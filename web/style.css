@@ -79,6 +79,8 @@ main {
 .status { color: var(--muted); font-size: 13px; }
 .status b { color: var(--text); font-family: var(--mono); }
 
+#keys-state { font-size: 0.85em; color: var(--muted); }
+.row.keys { border-top: 1px solid #2a3142; padding-top: 8px; }
 button, .filebtn {
   background: #222838;
   border: 1px solid var(--border);

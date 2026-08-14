@@ -83,31 +83,52 @@ impl Pfs0 {
         }
 
         let mut files = Vec::with_capacity(file_count);
+        // Most PFS0 images store file offsets relative to the file start, but
+        // some repack tools emit offsets relative to the end of the header +
+        // string table (the payload area). No file can legitimately overlap
+        // the header, so if an entry points inside it, rebase every offset by
+        // the payload start.
+        let payload_base = strings_end;
+        let mut rebase = false;
         for i in 0..file_count {
             let entry = table_start + i * FILE_ENTRY_SIZE;
             let offset = read_u64(data, entry);
             let size = read_u64(data, entry + 8);
             let name_off = read_u32(data, entry + 16) as usize;
+            if offset < payload_base as u64 {
+                rebase = true;
+            }
             let name = read_cstr(data, strings_start + name_off)
                 .ok_or(Error::BadStringTable {
                     index: i,
                     offset: name_off,
                 })?
                 .to_string();
-
-            let end = offset
-                .checked_add(size)
+            files.push(Pfs0File {
+                offset,
+                size,
+                name,
+            });
+        }
+        if rebase {
+            for f in files.iter_mut() {
+                f.offset = f.offset.saturating_add(payload_base as u64);
+            }
+        }
+        for (i, f) in files.iter().enumerate() {
+            let end = f
+                .offset
+                .checked_add(f.size)
                 .ok_or(Error::Overflow)?;
             if end as usize > data.len() {
                 return Err(Error::FileOutOfBounds {
                     index: i,
-                    name: name.clone(),
-                    offset,
-                    size,
+                    name: f.name.clone(),
+                    offset: f.offset,
+                    size: f.size,
                     image_size: data.len(),
                 });
             }
-            files.push(Pfs0File { offset, size, name });
         }
 
         Ok(Pfs0 {
@@ -256,3 +277,27 @@ mod tests {
         assert_eq!(pfs0.find_with_suffix(".NCA").unwrap().name, "main.nca");
     }
 }
+
+    #[test]
+    fn rebases_offsets_relative_to_payload() {
+        // Some repack tools emit PFS0 entries whose offsets are relative to
+        // the end of the string table (the payload area) instead of the file
+        // start. Build one: entries claim offset 0/4, but the real payloads
+        // live after the header + string table.
+        let mut image = Vec::new();
+        image.extend_from_slice(&PFS0_MAGIC.to_le_bytes());
+        image.extend_from_slice(&1u32.to_le_bytes()); // file count
+        image.extend_from_slice(&4u32.to_le_bytes()); // string table size
+        image.extend_from_slice(&0u32.to_le_bytes());
+        image.extend_from_slice(&0u64.to_le_bytes()); // offset (relative)
+        image.extend_from_slice(&4u64.to_le_bytes()); // size
+        image.extend_from_slice(&0u32.to_le_bytes()); // name offset
+        image.extend_from_slice(&0u32.to_le_bytes()); // padding
+        image.extend_from_slice(b"x\0\0\0");
+        let payload_base = image.len(); // header + entry + string table
+        image.extend_from_slice(b"DATA");
+        let pfs0 = Pfs0::parse(&image).unwrap();
+        assert_eq!(pfs0.files.len(), 1);
+        assert_eq!(pfs0.files[0].offset, payload_base as u64);
+        assert_eq!(&image[pfs0.files[0].offset as usize..][..4], b"DATA");
+    }

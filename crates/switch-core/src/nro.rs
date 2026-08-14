@@ -22,6 +22,7 @@
 //! ```
 
 use crate::mem::Memory;
+use crate::nsp::read_u32;
 use crate::{Error, Result};
 
 pub const NRO0_MAGIC: u32 = 0x304f524e; // "NRO0"
@@ -168,6 +169,109 @@ fn find_magic(data: &[u8], magic: u32) -> Option<usize> {
         .position(|w| w == &magic_le[..])
 }
 
+fn read_u64(data: &[u8], off: usize) -> u64 {
+    let mut b = [0u8; 8];
+    let n = (data.len().saturating_sub(off)).min(8);
+    b[..n].copy_from_slice(&data[off..off + n]);
+    u64::from_le_bytes(b)
+}
+
+/// Find the MOD0 header that follows the NRO0 header (it carries the dynamic
+/// section offset the loader needs for relocations).
+fn find_mod0(data: &[u8]) -> Option<usize> {
+    let magic = 0x30444f4du32.to_le_bytes(); // "MOD0"
+    data[..data.len().min(0x1000)]
+        .windows(4)
+        .position(|w| w == &magic[..])
+}
+
+/// Apply RELR packed relative relocations. Every 64-bit entry is either an
+/// address (bit 0 clear) or a bitmap (bit 0 set); each relocated word gets the
+/// load base added, turning stored file offsets into runtime addresses.
+///
+/// The chain is strictly monotonic (addresses only increase), so processing
+/// stops as soon as an entry would move backwards or past `end_addr` — this
+/// also guards against trailing garbage after the real RELR data.
+fn apply_relr(mem: &mut Memory, base: u32, end_addr: u32, relr: &[u8]) -> Result<()> {
+    let mut addr: u32 = 0;
+    let mut last: u32 = 0;
+    for chunk in relr.chunks(8) {
+        let mut bytes = [0u8; 8];
+        bytes[..chunk.len()].copy_from_slice(chunk);
+        let word = u64::from_le_bytes(bytes);
+        if word & 1 == 0 {
+            addr = base.wrapping_add(word as u32);
+            if addr < last || addr >= end_addr {
+                return Ok(());
+            }
+            last = addr;
+            let cur = mem.read_u64(addr)?;
+            mem.write_u64(addr, cur.wrapping_add(base as u64))?;
+        } else {
+            if addr >= end_addr {
+                return Ok(());
+            }
+            for bit in 1..64u32 {
+                if word & (1u64 << bit) != 0 {
+                    let a = addr.wrapping_add(8 * (bit - 1));
+                    if a < last || a >= end_addr {
+                        return Ok(());
+                    }
+                    last = a;
+                    let cur = mem.read_u64(a)?;
+                    mem.write_u64(a, cur.wrapping_add(base as u64))?;
+                }
+            }
+            addr = addr.wrapping_add(8 * 63);
+        }
+    }
+    Ok(())
+}
+
+/// Apply the RELR relocations described by the image's MOD0/dynamic headers,
+/// if present. NROs are linked against `NRO_BASE`, so absolute pointers in
+/// .data/.rodata only become valid once the base is added.
+fn apply_nro_relocations(mem: &mut Memory, data: &[u8], image_end: u32) -> Result<()> {
+    let mod0 = match find_mod0(data) {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+    let dyn_off = mod0.wrapping_add(read_u32(data, mod0 + 4) as usize);
+    if dyn_off + 16 > data.len() {
+        return Ok(());
+    }
+    let mut off = dyn_off;
+    let mut relr_off = 0u32;
+    let mut relr_size = 0u32;
+    let mut relr_count = 0u64;
+    loop {
+        if off + 16 > data.len() {
+            break;
+        }
+        let tag = read_u64(data, off);
+        let val = read_u64(data, off + 8);
+        off += 16;
+        if tag == 0 {
+            break;
+        }
+        match tag {
+            0x24 => relr_off = val as u32,   // DT_RELR
+            0x23 => relr_count = val,        // DT_RELRCOUNT
+            0x25 => relr_size = val as u32,  // DT_RELRSZ
+            _ => {}
+        }
+    }
+    // Some builds report a bogus DT_RELRSZ (e.g. hbmenu writes the byte size
+    // into DT_RELRCOUNT instead); take whichever field is larger, in bytes.
+    let size = relr_size.max(relr_count as u32);
+    let start = relr_off as usize;
+    let end = start.saturating_add(size as usize);
+    if size > 0 && end <= data.len() {
+        apply_relr(mem, NRO_BASE, image_end, &data[start..end])?;
+    }
+    Ok(())
+}
+
 /// Load an NRO into `mem` at [`NRO_BASE`], returning its entry point.
 pub fn load_nro(mem: &mut Memory, data: &[u8]) -> Result<LoadedNro> {
     let h = NroHeader::parse(data)?;
@@ -184,6 +288,8 @@ pub fn load_nro(mem: &mut Memory, data: &[u8]) -> Result<LoadedNro> {
     copy_segment(mem, data, h.ro_offset, h.ro_size, ro_addr)?;
     copy_segment(mem, data, h.data_offset, h.data_size, data_addr)?;
     mem.map_zero(end_addr, h.bss_size as usize)?;
+    let image_end = end_addr.wrapping_add(h.bss_size);
+    apply_nro_relocations(mem, data, image_end)?;
 
     Ok(LoadedNro {
         base,
@@ -271,6 +377,23 @@ mod tests {
         );
         assert!(loaded.is_64bit);
         assert_eq!(loaded.build_id, [0u8; 0x20]);
+    }
+
+    #[test]
+    fn apply_relr_relocates_and_stops_at_backward_jump() {
+        let mut mem = Memory::new();
+        mem.map_zero(NRO_BASE, 0x2000).unwrap();
+        mem.write_u64(NRO_BASE + 0x1000, 0x1234).unwrap();
+        mem.write_u64(NRO_BASE + 0x1008, 0x5678).unwrap();
+        // RELR: address entry [0x1000], a bitmap flagging the next slot, then
+        // a backward address (the trailing garbage hbmenu's section has).
+        let mut relr = Vec::new();
+        relr.extend_from_slice(&0x1000u64.to_le_bytes());
+        relr.extend_from_slice(&0b101u64.to_le_bytes()); // bitmap: bit0=1, bit2 → +8
+        relr.extend_from_slice(&0u64.to_le_bytes());     // address 0 → backwards → stop
+        apply_relr(&mut mem, NRO_BASE, NRO_BASE + 0x2000, &relr).unwrap();
+        assert_eq!(mem.read_u64(NRO_BASE + 0x1000).unwrap(), 0x1234 + NRO_BASE as u64);
+        assert_eq!(mem.read_u64(NRO_BASE + 0x1008).unwrap(), 0x5678 + NRO_BASE as u64);
     }
 
     #[test]

@@ -19,6 +19,14 @@
     <div class="dropzone" id="nsp-drop">Drop .nsp here, or <label for="nsp-file">browse</label>
       <input type="file" id="nsp-file" accept=".nsp,.nsz,.xci" hidden>
     </div>
+    <div class="row keys">
+      <label class="filebtn" for="prod-keys">Load prod.keys</label>
+      <input type="file" id="prod-keys" accept=".keys,.txt" hidden>
+      <label class="filebtn" for="title-keys">Load title.keys</label>
+      <input type="file" id="title-keys" accept=".keys,.txt" hidden>
+      <button id="btn-clear-keys" class="small">Clear keys</button>
+      <span id="keys-state" class="dim">no keys loaded — encrypted NCA headers can't be inspected</span>
+    </div>
     <div id="nsp-result"></div>
   </section>
 
@@ -30,7 +38,14 @@
       <p class="hint">Framebuffer @ 0x3F000000 — 640&times;360 RGBA, snapshotted after each run/step.</p>
     </div>
     <div class="row">
-      <button id="btn-demo">Run bundled demo</button>
+      <label class="checkbox">Bundled app:
+        <select id="asset-nro">
+          <option value="demo.nro">demo</option>
+          <option value="hbmenu.nro">hbmenu</option>
+          <option value="sdl-hello.nro">sdl-hello</option>
+        </select>
+      </label>
+      <button id="btn-demo">Run bundled app</button>
       <label class="filebtn" for="nro-file">Load .nro / .elf</label>
       <input type="file" id="nro-file" accept=".nro,.elf,.bin" hidden>
       <button id="btn-step">Step</button>
@@ -41,6 +56,7 @@
       <span>PC: <b id="pc">-</b></span>
       <span>Steps: <b id="steps">0</b></span>
       <span>State: <b id="state">idle</b></span>
+      <span>Input: <b id="input-state">none</b></span>
     </div>
     <pre class="console" id="console" aria-live="polite"></pre>
     <div class="row">

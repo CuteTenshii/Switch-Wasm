@@ -11,10 +11,12 @@
 //! deliberately out of scope.
 
 pub mod cpu;
+pub mod crypto;
 pub mod demo;
 pub mod disasm;
 pub mod elf;
 pub mod error;
+pub mod keys;
 pub mod mem;
 pub mod nca;
 pub mod nro;

@@ -588,7 +588,32 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                 let name = if o0 == 1 { "msub" } else { "madd" };
                 Ok(write!(s, "{} {}, {}, {}, {}", name, zr(rd), zr(rn), zr(rm), zr(ra)).is_ok())
             } else {
-                Ok(write!(s, "mul.long").is_ok())
+                let rn = (insn >> 5) & 0x1F;
+                let rd = insn & 0x1F;
+                let rm = (insn >> 16) & 0x1F;
+                let ra = (insn >> 10) & 0x1F;
+                let o0 = (insn >> 15) & 1;
+                let (name, operands) = match (insn >> 21) & 0xFF {
+                    0b11011001 => ("smaddl", true), // / SMSUBL
+                    0b11011101 => ("umaddl", true), // / UMSUBL
+                    0b11011010 => ("smulh", false), // / UMULH: no Ra
+                    0b11011110 => ("umulh", false),
+                    _ => return Ok(write!(s, "mul.long").is_ok()),
+                };
+                let name = if o0 == 1 {
+                    match name {
+                        "smaddl" => "smsubl",
+                        "umaddl" => "umsubl",
+                        _ => name,
+                    }
+                } else {
+                    name
+                };
+                if operands {
+                    Ok(write!(s, "{} {}, {}, {}, {}", name, zr(rd), zr(rn), zr(rm), zr(ra)).is_ok())
+                } else {
+                    Ok(write!(s, "{} {}, {}, {}", name, zr(rd), zr(rn), zr(rm)).is_ok())
+                }
             }
         }
         _ => Ok(false),

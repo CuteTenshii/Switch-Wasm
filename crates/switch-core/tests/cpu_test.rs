@@ -681,7 +681,7 @@ fn horizon_syscall_stubs() {
     cpu.mem.map(0x3000, b"hello").unwrap();
     cpu.set_reg(0, 0x3000);
     cpu.set_reg(1, 5);
-    cpu.mem.map(0x1000, &svc(0x26).to_le_bytes()).unwrap();
+    cpu.mem.map(0x1000, &svc(0x27).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.out, b"hello");
 
@@ -690,13 +690,13 @@ fn horizon_syscall_stubs() {
     cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(0, 0);
     cpu.set_reg(1, 0xFFFFFFFFFFFFFFDCu64);
-    cpu.mem.map(0x1000, &svc(0x26).to_le_bytes()).unwrap();
+    cpu.mem.map(0x1000, &svc(0x27).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
 
     // ExitProcess halts the machine.
     let mut cpu = cpu_at(0x1000);
     cpu.syscall_mode = SyscallMode::Horizon;
-    cpu.mem.map(0x1000, &svc(0x06).to_le_bytes()).unwrap();
+    cpu.mem.map(0x1000, &svc(0x07).to_le_bytes()).unwrap();
     let report = cpu.run(1).unwrap();
     assert!(report.halted);
 
@@ -705,7 +705,7 @@ fn horizon_syscall_stubs() {
     cpu.syscall_mode = SyscallMode::Horizon;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&nop().to_le_bytes());
-    bytes.extend_from_slice(&svc(0x1D).to_le_bytes());
+    bytes.extend_from_slice(&svc(0x1E).to_le_bytes());
     cpu.mem.map(0x1000, &bytes).unwrap();
     cpu.run(2).unwrap();
     assert_eq!(cpu.read_x(0), 1000); // one nop executed before the svc
@@ -715,7 +715,7 @@ fn horizon_syscall_stubs() {
     cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(0, 0x3000); // name pointer (ignored by the stub)
     cpu.set_reg(1, 4);
-    cpu.mem.map(0x1000, &svc(0x1E).to_le_bytes()).unwrap();
+    cpu.mem.map(0x1000, &svc(0x1F).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
     assert_eq!(cpu.read_x(1), 0x1000);
@@ -726,9 +726,39 @@ fn horizon_syscall_stubs() {
     cpu.set_reg(0, 0x1000); // session handle
     cpu.set_reg(1, 0x3000); // ipc buffer pointer
     cpu.set_reg(2, 0x40);
-    cpu.mem.map(0x1000, &svc(0x20).to_le_bytes()).unwrap();
+    cpu.mem.map(0x1000, &svc(0x21).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
+}
+
+#[test]
+fn horizon_query_memory_and_get_info() {
+    use switch_core::cpu::SyscallMode;
+
+    // QueryMemory writes a MemoryInfo struct to the out pointer and returns
+    // the page info in X1.
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.set_reg(0, 0x3000); // MemoryInfo out
+    cpu.set_reg(1, 0x4000); // PageInfo out
+    cpu.set_reg(2, 0x0800_1000); // queried address
+    cpu.mem.map(0x1000, &svc(0x06).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), 0);
+    assert_eq!(cpu.read_x(1), 0x1000);
+    assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), 0x0800_1000);
+    assert_eq!(cpu.mem.read_u64(0x3008).unwrap(), 0x8000_0000);
+
+    // GetInfo returns the requested value in X1 (the libnx wrapper stores it
+    // to the out pointer). InfoType 4 = TotalMemorySize.
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.set_reg(1, 4); // infoType
+    cpu.set_reg(2, 0xffff_8001); // CUR_PROCESS_HANDLE
+    cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), 0);
+    assert_eq!(cpu.read_x(1), 0x1E00_0000);
 }
 
 #[test]
@@ -864,4 +894,471 @@ fn disassembler_produces_readable_output() {
     assert_eq!(disassemble(0xD503201F), "nop");
     // CSEL X3, X1, X2, GT
     assert_eq!(disassemble(0x9A82C023), "csel x3, x1, x2, gt");
+}
+
+#[test]
+fn movk32_shift_is_bit21() {
+    // movz w1, #0x4653 ; movk w1, #0x4f43, lsl #16 → 0x4f434653.
+    // The 32-bit hw/shift bit is bit 21 (not bit 22) — a regression from the
+    // hbmenu MOD0-magic check that miscomputed w1 as 0x4f43.
+    let cpu = exec(
+        &[movz(1, 0x4653, 0, false), movk(1, 0x4f43, 1, false)],
+        2,
+    );
+    assert_eq!(cpu.read_x(1), 0x4f43_4653);
+}
+
+#[test]
+fn add_carry_overflow_masks_to_operand_size() {
+    // CMP W0, #4 with W0 = 0 must set C=0 (borrow), so B.CC is taken.
+    // A 64-bit `!rhs` leaking into the 32-bit carry computation previously set
+    // C=1 and mis-branched in hbmenu's applet init.
+    let cpu = exec(
+        &[
+            movz(0, 0, 0, false),
+            // cmp w0, #4  (SUBS WZR, W0, #4)
+            0x7100_101F,
+            bcond(0x3, 8), // B.CC +8 (taken iff C=0)
+            movz(5, 0xAA, 0, false),
+            movz(6, 0xBB, 0, false),
+            nop(),
+            nop(),
+        ],
+        6,
+    );
+    assert_eq!(cpu.read_x(5), 0); // B.CC taken → movz(5) skipped
+    assert_eq!(cpu.read_x(6), 0xBB);
+}
+
+#[test]
+fn register_offset_load_32bit() {
+    // ldr w2, [x19, x0] — the 0xb8606a62 form hbmenu hit; previously only the
+    // 64-bit register-offset encodings (bits[31:27]==11111) were decoded.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(19, 0x2000);
+    cpu.set_reg(0, 0x30);
+    cpu.mem.write_u32(0x2030, 0xDEAD_BEEF).unwrap();
+    let code = [0xB860_6A62u32, nop()];
+    let mut bytes = Vec::new();
+    for insn in code {
+        bytes.extend_from_slice(&insn.to_le_bytes());
+    }
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(2), 0xDEAD_BEEF);
+}
+
+#[test]
+fn simd_dup_umov_and_q_store() {
+    // dup v0.16b, w1 ; mov x2, v0.d[0] ; str q0, [x3]
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(1, 0x5A);
+    cpu.set_reg(3, 0x3000);
+    cpu.mem.map_zero(0x3000, 0x40).unwrap();
+    let code = [
+        0x4E01_0C20u32, // dup v0.16b, w1
+        0x4E08_3C02u32, // mov x2, v0.d[0]  (umov, rd=2)
+        0x3D80_0060u32, // str q0, [x3]
+        nop(),
+    ];
+    let mut bytes = Vec::new();
+    for insn in code {
+        bytes.extend_from_slice(&insn.to_le_bytes());
+    }
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    cpu.run(3).unwrap();
+    assert_eq!(cpu.read_x(2), 0x5A5A_5A5A_5A5A_5A5A);
+    assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), 0x5A5A_5A5A_5A5A_5A5A);
+    assert_eq!(cpu.mem.read_u64(0x3008).unwrap(), 0x5A5A_5A5A_5A5A_5A5A);
+}
+
+// ---------------- Advanced SIMD (three-same / logical / permute) ----------------
+
+// dup <Vd>.16B, <Wn>
+fn dup16(rd: u32, rn: u32) -> u32 {
+    0x4E01_0C00u32 | (rd & 0x1F) | ((rn & 0x1F) << 5)
+}
+// mov <Xd>, <Vn>.D[0]  (umov)
+fn umov_d0(rd: u32, rn: u32) -> u32 {
+    0x4E08_3C00u32 | rd | (rn << 5)
+}
+// SUB <Vd>.4S, <Vn>.4S, <Vm>.4S
+fn sub4s(rd: u32, rn: u32, rm: u32) -> u32 {
+    (1u32 << 30) | (1u32 << 29) | (0b1110 << 24) | (0b10 << 22) | (1 << 21)
+        | (rm << 16) | (0b10000 << 11) | (1 << 10) | (rn << 5) | rd
+}
+// CMEQ <Vd>.16B, <Vn>.16B, <Vm>.16B
+fn cmeq16(rd: u32, rn: u32, rm: u32) -> u32 {
+    (1u32 << 30) | (1u32 << 29) | (0b1110 << 24) | (1 << 21) | (rm << 16)
+        | (0b10001 << 11) | (1 << 10) | (rn << 5) | rd
+}
+// UHADD <Vd>.16B, <Vn>.16B, <Vm>.16B
+fn uhadd16(rd: u32, rn: u32, rm: u32) -> u32 {
+    (1u32 << 30) | (1u32 << 29) | (0b1110 << 24) | (rm << 16) | (1 << 10) | (rn << 5) | rd
+}
+// ADDP <Vd>.16B, <Vn>.16B, <Vm>.16B
+fn addp16(rd: u32, rn: u32, rm: u32) -> u32 {
+    (1u32 << 30) | (0b1110 << 24) | (1 << 21) | (rm << 16) | (0b10111 << 11) | (1 << 10) | (rn << 5) | rd
+}
+// ZIP1 <Vd>.16B, <Vn>.16B, <Vm>.16B
+fn zip1_16(rd: u32, rn: u32, rm: u32) -> u32 {
+    (1u32 << 30) | (0b1110 << 24) | (rm << 16) | (0b001110 << 10) | (rn << 5) | rd
+}
+
+#[test]
+fn simd_three_same_add_sub_compare() {
+    // dup v0.16b, w1 (0x3d) ; dup v1.16b, w2 (0x3d) ; sub v2.4s, v0.4s, v1.4s
+    // → lanes of 0x3d3d3d3d - 0x3d3d3d3d = 0 ; mov x3, v2.d[0]
+    let code = [dup16(0, 1), dup16(1, 2), sub4s(2, 0, 1), umov_d0(3, 2), nop()];
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(1, 0x3d);
+    cpu.set_reg(2, 0x3d);
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(3), 0);
+
+    // cmeq v4.16b, v0.16b, v1.16b → all-ones since equal ; mov x5, v4.d[0]
+    let code = [dup16(0, 1), dup16(1, 2), cmeq16(4, 0, 1), umov_d0(5, 4), nop()];
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(1, 0x3d);
+    cpu.set_reg(2, 0x3d);
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(5), u64::MAX);
+
+    // uhadd v6.16b, v0.16b, v1.16b with unequal bytes (1 + 3) >> 1 = 2
+    let code = [dup16(0, 1), dup16(1, 2), uhadd16(6, 0, 1), umov_d0(7, 6), nop()];
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(1, 1);
+    cpu.set_reg(2, 3);
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(7), 0x0202_0202_0202_0202);
+}
+
+#[test]
+fn simd_pairwise_addp() {
+    // v1 = {1,1,...}, v2 = {2,2,...}; addp v3.16b, v1.16b, v2.16b →
+    // v3[0..7] = v1 pairwise (2), v3[8..15] = v2 pairwise (4).
+    let code = [dup16(1, 1), dup16(2, 2), addp16(3, 1, 2), umov_d0(4, 3), nop()];
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(1, 1);
+    cpu.set_reg(2, 2);
+    let cpu = run_program(cpu, 0x1000, &code);
+    // lane0 = v1[0]+v1[1] = 2, lane7 = v1[14]+v1[15] = 2.
+    assert_eq!(cpu.read_x(4) & 0xFF, 2);
+    assert_eq!((cpu.read_x(4) >> 56) & 0xFF, 2);
+}
+
+#[test]
+fn simd_zip1_interleave() {
+    // v0 = {0..15} (bytes), v1 = {0x10..0x1f}; zip1 v2.16b, v0.16b, v1.16b
+    // → v2[2i] = v0[i], v2[2i+1] = v1[i] for i in 0..8.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x3000);
+    cpu.mem.map_zero(0x3000, 0x40).unwrap();
+    // ldr q0, [x0] ; ldr q1, [x0, #0x10] ; zip1 v2.16b, v0.16b, v1.16b ;
+    // str q2, [x0, #0x20]
+    let ldr_q = |rt: u32, imm: u32| {
+        0x3DC0_0000u32 | rt | ((imm >> 4) << 10)
+    };
+    let str_q = |rt: u32, imm: u32| {
+        0x3D80_0000u32 | rt | ((imm >> 4) << 10)
+    };
+    let code = [
+        ldr_q(0, 0),
+        ldr_q(1, 0x10),
+        zip1_16(2, 0, 1),
+        str_q(2, 0x20),
+        nop(),
+    ];
+    for i in 0..16u32 {
+        cpu.mem.write_u8(0x3000 + i, i as u8).unwrap();
+        cpu.mem.write_u8(0x3010 + i, (0x10 + i) as u8).unwrap();
+    }
+    let cpu = run_program(cpu, 0x1000, &code);
+    for i in 0..8u32 {
+        assert_eq!(cpu.mem.read_u8(0x3020 + 2 * i).unwrap(), i as u8);
+        assert_eq!(cpu.mem.read_u8(0x3020 + 2 * i + 1).unwrap(), 0x10u8 + i as u8);
+    }
+}
+
+// ---------------- scalar floating point ----------------
+
+// fmov <Vd>.D, <Xn>
+fn fmov_dx(rd: u32, rn: u32) -> u32 {
+    (1u32 << 31) | (0b0011110 << 24) | (0b01 << 22) | (0b100111 << 16) | (rn << 5) | rd
+}
+// fmov <Xd>, <Vn>.D
+fn fmov_xd(rd: u32, rn: u32) -> u32 {
+    (1u32 << 31) | (0b0011110 << 24) | (0b01 << 22) | (0b100110 << 16) | (rn << 5) | rd
+}
+// fadd <Dd>, <Dn>, <Dm>
+fn fadd_d(rd: u32, rn: u32, rm: u32) -> u32 {
+    (0b00011110 << 24) | (0b01 << 22) | (1 << 21) | (rm << 16) | (0b00101 << 11) | (rn << 5) | rd
+}
+#[test]
+fn scalar_fp_fadd_fmov() {
+    // fmov d0, x1 (2.0) ; fadd d2, d0, d0 (4.0) ; fmov x3, d2
+    let code = [fmov_dx(0, 1), fadd_d(2, 0, 0), fmov_xd(3, 2), nop()];
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(1, 0x4000_0000_0000_0000); // 2.0
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(3), 0x4010_0000_0000_0000); // 4.0
+}
+
+#[test]
+fn scalar_fp_fcvtzs() {
+    // scvtf s0, w1 (1000 → 1000.0f) ; fcvtzs w2, s0 (round trip)
+    let scvtf_ws = |rd: u32, rn: u32| {
+        (0b0011110 << 24) | (0b000010 << 16) | (rn << 5) | rd
+    };
+    let fcvtzs_ws = |rd: u32, rn: u32| {
+        (0b0011110 << 24) | (0b011000 << 16) | (rn << 5) | rd
+    };
+    let code = [scvtf_ws(0, 1), fcvtzs_ws(2, 0), nop()];
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(1, 1000);
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(2), 1000);
+}
+
+// ---------------- multiply-long ----------------
+
+#[test]
+fn multiply_long_ops() {
+    // UMADDL X2, X0, X1, X3: X2 = X3 + X0*X1
+    let umaddl = |rd: u32, rn: u32, rm: u32, ra: u32| {
+        (1u32 << 31) | (0b11011101 << 21) | (rm << 16) | (ra << 10) | (rn << 5) | rd
+    };
+    // SMULH X4, X0, X1: high 64 of signed product
+    let smulh = |rd: u32, rn: u32, rm: u32| {
+        (1u32 << 31) | (0b11011010 << 21) | (rm << 16) | (31 << 10) | (rn << 5) | rd
+    };
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x1000);
+    cpu.set_reg(1, 0x200);
+    cpu.set_reg(3, 0x42);
+    let code = [umaddl(2, 0, 1, 3), nop()];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(2), 0x42 + 0x1000 * 0x200);
+
+    // SMULH of i64::MIN * 2 → -1
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x8000_0000_0000_0000);
+    cpu.set_reg(1, 2);
+    let code = [smulh(4, 0, 1), nop()];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(4), u64::MAX);
+}
+
+// ---------------- Horizon IPC reply synthesis ----------------
+
+#[test]
+fn horizon_ipc_reply_success_not_busy() {
+    use switch_core::cpu::SyscallMode;
+    // A domain IPC request (ICommonStateGetter::ReceiveMessage, cmd 1) must get
+    // a success reply: the "SFCO" marker, Result 0 — NOT the AM_BUSY error
+    // (0x19280) that wedges hbmenu in its "wait for applet" sleep loop — and
+    // the FocusStateChanged applet message (15) in the reply payload.
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    let tls = 0x3000u32;
+    cpu.mem.map_zero(tls, 0x100).unwrap();
+    // msr tpidr_el0, x0 (x0 = tls base)
+    cpu.set_reg(0, tls as u64);
+    // hipc header: type=4 (request), 12 data words, no special header
+    cpu.mem.write_u32(tls, 0x0000_0004).unwrap();
+    cpu.mem.write_u32(tls + 4, 0x0c).unwrap();
+    // domain header
+    cpu.mem.write_u32(tls + 0x10, 0x0010_0001).unwrap(); // type=1, data_size=0x10
+    cpu.mem.write_u32(tls + 0x14, 4).unwrap(); // object id
+    // CmifInHeader: "SFCI", version 0, command id 1 (ReceiveMessage)
+    cpu.mem.write_u32(tls + 0x20, 0x4943_4653).unwrap();
+    cpu.mem.write_u32(tls + 0x24, 0).unwrap();
+    cpu.mem.write_u32(tls + 0x28, 1).unwrap();
+    cpu.mem.write_u32(tls + 0x2c, 0).unwrap();
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(0xD51B_D040u32).to_le_bytes()); // msr tpidr_el0, x0
+    bytes.extend_from_slice(&svc(0x21).to_le_bytes());
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    cpu.run(2).unwrap();
+
+    assert_eq!(cpu.read_x(0), 0); // Result 0 (success)
+    // The reply is coherent: SFCO at the domain out header, Result 0 after it.
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0x4F43_4653); // "SFCO"
+    assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0); // Result
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 15); // FocusStateChanged
+    assert_ne!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0x19280);
+}
+
+#[test]
+fn horizon_ipc_reply_focus_state() {
+    use switch_core::cpu::SyscallMode;
+    // ICommonStateGetter::GetCurrentFocusState (cmd 9) must report InFocus (1)
+    // so libnx's applet-mainloop wait loop terminates.
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    let tls = 0x3000u32;
+    cpu.mem.map_zero(tls, 0x100).unwrap();
+    cpu.set_reg(0, tls as u64);
+    cpu.mem.write_u32(tls, 0x0000_0004).unwrap();
+    cpu.mem.write_u32(tls + 4, 0x0c).unwrap();
+    cpu.mem.write_u32(tls + 0x10, 0x0010_0001).unwrap();
+    cpu.mem.write_u32(tls + 0x14, 4).unwrap();
+    cpu.mem.write_u32(tls + 0x20, 0x4943_4653).unwrap();
+    cpu.mem.write_u32(tls + 0x28, 9).unwrap(); // cmd 9 = GetCurrentFocusState
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&(0xD51B_D040u32).to_le_bytes());
+    bytes.extend_from_slice(&svc(0x21).to_le_bytes());
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    cpu.run(2).unwrap();
+
+    assert_eq!(cpu.read_x(0), 0);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1); // InFocus
+}
+
+#[test]
+fn ldrsw_sign_extends_and_loads() {
+    // LDRSW must LOAD a 32-bit value and sign-extend it — not be decoded as a
+    // store (opc=10 was misread as store, corrupting the target). Store
+    // 0xFFFF8001 at [x0] then `ldrsw w1, [x0, #0]` must yield 0xFFFFFFFF_FFFF8001.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x3000);
+    cpu.mem.map_zero(0x3000, 0x10).unwrap();
+    cpu.mem.write_u32(0x3000, 0xFFFF_8001).unwrap();
+    // LDRSW W1, [X0, #0] : size=10, V=0, opc=10, mode=01, imm=0, rn=0, rt=1
+    let ldrsw = 0b10u32 << 30 | 0b111 << 27 | 0b01 << 24 | 0b10 << 22 | (0 << 10) | (0 << 5) | 1;
+    let code = [ldrsw, nop()];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(1), 0xFFFF_FFFF_FFFF_8001);
+}
+
+#[test]
+fn gamepad_input_writes_input_reg_and_hid_shmem() {
+    use switch_core::cpu::SyscallMode;
+    // MapSharedMemory (svc 0x13) with x1=addr, x2=size must back the region
+    // with real memory and record it; set_gamepad_state then mirrors the
+    // button mask into INPUT_ADDR and the libnx HidSharedMemory player-1
+    // layout (npad at 0x3D7C0, full_key_lifo at +0x20).
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.set_reg(1, 0x3000_0000);
+    cpu.set_reg(2, 0x40000);
+    cpu.mem.map(0x1000, &svc(0x13).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), 0);
+
+    cpu.set_gamepad_state(0x3 /* A|B */, 1000, -2000, 0, 0);
+
+    assert_eq!(cpu.mem.read_u64(switch_core::INPUT_ADDR).unwrap(), 0x3);
+    // style_set = FullKey|Handheld
+    assert_eq!(cpu.mem.read_u32(0x3000_0000 + 0x3D7C0).unwrap(), 5);
+    // header.count == 1, one LIFO entry with buttons + connected attribute
+    let lifo = 0x3000_0000 + 0x3D7C0 + 0x20;
+    assert_eq!(cpu.mem.read_u64(lifo + 0x18).unwrap(), 1);
+    assert_eq!(cpu.mem.read_u64(lifo + 0x30).unwrap(), 0x3);
+    assert_eq!(cpu.mem.read_u32(lifo + 0x38).unwrap(), 1000);
+    assert_eq!(cpu.mem.read_u32(lifo + 0x3C).unwrap(), 2000u32.wrapping_neg());
+    assert_eq!(cpu.mem.read_u32(lifo + 0x48).unwrap(), 1); // IsConnected
+}
+
+#[test]
+fn logical_immediate_mask_80808080() {
+    // 0x3201c3f4 = `mov w20, #0x80808080`. The old decoder rejected it because
+    // imms=48 with N=0 has bits above the element size — those are ignored, not
+    // "unallocated" (QEMU logic_imm_decode_wmask). This was the first bug that
+    // stopped sdl-hello.nro from booting.
+    let code = [0x3201c3f4, nop()];
+    let cpu = run_program(cpu_at(0x1000), 0x1000, &code);
+    assert_eq!(cpu.read_x(20), 0x8080_8080);
+}
+
+#[test]
+fn ldrsw_register_offset_shifts_by_log2() {
+    // `ldrsw x8, [x9, x8, lsl #2]` = 0xb8a87928. The offset is Rm<<2 (the
+    // encoded LSL is log2(size), NOT the byte count); shifting by 4 read the
+    // wrong jump-table slot, loaded 0 and branched into the table itself.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(8, 0x27);
+    cpu.set_reg(9, 0x3000);
+    cpu.mem.map_zero(0x3000, 0x200).unwrap();
+    cpu.mem.write_u32(0x3000 + 0x27 * 4, 0xFFFF_F25A).unwrap();
+    let code = [0xb8a87928, nop()];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(8), 0xFFFF_FFFF_FFFF_F25A);
+}
+
+#[test]
+fn movi_modified_immediate_cmodes() {
+    // MOVI cmode semantics + the split imm8 field (bits 18:16 ++ 9:5), values
+    // verified under qemu-aarch64 (real A57 semantics).
+    // movi v0.8b, #0x1c  → every byte 0x1c (q=0: upper half cleared)
+    let cpu = run_program(cpu_at(0x1000), 0x1000, &[0x0f00e780, nop()]);
+    assert_eq!(cpu.read_vreg(0), 0x1c1c1c1c_1c1c1c1c);
+    // movi v4.4h, #0x1c  → every halfword 0x001c
+    let cpu = run_program(cpu_at(0x1000), 0x1000, &[0x4f008783, nop()]);
+    assert_eq!(cpu.read_vreg(3), 0x001c001c_001c001c_001c001c_001c001c);
+    // movi v4.4s, #0x1c  → every word 0x1c
+    let cpu = run_program(cpu_at(0x1000), 0x1000, &[0x4f000784, nop()]);
+    assert_eq!(cpu.read_vreg(4), 0x0000001c_0000001c_0000001c_0000001c);
+    // movi v5.4s, #0x1c, lsl #8
+    let cpu = run_program(cpu_at(0x1000), 0x1000, &[0x4f002785, nop()]);
+    assert_eq!(cpu.read_vreg(5), 0x00001c00_00001c00_00001c00_00001c00);
+    // mvni v6.4s, #0x1c  → ~0x1c per word
+    let cpu = run_program(cpu_at(0x1000), 0x1000, &[0x6f000786, nop()]);
+    assert_eq!(cpu.read_vreg(6), 0xffffffe3_ffffffe3_ffffffe3_ffffffe3);
+    // movi v7.2d, #0  (the encoding sdl-hello hit) → zero
+    let cpu = run_program(cpu_at(0x1000), 0x1000, &[0x2f00e408, nop()]);
+    assert_eq!(cpu.read_vreg(8), 0);
+}
+
+#[test]
+fn dczid_el0_reports_a57_block_size() {
+    // mrs x5, dczid_el0 must return BS=4 (64-byte DC ZVA). musl/newlib memset
+    // strides its cache-zero loop by `4 << BS`; BS=0 made it run away forever.
+    let cpu = run_program(cpu_at(0x1000), 0x1000, &[0xd53b00e5, nop()]);
+    assert_eq!(cpu.read_x(5), 4);
+}
+
+#[test]
+fn dc_zva_zeroes_64_bytes() {
+    // dc zva, x3 = 0xd50b7423: zeroes the 64-byte block at x3 (A57 block size).
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(3, 0x3040);
+    cpu.mem.map_zero(0x3000, 0x100).unwrap();
+    for i in 0..0x40u32 {
+        cpu.mem.write_u8(0x3040 + i, 0xAA).unwrap();
+    }
+    cpu.mem.write_u8(0x3080, 0xBB).unwrap();
+    let code = [0xd50b7423, nop()];
+    let cpu = run_program(cpu, 0x1000, &code);
+    for i in 0..0x40u32 {
+        assert_eq!(cpu.mem.read_u8(0x3040 + i).unwrap(), 0);
+    }
+    assert_eq!(cpu.mem.read_u8(0x3080).unwrap(), 0xBB);
+}
+
+#[test]
+fn fpr_load_store_pairs_and_scalar() {
+    // str d0, [x8, x10] (register offset, FP 64-bit) = 0xfc2a6900
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(8, 0x3000);
+    cpu.set_reg(10, 0x80);
+    cpu.set_vreg(0, 0x1122_3344_5566_7788);
+    cpu.mem.map_zero(0x3000, 0x200).unwrap();
+    let code = [0xfc2a6900, nop()];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.mem.read_u64(0x3080).unwrap(), 0x1122_3344_5566_7788);
+
+    // stp d8, d9, [x0, #0x70] (FP store pair, D) = 0x6d072408
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x3000);
+    cpu.set_vreg(8, 0x0102_0304_0506_0708);
+    cpu.set_vreg(9, 0x1112_1314_1516_1718);
+    cpu.mem.map_zero(0x3000, 0x200).unwrap();
+    let code = [0x6d072408, nop()];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.mem.read_u64(0x3070).unwrap(), 0x0102_0304_0506_0708);
+    assert_eq!(cpu.mem.read_u64(0x3078).unwrap(), 0x1112_1314_1516_1718);
 }

@@ -23,9 +23,11 @@ assets: wasm demo
 demo:
 	cargo run -p make-demo
 
-# Serve the frontend locally.
+# Serve the frontend locally (no-cache headers so the browser never reuses a
+# stale .wasm/.nro — python's http.server would otherwise let Firefox
+# heuristically cache them).
 serve: assets
-	python3 -m http.server 8000 --directory web
+	python3 tools/serve.py
 
 clean:
 	cargo clean

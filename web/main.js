@@ -8,9 +8,14 @@ let memory = null;    // wasm linear memory
 let handle = -1;      // session handle
 
 function alloc(len) { return api.switch_alloc(len); }
-function toWasm(jsbuf, ptr) { new Uint8Array(memory.buffer, ptr, jsbuf.length).set(jsbuf); }
+function toWasm(jsbuf, ptr) {
+  // Re-fetch the buffer every call: wasm memory can grow (detaching the old
+  // ArrayBuffer) between allocations.
+  const view = new Uint8Array(api.memory.buffer, ptr, jsbuf.length);
+  view.set(jsbuf);
+}
 function fromWasm(ptr, len) {
-  const b = new Uint8Array(memory.buffer, ptr, len);
+  const b = new Uint8Array(api.memory.buffer, ptr, len);
   // copy out before any later call may grow memory
   return b.slice();
 }
@@ -85,6 +90,10 @@ async function init() {
   screenEl.width = fbW;
   screenEl.height = fbH;
   $('wasm-ver').textContent = 'core loaded: ' + bytes.byteLength + ' bytes of wasm';
+  // Restore persisted keys into the session.
+  if (prodKeysText || titleKeysText) {
+    await stageKeys();
+  }
 }
 
 // ---------- NSP container ----------
@@ -104,9 +113,17 @@ async function handleNspFile(file) {
   clearNsp();
   log('Reading ' + file.name + ' (' + fmtSize(file.size) + ') ...');
   const data = await file.arrayBuffer();
-  const ptr = alloc(data.byteLength);
-  toWasm(new Uint8Array(data), ptr);
+  let ptr;
+  try {
+    ptr = alloc(data.byteLength);
+    toWasm(new Uint8Array(data), ptr);
+  } catch (e) {
+    log('Failed to stage ' + fmtSize(data.byteLength) + ' in wasm memory: ' + e, 'err');
+    return;
+  }
   const ok = api.switch_load_nsp(handle, ptr, data.byteLength);
+  // switch_load_nsp takes ownership of the staging buffer (it's now the
+  // session's NSP image), so we must NOT free it here.
   if (ok !== 0) {
     log('NSP error: ' + readLastError(), 'err');
     return;
@@ -114,6 +131,7 @@ async function handleNspFile(file) {
   const jbuf = alloc(8192);
   const jlen = api.switch_nsp_files_json(handle, jbuf, 8192);
   const files = JSON.parse(strFromWasm(jbuf, jlen));
+  api.switch_free(jbuf, 8192);
   log('Parsed ' + files.length + ' file(s). Click an .nca to inspect it.', 'ok');
 
   const ul = document.createElement('ul');
@@ -133,24 +151,109 @@ async function handleNspFile(file) {
 
 function clearNsp() { $('nsp-result').textContent = ''; }
 
+// ---------- keys ----------
+
+// Keys are persisted in localStorage so they survive page reloads (they're
+// just text; they never leave the browser).
+const KEYS_STORE = { prod: 'switch-prod-keys', title: 'switch-title-keys' };
+
+let prodKeysText = localStorage.getItem(KEYS_STORE.prod) || '';
+let titleKeysText = localStorage.getItem(KEYS_STORE.title) || '';
+let restoredKeys = Boolean(prodKeysText || titleKeysText);
+
+async function stageKeys() {
+  // Send the staged key text (prod.keys / title.keys) to the wasm session so
+  // NCA headers can be decrypted.
+  if (!api) return;
+  let pptr = 0, plen = 0, tptr = 0, tlen = 0;
+  if (prodKeysText) {
+    const b = new TextEncoder().encode(prodKeysText);
+    pptr = alloc(b.length); toWasm(b, pptr); plen = b.length;
+  }
+  if (titleKeysText) {
+    const b = new TextEncoder().encode(titleKeysText);
+    tptr = alloc(b.length); toWasm(b, tptr); tlen = b.length;
+  }
+  const rc = api.switch_load_keys(handle, pptr, plen, tptr, tlen);
+  if (pptr) api.switch_free(pptr, plen);
+  if (tptr) api.switch_free(tptr, tlen);
+  updateKeysState();
+  return rc;
+}
+
+function updateKeysState() {
+  const el = $('keys-state');
+  const parts = [];
+  if (prodKeysText) parts.push('prod.keys');
+  if (titleKeysText) parts.push('title.keys');
+  if (parts.length === 0) {
+    el.textContent = 'no keys loaded — encrypted NCA headers can\'t be inspected';
+  } else {
+    el.textContent = 'loaded: ' + parts.join(' + ') + (restoredKeys ? ' (from storage)' : '') +
+      ' — encrypted headers will be decrypted';
+  }
+}
+
+$('prod-keys').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  prodKeysText = await f.text();
+  restoredKeys = false;
+  localStorage.setItem(KEYS_STORE.prod, prodKeysText);
+  await stageKeys();
+  log('prod.keys loaded — NCA header decryption enabled.', 'ok');
+});
+$('title-keys').addEventListener('change', async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  titleKeysText = await f.text();
+  restoredKeys = false;
+  localStorage.setItem(KEYS_STORE.title, titleKeysText);
+  await stageKeys();
+  log('title.keys loaded.', 'ok');
+});
+$('btn-clear-keys').addEventListener('click', () => {
+  prodKeysText = '';
+  titleKeysText = '';
+  localStorage.removeItem(KEYS_STORE.prod);
+  localStorage.removeItem(KEYS_STORE.title);
+  restoredKeys = false;
+  stageKeys();
+  log('Keys cleared.', 'dim');
+});
+
 function inspectNca(f, index) {
+  // Replace any previous inspection result instead of stacking them up.
+  $('nsp-result').querySelectorAll('.nca-info').forEach((el) => el.remove());
   const out = document.createElement('div');
   out.className = 'nca-info';
   out.textContent = 'Parsing ' + f.name + ' ...';
   $('nsp-result').appendChild(out);
 
-  const buf = alloc(f.size);
-  const got = api.switch_extract_file(handle, index, buf, f.size);
+  // Only the first 0x400 bytes (the header) are needed to inspect an NCA —
+  // don't allocate the whole (possibly hundreds-of-MB) payload in wasm memory.
+  const headerLen = Math.min(f.size, 0x800);
+  const buf = alloc(headerLen);
+  const got = api.switch_read_file(handle, index, 0n, buf, headerLen);
   if (got < 0) {
-    out.textContent = 'extract failed: ' + readLastError();
+    out.textContent = 'read failed: ' + readLastError();
+    api.switch_free(buf, headerLen);
     return;
   }
   const jbuf = alloc(4096);
-  const jlen = api.switch_parse_nca(buf, f.size, jbuf, 4096);
+  const jlen = api.switch_parse_nca(handle, buf, headerLen, jbuf, 4096);
+  api.switch_free(buf, headerLen); // staging buffer no longer needed
   const info = JSON.parse(strFromWasm(jbuf, jlen));
+  api.switch_free(jbuf, 4096);
   out.textContent = '';
   if (info.error) {
-    out.textContent = 'NCA: ' + info.error;
+    // A CDN NCA stores its header encrypted with the header key, so the NCA3
+    // magic at 0x200 is invisible until it's decrypted — surface that clearly
+    // instead of a bare "bad magic", and point at the keys files.
+    const encrypted = /bad magic/.test(info.error);
+    out.textContent = encrypted
+      ? 'NCA header is encrypted — load prod.keys above (or pass title keys) to decrypt and inspect. (' + info.error + ')'
+      : 'NCA: ' + info.error;
     return;
   }
   const rows = [
@@ -188,6 +291,9 @@ async function loadProgram(file, kind) {
   const entry = kind === 'nro'
     ? api.switch_load_nro(handle, ptr, data.byteLength)
     : api.switch_load_elf(handle, ptr, data.byteLength);
+  // switch_load_nro/elf copy the image into emulated memory — free the staging
+  // buffer so repeated loads don't accumulate wasm memory.
+  api.switch_free(ptr, data.byteLength);
   if (entry < 0) {
     setState('error');
     log('Load failed: ' + readLastError(), 'err');
@@ -204,11 +310,14 @@ async function loadProgram(file, kind) {
 }
 
 $('btn-demo').addEventListener('click', async () => {
-  syscallMode.value = '1';
+  const name = $('asset-nro').value;
+  // demo uses the UART ABI; real homebrew needs the Horizon stubs.
+  syscallMode.value = name === 'demo.nro' ? '1' : '2';
   applySyscallMode();
-  const res = await fetch('assets/demo.nro');
+  const res = await fetch('assets/' + name);
+  if (!res.ok) { log('Fetch failed: ' + name, 'err'); return; }
   const data = await res.arrayBuffer();
-  const file = new File([data], 'demo.nro');
+  const file = new File([data], name);
   if (await loadProgram(file, 'nro')) run();
 });
 
@@ -343,6 +452,84 @@ function updatePc() {
   $('pc').textContent = '0x' + api.switch_get_pc(handle).toString(16).padStart(8, '0');
   $('steps').textContent = api.switch_get_cycles(handle).toString();
 }
+
+// ---------- controller input ----------
+// HidNpadButton bitfield, as the emulated program expects (switch_set_input).
+const BTN = {
+  A: 0x1, B: 0x2, X: 0x4, Y: 0x8, L: 0x10, R: 0x20, ZL: 0x40, ZR: 0x80,
+  PLUS: 0x100, MINUS: 0x200, LEFT: 0x400, UP: 0x800, RIGHT: 0x1000, DOWN: 0x2000,
+  STICK_L: 0x4000, STICK_R: 0x8000,
+};
+const inputEl = $('input-state');
+function inputStatus(text) {
+  if (inputEl) inputEl.textContent = text;
+}
+
+// Keyboard fallback: dpad + A/B/X/Y + start/select.
+const KEY_MAP = {
+  ArrowLeft: BTN.LEFT, ArrowUp: BTN.UP, ArrowRight: BTN.RIGHT, ArrowDown: BTN.DOWN,
+  Enter: BTN.PLUS, ShiftLeft: BTN.MINUS, ShiftRight: BTN.MINUS,
+  KeyZ: BTN.A, KeyX: BTN.B, KeyA: BTN.X, KeyS: BTN.Y,
+  KeyQ: BTN.L, KeyE: BTN.R,
+};
+const keysDown = new Set();
+window.addEventListener('keydown', (e) => {
+  if (KEY_MAP[e.code]) { keysDown.add(e.code); e.preventDefault(); }
+});
+window.addEventListener('keyup', (e) => keysDown.delete(e.code));
+
+function keyboardMask() {
+  let m = 0;
+  for (const code of keysDown) m |= KEY_MAP[code] || 0;
+  return m;
+}
+
+function pushInput() {
+  if (!api) return;
+  const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+  const pad = pads.find((p) => p && p.connected);
+  let mask = keyboardMask();
+  let slx = 0, sly = 0, srx = 0, sry = 0;
+  if (pad) {
+    // Standard button order: 0-3 = bottom/right/top/left (B/A/Y/X), 4-7 = L/R/ZL/ZR,
+    // 8-9 = select/start, 10-11 = stick presses, 12-17 = dpad.
+    if (pad.buttons[0]?.pressed) mask |= BTN.B;
+    if (pad.buttons[1]?.pressed) mask |= BTN.A;
+    if (pad.buttons[2]?.pressed) mask |= BTN.Y;
+    if (pad.buttons[3]?.pressed) mask |= BTN.X;
+    if (pad.buttons[4]?.pressed) mask |= BTN.L;
+    if (pad.buttons[5]?.pressed) mask |= BTN.R;
+    if (pad.buttons[6]?.pressed) mask |= BTN.ZL;
+    if (pad.buttons[7]?.pressed) mask |= BTN.ZR;
+    if (pad.buttons[8]?.pressed) mask |= BTN.MINUS;
+    if (pad.buttons[9]?.pressed) mask |= BTN.PLUS;
+    if (pad.buttons[10]?.pressed) mask |= BTN.STICK_L;
+    if (pad.buttons[11]?.pressed) mask |= BTN.STICK_R;
+    if (pad.buttons[12]?.pressed) mask |= BTN.UP;
+    if (pad.buttons[13]?.pressed) mask |= BTN.DOWN;
+    if (pad.buttons[14]?.pressed) mask |= BTN.LEFT;
+    if (pad.buttons[15]?.pressed) mask |= BTN.RIGHT;
+    // Analog sticks: -32768..32767, deadzone ~15%.
+    const dz = 0.15;
+    const axes = pad.axes || [];
+    const dl = Math.abs(axes[0] || 0) > dz ? (axes[0] || 0) : 0;
+    const dy = Math.abs(axes[1] || 0) > dz ? (axes[1] || 0) : 0;
+    const rx = Math.abs(axes[2] || 0) > dz ? (axes[2] || 0) : 0;
+    const ry = Math.abs(axes[3] || 0) > dz ? (axes[3] || 0) : 0;
+    slx = Math.round(dl * 32767); sly = Math.round(dy * 32767);
+    srx = Math.round(rx * 32767); sry = Math.round(ry * 32767);
+    // DPAD can also come through as digital axes on some browsers.
+    if (dl === 0) { if (axes[0] < -dz) mask |= BTN.LEFT; else if (axes[0] > dz) mask |= BTN.RIGHT; }
+    inputStatus('gamepad: ' + (pad.id || 'connected'));
+  } else if (mask) {
+    inputStatus('keyboard');
+  }
+  api.switch_set_input(handle, BigInt(mask), slx, sly, srx, sry);
+}
+
+setInterval(pushInput, 16);
+window.addEventListener('gamepadconnected', () => inputStatus('gamepad connected'));
+window.addEventListener('gamepaddisconnected', () => inputStatus('gamepad disconnected'));
 
 // register inspector
 const regIdx = $('reg-idx');
