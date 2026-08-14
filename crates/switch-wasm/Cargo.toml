@@ -1,0 +1,12 @@
+[package]
+name = "switch-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "WASM bindings exposing switch-core to the browser"
+license = "MIT"
+
+[dependencies]
+switch-core = { path = "../switch-core" }
+
+[lib]
+crate-type = ["cdylib"]

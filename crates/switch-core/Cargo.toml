@@ -1,0 +1,8 @@
+[package]
+name = "switch-core"
+version = "0.1.0"
+edition = "2021"
+description = "Browser-oriented Nintendo Switch emulation core: container parsers and an ARM64 interpreter"
+license = "MIT"
+
+[dependencies]

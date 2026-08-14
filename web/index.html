@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>switch-wasm — Nintendo Switch emulator core in the browser</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header>
+  <h1>switch-wasm</h1>
+  <p class="sub">A from-scratch Switch emulation core (ARM64 interpreter + NSP/NCA/NRO parsers) compiled to WebAssembly.</p>
+</header>
+
+<main>
+  <section class="card" id="container-card">
+    <h2>NSP container</h2>
+    <p class="hint">Drop a <code>.nsp</code> to list its contents and inspect NCA headers.</p>
+    <div class="dropzone" id="nsp-drop">Drop .nsp here, or <label for="nsp-file">browse</label>
+      <input type="file" id="nsp-file" accept=".nsp,.nsz,.xci" hidden>
+    </div>
+    <div id="nsp-result"></div>
+  </section>
+
+  <section class="card" id="run-card">
+    <h2>Homebrew runner</h2>
+    <p class="hint">Load an NRO or AArch64 ELF and execute it on the interpreter. Only integer instructions are supported (Phase 1); the bundled demo exercises them.</p>
+    <div class="display">
+      <canvas id="screen" width="640" height="360"></canvas>
+      <p class="hint">Framebuffer @ 0x3F000000 — 640&times;360 RGBA, snapshotted after each run/step.</p>
+    </div>
+    <div class="row">
+      <button id="btn-demo">Run bundled demo</button>
+      <label class="filebtn" for="nro-file">Load .nro / .elf</label>
+      <input type="file" id="nro-file" accept=".nro,.elf,.bin" hidden>
+      <button id="btn-step">Step</button>
+      <button id="btn-run">Run</button>
+      <button id="btn-reset">Reset</button>
+    </div>
+    <div class="row status">
+      <span>PC: <b id="pc">-</b></span>
+      <span>Steps: <b id="steps">0</b></span>
+      <span>State: <b id="state">idle</b></span>
+    </div>
+    <pre class="console" id="console" aria-live="polite"></pre>
+    <div class="row">
+      <label class="checkbox">Syscall ABI:
+        <select id="syscall-mode">
+          <option value="2" selected>Horizon (stubbed)</option>
+          <option value="1">Demo UART</option>
+        </select>
+      </label>
+      <label class="checkbox"><input type="checkbox" id="trace-cb"> Instruction trace</label>
+      <button id="btn-dumptrace">Dump trace</button>
+      <button id="btn-dumpregs">Dump regs</button>
+    </div>
+    <div class="row">
+      <input id="reg-idx" type="number" min="0" max="31" value="0">
+      <button id="btn-readreg">Read reg</button>
+      <span>X<span id="reg-idx-label">0</span> = <b id="reg-val">-</b></span>
+    </div>
+  </section>
+</main>
+
+<footer>
+  Demo payload is hand-assembled homebrew. Encrypted commercial content is out of scope.
+  <span id="wasm-ver"></span>
+</footer>
+
+<script src="main.js"></script>
+</body>
+</html>
