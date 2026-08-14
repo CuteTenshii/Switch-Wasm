@@ -176,13 +176,291 @@ fn read_u64(data: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(b)
 }
 
-/// Find the MOD0 header that follows the NRO0 header (it carries the dynamic
-/// section offset the loader needs for relocations).
+fn read_cstr(data: &[u8], off: usize) -> &str {
+    if off >= data.len() {
+        return "";
+    }
+    let end = data[off..]
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(data.len() - off);
+    std::str::from_utf8(&data[off..off + end]).unwrap_or("")
+}
+
+/// ELF hash used by the legacy DT_HASH symbol table.
+fn elf_hash(name: &str) -> u32 {
+    let mut h: u32 = 0;
+    for &b in name.as_bytes() {
+        h = (h << 4).wrapping_add(b as u32);
+        let g = h & 0xF000_0000;
+        if g != 0 {
+            h ^= g >> 24;
+            h &= !g;
+        }
+    }
+    h
+}
+
+/// Look up a symbol in the NRO's DT_HASH / DT_SYMTAB / DT_STRTAB dynamic
+/// tables. Returns the symbol's `st_value` (a file-offset relative to the
+/// load base) when found. This is intentionally simple: it only supports the
+/// legacy DT_HASH layout used by devkitA64/libtransistor NROs.
+fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
+    let mod0 = find_mod0(data)?;
+    let dyn_off = mod0.wrapping_add(read_u32(data, mod0 + 4) as usize);
+    let mut symtab = 0u64;
+    let mut strtab = 0u64;
+    let mut hash_off = 0u64;
+    let mut off = dyn_off;
+    while off + 16 <= data.len() {
+        let tag = read_u64(data, off);
+        let val = read_u64(data, off + 8);
+        off += 16;
+        if tag == 0 {
+            break;
+        }
+        match tag {
+            0x06 => symtab = val, // DT_SYMTAB
+            0x05 => strtab = val, // DT_STRTAB
+            0x04 => hash_off = val, // DT_HASH
+            _ => {}
+        }
+    }
+    if symtab == 0 || strtab == 0 || hash_off == 0 {
+        return None;
+    }
+    let symtab = symtab as usize;
+    let strtab = strtab as usize;
+    let hash_off = hash_off as usize;
+    if hash_off + 8 > data.len() {
+        return None;
+    }
+    let nbucket = read_u32(data, hash_off) as usize;
+    let nchain = read_u32(data, hash_off + 4) as usize;
+    let buckets_off = hash_off + 8;
+    let chains_off = buckets_off.checked_add(4 * nbucket)?;
+    if buckets_off.checked_add(4 * nbucket)? > data.len()
+        || chains_off.checked_add(4 * nchain)? > data.len()
+    {
+        return None;
+    }
+
+    let h = elf_hash(name) as usize;
+    let mut idx = read_u32(data, buckets_off + 4 * (h % nbucket)) as usize;
+    while idx != 0 {
+        let sym_off = symtab.checked_add(idx * 24)?;
+        if sym_off + 24 > data.len() {
+            break;
+        }
+        let name_off = read_u32(data, sym_off) as usize;
+        if read_cstr(data, strtab + name_off) == name {
+            return Some(read_u64(data, sym_off + 8));
+        }
+        idx = read_u32(data, chains_off + 4 * idx) as usize;
+    }
+    // Bucket 0 may legitimately point to symbol index 0, so check it too.
+    if idx == 0 {
+        let sym_off = symtab;
+        if sym_off + 24 <= data.len() {
+            let name_off = read_u32(data, sym_off) as usize;
+            if read_cstr(data, strtab + name_off) == name {
+                return Some(read_u64(data, sym_off + 8));
+            }
+        }
+    }
+    None
+}
+
+/// libtransistor NROs can ship with `_trn_runconf_heap_mode` set to OVERRIDE
+/// with a tiny or zero-sized heap. Without a real loader config that leaves
+/// `_sbrk_r` returning NULL on the first allocation. We force the runtime into
+/// NORMAL heap mode so it calls `svcSetHeapSize`, which the emulator stubs.
+///
+/// The active `_trn_runconf_heap_mode` is not always the weak symbol exported
+/// in the dynamic table; the main executable may define a strong copy that
+/// `_sbrk_r` actually reads. We therefore decode `_sbrk_r` to find the live
+/// mode pointer and patch that.
+fn patch_libtransistor_runconf(mem: &mut Memory, data: &[u8], base: u32, text_end: u32) -> Result<()> {
+    if let Some(off) = symbol_value(data, "_trn_runconf_heap_mode") {
+        let addr = base.wrapping_add(off as u32);
+        let _ = mem.write_u32(addr, 1);
+    }
+    let _ = patch_sbrk_runconf_via_code(mem, base, text_end);
+    Ok(())
+}
+
+fn read_insn(mem: &Memory, addr: u32) -> Option<u32> {
+    mem.read_u32(addr).ok()
+}
+
+fn is_svc(insn: u32, imm: u16) -> bool {
+    insn == (0xD4000001 | ((imm as u32) << 5))
+}
+
+fn decode_bl_target(pc: u32, insn: u32) -> Option<u32> {
+    if insn & 0xFC000000 != 0x94000000 {
+        return None;
+    }
+    let imm26 = insn & 0x03FFFFFF;
+    let offset = if imm26 < 0x02000000 {
+        imm26 as i32
+    } else {
+        (imm26 as i32) - 0x04000000
+    };
+    Some(pc.wrapping_add((offset * 4) as u32))
+}
+
+fn decode_adrp_target(pc: u32, insn: u32) -> Option<u32> {
+    if insn & 0x9F000000 != 0x90000000 {
+        return None;
+    }
+    let immhi = (insn >> 5) & 0x7FFFF;
+    let immlo = (insn >> 29) & 0x3;
+    let imm = ((immhi << 2) | immlo) as i32;
+    let imm = if imm >= (1 << 20) {
+        imm - (1 << 21)
+    } else {
+        imm
+    };
+    let page = (pc & !0xFFFu32).wrapping_add((imm << 12) as u32);
+    Some(page)
+}
+
+fn decode_ldr_x_imm_offset(insn: u32) -> Option<u32> {
+    // ldr Xt, [Xn, #imm12]: offset in units of 8 bytes.
+    if insn & 0xFFC00000 == 0xF9400000 {
+        Some(((insn >> 10) & 0xFFF) * 8)
+    } else {
+        None
+    }
+}
+
+fn decode_cmp_w_imm(insn: u32) -> Option<(u8, u16)> {
+    // subs wzr, wn, #imm  →  top 9 bits 0b011100010, Rd=31.
+    if insn & 0xFF80001F != 0x7100001F {
+        return None;
+    }
+    let rn = ((insn >> 5) & 0x1F) as u8;
+    let imm = ((insn >> 10) & 0xFFF) as u16;
+    Some((rn, imm))
+}
+
+fn is_b_cond(insn: u32, cond: u8) -> bool {
+    insn & 0xFF00000F == (0x54000000 | (cond as u32))
+}
+
+/// Find the `_sbrk_r` function by locating `svc #1` (SetHeapSize) and the
+/// `bl` to it, then decode the live `_trn_runconf_heap_mode` pointer and set
+/// it to NORMAL.
+fn patch_sbrk_runconf_via_code(mem: &mut Memory, base: u32, text_end: u32) -> Result<()> {
+    // Locate svc #1 inside the text segment.
+    let mut svc_addr = None;
+    let mut addr = base;
+    while addr < text_end {
+        if let Some(insn) = read_insn(mem, addr) {
+            if is_svc(insn, 1) {
+                svc_addr = Some(addr);
+                break;
+            }
+        }
+        addr = addr.wrapping_add(4);
+    }
+    let svc_addr = match svc_addr {
+        Some(a) => a,
+        None => return Ok(()),
+    };
+
+    // Find a bl that calls it (this is inside _sbrk_r).
+    let mut bl_addr = None;
+    addr = base;
+    while addr < text_end {
+        if let Some(insn) = read_insn(mem, addr) {
+            if let Some(tgt) = decode_bl_target(addr, insn) {
+                if tgt == svc_addr {
+                    bl_addr = Some(addr);
+                    break;
+                }
+            }
+        }
+        addr = addr.wrapping_add(4);
+    }
+    let bl_addr = match bl_addr {
+        Some(a) => a,
+        None => return Ok(()),
+    };
+
+    // Walk backwards to find the function start (previous ret or prologue).
+    let mut func_start = base;
+    addr = bl_addr;
+    while addr > base {
+        addr = addr.wrapping_sub(4);
+        if let Some(insn) = read_insn(mem, addr) {
+            if insn & 0xFFFFFC1F == 0xD65F0000 {
+                func_start = addr.wrapping_add(4);
+                break;
+            }
+            // stp x29, x30, [sp, #imm]! prologue
+            if insn & 0xFFE07FFF == 0xA9007BFD {
+                func_start = addr;
+                break;
+            }
+        }
+    }
+
+    // Scan the function for the mode-test pattern:
+    //   adrp  xN, ...
+    //   ldr   xN, [xN, #off]      ; load pointer to mode
+    //   ldr   wN, [xN]            ; load mode value
+    //   cmp   wN, #2
+    //   b.eq  override_path
+    //   cmp   wN, #1
+    //   b.ne  error_path
+    addr = func_start;
+    while addr < bl_addr {
+        let window = [
+            read_insn(mem, addr),
+            read_insn(mem, addr.wrapping_add(4)),
+            read_insn(mem, addr.wrapping_add(8)),
+            read_insn(mem, addr.wrapping_add(12)),
+            read_insn(mem, addr.wrapping_add(16)),
+            read_insn(mem, addr.wrapping_add(20)),
+            read_insn(mem, addr.wrapping_add(24)),
+        ];
+        if let [Some(i0), Some(i1), Some(i2), Some(i3), Some(i4), Some(i5), Some(i6)] = window {
+            if let Some(page) = decode_adrp_target(addr, i0) {
+                if let Some(off) = decode_ldr_x_imm_offset(i1) {
+                    let ptr_addr = page.wrapping_add(off);
+                    let reg = i1 & 0x1F;
+                    // i2: ldr wreg, [xreg, #0]
+                    let i2_is_ldrw = i2 & 0xFFC00000 == 0xB9400000;
+                    let i2_reg = i2 & 0x1F;
+                    let i2_base = (i2 >> 5) & 0x1F;
+                    if i2_is_ldrw && i2_base == reg && ((i2 >> 10) & 0xFFF) == 0 {
+                        if let Some((cmp_reg, imm)) = decode_cmp_w_imm(i3) {
+                            if cmp_reg == i2_reg as u8 && imm == 2 && is_b_cond(i4, 0) {
+                                if let Some((cmp_reg2, imm2)) = decode_cmp_w_imm(i5) {
+                                    if cmp_reg2 == i2_reg as u8 && imm2 == 1 && is_b_cond(i6, 1) {
+                                        return mem.write_u32(ptr_addr, 1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        addr = addr.wrapping_add(4);
+    }
+
+    Ok(())
+}
+
+/// Find the MOD0 header in the NRO image. It is usually close to the end of
+/// the file (just before the dynamic section), so the search covers the whole
+/// image rather than only the first page.
 fn find_mod0(data: &[u8]) -> Option<usize> {
     let magic = 0x30444f4du32.to_le_bytes(); // "MOD0"
-    data[..data.len().min(0x1000)]
-        .windows(4)
-        .position(|w| w == &magic[..])
+    data.windows(4).position(|w| w == &magic[..])
 }
 
 /// Apply RELR packed relative relocations. Every 64-bit entry is either an
@@ -290,6 +568,10 @@ pub fn load_nro(mem: &mut Memory, data: &[u8]) -> Result<LoadedNro> {
     mem.map_zero(end_addr, h.bss_size as usize)?;
     let image_end = end_addr.wrapping_add(h.bss_size);
     apply_nro_relocations(mem, data, image_end)?;
+    // libtransistor NROs may hardcode a tiny OVERRIDE heap. Force NORMAL so
+    // the runtime uses svcSetHeapSize instead of faulting on the first malloc.
+    let text_end = text_addr.wrapping_add(h.text_size);
+    let _ = patch_libtransistor_runconf(mem, data, base, text_end);
 
     Ok(LoadedNro {
         base,

@@ -276,11 +276,11 @@ function inspectNca(f, index) {
 
 // ---------- homebrew runner ----------
 
-const syscallMode = $('syscall-mode');
+// The frontend only runs real Horizon homebrew; the legacy UART demo ABI is
+// removed from the UI so sdl-hello/hbmenu can't accidentally execute under it.
 function applySyscallMode() {
-  api.switch_set_syscall_mode(handle, parseInt(syscallMode.value, 10));
+  api.switch_set_syscall_mode(handle, 2); // Horizon
 }
-syscallMode.addEventListener('change', applySyscallMode);
 
 async function loadProgram(file, kind) {
   clearConsole();
@@ -300,10 +300,7 @@ async function loadProgram(file, kind) {
     return false;
   }
   log('Loaded ' + file.name + ' — entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
-  const abi = syscallMode.value === '2'
-    ? 'Horizon syscall stubs (svcOutputDebugString → console)'
-    : 'UART demo ABI (#1 putchar, #2 putstr, #0 halt)';
-  log('SVC ABI: ' + abi, 'dim');
+  log('SVC ABI: Horizon stubs (svcOutputDebugString → console)', 'dim');
   setState('loaded');
   updatePc();
   return true;
@@ -311,8 +308,6 @@ async function loadProgram(file, kind) {
 
 $('btn-demo').addEventListener('click', async () => {
   const name = $('asset-nro').value;
-  // demo uses the UART ABI; real homebrew needs the Horizon stubs.
-  syscallMode.value = name === 'demo.nro' ? '1' : '2';
   applySyscallMode();
   const res = await fetch('assets/' + name);
   if (!res.ok) { log('Fetch failed: ' + name, 'err'); return; }
@@ -354,25 +349,6 @@ function run() {
   setState('running');
   const r = api.switch_run(handle, budget);
   finishRun(r, Number(budget));
-}
-
-function finishRun(steps, budget) {
-  const err = readLastError();
-  if (steps < 0) {
-    setState('fault');
-    log('CPU fault: ' + err, 'err');
-  } else if (api.switch_halted(handle)) {
-    setState('halted');
-    log('Halted via SVC #0', 'ok');
-  } else if (Number(steps) >= budget) {
-    setState('timeout');
-    log('Reached ' + budget + '-step budget; still running — click Run to continue.', 'dim');
-  } else {
-    setState('fault');
-    log('Stopped unexpectedly.', 'err');
-  }
-  drainOutput();
-  updatePc();
 }
 
 function drainOutput() {
@@ -431,7 +407,7 @@ function finishRun(steps, budget) {
     if (t) log(t.replace(/\n$/, ''), 'err');
   } else if (api.switch_halted(handle)) {
     setState('halted');
-    log('Halted via SVC #0', 'ok');
+    log('Halted (ExitProcess)', 'ok');
     if (traceCb.checked) {
       const t = drainTrace();
       if (t) log(t.replace(/\n$/, ''), 'dim');

@@ -23,12 +23,9 @@ pub enum SyscallMode {
     /// `SVC #0` halts the machine; anything else faults.
     #[default]
     None,
-    /// Demo ABI: `SVC #0` halts, `SVC #1` writes the byte in X0 to the
-    /// console, `SVC #2` writes the NUL-terminated string at X0.
-    Uart,
-    /// Real libnx syscall numbers, best-effort stubs so homebrew built for
-    /// the Switch can boot single-threaded: console logging, sleeps, handles
-    /// and process/timing info are faked, and unsupported calls fault.
+    /// Real libnx/libtransistor syscall numbers, best-effort stubs so homebrew
+    /// built for the Switch can boot single-threaded: console logging, sleeps,
+    /// handles and process/timing info are faked, and unsupported calls fault.
     Horizon,
 }
 
@@ -194,6 +191,11 @@ impl Cpu {
     /// Read the 128-bit SIMD&FP register Qn.
     pub fn read_vreg(&self, idx: u8) -> u128 {
         self.vregs[idx as usize]
+    }
+
+    /// Base of the libnx TLS (thread-local storage) region.
+    pub fn tls_base(&self) -> u32 {
+        self.tpidr as u32
     }
 
     /// Write the 128-bit SIMD&FP register Qn.
@@ -1444,29 +1446,6 @@ impl Cpu {
                     Err(Error::Cpu(format!("unimplemented syscall #{}", imm)))
                 }
             }
-            SyscallMode::Uart => match imm {
-                0 => {
-                    self.halted = true;
-                    Ok(())
-                }
-                1 => {
-                    self.out.push((self.read_zr(0) & 0xFF) as u8);
-                    Ok(())
-                }
-                2 => {
-                    let mut addr = self.read_zr(0) as u32;
-                    loop {
-                        let c = self.mem.read_u8(addr)?;
-                        if c == 0 {
-                            break;
-                        }
-                        self.out.push(c);
-                        addr = addr.wrapping_add(1);
-                    }
-                    Ok(())
-                }
-                _ => Err(Error::Cpu(format!("unknown UART syscall #{}", imm))),
-            },
             SyscallMode::Horizon => self.horizon_syscall(imm),
         }
     }
@@ -2722,15 +2701,18 @@ impl Cpu {
                             let (b, carry_in) = if imm_flag == 1 {
                                 let imm = (insn >> 16) & 0x1F;
                                 let v = if op == 1 {
+                                    // CCMN immediate is a signed 5-bit value.
                                     sext_u64(imm as u64, 5)
                                 } else {
+                                    // CCMP immediate is unsigned 5-bit.
                                     imm as u64
                                 };
                                 (v, 0u64)
                             } else {
                                 (self.read_zr(((insn >> 16) & 0x1F) as u8), 0u64)
                             };
-                            self.set_nzcv_from_compare(a, b, op == 0, carry_in, sf);
+                            // Bit 30: 1 = CCMP (subtract), 0 = CCMN (add).
+                            self.set_nzcv_from_compare(a, b, op == 1, carry_in, sf);
                         }
                         Ok(true)
                     }

@@ -40,9 +40,8 @@
     <div class="row">
       <label class="checkbox">Bundled app:
         <select id="asset-nro">
-          <option value="demo.nro">demo</option>
           <option value="hbmenu.nro">hbmenu</option>
-          <option value="sdl-hello.nro">sdl-hello</option>
+          <option value="sdl-hello.nro" selected>sdl-hello</option>
         </select>
       </label>
       <button id="btn-demo">Run bundled app</button>
@@ -60,12 +59,7 @@
     </div>
     <pre class="console" id="console" aria-live="polite"></pre>
     <div class="row">
-      <label class="checkbox">Syscall ABI:
-        <select id="syscall-mode">
-          <option value="2" selected>Horizon (stubbed)</option>
-          <option value="1">Demo UART</option>
-        </select>
-      </label>
+      <span class="hint">SVC ABI: Horizon stubs (real homebrew only)</span>
       <label class="checkbox"><input type="checkbox" id="trace-cb"> Instruction trace</label>
       <button id="btn-dumptrace">Dump trace</button>
       <button id="btn-dumpregs">Dump regs</button>

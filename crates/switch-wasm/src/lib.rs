@@ -414,13 +414,11 @@ fn boot_entry_regs(cpu: &mut Cpu) {
     cpu.set_reg(1, 1);
 }
 
-/// Configure the syscall ABI (0 = None, 1 = Uart demo ABI, 2 = Horizon
-/// stubs for real libnx homebrew).
+/// Configure the syscall ABI (0 = None, 2 = Horizon stubs for real homebrew).
 #[no_mangle]
 pub extern "C" fn switch_set_syscall_mode(handle: u32, mode: u32) {
     let s = session(handle);
     s.cpu.syscall_mode = match mode {
-        1 => SyscallMode::Uart,
         2 => SyscallMode::Horizon,
         _ => SyscallMode::None,
     };

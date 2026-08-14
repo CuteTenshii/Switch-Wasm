@@ -12,7 +12,6 @@
 
 pub mod cpu;
 pub mod crypto;
-pub mod demo;
 pub mod disasm;
 pub mod elf;
 pub mod error;

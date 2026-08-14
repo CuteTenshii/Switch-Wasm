@@ -1,9 +1,0 @@
-[package]
-name = "make-demo"
-version = "0.1.0"
-edition = "2021"
-description = "Host-side tool: emits web/assets/demo.nro"
-publish = false
-
-[dependencies]
-switch-core = { path = "../../crates/switch-core" }

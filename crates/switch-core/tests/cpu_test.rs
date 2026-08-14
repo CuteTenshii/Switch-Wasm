@@ -393,24 +393,6 @@ fn cbz_tbz() {
 }
 
 #[test]
-fn syscall_uart_prints_and_halts() {
-    let mut cpu = Cpu::new();
-    cpu.syscall_mode = SyscallMode::Uart;
-    // write "hi\0" at 0x3000
-    cpu.mem.map(0x3000, b"hi\0").unwrap();
-    let code = [adr(0, 0x3000 - 0x1000), svc(2), svc(0)];
-    let mut bytes = Vec::new();
-    for insn in code {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.set_pc(0x1000);
-    let report = cpu.run(code.len() as u64).unwrap();
-    assert!(report.halted);
-    assert_eq!(cpu.out, b"hi");
-}
-
-#[test]
 fn logical_immediate_masks() {
     // AND X1, X2, #0xFF  → encoding N=0, immr=0, imms=7
     let mut cpu = cpu_at(0x1000);
@@ -1361,4 +1343,25 @@ fn fpr_load_store_pairs_and_scalar() {
     let cpu = run_program(cpu, 0x1000, &code);
     assert_eq!(cpu.mem.read_u64(0x3070).unwrap(), 0x0102_0304_0506_0708);
     assert_eq!(cpu.mem.read_u64(0x3078).unwrap(), 0x1112_1314_1516_1718);
+}
+
+#[test]
+fn ccmp_eq_sets_carry_for_unsigned_ge() {
+    // ccmp x21, x1, #0, eq  with x21=0x20, x1=0x18 should leave C=1,
+    // so a following b.hs is taken. Regression caught by libtransistor malloc.
+    let code: [u32; 5] = [
+        0xd2800a95, // mov x21, #0x20  (0x20 << 5? actually movz x21,#0x20)
+        0xd2800301, // mov x1, #0x18
+        0xf10000ff, // cmp x7, #0   (sets Z=1; x7 is zero)
+        0xfa4102a0, // ccmp x21, x1, #0, eq  (exact instruction from sdl-hello)
+        0x540000a2, // b.hs #+20
+    ];
+    let mut cpu = cpu_at(0x1000);
+    let mut bytes = Vec::new();
+    for insn in &code { bytes.extend_from_slice(&insn.to_le_bytes()); }
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(code.len() as u64).unwrap();
+    assert_eq!(cpu.get_pc(), 0x1010 + 20,
+        "b.hs should have been taken; ccmp produced wrong flags");
 }

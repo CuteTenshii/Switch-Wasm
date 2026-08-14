@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/switch-core", "crates/switch-wasm", "tools/make-demo"]
+members = ["crates/switch-core", "crates/switch-wasm"]
 
 [profile.release]
 opt-level = 3

@@ -14,14 +14,10 @@ test:
 wasm:
 	cargo build --target $(TARGET) --release -p switch-wasm
 
-# Copy build artifacts into the web/ tree and (re)generate the demo payload.
-assets: wasm demo
+# Copy build artifacts into the web/ tree.
+assets: wasm
 	cp $(WASM) $(WEB)/switch_wasm.wasm
 	@ls -la $(WEB)
-
-# Regenerate the bundled demo NRO (hand-assembled homebrew).
-demo:
-	cargo run -p make-demo
 
 # Serve the frontend locally (no-cache headers so the browser never reuses a
 # stale .wasm/.nro — python's http.server would otherwise let Firefox
