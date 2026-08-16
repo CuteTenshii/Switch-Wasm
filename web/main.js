@@ -1,27 +1,48 @@
-/* switch-wasm browser frontend. Thin glue over the exported wasm ABI:
-   buffers are copied into wasm linear memory via switch_alloc + a DataView. */
+/* switch-wasm browser frontend. The emulator runs in a web worker
+   (worker.js) so long executions don't freeze the page; this file is a thin
+   promise-based RPC client over postMessage. Buffers (files, framebuffer,
+   console/trace output) are transferred across the worker boundary. */
 
 const $ = (id) => document.getElementById(id);
 
-let api = null;       // wasm exports
-let memory = null;    // wasm linear memory
-let handle = -1;      // session handle
+// ---------- worker RPC ----------
 
-function alloc(len) { return api.switch_alloc(len); }
-function toWasm(jsbuf, ptr) {
-  // Re-fetch the buffer every call: wasm memory can grow (detaching the old
-  // ArrayBuffer) between allocations.
-  const view = new Uint8Array(api.memory.buffer, ptr, jsbuf.length);
-  view.set(jsbuf);
+let worker = null;
+let handle = -1;   // client-side session id (display only)
+let ready = false;
+let readyResolve;
+const readyPromise = new Promise((r) => { readyResolve = r; });
+
+let msgId = 0;
+const pending = new Map();
+
+function call(cmd, ...args) {
+  return new Promise((resolve, reject) => {
+    const id = ++msgId;
+    pending.set(id, { resolve, reject });
+    worker.postMessage({ id, cmd, args });
+  });
 }
-function fromWasm(ptr, len) {
-  const b = new Uint8Array(api.memory.buffer, ptr, len);
-  // copy out before any later call may grow memory
-  return b.slice();
-}
-function strFromWasm(ptr, len) {
-  const bytes = fromWasm(ptr, len);
-  return new TextDecoder().decode(bytes).replace(/\u0000.*$/, '');
+
+function initWorker() {
+  worker = new Worker('worker.js');
+  worker.onmessage = (e) => {
+    const d = e.data;
+    if (d.type === 'ready') {
+      ready = true;
+      readyResolve();
+      return;
+    }
+    const p = pending.get(d.id);
+    if (!p) return;
+    pending.delete(d.id);
+    if (d.ok) p.resolve(d.result);
+    else p.reject(new Error(d.error || 'unknown error'));
+  };
+  worker.onerror = (e) => {
+    readyResolve();
+    log('worker error: ' + e.message, 'err');
+  };
 }
 
 const consoleEl = $('console');
@@ -44,11 +65,7 @@ function log(msg, cls) {
 }
 function clearConsole() { consoleEl.textContent = ''; }
 
-function readLastError() {
-  const buf = alloc(512);
-  const n = api.switch_last_error(handle, buf, 512);
-  return strFromWasm(buf, n);
-}
+async function readLastError() { return await call('last_error'); }
 
 function fmtSize(n) {
   if (n >= 1 << 30) return (n / (1 << 30)).toFixed(2) + ' GiB';
@@ -62,34 +79,29 @@ function setState(text) {
 }
 
 // Copy the emulated framebuffer (FB_BASE, 640x360 RGBA) into the canvas.
-function renderFb() {
-  if (!api || fbBytes === 0) return;
-  const buf = alloc(fbBytes);
-  const n = api.switch_fb_snapshot(handle, buf, fbBytes);
-  if (n > 0) {
-    // Copy out of wasm memory first so a later call can't invalidate the view.
-    const pixels = new Uint8ClampedArray(fromWasm(buf, n));
-    screenCtx.putImageData(new ImageData(pixels, fbW, fbH), 0, 0);
+async function renderFb() {
+  if (fbBytes === 0) return;
+  const pixels = await call('fb_snapshot', fbBytes);
+  if (pixels && pixels.length) {
+    const arr = new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.length);
+    screenCtx.putImageData(new ImageData(arr, fbW, fbH), 0, 0);
   }
-  api.switch_free(buf, fbBytes);
 }
 
 // ---------- boot ----------
 
 async function init() {
-  const res = await fetch('assets/switch_wasm.wasm');
-  const bytes = await res.arrayBuffer();
-  const { instance } = await WebAssembly.instantiate(bytes, {});
-  api = instance.exports;
-  memory = api.memory;
-  handle = api.switch_new();
-  applySyscallMode();
-  fbW = api.switch_fb_width();
-  fbH = api.switch_fb_height();
+  initWorker();
+  await readyPromise;
+  handle = await call('new');
+  await call('set_syscall_mode', 2); // Horizon
+  fbW = await call('fb_width');
+  fbH = await call('fb_height');
   fbBytes = fbW * fbH * 4;
   screenEl.width = fbW;
   screenEl.height = fbH;
-  $('wasm-ver').textContent = 'core loaded: ' + bytes.byteLength + ' bytes of wasm';
+  log('core ready');
+  $('wasm-ver').textContent = 'core ready (worker)';
   // Restore persisted keys into the session.
   if (prodKeysText || titleKeysText) {
     await stageKeys();
@@ -112,26 +124,18 @@ $('nsp-file').addEventListener('change', (e) => { if (e.target.files[0]) handleN
 async function handleNspFile(file) {
   clearNsp();
   log('Reading ' + file.name + ' (' + fmtSize(file.size) + ') ...');
-  const data = await file.arrayBuffer();
-  let ptr;
+  const data = new Uint8Array(await file.arrayBuffer());
   try {
-    ptr = alloc(data.byteLength);
-    toWasm(new Uint8Array(data), ptr);
+    const ok = await call('load_nsp', data);
+    if (ok !== 0) {
+      log('NSP error: ' + await readLastError(), 'err');
+      return;
+    }
   } catch (e) {
-    log('Failed to stage ' + fmtSize(data.byteLength) + ' in wasm memory: ' + e, 'err');
+    log('Failed to stage ' + fmtSize(data.length) + ' in the emulator: ' + e.message, 'err');
     return;
   }
-  const ok = api.switch_load_nsp(handle, ptr, data.byteLength);
-  // switch_load_nsp takes ownership of the staging buffer (it's now the
-  // session's NSP image), so we must NOT free it here.
-  if (ok !== 0) {
-    log('NSP error: ' + readLastError(), 'err');
-    return;
-  }
-  const jbuf = alloc(8192);
-  const jlen = api.switch_nsp_files_json(handle, jbuf, 8192);
-  const files = JSON.parse(strFromWasm(jbuf, jlen));
-  api.switch_free(jbuf, 8192);
+  const files = JSON.parse(await call('nsp_files_json'));
   log('Parsed ' + files.length + ' file(s). Click an .nca to inspect it.', 'ok');
 
   const ul = document.createElement('ul');
@@ -162,21 +166,10 @@ let titleKeysText = localStorage.getItem(KEYS_STORE.title) || '';
 let restoredKeys = Boolean(prodKeysText || titleKeysText);
 
 async function stageKeys() {
-  // Send the staged key text (prod.keys / title.keys) to the wasm session so
-  // NCA headers can be decrypted.
-  if (!api) return;
-  let pptr = 0, plen = 0, tptr = 0, tlen = 0;
-  if (prodKeysText) {
-    const b = new TextEncoder().encode(prodKeysText);
-    pptr = alloc(b.length); toWasm(b, pptr); plen = b.length;
-  }
-  if (titleKeysText) {
-    const b = new TextEncoder().encode(titleKeysText);
-    tptr = alloc(b.length); toWasm(b, tptr); tlen = b.length;
-  }
-  const rc = api.switch_load_keys(handle, pptr, plen, tptr, tlen);
-  if (pptr) api.switch_free(pptr, plen);
-  if (tptr) api.switch_free(tptr, tlen);
+  if (!ready) return;
+  const prod = prodKeysText ? new TextEncoder().encode(prodKeysText) : null;
+  const title = titleKeysText ? new TextEncoder().encode(titleKeysText) : null;
+  const rc = await call('load_keys', prod, title);
   updateKeysState();
   return rc;
 }
@@ -222,7 +215,7 @@ $('btn-clear-keys').addEventListener('click', () => {
   log('Keys cleared.', 'dim');
 });
 
-function inspectNca(f, index) {
+async function inspectNca(f, index) {
   // Replace any previous inspection result instead of stacking them up.
   $('nsp-result').querySelectorAll('.nca-info').forEach((el) => el.remove());
   const out = document.createElement('div');
@@ -231,20 +224,22 @@ function inspectNca(f, index) {
   $('nsp-result').appendChild(out);
 
   // Only the first 0x400 bytes (the header) are needed to inspect an NCA —
-  // don't allocate the whole (possibly hundreds-of-MB) payload in wasm memory.
+  // don't copy the whole (possibly hundreds-of-MB) payload to the worker.
   const headerLen = Math.min(f.size, 0x800);
-  const buf = alloc(headerLen);
-  const got = api.switch_read_file(handle, index, 0n, buf, headerLen);
-  if (got < 0) {
-    out.textContent = 'read failed: ' + readLastError();
-    api.switch_free(buf, headerLen);
+  let header;
+  try {
+    header = await call('read_file', index, 0, headerLen);
+  } catch (err) {
+    out.textContent = 'read failed: ' + err.message;
     return;
   }
-  const jbuf = alloc(4096);
-  const jlen = api.switch_parse_nca(handle, buf, headerLen, jbuf, 4096);
-  api.switch_free(buf, headerLen); // staging buffer no longer needed
-  const info = JSON.parse(strFromWasm(jbuf, jlen));
-  api.switch_free(jbuf, 4096);
+  let info;
+  try {
+    info = JSON.parse(await call('parse_nca', header));
+  } catch (err) {
+    out.textContent = 'parse failed: ' + err.message;
+    return;
+  }
   out.textContent = '';
   if (info.error) {
     // A CDN NCA stores its header encrypted with the header key, so the NCA3
@@ -279,154 +274,154 @@ function inspectNca(f, index) {
 // The frontend only runs real Horizon homebrew; the legacy UART demo ABI is
 // removed from the UI so sdl-hello/hbmenu can't accidentally execute under it.
 function applySyscallMode() {
-  api.switch_set_syscall_mode(handle, 2); // Horizon
+  return call('set_syscall_mode', 2); // Horizon
 }
 
 async function loadProgram(file, kind) {
   clearConsole();
   setState('loading');
-  const data = await file.arrayBuffer();
-  const ptr = alloc(data.byteLength);
-  toWasm(new Uint8Array(data), ptr);
-  const entry = kind === 'nro'
-    ? api.switch_load_nro(handle, ptr, data.byteLength)
-    : api.switch_load_elf(handle, ptr, data.byteLength);
-  // switch_load_nro/elf copy the image into emulated memory — free the staging
-  // buffer so repeated loads don't accumulate wasm memory.
-  api.switch_free(ptr, data.byteLength);
+  const data = new Uint8Array(await file.arrayBuffer());
+  let entry;
+  try {
+    entry = kind === 'nro'
+      ? await call('load_nro', data)
+      : await call('load_elf', data);
+  } catch (err) {
+    setState('error');
+    log('Load failed: ' + err.message, 'err');
+    return false;
+  }
   if (entry < 0) {
     setState('error');
-    log('Load failed: ' + readLastError(), 'err');
+    log('Load failed: ' + await readLastError(), 'err');
     return false;
   }
   log('Loaded ' + file.name + ' — entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
   log('SVC ABI: Horizon stubs (svcOutputDebugString → console)', 'dim');
   setState('loaded');
-  updatePc();
+  await updatePc();
   return true;
 }
 
 $('btn-demo').addEventListener('click', async () => {
   const name = $('asset-nro').value;
-  applySyscallMode();
+  await applySyscallMode();
   const res = await fetch('assets/' + name);
   if (!res.ok) { log('Fetch failed: ' + name, 'err'); return; }
   const data = await res.arrayBuffer();
   const file = new File([data], name);
-  if (await loadProgram(file, 'nro')) run();
+  if (await loadProgram(file, 'nro')) await run();
 });
 
 $('nro-file').addEventListener('change', async (e) => {
   const f = e.target.files[0];
   if (!f) return;
-  applySyscallMode();
+  await applySyscallMode();
   const kind = /\.nro$/i.test(f.name) ? 'nro' : 'elf';
-  if (await loadProgram(f, kind)) run();
+  if (await loadProgram(f, kind)) await run();
 });
 
 $('btn-run').addEventListener('click', run);
-$('btn-step').addEventListener('click', () => {
-  const r = api.switch_run(handle, 1n);
-  finishRun(r, 1);
+$('btn-step').addEventListener('click', async () => {
+  const r = await call('run', 1);
+  await finishRun(r, true);
   if (traceCb.checked && r >= 0) {
-    const t = drainTrace();
+    const t = await drainTrace();
     if (t) log(t.replace(/\n$/, ''), 'dim');
   }
 });
-$('btn-reset').addEventListener('click', () => {
-  api.switch_free_session(handle);
-  handle = api.switch_new();
-  applySyscallMode();
+$('btn-reset').addEventListener('click', async () => {
+  await call('free_session');
+  handle = await call('new');
+  await applySyscallMode();
   clearConsole();
   setState('idle');
 });
 
-function run() {
-  // Real homebrew needs far more than 100k steps just to get through libnx
-  // init, so the non-trace budget is large. Clicking Run again continues from
-  // where the previous run stopped (the CPU state persists).
-  const budget = traceCb.checked ? 5000n : 20_000_000n;
+// Run in worker slices until the app halts or faults. Each slice is short so
+// the page can paint and input can reach the emulator between slices; there is
+// no overall step budget (trace mode slices are small to keep the log usable).
+const RUN_SLICE = 5_000_000;
+async function run() {
   setState('running');
-  const r = api.switch_run(handle, budget);
-  finishRun(r, Number(budget));
+  const slice = traceCb.checked ? 5000 : RUN_SLICE;
+  let steps = 0;
+  for (;;) {
+    steps = await call('run', slice);
+    // Yield so the UI repaints and any queued input is processed.
+    await new Promise((r) => setTimeout(r, 0));
+    // Keep the display live during long runs: hbmenu never halts, so without
+    // these the step counter would stay at the post-load value and console
+    // output would only appear after the run "ends".
+    await updatePc();
+    await drainOutput();
+    if (steps < 0) break;
+    const halted = await call('halted');
+    if (halted || steps < slice) break;
+  }
+  await finishRun(steps);
 }
 
-function drainOutput() {
-  const outLen = 4096;
-  const buf = alloc(outLen);
-  let n = api.switch_drain_output(handle, buf, outLen);
-  let total = '';
-  while (n > 0) {
-    total += strFromWasm(buf, n);
-    n = api.switch_drain_output(handle, buf, outLen);
+async function drainOutput() {
+  const bytes = await call('drain_output');
+  if (bytes && bytes.length) {
+    log(new TextDecoder().decode(bytes));
   }
-  if (total) log(total);
 }
 
 // Debug trace + register dumps.
 const traceCb = $('trace-cb');
 traceCb.addEventListener('change', () => {
-  api.switch_set_trace(handle, traceCb.checked ? 1 : 0);
-  if (traceCb.checked) log('Tracing enabled — run budget is capped for readability.', 'dim');
+  call('set_trace', traceCb.checked ? 1 : 0);
+  if (traceCb.checked) log('Tracing enabled — run slices are capped for readability.', 'dim');
 });
 
-function drainTrace() {
-  const cap = 8192;
-  const buf = alloc(cap);
-  let n = api.switch_drain_trace(handle, buf, cap);
-  let total = '';
-  while (n > 0) {
-    total += strFromWasm(buf, n);
-    n = api.switch_drain_trace(handle, buf, cap);
-  }
-  return total;
+async function drainTrace() {
+  const bytes = await call('drain_trace');
+  if (bytes && bytes.length) return new TextDecoder().decode(bytes);
+  return '';
 }
 
-$('btn-dumptrace').addEventListener('click', () => {
-  const t = drainTrace();
+$('btn-dumptrace').addEventListener('click', async () => {
+  const t = await drainTrace();
   if (!t) { log('(no trace)', 'dim'); return; }
   log(t.replace(/\n$/, ''), 'dim');
 });
 
-$('btn-dumpregs').addEventListener('click', dumpRegs);
+$('btn-dumpregs').addEventListener('click', () => dumpRegs());
 
-function dumpRegs() {
-  const cap = 2048;
-  const buf = alloc(cap);
-  const n = api.switch_dump_regs(handle, buf, cap);
-  log(strFromWasm(buf, n).replace(/\n$/, ''), 'dim');
+async function dumpRegs() {
+  const s = await call('dump_regs');
+  if (s) log(s.replace(/\n$/, ''), 'dim');
 }
 
-function finishRun(steps, budget) {
-  const err = readLastError();
+async function finishRun(steps, stepped) {
+  const err = await readLastError();
   if (steps < 0) {
     setState('fault');
     log('CPU fault: ' + err, 'err');
     // The fault trace already carries the register snapshot from the CPU.
-    const t = drainTrace();
+    const t = await drainTrace();
     if (t) log(t.replace(/\n$/, ''), 'err');
-  } else if (api.switch_halted(handle)) {
+  } else if (await call('halted')) {
     setState('halted');
     log('Halted (ExitProcess)', 'ok');
     if (traceCb.checked) {
-      const t = drainTrace();
+      const t = await drainTrace();
       if (t) log(t.replace(/\n$/, ''), 'dim');
     }
-  } else if (Number(steps) >= budget) {
-    setState('timeout');
-    log('Reached ' + budget + '-step budget; still running — click Run to continue.', 'dim');
-  } else {
+  } else if (!stepped) {
     setState('fault');
     log('Stopped unexpectedly.', 'err');
   }
-  drainOutput();
-  renderFb();
-  updatePc();
+  await drainOutput();
+  await renderFb();
+  await updatePc();
 }
 
-function updatePc() {
-  $('pc').textContent = '0x' + api.switch_get_pc(handle).toString(16).padStart(8, '0');
-  $('steps').textContent = api.switch_get_cycles(handle).toString();
+async function updatePc() {
+  $('pc').textContent = '0x' + (await call('get_pc')).toString(16).padStart(8, '0');
+  $('steps').textContent = (await call('get_cycles')).toString();
 }
 
 // ---------- controller input ----------
@@ -461,7 +456,7 @@ function keyboardMask() {
 }
 
 function pushInput() {
-  if (!api) return;
+  if (!ready) return;
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   const pad = pads.find((p) => p && p.connected);
   let mask = keyboardMask();
@@ -500,7 +495,7 @@ function pushInput() {
   } else if (mask) {
     inputStatus('keyboard');
   }
-  api.switch_set_input(handle, BigInt(mask), slx, sly, srx, sry);
+  call('set_input', mask, slx, sly, srx, sry);
 }
 
 setInterval(pushInput, 16);
@@ -511,9 +506,9 @@ window.addEventListener('gamepaddisconnected', () => inputStatus('gamepad discon
 const regIdx = $('reg-idx');
 $('reg-idx-label').textContent = regIdx.value;
 regIdx.addEventListener('input', () => { $('reg-idx-label').textContent = regIdx.value; });
-$('btn-readreg').addEventListener('click', () => {
-  const v = api.switch_get_reg(handle, parseInt(regIdx.value, 10));
-  $('reg-val').textContent = '0x' + v.toString(16).padStart(16, '0');
+$('btn-readreg').addEventListener('click', async () => {
+  const v = await call('get_reg', parseInt(regIdx.value, 10));
+  $('reg-val').textContent = v;
 });
 
 init();

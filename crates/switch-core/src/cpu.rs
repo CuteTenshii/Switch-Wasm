@@ -16,6 +16,7 @@
 
 use crate::mem::Memory;
 use crate::{Error, Result};
+use std::collections::HashMap;
 
 /// Where SVC traps are routed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -39,9 +40,15 @@ pub struct RunReport {
 }
 
 /// Host-provided stack for [`Cpu::bootstrap`]: 1 MiB full-descending, top at
-/// `STACK_TOP` (below the NRO load base and clear of the framebuffer).
+/// `STACK_TOP`. Must be clear of the NRO image (0x08000000+), the libnx TLS
+/// (0x0FF00000) and the heap homebrew puts at 0x10000000 — hbmenu's deko3d
+/// memblocks are allocated there and zeroing them would stomp a stack placed
+/// in the same region, corrupting return addresses.
 pub const STACK_SIZE: u64 = 0x0010_0000;
 pub const STACK_TOP: u64 = 0x1010_0000;
+
+/// Address of the return-address trampoline for direct-entered homebrew.
+pub const SELF_RETURN_TRAMPOLINE: u32 = 0x1F00_0000;
 
 #[derive(Debug)]
 pub struct Cpu {
@@ -82,6 +89,28 @@ pub struct Cpu {
     /// Monotonic id handed out for domain IPC out-objects, so each synthesized
     /// subservice gets a distinct non-zero object id.
     next_object_id: u32,
+    /// Maps fake handles returned by `ConnectToNamedPort` or sm:`GetService`
+    /// to the named port / service they represent, so `SendSyncRequest` can
+    /// dispatch IPC commands to the right stub.
+    service_handles: HashMap<u64, String>,
+    /// Monotonic fake-handle allocator. 0 is invalid, so we start above the
+    /// earlier hard-coded `FAKE_HANDLE`.
+    next_handle: u32,
+    /// Monotonic domain object id allocator for services that use IPC domains
+    /// (e.g. `vi:m`).
+    next_domain_object_id: u32,
+    /// Maps (session handle, domain object id) to the interface name used for
+    /// dispatching domain commands.
+    domain_objects: HashMap<(u64, u32), String>,
+    /// Maps non-domain vi session handles to their sub-interface (vi:iads,
+    /// vi:ihosbd, ...) so the display stub can dispatch binder vs. display
+    /// commands on the right session.
+    vi_ifaces: HashMap<u64, String>,
+    /// Synthetic SD-card directory state for the fsp-srv stub: maps an open
+    /// directory handle to the entries it has not yielded yet
+    /// (name bytes, entry type, file size). Lets `fsFsOpenDirectory` /
+    /// `fsDirRead` hand NX-Shell's `FS::GetDirList` a real listing.
+    fs_dirs: HashMap<u64, Vec<(Vec<u8>, u8, u64)>>,
     /// Address the guest mapped its hid shared memory to (via `MapSharedMemory`
     /// on the handle hid's IPC returned). The host writes gamepad state into
     /// the libnx `HidSharedMemory` layout there so `padUpdate` sees it; 0 means
@@ -120,6 +149,12 @@ impl Cpu {
             recent_len: 0,
             tpidr: 0,
             next_object_id: 1,
+            service_handles: HashMap::new(),
+            next_handle: 0x1000,
+            next_domain_object_id: 1,
+            domain_objects: HashMap::new(),
+            vi_ifaces: HashMap::new(),
+            fs_dirs: HashMap::new(),
             hid_shmem_addr: 0,
             sample_counter: 0,
         };
@@ -152,10 +187,105 @@ impl Cpu {
         let _ = self.mem.map_zero((STACK_TOP - STACK_SIZE) as u32, STACK_SIZE as usize);
         self.sp = STACK_TOP;
         // libnx reads TPIDR_EL0 expecting the loader (HBL/kernel) to have set
-        // the thread-local-storage base. Point it at a writable low-memory
-        // region as a fallback; the crt0 may override it via MSR, which the
-        // interpreter honors.
-        self.tpidr = 0x2000_0000;
+        // the thread-local-storage base. Point it at a writable region clear of
+        // both the heap and the stack: the stack mapping is [0x10000000,
+        // 0x10100000) and svcSetHeapSize hands out 0x20000000. If TPIDR overlaps
+        // either, the app's IPC code writes its CMIF request over the heap's
+        // first chunk header (and malloc stomps the TLS), corrupting the
+        // allocator.
+        self.tpidr = 0x0FF0_0000;
+        // A return-address trampoline: the loader enters homebrew's `main`
+        // directly, so LR is 0 and any early return would branch to NULL.
+        // Point LR at a stub that calls ExitProcess (svc 0x07), so main's
+        // return surfaces as a clean exit code instead of a NULL jump.
+        let _ = self.mem.map_zero(SELF_RETURN_TRAMPOLINE, 0x10);
+        self.mem.write_u32(SELF_RETURN_TRAMPOLINE, 0xD400_00E1).ok(); // svc #7
+        self.mem.write_u32(SELF_RETURN_TRAMPOLINE + 4, 0x1400_0000).ok(); // b .
+    }
+
+    /// Boot a homebrew NRO the way HBL does: load the image, let the crt0's
+    /// relocation pass run up to the point it calls `main`, run the `.init_array`
+    /// (C++ static constructors) and set up the main thread's `ThreadVars`
+    /// (newlib reentrancy) that the skipped `__libnx_init` would normally
+    /// provide, then leave the CPU ready to enter `main`.
+    ///
+    /// The libnx "HOME BREW" crt0 runs the relocation pass itself and then
+    /// jumps to main; when it omits the `__libnx_init` step, every std::string
+    /// global is left empty and NX-Shell's `FS::GetDirList` resolves its SD
+    /// path to "" and exits. Running the constructors fixes that.
+    pub fn boot_homebrew(&mut self, data: &[u8]) -> Result<crate::nro::LoadedNro> {
+        let loaded = crate::nro::load_nro(&mut self.mem, data)?;
+        self.out.clear();
+        self.trace.clear();
+        self.halted = false;
+        self.trace_enabled = false;
+        for i in 0..=30u8 {
+            self.set_reg(i, 0);
+        }
+        self.set_reg(0, loaded.env_addr as u64);
+        self.set_reg(1, if loaded.env_addr != 0 { u64::MAX } else { 1 });
+        self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
+
+        let init = crate::nro::init_array_entries(data);
+        if !init.is_empty() && loaded.env_addr != 0 {
+            // The crt0 calls main with `bl` at entry+0xc0 (libnx switch_crt0
+            // layout); by then BSS is zeroed and RELR relocations are applied.
+            let main_call = loaded.entry.wrapping_add(0xc0);
+            let main_insn = self.mem.fetch(main_call).ok();
+            let is_bl = matches!(main_insn, Some(i) if (i & 0xFC00_0000) == 0x9400_0000);
+            if is_bl {
+                self.set_pc(loaded.entry);
+                for _ in 0..5_000_000u64 {
+                    if self.halted || self.get_pc() == main_call {
+                        break;
+                    }
+                    self.step()?;
+                }
+                // ThreadVars at TLS+0x1E0: magic, handle, thread_ptr, _REENT,
+                // tls_tp. The _REENT can be zeroed; newlib's malloc lazily
+                // initializes it.
+                const TV_MAGIC: u32 = 0x2154_5624; // "!TV$"
+                const REENT_ADDR: u32 = 0x1FF1_0000;
+                let tls = self.tls_base();
+                let _ = self.mem.map_zero(REENT_ADDR, 0x400);
+                let _ = self.mem.write_u32(tls + 0x1E0, TV_MAGIC);
+                let _ = self.mem.write_u32(tls + 0x1E4, 0x100);
+                let _ = self.mem.write_u32(tls + 0x1E8, 0);
+                let _ = self.mem.write_u32(tls + 0x1F0, REENT_ADDR);
+                let _ = self.mem.write_u32(tls + 0x1F8, tls);
+                // Run the constructors; each returns via x30.
+                const SENTINEL: u32 = 0x1FF0_0000;
+                for &entry in &init {
+                    if self.halted {
+                        break;
+                    }
+                    for i in 0..=29u8 {
+                        self.set_reg(i, 0);
+                    }
+                    self.set_reg(30, SENTINEL as u64);
+                    self.set_pc(entry);
+                    for _ in 0..20_000_000u64 {
+                        if self.halted || self.get_pc() == SENTINEL {
+                            break;
+                        }
+                        self.step()?;
+                    }
+                }
+                // The constructors clobber the entry registers; restore them
+                // and resume at the crt0's `bl main` so main is entered with
+                // the normal calling convention (x30 = the crt0's return path).
+                for i in 0..=30u8 {
+                    self.set_reg(i, 0);
+                }
+                self.set_reg(0, loaded.env_addr as u64);
+                self.set_reg(1, if loaded.env_addr != 0 { u64::MAX } else { 1 });
+                self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
+                self.set_pc(main_call);
+                return Ok(loaded);
+            }
+        }
+        self.set_pc(loaded.entry);
+        Ok(loaded)
     }
 
     // ---- register access ----
@@ -172,6 +302,17 @@ impl Cpu {
 
     pub fn set_pc(&mut self, pc: u32) {
         self.pc = pc;
+    }
+
+    /// Debug: dump the fake-handle -> service-name map.
+    pub fn service_handles_snapshot(&self) -> Vec<(u64, String)> {
+        let mut v: Vec<(u64, String)> = self
+            .service_handles
+            .iter()
+            .map(|(&h, s)| (h, s.clone()))
+            .collect();
+        v.sort();
+        v
     }
 
     /// Read X0..=X30 (X31 reads as zero / is the stack pointer).
@@ -563,8 +704,15 @@ impl Cpu {
                         return Ok(());
                     }
                     0b0010 => {
-                        // RET
-                        self.pc = self.read_zr(rn) as u32;
+                        // RET. A `ret` that returns to address 0 is a homebrew
+                        // exit path whose return-address convention the boot
+                        // model doesn't provide (the crt0 stashes the loader's
+                        // LR in x27, but the atexit table runner returns via
+                        // x30 = 0). Redirect to the exit trampoline so it
+                        // surfaces as a clean ExitProcess instead of a NULL
+                        // fetch.
+                        let tgt = self.read_zr(rn) as u32;
+                        self.pc = if tgt == 0 { SELF_RETURN_TRAMPOLINE } else { tgt };
                         return Ok(());
                     }
                     _ => {
@@ -730,6 +878,45 @@ impl Cpu {
     /// * `MOV <Xd>, <Vn>.D[<m>]` (UMOV) — copy a 64-bit lane to a GPR
     ///   (`bits[15:10] == 001111`, 64-bit lane form `imm5 == 01000 | m`).
     fn try_simd(&mut self, insn: u32) -> Result<bool> {
+        // ---- narrowing shifts (SHRN / RSHRN / SQSHRN / ...) ----
+        // bits[31]=0, bits[28:24]=01111, bit23=0. These share the group with
+        // MOVI (bits[28:23]=011110), so they must be checked first; the
+        // opcode lives in bits[15:11] and the shift in bits[22:16].
+        if ((insn >> 31) & 1) == 0
+            && ((insn >> 24) & 0x1F) == 0b01111
+            && ((insn >> 23) & 1) == 0
+            && ((insn >> 10) & 1) == 1
+        {
+            let op = (insn >> 11) & 0x1F;
+            if matches!(op, 0b10000 | 0b10001 | 0b10010 | 0b10011) {
+                let q = (insn >> 30) & 1 == 1;
+                let u = (insn >> 29) & 1;
+                let rd = (insn & 0x1F) as u8;
+                let rn = ((insn >> 5) & 0x1F) as u8;
+                let size = (insn >> 22) & 1;
+                let dest_esize = 8u32 << size;
+                let shift_field = (insn >> 16) & 0x7F;
+                let shift = (2 * dest_esize).saturating_sub(shift_field as u32);
+                if shift > 0 && shift <= dest_esize {
+                    let rounding = op & 1 == 1; // RSHRN/SQRSHRN/UQRSHRN round
+                    let (signed_src, to_unsigned) = match (u, op) {
+                        (0, 0b10000) => (false, false), // SHRN
+                        (0, 0b10001) => (false, false), // RSHRN
+                        (1, 0b10000) => (true, true),   // SQSHRUN
+                        (1, 0b10001) => (true, true),   // SQRSHRUN
+                        (0, 0b10010) => (true, false),  // SQSHRN
+                        (0, 0b10011) => (true, false),  // SQRSHRN
+                        (1, 0b10010) => (false, false), // UQSHRN
+                        (1, 0b10011) => (false, false), // UQRSHRN
+                        _ => unreachable!(),
+                    };
+                    let saturating = op & 0b10 != 0 || to_unsigned;
+                    self.simd_shrn(rd, rn, q, dest_esize, shift, rounding, signed_src, to_unsigned, saturating);
+                    return Ok(true);
+                }
+            }
+        }
+
         // MOVI/MVNI (modified immediate): bits[28:23] == 011110, bits[22:19]==0.
         // The 8-bit immediate is NOT contiguous: `abcdefgh` sits at bits 18:16
         // (a:b:c) and 9:5 (d:e:f:g:h), with bits 15:12 = cmode, bit 29 = op
@@ -909,6 +1096,17 @@ impl Cpu {
                         });
                         return Ok(true);
                     }
+                    0b10101 => {
+                        // SMINP (signed group) / UMINP (unsigned group).
+                        self.simd_pairwise(rd, rn, rm, q, esize, |a, b| {
+                            if u == 0 {
+                                if Self::sge(a, b, esize) { b } else { a }
+                            } else {
+                                a.min(b)
+                            }
+                        });
+                        return Ok(true);
+                    }
                     0b00011 => {
                         // Bitwise logicals (the selector lives in bits[23:21];
                         // it doubles as `sz`, so no sz guard here).
@@ -978,7 +1176,7 @@ impl Cpu {
                 // index, which the general-register form ignores).
                 let esize = 8u32 << imm5.trailing_zeros();
                 let elements = if q == 1 { 128 / esize } else { 64 / esize };
-                let val = self.read_zr(rn) & ((1u64 << esize) - 1);
+                let val = (self.read_zr(rn) as u128) & ((1u128 << esize) - 1);
                 let mut v: u128 = 0;
                 for i in 0..elements {
                     v |= (val as u128) << (i as u32 * esize);
@@ -1044,6 +1242,64 @@ impl Cpu {
 
     fn try_fp(&mut self, insn: u32) -> Result<bool> {
         let sf = (insn >> 31) & 1;
+        // FMOV (immediate): bits[31:24] = 00011110, bit21 = 1,
+        // bits[12:10] = 100, bits[9:5] = 0, imm8 = bits[20:13], type in
+        // bits[23:22] (00 = S, 01 = D). The value is VFPExpandImm() —
+        // `fmov s0, #1.0` = 0x1E2E1002 (sdl-hello's float env-var helper).
+        if ((insn >> 24) & 0xFF) == 0b00011110
+            && ((insn >> 21) & 1) == 1
+            && ((insn >> 10) & 0b111) == 0b100
+            && ((insn >> 5) & 0x1F) == 0
+        {
+            let imm8 = ((insn >> 13) & 0xFF) as u8;
+            let ftype = (insn >> 22) & 0b11;
+            let rd = (insn & 0x1F) as u8;
+            let sign = if (imm8 >> 7) & 1 == 1 { 0x8000u32 } else { 0 };
+            return match ftype {
+                0b00 => {
+                    let imm = (sign
+                        | if (imm8 >> 6) & 1 == 1 { 0x3E00 } else { 0x4000 }
+                        | (((imm8 & 0x3F) as u32) << 3))
+                        << 16;
+                    self.fp_set_f32(rd, f32::from_bits(imm));
+                    Ok(true)
+                }
+                0b01 => {
+                    let imm = (sign as u64
+                        | if (imm8 >> 6) & 1 == 1 { 0x3FC0 } else { 0x4000 }
+                        | (imm8 & 0x3F) as u64)
+                        << 48;
+                    self.fp_set_f64(rd, f64::from_bits(imm));
+                    Ok(true)
+                }
+                _ => Ok(false), // half precision: out of scope
+            };
+        }
+
+        // FCVT (float <-> float): bits[31:24] = 00011110, bit21 = 1,
+        // bits[20:15] = 000100 (Dn -> Sd) / 000101 (Sn -> Dd),
+        // bits[14:10] = 10000. `fcvt s0, d0` = 0x1E624000.
+        if ((insn >> 24) & 0xFF) == 0b00011110
+            && ((insn >> 21) & 1) == 1
+            && ((insn >> 10) & 0x1F) == 0b10000
+        {
+            let op = (insn >> 15) & 0x3F;
+            let rn = ((insn >> 5) & 0x1F) as u8;
+            let rd = (insn & 0x1F) as u8;
+            return match op {
+                0b000100 => {
+                    // double -> single
+                    self.fp_set_f32(rd, self.fp_get_f64(rn) as f32);
+                    Ok(true)
+                }
+                0b000101 => {
+                    // single -> double
+                    self.fp_set_f64(rd, self.fp_get_f32(rn) as f64);
+                    Ok(true)
+                }
+                _ => Ok(false),
+            };
+        }
         // FMOV (register): move between GPR and a vector lane. bits[30:24] =
         // 0011110, bits[15:10] = 000000, bits[21:16] select direction/size.
         if ((insn >> 24) & 0x7F) == 0b0011110
@@ -1087,7 +1343,10 @@ impl Cpu {
             let rd = (insn & 0x1F) as u8;
             let rn = ((insn >> 5) & 0x1F) as u8;
             let fbits = (insn >> 10) & 0x3F;
-            let use_double = ftype == 0b01 && sf == 1 || ftype == 0b10;
+            // type 00 = single, 01 = double (10/11 = half, out of scope). The
+            // float size is independent of `sf`; the old `&& sf == 1` clause
+            // made `fcvtzs w, d1` / `scvtf d0, w1` pick the wrong register size.
+            let use_double = ftype == 0b01;
             return match opc {
                 0b000010 | 0b000011 => {
                     // SCVTF / UCVTF: integer → float.
@@ -1110,21 +1369,29 @@ impl Cpu {
                     }
                     Ok(true)
                 }
-                0b011000 | 0b011001 => {
+                 0b011000 | 0b011001 | 0b101000 | 0b111000 | 0b101001 | 0b111001 => {
                     // FCVTZS / FCVTZU: float → integer, round toward zero.
-                    let signed = opc == 0b011000;
-                    let v = if use_double {
-                        self.fp_get_f64(rn) as i128
+                    // opc bit16 = 0 for ZS (signed), 1 for ZU (unsigned);
+                    // bit20 (and `type`) selects single vs double source.
+                    // `fcvtzs w24, d1` = 0x1e780038, `fcvtzu x8, d1` = 0x9e790028.
+                    let signed = (opc & 1) == 0;
+                    let f = if use_double {
+                        self.fp_get_f64(rn)
                     } else {
-                        self.fp_get_f32(rn) as i128
+                        self.fp_get_f32(rn) as f64
                     };
-                    if signed {
-                        let r = (v as i64) as u64;
-                        self.write_zr(rd, r & Self::mask(sf != 0));
+                    let r = if signed {
+                        if sf != 0 {
+                            f as i64 as u64
+                        } else {
+                            f as i32 as u32 as u64
+                        }
+                    } else if sf != 0 {
+                        f as u64
                     } else {
-                        let r = v.max(0) as u64;
-                        self.write_zr(rd, r & Self::mask(sf != 0));
-                    }
+                        f as u32 as u64
+                    };
+                    self.write_zr(rd, r);
                     Ok(true)
                 }
                 0b100000..=0b100111 if fbits == 0 => {
@@ -1151,6 +1418,33 @@ impl Cpu {
                 }
                 _ => Ok(false),
             }
+        }
+
+        // Scalar integer compare-to-zero: CMGE/CMGT/CMLE/CMLT <Dd>, <Dn>, #0.
+        // bits[31:30] = 01 (D), bit29 = U, bits[28:25] = 1110,
+        // bits[24:21] = 0111, bits[20:16] = 00000 (the zero operand),
+        // op = bits[15:10]. The result is an all-ones/all-zeros mask (used as
+        // a predicate by NX-Shell: `cmge d31, d31, #0` then `fmov x2, d31`).
+        if ((insn >> 31) & 1) == 0
+            && ((insn >> 30) & 0b11) == 0b01
+            && ((insn >> 25) & 0b1111) == 0b1111
+            && ((insn >> 21) & 0xF) == 0b0111
+            && ((insn >> 16) & 0x1F) == 0
+        {
+            let u = (insn >> 29) & 1;
+            let op = (insn >> 10) & 0x3F;
+            let rn = ((insn >> 5) & 0x1F) as u8;
+            let rd = (insn & 0x1F) as u8;
+            let v = (self.vregs[rn as usize] as u64) as i64;
+            let cond = match (u, op) {
+                (1, 0b100010) => v >= 0, // CMGE
+                (0, 0b100010) => v > 0,  // CMGT
+                (1, 0b100110) => v <= 0, // CMLE
+                (0, 0b101010) => v < 0,  // CMLT
+                _ => return Ok(false),
+            };
+            self.fp_set_f64(rd, f64::from_bits(if cond { u64::MAX } else { 0 }));
+            return Ok(true);
         }
 
         // Scalar FP data processing: bits[31:24] = 00011110 (single/double;
@@ -1392,11 +1686,63 @@ impl Cpu {
         }
         self.vregs[rd as usize] = out;
     }
-
     /// Signed `a >= b` for `bits`-wide lanes.
     fn sge(a: u64, b: u64, bits: u32) -> bool {
         let shift = 64 - bits;
         ((a << shift) as i64) >= ((b << shift) as i64)
+    }
+
+    /// Shift-right-and-narrow a vector (SHRN/RSHRN and the saturating forms).
+    /// Every `2*dest_esize`-bit lane of `Vn` is shifted right by `shift`
+    /// (optionally rounding) and narrowed to `dest_esize` bits; `Q=1` targets
+    /// the high half (`SHRN2`), `Q=0` the low half.
+    fn simd_shrn(
+        &mut self,
+        rd: u8,
+        rn: u8,
+        q: bool,
+        dest_esize: u32,
+        shift: u32,
+        rounding: bool,
+        signed_src: bool,
+        to_unsigned: bool,
+        saturating: bool,
+    ) {
+        let src_esize = 2 * dest_esize;
+        let src_elements = 128 / src_esize;
+        let src_mask = (1u128 << src_esize) - 1;
+        let dest_mask = (1u128 << dest_esize) - 1;
+        let src = self.vregs[rn as usize];
+        let round_add = if rounding { 1i64 << (shift - 1) } else { 0 };
+        let mut narrowed = [0u64; 16];
+        for i in 0..src_elements {
+            let raw = ((src >> (src_esize * i)) & src_mask) as u64;
+            let shifted = if signed_src {
+                let v = (raw as i64) << (64 - src_esize) >> (64 - src_esize);
+                v.wrapping_add(round_add) >> shift
+            } else {
+                (raw.wrapping_add(round_add as u64) >> shift) as i64
+            };
+            let mut v = shifted;
+            if saturating || to_unsigned {
+                let (min, max) = if to_unsigned || !signed_src {
+                    (0i64, dest_mask as i64)
+                } else {
+                    (-(1i64 << (dest_esize - 1)), (1i64 << (dest_esize - 1)) - 1)
+                };
+                v = v.clamp(min, max);
+            }
+            narrowed[i as usize] = (v as u64) & (dest_mask as u64);
+        }
+        let mut out: u128 = 0;
+        for i in 0..src_elements {
+            out |= (narrowed[i as usize] as u128) << (dest_esize * i);
+        }
+        if q {
+            self.vregs[rd as usize] = (self.vregs[rd as usize] & ((1u128 << 64) - 1)) | (out << 64);
+        } else {
+            self.vregs[rd as usize] = out & ((1u128 << 64) - 1);
+        }
     }
 
     /// Scan the TLS IPC buffer for the "SFCI" request-header magic and return
@@ -1409,6 +1755,13 @@ impl Cpu {
             if self.mem.read_u32(tls.wrapping_add(i)).ok()? == 0x4943_4653 {
                 return self.mem.read_u32(tls.wrapping_add(i + 8)).ok();
             }
+        }
+        // Older libnx (pre-CMIF) sessions — e.g. the FsDir object NX-Shell's
+        // `fsDirRead` uses — marshal requests as {type=2, object_id, cmd_id,
+        // ...} with no SFCI magic. Fall back to reading the command there.
+        let start = self.ipc_reply_start(tls);
+        if self.mem.read_u32(tls.wrapping_add(start)).unwrap_or(0) == 2 {
+            return self.mem.read_u32(tls.wrapping_add(start + 8)).ok();
         }
         None
     }
@@ -1433,8 +1786,503 @@ impl Cpu {
                 data_off += 8; // pid
             }
         }
-        data_off += 8 * (num_send_statics + num_send_buffers + num_recv_buffers + num_exch_buffers);
+        data_off += 8 * num_send_statics;
+        data_off += 12 * (num_send_buffers + num_recv_buffers + num_exch_buffers);
         (data_off + 15) & !15
+    }
+
+    fn alloc_handle(&mut self) -> u64 {
+        let h = self.next_handle as u64;
+        self.next_handle = self.next_handle.wrapping_add(1);
+        h
+    }
+
+    /// Address of the `index`-th receive buffer in a hipc request, from its
+    /// buffer descriptors (walk the same layout as [`Cpu::ipc_reply_start`]).
+    /// Returns `None` if the request has no such buffer.
+    fn ipc_recv_buffer_addr(&self, tls: u32, index: u32) -> Option<u32> {
+        let hdr1 = self.mem.read_u32(tls).unwrap_or(0);
+        let hdr2 = self.mem.read_u32(tls.wrapping_add(4)).unwrap_or(0);
+        let num_send_statics = (hdr1 >> 16) & 0xf;
+        let num_send_buffers = (hdr1 >> 20) & 0xf;
+        let num_recv_buffers = (hdr1 >> 24) & 0xf;
+        let _num_exch_buffers = (hdr1 >> 28) & 0xf;
+        if index >= num_recv_buffers {
+            return None;
+        }
+        let has_special = (hdr2 >> 31) & 1;
+        let mut off = 8u32;
+        if has_special != 0 {
+            off += 4;
+            let sphdr = self.mem.read_u32(tls.wrapping_add(8)).unwrap_or(0);
+            if sphdr & 1 != 0 {
+                off += 8; // pid
+            }
+        }
+        off += 8 * num_send_statics;
+        off += 12 * (num_send_buffers + index);
+        let address_low = self.mem.read_u32(tls.wrapping_add(off + 4)).unwrap_or(0);
+        let desc = self.mem.read_u32(tls.wrapping_add(off + 8)).unwrap_or(0);
+        let addr_mid = (desc >> 4) & 0xf;
+        let addr_high = (desc >> 6) & 0x3F_FFFF;
+        let addr = (address_low as u64) | ((addr_mid as u64) << 32) | ((addr_high as u64) << 36);
+        Some(addr as u32)
+    }
+
+    fn record_handle(&mut self, handle: u64, name: &str) {
+        self.service_handles.insert(handle, name.to_owned());
+    }
+
+    fn service_name(&self, handle: u64) -> Option<&str> {
+        self.service_handles.get(&handle).map(|s| s.as_str())
+    }
+
+    fn read_port_name(&self, ptr: u32) -> String {
+        let mut name = Vec::new();
+        for i in 0..16u32 {
+            match self.mem.read_u8(ptr.wrapping_add(i)) {
+                Ok(0) | Err(_) => break,
+                Ok(b) => name.push(b),
+            }
+        }
+        String::from_utf8_lossy(&name).into_owned()
+    }
+
+    fn u64_to_service_name(&self, value: u64) -> String {
+        let bytes = value.to_le_bytes();
+        let len = bytes.iter().position(|&b| b == 0).unwrap_or(8);
+        String::from_utf8_lossy(&bytes[..len]).into_owned()
+    }
+
+    fn ipc_message_type(&self, tls: u32) -> u32 {
+        self.mem.read_u32(tls).unwrap_or(0) & 0xFFFF
+    }
+
+    /// Whether the request is a domain message. Domain-ness is NOT encoded in
+    /// the hipc type field: a domain request still carries type 4
+    /// (`CmifCommandType_Request`), and the domain header (`CmifDomainInHeader`)
+    /// lives at the start of the data area with its `type` byte set to
+    /// `CmifDomainRequestType_SendMessage` (1). Reading it from where
+    /// [`Cpu::ipc_reply_start`] puts the data area avoids misfiring on plain
+    /// requests that happen to have a nonzero word in the same spot.
+    fn ipc_is_domain_request(&self, tls: u32) -> bool {
+        let start = self.ipc_reply_start(tls);
+        self.mem.read_u8(tls.wrapping_add(start)).unwrap_or(0) == 1
+    }
+
+    fn ipc_domain_object_id(&self, tls: u32) -> u32 {
+        let start = self.ipc_reply_start(tls);
+        self.mem.read_u32(tls.wrapping_add(start + 4)).unwrap_or(0xFFFFFFFF)
+    }
+
+    fn alloc_domain_object(&mut self) -> u32 {
+        let id = self.next_domain_object_id;
+        self.next_domain_object_id = id.wrapping_add(1);
+        if id == 0 { 1 } else { id }
+    }
+
+    fn record_domain_object(&mut self, handle: u64, object_id: u32, name: &str) {
+        self.domain_objects.insert((handle, object_id), name.to_owned());
+    }
+
+    fn domain_interface(&self, handle: u64, object_id: u32) -> Option<&str> {
+        self.domain_objects.get(&(handle, object_id)).map(|s| s.as_str())
+    }
+
+    /// Write a complete HIPC response into the TLS IPC buffer. `move_handles`
+    /// are emitted in the handle descriptor, `raw_data` lands after the
+    /// SFCO/result header, and `domain_objects` produces a domain response
+    /// (message type 4) with the given out-object ids.
+    fn write_ipc_response(
+        &mut self,
+        tls: u32,
+        result: u32,
+        move_handles: &[u64],
+        raw_data: &[u8],
+        domain_objects: &[u32],
+    ) -> Result<()> {
+        let is_domain = self.ipc_is_domain_request(tls);
+        // Real Horizon reply types: 0x40 (Reply) and 0x44 (DomainReply).
+        let msg_type = if is_domain { 0x44u32 } else { 0x40 };
+        self.mem.write_u32(tls, msg_type)?;
+        let has_handles = !move_handles.is_empty();
+        let handle_desc = (move_handles.len() as u32) << 5;
+        let raw_data_words = ((raw_data.len() as u32) + 3) / 4;
+        let object_words = ((domain_objects.len() as u32) * 4 + 3) / 4;
+        // SFCO header (4 words) + raw data + domain header/objects when needed,
+        // padded so pre+post = 4 words.
+        let mut raw_section_words = 4 + raw_data_words + 4;
+        if is_domain {
+            raw_section_words += 4 + object_words;
+        }
+        let mut header1 = raw_section_words;
+        if has_handles {
+            header1 |= 1 << 31;
+        }
+        self.mem.write_u32(tls.wrapping_add(4), header1)?;
+        let mut off = 8u32;
+        if has_handles {
+            self.mem.write_u32(tls.wrapping_add(off), handle_desc)?;
+            off += 4;
+            for &h in move_handles {
+                self.mem.write_u32(tls.wrapping_add(off), h as u32)?;
+                off += 4;
+            }
+        }
+        // Align to 16 bytes.
+        let pre = (16 - (off % 16)) % 16;
+        off += pre;
+        if is_domain {
+            self.mem.write_u32(tls.wrapping_add(off), domain_objects.len() as u32)?;
+            self.mem.write_u32(tls.wrapping_add(off + 4), 0)?;
+            self.mem.write_u32(tls.wrapping_add(off + 8), 0)?;
+            self.mem.write_u32(tls.wrapping_add(off + 12), 0)?;
+            off += 16;
+        }
+        // SFCO header.
+        self.mem.write_u32(tls.wrapping_add(off), 0x4F43_4653)?;
+        self.mem.write_u32(tls.wrapping_add(off + 4), 0)?;
+        self.mem.write_u32(tls.wrapping_add(off + 8), result)?;
+        self.mem.write_u32(tls.wrapping_add(off + 12), 0)?;
+        off += 16;
+        // Raw data.
+        for (i, &b) in raw_data.iter().enumerate() {
+            self.mem.write_u8(tls.wrapping_add(off + i as u32), b)?;
+        }
+        off += raw_data_words * 4;
+        // Domain object ids.
+        for (i, &obj) in domain_objects.iter().enumerate() {
+            self.mem.write_u32(tls.wrapping_add(off + (i as u32) * 4), obj)?;
+        }
+        Ok(())
+    }
+
+    fn stub_sm(&mut self, tls: u32, cmd_id: Option<u32>, _handle: u64) -> Result<()> {
+        match cmd_id {
+            Some(0) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            Some(1) => {
+                // GetService: raw data is the 8-byte service name.
+                let start = self.ipc_reply_start(tls);
+                let name_raw = self.mem.read_u64(tls.wrapping_add(start + 0x10)).unwrap_or(0);
+                let name = self.u64_to_service_name(name_raw);
+                let handle = self.alloc_handle();
+                self.record_handle(handle, &name);
+                self.write_ipc_response(tls, 0, &[handle], &[], &[])
+            }
+            Some(2) => {
+                let handle = self.alloc_handle();
+                self.write_ipc_response(tls, 0, &[handle], &[], &[])
+            }
+            Some(3) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    fn stub_fsp_srv(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+        match cmd_id {
+            // 0 = ConvertToDomain: hand back a fresh domain object id so the
+            // session becomes a domain (libnx's serviceConvertToDomain reads it
+            // from the out data). All later fsp-srv requests then carry the
+            // object id in the CmifDomainInHeader.
+            Some(0) => {
+                let obj = self.alloc_domain_object();
+                self.record_domain_object(handle, obj, "fsp-srv");
+                self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+            }
+            Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // 18 = fsOpenSdCardFileSystem, 11 = fsOpenBisFileSystem: both hand
+            // out an FsFileSystem session as a domain out-object.
+            Some(18) | Some(11) => {
+                let obj = self.alloc_domain_object();
+                self.record_domain_object(handle, obj, "fsp-srv-fs");
+                self.write_ipc_response(tls, 0, &[], &[], &[obj])
+            }
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// fsp-srv FsFileSystem object: `fsFsOpenDirectory` (9) hands out an FsDir
+    /// object backed by the synthetic SD card; everything else answers success
+    /// so the file-manager's setup checks pass.
+    fn stub_fs(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+        if std::env::var("TRACE_IPC").is_ok() {
+            eprintln!("[fs] pc={:#x} cmd={:?} h={}", self.pc, cmd_id, handle);
+        }
+        match cmd_id {
+            Some(9) => {
+                let obj = self.alloc_domain_object();
+                self.record_domain_object(handle, obj, "fsp-srv-fs-dir");
+                let entries = self.synthetic_sd_root();
+                self.fs_dirs.insert(obj as u64, entries);
+                self.write_ipc_response(tls, 0, &[], &[], &[obj])
+            }
+            // GetEntryType: report the entry as a directory so `stat` on the
+            // SD paths succeeds and the file manager stops re-creating them.
+            Some(7) => {
+                let ty = 0u64; // FsDirEntryType_Dir
+                self.write_ipc_response(tls, 0, &[], &ty.to_le_bytes(), &[])
+            }
+            // The remaining fs object commands (CreateFile/DeleteFile/
+            // CreateDirectory/OpenFile/...) answer success so the setup
+            // sequence completes without a concrete backing store.
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// A small stand-in SD card so `FS::GetDirList` (opendir/readdir over
+    /// fsdev) sees real entries and NX-Shell's `main` reaches its render loop
+    /// instead of returning early. `(name, type, file_size)` with type 0 = dir,
+    /// 1 = file.
+    fn synthetic_sd_root(&self) -> Vec<(Vec<u8>, u8, u64)> {
+        let mut v = Vec::new();
+        for (name, ty, size) in [
+            ("Switch", 0u8, 0u64),
+            ("hbmenu.nro", 1u8, 0x120_000),
+            ("switch.nro", 1u8, 0x200_000),
+            ("README.txt", 1u8, 0x40),
+            ("sdmc", 0u8, 0),
+        ] {
+            v.push((name.as_bytes().to_vec(), ty, size));
+        }
+        v
+    }
+
+    /// fsp-srv FsDir object: cmd 0 = fsDirRead (fill the out buffer with
+    /// `FsDirectoryEntry` structs), cmd 1 = fsDirGetEntryCount.
+    fn stub_fs_dir(&mut self, tls: u32, cmd_id: Option<u32>, object_id: u32) -> Result<()> {
+        if std::env::var("TRACE_IPC").is_ok() {
+            eprintln!("[dir] pc={:#x} cmd={:?} obj={}", self.pc, cmd_id, object_id);
+        }
+        match cmd_id {
+            Some(0) => {
+                let remaining = self.fs_dirs.entry(object_id as u64).or_default();
+                let to_yield = remaining.clone();
+                remaining.clear();
+                if let Some(buf) = self.ipc_recv_buffer_addr(tls, 0) {
+                    for (i, (name, ty, size)) in to_yield.iter().enumerate() {
+                        let off = buf.wrapping_add(i as u32 * 0x310);
+                        for j in 0..0x301u32 {
+                            let b = if (j as usize) < name.len() { name[j as usize] } else { 0 };
+                            let _ = self.mem.write_u8(off.wrapping_add(j), b);
+                        }
+                        // pad[3] (offsets 0x301..0x304) stays zero.
+                        let _ = self.mem.write_u8(off.wrapping_add(0x304), *ty);
+                        // pad2[3] stays zero; file_size at 0x308 (8-aligned).
+                        let _ = self.mem.write_u64(off.wrapping_add(0x308), *size);
+                    }
+                }
+                let n = to_yield.len() as u64;
+                self.write_ipc_response(tls, 0, &[], &n.to_le_bytes(), &[])
+            }
+            Some(1) => {
+                let n = self.fs_dirs.get(&(object_id as u64)).map(|v| v.len() as u64).unwrap_or(0);
+                self.write_ipc_response(tls, 0, &[], &n.to_le_bytes(), &[])
+            }
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    fn stub_vi(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        let req_type = self.ipc_message_type(tls);
+        // Control (type 5) requests: cmd 0 = ConvertToDomain, cmd 3 =
+        // QueryPointerBufferSize. Older libnx always converts the session to a
+        // domain before dispatching; hbmenu's libnx (NX_SERVICE_ASSUME_NON_DOMAIN)
+        // instead sends cmd 3 and then uses raw non-domain requests.
+        if req_type == 5 {
+            return match cmd_id {
+                Some(0) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "vi:root");
+                    let raw = obj.to_le_bytes();
+                    self.write_ipc_response(tls, 0, &[], &raw, &[])
+                }
+                // QueryPointerBufferSize: the server pointer buffer size (u16).
+                Some(3) => self.write_ipc_response(tls, 0, &[], &0x200u16.to_le_bytes(), &[]),
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
+        let object_id = if self.ipc_is_domain_request(tls) {
+            self.ipc_domain_object_id(tls)
+        } else {
+            0xFFFFFFFF
+        };
+        let is_domain = object_id != 0xFFFFFFFF;
+        if !is_domain {
+            // Non-domain (NX_SERVICE_ASSUME_NON_DOMAIN) sessions marshal output
+            // objects as move handles. Dispatch on the sub-interface (tracked per
+            // handle); unknown handles default to the vi root.
+            let iface = self.vi_ifaces.get(&handle).map(|s| s.as_str()).unwrap_or("vi:root");
+            match iface {
+                // IHOSBinderDriverRelay: libnx binder protocol — AdjustRefcount
+                // (1), GetNativeHandle (2), TransactParcel (3).
+                "vi:ihosbd" => match cmd_id {
+                    Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    Some(2) => {
+                        let h = self.alloc_handle();
+                        self.write_ipc_response(tls, 0, &[h], &[], &[])
+                    }
+                    Some(3) => self.vi_transact_parcel(tls),
+                    _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                },
+                // vi root: cmd 2 hands out the IApplicationDisplayService.
+                "vi:root" => match cmd_id {
+                    Some(2) => self.vi_out_session(tls, "vi:iads"),
+                    _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                },
+                // IApplicationDisplayService and the other display services.
+                _ => match cmd_id {
+                    Some(100) => self.vi_out_session(tls, "vi:ihosbd"),
+                    Some(101) => self.vi_out_session(tls, "vi:isds"),
+                    Some(102) => self.vi_out_session(tls, "vi:imds"),
+                    Some(103) => self.vi_out_session(tls, "vi:ihosbdind"),
+                    Some(1010) => self.write_ipc_response(tls, 0, &[], &1u64.to_le_bytes(), &[]),
+                    Some(5202) => {
+                        let h = self.alloc_handle();
+                        self.write_ipc_response(tls, 0, &[h], &[], &[])
+                    }
+                    // _viOpenLayer (2020) / _viCreateStrayLayer (2030 / 2012 / 2312):
+                    // fill the native-window receive buffer with a Binder parcel whose
+                    // payload[2] is the IGraphicBufferProducer binder id, and return the
+                    // parcel size. viCreateLayer parses exactly that.
+                    Some(2020) => self.vi_native_window(tls, 8),
+                    Some(2030) | Some(2012) | Some(2312) => self.vi_native_window(tls, 16),
+                    _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                },
+            }
+        } else {
+            match self.domain_interface(handle, object_id) {
+                Some("vi:root") => match cmd_id {
+                    Some(2) => {
+                        let obj = self.alloc_domain_object();
+                        self.record_domain_object(handle, obj, "vi:iads");
+                        self.write_ipc_response(tls, 0, &[], &[], &[obj])
+                    }
+                    _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                },
+                Some("vi:iads") => match cmd_id {
+                    Some(100) => {
+                        let obj = self.alloc_domain_object();
+                        self.record_domain_object(handle, obj, "vi:ihosbd");
+                        self.write_ipc_response(tls, 0, &[], &[], &[obj])
+                    }
+                    Some(101) => {
+                        let obj = self.alloc_domain_object();
+                        self.record_domain_object(handle, obj, "vi:isds");
+                        self.write_ipc_response(tls, 0, &[], &[], &[obj])
+                    }
+                    Some(102) => {
+                        let obj = self.alloc_domain_object();
+                        self.record_domain_object(handle, obj, "vi:imds");
+                        self.write_ipc_response(tls, 0, &[], &[], &[obj])
+                    }
+                    // OpenDisplay: return a display id of 1.
+                    Some(1010) => {
+                        let raw = 1u64.to_le_bytes();
+                        self.write_ipc_response(tls, 0, &[], &raw, &[])
+                    }
+                    // GetDisplayVsyncEvent: return a copy handle.
+                    Some(5202) => {
+                        let h = self.alloc_handle();
+                        self.write_ipc_response(tls, 0, &[h], &[], &[])
+                    }
+                    _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                },
+                Some("vi:ihosbd") | Some("vi:isds") | Some("vi:imds") => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            }
+        }
+    }
+
+    /// Non-domain vi session hand-out: allocate a fresh handle, record it as a
+    /// vi session so later SendSyncRequests route back here, and return it as a
+    /// move handle (how NX_SERVICE_ASSUME_NON_DOMAIN marshals output objects).
+    fn vi_out_session(&mut self, tls: u32, iface: &str) -> Result<()> {
+        let h = self.alloc_handle();
+        self.record_handle(h, "vi:m");
+        self.vi_ifaces.insert(h, iface.to_owned());
+        self.write_ipc_response(tls, 0, &[h], &[], &[])
+    }
+
+    /// IHOSBinderDriverRelay TransactParcel: fill the out-buffer with a reply
+    /// parcel. The transaction code lives at `ipc_reply_start + 0x14` (the
+    /// {session_id, code, flags} request struct). bqConnect (code 0xA) expects a
+    /// BqBufferOutput {width, height, transform, numPendingBuffers} followed by
+    /// a binder error code; other transactions get an empty reply parcel.
+    fn vi_transact_parcel(&mut self, tls: u32) -> Result<()> {
+        let start = self.ipc_reply_start(tls);
+        let code = self.mem.read_u32(tls.wrapping_add(start + 0x14)).unwrap_or(0);
+        let mut payload: Vec<u8> = Vec::new();
+        if code == 0xA {
+            // CONNECT: BqBufferOutput + binder error (0 = success).
+            for v in [1280u32, 720, 0, 0, 0] {
+                payload.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        let mut parcel = Vec::with_capacity(16 + payload.len());
+        parcel.extend_from_slice(&(payload.len() as u32).to_le_bytes()); // payload_size
+        parcel.extend_from_slice(&16u32.to_le_bytes()); // payload_off
+        parcel.extend_from_slice(&0u32.to_le_bytes()); // objects_size
+        parcel.extend_from_slice(&((16 + payload.len()) as u32).to_le_bytes()); // objects_off
+        parcel.extend_from_slice(&payload);
+        if let Some(buf) = self.ipc_recv_buffer_addr(tls, 0) {
+            for (i, &b) in parcel.iter().enumerate() {
+                let _ = self.mem.write_u8(buf.wrapping_add(i as u32), b);
+            }
+        }
+        self.write_ipc_response(tls, 0, &[], &[], &[])
+    }
+
+    /// viOpenLayer / viCreateStrayLayer reply: fill the request's native-window
+    /// receive buffer with a Binder parcel (ParcelHeader + payload whose third
+    /// word is the IGraphicBufferProducer binder object id), then return the
+    /// parcel size. `out_size` is the number of reply data words (8 for 2020's
+    /// single u64, 16 for 2030's layer_id+size pair).
+    fn vi_native_window(&mut self, tls: u32, out_size: usize) -> Result<()> {
+        let payload: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]; // payload[2] = binder id 1
+        let parcel_size = 16 + payload.len() as u32;
+        let mut parcel = Vec::with_capacity(parcel_size as usize);
+        parcel.extend_from_slice(&payload.len().to_le_bytes()); // payload_size
+        parcel.extend_from_slice(&16u32.to_le_bytes()); // payload_off
+        parcel.extend_from_slice(&0u32.to_le_bytes()); // objects_size
+        parcel.extend_from_slice(&parcel_size.to_le_bytes()); // objects_off
+        parcel.extend_from_slice(&payload);
+
+        let mut raw = Vec::with_capacity(out_size);
+        if out_size >= 16 {
+            // 2030: { layer_id, native_window_size }
+            raw.extend_from_slice(&1u64.to_le_bytes());
+            raw.extend_from_slice(&(parcel_size as u64).to_le_bytes());
+        } else {
+            // 2020: native_window_size
+            raw.extend_from_slice(&(parcel_size as u64).to_le_bytes());
+        }
+
+        if let Some(buf) = self.ipc_recv_buffer_addr(tls, 0) {
+            for (i, &b) in parcel.iter().enumerate() {
+                let _ = self.mem.write_u8(buf.wrapping_add(i as u32), b);
+            }
+        }
+        self.write_ipc_response(tls, 0, &[], &raw, &[])
+    }
+
+    fn stub_nvdrv(&mut self, tls: u32, cmd_id: Option<u32>, _handle: u64) -> Result<()> {
+        match cmd_id {
+            // Open: fd, error
+            Some(0) => {
+                let mut raw = [0u8; 8];
+                raw[..4].copy_from_slice(&1i32.to_le_bytes());
+                self.write_ipc_response(tls, 0, &[], &raw, &[])
+            }
+            // Ioctl: result
+            Some(1) | Some(2) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+            // Initialize: just the result (old libnx CMIF replies carry no raw
+            // data; a 4-byte payload shifts its reply parser and makes
+            // nvInitialize bail before nvGpuInit/nvOpen).
+            Some(3) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
     }
 
     fn syscall(&mut self, imm: u16) -> Result<()> {
@@ -1472,7 +2320,7 @@ impl Cpu {
             0x01 => {
                 // SetHeapSize: report a heap at a soft-mapped address.
                 self.write_zr(0, RESULT_OK);
-                self.write_zr(1, 0x2000_0000);
+                self.write_zr(1, 0x3000_0000);
                 Ok(())
             }
             0x02 | 0x03 | 0x04 | 0x14 => {
@@ -1508,29 +2356,47 @@ impl Cpu {
                 }
                 Ok(())
             }
-            0x06 => {
-                // QueryMemory(info, pageInfo, addr): report a single region
-                // covering the soft-mapped address space so address-space walks
-                // terminate after one page.
-                let out = self.read_zr(0) as u32;
-                let base = (self.read_zr(2) as u32) & !0xFFF;
-                let fields = [
-                    base as u64,   // base address
-                    0x8000_0000u64, // size
-                    3,             // MemoryType_CodeStatic
-                    0,             // attr
-                    0b101,         // perm: RX
-                    0,             // device_refcount
-                    0,             // ipc_refcount
-                    0,             // padding
-                ];
-                for (i, v) in fields.iter().enumerate() {
-                    self.mem.write_u64(out.wrapping_add((i as u32) * 8), *v)?;
-                }
-                self.write_zr(0, RESULT_OK);
-                self.write_zr(1, 0x1000); // page info: normal mapped page
-                Ok(())
-            }
+             0x06 => {
+                 // QueryMemory(info, pageInfo, addr): report the contiguous
+                 // run of pages in the same state (allocated vs untouched) as
+                 // the queried page. Real pages (image, stack, heap, anything
+                 // the app has written to) come back as RWX; untouched
+                 // soft-mapped pages come back as unmapped so libnx virtmem
+                 // address-space walks and reservations see free space. The
+                 // old stub reported the whole low 2 GiB as one RWX region,
+                 // which made deko3d's AS reservation fail.
+                 let out = self.read_zr(0) as u32;
+                 let addr = self.read_zr(2) as u32;
+                 let state = |a: u32| self.mem.page_mapped(a & !0xFFF);
+                 let mut base = addr & !0xFFF;
+                 while base >= 0x1000 && state(base - 0x1000) == state(base) {
+                     base -= 0x1000;
+                 }
+                 let mapped = state(base);
+                 let mut end = base + 0x1000;
+                 while end < 0x8000_0000 && state(end) == mapped {
+                     end += 0x1000;
+                 }
+                 let mut info = Vec::with_capacity(40);
+                 info.extend_from_slice(&(base as u64).to_le_bytes());
+                 info.extend_from_slice(&((end - base) as u64).to_le_bytes());
+                 for v in [
+                     if mapped { 3u32 } else { 0 }, // type (CodeStatic / Unmapped)
+                     0,
+                     if mapped { 0b111 } else { 0 }, // perm (RWX / none)
+                     0,
+                     0,
+                     0,
+                 ] {
+                     info.extend_from_slice(&v.to_le_bytes());
+                 }
+                 for (i, &b) in info.iter().enumerate() {
+                     self.mem.write_u8(out.wrapping_add(i as u32), b)?;
+                 }
+                 self.write_zr(0, RESULT_OK);
+                 self.write_zr(1, if mapped { 0x1000 } else { 0 }); // page info
+                 Ok(())
+             }
             0x07 | 0x0A => {
                 // ExitProcess / ExitThread
                 self.halted = true;
@@ -1569,8 +2435,12 @@ impl Cpu {
                 Ok(())
             }
             0x18 => {
-                // WaitSynchronization: waits complete immediately.
+                // WaitSynchronization: report the wait as immediately satisfied.
+                // X1 is the "number of signaled handles" that the libnx wrapper
+                // stores to the caller's out pointer; deko3d indexes its waiter
+                // array by it, so garbage here makes the fence wait retry forever.
                 self.write_zr(0, RESULT_OK);
+                self.write_zr(1, 1);
                 Ok(())
             }
             0x1E => {
@@ -1579,83 +2449,130 @@ impl Cpu {
                 Ok(())
             }
             0x1F => {
-                // ConnectToNamedPort: return a fake handle so sm/service init
-                // proceeds instead of aborting.
+                // ConnectToNamedPort: read the port name so later IPC can be
+                // dispatched to the right stub service.
+                let name_ptr = self.read_zr(1) as u32;
+                let name = if name_ptr != 0 {
+                    self.read_port_name(name_ptr)
+                } else {
+                    String::new()
+                };
+                let handle = self.alloc_handle();
+                self.record_handle(handle, &name);
                 self.write_zr(0, RESULT_OK);
-                self.write_zr(1, FAKE_HANDLE);
+                self.write_zr(1, handle);
                 Ok(())
             }
             0x20 | 0x21 | 0x22 | 0x23 => {
-                // SendSyncRequest[Light|WithUserBuffer] / async variant:
-                // pretend the request succeeded and synthesize a CMIF reply in
-                // the TLS command buffer. The reply layout is derived from the
-                // request's hipc header: the aligned data start is where the
-                // out header goes, and the "SFCO" marker + Result + out data
-                // land right after it. libnx's `cmifParseResponse` checks the
-                // marker and the Result, then reads out data/objects from the
-                // slots after the header.
-                //
-                // The reply Result must be 0 (success). libnx's applet init
-                // treats `0x19280` (`AM_BUSY_ERROR`) as "applet still busy" and
-                // loops `svcSleepThread(100ms)` forever waiting for it to
-                // change, so returning that value would wedge hbmenu in its
-                // "wait for applet" retry loop.
-                //
-                // Domain requests additionally read the returned object id
-                // from the reply (`hdr + 0x10 + out_size`); hand out a fresh
-                // non-zero id so libnx's `serviceCreateDomainSubservice`
-                // stores a valid object id for later calls on the subservice.
-                //
-                // A few applet commands carry data in the reply; without it the
-                // app spins. `ICommonStateGetter::GetCurrentFocusState` must
-                // report `InFocus` or libnx's applet-mainloop waits for a
-                // `FocusStateChanged` message forever (`eventWait` →
-                // `ReceiveMessage` → retry), which is the next stall after the
-                // AM_BUSY loop. We answer those commands with plausible values.
+                // SendSyncRequest[Light|WithUserBuffer] / async variant.
+                // If we recognize the target handle as a named service, dispatch
+                // to a small stub implementation. Otherwise fall back to the
+                // libnx applet-style generic reply so hbmenu/applet init still
+                // progresses.
                 let tls = self.tpidr as u32;
+                let handle = self.read_zr(0);
                 let cmd_id = self.ipc_command_id(tls);
-                let start = self.ipc_reply_start(tls);
-                // Domain requests place the "SFCI" in-header 16 bytes after the
-                // aligned data start (behind the domain header).
-                let is_domain =
-                    self.mem.read_u32(tls.wrapping_add(start + 0x10)).unwrap_or(0) == 0x4943_4653;
-                // Applet reply data overrides, keyed by command id. 15 is
-                // `AppletMessage_FocusStateChanged`, 1 is `AppletFocusState_
-                // InFocus` and `AppletOperationMode_Handheld`. Unlisted
-                // commands (mostly proxy `GetSession` variants) leave the
-                // fresh object id in place, which doubles as their out object.
-                let data = match cmd_id {
-                    Some(1) => 15, // ICommonStateGetter::ReceiveMessage
-                    Some(5) => 1,  // ICommonStateGetter::GetOperationMode
-                    Some(6) => 0,  // ICommonStateGetter::GetPerformanceMode
-                    Some(9) => 1,  // ICommonStateGetter::GetCurrentFocusState
-                    _ => {
-                        let obj = self.next_object_id;
-                        self.next_object_id = obj.wrapping_add(1);
-                        obj
+                let svc_name = self.service_name(handle).map(|s| s.to_string());
+                if std::env::var("TRACE_IPC").is_ok() {
+                    eprintln!(
+                        "[ipc] pc={:#x} h={} svc={:?} cmd={:?}",
+                        self.pc, handle, svc_name, cmd_id
+                    );
+                }
+                if let Some(name) = svc_name {
+                    let name = name;
+                    match name.as_str() {
+                        "sm:" | "sm" => self.stub_sm(tls, cmd_id, handle)?,
+                        "fsp-srv" | "fsp-srv:" => {
+                            // fsp-srv converts to a domain, so the fs/dir
+                            // sub-sessions come in as object ids on the same
+                            // session handle. Route on the recorded object
+                            // interface; unknown objects hit the root stub.
+                            let object_id = self.ipc_domain_object_id(tls);
+                            match self.domain_interface(handle, object_id) {
+                                Some("fsp-srv-fs") => self.stub_fs(tls, cmd_id, handle)?,
+                                Some("fsp-srv-fs-dir") => {
+                                    self.stub_fs_dir(tls, cmd_id, object_id)?
+                                }
+                                _ => self.stub_fsp_srv(tls, cmd_id, handle)?,
+                            }
+                        }
+                        "vi:m" | "vi:m:" => self.stub_vi(tls, handle, cmd_id)?,
+                        "nvdrv" | "nvdrv:" | "nvdrv:a" | "nvdrv:a:" => {
+                            self.stub_nvdrv(tls, cmd_id, handle)?
+                        }
+                         _ => {
+                             // Known service, no dedicated stub: answer like
+                             // the anonymous-handle fallback below so applet
+                             // state commands (ReceiveMessage → the applet
+                             // message, Get*Mode/GetCurrentFocusState → the
+                             // state value) return real data instead of an
+                             // empty reply.
+                             let data = match cmd_id {
+                                 Some(1) => 15, // ReceiveMessage → FocusStateChanged
+                                 Some(5) => 1,  // GetOperationMode → Handheld
+                                 Some(6) => 0,  // GetPerformanceMode → Normal
+                                 Some(9) => 1,  // GetCurrentFocusState → InFocus
+                                 _ => {
+                                     let obj = self.next_object_id;
+                                     self.next_object_id = obj.wrapping_add(1);
+                                     obj
+                                 }
+                             };
+                             self.write_ipc_response(tls, 0, &[], &data.to_le_bytes(), &[])?
+                         }
                     }
-                };
-                if is_domain {
-                    // CmifDomainOutHeader: num_out_objects and padding (0).
-                    for i in 0..4u32 {
-                        let _ = self.mem.write_u32(tls.wrapping_add(start + i * 4), 0);
-                    }
-                    // CmifOutHeader: SFCO magic, version, Result (0), token.
-                    let _ = self.mem.write_u32(tls.wrapping_add(start + 0x10), 0x4F43_4653);
-                    let _ = self.mem.write_u32(tls.wrapping_add(start + 0x14), 0);
-                    let _ = self.mem.write_u32(tls.wrapping_add(start + 0x18), 0);
-                    let _ = self.mem.write_u32(tls.wrapping_add(start + 0x1C), 0);
-                    // Out data / object slots.
-                    let _ = self.mem.write_u32(tls.wrapping_add(start + 0x20), data);
-                    let _ = self.mem.write_u32(tls.wrapping_add(start + 0x24), 0);
-                    let _ = self.mem.write_u32(tls.wrapping_add(start + 0x28), data);
                 } else {
-                    // CmifOutHeader at the aligned start.
-                    let _ = self.mem.write_u32(tls.wrapping_add(start), 0x4F43_4653);
-                    let _ = self.mem.write_u32(tls.wrapping_add(start + 0x04), 0);
-                    let _ = self.mem.write_u32(tls.wrapping_add(start + 0x08), 0);
-                    let _ = self.mem.write_u32(tls.wrapping_add(start + 0x0C), 0);
-                    let _ = self.mem.write_u32(tls.wrapping_add(start + 0x10), data);
+                    // Unrecognized session handle. The display service's session
+                    // handles come from generic object-id replies and aren't in
+                    // service_handles, so try the vi stub first; fall back to the
+                    // old applet-style generic reply if the request isn't a vi
+                    // command (e.g. hid/time sessions).
+                    if let Some(cmd) = cmd_id {
+                        // vi commands: GetIApplicationDisplayService (2) and the
+                        // display/session commands (100+). The generic reply already
+                        // answers ConvertToDomain (0) with a valid object id, and the
+                        // small applet state commands (1 = ReceiveMessage, 5/6/9)
+                        // must keep the generic reply.
+                        if cmd == 2 || cmd >= 100 {
+                            return self.stub_vi(tls, handle, cmd_id);
+                        }
+                    }
+                    let start = self.ipc_reply_start(tls);
+                    let is_domain = self
+                        .mem
+                        .read_u32(tls.wrapping_add(start + 0x10))
+                        .unwrap_or(0)
+                        == 0x4943_4653;
+                    let data = match cmd_id {
+                        Some(1) => 15,
+                        Some(5) => 1,
+                        Some(6) => 0,
+                        Some(9) => 1,
+                        _ => {
+                            let obj = self.next_object_id;
+                            self.next_object_id = obj.wrapping_add(1);
+                            obj
+                        }
+                    };
+                    if is_domain {
+                        for i in 0..4u32 {
+                            let _ = self.mem.write_u32(tls.wrapping_add(start + i * 4), 0);
+                        }
+                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x10), 0x4F43_4653);
+                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x14), 0);
+                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x18), 0);
+                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x1C), 0);
+                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x20), data);
+                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x24), 0);
+                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x28), data);
+                    } else {
+                        let _ = self.mem.write_u32(tls.wrapping_add(start), 0x4F43_4653);
+                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x04), 0);
+                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x08), 0);
+                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x0C), 0);
+                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x10), data);
+                    }
                 }
                 self.write_zr(0, RESULT_OK);
                 Ok(())
@@ -1690,30 +2607,34 @@ impl Cpu {
                 }
                 Ok(())
             }
-            0x29 => {
-                // GetInfo(out, infoType, handle, infoSubValue): report the
-                // value in X1 (the libnx wrapper stores it to the out
-                // pointer). Memory-layout types get plausible values so
-                // libnx heap/stack init sees a sane process.
-                let info_type = self.read_zr(1);
-                let value = match info_type {
-                    2 => u64::MAX,  // AllowedThreadHandleMask: allow the main thread
-                    3 => 0,         // UserExceptionContextAddress
-                    4 | 10 => 0x1E00_0000, // Total/ProgramTotalMemorySize
-                    5 | 11 => 0,    // Used/ProgramUsedMemorySize
-                    6 => 0x0800_0000, // AslrRegionBaseAddress
-                    7 => 0x1F00_0000, // AslrRegionSize
-                    8 => 0x1000_0000, // StackRegionBaseAddress
-                    9 => 0x0010_0000, // StackRegionSize
-                    12 => 0,        // ProgramHeapUsage
-                    13 => 39,       // ProcessAddressSpace (39-bit)
-                    14 | 15 | 0x1C => 0, // vaddr-mem / svc flags / misc
-                    _ => 0,
-                };
-                self.write_zr(1, value);
-                self.write_zr(0, RESULT_OK);
-                Ok(())
-            }
+             0x29 => {
+                 // GetInfo(out, infoType, handle, infoSubValue): report the
+                 // value in X1 (the libnx wrapper stores it to the out
+                 // pointer). The InfoType numbering here matches the libnx
+                 // build hbmenu is compiled against: 2/3 Alias, 4/5 Heap,
+                 // 6/7 Total/Used memory, 12/13 Aslr, 14/15 Stack.
+                 let info_type = self.read_zr(1);
+                 let value = match info_type {
+                     2 => 0x0000_0010_0000_0000, // AliasRegionAddress
+                     3 => 0x0000_0000_2000_0000, // AliasRegionSize
+                     4 => 0x0000_0002_0000_0000, // HeapRegionAddress
+                     5 => 0x0000_0000_2000_0000, // HeapRegionSize
+                     6 => 0x1E00_0000, // TotalMemorySize
+                     7 => 0,         // UsedMemorySize
+                     8 => 0,         // DebuggerAttached
+                     9 => 0,         // ResourceLimit
+                     12 => 0x0800_0000, // AslrRegionAddress
+                     13 => 0x1F00_0000, // AslrRegionSize
+                     14 => 0x1000_0000, // StackRegionAddress
+                     15 => 0x0010_0000, // StackRegionSize
+                     20 => 0,        // UserExceptionContextAddress
+                     28 => 0,        // AliasRegionExtraSize
+                     _ => 0,
+                 };
+                 self.write_zr(1, value);
+                 self.write_zr(0, RESULT_OK);
+                 Ok(())
+             }
             0x6F => {
                 // GetSystemInfo(out, handle, infoType): value in X1, as above.
                 let info_type = self.read_zr(2);
@@ -1825,6 +2746,74 @@ impl Cpu {
     /// that sets V=1 is left unimplemented.
     fn try_simd_load_store(&mut self, insn: u32) -> Result<bool> {
         let grp = (insn >> 27) & 0b111;
+        // Scalar SIMD LDR/STR (V=1): bits[29:27] = 111, bit26 = 1. The size/opc
+        // pairs select the width — opc 00/01 are STR/LDR of B/H/S/D (size
+        // 00/01/10/11, byte offset scaled 1/2/4/8), opc 10/11 are STR/LDR Q
+        // (128-bit, size must be 00, offset scaled 16). mode=01 is the
+        // unsigned-offset form (imm12), mode=00 the unscaled STUR/LDUR (imm9).
+        // `ldr b29, [x0, #0x280]` = 0x3D4A001D, `stur q17, [x0, #0x8]` = 0x3C808011.
+        if grp == 0b111 {
+            let sz = (insn >> 30) & 0b11;
+            let opc = (insn >> 22) & 0b11;
+            let rn = ((insn >> 5) & 0x1F) as u8;
+            let rt = (insn & 0x1F) as u8;
+            let (bytes, load) = match (sz, opc) {
+                (0b00, 0b00) => (1u64, false),
+                (0b00, 0b01) => (1, true),
+                (0b01, 0b00) => (2, false),
+                (0b01, 0b01) => (2, true),
+                (0b10, 0b00) => (4, false),
+                (0b10, 0b01) => (4, true),
+                (0b11, 0b00) => (8, false),
+                (0b11, 0b01) => (8, true),
+                (0b00, 0b10) => (16, false),
+                (0b00, 0b11) => (16, true),
+                _ => return Ok(false),
+            };
+            let mode = (insn >> 24) & 0b11;
+            let addr = match mode {
+                // Unsigned offset (immediate). imm12 occupies bits[21:10], so
+                // bit 21 must NOT be treated as a register-offset flag here —
+                // `ldr b29, [x0, #0xc80]` was being misread as a register load
+                // using a garbage Rm.
+                0b01 => {
+                    let scale = if bytes == 16 { 16u64 } else { bytes };
+                    let imm = ((insn >> 10) & 0xFFF) as u64;
+                    (self.read_x(rn).wrapping_add(imm * scale)) as u32
+                }
+                // Register offset (mode 0b00, bit 21 set): addr = Xn + (Rm << LSL).
+                0b00 if ((insn >> 21) & 1) == 1 => {
+                    let rm = ((insn >> 16) & 0x1F) as u8;
+                    let s = (insn >> 12) & 1;
+                    let shift = if s == 1 { bytes.trailing_zeros() } else { 0 };
+                    (self.read_x(rn).wrapping_add(self.read_x(rm).wrapping_shl(shift))) as u32
+                }
+                // Unscaled offset (STUR/LDUR).
+                0b00 => {
+                    let imm = sext_u64((insn >> 12) & 0x1FF, 9) as i64;
+                    (self.read_x(rn) as i64).wrapping_add(imm) as u32
+                }
+                _ => return Ok(false),
+            };
+            if load {
+                self.vregs[rt as usize] = match bytes {
+                    1 => self.mem.read_u8(addr)? as u128,
+                    2 => self.mem.read_u16(addr)? as u128,
+                    4 => self.mem.read_u32(addr)? as u128,
+                    8 => self.mem.read_u64(addr)? as u128,
+                    _ => self.load_q(addr)?,
+                };
+            } else {
+                match bytes {
+                    1 => self.mem.write_u8(addr, self.vregs[rt as usize] as u8)?,
+                    2 => self.mem.write_u16(addr, self.vregs[rt as usize] as u16)?,
+                    4 => self.mem.write_u32(addr, self.vregs[rt as usize] as u32)?,
+                    8 => self.mem.write_u64(addr, self.vregs[rt as usize] as u64)?,
+                    _ => self.store_q(addr, self.vregs[rt as usize])?,
+                }
+            }
+            return Ok(true);
+        }
         // Single structure (LD1/ST1 into one lane): bit31=0, q=bit30,
         // bits[29:24]=001101, p=bit23 (post-index), bit22=1 (load) / 0
         // (store), scale in bits[15:14], selem in bits[13]/[21], lane index in
@@ -2004,12 +2993,25 @@ impl Cpu {
                 1
             };
             let shift = elem_bytes.trailing_zeros();
-            let addr = if mode == 0b01 {
+            let base = self.read_x(rn);
+            let (addr, writeback, wb_val) = if mode == 0b01 {
+                // Unsigned immediate, no writeback.
                 let imm = (((insn >> 10) & 0xFFF) as u64) << shift;
-                self.read_x(rn).wrapping_add(imm) as u32
-            } else if mode == 0b00 && ((insn >> 21) & 1) == 0 && ((insn >> 11) & 1) == 0 {
+                (base.wrapping_add(imm) as u32, false, 0)
+            } else if mode == 0b00 && ((insn >> 21) & 1) == 0 {
+                // Unscaled/pre/post-indexed immediate: imm9 is a byte offset,
+                // and bits[11:10] select the addressing mode.
                 let imm = sext_u64((insn >> 12) & 0x1FF, 9) as i64;
-                (self.read_x(rn) as i64).wrapping_add(imm) as u32
+                let idx = (insn >> 10) & 0b11;
+                match idx {
+                    0b00 => (base.wrapping_add(imm as u64) as u32, false, 0),
+                    0b01 => (base as u32, true, base.wrapping_add(imm as u64)),
+                    0b11 => {
+                        let addr = base.wrapping_add(imm as u64);
+                        (addr as u32, true, addr)
+                    }
+                    _ => return Ok(false),
+                }
             } else {
                 return Ok(false);
             };
@@ -2031,6 +3033,9 @@ impl Cpu {
                     2 => self.mem.write_u16(addr, self.vregs[rt as usize] as u16)?,
                     _ => self.mem.write_u8(addr, self.vregs[rt as usize] as u8)?,
                 }
+            }
+            if writeback {
+                self.write_x(rn, wb_val);
             }
             return Ok(true);
         }
@@ -2250,6 +3255,15 @@ impl Cpu {
         // loads (LDRSB/LDRSH/LDRSW). The load bit is NOT opc&1 — treating
         // opc=10 as a store silently corrupted the target (observed as a
         // bogus `ldrsw` index in NX-Shell's tokenizer).
+        //
+        // size=11 with opc=10/11 is PRFM (prefetch hint) — it must NOT be
+        // executed as a sign-extending load, or the load clobbers a register
+        // (libtransistor's memcpy starts with `prfm pldl1keep, [x1]`, and
+        // treating it as `ldrsw x0, [x1]` made memcpy write to the source
+        // magic value as an address, zero-filling the real destination).
+        if sz == 0b11 && opc >= 0b10 {
+            return Ok(());
+        }
         let load = opc != 0b00;
         let sign = (opc >> 1) == 1;
         if load {
@@ -2509,7 +3523,8 @@ impl Cpu {
                         (((insn >> 16) & 0x1F), ((insn >> 10) & 0x1F))
                     };
                     let val = self.read_zr(rn) & Self::mask(sf);
-                    let r = bitfield_apply(opc, val, immr, imms, sf);
+                    let cur = self.read_zr(rd) & Self::mask(sf);
+                    let r = bitfield_apply(opc, val, cur, immr, imms, sf);
                     self.write_zr(rd, r);
                     Ok(true)
                 } else {
@@ -2698,27 +3713,25 @@ impl Cpu {
                             self.nzcv = nzcv << 28;
                         } else {
                             let a = self.read_zr(rn) & Self::mask(sf);
-                            let (b, carry_in) = if imm_flag == 1 {
-                                let imm = (insn >> 16) & 0x1F;
-                                let v = if op == 1 {
-                                    // CCMN immediate is a signed 5-bit value.
-                                    sext_u64(imm as u64, 5)
-                                } else {
-                                    // CCMP immediate is unsigned 5-bit.
-                                    imm as u64
-                                };
-                                (v, 0u64)
+                            // Bit 30: 1 = CCMP (subtract), 0 = CCMN (add). The
+                            // 5-bit immediate is unsigned for both forms
+                            // (QEMU-verified). The subtract needs the
+                            // +carry_in the borrow implies, so carry_in is 1
+                            // for CCMP and 0 for CCMN.
+                            let b = if imm_flag == 1 {
+                                ((insn >> 16) & 0x1F) as u64
                             } else {
-                                (self.read_zr(((insn >> 16) & 0x1F) as u8), 0u64)
+                                self.read_zr(((insn >> 16) & 0x1F) as u8)
                             };
-                            // Bit 30: 1 = CCMP (subtract), 0 = CCMN (add).
-                            self.set_nzcv_from_compare(a, b, op == 1, carry_in, sf);
+                            self.set_nzcv_from_compare(a, b, op == 1, op as u64, sf);
                         }
                         Ok(true)
                     }
                 } else {
                     if ((insn >> 23) & 1) == 1 {
-                        // CSEL family
+                        // CSEL family: csel / csinc / csinv / csneg.
+                        // The invert/increment are part of the *else* value,
+                        // not applied to the selected value.
                         let else_inv = ((insn >> 30) & 1) == 1;
                         let else_inc = ((insn >> 10) & 1) == 1;
                         let cond = ((insn >> 12) & 0xF) as u8;
@@ -2728,13 +3741,14 @@ impl Cpu {
                         let a = self.read_zr(rn) & Self::mask(sf);
                         let b = self.read_zr(rm) & Self::mask(sf);
                         let take_a = self.condition_holds(cond);
-                        let mut r = if take_a { a } else { b };
-                        if else_inc {
-                            r = r.wrapping_add(1);
-                        }
+                        let mut else_val = b;
                         if else_inv {
-                            r = !r;
+                            else_val = !else_val;
                         }
+                        if else_inc {
+                            else_val = else_val.wrapping_add(1);
+                        }
+                        let r = if take_a { a } else { else_val };
                         self.write_zr(rd, r & Self::mask(sf));
                     } else {
                         // ADC / ADCS / SBC / SBCS
@@ -3138,7 +4152,7 @@ pub(crate) fn decode_bit_mask(sf: bool, n: u32, immr: u32, imms: u32) -> Option<
 }
 
 /// SBFM / BFM / UBFM semantics.
-fn bitfield_apply(opc: u32, val: u64, immr: u32, imms: u32, sf: bool) -> u64 {
+fn bitfield_apply(opc: u32, val: u64, cur: u64, immr: u32, imms: u32, sf: bool) -> u64 {
     let datasize = if sf { 64 } else { 32 };
     let lsb = immr as u64;
     let msb = imms as u64;
@@ -3174,9 +4188,11 @@ fn bitfield_apply(opc: u32, val: u64, immr: u32, imms: u32, sf: bool) -> u64 {
                 }
             }
         }
-        // BFM
+        // BFM — merges Rn into the ORIGINAL Rd (BFI / BFXIL). The old decoder
+        // used `cur = val` (Rn) and never read the destination register, so
+        // `bfi` zeroed the bits it was meant to preserve. libtransistor's
+        // squashfs `swab_super` relies on this.
         0b01 => {
-            let cur = val;
             if msb >= lsb {
                 let width = (msb - lsb + 1) as u32;
                 let field = (val >> lsb) & mask_of_width(width, sf);

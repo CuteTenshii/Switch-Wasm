@@ -34,7 +34,6 @@ impl<T> SyncCell<T> {
 use switch_core::cpu::{Cpu, SyscallMode};
 use switch_core::elf::load_elf;
 use switch_core::nca::Nca;
-use switch_core::nro::load_nro;
 use switch_core::nsp::Pfs0;
 
 /// Framebuffer base address, width, height and stride (RGBA, little-endian).
@@ -365,10 +364,8 @@ pub extern "C" fn switch_load_keys(
 pub extern "C" fn switch_load_nro(handle: u32, ptr: *const u8, len: u32) -> i64 {
     let s = session(handle);
     let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    match load_nro(&mut s.cpu.mem, data) {
+    match s.cpu.boot_homebrew(data) {
         Ok(loaded) => {
-            s.cpu.set_pc(loaded.entry);
-            boot_entry_regs(&mut s.cpu);
             s.cpu.out.clear();
             s.cpu.trace.clear();
             s.cpu.halted = false;
@@ -390,7 +387,7 @@ pub extern "C" fn switch_load_elf(handle: u32, ptr: *const u8, len: u32) -> i64 
     match load_elf(&mut s.cpu.mem, data) {
         Ok(elf) => {
             s.cpu.set_pc(elf.entry as u32);
-            boot_entry_regs(&mut s.cpu);
+            boot_entry_regs(&mut s.cpu, 0);
             s.cpu.out.clear();
             s.cpu.trace.clear();
             s.cpu.halted = false;
@@ -405,13 +402,20 @@ pub extern "C" fn switch_load_elf(handle: u32, ptr: *const u8, len: u32) -> i64 
 }
 
 /// Reset the integer registers for a clean boot and pass the loader's entry
-/// convention: `x0 = 0`, `x1 = 1`. Real homebrew crt0s (e.g. hbmenu) store
-/// these into runtime globals and expect `x1` to be non-zero.
-fn boot_entry_regs(cpu: &mut Cpu) {
+/// convention. The libnx "HOME BREW" crt0 detects the entry kind from its
+/// arguments: `x0 = env block ptr` with `x1 = UINT64_MAX` selects the NRO /
+/// homebrew-ABI path (which parses the env and runs `main`), while `x0 = 0`
+/// selects the NSO path (plain boot). Non-self-relocating NROs (e.g. sdl)
+/// keep the plain `x0 = 0, x1 = 1` convention.
+fn boot_entry_regs(cpu: &mut Cpu, env_addr: u32) {
     for i in 0..=30u8 {
         cpu.set_reg(i, 0);
     }
-    cpu.set_reg(1, 1);
+    cpu.set_reg(0, env_addr as u64);
+    cpu.set_reg(1, if env_addr != 0 { u64::MAX } else { 1 });
+    // Point LR at the exit trampoline so a direct-entered `main` that returns
+    // cleanly exits instead of branching to NULL (pc=0).
+    cpu.set_reg(30, switch_core::cpu::SELF_RETURN_TRAMPOLINE as u64);
 }
 
 /// Configure the syscall ABI (0 = None, 2 = Horizon stubs for real homebrew).

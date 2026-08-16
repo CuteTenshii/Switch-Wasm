@@ -63,6 +63,46 @@ pub struct LoadedNro {
     pub bss_size: u32,
     pub build_id: [u8; 0x20],
     pub is_64bit: bool,
+    /// Address of the synthesized homebrew environment block to pass as the
+    /// crt0's `x0` (0 for NROs whose crt0 doesn't parse one).
+    pub env_addr: u32,
+}
+
+/// Where [`setup_env_block`] maps the environment block. Kept out of the
+/// loaded image so the crt0's BSS zeroing never touches it.
+pub const ENV_BLOCK_ADDR: u32 = 0x0010_0000;
+
+/// Entry keys of the libnx homebrew ABI (`nx/source/runtime/env.h`).
+const ENTRY_MAIN_THREAD_HANDLE: u32 = 1;
+const ENTRY_HOS_VERSION: u32 = 16;
+const ENTRY_END_OF_LIST: u32 = 0;
+
+/// Write a minimal homebrew ABI environment block so `envSetup` in the crt0
+/// populates its runtime globals. libnx's `EntryType_HosVersion` handler
+/// stores `Value[0]` as the host version and, when `Value[1]` is the
+/// `'ATMOSPHR'` magic, keeps it as-is. `0xFFFFFFFF` reads as "current
+/// firmware", which the version gates accept. Returns [`ENV_BLOCK_ADDR`].
+///
+/// The `ConfigEntry` here is the 24-byte form used by the linked crt0
+/// (`u32 Key, u32 Flags, u64 Value[2]`).
+pub fn setup_env_block(mem: &mut Memory) -> u32 {
+    let a = ENV_BLOCK_ADDR;
+    // MainThreadHandle (Key 1): required by __libnx_init_thread.
+    let _ = mem.write_u32(a, ENTRY_MAIN_THREAD_HANDLE);
+    let _ = mem.write_u32(a + 4, 0);
+    let _ = mem.write_u64(a + 8, 1);
+    let _ = mem.write_u64(a + 16, 0);
+    // HosVersion (Key 16 in this crt0): { version = 0xFFFFFFFF, "ATMOSPHR" }.
+    let _ = mem.write_u32(a + 24, ENTRY_HOS_VERSION);
+    let _ = mem.write_u32(a + 28, 0);
+    let _ = mem.write_u64(a + 32, 0xFFFF_FFFF);
+    let _ = mem.write_u64(a + 40, 0x4154_4D4F_5350_4852); // "ATMOSPHR"
+    // EndOfList
+    let _ = mem.write_u32(a + 48, ENTRY_END_OF_LIST);
+    let _ = mem.write_u32(a + 52, 0);
+    let _ = mem.write_u64(a + 56, 0);
+    let _ = mem.write_u64(a + 64, 0);
+    a
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,7 +245,7 @@ fn elf_hash(name: &str) -> u32 {
 /// tables. Returns the symbol's `st_value` (a file-offset relative to the
 /// load base) when found. This is intentionally simple: it only supports the
 /// legacy DT_HASH layout used by devkitA64/libtransistor NROs.
-fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
+pub fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
     let mod0 = find_mod0(data)?;
     let dyn_off = mod0.wrapping_add(read_u32(data, mod0 + 4) as usize);
     let mut symtab = 0u64;
@@ -463,6 +503,48 @@ fn find_mod0(data: &[u8]) -> Option<usize> {
     data.windows(4).position(|w| w == &magic[..])
 }
 
+/// Read the `.init_array` function addresses (relative to [`NRO_BASE`]) from
+/// the image's dynamic section, returning them as absolute vaddrs. Self-
+/// relocating NROs run this table in their crt0's `__libnx_init`; when the
+/// crt0 skips that step the loader (HBL / the emulator boot) must run it so
+/// C++ static constructors (std::string globals, ...) actually run. Returns
+/// an empty list when the image has no constructors.
+pub fn init_array_entries(data: &[u8]) -> Vec<u32> {
+    let mod0 = match find_mod0(data) {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
+    // The dynamic offset is relative to the MOD0 header itself.
+    let dyn_rel = crate::nsp::read_u32(data, mod0 + 4);
+    let mut dynp = mod0.wrapping_add(dyn_rel as usize);
+    let mut init_arr: Option<u32> = None;
+    let mut init_sz: u32 = 0;
+    for _ in 0..512 {
+        let tag = read_u64(data, dynp);
+        if tag == 0 {
+            break; // DT_NULL
+        }
+        let val = read_u64(data, dynp + 8);
+        if tag == 0x19 {
+            init_arr = Some(val as u32);
+        } else if tag == 0x1b {
+            init_sz = val as u32;
+        }
+        dynp += 16;
+    }
+    let (Some(arr_rel), n) = (init_arr, init_sz as usize) else {
+        return Vec::new();
+    };
+    if n == 0 || n % 8 != 0 {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(n / 8);
+    for i in 0..n / 8 {
+        out.push(NRO_BASE.wrapping_add(read_u64(data, arr_rel as usize + i * 8) as u32));
+    }
+    out
+}
+
 /// Apply RELR packed relative relocations. Every 64-bit entry is either an
 /// address (bit 0 clear) or a bitmap (bit 0 set); each relocated word gets the
 /// load base added, turning stored file offsets into runtime addresses.
@@ -550,6 +632,16 @@ fn apply_nro_relocations(mem: &mut Memory, data: &[u8], image_end: u32) -> Resul
     Ok(())
 }
 
+/// Whether the NRO carries the "HOME BREW" self-relocating crt0 (the `b` +
+/// "HOME" "BREW" preamble with `NRO0` at offset 0x10). Such images run their
+/// own RELR relocator during startup, so applying RELR here too would add the
+/// load base a second time and corrupt every relocated pointer.
+fn has_self_relocating_crt0(data: &[u8]) -> bool {
+    data.len() >= 0x10
+        && read_u32(data, 0x08) == 0x454d_4f48 // "HOME"
+        && read_u32(data, 0x0C) == 0x5745_5242 // "BREW"
+}
+
 /// Load an NRO into `mem` at [`NRO_BASE`], returning its entry point.
 pub fn load_nro(mem: &mut Memory, data: &[u8]) -> Result<LoadedNro> {
     let h = NroHeader::parse(data)?;
@@ -567,11 +659,22 @@ pub fn load_nro(mem: &mut Memory, data: &[u8]) -> Result<LoadedNro> {
     copy_segment(mem, data, h.data_offset, h.data_size, data_addr)?;
     mem.map_zero(end_addr, h.bss_size as usize)?;
     let image_end = end_addr.wrapping_add(h.bss_size);
-    apply_nro_relocations(mem, data, image_end)?;
+    // Self-relocating NROs apply RELR themselves in their crt0; running it
+    // here as well would relocate every pointer twice. Plain NROs (e.g. the
+    // sdl demo) rely on the loader to do it.
+    if !has_self_relocating_crt0(data) {
+        apply_nro_relocations(mem, data, image_end)?;
+    }
     // libtransistor NROs may hardcode a tiny OVERRIDE heap. Force NORMAL so
     // the runtime uses svcSetHeapSize instead of faulting on the first malloc.
     let text_end = text_addr.wrapping_add(h.text_size);
     let _ = patch_libtransistor_runconf(mem, data, base, text_end);
+
+    let env_addr = if has_self_relocating_crt0(data) {
+        setup_env_block(mem)
+    } else {
+        0
+    };
 
     Ok(LoadedNro {
         base,
@@ -594,6 +697,7 @@ pub fn load_nro(mem: &mut Memory, data: &[u8]) -> Result<LoadedNro> {
         bss_size: h.bss_size,
         build_id,
         is_64bit,
+        env_addr,
     })
 }
 

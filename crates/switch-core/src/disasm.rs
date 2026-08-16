@@ -89,7 +89,8 @@ fn disasm_into(insn: u32, s: &mut String) -> std::fmt::Result {
         let (name, sz) = match (insn >> 30) & 0b11 {
             0b00 => ("ldr", 2),
             0b01 => ("ldr", 3),
-            _ => ("ldrsw", 2),
+            0b10 => ("ldrsw", 2),
+            _ => return write!(s, "prfm #{}", simm(imm)), // prefetch literal
         };
         return write!(s, "{} {}, #{}", name, mem_reg(sz, rt), simm(imm));
     }
@@ -212,6 +213,11 @@ fn disasm_system(insn: u32, s: &mut String) -> std::fmt::Result {
 }
 
 fn ldst_name(sz: u32, opc: u32) -> &'static str {
+    // size=11 with opc 10/11 is PRFM (prefetch hint), not a sign-extending
+    // load (e.g. `prfm pldl1keep, [x1]` = 0xF9800020).
+    if sz == 3 && opc >= 0b10 {
+        return "prfm";
+    }
     match opc {
         0b00 => "str",
         0b01 if sz == 3 => "ldr",

@@ -451,6 +451,37 @@ fn csel_selects_by_condition() {
 }
 
 #[test]
+fn csel_family_else_ops() {
+    // csinv/csinc/csneg must apply invert/increment only to the ELSE operand.
+    // x1=5, x2=9. EQ true (cmp x1,x1) → all three select x1. EQ false
+    // (cmp x1,x2) → csinv=~9=-10, csinc=10, csneg=-9.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(1, 5);
+    cpu.set_reg(2, 9);
+    let eq_true = [
+        cmp_reg(1, 1, true),
+        0xda820023, // csinv x3, x1, x2, eq
+        0x9a820424, // csinc x4, x1, x2, eq
+        0xda820425, // csneg x5, x1, x2, eq
+    ];
+    cpu = run_program(cpu, 0x1000, &eq_true);
+    assert_eq!(cpu.read_x(3), 5);
+    assert_eq!(cpu.read_x(4), 5);
+    assert_eq!(cpu.read_x(5), 5);
+
+    let eq_false = [
+        cmp_reg(1, 2, true),
+        0xda820023, // csinv x3, x1, x2, eq
+        0x9a820424, // csinc x4, x1, x2, eq
+        0xda820425, // csneg x5, x1, x2, eq
+    ];
+    cpu = run_program(cpu, 0x1000, &eq_false);
+    assert_eq!(cpu.read_x(3) as i64, -10);
+    assert_eq!(cpu.read_x(4), 10);
+    assert_eq!(cpu.read_x(5) as i64, -9);
+}
+
+#[test]
 fn udiv_sdiv() {
     // UDIV X1, X6, X7 ; SDIV X2, X6, X7
     let mut cpu = cpu_at(0x1000);
@@ -718,21 +749,39 @@ fn horizon_query_memory_and_get_info() {
     use switch_core::cpu::SyscallMode;
 
     // QueryMemory writes a MemoryInfo struct to the out pointer and returns
-    // the page info in X1.
+    // the page info in X1. It reports the contiguous run of pages in the same
+    // state as the queried address.
     let mut cpu = cpu_at(0x1000);
     cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(0, 0x3000); // MemoryInfo out
     cpu.set_reg(1, 0x4000); // PageInfo out
     cpu.set_reg(2, 0x0800_1000); // queried address
     cpu.mem.map(0x1000, &svc(0x06).to_le_bytes()).unwrap();
+    cpu.mem.map_zero(0x0800_0000, 0x1_0000).unwrap(); // mapped 64 KiB run
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
-    assert_eq!(cpu.read_x(1), 0x1000);
-    assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), 0x0800_1000);
-    assert_eq!(cpu.mem.read_u64(0x3008).unwrap(), 0x8000_0000);
+    assert_eq!(cpu.read_x(1), 0x1000); // mapped page info
+    assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), 0x0800_0000); // run base
+    assert_eq!(cpu.mem.read_u64(0x3008).unwrap(), 0x1_0000); // run size
+    assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 3); // type
+    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0b111); // perm (RWX)
+
+    // An untouched soft-mapped page reports as unmapped (type 0, no perm),
+    // which is what lets libnx virtmem find free address space.
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.set_reg(0, 0x3000);
+    cpu.set_reg(1, 0x3040);
+    cpu.set_reg(2, 0x1234000);
+    cpu.mem.map_zero(0x3000, 0x60).unwrap();
+    cpu.mem.map(0x1000, &svc(0x06).to_le_bytes()).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 0);   // type (unmapped)
+    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0);   // perm
 
     // GetInfo returns the requested value in X1 (the libnx wrapper stores it
-    // to the out pointer). InfoType 4 = TotalMemorySize.
+    // to the out pointer). InfoType 4 = HeapRegionAddress.
     let mut cpu = cpu_at(0x1000);
     cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(1, 4); // infoType
@@ -740,7 +789,26 @@ fn horizon_query_memory_and_get_info() {
     cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
+    assert_eq!(cpu.read_x(1), 0x0000_0002_0000_0000);
+
+    // InfoType 6 = TotalMemorySize.
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.set_reg(1, 6);
+    cpu.set_reg(2, 0xffff_8001);
+    cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), 0);
     assert_eq!(cpu.read_x(1), 0x1E00_0000);
+
+    // InfoType 12 = AslrRegionAddress.
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.set_reg(1, 12);
+    cpu.set_reg(2, 0xffff_8001);
+    cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(1), 0x0800_0000);
 }
 
 #[test]
@@ -1217,6 +1285,53 @@ fn ldrsw_sign_extends_and_loads() {
 }
 
 #[test]
+fn prfm_is_a_noop_not_ldrsw() {
+    // `prfm pldl1keep, [x1]` = 0xF9800020 (size=11, V=0, opc=10). It is a
+    // prefetch HINT and must not write a register. libtransistor's memcpy
+    // starts with it; decoding it as `ldrsw x0, [x1]` clobbered the
+    // destination register and made memcpy copy to `[source_magic_value]`,
+    // leaving the real destination zeroed.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x1234_5678_9ABC_DEF0);
+    cpu.set_reg(1, 0x3000);
+    cpu.mem.map_zero(0x3000, 0x10).unwrap();
+    cpu.mem.write_u32(0x3000, 0x7371_7368).unwrap();
+    let prfm = 0b11u32 << 30 | 0b111 << 27 | 0b01 << 24 | 0b10 << 22 | (0 << 10) | (1 << 5) | 0;
+    assert_eq!(prfm, 0xF980_0020);
+    let code = [prfm, nop()];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(0), 0x1234_5678_9ABC_DEF0);
+}
+
+#[test]
+fn bfi_merges_into_destination_register() {
+    // `bfi w0, w1, #8, #24` = BFM w0, w1, #8, #31 must insert w1's low 24
+    // bits into w0 bits [31:8] and keep w0 bits [7:0]. The old decoder never
+    // read the destination register and shifted the wrong field (verified
+    // against qemu-aarch64: w0=0x5, w1=0xAB -> 0x0000AB05). libtransistor's
+    // squashfs `swab_super` depends on this.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x5);
+    cpu.set_reg(1, 0xAB);
+    let code = [0x3318_5C20, nop()]; // bfi w0, w1, #8, #24 (clang-encoded)
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(0), 0x0000_AB05);
+}
+
+#[test]
+fn bfxil_extracts_field_into_low_bits() {
+    // `bfxil w0, w1, #16, #8` = BFM w0, w1, #16, #7 copies w1 bits [23:16]
+    // into w0 bits [7:0], keeping w0's upper bits. qemu-aarch64: w1=0x00430000
+    // -> w0 = (old_w0 & ~0xFF) | 0x43.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x1234_5678);
+    cpu.set_reg(1, 0x0043_0000);
+    let code = [0x3310_5C20, nop()]; // bfxil w0, w1, #16, #8 (clang-encoded)
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(0), 0x1234_5678 & !0xFF | 0x43);
+}
+
+#[test]
 fn gamepad_input_writes_input_reg_and_hid_shmem() {
     use switch_core::cpu::SyscallMode;
     // MapSharedMemory (svc 0x13) with x1=addr, x2=size must back the region
@@ -1364,4 +1479,141 @@ fn ccmp_eq_sets_carry_for_unsigned_ge() {
     cpu.run(code.len() as u64).unwrap();
     assert_eq!(cpu.get_pc(), 0x1010 + 20,
         "b.hs should have been taken; ccmp produced wrong flags");
+}
+
+#[test]
+fn ccmp_subtract_carry_in() {
+    // CCMP (op=1) computes Rn - imm, which needs the +carry_in the borrow
+    // implies. With Rn=0, imm=0 the result is 0: Z and C must both be set.
+    // Without carry_in, 0 + !0 + 0 = u64::MAX, corrupting N/Z/C. This exact
+    // instruction was what sent NX-Shell's crt0 relocator into svcBreak.
+    let code: [u32; 4] = [
+        0xd2800102, // mov x2, #8
+        0xd2800000, // mov x0, #0
+        0xf100005f, // cmp x2, #0      (8-0=8 → Z clear, C set → NE holds)
+        0xfa401800, // ccmp x0, #0, #0, ne   (0 - 0 = 0 → Z set, C set)
+    ];
+    let cpu = exec(&code, 100);
+    assert_eq!(cpu.nzcv() & (1 << 30), 1 << 30, "Z must be set for 0-0");
+    assert_eq!(cpu.nzcv() & (1 << 29), 1 << 29, "C must be set for 0-0 (no borrow)");
+    assert_eq!(cpu.nzcv() & (1 << 31), 0, "N must be clear for 0-0");
+}
+
+#[test]
+fn ccmp_ccmn_immediate_is_unsigned() {
+    // The 5-bit immediate is unsigned for both CCMP and CCMN (QEMU-verified).
+    // CCMP x0, #0x10 with x0=1 → 1-16 = -15 → N set.
+    let c1: [u32; 3] = [
+        0xd2800020, // mov x0, #1
+        0xf100001f, // cmp x0, #0      (Z clear → NE holds)
+        0xfa501800, // ccmp x0, #0x10, #0, ne
+    ];
+    let cpu = exec(&c1, 100);
+    assert_eq!(cpu.nzcv() & (1 << 31), 1 << 31, "CCMP 1-16 = -15 → N set");
+    assert_eq!(cpu.nzcv() & (1 << 30), 0, "CCMP 1-16 ≠ 0 → Z clear");
+
+    // CCMN x0, #0x10 with x0=1 → 1+16 = 17 → all flags clear.
+    let c2: [u32; 3] = [
+        0xd2800020, // mov x0, #1
+        0xf100001f, // cmp x0, #0
+        0xba501800, // ccmn x0, #0x10, #0, ne
+    ];
+    let cpu = exec(&c2, 100);
+    assert_eq!(cpu.nzcv() & 0xF000_0000, 0, "CCMN 1+16 = 17 → no flags set");
+}
+
+#[test]
+fn simd_scalar_byte_load_and_stur_q() {
+    // hbmenu / NX-Shell both faulted on `ldr b29, [x0, #0x280]` = 0x3d4a001d
+    // (SIMD scalar 8-bit load). Also covers `stur q17, [x0, #0x8]` = 0x3c808011
+    // (SIMD scalar STUR, unscaled offset) which the same libnx init loop uses.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x3000);
+    cpu.mem.map_zero(0x3000, 0x300).unwrap();
+    cpu.mem.write_u8(0x3280, 0xAB).unwrap();
+    // ldr b29, [x0, #0x280]: size=00, V=1, mode=01, opc=01, imm12=0x280, rn=0, rt=29
+    let ldr_b = 0b00u32 << 30 | 0b111 << 27 | (1 << 26) | (0b01 << 24) | (0b01 << 22) | (0x280 << 10) | 29;
+    assert_eq!(ldr_b, 0x3d4a_001d);
+    let code = [ldr_b, nop()];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_vreg(29), 0xAB);
+
+    // stur q17, [x0, #0x8] = 0x3c808011: size=00, V=1, mode=00 (unscaled),
+    // opc=10 (STR Q), imm9=8, rn=0, rt=17.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x3000);
+    cpu.mem.map_zero(0x3000, 0x40).unwrap();
+    cpu.set_vreg(17, 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00);
+    let code = [0x3c80_8011u32, nop()];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.mem.read_into(0x3008, &mut [0u8; 16]).and_then(|_| Ok(u128::from_le_bytes(cpu.mem.dump(0x3008, 16).unwrap().try_into().unwrap()))).unwrap(), 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00);
+}
+
+#[test]
+fn query_memory_writes_40_byte_memoryinfo() {
+    // svc 0x06 (QueryMemory) writes a 40-byte MemoryInfo
+    // {base(u64), size(u64), type/attr/perm/device/ipc/padding(u32 each)} —
+    // NOT 8 x u64. The old stub wrote 64 bytes, overflowing the struct by 24
+    // bytes; when the app's info pointer sat near the top of its stack this
+    // clobbered main's saved LR and made NX-Shell's main "return" to 0.
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.set_reg(0, 0x3000);   // info out pointer
+    cpu.set_reg(1, 0x3040);   // page info out pointer
+    cpu.set_reg(2, 0x1234000); // address
+    cpu.mem.map_zero(0x1234000, 0x1000).unwrap();
+    cpu.mem.map_zero(0x3000, 0x60).unwrap();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&svc(0x06).to_le_bytes());
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(1).unwrap();
+    // Only the first 40 bytes are written; byte 40+ must stay untouched (0).
+    assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), 0x1234000);
+    assert_eq!(cpu.mem.read_u64(0x3008).unwrap(), 0x1000);
+    assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 3);   // type (mapped)
+    assert_eq!(cpu.mem.read_u32(0x3014).unwrap(), 0);   // attr
+    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0b111); // perm (RWX)
+    assert_eq!(cpu.mem.read_u32(0x301c).unwrap(), 0);   // device_refcount
+    assert_eq!(cpu.mem.read_u32(0x3020).unwrap(), 0);   // ipc_refcount
+    assert_eq!(cpu.mem.read_u32(0x3024).unwrap(), 0);   // padding
+
+    // An untouched soft-mapped page reports as unmapped (type 0, no perm),
+    // which is what lets libnx virtmem find free address space.
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.set_reg(0, 0x3000);
+    cpu.set_reg(1, 0x3040);
+    cpu.set_reg(2, 0x1234000);
+    cpu.mem.map_zero(0x3000, 0x60).unwrap();
+    cpu.mem.map(0x1000, &svc(0x06).to_le_bytes()).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(1).unwrap();
+    // 0x1234000 is inside the soft-mapped range but never written -> unmapped.
+    assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 0);   // type (unmapped)
+    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0);   // perm
+    // The old bug wrote 24 more bytes here; 0x3028+ must be untouched zeros.
+    assert_eq!(cpu.mem.read_u64(0x3028).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u64(0x3040).unwrap(), 0); // pageinfo written via x1? no, x1 holds it
+    assert_eq!(cpu.read_x(1), 0); // unmapped soft page -> page info 0
+}
+
+#[test]
+fn scalar_cmge_with_zero_masks_predicate() {
+    // NX-Shell faulted on `cmge d31, d31, #0` = 0x7ee08bff (scalar integer
+    // compare-to-zero: Dd = all-ones if Dn >= 0, else 0), used as a predicate
+    // mask via `fmov x2, d31` in a string-layout loop.
+    // Encoding: bits[31:30] = 01 (D), U (bit29) = 1, bits[28:25] = 1111,
+    // bits[24:21] = 0111, bits[20:16] = 00000 (zero operand), op = bits[15:10]
+    // = 100010 (GE), Rn = bits[9:5], Rd = bits[4:0].
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(31, 0); // 0 >= 0 → all-ones
+    let cpu = run_program(cpu, 0x1000, &[0x7ee0_8bff, nop()]);
+    assert_eq!(cpu.read_vreg(31), u64::MAX as u128);
+
+    // cmgt d4, d5, #0 = 0x5ee088a4 (U=0, op=100010): negative operand → 0.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(5, 0x8000_0000_0000_0000);
+    let cpu = run_program(cpu, 0x1000, &[0x5ee0_88a4, nop()]);
+    assert_eq!(cpu.read_vreg(4), 0);
 }

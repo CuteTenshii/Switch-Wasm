@@ -80,6 +80,13 @@ impl Memory {
         Err(Error::Cpu(format!("read from unmapped address {:#010x}", addr)))
     }
 
+    /// Whether a real page has been allocated at `addr` (as opposed to a
+    /// soft-mapped page that has never been touched). Used by `svcQueryMemory`
+    /// so address-space walks see genuinely free pages as unmapped.
+    pub fn page_mapped(&self, addr: u32) -> bool {
+        self.pages[Self::page_index(addr)].is_some()
+    }
+
     /// Map `data` at `addr`, allocating pages as needed and zero-filling any
     /// gap between existing mappings. Wraps around page boundaries.
     pub fn map(&mut self, addr: u32, data: &[u8]) -> Result<()> {
