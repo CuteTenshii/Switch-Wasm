@@ -72,8 +72,15 @@ pub struct LoadedNro {
 /// loaded image so the crt0's BSS zeroing never touches it.
 pub const ENV_BLOCK_ADDR: u32 = 0x0010_0000;
 
+/// Path the loaded NRO is presented at on the emulated SD card. libnx's
+/// `romfsMountSelf` re-opens the running NRO by `argv[0]` to read the RomFS
+/// appended after its image, so the file has to exist and the path has to
+/// match what the environment block advertises.
+pub const HOMEBREW_NRO_PATH: &str = "sdmc:/switch/homebrew.nro";
+
 /// Entry keys of the libnx homebrew ABI (`nx/source/runtime/env.h`).
 const ENTRY_MAIN_THREAD_HANDLE: u32 = 1;
+const ENTRY_ARGV: u32 = 5;
 const ENTRY_HOS_VERSION: u32 = 16;
 const ENTRY_END_OF_LIST: u32 = 0;
 
@@ -97,11 +104,24 @@ pub fn setup_env_block(mem: &mut Memory) -> u32 {
     let _ = mem.write_u32(a + 28, 0);
     let _ = mem.write_u64(a + 32, 0xFFFF_FFFF);
     let _ = mem.write_u64(a + 40, 0x4154_4D4F_5350_4852); // "ATMOSPHR"
-    // EndOfList
-    let _ = mem.write_u32(a + 48, ENTRY_END_OF_LIST);
+    // Argv (Key 5): Value[1] points at the command line, which libnx splits
+    // into argv. argv[0] is how `romfsMountSelf` finds the running NRO.
+    const ARGV_STRING_OFFSET: u32 = 0x100;
+    let _ = mem.write_u32(a + 48, ENTRY_ARGV);
     let _ = mem.write_u32(a + 52, 0);
     let _ = mem.write_u64(a + 56, 0);
-    let _ = mem.write_u64(a + 64, 0);
+    let _ = mem.write_u64(a + 64, (a + ARGV_STRING_OFFSET) as u64);
+    // EndOfList
+    let _ = mem.write_u32(a + 72, ENTRY_END_OF_LIST);
+    let _ = mem.write_u32(a + 76, 0);
+    let _ = mem.write_u64(a + 80, 0);
+    let _ = mem.write_u64(a + 88, 0);
+
+    let path = HOMEBREW_NRO_PATH.as_bytes();
+    for (i, &byte) in path.iter().enumerate() {
+        let _ = mem.write_u8(a + ARGV_STRING_OFFSET + i as u32, byte);
+    }
+    let _ = mem.write_u8(a + ARGV_STRING_OFFSET + path.len() as u32, 0);
     a
 }
 

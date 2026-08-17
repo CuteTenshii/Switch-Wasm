@@ -13,13 +13,16 @@
 pub mod cpu;
 pub mod crypto;
 pub mod disasm;
+pub mod display;
 pub mod elf;
 pub mod error;
+pub mod gpu;
 pub mod keys;
 pub mod mem;
 pub mod nca;
 pub mod nro;
 pub mod nsp;
+pub mod vfs;
 
 pub use error::{Error, Result};
 

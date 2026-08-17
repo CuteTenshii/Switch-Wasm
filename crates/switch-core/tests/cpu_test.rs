@@ -1617,3 +1617,105 @@ fn scalar_cmge_with_zero_masks_predicate() {
     let cpu = run_program(cpu, 0x1000, &[0x5ee0_88a4, nop()]);
     assert_eq!(cpu.read_vreg(4), 0);
 }
+
+#[test]
+fn sub_shifted_register_reads_xzr_not_sp() {
+    // `neg x1, x0` assembles as `sub x1, xzr, x0` (0xcb0003e1). In the
+    // shifted-register form register 31 is XZR; only the immediate and
+    // extended forms name SP. Reading SP here made newlib's `aligned_alloc`
+    // compute a garbage rounded size, so every aligned allocation failed.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_pc_and_sp(0x1000, 0x1000_0000);
+    cpu.set_reg(0, 0x1000);
+    let cpu = run_program(cpu, 0x1000, &[0xcb00_03e1, nop()]);
+    assert_eq!(cpu.read_x(1), (-0x1000i64) as u64);
+
+    // The same instruction with a destination of 31 writes XZR, not SP.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_pc_and_sp(0x1000, 0x1000_0000);
+    cpu.set_reg(0, 1);
+    cpu.set_reg(1, 2);
+    // sub sp-encoding: `sub x31, x1, x0` shifted-register = 0xcb00003f.
+    let cpu = run_program(cpu, 0x1000, &[0xcb00_003f, nop()]);
+    assert_eq!(cpu.sp(), 0x1000_0000, "shifted-register Rd=31 is XZR");
+}
+
+#[test]
+fn add_immediate_still_uses_sp_for_register_31() {
+    // `add sp, sp, #0x10` (0x910043ff) must keep naming SP: the immediate
+    // form is the one where register 31 really is the stack pointer.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_pc_and_sp(0x1000, 0x1000_0000);
+    let cpu = run_program(cpu, 0x1000, &[0x9100_43ff, nop()]);
+    assert_eq!(cpu.sp(), 0x1000_0010);
+}
+
+#[test]
+fn simd_post_index_store_writes_back_the_base() {
+    // `str q27, [x2], #0x10` = 0x3c81045b. Without the write-back the base
+    // never advances, so the vectorised table-fill loops it appears in never
+    // terminate.
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x4000, 0x100).unwrap();
+    cpu.set_reg(2, 0x4000);
+    cpu.set_vreg(27, 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00);
+    let cpu = run_program(cpu, 0x1000, &[0x3c81_045b, nop()]);
+    assert_eq!(cpu.read_x(2), 0x4010, "post-index base must advance");
+    assert_eq!(cpu.mem.read_u64(0x4000).unwrap(), 0x99AA_BBCC_DDEE_FF00);
+    assert_eq!(cpu.mem.read_u64(0x4008).unwrap(), 0x1122_3344_5566_7788);
+}
+
+#[test]
+fn simd_pre_index_load_uses_the_updated_base() {
+    // `ldr q0, [x1, #0x10]!` = 0x3cc10c20: the base updates first, then the
+    // access uses it.
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x4000, 0x100).unwrap();
+    cpu.mem.write_u64(0x4010, 0xDEAD_BEEF_CAFE_F00D).unwrap();
+    cpu.set_reg(1, 0x4000);
+    let cpu = run_program(cpu, 0x1000, &[0x3cc1_0c20, nop()]);
+    assert_eq!(cpu.read_x(1), 0x4010);
+    assert_eq!(cpu.read_vreg(0) as u64, 0xDEAD_BEEF_CAFE_F00D);
+}
+
+#[test]
+fn simd_shift_right_immediate() {
+    // `ushr v27.4s, v27.4s, #1` = 0x6f3f077b.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(27, 0x0000_0004_0000_0008_0000_0010_0000_0020);
+    let cpu = run_program(cpu, 0x1000, &[0x6f3f_077b, nop()]);
+    assert_eq!(cpu.read_vreg(27), 0x0000_0002_0000_0004_0000_0008_0000_0010);
+
+    // `sshr v0.4s, v1.4s, #1` = 0x4f3f0420 keeps the sign.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(1, 0xFFFF_FFFE_0000_0004_0000_0000_0000_0000);
+    let cpu = run_program(cpu, 0x1000, &[0x4f3f_0420, nop()]);
+    assert_eq!(cpu.read_vreg(0) >> 96, 0xFFFF_FFFF);
+}
+
+#[test]
+fn simd_shift_left_immediate() {
+    // `shl v0.4s, v1.4s, #1` = 0x4f215420.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(1, 0x0000_0001_0000_0002_0000_0003_0000_0004);
+    let cpu = run_program(cpu, 0x1000, &[0x4f21_5420, nop()]);
+    assert_eq!(cpu.read_vreg(0), 0x0000_0002_0000_0004_0000_0006_0000_0008);
+}
+
+#[test]
+fn simd_multiply_and_multiply_accumulate() {
+    // `mul v26.4s, v26.4s, v28.4s` = 0x4ebc9f5a.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(26, 0x0000_0002_0000_0003_0000_0004_0000_0005);
+    cpu.set_vreg(28, 0x0000_0002_0000_0002_0000_0002_0000_0002);
+    let cpu = run_program(cpu, 0x1000, &[0x4ebc_9f5a, nop()]);
+    assert_eq!(cpu.read_vreg(26), 0x0000_0004_0000_0006_0000_0008_0000_000A);
+
+    // `mla v0.4s, v1.4s, v2.4s` = 0x4ea29420 accumulates into Vd.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x0000_0001_0000_0001_0000_0001_0000_0001);
+    cpu.set_vreg(1, 0x0000_0002_0000_0002_0000_0002_0000_0002);
+    cpu.set_vreg(2, 0x0000_0003_0000_0003_0000_0003_0000_0003);
+    let cpu = run_program(cpu, 0x1000, &[0x4ea2_9420, nop()]);
+    assert_eq!(cpu.read_vreg(0), 0x0000_0007_0000_0007_0000_0007_0000_0007);
+}

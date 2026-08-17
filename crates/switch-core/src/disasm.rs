@@ -510,12 +510,15 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                     write!(s, " #{}", shift)?;
                 }
             } else {
+                // Shifted register: register 31 is XZR here, not SP. `neg x1,
+                // x0` is `sub x1, xzr, x0`, so printing it as `sp` misreads
+                // the instruction entirely.
                 let st = (insn >> 22) & 0b11;
                 let sa = (insn >> 10) & 0x3F;
                 if compare {
-                    write!(s, "{} {}, {}", name, sp(rn), zr(rm))?;
+                    write!(s, "{} {}, {}", name, zr(rn), zr(rm))?;
                 } else {
-                    write!(s, "{} {}, {}, {}", name, sp(rd), sp(rn), zr(rm))?;
+                    write!(s, "{} {}, {}, {}", name, zr(rd), zr(rn), zr(rm))?;
                 }
                 if sa > 0 || st != 0 {
                     write!(s, ", {} #{}", shift_name(st), sa)?;

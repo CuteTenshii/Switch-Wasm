@@ -124,8 +124,9 @@ const CMD = {
   get_cycles() { return Number(api.switch_get_cycles(handle)); },
   get_reg(i) { return '0x' + api.switch_get_reg(handle, i).toString(16).padStart(16, '0'); },
   last_error() { return lastError(); },
-  fb_width() { return api.switch_fb_width(); },
-  fb_height() { return api.switch_fb_height(); },
+  fb_width() { return api.switch_fb_width(handle); },
+  fb_height() { return api.switch_fb_height(handle); },
+  frame_count() { return api.switch_frame_count(handle); },
   fb_snapshot(len) {
     const buf = alloc(len);
     const n = api.switch_fb_snapshot(handle, buf, len);

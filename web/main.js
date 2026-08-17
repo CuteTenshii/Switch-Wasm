@@ -78,12 +78,24 @@ function setState(text) {
   $('state').textContent = text;
 }
 
-// Copy the emulated framebuffer (FB_BASE, 640x360 RGBA) into the canvas.
+// Copy the emulated screen into the canvas. Before anything is presented this
+// is the memory-mapped demo framebuffer; once the guest hands a frame to the
+// display it becomes the real console output, so the canvas is resized to
+// whatever resolution the guest chose (1280x720 for most homebrew).
 async function renderFb() {
-  if (fbBytes === 0) return;
+  const w = await call('fb_width');
+  const h = await call('fb_height');
+  if (!w || !h) return;
+  if (w !== fbW || h !== fbH) {
+    fbW = w;
+    fbH = h;
+    fbBytes = w * h * 4;
+    screenEl.width = w;
+    screenEl.height = h;
+  }
   const pixels = await call('fb_snapshot', fbBytes);
-  if (pixels && pixels.length) {
-    const arr = new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, pixels.length);
+  if (pixels && pixels.length >= fbBytes) {
+    const arr = new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, fbBytes);
     screenCtx.putImageData(new ImageData(arr, fbW, fbH), 0, 0);
   }
 }
@@ -342,10 +354,12 @@ $('btn-reset').addEventListener('click', async () => {
 // the page can paint and input can reach the emulator between slices; there is
 // no overall step budget (trace mode slices are small to keep the log usable).
 const RUN_SLICE = 5_000_000;
+let lastFrame = 0;
 async function run() {
   setState('running');
   const slice = traceCb.checked ? 5000 : RUN_SLICE;
   let steps = 0;
+  lastFrame = 0;
   for (;;) {
     steps = await call('run', slice);
     // Yield so the UI repaints and any queued input is processed.
@@ -355,6 +369,13 @@ async function run() {
     // output would only appear after the run "ends".
     await updatePc();
     await drainOutput();
+    // Repaint only when the guest has actually presented a new frame — the
+    // snapshot is several megabytes at 1280x720.
+    const frames = await call('frame_count');
+    if (frames !== lastFrame) {
+      lastFrame = frames;
+      await renderFb();
+    }
     if (steps < 0) break;
     const halted = await call('halted');
     if (halted || steps < slice) break;

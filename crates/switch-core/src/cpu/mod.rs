@@ -1,0 +1,946 @@
+//! AArch64 (A64) interpreter core.
+//!
+//! Implements a from-scratch decode + execute loop for the A64 instruction
+//! set covering the integer core that compiled Switch homebrew actually uses:
+//! integer ALU, shifts, bitfield ops, multiplies/divides, conditional selects
+//! and compares, loads/stores (immediate, register-offset, literal, paired,
+//! exclusive), PC-relative addressing, and the branch/subroutine family.
+//!
+//! System instructions (MRS/MSR/barriers/hints) are handled minimally, and
+//! `SVC` drives a small, explicit syscall ABI used by the bundled demo
+//! payload. Floating point, SIMD and the Horizon OS are out of scope for
+//! Phase 1 and raise [`Error::Cpu`] if encountered.
+//!
+//! Encoding references are taken from the ARMv8 architecture and cross-checked
+//! against QEMU's `target/arm/tcg/a64.decode`.
+
+use crate::mem::Memory;
+use crate::{Error, Result};
+use std::collections::HashMap;
+
+mod alu;
+mod bits;
+mod fp;
+mod ipc;
+mod loadstore;
+mod simd;
+mod svc;
+mod system;
+
+pub(crate) use bits::decode_bit_mask;
+use bits::*;
+
+
+/// Where SVC traps are routed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SyscallMode {
+    /// `SVC #0` halts the machine; anything else faults.
+    #[default]
+    None,
+    /// Real libnx/libtransistor syscall numbers, best-effort stubs so homebrew
+    /// built for the Switch can boot single-threaded: console logging, sleeps,
+    /// handles and process/timing info are faked, and unsupported calls fault.
+    Horizon,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RunReport {
+    /// Number of instructions executed this run.
+    pub steps: u64,
+    /// True if the machine reached a halt trap rather than exhausting the
+    /// step budget.
+    pub halted: bool,
+}
+
+/// Host-provided stack for [`Cpu::bootstrap`]: 1 MiB full-descending, top at
+/// `STACK_TOP`. Must be clear of the NRO image (0x08000000+), the libnx TLS
+/// (0x0FF00000) and the heap homebrew puts at 0x10000000 — hbmenu's deko3d
+/// memblocks are allocated there and zeroing them would stomp a stack placed
+/// in the same region, corrupting return addresses.
+pub const STACK_SIZE: u64 = 0x0010_0000;
+pub const STACK_TOP: u64 = 0x1010_0000;
+
+/// Address of the return-address trampoline for direct-entered homebrew.
+pub const SELF_RETURN_TRAMPOLINE: u32 = 0x1F00_0000;
+
+#[derive(Debug)]
+pub struct Cpu {
+    pub mem: Memory,
+    /// X0..=X30 (X31 is the stack pointer).
+    regs: [u64; 31],
+    /// The stack pointer register (X31).
+    sp: u64,
+    pc: u32,
+    /// NZCV, packed as ARM PSTATE does: N=31, Z=30, C=29, V=28.
+    nzcv: u32,
+    /// SIMD vector registers Q0..=Q31 (128-bit). Only the handful of
+    /// instructions libnx's `memset`/`memcpy` rely on are implemented;
+    /// full NEON is out of scope for Phase 1.
+    vregs: [u128; 32],
+    /// Console output accumulated by the UART syscall mode.
+    pub out: Vec<u8>,
+    /// Debug trace: per-instruction disassembly (when enabled) plus fault
+    /// context with a register snapshot.
+    pub trace: Vec<u8>,
+    /// When true, each executed instruction is appended to `trace`.
+    pub trace_enabled: bool,
+    /// Safety cap on the trace buffer to avoid unbounded growth.
+    trace_cap: usize,
+    pub syscall_mode: SyscallMode,
+    pub halted: bool,
+    /// Instructions executed in total.
+    pub cycles: u64,
+    /// Ring buffer of the most recent `RECENT_LEN` `(pc, insn)` pairs, dumped
+    /// on fault so the path into a crash is visible without full tracing.
+    recent: [(u32, u32); RECENT_LEN],
+    /// Total instructions recorded into [`Cpu::recent`].
+    recent_len: usize,
+    /// Thread-local-storage base (TPIDR_EL0). libnx reads and writes this to
+    /// find per-thread globals; stubbing it as always-zero makes those
+    /// accesses land near address 0.
+    tpidr: u64,
+    /// Monotonic id handed out for domain IPC out-objects, so each synthesized
+    /// subservice gets a distinct non-zero object id.
+    next_object_id: u32,
+    /// Maps fake handles returned by `ConnectToNamedPort` or sm:`GetService`
+    /// to the named port / service they represent, so `SendSyncRequest` can
+    /// dispatch IPC commands to the right stub.
+    service_handles: HashMap<u64, String>,
+    /// Monotonic fake-handle allocator. 0 is invalid, so we start above the
+    /// earlier hard-coded `FAKE_HANDLE`.
+    next_handle: u32,
+    /// Monotonic domain object id allocator for services that use IPC domains
+    /// (e.g. `vi:m`).
+    next_domain_object_id: u32,
+    /// Maps (session handle, domain object id) to the interface name used for
+    /// dispatching domain commands.
+    domain_objects: HashMap<(u64, u32), String>,
+    /// Maps non-domain vi session handles to their sub-interface (vi:iads,
+    /// vi:ihosbd, ...) so the display stub can dispatch binder vs. display
+    /// commands on the right session.
+    vi_ifaces: HashMap<u64, String>,
+    /// Synthetic SD-card directory state for the fsp-srv stub: maps an open
+    /// directory handle to the entries it has not yielded yet
+    /// (name bytes, entry type, file size). Lets `fsFsOpenDirectory` /
+    /// `fsDirRead` hand NX-Shell's `FS::GetDirList` a real listing.
+    fs_dirs: HashMap<u64, Vec<crate::vfs::DirEntry>>,
+    /// Open `IFile` objects: domain object id to the path it was opened on.
+    fs_files: HashMap<u64, String>,
+    /// Address the guest mapped its hid shared memory to (via `MapSharedMemory`
+    /// on the handle hid's IPC returned). The host writes gamepad state into
+    /// the libnx `HidSharedMemory` layout there so `padUpdate` sees it; 0 means
+    /// hid hasn't been initialized yet.
+    hid_shmem_addr: u32,
+    /// Monotonic sampling number for the hid shared-memory LIFO entries.
+    sample_counter: u64,
+    /// The emulated SD card `fsp-srv` serves.
+    pub fs: crate::vfs::Vfs,
+    /// The nvdrv driver and the GPU behind it.
+    pub nv: crate::gpu::nvdrv::NvDrv,
+    /// The app's window buffer queue: where rendered frames are handed to the
+    /// display.
+    pub display: crate::display::BufferQueue,
+    /// Log every nvdrv IPC request to stderr (`TRACE_NV`).
+    pub trace_nv: bool,
+}
+
+/// How many recently-executed instructions the fault trace shows.
+pub const RECENT_LEN: usize = 64;
+
+impl Default for Cpu {
+    fn default() -> Self {
+        Cpu::new()
+    }
+}
+
+impl Cpu {
+    pub fn new() -> Cpu {
+        let mut cpu = Cpu {
+            mem: Memory::new(),
+            regs: [0; 31],
+            sp: 0,
+            pc: 0,
+            nzcv: 0,
+            vregs: [0; 32],
+            out: Vec::new(),
+            trace: Vec::new(),
+            trace_enabled: false,
+            trace_cap: 512 * 1024,
+            syscall_mode: SyscallMode::None,
+            halted: false,
+            cycles: 0,
+            recent: [(0, 0); RECENT_LEN],
+            recent_len: 0,
+            tpidr: 0,
+            next_object_id: 1,
+            service_handles: HashMap::new(),
+            next_handle: 0x1000,
+            next_domain_object_id: 1,
+            domain_objects: HashMap::new(),
+            vi_ifaces: HashMap::new(),
+            fs_dirs: HashMap::new(),
+            fs_files: HashMap::new(),
+            hid_shmem_addr: 0,
+            sample_counter: 0,
+            fs: crate::vfs::Vfs::new(),
+            nv: crate::gpu::nvdrv::NvDrv::new(),
+            display: crate::display::BufferQueue::new(),
+            trace_nv: std::env::var("TRACE_NV").is_ok(),
+        };
+        cpu.nv.gpu.trace = std::env::var("TRACE_GPU").is_ok();
+        // The framebuffer and input registers are fixed hardware-mapped
+        // regions: pre-map them so reads never fault and programs (or the
+        // host) can touch them before writing.
+        let _ = cpu
+            .mem
+            .map_zero(crate::FB_BASE, (crate::FB_WIDTH * crate::FB_HEIGHT * 4) as usize);
+        let _ = cpu.mem.map_zero(crate::INPUT_ADDR, 4096);
+        cpu
+    }
+
+    /// Map a host-provided runtime environment and point SP at a stack, the
+    /// way the real loader does before jumping to a program's entry point.
+    ///
+    /// Without this, libnx-style crt0 writes to low memory (applet/env
+    /// metadata, null-relative globals) fault on the unmapped zeropage and
+    /// there is no stack to push to. The demo never touches the stack, so the
+    /// unit tests keep SP at 0; only hosts that want to boot real homebrew
+    /// should call this.
+    pub fn bootstrap(&mut self) {
+        // Present the low 2 GiB address space (everything below the old
+        // 2 GiB NRO base) as lazily mapped: reads return zeros, writes
+        // allocate a page on first touch, so nothing is reserved up front.
+        // This lets libnx-style code read heap/init globals without faulting
+        // even when a baked-in pointer is stale.
+        self.mem.soft_map_zero(0, 0x8000_0000);
+        // 1 MiB full-descending stack; SP starts at the top.
+        let _ = self.mem.map_zero((STACK_TOP - STACK_SIZE) as u32, STACK_SIZE as usize);
+        self.sp = STACK_TOP;
+        // libnx reads TPIDR_EL0 expecting the loader (HBL/kernel) to have set
+        // the thread-local-storage base. Point it at a writable region clear of
+        // both the heap and the stack: the stack mapping is [0x10000000,
+        // 0x10100000) and svcSetHeapSize hands out 0x20000000. If TPIDR overlaps
+        // either, the app's IPC code writes its CMIF request over the heap's
+        // first chunk header (and malloc stomps the TLS), corrupting the
+        // allocator.
+        self.tpidr = 0x0FF0_0000;
+        // A return-address trampoline: the loader enters homebrew's `main`
+        // directly, so LR is 0 and any early return would branch to NULL.
+        // Point LR at a stub that calls ExitProcess (svc 0x07), so main's
+        // return surfaces as a clean exit code instead of a NULL jump.
+        let _ = self.mem.map_zero(SELF_RETURN_TRAMPOLINE, 0x10);
+        self.mem.write_u32(SELF_RETURN_TRAMPOLINE, 0xD400_00E1).ok(); // svc #7
+        self.mem.write_u32(SELF_RETURN_TRAMPOLINE + 4, 0x1400_0000).ok(); // b .
+    }
+
+    /// Boot a homebrew NRO the way HBL does: load the image, let the crt0's
+    /// relocation pass run up to the point it calls `main`, run the `.init_array`
+    /// (C++ static constructors) and set up the main thread's `ThreadVars`
+    /// (newlib reentrancy) that the skipped `__libnx_init` would normally
+    /// provide, then leave the CPU ready to enter `main`.
+    ///
+    /// The libnx "HOME BREW" crt0 runs the relocation pass itself and then
+    /// jumps to main; when it omits the `__libnx_init` step, every std::string
+    /// global is left empty and NX-Shell's `FS::GetDirList` resolves its SD
+    /// path to "" and exits. Running the constructors fixes that.
+    pub fn boot_homebrew(&mut self, data: &[u8]) -> Result<crate::nro::LoadedNro> {
+        let loaded = crate::nro::load_nro(&mut self.mem, data)?;
+        // Present the NRO on the SD card at the path the environment block
+        // advertises as argv[0]: libnx's `romfsMountSelf` re-opens the running
+        // NRO through the filesystem to read the RomFS appended to it, which
+        // is where homebrew keeps its assets.
+        self.fs.write_file(crate::nro::HOMEBREW_NRO_PATH, data.to_vec());
+        self.out.clear();
+        self.trace.clear();
+        self.halted = false;
+        self.trace_enabled = false;
+        for i in 0..=30u8 {
+            self.set_reg(i, 0);
+        }
+        self.set_reg(0, loaded.env_addr as u64);
+        self.set_reg(1, if loaded.env_addr != 0 { u64::MAX } else { 1 });
+        self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
+
+        let init = crate::nro::init_array_entries(data);
+        if !init.is_empty() && loaded.env_addr != 0 {
+            // The crt0 calls main with `bl` at entry+0xc0 (libnx switch_crt0
+            // layout); by then BSS is zeroed and RELR relocations are applied.
+            let main_call = loaded.entry.wrapping_add(0xc0);
+            let main_insn = self.mem.fetch(main_call).ok();
+            let is_bl = matches!(main_insn, Some(i) if (i & 0xFC00_0000) == 0x9400_0000);
+            if is_bl {
+                self.set_pc(loaded.entry);
+                for _ in 0..5_000_000u64 {
+                    if self.halted || self.get_pc() == main_call {
+                        break;
+                    }
+                    self.step()?;
+                }
+                // ThreadVars at TLS+0x1E0: magic, handle, thread_ptr, _REENT,
+                // tls_tp. The _REENT can be zeroed; newlib's malloc lazily
+                // initializes it.
+                const TV_MAGIC: u32 = 0x2154_5624; // "!TV$"
+                const REENT_ADDR: u32 = 0x1FF1_0000;
+                let tls = self.tls_base();
+                let _ = self.mem.map_zero(REENT_ADDR, 0x400);
+                let _ = self.mem.write_u32(tls + 0x1E0, TV_MAGIC);
+                let _ = self.mem.write_u32(tls + 0x1E4, 0x100);
+                let _ = self.mem.write_u32(tls + 0x1E8, 0);
+                let _ = self.mem.write_u32(tls + 0x1F0, REENT_ADDR);
+                let _ = self.mem.write_u32(tls + 0x1F8, tls);
+                // Run the constructors; each returns via x30.
+                const SENTINEL: u32 = 0x1FF0_0000;
+                for &entry in &init {
+                    if self.halted {
+                        break;
+                    }
+                    for i in 0..=29u8 {
+                        self.set_reg(i, 0);
+                    }
+                    self.set_reg(30, SENTINEL as u64);
+                    self.set_pc(entry);
+                    for _ in 0..20_000_000u64 {
+                        if self.halted || self.get_pc() == SENTINEL {
+                            break;
+                        }
+                        self.step()?;
+                    }
+                }
+                // The constructors clobber the entry registers; restore them
+                // and resume at the crt0's `bl main` so main is entered with
+                // the normal calling convention (x30 = the crt0's return path).
+                for i in 0..=30u8 {
+                    self.set_reg(i, 0);
+                }
+                self.set_reg(0, loaded.env_addr as u64);
+                self.set_reg(1, if loaded.env_addr != 0 { u64::MAX } else { 1 });
+                self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
+                self.set_pc(main_call);
+                return Ok(loaded);
+            }
+        }
+        self.set_pc(loaded.entry);
+        Ok(loaded)
+    }
+
+    // ---- register access ----
+
+    #[inline]
+    pub fn get_pc(&self) -> u32 {
+        self.pc
+    }
+
+    #[inline]
+    pub fn sp(&self) -> u64 {
+        self.sp
+    }
+
+    pub fn set_pc(&mut self, pc: u32) {
+        self.pc = pc;
+    }
+
+    /// Debug: dump the fake-handle -> service-name map.
+    pub fn service_handles_snapshot(&self) -> Vec<(u64, String)> {
+        let mut v: Vec<(u64, String)> = self
+            .service_handles
+            .iter()
+            .map(|(&h, s)| (h, s.clone()))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Read X0..=X30 (X31 reads as zero / is the stack pointer).
+    #[inline]
+    pub fn read_x(&self, idx: u8) -> u64 {
+        match idx {
+            0..=30 => self.regs[idx as usize],
+            31 => self.sp,
+            _ => 0,
+        }
+    }
+
+    pub fn read_reg(&self, idx: u8) -> u64 {
+        self.read_x(idx)
+    }
+
+    /// Read the 128-bit SIMD&FP register Qn.
+    pub fn read_vreg(&self, idx: u8) -> u128 {
+        self.vregs[idx as usize]
+    }
+
+    /// Base of the libnx TLS (thread-local storage) region.
+    pub fn tls_base(&self) -> u32 {
+        self.tpidr as u32
+    }
+
+    /// Write the 128-bit SIMD&FP register Qn.
+    pub fn set_vreg(&mut self, idx: u8, val: u128) {
+        self.vregs[idx as usize] = val;
+    }
+
+    /// Read X0..=X30 where X31 is ZR (always zero).
+    #[inline]
+    fn read_zr(&self, idx: u8) -> u64 {
+        if idx == 31 { 0 } else { self.regs[idx as usize] }
+    }
+
+    #[inline]
+    fn write_zr(&mut self, idx: u8, val: u64) {
+        if idx != 31 {
+            self.regs[idx as usize] = val;
+        }
+    }
+
+    /// Write X0..=X30 where X31 is SP.
+    #[inline]
+    fn write_x(&mut self, idx: u8, val: u64) {
+        match idx {
+            0..=30 => self.regs[idx as usize] = val,
+            31 => self.sp = val,
+            _ => {}
+        }
+    }
+
+    pub fn set_reg(&mut self, idx: u8, val: u64) {
+        self.write_zr(idx, val);
+    }
+
+    pub fn read_u32_reg(&self, idx: u8) -> u32 {
+        self.read_zr(idx) as u32
+    }
+
+    pub fn set_pc_and_sp(&mut self, pc: u32, sp: u64) {
+        self.pc = pc;
+        self.sp = sp;
+    }
+
+    /// Write the host gamepad state so the guest can see it. The button
+    /// bitmask goes to the memory-mapped [`crate::INPUT_ADDR`] (simple polling
+    /// mechanism); when libnx has mapped its hid shared memory, the same state
+    /// is mirrored into the player-1 `HidNpadInternalState` layout that
+    /// `padUpdate` reads, so real homebrew (padInitialize/padUpdate) works too.
+    ///
+    /// `buttons` is a bitfield of `HidNpadButton` (A=1<<0, B=1<<1, X=1<<2,
+    /// Y=1<<3, L=1<<4, R=1<<5, ZL=1<<6, ZR=1<<7, Plus=1<<8, Minus=1<<9,
+    /// DpadLeft=1<<10, DpadUp=1<<11, DpadRight=1<<12, DpadDown=1<<13,
+    /// StickL=1<<14, StickR=1<<15). Sticks are signed -32768..32767.
+    pub fn set_gamepad_state(&mut self, buttons: u64, stick_lx: i32, stick_ly: i32, stick_rx: i32, stick_ry: i32) {
+        // Simple host→guest register: a u64 mask, then two analog sticks.
+        let _ = self.mem.write_u64(crate::INPUT_ADDR, buttons);
+        let _ = self.mem.write_u32(crate::INPUT_ADDR + 8, stick_lx as u32);
+        let _ = self.mem.write_u32(crate::INPUT_ADDR + 12, stick_ly as u32);
+        let _ = self.mem.write_u32(crate::INPUT_ADDR + 16, stick_rx as u32);
+        let _ = self.mem.write_u32(crate::INPUT_ADDR + 20, stick_ry as u32);
+
+        if self.hid_shmem_addr == 0 {
+            return;
+        }
+        self.write_hid_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
+    }
+
+    /// Mirror the gamepad state into libnx's `HidSharedMemory` for player 1.
+    /// The `npad` section sits at offset 0x3D7C0; each entry's `internal_state`
+    /// holds `style_set` at +0 and `full_key_lifo` at +0x20. A LIFO with one
+    /// entry, a monotonic sampling number, the connected attribute and the
+    /// button/stick state is enough for `padUpdate` to report input.
+    fn write_hid_gamepad_state(&mut self, buttons: u64, lx: i32, ly: i32, rx: i32, ry: i32) {
+        const NPAD_OFF: u32 = 0x3D7C0; // offsetof(HidSharedMemory, npad)
+        const STYLE_FULL_KEY_HANDHELD: u32 = 1 | 4; // NpadFullKey | NpadHandheld
+        const ATTR_CONNECTED: u32 = 1;
+        let base = self.hid_shmem_addr.wrapping_add(NPAD_OFF);
+        self.sample_counter = self.sample_counter.wrapping_add(1);
+        // internal_state
+        let _ = self.mem.write_u32(base, STYLE_FULL_KEY_HANDHELD);        // style_set
+        let _ = self.mem.write_u32(base + 4, 0);                          // joy_assignment_mode
+        // full_key_lifo at internal_state + 0x20
+        let lifo = base.wrapping_add(0x20);
+        let _ = self.mem.write_u64(lifo + 0x08, 1);       // header.buffer_count
+        let _ = self.mem.write_u64(lifo + 0x10, 0);       // header.tail
+        let _ = self.mem.write_u64(lifo + 0x18, 1);       // header.count
+        let _ = self.mem.write_u64(lifo + 0x20, self.sample_counter); // storage[0].sampling_number
+        let _ = self.mem.write_u64(lifo + 0x30, buttons); // storage[0].state.buttons
+        let _ = self.mem.write_u32(lifo + 0x38, lx as u32);
+        let _ = self.mem.write_u32(lifo + 0x3C, ly as u32);
+        let _ = self.mem.write_u32(lifo + 0x40, rx as u32);
+        let _ = self.mem.write_u32(lifo + 0x44, ry as u32);
+        let _ = self.mem.write_u32(lifo + 0x48, ATTR_CONNECTED);          // attributes
+    }
+
+    #[inline]
+    pub fn nzcv(&self) -> u32 {
+        self.nzcv
+    }
+
+    #[inline]
+    fn condition_holds(&self, cond: u8) -> bool {
+        let n = (self.nzcv >> 31) & 1;
+        let z = (self.nzcv >> 30) & 1;
+        let c = (self.nzcv >> 29) & 1;
+        let v = (self.nzcv >> 28) & 1;
+        match cond & 0xF {
+            0x0 => z == 1,                 // EQ
+            0x1 => z == 0,                 // NE
+            0x2 => c == 1,                 // CS
+            0x3 => c == 0,                 // CC
+            0x4 => n == 1,                 // MI
+            0x5 => n == 0,                 // PL
+            0x6 => v == 1,                 // VS
+            0x7 => v == 0,                 // VC
+            0x8 => c == 1 && z == 0,       // HI
+            0x9 => c == 0 || z == 1,       // LS
+            0xA => n == v,                 // GE
+            0xB => n != v,                 // LT
+            0xC => z == 0 && n == v,       // GT
+            0xD => z == 1 || n != v,       // LE
+            _ => true,                     // AL / NV
+        }
+    }
+
+    #[inline]
+    fn mask(sf: bool) -> u64 {
+        if sf { u64::MAX } else { u32::MAX as u64 }
+    }
+
+    /// Compute `a + b + carry_in`, returning (result, carry-out, overflow).
+    /// Operands are masked to the operation size first: callers pass `b` as
+    /// the already-inverted subtrahend for SUB, whose 64-bit `!` would
+    /// otherwise pollute the 32-bit carry/overflow computation.
+    #[inline]
+    fn add_carry_overflow(a: u64, b: u64, carry_in: u64, sf: bool) -> (u64, u32, u32) {
+        let size = if sf { 64 } else { 32 };
+        let mask = Self::mask(sf);
+        let a = a & mask;
+        let b = b & mask;
+        let base = 1u128 << size;
+        let sum = (a as u128) + (b as u128) + (carry_in as u128);
+        let result = (sum & (base - 1)) as u64;
+        let carry = ((sum >> size) & 1) as u32;
+        let sign = 1u64 << (size - 1);
+        let overflow = (((a & b & !result) | (!a & !b & result)) & sign != 0) as u32;
+        (result, carry, overflow)
+    }
+
+    fn set_nzcv_from_alu(&mut self, result: u64, sf: bool, carry: u32, overflow: u32) {
+        let n = ((result >> (if sf { 63 } else { 31 })) & 1) as u32;
+        let z = (result == 0) as u32;
+        self.nzcv = (n << 31) | (z << 30) | (carry << 29) | (overflow << 28);
+    }
+
+    fn set_nzcv_from_compare(&mut self, a: u64, b: u64, sub: bool, carry_in: u64, sf: bool) {
+        let (result, carry, overflow) = if sub {
+            Self::add_carry_overflow(a, !b, carry_in, sf)
+        } else {
+            Self::add_carry_overflow(a, b, carry_in, sf)
+        };
+        self.set_nzcv_from_alu(result, sf, carry, overflow);
+    }
+
+    /// The ADD/SUB core. `sp_form` says whether register 31 names SP rather
+    /// than XZR, which differs by encoding: the immediate and extended-register
+    /// forms use SP, the shifted-register form uses XZR. Getting that wrong
+    /// turns `neg x1, x0` (`sub x1, xzr, x0`) into a read of the stack
+    /// pointer — which is exactly how `aligned_alloc` computes its rounded
+    /// size, so it silently corrupts every aligned allocation.
+    fn add_sub(
+        &mut self,
+        rd: u8,
+        rn: u8,
+        rhs: u64,
+        set_flags: bool,
+        sub: bool,
+        sf: bool,
+        sp_form: bool,
+    ) {
+        let a = if sp_form { self.read_x(rn) } else { self.read_zr(rn) } & Self::mask(sf);
+        let (result, carry, overflow) = if sub {
+            Self::add_carry_overflow(a, !rhs, 1, sf)
+        } else {
+            Self::add_carry_overflow(a, rhs, 0, sf)
+        };
+        if set_flags {
+            self.set_nzcv_from_alu(result, sf, carry, overflow);
+        }
+        // Rd=31 is SP only for the plain ADD/SUB immediate and extended forms.
+        // For the flag-setting forms and the shifted-register form it is XZR,
+        // so the result is discarded.
+        if set_flags || !sp_form {
+            self.write_zr(rd, result);
+        } else {
+            self.write_x(rd, result);
+        }
+    }
+
+    // ---- main execution ----
+
+    /// Execute a single instruction. Returns `Ok(())` on success.
+    pub fn step(&mut self) -> Result<()> {
+        if self.halted {
+            return Err(Error::Cpu("attempted to step a halted CPU".into()));
+        }
+        let pc = self.pc;
+        let insn = match self.mem.fetch(pc) {
+            Ok(i) => i,
+            Err(e) => {
+                self.record_fault(&e, pc, 0);
+                return Err(e);
+            }
+        };
+        let next_pc = pc.wrapping_add(4);
+        self.recent[self.recent_len % RECENT_LEN] = (pc, insn);
+        self.recent_len = self.recent_len.saturating_add(1);
+        let result = self.execute(insn, next_pc);
+        if self.trace_enabled {
+            self.trace_line(&format!("{:08x}: {:08x}  {}\n", pc, insn, crate::disasm::disassemble(insn)));
+        }
+        if let Err(e) = &result {
+            self.record_fault(e, pc, insn);
+        }
+        self.cycles += 1;
+        result
+    }
+
+    fn record_fault(&mut self, e: &Error, pc: u32, insn: u32) {
+        self.trace_line(&format!(
+            "\n=== FAULT ===\n{}\n  at pc={:#010x} insn={:#010x}  {}\n",
+            e,
+            pc,
+            insn,
+            if insn == 0 {
+                String::new()
+            } else {
+                crate::disasm::disassemble(insn)
+            }
+        ));
+        self.trace_regs(pc);
+        // Show the run-up to the fault so the crash path is readable without
+        // full tracing enabled.
+        let n = self.recent_len.min(RECENT_LEN);
+        if n > 0 {
+            let start = self.recent_len.wrapping_sub(n) % RECENT_LEN;
+            self.trace_line(&format!("--- last {} instructions ---\n", n));
+            for i in 0..n {
+                let (ipc, iinsn) = self.recent[(start + i) % RECENT_LEN];
+                self.trace_line(&format!(
+                    "{:08x}: {:08x}  {}\n",
+                    ipc,
+                    iinsn,
+                    crate::disasm::disassemble(iinsn)
+                ));
+            }
+        }
+    }
+
+    fn trace_line(&mut self, line: &str) {
+        if self.trace.len() >= self.trace_cap {
+            if !self.trace.ends_with(b"\n[TRACE TRUNCATED]\n") {
+                self.trace
+                    .extend_from_slice(b"\n[TRACE TRUNCATED]\n");
+            }
+            return;
+        }
+        self.trace.extend_from_slice(line.as_bytes());
+    }
+
+    fn trace_regs(&mut self, pc: u32) {
+        let dump = self.reg_dump();
+        self.trace_line(&dump);
+        let _ = pc;
+    }
+
+    /// Walk the guest's frame-pointer chain and return the return addresses,
+    /// innermost first. devkitA64 keeps X29 as a frame pointer (`stp x29, x30,
+    /// [sp]; mov x29, sp`), so each frame stores `{saved fp, saved lr}` at the
+    /// frame base. Stops as soon as the chain leaves mapped memory or fails to
+    /// move forward, so a corrupt stack cannot loop.
+    pub fn backtrace(&self, depth: usize) -> Vec<u32> {
+        let mut out = Vec::with_capacity(depth + 1);
+        out.push(self.regs[30] as u32);
+        let mut fp = self.regs[29] as u32;
+        for _ in 0..depth {
+            let (next_fp, lr) = match (self.mem.read_u64(fp), self.mem.read_u64(fp + 8)) {
+                (Ok(next_fp), Ok(lr)) => (next_fp as u32, lr as u32),
+                _ => break,
+            };
+            if lr == 0 || next_fp <= fp {
+                break;
+            }
+            out.push(lr);
+            fp = next_fp;
+        }
+        out
+    }
+
+    /// Format a full register snapshot for debugging.
+    pub fn reg_dump(&self) -> String {
+        use std::fmt::Write;
+        let mut s = String::with_capacity(1024);
+        let n = (self.nzcv >> 31) & 1;
+        let z = (self.nzcv >> 30) & 1;
+        let c = (self.nzcv >> 29) & 1;
+        let v = (self.nzcv >> 28) & 1;
+        let _ = writeln!(
+            s,
+            "pc={:#010x}  sp={:#018x}  nzcv=N:{n} Z:{z} C:{c} V:{v}",
+            self.pc, self.sp
+        );
+        for i in 0..31 {
+            let _ = write!(s, "x{:<2}={:#018x}  ", i, self.regs[i]);
+            if i % 4 == 3 {
+                let _ = writeln!(s);
+            }
+        }
+        let _ = writeln!(s);
+        s
+    }
+
+    /// Run up to `max_steps` instructions, stopping early on halt or error.
+    pub fn run(&mut self, max_steps: u64) -> Result<RunReport> {
+        let mut steps = 0u64;
+        while steps < max_steps && !self.halted {
+            self.step()?;
+            steps += 1;
+        }
+        Ok(RunReport {
+            steps,
+            halted: self.halted,
+        })
+    }
+
+    #[inline]
+    fn b_imm(&mut self, next_pc: &mut u32, imm: i64) {
+        *next_pc = (self.pc as i64).wrapping_add(imm) as u32;
+    }
+
+    fn execute(&mut self, insn: u32, mut next_pc: u32) -> Result<()> {
+        // ---------------- unconditional branches ----------------
+        let op26 = (insn >> 26) & 0x3F;
+        if op26 == 0b000101 {
+            // B #imm
+            let imm = sext_u64((insn & 0x3FF_FFFF) as u64, 26) << 2;
+            self.b_imm(&mut next_pc, imm as i64);
+            self.pc = next_pc;
+            return Ok(());
+        }
+        if op26 == 0b100101 {
+            // BL #imm
+            let imm = sext_u64((insn & 0x3FF_FFFF) as u64, 26) << 2;
+            self.write_zr(30, next_pc as u64);
+            self.b_imm(&mut next_pc, imm as i64);
+            self.pc = next_pc;
+            return Ok(());
+        }
+
+        // ---------------- load literal ----------------
+        if ((insn >> 27) & 0b111) == 0b011 && ((insn >> 26) & 1) == 0 && ((insn >> 24) & 0b11) == 0b00 {
+            let rt = (insn & 0x1F) as u8;
+            let imm = sext_u64((insn >> 5) & 0x7_FFFF, 19) << 2;
+            let addr = (self.pc as i64).wrapping_add(imm as i64) as u32;
+            let sz = (insn >> 30) & 0b11;
+            let (val, width, sign) = match sz {
+                0b00 => (self.mem.read_u32(addr)? as u64, 32, false),
+                0b01 => (self.mem.read_u64(addr)?, 64, false),
+                0b10 => (self.mem.read_u32(addr)? as u64, 32, true),
+                _ => {
+                    // PRFM: prefetch hint, treat as NOP
+                    self.pc = next_pc;
+                    return Ok(());
+                }
+            };
+            let val = if sign {
+                sext_u64(val, width)
+            } else if width == 32 {
+                val & u32::MAX as u64
+            } else {
+                val
+            };
+            self.write_zr(rt, val);
+            self.pc = next_pc;
+            return Ok(());
+        }
+
+        // ---------------- branch register ----------------
+        if ((insn >> 25) & 0x7F) == 0b1101011 {
+            let opc = (insn >> 21) & 0xF;
+            let op2 = (insn >> 16) & 0x1F;
+            let op3 = (insn >> 10) & 0x3F;
+            if op2 == 0x1F && op3 == 0 {
+                let rn = ((insn >> 5) & 0x1F) as u8;
+                match opc {
+                    0b0000 => {
+                        // BR
+                        self.pc = self.read_zr(rn) as u32;
+                        return Ok(());
+                    }
+                    0b0001 => {
+                        // BLR
+                        self.write_zr(30, next_pc as u64);
+                        self.pc = self.read_zr(rn) as u32;
+                        return Ok(());
+                    }
+                    0b0010 => {
+                        // RET. A `ret` that returns to address 0 is a homebrew
+                        // exit path whose return-address convention the boot
+                        // model doesn't provide (the crt0 stashes the loader's
+                        // LR in x27, but the atexit table runner returns via
+                        // x30 = 0). Redirect to the exit trampoline so it
+                        // surfaces as a clean ExitProcess instead of a NULL
+                        // fetch.
+                        let tgt = self.read_zr(rn) as u32;
+                        self.pc = if tgt == 0 { SELF_RETURN_TRAMPOLINE } else { tgt };
+                        return Ok(());
+                    }
+                    _ => {
+                        return Err(Error::Cpu(format!(
+                            "unimplemented branch-register opc {:#b} at {:#x}",
+                            opc,
+                            self.pc
+                        )))
+                    }
+                }
+            }
+        }
+
+        // ---------------- exceptions ----------------
+        if ((insn >> 24) & 0xFF) == 0b11010100 {
+            let kind = (insn >> 21) & 0b111;
+            return match kind {
+                0b000 => {
+                    // SVC/HVC/SMC; SVC has low bits 0b00001
+                    if (insn & 0x1F) == 0b00001 {
+                        let imm = ((insn >> 5) & 0xFFFF) as u16;
+                        self.syscall(imm)?;
+                        self.pc = next_pc;
+                        Ok(())
+                    } else {
+                        Err(Error::Cpu(format!(
+                            "unimplemented HVC/SMC at {:#x}",
+                            self.pc
+                        )))
+                    }
+                }
+                0b001 => {
+                    // BRK
+                    let imm = ((insn >> 5) & 0xFFFF) as u16;
+                    Err(Error::Cpu(format!(
+                        "BRK #{} at {:#x}",
+                        imm, self.pc
+                    )))
+                }
+                _ => Err(Error::Cpu(format!(
+                    "unimplemented exception instruction at {:#x}",
+                    self.pc
+                ))),
+            };
+        }
+
+        // ---------------- system ----------------
+        if ((insn >> 22) & 0x3FF) == 0b1101010100 {
+            return self.system(insn, next_pc);
+        }
+
+        // ---------------- conditional branch ----------------
+        if ((insn >> 24) & 0xFF) == 0b01010100 {
+            let imm = sext_u64((insn >> 5) & 0x7_FFFF, 19) << 2;
+            let cond = (insn & 0xF) as u8;
+            if self.condition_holds(cond) {
+                self.b_imm(&mut next_pc, imm as i64);
+            }
+            self.pc = next_pc;
+            return Ok(());
+        }
+
+        // ---------------- compare & branch ----------------
+        if ((insn >> 25) & 0x3F) == 0b011010 {
+            let rt = (insn & 0x1F) as u8;
+            let nz = ((insn >> 24) & 1) == 1;
+            let imm = sext_u64((insn >> 5) & 0x7_FFFF, 19) << 2;
+            let val = self.read_zr(rt);
+            let is_zero = if (insn >> 31) & 1 == 1 {
+                val == 0
+            } else {
+                (val as u32) == 0
+            };
+            if is_zero == !nz {
+                self.b_imm(&mut next_pc, imm as i64);
+            }
+            self.pc = next_pc;
+            return Ok(());
+        }
+
+        // ---------------- test bit & branch ----------------
+        if ((insn >> 25) & 0x3F) == 0b011011 {
+            let rt = (insn & 0x1F) as u8;
+            let nz = ((insn >> 24) & 1) == 1;
+            let bit = ((insn >> 31) & 1) << 5 | ((insn >> 19) & 0x1F);
+            let imm = sext_u64((insn >> 5) & 0x3FFF, 14) << 2;
+            let val = self.read_zr(rt);
+            let bit_val = (val >> bit) & 1 == 1;
+            if bit_val == nz {
+                self.b_imm(&mut next_pc, imm as i64);
+            }
+            self.pc = next_pc;
+            return Ok(());
+        }
+
+        // ---------------- loads & stores ----------------
+        if self.try_load_store(insn, &mut next_pc)? {
+            self.pc = next_pc;
+            return Ok(());
+        }
+
+        // ---------------- minimal SIMD (vector registers) ----------------
+        if self.try_simd(insn)? {
+            self.pc = next_pc;
+            return Ok(());
+        }
+
+        // ---------------- scalar floating point ----------------
+        if self.try_fp(insn)? {
+            self.pc = next_pc;
+            return Ok(());
+        }
+
+        // ---------------- PC-relative addressing ----------------
+        // ADR/ADRP: fixed bits[28:24] == 10000; bits[30:29] are immlo (not
+        // zero in general, so the older check that required them to be 0
+        // silently dropped real ADRP instructions).
+        if ((insn >> 24) & 0x1F) == 0b10000 {
+            let rd = (insn & 0x1F) as u8;
+            let immhi = ((insn >> 5) & 0x7_FFFF) as u64;
+            let immlo = ((insn >> 29) & 0b11) as u64;
+            let imm = sext_u64((immhi << 2) | immlo, 21);
+            let page = (insn >> 31) & 1 == 1;
+            let base = if page {
+                (self.pc & !0xFFF) as u64
+            } else {
+                self.pc as u64
+            };
+            let target = if page {
+                base.wrapping_add(imm.wrapping_shl(12))
+            } else {
+                base.wrapping_add(imm)
+            };
+            self.write_zr(rd, target);
+            self.pc = next_pc;
+            return Ok(());
+        }
+
+        // ---------------- data processing: immediate ----------------
+        if self.try_data_proc_imm(insn, &mut next_pc)? {
+            self.pc = next_pc;
+            return Ok(());
+        }
+
+        // ---------------- data processing: register ----------------
+        if self.try_data_proc_reg(insn, &mut next_pc)? {
+            self.pc = next_pc;
+            return Ok(());
+        }
+
+        Err(Error::Cpu(format!(
+            "unimplemented instruction 0x{:08x} at pc={:#x}",
+            insn, self.pc
+        )))
+    }
+}

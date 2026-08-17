@@ -30,6 +30,9 @@ pub enum Error {
     Nro(String),
     /// A CPU fault (bad memory access, invalid state, unreachable).
     Cpu(String),
+    /// A GPU fault: an unmapped GPU address, a malformed command stream, or a
+    /// class/format the engine model does not implement.
+    Gpu(String),
 }
 
 impl fmt::Display for Error {
@@ -57,6 +60,7 @@ impl fmt::Display for Error {
             Error::Elf(msg) => write!(f, "ELF: {}", msg),
             Error::Nro(msg) => write!(f, "NRO: {}", msg),
             Error::Cpu(msg) => write!(f, "CPU: {}", msg),
+            Error::Gpu(msg) => write!(f, "GPU: {}", msg),
         }
     }
 }

@@ -461,20 +461,44 @@ pub extern "C" fn switch_dump_regs(handle: u32, buf: *mut u8, maxlen: u32) -> u3
     write_into(buf, maxlen, dump.as_bytes())
 }
 
-/// Framebuffer geometry accessors.
+/// Framebuffer geometry. Once the guest has presented a frame through the
+/// display's buffer queue, this is the real console resolution (usually
+/// 1280x720); before that it is the memory-mapped demo framebuffer.
 #[no_mangle]
-pub extern "C" fn switch_fb_width() -> u32 {
-    FB_WIDTH
-}
-#[no_mangle]
-pub extern "C" fn switch_fb_height() -> u32 {
-    FB_HEIGHT
+pub extern "C" fn switch_fb_width(handle: u32) -> u32 {
+    let s = session(handle);
+    if s.cpu.nv.gpu.frames > 0 { s.cpu.nv.gpu.framebuffer.width } else { FB_WIDTH }
 }
 
-/// Copy the current framebuffer (RGBA) into `buf`. Returns bytes copied.
+#[no_mangle]
+pub extern "C" fn switch_fb_height(handle: u32) -> u32 {
+    let s = session(handle);
+    if s.cpu.nv.gpu.frames > 0 { s.cpu.nv.gpu.framebuffer.height } else { FB_HEIGHT }
+}
+
+/// Number of frames the guest has presented. JS polls this to know when the
+/// screen changed and what resolution to size the canvas to.
+#[no_mangle]
+pub extern "C" fn switch_frame_count(handle: u32) -> u32 {
+    session(handle).cpu.nv.gpu.frames as u32
+}
+
+/// Copy the current screen (RGBA8888) into `buf`. Returns bytes copied.
+///
+/// This is the scanned-out frame the guest last handed to the display, or the
+/// memory-mapped demo framebuffer when nothing has been presented yet.
 #[no_mangle]
 pub extern "C" fn switch_fb_snapshot(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
+    if s.cpu.nv.gpu.frames > 0 {
+        let fb = &s.cpu.nv.gpu.framebuffer;
+        let n = (fb.pixels.len() * 4).min(maxlen as usize);
+        let out = unsafe { std::slice::from_raw_parts_mut(buf, n) };
+        for (chunk, pixel) in out.chunks_exact_mut(4).zip(fb.pixels.iter()) {
+            chunk.copy_from_slice(&pixel.to_le_bytes());
+        }
+        return n as u32;
+    }
     let n = ((FB_WIDTH * FB_HEIGHT * 4) as usize).min(maxlen as usize);
     let out = unsafe { std::slice::from_raw_parts_mut(buf, n) };
     match s.cpu.mem.read_into(FB_BASE, out) {

@@ -1,70 +1,87 @@
 # switch-wasm — boot status
 
 Goal: get the bundled demo and real homebrew (the Homebrew Menu NRO,
-`hbmenu.nro`) to actually **run** on the integer-only Phase 1 interpreter.
+`hbmenu.nro`) to actually **run** on the interpreter, and put what it renders
+on the canvas.
 
-## Demo
+## Current state: the emulated console draws to the screen
 
-The demo runs identically in Chromium and Firefox 153 (verified headless via
-Playwright): it halts at `pc=0x08000024` after 78,161 steps with the gradient
-painted and `00000000000068ac` printed.
+`hbmenu.nro` boots, initialises the display, renders with its own font and
+**presents 1280x720 frames that reach the HTML canvas**. The whole path is
+real: nvdrv ioctls → nvmap → the graphics MMU → the display buffer queue →
+block-linear de-swizzle → RGBA8888 → `putImageData`.
 
-## hbmenu.nro
+hbmenu currently stops at `assetsInit()` (PhysicsFS), so what the screen shows
+is its own error console — real text, drawn by the guest, scanned out through
+the emulated display pipeline.
 
-`hbmenu.nro` (nx-hbmenu v3.6.1) boots through crt0 → libnx heap/TLS init →
-service IPC handshakes (`apm`, `appletOE`, `hid`, `time:u`, `fsp-srv`, `vi:m`,
-`set:sys`, `set`, `nvdrv`) → deko3d's `graphicsInit` (`dkDeviceCreate` →
-`dkMemBlockCreate` → `dkSwapchainCreate` → `dkQueueCreate`). It connects to
-`nvdrv` and sends only cmd 3 (Initialize); deko3d's device init never reaches
-`nvOpen` (cmd 0), so no GPU device/command stream is set up.
+## GPU: a GM20B model, not a stub
 
-### What was wrong and what was fixed
+`crates/switch-core/src/gpu` implements the Tegra X1 GPU the way the CPU
+implements ARM64 — see AGENTS.md for the module map. Register numbers are
+taken from deko3d's generated Maxwell class headers and the driver ABI from
+libnx's `nvidia/ioctl`, so real command streams decode as-is.
 
-| Finding | Fix |
-|---|---|
-| **`appletInitialize` busy loop**: `_appletGetSessionProxy` returned `0x19280` (`AM_BUSY_ERROR`), and libnx loops `svcSleepThread(100ms)` → retry while the result matches that — an infinite "wait for applet" spin. | SendSyncRequest now synthesizes a proper CMIF reply with Result `0` (success), plus a fresh non-zero domain object id for the out subservice. |
-| **Applet focus-state loop**: after the busy loop, libnx waits for `AppletMessage_FocusStateChanged` before leaving `appletInitialize`; the reply payload was left as a random value, so `appletMainLoop` spun `eventWait` → `ReceiveMessage` → retry. | Reply synthesis parses the request's command id (`SFCI` header) and returns plausible applet data: `ReceiveMessage`→15 (FocusStateChanged), `GetCurrentFocusState`→1 (InFocus), `GetOperationMode`→1, `GetPerformanceMode`→0. |
-| The old reply was written into two overlapping "candidate slots" that clobbered each other (`[tls+0x30]` got both the magic and the payload). | Rewrote the reply writer to compute the reply start from the request's hipc header (special header + pid + buffer descriptors) and write one coherent reply. |
-| `UMSUBL`/`UMADDL`/`SMULH`/`UMULH` (multiply-long) were unimplemented — hbmenu's number formatting uses them (`0xcccd` divide-by-10 magic). | Added the multiply-long group (signed/unsigned multiply-add/sub and high-product forms). |
-| hbmenu's SIMD `strchr` (`'='` search in the menu UI) used ~20 NEON instructions beyond the DUP/MOV/MOVI subset. | Added three-same integer ops (ADD/SUB/CMEQ/CMTST/CMGE/CMHS, halving/saturating add-sub, shift-by-register, ADDP/SMAXP/UMAXP), the bitwise logicals (AND/BIC/ORR/ORN/EOR/BSL/BIT/BIF), the ZIP/UZP/TRN permutes, CMEQ-#0, LD/ST single- and multiple-structure, and fixed DUP element-size decoding (`8 << ctz(imm5)`). |
-| Scalar FP (FMOV, FADD, FCVTZS, …) was entirely unimplemented — hbmenu's UI sets up float geometry. | Added a scalar FP subset (FMOV, FADD/FSUB/FMUL/FDIV/FNMUL/FMAX/FMIN/FMAXNM/FMINNM, FABS/FNEG/FSQRT/FRINTx/FCVT, FMADD/FMSUB/FNMADD/FNMSUB, FCMP/FCCMP/FCSEL, SCVTF/UCVTF/FCVTZS/ZU/FCVTN*) using Rust's IEEE f32/f64, plus S/D/Q SIMD&FP loads/stores. |
-| Scalar SIMD compare-to-zero (`cmge v1.2s, v2.2s, #0` in NX-Shell's font code) hit "unimplemented". | Added `CMGE/CMGT/CMLE/CMLT <Dd>,<Dn>,#0` (bits[28:25]=0b1111, op at 15:10). |
-| hbmenu/NX-Shell's IPC requests wrote CMIF headers over the heap's first chunk, corrupting the malloc free-list (`TRACE_HEAP` showed bogus `0xc00000004`-style list pointers and malloc spins). | Root cause: `tpidr` (TLS base) `0x2000_0000` collided with the heap base; app IPC staging writes landed on the heap. Moved TLS to `0x0FF0_0000`. |
-| Static constructors never ran (NX-Shell's `std::string` statics / hbmenu's constructors), so e.g. NX-Shell's cwd/device (`sdmc:`) globals were never set. | `boot_homebrew` in the CPU runs crt0 through the `bl main`, sets ThreadVars at TLS+0x1E0 (magic `!TV$`, zeroed `_REENT` at `0x1FF10000`), runs `DT_INIT_ARRAY` (parsed from MOD0/dynamic in `nro.rs`), then resumes at the `bl main`. |
-| `svcGetInfo` used the wrong InfoType numbering, so libnx's `g_AslrRegion` was `{0, 39}` and deko3d's address-space reservation returned NULL (→ NULL slot base at `0x08254080` → svcBreak 0x1159). | Corrected to the hbmenu libnx numbering (2/3 Alias, 4/5 Heap, 6/7 Total/Used, 12/13 Aslr, 14/15 Stack). |
-| `svcQueryMemory` reported the whole low 2 GiB as one RWX region, so the virtmem allocator saw every candidate as "mapped" and failed. | QueryMemory now reports the contiguous run of pages in the same state (allocated = RWX, untouched soft pages = unmapped). |
-| SIMD&FP LDR/STR immediate loads with `imm12 >= 0x800` were misdecoded as register-offset (bit 21 is the top bit of imm12, not a register flag), e.g. `ldr b29, [x0, #0xc80]` used a garbage Rm and a constructor read `x14+x18`. | Register-offset form is `mode 0b00` + bit 21 set; the immediate (unsigned) form is `mode 0b01` with imm12 at bits[21:10]. |
-| `fcvtzs w24, d1` (0x1e780038) hit "unimplemented" in sdl-hello's stdout setup. The FCVTZS/FCVTZU handler matched the wrong opc (`0b011000` instead of `0b101000`/`0b111000` for S/D) and its `use_double` was `ftype==0b01 && sf==1` (broke 32-bit-dest double-source conversions). | Match `0b101000|0b111000` (signed) and `0b101001|0b111001` (unsigned); `use_double = ftype == 0b01`. `fcvtzs x8, d1` = 0x9e780028. |
+Working: the nvdrv device/ioctl layer, nvmap, the GMMU, host1x syncpoints,
+channels and the GPFIFO/pushbuffer command processor, the MME macro engine,
+`ClearBuffers`, report semaphores, the copy engine (including block-linear
+conversion and component remap), the 2D blitter, inline-to-memory uploads,
+and scan-out.
 
-### Current blockers
+Not implemented: the shader core. Draw calls are decoded and recorded but not
+rasterized, and compute dispatches record their QMD without running warps.
+Homebrew that renders through deko3d's 3D pipeline (or the EGL/GLAD stack, as
+NX-Shell does) will not produce an image until that exists.
 
-- **hbmenu renders nothing (framebuffer alloc fails)**: hbmenu now runs its
-  full init + `graphicsInit` + main loop (the deko3d multi-wait returns thanks
-  to `svcWaitSynchronization` reporting X1=1). But the linear framebuffer
-  (`dkMemBlockCreate` for the 1280x720x4 workmem) **returns NULL** — the
-  deko3d memblock allocator's dlmalloc gets a bad size arg (`x20` =
-  `0x8254998`, a global, instead of the block size) and fails. So hbmenu has
-  no CPU-side framebuffer to fill; the menu never visibly renders.
-- **NX-Shell uses the devkitPro EGL/OpenGL stack, not deko3d directly**
-  (links `-lglad -lEGL -lglapi -ldrm_nouveau`). It runs its full init (14
-  constructors), but `Config::Load`'s `GetDirList` fails (fsdev resolves an
-  empty path), main returns, and the deko3d teardown faults on a NULL device
-  callback — the binary's deko3d region is never entered, so its device list
-  is an uninitialized global.
+## CPU bugs found by running real code
 
-Rendering a frame would require emulating the nv GPU services (nvmap/nvhost)
-plus a software GM20B command-stream renderer, or stubbing deko3d itself;
-each unblocked step typically exposes the next.
+| Symptom | Root cause | Fix |
+|---|---|---|
+| `aligned_alloc` returned NULL for every allocation, so deko3d/libnx graphics init failed | Register 31 in the **shifted-register** ADD/SUB form is XZR, not SP. `neg x1, x0` is `sub x1, xzr, x0`, and reading SP produced a garbage rounded size. | `add_sub` takes the form explicitly: SP for immediate/extended, XZR for shifted. |
+| A vectorised table-fill loop never terminated | SIMD&FP load/store mode `0b00` only handled the unscaled STUR/LDUR form; bits[11:10] also select post-index and pre-index, whose base write-back was missing. | Decode the index field and write the base back. |
+| `unimplemented instruction 0x6f3f077b` | The AdvSIMD shift-by-immediate group (SSHR/USHR/SSRA/SRSHR/SRI/SHL/SLI/SSHLL) was absent. | Implemented; the narrowing forms were already handled separately. |
+| `unimplemented SIMD three-same op=0b10011` | MUL/MLA/MLS, SMAX/SMIN, SABD/SABA and CMGT/CMHI were missing from the three-same group. | Added, with a destination-reading variant for the accumulating forms. |
+| `unimplemented system instruction 0xd50b7e28` | Only `DC ZVA` was handled; libnx flushes the data cache around every GPU buffer. | The remaining `DC`/`IC` maintenance ops retire as no-ops — memory here is always coherent. |
+
+## Services
+
+- **nvdrv** is the real `INvDrvServices` interface (Open/Ioctl/Ioctl2/Ioctl3/
+  Close/Initialize/QueryEvent). `QueryPointerBufferSize` reports 0 so libnx
+  marshals every auto-select buffer as a map-alias range, and
+  `CloneCurrentObject` is honoured because libnx sends `SubmitGpfifo` down the
+  cloned session.
+- **vi** hands out an `IHOSBinderDriver` whose `TransactParcel` runs a real
+  `IGraphicBufferProducer`: `SET_PREALLOCATED_BUFFER` decodes the
+  `NvGraphicBuffer`, `DEQUEUE_BUFFER` hands back a slot, and `QUEUE_BUFFER`
+  scans the image out.
+- **fsp-srv** is backed by `vfs::Vfs`, a path-addressed SD card. Paths arrive
+  in HIPC static buffers, so a missing path reports `FsError_PathNotFound`
+  instead of pretending to succeed — which is what stopped hbmenu recursing
+  forever through directories that did not exist.
+- **set** reports a real language-code table so `setMakeLanguage` resolves
+  `en-US`; hbmenu's `textInit()` depends on it.
 
 ## Repro / verification
 
-- Host: `cargo run -p switch-core --example boot_hbmenu -- /path/to/hbmenu.nro`.
-- Browser: `make serve`, then load `hbmenu.nro` (copy into `web/assets/`)
-  with the "Horizon (stubbed)" ABI selected.
-- Regression suite: `make test` — 65 tests, including coverage for the
-  applet reply synthesis, the new three-same/logical/permute SIMD ops, the
-  scalar FP subset, the multiply-long forms, the hid shared-memory input
-  path, and PFS0 offset rebasing.
+- Host: `cargo run -p switch-core --release --example screenshot -- \
+  test-nros/hbmenu.nro out.ppm 3` writes the third presented frame.
+- `cargo run -p switch-core --release --example trace -- <nro>` profiles the
+  hottest PCs, or breaks on given PCs and dumps registers.
+- `TRACE_NV=1` traces nvdrv IPC (with guest backtraces), `TRACE_GPU=1` traces
+  device opens, ioctls and engine methods, `TRACE_IPC=1` traces all services.
+- Browser: `make serve`, load `hbmenu.nro` with the "Horizon (stubbed)" ABI.
+- Regression suite: `make test` — 186 tests.
+
+## Next
+
+1. **Shader core**: a Maxwell SASS interpreter plus a software rasterizer, so
+   `VertexBegin`/`DrawArrays` produce pixels. This is what deko3d-rendering and
+   EGL/OpenGL homebrew need.
+2. **PhysicsFS/assets**: hbmenu's `assetsInit()` is the current stopping point.
+3. **NX-Shell** faults on a NULL call in its C++ teardown path; it renders
+   through EGL/GLAD, so it needs (1) regardless.
+
+## Historical notes
 
 ## Input / controller support
 

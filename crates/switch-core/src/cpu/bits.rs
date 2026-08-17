@@ -1,0 +1,455 @@
+//! Bit-level helpers shared by the instruction groups: the ARM sign/zero
+//! extension, shift and rotate primitives, the bitmask-immediate and
+//! bitfield decoders, saturating arithmetic and the float rounding modes.
+
+/// Rounding mode for the float-to-integer conversion instructions.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Rounding {
+    /// Round to nearest, ties to even.
+    TiesEven,
+    /// Round toward +infinity.
+    TowardPos,
+    /// Round toward -infinity.
+    TowardNeg,
+    /// Round to nearest, ties away from zero.
+    TiesAway,
+}
+
+/// Convert a float to a (possibly signed) integer using an explicit rounding
+/// mode, then truncate to the destination size. NaN → 0, out-of-range results
+/// saturate, matching the default FPCR behavior the emulator assumes.
+pub(crate) fn round_to_int(f: f64, r: Rounding, signed: bool) -> u64 {
+    if f.is_nan() {
+        return 0;
+    }
+    let rounded = match r {
+        Rounding::TiesEven => f.round_ties_even(),
+        Rounding::TowardPos => f.ceil(),
+        Rounding::TowardNeg => f.floor(),
+        Rounding::TiesAway => f.round(),
+    };
+    let clipped = rounded.clamp(
+        i64::MIN as f64,
+        if signed { i64::MAX as f64 } else { u64::MAX as f64 },
+    );
+    if signed {
+        (clipped as i64) as u64
+    } else {
+        clipped.max(0.0) as u64
+    }
+}
+
+/// Saturating add of two `bits`-wide lanes (`signed` selects SQADD/UQADD).
+pub(crate) fn saturating_add(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
+    let sum = (a as i128) + (b as i128);
+    if signed {
+        let (min, max) = (i64::MIN >> (64 - bits), (1i64 << (bits - 1)) - 1);
+        sum.clamp(min as i128, max as i128) as u64
+    } else {
+        let max = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        (sum as u128).min(max as u128) as u64
+    }
+}
+
+/// Saturating subtract of two `bits`-wide lanes (`signed` selects SQSUB/UQSUB).
+pub(crate) fn saturating_sub(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
+    let diff = (a as i128) - (b as i128);
+    if signed {
+        let (min, max) = (i64::MIN >> (64 - bits), (1i64 << (bits - 1)) - 1);
+        diff.clamp(min as i128, max as i128) as u64
+    } else {
+        let max = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        diff.clamp(0, max as i128) as u64
+    }
+}
+
+/// Shift a lane left by the amount in `b`'s low bits; negative shifts shift
+/// right (arithmetically for SSHL, logically for USHL).
+pub(crate) fn shift_by_reg(a: u64, b: u64, bits: u32, unsigned: bool) -> u64 {
+    let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+    let a = a & mask;
+    let shift = (b & mask) as i64;
+    if shift >= 0 {
+        let sh = shift as u32;
+        if sh >= bits { 0 } else { (a << sh) & mask }
+    } else {
+        let sh = (-shift) as u32;
+        if unsigned {
+            if sh >= bits { 0 } else { a >> sh }
+        } else {
+            // Sign-extend the lane before the arithmetic shift.
+            let sa = if bits == 64 {
+                a as i64
+            } else {
+                ((a << (64 - bits)) as i64) >> (64 - bits)
+            };
+            if sh >= bits {
+                if sa < 0 { mask } else { 0 }
+            } else {
+                ((sa >> sh) as u64) & mask
+            }
+        }
+    }
+}
+
+/// FP max/min with ARM semantics: if either operand is NaN the NaN operand is
+/// returned (Rust's `f64::max` would discard it).
+pub(crate) fn fp_max(a: f64, b: f64) -> f64 {
+    if a.is_nan() {
+        a
+    } else if b.is_nan() {
+        b
+    } else {
+        a.max(b)
+    }
+}
+
+pub(crate) fn fp_min(a: f64, b: f64) -> f64 {
+    if a.is_nan() {
+        a
+    } else if b.is_nan() {
+        b
+    } else {
+        a.min(b)
+    }
+}
+
+/// FMAXNM/FMINNM: same NaN handling as the plain max/min.
+pub(crate) fn fp_maxnum(a: f64, b: f64) -> f64 {
+    fp_max(a, b)
+}
+
+pub(crate) fn fp_minnum(a: f64, b: f64) -> f64 {
+    fp_min(a, b)
+}
+
+#[inline]
+pub(crate) fn sext_u64<T: Into<u64>>(v: T, bits: u32) -> u64 {
+    let v = v.into();
+    if bits >= 64 {
+        return v;
+    }
+    let sign = 1u64 << (bits - 1);
+    let mask = (1u64 << bits) - 1;
+    let v = v & mask;
+    if v & sign != 0 {
+        v | !mask
+    } else {
+        v
+    }
+}
+
+/// Shift `v` left/right logically or arithmetically, or rotate, by `sa`.
+pub(crate) fn shift_reg(v: u64, st: u32, sa: u32, sf: bool) -> u64 {
+    let size = if sf { 64 } else { 32 };
+    let mask = if sf { u64::MAX } else { u32::MAX as u64 };
+    let v = v & mask;
+    match st {
+        0 => {
+            // LSL
+            if sa >= size {
+                0
+            } else if sa == 0 {
+                v
+            } else {
+                (v << sa) & mask
+            }
+        }
+        1 => {
+            // LSR
+            if sa >= size {
+                0
+            } else if sa == 0 {
+                v
+            } else {
+                v >> sa
+            }
+        }
+        2 => {
+            // ASR
+            if sa == 0 {
+                v
+            } else if sa >= size {
+                if v & (1 << (size - 1)) != 0 {
+                    mask
+                } else {
+                    0
+                }
+            } else {
+                ((v as i64) >> sa) as u64 & mask
+            }
+        }
+        _ => {
+            // ROR
+            if sa == 0 {
+                v
+            } else if sf {
+                v.rotate_right(sa % 64)
+            } else {
+                ((v as u32).rotate_right(sa % 32)) as u64
+            }
+        }
+    }
+}
+
+/// Variable shift by register amount (LSLV/LSRV/ASRV).
+pub(crate) fn shift_var(v: u64, amt: u64, kind: u32, sf: bool) -> u64 {
+    let size = if sf { 64 } else { 32 };
+    let amt = (amt % size) as u32;
+    shift_reg(v, kind, amt, sf)
+}
+
+/// Extend a register value for the ADD/SUB extended-register form.
+pub(crate) fn extend_reg(v: u64, option: u8, sf: bool) -> u64 {
+    match option {
+        0b000 => v as u8 as u64,        // UXTB
+        0b001 => v as u16 as u64,       // UXTH
+        0b010 => v as u32 as u64,       // UXTW
+        0b011 => v,                     // UXTX / LSL
+        0b100 => sext_u64(v, 8),        // SXTB
+        0b101 => sext_u64(v, 16),       // SXTH
+        0b110 => sext_u64(v, 32),       // SXTW
+        0b111 => v,                     // SXTX
+        _ => v,
+    }
+    .min(if sf { u64::MAX } else { u32::MAX as u64 })
+}
+
+/// Decode the rotated-element bitmask of the logical-immediate encoding.
+/// Decode a logical-immediate (AND/ORR/EOR/ANDS) bitmask, per ARM ARM
+/// `DecodeBitMasks`. Matches QEMU `logic_imm_decode_wmask`: the element size
+/// is derived from `N:NOT(imms)` and bits of `imms` above the element size
+/// are ignored (e.g. `mov w20, #0x80808080`).
+/// Expand a MOVI/MVNI 8-bit immediate per ARM `AdvSIMDExpandImm` (mirrors
+/// QEMU's `asimd_imm_const`). Returns the 64-bit lane value; the caller
+/// replicates it over the 128-bit register for Q=1.
+pub(crate) fn simd_imm_const(imm: u32, cmode: u32, op: u32) -> u64 {
+    let mut imm = imm;
+    match cmode {
+        0 | 1 => {}
+        2 | 3 => imm <<= 8,
+        4 | 5 => imm <<= 16,
+        6 | 7 => imm <<= 24,
+        8 | 9 => imm |= imm << 16,
+        10 | 11 => imm = (imm << 8) | (imm << 24),
+        12 => imm = (imm << 8) | 0xff,
+        13 => imm = (imm << 16) | 0xffff,
+        14 => {
+            if op == 1 {
+                // Byte-mask form: imm's set bits select 0xff bytes.
+                let mut imm64 = 0u64;
+                for n in 0..8 {
+                    if imm & (1 << n) != 0 {
+                        imm64 |= 0xffu64 << (n * 8);
+                    }
+                }
+                return imm64;
+            }
+            imm |= (imm << 8) | (imm << 16) | (imm << 24);
+        }
+        15 => {
+            if op == 1 {
+                // 64-bit float immediate (valid for AArch64).
+                let mut imm64 = ((imm & 0x3f) as u64) << 48;
+                if imm & 0x80 != 0 {
+                    imm64 |= 0x8000_0000_0000_0000;
+                }
+                if imm & 0x40 != 0 {
+                    imm64 |= 0x3fc0_0000_0000_0000;
+                } else {
+                    imm64 |= 0x4000_0000_0000_0000;
+                }
+                return imm64;
+            }
+            imm = ((imm & 0x80) << 24)
+                | ((imm & 0x3f) << 19)
+                | if imm & 0x40 != 0 { 0x1f << 25 } else { 1 << 30 };
+        }
+        _ => {}
+    }
+    if op != 0 {
+        imm = !imm;
+    }
+    (imm as u64) | ((imm as u64) << 32)
+}
+
+pub(crate) fn decode_bit_mask(sf: bool, n: u32, immr: u32, imms: u32) -> Option<u64> {
+    if !sf && n != 0 {
+        return None;
+    }
+    let combined = ((n & 1) << 6) | ((!imms) & 0x3F);
+    if combined == 0 {
+        return None;
+    }
+    let len = 32 - combined.leading_zeros() - 1;
+    let e = 1u64 << len;
+    let levels = e - 1;
+    let s = imms as u64 & levels;
+    let r = immr as u64 & levels;
+    if s == levels {
+        return None;
+    }
+    let mut welem = (1u64 << (s + 1)) - 1;
+    if r != 0 {
+        welem = (welem >> r) | (welem << (e - r));
+        if e < 64 {
+            welem &= (1u64 << e) - 1;
+        }
+    }
+    let datasize = if sf { 64 } else { 32 };
+    let mut wmask = 0u64;
+    let mut shift = 0u32;
+    while shift < datasize {
+        wmask |= welem.wrapping_shl(shift);
+        shift += e as u32;
+    }
+    Some(wmask)
+}
+
+/// SBFM / BFM / UBFM semantics.
+pub(crate) fn bitfield_apply(opc: u32, val: u64, cur: u64, immr: u32, imms: u32, sf: bool) -> u64 {
+    let datasize = if sf { 64 } else { 32 };
+    let lsb = immr as u64;
+    let msb = imms as u64;
+
+    match opc {
+        // UBFM
+        0b10 => {
+            if msb >= lsb {
+                let width = (msb - lsb + 1) as u32;
+                (val >> lsb) & mask_of_width(width, sf)
+            } else {
+                // UBFIZ: field at the bottom, shifted up
+                let shift = datasize - lsb;
+                ((val & mask_of_width((msb + 1) as u32, sf)).wrapping_shl(shift as u32))
+                    & mask_of_width(64, sf)
+            }
+        }
+        // SBFM
+        0b00 => {
+            if msb >= lsb {
+                let width = (msb - lsb + 1) as u32;
+                sext_u64(val >> lsb, width)
+            } else {
+                let shift = datasize - lsb;
+                let field = val & mask_of_width((msb + 1) as u32, sf);
+                let shifted = field.wrapping_shl(shift as u32);
+                // sign extend from bit (msb) after the shift
+                let sign_bit = msb as u32;
+                if shifted & (1u64 << sign_bit) != 0 {
+                    shifted | !mask_of_width((shift + msb + 1) as u32, sf)
+                } else {
+                    shifted & mask_of_width((shift + msb + 1) as u32, sf)
+                }
+            }
+        }
+        // BFM — merges Rn into the ORIGINAL Rd (BFI / BFXIL). The old decoder
+        // used `cur = val` (Rn) and never read the destination register, so
+        // `bfi` zeroed the bits it was meant to preserve. libtransistor's
+        // squashfs `swab_super` relies on this.
+        0b01 => {
+            if msb >= lsb {
+                let width = (msb - lsb + 1) as u32;
+                let field = (val >> lsb) & mask_of_width(width, sf);
+                (cur & !mask_of_width(width, sf)) | field
+            } else {
+                let field = val & mask_of_width((msb + 1) as u32, sf);
+                let shift = (datasize - lsb) as u32;
+                let m = mask_of_width((msb + 1) as u32, sf).wrapping_shl(shift);
+                (cur & !m) | (field << shift)
+            }
+        }
+        _ => 0,
+    }
+}
+
+pub(crate) fn mask_of_width(width: u32, _sf: bool) -> u64 {
+    if width >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << width) - 1
+    }
+}
+
+pub(crate) fn reverse_bits(v: u64, size: u32) -> u64 {
+    let r = v.reverse_bits();
+    if size == 64 {
+        r
+    } else {
+        (r >> 32) as u32 as u64
+    }
+}
+
+pub(crate) fn reverse_16_lanes(v: u64, size: u32) -> u64 {
+    let mut out = 0u64;
+    let lanes = size / 16;
+    for i in 0..lanes {
+        let lane = ((v >> (i * 16)) & 0xFFFF) as u16;
+        out |= ((lane.swap_bytes() as u64) & 0xFFFF) << (i * 16);
+    }
+    out
+}
+
+pub(crate) fn reverse_32_lanes(v: u64, size: u32) -> u64 {
+    let mut out = 0u64;
+    let lanes = size / 32;
+    for i in 0..lanes {
+        let lane = ((v >> (i * 32)) & 0xFFFF_FFFF) as u32;
+        out |= ((lane.swap_bytes() as u64) & 0xFFFF_FFFF) << (i * 32);
+    }
+    out
+}
+
+pub(crate) fn clz(v: u64, size: u32) -> u64 {
+    let v = if size == 32 { (v as u32) as u64 } else { v };
+    (if size == 64 {
+        v.leading_zeros()
+    } else {
+        (v as u32).leading_zeros()
+    }) as u64
+}
+
+pub(crate) fn cls(v: u64, size: u32) -> u64 {
+    if size == 32 {
+        let v = v as i32;
+        if v == 0 {
+            return 31;
+        }
+        if v < 0 {
+            (!v).leading_zeros() as u64
+        } else {
+            v.leading_zeros() as u64
+        }
+    } else {
+        let v = v as i64;
+        if v == 0 {
+            return 63;
+        }
+        if v < 0 {
+            (!v).leading_zeros() as u64
+        } else {
+            v.leading_zeros() as u64
+        }
+    }
+}
+
+pub(crate) fn ctz(v: u64, size: u32) -> u64 {
+    let v = if size == 32 { (v as u32) as u64 } else { v };
+    (if size == 64 {
+        v.trailing_zeros()
+    } else {
+        (v as u32).trailing_zeros()
+    }) as u64
+}
+
+
+/// Absolute difference of two `bits`-wide lanes (SABD/UABD).
+pub(crate) fn simd_abs_diff(a: u64, b: u64, bits: u32, unsigned: bool) -> u64 {
+    if unsigned {
+        if a >= b { a - b } else { b - a }
+    } else {
+        let sa = sext_u64(a, bits) as i64;
+        let sb = sext_u64(b, bits) as i64;
+        (sa - sb).unsigned_abs()
+    }
+}
