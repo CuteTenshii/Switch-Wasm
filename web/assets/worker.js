@@ -157,7 +157,7 @@ self.onmessage = (e) => {
   try {
     // instantiateStreaming fetches + compiles in one pass (works in workers).
     const { instance } = await WebAssembly.instantiateStreaming(
-      fetch('assets/switch_wasm.wasm'), {});
+      fetch('switch_wasm.wasm'), {});
     api = instance.exports;
     self.postMessage({ type: 'ready' });
   } catch (err) {

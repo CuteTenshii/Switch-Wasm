@@ -2,81 +2,160 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>switch-wasm — Nintendo Switch emulator core in the browser</title>
-<link rel="stylesheet" href="style.css">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#07080c">
+
+<title>switch-wasm - a Nintendo Switch emulator in your browser</title>
+<meta name="description" content="A from-scratch Nintendo Switch emulator core - an ARM64 interpreter and GM20B GPU emulation - compiled to WebAssembly. Boot homebrew NROs entirely in your browser; nothing is uploaded.">
+<link rel="canonical" href="https://tenshii.moe/Switch-Wasm/">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="switch-wasm">
+<meta property="og:title" content="switch-wasm - a Nintendo Switch emulator in your browser">
+<meta property="og:description" content="An ARM64 interpreter and GM20B GPU emulation compiled to WebAssembly. Boot homebrew NROs entirely in your browser; nothing is uploaded.">
+<meta property="og:url" content="https://tenshii.moe/Switch-Wasm/">
+<meta property="og:image" content="https://tenshii.moe/Switch-Wasm/assets/og.png">
+<meta property="og:image:type" content="image/png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="switch-wasm: a Nintendo Switch emulator that runs in your browser, showing hbmenu booting at 1280x720.">
+
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="switch-wasm - a Nintendo Switch emulator in your browser">
+<meta name="twitter:description" content="An ARM64 interpreter and GM20B GPU emulation compiled to WebAssembly. Boot homebrew NROs entirely in your browser; nothing is uploaded.">
+<meta name="twitter:image" content="https://tenshii.moe/Switch-Wasm/assets/og.png">
+<meta name="twitter:image:alt" content="switch-wasm: a Nintendo Switch emulator that runs in your browser, showing hbmenu booting at 1280x720.">
+
+<link rel="stylesheet" href="assets/style.css">
 </head>
 <body>
-<header>
-  <h1>switch-wasm</h1>
-  <p class="sub">A from-scratch Switch emulation core (ARM64 interpreter + NSP/NCA/NRO parsers) compiled to WebAssembly.</p>
-</header>
 
-<main>
-  <section class="card" id="container-card">
-    <h2>NSP container</h2>
-    <p class="hint">Drop a <code>.nsp</code> to list its contents and inspect NCA headers.</p>
-    <div class="dropzone" id="nsp-drop">Drop .nsp here, or <label for="nsp-file">browse</label>
-      <input type="file" id="nsp-file" accept=".nsp,.nsz,.xci" hidden>
-    </div>
-    <div class="row keys">
-      <label class="filebtn" for="prod-keys">Load prod.keys</label>
-      <input type="file" id="prod-keys" accept=".keys,.txt" hidden>
-      <label class="filebtn" for="title-keys">Load title.keys</label>
-      <input type="file" id="title-keys" accept=".keys,.txt" hidden>
-      <button id="btn-clear-keys" class="small">Clear keys</button>
-      <span id="keys-state" class="dim">no keys loaded — encrypted NCA headers can't be inspected</span>
-    </div>
-    <div id="nsp-result"></div>
-  </section>
+<div class="app" id="app">
 
-  <section class="card" id="run-card">
-    <h2>Homebrew runner</h2>
-    <p class="hint">Load an NRO or AArch64 ELF and execute it on the interpreter. Only integer instructions are supported (Phase 1); the bundled demo exercises them.</p>
-    <div class="display">
-      <canvas id="screen" width="640" height="360"></canvas>
-      <p class="hint">Framebuffer @ 0x3F000000 — 640&times;360 RGBA, snapshotted after each run/step.</p>
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <span class="name">switch-wasm</span>
     </div>
-    <div class="row">
-      <label class="checkbox">Bundled app:
-        <select id="asset-nro">
-          <option value="hbmenu.nro">hbmenu</option>
-          <option value="sdl-hello.nro" selected>sdl-hello</option>
-        </select>
-      </label>
-      <button id="btn-demo">Run bundled app</button>
-      <label class="filebtn" for="nro-file">Load .nro / .elf</label>
+
+    <div class="transport" role="group" aria-label="Emulation controls">
+      <button id="btn-run" class="btn primary" title="Run / Pause (Space)">
+        <span class="glyph" id="run-glyph">&#9654;</span><span id="run-label">Run</span>
+      </button>
+      <button id="btn-step" class="btn" title="Execute one instruction">Step</button>
+      <button id="btn-reset" class="btn" title="Reset the session">Reset</button>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="topbar-status">
+      <span class="chip" id="state" data-state="idle">idle</span>
+      <span class="readout" id="fps" title="Frames presented per second">- fps</span>
+    </div>
+
+    <div class="topbar-actions">
+      <label class="btn" for="nro-file" title="Open a .nro or .elf">Open</label>
       <input type="file" id="nro-file" accept=".nro,.elf,.bin" hidden>
-      <button id="btn-step">Step</button>
-      <button id="btn-run">Run</button>
-      <button id="btn-reset">Reset</button>
+      <button id="btn-fullscreen" class="btn icon" title="Fullscreen" aria-label="Fullscreen">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path
+          d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>
+      </button>
+      <button id="btn-panel" class="btn icon" title="Toggle panel (`)" aria-label="Toggle panel"
+              aria-expanded="false">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="1.5" y="2.5" width="13" height="11"
+          rx="1.5"/><path d="M10 2.5v11"/></svg>
+      </button>
     </div>
-    <div class="row status">
-      <span>PC: <b id="pc">-</b></span>
-      <span>Steps: <b id="steps">0</b></span>
-      <span>State: <b id="state">idle</b></span>
-      <span>Input: <b id="input-state">none</b></span>
+  </header>
+
+  <main class="stage" id="stage">
+    <canvas id="screen" width="1280" height="720"></canvas>
+
+    <div class="overlay" id="overlay">
+      <div class="overlay-inner">
+        <h1>Drop a homebrew <code>.nro</code> to boot</h1>
+        <p class="muted">…or open one, or start a bundled app. Everything runs locally in your browser.</p>
+        <div class="overlay-actions">
+          <label class="btn primary big" for="nro-file-2">Open .nro / .elf</label>
+          <input type="file" id="nro-file-2" accept=".nro,.elf,.bin" hidden>
+          <span class="or">or</span>
+          <select id="asset-nro" class="select big">
+            <option value="hbmenu.nro">hbmenu</option>
+            <option value="sdl-hello.nro">sdl-hello</option>
+          </select>
+          <button id="btn-demo" class="btn big">Boot</button>
+        </div>
+        <p class="muted tiny">Keyboard: arrows = D-pad · Z/X = A/B · A/S = X/Y · Q/E = L/R · Enter = + · Shift = −.
+          A connected gamepad is used automatically.</p>
+      </div>
+    </div>
+
+    <div class="dropveil" id="dropveil"><span>Release to boot</span></div>
+  </main>
+
+  <footer class="statusbar">
+    <span class="item">PC <b id="pc">-</b></span>
+    <span class="item">Steps <b id="steps">0</b></span>
+    <span class="item">Res <b id="res">-</b></span>
+    <span class="item">Input <b id="input-state">none</b></span>
+    <span class="spacer"></span>
+    <span class="item dim" id="wasm-ver">starting core…</span>
+  </footer>
+
+</div>
+
+<aside class="panel" id="panel" aria-label="Tools">
+  <nav class="tabs" role="tablist">
+    <button class="tab is-active" data-tab="console" role="tab" aria-selected="true">Console</button>
+    <button class="tab" data-tab="debug" role="tab" aria-selected="false">Debug</button>
+    <button class="tab" data-tab="files" role="tab" aria-selected="false">Files</button>
+    <button class="tab-close btn icon" id="btn-panel-close" title="Close panel" aria-label="Close panel">&times;</button>
+  </nav>
+
+  <section class="tabpanel is-active" data-panel="console">
+    <div class="panel-tools">
+      <button id="btn-clear-console" class="btn small">Clear</button>
+      <label class="check"><input type="checkbox" id="autoscroll-cb" checked> Autoscroll</label>
     </div>
     <pre class="console" id="console" aria-live="polite"></pre>
-    <div class="row">
-      <span class="hint">SVC ABI: Horizon stubs (real homebrew only)</span>
-      <label class="checkbox"><input type="checkbox" id="trace-cb"> Instruction trace</label>
-      <button id="btn-dumptrace">Dump trace</button>
-      <button id="btn-dumpregs">Dump regs</button>
-    </div>
-    <div class="row">
-      <input id="reg-idx" type="number" min="0" max="31" value="0">
-      <button id="btn-readreg">Read reg</button>
-      <span>X<span id="reg-idx-label">0</span> = <b id="reg-val">-</b></span>
-    </div>
   </section>
-</main>
 
-<footer>
-  Demo payload is hand-assembled homebrew. Encrypted commercial content is out of scope.
-  <span id="wasm-ver"></span>
-</footer>
+  <section class="tabpanel" data-panel="debug">
+    <div class="panel-tools">
+      <label class="check"><input type="checkbox" id="trace-cb"> Instruction trace</label>
+      <button id="btn-dumptrace" class="btn small">Dump trace</button>
+      <button id="btn-dumpregs" class="btn small">Dump regs</button>
+    </div>
+    <div class="panel-tools">
+      <label class="check">X<input id="reg-idx" type="number" min="0" max="31" value="0" class="num"></label>
+      <button id="btn-readreg" class="btn small">Read</button>
+      <code class="regval" id="reg-val">-</code>
+    </div>
+    <p class="muted tiny">Tracing caps each run slice so the log stays readable.
+      A fault dumps the register snapshot and the last instructions into the console.</p>
+  </section>
 
-<script src="main.js"></script>
+  <section class="tabpanel" data-panel="files">
+    <p class="muted tiny">Inspect an <code>.nsp</code> container and its NCA headers. Encrypted
+      (CDN) headers need <code>prod.keys</code>.</p>
+    <div class="dropzone" id="nsp-drop">
+      Drop <code>.nsp</code> here, or <label for="nsp-file">browse</label>
+      <input type="file" id="nsp-file" accept=".nsp,.nsz,.xci" hidden>
+    </div>
+    <div class="panel-tools">
+      <label class="btn small" for="prod-keys">prod.keys</label>
+      <input type="file" id="prod-keys" accept=".keys,.txt" hidden>
+      <label class="btn small" for="title-keys">title.keys</label>
+      <input type="file" id="title-keys" accept=".keys,.txt" hidden>
+      <button id="btn-clear-keys" class="btn small">Clear</button>
+    </div>
+    <p class="muted tiny" id="keys-state">no keys loaded</p>
+    <div id="nsp-result"></div>
+  </section>
+</aside>
+
+<script src="assets/main.js"></script>
 </body>
 </html>

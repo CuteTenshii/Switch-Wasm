@@ -21,8 +21,12 @@ Browser-oriented Nintendo Switch emulation core: an ARM64 (A64) integer interpre
 
 - `crates/switch-core` — the emulation core, zero external deps. Modules: `cpu` (A64 interpreter, split into `mod`/`alu`/`bits`/`fp`/`ipc`/`loadstore`/`simd`/`svc`/`system`), `gpu` (GM20B model), `display` (binder buffer queue), `vfs` (emulated SD card), `mem` (sparse 4 GiB page table), `disasm`, `nsp`/`nca`/`nro`/`elf` (parsers), `error`.
 - `crates/switch-wasm` — `cdylib` for `wasm32-unknown-unknown`, exports a raw `extern "C"` ABI (no wasm-bindgen). Buffers cross the boundary via wasm linear memory (`switch_alloc`/`switch_free`); a handle is an index into a global session table. **No external deps by design** — JSON results are emitted by the hand-rolled `json_escape`/`write_into` helpers in `crates/switch-wasm/src/lib.rs`. Don't add serde/etc.
-- `tools/serve.py` — local static server with no-cache headers.
-- `web/worker.js` — hosts the wasm module (`WebAssembly.instantiateStreaming` of `assets/switch_wasm.wasm`) and is the glue over the ABI. `web/main.js` is promise-based RPC over `postMessage`. Step budgets: non-trace `Number.MAX_SAFE_INTEGER`, trace mode 5000.
+- `tools/serve.py` — local static server with no-cache headers and the right `application/wasm` MIME type (`instantiateStreaming` refuses anything else). Takes an optional port.
+- `tools/make_og.py` — renders `web/assets/og.png`, the social preview card, around a real captured frame (`web/assets/screenshot.png`).
+- `web/index.html` is the only file at the web root; everything else lives in `web/assets/`, which therefore exists in a fresh checkout. (`*.wasm`/`*.nro` are gitignored, so the directory used to be absent and the Pages build failed on `cp`.)
+- `web/assets/worker.js` hosts the wasm module (`WebAssembly.instantiateStreaming` of `switch_wasm.wasm`) and is the glue over the ABI; `web/assets/main.js` is promise-based RPC over `postMessage` plus the app shell. Step budgets: non-trace 5,000,000 per slice, trace mode 5000.
+- **Path trap**: `new Worker(...)` resolves against the *document*, so main.js says `assets/worker.js`; a `fetch` inside the worker resolves against the *worker script*, so worker.js says `switch_wasm.wasm` with no prefix.
+- The UI is an app shell, not a page: the canvas owns the viewport, the tools drawer is closed by default (backtick toggles it, Space is run/pause), and the canvas resizes to whatever resolution the guest presents.
 - Emulated CPU addresses are `u32` (32-bit PC). Memory is a sparse page table (`PAGE_COUNT` computed in `u64` to survive wasm32 `usize` truncation); reads/writes to unmapped addresses fault with `Error::Cpu`.
 - The demo framebuffer is memory-mapped at `FB_BASE = 0x3F00_0000` (640x360 RGBA) and input at `INPUT_ADDR = 0x3F10_0000`. Syscall ABI: `SyscallMode::Horizon` stubs for real homebrew. Commercial encrypted content is out of scope.
 
