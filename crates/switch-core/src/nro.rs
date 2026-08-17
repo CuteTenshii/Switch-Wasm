@@ -80,9 +80,18 @@ pub const HOMEBREW_NRO_PATH: &str = "sdmc:/switch/homebrew.nro";
 
 /// Entry keys of the libnx homebrew ABI (`nx/source/runtime/env.h`).
 const ENTRY_MAIN_THREAD_HANDLE: u32 = 1;
+const ENTRY_NEXT_LOAD_PATH: u32 = 2;
 const ENTRY_ARGV: u32 = 5;
 const ENTRY_HOS_VERSION: u32 = 16;
 const ENTRY_END_OF_LIST: u32 = 0;
+
+/// Where the environment block keeps the "next NRO to run" buffers that
+/// `EntryType_NextLoadPath` points at. A menu writes the path it wants launched
+/// here and exits; hbmenu's `launchInit()` refuses to start without them.
+pub const NEXT_LOAD_PATH_ADDR: u32 = ENV_BLOCK_ADDR + 0x400;
+pub const NEXT_LOAD_ARGV_ADDR: u32 = ENV_BLOCK_ADDR + 0x800;
+/// Size of each of those buffers, as hbloader sizes them.
+pub const NEXT_LOAD_BUFFER_SIZE: usize = 0x300;
 
 /// Write a minimal homebrew ABI environment block so `envSetup` in the crt0
 /// populates its runtime globals. libnx's `EntryType_HosVersion` handler
@@ -111,11 +120,20 @@ pub fn setup_env_block(mem: &mut Memory) -> u32 {
     let _ = mem.write_u32(a + 52, 0);
     let _ = mem.write_u64(a + 56, 0);
     let _ = mem.write_u64(a + 64, (a + ARGV_STRING_OFFSET) as u64);
-    // EndOfList
-    let _ = mem.write_u32(a + 72, ENTRY_END_OF_LIST);
+    // NextLoadPath (Key 2): { path buffer, argv buffer }. A homebrew menu is
+    // expected to write what it wants launched next into these and exit — and
+    // hbmenu's `launchInit()` fails outright when the loader doesn't offer them.
+    let _ = mem.write_u32(a + 72, ENTRY_NEXT_LOAD_PATH);
     let _ = mem.write_u32(a + 76, 0);
-    let _ = mem.write_u64(a + 80, 0);
-    let _ = mem.write_u64(a + 88, 0);
+    let _ = mem.write_u64(a + 80, u64::from(NEXT_LOAD_PATH_ADDR));
+    let _ = mem.write_u64(a + 88, u64::from(NEXT_LOAD_ARGV_ADDR));
+    let _ = mem.map_zero(NEXT_LOAD_PATH_ADDR, NEXT_LOAD_BUFFER_SIZE);
+    let _ = mem.map_zero(NEXT_LOAD_ARGV_ADDR, NEXT_LOAD_BUFFER_SIZE);
+    // EndOfList
+    let _ = mem.write_u32(a + 96, ENTRY_END_OF_LIST);
+    let _ = mem.write_u32(a + 100, 0);
+    let _ = mem.write_u64(a + 104, 0);
+    let _ = mem.write_u64(a + 112, 0);
 
     let path = HOMEBREW_NRO_PATH.as_bytes();
     for (i, &byte) in path.iter().enumerate() {

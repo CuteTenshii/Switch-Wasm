@@ -599,6 +599,13 @@ pub extern "C" fn switch_get_cycles(handle: u32) -> u64 {
     session(handle).cpu.cycles
 }
 
+/// Guest RAM currently backed by host storage, in bytes — the emulated
+/// console's memory use, not the wasm heap's.
+#[no_mangle]
+pub extern "C" fn switch_guest_ram(handle: u32) -> u64 {
+    session(handle).cpu.mem.mapped_bytes()
+}
+
 // ---- small JSON helpers ----
 
 fn json_escape(s: &str, out: &mut Vec<u8>) {

@@ -36,7 +36,11 @@ impl Cpu {
                 // size (BS=4 → 64 bytes). musl/newlib memset strides the
                 // cache-zero loop with `4 << BS`; BS=0 makes it run away.
                 0b11_011_0000_0000_111 => 4,
-                // CTR_EL0 etc: report 0
+                // CTR_EL0: 3:3:0:0:1 — the Cortex-A57 value (0x8444C004:
+                // 64-byte I- and D-cache lines, 64-byte ERG/CWG). Cache-flush
+                // loops stride by `4 << DminLine`, so reporting 0 made
+                // NX-Shell's flush walk its buffers 4 bytes at a time.
+                0b11_011_0000_0000_001 => 0x8444_C004,
                 _ => 0,
             };
             self.write_zr(rt, val);

@@ -16,10 +16,11 @@ impl Cpu {
         f64::from_bits(self.vregs[r as usize] as u64)
     }
 
+    /// Write Sn. A scalar FP write is a 32-bit write to the vector register, so
+    /// it zeroes the other 96 bits rather than leaving whatever was there.
     #[inline]
     pub(super) fn fp_set_f32(&mut self, r: u8, v: f32) {
-        let bits = v.to_bits() as u128;
-        self.vregs[r as usize] = (self.vregs[r as usize] & !0xFFFF_FFFF) | bits;
+        self.vregs[r as usize] = u128::from(v.to_bits());
     }
 
     #[inline]
@@ -63,9 +64,12 @@ impl Cpu {
             };
         }
 
-        // FCVT (float <-> float): bits[31:24] = 00011110, bit21 = 1,
-        // bits[20:15] = 000100 (Dn -> Sd) / 000101 (Sn -> Dd),
-        // bits[14:10] = 10000. `fcvt s0, d0` = 0x1E624000.
+        // Scalar FP 1-source: bits[31:24] = 00011110, bit21 = 1,
+        // bits[14:10] = 10000, opcode in bits[20:15], `type` in bits[23:22]
+        // (00 = S, 01 = D). Note the opcode's low bit lands in bits[15], so
+        // matching on bits[15:10] as a unit misses half the group — which is
+        // how `fmov s0, s15` (opcode 0) came out unimplemented.
+        // `fcvt s0, d0` = 0x1E624000, `fmov s0, s15` = 0x1E2041E0.
         if ((insn >> 24) & 0xFF) == 0b00011110
             && ((insn >> 21) & 1) == 1
             && ((insn >> 10) & 0x1F) == 0b10000
@@ -73,19 +77,72 @@ impl Cpu {
             let op = (insn >> 15) & 0x3F;
             let rn = ((insn >> 5) & 0x1F) as u8;
             let rd = (insn & 0x1F) as u8;
-            return match op {
-                0b000100 => {
-                    // double -> single
-                    self.fp_set_f32(rd, self.fp_get_f64(rn) as f32);
-                    Ok(true)
-                }
-                0b000101 => {
-                    // single -> double
-                    self.fp_set_f64(rd, self.fp_get_f32(rn) as f64);
-                    Ok(true)
-                }
-                _ => Ok(false),
+            let double = match (insn >> 22) & 0b11 {
+                0b00 => false,
+                0b01 => true,
+                _ => return Ok(false), // half precision: out of scope
             };
+            // FCVT is the one form whose destination width differs from its
+            // source, so it can't share the write-back below.
+            match (op, double) {
+                (0b000100, true) => {
+                    self.fp_set_f32(rd, self.fp_get_f64(rn) as f32);
+                    return Ok(true);
+                }
+                (0b000101, false) => {
+                    self.fp_set_f64(rd, f64::from(self.fp_get_f32(rn)));
+                    return Ok(true);
+                }
+                _ => {}
+            }
+            if op == 0 {
+                // FMOV Sd/Dd, Sn/Dn: a bit-exact copy, so it must not go
+                // through a float conversion (that can canonicalize NaNs).
+                let bits = self.vregs[rn as usize];
+                self.vregs[rd as usize] = if double {
+                    u128::from(bits as u64)
+                } else {
+                    u128::from(bits as u32)
+                };
+                return Ok(true);
+            }
+            // FABS/FNEG are bit operations on the sign, and single-precision
+            // FSQRT/FRINTx round once — computing them in f64 and narrowing
+            // would round twice.
+            if double {
+                let a = self.fp_get_f64(rn);
+                let r = match op {
+                    0b000001 => f64::from_bits(a.to_bits() & !(1 << 63)),
+                    0b000010 => f64::from_bits(a.to_bits() ^ (1 << 63)),
+                    0b000011 => a.sqrt(),
+                    0b001000 => a.round_ties_even(), // FRINTN
+                    0b001001 => a.ceil(),            // FRINTP
+                    0b001010 => a.floor(),           // FRINTM
+                    0b001011 => a.trunc(),           // FRINTZ
+                    0b001100 => a.round(),           // FRINTA (ties away)
+                    // FRINTX/FRINTI round to the current mode, which is
+                    // round-to-nearest-even here.
+                    0b001110 | 0b001111 => a.round_ties_even(),
+                    _ => return Ok(false),
+                };
+                self.fp_set_f64(rd, r);
+            } else {
+                let a = self.fp_get_f32(rn);
+                let r = match op {
+                    0b000001 => f32::from_bits(a.to_bits() & !(1 << 31)),
+                    0b000010 => f32::from_bits(a.to_bits() ^ (1 << 31)),
+                    0b000011 => a.sqrt(),
+                    0b001000 => a.round_ties_even(),
+                    0b001001 => a.ceil(),
+                    0b001010 => a.floor(),
+                    0b001011 => a.trunc(),
+                    0b001100 => a.round(),
+                    0b001110 | 0b001111 => a.round_ties_even(),
+                    _ => return Ok(false),
+                };
+                self.fp_set_f32(rd, r);
+            }
+            return Ok(true);
         }
         // FMOV (register): move between GPR and a vector lane. bits[30:24] =
         // 0011110, bits[15:10] = 000000, bits[21:16] select direction/size.
@@ -120,91 +177,133 @@ impl Cpu {
             return Ok(true);
         }
 
-        // Integer <-> float conversions: bits[30:24] = 0011110 (sf at bit31),
-        // `type` in bits[23:22] picks single/double, opc in bits[21:16].
-        // The pure integer forms have bits[15:10] = 0; non-zero there means a
-        // fixed-point scale (or, with bit21=1, a 2-source FP op — FADD etc.).
-        if ((insn >> 24) & 0x7F) == 0b0011110 && ((insn >> 10) & 0x3F) == 0 {
-            let ftype = (insn >> 22) & 0b11; // 00 → S, 01 → D
-            let opc = (insn >> 16) & 0x3F;
+        // Conversion between floating-point and integer: bits[30:24] =
+        // 0011110 (sf at bit31), `type` in bits[23:22], bit21 = 1,
+        // bits[15:10] = 0 (non-zero there is the fixed-point scale, a separate
+        // class). The operation is `rmode` (bits[20:19]) and `opcode`
+        // (bits[18:16]) — treating bits[21:16] as one 6-bit field folds the
+        // fixed bit21 into the value, which made `ucvtf d0, x1` decode as
+        // FCVTMU and write x0 instead of d0 (NX-Shell then dereferenced the
+        // clobbered pointer).
+        if ((insn >> 24) & 0x7F) == 0b0011110
+            && ((insn >> 21) & 1) == 1
+            && ((insn >> 10) & 0x3F) == 0
+        {
+            let ftype = (insn >> 22) & 0b11; // 00 = single, 01 = double
+            if ftype > 0b01 {
+                return Ok(false); // half precision: out of scope
+            }
+            let use_double = ftype == 0b01;
+            let rmode = (insn >> 19) & 0b11;
+            let opcode = (insn >> 16) & 0b111;
             let rd = (insn & 0x1F) as u8;
             let rn = ((insn >> 5) & 0x1F) as u8;
-            let fbits = (insn >> 10) & 0x3F;
-            // type 00 = single, 01 = double (10/11 = half, out of scope). The
-            // float size is independent of `sf`; the old `&& sf == 1` clause
-            // made `fcvtzs w, d1` / `scvtf d0, w1` pick the wrong register size.
-            let use_double = ftype == 0b01;
-            return match opc {
-                0b000010 | 0b000011 => {
-                    // SCVTF / UCVTF: integer → float.
-                    let signed = opc == 0b000010;
+            let wide = sf != 0;
+            return match (rmode, opcode) {
+                // SCVTF / UCVTF: integer → float. `sf` gives the source width,
+                // `type` the destination's, and they are independent.
+                (0b00, 0b010) | (0b00, 0b011) => {
+                    let signed = opcode == 0b010;
                     let v = self.read_zr(rn);
+                    let f = match (signed, wide) {
+                        (true, true) => v as i64 as f64,
+                        (true, false) => f64::from(v as i32),
+                        (false, true) => v as f64,
+                        (false, false) => f64::from(v as u32),
+                    };
                     if use_double {
-                        let f = if signed {
-                            (v as i64) as f64
-                        } else {
-                            v as f64
-                        };
                         self.fp_set_f64(rd, f);
                     } else {
-                        let f = if signed {
-                            (v as i32) as f32
-                        } else {
-                            v as f32
-                        };
-                        self.fp_set_f32(rd, f);
+                        self.fp_set_f32(rd, f as f32);
                     }
                     Ok(true)
                 }
-                 0b011000 | 0b011001 | 0b101000 | 0b111000 | 0b101001 | 0b111001 => {
-                    // FCVTZS / FCVTZU: float → integer, round toward zero.
-                    // opc bit16 = 0 for ZS (signed), 1 for ZU (unsigned);
-                    // bit20 (and `type`) selects single vs double source.
-                    // `fcvtzs w24, d1` = 0x1e780038, `fcvtzu x8, d1` = 0x9e790028.
-                    let signed = (opc & 1) == 0;
+                // FMOV between a GPR and an FP register is handled above.
+                (0b00, 0b110) | (0b00, 0b111) => Ok(false),
+                // Float → integer. `opcode` picks signed/unsigned and `rmode`
+                // the rounding: 00 = nearest-even (FCVTNS/NU), 01 = +inf
+                // (FCVTPS/PU), 10 = -inf (FCVTMS/MU), 11 = zero (FCVTZS/ZU).
+                // rmode 00 with opcode 100/101 is FCVTAS/FCVTAU (ties away).
+                (_, 0b000) | (_, 0b001) | (0b00, 0b100) | (0b00, 0b101) => {
+                    let signed = opcode & 1 == 0;
+                    let rounding = if opcode >= 0b100 {
+                        Rounding::TiesAway
+                    } else {
+                        match rmode {
+                            0b00 => Rounding::TiesEven,
+                            0b01 => Rounding::TowardPos,
+                            0b10 => Rounding::TowardNeg,
+                            _ => Rounding::TowardZero,
+                        }
+                    };
                     let f = if use_double {
                         self.fp_get_f64(rn)
                     } else {
-                        self.fp_get_f32(rn) as f64
+                        f64::from(self.fp_get_f32(rn))
                     };
-                    let r = if signed {
-                        if sf != 0 {
-                            f as i64 as u64
-                        } else {
-                            f as i32 as u32 as u64
-                        }
-                    } else if sf != 0 {
-                        f as u64
-                    } else {
-                        f as u32 as u64
-                    };
+                    let r = round_to_int_sized(f, rounding, signed, if wide { 64 } else { 32 });
                     self.write_zr(rd, r);
                     Ok(true)
                 }
-                0b100000..=0b100111 if fbits == 0 => {
-                    // Float → integer with explicit rounding mode (opc 1000xx).
-                    let (signed, rounding) = match opc {
-                        0b100000 => (true, Rounding::TiesEven),
-                        0b100001 => (false, Rounding::TiesEven),
-                        0b100010 => (true, Rounding::TowardNeg),
-                        0b100011 => (false, Rounding::TowardNeg),
-                        0b100100 => (true, Rounding::TowardPos),
-                        0b100101 => (false, Rounding::TowardPos),
-                        0b100110 => (true, Rounding::TiesAway),
-                        0b100111 => (false, Rounding::TiesAway),
-                        _ => unreachable!(),
+                _ => Ok(false),
+            };
+        }
+
+        // Floating-point <-> fixed-point conversion: bits[30:24] = 0011110
+        // with bit21 = 0. Same rmode/opcode split as the integer conversions,
+        // with the binary point `64 - scale` bits in from bits[15:10]. `sf` is
+        // bit31, so this has to be matched before the bit31-inclusive guard
+        // below (which is only correct for the forms that have no `sf`).
+        if ((insn >> 24) & 0x7F) == 0b0011110 && ((insn >> 21) & 1) == 0 {
+            let ftype = (insn >> 22) & 0b11;
+            if ftype > 0b01 {
+                return Ok(false); // half precision: out of scope
+            }
+            let double = ftype == 0b01;
+            let rn = ((insn >> 5) & 0x1F) as u8;
+            let rd = (insn & 0x1F) as u8;
+            let rmode = (insn >> 19) & 0b11;
+            let opcode = (insn >> 16) & 0b111;
+            let fbits = 64 - ((insn >> 10) & 0x3F);
+            let wide = sf != 0;
+            let scale = 2f64.powi(fbits as i32);
+            return match (rmode, opcode) {
+                // SCVTF / UCVTF: fixed-point → float.
+                (0b00, 0b010) | (0b00, 0b011) => {
+                    let signed = opcode == 0b010;
+                    let v = self.read_zr(rn);
+                    let raw = match (signed, wide) {
+                        (true, true) => v as i64 as f64,
+                        (true, false) => f64::from(v as i32),
+                        (false, true) => v as f64,
+                        (false, false) => f64::from(v as u32),
                     };
-                    let f = if use_double {
+                    if double {
+                        self.fp_set_f64(rd, raw / scale);
+                    } else {
+                        self.fp_set_f32(rd, (raw / scale) as f32);
+                    }
+                    Ok(true)
+                }
+                // FCVTZS / FCVTZU: float → fixed-point, rounding toward zero.
+                (0b11, 0b000) | (0b11, 0b001) => {
+                    let signed = opcode == 0b000;
+                    let f = if double {
                         self.fp_get_f64(rn)
                     } else {
-                        self.fp_get_f32(rn) as f64
+                        f64::from(self.fp_get_f32(rn))
                     };
-                    let r = round_to_int(f, rounding, signed);
-                    self.write_zr(rd, r & Self::mask(sf != 0));
+                    let r = round_to_int_sized(
+                        f * scale,
+                        Rounding::TowardZero,
+                        signed,
+                        if wide { 64 } else { 32 },
+                    );
+                    self.write_zr(rd, r);
                     Ok(true)
                 }
                 _ => Ok(false),
-            }
+            };
         }
 
         // Scalar integer compare-to-zero: CMGE/CMGT/CMLE/CMLT <Dd>, <Dn>, #0.
@@ -234,6 +333,53 @@ impl Cpu {
             return Ok(true);
         }
 
+        // 3-source fused ops: bits[31:24] = 00011111, `type` in bits[23:22],
+        // o1 = bit21, o0 = bit15, Ra in bits[14:10]. This group has its own
+        // top byte, so it has to be matched before the 00011110 space below.
+        // `fmadd d0, d31, d26, d0` = 0x1F5A03E0.
+        if ((insn >> 24) & 0xFF) == 0b00011111 {
+            let double = match (insn >> 22) & 0b11 {
+                0b00 => false,
+                0b01 => true,
+                _ => return Ok(false), // half precision: out of scope
+            };
+            let rn = ((insn >> 5) & 0x1F) as u8;
+            let rd = (insn & 0x1F) as u8;
+            let rm = ((insn >> 16) & 0x1F) as u8;
+            let ra = ((insn >> 10) & 0x1F) as u8;
+            let o0 = (insn >> 15) & 1;
+            let o1 = (insn >> 21) & 1;
+            // o1 negates the accumulator, o1 != o0 the product:
+            // 00 FMADD, 01 FMSUB, 10 FNMADD, 11 FNMSUB.
+            let neg_a = o1 == 1;
+            let neg_n = o1 != o0;
+            // These are fused: one rounding for the whole multiply-add.
+            if double {
+                let mut fa = self.fp_get_f64(ra);
+                let mut fnn = self.fp_get_f64(rn);
+                let fm = self.fp_get_f64(rm);
+                if neg_a {
+                    fa = -fa;
+                }
+                if neg_n {
+                    fnn = -fnn;
+                }
+                self.fp_set_f64(rd, fnn.mul_add(fm, fa));
+            } else {
+                let mut fa = self.fp_get_f32(ra);
+                let mut fnn = self.fp_get_f32(rn);
+                let fm = self.fp_get_f32(rm);
+                if neg_a {
+                    fa = -fa;
+                }
+                if neg_n {
+                    fnn = -fnn;
+                }
+                self.fp_set_f32(rd, fnn.mul_add(fm, fa));
+            }
+            return Ok(true);
+        }
+
         // Scalar FP data processing: bits[31:24] = 00011110 (single/double;
         // bit23 = 1 selects half precision, which is out of scope).
         if ((insn >> 24) & 0xFF) != 0b00011110 || ((insn >> 23) & 1) == 1 {
@@ -243,56 +389,23 @@ impl Cpu {
         let rn = ((insn >> 5) & 0x1F) as u8;
         let rd = (insn & 0x1F) as u8;
         let rm = ((insn >> 16) & 0x1F) as u8;
-        // 3-source fused ops: bits[31:24] = 00011111.
-        if ((insn >> 24) & 0xFF) == 0b00011111 {
-            let ra = ((insn >> 10) & 0x1F) as u8;
-            let o3 = (insn >> 15) & 1;
-            let o1 = (insn >> 21) & 1;
-            // o1/o3 → negate-accumulator / negate-product (QEMU do_fmadd):
-            // 00 FMADD, 01 FMSUB, 10 FNMADD, 11 FNMSUB.
-            let neg_a = o1 == 1;
-            let neg_n = o1 != o3;
-            let fa = if double {
-                self.fp_get_f64(ra)
-            } else {
-                self.fp_get_f32(ra) as f64
-            };
-            let fn_ = if double {
-                self.fp_get_f64(rn)
-            } else {
-                self.fp_get_f32(rn) as f64
-            };
-            let fm = if double {
-                self.fp_get_f64(rm)
-            } else {
-                self.fp_get_f32(rm) as f64
-            };
-            let fa = if neg_a { -fa } else { fa };
-            let fn_ = if neg_n { -fn_ } else { fn_ };
-            let r = fn_ * fm + fa;
-            if double {
-                self.fp_set_f64(rd, r);
-            } else {
-                self.fp_set_f32(rd, r as f32);
-            }
-            return Ok(true);
-        }
-        // bit21 == 0 → the compare/select encodings (FCSEL/FCCMP live here,
-        // distinguished by bits[11:10]).
-        if ((insn >> 21) & 1) == 0 {
-            let sel_lo = (insn >> 10) & 0b11;
-            let cond = ((insn >> 12) & 0xF) as u8;
-            if sel_lo == 0b01 {
-                // FCCMP: compare, else set nzcv from the immediate.
-                let nzcv = (insn & 0xF) as u32;
+        // bit21 == 1. The 1-source group is handled above; bits[11:10] split the
+        // rest: 01 = FCCMP, 11 = FCSEL, 10 = the 2-source ops, 00 = FCMP. Both
+        // conditional forms have bit21 SET — testing for 0 made them dead code,
+        // so `fcsel s30, s31, s30, gt` came out unimplemented.
+        let cond = ((insn >> 12) & 0xF) as u8;
+        match (insn >> 10) & 0b11 {
+            0b01 => {
+                // FCCMP: compare, or set NZCV from the immediate when the
+                // condition fails.
                 if self.condition_holds(cond) {
                     self.fp_cmp(rn, rm, double);
                 } else {
-                    self.nzcv = nzcv << 28;
+                    self.nzcv = ((insn & 0xF) as u32) << 28;
                 }
                 return Ok(true);
             }
-            if sel_lo == 0b11 {
+            0b11 => {
                 // FCSEL: select Vn or Vm on the condition.
                 let v = if self.condition_holds(cond) { rn } else { rm };
                 if double {
@@ -304,45 +417,17 @@ impl Cpu {
                 }
                 return Ok(true);
             }
-            return Ok(false);
+            _ => {}
         }
-        // bit21 == 1: 1-source (bits[14:10] == 10000), 2-source, FCMP.
         let fixed = (insn >> 10) & 0x3F;
-        if fixed == 0b100000 {
-            // 1-source: opcode in bits[20:15].
-            let op = (insn >> 15) & 0x3F;
-            let a = if double { self.fp_get_f64(rn) } else { self.fp_get_f32(rn) as f64 };
-            let r = match op {
-                1 => a.abs(),
-                2 => -a,
-                3 => a.sqrt(),
-                4 if double => a as f32 as f64, // FCVT Sd←Dn
-                4 => a,                          // FCVT Sh←Sn (half, unsupported)
-                5 if !double => a as f64,        // FCVT Dd←Sn
-                5 => a as f32 as f64,            // FCVT Hd←Dn (half, unsupported)
-                8 => a.round_ties_even(),        // FRINTN
-                9 => a.ceil(),                   // FRINTP
-                10 => a.floor(),                 // FRINTM
-                11 => a.trunc(),                 // FRINTZ
-                12 => a.round(),                 // FRINTA (ties away)
-                14 | 15 => a,                    // FRINTX/I (already rounded)
-                _ => return Ok(false),
-            };
-            if double {
-                self.fp_set_f64(rd, r);
-            } else if op == 4 && !double {
-                // FCVT to half — out of scope.
-                return Ok(false);
-            } else {
-                self.fp_set_f32(rd, r as f32);
-            }
-            return Ok(true);
-        }
         if fixed == 0b001000 {
-            // FCMP / FCMPE (with or without zero).
-            let e = (insn >> 9) & 1;
-            let z = (insn >> 8) & 1;
-            let _ = e;
+            // FCMP / FCMPE. `opcode2` is bits[4:0]: bit3 selects the
+            // compare-with-zero form and bit4 the signalling (E) variant, which
+            // only differs in which NaNs raise an exception - not modelled.
+            // Reading them from bits[9:8] took them out of Rn instead, so
+            // `fcmp d0, #0.0` compared d0 with d0 and `fcmp d8, #0.0` compared
+            // against whatever v0 held.
+            let z = (insn >> 3) & 1;
             if z == 1 {
                 self.fp_cmp_zero(rn, double);
             } else {
@@ -350,26 +435,42 @@ impl Cpu {
             }
             return Ok(true);
         }
-        // 2-source: opcode in bits[15:11].
+        // 2-source: opcode in bits[15:11] (its low bit is the fixed 1 of
+        // bits[11:10] = 10). Single precision is computed in f32 rather than in
+        // f64 and narrowed, which would round twice.
         let op = (insn >> 11) & 0x1F;
-        let a = if double { self.fp_get_f64(rn) } else { self.fp_get_f32(rn) as f64 };
-        let b = if double { self.fp_get_f64(rm) } else { self.fp_get_f32(rm) as f64 };
-        let r = match op {
-            1 => a * b,    // FMUL
-            3 => a / b,    // FDIV
-            5 => a + b,    // FADD
-            7 => a - b,    // FSUB
-            9 => fp_max(a, b),     // FMAX
-            11 => fp_min(a, b),    // FMIN
-            13 => fp_maxnum(a, b), // FMAXNM
-            15 => fp_minnum(a, b), // FMINNM
-            17 => -(a * b),        // FNMUL
-            _ => return Ok(false),
-        };
         if double {
+            let a = self.fp_get_f64(rn);
+            let b = self.fp_get_f64(rm);
+            let r = match op {
+                1 => a * b,            // FMUL
+                3 => a / b,            // FDIV
+                5 => a + b,            // FADD
+                7 => a - b,            // FSUB
+                9 => fp_max(a, b),     // FMAX
+                11 => fp_min(a, b),    // FMIN
+                13 => fp_maxnum(a, b), // FMAXNM
+                15 => fp_minnum(a, b), // FMINNM
+                17 => -(a * b),        // FNMUL
+                _ => return Ok(false),
+            };
             self.fp_set_f64(rd, r);
         } else {
-            self.fp_set_f32(rd, r as f32);
+            let a = self.fp_get_f32(rn);
+            let b = self.fp_get_f32(rm);
+            let r = match op {
+                1 => a * b,
+                3 => a / b,
+                5 => a + b,
+                7 => a - b,
+                9 => fp_max(f64::from(a), f64::from(b)) as f32,
+                11 => fp_min(f64::from(a), f64::from(b)) as f32,
+                13 => fp_maxnum(f64::from(a), f64::from(b)) as f32,
+                15 => fp_minnum(f64::from(a), f64::from(b)) as f32,
+                17 => -(a * b),
+                _ => return Ok(false),
+            };
+            self.fp_set_f32(rd, r);
         }
         Ok(true)
     }

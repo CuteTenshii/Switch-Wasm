@@ -52,6 +52,24 @@ impl Cpu {
         (data_off + 15) & !15
     }
 
+    /// Address of a CMIF request's raw payload — the bytes after the 16-byte
+    /// `CmifInHeader`.
+    ///
+    /// Its distance from the data area is not fixed: a domain request carries a
+    /// `CmifDomainInHeader` in front of the `CmifInHeader`, so the payload sits
+    /// 0x20 rather than 0x10 bytes in. Locating the "SFCI" magic covers both.
+    /// (Assuming 0x10 made `fsFileRead` on the domain session libnx uses for
+    /// `fsp-srv` read its offset and size out of the header, so every read
+    /// asked for 0 bytes at offset 0 and `romfsMountSelf` failed.)
+    pub(super) fn ipc_request_data(&self, tls: u32) -> u32 {
+        for i in 0..0x40u32 {
+            if self.mem.read_u32(tls.wrapping_add(i)).unwrap_or(0) == 0x4943_4653 {
+                return tls.wrapping_add(i + 0x10);
+            }
+        }
+        tls.wrapping_add(self.ipc_reply_start(tls) + 0x10)
+    }
+
     pub(super) fn alloc_handle(&mut self) -> u64 {
         let h = self.next_handle as u64;
         self.next_handle = self.next_handle.wrapping_add(1);
@@ -134,8 +152,52 @@ impl Cpu {
         if trimmed.is_empty() { "/".to_owned() } else { format!("/{}", trimmed) }
     }
 
+    /// Hand a sub-interface back to the caller the way its session expects.
+    ///
+    /// A domain session (libnx converts `fsp-srv` to one) takes an out-object
+    /// id in the response's domain header; a plain session — libtransistor
+    /// never converts, so sdl-hello's `fsp-srv` is one — takes a real session
+    /// handle as a move handle, and validates the count, so answering with a
+    /// domain object made `fsp_srv_open_sd_card_filesystem` fail. Returns the
+    /// key the new object's state is filed under.
+    pub(super) fn reply_with_interface(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        name: &str,
+    ) -> Result<u64> {
+        if self.ipc_is_domain_request(tls) {
+            let obj = self.alloc_domain_object();
+            self.record_domain_object(handle, obj, name);
+            self.write_ipc_response(tls, 0, &[], &[], &[obj])?;
+            Ok(Self::object_key(handle, obj))
+        } else {
+            let sub = self.alloc_handle();
+            self.record_handle(sub, name);
+            self.write_ipc_response(tls, 0, &[sub], &[], &[])?;
+            Ok(Self::object_key(sub, 0))
+        }
+    }
+
+    /// Key for the per-object state maps (`fs_files`, `fs_dirs`). A domain
+    /// object id is only unique within its session, and a plain sub-session is
+    /// identified by its own handle, so both go in as `handle:object_id`.
+    pub(super) fn object_key(handle: u64, object_id: u32) -> u64 {
+        (handle << 32) | u64::from(object_id)
+    }
+
     pub(super) fn record_handle(&mut self, handle: u64, name: &str) {
         self.service_handles.insert(handle, name.to_owned());
+    }
+
+    /// Drop everything recorded for a session the guest has closed. Handles are
+    /// never reused, so this only keeps the tables from growing.
+    pub(super) fn forget_handle(&mut self, handle: u64) {
+        self.service_handles.remove(&handle);
+        self.domain_objects.retain(|&(owner, _), _| owner != handle);
+        let session = handle << 32;
+        self.fs_files.retain(|&key, _| key & !0xFFFF_FFFF != session);
+        self.fs_dirs.retain(|&key, _| key & !0xFFFF_FFFF != session);
     }
 
     pub(super) fn service_name(&self, handle: u64) -> Option<&str> {
@@ -207,9 +269,12 @@ impl Cpu {
         domain_objects: &[u32],
     ) -> Result<()> {
         let is_domain = self.ipc_is_domain_request(tls);
-        // Real Horizon reply types: 0x40 (Reply) and 0x44 (DomainReply).
-        let msg_type = if is_domain { 0x44u32 } else { 0x40 };
-        self.mem.write_u32(tls, msg_type)?;
+        // A reply's `type` field (bits[15:0] of word 0) is 0: the counts in the
+        // rest of the word are what matter. libnx ignores the field entirely,
+        // but libtransistor validates it (`type != 0 && type != 4` → its error
+        // 0x7E0DD), which is what made sdl-hello's "Failed to open connection
+        // to fsp-srv" — a 0x40 here fails that check on every single reply.
+        self.mem.write_u32(tls, 0)?;
         let has_handles = !move_handles.is_empty();
         let handle_desc = (move_handles.len() as u32) << 5;
         let raw_data_words = ((raw_data.len() as u32) + 3) / 4;
@@ -267,8 +332,7 @@ impl Cpu {
             Some(0) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             Some(1) => {
                 // GetService: raw data is the 8-byte service name.
-                let start = self.ipc_reply_start(tls);
-                let name_raw = self.mem.read_u64(tls.wrapping_add(start + 0x10)).unwrap_or(0);
+                let name_raw = self.mem.read_u64(self.ipc_request_data(tls)).unwrap_or(0);
                 let name = self.u64_to_service_name(name_raw);
                 let handle = self.alloc_handle();
                 self.record_handle(handle, &name);
@@ -298,9 +362,8 @@ impl Cpu {
             // 18 = fsOpenSdCardFileSystem, 11 = fsOpenBisFileSystem: both hand
             // out an FsFileSystem session as a domain out-object.
             Some(18) | Some(11) => {
-                let obj = self.alloc_domain_object();
-                self.record_domain_object(handle, obj, "fsp-srv-fs");
-                self.write_ipc_response(tls, 0, &[], &[], &[obj])
+                self.reply_with_interface(tls, handle, "fsp-srv-fs")?;
+                Ok(())
             }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
         }
@@ -350,18 +413,16 @@ impl Cpu {
                 if self.fs.entry_type(&path) != Some(crate::vfs::ENTRY_TYPE_FILE) {
                     return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
                 }
-                let obj = self.alloc_domain_object();
-                self.record_domain_object(handle, obj, "fsp-srv-fs-file");
-                self.fs_files.insert(obj as u64, path);
-                self.write_ipc_response(tls, 0, &[], &[], &[obj])
+                let key = self.reply_with_interface(tls, handle, "fsp-srv-fs-file")?;
+                self.fs_files.insert(key, path);
+                Ok(())
             }
             // OpenDirectory(u32 mode) -> IDirectory
             Some(9) => match self.fs.read_dir(&path) {
                 Some(entries) => {
-                    let obj = self.alloc_domain_object();
-                    self.record_domain_object(handle, obj, "fsp-srv-fs-dir");
-                    self.fs_dirs.insert(obj as u64, entries);
-                    self.write_ipc_response(tls, 0, &[], &[], &[obj])
+                    let key = self.reply_with_interface(tls, handle, "fsp-srv-fs-dir")?;
+                    self.fs_dirs.insert(key, entries);
+                    Ok(())
                 }
                 None => self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]),
             },
@@ -377,13 +438,13 @@ impl Cpu {
 
     /// `IDirectory`: cmd 0 = `fsDirRead` (fill the out buffer with
     /// `FsDirectoryEntry` structs), cmd 1 = `fsDirGetEntryCount`.
-    pub(super) fn stub_fs_dir(&mut self, tls: u32, cmd_id: Option<u32>, object_id: u32) -> Result<()> {
+    pub(super) fn stub_fs_dir(&mut self, tls: u32, cmd_id: Option<u32>, key: u64) -> Result<()> {
         /// `sizeof(FsDirectoryEntry)`: a 0x301-byte name, padding, the entry
         /// type, more padding, then the 8-aligned size.
         const ENTRY_SIZE: u32 = 0x310;
         match cmd_id {
             Some(0) => {
-                let entries = self.fs_dirs.remove(&(object_id as u64)).unwrap_or_default();
+                let entries = self.fs_dirs.remove(&key).unwrap_or_default();
                 if let Some(buf) = self.ipc_recv_buffer_addr(tls, 0) {
                     for (i, entry) in entries.iter().enumerate() {
                         let base = buf.wrapping_add(i as u32 * ENTRY_SIZE);
@@ -401,7 +462,7 @@ impl Cpu {
             }
             Some(1) => {
                 let count =
-                    self.fs_dirs.get(&(object_id as u64)).map(|v| v.len() as u64).unwrap_or(0);
+                    self.fs_dirs.get(&key).map(|v| v.len() as u64).unwrap_or(0);
                 self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
             }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -409,17 +470,26 @@ impl Cpu {
     }
 
     /// `IFile`: cmd 0 = Read, cmd 4 = GetSize.
-    pub(super) fn stub_fs_file(&mut self, tls: u32, cmd_id: Option<u32>, object_id: u32) -> Result<()> {
-        let path = self.fs_files.get(&(object_id as u64)).cloned().unwrap_or_default();
+    pub(super) fn stub_fs_file(&mut self, tls: u32, cmd_id: Option<u32>, key: u64) -> Result<()> {
+        let path = self.fs_files.get(&key).cloned().unwrap_or_default();
         match cmd_id {
             // Read(u32 option, u64 offset, u64 size) -> u64 bytes_read
             Some(0) => {
-                let start = self.ipc_reply_start(tls);
-                let data = tls.wrapping_add(start + 0x10);
+                let data = self.ipc_request_data(tls);
                 let offset = self.mem.read_u64(data.wrapping_add(8))?;
                 let requested = self.mem.read_u64(data.wrapping_add(0x10))? as usize;
                 let mut buf = vec![0u8; requested.min(1 << 24)];
                 let read = self.fs.read(&path, offset, &mut buf).unwrap_or(0);
+                if std::env::var("TRACE_IPC").is_ok() {
+                    eprintln!(
+                        "[fs-file] read path={:?} offset={:#x} size={:#x} -> {:#x} buf={:?}",
+                        path,
+                        offset,
+                        requested,
+                        read,
+                        self.ipc_recv_buffer_addr(tls, 0)
+                    );
+                }
                 if let Some(addr) = self.ipc_recv_buffer_addr(tls, 0) {
                     for (i, &byte) in buf[..read].iter().enumerate() {
                         self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
@@ -442,6 +512,38 @@ impl Cpu {
     /// language code back to it by searching the array
     /// `GetAvailableLanguageCodes` returns — so the order matters and both
     /// commands have to agree.
+    /// `pl:u` (`IPlatformServiceManager`): the shared system fonts.
+    ///
+    /// There are no Nintendo fonts here, so the set is reported as loaded but
+    /// empty — a guest gets a well-formed "no font data" answer instead of
+    /// spinning on `GetLoadState`. Font-rendering homebrew will have to fall
+    /// back to whatever it ships itself.
+    pub(super) fn stub_pl(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        match cmd_id {
+            // RequestLoad(u32 SharedFontType)
+            Some(0) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // GetLoadState(u32) -> u32 (1 = Loaded)
+            Some(1) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]),
+            // GetSize(u32) -> u32, GetSharedMemoryAddressOffset(u32) -> u32
+            Some(2) | Some(3) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // GetSharedMemoryNativeHandle -> a shared memory handle, which
+            // `svcMapSharedMemory` backs with zeroed pages.
+            Some(4) => {
+                let handle = self.alloc_handle();
+                self.write_ipc_response(tls, 0, &[handle], &[], &[])
+            }
+            // GetSharedFontInOrderOfPriority(u64 LanguageCode) ->
+            // { u8 Loaded, u8 pad[3], u32 total_fonts } with three output
+            // buffers; reporting zero fonts is consistent with the empty set.
+            Some(5) => {
+                let mut raw = [0u8; 8];
+                raw[0] = 1; // Loaded
+                self.write_ipc_response(tls, 0, &[], &raw, &[])
+            }
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
     pub(super) fn stub_set(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         // Language codes in `SetLanguage` order, as NUL-padded ASCII in a u64.
         const LANGUAGE_CODES: [&str; 18] = [
@@ -466,8 +568,7 @@ impl Cpu {
             }
             // MakeLanguageCode(SetLanguage) -> u64 code
             Some(2) => {
-                let start = self.ipc_reply_start(tls);
-                let language = self.mem.read_u32(tls.wrapping_add(start + 0x10)).unwrap_or(0);
+                let language = self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0);
                 let index = (language as usize).min(LANGUAGE_CODES.len() - 1);
                 self.write_ipc_response(tls, 0, &[], &code(index).to_le_bytes(), &[])
             }
@@ -627,9 +728,7 @@ impl Cpu {
     /// GPU scans that buffer out — this is where a rendered frame becomes
     /// something the host can display.
     pub(super) fn vi_transact_parcel(&mut self, tls: u32) -> Result<()> {
-        let start = self.ipc_reply_start(tls);
-        // The CMIF request data follows the 16-byte SFCI header.
-        let data = tls.wrapping_add(start + 0x10);
+        let data = self.ipc_request_data(tls);
         let code = self.mem.read_u32(data.wrapping_add(4)).unwrap_or(0);
         let (send, recv) = self.ipc_map_buffers(tls);
         let request = match send.first() {
@@ -715,9 +814,7 @@ impl Cpu {
                 _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
             };
         }
-        let start = self.ipc_reply_start(tls);
-        // CMIF request data begins after the 16-byte SFCI header.
-        let data = tls.wrapping_add(start + 0x10);
+        let data = self.ipc_request_data(tls);
         let (send, recv) = self.ipc_map_buffers(tls);
         if self.trace_nv {
             eprintln!(
@@ -774,11 +871,13 @@ impl Cpu {
                 let error = self.nv.close(fd);
                 self.write_ipc_response(tls, 0, &[], &error.to_le_bytes(), &[])
             }
-            // Initialize(u32 transfer_mem_size, handles) -> no out data
+            // Initialize(u32 transfer_mem_size, handles) -> u32 error. libnx
+            // ignores the out word, but libtransistor checks the reply's raw
+            // size, so omitting it failed sdl-hello's nv init.
             Some(3) => {
                 self.nv.transfer_mem_size = self.mem.read_u32(data).unwrap_or(0);
                 self.nv.initialized = true;
-                self.write_ipc_response(tls, 0, &[], &[], &[])
+                self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
             }
             // QueryEvent(u32 fd, u32 event_id) -> u32 error + a copy handle
             Some(4) => {
@@ -845,5 +944,100 @@ impl Cpu {
             .map(&mut read_descriptor)
             .collect();
         (send, recv)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cpu;
+
+    const TLS: u32 = 0x2000;
+    const SFCI: u32 = 0x4943_4653;
+
+    /// A CMIF request in the TLS buffer with no buffer descriptors:
+    /// `CmifDomainInHeader` (when `domain`) then `CmifInHeader` then payload.
+    fn request(domain: bool, command_id: u32, payload: &[u8]) -> Cpu {
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.mem.write_u32(TLS, 4).unwrap(); // CmifCommandType_Request
+        cpu.mem.write_u32(TLS + 4, 8).unwrap(); // num_data_words
+        let mut at = TLS + 0x10; // the aligned data area
+        if domain {
+            cpu.mem.write_u8(at, 1).unwrap(); // CmifDomainRequestType_SendMessage
+            cpu.mem.write_u32(at + 4, 7).unwrap(); // object id
+            at += 0x10;
+        }
+        cpu.mem.write_u32(at, SFCI).unwrap();
+        cpu.mem.write_u32(at + 8, command_id).unwrap();
+        at += 0x10;
+        for (i, &byte) in payload.iter().enumerate() {
+            cpu.mem.write_u8(at + i as u32, byte).unwrap();
+        }
+        cpu
+    }
+
+    #[test]
+    fn request_payload_skips_the_domain_header() {
+        // fsFileRead's payload is { u32 option, u32 pad, s64 offset, u64 size }.
+        let mut payload = [0u8; 0x18];
+        payload[8..16].copy_from_slice(&0x10u64.to_le_bytes());
+        payload[16..24].copy_from_slice(&0x70u64.to_le_bytes());
+
+        let plain = request(false, 0, &payload);
+        assert_eq!(plain.ipc_request_data(TLS), TLS + 0x20);
+        assert_eq!(plain.ipc_command_id(TLS), Some(0));
+        assert!(!plain.ipc_is_domain_request(TLS));
+
+        // libnx converts the fsp-srv session to a domain, which pushes the
+        // payload another 16 bytes in. Assuming a fixed 0x10 read the offset and
+        // size out of the CmifInHeader, so every read asked for 0 bytes at
+        // offset 0 and `romfsMountSelf` failed with an I/O error.
+        let domain = request(true, 0, &payload);
+        assert_eq!(domain.ipc_request_data(TLS), TLS + 0x30);
+        assert_eq!(domain.ipc_command_id(TLS), Some(0));
+        assert!(domain.ipc_is_domain_request(TLS));
+        assert_eq!(domain.ipc_domain_object_id(TLS), 7);
+
+        let data = domain.ipc_request_data(TLS);
+        assert_eq!(domain.mem.read_u64(data + 8).unwrap(), 0x10);
+        assert_eq!(domain.mem.read_u64(data + 0x10).unwrap(), 0x70);
+    }
+
+    #[test]
+    fn reply_header_type_is_zero_and_carries_the_move_handle() {
+        let mut cpu = request(false, 1, &[]);
+        cpu.write_ipc_response(TLS, 0, &[0x1234], &7u32.to_le_bytes(), &[]).unwrap();
+
+        // A reply's type field is 0. libnx ignores it, but libtransistor
+        // rejects anything other than 0 or 4 with its error 0x7E0DD, which is
+        // what made sdl-hello fail to open fsp-srv.
+        assert_eq!(cpu.mem.read_u32(TLS).unwrap() & 0xFFFF, 0);
+        // Word 1: the raw-data word count with bit 31 set for the handle
+        // descriptor that follows.
+        let header1 = cpu.mem.read_u32(TLS + 4).unwrap();
+        assert_eq!(header1 >> 31, 1);
+        assert_eq!(header1 & 0x1FF, 4 + 1 + 4); // SFCO + one word + padding
+        // Handle descriptor: one move handle, no pid, no copy handles.
+        assert_eq!(cpu.mem.read_u32(TLS + 8).unwrap(), 1 << 5);
+        assert_eq!(cpu.mem.read_u32(TLS + 12).unwrap(), 0x1234);
+        // The data section is 16-byte aligned: SFCO, version, result, token,
+        // then the payload.
+        assert_eq!(cpu.mem.read_u32(TLS + 0x10).unwrap(), 0x4F43_4653);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 7);
+    }
+
+    #[test]
+    fn a_closed_session_forgets_its_recorded_state() {
+        let mut cpu = Cpu::new();
+        cpu.record_handle(9, "fsp-srv");
+        cpu.record_domain_object(9, 1, "fsp-srv-fs");
+        cpu.fs_files.insert(Cpu::object_key(9, 1), "/a.txt".to_owned());
+        cpu.record_handle(10, "vi:m");
+        cpu.forget_handle(9);
+        assert!(cpu.service_name(9).is_none());
+        assert!(cpu.domain_interface(9, 1).is_none());
+        assert!(cpu.fs_files.is_empty());
+        assert_eq!(cpu.service_name(10), Some("vi:m"));
     }
 }

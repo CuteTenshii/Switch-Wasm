@@ -4,16 +4,24 @@ Goal: get the bundled demo and real homebrew (the Homebrew Menu NRO,
 `hbmenu.nro`) to actually **run** on the interpreter, and put what it renders
 on the canvas.
 
-## Current state: the emulated console draws to the screen
+## Current state: hbmenu boots through its whole init and presents frames
 
 `hbmenu.nro` boots, initialises the display, renders with its own font and
 **presents 1280x720 frames that reach the HTML canvas**. The whole path is
 real: nvdrv ioctls → nvmap → the graphics MMU → the display buffer queue →
 block-linear de-swizzle → RGBA8888 → `putImageData`.
 
-hbmenu currently stops at `assetsInit()` (PhysicsFS), so what the screen shows
-is its own error console — real text, drawn by the guest, scanned out through
-the emulated display pipeline.
+`hbmenu.nro` now gets through **all of its init**: `assetsInit()` (RomFS +
+`romfs:/assets.zip` through PhysicsFS), the worker thread its `thrd_create`
+starts, the NEON JPEG decode of its icon, and `launchInit()`. It presents
+1280x720 frames again — currently blank, with its time going into a repeated
+256-entry cleanup loop at `0x080102c8`.
+
+Getting there needed guest threads (cooperative, with real mutex/condvar
+handoff), the `blr x30` fix, correct TRN/ZIP/UZP semantics, the AdvSIMD
+by-element and three-different multiply groups, the scalar shift/misc/FP
+forms, and the `NextLoadPath` environment entry `launchInit()` requires.
+`tools/difftest.py` now checks the SIMD decode against qemu-aarch64 directly.
 
 ## GPU: a GM20B model, not a stub
 
@@ -43,6 +51,53 @@ NX-Shell does) will not produce an image until that exists.
 | `unimplemented SIMD three-same op=0b10011` | MUL/MLA/MLS, SMAX/SMIN, SABD/SABA and CMGT/CMHI were missing from the three-same group. | Added, with a destination-reading variant for the accumulating forms. |
 | `unimplemented system instruction 0xd50b7e28` | Only `DC ZVA` was handled; libnx flushes the data cache around every GPU buffer. | The remaining `DC`/`IC` maintenance ops retire as no-ops — memory here is always coherent. |
 
+## CPU/IPC bugs found by getting past PhysicsFS
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| `PHYSFS_init() failed: no error` | `ld1 {v1.16b, v2.16b}, [x2], #32` never wrote its base back (writeback was keyed off `Rm != 31`, but the immediate post-index form *is* `Rm == 31`), so newlib's `strrchr` returned a pointer 32 bytes below `argv[0]`; physfs then asked `malloc` for a negative length, and `PHYSFS_deinit` cleared the error code on the way out | Rewrote both AdvSIMD structure load/store groups against the ARM pseudocode: bit 23 selects writeback, `Rm` chooses immediate vs register increment, the interleaved LD2/LD3/LD4 forms work, `LD1R` replicates, and the single-lane index is decoded from `Q:S:size` |
+| `assetsInit() failed: 2345-0010` (`romfsMountSelf` → `LibnxError_IoError`) | `fsFileRead`'s payload was read at `data_area + 0x10`, but libnx converts `fsp-srv` to a domain, which puts a `CmifDomainInHeader` first — so every read asked for 0 bytes at offset 0 | `Cpu::ipc_request_data` finds the payload after the "SFCI" header wherever it is |
+| Same error, next layer: `PHYSFS_mount("romfs:/assets.zip")` reported "not found" | BSL/BIT/BIF took their mask from the wrong register, so newlib's vectorised `strchr` missed the `:` in the path; `FindDevice` then fell back to the default device and looked the file up on the SD card | Mask is Vd for BSL, Vm for BIT/BIF |
+| NX-Shell: `blr` to 0, then `unimplemented instruction` on `fmov s0, s15`, then `fmadd d0, d31, d26, d0` | The scalar-FP 1-source and 3-source groups were unreachable: bits[15:10] were matched as a unit although the opcode's low bit lands in bit 15, and the 3-source test sat inside a branch that had already required a different top byte | Both groups decoded properly, FMOV as a bit-exact copy, FMADD/FMSUB/FNMADD/FNMSUB fused (`mul_add`) |
+| NX-Shell: a cache-flush loop running 16x too long | `CTR_EL0` read as 0, so `4 << DminLine` gave a 4-byte stride | Report the Cortex-A57 `0x8444C004` |
+| NX-Shell: `unimplemented SIMD three-same op=0b11011` (`scvtf v28.4s, v31.4s`), then `fdiv v28.4s, …` | The two-register misc and FP three-same groups both fell into the integer three-same decode | Implemented both: REV/CLS/CLZ/CNT/NOT/RBIT/ABS/NEG, the compares against zero, XTN/SQXTN/UQXTN/SQXTUN/SHLL, SADDLP/UADALP, FCVTL/FCVTN, the FRINTx and FCVTxS/U families, SCVTF/UCVTF, FABS/FNEG/FSQRT, and FADD/FSUB/FMUL/FDIV/FMLA/FMLS/FMAX/FMIN(NM)/FABD/FCMxx/FACGx/FADDP/FMAXP/FMINP |
+
+## NX-Shell: no CPU faults left
+
+NX-Shell now runs from boot to a **clean exit** (`ExitProcess`, ~16.3M steps).
+Each fault along the way was an emulator bug, mostly whole decode groups that
+were unreachable because a guard tested a field that included a fixed bit:
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| `ldr s28, [x7]` with `x7 == -1` | `ucvtf d0, x1` decoded as FCVTMU (the int↔float class's `rmode`/`opcode` were read as one 6-bit field including the fixed bit21) and wrote **x0**, clobbering a live pointer | Decode `rmode` (bits[20:19]) and `opcode` (bits[18:16]) separately; every rounding mode now maps to the right instruction |
+| `unimplemented SIMD three-same op=0b1000` | `ext v31.16b, …, #8` — the vector-extract group was missing, and the permute guard ignored bit29 so it executed EXT as UZP1 | EXT implemented; permute requires bit29 == 0 |
+| `unimplemented instruction 0x7f6007fe` | `ushr d30, d31, #32` — only the *vector* shift-by-immediate encodings were decoded | The scalar forms (bit28 set) share the helper with one 64-bit lane |
+| `unimplemented instruction 0x1e3ecffe` | `fcsel`/`fccmp` were guarded on bit21 being **clear**; they have it set, so both were dead code — and that branch was intercepting the FP↔fixed-point conversions | Conditionals moved to bit21 == 1 keyed on bits[11:10]; the fixed-point conversions implemented |
+| `unimplemented instruction 0x7e21d9ad` | `ucvtf s13, s13` — the *scalar* two-register-misc group | Shares the vector implementation with a one-lane count |
+| 190k identical `pl:u` calls | `GetLoadState` fell through to the generic reply, which answers command 1 with the applet's `ReceiveMessage` value (15), so the shared-font poll never saw "loaded" | The applet guesses only apply to applet services; `pl:u` has its own stub |
+| `unimplemented instruction 0x0` at `pc=0` | Not a crash: libnx's `__nx_exit` branches to the loader return address, which `envSetup` takes from `__libnx_init`'s third argument. The constructor pass zeroes the registers, so it was 0 | Pass the exit trampoline in x2 when resuming the crt0 |
+
+What stops it now is content, not code: it wants the **shared system fonts**
+from `pl:u`, and there are none here, so it takes its own exit path. Its
+renderer needs the shader core regardless.
+
+## sdl-hello: libtransistor's stricter IPC
+
+`sdl-hello.nro` uses libtransistor, which validates replies libnx ignores. Three
+fixes took it from "Failed to open connection to fsp-srv: 7e0dd" to **SDL
+initialised, window created, window surface obtained**:
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| `Failed to open connection to fsp-srv: 7e0dd` | Replies carried `type = 0x40`; libtransistor requires 0 or 4 | Replies write `type = 0`, which is what a real server sends |
+| `Failed to mount sdcard on fsp-srv: 7ecdd` (move-handle count mismatch) | `OpenSdCardFileSystem` answered with a domain out-object, but libtransistor never converts to a domain and expects a session handle | `Cpu::reply_with_interface` answers with an out-object for a domain request and a move handle otherwise |
+| `SDL init failed:` right after `nvdrv` Initialize | `Initialize` returned no raw data; it really returns a `u32 error`, and libtransistor checks the reply's size | Return the error word |
+
+It still presents no frame: its `vi`/binder requests come in libtransistor's
+own (non-CMIF) marshalling, which the command-id scan misreads (four requests
+decode as command `0x10100000`), and the GPU path needs the shader core anyway.
+
 ## Services
 
 - **nvdrv** is the real `INvDrvServices` interface (Open/Ioctl/Ioctl2/Ioctl3/
@@ -70,16 +125,17 @@ NX-Shell does) will not produce an image until that exists.
 - `TRACE_NV=1` traces nvdrv IPC (with guest backtraces), `TRACE_GPU=1` traces
   device opens, ioctls and engine methods, `TRACE_IPC=1` traces all services.
 - Browser: `make serve`, load `hbmenu.nro` with the "Horizon (stubbed)" ABI.
-- Regression suite: `make test` — 186 tests.
+- Regression suite: `make test` — 199 tests.
 
 ## Next
 
-1. **Shader core**: a Maxwell SASS interpreter plus a software rasterizer, so
+1. **hbmenu's blank frames**: it presents, but draws nothing yet and spins in a
+   256-entry cleanup loop at `0x080102c8`. Find what that loop is waiting on.
+2. **Shader core**: a Maxwell SASS interpreter plus a software rasterizer, so
    `VertexBegin`/`DrawArrays` produce pixels. This is what deko3d-rendering and
    EGL/OpenGL homebrew need.
-2. **PhysicsFS/assets**: hbmenu's `assetsInit()` is the current stopping point.
-3. **NX-Shell** faults on a NULL call in its C++ teardown path; it renders
-   through EGL/GLAD, so it needs (1) regardless.
+3. **NX-Shell** now dies on that `x7 == -1` pointer; it renders through
+   EGL/GLAD, so it needs (2) regardless.
 
 ## Historical notes
 

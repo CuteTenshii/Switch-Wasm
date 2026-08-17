@@ -2,6 +2,12 @@
 //! extension, shift and rotate primitives, the bitmask-immediate and
 //! bitfield decoders, saturating arithmetic and the float rounding modes.
 
+/// Mask of a vector element `bits` wide (`bits` <= 64).
+#[inline]
+pub(crate) fn elem_mask(bits: u32) -> u128 {
+    (1u128 << bits) - 1
+}
+
 /// Rounding mode for the float-to-integer conversion instructions.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rounding {
@@ -13,6 +19,8 @@ pub(crate) enum Rounding {
     TowardNeg,
     /// Round to nearest, ties away from zero.
     TiesAway,
+    /// Round toward zero (truncate).
+    TowardZero,
 }
 
 /// Convert a float to a (possibly signed) integer using an explicit rounding
@@ -27,6 +35,7 @@ pub(crate) fn round_to_int(f: f64, r: Rounding, signed: bool) -> u64 {
         Rounding::TowardPos => f.ceil(),
         Rounding::TowardNeg => f.floor(),
         Rounding::TiesAway => f.round(),
+        Rounding::TowardZero => f.trunc(),
     };
     let clipped = rounded.clamp(
         i64::MIN as f64,
@@ -36,6 +45,33 @@ pub(crate) fn round_to_int(f: f64, r: Rounding, signed: bool) -> u64 {
         (clipped as i64) as u64
     } else {
         clipped.max(0.0) as u64
+    }
+}
+
+/// [`round_to_int`] into a `bits`-wide destination: out-of-range values
+/// saturate at that width rather than wrapping, which is what the vector
+/// converts (`fcvtzs v0.4s, v1.4s`) need for their 32-bit lanes.
+pub(crate) fn round_to_int_sized(f: f64, r: Rounding, signed: bool, bits: u32) -> u64 {
+    if bits >= 64 {
+        return round_to_int(f, r, signed);
+    }
+    if f.is_nan() {
+        return 0;
+    }
+    let rounded = match r {
+        Rounding::TiesEven => f.round_ties_even(),
+        Rounding::TowardPos => f.ceil(),
+        Rounding::TowardNeg => f.floor(),
+        Rounding::TiesAway => f.round(),
+        Rounding::TowardZero => f.trunc(),
+    };
+    let mask = (1u64 << bits) - 1;
+    if signed {
+        let max = (1i64 << (bits - 1)) - 1;
+        let min = -(1i64 << (bits - 1));
+        (rounded.clamp(min as f64, max as f64) as i64 as u64) & mask
+    } else {
+        rounded.clamp(0.0, mask as f64) as u64
     }
 }
 

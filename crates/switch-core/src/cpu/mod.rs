@@ -63,6 +63,57 @@ pub const STACK_TOP: u64 = 0x1010_0000;
 /// Address of the return-address trampoline for direct-entered homebrew.
 pub const SELF_RETURN_TRAMPOLINE: u32 = 0x1F00_0000;
 
+/// Where a guest thread's entry point returns to: a stub that calls
+/// `svcExitThread` (svc 0x0A), the way libnx's thread entry does.
+pub const THREAD_EXIT_TRAMPOLINE: u32 = 0x1F00_0100;
+
+/// The handle the main thread is known by (the environment block advertises the
+/// same value as `EntryType_MainThreadHandle`).
+pub const MAIN_THREAD_HANDLE: u64 = 1;
+
+/// Base of the per-thread TLS blocks handed to threads the guest creates. The
+/// main thread keeps `0x0FF0_0000` (see [`Cpu::bootstrap`]); children get a
+/// page each above it, clear of the heap and the stack.
+pub const THREAD_TLS_BASE: u32 = 0x0FF1_0000;
+/// Distance between two threads' TLS blocks. Horizon's are 0x200 bytes; a page
+/// each keeps the newlib reentrancy struct that follows out of the way too.
+pub const THREAD_TLS_STRIDE: u32 = 0x1000;
+
+/// What a guest thread is doing. Threads only switch at the blocking
+/// syscalls, so a critical section that does not block is effectively atomic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreadState {
+    /// Created but not yet started with `svcStartThread`.
+    Created,
+    /// Eligible to run.
+    Runnable,
+    /// Returned from its entry point or called `svcExitThread`.
+    Finished,
+    /// Blocked in `svcArbitrateLock` on the mutex word at this address.
+    WaitMutex(u32),
+    /// Blocked in `svcWaitProcessWideKeyAtomic` on a condition variable, to
+    /// re-acquire `mutex` when woken.
+    WaitKey { key: u32, mutex: u32 },
+}
+
+/// Bit Horizon's mutex words set to mean "someone is blocked on me, so the
+/// unlock has to go through `svcArbitrateUnlock`".
+const MUTEX_HAS_LISTENERS: u32 = 0x4000_0000;
+
+/// A guest thread's saved CPU state. The running thread's state lives in the
+/// [`Cpu`] fields; this is what a switch saves and restores.
+#[derive(Debug, Clone)]
+pub struct ThreadContext {
+    pub handle: u64,
+    pub state: ThreadState,
+    regs: [u64; 31],
+    sp: u64,
+    pc: u32,
+    nzcv: u32,
+    vregs: [u128; 32],
+    tpidr: u64,
+}
+
 #[derive(Debug)]
 pub struct Cpu {
     pub mem: Memory,
@@ -142,6 +193,12 @@ pub struct Cpu {
     pub display: crate::display::BufferQueue,
     /// Log every nvdrv IPC request to stderr (`TRACE_NV`).
     pub trace_nv: bool,
+    /// Guest threads. Index 0 is the main thread; entries are appended by
+    /// `svcCreateThread`. The running thread's registers are the `Cpu` fields,
+    /// so its slot here is only up to date while another thread runs.
+    threads: Vec<ThreadContext>,
+    /// Which entry of `threads` is running.
+    current_thread: usize,
 }
 
 /// How many recently-executed instructions the fault trace shows.
@@ -186,6 +243,8 @@ impl Cpu {
             nv: crate::gpu::nvdrv::NvDrv::new(),
             display: crate::display::BufferQueue::new(),
             trace_nv: std::env::var("TRACE_NV").is_ok(),
+            threads: Vec::new(),
+            current_thread: 0,
         };
         cpu.nv.gpu.trace = std::env::var("TRACE_GPU").is_ok();
         // The framebuffer and input registers are fixed hardware-mapped
@@ -231,6 +290,270 @@ impl Cpu {
         let _ = self.mem.map_zero(SELF_RETURN_TRAMPOLINE, 0x10);
         self.mem.write_u32(SELF_RETURN_TRAMPOLINE, 0xD400_00E1).ok(); // svc #7
         self.mem.write_u32(SELF_RETURN_TRAMPOLINE + 4, 0x1400_0000).ok(); // b .
+        // The same for a thread's entry point: returning from it is
+        // `svcExitThread` (svc 0x0A), not a process exit.
+        let _ = self.mem.map_zero(THREAD_EXIT_TRAMPOLINE, 0x10);
+        self.mem.write_u32(THREAD_EXIT_TRAMPOLINE, 0xD400_0141).ok(); // svc #0xa
+        self.mem.write_u32(THREAD_EXIT_TRAMPOLINE + 4, 0x1400_0000).ok(); // b .
+    }
+
+    // ---- guest threads ----
+    //
+    // Cooperative: a thread runs until it makes a blocking syscall (sleep, wait,
+    // lock, condvar) or exits, and only then does another get the CPU. Real
+    // Horizon preempts, but every libnx synchronization primitive re-checks its
+    // predicate in a loop, so co-operative switching makes the same handshakes
+    // complete — which is all a stub scheduler needs to let `thrd_create`'s
+    // "has the child started?" wait finish.
+
+    /// The main thread's slot, created on demand so a single-threaded program
+    /// costs nothing.
+    fn ensure_main_thread(&mut self) {
+        if self.threads.is_empty() {
+            self.threads.push(ThreadContext {
+                handle: MAIN_THREAD_HANDLE,
+                state: ThreadState::Runnable,
+                regs: [0; 31],
+                sp: 0,
+                pc: 0,
+                nzcv: 0,
+                vregs: [0; 32],
+                tpidr: self.tpidr,
+            });
+            self.current_thread = 0;
+        }
+    }
+
+    /// Create a thread the way `svcCreateThread` does: its own TLS block (with
+    /// the libnx `ThreadVars` the guest reads through TPIDRRO_EL0), the given
+    /// stack and entry point, and the argument in x0. Returns its handle.
+    pub(super) fn create_thread(&mut self, entry: u32, arg: u64, stack_top: u64) -> u64 {
+        self.ensure_main_thread();
+        let handle = self.alloc_handle();
+        let index = self.threads.len() as u32;
+        let tls = THREAD_TLS_BASE + index * THREAD_TLS_STRIDE;
+        let _ = self.mem.map_zero(tls, THREAD_TLS_STRIDE as usize);
+        // ThreadVars at TLS+0x1E0, same layout the main thread gets in
+        // `boot_homebrew`: magic, handle, thread pointer, reent, tls_tp.
+        const TV_MAGIC: u32 = 0x2154_5624; // "!TV$"
+        let reent = tls + 0x400;
+        let _ = self.mem.write_u32(tls + 0x1E0, TV_MAGIC);
+        let _ = self.mem.write_u32(tls + 0x1E4, handle as u32);
+        let _ = self.mem.write_u32(tls + 0x1E8, 0);
+        let _ = self.mem.write_u32(tls + 0x1F0, reent);
+        let _ = self.mem.write_u32(tls + 0x1F8, tls);
+
+        let mut regs = [0u64; 31];
+        regs[0] = arg;
+        regs[30] = THREAD_EXIT_TRAMPOLINE as u64;
+        self.threads.push(ThreadContext {
+            handle,
+            state: ThreadState::Created,
+            regs,
+            sp: stack_top,
+            pc: entry,
+            nzcv: 0,
+            vregs: [0; 32],
+            tpidr: u64::from(tls),
+        });
+        handle
+    }
+
+    /// Mark a created thread runnable (`svcStartThread`).
+    pub(super) fn start_thread(&mut self, handle: u64) -> bool {
+        for thread in &mut self.threads {
+            if thread.handle == handle && thread.state == ThreadState::Created {
+                thread.state = ThreadState::Runnable;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Whether any thread other than the running one could run.
+    pub(super) fn has_other_runnable(&self) -> bool {
+        self.threads
+            .iter()
+            .enumerate()
+            .any(|(i, t)| i != self.current_thread && t.state == ThreadState::Runnable)
+    }
+
+    /// End the running thread (`svcExitThread`, or a return through the exit
+    /// trampoline) and switch away. The process only ends when the main thread
+    /// exits, matching Horizon.
+    pub(super) fn exit_thread(&mut self) {
+        self.ensure_main_thread();
+        if self.current_thread == 0 {
+            self.halted = true;
+            return;
+        }
+        self.threads[self.current_thread].state = ThreadState::Finished;
+        if !self.switch_to_next_runnable() {
+            // Nothing else can run: fall back to the main thread, which is
+            // presumably waiting on this one.
+            self.threads[0].state = ThreadState::Runnable;
+            self.switch_to_next_runnable();
+        }
+    }
+
+    /// Give up the CPU at a blocking syscall. Does nothing when this is the
+    /// only runnable thread, so single-threaded programs behave exactly as
+    /// before.
+    pub(super) fn yield_thread(&mut self) {
+        if self.threads.len() < 2 || !self.has_other_runnable() {
+            return;
+        }
+        self.switch_to_next_runnable();
+    }
+
+    // ---- mutexes and condition variables ----
+    //
+    // Horizon keeps the lock word in guest memory and only asks the kernel to
+    // arbitrate when a thread has to block: the word holds the owning thread's
+    // handle, plus MUTEX_HAS_LISTENERS when someone is queued. libnx re-reads
+    // that word after every arbitration, so ownership has to actually move —
+    // returning success from the stubs left hbmenu's worker spinning on a lock
+    // its main thread held.
+
+    /// `svcArbitrateLock(owner, mutex_addr, self)`: block until the owner
+    /// releases, unless the word has already changed under us.
+    pub(super) fn arbitrate_lock(&mut self, owner: u32, addr: u32, _self_handle: u32) {
+        self.ensure_main_thread();
+        let word = self.mem.read_u32(addr).unwrap_or(0);
+        if word & !MUTEX_HAS_LISTENERS != owner || owner == 0 {
+            return; // stale request; the guest re-reads the word and retries
+        }
+        self.threads[self.current_thread].state = ThreadState::WaitMutex(addr);
+        self.reschedule();
+    }
+
+    /// `svcArbitrateUnlock(mutex_addr)`: hand the mutex to a waiter, or clear
+    /// it when there is none.
+    pub(super) fn arbitrate_unlock(&mut self, addr: u32) {
+        self.ensure_main_thread();
+        let waiters: Vec<usize> = (0..self.threads.len())
+            .filter(|&i| self.threads[i].state == ThreadState::WaitMutex(addr))
+            .collect();
+        match waiters.first() {
+            Some(&next) => {
+                let mut handle = self.threads[next].handle as u32;
+                if waiters.len() > 1 {
+                    handle |= MUTEX_HAS_LISTENERS;
+                }
+                let _ = self.mem.write_u32(addr, handle);
+                self.threads[next].state = ThreadState::Runnable;
+            }
+            None => {
+                let _ = self.mem.write_u32(addr, 0);
+            }
+        }
+    }
+
+    /// `svcWaitProcessWideKeyAtomic(mutex_addr, key, self, timeout)`: release
+    /// the mutex and block on the condition variable.
+    pub(super) fn wait_process_wide_key(&mut self, mutex: u32, key: u32, _self_handle: u32) {
+        self.ensure_main_thread();
+        self.arbitrate_unlock(mutex);
+        self.threads[self.current_thread].state = ThreadState::WaitKey { key, mutex };
+        self.reschedule();
+    }
+
+    /// `svcSignalProcessWideKey(key, count)`: wake up to `count` waiters
+    /// (`count` < 0 wakes all of them). A woken thread holds the mutex again,
+    /// or queues for it if someone else took it meanwhile.
+    pub(super) fn signal_process_wide_key(&mut self, key: u32, count: i32) {
+        self.ensure_main_thread();
+        let mut woken = 0;
+        for i in 0..self.threads.len() {
+            if count >= 0 && woken >= count {
+                break;
+            }
+            if let ThreadState::WaitKey { key: waiting, mutex } = self.threads[i].state {
+                if waiting != key {
+                    continue;
+                }
+                let handle = self.threads[i].handle as u32;
+                let owner = self.mem.read_u32(mutex).unwrap_or(0);
+                if owner == 0 {
+                    let _ = self.mem.write_u32(mutex, handle);
+                    self.threads[i].state = ThreadState::Runnable;
+                } else {
+                    // Someone holds it: queue up, and mark the word so the
+                    // owner arbitrates its unlock instead of just clearing it.
+                    let _ = self.mem.write_u32(mutex, owner | MUTEX_HAS_LISTENERS);
+                    self.threads[i].state = ThreadState::WaitMutex(mutex);
+                }
+                woken += 1;
+            }
+        }
+    }
+
+    /// Switch away from the running thread after it blocked. If nothing can
+    /// run, everything blocked is woken: guests re-check their predicates in a
+    /// loop, so a spurious wake degrades to the old spin rather than a hang.
+    fn reschedule(&mut self) {
+        if self.switch_to_next_runnable() {
+            return;
+        }
+        for thread in &mut self.threads {
+            if matches!(
+                thread.state,
+                ThreadState::WaitMutex(_) | ThreadState::WaitKey { .. }
+            ) {
+                thread.state = ThreadState::Runnable;
+            }
+        }
+        self.switch_to_next_runnable();
+    }
+
+    /// Round-robin to the next runnable thread. Returns false if there is none
+    /// (in which case the running thread keeps going).
+    fn switch_to_next_runnable(&mut self) -> bool {
+        let count = self.threads.len();
+        let start = self.current_thread;
+        for step in 1..=count {
+            let candidate = (start + step) % count;
+            if candidate == start {
+                continue;
+            }
+            if self.threads[candidate].state == ThreadState::Runnable {
+                self.save_context(start);
+                self.load_context(candidate);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn save_context(&mut self, index: usize) {
+        let thread = &mut self.threads[index];
+        thread.regs = self.regs;
+        thread.sp = self.sp;
+        thread.pc = self.pc;
+        thread.nzcv = self.nzcv;
+        thread.vregs = self.vregs;
+        thread.tpidr = self.tpidr;
+    }
+
+    fn load_context(&mut self, index: usize) {
+        let thread = self.threads[index].clone();
+        self.regs = thread.regs;
+        self.sp = thread.sp;
+        self.pc = thread.pc;
+        self.nzcv = thread.nzcv;
+        self.vregs = thread.vregs;
+        self.tpidr = thread.tpidr;
+        self.current_thread = index;
+    }
+
+    /// Handle of the thread that is running, as the guest knows it.
+    pub fn current_thread_handle(&self) -> u64 {
+        self.threads.get(self.current_thread).map_or(MAIN_THREAD_HANDLE, |t| t.handle)
+    }
+
+    /// How many threads the guest has created (including the main thread).
+    pub fn thread_count(&self) -> usize {
+        self.threads.len().max(1)
     }
 
     /// Boot a homebrew NRO the way HBL does: load the image, let the crt0's
@@ -307,13 +630,21 @@ impl Cpu {
                     }
                 }
                 // The constructors clobber the entry registers; restore them
-                // and resume at the crt0's `bl main` so main is entered with
-                // the normal calling convention (x30 = the crt0's return path).
+                // and resume at the crt0's call so it is entered with the normal
+                // calling convention (x30 = the crt0's return path).
+                //
+                // That call is libnx's `__libnx_init(ctx, main_thread,
+                // saved_lr)`, and `saved_lr` is the loader's return address:
+                // `envSetup` keeps it as the exit function pointer, and
+                // `__nx_exit` branches straight to it. Leaving x2 at 0 made
+                // every clean exit jump to NULL — NX-Shell looked like it
+                // crashed when it was only returning from main.
                 for i in 0..=30u8 {
                     self.set_reg(i, 0);
                 }
                 self.set_reg(0, loaded.env_addr as u64);
                 self.set_reg(1, if loaded.env_addr != 0 { u64::MAX } else { 1 });
+                self.set_reg(2, SELF_RETURN_TRAMPOLINE as u64);
                 self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
                 self.set_pc(main_call);
                 return Ok(loaded);
@@ -773,9 +1104,14 @@ impl Cpu {
                         return Ok(());
                     }
                     0b0001 => {
-                        // BLR
+                        // BLR: read the target *before* linking, because the
+                        // link register can be the target — `blr x30` is a
+                        // return-and-relink, and writing x30 first made it jump
+                        // to itself+4. hbmenu's NEON JPEG decoder ends its IDCT
+                        // that way, so its icon decode never returned.
+                        let target = self.read_zr(rn) as u32;
                         self.write_zr(30, next_pc as u64);
-                        self.pc = self.read_zr(rn) as u32;
+                        self.pc = target;
                         return Ok(());
                     }
                     0b0010 => {
@@ -809,8 +1145,12 @@ impl Cpu {
                     // SVC/HVC/SMC; SVC has low bits 0b00001
                     if (insn & 0x1F) == 0b00001 {
                         let imm = ((insn >> 5) & 0xFFFF) as u16;
-                        self.syscall(imm)?;
+                        // Retire the SVC before dispatching it: a syscall that
+                        // switches threads installs the incoming thread's PC,
+                        // and the outgoing one has to resume after its own SVC
+                        // (which is what the real ELR holds).
                         self.pc = next_pc;
+                        self.syscall(imm)?;
                         Ok(())
                     } else {
                         Err(Error::Cpu(format!(

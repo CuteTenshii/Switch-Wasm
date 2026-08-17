@@ -116,24 +116,79 @@ impl Cpu {
                  self.write_zr(1, if mapped { 0x1000 } else { 0 }); // page info
                  Ok(())
              }
-            0x07 | 0x0A => {
-                // ExitProcess / ExitThread
+            0x07 => {
+                // ExitProcess
                 self.halted = true;
                 Ok(())
             }
-            0x08 => {
-                // CreateThread: hand out a fake handle; StartThread is a no-op
-                // so the main thread keeps running and waits "complete".
-                self.write_zr(0, RESULT_OK);
-                self.write_zr(1, FAKE_HANDLE);
+            0x0A => {
+                // ExitThread: only the main thread ending stops the process.
+                self.exit_thread();
                 Ok(())
             }
-            0x09 | 0x0B | 0x0C | 0x0D | 0x0E | 0x0F | 0x16 | 0x17 | 0x19 | 0x1A
-            | 0x1B | 0x1C | 0x1D | 0x28 => {
-                // StartThread / SleepThread / get-set thread priority+core
-                // mask / CloseHandle / ResetSignal / CancelSynchronization /
-                // ArbitrateLock+Unlock / Wait+SignalProcessWideKey /
-                // ReturnFromException
+            0x08 => {
+                // CreateThread(entry = X1, arg = X2, stack_top = X3,
+                // priority = W4, core = W5) -> handle in X1. The thread gets its
+                // own TLS block and starts suspended.
+                let entry = self.read_zr(1) as u32;
+                let arg = self.read_zr(2);
+                let stack_top = self.read_zr(3);
+                let handle = self.create_thread(entry, arg, stack_top);
+                self.write_zr(0, RESULT_OK);
+                self.write_zr(1, handle);
+                Ok(())
+            }
+            0x09 => {
+                // StartThread: make it runnable. It gets the CPU at the next
+                // point this thread blocks.
+                let handle = self.read_zr(0);
+                self.start_thread(handle);
+                self.write_zr(0, RESULT_OK);
+                Ok(())
+            }
+            0x0B => {
+                // SleepThread: give another thread the CPU.
+                self.write_zr(0, RESULT_OK);
+                self.yield_thread();
+                Ok(())
+            }
+            0x1A => {
+                // ArbitrateLock(owner = W0, mutex = X1, self = W2)
+                let owner = self.read_zr(0) as u32;
+                let mutex = self.read_zr(1) as u32;
+                let requester = self.read_zr(2) as u32;
+                self.write_zr(0, RESULT_OK);
+                self.arbitrate_lock(owner, mutex, requester);
+                Ok(())
+            }
+            0x1B => {
+                // ArbitrateUnlock(mutex = X0): hand the lock to a waiter.
+                let mutex = self.read_zr(0) as u32;
+                self.write_zr(0, RESULT_OK);
+                self.arbitrate_unlock(mutex);
+                Ok(())
+            }
+            0x1C => {
+                // WaitProcessWideKeyAtomic(mutex = X0, key = X1, self = W2,
+                // timeout = X3): release the mutex and block on the condvar.
+                let mutex = self.read_zr(0) as u32;
+                let key = self.read_zr(1) as u32;
+                let requester = self.read_zr(2) as u32;
+                self.write_zr(0, RESULT_OK);
+                self.wait_process_wide_key(mutex, key, requester);
+                Ok(())
+            }
+            0x1D => {
+                // SignalProcessWideKey(key = X0, count = W1)
+                let key = self.read_zr(0) as u32;
+                let count = self.read_zr(1) as u32 as i32;
+                self.write_zr(0, RESULT_OK);
+                self.signal_process_wide_key(key, count);
+                Ok(())
+            }
+            0x0C | 0x0D | 0x0E | 0x0F | 0x16 | 0x17 | 0x19 | 0x28 => {
+                // get/set thread priority + core mask / CloseHandle /
+                // ResetSignal / CancelSynchronization / ReturnFromException
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
@@ -160,6 +215,9 @@ impl Cpu {
                 // array by it, so garbage here makes the fence wait retry forever.
                 self.write_zr(0, RESULT_OK);
                 self.write_zr(1, 1);
+                // Waiting is where a thread that spins on another thread's
+                // progress gives way to it.
+                self.yield_thread();
                 Ok(())
             }
             0x1E => {
@@ -198,44 +256,70 @@ impl Cpu {
                         self.pc, handle, svc_name, cmd_id
                     );
                 }
+                // A Close request (message type 2) carries no command id at
+                // all: it tears the session down. Dispatching it on whatever
+                // command id is still sitting in the TLS buffer runs a real
+                // command instead — closing an `fsp-srv` session was landing on
+                // `CreateFile` and adding an empty file to the SD card.
+                if self.ipc_message_type(tls) == 2 {
+                    self.forget_handle(handle);
+                    self.write_ipc_response(tls, 0, &[], &[], &[])?;
+                    self.write_zr(0, RESULT_OK);
+                    return Ok(());
+                }
                 if let Some(name) = svc_name {
                     let name = name;
                     match name.as_str() {
                         "sm:" | "sm" => self.stub_sm(tls, cmd_id, handle)?,
                         "fsp-srv" | "fsp-srv:" => {
-                            // fsp-srv converts to a domain, so the fs/dir
-                            // sub-sessions come in as object ids on the same
-                            // session handle. Route on the recorded object
-                            // interface; unknown objects hit the root stub.
+                            // libnx converts fsp-srv to a domain, so the
+                            // fs/dir/file sub-sessions come in as object ids on
+                            // the same session handle. Route on the recorded
+                            // object interface; unknown objects hit the root
+                            // stub.
                             let object_id = self.ipc_domain_object_id(tls);
                             match self.domain_interface(handle, object_id) {
                                 Some("fsp-srv-fs") => self.stub_fs(tls, cmd_id, handle)?,
                                 Some("fsp-srv-fs-dir") => {
-                                    self.stub_fs_dir(tls, cmd_id, object_id)?
+                                    self.stub_fs_dir(tls, cmd_id, Self::object_key(handle, object_id))?
                                 }
                                 Some("fsp-srv-fs-file") => {
-                                    self.stub_fs_file(tls, cmd_id, object_id)?
+                                    self.stub_fs_file(tls, cmd_id, Self::object_key(handle, object_id))?
                                 }
                                 _ => self.stub_fsp_srv(tls, cmd_id, handle)?,
                             }
+                        }
+                        // The same interfaces reached over their own session
+                        // handle, which is how a caller that never converts to
+                        // a domain (libtransistor) uses them.
+                        "fsp-srv-fs" => self.stub_fs(tls, cmd_id, handle)?,
+                        "fsp-srv-fs-dir" => {
+                            self.stub_fs_dir(tls, cmd_id, Self::object_key(handle, 0))?
+                        }
+                        "fsp-srv-fs-file" => {
+                            self.stub_fs_file(tls, cmd_id, Self::object_key(handle, 0))?
                         }
                         "vi:m" | "vi:m:" => self.stub_vi(tls, handle, cmd_id)?,
                         "set" => self.stub_set(tls, cmd_id)?,
                         "nvdrv" | "nvdrv:" | "nvdrv:a" | "nvdrv:a:" | "nvdrv:s" | "nvdrv:t" => {
                             self.nvdrv_request(tls, cmd_id, handle)?
                         }
-                         _ => {
-                             // Known service, no dedicated stub: answer like
-                             // the anonymous-handle fallback below so applet
-                             // state commands (ReceiveMessage → the applet
-                             // message, Get*Mode/GetCurrentFocusState → the
-                             // state value) return real data instead of an
-                             // empty reply.
+                        // pl:u, the shared-font service.
+                        "pl:u" | "pl:s" => self.stub_pl(tls, cmd_id)?,
+                         name => {
+                             // Known service, no dedicated stub. The applet
+                             // services get the state values their init polls
+                             // for (ReceiveMessage → the applet message,
+                             // Get*Mode/GetCurrentFocusState → the state); every
+                             // other service must NOT get those numbers back —
+                             // answering `pl:u`'s GetLoadState with the applet
+                             // message left NX-Shell polling it 190k times.
+                             let applet = name.starts_with("applet");
                              let data = match cmd_id {
-                                 Some(1) => 15, // ReceiveMessage → FocusStateChanged
-                                 Some(5) => 1,  // GetOperationMode → Handheld
-                                 Some(6) => 0,  // GetPerformanceMode → Normal
-                                 Some(9) => 1,  // GetCurrentFocusState → InFocus
+                                 Some(1) if applet => 15, // ReceiveMessage → FocusStateChanged
+                                 Some(5) if applet => 1,  // GetOperationMode → Handheld
+                                 Some(6) if applet => 0,  // GetPerformanceMode → Normal
+                                 Some(9) if applet => 1,  // GetCurrentFocusState → InFocus
                                  _ => {
                                      let obj = self.next_object_id;
                                      self.next_object_id = obj.wrapping_add(1);

@@ -27,6 +27,10 @@ pub struct Memory {
     soft: (u32, u32),
     /// Shared zero page served for reads inside the soft region.
     zero: Box<[u8; PAGE_SIZE]>,
+    /// How many pages currently hold real storage. Counted as they are
+    /// allocated so reporting guest RAM use never walks the million-entry
+    /// page table.
+    mapped_pages: usize,
 }
 
 impl Default for Memory {
@@ -41,6 +45,7 @@ impl Memory {
             pages: vec![None; PAGE_COUNT],
             soft: (1, 0),
             zero: Box::new([0u8; PAGE_SIZE]),
+            mapped_pages: 0,
         }
     }
 
@@ -65,8 +70,21 @@ impl Memory {
     fn page_mut(&mut self, idx: usize) -> Result<&mut Box<[u8; PAGE_SIZE]>> {
         if self.pages[idx].is_none() {
             self.pages[idx] = Some(Box::new([0u8; PAGE_SIZE]));
+            self.mapped_pages += 1;
         }
         Ok(self.pages[idx].as_mut().unwrap())
+    }
+
+    /// Pages backed by real storage.
+    pub fn mapped_pages(&self) -> usize {
+        self.mapped_pages
+    }
+
+    /// Guest memory actually backed by host storage, in bytes. This is what the
+    /// emulated console "uses": the image, stack, heap and every page the guest
+    /// has touched inside a soft-mapped region.
+    pub fn mapped_bytes(&self) -> u64 {
+        self.mapped_pages as u64 * PAGE_SIZE as u64
     }
 
     fn page_ref(&self, idx: usize) -> Result<&[u8; PAGE_SIZE]> {
@@ -204,6 +222,24 @@ impl Memory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mapped_bytes_counts_pages_as_they_are_backed() {
+        let mut m = Memory::new();
+        assert_eq!(m.mapped_bytes(), 0);
+        m.map_zero(0x1000, PAGE_SIZE).unwrap();
+        assert_eq!(m.mapped_bytes(), PAGE_SIZE as u64);
+        // Writing inside an already-backed page doesn't count again.
+        m.write_u8(0x1FFF, 1).unwrap();
+        assert_eq!(m.mapped_bytes(), PAGE_SIZE as u64);
+        // A soft-mapped page only costs storage once the guest writes to it.
+        m.soft_map_zero(0x2000, 0x4000);
+        assert_eq!(m.read_u8(0x2000).unwrap(), 0);
+        assert_eq!(m.mapped_bytes(), PAGE_SIZE as u64);
+        m.write_u8(0x2000, 7).unwrap();
+        assert_eq!(m.mapped_bytes(), 2 * PAGE_SIZE as u64);
+        assert_eq!(m.mapped_pages(), 2);
+    }
 
     #[test]
     fn unmmapped_read_faults() {

@@ -104,6 +104,14 @@ function showOverlay(show) {
   overlayEl.classList.toggle('hidden', !show);
 }
 
+// Uncover the canvas and blank it. The context is alpha-less, so clearRect
+// paints black - the same "powered on, nothing presented yet" state a real
+// console shows.
+function showScreen() {
+  screenCtx.clearRect(0, 0, screenEl.width, screenEl.height);
+  showOverlay(false);
+}
+
 // Side panel (Console / Debug / Files). Closed by default: the screen is the
 // point of the page, not the tooling around it.
 function panelOpen() {
@@ -140,10 +148,10 @@ $('btn-fullscreen').addEventListener('click', () => {
 
 // ---------- display ----------
 
-// Copy the emulated screen into the canvas. Before anything is presented this
-// is the memory-mapped demo framebuffer; once the guest hands a frame to the
-// display it becomes the real console output, so the canvas is resized to
-// whatever resolution the guest chose (1280x720 for most homebrew).
+// Copy the emulated screen into the canvas, resizing it to whatever resolution
+// the guest presented (1280x720 for most homebrew). Before the guest hands the
+// display its first frame there is nothing to copy, so the canvas stays a blank
+// screen - visible, but empty.
 async function renderFb() {
   const w = await call('fb_width');
   const h = await call('fb_height');
@@ -154,7 +162,19 @@ async function renderFb() {
     fbBytes = w * h * 4;
     screenEl.width = w;
     screenEl.height = h;
-    $('res').textContent = w + '×' + h;
+  }
+  // Until the guest hands the display a frame there is no resolution to
+  // report - `fb_width`/`fb_height` fall back to the memory-mapped
+  // framebuffer's size, which real homebrew never uses.
+  if (lastFrame === 0) lastFrame = await call('frame_count');
+  $('res').textContent = lastFrame > 0 ? w + '×' + h : '—';
+  if (lastFrame === 0) {
+    // Nothing has been presented, so there is no screen content to copy: the
+    // fallback framebuffer region is just guest memory that Horizon homebrew
+    // never writes. Show it as a blank screen instead of that memory's
+    // contents.
+    showScreen();
+    return;
   }
   const pixels = await call('fb_snapshot', fbBytes);
   if (pixels && pixels.length >= fbBytes) {
@@ -190,7 +210,6 @@ async function init() {
   fbBytes = fbW * fbH * 4;
   screenEl.width = fbW;
   screenEl.height = fbH;
-  $('res').textContent = fbW + '×' + fbH;
   $('wasm-ver').textContent = 'core ready';
   log('core ready', 'dim');
   // Restore persisted keys into the session.
@@ -229,6 +248,11 @@ async function loadProgram(file, kind) {
   }
   log('Loaded ' + file.name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
   setState('loaded');
+  // Hand the stage over to the emulated screen now, not when the first frame
+  // arrives: homebrew can run for a long time (or fault) before it presents
+  // anything, and leaving the boot splash up until then makes it look as
+  // though nothing is happening.
+  showScreen();
   await updatePc();
   return true;
 }
@@ -351,6 +375,7 @@ $('btn-reset').addEventListener('click', async () => {
   clearConsole();
   lastFrame = 0;
   fbW = fbH = 0;
+  $('res').textContent = '—';
   setState('idle');
   showOverlay(true);
   screenCtx.clearRect(0, 0, screenEl.width, screenEl.height);
@@ -399,6 +424,23 @@ async function finishRun(steps, stepped) {
 async function updatePc() {
   $('pc').textContent = '0x' + (await call('get_pc')).toString(16).padStart(8, '0');
   $('steps').textContent = (await call('get_cycles')).toLocaleString();
+  await updateRam();
+}
+
+function formatBytes(n) {
+  if (n >= 1024 * 1024 * 1024) return (n / (1024 * 1024 * 1024)).toFixed(2) + ' GiB';
+  if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MiB';
+  if (n >= 1024) return (n / 1024).toFixed(0) + ' KiB';
+  return n + ' B';
+}
+
+// Guest RAM is the emulated console's own memory use (pages the guest has
+// actually touched); the wasm figure is what the worker's linear memory costs
+// the browser, which is the number that matters when a load fails to allocate.
+async function updateRam() {
+  const ram = await call('ram');
+  if (!ram) return;
+  $('ram').textContent = `${formatBytes(ram.guest)} (${formatBytes(ram.wasm)})`;
 }
 
 // ---------- debug tools ----------

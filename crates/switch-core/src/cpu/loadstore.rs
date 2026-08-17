@@ -95,70 +95,117 @@ impl Cpu {
             }
             return Ok(true);
         }
-        // Single structure (LD1/ST1 into one lane): bit31=0, q=bit30,
-        // bits[29:24]=001101, p=bit23 (post-index), bit22=1 (load) / 0
-        // (store), scale in bits[15:14], selem in bits[13]/[21], lane index in
-        // bits[12:10]/[12]/[13] depending on scale.
+        // AdvSIMD load/store single structure: bit31=0, Q=bit30,
+        // bits[29:24]=001101, wback=bit23 (the post-index forms), L=bit22,
+        // R=bit21, Rm=bits[20:16], opcode=bits[15:13], S=bit12,
+        // size=bits[11:10]. `scale` is opcode[2:1] and picks the element
+        // width; scale 0b11 is the load-and-replicate group (LD1R/LD2R/LD3R/
+        // LD4R), where `size` carries the width instead and every lane gets
+        // the same element.
         if ((insn >> 31) & 1) == 0 && ((insn >> 24) & 0x3F) == 0b001101 {
-            let q = (insn >> 30) & 1 == 1;
-            let p = (insn >> 23) & 1 == 1;
+            let q = (insn >> 30) & 1;
+            let wback = (insn >> 23) & 1 == 1;
             let load = (insn >> 22) & 1 == 1;
+            let r = (insn >> 21) & 1;
             let rm = ((insn >> 16) & 0x1F) as u8;
+            let opcode = (insn >> 13) & 0b111;
+            let s = (insn >> 12) & 1;
+            let size = (insn >> 10) & 0b11;
             let rn = ((insn >> 5) & 0x1F) as u8;
             let rt = (insn & 0x1F) as u8;
-            let scale = (insn >> 14) & 0b11;
-            let esize = 1u32 << scale;
-            let selem = (((insn >> 21) & 1) << 1 | (insn >> 13) & 1) as u32 + 1;
-            let qbit = if q { 1u32 } else { 0 };
-            let index = match scale {
-                0 => ((insn >> 10) & 0b111) | (qbit << 3),
-                1 => ((insn >> 10) & 0b11) | (qbit << 2),
-                2 => ((insn >> 12) & 1) | (qbit << 1),
-                _ => qbit,
-            };
-            let mut addr = self.read_x(rn);
-            let esize_u = esize as u64;
-            for xs in 0..selem {
-                let reg = (rt as u32 + xs) % 32;
-                let shift = (index as u32) * esize;
-                let mask = (1u128 << esize) - 1;
-                if load {
-                    let val = self.load_by_size(addr as u32, scale, false)?;
-                    self.vregs[reg as usize] =
-                        (self.vregs[reg as usize] & !(mask << shift)) | ((val as u128) << shift);
-                } else {
-                    let val = ((self.vregs[reg as usize] >> shift) & mask) as u64;
-                    self.store_by_size(addr as u32, scale, val)?;
+            let selem = ((opcode & 1) << 1 | r) + 1;
+            let mut scale = opcode >> 1;
+            let mut replicate = false;
+            // The lane index is spread across Q, S and `size`, and which bits
+            // belong to it depends on the element width.
+            let index;
+            match scale {
+                0b11 => {
+                    if !load || s == 1 {
+                        return Ok(false);
+                    }
+                    scale = size;
+                    replicate = true;
+                    index = 0;
                 }
-                addr = addr.wrapping_add(esize_u);
+                0b00 => index = (q << 3) | (s << 2) | size,
+                0b01 => {
+                    if size & 1 != 0 {
+                        return Ok(false);
+                    }
+                    index = (q << 2) | (s << 1) | (size >> 1);
+                }
+                _ => {
+                    if size & 0b10 != 0 {
+                        return Ok(false);
+                    }
+                    if size & 1 == 0 {
+                        index = (q << 1) | s;
+                    } else {
+                        if s == 1 {
+                            return Ok(false);
+                        }
+                        index = q;
+                        scale = 0b11;
+                    }
+                }
             }
-            if p {
-                if rm == 31 {
-                    self.write_x(rn, addr);
+            let esize = 8u32 << scale;
+            let ebytes = u64::from(esize / 8);
+            let lanes = if q == 1 { 128 / esize } else { 64 / esize };
+            let base = self.read_x(rn);
+            let mut offs = 0u64;
+            for sel in 0..selem {
+                let reg = ((u32::from(rt) + sel) % 32) as u8;
+                let addr = base.wrapping_add(offs) as u32;
+                if replicate {
+                    let elem = self.load_by_size(addr, scale, false)?;
+                    let mask = elem_mask(esize);
+                    let mut val = 0u128;
+                    for lane in 0..lanes {
+                        val |= (u128::from(elem) & mask) << (esize * lane);
+                    }
+                    // A 64-bit destination zeroes the register's top half.
+                    self.vregs[reg as usize] = val;
+                } else if load {
+                    let elem = self.load_by_size(addr, scale, false)?;
+                    self.write_vreg_elem(reg, index, esize, elem);
                 } else {
-                    self.write_x(rn, self.read_x(rn).wrapping_add(self.read_x(rm)));
+                    let elem = self.read_vreg_elem(reg, index, esize);
+                    self.store_by_size(addr, scale, elem)?;
                 }
+                offs += ebytes;
+            }
+            if wback {
+                // Rm == 31 selects the immediate form, whose increment is the
+                // number of bytes transferred; anything else is a register
+                // increment. Without this the base of `ld1 {v1.16b, v2.16b},
+                // [x2], #32` never advanced, so newlib's strrchr returned a
+                // pointer 32 bytes below the string.
+                let step = if rm == 31 { offs } else { self.read_x(rm) };
+                self.write_x(rn, base.wrapping_add(step));
             }
             return Ok(true);
         }
-        // Multiple structures (LD1/LD2/LD3/LD4, ST1/ST2/ST3/ST4): bit31=0,
-        // bits[29:24]=001100, bit23=p (post-index), bit22=1 (load) / 0
-        // (store), L=bit21, opcode=bits[15:12] selects (rpt, selem), sz in
-        // bits[11:10]. Only the `selem==1` forms are contiguous (each
-        // register is a plain 64/128-bit chunk); selem>1 interleaves, which
-        // isn't needed yet.
+        // AdvSIMD load/store multiple structures: bit31=0, Q=bit30,
+        // bits[29:24]=001100, wback=bit23 (the post-index forms), L=bit22,
+        // bit21=0, Rm=bits[20:16], opcode=bits[15:12] selects (rpt, selem),
+        // size=bits[11:10]. `selem` > 1 is the interleaving LD2/LD3/LD4 and
+        // ST2/ST3/ST4 group.
         if ((insn >> 31) & 1) == 0
-            && ((insn >> 28) & 0b11) == 0b00
-            && ((insn >> 24) & 0x0F) == 0b1100
+            && ((insn >> 24) & 0x3F) == 0b001100
+            && ((insn >> 21) & 1) == 0
         {
-            let q = (insn >> 30) & 1 == 1;
+            let q = (insn >> 30) & 1;
+            let wback = (insn >> 23) & 1 == 1;
             let load = (insn >> 22) & 1 == 1;
             let rm = ((insn >> 16) & 0x1F) as u8;
+            let opcode = (insn >> 12) & 0b1111;
+            let size = (insn >> 10) & 0b11;
             let rn = ((insn >> 5) & 0x1F) as u8;
             let rt = (insn & 0x1F) as u8;
-            let opcode = (insn >> 12) & 0b1111;
             let (rpt, selem) = match opcode {
-                0b0000 => (1, 4),
+                0b0000 => (1u32, 4u32),
                 0b0010 => (4, 1),
                 0b0100 => (1, 3),
                 0b0110 => (3, 1),
@@ -167,22 +214,65 @@ impl Cpu {
                 0b1010 => (2, 1),
                 _ => return Ok(false),
             };
-            if selem != 1 {
+            // A structure of 64-bit elements can't be interleaved into 64-bit
+            // registers: there is only one lane to interleave.
+            if size == 0b11 && q == 0 && selem != 1 {
                 return Ok(false);
             }
-            let vec_bytes: u32 = if q { 16 } else { 8 };
-            let addr = self.read_x(rn);
-            for i in 0..rpt {
-                let a = addr.wrapping_add((i as u64) * vec_bytes as u64) as u32;
-                if load {
-                    self.vregs[(rt + i) as usize % 32] = self.load_q(a)?;
-                } else {
-                    self.store_q(a, self.vregs[(rt + i) as usize % 32])?;
+            let esize = 8u32 << size;
+            let ebytes = u64::from(esize / 8);
+            let vec_bytes = if q == 1 { 16u64 } else { 8 };
+            let lanes = if q == 1 { 128 / esize } else { 64 / esize };
+            let base = self.read_x(rn);
+            let mut offs = 0u64;
+            if selem == 1 {
+                // Contiguous: each register is a plain 64/128-bit chunk of
+                // memory whatever the element size, so move it in one go.
+                for i in 0..rpt {
+                    let addr = base.wrapping_add(offs) as u32;
+                    let reg = ((u32::from(rt) + i) % 32) as usize;
+                    if load {
+                        self.vregs[reg] = if q == 1 {
+                            self.load_q(addr)?
+                        } else {
+                            u128::from(self.mem.read_u64(addr)?)
+                        };
+                    } else if q == 1 {
+                        self.store_q(addr, self.vregs[reg])?;
+                    } else {
+                        self.mem.write_u64(addr, self.vregs[reg] as u64)?;
+                    }
+                    offs += vec_bytes;
+                }
+            } else {
+                if load && q == 0 {
+                    // Loading a 64-bit register zeroes its top half, and the
+                    // lane writes below only touch the bottom one.
+                    for i in 0..rpt * selem {
+                        self.vregs[((u32::from(rt) + i) % 32) as usize] &= elem_mask(64);
+                    }
+                }
+                for r in 0..rpt {
+                    for lane in 0..lanes {
+                        let mut reg = u32::from(rt) + r;
+                        for _ in 0..selem {
+                            let addr = base.wrapping_add(offs) as u32;
+                            if load {
+                                let elem = self.load_by_size(addr, size, false)?;
+                                self.write_vreg_elem((reg % 32) as u8, lane, esize, elem);
+                            } else {
+                                let elem = self.read_vreg_elem((reg % 32) as u8, lane, esize);
+                                self.store_by_size(addr, size, elem)?;
+                            }
+                            offs += ebytes;
+                            reg += 1;
+                        }
+                    }
                 }
             }
-            if rm != 31 {
-                let total = (rpt as u64) * (vec_bytes as u64);
-                self.write_x(rn, addr.wrapping_add(total));
+            if wback {
+                let step = if rm == 31 { offs } else { self.read_x(rm) };
+                self.write_x(rn, base.wrapping_add(step));
             }
             return Ok(true);
         }
@@ -395,6 +485,21 @@ impl Cpu {
         self.mem.write_u64(addr.wrapping_add(8), (v >> 64) as u64)
     }
 
+    /// Read lane `index` of Vn, `esize` bits wide, in little-endian lane order.
+    #[inline]
+    pub(super) fn read_vreg_elem(&self, reg: u8, index: u32, esize: u32) -> u64 {
+        ((self.vregs[reg as usize] >> (index * esize)) & elem_mask(esize)) as u64
+    }
+
+    /// Write lane `index` of Vn, leaving every other lane alone.
+    #[inline]
+    pub(super) fn write_vreg_elem(&mut self, reg: u8, index: u32, esize: u32, val: u64) {
+        let shift = index * esize;
+        let mask = elem_mask(esize) << shift;
+        self.vregs[reg as usize] =
+            (self.vregs[reg as usize] & !mask) | ((u128::from(val) << shift) & mask);
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn try_load_store(&mut self, insn: u32, _next_pc: &mut u32) -> Result<bool> {
         // Exclusive accessors.
@@ -592,15 +697,15 @@ impl Cpu {
         // read entry 4x too far, loading 0 and jumping into the table itself).
         let shift = if s == 1 { sz as u32 } else { 0 };
         let v = self.read_zr(rm);
+        // Only four of the eight extend encodings are defined for a
+        // register-offset load/store, and the signed pair is 110/111 — not
+        // 111/110 as in some tables. A byte/halfword extend here is an
+        // UNDEFINED encoding, so it faults rather than guessing.
         let ext = match opt {
-            0b011 => v,                                       // LSL / UXTX
-            0b010 => (v as u32) as i64 as u64,                // UXTW
-            0b111 => sext_u64(v, 32),                         // SXTW
-            0b000 => (v as u8) as u64,                        // UXTB
-            0b001 => (v as u16) as u64,                       // UXTH
-            0b100 => sext_u64(v, 8),                          // SXTB
-            0b101 => sext_u64(v, 16),                         // SXTH
-            0b110 => v,                                       // SXTX
+            0b010 => (v as u32) as u64,        // UXTW
+            0b011 => v,                        // LSL / UXTX
+            0b110 => sext_u64(v, 32),          // SXTW
+            0b111 => v,                        // SXTX
             _ => return Err(Error::Cpu(format!("bad register offset option {}", opt))),
         };
         Ok((ext.wrapping_shl(shift)) as i64)

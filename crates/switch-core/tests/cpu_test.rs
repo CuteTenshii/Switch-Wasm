@@ -1156,14 +1156,12 @@ fn scalar_fp_fadd_fmov() {
 
 #[test]
 fn scalar_fp_fcvtzs() {
-    // scvtf s0, w1 (1000 → 1000.0f) ; fcvtzs w2, s0 (round trip)
-    let scvtf_ws = |rd: u32, rn: u32| {
-        (0b0011110 << 24) | (0b000010 << 16) | (rn << 5) | rd
-    };
-    let fcvtzs_ws = |rd: u32, rn: u32| {
-        (0b0011110 << 24) | (0b011000 << 16) | (rn << 5) | rd
-    };
-    let code = [scvtf_ws(0, 1), fcvtzs_ws(2, 0), nop()];
+    // `scvtf s0, w1` = 0x1e220020 (1000 → 1000.0f) then `fcvtzs w2, s0` =
+    // 0x1e380002 back again. Bit 21 is a fixed 1 in this encoding class, so the
+    // operation is rmode (bits[20:19]) and opcode (bits[18:16]); the old
+    // hand-assembled encodings here had bit 21 clear, which is not a valid
+    // instruction at all.
+    let code = [0x1e22_0020u32, 0x1e38_0002, nop()];
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(1, 1000);
     let cpu = run_program(cpu, 0x1000, &code);
@@ -1718,4 +1716,909 @@ fn simd_multiply_and_multiply_accumulate() {
     cpu.set_vreg(2, 0x0000_0003_0000_0003_0000_0003_0000_0003);
     let cpu = run_program(cpu, 0x1000, &[0x4ea2_9420, nop()]);
     assert_eq!(cpu.read_vreg(0), 0x0000_0007_0000_0007_0000_0007_0000_0007);
+}
+
+/// 64 bytes of 0x00..0x3F at `addr`, for the structure load/store tests.
+fn map_ramp(cpu: &mut Cpu, addr: u32, len: u32) {
+    cpu.mem.map_zero(addr, len as usize).unwrap();
+    for i in 0..len {
+        cpu.mem.write_u8(addr + i, i as u8).unwrap();
+    }
+}
+
+/// The 16 bytes at `addr` as the u128 a `ld1 {Vt.16b}` would produce.
+fn mem_u128(cpu: &Cpu, addr: u32) -> u128 {
+    u128::from_le_bytes(cpu.mem.dump(addr, 16).unwrap().try_into().unwrap())
+}
+
+#[test]
+fn ld1_multiple_structures_writes_back_only_when_post_indexed() {
+    // `ld1 {v1.16b, v2.16b}, [x2], #32` = 0x4cdfa041. The immediate post-index
+    // form has Rm == 31, which the old decode read as "no writeback" — newlib's
+    // strrchr then computed its result from a base 32 bytes too low and
+    // PHYSFS_init failed on a garbage argv[0] directory.
+    let mut cpu = cpu_at(0x1000);
+    map_ramp(&mut cpu, 0x3000, 64);
+    cpu.set_reg(2, 0x3000);
+    let cpu = run_program(cpu, 0x1000, &[0x4cdf_a041, nop()]);
+    assert_eq!(cpu.read_vreg(1), mem_u128(&cpu, 0x3000));
+    assert_eq!(cpu.read_vreg(2), mem_u128(&cpu, 0x3010));
+    assert_eq!(cpu.read_reg(2), 0x3020);
+
+    // `ld1 {v3.16b}, [x0]` = 0x4c407003 has no writeback at all: Rm reads as 0
+    // there, and the old decode wrote the incremented base into x0.
+    let mut cpu = cpu_at(0x1000);
+    map_ramp(&mut cpu, 0x3000, 64);
+    cpu.set_reg(0, 0x3000);
+    let cpu = run_program(cpu, 0x1000, &[0x4c40_7003, nop()]);
+    assert_eq!(cpu.read_vreg(3), mem_u128(&cpu, 0x3000));
+    assert_eq!(cpu.read_reg(0), 0x3000);
+
+    // `ld1 {v4.8b}, [x0]` = 0x0c407004 moves 8 bytes, not 16, and zeroes the
+    // register's top half.
+    let mut cpu = cpu_at(0x1000);
+    map_ramp(&mut cpu, 0x3000, 64);
+    cpu.set_reg(0, 0x3000);
+    cpu.set_vreg(4, u128::MAX);
+    let cpu = run_program(cpu, 0x1000, &[0x0c40_7004, nop()]);
+    assert_eq!(cpu.read_vreg(4), 0x0706_0504_0302_0100);
+
+    // `ld1 {v5.16b, v6.16b, v7.16b, v8.16b}, [x1], #64` = 0x4cdf2025.
+    let mut cpu = cpu_at(0x1000);
+    map_ramp(&mut cpu, 0x3000, 64);
+    cpu.set_reg(1, 0x3000);
+    let cpu = run_program(cpu, 0x1000, &[0x4cdf_2025, nop()]);
+    for (i, reg) in (5u8..=8).enumerate() {
+        assert_eq!(cpu.read_vreg(reg), mem_u128(&cpu, 0x3000 + 16 * i as u32));
+    }
+    assert_eq!(cpu.read_reg(1), 0x3040);
+
+    // Register post-index: `ld1 {v0.2d, v1.2d}, [x0], x5` = 0x4cc5ac00 advances
+    // the base by Xm, not by the transfer size.
+    let mut cpu = cpu_at(0x1000);
+    map_ramp(&mut cpu, 0x3000, 64);
+    cpu.set_reg(0, 0x3000);
+    cpu.set_reg(5, 8);
+    let cpu = run_program(cpu, 0x1000, &[0x4cc5_ac00, nop()]);
+    assert_eq!(cpu.read_reg(0), 0x3008);
+}
+
+#[test]
+fn ld1r_replicates_one_element_to_every_lane() {
+    // `ld1r {v9.16b}, [x0]` = 0x4d40c009 and `ld1r {v10.4s}, [x0]` = 0x4d40c80a.
+    // The replicate group is `scale == 0b11`, which the old decode treated as a
+    // doubleword lane insert.
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x3000, 0x40).unwrap();
+    cpu.mem.write_u32(0x3000, 0x1122_33AB).unwrap();
+    cpu.set_reg(0, 0x3000);
+    let cpu = run_program(cpu, 0x1000, &[0x4d40_c009, 0x4d40_c80a, nop()]);
+    assert_eq!(cpu.read_vreg(9), u128::from_le_bytes([0xAB; 16]));
+    assert_eq!(cpu.read_vreg(10), 0x1122_33AB_1122_33AB_1122_33AB_1122_33AB);
+}
+
+#[test]
+fn ld2_and_st2_interleave_lanes() {
+    // `ld2 {v11.16b, v12.16b}, [x0]` = 0x4c40800b splits the block into even
+    // and odd bytes; `st2 {v11.16b, v12.16b}, [x3]` = 0x4c00806b puts it back.
+    let mut cpu = cpu_at(0x1000);
+    map_ramp(&mut cpu, 0x3000, 32);
+    cpu.mem.map_zero(0x3100, 0x40).unwrap();
+    cpu.set_reg(0, 0x3000);
+    cpu.set_reg(3, 0x3100);
+    let cpu = run_program(cpu, 0x1000, &[0x4c40_800b, 0x4c00_806b, nop()]);
+    let evens: Vec<u8> = (0..32u8).filter(|b| b % 2 == 0).collect();
+    let odds: Vec<u8> = (0..32u8).filter(|b| b % 2 == 1).collect();
+    assert_eq!(cpu.read_vreg(11), u128::from_le_bytes(evens.try_into().unwrap()));
+    assert_eq!(cpu.read_vreg(12), u128::from_le_bytes(odds.try_into().unwrap()));
+    assert_eq!(cpu.mem.dump(0x3100, 32).unwrap(), (0..32u8).collect::<Vec<u8>>());
+
+    // `ld4 {v16.4s, v17.4s, v18.4s, v19.4s}, [x0], #64` = 0x4cdf0810 takes
+    // every fourth word into each register.
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x3000, 0x40).unwrap();
+    for i in 0..16u32 {
+        cpu.mem.write_u32(0x3000 + i * 4, i).unwrap();
+    }
+    cpu.set_reg(0, 0x3000);
+    let cpu = run_program(cpu, 0x1000, &[0x4cdf_0810, nop()]);
+    assert_eq!(cpu.read_vreg(16), 0x0000_000C_0000_0008_0000_0004_0000_0000);
+    assert_eq!(cpu.read_vreg(17), 0x0000_000D_0000_0009_0000_0005_0000_0001);
+    assert_eq!(cpu.read_vreg(18), 0x0000_000E_0000_000A_0000_0006_0000_0002);
+    assert_eq!(cpu.read_vreg(19), 0x0000_000F_0000_000B_0000_0007_0000_0003);
+    assert_eq!(cpu.read_reg(0), 0x3040);
+}
+
+#[test]
+fn ld1_single_lane_addresses_the_whole_element() {
+    // `ld1 {v13.s}[1], [x0]` = 0x0d40900d replaces bits 32..63 and nothing
+    // else; the old decode shifted by the element's byte count and masked to
+    // that many bits, so it rewrote 4 bits at bit 4.
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x3000, 0x40).unwrap();
+    cpu.mem.map_zero(0x3100, 0x40).unwrap();
+    cpu.mem.write_u32(0x3000, 0xDEAD_BEEF).unwrap();
+    cpu.set_reg(0, 0x3000);
+    cpu.set_reg(3, 0x3100);
+    cpu.set_vreg(13, 0x1111_1111_2222_2222_3333_3333_4444_4444);
+    let cpu = run_program(cpu, 0x1000, &[0x0d40_900d, 0x0d00_906d, nop()]);
+    assert_eq!(cpu.read_vreg(13), 0x1111_1111_2222_2222_DEAD_BEEF_4444_4444);
+    assert_eq!(cpu.mem.read_u32(0x3100).unwrap(), 0xDEAD_BEEF);
+}
+
+#[test]
+fn bsl_bit_and_bif_take_their_mask_from_the_right_register() {
+    // BSL selects with Vd, BIT and BIF with Vm. All three had the mask wrong,
+    // which broke newlib's vectorised strchr (it uses `bif` to fold the
+    // "matched" and "end of string" predicates together).
+    let mut cpu = cpu_at(0x1000);
+    let byte = |b: u8| u128::from_le_bytes([b; 16]);
+    cpu.set_vreg(20, byte(0xF0));
+    cpu.set_vreg(21, byte(0xAA));
+    cpu.set_vreg(22, byte(0x55));
+    cpu.set_vreg(23, byte(0x55));
+    cpu.set_vreg(24, byte(0xAA));
+    cpu.set_vreg(25, byte(0xF0));
+    cpu.set_vreg(26, byte(0x55));
+    cpu.set_vreg(27, byte(0xAA));
+    cpu.set_vreg(28, byte(0xF0));
+    // bsl v20, v21, v22 / bit v23, v24, v25 / bif v26, v27, v28
+    let cpu = run_program(cpu, 0x1000, &[0x6e76_1eb4, 0x6eb9_1f17, 0x6efc_1f7a, nop()]);
+    assert_eq!(cpu.read_vreg(20), byte(0xA5));
+    assert_eq!(cpu.read_vreg(23), byte(0xA5));
+    assert_eq!(cpu.read_vreg(26), byte(0x5A));
+}
+
+#[test]
+fn register_offset_load_sign_extends_a_32_bit_index() {
+    // `ldr x4, [x1, w2, sxtw #3]` = 0xf862d824 with w2 = -2 reads 16 bytes
+    // below the base.
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x3000, 0x200).unwrap();
+    cpu.mem.write_u64(0x30F0, 0xAAAA_AAAA_AAAA_AAAA).unwrap();
+    cpu.set_reg(1, 0x3100);
+    cpu.set_reg(2, 0xFFFF_FFFE);
+    let cpu = run_program(cpu, 0x1000, &[0xf862_d824, nop()]);
+    assert_eq!(cpu.read_reg(4), 0xAAAA_AAAA_AAAA_AAAA);
+
+    // `ldr x5, [x1, x2, sxtx #3]` = 0xf862f825 takes the index as a full 64-bit
+    // value.
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x3000, 0x200).unwrap();
+    cpu.mem.write_u64(0x30F0, 0xBBBB_BBBB_BBBB_BBBB).unwrap();
+    cpu.set_reg(1, 0x3100);
+    cpu.set_reg(2, 0xFFFF_FFFF_FFFF_FFFE);
+    let cpu = run_program(cpu, 0x1000, &[0xf862_f825, nop()]);
+    assert_eq!(cpu.read_reg(5), 0xBBBB_BBBB_BBBB_BBBB);
+}
+
+#[test]
+fn scalar_fp_one_source_and_fused_multiply_add() {
+    // `fmov s0, s15` = 0x1e2041e0 is opcode 0 of the 1-source group, whose low
+    // opcode bit sits in bits[15] — matching bits[15:10] as a unit missed the
+    // whole group, so NX-Shell faulted here. FMOV is a bit-exact copy, so a
+    // signalling NaN payload survives it.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(15, 0x1111_1111_1111_1111_1111_1111_7FA0_1234);
+    let cpu = run_program(cpu, 0x1000, &[0x1e20_41e0, nop()]);
+    assert_eq!(cpu.read_vreg(0), 0x7FA0_1234);
+
+    // `fmov d1, d2` = 0x1e604041 keeps 64 bits and zeroes the rest.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(2, 0x9999_9999_9999_9999_4008_0000_0000_0000);
+    let cpu = run_program(cpu, 0x1000, &[0x1e60_4041, nop()]);
+    assert_eq!(cpu.read_vreg(1), 0x4008_0000_0000_0000);
+
+    // FMADD/FMSUB/FNMADD/FNMSUB (`fmadd d3, d4, d5, d6` = 0x1f451883 and
+    // friends): the 3-source group has its own top byte, so it was unreachable.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(4, 3.0f64.to_bits() as u128);
+    cpu.set_vreg(5, 4.0f64.to_bits() as u128);
+    cpu.set_vreg(6, 5.0f64.to_bits() as u128);
+    let cpu = run_program(
+        cpu,
+        0x1000,
+        &[0x1f45_1883, 0x1f45_9887, 0x1f65_1888, 0x1f65_9889, nop()],
+    );
+    assert_eq!(f64::from_bits(cpu.read_vreg(3) as u64), 17.0);
+    assert_eq!(f64::from_bits(cpu.read_vreg(7) as u64), -7.0);
+    assert_eq!(f64::from_bits(cpu.read_vreg(8) as u64), -17.0);
+    assert_eq!(f64::from_bits(cpu.read_vreg(9) as u64), 7.0);
+
+    // FABS/FNEG/FSQRT/FRINTM/FRINTP and the two FCVT directions.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(12, (-1.5f32).to_bits() as u128);
+    cpu.set_vreg(14, (2.5f64).to_bits() as u128);
+    cpu.set_vreg(15, (9.0f32).to_bits() as u128);
+    cpu.set_vreg(16, (-1.5f64).to_bits() as u128);
+    cpu.set_vreg(17, (1.25f32).to_bits() as u128);
+    cpu.set_vreg(18, (0.5f64).to_bits() as u128);
+    cpu.set_vreg(19, (0.25f32).to_bits() as u128);
+    let cpu = run_program(
+        cpu,
+        0x1000,
+        &[
+            0x1e20_c18b, // fabs s11, s12
+            0x1e61_41cd, // fneg d13, d14
+            0x1e21_c1ee, // fsqrt s14, s15
+            0x1e65_420f, // frintm d15, d16
+            0x1e24_c230, // frintp s16, s17
+            0x1e62_4251, // fcvt s17, d18
+            0x1e22_c272, // fcvt d18, s19
+            nop(),
+        ],
+    );
+    assert_eq!(f32::from_bits(cpu.read_vreg(11) as u32), 1.5);
+    assert_eq!(f64::from_bits(cpu.read_vreg(13) as u64), -2.5);
+    assert_eq!(f32::from_bits(cpu.read_vreg(14) as u32), 3.0);
+    assert_eq!(f64::from_bits(cpu.read_vreg(15) as u64), -2.0);
+    assert_eq!(f32::from_bits(cpu.read_vreg(16) as u32), 2.0);
+    assert_eq!(f32::from_bits(cpu.read_vreg(17) as u32), 0.5);
+    assert_eq!(f64::from_bits(cpu.read_vreg(18) as u64), 0.25);
+}
+
+#[test]
+fn ctr_el0_reports_64_byte_cache_lines() {
+    // `mrs x7, ctr_el0` = 0xd53b0027. Cache-flush loops stride by
+    // `4 << DminLine`; reporting 0 walked NX-Shell's buffers 4 bytes at a time.
+    let cpu = run_program(cpu_at(0x1000), 0x1000, &[0xd53b_0027, nop()]);
+    assert_eq!(cpu.read_reg(7), 0x8444_C004);
+    assert_eq!((cpu.read_reg(7) >> 16) & 0xF, 4);
+}
+
+/// Pack four 32-bit lanes, lane 0 in the low bits.
+fn u32x4(lanes: [u32; 4]) -> u128 {
+    lanes.iter().rev().fold(0u128, |acc, &l| (acc << 32) | u128::from(l))
+}
+
+fn f32x4(lanes: [f32; 4]) -> u128 {
+    u32x4([lanes[0].to_bits(), lanes[1].to_bits(), lanes[2].to_bits(), lanes[3].to_bits()])
+}
+
+fn u64x2(lanes: [u64; 2]) -> u128 {
+    u128::from(lanes[0]) | (u128::from(lanes[1]) << 64)
+}
+
+fn f64x2(lanes: [f64; 2]) -> u128 {
+    u64x2([lanes[0].to_bits(), lanes[1].to_bits()])
+}
+
+fn lanes_f32(v: u128) -> [f32; 4] {
+    [0, 1, 2, 3].map(|i| f32::from_bits((v >> (32 * i)) as u32))
+}
+
+fn lanes_u32(v: u128) -> [u32; 4] {
+    [0, 1, 2, 3].map(|i| (v >> (32 * i)) as u32)
+}
+
+#[test]
+fn vector_integer_float_conversions() {
+    // `scvtf v28.4s, v31.4s` = 0x4e21dbfc is where NX-Shell faulted: the
+    // two-register misc group was falling through to the three-same decode.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(31, u32x4([1, 2, 3, 0xFFFF_FFFF]));
+    let cpu = run_program(cpu, 0x1000, &[0x4e21_dbfc, nop()]);
+    assert_eq!(lanes_f32(cpu.read_vreg(28)), [1.0, 2.0, 3.0, -1.0]);
+
+    // UCVTF reads the same lanes as unsigned.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(3, u32x4([1, 2, 3, 0xFFFF_FFFF]));
+    let cpu = run_program(cpu, 0x1000, &[0x6e21_d862, nop()]);
+    assert_eq!(lanes_f32(cpu.read_vreg(2)), [1.0, 2.0, 3.0, 4_294_967_295.0]);
+
+    // FCVTZS truncates toward zero and saturates at the lane width.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(5, f32x4([1.9, -1.9, 1.0e10, -1.0e10]));
+    let cpu = run_program(cpu, 0x1000, &[0x4ea1_b8a4, nop()]);
+    assert_eq!(
+        lanes_u32(cpu.read_vreg(4)),
+        [1, (-1i32) as u32, i32::MAX as u32, i32::MIN as u32]
+    );
+
+    // FCVTZU clamps negatives to zero.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(7, f32x4([2.7, -2.7, 5.0, 0.0]));
+    let cpu = run_program(cpu, 0x1000, &[0x6ea1_b8e6, nop()]);
+    assert_eq!(lanes_u32(cpu.read_vreg(6)), [2, 0, 5, 0]);
+
+    // The rounding modes: FCVTNS ties to even, FCVTPS up, FCVTMS down.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(13, f32x4([0.5, 1.5, 2.5, -1.5]));
+    cpu.set_vreg(11, f32x4([1.1, -1.1, 0.0, 3.9]));
+    cpu.set_vreg(9, f64x2([-1.5, 2.5]));
+    let cpu = run_program(cpu, 0x1000, &[0x4e21_a9ac, 0x4ea1_a96a, 0x4e61_b928, nop()]);
+    assert_eq!(lanes_u32(cpu.read_vreg(12)), [0, 2, 2, (-2i32) as u32]);
+    assert_eq!(lanes_u32(cpu.read_vreg(10)), [2, (-1i32) as u32, 0, 4]);
+    assert_eq!(cpu.read_vreg(8), u64x2([(-2i64) as u64, 2]));
+}
+
+#[test]
+fn vector_floating_point_arithmetic() {
+    // `fdiv v28.4s, v28.4s, v30.4s` = 0x6e3eff9c — the FP three-same group
+    // (opcodes from 0b11000 up) was being decoded as integer ops.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(28, f32x4([1.0, 3.0, 5.0, 9.0]));
+    cpu.set_vreg(30, f32x4([2.0, 4.0, 5.0, 3.0]));
+    let cpu = run_program(cpu, 0x1000, &[0x6e3e_ff9c, nop()]);
+    assert_eq!(lanes_f32(cpu.read_vreg(28)), [0.5, 0.75, 1.0, 3.0]);
+
+    // FADD / FSUB (2D) / FMUL.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(1, f32x4([1.0, 2.0, 3.0, 4.0]));
+    cpu.set_vreg(2, f32x4([0.5, 0.5, 0.5, 0.5]));
+    cpu.set_vreg(4, f32x4([2.0, 3.0, 4.0, 5.0]));
+    cpu.set_vreg(5, f32x4([2.0, 2.0, 2.0, 2.0]));
+    let cpu = run_program(cpu, 0x1000, &[0x4e22_d420, 0x6e25_dc83, nop()]);
+    assert_eq!(lanes_f32(cpu.read_vreg(0)), [1.5, 2.5, 3.5, 4.5]);
+    assert_eq!(lanes_f32(cpu.read_vreg(3)), [4.0, 6.0, 8.0, 10.0]);
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(1, f64x2([1.0, 2.0]));
+    cpu.set_vreg(2, f64x2([0.25, 0.5]));
+    let cpu = run_program(cpu, 0x1000, &[0x4ee2_d420, nop()]);
+    assert_eq!(cpu.read_vreg(0), f64x2([0.75, 1.5]));
+
+    // FMLA and FMLS accumulate into Vd.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(6, f32x4([1.0, 1.0, 1.0, 1.0]));
+    cpu.set_vreg(7, f32x4([2.0, 2.0, 2.0, 2.0]));
+    cpu.set_vreg(8, f32x4([3.0, 3.0, 3.0, 3.0]));
+    cpu.set_vreg(9, f32x4([1.0, 1.0, 1.0, 1.0]));
+    cpu.set_vreg(10, f32x4([2.0, 2.0, 2.0, 2.0]));
+    cpu.set_vreg(11, f32x4([3.0, 3.0, 3.0, 3.0]));
+    let cpu = run_program(cpu, 0x1000, &[0x4e28_cce6, 0x4eab_cd49, nop()]);
+    assert_eq!(lanes_f32(cpu.read_vreg(6)), [7.0; 4]);
+    assert_eq!(lanes_f32(cpu.read_vreg(9)), [-5.0; 4]);
+
+    // FMAX, FMINNM (2D), the compares and FADDP.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(13, f32x4([1.0, 5.0, -1.0, 0.0]));
+    cpu.set_vreg(14, f32x4([2.0, 4.0, -2.0, 0.0]));
+    cpu.set_vreg(16, f64x2([1.0, 8.0]));
+    cpu.set_vreg(17, f64x2([2.0, 4.0]));
+    cpu.set_vreg(19, f32x4([1.0, 2.0, 3.0, 4.0]));
+    cpu.set_vreg(20, f32x4([1.0, 0.0, 3.0, 0.0]));
+    cpu.set_vreg(22, f32x4([1.0, 2.0, 3.0, 4.0]));
+    cpu.set_vreg(23, f32x4([2.0, 2.0, 1.0, 5.0]));
+    cpu.set_vreg(25, f32x4([-3.0, 1.0, -1.0, 2.0]));
+    cpu.set_vreg(26, f32x4([2.0, -2.0, 1.0, 2.0]));
+    cpu.set_vreg(28, f32x4([1.0, 2.0, 3.0, 4.0]));
+    cpu.set_vreg(29, f32x4([10.0, 20.0, 30.0, 40.0]));
+    let code = [
+        0x4e2e_f5ac, // fmax v12.4s, v13.4s, v14.4s
+        0x4ef1_c60f, // fminnm v15.2d, v16.2d, v17.2d
+        0x4e34_e672, // fcmeq v18.4s, v19.4s, v20.4s
+        0x6e37_e6d5, // fcmge v21.4s, v22.4s, v23.4s
+        0x6eba_ef38, // facgt v24.4s, v25.4s, v26.4s
+        0x6e3d_d79b, // faddp v27.4s, v28.4s, v29.4s
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(lanes_f32(cpu.read_vreg(12)), [2.0, 5.0, -1.0, 0.0]);
+    assert_eq!(cpu.read_vreg(15), f64x2([1.0, 4.0]));
+    assert_eq!(lanes_u32(cpu.read_vreg(18)), [u32::MAX, 0, u32::MAX, 0]);
+    assert_eq!(lanes_u32(cpu.read_vreg(21)), [0, u32::MAX, u32::MAX, 0]);
+    assert_eq!(lanes_u32(cpu.read_vreg(24)), [u32::MAX, 0, 0, 0]);
+    assert_eq!(lanes_f32(cpu.read_vreg(27)), [3.0, 7.0, 30.0, 70.0]);
+
+    // FABS / FNEG / FSQRT / FRINTM / FRINTP and the compares against zero.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(15, f32x4([-1.5, 2.5, -0.0, 3.0]));
+    cpu.set_vreg(17, f64x2([1.5, -2.5]));
+    cpu.set_vreg(19, f32x4([4.0, 9.0, 16.0, 25.0]));
+    cpu.set_vreg(21, f32x4([1.5, -1.5, 2.0, -2.5]));
+    cpu.set_vreg(23, f32x4([1.5, -1.5, 2.0, -2.5]));
+    cpu.set_vreg(25, f32x4([1.0, -1.0, 0.0, 2.0]));
+    cpu.set_vreg(27, f32x4([1.0, -1.0, 0.0, 2.0]));
+    let code = [
+        0x4ea0_f9ee, // fabs v14.4s, v15.4s
+        0x6ee0_fa30, // fneg v16.2d, v17.2d
+        0x6ea1_fa72, // fsqrt v18.4s, v19.4s
+        0x4e21_9ab4, // frintm v20.4s, v21.4s
+        0x4ea1_8af6, // frintp v22.4s, v23.4s
+        0x4ea0_cb38, // fcmgt v24.4s, v25.4s, #0.0
+        0x6ea0_db7a, // fcmle v26.4s, v27.4s, #0.0
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(lanes_f32(cpu.read_vreg(14)), [1.5, 2.5, 0.0, 3.0]);
+    assert_eq!(cpu.read_vreg(16), f64x2([-1.5, 2.5]));
+    assert_eq!(lanes_f32(cpu.read_vreg(18)), [2.0, 3.0, 4.0, 5.0]);
+    assert_eq!(lanes_f32(cpu.read_vreg(20)), [1.0, -2.0, 2.0, -3.0]);
+    assert_eq!(lanes_f32(cpu.read_vreg(22)), [2.0, -1.0, 2.0, -2.0]);
+    assert_eq!(lanes_u32(cpu.read_vreg(24)), [u32::MAX, 0, 0, u32::MAX]);
+    assert_eq!(lanes_u32(cpu.read_vreg(26)), [0, u32::MAX, u32::MAX, 0]);
+}
+
+#[test]
+fn vector_two_register_misc_integer_ops() {
+    // CNT / CLZ / NOT / RBIT.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(1, u32x4([0x0000_00FF, 0x0101_0101, 0, 0x8000_0001]));
+    cpu.set_vreg(3, u32x4([1, 0x8000_0000, 0, 0x0000_FFFF]));
+    cpu.set_vreg(5, u32x4([0, u32::MAX, 0x1234_5678, 0]));
+    cpu.set_vreg(7, u32x4([0x0000_0001, 0, 0, 0]));
+    let code = [
+        0x4e20_5820, // cnt v0.16b, v1.16b
+        0x6ea0_4862, // clz v2.4s, v3.4s
+        0x6e20_58a4, // not v4.16b, v5.16b
+        0x6e60_58e6, // rbit v6.16b, v7.16b
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(lanes_u32(cpu.read_vreg(0)), [8, 0x0101_0101, 0, 0x0100_0001]);
+    assert_eq!(lanes_u32(cpu.read_vreg(2)), [31, 0, 32, 16]);
+    assert_eq!(lanes_u32(cpu.read_vreg(4)), [u32::MAX, 0, 0xEDCB_A987, u32::MAX]);
+    assert_eq!(lanes_u32(cpu.read_vreg(6)), [0x0000_0080, 0, 0, 0]);
+
+    // ABS / NEG / CMGT #0 / CMLT #0 / CLS.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(9, u32x4([1, (-2i32) as u32, 0, i32::MIN as u32]));
+    cpu.set_vreg(11, u32x4([1, (-2i32) as u32, 0, 5]));
+    cpu.set_vreg(1, u32x4([1, (-1i32) as u32, 0, 7]));
+    cpu.set_vreg(3, u32x4([1, (-1i32) as u32, 0, 7]));
+    cpu.set_vreg(7, u32x4([0x0000_0001, 0xFFFF_FFFF, 0x4000_0000, 0]));
+    let code = [
+        0x4ea0_b928, // abs v8.4s, v9.4s
+        0x6ea0_b96a, // neg v10.4s, v11.4s
+        0x4ea0_8820, // cmgt v0.4s, v1.4s, #0
+        0x4ea0_a862, // cmlt v2.4s, v3.4s, #0
+        0x4ea0_48e6, // cls v6.4s, v7.4s
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(lanes_u32(cpu.read_vreg(8)), [1, 2, 0, i32::MIN as u32]);
+    assert_eq!(lanes_u32(cpu.read_vreg(10)), [(-1i32) as u32, 2, 0, (-5i32) as u32]);
+    assert_eq!(lanes_u32(cpu.read_vreg(0)), [u32::MAX, 0, 0, u32::MAX]);
+    assert_eq!(lanes_u32(cpu.read_vreg(2)), [0, u32::MAX, 0, 0]);
+    assert_eq!(lanes_u32(cpu.read_vreg(6)), [30, 31, 0, 31]);
+
+    // REV64 / REV32 / REV16 reverse bytes within their container.
+    let mut cpu = cpu_at(0x1000);
+    let ramp = u128::from_le_bytes([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    cpu.set_vreg(13, ramp);
+    cpu.set_vreg(15, ramp);
+    cpu.set_vreg(17, ramp);
+    let code = [
+        0x4e20_09ac, // rev64 v12.16b, v13.16b
+        0x6e60_09ee, // rev32 v14.8h, v15.8h
+        0x4e20_1a30, // rev16 v16.16b, v17.16b
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(
+        cpu.read_vreg(12).to_le_bytes(),
+        [7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12, 11, 10, 9, 8]
+    );
+    assert_eq!(
+        cpu.read_vreg(14).to_le_bytes(),
+        [2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13]
+    );
+    assert_eq!(
+        cpu.read_vreg(16).to_le_bytes(),
+        [1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 13, 12, 15, 14]
+    );
+
+    // XTN / SQXTN / UQXTN narrow, SHLL widens, UADDLP folds lane pairs.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(19, u64x2([0x0004_0003_0002_0001, 0]));
+    cpu.set_vreg(21, u64x2([0x7FFF_8000_0002_FFFF, 0]));
+    cpu.set_vreg(23, u32x4([0x0000_00FF, 0x0001_0000, 0, 0]));
+    cpu.set_vreg(25, u64x2([0x0004_0003_0002_0001, 0]));
+    cpu.set_vreg(5, u64x2([0x0004_0003_0002_0001, 0x0008_0007_0006_0005]));
+    let code = [
+        0x0e21_2a72, // xtn v18.8b, v19.8h
+        0x0e21_4ab4, // sqxtn v20.8b, v21.8h
+        0x2e61_4af6, // uqxtn v22.4h, v23.4s
+        0x2e61_3b38, // shll v24.4s, v25.4h, #16
+        0x6e60_28a4, // uaddlp v4.4s, v5.8h
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_vreg(18), 0x0403_0201);
+    // Signed saturation: 0x7FFF -> 0x7F, 0x8000 -> 0x80, 0x0002 stays,
+    // 0xFFFF is -1.
+    assert_eq!(cpu.read_vreg(20), 0x7F80_02FF);
+    // Unsigned saturation: 0x0001_0000 -> 0xFFFF, 0xFF stays.
+    assert_eq!(cpu.read_vreg(22), 0xFFFF_00FF);
+    assert_eq!(cpu.read_vreg(24), u64x2([0x0002_0000_0001_0000, 0x0004_0000_0003_0000]));
+    assert_eq!(lanes_u32(cpu.read_vreg(4)), [3, 7, 11, 15]);
+
+    // FCVTL widens 2S to 2D and FCVTN narrows back.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(27, f32x4([1.5, -2.5, 0.0, 0.0]));
+    cpu.set_vreg(29, f64x2([3.5, -4.5]));
+    let cpu = run_program(cpu, 0x1000, &[0x0e61_7b7a, 0x0e61_6bbc, nop()]);
+    assert_eq!(cpu.read_vreg(26), f64x2([1.5, -2.5]));
+    assert_eq!(lanes_f32(cpu.read_vreg(28)), [3.5, -4.5, 0.0, 0.0]);
+}
+
+#[test]
+fn scalar_integer_float_conversions_and_rounding_modes() {
+    // `ucvtf d0, x1` = 0x9e630020 is where NX-Shell died: rmode/opcode were
+    // read as one 6-bit field including the fixed bit 21, so this decoded as
+    // FCVTMU and wrote x0 — clobbering a live pointer.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0xDEAD_BEEF);
+    cpu.set_reg(1, 5);
+    let cpu = run_program(cpu, 0x1000, &[0x9e63_0020, nop()]);
+    assert_eq!(f64::from_bits(cpu.read_vreg(0) as u64), 5.0);
+    assert_eq!(cpu.read_reg(0), 0xDEAD_BEEF, "x0 must be untouched");
+
+    // UCVTF reads the source as unsigned, SCVTF as signed, and `sf` gives the
+    // source width independently of the destination's.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(1, u64::MAX);
+    cpu.set_reg(3, -3i64 as u64);
+    cpu.set_reg(5, 0xFFFF_FFFF);
+    let code = [
+        0x9e63_0020, // ucvtf d0, x1
+        0x9e62_0062, // scvtf d2, x3
+        0x1e23_00a4, // ucvtf s4, w5
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(f64::from_bits(cpu.read_vreg(0) as u64), 18_446_744_073_709_551_615.0);
+    assert_eq!(f64::from_bits(cpu.read_vreg(2) as u64), -3.0);
+    assert_eq!(f32::from_bits(cpu.read_vreg(4) as u32), 4_294_967_295.0);
+
+    // The float → integer forms: rmode picks the rounding and the result
+    // saturates at the destination width.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, (2.5f32).to_bits() as u128);
+    let code = [
+        0x1e20_0008, // fcvtns w8, s0  (ties to even → 2)
+        0x1e28_0009, // fcvtps w9, s0  (toward +inf → 3)
+        0x1e30_000a, // fcvtms w10, s0 (toward -inf → 2)
+        0x1e24_000b, // fcvtas w11, s0 (ties away → 3)
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_reg(8), 2);
+    assert_eq!(cpu.read_reg(9), 3);
+    assert_eq!(cpu.read_reg(10), 2);
+    assert_eq!(cpu.read_reg(11), 3);
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, (-2.7f64).to_bits() as u128);
+    let code = [
+        0x9e79_0006, // fcvtzu x6, d0 → negative clamps to 0
+        0x1e78_0007, // fcvtzs w7, d0 → -2 (truncated)
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_reg(6), 0);
+    assert_eq!(cpu.read_reg(7) as u32, -2i32 as u32);
+
+    // A 32-bit destination saturates rather than wrapping.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, (1.0e18f64).to_bits() as u128);
+    let cpu = run_program(cpu, 0x1000, &[0x1e78_0007, nop()]);
+    assert_eq!(cpu.read_reg(7) as u32, i32::MAX as u32);
+}
+
+#[test]
+fn fcmp_against_zero_uses_the_opcode2_bit() {
+    // `fcmp d8, #0.0` = 0x1e602108. The compare-with-zero flag is bit 3 of
+    // opcode2 (bits[4:0]); reading it from bits[9:8] took it out of Rn, so this
+    // compared d8 against v0 instead of zero.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(8, (1.5f64).to_bits() as u128);
+    cpu.set_vreg(0, (1.5f64).to_bits() as u128);
+    let cpu = run_program(cpu, 0x1000, &[0x1e60_2108, nop()]);
+    // 1.5 > 0 → N=0 Z=0 C=1 V=0.
+    assert_eq!(cpu.nzcv() >> 28, 0b0010);
+
+    // `fcmp d0, #0.0` = 0x1e602008 with a non-zero d0 must not read d0 as the
+    // second operand (which would always compare equal).
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, (-4.0f64).to_bits() as u128);
+    let cpu = run_program(cpu, 0x1000, &[0x1e60_2008, nop()]);
+    // -4 < 0 → N=1 Z=0 C=0 V=0.
+    assert_eq!(cpu.nzcv() >> 28, 0b1000);
+
+    // The register form still compares Vn with Vm.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(1, (2.0f64).to_bits() as u128);
+    cpu.set_vreg(2, (2.0f64).to_bits() as u128);
+    let cpu = run_program(cpu, 0x1000, &[0x1e62_2020, nop()]);
+    // equal → N=0 Z=1 C=1 V=0.
+    assert_eq!(cpu.nzcv() >> 28, 0b0110);
+}
+
+#[test]
+fn ext_extracts_across_a_vector_pair() {
+    // `ext v0.16b, v1.16b, v2.16b, #4` = 0x6e022020 takes the top 12 bytes of
+    // Vn followed by the low 4 of Vm. NX-Shell faulted on the `#8` form.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(1, 0x1F1E_1D1C_1B1A_1918_1716_1514_1312_1110);
+    cpu.set_vreg(2, 0x2F2E_2D2C_2B2A_2928_2726_2524_2322_2120);
+    let cpu = run_program(cpu, 0x1000, &[0x6e02_2020, nop()]);
+    assert_eq!(cpu.read_vreg(0), 0x2322_2120_1F1E_1D1C_1B1A_1918_1716_1514);
+
+    // #8 on a single register rotates it by 8 bytes.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(31, 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00);
+    let cpu = run_program(cpu, 0x1000, &[0x6e1f_43ff, nop()]);
+    assert_eq!(cpu.read_vreg(31), 0x99AA_BBCC_DDEE_FF00_1122_3344_5566_7788);
+
+    // #0 is a plain move of Vn.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(7, 0xAAAA);
+    cpu.set_vreg(8, 0xBBBB);
+    let cpu = run_program(cpu, 0x1000, &[0x6e08_00e6, nop()]);
+    assert_eq!(cpu.read_vreg(6), 0xAAAA);
+
+    // The 64-bit form works on the low halves only and zeroes the top.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(4, 0xFFFF_FFFF_FFFF_FFFF_0807_0605_0403_0201);
+    cpu.set_vreg(5, 0xFFFF_FFFF_FFFF_FFFF_1817_1615_1413_1211);
+    let cpu = run_program(cpu, 0x1000, &[0x2e05_1883, nop()]);
+    assert_eq!(cpu.read_vreg(3), 0x1312_1108_0706_0504);
+}
+
+#[test]
+fn scalar_shift_by_immediate() {
+    // `ushr d30, d31, #32` = 0x7f6007fe. The scalar forms differ from the
+    // vector ones only in bit 28 and always operate on one 64-bit lane; only
+    // the vector encodings were decoded, so NX-Shell faulted here.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(31, 0xFFFF_FFFF_FFFF_FFFF_1122_3344_5566_7788);
+    let cpu = run_program(cpu, 0x1000, &[0x7f60_07fe, nop()]);
+    assert_eq!(cpu.read_vreg(30), 0x1122_3344);
+
+    // `shl d0, d1, #4` = 0x5f445420 and `sshr d2, d3, #63` = 0x5f410462.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(1, 0x0000_0000_0000_0123);
+    cpu.set_vreg(3, 0x8000_0000_0000_0000);
+    let cpu = run_program(cpu, 0x1000, &[0x5f44_5420, 0x5f41_0462, nop()]);
+    assert_eq!(cpu.read_vreg(0), 0x1230);
+    assert_eq!(cpu.read_vreg(2), 0xFFFF_FFFF_FFFF_FFFF);
+}
+
+#[test]
+fn fcsel_fccmp_and_fixed_point_conversions() {
+    // `fcsel s30, s31, s30, gt` = 0x1e3ecffe. FCSEL and FCCMP have bit 21 set;
+    // they were guarded on bit 21 being clear, so neither was reachable.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(31, (1.5f32).to_bits() as u128);
+    cpu.set_vreg(30, (2.5f32).to_bits() as u128);
+    // Set flags with `fcmp s31, s30` (1.5 < 2.5 → not GT) then select.
+    cpu.set_reg(0, 0);
+    let cpu = run_program(cpu, 0x1000, &[0x1e3e_23e0, 0x1e3e_cffe, nop()]);
+    assert_eq!(f32::from_bits(cpu.read_vreg(30) as u32), 2.5, "GT false → Vm");
+
+    // With the condition true it takes Vn.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(1, (7.0f64).to_bits() as u128);
+    cpu.set_vreg(2, (9.0f64).to_bits() as u128);
+    cpu.set_vreg(3, (1.0f64).to_bits() as u128);
+    // `fcmp d3, d3` sets Z (equal), so EQ holds → `fcsel d0, d1, d2, eq` = d1.
+    let cpu = run_program(cpu, 0x1000, &[0x1e63_2060, 0x1e62_0c20, nop()]);
+    assert_eq!(f64::from_bits(cpu.read_vreg(0) as u64), 7.0);
+
+    // FCCMP with a failing condition installs its NZCV immediate instead of
+    // comparing: `fccmp d1, d2, #5, ne` = 0x1e621425 after `fcmp d3, d3` (Z set,
+    // so NE fails) leaves NZCV = 5 (Z and V).
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(1, (1.0f64).to_bits() as u128);
+    cpu.set_vreg(2, (2.0f64).to_bits() as u128);
+    cpu.set_vreg(3, (1.0f64).to_bits() as u128);
+    let cpu = run_program(cpu, 0x1000, &[0x1e63_2060, 0x1e62_1425, nop()]);
+    assert_eq!(cpu.nzcv() >> 28, 0b0101);
+
+    // The fixed-point conversions (bit 21 clear) used to land in the branch
+    // those conditionals occupied: `scvtf s0, w1, #8` = 0x1e02e020 scales by
+    // 2^-8, and `fcvtzs w2, s0, #4` = 0x1e18f002 scales back up by 2^4.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(1, 256);
+    cpu.set_reg(4, 3);
+    let code = [
+        0x1e02_e020, // scvtf s0, w1, #8   → 256 / 256 = 1.0
+        0x1e18_f002, // fcvtzs w2, s0, #4  → 1.0 * 16 = 16
+        0x9e43_c083, // ucvtf d3, x4, #16  → 3 / 65536
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(f32::from_bits(cpu.read_vreg(0) as u32), 1.0);
+    assert_eq!(cpu.read_reg(2), 16);
+    assert_eq!(f64::from_bits(cpu.read_vreg(3) as u64), 3.0 / 65536.0);
+}
+
+#[test]
+fn scalar_two_register_misc_converts_one_lane() {
+    // `ucvtf s13, s13` = 0x7e21d9ad — the scalar form of the two-register misc
+    // group (bits[31:30] = 01, bits[28:24] = 11110). Only the vector encodings
+    // were decoded, so NX-Shell faulted here.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(13, 0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_0000_0007);
+    let cpu = run_program(cpu, 0x1000, &[0x7e21_d9ad, nop()]);
+    // One lane converted, everything above it zeroed.
+    assert_eq!(cpu.read_vreg(13), u128::from((7.0f32).to_bits()));
+}
+
+#[test]
+fn blr_reads_its_target_before_linking() {
+    // `blr x30` is a return-and-relink: BLR reads the target register first,
+    // then writes x30. Linking first made it branch to itself+4 — hbmenu's NEON
+    // JPEG decoder ends its IDCT that way, so its icon never finished decoding.
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.set_reg(30, 0x2000);
+    // blr x30 = 0xd63f03c0
+    let cpu = run_program(cpu, 0x1000, &[0xd63f_03c0u32]);
+    assert_eq!(cpu.get_pc(), 0x2000, "branched to the old x30");
+    assert_eq!(cpu.read_reg(30), 0x1004, "and linked to the next instruction");
+}
+
+#[test]
+fn permutes_follow_the_zip_uzp_trn_definitions() {
+    // Values cross-checked against qemu-aarch64. Vn = 0x1000,0x2000,..,0x8000
+    // and Vm = 1,2,4,..,0x80 as halfwords.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(2, u64x2([0x4000_3000_2000_1000, 0x8000_7000_6000_5000]));
+    cpu.set_vreg(3, u64x2([0x0008_0004_0002_0001, 0x0080_0040_0020_0010]));
+    // trn1 v28.8h, v2.8h, v3.8h / trn2 v16.8h / zip1 v10.8h / zip2 v11.8h /
+    // uzp1 v12.8h / uzp2 v13.8h
+    let cpu = run_program(
+        cpu,
+        0x1000,
+        &[0x4e43_285c, 0x4e43_6850, 0x4e43_384a, 0x4e43_784b, 0x4e43_184c, 0x4e43_584d, nop()],
+    );
+    // TRN1 takes the even elements of both, interleaved.
+    assert_eq!(cpu.read_vreg(28), u64x2([0x0004_3000_0001_1000, 0x0040_7000_0010_5000]));
+    // TRN2 the odd ones.
+    assert_eq!(cpu.read_vreg(16), u64x2([0x0008_4000_0002_2000, 0x0080_8000_0020_6000]));
+    // ZIP1 interleaves the low halves, ZIP2 the high halves.
+    assert_eq!(cpu.read_vreg(10), u64x2([0x0002_2000_0001_1000, 0x0008_4000_0004_3000]));
+    assert_eq!(cpu.read_vreg(11), u64x2([0x0020_6000_0010_5000, 0x0080_8000_0040_7000]));
+    // UZP1 packs Vn's even elements then Vm's; UZP2 the odd ones.
+    assert_eq!(cpu.read_vreg(12), u64x2([0x7000_5000_3000_1000, 0x0040_0010_0004_0001]));
+    assert_eq!(cpu.read_vreg(13), u64x2([0x8000_6000_4000_2000, 0x0080_0020_0008_0002]));
+}
+
+#[test]
+fn widening_and_by_element_multiplies() {
+    // `smull v18.4s, v18.4h, v0.h[2]` = 0x4f60a252-ish: every lane times one
+    // selected lane, widened. Cross-checked against qemu-aarch64.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(2, u64x2([0x0004_0003_0002_0001, 0x0008_0007_0006_0005]));
+    cpu.set_vreg(0, u64x2([0x0000_0003_0000_0000, 0]));
+    // smull v4.4s, v2.4h, v0.h[2] (v0.h[2] = 3)
+    let cpu = run_program(cpu, 0x1000, &[0x0f60_a044, nop()]);
+    assert_eq!(lanes_u32(cpu.read_vreg(4)), [3, 6, 9, 12]);
+
+    // The `2` form reads the high half of the source.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(2, u64x2([0x0004_0003_0002_0001, 0x0008_0007_0006_0005]));
+    cpu.set_vreg(0, u64x2([0x0000_0003_0000_0000, 0]));
+    let cpu = run_program(cpu, 0x1000, &[0x4f60_a044, nop()]);
+    assert_eq!(lanes_u32(cpu.read_vreg(4)), [15, 18, 21, 24]);
+
+    // The vector (three-different) forms: smull, smlal, saddl, addhn.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(2, u64x2([0x0004_0003_0002_0001, 0]));
+    cpu.set_vreg(3, u64x2([0xFFFF_0002_0003_0004, 0]));
+    cpu.set_vreg(5, u64x2([0x0000_000A_0000_000A, 0x0000_000A_0000_000A]));
+    // smull v5.4s, v2.4h, v3.4h
+    let cpu = run_program(cpu, 0x1000, &[0x0e63_c045, nop()]);
+    // 1*4, 2*3, 3*2, 4*-1
+    assert_eq!(
+        lanes_u32(cpu.read_vreg(5)),
+        [4, 6, 6, (-4i32) as u32]
+    );
+}
+
+#[test]
+fn guest_threads_run_and_hand_over_at_blocking_syscalls() {
+    // A guest program that creates a thread, starts it, and waits for it to set
+    // a flag. Thread creation used to hand out a fake handle and never run
+    // anything, so the wait spun forever — which is where hbmenu stopped.
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.mem.map_zero(0x4000, 0x2000).unwrap(); // the child's stack
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap(); // the flag and the arg it saw
+
+    // main: svcCreateThread(entry = 0x2000, arg = 0x1234, stack_top = 0x5000),
+    // svcStartThread, then sleep until the flag is set and exit.
+    let main = [
+        0xd284_0001u32, // mov x1, #0x2000  (entry)
+        0xd282_4682,    // mov x2, #0x1234  (arg)
+        0xd28a_0003,    // mov x3, #0x5000  (stack top)
+        0x5280_0764,    // mov w4, #0x3b    (priority)
+        0x1280_0005,    // mov w5, #-1      (core)
+        0xd400_0101,    // svc #8           (CreateThread → handle in x1)
+        0xaa01_03e0,    // mov x0, x1
+        0xd400_0121,    // svc #9           (StartThread)
+        0xd400_0161,    // svc #0xb         (SleepThread → yields)
+        0xd28c_0009,    // mov x9, #0x6000
+        0xb940_0122,    // ldr w2, [x9]
+        0x34ff_ffa2,    // cbz w2, -12      (back to the sleep)
+        0xd400_00e1,    // svc #7           (ExitProcess)
+    ];
+    // child: record the argument it was passed, set the flag, exit.
+    let child = [
+        0xd28c_0009u32, // mov x9, #0x6000
+        0xb900_0520,    // str w0, [x9, #4]
+        0x5280_0aa1,    // mov w1, #0x55
+        0xb900_0121,    // str w1, [x9]
+        0xd400_0141,    // svc #0xa         (ExitThread)
+    ];
+    let bytes = |code: &[u32]| -> Vec<u8> {
+        code.iter().flat_map(|i| i.to_le_bytes()).collect()
+    };
+    cpu.mem.map_zero(0x1000, 0x100).unwrap();
+    cpu.mem.map(0x1000, &bytes(&main)).unwrap();
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &bytes(&child)).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(10_000).unwrap();
+
+    assert!(cpu.halted, "main should reach ExitProcess once the child ran");
+    assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 0x55, "the child set the flag");
+    assert_eq!(cpu.mem.read_u32(0x6004).unwrap(), 0x1234, "with its argument in x0");
+    assert_eq!(cpu.thread_count(), 2);
+}
+
+#[test]
+fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
+    // Horizon keeps the lock word in guest memory: it holds the owner's handle,
+    // plus bit30 when someone is queued. `svcArbitrateUnlock` has to move
+    // ownership, or libnx's mutexLock re-reads the word and spins forever.
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.mem.map_zero(0x4000, 0x2000).unwrap();
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap();
+    const MUTEX: u32 = 0x6100;
+
+    // main: create + start a thread, then hold the mutex and unlock it. The
+    // child blocks in ArbitrateLock and must come out owning the word.
+    let main = [
+        0xd284_0001u32, // mov x1, #0x2000
+        0xd280_0002,    // mov x2, #0
+        0xd28a_0003,    // mov x3, #0x5000
+        0x5280_0764,    // mov w4, #0x3b
+        0x1280_0005,    // mov w5, #-1
+        0xd400_0101,    // svc #8
+        0xaa01_03e0,    // mov x0, x1
+        0xd400_0121,    // svc #9
+        0xd400_0161,    // svc #0xb   (yield: the child blocks on the mutex)
+        0xd28c_2009,    // mov x9, #0x6100
+        0xaa0903e0u32,  // mov x0, x9  (ArbitrateUnlock takes the address in x0)
+        0xd400_0361,    // svc #0x1b  (ArbitrateUnlock → hand it to the child)
+        0xd400_0161,    // svc #0xb   (yield so the child can finish)
+        0xd400_00e1,    // svc #7
+    ];
+    // child: ask the kernel to arbitrate a mutex main owns, then record the
+    // word it ended up with.
+    let child = [
+        0xd28c_2009u32, // mov x9, #0x6100
+        0xb940_0120,    // ldr w0, [x9]     (current owner)
+        0xaa09_03e1,    // mov x1, x9       (the mutex address)
+        0xd280_0022,    // mov x2, #1       (our handle, unused by the stub)
+        0xd400_0341,    // svc #0x1a        (ArbitrateLock → blocks)
+        0xb940_0122,    // ldr w2, [x9]
+        0xd28c_0009,    // mov x9, #0x6000
+        0xb900_0122,    // str w2, [x9]
+        0xd400_0141,    // svc #0xa
+    ];
+    let bytes = |code: &[u32]| -> Vec<u8> {
+        code.iter().flat_map(|i| i.to_le_bytes()).collect()
+    };
+    cpu.mem.map_zero(0x1000, 0x100).unwrap();
+    cpu.mem.map(0x1000, &bytes(&main)).unwrap();
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &bytes(&child)).unwrap();
+    // main "owns" the mutex to begin with (handle 1 = the main thread).
+    cpu.mem.write_u32(MUTEX, 1).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(10_000).unwrap();
+
+    assert!(cpu.halted);
+    // The child saw itself as the owner after the unlock handed it over.
+    let observed = cpu.mem.read_u32(0x6000).unwrap();
+    assert_ne!(observed, 0, "the child ran after the unlock");
+    assert_ne!(observed, 1, "and the word no longer names the main thread");
 }

@@ -122,6 +122,15 @@ const CMD = {
   },
   get_pc() { return api.switch_get_pc(handle); },
   get_cycles() { return Number(api.switch_get_cycles(handle)); },
+  // Guest RAM is what the emulated console has touched; wasm is what this
+  // worker's linear memory costs the browser (the page table, the loaded
+  // image and every staging buffer live there).
+  ram() {
+    return {
+      guest: handle < 0 ? 0 : Number(api.switch_guest_ram(handle)),
+      wasm: api.memory.buffer.byteLength,
+    };
+  },
   get_reg(i) { return '0x' + api.switch_get_reg(handle, i).toString(16).padStart(16, '0'); },
   last_error() { return lastError(); },
   fb_width() { return api.switch_fb_width(handle); },
