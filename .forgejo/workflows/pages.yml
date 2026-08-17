@@ -25,6 +25,5 @@ jobs:
       - uses: actions/git-pages@v2
         with:
           site: https://tenshii.moe/Switch-Wasm/
-          server: pages.tenshii.moe
           token: ${{ forge.token }}
           source: web/
