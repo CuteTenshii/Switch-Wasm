@@ -2622,3 +2622,101 @@ fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
     assert_ne!(observed, 0, "the child ran after the unlock");
     assert_ne!(observed, 1, "and the word no longer names the main thread");
 }
+
+#[test]
+fn thirty_two_bit_writes_clear_the_upper_half() {
+    // Every write to a W register zeroes bits 63:32. SBFM's sign extension was
+    // filling them instead, so `asr w0, w0, #31` produced
+    // 0xFFFF_FFFF_FFFF_FFFF and any later 64-bit use of that register saw a
+    // huge value.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0xFFFF_FF00); // negative as a word, clear upper half
+    cpu.set_reg(5, 0x0000_0F00);
+    cpu.set_reg(6, 0x0000_8001);
+    let code = [
+        0x131f_7c00u32, // asr w0, w0, #31
+        0x1304_2ca5,    // sbfx w5, w5, #4, #8
+        0x1300_3cc6,    // sxth w6, w6
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_reg(0), 0x0000_0000_FFFF_FFFF);
+    assert_eq!(cpu.read_reg(5), 0x0000_0000_FFFF_FFF0);
+    assert_eq!(cpu.read_reg(6), 0x0000_0000_FFFF_8001);
+
+    // The 64-bit forms still fill the whole register.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(4, 0xFFFF_FFFF_FFFF_FF00);
+    let cpu = run_program(cpu, 0x1000, &[0x937f_fc84, nop()]); // asr x4, x4, #63
+    assert_eq!(cpu.read_reg(4), u64::MAX);
+}
+
+#[test]
+fn asr_by_register_sign_extends_from_the_operand_width() {
+    // `asr w2, w2, w3` on a negative word must give all-ones. The operand was
+    // masked to 32 bits and then shifted as a positive i64, yielding 1 — which
+    // is how libjpeg-turbo's HUFF_EXTEND lost the sign of every DC difference
+    // and hbmenu's icon decoded with the wrong luma and chroma.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(2, 0xFFFF_FF00);
+    cpu.set_reg(3, 31);
+    let cpu = run_program(cpu, 0x1000, &[0x1ac3_2842, nop()]);
+    assert_eq!(cpu.read_reg(2), 0x0000_0000_FFFF_FFFF);
+
+    // A positive word still shifts to zero, and the 64-bit form is unaffected.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(2, 0x7FFF_FF00);
+    cpu.set_reg(3, 31);
+    let cpu = run_program(cpu, 0x1000, &[0x1ac3_2842, nop()]);
+    assert_eq!(cpu.read_reg(2), 0);
+}
+
+#[test]
+fn scalar_integer_forms_verified_against_qemu() {
+    // Each of these was wrong until `tools/difftest.py --scalar` compared it
+    // with qemu-aarch64; the values here are qemu's.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(10, 0xFFFF_FF00);
+    cpu.set_reg(11, 0x1F);
+    cpu.set_reg(12, 0x8000_0000_0000_0001);
+
+    // EXTR takes the low bits of Rn:Rm >> imm, so Rn is the *high* half.
+    let cpu = run_program(cpu, 0x1000, &[0x138b_1d41, nop()]); // extr w1, w10, w11, #7
+    assert_eq!(cpu.read_reg(1), 0);
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(10, 0xFFFF_FF00);
+    cpu.set_reg(11, 0x1F);
+    let cpu = run_program(cpu, 0x1000, &[0x93cb_8542, nop()]); // extr x2, x10, x11, #33
+    assert_eq!(cpu.read_reg(2), 0x7FFF_FF80_0000_0000);
+
+    // ADCS adds with carry: bit30 selects subtract and bit29 sets the flags, and
+    // having them swapped made `adcs` subtract.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(10, 0xFFFF_FF00);
+    cpu.set_reg(11, 0x1F);
+    // `cmp w11, w11` sets C, then `adcs w5, w10, w11`.
+    let cpu = run_program(cpu, 0x1000, &[0x6b0b_017f, 0x3a0b_0145, nop()]);
+    assert_eq!(cpu.read_reg(5), 0xFFFF_FF20);
+
+    // SDIV sign-extends its operands from their own width.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(10, 0xFFFF_FF00); // -256 as a word
+    cpu.set_reg(11, 0x1F);
+    let cpu = run_program(cpu, 0x1000, &[0x1acb_0d49, nop()]); // sdiv w9, w10, w11
+    assert_eq!(cpu.read_reg(9), 0xFFFF_FFF8); // -256 / 31 = -8
+
+    // SMADDL multiplies the low 32 bits, sign-extended.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(10, 0xFFFF_FF00);
+    cpu.set_reg(11, 0x1F);
+    cpu.set_reg(12, 0x8000_0000_0000_0001);
+    let cpu = run_program(cpu, 0x1000, &[0x9b2b_3145, nop()]); // smaddl x5, w10, w11, x12
+    assert_eq!(cpu.read_reg(5), 0x7FFF_FFFF_FFFF_E101);
+
+    // CLS counts the sign bits *after* the sign bit.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(10, 0xFFFF_FF00);
+    let cpu = run_program(cpu, 0x1000, &[0x5ac0_1549, nop()]); // cls w9, w10
+    assert_eq!(cpu.read_reg(9), 23);
+}

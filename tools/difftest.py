@@ -97,6 +97,13 @@ INSTRUCTIONS = [
     "fcsel s21, s2, s3, ne",
     "fcvtl v1.2d, v2.2s",
     "fcvtn v3.2s, v2.2d",
+    # what libjpeg-turbo's NEON colour conversion uses
+    "sqxtun v1.8b, v2.8h",
+    "sqxtun2 v3.16b, v4.8h",
+    "uaddw v5.8h, v6.8h, v2.8b",
+    "uaddw2 v7.8h, v6.8h, v2.16b",
+    "rshrn2 v9.8h, v18.4s, #11",
+    "saddw2 v11.4s, v6.4s, v2.8h",
     # memory forms, last so their side effects do not disturb the others
     "st1 { v2.d }[1], [x3]",
     "ldr q11, [x3]",
@@ -105,7 +112,127 @@ INSTRUCTIONS = [
     "ld1 { v17.16b, v18.16b }, [x0], #32",
     "ld1r { v19.4s }, [x3]",
     "ld1 { v21.h }[3], [x3]",
+    # the interleaving stores/loads the pixel writer uses
+    "st3 { v2.8b, v3.8b, v4.8b }, [x3]",
+    "ldr q23, [x3]",
+    "ldr q24, [x3, #16]",
+    "st4 { v2.8b, v3.8b, v4.8b, v5.8b }, [x3]",
+    "ldr q25, [x3]",
+    "ldr q26, [x3, #16]",
+    "ld3 { v27.8b, v28.8b, v29.8b }, [x3]",
+    "ld4 { v0.16b, v1.16b, v2.16b, v3.16b }, [x0]",
+    "st3 { v5.16b, v6.16b, v7.16b }, [x3]",
+    "ldr q30, [x3, #32]",
 ]
+
+# Scalar integer instructions. These run in a separate program that dumps
+# x0..x25 after each one, because the vector harness needs its own pointers.
+# 32-bit forms are included deliberately: every write to a W register zeroes
+# bits 63:32, and getting that wrong is invisible until something uses the X
+# form (it cost hbmenu's JPEG decode the sign of every DC difference).
+SCALAR_INSTRUCTIONS = [
+    # shifts by immediate (bitfield aliases) and by register
+    "asr w0, w10, #31",
+    "asr x1, x10, #63",
+    "lsr w2, w10, #4",
+    "lsl w3, w10, #4",
+    "ror w4, w10, #7",
+    "asr w5, w10, w11",
+    "lsr w6, w10, w11",
+    "lsl w7, w10, w11",
+    "ror w8, w10, w11",
+    "asr x9, x10, x11",
+    # bitfield moves and extends
+    "sbfx w0, w10, #4, #8",
+    "ubfx w1, w10, #4, #8",
+    "sbfiz w2, w10, #4, #8",
+    "ubfiz w3, w10, #4, #8",
+    "bfi w4, w10, #4, #8",
+    "bfxil w5, w10, #4, #8",
+    "sxtb w6, w10",
+    "sxth w7, w10",
+    "sxtw x8, w10",
+    "uxtb w9, w10",
+    "uxth w0, w10",
+    "extr w1, w10, w11, #7",
+    "extr x2, x10, x11, #33",
+    # conditional select family (flags come from the previous compare)
+    "cmp w10, w11",
+    "csel w3, w12, w13, gt",
+    "csinc w4, w12, w13, gt",
+    "csinv w5, w12, w13, gt",
+    "csneg w6, w12, w13, gt",
+    "cset w7, lt",
+    "csetm w8, lt",
+    "cinc w9, w12, lt",
+    "cneg w0, w12, lt",
+    "ccmp w10, #3, #5, ne",
+    "ccmn w10, #3, #5, ne",
+    "ccmp x10, x11, #7, eq",
+    # arithmetic, including the extending and flag-setting forms
+    "adds w1, w10, w11",
+    "subs w2, w10, w11",
+    "adds x3, x10, x11",
+    "sbcs w4, w10, w11",
+    "adcs w5, w10, w11",
+    "add w6, w10, w11, lsl #3",
+    "sub w7, w10, w11, asr #2",
+    "add x8, x10, w11, sxtw #2",
+    "add x9, x10, w11, uxtw #1",
+    "sub x0, x10, w11, sxth #3",
+    "neg w1, w10",
+    "ngc w2, w10",
+    # multiply / divide
+    "madd w3, w10, w11, w12",
+    "msub w4, w10, w11, w12",
+    "smaddl x5, w10, w11, x12",
+    "umsubl x6, w10, w11, x12",
+    "smulh x7, x10, x11",
+    "umulh x8, x10, x11",
+    "sdiv w9, w10, w11",
+    "udiv w0, w10, w11",
+    "sdiv x1, x10, x11",
+    "udiv x2, x10, x11",
+    # bit counting and reversal
+    "rbit w3, w10",
+    "rbit x4, x10",
+    "rev w5, w10",
+    "rev16 w6, w10",
+    "rev32 x7, x10",
+    "clz w8, w10",
+    "cls w9, w10",
+    "clz x0, x10",
+    # logicals with shifted operands
+    "and w1, w10, w11, lsr #3",
+    "orn w2, w10, w11, asr #4",
+    "eor x3, x10, x11, ror #9",
+    "bics w4, w10, w11, lsl #2",
+    "tst w10, w11",
+    "ands w5, w10, w11",
+]
+
+# The values loaded into x10..x25 before the scalar tests run.
+SCALAR_INPUTS = [
+    0xFFFF_FF00,
+    0x0000_001F,
+    0x8000_0000_0000_0001,
+    0x0000_0000_7FFF_FFFF,
+    0xFFFF_FFFF_FFFF_FFFF,
+    0x0000_0000_0000_0003,
+    0x1234_5678_9ABC_DEF0,
+    0xFFFF_FFFF_0000_0000,
+    0x0000_0000_0000_0000,
+    0x7FFF_FFFF_FFFF_FFFF,
+    0x0000_0000_8000_0000,
+    0xFEDC_BA98_7654_3210,
+    0x0000_0000_0000_00FF,
+    0xFFFF_0000_FFFF_0000,
+    0x0000_0000_0000_0007,
+    0x5555_5555_AAAA_AAAA,
+]
+
+SCALAR_DUMP_REGS = 26
+SCALAR_DUMP_BYTES = SCALAR_DUMP_REGS * 8
 
 INPUT_VECTORS = [
     [0x0102, 0xFFFE, 0x7FFF, 0x8000, 0x0005, 0xFFF9, 0x1234, 0xABCD],
@@ -174,6 +301,50 @@ outbuf:
 """
 
 
+def build_scalar_asm(instructions):
+    """A program that dumps x0..x25 after each scalar instruction. x26..x30 are
+    reserved for the harness, so the tests only touch x0..x25."""
+    body = [f"    ldr x{i}, [x27, #{(i - 10) * 8}]" for i in range(10, 26)]
+    body.append("    cmp x10, x10")  # a known flag state to start from
+    for insn in instructions:
+        body.append(f"    {insn}")
+        body += [
+            f"    stp x{i}, x{i + 1}, [x28, #{i * 8}]"
+            for i in range(0, SCALAR_DUMP_REGS, 2)
+        ]
+        body.append(f"    add x28, x28, #{SCALAR_DUMP_BYTES}")
+    total = len(instructions) * SCALAR_DUMP_BYTES
+    data = "".join(f"    .quad {v}\n" for v in SCALAR_INPUTS)
+    return f"""
+    .text
+    .global _start
+_start:
+    adrp x27, inputs
+    add  x27, x27, :lo12:inputs
+    adrp x28, outbuf
+    add  x28, x28, :lo12:outbuf
+    mov  x26, x28
+{chr(10).join(body)}
+    mov x0, #1
+    mov x1, x26
+    mov x2, #{total}
+    mov x8, #64
+    svc #0
+    mov x0, #0
+    mov x8, #93
+    svc #0
+
+    .data
+    .balign 16
+inputs:
+{data}
+    .bss
+    .balign 16
+outbuf:
+    .space {total + SCALAR_DUMP_BYTES}
+"""
+
+
 def sections(elf):
     """(address, offset, size) per section name."""
     data = open(elf, "rb").read()
@@ -190,12 +361,81 @@ def sections(elf):
     return data, out
 
 
+def run(work, asm_text, instructions, dump_bytes, inputs_bytes, prologue_insns):
+    """Assemble, run under qemu, run the same bytes through the interpreter and
+    report the first register that differs for each instruction."""
+    asm = os.path.join(work, "test.s")
+    elf = os.path.join(work, "test.elf")
+    open(asm, "w").write(asm_text)
+    subprocess.run(
+        ["clang", "--target=aarch64-linux-gnu", "-nostdlib", "-static",
+         "-fuse-ld=lld", asm, "-o", elf],
+        check=True,
+    )
+    qemu = subprocess.run(["qemu-aarch64", elf], capture_output=True, check=True)
+
+    data, sec = sections(elf)
+    _, text_off, text_size = sec[".text"]
+    code = data[text_off + prologue_insns * 4:text_off + text_size]
+    open(os.path.join(work, "code.bin"), "wb").write(code)
+    open(os.path.join(work, "inputs.bin"), "wb").write(inputs_bytes)
+    subprocess.run(
+        ["cargo", "run", "--quiet", "--release", "-p", "switch-core",
+         "--example", "difftest", "--",
+         os.path.join(work, "code.bin"), os.path.join(work, "inputs.bin"),
+         os.path.join(work, "emu.bin"), hex(sec[".data"][0]),
+         str(dump_bytes)],
+        cwd=REPO, check=True,
+    )
+
+    expected = qemu.stdout
+    actual = open(os.path.join(work, "emu.bin"), "rb").read()
+    regs = dump_bytes // 16 if dump_bytes % 16 == 0 and dump_bytes >= 512 else dump_bytes // 8
+    width = 16 if dump_bytes >= 512 else 8
+    failures = 0
+    for i, insn in enumerate(instructions):
+        want = expected[i * dump_bytes:(i + 1) * dump_bytes]
+        got = actual[i * dump_bytes:(i + 1) * dump_bytes]
+        if len(got) < dump_bytes:
+            print(f"stopped before {insn} (the emulator faulted or ran short)")
+            failures += 1
+            break
+        previous = expected[(i - 1) * dump_bytes:i * dump_bytes] if i else bytes(dump_bytes)
+        for reg in range(regs):
+            lo, hi = reg * width, (reg + 1) * width
+            if want[lo:hi] == previous[lo:hi]:
+                continue  # this instruction didn't change it
+            if want[lo:hi] != got[lo:hi]:
+                kind = "v" if width == 16 else "x"
+                print(f"MISMATCH {insn:<34} {kind}{reg}")
+                print(f"    qemu {want[lo:hi][::-1].hex() if width == 8 else want[lo:hi].hex()}")
+                print(f"    emu  {got[lo:hi][::-1].hex() if width == 8 else got[lo:hi].hex()}")
+                failures += 1
+    print(f"{len(instructions) - failures}/{len(instructions)} instructions match qemu")
+    return failures
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--keep", action="store_true", help="keep the build directory")
+    parser.add_argument("--scalar", action="store_true",
+                        help="test the integer instructions instead of the SIMD ones")
     args = parser.parse_args()
 
     work = tempfile.mkdtemp(prefix="switch-difftest-")
+    if args.scalar:
+        failures = run(
+            work,
+            build_scalar_asm(SCALAR_INSTRUCTIONS),
+            SCALAR_INSTRUCTIONS,
+            SCALAR_DUMP_BYTES,
+            b"".join(struct.pack("<Q", v) for v in SCALAR_INPUTS),
+            prologue_insns=5,
+        )
+        if args.keep:
+            print("build kept in", work)
+        return 1 if failures else 0
+
     asm = os.path.join(work, "test.s")
     elf = os.path.join(work, "test.elf")
     open(asm, "w").write(build_asm(INSTRUCTIONS))

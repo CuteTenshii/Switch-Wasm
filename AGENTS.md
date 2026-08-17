@@ -10,7 +10,7 @@ Browser-oriented Nintendo Switch emulation core: an ARM64 (A64) integer interpre
 - `make assets` — wasm, then **copies the built `.wasm` into `web/assets/`**.
 - `make serve` — `python3 tools/serve.py` (after assets). Frontend is plain static JS; no bundler.
 - Single test: `cargo test -p switch-core <test_name>`.
-- `python3 tools/difftest.py` — differential-test the SIMD/FP decode against **real ARM semantics**: it assembles the instruction list in the script, runs it under `qemu-aarch64`, runs the identical bytes through `cargo run --example difftest`, and prints the first register that differs. Needs `clang` + `lld` + `qemu-aarch64`. Add an instruction to `INSTRUCTIONS` there before hand-deriving expected values — this is what caught TRN1/TRN2 taking the wrong lanes.
+- `python3 tools/difftest.py` — differential-test the decode against **real ARM semantics**: it assembles the instruction list in the script, runs it under `qemu-aarch64`, runs the identical bytes through `cargo run --example difftest`, and prints the first register that differs. `--scalar` does the same for the integer instructions (dumping x0..x25 instead of the vector registers). Needs `clang` + `lld` + `qemu-aarch64`. **Add an instruction there before hand-deriving expected values.** This caught TRN1/TRN2 taking the wrong lanes, and the scalar sweep found seven more in one run (EXTR's operand order, ADCS/SBC's op bit, SDIV's sign extension, SMADDL's operand width, CLS off by one).
 - `rustup target add wasm32-unknown-unknown` is required for the wasm build.
 
 ## Build pipeline traps
@@ -43,10 +43,10 @@ Browser-oriented Nintendo Switch emulation core: an ARM64 (A64) integer interpre
   deko3d uses it; leaving it garbage made the fence wait read a bogus waiter
   index. A Timeout (0xEA01) during deko3d device init is treated as fatal
   (`svcBreak` 0x1159).
-- hbmenu state: **its menu renders** — title, theme background, entry tiles and
-  the icon panel all composite through the real path (CPU-drawn linear buffer →
-  deko3d copy-engine blit → swapchain → binder present). The only wrong pixels
-  are inside the JPEG-decoded icon bitmap, which still has banding.
+- hbmenu state: **its menu renders correctly** — title, theme background, entry
+  tile and the icon (JPEG-decoded, pixel-exact against a reference decode) all
+  composite through the real path: CPU-drawn linear buffer → deko3d copy-engine
+  blit → swapchain → binder present.
 - **hbmenu does not need the shader core.** `nx_graphics.c` draws with the CPU
   into a linear memblock and its command list is just
   `dkCmdBufCopyBufferToImage` + `dkCmdBufSignalFence`; its assets are raw RGBA
@@ -91,6 +91,7 @@ the same handshakes.
   picking Vm's odd elements is what stalled hbmenu's icon decode.
 - **AdvSIMD structure loads/stores** (`LD1`–`LD4`/`ST1`–`ST4`): writeback is bit 23 (the post-index forms) and `Rm == 31` means "increment by the transfer size"; a different `Rm` is a register increment. Keying writeback off `Rm` alone left `ld1 {v1.16b, v2.16b}, [x2], #32` without its base update, so newlib's `strrchr` returned a pointer 32 bytes below the string and `PHYSFS_init` failed on a garbage `argv[0]` directory. The single-lane forms spread their lane index across `Q:S:size`, and `scale == 0b11` is the load-and-replicate group (`LD1R`), not a doubleword lane insert.
 - **BSL/BIT/BIF** differ only in which register is the mask: BSL selects with Vd, BIT and BIF with Vm. Getting that wrong broke newlib's vectorised `strchr` (it folds the "matched" and "end of string" predicates with `bif`), so every `device:` prefix lookup fell through to the default device and `romfs:/…` was looked up on the SD card.
+- **A write to a W register zeroes bits 63:32.** Every 32-bit result has to be truncated: SBFM's sign extension was filling the top half, so `asr w0, w0, #31` produced `0xFFFF_FFFF_FFFF_FFFF` and any later 64-bit use of that register saw a huge value. Related: a 32-bit operand must be sign-extended from *bit 31* before an arithmetic shift or a signed divide — masking it to 32 bits and treating it as a positive `i64` made `asr w, w, w` and `sdiv w, w, w` unsigned, which is how libjpeg-turbo's `HUFF_EXTEND` lost the sign of every JPEG DC difference (hbmenu's icon decoded with grey luma and magenta chroma).
 - **A guard that includes a fixed bit kills the whole group.** Three FP classes were dead code for this reason: the 1-source group (bits[15:10] matched as a unit though the opcode's low bit is bit15), FCSEL/FCCMP (guarded on bit21 == 0 when they have it set), and the int↔float conversions (`rmode`:`opcode` read as bits[21:16], which folds in the fixed bit21 — that made `ucvtf d0, x1` execute as FCVTMU and write **x0**). After adding a group, prove the guard reaches it with a real encoding from `llvm-mc`.
 - The AdvSIMD **scalar** forms are separate encodings from the vector ones: shift-by-immediate has bit28 set, two-register-misc is `01 U 11110 …`. Both share the vector implementation with a one-lane count.
 - **EXT** (`0 Q 101110 00 0 Rm 0 imm4 0 Rn Rd`) shares bits[28:24] with the permute group, which is why permute also has to require bit29 == 0.

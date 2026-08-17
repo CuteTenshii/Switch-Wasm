@@ -202,7 +202,11 @@ pub(crate) fn shift_reg(v: u64, st: u32, sa: u32, sf: bool) -> u64 {
             }
         }
         2 => {
-            // ASR
+            // ASR. The operand was masked to its own width above, so it has to
+            // be sign-extended from *that* width before shifting — shifting the
+            // masked value as a positive i64 turned `asr w0, w0, w1` on a
+            // negative word into a small positive number, which is how
+            // libjpeg-turbo's HUFF_EXTEND lost the sign of every DC difference.
             if sa == 0 {
                 v
             } else if sa >= size {
@@ -212,7 +216,8 @@ pub(crate) fn shift_reg(v: u64, st: u32, sa: u32, sf: bool) -> u64 {
                     0
                 }
             } else {
-                ((v as i64) >> sa) as u64 & mask
+                let signed = sext_u64(v, size) as i64;
+                ((signed >> sa) as u64) & mask
             }
         }
         _ => {
@@ -343,7 +348,17 @@ pub(crate) fn decode_bit_mask(sf: bool, n: u32, immr: u32, imms: u32) -> Option<
 }
 
 /// SBFM / BFM / UBFM semantics.
+///
+/// The result is truncated to the operand width: a write to a W register zeroes
+/// bits 63:32, and SBFM's sign extension would otherwise fill them (`asr w0,
+/// w0, #31` produced `0xFFFF_FFFF_FFFF_FFFF`, so any later 64-bit use of that
+/// register saw a huge value).
 pub(crate) fn bitfield_apply(opc: u32, val: u64, cur: u64, immr: u32, imms: u32, sf: bool) -> u64 {
+    let width = if sf { u64::MAX } else { u64::from(u32::MAX) };
+    bitfield_value(opc, val, cur, immr, imms, sf) & width
+}
+
+fn bitfield_value(opc: u32, val: u64, cur: u64, immr: u32, imms: u32, sf: bool) -> u64 {
     let datasize = if sf { 64 } else { 32 };
     let lsb = immr as u64;
     let msb = imms as u64;
@@ -445,27 +460,16 @@ pub(crate) fn clz(v: u64, size: u32) -> u64 {
     }) as u64
 }
 
+/// CLS: how many bits after the sign bit match it (so 31/63 for 0 and -1).
 pub(crate) fn cls(v: u64, size: u32) -> u64 {
     if size == 32 {
-        let v = v as i32;
-        if v == 0 {
-            return 31;
-        }
-        if v < 0 {
-            (!v).leading_zeros() as u64
-        } else {
-            v.leading_zeros() as u64
-        }
+        let v = v as u32 as i32;
+        let magnitude = if v < 0 { !v as u32 } else { v as u32 };
+        u64::from(magnitude.leading_zeros() - 1)
     } else {
         let v = v as i64;
-        if v == 0 {
-            return 63;
-        }
-        if v < 0 {
-            (!v).leading_zeros() as u64
-        } else {
-            v.leading_zeros() as u64
-        }
+        let magnitude = if v < 0 { !v as u64 } else { v as u64 };
+        u64::from(magnitude.leading_zeros() - 1)
     }
 }
 

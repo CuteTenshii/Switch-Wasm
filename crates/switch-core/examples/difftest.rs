@@ -33,10 +33,15 @@ fn main() {
     cpu.set_reg(1, OUTPUT as u64);
     cpu.set_pc(CODE);
     cpu.set_reg(9, OUTPUT as u64);
+    // The scalar harness keeps its pointers in x26..x28 instead, so seed both;
+    // whichever the program uses, the other set is simply unread.
+    cpu.set_reg(26, OUTPUT as u64);
+    cpu.set_reg(27, inputs_addr as u64);
+    cpu.set_reg(28, OUTPUT as u64);
     let mut steps = 0;
     let mut high_water = OUTPUT as u64;
     while !cpu.halted && steps < code.len() as u64 / 4 {
-        high_water = high_water.max(cpu.read_reg(1));
+        high_water = high_water.max(cpu.read_reg(1)).max(cpu.read_reg(28));
         let pc = cpu.get_pc();
         if let Err(e) = cpu.step() {
             println!("FAULT at {pc:#x} step {steps}: {e}");

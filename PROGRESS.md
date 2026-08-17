@@ -4,7 +4,7 @@ Goal: get the bundled demo and real homebrew (the Homebrew Menu NRO,
 `hbmenu.nro`) to actually **run** on the interpreter, and put what it renders
 on the canvas.
 
-## Current state: hbmenu's menu renders
+## Current state: hbmenu's menu renders correctly
 
 `hbmenu.nro` boots, initialises the display, renders with its own font and
 **presents 1280x720 frames that reach the HTML canvas**. The whole path is
@@ -12,11 +12,11 @@ real: nvdrv ioctls → nvmap → the graphics MMU → the display buffer queue �
 block-linear de-swizzle → RGBA8888 → `putImageData`.
 
 `hbmenu.nro` **draws its menu**: the title, the theme's background and swoosh,
-the entry tile and the icon panel all appear, composited through the real path —
+the entry tile and the icon all appear, composited through the real path —
 hbmenu draws with the CPU into a linear buffer, deko3d's recorded command list
 blits it into the tiled swapchain image with the copy engine, and the binder
-presents it. The remaining artefact is banding inside the JPEG-decoded icon
-bitmap.
+presents it. The icon's JPEG decode is **pixel-exact** against a reference
+decode (mean error 0, max 0 over the 256x256 image).
 
 Two bugs stood between "presents blank frames" and this:
 
@@ -110,6 +110,25 @@ It still presents no frame: its `vi`/binder requests come in libtransistor's
 own (non-CMIF) marshalling, which the command-id scan misreads (four requests
 decode as command `0x10100000`), and the GPU path needs the shader core anyway.
 
+## Integer-decode bugs behind the JPEG corruption
+
+hbmenu's icon decoded with grey luma and magenta chroma. The DC coefficients came
+out `+1023` off: libjpeg-turbo's `HUFF_EXTEND` sign-extends the DC difference
+branchlessly with `(x - (1 << (s-1))) >> 31`, and our 32-bit arithmetic shift was
+masking the operand to 32 bits and then shifting it as a *positive* `i64`, so the
+sign-extension mask came out 0. `tools/difftest.py --scalar` (new) then compared
+71 integer instructions against qemu-aarch64 and found six more:
+
+| Instruction | Was | Should be |
+|---|---|---|
+| `asr w, w, w` | shifted the masked value as positive | sign-extend from bit 31 |
+| `asr w0, w0, #31`, `sbfx`, `sxth` | left the sign in bits 63:32 | a W write zeroes the top half |
+| `extr` | took Rm as the high half | Rn is the high half of `Rn:Rm` |
+| `adcs` / `ngc` | bit29 read as "subtract" | bit30 = subtract, bit29 = set flags |
+| `sdiv w` | divided unsigned | sign-extend from the operand width |
+| `smaddl` / `umaddl` | multiplied the full 64-bit registers | the low 32 bits, sign/zero-extended |
+| `cls` | counted the sign bit too | count the bits *after* the sign |
+
 ## Services
 
 - **nvdrv** is the real `INvDrvServices` interface (Open/Ioctl/Ioctl2/Ioctl3/
@@ -141,9 +160,8 @@ decode as command `0x10100000`), and the GPU path needs the shader core anyway.
 
 ## Next
 
-1. **hbmenu's icon**: the menu renders, but the JPEG-decoded icon bitmap still
-   bands. `tools/difftest.py` is the way in — extend it with the rest of the
-   decoder's SIMD ops (upsampling, colour conversion).
+1. **hbmenu's entry label** is drawn as a blank white box (the tile's text area),
+   so its FreeType text path is worth a look next.
 2. **Shader core**: a Maxwell SASS interpreter plus a software rasterizer, so
    `VertexBegin`/`DrawArrays` produce pixels. This is what deko3d-rendering and
    EGL/OpenGL homebrew need.

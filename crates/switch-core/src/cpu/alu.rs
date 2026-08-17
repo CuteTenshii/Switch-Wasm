@@ -157,10 +157,13 @@ impl Cpu {
                     let size = if sf { 64 } else { 32 };
                     let a = self.read_zr(rn) & Self::mask(sf);
                     let b = self.read_zr(rm) & Self::mask(sf);
+                    // EXTR takes the low `size` bits of `Rn:Rm >> imm`, so Rn
+                    // is the *high* half. Having them the other way round made
+                    // every `extr` extract from the wrong operand.
                     let r = if imm == 0 {
-                        a
+                        b
                     } else {
-                        ((a >> imm) | (b.wrapping_shl((size as u32).wrapping_sub(imm)))) & Self::mask(sf)
+                        ((b >> imm) | (a.wrapping_shl((size as u32).wrapping_sub(imm)))) & Self::mask(sf)
                     };
                     self.write_zr(rd, r);
                     Ok(true)
@@ -248,13 +251,21 @@ impl Cpu {
                             let b = self.read_zr(rm) & Self::mask(sf);
                             let r = match opcode2 {
                                 0b000010 => {
-                                    // UDIV
-                                    a.checked_div(b).unwrap_or(0)
+                                    // UDIV. Division by zero gives 0 (no trap).
+                                    a.checked_div(b).unwrap_or(0) & Self::mask(sf)
                                 }
                                 0b000011 => {
-                                    // SDIV
-                                    let (x, y) = (a as i64, b as i64);
-                                    (x.checked_div(y).unwrap_or(0)) as u64
+                                    // SDIV. The operands have to be sign-extended
+                                    // from *their own* width — using the masked
+                                    // 32-bit values as positive i64 turned
+                                    // `sdiv w9, w10, w11` into an unsigned
+                                    // divide. INT_MIN / -1 wraps rather than
+                                    // trapping.
+                                    let size = if sf { 64 } else { 32 };
+                                    let x = sext_u64(a, size) as i64;
+                                    let y = sext_u64(b, size) as i64;
+                                    let q = if y == 0 { 0 } else { x.wrapping_div(y) };
+                                    (q as u64) & Self::mask(sf)
                                 }
                                 0b001000 => shift_var(a, b, 0, sf),
                                 0b001001 => shift_var(a, b, 1, sf),
@@ -364,8 +375,12 @@ impl Cpu {
                         let carry_in = ((self.nzcv >> 29) & 1) as u64;
                         let a = self.read_zr(rn) & Self::mask(sf);
                         let b = self.read_zr(rm) & Self::mask(sf);
-                        let sub = (op & 1) == 1;
-                        let set_flags = (op & 2) == 2;
+                        // bit30 = subtract (SBC), bit29 = S. Reading them the
+                        // other way round made `adcs` subtract and `ngc` negate
+                        // the wrong operand.
+                        let _ = op;
+                        let sub = ((insn >> 30) & 1) == 1;
+                        let set_flags = ((insn >> 29) & 1) == 1;
                         let (result, carry, overflow) = if sub {
                             Self::add_carry_overflow(a, !b, carry_in, sf)
                         } else {
@@ -404,9 +419,11 @@ impl Cpu {
                         };
                         self.write_zr(rd, r & mask);
                     }
-                    // SMADDL / SMSUBL: signed 64x64 multiply-add/subtract.
+                    // SMADDL / SMSUBL: the multiplicands are the low 32 bits
+                    // of Rn/Rm, sign-extended — not the whole register.
                     0b11011001 => {
-                        let product = ((a as i64 as i128) * (b as i64 as i128)) as u64;
+                        let product =
+                            ((i128::from(a as u32 as i32)) * (i128::from(b as u32 as i32))) as u64;
                         let c = self.read_zr(ra);
                         let r = if o0 {
                             c.wrapping_sub(product)
@@ -415,9 +432,9 @@ impl Cpu {
                         };
                         self.write_zr(rd, r);
                     }
-                    // UMADDL / UMSUBL: unsigned 64x64 multiply-add/subtract.
+                    // UMADDL / UMSUBL: the low 32 bits of Rn/Rm, zero-extended.
                     0b11011101 => {
-                        let product = (a as u128 * b as u128) as u64;
+                        let product = (u128::from(a as u32) * u128::from(b as u32)) as u64;
                         let c = self.read_zr(ra);
                         let r = if o0 {
                             c.wrapping_sub(product)
