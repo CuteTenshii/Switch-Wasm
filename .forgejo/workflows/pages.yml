@@ -1,0 +1,30 @@
+name: Deploy to Pages
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Build wasm and demo
+        run: make assets
+
+      - uses: actions/git-pages@v2
+        with:
+          site: https://tenshii.moe/Switch-Wasm/
+          server: pages.tenshii.moe
+          token: ${{ forge.token }}
+          source: web/
