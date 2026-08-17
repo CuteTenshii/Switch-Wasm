@@ -55,21 +55,38 @@ impl ExecCtx<'_> {
         self.vmm.write_u64(self.mem, gpu_va, value)
     }
 
-    /// Read `len` bytes of a surface's raw pixel, little-endian.
+    /// Read `len` bytes of a surface's raw pixel, little-endian. The GPU VA is
+    /// translated once for the whole pixel rather than once per byte: a blit
+    /// touches every pixel of a 1280x720 surface, and a per-byte translation
+    /// meant millions of address-space lookups per frame.
     pub fn read_pixel(&self, gpu_va: u64, len: u32) -> Result<u128> {
+        let cpu = self.pixel_addr(gpu_va, len)?;
         let mut v = 0u128;
         for i in 0..len {
-            v |= (self.vmm_read_u8(gpu_va + i as u64)? as u128) << (8 * i);
+            v |= u128::from(self.mem.read_u8(cpu.wrapping_add(i))?) << (8 * i);
         }
         Ok(v)
     }
 
     /// Write `len` bytes of a surface's raw pixel, little-endian.
     pub fn write_pixel(&mut self, gpu_va: u64, len: u32, value: u128) -> Result<()> {
+        let cpu = self.pixel_addr(gpu_va, len)?;
         for i in 0..len {
-            self.vmm_write_u8(gpu_va + i as u64, (value >> (8 * i)) as u8)?;
+            self.mem.write_u8(cpu.wrapping_add(i), (value >> (8 * i)) as u8)?;
         }
         Ok(())
+    }
+
+    /// Where a pixel's `len` bytes live in guest memory. A pixel never spans two
+    /// mappings, so one translation covers all of it.
+    fn pixel_addr(&self, gpu_va: u64, len: u32) -> Result<u32> {
+        match self.vmm.translate(gpu_va) {
+            Some((cpu, left)) if left >= u64::from(len) => Ok(cpu),
+            _ => Err(Error::Gpu(format!(
+                "gpu va {:#x}: {} bytes are not mapped",
+                gpu_va, len
+            ))),
+        }
     }
 
     pub fn vmm_read_u8(&self, gpu_va: u64) -> Result<u8> {

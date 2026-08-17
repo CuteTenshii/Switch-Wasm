@@ -13,6 +13,7 @@
 
 use crate::mem::Memory;
 use crate::{Error, Result};
+use std::cell::Cell;
 use std::collections::BTreeMap;
 
 /// GPU small page size (the GMMU's finest granularity).
@@ -74,6 +75,11 @@ pub struct AddressSpace {
     next_small: u64,
     /// Bump pointer for un-fixed big-page allocations.
     next_big: u64,
+    /// The mapping the last translation resolved to, as
+    /// `(gpu_va, cpu_addr, size)`. Engines walk a surface address by address, so
+    /// one entry catches nearly every lookup; without it a blit pays a
+    /// `BTreeMap` search for every pixel it touches.
+    last_translation: Cell<Option<(u64, u32, u64)>>,
 }
 
 impl Default for AddressSpace {
@@ -88,6 +94,7 @@ impl AddressSpace {
             big_page_size: BIG_PAGE_SIZE,
             mappings: BTreeMap::new(),
             reservations: BTreeMap::new(),
+            last_translation: Cell::new(None),
             next_small: SMALL_REGION_BASE,
             next_big: SMALL_REGION_END,
         }
@@ -135,6 +142,7 @@ impl AddressSpace {
             .collect();
         for key in doomed {
             self.mappings.remove(&key);
+            self.last_translation.set(None);
         }
         Ok(())
     }
@@ -163,12 +171,14 @@ impl AddressSpace {
         };
         self.mappings
             .insert(gpu_va, Mapping { gpu_va, size, cpu_addr, handle, kind });
+        self.last_translation.set(None);
         Ok(gpu_va)
     }
 
     /// Drop the mapping that starts at `gpu_va` (`UNMAP_BUFFER`).
     pub fn unmap(&mut self, gpu_va: u64) -> Result<()> {
         self.mappings.remove(&gpu_va);
+        self.last_translation.set(None);
         Ok(())
     }
 
@@ -196,11 +206,20 @@ impl AddressSpace {
     }
 
     /// Translate a GPU VA to `(cpu_addr, bytes_left_in_mapping)`.
+    #[inline]
     pub fn translate(&self, gpu_va: u64) -> Option<(u32, u64)> {
+        if let Some((base, cpu_addr, size)) = self.last_translation.get() {
+            let off = gpu_va.wrapping_sub(base);
+            if off < size {
+                return Some((cpu_addr.wrapping_add(off as u32), size - off));
+            }
+        }
         let (_, m) = self.mappings.range(..=gpu_va).next_back()?;
         if !m.contains(gpu_va) {
             return None;
         }
+        self.last_translation
+            .set(Some((m.gpu_va, m.cpu_addr, m.size)));
         let off = gpu_va - m.gpu_va;
         Some((m.cpu_addr.wrapping_add(off as u32), m.size - off))
     }

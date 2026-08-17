@@ -67,12 +67,21 @@ impl Memory {
         (addr as usize) & (PAGE_SIZE - 1)
     }
 
+    #[inline(always)]
     fn page_mut(&mut self, idx: usize) -> Result<&mut Box<[u8; PAGE_SIZE]>> {
         if self.pages[idx].is_none() {
-            self.pages[idx] = Some(Box::new([0u8; PAGE_SIZE]));
-            self.mapped_pages += 1;
+            self.allocate_page(idx);
         }
         Ok(self.pages[idx].as_mut().unwrap())
+    }
+
+    /// First touch of a page. Out of line so the common "already mapped" store
+    /// path does not carry the allocation code with it.
+    #[cold]
+    #[inline(never)]
+    fn allocate_page(&mut self, idx: usize) {
+        self.pages[idx] = Some(Box::new([0u8; PAGE_SIZE]));
+        self.mapped_pages += 1;
     }
 
     /// Pages backed by real storage.
@@ -87,10 +96,21 @@ impl Memory {
         self.mapped_pages as u64 * PAGE_SIZE as u64
     }
 
+    #[inline(always)]
     fn page_ref(&self, idx: usize) -> Result<&[u8; PAGE_SIZE]> {
-        if let Some(page) = self.pages[idx].as_deref() {
-            return Ok(page);
+        match self.pages.get(idx).and_then(|p| p.as_deref()) {
+            Some(page) => Ok(page),
+            None => self.page_ref_unmapped(idx),
         }
+    }
+
+    /// An access to a page with no storage behind it: zeros inside a soft-mapped
+    /// region, a fault anywhere else. Kept out of line so the mapped case stays
+    /// small enough to inline into its callers — it is on the path of every
+    /// instruction fetch.
+    #[cold]
+    #[inline(never)]
+    fn page_ref_unmapped(&self, idx: usize) -> Result<&[u8; PAGE_SIZE]> {
         let addr = idx << PAGE_BITS;
         if addr >= self.soft.0 as usize && addr < self.soft.1 as usize {
             return Ok(&self.zero);
@@ -132,38 +152,92 @@ impl Memory {
         Ok(())
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn read_u8(&self, addr: u32) -> Result<u8> {
         let page = self.page_ref(Self::page_index(addr))?;
         Ok(page[Self::in_page_offset(addr)])
     }
 
-    #[inline]
-    pub fn read_u16(&self, addr: u32) -> Result<u16> {
-        Ok((self.read_u8(addr)? as u16)
-            | ((self.read_u8(addr.wrapping_add(1))? as u16) << 8))
+    /// The `N` bytes at `addr` when they all live in one page. Multi-byte
+    /// accesses go through this so they cost a single page lookup instead of one
+    /// per byte — the interpreter reads four bytes for every instruction it
+    /// fetches, so this is the hottest path in the emulator.
+    #[inline(always)]
+    fn read_bytes_in_page<const N: usize>(&self, addr: u32) -> Option<[u8; N]> {
+        let off = Self::in_page_offset(addr);
+        if off + N > PAGE_SIZE {
+            return None;
+        }
+        let page = self.page_ref(Self::page_index(addr)).ok()?;
+        Some(page[off..off + N].try_into().unwrap())
     }
 
-    #[inline]
+    /// Same, for writing. `None` means the access straddles a page boundary and
+    /// the caller has to fall back to going byte by byte.
+    #[inline(always)]
+    fn write_bytes_in_page<const N: usize>(&mut self, addr: u32, val: [u8; N]) -> Option<()> {
+        let off = Self::in_page_offset(addr);
+        if off + N > PAGE_SIZE {
+            return None;
+        }
+        let page = self.page_mut(Self::page_index(addr)).ok()?;
+        page[off..off + N].copy_from_slice(&val);
+        Some(())
+    }
+
+    #[inline(always)]
+    pub fn read_u16(&self, addr: u32) -> Result<u16> {
+        match self.read_bytes_in_page::<2>(addr) {
+            Some(bytes) => Ok(u16::from_le_bytes(bytes)),
+            None => self.read_u16_straddling(addr),
+        }
+    }
+
+    /// The rare read that crosses a page boundary.
+    #[cold]
+    #[inline(never)]
+    fn read_u16_straddling(&self, addr: u32) -> Result<u16> {
+        Ok((self.read_u8(addr)? as u16) | ((self.read_u8(addr.wrapping_add(1))? as u16) << 8))
+    }
+
+    #[inline(always)]
     pub fn read_u32(&self, addr: u32) -> Result<u32> {
+        match self.read_bytes_in_page::<4>(addr) {
+            Some(bytes) => Ok(u32::from_le_bytes(bytes)),
+            None => self.read_u32_straddling(addr),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn read_u32_straddling(&self, addr: u32) -> Result<u32> {
         Ok((self.read_u8(addr)? as u32)
             | ((self.read_u8(addr.wrapping_add(1))? as u32) << 8)
             | ((self.read_u8(addr.wrapping_add(2))? as u32) << 16)
             | ((self.read_u8(addr.wrapping_add(3))? as u32) << 24))
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn read_u64(&self, addr: u32) -> Result<u64> {
+        match self.read_bytes_in_page::<8>(addr) {
+            Some(bytes) => Ok(u64::from_le_bytes(bytes)),
+            None => self.read_u64_straddling(addr),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn read_u64_straddling(&self, addr: u32) -> Result<u64> {
         Ok((self.read_u32(addr)? as u64) | ((self.read_u32(addr.wrapping_add(4))? as u64) << 32))
     }
 
     /// Fetch the next instruction (little-endian AArch64 word).
-    #[inline]
+    #[inline(always)]
     pub fn fetch(&self, pc: u32) -> Result<u32> {
         self.read_u32(pc)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn write_u8(&mut self, addr: u32, val: u8) -> Result<()> {
         let idx = Self::page_index(addr);
         let off = Self::in_page_offset(addr);
@@ -172,22 +246,52 @@ impl Memory {
         Ok(())
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn write_u16(&mut self, addr: u32, val: u16) -> Result<()> {
+        if self.write_bytes_in_page(addr, val.to_le_bytes()).is_some() {
+            return Ok(());
+        }
+        self.write_u16_straddling(addr, val)
+    }
+
+    /// The rare access that crosses a page boundary.
+    #[cold]
+    #[inline(never)]
+    fn write_u16_straddling(&mut self, addr: u32, val: u16) -> Result<()> {
         self.write_u8(addr, val as u8)?;
         self.write_u8(addr.wrapping_add(1), (val >> 8) as u8)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn write_u32(&mut self, addr: u32, val: u32) -> Result<()> {
+        if self.write_bytes_in_page(addr, val.to_le_bytes()).is_some() {
+            return Ok(());
+        }
+        self.write_u32_straddling(addr, val)
+    }
+
+    /// The rare access that crosses a page boundary.
+    #[cold]
+    #[inline(never)]
+    fn write_u32_straddling(&mut self, addr: u32, val: u32) -> Result<()> {
         self.write_u8(addr, val as u8)?;
         self.write_u8(addr.wrapping_add(1), (val >> 8) as u8)?;
         self.write_u8(addr.wrapping_add(2), (val >> 16) as u8)?;
         self.write_u8(addr.wrapping_add(3), (val >> 24) as u8)
     }
 
-    #[inline]
+    #[inline(always)]
     pub fn write_u64(&mut self, addr: u32, val: u64) -> Result<()> {
+        if self.write_bytes_in_page(addr, val.to_le_bytes()).is_some() {
+            return Ok(());
+        }
+        self.write_u64_straddling(addr, val)
+    }
+
+    /// The rare access that crosses a page boundary.
+    #[cold]
+    #[inline(never)]
+    fn write_u64_straddling(&mut self, addr: u32, val: u64) -> Result<()> {
         self.write_u32(addr, val as u32)?;
         self.write_u32(addr.wrapping_add(4), (val >> 32) as u32)
     }

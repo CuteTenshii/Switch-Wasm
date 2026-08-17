@@ -159,7 +159,7 @@ pub(crate) fn fp_minnum(a: f64, b: f64) -> f64 {
     fp_min(a, b)
 }
 
-#[inline]
+#[inline(always)]
 pub(crate) fn sext_u64<T: Into<u64>>(v: T, bits: u32) -> u64 {
     let v = v.into();
     if bits >= 64 {
@@ -176,6 +176,7 @@ pub(crate) fn sext_u64<T: Into<u64>>(v: T, bits: u32) -> u64 {
 }
 
 /// Shift `v` left/right logically or arithmetically, or rotate, by `sa`.
+#[inline(always)]
 pub(crate) fn shift_reg(v: u64, st: u32, sa: u32, sf: bool) -> u64 {
     let size = if sf { 64 } else { 32 };
     let mask = if sf { u64::MAX } else { u32::MAX as u64 };
@@ -241,6 +242,7 @@ pub(crate) fn shift_var(v: u64, amt: u64, kind: u32, sf: bool) -> u64 {
 }
 
 /// Extend a register value for the ADD/SUB extended-register form.
+#[inline(always)]
 pub(crate) fn extend_reg(v: u64, option: u8, sf: bool) -> u64 {
     match option {
         0b000 => v as u8 as u64,        // UXTB

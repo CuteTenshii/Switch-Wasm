@@ -636,6 +636,7 @@ impl Cpu {
         Ok(false)
     }
 
+    #[inline(always)]
     pub(super) fn ld_st_opc(&mut self, addr: u32, rt: u8, sz: u32, opc: u32) -> Result<()> {
         // opc selects the access: 00 = STR, 01 = LDR, 10/11 = sign-extending
         // loads (LDRSB/LDRSH/LDRSW). The load bit is NOT opc&1 — treating
@@ -661,6 +662,7 @@ impl Cpu {
         Ok(())
     }
 
+    #[inline(always)]
     pub(super) fn load_by_size(&self, addr: u32, sz: u32, sign: bool) -> Result<u64> {
         let raw = match sz {
             0b00 => self.mem.read_u8(addr)? as u64,
@@ -681,6 +683,7 @@ impl Cpu {
         })
     }
 
+    #[inline(always)]
     pub(super) fn store_by_size(&mut self, addr: u32, sz: u32, val: u64) -> Result<()> {
         match sz {
             0b00 => self.mem.write_u8(addr, val as u8),

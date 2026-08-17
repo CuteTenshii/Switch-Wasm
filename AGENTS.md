@@ -262,6 +262,38 @@ Page storage is not shareable, so the alias is a copy (`Memory::copy_range`),
 copied back by `svcUnmapMemory`, which then frees the pages. The guest only ever
 touches one side of such an alias, so it cannot tell the difference.
 
+## Performance: measure the wasm build, not just the host
+
+Three tools, and they do not agree — measure the one you care about:
+
+- `cargo run --release -p switch-core --example bench` — per-instruction-class
+  throughput on the host. `b .` is the floor (one instruction, first check in the
+  decoder), so the gap between it and a class is that class's decode+execute cost.
+- `cargo run --release -p switch-core --example hotspots -- <nro>` — every
+  instruction of one steady-state frame, bucketed by guest address and by encoding
+  byte. This is how you find out that 72% of an hbmenu frame is hbmenu's own
+  software gradient fill and only ~10% is the emulator's GPU work.
+- `node tools/wasm_bench.mjs <nro>` — the build the browser runs, reporting the
+  steady-frame cost in fps. `node --cpu-prof` on it produces a profile whose
+  samples name the wasm functions; it is the only profiler available for that
+  build.
+
+What the numbers taught us:
+
+- **Dispatch order matters on the host, inlining matters in wasm.** Routing by
+  the A64 top-level group (bits 28:25) before running a group's decoder was worth
+  ~25% natively and *nothing* in wasm. Splitting `Memory`'s accessors into an
+  `#[inline(always)]` in-page fast path plus `#[cold]` page-straddling and
+  unmapped fallbacks was worth ~15% in wasm — V8 had been emitting `read_u32` as a
+  real call on the path of every instruction fetch.
+- The interpreter's floor is ~9ns per instruction natively and ~20ns in wasm, so a
+  frame of ~30M guest instructions cannot go below about a second in the browser
+  no matter how the decoder is arranged. Getting past that needs a decoded-block
+  cache (see PROGRESS.md), not more guard reordering.
+- Anything on the per-instruction path is worth checking for accidental cost: the
+  GPU's `read_pixel`/`write_pixel` used to translate a GPU address **per byte**,
+  which is four `BTreeMap` searches per pixel and millions per blit.
+
 ## A64 traps found the hard way
 
 - **Register 31 in ADD/SUB**: SP in the immediate and extended-register forms,

@@ -17,6 +17,35 @@ verified end to end.
 | Controller did nothing | The `HidSharedMemory` writer used invented offsets (`npad` at 0x3D7C0, lifo at +0x20) and only filled one slot; the frontend also used the old `KEY_*` bit order | Offsets taken from libnx's `hid.h` (npad 0x9A00, 0x5000 stride, full_key_lifo +0x28, handheld_lifo +0x378), both player 1 and handheld published, Horizon's button order, stick pseudo-buttons derived |
 | Faults with a clobbered link register once input woke a parked thread | `virtmemFindStack` found no room in the reported stack region and returned NULL, and the no-op `svcMapMemory` let **every thread's stack mirror land at address 0** — two threads shared one stack | A stack region clear of the main stack, and `svcMapMemory`/`svcUnmapMemory` that really map, copy and free |
 
+### Frame rate: ~0.7 fps, and where it goes
+
+hbmenu is correct but slow. The measurements (`examples/hotspots.rs`,
+`tools/wasm_bench.mjs`):
+
+| | |
+|---|---|
+| One steady hbmenu frame | **~30M emulated instructions** |
+| …of which hbmenu's own software gradient fill | 72% (~20M, about 20 instructions per pixel over 1280x720) |
+| …FreeType text rasterisation | ~10% |
+| …the emulator's GPU/display work | ~10% |
+| Interpreter throughput, host | 28M instructions/s (was 18M) |
+| Interpreter throughput, wasm in V8 | 21M instructions/s (was 17M) |
+| Resulting frame rate in the browser | **0.72 fps** (was 0.57) |
+
+The 26% that came out of it: routing by the A64 top-level encoding group before
+running a group's decoder (worth 55% natively, nothing in wasm), inlining
+`Memory`'s in-page fast paths while pushing the straddling and unmapped cases out
+of line (worth ~15% in wasm), one translation per pixel instead of per byte in the
+GPU's pixel accessors, and `Cpu::run` no longer paying a call per instruction.
+
+The floor is now ~9ns per instruction natively and ~20ns in wasm, nearly all of it
+fetch plus dispatch, so **no further reordering will make this smooth**: a 30M
+instruction frame is a second of wall clock in the browser. The next real step is a
+decoded-block cache — decode each basic block once into a compact form and execute
+from that, which is where an interpreter of this shape normally finds its 2-4x.
+Beyond that only generating code (a wasm JIT) reaches real time, and hbmenu itself
+would still be asking for 30M instructions a frame.
+
 ### Known interpreter bug: hinted TrueType collapses horizontally
 
 With a font that carries hinting programs (`fpgm`/`prep`/`cvt`), glyphs render
