@@ -135,6 +135,12 @@ impl NvMap {
         Some(handle)
     }
 
+    /// Every live handle, for tools that want to inspect what the guest
+    /// allocated (sizes and CPU addresses are how deko3d's memblocks are found).
+    pub fn iter(&self) -> impl Iterator<Item = &NvMapHandle> {
+        self.handles.values()
+    }
+
     pub fn get(&self, handle: u32) -> Option<&NvMapHandle> {
         self.handles.get(&handle)
     }

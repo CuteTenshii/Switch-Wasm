@@ -43,11 +43,14 @@ Browser-oriented Nintendo Switch emulation core: an ARM64 (A64) integer interpre
   deko3d uses it; leaving it garbage made the fence wait read a bogus waiter
   index. A Timeout (0xEA01) during deko3d device init is treated as fatal
   (`svcBreak` 0x1159).
-- hbmenu state: gets through `assetsInit()` (RomFS + `romfs:/assets.zip` via
-  PhysicsFS), the worker thread `thrd_create` starts, its NEON JPEG icon decode,
-  and `launchInit()`, and **presents 1280x720 frames**. What it draws is still
-  blank; it spends its time in a repeated 256-entry cleanup loop at
-  `0x080102c8`, which is the next thing to look at.
+- hbmenu state: **its menu renders** — title, theme background, entry tiles and
+  the icon panel all composite through the real path (CPU-drawn linear buffer →
+  deko3d copy-engine blit → swapchain → binder present). The only wrong pixels
+  are inside the JPEG-decoded icon bitmap, which still has banding.
+- **hbmenu does not need the shader core.** `nx_graphics.c` draws with the CPU
+  into a linear memblock and its command list is just
+  `dkCmdBufCopyBufferToImage` + `dkCmdBufSignalFence`; its assets are raw RGBA
+  `.bin` bitmaps. Only the copy engine and syncpoints are involved.
 
 ## Guest threads (`cpu/mod.rs`, `cpu/svc.rs`)
 
@@ -119,6 +122,11 @@ deko3d's generated Maxwell headers and the ioctl ABI from libnx's
 - `surface` — block-linear (GOB) swizzling and the colour formats. A naive
   memory dump of a Switch framebuffer looks shredded because of this.
 
+Subchannel 6 (`SUBCHANNEL_GPFIFO`) is pre-bound to the channel's own
+`MAXWELL_CHANNEL_GPFIFO_A` class, because nvhost binds it at channel creation and
+userspace never issues a `SetObject` for it — deko3d writes its syncpoint
+increments and cache-flush ops straight there.
+
 Scan-out: the app hands a finished image to `display::BufferQueue`
 (`QUEUE_BUFFER`), which resolves the `NvGraphicBuffer` to an nvmap id and
 `Gpu::present` de-swizzles it into `Gpu::framebuffer` (RGBA8888). The wasm
@@ -159,6 +167,16 @@ whatever command id is left in the TLS buffer runs a real command — closing an
 `fsp-srv` session was landing on `CreateFile` and adding an empty file to the SD
 card — so `svc.rs` answers type 2 before dispatch and calls
 `Cpu::forget_handle`.
+
+## Where a CMIF header lands (`cpu/ipc.rs`)
+
+`Cpu::ipc_cmif_header_offset` finds the "SFCI" header by walking the request's
+descriptors (`ipc_reply_start`), checking the domain offset too, and only then
+scanning the message buffer. A request with buffer descriptors pushes the header
+well past the start — nvdrv's `KICKOFF_PB` puts it at 0x40 — and a fixed scan of
+the first 0x40 bytes reported "no command id", so **the GPU submit was answered
+as an unknown command with a generic success**: no pushbuffer ever ran, the frame
+fence never signalled, and hbmenu spun in `dkFenceWait` forever.
 
 ## IPC payload offsets (`cpu/ipc.rs`)
 

@@ -4,18 +4,30 @@ Goal: get the bundled demo and real homebrew (the Homebrew Menu NRO,
 `hbmenu.nro`) to actually **run** on the interpreter, and put what it renders
 on the canvas.
 
-## Current state: hbmenu boots through its whole init and presents frames
+## Current state: hbmenu's menu renders
 
 `hbmenu.nro` boots, initialises the display, renders with its own font and
 **presents 1280x720 frames that reach the HTML canvas**. The whole path is
 real: nvdrv ioctls → nvmap → the graphics MMU → the display buffer queue →
 block-linear de-swizzle → RGBA8888 → `putImageData`.
 
-`hbmenu.nro` now gets through **all of its init**: `assetsInit()` (RomFS +
-`romfs:/assets.zip` through PhysicsFS), the worker thread its `thrd_create`
-starts, the NEON JPEG decode of its icon, and `launchInit()`. It presents
-1280x720 frames again — currently blank, with its time going into a repeated
-256-entry cleanup loop at `0x080102c8`.
+`hbmenu.nro` **draws its menu**: the title, the theme's background and swoosh,
+the entry tile and the icon panel all appear, composited through the real path —
+hbmenu draws with the CPU into a linear buffer, deko3d's recorded command list
+blits it into the tiled swapchain image with the copy engine, and the binder
+presents it. The remaining artefact is banding inside the JPEG-decoded icon
+bitmap.
+
+Two bugs stood between "presents blank frames" and this:
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| `GpuStats { submissions: 0 }` — no pushbuffer ever ran, so `dkFenceWait` spun forever waiting for syncpoint 8 to reach 1 | nvdrv's `KICKOFF_PB` request carries buffer descriptors, so its CMIF header sits at 0x40; the header scan stopped at 0x40 and reported no command id, and the submit was answered as an unknown command with a generic success | `ipc_cmif_header_offset` walks the descriptors (and scans the whole message buffer as a fallback) |
+| `pfifo: method 0xb on subchannel 6 before any class was bound` | deko3d writes gpfifo methods (syncpoint increment, cache flush) to subchannel 6 without a `SetObject`, because nvhost binds the channel's own class at creation | Pre-bind `SUBCHANNEL_GPFIFO` to `CLASS_GPFIFO` |
+
+**hbmenu never needed the shader core**: its command list is one
+`dkCmdBufCopyBufferToImage` plus a fence signal, and its assets are raw RGBA
+bitmaps.
 
 Getting there needed guest threads (cooperative, with real mutex/condvar
 handoff), the `blr x30` fix, correct TRN/ZIP/UZP semantics, the AdvSIMD
@@ -129,8 +141,9 @@ decode as command `0x10100000`), and the GPU path needs the shader core anyway.
 
 ## Next
 
-1. **hbmenu's blank frames**: it presents, but draws nothing yet and spins in a
-   256-entry cleanup loop at `0x080102c8`. Find what that loop is waiting on.
+1. **hbmenu's icon**: the menu renders, but the JPEG-decoded icon bitmap still
+   bands. `tools/difftest.py` is the way in — extend it with the rest of the
+   decoder's SIMD ops (upsampling, colour conversion).
 2. **Shader core**: a Maxwell SASS interpreter plus a software rasterizer, so
    `VertexBegin`/`DrawArrays` produce pixels. This is what deko3d-rendering and
    EGL/OpenGL homebrew need.

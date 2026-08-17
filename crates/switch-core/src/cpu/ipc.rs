@@ -6,16 +6,36 @@ use super::Cpu;
 use crate::Result;
 
 impl Cpu {
-    /// Scan the TLS IPC buffer for the "SFCI" request-header magic and return
-    /// the command id that follows it (`CmifInHeader::command_id`). Returns
-    /// `None` when the buffer doesn't look like a CMIF request (the domain and
-    /// non-domain layouts place the header at different offsets, so we search
-    /// rather than hard-code one).
-    pub(super) fn ipc_command_id(&self, tls: u32) -> Option<u32> {
-        for i in 0..0x40u32 {
-            if self.mem.read_u32(tls.wrapping_add(i)).ok()? == 0x4943_4653 {
-                return self.mem.read_u32(tls.wrapping_add(i + 8)).ok();
+    /// Offset of a CMIF request's `SFCI` header inside the TLS message buffer.
+    ///
+    /// Where it lands depends on how many descriptors the request carries: the
+    /// data area follows the message header, the optional pid, and the static
+    /// and buffer descriptors. A `KICKOFF_PB` with its gpfifo-entry buffers puts
+    /// it at 0x40 — a fixed scan of the first 0x40 bytes missed it entirely, so
+    /// the submit was dispatched as "unknown command", answered with a generic
+    /// success, and the GPU never saw the frame.
+    pub(super) fn ipc_cmif_header_offset(&self, tls: u32) -> Option<u32> {
+        const SFCI: u32 = 0x4943_4653;
+        // The computed data area, then the same 0x10 further in for a domain
+        // request (which puts a `CmifDomainInHeader` first).
+        let start = self.ipc_reply_start(tls);
+        for candidate in [start, start.wrapping_add(0x10)] {
+            if self.mem.read_u32(tls.wrapping_add(candidate)).unwrap_or(0) == SFCI {
+                return Some(candidate);
             }
+        }
+        // Otherwise search the whole 0x100-byte message buffer, for layouts the
+        // descriptor walk above doesn't model exactly.
+        (0..0x100u32)
+            .step_by(4)
+            .find(|&i| self.mem.read_u32(tls.wrapping_add(i)).unwrap_or(0) == SFCI)
+    }
+
+    /// The command id a CMIF request carries (`CmifInHeader::command_id`), or
+    /// `None` when the buffer doesn't look like a CMIF request.
+    pub(super) fn ipc_command_id(&self, tls: u32) -> Option<u32> {
+        if let Some(offset) = self.ipc_cmif_header_offset(tls) {
+            return self.mem.read_u32(tls.wrapping_add(offset + 8)).ok();
         }
         // Older libnx (pre-CMIF) sessions — e.g. the FsDir object NX-Shell's
         // `fsDirRead` uses — marshal requests as {type=2, object_id, cmd_id,
@@ -62,12 +82,10 @@ impl Cpu {
     /// `fsp-srv` read its offset and size out of the header, so every read
     /// asked for 0 bytes at offset 0 and `romfsMountSelf` failed.)
     pub(super) fn ipc_request_data(&self, tls: u32) -> u32 {
-        for i in 0..0x40u32 {
-            if self.mem.read_u32(tls.wrapping_add(i)).unwrap_or(0) == 0x4943_4653 {
-                return tls.wrapping_add(i + 0x10);
-            }
+        match self.ipc_cmif_header_offset(tls) {
+            Some(offset) => tls.wrapping_add(offset + 0x10),
+            None => tls.wrapping_add(self.ipc_reply_start(tls) + 0x10),
         }
-        tls.wrapping_add(self.ipc_reply_start(tls) + 0x10)
     }
 
     pub(super) fn alloc_handle(&mut self) -> u64 {
@@ -1001,6 +1019,38 @@ mod tests {
         let data = domain.ipc_request_data(TLS);
         assert_eq!(domain.mem.read_u64(data + 8).unwrap(), 0x10);
         assert_eq!(domain.mem.read_u64(data + 0x10).unwrap(), 0x70);
+    }
+
+    #[test]
+    fn the_cmif_header_is_found_past_the_buffer_descriptors() {
+        // A request with buffer descriptors pushes its CMIF header further into
+        // the message buffer: nvdrv's KICKOFF_PB lands at 0x40. Scanning only
+        // the first 0x40 bytes reported "no command id", so the GPU submit was
+        // answered as an unknown command with a generic success and hbmenu's
+        // frame fence never signalled.
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        // type 4, 0 statics, 2 send buffers, 1 recv buffer → the data area is
+        // 8 + 3*12 = 44 bytes in, rounded up to 0x30.
+        cpu.mem.write_u32(TLS, 4 | (2 << 20) | (1 << 24)).unwrap();
+        cpu.mem.write_u32(TLS + 4, 8).unwrap();
+        let data_area = cpu.ipc_reply_start(TLS);
+        assert_eq!(data_area, 0x30);
+        cpu.mem.write_u32(TLS + data_area, SFCI).unwrap();
+        cpu.mem.write_u32(TLS + data_area + 8, 0x1b).unwrap();
+        assert_eq!(cpu.ipc_command_id(TLS), Some(0x1b));
+        assert_eq!(cpu.ipc_request_data(TLS), TLS + data_area + 0x10);
+
+        // And when the descriptor walk doesn't land exactly on it (0x40 here),
+        // the scan of the message buffer still finds it.
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.mem.write_u32(TLS, 4).unwrap();
+        cpu.mem.write_u32(TLS + 4, 8).unwrap();
+        cpu.mem.write_u32(TLS + 0x40, SFCI).unwrap();
+        cpu.mem.write_u32(TLS + 0x48, 0x1b).unwrap();
+        assert_eq!(cpu.ipc_command_id(TLS), Some(0x1b));
+        assert_eq!(cpu.ipc_request_data(TLS), TLS + 0x50);
     }
 
     #[test]

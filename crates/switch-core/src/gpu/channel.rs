@@ -22,6 +22,13 @@ const SET_OBJECT: u32 = 0x000;
 /// Number of subchannels a channel has.
 pub const SUBCHANNEL_COUNT: usize = 8;
 
+/// Subchannel the channel's own `MAXWELL_CHANNEL_GPFIFO_A` class answers on.
+/// nvhost binds it when the channel is created, so userspace never issues a
+/// `SetObject` for it — deko3d writes its syncpoint increments and cache-flush
+/// operations straight to subchannel 6, and without the pre-binding those
+/// methods land on an unbound subchannel and the fence never signals.
+pub const SUBCHANNEL_GPFIFO: usize = 6;
+
 /// Maximum pushbuffer length (in dwords) the GPFIFO entry can express.
 const MAX_PUSHBUFFER_WORDS: u32 = 0x1F_FFFF;
 
@@ -74,11 +81,13 @@ pub struct Channel {
 
 impl Channel {
     pub fn new(id: u32, syncpt: u32) -> Channel {
+        let mut subchannel_class = [0; SUBCHANNEL_COUNT];
+        subchannel_class[SUBCHANNEL_GPFIFO] = CLASS_GPFIFO;
         Channel {
             id,
             as_id: None,
             syncpt,
-            subchannel_class: [0; SUBCHANNEL_COUNT],
+            subchannel_class,
             three_d: Engine3D::new(),
             two_d: Engine2D::new(),
             copy: EngineCopy::new(),
@@ -304,6 +313,21 @@ mod tests {
 
     fn pushbuffer(words: &[u32]) -> Vec<u8> {
         words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn the_gpfifo_subchannel_is_bound_without_a_set_object() {
+        // nvhost binds the channel's own class, so deko3d writes its syncpoint
+        // increments to subchannel 6 with no SetObject. Requiring one made the
+        // pushbuffer fault ("method 0xb on subchannel 6 before any class was
+        // bound") and hbmenu's frame fence never signalled.
+        let chan = Channel::new(1, 8);
+        assert_eq!(chan.subchannel_class[SUBCHANNEL_GPFIFO], CLASS_GPFIFO);
+        for (index, &class) in chan.subchannel_class.iter().enumerate() {
+            if index != SUBCHANNEL_GPFIFO {
+                assert_eq!(class, 0, "subchannel {index} must start unbound");
+            }
+        }
     }
 
     #[test]
