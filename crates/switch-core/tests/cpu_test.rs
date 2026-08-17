@@ -1333,29 +1333,113 @@ fn bfxil_extracts_field_into_low_bits() {
 fn gamepad_input_writes_input_reg_and_hid_shmem() {
     use switch_core::cpu::SyscallMode;
     // MapSharedMemory (svc 0x13) with x1=addr, x2=size must back the region
-    // with real memory and record it; set_gamepad_state then mirrors the
-    // button mask into INPUT_ADDR and the libnx HidSharedMemory player-1
-    // layout (npad at 0x3D7C0, full_key_lifo at +0x20).
+    // with real memory and, for a region hid's size, record it; set_gamepad_state
+    // then mirrors the pad into INPUT_ADDR and into the two npad slots libnx
+    // reads. The offsets are `HidSharedMemory`'s: npad at 0x9A00, 0x5000 per
+    // controller, `full_key_lifo` at +0x28 and `handheld_lifo` at +0x378 within
+    // `HidNpadInternalState`, each LIFO holding a 0x20-byte header then storage
+    // entries of {sampling_number, HidNpadCommonState}.
+    const SHMEM: u32 = 0x3000_0000;
+    const NPAD: u32 = SHMEM + 0x9A00;
+    const HANDHELD: u32 = NPAD + 8 * 0x5000;
     let mut cpu = cpu_at(0x1000);
     cpu.syscall_mode = SyscallMode::Horizon;
-    cpu.set_reg(1, 0x3000_0000);
+    cpu.set_reg(1, SHMEM as u64);
     cpu.set_reg(2, 0x40000);
     cpu.mem.map(0x1000, &svc(0x13).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
 
-    cpu.set_gamepad_state(0x3 /* A|B */, 1000, -2000, 0, 0);
+    // A|B held, left stick pushed fully up and slightly left.
+    cpu.set_gamepad_state(0x3, -1000, 30000, 0, 0);
 
-    assert_eq!(cpu.mem.read_u64(switch_core::INPUT_ADDR).unwrap(), 0x3);
-    // style_set = FullKey|Handheld
-    assert_eq!(cpu.mem.read_u32(0x3000_0000 + 0x3D7C0).unwrap(), 5);
-    // header.count == 1, one LIFO entry with buttons + connected attribute
-    let lifo = 0x3000_0000 + 0x3D7C0 + 0x20;
-    assert_eq!(cpu.mem.read_u64(lifo + 0x18).unwrap(), 1);
-    assert_eq!(cpu.mem.read_u64(lifo + 0x30).unwrap(), 0x3);
-    assert_eq!(cpu.mem.read_u32(lifo + 0x38).unwrap(), 1000);
-    assert_eq!(cpu.mem.read_u32(lifo + 0x3C).unwrap(), 2000u32.wrapping_neg());
-    assert_eq!(cpu.mem.read_u32(lifo + 0x48).unwrap(), 1); // IsConnected
+    // The mask handed to the guest gains HidNpadButton_StickLUp (1 << 17); the
+    // small horizontal deflection stays below the pseudo-button threshold.
+    let expected_buttons = 0x3 | (1 << 17);
+    assert_eq!(
+        cpu.mem.read_u64(switch_core::INPUT_ADDR).unwrap(),
+        expected_buttons
+    );
+
+    for (base, lifo_off, style, device) in [
+        (NPAD, 0x28, 1 << 0, 1 << 0),                    // player 1, Pro Controller
+        (HANDHELD, 0x378, 1 << 1, (1 << 2) | (1 << 3)),  // handheld
+    ] {
+        assert_eq!(cpu.mem.read_u32(base).unwrap(), style, "style_set");
+        assert_eq!(cpu.mem.read_u32(base + 0x4188).unwrap(), device, "device_type");
+        let lifo = base + lifo_off;
+        assert_eq!(cpu.mem.read_u64(lifo + 0x08).unwrap(), 17, "buffer_count");
+        assert_eq!(cpu.mem.read_u64(lifo + 0x10).unwrap(), 0, "tail");
+        assert_eq!(cpu.mem.read_u64(lifo + 0x18).unwrap(), 1, "count");
+        let entry = lifo + 0x20;
+        let sample = cpu.mem.read_u64(entry).unwrap();
+        assert!(sample > 0, "sampling number must advance");
+        assert_eq!(cpu.mem.read_u64(entry + 0x08).unwrap(), sample);
+        assert_eq!(cpu.mem.read_u64(entry + 0x10).unwrap(), expected_buttons);
+        assert_eq!(cpu.mem.read_u32(entry + 0x18).unwrap(), 1000u32.wrapping_neg());
+        assert_eq!(cpu.mem.read_u32(entry + 0x1C).unwrap(), 30000);
+        // IsConnected, whatever else the controller reports about its halves.
+        assert_eq!(cpu.mem.read_u32(entry + 0x28).unwrap() & 1, 1);
+    }
+}
+
+#[test]
+fn mapping_pl_shared_memory_delivers_the_shared_font() {
+    use switch_core::cpu::{SyscallMode, PL_SHMEM_SIZE};
+    // `plInitialize` maps pl's shared memory and homebrew then reads the font
+    // out of it at the offset pl reported (0), so the bytes have to be there by
+    // the time the mapping syscall returns.
+    const ADDR: u32 = 0x2000_0000;
+    let font: Vec<u8> = (0..=255u8).cycle().take(0x2000).collect();
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.set_shared_font(font.clone());
+    cpu.set_reg(1, ADDR as u64);
+    cpu.set_reg(2, u64::from(PL_SHMEM_SIZE));
+    cpu.mem.map(0x1000, &svc(0x13).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), 0);
+    assert_eq!(cpu.mem.dump(ADDR, font.len()).unwrap(), font);
+
+    // A font handed over after the guest mapped the region still reaches it:
+    // the guest is holding a pointer into memory it already mapped.
+    let replacement: Vec<u8> = vec![0xAB; 0x1000];
+    cpu.set_shared_font(replacement.clone());
+    assert_eq!(cpu.mem.dump(ADDR, replacement.len()).unwrap(), replacement);
+}
+
+#[test]
+fn map_memory_backs_the_destination_and_unmap_frees_it() {
+    use switch_core::cpu::SyscallMode;
+    // svcMapMemory(dst, src, size) aliases a range; libnx uses it to mirror a
+    // thread's stack and then finds the *next* thread's mirror by looking for an
+    // unmapped range, so the destination has to read back as mapped memory
+    // holding the source's bytes. svcUnmapMemory hands them back and frees it.
+    const SRC: u32 = 0x3000_0000;
+    const DST: u32 = 0x1800_0000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.mem.map(SRC, &0xDEAD_BEEFu32.to_le_bytes()).unwrap();
+    cpu.mem.map(0x1000, &svc(0x04).to_le_bytes()).unwrap();
+    cpu.mem.map(0x1004, &svc(0x05).to_le_bytes()).unwrap();
+
+    cpu.set_reg(0, DST as u64);
+    cpu.set_reg(1, SRC as u64);
+    cpu.set_reg(2, 0x2000);
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), 0);
+    assert!(cpu.mem.page_mapped(DST));
+    assert!(cpu.mem.page_mapped(DST + 0x1000));
+    assert_eq!(cpu.mem.read_u32(DST).unwrap(), 0xDEAD_BEEF);
+
+    cpu.mem.write_u32(DST, 0x1234_5678).unwrap();
+    cpu.set_reg(0, DST as u64);
+    cpu.set_reg(1, SRC as u64);
+    cpu.set_reg(2, 0x2000);
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), 0);
+    assert_eq!(cpu.mem.read_u32(SRC).unwrap(), 0x1234_5678);
+    assert!(!cpu.mem.page_mapped(DST));
 }
 
 #[test]

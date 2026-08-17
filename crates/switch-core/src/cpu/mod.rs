@@ -100,6 +100,73 @@ pub enum ThreadState {
 /// unlock has to go through `svcArbitrateUnlock`".
 const MUTEX_HAS_LISTENERS: u32 = 0x4000_0000;
 
+/// The address-space range `svcGetInfo` reports as the stack region: where
+/// libnx mirrors the stacks of the threads the guest creates. It sits inside the
+/// ASLR region and clear of the image, the main stack and the heap.
+pub const GUEST_STACK_REGION_ADDR: u32 = 0x1800_0000;
+pub const GUEST_STACK_REGION_SIZE: u32 = 0x0800_0000;
+
+/// Size of hid's shared memory, the value libnx passes to `svcMapSharedMemory`.
+/// Used to tell that mapping apart from any other shared memory the guest maps.
+pub const HID_SHMEM_SIZE: u32 = 0x4_0000;
+
+/// Size of `pl:u`'s shared memory, the region the system fonts live in
+/// (`SHAREDMEMFONT_SIZE` in libnx). Recognised the same way as hid's.
+pub const PL_SHMEM_SIZE: u32 = 0x110_0000;
+
+/// Offsets into libnx's `HidSharedMemory` (`switch/services/hid.h`): the npad
+/// section, the per-controller stride, and the fields of `HidNpadInternalState`
+/// that `padUpdate` reads.
+mod hid_shmem {
+    /// `offsetof(HidSharedMemory, npad)`.
+    pub const NPAD: u32 = 0x9A00;
+    /// `sizeof(HidNpadSharedMemoryEntry)`; `internal_state` sits at its start.
+    pub const ENTRY_SIZE: u32 = 0x5000;
+    /// Slot `HidNpadIdType_Handheld` reads (players 1-8 are slots 0-7).
+    pub const HANDHELD_SLOT: u32 = 8;
+
+    pub const STYLE_SET: u32 = 0x00;
+    pub const JOY_ASSIGNMENT_MODE: u32 = 0x04;
+    pub const FULL_KEY_LIFO: u32 = 0x28;
+    pub const HANDHELD_LIFO: u32 = 0x378;
+    pub const DEVICE_TYPE: u32 = 0x4188;
+
+    /// `HidNpadCommonLifo`: a 0x20-byte header then 17 storage entries. The
+    /// header's fields are unused/buffer_count/tail/count; a reader takes
+    /// `count` entries ending at `tail`.
+    pub const LIFO_BUFFER_COUNT: u32 = 0x08;
+    pub const LIFO_TAIL: u32 = 0x10;
+    pub const LIFO_COUNT: u32 = 0x18;
+    pub const LIFO_STORAGE: u32 = 0x20;
+    pub const LIFO_CAPACITY: u64 = 17;
+
+    /// `HidNpadCommonStateAtomicStorage`: a sampling number the reader uses to
+    /// detect a torn read, then the `HidNpadCommonState` itself.
+    pub const STORAGE_SAMPLING_NUMBER: u32 = 0x00;
+    pub const STATE_SAMPLING_NUMBER: u32 = 0x08;
+    pub const STATE_BUTTONS: u32 = 0x10;
+    pub const STATE_STICK_L: u32 = 0x18;
+    pub const STATE_STICK_R: u32 = 0x20;
+    pub const STATE_ATTRIBUTES: u32 = 0x28;
+
+    pub const STYLE_FULL_KEY: u32 = 1 << 0;
+    pub const STYLE_HANDHELD: u32 = 1 << 1;
+
+    pub const DEVICE_FULL_KEY: u32 = 1 << 0;
+    pub const DEVICE_HANDHELD: u32 = (1 << 2) | (1 << 3); // HandheldLeft|Right
+
+    pub const ATTR_CONNECTED: u32 = 1 << 0;
+    pub const ATTR_WIRED: u32 = 1 << 1;
+    pub const ATTR_LEFT_CONNECTED: u32 = 1 << 2;
+    pub const ATTR_LEFT_WIRED: u32 = 1 << 3;
+    pub const ATTR_RIGHT_CONNECTED: u32 = 1 << 4;
+    pub const ATTR_RIGHT_WIRED: u32 = 1 << 5;
+}
+
+/// Deflection past which hid reports the `HidNpadButton_StickL*`/`StickR*`
+/// pseudo-buttons, which is what `HidNpadButton_AnyLeft` and friends look at.
+const HID_STICK_THRESHOLD: i32 = 0x4000;
+
 /// A guest thread's saved CPU state. The running thread's state lives in the
 /// [`Cpu`] fields; this is what a switch saves and restores.
 #[derive(Debug, Clone)]
@@ -184,6 +251,13 @@ pub struct Cpu {
     hid_shmem_addr: u32,
     /// Monotonic sampling number for the hid shared-memory LIFO entries.
     sample_counter: u64,
+    /// The font `pl:u` serves as every shared font type, as a TrueType/OpenType
+    /// file. Homebrew reads it out of pl's shared memory and hands it to
+    /// FreeType, so an empty vector means no text renders at all.
+    shared_font: Vec<u8>,
+    /// Address the guest mapped pl's shared memory to, where the font was
+    /// written; 0 until the guest calls `plInitialize`.
+    pl_shmem_addr: u32,
     /// The emulated SD card `fsp-srv` serves.
     pub fs: crate::vfs::Vfs,
     /// The nvdrv driver and the GPU behind it.
@@ -239,6 +313,8 @@ impl Cpu {
             fs_files: HashMap::new(),
             hid_shmem_addr: 0,
             sample_counter: 0,
+            shared_font: Vec::new(),
+            pl_shmem_addr: 0,
             fs: crate::vfs::Vfs::new(),
             nv: crate::gpu::nvdrv::NvDrv::new(),
             display: crate::display::BufferQueue::new(),
@@ -753,10 +829,15 @@ impl Cpu {
     /// `padUpdate` reads, so real homebrew (padInitialize/padUpdate) works too.
     ///
     /// `buttons` is a bitfield of `HidNpadButton` (A=1<<0, B=1<<1, X=1<<2,
-    /// Y=1<<3, L=1<<4, R=1<<5, ZL=1<<6, ZR=1<<7, Plus=1<<8, Minus=1<<9,
-    /// DpadLeft=1<<10, DpadUp=1<<11, DpadRight=1<<12, DpadDown=1<<13,
-    /// StickL=1<<14, StickR=1<<15). Sticks are signed -32768..32767.
+    /// Y=1<<3, StickL=1<<4, StickR=1<<5, L=1<<6, R=1<<7, ZL=1<<8, ZR=1<<9,
+    /// Plus=1<<10, Minus=1<<11, DpadLeft=1<<12, DpadUp=1<<13, DpadRight=1<<14,
+    /// DpadDown=1<<15). Sticks are signed -32768..32767, positive being right
+    /// and *up* as Horizon reports them. The stick pseudo-buttons
+    /// (`StickLLeft`..`StickRDown`, bits 16-23) are derived here, so a caller
+    /// only has to pass the analog values.
     pub fn set_gamepad_state(&mut self, buttons: u64, stick_lx: i32, stick_ly: i32, stick_rx: i32, stick_ry: i32) {
+        let buttons = buttons | Self::stick_pseudo_buttons(stick_lx, stick_ly, stick_rx, stick_ry);
+
         // Simple host→guest register: a u64 mask, then two analog sticks.
         let _ = self.mem.write_u64(crate::INPUT_ADDR, buttons);
         let _ = self.mem.write_u32(crate::INPUT_ADDR + 8, stick_lx as u32);
@@ -770,32 +851,134 @@ impl Cpu {
         self.write_hid_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
     }
 
-    /// Mirror the gamepad state into libnx's `HidSharedMemory` for player 1.
-    /// The `npad` section sits at offset 0x3D7C0; each entry's `internal_state`
-    /// holds `style_set` at +0 and `full_key_lifo` at +0x20. A LIFO with one
-    /// entry, a monotonic sampling number, the connected attribute and the
-    /// button/stick state is enough for `padUpdate` to report input.
+    /// The `HidNpadButton_StickL*`/`StickR*` bits hid sets from stick
+    /// deflection. Homebrew navigates menus with `HidNpadButton_AnyUp` and
+    /// friends, which are the d-pad bit OR'd with these.
+    fn stick_pseudo_buttons(lx: i32, ly: i32, rx: i32, ry: i32) -> u64 {
+        let mut mask = 0u64;
+        for (i, (x, y)) in [(lx, ly), (rx, ry)].iter().enumerate() {
+            let base = 16 + 4 * i as u64; // StickLLeft, then StickRLeft
+            if *x < -HID_STICK_THRESHOLD {
+                mask |= 1 << base;
+            }
+            if *y > HID_STICK_THRESHOLD {
+                mask |= 1 << (base + 1);
+            }
+            if *x > HID_STICK_THRESHOLD {
+                mask |= 1 << (base + 2);
+            }
+            if *y < -HID_STICK_THRESHOLD {
+                mask |= 1 << (base + 3);
+            }
+        }
+        mask
+    }
+
+    /// Mirror the gamepad state into libnx's `HidSharedMemory`. The host pad is
+    /// published both as player 1 holding a Pro Controller and as the handheld
+    /// controller, because homebrew polls whichever of the two it was built to
+    /// expect; `padUpdate` merges the slots it was asked for, so a program that
+    /// reads both still sees one pad's worth of input.
     fn write_hid_gamepad_state(&mut self, buttons: u64, lx: i32, ly: i32, rx: i32, ry: i32) {
-        const NPAD_OFF: u32 = 0x3D7C0; // offsetof(HidSharedMemory, npad)
-        const STYLE_FULL_KEY_HANDHELD: u32 = 1 | 4; // NpadFullKey | NpadHandheld
-        const ATTR_CONNECTED: u32 = 1;
-        let base = self.hid_shmem_addr.wrapping_add(NPAD_OFF);
+        use hid_shmem as h;
         self.sample_counter = self.sample_counter.wrapping_add(1);
-        // internal_state
-        let _ = self.mem.write_u32(base, STYLE_FULL_KEY_HANDHELD);        // style_set
-        let _ = self.mem.write_u32(base + 4, 0);                          // joy_assignment_mode
-        // full_key_lifo at internal_state + 0x20
-        let lifo = base.wrapping_add(0x20);
-        let _ = self.mem.write_u64(lifo + 0x08, 1);       // header.buffer_count
-        let _ = self.mem.write_u64(lifo + 0x10, 0);       // header.tail
-        let _ = self.mem.write_u64(lifo + 0x18, 1);       // header.count
-        let _ = self.mem.write_u64(lifo + 0x20, self.sample_counter); // storage[0].sampling_number
-        let _ = self.mem.write_u64(lifo + 0x30, buttons); // storage[0].state.buttons
-        let _ = self.mem.write_u32(lifo + 0x38, lx as u32);
-        let _ = self.mem.write_u32(lifo + 0x3C, ly as u32);
-        let _ = self.mem.write_u32(lifo + 0x40, rx as u32);
-        let _ = self.mem.write_u32(lifo + 0x44, ry as u32);
-        let _ = self.mem.write_u32(lifo + 0x48, ATTR_CONNECTED);          // attributes
+        let sample = self.sample_counter;
+        self.write_npad_slot(
+            0,
+            h::STYLE_FULL_KEY,
+            h::DEVICE_FULL_KEY,
+            h::FULL_KEY_LIFO,
+            h::ATTR_CONNECTED | h::ATTR_WIRED,
+            sample,
+            buttons,
+            (lx, ly, rx, ry),
+        );
+        self.write_npad_slot(
+            h::HANDHELD_SLOT,
+            h::STYLE_HANDHELD,
+            h::DEVICE_HANDHELD,
+            h::HANDHELD_LIFO,
+            h::ATTR_CONNECTED
+                | h::ATTR_LEFT_CONNECTED
+                | h::ATTR_LEFT_WIRED
+                | h::ATTR_RIGHT_CONNECTED
+                | h::ATTR_RIGHT_WIRED,
+            sample,
+            buttons,
+            (lx, ly, rx, ry),
+        );
+    }
+
+    /// Publish one `HidNpadInternalState`: the controller's style and device
+    /// type, then a single-entry LIFO holding the current button/stick state.
+    /// A reader takes `count` entries ending at `tail`, so one entry at index 0
+    /// is all `hidGetNpadStates*` needs.
+    #[allow(clippy::too_many_arguments)]
+    fn write_npad_slot(
+        &mut self,
+        slot: u32,
+        style: u32,
+        device_type: u32,
+        lifo_off: u32,
+        attributes: u32,
+        sample: u64,
+        buttons: u64,
+        sticks: (i32, i32, i32, i32),
+    ) {
+        use hid_shmem as h;
+        let (lx, ly, rx, ry) = sticks;
+        let base = self
+            .hid_shmem_addr
+            .wrapping_add(h::NPAD)
+            .wrapping_add(slot.wrapping_mul(h::ENTRY_SIZE));
+        let _ = self.mem.write_u32(base + h::STYLE_SET, style);
+        let _ = self.mem.write_u32(base + h::JOY_ASSIGNMENT_MODE, 0); // Dual
+        let _ = self.mem.write_u32(base + h::DEVICE_TYPE, device_type);
+
+        let lifo = base.wrapping_add(lifo_off);
+        let _ = self.mem.write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
+        let _ = self.mem.write_u64(lifo + h::LIFO_TAIL, 0);
+        let _ = self.mem.write_u64(lifo + h::LIFO_COUNT, 1);
+
+        let entry = lifo.wrapping_add(h::LIFO_STORAGE);
+        let _ = self.mem.write_u64(entry + h::STORAGE_SAMPLING_NUMBER, sample);
+        let _ = self.mem.write_u64(entry + h::STATE_SAMPLING_NUMBER, sample);
+        let _ = self.mem.write_u64(entry + h::STATE_BUTTONS, buttons);
+        let _ = self.mem.write_u32(entry + h::STATE_STICK_L, lx as u32);
+        let _ = self.mem.write_u32(entry + h::STATE_STICK_L + 4, ly as u32);
+        let _ = self.mem.write_u32(entry + h::STATE_STICK_R, rx as u32);
+        let _ = self.mem.write_u32(entry + h::STATE_STICK_R + 4, ry as u32);
+        let _ = self.mem.write_u32(entry + h::STATE_ATTRIBUTES, attributes);
+    }
+
+    /// Where the guest mapped hid's shared memory (0 until libnx maps it).
+    pub fn hid_shmem_addr(&self) -> u32 {
+        self.hid_shmem_addr
+    }
+
+    /// Provide the font `pl:u` hands out as every shared font type, as the
+    /// contents of a TrueType/OpenType file. Homebrew that draws text (hbmenu,
+    /// anything using `plGetSharedFont`) feeds these bytes to FreeType, so
+    /// without one nothing but pre-rendered bitmaps appears on screen.
+    pub fn set_shared_font(&mut self, font: Vec<u8>) {
+        self.shared_font = font;
+        // A guest that already mapped the shared memory keeps the pointer it was
+        // given, so refill the region in place.
+        if self.pl_shmem_addr != 0 {
+            self.write_shared_font(self.pl_shmem_addr);
+        }
+    }
+
+    /// How many bytes of font data `pl:u` is serving.
+    pub fn shared_font_len(&self) -> usize {
+        self.shared_font.len()
+    }
+
+    /// Copy the shared font into pl's shared memory at `addr`.
+    pub(super) fn write_shared_font(&mut self, addr: u32) {
+        let font = std::mem::take(&mut self.shared_font);
+        let _ = self.mem.map(addr, &font);
+        self.shared_font = font;
     }
 
     #[inline]

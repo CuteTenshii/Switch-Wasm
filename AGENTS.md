@@ -199,6 +199,69 @@ for every path made menus recurse forever. The running NRO is published at
 environment block, which is how libnx's `romfsMountSelf` finds the RomFS
 appended to it.
 
+## Controller input (`cpu/mod.rs`, `web/assets/main.js`)
+
+`Cpu::set_gamepad_state` publishes the host pad two ways: the memory-mapped
+`INPUT_ADDR` register, and libnx's `HidSharedMemory` layout that `padUpdate`
+reads. The offsets are not guessable — they were taken from libnx's
+`services/hid.h` by compiling the struct on the host: `npad` at **0x9A00**, one
+`HidNpadSharedMemoryEntry` every **0x5000**, `full_key_lifo` at **+0x28** and
+`handheld_lifo` at **+0x378** inside `HidNpadInternalState`, `device_type` at
+**+0x4188**; each LIFO is a 0x20-byte header (unused/buffer_count/tail/count)
+then 0x30-byte entries of `{sampling_number, HidNpadCommonState}`. A single
+entry at index 0 with `tail = 0`, `count = 1` and `HidNpadAttribute_IsConnected`
+is all `hidGetNpadStates*` needs.
+
+The pad is published in **two slots**: player 1 as a Pro Controller and slot 8
+as the handheld controller, because homebrew polls whichever it was built to
+expect and `padUpdate` merges them. Slot 8 is `HidNpadIdType_Handheld`.
+
+The button bits are Horizon's order (A=1<<0 … StickR=1<<5, L=1<<6, ZL=1<<8,
+Plus=1<<10, d-pad from 1<<12), not the old `KEY_*` order, and the
+`HidNpadButton_StickL*`/`StickR*` pseudo-buttons are derived from the analog
+values — `HidNpadButton_AnyUp` and friends are what menus navigate with. Stick Y
+is positive **up**, the opposite of the browser Gamepad API.
+
+The worker holds a press for one run slice (`pressedButtons`): a slice is
+millions of instructions, so a tap that arrives and is released between two
+slices would otherwise never be visible to the guest at all.
+
+## The shared system font (`cpu/ipc.rs`, `web/assets/font.ttf`)
+
+Homebrew does not ship fonts: it asks `pl:u` for the console's shared fonts and
+renders them with its own FreeType (`plGetSharedFont` → `FT_New_Memory_Face`).
+`Cpu::set_shared_font` takes a TrueType/OpenType file, `stub_pl` reports it as
+every shared font type at offset 0, and mapping pl's shared memory (recognised
+by its size, `PL_SHMEM_SIZE`) fills the region with it. Reporting an empty font
+set — which is what this did before — means **no text renders at all**.
+
+`tools/make_font.py` builds the shipped subset. It strips the TrueType hinting
+programs for two reasons: hinted glyphs come out collapsed horizontally under
+the interpreter (see PROGRESS.md — a real bug, not a font problem), and running
+the hinting bytecode costs about **8x** more emulated instructions per frame
+(hbmenu's first frame: 46M steps without, 350M with). It also points Nintendo's
+private-use button codepoints (0xE0E0…, 0xE0A0…) at the matching letters so
+on-screen button hints read as "A Launch" instead of arbitrary glyphs.
+
+## Thread stacks live in the stack region (`cpu/svc.rs`)
+
+`threadCreate` allocates a stack on the heap, asks `virtmemFindStack` for a free
+range in the region `svcGetInfo` reports, and `svcMapMemory`s the stack there —
+from then on it uses only that mirror. Two things therefore have to be true:
+
+- The reported stack region (`GUEST_STACK_REGION_ADDR`) must have room. It used
+  to be the 1 MiB the *main* stack already occupied, so every lookup failed,
+  `virtmemFindStack` returned NULL, and each thread's mirror was address 0.
+- `svcMapMemory` must really back the destination. While it was a no-op success,
+  the next lookup saw the range as still free and handed out the same address,
+  so **two threads shared one stack** and silently overwrote each other's
+  frames; the crash only surfaced when input woke the parked thread and it
+  returned through a clobbered link register.
+
+Page storage is not shareable, so the alias is a copy (`Memory::copy_range`),
+copied back by `svcUnmapMemory`, which then frees the pages. The guest only ever
+touches one side of such an alias, so it cannot tell the difference.
+
 ## A64 traps found the hard way
 
 - **Register 31 in ADD/SUB**: SP in the immediate and extended-register forms,

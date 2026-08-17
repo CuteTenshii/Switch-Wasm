@@ -209,6 +209,44 @@ impl Memory {
         Ok(())
     }
 
+    /// Copy `size` bytes from `src` to `dst`, backing the destination with real
+    /// pages. Horizon's `svcMapMemory` aliases two ranges; page storage here is
+    /// not shareable, so the bytes are copied instead and copied back when the
+    /// alias is torn down. The guest only uses one side of such an alias at a
+    /// time — libnx maps a thread's stack into the stack region and from then on
+    /// touches only the mirror — so a copy behaves like an alias to it.
+    /// Source pages that were never touched contribute zeros, the same
+    /// zero-filled memory the guest would have seen through the alias.
+    pub fn copy_range(&mut self, dst: u32, src: u32, size: usize) -> Result<()> {
+        let mut buf = vec![0u8; size];
+        let mut pos = 0usize;
+        while pos < size {
+            let addr = src.wrapping_add(pos as u32);
+            let off = Self::in_page_offset(addr);
+            let n = (PAGE_SIZE - off).min(size - pos);
+            if let Ok(page) = self.page_ref(Self::page_index(addr)) {
+                buf[pos..pos + n].copy_from_slice(&page[off..off + n]);
+            }
+            pos += n;
+        }
+        self.map(dst, &buf)
+    }
+
+    /// Drop the real pages backing `size` bytes at `addr`, so address-space
+    /// walks see the range as free again. Partial pages at either end are kept,
+    /// since something else may still live in them.
+    pub fn unmap(&mut self, addr: u32, size: usize) {
+        // Whole pages only, and in page indices: the address space is 4 GiB, so
+        // byte counts do not fit a 32-bit usize on wasm.
+        let first = (addr as u64 + PAGE_SIZE as u64 - 1) >> PAGE_BITS;
+        let last = (addr as u64 + size as u64) >> PAGE_BITS;
+        for idx in first..last.min(PAGE_COUNT as u64) {
+            if self.pages[idx as usize].take().is_some() {
+                self.mapped_pages -= 1;
+            }
+        }
+    }
+
     /// Dump a contiguous region for debugging.
     pub fn dump(&self, addr: u32, len: usize) -> Result<Vec<u8>> {
         let mut out = Vec::with_capacity(len);

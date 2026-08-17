@@ -200,11 +200,32 @@ function countFrames(delta) {
 
 // ---------- boot ----------
 
+// The font the emulator serves as the console's shared system font. Homebrew
+// reads it out of pl:u's shared memory and renders it with its own copy of
+// FreeType, so without it nothing but pre-rendered bitmaps appears on screen.
+const FONT_URL = 'assets/font.ttf';
+let fontBytes = null;
+
+async function stageFont() {
+  if (!fontBytes) {
+    try {
+      const res = await fetch(FONT_URL);
+      if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+      fontBytes = new Uint8Array(await res.arrayBuffer());
+    } catch (err) {
+      log('No system font (' + FONT_URL + '): ' + err.message + ' - text will not render.', 'err');
+      return;
+    }
+  }
+  await call('load_font', fontBytes);
+}
+
 async function init() {
   initWorker();
   await readyPromise;
   handle = await call('new');
   await call('set_syscall_mode', 2); // Horizon
+  await stageFont();
   fbW = await call('fb_width');
   fbH = await call('fb_height');
   fbBytes = fbW * fbH * 4;
@@ -372,6 +393,7 @@ $('btn-reset').addEventListener('click', async () => {
   await call('free_session');
   handle = await call('new');
   await applySyscallMode();
+  await stageFont();
   clearConsole();
   lastFrame = 0;
   fbW = fbH = 0;
@@ -629,10 +651,14 @@ $('btn-clear-keys').addEventListener('click', () => {
 
 // ---------- controller input ----------
 // HidNpadButton bitfield, as the emulated program expects (switch_set_input).
+// The order is Horizon's, not the browser's: face buttons, stick presses,
+// shoulders, triggers, plus/minus, then the d-pad.
 const BTN = {
-  A: 0x1, B: 0x2, X: 0x4, Y: 0x8, L: 0x10, R: 0x20, ZL: 0x40, ZR: 0x80,
-  PLUS: 0x100, MINUS: 0x200, LEFT: 0x400, UP: 0x800, RIGHT: 0x1000, DOWN: 0x2000,
-  STICK_L: 0x4000, STICK_R: 0x8000,
+  A: 1 << 0, B: 1 << 1, X: 1 << 2, Y: 1 << 3,
+  STICK_L: 1 << 4, STICK_R: 1 << 5,
+  L: 1 << 6, R: 1 << 7, ZL: 1 << 8, ZR: 1 << 9,
+  PLUS: 1 << 10, MINUS: 1 << 11,
+  LEFT: 1 << 12, UP: 1 << 13, RIGHT: 1 << 14, DOWN: 1 << 15,
 };
 function inputStatus(text) {
   $('input-state').textContent = text;
@@ -683,17 +709,15 @@ function pushInput() {
     if (pad.buttons[13]?.pressed) mask |= BTN.DOWN;
     if (pad.buttons[14]?.pressed) mask |= BTN.LEFT;
     if (pad.buttons[15]?.pressed) mask |= BTN.RIGHT;
-    // Analog sticks: -32768..32767, deadzone ~15%.
+    // Analog sticks: -32768..32767, deadzone ~15%. Horizon's Y axis points up,
+    // the browser's points down, so the vertical axes are negated. The emulator
+    // derives the stick pseudo-buttons (which is what menus navigate with) from
+    // these values, so they must arrive with the console's sign convention.
     const dz = 0.15;
     const axes = pad.axes || [];
-    const dl = Math.abs(axes[0] || 0) > dz ? (axes[0] || 0) : 0;
-    const dy = Math.abs(axes[1] || 0) > dz ? (axes[1] || 0) : 0;
-    const rx = Math.abs(axes[2] || 0) > dz ? (axes[2] || 0) : 0;
-    const ry = Math.abs(axes[3] || 0) > dz ? (axes[3] || 0) : 0;
-    slx = Math.round(dl * 32767); sly = Math.round(dy * 32767);
-    srx = Math.round(rx * 32767); sry = Math.round(ry * 32767);
-    // DPAD can also come through as digital axes on some browsers.
-    if (dl === 0) { if (axes[0] < -dz) mask |= BTN.LEFT; else if (axes[0] > dz) mask |= BTN.RIGHT; }
+    const axis = (i) => (Math.abs(axes[i] || 0) > dz ? axes[i] : 0);
+    slx = Math.round(axis(0) * 32767); sly = Math.round(-axis(1) * 32767);
+    srx = Math.round(axis(2) * 32767); sry = Math.round(-axis(3) * 32767);
     inputStatus('gamepad');
   } else if (mask) {
     inputStatus('keyboard');

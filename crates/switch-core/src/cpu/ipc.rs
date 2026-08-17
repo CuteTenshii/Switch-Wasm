@@ -532,30 +532,50 @@ impl Cpu {
     /// commands have to agree.
     /// `pl:u` (`IPlatformServiceManager`): the shared system fonts.
     ///
-    /// There are no Nintendo fonts here, so the set is reported as loaded but
-    /// empty — a guest gets a well-formed "no font data" answer instead of
-    /// spinning on `GetLoadState`. Font-rendering homebrew will have to fall
-    /// back to whatever it ships itself.
+    /// A guest asks for the fonts by type, gets back an offset and a size, and
+    /// reads the font data straight out of pl's shared memory — hbmenu hands
+    /// that pointer to `FT_New_Memory_Face`. There are no Nintendo fonts here,
+    /// so every type resolves to the host-supplied font
+    /// ([`Cpu::set_shared_font`]), which the shared memory is filled with when
+    /// the guest maps it. Without a font the set is reported as loaded but
+    /// empty, which is a well-formed "no font data" answer rather than a guest
+    /// spinning on `GetLoadState`.
     pub(super) fn stub_pl(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        let font_size = self.shared_font.len() as u32;
         match cmd_id {
             // RequestLoad(u32 SharedFontType)
             Some(0) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // GetLoadState(u32) -> u32 (1 = Loaded)
             Some(1) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]),
-            // GetSize(u32) -> u32, GetSharedMemoryAddressOffset(u32) -> u32
-            Some(2) | Some(3) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
-            // GetSharedMemoryNativeHandle -> a shared memory handle, which
-            // `svcMapSharedMemory` backs with zeroed pages.
+            // GetSize(u32) -> u32
+            Some(2) => self.write_ipc_response(tls, 0, &[], &font_size.to_le_bytes(), &[]),
+            // GetSharedMemoryAddressOffset(u32) -> u32: the font sits at the
+            // start of the shared memory.
+            Some(3) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // GetSharedMemoryNativeHandle -> a shared memory handle;
+            // `svcMapSharedMemory` fills the region with the font.
             Some(4) => {
                 let handle = self.alloc_handle();
                 self.write_ipc_response(tls, 0, &[handle], &[], &[])
             }
             // GetSharedFontInOrderOfPriority(u64 LanguageCode) ->
-            // { u8 Loaded, u8 pad[3], u32 total_fonts } with three output
-            // buffers; reporting zero fonts is consistent with the empty set.
+            // { u8 Loaded, u8 pad[3], s32 total_fonts }, with the types, the
+            // offsets and the sizes of the fonts in three output buffers.
             Some(5) => {
+                let (_, recv) = self.ipc_map_buffers(tls);
+                let count = if font_size == 0 { 0u32 } else { 1 };
+                if count == 1 {
+                    // PlSharedFontType_Standard, at offset 0.
+                    for (buffer, value) in recv.iter().zip([0u32, 0, font_size]) {
+                        let (addr, size) = *buffer;
+                        if size >= 4 {
+                            self.mem.write_u32(addr, value)?;
+                        }
+                    }
+                }
                 let mut raw = [0u8; 8];
                 raw[0] = 1; // Loaded
+                raw[4..].copy_from_slice(&count.to_le_bytes());
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -1075,6 +1095,60 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x10).unwrap(), 0x4F43_4653);
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 7);
+    }
+
+    #[test]
+    fn pl_serves_the_host_font_from_its_shared_memory() {
+        // `plGetSharedFont` asks for the sizes and offsets of the shared fonts
+        // and then reads the font data straight out of pl's shared memory, which
+        // is where the host font lands when the guest maps it. The three output
+        // buffers take the type, the offset and the size of each font.
+        const BUFFERS: u32 = 0x3000;
+        let font = b"not really a font, but bytes are bytes".to_vec();
+
+        let mut cpu = request(false, 2, &[]);
+        cpu.set_shared_font(font.clone());
+        cpu.stub_pl(TLS, Some(2)).unwrap();
+        let size = cpu.mem.read_u32(TLS + 0x20).unwrap();
+        assert_eq!(size as usize, font.len(), "GetSize reports the font's length");
+
+        cpu.stub_pl(TLS, Some(3)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "font is at offset 0");
+
+        // GetSharedFontInOrderOfPriority: one request, three out map-aliases.
+        let mut cpu = Cpu::new();
+        cpu.set_shared_font(font.clone());
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.mem.map_zero(BUFFERS, 0x100).unwrap();
+        cpu.mem.write_u32(TLS, 4 | (3 << 24)).unwrap(); // 3 recv buffers
+        cpu.mem.write_u32(TLS + 4, 8).unwrap();
+        for i in 0..3u32 {
+            let at = TLS + 8 + 12 * i;
+            cpu.mem.write_u32(at, 4 * 6).unwrap(); // size: PlSharedFontType_Total
+            cpu.mem.write_u32(at + 4, BUFFERS + 0x40 * i).unwrap();
+        }
+        let data_area = cpu.ipc_reply_start(TLS);
+        cpu.mem.write_u32(TLS + data_area, SFCI).unwrap();
+        cpu.mem.write_u32(TLS + data_area + 8, 5).unwrap();
+        cpu.stub_pl(TLS, Some(5)).unwrap();
+
+        assert_eq!(cpu.mem.read_u32(BUFFERS).unwrap(), 0); // Standard
+        assert_eq!(cpu.mem.read_u32(BUFFERS + 0x40).unwrap(), 0); // offset
+        assert_eq!(cpu.mem.read_u32(BUFFERS + 0x80).unwrap() as usize, font.len());
+        // { u8 fonts_loaded, u8 pad[3], s32 total_fonts }
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), 1);
+    }
+
+    #[test]
+    fn without_a_font_pl_reports_an_empty_set() {
+        // A guest must get a well-formed "no fonts" answer rather than spin in
+        // `_plRequestLoadWait` or read a font that isn't there.
+        let mut cpu = request(false, 5, &[]);
+        cpu.stub_pl(TLS, Some(1)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "reported as loaded");
+        cpu.stub_pl(TLS, Some(5)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), 0, "no fonts");
     }
 
     #[test]

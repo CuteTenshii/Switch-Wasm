@@ -1,18 +1,27 @@
 //! Boot an NRO and write a presented frame to a PPM:
-//! `screenshot <nro> <out.ppm> [frame-index]`.
+//! `screenshot <nro> <out.ppm> [frame-index] [font.ttf]`.
 use std::fs;
 use switch_core::cpu::{Cpu, SyscallMode};
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: screenshot <nro> <out.ppm> [frame]");
+    let path = args.next().expect("usage: screenshot <nro> <out.ppm> [frame] [font]");
     let out = args.next().expect("output path");
     let want = args.next().and_then(|a| a.parse::<u64>().ok()).unwrap_or(1);
+    // The shared system font `pl:u` hands to the guest, which is what homebrew
+    // renders its text with. The frontend fetches the same file.
+    let font = args
+        .next()
+        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/assets/font.ttf").into());
     let data = fs::read(&path).expect("read nro");
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
     cpu.syscall_mode = SyscallMode::Horizon;
+    match fs::read(&font) {
+        Ok(bytes) => cpu.set_shared_font(bytes),
+        Err(e) => println!("no font at {font} ({e}): text will not render"),
+    }
     cpu.boot_homebrew(&data).expect("boot");
 
     let mut steps = 0u64;

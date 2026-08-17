@@ -4,15 +4,42 @@ Goal: get the bundled demo and real homebrew (the Homebrew Menu NRO,
 `hbmenu.nro`) to actually **run** on the interpreter, and put what it renders
 on the canvas.
 
-## Current state: hbmenu's menu renders correctly
+## Current state: hbmenu's menu renders and takes input
 
-`hbmenu.nro` boots, initialises the display, renders with its own font and
-**presents 1280x720 frames that reach the HTML canvas**. The whole path is
-real: nvdrv ioctls → nvmap → the graphics MMU → the display buffer queue →
-block-linear de-swizzle → RGBA8888 → `putImageData`.
+hbmenu now draws its **whole UI** — title and version, the clock, the entry's
+name/author/version, the footer's paths and button hints — and **responds to a
+controller**: pressing + exits the menu, which is how the input path was
+verified end to end.
 
-`hbmenu.nro` **draws its menu**: the title, the theme's background and swoosh,
-the entry tile and the icon all appear, composited through the real path —
+| Symptom | Root cause | Fix |
+|---|---|---|
+| No text anywhere, only the bitmap logo | `pl:u` reported the shared font set as loaded but **empty**, and homebrew has no font of its own — it feeds pl's shared memory straight to FreeType | `Cpu::set_shared_font` + a real `GetSharedFontInOrderOfPriority`; the frontend fetches `web/assets/font.ttf` (built by `tools/make_font.py`) |
+| Controller did nothing | The `HidSharedMemory` writer used invented offsets (`npad` at 0x3D7C0, lifo at +0x20) and only filled one slot; the frontend also used the old `KEY_*` bit order | Offsets taken from libnx's `hid.h` (npad 0x9A00, 0x5000 stride, full_key_lifo +0x28, handheld_lifo +0x378), both player 1 and handheld published, Horizon's button order, stick pseudo-buttons derived |
+| Faults with a clobbered link register once input woke a parked thread | `virtmemFindStack` found no room in the reported stack region and returned NULL, and the no-op `svcMapMemory` let **every thread's stack mirror land at address 0** — two threads shared one stack | A stack region clear of the main stack, and `svcMapMemory`/`svcUnmapMemory` that really map, copy and free |
+
+### Known interpreter bug: hinted TrueType collapses horizontally
+
+With a font that carries hinting programs (`fpgm`/`prep`/`cvt`), glyphs render
+with correct heights and advances but each bitmap is 1-3 px wide, as if the
+outline's x coordinates collapsed — untouched points look like they never get
+interpolated. The same subset with `--no-hinting` renders perfectly, so this is
+the emulator mis-executing something the TrueType bytecode interpreter relies
+on, not a font problem.
+
+Reproduce with two subsets of the same font (one hinted, one not) through
+`cargo run -p switch-core --example screenshot -- hbmenu.nro out.ppm 1 <font>`.
+The shipped font has no hinting, so this is invisible in normal use — but it is
+a real correctness gap and hinting is also 8x slower to emulate.
+
+## How hbmenu's rendering got here
+
+`hbmenu.nro` boots, initialises the display and **presents 1280x720 frames that
+reach the HTML canvas**. The whole path is real: nvdrv ioctls → nvmap → the
+graphics MMU → the display buffer queue → block-linear de-swizzle → RGBA8888 →
+`putImageData`.
+
+`hbmenu.nro` **draws its menu**: the theme's background and swoosh, the entry
+tile, the icon and every string all appear, composited through the real path —
 hbmenu draws with the CPU into a linear buffer, deko3d's recorded command list
 blits it into the tiled swapchain image with the copy engine, and the binder
 presents it. The icon's JPEG decode is **pixel-exact** against a reference

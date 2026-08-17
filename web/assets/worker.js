@@ -42,6 +42,20 @@ function drain(fn, cap) {
   return out;
 }
 
+// Gamepad state arrives from the main thread far more often than the emulator
+// gets to look at it: a whole run slice executes between two message drains, so
+// a quick tap could be pressed and released without the guest ever seeing it.
+// Presses are therefore held until a slice has run with them visible; the
+// sticks, being continuous, just take the newest value.
+let heldButtons = 0n;
+let pressedButtons = 0n;
+let sticks = [0, 0, 0, 0];
+
+function publishInput(mask) {
+  if (handle < 0) return;
+  api.switch_set_input(handle, mask, sticks[0], sticks[1], sticks[2], sticks[3]);
+}
+
 // Every handler returns a plain value (Number/string/Uint8Array/object).
 const CMD = {
   new() { handle = api.switch_new(); return handle; },
@@ -49,8 +63,19 @@ const CMD = {
   set_syscall_mode(mode) { api.switch_set_syscall_mode(handle, mode); return 0; },
   set_trace(on) { api.switch_set_trace(handle, on ? 1 : 0); return 0; },
   set_input(mask, slx, sly, srx, sry) {
-    api.switch_set_input(handle, BigInt(mask), slx, sly, srx, sry);
+    heldButtons = BigInt(mask);
+    pressedButtons |= heldButtons;
+    sticks = [slx, sly, srx, sry];
+    publishInput(pressedButtons);
     return 0;
+  },
+
+  load_font(bytes) {
+    const ptr = alloc(bytes.length);
+    toWasm(bytes, ptr);
+    const taken = api.switch_load_font(handle, ptr, bytes.length);
+    api.switch_free(ptr, bytes.length);
+    return taken;
   },
 
   load_nro(bytes) {
@@ -109,7 +134,15 @@ const CMD = {
     return s;
   },
 
-  run(budget) { return Number(api.switch_run(handle, BigInt(budget))); },
+  run(budget) {
+    const steps = Number(api.switch_run(handle, BigInt(budget)));
+    // The guest has now had a slice to see whatever was tapped; release it.
+    if (pressedButtons !== heldButtons) {
+      pressedButtons = heldButtons;
+      publishInput(pressedButtons);
+    }
+    return steps;
+  },
   halted() { return api.switch_halted(handle); },
   drain_output() { return drain((h, b, l) => api.switch_drain_output(h, b, l), 4096); },
   drain_trace() { return drain((h, b, l) => api.switch_drain_trace(h, b, l), 8192); },

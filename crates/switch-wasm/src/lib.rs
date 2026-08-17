@@ -522,13 +522,26 @@ pub extern "C" fn switch_write_mem(handle: u32, addr: u32, ptr: *const u8, len: 
     }
 }
 
+/// Give the session the font `pl:u` serves as the shared system font, as the
+/// contents of a TrueType/OpenType file. Homebrew that draws text reads it out
+/// of pl's shared memory and hands it to FreeType, so this has to be set before
+/// the guest calls `plInitialize` for any text to appear. Returns the number of
+/// bytes taken.
+#[no_mangle]
+pub extern "C" fn switch_load_font(handle: u32, ptr: *const u8, len: u32) -> u32 {
+    let s = session(handle);
+    let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    s.cpu.set_shared_font(data.to_vec());
+    s.cpu.shared_font_len() as u32
+}
+
 /// Feed the host gamepad state to the guest. `buttons` is a `HidNpadButton`
-/// bitfield (A=0x1, B=0x2, X=0x4, Y=0x8, L=0x10, R=0x20, ZL=0x40, ZR=0x80,
-/// Plus=0x100, Minus=0x200, DpadLeft=0x400, DpadUp=0x800, DpadRight=0x1000,
-/// DpadDown=0x2000, StickL=0x4000, StickR=0x8000); sticks are -32768..32767.
-/// Written to the memory-mapped input register and, once libnx maps its hid
-/// shared memory, mirrored into the `HidSharedMemory` layout so `padUpdate`
-/// sees it.
+/// bitfield in Horizon's order (A=1<<0, B=1<<1, X=1<<2, Y=1<<3, StickL=1<<4,
+/// StickR=1<<5, L=1<<6, R=1<<7, ZL=1<<8, ZR=1<<9, Plus=1<<10, Minus=1<<11,
+/// DpadLeft=1<<12, DpadUp=1<<13, DpadRight=1<<14, DpadDown=1<<15); sticks are
+/// -32768..32767 with positive being right and up. Written to the memory-mapped
+/// input register and, once libnx maps its hid shared memory, mirrored into the
+/// `HidSharedMemory` layout so `padUpdate` sees it.
 #[no_mangle]
 pub extern "C" fn switch_set_input(
     handle: u32,

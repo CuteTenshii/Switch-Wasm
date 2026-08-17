@@ -1,6 +1,9 @@
 //! The Horizon supervisor calls (`SVC`) libnx homebrew issues at runtime.
 
-use super::{Cpu, SyscallMode};
+use super::{
+    Cpu, SyscallMode, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE,
+    PL_SHMEM_SIZE,
+};
 use crate::{Error, Result};
 
 impl Cpu {
@@ -35,6 +38,8 @@ impl Cpu {
         // Non-zero handle handed out by handle-returning syscalls (libnx
         // stores X1 into the caller's output pointer).
         const FAKE_HANDLE: u64 = 0x1000;
+        // KERNELRESULT(InvalidMemoryRange), as libnx spells it.
+        const RESULT_INVALID_MEMORY_RANGE: u64 = 0x8000_DC01;
         match imm {
             0x01 => {
                 // SetHeapSize: report a heap at a soft-mapped address.
@@ -42,37 +47,71 @@ impl Cpu {
                 self.write_zr(1, 0x3000_0000);
                 Ok(())
             }
-            0x02 | 0x03 | 0x04 | 0x14 => {
-                // SetMemoryPermission / SetMemoryAttribute / MapMemory /
-                // UnmapSharedMemory
+            0x02 | 0x03 | 0x14 => {
+                // SetMemoryPermission / SetMemoryAttribute / UnmapSharedMemory
+                self.write_zr(0, RESULT_OK);
+                Ok(())
+            }
+            0x04 => {
+                // MapMemory(dst, src, size): libnx maps a thread's stack into
+                // the stack region and from then on uses only that mirror, so
+                // back the destination for real. It has to become mapped memory
+                // and not just a promise: `virtmemFindStack` picks the next
+                // thread's mirror by looking for an unmapped range, so while
+                // this was a no-op every thread was handed the same address and
+                // they all shared one stack, corrupting each other's frames.
+                let dst = self.read_zr(0) as u32;
+                let src = self.read_zr(1) as u32;
+                let size = self.read_zr(2) as usize;
+                if dst == 0 || size == 0 {
+                    self.write_zr(0, RESULT_INVALID_MEMORY_RANGE);
+                    return Ok(());
+                }
+                self.mem.copy_range(dst, src, size)?;
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
             0x13 => {
-                // MapSharedMemory(handle, addr, size, perm): libnx maps the
-                // hid service's shared memory this way; back it with a real
-                // zeroed buffer and remember where so the host can write
-                // gamepad state into the HidSharedMemory layout.
+                // MapSharedMemory(handle, addr, size, perm): back it with a
+                // real zeroed buffer. Two of these regions have host-provided
+                // contents and are recognised by their size. For hid's,
+                // remember where it landed and immediately publish a connected
+                // controller, otherwise a program that polls before the host
+                // sends any input decides no pad exists; pl's gets filled with
+                // the shared font the guest is about to read.
                 let addr = self.read_zr(1) as u32;
                 let size = self.read_zr(2) as u32;
                 self.mem.map_zero(addr, size as usize)?;
-                self.hid_shmem_addr = addr;
+                if size == HID_SHMEM_SIZE {
+                    self.hid_shmem_addr = addr;
+                    self.set_gamepad_state(0, 0, 0, 0, 0);
+                } else if size == PL_SHMEM_SIZE {
+                    self.pl_shmem_addr = addr;
+                    self.write_shared_font(addr);
+                }
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
             0x05 => {
-                // UnmapMemory(addr, size). hbmenu detects the process address
-                // space by unmapping the very top of the 64-bit range and
-                // reading the failure code: an out-of-range unmap returns a
-                // kernel error whose low bits are 0xd401 (39-bit AArch64) or
-                // 0xdc01 (36-bit). Report 39-bit; anything in-range is a no-op
-                // success.
-                let addr = self.read_zr(0);
-                if (addr >> 48) == 0xFFFF {
+                // UnmapMemory(dst, src, size), the counterpart of 0x04. hbmenu
+                // detects the process address space by unmapping the very top of
+                // the 64-bit range and reading the failure code: an out-of-range
+                // unmap returns a kernel error whose low bits are 0xd401 (39-bit
+                // AArch64) or 0xdc01 (36-bit). Report 39-bit; a real unmap gives
+                // the destination's contents back to the source range and frees
+                // it, so the address space can be reused.
+                let dst = self.read_zr(0);
+                if (dst >> 48) == 0xFFFF {
                     self.write_zr(0, 0x8000_D401);
-                } else {
-                    self.write_zr(0, RESULT_OK);
+                    return Ok(());
                 }
+                let src = self.read_zr(1) as u32;
+                let size = self.read_zr(2) as usize;
+                if dst != 0 && src != 0 && size != 0 {
+                    self.mem.copy_range(src, dst as u32, size)?;
+                    self.mem.unmap(dst as u32, size);
+                }
+                self.write_zr(0, RESULT_OK);
                 Ok(())
             }
              0x06 => {
@@ -432,8 +471,13 @@ impl Cpu {
                      9 => 0,         // ResourceLimit
                      12 => 0x0800_0000, // AslrRegionAddress
                      13 => 0x1F00_0000, // AslrRegionSize
-                     14 => 0x1000_0000, // StackRegionAddress
-                     15 => 0x0010_0000, // StackRegionSize
+                     // Where thread stacks get mirrored. It has to be clear of
+                     // the main stack (`STACK_TOP`) and big enough for several
+                     // stacks plus the guard pages libnx leaves around them:
+                     // when a lookup finds no free range it hands back a null
+                     // mirror address, and every thread ends up on one stack.
+                     14 => u64::from(GUEST_STACK_REGION_ADDR),
+                     15 => u64::from(GUEST_STACK_REGION_SIZE),
                      20 => 0,        // UserExceptionContextAddress
                      28 => 0,        // AliasRegionExtraSize
                      _ => 0,
