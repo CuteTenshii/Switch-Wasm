@@ -482,6 +482,15 @@ impl Cpu {
                 2 => 32,
                 _ => 64,
             };
+            // AdvSIMD across lanes: `0 Q U 01110 size 11000 opcode 10 Rn Rd`
+            // — a horizontal reduce across a vector into a single scalar
+            // lane. Shares bits[28:24] with three-same, but bits[21:17] are
+            // the fixed group selector 11000 rather than a free Rm, and
+            // bit10 = 0 where three-same always has bit10 = 1.
+            // `smaxv s28, v28.4s` = 0x4eb0ab9c.
+            if b10 == 0 && ((insn >> 17) & 0x1F) == 0b11000 {
+                return self.simd_across_lanes(insn);
+            }
             // Opcodes from 0b11000 up in the three-same group are the FP ops,
             // where bits[23:22] are `a`:`sz` rather than an element size.
             if b10 == 1 && ((insn >> 21) & 1) == 1 && op >= 0b11000 {
@@ -958,6 +967,61 @@ impl Cpu {
     pub(super) fn sge(a: u64, b: u64, bits: u32) -> bool {
         let shift = 64 - bits;
         ((a << shift) as i64) >= ((b << shift) as i64)
+    }
+
+    /// AdvSIMD across lanes (integer forms): `0 Q U 01110 size 11000
+    /// opcode(5) 10 Rn Rd`. A horizontal reduce over every lane of Vn into
+    /// a single scalar written to Vd, zeroing the rest of the register —
+    /// SADDLV/UADDLV, SMAXV/UMAXV and SMINV/UMINV.
+    fn simd_across_lanes(&mut self, insn: u32) -> Result<bool> {
+        let q = (insn >> 30) & 1 == 1;
+        let u = (insn >> 29) & 1;
+        let size = (insn >> 22) & 0b11;
+        let opcode = (insn >> 12) & 0x1F;
+        let rn = ((insn >> 5) & 0x1F) as u8;
+        let rd = (insn & 0x1F) as u8;
+        if size == 0b11 || !matches!(opcode, 0b00011 | 0b01010 | 0b11010) {
+            return Ok(false);
+        }
+        let esize = 8u32 << size;
+        let lanes = if q { 128 / esize } else { 64 / esize };
+        let mask = (1u128 << esize) - 1;
+        let a = self.vregs[rn as usize];
+        let elem = |i: u32| ((a >> (esize * i)) & mask) as u64;
+        let signed = u == 0;
+        let result = match opcode {
+            0b00011 => {
+                // SADDLV / UADDLV: sum widened to double the element size.
+                let mut sum: i128 = 0;
+                for i in 0..lanes {
+                    let v = elem(i);
+                    sum += if signed { sext_u64(v, esize) as i64 as i128 } else { v as i128 };
+                }
+                (sum as u128) & ((1u128 << (esize * 2)) - 1)
+            }
+            0b01010 | 0b11010 => {
+                // SMAXV / UMAXV (0b01010), SMINV / UMINV (0b11010).
+                let want_max = opcode == 0b01010;
+                let mut best = elem(0);
+                for i in 1..lanes {
+                    let v = elem(i);
+                    let v_wins = if signed {
+                        if want_max { !Self::sge(best, v, esize) } else { Self::sge(best, v, esize) && best != v }
+                    } else if want_max {
+                        v > best
+                    } else {
+                        v < best
+                    };
+                    if v_wins {
+                        best = v;
+                    }
+                }
+                best as u128
+            }
+            _ => unreachable!(),
+        };
+        self.vregs[rd as usize] = result;
+        Ok(true)
     }
 
     /// AdvSIMD shift-by-immediate.

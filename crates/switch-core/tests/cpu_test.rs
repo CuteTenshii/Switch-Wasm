@@ -1130,6 +1130,43 @@ fn simd_zip1_interleave() {
     }
 }
 
+// AdvSIMD across lanes: `0 Q U 01110 size 11000 opcode(5) 10 Rn Rd`.
+fn across_lanes(q: u32, u: u32, size: u32, opcode: u32, rd: u32, rn: u32) -> u32 {
+    (q << 30) | (u << 29) | (0b01110 << 24) | (size << 22) | (0b11000 << 17)
+        | (opcode << 12) | (0b10 << 10) | (rn << 5) | rd
+}
+
+#[test]
+fn simd_across_lanes_reduce() {
+    // v0.4s = {3, 7, 2, -1(0xFFFFFFFF)}.
+    let ldr_q = |rt: u32, imm: u32| 0x3DC0_0000u32 | rt | ((imm >> 4) << 10);
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x3000);
+    cpu.mem.map_zero(0x3000, 0x20).unwrap();
+    for (i, v) in [3u32, 7, 2, 0xFFFF_FFFF].into_iter().enumerate() {
+        cpu.mem.write_u32(0x3000 + 4 * i as u32, v).unwrap();
+    }
+    // smaxv s1, v0.4s = 0x4eb0a801 ; sminv s2, v0.4s = 0x4eb1a802
+    let smaxv = across_lanes(1, 0, 0b10, 0b01010, 1, 0);
+    let sminv = across_lanes(1, 0, 0b10, 0b11010, 2, 0);
+    let code = [ldr_q(0, 0), smaxv, sminv, umov_d0(3, 1), umov_d0(4, 2), nop()];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(3) as u32, 7); // signed max ignores the -1 lane.
+    assert_eq!(cpu.read_x(4) as u32, 0xFFFF_FFFF); // signed min picks it.
+
+    // v0.4s = {1, 2, 3, 4}; uaddlv d5, v0.4s = 10, widened into a 64-bit lane.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x3000);
+    cpu.mem.map_zero(0x3000, 0x20).unwrap();
+    for (i, v) in [1u32, 2, 3, 4].into_iter().enumerate() {
+        cpu.mem.write_u32(0x3000 + 4 * i as u32, v).unwrap();
+    }
+    let uaddlv = across_lanes(1, 1, 0b10, 0b00011, 5, 0);
+    let code = [ldr_q(0, 0), uaddlv, umov_d0(6, 5), nop()];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_x(6), 10);
+}
+
 // ---------------- scalar floating point ----------------
 
 // fmov <Vd>.D, <Xn>
