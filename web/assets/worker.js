@@ -56,9 +56,28 @@ function publishInput(mask) {
   api.switch_set_input(handle, mask, sticks[0], sticks[1], sticks[2], sticks[3]);
 }
 
+// wasm32-unknown-unknown has no OS clock, so the emulated RTC (time:u/time:s)
+// only knows what we push into it. The worker (unlike the wasm guest) has a
+// real Date, so it just samples it directly rather than round-tripping
+// through the main thread the way gamepad input has to.
+function pushTime() {
+  if (handle < 0) return;
+  api.switch_set_time(handle, BigInt(Math.floor(Date.now() / 1000)));
+}
+
+// The Battery Status API is Window-only (not exposed to Workers), so unlike
+// time this arrives from the main thread rather than being sampled here.
+// Cached so a freshly created session picks up the last known reading
+// immediately instead of the wasm default (full, charging).
+let lastBattery = { percent: 100, charging: true };
+function pushBattery() {
+  if (handle < 0) return;
+  api.switch_set_battery(handle, lastBattery.percent, lastBattery.charging ? 1 : 0);
+}
+
 // Every handler returns a plain value (Number/string/Uint8Array/object).
 const CMD = {
-  new() { handle = api.switch_new(); return handle; },
+  new() { handle = api.switch_new(); pushTime(); pushBattery(); return handle; },
   free_session() { api.switch_free_session(handle); handle = -1; return 0; },
   set_syscall_mode(mode) { api.switch_set_syscall_mode(handle, mode); return 0; },
   set_trace(on) { api.switch_set_trace(handle, on ? 1 : 0); return 0; },
@@ -67,6 +86,11 @@ const CMD = {
     pressedButtons |= heldButtons;
     sticks = [slx, sly, srx, sry];
     publishInput(pressedButtons);
+    return 0;
+  },
+  set_battery(percent, charging) {
+    lastBattery = { percent, charging: !!charging };
+    pushBattery();
     return 0;
   },
 
@@ -135,6 +159,7 @@ const CMD = {
   },
 
   run(budget) {
+    pushTime();
     const steps = Number(api.switch_run(handle, BigInt(budget)));
     // The guest has now had a slice to see whatever was tapped; release it.
     if (pressedButtons !== heldButtons) {

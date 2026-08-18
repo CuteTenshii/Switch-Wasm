@@ -258,6 +258,16 @@ pub struct Cpu {
     /// Address the guest mapped pl's shared memory to, where the font was
     /// written; 0 until the guest calls `plInitialize`.
     pl_shmem_addr: u32,
+    /// The wall-clock time `time:u`/`time:s` reports, as POSIX seconds (UTC).
+    /// `wasm32-unknown-unknown` has no OS clock, so this stays at the Unix
+    /// epoch until the host calls [`Cpu::set_unix_time`].
+    unix_time: i64,
+    /// The battery level `psm` reports, 0-100. There is no host battery API
+    /// reachable from `wasm32-unknown-unknown` either, so this defaults to a
+    /// full, charging battery until [`Cpu::set_battery`] says otherwise.
+    battery_percent: u8,
+    /// Whether `psm` reports a charger connected.
+    battery_charging: bool,
     /// The emulated SD card `fsp-srv` serves.
     pub fs: crate::vfs::Vfs,
     /// The nvdrv driver and the GPU behind it.
@@ -315,6 +325,9 @@ impl Cpu {
             sample_counter: 0,
             shared_font: Vec::new(),
             pl_shmem_addr: 0,
+            unix_time: 0,
+            battery_percent: 100,
+            battery_charging: true,
             fs: crate::vfs::Vfs::new(),
             nv: crate::gpu::nvdrv::NvDrv::new(),
             display: crate::display::BufferQueue::new(),
@@ -979,6 +992,33 @@ impl Cpu {
         let font = std::mem::take(&mut self.shared_font);
         let _ = self.mem.map(addr, &font);
         self.shared_font = font;
+    }
+
+    /// Set the wall-clock time `time:u`/`time:s` reports, as POSIX seconds
+    /// (UTC). There is no OS clock under `wasm32-unknown-unknown`, so without
+    /// a host pushing this (from `Date.now()`), every clock reads the Unix
+    /// epoch.
+    pub fn set_unix_time(&mut self, seconds: i64) {
+        self.unix_time = seconds;
+    }
+
+    /// Current value of the emulated RTC, as set by [`Cpu::set_unix_time`].
+    pub fn unix_time(&self) -> i64 {
+        self.unix_time
+    }
+
+    /// Set the battery level `psm` reports. There is no host battery API
+    /// reachable from `wasm32-unknown-unknown`, so without a host pushing
+    /// this (from the browser's Battery Status API, where available), `psm`
+    /// reports a full, charging battery.
+    pub fn set_battery(&mut self, percent: u8, charging: bool) {
+        self.battery_percent = percent.min(100);
+        self.battery_charging = charging;
+    }
+
+    /// Current battery reading, as set by [`Cpu::set_battery`].
+    pub fn battery(&self) -> (u8, bool) {
+        (self.battery_percent, self.battery_charging)
     }
 
     #[inline]

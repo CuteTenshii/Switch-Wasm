@@ -556,6 +556,22 @@ pub extern "C" fn switch_set_input(
         .set_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
 }
 
+/// Set the wall-clock time `time:u`/`time:s` report, as POSIX seconds (UTC).
+/// `wasm32-unknown-unknown` has no OS clock, so without the host calling this
+/// (with `Date.now() / 1000`) the emulated RTC reads the Unix epoch.
+#[no_mangle]
+pub extern "C" fn switch_set_time(handle: u32, unix_seconds: i64) {
+    session(handle).cpu.set_unix_time(unix_seconds);
+}
+
+/// Set the battery level `psm` reports. `wasm32-unknown-unknown` has no
+/// battery API of its own; the host pushes this from the browser's Battery
+/// Status API, where available.
+#[no_mangle]
+pub extern "C" fn switch_set_battery(handle: u32, percent: u32, charging: u32) {
+    session(handle).cpu.set_battery(percent.min(100) as u8, charging != 0);
+}
+
 /// Run up to `max_steps` instructions. Returns steps executed or -1 on error.
 #[no_mangle]
 pub extern "C" fn switch_run(handle: u32, max_steps: u64) -> i64 {

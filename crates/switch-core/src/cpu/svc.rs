@@ -309,7 +309,7 @@ impl Cpu {
                 if let Some(name) = svc_name {
                     let name = name;
                     match name.as_str() {
-                        "sm:" | "sm" => self.stub_sm(tls, cmd_id, handle)?,
+                        "sm:" | "sm" => self.sm_request(tls, cmd_id, handle)?,
                         "fsp-srv" | "fsp-srv:" => {
                             // libnx converts fsp-srv to a domain, so the
                             // fs/dir/file sub-sessions come in as object ids on
@@ -318,33 +318,67 @@ impl Cpu {
                             // stub.
                             let object_id = self.ipc_domain_object_id(tls);
                             match self.domain_interface(handle, object_id) {
-                                Some("fsp-srv-fs") => self.stub_fs(tls, cmd_id, handle)?,
+                                Some("fsp-srv-fs") => self.fs_request(tls, cmd_id, handle)?,
                                 Some("fsp-srv-fs-dir") => {
-                                    self.stub_fs_dir(tls, cmd_id, Self::object_key(handle, object_id))?
+                                    self.fs_dir_request(tls, cmd_id, Self::object_key(handle, object_id))?
                                 }
                                 Some("fsp-srv-fs-file") => {
-                                    self.stub_fs_file(tls, cmd_id, Self::object_key(handle, object_id))?
+                                    self.fs_file_request(tls, cmd_id, Self::object_key(handle, object_id))?
                                 }
-                                _ => self.stub_fsp_srv(tls, cmd_id, handle)?,
+                                _ => self.fsp_srv_request(tls, cmd_id, handle)?,
                             }
                         }
                         // The same interfaces reached over their own session
                         // handle, which is how a caller that never converts to
                         // a domain (libtransistor) uses them.
-                        "fsp-srv-fs" => self.stub_fs(tls, cmd_id, handle)?,
+                        "fsp-srv-fs" => self.fs_request(tls, cmd_id, handle)?,
                         "fsp-srv-fs-dir" => {
-                            self.stub_fs_dir(tls, cmd_id, Self::object_key(handle, 0))?
+                            self.fs_dir_request(tls, cmd_id, Self::object_key(handle, 0))?
                         }
                         "fsp-srv-fs-file" => {
-                            self.stub_fs_file(tls, cmd_id, Self::object_key(handle, 0))?
+                            self.fs_file_request(tls, cmd_id, Self::object_key(handle, 0))?
                         }
-                        "vi:m" | "vi:m:" => self.stub_vi(tls, handle, cmd_id)?,
-                        "set" => self.stub_set(tls, cmd_id)?,
+                        "vi:m" | "vi:m:" => self.vi_request(tls, handle, cmd_id)?,
+                        "set" => self.set_request(tls, cmd_id)?,
                         "nvdrv" | "nvdrv:" | "nvdrv:a" | "nvdrv:a:" | "nvdrv:s" | "nvdrv:t" => {
                             self.nvdrv_request(tls, cmd_id, handle)?
                         }
                         // pl:u, the shared-font service.
-                        "pl:u" | "pl:s" => self.stub_pl(tls, cmd_id)?,
+                        "pl:u" | "pl:s" => self.pl_request(tls, cmd_id)?,
+                        // time:*, converted to a domain by libnx the same way
+                        // fsp-srv is; the system clock / steady clock /
+                        // timezone sub-interfaces come back as out-objects on
+                        // this same session handle.
+                        "time:s" | "time:u" | "time:a" | "time:r" => {
+                            let object_id = self.ipc_domain_object_id(tls);
+                            match self.domain_interface(handle, object_id) {
+                                Some("time:system-clock") => {
+                                    self.time_system_clock_request(tls, cmd_id)?
+                                }
+                                Some("time:steady-clock") => {
+                                    self.time_steady_clock_request(tls, cmd_id)?
+                                }
+                                Some("time:timezone") => self.time_timezone_request(tls, cmd_id)?,
+                                _ => self.time_request(tls, cmd_id, handle)?,
+                            }
+                        }
+                        // The same sub-interfaces reached over their own
+                        // session handle (the libtransistor case, as with
+                        // fsp-srv-fs above).
+                        "time:system-clock" => self.time_system_clock_request(tls, cmd_id)?,
+                        "time:steady-clock" => self.time_steady_clock_request(tls, cmd_id)?,
+                        "time:timezone" => self.time_timezone_request(tls, cmd_id)?,
+                        // psm (power state management): the battery. Its
+                        // IPsmSession sub-interface follows the same
+                        // domain-or-own-handle split as time's above.
+                        "psm" => {
+                            let object_id = self.ipc_domain_object_id(tls);
+                            match self.domain_interface(handle, object_id) {
+                                Some("psm-session") => self.psm_session_request(tls, cmd_id)?,
+                                _ => self.psm_request(tls, cmd_id, handle)?,
+                            }
+                        }
+                        "psm-session" => self.psm_session_request(tls, cmd_id)?,
                          name => {
                              // Known service, no dedicated stub. The applet
                              // services get the state values their init polls
@@ -381,7 +415,7 @@ impl Cpu {
                         // small applet state commands (1 = ReceiveMessage, 5/6/9)
                         // must keep the generic reply.
                         if cmd == 2 || cmd >= 100 {
-                            return self.stub_vi(tls, handle, cmd_id);
+                            return self.vi_request(tls, handle, cmd_id);
                         }
                     }
                     let start = self.ipc_reply_start(tls);
