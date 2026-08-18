@@ -16,6 +16,13 @@ pub const ADDRESS_SPACE_SIZE: u64 = 0x1_0000_0000; // 4 GiB
 /// Number of 4 KiB pages in the 4 GiB space. Computed in u64 first so it
 /// survives the wasm32 (32-bit usize) truncation of the 4 GiB constant.
 const PAGE_COUNT: usize = (ADDRESS_SPACE_SIZE >> PAGE_BITS) as usize;
+/// Hard ceiling on real, host-backed guest RAM. Any homebrew's actual image +
+/// heap + stack use sits far below this; it exists to bound a runaway guest
+/// write (e.g. a stray pointer walking up from a null base, one soft-mapped
+/// page at a time) to a fast, cheap failure instead of ballooning the host
+/// process — a browser tab included — for seconds before anything faults.
+pub const MAX_MAPPED_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+const MAX_MAPPED_PAGES: usize = (MAX_MAPPED_BYTES / PAGE_SIZE as u64) as usize;
 
 #[derive(Debug)]
 pub struct Memory {
@@ -25,6 +32,12 @@ pub struct Memory {
     /// it. Unmapped pages in `[start, end)` read as zero from [`Memory::zero`]
     /// and allocate a private page on first write.
     soft: (u32, u32),
+    /// Read-only region as `(start, end)` (end-exclusive); `start > end`
+    /// disables it. Sits over the loaded image's `.text` once the loader has
+    /// finished patching it, so a guest write through a wild pointer faults
+    /// instead of silently corrupting the running code — see
+    /// [`Memory::mark_readonly`].
+    readonly: (u32, u32),
     /// Shared zero page served for reads inside the soft region.
     zero: Box<[u8; PAGE_SIZE]>,
     /// How many pages currently hold real storage. Counted as they are
@@ -44,6 +57,7 @@ impl Memory {
         Memory {
             pages: vec![None; PAGE_COUNT],
             soft: (1, 0),
+            readonly: (1, 0),
             zero: Box::new([0u8; PAGE_SIZE]),
             mapped_pages: 0,
         }
@@ -55,6 +69,24 @@ impl Memory {
     /// host reserving the whole region up front.
     pub fn soft_map_zero(&mut self, start: u32, end: u32) {
         self.soft = (start, end);
+    }
+
+    /// Mark `[start, end)` as read-only to the guest: a CPU store into it
+    /// faults instead of writing through. Replaces any previous read-only
+    /// region (there is only ever one loaded image). Loader-only writes
+    /// (`map`/`map_zero`/`copy_range`) are unaffected — call this once a
+    /// segment's relocations have been patched in, not before.
+    pub fn mark_readonly(&mut self, start: u32, end: u32) {
+        self.readonly = (start, end);
+    }
+
+    #[inline(always)]
+    fn check_writable(&self, addr: u32) -> Result<()> {
+        if addr >= self.readonly.0 && addr < self.readonly.1 {
+            Err(Error::Cpu(format!("write to read-only address {:#010x}", addr)))
+        } else {
+            Ok(())
+        }
     }
 
     #[inline]
@@ -70,7 +102,7 @@ impl Memory {
     #[inline(always)]
     fn page_mut(&mut self, idx: usize) -> Result<&mut Box<[u8; PAGE_SIZE]>> {
         if self.pages[idx].is_none() {
-            self.allocate_page(idx);
+            self.allocate_page(idx)?;
         }
         Ok(self.pages[idx].as_mut().unwrap())
     }
@@ -79,9 +111,16 @@ impl Memory {
     /// path does not carry the allocation code with it.
     #[cold]
     #[inline(never)]
-    fn allocate_page(&mut self, idx: usize) {
+    fn allocate_page(&mut self, idx: usize) -> Result<()> {
+        if self.mapped_pages >= MAX_MAPPED_PAGES {
+            return Err(Error::Cpu(format!(
+                "out of guest memory: exceeded the {} MiB cap",
+                MAX_MAPPED_BYTES / (1024 * 1024)
+            )));
+        }
         self.pages[idx] = Some(Box::new([0u8; PAGE_SIZE]));
         self.mapped_pages += 1;
+        Ok(())
     }
 
     /// Pages backed by real storage.
@@ -180,6 +219,7 @@ impl Memory {
         if off + N > PAGE_SIZE {
             return None;
         }
+        self.check_writable(addr).ok()?;
         let page = self.page_mut(Self::page_index(addr)).ok()?;
         page[off..off + N].copy_from_slice(&val);
         Some(())
@@ -239,6 +279,7 @@ impl Memory {
 
     #[inline(always)]
     pub fn write_u8(&mut self, addr: u32, val: u8) -> Result<()> {
+        self.check_writable(addr)?;
         let idx = Self::page_index(addr);
         let off = Self::in_page_offset(addr);
         let page = self.page_mut(idx)?;
@@ -387,6 +428,47 @@ mod tests {
     fn unmmapped_read_faults() {
         let m = Memory::new();
         assert!(m.read_u32(0xDEAD_0000).is_err());
+    }
+
+    #[test]
+    fn runaway_soft_writes_fail_fast_at_the_ram_cap() {
+        // A wild pointer walking up through a wide-open soft region (the
+        // scenario a null buffer pointer plus a growing byte offset hits)
+        // must not be allowed to fabricate pages forever: it should fail as
+        // soon as it has touched the RAM cap's worth of pages, not after
+        // exhausting the whole soft region.
+        let mut m = Memory::new();
+        m.soft_map_zero(0, 0x8000_0000);
+        let mut addr = 0u32;
+        let mut touched = 0u64;
+        loop {
+            match m.write_u8(addr, 1) {
+                Ok(()) => {
+                    touched += 1;
+                    addr = addr.wrapping_add(PAGE_SIZE as u32);
+                }
+                Err(_) => break,
+            }
+        }
+        assert_eq!(touched, MAX_MAPPED_PAGES as u64);
+        assert_eq!(m.mapped_bytes(), MAX_MAPPED_BYTES);
+    }
+
+    #[test]
+    fn readonly_region_rejects_guest_writes_but_not_reads() {
+        let mut m = Memory::new();
+        m.map_zero(0x1000, PAGE_SIZE).unwrap();
+        m.write_u32(0x1000, 0x1111_1111).unwrap();
+        m.mark_readonly(0x1000, 0x2000);
+        // A wild write into the now-locked-down page faults instead of
+        // silently corrupting it...
+        assert!(m.write_u32(0x1000, 0x2222_2222).is_err());
+        assert!(m.write_u8(0x1FFF, 1).is_err());
+        // ...but reads, and writes just outside the range, are unaffected.
+        assert_eq!(m.read_u32(0x1000).unwrap(), 0x1111_1111);
+        m.map_zero(0x2000, PAGE_SIZE).unwrap();
+        m.write_u32(0x2000, 3).unwrap();
+        assert_eq!(m.read_u32(0x2000).unwrap(), 3);
     }
 
     #[test]

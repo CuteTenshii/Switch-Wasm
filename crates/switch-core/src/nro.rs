@@ -707,6 +707,13 @@ pub fn load_nro(mem: &mut Memory, data: &[u8]) -> Result<LoadedNro> {
     // the runtime uses svcSetHeapSize instead of faulting on the first malloc.
     let text_end = text_addr.wrapping_add(h.text_size);
     let _ = patch_libtransistor_runconf(mem, data, base, text_end);
+    // .text is never a legitimate relocation target (position-independent
+    // code needs no runtime patches to its own instructions), so it can be
+    // locked down now: a wild guest write through a stray/null pointer
+    // faults immediately instead of silently corrupting the running image.
+    // `.rodata` is left writable — a self-relocating crt0 may still need to
+    // patch RELR entries living in `.data.rel.ro` there.
+    mem.mark_readonly(text_addr, ro_addr);
 
     let env_addr = if has_self_relocating_crt0(data) {
         setup_env_block(mem)
@@ -801,6 +808,22 @@ mod tests {
         );
         assert!(loaded.is_64bit);
         assert_eq!(loaded.build_id, [0u8; 0x20]);
+    }
+
+    #[test]
+    fn loaded_text_is_read_only_but_data_is_not() {
+        let text = [0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00];
+        let data = [0xDE, 0xAD, 0xBE, 0xEF];
+        let nro = build_nro(&text, &data);
+        let mut mem = Memory::new();
+        let loaded = load_nro(&mut mem, &nro).unwrap();
+        // A wild write into .text (what corrupted the running image before
+        // this was locked down) now faults instead of silently succeeding.
+        assert!(mem.write_u32(loaded.text.mem_addr, 0xDEAD_BEEF).is_err());
+        assert_eq!(mem.read_u32(loaded.text.mem_addr).unwrap(), 0x01);
+        // .data stays writable — globals still work.
+        mem.write_u32(loaded.data.mem_addr, 0x1234).unwrap();
+        assert_eq!(mem.read_u32(loaded.data.mem_addr).unwrap(), 0x1234);
     }
 
     #[test]
