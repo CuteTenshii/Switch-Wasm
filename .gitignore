@@ -1,3 +1,4 @@
 /target
 *.wasm
 *.nro
+.DS_Store
