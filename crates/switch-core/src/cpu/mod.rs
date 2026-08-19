@@ -53,12 +53,21 @@ pub struct RunReport {
 }
 
 /// Host-provided stack for [`Cpu::bootstrap`]: 1 MiB full-descending, top at
-/// `STACK_TOP`. Must be clear of the NRO image (0x08000000+), the libnx TLS
-/// (0x0FF00000) and the heap homebrew puts at 0x10000000 — hbmenu's deko3d
-/// memblocks are allocated there and zeroing them would stomp a stack placed
-/// in the same region, corrupting return addresses.
+/// `STACK_TOP`. Clear of the NRO image (0x08000000+), the ASLR region homebrew's
+/// own allocators search (`AslrRegionAddress`/`Size`: [0x08000000, 0x27000000)
+/// — see `svcGetInfo` types 12/13) and the real heap `svcSetHeapSize` hands
+/// out (0x30000000).
+///
+/// Used to sit at 0x10000000, inside that ASLR region — fine for hbmenu's own
+/// small deko3d memblocks, but Mesa/Nouveau's GPU buffer-object pool (JKSV
+/// pulls in a full `nvc0` Gallium driver) keeps growing as more
+/// textures/icons get created and doesn't re-verify each new allocation
+/// against `svcQueryMemory`, so a big enough one blew straight through the
+/// stack's mapped pages, `memset`-zeroing saved return addresses on it.
+/// Past the ASLR region and before the heap is address space nothing else
+/// claims.
 pub const STACK_SIZE: u64 = 0x0010_0000;
-pub const STACK_TOP: u64 = 0x1010_0000;
+pub const STACK_TOP: u64 = 0x2810_0000;
 
 /// Address of the return-address trampoline for direct-entered homebrew.
 pub const SELF_RETURN_TRAMPOLINE: u32 = 0x1F00_0000;
@@ -72,9 +81,9 @@ pub const THREAD_EXIT_TRAMPOLINE: u32 = 0x1F00_0100;
 pub const MAIN_THREAD_HANDLE: u64 = 1;
 
 /// Base of the per-thread TLS blocks handed to threads the guest creates. The
-/// main thread keeps `0x0FF0_0000` (see [`Cpu::bootstrap`]); children get a
+/// main thread keeps `0x1FE0_0000` (see [`Cpu::bootstrap`]); children get a
 /// page each above it, clear of the heap and the stack.
-pub const THREAD_TLS_BASE: u32 = 0x0FF1_0000;
+pub const THREAD_TLS_BASE: u32 = 0x1FE1_0000;
 /// Distance between two threads' TLS blocks. Horizon's are 0x200 bytes; a page
 /// each keeps the newlib reentrancy struct that follows out of the way too.
 pub const THREAD_TLS_STRIDE: u32 = 0x1000;
@@ -167,8 +176,18 @@ mod hid_shmem {
 /// pseudo-buttons, which is what `HidNpadButton_AnyLeft` and friends look at.
 const HID_STICK_THRESHOLD: i32 = 0x4000;
 
-/// A guest thread's saved CPU state. The running thread's state lives in the
-/// [`Cpu`] fields; this is what a switch saves and restores.
+/// The counts an `OpenAudioRenderer` call fixes for the lifetime of its
+/// `IAudioRenderer` session — how big every later `RequestUpdateAudioRenderer`
+/// reply has to be.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AudrenParams {
+    pub revision: u32,
+    pub voice_count: u32,
+    pub sink_count: u32,
+    pub effect_count: u32,
+}
+
+
 #[derive(Debug, Clone)]
 pub struct ThreadContext {
     pub handle: u64,
@@ -179,6 +198,7 @@ pub struct ThreadContext {
     nzcv: u32,
     vregs: [u128; 32],
     tpidr: u64,
+    tpidr_rw: u64,
 }
 
 #[derive(Debug)]
@@ -213,10 +233,21 @@ pub struct Cpu {
     recent: [(u32, u32); RECENT_LEN],
     /// Total instructions recorded into [`Cpu::recent`].
     recent_len: usize,
-    /// Thread-local-storage base (TPIDR_EL0). libnx reads and writes this to
-    /// find per-thread globals; stubbing it as always-zero makes those
-    /// accesses land near address 0.
+    /// Base of the kernel-fixed Thread Local Region (TPIDRRO_EL0): where the
+    /// IPC message buffer lives and where `create_thread` points each
+    /// thread's own TLS block. Real hardware makes this read-only at EL0 —
+    /// only the kernel sets it — unlike [`Cpu::tpidr_rw`] below.
     tpidr: u64,
+    /// TPIDR_EL0: freely readable *and writable* by guest code, unlike
+    /// `tpidr` above. Nintendo's SDK uses it for its own per-thread pointer
+    /// bookkeeping, entirely separate from the kernel-provided TLS region.
+    /// Real hardware backs these with two distinct registers; aliasing them
+    /// to the same storage let a guest `msr tpidr_el0, x0` silently stomp
+    /// the kernel-fixed TLS pointer IPC dispatch and thread setup depend on
+    /// — confirmed by tracing a real title's `nnSdk` init, which does
+    /// exactly that write and then found its own IPC/TLS-relative reads
+    /// pointing at low, unmapped-feeling addresses afterward.
+    tpidr_rw: u64,
     /// Monotonic id handed out for domain IPC out-objects, so each synthesized
     /// subservice gets a distinct non-zero object id.
     next_object_id: u32,
@@ -237,6 +268,12 @@ pub struct Cpu {
     /// vi:ihosbd, ...) so the display stub can dispatch binder vs. display
     /// commands on the right session.
     vi_ifaces: HashMap<u64, String>,
+    /// Whether `ICommonStateGetter::ReceiveMessage` has already handed out the
+    /// initial `FocusStateChanged`. Real AM enqueues that message once at
+    /// startup and then reports "no message" until the state actually
+    /// changes; answering every poll with a fresh message made
+    /// `appletMainLoop` re-process a focus change on every call.
+    applet_focus_sent: bool,
     /// Synthetic SD-card directory state for the fsp-srv stub: maps an open
     /// directory handle to the entries it has not yielded yet
     /// (name bytes, entry type, file size). Lets `fsFsOpenDirectory` /
@@ -244,6 +281,13 @@ pub struct Cpu {
     fs_dirs: HashMap<u64, Vec<crate::vfs::DirEntry>>,
     /// Open `IFile` objects: domain object id to the path it was opened on.
     fs_files: HashMap<u64, String>,
+    /// The current process's own RomFS, decrypted from its Program NCA's
+    /// RomFS section — what `OpenDataStorageByCurrentProcess` hands back as
+    /// an `IStorage`. `None` until the loader calls
+    /// [`Cpu::set_romfs`] (homebrew has no NCA and never sets this; it reads
+    /// its RomFS off the SD card by path instead, through the regular
+    /// `IFileSystem`/`IFile` path).
+    romfs: Option<Vec<u8>>,
     /// Address the guest mapped its hid shared memory to (via `MapSharedMemory`
     /// on the handle hid's IPC returned). The host writes gamepad state into
     /// the libnx `HidSharedMemory` layout there so `padUpdate` sees it; 0 means
@@ -258,6 +302,12 @@ pub struct Cpu {
     /// Address the guest mapped pl's shared memory to, where the font was
     /// written; 0 until the guest calls `plInitialize`.
     pl_shmem_addr: u32,
+    /// Per-`IAudioRenderer` session state (voice/sink/effect counts, revision)
+    /// from its `OpenAudioRenderer` call, kept so `RequestUpdateAudioRenderer`
+    /// can size its reply the same way the guest sized the buffer it passed
+    /// in — `audrvUpdate` rejects a reply whose `mempools_sz`/`voices_sz`
+    /// fields don't match what it computed from those same counts.
+    audren_renderers: HashMap<u64, AudrenParams>,
     /// The wall-clock time `time:u`/`time:s` reports, as POSIX seconds (UTC).
     /// `wasm32-unknown-unknown` has no OS clock, so this stays at the Unix
     /// epoch until the host calls [`Cpu::set_unix_time`].
@@ -313,18 +363,22 @@ impl Cpu {
             recent: [(0, 0); RECENT_LEN],
             recent_len: 0,
             tpidr: 0,
+            tpidr_rw: 0,
             next_object_id: 1,
             service_handles: HashMap::new(),
             next_handle: 0x1000,
             next_domain_object_id: 1,
             domain_objects: HashMap::new(),
             vi_ifaces: HashMap::new(),
+            applet_focus_sent: false,
             fs_dirs: HashMap::new(),
             fs_files: HashMap::new(),
+            romfs: None,
             hid_shmem_addr: 0,
             sample_counter: 0,
             shared_font: Vec::new(),
             pl_shmem_addr: 0,
+            audren_renderers: HashMap::new(),
             unix_time: 0,
             battery_percent: 100,
             battery_charging: true,
@@ -366,12 +420,23 @@ impl Cpu {
         self.sp = STACK_TOP;
         // libnx reads TPIDR_EL0 expecting the loader (HBL/kernel) to have set
         // the thread-local-storage base. Point it at a writable region clear of
-        // both the heap and the stack: the stack mapping is [0x10000000,
-        // 0x10100000) and svcSetHeapSize hands out 0x20000000. If TPIDR overlaps
-        // either, the app's IPC code writes its CMIF request over the heap's
-        // first chunk header (and malloc stomps the TLS), corrupting the
-        // allocator.
-        self.tpidr = 0x0FF0_0000;
+        // both the heap (`svcSetHeapSize` hands out 0x30000000) and the stack
+        // (`STACK_TOP`, now 0x28100000) — if TPIDR overlaps either, the app's
+        // IPC code writes its CMIF request over the heap's first chunk header
+        // (and malloc stomps the TLS), corrupting the allocator.
+        //
+        // 0x0FF00000 used to work here, sitting just under where the stack
+        // used to be. But a big enough Mesa/Nouveau GPU-buffer allocation —
+        // nouveau reserves its own address range by scanning for free space
+        // with `svcQueryMemory` rather than going through the regular heap,
+        // and its search isn't guaranteed to stop at a single mapped page in
+        // the middle of an otherwise-huge free run — grew past it and
+        // `memset()`-zeroed straight over the `ThreadVars` magic, so the next
+        // `malloc()` on that thread failed `__syscall_getreent`'s `BadReent`
+        // check and the app aborted. Up here, past the stack and well clear of
+        // everything the guest's own allocators have been observed to reach,
+        // is safe.
+        self.tpidr = 0x1FE0_0000;
         // A return-address trampoline: the loader enters homebrew's `main`
         // directly, so LR is 0 and any early return would branch to NULL.
         // Point LR at a stub that calls ExitProcess (svc 0x07), so main's
@@ -408,6 +473,7 @@ impl Cpu {
                 nzcv: 0,
                 vregs: [0; 32],
                 tpidr: self.tpidr,
+                tpidr_rw: self.tpidr_rw,
             });
             self.current_thread = 0;
         }
@@ -444,6 +510,7 @@ impl Cpu {
             nzcv: 0,
             vregs: [0; 32],
             tpidr: u64::from(tls),
+            tpidr_rw: 0,
         });
         handle
     }
@@ -622,6 +689,7 @@ impl Cpu {
         thread.nzcv = self.nzcv;
         thread.vregs = self.vregs;
         thread.tpidr = self.tpidr;
+        thread.tpidr_rw = self.tpidr_rw;
     }
 
     fn load_context(&mut self, index: usize) {
@@ -632,6 +700,7 @@ impl Cpu {
         self.nzcv = thread.nzcv;
         self.vregs = thread.vregs;
         self.tpidr = thread.tpidr;
+        self.tpidr_rw = thread.tpidr_rw;
         self.current_thread = index;
     }
 
@@ -656,6 +725,7 @@ impl Cpu {
     /// global is left empty and NX-Shell's `FS::GetDirList` resolves its SD
     /// path to "" and exits. Running the constructors fixes that.
     pub fn boot_homebrew(&mut self, data: &[u8]) -> Result<crate::nro::LoadedNro> {
+        self.mem.clear_readonly();
         let loaded = crate::nro::load_nro(&mut self.mem, data)?;
         // Present the NRO on the SD card at the path the environment block
         // advertises as argv[0]: libnx's `romfsMountSelf` re-opens the running
@@ -741,6 +811,72 @@ impl Cpu {
         }
         self.set_pc(loaded.entry);
         Ok(loaded)
+    }
+
+    /// Boot a retail title's full module set (`rtld`, `main`, `subsdk*`,
+    /// `sdk`) the way Nintendo's process creation does: load every module
+    /// into one shared address space, back to back, and hand off to
+    /// `rtld`'s entry point — *not* `main`'s.
+    ///
+    /// `rtld` is Nintendo's own runtime linker; its job is to process every
+    /// other module's relocations (base-relative fixups, and resolving
+    /// cross-module calls — e.g. `main` importing something `sdk` exports)
+    /// before jumping into `main`'s own crt0. Jumping straight to `main`
+    /// (this emulator's first attempt) leaves its GOT full of unrelocated
+    /// placeholder addresses: confirmed against a real title, whose `main`
+    /// crt0 runs cleanly right up to its first PLT-style indirect call,
+    /// which lands on exactly such a placeholder.
+    ///
+    /// `modules` must be in Nintendo's required load order: `rtld`, `main`,
+    /// `subsdk0..subsdk9`, `sdk` — whichever of those a title actually has.
+    /// Actually running a retail title past `rtld`'s own work needs the
+    /// Horizon service surface a full SDK program expects, which this
+    /// emulator does not have yet; this gets it as far as that surface, the
+    /// same "boot as far as it goes" spirit as `boot_homebrew`.
+    pub fn boot_retail_program(&mut self, modules: &[(&str, &[u8])]) -> Result<Vec<crate::nso::LoadedNso>> {
+        self.out.clear();
+        self.trace.clear();
+        self.halted = false;
+        self.trace_enabled = false;
+        self.mem.clear_readonly();
+        for i in 0..=30u8 {
+            self.set_reg(i, 0);
+        }
+        self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
+
+        // Real inter-module gaps are whatever the kernel's ASLR/layout
+        // picked; page-aligned and back-to-back is a reasonable stand-in —
+        // each module is fully self-contained PC-relative code, so the only
+        // thing that matters is that nothing overlaps.
+        const MODULE_ALIGN: u32 = 0x1000;
+        let mut base = crate::nso::NSO_BASE;
+        let mut loaded = Vec::with_capacity(modules.len());
+        for (name, data) in modules {
+            let module = crate::nso::load_nso(&mut self.mem, data, base).map_err(|e| {
+                Error::Cpu(format!("loading module {:?} at {:#x}: {}", name, base, e))
+            })?;
+            let image_end = module
+                .data
+                .mem_addr
+                .wrapping_add(module.data.file_size)
+                .wrapping_add(module.bss_size);
+            base = image_end.wrapping_add(MODULE_ALIGN - 1) & !(MODULE_ALIGN - 1);
+            loaded.push(module);
+        }
+        let entry = loaded
+            .first()
+            .ok_or_else(|| Error::Cpu("no modules to boot".into()))?
+            .entry;
+        self.set_pc(entry);
+        Ok(loaded)
+    }
+
+    /// Set the decrypted RomFS bytes `OpenDataStorageByCurrentProcess`
+    /// serves. The caller (the NCA-decryption loader) supplies these — `Cpu`
+    /// has no key material and doesn't know how to get from an NCA to a
+    /// RomFS image itself.
+    pub fn set_romfs(&mut self, data: Vec<u8>) {
+        self.romfs = Some(data);
     }
 
     // ---- register access ----

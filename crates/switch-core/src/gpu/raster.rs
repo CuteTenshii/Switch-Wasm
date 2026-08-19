@@ -1,0 +1,988 @@
+//! Vertex fetch, primitive assembly, rasterization, and the fragment-shader
+//! integration that turns coverage into real pixels.
+//!
+//! [`draw`] is the top-level entry point `Engine3D::draw_arrays`/
+//! `draw_elements` call. Everything it calls is independently testable
+//! against synthetic inputs, which is how each earlier stage validated its
+//! own piece before this stage wired them together.
+
+use crate::gpu::engine::threed::{
+    decode_depth, encode_depth, BlendTarget, Engine3D, ShaderStage, VertexArray, VertexAttrib,
+};
+use crate::gpu::exec::ExecCtx;
+use crate::gpu::shader::interp::{ConstantSource, Invocation, MemoryConstants, MemoryTextures, NoTextures, TextureSource};
+use crate::gpu::shader::{isa, Instruction};
+use crate::{Error, Result};
+
+/// `DkPrimitive`'s subset this rasterizer supports (deko3d.h, devkitPro/
+/// libnx, MIT). Real content routes through one of these two for 2D UI; any
+/// other topology is a hard error rather than silently dropped geometry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Primitive {
+    Triangles,
+    TriangleStrip,
+}
+
+impl Primitive {
+    pub fn from_raw(raw: u32) -> Result<Primitive> {
+        match raw {
+            4 => Ok(Primitive::Triangles),
+            5 => Ok(Primitive::TriangleStrip),
+            other => Err(Error::Gpu(format!(
+                "raster: unsupported DkPrimitive {} (only Triangles/TriangleStrip)",
+                other
+            ))),
+        }
+    }
+}
+
+/// Break a `count`-vertex draw into triangles, as vertex-ordinal triples.
+/// `TriangleStrip` alternates the first two indices of odd triangles to
+/// keep winding consistent across the strip.
+pub fn assemble(primitive: Primitive, count: u32) -> Vec<[u32; 3]> {
+    match primitive {
+        Primitive::Triangles => (0..count / 3).map(|t| [t * 3, t * 3 + 1, t * 3 + 2]).collect(),
+        Primitive::TriangleStrip => {
+            if count < 3 {
+                return Vec::new();
+            }
+            (0..count - 2)
+                .map(|i| if i % 2 == 0 { [i, i + 1, i + 2] } else { [i + 1, i, i + 2] })
+                .collect()
+        }
+    }
+}
+
+/// A vertex position in screen space (pixels, `y` growing downward).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenVertex {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Inclusive-exclusive pixel bounds: `[x0, x1) x [y0, y1)` — a resolved
+/// viewport/scissor intersection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bounds {
+    pub x0: u32,
+    pub y0: u32,
+    pub x1: u32,
+    pub y1: u32,
+}
+
+/// Rasterize one triangle to the pixels it covers, using the standard
+/// top-left fill rule: a pixel's center is covered if it's strictly inside,
+/// or lies exactly on a "top" or "left" edge. That tie-break is what keeps
+/// two triangles sharing an edge from double-covering or gapping the pixels
+/// along it. No fragment shading or depth test yet — this is coverage only.
+pub fn rasterize_triangle(
+    v0: ScreenVertex,
+    v1: ScreenVertex,
+    v2: ScreenVertex,
+    bounds: Bounds,
+) -> Vec<(u32, u32)> {
+    rasterize_triangle_weighted(v0, v1, v2, bounds)
+        .into_iter()
+        .map(|(x, y, ..)| (x, y))
+        .collect()
+}
+
+/// Like [`rasterize_triangle`], but also returns each covered pixel's
+/// barycentric weights (`w0, w1, w2`, summing to 1, one per vertex). These
+/// are screen-space-linear, not perspective-corrected — the shader's own
+/// `ipa`/`mufu rcp` sequence does that correction (see `isa`'s module
+/// docs), so the caller feeds these straight in as the linearly-interpolated
+/// `attr/w` and `1/w` values a real Maxwell rasterizer would hand it.
+pub fn rasterize_triangle_weighted(
+    v0: ScreenVertex,
+    v1: ScreenVertex,
+    v2: ScreenVertex,
+    bounds: Bounds,
+) -> Vec<(u32, u32, f32, f32, f32)> {
+    fn edge(a: ScreenVertex, b: ScreenVertex, px: f32, py: f32) -> f32 {
+        (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x)
+    }
+    fn is_top_left(a: ScreenVertex, b: ScreenVertex) -> bool {
+        (a.y == b.y && a.x > b.x) || (a.y > b.y)
+    }
+
+    let area = edge(v0, v1, v2.x, v2.y);
+    if area == 0.0 {
+        return Vec::new(); // degenerate triangle: zero area, nothing covered.
+    }
+    let inside = |e: f32, top_left: bool| {
+        if area > 0.0 {
+            e > 0.0 || (top_left && e == 0.0)
+        } else {
+            e < 0.0 || (top_left && e == 0.0)
+        }
+    };
+    let tl01 = is_top_left(v0, v1);
+    let tl12 = is_top_left(v1, v2);
+    let tl20 = is_top_left(v2, v0);
+
+    let min_x = v0.x.min(v1.x).min(v2.x).floor().max(bounds.x0 as f32) as u32;
+    let max_x = (v0.x.max(v1.x).max(v2.x).ceil() as u32).min(bounds.x1);
+    let min_y = v0.y.min(v1.y).min(v2.y).floor().max(bounds.y0 as f32) as u32;
+    let max_y = (v0.y.max(v1.y).max(v2.y).ceil() as u32).min(bounds.y1);
+
+    let mut out = Vec::new();
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let e01 = edge(v0, v1, px, py);
+            let e12 = edge(v1, v2, px, py);
+            let e20 = edge(v2, v0, px, py);
+            if inside(e01, tl01) && inside(e12, tl12) && inside(e20, tl20) {
+                // w0 is opposite v0 (edge v1-v2), etc.
+                out.push((x, y, e12 / area, e20 / area, e01 / area));
+            }
+        }
+    }
+    out
+}
+
+/// `DkVtxAttribSize`'s component count and per-component bit width
+/// (deko3d.h). Only the shapes this fetcher decodes are listed; anything
+/// else is a clear "unsupported" error rather than a guess.
+fn attrib_shape(size: u32) -> Option<(u32, u32)> {
+    match size {
+        0x01 => Some((4, 32)), // 4x32
+        0x02 => Some((3, 32)), // 3x32
+        0x04 => Some((2, 32)), // 2x32
+        0x12 => Some((1, 32)), // 1x32
+        0x0a => Some((4, 8)),  // 4x8
+        _ => None,
+    }
+}
+
+/// `DkVtxAttribType` (deko3d.h): `Float = 7`, `Unorm = 2`.
+const ATTRIB_TYPE_UNORM: u32 = 2;
+const ATTRIB_TYPE_FLOAT: u32 = 7;
+
+/// Fetch one vertex's worth of a single attribute out of GPU memory,
+/// returning it padded to 4 components (`0,0,0,1` for the ones the format
+/// doesn't carry — the usual `vec4` default). `is_bgra` swaps the first and
+/// third component after decoding, matching a packed-colour attribute
+/// declared BGRA instead of RGBA.
+pub fn fetch_attribute(
+    attrib: VertexAttrib,
+    array: VertexArray,
+    vertex_index: u32,
+    ctx: &ExecCtx,
+) -> Result<[f32; 4]> {
+    if attrib.is_fixed {
+        return Err(Error::Gpu(
+            "raster: fixed (non-buffer) vertex attributes aren't supported yet".into(),
+        ));
+    }
+    if !array.enabled {
+        return Err(Error::Gpu(format!(
+            "raster: attribute reads from disabled vertex buffer {}",
+            attrib.buffer_id
+        )));
+    }
+    let (components, bits) = attrib_shape(attrib.size).ok_or_else(|| {
+        Error::Gpu(format!(
+            "raster: unsupported vertex attribute size {:#x}",
+            attrib.size
+        ))
+    })?;
+
+    let addr = array.start
+        + vertex_index as u64 * array.stride as u64
+        + attrib.offset as u64;
+
+    let mut out = [0.0f32, 0.0, 0.0, 1.0];
+    match (attrib.ty, bits) {
+        (ATTRIB_TYPE_FLOAT, 32) => {
+            for c in 0..components {
+                let bits = ctx.read_u32(addr + c as u64 * 4)?;
+                out[c as usize] = f32::from_bits(bits);
+            }
+        }
+        (ATTRIB_TYPE_UNORM, 8) => {
+            let packed = ctx.read_u32(addr)?;
+            for c in 0..components {
+                let byte = (packed >> (c * 8)) & 0xff;
+                out[c as usize] = byte as f32 / 255.0;
+            }
+        }
+        (ty, bits) => {
+            return Err(Error::Gpu(format!(
+                "raster: unsupported vertex attribute type {} at {} bits",
+                ty, bits
+            )));
+        }
+    }
+    if attrib.is_bgra {
+        out.swap(0, 2);
+    }
+    Ok(out)
+}
+
+/// The `a[]` offset `gl_Position`/clip position lands at, and the fixed
+/// interpolated-`1/w` slot — both established in Stage 0's recon (see
+/// `isa`'s module docs) and already load-bearing in `shader::interp`'s
+/// tests.
+const CLIP_POS_OFFSET: u16 = 0x70;
+const INV_W_OFFSET: u16 = 0x7c;
+/// Generic varying `i`'s `a[]` slot: `VARYING_BASE + i * VARYING_STRIDE`.
+/// This is the same numeric convention on both sides of the interpolator —
+/// a vertex shader's output slot `i` is the fragment shader's input slot
+/// `i` — because they're literally the same fixed-function wires.
+const VARYING_BASE: u16 = 0x80;
+const VARYING_STRIDE: u16 = 0x10;
+/// How many generic varying slots get fetched/interpolated. Real Maxwell
+/// supports far more; this is enough for 2D UI (colour, texcoord, a spare)
+/// without needing to know how many a given shader pair actually uses —
+/// unused slots just carry unread zeros.
+const NUM_VARYINGS: usize = 4;
+/// Real Maxwell guarantees at least this many vertex attributes; scanning a
+/// fixed range means vertex fetch doesn't need the shader to declare how
+/// many it reads.
+const MAX_VERTEX_ATTRIBS: u32 = 16;
+/// Words of shader binary to scan looking for `exit` before giving up —
+/// generous for 2D UI, not unbounded (see `shader::MAX_INSTRUCTIONS`'s doc
+/// comment for the same reasoning). Reading stops as soon as `exit` is
+/// found, so a short real program never touches memory past its own end.
+const MAX_PROGRAM_WORDS: u64 = 1024;
+
+/// One vertex after the vertex shader ran: clip-space position plus every
+/// generic varying, ready for the perspective divide and interpolation.
+#[derive(Clone, Copy)]
+struct ShadedVertex {
+    clip: [f32; 4],
+    varyings: [[f32; 4]; NUM_VARYINGS],
+}
+
+/// Decode a shader program straight out of GPU memory, stripping `sched`
+/// words and stopping at the first `exit` (mirrors
+/// `shader::decode_program`, which needs the whole binary as a slice
+/// up front — reading incrementally here means a short real program never
+/// touches memory past its own end).
+/// Nouveau/Mesa's shader upload convention prepends a fixed-size header
+/// (driver bookkeeping, not part of the Maxwell ISA) before the real `sched`/
+/// instruction stream — confirmed empirically against a live JKSV capture
+/// (its vertex and fragment programs both have a recognisable `sched` word,
+/// followed by a real `ld`, starting exactly 0x50 bytes in;
+/// `/tmp/dump_vs.bin`/`dump_fs.bin` via a temporary dump added and removed
+/// for this investigation). `uam`/deko3d-compiled binaries (hbmenu, this
+/// module's own test fixtures) have no such header. The header's own first
+/// bytes aren't reliably zero (they carry real driver metadata), so this
+/// can't be detected by peeking the first word — instead, decode
+/// speculatively assuming no header, and if the very first real instruction
+/// (slot 1, right after the first `sched` word) doesn't decode, that's the
+/// header showing through: retry assuming one.
+const MESA_SHADER_HEADER_BYTES: u64 = 0x50;
+
+fn decode_program_from_memory(ctx: &ExecCtx, addr: u64) -> Result<Vec<Instruction>> {
+    let first_real_word = ctx.read_u64(addr + 8)?;
+    let addr = if matches!(isa::decode(first_real_word), Instruction::Unimplemented { .. }) {
+        addr + MESA_SHADER_HEADER_BYTES
+    } else {
+        addr
+    };
+    let mut out = Vec::new();
+    for slot in 0..MAX_PROGRAM_WORDS {
+        if slot % 4 == 0 {
+            continue; // sched control word
+        }
+        let word = ctx.read_u64(addr + slot * 8)?;
+        let insn = isa::decode(word);
+        let is_exit = insn == Instruction::Exit;
+        out.push(insn);
+        if is_exit {
+            return Ok(out);
+        }
+    }
+    Err(Error::Gpu("raster: program ended without an exit".into()))
+}
+
+fn shade_vertex(
+    program: &[Instruction],
+    attribs: &[VertexAttrib],
+    arrays: &[VertexArray],
+    vertex_index: u32,
+    ctx: &ExecCtx,
+    consts: &dyn ConstantSource,
+) -> Result<ShadedVertex> {
+    let mut inv = Invocation::new();
+    for (i, attrib) in attribs.iter().enumerate() {
+        // size 0 isn't a valid DkVtxAttribSize — it's what an unconfigured
+        // `VertexAttribState` slot reads back as, so it means "not used"
+        // rather than "unsupported format".
+        if attrib.size == 0 {
+            continue;
+        }
+        let array = arrays[attrib.buffer_id as usize];
+        if !array.enabled {
+            continue;
+        }
+        let v = fetch_attribute(*attrib, array, vertex_index, ctx)?;
+        let base = VARYING_BASE + i as u16 * VARYING_STRIDE;
+        for (c, &component) in v.iter().enumerate() {
+            inv.attr_in.insert(base + c as u16 * 4, component);
+        }
+    }
+    inv.execute(program, consts, &NoTextures)?;
+
+    let mut clip = [0.0, 0.0, 0.0, 1.0];
+    for (c, slot) in clip.iter_mut().enumerate() {
+        if let Some(&v) = inv.attr_out.get(&(CLIP_POS_OFFSET + c as u16 * 4)) {
+            *slot = v;
+        }
+    }
+    let mut varyings = [[0.0f32; 4]; NUM_VARYINGS];
+    for (i, varying) in varyings.iter_mut().enumerate() {
+        let base = VARYING_BASE + i as u16 * VARYING_STRIDE;
+        for (c, slot) in varying.iter_mut().enumerate() {
+            if let Some(&v) = inv.attr_out.get(&(base + c as u16 * 4)) {
+                *slot = v;
+            }
+        }
+    }
+    Ok(ShadedVertex { clip, varyings })
+}
+
+/// Clip position to screen space: perspective-divide, then map NDC's
+/// `[-1, 1]` square onto the viewport rectangle. NDC is y-up; the
+/// framebuffer is y-down, so this flips y — the common GL-on-Maxwell
+/// convention (unverified against real hardware; Stage 9's JKSV screenshot
+/// is the check for this). Also returns NDC z (`[-1, 1]`, GL convention) for
+/// depth testing — like `1/w`, it's already affine in screen space, so it
+/// only needs plain (not perspective-corrected) barycentric interpolation.
+fn to_screen(clip: [f32; 4], viewport: (f32, f32, f32, f32)) -> (ScreenVertex, f32, f32) {
+    let (vx, vy, vw, vh) = viewport;
+    let inv_w = 1.0 / clip[3];
+    let ndc_x = clip[0] * inv_w;
+    let ndc_y = clip[1] * inv_w;
+    let ndc_z = clip[2] * inv_w;
+    let screen = ScreenVertex {
+        x: vx + (ndc_x + 1.0) * 0.5 * vw,
+        y: vy + (1.0 - ndc_y) * 0.5 * vh,
+    };
+    (screen, inv_w, ndc_z)
+}
+
+/// `DkCompareOp` (deko3d.h): `1..=8`, `Never..=Always`, one-based.
+fn depth_test_passes(func: u32, new: f32, old: f32) -> bool {
+    match func {
+        1 => false,
+        2 => new < old,
+        3 => new == old,
+        4 => new <= old,
+        5 => new > old,
+        6 => new != old,
+        7 => new >= old,
+        _ => true, // Always, and any unrecognised code.
+    }
+}
+
+/// `DkBlendFactor` (deko3d.h) as a per-channel multiplier — `SrcColor`/
+/// `DstColor` are genuinely per-channel; the rest just broadcast a scalar.
+fn blend_factor(code: u32, src: [f32; 4], dst: [f32; 4], constant: [f32; 4]) -> [f32; 4] {
+    match code {
+        1 => [0.0; 4],                              // Zero
+        3 => src,                                    // SrcColor
+        4 => src.map(|c| 1.0 - c),                   // InvSrcColor
+        5 => [src[3]; 4],                             // SrcAlpha
+        6 => [1.0 - src[3]; 4],                       // InvSrcAlpha
+        7 => [dst[3]; 4],                             // DstAlpha
+        8 => [1.0 - dst[3]; 4],                       // InvDstAlpha
+        9 => dst,                                     // DstColor
+        10 => dst.map(|c| 1.0 - c),                   // InvDstColor
+        33 => constant,                               // ConstColor (1|0x20)
+        34 => constant.map(|c| 1.0 - c),              // InvConstColor
+        35 => [constant[3]; 4],                       // ConstAlpha
+        36 => [1.0 - constant[3]; 4],                 // InvConstAlpha
+        _ => [1.0; 4],                                 // One, and anything unrecognised.
+    }
+}
+
+/// `DkBlendOp` (deko3d.h): `1..=5`, `Add..=Max`.
+fn blend_equation(op: u32, src: f32, dst: f32) -> f32 {
+    match op {
+        2 => src - dst,        // Sub
+        3 => dst - src,        // RevSub
+        4 => src.min(dst),     // Min
+        5 => src.max(dst),     // Max
+        _ => src + dst,        // Add, and anything unrecognised.
+    }
+}
+
+fn blend(target: BlendTarget, constant: [f32; 4], src: [f32; 4], dst: [f32; 4]) -> [f32; 4] {
+    let src_rgb = blend_factor(target.func_rgb_src, src, dst, constant);
+    let dst_rgb = blend_factor(target.func_rgb_dst, src, dst, constant);
+    let src_a = blend_factor(target.func_alpha_src, src, dst, constant)[3];
+    let dst_a = blend_factor(target.func_alpha_dst, src, dst, constant)[3];
+    let mut out = [0.0f32; 4];
+    for i in 0..3 {
+        out[i] = blend_equation(target.equation_rgb, src[i] * src_rgb[i], dst[i] * dst_rgb[i]);
+    }
+    out[3] = blend_equation(target.equation_alpha, src[3] * src_a, dst[3] * dst_a);
+    out
+}
+
+fn shade_fragment(
+    program: &[Instruction],
+    verts: &[ShadedVertex; 3],
+    inv_w: [f32; 3],
+    weights: [f32; 3],
+    consts: &dyn ConstantSource,
+    textures: &dyn TextureSource,
+) -> Result<[f32; 4]> {
+    let mut inv = Invocation::new();
+    let interp_inv_w = weights[0] * inv_w[0] + weights[1] * inv_w[1] + weights[2] * inv_w[2];
+    inv.attr_in.insert(INV_W_OFFSET, interp_inv_w);
+    for slot in 0..NUM_VARYINGS {
+        let base = VARYING_BASE + slot as u16 * VARYING_STRIDE;
+        for c in 0..4 {
+            let over_w = weights[0] * verts[0].varyings[slot][c] * inv_w[0]
+                + weights[1] * verts[1].varyings[slot][c] * inv_w[1]
+                + weights[2] * verts[2].varyings[slot][c] * inv_w[2];
+            inv.attr_in.insert(base + c as u16 * 4, over_w);
+        }
+    }
+    inv.execute(program, consts, textures)?;
+    Ok([inv.reg_f32(0), inv.reg_f32(1), inv.reg_f32(2), inv.reg_f32(3)])
+}
+
+/// Run `engine.last_draw` for real: fetch vertices, shade them, rasterize,
+/// shade covered pixels, and write real colour into the bound render
+/// target. Triangle lists/strips only (see [`Primitive`]); indexed draws
+/// aren't supported yet.
+pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
+    let call = engine.last_draw;
+    if call.indexed {
+        return Err(Error::Gpu("raster: indexed draws aren't supported yet".into()));
+    }
+    let rt = engine
+        .render_target(0)?
+        .ok_or_else(|| Error::Gpu("raster: draw with no bound render target".into()))?;
+
+    let vs_binding = engine
+        .program(ShaderStage::VertexB)
+        .ok_or_else(|| Error::Gpu("raster: draw with no bound vertex program".into()))?;
+    let fs_binding = engine
+        .program(ShaderStage::Fragment)
+        .ok_or_else(|| Error::Gpu("raster: draw with no bound fragment program".into()))?;
+
+    let vs_program = decode_program_from_memory(&*ctx, vs_binding.addr)?;
+    let fs_program = decode_program_from_memory(&*ctx, fs_binding.addr)?;
+
+    let attribs: Vec<VertexAttrib> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_attrib(i)).collect();
+    let arrays: Vec<VertexArray> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_array(i)).collect();
+    let viewport = engine.viewport();
+    let bounds = Bounds { x0: 0, y0: 0, x1: rt.width, y1: rt.height };
+    let depth = engine.depth_target()?;
+    let depth_state = engine.depth_state();
+    let blend_target = engine.blend_target(0);
+    let blend_constant = engine.blend_constant();
+
+    let triangles = assemble(Primitive::from_raw(call.primitive)?, call.count);
+    for tri in triangles {
+        let mut shaded: Vec<ShadedVertex> = Vec::with_capacity(3);
+        for &i in &tri {
+            let vs_consts = MemoryConstants {
+                ctx: &*ctx,
+                bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::VertexB, bank as u32),
+            };
+            shaded.push(shade_vertex(
+                &vs_program,
+                &attribs,
+                &arrays,
+                call.first + i,
+                &*ctx,
+                &vs_consts,
+            )?);
+        }
+        let projected: Vec<(ScreenVertex, f32, f32)> =
+            shaded.iter().map(|v| to_screen(v.clip, viewport)).collect();
+        let screen = [projected[0].0, projected[1].0, projected[2].0];
+        let inv_w = [projected[0].1, projected[1].1, projected[2].1];
+        let ndc_z = [projected[0].2, projected[1].2, projected[2].2];
+
+        for (x, y, w0, w1, w2) in rasterize_triangle_weighted(screen[0], screen[1], screen[2], bounds) {
+            if let (true, Some(dt)) = (depth_state.test_enabled, depth) {
+                let z01 = (w0 * ndc_z[0] + w1 * ndc_z[1] + w2 * ndc_z[2] + 1.0) * 0.5;
+                let dva = dt.addr + dt.layout.offset(x * dt.bytes, y, dt.width * dt.bytes) as u64;
+                let old_raw = ctx.read_pixel(dva, dt.bytes)?;
+                let old = decode_depth(old_raw, dt.depth_bits);
+                if !depth_test_passes(depth_state.func, z01, old) {
+                    continue;
+                }
+                if depth_state.write_enabled {
+                    ctx.write_pixel(dva, dt.bytes, encode_depth(z01, dt.depth_bits))?;
+                }
+            }
+
+            let color = {
+                let fs_consts = MemoryConstants {
+                    ctx: &*ctx,
+                    bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::Fragment, bank as u32),
+                };
+                let fs_textures = MemoryTextures {
+                    ctx: &*ctx,
+                    tex_header_pool: engine.tex_header_pool(),
+                    tex_sampler_pool: engine.tex_sampler_pool(),
+                };
+                shade_fragment(
+                    &fs_program,
+                    &[shaded[0], shaded[1], shaded[2]],
+                    [inv_w[0], inv_w[1], inv_w[2]],
+                    [w0, w1, w2],
+                    &fs_consts,
+                    &fs_textures,
+                )?
+            };
+            let bpp = rt.format.bytes_per_pixel;
+            let va = rt.addr + rt.layout.offset(x * bpp, y, rt.width * bpp) as u64;
+            let out = if blend_target.enabled {
+                let dst = rt.format.decode(ctx.read_pixel(va, bpp)?)?;
+                blend(blend_target, blend_constant, color, dst)
+            } else {
+                color
+            };
+            ctx.write_pixel(va, bpp, rt.format.encode(out)?)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gpu::engine::threed::DrawCall;
+    use crate::gpu::syncpt::Host1x;
+    use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
+    use crate::mem::Memory;
+
+    #[test]
+    fn triangles_assemble_into_disjoint_triples() {
+        assert_eq!(
+            assemble(Primitive::Triangles, 6),
+            vec![[0, 1, 2], [3, 4, 5]]
+        );
+    }
+
+    #[test]
+    fn triangle_strip_alternates_winding() {
+        assert_eq!(
+            assemble(Primitive::TriangleStrip, 5),
+            vec![[0, 1, 2], [2, 1, 3], [2, 3, 4]]
+        );
+    }
+
+    #[test]
+    fn a_right_triangle_covers_exactly_its_staircase_of_pixels() {
+        // (0,0)-(4,0)-(0,4): a clean, hand-verifiable case — the covered set
+        // is the classic staircase, with the top-left rule resolving the
+        // shared hypotenuse/edges so nothing doubles up or gaps.
+        let covered = rasterize_triangle(
+            ScreenVertex { x: 0.0, y: 0.0 },
+            ScreenVertex { x: 4.0, y: 0.0 },
+            ScreenVertex { x: 0.0, y: 4.0 },
+            Bounds { x0: 0, y0: 0, x1: 8, y1: 8 },
+        );
+        let mut covered = covered;
+        covered.sort();
+        assert_eq!(
+            covered,
+            vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (2, 0)]
+        );
+    }
+
+    #[test]
+    fn rasterization_is_clipped_to_bounds() {
+        let covered = rasterize_triangle(
+            ScreenVertex { x: 0.0, y: 0.0 },
+            ScreenVertex { x: 10.0, y: 0.0 },
+            ScreenVertex { x: 0.0, y: 10.0 },
+            Bounds { x0: 2, y0: 2, x1: 4, y1: 4 },
+        );
+        let mut covered = covered;
+        covered.sort();
+        assert_eq!(covered, vec![(2, 2), (2, 3), (3, 2), (3, 3)]);
+    }
+
+    #[test]
+    fn a_degenerate_triangle_covers_nothing() {
+        let covered = rasterize_triangle(
+            ScreenVertex { x: 1.0, y: 1.0 },
+            ScreenVertex { x: 2.0, y: 2.0 },
+            ScreenVertex { x: 3.0, y: 3.0 },
+            Bounds { x0: 0, y0: 0, x1: 8, y1: 8 },
+        );
+        assert!(covered.is_empty());
+    }
+
+    fn harness() -> (Memory, AddressSpace, u64) {
+        let mut mem = Memory::new();
+        mem.map_zero(0x6000_0000, 0x1000).unwrap();
+        let mut vmm = AddressSpace::new();
+        let gpu_va = vmm
+            .map(0x6000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
+        (mem, vmm, gpu_va)
+    }
+
+    #[test]
+    fn fetch_attribute_reads_a_float32_vec4_by_stride() {
+        let (mut mem, vmm, base) = harness();
+        // Vertex 1's position at base + stride*1 + offset(0).
+        let stride = 16u32;
+        let addr = base + stride as u64;
+        for (i, v) in [1.0f32, 2.0, 3.0, 4.0].iter().enumerate() {
+            vmm.write_u32(&mut mem, addr + i as u64 * 4, v.to_bits())
+                .unwrap();
+        }
+        let mut stats = Default::default();
+        let mut host1x = Host1x::new();
+        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+
+        let attrib = VertexAttrib { buffer_id: 0, is_fixed: false, offset: 0, size: 0x01, ty: ATTRIB_TYPE_FLOAT, is_bgra: false };
+        let array = VertexArray { enabled: true, stride, start: base, limit: base + 0x1000, divisor: 0 };
+
+        let v = fetch_attribute(attrib, array, 1, &ctx).unwrap();
+        assert_eq!(v, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn fetch_attribute_unpacks_unorm8_and_honours_is_bgra() {
+        let (mut mem, vmm, base) = harness();
+        // Packed BGRA8: B=0x40, G=0x80, R=0xff, A=0x00 (little-endian word).
+        let packed = 0x00u32 << 24 | 0xffu32 << 16 | 0x80u32 << 8 | 0x40u32;
+        vmm.write_u32(&mut mem, base, packed).unwrap();
+        let mut stats = Default::default();
+        let mut host1x = Host1x::new();
+        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+
+        let attrib = VertexAttrib { buffer_id: 0, is_fixed: false, offset: 0, size: 0x0a, ty: ATTRIB_TYPE_UNORM, is_bgra: true };
+        let array = VertexArray { enabled: true, stride: 4, start: base, limit: base + 0x1000, divisor: 0 };
+
+        let v = fetch_attribute(attrib, array, 0, &ctx).unwrap();
+        // Decoded as BGRA then swapped to RGBA: R=0xff, G=0x80, B=0x40, A=0x00.
+        assert_eq!(v, [1.0, 0x80 as f32 / 255.0, 0x40 as f32 / 255.0, 0.0]);
+    }
+
+    #[test]
+    fn fetch_attribute_from_a_disabled_buffer_is_an_error() {
+        let (mut mem, vmm, base) = harness();
+        let mut stats = Default::default();
+        let mut host1x = Host1x::new();
+        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let attrib = VertexAttrib { buffer_id: 0, is_fixed: false, offset: 0, size: 0x01, ty: ATTRIB_TYPE_FLOAT, is_bgra: false };
+        let array = VertexArray { enabled: false, stride: 16, start: base, limit: base, divisor: 0 };
+        assert!(fetch_attribute(attrib, array, 0, &ctx).is_err());
+    }
+
+    // -- Full-pipeline integration: vertex fetch -> vertex shading ->
+    // rasterization -> fragment shading -> real pixel write. Register
+    // numbers below are the same raw values `threed.rs`'s own
+    // `setup_pitch_target` test helper uses, since its constants are
+    // private to that module.
+
+    fn word(low: u32, high: u32) -> [u8; 8] {
+        (((high as u64) << 32) | low as u64).to_le_bytes()
+    }
+    fn block(sched: (u32, u32), a: (u32, u32), b: (u32, u32), c: (u32, u32)) -> Vec<u8> {
+        let mut out = Vec::with_capacity(32);
+        out.extend_from_slice(&word(sched.0, sched.1));
+        out.extend_from_slice(&word(a.0, a.1));
+        out.extend_from_slice(&word(b.0, b.1));
+        out.extend_from_slice(&word(c.0, c.1));
+        out
+    }
+
+    /// `gl_Position = aPosition; vColor = aColor;` — composed directly from
+    /// the same real, oracle-verified `ld`/`st` b128 attribute-space words
+    /// `mvp.vert`'s fixture uses (see `isa`'s module docs), so no new
+    /// bit-level guessing is needed for this passthrough.
+    fn passthrough_vertex_shader() -> Vec<u8> {
+        // Sched words are placeholders reused from mvp.vert's real capture —
+        // never all-zero, since `decode_program_from_memory` treats an
+        // all-zero first word as "this binary has a Mesa header" (see
+        // `MESA_SHADER_HEADER_BYTES`'s doc comment).
+        let mut bytes = block(
+            (0xfc20070f, 0x081f8441),
+            (0x0807ff00, 0xefd9ff80), // ld b128 $r0 a[0x80] 0x0  (aPosition)
+            (0x0707ff00, 0xeff1ff80), // st b128 a[0x70] $r0 0x0  (gl_Position)
+            (0x0907ff00, 0xefd9ff80), // ld b128 $r0 a[0x90] 0x0  (aColor)
+        );
+        bytes.extend(block(
+            (0xfc2207e1, 0x001f8c40),
+            (0x0807ff00, 0xeff1ff80), // st b128 a[0x80] $r0 0x0  (vColor)
+            (0x0007000f, 0xe3000000), // exit
+            (0, 0),
+        ));
+        bytes
+    }
+
+    /// `oColor = vColor;` — the same real capture `isa`'s module docs and
+    /// `shader::interp`'s tests use.
+    fn solid_fragment_shader() -> Vec<u8> {
+        let mut bytes = block(
+            (0xe1a0070f, 0x00240401),
+            (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+            (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+            (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+        );
+        bytes.extend(block(
+            (0xb0400341, 0x055c8400),
+            (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
+            (0x8037ff02, 0xe043ff88), // ipa $r2 a[0x88] $r3 0x0 0x1
+            (0xc037ff03, 0xe043ff88), // ipa $r3 a[0x8c] $r3 0x0 0x1
+        ));
+        bytes.extend(block(
+            (0xffe1ffef, 0x001f8000),
+            (0x0007000f, 0xe3000000), // exit
+            (0, 0),
+            (0, 0),
+        ));
+        bytes
+    }
+
+    /// Lay out a render target, both programs, and a 3-vertex buffer
+    /// (position vec4 @ offset 0, colour vec4 @ offset 16, stride 32) in one
+    /// mapped region, and program `engine`'s registers to match. Returns
+    /// `(mem, vmm, engine)`; the caller still needs to write vertex data and
+    /// call [`draw`].
+    fn pipeline_harness() -> (Memory, AddressSpace, Engine3D) {
+        let mut mem = Memory::new();
+        mem.map_zero(0x7000_0000, 0x2000).unwrap();
+        let mut vmm = AddressSpace::new();
+        let base = vmm.map(0x7000_0000, 0x2000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+
+        let rt_addr = base;
+        let vs_addr = base + 0x200;
+        let fs_addr = base + 0x300;
+        let vbuf_addr = base + 0x400;
+
+        {
+            let mut host1x = Host1x::new();
+            let mut stats = Default::default();
+            let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+            for (words, addr) in [
+                (passthrough_vertex_shader(), vs_addr),
+                (solid_fragment_shader(), fs_addr),
+            ] {
+                for (i, chunk) in words.chunks_exact(4).enumerate() {
+                    let word = u32::from_le_bytes(chunk.try_into().unwrap());
+                    ctx.write_u32(addr + i as u64 * 4, word).unwrap();
+                }
+            }
+        }
+
+        let mut engine = Engine3D::new();
+        // Render target: 16x8 pitch-linear RGBA8, matching setup_pitch_target.
+        engine.regs.set(0x200, (rt_addr >> 32) as u32);
+        engine.regs.set(0x201, rt_addr as u32);
+        engine.regs.set(0x202, 16 * 4);
+        engine.regs.set(0x203, 8);
+        engine.regs.set(0x204, 0xD5); // RGBA8Unorm
+        engine.regs.set(0x205, 1 << 12); // IsLinear
+        engine.regs.set(0x206, 1);
+        // Viewport 0: x=0,y=0,w=16,h=8.
+        engine.regs.set(0x300, 16 << 16);
+        engine.regs.set(0x301, 8 << 16);
+        // SetProgramRegion.
+        engine.regs.set(0x582, (base >> 32) as u32);
+        engine.regs.set(0x583, base as u32);
+        // SetProgram[VertexB] (StageId 1): enabled, offset 0x200.
+        engine.regs.set(0x800 + 0x10, 1 | (1 << 4));
+        engine.regs.set(0x800 + 0x11, 0x200);
+        engine.regs.set(0x800 + 0x13, 8);
+        // SetProgram[Fragment] (StageId 5): enabled, offset 0x300.
+        engine.regs.set(0x800 + 5 * 0x10, 1 | (5 << 4));
+        engine.regs.set(0x800 + 5 * 0x10 + 1, 0x300);
+        engine.regs.set(0x800 + 5 * 0x10 + 3, 8);
+        // VertexAttribState[0] = aPosition: buffer 0, offset 0, 4x32 float.
+        engine.regs.set(0x458, 0x01 << 21 | 7 << 27);
+        // VertexAttribState[1] = aColor: buffer 0, offset 16, 4x32 float.
+        engine.regs.set(0x458 + 1, (16 << 7) | (0x01 << 21) | (7 << 27));
+        // VertexArray[0]: stride 32, enabled.
+        engine.regs.set(0x700, 32 | (1 << 12));
+        engine.regs.set(0x701, (vbuf_addr >> 32) as u32);
+        engine.regs.set(0x702, vbuf_addr as u32);
+        engine.regs.set(0x7C0, (vbuf_addr >> 32) as u32);
+        engine.regs.set(0x7C1, vbuf_addr as u32 + 3 * 32);
+
+        engine.last_draw = DrawCall { primitive: 4, first: 0, count: 3, indexed: false, index_format: 0 };
+        (mem, vmm, engine)
+    }
+
+    fn write_vertex(mem: &mut Memory, vmm: &AddressSpace, base: u64, index: u32, pos: [f32; 4], color: [f32; 4]) {
+        let addr = base + index as u64 * 32;
+        for (i, v) in pos.iter().enumerate() {
+            vmm.write_u32(mem, addr + i as u64 * 4, v.to_bits()).unwrap();
+        }
+        for (i, v) in color.iter().enumerate() {
+            vmm.write_u32(mem, addr + 16 + i as u64 * 4, v.to_bits()).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_solid_colour_triangle_matches_a_clear_color_equivalent_fill() {
+        let (mut mem, vmm, engine) = pipeline_harness();
+        let vbuf_addr = engine.vertex_array(0).start;
+        let color = [0.2f32, 0.4, 0.6, 1.0];
+        // Screen (0,0)-(16,0)-(0,8): covers the whole 16x8 target's upper
+        // triangle half. clip.w = 1 everywhere (no projection), so NDC and
+        // clip are the same.
+        write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: true };
+        draw(&engine, &mut ctx).unwrap();
+
+        let rt = engine.render_target(0).unwrap().unwrap();
+        let expected = rt.format.encode(color).unwrap();
+        // (2,2) and (0,0) are inside the covered half; (12,6) is in the
+        // untouched half and must still read as the mapping's initial zero.
+        assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
+        assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(2 * 4, 2, 16 * 4) as u64).unwrap() as u128, expected);
+        assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(12 * 4, 6, 16 * 4) as u64).unwrap(), 0);
+    }
+
+    #[test]
+    fn three_vertex_colours_interpolate_correctly_at_a_known_interior_point() {
+        let (mut mem, vmm, engine) = pipeline_harness();
+        let vbuf_addr = engine.vertex_array(0).start;
+        let red = [1.0f32, 0.0, 0.0, 1.0];
+        let green = [0.0f32, 1.0, 0.0, 1.0];
+        let blue = [0.0f32, 0.0, 1.0, 1.0];
+        write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], red);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], green);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], blue);
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: true };
+        draw(&engine, &mut ctx).unwrap();
+
+        let rt = engine.render_target(0).unwrap().unwrap();
+        // Pixel (4,2), centre (4.5,2.5): barycentric weights against
+        // (0,0)-(16,0)-(0,8) are (0.40625, 0.28125, 0.3125).
+        let expected_color = [
+            0.40625 * red[0] + 0.28125 * green[0] + 0.3125 * blue[0],
+            0.40625 * red[1] + 0.28125 * green[1] + 0.3125 * blue[1],
+            0.40625 * red[2] + 0.28125 * green[2] + 0.3125 * blue[2],
+            1.0,
+        ];
+        let expected = rt.format.encode(expected_color).unwrap();
+        let va = rt.addr + rt.layout.offset(4 * 4, 2, 16 * 4) as u64;
+        assert_eq!(ctx.read_u32(va).unwrap() as u128, expected);
+    }
+
+    #[test]
+    fn depth_test_passes_matches_dkcompareop() {
+        assert!(!depth_test_passes(1, 0.1, 0.5)); // Never
+        assert!(depth_test_passes(2, 0.1, 0.5)); // Less
+        assert!(!depth_test_passes(2, 0.5, 0.5));
+        assert!(depth_test_passes(3, 0.5, 0.5)); // Equal
+        assert!(depth_test_passes(4, 0.5, 0.5)); // Lequal
+        assert!(depth_test_passes(5, 0.6, 0.5)); // Greater
+        assert!(depth_test_passes(6, 0.6, 0.5)); // NotEqual
+        assert!(depth_test_passes(7, 0.5, 0.5)); // Gequal
+        assert!(depth_test_passes(8, 0.9, 0.1)); // Always
+    }
+
+    #[test]
+    fn blend_factor_reads_src_and_dst_color_and_alpha() {
+        let src = [1.0, 0.5, 0.25, 0.75];
+        let dst = [0.0, 1.0, 0.0, 0.2];
+        let constant = [0.1, 0.2, 0.3, 0.4];
+        assert_eq!(blend_factor(1, src, dst, constant), [0.0; 4]); // Zero
+        assert_eq!(blend_factor(2, src, dst, constant), [1.0; 4]); // One
+        assert_eq!(blend_factor(3, src, dst, constant), src); // SrcColor
+        assert_eq!(blend_factor(5, src, dst, constant), [0.75; 4]); // SrcAlpha
+        assert_eq!(blend_factor(6, src, dst, constant), [0.25; 4]); // InvSrcAlpha
+        assert_eq!(blend_factor(9, src, dst, constant), dst); // DstColor
+        assert_eq!(blend_factor(33, src, dst, constant), constant); // ConstColor
+    }
+
+    #[test]
+    fn blend_composites_the_default_alpha_blend_state() {
+        // dkBlendStateDefaults: colorBlendOp=Add, src=SrcAlpha, dst=InvSrcAlpha;
+        // alphaBlendOp=Add, src=One, dst=Zero -- so out.a is just src.a.
+        let target = BlendTarget {
+            enabled: true,
+            equation_rgb: 1,
+            func_rgb_src: 5,
+            func_rgb_dst: 6,
+            equation_alpha: 1,
+            func_alpha_src: 2,
+            func_alpha_dst: 1,
+        };
+        let src = [1.0, 0.0, 0.0, 0.5]; // 50% opaque red
+        let dst = [0.0, 0.0, 1.0, 1.0]; // opaque blue
+        let out = blend(target, [0.0; 4], src, dst);
+        assert_eq!(out, [0.5, 0.0, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn depth_test_keeps_the_nearer_of_two_overlapping_triangles() {
+        let (mut mem, vmm, mut engine) = pipeline_harness();
+        let vbuf_addr = engine.vertex_array(0).start;
+        let depth_addr = vbuf_addr + 0x200; // past the vertex buffer, still inside the mapped region.
+
+        engine.regs.set(0x3F8, (depth_addr >> 32) as u32);
+        engine.regs.set(0x3F9, depth_addr as u32);
+        engine.regs.set(0x3FA, 0x0A); // Z32Float
+        engine.regs.set(0x3FB, 0); // block_height_gobs = 1
+        engine.regs.set(0x48A, 16);
+        engine.regs.set(0x48B, 8);
+        engine.regs.set(0x4B3, 1); // DepthTestEnable
+        engine.regs.set(0x4BA, 1); // DepthWriteEnable
+        engine.regs.set(0x4C3, 2); // DepthTestFunc = Less
+
+        {
+            // Clear depth to 1.0 (far) first, as real content always does —
+            // an unwritten (zeroed) depth buffer would otherwise read as the
+            // nearest possible value and reject every draw.
+            let mut host1x = Host1x::new();
+            let mut stats = Default::default();
+            let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+            engine.regs.set(0x364, 1.0f32.to_bits()); // CLEAR_DEPTH
+            engine.write(0x674, 0b1, true, &mut ctx).unwrap(); // CLEAR_BUFFERS: clear_depth
+        }
+
+        let near = [0.2f32, 0.8, 0.2, 1.0];
+        let far = [0.8f32, 0.2, 0.2, 1.0];
+
+        // Far triangle first, at NDC z = 0.5 (covers the whole target).
+        write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.5, 1.0], far);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.5, 1.0], far);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.5, 1.0], far);
+        {
+            let mut host1x = Host1x::new();
+            let mut stats = Default::default();
+            let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+            draw(&engine, &mut ctx).unwrap();
+        }
+        // Near triangle second, at NDC z = -0.5 (closer — smaller depth).
+        write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, -0.5, 1.0], near);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, -0.5, 1.0], near);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, -0.5, 1.0], near);
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        draw(&engine, &mut ctx).unwrap();
+
+        let rt = engine.render_target(0).unwrap().unwrap();
+        let expected = rt.format.encode(near).unwrap();
+        assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
+
+        // Drawing the far triangle a third time must not overwrite the
+        // nearer surface already there.
+        write_vertex(ctx.mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.5, 1.0], far);
+        write_vertex(ctx.mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.5, 1.0], far);
+        write_vertex(ctx.mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.5, 1.0], far);
+        draw(&engine, &mut ctx).unwrap();
+        assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
+    }
+}

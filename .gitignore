@@ -2,3 +2,4 @@
 *.wasm
 *.nro
 .DS_Store
+*.bndb

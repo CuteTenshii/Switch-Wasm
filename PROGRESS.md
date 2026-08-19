@@ -257,6 +257,317 @@ Gamepad and keyboard input is wired end-to-end:
   after use, and `toWasm` re-fetches the linear-memory buffer (which is
   detached on growth).
 
+## NCA body decryption and launching — verified against a real title
+
+Previously an NCA could only be *inspected* (header metadata) — there was no
+path from "this is a Program NCA" to "boot its executable". That gap is
+closed and **proven against a real commercial title** ("A Short Hike"),
+decrypted end-to-end with its own SHA-256 hash verified against Nintendo's own
+stored master hash — not a synthetic test. Given `prod.keys` (and either a
+`title.keys` entry or, more commonly, the ticket a scene NSP release bundles
+right next to the content), the emulator decrypts a Program NCA's ExeFS
+section, extracts `main` and boots it, via a "Launch" button on Program NCAs
+in the NSP inspector — for an NCA embedded in an NSP
+(`switch_load_nca_from_nsp`) or a standalone `.nca` dropped directly
+(`switch_load_nca`) — both funnel into `Cpu::boot_program`. A CLI equivalent
+(`cargo run -p switch-core --example boot_nsp -- <nsp> <prod.keys>
+[title.keys]`) exists for debugging without a browser.
+
+The pieces:
+
+- **`crypto.rs`**: AES-128-CTR (cross-checked against `openssl enc
+  -aes-128-ctr`) and SHA-256 (cross-checked against `hashlib`), alongside the
+  existing AES-ECB/XTS used for headers.
+- **`keys.rs`**: `key_area_key_<application|ocean|system>_XX` and
+  `titlekek_XX` parsed directly from `prod.keys` (by generation suffix), like
+  `header_key` — stored as dumped, not derived, since deriving them needs
+  Nintendo's secret seed constants this project doesn't embed.
+- **`ticket.rs`**: parses an ES ticket (`.tik`) and decrypts its title key
+  (Common crypto only — Personalized needs a console's ETicket RSA key,
+  out of scope). `find_and_decrypt_title_key` locates `<rights_id-hex>.tik`
+  among an NSP's files, so a title-key-crypto title works out of the box
+  without a separate personal `title.keys` dump, the same way real scene
+  releases are set up to be opened.
+- **`nca.rs`**: decrypts the 4 per-section FS headers, unlocks the AES-CTR
+  section key (ticket/`title.keys` title key for rights-id titles, key-area
+  slot 2 otherwise), decrypts a section body, and verifies it against the FS
+  header's own master hash before trusting it — AES-CTR with the wrong key
+  still "decrypts" into plausible-looking garbage, so this hash check is the
+  only way to know the keys were actually right (and is how the bugs below
+  were actually found and fixed, by treating a real file as an oracle rather
+  than trusting the public spec by itself).
+- **`lz4.rs`** / **`nso.rs`**: raw-block LZ4 decompression and the NSO0
+  loader (three segments + BSS, like NRO, but per-segment compressed and
+  with no external relocator — the linked crt0 relocates itself).
+- **`Cpu::boot_program`**: places the NSO and jumps to its entry — no
+  homebrew ABI env block to set up for a retail program.
+
+Bugs a real file caught that no synthetic test could (each confirmed via the
+master-hash oracle, which flips from "mismatch" to "match" the instant the
+fix lands):
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| A real Program NCA's section 0 decoded at a multi-terabyte offset, 1 byte long | The section table entry is `u32 start_offset; u32 end_offset` in 0x200-byte media units, not a `u64 offset; u64 size` byte pair | `SectionHeader` parsing now reads the u32 pair and scales by 0x200 |
+| AES-CTR decrypted to garbage (hash mismatch) even with the *correct* title key | The AES-CTR counter's low 8 bytes reset to 0 at each section's start; Nintendo's own `nca_calculate_section_ctr` runs the counter across the section's *absolute* position in the file instead | `FsHeader::initial_counter` takes the section's `media_offset` and seeds the counter with `media_offset >> 4` |
+| Resolved title key decrypted to garbage even with the right ticket bytes | The ticket's `common_key_id` needs the same "stored value is one more than the real generation, except 0" adjustment the NCA header's key-area generation already gets — `common_key_id` 0x0b needs `titlekek_0a`, not `titlekek_0b` | `Ticket::master_key_revision` applies `saturating_sub(1)` |
+| Inspector showed "Crypto: cleartext" and "File size: 0 B" for an obviously-encrypted, 304 MiB real NCA | `crypto_type` (0x21C) is 0 for title-key-crypto titles by design (it only describes key-*area* crypto) — not a bug, just an incomplete check; separately, `file_size` was read from 0x340, which isn't where content size actually lives | `is_encrypted()` now also checks `has_rights_id()`; `file_size`/`program_id` moved to their real offsets (0x208, 0x210 — found by searching the decrypted header for the byte pattern of the file's known real size) |
+
+**Real entry point found and fixed**: the ExeFS extracts a completely real,
+sensible layout (`main`, `main.npdm`, `rtld`, `sdk`, `subsdk0`), and `main`
+now actually executes. The first fault was at the very first instruction —
+confirmed (via the raw LZ4 literal bytes, not just decompression output) to
+be genuine file content: `.text` starts with `00 00 00 00 / 00 00 00 08 /
+"MOD0"`, a `ModulePtr`/MOD0 header (data), not a branch instruction the way
+devkitA64 homebrew's crt0 starts. Disassembling forward with the project's
+own disassembler (`switch_core::disasm`) found where real code actually
+begins: everything up to `.text`+0x30 decodes as garbage (it's the
+`ModulePtr` + `MOD0` header + alignment padding), and at exactly 0x30 a
+textbook crt0 prologue appears (`sub sp, sp, #0x90` / `stp x29, x30, [...]`)
+followed by the same constructor-array-iteration pattern (`blr` in a loop)
+homebrew's own crt0 runs. `nso::load_nso` now reports `entry` as `.text`+
+[`NSO_ENTRY_OFFSET`] (0x30) instead of `.text`+0 — real SDK-linked NSOs, not
+just this title, since the ModulePtr/MOD0/padding layout is a fixed part of
+the format, not something that varies per build.
+
+Booting "A Short Hike"'s `main` with this fix now runs 61 real instructions
+(up from 0) before faulting on the next missing piece — a genuinely new,
+separate wall (not a decoding bug in the entry sequence, which behaves
+exactly like a normal function call/return so far). Beyond that: a much
+larger service surface (`acc`, `ns`, `aoc`, `bcat`, …) than any homebrew has
+ever needed, and no shader core — expect real titles to run only until the
+next missing piece, the same "boot as far as it goes" pattern as everything
+else in this file.
+
+## RomFS mounting — verified against a real title
+
+`OpenDataStorageByCurrentProcess` (fsp-srv cmd 200) hands back an `IStorage`
+backed by `Cpu`'s decrypted RomFS bytes (`Cpu::set_romfs`, `fs_storage_request`
+in `ipc.rs`) — cmd 0 = `Read(offset, size)`, cmd 4 = `GetSize`. This is
+deliberately thin: libnx's `romfsMount`/`nn::fs::MountRom` parse the RomFS
+header and directory/file tables entirely in guest code against raw byte
+reads, so the host only ever needs to serve byte ranges, never parse the
+filesystem itself. `Nca::romfs_section_index`/`decrypt_romfs_section` find
+and decrypt the section, then slice out the actual RomFS body (see below —
+it isn't at byte 0), sanity-checked against RomFS's own `header_size` field
+(always 0x50).
+
+**Fixing this needed a real reference implementation, not just the public
+wiki write-up.** The AES-CTR key and counter construction were both already
+byte-for-byte correct (independently confirmed: building `hactool` from
+source — `/Users/thelio/Perso/hactool` — and pointing it at this exact NCA
+with these exact keys reproduces the identical `Section CTR` and decrypted
+title key this project computes). The actual bug was architectural: an IVFC
+(`HierarchicalIntegrity`) section is a multi-level hash tree — byte 0 of the
+decrypted section is Level 0's (coarsest) hash table, not RomFS's own header.
+The real RomFS data lives at the *last* level's `logical_offset`
+(`FsHeader::romfs_data_offset`, parsed from the FS header's `ivfc_hdr_t`,
+always `level_headers[5]` — hactool's own `nca.c` reads a fixed index 5
+regardless of the header's `num_levels` field, which reads `7` on this real
+file despite the level array only holding 6 entries; deriving the index from
+it instead of hardcoding 5 reads 24 bytes into the trailing padding and
+silently returns 0). Once addressed, "A Short Hike"'s ~276 MiB RomFS section
+decrypts cleanly on every run — same title key, same `decrypt_section` code
+path as the already-hash-verified ExeFS, just sliced at the right offset.
+
+Along the way, `hactool` also confirmed two things about the ticket/title-key
+work from the previous session were exactly right: the decrypted title key
+(`95c1b034b8151c9d058126216efde161`) and the `common_key_id` → `titlekek`
+generation adjustment (hactool independently reports "Master Key Revision:
+0xA" for `common_key_id` `0x0b`, matching `Ticket::master_key_revision`'s
+`saturating_sub(1)`).
+
+**Byte-for-byte correction to the FS header field names**: cross-checking
+against `nca_fs_header_t` also caught that this project's `fs_type`/`hash_type`
+field names were swapped relative to hactool's actual struct — byte 2 is
+`partition_type` (0=RomFs, 1=Pfs0), byte 3 is `fs_type` (2=Pfs0, 3=RomFs) and
+doubles as what this project called `hash_type` (there's no separate hash-type
+byte). The byte *positions* being read were already right, so this was a
+naming fix, not a behavior change — `exefs_section_index`/`romfs_section_index`
+now use the real names.
+
+Loading a title with no RomFS section (Meta/Control-only) or one whose RomFS
+decrypt fails still boots (`main` still runs, or tries to) — this is treated
+as optional and non-fatal, same as a missing Horizon service. Full multi-level
+IVFC hash verification (walking all 6 levels, the way `decrypt_pfs0_section`
+verifies `HierarchicalSha256`) isn't implemented — only the `header_size`
+sanity check — so a corruption subtler than "wrong key" wouldn't be caught.
+
+
+## Multi-module loading (`rtld`+`main`+`subsdk`+`sdk`) — real entry-point bug found and fixed
+
+A retail title's ExeFS is multiple NSO modules sharing one address space
+(`rtld`, `main`, `subsdk0..9`, `sdk`), not just `main` — `main`'s own
+GOT/PLT-style indirect calls are unrelocated until `rtld` (Nintendo's own
+runtime linker, loaded and run *first*) processes them.
+`Cpu::boot_retail_program` now loads every present module sequentially at
+page-aligned addresses (`collect_modules` in `switch-wasm`, in Nintendo's
+required order) and jumps to `rtld`'s entry instead of `main`'s.
+
+**Bug found by tracing "A Short Hike"'s real `rtld` for 25 million
+instructions**: it ran cleanly for a long time, then hit
+`unimplemented instruction 0x00000000` deep inside its own module — at an
+address that, moments earlier, held a legitimate `stp`/`add`/`cmp`/`b.hi`
+zero-fill loop. The loop was overwriting its own code. Root cause:
+[`NSO_ENTRY_OFFSET`] (`.text`+0x30) is only correct for modules that actually
+have a `ModulePtr`/`MOD0` header at `.text`+0 (`main`/`subsdk*`/`sdk` do —
+confirmed earlier by disassembling a real module's `.text`+0, which is inert
+data up to +0x30 where a textbook crt0 begins). **`rtld` has no such
+header** — its `.text`+0 is real code: a `b` that skips an inline
+PC-relative literal used by a `bl`+literal idiom (`bl #8; .word disp;
+ldr wN,[x30]; sbfx; add xN,xN,x30`) to compute its own load address, since
+`rtld` must establish where it was loaded before it can do anything else,
+including finding its own `MOD0`. Jumping straight past that bootstrap (as
+`.text`+0x30 does) left `x0` — meant to hold `rtld`'s own base address — at
+`0`, so a later `bss_end - base` computation produced a ~4 GB byte count fed
+to that zero-fill loop, which walked forward through nearly the entire
+32-bit address space until it reached back around into its own `.text` and
+clobbered the very instructions running it. `nso::entry_offset` now checks
+for the `ModulePtr`+`MOD0` signature (`reserved==0` at `.text`+0, magic
+`"MOD0"` at the offset it points to) instead of assuming it's always there;
+absent it, entry is `.text`+0.
+
+With that fixed, `rtld`'s real bootstrap runs correctly (byte count for the
+zero-fill is now a sane `0xe8`, not billions) — and it gets *much* further
+before its next fault, at instruction 9727 instead of 25 million:
+`br x16` to a null pointer, from a lazy-PLT-style resolver trampoline
+(`mov x16, x0` / spill args / call resolver / reload args / `br x16`). The
+program's own console output names exactly what it was trying to resolve:
+`[rtld] Unresolved symbol: '_ZN2nn4init5StartEmmPFvvES2_'`
+(`nn::init::Start`, normally exported by the `sdk` module).
+
+**This turned out not to need a loader-config handoff at all — `rtld`
+doesn't wait to be told what modules exist, it finds them itself.**
+Disassembling the whole 6790-byte module (small enough to read start to
+finish) turned up its actual discovery algorithm, right down to the exact
+filter it applies: a loop that calls `svcQueryMemory` (the only `svc #0x6`
+in the module) across the address space and, for each region, checks
+`type == 3` (`CodeStatic`) *and* `perm == 5` (`R-X`, built as
+`movz w24,#0x4f4d; movk w24,#0x3044` — literally the `"MOD0"` magic,
+compared against `[region_base + mod0_offset]`) before treating it as a
+module and processing its dynamic/export table. Two things broke this in
+this project's own `svcQueryMemory` stub (`svc.rs`, `0x06`): it reported a
+blanket RWX (`0b111`) permission on every mapped page instead of real R-X on
+`.text`, so no region ever matched `perm == 5` and every other module was
+invisible to the scan; and `Memory`'s read-only tracking
+(`Memory::mark_readonly`, backing `.text` write-protection) held only a
+*single* `(start, end)` range, silently unprotecting every earlier module's
+`.text` each time a later one loaded — fine for a lone homebrew NRO, wrong
+for four back-to-back NSOs. Fixed by turning `Memory`'s read-only tracking
+into a list of ranges (one push per loaded module, `Memory::is_readonly`
+checks all of them) and having `svcQueryMemory` consult it to report R-X
+specifically on `.text` pages, RWX elsewhere — reusing the exact ranges
+already tracked for write-protection rather than adding a parallel table.
+
+Both fixes together took "A Short Hike"'s real ExeFS from faulting inside
+`rtld` at instruction 51 (before any of this session's work) to running
+**116 million instructions** — through `rtld`'s relocation of itself and the
+other three modules, `main`'s init, `subsdk0`, and into `sdk`'s own code —
+before hitting a deliberate `svcBreak` (an SDK-side abort call, not a CPU
+crash) inside `sdk`. That's expected: this project has no Horizon service
+support for retail games yet, so a real title is expected to run until the
+first missing service or explicit abort rather than reach a menu — but it's
+the first time a real retail title's actual multi-module boot sequence has
+run this deep.
+
+### Chasing the `svcBreak` itself — real Horizon `InfoType_RandomEntropy` gap found, root cause of *this* abort still open
+
+Traced the exact `svcBreak(reason=Panic, arg=&1u32, size=4)` call site by
+walking the frame-pointer chain (`Cpu::backtrace`) instead of raw
+instruction history — much cheaper than reading through the resolver's own
+symbol-hash loops, which dominate any short instruction window around a
+call this deep in `sdk`. Two things came out of that:
+
+- `svcGetInfo` type `11` (`RandomEntropy` — four kernel-supplied random
+  words, real hardware's seed for stack canaries/ASLR cookies) wasn't
+  implemented at all (fell into the stub's `_ => 0` default). Confirmed via
+  the same instrumented run that `sdk` init does query it (`infoSubValue`
+  `2` and `3`) shortly before the abort. Added it (`svc.rs`, `0x29`
+  handler): a SplitMix64 mix keyed by the subvalue, so it's non-zero and
+  varies per word — there's no real entropy source to draw on, and it only
+  needs to look "not obviously broken" to whatever init-time check reads it.
+- That fix changed nothing about *this* abort — same instruction count
+  (116828674) to the same `svcBreak`, byte for byte. Disassembling the
+  final ~40 instructions before it (`0xcf11ea0`..`0xcf12090`) explains why:
+  that whole span is `sdk`'s raw per-syscall wrapper table (`svc #N; ret`,
+  one thunk per number), and the specific sequence executed right before
+  the break (`QueryMemory`, `GetThreadPriority`, `GetThreadId`, then
+  `Break`) is `nn::diag`'s abort path gathering thread/memory context to
+  attach to the crash report, not a condition being checked — by the time
+  any of that runs, the decision to abort has already been made further
+  back, in `sdk` code with no visible symbols and no distinguishing
+  landmark (no Result-code comparison, no recognizable constant) in reach
+  of frame-pointer backtracing alone.
+
+Finding *which* precondition actually fails would need either real nnSdk
+symbols to match this disassembly against, or a much deeper manual
+reverse-engineering pass than the instruction-history/backtrace tools used
+so far — a different kind of effort than the loader/`svc`-table bugs above,
+each of which had a concrete, verifiable signature (a wrong offset, a wrong
+permission code) to chase. The `RandomEntropy` fix stays in regardless: it's
+a real gap (every retail title's `sdk` init reads it) independent of whether
+it explains this specific abort.
+
+`svcBreak` (`svc.rs`, `0x26`) used to just log a bare `"[svcBreak]"` marker
+and halt, throwing away exactly the info that identified the cause the last
+few times it fired (a resolver's own `reason`/`arg`/`size` triple, the value
+`arg` points at, the call stack). It now decodes `reason` against libnx's
+`BreakReason` enum, dereferences `arg` when `size` is a plain integer width,
+and appends a `Cpu::backtrace` frame-pointer walk — all into `self.out`, so
+it shows up in the console unconditionally instead of needing trace mode on.
+
+### Chasing the abort with Binary Ninja — one real bug found and fixed, one still open
+
+Picked this back up with an actual decompiler (Binary Ninja, driven both via
+its MCP server and, for headless scripting where the MCP surface had no
+"create function" primitive, its own bundled Python API) instead of hand-
+reading disassembly. Dumped `sdk`'s loaded memory image, wrapped it in a
+synthetic ELF at its real runtime base so the tool could auto-detect
+architecture and load address, and worked backward from `Cpu::backtrace`'s
+frame-pointer walk at the halt point — each frame a function to decompile,
+each indirect call resolved by reading its GOT/vtable slot's *live* value out
+of the emulator (Binary Ninja's own view is a static snapshot; only the
+running `Cpu`'s memory reflects relocations and runtime writes).
+
+That walk reached all the way back to `nn::init::Start` itself — recognizable
+by its exact signature (two integers, two function-pointer calls), the same
+symbol `rtld` failed to resolve at the very start of this investigation,
+closing the loop. Its own internal setup calls into a chain of GOT-indirected
+helpers ending in a "does the current thread's context match what's
+expected" check (`(*arg1 & 0xbfffffff) == *(x8 + 0x1b0)`, `x8` read via
+`TPIDRRO_EL0`) that reads both sides as `0` and treats that as a match,
+walking into an unconditional abort helper.
+
+**Real bug #1, found along the way and fixed**: `TPIDR_EL0` and `TPIDRRO_EL0`
+were aliased to the same backing field (`cpu/mod.rs`/`system.rs`). Real
+AArch64 makes these two separate registers — `TPIDR_EL0` freely
+read/write by EL0, `TPIDRRO_EL0` fixed once by the kernel and read-only
+thereafter. `nnSdk`'s own init legitimately writes `TPIDR_EL0` for its own
+per-thread bookkeeping; with the two aliased, that write silently corrupted
+what should have been the *stable* kernel-provided TLS pointer everything
+else (IPC dispatch, the thread-context check above) reads through
+`TPIDRRO_EL0`. Split into `tpidr` (kernel-fixed, unchanged semantics — still
+backs IPC's TLS-relative buffer lookup and thread creation) and a new
+`tpidr_rw` (the guest-writable one). Verified with a live memory probe:
+before the fix, `TPIDRRO_EL0` read back `0` after `nnSdk`'s write (an
+address-space-near-zero pointer registration lands at literal absolute
+`0x1f8` instead of the intended `0x1fe001f8`); after, it stays at its
+bootstrap value (`0x1fe00000`) for the entire run, and the per-thread struct
+pointer registration lands at the correct address. Zero regressions
+(199/199 lib tests).
+
+**Real bug #2, still open**: that fix changed nothing about the actual
+abort — same instruction count, same backtrace, same values, confirmed by
+re-running the identical probe before and after. The struct pointer itself
+(`x8`) resolves correctly either way (self-consistent write-then-read
+regardless of which base address it's relative to); the specific field at
+`x8 + 0x1b0` is simply never written by anything, for the entire 117M-
+instruction run (confirmed with a full-run memory watch). Finding what's
+*supposed* to write it means reverse-engineering another offset in
+Nintendo's undocumented private per-thread structure — a real target, but
+without a spec to check against like the TPIDR/TPIDRRO split had, so it's
+open-ended guessing rather than a provable fix.
+
 ## deko3d / nv (unresolved)
 
 The nv GPU path is still stubbed at the service boundary:

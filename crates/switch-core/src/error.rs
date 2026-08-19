@@ -28,6 +28,15 @@ pub enum Error {
     Elf(String),
     /// The file is not an NRO we can load.
     Nro(String),
+    /// An NCA body couldn't be decrypted or extracted (missing/wrong keys,
+    /// an unsupported section encryption type, or a hash mismatch).
+    Nca(String),
+    /// The file is not an NSO we can load.
+    Nso(String),
+    /// An ES ticket couldn't be parsed or its title key couldn't be
+    /// decrypted (unknown signature type, personalized crypto, missing
+    /// titlekek).
+    Ticket(String),
     /// A CPU fault (bad memory access, invalid state, unreachable).
     Cpu(String),
     /// A GPU fault: an unmapped GPU address, a malformed command stream, or a
@@ -59,6 +68,9 @@ impl fmt::Display for Error {
             Error::Overflow => write!(f, "arithmetic overflow"),
             Error::Elf(msg) => write!(f, "ELF: {}", msg),
             Error::Nro(msg) => write!(f, "NRO: {}", msg),
+            Error::Nca(msg) => write!(f, "NCA: {}", msg),
+            Error::Nso(msg) => write!(f, "NSO: {}", msg),
+            Error::Ticket(msg) => write!(f, "ticket: {}", msg),
             Error::Cpu(msg) => write!(f, "CPU: {}", msg),
             Error::Gpu(msg) => write!(f, "GPU: {}", msg),
         }

@@ -5,6 +5,7 @@ use super::{
     PL_SHMEM_SIZE,
 };
 use crate::{Error, Result};
+use std::fmt::Write;
 
 impl Cpu {
     pub(super) fn syscall(&mut self, imm: u16) -> Result<()> {
@@ -123,16 +124,25 @@ impl Cpu {
                  // address-space walks and reservations see free space. The
                  // old stub reported the whole low 2 GiB as one RWX region,
                  // which made deko3d's AS reservation fail.
+                 //
+                 // A module's `.text` reports the real R-X permission code
+                 // (5) instead of blanket RWX: retail `rtld` discovers the
+                 // other loaded modules (`main`/`subsdk*`/`sdk`) by walking
+                 // `QueryMemory` across the address space and filtering for
+                 // exactly `type == CodeStatic (3) && perm == R-X (5)` before
+                 // checking each hit for a `MOD0` signature — reporting RWX
+                 // there makes every module invisible to that scan, so it
+                 // can never resolve a symbol from another module.
                  let out = self.read_zr(0) as u32;
                  let addr = self.read_zr(2) as u32;
-                 let state = |a: u32| self.mem.page_mapped(a & !0xFFF);
+                 let region = |a: u32| (self.mem.page_mapped(a & !0xFFF), self.mem.is_readonly(a & !0xFFF));
                  let mut base = addr & !0xFFF;
-                 while base >= 0x1000 && state(base - 0x1000) == state(base) {
+                 while base >= 0x1000 && region(base - 0x1000) == region(base) {
                      base -= 0x1000;
                  }
-                 let mapped = state(base);
+                 let (mapped, text) = region(base);
                  let mut end = base + 0x1000;
-                 while end < 0x8000_0000 && state(end) == mapped {
+                 while end < 0x8000_0000 && region(end) == (mapped, text) {
                      end += 0x1000;
                  }
                  let mut info = Vec::with_capacity(40);
@@ -141,7 +151,7 @@ impl Cpu {
                  for v in [
                      if mapped { 3u32 } else { 0 }, // type (CodeStatic / Unmapped)
                      0,
-                     if mapped { 0b111 } else { 0 }, // perm (RWX / none)
+                     if text { 5u32 } else if mapped { 0b111 } else { 0 }, // perm (R-X / RWX / none)
                      0,
                      0,
                      0,
@@ -290,9 +300,18 @@ impl Cpu {
                 let cmd_id = self.ipc_command_id(tls);
                 let svc_name = self.service_name(handle).map(|s| s.to_string());
                 if std::env::var("TRACE_IPC").is_ok() {
+                    let obj = self.ipc_domain_object_id(tls);
+                    let iface = self.domain_interface(handle, obj).map(|s| s.to_string());
                     eprintln!(
-                        "[ipc] pc={:#x} h={} svc={:?} cmd={:?}",
-                        self.pc, handle, svc_name, cmd_id
+                        "[ipc] pc={:#x} h={} svc={:?} obj={} iface={:?} domain={} type={} cmd={:?}",
+                        self.pc,
+                        handle,
+                        svc_name,
+                        obj,
+                        iface,
+                        self.ipc_is_domain_request(tls),
+                        self.ipc_message_type(tls),
+                        cmd_id
                     );
                 }
                 // A Close request (message type 2) carries no command id at
@@ -325,6 +344,9 @@ impl Cpu {
                                 Some("fsp-srv-fs-file") => {
                                     self.fs_file_request(tls, cmd_id, Self::object_key(handle, object_id))?
                                 }
+                                Some("fsp-srv-storage") => {
+                                    self.fs_storage_request(tls, cmd_id)?
+                                }
                                 _ => self.fsp_srv_request(tls, cmd_id, handle)?,
                             }
                         }
@@ -338,6 +360,7 @@ impl Cpu {
                         "fsp-srv-fs-file" => {
                             self.fs_file_request(tls, cmd_id, Self::object_key(handle, 0))?
                         }
+                        "fsp-srv-storage" => self.fs_storage_request(tls, cmd_id)?,
                         "vi:m" | "vi:m:" => self.vi_request(tls, handle, cmd_id)?,
                         "set" => self.set_request(tls, cmd_id)?,
                         "nvdrv" | "nvdrv:" | "nvdrv:a" | "nvdrv:a:" | "nvdrv:s" | "nvdrv:t" => {
@@ -379,6 +402,22 @@ impl Cpu {
                             }
                         }
                         "psm-session" => self.psm_session_request(tls, cmd_id)?,
+                        // appletOE (application applet) / appletAE (everything
+                        // else). Both are the same IApplicationProxyService/
+                        // IApplicationProxy/ICommonStateGetter chain.
+                        "appletOE" | "appletAE" => self.applet_request(tls, handle, cmd_id)?,
+                        "nifm:u" => {
+                            let object_id = self.ipc_domain_object_id(tls);
+                            match self.domain_interface(handle, object_id) {
+                                Some("nifm:general-service") => {
+                                    self.nifm_general_service_request(tls, handle, cmd_id)?
+                                }
+                                Some("nifm:request") => self.write_ipc_response(tls, 0, &[], &[], &[])?,
+                                _ => self.nifm_request(tls, cmd_id, handle)?,
+                            }
+                        }
+                        "audren:u" => self.audren_request(tls, cmd_id)?,
+                        "audren:iaudiorenderer" => self.audren_renderer_request(tls, cmd_id, handle)?,
                          name => {
                              // Known service, no dedicated stub. The applet
                              // services get the state values their init polls
@@ -458,18 +497,68 @@ impl Cpu {
                 Ok(())
             }
             0x24 => {
-                // GetProcessId
-                self.write_zr(0, 1);
+                // GetProcessId(out_process_id, process_handle): Result in
+                // X0, id in X1 — the caller's wrapper stores X1 through the
+                // out pointer. Confirmed wrong by tracing a real title's
+                // `sdk` init through Binary Ninja: it treats any non-zero X0
+                // as failure, and this used to hand back X0=1 (looking like
+                // a "successful" id 1, but actually read as an error code)
+                // with X1 left stale, sending real code down an error path
+                // that ultimately aborted.
+                self.write_zr(0, RESULT_OK);
+                self.write_zr(1, 1);
                 Ok(())
             }
             0x25 => {
-                // GetThreadId
-                self.write_zr(0, 1);
+                // GetThreadId(out_thread_id, handle): same shape and same
+                // fix as GetProcessId above.
+                self.write_zr(0, RESULT_OK);
+                self.write_zr(1, 1);
                 Ok(())
             }
             0x26 => {
-                // Break: fatal debugger trap — surface and stop.
-                self.out.extend_from_slice(b"[svcBreak]\n");
+                // Break(reason, arg, size): fatal debugger trap. Nintendo's
+                // own abort path (nn::diag::detail::AbortImpl) reaches this
+                // with real diagnostic info attached — a reason code and an
+                // arg/size pair the caller chose to hand the debugger — and
+                // a plain "[svcBreak]" marker was throwing all of it away.
+                // Decode the reason, dereference the arg pointer when its
+                // size is a plain integer width, and include a
+                // frame-pointer backtrace: together, exactly what identified
+                // the real cause the last few times this fired (an
+                // unresolved symbol, a missing InfoType) without needing an
+                // ad hoc debug build to see it.
+                let reason = self.read_zr(0);
+                let arg = self.read_zr(1);
+                let size = self.read_zr(2);
+                let reason_name = match reason & 0xFF {
+                    0 => "Panic",
+                    1 => "Assert",
+                    2 => "User",
+                    3 => "PreLoadDll",
+                    4 => "PostLoadDll",
+                    5 => "PreUnloadDll",
+                    6 => "PostUnloadDll",
+                    7 => "CppException",
+                    _ => "Unknown",
+                };
+                let mut msg = format!(
+                    "[svcBreak] reason={reason_name} ({reason:#x}) arg={arg:#x} size={size:#x}"
+                );
+                if let Some(value) = match size {
+                    1 => self.mem.read_u8(arg as u32).ok().map(u64::from),
+                    2 => self.mem.read_u16(arg as u32).ok().map(u64::from),
+                    4 => self.mem.read_u32(arg as u32).ok().map(u64::from),
+                    8 => self.mem.read_u64(arg as u32).ok(),
+                    _ => None,
+                } {
+                    let _ = write!(msg, " value={value:#x}");
+                }
+                msg.push('\n');
+                for addr in self.backtrace(16) {
+                    let _ = write!(msg, "  {addr:#010x}\n");
+                }
+                self.out.extend_from_slice(msg.as_bytes());
                 self.halted = true;
                 Ok(())
             }
@@ -492,7 +581,8 @@ impl Cpu {
                  // value in X1 (the libnx wrapper stores it to the out
                  // pointer). The InfoType numbering here matches the libnx
                  // build hbmenu is compiled against: 2/3 Alias, 4/5 Heap,
-                 // 6/7 Total/Used memory, 12/13 Aslr, 14/15 Stack.
+                 // 6/7 Total/Used memory, 11 RandomEntropy, 12/13 Aslr, 14/15
+                 // Stack.
                  let info_type = self.read_zr(1);
                  let value = match info_type {
                      2 => 0x0000_0010_0000_0000, // AliasRegionAddress
@@ -503,6 +593,26 @@ impl Cpu {
                      7 => 0,         // UsedMemorySize
                      8 => 0,         // DebuggerAttached
                      9 => 0,         // ResourceLimit
+                     // RandomEntropy: 4 words (infoSubValue 0..3) of kernel-
+                     // supplied randomness, real hardware's seed for stack
+                     // canaries/ASLR cookies. Real `sdk` startup (confirmed by
+                     // tracing "A Short Hike"'s actual `rtld`+`sdk` boot)
+                     // fetches two of these words and aborts
+                     // (`svcBreak`/Panic) if what comes back looks unusable —
+                     // an all-zero entropy pool reads as "broken RNG", not
+                     // "no RNG", to security-conscious SDK init. There's no
+                     // real entropy source to draw on here, so this returns
+                     // *some* non-zero, per-subvalue-varying bits (SplitMix64
+                     // keyed by the subvalue) rather than a cryptographically
+                     // meaningful seed — it only needs to satisfy that "not
+                     // obviously broken" check, not actually secure anything.
+                     11 => {
+                         let sub = self.read_zr(3).wrapping_add(1);
+                         let mut z = sub.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                         z ^ (z >> 31)
+                     }
                      12 => 0x0800_0000, // AslrRegionAddress
                      13 => 0x1F00_0000, // AslrRegionSize
                      // Where thread stacks get mirrored. It has to be clear of

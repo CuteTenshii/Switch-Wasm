@@ -7,8 +7,12 @@
 //! Phase 1 provides a full AArch64 integer interpreter ([`cpu::Cpu`]) that can
 //! boot hand-assembled and simple compiled homebrew.
 //!
-//! Commercial game content is encrypted and requires console keys; that is
-//! deliberately out of scope.
+//! Commercial game content (NCA) can be decrypted and its main executable
+//! (NSO0) loaded when the caller supplies `prod.keys`/`title.keys` — see
+//! [`nca`] and [`nso`]. That only gets a real title as far as its own crt0;
+//! actually running one needs the Horizon service surface a retail SDK
+//! program expects, which is a much larger undertaking than homebrew ever
+//! needed and is tracked separately in `PROGRESS.md`.
 
 pub mod cpu;
 pub mod crypto;
@@ -18,10 +22,13 @@ pub mod elf;
 pub mod error;
 pub mod gpu;
 pub mod keys;
+pub mod lz4;
 pub mod mem;
 pub mod nca;
 pub mod nro;
+pub mod nso;
 pub mod nsp;
+pub mod ticket;
 pub mod vfs;
 
 pub use error::{Error, Result};

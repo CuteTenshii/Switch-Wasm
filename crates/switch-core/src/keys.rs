@@ -8,12 +8,37 @@
 
 use crate::crypto::aes128_ecb_decrypt;
 
-/// Parsed keysets with everything needed to decrypt NCA headers.
+/// Number of key generations (`_00`.._1f`) prod.keys dumps carry per key kind.
+pub const KEY_GENERATION_COUNT: usize = 0x20;
+
+/// Which of the three "key area" key families decrypts an NCA's embedded key
+/// area, selected by the NCA header's key index byte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAreaKind {
+    Application,
+    Ocean,
+    System,
+}
+
+impl KeyAreaKind {
+    pub fn from_index(index: u8) -> Option<KeyAreaKind> {
+        match index {
+            0 => Some(KeyAreaKind::Application),
+            1 => Some(KeyAreaKind::Ocean),
+            2 => Some(KeyAreaKind::System),
+            _ => None,
+        }
+    }
+}
+
+/// Parsed keysets with everything needed to decrypt NCA headers and bodies.
 #[derive(Debug, Default, Clone)]
 pub struct KeySet {
     /// 32-byte NCA header key (directly, if provided).
     pub header_key: Option<[u8; 32]>,
-    /// Title keys by rights id (16 bytes each) from `title.keys`.
+    /// Title keys by rights id (16 bytes each) from `title.keys`. These are
+    /// already-decrypted per-title keys (what Lockpick_RCM dumps), so no
+    /// further derivation is needed to use one as an NCA section key.
     pub title_keys: Vec<([u8; 16], [u8; 16])>,
     // Sources for deriving the header key (prod.keys).
     pub header_key_source: Option<[u8; 32]>,
@@ -21,6 +46,18 @@ pub struct KeySet {
     pub master_key_00: Option<[u8; 16]>,
     pub aes_kek_generation_source: Option<[u8; 16]>,
     pub aes_key_generation_source: Option<[u8; 16]>,
+    /// `key_area_key_application_XX` / `_ocean_XX` / `_system_XX`, indexed by
+    /// key generation. Like `header_key`, these are stored directly rather
+    /// than derived — that's what prod.keys dumps (Lockpick_RCM) provide, and
+    /// deriving them would need Nintendo's secret seed constants, which this
+    /// project does not embed.
+    pub key_area_key_application: [Option<[u8; 16]>; KEY_GENERATION_COUNT],
+    pub key_area_key_ocean: [Option<[u8; 16]>; KEY_GENERATION_COUNT],
+    pub key_area_key_system: [Option<[u8; 16]>; KEY_GENERATION_COUNT],
+    /// `titlekek_XX`, indexed by key generation — decrypts a "Common"-crypto
+    /// ticket's title-key block (see `ticket.rs`). Stored directly, like the
+    /// key-area keys above.
+    pub titlekek: [Option<[u8; 16]>; KEY_GENERATION_COUNT],
 }
 
 impl KeySet {
@@ -30,6 +67,22 @@ impl KeySet {
             .iter()
             .find(|(id, _)| id == rights_id)
             .map(|(_, k)| k)
+    }
+
+    /// Look up a key-area key by kind and generation (the NCA header's key
+    /// index and key generation byte).
+    pub fn key_area_key(&self, kind: KeyAreaKind, generation: u8) -> Option<[u8; 16]> {
+        let table = match kind {
+            KeyAreaKind::Application => &self.key_area_key_application,
+            KeyAreaKind::Ocean => &self.key_area_key_ocean,
+            KeyAreaKind::System => &self.key_area_key_system,
+        };
+        table.get(generation as usize).copied().flatten()
+    }
+
+    /// Look up `titlekek_<generation>`.
+    pub fn titlekek(&self, generation: u8) -> Option<[u8; 16]> {
+        self.titlekek.get(generation as usize).copied().flatten()
     }
 
     /// The 32-byte header key, either provided directly or derived from the
@@ -138,10 +191,43 @@ pub fn keyset_from_prod(entries: &[(String, Vec<u8>)]) -> KeySet {
                 k.copy_from_slice(val);
                 ks.aes_key_generation_source = Some(k);
             }
-            _ => {}
+            _ => {
+                if val.len() == 16 {
+                    if let Some((table, gen)) = key_area_table_and_generation(&mut ks, name) {
+                        let mut k = [0u8; 16];
+                        k.copy_from_slice(val);
+                        table[gen] = Some(k);
+                    }
+                }
+            }
         }
     }
     ks
+}
+
+/// Match `key_area_key_<application|ocean|system>_<XX>` or `titlekek_<XX>`
+/// and return the matching table slot and generation index, if `name` fits
+/// one of those shapes.
+fn key_area_table_and_generation<'a>(
+    ks: &'a mut KeySet,
+    name: &str,
+) -> Option<(&'a mut [Option<[u8; 16]>; KEY_GENERATION_COUNT], usize)> {
+    let suffix = name.strip_prefix("key_area_key_application_").map(|s| (s, 0));
+    let suffix = suffix.or_else(|| name.strip_prefix("key_area_key_ocean_").map(|s| (s, 1)));
+    let suffix = suffix.or_else(|| name.strip_prefix("key_area_key_system_").map(|s| (s, 2)));
+    let suffix = suffix.or_else(|| name.strip_prefix("titlekek_").map(|s| (s, 3)));
+    let (gen_hex, kind) = suffix?;
+    let gen = usize::from_str_radix(gen_hex, 16).ok()?;
+    if gen >= KEY_GENERATION_COUNT {
+        return None;
+    }
+    let table = match kind {
+        0 => &mut ks.key_area_key_application,
+        1 => &mut ks.key_area_key_ocean,
+        2 => &mut ks.key_area_key_system,
+        _ => &mut ks.titlekek,
+    };
+    Some((table, gen))
 }
 
 /// Build a [`KeySet`] title-key list from parsed `title.keys` entries. Keys
@@ -193,6 +279,31 @@ mod tests {
         let ks = keyset_from_prod(&entries);
         assert_eq!(ks.header_key.unwrap()[0], 0x00);
         assert_eq!(ks.master_key_00.unwrap()[15], 0x10);
+    }
+
+    #[test]
+    fn parses_key_area_keys_by_generation() {
+        let text = "key_area_key_application_00 = 00000000000000000000000000000000\n\
+                     key_area_key_application_01 = 11111111111111111111111111111111\n\
+                     key_area_key_ocean_1f = 22222222222222222222222222222222\n\
+                     key_area_key_system_05 = 33333333333333333333333333333333\n";
+        let entries = parse_keys_file(text);
+        let ks = keyset_from_prod(&entries);
+        assert_eq!(
+            ks.key_area_key(KeyAreaKind::Application, 0),
+            Some([0u8; 16])
+        );
+        assert_eq!(
+            ks.key_area_key(KeyAreaKind::Application, 1),
+            Some([0x11u8; 16])
+        );
+        assert_eq!(ks.key_area_key(KeyAreaKind::Ocean, 0x1f), Some([0x22u8; 16]));
+        assert_eq!(ks.key_area_key(KeyAreaKind::System, 5), Some([0x33u8; 16]));
+        // Unset generations and the wrong kind both miss.
+        assert_eq!(ks.key_area_key(KeyAreaKind::Application, 2), None);
+        assert_eq!(ks.key_area_key(KeyAreaKind::System, 0), None);
+        // Out-of-range generation index doesn't panic.
+        assert_eq!(ks.key_area_key(KeyAreaKind::Application, 0xff), None);
     }
 
     #[test]

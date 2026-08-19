@@ -972,7 +972,7 @@ impl Cpu {
     /// AdvSIMD across lanes (integer forms): `0 Q U 01110 size 11000
     /// opcode(5) 10 Rn Rd`. A horizontal reduce over every lane of Vn into
     /// a single scalar written to Vd, zeroing the rest of the register —
-    /// SADDLV/UADDLV, SMAXV/UMAXV and SMINV/UMINV.
+    /// SADDLV/UADDLV, SMAXV/UMAXV, SMINV/UMINV and ADDV.
     fn simd_across_lanes(&mut self, insn: u32) -> Result<bool> {
         let q = (insn >> 30) & 1 == 1;
         let u = (insn >> 29) & 1;
@@ -980,7 +980,7 @@ impl Cpu {
         let opcode = (insn >> 12) & 0x1F;
         let rn = ((insn >> 5) & 0x1F) as u8;
         let rd = (insn & 0x1F) as u8;
-        if size == 0b11 || !matches!(opcode, 0b00011 | 0b01010 | 0b11010) {
+        if size == 0b11 || !matches!(opcode, 0b00011 | 0b01010 | 0b11010 | 0b11011) {
             return Ok(false);
         }
         let esize = 8u32 << size;
@@ -1017,6 +1017,16 @@ impl Cpu {
                     }
                 }
                 best as u128
+            }
+            0b11011 => {
+                // ADDV: sum of all lanes wrapped to the element size — unlike
+                // SADDLV/UADDLV there is no widening, and U is always 0 (a
+                // same-width wraparound sum doesn't care about signedness).
+                let mut sum: u128 = 0;
+                for i in 0..lanes {
+                    sum = sum.wrapping_add(elem(i) as u128);
+                }
+                sum & mask
             }
             _ => unreachable!(),
         };

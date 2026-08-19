@@ -32,12 +32,16 @@ pub struct Memory {
     /// it. Unmapped pages in `[start, end)` read as zero from [`Memory::zero`]
     /// and allocate a private page on first write.
     soft: (u32, u32),
-    /// Read-only region as `(start, end)` (end-exclusive); `start > end`
-    /// disables it. Sits over the loaded image's `.text` once the loader has
-    /// finished patching it, so a guest write through a wild pointer faults
-    /// instead of silently corrupting the running code — see
-    /// [`Memory::mark_readonly`].
-    readonly: (u32, u32),
+    /// Read-only regions, each `(start, end)` (end-exclusive). Sits over each
+    /// loaded module's `.text` once the loader has finished patching it, so
+    /// a guest write through a wild pointer faults instead of silently
+    /// corrupting running code, and so `svcQueryMemory` can report the
+    /// real-world R-X permission code on it (retail `rtld` scans process
+    /// memory for other modules by filtering on exactly that permission —
+    /// see [`Memory::mark_readonly`]). A retail process loads several
+    /// modules (`rtld`/`main`/`subsdk*`/`sdk`), so this is a list, not a
+    /// single range.
+    readonly: Vec<(u32, u32)>,
     /// Shared zero page served for reads inside the soft region.
     zero: Box<[u8; PAGE_SIZE]>,
     /// How many pages currently hold real storage. Counted as they are
@@ -57,7 +61,7 @@ impl Memory {
         Memory {
             pages: vec![None; PAGE_COUNT],
             soft: (1, 0),
-            readonly: (1, 0),
+            readonly: Vec::new(),
             zero: Box::new([0u8; PAGE_SIZE]),
             mapped_pages: 0,
         }
@@ -72,17 +76,31 @@ impl Memory {
     }
 
     /// Mark `[start, end)` as read-only to the guest: a CPU store into it
-    /// faults instead of writing through. Replaces any previous read-only
-    /// region (there is only ever one loaded image). Loader-only writes
-    /// (`map`/`map_zero`/`copy_range`) are unaffected — call this once a
-    /// segment's relocations have been patched in, not before.
+    /// faults instead of writing through. Adds to the existing set of
+    /// read-only ranges (a retail process has one per loaded module) rather
+    /// than replacing it. Loader-only writes (`map`/`map_zero`/`copy_range`)
+    /// are unaffected — call this once a segment's relocations have been
+    /// patched in, not before.
     pub fn mark_readonly(&mut self, start: u32, end: u32) {
-        self.readonly = (start, end);
+        self.readonly.push((start, end));
+    }
+
+    /// Drop every read-only range, so a fresh boot in a reused [`Memory`]
+    /// doesn't inherit protection left over from a previous title/homebrew.
+    pub fn clear_readonly(&mut self) {
+        self.readonly.clear();
+    }
+
+    /// Whether `addr` falls in a range marked by [`Memory::mark_readonly`] —
+    /// in practice, always a loaded module's `.text`. Used by `svcQueryMemory`
+    /// to report the real R-X permission code on it instead of a blanket RWX.
+    pub fn is_readonly(&self, addr: u32) -> bool {
+        self.readonly.iter().any(|&(s, e)| addr >= s && addr < e)
     }
 
     #[inline(always)]
     fn check_writable(&self, addr: u32) -> Result<()> {
-        if addr >= self.readonly.0 && addr < self.readonly.1 {
+        if self.is_readonly(addr) {
             Err(Error::Cpu(format!("write to read-only address {:#010x}", addr)))
         } else {
             Ok(())

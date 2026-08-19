@@ -26,10 +26,12 @@ impl Cpu {
             let val = match sysreg {
                 // NZCV: 3:3:4:2:0
                 0b11_011_0100_0010_000 => self.nzcv as u64,
-                // TPIDR_EL0 (3:3:13:0:2) and TPIDRRO_EL0 (3:3:13:0:3):
-                // libnx reads the TLS base from one of these, set by the
-                // loader. Both are backed by the same value here.
-                0b11_011_1101_0000_010 | 0b11_011_1101_0000_011 => self.tpidr,
+                // TPIDR_EL0 (3:3:13:0:2): freely writable by guest code.
+                0b11_011_1101_0000_010 => self.tpidr_rw,
+                // TPIDRRO_EL0 (3:3:13:0:3): the kernel-fixed TLS base —
+                // read-only at EL0 on real hardware, so there is no
+                // corresponding MSR case below.
+                0b11_011_1101_0000_011 => self.tpidr,
                 // FPCR: 3:0:4:4:0
                 0b11_000_0100_0100_000 => 0,
                 // DCZID_EL0: 3:3:0:0:7 — report the Cortex-A57 DC ZVA block
@@ -86,13 +88,15 @@ impl Cpu {
         }
 
         if l == 0 && (op0 == 2 || op0 == 3) {
-            // MSR (register): write sysreg from Xt. We observe NZCV and the
-            // libnx TLS base.
+            // MSR (register): write sysreg from Xt. We observe NZCV and
+            // TPIDR_EL0 — not TPIDRRO_EL0, which real hardware makes
+            // read-only at EL0, so a guest write to it is simply ignored
+            // (matches the `_ => {}` fallthrough).
             let sysreg = (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
             match sysreg {
                 0b11_011_0100_0010_000 => self.nzcv = self.read_zr(rt) as u32,
-                0b11_011_1101_0000_010 | 0b11_011_1101_0000_011 => {
-                    self.tpidr = self.read_zr(rt)
+                0b11_011_1101_0000_010 => {
+                    self.tpidr_rw = self.read_zr(rt)
                 }
                 _ => {}
             }

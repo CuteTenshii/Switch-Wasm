@@ -311,9 +311,20 @@ pub extern "C" fn switch_parse_nca(handle: u32, ptr: *const u8, len: u32, buf: *
                 out.extend_from_slice(sec.media_offset.to_string().as_bytes());
                 out.extend_from_slice(b",\"size\":");
                 out.extend_from_slice(sec.media_size.to_string().as_bytes());
-                out.extend_from_slice(b",\"fs_type\":");
-                out.extend_from_slice(if sec.fs_type == 0 { b"\"PFS0\"" } else { b"\"ROMFS\"" });
-                out.extend_from_slice(b"}");
+                out.extend_from_slice(b",\"fs_type\":\"");
+                // The section entry itself carries no filesystem-type byte;
+                // that only lives in the (separately encrypted) FS header,
+                // which needs the full NCA_FULL_HEADER_SIZE-byte header to
+                // decrypt. The lightweight "inspect this NCA" path may only
+                // have the base header, in which case this is unknown.
+                let fs_type = match nca.fs_headers.get(i).and_then(|o| o.as_ref()) {
+                    Some(fs) if sec.media_size > 0 => {
+                        if fs.fs_type == 1 { "PFS0" } else { "ROMFS" }
+                    }
+                    _ => "?",
+                };
+                out.extend_from_slice(fs_type.as_bytes());
+                out.extend_from_slice(b"\"}");
             }
             out.extend_from_slice(b"]}");
         }
@@ -377,6 +388,164 @@ pub extern "C" fn switch_load_nro(handle: u32, ptr: *const u8, len: u32) -> i64 
             -1
         }
     }
+}
+
+/// Collect a title's ExeFS modules in Nintendo's required load order —
+/// `rtld`, `main`, `subsdk0..subsdk9`, `sdk` — skipping whichever of those a
+/// title doesn't have. `main` is required by every real title; the rest are
+/// common but not guaranteed (a title with no imports from `sdk` might omit
+/// it, for instance).
+fn collect_modules<'a>(pfs0: &Pfs0, exefs: &'a [u8]) -> Vec<(&'static str, &'a [u8])> {
+    const MODULE_ORDER: &[&str] = &[
+        "rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4", "subsdk5",
+        "subsdk6", "subsdk7", "subsdk8", "subsdk9", "sdk",
+    ];
+    MODULE_ORDER
+        .iter()
+        .filter_map(|&name| {
+            let f = pfs0.find(name)?;
+            let start = f.offset as usize;
+            let end = start + f.size as usize; // Pfs0::parse already bounds-checked every entry
+            Some((name, &exefs[start..end]))
+        })
+        .collect()
+}
+
+/// Shared by `switch_load_nca` and `switch_load_nca_from_nsp`: decrypt a
+/// Program NCA's ExeFS from `raw` (the full, still-encrypted NCA bytes),
+/// extract `main` and boot it. Returns entry address or -1.
+///
+/// Takes `keys`/`cpu`/`last_error` as separate borrows (rather than `&mut
+/// Session`) so a caller can pass `raw` borrowed from another field of the
+/// same `Session` (e.g. a slice of `nsp_data`) without that overlapping with
+/// the `&mut Cpu` borrow — which is what lets `switch_load_nca_from_nsp` boot
+/// straight out of the already-staged NSP buffer instead of copying a
+/// possibly hundreds-of-MB NCA first.
+fn load_and_boot_nca(
+    keys: &switch_core::keys::KeySet,
+    cpu: &mut Cpu,
+    last_error: &mut String,
+    raw: &[u8],
+) -> i64 {
+    let nca = match Nca::parse_with_keys(raw, Some(keys)) {
+        Ok(nca) => nca,
+        Err(e) => {
+            *last_error = e.to_string();
+            return -1;
+        }
+    };
+    let exefs_index = match nca.exefs_section_index() {
+        Some(i) => i,
+        None => {
+            *last_error = "no ExeFS (PFS0) section in this NCA".into();
+            return -1;
+        }
+    };
+    let exefs = match nca.decrypt_pfs0_section(raw, keys, exefs_index) {
+        Ok(v) => v,
+        Err(e) => {
+            *last_error = e.to_string();
+            return -1;
+        }
+    };
+    let pfs0 = match Pfs0::parse(&exefs) {
+        Ok(p) => p,
+        Err(e) => {
+            *last_error = e.to_string();
+            return -1;
+        }
+    };
+    let modules = collect_modules(&pfs0, &exefs);
+    if !modules.iter().any(|(name, _)| *name == "main") {
+        *last_error = "no 'main' executable in this NCA's ExeFS".into();
+        return -1;
+    }
+
+    // RomFS is optional (Meta/Control-only content, or a title with no
+    // assets of its own, has none) and a failure to decrypt it shouldn't
+    // block booting — the title just won't have its asset storage mounted.
+    if let Some(romfs_index) = nca.romfs_section_index() {
+        if let Ok(romfs) = nca.decrypt_romfs_section(raw, keys, romfs_index) {
+            cpu.set_romfs(romfs);
+        }
+    }
+
+    match cpu.boot_retail_program(&modules) {
+        Ok(loaded) => {
+            last_error.clear();
+            loaded[0].entry as i64
+        }
+        Err(e) => {
+            *last_error = e.to_string();
+            -1
+        }
+    }
+}
+
+/// Decrypt a standalone Program NCA file (using whatever keys are loaded),
+/// extract its ExeFS `main` executable and boot it. Takes ownership of the
+/// buffer at `ptr` (do not free it afterwards) — an NCA can be hundreds of MB,
+/// so this avoids a second copy the way `switch_load_nsp` does. Returns entry
+/// address or -1 — check `switch_last_error` either way, since the entry can
+/// legitimately be 0 for some NSO layouts.
+///
+/// This gets a real title as far as its own crt0; there is no Horizon service
+/// surface for a full retail SDK program yet, so expect it to run until the
+/// first missing service rather than to a menu.
+#[no_mangle]
+pub extern "C" fn switch_load_nca(handle: u32, ptr: *const u8, len: u32) -> i64 {
+    let s = session(handle);
+    if ptr.is_null() {
+        s.last_error = "null NCA buffer".into();
+        return -1;
+    }
+    // SAFETY: `ptr` came from `switch_alloc(len)` (same global allocator,
+    // same Layout), and the caller no longer frees it.
+    let owned = unsafe { Vec::from_raw_parts(ptr as *mut u8, len as usize, len as usize) };
+    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, &owned)
+}
+
+/// Decrypt NSP file `index` as a Program NCA (using whatever keys are
+/// loaded), extract its ExeFS `main` executable and boot it. Returns entry
+/// address or -1 — check `switch_last_error` either way, since the entry can
+/// legitimately be 0 for some NSO layouts.
+///
+/// This gets a real title as far as its own crt0; there is no Horizon service
+/// surface for a full retail SDK program yet, so expect it to run until the
+/// first missing service rather than to a menu.
+#[no_mangle]
+pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
+    let s = session(handle);
+    let (start, end) = match s.nsp_files.get(index as usize) {
+        Some(f) => match (f.offset as usize).checked_add(f.size as usize) {
+            Some(end) if end <= s.nsp_data.len() => (f.offset as usize, end),
+            _ => {
+                s.last_error = "NCA file entry exceeds the loaded NSP".into();
+                return -1;
+            }
+        },
+        None => {
+            s.last_error = "no such NSP file index".into();
+            return -1;
+        }
+    };
+
+    // Title-key crypto: the key doesn't live in the NCA header's own key
+    // area, and scene NSP releases almost always bundle the ticket that
+    // unlocks it right next to the content — try that before falling back to
+    // whatever an external title.keys provided.
+    if let Ok(nca) = switch_core::nca::Nca::parse_with_keys(&s.nsp_data[start..end], Some(&s.keys)) {
+        if nca.has_rights_id() && s.keys.title_key(&nca.rights_id).is_none() {
+            if let Ok(title_key) =
+                switch_core::ticket::find_and_decrypt_title_key(&nca.rights_id, &s.nsp_files, &s.nsp_data, &s.keys)
+            {
+                s.keys.title_keys.push((nca.rights_id, title_key));
+            }
+        }
+    }
+
+    let raw = &s.nsp_data[start..end];
+    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, raw)
 }
 
 /// Load an AArch64 ELF into the CPU. Returns entry address or -1.

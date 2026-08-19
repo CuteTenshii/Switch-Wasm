@@ -246,6 +246,10 @@ impl AddressSpace {
         }
     }
 
+    pub fn read_u8(&self, mem: &Memory, gpu_va: u64) -> Result<u8> {
+        mem.read_u8(self.cpu_addr(gpu_va, 1)?)
+    }
+
     pub fn read_u32(&self, mem: &Memory, gpu_va: u64) -> Result<u32> {
         mem.read_u32(self.cpu_addr(gpu_va, 4)?)
     }

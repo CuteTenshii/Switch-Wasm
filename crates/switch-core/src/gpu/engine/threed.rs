@@ -7,8 +7,10 @@
 use crate::gpu::engine::{field, Registers};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::macro_engine::{MacroEngine, MACRO_METHODS_START};
+use crate::gpu::raster;
 use crate::gpu::surface::{ColorFormat, Layout};
 use crate::{Error, Result};
+use std::collections::HashMap;
 
 // Registers with behaviour attached. Everything else is plain state.
 const MME_INSTRUCTION_RAM_POINTER: u32 = 0x045;
@@ -50,6 +52,161 @@ const LOAD_CONSTBUF_DATA_LAST: u32 = 0x8F3;
 // them on the 3D subchannel (see `gpu_transfer.cpp`).
 const INLINE_FIRST: u32 = 0x060;
 const INLINE_LAST: u32 = 0x06D;
+
+// --- Shader program binding ---
+// `SetProgramRegion` is a base iova; each `SetProgram[stage]` entry's `Offset`
+// is relative to it. Register numbers and layout from deko3d's
+// `engine_3d.def`, cross-checked against JKSV's own real shader uploads (see
+// `gpu/shader/mod.rs`'s module doc for how that was derived).
+const SET_PROGRAM_REGION: u32 = 0x582;
+const SET_PROGRAM: u32 = 0x800;
+const SET_PROGRAM_STRIDE: u32 = 0x10;
+
+// --- Vertex format ---
+const VERTEX_ATTRIB_STATE: u32 = 0x458;
+const VERTEX_ARRAY: u32 = 0x700;
+const VERTEX_ARRAY_STRIDE: u32 = 0x4;
+const VERTEX_ARRAY_LIMIT: u32 = 0x7C0;
+
+// --- Texture/sampler pools ---
+const SET_TEX_SAMPLER_POOL: u32 = 0x557;
+const SET_TEX_HEADER_POOL: u32 = 0x55D;
+
+// --- Depth/stencil test (as opposed to depth *clear*, above) ---
+const DEPTH_TEST_ENABLE: u32 = 0x4B3;
+const INDEPENDENT_BLEND_ENABLE: u32 = 0x4B9;
+const DEPTH_WRITE_ENABLE: u32 = 0x4BA;
+const DEPTH_TEST_FUNC: u32 = 0x4C3;
+
+// --- Blend ---
+const BLEND_CONSTANT: u32 = 0x4C7;
+const COLOR_BLEND_ENABLE: u32 = 0x4D8;
+const INDEPENDENT_BLEND: u32 = 0x780;
+const INDEPENDENT_BLEND_STRIDE: u32 = 0x8;
+
+// --- Constant-buffer stage binding ---
+// `Bind[slot].Constbuf{Valid, Index}` is a *trigger*, not plain state: on a
+// valid write, real hardware snapshots the currently-selected
+// `ConstbufSelectorAddr`/`Size` into a per-(stage, bank) table that the
+// shader ISA's `cN[offset]` operand reads through directly — it is a
+// separate mechanism from `LoadConstbufData`'s upload cursor, which just
+// writes bytes to whatever `ConstbufSelectorAddr` currently points at.
+// `Bind` has one slot per stage *except* the vertex shader's `VertexA`/
+// `VertexB` split, which share a slot (see `ShaderStage::bind_slot`).
+const BIND: u32 = 0x900;
+const BIND_STRIDE: u32 = 0x8;
+const BIND_LAST: u32 = BIND + 5 * BIND_STRIDE - 1;
+const BIND_CONSTBUF_OFFSET: u32 = 0x4;
+
+/// Which pipeline stage a `SetProgram`/`Bind` entry configures. Numbering
+/// matches `SetProgram[i].Config.StageId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShaderStage {
+    VertexA,
+    VertexB,
+    TessCtrl,
+    TessEval,
+    Geometry,
+    Fragment,
+}
+
+impl ShaderStage {
+    const ALL: [ShaderStage; 6] = [
+        ShaderStage::VertexA,
+        ShaderStage::VertexB,
+        ShaderStage::TessCtrl,
+        ShaderStage::TessEval,
+        ShaderStage::Geometry,
+        ShaderStage::Fragment,
+    ];
+
+    fn index(self) -> u32 {
+        Self::ALL.iter().position(|&s| s == self).unwrap() as u32
+    }
+
+    /// `Bind`'s array index for this stage. `VertexA` and `VertexB` share a
+    /// slot — Maxwell's constant-buffer bindings don't distinguish the split
+    /// vertex-shader halves.
+    fn bind_slot(self) -> u32 {
+        match self {
+            ShaderStage::VertexA | ShaderStage::VertexB => 0,
+            ShaderStage::TessCtrl => 1,
+            ShaderStage::TessEval => 2,
+            ShaderStage::Geometry => 3,
+            ShaderStage::Fragment => 4,
+        }
+    }
+}
+
+/// A `SetProgram[stage]` resolved into an absolute address, ready for
+/// `gpu/shader::decode_program`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProgramBinding {
+    pub addr: u64,
+    pub num_registers: u32,
+}
+
+/// A `VertexAttribState[i]` entry: where in a vertex buffer this attribute's
+/// data lives and how to interpret it. `size`/`ty` are the raw
+/// `DkVtxAttribSize`/`DkVtxAttribType`-shaped enum values — decoding those
+/// into an actual component count/format is `gpu/raster.rs`'s job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexAttrib {
+    pub buffer_id: u32,
+    pub is_fixed: bool,
+    pub offset: u32,
+    pub size: u32,
+    pub ty: u32,
+    pub is_bgra: bool,
+}
+
+/// A `VertexArray[i]` + its `VertexArrayLimit[i]`: one vertex buffer binding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VertexArray {
+    pub enabled: bool,
+    pub stride: u32,
+    pub start: u64,
+    pub limit: u64,
+    pub divisor: u32,
+}
+
+/// One `IndependentBlend[i]` entry plus its shared `ColorBlendEnable[i]` bit.
+/// Function/equation values are the raw Maxwell enum codes (GL blend
+/// func/equation order) — resolving those is `gpu/raster.rs`'s job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlendTarget {
+    pub enabled: bool,
+    pub equation_rgb: u32,
+    pub func_rgb_src: u32,
+    pub func_rgb_dst: u32,
+    pub equation_alpha: u32,
+    pub func_alpha_src: u32,
+    pub func_alpha_dst: u32,
+}
+
+/// The depth-test state (as opposed to `DEPTH_TARGET_*`'s depth-clear
+/// state). `func` is the raw `DepthTestFunc` enum code (`1..=8`,
+/// `Never..=Always` — one-based, unlike GL's zero-based `GL_NEVER..=GL_ALWAYS`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepthState {
+    pub test_enabled: bool,
+    pub write_enabled: bool,
+    pub func: u32,
+}
+
+/// A depth/stencil render target resolved from the register file, mirroring
+/// [`RenderTarget`] for the colour side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepthTarget {
+    pub addr: u64,
+    pub width: u32,
+    pub height: u32,
+    pub layout: Layout,
+    /// Bytes per pixel (matches [`depth_format_layout`]'s first field).
+    pub bytes: u32,
+    /// Depth bits (`0` means 32-bit float, matching `depth_format_layout`).
+    pub depth_bits: u32,
+}
 
 /// A draw the engine was asked to perform, kept so the rasterizer stage (and
 /// tests) can see what was requested.
@@ -95,6 +252,11 @@ pub struct Engine3D {
     pub last_draw: DrawCall,
     /// Write cursor for `LoadConstbufData`, in bytes.
     constbuf_cursor: u32,
+    /// `(Bind slot, hardware bank index) -> (addr, size)` snapshots taken on
+    /// each valid `Bind[slot].Constbuf` write — see the constant `BIND`'s
+    /// doc comment for why this needs to be its own table rather than a
+    /// plain register read.
+    bound_constbufs: HashMap<(u32, u32), (u64, u32)>,
 }
 
 impl Default for Engine3D {
@@ -110,6 +272,7 @@ impl Engine3D {
             macros: MacroEngine::new(),
             last_draw: DrawCall::default(),
             constbuf_cursor: 0,
+            bound_constbufs: HashMap::new(),
         }
     }
 
@@ -136,6 +299,7 @@ impl Engine3D {
             REPORT_SEMAPHORE => self.report_semaphore(arg, ctx)?,
             LOAD_CONSTBUF_OFFSET => self.constbuf_cursor = field(arg, 0, 15),
             LOAD_CONSTBUF_DATA..=LOAD_CONSTBUF_DATA_LAST => self.load_constbuf(arg, ctx)?,
+            BIND..=BIND_LAST => self.bind(method, arg),
             DRAW_ARRAYS_COUNT => self.draw_arrays(arg, ctx)?,
             DRAW_ELEMENTS_COUNT => self.draw_elements(arg, ctx)?,
             VERTEX_BEGIN_GL => self.last_draw.primitive = field(arg, 0, 15),
@@ -222,6 +386,26 @@ impl Engine3D {
         Ok(())
     }
 
+    /// `Bind[slot]`: on a valid `Constbuf` sub-write, snapshot the
+    /// currently-selected constant buffer into `bound_constbufs` under
+    /// `(slot, bank index)`; on an invalid one, forget that bank.
+    fn bind(&mut self, method: u32, arg: u32) {
+        let offset = method - BIND;
+        let slot = offset / BIND_STRIDE;
+        if offset % BIND_STRIDE != BIND_CONSTBUF_OFFSET {
+            return;
+        }
+        let valid = field(arg, 0, 0) != 0;
+        let index = field(arg, 4, 8);
+        if valid {
+            let addr = self.regs.iova(CONSTBUF_SELECTOR_ADDR);
+            let size = self.regs.field(CONSTBUF_SELECTOR_SIZE, 0, 16);
+            self.bound_constbufs.insert((slot, index), (addr, size));
+        } else {
+            self.bound_constbufs.remove(&(slot, index));
+        }
+    }
+
     fn draw_arrays(&mut self, count: u32, ctx: &mut ExecCtx) -> Result<()> {
         self.last_draw = DrawCall {
             primitive: self.regs.field(VERTEX_BEGIN_GL, 0, 15),
@@ -231,6 +415,7 @@ impl Engine3D {
             index_format: 0,
         };
         ctx.stats.draws += 1;
+        self.rasterize_or_log(ctx);
         Ok(())
     }
 
@@ -243,7 +428,150 @@ impl Engine3D {
             index_format: self.regs.get(0x5F6),
         };
         ctx.stats.draws += 1;
+        self.rasterize_or_log(ctx);
         Ok(())
+    }
+
+    /// Run the real rasterizer for `last_draw`. This is deliberately
+    /// non-fatal: the ISA/feature subset it supports is still growing (see
+    /// `gpu/shader`'s staging), and content that hits something outside it
+    /// — real deko3d/Mesa shaders are far richer than our fixtures — must
+    /// keep running exactly as it did before this existed, just without
+    /// real pixels for that draw. `TRACE_GPU` surfaces why.
+    fn rasterize_or_log(&self, ctx: &mut ExecCtx) {
+        if let Err(e) = raster::draw(self, ctx) {
+            if ctx.trace {
+                eprintln!("[gpu] raster: {}", e);
+            }
+        }
+    }
+
+    /// Resolve `stage`'s bound program, if `SetProgram[stage].Config.Enable`
+    /// is set.
+    pub fn program(&self, stage: ShaderStage) -> Option<ProgramBinding> {
+        let base = SET_PROGRAM + stage.index() * SET_PROGRAM_STRIDE;
+        if field(self.regs.get(base), 0, 0) == 0 {
+            return None;
+        }
+        let offset = self.regs.get(base + 1);
+        let num_registers = self.regs.get(base + 3);
+        let addr = self.regs.iova(SET_PROGRAM_REGION).wrapping_add(u64::from(offset));
+        Some(ProgramBinding { addr, num_registers })
+    }
+
+    /// Resolve `VertexAttribState[i]`.
+    pub fn vertex_attrib(&self, i: u32) -> VertexAttrib {
+        let raw = self.regs.get(VERTEX_ATTRIB_STATE + i);
+        VertexAttrib {
+            buffer_id: field(raw, 0, 4),
+            is_fixed: field(raw, 6, 6) != 0,
+            offset: field(raw, 7, 20),
+            size: field(raw, 21, 26),
+            ty: field(raw, 27, 29),
+            is_bgra: field(raw, 31, 31) != 0,
+        }
+    }
+
+    /// Resolve `VertexArray[i]` plus its `VertexArrayLimit[i]`.
+    pub fn vertex_array(&self, i: u32) -> VertexArray {
+        let base = VERTEX_ARRAY + i * VERTEX_ARRAY_STRIDE;
+        let config = self.regs.get(base);
+        VertexArray {
+            enabled: field(config, 12, 12) != 0,
+            stride: field(config, 0, 11),
+            start: self.regs.iova(base + 1),
+            limit: self.regs.iova(VERTEX_ARRAY_LIMIT + i * 2),
+            divisor: self.regs.get(base + 3),
+        }
+    }
+
+    /// Base of the texture-image-control descriptor pool `SetTexHeaderPool`
+    /// points at.
+    pub fn tex_header_pool(&self) -> u64 {
+        self.regs.iova(SET_TEX_HEADER_POOL)
+    }
+
+    /// Base of the texture-sampler-control descriptor pool
+    /// `SetTexSamplerPool` points at.
+    pub fn tex_sampler_pool(&self) -> u64 {
+        self.regs.iova(SET_TEX_SAMPLER_POOL)
+    }
+
+    /// The `(addr, size)` of the constant buffer bound to `stage`'s hardware
+    /// bank `bank` — see `BIND`'s doc comment.
+    pub fn bound_constbuf(&self, stage: ShaderStage, bank: u32) -> Option<(u64, u32)> {
+        self.bound_constbufs.get(&(stage.bind_slot(), bank)).copied()
+    }
+
+    /// Resolve `IndependentBlend[index]` plus its `ColorBlendEnable[index]`
+    /// bit.
+    pub fn blend_target(&self, index: u32) -> BlendTarget {
+        let base = INDEPENDENT_BLEND + index * INDEPENDENT_BLEND_STRIDE;
+        BlendTarget {
+            enabled: self.regs.get(COLOR_BLEND_ENABLE + index) != 0,
+            equation_rgb: self.regs.get(base + 1),
+            func_rgb_src: self.regs.get(base + 2),
+            func_rgb_dst: self.regs.get(base + 3),
+            equation_alpha: self.regs.get(base + 4),
+            func_alpha_src: self.regs.get(base + 5),
+            func_alpha_dst: self.regs.get(base + 6),
+        }
+    }
+
+    /// Whether blend targets are independent (`IndependentBlendEnable`) —
+    /// when false, every render target uses `blend_target(0)`.
+    pub fn independent_blend_enabled(&self) -> bool {
+        self.regs.get(INDEPENDENT_BLEND_ENABLE) != 0
+    }
+
+    pub fn blend_constant(&self) -> [f32; 4] {
+        [
+            self.regs.float(BLEND_CONSTANT),
+            self.regs.float(BLEND_CONSTANT + 1),
+            self.regs.float(BLEND_CONSTANT + 2),
+            self.regs.float(BLEND_CONSTANT + 3),
+        ]
+    }
+
+    pub fn depth_state(&self) -> DepthState {
+        DepthState {
+            test_enabled: self.regs.get(DEPTH_TEST_ENABLE) != 0,
+            write_enabled: self.regs.get(DEPTH_WRITE_ENABLE) != 0,
+            func: self.regs.get(DEPTH_TEST_FUNC),
+        }
+    }
+
+    /// Resolve the depth/stencil render target from the register file,
+    /// mirroring [`Self::render_target`].
+    pub fn depth_target(&self) -> Result<Option<DepthTarget>> {
+        let addr = self.regs.iova(DEPTH_TARGET_ADDR);
+        let raw_format = self.regs.get(DEPTH_TARGET_FORMAT);
+        if addr == 0 || raw_format == 0 {
+            return Ok(None);
+        }
+        let (bytes, depth_bits, _stencil_shift) = depth_format_layout(raw_format)?;
+        let tile_mode = self.regs.get(DEPTH_TARGET_TILE_MODE);
+        Ok(Some(DepthTarget {
+            addr,
+            width: self.regs.get(DEPTH_TARGET_HORIZONTAL),
+            height: self.regs.get(DEPTH_TARGET_VERTICAL),
+            layout: Layout::BlockLinear { block_height_gobs: 1 << field(tile_mode, 4, 7) },
+            bytes,
+            depth_bits,
+        }))
+    }
+
+    /// Viewport 0's `(x, y, width, height)` in pixels — the NDC-to-screen
+    /// transform's target rectangle. Real Maxwell has up to 16 viewports;
+    /// only the first is wired up, matching `clear_rect`'s existing
+    /// single-viewport assumption.
+    pub fn viewport(&self) -> (f32, f32, f32, f32) {
+        (
+            self.regs.field(VIEWPORT_BASE, 0, 15) as f32,
+            self.regs.field(VIEWPORT_BASE + 1, 0, 15) as f32,
+            self.regs.field(VIEWPORT_BASE, 16, 31) as f32,
+            self.regs.field(VIEWPORT_BASE + 1, 16, 31) as f32,
+        )
     }
 
     /// Resolve colour render target `index` from the register file.
@@ -440,7 +768,7 @@ impl Engine3D {
 
 /// `(bytes per pixel, depth bits, stencil bit offset)` for a depth format.
 /// Depth bits of 32 with a float layout is signalled by `depth_bits == 0`.
-fn depth_format_layout(raw: u32) -> Result<(u32, u32, Option<u32>)> {
+pub(crate) fn depth_format_layout(raw: u32) -> Result<(u32, u32, Option<u32>)> {
     Ok(match raw {
         0x0A => (4, 0, None),        // Z32Float
         0x13 => (2, 16, None),       // Z16Unorm
@@ -458,19 +786,30 @@ fn depth_format_layout(raw: u32) -> Result<(u32, u32, Option<u32>)> {
     })
 }
 
-fn depth_mask(depth_bits: u32) -> u128 {
+pub(crate) fn depth_mask(depth_bits: u32) -> u128 {
     match depth_bits {
         0 => 0xFFFF_FFFF,
         bits => (1u128 << bits) - 1,
     }
 }
 
-fn encode_depth(depth: f32, depth_bits: u32) -> u128 {
+pub(crate) fn encode_depth(depth: f32, depth_bits: u32) -> u128 {
     match depth_bits {
         0 => depth.to_bits() as u128,
         bits => {
             let max = ((1u64 << bits) - 1) as f32;
             (depth * max + 0.5) as u128
+        }
+    }
+}
+
+/// Inverse of [`encode_depth`]: a stored depth value back to `0.0..=1.0`.
+pub(crate) fn decode_depth(raw: u128, depth_bits: u32) -> f32 {
+    match depth_bits {
+        0 => f32::from_bits(raw as u32),
+        bits => {
+            let max = ((1u64 << bits) - 1) as f32;
+            (raw & depth_mask(bits)) as f32 / max
         }
     }
 }
@@ -680,5 +1019,122 @@ mod tests {
             DrawCall { primitive: 4, first: 6, count: 3, indexed: false, index_format: 0 }
         );
         assert_eq!(h.stats.draws, 1);
+    }
+
+    #[test]
+    fn program_binding_resolves_relative_to_its_region() {
+        let mut h = Harness::new(0x1000);
+        let base_addr = h.base;
+        let mut engine = Engine3D::new();
+        let mut ctx = h.ctx();
+        engine.write(SET_PROGRAM_REGION, (base_addr >> 32) as u32, true, &mut ctx).unwrap();
+        engine.write(SET_PROGRAM_REGION + 1, base_addr as u32, true, &mut ctx).unwrap();
+        // Fragment (StageId 5) enabled, at +0x100, using 4 registers.
+        let base = SET_PROGRAM + 5 * SET_PROGRAM_STRIDE;
+        engine.write(base, 1 | (5 << 4), true, &mut ctx).unwrap();
+        engine.write(base + 1, 0x100, true, &mut ctx).unwrap();
+        engine.write(base + 3, 4, true, &mut ctx).unwrap();
+
+        assert_eq!(
+            engine.program(ShaderStage::Fragment),
+            Some(ProgramBinding { addr: base_addr + 0x100, num_registers: 4 })
+        );
+        assert_eq!(engine.program(ShaderStage::Geometry), None);
+    }
+
+    #[test]
+    fn vertex_attrib_state_decodes_its_bit_fields() {
+        let mut h = Harness::new(0x1000);
+        let mut engine = Engine3D::new();
+        let mut ctx = h.ctx();
+        // BufferId=2, IsFixed=0, Offset=0x10, Size=0x1F, Type=3, IsBgra=1.
+        let raw = 2 | (0x10 << 7) | (0x1F << 21) | (3 << 27) | (1 << 31);
+        engine.write(VERTEX_ATTRIB_STATE + 3, raw, true, &mut ctx).unwrap();
+
+        let attrib = engine.vertex_attrib(3);
+        assert_eq!(attrib.buffer_id, 2);
+        assert!(!attrib.is_fixed);
+        assert_eq!(attrib.offset, 0x10);
+        assert_eq!(attrib.size, 0x1F);
+        assert_eq!(attrib.ty, 3);
+        assert!(attrib.is_bgra);
+    }
+
+    #[test]
+    fn vertex_array_resolves_start_and_limit() {
+        let mut h = Harness::new(0x1000);
+        let base_addr = h.base;
+        let mut engine = Engine3D::new();
+        let mut ctx = h.ctx();
+        let base = VERTEX_ARRAY + 2 * VERTEX_ARRAY_STRIDE;
+        engine.write(base, 0x20 | (1 << 12), true, &mut ctx).unwrap(); // stride 0x20, enabled
+        engine.write(base + 1, (base_addr >> 32) as u32, true, &mut ctx).unwrap();
+        engine.write(base + 2, base_addr as u32, true, &mut ctx).unwrap();
+        engine.write(base + 3, 5, true, &mut ctx).unwrap(); // divisor
+        engine.write(VERTEX_ARRAY_LIMIT + 2 * 2, (base_addr >> 32) as u32, true, &mut ctx).unwrap();
+        engine
+            .write(VERTEX_ARRAY_LIMIT + 2 * 2 + 1, base_addr as u32 + 0x1000, true, &mut ctx)
+            .unwrap();
+
+        let va = engine.vertex_array(2);
+        assert!(va.enabled);
+        assert_eq!(va.stride, 0x20);
+        assert_eq!(va.start, base_addr);
+        assert_eq!(va.limit, base_addr + 0x1000);
+        assert_eq!(va.divisor, 5);
+    }
+
+    #[test]
+    fn binding_a_constbuf_snapshots_the_current_selector() {
+        let mut h = Harness::new(0x1000);
+        let base_addr = h.base;
+        let mut engine = Engine3D::new();
+        let mut ctx = h.ctx();
+        engine.write(CONSTBUF_SELECTOR_SIZE, 0x40, true, &mut ctx).unwrap();
+        engine.write(CONSTBUF_SELECTOR_ADDR, (base_addr >> 32) as u32, true, &mut ctx).unwrap();
+        engine.write(CONSTBUF_SELECTOR_ADDR + 1, base_addr as u32, true, &mut ctx).unwrap();
+
+        // Fragment's bind slot (4), bank 2, valid.
+        let base = BIND + 4 * BIND_STRIDE;
+        engine.write(base + BIND_CONSTBUF_OFFSET, 1 | (2 << 4), true, &mut ctx).unwrap();
+
+        assert_eq!(engine.bound_constbuf(ShaderStage::Fragment, 2), Some((base_addr, 0x40)));
+        assert_eq!(engine.bound_constbuf(ShaderStage::Fragment, 3), None);
+        // Vertex shares Fragment's data source but not its bank slot.
+        assert_eq!(engine.bound_constbuf(ShaderStage::VertexB, 2), None);
+
+        // A later selector change must not retroactively affect an already
+        // bound bank — binding really does snapshot, not alias.
+        engine.write(CONSTBUF_SELECTOR_ADDR + 1, base_addr as u32 + 0x40, true, &mut ctx).unwrap();
+        assert_eq!(engine.bound_constbuf(ShaderStage::Fragment, 2), Some((base_addr, 0x40)));
+
+        // Unbinding forgets it.
+        engine.write(base + BIND_CONSTBUF_OFFSET, 0 | (2 << 4), true, &mut ctx).unwrap();
+        assert_eq!(engine.bound_constbuf(ShaderStage::Fragment, 2), None);
+    }
+
+    #[test]
+    fn blend_and_depth_state_resolve_from_registers() {
+        let mut h = Harness::new(0x1000);
+        let mut engine = Engine3D::new();
+        let mut ctx = h.ctx();
+        engine.write(COLOR_BLEND_ENABLE + 1, 1, true, &mut ctx).unwrap();
+        let base = INDEPENDENT_BLEND + 1 * INDEPENDENT_BLEND_STRIDE;
+        engine.write(base + 1, 1, true, &mut ctx).unwrap(); // EquationRgb = FUNC_ADD
+        engine.write(base + 2, 1, true, &mut ctx).unwrap(); // FuncRgbSrc = ONE
+        engine.write(base + 3, 0, true, &mut ctx).unwrap(); // FuncRgbDst = ZERO
+        engine.write(INDEPENDENT_BLEND_ENABLE, 1, true, &mut ctx).unwrap();
+        engine.write(DEPTH_TEST_ENABLE, 1, true, &mut ctx).unwrap();
+        engine.write(DEPTH_WRITE_ENABLE, 1, true, &mut ctx).unwrap();
+        engine.write(DEPTH_TEST_FUNC, 4, true, &mut ctx).unwrap(); // Lequal
+
+        let bt = engine.blend_target(1);
+        assert!(bt.enabled);
+        assert_eq!((bt.equation_rgb, bt.func_rgb_src, bt.func_rgb_dst), (1, 1, 0));
+        assert!(engine.independent_blend_enabled());
+        assert_eq!(
+            engine.depth_state(),
+            DepthState { test_enabled: true, write_enabled: true, func: 4 }
+        );
     }
 }

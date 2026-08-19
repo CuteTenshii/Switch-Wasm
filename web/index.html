@@ -139,11 +139,11 @@
   </section>
 
   <section class="tabpanel" data-panel="files">
-    <p class="muted tiny">Inspect an <code>.nsp</code> container and its NCA headers. Encrypted
-      (CDN) headers need <code>prod.keys</code>.</p>
+    <p class="muted tiny">Inspect an <code>.nsp</code> container and its NCA headers, or drop a
+      standalone <code>.nca</code>. Encrypted (CDN) headers need <code>prod.keys</code>.</p>
     <div class="dropzone" id="nsp-drop">
-      Drop <code>.nsp</code> here, or <label for="nsp-file">browse</label>
-      <input type="file" id="nsp-file" accept=".nsp,.nsz,.xci" hidden>
+      Drop <code>.nsp</code> or <code>.nca</code> here, or <label for="nsp-file">browse</label>
+      <input type="file" id="nsp-file" accept=".nsp,.nsz,.xci,.nca" hidden>
     </div>
     <div class="panel-tools">
       <label class="btn small" for="prod-keys">prod.keys</label>

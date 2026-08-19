@@ -123,6 +123,22 @@ const CMD = {
     // switch_load_nsp keeps the staging buffer; do not free it.
     return ok;
   },
+  // Decrypts NSP file `index` as a Program NCA (with whatever keys are
+  // loaded) and boots its ExeFS `main` executable. Operates on the NSP bytes
+  // already staged in the worker's wasm memory by load_nsp - no extra copy of
+  // the (possibly hundreds-of-MB) NCA crosses the postMessage boundary.
+  load_nca_from_nsp(index) {
+    return Number(api.switch_load_nca_from_nsp(handle, index));
+  },
+  // Same, for a standalone .nca file (not inside an NSP): stages the whole
+  // file into wasm memory and boots it.
+  load_nca(bytes) {
+    const ptr = alloc(bytes.length);
+    toWasm(bytes, ptr);
+    const entry = Number(api.switch_load_nca(handle, ptr, bytes.length));
+    // switch_load_nca takes ownership of the staging buffer; do not free it.
+    return entry;
+  },
   load_keys(prod, title) {
     let pptr = 0, plen = 0, tptr = 0, tlen = 0;
     if (prod && prod.length) { pptr = alloc(prod.length); toWasm(prod, pptr); plen = prod.length; }
@@ -141,7 +157,10 @@ const CMD = {
   },
   read_file(index, offset, len) {
     const buf = alloc(len);
-    const got = api.switch_read_file(handle, index, offset, buf, len);
+    // file_offset is a wasm u64 (needs a BigInt going in) and the return is
+    // an i64 (comes back as a BigInt too) - convert that back to a Number
+    // before using it as a length.
+    const got = Number(api.switch_read_file(handle, index, BigInt(offset), buf, len));
     if (got < 0) return { error: lastError() };
     const b = fromWasm(buf, got);
     api.switch_free(buf, len);

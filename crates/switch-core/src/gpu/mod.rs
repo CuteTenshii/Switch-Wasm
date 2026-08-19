@@ -15,8 +15,11 @@ pub mod exec;
 pub mod macro_engine;
 pub mod nvdrv;
 pub mod nvmap;
+pub mod raster;
+pub mod shader;
 pub mod surface;
 pub mod syncpt;
+pub mod texture;
 pub mod vmm;
 
 use crate::mem::Memory;

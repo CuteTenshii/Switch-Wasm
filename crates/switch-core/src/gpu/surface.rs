@@ -10,6 +10,7 @@
 //! A surface can also be *pitch* (plain linear rows), which the display path
 //! and the 2D engine both use.
 
+use crate::gpu::exec::ExecCtx;
 use crate::{Error, Result};
 
 /// GOB dimensions on Fermi and later.
@@ -300,6 +301,60 @@ fn f16_to_f32(v: u16) -> f32 {
         f32::from_bits(sign | 0x7F80_0000 | (mantissa << 13))
     } else {
         f32::from_bits(sign | ((exp + 127 - 15) << 23) | (mantissa << 13))
+    }
+}
+
+/// A described image in GPU memory: enough to compute where `(x, y)` lives
+/// and how to decode it. Shared by the 2D engine's blits and the 3D engine's
+/// texture sampling — both are "read a described surface", nothing more.
+#[derive(Debug, Clone, Copy)]
+pub struct Surface {
+    pub addr: u64,
+    pub width: u32,
+    pub height: u32,
+    pub format: ColorFormat,
+    pub layout: Layout,
+}
+
+impl Surface {
+    pub fn offset(&self, x: u32, y: u32) -> u32 {
+        let bpp = self.format.bytes_per_pixel;
+        let width_bytes = match self.layout {
+            Layout::Pitch { pitch } => pitch,
+            Layout::BlockLinear { .. } => self.width * bpp,
+        };
+        self.layout.offset(x * bpp, y, width_bytes)
+    }
+
+    pub fn texel(&self, x: u32, y: u32, ctx: &ExecCtx) -> Result<[f32; 4]> {
+        let x = x.min(self.width.saturating_sub(1));
+        let y = y.min(self.height.saturating_sub(1));
+        let va = self.addr + self.offset(x, y) as u64;
+        self.format.decode(ctx.read_pixel(va, self.format.bytes_per_pixel)?)
+    }
+
+    pub fn sample_point(&self, u: f64, v: f64, ctx: &ExecCtx) -> Result<[f32; 4]> {
+        self.texel(u.max(0.0) as u32, v.max(0.0) as u32, ctx)
+    }
+
+    pub fn sample_bilinear(&self, u: f64, v: f64, ctx: &ExecCtx) -> Result<[f32; 4]> {
+        let u = (u - 0.5).max(0.0);
+        let v = (v - 0.5).max(0.0);
+        let x0 = u as u32;
+        let y0 = v as u32;
+        let fx = (u - x0 as f64) as f32;
+        let fy = (v - y0 as f64) as f32;
+        let c00 = self.texel(x0, y0, ctx)?;
+        let c10 = self.texel(x0 + 1, y0, ctx)?;
+        let c01 = self.texel(x0, y0 + 1, ctx)?;
+        let c11 = self.texel(x0 + 1, y0 + 1, ctx)?;
+        let mut out = [0.0f32; 4];
+        for i in 0..4 {
+            let top = c00[i] + (c10[i] - c00[i]) * fx;
+            let bottom = c01[i] + (c11[i] - c01[i]) * fx;
+            out[i] = top + (bottom - top) * fy;
+        }
+        Ok(out)
     }
 }
 

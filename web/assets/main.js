@@ -506,9 +506,14 @@ nspDrop.addEventListener('drop', (e) => {
   e.preventDefault();
   nspDrop.classList.remove('drag');
   const file = e.dataTransfer.files[0];
-  if (file) handleNspFile(file);
+  if (file) handleContainerFile(file);
 });
-$('nsp-file').addEventListener('change', (e) => { if (e.target.files[0]) handleNspFile(e.target.files[0]); });
+$('nsp-file').addEventListener('change', (e) => { if (e.target.files[0]) handleContainerFile(e.target.files[0]); });
+
+function handleContainerFile(file) {
+  if (/\.nca$/i.test(file.name)) return handleStandaloneNca(file);
+  return handleNspFile(file);
+}
 
 async function handleNspFile(file) {
   clearNsp();
@@ -549,9 +554,10 @@ async function inspectNca(f, index) {
   const out = el('div', 'nca-info', 'Parsing ' + f.name + ' ...');
   $('nsp-result').appendChild(out);
 
-  // Only the first 0x400 bytes (the header) are needed to inspect an NCA -
-  // don't copy the whole (possibly hundreds-of-MB) payload to the worker.
-  const headerLen = Math.min(f.size, 0x800);
+  // 0xC00 covers the base header plus all 4 per-section FS headers (needed
+  // for an accurate fs_type in the display below) - still tiny next to the
+  // (possibly hundreds-of-MB) payload, so no need to copy the whole file.
+  const headerLen = Math.min(f.size, 0xC00);
   let header;
   try {
     header = await call('read_file', index, 0, headerLen);
@@ -559,6 +565,22 @@ async function inspectNca(f, index) {
     out.textContent = 'read failed: ' + err.message;
     return;
   }
+  await parseAndRenderNca(out, header, f.name, () => launchNca(f, index));
+}
+
+// Drop/browse a standalone .nca (not inside an NSP): same inspect-then-Launch
+// flow, but the header slice comes straight off the browser File object
+// instead of a staged NSP buffer.
+async function handleStandaloneNca(file) {
+  clearNsp();
+  const out = el('div', 'nca-info', 'Parsing ' + file.name + ' ...');
+  $('nsp-result').appendChild(out);
+  const headerLen = Math.min(file.size, 0xC00);
+  const header = new Uint8Array(await file.slice(0, headerLen).arrayBuffer());
+  await parseAndRenderNca(out, header, file.name, () => launchStandaloneNca(file));
+}
+
+async function parseAndRenderNca(out, header, name, onLaunch) {
   let info;
   try {
     info = JSON.parse(await call('parse_nca', header));
@@ -591,6 +613,56 @@ async function inspectNca(f, index) {
     row.append(' ' + v);
     out.appendChild(row);
   }
+  if (info.content_type === 'Program') {
+    const btn = el('button', 'btn small', 'Launch');
+    btn.addEventListener('click', onLaunch);
+    out.appendChild(btn);
+  }
+}
+
+// Decrypts NSP file `index` as a Program NCA and boots its ExeFS `main`
+// executable. This gets a real title only as far as its own crt0 - there is
+// no Horizon service surface for a full retail SDK program yet (that's a much
+// larger undertaking than the homebrew this emulator otherwise runs), so
+// expect it to run until the first missing service rather than reach a menu.
+async function launchNca(f, index) {
+  return doLaunchNca(f.name, () => call('load_nca_from_nsp', index));
+}
+
+// Same as `launchNca`, but for a standalone .nca file: the whole file has to
+// be read and staged now (Launch is the first point a standalone NCA needs
+// its full bytes, not just the header).
+async function launchStandaloneNca(file) {
+  return doLaunchNca(file.name, async () => {
+    log('Reading ' + file.name + ' (' + fmtSize(file.size) + ') ...');
+    const data = new Uint8Array(await file.arrayBuffer());
+    return call('load_nca', data);
+  });
+}
+
+async function doLaunchNca(name, loadFn) {
+  clearConsole();
+  setState('loading');
+  await applySyscallMode();
+  let entry;
+  try {
+    entry = await loadFn();
+  } catch (err) {
+    setState('fault');
+    log('Launch failed: ' + err.message, 'err');
+    return;
+  }
+  if (entry < 0) {
+    setState('fault');
+    log('Launch failed: ' + await readLastError(), 'err');
+    return;
+  }
+  log('Launched ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
+  log('Decrypted and booted the title\'s own executable; there is no Horizon service support for retail games yet, so expect it to run until the first missing service rather than reach a menu.', 'dim');
+  setState('loaded');
+  showScreen();
+  await updatePc();
+  await run();
 }
 
 // ---------- keys ----------

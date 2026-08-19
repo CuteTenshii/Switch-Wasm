@@ -2,7 +2,7 @@
 //! synthesizing replies, and the service implementations behind the
 //! session handles homebrew opens (`sm:`, `fsp-srv`, `vi:m`, `nvdrv`).
 
-use super::Cpu;
+use super::{AudrenParams, Cpu};
 use crate::Result;
 
 impl Cpu {
@@ -382,6 +382,52 @@ impl Cpu {
             Some(18) | Some(11) => {
                 self.reply_with_interface(tls, handle, "fsp-srv-fs")?;
                 Ok(())
+            }
+            // 200 = OpenDataStorageByCurrentProcess: hands back the calling
+            // title's own RomFS as a raw `IStorage` (offset/size reads only —
+            // no paths). libnx's `romfsMount`/`nn::fs::MountRom` parse the
+            // RomFS header and directory/file tables entirely in guest code
+            // against this; the emulator only has to serve byte ranges.
+            Some(200) => {
+                if self.romfs.is_none() {
+                    // No NCA was decrypted this session (homebrew, or a
+                    // title with no RomFS section) — report "not found"
+                    // rather than handing out a storage backed by nothing.
+                    const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
+                    return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
+                }
+                self.reply_with_interface(tls, handle, "fsp-srv-storage")?;
+                Ok(())
+            }
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// `IStorage`, backed by the current process's decrypted RomFS
+    /// ([`Cpu::set_romfs`]). Cmd 0 = Read(u64 offset, u64 size), cmd 4 =
+    /// GetSize — the same shape as `IFile`, but offset-addressed rather than
+    /// path-addressed since there's exactly one of these per process.
+    pub(super) fn fs_storage_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        let romfs = self.romfs.as_deref().unwrap_or(&[]);
+        match cmd_id {
+            // Read(u64 offset, u64 size) -> bytes into the recv buffer.
+            Some(0) => {
+                let data = self.ipc_request_data(tls);
+                let offset = self.mem.read_u64(data.wrapping_add(8))? as usize;
+                let requested = self.mem.read_u64(data.wrapping_add(0x10))? as usize;
+                let start = offset.min(romfs.len());
+                let end = start.saturating_add(requested).min(romfs.len());
+                let chunk = &romfs[start..end];
+                if let Some(addr) = self.ipc_recv_buffer_addr(tls, 0) {
+                    for (i, &byte) in chunk.iter().enumerate() {
+                        self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
+                    }
+                }
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // GetSize -> u64
+            Some(4) => {
+                self.write_ipc_response(tls, 0, &[], &(romfs.len() as u64).to_le_bytes(), &[])
             }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
         }
@@ -896,6 +942,9 @@ impl Cpu {
                 };
                 argp.resize(size, 0);
                 let error = self.nv.ioctl(&mut self.mem, fd, request, &mut argp, &inline_in)?;
+                if error != 0 && std::env::var("TRACE_NV").is_ok() {
+                    eprintln!("[nv] ioctl fd={fd} request={request:#x} -> error {error}");
+                }
                 if let Some(&(addr, len)) = recv.first() {
                     for (i, &byte) in argp.iter().take(len as usize).enumerate() {
                         self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
@@ -1256,6 +1305,301 @@ impl Cpu {
             }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
         }
+    }
+
+    /// `IApplicationProxyService`/`IApplicationProxy`: the applet-lifecycle
+    /// chain homebrew opens as `appletOE` (or `appletAE`, for a non-application
+    /// applet). `appletMainLoop` polls `ICommonStateGetter` every frame — the
+    /// event handle, then `ReceiveMessage`/`GetOperationMode`/
+    /// `GetCurrentFocusState` — to decide whether to keep running; the old
+    /// generic stub answered every one of those the same way regardless of
+    /// which sub-interface actually made the call (and re-sent the initial
+    /// "focus changed" message on every single poll), which made at least one
+    /// real homebrew (JKSV) treat every frame as a fresh focus transition and
+    /// give up after a handful of them.
+    pub(super) fn applet_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        const CONVERT_TO_DOMAIN: u32 = 0;
+        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
+        if self.ipc_message_type(tls) == 5 {
+            return match cmd_id {
+                Some(CONVERT_TO_DOMAIN) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "am:proxy-service");
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                Some(QUERY_POINTER_BUFFER_SIZE) => {
+                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
+                }
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
+        let object_id = self.ipc_domain_object_id(tls);
+        match self.domain_interface(handle, object_id) {
+            // IApplicationProxyService::OpenApplicationProxy.
+            Some("am:proxy-service") => match cmd_id {
+                Some(0) => {
+                    self.reply_with_interface(tls, handle, "am:application-proxy")?;
+                    Ok(())
+                }
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            },
+            // IApplicationProxy's Get* accessors, each handing back one of the
+            // sub-interfaces below.
+            Some("am:application-proxy") => {
+                let iface = match cmd_id {
+                    Some(0) => Some("am:common-state-getter"),
+                    Some(1) => Some("am:self-controller"),
+                    Some(2) => Some("am:window-controller"),
+                    Some(3) => Some("am:audio-controller"),
+                    Some(4) => Some("am:display-controller"),
+                    Some(11) => Some("am:library-applet-creator"),
+                    Some(20) => Some("am:application-functions"),
+                    Some(1000) => Some("am:debug-functions"),
+                    _ => None,
+                };
+                match iface {
+                    Some(name) => {
+                        self.reply_with_interface(tls, handle, name)?;
+                        Ok(())
+                    }
+                    None => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                }
+            }
+            // ICommonStateGetter: the state `appletMainLoop` polls every frame.
+            Some("am:common-state-getter") => match cmd_id {
+                // GetEventHandle: a copy handle the guest waits on before
+                // polling ReceiveMessage. WaitSynchronization treats any
+                // handle outside the thread/mutex tables as already
+                // signaled — the same trick `vi:m`'s GetDisplayVsyncEvent
+                // uses — so the wait never blocks.
+                Some(0) => {
+                    let h = self.alloc_handle();
+                    self.write_ipc_response(tls, 0, &[h], &[], &[])
+                }
+                // ReceiveMessage: real AM enqueues one FocusStateChanged at
+                // startup and then reports "no message" until the state
+                // actually changes; answering every poll with a fresh message
+                // is what made JKSV think focus kept changing.
+                Some(1) => {
+                    const NO_MESSAGES: u32 = 128 | (3 << 9); // am, "no message"
+                    const FOCUS_STATE_CHANGED: u32 = 15;
+                    if std::mem::replace(&mut self.applet_focus_sent, true) {
+                        self.write_ipc_response(tls, NO_MESSAGES, &[], &[], &[])
+                    } else {
+                        self.write_ipc_response(tls, 0, &[], &FOCUS_STATE_CHANGED.to_le_bytes(), &[])
+                    }
+                }
+                Some(5) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]), // GetOperationMode: Handheld
+                Some(6) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]), // GetPerformanceMode: Normal
+                Some(9) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]), // GetCurrentFocusState: InFocus
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            },
+            // IApplicationFunctions: PopLaunchParameter fails when hbmenu
+            // launched the app without forwarding arguments, same as on real
+            // hardware — the old stub's success-with-an-unrelated-object-id
+            // left callers treating that id as a launch-parameter storage
+            // object that was never actually registered as one.
+            Some("am:application-functions") => match cmd_id {
+                Some(1) => {
+                    const LAUNCH_PARAMETER_NOT_FOUND: u32 = 128 | (2 << 9); // am
+                    self.write_ipc_response(tls, LAUNCH_PARAMETER_NOT_FOUND, &[], &[], &[])
+                }
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            },
+            // ISelfController, IWindowController, IAudioController,
+            // IDisplayController, ILibraryAppletCreator, IDebugFunctions, and
+            // the root session before ConvertToDomain: every command they get
+            // is a setter/notifier a caller only checks the result of, so a
+            // bare success covers all of them.
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// `nifm:u`'s root session: session control plus
+    /// `CreateGeneralServiceOld`/`CreateGeneralService`, which hand back the
+    /// `IGeneralService` homebrew actually queries connectivity through.
+    pub(super) fn nifm_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+        const CONVERT_TO_DOMAIN: u32 = 0;
+        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
+        if self.ipc_message_type(tls) == 5 {
+            return match cmd_id {
+                Some(CONVERT_TO_DOMAIN) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "nifm:u");
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                Some(QUERY_POINTER_BUFFER_SIZE) => {
+                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
+                }
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
+        const CREATE_GENERAL_SERVICE_OLD: u32 = 4;
+        const CREATE_GENERAL_SERVICE: u32 = 5;
+        match cmd_id {
+            Some(CREATE_GENERAL_SERVICE_OLD) | Some(CREATE_GENERAL_SERVICE) => {
+                self.reply_with_interface(tls, handle, "nifm:general-service")?;
+                Ok(())
+            }
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// `IGeneralService`: reports a wired connection that is up and has
+    /// internet access, and hands out `IRequest` objects that immediately
+    /// look accepted — there is no real network stack behind this, so every
+    /// homebrew that only checks "is there a connection" sees a permanent
+    /// wired one instead of the emulator looking offline.
+    pub(super) fn nifm_general_service_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        const GET_CLIENT_ID: u32 = 1;
+        const CREATE_REQUEST: u32 = 4;
+        const GET_CURRENT_IP_ADDRESS: u32 = 15;
+        const GET_INTERNET_CONNECTION_STATUS: u32 = 12;
+        match cmd_id {
+            Some(GET_CLIENT_ID) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]),
+            Some(CREATE_REQUEST) => {
+                let obj = self.alloc_domain_object();
+                self.record_domain_object(handle, obj, "nifm:request");
+                self.write_ipc_response(tls, 0, &[], &[], &[obj])
+            }
+            // NifmInternetConnectionType_Ethernet, no Wi-Fi strength to
+            // report, NifmInternetConnectionStatus_Connected.
+            Some(GET_INTERNET_CONNECTION_STATUS) => {
+                self.write_ipc_response(tls, 0, &[], &[2u8, 0u8, 2u8], &[])
+            }
+            Some(GET_CURRENT_IP_ADDRESS) => {
+                self.write_ipc_response(tls, 0, &[], &[192, 168, 1, 100], &[])
+            }
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// `audren:u` (`IAudioRendererManager`): the factory for `IAudioRenderer`.
+    /// Never converted to a domain (libnx builds it with
+    /// `NX_SERVICE_ASSUME_NON_DOMAIN`), so `OpenAudioRenderer` hands its
+    /// session out as a move handle, the same as `vi:m`/`nvdrv`.
+    ///
+    /// Answering `GetWorkBufferSize` with an empty reply (the old generic
+    /// stub) left `workBufSize` as whatever garbage was already in that
+    /// stack slot; `tmemCreate`ing a transfer memory block of that size
+    /// reliably failed, and `audrenInitialize` — and so `SDL_OpenAudioDevice`,
+    /// and so `JKSV::initialize_sdl`, and so `JKSV::JKSV()` itself — gave up
+    /// before a single frame ever rendered.
+    pub(super) fn audren_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_message_type(tls) == 5 {
+            return match cmd_id {
+                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
+        let data = self.ipc_request_data(tls);
+        // `AudioRendererParameter`: sample_rate, sample_count, mix_buffer_count,
+        // submix_count, voice_count, sink_count, effect_count, unk1, unk2+pad,
+        // splitter_count, unk3, unk4, revision.
+        let voice_count = self.mem.read_u32(data.wrapping_add(16)).unwrap_or(0);
+        let sink_count = self.mem.read_u32(data.wrapping_add(20)).unwrap_or(0);
+        let effect_count = self.mem.read_u32(data.wrapping_add(24)).unwrap_or(0);
+        let revision = self.mem.read_u32(data.wrapping_add(48)).unwrap_or(0);
+        match cmd_id {
+            // GetWorkBufferSize: any page-sized answer works — nothing here
+            // actually allocates real renderer memory out of it.
+            Some(1) => self.write_ipc_response(tls, 0, &[], &0x10_0000u64.to_le_bytes(), &[]),
+            // OpenAudioRenderer.
+            Some(0) => {
+                let renderer = self.alloc_handle();
+                self.record_handle(renderer, "audren:iaudiorenderer");
+                self.audren_renderers.insert(
+                    renderer,
+                    AudrenParams { revision, voice_count, sink_count, effect_count },
+                );
+                self.write_ipc_response(tls, 0, &[renderer], &[], &[])
+            }
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// `IAudioRenderer`. `RequestUpdateAudioRenderer` fills in the exact
+    /// shape `audrvUpdate` expects (`AudioRendererUpdateDataHeader` + one
+    /// `AudioRendererMemPoolInfoOut` per mempool + one
+    /// `AudioRendererVoiceInfoOut` per voice + one `AudioRendererSinkInfoOut`
+    /// per sink + the performance/behavior tails), all zeroed — no mempool
+    /// ever needs attaching, no voice ever played anything, so the all-zero
+    /// answer is a truthful "did nothing" rather than a guess. Getting the
+    /// `_sz` fields right matters: `audrvUpdate` rejects a reply whose sizes
+    /// do not match what it computed from the same voice/sink/effect counts,
+    /// and it runs every frame the app is alive, not just at startup.
+    pub(super) fn audren_renderer_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+        if self.ipc_message_type(tls) == 5 {
+            return match cmd_id {
+                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
+        match cmd_id {
+            // GetState: 0 is a live sample-generation counter to a real
+            // console; any stable value here is a legal "nothing changed".
+            Some(3) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // RequestUpdateAudioRenderer, cmd 4 pre-3.0.0 / cmd 10 since.
+            Some(4) | Some(10) => self.audren_write_update_reply(tls, handle),
+            Some(5) | Some(6) | Some(8) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // QuerySystemEvent: a copy handle WaitSynchronization treats as
+            // already signaled, the same trick `vi:m`'s vsync event uses —
+            // the audio thread's frame wait never blocks.
+            Some(7) => {
+                let h = self.alloc_handle();
+                self.write_ipc_response(tls, 0, &[h], &[], &[])
+            }
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    fn audren_write_update_reply(&mut self, tls: u32, handle: u64) -> Result<()> {
+        let params = self.audren_renderers.get(&handle).copied().unwrap_or(AudrenParams {
+            revision: 0,
+            voice_count: 0,
+            sink_count: 0,
+            effect_count: 0,
+        });
+        let mempool_count = params.effect_count + 4 * params.voice_count;
+        const HEADER_SZ: u32 = 64;
+        const MEMPOOL_OUT_SZ: u32 = 16;
+        const VOICE_OUT_SZ: u32 = 16;
+        const SINK_OUT_SZ: u32 = 32;
+        const PERFMGR_OUT_SZ: u32 = 16;
+        const BEHAVIOR_OUT_SZ: u32 = 176;
+        let mempools_sz = mempool_count * MEMPOOL_OUT_SZ;
+        let voices_sz = params.voice_count * VOICE_OUT_SZ;
+        let sinks_sz = params.sink_count * SINK_OUT_SZ;
+        let total_sz = HEADER_SZ + mempools_sz + voices_sz + sinks_sz + PERFMGR_OUT_SZ + BEHAVIOR_OUT_SZ;
+
+        let mut reply = vec![0u8; total_sz as usize];
+        reply[0..4].copy_from_slice(&params.revision.to_le_bytes());
+        reply[4..8].copy_from_slice(&BEHAVIOR_OUT_SZ.to_le_bytes());
+        reply[8..12].copy_from_slice(&mempools_sz.to_le_bytes());
+        reply[12..16].copy_from_slice(&voices_sz.to_le_bytes());
+        // channels_sz, effects_sz, mixes_sz stay 0: not part of this revision's
+        // output layout (libnx's own size helpers don't count them either).
+        reply[28..32].copy_from_slice(&sinks_sz.to_le_bytes());
+        reply[32..36].copy_from_slice(&PERFMGR_OUT_SZ.to_le_bytes());
+        reply[60..64].copy_from_slice(&total_sz.to_le_bytes());
+        // Every MemPoolInfoOut/VoiceInfoOut/SinkInfoOut/PerformanceBufferInfoOut
+        // entry after the header is left zeroed: `AudioRendererMemPoolState_Invalid`
+        // (0) tells the caller to leave that mempool's state alone, and zeroed
+        // voice/sink/performance counters are a truthful "nothing happened".
+
+        let (_, recv) = self.ipc_map_buffers(tls);
+        if let Some(&(addr, size)) = recv.first() {
+            let n = (size as usize).min(reply.len());
+            for (i, &byte) in reply[..n].iter().enumerate() {
+                self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
+            }
+        }
+        self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
     /// Read `len` bytes of guest memory, stopping at the first fault.
