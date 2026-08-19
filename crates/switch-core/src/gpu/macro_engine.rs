@@ -25,6 +25,12 @@
 //!  bits 14..31  sign-extended immediate (18 bits)
 //!  bit 7        exit after the next instruction
 //! ```
+//!
+//! A branch (operation 7) and the exit modifier both have a one-instruction
+//! delay slot: they take effect only after the following instruction has run.
+//! Branch bit 4 selects != 0 vs == 0 and bit 5 annuls the delay slot when the
+//! branch is taken; combining the exit modifier with a branch exits only when
+//! the branch is *not* taken.
 
 use crate::{Error, Result};
 
@@ -71,6 +77,15 @@ impl Assignment {
 pub struct MacroWrite {
     pub method: u32,
     pub arg: u32,
+}
+
+/// The class-side interface a running macro needs: read a class register and
+/// apply an emitted method write. Both are called in program order as the
+/// macro runs, so a `read_method` sees the effect of every write the macro has
+/// already emitted (and its side effects, such as a firmware call completing).
+pub trait MacroHost {
+    fn read_method(&self, method: u32) -> u32;
+    fn write_method(&mut self, write: MacroWrite) -> Result<()>;
 }
 
 /// The MME's storage: instruction RAM plus the per-slot entry points. Lives
@@ -142,16 +157,14 @@ impl MacroEngine {
         self.pending
     }
 
-    /// Run the pending macro. `read_method` supplies the class register file
-    /// for the MME's `read` opcode; the returned writes must be applied to the
-    /// class in order.
-    pub fn run<F>(&mut self, read_method: F) -> Result<Vec<MacroWrite>>
-    where
-        F: Fn(u32) -> u32,
-    {
+    /// Run the pending macro against `host`, which supplies the class register
+    /// file for `read` and receives each emitted method write as it happens —
+    /// so a later `read` sees the effect of earlier writes (e.g.
+    /// `WriteHardwareReg`'s firmware-call completion poll).
+    pub fn run<H: MacroHost + ?Sized>(&mut self, host: &mut H) -> Result<()> {
         let slot = match self.pending.take() {
             Some(slot) => slot,
-            None => return Ok(Vec::new()),
+            None => return Ok(()),
         };
         let entry = *self
             .start_addresses
@@ -166,30 +179,72 @@ impl MacroEngine {
             args: &args,
             arg_index: 0,
             carry: false,
-            writes: Vec::new(),
         };
         // The first argument arrives in R1 rather than through a fetch.
         state.gprs[1] = state.fetch_arg();
         let mut steps = 0u32;
+        // A branch and the exit modifier both have a one-instruction delay slot:
+        // they take effect only after the following instruction has run. A taken
+        // branch overrides a concurrent exit, so an exit in a branch's delay
+        // slot only fires when control falls through instead of jumping.
+        let mut pending_jump: Option<u32> = None;
+        let mut pending_exit = false;
+        let mut trace: Vec<(u32, u32)> = Vec::new();
         loop {
             if steps >= MAX_STEPS {
-                return Err(Error::Gpu(format!(
-                    "mme: macro {} ran for {} instructions without exiting",
-                    slot, MAX_STEPS
-                )));
+                let mut detail = format!(
+                    "mme: macro {} ran for {} instructions without exiting (entry {:#x})\n",
+                    slot, MAX_STEPS, entry
+                );
+                for (pc, word) in trace.iter().rev().take(40).rev() {
+                    detail.push_str(&format!("  {:#06x}: {:#010x}  {}\n", pc, word, disasm(*word)));
+                }
+                return Err(Error::Gpu(detail));
             }
             steps += 1;
             let word = *self
                 .instruction_ram
                 .get(state.pc as usize)
                 .ok_or_else(|| Error::Gpu(format!("mme: pc {:#x} out of range", state.pc)))?;
+            if trace.len() < 2000 {
+                trace.push((state.pc, word));
+            }
             state.pc = state.pc.wrapping_add(1);
-            if !state.step(word, &read_method)? {
+            let flow = state.execute(word, host)?;
+
+            // The delay slot has just run; resolve the previous instruction's
+            // branch/exit. A jump discards an exit scheduled by the delay slot.
+            let was_delay_slot = pending_jump.is_some();
+            if let Some(target) = pending_jump.take() {
+                state.pc = target;
+            } else if pending_exit {
                 break;
             }
+
+            // Schedule this instruction's control flow for the next slot.
+            if flow.is_branch && flow.taken {
+                if flow.annul {
+                    state.pc = flow.target;
+                } else {
+                    pending_jump = Some(flow.target);
+                }
+            }
+            if flow.exit && !(flow.is_branch && flow.taken) && !was_delay_slot {
+                pending_exit = true;
+            }
         }
-        Ok(state.writes)
+        Ok(())
     }
+}
+
+/// The flow-control intent of a single executed instruction, resolved by the
+/// caller once the instruction's delay slot has run.
+struct Flow {
+    is_branch: bool,
+    taken: bool,
+    target: u32,
+    annul: bool,
+    exit: bool,
 }
 
 struct MacroState<'a> {
@@ -200,7 +255,6 @@ struct MacroState<'a> {
     args: &'a [u32],
     arg_index: usize,
     carry: bool,
-    writes: Vec<MacroWrite>,
 }
 
 impl MacroState<'_> {
@@ -225,76 +279,69 @@ impl MacroState<'_> {
         self.method_increment = (value >> 12) & 0x3F;
     }
 
-    fn send(&mut self, value: u32) {
-        self.writes.push(MacroWrite { method: self.method_address, arg: value });
+    fn send<H: MacroHost + ?Sized>(&mut self, value: u32, host: &mut H) -> Result<()> {
+        host.write_method(MacroWrite { method: self.method_address, arg: value })?;
         self.method_address = self.method_address.wrapping_add(self.method_increment) & 0xFFF;
+        Ok(())
     }
 
-    /// Execute one instruction. Returns false once the program has exited.
-    fn step<F>(&mut self, word: u32, read_method: &F) -> Result<bool>
-    where
-        F: Fn(u32) -> u32,
-    {
-        let op = word & 7;
-        if op == 7 {
+    /// Execute one instruction, returning its flow-control intent. The caller
+    /// applies branches and the exit modifier after the delay slot has run.
+    fn execute<H: MacroHost + ?Sized>(&mut self, word: u32, host: &mut H) -> Result<Flow> {
+        let exit = (word >> 7) & 1 != 0;
+        if word & 7 == 7 {
             // Branch: bit 4 selects != 0 vs == 0, bit 5 annuls the delay slot.
             let on_not_zero = (word >> 4) & 1 != 0;
+            let annul = (word >> 5) & 1 != 0;
             let value = self.gpr((word >> 11) & 7);
             let taken = if on_not_zero { value != 0 } else { value == 0 };
-            if taken {
-                // The immediate is relative to the branch instruction, and the
-                // pc has already advanced past it.
-                self.pc = self.pc.wrapping_sub(1).wrapping_add(imm(word) as u32);
-                return Ok(true);
+            // The immediate is relative to the branch instruction, and the
+            // pc has already advanced past it.
+            let target = self.pc.wrapping_sub(1).wrapping_add(imm(word) as u32);
+            return Ok(Flow { is_branch: true, taken, target, annul, exit });
+        }
+        let result = self.alu(word, host)?;
+        let dst = (word >> 8) & 7;
+        match Assignment::from_bits(word >> 4) {
+            Assignment::IgnoreAndFetch => {
+                let v = self.fetch_arg();
+                self.set_gpr(dst, v);
             }
-        } else {
-            let result = self.alu(word, read_method)?;
-            let dst = (word >> 8) & 7;
-            match Assignment::from_bits(word >> 4) {
-                Assignment::IgnoreAndFetch => {
-                    let v = self.fetch_arg();
-                    self.set_gpr(dst, v);
-                }
-                Assignment::Move => self.set_gpr(dst, result),
-                Assignment::MoveAndSetMethod => {
-                    self.set_gpr(dst, result);
-                    self.set_method(result);
-                }
-                Assignment::FetchAndSend => {
-                    let v = self.fetch_arg();
-                    self.set_gpr(dst, v);
-                    self.send(result);
-                }
-                Assignment::MoveAndSend => {
-                    self.set_gpr(dst, result);
-                    self.send(result);
-                }
-                Assignment::FetchAndSetMethod => {
-                    let v = self.fetch_arg();
-                    self.set_gpr(dst, v);
-                    self.set_method(result);
-                }
-                Assignment::MoveAndSetMethodThenFetchAndSend => {
-                    self.set_gpr(dst, result);
-                    self.set_method(result);
-                    let v = self.fetch_arg();
-                    self.send(v);
-                }
-                Assignment::MoveAndSetMethodThenSendHigh => {
-                    self.set_gpr(dst, result);
-                    self.set_method(result);
-                    self.send((result >> 12) & 0x3F);
-                }
+            Assignment::Move => self.set_gpr(dst, result),
+            Assignment::MoveAndSetMethod => {
+                self.set_gpr(dst, result);
+                self.set_method(result);
+            }
+            Assignment::FetchAndSend => {
+                let v = self.fetch_arg();
+                self.set_gpr(dst, v);
+                self.send(result, host)?;
+            }
+            Assignment::MoveAndSend => {
+                self.set_gpr(dst, result);
+                self.send(result, host)?;
+            }
+            Assignment::FetchAndSetMethod => {
+                let v = self.fetch_arg();
+                self.set_gpr(dst, v);
+                self.set_method(result);
+            }
+            Assignment::MoveAndSetMethodThenFetchAndSend => {
+                self.set_gpr(dst, result);
+                self.set_method(result);
+                let v = self.fetch_arg();
+                self.send(v, host)?;
+            }
+            Assignment::MoveAndSetMethodThenSendHigh => {
+                self.set_gpr(dst, result);
+                self.set_method(result);
+                self.send((result >> 12) & 0x3F, host)?;
             }
         }
-        // Bit 7 exits, but only after the following instruction has run.
-        Ok((word >> 7) & 1 == 0)
+        Ok(Flow { is_branch: false, taken: false, target: 0, annul: false, exit })
     }
 
-    fn alu<F>(&mut self, word: u32, read_method: &F) -> Result<u32>
-    where
-        F: Fn(u32) -> u32,
-    {
+    fn alu<H: MacroHost + ?Sized>(&mut self, word: u32, host: &mut H) -> Result<u32> {
         let a = self.gpr((word >> 11) & 7);
         let b = self.gpr((word >> 14) & 7);
         match word & 7 {
@@ -357,7 +404,7 @@ impl MacroState<'_> {
                     _ => ((b >> src_bit) & mask) << (a & 31),
                 })
             }
-            5 => Ok(read_method(a.wrapping_add(imm(word) as u32) & 0xFFF)),
+            5 => Ok(host.read_method(a.wrapping_add(imm(word) as u32) & 0xFFF)),
             other => Err(Error::Gpu(format!(
                 "mme: unimplemented operation {} (word {:#010x})",
                 other, word
@@ -369,6 +416,40 @@ impl MacroState<'_> {
 /// The sign-extended 18-bit immediate held in bits 14..31.
 fn imm(word: u32) -> i32 {
     (word as i32) >> 14
+}
+
+/// Human-readable decode of one MME instruction, for debugging dumps.
+pub fn disasm(word: u32) -> String {
+    let op = word & 7;
+    let assign = (word >> 4) & 7;
+    let exit = if word & 0x80 != 0 { " exit" } else { "" };
+    let dst = (word >> 8) & 7;
+    let a = (word >> 11) & 7;
+    let b = (word >> 14) & 7;
+    match op {
+        7 => {
+            let cond = if word & 0x10 != 0 { "bnz" } else { "bz" };
+            let annul = if word & 0x20 != 0 { " annul" } else { "" };
+            format!("{cond} r{a} -> {}{annul}{exit}", imm(word))
+        }
+        5 => format!("read r{dst} = [r{a} + {}]{exit}", imm(word)),
+        1 => format!("addi r{dst} = r{a} + {} (assign {assign}){exit}", imm(word)),
+        2 | 3 | 4 => {
+            let src_bit = (word >> 17) & 0x1F;
+            let size = (word >> 22) & 0x1F;
+            let dst_bit = (word >> 27) & 0x1F;
+            match op {
+                2 =>                 format!("insrt r{dst} = r{a}[{dst_bit}:{size}] <- r{b} (assign {assign}){exit}"),
+                3 => format!("extr r{dst} = r{b}[r{a}:{}] << {} (assign {assign}){exit}", size, dst_bit),
+                _ => format!("extr r{dst} = r{b}[{}:{}] << r{a} (assign {assign}){exit}", src_bit, size),
+            }
+        }
+        0 => {
+            let sub = (word >> 17) & 0x1F;
+            format!("alu r{dst} = r{a} op{sub} r{b} (assign {assign}){exit}")
+        }
+        other => format!("op{other} (assign {assign}){exit}"),
+    }
 }
 
 #[cfg(test)]
@@ -393,6 +474,27 @@ mod tests {
         }
     }
 
+    /// Run a macro and collect its emitted writes.
+    fn run_collect(engine: &mut MacroEngine, read: impl Fn(u32) -> u32) -> Result<Vec<MacroWrite>> {
+        struct Host<'a, F> {
+            read: F,
+            writes: &'a mut Vec<MacroWrite>,
+        }
+        impl<F: Fn(u32) -> u32> MacroHost for Host<'_, F> {
+            fn read_method(&self, method: u32) -> u32 {
+                (self.read)(method)
+            }
+            fn write_method(&mut self, write: MacroWrite) -> Result<()> {
+                self.writes.push(write);
+                Ok(())
+            }
+        }
+        let mut writes = Vec::new();
+        let mut host = Host { read, writes: &mut writes };
+        engine.run(&mut host)?;
+        Ok(writes)
+    }
+
     #[test]
     fn macro_sets_a_method_and_sends_one_value() {
         let mut engine = MacroEngine::new();
@@ -409,7 +511,7 @@ mod tests {
         );
         engine.start(0, 0x360); // method 0x360, increment 0
         engine.push_argument(0x1234);
-        let writes = engine.run(|_| 0).unwrap();
+        let writes = run_collect(&mut engine, |_| 0).unwrap();
         assert_eq!(writes, vec![MacroWrite { method: 0x360, arg: 0x1234 }]);
     }
 
@@ -430,7 +532,7 @@ mod tests {
         engine.start(1, 0x100 | (1 << 12));
         engine.push_argument(0xAA);
         engine.push_argument(0xBB);
-        let writes = engine.run(|_| 0).unwrap();
+        let writes = run_collect(&mut engine, |_| 0).unwrap();
         assert_eq!(writes[0], MacroWrite { method: 0x100, arg: 0xAA });
     }
 
@@ -451,7 +553,7 @@ mod tests {
             ],
         );
         engine.start(0, 0x200);
-        let writes = engine.run(|method| if method == 0x200 { 0x99 } else { 0 }).unwrap();
+        let writes = run_collect(&mut engine, |method| if method == 0x200 { 0x99 } else { 0 }).unwrap();
         // The macro only sets the method here; what matters is that `read`
         // resolved without faulting and the program exited.
         assert!(writes.is_empty());
@@ -463,6 +565,63 @@ mod tests {
         // Unconditional-ish backward branch on R0 == 0, never exits.
         load(&mut engine, 0, &[7 | (0 << 4) | (0 << 11) | ((0i32 as u32) << 14)]);
         engine.start(0, 0);
-        assert!(engine.run(|_| 0).is_err());
+        assert!(run_collect(&mut engine, |_| 0).is_err());
+    }
+
+    /// deko3d's `FillRegisters` shape: a counting loop whose exit lives in the
+    /// branch's delay slot, so the branch must cancel the exit on the way back
+    /// around. This used to spin for `MAX_STEPS` instructions.
+    #[test]
+    fn branch_delay_slot_cancels_exit() {
+        fn branch(src: u32, on_not_zero: bool, annul: bool, imm: i32) -> u32 {
+            7 | ((on_not_zero as u32) << 4) | ((annul as u32) << 5) | (src << 11) | ((imm as u32) << 14)
+        }
+        let mut engine = MacroEngine::new();
+        load(
+            &mut engine,
+            0,
+            &[
+                add_imm(2, 1, 0, 5, false), // method addr = R1, fetch count -> R2
+                add_imm(3, 0, 0, 0, false), // fetch value -> R3
+                add_imm(2, 2, -1, 1, false), // dec R2
+                branch(2, true, false, -1), // bnz R2 loop
+                add_imm(0, 3, 0, 4, true),  // *send R3 (exit)
+                add_imm(0, 0, 0, 1, false), // nop (delay slot of the exit)
+            ],
+        );
+        engine.start(0, 0x100);
+        engine.push_argument(3); // three writes
+        engine.push_argument(0xAA);
+        let writes = run_collect(&mut engine, |_| 0).unwrap();
+        assert_eq!(writes, vec![MacroWrite { method: 0x100, arg: 0xAA }; 3]);
+    }
+
+    #[test]
+    fn branch_with_exit_exits_only_when_not_taken() {
+        fn branch(src: u32, on_not_zero: bool, annul: bool, imm: i32, exit: bool) -> u32 {
+            7 | ((on_not_zero as u32) << 4) | ((annul as u32) << 5) | ((exit as u32) << 7)
+                | (src << 11) | ((imm as u32) << 14)
+        }
+        let mut engine = MacroEngine::new();
+        // deko3d's `CommonClearLoop` shape: send, then branch-with-exit back to
+        // the top while a counter is non-zero; the exit fires when it hits zero.
+        load(
+            &mut engine,
+            0,
+            &[
+                add_imm(2, 1, 0, 5, false), // method addr = R1, fetch count -> R2
+                add_imm(2, 2, -1, 1, false), // dec R2
+                add_imm(0, 1, 0, 4, false),  // send R1
+                branch(2, true, false, -2, true), // *bnz R2 loop
+                add_imm(1, 1, 1, 1, false),  // delay slot: R1 += 1
+            ],
+        );
+        engine.start(0, 0x200);
+        engine.push_argument(2); // two sends
+        let writes = run_collect(&mut engine, |_| 0).unwrap();
+        assert_eq!(
+            writes,
+            vec![MacroWrite { method: 0x200, arg: 0x200 }, MacroWrite { method: 0x200, arg: 0x201 }]
+        );
     }
 }

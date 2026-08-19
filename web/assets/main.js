@@ -738,16 +738,17 @@ function inputStatus(text) {
 
 // Keyboard fallback: dpad + A/B/X/Y + start/select.
 const KEY_MAP = {
-  ArrowLeft: BTN.LEFT, ArrowUp: BTN.UP, ArrowRight: BTN.RIGHT, ArrowDown: BTN.DOWN,
-  Enter: BTN.PLUS, ShiftLeft: BTN.MINUS, ShiftRight: BTN.MINUS,
-  KeyZ: BTN.A, KeyX: BTN.B, KeyA: BTN.X, KeyS: BTN.Y,
-  KeyQ: BTN.L, KeyE: BTN.R,
+  arrowleft: BTN.LEFT, arrowup: BTN.UP, arrowright: BTN.RIGHT, arrowdown: BTN.DOWN,
+  enter: BTN.PLUS, shift: BTN.MINUS,
+  z: BTN.A, x: BTN.B, a: BTN.X, s: BTN.Y,
+  q: BTN.L, e: BTN.R,
 };
 const keysDown = new Set();
 window.addEventListener('keydown', (e) => {
-  if (KEY_MAP[e.code]) { keysDown.add(e.code); e.preventDefault(); }
+  const key = e.key.toLowerCase();
+  if (KEY_MAP[key]) { keysDown.add(key); e.preventDefault(); }
 });
-window.addEventListener('keyup', (e) => keysDown.delete(e.code));
+window.addEventListener('keyup', (e) => keysDown.delete(e.key.toLowerCase()));
 window.addEventListener('blur', () => keysDown.clear());
 
 function keyboardMask() {

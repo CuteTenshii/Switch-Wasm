@@ -143,10 +143,44 @@ fn main() {
     }
 
     let mut done = 0u64;
+    let watch: std::collections::HashSet<u32> = std::env::var("WATCH")
+        .map(|s| {
+            s.split(',')
+                .filter_map(|x| u32::from_str_radix(x.trim_start_matches("0x"), 16).ok())
+                .collect()
+        })
+        .unwrap_or_default();
     loop {
         if done >= max_steps {
             println!("STOPPED at step budget {done} pc={:#x}", cpu.get_pc());
             break;
+        }
+        let pc = cpu.get_pc();
+        if watch.contains(&pc) {
+            println!(
+                "[watch] step={done} pc={pc:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} x6={:#x} x7={:#x} bt={:?}",
+                cpu.read_x(0),
+                cpu.read_x(1),
+                cpu.read_x(2),
+                cpu.read_x(3),
+                cpu.read_x(4),
+                cpu.read_x(5),
+                cpu.read_x(6),
+                cpu.read_x(7),
+                cpu.backtrace(16)
+            );
+            if pc == 0xce6ab00 {
+                let f = cpu.read_x(0);
+                let mut s = String::new();
+                for i in 0..48u64 {
+                    match cpu.mem.read_u64((f as u32).wrapping_add(i as u32)) {
+                        Ok(0) => break,
+                        Ok(b) => s.push((b & 0xff) as u8 as char),
+                        Err(_) => break,
+                    }
+                }
+                println!("  ** nn_result_abort msg@{f:#x} = {:?}", s);
+            }
         }
         match cpu.step() {
             Ok(()) => {}
@@ -157,6 +191,24 @@ fn main() {
         }
         if cpu.halted {
             println!("HALTED at step {done} pc={:#x} x0={:#x}", cpu.get_pc(), cpu.read_x(0));
+            if std::env::var("DUMP_REGS").is_ok() {
+                println!("{}", cpu.reg_dump());
+                for a in [0xdffb790u32, 0xdffdaf0, 0xdffd080, 0xdffdaa0, 0xdffc2a8, 0xdffc298, 0xdffc2c0, 0xdffc2d0, 0xdffd028, 0xdffd018, 0xdffd020, 0xdffd010] {
+                    if let Ok(v) = cpu.mem.read_u64(a) {
+                        println!("data@{a:#x} -> fx {v:#x}");
+                    }
+                }
+                if let Ok(v) = cpu.mem.read_u32(0x0e06e2ac) {
+                    println!("data@0x0e06e2ac (result) = {v:#010x}");
+                }
+                let tls = cpu.tls_base();
+                if let Ok(tp) = cpu.mem.read_u64(tls + 0x1f8) {
+                    println!("TLS tls_tp = {tp:#x}");
+                    if let Ok(succ) = cpu.mem.read_u32(tp as u32 + 0x1b0) {
+                        println!("expected success code @tls_tp+0x1b0 = {succ:#010x}");
+                    }
+                }
+            }
             break;
         }
         done += 1;

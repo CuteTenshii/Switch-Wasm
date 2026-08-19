@@ -6,7 +6,7 @@
 
 use crate::gpu::engine::{field, Registers};
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::macro_engine::{MacroEngine, MACRO_METHODS_START};
+use crate::gpu::macro_engine::{MacroEngine, MacroHost, MacroWrite, MACRO_METHODS_START};
 use crate::gpu::raster;
 use crate::gpu::surface::{ColorFormat, Layout};
 use crate::{Error, Result};
@@ -48,6 +48,15 @@ const LOAD_CONSTBUF_OFFSET: u32 = 0x8E3;
 const LOAD_CONSTBUF_DATA: u32 = 0x8E4;
 const LOAD_CONSTBUF_DATA_LAST: u32 = 0x8F3;
 
+// The Falcon firmware "method call" interface: writing one of these kicks off
+// a firmware routine whose arguments live in the MmeFirmwareArgs registers
+// (0xD00..). deko3d's `WriteHardwareReg` macro uses FirmwareCall[4] to poke
+// PGRAPH registers, then polls MmeFirmwareArgs[0] until the firmware reports
+// completion — see `firmware_call` below.
+const FIRMWARE_CALL: u32 = 0x8C0;
+const FIRMWARE_CALL_LAST: u32 = 0x8DF;
+const MME_FIRMWARE_ARGS: u32 = 0xD00;
+
 // The 3D class also implements the inline-to-memory methods; deko3d issues
 // them on the 3D subchannel (see `gpu_transfer.cpp`).
 const INLINE_FIRST: u32 = 0x060;
@@ -80,6 +89,19 @@ const DEPTH_TEST_FUNC: u32 = 0x4C3;
 
 // --- Blend ---
 const BLEND_CONSTANT: u32 = 0x4C7;
+// The shared, non-independent blend state (`gf100_3d.xml`: BLEND_EQUATION_RGB
+// 0x1340..BLEND_FUNC_DST_ALPHA 0x1358, word-indexed) — what real hardware
+// actually reads when `IndependentBlendEnable` is off, which is the common
+// case. `IndependentBlend[i]` below is a *different* register block that
+// only applies when that bit is set; reading it unconditionally left every
+// blend factor/equation at 0 (not a valid `DkBlendFactor`/`DkBlendOp`) for
+// any content that never turns independent blending on.
+const BLEND_EQUATION_RGB: u32 = 0x4D0;
+const BLEND_FUNC_SRC_RGB: u32 = 0x4D1;
+const BLEND_FUNC_DST_RGB: u32 = 0x4D2;
+const BLEND_EQUATION_ALPHA: u32 = 0x4D3;
+const BLEND_FUNC_SRC_ALPHA: u32 = 0x4D4;
+const BLEND_FUNC_DST_ALPHA: u32 = 0x4D6;
 const COLOR_BLEND_ENABLE: u32 = 0x4D8;
 const INDEPENDENT_BLEND: u32 = 0x780;
 const INDEPENDENT_BLEND_STRIDE: u32 = 0x8;
@@ -297,6 +319,7 @@ impl Engine3D {
             SYNCPT_ACTION => self.syncpt_action(arg, ctx)?,
             CLEAR_BUFFERS => self.clear_buffers(arg, ctx)?,
             REPORT_SEMAPHORE => self.report_semaphore(arg, ctx)?,
+            FIRMWARE_CALL..=FIRMWARE_CALL_LAST => self.firmware_call(arg, ctx)?,
             LOAD_CONSTBUF_OFFSET => self.constbuf_cursor = field(arg, 0, 15),
             LOAD_CONSTBUF_DATA..=LOAD_CONSTBUF_DATA_LAST => self.load_constbuf(arg, ctx)?,
             BIND..=BIND_LAST => self.bind(method, arg),
@@ -328,16 +351,29 @@ impl Engine3D {
             self.macros.push_argument(arg);
         }
         if last_call {
-            let writes = {
-                let regs = &self.regs;
-                self.macros.run(|m| regs.get(m))?
-            };
-            ctx.stats.macros += 1;
-            for write in writes {
-                // A macro can only emit ordinary method writes, so this
-                // recursion is one level deep.
-                self.write(write.method, write.arg, true, ctx)?;
+            // The macro's writes are applied to the class as they are emitted,
+            // so a later `read` in the macro sees their effect (e.g. the
+            // `WriteHardwareReg` firmware-call poll reads `MmeFirmwareArgs[0]`
+            // back after the firmware call writes it). Take the engine out so
+            // the mutable borrow of `macros` doesn't conflict with `self.write`.
+            let mut macros = std::mem::take(&mut self.macros);
+            struct Host<'e, 'c, 'x> {
+                engine: &'e mut Engine3D,
+                ctx: &'c mut ExecCtx<'x>,
             }
+            impl<'e, 'c, 'x> MacroHost for Host<'e, 'c, 'x> {
+                fn read_method(&self, method: u32) -> u32 {
+                    self.engine.regs.get(method)
+                }
+                fn write_method(&mut self, write: MacroWrite) -> Result<()> {
+                    self.engine.write(write.method, write.arg, true, self.ctx)
+                }
+            }
+            let mut host = Host { engine: self, ctx };
+            let result = macros.run(&mut host);
+            self.macros = macros;
+            ctx.stats.macros += 1;
+            result?;
         }
         Ok(())
     }
@@ -368,6 +404,21 @@ impl Engine3D {
             ctx.write_u64(addr, payload as u64)?;
             ctx.write_u64(addr + 8, ctx.stats.submissions)?;
         }
+        Ok(())
+    }
+
+    /// `FirmwareCall[n]`: the Falcon firmware method-call interface. Writing
+    /// one of these starts a firmware routine that reads its arguments from the
+    /// `MmeFirmwareArgs` registers and writes a completion code back to
+    /// `MmeFirmwareArgs[0]`. deko3d's `WriteHardwareReg` macro fires
+    /// `FirmwareCall[4]` to write a PGRAPH register and then polls
+    /// `MmeFirmwareArgs[0]` until it reads 1.
+    ///
+    /// There is no firmware and PGRAPH MMIO is not modelled, so the actual
+    /// register poke is a no-op; just acknowledge completion so the macro's
+    /// poll loop terminates.
+    fn firmware_call(&mut self, _arg: u32, _ctx: &mut ExecCtx) -> Result<()> {
+        self.regs.set(MME_FIRMWARE_ARGS, 1);
         Ok(())
     }
 
@@ -506,15 +557,28 @@ impl Engine3D {
     /// Resolve `IndependentBlend[index]` plus its `ColorBlendEnable[index]`
     /// bit.
     pub fn blend_target(&self, index: u32) -> BlendTarget {
-        let base = INDEPENDENT_BLEND + index * INDEPENDENT_BLEND_STRIDE;
-        BlendTarget {
-            enabled: self.regs.get(COLOR_BLEND_ENABLE + index) != 0,
-            equation_rgb: self.regs.get(base + 1),
-            func_rgb_src: self.regs.get(base + 2),
-            func_rgb_dst: self.regs.get(base + 3),
-            equation_alpha: self.regs.get(base + 4),
-            func_alpha_src: self.regs.get(base + 5),
-            func_alpha_dst: self.regs.get(base + 6),
+        let enabled = self.regs.get(COLOR_BLEND_ENABLE + index) != 0;
+        if self.independent_blend_enabled() {
+            let base = INDEPENDENT_BLEND + index * INDEPENDENT_BLEND_STRIDE;
+            BlendTarget {
+                enabled,
+                equation_rgb: self.regs.get(base + 1),
+                func_rgb_src: self.regs.get(base + 2),
+                func_rgb_dst: self.regs.get(base + 3),
+                equation_alpha: self.regs.get(base + 4),
+                func_alpha_src: self.regs.get(base + 5),
+                func_alpha_dst: self.regs.get(base + 6),
+            }
+        } else {
+            BlendTarget {
+                enabled,
+                equation_rgb: self.regs.get(BLEND_EQUATION_RGB),
+                func_rgb_src: self.regs.get(BLEND_FUNC_SRC_RGB),
+                func_rgb_dst: self.regs.get(BLEND_FUNC_DST_RGB),
+                equation_alpha: self.regs.get(BLEND_EQUATION_ALPHA),
+                func_alpha_src: self.regs.get(BLEND_FUNC_SRC_ALPHA),
+                func_alpha_dst: self.regs.get(BLEND_FUNC_DST_ALPHA),
+            }
         }
     }
 
@@ -1111,6 +1175,32 @@ mod tests {
         // Unbinding forgets it.
         engine.write(base + BIND_CONSTBUF_OFFSET, 0 | (2 << 4), true, &mut ctx).unwrap();
         assert_eq!(engine.bound_constbuf(ShaderStage::Fragment, 2), None);
+    }
+
+    #[test]
+    fn blend_target_uses_the_shared_registers_when_independent_blend_is_off() {
+        // `IndependentBlendEnable` defaults to off — this is the common case
+        // (a single font/UI shader drawing everything with one blend
+        // state), and it's a *different* register block from
+        // `IndependentBlend[i]`, not just index 0 of the same array.
+        let mut h = Harness::new(0x1000);
+        let mut engine = Engine3D::new();
+        let mut ctx = h.ctx();
+        engine.write(COLOR_BLEND_ENABLE, 1, true, &mut ctx).unwrap();
+        engine.write(BLEND_EQUATION_RGB, 1, true, &mut ctx).unwrap(); // Add
+        engine.write(BLEND_FUNC_SRC_RGB, 5, true, &mut ctx).unwrap(); // SrcAlpha
+        engine.write(BLEND_FUNC_DST_RGB, 6, true, &mut ctx).unwrap(); // InvSrcAlpha
+        engine.write(BLEND_EQUATION_ALPHA, 1, true, &mut ctx).unwrap();
+        engine.write(BLEND_FUNC_SRC_ALPHA, 2, true, &mut ctx).unwrap(); // One
+        engine.write(BLEND_FUNC_DST_ALPHA, 1, true, &mut ctx).unwrap(); // Zero
+
+        assert!(!engine.independent_blend_enabled());
+        let bt = engine.blend_target(0);
+        assert!(bt.enabled);
+        assert_eq!(
+            (bt.equation_rgb, bt.func_rgb_src, bt.func_rgb_dst, bt.equation_alpha, bt.func_alpha_src, bt.func_alpha_dst),
+            (1, 5, 6, 1, 2, 1)
+        );
     }
 
     #[test]

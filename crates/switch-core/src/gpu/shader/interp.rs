@@ -161,20 +161,121 @@ impl Invocation {
         }
     }
 
+    /// Registers `insn` reads as a source operand (not counting [`RZ`] —
+    /// reading it is always a no-op, so it can never be a real dependency).
+    fn reads(insn: &Instruction) -> Vec<u8> {
+        let mut out = match *insn {
+            Instruction::St { src, size, .. } => {
+                (0..Self::attr_slots(size)).map(|i| src.wrapping_add(i)).collect()
+            }
+            Instruction::Ipa { mul: Some(m), .. } => vec![m],
+            Instruction::MufuRcp { src, .. } => vec![src],
+            Instruction::Fmul { a, b, .. } | Instruction::Fadd { a, b, .. } => {
+                let mut v = vec![a];
+                if let Operand::Reg(r) = b {
+                    v.push(r);
+                }
+                v
+            }
+            Instruction::Ffma { a, b, c, .. } => {
+                let mut v = vec![a, c];
+                if let Operand::Reg(r) = b {
+                    v.push(r);
+                }
+                v
+            }
+            Instruction::Texs { coords, .. } => coords.to_vec(),
+            _ => Vec::new(),
+        };
+        out.retain(|&r| r != RZ);
+        out
+    }
+
+    /// Registers `insn` writes as a destination.
+    fn writes(insn: &Instruction) -> Vec<u8> {
+        match *insn {
+            Instruction::Ld { dst, size, .. } => {
+                (0..Self::attr_slots(size)).map(|i| dst.wrapping_add(i)).collect()
+            }
+            Instruction::Ipa { dst, .. }
+            | Instruction::MufuRcp { dst, .. }
+            | Instruction::Fmul { dst, .. }
+            | Instruction::Fadd { dst, .. }
+            | Instruction::Mov32i { dst, .. }
+            | Instruction::Ffma { dst, .. } => vec![dst],
+            Instruction::Texs { dst, mask, .. } => {
+                let mut r = dst;
+                let mut v = Vec::new();
+                for &enabled in mask.iter() {
+                    if enabled {
+                        v.push(r);
+                        r = r.wrapping_add(1);
+                    }
+                }
+                v
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Where `reg`'s pending write should actually land: right before the
+    /// first later instruction that reads it (the real dependency point);
+    /// dropped entirely if something overwrites it first (the value was
+    /// never actually needed); or — if the program never touches it again —
+    /// right before the final `Exit`, so a shader that hands a `texs`
+    /// result straight to its output register (no modulation in between)
+    /// still sees it in the final register state real hardware would
+    /// eventually have written regardless of whether anything read it.
+    fn first_use_after(program: &[Instruction], start: usize, reg: u8) -> Option<usize> {
+        for (idx, insn) in program.iter().enumerate().skip(start) {
+            if Self::reads(insn).contains(&reg) {
+                return Some(idx);
+            }
+            if Self::writes(insn).contains(&reg) {
+                return None;
+            }
+        }
+        // Never read again and never overwritten: land it right before the
+        // final instruction (`Exit`) rather than dropping it, so it's still
+        // visible in the program's final register state.
+        program.len().checked_sub(1)
+    }
+
     /// Execute `program` to completion. `program` must end in
     /// [`Instruction::Exit`] — every path [`super::decode_program`] returns
     /// does — so falling off the end without one is this function's own
     /// bug, not a guest error.
+    ///
+    /// Real Maxwell issues `texs` asynchronously: the compiler interleaves
+    /// unrelated instructions between the fetch and its first real
+    /// consumer, relying on the texture unit's latency to hide them, and
+    /// those interleaved instructions are guaranteed *not* to depend on the
+    /// result — so they still see whatever the destination registers held
+    /// before the fetch. A synchronous write at the `texs` instruction
+    /// itself breaks that guarantee (see `gpu::texture`'s module docs for
+    /// how this was caught against real content). So `texs`'s writes are
+    /// deferred: each destination register's real value is queued and only
+    /// applied immediately before the instruction that actually reads it —
+    /// found by scanning forward once, which is exactly the guarantee the
+    /// compiler already relied on.
     pub fn execute(
         &mut self,
         program: &[Instruction],
         consts: &dyn ConstantSource,
         textures: &dyn TextureSource,
     ) -> Result<()> {
-        for insn in program {
+        let mut pending: Vec<(usize, u8, f32)> = Vec::new();
+        for (idx, insn) in program.iter().enumerate() {
+            pending.retain(|&(due, reg, val)| {
+                if due == idx {
+                    self.set_reg_f32(reg, val);
+                    false
+                } else {
+                    true
+                }
+            });
             match *insn {
                 Instruction::Exit => return Ok(()),
-
                 Instruction::Ld { dst, offset, size } => {
                     for i in 0..Self::attr_slots(size) {
                         let v = self
@@ -230,20 +331,26 @@ impl Invocation {
                     // The bindless handle lives in the driver's reserved
                     // constant bank at the shader's own immediate offset —
                     // see `gpu::texture`'s module docs for how that was
-                    // confirmed. `t2d`'s two coordinates are REG_00 (u) and
-                    // REG_20 (v); REG_08 (coords[1]) is unused for a plain
-                    // 2D sample (it's a 3rd-dimension/array slot on other
-                    // `TexDim`s this decoder doesn't need yet).
+                    // confirmed. The real destination is `dst` (envydis
+                    // prints `REG_28` first, which reads as the destination
+                    // by the convention every other instruction follows,
+                    // but isn't one here — see `isa`'s `decodes_texs` test
+                    // for how that was confirmed against real GLSL
+                    // semantics). `t2d`'s two coordinates are REG_08 (u,
+                    // `coords[1]`) and REG_20 (v, `coords[2]`); REG_28
+                    // (`coords[0]`) is unused for a plain 2D sample.
                     let handle_bits = self
                         .operand(Operand::Const { bank: crate::gpu::texture::DRIVER_CONSTBUF_BANK, offset: handle }, consts)?
                         .to_bits();
-                    let u = self.reg_f32(coords[0]);
+                    let u = self.reg_f32(coords[1]);
                     let v = self.reg_f32(coords[2]);
                     let color = textures.sample(handle_bits, u, v)?;
                     let mut r = dst;
                     for (channel, &enabled) in mask.iter().enumerate() {
                         if enabled {
-                            self.set_reg_f32(r, color[channel]);
+                            if let Some(due) = Self::first_use_after(program, idx + 1, r) {
+                                pending.push((due, r, color[channel]));
+                            }
                             r = r.wrapping_add(1);
                         }
                     }
@@ -327,11 +434,13 @@ mod tests {
 
     #[test]
     fn texs_resolves_its_handle_from_the_driver_constant_bank_and_writes_the_masked_channels() {
-        // tex.frag's real shape: "texs $r2 $r0 $r0 $r1 <handle_offset> t2d rgba".
+        // tex.frag's real shape, with the roles `isa`'s `decodes_texs` test
+        // documents: dst is REG_00, coords are [REG_28 (unused), REG_08 (u),
+        // REG_20 (v)].
         let program = vec![
             Instruction::Texs {
                 dst: 2,
-                coords: [0, 1, 3], // u=r0, [unused for t2d]=r1, v=r3
+                coords: [9, 0, 3], // coords[0] unused for t2d; u=r0, v=r3
                 handle: 0x20,
                 dim: TexDim::T2d,
                 mask: [true, true, true, true],
@@ -552,5 +661,85 @@ mod tests {
         assert_eq!(source.read_const(2, 0x10).unwrap(), 42.5);
         assert!(source.read_const(3, 0x10).is_err()); // unbound bank
         assert!(source.read_const(2, 0x1000).is_err()); // past the buffer's size
+    }
+
+    #[test]
+    fn textured_fragment_shader_multiplies_the_real_sample_by_vertex_colour() {
+        // tex.frag in full (the same real capture `isa`'s module docs and
+        // `decodes_texs`'s test cite): `oColor = texture(uTex, vTexCoord) *
+        // vColor;`. This is also the test that caught `texs`'s real
+        // dst/coordinate roles (see `isa::decodes_texs`'s doc comment) —
+        // with a solid vertex colour of (1,1,1,1) the expected output is
+        // exactly the sampled texture colour, letting a wrong register
+        // mapping surface immediately as a wrong result instead of a
+        // plausible-looking wash of white.
+        fn word(low: u32, high: u32) -> [u8; 8] {
+            (((high as u64) << 32) | low as u64).to_le_bytes()
+        }
+        fn block(sched: (u32, u32), a: (u32, u32), b: (u32, u32), c: (u32, u32)) -> Vec<u8> {
+            let mut out = Vec::with_capacity(32);
+            out.extend_from_slice(&word(sched.0, sched.1));
+            out.extend_from_slice(&word(a.0, a.1));
+            out.extend_from_slice(&word(b.0, b.1));
+            out.extend_from_slice(&word(c.0, c.1));
+            out
+        }
+        let mut bytes = block(
+            (0xe1a0070f, 0x003c0401),
+            (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+            (0x00470004, 0x50800000), // mufu rcp $r4 $r0
+            (0x0047ff00, 0xe043ff89), // ipa $r0 a[0x90] $r4 0x0 0x1  (u)
+        );
+        bytes.extend(block(
+            (0xe020072f, 0x001cbc03),
+            (0x4047ff01, 0xe043ff89), // ipa $r1 a[0x94] $r4 0x0 0x1  (v)
+            (0x20170000, 0xd8301a40), // texs $r2 $r0 $r0 $r1 0x1a4 t2d rgba
+            (0x0047ff05, 0xe043ff88), // ipa $r5 a[0x80] $r4 0x0 0x1
+        ));
+        bytes.extend(block(
+            (0xe1e01ff0, 0x003fc000),
+            (0x00570000, 0x5c681000), // fmul ftz $r0 $r0 $r5
+            (0x4047ff05, 0xe043ff88), // ipa $r5 a[0x84] $r4 0x0 0x1
+            (0x00570101, 0x5c681000), // fmul ftz $r1 $r1 $r5
+        ));
+        bytes.extend(block(
+            (0xfe00070f, 0x001c3c01),
+            (0x8047ff05, 0xe043ff88), // ipa $r5 a[0x88] $r4 0x0 0x1
+            (0x00570202, 0x5c681000), // fmul ftz $r2 $r2 $r5
+            (0xc047ff04, 0xe043ff88), // ipa $r4 a[0x8c] $r4 0x0 0x1
+        ));
+        bytes.extend(block(
+            (0xfde00ff0, 0x001ffc3f),
+            (0x00470303, 0x5c681000), // fmul ftz $r3 $r3 $r4
+            (0x0007000f, 0xe3000000), // exit
+            (0xff87000f, 0xe2400fff), // bra (padding, never reached)
+        ));
+        let program = decode_program(&bytes).unwrap();
+
+        struct StubTex;
+        impl TextureSource for StubTex {
+            fn sample(&self, _handle: u32, _u: f32, _v: f32) -> Result<[f32; 4]> {
+                Ok([0.2, 0.4, 0.6, 0.8])
+            }
+        }
+
+        let w = 2.0f32;
+        let color = [1.0f32, 1.0, 1.0, 1.0];
+        let mut inv = Invocation::new();
+        inv.attr_in.insert(0x7c, 1.0 / w);
+        inv.attr_in.insert(0x90, 0.5 / w); // u
+        inv.attr_in.insert(0x94, 0.5 / w); // v
+        inv.attr_in.insert(0x80, color[0] / w);
+        inv.attr_in.insert(0x84, color[1] / w);
+        inv.attr_in.insert(0x88, color[2] / w);
+        inv.attr_in.insert(0x8c, color[3] / w);
+
+        let no_consts: HashMap<(u8, u16), f32> = HashMap::new();
+        inv.execute(&program, &no_consts, &StubTex).unwrap();
+
+        assert_eq!(inv.reg_f32(0), 0.2);
+        assert_eq!(inv.reg_f32(1), 0.4);
+        assert_eq!(inv.reg_f32(2), 0.6);
+        assert_eq!(inv.reg_f32(3), 0.8);
     }
 }

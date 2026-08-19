@@ -264,8 +264,8 @@ pub fn decode(insn: u64) -> Instruction {
             if let (Some(dim), Some(mask)) = (decode_tex_dim(dim_bits), decode_tex_mask(mask_bits))
             {
                 return Instruction::Texs {
-                    dst: reg(insn, 28, 8),
-                    coords: [reg(insn, 0, 8), reg(insn, 8, 8), reg(insn, 20, 8)],
+                    dst: reg(insn, 0, 8),
+                    coords: [reg(insn, 28, 8), reg(insn, 8, 8), reg(insn, 20, 8)],
                     handle: field(insn, 36, 13) as u16,
                     dim,
                     mask,
@@ -516,12 +516,19 @@ mod tests {
 
     #[test]
     fn decodes_texs() {
-        // tex.frag: "texs $r2 $r0 $r0 $r1 0x1a4 t2d rgba"
+        // tex.frag: envydis prints "texs $r2 $r0 $r0 $r1 0x1a4 t2d rgba", but
+        // envydis's print order doesn't match this ISA's real dst/coord
+        // roles — confirmed empirically (see `interp`'s module docs) by
+        // running the decoded program against known texture/colour inputs
+        // and checking the output against `texture.rgba * vColor.rgba`:
+        // the real destination is REG_00 (here 0, i.e. $r0, not the
+        // first-printed $r2), and REG_28 (here 2) is an unused coordinate
+        // slot for a plain 2D sample.
         assert_eq!(
             decode(0xd8301a40_20170000),
             Instruction::Texs {
-                dst: 2,
-                coords: [0, 0, 1],
+                dst: 0,
+                coords: [2, 0, 1],
                 handle: 0x1a4,
                 dim: TexDim::T2d,
                 mask: [true, true, true, true],

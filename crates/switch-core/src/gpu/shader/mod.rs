@@ -223,8 +223,8 @@ mod tests {
         assert_eq!(
             program[4],
             Instruction::Texs {
-                dst: 2,
-                coords: [0, 0, 1],
+                dst: 0,
+                coords: [2, 0, 1],
                 handle: 0x1a4,
                 dim: TexDim::T2d,
                 mask: [true, true, true, true],

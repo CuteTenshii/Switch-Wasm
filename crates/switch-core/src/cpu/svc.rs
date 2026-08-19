@@ -363,6 +363,7 @@ impl Cpu {
                         "fsp-srv-storage" => self.fs_storage_request(tls, cmd_id)?,
                         "vi:m" | "vi:m:" => self.vi_request(tls, handle, cmd_id)?,
                         "set" => self.set_request(tls, cmd_id)?,
+                        "set:sys" => self.set_sys_request(tls, cmd_id)?,
                         "nvdrv" | "nvdrv:" | "nvdrv:a" | "nvdrv:a:" | "nvdrv:s" | "nvdrv:t" => {
                             self.nvdrv_request(tls, cmd_id, handle)?
                         }

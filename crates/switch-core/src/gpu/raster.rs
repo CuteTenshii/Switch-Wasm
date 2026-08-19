@@ -365,49 +365,60 @@ fn to_screen(clip: [f32; 4], viewport: (f32, f32, f32, f32)) -> (ScreenVertex, f
     (screen, inv_w, ndc_z)
 }
 
-/// `DkCompareOp` (deko3d.h): `1..=8`, `Never..=Always`, one-based.
+/// `DEPTH_TEST_FUNC`'s real hardware type is `gl_comparison_op`
+/// (`nv_3ddefs.xml`): literal OpenGL `GL_NEVER`(0x0200)`..=GL_ALWAYS`(0x0207)
+/// enum values, not deko3d's simplified 1-8 `DkCompareOp` numbering — real
+/// content goes through Mesa's GL driver (JKSV), which writes the GL enum
+/// straight through. Confirmed by dumping a live JKSV capture's actual
+/// register contents.
 fn depth_test_passes(func: u32, new: f32, old: f32) -> bool {
     match func {
-        1 => false,
-        2 => new < old,
-        3 => new == old,
-        4 => new <= old,
-        5 => new > old,
-        6 => new != old,
-        7 => new >= old,
-        _ => true, // Always, and any unrecognised code.
+        0x0200 => false,
+        0x0201 => new < old,
+        0x0202 => new == old,
+        0x0203 => new <= old,
+        0x0204 => new > old,
+        0x0205 => new != old,
+        0x0206 => new >= old,
+        _ => true, // GL_ALWAYS (0x0207), and any unrecognised code.
     }
 }
 
-/// `DkBlendFactor` (deko3d.h) as a per-channel multiplier — `SrcColor`/
-/// `DstColor` are genuinely per-channel; the rest just broadcast a scalar.
+/// `BLEND_FUNC_*`'s real hardware type is `G80_BLEND_FACTOR`
+/// (`nv_3ddefs.xml`): literal OpenGL blend-factor enum values (`0x4000`+ for
+/// the plain factors, `0xc000`+ for the constant-colour ones), not deko3d's
+/// simplified `DkBlendFactor` numbering — see [`depth_test_passes`]'s doc
+/// comment for how that was confirmed. `SrcColor`/`DstColor` are genuinely
+/// per-channel; the rest just broadcast a scalar.
 fn blend_factor(code: u32, src: [f32; 4], dst: [f32; 4], constant: [f32; 4]) -> [f32; 4] {
     match code {
-        1 => [0.0; 4],                              // Zero
-        3 => src,                                    // SrcColor
-        4 => src.map(|c| 1.0 - c),                   // InvSrcColor
-        5 => [src[3]; 4],                             // SrcAlpha
-        6 => [1.0 - src[3]; 4],                       // InvSrcAlpha
-        7 => [dst[3]; 4],                             // DstAlpha
-        8 => [1.0 - dst[3]; 4],                       // InvDstAlpha
-        9 => dst,                                     // DstColor
-        10 => dst.map(|c| 1.0 - c),                   // InvDstColor
-        33 => constant,                               // ConstColor (1|0x20)
-        34 => constant.map(|c| 1.0 - c),              // InvConstColor
-        35 => [constant[3]; 4],                       // ConstAlpha
-        36 => [1.0 - constant[3]; 4],                 // InvConstAlpha
-        _ => [1.0; 4],                                 // One, and anything unrecognised.
+        0x4000 => [0.0; 4],                  // Zero
+        0x4300 => src,                       // SrcColor
+        0x4301 => src.map(|c| 1.0 - c),       // OneMinusSrcColor
+        0x4302 => [src[3]; 4],               // SrcAlpha
+        0x4303 => [1.0 - src[3]; 4],         // OneMinusSrcAlpha
+        0x4304 => [dst[3]; 4],               // DstAlpha
+        0x4305 => [1.0 - dst[3]; 4],         // OneMinusDstAlpha
+        0x4306 => dst,                       // DstColor
+        0x4307 => dst.map(|c| 1.0 - c),       // OneMinusDstColor
+        0xc001 => constant,                  // ConstantColor
+        0xc002 => constant.map(|c| 1.0 - c),  // OneMinusConstantColor
+        0xc003 => [constant[3]; 4],          // ConstantAlpha
+        0xc004 => [1.0 - constant[3]; 4],    // OneMinusConstantAlpha
+        _ => [1.0; 4],                        // One (0x4001), and anything unrecognised.
     }
 }
 
-/// `DkBlendOp` (deko3d.h): `1..=5`, `Add..=Max`.
+/// `BLEND_EQUATION_*`'s real hardware type is `gl_blend_equation`
+/// (`nv_3ddefs.xml`): literal `GL_FUNC_ADD`(0x8006)`..=GL_FUNC_REVERSE_
+/// SUBTRACT`(0x800b), not deko3d's simplified 1-5 `DkBlendOp` numbering.
 fn blend_equation(op: u32, src: f32, dst: f32) -> f32 {
     match op {
-        2 => src - dst,        // Sub
-        3 => dst - src,        // RevSub
-        4 => src.min(dst),     // Min
-        5 => src.max(dst),     // Max
-        _ => src + dst,        // Add, and anything unrecognised.
+        0x800a => src - dst,   // FuncSubtract
+        0x800b => dst - src,   // FuncReverseSubtract
+        0x8007 => src.min(dst), // Min
+        0x8008 => src.max(dst), // Max
+        _ => src + dst,         // FuncAdd (0x8006), and anything unrecognised.
     }
 }
 
@@ -879,16 +890,16 @@ mod tests {
     }
 
     #[test]
-    fn depth_test_passes_matches_dkcompareop() {
-        assert!(!depth_test_passes(1, 0.1, 0.5)); // Never
-        assert!(depth_test_passes(2, 0.1, 0.5)); // Less
-        assert!(!depth_test_passes(2, 0.5, 0.5));
-        assert!(depth_test_passes(3, 0.5, 0.5)); // Equal
-        assert!(depth_test_passes(4, 0.5, 0.5)); // Lequal
-        assert!(depth_test_passes(5, 0.6, 0.5)); // Greater
-        assert!(depth_test_passes(6, 0.6, 0.5)); // NotEqual
-        assert!(depth_test_passes(7, 0.5, 0.5)); // Gequal
-        assert!(depth_test_passes(8, 0.9, 0.1)); // Always
+    fn depth_test_passes_matches_gl_comparison_op() {
+        assert!(!depth_test_passes(0x0200, 0.1, 0.5)); // Never
+        assert!(depth_test_passes(0x0201, 0.1, 0.5)); // Less
+        assert!(!depth_test_passes(0x0201, 0.5, 0.5));
+        assert!(depth_test_passes(0x0202, 0.5, 0.5)); // Equal
+        assert!(depth_test_passes(0x0203, 0.5, 0.5)); // Lequal
+        assert!(depth_test_passes(0x0204, 0.6, 0.5)); // Greater
+        assert!(depth_test_passes(0x0205, 0.6, 0.5)); // NotEqual
+        assert!(depth_test_passes(0x0206, 0.5, 0.5)); // Gequal
+        assert!(depth_test_passes(0x0207, 0.9, 0.1)); // Always
     }
 
     #[test]
@@ -896,27 +907,30 @@ mod tests {
         let src = [1.0, 0.5, 0.25, 0.75];
         let dst = [0.0, 1.0, 0.0, 0.2];
         let constant = [0.1, 0.2, 0.3, 0.4];
-        assert_eq!(blend_factor(1, src, dst, constant), [0.0; 4]); // Zero
-        assert_eq!(blend_factor(2, src, dst, constant), [1.0; 4]); // One
-        assert_eq!(blend_factor(3, src, dst, constant), src); // SrcColor
-        assert_eq!(blend_factor(5, src, dst, constant), [0.75; 4]); // SrcAlpha
-        assert_eq!(blend_factor(6, src, dst, constant), [0.25; 4]); // InvSrcAlpha
-        assert_eq!(blend_factor(9, src, dst, constant), dst); // DstColor
-        assert_eq!(blend_factor(33, src, dst, constant), constant); // ConstColor
+        assert_eq!(blend_factor(0x4000, src, dst, constant), [0.0; 4]); // Zero
+        assert_eq!(blend_factor(0x4001, src, dst, constant), [1.0; 4]); // One
+        assert_eq!(blend_factor(0x4300, src, dst, constant), src); // SrcColor
+        assert_eq!(blend_factor(0x4302, src, dst, constant), [0.75; 4]); // SrcAlpha
+        assert_eq!(blend_factor(0x4303, src, dst, constant), [0.25; 4]); // OneMinusSrcAlpha
+        assert_eq!(blend_factor(0x4306, src, dst, constant), dst); // DstColor
+        assert_eq!(blend_factor(0xc001, src, dst, constant), constant); // ConstantColor
     }
 
     #[test]
     fn blend_composites_the_default_alpha_blend_state() {
         // dkBlendStateDefaults: colorBlendOp=Add, src=SrcAlpha, dst=InvSrcAlpha;
         // alphaBlendOp=Add, src=One, dst=Zero -- so out.a is just src.a.
+        // Values are the real hardware's GL enum codes (see
+        // `blend_factor`/`blend_equation`'s doc comments), not deko3d's API
+        // numbering.
         let target = BlendTarget {
             enabled: true,
-            equation_rgb: 1,
-            func_rgb_src: 5,
-            func_rgb_dst: 6,
-            equation_alpha: 1,
-            func_alpha_src: 2,
-            func_alpha_dst: 1,
+            equation_rgb: 0x8006,   // FuncAdd
+            func_rgb_src: 0x4302,   // SrcAlpha
+            func_rgb_dst: 0x4303,   // OneMinusSrcAlpha
+            equation_alpha: 0x8006, // FuncAdd
+            func_alpha_src: 0x4001, // One
+            func_alpha_dst: 0x4000, // Zero
         };
         let src = [1.0, 0.0, 0.0, 0.5]; // 50% opaque red
         let dst = [0.0, 0.0, 1.0, 1.0]; // opaque blue
@@ -938,7 +952,7 @@ mod tests {
         engine.regs.set(0x48B, 8);
         engine.regs.set(0x4B3, 1); // DepthTestEnable
         engine.regs.set(0x4BA, 1); // DepthWriteEnable
-        engine.regs.set(0x4C3, 2); // DepthTestFunc = Less
+        engine.regs.set(0x4C3, 0x0201); // DepthTestFunc = GL_LESS
 
         {
             // Clear depth to 1.0 (far) first, as real content always does —

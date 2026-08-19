@@ -645,6 +645,9 @@ impl Cpu {
         };
 
         match cmd_id {
+            // GetRegionCode -> SetRegion (SetRegion_USA), paired with
+            // SYSTEM_LANGUAGE (en-US) above rather than a separate constant.
+            Some(4) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]),
             // GetLanguageCode
             Some(0) => {
                 let raw = code(SYSTEM_LANGUAGE).to_le_bytes();
@@ -673,6 +676,25 @@ impl Cpu {
             Some(3) | Some(6) => {
                 let total = LANGUAGE_CODES.len() as u32;
                 self.write_ipc_response(tls, 0, &[], &total.to_le_bytes(), &[])
+            }
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// `set:sys` — system settings not covered by the plain `set` service
+    /// above (language codes). Only `GetSerialNumber` is implemented; every
+    /// other command falls through to a generic empty-success reply, same as
+    /// `set_request`'s default arm.
+    pub(super) fn set_sys_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        match cmd_id {
+            // GetSerialNumber -> SetSysSerialNumber { char number[0x18] }.
+            // Real hardware's is burned in at manufacturing and unique per
+            // console; this is a fixed placeholder, not a real serial.
+            Some(68) => {
+                const SERIAL: &[u8] = b"XAW00000000000";
+                let mut number = [0u8; 0x18];
+                number[..SERIAL.len()].copy_from_slice(SERIAL);
+                self.write_ipc_response(tls, 0, &[], &number, &[])
             }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
         }
@@ -1942,5 +1964,24 @@ mod tests {
         cpu.set_battery(100, true);
         cpu.psm_request(TLS, Some(1), 9).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "charging -> EnoughPower");
+    }
+
+    #[test]
+    fn set_sys_get_serial_number_returns_a_nul_padded_placeholder() {
+        let mut cpu = request(false, 68, &[]);
+        cpu.set_sys_request(TLS, Some(68)).unwrap();
+        let mut got = [0u8; 0x18];
+        for (i, byte) in got.iter_mut().enumerate() {
+            *byte = cpu.mem.read_u8(TLS + 0x20 + i as u32).unwrap();
+        }
+        assert!(got.starts_with(b"XAW00000000000"));
+        assert_eq!(got[b"XAW00000000000".len()], 0, "NUL-padded, not garbage");
+    }
+
+    #[test]
+    fn set_get_region_code_reports_usa() {
+        let mut cpu = request(false, 4, &[]);
+        cpu.set_request(TLS, Some(4)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "SetRegion_USA");
     }
 }
