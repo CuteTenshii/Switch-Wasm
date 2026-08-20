@@ -213,6 +213,7 @@ fn main() {
         done += 1;
     }
     println!("frames presented: {}", cpu.nv.gpu.frames);
+    println!("gpu stats: {:?}", cpu.nv.gpu.stats);
     println!("--- program console output ({} bytes) ---", cpu.out.len());
     let out = String::from_utf8_lossy(&cpu.out);
     for line in out.lines().take(80) {

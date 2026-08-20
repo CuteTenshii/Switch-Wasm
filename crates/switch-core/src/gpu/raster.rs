@@ -7,40 +7,65 @@
 //! own piece before this stage wired them together.
 
 use crate::gpu::engine::threed::{
-    decode_depth, encode_depth, BlendTarget, Engine3D, ShaderStage, VertexArray, VertexAttrib,
+    decode_depth, encode_depth, BlendTarget, CullState, Engine3D, ScissorRect, ShaderStage,
+    VertexArray, VertexAttrib,
 };
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::shader::interp::{ConstantSource, Invocation, MemoryConstants, MemoryTextures, NoTextures, TextureSource};
-use crate::gpu::shader::{isa, Instruction};
+use crate::gpu::shader::interp::{
+    ConstantSource, Env, Invocation, MemoryConstants, MemoryTextures, NoTextures, TextureSource,
+};
+use crate::gpu::shader::{self, Op, Program};
 use crate::{Error, Result};
 
-/// `DkPrimitive`'s subset this rasterizer supports (deko3d.h, devkitPro/
-/// libnx, MIT). Real content routes through one of these two for 2D UI; any
-/// other topology is a hard error rather than silently dropped geometry.
+/// The `DkPrimitive` topologies this rasterizer assembles (deko3d.h,
+/// devkitPro/libnx, MIT). Point and line topologies are recognised so a draw
+/// that uses them is reported as such rather than as an unknown number;
+/// nothing here rasterizes them yet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Primitive {
+    Points,
+    Lines,
+    LineLoop,
+    LineStrip,
     Triangles,
     TriangleStrip,
+    TriangleFan,
+    Quads,
+    QuadStrip,
+    Polygon,
 }
 
 impl Primitive {
     pub fn from_raw(raw: u32) -> Result<Primitive> {
         match raw {
+            0 => Ok(Primitive::Points),
+            1 => Ok(Primitive::Lines),
+            2 => Ok(Primitive::LineLoop),
+            3 => Ok(Primitive::LineStrip),
             4 => Ok(Primitive::Triangles),
             5 => Ok(Primitive::TriangleStrip),
-            other => Err(Error::Gpu(format!(
-                "raster: unsupported DkPrimitive {} (only Triangles/TriangleStrip)",
-                other
-            ))),
+            6 => Ok(Primitive::TriangleFan),
+            7 => Ok(Primitive::Quads),
+            8 => Ok(Primitive::QuadStrip),
+            9 => Ok(Primitive::Polygon),
+            other => Err(Error::Gpu(format!("raster: unknown DkPrimitive {other}"))),
         }
     }
 }
 
 /// Break a `count`-vertex draw into triangles, as vertex-ordinal triples.
-/// `TriangleStrip` alternates the first two indices of odd triangles to
-/// keep winding consistent across the strip.
+///
+/// `TriangleStrip` alternates the first two indices of odd triangles so
+/// every triangle in the strip winds the same way, which matters once
+/// back-face culling is on. `Quads`/`QuadStrip`/`Polygon` fan out into
+/// triangles the way the fixed-function pipeline does. Point and line
+/// topologies produce nothing: they need their own rasterization, and
+/// silently turning them into triangles would draw the wrong thing.
 pub fn assemble(primitive: Primitive, count: u32) -> Vec<[u32; 3]> {
     match primitive {
+        Primitive::Points | Primitive::Lines | Primitive::LineLoop | Primitive::LineStrip => {
+            Vec::new()
+        }
         Primitive::Triangles => (0..count / 3).map(|t| [t * 3, t * 3 + 1, t * 3 + 2]).collect(),
         Primitive::TriangleStrip => {
             if count < 3 {
@@ -48,6 +73,29 @@ pub fn assemble(primitive: Primitive, count: u32) -> Vec<[u32; 3]> {
             }
             (0..count - 2)
                 .map(|i| if i % 2 == 0 { [i, i + 1, i + 2] } else { [i + 1, i, i + 2] })
+                .collect()
+        }
+        Primitive::TriangleFan | Primitive::Polygon => {
+            if count < 3 {
+                return Vec::new();
+            }
+            (0..count - 2).map(|i| [0, i + 1, i + 2]).collect()
+        }
+        Primitive::Quads => (0..count / 4)
+            .flat_map(|q| {
+                let b = q * 4;
+                [[b, b + 1, b + 2], [b, b + 2, b + 3]]
+            })
+            .collect(),
+        Primitive::QuadStrip => {
+            if count < 4 {
+                return Vec::new();
+            }
+            (0..(count - 2) / 2)
+                .flat_map(|q| {
+                    let b = q * 2;
+                    [[b, b + 1, b + 2], [b + 2, b + 1, b + 3]]
+                })
                 .collect()
         }
     }
@@ -276,31 +324,26 @@ struct ShadedVertex {
 /// header showing through: retry assuming one.
 const MESA_SHADER_HEADER_BYTES: u64 = 0x50;
 
-fn decode_program_from_memory(ctx: &ExecCtx, addr: u64) -> Result<Vec<Instruction>> {
+fn decode_program_from_memory(ctx: &ExecCtx, addr: u64) -> Result<Program> {
     let first_real_word = ctx.read_u64(addr + 8)?;
-    let addr = if matches!(isa::decode(first_real_word), Instruction::Unimplemented { .. }) {
+    let addr = if matches!(shader::isa::decode(first_real_word).op, Op::Unimplemented { .. }) {
         addr + MESA_SHADER_HEADER_BYTES
     } else {
         addr
     };
-    let mut out = Vec::new();
-    for slot in 0..MAX_PROGRAM_WORDS {
-        if slot % 4 == 0 {
-            continue; // sched control word
+    let limit = MAX_PROGRAM_WORDS * 8;
+    shader::decode_program_with(&mut |offset: u32| {
+        if u64::from(offset) >= limit {
+            return Err(Error::Gpu(format!(
+                "raster: program read at {offset:#x} is past the {limit:#x}-byte cap"
+            )));
         }
-        let word = ctx.read_u64(addr + slot * 8)?;
-        let insn = isa::decode(word);
-        let is_exit = insn == Instruction::Exit;
-        out.push(insn);
-        if is_exit {
-            return Ok(out);
-        }
-    }
-    Err(Error::Gpu("raster: program ended without an exit".into()))
+        ctx.read_u64(addr + u64::from(offset))
+    })
 }
 
 fn shade_vertex(
-    program: &[Instruction],
+    program: &Program,
     attribs: &[VertexAttrib],
     arrays: &[VertexArray],
     vertex_index: u32,
@@ -325,7 +368,7 @@ fn shade_vertex(
             inv.attr_in.insert(base + c as u16 * 4, component);
         }
     }
-    inv.execute(program, consts, &NoTextures)?;
+    inv.execute(program, &Env::new(consts, &NoTextures))?;
 
     let mut clip = [0.0, 0.0, 0.0, 1.0];
     for (c, slot) in clip.iter_mut().enumerate() {
@@ -436,13 +479,13 @@ fn blend(target: BlendTarget, constant: [f32; 4], src: [f32; 4], dst: [f32; 4]) 
 }
 
 fn shade_fragment(
-    program: &[Instruction],
+    program: &Program,
     verts: &[ShadedVertex; 3],
     inv_w: [f32; 3],
     weights: [f32; 3],
     consts: &dyn ConstantSource,
     textures: &dyn TextureSource,
-) -> Result<[f32; 4]> {
+) -> Result<Option<[f32; 4]>> {
     let mut inv = Invocation::new();
     let interp_inv_w = weights[0] * inv_w[0] + weights[1] * inv_w[1] + weights[2] * inv_w[2];
     inv.attr_in.insert(INV_W_OFFSET, interp_inv_w);
@@ -455,19 +498,119 @@ fn shade_fragment(
             inv.attr_in.insert(base + c as u16 * 4, over_w);
         }
     }
-    inv.execute(program, consts, textures)?;
-    Ok([inv.reg_f32(0), inv.reg_f32(1), inv.reg_f32(2), inv.reg_f32(3)])
+    inv.execute(program, &Env::new(consts, textures))?;
+    if inv.discarded {
+        return Ok(None);
+    }
+    Ok(Some([inv.reg_f32(0), inv.reg_f32(1), inv.reg_f32(2), inv.reg_f32(3)]))
 }
 
-/// Run `engine.last_draw` for real: fetch vertices, shade them, rasterize,
-/// shade covered pixels, and write real colour into the bound render
-/// target. Triangle lists/strips only (see [`Primitive`]); indexed draws
-/// aren't supported yet.
+/// Whether `cull` throws this triangle away.
+///
+/// `to_screen` flips y (NDC is y-up, the framebuffer is y-down), so a
+/// triangle wound counter-clockwise in NDC has a positive signed area in the
+/// y-down screen space this computes it in. A zero-area triangle covers no
+/// pixels either way; reporting it culled saves the rasterizer the walk.
+fn culls(cull: CullState, v: [ScreenVertex; 3]) -> bool {
+    if !cull.enabled {
+        return false;
+    }
+    let area = (v[1].x - v[0].x) * (v[2].y - v[0].y) - (v[1].y - v[0].y) * (v[2].x - v[0].x);
+    if area == 0.0 {
+        return true;
+    }
+    let front = (area > 0.0) == cull.front_ccw;
+    if front {
+        cull.cull_front
+    } else {
+        cull.cull_back
+    }
+}
+
+/// Read the `i`th index of an indexed draw out of the bound index buffer.
+fn read_index(ctx: &ExecCtx, base: u64, format: u32, i: u32) -> Result<u32> {
+    Ok(match format {
+        0 => u32::from(ctx.vmm_read_u8(base + u64::from(i))?),
+        1 => {
+            let at = base + u64::from(i) * 2;
+            u32::from(ctx.vmm_read_u8(at)?) | (u32::from(ctx.vmm_read_u8(at + 1)?) << 8)
+        }
+        2 => ctx.read_u32(base + u64::from(i) * 4)?,
+        other => {
+            return Err(Error::Gpu(format!("raster: unknown index format {other}")));
+        }
+    })
+}
+
+/// A vertex after clipping: clip-space position plus its varyings, which
+/// interpolate linearly in clip space (that's what makes clipping able to
+/// produce new vertices at all).
+#[derive(Debug, Clone, Copy)]
+struct ClipVertex {
+    clip: [f32; 4],
+    varyings: [[f32; 4]; NUM_VARYINGS],
+}
+
+impl ClipVertex {
+    fn lerp(a: &ClipVertex, b: &ClipVertex, t: f32) -> ClipVertex {
+        let mut out = ClipVertex { clip: [0.0; 4], varyings: [[0.0; 4]; NUM_VARYINGS] };
+        for c in 0..4 {
+            out.clip[c] = a.clip[c] + (b.clip[c] - a.clip[c]) * t;
+        }
+        for slot in 0..NUM_VARYINGS {
+            for c in 0..4 {
+                out.varyings[slot][c] =
+                    a.varyings[slot][c] + (b.varyings[slot][c] - a.varyings[slot][c]) * t;
+            }
+        }
+        out
+    }
+}
+
+/// Clip a triangle against the near plane (`w > epsilon`).
+///
+/// This is not an optimisation. A vertex at or behind the eye has `w <= 0`,
+/// and the perspective divide by it sends the projected position to infinity
+/// or flips it to the wrong side of the screen — one off-screen vertex
+/// smears a triangle across the whole framebuffer. Clipping first replaces
+/// the offending vertices with real ones on the plane, so the rasterizer
+/// only ever sees geometry that projects.
+fn clip_near(tri: [ClipVertex; 3]) -> Vec<[ClipVertex; 3]> {
+    /// Far enough from zero that the reciprocal stays finite.
+    const NEAR_W: f32 = 1e-6;
+
+    let inside: Vec<bool> = tri.iter().map(|v| v.clip[3] > NEAR_W).collect();
+    let count = inside.iter().filter(|&&i| i).count();
+    if count == 3 {
+        return vec![tri];
+    }
+    if count == 0 {
+        return Vec::new();
+    }
+    // Walk the edges, emitting kept vertices and the crossings between them.
+    let mut poly: Vec<ClipVertex> = Vec::with_capacity(4);
+    for i in 0..3 {
+        let j = (i + 1) % 3;
+        let (a, b) = (tri[i], tri[j]);
+        if inside[i] {
+            poly.push(a);
+        }
+        if inside[i] != inside[j] {
+            let t = (NEAR_W - a.clip[3]) / (b.clip[3] - a.clip[3]);
+            poly.push(ClipVertex::lerp(&a, &b, t));
+        }
+    }
+    // A triangle clipped by one plane is a triangle or a quad; fan it.
+    (1..poly.len().saturating_sub(1))
+        .map(|i| [poly[0], poly[i], poly[i + 1]])
+        .collect()
+}
+
+/// Run `engine.last_draw` for real: fetch vertices, shade them, clip,
+/// rasterize, shade covered pixels, and write real colour into the bound
+/// render target.
 pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let call = engine.last_draw;
-    if call.indexed {
-        return Err(Error::Gpu("raster: indexed draws aren't supported yet".into()));
-    }
     let rt = engine
         .render_target(0)?
         .ok_or_else(|| Error::Gpu("raster: draw with no bound render target".into()))?;
@@ -485,77 +628,118 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let attribs: Vec<VertexAttrib> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_attrib(i)).collect();
     let arrays: Vec<VertexArray> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_array(i)).collect();
     let viewport = engine.viewport();
-    let bounds = Bounds { x0: 0, y0: 0, x1: rt.width, y1: rt.height };
+    let clip = engine.apply_scissor(ScissorRect { x0: 0, y0: 0, x1: rt.width, y1: rt.height });
+    let bounds = Bounds { x0: clip.x0, y0: clip.y0, x1: clip.x1, y1: clip.y1 };
     let depth = engine.depth_target()?;
     let depth_state = engine.depth_state();
     let blend_target = engine.blend_target(0);
     let blend_constant = engine.blend_constant();
+    let cull = engine.cull_state();
 
+    let index_base = if call.indexed { engine.index_array_start() } else { 0 };
     let triangles = assemble(Primitive::from_raw(call.primitive)?, call.count);
+    // One shaded vertex per *index*, cached: an indexed mesh reuses vertices
+    // heavily, and re-running the vertex shader for each reference is the
+    // single most expensive thing this loop can do.
+    let mut cache: std::collections::HashMap<u32, ShadedVertex> = std::collections::HashMap::new();
+
     for tri in triangles {
         let mut shaded: Vec<ShadedVertex> = Vec::with_capacity(3);
-        for &i in &tri {
+        for &ordinal in &tri {
+            let index = if call.indexed {
+                read_index(&*ctx, index_base, call.index_format, call.first + ordinal)?
+            } else {
+                call.first + ordinal
+            };
+            if let Some(v) = cache.get(&index) {
+                shaded.push(*v);
+                continue;
+            }
             let vs_consts = MemoryConstants {
                 ctx: &*ctx,
                 bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::VertexB, bank as u32),
             };
-            shaded.push(shade_vertex(
-                &vs_program,
-                &attribs,
-                &arrays,
-                call.first + i,
-                &*ctx,
-                &vs_consts,
-            )?);
+            let v = shade_vertex(&vs_program, &attribs, &arrays, index, &*ctx, &vs_consts)?;
+            cache.insert(index, v);
+            shaded.push(v);
         }
-        let projected: Vec<(ScreenVertex, f32, f32)> =
-            shaded.iter().map(|v| to_screen(v.clip, viewport)).collect();
-        let screen = [projected[0].0, projected[1].0, projected[2].0];
-        let inv_w = [projected[0].1, projected[1].1, projected[2].1];
-        let ndc_z = [projected[0].2, projected[1].2, projected[2].2];
 
-        for (x, y, w0, w1, w2) in rasterize_triangle_weighted(screen[0], screen[1], screen[2], bounds) {
-            if let (true, Some(dt)) = (depth_state.test_enabled, depth) {
-                let z01 = (w0 * ndc_z[0] + w1 * ndc_z[1] + w2 * ndc_z[2] + 1.0) * 0.5;
-                let dva = dt.addr + dt.layout.offset(x * dt.bytes, y, dt.width * dt.bytes) as u64;
-                let old_raw = ctx.read_pixel(dva, dt.bytes)?;
-                let old = decode_depth(old_raw, dt.depth_bits);
-                if !depth_test_passes(depth_state.func, z01, old) {
-                    continue;
-                }
-                if depth_state.write_enabled {
-                    ctx.write_pixel(dva, dt.bytes, encode_depth(z01, dt.depth_bits))?;
-                }
+        let unclipped = [
+            ClipVertex { clip: shaded[0].clip, varyings: shaded[0].varyings },
+            ClipVertex { clip: shaded[1].clip, varyings: shaded[1].varyings },
+            ClipVertex { clip: shaded[2].clip, varyings: shaded[2].varyings },
+        ];
+        for piece in clip_near(unclipped) {
+            let shaded: [ShadedVertex; 3] = [
+                ShadedVertex { clip: piece[0].clip, varyings: piece[0].varyings },
+                ShadedVertex { clip: piece[1].clip, varyings: piece[1].varyings },
+                ShadedVertex { clip: piece[2].clip, varyings: piece[2].varyings },
+            ];
+            let projected: Vec<(ScreenVertex, f32, f32)> =
+                shaded.iter().map(|v| to_screen(v.clip, viewport)).collect();
+            let screen = [projected[0].0, projected[1].0, projected[2].0];
+            let inv_w = [projected[0].1, projected[1].1, projected[2].1];
+            let ndc_z = [projected[0].2, projected[1].2, projected[2].2];
+
+            if culls(cull, screen) {
+                continue;
             }
 
-            let color = {
-                let fs_consts = MemoryConstants {
-                    ctx: &*ctx,
-                    bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::Fragment, bank as u32),
+            for (x, y, w0, w1, w2) in
+                rasterize_triangle_weighted(screen[0], screen[1], screen[2], bounds)
+            {
+                let z01 = (w0 * ndc_z[0] + w1 * ndc_z[1] + w2 * ndc_z[2] + 1.0) * 0.5;
+                if let (true, Some(dt)) = (depth_state.test_enabled, depth) {
+                    let dva = dt.addr + dt.layout.offset(x * dt.bytes, y, dt.width * dt.bytes) as u64;
+                    let old_raw = ctx.read_pixel(dva, dt.bytes)?;
+                    let old = decode_depth(old_raw, dt.depth_bits);
+                    if !depth_test_passes(depth_state.func, z01, old) {
+                        continue;
+                    }
+                }
+
+                let color = {
+                    let fs_consts = MemoryConstants {
+                        ctx: &*ctx,
+                        bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::Fragment, bank as u32),
+                    };
+                    let fs_textures = MemoryTextures {
+                        ctx: &*ctx,
+                        tex_header_pool: engine.tex_header_pool(),
+                        tex_sampler_pool: engine.tex_sampler_pool(),
+                    };
+                    shade_fragment(
+                        &fs_program,
+                        &shaded,
+                        [inv_w[0], inv_w[1], inv_w[2]],
+                        [w0, w1, w2],
+                        &fs_consts,
+                        &fs_textures,
+                    )?
                 };
-                let fs_textures = MemoryTextures {
-                    ctx: &*ctx,
-                    tex_header_pool: engine.tex_header_pool(),
-                    tex_sampler_pool: engine.tex_sampler_pool(),
+                // `kil` discards the fragment: no colour, and no depth
+                // write either, which is why the depth store waits until
+                // after shading rather than happening with the test.
+                let Some(color) = color else { continue };
+
+                if depth_state.test_enabled && depth_state.write_enabled {
+                    if let Some(dt) = depth {
+                        let dva =
+                            dt.addr + dt.layout.offset(x * dt.bytes, y, dt.width * dt.bytes) as u64;
+                        ctx.write_pixel(dva, dt.bytes, encode_depth(z01, dt.depth_bits))?;
+                    }
+                }
+
+                let bpp = rt.format.bytes_per_pixel;
+                let va = rt.addr + rt.layout.offset(x * bpp, y, rt.width * bpp) as u64;
+                let out = if blend_target.enabled {
+                    let dst = rt.format.decode(ctx.read_pixel(va, bpp)?)?;
+                    blend(blend_target, blend_constant, color, dst)
+                } else {
+                    color
                 };
-                shade_fragment(
-                    &fs_program,
-                    &[shaded[0], shaded[1], shaded[2]],
-                    [inv_w[0], inv_w[1], inv_w[2]],
-                    [w0, w1, w2],
-                    &fs_consts,
-                    &fs_textures,
-                )?
-            };
-            let bpp = rt.format.bytes_per_pixel;
-            let va = rt.addr + rt.layout.offset(x * bpp, y, rt.width * bpp) as u64;
-            let out = if blend_target.enabled {
-                let dst = rt.format.decode(ctx.read_pixel(va, bpp)?)?;
-                blend(blend_target, blend_constant, color, dst)
-            } else {
-                color
-            };
-            ctx.write_pixel(va, bpp, rt.format.encode(out)?)?;
+                ctx.write_pixel(va, bpp, rt.format.encode(out)?)?;
+            }
         }
     }
     Ok(())
@@ -857,6 +1041,112 @@ mod tests {
         assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
         assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(2 * 4, 2, 16 * 4) as u64).unwrap() as u128, expected);
         assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(12 * 4, 6, 16 * 4) as u64).unwrap(), 0);
+    }
+
+    #[test]
+    fn an_indexed_draw_reads_its_vertices_through_the_index_buffer() {
+        // The same covered half as the direct draw above, but the vertices
+        // are stored in the reverse order and an index buffer puts them
+        // back. Unity and every other real engine draws this way.
+        let (mut mem, vmm, mut engine) = pipeline_harness();
+        let vbuf_addr = engine.vertex_array(0).start;
+        let color = [0.2f32, 0.4, 0.6, 1.0];
+        write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, -1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, 1.0, 0.0, 1.0], color);
+
+        // A u16 index buffer of [2, 1, 0], right after the vertex data.
+        let ibuf_addr = vbuf_addr + 3 * 32;
+        {
+            let mut host1x = Host1x::new();
+            let mut stats = Default::default();
+            let mut ctx =
+                ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+            ctx.write_u32(ibuf_addr, 2 | (1 << 16)).unwrap();
+            ctx.write_u32(ibuf_addr + 4, 0).unwrap();
+        }
+        engine.regs.set(0x5F2, (ibuf_addr >> 32) as u32);
+        engine.regs.set(0x5F3, ibuf_addr as u32);
+        engine.last_draw =
+            DrawCall { primitive: 4, first: 0, count: 3, indexed: true, index_format: 1 };
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let mut ctx =
+            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: true };
+        draw(&engine, &mut ctx).unwrap();
+
+        let rt = engine.render_target(0).unwrap().unwrap();
+        let expected = rt.format.encode(color).unwrap();
+        assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
+        assert_eq!(
+            ctx.read_u32(rt.addr + rt.layout.offset(2 * 4, 2, 16 * 4) as u64).unwrap() as u128,
+            expected
+        );
+        assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(12 * 4, 6, 16 * 4) as u64).unwrap(), 0);
+    }
+
+    #[test]
+    fn back_face_culling_drops_the_wrongly_wound_triangle() {
+        let (mut mem, vmm, mut engine) = pipeline_harness();
+        let vbuf_addr = engine.vertex_array(0).start;
+        let color = [0.2f32, 0.4, 0.6, 1.0];
+        // Clockwise in NDC, i.e. the back face when front is CCW.
+        write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [-1.0, -1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [1.0, 1.0, 0.0, 1.0], color);
+
+        // OGL_SET_CULL enable, front = CCW, cull = BACK.
+        engine.regs.set(0x646, 1);
+        engine.regs.set(0x647, 0x901);
+        engine.regs.set(0x648, 0x405);
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let mut ctx =
+            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: true };
+        draw(&engine, &mut ctx).unwrap();
+        let rt = engine.render_target(0).unwrap().unwrap();
+        assert_eq!(ctx.read_u32(rt.addr).unwrap(), 0, "a back face must not be drawn");
+
+        // Culling the front face instead draws it.
+        engine.regs.set(0x648, 0x404);
+        draw(&engine, &mut ctx).unwrap();
+        assert_ne!(ctx.read_u32(rt.addr).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_triangle_crossing_the_near_plane_is_clipped_not_projected() {
+        // One vertex behind the eye. Dividing by its w would throw the
+        // projected position to the far side of the screen and smear the
+        // triangle across the whole target; clipping replaces it with real
+        // vertices on the plane first.
+        let far = ClipVertex { clip: [-1.0, 1.0, 0.0, 1.0], varyings: [[0.0; 4]; NUM_VARYINGS] };
+        let also_far = ClipVertex { clip: [1.0, 1.0, 0.0, 1.0], varyings: [[0.0; 4]; NUM_VARYINGS] };
+        let behind = ClipVertex { clip: [0.0, -1.0, 0.0, -1.0], varyings: [[0.0; 4]; NUM_VARYINGS] };
+
+        let pieces = clip_near([far, also_far, behind]);
+        assert_eq!(pieces.len(), 2, "a triangle cut by one plane fans into two");
+        for piece in &pieces {
+            for v in piece {
+                assert!(v.clip[3] > 0.0, "no vertex may survive at or behind the eye");
+            }
+        }
+
+        // Wholly in front: untouched. Wholly behind: gone.
+        assert_eq!(clip_near([far, also_far, far]).len(), 1);
+        assert!(clip_near([behind, behind, behind]).is_empty());
+    }
+
+    #[test]
+    fn the_other_triangle_topologies_assemble() {
+        assert_eq!(assemble(Primitive::TriangleFan, 5), vec![[0, 1, 2], [0, 2, 3], [0, 3, 4]]);
+        assert_eq!(assemble(Primitive::Quads, 4), vec![[0, 1, 2], [0, 2, 3]]);
+        assert_eq!(assemble(Primitive::QuadStrip, 4), vec![[0, 1, 2], [2, 1, 3]]);
+        // Point and line topologies need their own rasterization; turning
+        // them into triangles would draw something that isn't there.
+        assert!(assemble(Primitive::Lines, 6).is_empty());
+        assert!(assemble(Primitive::Points, 6).is_empty());
     }
 
     #[test]

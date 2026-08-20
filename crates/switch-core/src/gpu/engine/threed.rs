@@ -22,6 +22,14 @@ const RENDER_TARGET_BASE: u32 = 0x200;
 const RENDER_TARGET_STRIDE: u32 = 0x10;
 const VIEWPORT_BASE: u32 = 0x300;
 const SCISSOR_BASE: u32 = 0x380;
+// NV9097_OGL_SET_CULL / _FRONT_FACE / _CULL_FACE at methods 0x1918/0x191c/
+// 0x1920 (NVIDIA's cl9097.h), as dword indices.
+const OGL_SET_CULL: u32 = 0x646;
+const OGL_SET_FRONT_FACE: u32 = 0x647;
+const OGL_SET_CULL_FACE: u32 = 0x648;
+// NV9097_SET_INDEX_BUFFER_A at method 0x17c8: the address pair the format,
+// first and count registers this file already names follow on from.
+const INDEX_ARRAY_START: u32 = 0x5F2;
 const DRAW_ARRAYS_COUNT: u32 = 0x35E;
 const CLEAR_COLOR: u32 = 0x360;
 const CLEAR_DEPTH: u32 = 0x364;
@@ -228,6 +236,25 @@ pub struct DepthTarget {
     pub bytes: u32,
     /// Depth bits (`0` means 32-bit float, matching `depth_format_layout`).
     pub depth_bits: u32,
+}
+
+/// A resolved pixel rectangle, `[x0, x1) x [y0, y1)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScissorRect {
+    pub x0: u32,
+    pub y0: u32,
+    pub x1: u32,
+    pub y1: u32,
+}
+
+/// Which faces a draw throws away before rasterizing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CullState {
+    pub enabled: bool,
+    /// Whether counter-clockwise winding (in NDC) is the front face.
+    pub front_ccw: bool,
+    pub cull_front: bool,
+    pub cull_back: bool,
 }
 
 /// A draw the engine was asked to perform, kept so the rasterizer stage (and
@@ -636,6 +663,50 @@ impl Engine3D {
             self.regs.field(VIEWPORT_BASE, 16, 31) as f32,
             self.regs.field(VIEWPORT_BASE + 1, 16, 31) as f32,
         )
+    }
+
+    /// Where the bound index buffer starts.
+    pub fn index_array_start(&self) -> u64 {
+        self.regs.iova(INDEX_ARRAY_START)
+    }
+
+    /// Narrow `rect` — normally a render target's full extent — by whichever
+    /// of the two clip rectangles the guest has actually configured.
+    ///
+    /// Both are skipped when unset rather than treated as empty: a register
+    /// file that has never been written would otherwise clip every draw to
+    /// nothing, and "no scissor programmed" means "do not clip".
+    pub fn apply_scissor(&self, rect: ScissorRect) -> ScissorRect {
+        let mut out = rect;
+        let screen_w = self.regs.field(SCREEN_SCISSOR_HORIZONTAL, 16, 31);
+        let screen_h = self.regs.field(SCREEN_SCISSOR_VERTICAL, 16, 31);
+        if screen_w != 0 && screen_h != 0 {
+            let x0 = self.regs.field(SCREEN_SCISSOR_HORIZONTAL, 0, 15);
+            let y0 = self.regs.field(SCREEN_SCISSOR_VERTICAL, 0, 15);
+            out.x0 = out.x0.max(x0);
+            out.y0 = out.y0.max(y0);
+            out.x1 = out.x1.min(x0 + screen_w);
+            out.y1 = out.y1.min(y0 + screen_h);
+        }
+        if self.regs.get(SCISSOR_BASE) != 0 {
+            out.x0 = out.x0.max(self.regs.field(SCISSOR_BASE + 1, 0, 15));
+            out.x1 = out.x1.min(self.regs.field(SCISSOR_BASE + 1, 16, 31));
+            out.y0 = out.y0.max(self.regs.field(SCISSOR_BASE + 2, 0, 15));
+            out.y1 = out.y1.min(self.regs.field(SCISSOR_BASE + 2, 16, 31));
+        }
+        ScissorRect { x0: out.x0, y0: out.y0, x1: out.x1.max(out.x0), y1: out.y1.max(out.y0) }
+    }
+
+    /// Face culling, as `OGL_SET_CULL`/`_FRONT_FACE`/`_CULL_FACE` describe
+    /// it. The face constants are the GL ones the hardware inherited.
+    pub fn cull_state(&self) -> CullState {
+        let face = self.regs.get(OGL_SET_CULL_FACE);
+        CullState {
+            enabled: field(self.regs.get(OGL_SET_CULL), 0, 0) != 0,
+            front_ccw: self.regs.get(OGL_SET_FRONT_FACE) != 0x900,
+            cull_front: face == 0x404 || face == 0x408,
+            cull_back: face == 0x405 || face == 0x408,
+        }
     }
 
     /// Resolve colour render target `index` from the register file.

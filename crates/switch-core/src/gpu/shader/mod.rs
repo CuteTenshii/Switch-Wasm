@@ -3,59 +3,165 @@
 //!
 //! Real binaries pack instructions in 32-byte blocks: an 8-byte `sched`
 //! control word (which register bank/latency hints the scheduler needs — not
-//! a real instruction) followed by three real 8-byte instructions. This
-//! module strips those control words and decodes the rest, stopping at the
-//! first `exit` — everything after it is branch-target padding a program
-//! with no branches never reaches.
+//! a real instruction) followed by three real 8-byte instructions.
+//!
+//! A shader binary carries no length, so the end has to be found rather than
+//! read. The first version of this stopped at the first `exit`, which is
+//! right only for straight-line programs — a shader with any control flow has
+//! code *after* its first `exit` that a branch reaches. This walks the
+//! control-flow graph instead: decode from the entry point, follow every
+//! branch target, and stop each path at whatever ends it. Anything no path
+//! reaches is padding and never decoded.
 
 pub mod interp;
 pub mod isa;
 
-pub use isa::Instruction;
+pub use isa::{Instruction, Op};
 
 use crate::{Error, Result};
+use std::collections::{BTreeMap, HashSet};
 
-/// Hard cap on decoded instructions per program, so a binary that's missing
-/// its `exit` (corrupt upload, or a real feature — loops/branches — this
-/// decoder doesn't support yet) can't hang the emulator.
+/// Hard cap on decoded instructions per program, so a binary that is missing
+/// its `exit` — a corrupt upload, or a control-flow form this decoder cannot
+/// follow — can't walk off into unmapped memory.
 const MAX_INSTRUCTIONS: usize = 4096;
 
-/// Decode `bytes` into its real instructions, stripping the `sched` word
-/// that precedes every group of three and stopping at the first `exit`.
-pub fn decode_program(bytes: &[u8]) -> Result<Vec<Instruction>> {
+/// The first real instruction sits in slot 1 of the first 32-byte block,
+/// right after that block's `sched` word.
+pub const ENTRY_OFFSET: u32 = 8;
+
+/// A decoded program: instructions in ascending address order, each paired
+/// with the byte offset it was decoded from so a branch target can be
+/// resolved back to an index.
+#[derive(Debug, Clone, Default)]
+pub struct Program {
+    pub insns: Vec<Instruction>,
+    pub offsets: Vec<u32>,
+}
+
+impl Program {
+    pub fn len(&self) -> usize {
+        self.insns.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.insns.is_empty()
+    }
+
+    /// The index of the instruction at `byte_offset`, if it was decoded.
+    pub fn index_of(&self, byte_offset: u32) -> Option<usize> {
+        self.offsets.binary_search(&byte_offset).ok()
+    }
+}
+
+/// Whether `offset` names a real instruction rather than a `sched` control
+/// word. Slot 0 of every 32-byte block is the control word.
+fn is_instruction_slot(offset: u32) -> bool {
+    (offset / 8) % 4 != 0
+}
+
+/// The next instruction slot after `offset`, skipping the `sched` word that
+/// starts each block.
+pub fn next_slot(offset: u32) -> u32 {
+    let next = offset + 8;
+    if is_instruction_slot(next) {
+        next
+    } else {
+        next + 8
+    }
+}
+
+/// Decode a program by walking its control-flow graph from `ENTRY_OFFSET`.
+/// `read` fetches the 8-byte word at a byte offset; it is fallible because a
+/// real one reads guest memory, and a program that runs off the end of what
+/// is mapped is a decode error rather than a panic.
+pub fn decode_program_with(read: &mut dyn FnMut(u32) -> Result<u64>) -> Result<Program> {
+    let mut decoded: BTreeMap<u32, Instruction> = BTreeMap::new();
+    let mut queued: HashSet<u32> = HashSet::new();
+    let mut worklist = vec![ENTRY_OFFSET];
+    queued.insert(ENTRY_OFFSET);
+
+    while let Some(mut offset) = worklist.pop() {
+        loop {
+            if decoded.contains_key(&offset) {
+                break; // already walked from here
+            }
+            if decoded.len() >= MAX_INSTRUCTIONS {
+                return Err(Error::Gpu(format!(
+                    "shader: program exceeded {MAX_INSTRUCTIONS} instructions"
+                )));
+            }
+            let insn = isa::decode_at(read(offset)?, offset);
+            decoded.insert(offset, insn);
+
+            let push = |target: u32, worklist: &mut Vec<u32>, queued: &mut HashSet<u32>| {
+                if is_instruction_slot(target) && queued.insert(target) {
+                    worklist.push(target);
+                }
+            };
+            // Whether this instruction can fall through to the next one, and
+            // what else it can reach.
+            let falls_through = match insn.op {
+                Op::Exit | Op::Kil => !insn.pred.is_always(),
+                Op::Bra { target } => {
+                    push(target, &mut worklist, &mut queued);
+                    !insn.pred.is_always()
+                }
+                // `sync`/`brk`/`cont` jump to a point pushed earlier by the
+                // matching `ssy`/`pbk`/`pcnt`, which is already queued.
+                Op::Sync | Op::Brk | Op::Cont => !insn.pred.is_always(),
+                Op::Ssy { target } | Op::Pbk { target } | Op::Pcnt { target } => {
+                    push(target, &mut worklist, &mut queued);
+                    true
+                }
+                _ => true,
+            };
+            if !falls_through {
+                break;
+            }
+            offset = next_slot(offset);
+        }
+    }
+
+    if decoded.is_empty() {
+        return Err(Error::Gpu("shader: empty program".into()));
+    }
+    let mut program = Program::default();
+    for (offset, insn) in decoded {
+        program.offsets.push(offset);
+        program.insns.push(insn);
+    }
+    Ok(program)
+}
+
+/// [`decode_program_with`] over a byte slice.
+pub fn decode_program(bytes: &[u8]) -> Result<Program> {
     if !bytes.len().is_multiple_of(8) {
         return Err(Error::Gpu(format!(
             "shader: program length {} is not a multiple of 8 bytes",
             bytes.len()
         )));
     }
-
-    let mut out = Vec::new();
-    for (slot, chunk) in bytes.chunks_exact(8).enumerate() {
-        if slot % 4 == 0 {
-            continue; // sched control word
-        }
-        let word = u64::from_le_bytes(chunk.try_into().expect("chunks_exact(8)"));
-        let insn = isa::decode(word);
-        let is_exit = insn == Instruction::Exit;
-        out.push(insn);
-        if is_exit {
-            return Ok(out);
-        }
-        if out.len() >= MAX_INSTRUCTIONS {
-            return Err(Error::Gpu(format!(
-                "shader: program exceeded {} instructions without hitting exit",
-                MAX_INSTRUCTIONS
-            )));
-        }
-    }
-    Err(Error::Gpu("shader: program ended without an exit".into()))
+    decode_program_with(&mut |offset: u32| {
+        let start = offset as usize;
+        bytes
+            .get(start..start + 8)
+            .map(|w| u64::from_le_bytes(w.try_into().expect("8 bytes")))
+            .ok_or_else(|| {
+                Error::Gpu(format!("shader: program read at {offset:#x} is past its end"))
+            })
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use isa::{MemSize, Operand, TexDim};
+    use isa::{FMod, MemSize, MufuOp, Operand, TexDim, RZ};
+
+    /// Just the opcodes, for comparing a decode against an expected list.
+    fn ops(program: &Program) -> Vec<Op> {
+        program.insns.iter().map(|i| i.op).collect()
+    }
 
     fn word(low: u32, high: u32) -> [u8; 8] {
         let v = ((high as u64) << 32) | low as u64;
@@ -100,15 +206,15 @@ mod tests {
 
         let program = decode_program(&bytes).unwrap();
         assert_eq!(
-            program,
+            ops(&program),
             vec![
-                Instruction::Ipa { dst: 0, offset: 0x7c, mul: None, perspective: false },
-                Instruction::MufuRcp { dst: 3, src: 0 },
-                Instruction::Ipa { dst: 0, offset: 0x80, mul: Some(3), perspective: true },
-                Instruction::Ipa { dst: 1, offset: 0x84, mul: Some(3), perspective: true },
-                Instruction::Ipa { dst: 2, offset: 0x88, mul: Some(3), perspective: true },
-                Instruction::Ipa { dst: 3, offset: 0x8c, mul: Some(3), perspective: true },
-                Instruction::Exit,
+                Op::Ipa { dst: 0, offset: 0x7c, mul: None, perspective: false, sat: false },
+                Op::Mufu { dst: 3, src: 0, sm: FMod::NONE, op: MufuOp::Rcp, sat: false },
+                Op::Ipa { dst: 0, offset: 0x80, mul: Some(3), perspective: true, sat: false },
+                Op::Ipa { dst: 1, offset: 0x84, mul: Some(3), perspective: true, sat: false },
+                Op::Ipa { dst: 2, offset: 0x88, mul: Some(3), perspective: true, sat: false },
+                Op::Ipa { dst: 3, offset: 0x8c, mul: Some(3), perspective: true, sat: false },
+                Op::Exit,
             ]
         );
     }
@@ -163,25 +269,26 @@ mod tests {
 
         let program = decode_program(&bytes).unwrap();
         assert_eq!(program.len(), 21);
-        assert_eq!(program[0], Instruction::Ld { dst: 0, offset: 0x80, size: MemSize::B128 });
+        assert_eq!(program.insns[0].op, Op::Ld { dst: 0, offset: 0x80, idx: RZ, size: MemSize::B128 });
         assert_eq!(
-            program[1],
-            Instruction::Fmul { dst: 4, a: 0, b: Operand::Const { bank: 2, offset: 0x0 }, ftz: true }
-        );
-        assert_eq!(
-            program[5],
-            Instruction::Ffma {
+            program.insns[1].op,
+            Op::Fmul {
                 dst: 4,
-                a: 1,
-                b: Operand::Const { bank: 2, offset: 0x10 },
-                c: 4,
+                a: 0,
+                b: Operand::Const { bank: 2, offset: 0x0 },
+                bm: FMod::NONE,
                 ftz: true,
+                sat: false,
             }
         );
-        assert_eq!(program[17], Instruction::St { offset: 0x70, src: 0, size: MemSize::B128 });
-        assert_eq!(program[18], Instruction::Ld { dst: 0, offset: 0x90, size: MemSize::B128 });
-        assert_eq!(program[19], Instruction::St { offset: 0x80, src: 0, size: MemSize::B128 });
-        assert_eq!(program[20], Instruction::Exit);
+        assert_eq!(
+            program.insns[5].op,
+            Op::Ffma { dst: 4, a: 1, b: Operand::Const { bank: 2, offset: 0x10 }, bneg: false, c: Operand::Reg(4), cneg: false, ftz: true, sat: false }
+        );
+        assert_eq!(program.insns[17].op, Op::St { offset: 0x70, idx: RZ, src: 0, size: MemSize::B128 });
+        assert_eq!(program.insns[18].op, Op::Ld { dst: 0, offset: 0x90, idx: RZ, size: MemSize::B128 });
+        assert_eq!(program.insns[19].op, Op::St { offset: 0x80, idx: RZ, src: 0, size: MemSize::B128 });
+        assert_eq!(program.insns[20].op, Op::Exit);
     }
 
     #[test]
@@ -221,20 +328,17 @@ mod tests {
 
         let program = decode_program(&bytes).unwrap();
         assert_eq!(
-            program[4],
-            Instruction::Texs {
-                dst: 0,
-                coords: [2, 0, 1],
-                handle: 0x1a4,
-                dim: TexDim::T2d,
-                mask: [true, true, true, true],
-            }
+            program.insns[4].op,
+            Op::Texs { dst: 0, dst2: 2, coords: [2, 0, 1], handle: 0x1a4, dim: TexDim::T2d, mask: [true, true, true, true] }
         );
-        assert_eq!(*program.last().unwrap(), Instruction::Exit);
+        assert_eq!(program.insns.last().unwrap().op, Op::Exit);
     }
 
     #[test]
-    fn a_program_without_exit_is_an_error_not_a_hang() {
+    fn a_program_that_never_ends_is_an_error_not_a_hang() {
+        // All-zero words decode as unimplemented instructions, which fall
+        // through to the next slot; with nothing ending the path the walk
+        // runs off the end of the buffer, and that is an error.
         let bytes = block((0, 0), (0, 0), (0, 0), (0, 0));
         assert!(decode_program(&bytes).is_err());
     }
