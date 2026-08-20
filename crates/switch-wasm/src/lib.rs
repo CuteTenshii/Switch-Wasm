@@ -1006,13 +1006,26 @@ fn write_into(buf: *mut u8, maxlen: u32, data: &[u8]) -> u32 {
 mod tests {
     use super::*;
 
-    /// `switch_new` installs a panic hook that captures the message for
+    /// The session table is a [`SyncCell`]: sound in wasm, which is
+    /// single-threaded, and *not* sound under `cargo test`, which is not. Two
+    /// tests each calling `switch_new` mutate the same `Vec` at once, and the
+    /// panic that eventually falls out crosses an `extern "C"` boundary and
+    /// aborts the whole harness rather than failing one test. Every test that
+    /// touches a session holds this for its duration.
+    static HOST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A session, and the lock that makes owning one exclusive.
+    ///
+    /// `switch_new` also installs a panic hook that captures the message for
     /// `switch_last_error`, which in a test swallows the assertion. Put the
     /// default back so failures are readable.
-    fn new_session() -> u32 {
+    fn new_session() -> (std::sync::MutexGuard<'static, ()>, u32) {
+        // A test that fails while holding the lock poisons it; the next one
+        // still needs it, and the failure has already been reported.
+        let guard = HOST.lock().unwrap_or_else(|e| e.into_inner());
         let handle = switch_new();
         let _ = std::panic::take_hook();
-        handle
+        (guard, handle)
     }
 
     fn take_changes(handle: u32) -> String {
@@ -1034,7 +1047,7 @@ mod tests {
 
     #[test]
     fn the_sd_card_round_trips_through_the_host_entry_points() {
-        let handle = new_session();
+        let (_host, handle) = new_session();
 
         // Restoring the card is the host's own load path, so it must not come
         // back as a change — otherwise every restored file is written straight
@@ -1112,7 +1125,7 @@ mod tests {
     fn a_path_json_cannot_carry_raw_is_escaped() {
         // Guest paths hold whatever a filename can, and the page parses this
         // with JSON.parse — one unescaped quote and the whole batch is lost.
-        let handle = new_session();
+        let (_host, handle) = new_session();
         session(handle).cpu.fs.create_file(r#"/switch/a"b\c"#, 0);
         let json = take_changes(handle);
         assert_eq!(json, r#"[{"path":"/switch/a\"b\\c","kind":"file","size":0}]"#);
