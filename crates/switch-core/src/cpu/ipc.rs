@@ -2,8 +2,16 @@
 //! synthesizing replies, and the service implementations behind the
 //! session handles homebrew opens (`sm:`, `fsp-srv`, `vi:m`, `nvdrv`).
 
-use super::{AudrenParams, Cpu};
+use super::{AudioOut, AudrenParams, Cpu};
 use crate::Result;
+use std::collections::VecDeque;
+
+/// `nn::audio::PcmFormat`: 16-bit signed samples, the only format `audout`
+/// takes here and the one every caller asks for.
+const PCM_FORMAT_INT16: u32 = 2;
+/// `nn::audio::AudioOutState`, as `IAudioOut` reports it.
+const AUDIO_OUT_STARTED: u32 = 0;
+const AUDIO_OUT_STOPPED: u32 = 1;
 
 impl Cpu {
     /// Offset of a CMIF request's `SFCI` header inside the TLS message buffer.
@@ -124,6 +132,33 @@ impl Cpu {
         let addr_high = (desc >> 6) & 0x3F_FFFF;
         let addr = (address_low as u64) | ((addr_mid as u64) << 32) | ((addr_high as u64) << 36);
         Some(addr as u32)
+    }
+
+    /// The `index`-th map-alias **receive** buffer as `(address, size)`. Same
+    /// walk as [`Cpu::ipc_recv_buffer_addr`], keeping the size a caller needs
+    /// when the reply's length is whatever fits (`GetReleasedAudioOutBuffer`
+    /// hands back as many tags as the guest left room for).
+    pub(super) fn ipc_recv_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
+        let hdr1 = self.mem.read_u32(tls).unwrap_or(0);
+        let hdr2 = self.mem.read_u32(tls.wrapping_add(4)).unwrap_or(0);
+        let num_send_statics = (hdr1 >> 16) & 0xf;
+        let num_send_buffers = (hdr1 >> 20) & 0xf;
+        let num_recv_buffers = (hdr1 >> 24) & 0xf;
+        if index >= num_recv_buffers {
+            return None;
+        }
+        let mut off = 8u32;
+        if (hdr2 >> 31) & 1 != 0 {
+            off += 4;
+            if self.mem.read_u32(tls.wrapping_add(8)).unwrap_or(0) & 1 != 0 {
+                off += 8; // pid
+            }
+        }
+        off += 8 * num_send_statics;
+        off += 12 * (num_send_buffers + index);
+        let size = self.mem.read_u32(tls.wrapping_add(off)).ok()?;
+        let addr = self.ipc_recv_buffer_addr(tls, index)?;
+        Some((addr, size))
     }
 
     /// The `index`-th map-alias **send** buffer of a hipc request, as
@@ -2413,6 +2448,251 @@ impl Cpu {
     /// reliably failed, and `audrenInitialize` — and so `SDL_OpenAudioDevice`,
     /// and so `JKSV::initialize_sdl`, and so `JKSV::JKSV()` itself — gave up
     /// before a single frame ever rendered.
+    /// `IAudioOutManager` (`audout:u`): the plain PCM-out device, which is
+    /// what `nn::audio::OpenDefaultAudioOut` and libnx's `audoutInitialize`
+    /// open. The renderer (`audren`) is a separate, much larger interface.
+    ///
+    /// Only one device exists here, `DeviceOut`, at whatever rate and channel
+    /// count the guest asks for. Real `audout` resamples everything to 48 kHz
+    /// stereo; the samples are handed to the host verbatim instead, with the
+    /// format alongside them, so nothing is resampled twice.
+    pub(super) fn audout_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
+        // Both clients that reach this — `nnSdk` and libnx's `audoutInitialize`
+        // — keep `audout` as a plain session and take the `IAudioOut` back as a
+        // move handle. A domain request would need the reply to carry an object
+        // id instead, so say so rather than hand back a handle it cannot use.
+        if self.ipc_is_domain_request(tls) {
+            return self.unimplemented_command(tls, "audout:u (domain)", cmd_id);
+        }
+        /// `AudioOutName`: a fixed 0x20-byte NUL-padded device name.
+        const NAME_LEN: u32 = 0x20;
+        /// The name real `audout` reports for the console's only output.
+        const DEVICE: &[u8] = b"DeviceOut\0";
+        match cmd_id {
+            // ListAudioOuts / ListAudioOutsAuto: one device.
+            Some(0) | Some(2) => {
+                if let Some(buf) = self.ipc_recv_buffer_addr(tls, 0) {
+                    for i in 0..NAME_LEN {
+                        let b = DEVICE.get(i as usize).copied().unwrap_or(0);
+                        let _ = self.mem.write_u8(buf.wrapping_add(i), b);
+                    }
+                }
+                self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[])
+            }
+            // OpenAudioOut / OpenAudioOutAuto: in { u32 sample_rate, u32
+            // channel_count, u64 aruid }, out { u32 sample_rate, u32
+            // channel_count, u32 pcm_format, u32 state } and the IAudioOut.
+            Some(1) | Some(3) => {
+                let data = self.ipc_request_data(tls);
+                let asked_rate = self.mem.read_u32(data).unwrap_or(0);
+                let asked_channels = self.mem.read_u32(data.wrapping_add(4)).unwrap_or(0);
+                // A guest that asks for 0 means "whatever the device is".
+                let sample_rate = if asked_rate == 0 { 48_000 } else { asked_rate };
+                let channel_count = if asked_channels == 0 { 2 } else { asked_channels };
+
+                if let Some(buf) = self.ipc_recv_buffer_addr(tls, 0) {
+                    for i in 0..NAME_LEN {
+                        let b = DEVICE.get(i as usize).copied().unwrap_or(0);
+                        let _ = self.mem.write_u8(buf.wrapping_add(i), b);
+                    }
+                }
+
+                let handle = self.alloc_handle();
+                self.record_handle(handle, "audout:iaudioout");
+                let event = self.alloc_event("audout:buffer", true);
+                self.audio_outs.insert(
+                    handle,
+                    AudioOut {
+                        sample_rate,
+                        channel_count,
+                        started: false,
+                        volume: 1.0,
+                        event,
+                        released: VecDeque::new(),
+                        played_frames: 0,
+                    },
+                );
+                self.audio_format = (sample_rate, channel_count);
+
+                let mut raw = Vec::with_capacity(16);
+                raw.extend_from_slice(&sample_rate.to_le_bytes());
+                raw.extend_from_slice(&channel_count.to_le_bytes());
+                raw.extend_from_slice(&PCM_FORMAT_INT16.to_le_bytes());
+                raw.extend_from_slice(&AUDIO_OUT_STOPPED.to_le_bytes());
+                self.write_ipc_response(tls, 0, &[handle], &raw, &[])
+            }
+            _ => self.unimplemented_command(tls, "audout:u", cmd_id),
+        }
+    }
+
+    /// `IAudioOut`: one open output device.
+    ///
+    /// The buffer protocol is the whole interface. The guest appends a buffer,
+    /// waits on the event from `RegisterBufferEvent`, then collects the tags of
+    /// the buffers the device has finished with. Here a buffer is finished the
+    /// moment its samples have been copied out for the host, so every append
+    /// releases immediately — a device that never falls behind.
+    pub(super) fn audio_out_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+        handle: u64,
+    ) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
+        match cmd_id {
+            // GetAudioOutState.
+            Some(0) => {
+                let started =
+                    self.audio_outs.get(&handle).map(|d| d.started).unwrap_or(false);
+                let state = if started { AUDIO_OUT_STARTED } else { AUDIO_OUT_STOPPED };
+                self.write_ipc_response(tls, 0, &[], &state.to_le_bytes(), &[])
+            }
+            // StartAudioOut / StopAudioOut.
+            Some(1) | Some(2) => {
+                let started = cmd_id == Some(1);
+                if let Some(device) = self.audio_outs.get_mut(&handle) {
+                    device.started = started;
+                }
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // AppendAudioOutBuffer / AppendAudioOutBufferAuto.
+            Some(3) | Some(7) => self.audio_out_append(tls, handle),
+            // RegisterBufferEvent: the event a released buffer signals. Events
+            // are copy handles.
+            Some(4) => {
+                let Some(event) = self.audio_outs.get(&handle).map(|d| d.event) else {
+                    return self.unimplemented_command(tls, "audout:iaudioout", cmd_id);
+                };
+                self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+            }
+            // GetReleasedAudioOutBuffer / ...Auto: as many tags as fit.
+            Some(5) | Some(8) => self.audio_out_release(tls, handle),
+            // ContainsAudioOutBuffer.
+            Some(6) => {
+                let data = self.ipc_request_data(tls);
+                let tag = self.mem.read_u64(data).unwrap_or(0);
+                let held = self
+                    .audio_outs
+                    .get(&handle)
+                    .map(|d| d.released.contains(&tag))
+                    .unwrap_or(false);
+                self.write_ipc_response(tls, 0, &[], &[u8::from(held)], &[])
+            }
+            // GetAudioOutBufferCount: buffers appended and not yet collected.
+            Some(9) => {
+                let count = self
+                    .audio_outs
+                    .get(&handle)
+                    .map(|d| d.released.len() as u32)
+                    .unwrap_or(0);
+                self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
+            }
+            // GetAudioOutPlayedSampleCount.
+            Some(10) => {
+                let frames =
+                    self.audio_outs.get(&handle).map(|d| d.played_frames).unwrap_or(0);
+                self.write_ipc_response(tls, 0, &[], &frames.to_le_bytes(), &[])
+            }
+            // FlushAudioOutBuffers: nothing is ever in flight, so nothing is
+            // ever flushed — the bool says so.
+            Some(11) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+            // SetAudioOutVolume / GetAudioOutVolume.
+            Some(12) => {
+                let data = self.ipc_request_data(tls);
+                let volume = f32::from_bits(self.mem.read_u32(data).unwrap_or(0));
+                if let Some(device) = self.audio_outs.get_mut(&handle) {
+                    device.volume = if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 1.0 };
+                }
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            Some(13) => {
+                let volume =
+                    self.audio_outs.get(&handle).map(|d| d.volume).unwrap_or(1.0);
+                self.write_ipc_response(tls, 0, &[], &volume.to_bits().to_le_bytes(), &[])
+            }
+            _ => self.unimplemented_command(tls, "audout:iaudioout", cmd_id),
+        }
+    }
+
+    /// `AppendAudioOutBuffer`: copy the guest's samples out for the host and
+    /// release the buffer's tag.
+    fn audio_out_append(&mut self, tls: u32, handle: u64) -> Result<()> {
+        let data = self.ipc_request_data(tls);
+        let tag = self.mem.read_u64(data).unwrap_or(0);
+        // `AudioOutBuffer`: { next, buffer, buffer_size, data_size,
+        // data_offset }, all 8 bytes, travelling as an input buffer.
+        let mut samples = Vec::new();
+        if let Some((desc, _)) = self.ipc_input_buffer(tls, 0) {
+            let buffer = self.mem.read_u64(desc.wrapping_add(8)).unwrap_or(0) as u32;
+            let data_size = self.mem.read_u64(desc.wrapping_add(24)).unwrap_or(0) as u32;
+            let data_offset = self.mem.read_u64(desc.wrapping_add(32)).unwrap_or(0) as u32;
+            let start = buffer.wrapping_add(data_offset);
+            for i in 0..data_size / 2 {
+                let sample = self.mem.read_u16(start.wrapping_add(i * 2)).unwrap_or(0);
+                samples.push(sample as i16);
+            }
+        }
+        let Some(device) = self.audio_outs.get_mut(&handle) else {
+            return self.unimplemented_command(tls, "audout:iaudioout", Some(3));
+        };
+        let channels = device.channel_count.max(1) as usize;
+        let format = (device.sample_rate, device.channel_count);
+        device.played_frames += (samples.len() / channels) as u64;
+        device.released.push_back(tag);
+        let volume = device.volume;
+        let event = device.event;
+        // A stopped device is not playing: its buffers still come back (the
+        // guest is entitled to its memory) but the samples are not queued.
+        let playing = device.started;
+        if playing {
+            // Whichever device is actually producing samples defines the
+            // format the host plays them in.
+            self.audio_format = format;
+            let scaled = samples
+                .into_iter()
+                .map(move |s| ((s as f32) * volume).round().clamp(-32768.0, 32767.0) as i16);
+            self.queue_audio(scaled);
+        }
+        self.signal_event(event);
+        self.write_ipc_response(tls, 0, &[], &[], &[])
+    }
+
+    /// `GetReleasedAudioOutBuffer`: hand back the tags of finished buffers,
+    /// as many as the guest's out buffer has room for.
+    fn audio_out_release(&mut self, tls: u32, handle: u64) -> Result<()> {
+        let room = self
+            .ipc_recv_buffer(tls, 0)
+            .map(|(_, size)| size / 8)
+            .unwrap_or(0);
+        let addr = self.ipc_recv_buffer_addr(tls, 0);
+        let mut tags = Vec::new();
+        if let Some(device) = self.audio_outs.get_mut(&handle) {
+            while (tags.len() as u32) < room {
+                match device.released.pop_front() {
+                    Some(tag) => tags.push(tag),
+                    None => break,
+                }
+            }
+        }
+        if let Some(addr) = addr {
+            for (i, &tag) in tags.iter().enumerate() {
+                let _ = self.mem.write_u64(addr.wrapping_add(i as u32 * 8), tag);
+            }
+        }
+        self.write_ipc_response(tls, 0, &[], &(tags.len() as u32).to_le_bytes(), &[])
+    }
+
     pub(super) fn audren_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return match cmd_id {

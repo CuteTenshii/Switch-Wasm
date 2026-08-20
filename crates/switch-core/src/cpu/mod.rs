@@ -16,7 +16,7 @@
 
 use crate::mem::Memory;
 use crate::{Error, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 mod alu;
 mod bits;
@@ -209,6 +209,34 @@ pub(crate) struct AudrenParams {
 }
 
 
+/// One open `IAudioOut` session: what it was opened with, and the buffer
+/// bookkeeping its client polls.
+///
+/// A real device releases a buffer once its samples have been clocked out to
+/// the DAC. There is no DAC here — the samples are copied into
+/// [`Cpu::audio_pcm`] for the host to play — so a buffer is released as soon
+/// as it has been copied. The guest sees a device that always keeps up, never
+/// one that succeeded at something it did not do.
+#[derive(Debug, Clone)]
+pub(crate) struct AudioOut {
+    /// Sample rate and channel count the device was opened with.
+    pub sample_rate: u32,
+    pub channel_count: u32,
+    /// Whether `StartAudioOut` has been called and `StopAudioOut` has not.
+    pub started: bool,
+    /// The volume the guest set, 0.0..=1.0. Applied when samples are taken.
+    pub volume: f32,
+    /// Signalled every time a buffer is released — what
+    /// `audoutWaitPlayFinish` blocks on.
+    pub event: u64,
+    /// Tags of buffers already consumed, waiting for the guest to collect
+    /// them with `GetReleasedAudioOutBuffer`.
+    pub released: VecDeque<u64>,
+    /// Frames handed over since the device was opened, which is what
+    /// `GetAudioOutPlayedSampleCount` reports.
+    pub played_frames: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct ThreadContext {
     pub handle: u64,
@@ -368,6 +396,15 @@ pub struct Cpu {
     /// in — `audrvUpdate` rejects a reply whose `mempools_sz`/`voices_sz`
     /// fields don't match what it computed from those same counts.
     audren_renderers: HashMap<u64, AudrenParams>,
+    /// Every open `IAudioOut`, by session handle.
+    audio_outs: HashMap<u64, AudioOut>,
+    /// Interleaved 16-bit PCM the guest has handed to `audout` and the host
+    /// has not played yet. Bounded: a host that never drains it (a headless
+    /// test, a paused tab) must not be able to grow it without limit.
+    audio_pcm: VecDeque<i16>,
+    /// The rate and channel count the samples in `audio_pcm` are in, from the
+    /// most recently opened device. `(0, 0)` until one is opened.
+    audio_format: (u32, u32),
     /// The wall-clock time `time:u`/`time:s` reports, as POSIX seconds (UTC).
     /// `wasm32-unknown-unknown` has no OS clock, so this stays at the Unix
     /// epoch until the host calls [`Cpu::set_unix_time`].
@@ -449,6 +486,9 @@ impl Cpu {
             shared_font: Vec::new(),
             pl_shmem_addr: 0,
             audren_renderers: HashMap::new(),
+            audio_outs: HashMap::new(),
+            audio_pcm: VecDeque::new(),
+            audio_format: (0, 0),
             unix_time: 0,
             battery_percent: 100,
             battery_charging: true,
@@ -1228,7 +1268,6 @@ impl Cpu {
         let _ = self.mem.write_u32(entry + h::STATE_ATTRIBUTES, attributes);
     }
 
-    /// Where the guest mapped hid's shared memory (0 until libnx maps it).
     /// What the guest last asked the rumble motors to do, as `(low, high)`
     /// amplitudes in 0.0..=1.0. The frontend maps these onto the Gamepad API's
     /// `dual-rumble` strong and weak magnitudes.
@@ -1244,6 +1283,39 @@ impl Cpu {
     pub fn hid_shmem_addr(&self) -> u32 {
         self.hid_shmem_addr
     }
+
+    /// The rate and channel count of the samples [`Cpu::take_audio`] returns,
+    /// as `(sample_rate, channels)`. `(0, 0)` before the guest has opened an
+    /// audio device — there is nothing to play, and no format to play it in.
+    pub fn audio_format(&self) -> (u32, u32) {
+        self.audio_format
+    }
+
+    /// Move up to `out.len()` interleaved samples of queued PCM into `out`,
+    /// returning how many were written. What is taken is gone: this is a
+    /// hand-off to the host's audio device, not a peek.
+    pub fn take_audio(&mut self, out: &mut [i16]) -> usize {
+        let n = out.len().min(self.audio_pcm.len());
+        for slot in out.iter_mut().take(n) {
+            *slot = self.audio_pcm.pop_front().unwrap_or(0);
+        }
+        n
+    }
+
+    /// Queue interleaved PCM for the host, dropping the oldest samples once
+    /// the backlog passes [`Cpu::AUDIO_QUEUE_LIMIT`]. Dropping the oldest is
+    /// what a real device effectively does when nothing consumes its output:
+    /// the guest keeps running, and only the audio that could never have been
+    /// heard is lost.
+    pub(crate) fn queue_audio(&mut self, samples: impl Iterator<Item = i16>) {
+        self.audio_pcm.extend(samples);
+        let over = self.audio_pcm.len().saturating_sub(Self::AUDIO_QUEUE_LIMIT);
+        self.audio_pcm.drain(..over);
+    }
+
+    /// Roughly a second of 48 kHz stereo. Past this the host is not keeping
+    /// up and the backlog is only latency.
+    pub(crate) const AUDIO_QUEUE_LIMIT: usize = 48_000 * 2;
 
     /// Provide the font `pl:u` hands out as every shared font type, as the
     /// contents of a TrueType/OpenType file. Homebrew that draws text (hbmenu,

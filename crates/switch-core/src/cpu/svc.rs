@@ -631,6 +631,13 @@ impl Cpu {
                         // handle (the non-domain route `nnSdk` takes).
                         "pctl" | "pctl:s" | "pctl:a" | "pctl:r" | "pctl:factory"
                         | "pctl:service" => self.pctl_request(tls, handle, cmd_id)?,
+                        // audout, the plain PCM output device. `audout:a`
+                        // and `audout:d` are the same interface at higher
+                        // privilege; nothing here distinguishes them.
+                        "audout:u" | "audout:a" | "audout:d" => {
+                            self.audout_request(tls, cmd_id)?
+                        }
+                        "audout:iaudioout" => self.audio_out_request(tls, cmd_id, handle)?,
                         "audren:u" => self.audren_request(tls, cmd_id)?,
                         "audren:iaudiorenderer" => self.audren_renderer_request(tls, cmd_id, handle)?,
                          name => {

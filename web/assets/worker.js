@@ -213,6 +213,20 @@ const CMD = {
   fb_width() { return api.switch_fb_width(handle); },
   fb_height() { return api.switch_fb_height(handle); },
   frame_count() { return api.switch_frame_count(handle); },
+  audio_format() { return api.switch_audio_format(handle); },
+
+  // Interleaved 16-bit PCM, as raw bytes. The main thread reinterprets them
+  // as an Int16Array rather than paying for a second copy here.
+  audio_pull(maxSamples) {
+    const bytes = maxSamples * 2;
+    const buf = alloc(bytes);
+    const n = api.switch_audio_pull(handle, buf, maxSamples);
+    if (n <= 0) { api.switch_free(buf, bytes); return null; }
+    const b = fromWasm(buf, n * 2);
+    api.switch_free(buf, bytes);
+    return b;
+  },
+
   fb_snapshot(len) {
     const buf = alloc(len);
     const n = api.switch_fb_snapshot(handle, buf, len);

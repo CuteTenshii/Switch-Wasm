@@ -124,6 +124,8 @@ pub extern "C" fn switch_new() -> u32 {
     // homebrew gets the runtime environment the real loader sets up.
     let mut cpu = Cpu::new();
     cpu.bootstrap();
+    // Horizon is the only ABI a session ever runs: the frontend loads NROs,
+    // NCAs and NSPs, all of which are real Switch programs.
     new_handle(Session {
         nsp_data: Vec::new(),
         nsp_files: Vec::new(),
@@ -634,6 +636,32 @@ pub extern "C" fn switch_vibration(handle: u32) -> u32 {
     let (low, high) = s.cpu.vibration();
     let scale = |v: f32| (v * 1000.0).round().clamp(0.0, 1000.0) as u32;
     (scale(high) << 16) | scale(low)
+}
+
+/// The format of the PCM `switch_audio_pull` returns, packed as
+/// `(channels << 24) | sample_rate`. Zero until the guest opens an audio
+/// device — before that there is nothing to play and no rate to play it at.
+#[no_mangle]
+pub extern "C" fn switch_audio_format(handle: u32) -> u32 {
+    let (rate, channels) = session(handle).cpu.audio_format();
+    if rate == 0 {
+        return 0;
+    }
+    (channels << 24) | (rate & 0x00ff_ffff)
+}
+
+/// Move up to `max_samples` interleaved 16-bit samples into `buf`, returning
+/// how many were written. What is pulled is gone from the queue.
+#[no_mangle]
+pub extern "C" fn switch_audio_pull(handle: u32, buf: *mut u8, max_samples: u32) -> u32 {
+    let s = session(handle);
+    let mut samples = vec![0i16; max_samples as usize];
+    let n = s.cpu.take_audio(&mut samples);
+    let out = unsafe { std::slice::from_raw_parts_mut(buf, n * 2) };
+    for (chunk, sample) in out.chunks_exact_mut(2).zip(samples.iter()) {
+        chunk.copy_from_slice(&sample.to_le_bytes());
+    }
+    n as u32
 }
 
 /// Framebuffer geometry. Once the guest has presented a frame through the

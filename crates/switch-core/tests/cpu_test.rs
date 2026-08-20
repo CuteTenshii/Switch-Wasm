@@ -3459,6 +3459,123 @@ fn ipc_request_plain_with_buffer(
 }
 
 #[test]
+fn audout_plays_the_buffers_the_guest_hands_it() {
+    // `audout` is the plain PCM-out device, and the whole interface is the
+    // buffer protocol: append a buffer, wait on the event, collect the tags of
+    // the buffers the device is done with. A device that accepts buffers and
+    // never releases them hangs the guest's audio thread forever.
+    const AUDOUT: u64 = 0xA000;
+    const DESC: u32 = 0x8000; // the AudioOutBuffer struct
+    const PCM: u32 = 0x8100; // its samples
+    const TAGS: u32 = 0x8200; // where released tags come back
+    const TAG: u64 = 0xFEED_0001;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(AUDOUT, "audout:u");
+    let tls = cpu.tls_base();
+
+    // OpenAudioOut(48 kHz, stereo) -> { rate, channels, format, state } and an
+    // IAudioOut as a *move* handle.
+    let mut args = Vec::new();
+    args.extend_from_slice(&48_000u32.to_le_bytes());
+    args.extend_from_slice(&2u32.to_le_bytes());
+    args.extend_from_slice(&0u64.to_le_bytes()); // aruid
+    ipc_request_plain(&mut cpu, AUDOUT, 1, &args);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "OpenAudioOut failed");
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 48_000);
+    assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 2);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 2, "PcmFormat::Int16");
+    assert_eq!(cpu.mem.read_u32(tls + 0x2c).unwrap(), 1, "a device opens stopped");
+    // { send_pid:1, num_copy:4, num_move:4 }: one move handle, no copy ones.
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 5);
+    let device = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(device, 0, "no IAudioOut came back");
+
+    // RegisterBufferEvent: an event, and events are *copy* handles.
+    ipc_request_plain(&mut cpu, device, 4, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
+    let event = cpu.mem.read_u32(tls + 0x0c).unwrap();
+    assert_ne!(event, 0);
+    // Nothing has been played, so nothing has been released.
+    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0xEA01, "event fired early");
+
+    // StartAudioOut, then hand over one buffer of four stereo frames.
+    ipc_request_plain(&mut cpu, device, 1, &[]);
+    ipc_request_plain(&mut cpu, device, 0, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "started");
+
+    let samples: [i16; 8] = [1, -1, 2, -2, 3, -3, 4, -4];
+    for (i, &s) in samples.iter().enumerate() {
+        cpu.mem.write_u16(PCM + i as u32 * 2, s as u16).unwrap();
+    }
+    // AudioOutBuffer { next, buffer, buffer_size, data_size, data_offset }.
+    cpu.mem.write_u64(DESC, 0).unwrap();
+    cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
+    cpu.mem.write_u64(DESC + 16, 16).unwrap();
+    cpu.mem.write_u64(DESC + 24, 16).unwrap();
+    cpu.mem.write_u64(DESC + 32, 0).unwrap();
+    ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &TAG.to_le_bytes());
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "AppendAudioOutBuffer failed");
+
+    // The samples reached the host, unchanged, at full volume.
+    let mut played = [0i16; 8];
+    assert_eq!(cpu.take_audio(&mut played), 8);
+    assert_eq!(played, samples);
+
+    // The buffer came back: the event fired and its tag is collectable.
+    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0, "the released buffer did not fire");
+    ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "no tag released");
+    assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
+
+    // GetAudioOutPlayedSampleCount counts frames, not samples: four stereo
+    // frames, not eight.
+    ipc_request_plain(&mut cpu, device, 10, &[]);
+    assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), 4);
+
+    // And the host is told what to play it at.
+    assert_eq!(cpu.audio_format(), (48_000, 2));
+}
+
+#[test]
+fn audout_does_not_play_a_stopped_device() {
+    // A device that has not been started is not playing. Its buffers still
+    // come back -- the memory is the guest's -- but nothing is queued for the
+    // host, because nothing was heard.
+    const AUDOUT: u64 = 0xA000;
+    const DESC: u32 = 0x8000;
+    const PCM: u32 = 0x8100;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(AUDOUT, "audout:u");
+    let tls = cpu.tls_base();
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&48_000u32.to_le_bytes());
+    args.extend_from_slice(&2u32.to_le_bytes());
+    args.extend_from_slice(&0u64.to_le_bytes());
+    ipc_request_plain(&mut cpu, AUDOUT, 1, &args);
+    let device = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+
+    cpu.mem.write_u16(PCM, 0x1234).unwrap();
+    cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
+    cpu.mem.write_u64(DESC + 16, 2).unwrap();
+    cpu.mem.write_u64(DESC + 24, 2).unwrap();
+    cpu.mem.write_u64(DESC + 32, 0).unwrap();
+    ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &7u64.to_le_bytes());
+
+    let mut played = [0i16; 4];
+    assert_eq!(cpu.take_audio(&mut played), 0, "a stopped device played something");
+    // The tag still comes back.
+    ipc_request_plain(&mut cpu, device, 9, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1);
+}
+
+#[test]
 fn vi_native_window_names_the_binder_interface() {
     // `OpenLayer` answers with an Android parcel holding one flattened binder
     // object. libnx only reads the binder id out of it; nnSdk also checks the

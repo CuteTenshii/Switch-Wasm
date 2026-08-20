@@ -93,8 +93,10 @@ fn main() {
             recording = true;
             // Whatever this function was called with: dump any argument that
             // points at a printable C string, which is how a path or a mount
-            // name gets read out of a stuck `nn::fs` call.
-            for r in 0..4u8 {
+            // name gets read out of a stuck `nn::fs` call — or the condition,
+            // file, function and message of an `nn::diag` assertion, which sit
+            // as far out as x5.
+            for r in 0..8u8 {
                 let addr = cpu.read_x(r) as u32;
                 let mut sbuf = String::new();
                 for i in 0..128u32 {
