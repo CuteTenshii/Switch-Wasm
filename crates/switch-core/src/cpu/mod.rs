@@ -29,6 +29,7 @@ mod system;
 
 pub(crate) use bits::decode_bit_mask;
 use bits::*;
+use ipc::{DEFAULT_NICKNAME, NICKNAME_LEN};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +238,29 @@ pub(crate) struct AudioOut {
     pub played_frames: u64,
 }
 
+/// One open `bsd:u` socket.
+///
+/// A socket here can be created, configured, bound and listened on — every
+/// local operation a real one supports — and can never carry a byte, because
+/// there is no network behind this service. See [`Cpu::bsd_request`].
+#[derive(Debug, Clone)]
+pub(crate) struct BsdSocket {
+    /// The address family and socket type it was created with. The family is
+    /// carried for `DuplicateSocket`; the type decides which "went nowhere"
+    /// errno the data path reports.
+    pub domain: u32,
+    pub kind: u32,
+    /// The raw `sockaddr` bytes `bind` was given, which `GetSockName` reports
+    /// back.
+    pub bound: Vec<u8>,
+    /// The flags word `fcntl(F_SETFL)` set, stored verbatim so `F_GETFL` hands
+    /// back exactly what the guest wrote.
+    pub flags: u32,
+    /// Whether `listen` was called — an `accept` on a socket that never
+    /// listened is a different error from one nobody has connected to.
+    pub listening: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ThreadContext {
     pub handle: u64,
@@ -414,6 +438,27 @@ pub struct Cpu {
     /// `wasm32-unknown-unknown` has no OS clock, so this stays at the Unix
     /// epoch until the host calls [`Cpu::set_unix_time`].
     unix_time: i64,
+    /// The nickname `acc` reports for the console's one user account, and
+    /// the only part of that profile a guest can change: `IProfileEditor::
+    /// Store` writes it back here and `IProfile::GetBase` reads it out again,
+    /// so the pair agrees the way a real profile edit would.
+    account_nickname: String,
+    /// When that profile was last edited, as POSIX seconds — 0 until the guest
+    /// stores one through `IProfileEditor`, which is what a profile nobody has
+    /// touched reports.
+    account_edited_at: i64,
+    /// Every open `bsd` socket, by descriptor, and the socket options set on
+    /// them keyed by `(descriptor, level, option)` — options are read back, so
+    /// they are stored rather than acknowledged and forgotten.
+    bsd_sockets: HashMap<i32, BsdSocket>,
+    bsd_socket_options: HashMap<(i32, u32, u32), u32>,
+    /// Monotonic descriptor allocator. Starts at 3, past the standard streams
+    /// a guest's C library already holds.
+    next_bsd_fd: i32,
+    /// The `ApmPerformanceConfiguration` set for each performance mode
+    /// (Normal, then Boost). Read back by `GetPerformanceConfiguration`, so
+    /// they are stored rather than acknowledged and forgotten.
+    apm_configuration: [u32; 2],
     /// The battery level `psm` reports, 0-100. There is no host battery API
     /// reachable from `wasm32-unknown-unknown` either, so this defaults to a
     /// full, charging battery until [`Cpu::set_battery`] says otherwise.
@@ -495,6 +540,12 @@ impl Cpu {
             audio_pcm: VecDeque::new(),
             audio_format: (0, 0),
             unix_time: 0,
+            account_nickname: String::from(DEFAULT_NICKNAME),
+            account_edited_at: 0,
+            apm_configuration: ipc::APM_DEFAULT_CONFIGURATION,
+            bsd_sockets: HashMap::new(),
+            bsd_socket_options: HashMap::new(),
+            next_bsd_fd: 3,
             battery_percent: 100,
             battery_charging: true,
             fs: crate::vfs::Vfs::new(),
@@ -1431,6 +1482,26 @@ impl Cpu {
     /// Current battery reading, as set by [`Cpu::set_battery`].
     pub fn battery(&self) -> (u8, bool) {
         (self.battery_percent, self.battery_charging)
+    }
+
+    /// Set the nickname `acc` reports for the console's one user account.
+    ///
+    /// `nn::account::Nickname` is a fixed 0x20-byte NUL-terminated field, so
+    /// anything longer is cut to the 0x1F bytes that fit — on a char
+    /// boundary, since a nickname split mid-codepoint would reach the guest
+    /// as mojibake rather than as a shorter name.
+    pub fn set_user_nickname(&mut self, nickname: &str) {
+        let mut end = nickname.len().min(NICKNAME_LEN - 1);
+        while end > 0 && !nickname.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.account_nickname = nickname[..end].to_owned();
+    }
+
+    /// The nickname `acc` reports, as set by [`Cpu::set_user_nickname`] or by
+    /// the guest's own `IProfileEditor::Store`.
+    pub fn user_nickname(&self) -> &str {
+        &self.account_nickname
     }
 
     #[inline]

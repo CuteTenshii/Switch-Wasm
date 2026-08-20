@@ -406,7 +406,9 @@ receive buffer.
   (`set_sys_request`, dispatched in `svc.rs`) — an earlier version of this file
   claimed it did not.
 - **lm** (the log manager), **pctl** (parental controls, reported off), **hid**
-  (input negotiation and rumble) and **ssl** (the system TLS stack) are
+  (input negotiation and rumble), **ssl** (the system TLS stack), **acc** (one
+  user account, always signed in), **apm** (clock profiles), **bsd** (sockets
+  that exist but reach nothing) and **ts** (the temperature sensors) are
   implemented; see their sections below.
 - **A service with no dedicated handler still answers**, with a fabricated
   object id — that is load-bearing for homebrew which only checks the Result —
@@ -1032,6 +1034,100 @@ into the caller's `AudioOut`. Unity's own binary has no symbols, so its call
 sites were resolved by walking `main`'s `.rela.plt` and matching GOT addresses
 back to imported names.
 
+### acc, apm, bsd, and ts
+
+`acc` models a console with **one user account**, always signed in, uid
+`ACCOUNT_UID` (`"switch-wasm user"` — sixteen bytes, and nonzero, which is the
+part that matters: zero is `AccountUid`'s "nobody is signed in" sentinel).
+That is not a stub standing in for a user database. It is what this console is
+— no account applet to register a second user with, no profile UI, nowhere to
+persist one — so every "who is the current user" question has one determinate
+answer and every list is one entry long.
+
+`acc:u0` is the application-facing service and `acc:u1`/`acc:su` the
+system-facing ones. They share commands 0..=51 (`GetUserCount`,
+`GetUserExistence`, the three user lists, `GetLastOpenedUser`, `GetProfile`,
+`TrySelectUserWithoutInteraction`) and **diverge from 100 up, where the same
+command id means different things**: 100 is `InitializeApplicationInfo` on
+`acc:u0` and `GetUserRegistrationNotifier` on `acc:u1`, 101 is
+`GetBaasAccountManagerForApplication` against `GetUserStateChangeNotifier`.
+Those arms dispatch on the service the session was opened under, which is what
+the test `acc_the_same_command_id_means_different_things_on_u0_and_u1` pins.
+
+Three details were load-bearing:
+
+- **`IProfile::Get` returns its `AccountUserData` through a receive-static
+  ("pointer") buffer** — the one descriptor kind that sits *after* the raw
+  data, at the unaligned data offset plus `num_data_words` (which counts the
+  padding that aligns the CMIF header). Nothing in `ipc.rs` parsed those, so
+  `Cpu::ipc_recv_static_buffers` is new, along with `Cpu::ipc_output_buffer`,
+  the mirror of `ipc_input_buffer`. `acc` therefore answers
+  `QueryPointerBufferSize` with a real size, for the same reason `hid` does: a
+  client told the server has no room sends no descriptor at all, and then reads
+  the icon id and background colour back out of its own stack.
+- **`LoadImage` has to return a real JPEG.** A caller feeds what it gets
+  straight to a decoder, so zero bytes is nothing to decode. `solid_jpeg`
+  encodes one: a constant image needs no DCT, since the transform of a flat
+  block is a single DC coefficient with every AC term zero, so each block is
+  one Huffman-coded DC difference (nonzero only in the first block of each
+  component) followed by end-of-block, with minimal Huffman tables rather than
+  Annex K's. The test decodes the icon back — markers, tables rebuilt out of
+  the file's own DHT segments, all 3072 blocks — and checks every one comes
+  back as the same colour with the bit stream ending exactly at the EOI.
+- **The nickname is real state.** `IProfileEditor::Store` writes it into
+  `Cpu::account_nickname` (the host can seed it with `set_user_nickname`) and
+  `GetBase` reads it out again, timestamp included. A `Set`/`Get` pair that
+  disagrees is the failure mode this whole file keeps rediscovering.
+
+The one place `acc` claims more than it has is `IManagerForApplication`:
+`CheckAvailability` succeeds and `GetAccountId` reports a nonzero network
+service account, the same trade `nifm`'s permanently-connected ethernet link
+makes. It still cannot produce a token — `LoadIdTokenCache` returns zero bytes
+— so anything that genuinely authenticates fails there, where the missing piece
+actually is.
+
+`apm` is the clock profiles, and there is nothing here to clock: the CPU is an
+interpreter and the GPU a software rasterizer. What it must do is agree with
+what is already reported elsewhere — `GetPerformanceMode` answers the same
+Normal that `am`'s `ICommonStateGetter::GetPerformanceMode` does, which the
+test asserts by asking both — and give back per mode whatever
+`SetPerformanceConfiguration` was last handed. libnx's `apmInitialize` runs
+from `__appInit`, so JKSV opens it before it draws anything, and it was
+reaching the fabricated-object-id fallback.
+
+`bsd` is the socket service, and there is **no network behind it**: a browser
+tab cannot open a TCP socket and nothing here proxies one. What it models is a
+console whose link is up (which is what `nifm` already reports) and on which
+nothing ever answers. Sockets can be created, bound, listened on, configured
+and closed — those are local operations that genuinely succeed — and everything
+that needs a peer fails at once with a definite errno: `connect` is
+`ECONNREFUSED`, the data path is `ENOTCONN` on a stream socket and
+`ENETUNREACH` on a datagram one, `accept` is `EAGAIN`, `select`/`poll` report
+nothing ready. Failing immediately is the point: there is no other thread to
+run while a guest waits on a socket, so a timeout would stall the frame loop
+that a save manager's update check sits in.
+
+Two details are worth keeping: the errnos are **FreeBSD's**, not Linux's or
+newlib's (`EAGAIN` is 35, not 11), because that is what the real service
+returns and what guest code is written against; and `fcntl`'s flags word is
+stored and returned **verbatim** rather than decoded, since `O_NONBLOCK` is a
+different bit in each of those three C libraries and the only thing that has to
+hold is that a guest reads back what it set. `sfdnsres`, the resolver, is still
+unimplemented — nothing here can turn a hostname into an address.
+
+`ts` is the last of the four: the two thermometers real hardware carries, on
+the SoC and on the PCB, both reporting a fixed idle temperature. There is no
+silicon here to heat, so idle is the honest reading; what the implementation
+has to get right is that the same measurement in degrees and in millidegrees
+agrees, and that both sit inside the range the service itself reports. Two
+traps, both caught by looking at what NX-Fetch actually drew: `ISession`'s
+`GetTemperature` is **command 4, returning a `float`** — the same command id
+the server uses for `OpenSession` — so one shared dispatch handed a session's
+temperature request another session object, which NX-Fetch printed as "8 C";
+and the sensor is selected by the device code's **high byte** (`0x41……` SoC,
+`0x43……` PCB), not its low byte, which had the PCB's reading appearing under
+the "CPU" label.
+
 ### Suspending threads, and reading their registers
 
 Past audio the title stopped twice more, each time on an unimplemented
@@ -1243,9 +1339,12 @@ the retail title render, for the reason recorded there.
    `SetThreadActivity` and `GetThreadContext3` are done, and whatever it asks
    for next will show up as an `unimplemented Horizon syscall` fault.
 3. **Homebrew service gaps.** Run a title and read the `[ipc] no
-   implementation` lines. Currently: `hid` and `audout` are done, but `bsd:u`
-   (sockets), `acc` (user profiles — and save data in `fs` behind it), `apm`,
-   `spl:`, `usb:hs`, `ts`, `csrng`, `ncm`, `ns:am2`, `pm:*`, `pdm:qry` are not.
+   implementation` lines. Currently: `hid`, `audout`, `acc`, `apm`, `bsd` and
+   `ts` are done, but `spl:`, `usb:hs`, `csrng`, `ncm`, `ns:am2`, `pm:*`,
+   `pdm:qry` are not, and neither is `sfdnsres` (DNS), which is the other half
+   of `bsd` for anything that resolves a name. Save data behind `acc` is also
+   still missing: `fs`'s save-data mounts are not implemented, so the account
+   exists but has nothing filed under it.
 
 Lower priority: hbmenu's entry label renders as a blank box (its FreeType text
 path is worth a look); NAND-vs-SD storage sizes are one hardcoded 32 GiB for

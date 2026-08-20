@@ -661,6 +661,30 @@ impl Cpu {
                         "lm" | "lm:service" | "lm:logger" => {
                             self.lm_request(tls, handle, cmd_id)?
                         }
+                        // acc, the user accounts: `acc:u0` for an
+                        // application, `acc:u1`/`acc:su` for the system side,
+                        // plus the profile / manager / async-context objects
+                        // they hand out over either route.
+                        "acc:u0" | "acc:u1" | "acc:su" | "acc:profile"
+                        | "acc:profile-editor" | "acc:manager"
+                        | "acc:async-context" | "acc:notifier" => {
+                            self.acc_request(tls, handle, cmd_id)?
+                        }
+                        // ts, the temperature sensors, and the ISession
+                        // later firmware moved the measurement onto.
+                        "ts" | "ts:u" | "ts:s" | "ts:session-internal"
+                        | "ts:session-external" => {
+                            self.ts_request(tls, handle, cmd_id)?
+                        }
+                        // bsd, the socket service. `bsd:s` is the same
+                        // interface at higher privilege.
+                        "bsd:u" | "bsd:s" => self.bsd_request(tls, handle, cmd_id)?,
+                        // apm, the clock profiles: the manager, the
+                        // privileged system manager, and the ISession the
+                        // manager hands out.
+                        "apm" | "apm:p" | "apm:am" | "apm:sys" | "apm:session" => {
+                            self.apm_request(tls, handle, cmd_id)?
+                        }
                         // pctl and its aliases, plus the
                         // IParentalControlService reached over its own session
                         // handle (the non-domain route `nnSdk` takes).

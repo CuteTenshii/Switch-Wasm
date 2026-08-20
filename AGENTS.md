@@ -358,14 +358,77 @@ compile their logging out, so an empty log is not evidence this is broken —
 `lm_writes_the_guests_own_log_to_the_console` is.
 
 `pctl` (parental controls, `pctl_request`) reports the console as
-**unrestricted**, which is the true state here — no accounts, no PIN, no play
-timer, no linked guardian. Watch the direction of the answers: a `Confirm*`/
+**unrestricted**, which is the true state here — no PIN, no play timer, no
+linked guardian, and the one local account `acc` reports has no Nintendo
+Account behind it. Watch the direction of the answers: a `Confirm*`/
 `Check*Permission` command replies with a bare `Result` where success *is*
 "permitted" (a restriction is an error the caller checks for by value), an
 `IsRestriction*`/`IsRestrictedBy*` query is `false`, and an
 `IsFreeCommunicationAvailable`/`IsStereoVisionPermitted` query is `true`. The
 last family reads the opposite way from the middle one, so a blanket `false`
 would report free communication as unavailable.
+
+`acc` (user accounts, `acc_request`) models a console with **exactly one
+user**, always signed in, whose uid is `ACCOUNT_UID` — nonzero, because zero is
+`AccountUid`'s "no user" sentinel and a title handed it back concludes nobody
+is signed in. `acc:u0` is the application-facing service and `acc:u1`/`acc:su`
+the system-facing ones; they share commands 0..=51 and **diverge from 100 up,
+where the same command id means different things** (100 is
+`InitializeApplicationInfo` on `acc:u0` but `GetUserRegistrationNotifier` on
+`acc:u1`), so those arms dispatch on which service the session was opened under
+rather than on the command alone. The nickname is the one piece of real state:
+`IProfileEditor::Store` writes it into `Cpu::account_nickname` and
+`IProfile::GetBase` reads it back out. `LoadImage` hands over a real JPEG that
+`solid_jpeg` encodes — a caller feeds what it gets straight to a decoder, so
+zero bytes is nothing to decode.
+
+`IProfile::Get` is why `Cpu::ipc_recv_static_buffers` exists: its
+`AccountUserData` comes back through a **receive-static ("pointer") buffer**,
+the one descriptor kind that sits *after* the raw data — at the unaligned data
+offset plus `num_data_words`, which counts the padding that aligns the CMIF
+header. It is also why `acc` answers `QueryPointerBufferSize` with a real size:
+a client told the server has no room marshals no descriptor at all and then
+reads the icon id and background colour back out of its own stack. Read one
+with `Cpu::ipc_output_buffer` (map-alias first, pointer buffer second), the
+mirror of `ipc_input_buffer`.
+
+`apm` (performance management, `apm_request`) is the clock profiles, and there
+is nothing here to clock — the CPU is an interpreter and the GPU a software
+rasterizer. What it has to do is **agree**: `GetPerformanceMode` reports the
+same Normal that `am`'s `ICommonStateGetter::GetPerformanceMode` does, and
+`GetPerformanceConfiguration` gives back, per mode, whatever
+`SetPerformanceConfiguration` was last handed (the defaults are nonzero, since
+0 is `ApmPerformanceConfiguration_Invalid`).
+
+`bsd` (sockets, `bsd_request`) models a console whose link is up — which is
+what `nifm` already claims — and on which **nothing ever answers**. A browser
+tab cannot open a TCP socket and nothing here proxies one, so the split is:
+every genuinely local operation really succeeds (socket, bind, listen,
+get/setsockopt, fcntl, shutdown, close, dup) and every operation needing a peer
+fails immediately with a definite errno — `connect` is `ECONNREFUSED`, the data
+path is `ENOTCONN` for a stream socket and `ENETUNREACH` for a datagram one,
+`accept` on a listening socket is `EAGAIN`, and `select`/`poll` report nothing
+ready. Failing at once matters more than it looks: there is no second thread to
+run while a guest blocks on a socket, so a timeout would stall the frame loop.
+**The errnos are FreeBSD's** (`EAGAIN` is 35, not 11) because that is what the
+real service returns. `fcntl`'s flags word is stored and returned *verbatim*
+rather than decoded — `O_NONBLOCK` is a different bit in FreeBSD, newlib and
+Linux, and what has to hold is that a guest reads back what it set.
+
+`ts` (temperatures, `ts_request`) reports the two sensors real hardware has —
+the SoC (`TsLocation_Internal`) and the PCB (`TsLocation_External`) — at a
+fixed idle reading, which is the true state of a console with no silicon to
+heat. Three things to keep straight. The constraint is internal consistency:
+`GetTemperatureMilliC` is `GetTemperature` times a thousand, and both sit
+inside what `GetTemperatureRange` reports, since a caller scaling a gauge by
+that range would otherwise draw the needle off the end. **`ISession` is a
+different interface from the server it came from**: its `GetTemperature` is
+command 4, the same id the server uses for `OpenSession`, and it returns a
+`float` where the server's commands return integers — one shared dispatch
+answered a session's temperature request with another session object, which
+NX-Fetch printed as "8 C". And the **device code's high byte** picks the
+sensor (`0x41……` SoC, `0x43……` PCB), not its low byte: NX-Fetch asks for
+`0x41000002` and calls the result "CPU".
 
 **A stub that answers by fabrication says so.** The generic reply for a service
 with no dedicated handler is load-bearing for homebrew that only checks the
