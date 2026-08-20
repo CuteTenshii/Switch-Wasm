@@ -33,6 +33,15 @@ pub(super) const NICKNAME_LEN: usize = 0x20;
 /// The nickname the console's user has until a host or the guest changes it.
 pub(super) const DEFAULT_NICKNAME: &str = "Player";
 
+/// The system version `set:sys` reports, as major/minor/micro.
+///
+/// libnx seeds `hosversionGet` from this and branches on it everywhere, so the
+/// number is load-bearing rather than decorative: it is picked to sit past the
+/// gates the services here implement (6.0.0 for `acc`'s qualified-user list)
+/// and before the ones they do not (17.0.0, where `ts` moves its measurement
+/// onto a different interface).
+const FIRMWARE_VERSION: (u8, u8, u8) = (12, 1, 0);
+
 /// The temperatures `ts` reports, in degrees Celsius: the SoC
 /// (`TsLocation_Internal`) first, the PCB (`TsLocation_External`) second.
 ///
@@ -985,7 +994,39 @@ impl Cpu {
     /// other command falls through to a generic empty-success reply, same as
     /// `set_request`'s default arm.
     pub(super) fn set_sys_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            // `GetFirmwareVersion` returns its struct through a receive-static
+            // ("pointer") buffer, so this has to claim room for one.
+            return match cmd_id {
+                Some(3) => self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[]),
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
         match cmd_id {
+            // GetFirmwareVersion / GetFirmwareVersion2 -> a
+            // `SetSysFirmwareVersion` in an output buffer.
+            //
+            // This is not cosmetic. libnx's `__appInit` seeds `hosversionGet`
+            // from it, and everything version-gated downstream branches on
+            // that: which `acc` commands exist, which `ts` interface carries
+            // the temperature, which audio-renderer revision is negotiated.
+            // The generic empty-success answer left the caller reading its own
+            // uninitialized buffer as the version — NX-Fetch reported "Horizon
+            // OS 115.119.105", which is the ASCII of `switch-wasm user`, the
+            // uid this emulator had left in that same buffer earlier.
+            Some(3) | Some(4) => {
+                let version = Self::firmware_version();
+                if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
+                    if addr != 0 {
+                        for (index, &byte) in
+                            version.iter().take(size as usize).enumerate()
+                        {
+                            self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
+                        }
+                    }
+                }
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
             // GetSerialNumber -> SetSysSerialNumber { char number[0x18] }.
             // Real hardware's is burned in at manufacturing and unique per
             // console; this is a fixed placeholder, not a real serial.
@@ -997,6 +1038,31 @@ impl Cpu {
             }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
         }
+    }
+
+    /// `SetSysFirmwareVersion`, the 0x100-byte block `set:sys` reports the
+    /// system version in: the numeric version, then the platform, the build
+    /// hash, and the two display strings the settings applet shows.
+    fn firmware_version() -> [u8; 0x100] {
+        let mut version = [0u8; 0x100];
+        version[0] = FIRMWARE_VERSION.0;
+        version[1] = FIRMWARE_VERSION.1;
+        version[2] = FIRMWARE_VERSION.2;
+        version[4] = 1; // revision_major
+        let mut write = |offset: usize, text: &str, room: usize| {
+            let bytes = text.as_bytes();
+            let len = bytes.len().min(room - 1);
+            version[offset..offset + len].copy_from_slice(&bytes[..len]);
+        };
+        write(0x08, "NX", 0x20);
+        write(0x28, "switch-wasm", 0x40);
+        let display = format!(
+            "{}.{}.{}",
+            FIRMWARE_VERSION.0, FIRMWARE_VERSION.1, FIRMWARE_VERSION.2
+        );
+        write(0x68, &display, 0x18);
+        write(0x80, &format!("NintendoSDK Firmware for NX {display}-1.0"), 0x80);
+        version
     }
 
     pub(super) fn vi_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
@@ -4875,6 +4941,31 @@ mod tests {
             );
             assert_eq!(reading, expected as f32, "{iface}");
         }
+    }
+
+    #[test]
+    fn set_sys_reports_a_real_firmware_version_into_its_pointer_buffer() {
+        // libnx seeds `hosversionGet` from this, and everything version-gated
+        // branches on it. Answering with an empty success left the caller
+        // reading its own stale buffer: NX-Fetch showed "Horizon OS
+        // 115.119.105", the ASCII of the uid this emulator had left there.
+        const BUFFER: u32 = 0x4000;
+        let mut cpu = request_with_recv_static(3, &[], BUFFER, 0x100);
+        cpu.mem.map_zero(BUFFER, 0x200).unwrap();
+        for offset in 0..0x100 {
+            cpu.mem.write_u8(BUFFER + offset, b'x').unwrap();
+        }
+        cpu.set_sys_request(TLS, Some(3)).unwrap();
+
+        let (major, minor, micro) = super::FIRMWARE_VERSION;
+        assert_eq!(cpu.mem.read_u8(BUFFER).unwrap(), major);
+        assert_eq!(cpu.mem.read_u8(BUFFER + 1).unwrap(), minor);
+        assert_eq!(cpu.mem.read_u8(BUFFER + 2).unwrap(), micro);
+        assert_eq!(cpu.read_string(BUFFER + 0x08, 0x20), "NX");
+        // The display strings agree with the numbers above them.
+        let display = format!("{major}.{minor}.{micro}");
+        assert_eq!(cpu.read_string(BUFFER + 0x68, 0x18), display);
+        assert!(cpu.read_string(BUFFER + 0x80, 0x80).ends_with(&format!("{display}-1.0")));
     }
 
     #[test]

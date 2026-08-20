@@ -430,6 +430,17 @@ NX-Fetch printed as "8 C". And the **device code's high byte** picks the
 sensor (`0x41……` SoC, `0x43……` PCB), not its low byte: NX-Fetch asks for
 `0x41000002` and calls the result "CPU".
 
+`set:sys`'s `GetFirmwareVersion`/`GetFirmwareVersion2` (commands 3 and 4) are
+**not cosmetic**. libnx's `__appInit` seeds `hosversionGet()` from them, and
+everything version-gated branches on that — which `acc` commands exist, which
+`ts` interface carries the measurement, which audio-renderer revision gets
+negotiated. Answering them with the generic empty success left each caller
+reading its own uninitialized buffer as the system version: NX-Fetch reported
+"Horizon OS 115.119.105", which is the ASCII of `switch-wasm user` — the `acc`
+uid this emulator had left in that same buffer earlier. The struct goes back
+through a pointer buffer, so it needs `ipc_output_buffer` and a non-zero
+`QueryPointerBufferSize`, like `acc`'s.
+
 **A stub that answers by fabrication says so.** The generic reply for a service
 with no dedicated handler is load-bearing for homebrew that only checks the
 Result, so it still succeeds — but `Cpu::warn_no_implementation` records

@@ -1128,6 +1128,37 @@ and the sensor is selected by the device code's **high byte** (`0x41……` SoC,
 `0x43……` PCB), not its low byte, which had the PCB's reading appearing under
 the "CPU" label.
 
+### The system version was being read out of stale memory
+
+`set:sys`'s `GetFirmwareVersion`/`GetFirmwareVersion2` had no implementation,
+so they took the generic empty-success path and never wrote the
+`SetSysFirmwareVersion` the caller was waiting for. The caller then read its
+own uninitialized buffer as the system version, and NX-Fetch displayed
+**"Horizon OS 115.119.105"** — 115, 119, 105 is the ASCII of `swi`, the start
+of `switch-wasm user`, the `acc` uid this emulator had left in that buffer on
+an earlier call. A stale-buffer read is exactly the failure the new
+pointer-buffer write in `IProfile::Get` was added to avoid, in a service that
+predates it.
+
+That number is load-bearing rather than decorative: libnx's `__appInit` seeds
+`hosversionGet()` from it and every version gate downstream reads it, so a
+garbage version means a guest picking service commands and interface revisions
+at random — Checkpoint's `acc` call was `ListQualifiedUsers`, which libnx only
+issues on 6.0.0 and later, decided by a version it had read out of stale stack.
+`set:sys` now reports **12.1.0**, chosen to sit past the gates the services
+here implement and before the ones they do not (17.0.0 moves `ts`'s
+measurement). NX-Fetch reads it back correctly, and prints `Player@` beside it
+— the `acc` nickname, on screen, through the whole profile path.
+
+Checkpoint is the guest that exercises `acc` here: it opens `acc:u0` and calls
+`ListQualifiedUsers` (command 140), which now answers with the console's uid
+and a count of 1 instead of a fabricated object id. `bsd` is the other service it wanted:
+`RegisterClient`, `StartMonitoring`, then a socket that gets an option set, is
+bound, and is closed again — all of which now answer as a real socket layer
+would. It still aborts — `svcBreak` Panic with result `0x367` from `0x818bb8c`
+— exactly as it did before, and the last IPC before the abort is a long run of
+`nvdrv` ioctls, so whatever stops Checkpoint is on the GPU side, not here.
+
 ### Suspending threads, and reading their registers
 
 Past audio the title stopped twice more, each time on an unimplemented
