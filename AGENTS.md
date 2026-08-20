@@ -216,10 +216,23 @@ Scan-out: the app hands a finished image to `display::BufferQueue`
 `switch_fb_*`/`switch_frame_count` exports feed that to the canvas, which
 resizes itself to whatever resolution the guest picked.
 
-**Not yet implemented**: the shader core. `ClearBuffers`, the copy engine, the
-2D blitter and inline uploads all execute for real; `VertexBegin`/draw calls
-are decoded and recorded but not rasterized, and compute dispatches record
-their QMD address without running warps.
+Draws are rasterized for real (`gpu/raster.rs`) with the SASS interpreter in
+`gpu/shader/interp.rs` shading each vertex and each covered fragment; compute
+dispatches still record their QMD address without running warps.
+
+**A fragment shader runs once per covered pixel, so anything per-invocation is
+per-pixel.** A full-screen pass is 921 600 of them, and NXpotify's frame is
+five such passes. That makes the usual instinct — allocate a small `Vec`, use
+a `HashMap` for a sparse thing, rescan the program to answer a question —
+cost whole seconds a frame. Three that did: `texs` rescanned the program to
+find where its result lands (a hundred heap allocations per pixel; it is a
+property of the decoded program and is cached on `Program` now), `a[]` was a
+`HashMap` (it is a 256-word flat array now, with a written-mask so "never
+written" stays distinguishable from "wrote zero"), and the rasterizer built a
+fresh `Invocation` per pixel (one per draw now, reset per pixel). Together
+those were 2.6 s/frame → 0.67 s. Measure before and after with
+`examples/screenshot` at two frame indices; the frames must stay
+byte-identical.
 
 ## IPC dialects (`cpu/ipc.rs`)
 

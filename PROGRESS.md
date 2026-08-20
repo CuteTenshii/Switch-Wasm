@@ -1393,6 +1393,54 @@ stdout and `[nv]`/`[vi]` to stderr, so a merged `2>&1 | tail` interleaves them
 by *buffer flush*, not by time — a six-call sequence read as an endless loop
 three separate times. Count with `grep -c` before believing a tail.
 
+### NXpotify was slow because a texture result rescanned the program
+
+The lag was not the CPU interpreter: one steady-state frame is 481 147 guest
+instructions, which the interpreter gets through in about 40 ms. It was the
+GPU. A frame is five draws, and those five draws shade **956 000 fragments** —
+essentially one full-screen pass — at 2.6 s a frame. Short-circuiting
+`shade_fragment` proved it: 2.61 s/frame became 0.32 s.
+
+Counting what a fragment actually does gave the shape: 12 interpreted SASS
+instructions, one constant read and one texture sample each, at 2.7 µs a
+fragment. Twelve instructions cannot cost 2.7 µs, so the cost was not in the
+instructions.
+
+It was in `texs`. A texture result arrives late on hardware, so the
+interpreter parks it and lands it just before the first later instruction that
+reads the register. Finding that instruction meant scanning forward through
+the program, and the scan called `reads()`/`writes()` per instruction — each
+of which **builds a `Vec<u8>`**. Four channels, twelve instructions, two
+vectors each: about a hundred heap allocations for every covered pixel. But
+where a result lands is a property of the *decoded program*, not of the
+invocation. It is now worked out once, in a `OnceCell` on `Program` (lazy
+rather than filled at construction, so a `Program` built any other way — the
+test helpers do — cannot carry a stale table).
+
+Two smaller ones alongside it:
+
+- `Invocation::attr_in`/`attr_out` were `HashMap<u16, f32>`. A fragment writes
+  17 of them and the map allocates on its first insert, so that was a hash per
+  component plus an allocation per pixel. `a[]` is a ten-bit byte address —
+  the whole space is 256 words — so it is a flat array now, with a 256-bit
+  written-mask beside it. The mask is not bookkeeping for its own sake: a
+  vertex shader that never writes `clip.w` has to get the default 1.0 rather
+  than 0.0, so "never written" has to stay distinguishable from "wrote zero".
+  It also makes clearing a 32-byte wipe instead of a 1 KiB one.
+- The rasterizer built a fresh `Invocation` per covered pixel — a 1 KiB
+  register-file wipe and two map allocations each. One per draw now, reset per
+  pixel.
+
+**2.61 s/frame → 0.67 s/frame, and every frame is byte-identical** (nxpotify,
+hbmenu, JKSV, NX-Fetch). What is left splits as ~0.19 s of rasterization,
+depth and blend, ~0.11 s of texture sampling — `sample` still re-reads and
+re-parses the 32-byte TIC and TSC out of GPU memory for every sampled pixel,
+which is the obvious next one — and the rest in the interpreter itself.
+
+Reusing the `pending` vector across fragments was also tried and measured at
+no effect, so it was dropped rather than kept on the theory that it should
+have helped.
+
 ## Frontend
 
 - **PFS0 offset rebasing**: some repacked NSPs (e.g. ROMSLAB) store PFS0 file

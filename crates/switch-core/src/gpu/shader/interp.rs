@@ -139,15 +139,78 @@ impl<'a> Env<'a> {
 
 /// Per-vertex/per-fragment machine state.
 #[derive(Debug)]
+/// The `a[]` attribute space — a shader's interpolated inputs on the way in,
+/// its outputs on the way out — addressed by the byte offset the ISA uses
+/// (`a[0x7c]` is offset `0x7c`).
+///
+/// Flat rather than a map, because a fragment shader runs *once per covered
+/// pixel*: the `HashMap<u16, f32>` this replaces cost a hash per component
+/// plus a heap allocation on each invocation's first insert, and those
+/// together were most of the time in a shaded pixel. `ld`/`st`/`ipa` address
+/// `a[]` with a ten-bit field, so the whole space is `0x000..0x400` — 256
+/// words — and an offset past that (only reachable by adding an indexing
+/// register) is outside attribute space entirely: it reads zero and a write
+/// to it is dropped.
+///
+/// The written-mask is what makes "never written" distinguishable from
+/// "written zero", which matters for outputs: a vertex shader that leaves
+/// `clip.w` alone must get the default 1.0, not 0.0. It also makes
+/// [`Attributes::clear`] a 32-byte wipe instead of a 1 KiB one.
+#[derive(Clone)]
+pub struct Attributes {
+    words: [f32; Attributes::WORDS],
+    written: [u64; Attributes::WORDS / 64],
+}
+
+impl Attributes {
+    /// `a[]` is a ten-bit byte address, one `f32` per word.
+    const WORDS: usize = 0x400 / 4;
+
+    /// The value at `offset`, or 0.0 if nothing wrote it — what a read of an
+    /// absent key gave before.
+    pub fn get(&self, offset: u16) -> f32 {
+        self.written(offset).unwrap_or(0.0)
+    }
+
+    /// The value at `offset`, or `None` if nothing wrote it.
+    pub fn written(&self, offset: u16) -> Option<f32> {
+        let word = offset as usize / 4;
+        if word >= Self::WORDS || self.written[word / 64] & (1 << (word % 64)) == 0 {
+            return None;
+        }
+        Some(self.words[word])
+    }
+
+    pub fn set(&mut self, offset: u16, value: f32) {
+        let word = offset as usize / 4;
+        if word >= Self::WORDS {
+            return;
+        }
+        self.words[word] = value;
+        self.written[word / 64] |= 1 << (word % 64);
+    }
+
+    /// Forget everything. Only the mask has to be cleared — a stale word is
+    /// unreachable once it reads as unwritten.
+    pub fn clear(&mut self) {
+        self.written = [0; Self::WORDS / 64];
+    }
+}
+
+impl Default for Attributes {
+    fn default() -> Self {
+        Attributes { words: [0.0; Attributes::WORDS], written: [0; Attributes::WORDS / 64] }
+    }
+}
+
 pub struct Invocation {
     gpr: [u32; 255],
     /// `p0`..`p6`. `p7` is `PT`, which always reads true and can't be
     /// written, so it isn't stored.
     pred: [bool; 7],
-    /// `a[]` input and output, keyed by the same byte offset the ISA uses
-    /// (`a[0x7c]` becomes key `0x7c`).
-    pub attr_in: HashMap<u16, f32>,
-    pub attr_out: HashMap<u16, f32>,
+    /// `a[]` input and output.
+    pub attr_in: Attributes,
+    pub attr_out: Attributes,
     /// Set by `kil`: this fragment must not be written.
     pub discarded: bool,
     /// `ssy`/`pbk`/`pcnt` push a resume address; `sync`/`brk`/`cont` pop it.
@@ -160,8 +223,8 @@ impl Default for Invocation {
         Invocation {
             gpr: [0; 255],
             pred: [false; 7],
-            attr_in: HashMap::new(),
-            attr_out: HashMap::new(),
+            attr_in: Attributes::default(),
+            attr_out: Attributes::default(),
             discarded: false,
             stack: Vec::new(),
             local: Vec::new(),
@@ -172,6 +235,20 @@ impl Default for Invocation {
 impl Invocation {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Put this invocation back to its initial state so one of them can serve
+    /// a whole draw. Building a fresh `Invocation` per fragment meant a 1 KiB
+    /// register-file wipe and two map allocations for every covered pixel;
+    /// this is the same state, without the allocations.
+    pub fn reset(&mut self) {
+        self.gpr = [0; 255];
+        self.pred = [false; 7];
+        self.attr_in.clear();
+        self.attr_out.clear();
+        self.discarded = false;
+        self.stack.clear();
+        self.local.clear();
     }
 
     pub fn reg_f32(&self, r: u8) -> f32 {
@@ -318,7 +395,7 @@ impl Invocation {
             Op::Ld { dst, offset, idx, size } => {
                 let base = offset.wrapping_add(self.attr_index(idx));
                 for i in 0..size.regs() {
-                    let v = self.attr_in.get(&(base + i as u16 * 4)).copied().unwrap_or(0.0);
+                    let v = self.attr_in.get(base + i as u16 * 4);
                     self.set_reg_f32(dst.wrapping_add(i), v);
                 }
             }
@@ -326,11 +403,11 @@ impl Invocation {
                 let base = offset.wrapping_add(self.attr_index(idx));
                 for i in 0..size.regs() {
                     let v = self.reg_f32(src.wrapping_add(i));
-                    self.attr_out.insert(base + i as u16 * 4, v);
+                    self.attr_out.set(base + i as u16 * 4, v);
                 }
             }
             Op::Ipa { dst, offset, mul, perspective, sat } => {
-                let mut v = self.attr_in.get(&offset).copied().unwrap_or(0.0);
+                let mut v = self.attr_in.get(offset);
                 if perspective {
                     if let Some(m) = mul {
                         v *= self.reg_f32(m);
@@ -702,7 +779,7 @@ impl Invocation {
         env: &Env,
         pending: &mut Vec<(usize, u8, f32)>,
     ) -> Result<()> {
-        let Op::Texs { dst, coords, handle, mask, .. } = op else {
+        let Op::Texs { coords, handle, .. } = op else {
             unreachable!("run_texs called with {op:?}");
         };
         // The bindless handle lives in the driver's reserved constant bank
@@ -714,18 +791,37 @@ impl Invocation {
         let v = self.reg_f32(coords[2]);
         let color = env.textures.sample(handle, u, v)?;
 
+        // Where each channel lands was worked out at decode time.
+        for &(channel, reg, due) in program.texs_writes(pc) {
+            pending.retain(|&(_, r, _)| r != reg);
+            pending.push((due, reg, color[channel]));
+        }
+        Ok(())
+    }
+}
+
+/// Work out, for every `texs` in `program`, where each of its results lands.
+/// Called once per decode by [`super::decode_program_with`]; see
+/// [`super::Program::texs_writes`] for why it is not done per invocation.
+pub(super) fn texs_writes_for(program: &Program) -> Vec<super::TexsWrites> {
+    let mut out = Vec::new();
+    for (pc, insn) in program.insns.iter().enumerate() {
+        let Op::Texs { dst, mask, .. } = insn.op else {
+            continue;
+        };
+        let mut writes = Vec::new();
         let mut reg = dst;
         for (channel, &enabled) in mask.iter().enumerate() {
             if !enabled {
                 continue;
             }
             let due = first_use_after(program, pc + 1, reg).unwrap_or(program.len() - 1);
-            pending.retain(|&(_, r, _)| r != reg);
-            pending.push((due, reg, color[channel]));
+            writes.push((channel, reg, due));
             reg = reg.wrapping_add(1);
         }
-        Ok(())
+        out.push(super::TexsWrites { at: pc, writes });
     }
+    out
 }
 
 /// Where `reg`'s pending write should land: right before the first later
@@ -1453,11 +1549,11 @@ mod tests {
         let program = decode_program(&bytes).unwrap();
 
         let mut inv = Invocation::new();
-        inv.attr_in.insert(0x7c, 1.0 / w);
-        inv.attr_in.insert(0x80, color[0] / w);
-        inv.attr_in.insert(0x84, color[1] / w);
-        inv.attr_in.insert(0x88, color[2] / w);
-        inv.attr_in.insert(0x8c, color[3] / w);
+        inv.attr_in.set(0x7c, 1.0 / w);
+        inv.attr_in.set(0x80, color[0] / w);
+        inv.attr_in.set(0x84, color[1] / w);
+        inv.attr_in.set(0x88, color[2] / w);
+        inv.attr_in.set(0x8c, color[3] / w);
 
         inv.execute(&program, &Env::new(&no_consts(), &NoTextures)).unwrap();
 
@@ -1548,14 +1644,14 @@ mod tests {
         let pos = [10.0f32, 20.0, 30.0, 1.0];
         let color = [0.1f32, 0.2, 0.3, 0.4];
         let mut inv = Invocation::new();
-        inv.attr_in.insert(0x80, pos[0]);
-        inv.attr_in.insert(0x84, pos[1]);
-        inv.attr_in.insert(0x88, pos[2]);
-        inv.attr_in.insert(0x8c, pos[3]);
-        inv.attr_in.insert(0x90, color[0]);
-        inv.attr_in.insert(0x94, color[1]);
-        inv.attr_in.insert(0x98, color[2]);
-        inv.attr_in.insert(0x9c, color[3]);
+        inv.attr_in.set(0x80, pos[0]);
+        inv.attr_in.set(0x84, pos[1]);
+        inv.attr_in.set(0x88, pos[2]);
+        inv.attr_in.set(0x8c, pos[3]);
+        inv.attr_in.set(0x90, color[0]);
+        inv.attr_in.set(0x94, color[1]);
+        inv.attr_in.set(0x98, color[2]);
+        inv.attr_in.set(0x9c, color[3]);
 
         inv.execute(&program, &Env::new(&consts, &NoTextures)).unwrap();
 
@@ -1565,16 +1661,16 @@ mod tests {
             (0..4).map(|c| m[2][c] * pos[c]).sum::<f32>(),
             (0..4).map(|c| m[3][c] * pos[c]).sum::<f32>(),
         ];
-        assert_eq!(inv.attr_out[&0x70], expected[0]);
-        assert_eq!(inv.attr_out[&0x74], expected[1]);
-        assert_eq!(inv.attr_out[&0x78], expected[2]);
-        assert_eq!(inv.attr_out[&0x7c], expected[3]);
+        assert_eq!(inv.attr_out.get(0x70), expected[0]);
+        assert_eq!(inv.attr_out.get(0x74), expected[1]);
+        assert_eq!(inv.attr_out.get(0x78), expected[2]);
+        assert_eq!(inv.attr_out.get(0x7c), expected[3]);
 
         // vColor = aColor passthrough.
-        assert_eq!(inv.attr_out[&0x80], color[0]);
-        assert_eq!(inv.attr_out[&0x84], color[1]);
-        assert_eq!(inv.attr_out[&0x88], color[2]);
-        assert_eq!(inv.attr_out[&0x8c], color[3]);
+        assert_eq!(inv.attr_out.get(0x80), color[0]);
+        assert_eq!(inv.attr_out.get(0x84), color[1]);
+        assert_eq!(inv.attr_out.get(0x88), color[2]);
+        assert_eq!(inv.attr_out.get(0x8c), color[3]);
     }
 
     #[test]
@@ -1667,13 +1763,13 @@ mod tests {
         let w = 2.0f32;
         let color = [1.0f32, 1.0, 1.0, 1.0];
         let mut inv = Invocation::new();
-        inv.attr_in.insert(0x7c, 1.0 / w);
-        inv.attr_in.insert(0x90, 0.5 / w); // u
-        inv.attr_in.insert(0x94, 0.5 / w); // v
-        inv.attr_in.insert(0x80, color[0] / w);
-        inv.attr_in.insert(0x84, color[1] / w);
-        inv.attr_in.insert(0x88, color[2] / w);
-        inv.attr_in.insert(0x8c, color[3] / w);
+        inv.attr_in.set(0x7c, 1.0 / w);
+        inv.attr_in.set(0x90, 0.5 / w); // u
+        inv.attr_in.set(0x94, 0.5 / w); // v
+        inv.attr_in.set(0x80, color[0] / w);
+        inv.attr_in.set(0x84, color[1] / w);
+        inv.attr_in.set(0x88, color[2] / w);
+        inv.attr_in.set(0x8c, color[3] / w);
 
         let no_consts: HashMap<(u8, u16), f32> = HashMap::new();
         inv.execute(&program, &Env::new(&no_consts, &StubTex)).unwrap();

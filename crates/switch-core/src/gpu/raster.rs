@@ -375,14 +375,14 @@ fn shade_vertex(
         let v = fetch_attribute(*attrib, array, vertex_index, ctx)?;
         let base = VARYING_BASE + i as u16 * VARYING_STRIDE;
         for (c, &component) in v.iter().enumerate() {
-            inv.attr_in.insert(base + c as u16 * 4, component);
+            inv.attr_in.set(base + c as u16 * 4, component);
         }
     }
     inv.execute(program, &Env::new(consts, &NoTextures))?;
 
     let mut clip = [0.0, 0.0, 0.0, 1.0];
     for (c, slot) in clip.iter_mut().enumerate() {
-        if let Some(&v) = inv.attr_out.get(&(CLIP_POS_OFFSET + c as u16 * 4)) {
+        if let Some(v) = inv.attr_out.written(CLIP_POS_OFFSET + c as u16 * 4) {
             *slot = v;
         }
     }
@@ -390,7 +390,7 @@ fn shade_vertex(
     for (i, varying) in varyings.iter_mut().enumerate() {
         let base = VARYING_BASE + i as u16 * VARYING_STRIDE;
         for (c, slot) in varying.iter_mut().enumerate() {
-            if let Some(&v) = inv.attr_out.get(&(base + c as u16 * 4)) {
+            if let Some(v) = inv.attr_out.written(base + c as u16 * 4) {
                 *slot = v;
             }
         }
@@ -488,7 +488,11 @@ fn blend(target: BlendTarget, constant: [f32; 4], src: [f32; 4], dst: [f32; 4]) 
     out
 }
 
+/// Shade one covered pixel. `inv` is threaded in rather than created here so
+/// that a draw allocates one invocation instead of one per covered pixel — a
+/// full-screen quad covers 921 600 of them.
 fn shade_fragment(
+    inv: &mut Invocation,
     program: &Program,
     verts: &[ShadedVertex; 3],
     inv_w: [f32; 3],
@@ -496,16 +500,16 @@ fn shade_fragment(
     consts: &dyn ConstantSource,
     textures: &dyn TextureSource,
 ) -> Result<Option<[f32; 4]>> {
-    let mut inv = Invocation::new();
+    inv.reset();
     let interp_inv_w = weights[0] * inv_w[0] + weights[1] * inv_w[1] + weights[2] * inv_w[2];
-    inv.attr_in.insert(INV_W_OFFSET, interp_inv_w);
+    inv.attr_in.set(INV_W_OFFSET, interp_inv_w);
     for slot in 0..NUM_VARYINGS {
         let base = VARYING_BASE + slot as u16 * VARYING_STRIDE;
         for c in 0..4 {
             let over_w = weights[0] * verts[0].varyings[slot][c] * inv_w[0]
                 + weights[1] * verts[1].varyings[slot][c] * inv_w[1]
                 + weights[2] * verts[2].varyings[slot][c] * inv_w[2];
-            inv.attr_in.insert(base + c as u16 * 4, over_w);
+            inv.attr_in.set(base + c as u16 * 4, over_w);
         }
     }
     inv.execute(program, &Env::new(consts, textures))?;
@@ -652,6 +656,8 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // heavily, and re-running the vertex shader for each reference is the
     // single most expensive thing this loop can do.
     let mut cache: std::collections::HashMap<u32, ShadedVertex> = std::collections::HashMap::new();
+    // One fragment invocation for the whole draw, reset per pixel.
+    let mut fragment = Invocation::new();
 
     for tri in triangles {
         let mut shaded: Vec<ShadedVertex> = Vec::with_capacity(3);
@@ -719,6 +725,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         tex_sampler_pool: engine.tex_sampler_pool(),
                     };
                     shade_fragment(
+                        &mut fragment,
                         &fs_program,
                         &shaded,
                         [inv_w[0], inv_w[1], inv_w[2]],

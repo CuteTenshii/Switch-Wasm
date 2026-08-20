@@ -37,11 +37,46 @@ pub const ENTRY_OFFSET: u32 = 8;
 pub struct Program {
     pub insns: Vec<Instruction>,
     pub offsets: Vec<u32>,
+    /// Where each `texs`'s results land. Derived from `insns`, and worked out
+    /// on first use rather than at construction so that it cannot be left
+    /// stale by a `Program` built any other way — see [`Program::texs_writes`].
+    texs_writes: std::cell::OnceCell<Vec<TexsWrites>>,
+}
+
+/// Where one `texs` instruction's results land.
+#[derive(Debug, Clone)]
+pub struct TexsWrites {
+    /// Index of the `texs` itself.
+    pub at: usize,
+    /// One entry per enabled colour channel: `(channel, destination
+    /// register, the instruction index the write must land before)`.
+    pub writes: Vec<(usize, u8, usize)>,
 }
 
 impl Program {
     pub fn len(&self) -> usize {
         self.insns.len()
+    }
+
+    /// The deferred register writes the `texs` at instruction `index`
+    /// produces: `(colour channel, destination register, the instruction
+    /// index the write must land before)`.
+    ///
+    /// A texture result arrives late on hardware, so the interpreter parks it
+    /// until just before the first later instruction that reads the register
+    /// (see `interp::texs_writes_for`). Where that is depends only on the
+    /// decoded program, not on the invocation — and rediscovering it meant
+    /// scanning forward through the program, building a `Vec` of read and
+    /// written registers per instruction scanned, *once per covered pixel*.
+    /// That scan was the single most expensive thing in a shaded pixel;
+    /// NXpotify's frame time was 1.8 s, of which 1.5 s was this.
+    pub fn texs_writes(&self, index: usize) -> &[(usize, u8, usize)] {
+        self.texs_writes
+            .get_or_init(|| interp::texs_writes_for(self))
+            .iter()
+            .find(|t| t.at == index)
+            .map(|t| t.writes.as_slice())
+            .unwrap_or(&[])
     }
 
     pub fn is_empty(&self) -> bool {
