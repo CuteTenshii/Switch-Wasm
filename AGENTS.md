@@ -253,6 +253,35 @@ started with "applet"; those numbers leaked — `pl:u`'s `GetLoadState` is also
 command 1, and answering it with 15 left NX-Shell polling the shared-font
 service 190k times.
 
+`hid` (`hid_request`) is the **negotiation** around input, not the input
+itself. The data — buttons, sticks, touch — lives in a 256 KiB shared memory
+region the guest reads directly with no IPC per frame, which
+`Cpu::set_gamepad_state` already fills. `IHidServer::CreateAppletResource` →
+`IAppletResource::GetSharedMemoryHandle` is what hands that region over, and
+the handle it returns is now what `svcMapSharedMemory` recognises (the old
+match on a 0x40000 size stays as a fallback, and is the reason `libnx` got
+working input out of a fabricated reply while `nnSdk` called a method on a null
+`IAppletResource`).
+
+Two things there are easy to get wrong:
+
+- **`QueryPointerBufferSize` must be non-zero for `hid`.**
+  `nn::hid::SetSupportedNpadIdType` marshals its npad id array as a
+  send-static ("pointer") buffer, and `nnSdk`'s client checks the negotiated
+  size *before* sending, failing outright when the server claims it can take
+  nothing. Note this also changes how `libnx`'s AutoSelect marshals — read
+  input buffers with `Cpu::ipc_input_buffer`, which tries both forms.
+- **The `Set*`/`Get*` pairs have to agree.** `SetSupportedNpadStyleSet` /
+  `GetSupportedNpadStyleSet` and the joy-hold-type pair are read back; a caller
+  that reads back something it did not set decides the controller it wanted is
+  not there.
+
+Vibration comes back out the same way: `SendVibrationValue` carries a
+`HidVibrationValue` (amplitude and frequency for a low band and a high band),
+the two amplitudes are kept in `Cpu::vibration`, and the page maps them onto
+the Gamepad API's `dual-rumble` `strongMagnitude`/`weakMagnitude` — Switch
+rumble is two independently driven actuators, which is the same shape.
+
 **Events are copy handles, and they start unsignalled.** `Cpu::alloc_event`
 names one and records it in `Cpu::events`; it has to reach the guest through
 `Cpu::write_ipc_reply`'s **copy** list, not the move list — a move handle

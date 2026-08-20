@@ -630,6 +630,22 @@ pub extern "C" fn switch_dump_regs(handle: u32, buf: *mut u8, maxlen: u32) -> u3
     write_into(buf, maxlen, dump.as_bytes())
 }
 
+/// What the guest last asked the rumble motors to do, packed as
+/// `(weak << 16) | strong` with each field 0..=1000.
+///
+/// Switch rumble drives two linear resonant actuators independently, which is
+/// the same shape the browser's Gamepad API exposes as `dual-rumble`: the low
+/// band maps onto `strongMagnitude` and the high band onto `weakMagnitude`.
+/// Packed into one word so the page can poll it alongside input in a single
+/// call.
+#[no_mangle]
+pub extern "C" fn switch_vibration(handle: u32) -> u32 {
+    let s = session(handle);
+    let (low, high) = s.cpu.vibration();
+    let scale = |v: f32| (v * 1000.0).round().clamp(0.0, 1000.0) as u32;
+    (scale(high) << 16) | scale(low)
+}
+
 /// Framebuffer geometry. Once the guest has presented a frame through the
 /// display's buffer queue, this is the real console resolution (usually
 /// 1280x720); before that it is the memory-mapped demo framebuffer.

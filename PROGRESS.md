@@ -18,8 +18,8 @@ and put what they render on the canvas.
   real `nnSdk` init — `nn::init::Start` → `nn::oe::Initialize` →
   `nn::oe::InitializeApplet` — and start the SDK's system worker thread. All
   of `nn::oe::Initialize` and `nn::init`'s heap setup now complete, and the
-  title mounts and reads its own RomFS and gets real kernel events; at 361.2M
-  instructions it stops in `hid`, which has no implementation behind it. See
+  title mounts and reads its own RomFS, gets real kernel events and real input;
+  at 362.2M instructions it stops in the nv GPU driver. See
   [Retail NCA/NSP loading](#retail-ncansp-loading).
 
 See [Next](#next) for the live open threads.
@@ -686,18 +686,36 @@ not a different answer in the wait.
 
 The title now runs **361.2M** instructions.
 
-**Now open**: `hid`. The title calls `IHidServer::CreateAppletResource`, gets
-the generic fabricated-object-id reply, and calls a method on the null
-`IAppletResource` it was handed:
+### hid, and rumble
 
-```
-sdk!nn::hid::detail::SharedMemoryAccessor::Activate+0x18c   -> blr 0
-```
+Input arrives in two halves and only one of them is IPC. The **data** lives in
+a 256 KiB shared memory region the guest reads directly, which
+`Cpu::set_gamepad_state` already filled; `IHidServer` is the **negotiation**
+around it, and none of that existed. `libnx` survived on a fabricated reply
+because it maps the region by size and this emulator recognises it that way —
+`nnSdk` called a method on the null `IAppletResource` it was handed.
 
-`hid` has no implementation at all — every one of its commands (0, 3, 11, 21,
-31, 100, 102, 109, 128) is answered by fabrication, in homebrew too. It works
-today only because real input arrives through shared memory and the IPC side
-merely configures it.
+`CreateAppletResource` → `IAppletResource::GetSharedMemoryHandle` now hands
+over a real copy handle, which `svcMapSharedMemory` prefers over the size
+guess. Two things had to be right beyond the obvious:
+
+- **`QueryPointerBufferSize` had to stop being 0.**
+  `nn::hid::SetSupportedNpadIdType` marshals its id array as a send-static
+  buffer and `nnSdk` checks the negotiated size before sending, so a server
+  claiming no room fails the call outright — `hid` result 11-141, aborting
+  inside `SetSupportedNpadIdType` itself.
+- **The `Set*`/`Get*` pairs have to agree**, because they are read back.
+
+The title now runs **362.2M** instructions, through input init and into the
+GPU driver: `sdk!NvRmGpuDeviceGetInfo+0x10` calls a null pointer.
+
+Rumble came along with it, and works in the browser: `SendVibrationValue`
+carries amplitude/frequency for a low and a high band, the two amplitudes go to
+`Cpu::vibration`, and the page maps them onto the Gamepad API's `dual-rumble`
+`strongMagnitude`/`weakMagnitude` — Switch rumble is two independently driven
+linear resonant actuators, the same shape the browser exposes. Only
+Chromium-family browsers implement `vibrationActuator`, so it is best-effort
+and silent elsewhere.
 
 Two other things stay open behind this one. The kernel still has no waitable
 object model — `svcWaitSynchronization` reports every handle instantly

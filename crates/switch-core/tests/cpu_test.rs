@@ -1310,11 +1310,31 @@ fn multiply_long_ops() {
 
 // ---------------- Horizon IPC reply synthesis ----------------
 
+/// A domain request carrying raw arguments after the CmifInHeader. The reply
+/// overwrites the request in TLS, so the payload has to go in before the
+/// request runs rather than by re-running it.
+fn ipc_request_with_payload(cpu: &mut Cpu, handle: u64, object_id: u32, cmd: u32, payload: &[u8]) {
+    build_ipc_request(cpu, 4, Some(object_id), cmd);
+    // No buffer descriptors, so the data area starts at 0x10: the domain
+    // header, then the CmifInHeader at 0x20, then the arguments at 0x30.
+    let tls = cpu.tls_base();
+    for (i, &b) in payload.iter().enumerate() {
+        cpu.mem.write_u8(tls + 0x30 + i as u32, b).unwrap();
+    }
+    run_ipc_request(cpu, handle);
+}
+
 /// Drive one IPC request at `handle` and return the CPU. The request is built
 /// in the guest's own TLS buffer the way `libnx` marshals a CMIF message:
 /// hipc header, an optional `CmifDomainInHeader`, then the `SFCI` in-header
 /// carrying the command id.
 fn ipc_request(cpu: &mut Cpu, handle: u64, msg_type: u32, object_id: Option<u32>, cmd: u32) {
+    build_ipc_request(cpu, msg_type, object_id, cmd);
+    run_ipc_request(cpu, handle);
+}
+
+/// Marshal a request into TLS without sending it.
+fn build_ipc_request(cpu: &mut Cpu, msg_type: u32, object_id: Option<u32>, cmd: u32) {
     let tls = cpu.tls_base();
     for i in (0..0x100u32).step_by(4) {
         cpu.mem.write_u32(tls + i, 0).unwrap();
@@ -1332,6 +1352,10 @@ fn ipc_request(cpu: &mut Cpu, handle: u64, msg_type: u32, object_id: Option<u32>
     };
     cpu.mem.write_u32(cmif, 0x4943_4653).unwrap(); // "SFCI"
     cpu.mem.write_u32(cmif + 8, cmd).unwrap();
+}
+
+/// Send whatever is marshalled in TLS to `handle`.
+fn run_ipc_request(cpu: &mut Cpu, handle: u64) {
     cpu.set_reg(0, handle);
     let pc = cpu.get_pc();
     cpu.mem.map(pc, &svc(0x21).to_le_bytes()).unwrap();
@@ -1441,6 +1465,105 @@ fn wait_sync(cpu: &mut Cpu, handles: &[u32], timeout: i64) -> (u64, u64) {
     (cpu.read_x(0), cpu.read_x(1))
 }
 
+/// Open `hid` and convert it to a domain: (cpu, session handle, IHidServer).
+fn hid_server() -> (Cpu, u64, u32) {
+    use switch_core::cpu::SyscallMode;
+    const HID: u64 = 0x9000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.register_service_handle(HID, "hid");
+    let tls = cpu.tls_base();
+    // A control reply is not a domain reply: SFCO lands at 0x10 and the raw
+    // data (here the new domain object id) at 0x20.
+    ipc_request(&mut cpu, HID, 5, None, 0); // ConvertToDomain
+    let server = cpu.mem.read_u32(tls + 0x20).unwrap();
+    (cpu, HID, server)
+}
+
+#[test]
+fn hid_hands_over_the_input_shared_memory() {
+    // The input *data* lives in a shared memory region the guest reads
+    // directly; hid's IPC is the negotiation that hands it over. libnx got
+    // working input out of the old fabricated reply only because it maps that
+    // region by size and this emulator recognises it that way -- nnSdk calls a
+    // method on the IAppletResource it is given, and an object id is not one.
+    let (mut cpu, hid, server) = hid_server();
+    let tls = cpu.tls_base();
+
+    ipc_request(&mut cpu, hid, 4, Some(server), 0); // CreateAppletResource
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    let resource = cpu.mem.read_u32(tls + 0x30).unwrap();
+    assert_ne!(resource, server);
+
+    // GetSharedMemoryHandle -> a copy handle, not a move handle.
+    ipc_request(&mut cpu, hid, 4, Some(resource), 0);
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
+    assert_ne!(cpu.mem.read_u32(tls + 0x0c).unwrap(), 0);
+
+    // QueryPointerBufferSize has to be non-zero: nn::hid::SetSupportedNpadIdType
+    // marshals its id array as a pointer buffer, and nnSdk checks the
+    // negotiated size before it sends.
+    ipc_request(&mut cpu, hid, 5, None, 3);
+    assert_ne!(cpu.mem.read_u16(tls + 0x20).unwrap(), 0);
+}
+
+#[test]
+fn hid_reads_back_what_the_guest_configured() {
+    // A caller that sets a controller style set and reads back something else
+    // decides the pad it wanted is not there -- which is what the generic
+    // reply's incrementing object id looked like.
+    let (mut cpu, hid, server) = hid_server();
+    let tls = cpu.tls_base();
+    const STYLE_SET: u32 = 0b1101;
+
+    ipc_request_with_payload(&mut cpu, hid, server, 100, &STYLE_SET.to_le_bytes());
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    ipc_request(&mut cpu, hid, 4, Some(server), 101);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), STYLE_SET);
+
+    // Set/GetNpadJoyHoldType: the hold type follows the aruid.
+    let mut args = [0u8; 16];
+    args[8..].copy_from_slice(&1u64.to_le_bytes());
+    ipc_request_with_payload(&mut cpu, hid, server, 120, &args);
+    ipc_request(&mut cpu, hid, 4, Some(server), 121);
+    assert_eq!(cpu.mem.read_u64(tls + 0x30).unwrap(), 1);
+}
+
+#[test]
+fn hid_vibration_reaches_the_host() {
+    // SendVibrationValue(handle, HidVibrationValue, aruid): the value is four
+    // floats, so the two band amplitudes sit at +4 and +0xc after the u32
+    // handle. The frontend maps them onto dual-rumble's magnitudes.
+    let (mut cpu, hid, server) = hid_server();
+    let tls = cpu.tls_base();
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&0u32.to_le_bytes()); // device handle
+    args.extend_from_slice(&0.75f32.to_bits().to_le_bytes()); // amp_low
+    args.extend_from_slice(&160.0f32.to_bits().to_le_bytes()); // freq_low
+    args.extend_from_slice(&0.25f32.to_bits().to_le_bytes()); // amp_high
+    args.extend_from_slice(&320.0f32.to_bits().to_le_bytes()); // freq_high
+    ipc_request_with_payload(&mut cpu, hid, server, 201, &args);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    assert_eq!(cpu.vibration(), (0.75, 0.25));
+
+    // GetActualVibrationValue reports what is playing.
+    ipc_request(&mut cpu, hid, 4, Some(server), 202);
+    assert_eq!(f32::from_bits(cpu.mem.read_u32(tls + 0x30).unwrap()), 0.75);
+    assert_eq!(f32::from_bits(cpu.mem.read_u32(tls + 0x38).unwrap()), 0.25);
+
+    // Out of range or not finite is clamped rather than handed to the browser.
+    let mut args = vec![0u8; 4];
+    args.extend_from_slice(&5.0f32.to_bits().to_le_bytes());
+    args.extend_from_slice(&0u32.to_le_bytes());
+    args.extend_from_slice(&f32::NAN.to_bits().to_le_bytes());
+    args.extend_from_slice(&0u32.to_le_bytes());
+    ipc_request_with_payload(&mut cpu, hid, server, 201, &args);
+    assert_eq!(cpu.vibration(), (1.0, 0.0));
+}
+
 #[test]
 fn events_are_copy_handles_and_start_unsignalled() {
     use switch_core::cpu::SyscallMode;
@@ -1522,7 +1645,7 @@ fn control_clone_hands_back_a_working_session() {
 
     // Convert to a domain first, so the clone has objects to inherit.
     ipc_request(&mut cpu, FS, 5, None, 0);
-    let object = cpu.mem.read_u32(tls + 0x10).unwrap();
+    let object = cpu.mem.read_u32(tls + 0x20).unwrap();
 
     ipc_request(&mut cpu, FS, 5, None, 2); // CloneCurrentObject
     assert_eq!(cpu.read_x(0), 0);

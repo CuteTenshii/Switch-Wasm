@@ -343,6 +343,22 @@ pub struct Cpu {
     /// the libnx `HidSharedMemory` layout there so `padUpdate` sees it; 0 means
     /// hid hasn't been initialized yet.
     hid_shmem_addr: u32,
+    /// The handle `hid`'s `IAppletResource::GetSharedMemoryHandle` handed out,
+    /// so `svcMapSharedMemory` can recognise the region by **handle** rather
+    /// than by guessing from its size.
+    hid_shmem_handle: Option<u64>,
+    /// The controller styles the guest said it supports
+    /// (`SetSupportedNpadStyleSet`), and how it wants joy-cons held
+    /// (`SetNpadJoyHoldType`). Both are read back by their `Get*` pairs, and a
+    /// caller that reads back something it did not set decides the controller
+    /// it wanted is not there.
+    npad_style_set: u32,
+    npad_joy_hold_type: u64,
+    /// The amplitudes of the two rumble bands the guest last asked for, low
+    /// then high. Switch rumble is two linear resonant actuators driven
+    /// independently; the browser's Gamepad API exposes the same shape as
+    /// `dual-rumble`'s strong and weak magnitudes.
+    vibration: (f32, f32),
     /// Monotonic sampling number for the hid shared-memory LIFO entries.
     sample_counter: u64,
     /// The font `pl:u` serves as every shared font type, as a TrueType/OpenType
@@ -429,6 +445,10 @@ impl Cpu {
             fs_files: HashMap::new(),
             romfs: None,
             hid_shmem_addr: 0,
+            hid_shmem_handle: None,
+            npad_style_set: 0,
+            npad_joy_hold_type: 0,
+            vibration: (0.0, 0.0),
             sample_counter: 0,
             shared_font: Vec::new(),
             pl_shmem_addr: 0,
@@ -1213,6 +1233,18 @@ impl Cpu {
     }
 
     /// Where the guest mapped hid's shared memory (0 until libnx maps it).
+    /// What the guest last asked the rumble motors to do, as `(low, high)`
+    /// amplitudes in 0.0..=1.0. The frontend maps these onto the Gamepad API's
+    /// `dual-rumble` strong and weak magnitudes.
+    pub fn vibration(&self) -> (f32, f32) {
+        self.vibration
+    }
+
+    pub(crate) fn set_vibration(&mut self, low: f32, high: f32) {
+        let clamp = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        self.vibration = (clamp(low), clamp(high));
+    }
+
     pub fn hid_shmem_addr(&self) -> u32 {
         self.hid_shmem_addr
     }

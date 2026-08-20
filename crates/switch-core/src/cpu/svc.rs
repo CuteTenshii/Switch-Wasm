@@ -141,7 +141,10 @@ impl Cpu {
                 let addr = self.read_zr(1) as u32;
                 let size = self.read_zr(2) as u32;
                 self.mem.map_zero(addr, size as usize)?;
-                if size == HID_SHMEM_SIZE {
+                // Prefer the handle `hid` actually handed out; the size
+                // match stays as a fallback for a caller that never asked for
+                // one, which is how this worked before `hid` existed at all.
+                if Some(self.read_zr(0)) == self.hid_shmem_handle || size == HID_SHMEM_SIZE {
                     self.hid_shmem_addr = addr;
                     self.set_gamepad_state(0, 0, 0, 0, 0);
                 } else if size == PL_SHMEM_SIZE {
@@ -607,6 +610,11 @@ impl Cpu {
                                 Some("nifm:request") => self.write_ipc_response(tls, 0, &[], &[], &[])?,
                                 _ => self.nifm_request(tls, cmd_id, handle)?,
                             }
+                        }
+                        // hid, and the IAppletResource it hands the input
+                        // shared memory over through.
+                        "hid" | "hid:dbg" | "hid:server" | "hid:applet-resource" => {
+                            self.hid_request(tls, handle, cmd_id)?
                         }
                         // lm, the log manager: a title's own diagnostic
                         // output, and its ILogger over either route.

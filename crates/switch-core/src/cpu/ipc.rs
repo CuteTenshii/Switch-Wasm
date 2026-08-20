@@ -156,6 +156,16 @@ impl Cpu {
         Some((addr, size))
     }
 
+    /// The `index`-th **input** buffer, whichever form the caller marshalled
+    /// it in: `libnx`'s AutoSelect picks a send-static ("pointer") buffer when
+    /// the server advertises room for one and a map-alias send buffer
+    /// otherwise, so a service that answers `QueryPointerBufferSize` with a
+    /// real size has to read both.
+    pub(super) fn ipc_input_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
+        self.ipc_send_buffer(tls, index)
+            .or_else(|| self.ipc_static_buffers(tls).get(index as usize).copied())
+    }
+
     /// The send-static ("pointer") buffers of a hipc request, as
     /// `(address, size)`.
     ///
@@ -1900,6 +1910,207 @@ impl Cpu {
         self.out.extend_from_slice(text.as_bytes());
         if flags & FLAG_TAIL != 0 && !self.out.ends_with(b"\n") {
             self.out.push(b'\n');
+        }
+    }
+
+    /// `hid`: the input service.
+    ///
+    /// Input arrives on Switch in two halves, and only one of them is IPC. The
+    /// **data** — buttons, sticks, touch points — lives in a 256 KiB shared
+    /// memory region the `hid` sysmodule writes continuously and the
+    /// application reads directly, with no IPC per frame; this emulator
+    /// already fills it from [`Cpu::set_gamepad_state`]. What `IHidServer`
+    /// does is the **negotiation** around it: which controller styles and
+    /// player slots the app supports, turning the npads and touchscreen on,
+    /// and handing over the shared memory in the first place:
+    ///
+    /// ```text
+    /// IHidServer::CreateAppletResource(aruid) -> IAppletResource
+    /// IAppletResource::GetSharedMemoryHandle() -> a copy handle
+    /// svcMapSharedMemory(handle, addr, 0x40000)
+    /// ```
+    ///
+    /// None of that existed. `libnx` survived it because it maps the region by
+    /// size and this emulator recognises it that way, so homebrew got working
+    /// input out of a fabricated reply — but `nnSdk` calls a method on the
+    /// `IAppletResource` it was handed, and a fabricated object id is not one.
+    pub(super) fn hid_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        const CONVERT_TO_DOMAIN: u32 = 0;
+        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(CONVERT_TO_DOMAIN) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "hid:server");
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                // QueryPointerBufferSize: how much the server will accept in
+                // a send-static ("pointer") buffer. This has to be non-zero
+                // here: `nn::hid::SetSupportedNpadIdType` marshals its npad id
+                // array as a pointer buffer, and `nnSdk`'s client checks the
+                // negotiated size before it sends, failing outright when the
+                // server claims it cannot take any.
+                Some(QUERY_POINTER_BUFFER_SIZE) => {
+                    self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[])
+                }
+                _ => self.unimplemented_command(tls, "hid:control", cmd_id),
+            };
+        }
+        let object_id = self.ipc_domain_object_id(tls);
+        if self.ipc_is_domain_close(tls) {
+            return self.close_domain_object(tls, handle, object_id);
+        }
+        let iface = if self.ipc_is_domain_request(tls) {
+            self.domain_interface(handle, object_id).unwrap_or("hid:server").to_string()
+        } else {
+            match self.service_name(handle) {
+                Some("hid") | Some("hid:dbg") | None => "hid:server".to_string(),
+                Some(name) => name.to_string(),
+            }
+        };
+        let data = self.ipc_request_data(tls);
+        match iface.as_str() {
+            "hid:server" => match cmd_id {
+                // CreateAppletResource(aruid) -> IAppletResource.
+                Some(0) => {
+                    self.reply_with_interface(tls, handle, "hid:applet-resource")?;
+                    Ok(())
+                }
+                // Activate{DebugPad,TouchScreen,Mouse,Keyboard,Npad},
+                // ActivateNpadWithRevision, DeactivateNpad, DisconnectNpad,
+                // Start/StopSixAxisSensor, the joy-assignment modes,
+                // SetNpadHandheldActivationMode, and the Set* half of the
+                // style/id negotiation below.
+                //
+                // Every one of these is a setter: the shared memory this
+                // emulator publishes always carries one connected handheld
+                // pad, whatever the caller asks to activate, so accepting the
+                // request is the whole implementation.
+                Some(1) | Some(11) | Some(21) | Some(31) | Some(66) | Some(67) | Some(103)
+                | Some(104) | Some(107) | Some(109) | Some(122..=125) | Some(128) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // SetSupportedNpadStyleSet(u32 style_set, aruid) and its
+                // readback. A caller that sets a style set and reads back
+                // something else decides the pad it wants does not exist —
+                // which is what the generic reply's incrementing object id
+                // looked like.
+                Some(100) => {
+                    self.npad_style_set = self.mem.read_u32(data)?;
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                Some(101) => {
+                    let styles = self.npad_style_set;
+                    self.write_ipc_response(tls, 0, &[], &styles.to_le_bytes(), &[])
+                }
+                // SetSupportedNpadIdType: the id list arrives in a buffer, and
+                // there is one pad here regardless of which slots are asked
+                // for.
+                Some(102) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // AcquireNpadStyleSetUpdateEventHandle(npad_id, aruid, u64):
+                // fires when a controller is connected or its style changes.
+                // Nothing here hot-plugs, so it is handed out and never
+                // signalled.
+                Some(106) => {
+                    let event = self.alloc_event("hid:npad-style-update", true);
+                    self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+                }
+                // GetPlayerLedPattern(npad_id) -> the four player LEDs. One
+                // pad, so player 1: the first LED.
+                Some(108) => self.write_ipc_response(tls, 0, &[], &1u64.to_le_bytes(), &[]),
+                // Set/GetNpadJoyHoldType(aruid, u64).
+                Some(120) => {
+                    self.npad_joy_hold_type = self.mem.read_u64(data.wrapping_add(8))?;
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                Some(121) => {
+                    let hold = self.npad_joy_hold_type;
+                    self.write_ipc_response(tls, 0, &[], &hold.to_le_bytes(), &[])
+                }
+                // GetNpadHandheldActivationMode.
+                Some(129) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+                // ---- vibration ----
+                //
+                // A `HidVibrationValue` is four floats: amplitude and
+                // frequency for a low band and a high band. Switch rumble is
+                // two linear resonant actuators driven independently, which is
+                // also what the browser's Gamepad API exposes as
+                // `dual-rumble`'s strong and weak magnitudes — so the two
+                // amplitudes are kept and [`Cpu::vibration`] hands them to the
+                // page.
+                //
+                // GetVibrationDeviceInfo -> { device_type, position }: a
+                // linear resonant actuator (1) on the left (0).
+                Some(200) => {
+                    let mut info = Vec::with_capacity(8);
+                    info.extend_from_slice(&1u32.to_le_bytes());
+                    info.extend_from_slice(&0u32.to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &info, &[])
+                }
+                // SendVibrationValue(handle, HidVibrationValue, aruid): the
+                // value follows the u32 handle, so the amplitudes are at +4
+                // and +0xc.
+                Some(201) => {
+                    let low = f32::from_bits(self.mem.read_u32(data.wrapping_add(4))?);
+                    let high = f32::from_bits(self.mem.read_u32(data.wrapping_add(0xc))?);
+                    self.set_vibration(low, high);
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // GetActualVibrationValue -> what is actually playing.
+                Some(202) => {
+                    let (low, high) = self.vibration();
+                    let mut value = Vec::with_capacity(16);
+                    value.extend_from_slice(&low.to_bits().to_le_bytes());
+                    value.extend_from_slice(&160.0f32.to_bits().to_le_bytes());
+                    value.extend_from_slice(&high.to_bits().to_le_bytes());
+                    value.extend_from_slice(&320.0f32.to_bits().to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &value, &[])
+                }
+                // CreateActiveVibrationDeviceList -> IActiveVibrationDeviceList.
+                Some(203) => {
+                    self.reply_with_interface(tls, handle, "hid:vibration-devices")?;
+                    Ok(())
+                }
+                // PermitVibration / Begin/EndPermitVibrationSession.
+                Some(204) | Some(209) | Some(210) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // IsVibrationPermitted / IsVibrationDeviceMounted: there is a
+                // pad and the page decides whether it can actually rumble.
+                Some(205) | Some(211) => {
+                    self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[])
+                }
+                // SendVibrationValues(handles[], values[]): the arrays arrive
+                // as buffers. Only the first value is kept — this emulator
+                // drives one actuator pair, not one per device.
+                Some(206) => {
+                    if let Some((addr, size)) = self.ipc_input_buffer(tls, 1) {
+                        if size >= 16 {
+                            let low = f32::from_bits(self.mem.read_u32(addr)?);
+                            let high = f32::from_bits(self.mem.read_u32(addr.wrapping_add(8))?);
+                            self.set_vibration(low, high);
+                        }
+                    }
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // IActiveVibrationDeviceList::InitializeVibrationDevice.
+            "hid:vibration-devices" => match cmd_id {
+                Some(0) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // IAppletResource: the handover of the shared memory the input
+            // data actually lives in.
+            "hid:applet-resource" => match cmd_id {
+                Some(0) => {
+                    let shmem = self.alloc_handle();
+                    self.hid_shmem_handle = Some(shmem);
+                    self.write_ipc_reply(tls, 0, &[shmem], &[], &[], &[])
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            _ => self.unimplemented_command(tls, &iface, cmd_id),
         }
     }
 
