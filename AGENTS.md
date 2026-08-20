@@ -253,6 +253,17 @@ started with "applet"; those numbers leaked — `pl:u`'s `GetLoadState` is also
 command 1, and answering it with 15 left NX-Shell polling the shared-font
 service 190k times.
 
+`ssl` (`ssl_request`) is the system TLS stack — Switch does not let a title
+bring its own, so a title asks the OS to build connections
+(`CreateContext` → `ISslContext::CreateConnection` → an `ISslConnection`
+wrapping a `bsd:u` socket). The local half is implemented, because contexts and
+their options are ordinary objects that exist whether or not anything is
+reachable; **`CreateConnection` deliberately reports itself as unimplemented**
+rather than handing back a connection that can never connect, since there is no
+socket layer under it. An offline retail title only ever calls
+`SetInterfaceVersion`, which `nnSdk` issues at startup because `ssl` is in the
+NPDM service list.
+
 `hid` (`hid_request`) is the **negotiation** around input, not the input
 itself. The data — buttons, sticks, touch — lives in a 256 KiB shared memory
 region the guest reads directly with no IPC per frame, which

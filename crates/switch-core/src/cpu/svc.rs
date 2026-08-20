@@ -611,6 +611,11 @@ impl Cpu {
                                 _ => self.nifm_request(tls, cmd_id, handle)?,
                             }
                         }
+                        // ssl, the system TLS stack, and the contexts it
+                        // hands out over either route.
+                        "ssl" | "ssl:service" | "ssl:context" => {
+                            self.ssl_request(tls, handle, cmd_id)?
+                        }
                         // hid, and the IAppletResource it hands the input
                         // shared memory over through.
                         "hid" | "hid:dbg" | "hid:server" | "hid:applet-resource" => {

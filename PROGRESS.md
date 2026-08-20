@@ -686,6 +686,21 @@ not a different answer in the wait.
 
 The title now runs **361.2M** instructions.
 
+### ssl
+
+The system TLS stack: Switch owns the implementation and the certificate store,
+and a title asks it to build connections rather than bringing its own. Contexts
+and their options are implemented — they are ordinary local objects — while
+`CreateConnection` reports itself, because there is no socket layer beneath it
+and a connection that can never connect is the fabricated-success problem
+again. "A Short Hike" is offline and calls exactly one `ssl` command,
+`SetInterfaceVersion`, which `nnSdk` issues at startup because `ssl` is in the
+title's NPDM service list.
+
+**Every service the retail title asks for now has a real implementation
+behind it** — a full boot logs no `no implementation` and no `unimplemented`
+lines at all.
+
 ### hid, and rumble
 
 Input arrives in two halves and only one of them is IPC. The **data** lives in

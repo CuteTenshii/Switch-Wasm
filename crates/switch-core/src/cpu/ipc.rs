@@ -1913,6 +1913,102 @@ impl Cpu {
         }
     }
 
+    /// `ssl`: the system TLS stack.
+    ///
+    /// Switch does not let a title bring its own TLS — the OS owns the
+    /// implementation and the certificate store, and a title asks it to build
+    /// connections: `ISslService::CreateContext` gives an `ISslContext`, whose
+    /// `CreateConnection` gives an `ISslConnection` wrapping a `bsd:u` socket.
+    ///
+    /// The local half of that is real here: contexts and their options are
+    /// ordinary objects that exist whether or not anything can be reached. The
+    /// connection half is not, and is left to report itself rather than hand
+    /// back a connection that can never connect — there is no socket layer
+    /// under it. "A Short Hike" is offline and only calls
+    /// `SetInterfaceVersion`, which `nnSdk` issues at startup because `ssl` is
+    /// in the title's NPDM service list.
+    pub(super) fn ssl_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        const CONVERT_TO_DOMAIN: u32 = 0;
+        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(CONVERT_TO_DOMAIN) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "ssl:service");
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                Some(QUERY_POINTER_BUFFER_SIZE) => {
+                    self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[])
+                }
+                _ => self.unimplemented_command(tls, "ssl:control", cmd_id),
+            };
+        }
+        let object_id = self.ipc_domain_object_id(tls);
+        if self.ipc_is_domain_close(tls) {
+            if self.domain_interface(handle, object_id) == Some("ssl:context") {
+                self.ssl_contexts = self.ssl_contexts.saturating_sub(1);
+            }
+            return self.close_domain_object(tls, handle, object_id);
+        }
+        let iface = if self.ipc_is_domain_request(tls) {
+            self.domain_interface(handle, object_id).unwrap_or("ssl:service").to_string()
+        } else {
+            match self.service_name(handle) {
+                Some("ssl") | None => "ssl:service".to_string(),
+                Some(name) => name.to_string(),
+            }
+        };
+        let data = self.ipc_request_data(tls);
+        match iface.as_str() {
+            "ssl:service" => match cmd_id {
+                // CreateContext(SslVersion, pid placeholder) -> ISslContext.
+                Some(0) => {
+                    self.ssl_contexts += 1;
+                    self.reply_with_interface(tls, handle, "ssl:context")?;
+                    Ok(())
+                }
+                // GetContextCount.
+                Some(1) => {
+                    let count = self.ssl_contexts;
+                    self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
+                }
+                // SetInterfaceVersion(u32): which revision of the interface the
+                // caller speaks. Recording it is the whole implementation, and
+                // it is the only `ssl` command a retail title issues at all
+                // unless it goes online.
+                Some(5) => {
+                    self.ssl_interface_version = self.mem.read_u32(data)?;
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // FlushSessionCache: nothing has been cached to flush.
+                Some(6) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            "ssl:context" => match cmd_id {
+                // Set/GetOption(SslContextOption, s32). Options are per-context
+                // state a caller reads back, so they are stored rather than
+                // acknowledged and forgotten.
+                Some(0) => {
+                    let option = self.mem.read_u32(data)?;
+                    let value = self.mem.read_u32(data.wrapping_add(4))?;
+                    let key = Self::object_key(handle, object_id);
+                    self.ssl_options.insert((key, option), value);
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                Some(1) => {
+                    let option = self.mem.read_u32(data)?;
+                    let key = Self::object_key(handle, object_id);
+                    let value = self.ssl_options.get(&(key, option)).copied().unwrap_or(0);
+                    self.write_ipc_response(tls, 0, &[], &value.to_le_bytes(), &[])
+                }
+                // GetConnectionCount: none, and none can be made — see below.
+                Some(3) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            _ => self.unimplemented_command(tls, &iface, cmd_id),
+        }
+    }
+
     /// `hid`: the input service.
     ///
     /// Input arrives on Switch in two halves, and only one of them is IPC. The

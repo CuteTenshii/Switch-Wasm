@@ -359,6 +359,13 @@ pub struct Cpu {
     /// independently; the browser's Gamepad API exposes the same shape as
     /// `dual-rumble`'s strong and weak magnitudes.
     vibration: (f32, f32),
+    /// `ssl` state: the interface revision the guest declared, how many TLS
+    /// contexts it holds, and each context's options keyed by
+    /// `(object_key, option)`. Options are read back, so they are stored
+    /// rather than acknowledged and forgotten.
+    ssl_interface_version: u32,
+    ssl_contexts: u32,
+    ssl_options: HashMap<(u64, u32), u32>,
     /// Monotonic sampling number for the hid shared-memory LIFO entries.
     sample_counter: u64,
     /// The font `pl:u` serves as every shared font type, as a TrueType/OpenType
@@ -449,6 +456,9 @@ impl Cpu {
             npad_style_set: 0,
             npad_joy_hold_type: 0,
             vibration: (0.0, 0.0),
+            ssl_interface_version: 0,
+            ssl_contexts: 0,
+            ssl_options: HashMap::new(),
             sample_counter: 0,
             shared_font: Vec::new(),
             pl_shmem_addr: 0,

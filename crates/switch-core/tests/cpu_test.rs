@@ -1465,6 +1465,56 @@ fn wait_sync(cpu: &mut Cpu, handles: &[u32], timeout: i64) -> (u64, u64) {
     (cpu.read_x(0), cpu.read_x(1))
 }
 
+#[test]
+fn ssl_keeps_context_state_and_refuses_connections() {
+    use switch_core::cpu::SyscallMode;
+    // ssl is the system TLS stack: a title asks the OS to build connections
+    // rather than bringing its own implementation. The local half -- contexts
+    // and their options -- is real here; the connection half is not, because
+    // there is no socket layer under it.
+    const SSL: u64 = 0x9000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.register_service_handle(SSL, "ssl");
+    let tls = cpu.tls_base();
+    ipc_request(&mut cpu, SSL, 5, None, 0); // ConvertToDomain
+    let service = cpu.mem.read_u32(tls + 0x20).unwrap();
+
+    // SetInterfaceVersion is the only ssl command an offline retail title
+    // issues, because ssl is in its NPDM service list and nnSdk initialises it
+    // at startup regardless.
+    ipc_request_with_payload(&mut cpu, SSL, service, 5, &4u32.to_le_bytes());
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+
+    // CreateContext -> ISslContext, and the count follows it.
+    ipc_request(&mut cpu, SSL, 4, Some(service), 1);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0);
+    ipc_request(&mut cpu, SSL, 4, Some(service), 0);
+    let context = cpu.mem.read_u32(tls + 0x30).unwrap();
+    assert_ne!(context, service);
+    ipc_request(&mut cpu, SSL, 4, Some(service), 1);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1);
+
+    // Options are per-context state a caller reads back.
+    let mut args = Vec::new();
+    args.extend_from_slice(&2u32.to_le_bytes()); // option
+    args.extend_from_slice(&1u32.to_le_bytes()); // value
+    ipc_request_with_payload(&mut cpu, SSL, context, 0, &args);
+    ipc_request_with_payload(&mut cpu, SSL, context, 1, &2u32.to_le_bytes());
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1);
+    // An option never set reads as 0 rather than as another option's value.
+    ipc_request_with_payload(&mut cpu, SSL, context, 1, &7u32.to_le_bytes());
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0);
+
+    // CreateConnection reports itself rather than handing back a connection
+    // that can never connect.
+    const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
+    ipc_request(&mut cpu, SSL, 4, Some(context), 2);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), UNKNOWN_COMMAND_ID);
+}
+
 /// Open `hid` and convert it to a domain: (cpu, session handle, IHidServer).
 fn hid_server() -> (Cpu, u64, u32) {
     use switch_core::cpu::SyscallMode;
