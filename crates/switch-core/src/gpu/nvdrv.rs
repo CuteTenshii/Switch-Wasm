@@ -11,7 +11,9 @@
 //! which is what real homebrew is compiled against.
 
 use crate::gpu::syncpt::NvFence;
-use crate::gpu::vmm::{BIG_REGION_END, SMALL_PAGE_SIZE, SMALL_REGION_BASE, SMALL_REGION_END};
+use crate::gpu::vmm::{
+    BIG_REGION_END, FLAG_REMAP_SUB_RANGE, SMALL_PAGE_SIZE, SMALL_REGION_BASE, SMALL_REGION_END,
+};
 use crate::gpu::Gpu;
 use crate::mem::Memory;
 use crate::{Error, Result};
@@ -432,6 +434,22 @@ impl NvDrv {
                 let mapping_size = read_u64(data, 0x18);
                 let requested = read_u64(data, 0x20);
 
+                // The remap form maps nothing new: `offset` names a mapping
+                // that already exists and `nvmap_handle` is unused (0 here),
+                // so it has to be split off before the handle lookup below —
+                // which is what rejected it with `BadParameter`, and what
+                // aborted `deko3d`'s image setup before it drew a frame.
+                if flags & FLAG_REMAP_SUB_RANGE != 0 {
+                    let gpu_va = requested.wrapping_add(buffer_offset);
+                    let kind = (kind != u32::MAX).then_some(kind as u8);
+                    let space = self.gpu.address_space_mut(as_id)?;
+                    return if space.remap(gpu_va, mapping_size, kind) {
+                        write_u64(data, 0x20, gpu_va);
+                        Ok(NV_OK)
+                    } else {
+                        Ok(NV_BAD_PARAMETER)
+                    };
+                }
                 let handle = match self.gpu.nvmap.get(nvmap_handle) {
                     Some(h) if h.allocated => *h,
                     Some(_) => return Ok(NV_INVALID_STATE),
@@ -734,6 +752,76 @@ mod tests {
         write_u32(&mut param, 4, 3); // Base
         assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x09, &mut param), NV_OK);
         assert_eq!(read_u32(&param, 8), 0x3000_0000);
+    }
+
+    #[test]
+    fn map_buffer_ex_remaps_a_sub_range_without_an_nvmap_handle() {
+        // `deko3d` maps a memory block once and then re-maps the ranges
+        // holding block-linear images over the top with the kind that
+        // describes their swizzle. That second call sets
+        // `NVGPU_AS_MAP_BUFFER_FLAGS_MODIFY`, names the existing mapping in
+        // `offset`, and leaves the nvmap handle **0** — which the ordinary
+        // map path rejected as `BadParameter`, aborting before the first frame.
+        let mut drv = NvDrv::new();
+        let mut mem = Memory::new();
+        mem.map_zero(0x3000_0000, 0x4000).unwrap();
+        let (map_fd, _) = drv.open("/dev/nvmap").unwrap();
+        let (as_fd, _) = drv.open("/dev/nvhost-as-gpu").unwrap();
+
+        let mut create = [0u8; 8];
+        write_u32(&mut create, 0, 0x4000);
+        ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x01, &mut create);
+        let handle = read_u32(&create, 4);
+        let mut alloc = [0u8; 0x20];
+        write_u32(&mut alloc, 0, handle);
+        write_u64(&mut alloc, 0x18, 0x3000_0000);
+        ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x04, &mut alloc);
+
+        let mut map = [0u8; 0x28];
+        write_u32(&mut map, 8, handle);
+        write_u64(&mut map, 0x18, 0x4000);
+        assert_eq!(ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut map), NV_OK);
+        let gpu_va = read_u64(&map, 0x20);
+
+        // Re-map the middle 0x1000 bytes with kind 0xdb (a block-linear
+        // kind), the way the driver is asked to.
+        let mut remap = [0u8; 0x28];
+        write_u32(&mut remap, 0, 1 << 8); // MODIFY
+        write_u32(&mut remap, 4, 0xdb);
+        write_u64(&mut remap, 0x10, 0x1000); // buffer_offset
+        write_u64(&mut remap, 0x18, 0x1000); // mapping_size
+        write_u64(&mut remap, 0x20, gpu_va);
+        assert_eq!(ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut remap), NV_OK);
+        assert_eq!(read_u64(&remap, 0x20), gpu_va + 0x1000);
+
+        let NvFile::AddressSpace { as_id } = *drv.file(as_fd).unwrap() else {
+            panic!("expected an address-space fd");
+        };
+        let space = &drv.gpu.address_spaces[&as_id];
+        // The backing memory does not move: every byte of the original
+        // mapping still resolves to the CPU address it did before, across
+        // both of the boundaries the split introduced.
+        for offset in [0u64, 0xFFF, 0x1000, 0x1FFF, 0x2000, 0x3FFF] {
+            assert_eq!(
+                space.translate(gpu_va + offset).map(|(cpu, _)| cpu),
+                Some(0x3000_0000 + offset as u32),
+                "{offset:#x}"
+            );
+        }
+        // Only the re-mapped range carries the new kind.
+        assert_eq!(space.mapping_at(gpu_va).map(|m| m.kind), Some(0));
+        assert_eq!(space.mapping_at(gpu_va + 0x1000).map(|m| m.kind), Some(0xdb));
+        assert_eq!(space.mapping_at(gpu_va + 0x2000).map(|m| m.kind), Some(0));
+
+        // A range no mapping covers is the one thing this really cannot do.
+        let mut orphan = [0u8; 0x28];
+        write_u32(&mut orphan, 0, 1 << 8);
+        write_u64(&mut orphan, 0x18, 0x1000);
+        write_u64(&mut orphan, 0x20, gpu_va + 0x10_0000);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut orphan),
+            NV_BAD_PARAMETER
+        );
     }
 
     #[test]

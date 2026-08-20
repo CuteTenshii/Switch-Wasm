@@ -35,6 +35,13 @@ pub const FLAG_FIXED_OFFSET: u32 = 1 << 0;
 pub const FLAG_MAPPABLE_COMPBITS: u32 = 1 << 1;
 /// `NVGPU_AS_MAP_BUFFER_FLAGS_CACHEABLE`.
 pub const FLAG_CACHEABLE: u32 = 1 << 2;
+/// `NVGPU_AS_MAP_BUFFER_FLAGS_MODIFY`: `MAP_BUFFER_EX` is not mapping a new
+/// nvmap handle at all, it is **re-mapping a sub-range of a mapping that
+/// already exists** with a different memory kind. The `offset` field names the
+/// existing mapping rather than requesting one, and the nvmap handle field is
+/// unused — which is why treating this as an ordinary map rejected it with
+/// `BadParameter` for handle 0.
+pub const FLAG_REMAP_SUB_RANGE: u32 = 1 << 8;
 
 /// One mapped nvmap range.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,6 +180,59 @@ impl AddressSpace {
             .insert(gpu_va, Mapping { gpu_va, size, cpu_addr, handle, kind });
         self.last_translation.set(None);
         Ok(gpu_va)
+    }
+
+    /// Re-map `[gpu_va, gpu_va + size)` — a sub-range of a mapping that
+    /// already exists — with a different memory kind
+    /// ([`FLAG_REMAP_SUB_RANGE`]). Returns whether a mapping covered it.
+    ///
+    /// This is how a driver gives one buffer several layouts: the whole nvmap
+    /// handle is mapped once, then the ranges holding block-linear images are
+    /// re-mapped over the top with the kind that describes their swizzle. The
+    /// backing memory does not move — the sub-range keeps resolving to exactly
+    /// the CPU bytes it did before — so the only thing that changes is the
+    /// kind recorded for those pages.
+    ///
+    /// The covering mapping is split rather than overwritten. Overwriting it
+    /// would drop whatever lay past the sub-range (the map is keyed by start
+    /// VA, so a sub-range starting at the same VA replaces the whole entry),
+    /// and [`AddressSpace::translate`] relies on the ranges not overlapping.
+    pub fn remap(&mut self, gpu_va: u64, size: u64, kind: Option<u8>) -> bool {
+        if size == 0 {
+            return false;
+        }
+        let Some((_, &covering)) = self.mappings.range(..=gpu_va).next_back() else {
+            return false;
+        };
+        let covering_end = covering.gpu_va.saturating_add(covering.size);
+        let end = gpu_va.saturating_add(size);
+        if !covering.contains(gpu_va) || end > covering_end {
+            return false;
+        }
+        // `NV_KIND_INVALID` means "keep what the mapping already had", and a
+        // kind that is already what it should be needs no split at all.
+        let kind = match kind {
+            Some(kind) if kind != covering.kind => kind,
+            _ => return true,
+        };
+        let piece = |gpu_va: u64, size: u64, kind: u8| Mapping {
+            gpu_va,
+            size,
+            cpu_addr: covering.cpu_addr.wrapping_add((gpu_va - covering.gpu_va) as u32),
+            handle: covering.handle,
+            kind,
+        };
+        self.mappings.remove(&covering.gpu_va);
+        if gpu_va > covering.gpu_va {
+            self.mappings
+                .insert(covering.gpu_va, piece(covering.gpu_va, gpu_va - covering.gpu_va, covering.kind));
+        }
+        self.mappings.insert(gpu_va, piece(gpu_va, size, kind));
+        if end < covering_end {
+            self.mappings.insert(end, piece(end, covering_end - end, covering.kind));
+        }
+        self.last_translation.set(None);
+        true
     }
 
     /// Drop the mapping that starts at `gpu_va` (`UNMAP_BUFFER`).
