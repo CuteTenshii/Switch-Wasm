@@ -462,9 +462,14 @@ impl Cpu {
         let grp = (insn >> 24) & 0x1F;
         // Vector three-same always has bits[28:24] == 01110 (bit28=0);
         // bits[28:24] == 11110 is the scalar-FP group, handled by try_fp.
-        // Copy group (DUP/INS/UMOV/SMOV, 0{q}00 1110 000): q (bit30) is free,
-        // and bit20 is part of imm5 (so it may be set for 64-bit lanes).
-        let copy_group = ((insn >> 21) & 0x1FF) == 0b001110000 && ((insn >> 31) & 1) == 0;
+        // Copy group (DUP/INS/UMOV/SMOV, 0{q}{op} 0111 0000): q (bit30) and
+        // **op (bit29)** are both free, and bit20 is part of imm5 (so it may
+        // be set for 64-bit lanes). What separates the group from three-same
+        // is bit21 == 0, not bit29 — matching on bits[29:21] here excluded
+        // every `op == 1` encoding, i.e. the whole of INS (element), which
+        // then fell through to the three-same decoder and was executed as an
+        // unrelated arithmetic op. See [`Cpu::try_simd_copy`].
+        let copy_group = ((insn >> 21) & 0xFF) == 0b01110000 && ((insn >> 31) & 1) == 0;
         if ((insn >> 31) & 1) == 0 && grp == 0b01110 && !copy_group {
             // (copy_group == the DUP/MOV/INS encodings, which also live in the
             // 0x4e group with bits[23:21] == 000 and are handled below.)
@@ -739,14 +744,96 @@ impl Cpu {
             )));
         }
 
-        // ---- copy / element moves ----
-        if ((insn >> 21) & 0x1FF) != 0b001110000 || ((insn >> 31) & 1) != 0 {
+        // ---- copy / element moves, and table lookup ----
+        // bits[28:21] == 0111 0000 (bit21 = 0 is what separates this whole
+        // space from three-same/three-different/two-reg-misc); bit30 is Q and
+        // bit29 is `op`, both free. EXT and the ZIP/UZP/TRN permutes share the
+        // bit21 = 0 space but are matched earlier in `try_simd`/`try_simd_rest`,
+        // so they never reach here.
+        if ((insn >> 21) & 0xFF) != 0b01110000 || ((insn >> 31) & 1) != 0 {
             return Ok(false);
         }
+        let op = (insn >> 29) & 1;
+
+        // TBL / TBX: `0 Q 001110 00 0 Rm 0 len op 00 Rn Rd`. Rebuild a vector
+        // by picking bytes out of a table held in `len+1` consecutive vector
+        // registers, one index per byte of `Vm` — how a compiler spells an
+        // arbitrary byte shuffle when no fixed permute (ZIP/UZP/TRN/EXT)
+        // matches. It shares bits[28:21] with the copy group below, so it has
+        // to be split off first: the copy encodings all set bit10, where
+        // table lookup has bit15 = 0 and bits[11:10] = 00. Table lookup has no
+        // `op` bit of its own — bits[29:24] are fixed at 001110 — so it is
+        // only ever the `op == 0` half.
+        // `tbl v31.16b, {v29.16b}, v28.16b` = 0x4e1c03bf.
+        if op == 0 && ((insn >> 15) & 1) == 0 && ((insn >> 10) & 0b11) == 0 {
+            let q = (insn >> 30) & 1 == 1;
+            let rd = (insn & 0x1F) as usize;
+            let rn = ((insn >> 5) & 0x1F) as usize;
+            let rm = ((insn >> 16) & 0x1F) as usize;
+            let len = ((insn >> 13) & 0b11) as usize + 1;
+            // The only difference between the two: for an index past the end
+            // of the table TBL writes zero, TBX leaves the destination byte
+            // alone (so a second lookup can fill in what the first missed).
+            let keep_on_miss = (insn >> 12) & 1 == 1;
+            let indices = self.vregs[rm].to_le_bytes();
+            let mut out = self.vregs[rd].to_le_bytes();
+            let lanes = if q { 16 } else { 8 };
+            for (i, slot) in out.iter_mut().enumerate().take(lanes) {
+                let idx = indices[i] as usize;
+                if idx < len * 16 {
+                    // The table wraps past v31, so {v30, v31, v0, v1} is a
+                    // legal four-register table.
+                    *slot = self.vregs[(rn + idx / 16) % 32].to_le_bytes()[idx % 16];
+                } else if !keep_on_miss {
+                    *slot = 0;
+                }
+            }
+            // The 8-byte form zeroes the top half like every other AdvSIMD
+            // `Q == 0` encoding, including TBX.
+            out[lanes..].fill(0);
+            self.vregs[rd] = u128::from_le_bytes(out);
+            return Ok(true);
+        }
+
         let q = (insn >> 30) & 1;
         let rd = (insn & 0x1F) as u8;
         let rn = ((insn >> 5) & 0x1F) as u8;
         let imm5 = (insn >> 16) & 0x1F;
+
+        if op == 1 {
+            // INS <Vd>.<Ts>[<index1>], <Vn>.<Ts>[<index2>] — move one lane to
+            // another lane, the only `op == 1` encoding in the copy group.
+            // `imm5` gives the element size and the *destination* index the
+            // same way UMOV/SMOV/INS-general do; `imm4` gives the *source*
+            // index, shifted down by the same `lsb` (imm4<3:size>).
+            //
+            // This is how a compiler assembles a short string in a register
+            // without touching memory: libnx's `smEncodeName` builds the
+            // 8-byte `SmServiceName` with one `ldr b<n>, [str, #i]` per
+            // character and then a chain of `ins v31.b[i], v<n>.b[0]`.
+            // Without this, every such name reached `sm::GetService` as
+            // eight zero bytes — Checkpoint asked for `ns:am2`, got a session
+            // bound to "", and panicked once it used it.
+            if q == 0 || imm5 == 0 || ((insn >> 15) & 1) != 0 || ((insn >> 10) & 1) == 0 {
+                return Ok(false);
+            }
+            let lsb = imm5.trailing_zeros();
+            if lsb > 3 {
+                return Ok(false);
+            }
+            let esize = 8u32 << lsb;
+            let dst_index = imm5 >> (lsb + 1);
+            let src_index = ((insn >> 11) & 0xF) >> lsb;
+            let mask = (1u128 << esize) - 1;
+            let val = (self.vregs[rn as usize] >> (src_index * esize)) & mask;
+            let shift = dst_index * esize;
+            let v = self.vregs[rd as usize];
+            // INS leaves every other lane of Vd alone — including the top
+            // half, which is why there is no `Q == 0` zeroing here.
+            self.vregs[rd as usize] = (v & !(mask << shift)) | (val << shift);
+            return Ok(true);
+        }
+
         match (insn >> 10) & 0b111111 {
             0b000111 => {
                 // INS <Vd>.<T>[<index>], <Rn> — insert a GPR lane. Same

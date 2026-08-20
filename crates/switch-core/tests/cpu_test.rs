@@ -1101,7 +1101,11 @@ fn cmeq16(rd: u32, rn: u32, rm: u32) -> u32 {
 }
 // UHADD <Vd>.16B, <Vn>.16B, <Vm>.16B
 fn uhadd16(rd: u32, rn: u32, rm: u32) -> u32 {
-    (1u32 << 30) | (1u32 << 29) | (0b1110 << 24) | (rm << 16) | (1 << 10) | (rn << 5) | rd
+    // bit21 is what separates three-same from the copy/permute/table space —
+    // every other helper here sets it, and this one used to leave it clear.
+    // The decoder ignored bit21, so the malformed encoding still reached
+    // UHADD; it is really an INS (element) opcode.
+    (1u32 << 30) | (1u32 << 29) | (0b1110 << 24) | (1 << 21) | (rm << 16) | (1 << 10) | (rn << 5) | rd
 }
 // ADDP <Vd>.16B, <Vn>.16B, <Vm>.16B
 fn addp16(rd: u32, rn: u32, rm: u32) -> u32 {
@@ -1185,6 +1189,153 @@ fn simd_zip1_interleave() {
         assert_eq!(cpu.mem.read_u8(0x3020 + 2 * i).unwrap(), i as u8);
         assert_eq!(cpu.mem.read_u8(0x3020 + 2 * i + 1).unwrap(), 0x10u8 + i as u8);
     }
+}
+
+// AdvSIMD table lookup: `0 Q 001110 00 0 Rm 0 len op 00 Rn Rd`. `op` picks
+// TBX (1) over TBL (0); `len` is the table size in registers, minus one.
+fn tbl_insn(q: u32, len: u32, op: u32, rd: u32, rn: u32, rm: u32) -> u32 {
+    (q << 30) | (0b001110 << 24) | (rm << 16) | (len << 13) | (op << 12) | (rn << 5) | rd
+}
+
+#[test]
+fn simd_table_lookup_gathers_bytes_and_zeroes_misses() {
+    let ldr_q = |rt: u32, imm: u32| 0x3DC0_0000u32 | rt | ((imm >> 4) << 10);
+    let str_q = |rt: u32, imm: u32| 0x3D80_0000u32 | rt | ((imm >> 4) << 10);
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x3000);
+    cpu.mem.map_zero(0x3000, 0x100).unwrap();
+    // Two table registers: v0 = 0x10..0x1f, v1 = 0x20..0x2f.
+    for i in 0..16u32 {
+        cpu.mem.write_u8(0x3000 + i, 0x10 + i as u8).unwrap();
+        cpu.mem.write_u8(0x3010 + i, 0x20 + i as u8).unwrap();
+    }
+    // v2: the low half reverses the first eight table bytes, the high half
+    // is 0x40 — past the end of any table this test builds.
+    for i in 0..8u32 {
+        cpu.mem.write_u8(0x3020 + i, 7 - i as u8).unwrap();
+        cpu.mem.write_u8(0x3028 + i, 0x40).unwrap();
+    }
+    // v3 starts as 0xaa so TBX keeping a byte is distinguishable from TBL
+    // zeroing it.
+    for i in 0..16u32 {
+        cpu.mem.write_u8(0x3030 + i, 0xaa).unwrap();
+    }
+    let code = [
+        ldr_q(0, 0x00),
+        ldr_q(1, 0x10),
+        ldr_q(2, 0x20),
+        ldr_q(3, 0x30),
+        tbl_insn(1, 0, 0, 4, 0, 2), // tbl v4.16b, {v0.16b}, v2.16b
+        tbl_insn(1, 0, 1, 3, 0, 2), // tbx v3.16b, {v0.16b}, v2.16b
+        tbl_insn(0, 0, 0, 5, 0, 2), // tbl v5.8b,  {v0.16b}, v2.8b
+        str_q(4, 0x40),
+        str_q(3, 0x50),
+        str_q(5, 0x60),
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    for i in 0..8u32 {
+        // Indices in range gather from the table...
+        assert_eq!(cpu.mem.read_u8(0x3040 + i).unwrap(), 0x17 - i as u8);
+        assert_eq!(cpu.mem.read_u8(0x3050 + i).unwrap(), 0x17 - i as u8);
+        assert_eq!(cpu.mem.read_u8(0x3060 + i).unwrap(), 0x17 - i as u8);
+        // ...and out-of-range ones read zero from TBL, but leave TBX's
+        // destination byte as it was.
+        assert_eq!(cpu.mem.read_u8(0x3048 + i).unwrap(), 0);
+        assert_eq!(cpu.mem.read_u8(0x3058 + i).unwrap(), 0xaa);
+        // The 8-byte form zeroes the top half of the destination.
+        assert_eq!(cpu.mem.read_u8(0x3068 + i).unwrap(), 0);
+    }
+}
+
+// AdvSIMD copy, element form: `0 1 1 01110000 imm5 0 imm4 1 Rn Rd`.
+// `imm5` carries the element size and the destination lane, `imm4` the source
+// lane (both shifted down by log2 of the element size).
+fn ins_elem_b(rd: u32, dst_index: u32, rn: u32, src_index: u32) -> u32 {
+    let imm5 = (dst_index << 1) | 1; // size = B → imm5<0> = 1
+    0x6E00_0400u32 | (imm5 << 16) | (src_index << 11) | (rn << 5) | rd
+}
+
+#[test]
+fn simd_ins_element_moves_one_lane_and_leaves_the_rest() {
+    // `INS <Vd>.<Ts>[<i1>], <Vn>.<Ts>[<i2>]` is the `op == 1` half of the
+    // AdvSIMD copy group. The group was matched on bits[29:21], which pins
+    // `op` to 0, so every one of these fell through to the three-same integer
+    // decoder and executed as an unrelated arithmetic op — silently
+    // overwriting the whole destination register instead of one lane.
+    //
+    // The regression this comes from: libnx's `smEncodeName` builds an 8-byte
+    // `SmServiceName` in a vector register with one `ldr b<n>, [s, #i]` per
+    // character followed by a chain of `ins v31.b[i], v<n>.b[0]`, then
+    // `umov x1, v31.d[0]`. Checkpoint asked `sm` for `ns:am2` this way and the
+    // request went out with an all-zero name; the session it got back was
+    // filed under "", answered nothing, and the guest panicked.
+    let mut cpu = cpu_at(0x1000);
+    // v31 holds 'n' (as `ldr b31, [x0]` would leave it); one source register
+    // per remaining character, each with the byte in lane 0.
+    cpu.set_vreg(31, 0x6E);
+    for (i, ch) in [b's', b':', b'a', b'm', b'2'].into_iter().enumerate() {
+        cpu.set_vreg(29 - i as u8, u128::from(ch));
+    }
+    let code = [
+        ins_elem_b(31, 1, 29, 0),
+        ins_elem_b(31, 2, 28, 0),
+        ins_elem_b(31, 3, 27, 0),
+        ins_elem_b(31, 4, 26, 0),
+        ins_elem_b(31, 5, 25, 0),
+        0x4E08_3FE1, // umov x1, v31.d[0]
+        nop(),
+    ];
+    assert_eq!(code[0], 0x6E03_07BF); // ins v31.b[1], v29.b[0], as clang emits
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_vreg(31), 0x326D_613A_736E);
+    assert_eq!(cpu.read_x(1), u64::from_le_bytes(*b"ns:am2\0\0"));
+
+    // A non-zero source lane, and lanes wider than a byte. INS touches only
+    // the destination lane — the top half of Vd is left alone, unlike almost
+    // every other AdvSIMD encoding.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00);
+    cpu.set_vreg(1, 0xFFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF_FFFF);
+    let code = [
+        ins_elem_b(1, 15, 0, 8), // ins v1.b[15], v0.b[8]
+        // ins v1.s[1], v0.s[3]: imm5 = 0b00100 | (1 << 3), imm4 = 3 << 2
+        0x6E00_0400u32 | (0b01100 << 16) | (0b1100 << 11) | (0 << 5) | 1,
+        // ins v1.d[0], v0.d[1]: imm5 = 0b01000, imm4 = 1 << 3
+        0x6E00_0400u32 | (0b01000 << 16) | (0b1000 << 11) | (0 << 5) | 1,
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    assert_eq!(cpu.read_vreg(1), 0x88FF_FFFF_FFFF_FFFF_1122_3344_5566_7788);
+}
+
+#[test]
+fn simd_table_lookup_spans_several_registers() {
+    let ldr_q = |rt: u32, imm: u32| 0x3DC0_0000u32 | rt | ((imm >> 4) << 10);
+    let str_q = |rt: u32, imm: u32| 0x3D80_0000u32 | rt | ((imm >> 4) << 10);
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(0, 0x3000);
+    cpu.mem.map_zero(0x3000, 0x100).unwrap();
+    for i in 0..16u32 {
+        cpu.mem.write_u8(0x3000 + i, 0x10 + i as u8).unwrap();
+        cpu.mem.write_u8(0x3010 + i, 0x20 + i as u8).unwrap();
+    }
+    // A {v0, v1} table is 32 bytes, so 31 is the last index that hits and 32
+    // is the first that misses.
+    for (i, idx) in [0u8, 15, 16, 31, 32].into_iter().enumerate() {
+        cpu.mem.write_u8(0x3020 + i as u32, idx).unwrap();
+    }
+    let code = [
+        ldr_q(0, 0x00),
+        ldr_q(1, 0x10),
+        ldr_q(2, 0x20),
+        tbl_insn(1, 1, 0, 3, 0, 2), // tbl v3.16b, {v0.16b, v1.16b}, v2.16b
+        str_q(3, 0x40),
+        nop(),
+    ];
+    let cpu = run_program(cpu, 0x1000, &code);
+    let out: Vec<u8> = (0..5).map(|i| cpu.mem.read_u8(0x3040 + i).unwrap()).collect();
+    assert_eq!(out, vec![0x10, 0x1f, 0x20, 0x2f, 0x00]);
 }
 
 // AdvSIMD across lanes: `0 Q U 01110 size 11000 opcode(5) 10 Rn Rd`.
@@ -3701,3 +3852,4 @@ fn vi_native_window_names_the_binder_interface() {
     }
     assert_eq!(&name, b"dispdrv\0", "the interface has to name itself");
 }
+
