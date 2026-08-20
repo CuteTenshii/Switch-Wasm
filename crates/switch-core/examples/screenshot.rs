@@ -1,7 +1,7 @@
 //! Boot an NRO and write a presented frame to a PPM:
 //! `screenshot <nro> <out.ppm> [frame-index] [font.ttf]`.
 use std::fs;
-use switch_core::cpu::{Cpu, SyscallMode};
+use switch_core::cpu::Cpu;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -17,7 +17,6 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.syscall_mode = SyscallMode::Horizon;
     match fs::read(&font) {
         Ok(bytes) => cpu.set_shared_font(bytes),
         Err(e) => println!("no font at {font} ({e}): text will not render"),

@@ -1,5 +1,5 @@
 use std::fs;
-use switch_core::cpu::{Cpu, SyscallMode};
+use switch_core::cpu::Cpu;
 use switch_core::nro::{load_nro, symbol_value};
 
 fn main() {
@@ -8,7 +8,6 @@ fn main() {
     let data = fs::read(&nro_path).expect("read nro");
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.syscall_mode = SyscallMode::Horizon;
     load_nro(&mut cpu.mem, &data).expect("load nro");
 
     let start = symbol_value(&data, "_libtransistor_squashfs_image").expect("start symbol") as u32;

@@ -6,7 +6,7 @@
 //! fill, not in the emulator); the encoding histogram says which decoder paths
 //! are worth optimising.
 use std::fs;
-use switch_core::cpu::{Cpu, SyscallMode};
+use switch_core::cpu::Cpu;
 
 /// Where NROs are loaded, and how much of the space to histogram.
 const IMAGE_BASE: u32 = 0x0800_0000;
@@ -23,7 +23,6 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.syscall_mode = SyscallMode::Horizon;
     if let Ok(bytes) = fs::read(&font) {
         cpu.set_shared_font(bytes);
     }

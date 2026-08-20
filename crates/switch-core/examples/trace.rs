@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
-use switch_core::cpu::{Cpu, SyscallMode};
+use switch_core::cpu::Cpu;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -14,7 +14,6 @@ fn main() {
     let data = fs::read(&path).expect("read nro");
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.boot_homebrew(&data).expect("boot");
 
     let mut steps = 0u64;

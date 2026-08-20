@@ -1,7 +1,7 @@
 //! The Horizon supervisor calls (`SVC`) libnx homebrew issues at runtime.
 
 use super::{
-    Cpu, SyscallMode, GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
+    Cpu, GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
     GUEST_HEAP_REGION_SIZE, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE,
     PL_SHMEM_SIZE,
 };
@@ -9,17 +9,17 @@ use crate::{Error, Result};
 use std::fmt::Write;
 
 impl Cpu {
+    /// Every SVC a guest issues, except `svc #0`.
+    ///
+    /// Horizon numbers its syscalls from 1, so 0 is free, and this reserves it
+    /// as a host halt trap: a hand-assembled test program ends with `svc #0`,
+    /// and so does the trampoline a program returns to.
     pub(super) fn syscall(&mut self, imm: u16) -> Result<()> {
-        match self.syscall_mode {
-            SyscallMode::None => {                if imm == 0 {
-                    self.halted = true;
-                    Ok(())
-                } else {
-                    Err(Error::Cpu(format!("unimplemented syscall #{}", imm)))
-                }
-            }
-            SyscallMode::Horizon => self.horizon_syscall(imm),
+        if imm == 0 {
+            self.halted = true;
+            return Ok(());
         }
+        self.horizon_syscall(imm)
     }
 
     /// Permissive stubs for the Horizon syscall numbers libnx homebrew hits

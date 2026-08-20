@@ -31,7 +31,7 @@ impl<T> SyncCell<T> {
     }
 }
 
-use switch_core::cpu::{Cpu, SyscallMode};
+use switch_core::cpu::Cpu;
 use switch_core::elf::load_elf;
 use switch_core::nca::Nca;
 use switch_core::nsp::Pfs0;
@@ -585,16 +585,6 @@ fn boot_entry_regs(cpu: &mut Cpu, env_addr: u32) {
     // Point LR at the exit trampoline so a direct-entered `main` that returns
     // cleanly exits instead of branching to NULL (pc=0).
     cpu.set_reg(30, switch_core::cpu::SELF_RETURN_TRAMPOLINE as u64);
-}
-
-/// Configure the syscall ABI (0 = None, 2 = Horizon stubs for real homebrew).
-#[no_mangle]
-pub extern "C" fn switch_set_syscall_mode(handle: u32, mode: u32) {
-    let s = session(handle);
-    s.cpu.syscall_mode = match mode {
-        2 => SyscallMode::Horizon,
-        _ => SyscallMode::None,
-    };
 }
 
 /// Enable/disable the per-instruction disassembly trace.

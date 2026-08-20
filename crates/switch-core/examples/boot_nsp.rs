@@ -7,7 +7,7 @@
 
 use std::env;
 use std::fs;
-use switch_core::cpu::{Cpu, SyscallMode};
+use switch_core::cpu::Cpu;
 use switch_core::nsp::Pfs0;
 
 fn main() {
@@ -122,7 +122,6 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.syscall_mode = SyscallMode::Horizon;
     // RomFS is optional (Meta/Control-only content, or a title with no
     // assets of its own, has none) and a failure to decrypt it shouldn't
     // block booting — the title just won't have its asset storage mounted.

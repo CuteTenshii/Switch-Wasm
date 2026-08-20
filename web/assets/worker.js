@@ -79,7 +79,6 @@ function pushBattery() {
 const CMD = {
   new() { handle = api.switch_new(); pushTime(); pushBattery(); return handle; },
   free_session() { api.switch_free_session(handle); handle = -1; return 0; },
-  set_syscall_mode(mode) { api.switch_set_syscall_mode(handle, mode); return 0; },
   set_trace(on) { api.switch_set_trace(handle, on ? 1 : 0); return 0; },
   vibration() { return api.switch_vibration(handle); },
   set_input(mask, slx, sly, srx, sry) {

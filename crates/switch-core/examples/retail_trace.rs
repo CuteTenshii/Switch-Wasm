@@ -7,7 +7,7 @@
 
 use std::env;
 use std::fs;
-use switch_core::cpu::{Cpu, SyscallMode};
+use switch_core::cpu::Cpu;
 use switch_core::nsp::Pfs0;
 
 fn main() {
@@ -62,7 +62,6 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.syscall_mode = SyscallMode::Horizon;
     if let Some(i) = nca.romfs_section_index() {
         if let Ok(r) = nca.decrypt_romfs_section(raw, &keys, i) {
             cpu.set_romfs(r);

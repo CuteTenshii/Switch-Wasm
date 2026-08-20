@@ -4,7 +4,7 @@
 //! assert on register, flag, memory and console state. Encodings were
 //! verified against QEMU's `a64.decode` where a doubt existed.
 
-use switch_core::cpu::{Cpu, SyscallMode};
+use switch_core::cpu::Cpu;
 
 fn cpu_at(pc: u32) -> Cpu {
     let mut cpu = Cpu::new();
@@ -686,11 +686,9 @@ fn bootstrap_provides_stack_and_low_memory() {
 
 #[test]
 fn horizon_syscall_stubs() {
-    use switch_core::cpu::SyscallMode;
 
     // OutputDebugString(0x3000, 5) logs the string to the console.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.mem.map(0x3000, b"hello").unwrap();
     cpu.set_reg(0, 0x3000);
     cpu.set_reg(1, 5);
@@ -700,7 +698,6 @@ fn horizon_syscall_stubs() {
 
     // A null pointer / bogus length is tolerated (no fault).
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(0, 0);
     cpu.set_reg(1, 0xFFFFFFFFFFFFFFDCu64);
     cpu.mem.map(0x1000, &svc(0x27).to_le_bytes()).unwrap();
@@ -708,14 +705,12 @@ fn horizon_syscall_stubs() {
 
     // ExitProcess halts the machine.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.mem.map(0x1000, &svc(0x07).to_le_bytes()).unwrap();
     let report = cpu.run(1).unwrap();
     assert!(report.halted);
 
     // GetSystemTick returns the cycle count scaled to ns.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&nop().to_le_bytes());
     bytes.extend_from_slice(&svc(0x1E).to_le_bytes());
@@ -725,7 +720,6 @@ fn horizon_syscall_stubs() {
 
     // ConnectToNamedPort succeeds with a fake handle returned in X1.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(0, 0x3000); // name pointer (ignored by the stub)
     cpu.set_reg(1, 4);
     cpu.mem.map(0x1000, &svc(0x1F).to_le_bytes()).unwrap();
@@ -735,7 +729,6 @@ fn horizon_syscall_stubs() {
 
     // SendSyncRequest is a no-op success so service init proceeds.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(0, 0x1000); // session handle
     cpu.set_reg(1, 0x3000); // ipc buffer pointer
     cpu.set_reg(2, 0x40);
@@ -746,13 +739,11 @@ fn horizon_syscall_stubs() {
 
 #[test]
 fn horizon_query_memory_and_get_info() {
-    use switch_core::cpu::SyscallMode;
 
     // QueryMemory writes a MemoryInfo struct to the out pointer and returns
     // the page info in X1. It reports the contiguous run of pages in the same
     // state as the queried address.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(0, 0x3000); // MemoryInfo out
     cpu.set_reg(1, 0x4000); // PageInfo out
     cpu.set_reg(2, 0x0800_1000); // queried address
@@ -769,7 +760,6 @@ fn horizon_query_memory_and_get_info() {
     // An untouched soft-mapped page reports as unmapped (type 0, no perm),
     // which is what lets libnx virtmem find free address space.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(0, 0x3000);
     cpu.set_reg(1, 0x3040);
     cpu.set_reg(2, 0x1234000);
@@ -787,7 +777,6 @@ fn horizon_query_memory_and_get_info() {
     // out-of-range region bases had `nnSdk` asking `svcMapPhysicalMemory` to
     // back 0x10_0000_0000.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(1, 4); // infoType
     cpu.set_reg(2, 0xffff_8001); // CUR_PROCESS_HANDLE
     cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
@@ -802,7 +791,6 @@ fn horizon_query_memory_and_get_info() {
     // 16 KiB. Answering 0 (the old `_ => 0` default) made that difference 0.
     for (info_type, expected) in [(21u64, 0x1E00_0000u64), (22, 0)] {
         let mut cpu = cpu_at(0x1000);
-        cpu.syscall_mode = SyscallMode::Horizon;
         cpu.set_reg(1, info_type);
         cpu.set_reg(2, 0xffff_8001);
         cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
@@ -816,7 +804,6 @@ fn horizon_query_memory_and_get_info() {
     // address memory manager, which needs kernel machinery this emulator does
     // not have, and `nn::os::AllocateAddressRegion` then fails outright.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(1, 16);
     cpu.set_reg(2, 0xffff_8001);
     cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
@@ -825,7 +812,6 @@ fn horizon_query_memory_and_get_info() {
 
     // InfoType 6 = TotalMemorySize.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(1, 6);
     cpu.set_reg(2, 0xffff_8001);
     cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
@@ -835,7 +821,6 @@ fn horizon_query_memory_and_get_info() {
 
     // InfoType 12 = AslrRegionAddress.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(1, 12);
     cpu.set_reg(2, 0xffff_8001);
     cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
@@ -845,7 +830,7 @@ fn horizon_query_memory_and_get_info() {
 
 #[test]
 fn horizon_map_physical_memory() {
-    use switch_core::cpu::{SyscallMode, GUEST_ALIAS_REGION_ADDR};
+    use switch_core::cpu::GUEST_ALIAS_REGION_ADDR;
     // MapPhysicalMemory(address, size) is how an application built for the
     // 39-bit address space grows its heap — it picks the address itself out of
     // the alias region rather than calling svcSetHeapSize, which is why a
@@ -853,7 +838,6 @@ fn horizon_map_physical_memory() {
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.mem.map(0x1000, &svc(0x2c).to_le_bytes()).unwrap();
     cpu.set_reg(0, u64::from(GUEST_ALIAS_REGION_ADDR));
     cpu.set_reg(1, 0x10_0000);
@@ -876,7 +860,6 @@ fn horizon_map_physical_memory() {
         let mut cpu = cpu_at(0x1000);
         cpu.bootstrap();
         cpu.set_pc(0x1000);
-        cpu.syscall_mode = SyscallMode::Horizon;
         cpu.mem.map(0x1000, &svc(0x2c).to_le_bytes()).unwrap();
         cpu.set_reg(0, addr);
         cpu.set_reg(1, size);
@@ -1367,12 +1350,10 @@ fn run_ipc_request(cpu: &mut Cpu, handle: u64) {
 /// converted to a domain, plus the object ids of the `IApplicationProxy` and
 /// `ICommonStateGetter` opened through it.
 fn applet_chain() -> (Cpu, u64, u32, u32) {
-    use switch_core::cpu::SyscallMode;
     const APPLET: u64 = 0x1000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.register_service_handle(APPLET, "appletOE");
     let tls = cpu.tls_base();
 
@@ -1467,7 +1448,6 @@ fn wait_sync(cpu: &mut Cpu, handles: &[u32], timeout: i64) -> (u64, u64) {
 
 #[test]
 fn ssl_keeps_context_state_and_refuses_connections() {
-    use switch_core::cpu::SyscallMode;
     // ssl is the system TLS stack: a title asks the OS to build connections
     // rather than bringing its own implementation. The local half -- contexts
     // and their options -- is real here; the connection half is not, because
@@ -1476,7 +1456,6 @@ fn ssl_keeps_context_state_and_refuses_connections() {
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.register_service_handle(SSL, "ssl");
     let tls = cpu.tls_base();
     ipc_request(&mut cpu, SSL, 5, None, 0); // ConvertToDomain
@@ -1517,12 +1496,10 @@ fn ssl_keeps_context_state_and_refuses_connections() {
 
 /// Open `hid` and convert it to a domain: (cpu, session handle, IHidServer).
 fn hid_server() -> (Cpu, u64, u32) {
-    use switch_core::cpu::SyscallMode;
     const HID: u64 = 0x9000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.register_service_handle(HID, "hid");
     let tls = cpu.tls_base();
     // A control reply is not a domain reply: SFCO lands at 0x10 and the raw
@@ -1616,7 +1593,6 @@ fn hid_vibration_reaches_the_host() {
 
 #[test]
 fn events_are_copy_handles_and_start_unsignalled() {
-    use switch_core::cpu::SyscallMode;
     // Every event a service hands out is a **copy** handle: a move handle
     // transfers ownership and lives in a different field of the handle
     // descriptor, so an event sent in the move slot is read back as 0. That is
@@ -1626,7 +1602,6 @@ fn events_are_copy_handles_and_start_unsignalled() {
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.register_service_handle(APPLET, "appletOE");
     let tls = cpu.tls_base();
 
@@ -1677,7 +1652,6 @@ fn events_are_copy_handles_and_start_unsignalled() {
 
 #[test]
 fn control_clone_hands_back_a_working_session() {
-    use switch_core::cpu::SyscallMode;
     // CloneCurrentObject (control command 2) duplicates a session, and the
     // reply has to carry a **new session handle as a move handle**. Answering
     // it with a bare success and no handle left nnSdk -- which clones fsp-srv
@@ -1689,7 +1663,6 @@ fn control_clone_hands_back_a_working_session() {
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.register_service_handle(FS, "fsp-srv");
     let tls = cpu.tls_base();
 
@@ -1714,7 +1687,6 @@ fn control_clone_hands_back_a_working_session() {
 
 #[test]
 fn storage_read_uses_the_istorage_field_layout() {
-    use switch_core::cpu::SyscallMode;
     // IStorage::Read is (s64 offset, u64 size) -- *not* IFile::Read, which
     // leads with a u32 option and pads to 8, putting its offset at +8 and its
     // size at +0x10. Reading those two fields here meant every RomFS read came
@@ -1726,7 +1698,6 @@ fn storage_read_uses_the_istorage_field_layout() {
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_romfs(romfs.clone());
     cpu.register_service_handle(FS, "fsp-srv-storage");
     let tls = cpu.tls_base();
@@ -1758,7 +1729,6 @@ fn storage_read_uses_the_istorage_field_layout() {
 
 #[test]
 fn lm_writes_the_guests_own_log_to_the_console() {
-    use switch_core::cpu::SyscallMode;
     const LM: u64 = 0x1000;
     const PACKET: u32 = 0x5000;
     const KEY_TEXT: u8 = 2;
@@ -1769,7 +1739,6 @@ fn lm_writes_the_guests_own_log_to_the_console() {
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.register_service_handle(LM, "lm");
     let tls = cpu.tls_base();
 
@@ -1810,12 +1779,10 @@ fn lm_writes_the_guests_own_log_to_the_console() {
 
 #[test]
 fn pctl_reports_parental_controls_off() {
-    use switch_core::cpu::SyscallMode;
     const PCTL: u64 = 0x1000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.register_service_handle(PCTL, "pctl");
     let tls = cpu.tls_base();
 
@@ -1907,12 +1874,10 @@ fn applet_control_command_with_context_is_not_a_normal_command() {
     // control message turned `appletOE`'s opening QueryPointerBufferSize into
     // IApplicationProxyService command 3, which does not exist, and the applet
     // chain died before it ever opened.
-    use switch_core::cpu::SyscallMode;
     const APPLET: u64 = 0x1000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.register_service_handle(APPLET, "appletOE");
     let tls = cpu.tls_base();
 
@@ -1986,7 +1951,6 @@ fn bfxil_extracts_field_into_low_bits() {
 
 #[test]
 fn gamepad_input_writes_input_reg_and_hid_shmem() {
-    use switch_core::cpu::SyscallMode;
     // MapSharedMemory (svc 0x13) with x1=addr, x2=size must back the region
     // with real memory and, for a region hid's size, record it; set_gamepad_state
     // then mirrors the pad into INPUT_ADDR and into the two npad slots libnx
@@ -1998,7 +1962,6 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
     const NPAD: u32 = SHMEM + 0x9A00;
     const HANDHELD: u32 = NPAD + 8 * 0x5000;
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(1, SHMEM as u64);
     cpu.set_reg(2, 0x40000);
     cpu.mem.map(0x1000, &svc(0x13).to_le_bytes()).unwrap();
@@ -2040,14 +2003,13 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
 
 #[test]
 fn mapping_pl_shared_memory_delivers_the_shared_font() {
-    use switch_core::cpu::{SyscallMode, PL_SHMEM_SIZE};
+    use switch_core::cpu::PL_SHMEM_SIZE;
     // `plInitialize` maps pl's shared memory and homebrew then reads the font
     // out of it at the offset pl reported (0), so the bytes have to be there by
     // the time the mapping syscall returns.
     const ADDR: u32 = 0x2000_0000;
     let font: Vec<u8> = (0..=255u8).cycle().take(0x2000).collect();
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_shared_font(font.clone());
     cpu.set_reg(1, ADDR as u64);
     cpu.set_reg(2, u64::from(PL_SHMEM_SIZE));
@@ -2065,7 +2027,6 @@ fn mapping_pl_shared_memory_delivers_the_shared_font() {
 
 #[test]
 fn map_memory_backs_the_destination_and_unmap_frees_it() {
-    use switch_core::cpu::SyscallMode;
     // svcMapMemory(dst, src, size) aliases a range; libnx uses it to mirror a
     // thread's stack and then finds the *next* thread's mirror by looking for an
     // unmapped range, so the destination has to read back as mapped memory
@@ -2073,7 +2034,6 @@ fn map_memory_backs_the_destination_and_unmap_frees_it() {
     const SRC: u32 = 0x3000_0000;
     const DST: u32 = 0x1800_0000;
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.mem.map(SRC, &0xDEAD_BEEFu32.to_le_bytes()).unwrap();
     cpu.mem.map(0x1000, &svc(0x04).to_le_bytes()).unwrap();
     cpu.mem.map(0x1004, &svc(0x05).to_le_bytes()).unwrap();
@@ -2294,7 +2254,6 @@ fn query_memory_writes_40_byte_memoryinfo() {
     // bytes; when the app's info pointer sat near the top of its stack this
     // clobbered main's saved LR and made NX-Shell's main "return" to 0.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(0, 0x3000);   // info out pointer
     cpu.set_reg(1, 0x3040);   // page info out pointer
     cpu.set_reg(2, 0x1234000); // address
@@ -2318,7 +2277,6 @@ fn query_memory_writes_40_byte_memoryinfo() {
     // An untouched soft-mapped page reports as unmapped (type 0, no perm),
     // which is what lets libnx virtmem find free address space.
     let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(0, 0x3000);
     cpu.set_reg(1, 0x3040);
     cpu.set_reg(2, 0x1234000);
@@ -3255,7 +3213,6 @@ fn guest_threads_run_and_hand_over_at_blocking_syscalls() {
     // anything, so the wait spun forever — which is where hbmenu stopped.
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.mem.map_zero(0x4000, 0x2000).unwrap(); // the child's stack
     cpu.mem.map_zero(0x6000, 0x1000).unwrap(); // the flag and the arg it saw
 
@@ -3307,7 +3264,6 @@ fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
     // ownership, or libnx's mutexLock re-reads the word and spins forever.
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.syscall_mode = SyscallMode::Horizon;
     cpu.mem.map_zero(0x4000, 0x2000).unwrap();
     cpu.mem.map_zero(0x6000, 0x1000).unwrap();
     const MUTEX: u32 = 0x6100;

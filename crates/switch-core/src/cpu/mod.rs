@@ -31,18 +31,6 @@ pub(crate) use bits::decode_bit_mask;
 use bits::*;
 
 
-/// Where SVC traps are routed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SyscallMode {
-    /// `SVC #0` halts the machine; anything else faults.
-    #[default]
-    None,
-    /// Real libnx/libtransistor syscall numbers, best-effort stubs so homebrew
-    /// built for the Switch can boot single-threaded: console logging, sleeps,
-    /// handles and process/timing info are faked, and unsupported calls fault.
-    Horizon,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunReport {
     /// Number of instructions executed this run.
@@ -257,7 +245,6 @@ pub struct Cpu {
     pub trace_enabled: bool,
     /// Safety cap on the trace buffer to avoid unbounded growth.
     trace_cap: usize,
-    pub syscall_mode: SyscallMode,
     pub halted: bool,
     /// Instructions executed in total.
     pub cycles: u64,
@@ -430,7 +417,6 @@ impl Cpu {
             trace: Vec::new(),
             trace_enabled: false,
             trace_cap: 512 * 1024,
-            syscall_mode: SyscallMode::None,
             halted: false,
             cycles: 0,
             recent: [(0, 0); RECENT_LEN],

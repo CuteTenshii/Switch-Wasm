@@ -4,7 +4,7 @@
 // instruction, to find who reads vs writes that slot.
 use std::env;
 use std::fs;
-use switch_core::cpu::{Cpu, SyscallMode};
+use switch_core::cpu::Cpu;
 use switch_core::nsp::Pfs0;
 
 fn main() {
@@ -43,7 +43,6 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.syscall_mode = SyscallMode::Horizon;
     let base = 0x0ce15000u32;
     let _ = switch_core::nso::load_nso(&mut cpu.mem, sdk_bytes, base).expect("load sdk");
     let tsize = u32::from_le_bytes(sdk_bytes[0x18..0x1c].try_into().unwrap());

@@ -4,7 +4,7 @@
 //! `cargo run -p switch-core --example mme_debug -- <path> [max_steps]`.
 use std::env;
 use std::fs;
-use switch_core::cpu::{Cpu, SyscallMode};
+use switch_core::cpu::Cpu;
 
 fn main() {
     let path = env::args().nth(1).expect("usage: mme_debug <path> [max_steps]");
@@ -15,7 +15,6 @@ fn main() {
     let data = fs::read(&path).expect("read nro");
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.syscall_mode = SyscallMode::Horizon;
     if let Ok(font) = fs::read("web/assets/font.ttf") {
         cpu.set_shared_font(font);
     }

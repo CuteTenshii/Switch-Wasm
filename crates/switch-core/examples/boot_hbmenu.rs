@@ -2,7 +2,7 @@
 //! syscall stubs. Usage: `cargo run -p switch-core --example boot_hbmenu -- <path>`.
 use std::env;
 use std::fs;
-use switch_core::cpu::{Cpu, SyscallMode};
+use switch_core::cpu::Cpu;
 use switch_core::nro::load_nro;
 
 fn main() {
@@ -10,7 +10,6 @@ fn main() {
     let data = fs::read(&path).expect("read nro");
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.syscall_mode = SyscallMode::Horizon;
     let loaded = load_nro(&mut cpu.mem, &data).expect("load nro");
     println!("entry = {:#010x}", loaded.entry);
     for i in 0..=30u8 {

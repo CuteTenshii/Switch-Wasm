@@ -224,7 +224,6 @@ async function init() {
   initWorker();
   await readyPromise;
   handle = await call('new');
-  await call('set_syscall_mode', 2); // Horizon
   await stageFont();
   fbW = await call('fb_width');
   fbH = await call('fb_height');
@@ -241,12 +240,6 @@ async function init() {
 }
 
 // ---------- program loading ----------
-
-// The frontend only runs real Horizon homebrew; the legacy UART demo ABI is
-// removed from the UI so sdl-hello/hbmenu can't accidentally execute under it.
-function applySyscallMode() {
-  return call('set_syscall_mode', 2); // Horizon
-}
 
 async function loadProgram(file, kind) {
   clearConsole();
@@ -279,7 +272,6 @@ async function loadProgram(file, kind) {
 }
 
 async function bootFile(file) {
-  await applySyscallMode();
   const kind = /\.nro$/i.test(file.name) ? 'nro' : 'elf';
   if (await loadProgram(file, kind)) await run();
 }
@@ -393,7 +385,6 @@ $('btn-reset').addEventListener('click', async () => {
   setRunButton(false);
   await call('free_session');
   handle = await call('new');
-  await applySyscallMode();
   await stageFont();
   clearConsole();
   lastFrame = 0;
@@ -651,7 +642,6 @@ async function launchStandaloneNca(file) {
 async function doLaunchNca(name, loadFn) {
   clearConsole();
   setState('loading');
-  await applySyscallMode();
   let entry;
   try {
     entry = await loadFn();

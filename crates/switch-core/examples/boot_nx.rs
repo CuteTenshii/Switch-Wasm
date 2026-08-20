@@ -1,11 +1,10 @@
 use std::fs;
-use switch_core::cpu::{Cpu, SyscallMode};
+use switch_core::cpu::Cpu;
 fn main() {
     let path = std::env::args().nth(1).expect("usage: boot_nx <path-to-.nro>");
     let data = fs::read(&path).expect("read nro");
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    cpu.syscall_mode = SyscallMode::Horizon;
     let loaded = cpu.boot_homebrew(&data).expect("boot nro");
     println!("entry = {:#010x}", loaded.entry);
     let mut done = 0u64;
