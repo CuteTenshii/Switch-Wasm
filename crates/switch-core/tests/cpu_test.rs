@@ -1743,6 +1743,53 @@ fn hid_vibration_reaches_the_host() {
 }
 
 #[test]
+fn hid_sys_is_its_own_interface_and_answers_before_any_command() {
+    // `libnx` opens hid:sys in hidsysInitialize and records the session's
+    // pointer buffer size on it before sending anything, so for a title that
+    // never calls a hid:sys command -- Checkpoint is one -- opening the
+    // service *is* the only traffic there ever is. With hid:sys unrouted that
+    // control request fell through to the generic reply and was answered with
+    // a fabricated object id, exactly the way ns:am2 was.
+    const HIDSYS: u64 = 0x9100;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(HIDSYS, "hid:sys");
+    let tls = cpu.tls_base();
+
+    ipc_request(&mut cpu, HIDSYS, 5, None, 3); // QueryPointerBufferSize
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u16(tls + 0x20).unwrap(), 0x1000);
+
+    ipc_request(&mut cpu, HIDSYS, 5, None, 0); // ConvertToDomain
+    let server = cpu.mem.read_u32(tls + 0x20).unwrap();
+
+    // EnableAppletToGetInput: a setter over state this emulator does not have.
+    ipc_request(&mut cpu, HIDSYS, 4, Some(server), 503);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+
+    // GetUniquePadIds -> an s64 count. A unique pad is a *detachable*
+    // controller and the one here is the built-in handheld pad, so there are
+    // none and the pointer buffer is left alone.
+    ipc_request(&mut cpu, HIDSYS, 4, Some(server), 703);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u64(tls + 0x30).unwrap(), 0);
+
+    // AcquireHomeButtonEventHandle -> a copy handle. There is no Home button,
+    // so it is handed out and never signalled.
+    ipc_request(&mut cpu, HIDSYS, 4, Some(server), 101);
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
+    assert_ne!(cpu.mem.read_u32(tls + 0x0c).unwrap(), 0);
+
+    // Converting the session to a domain must not quietly turn it into
+    // IHidServer: command 0 there is CreateAppletResource, and hid:sys has no
+    // command 0 at all.
+    const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
+    ipc_request(&mut cpu, HIDSYS, 4, Some(server), 0);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), UNKNOWN_COMMAND_ID);
+}
+
+#[test]
 fn events_are_copy_handles_and_start_unsignalled() {
     // Every event a service hands out is a **copy** handle: a move handle
     // transfers ownership and lives in a different field of the handle

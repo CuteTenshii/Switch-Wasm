@@ -659,7 +659,8 @@ impl Cpu {
                         }
                         // hid, and the IAppletResource it hands the input
                         // shared memory over through.
-                        "hid" | "hid:dbg" | "hid:server" | "hid:applet-resource" => {
+                        "hid" | "hid:dbg" | "hid:sys" | "hid:server"
+                        | "hid:applet-resource" => {
                             self.hid_request(tls, handle, cmd_id)?
                         }
                         // lm, the log manager: a title's own diagnostic

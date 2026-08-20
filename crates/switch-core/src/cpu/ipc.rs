@@ -2483,14 +2483,28 @@ impl Cpu {
     /// size and this emulator recognises it that way, so homebrew got working
     /// input out of a fabricated reply — but `nnSdk` calls a method on the
     /// `IAppletResource` it was handed, and a fabricated object id is not one.
+    /// Which `hid` interface a session handle stands for.
+    ///
+    /// `hid` and `hid:dbg` are both `IHidServer` — the debug service is the
+    /// same interface at higher privilege, and nothing here enforces
+    /// privilege. `hid:sys` is a *different* interface (`IHidSystemServer`),
+    /// so it keeps its own name and gets its own dispatch below.
+    fn hid_interface_for(name: Option<&str>) -> String {
+        match name {
+            Some("hid") | Some("hid:dbg") | None => "hid:server".to_string(),
+            Some(name) => name.to_string(),
+        }
+    }
+
     pub(super) fn hid_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
+                    let name = Self::hid_interface_for(self.service_name(handle));
                     let obj = self.alloc_domain_object();
-                    self.record_domain_object(handle, obj, "hid:server");
+                    self.record_domain_object(handle, obj, &name);
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
                 }
                 // QueryPointerBufferSize: how much the server will accept in
@@ -2512,10 +2526,7 @@ impl Cpu {
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("hid:server").to_string()
         } else {
-            match self.service_name(handle) {
-                Some("hid") | Some("hid:dbg") | None => "hid:server".to_string(),
-                Some(name) => name.to_string(),
-            }
+            Self::hid_interface_for(self.service_name(handle))
         };
         let data = self.ipc_request_data(tls);
         match iface.as_str() {
@@ -2642,6 +2653,59 @@ impl Cpu {
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // `IHidSystemServer`: the privileged half of hid, opened as
+            // `hid:sys`. Nothing an application needs for *input* is here —
+            // that is `IHidServer` above — but homebrew reaches for this one
+            // to take the console's own buttons over, and `libnx` opens the
+            // session during `hidsysInitialize` whether or not it ever sends
+            // a command.
+            //
+            // Which is exactly how this went wrong: opening the session is
+            // itself the traffic. `libnx` records the pointer buffer size on
+            // it before any command, and with `hid:sys` not routed here that
+            // control request fell through to the generic reply and was
+            // answered with a fabricated object id — the same failure `ns:am2`
+            // had. The command ids below come from `libnx`'s `hidsys.c`.
+            "hid:sys" => match cmd_id {
+                // Acquire{Home,Sleep,Capture}ButtonEventHandle -> a copy
+                // handle. This console has no Home, Sleep or Capture button,
+                // so each event is handed out and never signalled — the
+                // caller waits on a press that cannot arrive, which is the
+                // truth rather than a fabricated one.
+                Some(101) => {
+                    let event = self.alloc_event("hid:sys-home-button", true);
+                    self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+                }
+                Some(121) => {
+                    let event = self.alloc_event("hid:sys-sleep-button", true);
+                    self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+                }
+                Some(141) => {
+                    let event = self.alloc_event("hid:sys-capture-button", true);
+                    self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+                }
+                // Activate{Home,Sleep,Capture}Button, and
+                // ApplyNpadSystemCommonPolicy / EnableAppletToGetInput.
+                // Every one is a setter over state this emulator does not
+                // have — there is one pad, it is always connected, and the
+                // caller is always the foreground applet — so accepting the
+                // request is the whole implementation.
+                Some(111) | Some(131) | Some(151) | Some(303) | Some(503) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // GetUniquePadIds -> the ids of the physically attached
+                // controllers, written into a pointer buffer, with the count
+                // returned as an s64. A "unique pad" is a detachable
+                // controller; the pad here is the built-in handheld one, so
+                // there are none and the buffer is left alone.
+                Some(703) => self.write_ipc_response(tls, 0, &[], &0i64.to_le_bytes(), &[]),
+                // SetNotificationLedPattern and its timeout form: the
+                // breathing pattern for a Joy-Con's player LEDs. No LEDs, and
+                // `hid`'s GetPlayerLedPattern above already reports the fixed
+                // one.
+                Some(830) | Some(831) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IActiveVibrationDeviceList::InitializeVibrationDevice.
