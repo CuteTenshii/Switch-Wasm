@@ -800,6 +800,13 @@ impl Cpu {
                     }
                 }
                 self.write_zr(0, RESULT_OK);
+                // A service that answered "nothing yet" asked to be
+                // descheduled. Do it here, after X0 is written: `yield_thread`
+                // swaps the register file, so anything written past it would
+                // land on whichever thread runs next.
+                if std::mem::take(&mut self.pending_yield) {
+                    self.yield_thread();
+                }
                 Ok(())
             }
             0x24 => {

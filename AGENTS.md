@@ -409,9 +409,16 @@ get/setsockopt, fcntl, shutdown, close, dup) and every operation needing a peer
 fails immediately with a definite errno — `connect` is `ECONNREFUSED`, the data
 path is `ENOTCONN` for a stream socket and `ENETUNREACH` for a datagram one,
 `accept` on a listening socket is `EAGAIN`, and `select`/`poll` report nothing
-ready. Failing at once matters more than it looks: there is no second thread to
-run while a guest blocks on a socket, so a timeout would stall the frame loop.
-**The errnos are FreeBSD's** (`EAGAIN` is 35, not 11) because that is what the
+ready. An empty answer is not the same as an *instant* answer, though: a `poll`
+that was handed a timeout is a wait, and `bsd_request` asks for a reschedule
+(`Cpu::pending_yield`, consumed by `svcSendSyncRequest` once the reply and X0
+are written — switching threads swaps the register file) before returning zero.
+Threads here only hand over at blocking syscalls, so without that a guest
+looping on `if (poll(&pfd, 1, 200) <= 0) continue;` around an idle socket owns
+the CPU forever and starves every other thread, its own main one included.
+NXpotify's Zeroconf listener is exactly that loop, and it never drew a frame.
+A `poll` with a zero timeout is an explicit non-blocking probe and still
+returns at once, as it does on hardware. **The errnos are FreeBSD's** (`EAGAIN` is 35, not 11) because that is what the
 real service returns. `fcntl`'s flags word is stored and returned *verbatim*
 rather than decoded — `O_NONBLOCK` is a different bit in FreeBSD, newlib and
 Linux, and what has to hold is that a guest reads back what it set.

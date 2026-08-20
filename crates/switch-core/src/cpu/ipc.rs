@@ -1238,6 +1238,11 @@ impl Cpu {
         };
 
         let (reply, action) = self.display.transact(code, &request);
+        if self.trace_nv {
+            // The binder transaction code, not the IPC command: this is the
+            // level a stuck buffer-queue loop shows up at.
+            eprintln!("[vi] transact code={code} in={} out={} bytes", request.len(), reply.len());
+        }
         if let crate::display::Action::Present(buffer) = action {
             self.nv.gpu.present(&self.mem, &buffer)?;
             if self.trace_nv {
@@ -3596,7 +3601,17 @@ impl Cpu {
             // `revents` cleared — no event ever fires. Copying the array
             // through matters: the caller reads its `revents` out of the
             // *output* buffer, which is a different range from the input one.
+            //
+            // A poll with a timeout is a *wait*, and answering it instantly is
+            // what breaks a guest, not the empty answer. NXpotify's Zeroconf
+            // listener runs `if (poll(&pfd, 1, 200) <= 0) continue;`, which on
+            // hardware sleeps a fifth of a second per turn; returning zero
+            // immediately turned it into a loop that never makes a blocking
+            // syscall, and threads here only switch at those — so it starved
+            // every other thread, main included, and no frame was ever drawn.
+            // Reschedule instead, once the reply is written.
             Some(6) => {
+                let timeout = word(self, 1) as i32;
                 if let (Some((src, src_size)), Some((dst, dst_size))) =
                     (self.ipc_input_buffer(tls, 0), self.ipc_output_buffer(tls, 0))
                 {
@@ -3609,6 +3624,9 @@ impl Cpu {
                         self.mem.write_u16(dst.wrapping_add(offset + 6), 0)?;
                     }
                 }
+                // `timeout == 0` is an explicit non-blocking probe, and comes
+                // back at once on hardware too.
+                self.pending_yield = timeout != 0;
                 self.bsd_reply(tls, 0, 0)
             }
             // Recv / RecvFrom / Send / SendTo / Write / Read: the data path.
@@ -5656,6 +5674,33 @@ mod tests {
         write_request(&mut cpu, 20, &payload);
         cpu.bsd_request(TLS, 9, Some(20)).unwrap();
         assert_eq!(bsd_result(&cpu), (0x0800, 0));
+    }
+
+    #[test]
+    fn a_poll_with_a_timeout_gives_up_the_cpu() {
+        // NXpotify's Zeroconf listener runs `if (poll(&pfd, 1, 200) <= 0)
+        // continue;`, which on hardware sleeps a fifth of a second per turn.
+        // Answering "nothing ready" instantly turned that into a loop with no
+        // blocking syscall in it, and threads here only switch at those — so
+        // it starved every other thread, main included, and the app never drew
+        // a frame. The empty answer is right; returning it without yielding is
+        // not.
+        let (mut cpu, _fd) = bsd_socket(1);
+        let mut payload = [0u8; 8];
+        payload[..4].copy_from_slice(&1u32.to_le_bytes()); // nfds
+        payload[4..].copy_from_slice(&200i32.to_le_bytes()); // timeout, ms
+        write_request(&mut cpu, 6, &payload);
+        cpu.bsd_request(TLS, 9, Some(6)).unwrap();
+        assert_eq!(bsd_result(&cpu), (0, 0), "no descriptor is ever ready");
+        assert!(cpu.pending_yield, "a poll that waits has to reschedule");
+
+        // A zero timeout is an explicit non-blocking probe: hardware answers
+        // that one immediately too, so there is nothing to give up.
+        payload[4..].copy_from_slice(&0i32.to_le_bytes());
+        write_request(&mut cpu, 6, &payload);
+        cpu.bsd_request(TLS, 9, Some(6)).unwrap();
+        assert_eq!(bsd_result(&cpu), (0, 0));
+        assert!(!cpu.pending_yield);
     }
 
     #[test]

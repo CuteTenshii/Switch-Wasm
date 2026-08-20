@@ -3409,6 +3409,72 @@ fn guest_threads_run_and_hand_over_at_blocking_syscalls() {
 }
 
 #[test]
+fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
+    // NXpotify's Zeroconf listener is `if (poll(&pfd, 1, 200) <= 0) continue;`
+    // around an idle socket. Nothing here will ever be ready, so the answer is
+    // always zero — but a poll that was given a timeout is a *wait*, and
+    // returning it instantly left that thread looping with no blocking syscall
+    // in it. Threads only hand over at those, so the loop owned the CPU
+    // forever and the main thread never drew another frame.
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.register_service_handle(0x30, "bsd:u");
+    cpu.mem.map_zero(0x4000, 0x2000).unwrap(); // the child's stack
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap(); // the flag main sets
+
+    // main: start the poller, sleep once to hand it the CPU, and then — only
+    // if it hands the CPU back — set the flag and exit.
+    let main = [
+        0xd284_0001u32, // mov x1, #0x2000  (entry)
+        0xd280_0002,    // mov x2, #0       (arg)
+        0xd28a_0003,    // mov x3, #0x5000  (stack top)
+        0x5280_0764,    // mov w4, #0x3b    (priority)
+        0x1280_0005,    // mov w5, #-1      (core)
+        0xd400_0101,    // svc #8           (CreateThread → handle in x1)
+        0xaa01_03e0,    // mov x0, x1
+        0xd400_0121,    // svc #9           (StartThread)
+        0xd400_0161,    // svc #0xb         (SleepThread → over to the poller)
+        0xd28c_0009,    // mov x9, #0x6000
+        0x5280_0aa1,    // mov w1, #0x55
+        0xb900_0121,    // str w1, [x9]
+        0xd400_00e1,    // svc #7           (ExitProcess)
+    ];
+    // The poller: build a `Poll(nfds = 1, timeout = 200)` CMIF request in its
+    // own TLS block and send it, forever. Threads get their TLS at
+    // THREAD_TLS_BASE + index * stride, and this is thread 1.
+    let child = [
+        0xd282_0009u32, // mov x9, #0x1000
+        0xf2a3_fc29,    // movk x9, #0x1fe1, lsl #16   (= THREAD_TLS_BASE + stride)
+        0x5280_0081,    // mov w1, #4                  (message type: Request)
+        0xb900_0121,    // str w1, [x9]
+        0x5280_0101,    // mov w1, #8                  (data words)
+        0xb900_0521,    // str w1, [x9, #4]
+        0x5288_ca61,    // mov w1, #0x4653             ("SFCI")
+        0x72a9_2861,    // movk w1, #0x4943, lsl #16
+        0xb900_1121,    // str w1, [x9, #0x10]
+        0x5280_00c1,    // mov w1, #6                  (command: Poll)
+        0xb900_1921,    // str w1, [x9, #0x18]
+        0x5280_0021,    // mov w1, #1                  (nfds)
+        0xb900_2121,    // str w1, [x9, #0x20]
+        0x5280_1901,    // mov w1, #200                (timeout, ms)
+        0xb900_2521,    // str w1, [x9, #0x24]
+        0xd280_0600,    // mov x0, #0x30               (the bsd:u handle)
+        0xd400_0421,    // svc #0x21                   (SendSyncRequest)
+        0x17ff_ffef,    // b -0x44                     (round again)
+    ];
+    let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
+    cpu.mem.map_zero(0x1000, 0x100).unwrap();
+    cpu.mem.map(0x1000, &bytes(&main)).unwrap();
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &bytes(&child)).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(10_000).unwrap();
+
+    assert!(cpu.halted, "main never got the CPU back from the polling thread");
+    assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 0x55);
+}
+
+#[test]
 fn set_thread_activity_takes_a_thread_out_of_the_rotation() {
     // `svcSetThreadActivity` is `nn::os::SuspendThread`/`ResumeThread`. A
     // suspended thread keeps whatever it was doing and simply stops being

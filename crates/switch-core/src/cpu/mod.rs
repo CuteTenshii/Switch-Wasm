@@ -491,6 +491,12 @@ pub struct Cpu {
     threads: Vec<ThreadContext>,
     /// Which entry of `threads` is running.
     current_thread: usize,
+    /// Set by a service call that answered "nothing is ready yet" and would
+    /// have blocked on hardware. The reschedule cannot happen inside the
+    /// handler — switching threads swaps the register file, and the syscall
+    /// still has to write its result into the *caller's* X0 — so
+    /// `svcSendSyncRequest` acts on this once the reply is in place.
+    pub(crate) pending_yield: bool,
 }
 
 /// How many recently-executed instructions the fault trace shows.
@@ -568,6 +574,7 @@ impl Cpu {
             trace_nv: std::env::var("TRACE_NV").is_ok(),
             threads: Vec::new(),
             current_thread: 0,
+            pending_yield: false,
         };
         cpu.nv.gpu.trace = std::env::var("TRACE_GPU").is_ok();
         // The framebuffer and input registers are fixed hardware-mapped
@@ -1722,6 +1729,28 @@ impl Cpu {
                 ));
             }
         }
+    }
+
+    /// One line per guest thread: which one is running, what each is blocked
+    /// on, and where it stopped. The counterpart to [`Cpu::backtrace`] for
+    /// hangs that are about *scheduling* rather than about one call stack —
+    /// a thread spinning without ever reaching a blocking syscall looks
+    /// identical to a busy program until you can see that every other thread
+    /// is Runnable and none of them has moved.
+    pub fn thread_dump(&self) -> String {
+        let mut out = String::new();
+        for (index, thread) in self.threads.iter().enumerate() {
+            let running = index == self.current_thread;
+            out.push_str(&format!(
+                "  [{index}]{} handle={:#x} state={:?} paused={} pc={:#x}\n",
+                if running { "*" } else { " " },
+                thread.handle,
+                thread.state,
+                thread.paused,
+                if running { self.pc } else { thread.pc },
+            ));
+        }
+        out
     }
 
     /// Record a diagnostic the user needs to see wherever the emulator is

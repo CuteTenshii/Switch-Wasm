@@ -1338,6 +1338,61 @@ one pushbuffer and issues no draw at all: `GpuStats { submissions: 1,
 methods: 3536, clears: 0, draws: 0, copies: 0, macros: 35, inert_methods:
 554 }`. Whatever it is waiting for is upstream of the GPU.
 
+### NXpotify: a missing shuffle, then a thread that never let go
+
+Two separate faults, in a row, in an app that reaches further into the system
+than anything else in `web/assets` — it links Mesa's nouveau driver, SDL2,
+FreeType, curl and mbedTLS, so it exercises the GPU, the socket stack and the
+scheduler at once.
+
+**`0x4e1c03bf` was `tbl v31.16b, {v29.16b}, v28.16b`**, in a NEON SHA-512
+round. The decoder had no table lookup at all, and the reason it was missing
+is worth keeping: TBL/TBX share bits[29:21] with the copy group
+(DUP/INS/UMOV/SMOV) and were being swallowed by its guard. Every copy
+encoding sets bit10; table lookup has bit15 == 0 and bits[11:10] == 00. The
+table is `len+1` consecutive registers, wrapping past v31, and an index past
+the end reads zero for TBL but leaves the destination byte untouched for TBX
+— which is the whole point of TBX, since it lets a second lookup fill in what
+the first missed.
+
+**Then it hung, and the hang was ours, not the app's.** The symptom was a
+process pinned at ~119 MiB that looked like a leak and looked like a tight
+loop. Neither: the memory is Mesa's up-front pool (one 67 MiB allocation; 16
+nvmap allocations in the whole run), and `Cpu::thread_dump` — added for this —
+showed the real shape at a glance. Seven threads, all Runnable, and only one
+of them ever running:
+
+```
+  [0]  handle=0x1    state=Runnable pc=0x8683028
+  ...
+  [6]* handle=0x102d state=Runnable pc=0x8683b14
+```
+
+Thread 6 is NXpotify's Zeroconf HTTP listener, whose loop is
+`if (poll(&pfd, 1, 200) <= 0) continue;`. On hardware that sleeps a fifth of
+a second per turn. `bsd`'s `Poll` correctly reported nothing ready — and
+returned instantly, which turned the loop into one with no blocking syscall
+in it. Threads here only hand over at those, so it starved every other
+thread, main included, and no frame was ever presented.
+
+The fix is that an empty answer and an *instant* answer are different things:
+a `Poll` carrying a non-zero timeout sets `Cpu::pending_yield`, and
+`svcSendSyncRequest` reschedules once the reply and X0 are written — it has
+to be after, because switching threads swaps the register file, so a
+`write_zr(0, …)` past the yield would land on whichever thread runs next. A
+zero timeout is an explicit non-blocking probe and still returns at once.
+
+With both fixed NXpotify presents frames (`draws: 50` by frame 10). What
+shows is the settings gear in the corner and nothing else — its text is drawn
+through SDL2_ttf into GL textures and those draws produce nothing visible, a
+GPU-side gap that is unrelated to either bug here. hbmenu (918713 non-black
+pixels) and JKSV (21 draws, step 83964291) are unchanged.
+
+Two things this cost time on, worth avoiding next time: `[ipc]` goes to
+stdout and `[nv]`/`[vi]` to stderr, so a merged `2>&1 | tail` interleaves them
+by *buffer flush*, not by time — a six-call sequence read as an endless loop
+three separate times. Count with `grep -c` before believing a tail.
+
 ## Frontend
 
 - **PFS0 offset rebasing**: some repacked NSPs (e.g. ROMSLAB) store PFS0 file
