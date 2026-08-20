@@ -290,10 +290,10 @@ pub struct Cpu {
     /// changes; answering every poll with a fresh message made
     /// `appletMainLoop` re-process a focus change on every call.
     applet_focus_sent: bool,
-    /// Every `(interface, command)` pair the applet stub has already reported
-    /// as unimplemented, so the warning naming it prints once instead of once
-    /// per poll (`appletMainLoop` calls into `am` every frame).
-    unimplemented_am: HashSet<(String, Option<u32>)>,
+    /// Every `(interface, command)` pair already reported as having no
+    /// implementation behind it, so the warning naming it prints once instead
+    /// of once per call (`appletMainLoop` polls `am` every frame).
+    unimplemented_ipc: HashSet<(String, Option<u32>)>,
     /// Synthetic SD-card directory state for the fsp-srv stub: maps an open
     /// directory handle to the entries it has not yielded yet
     /// (name bytes, entry type, file size). Lets `fsFsOpenDirectory` /
@@ -391,7 +391,7 @@ impl Cpu {
             domain_objects: HashMap::new(),
             vi_ifaces: HashMap::new(),
             applet_focus_sent: false,
-            unimplemented_am: HashSet::new(),
+            unimplemented_ipc: HashSet::new(),
             fs_dirs: HashMap::new(),
             fs_files: HashMap::new(),
             romfs: None,
@@ -1366,6 +1366,19 @@ impl Cpu {
                 ));
             }
         }
+    }
+
+    /// Record a diagnostic the user needs to see wherever the emulator is
+    /// running. On the host that is stderr; in the browser there is no stderr
+    /// at all — `wasm32-unknown-unknown` has no WASI, so an `eprintln!` there
+    /// goes nowhere and `std::env::var` always fails, which is why the
+    /// `TRACE_*`-gated traces are CLI-only. The trace buffer is the channel
+    /// the page actually drains (`switch_drain_trace`), so anything that must
+    /// reach a browser user goes through here as well, and is recorded whether
+    /// or not per-instruction tracing is on — the same as fault context.
+    pub(crate) fn diagnostic(&mut self, line: &str) {
+        eprintln!("{line}");
+        self.trace_line(&format!("{line}\n"));
     }
 
     fn trace_line(&mut self, line: &str) {

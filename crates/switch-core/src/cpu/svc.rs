@@ -498,7 +498,7 @@ impl Cpu {
                         }
                         "audren:u" => self.audren_request(tls, cmd_id)?,
                         "audren:iaudiorenderer" => self.audren_renderer_request(tls, cmd_id, handle)?,
-                         _name => {
+                         name => {
                              // Known service, no dedicated stub: answer with a
                              // fresh object id so a caller that expects an
                              // out-object gets something coherent.
@@ -515,6 +515,8 @@ impl Cpu {
                              // the same way `pl:u`'s GetLoadState once got the
                              // applet message back and left NX-Shell polling it
                              // 190k times.
+                             let name = name.to_string();
+                             self.warn_no_implementation(&name, cmd_id);
                              let obj = self.next_object_id;
                              self.next_object_id = obj.wrapping_add(1);
                              self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])?
@@ -547,6 +549,7 @@ impl Cpu {
                     // session, not just an applet one, so `vi`'s and `hid`'s
                     // sessions were being answered with applet state whenever
                     // their command ids happened to collide.
+                    self.warn_no_implementation("<untracked session>", cmd_id);
                     let data = {
                         let obj = self.next_object_id;
                         self.next_object_id = obj.wrapping_add(1);

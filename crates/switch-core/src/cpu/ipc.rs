@@ -1368,10 +1368,24 @@ impl Cpu {
         /// `cmif` (module 10) description 221: what a real `sf` server answers
         /// when a session has no handler for the requested command id.
         const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
-        if self.unimplemented_am.insert((iface.to_string(), cmd_id)) {
-            eprintln!("[am] unimplemented: {iface} cmd={cmd_id:?} (pc={:#x})", self.pc);
+        if self.unimplemented_ipc.insert((iface.to_string(), cmd_id)) {
+            let pc = self.pc;
+            self.diagnostic(&format!("[am] unimplemented: {iface} cmd={cmd_id:?} (pc={pc:#x})"));
         }
         self.write_ipc_response(tls, UNKNOWN_COMMAND_ID, &[], &[], &[])
+    }
+
+    /// Note that a service reached over IPC has no implementation behind it at
+    /// all, and is about to be answered with a fabricated object id.
+    ///
+    /// Unlike [`Cpu::am_unimplemented`] this does not change the reply — the
+    /// generic success is load-bearing for homebrew that only checks the
+    /// Result — it just stops the gap being invisible. Whatever this prints is
+    /// the list of services a guest is asking for and not getting.
+    pub(super) fn warn_no_implementation(&mut self, service: &str, cmd_id: Option<u32>) {
+        if self.unimplemented_ipc.insert((service.to_string(), cmd_id)) {
+            self.diagnostic(&format!("[ipc] no implementation: {service} cmd={cmd_id:?}"));
+        }
     }
 
     /// `IApplicationProxyService`/`IApplicationProxy`: the applet-lifecycle

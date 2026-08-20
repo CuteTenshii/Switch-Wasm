@@ -91,6 +91,15 @@ heap at `GUEST_HEAP_REGION_ADDR` (0x3000_0000, ending where `FB_BASE` begins).
   that does not exist here — and `nn::os::AllocateAddressRegion` fails with os
   result 3-12.
 
+**There is no stderr in the browser.** `wasm32-unknown-unknown` has no WASI,
+so an `eprintln!` goes nowhere and `std::env::var` always fails — every
+`TRACE_*`-gated trace is host-CLI-only. A diagnostic that has to reach a
+browser user goes through `Cpu::diagnostic`, which writes stderr *and* the
+trace buffer the page drains (`switch_drain_trace`), and is recorded whether or
+not per-instruction tracing is on. `main.js` drains it every run slice, so
+`[am] unimplemented` and `[ipc] no implementation` show up in the page's
+console panel as they happen.
+
 `TRACE_SVC=1` prints every syscall except the three hot ones
 (`SendSyncRequest`, `WaitSynchronization`, `SleepThread`), plus each
 `svcGetInfo` answer. It is the counterpart of `TRACE_IPC` and the fastest way
@@ -239,6 +248,12 @@ object id and nothing else. It used to guess the *applet* state commands
 started with "applet"; those numbers leaked — `pl:u`'s `GetLoadState` is also
 command 1, and answering it with 15 left NX-Shell polling the shared-font
 service 190k times.
+
+**A stub that answers by fabrication says so.** The generic reply for a service
+with no dedicated handler is load-bearing for homebrew that only checks the
+Result, so it still succeeds — but `Cpu::warn_no_implementation` records
+`[ipc] no implementation: <service> cmd=<n>` once per pair, and that list *is*
+the inventory of what a given guest is asking for and not getting.
 
 **An unimplemented `am` command must not answer with a bare success.**
 Everything `am` hands back is a live kernel object or a piece of applet state

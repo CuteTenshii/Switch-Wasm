@@ -350,6 +350,7 @@ async function run() {
     await new Promise((r) => setTimeout(r, 0));
     await updatePc();
     await drainOutput();
+    await drainDiagnostics();
     // Repaint only when the guest has actually presented a new frame - the
     // snapshot is several megabytes at 1280x720.
     const frames = await call('frame_count');
@@ -430,10 +431,7 @@ async function finishRun(steps, stepped) {
   } else if (await call('halted')) {
     setState('halted');
     log('Halted (ExitProcess)', 'ok');
-    if (traceCb.checked) {
-      const t = await drainTrace();
-      if (t) log(t.replace(/\n$/, ''), 'dim');
-    }
+    await drainDiagnostics();
   } else if (!stepped) {
     setState('fault');
     log('Stopped unexpectedly.', 'err');
@@ -472,6 +470,16 @@ traceCb.addEventListener('change', () => {
   call('set_trace', traceCb.checked ? 1 : 0);
   if (traceCb.checked) log('Tracing enabled - run slices are capped for readability.', 'dim');
 });
+
+// The trace buffer carries more than the per-instruction disassembly: the
+// emulator records diagnostics there whether or not tracing is enabled -
+// services and applet commands a guest asked for that have no implementation
+// behind them. There is no stderr in the browser, so this is the only way they
+// reach anyone. Drained as the run goes rather than only at the end.
+async function drainDiagnostics() {
+  const t = await drainTrace();
+  if (t) log(t.replace(/\n$/, ''), 'dim');
+}
 
 async function drainTrace() {
   const bytes = await call('drain_trace');
