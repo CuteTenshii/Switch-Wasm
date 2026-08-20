@@ -779,15 +779,28 @@ impl Cpu {
         /// Horizon `fs` results: module 2, descriptions 1 (path not found) and
         /// 2 (path already exists).
         const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
+        const PATH_ALREADY_EXISTS: u32 = 2 | (2 << 9);
         let path = self.ipc_request_path(tls);
         if std::env::var("TRACE_IPC").is_ok() {
             eprintln!("[fs] pc={:#x} cmd={:?} path={:?}", self.pc, cmd_id, path);
         }
         match cmd_id {
-            // CreateFile(u64 size, u32 flags) / CreateDirectory
+            // CreateFile(u32 option, s64 size) / CreateDirectory.
+            //
+            // Creating a file that already exists is an **error**, not a
+            // truncation: `fsdev` opens a file for writing by calling this,
+            // expecting "already exists", and then opening it. Answering with
+            // a fresh empty file instead emptied the file on every reopen —
+            // which is what made a config written one moment read back as
+            // zero bytes the next.
             Some(0) => {
-                self.fs.write_file(&path, Vec::new());
-                self.write_ipc_response(tls, 0, &[], &[], &[])
+                let data = self.ipc_request_data(tls);
+                let size = self.mem.read_u64(data.wrapping_add(8)).unwrap_or(0);
+                if self.fs.create_file(&path, size) {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                } else {
+                    self.write_ipc_response(tls, PATH_ALREADY_EXISTS, &[], &[], &[])
+                }
             }
             Some(2) => {
                 self.fs.create_dir(&path);
@@ -831,6 +844,17 @@ impl Cpu {
                 let bytes = 32u64 << 30;
                 self.write_ipc_response(tls, 0, &[], &bytes.to_le_bytes(), &[])
             }
+            // GetFileTimeStampRaw -> FsTimeStampRaw { created, modified,
+            // accessed, is_valid }. Nothing here records a file's times, and
+            // `is_valid` is the field that says so — the point of answering
+            // rather than falling through to the bare success below, which
+            // left the caller reading three timestamps off its own stack.
+            Some(14) => {
+                if self.fs.entry_type(&path).is_none() {
+                    return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
+                }
+                self.write_ipc_response(tls, 0, &[], &[0u8; 0x20], &[])
+            }
             // Commit and the remaining bookkeeping commands.
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
         }
@@ -869,8 +893,17 @@ impl Cpu {
         }
     }
 
-    /// `IFile`: cmd 0 = Read, cmd 4 = GetSize.
+    /// `IFile`: cmd 0 = Read, cmd 1 = Write, cmd 2 = Flush, cmd 3 = SetSize,
+    /// cmd 4 = GetSize.
+    ///
+    /// The writing half used to fall through to the catch-all below, so a
+    /// guest was told its write succeeded and then read the file back empty.
+    /// That is worse than an error: an application that cannot write its
+    /// settings can say so, but one told it *did* write them has no reason to
+    /// doubt the zero bytes it reads next. Checkpoint wrote its `config.json`,
+    /// re-opened it, found nothing, and gave up before its first frame.
     pub(super) fn fs_file_request(&mut self, tls: u32, cmd_id: Option<u32>, key: u64) -> Result<()> {
+        const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
         let path = self.fs_files.get(&key).cloned().unwrap_or_default();
         match cmd_id {
             // Read(u32 option, u64 offset, u64 size) -> u64 bytes_read
@@ -896,6 +929,45 @@ impl Cpu {
                     }
                 }
                 self.write_ipc_response(tls, 0, &[], &(read as u64).to_le_bytes(), &[])
+            }
+            // Write(u32 option, s64 offset, u64 size) with the bytes in a
+            // send buffer. `option`'s bit 0 is Flush, which costs nothing
+            // here — the write has already reached the only copy there is.
+            Some(1) => {
+                let data = self.ipc_request_data(tls);
+                let offset = self.mem.read_u64(data.wrapping_add(8))?;
+                let requested = self.mem.read_u64(data.wrapping_add(0x10))?;
+                let bytes = match self.ipc_send_buffer(tls, 0) {
+                    Some((addr, len)) => {
+                        self.read_bytes(addr, (len as u64).min(requested) as u32)
+                    }
+                    None => Vec::new(),
+                };
+                if std::env::var("TRACE_IPC").is_ok() {
+                    eprintln!(
+                        "[fs-file] write path={:?} offset={:#x} size={:#x} -> {:#x}",
+                        path,
+                        offset,
+                        requested,
+                        bytes.len()
+                    );
+                }
+                match self.fs.write(&path, offset, &bytes) {
+                    Some(_) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    None => self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]),
+                }
+            }
+            // Flush: there is no write-behind cache to flush.
+            Some(2) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // SetSize(s64 size) — how `fsdev` truncates a file it opened with
+            // `O_TRUNC`, so it has to actually shorten it.
+            Some(3) => {
+                let size = self.mem.read_u64(self.ipc_request_data(tls))?;
+                if self.fs.set_size(&path, size) {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                } else {
+                    self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[])
+                }
             }
             // GetSize -> u64
             Some(4) => {
@@ -4944,6 +5016,120 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "reported as loaded");
         cpu.pl_request(TLS, Some(5)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), 0, "no fonts");
+    }
+
+    /// A CMIF request whose first send-static ("pointer") buffer carries a
+    /// path, the way every `IFileSystem` command names the file it acts on.
+    fn request_with_path(command_id: u32, path: &str, payload: &[u8]) -> Cpu {
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.mem.map_zero(PATH_AT, 0x400).unwrap();
+        write_path_request(&mut cpu, command_id, path, payload);
+        cpu
+    }
+
+    /// Where [`write_path_request`] parks the path it hands the service.
+    const PATH_AT: u32 = 0x3800;
+
+    /// The same, into an existing `Cpu`, so a test can drive a second command
+    /// against the tree the first one left behind.
+    fn write_path_request(cpu: &mut Cpu, command_id: u32, path: &str, payload: &[u8]) {
+        for offset in (0..0x100u32).step_by(4) {
+            cpu.mem.write_u32(TLS + offset, 0).unwrap();
+        }
+        for (i, &byte) in path.as_bytes().iter().enumerate() {
+            cpu.mem.write_u8(PATH_AT + i as u32, byte).unwrap();
+        }
+        cpu.mem.write_u8(PATH_AT + path.len() as u32, 0).unwrap();
+        cpu.mem.write_u32(TLS, 4 | (1 << 16)).unwrap(); // one send-static
+        cpu.mem.write_u32(TLS + 4, 12).unwrap();
+        cpu.mem.write_u32(TLS + 8, (path.len() as u32 + 1) << 16).unwrap();
+        cpu.mem.write_u32(TLS + 12, PATH_AT).unwrap();
+        let at = TLS + 0x20;
+        cpu.mem.write_u32(at, SFCI).unwrap();
+        cpu.mem.write_u32(at + 8, command_id).unwrap();
+        for (i, &byte) in payload.iter().enumerate() {
+            cpu.mem.write_u8(at + 0x10 + i as u32, byte).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_file_written_through_ifile_reads_back() {
+        // `IFile`'s writing half used to fall through to the catch-all
+        // "success, no data" reply, so the bytes went nowhere and the guest
+        // had no way to know: Checkpoint wrote its config, re-opened it, read
+        // zero bytes, and quit before drawing anything.
+        let key = Cpu::object_key(9, 1);
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.mem.map_zero(0x3000, 0x100).unwrap();
+        assert!(cpu.fs.create_file("/switch/cfg.json", 0));
+        cpu.fs_files.insert(key, "/switch/cfg.json".to_owned());
+
+        // fsFileWrite { u32 option, u32 pad, s64 offset, u64 size } with the
+        // bytes in a send buffer.
+        for (i, &byte) in br#"{"v":5}"#.iter().enumerate() {
+            cpu.mem.write_u8(0x3000 + i as u32, byte).unwrap();
+        }
+        let mut payload = [0u8; 0x18];
+        payload[8..16].copy_from_slice(&0u64.to_le_bytes());
+        payload[16..24].copy_from_slice(&7u64.to_le_bytes());
+        write_map_buffer_request(&mut cpu, 1, &payload, 0x3000, 7, true);
+        cpu.fs_file_request(TLS, Some(1), key).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.fs.file("/switch/cfg.json"), Some(&br#"{"v":5}"#[..]));
+
+        // GetSize agrees with what was written, rather than the zero the file
+        // was created with.
+        write_request(&mut cpu, 4, &[]);
+        cpu.fs_file_request(TLS, Some(4), key).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 7);
+
+        // A write past the end grows the file.
+        for (i, &byte) in b"!!".iter().enumerate() {
+            cpu.mem.write_u8(0x3000 + i as u32, byte).unwrap();
+        }
+        let mut payload = [0u8; 0x18];
+        payload[8..16].copy_from_slice(&7u64.to_le_bytes());
+        payload[16..24].copy_from_slice(&2u64.to_le_bytes());
+        write_map_buffer_request(&mut cpu, 1, &payload, 0x3000, 2, true);
+        cpu.fs_file_request(TLS, Some(1), key).unwrap();
+        assert_eq!(cpu.fs.size("/switch/cfg.json"), Some(9));
+
+        // SetSize truncates — how `fsdev` honours `O_TRUNC`.
+        write_request(&mut cpu, 3, &3u64.to_le_bytes());
+        cpu.fs_file_request(TLS, Some(3), key).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.fs.file("/switch/cfg.json"), Some(&br#"{"v"#[..]));
+
+        // A handle whose file is gone reports it rather than reporting
+        // success — the distinction the catch-all could not make.
+        cpu.fs.remove("/switch/cfg.json");
+        write_request(&mut cpu, 3, &0u64.to_le_bytes());
+        cpu.fs_file_request(TLS, Some(3), key).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 2 | (1 << 9), "path not found");
+    }
+
+    #[test]
+    fn create_file_on_one_that_exists_reports_it_rather_than_emptying_it() {
+        const PATH_ALREADY_EXISTS: u32 = 2 | (2 << 9);
+        // CreateFile(option, size): the size is the initial length.
+        let mut payload = [0u8; 0x10];
+        payload[8..16].copy_from_slice(&4u64.to_le_bytes());
+        let mut cpu = request_with_path(0, "sdmc:/switch/cfg.json", &payload);
+        cpu.record_handle(9, "fsp-srv");
+        cpu.fs_request(TLS, Some(0), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "created");
+        assert_eq!(cpu.fs.file("/switch/cfg.json"), Some(&[0u8; 4][..]));
+
+        // Creating it again fails and leaves the contents alone — `fsdev`
+        // opens an existing file this way, and truncating here is what made a
+        // config read back empty right after it was written.
+        cpu.fs.write("/switch/cfg.json", 0, b"{}!!").unwrap();
+        write_path_request(&mut cpu, 0, "sdmc:/switch/cfg.json", &payload);
+        cpu.fs_request(TLS, Some(0), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), PATH_ALREADY_EXISTS);
+        assert_eq!(cpu.fs.file("/switch/cfg.json"), Some(&b"{}!!"[..]));
     }
 
     #[test]

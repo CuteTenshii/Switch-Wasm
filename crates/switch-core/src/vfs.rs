@@ -85,6 +85,54 @@ impl Vfs {
         self.nodes.insert(path, Node::File(data));
     }
 
+    /// Create an empty file of `size` bytes, failing if anything is already
+    /// at `path`.
+    ///
+    /// Unlike [`Vfs::write_file`] — which is the *host* putting a file on the
+    /// card and may replace what is there — this is the guest's `CreateFile`,
+    /// and it must not truncate: `fsdev` opens an existing file by calling
+    /// `CreateFile`, expecting "already exists", and then opening it. Losing
+    /// that distinction silently emptied a file every time the guest reopened
+    /// it.
+    pub fn create_file(&mut self, path: &str, size: u64) -> bool {
+        let path = Self::normalize(path);
+        if self.nodes.contains_key(&path) {
+            return false;
+        }
+        if let Some(parent) = Self::parent_of(&path) {
+            self.create_dir(&parent);
+        }
+        self.nodes.insert(path, Node::File(vec![0; size as usize]));
+        true
+    }
+
+    /// Write `data` at `offset`, growing the file (zero-filling any gap) when
+    /// it runs past the end. Returns how many bytes were written, or `None`
+    /// when the path is not a file.
+    pub fn write(&mut self, path: &str, offset: u64, data: &[u8]) -> Option<usize> {
+        let Some(Node::File(contents)) = self.nodes.get_mut(&Self::normalize(path)) else {
+            return None;
+        };
+        let start = offset as usize;
+        let end = start.checked_add(data.len())?;
+        if end > contents.len() {
+            contents.resize(end, 0);
+        }
+        contents[start..end].copy_from_slice(data);
+        Some(data.len())
+    }
+
+    /// Resize a file, zero-filling any growth. Returns whether it was one.
+    pub fn set_size(&mut self, path: &str, size: u64) -> bool {
+        match self.nodes.get_mut(&Self::normalize(path)) {
+            Some(Node::File(contents)) => {
+                contents.resize(size as usize, 0);
+                true
+            }
+            _ => false,
+        }
+    }
+
     pub fn remove(&mut self, path: &str) -> bool {
         self.nodes.remove(&Self::normalize(path)).is_some()
     }
@@ -223,6 +271,57 @@ mod tests {
         assert_eq!(vfs.entry_type("/a"), Some(ENTRY_TYPE_DIR));
         assert_eq!(vfs.entry_type("/a/b"), Some(ENTRY_TYPE_DIR));
         assert_eq!(vfs.entry_type("/a/b/c.txt"), Some(ENTRY_TYPE_FILE));
+    }
+
+    #[test]
+    fn create_file_refuses_to_truncate_what_is_already_there() {
+        // `fsdev` opens an existing file by calling `CreateFile` first and
+        // expecting it to fail, so a create that quietly emptied the file
+        // lost the contents on every reopen.
+        let mut vfs = Vfs::new();
+        assert!(vfs.create_file("/switch/cfg.json", 0));
+        assert_eq!(vfs.size("/switch/cfg.json"), Some(0));
+        vfs.write("/switch/cfg.json", 0, b"{}").unwrap();
+
+        assert!(!vfs.create_file("/switch/cfg.json", 0), "already exists");
+        assert_eq!(vfs.file("/switch/cfg.json"), Some(&b"{}"[..]));
+        // A directory in the way counts as "already there" too.
+        assert!(!vfs.create_file("/switch", 0));
+
+        // The size argument is the file's initial length, zero-filled.
+        assert!(vfs.create_file("/switch/blank.bin", 4));
+        assert_eq!(vfs.file("/switch/blank.bin"), Some(&[0u8; 4][..]));
+    }
+
+    #[test]
+    fn writing_past_the_end_grows_the_file() {
+        let mut vfs = Vfs::new();
+        vfs.write_file("/data.bin", vec![1, 2, 3, 4]);
+        // Overwrite in place.
+        assert_eq!(vfs.write("/data.bin", 1, &[9, 9]), Some(2));
+        assert_eq!(vfs.file("/data.bin"), Some(&[1, 9, 9, 4][..]));
+        // Past the end: the file grows to fit.
+        assert_eq!(vfs.write("/data.bin", 4, &[5, 6]), Some(2));
+        assert_eq!(vfs.file("/data.bin"), Some(&[1, 9, 9, 4, 5, 6][..]));
+        // A gap between the end and the write is zero-filled rather than
+        // left holding whatever the allocation had.
+        assert_eq!(vfs.write("/data.bin", 8, &[7]), Some(1));
+        assert_eq!(vfs.file("/data.bin"), Some(&[1, 9, 9, 4, 5, 6, 0, 0, 7][..]));
+        // Neither a directory nor a missing path is writable.
+        assert_eq!(vfs.write("/switch", 0, &[1]), None);
+        assert_eq!(vfs.write("/nope", 0, &[1]), None);
+    }
+
+    #[test]
+    fn set_size_truncates_and_extends() {
+        let mut vfs = Vfs::new();
+        vfs.write_file("/data.bin", (0..8u8).collect());
+        assert!(vfs.set_size("/data.bin", 3));
+        assert_eq!(vfs.file("/data.bin"), Some(&[0, 1, 2][..]));
+        assert!(vfs.set_size("/data.bin", 5));
+        assert_eq!(vfs.file("/data.bin"), Some(&[0, 1, 2, 0, 0][..]));
+        assert!(!vfs.set_size("/switch", 0), "not a file");
+        assert!(!vfs.set_size("/nope", 0));
     }
 
     #[test]
