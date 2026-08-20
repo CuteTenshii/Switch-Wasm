@@ -4,6 +4,8 @@
 //!
 //! Usage: retail_trace <nsp> <prod.keys> <title.keys> [tail_len]
 //!   RING_FROM=<hex pc>  start recording only once this pc is first hit.
+//!   MARK=<pc>[=name][,...]  print a line each time one of these pcs runs.
+//!   MARK_DUMP=<reg>,<byte offset>,<words>  also dump memory at each mark.
 
 use std::env;
 use std::fs;
@@ -86,9 +88,52 @@ fn main() {
     // *beginning* of a function rather than the last N steps before the halt.
     let stop_after = env::var("RING_STOP_AFTER").ok().and_then(|s| s.parse::<u64>().ok());
     let mut recorded = 0u64;
+    // Print a line every time one of these addresses is executed. Pass a
+    // comma-separated list of hex pcs (a function's entry, say) to watch a
+    // whole API get called in order without recording every step in between.
+    let marks: std::collections::HashMap<u32, String> = env::var("MARK")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .filter(|s| !s.is_empty())
+                .filter_map(|entry| {
+                    let (pc, name) = entry.split_once('=').unwrap_or((entry, entry));
+                    let pc = u32::from_str_radix(pc.trim().trim_start_matches("0x"), 16).ok()?;
+                    Some((pc, name.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // With MARK, also dump memory: `MARK_DUMP=<reg>,<signed byte offset>,<words>`
+    // — the reply struct a marked function is about to read, say.
+    let mark_dump: Option<(u8, i64, u32)> = env::var("MARK_DUMP").ok().and_then(|v| {
+        let mut parts = v.split(',');
+        Some((
+            parts.next()?.trim().parse().ok()?,
+            parts.next()?.trim().parse().ok()?,
+            parts.next()?.trim().parse().ok()?,
+        ))
+    });
     let mut done = 0u64;
     while !cpu.halted && done < 400_000_000 {
         let pc = cpu.get_pc();
+        if let Some(name) = marks.get(&pc) {
+            println!(
+                "[mark] {done} {name} x0={:#x} x1={:#x} x2={:#x} x3={:#x} lr={:#x}",
+                cpu.read_x(0), cpu.read_x(1), cpu.read_x(2), cpu.read_x(3), cpu.read_x(30)
+            );
+            if let Some((reg, off, len)) = mark_dump {
+                let at = (cpu.read_x(reg) as i64 + off) as u32;
+                let mut line = String::new();
+                for i in 0..len {
+                    let _ = std::fmt::Write::write_fmt(
+                        &mut line,
+                        format_args!(" {:08x}", cpu.mem.read_u32(at + i * 4).unwrap_or(0)),
+                    );
+                }
+                println!("[mark]   x{reg}{off:+} = {at:#x}:{line}");
+            }
+        }
         if !recording && Some(pc) == ring_from {
             recording = true;
             // Whatever this function was called with: dump any argument that

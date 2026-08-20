@@ -3540,6 +3540,29 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
 }
 
 #[test]
+fn audout_reads_the_channel_count_as_sixteen_bits() {
+    // `OpenAudioOut` takes the channel count as a 16-bit field, and the two
+    // bytes above it are padding the caller never writes. Reading the whole
+    // word and echoing it back handed `nnSdk` a channel count of 0xcafe0002 --
+    // negative, so its own "channelCount > 0" check failed and the title tore
+    // its audio down and re-opened, which aborts.
+    const AUDOUT: u64 = 0xA000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(AUDOUT, "audout:u");
+    let tls = cpu.tls_base();
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&0u32.to_le_bytes()); // sample rate: device default
+    args.extend_from_slice(&0xcafe_0002u32.to_le_bytes()); // stereo, plus junk
+    args.extend_from_slice(&0u64.to_le_bytes()); // aruid
+    ipc_request_plain(&mut cpu, AUDOUT, 1, &args);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 48_000, "device default rate");
+    assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 2, "the padding leaked through");
+}
+
+#[test]
 fn audout_does_not_play_a_stopped_device() {
     // A device that has not been started is not playing. Its buffers still
     // come back -- the memory is the guest's -- but nothing is queued for the

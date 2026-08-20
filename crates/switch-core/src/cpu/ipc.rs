@@ -2491,10 +2491,17 @@ impl Cpu {
             Some(1) | Some(3) => {
                 let data = self.ipc_request_data(tls);
                 let asked_rate = self.mem.read_u32(data).unwrap_or(0);
-                let asked_channels = self.mem.read_u32(data.wrapping_add(4)).unwrap_or(0);
+                // The channel count is 16 bits wide on the wire and the two
+                // bytes above it are padding the caller does not initialise.
+                // Reading the whole word and echoing it back is how `nnSdk`
+                // came to believe the device had 0xcafe0002 channels --
+                // negative, so its "channelCount > 0" check failed, so Unity
+                // tore audio down and re-opened, and the second open aborted
+                // the process with `audio` result 2153-0009.
+                let asked_channels = self.mem.read_u16(data.wrapping_add(4)).unwrap_or(0);
                 // A guest that asks for 0 means "whatever the device is".
                 let sample_rate = if asked_rate == 0 { 48_000 } else { asked_rate };
-                let channel_count = if asked_channels == 0 { 2 } else { asked_channels };
+                let channel_count = u32::from(if asked_channels == 0 { 2 } else { asked_channels });
 
                 if let Some(buf) = self.ipc_recv_buffer_addr(tls, 0) {
                     for i in 0..NAME_LEN {
