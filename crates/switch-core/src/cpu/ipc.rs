@@ -1075,12 +1075,23 @@ impl Cpu {
                     _ => Vec::new(),
                 };
                 argp.resize(size, 0);
-                let error = self.nv.ioctl(&mut self.mem, fd, request, &mut argp, &inline_in)?;
+                let mut inline_out = Vec::new();
+                let error =
+                    self.nv.ioctl(&mut self.mem, fd, request, &mut argp, &inline_in, &mut inline_out)?;
                 if error != 0 && std::env::var("TRACE_NV").is_ok() {
                     eprintln!("[nv] ioctl fd={fd} request={request:#x} -> error {error}");
                 }
                 if let Some(&(addr, len)) = recv.first() {
                     for (i, &byte) in argp.iter().take(len as usize).enumerate() {
+                        self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
+                    }
+                }
+                // `nvIoctl3`'s second receive buffer: where a caller that
+                // asked for its payload out-of-line reads it from. Leaving it
+                // untouched is how a retail title ended up with a zeroed GPU
+                // characteristics struct.
+                if let Some(&(addr, len)) = recv.get(1) {
+                    for (i, &byte) in inline_out.iter().take(len as usize).enumerate() {
                         self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
                     }
                 }

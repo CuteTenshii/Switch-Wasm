@@ -116,8 +116,18 @@ impl NvDrv {
 
     /// `nvIoctl` / `nvIoctl2` / `nvIoctl3`. `data` is the in/out argument
     /// struct, resized by the caller to the ioctl's declared size; `inline_in`
-    /// carries `nvIoctl2`'s extra input buffer. Returns the `NvError` the
-    /// guest sees, or a hard [`Error`] when the GPU model itself faults.
+    /// carries `nvIoctl2`'s extra input buffer and `inline_out` receives
+    /// `nvIoctl3`'s extra *output* buffer. Returns the `NvError` the guest
+    /// sees, or a hard [`Error`] when the GPU model itself faults.
+    ///
+    /// The inline output is not decoration. An ioctl whose argument struct
+    /// carries a `{ buf_size, buf_addr }` pair returns its payload *through*
+    /// that pair, and `nvIoctl3` is how a caller asks for it to come back in a
+    /// second buffer rather than inline. `libnx` uses `nvIoctl` and reads the
+    /// payload from `data`; `nnSdk` uses `nvIoctl3` and reads it from here, so
+    /// leaving this empty handed a retail title a **zeroed** GPU
+    /// characteristics struct — it closed `/dev/nvhost-ctrl-gpu` and returned
+    /// a null device, which its caller then dereferenced.
     pub fn ioctl(
         &mut self,
         mem: &mut Memory,
@@ -125,6 +135,7 @@ impl NvDrv {
         request: u32,
         data: &mut [u8],
         inline_in: &[u8],
+        inline_out: &mut Vec<u8>,
     ) -> Result<u32> {
         let ioc_type = (request >> 8) & 0xFF;
         let nr = request & 0xFF;
@@ -146,7 +157,7 @@ impl NvDrv {
         match (&file, ioc_type) {
             (NvFile::NvMap, TYPE_NVMAP) => self.nvmap_ioctl(nr, data),
             (NvFile::NvHostCtrl, TYPE_NVHOST) => self.nvhost_ctrl_ioctl(nr, data),
-            (NvFile::NvHostCtrlGpu, TYPE_CTRL_GPU) => self.ctrl_gpu_ioctl(nr, data),
+            (NvFile::NvHostCtrlGpu, TYPE_CTRL_GPU) => self.ctrl_gpu_ioctl(nr, data, inline_out),
             (NvFile::AddressSpace { as_id }, TYPE_AS_GPU) => self.as_gpu_ioctl(*as_id, nr, data),
             (NvFile::Channel { channel_id }, _) => {
                 self.channel_ioctl(mem, *channel_id, ioc_type, nr, data, inline_in)
@@ -307,7 +318,7 @@ impl NvDrv {
 
     // -- /dev/nvhost-ctrl-gpu --------------------------------------------
 
-    fn ctrl_gpu_ioctl(&mut self, nr: u32, data: &mut [u8]) -> Result<u32> {
+    fn ctrl_gpu_ioctl(&mut self, nr: u32, data: &mut [u8], inline_out: &mut Vec<u8>) -> Result<u32> {
         match nr {
             // ZCullGetCtxSize { out u32 }
             0x01 => {
@@ -329,7 +340,9 @@ impl NvDrv {
             // ZbcSetTable / ZbcQueryTable: the zero-bandwidth-clear cache is
             // a pure optimisation; accepting the table is enough.
             0x03 | 0x04 => Ok(NV_OK),
-            // GetCharacteristics { in u64 buf_size, buf_addr; out gc }
+            // GetCharacteristics { in u64 buf_size, buf_addr; out gc }.
+            // The payload goes both inline (where `nvIoctl` callers read it)
+            // and into the inline-output buffer (where `nvIoctl3` callers do).
             0x05 => {
                 write_u64(data, 0, GPU_CHARACTERISTICS.len() as u64);
                 for (i, byte) in GPU_CHARACTERISTICS.iter().enumerate() {
@@ -337,12 +350,18 @@ impl NvDrv {
                         *slot = *byte;
                     }
                 }
+                inline_out.clear();
+                inline_out.extend_from_slice(&GPU_CHARACTERISTICS);
                 Ok(NV_OK)
             }
-            // GetTpcMasks { in bufsize, pad, bufaddr; out u8[8] }
+            // GetTpcMasks { in bufsize, pad, bufaddr; out u8[8] }, the same
+            // shape and so the same two destinations.
             0x06 => {
                 write_u32(data, 0x10, 0x3); // two TPCs in GPC 0
                 write_u32(data, 0x14, 0);
+                inline_out.clear();
+                inline_out.extend_from_slice(&3u32.to_le_bytes());
+                inline_out.extend_from_slice(&0u32.to_le_bytes());
                 Ok(NV_OK)
             }
             // ZbcGetActiveSlotMask { out slot, mask }
@@ -670,8 +689,9 @@ mod tests {
     const IOWR: u32 = 3;
 
     fn ioctl(drv: &mut NvDrv, mem: &mut Memory, fd: u32, ty: u32, nr: u32, data: &mut [u8]) -> u32 {
+        let mut inline_out = Vec::new();
         let request = make_ioctl(IOWR, ty, nr, data.len() as u32);
-        drv.ioctl(mem, fd, request, data, &[]).unwrap()
+        drv.ioctl(mem, fd, request, data, &[], &mut inline_out).unwrap()
     }
 
     #[test]
