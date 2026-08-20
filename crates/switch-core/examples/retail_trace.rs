@@ -83,13 +83,42 @@ fn main() {
     let mut ring: std::collections::VecDeque<(u64, u32, [u64; 8])> =
         std::collections::VecDeque::with_capacity(tail + 1);
 
+    // Stop this many steps after recording starts, so the ring holds the
+    // *beginning* of a function rather than the last N steps before the halt.
+    let stop_after = env::var("RING_STOP_AFTER").ok().and_then(|s| s.parse::<u64>().ok());
+    let mut recorded = 0u64;
     let mut done = 0u64;
     while !cpu.halted && done < 400_000_000 {
         let pc = cpu.get_pc();
         if !recording && Some(pc) == ring_from {
             recording = true;
+            // Whatever this function was called with: dump any argument that
+            // points at a printable C string, which is how a path or a mount
+            // name gets read out of a stuck `nn::fs` call.
+            for r in 0..4u8 {
+                let addr = cpu.read_x(r) as u32;
+                let mut sbuf = String::new();
+                for i in 0..128u32 {
+                    match cpu.mem.read_u8(addr.wrapping_add(i)) {
+                        Ok(0) => break,
+                        Ok(b) if (0x20..0x7f).contains(&b) => sbuf.push(b as char),
+                        _ => {
+                            sbuf.clear();
+                            break;
+                        }
+                    }
+                }
+                if sbuf.len() >= 2 {
+                    println!("x{r} = {addr:#x} -> {sbuf:?}");
+                }
+            }
         }
         if recording && pc >= ring_min {
+            recorded += 1;
+            if stop_after.is_some_and(|n| recorded > n) {
+                println!("stopped {recorded} steps after RING_FROM");
+                break;
+            }
             if ring.len() == tail {
                 ring.pop_front();
             }

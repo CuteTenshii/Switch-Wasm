@@ -1365,13 +1365,24 @@ fn applet_chain() -> (Cpu, u64, u32, u32) {
 }
 
 /// Build an IPC request carrying one map-alias send buffer, and run it.
-fn ipc_request_with_buffer(cpu: &mut Cpu, handle: u64, object_id: u32, cmd: u32, buf: u32, len: u32) {
+fn ipc_request_with_buffer(
+    cpu: &mut Cpu,
+    handle: u64,
+    object_id: u32,
+    cmd: u32,
+    buf: u32,
+    len: u32,
+    recv: bool,
+    payload: &[u8],
+) {
     let tls = cpu.tls_base();
     for i in (0..0x100u32).step_by(4) {
         cpu.mem.write_u32(tls + i, 0).unwrap();
     }
-    // hdr1: type 4 (Request), one send buffer in bits 23:20.
-    cpu.mem.write_u32(tls, 4 | (1 << 20)).unwrap();
+    // hdr1: type 4 (Request), one buffer — send buffers count in bits 23:20,
+    // receive buffers in 27:24. Either way it is one 12-byte descriptor, so
+    // the aligned data area lands at 0x20.
+    cpu.mem.write_u32(tls, 4 | (1 << if recv { 24 } else { 20 })).unwrap();
     cpu.mem.write_u32(tls + 4, 0x0c).unwrap();
     // HipcBufferDescriptor: size, address, then the high bits (all zero for a
     // 32-bit guest address).
@@ -1383,6 +1394,10 @@ fn ipc_request_with_buffer(cpu: &mut Cpu, handle: u64, object_id: u32, cmd: u32,
     cpu.mem.write_u32(tls + 0x24, object_id).unwrap();
     cpu.mem.write_u32(tls + 0x30, 0x4943_4653).unwrap(); // "SFCI"
     cpu.mem.write_u32(tls + 0x38, cmd).unwrap();
+    // The command's own arguments follow the 16-byte CmifInHeader.
+    for (i, &b) in payload.iter().enumerate() {
+        cpu.mem.write_u8(tls + 0x40 + i as u32, b).unwrap();
+    }
     cpu.set_reg(0, handle);
     let pc = cpu.get_pc();
     cpu.mem.map(pc, &svc(0x21).to_le_bytes()).unwrap();
@@ -1408,6 +1423,87 @@ fn write_log_packet(cpu: &mut Cpu, addr: u32, flags: u8, severity: u8, tlvs: &[(
         cpu.mem.write_u8(addr + 0x18 + i as u32, b).unwrap();
     }
     0x18 + payload.len() as u32
+}
+
+#[test]
+fn control_clone_hands_back_a_working_session() {
+    use switch_core::cpu::SyscallMode;
+    // CloneCurrentObject (control command 2) duplicates a session, and the
+    // reply has to carry a **new session handle as a move handle**. Answering
+    // it with a bare success and no handle left nnSdk -- which clones fsp-srv
+    // before mounting anything -- talking to handle 0, so nn::fs::MountRom
+    // failed without ever issuing a filesystem command.
+    // Clear of `alloc_handle`'s own range, which starts at 0x1000 -- a real
+    // session handle always comes from there, but this one is hand-registered.
+    const FS: u64 = 0x9000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.register_service_handle(FS, "fsp-srv");
+    let tls = cpu.tls_base();
+
+    // Convert to a domain first, so the clone has objects to inherit.
+    ipc_request(&mut cpu, FS, 5, None, 0);
+    let object = cpu.mem.read_u32(tls + 0x10).unwrap();
+
+    ipc_request(&mut cpu, FS, 5, None, 2); // CloneCurrentObject
+    assert_eq!(cpu.read_x(0), 0);
+    // Move handles land right after the 8-byte hipc header: a descriptor word
+    // then the handles themselves.
+    let clone = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(clone, 0, "clone must hand back a real handle, not 0");
+    assert_ne!(clone, FS, "the clone is a separate session");
+
+    // The clone reaches the same service, holding the same domain objects.
+    let handles = cpu.service_handles_snapshot();
+    assert!(handles.iter().any(|(h, name)| *h == clone && name == "fsp-srv"));
+    ipc_request(&mut cpu, clone, 4, Some(object), 1); // SetCurrentProcess
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+}
+
+#[test]
+fn storage_read_uses_the_istorage_field_layout() {
+    use switch_core::cpu::SyscallMode;
+    // IStorage::Read is (s64 offset, u64 size) -- *not* IFile::Read, which
+    // leads with a u32 option and pads to 8, putting its offset at +8 and its
+    // size at +0x10. Reading those two fields here meant every RomFS read came
+    // back as "0 bytes at offset 0x50": the guest mounted its RomFS, parsed an
+    // empty header, and found none of its own files.
+    const FS: u64 = 0x1000;
+    const OUT: u32 = 0x6000;
+    let romfs: Vec<u8> = (0..64u8).collect();
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.set_romfs(romfs.clone());
+    cpu.register_service_handle(FS, "fsp-srv-storage");
+    let tls = cpu.tls_base();
+
+    // Read(offset = 4, size = 8).
+    let mut args = Vec::new();
+    args.extend_from_slice(&4u64.to_le_bytes()); // offset
+    args.extend_from_slice(&8u64.to_le_bytes()); // size
+    ipc_request_with_buffer(&mut cpu, FS, 1, 0, OUT, 16, true, &args);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    for i in 0..8u32 {
+        assert_eq!(cpu.mem.read_u8(OUT + i).unwrap(), romfs[4 + i as usize], "byte {i}");
+    }
+    // Nothing past the requested size is touched.
+    assert_eq!(cpu.mem.read_u8(OUT + 8).unwrap(), 0);
+
+    // A read that runs off the end is clamped rather than faulting.
+    let mut args = Vec::new();
+    args.extend_from_slice(&(romfs.len() as u64 - 2).to_le_bytes());
+    args.extend_from_slice(&64u64.to_le_bytes());
+    ipc_request_with_buffer(&mut cpu, FS, 1, 0, OUT, 64, true, &args);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u8(OUT).unwrap(), romfs[romfs.len() - 2]);
+
+    // GetSize reports the whole RomFS.
+    ipc_request(&mut cpu, FS, 4, Some(1), 4);
+    assert_eq!(cpu.mem.read_u64(tls + 0x30).unwrap(), romfs.len() as u64);
 }
 
 #[test]
@@ -1441,16 +1537,16 @@ fn lm_writes_the_guests_own_log_to_the_console() {
         3,
         &[(KEY_MODULE, b"Game"), (KEY_TEXT, b"hello world")],
     );
-    ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len);
+    ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len, false, &[]);
     assert_eq!(String::from_utf8_lossy(&cpu.out), "[lm/ERROR/Game] hello world\n");
 
     // A message split across packets: only the head carries the prefix and
     // only the tail ends the line, so the two halves join into one message.
     cpu.out.clear();
     let len = write_log_packet(&mut cpu, PACKET, HEAD, 1, &[(KEY_TEXT, b"split ")]);
-    ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len);
+    ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len, false, &[]);
     let len = write_log_packet(&mut cpu, PACKET, TAIL, 1, &[(KEY_TEXT, b"message")]);
-    ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len);
+    ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len, false, &[]);
     assert_eq!(String::from_utf8_lossy(&cpu.out), "[lm/INFO] split message\n");
 
     // A packet claiming more payload than the buffer holds is trusted only as
@@ -1458,7 +1554,7 @@ fn lm_writes_the_guests_own_log_to_the_console() {
     cpu.out.clear();
     let len = write_log_packet(&mut cpu, PACKET, HEAD | TAIL, 0, &[(KEY_TEXT, b"truncated")]);
     cpu.mem.write_u32(PACKET + 0x14, 0xFFFF).unwrap();
-    ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len);
+    ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len, false, &[]);
     assert_eq!(String::from_utf8_lossy(&cpu.out), "[lm/TRACE] truncated\n");
 }
 

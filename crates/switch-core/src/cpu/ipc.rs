@@ -478,8 +478,21 @@ impl Cpu {
             // Read(u64 offset, u64 size) -> bytes into the recv buffer.
             Some(0) => {
                 let data = self.ipc_request_data(tls);
-                let offset = self.mem.read_u64(data.wrapping_add(8))? as usize;
-                let requested = self.mem.read_u64(data.wrapping_add(0x10))? as usize;
+                // `IStorage::Read(s64 offset, u64 size)`. Note the layout is
+                // **not** `IFile::Read`'s: a file read leads with a `u32
+                // option` and pads to 8, putting its offset at +8 and its size
+                // at +0x10. This used to read those two fields, so every
+                // storage read came back as "0 bytes at offset 0x50" — the
+                // guest mounted its RomFS, parsed an empty header, and
+                // `nn::fs::OpenDirectory("rom:/Data")` found nothing.
+                let offset = self.mem.read_u64(data)? as usize;
+                let requested = self.mem.read_u64(data.wrapping_add(8))? as usize;
+                if std::env::var("TRACE_IPC").is_ok() {
+                    eprintln!(
+                        "[storage] read offset={offset:#x} size={requested:#x} of {:#x}",
+                        romfs.len()
+                    );
+                }
                 let start = offset.min(romfs.len());
                 let end = start.saturating_add(requested).min(romfs.len());
                 let chunk = &romfs[start..end];

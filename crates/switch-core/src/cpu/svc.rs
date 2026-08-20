@@ -389,6 +389,36 @@ impl Cpu {
                     self.write_zr(0, RESULT_OK);
                     return Ok(());
                 }
+                // CloneCurrentObject (control command 2) and its Ex form (4)
+                // duplicate a session: the reply carries a **new session
+                // handle as a move handle**, and the clone reaches the same
+                // interface, holding the same domain objects, as the original.
+                //
+                // Every service's control path answered this with a bare
+                // success and no handle at all. `nnSdk` clones `fsp-srv`
+                // before it mounts anything, so it was left talking to handle
+                // 0 and `nn::fs::MountRom("rom", ...)` failed without ever
+                // issuing a filesystem command — which surfaced much later as
+                // `nn::fs::OpenDirectory("rom:/Data")` reporting that no such
+                // mount name was registered.
+                if self.ipc_is_control_request(tls) && matches!(cmd_id, Some(2) | Some(4)) {
+                    if let Some(name) = svc_name.clone() {
+                        let clone = self.alloc_handle();
+                        self.record_handle(clone, &name);
+                        let objects: Vec<(u32, String)> = self
+                            .domain_objects
+                            .iter()
+                            .filter(|((h, _), _)| *h == handle)
+                            .map(|((_, obj), iface)| (*obj, iface.clone()))
+                            .collect();
+                        for (obj, iface) in objects {
+                            self.record_domain_object(clone, obj, &iface);
+                        }
+                        self.write_ipc_response(tls, 0, &[clone], &[], &[])?;
+                        self.write_zr(0, RESULT_OK);
+                        return Ok(());
+                    }
+                }
                 if let Some(name) = svc_name {
                     let name = name;
                     match name.as_str() {

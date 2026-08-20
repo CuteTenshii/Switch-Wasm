@@ -17,9 +17,10 @@ and put what they render on the canvas.
   (`rtld` → `main` → `subsdk*` → `sdk`) run for 117M+ instructions through
   real `nnSdk` init — `nn::init::Start` → `nn::oe::Initialize` →
   `nn::oe::InitializeApplet` — and start the SDK's system worker thread. All
-  of `nn::oe::Initialize` and `nn::init`'s heap setup now complete; at 127.9M
-  instructions the title is running its own code and stops in
-  `nn::fs::OpenDirectory`, looking for its assets. See
+  of `nn::oe::Initialize` and `nn::init`'s heap setup now complete, and the
+  title mounts and reads its own RomFS; at 355.9M instructions it stops on the
+  emulator's missing kernel event model rather than on anything it asked for.
+  See
   [Retail NCA/NSP loading](#retail-ncansp-loading).
 
 See [Next](#next) for the live open threads.
@@ -631,10 +632,40 @@ Short Hike" opens a logger but writes nothing before it aborts, which is normal
 for a retail build with its logging compiled out. Between them, **every service
 that title reaches now has a real implementation behind it.**
 
-**Now open**: the filesystem. `nn::fs::OpenDirectory` fails because no mount
-name is registered — the title mounts its RomFS through `fsp-srv` and then
-opens paths under that mount, and the `fs` stub does not model mount names at
-all.
+### The filesystem
+
+`nn::fs::OpenDirectory("rom:/Data")` failed with fs result 2-3005, which looked
+like a missing mount-name model. It was not: `nn::fs`'s `MountTable` is
+client-side inside `sdk`, so a mount name never reaches the emulator at all.
+Two bugs underneath it were stopping the mount from happening.
+
+- **`CloneCurrentObject` returned no session handle.** Control command 2 (and 4
+  for the Ex form) duplicates a session and must reply with a **new session
+  handle as a move handle**. Every service's control path answered it with a
+  bare success and nothing else. `nnSdk` clones `fsp-srv` before it mounts
+  anything, so `nn::fs::MountRom("rom", …)` failed while talking to handle 0 —
+  without ever issuing a single filesystem command, which is why the whole
+  `fsp-srv` session showed only three control requests and no `fs` traffic at
+  all. It is answered centrally in `svc.rs` now, since it is session management
+  and identical for every service.
+- **`IStorage::Read` used `IFile::Read`'s field layout.** A file read leads
+  with a `u32 option` and pads to 8, so its offset is at +8 and its size at
+  +0x10; `IStorage::Read(s64 offset, u64 size)` has neither. Every RomFS read
+  came back as "0 bytes at offset 0x50", so the guest mounted its RomFS, parsed
+  an empty header, and `HierarchicalRomFileTable` found none of its files.
+
+With both fixed the title mounts `rom:`, reads its RomFS through
+`OpenDataStorageByCurrentProcess`, and runs **355.8M** instructions — 2.8x
+further than before.
+
+**Now open**: the kernel's missing waitable-object model, which is what the
+title now dies on. Its system worker thread starts, its first holder is the
+GPU-error event, `nn::os::TryWaitSystemEvent` reports it signaled because
+`svcWaitSynchronization` reports *everything* signaled, and
+`nn::oe::GpuErrorHandler` aborts. This needs the real thing: a per-handle
+signaled flag, events created by `svcCreateEvent` and returned as IPC
+copy-handles, `svcSignalEvent`/`svcClearEvent`/`svcResetSignal` state, and a
+`svcWaitSynchronization` that actually blocks and reschedules.
 
 Two other things stay open behind this one. The kernel still has no waitable
 object model — `svcWaitSynchronization` reports every handle instantly

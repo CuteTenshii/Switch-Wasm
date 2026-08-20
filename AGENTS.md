@@ -249,6 +249,29 @@ started with "applet"; those numbers leaked — `pl:u`'s `GetLoadState` is also
 command 1, and answering it with 15 left NX-Shell polling the shared-font
 service 190k times.
 
+**`CloneCurrentObject` (control command 2, and 4 for the Ex form) must hand
+back a new session handle as a move handle.** It is answered centrally in
+`svc.rs`, before per-service dispatch, because it is session management and
+identical for every service: the clone reaches the same interface and inherits
+the same domain objects. Every service's control path used to answer it with a
+bare success and no handle at all, and `nnSdk` clones `fsp-srv` before it
+mounts anything — so `nn::fs::MountRom("rom", …)` failed without ever issuing a
+filesystem command, and the title only noticed much later, when
+`nn::fs::OpenDirectory("rom:/Data")` found no such mount.
+
+**Mount names live in the guest, not here.** `nn::fs`'s `MountTable` is
+client-side inside `sdk`: a successful mount registers the name and the
+emulator never sees it. So there is nothing to implement for `rom:` beyond
+making the calls underneath it work — `OpenDataStorageByCurrentProcess`
+(command 200) handing back an `IStorage` over the process's RomFS, and that
+storage reading correctly.
+
+**`IStorage::Read` is `(s64 offset, u64 size)` — not `IFile::Read`.** A file
+read leads with a `u32 option` and pads to 8, putting its offset at +8 and its
+size at +0x10; a storage read has neither. Reading the file layout on a storage
+made every RomFS read return "0 bytes at offset 0x50", so the guest mounted its
+RomFS, parsed an empty header, and found none of its own files.
+
 `lm` (`lm_request`) is where a title's **own** diagnostic output goes —
 `nnSdk`'s `NN_LOG` and everything on top of it, rather than
 `svcOutputDebugString`. `ILogger::Log` carries one LogPacket in a map-alias
