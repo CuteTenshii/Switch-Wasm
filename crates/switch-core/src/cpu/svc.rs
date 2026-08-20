@@ -496,6 +496,11 @@ impl Cpu {
                                 _ => self.nifm_request(tls, cmd_id, handle)?,
                             }
                         }
+                        // lm, the log manager: a title's own diagnostic
+                        // output, and its ILogger over either route.
+                        "lm" | "lm:service" | "lm:logger" => {
+                            self.lm_request(tls, handle, cmd_id)?
+                        }
                         // pctl and its aliases, plus the
                         // IParentalControlService reached over its own session
                         // handle (the non-domain route `nnSdk` takes).

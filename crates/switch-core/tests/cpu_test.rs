@@ -1364,6 +1364,104 @@ fn applet_chain() -> (Cpu, u64, u32, u32) {
     (cpu, APPLET, proxy, state_getter)
 }
 
+/// Build an IPC request carrying one map-alias send buffer, and run it.
+fn ipc_request_with_buffer(cpu: &mut Cpu, handle: u64, object_id: u32, cmd: u32, buf: u32, len: u32) {
+    let tls = cpu.tls_base();
+    for i in (0..0x100u32).step_by(4) {
+        cpu.mem.write_u32(tls + i, 0).unwrap();
+    }
+    // hdr1: type 4 (Request), one send buffer in bits 23:20.
+    cpu.mem.write_u32(tls, 4 | (1 << 20)).unwrap();
+    cpu.mem.write_u32(tls + 4, 0x0c).unwrap();
+    // HipcBufferDescriptor: size, address, then the high bits (all zero for a
+    // 32-bit guest address).
+    cpu.mem.write_u32(tls + 0x08, len).unwrap();
+    cpu.mem.write_u32(tls + 0x0c, buf).unwrap();
+    cpu.mem.write_u32(tls + 0x10, 0).unwrap();
+    // One descriptor pushes the aligned data area out to 0x20.
+    cpu.mem.write_u32(tls + 0x20, 0x0010_0001).unwrap();
+    cpu.mem.write_u32(tls + 0x24, object_id).unwrap();
+    cpu.mem.write_u32(tls + 0x30, 0x4943_4653).unwrap(); // "SFCI"
+    cpu.mem.write_u32(tls + 0x38, cmd).unwrap();
+    cpu.set_reg(0, handle);
+    let pc = cpu.get_pc();
+    cpu.mem.map(pc, &svc(0x21).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    cpu.set_pc(pc);
+}
+
+/// Write one `lm` LogPacket at `addr` and return its total length.
+fn write_log_packet(cpu: &mut Cpu, addr: u32, flags: u8, severity: u8, tlvs: &[(u8, &[u8])]) -> u32 {
+    let mut payload = Vec::new();
+    for &(key, data) in tlvs {
+        payload.push(key);
+        payload.push(data.len() as u8);
+        payload.extend_from_slice(data);
+    }
+    for i in 0..0x18u32 {
+        cpu.mem.write_u8(addr + i, 0).unwrap();
+    }
+    cpu.mem.write_u8(addr + 0x10, flags).unwrap();
+    cpu.mem.write_u8(addr + 0x12, severity).unwrap();
+    cpu.mem.write_u32(addr + 0x14, payload.len() as u32).unwrap();
+    for (i, &b) in payload.iter().enumerate() {
+        cpu.mem.write_u8(addr + 0x18 + i as u32, b).unwrap();
+    }
+    0x18 + payload.len() as u32
+}
+
+#[test]
+fn lm_writes_the_guests_own_log_to_the_console() {
+    use switch_core::cpu::SyscallMode;
+    const LM: u64 = 0x1000;
+    const PACKET: u32 = 0x5000;
+    const KEY_TEXT: u8 = 2;
+    const KEY_MODULE: u8 = 6;
+    const HEAD: u8 = 1;
+    const TAIL: u8 = 2;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.register_service_handle(LM, "lm");
+    let tls = cpu.tls_base();
+
+    ipc_request(&mut cpu, LM, 5, None, 0); // Control::ConvertToDomain
+    let service = cpu.mem.read_u32(tls + 0x20).unwrap();
+    ipc_request(&mut cpu, LM, 4, Some(service), 0); // OpenLogger
+    let logger = cpu.mem.read_u32(tls + 0x30).unwrap();
+
+    // One whole message in a single packet: severity 3 is Error, and the
+    // module name comes from key 6, the text from key 2.
+    let len = write_log_packet(
+        &mut cpu,
+        PACKET,
+        HEAD | TAIL,
+        3,
+        &[(KEY_MODULE, b"Game"), (KEY_TEXT, b"hello world")],
+    );
+    ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len);
+    assert_eq!(String::from_utf8_lossy(&cpu.out), "[lm/ERROR/Game] hello world\n");
+
+    // A message split across packets: only the head carries the prefix and
+    // only the tail ends the line, so the two halves join into one message.
+    cpu.out.clear();
+    let len = write_log_packet(&mut cpu, PACKET, HEAD, 1, &[(KEY_TEXT, b"split ")]);
+    ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len);
+    let len = write_log_packet(&mut cpu, PACKET, TAIL, 1, &[(KEY_TEXT, b"message")]);
+    ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len);
+    assert_eq!(String::from_utf8_lossy(&cpu.out), "[lm/INFO] split message\n");
+
+    // A packet claiming more payload than the buffer holds is trusted only as
+    // far as the buffer goes, rather than walking off the end of the mapping.
+    cpu.out.clear();
+    let len = write_log_packet(&mut cpu, PACKET, HEAD | TAIL, 0, &[(KEY_TEXT, b"truncated")]);
+    cpu.mem.write_u32(PACKET + 0x14, 0xFFFF).unwrap();
+    ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len);
+    assert_eq!(String::from_utf8_lossy(&cpu.out), "[lm/TRACE] truncated\n");
+}
+
 #[test]
 fn pctl_reports_parental_controls_off() {
     use switch_core::cpu::SyscallMode;

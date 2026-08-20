@@ -625,8 +625,11 @@ sdk!nn::fs::OpenDirectory(nn::fs::DirectoryHandle*, char const*, int)+0x218
 
 `pctl` is implemented (parental controls, reported off) — a retail title opens
 all four aliases before it touches the filesystem, and `nnSdk` will not start
-an application it believes is restricted. `lm` is the only service "A Short
-Hike" still reaches without an implementation behind it.
+an application it believes is restricted. `lm` is implemented too, so a title's
+own `NN_LOG` output now reaches the console instead of being discarded; "A
+Short Hike" opens a logger but writes nothing before it aborts, which is normal
+for a retail build with its logging compiled out. Between them, **every service
+that title reaches now has a real implementation behind it.**
 
 **Now open**: the filesystem. `nn::fs::OpenDirectory` fails because no mount
 name is registered — the title mounts its RomFS through `fsp-srv` and then

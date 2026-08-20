@@ -249,6 +249,18 @@ started with "applet"; those numbers leaked — `pl:u`'s `GetLoadState` is also
 command 1, and answering it with 15 left NX-Shell polling the shared-font
 service 190k times.
 
+`lm` (`lm_request`) is where a title's **own** diagnostic output goes —
+`nnSdk`'s `NN_LOG` and everything on top of it, rather than
+`svcOutputDebugString`. `ILogger::Log` carries one LogPacket in a map-alias
+send buffer (`Cpu::ipc_send_buffer`): a 0x18-byte header (pid, thread id,
+flags, severity, verbosity, payload size) then TLV chunks, of which key 2 is
+the message text and key 6 the module name. A long message is split across
+packets with `flags` bit 0 marking the head and bit 1 the tail, so the text
+accumulates and only the tail ends the line. Output lands in `Cpu::out`,
+alongside the guest's `svcOutputDebugString` writes. Retail builds often
+compile their logging out, so an empty log is not evidence this is broken —
+`lm_writes_the_guests_own_log_to_the_console` is.
+
 `pctl` (parental controls, `pctl_request`) reports the console as
 **unrestricted**, which is the true state here — no accounts, no PIN, no play
 timer, no linked guardian. Watch the direction of the answers: a `Confirm*`/
