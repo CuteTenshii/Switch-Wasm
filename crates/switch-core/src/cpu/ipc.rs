@@ -77,6 +77,15 @@ const TS_TEMPERATURE_RANGE_C: (i32, i32) = (0, 100);
 /// `bsd` reports for a socket that was never bound.
 const NIFM_LOCAL_IP: [u8; 4] = [192, 168, 1, 100];
 
+/// `sfdnsres` failures. `EAI_NONAME` ("name or service not known") is the
+/// `getaddrinfo` family's, `HOST_NOT_FOUND` the `gethostbyname` family's, and
+/// both are the **definitive** failure rather than the try-again one: a caller
+/// told to retry retries, and there is no other thread here to run while it
+/// does. These are FreeBSD's positive `EAI_*` values, matching the errnos
+/// below rather than glibc's negative ones.
+const SFDNSRES_EAI_NONAME: i32 = 8;
+const SFDNSRES_HOST_NOT_FOUND: i32 = 1;
+
 /// `bsd` errnos, in **FreeBSD's** numbering — which is what the real service
 /// returns, and so what guest code is written against (`EAGAIN` is 35 here,
 /// not the 11 a Linux-hosted build would use).
@@ -3288,6 +3297,91 @@ impl Cpu {
         }
     }
 
+    /// `sfdnsres` (`IResolver`): the DNS resolver, and the other half of the
+    /// socket stack `bsd` is the transport half of. `getaddrinfo`,
+    /// `gethostbyname` and `getnameinfo` are all IPC calls into this, and
+    /// libnx's `socketInitialize` opens it alongside `bsd:u`.
+    ///
+    /// **Nothing resolves.** There is no resolver here and no network to reach
+    /// a name server on, so every lookup fails the way a name that does not
+    /// exist fails: `EAI_NONAME` for the `getaddrinfo` family, `HOST_NOT_FOUND`
+    /// for the `gethostbyname` one. That is deliberately the *definitive*
+    /// failure rather than `EAI_AGAIN`, which invites a caller to retry
+    /// forever — the same reasoning as `bsd`'s `ECONNREFUSED`, and for the same
+    /// reason: there is no other thread here to run while a guest retries.
+    ///
+    /// A numeric address string would resolve on real hardware without any DNS
+    /// at all, and this fails that too. Serializing an `addrinfo` into the
+    /// packed form Horizon returns is guesswork this cannot verify against a
+    /// real console, and the connect that would follow is refused by `bsd`
+    /// anyway — so the lookup fails where the guest can act on it, rather than
+    /// succeeding into a reply whose layout might be wrong.
+    ///
+    /// The error *strings* are worth answering properly: a guest that prints
+    /// why a lookup failed gets a sentence, not an empty line.
+    pub(super) fn sfdnsres_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[]);
+        }
+        match cmd_id {
+            // GetHostByNameRequest / GetHostByAddrRequest, and their
+            // WithOptions forms: the `gethostbyname` family, which reports
+            // through `h_errno`.
+            Some(2) | Some(3) | Some(10) | Some(11) => {
+                self.sfdnsres_failure(tls, SFDNSRES_HOST_NOT_FOUND)
+            }
+            // GetAddrInfoRequest / GetNameInfoRequest and their WithOptions
+            // forms: the `getaddrinfo` family, which reports a `gai` error.
+            Some(6) | Some(7) | Some(12) | Some(13) => {
+                self.sfdnsres_failure(tls, SFDNSRES_EAI_NONAME)
+            }
+            // GetHostStringErrorRequest / GetGaiStringErrorRequest: the text
+            // for an error code, into an output buffer.
+            Some(4) | Some(5) => {
+                let message: &[u8] = b"Name or service not known\0";
+                if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
+                    if addr != 0 {
+                        for (index, &byte) in message.iter().take(size as usize).enumerate() {
+                            self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
+                        }
+                    }
+                }
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // RequestCancelHandleRequest -> u32: the token a caller passes to
+            // CancelRequest to abandon a lookup in flight. Every lookup here
+            // finishes before it returns, so the token is only ever handed
+            // back and cancelled.
+            Some(8) => {
+                let handle = self.next_object_id;
+                self.next_object_id = handle.wrapping_add(1);
+                self.write_ipc_response(tls, 0, &[], &handle.to_le_bytes(), &[])
+            }
+            // CancelRequest, and the resolver options: there is nothing in
+            // flight to cancel, and no resolver whose behaviour an option
+            // could change.
+            Some(9) | Some(14) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            Some(15) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            _ => self.unimplemented_command(tls, "sfdnsres", cmd_id),
+        }
+    }
+
+    /// A failed lookup: the error in the first word, no `errno` behind it, and
+    /// nothing serialized into the output buffer.
+    ///
+    /// The three words are `SfdnsresRequestResults` — return value, `errno`,
+    /// and how many bytes were written to the caller's buffer. Putting the
+    /// failure in the *first* word is what makes this robust to the exact
+    /// field order: a caller checking the return value sees the error, and one
+    /// that reads the serialized size sees zero either way. `errno` stays 0
+    /// because these errors are not `EAI_SYSTEM` — there is no underlying
+    /// system call that failed.
+    fn sfdnsres_failure(&mut self, tls: u32, error: i32) -> Result<()> {
+        let mut results = [0u8; 12];
+        results[..4].copy_from_slice(&error.to_le_bytes());
+        self.write_ipc_response(tls, 0, &[], &results, &[])
+    }
+
     /// `ts` (`IMeasurementServer`): the console's thermometers.
     ///
     /// Real hardware has two — one on the SoC die (`TsLocation_Internal`) and
@@ -5443,6 +5537,35 @@ mod tests {
         cpu.register_service_handle(9, "am:common-state-getter");
         cpu.applet_request(TLS, 9, Some(5)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "Handheld");
+    }
+
+    #[test]
+    fn sfdnsres_fails_every_lookup_definitively() {
+        // getaddrinfo: EAI_NONAME, not EAI_AGAIN. A caller told to try again
+        // tries again, and there is no other thread here to run while it does.
+        let mut cpu = request(false, 6, &[]);
+        cpu.sfdnsres_request(TLS, Some(6)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap() as i32, super::SFDNSRES_EAI_NONAME);
+        // Nothing was serialized into the caller's buffer, and no errno is
+        // claimed behind the failure.
+        assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), 0, "errno");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "serialized size");
+
+        // gethostbyname reports through h_errno, which has its own numbering.
+        let mut cpu = request(false, 2, &[]);
+        cpu.sfdnsres_request(TLS, Some(2)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap() as i32, super::SFDNSRES_HOST_NOT_FOUND);
+    }
+
+    #[test]
+    fn sfdnsres_explains_the_failure_it_reports() {
+        // A guest that prints why a lookup failed should get a sentence, not
+        // an empty line.
+        const BUFFER: u32 = 0x4000;
+        let mut cpu = request_with_recv_buffer(5, &[], BUFFER, 0x40);
+        cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+        cpu.sfdnsres_request(TLS, Some(5)).unwrap();
+        assert_eq!(cpu.read_string(BUFFER, 0x40), "Name or service not known");
     }
 
     #[test]

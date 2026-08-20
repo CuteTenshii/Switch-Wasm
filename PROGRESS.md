@@ -409,8 +409,8 @@ receive buffer.
   (input negotiation and rumble), **ssl** (the system TLS stack), **acc** (one
   user account, always signed in), **apm** (clock profiles), **bsd** (sockets
   that exist but reach nothing), **ts** (the temperature sensors), **csrng**,
-  **spl:**, **pdm:qry**, **pm:\*** and **pcv**/**clkrst** are implemented; see
-  their sections below.
+  **spl:**, **pdm:qry**, **pm:\***, **pcv**/**clkrst** and **sfdnsres** are
+  implemented; see their sections below.
 - **A service with no dedicated handler still answers**, with a fabricated
   object id — that is load-bearing for homebrew which only checks the Result —
   but it now records `[ipc] no implementation: <service> cmd=<n>` once per
@@ -1113,8 +1113,19 @@ newlib's (`EAGAIN` is 35, not 11), because that is what the real service
 returns and what guest code is written against; and `fcntl`'s flags word is
 stored and returned **verbatim** rather than decoded, since `O_NONBLOCK` is a
 different bit in each of those three C libraries and the only thing that has to
-hold is that a guest reads back what it set. `sfdnsres`, the resolver, is still
-unimplemented — nothing here can turn a hostname into an address.
+hold is that a guest reads back what it set. **`sfdnsres`**, the resolver, is the other half of that stack — `getaddrinfo`,
+`gethostbyname` and `getnameinfo` are all IPC calls into it, and
+`socketInitialize` opens it alongside `bsd:u`. Nothing resolves, and it says so
+definitively: `EAI_NONAME` for the `getaddrinfo` family and `HOST_NOT_FOUND`
+for the `gethostbyname` one, rather than the try-again errors that invite a
+caller to spin. A numeric address string fails as well, which real hardware
+resolves without touching DNS — serializing an `addrinfo` into Horizon's packed
+form is guesswork nothing here can check against a real console, and `bsd`
+refuses the connect that would follow, so the lookup fails at the point the
+guest can act on it. The failure goes in the first word of the three-word
+result, which is what makes it robust to the exact field order. The error
+strings *are* answered, so a guest that prints why a lookup failed gets a
+sentence instead of an empty line.
 
 `ts` is the last of the four: the two thermometers real hardware carries, on
 the SoC and on the PCB, both reporting a fixed idle temperature. There is no
@@ -1435,9 +1446,8 @@ the retail title render, for the reason recorded there.
    for next will show up as an `unimplemented Horizon syscall` fault.
 3. **Homebrew service gaps.** Run a title and read the `[ipc] no
    implementation` lines. Currently: `hid`, `audout`, `acc`, `apm`, `bsd`,
-   `ts`, `csrng`, `spl:`, `pdm:qry`, `pm:*` and `pcv`/`clkrst` are done, but
-   `usb:hs`, `ncm` and `ns:am2` are not, and neither is `sfdnsres` (DNS), the
-   other half of `bsd` for anything that resolves a name. Save data behind
+   `ts`, `csrng`, `spl:`, `pdm:qry`, `pm:*`, `pcv`/`clkrst` and `sfdnsres` are
+   done, but `usb:hs`, `ncm` and `ns:am2` are not. Save data behind
    `acc` is also still missing: `fs`'s save-data mounts are not implemented, so
    the account exists but has nothing filed under it. What a homebrew run still
    logs is a service opened under an **empty name** — the guest really does ask

@@ -697,6 +697,9 @@ impl Cpu {
                         | "ts:session-external" => {
                             self.ts_request(tls, handle, cmd_id)?
                         }
+                        // sfdnsres, the DNS resolver: the other half of the
+                        // socket stack, opened alongside `bsd:u`.
+                        "sfdnsres" => self.sfdnsres_request(tls, cmd_id)?,
                         // bsd, the socket service. `bsd:s` is the same
                         // interface at higher privilege.
                         "bsd:u" | "bsd:s" => self.bsd_request(tls, handle, cmd_id)?,

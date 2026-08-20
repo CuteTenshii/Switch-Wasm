@@ -470,6 +470,18 @@ system-info or save-management homebrew opens.
   for `0x40000001`/`0x40000002`/`0x40000039` and labels them CPU, GPU and
   Memory. Rates are the **handheld** ones, and a rate a guest sets reads back.
 
+`sfdnsres` (the DNS resolver, `sfdnsres_request`) is the other half of the
+socket stack, opened alongside `bsd:u` by `socketInitialize`. Nothing resolves:
+`EAI_NONAME` for the `getaddrinfo` family, `HOST_NOT_FOUND` for the
+`gethostbyname` one — the *definitive* failure, not the try-again one, for
+`bsd`'s reason. A numeric address string fails too, which real hardware would
+resolve without any DNS: serializing an `addrinfo` into Horizon's packed form
+is guesswork nothing here can check against a real console, and the connect
+that follows is refused anyway, so the lookup fails where the guest can act on
+it. The failure goes in the **first** word of `SfdnsresRequestResults`, which
+is what makes it robust to the field order; the error *strings* are answered
+properly, so a guest that prints why a lookup failed gets a sentence.
+
 **One console, one answer.** These services describe the same machine from
 different angles, and a guest reads several of them: `am`'s operation mode,
 `apm`'s performance mode and `clkrst`'s rates have to describe one console, or
