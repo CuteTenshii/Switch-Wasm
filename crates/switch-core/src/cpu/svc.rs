@@ -561,6 +561,9 @@ impl Cpu {
                                 Some("fsp-srv-storage") => {
                                     self.fs_storage_request(tls, cmd_id)?
                                 }
+                                Some("fsp-srv-save-info-reader") => {
+                                    self.fs_save_data_info_reader_request(tls, cmd_id)?
+                                }
                                 _ => self.fsp_srv_request(tls, cmd_id, handle)?,
                             }
                         }
@@ -575,6 +578,9 @@ impl Cpu {
                             self.fs_file_request(tls, cmd_id, Self::object_key(handle, 0))?
                         }
                         "fsp-srv-storage" => self.fs_storage_request(tls, cmd_id)?,
+                        "fsp-srv-save-info-reader" => {
+                            self.fs_save_data_info_reader_request(tls, cmd_id)?
+                        }
                         "vi:m" | "vi:m:" => self.vi_request(tls, handle, cmd_id)?,
                         "set" => self.set_request(tls, cmd_id)?,
                         "set:sys" => self.set_sys_request(tls, cmd_id)?,

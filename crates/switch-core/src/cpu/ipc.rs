@@ -722,7 +722,50 @@ impl Cpu {
                 self.reply_with_interface(tls, handle, "fsp-srv-storage")?;
                 Ok(())
             }
+            // 51 = OpenSaveDataFileSystem, 52 = ...BySystemSaveDataId,
+            // 53 = OpenReadOnlySaveDataFileSystem. There is no save data on
+            // this console, so every one of these is a request to mount
+            // something that is not there.
+            //
+            // Reporting that is not a regression from the catch-all below: an
+            // `IFileSystem` is an out-object, and the catch-all answered with
+            // success and *no* object, leaving the caller to mount whatever
+            // domain object id happened to be in its reply buffer.
+            Some(51) | Some(52) | Some(53) => {
+                const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
+                self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[])
+            }
+            // 60 = OpenSaveDataInfoReader, 61 = ...BySaveDataSpaceId,
+            // 62 = ...OnlyCacheStorage: the enumerator a save manager walks to
+            // find what is on the console.
+            Some(60) | Some(61) | Some(62) => {
+                self.reply_with_interface(tls, handle, "fsp-srv-save-info-reader")?;
+                Ok(())
+            }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// `ISaveDataInfoReader`: cmd 0 = `ReadSaveDataInfo`, which fills an
+    /// output buffer with `FsSaveDataInfo` entries and reports how many it
+    /// wrote. A caller reads until it reports **zero**, which is the whole
+    /// termination condition — there is no separate "end" signal.
+    ///
+    /// This console has no save data, so the first read is already the last
+    /// one. Saying so is the entire implementation, and saying it *wrongly* is
+    /// unusually expensive: the reader used to be a fabricated object id, and
+    /// a fabricated success made every read look like it had returned more
+    /// entries, so Checkpoint enumerated saves forever — 1434 rounds of
+    /// mounting and scanning a save named after an all-zero title id, with no
+    /// end in sight.
+    pub(super) fn fs_save_data_info_reader_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        match cmd_id {
+            Some(0) => self.write_ipc_response(tls, 0, &[], &0i64.to_le_bytes(), &[]),
+            _ => self.unimplemented_command(tls, "fsp-srv-save-info-reader", cmd_id),
         }
     }
 
@@ -5130,6 +5173,35 @@ mod tests {
         cpu.fs_request(TLS, Some(0), 9).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), PATH_ALREADY_EXISTS);
         assert_eq!(cpu.fs.file("/switch/cfg.json"), Some(&b"{}!!"[..]));
+    }
+
+    #[test]
+    fn a_console_with_no_save_data_ends_the_scan_on_the_first_read() {
+        // OpenSaveDataInfoReaderBySaveDataSpaceId hands back an `IFileSystem`-
+        // style out-object. The catch-all reply answered with success and no
+        // object at all, so the caller read an object id out of its own reply
+        // buffer and called `ReadSaveDataInfo` on whatever that named.
+        let mut cpu = request(false, 61, &[1u8]);
+        cpu.record_handle(9, "fsp-srv");
+        cpu.fsp_srv_request(TLS, Some(61), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        let reader = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        assert_eq!(cpu.service_name(reader), Some("fsp-srv-save-info-reader"));
+
+        // Zero entries is the whole termination condition — a reader stops
+        // when a read reports nothing, and there is no other end signal. A
+        // fabricated success is an endless scan: Checkpoint ran 1434 rounds of
+        // it before this existed.
+        write_request(&mut cpu, 0, &[]);
+        cpu.fs_save_data_info_reader_request(TLS, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "entries");
+
+        // And mounting a save reports there is none, rather than succeeding
+        // with no filesystem for the caller to mount.
+        write_request(&mut cpu, 52, &[0u8; 0x10]);
+        cpu.fsp_srv_request(TLS, Some(52), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 2 | (1 << 9), "path not found");
     }
 
     #[test]
