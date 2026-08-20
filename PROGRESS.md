@@ -408,8 +408,9 @@ receive buffer.
 - **lm** (the log manager), **pctl** (parental controls, reported off), **hid**
   (input negotiation and rumble), **ssl** (the system TLS stack), **acc** (one
   user account, always signed in), **apm** (clock profiles), **bsd** (sockets
-  that exist but reach nothing) and **ts** (the temperature sensors) are
-  implemented; see their sections below.
+  that exist but reach nothing), **ts** (the temperature sensors), **csrng**,
+  **spl:**, **pdm:qry**, **pm:\*** and **pcv**/**clkrst** are implemented; see
+  their sections below.
 - **A service with no dedicated handler still answers**, with a fabricated
   object id — that is load-bearing for homebrew which only checks the Result —
   but it now records `[ipc] no implementation: <service> cmd=<n>` once per
@@ -1159,6 +1160,69 @@ would. It still aborts — `svcBreak` Panic with result `0x367` from `0x818bb8c`
 — exactly as it did before, and the last IPC before the abort is a long run of
 `nvdrv` ioctls, so whatever stops Checkpoint is on the GPU side, not here.
 
+### The rest of what homebrew opens: csrng, spl, pdm, pm, pcv/clkrst
+
+Five more services, each reaching the fabricated-object-id fallback, and each
+with a determinate answer once you ask what this console actually is.
+
+**csrng** is the random number generator. Real hardware answers out of the
+security processor's hardware RNG; there is none here, and
+`wasm32-unknown-unknown` has no OS entropy to borrow, so `Cpu::next_random_u64`
+is splitmix64 seeded from the emulated clock. That is **not** a CSPRNG and
+nothing out of it should be used as a key — but the fallback left the caller's
+buffer untouched, so a "random" value was whatever the stack already held:
+non-random, and undetectably so.
+
+**spl:** is the liaison to TrustZone. Everything it exists for is out of reach,
+and `GetConfig` — the one command a guest asks for — is answerable: an original
+(Icosa) retail unit, not in debug mode, with a fixed device id. Worth knowing
+what a real guest asks first: NX-Fetch wants **Atmosphère's extension items at
+65000 and up** (CFW API version, emummc type), and zero there reads as "no
+custom firmware, booted from internal storage", which is exactly right.
+
+**pdm:qry** is the play-history database, and nothing has ever been played
+here: no `pdm:ntfy` records launches, nothing survives a page reload. So every
+query answers empty — no events, an empty range, zeroed statistics — which is
+the state of a factory-fresh console rather than a placeholder.
+
+**pm:\*** is the process manager, four interfaces on four service names. There
+is one process and nothing can create another, so what they answer is identity:
+which process is the application, and which program it runs. The process id is
+`svcGetProcessId`'s, because those two are the same question through different
+doors. The program id defaults to the Album applet's — what hbmenu-launched
+homebrew runs as on real hardware — and `Cpu::set_program_id` is there for a
+loader that decrypted an NCA and knows the real title id.
+
+**pcv**/**clkrst** are the same clock manager either side of 8.0.0. Their
+numbering differs by an offset, not a rename: a `clkrst` device code is
+`0x40000000 + module + 1` over the `PcvModule` value `pcv` takes directly.
+NX-Fetch asks for `0x40000001`, `0x40000002` and `0x40000039` and labels the
+answers CPU, GPU and Memory, so those are CpuBus, GPU and EMC — and reading the
+code's low bits as the module puts the GPU's rate under the CPU's name.
+
+**`am` command 30** — the one JKSV logged as an honest gap — is
+`BeginBlockingHomeButtonShortAndLongPressed`, which a title asks for before
+doing something it must not be interrupted in the middle of (JKSV blocks the
+home button while writing a save). There is no home button here and no home
+menu to return to, so the request is granted because it is already true.
+
+### One console, one answer
+
+These services describe the same machine from different angles, and a guest
+reads several of them. `am`'s `GetOperationMode` answered **1 (Console)** under
+a comment that said Handheld — `AppletOperationMode_Handheld` is 0 — so
+NX-Fetch printed "Docked" beside a 720p handheld framebuffer, and a title that
+picks its resolution by operation mode was being told to render at 1080p. With
+that corrected, the operation mode, `apm`'s Normal performance mode and
+`clkrst`'s handheld rates all describe one console.
+
+NX-Fetch is the proof: it now reads `Player@` (the `acc` nickname), `Horizon OS
+12.1.0`, `1280x720 @ 60Hz [Handheld]`, `CPU ... @ 1020 MHz [40.0C]`, `GPU ... @
+384 MHz` and `Memory ... @ 1600 MHz` — every one of those a different service
+answering for the same console. Its "Hardware: Unknown" line is the one that
+stays blank: no probe identified which command feeds it, and inventing an
+answer for a command that cannot be named is what the fabricating fallback did.
+
 ### Suspending threads, and reading their registers
 
 Past audio the title stopped twice more, each time on an unimplemented
@@ -1370,12 +1434,15 @@ the retail title render, for the reason recorded there.
    `SetThreadActivity` and `GetThreadContext3` are done, and whatever it asks
    for next will show up as an `unimplemented Horizon syscall` fault.
 3. **Homebrew service gaps.** Run a title and read the `[ipc] no
-   implementation` lines. Currently: `hid`, `audout`, `acc`, `apm`, `bsd` and
-   `ts` are done, but `spl:`, `usb:hs`, `csrng`, `ncm`, `ns:am2`, `pm:*`,
-   `pdm:qry` are not, and neither is `sfdnsres` (DNS), which is the other half
-   of `bsd` for anything that resolves a name. Save data behind `acc` is also
-   still missing: `fs`'s save-data mounts are not implemented, so the account
-   exists but has nothing filed under it.
+   implementation` lines. Currently: `hid`, `audout`, `acc`, `apm`, `bsd`,
+   `ts`, `csrng`, `spl:`, `pdm:qry`, `pm:*` and `pcv`/`clkrst` are done, but
+   `usb:hs`, `ncm` and `ns:am2` are not, and neither is `sfdnsres` (DNS), the
+   other half of `bsd` for anything that resolves a name. Save data behind
+   `acc` is also still missing: `fs`'s save-data mounts are not implemented, so
+   the account exists but has nothing filed under it. What a homebrew run still
+   logs is a service opened under an **empty name** — the guest really does ask
+   `sm` for one (Checkpoint does; the name word it sends is zero), and `sm`
+   hands out a working handle instead of failing the way real `sm` would.
 
 Lower priority: hbmenu's entry label renders as a blank box (its FreeType text
 path is worth a look); NAND-vs-SD storage sizes are one hardcoded 32 GiB for

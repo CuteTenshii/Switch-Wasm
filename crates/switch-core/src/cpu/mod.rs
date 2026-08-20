@@ -447,6 +447,17 @@ pub struct Cpu {
     /// stores one through `IProfileEditor`, which is what a profile nobody has
     /// touched reports.
     account_edited_at: i64,
+    /// The program (title) id `pm:info` reports for this process. Defaults to
+    /// the Album applet's, which is what homebrew launched from hbmenu runs
+    /// as on real hardware; a loader that knows the real title id sets it with
+    /// [`Cpu::set_program_id`].
+    program_id: u64,
+    /// The clock rate each module was last *set* to, by module index. A module
+    /// with no entry runs at its default in `CLOCK_RATES_HZ`.
+    clock_rates: HashMap<u32, u32>,
+    /// State for the pseudo-random generator behind `csrng`, seeded lazily
+    /// from the emulated clock. Zero means "not seeded yet".
+    rng_state: u64,
     /// Every open `bsd` socket, by descriptor, and the socket options set on
     /// them keyed by `(descriptor, level, option)` — options are read back, so
     /// they are stored rather than acknowledged and forgotten.
@@ -543,6 +554,9 @@ impl Cpu {
             account_nickname: String::from(DEFAULT_NICKNAME),
             account_edited_at: 0,
             apm_configuration: ipc::APM_DEFAULT_CONFIGURATION,
+            program_id: ipc::DEFAULT_PROGRAM_ID,
+            clock_rates: HashMap::new(),
+            rng_state: 0,
             bsd_sockets: HashMap::new(),
             bsd_socket_options: HashMap::new(),
             next_bsd_fd: 3,
@@ -1502,6 +1516,40 @@ impl Cpu {
     /// the guest's own `IProfileEditor::Store`.
     pub fn user_nickname(&self) -> &str {
         &self.account_nickname
+    }
+
+    /// Set the program (title) id `pm:info` reports for the running process.
+    /// A loader that decrypted an NCA knows it; homebrew has none, and keeps
+    /// the Album applet's id it would run under on real hardware.
+    pub fn set_program_id(&mut self, program_id: u64) {
+        self.program_id = program_id;
+    }
+
+    /// The program id `pm` reports, as set by [`Cpu::set_program_id`].
+    pub fn program_id(&self) -> u64 {
+        self.program_id
+    }
+
+    /// A pseudo-random 64-bit value, for `csrng`.
+    ///
+    /// splitmix64 over a state seeded from the emulated clock. This is **not**
+    /// a CSPRNG and nothing that comes out of it should be used as a key:
+    /// `wasm32-unknown-unknown` has no OS entropy to draw on, and the security
+    /// processor whose hardware RNG really answers `csrng` is not modelled.
+    /// What it does guarantee is that a caller asking for random bytes gets
+    /// bytes that differ from each other and from the last call, which the
+    /// generic reply — leaving the caller's buffer untouched — did not.
+    pub(crate) fn next_random_u64(&mut self) -> u64 {
+        if self.rng_state == 0 {
+            self.rng_state = (self.unix_time as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                ^ 0xA076_1D64_78BD_642F;
+        }
+        self.rng_state = self.rng_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.rng_state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
     }
 
     #[inline]

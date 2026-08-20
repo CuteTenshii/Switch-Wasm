@@ -441,6 +441,42 @@ uid this emulator had left in that same buffer earlier. The struct goes back
 through a pointer buffer, so it needs `ipc_output_buffer` and a non-zero
 `QueryPointerBufferSize`, like `acc`'s.
 
+`csrng`, `spl:`, `pdm:qry`, `pm:*` and `pcv`/`clkrst` are the rest of what a
+system-info or save-management homebrew opens.
+
+- **csrng** fills the caller's buffer from `Cpu::next_random_u64` (splitmix64,
+  seeded from the emulated clock). It is **not** a CSPRNG — there is no OS
+  entropy under `wasm32-unknown-unknown` and no security processor here — but
+  the generic reply left the buffer untouched, which is a "random" value that
+  is whatever was on the caller's stack, non-random *and* undetectably so.
+- **spl:** answers `GetConfig`: an original (Icosa) retail console, not in
+  debug mode. Note what a real guest actually asks it for first — NX-Fetch
+  wants **Atmosphère's extensions at 65000+** (CFW API version, emummc type),
+  and zero there reads as "no custom firmware", which is true.
+- **pdm:qry** reports a console **nothing has ever been played on**: empty
+  event lists, an empty available range, zeroed statistics. That is a state a
+  factory-fresh console has, which is what makes it truthful rather than a
+  placeholder.
+- **pm:\*** are four different interfaces on four service names, so
+  `pm_request` dispatches on the name. What they can answer honestly is
+  identity, and `pm`'s process id must equal `svcGetProcessId`'s — the same
+  question through a different door. `pm:info`'s program id defaults to the
+  Album applet's, which is what hbmenu-launched homebrew runs as on hardware;
+  a loader that knows a real title id sets it with `Cpu::set_program_id`.
+- **pcv/clkrst** are the same clock manager either side of 8.0.0. Their
+  numbering differs *by an offset*: a `clkrst` device code is
+  `0x40000000 + module + 1` over the `PcvModule` value `pcv` takes directly,
+  so reading the code's low bits as the module is off by one — NX-Fetch asks
+  for `0x40000001`/`0x40000002`/`0x40000039` and labels them CPU, GPU and
+  Memory. Rates are the **handheld** ones, and a rate a guest sets reads back.
+
+**One console, one answer.** These services describe the same machine from
+different angles, and a guest reads several of them: `am`'s operation mode,
+`apm`'s performance mode and `clkrst`'s rates have to describe one console, or
+NX-Fetch prints "Docked" beside a 720p framebuffer clocked for handheld. That
+mismatch was real — `GetOperationMode` answered 1 (Console) under a comment
+saying Handheld, and `AppletOperationMode_Handheld` is 0.
+
 **A stub that answers by fabrication says so.** The generic reply for a service
 with no dedicated handler is load-bearing for homebrew that only checks the
 Result, so it still succeeds — but `Cpu::warn_no_implementation` records

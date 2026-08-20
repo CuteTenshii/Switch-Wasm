@@ -670,6 +670,27 @@ impl Cpu {
                         | "acc:async-context" | "acc:notifier" => {
                             self.acc_request(tls, handle, cmd_id)?
                         }
+                        // csrng, the random number generator, and `spl:`,
+                        // the security processor it really lives behind.
+                        "csrng" => self.csrng_request(tls, cmd_id)?,
+                        "spl:" | "spl:mig" | "spl:fs" | "spl:ssl" | "spl:es"
+                        | "spl:manu" => self.spl_request(tls, cmd_id)?,
+                        // pdm, the play-history database.
+                        "pdm:qry" | "pdm:ntfy" | "pdm:info" => {
+                            self.pdm_request(tls, cmd_id)?
+                        }
+                        // pm, the process manager, whose four services are
+                        // four different interfaces.
+                        "pm:shell" | "pm:dmnt" | "pm:info" | "pm:bm" => {
+                            self.pm_request(tls, handle, cmd_id)?
+                        }
+                        // pcv and clkrst, the clock manager either side of
+                        // 8.0.0, plus the per-module sessions clkrst hands out.
+                        "pcv" | "clkrst" | "clkrst:i" | "clkrst:session-0"
+                        | "clkrst:session-1" | "clkrst:session-2"
+                        | "clkrst:session-3" => {
+                            self.pcv_request(tls, handle, cmd_id)?
+                        }
                         // ts, the temperature sensors, and the ISession
                         // later firmware moved the measurement onto.
                         "ts" | "ts:u" | "ts:s" | "ts:session-internal"

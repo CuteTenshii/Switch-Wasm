@@ -33,6 +33,25 @@ pub(super) const NICKNAME_LEN: usize = 0x20;
 /// The nickname the console's user has until a host or the guest changes it.
 pub(super) const DEFAULT_NICKNAME: &str = "Player";
 
+/// The process id `svcGetProcessId` reports, and so the one `pm` has to
+/// report for the application: there is one process here, and two answers to
+/// "which process is this" would be one too many.
+const PROCESS_ID: u64 = 1;
+/// The program id a guest runs under until a loader sets one. This is the
+/// Album applet's, which is what hbmenu-launched homebrew runs as on real
+/// hardware — not an invention, and not a title id belonging to somebody.
+pub(super) const DEFAULT_PROGRAM_ID: u64 = 0x0100_0000_0000_1000;
+/// The `DeviceId` `spl:` reports. A real console's is fused in at
+/// manufacturing and unique; nothing here derives anything from it.
+const SPL_DEVICE_ID: u64 = 0x0000_5357_4153_4D00;
+/// The rate each clock module runs at, in Hz: CPU, GPU, memory, then every
+/// module this does not model, which runs at nothing. These are an original
+/// console's **handheld** rates, matching the operation mode `am` reports and
+/// the Normal performance mode `apm` does — a docked console runs its GPU at
+/// 768 MHz instead, and claiming that while presenting a 720p handheld
+/// framebuffer would be two answers to the same question.
+const CLOCK_RATES_HZ: [u32; 4] = [1_020_000_000, 384_000_000, 1_600_000_000, 0];
+
 /// The system version `set:sys` reports, as major/minor/micro.
 ///
 /// libnx seeds `hosversionGet` from this and branches on it everywhere, so the
@@ -1883,7 +1902,12 @@ impl Cpu {
                         self.write_ipc_response(tls, 0, &[], &FOCUS_STATE_CHANGED.to_le_bytes(), &[])
                     }
                 }
-                Some(5) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]), // GetOperationMode: Handheld
+                // GetOperationMode -> AppletOperationMode. **Handheld is 0**
+                // and Console (docked) is 1; this answered 1 while its comment
+                // said Handheld, so NX-Fetch printed "Docked" beside a 720p
+                // handheld framebuffer, and a title that picks its resolution
+                // by operation mode was being told to render at 1080p.
+                Some(5) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
                 Some(6) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]), // GetPerformanceMode: Normal
                 Some(9) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]), // GetCurrentFocusState: InFocus
                 // GetBootMode: Normal.
@@ -1938,6 +1962,17 @@ impl Cpu {
                     let mut version = [0u8; 16];
                     version[..5].copy_from_slice(b"1.0.0");
                     self.write_ipc_response(tls, 0, &[], &version, &[])
+                }
+                // BeginBlockingHomeButtonShortAndLongPressed(s64 timeout) and
+                // its End, then the same pair for the plain home button.
+                //
+                // A title asks for this before doing something it must not be
+                // interrupted in the middle of — JKSV blocks the home button
+                // while it writes a save. There is no home button here and no
+                // home menu to return to, so nothing *can* interrupt it: the
+                // request is granted because it is already true.
+                Some(30) | Some(31) | Some(32) | Some(33) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // NotifyRunning -> whether the notification was the first one.
                 Some(40) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
@@ -2956,6 +2991,301 @@ impl Cpu {
             }
         }
         self.write_ipc_response(tls, 0, &[], &written.to_le_bytes(), &[])
+    }
+
+    /// `csrng` (`IRandomInterface`): the console's random number generator.
+    ///
+    /// Real hardware answers this out of the security processor's hardware
+    /// RNG. There is none here, and `wasm32-unknown-unknown` has no OS entropy
+    /// to borrow either, so what a caller gets is **pseudo**-random: splitmix64
+    /// over a state seeded from the emulated clock. That distinction is real —
+    /// nothing that comes out of here should be used as a key — but it is a
+    /// far better answer than the generic fallback's, which left the caller's
+    /// buffer untouched: a "random" number that is whatever was on the stack
+    /// is both non-random *and* undetectably so.
+    pub(super) fn csrng_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
+        }
+        match cmd_id {
+            // GenerateRandomBytes -> the bytes, in an output buffer.
+            Some(0) => {
+                if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
+                    if addr != 0 {
+                        let mut offset = 0u32;
+                        while offset < size {
+                            let word = self.next_random_u64().to_le_bytes();
+                            for &byte in word.iter().take((size - offset).min(8) as usize) {
+                                self.mem.write_u8(addr.wrapping_add(offset), byte)?;
+                                offset += 1;
+                            }
+                        }
+                    }
+                }
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            _ => self.unimplemented_command(tls, "csrng", cmd_id),
+        }
+    }
+
+    /// `spl:` (`IGeneralInterface`): the liaison to the security processor.
+    ///
+    /// Everything it exists for — key derivation, AES with device-unique keys,
+    /// unwrapping title keys in TrustZone — is out of reach here, and the one
+    /// command a guest actually asks this emulator for is `GetConfig`, which
+    /// reports what kind of console it is running on. That much this can
+    /// answer truthfully: an original (Icosa) retail unit, not in debug mode.
+    /// The device id is a fixed placeholder rather than a real fused id.
+    pub(super) fn spl_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
+        }
+        match cmd_id {
+            // GetConfig(u32 ConfigItem) -> u64.
+            Some(0) => {
+                let item = self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0);
+                let value: u64 = match item {
+                    // DisableProgramVerification: verification is on.
+                    0 => 0,
+                    // DramId: the 4 GiB Samsung part an original unit shipped
+                    // with. `MAX_MAPPED_BYTES` is the real memory limit here;
+                    // this only names the part.
+                    1 => 0,
+                    // HardwareType: Icosa, the original console.
+                    4 => 0,
+                    // HardwareState: Production, not a development unit.
+                    5 => 1,
+                    // IsRecoveryBoot: this booted normally.
+                    6 => 0,
+                    // DeviceId: a real console's is fused in and unique. This
+                    // one is fixed, and nothing derives a key from it.
+                    7 => SPL_DEVICE_ID,
+                    // MemoryArrange: the standard 4 GiB layout.
+                    9 => 0,
+                    // IsDebugMode: no.
+                    10 => 0,
+                    // Everything else — Version, BootReason, kernel
+                    // configuration, quest state, regulator and key
+                    // generation — reads as zero, which is the "nothing
+                    // unusual" answer for each of them.
+                    //
+                    // That deliberately includes Atmosphère's own extensions
+                    // at 65000 and up, which are what a real guest asks this
+                    // service for first: NX-Fetch wants the CFW's API version
+                    // (65000) and emummc type (65007). Zero there reads as "no
+                    // custom firmware, booted from internal storage", and this
+                    // emulator is indeed not Atmosphère — answering with a
+                    // version would be claiming a CFW whose behaviour nothing
+                    // here implements.
+                    _ => 0,
+                };
+                self.write_ipc_response(tls, 0, &[], &value.to_le_bytes(), &[])
+            }
+            _ => self.unimplemented_command(tls, "spl:", cmd_id),
+        }
+    }
+
+    /// `pdm:qry` (`IQueryService`): the play-history database — what has been
+    /// played, for how long, and when.
+    ///
+    /// **Nothing has ever been played on this console.** There is no
+    /// `pdm:ntfy` recording launches, nothing persists across a page reload,
+    /// and no title has run here more than once. So every query answers with
+    /// an empty result rather than a fabricated history: no play events, no
+    /// account events, an empty available range, and zeroed statistics.
+    ///
+    /// An empty result is a state a real console has too — a factory-fresh one
+    /// — which is what makes it a truthful answer rather than a placeholder.
+    pub(super) fn pdm_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
+        }
+        match cmd_id {
+            // The list queries — QueryAppletEvent, QueryPlayEvent,
+            // QueryAccountEvent, QueryAccountPlayEvent,
+            // QueryRecentlyPlayedApplication — each fill an output array and
+            // report how many entries they wrote. None.
+            Some(0) | Some(5) | Some(7) | Some(8) | Some(11) => {
+                self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[])
+            }
+            // QueryPlayStatisticsByApplicationId /
+            // ...AndUserAccountId -> PdmPlayStatistics: an application that
+            // has been launched zero times, for zero minutes.
+            Some(2) | Some(3) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x28], &[]),
+            // GetAvailablePlayEventRange / GetAvailableAccountPlayEventRange
+            // -> { s32 total, s32 start, s32 end }: an empty range.
+            Some(6) | Some(9) => self.write_ipc_response(tls, 0, &[], &[0u8; 12], &[]),
+            _ => self.unimplemented_command(tls, "pdm:qry", cmd_id),
+        }
+    }
+
+    /// `pm:*`: the process manager. `pm:shell` starts and stops processes,
+    /// `pm:dmnt` finds them, `pm:info` maps one to its program, and `pm:bm`
+    /// reports how the console booted.
+    ///
+    /// There is exactly one process here and nothing can create another —
+    /// `LaunchProgram` has nothing to launch and no second address space to
+    /// launch it into — so what these can answer honestly is *identity*: which
+    /// process is the application (this one), and which program it is running.
+    /// The process id agrees with `svcGetProcessId`'s, which is the same
+    /// question asked through the kernel instead.
+    pub(super) fn pm_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
+        }
+        let iface = self.service_name(handle).unwrap_or("pm:shell").to_string();
+        match iface.as_str() {
+            // IDebugMonitorInterface.
+            "pm:dmnt" => match cmd_id {
+                // GetJitDebugProcessIdList -> s32 count: nothing is being
+                // JIT-debugged.
+                Some(0) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+                // GetProcessId(u64 program_id) / GetApplicationProcessId ->
+                // u64 pid. Either way it is this process.
+                Some(2) | Some(4) => {
+                    self.write_ipc_response(tls, 0, &[], &PROCESS_ID.to_le_bytes(), &[])
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // IInformationInterface::GetProgramId(u64 pid) -> u64 program_id.
+            "pm:info" => match cmd_id {
+                Some(0) => {
+                    let program_id = self.program_id;
+                    self.write_ipc_response(tls, 0, &[], &program_id.to_le_bytes(), &[])
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // IBootModeInterface::GetBootMode -> u32: Normal. The maintenance
+            // mode this could otherwise report is a state the console is put
+            // in deliberately, and nothing here does.
+            "pm:bm" => match cmd_id {
+                Some(0) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // IShellInterface. NotifyBootFinished is an announcement, and
+            // GetApplicationProcessIdForShell asks the same identity question
+            // `pm:dmnt` does.
+            _ => match cmd_id {
+                Some(7) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                Some(8) => self.write_ipc_response(tls, 0, &[], &PROCESS_ID.to_le_bytes(), &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+        }
+    }
+
+    /// `clkrst` (`IClkrstManager`) and `pcv`, the same clock-and-voltage
+    /// manager either side of 8.0.0: what rate each hardware module runs at.
+    ///
+    /// Nothing here is clocked — the CPU is an interpreter and the GPU a
+    /// software rasterizer — so these report the rates an idle console in
+    /// handheld mode runs at, which is the mode `am` and `apm` already agree
+    /// this console is in. A rate a guest *sets* is stored and read back:
+    /// that pair has to agree even when neither value drives anything, since
+    /// a caller that reads back a different rate concludes its request failed.
+    ///
+    /// The old `pcv` interface takes a small module enum and the newer
+    /// `clkrst` a device code; both end up in [`Cpu::clkrst_module`], which is
+    /// where the two numbering schemes are reconciled.
+    pub(super) fn pcv_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
+        }
+        let data = self.ipc_request_data(tls);
+        let iface = self.service_name(handle).unwrap_or("pcv").to_string();
+        if iface == "clkrst" {
+            return match cmd_id {
+                // IClkrstManager::OpenSession(u32 device_code, u32 unk) ->
+                // IClkrstSession. Which module the session is for rides in
+                // the interface name, the way `ts`'s sensor does.
+                Some(0) => {
+                    let module = self.clkrst_module(self.mem.read_u32(data).unwrap_or(0));
+                    let name = Self::clkrst_session_name(module);
+                    self.reply_with_interface(tls, handle, name)?;
+                    Ok(())
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            };
+        }
+        if let Some(module) = iface.strip_prefix("clkrst:session-") {
+            let module = module.parse::<u32>().unwrap_or(0);
+            return match cmd_id {
+                // IClkrstSession::SetClockRate(u32 hz) / GetClockRate -> hz.
+                Some(7) => {
+                    let rate = self.mem.read_u32(data).unwrap_or(0);
+                    self.clock_rates.insert(module, rate);
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                Some(8) => {
+                    let rate = self.clock_rate(module);
+                    self.write_ipc_response(tls, 0, &[], &rate.to_le_bytes(), &[])
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            };
+        }
+        // `pcv`, where the module is an argument rather than a session.
+        match cmd_id {
+            // SetClockRate(PcvModule, u32 hz) / GetClockRate(PcvModule) -> hz.
+            Some(2) => {
+                let module = self.clkrst_module(self.mem.read_u32(data).unwrap_or(0));
+                let rate = self.mem.read_u32(data.wrapping_add(4)).unwrap_or(0);
+                self.clock_rates.insert(module, rate);
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            Some(3) => {
+                let module = self.clkrst_module(self.mem.read_u32(data).unwrap_or(0));
+                let rate = self.clock_rate(module);
+                self.write_ipc_response(tls, 0, &[], &rate.to_le_bytes(), &[])
+            }
+            // SetPowerEnabled / SetClockEnabled and their disables: there is
+            // no rail to switch.
+            Some(0) | Some(1) | Some(4) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            _ => self.unimplemented_command(tls, &iface, cmd_id),
+        }
+    }
+
+    /// Reconcile `pcv`'s module enum and `clkrst`'s device codes into one
+    /// index into [`CLOCK_RATES_HZ`].
+    ///
+    /// The two number the same hardware differently, and by an offset rather
+    /// than a rename: a `clkrst` device code is `0x40000000 + module + 1`,
+    /// where `module` is the `PcvModule` value `pcv` takes directly. NX-Fetch
+    /// asks `clkrst` for `0x40000001`, `0x40000002` and `0x40000039` and
+    /// labels the answers CPU, GPU and Memory — so those are `PcvModule`s 0
+    /// (CpuBus), 1 (GPU) and 0x38 (EMC), and reading the code's low bits as
+    /// the module directly is off by one.
+    ///
+    /// A module this does not model reports its own entry, which is 0 Hz —
+    /// "not running" — rather than another module's rate.
+    fn clkrst_module(&self, code: u32) -> u32 {
+        const PCV_MODULE_CPU_BUS: u32 = 0;
+        const PCV_MODULE_GPU: u32 = 1;
+        const PCV_MODULE_EMC: u32 = 0x38;
+        let module = if code >= 0x4000_0000 { (code & 0xFF).wrapping_sub(1) } else { code };
+        match module {
+            PCV_MODULE_CPU_BUS => 0,
+            PCV_MODULE_GPU => 1,
+            PCV_MODULE_EMC => 2,
+            _ => 3,
+        }
+    }
+
+    /// The rate a module runs at: whatever was last set for it, else the
+    /// idle-handheld default.
+    fn clock_rate(&self, module: u32) -> u32 {
+        match self.clock_rates.get(&module) {
+            Some(&rate) => rate,
+            None => CLOCK_RATES_HZ[module as usize],
+        }
+    }
+
+    /// The interface name a `clkrst` session for `module` is filed under.
+    fn clkrst_session_name(module: u32) -> &'static str {
+        match module {
+            1 => "clkrst:session-1",
+            2 => "clkrst:session-2",
+            3 => "clkrst:session-3",
+            _ => "clkrst:session-0",
+        }
     }
 
     /// `ts` (`IMeasurementServer`): the console's thermometers.
@@ -4992,6 +5322,127 @@ mod tests {
             let high = cpu.mem.read_u32(TLS + 0x24).unwrap() as i32;
             assert!(low <= celsius && celsius <= high, "{celsius} outside {low}..={high}");
         }
+    }
+
+    #[test]
+    fn csrng_fills_the_buffer_with_bytes_that_differ() {
+        // Not a CSPRNG — see `Cpu::next_random_u64` — but a caller asking for
+        // random bytes has to get bytes, and different ones each call. The
+        // generic reply left the buffer untouched, so a "random" value was
+        // whatever the caller's stack already held.
+        const BUFFER: u32 = 0x4000;
+        let mut cpu = request_with_recv_buffer(0, &[], BUFFER, 0x20);
+        cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+        cpu.set_unix_time(1_700_000_000);
+        cpu.csrng_request(TLS, Some(0)).unwrap();
+        let first = cpu.read_bytes(BUFFER, 0x20);
+        assert_ne!(first, vec![0u8; 0x20], "the buffer was written");
+        assert!(first.windows(8).any(|w| w != &first[..8]), "not one value repeated");
+
+        write_map_buffer_request(&mut cpu, 0, &[], BUFFER, 0x20, false);
+        cpu.csrng_request(TLS, Some(0)).unwrap();
+        assert_ne!(cpu.read_bytes(BUFFER, 0x20), first, "a second call differs");
+    }
+
+    #[test]
+    fn spl_reports_a_retail_console() {
+        // ConfigItem 4 is HardwareType (0 = Icosa, the original console) and 5
+        // is HardwareState (1 = Production). Reporting a development unit
+        // would send a guest down paths this emulator does not implement.
+        for (item, expected) in [(4u32, 0u64), (5, 1), (10, 0)] {
+            let mut cpu = request(false, 0, &item.to_le_bytes());
+            cpu.spl_request(TLS, Some(0)).unwrap();
+            assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), expected, "config item {item}");
+        }
+        // The device id is fixed, but it must not read as "no device".
+        let mut cpu = request(false, 0, &7u32.to_le_bytes());
+        cpu.spl_request(TLS, Some(0)).unwrap();
+        assert_ne!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0);
+    }
+
+    #[test]
+    fn pdm_reports_a_console_nothing_has_been_played_on() {
+        // QueryPlayEvent: no entries, because nothing here records any.
+        let mut cpu = request(false, 5, &[]);
+        cpu.pdm_request(TLS, Some(5)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0);
+
+        // And the statistics for any application are a title launched zero
+        // times — not a fabricated playtime.
+        let mut cpu = request(false, 2, &[0u8; 8]);
+        cpu.pdm_request(TLS, Some(2)).unwrap();
+        assert_eq!(cpu.read_bytes(TLS + 0x20, 0x20), vec![0u8; 0x20]);
+    }
+
+    #[test]
+    fn pm_agrees_with_the_kernel_about_which_process_this_is() {
+        // pm:dmnt's GetApplicationProcessId and svcGetProcessId answer the
+        // same question through different doors; two answers would be one too
+        // many.
+        let mut cpu = request(false, 4, &[]);
+        cpu.register_service_handle(9, "pm:dmnt");
+        cpu.pm_request(TLS, 9, Some(4)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), super::PROCESS_ID);
+
+        // pm:info maps it to the program it is running: the Album applet's id
+        // for homebrew, or whatever a loader set.
+        let mut cpu = request(false, 0, &super::PROCESS_ID.to_le_bytes());
+        cpu.register_service_handle(9, "pm:info");
+        cpu.set_program_id(0x0100_4890_117B_2000);
+        cpu.pm_request(TLS, 9, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0x0100_4890_117B_2000);
+    }
+
+    #[test]
+    fn clkrst_reports_handheld_rates_for_the_modules_nx_fetch_asks_about() {
+        // The device codes NX-Fetch sends, and the labels it puts on them.
+        // A code is 0x40000000 + module + 1, so reading the low bits as the
+        // module is off by one — which had the GPU's rate under "CPU".
+        for (code, expected) in [
+            (0x4000_0001u32, super::CLOCK_RATES_HZ[0]), // CpuBus
+            (0x4000_0002, super::CLOCK_RATES_HZ[1]),    // GPU
+            (0x4000_0039, super::CLOCK_RATES_HZ[2]),    // EMC
+        ] {
+            let mut cpu = request(false, 0, &code.to_le_bytes());
+            cpu.register_service_handle(9, "clkrst");
+            cpu.pcv_request(TLS, 9, Some(0)).unwrap();
+            let session = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+
+            write_request(&mut cpu, 8, &[]);
+            cpu.pcv_request(TLS, session, Some(8)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), expected, "{code:#x}");
+        }
+    }
+
+    #[test]
+    fn clkrst_gives_back_the_rate_it_was_set_to() {
+        let mut cpu = request(false, 0, &0x4000_0002u32.to_le_bytes());
+        cpu.register_service_handle(9, "clkrst");
+        cpu.pcv_request(TLS, 9, Some(0)).unwrap();
+        let session = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+
+        write_request(&mut cpu, 7, &768_000_000u32.to_le_bytes());
+        cpu.pcv_request(TLS, session, Some(7)).unwrap();
+        write_request(&mut cpu, 8, &[]);
+        cpu.pcv_request(TLS, session, Some(8)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 768_000_000);
+
+        // The CPU's rate is its own, not the one just set for the GPU.
+        let mut cpu2 = request(false, 3, &0u32.to_le_bytes());
+        cpu2.register_service_handle(9, "pcv");
+        cpu2.pcv_request(TLS, 9, Some(3)).unwrap();
+        assert_eq!(cpu2.mem.read_u32(TLS + 0x20).unwrap(), super::CLOCK_RATES_HZ[0]);
+    }
+
+    #[test]
+    fn am_reports_the_handheld_operation_mode_it_always_claimed_to() {
+        // AppletOperationMode_Handheld is 0 and Console is 1. This answered 1
+        // under a comment saying Handheld, so NX-Fetch printed "Docked" beside
+        // a 720p framebuffer.
+        let mut cpu = request(false, 5, &[]);
+        cpu.register_service_handle(9, "am:common-state-getter");
+        cpu.applet_request(TLS, 9, Some(5)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "Handheld");
     }
 
     #[test]
