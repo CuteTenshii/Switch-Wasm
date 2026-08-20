@@ -273,6 +273,23 @@ impl Cpu {
         self.mem.read_u8(tls.wrapping_add(start)).unwrap_or(0) == 1
     }
 
+    /// Whether the request is a domain *close* (`CmifDomainRequestType_Close`,
+    /// the domain header's type byte set to 2): it drops one object out of the
+    /// session and carries no `CmifInHeader` at all. [`Cpu::ipc_command_id`]
+    /// falls back to scanning the whole message buffer for an `SFCI` magic, so
+    /// on a close it finds the *previous* request's header still sitting there
+    /// and reports that command id — which is why `appletExit`'s teardown used
+    /// to look like a flurry of command 0s.
+    pub(super) fn ipc_is_domain_close(&self, tls: u32) -> bool {
+        self.mem.read_u8(tls.wrapping_add(self.ipc_reply_start(tls))).unwrap_or(0) == 2
+    }
+
+    /// Forget one object and acknowledge the close.
+    pub(super) fn close_domain_object(&mut self, tls: u32, handle: u64, object_id: u32) -> Result<()> {
+        self.domain_objects.remove(&(handle, object_id));
+        self.write_ipc_response(tls, 0, &[], &[], &[])
+    }
+
     pub(super) fn ipc_domain_object_id(&self, tls: u32) -> u32 {
         let start = self.ipc_reply_start(tls);
         self.mem.read_u32(tls.wrapping_add(start + 4)).unwrap_or(0xFFFFFFFF)
@@ -1347,7 +1364,7 @@ impl Cpu {
         }
     }
 
-    /// Answers an `am` command the applet stub does not actually implement.
+    /// Answers a command a service does not actually implement.
     ///
     /// Everything `am` hands back is a live kernel object or a piece of applet
     /// state the caller then acts on, so a blanket "success, no data" reply is
@@ -1359,7 +1376,7 @@ impl Cpu {
     /// Reporting `cmif`'s "unknown command id" instead makes the guest fail at
     /// the command that is genuinely missing, and the warning names the one to
     /// implement next.
-    pub(super) fn am_unimplemented(
+    pub(super) fn unimplemented_command(
         &mut self,
         tls: u32,
         iface: &str,
@@ -1370,7 +1387,7 @@ impl Cpu {
         const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
         if self.unimplemented_ipc.insert((iface.to_string(), cmd_id)) {
             let pc = self.pc;
-            self.diagnostic(&format!("[am] unimplemented: {iface} cmd={cmd_id:?} (pc={pc:#x})"));
+            self.diagnostic(&format!("[ipc] unimplemented: {iface} cmd={cmd_id:?} (pc={pc:#x})"));
         }
         self.write_ipc_response(tls, UNKNOWN_COMMAND_ID, &[], &[], &[])
     }
@@ -1378,7 +1395,7 @@ impl Cpu {
     /// Note that a service reached over IPC has no implementation behind it at
     /// all, and is about to be answered with a fabricated object id.
     ///
-    /// Unlike [`Cpu::am_unimplemented`] this does not change the reply — the
+    /// Unlike [`Cpu::unimplemented_command`] this does not change the reply — the
     /// generic success is load-bearing for homebrew that only checks the
     /// Result — it just stops the gap being invisible. Whatever this prints is
     /// the list of services a guest is asking for and not getting.
@@ -1400,7 +1417,7 @@ impl Cpu {
     /// give up after a handful of them.
     ///
     /// Only the commands listed below are implemented. Everything else goes to
-    /// [`Cpu::am_unimplemented`] rather than a fabricated success — see there
+    /// [`Cpu::unimplemented_command`] rather than a fabricated success — see there
     /// for why.
     pub(super) fn applet_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
@@ -1415,7 +1432,7 @@ impl Cpu {
                 Some(QUERY_POINTER_BUFFER_SIZE) => {
                     self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
                 }
-                _ => self.am_unimplemented(tls, "am:control", cmd_id),
+                _ => self.unimplemented_command(tls, "am:control", cmd_id),
             };
         }
         // Which `am` sub-interface this request is actually for. A caller that
@@ -1426,16 +1443,8 @@ impl Cpu {
         // handle instead. Resolving only the domain case left every `nnSdk`
         // request answered as `am:unknown`.
         let object_id = self.ipc_domain_object_id(tls);
-        // A domain *close* request (`CmifDomainRequestType_Close`, the domain
-        // header's type byte set to 2) drops one object out of the session and
-        // carries no `CmifInHeader` at all. [`Cpu::ipc_command_id`] falls back
-        // to scanning the whole message buffer for an `SFCI` magic, so on a
-        // close it finds the *previous* request's header still sitting there
-        // and reports that command id — which is why `appletExit`'s teardown
-        // used to look like a flurry of command 0s.
-        if self.mem.read_u8(tls.wrapping_add(self.ipc_reply_start(tls))).unwrap_or(0) == 2 {
-            self.domain_objects.remove(&(handle, object_id));
-            return self.write_ipc_response(tls, 0, &[], &[], &[]);
+        if self.ipc_is_domain_close(tls) {
+            return self.close_domain_object(tls, handle, object_id);
         }
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("am:unknown").to_string()
@@ -1454,7 +1463,7 @@ impl Cpu {
                     self.reply_with_interface(tls, handle, "am:application-proxy")?;
                     Ok(())
                 }
-                _ => self.am_unimplemented(tls, &iface, cmd_id),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IApplicationProxy's Get* accessors, each handing back one of the
             // sub-interfaces below.
@@ -1475,7 +1484,7 @@ impl Cpu {
                         self.reply_with_interface(tls, handle, name)?;
                         Ok(())
                     }
-                    None => self.am_unimplemented(tls, &iface, cmd_id),
+                    None => self.unimplemented_command(tls, &iface, cmd_id),
                 }
             }
             // ICommonStateGetter: the state `appletMainLoop` polls every frame.
@@ -1531,7 +1540,7 @@ impl Cpu {
                 Some(10) | Some(11) | Some(12) | Some(66) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                _ => self.am_unimplemented(tls, &iface, cmd_id),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IApplicationFunctions: PopLaunchParameter fails when hbmenu
             // launched the app without forwarding arguments, same as on real
@@ -1583,7 +1592,7 @@ impl Cpu {
                 Some(22) | Some(66) | Some(67) | Some(131) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                _ => self.am_unimplemented(tls, &iface, cmd_id),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // ISelfController: the applet's own lifecycle knobs.
             "am:self-controller" => match cmd_id {
@@ -1634,7 +1643,7 @@ impl Cpu {
                     raw.extend_from_slice(&1u64.to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &raw, &[])
                 }
-                _ => self.am_unimplemented(tls, &iface, cmd_id),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IWindowController: foreground rights and the applet resource id
             // every other service tags this process's requests with.
@@ -1651,7 +1660,7 @@ impl Cpu {
                 Some(10) | Some(11) | Some(12) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                _ => self.am_unimplemented(tls, &iface, cmd_id),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IAudioController: the applet's volume relative to the system's.
             "am:audio-controller" => match cmd_id {
@@ -1662,14 +1671,108 @@ impl Cpu {
                 Some(1) | Some(2) => {
                     self.write_ipc_response(tls, 0, &[], &1.0f32.to_le_bytes(), &[])
                 }
-                _ => self.am_unimplemented(tls, &iface, cmd_id),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IDisplayController (capture buffers), ILibraryAppletCreator
             // (launching another applet), IDebugFunctions, and any session that
             // never named itself. Nothing here can answer those honestly: a
             // capture buffer has no contents, and a library applet has nowhere
             // to run.
-            _ => self.am_unimplemented(tls, &iface, cmd_id),
+            _ => self.unimplemented_command(tls, &iface, cmd_id),
+        }
+    }
+
+    /// `pctl` and its aliases (`pctl:s`, `pctl:a`, `pctl:r`): parental
+    /// controls, reported as **switched off**.
+    ///
+    /// There is nobody to restrict here — no accounts, no PIN, no play timer,
+    /// no linked guardian — so "off" is not a placeholder, it is the true
+    /// state of this console. That makes every answer determinate: a
+    /// permission check succeeds (a real denial is an error `Result`, not a
+    /// `false`), an "is this restricted" query is `false`, and an "is this
+    /// still allowed" query is `true`. Note which way round those go — the two
+    /// families read in opposite directions, and a blanket `false` would have
+    /// reported free communication as *unavailable*.
+    ///
+    /// A retail title asks for this early: "A Short Hike" opens all four
+    /// aliases before it touches the filesystem, and `nnSdk` will not start an
+    /// application it believes is restricted.
+    pub(super) fn pctl_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        const CONVERT_TO_DOMAIN: u32 = 0;
+        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(CONVERT_TO_DOMAIN) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "pctl:factory");
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                Some(QUERY_POINTER_BUFFER_SIZE) => {
+                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
+                }
+                _ => self.unimplemented_command(tls, "pctl:control", cmd_id),
+            };
+        }
+        let object_id = self.ipc_domain_object_id(tls);
+        if self.ipc_is_domain_close(tls) {
+            return self.close_domain_object(tls, handle, object_id);
+        }
+        let iface = if self.ipc_is_domain_request(tls) {
+            self.domain_interface(handle, object_id).unwrap_or("pctl:factory").to_string()
+        } else {
+            match self.service_name(handle) {
+                // The root session is IParentalControlServiceFactory itself.
+                Some("pctl") | Some("pctl:s") | Some("pctl:a") | Some("pctl:r") | None => {
+                    "pctl:factory".to_string()
+                }
+                Some(name) => name.to_string(),
+            }
+        };
+        match iface.as_str() {
+            // IParentalControlServiceFactory::CreateService /
+            // CreateServiceWithoutInitialize. The difference is whether the
+            // returned interface arrives already initialized; with no settings
+            // to load, both hand back the same thing.
+            "pctl:factory" => match cmd_id {
+                Some(0) | Some(1) => {
+                    self.reply_with_interface(tls, handle, "pctl:service")?;
+                    Ok(())
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            "pctl:service" => match cmd_id {
+                // Initialize.
+                Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // The permission checks: CheckFreeCommunicationPermission,
+                // ConfirmLaunchApplicationPermission,
+                // ConfirmResumeApplicationPermission,
+                // ConfirmSnsPostPermission,
+                // ConfirmSystemSettingsPermission,
+                // ConfirmStereoVisionPermission, ConfirmShowNewsPermission,
+                // EndFreeCommunication,
+                // ResetConfirmedStereoVisionPermission.
+                //
+                // These answer with a bare `Result`: success *is* "permitted",
+                // and a restriction shows up as an error the caller checks for
+                // by value. Nothing is restricted, so they all succeed.
+                Some(1001..=1005) | Some(1013) | Some(1016) | Some(1017) | Some(1064) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // IsRestrictionTemporaryUnlocked /
+                // IsRestrictedSystemSettingsEntered / IsRestrictionEnabled /
+                // IsPlayTimerEnabled / IsRestrictedByPlayTimer: "is something
+                // restricting you" — all false.
+                Some(1006) | Some(1010) | Some(1031) | Some(1453) | Some(1455) => {
+                    self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[])
+                }
+                // IsFreeCommunicationAvailable / IsStereoVisionPermitted: "is
+                // something still allowed" — the opposite sense, so both true.
+                Some(1018) | Some(1065) => {
+                    self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[])
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            _ => self.unimplemented_command(tls, &iface, cmd_id),
         }
     }
 

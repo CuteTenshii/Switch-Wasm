@@ -554,8 +554,8 @@ asked for `IApplicationFunctions::GetGpuErrorDetectedSystemEvent` (command
 130), got "success" and *no copy handle*, and filed handle **0** as the
 GPU-error event.
 
-`Cpu::am_unimplemented` now reports `cmif`'s `UnknownCommandId` (`0x1ba0a`) and
-prints `[am] unimplemented: <interface> cmd=<n>` once per pair. Two more real
+`Cpu::unimplemented_command` now reports `cmif`'s `UnknownCommandId` (`0x1ba0a`) and
+prints `[ipc] unimplemented: <interface> cmd=<n>` once per pair. Two more real
 bugs fell out of turning that on:
 
 - **`nnSdk` sends every message in the "with context" encoding.**
@@ -622,6 +622,11 @@ main!...+0x93348
 sdk!nn::fs::OpenDirectory(nn::fs::DirectoryHandle*, char const*, int)+0x218
   -> fs result 2-3005
 ```
+
+`pctl` is implemented (parental controls, reported off) — a retail title opens
+all four aliases before it touches the filesystem, and `nnSdk` will not start
+an application it believes is restricted. `lm` is the only service "A Short
+Hike" still reaches without an implementation behind it.
 
 **Now open**: the filesystem. `nn::fs::OpenDirectory` fails because no mount
 name is registered — the title mounts its RomFS through `fsp-srv` and then

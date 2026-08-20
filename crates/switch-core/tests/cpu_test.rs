@@ -1314,7 +1314,7 @@ fn multiply_long_ops() {
 /// in the guest's own TLS buffer the way `libnx` marshals a CMIF message:
 /// hipc header, an optional `CmifDomainInHeader`, then the `SFCI` in-header
 /// carrying the command id.
-fn am_request(cpu: &mut Cpu, handle: u64, msg_type: u32, object_id: Option<u32>, cmd: u32) {
+fn ipc_request(cpu: &mut Cpu, handle: u64, msg_type: u32, object_id: Option<u32>, cmd: u32) {
     let tls = cpu.tls_base();
     for i in (0..0x100u32).step_by(4) {
         cpu.mem.write_u32(tls + i, 0).unwrap();
@@ -1353,15 +1353,59 @@ fn applet_chain() -> (Cpu, u64, u32, u32) {
     let tls = cpu.tls_base();
 
     // Control::ConvertToDomain on the root session -> IApplicationProxyService.
-    am_request(&mut cpu, APPLET, 5, None, 0);
+    ipc_request(&mut cpu, APPLET, 5, None, 0);
     let proxy_service = cpu.mem.read_u32(tls + 0x20).unwrap();
     // IApplicationProxyService::OpenApplicationProxy -> IApplicationProxy.
-    am_request(&mut cpu, APPLET, 4, Some(proxy_service), 0);
+    ipc_request(&mut cpu, APPLET, 4, Some(proxy_service), 0);
     let proxy = cpu.mem.read_u32(tls + 0x30).unwrap();
     // IApplicationProxy::GetCommonStateGetter.
-    am_request(&mut cpu, APPLET, 4, Some(proxy), 0);
+    ipc_request(&mut cpu, APPLET, 4, Some(proxy), 0);
     let state_getter = cpu.mem.read_u32(tls + 0x30).unwrap();
     (cpu, APPLET, proxy, state_getter)
+}
+
+#[test]
+fn pctl_reports_parental_controls_off() {
+    use switch_core::cpu::SyscallMode;
+    const PCTL: u64 = 0x1000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.register_service_handle(PCTL, "pctl");
+    let tls = cpu.tls_base();
+
+    // Control::ConvertToDomain -> IParentalControlServiceFactory, then
+    // CreateServiceWithoutInitialize -> IParentalControlService.
+    ipc_request(&mut cpu, PCTL, 5, None, 0);
+    let factory = cpu.mem.read_u32(tls + 0x20).unwrap();
+    ipc_request(&mut cpu, PCTL, 4, Some(factory), 1);
+    let service = cpu.mem.read_u32(tls + 0x30).unwrap();
+
+    // A permission check answers with a bare Result: success *is* "permitted",
+    // and a restriction is an error the caller checks for by value.
+    for cmd in [1001u32, 1004, 1013, 1017] {
+        ipc_request(&mut cpu, PCTL, 4, Some(service), cmd);
+        assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "cmd {cmd}");
+    }
+
+    // The two query families read in opposite directions, and answering both
+    // the same way would report free communication as unavailable.
+    for cmd in [1031u32, 1010, 1453, 1455] {
+        ipc_request(&mut cpu, PCTL, 4, Some(service), cmd);
+        assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "cmd {cmd}");
+        assert_eq!(cpu.mem.read_u8(tls + 0x30).unwrap(), 0, "cmd {cmd} restricted");
+    }
+    for cmd in [1018u32, 1065] {
+        ipc_request(&mut cpu, PCTL, 4, Some(service), cmd);
+        assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "cmd {cmd}");
+        assert_eq!(cpu.mem.read_u8(tls + 0x30).unwrap(), 1, "cmd {cmd} allowed");
+    }
+
+    // Anything else still reports honestly rather than fabricating a success.
+    const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
+    ipc_request(&mut cpu, PCTL, 4, Some(service), 1203); // SetPinCode
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), UNKNOWN_COMMAND_ID);
 }
 
 #[test]
@@ -1374,20 +1418,20 @@ fn applet_common_state_getter_reports_focus_once() {
     let (mut cpu, handle, _proxy, state_getter) = applet_chain();
     let tls = cpu.tls_base();
 
-    am_request(&mut cpu, handle, 4, Some(state_getter), 1);
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
     assert_eq!(cpu.read_x(0), 0); // svc result
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0x4F43_4653); // "SFCO"
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0); // Result: success
     assert_ne!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0x19280);
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 15); // FocusStateChanged
 
-    am_request(&mut cpu, handle, 4, Some(state_getter), 1);
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
     const NO_MESSAGES: u32 = 128 | (3 << 9);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), NO_MESSAGES);
 
     // GetCurrentFocusState (cmd 9) reports InFocus so libnx's applet-mainloop
     // wait loop terminates.
-    am_request(&mut cpu, handle, 4, Some(state_getter), 9);
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 9);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1);
 }
@@ -1405,9 +1449,9 @@ fn applet_unimplemented_command_is_an_error_not_a_fake_success() {
     let tls = cpu.tls_base();
 
     // IApplicationProxy::GetDisplayController, then a command it does not have.
-    am_request(&mut cpu, handle, 4, Some(proxy), 4);
+    ipc_request(&mut cpu, handle, 4, Some(proxy), 4);
     let display_controller = cpu.mem.read_u32(tls + 0x30).unwrap();
-    am_request(&mut cpu, handle, 4, Some(display_controller), 8);
+    ipc_request(&mut cpu, handle, 4, Some(display_controller), 8);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0x4F43_4653); // "SFCO"
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), UNKNOWN_COMMAND_ID);
 }
@@ -1428,7 +1472,7 @@ fn applet_control_command_with_context_is_not_a_normal_command() {
     cpu.register_service_handle(APPLET, "appletOE");
     let tls = cpu.tls_base();
 
-    am_request(&mut cpu, APPLET, 7, None, 3); // QueryPointerBufferSize
+    ipc_request(&mut cpu, APPLET, 7, None, 3); // QueryPointerBufferSize
     assert_eq!(cpu.mem.read_u32(tls + 0x10).unwrap(), 0x4F43_4653); // "SFCO"
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0); // success, not an error
 }

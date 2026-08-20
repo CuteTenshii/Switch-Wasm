@@ -496,6 +496,11 @@ impl Cpu {
                                 _ => self.nifm_request(tls, cmd_id, handle)?,
                             }
                         }
+                        // pctl and its aliases, plus the
+                        // IParentalControlService reached over its own session
+                        // handle (the non-domain route `nnSdk` takes).
+                        "pctl" | "pctl:s" | "pctl:a" | "pctl:r" | "pctl:factory"
+                        | "pctl:service" => self.pctl_request(tls, handle, cmd_id)?,
                         "audren:u" => self.audren_request(tls, cmd_id)?,
                         "audren:iaudiorenderer" => self.audren_renderer_request(tls, cmd_id, handle)?,
                          name => {

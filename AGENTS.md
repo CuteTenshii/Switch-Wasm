@@ -97,7 +97,7 @@ so an `eprintln!` goes nowhere and `std::env::var` always fails — every
 browser user goes through `Cpu::diagnostic`, which writes stderr *and* the
 trace buffer the page drains (`switch_drain_trace`), and is recorded whether or
 not per-instruction tracing is on. `main.js` drains it every run slice, so
-`[am] unimplemented` and `[ipc] no implementation` show up in the page's
+`[ipc] unimplemented` and `[ipc] no implementation` show up in the page's
 console panel as they happen.
 
 `TRACE_SVC=1` prints every syscall except the three hot ones
@@ -249,6 +249,16 @@ started with "applet"; those numbers leaked — `pl:u`'s `GetLoadState` is also
 command 1, and answering it with 15 left NX-Shell polling the shared-font
 service 190k times.
 
+`pctl` (parental controls, `pctl_request`) reports the console as
+**unrestricted**, which is the true state here — no accounts, no PIN, no play
+timer, no linked guardian. Watch the direction of the answers: a `Confirm*`/
+`Check*Permission` command replies with a bare `Result` where success *is*
+"permitted" (a restriction is an error the caller checks for by value), an
+`IsRestriction*`/`IsRestrictedBy*` query is `false`, and an
+`IsFreeCommunicationAvailable`/`IsStereoVisionPermitted` query is `true`. The
+last family reads the opposite way from the middle one, so a blanket `false`
+would report free communication as unavailable.
+
 **A stub that answers by fabrication says so.** The generic reply for a service
 with no dedicated handler is load-bearing for homebrew that only checks the
 Result, so it still succeeds — but `Cpu::warn_no_implementation` records
@@ -261,7 +271,7 @@ the caller acts on, so a fabricated success is a wrong answer the guest
 believes rather than a neutral placeholder: the old catch-all answered
 `IApplicationFunctions::GetGpuErrorDetectedSystemEvent` (command 130) with
 success and *no copy handle*, and `nnSdk`'s system worker spent the rest of the
-boot waiting on handle 0. `Cpu::am_unimplemented` reports `cmif`'s
+boot waiting on handle 0. `Cpu::unimplemented_command` reports `cmif`'s
 `UnknownCommandId` (module 10, description 221 — `0x1ba0a`) and warns once per
 `(interface, command)` on stderr, which is how you find the next command to
 implement. A bare success is still the *right* answer for a genuine
