@@ -846,7 +846,7 @@ impl Cpu {
                 }
             }
             Some(2) => {
-                self.fs.create_dir(&path);
+                self.fs.guest_create_dir(&path);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             // DeleteFile / DeleteDirectory / DeleteDirectoryRecursively

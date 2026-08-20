@@ -227,6 +227,87 @@ const CMD = {
     return b;
   },
 
+  // ---------- the emulated SD card ----------
+  //
+  // `Vfs` lives in the session, so on its own nothing the guest writes
+  // survives a reload. The main thread mirrors it into IndexedDB using these:
+  // `sd_write_file`/`sd_create_dir` restore the card before a boot, and
+  // `sd_take_changes` reports what the guest touched so only that is written
+  // back.
+
+  sd_write_file(path, bytes) {
+    const p = new TextEncoder().encode(path);
+    const pptr = alloc(p.length);
+    toWasm(p, pptr);
+    const dptr = alloc(bytes.length || 1);
+    if (bytes.length) toWasm(bytes, dptr);
+    const rc = api.switch_sd_write_file(handle, pptr, p.length, dptr, bytes.length);
+    api.switch_free(pptr, p.length);
+    api.switch_free(dptr, bytes.length || 1);
+    return rc;
+  },
+
+  sd_create_dir(path) {
+    const p = new TextEncoder().encode(path);
+    const ptr = alloc(p.length);
+    toWasm(p, ptr);
+    const rc = api.switch_sd_create_dir(handle, ptr, p.length);
+    api.switch_free(ptr, p.length);
+    return rc;
+  },
+
+  sd_remove(path) {
+    const p = new TextEncoder().encode(path);
+    const ptr = alloc(p.length);
+    toWasm(p, ptr);
+    const rc = api.switch_sd_remove(handle, ptr, p.length);
+    api.switch_free(ptr, p.length);
+    return rc;
+  },
+
+  // The whole file, or null when the path is not one. Read in slices so a
+  // large save does not need a single allocation twice its size.
+  sd_read_file(path) {
+    const p = new TextEncoder().encode(path);
+    const pptr = alloc(p.length);
+    toWasm(p, pptr);
+    const size = Number(api.switch_sd_file_size(handle, pptr, p.length));
+    if (size < 0) { api.switch_free(pptr, p.length); return null; }
+    const out = new Uint8Array(size);
+    const CHUNK = 1 << 20;
+    const cap = Math.min(Math.max(size, 1), CHUNK);
+    const buf = alloc(cap);
+    let off = 0;
+    while (off < size) {
+      const n = Number(api.switch_sd_read_file(handle, pptr, p.length, BigInt(off), buf, cap));
+      if (n <= 0) break;
+      out.set(fromWasm(buf, n), off);
+      off += n;
+    }
+    api.switch_free(buf, cap);
+    api.switch_free(pptr, p.length);
+    return out;
+  },
+
+  sd_pending_changes() {
+    return handle < 0 ? 0 : api.switch_sd_pending_changes(handle);
+  },
+
+  // Drains on the wasm side whether or not the JSON fits, so the buffer is
+  // sized from the pending count first: a path is capped at 0x301 bytes by
+  // the fs protocol, plus ~48 for the rest of the entry.
+  sd_take_changes() {
+    if (handle < 0) return [];
+    const pending = api.switch_sd_pending_changes(handle);
+    if (!pending) return [];
+    const cap = 2 + pending * (0x301 * 2 + 64);
+    const buf = alloc(cap);
+    const n = api.switch_sd_take_changes_json(handle, buf, cap);
+    const text = new TextDecoder().decode(fromWasm(buf, n));
+    api.switch_free(buf, cap);
+    try { return JSON.parse(text); } catch { return []; }
+  },
+
   fb_snapshot(len) {
     const buf = alloc(len);
     const n = api.switch_fb_snapshot(handle, buf, len);

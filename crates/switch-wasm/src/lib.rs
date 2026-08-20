@@ -725,6 +725,143 @@ pub extern "C" fn switch_write_mem(handle: u32, addr: u32, ptr: *const u8, len: 
     }
 }
 
+// ---------------------------------------------------------------------------
+// The emulated SD card.
+//
+// `Vfs` lives in memory for the life of a session, so on its own nothing the
+// guest writes survives a reload. These are the two directions a host needs to
+// back it with a real store: put files on the card before booting, and find
+// out what the guest changed so only that has to be written back.
+//
+// Paths are guest paths — a `sdmc:` prefix and any number of slashes are
+// normalized away, so "sdmc:/switch/x" and "/switch/x" are the same file.
+// ---------------------------------------------------------------------------
+
+/// Read a UTF-8 path out of guest-supplied wasm memory.
+fn sd_path(ptr: *const u8, len: u32) -> String {
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Put a file on the SD card, replacing whatever is at that path. This is the
+/// host's own load path — restoring the card from a store, or a file the user
+/// dropped in — so it is deliberately **not** reported by
+/// `switch_sd_take_changes_json`: a restored file has not changed.
+#[no_mangle]
+pub extern "C" fn switch_sd_write_file(
+    handle: u32,
+    path_ptr: *const u8,
+    path_len: u32,
+    data_ptr: *const u8,
+    data_len: u32,
+) -> i32 {
+    let s = session(handle);
+    let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
+    s.cpu.fs.write_file(&sd_path(path_ptr, path_len), data.to_vec());
+    0
+}
+
+/// Create a directory on the SD card and any missing parents. Same "host load
+/// path" reasoning as `switch_sd_write_file`: not reported as a change.
+#[no_mangle]
+pub extern "C" fn switch_sd_create_dir(handle: u32, path_ptr: *const u8, path_len: u32) -> i32 {
+    session(handle).cpu.fs.create_dir(&sd_path(path_ptr, path_len));
+    0
+}
+
+/// Delete a path from the SD card. Returns 1 if something was there, 0 if not.
+#[no_mangle]
+pub extern "C" fn switch_sd_remove(handle: u32, path_ptr: *const u8, path_len: u32) -> i32 {
+    i32::from(session(handle).cpu.fs.remove(&sd_path(path_ptr, path_len)))
+}
+
+/// Size of a file on the SD card, or -1 when the path is not one (missing, or
+/// a directory).
+#[no_mangle]
+pub extern "C" fn switch_sd_file_size(handle: u32, path_ptr: *const u8, path_len: u32) -> i64 {
+    match session(handle).cpu.fs.size(&sd_path(path_ptr, path_len)) {
+        Some(size) => size as i64,
+        None => -1,
+    }
+}
+
+/// Copy a file off the SD card into `buf`, starting at `offset`. Returns the
+/// number of bytes copied, or -1 when the path is not a file. Call
+/// `switch_sd_file_size` first to size the buffer; a file larger than `maxlen`
+/// can be pulled in slices.
+#[no_mangle]
+pub extern "C" fn switch_sd_read_file(
+    handle: u32,
+    path_ptr: *const u8,
+    path_len: u32,
+    offset: u64,
+    buf: *mut u8,
+    maxlen: u32,
+) -> i64 {
+    let s = session(handle);
+    let out = unsafe { std::slice::from_raw_parts_mut(buf, maxlen as usize) };
+    match s.cpu.fs.read(&sd_path(path_ptr, path_len), offset, out) {
+        Some(n) => n as i64,
+        None => -1,
+    }
+}
+
+/// How many paths the guest has changed and not yet had drained. Lets a host
+/// skip the JSON round trip on the overwhelmingly common "nothing changed"
+/// tick.
+#[no_mangle]
+pub extern "C" fn switch_sd_pending_changes(handle: u32) -> u32 {
+    session(handle).cpu.fs.pending_changes() as u32
+}
+
+/// Drain what the guest has changed on the SD card since the last call, as
+/// JSON: `[{"path":"/switch/a.json","kind":"file","size":12},
+/// {"path":"/switch/d","kind":"dir","size":0},
+/// {"path":"/switch/gone","kind":"deleted","size":0}]`.
+///
+/// Each entry says what is at the path *now*, so a host can store it or drop
+/// it from its store without asking again. **The drain happens even if the
+/// result does not fit in `buf`** — call `switch_sd_pending_changes` first and
+/// size the buffer, or changes will be lost.
+#[no_mangle]
+pub extern "C" fn switch_sd_take_changes_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session(handle);
+    let mut out = Vec::from("[");
+    for (i, change) in s.cpu.fs.take_changes().into_iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        let kind = match change.kind {
+            Some(switch_core::vfs::ENTRY_TYPE_DIR) => "dir",
+            Some(_) => "file",
+            None => "deleted",
+        };
+        out.extend_from_slice(b"{\"path\":\"");
+        // Guest paths can hold anything a filename can; escape what JSON
+        // cannot carry raw rather than emitting a broken document.
+        for &byte in change.path.as_bytes() {
+            match byte {
+                b'"' | b'\\' => {
+                    out.push(b'\\');
+                    out.push(byte);
+                }
+                0x00..=0x1F => out.extend_from_slice(format!("\\u{:04x}", byte).as_bytes()),
+                _ => out.push(byte),
+            }
+        }
+        out.extend_from_slice(b"\",\"kind\":\"");
+        out.extend_from_slice(kind.as_bytes());
+        out.extend_from_slice(b"\",\"size\":");
+        out.extend_from_slice(change.size.to_string().as_bytes());
+        out.push(b'}');
+    }
+    out.push(b']');
+    let n = out.len().min(maxlen as usize);
+    let dst = unsafe { std::slice::from_raw_parts_mut(buf, n) };
+    dst.copy_from_slice(&out[..n]);
+    n as u32
+}
+
 /// Give the session the font `pl:u` serves as the shared system font, as the
 /// contents of a TrueType/OpenType file. Homebrew that draws text reads it out
 /// of pl's shared memory and hands it to FreeType, so this has to be set before
@@ -863,4 +1000,122 @@ fn write_into(buf: *mut u8, maxlen: u32, data: &[u8]) -> u32 {
         }
     }
     n as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `switch_new` installs a panic hook that captures the message for
+    /// `switch_last_error`, which in a test swallows the assertion. Put the
+    /// default back so failures are readable.
+    fn new_session() -> u32 {
+        let handle = switch_new();
+        let _ = std::panic::take_hook();
+        handle
+    }
+
+    fn take_changes(handle: u32) -> String {
+        let cap = 64 * 1024;
+        let mut buf = vec![0u8; cap];
+        let n = switch_sd_take_changes_json(handle, buf.as_mut_ptr(), cap as u32);
+        String::from_utf8(buf[..n as usize].to_vec()).unwrap()
+    }
+
+    fn put(handle: u32, path: &str, data: &[u8]) {
+        switch_sd_write_file(
+            handle,
+            path.as_ptr(),
+            path.len() as u32,
+            data.as_ptr(),
+            data.len() as u32,
+        );
+    }
+
+    #[test]
+    fn the_sd_card_round_trips_through_the_host_entry_points() {
+        let handle = new_session();
+
+        // Restoring the card is the host's own load path, so it must not come
+        // back as a change — otherwise every restored file is written straight
+        // back to the store it was just read from, on the first flush.
+        put(handle, "sdmc:/switch/restored.txt", b"hello");
+        assert_eq!(switch_sd_pending_changes(handle), 0);
+        assert_eq!(take_changes(handle), "[]");
+
+        // A guest write is. `IFile::Write` at offset 0 of a file the guest
+        // created, which is what a config save looks like.
+        {
+            let cpu = &mut session(handle).cpu;
+            assert!(cpu.fs.create_file("/switch/cfg.json", 0));
+            cpu.fs.write("/switch/cfg.json", 0, br#"{"v":5}"#).unwrap();
+            cpu.fs.guest_create_dir("/switch/saves");
+            cpu.fs.remove("/switch/restored.txt");
+        }
+        assert_eq!(switch_sd_pending_changes(handle), 3);
+        assert_eq!(
+            take_changes(handle),
+            r#"[{"path":"/switch/cfg.json","kind":"file","size":7},"#.to_owned()
+                + r#"{"path":"/switch/restored.txt","kind":"deleted","size":0},"#
+                + r#"{"path":"/switch/saves","kind":"dir","size":0}]"#
+        );
+        // Draining clears them: the page only ever writes back what is new.
+        assert_eq!(switch_sd_pending_changes(handle), 0);
+        assert_eq!(take_changes(handle), "[]");
+
+        // Reading a file back out is how the page gets the bytes to store.
+        let path = "/switch/cfg.json";
+        assert_eq!(switch_sd_file_size(handle, path.as_ptr(), path.len() as u32), 7);
+        let mut out = [0u8; 16];
+        let n = switch_sd_read_file(
+            handle,
+            path.as_ptr(),
+            path.len() as u32,
+            0,
+            out.as_mut_ptr(),
+            out.len() as u32,
+        );
+        assert_eq!(n, 7);
+        assert_eq!(&out[..7], br#"{"v":5}"#);
+
+        // Offsets let a large save be pulled in slices.
+        let n = switch_sd_read_file(
+            handle,
+            path.as_ptr(),
+            path.len() as u32,
+            4,
+            out.as_mut_ptr(),
+            out.len() as u32,
+        );
+        assert_eq!(n, 3);
+        assert_eq!(&out[..3], b":5}");
+
+        // A directory is not a file, and neither is a path with nothing at it.
+        let dir = "/switch";
+        assert_eq!(switch_sd_file_size(handle, dir.as_ptr(), dir.len() as u32), -1);
+        let missing = "/switch/nope";
+        assert_eq!(
+            switch_sd_read_file(
+                handle,
+                missing.as_ptr(),
+                missing.len() as u32,
+                0,
+                out.as_mut_ptr(),
+                out.len() as u32
+            ),
+            -1
+        );
+        switch_free_session(handle);
+    }
+
+    #[test]
+    fn a_path_json_cannot_carry_raw_is_escaped() {
+        // Guest paths hold whatever a filename can, and the page parses this
+        // with JSON.parse — one unescaped quote and the whole batch is lost.
+        let handle = new_session();
+        session(handle).cpu.fs.create_file(r#"/switch/a"b\c"#, 0);
+        let json = take_changes(handle);
+        assert_eq!(json, r#"[{"path":"/switch/a\"b\\c","kind":"file","size":0}]"#);
+        switch_free_session(handle);
+    }
 }

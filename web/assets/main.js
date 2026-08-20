@@ -220,11 +220,129 @@ async function stageFont() {
   await call('load_font', fontBytes);
 }
 
+// ---------- persistent SD card ----------
+//
+// The emulated SD card lives in the session's memory, so without this nothing
+// the guest writes survives a reload - and a save manager that cannot keep a
+// save is not much of one. IndexedDB fits the shape the core exposes: the card
+// is a path -> bytes map, and the core reports which paths the *guest*
+// changed, so a flush writes back only those instead of the whole card.
+
+const SD_DB_NAME = 'switch-wasm-sd';
+const SD_STORE = 'entries';
+let sdDb = null;
+// Entries drained from the core but not yet stored - keyed by path, so a file
+// written repeatedly between two successful flushes only costs one slot. The
+// core cannot be handed a change back once drained, so anything IndexedDB
+// refuses (a quota, most likely) waits here for the next flush rather than
+// being lost.
+const sdBacklog = new Map();
+let sdFlushing = false;
+
+function sdIdb() {
+  if (sdDb) return Promise.resolve(sdDb);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(SD_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(SD_STORE)) req.result.createObjectStore(SD_STORE);
+    };
+    req.onsuccess = () => { sdDb = req.result; resolve(sdDb); };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function sdReadAll() {
+  return sdIdb().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction(SD_STORE, 'readonly');
+    const store = tx.objectStore(SD_STORE);
+    const keys = store.getAllKeys();
+    const values = store.getAll();
+    tx.oncomplete = () => resolve(keys.result.map((k, i) => [k, values.result[i]]));
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  }));
+}
+
+// `entries` is [path, value] pairs; a null value deletes the path.
+function sdApply(entries) {
+  return sdIdb().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction(SD_STORE, 'readwrite');
+    const store = tx.objectStore(SD_STORE);
+    for (const [path, value] of entries) {
+      if (value === null) store.delete(path);
+      else store.put(value, path);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  }));
+}
+
+// Ask the browser not to evict the card under storage pressure. Without this
+// IndexedDB is best-effort and a save can quietly disappear.
+async function sdRequestPersistence() {
+  if (!navigator.storage || !navigator.storage.persist) return;
+  try {
+    if (await navigator.storage.persisted()) return;
+    if (!(await navigator.storage.persist())) {
+      log('SD card: storage is not marked persistent - the browser may evict it.', 'dim');
+    }
+  } catch { /* not fatal: the card still works for this session */ }
+}
+
+// Put the stored card back into a fresh session. Restores through the host
+// entry points, which do not count as guest changes, so this does not
+// immediately queue everything to be written straight back.
+async function sdRestore() {
+  let entries;
+  try {
+    entries = await sdReadAll();
+  } catch (err) {
+    log('SD card: could not be read (' + err + ')', 'err');
+    return;
+  }
+  if (!entries.length) return;
+  // Directories first, so one the guest left empty survives on its own.
+  entries.sort((a, b) => (a[1].kind === b[1].kind ? 0 : a[1].kind === 'dir' ? -1 : 1));
+  for (const [path, value] of entries) {
+    if (value.kind === 'dir') await call('sd_create_dir', path);
+    else await call('sd_write_file', path, value.data || new Uint8Array(0));
+  }
+  log('SD card: restored ' + entries.length + ' entries', 'dim');
+}
+
+// Write back what the guest changed. Cheap when it changed nothing, which is
+// almost every slice.
+async function sdFlush() {
+  if (sdFlushing || handle < 0) return;
+  sdFlushing = true;
+  try {
+    for (const change of await call('sd_take_changes')) {
+      if (change.kind === 'deleted') sdBacklog.set(change.path, null);
+      else if (change.kind === 'dir') sdBacklog.set(change.path, { kind: 'dir' });
+      else {
+        const data = await call('sd_read_file', change.path);
+        sdBacklog.set(change.path, { kind: 'file', data: data || new Uint8Array(0) });
+      }
+    }
+    if (sdBacklog.size) {
+      await sdApply([...sdBacklog]);
+      sdBacklog.clear();
+    }
+  } catch (err) {
+    log('SD card: could not be written (' + err + ') - retrying on the next flush.', 'err');
+  } finally {
+    sdFlushing = false;
+  }
+}
+
 async function init() {
   initWorker();
   await readyPromise;
   handle = await call('new');
   await stageFont();
+  await sdRequestPersistence();
+  await sdRestore();
   fbW = await call('fb_width');
   fbH = await call('fb_height');
   fbBytes = fbW * fbH * 4;
@@ -336,6 +454,7 @@ async function run() {
     await drainOutput();
     await drainDiagnostics();
     await pumpAudio();
+    await sdFlush();
     // Repaint only when the guest has actually presented a new frame - the
     // snapshot is several megabytes at 1280x720.
     const frames = await call('frame_count');
@@ -379,6 +498,7 @@ $('btn-reset').addEventListener('click', async () => {
   await call('free_session');
   handle = await call('new');
   await stageFont();
+  await sdRestore();
   resetAudio();
   clearConsole();
   lastFrame = 0;
@@ -422,6 +542,7 @@ async function finishRun(steps, stepped) {
     log('Stopped unexpectedly.', 'err');
   }
   await drainOutput();
+  await sdFlush();
   await renderFb();
   await updatePc();
 }

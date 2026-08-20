@@ -6,9 +6,12 @@ WEB    := web/assets
 
 all: test wasm assets
 
-# Host test suite: parsers, memory, CPU interpreter, loaders, demo boot.
+# Host test suite: parsers, memory, CPU interpreter, loaders, demo boot, and
+# the host-facing wasm entry points (which build for the host too, so the SD
+# card's import/export API is covered without a browser).
 test:
 	cargo test -p switch-core
+	cargo test -p switch-wasm
 
 # Compile the wasm bindings crate.
 wasm:

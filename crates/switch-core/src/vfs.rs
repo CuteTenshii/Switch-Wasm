@@ -5,7 +5,7 @@
 //! instead of a fixed reply. Hosts populate it — the browser frontend adds the
 //! files the user drops in, and tests build small trees inline.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// `FsDirEntryType`.
 pub const ENTRY_TYPE_DIR: u8 = 0;
@@ -29,13 +29,32 @@ enum Node {
 pub struct Vfs {
     /// Normalized absolute paths (`/`, `/switch`, `/switch/app.nro`) to nodes.
     nodes: BTreeMap<String, Node>,
+    /// Paths the **guest** has created, written, resized or deleted since the
+    /// host last drained them ([`Vfs::take_changes`]).
+    ///
+    /// This is what lets a host persist the card without writing all of it
+    /// back on every tick: the emulated SD card lives in memory, and the only
+    /// thing a store outside the session needs to hear about is what changed.
+    /// Host-side edits ([`Vfs::write_file`]) deliberately do **not** land here
+    /// — that is the host loading the card *from* its store, and marking those
+    /// would write every file straight back where it came from.
+    changed: BTreeSet<String>,
+}
+
+/// What happened to a path, as [`Vfs::take_changes`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    pub path: String,
+    /// `ENTRY_TYPE_FILE`, `ENTRY_TYPE_DIR`, or `None` when it was deleted.
+    pub kind: Option<u8>,
+    pub size: u64,
 }
 
 impl Vfs {
     /// An SD card with just the root and the `/switch` directory homebrew
     /// menus expect to exist.
     pub fn new() -> Vfs {
-        let mut vfs = Vfs { nodes: BTreeMap::new() };
+        let mut vfs = Vfs { nodes: BTreeMap::new(), changed: BTreeSet::new() };
         vfs.nodes.insert("/".to_owned(), Node::Dir);
         vfs.create_dir("/switch");
         vfs
@@ -100,10 +119,54 @@ impl Vfs {
             return false;
         }
         if let Some(parent) = Self::parent_of(&path) {
-            self.create_dir(&parent);
+            self.guest_create_dir(&parent);
         }
-        self.nodes.insert(path, Node::File(vec![0; size as usize]));
+        self.nodes.insert(path.clone(), Node::File(vec![0; size as usize]));
+        self.changed.insert(path);
         true
+    }
+
+    /// [`Vfs::create_dir`], recording every directory it had to make so a host
+    /// can persist an empty one the guest created.
+    pub fn guest_create_dir(&mut self, path: &str) {
+        let path = Self::normalize(path);
+        let mut current = String::from("/");
+        for part in path.split('/').filter(|p| !p.is_empty()) {
+            if current == "/" {
+                current = format!("/{}", part);
+            } else {
+                current = format!("{}/{}", current, part);
+            }
+            if !self.nodes.contains_key(&current) {
+                self.changed.insert(current.clone());
+            }
+        }
+        self.create_dir(&path);
+    }
+
+    /// Drain the paths the guest has changed since this was last called.
+    ///
+    /// Each is reported with what is at it *now*, so a host can store the file
+    /// or delete it from its store without a second lookup. A path that was
+    /// created and deleted between two drains is reported once, as deleted.
+    pub fn take_changes(&mut self) -> Vec<Change> {
+        std::mem::take(&mut self.changed)
+            .into_iter()
+            .map(|path| {
+                let kind = self.entry_type(&path);
+                let size = if kind == Some(ENTRY_TYPE_FILE) {
+                    self.size(&path).unwrap_or(0)
+                } else {
+                    0
+                };
+                Change { path, kind, size }
+            })
+            .collect()
+    }
+
+    /// How many paths are waiting to be drained, without draining them.
+    pub fn pending_changes(&self) -> usize {
+        self.changed.len()
     }
 
     /// Write `data` at `offset`, growing the file (zero-filling any gap) when
@@ -119,6 +182,7 @@ impl Vfs {
             contents.resize(end, 0);
         }
         contents[start..end].copy_from_slice(data);
+        self.changed.insert(Self::normalize(path));
         Some(data.len())
     }
 
@@ -127,6 +191,7 @@ impl Vfs {
         match self.nodes.get_mut(&Self::normalize(path)) {
             Some(Node::File(contents)) => {
                 contents.resize(size as usize, 0);
+                self.changed.insert(Self::normalize(path));
                 true
             }
             _ => false,
@@ -134,7 +199,12 @@ impl Vfs {
     }
 
     pub fn remove(&mut self, path: &str) -> bool {
-        self.nodes.remove(&Self::normalize(path)).is_some()
+        let path = Self::normalize(path);
+        if self.nodes.remove(&path).is_none() {
+            return false;
+        }
+        self.changed.insert(path);
+        true
     }
 
     /// `FsDirEntryType` of a path, or `None` when it does not exist.
@@ -322,6 +392,58 @@ mod tests {
         assert_eq!(vfs.file("/data.bin"), Some(&[0, 1, 2, 0, 0][..]));
         assert!(!vfs.set_size("/switch", 0), "not a file");
         assert!(!vfs.set_size("/nope", 0));
+    }
+
+    #[test]
+    fn only_guest_writes_are_reported_as_changes() {
+        let mut vfs = Vfs::new();
+        // The host restoring the card is not a change: reporting it would
+        // write every file straight back to the store it just came from.
+        vfs.write_file("/switch/restored.txt", b"x".to_vec());
+        vfs.create_dir("/switch/olddir");
+        assert_eq!(vfs.pending_changes(), 0);
+
+        // Everything the guest does is.
+        assert!(vfs.create_file("/switch/cfg.json", 0));
+        vfs.write("/switch/cfg.json", 0, b"{}").unwrap();
+        vfs.guest_create_dir("/switch/app/data");
+        vfs.set_size("/switch/restored.txt", 4);
+        vfs.remove("/switch/olddir");
+
+        let changes = vfs.take_changes();
+        let by_path: Vec<(&str, Option<u8>, u64)> =
+            changes.iter().map(|c| (c.path.as_str(), c.kind, c.size)).collect();
+        assert_eq!(
+            by_path,
+            vec![
+                ("/switch/app", Some(ENTRY_TYPE_DIR), 0),
+                ("/switch/app/data", Some(ENTRY_TYPE_DIR), 0),
+                ("/switch/cfg.json", Some(ENTRY_TYPE_FILE), 2),
+                ("/switch/olddir", None, 0),
+                ("/switch/restored.txt", Some(ENTRY_TYPE_FILE), 4),
+            ]
+        );
+
+        // Draining clears them, so a host only ever writes back what is new.
+        assert_eq!(vfs.pending_changes(), 0);
+        assert!(vfs.take_changes().is_empty());
+
+        // A path written twice between drains is reported once, with the
+        // state it ended up in.
+        vfs.write("/switch/cfg.json", 0, b"ab").unwrap();
+        vfs.write("/switch/cfg.json", 2, b"cd").unwrap();
+        let changes = vfs.take_changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].size, 4);
+
+        // ...including one created and then deleted, which is reported as the
+        // deletion it ended as.
+        vfs.create_file("/switch/tmp", 0);
+        vfs.remove("/switch/tmp");
+        let changes = vfs.take_changes();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "/switch/tmp");
+        assert_eq!(changes[0].kind, None);
     }
 
     #[test]
