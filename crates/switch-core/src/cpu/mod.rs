@@ -16,7 +16,7 @@
 
 use crate::mem::Memory;
 use crate::{Error, Result};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 mod alu;
 mod bits;
@@ -274,6 +274,10 @@ pub struct Cpu {
     /// changes; answering every poll with a fresh message made
     /// `appletMainLoop` re-process a focus change on every call.
     applet_focus_sent: bool,
+    /// Every `(interface, command)` pair the applet stub has already reported
+    /// as unimplemented, so the warning naming it prints once instead of once
+    /// per poll (`appletMainLoop` calls into `am` every frame).
+    unimplemented_am: HashSet<(String, Option<u32>)>,
     /// Synthetic SD-card directory state for the fsp-srv stub: maps an open
     /// directory handle to the entries it has not yielded yet
     /// (name bytes, entry type, file size). Lets `fsFsOpenDirectory` /
@@ -371,6 +375,7 @@ impl Cpu {
             domain_objects: HashMap::new(),
             vi_ifaces: HashMap::new(),
             applet_focus_sent: false,
+            unimplemented_am: HashSet::new(),
             fs_dirs: HashMap::new(),
             fs_files: HashMap::new(),
             romfs: None,
@@ -842,6 +847,17 @@ impl Cpu {
         for i in 0..=30u8 {
             self.set_reg(i, 0);
         }
+        // Horizon's process entry ABI, which `rtld` reads literally at its
+        // first two instructions (`cmp x0, #0` / `mov w19, w1`): X0 is the
+        // launch argument — 0 for a normal process launch, non-zero only for
+        // the homebrew loader's config block — and **X1 is the main thread's
+        // handle**. `nnSdk` stores that handle in the main
+        // `nn::os::ThreadType` (+0x1B0) and every `SdkMutex` compares its
+        // lock word against it; leaving X1 at 0 makes an *unlocked* mutex
+        // (lock word 0) compare equal to "owned by the current thread", so
+        // `nn::os::SdkMutexType::Lock` fires its recursive-lock assertion and
+        // `nn::oe::Initialize` aborts before the SDK ever reaches a service.
+        self.set_reg(1, MAIN_THREAD_HANDLE);
         self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
 
         // Real inter-module gaps are whatever the kernel's ASLR/layout
@@ -893,6 +909,13 @@ impl Cpu {
 
     pub fn set_pc(&mut self, pc: u32) {
         self.pc = pc;
+    }
+
+    /// Debug/test counterpart to [`Cpu::service_handles_snapshot`]: bind a
+    /// handle to a service name without going through `sm`'s GetService, so a
+    /// test can drive one service's IPC surface directly.
+    pub fn register_service_handle(&mut self, handle: u64, name: &str) {
+        self.record_handle(handle, name);
     }
 
     /// Debug: dump the fake-handle -> service-name map.

@@ -258,12 +258,19 @@ impl Cpu {
                 Ok(())
             }
             0x18 => {
-                // WaitSynchronization: report the wait as immediately satisfied.
-                // X1 is the "number of signaled handles" that the libnx wrapper
-                // stores to the caller's out pointer; deko3d indexes its waiter
-                // array by it, so garbage here makes the fence wait retry forever.
+                // WaitSynchronization(out_index, handles, num_handles, timeout):
+                // report the wait as immediately satisfied. X1 is the *index*
+                // of the handle that signaled, which the libnx wrapper stores
+                // to the caller's out pointer — callers index their own waiter
+                // array by it, so garbage here sends them to the wrong object.
+                // With every object pretended signaled, the first one is the
+                // one that signaled: 0. It used to answer 1 unconditionally,
+                // which is out of range for the single-handle waits `nnSdk`'s
+                // system worker does (`nn::os::detail::MultiWaitImpl::WaitAny`)
+                // — it then read a `MultiWaitHolderType` past the end of its
+                // list and called its null handler pointer.
                 self.write_zr(0, RESULT_OK);
-                self.write_zr(1, 1);
+                self.write_zr(1, 0);
                 // Waiting is where a thread that spins on another thread's
                 // progress gives way to it.
                 self.yield_thread();
@@ -293,8 +300,7 @@ impl Cpu {
                 // SendSyncRequest[Light|WithUserBuffer] / async variant.
                 // If we recognize the target handle as a named service, dispatch
                 // to a small stub implementation. Otherwise fall back to the
-                // libnx applet-style generic reply so hbmenu/applet init still
-                // progresses.
+                // generic reply below, which answers with a fresh object id.
                 let tls = self.tpidr as u32;
                 let handle = self.read_zr(0);
                 let cmd_id = self.ipc_command_id(tls);
@@ -406,7 +412,22 @@ impl Cpu {
                         // appletOE (application applet) / appletAE (everything
                         // else). Both are the same IApplicationProxyService/
                         // IApplicationProxy/ICommonStateGetter chain.
-                        "appletOE" | "appletAE" => self.applet_request(tls, handle, cmd_id)?,
+                        // The same `am` sub-interfaces reached over their own
+                        // session handle, which is how a caller that never
+                        // converts the root session to a domain (`nnSdk`) uses
+                        // them — the fsp-srv-fs / time:system-clock split
+                        // above, again.
+                        "appletOE" | "appletAE"
+                        | "am:proxy-service"
+                        | "am:application-proxy"
+                        | "am:common-state-getter"
+                        | "am:self-controller"
+                        | "am:window-controller"
+                        | "am:audio-controller"
+                        | "am:display-controller"
+                        | "am:library-applet-creator"
+                        | "am:application-functions"
+                        | "am:debug-functions" => self.applet_request(tls, handle, cmd_id)?,
                         "nifm:u" => {
                             let object_id = self.ipc_domain_object_id(tls);
                             match self.domain_interface(handle, object_id) {
@@ -419,41 +440,38 @@ impl Cpu {
                         }
                         "audren:u" => self.audren_request(tls, cmd_id)?,
                         "audren:iaudiorenderer" => self.audren_renderer_request(tls, cmd_id, handle)?,
-                         name => {
-                             // Known service, no dedicated stub. The applet
-                             // services get the state values their init polls
-                             // for (ReceiveMessage → the applet message,
-                             // Get*Mode/GetCurrentFocusState → the state); every
-                             // other service must NOT get those numbers back —
-                             // answering `pl:u`'s GetLoadState with the applet
-                             // message left NX-Shell polling it 190k times.
-                             let applet = name.starts_with("applet");
-                             let data = match cmd_id {
-                                 Some(1) if applet => 15, // ReceiveMessage → FocusStateChanged
-                                 Some(5) if applet => 1,  // GetOperationMode → Handheld
-                                 Some(6) if applet => 0,  // GetPerformanceMode → Normal
-                                 Some(9) if applet => 1,  // GetCurrentFocusState → InFocus
-                                 _ => {
-                                     let obj = self.next_object_id;
-                                     self.next_object_id = obj.wrapping_add(1);
-                                     obj
-                                 }
-                             };
-                             self.write_ipc_response(tls, 0, &[], &data.to_le_bytes(), &[])?
+                         _name => {
+                             // Known service, no dedicated stub: answer with a
+                             // fresh object id so a caller that expects an
+                             // out-object gets something coherent.
+                             //
+                             // This used to special-case any service whose name
+                             // starts with "applet", handing back the values
+                             // ICommonStateGetter's pollers expect (command 1 →
+                             // FocusStateChanged, 5 → Handheld, 6 → Normal, 9 →
+                             // InFocus) for *whatever* command carried those
+                             // ids. `appletOE`/`appletAE` have had a real
+                             // dispatch of their own for a while now, so the
+                             // guess only ever applied to some other applet
+                             // service that would have been answered wrong —
+                             // the same way `pl:u`'s GetLoadState once got the
+                             // applet message back and left NX-Shell polling it
+                             // 190k times.
+                             let obj = self.next_object_id;
+                             self.next_object_id = obj.wrapping_add(1);
+                             self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])?
                          }
                     }
                 } else {
                     // Unrecognized session handle. The display service's session
                     // handles come from generic object-id replies and aren't in
                     // service_handles, so try the vi stub first; fall back to the
-                    // old applet-style generic reply if the request isn't a vi
-                    // command (e.g. hid/time sessions).
+                    // generic object-id reply if the request isn't a vi command
+                    // (e.g. hid/time sessions).
                     if let Some(cmd) = cmd_id {
                         // vi commands: GetIApplicationDisplayService (2) and the
                         // display/session commands (100+). The generic reply already
-                        // answers ConvertToDomain (0) with a valid object id, and the
-                        // small applet state commands (1 = ReceiveMessage, 5/6/9)
-                        // must keep the generic reply.
+                        // answers ConvertToDomain (0) with a valid object id.
                         if cmd == 2 || cmd >= 100 {
                             return self.vi_request(tls, handle, cmd_id);
                         }
@@ -464,16 +482,17 @@ impl Cpu {
                         .read_u32(tls.wrapping_add(start + 0x10))
                         .unwrap_or(0)
                         == 0x4943_4653;
-                    let data = match cmd_id {
-                        Some(1) => 15,
-                        Some(5) => 1,
-                        Some(6) => 0,
-                        Some(9) => 1,
-                        _ => {
-                            let obj = self.next_object_id;
-                            self.next_object_id = obj.wrapping_add(1);
-                            obj
-                        }
+                    // A fresh object id, for a caller that expects an
+                    // out-object. The applet-state guesses that used to live
+                    // here (command 1 → FocusStateChanged, 5 → Handheld, 6 →
+                    // Normal, 9 → InFocus) applied to *every* untracked
+                    // session, not just an applet one, so `vi`'s and `hid`'s
+                    // sessions were being answered with applet state whenever
+                    // their command ids happened to collide.
+                    let data = {
+                        let obj = self.next_object_id;
+                        self.next_object_id = obj.wrapping_add(1);
+                        obj
                     };
                     if is_domain {
                         for i in 0..4u32 {
@@ -581,11 +600,22 @@ impl Cpu {
                  // GetInfo(out, infoType, handle, infoSubValue): report the
                  // value in X1 (the libnx wrapper stores it to the out
                  // pointer). The InfoType numbering here matches the libnx
-                 // build hbmenu is compiled against: 2/3 Alias, 4/5 Heap,
-                 // 6/7 Total/Used memory, 11 RandomEntropy, 12/13 Aslr, 14/15
-                 // Stack.
+                 // build hbmenu is compiled against: 0/1 Core/Priority mask,
+                 // 2/3 Alias, 4/5 Heap, 6/7 Total/Used memory,
+                 // 11 RandomEntropy, 12/13 Aslr, 14/15 Stack.
                  let info_type = self.read_zr(1);
                  let value = match info_type {
+                     // CoreMask / PriorityMask describe what the process is
+                     // allowed to schedule on, and they come from the NPDM's
+                     // `ThreadInfo` kernel capability. "A Short Hike"'s
+                     // `main.npdm` carries the ordinary application values —
+                     // cores 0..2 and priorities 28..59 — which is what every
+                     // retail application gets. Reporting 0 (the old `_ => 0`
+                     // default) makes `nn::os::GetThreadAvailableCoreMask`
+                     // hand `nn::os::RegisterSystemWorkerHandler` an empty
+                     // mask, whose "highest set bit" scan then asserts.
+                     0 => 0b0000_0111, // CoreMask: cores 0, 1, 2
+                     1 => 0x0FFF_FFFF_F000_0000, // PriorityMask: 28..=59
                      2 => 0x0000_0010_0000_0000, // AliasRegionAddress
                      3 => 0x0000_0000_2000_0000, // AliasRegionSize
                      4 => 0x0000_0002_0000_0000, // HeapRegionAddress

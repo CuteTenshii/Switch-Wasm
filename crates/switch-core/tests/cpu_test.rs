@@ -1236,71 +1236,127 @@ fn multiply_long_ops() {
 
 // ---------------- Horizon IPC reply synthesis ----------------
 
-#[test]
-fn horizon_ipc_reply_success_not_busy() {
-    use switch_core::cpu::SyscallMode;
-    // A domain IPC request (ICommonStateGetter::ReceiveMessage, cmd 1) must get
-    // a success reply: the "SFCO" marker, Result 0 — NOT the AM_BUSY error
-    // (0x19280) that wedges hbmenu in its "wait for applet" sleep loop — and
-    // the FocusStateChanged applet message (15) in the reply payload.
-    let mut cpu = cpu_at(0x1000);
-    cpu.syscall_mode = SyscallMode::Horizon;
-    let tls = 0x3000u32;
-    cpu.mem.map_zero(tls, 0x100).unwrap();
-    // msr tpidr_el0, x0 (x0 = tls base)
-    cpu.set_reg(0, tls as u64);
-    // hipc header: type=4 (request), 12 data words, no special header
-    cpu.mem.write_u32(tls, 0x0000_0004).unwrap();
+/// Drive one IPC request at `handle` and return the CPU. The request is built
+/// in the guest's own TLS buffer the way `libnx` marshals a CMIF message:
+/// hipc header, an optional `CmifDomainInHeader`, then the `SFCI` in-header
+/// carrying the command id.
+fn am_request(cpu: &mut Cpu, handle: u64, msg_type: u32, object_id: Option<u32>, cmd: u32) {
+    let tls = cpu.tls_base();
+    for i in (0..0x100u32).step_by(4) {
+        cpu.mem.write_u32(tls + i, 0).unwrap();
+    }
+    cpu.mem.write_u32(tls, msg_type).unwrap();
     cpu.mem.write_u32(tls + 4, 0x0c).unwrap();
-    // domain header
-    cpu.mem.write_u32(tls + 0x10, 0x0010_0001).unwrap(); // type=1, data_size=0x10
-    cpu.mem.write_u32(tls + 0x14, 4).unwrap(); // object id
-    // CmifInHeader: "SFCI", version 0, command id 1 (ReceiveMessage)
-    cpu.mem.write_u32(tls + 0x20, 0x4943_4653).unwrap();
-    cpu.mem.write_u32(tls + 0x24, 0).unwrap();
-    cpu.mem.write_u32(tls + 0x28, 1).unwrap();
-    cpu.mem.write_u32(tls + 0x2c, 0).unwrap();
+    let cmif = match object_id {
+        Some(obj) => {
+            // CmifDomainRequestType_SendMessage, 0x10 bytes of data.
+            cpu.mem.write_u32(tls + 0x10, 0x0010_0001).unwrap();
+            cpu.mem.write_u32(tls + 0x14, obj).unwrap();
+            tls + 0x20
+        }
+        None => tls + 0x10,
+    };
+    cpu.mem.write_u32(cmif, 0x4943_4653).unwrap(); // "SFCI"
+    cpu.mem.write_u32(cmif + 8, cmd).unwrap();
+    cpu.set_reg(0, handle);
+    let pc = cpu.get_pc();
+    cpu.mem.map(pc, &svc(0x21).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    cpu.set_pc(pc);
+}
 
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&(0xD51B_D040u32).to_le_bytes()); // msr tpidr_el0, x0
-    bytes.extend_from_slice(&svc(0x21).to_le_bytes());
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.run(2).unwrap();
+/// A bootstrapped Horizon CPU with `appletOE` already bound to a handle and
+/// converted to a domain, plus the object ids of the `IApplicationProxy` and
+/// `ICommonStateGetter` opened through it.
+fn applet_chain() -> (Cpu, u64, u32, u32) {
+    use switch_core::cpu::SyscallMode;
+    const APPLET: u64 = 0x1000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.register_service_handle(APPLET, "appletOE");
+    let tls = cpu.tls_base();
 
-    assert_eq!(cpu.read_x(0), 0); // Result 0 (success)
-    // The reply is coherent: SFCO at the domain out header, Result 0 after it.
-    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0x4F43_4653); // "SFCO"
-    assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 0);
-    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0); // Result
-    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 15); // FocusStateChanged
-    assert_ne!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0x19280);
+    // Control::ConvertToDomain on the root session -> IApplicationProxyService.
+    am_request(&mut cpu, APPLET, 5, None, 0);
+    let proxy_service = cpu.mem.read_u32(tls + 0x20).unwrap();
+    // IApplicationProxyService::OpenApplicationProxy -> IApplicationProxy.
+    am_request(&mut cpu, APPLET, 4, Some(proxy_service), 0);
+    let proxy = cpu.mem.read_u32(tls + 0x30).unwrap();
+    // IApplicationProxy::GetCommonStateGetter.
+    am_request(&mut cpu, APPLET, 4, Some(proxy), 0);
+    let state_getter = cpu.mem.read_u32(tls + 0x30).unwrap();
+    (cpu, APPLET, proxy, state_getter)
 }
 
 #[test]
-fn horizon_ipc_reply_focus_state() {
+fn applet_common_state_getter_reports_focus_once() {
+    // ICommonStateGetter::ReceiveMessage (cmd 1) must hand out the startup
+    // FocusStateChanged (15) exactly once and then report "no message" — NOT
+    // the AM_BUSY error (0x19280) that wedges hbmenu in its "wait for applet"
+    // sleep loop, and not a fresh focus change on every poll, which made JKSV
+    // treat every frame as a new focus transition.
+    let (mut cpu, handle, _proxy, state_getter) = applet_chain();
+    let tls = cpu.tls_base();
+
+    am_request(&mut cpu, handle, 4, Some(state_getter), 1);
+    assert_eq!(cpu.read_x(0), 0); // svc result
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0x4F43_4653); // "SFCO"
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0); // Result: success
+    assert_ne!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0x19280);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 15); // FocusStateChanged
+
+    am_request(&mut cpu, handle, 4, Some(state_getter), 1);
+    const NO_MESSAGES: u32 = 128 | (3 << 9);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), NO_MESSAGES);
+
+    // GetCurrentFocusState (cmd 9) reports InFocus so libnx's applet-mainloop
+    // wait loop terminates.
+    am_request(&mut cpu, handle, 4, Some(state_getter), 9);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1);
+}
+
+#[test]
+fn applet_unimplemented_command_is_an_error_not_a_fake_success() {
+    // An `am` command with no implementation behind it must report cmif's
+    // "unknown command id" rather than a bare success. Everything `am` returns
+    // is a live handle or a piece of applet state the caller then acts on, so
+    // a fabricated success is a wrong answer the guest believes: answering
+    // IApplicationFunctions::GetGpuErrorDetectedSystemEvent that way left
+    // nnSdk's system worker waiting on handle 0.
+    const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
+    let (mut cpu, handle, proxy, _state_getter) = applet_chain();
+    let tls = cpu.tls_base();
+
+    // IApplicationProxy::GetDisplayController, then a command it does not have.
+    am_request(&mut cpu, handle, 4, Some(proxy), 4);
+    let display_controller = cpu.mem.read_u32(tls + 0x30).unwrap();
+    am_request(&mut cpu, handle, 4, Some(display_controller), 8);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0x4F43_4653); // "SFCO"
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), UNKNOWN_COMMAND_ID);
+}
+
+#[test]
+fn applet_control_command_with_context_is_not_a_normal_command() {
+    // nnSdk sends every message in the "with context" encoding —
+    // ControlWithContext (7) rather than Control (5). Reading only type 5 as a
+    // control message turned `appletOE`'s opening QueryPointerBufferSize into
+    // IApplicationProxyService command 3, which does not exist, and the applet
+    // chain died before it ever opened.
     use switch_core::cpu::SyscallMode;
-    // ICommonStateGetter::GetCurrentFocusState (cmd 9) must report InFocus (1)
-    // so libnx's applet-mainloop wait loop terminates.
+    const APPLET: u64 = 0x1000;
     let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
     cpu.syscall_mode = SyscallMode::Horizon;
-    let tls = 0x3000u32;
-    cpu.mem.map_zero(tls, 0x100).unwrap();
-    cpu.set_reg(0, tls as u64);
-    cpu.mem.write_u32(tls, 0x0000_0004).unwrap();
-    cpu.mem.write_u32(tls + 4, 0x0c).unwrap();
-    cpu.mem.write_u32(tls + 0x10, 0x0010_0001).unwrap();
-    cpu.mem.write_u32(tls + 0x14, 4).unwrap();
-    cpu.mem.write_u32(tls + 0x20, 0x4943_4653).unwrap();
-    cpu.mem.write_u32(tls + 0x28, 9).unwrap(); // cmd 9 = GetCurrentFocusState
+    cpu.register_service_handle(APPLET, "appletOE");
+    let tls = cpu.tls_base();
 
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&(0xD51B_D040u32).to_le_bytes());
-    bytes.extend_from_slice(&svc(0x21).to_le_bytes());
-    cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.run(2).unwrap();
-
-    assert_eq!(cpu.read_x(0), 0);
-    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1); // InFocus
+    am_request(&mut cpu, APPLET, 7, None, 3); // QueryPointerBufferSize
+    assert_eq!(cpu.mem.read_u32(tls + 0x10).unwrap(), 0x4F43_4653); // "SFCO"
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0); // success, not an error
 }
 
 #[test]

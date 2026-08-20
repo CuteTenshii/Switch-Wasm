@@ -38,10 +38,15 @@ Browser-oriented Nintendo Switch emulation core: an ARM64 (A64) integer interpre
 - Heap via `svcSetHeapSize` returns `0x3000_0000` (address out-param; deliberately NOT `0x2000_0000` — with a 512 MiB heap there, `malloc`'s arena lands at `STACK_BASE + 0x1a80` and the app's 8 MiB memblock memset overwrites the stack). `svcQueryMemory` reports per-page state (allocated pages = RWX, untouched soft pages = unmapped) so libnx virtmem reservations find free address space. `svcGetInfo` uses the hbmenu libnx InfoType numbering (2/3 Alias, 4/5 Heap, 6/7 Total/Used memory, 12/13 Aslr, 14/15 Stack). Env block at `ENV_BLOCK_ADDR = 0x0010_0000`.
 - `boot_homebrew` (cpu.rs): runs crt0 through the `bl` at entry+0xc0, seeds env/ThreadVars, runs `DT_INIT_ARRAY` (`init_array_entries` in nro.rs parses MOD0/dynamic), then resumes at that `bl`. **Static constructors only run through this path.** That call is libnx's `__libnx_init(ctx, main_thread, saved_lr)`: the constructor pass zeroes the registers, so all three arguments are re-seeded before resuming — including `saved_lr` = `SELF_RETURN_TRAMPOLINE`, which `envSetup` keeps as the exit function pointer. With it left at 0, `__nx_exit` branched to NULL and a clean exit looked like a crash.
 - `nvdrv_request` (cpu/ipc.rs): the real `INvDrvServices` interface — Open/Ioctl/Ioctl2/Ioctl3/Close/Initialize/QueryEvent, dispatched into `gpu::nvdrv`.
-- `svcWaitSynchronization` reports the wait satisfied with X1 = 1 ("one handle
-  signaled") — the libnx wrapper stores X1 to the caller's out pointer, and
-  deko3d uses it; leaving it garbage made the fence wait read a bogus waiter
-  index. A Timeout (0xEA01) during deko3d device init is treated as fatal
+- `svcWaitSynchronization` reports the wait satisfied with X1 = **0**: X1 is
+  the *index* of the handle that signaled, and with every object pretended
+  signaled the first one is it. The libnx wrapper stores X1 to the caller's
+  out pointer and callers index their own waiter array by it, so garbage
+  there sends them to the wrong object. It used to answer 1 unconditionally,
+  which is out of range for a single-handle wait — `nnSdk`'s system worker
+  (`nn::os::detail::MultiWaitImpl::WaitAny`) then read a
+  `MultiWaitHolderType` past the end of its list and `blr`'d its null handler.
+  A Timeout (0xEA01) during deko3d device init is treated as fatal
   (`svcBreak` 0x1159).
 - hbmenu state: **its menu renders correctly** — title, theme background, entry
   tile and the icon (JPEG-decoded, pixel-exact against a reference decode) all
@@ -51,6 +56,30 @@ Browser-oriented Nintendo Switch emulation core: an ARM64 (A64) integer interpre
   into a linear memblock and its command list is just
   `dkCmdBufCopyBufferToImage` + `dkCmdBufSignalFence`; its assets are raw RGBA
   `.bin` bitmaps. Only the copy engine and syncpoints are involved.
+
+## Retail process entry (`Cpu::boot_retail_program`)
+
+Horizon's process entry ABI is two registers, and `rtld`'s first two
+instructions read both literally (`cmp x0, #0` / `mov w19, w1`):
+
+- **X0** — the launch argument. `0` for a normal process launch; non-zero only
+  for the homebrew loader's config block, which sends `rtld` down a different
+  path entirely.
+- **X1** — the **main thread's handle** ([`MAIN_THREAD_HANDLE`]). `nnSdk`
+  stores it in the main `nn::os::ThreadType` at **+0x1B0**, and
+  `nn::os::detail::InternalCriticalSectionImplByHorizon::IsLockedByCurrentThread`
+  compares every `SdkMutex` lock word (masked with `0xBFFFFFFF`, dropping the
+  has-waiters bit) against it. Leaving X1 at 0 makes an *unlocked* mutex (lock
+  word 0) compare equal to "owned by the current thread", so the very first
+  `nn::os::SdkMutexType::Lock` fires its recursive-lock assertion and the
+  title aborts inside `nn::oe::Initialize` before reaching any service.
+
+`svcGetInfo`'s CoreMask (0) and PriorityMask (1) come from the NPDM's
+`ThreadInfo` kernel capability; every retail application carries cores 0..2
+(mask `0b111`) and priorities 28..59, which is what "A Short Hike"'s own
+`main.npdm` says. Reporting 0 there hands
+`nn::os::GetThreadAvailableCoreMask` an empty mask, whose inlined
+highest-set-bit scan inside `nn::os::RegisterSystemWorkerHandler` asserts.
 
 ## Guest threads (`cpu/mod.rs`, `cpu/svc.rs`)
 
@@ -156,12 +185,40 @@ replies are:
   `Cpu::reply_with_interface` picks the right shape per request and files the
   object's state under `Cpu::object_key(handle, object_id)`.
 
-The generic reply for a service with no dedicated stub answers the *applet*
-state commands (`ReceiveMessage` → 15, `GetOperationMode` → 1, …) with the
-values applet init polls for. Those numbers must not leak to other services:
-`pl:u`'s `GetLoadState` is also command 1, and answering it with 15 left
-NX-Shell polling the shared-font service 190k times. The guesses are gated on
-the service name starting with "applet".
+There are **two encodings of every message kind**: the plain one (`Request` =
+4, `Control` = 5) and the "with context" one (`RequestWithContext` = 6,
+`ControlWithContext` = 7), which prefixes the raw data with a 16-byte tracing
+context. `libnx` sends the plain form; **`nnSdk` sends the context form for
+everything**. Test control-ness with `Cpu::ipc_is_control_request`, never `type
+== 5` — `appletOE`'s opening message from a retail title is
+`QueryPointerBufferSize` as type 7, and reading it as an ordinary command
+killed the applet chain before it opened.
+
+The generic reply for a service with no dedicated stub answers with a fresh
+object id and nothing else. It used to guess the *applet* state commands
+(`ReceiveMessage` → 15, `GetOperationMode` → 1, …) for any service whose name
+started with "applet"; those numbers leaked — `pl:u`'s `GetLoadState` is also
+command 1, and answering it with 15 left NX-Shell polling the shared-font
+service 190k times.
+
+**An unimplemented `am` command must not answer with a bare success.**
+Everything `am` hands back is a live kernel object or a piece of applet state
+the caller acts on, so a fabricated success is a wrong answer the guest
+believes rather than a neutral placeholder: the old catch-all answered
+`IApplicationFunctions::GetGpuErrorDetectedSystemEvent` (command 130) with
+success and *no copy handle*, and `nnSdk`'s system worker spent the rest of the
+boot waiting on handle 0. `Cpu::am_unimplemented` reports `cmif`'s
+`UnknownCommandId` (module 10, description 221 — `0x1ba0a`) and warns once per
+`(interface, command)` on stderr, which is how you find the next command to
+implement. A bare success is still the *right* answer for a genuine
+setter/notifier whose whole reply is a Result — but those are listed by command
+id, not caught by a `_` arm.
+
+Both callers reach the same `Cpu::applet_request`, by two different routes:
+`libnx` converts `appletOE` to a domain and addresses each sub-interface by
+object id, while `nnSdk` never converts and gets a **session handle per
+interface**, so the `am:*` names are also listed in `svc.rs`'s dispatch (the
+same split as `fsp-srv-fs` and `time:system-clock`).
 
 A **Close** request (message type 2) carries no command id. Dispatching one on
 whatever command id is left in the TLS buffer runs a real command — closing an

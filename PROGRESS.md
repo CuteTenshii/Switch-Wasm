@@ -14,9 +14,13 @@ and put what they render on the canvas.
   SASS + rasterizer) is not implemented; see [GPU](#gpu-gm20b-model).
 - **Retail NCA/NSP**: a real, encrypted commercial title ("A Short Hike") can
   be decrypted, its RomFS mounted, and its full multi-module boot sequence
-  (`rtld` → `main` → `subsdk*` → `sdk`) run for 100M+ instructions into real
-  `nnSdk` init code before hitting an internal abort we haven't fully
-  root-caused; see [Retail NCA/NSP loading](#retail-ncansp-loading).
+  (`rtld` → `main` → `subsdk*` → `sdk`) run for 117M+ instructions through
+  real `nnSdk` init — `nn::init::Start` → `nn::oe::Initialize` →
+  `nn::oe::InitializeApplet` — and start the SDK's system worker thread. All
+  of `nn::oe::Initialize` now completes; at 117.8M instructions the title is
+  in its own `main`, and stops setting up its heap in
+  `nn::mem::StandardAllocator::Initialize`. See
+  [Retail NCA/NSP loading](#retail-ncansp-loading).
 
 See [Next](#next) for the live open threads.
 
@@ -474,23 +478,125 @@ instead of the intended `0x1fe001f8`); after, it stays at its bootstrap
 value for the entire run, and the registration lands at the correct address.
 Zero regressions.
 
-**Still open**: that fix changed nothing about the actual abort — same
-instruction count, same backtrace, same values. The struct pointer itself
-resolves correctly either way (self-consistent write-then-read regardless of
-which base it's relative to); the field at `+0x1b0` is simply never written
-by anything for the entire run. Cross-referencing two independent public
-`nn::os::ThreadType` reverse-engineering sources (`skyline-dev/skyline`,
-`misson20000/nn-types` on GitHub) confirms the struct layout — `+0x1b8` is
-`thread_handle` (matches exactly what our own traced code writes there on
-`GetThreadId` success) and `+0x1b0` is `crit`, a critical-section lock word.
-`0` there is its normal *unlocked* state, so it isn't obviously a bug by
-itself — the real open question is what the *other* side of the comparison
-(`arg1`, also reading `0`) is supposed to hold. Traced `arg1` to the return
-value of a call chain rooted in `nn::diag`'s internal logging/formatting
-implementation (a dynamically-resolved GOT slot, `sub_d339760` in the traced
-binary) — unlike `ThreadType`, this is Nintendo-internal and not in any
-public reference material found so far, so resolving it further means
-inferring behavior rather than checking it against a spec.
+**Resolved**: that `TPIDRRO_EL0` fix changed nothing about the abort on its
+own, and the guess that `+0x1b0` was `crit` (a lock word) was wrong. Naming
+the backtrace settled it. `sdk`'s NSO carries a full `DT_HASH` dynamic symbol
+table — 36,622 symbols — so every address in a real run can be resolved
+exactly; `examples/dump_exefs.rs` decrypts the ExeFS, lays the modules out at
+the same addresses `boot_retail_program` uses and writes a flat image plus a
+sorted `symbols.txt`, and `examples/disasm_flat.rs` disassembles either at its
+real load address. The original backtrace reads, innermost last:
+
+```
+nn::diag::detail::Abort(nn::Result const*)          <- svcBreak
+nn::diag::detail::VAbortImpl(...)
+nn::diag::detail::AbortImpl(...)
+nn::diag::detail::OnAssertionFailure(...)
+nn::os::SdkMutexType::Lock()                        <- the assertion
+nn::oe::Initialize()
+nninitInitializeSdkModule()
+nn::init::Start(...)
+```
+
+and the predicate `SdkMutexType::Lock` asserts on is
+`nn::os::detail::InternalCriticalSectionImplByHorizon::IsLockedByCurrentThread`,
+eleven instructions long:
+
+```
+mrs x8, TPIDRRO_EL0
+ldr x8, [x8, #0x1f8]      ; ThreadType* out of TLS
+ldr w9, [x0]              ; the mutex's lock word
+ldr w8, [x8, #0x1b0]      ; the current thread's *handle*
+and w9, w9, #0xbfffffff   ; drop the has-waiters bit
+cmp w9, w8
+csinc w0, wzr, wzr, ne
+```
+
+So `+0x1b0` is the thread handle, not `crit`, and the abort was a *recursive
+lock* assertion: `Lock()` on a mutex the caller already holds. Both sides read
+`0` — an unlocked mutex against a thread handle of zero — so an untouched
+mutex looked self-owned.
+
+Three real bugs came out of it, each one moving the boot further:
+
+- **The main thread handle was never delivered.** Horizon's process entry ABI
+  puts the launch argument in X0 and the **main thread's handle in X1**;
+  `rtld`'s first two instructions are literally `cmp x0, #0` / `mov w19, w1`.
+  `boot_retail_program` zeroed all 31 registers and jumped, so `nnSdk` filed a
+  handle of 0 into the main `ThreadType` and every `SdkMutex` matched it.
+  Seeding X1 with `MAIN_THREAD_HANDLE` (the same value `boot_homebrew` already
+  advertises through the homebrew ABI env block) fixed it.
+- **`svcGetInfo` CoreMask (0) and PriorityMask (1) fell into the `_ => 0`
+  default.** The next abort was `nn::oe::Initialize` →
+  `nn::oe::InitializeApplet` → `nn::oe::SetupGpuErrorHandler` →
+  `nn::os::RegisterSystemWorkerHandler`, whose inlined highest-set-bit scan
+  over `nn::os::GetThreadAvailableCoreMask()` asserts on an empty mask. The
+  right values are in the title's own `main.npdm`: its `ThreadInfo` kernel
+  capability says `min_core=0 max_core=2` (mask `0b111`) and priorities
+  28..=59, which is what every retail application gets.
+- **`svcWaitSynchronization` answered X1 = 1 unconditionally.** X1 is the
+  *index* of the handle that signaled, not a count, so 1 is out of range for
+  the single-handle waits `nn::os::detail::MultiWaitImpl::WaitAny` issues. The
+  SDK's system worker took the returned index into its `MultiWaitHolderType`
+  list, read one past the end, and `blr`'d the null handler pointer at
+  `holder+0x38` — PC 0. Answering 0 is both in range and what "every object is
+  pretended signaled" actually implies. hbmenu, sysinfo and NX-Fetch render
+  byte-identical frames in the same instruction counts either way.
+
+### The applet stub stopped guessing
+
+The three fixes above got the title to 117.59M instructions and an abort in
+`nn::oe::GpuErrorHandler`. Chasing it turned out to be a stub-design problem
+rather than a missing-kernel problem: **the `am` stub answered every command it
+did not implement with a bare success**, so a caller could not tell an
+implemented command from an unimplemented one. `nn::oe::SetupGpuErrorHandler`
+asked for `IApplicationFunctions::GetGpuErrorDetectedSystemEvent` (command
+130), got "success" and *no copy handle*, and filed handle **0** as the
+GPU-error event.
+
+`Cpu::am_unimplemented` now reports `cmif`'s `UnknownCommandId` (`0x1ba0a`) and
+prints `[am] unimplemented: <interface> cmd=<n>` once per pair. Two more real
+bugs fell out of turning that on:
+
+- **`nnSdk` sends every message in the "with context" encoding.**
+  `RequestWithContext` is type 6 and `ControlWithContext` is type 7, where
+  `libnx` sends 4 and 5. Every stub tested `ipc_message_type(tls) == 5` for
+  control-ness, so `appletOE`'s *first* message from a retail title —
+  `QueryPointerBufferSize`, type 7 — was dispatched as IApplicationProxyService
+  command 3, which does not exist. `Cpu::ipc_is_control_request` accepts both.
+- **The `am` sub-interfaces were unreachable over their own session handles.**
+  `libnx` converts `appletOE` to a domain; `nnSdk` never converts, so each
+  sub-interface comes back as a separate session handle recorded as `am:…`.
+  Those names were not in `svc.rs`'s dispatch, so every retail `am` request
+  landed in the generic object-id reply instead of `applet_request`.
+
+With `GetGpuErrorDetectedSystemEvent` answering with a real copy handle the
+title reaches **117.82M** instructions — past `nn::oe::Initialize` entirely —
+and stops in its own `main`:
+
+```
+main!nninitStartup+0x68
+sdk!nn::mem::StandardAllocator::Initialize(void*, unsigned long, bool)+0xd0
+sdk!nn::diag::detail::OnAssertionFailure(...)
+```
+
+**Now open**: the title's own heap setup. `nn::mem::StandardAllocator::
+Initialize` asserts on the block it was handed, which points at `svcSetHeapSize`
+/ the heap region `svcGetInfo` reports rather than at anything applet-related.
+
+Two other things stay open behind this one. The kernel still has no waitable
+object model — `svcWaitSynchronization` reports every handle instantly
+signaled, so an event handed out by `am` is "already signaled" the moment a
+caller polls it; that needs a per-handle signaled flag, `svcCreateEvent`,
+`svcSignalEvent`/`svcClearEvent`/`svcResetSignal`, and a wait that actually
+blocks and reschedules. And the rest of the applet surface the title asks for
+is enumerated in its `main.npdm` service-access-control list: `appletOE`,
+`fsp-srv`, `hid`, `nvdrv`, `vi:u`, `pl:u`, `set`, `time:u`, `audout:u`,
+`audren:u`, `nifm:u`, `ssl`, `acc:u0`, `csrng`, and others.
+
+Homebrew reports two honest gaps of its own, both harmless — the caller checks
+the Result and carries on, and every frame is byte-identical to before:
+`IApplicationFunctions` command 30 (JKSV) and command 60 (nxdumptool).
 
 ## Frontend
 
@@ -523,6 +629,22 @@ inferring behavior rather than checking it against a spec.
 - `cargo run -p switch-core --release --example boot_nsp -- <nsp> <prod.keys>
   [title.keys] [max_steps]` boots a real NSP/NCA from the CLI — the
   equivalent of the browser's "Launch" button, for debugging without one.
+- `cargo run -p switch-core --release --example dump_exefs -- <nsp>
+  <prod.keys> <title.keys> <out_dir>` decrypts the Program ExeFS and writes
+  every module as a flat image at the address `boot_retail_program` loads it
+  at, the raw `main.npdm`/NSO files, and a sorted `symbols.txt` of all 36k+
+  `DT_HASH` dynamic symbols. **This is what makes a retail backtrace
+  readable** — `0x0ce6c0c8` on its own says nothing;
+  `sdk!nn::diag::detail::Abort+0x18` says everything.
+- `cargo run -p switch-core --release --example disasm_flat -- <module.bin>
+  <base> <addr> [count]` disassembles one of those images at its real load
+  address.
+- `cargo run -p switch-core --release --example retail_trace -- <nsp>
+  <prod.keys> <title.keys> [tail]` boots the same way but keeps a ring buffer
+  of the last N instructions and dumps it on halt or fault. `RING_FROM=<pc>`
+  starts recording at a pc, `RING_MIN=<addr>` drops everything below an
+  address — set it past `rtld` (`0x08004000`), whose lazy-binding resolver
+  runs hundreds of steps per call and would otherwise fill the whole ring.
 - `TRACE_NV=1` traces nvdrv IPC (with guest backtraces), `TRACE_GPU=1` traces
   device opens, ioctls and engine methods, `TRACE_IPC=1` traces all services.
 - Browser: `make serve`, load `hbmenu.nro` with the "Horizon (stubbed)" ABI.

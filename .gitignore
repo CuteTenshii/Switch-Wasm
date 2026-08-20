@@ -3,3 +3,7 @@
 *.nro
 .DS_Store
 *.bndb
+*.keys
+*.nsp
+*.nca
+*.xci

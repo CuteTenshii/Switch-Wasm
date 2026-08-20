@@ -243,6 +243,24 @@ impl Cpu {
         self.mem.read_u32(tls).unwrap_or(0) & 0xFFFF
     }
 
+    /// Whether the request is a *control* message — the session-management
+    /// commands (ConvertToDomain, Clone, QueryPointerBufferSize) rather than a
+    /// command on the interface behind the session.
+    ///
+    /// There are two encodings of every message kind: the plain one
+    /// (`Request` = 4, `Control` = 5) and the "with context" one
+    /// (`RequestWithContext` = 6, `ControlWithContext` = 7), which prefixes the
+    /// raw data with a 16-byte tracing context. `libnx` sends the plain form;
+    /// **`nnSdk` sends the context form for everything**, so testing `== 5`
+    /// classified every retail control command as an ordinary command on the
+    /// interface. `appletOE`'s very first message is
+    /// `QueryPointerBufferSize`, which arrives as type 7 and was being answered
+    /// as though it were IApplicationProxyService command 3 — a command that
+    /// does not exist — which killed the applet chain before it opened.
+    pub(super) fn ipc_is_control_request(&self, tls: u32) -> bool {
+        matches!(self.ipc_message_type(tls), 5 | 7)
+    }
+
     /// Whether the request is a domain message. Domain-ness is NOT encoded in
     /// the hipc type field: a domain request still carries type 4
     /// (`CmifCommandType_Request`), and the domain header (`CmifDomainInHeader`)
@@ -906,7 +924,7 @@ impl Cpu {
         // nv interface. QueryPointerBufferSize must report 0 so libnx's
         // `SfBufferAttr_HipcAutoSelect` buffers are marshalled as map-alias
         // ranges rather than through a server pointer buffer we do not have.
-        if self.ipc_message_type(tls) == 5 {
+        if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
                 // CloneCurrentObject(Ex): libnx clones the nvdrv session and
@@ -1013,7 +1031,7 @@ impl Cpu {
     pub(super) fn time_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
-        if self.ipc_message_type(tls) == 5 {
+        if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
@@ -1250,7 +1268,7 @@ impl Cpu {
     pub(super) fn psm_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
-        if self.ipc_message_type(tls) == 5 {
+        if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
@@ -1329,20 +1347,51 @@ impl Cpu {
         }
     }
 
+    /// Answers an `am` command the applet stub does not actually implement.
+    ///
+    /// Everything `am` hands back is a live kernel object or a piece of applet
+    /// state the caller then acts on, so a blanket "success, no data" reply is
+    /// not a neutral placeholder — it is a wrong answer the guest believes.
+    /// That is exactly how `nn::oe::SetupGpuErrorHandler` ended up waiting on
+    /// handle **0**: the old catch-all answered
+    /// `GetGpuErrorDetectedSystemEvent` with success and no copy handle at
+    /// all, and the SDK's system worker took the missing handle at face value.
+    /// Reporting `cmif`'s "unknown command id" instead makes the guest fail at
+    /// the command that is genuinely missing, and the warning names the one to
+    /// implement next.
+    pub(super) fn am_unimplemented(
+        &mut self,
+        tls: u32,
+        iface: &str,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        /// `cmif` (module 10) description 221: what a real `sf` server answers
+        /// when a session has no handler for the requested command id.
+        const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
+        if self.unimplemented_am.insert((iface.to_string(), cmd_id)) {
+            eprintln!("[am] unimplemented: {iface} cmd={cmd_id:?} (pc={:#x})", self.pc);
+        }
+        self.write_ipc_response(tls, UNKNOWN_COMMAND_ID, &[], &[], &[])
+    }
+
     /// `IApplicationProxyService`/`IApplicationProxy`: the applet-lifecycle
     /// chain homebrew opens as `appletOE` (or `appletAE`, for a non-application
     /// applet). `appletMainLoop` polls `ICommonStateGetter` every frame — the
     /// event handle, then `ReceiveMessage`/`GetOperationMode`/
-    /// `GetCurrentFocusState` — to decide whether to keep running; the old
+    /// `GetCurrentFocusState` — to decide whether to keep running; an earlier
     /// generic stub answered every one of those the same way regardless of
     /// which sub-interface actually made the call (and re-sent the initial
     /// "focus changed" message on every single poll), which made at least one
     /// real homebrew (JKSV) treat every frame as a fresh focus transition and
     /// give up after a handful of them.
+    ///
+    /// Only the commands listed below are implemented. Everything else goes to
+    /// [`Cpu::am_unimplemented`] rather than a fabricated success — see there
+    /// for why.
     pub(super) fn applet_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
-        if self.ipc_message_type(tls) == 5 {
+        if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
@@ -1352,23 +1401,51 @@ impl Cpu {
                 Some(QUERY_POINTER_BUFFER_SIZE) => {
                     self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
                 }
-                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                _ => self.am_unimplemented(tls, "am:control", cmd_id),
             };
         }
+        // Which `am` sub-interface this request is actually for. A caller that
+        // converted the session to a domain (`libnx`) addresses each one by
+        // object id on the one `appletOE` handle; a caller that did not
+        // (`nnSdk`) got a separate session handle per interface out of
+        // [`Cpu::reply_with_interface`], and the name is recorded against the
+        // handle instead. Resolving only the domain case left every `nnSdk`
+        // request answered as `am:unknown`.
         let object_id = self.ipc_domain_object_id(tls);
-        match self.domain_interface(handle, object_id) {
+        // A domain *close* request (`CmifDomainRequestType_Close`, the domain
+        // header's type byte set to 2) drops one object out of the session and
+        // carries no `CmifInHeader` at all. [`Cpu::ipc_command_id`] falls back
+        // to scanning the whole message buffer for an `SFCI` magic, so on a
+        // close it finds the *previous* request's header still sitting there
+        // and reports that command id — which is why `appletExit`'s teardown
+        // used to look like a flurry of command 0s.
+        if self.mem.read_u8(tls.wrapping_add(self.ipc_reply_start(tls))).unwrap_or(0) == 2 {
+            self.domain_objects.remove(&(handle, object_id));
+            return self.write_ipc_response(tls, 0, &[], &[], &[]);
+        }
+        let iface = if self.ipc_is_domain_request(tls) {
+            self.domain_interface(handle, object_id).unwrap_or("am:unknown").to_string()
+        } else {
+            match self.service_name(handle) {
+                // The root session before any ConvertToDomain *is*
+                // IApplicationProxyService.
+                Some("appletOE") | Some("appletAE") | None => "am:proxy-service".to_string(),
+                Some(name) => name.to_string(),
+            }
+        };
+        match iface.as_str() {
             // IApplicationProxyService::OpenApplicationProxy.
-            Some("am:proxy-service") => match cmd_id {
+            "am:proxy-service" => match cmd_id {
                 Some(0) => {
                     self.reply_with_interface(tls, handle, "am:application-proxy")?;
                     Ok(())
                 }
-                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                _ => self.am_unimplemented(tls, &iface, cmd_id),
             },
             // IApplicationProxy's Get* accessors, each handing back one of the
             // sub-interfaces below.
-            Some("am:application-proxy") => {
-                let iface = match cmd_id {
+            "am:application-proxy" => {
+                let sub = match cmd_id {
                     Some(0) => Some("am:common-state-getter"),
                     Some(1) => Some("am:self-controller"),
                     Some(2) => Some("am:window-controller"),
@@ -1379,16 +1456,16 @@ impl Cpu {
                     Some(1000) => Some("am:debug-functions"),
                     _ => None,
                 };
-                match iface {
+                match sub {
                     Some(name) => {
                         self.reply_with_interface(tls, handle, name)?;
                         Ok(())
                     }
-                    None => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    None => self.am_unimplemented(tls, &iface, cmd_id),
                 }
             }
             // ICommonStateGetter: the state `appletMainLoop` polls every frame.
-            Some("am:common-state-getter") => match cmd_id {
+            "am:common-state-getter" => match cmd_id {
                 // GetEventHandle: a copy handle the guest waits on before
                 // polling ReceiveMessage. WaitSynchronization treats any
                 // handle outside the thread/mutex tables as already
@@ -1414,26 +1491,171 @@ impl Cpu {
                 Some(5) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]), // GetOperationMode: Handheld
                 Some(6) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]), // GetPerformanceMode: Normal
                 Some(9) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]), // GetCurrentFocusState: InFocus
-                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // GetBootMode: Normal.
+                Some(8) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
+                // GetAcquiredSleepLockEvent / GetDefaultDisplayResolutionChangeEvent:
+                // handles the caller waits on. Nothing here ever sleeps or
+                // changes resolution, so they are handed out and never
+                // signalled — see the note on GetEventHandle above for why a
+                // wait on them still returns.
+                Some(13) | Some(61) => {
+                    let h = self.alloc_handle();
+                    self.write_ipc_response(tls, 0, &[h], &[], &[])
+                }
+                // GetDefaultDisplayResolution: the same 1280x720 the display
+                // stub hands out as its native window.
+                Some(60) => {
+                    let mut raw = Vec::with_capacity(8);
+                    raw.extend_from_slice(&1280u32.to_le_bytes());
+                    raw.extend_from_slice(&720u32.to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &raw, &[])
+                }
+                // RequestToAcquireSleepLock / ReleaseSleepLock /
+                // ReleaseSleepLockTransiently / SetCpuBoostMode: there is no
+                // sleep state or clock governor to move, so accepting the
+                // request is the whole implementation.
+                Some(10) | Some(11) | Some(12) | Some(66) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                _ => self.am_unimplemented(tls, &iface, cmd_id),
             },
             // IApplicationFunctions: PopLaunchParameter fails when hbmenu
             // launched the app without forwarding arguments, same as on real
-            // hardware — the old stub's success-with-an-unrelated-object-id
+            // hardware — an earlier stub's success-with-an-unrelated-object-id
             // left callers treating that id as a launch-parameter storage
             // object that was never actually registered as one.
-            Some("am:application-functions") => match cmd_id {
+            "am:application-functions" => match cmd_id {
                 Some(1) => {
                     const LAUNCH_PARAMETER_NOT_FOUND: u32 = 128 | (2 << 9); // am
                     self.write_ipc_response(tls, LAUNCH_PARAMETER_NOT_FOUND, &[], &[], &[])
                 }
-                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // EnsureSaveData -> the save data size it ensured.
+                Some(20) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+                // GetDesiredLanguage -> an `nn::settings::LanguageCode`, which
+                // is the null-padded BCP-47 tag as eight raw bytes.
+                Some(21) => {
+                    let mut code = [0u8; 8];
+                    code[..5].copy_from_slice(b"en-US");
+                    self.write_ipc_response(tls, 0, &[], &code, &[])
+                }
+                // GetDisplayVersion -> a 16-byte version string.
+                Some(23) => {
+                    let mut version = [0u8; 16];
+                    version[..5].copy_from_slice(b"1.0.0");
+                    self.write_ipc_response(tls, 0, &[], &version, &[])
+                }
+                // NotifyRunning -> whether the notification was the first one.
+                Some(40) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
+                // GetPseudoDeviceId -> a 16-byte per-console, per-title id.
+                // Zero is a legitimate value and nothing here derives anything
+                // from it, but it must be the right *size* — a caller copies
+                // 16 bytes out of the reply either way.
+                Some(50) => self.write_ipc_response(tls, 0, &[], &[0u8; 16], &[]),
+                // GetGpuErrorDetectedSystemEvent: the event `nn::oe::
+                // SetupGpuErrorHandler` registers with the SDK's system
+                // worker, so that a GPU fault wakes a handler instead of
+                // hanging the title. It is the first thing a retail `nnSdk`
+                // asks `am` for that it cannot start without — answering it
+                // with anything but a copy handle aborts `nn::oe::Initialize`.
+                // Nothing here ever faults the GPU, so the event is handed out
+                // and never signalled.
+                Some(130) => {
+                    let h = self.alloc_handle();
+                    self.write_ipc_response(tls, 0, &[h], &[], &[])
+                }
+                // SetTerminateResult / InitializeGamePlayRecording /
+                // SetGamePlayRecordingState / SetDelayTimeToAbortOnGpuError:
+                // nothing to record, nothing to fault, nothing to report back.
+                Some(22) | Some(66) | Some(67) | Some(131) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                _ => self.am_unimplemented(tls, &iface, cmd_id),
             },
-            // ISelfController, IWindowController, IAudioController,
-            // IDisplayController, ILibraryAppletCreator, IDebugFunctions, and
-            // the root session before ConvertToDomain: every command they get
-            // is a setter/notifier a caller only checks the result of, so a
-            // bare success covers all of them.
-            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // ISelfController: the applet's own lifecycle knobs.
+            "am:self-controller" => match cmd_id {
+                // Exit / LockExit / UnlockExit / EnterFatalSection /
+                // LeaveFatalSection / SetScreenShotPermission /
+                // Set{Operation,Performance}ModeChangedNotification /
+                // SetFocusHandlingMode / SetRestartMessageEnabled /
+                // SetScreenShotAppletIdentityInfo /
+                // SetOutOfFocusSuspendingEnabled /
+                // SetScreenShotImageOrientation / SetHandlesRequestToDisplay /
+                // SetIdleTimeDetectionExtension / SetAutoSleepDisabled /
+                // SetAlbumImageTakenNotificationEnabled /
+                // SetApplicationAlbumUserData / SetRecordVolumeMuted.
+                //
+                // Every one of these is a setter or a notifier whose whole
+                // reply is a Result. There is no suspend, screenshot, album or
+                // exit-lock behaviour behind them to change, so accepting the
+                // setting really is the complete implementation — unlike the
+                // commands below it, a bare success here is the truth.
+                Some(0..=4) | Some(10..=16) | Some(19) | Some(50) | Some(62) | Some(68)
+                | Some(100) | Some(110) | Some(130) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // GetLibraryAppletLaunchableEvent /
+                // GetAccumulatedSuspendedTickChangedEvent: copy handles the
+                // caller stores and later waits on. `libnx`'s `appletInitialize`
+                // asks for the second one on 6.0.0+ and keeps whatever handle
+                // came back, so answering with success and *no* handle left it
+                // holding 0 — the same shape of bug that had `nnSdk`'s system
+                // worker waiting on handle 0.
+                Some(9) | Some(91) => {
+                    let h = self.alloc_handle();
+                    self.write_ipc_response(tls, 0, &[h], &[], &[])
+                }
+                // GetAccumulatedSuspendedTickValue: nothing has ever been
+                // suspended.
+                Some(90) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+                // CreateManagedDisplayLayer -> the layer id the caller then
+                // passes to `vi`'s OpenLayer. The display stub only models one
+                // layer and calls it 1 (see [`Cpu::vi_native_window`]), so this
+                // has to agree with it.
+                Some(40) => self.write_ipc_response(tls, 0, &[], &1u64.to_le_bytes(), &[]),
+                // CreateManagedDisplaySeparableLayer -> the same layer plus a
+                // recording layer, which nothing here records from.
+                Some(44) => {
+                    let mut raw = Vec::with_capacity(16);
+                    raw.extend_from_slice(&1u64.to_le_bytes());
+                    raw.extend_from_slice(&1u64.to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &raw, &[])
+                }
+                _ => self.am_unimplemented(tls, &iface, cmd_id),
+            },
+            // IWindowController: foreground rights and the applet resource id
+            // every other service tags this process's requests with.
+            "am:window-controller" => match cmd_id {
+                // GetAppletResourceUserId / GetAppletResourceUserIdOfCallerApplet.
+                // There is one process here, so it gets one id; the `vi` and
+                // `hid` stubs ignore which id a request carries.
+                Some(1) | Some(2) => {
+                    self.write_ipc_response(tls, 0, &[], &1u64.to_le_bytes(), &[])
+                }
+                // AcquireForegroundRights / ReleaseForegroundRights /
+                // RejectToChangeIntoBackground: nothing else is competing for
+                // the foreground.
+                Some(10) | Some(11) | Some(12) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                _ => self.am_unimplemented(tls, &iface, cmd_id),
+            },
+            // IAudioController: the applet's volume relative to the system's.
+            "am:audio-controller" => match cmd_id {
+                // SetExpectedMasterVolume / ChangeMainAppletMasterVolume /
+                // SetTransparentVolumeRate.
+                Some(0) | Some(3) | Some(4) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // Get{Main,Library}AppletExpectedMasterVolume -> an f32.
+                Some(1) | Some(2) => {
+                    self.write_ipc_response(tls, 0, &[], &1.0f32.to_le_bytes(), &[])
+                }
+                _ => self.am_unimplemented(tls, &iface, cmd_id),
+            },
+            // IDisplayController (capture buffers), ILibraryAppletCreator
+            // (launching another applet), IDebugFunctions, and any session that
+            // never named itself. Nothing here can answer those honestly: a
+            // capture buffer has no contents, and a library applet has nowhere
+            // to run.
+            _ => self.am_unimplemented(tls, &iface, cmd_id),
         }
     }
 
@@ -1443,7 +1665,7 @@ impl Cpu {
     pub(super) fn nifm_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
-        if self.ipc_message_type(tls) == 5 {
+        if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
@@ -1513,7 +1735,7 @@ impl Cpu {
     /// and so `JKSV::initialize_sdl`, and so `JKSV::JKSV()` itself — gave up
     /// before a single frame ever rendered.
     pub(super) fn audren_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
-        if self.ipc_message_type(tls) == 5 {
+        if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
                 _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -1556,7 +1778,7 @@ impl Cpu {
     /// do not match what it computed from the same voice/sink/effect counts,
     /// and it runs every frame the app is alive, not just at startup.
     pub(super) fn audren_renderer_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
-        if self.ipc_message_type(tls) == 5 {
+        if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
                 _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
