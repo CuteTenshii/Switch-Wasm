@@ -3007,6 +3007,120 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &written.to_le_bytes(), &[])
     }
 
+    /// `ns:am2` (`IServiceGetterInterface`) and the interfaces it hands out:
+    /// the console's record of which applications are **installed**.
+    ///
+    /// Nothing is installed here. There is no NAND to install a title to, no
+    /// content manager to install one with, and no application record database
+    /// to have recorded it — so `ListApplicationRecord` is an empty list, and
+    /// that is the truthful answer rather than a gap. A save manager asks `ns`
+    /// what a title id is *called* so it can label the save it found; with no
+    /// records to label, it has nothing to ask about.
+    ///
+    /// The generic fallback answered the getters below with a fabricated
+    /// object id, so a caller that asked for `IApplicationManagerInterface`
+    /// got an id that was not one and then called `ListApplicationRecord` on
+    /// it — which the fallback also answered with a fresh object id, leaving
+    /// the caller to read its record count out of that.
+    ///
+    /// Before 3.0.0 `ns:am` *was* the application manager; from 3.0.0 the
+    /// service is a getter and the manager is one of ten interfaces it hands
+    /// out (7988..=7999). Both routes land on the same interfaces here.
+    pub(super) fn ns_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        const CONVERT_TO_DOMAIN: u32 = 0;
+        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(CONVERT_TO_DOMAIN) => {
+                    let name = self.service_name(handle).unwrap_or("ns:am2").to_string();
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, &name);
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                // `libnx` records this on the session the moment `sm` hands it
+                // over, before any `ns` command is sent — it is what the
+                // fabricated-object-id reply was corrupting for `ns:am2`.
+                Some(QUERY_POINTER_BUFFER_SIZE) => {
+                    self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[])
+                }
+                _ => self.unimplemented_command(tls, "ns:control", cmd_id),
+            };
+        }
+        let object_id = self.ipc_domain_object_id(tls);
+        if self.ipc_is_domain_close(tls) {
+            return self.close_domain_object(tls, handle, object_id);
+        }
+        let iface = if self.ipc_is_domain_request(tls) {
+            self.domain_interface(handle, object_id).unwrap_or("ns:am2").to_string()
+        } else {
+            match self.service_name(handle) {
+                Some(name) => name.to_string(),
+                None => "ns:am2".to_string(),
+            }
+        };
+        match iface.as_str() {
+            // The getter services. Every one of them is the same
+            // `IServiceGetterInterface`; which system service you opened
+            // decides what you are *allowed* to ask for, not what the
+            // interface is, and nothing here enforces privilege.
+            "ns:am2" | "ns:ec" | "ns:rid" | "ns:rt" | "ns:web" | "ns:ro" | "ns:su"
+            | "ns:vm" | "ns:dev" => match cmd_id {
+                Some(7988) => self.ns_reply_with_interface(tls, handle, "ns:dynamic-rights"),
+                Some(7989) => self.ns_reply_with_interface(tls, handle, "ns:read-only-record"),
+                Some(7992) => self.ns_reply_with_interface(tls, handle, "ns:read-only-control"),
+                Some(7993) => self.ns_reply_with_interface(tls, handle, "ns:ecommerce"),
+                Some(7994) => self.ns_reply_with_interface(tls, handle, "ns:app-version"),
+                Some(7995) => self.ns_reply_with_interface(tls, handle, "ns:factory-reset"),
+                Some(7996) => self.ns_reply_with_interface(tls, handle, "ns:account-proxy"),
+                Some(7997) => self.ns_reply_with_interface(tls, handle, "ns:app-manager"),
+                Some(7998) => self.ns_reply_with_interface(tls, handle, "ns:download-task"),
+                Some(7999) => self.ns_reply_with_interface(tls, handle, "ns:content-management"),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // `ns:am` is the pre-3.0.0 service, where the application manager
+            // is reached directly rather than through a getter.
+            "ns:am" | "ns:app-manager" => self.ns_application_manager_request(tls, &iface, cmd_id),
+            // `IReadOnlyApplicationRecordInterface`: the record half of the
+            // manager, for callers that only want to know what is installed.
+            "ns:read-only-record" => match cmd_id {
+                // HasApplicationRecord(u64 application_id) -> bool. Nothing is
+                // installed, so nothing has a record.
+                Some(0) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            _ => self.unimplemented_command(tls, &iface, cmd_id),
+        }
+    }
+
+    /// Hand out one of `ns`'s sub-interfaces. The getters all have the same
+    /// shape — no input, one out-interface — so they share this.
+    fn ns_reply_with_interface(&mut self, tls: u32, handle: u64, name: &str) -> Result<()> {
+        self.reply_with_interface(tls, handle, name)?;
+        Ok(())
+    }
+
+    /// `IApplicationManagerInterface`, the interface a title actually asks
+    /// about installed applications through.
+    fn ns_application_manager_request(
+        &mut self,
+        tls: u32,
+        iface: &str,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        match cmd_id {
+            // ListApplicationRecord(s32 entry_offset) -> (s32 count, out
+            // buffer of ApplicationRecord). Zero records, whatever the offset:
+            // see the type comment for why that is the answer and not a stub.
+            //
+            // The count has to be written even though it is zero — a caller
+            // that gets a success with no out-data reads its record count off
+            // its own stack, which is how "no titles installed" turns into
+            // several billion of them.
+            Some(0) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+            _ => self.unimplemented_command(tls, iface, cmd_id),
+        }
+    }
+
     /// `csrng` (`IRandomInterface`): the console's random number generator.
     ///
     /// Real hardware answers this out of the security processor's hardware
@@ -5484,6 +5598,97 @@ mod tests {
         let mut cpu = request(false, 2, &[0u8; 8]);
         cpu.pdm_request(TLS, Some(2)).unwrap();
         assert_eq!(cpu.read_bytes(TLS + 0x20, 0x20), vec![0u8; 0x20]);
+    }
+
+    /// A CMIF **control** request (message type 5) — the session-management
+    /// commands `libnx` sends on a handle the moment `sm` hands it over,
+    /// before any command of the service's own.
+    fn control_request(command_id: u32) -> Cpu {
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.mem.write_u32(TLS, 5).unwrap(); // CmifCommandType_Control
+        cpu.mem.write_u32(TLS + 4, 8).unwrap();
+        cpu.mem.write_u32(TLS + 0x10, SFCI).unwrap();
+        cpu.mem.write_u32(TLS + 0x18, command_id).unwrap();
+        cpu
+    }
+
+    #[test]
+    fn ns_answers_the_pointer_buffer_size_asked_before_any_command() {
+        // `libnx` records the pointer buffer size on the session as part of
+        // opening it, so this is the *first* thing `ns:am2` is ever asked and
+        // the only thing a caller that never lists a title asks at all. The
+        // generic fallback answered it with a fabricated object id, so the
+        // size came back as whatever that id happened to be.
+        let mut cpu = control_request(3);
+        cpu.register_service_handle(9, "ns:am2");
+        cpu.ns_request(TLS, 9, Some(3)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u16(TLS + 0x20).unwrap(), 0x1000);
+    }
+
+    #[test]
+    fn ns_hands_out_the_interface_each_getter_names() {
+        // From 3.0.0 `ns:am2` is a getter: every interface behind it is
+        // reached by asking for it by command id, and answering the wrong one
+        // (or a fabricated object) hands the caller an interface whose
+        // commands mean something else entirely.
+        for (command, expected) in [
+            (7989u32, "ns:read-only-record"),
+            (7997, "ns:app-manager"),
+            (7998, "ns:download-task"),
+            (7999, "ns:content-management"),
+        ] {
+            let mut cpu = request(false, command, &[]);
+            cpu.register_service_handle(9, "ns:am2");
+            cpu.ns_request(TLS, 9, Some(command)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "{command}");
+            let session = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+            assert_ne!(session, 0, "{command}");
+            assert_eq!(cpu.service_name(session), Some(expected), "{command}");
+        }
+    }
+
+    #[test]
+    fn ns_reports_a_console_with_nothing_installed() {
+        // There is no NAND to install a title to and no record database to
+        // have recorded one, so the list is empty — and the count has to be
+        // written even though it is zero, or the caller reads its record
+        // count off its own stack.
+        let mut cpu = request(false, 7997, &[]);
+        cpu.register_service_handle(9, "ns:am2");
+        cpu.ns_request(TLS, 9, Some(7997)).unwrap();
+        let manager = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+
+        write_request(&mut cpu, 0, &0i32.to_le_bytes()); // ListApplicationRecord
+        cpu.ns_request(TLS, manager, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "record count");
+
+        // And no application id has a record, including the one this process
+        // is running as.
+        let mut cpu = request(false, 7989, &[]);
+        cpu.register_service_handle(9, "ns:am2");
+        cpu.ns_request(TLS, 9, Some(7989)).unwrap();
+        let records = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+
+        write_request(&mut cpu, 0, &super::DEFAULT_PROGRAM_ID.to_le_bytes());
+        cpu.ns_request(TLS, records, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "has record");
+    }
+
+    #[test]
+    fn ns_reports_a_command_it_does_not_implement_rather_than_succeeding() {
+        // The whole point of naming the service instead of leaving it to the
+        // fallback: a command with nothing behind it has to fail, so the
+        // caller fails at the command that is genuinely missing and the log
+        // names the one to implement next.
+        let mut cpu = request(false, 400, &[]);
+        cpu.register_service_handle(9, "ns:am2");
+        cpu.ns_request(TLS, 9, Some(400)).unwrap();
+        const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), UNKNOWN_COMMAND_ID);
     }
 
     #[test]

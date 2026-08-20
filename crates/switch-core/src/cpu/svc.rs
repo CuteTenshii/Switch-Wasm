@@ -670,6 +670,17 @@ impl Cpu {
                         | "acc:async-context" | "acc:notifier" => {
                             self.acc_request(tls, handle, cmd_id)?
                         }
+                        // ns, the record of what is installed: the getter
+                        // services either side of 3.0.0, plus the interfaces
+                        // they hand out over either route.
+                        "ns:am" | "ns:am2" | "ns:ec" | "ns:rid" | "ns:rt" | "ns:web"
+                        | "ns:ro" | "ns:su" | "ns:vm" | "ns:dev" | "ns:app-manager"
+                        | "ns:read-only-record" | "ns:read-only-control"
+                        | "ns:content-management" | "ns:download-task"
+                        | "ns:account-proxy" | "ns:app-version" | "ns:factory-reset"
+                        | "ns:ecommerce" | "ns:dynamic-rights" => {
+                            self.ns_request(tls, handle, cmd_id)?
+                        }
                         // csrng, the random number generator, and `spl:`,
                         // the security processor it really lives behind.
                         "csrng" => self.csrng_request(tls, cmd_id)?,
