@@ -18,7 +18,7 @@ out to be stale.
 | `nxdumptool.nro` | renders | yes |
 | `NX-Shell.nro` | clean exit at 15.7M steps, no font (below) | no |
 | `Checkpoint.nro` | 6.8M steps, no exit | no |
-| "A Short Hike" (NSP) | 362.5M steps, into `nn::vi::CreateLayer` | no |
+| "A Short Hike" (NSP) | runs 1.5B steps with no fault or abort | not yet |
 
 - **GPU**: the nvdrv/nvmap/GMMU/channel/copy-engine path is real
   (`crates/switch-core/src/gpu`). The 3D shader core (Maxwell SASS +
@@ -28,9 +28,11 @@ out to be stale.
   `subsdk*` → `sdk`) run through real `nnSdk` init. `nn::init::Start` →
   `nn::oe::Initialize` → `nn::oe::InitializeApplet` all complete, the heap is
   set up, the title mounts and reads its own RomFS, gets real kernel events and
-  real input, and brings its whole graphics stack up. **Every service it asks
-  for now has a real implementation behind it** — a full boot logs no `no
-  implementation` and no `unimplemented` lines. See [Retail NCA/NSP
+  real input, brings its whole graphics stack up, creates its display layer,
+  opens its audio device and starts feeding it — and then runs on into its own
+  loop instead of aborting. **Every service it asks for now has a real
+  implementation behind it** — a full boot logs no `no implementation` and no
+  `unimplemented` lines. See [Retail NCA/NSP
   loading](#retail-ncansp-loading).
 
 See [Next](#next) for the live open threads.
@@ -969,6 +971,99 @@ Homebrew reports two honest gaps of its own, both harmless — the caller checks
 the Result and carries on, and every frame is byte-identical to before:
 `IApplicationFunctions` command 30 (JKSV) and command 60 (nxdumptool).
 
+### The layer, and the binder object in its parcel
+
+`vi`'s `OpenLayer` answers with an Android `Parcel` that describes the layer's
+`IGraphicBufferProducer`. What this sent was a twelve-byte payload with the
+binder id at offset 8 and nothing else. libnx reads the id out of it and
+ignores the rest, so every homebrew here was happy; `nnSdk` also looks at
+*what the object is*, found no interface it recognised, and aborted the
+process from inside `nn::vi::CreateLayer` with `vi` result 114-1.
+
+The parcel now carries the whole `flat_binder_object` real `vi` sends — type,
+flags, the binder id, a cookie, and the interface name `"dispdrv"` — followed
+by the four-byte object offset table its header had always pointed at. The id
+stays at offset 8, so libnx reads exactly what it read before: hbmenu,
+sysinfo, NX-Fetch, JKSV and nxdumptool all render byte-identical frames.
+
+That took the title to **383.1M** instructions, through Unity's RomFS asset
+loading and into `nn::audio::OpenDefaultAudioOut`.
+
+### audio
+
+`audout:u` is the plain PCM output device — the one
+`nn::audio::OpenDefaultAudioOut` and libnx's `audoutInitialize` open, distinct
+from the renderer (`audren`). It was reaching the generic "no implementation"
+fallback, which answers with a fabricated object id; `OpenAudioOut` needs an
+`IAudioOut` back as a move handle, so the title got a null interface and
+branched to pc=0.
+
+`IAudioOutManager` now lists the console's one device and opens it, and
+`IAudioOut` implements the buffer protocol that is the whole interface: append
+a buffer, wait on the event from `RegisterBufferEvent`, collect the tags of the
+buffers the device has finished with. A real device releases a buffer once its
+samples have been clocked out; there is no DAC here, so a buffer is released as
+soon as its samples have been copied into a queue for the host — a device that
+never falls behind, rather than one that claims to have played what it dropped.
+A device that has not been started still gets its buffers back, because the
+memory is the guest's, but queues nothing. The queue is capped at about a
+second and drops from the front, so a paused tab cannot grow it without bound.
+
+The host end is `switch_audio_format` and `switch_audio_pull`, and the page
+schedules each pull as one `AudioBuffer` butted against the end of the last.
+The emulator does not run a retail title in real time, so underruns are the
+normal case; the cursor restarts slightly ahead of `currentTime` rather than
+stretching anything to cover the gap.
+
+Then one field width cost the whole title:
+
+- **`OpenAudioOut`'s channel count is 16 bits on the wire**, and the two bytes
+  above it are padding the caller never initialises. Reading the whole word and
+  echoing it back in the reply told `nnSdk` the device had 0xcafe0002 channels.
+  `nn::audio::GetAudioOutChannelCount` hands that straight to its caller, and
+  0xcafe0002 is negative, so Unity's `channelCount > 0` check failed. Unity
+  treated audio init as failed and tore it down — without calling
+  `CloseAudioOut`, because as far as it knew there was nothing to close — then
+  retried. The retry hit `nnSdk`'s own registry, which still held the device as
+  open, and got `audio` result 2153-0009, which Unity aborts on.
+
+Reading the field at its real width, the title opens its audio device, queues
+four 4 KiB buffers, starts it, and goes on to `vi`'s buffer queue and a long
+run of `nvdrv` ioctls.
+
+Finding that needed two additions to `retail_trace`: `MARK` prints a line every
+time one of a list of pcs runs, so a whole API can be watched being called in
+order without recording the steps in between, and `MARK_DUMP` dumps memory at
+each mark — here the reply struct `nn::audio::OpenAudioOut` was about to copy
+into the caller's `AudioOut`. Unity's own binary has no symbols, so its call
+sites were resolved by walking `main`'s `.rela.plt` and matching GOT addresses
+back to imported names.
+
+### Suspending threads, and reading their registers
+
+Past audio the title stopped twice more, each time on an unimplemented
+syscall rather than an abort, and both belong to the same caller: IL2CPP's
+garbage collector, which suspends every thread and then scans the roots
+living in their registers.
+
+- **`svcSetThreadActivity`** takes a thread out of the scheduler's rotation or
+  puts it back. Suspension is tracked apart from `ThreadState` on purpose: it
+  does not replace what the thread was doing, so a paused thread blocked on a
+  mutex is still blocked on it when it resumes. Horizon refuses to suspend the
+  calling thread (`Busy`) and reports a thread already in the requested state
+  (`InvalidState`) rather than treating the call as a no-op, and so does this.
+- **`svcGetThreadContext3`** fills the 0x320-byte `ThreadContext`: x0..x28, fp,
+  lr, sp, pc, pstate, the vector registers, fpcr/fpsr and the thread pointer.
+  The register file has to be the real one, so the running thread's comes from
+  the live registers and a switched-out thread's from what was saved when it
+  last gave up the CPU. No FPCR/FPSR is modelled; both report their reset
+  value.
+
+With those two, "A Short Hike" runs **1.5 billion** instructions — the step
+budget, not a fault — with no abort and no unimplemented syscall. It still
+presents no frame, because nothing rasterizes: it is issuing `nvdrv` ioctls
+into a GPU model with no shader core.
+
 ## Frontend
 
 - **PFS0 offset rebasing**: some repacked NSPs (e.g. ROMSLAB) store PFS0 file
@@ -989,6 +1084,23 @@ the Result and carries on, and every frame is byte-identical to before:
   promise-based RPC over `postMessage`. The step budget is unlimited for normal
   runs and 5000 in trace mode, so a well-behaved NRO can run to exit/teardown
   instead of being cut off mid-init.
+
+- **The bundled-app boot menu is gone.** The overlay offered a "Boot" button
+  over a list of NROs fetched from `assets/`, which are not shipped in
+  production, so it 404'd for everyone but a local checkout — and the list was
+  stale even there: it named `sdl-hello.nro`, which is not in the tree, while
+  the NROs that are were never offered. Opening a file and dropping one on the
+  stage both still work, and the local `.nro` files stay for the screenshot
+  regression tooling.
+- **Audio reaches the speakers.** Each run slice pulls whatever PCM `audout`
+  has queued and schedules it as one `AudioBuffer` butted against the end of
+  the last, at the rate and channel count the guest opened its device with.
+- **There is no syscall mode any more.** `SyscallMode` had two variants and
+  nothing chose between them: everything that boots a program set `Horizon`,
+  and `None` was only the default the bare-CPU tests never changed, where it
+  meant "`svc #0` halts". Horizon numbers its syscalls from 1, so 0 is free and
+  is now permanently the host halt trap. `switch_set_syscall_mode`, the worker
+  command behind it, and `applySyscallMode`'s four call sites are gone.
 
 ## Repro / verification
 
@@ -1041,19 +1153,23 @@ the Result and carries on, and every frame is byte-identical to before:
 The old item 1 here — "resolve `sub_d339760` to find what should populate the
 `+0x1b0` lock-word comparison" — is **resolved**: `+0x1b0` in
 `nn::os::ThreadType` is the thread handle, and the process entry ABI delivers
-it in X1. See [the applet section](#the-applet-stub-stopped-guessing).
+it in X1. See [the applet section](#the-applet-stub-stopped-guessing). So is
+the one after it, `nn::vi::CreateLayer` — see [the layer
+section](#the-layer-and-the-binder-object-in-its-parcel).
 
-1. **`nn::vi::CreateLayer`**, where the retail title stops now, failing with
-   `vi` result 114-1. `vi` is implemented for the `libnx` path; the retail path
-   through it is not.
-2. **Shader core**: a Maxwell SASS interpreter plus a software rasterizer, so
+1. **Shader core**: a Maxwell SASS interpreter plus a software rasterizer, so
    `VertexBegin`/`DrawArrays` produce pixels. Needed by anything rendering
-   through deko3d's 3D pipeline or EGL, and by the retail title once it has a
-   layer.
+   through deko3d's 3D pipeline or EGL, and by the retail title — which now has
+   its layer, its buffer queue and a stream of `nvdrv` ioctls, and still
+   presents no frame.
+2. **The rest of the thread syscalls.** The title's own scheduler and IL2CPP's
+   garbage collector reach for them one at a time as it runs;
+   `SetThreadActivity` and `GetThreadContext3` are done, and whatever it asks
+   for next will show up as an `unimplemented Horizon syscall` fault.
 3. **Homebrew service gaps.** Run a title and read the `[ipc] no
-   implementation` lines. Currently: `hid` is done, but `bsd:u` (sockets),
-   `acc` (user profiles — and save data in `fs` behind it), `apm`, `spl:`,
-   `usb:hs`, `ts`, `csrng`, `ncm`, `ns:am2`, `pm:*`, `pdm:qry` are not.
+   implementation` lines. Currently: `hid` and `audout` are done, but `bsd:u`
+   (sockets), `acc` (user profiles — and save data in `fs` behind it), `apm`,
+   `spl:`, `usb:hs`, `ts`, `csrng`, `ncm`, `ns:am2`, `pm:*`, `pdm:qry` are not.
 
 Lower priority: hbmenu's entry label renders as a blank box (its FreeType text
 path is worth a look); NAND-vs-SD storage sizes are one hardcoded 32 GiB for

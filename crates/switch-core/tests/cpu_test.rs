@@ -3258,6 +3258,60 @@ fn guest_threads_run_and_hand_over_at_blocking_syscalls() {
 }
 
 #[test]
+fn set_thread_activity_takes_a_thread_out_of_the_rotation() {
+    // `svcSetThreadActivity` is `nn::os::SuspendThread`/`ResumeThread`. A
+    // suspended thread keeps whatever it was doing and simply stops being
+    // scheduled; Horizon refuses to suspend the caller, and reports a thread
+    // already in the requested state rather than treating the call as a no-op.
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.mem.map_zero(0x4000, 0x2000).unwrap(); // the child's stack
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap(); // the flag it sets
+
+    // main: create and start a child, suspend it, yield a few times, then
+    // record whether it ever ran, resume it, yield again, and exit.
+    let main = [
+        0xd284_0001u32, // mov x1, #0x2000  (entry)
+        0xd280_0002,    // mov x2, #0        (arg)
+        0xd28a_0003,    // mov x3, #0x5000   (stack top)
+        0xd400_0101,    // svc #8            (CreateThread -> handle in x1)
+        0xaa01_03ea,    // mov x10, x1       (keep the handle)
+        0xaa01_03e0,    // mov x0, x1
+        0xd400_0121,    // svc #9            (StartThread)
+        0xaa0a_03e0,    // mov x0, x10
+        0xd280_0021,    // mov x1, #1        (Paused)
+        0xd400_0641,    // svc #0x32         (SetThreadActivity)
+        0xd400_0161,    // svc #0xb          (SleepThread -> yields)
+        0xd400_0161,    // svc #0xb
+        0xd28c_0009,    // mov x9, #0x6000
+        0xb940_0122,    // ldr w2, [x9]
+        0xb900_0522,    // str w2, [x9, #4]  (what it saw while suspended)
+        0xaa0a_03e0,    // mov x0, x10
+        0xd280_0001,    // mov x1, #0        (Runnable)
+        0xd400_0641,    // svc #0x32         (SetThreadActivity)
+        0xd400_0161,    // svc #0xb
+        0xd400_00e1,    // svc #7            (ExitProcess)
+    ];
+    let child = [
+        0xd28c_0009u32, // mov x9, #0x6000
+        0x5280_0aa1,    // mov w1, #0x55
+        0xb900_0121,    // str w1, [x9]
+        0xd400_0141,    // svc #0xa          (ExitThread)
+    ];
+    let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
+    cpu.mem.map_zero(0x1000, 0x100).unwrap();
+    cpu.mem.map(0x1000, &bytes(&main)).unwrap();
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &bytes(&child)).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(10_000).unwrap();
+
+    assert!(cpu.halted, "main should reach ExitProcess");
+    assert_eq!(cpu.mem.read_u32(0x6004).unwrap(), 0, "a suspended thread must not run");
+    assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 0x55, "and must run once resumed");
+}
+
+#[test]
 fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
     // Horizon keeps the lock word in guest memory: it holds the owner's handle,
     // plus bit30 when someone is queued. `svcArbitrateUnlock` has to move

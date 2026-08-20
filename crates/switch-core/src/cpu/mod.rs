@@ -241,6 +241,11 @@ pub(crate) struct AudioOut {
 pub struct ThreadContext {
     pub handle: u64,
     pub state: ThreadState,
+    /// Suspended by `svcSetThreadActivity`. Kept apart from `state` because
+    /// suspension does not replace what the thread was doing — a paused thread
+    /// blocked on a mutex is still blocked on it when it resumes; it is only
+    /// taken out of the scheduler's rotation meanwhile.
+    paused: bool,
     regs: [u64; 31],
     sp: u64,
     pc: u32,
@@ -577,6 +582,7 @@ impl Cpu {
             self.threads.push(ThreadContext {
                 handle: MAIN_THREAD_HANDLE,
                 state: ThreadState::Runnable,
+                paused: false,
                 regs: [0; 31],
                 sp: 0,
                 pc: 0,
@@ -614,6 +620,7 @@ impl Cpu {
         self.threads.push(ThreadContext {
             handle,
             state: ThreadState::Created,
+            paused: false,
             regs,
             sp: stack_top,
             pc: entry,
@@ -636,12 +643,67 @@ impl Cpu {
         false
     }
 
+    /// `svcSetThreadActivity`: take a thread out of the scheduler's rotation,
+    /// or put it back. `Ok(())` on a real change; `Err(())` when the thread is
+    /// already in the requested state, which Horizon reports rather than
+    /// treating as a no-op.
+    pub(super) fn set_thread_paused(&mut self, handle: u64, paused: bool) -> Option<bool> {
+        let thread = self.threads.iter_mut().find(|t| t.handle == handle)?;
+        if thread.paused == paused {
+            return Some(false);
+        }
+        thread.paused = paused;
+        Some(true)
+    }
+
+    /// Fill the 0x320-byte `ThreadContext` `svcGetThreadContext3` hands back:
+    /// x0..x28, fp, lr, sp, pc, pstate, the vector registers, fpcr/fpsr and
+    /// the thread pointer. IL2CPP's garbage collector suspends every thread
+    /// and reads this to find the roots living in their registers, so the
+    /// register file has to be the real one — the running thread's live, a
+    /// switched-out thread's as saved when it last gave up the CPU.
+    pub(super) fn write_thread_context(&mut self, out: u32, handle: u64) -> bool {
+        self.ensure_main_thread();
+        let Some(index) = self.threads.iter().position(|t| t.handle == handle) else {
+            return false;
+        };
+        let (regs, sp, pc, nzcv, vregs, tpidr) = if index == self.current_thread {
+            (self.regs, self.sp, self.pc, self.nzcv, self.vregs, self.tpidr)
+        } else {
+            let t = &self.threads[index];
+            (t.regs, t.sp, t.pc, t.nzcv, t.vregs, t.tpidr)
+        };
+        let put64 = |cpu: &mut Self, off: u32, v: u64| {
+            let _ = cpu.mem.write_u64(out.wrapping_add(off), v);
+        };
+        for (i, &r) in regs.iter().take(29).enumerate() {
+            put64(self, i as u32 * 8, r);
+        }
+        put64(self, 0xE8, regs[29]); // fp
+        put64(self, 0xF0, regs[30]); // lr
+        put64(self, 0xF8, sp);
+        put64(self, 0x100, u64::from(pc));
+        let _ = self.mem.write_u32(out.wrapping_add(0x108), nzcv);
+        let _ = self.mem.write_u32(out.wrapping_add(0x10C), 0);
+        for (i, &v) in vregs.iter().enumerate() {
+            let at = 0x110 + i as u32 * 16;
+            put64(self, at, v as u64);
+            put64(self, at + 8, (v >> 64) as u64);
+        }
+        // No FPCR/FPSR is modelled: rounding mode and the accrued exception
+        // flags are both at their reset value.
+        let _ = self.mem.write_u32(out.wrapping_add(0x310), 0);
+        let _ = self.mem.write_u32(out.wrapping_add(0x314), 0);
+        put64(self, 0x318, tpidr);
+        true
+    }
+
     /// Whether any thread other than the running one could run.
     pub(super) fn has_other_runnable(&self) -> bool {
         self.threads
             .iter()
             .enumerate()
-            .any(|(i, t)| i != self.current_thread && t.state == ThreadState::Runnable)
+            .any(|(i, t)| i != self.current_thread && t.state == ThreadState::Runnable && !t.paused)
     }
 
     /// End the running thread (`svcExitThread`, or a return through the exit
@@ -782,7 +844,9 @@ impl Cpu {
             if candidate == start {
                 continue;
             }
-            if self.threads[candidate].state == ThreadState::Runnable {
+            if self.threads[candidate].state == ThreadState::Runnable
+                && !self.threads[candidate].paused
+            {
                 self.save_context(start);
                 self.load_context(candidate);
                 return true;

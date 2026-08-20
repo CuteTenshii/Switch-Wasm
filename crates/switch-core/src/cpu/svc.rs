@@ -42,6 +42,8 @@ impl Cpu {
         const FAKE_HANDLE: u64 = 0x1000;
         // KERNELRESULT(InvalidMemoryRange), as libnx spells it.
         const RESULT_INVALID_MEMORY_RANGE: u64 = 0x8000_DC01;
+        // Kernel (module 1) description 114: a handle that names nothing.
+        const RESULT_INVALID_HANDLE: u64 = 1 | (114 << 9);
         // What `svcGetInfo` reports as the process's memory pool, and the
         // slice of it the kernel reserves for its own per-process bookkeeping
         // (see InfoType 16 below for why that one is zero).
@@ -254,6 +256,39 @@ impl Cpu {
                 let handle = self.read_zr(0);
                 self.start_thread(handle);
                 self.write_zr(0, RESULT_OK);
+                Ok(())
+            }
+            0x32 => {
+                // SetThreadActivity(handle, activity): 0 = Runnable,
+                // 1 = Paused. This is `nn::os::SuspendThread`/`ResumeThread`.
+                // Horizon refuses to suspend the calling thread, and reports a
+                // thread that is already in the requested state rather than
+                // treating the call as a no-op.
+                const RESULT_BUSY: u64 = 1 | (122 << 9);
+                const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
+                let handle = self.read_zr(0);
+                let paused = self.read_zr(1) != 0;
+                if self.current_thread_handle() == handle {
+                    self.write_zr(0, RESULT_BUSY);
+                    return Ok(());
+                }
+                let result = match self.set_thread_paused(handle, paused) {
+                    Some(true) => RESULT_OK,
+                    Some(false) => RESULT_INVALID_STATE,
+                    None => RESULT_INVALID_HANDLE,
+                };
+                self.write_zr(0, result);
+                Ok(())
+            }
+            0x33 => {
+                // GetThreadContext3(out = X0, handle = X1): the suspended
+                // thread's whole register file. IL2CPP's collector pairs this
+                // with SetThreadActivity to scan the roots living in
+                // registers, so it has to be the thread's real state.
+                let out = self.read_zr(0) as u32;
+                let handle = self.read_zr(1);
+                let ok = self.write_thread_context(out, handle);
+                self.write_zr(0, if ok { RESULT_OK } else { RESULT_INVALID_HANDLE });
                 Ok(())
             }
             0x0B => {
