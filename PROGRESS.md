@@ -17,9 +17,9 @@ and put what they render on the canvas.
   (`rtld` → `main` → `subsdk*` → `sdk`) run for 117M+ instructions through
   real `nnSdk` init — `nn::init::Start` → `nn::oe::Initialize` →
   `nn::oe::InitializeApplet` — and start the SDK's system worker thread. All
-  of `nn::oe::Initialize` now completes; at 117.8M instructions the title is
-  in its own `main`, and stops setting up its heap in
-  `nn::mem::StandardAllocator::Initialize`. See
+  of `nn::oe::Initialize` and `nn::init`'s heap setup now complete; at 127.9M
+  instructions the title is running its own code and stops in
+  `nn::fs::OpenDirectory`, looking for its assets. See
   [Retail NCA/NSP loading](#retail-ncansp-loading).
 
 See [Next](#next) for the live open threads.
@@ -580,9 +580,53 @@ sdk!nn::mem::StandardAllocator::Initialize(void*, unsigned long, bool)+0xd0
 sdk!nn::diag::detail::OnAssertionFailure(...)
 ```
 
-**Now open**: the title's own heap setup. `nn::mem::StandardAllocator::
-Initialize` asserts on the block it was handed, which points at `svcSetHeapSize`
-/ the heap region `svcGetInfo` reports rather than at anything applet-related.
+### `nn::init` and the application heap
+
+`nn::mem::StandardAllocator::Initialize(this, address, size, cache)` asserts
+on three things, and the retail boot hit all of them in turn. Disassembling it
+is what made that legible: it aborts if the allocator is already initialized,
+if the page-aligned span is empty, or if it is under 16 KiB (`ubfx x8, x2,
+#14, #50` — the span in 16 KiB units — then `cbz`).
+
+- **`svcGetInfo` InfoType 21/22 (Total/UsedNonSystemMemorySize) fell into the
+  `_ => 0` default.** `nn::init`'s startup sizes the application heap as their
+  difference and hands it straight to `StandardAllocator::Initialize`, so the
+  span was 0. They now report the same figures as 6/7 with the system resource
+  taken out.
+- **A retail title never calls `svcSetHeapSize`.** Built for the 39-bit
+  address space, it picks an address out of its alias region and calls
+  `svcMapPhysicalMemory` (0x2c) instead — which was unimplemented. The pages
+  are left to the soft map (`bootstrap` soft-maps 0..0x8000_0000, so unwritten
+  pages read as zeros and allocate on first write); 0x2d hands them back.
+- **The reported region bases were not representable.** `svcGetInfo` answered
+  with Horizon's real alias base, 0x10_0000_0000, and guest memory is indexed
+  with a `u32` — so `nnSdk` asked to map physical memory at an address that
+  truncates to 0. Alias and heap now live at `GUEST_ALIAS_REGION_ADDR`
+  (0x4000_0000) and `GUEST_HEAP_REGION_ADDR` (0x3000_0000).
+- **InfoType 16 (SystemResourceSizeTotal) has to be 0**, and it is the one
+  value here deliberately *not* taken from the title's own NPDM, which asks for
+  16 MiB. Reporting 16 MiB makes
+  `nn::os::detail::VammManager::InitializeIfEnabled` switch the whole heap onto
+  a virtual-address-memory manager that reserves address space out of the alias
+  region and backs it page by page. That needs kernel machinery this emulator
+  does not have, so `nn::os::AllocateAddressRegion` returned os result 3-12 and
+  the allocator aborted anyway. Reporting 0 states what is actually true — no
+  memory is reserved for the kernel here — and puts `nnSdk` on its plain heap
+  path.
+
+With the heap up, the title runs **127.9M** instructions and stops in its own
+asset loading:
+
+```
+main!...+0x93348
+sdk!nn::fs::OpenDirectory(nn::fs::DirectoryHandle*, char const*, int)+0x218
+  -> fs result 2-3005
+```
+
+**Now open**: the filesystem. `nn::fs::OpenDirectory` fails because no mount
+name is registered — the title mounts its RomFS through `fsp-srv` and then
+opens paths under that mount, and the `fs` stub does not model mount names at
+all.
 
 Two other things stay open behind this one. The kernel still has no waitable
 object model — `svcWaitSynchronization` reports every handle instantly

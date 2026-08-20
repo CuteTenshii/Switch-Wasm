@@ -1,7 +1,8 @@
 //! The Horizon supervisor calls (`SVC`) libnx homebrew issues at runtime.
 
 use super::{
-    Cpu, SyscallMode, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE,
+    Cpu, SyscallMode, GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
+    GUEST_HEAP_REGION_SIZE, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE,
     PL_SHMEM_SIZE,
 };
 use crate::{Error, Result};
@@ -41,11 +42,33 @@ impl Cpu {
         const FAKE_HANDLE: u64 = 0x1000;
         // KERNELRESULT(InvalidMemoryRange), as libnx spells it.
         const RESULT_INVALID_MEMORY_RANGE: u64 = 0x8000_DC01;
+        // What `svcGetInfo` reports as the process's memory pool, and the
+        // slice of it the kernel reserves for its own per-process bookkeeping
+        // (see InfoType 16 below for why that one is zero).
+        const TOTAL_MEMORY_SIZE: u64 = 0x1E00_0000;
+        const SYSTEM_RESOURCE_SIZE: u64 = 0;
+        // The counterpart of `TRACE_IPC` for everything that is not a service
+        // request. `svcSendSyncRequest` (0x21) is excluded because `TRACE_IPC`
+        // already decodes it, and the two hot ones a running guest issues
+        // thousands of times a frame — `svcWaitSynchronization` (0x18) and
+        // `svcSleepThread` (0x0b) — would bury everything else.
+        if !matches!(imm, 0x21 | 0x18 | 0x0b) && std::env::var("TRACE_SVC").is_ok() {
+            eprintln!(
+                "[svc] pc={:#x} #{:#04x} x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
+                self.pc,
+                imm,
+                self.read_zr(0),
+                self.read_zr(1),
+                self.read_zr(2),
+                self.read_zr(3)
+            );
+        }
         match imm {
             0x01 => {
-                // SetHeapSize: report a heap at a soft-mapped address.
+                // SetHeapSize: report a heap at a soft-mapped address, the
+                // same one `svcGetInfo`'s HeapRegionAddress names.
                 self.write_zr(0, RESULT_OK);
-                self.write_zr(1, 0x3000_0000);
+                self.write_zr(1, u64::from(GUEST_HEAP_REGION_ADDR));
                 Ok(())
             }
             0x02 | 0x03 | 0x14 => {
@@ -69,6 +92,41 @@ impl Cpu {
                     return Ok(());
                 }
                 self.mem.copy_range(dst, src, size)?;
+                self.write_zr(0, RESULT_OK);
+                Ok(())
+            }
+            0x2C => {
+                // MapPhysicalMemory(address, size): grow the process's heap by
+                // backing `[address, address + size)` with physical pages. An
+                // application built for the 39-bit address space grows its heap
+                // this way rather than through `svcSetHeapSize` — it picks the
+                // address itself out of its ASLR region — which is why a retail
+                // title never issues syscall 0x01 at all.
+                //
+                // The pages are left to materialise on first write. `bootstrap`
+                // soft-maps the whole low 2 GiB (reads see zeros, a write
+                // allocates), so that *is* demand paging, and it is the only
+                // workable answer here: `nn::init` asks for everything
+                // `svcGetInfo` says is free, which is far more than the
+                // emulator's RAM cap, and a title that actually touched all of
+                // it could not run on this host either way.
+                let addr = self.read_zr(0);
+                let size = self.read_zr(1);
+                let fits = addr.checked_add(size).is_some_and(|end| end <= u64::from(u32::MAX) + 1);
+                if size == 0 || (addr & 0xFFF) != 0 || (size & 0xFFF) != 0 || !fits {
+                    self.write_zr(0, RESULT_INVALID_MEMORY_RANGE);
+                    return Ok(());
+                }
+                self.write_zr(0, RESULT_OK);
+                Ok(())
+            }
+            0x2D => {
+                // UnmapPhysicalMemory(address, size): the counterpart, and the
+                // one direction that has to do real work — the pages go back so
+                // the RAM cap sees them freed.
+                let addr = self.read_zr(0) as u32;
+                let size = self.read_zr(1) as usize;
+                self.mem.unmap(addr, size);
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
@@ -616,11 +674,19 @@ impl Cpu {
                      // mask, whose "highest set bit" scan then asserts.
                      0 => 0b0000_0111, // CoreMask: cores 0, 1, 2
                      1 => 0x0FFF_FFFF_F000_0000, // PriorityMask: 28..=59
-                     2 => 0x0000_0010_0000_0000, // AliasRegionAddress
-                     3 => 0x0000_0000_2000_0000, // AliasRegionSize
-                     4 => 0x0000_0002_0000_0000, // HeapRegionAddress
-                     5 => 0x0000_0000_2000_0000, // HeapRegionSize
-                     6 => 0x1E00_0000, // TotalMemorySize
+                     // Alias/Heap region. Real Horizon puts these far above
+                     // the 32-bit range (alias at 0x10_0000_0000, heap at
+                     // 0x2_0000_0000) and this used to report those figures
+                     // literally — but the emulator addresses guest memory
+                     // with a `u32`, so `nnSdk` took the alias address at its
+                     // word and asked `svcMapPhysicalMemory` to back
+                     // 0x10_0000_0000, which is not a representable address
+                     // here. See the region constants for the layout.
+                     2 => u64::from(GUEST_ALIAS_REGION_ADDR), // AliasRegionAddress
+                     3 => u64::from(GUEST_ALIAS_REGION_SIZE), // AliasRegionSize
+                     4 => u64::from(GUEST_HEAP_REGION_ADDR),  // HeapRegionAddress
+                     5 => u64::from(GUEST_HEAP_REGION_SIZE),  // HeapRegionSize
+                     6 => TOTAL_MEMORY_SIZE, // TotalMemorySize
                      7 => 0,         // UsedMemorySize
                      8 => 0,         // DebuggerAttached
                      9 => 0,         // ResourceLimit
@@ -644,6 +710,39 @@ impl Cpu {
                          z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
                          z ^ (z >> 31)
                      }
+                     // The system resource is the slice of the process's
+                     // memory the kernel keeps for its own per-process
+                     // bookkeeping (page tables, handle tables), carved out of
+                     // the application pool and declared in the NPDM.
+                     //
+                     // This is **deliberately 0 rather than the 16 MiB "A
+                     // Short Hike"'s `main.npdm` asks for**, and it is the one
+                     // figure here that does not follow the title's own
+                     // manifest. `nnSdk` treats a non-zero answer as "this
+                     // process has virtual address memory", and
+                     // `nn::os::detail::VammManager::InitializeIfEnabled`
+                     // switches the whole heap onto a manager that reserves
+                     // address space out of the alias region and backs it a
+                     // page at a time — kernel machinery this emulator does
+                     // not have. `nn::os::AllocateAddressRegion` then fails
+                     // (os result 3-12) and `nn::mem::StandardAllocator`
+                     // aborts. Reporting 0 says what is actually true here —
+                     // nothing is reserved for the kernel — and puts `nnSdk`
+                     // on its plain heap path, which works.
+                     16 => SYSTEM_RESOURCE_SIZE, // SystemResourceSizeTotal
+                     17 => 0,                    // SystemResourceSizeUsed
+                     // Total/UsedNonSystemMemorySize: the same figures as
+                     // 6/7 with the system resource taken out, and what
+                     // `nnSdk` actually sizes the application heap from —
+                     // `nn::init`'s startup asks for
+                     // `TotalNonSystem - UsedNonSystem` and hands the result
+                     // straight to `nn::mem::StandardAllocator::Initialize`.
+                     // Falling into the `_ => 0` default made that
+                     // subtraction 0, and the allocator asserts on any span
+                     // below its 16 KiB minimum — which is where the retail
+                     // boot stopped once `nn::oe::Initialize` was working.
+                     21 => TOTAL_MEMORY_SIZE - SYSTEM_RESOURCE_SIZE,
+                     22 => 0,
                      12 => 0x0800_0000, // AslrRegionAddress
                      13 => 0x1F00_0000, // AslrRegionSize
                      // Where thread stacks get mirrored. It has to be clear of
@@ -657,6 +756,9 @@ impl Cpu {
                      28 => 0,        // AliasRegionExtraSize
                      _ => 0,
                  };
+                 if std::env::var("TRACE_SVC").is_ok() {
+                     eprintln!("[svc]   -> GetInfo({info_type}) = {value:#x}");
+                 }
                  self.write_zr(1, value);
                  self.write_zr(0, RESULT_OK);
                  Ok(())

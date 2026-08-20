@@ -781,7 +781,11 @@ fn horizon_query_memory_and_get_info() {
     assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0);   // perm
 
     // GetInfo returns the requested value in X1 (the libnx wrapper stores it
-    // to the out pointer). InfoType 4 = HeapRegionAddress.
+    // to the out pointer). InfoType 4 = HeapRegionAddress. Every region this
+    // reports has to be an address the emulator can actually represent: guest
+    // memory is addressed with a `u32`, and reporting Horizon's real
+    // out-of-range region bases had `nnSdk` asking `svcMapPhysicalMemory` to
+    // back 0x10_0000_0000.
     let mut cpu = cpu_at(0x1000);
     cpu.syscall_mode = SyscallMode::Horizon;
     cpu.set_reg(1, 4); // infoType
@@ -789,7 +793,35 @@ fn horizon_query_memory_and_get_info() {
     cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
-    assert_eq!(cpu.read_x(1), 0x0000_0002_0000_0000);
+    assert_eq!(cpu.read_x(1), u64::from(switch_core::cpu::GUEST_HEAP_REGION_ADDR));
+    assert!(cpu.read_x(1) <= u64::from(u32::MAX));
+
+    // InfoType 21/22 = Total/UsedNonSystemMemorySize, which is what `nnSdk`
+    // sizes the application heap from — it hands the difference straight to
+    // `nn::mem::StandardAllocator::Initialize`, which asserts on a span under
+    // 16 KiB. Answering 0 (the old `_ => 0` default) made that difference 0.
+    for (info_type, expected) in [(21u64, 0x1E00_0000u64), (22, 0)] {
+        let mut cpu = cpu_at(0x1000);
+        cpu.syscall_mode = SyscallMode::Horizon;
+        cpu.set_reg(1, info_type);
+        cpu.set_reg(2, 0xffff_8001);
+        cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
+        cpu.run(1).unwrap();
+        assert_eq!(cpu.read_x(0), 0);
+        assert_eq!(cpu.read_x(1), expected);
+    }
+
+    // InfoType 16 = SystemResourceSizeTotal, deliberately 0 — see the note on
+    // it in `svc.rs`. A non-zero answer switches `nnSdk` onto its virtual
+    // address memory manager, which needs kernel machinery this emulator does
+    // not have, and `nn::os::AllocateAddressRegion` then fails outright.
+    let mut cpu = cpu_at(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.set_reg(1, 16);
+    cpu.set_reg(2, 0xffff_8001);
+    cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(1), 0);
 
     // InfoType 6 = TotalMemorySize.
     let mut cpu = cpu_at(0x1000);
@@ -809,6 +841,48 @@ fn horizon_query_memory_and_get_info() {
     cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(1), 0x0800_0000);
+}
+
+#[test]
+fn horizon_map_physical_memory() {
+    use switch_core::cpu::{SyscallMode, GUEST_ALIAS_REGION_ADDR};
+    // MapPhysicalMemory(address, size) is how an application built for the
+    // 39-bit address space grows its heap — it picks the address itself out of
+    // the alias region rather than calling svcSetHeapSize, which is why a
+    // retail title never issues syscall 0x01 at all.
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.mem.map(0x1000, &svc(0x2c).to_le_bytes()).unwrap();
+    cpu.set_reg(0, u64::from(GUEST_ALIAS_REGION_ADDR));
+    cpu.set_reg(1, 0x10_0000);
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), 0);
+    // The pages are demand-allocated, so the range reads as zeros and costs
+    // nothing until it is written to.
+    assert_eq!(cpu.mem.read_u32(GUEST_ALIAS_REGION_ADDR).unwrap(), 0);
+
+    // An unaligned or empty range is rejected, and so is one the emulator
+    // cannot address: guest memory is indexed with a `u32`, and silently
+    // truncating Horizon's real alias base (0x10_0000_0000) to 0 would map the
+    // heap over the null page.
+    for (addr, size) in [
+        (u64::from(GUEST_ALIAS_REGION_ADDR), 0u64),
+        (u64::from(GUEST_ALIAS_REGION_ADDR) + 1, 0x1000),
+        (u64::from(GUEST_ALIAS_REGION_ADDR), 0x800),
+        (0x10_0000_0000, 0x1000),
+    ] {
+        let mut cpu = cpu_at(0x1000);
+        cpu.bootstrap();
+        cpu.set_pc(0x1000);
+        cpu.syscall_mode = SyscallMode::Horizon;
+        cpu.mem.map(0x1000, &svc(0x2c).to_le_bytes()).unwrap();
+        cpu.set_reg(0, addr);
+        cpu.set_reg(1, size);
+        cpu.run(1).unwrap();
+        assert_ne!(cpu.read_x(0), 0, "{addr:#x}+{size:#x} should be rejected");
+    }
 }
 
 #[test]

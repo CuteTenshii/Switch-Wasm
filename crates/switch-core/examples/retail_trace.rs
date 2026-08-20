@@ -80,7 +80,7 @@ fn main() {
         .ok()
         .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
         .unwrap_or(0);
-    let mut ring: std::collections::VecDeque<(u64, u32, [u64; 6])> =
+    let mut ring: std::collections::VecDeque<(u64, u32, [u64; 8])> =
         std::collections::VecDeque::with_capacity(tail + 1);
 
     let mut done = 0u64;
@@ -96,7 +96,7 @@ fn main() {
             ring.push_back((
                 done,
                 pc,
-                [cpu.read_x(0), cpu.read_x(1), cpu.read_x(8), cpu.read_x(19), cpu.read_x(30), cpu.sp()],
+                [cpu.read_x(0), cpu.read_x(1), cpu.read_x(2), cpu.read_x(3), cpu.read_x(8), cpu.read_x(19), cpu.read_x(30), cpu.sp()],
             ));
         }
         if let Err(e) = cpu.step() {
@@ -109,8 +109,8 @@ fn main() {
     println!("--- last {} steps ---", ring.len());
     for (s, pc, r) in &ring {
         println!(
-            "{s} {pc:#010x} x0={:#x} x1={:#x} x8={:#x} x19={:#x} lr={:#x} sp={:#x}",
-            r[0], r[1], r[2], r[3], r[4], r[5]
+            "{s} {pc:#010x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x8={:#x} x19={:#x} lr={:#x} sp={:#x}",
+            r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]
         );
     }
     println!("--- out ---\n{}", String::from_utf8_lossy(&cpu.out));

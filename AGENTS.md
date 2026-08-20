@@ -35,7 +35,7 @@ Browser-oriented Nintendo Switch emulation core: an ARM64 (A64) integer interpre
 
 - Stack: `STACK_TOP = 0x1010_0000`, size 1 MiB (so `STACK_BASE = 0x1000_0000`), SP seeded at `STACK_TOP`.
 - TLS base: `tpidr = 0x0FF0_0000` (deliberately clear of the heap). libnx ThreadVars at TLS+0x1E0 (magic `0x21545624` "!TV$"), `_REENT` zeroed at `0x1FF1_0000`.
-- Heap via `svcSetHeapSize` returns `0x3000_0000` (address out-param; deliberately NOT `0x2000_0000` — with a 512 MiB heap there, `malloc`'s arena lands at `STACK_BASE + 0x1a80` and the app's 8 MiB memblock memset overwrites the stack). `svcQueryMemory` reports per-page state (allocated pages = RWX, untouched soft pages = unmapped) so libnx virtmem reservations find free address space. `svcGetInfo` uses the hbmenu libnx InfoType numbering (2/3 Alias, 4/5 Heap, 6/7 Total/Used memory, 12/13 Aslr, 14/15 Stack). Env block at `ENV_BLOCK_ADDR = 0x0010_0000`.
+- Heap via `svcSetHeapSize` returns `0x3000_0000` (address out-param; deliberately NOT `0x2000_0000` — with a 512 MiB heap there, `malloc`'s arena lands at `STACK_BASE + 0x1a80` and the app's 8 MiB memblock memset overwrites the stack). `svcQueryMemory` reports per-page state (allocated pages = RWX, untouched soft pages = unmapped) so libnx virtmem reservations find free address space. `svcGetInfo` uses the hbmenu libnx InfoType numbering (0/1 Core/Priority mask, 2/3 Alias, 4/5 Heap, 6/7 Total/Used memory, 12/13 Aslr, 14/15 Stack, 16/17 System resource, 21/22 Total/Used non-system memory) — see the memory-region section below. Env block at `ENV_BLOCK_ADDR = 0x0010_0000`.
 - `boot_homebrew` (cpu.rs): runs crt0 through the `bl` at entry+0xc0, seeds env/ThreadVars, runs `DT_INIT_ARRAY` (`init_array_entries` in nro.rs parses MOD0/dynamic), then resumes at that `bl`. **Static constructors only run through this path.** That call is libnx's `__libnx_init(ctx, main_thread, saved_lr)`: the constructor pass zeroes the registers, so all three arguments are re-seeded before resuming — including `saved_lr` = `SELF_RETURN_TRAMPOLINE`, which `envSetup` keeps as the exit function pointer. With it left at 0, `__nx_exit` branched to NULL and a clean exit looked like a crash.
 - `nvdrv_request` (cpu/ipc.rs): the real `INvDrvServices` interface — Open/Ioctl/Ioctl2/Ioctl3/Close/Initialize/QueryEvent, dispatched into `gpu::nvdrv`.
 - `svcWaitSynchronization` reports the wait satisfied with X1 = **0**: X1 is
@@ -56,6 +56,45 @@ Browser-oriented Nintendo Switch emulation core: an ARM64 (A64) integer interpre
   into a linear memblock and its command list is just
   `dkCmdBufCopyBufferToImage` + `dkCmdBufSignalFence`; its assets are raw RGBA
   `.bin` bitmaps. Only the copy engine and syncpoints are involved.
+
+## Guest memory regions (`cpu/mod.rs`, `svcGetInfo`)
+
+**Every region `svcGetInfo` reports has to be an address the emulator can
+actually represent.** Guest memory is indexed with a `u32`, so the whole
+address space is the low 4 GiB and `Cpu::bootstrap` soft-maps 0..0x8000_0000
+(unwritten pages read as zeros and allocate on first write — that *is* demand
+paging, and it is why a region can be reported far larger than the
+`MAX_MAPPED_BYTES` RAM cap without costing anything).
+
+`svcGetInfo` used to report Horizon's real region bases literally — alias at
+0x10_0000_0000, heap at 0x2_0000_0000. `nnSdk` took the alias base at its word
+and asked `svcMapPhysicalMemory` to back 0x10_0000_0000, which truncates to 0.
+The regions now live in representable space: alias at
+`GUEST_ALIAS_REGION_ADDR` (0x4000_0000, 1 GiB, up to the end of the soft map),
+heap at `GUEST_HEAP_REGION_ADDR` (0x3000_0000, ending where `FB_BASE` begins).
+
+- **`svcMapPhysicalMemory` (0x2c) is how a retail title grows its heap**, not
+  `svcSetHeapSize` (0x01) — an application built for the 39-bit address space
+  picks the address itself out of the alias region, which is why tracing one
+  shows syscall 0x01 never being issued at all. 0x2c leaves the pages to the
+  soft map and only validates the range; 0x2d (`UnmapPhysicalMemory`) does the
+  real work of handing pages back.
+- **InfoType 21/22 (Total/UsedNonSystemMemorySize) size the application
+  heap.** `nn::init`'s startup hands their difference straight to
+  `nn::mem::StandardAllocator::Initialize`, which asserts on any page-aligned
+  span under 16 KiB — so the `_ => 0` default aborted the boot.
+- **InfoType 16 (SystemResourceSizeTotal) is deliberately 0**, and is the one
+  figure not taken from the title's own NPDM (which asks for 16 MiB). A
+  non-zero answer makes `nn::os::detail::VammManager::InitializeIfEnabled`
+  switch the heap onto a virtual-address-memory manager that reserves address
+  space out of the alias region and backs it page by page — kernel machinery
+  that does not exist here — and `nn::os::AllocateAddressRegion` fails with os
+  result 3-12.
+
+`TRACE_SVC=1` prints every syscall except the three hot ones
+(`SendSyncRequest`, `WaitSynchronization`, `SleepThread`), plus each
+`svcGetInfo` answer. It is the counterpart of `TRACE_IPC` and the fastest way
+to see which InfoType a stuck `nnSdk` is unhappy with.
 
 ## Retail process entry (`Cpu::boot_retail_program`)
 

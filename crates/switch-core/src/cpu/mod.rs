@@ -115,6 +115,22 @@ const MUTEX_HAS_LISTENERS: u32 = 0x4000_0000;
 pub const GUEST_STACK_REGION_ADDR: u32 = 0x1800_0000;
 pub const GUEST_STACK_REGION_SIZE: u32 = 0x0800_0000;
 
+/// The alias region: where `svcMapPhysicalMemory` backs pages, and how a
+/// 39-bit-address-space application grows its heap. It has to live inside the
+/// soft-mapped low 2 GiB `Cpu::bootstrap` sets up, because this emulator
+/// addresses guest memory with a `u32`. Horizon's own alias region starts at
+/// 0x10_0000_0000, and reporting *that* through `svcGetInfo` had `nnSdk`
+/// asking to map memory at an address the emulator cannot represent at all —
+/// which `svcMapPhysicalMemory` would silently truncate to 0.
+pub const GUEST_ALIAS_REGION_ADDR: u32 = 0x4000_0000;
+pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x4000_0000;
+
+/// The heap region `svcSetHeapSize` grows, for a caller that uses it (`libnx`
+/// does; a retail `nnSdk` title uses the alias region above instead). It ends
+/// where [`crate::FB_BASE`] begins.
+pub const GUEST_HEAP_REGION_ADDR: u32 = 0x3000_0000;
+pub const GUEST_HEAP_REGION_SIZE: u32 = 0x0F00_0000;
+
 /// Size of hid's shared memory, the value libnx passes to `svcMapSharedMemory`.
 /// Used to tell that mapping apart from any other shared memory the guest maps.
 pub const HID_SHMEM_SIZE: u32 = 0x4_0000;
