@@ -351,6 +351,26 @@ impl Cpu {
         raw_data: &[u8],
         domain_objects: &[u32],
     ) -> Result<()> {
+        self.write_ipc_reply(tls, result, &[], move_handles, raw_data, domain_objects)
+    }
+
+    /// The full form: a reply may carry **copy** handles as well as move ones,
+    /// and the difference is not cosmetic. A move handle transfers ownership
+    /// (a sub-session from `reply_with_interface`); a copy handle duplicates
+    /// one the server keeps (every event a service hands out). They live in
+    /// different fields of the handle descriptor and in that order in the
+    /// reply, so a copy handle sent in the move slot is read back as **0** —
+    /// which is exactly why `nnSdk` spent the whole boot waiting on handle 0
+    /// after asking for `GetGpuErrorDetectedSystemEvent`.
+    pub(super) fn write_ipc_reply(
+        &mut self,
+        tls: u32,
+        result: u32,
+        copy_handles: &[u64],
+        move_handles: &[u64],
+        raw_data: &[u8],
+        domain_objects: &[u32],
+    ) -> Result<()> {
         let is_domain = self.ipc_is_domain_request(tls);
         // A reply's `type` field (bits[15:0] of word 0) is 0: the counts in the
         // rest of the word are what matter. libnx ignores the field entirely,
@@ -358,8 +378,9 @@ impl Cpu {
         // 0x7E0DD), which is what made sdl-hello's "Failed to open connection
         // to fsp-srv" — a 0x40 here fails that check on every single reply.
         self.mem.write_u32(tls, 0)?;
-        let has_handles = !move_handles.is_empty();
-        let handle_desc = (move_handles.len() as u32) << 5;
+        let has_handles = !copy_handles.is_empty() || !move_handles.is_empty();
+        // { send_pid:1, num_copy:4, num_move:4 }
+        let handle_desc = ((copy_handles.len() as u32) << 1) | ((move_handles.len() as u32) << 5);
         let raw_data_words = ((raw_data.len() as u32) + 3) / 4;
         let object_words = ((domain_objects.len() as u32) * 4 + 3) / 4;
         // SFCO header (4 words) + raw data + domain header/objects when needed,
@@ -377,7 +398,8 @@ impl Cpu {
         if has_handles {
             self.mem.write_u32(tls.wrapping_add(off), handle_desc)?;
             off += 4;
-            for &h in move_handles {
+            // Copy handles come first, then move handles.
+            for &h in copy_handles.iter().chain(move_handles) {
                 self.mem.write_u32(tls.wrapping_add(off), h as u32)?;
                 off += 4;
             }
@@ -878,10 +900,12 @@ impl Cpu {
                         let raw = 1u64.to_le_bytes();
                         self.write_ipc_response(tls, 0, &[], &raw, &[])
                     }
-                    // GetDisplayVsyncEvent: return a copy handle.
+                    // GetDisplayVsyncEvent: a real copy handle, signalled
+                    // once per presented frame by `Cpu::signal_vsync`.
                     Some(5202) => {
-                        let h = self.alloc_handle();
-                        self.write_ipc_response(tls, 0, &[h], &[], &[])
+                        let h = self.alloc_event("vi:vsync", true);
+                        self.vsync_event = Some(h);
+                        self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                     }
                     _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 },
@@ -1071,8 +1095,8 @@ impl Cpu {
                 let fd = self.mem.read_u32(data)?;
                 let event_id = self.mem.read_u32(data.wrapping_add(4))?;
                 let error = self.nv.query_event(fd, event_id);
-                let handle = self.alloc_handle();
-                self.write_ipc_response(tls, 0, &[handle], &error.to_le_bytes(), &[])
+                let handle = self.alloc_event("nvdrv:query-event", true);
+                self.write_ipc_reply(tls, 0, &[handle], &[], &error.to_le_bytes(), &[])
             }
             // SetClientPID / everything else: acknowledge with no out data.
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -1394,8 +1418,8 @@ impl Cpu {
         const SET_BATTERY_VOLTAGE_STATE_CHANGE_EVENT_ENABLED: u32 = 4;
         match cmd_id {
             Some(BIND_STATE_CHANGE_EVENT) => {
-                let event = self.alloc_handle();
-                self.write_ipc_response(tls, 0, &[event], &[], &[])
+                let event = self.alloc_event("psm:state-change", true);
+                self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
             }
             Some(UNBIND_STATE_CHANGE_EVENT)
             | Some(SET_CHARGER_TYPE_CHANGE_EVENT_ENABLED)
@@ -1532,14 +1556,20 @@ impl Cpu {
             }
             // ICommonStateGetter: the state `appletMainLoop` polls every frame.
             "am:common-state-getter" => match cmd_id {
-                // GetEventHandle: a copy handle the guest waits on before
-                // polling ReceiveMessage. WaitSynchronization treats any
-                // handle outside the thread/mutex tables as already
-                // signaled — the same trick `vi:m`'s GetDisplayVsyncEvent
-                // uses — so the wait never blocks.
+                // GetEventHandle: the copy handle the guest waits on before
+                // polling ReceiveMessage.
+                //
+                // It stays **unsignalled**. Firing it looks right — AM really
+                // does have one message queued at startup, which
+                // ReceiveMessage below hands out — but nothing here enqueues
+                // messages asynchronously, and `nnSdk`'s system worker waits
+                // on this event holding no callback for it: reporting it
+                // signalled made the worker dispatch a handler that does not
+                // exist, and jump to 0. A waiter times out and polls
+                // ReceiveMessage, which is where the message actually is.
                 Some(0) => {
-                    let h = self.alloc_handle();
-                    self.write_ipc_response(tls, 0, &[h], &[], &[])
+                    let h = self.alloc_event("am:applet-message", true);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 // ReceiveMessage: real AM enqueues one FocusStateChanged at
                 // startup and then reports "no message" until the state
@@ -1565,8 +1595,8 @@ impl Cpu {
                 // signalled — see the note on GetEventHandle above for why a
                 // wait on them still returns.
                 Some(13) | Some(61) => {
-                    let h = self.alloc_handle();
-                    self.write_ipc_response(tls, 0, &[h], &[], &[])
+                    let h = self.alloc_event("am:common-state-getter", true);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 // GetDefaultDisplayResolution: the same 1280x720 the display
                 // stub hands out as its native window.
@@ -1626,8 +1656,8 @@ impl Cpu {
                 // Nothing here ever faults the GPU, so the event is handed out
                 // and never signalled.
                 Some(130) => {
-                    let h = self.alloc_handle();
-                    self.write_ipc_response(tls, 0, &[h], &[], &[])
+                    let h = self.alloc_event("am:self-controller", true);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 // SetTerminateResult / InitializeGamePlayRecording /
                 // SetGamePlayRecordingState / SetDelayTimeToAbortOnGpuError:
@@ -1667,8 +1697,8 @@ impl Cpu {
                 // holding 0 — the same shape of bug that had `nnSdk`'s system
                 // worker waiting on handle 0.
                 Some(9) | Some(91) => {
-                    let h = self.alloc_handle();
-                    self.write_ipc_response(tls, 0, &[h], &[], &[])
+                    let h = self.alloc_event("am:gpu-error", true);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 // GetAccumulatedSuspendedTickValue: nothing has ever been
                 // suspended.

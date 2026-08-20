@@ -100,6 +100,10 @@ not per-instruction tracing is on. `main.js` drains it every run slice, so
 `[ipc] unimplemented` and `[ipc] no implementation` show up in the page's
 console panel as they happen.
 
+`TRACE_WAIT=1` prints every event as it is handed out and every
+`svcWaitSynchronization` with the state of what it is waiting on — the fastest
+way to see whether a guest is holding a real event handle or 0.
+
 `TRACE_SVC=1` prints every syscall except the three hot ones
 (`SendSyncRequest`, `WaitSynchronization`, `SleepThread`), plus each
 `svcGetInfo` answer. It is the counterpart of `TRACE_IPC` and the fastest way
@@ -248,6 +252,35 @@ object id and nothing else. It used to guess the *applet* state commands
 started with "applet"; those numbers leaked — `pl:u`'s `GetLoadState` is also
 command 1, and answering it with 15 left NX-Shell polling the shared-font
 service 190k times.
+
+**Events are copy handles, and they start unsignalled.** `Cpu::alloc_event`
+names one and records it in `Cpu::events`; it has to reach the guest through
+`Cpu::write_ipc_reply`'s **copy** list, not the move list — a move handle
+transfers ownership (a sub-session from `reply_with_interface`), a copy handle
+duplicates one the server keeps, they occupy different fields of the handle
+descriptor, and an event sent in the move slot is read back as **0**. That is
+why `nnSdk` spent whole boots waiting on handle 0.
+
+`svcWaitSynchronization` then answers from real state:
+
+- A handle that is *not* in `Cpu::events` still counts as ready. Thread handles
+  and every service handle this emulator does not model keep behaving as they
+  always have — do not "fix" this without checking homebrew.
+- A **poll** (timeout 0, which is what `nn::os::TryWaitSystemEvent` and libnx's
+  `waitSingle` issue) on events that have not fired reports Timeout. This is
+  the fix that stopped `nn::oe::GpuErrorHandler` being told the GPU had
+  faulted.
+- A **blocking** wait with nothing signalled still reports the first handle
+  ready, which is a lie and is deliberate. `nn::os::detail::MultiWaitImpl::
+  WaitAny` answers a timeout by returning a **null holder** that
+  `nn::os::RegisterSystemWorkerHandler` calls without checking, so telling that
+  thread the truth jumps to 0; and blocking it for real is worse, because
+  nothing here fires those events and the last runnable thread would have
+  nowhere to go. Fixing this properly needs events that actually fire, not a
+  different answer here.
+- `Cpu::vsync_event` is signalled from the guest's own presented frames, which
+  is the only periodic tick this emulator has — there is no clock behind the
+  display.
 
 **`CloneCurrentObject` (control command 2, and 4 for the Ex form) must hand
 back a new session handle as a move handle.** It is answered centrally in

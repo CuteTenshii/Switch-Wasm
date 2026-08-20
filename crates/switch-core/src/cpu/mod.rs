@@ -105,6 +105,23 @@ pub enum ThreadState {
     WaitKey { key: u32, mutex: u32 },
 }
 
+/// A kernel event a service handed the guest a handle to.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Event {
+    /// What the event is for. Diagnostics only, but a wait trace is unreadable
+    /// without it.
+    name: &'static str,
+    /// Whether it is currently signalled. Events start **unsignalled**: an
+    /// event nothing has fired is the ordinary case, and reporting the
+    /// opposite is what made `nn::os::TryWaitSystemEvent` tell
+    /// `nn::oe::GpuErrorHandler` that the GPU had faulted.
+    signaled: bool,
+    /// Whether a successful wait consumes the signal. Horizon calls this an
+    /// auto-clear event; the alternative stays signalled until the guest
+    /// clears it by hand.
+    auto_clear: bool,
+}
+
 /// Bit Horizon's mutex words set to mean "someone is blocked on me, so the
 /// unlock has to go through `svcArbitrateUnlock`".
 const MUTEX_HAS_LISTENERS: u32 = 0x4000_0000;
@@ -294,6 +311,19 @@ pub struct Cpu {
     /// implementation behind it, so the warning naming it prints once instead
     /// of once per call (`appletMainLoop` polls `am` every frame).
     unimplemented_ipc: HashSet<(String, Option<u32>)>,
+    /// Handles that name a kernel **event**, and whether each has been
+    /// signalled yet. A handle that is not in here is not modelled as an
+    /// event, and [`Cpu::horizon_syscall`]'s `WaitSynchronization` keeps
+    /// treating it as immediately signalled — thread handles, and every
+    /// service handle a guest happens to wait on.
+    events: HashMap<u64, Event>,
+    /// The display's vsync event, once `vi` has handed it out. Signalled every
+    /// time the guest presents a frame, which is the only periodic tick this
+    /// emulator has: a render loop that waits on it has to be woken by
+    /// something, and there is no real clock behind the display.
+    vsync_event: Option<u64>,
+    /// Frame count the vsync event was last fired for.
+    last_vsync_frame: u64,
     /// Synthetic SD-card directory state for the fsp-srv stub: maps an open
     /// directory handle to the entries it has not yielded yet
     /// (name bytes, entry type, file size). Lets `fsFsOpenDirectory` /
@@ -392,6 +422,9 @@ impl Cpu {
             vi_ifaces: HashMap::new(),
             applet_focus_sent: false,
             unimplemented_ipc: HashSet::new(),
+            events: HashMap::new(),
+            vsync_event: None,
+            last_vsync_frame: 0,
             fs_dirs: HashMap::new(),
             fs_files: HashMap::new(),
             romfs: None,
@@ -925,6 +958,46 @@ impl Cpu {
 
     pub fn set_pc(&mut self, pc: u32) {
         self.pc = pc;
+    }
+
+    /// Allocate a handle and record it as an event. Callers are the services
+    /// that hand events out (`am`'s applet-message and GPU-error events,
+    /// `vi`'s display vsync, `nvdrv`'s QueryEvent), and the handle has to
+    /// reach the guest as a **copy** handle — see [`Cpu::write_ipc_reply`].
+    pub(crate) fn alloc_event(&mut self, name: &'static str, auto_clear: bool) -> u64 {
+        let handle = self.alloc_handle();
+        self.events.insert(handle, Event { name, signaled: false, auto_clear });
+        if std::env::var("TRACE_WAIT").is_ok() {
+            eprintln!("[event] {name} = {handle:#x} auto_clear={auto_clear}");
+        }
+        handle
+    }
+
+    /// What an event handle is for, for diagnostics.
+    pub(crate) fn event_name(&self, handle: u64) -> Option<&'static str> {
+        self.events.get(&handle).map(|event| event.name)
+    }
+
+    /// Fire an event.
+    pub fn signal_event(&mut self, handle: u64) {
+        if let Some(event) = self.events.get_mut(&handle) {
+            event.signaled = true;
+        }
+    }
+
+    /// Whether `handle` names an event that has fired. `None` means the handle
+    /// is not modelled as an event at all.
+    pub(crate) fn event_signaled(&self, handle: u64) -> Option<bool> {
+        self.events.get(&handle).map(|event| event.signaled)
+    }
+
+    /// Consume an auto-clear event's signal after a wait has reported it.
+    pub(crate) fn consume_event(&mut self, handle: u64) {
+        if let Some(event) = self.events.get_mut(&handle) {
+            if event.auto_clear {
+                event.signaled = false;
+            }
+        }
     }
 
     /// Debug/test counterpart to [`Cpu::service_handles_snapshot`]: bind a

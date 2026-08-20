@@ -327,10 +327,92 @@ impl Cpu {
                 // system worker does (`nn::os::detail::MultiWaitImpl::WaitAny`)
                 // — it then read a `MultiWaitHolderType` past the end of its
                 // list and called its null handler pointer.
+                // KERNELRESULT(TimedOut), as libnx spells it.
+                const RESULT_TIMED_OUT: u64 = 0xEA01;
+                let handles_ptr = self.read_zr(1) as u32;
+                let count = (self.read_zr(2) as u32).min(0x40);
+                let timeout = self.read_zr(3) as i64;
+                let handles: Vec<u64> = (0..count)
+                    .map(|i| {
+                        u64::from(self.mem.read_u32(handles_ptr.wrapping_add(i * 4)).unwrap_or(0))
+                    })
+                    .collect();
+                if std::env::var("TRACE_WAIT").is_ok() {
+                    let named: Vec<String> = handles
+                        .iter()
+                        .map(|&h| match (self.event_name(h), self.event_signaled(h)) {
+                            (Some(name), Some(true)) => format!("{h:#x} {name} signalled"),
+                            (Some(name), _) => format!("{h:#x} {name}"),
+                            _ => format!("{h:#x} (not an event)"),
+                        })
+                        .collect();
+                    eprintln!("[wait] pc={:#x} timeout={timeout} {named:?}", self.pc);
+                }
+                // A presented frame is the only periodic tick this emulator
+                // has, so it is what drives vsync: the guest's own present is
+                // what advances the display, and a render loop waiting on
+                // vsync is woken by it rather than by a clock.
+                if self.nv.gpu.frames != self.last_vsync_frame {
+                    self.last_vsync_frame = self.nv.gpu.frames;
+                    if let Some(vsync) = self.vsync_event {
+                        self.signal_event(vsync);
+                    }
+                }
+                // The first handle that is ready. A handle this emulator does
+                // not model as an event still counts as ready, which is what
+                // keeps thread handles and every unmodelled service handle
+                // behaving as they always have.
+                let ready = handles
+                    .iter()
+                    .position(|&h| self.event_signaled(h) != Some(false));
+                if let Some(index) = ready {
+                    self.consume_event(handles[index]);
+                    self.write_zr(0, RESULT_OK);
+                    self.write_zr(1, index as u64);
+                    self.yield_thread();
+                    return Ok(());
+                }
+                // Every handle names an event, and none of them has fired, so
+                // the wait times out. That is the honest answer for a poll
+                // (`nn::os::TryWaitSystemEvent`, and libnx's `waitSingle` with
+                // no timeout, both issue one), and reporting the wait
+                // *satisfied* instead is what told `nn::oe::GpuErrorHandler`
+                // that the GPU had faulted, one callback into the SDK's system
+                // worker.
+                //
+                // A blocking wait gets the same answer rather than blocking
+                // until something fires, because nothing here can wake it:
+                // there is no clock behind the events, only the guest's own
+                // presents. `nn::os::detail::MultiWaitImplByHorizon::
+                // WaitSynchronizationN` accepts exactly Success, Timeout and
+                // Cancelled and asserts on anything else, and answers a
+                // timeout by looping — so this degrades to the spin the old
+                // always-signalled behaviour already had, without lying about
+                // what fired.
+                //
+                // Note the result is written *before* yielding: `yield_thread`
+                // switches register context, so writing X0/X1 after it lands
+                // them in the next thread's registers and leaves this one
+                // resuming on garbage.
+                // A blocking wait really blocks, but only while some other
+                // thread can make progress. `nnSdk`'s system worker waits
+                // forever on events nothing here fires, and
+                // `nn::os::detail::MultiWaitImpl::WaitAny` answers a timeout
+                // by returning a **null holder** that
+                // `nn::os::RegisterSystemWorkerHandler` then calls without
+                // checking — so telling that thread "timed out" jumps to 0,
+                // while letting it sleep is both correct and what a real
+                // console does.
+                //
+                // Guarding on another thread being runnable keeps the last
+                // runnable thread out of `WaitEvent`, so the process can never
+                // block itself entirely.
+                if timeout == 0 {
+                    self.write_zr(0, RESULT_TIMED_OUT);
+                    return Ok(());
+                }
                 self.write_zr(0, RESULT_OK);
                 self.write_zr(1, 0);
-                // Waiting is where a thread that spins on another thread's
-                // progress gives way to it.
                 self.yield_thread();
                 Ok(())
             }

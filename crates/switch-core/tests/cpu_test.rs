@@ -1425,6 +1425,83 @@ fn write_log_packet(cpu: &mut Cpu, addr: u32, flags: u8, severity: u8, tlvs: &[(
     0x18 + payload.len() as u32
 }
 
+/// Run one `svcWaitSynchronization` over `handles`, returning (result, index).
+fn wait_sync(cpu: &mut Cpu, handles: &[u32], timeout: i64) -> (u64, u64) {
+    const ARRAY: u32 = 0x7000;
+    for (i, &h) in handles.iter().enumerate() {
+        cpu.mem.write_u32(ARRAY + (i as u32) * 4, h).unwrap();
+    }
+    cpu.set_reg(1, u64::from(ARRAY));
+    cpu.set_reg(2, handles.len() as u64);
+    cpu.set_reg(3, timeout as u64);
+    let pc = cpu.get_pc();
+    cpu.mem.map(pc, &svc(0x18).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    cpu.set_pc(pc);
+    (cpu.read_x(0), cpu.read_x(1))
+}
+
+#[test]
+fn events_are_copy_handles_and_start_unsignalled() {
+    use switch_core::cpu::SyscallMode;
+    // Every event a service hands out is a **copy** handle: a move handle
+    // transfers ownership and lives in a different field of the handle
+    // descriptor, so an event sent in the move slot is read back as 0. That is
+    // why nnSdk spent whole boots waiting on handle 0 after asking for
+    // GetGpuErrorDetectedSystemEvent.
+    const APPLET: u64 = 0x9000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.syscall_mode = SyscallMode::Horizon;
+    cpu.register_service_handle(APPLET, "appletOE");
+    let tls = cpu.tls_base();
+
+    ipc_request(&mut cpu, APPLET, 5, None, 0);
+    let proxy_service = cpu.mem.read_u32(tls + 0x20).unwrap();
+    ipc_request(&mut cpu, APPLET, 4, Some(proxy_service), 0);
+    let proxy = cpu.mem.read_u32(tls + 0x30).unwrap();
+    ipc_request(&mut cpu, APPLET, 4, Some(proxy), 20); // IApplicationFunctions
+    let functions = cpu.mem.read_u32(tls + 0x30).unwrap();
+
+    // GetGpuErrorDetectedSystemEvent.
+    ipc_request(&mut cpu, APPLET, 4, Some(functions), 130);
+    // { send_pid:1, num_copy:4, num_move:4 } -- one copy handle, no move ones.
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
+    let event = cpu.mem.read_u32(tls + 0x0c).unwrap();
+    assert_ne!(event, 0, "the guest must receive a real handle");
+
+    // Nothing has fired it, so a poll times out. Reporting the wait satisfied
+    // is what told nn::oe::GpuErrorHandler that the GPU had faulted.
+    const RESULT_TIMED_OUT: u64 = 0xEA01;
+    let (result, _) = wait_sync(&mut cpu, &[event], 0);
+    assert_eq!(result, RESULT_TIMED_OUT);
+
+    // A second event, left unsignalled, so the index below is a real position
+    // rather than "the first handle".
+    ipc_request(&mut cpu, APPLET, 4, Some(proxy), 0); // ICommonStateGetter
+    let state_getter = cpu.mem.read_u32(tls + 0x30).unwrap();
+    ipc_request(&mut cpu, APPLET, 4, Some(state_getter), 0); // GetEventHandle
+    let quiet = cpu.mem.read_u32(tls + 0x0c).unwrap();
+    assert_ne!(quiet, event);
+
+    // Once signalled it reports the index that fired, and consumes it: these
+    // are auto-clear events, so a second poll times out again.
+    cpu.signal_event(u64::from(event));
+    let (result, index) = wait_sync(&mut cpu, &[quiet, event], 0);
+    assert_eq!(result, 0);
+    assert_eq!(index, 1, "the index of the handle that fired, not a count");
+    let (result, _) = wait_sync(&mut cpu, &[event], 0);
+    assert_eq!(result, RESULT_TIMED_OUT);
+
+    // A handle this emulator does not model as an event is still treated as
+    // ready, which is what keeps thread handles and unmodelled service handles
+    // behaving as they always have.
+    let (result, index) = wait_sync(&mut cpu, &[0x1234], 0);
+    assert_eq!(result, 0);
+    assert_eq!(index, 0);
+}
+
 #[test]
 fn control_clone_hands_back_a_working_session() {
     use switch_core::cpu::SyscallMode;

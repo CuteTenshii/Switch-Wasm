@@ -18,9 +18,8 @@ and put what they render on the canvas.
   real `nnSdk` init — `nn::init::Start` → `nn::oe::Initialize` →
   `nn::oe::InitializeApplet` — and start the SDK's system worker thread. All
   of `nn::oe::Initialize` and `nn::init`'s heap setup now complete, and the
-  title mounts and reads its own RomFS; at 355.9M instructions it stops on the
-  emulator's missing kernel event model rather than on anything it asked for.
-  See
+  title mounts and reads its own RomFS and gets real kernel events; at 361.2M
+  instructions it stops in `hid`, which has no implementation behind it. See
   [Retail NCA/NSP loading](#retail-ncansp-loading).
 
 See [Next](#next) for the live open threads.
@@ -658,14 +657,47 @@ With both fixed the title mounts `rom:`, reads its RomFS through
 `OpenDataStorageByCurrentProcess`, and runs **355.8M** instructions — 2.8x
 further than before.
 
-**Now open**: the kernel's missing waitable-object model, which is what the
-title now dies on. Its system worker thread starts, its first holder is the
-GPU-error event, `nn::os::TryWaitSystemEvent` reports it signaled because
-`svcWaitSynchronization` reports *everything* signaled, and
-`nn::oe::GpuErrorHandler` aborts. This needs the real thing: a per-handle
-signaled flag, events created by `svcCreateEvent` and returned as IPC
-copy-handles, `svcSignalEvent`/`svcClearEvent`/`svcResetSignal` state, and a
-`svcWaitSynchronization` that actually blocks and reschedules.
+### Kernel events
+
+The title's system worker was being told the GPU had faulted. Two things were
+wrong, and only one of them was the wait.
+
+- **Every event was handed out as a *move* handle.** A move handle transfers
+  ownership (a sub-session from `reply_with_interface`); a copy handle
+  duplicates one the server keeps, which is what every event is. They live in
+  different fields of the handle descriptor, so an event in the move slot reads
+  back as **0** — `TRACE_WAIT` showed the whole boot waiting on handle 0.
+  `Cpu::write_ipc_reply` now emits both lists, copy handles first.
+- **Nothing tracked whether an event had fired.** `Cpu::alloc_event` names one
+  and records it; `svcWaitSynchronization` answers a **poll** (timeout 0, which
+  is what `nn::os::TryWaitSystemEvent` issues) with Timeout when nothing has
+  fired, instead of reporting the wait satisfied. That is what stopped
+  `nn::oe::GpuErrorHandler` aborting. The display's vsync event is signalled
+  from the guest's own presented frames, the only periodic tick here.
+
+A blocking wait with nothing signalled still reports the first handle ready,
+and that is deliberate rather than unfinished: `nn::os::detail::MultiWaitImpl::
+WaitAny` answers a timeout by returning a **null holder** which
+`nn::os::RegisterSystemWorkerHandler` then calls without checking, so telling
+that thread the truth jumps to 0 — measured, at 117.5M instructions. Blocking
+it for real is worse: nothing here fires those events, so the last runnable
+thread has nowhere to go. Getting this honest needs events that actually fire,
+not a different answer in the wait.
+
+The title now runs **361.2M** instructions.
+
+**Now open**: `hid`. The title calls `IHidServer::CreateAppletResource`, gets
+the generic fabricated-object-id reply, and calls a method on the null
+`IAppletResource` it was handed:
+
+```
+sdk!nn::hid::detail::SharedMemoryAccessor::Activate+0x18c   -> blr 0
+```
+
+`hid` has no implementation at all — every one of its commands (0, 3, 11, 21,
+31, 100, 102, 109, 128) is answered by fabrication, in homebrew too. It works
+today only because real input arrives through shared memory and the IPC side
+merely configures it.
 
 Two other things stay open behind this one. The kernel still has no waitable
 object model — `svcWaitSynchronization` reports every handle instantly
