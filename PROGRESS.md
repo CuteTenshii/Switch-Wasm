@@ -14,15 +14,16 @@ out to be stale.
 | `hbmenu.nro` | full UI, responds to a controller | yes |
 | `sysinfo.nro` | renders | yes |
 | `NX-Fetch.nro` | renders | yes |
-| `JKSV.nro` | renders, 48 draws through the GPU | yes |
+| `JKSV.nro` | renders, 21 draws through the shader core | yes |
 | `nxdumptool.nro` | renders | yes |
 | `NX-Shell.nro` | clean exit at 15.7M steps, no font (below) | no |
 | `Checkpoint.nro` | 6.8M steps, no exit | no |
 | "A Short Hike" (NSP) | runs 1.5B steps with no fault or abort | not yet |
 
 - **GPU**: the nvdrv/nvmap/GMMU/channel/copy-engine path is real
-  (`crates/switch-core/src/gpu`). The 3D shader core (Maxwell SASS +
-  rasterizer) is not implemented; see [GPU](#gpu-gm20b-model).
+  (`crates/switch-core/src/gpu`), and so is the 3D shader core: a Maxwell
+  SASS interpreter feeding a software rasterizer. See
+  [GPU](#gpu-gm20b-model).
 - **Retail NCA/NSP**: a real, encrypted commercial title can be decrypted, its
   RomFS mounted, and its multi-module boot sequence (`rtld` → `main` →
   `subsdk*` → `sdk`) run through real `nnSdk` init. `nn::init::Start` →
@@ -258,8 +259,7 @@ fixed bit:
 
 The clean exit is it giving up for want of the **shared system fonts** from
 `pl:u` — that is the no-font path above, not a success. With a font it gets
-further and then stalls, un-diagnosed. Its renderer needs the shader core
-either way.
+further and then stalls, un-diagnosed.
 
 ### sdl-hello — historical, no longer in the tree
 
@@ -337,11 +337,7 @@ point where `SDL_Init` reaches the deko3d video backend, which isn't emulated.
   unchanged
 
 It still presents no frame: its `vi`/binder requests come in libtransistor's
-own (non-CMIF) marshalling, which the command-id scan misreads, and the GPU
-path needs the shader core anyway.
-
-The frontend has a "Bundled app" selector (demo / hbmenu / NX-Shell /
-sdl-hello) and `prod.keys`/`title.keys` persist in `localStorage`.
+own (non-CMIF) marshalling, which the command-id scan misreads.
 
 ## GPU (GM20B model)
 
@@ -353,13 +349,10 @@ from deko3d's generated Maxwell class headers and the driver ABI from libnx's
 Working: the nvdrv device/ioctl layer, nvmap, the GMMU, host1x syncpoints,
 channels and the GPFIFO/pushbuffer command processor, the MME macro engine,
 `ClearBuffers`, report semaphores, the copy engine (including block-linear
-conversion and component remap), the 2D blitter, inline-to-memory uploads, and
-scan-out.
+conversion and component remap), the 2D blitter, inline-to-memory uploads,
+scan-out, and the 3D shader core — see [the shader core](#the-shader-core).
 
-Not implemented: the shader core. Draw calls are decoded and recorded but not
-rasterized, and compute dispatches record their QMD without running warps.
-Homebrew that renders through deko3d's 3D pipeline (or the EGL/GLAD stack, as
-NX-Shell does) will not produce an image until that exists.
+Not implemented: compute. A dispatch records its QMD without running warps.
 
 ### nv device init
 
@@ -1061,8 +1054,87 @@ living in their registers.
 
 With those two, "A Short Hike" runs **1.5 billion** instructions — the step
 budget, not a fault — with no abort and no unimplemented syscall. It still
-presents no frame, because nothing rasterizes: it is issuing `nvdrv` ioctls
-into a GPU model with no shader core.
+presents no frame, and the reason is not the GPU: over that whole run it
+issues no draw call at all (see [the shader core](#the-shader-core)).
+
+### The shader core
+
+Both halves of this existed before and both were narrow enough that only the
+fixtures they were built against could get through them. Every opcode value,
+mask, operand position and modifier sub-table below is transcribed from
+envytools' `gm107.c`, plus NVIDIA's own `cl9097.h` for the 3D class
+registers.
+
+**The decoder** (`gpu/shader/isa.rs`) covered ten opcodes and rejected any
+instruction carrying a guard predicate — which is most of them, in anything
+with control flow. It now decodes the predicate rather than giving up on it,
+along with source negate/absolute and result saturate, and about forty
+opcodes: the float ALU (`fadd`/`fmul`/`ffma`/`fmnmx`/`fset`/`fsetp`/`mufu`),
+the integer ALU (`iadd`/`iadd3`/`imnmx`/`iscadd`/`isetp`/`iset`/`icmp`/
+`imul`/`xmad`), the bitwise and shift group (`lop`/`lop3`/`shl`/`shr`/`shf`/
+`bfe`/`popc`/`flo`), conversions (`i2f`/`f2i`/`f2f`/`i2i`), moves
+(`mov`/`mov32i`/`s2r`/`sel`/`psetp`), memory (`ld`/`st`/`ldc`/`ldg`/`stg`/
+`ldl`/`stl`), the interpolator (`ipa`), `texs`, and control flow
+(`bra`/`ssy`/`sync`/`pbk`/`brk`/`pcnt`/`cont`/`exit`/`kil`).
+
+Three decode bugs worth recording, all caught by tests written from the
+tables rather than from a capture:
+
+- Opcode groups are matched on the top 16 bits, but the low three of those
+  are modifier bits — the group mask is `0xfff8`. Matching all sixteen made
+  `ld` (`0xefd9`) miss its own arm.
+- `nop` (`0x50b0`) and `f2i` share a low byte, and `ffma` (`0x49a0`) and
+  `sel` (`0x4ca0`) share another. The shared-form dispatch now gates on the
+  *high* byte first.
+- A shader's instructions are not contiguous. Maxwell packs 32-byte blocks
+  of one scheduling control word plus three instructions, so a program's
+  byte offsets run 0x08, 0x10, 0x18, **0x28**, 0x30, 0x38 — the decoder
+  walks slots rather than striding.
+
+**The interpreter** (`gpu/shader/interp.rs`) is a scalar machine: a program
+counter, seven predicate registers, an untyped 32-bit register file, and the
+reconvergence stack that `ssy`/`sync`, `pbk`/`brk` and `pcnt`/`cont` push and
+pop. Constants are read as `u32` and reinterpreted by the consuming
+instruction, because that is what the hardware does — the previous `f32`
+constant source could not serve an `ldc` feeding integer arithmetic. `kil`
+discards the fragment, so the depth store had to move after shading rather
+than happening alongside the test.
+
+**The rasterizer** (`gpu/raster.rs`) gained indexed draws (u8/u16/u32
+indices, with a vertex cache keyed on index — an indexed mesh reuses vertices
+heavily and re-shading each reference is the most expensive thing the loop
+can do), all ten primitive topologies, near-plane clipping, face culling, and
+scissor rectangles.
+
+One bug here was caught only by the screenshot regression, and is the reason
+that check exists: `texs` resolves its texture handle through a constant
+bank, and the bank/offset convention was guessed rather than looked up.
+JKSV's frame differed in 42059 pixels — a 256x269 region turned flat grey —
+and `TRACE_GPU` showed eighteen "read from unbound constant bank 2" errors
+where the baseline had two. The handle comes from the driver constant bank
+(15) at the offset the instruction names, with no scaling; with that fixed
+the frame was byte-identical again and the error counts matched exactly.
+
+A second, subtler one: a *fixed* vertex attribute — bit 6 of
+`VertexAttribState[i]`, meaning "this input has no vertex buffer behind it" —
+was an error, which dropped the entire draw and every attribute that *was*
+bound with it. It reads the `vec4` default (`0,0,0,1`) instead. Two JKSV
+draws were being thrown away over an attribute their shader never reads: a
+full-screen background quad and the fade-in overlay on top of it. With them
+restored JKSV's first frame is nearly black and brightens over the next
+fifteen — which is the fade the app actually asked for, and which the dropped
+draws had been hiding. The same frame also loses two divider rules that JKSV
+itself paints over in that frame; they are its own overdraw, not a
+regression. Reading from a *disabled* buffer is still an error, because that
+one means some register was read wrong and there is no correct value to
+invent.
+
+hbmenu, sysinfo, NX-Fetch and nxdumptool still render byte-identical frames.
+
+**This does not make "A Short Hike" render.** The title's whole run submits
+one pushbuffer and issues no draw at all: `GpuStats { submissions: 1,
+methods: 3536, clears: 0, draws: 0, copies: 0, macros: 35, inert_methods:
+554 }`. Whatever it is waiting for is upstream of the GPU.
 
 ## Frontend
 
@@ -1142,11 +1214,11 @@ into a GPU model with no shader core.
   and none of these can be turned on in the browser; diagnostics that must
   reach a browser user go through `Cpu::diagnostic` instead, which also writes
   the trace buffer the page drains.
-- Browser: `make serve`, then pick a bundled app or drop in an `.nro`.
+- Browser: `make serve`, then drop in an `.nro` or an `.nsp`.
 - Regression suite: `make test`. **Two tests fail and have failed throughout**:
   `bootstrap_provides_stack_and_low_memory` and `tpidr_el0_roundtrip` (the
   latter is stale — it writes `TPIDR_EL0` while IPC reads `TPIDRRO_EL0`, which
-  was a deliberate split). 104 pass.
+  was a deliberate split). 231 unit tests and 109 integration tests pass.
 
 ## Next
 
@@ -1157,11 +1229,15 @@ it in X1. See [the applet section](#the-applet-stub-stopped-guessing). So is
 the one after it, `nn::vi::CreateLayer` — see [the layer
 section](#the-layer-and-the-binder-object-in-its-parcel).
 
-1. **Shader core**: a Maxwell SASS interpreter plus a software rasterizer, so
-   `VertexBegin`/`DrawArrays` produce pixels. Needed by anything rendering
-   through deko3d's 3D pipeline or EGL, and by the retail title — which now has
-   its layer, its buffer queue and a stream of `nvdrv` ioctls, and still
-   presents no frame.
+The old item 1, "a Maxwell SASS interpreter plus a software rasterizer", is
+also **resolved** — see [the shader core](#the-shader-core). It did not make
+the retail title render, for the reason recorded there.
+
+1. **Find out why "A Short Hike" issues no draws.** It has its layer, its
+   buffer queue and a stream of `nvdrv` ioctls, and over 1.5 billion
+   instructions it submits one pushbuffer carrying 3536 methods and zero
+   draw calls. Whatever it is waiting on sits above the GPU: the next thing
+   to do is find which thread is spinning at `pc=0xa70b7ec` and on what.
 2. **The rest of the thread syscalls.** The title's own scheduler and IL2CPP's
    garbage collector reach for them one at a time as it runs;
    `SetThreadActivity` and `GetThreadContext3` are done, and whatever it asks

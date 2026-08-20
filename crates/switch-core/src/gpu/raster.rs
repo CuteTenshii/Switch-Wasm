@@ -208,22 +208,32 @@ fn attrib_shape(size: u32) -> Option<(u32, u32)> {
 const ATTRIB_TYPE_UNORM: u32 = 2;
 const ATTRIB_TYPE_FLOAT: u32 = 7;
 
+/// What a "fixed" attribute reads as: the `vec4` default every graphics API
+/// hands a vertex input the draw supplies no data for.
+const ATTRIB_DEFAULT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+
 /// Fetch one vertex's worth of a single attribute out of GPU memory,
 /// returning it padded to 4 components (`0,0,0,1` for the ones the format
 /// doesn't carry — the usual `vec4` default). `is_bgra` swaps the first and
 /// third component after decoding, matching a packed-colour attribute
-/// declared BGRA instead of RGBA.
+/// declared BGRA instead of RGBA. A "fixed" attribute has no buffer behind
+/// it and reads [`ATTRIB_DEFAULT`] outright.
 pub fn fetch_attribute(
     attrib: VertexAttrib,
     array: VertexArray,
     vertex_index: u32,
     ctx: &ExecCtx,
 ) -> Result<[f32; 4]> {
+    // A "fixed" attribute is not backed by a vertex buffer at all -- it is
+    // the shader reading an input this draw binds nothing to, which is a
+    // well-defined thing to do rather than a gap in this rasterizer. Erroring
+    // dropped the whole draw, and with it every attribute that *was* bound.
     if attrib.is_fixed {
-        return Err(Error::Gpu(
-            "raster: fixed (non-buffer) vertex attributes aren't supported yet".into(),
-        ));
+        return Ok(ATTRIB_DEFAULT);
     }
+    // A disabled buffer is different: the attribute claims to be fetched from
+    // an array the draw never turned on, so some piece of state has been read
+    // wrong. Say so instead of inventing a value.
     if !array.enabled {
         return Err(Error::Gpu(format!(
             "raster: attribute reads from disabled vertex buffer {}",
@@ -870,6 +880,23 @@ mod tests {
         let attrib = VertexAttrib { buffer_id: 0, is_fixed: false, offset: 0, size: 0x01, ty: ATTRIB_TYPE_FLOAT, is_bgra: false };
         let array = VertexArray { enabled: false, stride: 16, start: base, limit: base, divisor: 0 };
         assert!(fetch_attribute(attrib, array, 0, &ctx).is_err());
+    }
+
+    #[test]
+    fn a_fixed_attribute_reads_the_vec4_default_instead_of_failing_the_draw() {
+        // JKSV leaves attribute 2 marked fixed on draws whose shader never
+        // reads it. Erroring dropped those draws entirely -- including its
+        // full-screen background quad, which then left the previous frame's
+        // chrome showing through.
+        let (mut mem, vmm, base) = harness();
+        let mut stats = Default::default();
+        let mut host1x = Host1x::new();
+        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let attrib = VertexAttrib { buffer_id: 0, is_fixed: true, offset: 0, size: 0x12, ty: ATTRIB_TYPE_FLOAT, is_bgra: false };
+        // Deliberately a disabled array: a fixed attribute is not fetched
+        // from one at all, so the buffer's state must not matter.
+        let array = VertexArray { enabled: false, stride: 0, start: base, limit: base, divisor: 0 };
+        assert_eq!(fetch_attribute(attrib, array, 0, &ctx).unwrap(), [0.0, 0.0, 0.0, 1.0]);
     }
 
     // -- Full-pipeline integration: vertex fetch -> vertex shading ->
