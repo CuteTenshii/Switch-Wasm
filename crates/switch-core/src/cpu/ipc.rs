@@ -978,15 +978,38 @@ impl Cpu {
     /// word is the IGraphicBufferProducer binder object id), then return the
     /// parcel size. `out_size` is the number of reply data words (8 for 2020's
     /// single u64, 16 for 2030's layer_id+size pair).
+    /// The native-window parcel `OpenLayer` (2020) and `CreateStrayLayer`
+    /// (2030) hand back: an Android `Parcel` holding one flattened binder
+    /// object that names the layer's `IGraphicBufferProducer`.
+    ///
+    /// libnx only reads the binder id out of it, but `nnSdk` also checks the
+    /// interface name, so the object is written in full: the 0x28-byte
+    /// `flat_binder_object` real `vi` sends, followed by the four-byte object
+    /// offset table the parcel header points at.
     pub(super) fn vi_native_window(&mut self, tls: u32, out_size: usize) -> Result<()> {
-        let payload: [u8; 12] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]; // payload[2] = binder id 1
-        let parcel_size = 16 + payload.len() as u32;
+        /// The binder handle every layer here shares — `vi_transact_parcel`
+        /// serves the one `IGraphicBufferProducer` this emulator has.
+        const BINDER_ID: u64 = 1;
+
+        let mut payload = Vec::with_capacity(0x28);
+        payload.extend_from_slice(&2u32.to_le_bytes()); // type: a binder handle
+        payload.extend_from_slice(&0u32.to_le_bytes()); // flags
+        payload.extend_from_slice(&BINDER_ID.to_le_bytes());
+        payload.extend_from_slice(&0u64.to_le_bytes()); // cookie
+        payload.extend_from_slice(b"dispdrv\0"); // the interface's name
+        payload.extend_from_slice(&0u64.to_le_bytes()); // trailing pad
+        let objects = 0u32.to_le_bytes(); // one object, at payload offset 0
+
+        let payload_off = 16u32;
+        let objects_off = payload_off + payload.len() as u32;
+        let parcel_size = objects_off + objects.len() as u32;
         let mut parcel = Vec::with_capacity(parcel_size as usize);
-        parcel.extend_from_slice(&payload.len().to_le_bytes()); // payload_size
-        parcel.extend_from_slice(&16u32.to_le_bytes()); // payload_off
-        parcel.extend_from_slice(&0u32.to_le_bytes()); // objects_size
-        parcel.extend_from_slice(&parcel_size.to_le_bytes()); // objects_off
+        parcel.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        parcel.extend_from_slice(&payload_off.to_le_bytes());
+        parcel.extend_from_slice(&(objects.len() as u32).to_le_bytes());
+        parcel.extend_from_slice(&objects_off.to_le_bytes());
         parcel.extend_from_slice(&payload);
+        parcel.extend_from_slice(&objects);
 
         let mut raw = Vec::with_capacity(out_size);
         if out_size >= 16 {

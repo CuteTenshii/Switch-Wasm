@@ -3415,3 +3415,95 @@ fn scalar_integer_forms_verified_against_qemu() {
     let cpu = run_program(cpu, 0x1000, &[0x5ac0_1549, nop()]); // cls w9, w10
     assert_eq!(cpu.read_reg(9), 23);
 }
+
+/// Marshal a non-domain request (an `SFCI` header straight after the hipc
+/// header) with `payload` as its arguments, and send it. `nnSdk` keeps
+/// `audout` as a plain session rather than converting it to a domain, so this
+/// is the shape those commands actually arrive in.
+fn ipc_request_plain(cpu: &mut Cpu, handle: u64, cmd: u32, payload: &[u8]) {
+    build_ipc_request(cpu, 4, None, cmd);
+    let tls = cpu.tls_base();
+    for (i, &b) in payload.iter().enumerate() {
+        cpu.mem.write_u8(tls + 0x20 + i as u32, b).unwrap();
+    }
+    run_ipc_request(cpu, handle);
+}
+
+/// The same, carrying one map-alias buffer in the direction `recv` asks for.
+fn ipc_request_plain_with_buffer(
+    cpu: &mut Cpu,
+    handle: u64,
+    cmd: u32,
+    buf: u32,
+    len: u32,
+    recv: bool,
+    payload: &[u8],
+) {
+    let tls = cpu.tls_base();
+    for i in (0..0x100u32).step_by(4) {
+        cpu.mem.write_u32(tls + i, 0).unwrap();
+    }
+    // Send buffers count in bits 23:20, receive buffers in 27:24.
+    cpu.mem.write_u32(tls, 4 | (1 << if recv { 24 } else { 20 })).unwrap();
+    cpu.mem.write_u32(tls + 4, 0x0c).unwrap();
+    cpu.mem.write_u32(tls + 0x08, len).unwrap();
+    cpu.mem.write_u32(tls + 0x0c, buf).unwrap();
+    cpu.mem.write_u32(tls + 0x10, 0).unwrap();
+    // One descriptor pushes the aligned data area out to 0x20.
+    cpu.mem.write_u32(tls + 0x20, 0x4943_4653).unwrap(); // "SFCI"
+    cpu.mem.write_u32(tls + 0x28, cmd).unwrap();
+    for (i, &b) in payload.iter().enumerate() {
+        cpu.mem.write_u8(tls + 0x30 + i as u32, b).unwrap();
+    }
+    run_ipc_request(cpu, handle);
+}
+
+#[test]
+fn vi_native_window_names_the_binder_interface() {
+    // `OpenLayer` answers with an Android parcel holding one flattened binder
+    // object. libnx only reads the binder id out of it; nnSdk also checks the
+    // interface name, and rejected the whole layer -- vi result 114-1, an
+    // abort inside nn::vi::CreateLayer -- while the parcel carried a bare id
+    // and nothing else.
+    const VI: u64 = 0xB000;
+    const WINDOW: u32 = 0x8000;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(VI, "vi:m");
+    let tls = cpu.tls_base();
+
+    // GetDisplayService first: OpenLayer lives on the
+    // IApplicationDisplayService, not on the vi root.
+    ipc_request_plain(&mut cpu, VI, 2, &[]);
+    let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(display, 0, "no IApplicationDisplayService");
+
+    // OpenLayer, with the 0x100-byte native-window receive buffer the caller
+    // always provides.
+    ipc_request_plain_with_buffer(&mut cpu, display, 2020, WINDOW, 0x100, true, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "OpenLayer failed");
+    let size = cpu.mem.read_u64(tls + 0x20).unwrap() as u32;
+
+    // Parcel header: { payload_size, payload_off, objects_size, objects_off }.
+    let payload_size = cpu.mem.read_u32(WINDOW).unwrap();
+    let payload_off = cpu.mem.read_u32(WINDOW + 4).unwrap();
+    let objects_size = cpu.mem.read_u32(WINDOW + 8).unwrap();
+    let objects_off = cpu.mem.read_u32(WINDOW + 12).unwrap();
+    assert_eq!(payload_size, 0x28, "a flat_binder_object is 0x28 bytes");
+    assert_eq!(payload_off, 0x10);
+    assert_eq!(objects_size, 4, "one object in the offset table");
+    assert_eq!(objects_off, payload_off + payload_size);
+    assert_eq!(size, objects_off + objects_size, "the reported size must cover it all");
+
+    let payload = WINDOW + payload_off;
+    assert_eq!(cpu.mem.read_u32(payload).unwrap(), 2, "flat_binder_object type");
+    let binder = cpu.mem.read_u64(payload + 8).unwrap();
+    assert_ne!(binder, 0, "no IGraphicBufferProducer id");
+    let mut name = [0u8; 8];
+    for (i, slot) in name.iter_mut().enumerate() {
+        *slot = cpu.mem.read_u8(payload + 0x18 + i as u32).unwrap();
+    }
+    assert_eq!(&name, b"dispdrv\0", "the interface has to name itself");
+}
