@@ -284,14 +284,6 @@ for (const id of ['nro-file', 'nro-file-2']) {
   });
 }
 
-$('btn-demo').addEventListener('click', async () => {
-  const name = $('asset-nro').value;
-  const res = await fetch('assets/' + name);
-  if (!res.ok) { log('Fetch failed: ' + name, 'err'); return; }
-  const data = await res.arrayBuffer();
-  await bootFile(new File([data], name));
-});
-
 // Drop an NRO anywhere on the stage to boot it.
 let dragDepth = 0;
 stageEl.addEventListener('dragenter', (e) => {

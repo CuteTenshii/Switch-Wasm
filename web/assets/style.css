@@ -188,7 +188,6 @@ body {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
   gap: 10px; margin: 20px 0 18px;
 }
-.overlay .or { color: var(--muted); font-size: 13px; }
 
 .muted { color: var(--muted); margin: 0; }
 .tiny { font-size: 12px; line-height: 1.55; }
