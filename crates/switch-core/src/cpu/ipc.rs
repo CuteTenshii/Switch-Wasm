@@ -52,6 +52,24 @@ const SPL_DEVICE_ID: u64 = 0x0000_5357_4153_4D00;
 /// framebuffer would be two answers to the same question.
 const CLOCK_RATES_HZ: [u32; 4] = [1_020_000_000, 384_000_000, 1_600_000_000, 0];
 
+/// The one display `vi` composes, as (width, height).
+///
+/// Handheld and 720p, to agree with the operation mode `am` reports, with its
+/// `GetDefaultDisplayResolution`, and with the buffer queue's own default. A
+/// caller that sizes its framebuffer from one of those and scans out through
+/// another draws at the wrong scale, so the number cannot differ by place.
+const DISPLAY_SIZE: (u32, u32) = (1280, 720);
+/// The refresh rate `ListDisplayModes` reports, in Hz.
+const DISPLAY_REFRESH_HZ: f32 = 60.0;
+/// That display's name. `OpenDisplay` takes it as a 0x40-byte string and
+/// `ListDisplays` hands it back; there is no second display to name.
+const DISPLAY_NAME: &str = "Default";
+/// The id `OpenDisplay` returns and every later display command carries back.
+const DISPLAY_ID: u64 = 1;
+/// The id of the one layer, shared by `OpenLayer`, `CreateStrayLayer` and
+/// `CreateManagedLayer` — they all end up on the single buffer queue.
+const LAYER_ID: u64 = 1;
+
 /// The system version `set:sys` reports, as major/minor/micro.
 ///
 /// libnx seeds `hosversionGet` from this and branches on it everywhere, so the
@@ -678,6 +696,24 @@ impl Cpu {
         // Align to 16 bytes.
         let pre = (16 - (off % 16)) % 16;
         off += pre;
+        // Clear the section this reply is about to declare, before filling it.
+        //
+        // A reply is written *over* the request, in the same TLS buffer, and
+        // whatever it does not write stays as the request's bytes. The padding
+        // the header counts is four words wide, which is room for a small out
+        // parameter — so a command answered with an empty success never handed
+        // the caller nothing. It handed the caller stale TLS, in a reply whose
+        // declared size passed every length check `nnSdk` and libnx make.
+        //
+        // That is how `ListDisplayModes` cost the Home Menu a billion
+        // instructions: it read its mode count out of the previous reply's
+        // leftovers and walked a buffer nothing had written. Zeroed, an
+        // unimplemented command's out parameters read as 0 — still wrong, but
+        // the same wrong every time and survivable, which is the difference
+        // between a bug that can be found and one that cannot.
+        for i in 0..raw_section_words * 4 {
+            self.mem.write_u8(tls.wrapping_add(off + i), 0)?;
+        }
         if is_domain {
             self.mem.write_u32(tls.wrapping_add(off), domain_objects.len() as u32)?;
             self.mem.write_u32(tls.wrapping_add(off + 4), 0)?;
@@ -731,6 +767,11 @@ impl Cpu {
                 self.mem.write_u32(tls.wrapping_add(off), h as u32)?;
                 off += 4;
             }
+        }
+        // Same reason as the CMIF path: clear before filling, so the tail of
+        // a partly-filled last word is a zero rather than a request byte.
+        for i in 0..raw_words * 4 {
+            self.mem.write_u8(tls.wrapping_add(off + i), 0)?;
         }
         self.mem.write_u32(tls.wrapping_add(off), result)?;
         off += 4;
@@ -1377,27 +1418,42 @@ impl Cpu {
             0xFFFFFFFF
         };
         let is_domain = object_id != 0xFFFFFFFF;
+        // The display commands answer the same way on either dialect and on
+        // whichever sub-interface they arrive at, so they are dispatched ahead
+        // of the object getters below rather than duplicated into four arms.
+        // None of their command ids collide with a getter's.
+        if let Some(done) = self.vi_common_command(tls, cmd_id) {
+            return done;
+        }
         if !is_domain {
             // Non-domain (NX_SERVICE_ASSUME_NON_DOMAIN) sessions marshal output
             // objects as move handles. Dispatch on the sub-interface (tracked per
             // handle); unknown handles default to the vi root.
-            let iface = self.vi_ifaces.get(&handle).map(|s| s.as_str()).unwrap_or("vi:root");
-            match iface {
+            // Owned rather than borrowed: the arms below take `&mut self`.
+            let iface = self
+                .vi_ifaces
+                .get(&handle)
+                .cloned()
+                .unwrap_or_else(|| "vi:root".to_owned());
+            match iface.as_str() {
                 // IHOSBinderDriverRelay: libnx binder protocol — AdjustRefcount
                 // (1), GetNativeHandle (2), TransactParcel (3).
                 "vi:ihosbd" => match cmd_id {
                     Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    // GetNativeHandle: the buffer queue's own event, and a
+                    // **copy** handle like every other event a service hands
+                    // out. Sent in the move slot it arrives as 0.
                     Some(2) => {
-                        let h = self.alloc_handle();
-                        self.write_ipc_response(tls, 0, &[h], &[], &[])
+                        let h = self.alloc_event("vi:binder", true);
+                        self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                     }
                     Some(3) => self.vi_transact_parcel(tls),
-                    _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    _ => self.vi_unhandled(tls, &iface, cmd_id),
                 },
                 // vi root: cmd 2 hands out the IApplicationDisplayService.
                 "vi:root" => match cmd_id {
                     Some(2) => self.vi_out_session(tls, "vi:iads"),
-                    _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    _ => self.vi_unhandled(tls, &iface, cmd_id),
                 },
                 // IApplicationDisplayService and the other display services.
                 _ => match cmd_id {
@@ -1405,18 +1461,20 @@ impl Cpu {
                     Some(101) => self.vi_out_session(tls, "vi:isds"),
                     Some(102) => self.vi_out_session(tls, "vi:imds"),
                     Some(103) => self.vi_out_session(tls, "vi:ihosbdind"),
-                    Some(1010) => self.write_ipc_response(tls, 0, &[], &1u64.to_le_bytes(), &[]),
+                    // GetDisplayVsyncEvent, on a session that never became a
+                    // domain. It used to hand back a bare handle in the *move*
+                    // slot and register nothing: a copy handle read from the
+                    // move slot is 0, and `signal_vsync` had no event to fire
+                    // even if the caller had got one. So a render loop paced
+                    // by vsync was waiting on handle 0 forever — and only kept
+                    // running at all because a wait on an unknown handle is
+                    // answered as satisfied.
                     Some(5202) => {
-                        let h = self.alloc_handle();
-                        self.write_ipc_response(tls, 0, &[h], &[], &[])
+                        let h = self.alloc_event("vi:vsync", true);
+                        self.vsync_event = Some(h);
+                        self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                     }
-                    // _viOpenLayer (2020) / _viCreateStrayLayer (2030 / 2012 / 2312):
-                    // fill the native-window receive buffer with a Binder parcel whose
-                    // payload[2] is the IGraphicBufferProducer binder id, and return the
-                    // parcel size. viCreateLayer parses exactly that.
-                    Some(2020) => self.vi_native_window(tls, 8),
-                    Some(2030) | Some(2012) | Some(2312) => self.vi_native_window(tls, 16),
-                    _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    _ => self.vi_unhandled(tls, &iface, cmd_id),
                 },
             }
         } else {
@@ -1427,7 +1485,7 @@ impl Cpu {
                         self.record_domain_object(handle, obj, "vi:iads");
                         self.write_ipc_response(tls, 0, &[], &[], &[obj])
                     }
-                    _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    _ => self.vi_unhandled(tls, "vi:root", cmd_id),
                 },
                 Some("vi:iads") => match cmd_id {
                     Some(100) => {
@@ -1445,10 +1503,10 @@ impl Cpu {
                         self.record_domain_object(handle, obj, "vi:imds");
                         self.write_ipc_response(tls, 0, &[], &[], &[obj])
                     }
-                    // OpenDisplay: return a display id of 1.
-                    Some(1010) => {
-                        let raw = 1u64.to_le_bytes();
-                        self.write_ipc_response(tls, 0, &[], &raw, &[])
+                    Some(103) => {
+                        let obj = self.alloc_domain_object();
+                        self.record_domain_object(handle, obj, "vi:ihosbdind");
+                        self.write_ipc_response(tls, 0, &[], &[], &[obj])
                     }
                     // GetDisplayVsyncEvent: a real copy handle, signalled
                     // once per presented frame by `Cpu::signal_vsync`.
@@ -1457,14 +1515,154 @@ impl Cpu {
                         self.vsync_event = Some(h);
                         self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                     }
-                    _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    _ => self.vi_unhandled(tls, "vi:iads", cmd_id),
                 },
-                Some("vi:ihosbd") | Some("vi:isds") | Some("vi:imds") => {
-                    self.write_ipc_response(tls, 0, &[], &[], &[])
-                }
-                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // The binder relay does the same work on a domain session as
+                // on a plain one. Answering `TransactParcel` with an empty
+                // success instead meant a caller that converted its vi session
+                // to a domain — which is what libnx does by default — queued
+                // every frame into nothing and presented none of them.
+                Some("vi:ihosbd") => match cmd_id {
+                    Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    Some(2) => {
+                        let h = self.alloc_event("vi:binder", true);
+                        self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+                    }
+                    Some(3) => self.vi_transact_parcel(tls),
+                    _ => self.vi_unhandled(tls, "vi:ihosbd", cmd_id),
+                },
+                Some("vi:isds") => self.vi_unhandled(tls, "vi:isds", cmd_id),
+                Some("vi:imds") => self.vi_unhandled(tls, "vi:imds", cmd_id),
+                _ => self.vi_unhandled(tls, "vi:m", cmd_id),
             }
         }
+    }
+
+    /// The `vi` commands that answer with data rather than with an object.
+    ///
+    /// They are the same on `IApplicationDisplayService`,
+    /// `ISystemDisplayService` and `IManagerDisplayService` — the command ids
+    /// do not overlap — and identical on a domain session and a plain one, so
+    /// dispatching them once ahead of the sub-interface match beats writing
+    /// each of them four times.
+    ///
+    /// The shape of the bug this closes is worth stating: a command with an
+    /// `out` parameter answered by an *empty success* is worse than a refusal.
+    /// `ListDisplayModes` did exactly that, so the Home Menu read its mode
+    /// count out of whatever the previous reply had left in the TLS data area
+    /// and then walked a buffer nothing had written — a billion instructions
+    /// of spinning without a single syscall, and no way to tell from the
+    /// outside that a display query was where it went wrong.
+    ///
+    /// Returns `None` for anything not answered here, so the caller falls
+    /// through to its own dispatch.
+    fn vi_common_command(&mut self, tls: u32, cmd_id: Option<u32>) -> Option<Result<()>> {
+        let (width, height) = DISPLAY_SIZE;
+        let raw: Vec<u8> = match cmd_id? {
+            // ListDisplays: the one display, and a count of one.
+            1000 => {
+                let mut info = [0u8; 0x60];
+                let name = DISPLAY_NAME.as_bytes();
+                info[..name.len()].copy_from_slice(name);
+                info[0x40] = 1; // layer_limit_enabled
+                info[0x48..0x50].copy_from_slice(&1u64.to_le_bytes()); // layer_limit_max
+                info[0x50..0x58].copy_from_slice(&u64::from(width).to_le_bytes());
+                info[0x58..0x60].copy_from_slice(&u64::from(height).to_le_bytes());
+                self.vi_fill_out_buffer(tls, &info);
+                1u64.to_le_bytes().to_vec()
+            }
+            // OpenDisplay / OpenDefaultDisplay.
+            1010 | 1011 => DISPLAY_ID.to_le_bytes().to_vec(),
+            // GetDisplayResolution, on the application and manager interfaces
+            // alike.
+            1102 => {
+                let mut raw = Vec::with_capacity(0x10);
+                raw.extend_from_slice(&u64::from(width).to_le_bytes());
+                raw.extend_from_slice(&u64::from(height).to_le_bytes());
+                raw
+            }
+            // GetZOrderCountMin / GetZOrderCountMax: one layer stack, so 0 is
+            // both the lowest and the highest z a layer can take.
+            1200 | 1202 => 0i64.to_le_bytes().to_vec(),
+            // GetDisplayLogicalResolution: the same size, as two s32.
+            1203 => {
+                let mut raw = Vec::with_capacity(8);
+                raw.extend_from_slice(&(width as i32).to_le_bytes());
+                raw.extend_from_slice(&(height as i32).to_le_bytes());
+                raw
+            }
+            // CreateManagedLayer: the managed form of the same single layer.
+            2010 => LAYER_ID.to_le_bytes().to_vec(),
+            // _viOpenLayer (2020) / _viCreateStrayLayer (2030 / 2012 / 2312):
+            // fill the native-window receive buffer with a Binder parcel whose
+            // payload[2] is the IGraphicBufferProducer binder id, and return
+            // the parcel size. viCreateLayer parses exactly that.
+            2020 => return Some(self.vi_native_window(tls, 8)),
+            2030 | 2012 | 2312 => return Some(self.vi_native_window(tls, 16)),
+            // ConvertScalingMode: every nn mode this composes ends up as
+            // ScalingMode_PreserveAspectRatio.
+            2102 => 2u64.to_le_bytes().to_vec(),
+            // GetLayerZ.
+            2204 => 0u64.to_le_bytes().to_vec(),
+            // ListDisplayModes: one mode, the display's own.
+            3000 => {
+                let mut mode = [0u8; 0x10];
+                mode[0..4].copy_from_slice(&width.to_le_bytes());
+                mode[4..8].copy_from_slice(&height.to_le_bytes());
+                mode[8..12].copy_from_slice(&DISPLAY_REFRESH_HZ.to_le_bytes());
+                self.vi_fill_out_buffer(tls, &mode);
+                1u64.to_le_bytes().to_vec()
+            }
+            // ListDisplayRgbRanges / ListDisplayContentTypes: one entry each,
+            // and 0 is the automatic setting in both enums.
+            3001 | 3002 => {
+                self.vi_fill_out_buffer(tls, &0u32.to_le_bytes());
+                1u64.to_le_bytes().to_vec()
+            }
+            // GetDisplayMode: that one mode, by value.
+            3200 => {
+                let mut raw = Vec::with_capacity(0x10);
+                raw.extend_from_slice(&width.to_le_bytes());
+                raw.extend_from_slice(&height.to_le_bytes());
+                raw.extend_from_slice(&DISPLAY_REFRESH_HZ.to_le_bytes());
+                raw.extend_from_slice(&0u32.to_le_bytes());
+                raw
+            }
+            // GetDisplayUnderscan: none, on a panel that is not a television.
+            3202 => 0i64.to_le_bytes().to_vec(),
+            // GetDisplayContentType / GetDisplayRgbRange / GetDisplayCmuMode:
+            // all automatic, which is 0 in each of the three enums.
+            3204 | 3206 | 3208 => 0u32.to_le_bytes().to_vec(),
+            // GetDisplayContrastRatio: unadjusted.
+            3210 => 1.0f32.to_le_bytes().to_vec(),
+            _ => return None,
+        };
+        Some(self.write_ipc_response(tls, 0, &[], &raw, &[]))
+    }
+
+    /// Write one element into the request's out buffer, if the caller left
+    /// room for it. Nothing `vi` lists here has a second entry, so one element
+    /// is the whole list.
+    fn vi_fill_out_buffer(&mut self, tls: u32, entry: &[u8]) {
+        let Some((addr, size)) = self.ipc_recv_buffer(tls, 0) else {
+            return;
+        };
+        for (i, &b) in entry.iter().take(size as usize).enumerate() {
+            let _ = self.mem.write_u8(addr.wrapping_add(i as u32), b);
+        }
+    }
+
+    /// Answer a `vi` command nothing implements.
+    ///
+    /// It cannot refuse: most of what lands here is a void setter, and an
+    /// empty success is the right answer for those. But it says so under
+    /// `TRACE_IPC`, because when the command did have an out parameter this
+    /// line is the only place the silence becomes visible.
+    fn vi_unhandled(&mut self, tls: u32, iface: &str, cmd_id: Option<u32>) -> Result<()> {
+        if std::env::var("TRACE_IPC").is_ok() {
+            eprintln!("[ipc] no implementation: {iface} cmd={cmd_id:?}");
+        }
+        self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
     /// Non-domain vi session hand-out: allocate a fresh handle, record it as a
@@ -1559,7 +1757,7 @@ impl Cpu {
         let mut raw = Vec::with_capacity(out_size);
         if out_size >= 16 {
             // 2030: { layer_id, native_window_size }
-            raw.extend_from_slice(&1u64.to_le_bytes());
+            raw.extend_from_slice(&LAYER_ID.to_le_bytes());
             raw.extend_from_slice(&(parcel_size as u64).to_le_bytes());
         } else {
             // 2020: native_window_size
@@ -1684,7 +1882,25 @@ impl Cpu {
                 let fd = self.mem.read_u32(data)?;
                 let event_id = self.mem.read_u32(data.wrapping_add(4))?;
                 let error = self.nv.query_event(fd, event_id);
-                let handle = self.alloc_event("nvdrv:query-event", true);
+                // Named by the node it came from, because what the event means
+                // is a property of the node and not of nvdrv: a
+                // `/dev/nvhost-ctrl` event fires when a syncpoint retires,
+                // while a `/dev/nvhost-ctrl-gpu` one fires when the GPU
+                // faults. One of those a stalled guest wants signalled and the
+                // other it very much does not, and a single `query-event` name
+                // for both hid which was which in every trace.
+                let node = match self.nv.file(fd) {
+                    Some(crate::gpu::nvdrv::NvFile::NvHostCtrl) => "nvdrv:nvhost-ctrl",
+                    Some(crate::gpu::nvdrv::NvFile::NvHostCtrlGpu) => "nvdrv:nvhost-ctrl-gpu",
+                    Some(crate::gpu::nvdrv::NvFile::Channel { .. }) => "nvdrv:nvhost-gpu",
+                    Some(crate::gpu::nvdrv::NvFile::AddressSpace { .. }) => "nvdrv:nvhost-as-gpu",
+                    Some(crate::gpu::nvdrv::NvFile::NvMap) => "nvdrv:nvmap",
+                    _ => "nvdrv:unknown-node",
+                };
+                if self.trace_nv {
+                    eprintln!("[nv] QueryEvent fd={fd} event={event_id} -> {node}");
+                }
+                let handle = self.alloc_event(node, true);
                 self.write_ipc_reply(tls, 0, &[handle], &[], &error.to_le_bytes(), &[])
             }
             // SetClientPID / everything else: acknowledge with no out data.
@@ -2082,9 +2298,22 @@ impl Cpu {
     /// id, which is what a caller reading a plain out value has always read
     /// here, `ConvertToDomain` most of all.
     ///
-    /// Both are allocated once per `(session, command)` and reused: a guest
-    /// polling a command nothing implements would otherwise be handed a fresh
-    /// handle on every single call.
+    /// The reply also carries an **event**, in the copy-handle slot, for the
+    /// same reason it carries a sub-session in the move slot: an out-object
+    /// and an out-event are the two things a command can hand back that a
+    /// caller cannot invent for itself, and nothing here knows which of them
+    /// an unimplemented command was supposed to return. Filling both costs one
+    /// handle and removes the case where a caller waits forever on handle 0 —
+    /// which is not a hypothetical: it is where the Home Menu's message thread
+    /// stopped, three created-but-never-started threads behind it, and there
+    /// was nothing in any trace to say which command had failed to hand it an
+    /// event. The event is never signalled, so a caller that waits on it is
+    /// waiting for something that genuinely never happens, rather than acting
+    /// on one that never will.
+    ///
+    /// All three are allocated once per `(session, command)` and reused: a
+    /// guest polling a command nothing implements would otherwise be handed a
+    /// fresh handle on every single call.
     pub(super) fn reply_with_fabricated_object(
         &mut self,
         tls: u32,
@@ -2093,22 +2322,23 @@ impl Cpu {
         cmd_id: Option<u32>,
     ) -> Result<()> {
         let key = (handle, cmd_id.unwrap_or(u32::MAX));
-        let (object_id, sub) = match self.fabricated_objects.get(&key) {
-            Some(&pair) => pair,
+        let (object_id, sub, event) = match self.fabricated_objects.get(&key) {
+            Some(&triple) => triple,
             None => {
                 let object_id = self.next_object_id;
                 self.next_object_id = object_id.wrapping_add(1);
                 let sub = self.alloc_handle();
-                self.fabricated_objects.insert(key, (object_id, sub));
-                (object_id, sub)
+                let event = self.alloc_event("ipc:fabricated", true);
+                self.fabricated_objects.insert(key, (object_id, sub, event));
+                (object_id, sub, event)
             }
         };
         if self.ipc_is_domain_request(tls) {
             self.record_domain_object(handle, object_id, name);
-            self.write_ipc_response(tls, 0, &[], &object_id.to_le_bytes(), &[object_id])
+            self.write_ipc_reply(tls, 0, &[event], &[], &object_id.to_le_bytes(), &[object_id])
         } else {
             self.record_handle(sub, name);
-            self.write_ipc_response(tls, 0, &[sub], &object_id.to_le_bytes(), &[])
+            self.write_ipc_reply(tls, 0, &[event], &[sub], &object_id.to_le_bytes(), &[])
         }
     }
 
@@ -2303,16 +2533,29 @@ impl Cpu {
                 // GetEventHandle: the copy handle the guest waits on before
                 // polling ReceiveMessage.
                 //
-                // It stays **unsignalled**. Firing it looks right — AM really
-                // does have one message queued at startup, which
-                // ReceiveMessage below hands out — but nothing here enqueues
-                // messages asynchronously, and `nnSdk`'s system worker waits
-                // on this event holding no callback for it: reporting it
-                // signalled made the worker dispatch a handler that does not
-                // exist, and jump to 0. A waiter times out and polls
-                // ReceiveMessage, which is where the message actually is.
+                // It starts **signalled** exactly when a message is waiting,
+                // which at startup means once: AM queues one FocusStateChanged
+                // and ReceiveMessage below hands it out. The event is
+                // auto-clearing, so the first successful wait consumes it and
+                // every later poll times out — which is the whole protocol.
+                //
+                // An applet does not draw until it has been told it is in
+                // focus, and it asks by *polling this event with a zero
+                // timeout* rather than by calling ReceiveMessage. Leaving the
+                // event dark meant the message was there and nothing ever came
+                // to collect it: the Mii editor sat in `appletMainLoop`
+                // polling an event that would never fire, one dequeued buffer
+                // in hand and not a single draw behind it.
+                //
+                // (It used to be left dark on purpose, because firing it sent
+                // `nnSdk`'s system worker into a handler that did not exist.
+                // That was `WaitSynchronization` reporting index 1 for a
+                // one-handle wait, and it is fixed where it belongs.)
                 Some(0) => {
                     let h = self.alloc_event("am:applet-message", true);
+                    if !self.applet_focus_sent {
+                        self.signal_event(h);
+                    }
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 // ReceiveMessage: real AM enqueues one FocusStateChanged at
@@ -3352,6 +3595,55 @@ impl Cpu {
                 // something still allowed" — the opposite sense, so both true.
                 Some(1018) | Some(1065) => {
                     self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[])
+                }
+                // IsPairingActive / IsPlayTimerAlarmDisabled: no guardian is
+                // paired and there is no timer to sound an alarm. The second
+                // reads the other way round again — "disabled" is the
+                // unrestricted answer, so it is true where the first is false.
+                Some(1403) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
+                Some(1458) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
+                // GetRestrictedFeatures / GetSafetyLevel /
+                // GetFreeCommunicationApplicationListCount / GetPinCodeLength
+                // / GetAccountState / GetPostEventInterval: nothing set, no
+                // list, no PIN, no linked account — zero in every one of them.
+                Some(1012) | Some(1032) | Some(1039) | Some(1206) | Some(1424) | Some(1426) => {
+                    self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
+                }
+                // The event getters: GetPinCodeChangedEvent (1207),
+                // GetSynchronizationEvent (1432),
+                // GetPlayTimerEventToRequestSuspension (1457) and
+                // GetUnlinkedEvent (1473).
+                //
+                // Each is a **copy** handle, and each stays unsignalled for
+                // the life of the process — the PIN never changes, there is no
+                // guardian account to synchronise with, no timer to ask for a
+                // suspension and no link to break. A caller waits on all four
+                // forever, which is the correct thing for it to do. Refusing
+                // instead is what took the Home Menu down: `nnSdk` aborts on
+                // an unknown command id rather than carry on without the
+                // handle.
+                Some(1207) | Some(1432) | Some(1457) | Some(1473) => {
+                    let name = match cmd_id {
+                        Some(1207) => "pctl:pin-changed",
+                        Some(1432) => "pctl:synchronization",
+                        Some(1457) => "pctl:play-timer-suspend",
+                        _ => "pctl:unlinked",
+                    };
+                    let h = self.alloc_event(name, true);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+                }
+                // GetPlayTimerSettings: an unset settings block. Zeroed and
+                // sized past `nn::pctl::PlayTimerSettings` so that a wider
+                // struct still reads as unset rather than as reply padding —
+                // a reply may be longer than the caller needs, never shorter.
+                Some(1456) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x40], &[]),
+                // StartPlayTimer / StopPlayTimer / RequestPostEvents /
+                // ClearUnlinkedEvent / DisableFeaturesForReset /
+                // NotifyApplicationDownloadStarted /
+                // NotifyNetworkProfileCreated: void, and there is no state
+                // here for any of them to change.
+                Some(1046..=1048) | Some(1425) | Some(1451) | Some(1452) | Some(1474) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },

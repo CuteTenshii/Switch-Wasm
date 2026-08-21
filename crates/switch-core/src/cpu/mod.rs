@@ -408,12 +408,13 @@ pub struct Cpu {
     /// implementation behind it, so the warning naming it prints once instead
     /// of once per call (`appletMainLoop` polls `am` every frame).
     unimplemented_ipc: HashSet<(String, Option<u32>)>,
-    /// The out-object handed back for a command nothing implements, keyed by
-    /// `(session handle, command id)`: the domain object id and the plain
-    /// sub-session handle [`Cpu::reply_with_fabricated_object`] answers with.
-    /// Allocated once and reused, so a guest polling such a command is not
-    /// handed a fresh handle on every call.
-    fabricated_objects: HashMap<(u64, u32), (u32, u64)>,
+    /// What [`Cpu::reply_with_fabricated_object`] hands back for a command
+    /// nothing implements, keyed by `(session handle, command id)`: the domain
+    /// object id, the plain sub-session handle, and the event — one for each
+    /// shape of out parameter a caller cannot invent for itself. Allocated
+    /// once and reused, so a guest polling such a command is not handed a
+    /// fresh handle on every call.
+    fabricated_objects: HashMap<(u64, u32), (u32, u64, u64)>,
     /// Handles that name a kernel **event**, and whether each has been
     /// signalled yet. A handle that is not in here is not modelled as an
     /// event, and [`Cpu::horizon_syscall`]'s `WaitSynchronization` keeps

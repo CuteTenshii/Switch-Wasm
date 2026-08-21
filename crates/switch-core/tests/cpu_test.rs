@@ -1899,10 +1899,13 @@ fn events_are_copy_handles_and_start_unsignalled() {
     assert_eq!(result, RESULT_TIMED_OUT);
 
     // A second event, left unsignalled, so the index below is a real position
-    // rather than "the first handle".
+    // rather than "the first handle". GetAcquiredSleepLockEvent, not
+    // GetEventHandle -- nothing here ever sleeps, while the applet-message
+    // event *starts* signalled because AM really does have one message queued
+    // at startup.
     ipc_request(&mut cpu, APPLET, 4, Some(proxy), 0); // ICommonStateGetter
     let state_getter = cpu.mem.read_u32(tls + 0x30).unwrap();
-    ipc_request(&mut cpu, APPLET, 4, Some(state_getter), 0); // GetEventHandle
+    ipc_request(&mut cpu, APPLET, 4, Some(state_getter), 13);
     let quiet = cpu.mem.read_u32(tls + 0x0c).unwrap();
     assert_ne!(quiet, event);
 
@@ -4419,7 +4422,7 @@ fn an_undriven_gpio_pad_reads_high() {
 }
 
 #[test]
-fn a_fabricated_out_object_comes_back_as_a_move_handle() {
+fn a_fabricated_reply_fills_both_handle_slots() {
     // The reply for a command nothing implements used to carry only a raw
     // object id in its data. On a plain session that is not where an
     // out-object lives -- nnSdk reads one as a move handle, and a reply
@@ -4428,6 +4431,12 @@ fn a_fabricated_out_object_comes_back_as_a_move_handle() {
     // The caller then makes its first virtual call through a null pointer,
     // which is how boot2 reached pc=0 one instruction after `gpio`'s
     // OpenSession2 was answered "successfully".
+    //
+    // An out-*event* is the same trap in the other handle slot, and nothing
+    // here knows which of the two an unimplemented command was meant to
+    // return -- so the reply carries one of each. That is what the Home Menu's
+    // message thread was missing when it settled into waiting on handle 0,
+    // three created-but-never-started threads behind it.
     const NCM: u64 = 0x9200;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -4437,20 +4446,32 @@ fn a_fabricated_out_object_comes_back_as_a_move_handle() {
 
     // IContentManager::OpenContentStorage(StorageId) -> IContentStorage.
     ipc_request_plain(&mut cpu, NCM, 4, &[1, 0, 0, 0]);
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
-    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 5, "no move handle");
-    let storage = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    // { send_pid:1, num_copy:4, num_move:4 }: one of each. Copy handles come
+    // first in the reply, so the event is at +0x0c and the object at +0x10,
+    // and the raw section starts at the next 16-byte boundary after them.
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), (1 << 1) | (1 << 5));
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "OpenContentStorage failed");
+    let event = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    let storage = u64::from(cpu.mem.read_u32(tls + 0x10).unwrap());
     assert_ne!(storage, 0, "a success with no object is worse than a failure");
+    assert_ne!(event, 0, "a success with no event is the same bug in the other slot");
+    assert_ne!(event, storage);
 
     // The sub-session reaches the same service, so a command on it is
     // dispatched rather than falling through as an untracked handle.
     let handles = cpu.service_handles_snapshot();
     assert!(handles.iter().any(|(h, name)| *h == storage && name == "ncm"));
 
-    // Asked again, the same object comes back: a guest polling a command
-    // nothing implements must not be handed a fresh handle every call.
+    // The event is real and quiet: a caller that waits on it is waiting for
+    // something that never happens, which is the truth, rather than acting on
+    // something that never will.
+    assert_eq!(wait_sync(&mut cpu, &[event as u32], 0).0, 0xEA01);
+
+    // Asked again, the same pair comes back: a guest polling a command nothing
+    // implements must not be handed fresh handles every call.
     ipc_request_plain(&mut cpu, NCM, 4, &[1, 0, 0, 0]);
-    assert_eq!(u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap()), storage);
+    assert_eq!(u64::from(cpu.mem.read_u32(tls + 0x10).unwrap()), storage);
+    assert_eq!(u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap()), event);
 }
 
 #[test]
@@ -4506,4 +4527,211 @@ fn the_home_menu_opens_a_system_applet_proxy() {
     const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
     ipc_request_plain(&mut cpu, global, 3, &[]); // StartShutdownSequence
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), UNKNOWN_COMMAND_ID);
+}
+
+#[test]
+fn the_display_answers_what_it_is() {
+    // `ListDisplays` and `ListDisplayModes` used to fall through to `vi`'s
+    // catch-all, which answers with an empty success. That is not "no
+    // displays" -- a reply's declared raw section is four words of padding
+    // wide, so the caller read its count out of whatever the *request* had
+    // left in those bytes and then walked an out-buffer nothing had written.
+    // The Home Menu spent a billion instructions in that walk without making
+    // a single syscall, and there was nothing in any trace to say where it had
+    // gone.
+    const VI: u64 = 0xB100;
+    const BUF: u32 = 0x8000;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(VI, "vi:m");
+    let tls = cpu.tls_base();
+
+    ipc_request_plain(&mut cpu, VI, 2, &[]); // GetDisplayService
+    let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(display, 0, "no IApplicationDisplayService");
+
+    // ListDisplays -> one DisplayInfo { char name[0x40]; bool limited; pad[7];
+    // u64 layer_limit; u64 width; u64 height }, and a count of one.
+    ipc_request_plain_with_buffer(&mut cpu, display, 1000, BUF, 0xc0, true, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "ListDisplays failed");
+    assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), 1, "no displays");
+    let name: Vec<u8> = (0..7).map(|i| cpu.mem.read_u8(BUF + i).unwrap()).collect();
+    assert_eq!(&name, b"Default");
+    assert_eq!(cpu.mem.read_u8(BUF + 0x40).unwrap(), 1, "layer limit not enabled");
+    assert_eq!(cpu.mem.read_u64(BUF + 0x50).unwrap(), 1280);
+    assert_eq!(cpu.mem.read_u64(BUF + 0x58).unwrap(), 720);
+
+    // OpenDisplay takes that name and hands back the id every later display
+    // command carries.
+    let mut open = [0u8; 0x40];
+    open[..7].copy_from_slice(b"Default");
+    ipc_request_plain(&mut cpu, display, 1010, &open);
+    let display_id = cpu.mem.read_u64(tls + 0x20).unwrap();
+    assert_ne!(display_id, 0, "a display id of 0 is the no-display sentinel");
+
+    // GetDisplayResolution, on the same interface, has to agree with it.
+    ipc_request_plain(&mut cpu, display, 1102, &display_id.to_le_bytes());
+    assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), 1280);
+    assert_eq!(cpu.mem.read_u64(tls + 0x28).unwrap(), 720);
+
+    // ListDisplayModes lives on ISystemDisplayService: one
+    // DisplayModeInfo { u32 width; u32 height; f32 refresh; u32 }.
+    ipc_request_plain(&mut cpu, display, 101, &[]);
+    let system = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(system, 0, "no ISystemDisplayService");
+
+    for i in 0..0x40u32 {
+        cpu.mem.write_u32(BUF + i * 4, 0xDEAD_BEEF).unwrap();
+    }
+    ipc_request_plain_with_buffer(&mut cpu, system, 3000, BUF, 0x100, true, &display_id.to_le_bytes());
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "ListDisplayModes failed");
+    assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), 1, "no modes to pick from");
+    assert_eq!(cpu.mem.read_u32(BUF).unwrap(), 1280);
+    assert_eq!(cpu.mem.read_u32(BUF + 4).unwrap(), 720);
+    assert_eq!(f32::from_bits(cpu.mem.read_u32(BUF + 8).unwrap()), 60.0);
+}
+
+#[test]
+fn an_unfilled_out_parameter_reads_as_zero_not_as_the_request() {
+    // A reply is written *over* the request, in the same TLS buffer, and the
+    // padding its header declares is four words wide -- room for a small out
+    // parameter. So a command answered with a bare success never handed the
+    // caller nothing: it handed the caller stale request bytes, in a reply
+    // whose declared size passes every length check nnSdk and libnx make.
+    const VI: u64 = 0xB200;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(VI, "vi:m");
+    let tls = cpu.tls_base();
+
+    ipc_request_plain(&mut cpu, VI, 2, &[]);
+    let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+
+    // CloseDisplay: void, and nothing implements it. Poison the bytes an out
+    // parameter would be read from before sending.
+    build_ipc_request(&mut cpu, 4, None, 1020);
+    for i in 0..4u32 {
+        cpu.mem.write_u32(tls + 0x20 + i * 4, 0xDEAD_BEEF).unwrap();
+    }
+    run_ipc_request(&mut cpu, display);
+
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "CloseDisplay refused");
+    for i in 0..4u32 {
+        assert_eq!(
+            cpu.mem.read_u32(tls + 0x20 + i * 4).unwrap(),
+            0,
+            "word {i} of the reply is a leftover of the request"
+        );
+    }
+}
+
+#[test]
+fn the_vsync_event_is_a_copy_handle_on_a_plain_session() {
+    // GetDisplayVsyncEvent on a session that never became a domain used to
+    // hand back a bare handle in the *move* slot and register nothing. A copy
+    // handle read out of the move slot is 0, and there was no event behind it
+    // for a present to fire -- so a render loop paced by vsync waited on
+    // handle 0 forever, and only kept running because a wait on an unknown
+    // handle is answered as satisfied.
+    const VI: u64 = 0xB300;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(VI, "vi:m");
+    let tls = cpu.tls_base();
+
+    ipc_request_plain(&mut cpu, VI, 2, &[]);
+    let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+
+    ipc_request_plain(&mut cpu, display, 5202, &[]);
+    // { send_pid:1, num_copy:4, num_move:4 }: one copy handle, no move ones.
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
+    let vsync = cpu.mem.read_u32(tls + 0x0c).unwrap();
+    assert_ne!(vsync, 0, "the guest must receive a real handle");
+
+    // It is a real event, and quiet until the display advances.
+    const RESULT_TIMED_OUT: u64 = 0xEA01;
+    assert_eq!(wait_sync(&mut cpu, &[vsync], 0).0, RESULT_TIMED_OUT);
+    cpu.signal_event(u64::from(vsync));
+    assert_eq!(wait_sync(&mut cpu, &[vsync], 0).0, 0, "a signalled vsync did not fire");
+}
+
+#[test]
+fn the_applet_message_event_starts_signalled_and_clears() {
+    // An applet does not draw until it has been told it is in focus, and it
+    // asks by polling this event with a zero timeout rather than by calling
+    // ReceiveMessage. Left dark, the one message AM queues at startup sat
+    // there with nothing ever coming to collect it: the Mii editor idled in
+    // `appletMainLoop` with a dequeued buffer in hand and not one draw behind
+    // it. The event is auto-clearing, so the first poll takes the message and
+    // every later one times out.
+    const APPLET: u64 = 0x9400;
+    const RESULT_TIMED_OUT: u64 = 0xEA01;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(APPLET, "appletOE");
+    let tls = cpu.tls_base();
+
+    ipc_request(&mut cpu, APPLET, 5, None, 0);
+    let proxy_service = cpu.mem.read_u32(tls + 0x20).unwrap();
+    ipc_request(&mut cpu, APPLET, 4, Some(proxy_service), 0);
+    let proxy = cpu.mem.read_u32(tls + 0x30).unwrap();
+    ipc_request(&mut cpu, APPLET, 4, Some(proxy), 0); // ICommonStateGetter
+    let state_getter = cpu.mem.read_u32(tls + 0x30).unwrap();
+
+    ipc_request(&mut cpu, APPLET, 4, Some(state_getter), 0); // GetEventHandle
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1, "events are copy handles");
+    let message = cpu.mem.read_u32(tls + 0x0c).unwrap();
+    assert_eq!(wait_sync(&mut cpu, &[message], 0).0, 0, "the queued message never announced itself");
+    assert_eq!(wait_sync(&mut cpu, &[message], 0).0, RESULT_TIMED_OUT, "it announced itself twice");
+
+    // And the message behind it is the focus change.
+    const FOCUS_STATE_CHANGED: u32 = 15;
+    // A domain reply with no handles carries its CmifDomainOutHeader first,
+    // so the result and the data sit 0x10 further in than on a plain session.
+    ipc_request(&mut cpu, APPLET, 4, Some(state_getter), 1); // ReceiveMessage
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "no message was queued");
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), FOCUS_STATE_CHANGED);
+}
+
+#[test]
+fn parental_control_hands_out_the_events_it_is_asked_for() {
+    // The Home Menu opens `pctl`, asks IParentalControlService for its
+    // synchronisation event, and R_ABORT_UNLESSes on the answer. Refusing the
+    // command -- 2010-0221, `cmif`'s "unknown command id" -- killed it there
+    // with an svcBreak, one applet call into its own boot. There is no
+    // guardian account to synchronise with, so the event is real and never
+    // fires, which is the true state rather than a placeholder for one.
+    const PCTL: u64 = 0x9500;
+    const RESULT_TIMED_OUT: u64 = 0xEA01;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(PCTL, "pctl");
+    let tls = cpu.tls_base();
+
+    ipc_request_plain(&mut cpu, PCTL, 0, &[]); // CreateService
+    let service = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(service, 0, "no IParentalControlService");
+
+    for cmd in [1207u32, 1432, 1457, 1473] {
+        ipc_request_plain(&mut cpu, service, cmd, &[]);
+        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "pctl {cmd} refused");
+        assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1, "pctl {cmd} is not a copy handle");
+        let event = cpu.mem.read_u32(tls + 0x0c).unwrap();
+        assert_ne!(event, 0, "pctl {cmd} handed back no event");
+        assert_eq!(wait_sync(&mut cpu, &[event], 0).0, RESULT_TIMED_OUT, "pctl {cmd} fired");
+    }
+
+    // Nothing restricts anything here, and the two families of query read in
+    // opposite directions: "is something restricting you" is false, "is
+    // something still allowed" is true.
+    ipc_request_plain(&mut cpu, service, 1031, &[]); // IsRestrictionEnabled
+    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 0);
+    ipc_request_plain(&mut cpu, service, 1458, &[]); // IsPlayTimerAlarmDisabled
+    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 1);
 }

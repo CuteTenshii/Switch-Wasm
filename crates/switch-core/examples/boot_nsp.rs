@@ -195,6 +195,10 @@ fn main() {
     loop {
         if done >= max_steps {
             println!("STOPPED at step budget {done} pc={:#x}", cpu.get_pc());
+            // A run that stops on the budget rather than on a fault has almost
+            // always stopped making progress, and where each *thread* is says
+            // more about why than where the one running thread is.
+            print!("{}", cpu.thread_dump());
             break;
         }
         let pc = cpu.get_pc();

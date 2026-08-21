@@ -303,15 +303,45 @@ everything**. Test control-ness with `Cpu::ipc_is_control_request`, never `type
 killed the applet chain before it opened.
 
 The generic reply for a service with no dedicated stub
-(`Cpu::reply_with_fabricated_object`) answers with a fresh object id **and a
-real sub-session**, allocated once per `(session, command)` and reused. The
-handle is not optional: `nnSdk` reads an out-object off a plain session as a
-move handle, and a reply carrying none is not an error to it — the handle
-parses as 0, the client silently skips constructing the proxy, and the command
-still returns **success**. The caller's first virtual call then goes through a
-null pointer, which is how boot2 reached `pc=0` one instruction after `gpio`'s
+(`Cpu::reply_with_fabricated_object`) answers with a fresh object id, **a real
+sub-session in the move slot and a real event in the copy slot**, all allocated
+once per `(session, command)` and reused. The handles are not optional:
+`nnSdk` reads an out-object off a plain session as a move handle, and a reply
+carrying none is not an error to it — the handle parses as 0, the client
+silently skips constructing the proxy, and the command still returns
+**success**. The caller's first virtual call then goes through a null pointer,
+which is how boot2 reached `pc=0` one instruction after `gpio`'s
 `OpenSession2` was answered "successfully", with nothing in the log between the
-lie and the crash.
+lie and the crash. An out-**event** is the same trap in the other slot and
+nothing here can tell which of the two a given command wanted, so the reply
+carries one of each; that is what the Home Menu's message thread was missing
+when it settled into waiting on handle 0 with three created-but-never-started
+threads behind it.
+
+**A success with an unfilled out parameter is the whole bug class**, and it is
+not visible from the reply. A reply is written *over* the request, in the same
+TLS buffer, and its header declares four words of padding past the SFCO header
+— room for a small out value — so a bare success passes every length check
+`nnSdk` and `libnx` make and hands the caller stale *request* bytes.
+`Cpu::write_ipc_reply` therefore clears the whole section it is about to
+declare before filling it, so an unimplemented command's out parameters read as
+0: still wrong, but the same wrong every time. Before that, `vi`'s
+`ListDisplayModes` cost the Home Menu a billion instructions walking a buffer
+nothing had written, off a count it had read out of the previous reply's
+leftovers, without making one syscall the whole time. When a command *does*
+have an out parameter, implement it — and when the struct's exact width is not
+pinned down, reply with a zeroed block wider than it needs: a reply may be
+longer than the caller expects, never shorter.
+
+`vi`'s display queries (`ListDisplays`, `ListDisplayModes`,
+`GetDisplayResolution`, …) are dispatched in one place,
+`Cpu::vi_common_command`, ahead of the sub-interface match — the command ids
+do not collide across `IApplicationDisplayService`, `ISystemDisplayService` and
+`IManagerDisplayService`, and the answers are identical on a domain session and
+a plain one. Everything the display reports is one size, `DISPLAY_SIZE`: it has
+to agree with `am`'s `GetDefaultDisplayResolution` and with the buffer queue's
+own default, or a caller sizes its framebuffer from one and scans out through
+another.
 
 That reply used to guess the *applet* state commands (`ReceiveMessage` → 15,
 `GetOperationMode` → 1, …) for any service whose name started with "applet";
