@@ -90,6 +90,19 @@ fn main() {
         println!("[watch-mem] never non-zero");
     }
     println!("steps={done} frames={} stats={:?}", cpu.nv.gpu.frames, cpu.nv.gpu.stats);
+    // `DUMP_MEM=<addr>[,<addr>]` reads three 60-byte rows there as floats,
+    // which is the quickest way to tell a vertex buffer from whatever else
+    // happened to be nearby: real positions are ordinary numbers, and a
+    // structure reinterpreted as float is a wall of denormals.
+    if let Ok(v) = env::var("DUMP_MEM") {
+        for spec in v.split(',') {
+            let at = u32::from_str_radix(spec.trim().trim_start_matches("0x"), 16).unwrap_or(0);
+            let f: Vec<f32> = (0..45u32).map(|k| f32::from_bits(cpu.mem.read_u32(at + k * 4).unwrap_or(0))).collect();
+            println!("  {at:#x} as f32: {:?}", &f[..15]);
+            println!("  {at:#x} +60    : {:?}", &f[15..30]);
+            println!("  {at:#x} +120   : {:?}", &f[30..45]);
+        }
+    }
     let fb = &cpu.nv.gpu.framebuffer;
     if fb.is_empty() { println!("no frame"); return; }
     let mut ppm = format!("P6\n{} {}\n255\n", fb.width, fb.height).into_bytes();
