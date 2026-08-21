@@ -594,9 +594,24 @@ Plus=1<<10, d-pad from 1<<12), not the old `KEY_*` order, and the
 values — `HidNpadButton_AnyUp` and friends are what menus navigate with. Stick Y
 is positive **up**, the opposite of the browser Gamepad API.
 
-The worker holds a press for one run slice (`pressedButtons`): a slice is
-millions of instructions, so a tap that arrives and is released between two
-slices would otherwise never be visible to the guest at all.
+**The run slice is the input sampling period.** The worker is single threaded,
+so a `set_input` posted mid-slice sits in its queue until `switch_run` returns —
+at ~23M steps/s the old 5,000,000-step slice was a 240ms block before the guest
+could see anything. Slice size costs the interpreter nothing (`Cpu::run` is a
+bare loop; throughput is flat from 100k to 5M steps), only the frontend's
+postMessage round trips, which is why `RUN_SLICE` is 1,000,000 and the
+debug-panel refreshes run on their own `HOUSEKEEPING_EVERY` cadence.
+
+The worker latches a press until the **frame counter has advanced twice**, not
+for a fixed number of slices. The guest polls hid once per iteration of its own
+loop, and one of those spans many slices (hbmenu: ~25M instructions, five
+slices), so holding a tap for one slice dropped most taps outright — and the
+poll sits *inside* the loop, so only a complete present-to-present interval is
+guaranteed to contain one. Only bits the guest may not have seen are latched: a
+key the host still reports as down is published from `heldButtons` alone, so
+releasing it lands on the next slice instead of a slice later (that extra slice
+of stickiness made one d-pad tap step two menu entries). `MAX_LATCH_SLICES` is
+the escape hatch for a program that has stopped presenting.
 
 ## The shared system font (`cpu/ipc.rs`, `web/assets/font.ttf`)
 

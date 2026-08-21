@@ -486,7 +486,21 @@ stageEl.addEventListener('drop', async (e) => {
 // Run in worker slices so the page can paint and input can reach the emulator
 // between them. There is no overall step budget - hbmenu never halts - so the
 // loop is driven by the pause flag and by faults.
-const RUN_SLICE = 5_000_000;
+//
+// The slice length *is* the input sampling period: the worker is single
+// threaded, so a `set_input` posted mid-slice sits in its queue until
+// `switch_run` returns. At the ~23M steps/s the wasm build manages, the old
+// 5,000,000 was a 240ms slice, and every keypress waited that long before the
+// guest could possibly see it. Slice size costs the interpreter nothing
+// (`Cpu::run` is a bare loop with no per-call setup - measured flat from 100k
+// to 5M steps), only the round trips below, so this buys ~5x lower input
+// latency for ~6% of throughput.
+const RUN_SLICE = 1_000_000;
+// Slices between panel refreshes. `updatePc`/`drainOutput`/`drainDiagnostics`/
+// `sdFlush` are eight postMessage round trips of debug-panel text that nothing
+// time-critical reads, so running them once per slice would spend more of the
+// budget on chatter than the shorter slice saves.
+const HOUSEKEEPING_EVERY = 8;
 let running = false;
 let pauseRequested = false;
 let lastFrame = 0;
@@ -507,15 +521,22 @@ async function run() {
   setState('running');
   const slice = traceCb.checked ? 5000 : RUN_SLICE;
   let steps = 0;
+  let tick = 0;
   for (;;) {
     steps = await call('run', slice);
     // Yield so the UI repaints and any queued input is processed.
     await new Promise((r) => setTimeout(r, 0));
-    await updatePc();
-    await drainOutput();
-    await drainDiagnostics();
+    // `Cpu::run` only stops short of its budget when the machine halted, so a
+    // short slice means this run is over - no separate `halted` round trip.
+    const done = steps < 0 || steps < slice;
+    // Audio has to track the guest or the stream gaps; the panel does not.
     await pumpAudio();
-    await sdFlush();
+    if (done || ++tick % HOUSEKEEPING_EVERY === 0) {
+      await updatePc();
+      await drainOutput();
+      await drainDiagnostics();
+      await sdFlush();
+    }
     // Repaint only when the guest has actually presented a new frame - the
     // snapshot is several megabytes at 1280x720.
     const frames = await call('frame_count');
@@ -524,9 +545,7 @@ async function run() {
       lastFrame = frames;
       await renderFb();
     }
-    if (steps < 0) break;
-    if (await call('halted')) break;
-    if (steps < slice) break;
+    if (done) break;
     if (pauseRequested) {
       running = false;
       setRunButton(false);
@@ -918,12 +937,26 @@ const KEY_MAP = {
   q: BTN.L, e: BTN.R,
 };
 const keysDown = new Set();
+// Pushed on the edge as well as on the poll below: the 16ms tick is there for
+// the gamepad, which can only be sampled, but a key press *is* an event and
+// waiting up to a tick to forward it is latency for nothing. The worker
+// coalesces whatever arrives before its next slice boundary.
 window.addEventListener('keydown', (e) => {
   const key = e.key.toLowerCase();
-  if (KEY_MAP[key]) { keysDown.add(key); e.preventDefault(); }
+  if (!KEY_MAP[key]) return;
+  e.preventDefault();
+  // Auto-repeat is not a new press - but it is the only evidence a key is
+  // still down after `blur` cleared the set, so go by the set, not `e.repeat`.
+  if (keysDown.has(key)) return;
+  keysDown.add(key);
+  pushInput();
 });
-window.addEventListener('keyup', (e) => keysDown.delete(e.key.toLowerCase()));
-window.addEventListener('blur', () => keysDown.clear());
+window.addEventListener('keyup', (e) => {
+  if (keysDown.delete(e.key.toLowerCase())) pushInput();
+});
+window.addEventListener('blur', () => {
+  if (keysDown.size) { keysDown.clear(); pushInput(); }
+});
 
 function keyboardMask() {
   let m = 0;

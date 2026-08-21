@@ -43,17 +43,80 @@ function drain(fn, cap) {
 }
 
 // Gamepad state arrives from the main thread far more often than the emulator
-// gets to look at it: a whole run slice executes between two message drains, so
-// a quick tap could be pressed and released without the guest ever seeing it.
-// Presses are therefore held until a slice has run with them visible; the
-// sticks, being continuous, just take the newest value.
-let heldButtons = 0n;
-let pressedButtons = 0n;
-let sticks = [0, 0, 0, 0];
+// gets to look at it: the worker is blocked inside `switch_run` while the input
+// messages pile up in its queue, so a whole slice's worth of them lands at once
+// at the slice boundary and a quick tap can be pressed and released without the
+// guest ever having been running to see it.
+//
+// The unit a press has to survive is a *guest frame*, not a run slice. The
+// guest polls hid once per iteration of its own loop and presents once per
+// iteration, and one of those spans many slices, so holding a tap for a single
+// slice still let most taps fall between two polls. A press is therefore held
+// until the frame counter has advanced twice: the poll sits somewhere inside
+// the guest's loop, so only a complete present-to-present interval is
+// guaranteed to contain one.
+//
+// Only bits the guest may not have seen are held. A key the host still reports
+// as down is published from `heldButtons` on its own, so releasing it takes
+// effect at the very next slice instead of a slice later - that extra slice of
+// stickiness was making one d-pad tap step two menu entries.
+let heldButtons = 0n;    // what the host says is physically down right now
+let latchedButtons = 0n; // pressed, but not yet guaranteed seen by the guest
+let sticks = [0, 0, 0, 0];  // newest analog values
+let latchedSticks = null;   // a deflection held for the same reason as a press
 
-function publishInput(mask) {
+// Frame the latch is waiting on, plus a slice cap so that a program which never
+// presents - or has stopped, mid-load - still releases instead of holding a
+// phantom press until it draws again. A couple of seconds' worth of slices.
+let latchFrame = -1;
+let latchSlices = 0;
+const LATCH_FRAMES = 2;
+const MAX_LATCH_SLICES = 64;
+
+// Matches HID_STICK_THRESHOLD in cpu/mod.rs: past this the core reports the
+// HidNpadButton_StickL*/StickR* pseudo-buttons, which is what menus navigate
+// with, so a flick has to be latched exactly like a button press.
+const STICK_THRESHOLD = 0x4000;
+const deflected = (s) => s.some((v) => Math.abs(v) > STICK_THRESHOLD);
+
+function publishInput() {
   if (handle < 0) return;
-  api.switch_set_input(handle, mask, sticks[0], sticks[1], sticks[2], sticks[3]);
+  // A stick the host is still deflecting reports its live value; a latched
+  // flick only stands in once the stick has sprung back to centre.
+  const s = latchedSticks && !deflected(sticks) ? latchedSticks : sticks;
+  api.switch_set_input(handle, heldButtons | latchedButtons, s[0], s[1], s[2], s[3]);
+}
+
+// A latch armed against the old session's frame counter would outlive a reset,
+// so both ends of the session lifecycle clear it.
+function resetInput() {
+  heldButtons = 0n;
+  latchedButtons = 0n;
+  sticks = [0, 0, 0, 0];
+  latchedSticks = null;
+  latchFrame = -1;
+  latchSlices = 0;
+}
+
+// Start (or restart) the wait for the guest to run a frame with the latch
+// visible. Restarting on a later press extends the window for earlier ones too,
+// which is what we want: they are all still unseen.
+function armLatch() {
+  latchFrame = handle < 0 ? -1 : api.switch_frame_count(handle);
+  latchSlices = 0;
+}
+
+// Called once per run slice: drop the latch as soon as the guest has had a
+// whole frame to poll with it visible.
+function releaseLatchIfSeen() {
+  if (handle < 0 || (latchedButtons === 0n && !latchedSticks)) return;
+  const frames = api.switch_frame_count(handle);
+  if (frames - latchFrame < LATCH_FRAMES && ++latchSlices < MAX_LATCH_SLICES) return;
+  latchedButtons = 0n;
+  latchedSticks = null;
+  latchFrame = -1;
+  latchSlices = 0;
+  publishInput();
 }
 
 // wasm32-unknown-unknown has no OS clock, so the emulated RTC (time:u/time:s)
@@ -77,15 +140,28 @@ function pushBattery() {
 
 // Every handler returns a plain value (Number/string/Uint8Array/object).
 const CMD = {
-  new() { handle = api.switch_new(); pushTime(); pushBattery(); return handle; },
-  free_session() { api.switch_free_session(handle); handle = -1; return 0; },
+  new() {
+    handle = api.switch_new();
+    resetInput(); // the new session's frame counter restarts at 0
+    pushTime();
+    pushBattery();
+    return handle;
+  },
+  free_session() { api.switch_free_session(handle); handle = -1; resetInput(); return 0; },
   set_trace(on) { api.switch_set_trace(handle, on ? 1 : 0); return 0; },
   vibration() { return api.switch_vibration(handle); },
   set_input(mask, slx, sly, srx, sry) {
-    heldButtons = BigInt(mask);
-    pressedButtons |= heldButtons;
+    const next = BigInt(mask);
+    const pressed = next & ~heldButtons; // edges, not level: what just went down
+    heldButtons = next;
     sticks = [slx, sly, srx, sry];
-    publishInput(pressedButtons);
+    const flicked = deflected(sticks);
+    if (flicked) latchedSticks = sticks;
+    if (pressed !== 0n || flicked) {
+      latchedButtons |= pressed;
+      armLatch();
+    }
+    publishInput();
     return 0;
   },
   set_battery(percent, charging) {
@@ -180,11 +256,7 @@ const CMD = {
   run(budget) {
     pushTime();
     const steps = Number(api.switch_run(handle, BigInt(budget)));
-    // The guest has now had a slice to see whatever was tapped; release it.
-    if (pressedButtons !== heldButtons) {
-      pressedButtons = heldButtons;
-      publishInput(pressedButtons);
-    }
+    releaseLatchIfSeen();
     return steps;
   },
   halted() { return api.switch_halted(handle); },
