@@ -394,7 +394,11 @@ fn disasm_dp_imm(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                 0b00 => "and", 0b01 => "orr", 0b10 => "eor", _ => "ands",
             };
             let mask = crate::cpu::decode_bit_mask(sf == 1, n, immr, imms).unwrap_or(0);
-            Ok(write!(s, "{} {}, {}, #{:#x}", name, zr(rd), zr(rn), mask).is_ok())
+            // Rd 31 is SP for and/orr/eor and the zero register for ands, so
+            // `and sp, x9, #~0x3f` -- LLVM's stack-frame alignment -- reads as
+            // a discarded result unless this says `sp`.
+            let d = if opc == 0b11 { zr(rd) } else { sp(rd) };
+            Ok(write!(s, "{} {}, {}, #{:#x}", name, d, zr(rn), mask).is_ok())
         }
         0b10011 => {
             let rn = (insn >> 5) & 0x1F;

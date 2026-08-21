@@ -3522,6 +3522,55 @@ fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
 }
 
 #[test]
+fn a_logical_immediate_writes_sp_but_ands_writes_the_zero_register() {
+    // `AND`, `ORR` and `EOR` (immediate) spell register 31 as **SP**; only
+    // `ANDS` -- the `TST` alias -- spells it as the zero register. Treating all
+    // four as the zero register throws away every `and sp, xN, #imm`, which is
+    // how LLVM aligns a stack frame it has just made room in:
+    //
+    //     str x28, [sp, #-96]!            save area
+    //     sub x9, sp, #0x260              room for the locals
+    //     stp x29, x30, [sp, #0x50]       the return address, at x29
+    //     add x29, sp, #0x50
+    //     and sp, x9, #0xffffffffffffffc0 <- allocate, 64-byte aligned
+    //
+    // Discard that last one and the frame is never allocated: every local the
+    // function writes then lands 0x260 bytes high, on top of the save area it
+    // just filled in. "A Short Hike" returned through the result and jumped
+    // into a Unity shader name.
+    let cpu = exec(
+        &[
+            0xd2800fe9, // mov x9, #0x7f
+            0x927ae53f, // and sp, x9, #0xffffffffffffffc0
+        ],
+        8,
+    );
+    assert_eq!(cpu.sp(), 0x40, "and (immediate) has to write SP, not discard");
+
+    // ORR is the same register field; `mov sp, x9` is `orr sp, x9, #0` in
+    // disguise for exactly this reason.
+    let cpu = exec(
+        &[
+            0xd2801fe9, // mov x9, #0xff
+            0xb2400d3f, // orr sp, x9, #0x7
+        ],
+        8,
+    );
+    assert_eq!(cpu.sp(), 0xff);
+
+    // ANDS with Rd 31 is TST: the flags move, SP does not.
+    let cpu = exec(
+        &[
+            0xd28001e9, // mov x9, #0xf
+            0xf240053f, // ands xzr, x9, #0x3
+        ],
+        8,
+    );
+    assert_eq!(cpu.sp(), 0, "ands must leave SP alone");
+    assert_eq!(cpu.nzcv() >> 30 & 1, 0, "0xf & 0x3 is not zero");
+}
+
+#[test]
 fn an_audio_thread_appending_buffers_does_not_starve_the_others() {
     // `audout` releases every buffer the moment it is appended -- a device
     // that never falls behind -- so the guest's mixer never has to wait on the

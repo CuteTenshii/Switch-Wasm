@@ -100,7 +100,26 @@ impl Cpu {
                             r
                         }
                     };
-                    self.write_zr(rd, r);
+                    // `Rd == 31` is **SP** for AND/ORR/EOR, and the zero
+                    // register only for ANDS -- the immediate forms are among
+                    // the handful where the two differ, unlike the
+                    // shifted-register forms right below where 31 is always
+                    // ZR. `write_zr` for all four threw away every
+                    // `and sp, xN, #imm`, which is how LLVM aligns a stack
+                    // frame it has just made room in:
+                    //
+                    //     sub x9, sp, #0x260
+                    //     and sp, x9, #0xffffffffffffffc0
+                    //
+                    // With the second one discarded the frame is never
+                    // allocated, and every local the function then writes
+                    // lands 0x260 bytes too high -- straight over the
+                    // register save area it just filled in.
+                    if opc == 0b11 {
+                        self.write_zr(rd, r);
+                    } else {
+                        self.write_x(rd, r);
+                    }
                     Ok(true)
                 }
             }
