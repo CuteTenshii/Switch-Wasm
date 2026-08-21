@@ -213,6 +213,15 @@ impl NvDrv {
                         addr
                     )));
                 }
+                if self.gpu.trace {
+                    // With whatever the handle was bound to before. A second
+                    // alloc on a handle that is already mapped would leave the
+                    // GPU address space pointing at the old memory, which is
+                    // the kind of thing that shows up as a buffer full of
+                    // zeroes and nothing else to explain it.
+                    let was = self.gpu.nvmap.get(handle).map(|h| (h.cpu_addr, h.allocated));
+                    eprintln!("[nv] nvmap alloc handle={handle} addr={:#x} (was {was:x?})", addr as u32);
+                }
                 self.gpu.nvmap.alloc(handle, heap_mask, flags, align, kind, addr as u32)?;
                 Ok(NV_OK)
             }
