@@ -254,6 +254,134 @@ impl Cpu {
             return Ok(true);
         }
 
+        // ---- by-element multiplies (scalar x indexed element) ----
+        // `01 U 11111 size L M Rm opcode(4) H 0 Rn Rd`: one lane of Vn times
+        // one selected lane of Vm, with the result written as a *scalar* --
+        // the bottom element, everything above it zeroed. The vector form
+        // below is the same arithmetic across every lane, and differs only in
+        // bits[28:24], 01111 against 11111.
+        //
+        // `fmul s3, s4, v3.s[0]` = 0x5f839083.
+        if ((insn >> 30) & 0b11) == 0b01
+            && ((insn >> 24) & 0x1F) == 0b11111
+            && ((insn >> 10) & 1) == 0
+        {
+            let u = (insn >> 29) & 1;
+            let size = (insn >> 22) & 0b11;
+            let l = (insn >> 21) & 1;
+            let m = (insn >> 20) & 1;
+            let rm_low = (insn >> 16) & 0xF;
+            let opcode = (insn >> 12) & 0xF;
+            let h = (insn >> 11) & 1;
+            let rn = ((insn >> 5) & 0x1F) as usize;
+            let rd = (insn & 0x1F) as usize;
+            // The index is spread over H:L:M, exactly as in the vector form: a
+            // halfword element can only come from the low 16 vector registers,
+            // because M is part of the index rather than of Rm.
+            let (esize, index, rm) = match size {
+                0b01 => (16u32, (h << 2) | (l << 1) | m, rm_low as usize),
+                0b10 => (32, (h << 1) | l, ((m << 4) | rm_low) as usize),
+                0b11 => (64, h, ((m << 4) | rm_low) as usize),
+                _ => return Ok(false),
+            };
+            let key = 16 * u + opcode;
+            let elem = ((self.vregs[rm] >> (index * esize)) & elem_mask(esize)) as u64;
+            let a = (self.vregs[rn] & elem_mask(esize)) as u64;
+            let signed = |v: u64, bits: u32| -> i128 { sext_u64(v, bits) as i64 as i128 };
+            let lane = |reg: usize, bits: u32| -> u64 { (self.vregs[reg] & elem_mask(bits)) as u64 };
+
+            // Saturate to a signed field of `bits`, which every form here but
+            // the floating-point four ends with.
+            let sat = |value: i128, bits: u32| -> u64 {
+                let max = (1i128 << (bits - 1)) - 1;
+                let min = -(1i128 << (bits - 1));
+                (value.clamp(min, max) as u64) & (elem_mask(bits) as u64)
+            };
+            // `2 * a * b`, the doubling every saturating form in this group is
+            // built on. Only the most negative input squared can overflow it.
+            let doubled = signed(a, esize) * signed(elem, esize) * 2;
+            // ...and its high half, rounded or truncated back to the source
+            // width.
+            let high_half = |rounding: bool| -> i128 {
+                let product = if rounding { doubled + (1i128 << (esize - 1)) } else { doubled };
+                product >> esize
+            };
+
+            let (value, width) = match key {
+                // FMLA / FMLS / FMUL / FMULX. Half precision is out of scope
+                // here for the same reason it is in the vector form.
+                0x01 | 0x05 | 0x09 | 0x19 => {
+                    if esize == 16 {
+                        return Ok(false);
+                    }
+                    let d = lane(rd, esize);
+                    let bits = if esize == 64 {
+                        let (mut x, y, acc) =
+                            (f64::from_bits(a), f64::from_bits(elem), f64::from_bits(d));
+                        if key == 0x05 {
+                            x = -x;
+                        }
+                        let r = match key {
+                            0x01 | 0x05 => x.mul_add(y, acc),
+                            0x19 => fmulx(x, y),
+                            _ => x * y,
+                        };
+                        r.to_bits()
+                    } else {
+                        let (mut x, y, acc) = (
+                            f32::from_bits(a as u32),
+                            f32::from_bits(elem as u32),
+                            f32::from_bits(d as u32),
+                        );
+                        if key == 0x05 {
+                            x = -x;
+                        }
+                        // Fused at the source width: FMLA rounds once, so
+                        // widening to f64 and back would round twice.
+                        let r = match key {
+                            0x01 | 0x05 => x.mul_add(y, acc),
+                            0x19 => fmulx(f64::from(x), f64::from(y)) as f32,
+                            _ => x * y,
+                        };
+                        u64::from(r.to_bits())
+                    };
+                    (bits, esize)
+                }
+                // SQDMULL: the doubled product, kept at twice the width.
+                0x0b => (sat(doubled, esize * 2), esize * 2),
+                // SQDMLAL / SQDMLSL: the same, accumulated into the wide
+                // destination. Both saturations are real -- the product is
+                // clamped before the accumulate and the sum after it.
+                0x03 | 0x07 => {
+                    let wide = esize * 2;
+                    let acc = signed(lane(rd, wide), wide);
+                    let product = signed(sat(doubled, wide), wide);
+                    let sum = if key == 0x03 { acc + product } else { acc - product };
+                    (sat(sum, wide), wide)
+                }
+                // SQDMULH / SQRDMULH: the doubled product's high half, the
+                // second rounded rather than truncated.
+                0x0c | 0x0d => (sat(high_half(key == 0x0d), esize), esize),
+                // SQRDMLAH / SQRDMLSH: SQRDMULH accumulated into Rd.
+                0x1d | 0x1f => {
+                    let acc = signed(lane(rd, esize), esize);
+                    let product = high_half(true);
+                    let sum = if key == 0x1d { acc + product } else { acc - product };
+                    (sat(sum, esize), esize)
+                }
+                _ => {
+                    return Err(Error::Cpu(format!(
+                        "unimplemented SIMD scalar by-element u={} opcode={:#06b} at {:#x}",
+                        u, opcode, self.pc
+                    )))
+                }
+            };
+            // A scalar destination: the result at the bottom, everything above
+            // it zeroed.
+            self.vregs[rd] = u128::from(value) & elem_mask(width);
+            return Ok(true);
+        }
+
         // ---- by-element multiplies (vector x indexed element) ----
         // `0 Q U 01111 size L M Rm opcode(4) H 0 Rn Rd`: every lane of Vn times
         // one selected lane of Vm. Shares bits[28:24] with MOVI and the
@@ -1656,7 +1784,7 @@ impl Cpu {
                 0x1a => x + y,               // FADD
                 0x3a => x - y,               // FSUB
                 0x5b => x * y,               // FMUL
-                0x1b => x * y,               // FMULX (without the 0*inf fixup)
+                0x1b => fmulx(x, y),         // FMULX
                 0x5f => x / y,               // FDIV
                 0x7a => (x - y).abs(),       // FABD
                 0x1e => fp_max(x, y),        // FMAX

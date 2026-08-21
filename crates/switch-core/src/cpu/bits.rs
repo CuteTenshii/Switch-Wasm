@@ -130,6 +130,18 @@ pub(crate) fn shift_by_reg(a: u64, b: u64, bits: u32, unsigned: bool) -> u64 {
 
 /// FP max/min with ARM semantics: if either operand is NaN the NaN operand is
 /// returned (Rust's `f64::max` would discard it).
+/// `FMULX`: an ordinary multiply, except that zero times infinity is 2.0 with
+/// the sign of the product rather than a NaN. That is the whole reason the
+/// instruction exists -- it is what makes `FRECPS`/`FRSQRTS` behave at the
+/// extremes of Newton-Raphson refinement, where a reciprocal estimate of
+/// infinity has to multiply back to a finite number.
+pub(crate) fn fmulx(x: f64, y: f64) -> f64 {
+    if (x == 0.0 && y.is_infinite()) || (x.is_infinite() && y == 0.0) {
+        return if x.is_sign_negative() != y.is_sign_negative() { -2.0 } else { 2.0 };
+    }
+    x * y
+}
+
 pub(crate) fn fp_max(a: f64, b: f64) -> f64 {
     if a.is_nan() {
         a

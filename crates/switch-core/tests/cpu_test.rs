@@ -3521,6 +3521,104 @@ fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
     assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 0x55);
 }
 
+/// Run one instruction with the vector registers preloaded.
+fn simd1(insn: u32, regs: &[(u8, u128)]) -> Cpu {
+    let mut cpu = cpu_at(0x1000);
+    for &(i, v) in regs {
+        cpu.set_vreg(i, v);
+    }
+    cpu.mem.map(0x1000, &insn.to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    cpu
+}
+
+fn f32b(x: f32) -> u128 {
+    u128::from(x.to_bits())
+}
+fn f64b(x: f64) -> u128 {
+    u128::from(x.to_bits())
+}
+
+#[test]
+fn advsimd_scalar_by_element_multiplies() {
+    // `01 U 11111 size L M Rm opcode H 0 Rn Rd`: one lane of Vn times one
+    // selected lane of Vm, written as a *scalar* -- bottom element, everything
+    // above it zeroed. It differs from the vector-by-element form only in
+    // bits[28:24], 11111 against 01111, so the whole group was falling through
+    // that check. "A Short Hike" reaches `fmul s3, s4, v3.s[0]` two billion
+    // instructions in, having got that far only once every earlier fix landed.
+    //
+    // Every encoding below is what LLVM assembles the named instruction to,
+    // not one derived by hand from the manual.
+
+    // fmul s3, s4, v3.s[0] -- Rd and Rm are the same register here, which is
+    // the real instruction from the title, so it also pins that reading Vm
+    // happens before writing Vd.
+    let cpu = simd1(0x5f839083, &[(4, f32b(3.0)), (3, f32b(2.0) | (f32b(9.0) << 32))]);
+    assert_eq!(cpu.read_vreg(3), f32b(6.0), "fmul s3, s4, v3.s[0]");
+
+    // fmul d0, d1, v2.d[1] -- the index picks the *high* half of Vm, and the
+    // 64-bit result must not leave the old top half of Vd behind.
+    let cpu = simd1(
+        0x5fc29820,
+        &[(1, f64b(1.5)), (2, f64b(1.0) | (f64b(4.0) << 64)), (0, u128::MAX)],
+    );
+    assert_eq!(cpu.read_vreg(0), f64b(6.0), "fmul d0, d1, v2.d[1]");
+
+    // fmla s0, s1, v2.s[3]: Vd is the accumulator, so 1 + 2*3.
+    let cpu = simd1(0x5fa21820, &[(0, f32b(1.0)), (1, f32b(2.0)), (2, f32b(3.0) << 96)]);
+    assert_eq!(cpu.read_vreg(0), f32b(7.0), "fmla s0, s1, v2.s[3]");
+
+    // fmls d5, d6, v7.d[0]: 10 - 2*3.
+    let cpu = simd1(0x5fc750c5, &[(5, f64b(10.0)), (6, f64b(2.0)), (7, f64b(3.0))]);
+    assert_eq!(cpu.read_vreg(5), f64b(4.0), "fmls d5, d6, v7.d[0]");
+
+    // fmulx s0, s1, v2.s[0]: an ordinary multiply...
+    let cpu = simd1(0x7f829020, &[(1, f32b(2.0)), (2, f32b(3.0))]);
+    assert_eq!(cpu.read_vreg(0), f32b(6.0), "fmulx s0, s1, v2.s[0]");
+    // ...except that zero times infinity is 2.0 rather than a NaN, which is
+    // the only reason the instruction exists apart from FMUL.
+    let cpu = simd1(0x7f829020, &[(1, f32b(0.0)), (2, f32b(f32::INFINITY))]);
+    assert_eq!(cpu.read_vreg(0), f32b(2.0), "fmulx 0 * inf");
+    let cpu = simd1(0x7f829020, &[(1, f32b(-0.0)), (2, f32b(f32::INFINITY))]);
+    assert_eq!(cpu.read_vreg(0), f32b(-2.0), "fmulx -0 * inf keeps the sign");
+
+    // sqdmulh h0, h1, v2.h[3]: the doubled product's high half. 2*0x4000*0x4000
+    // is 0x2000_0000, and the top 16 bits of that are 0x2000.
+    let cpu = simd1(0x5f72c020, &[(1, 0x4000), (2, 0x4000 << 48)]);
+    assert_eq!(cpu.read_vreg(0), 0x2000, "sqdmulh h0, h1, v2.h[3]");
+    // The one input pair that saturates: the most negative value squared.
+    let cpu = simd1(0x5f72c020, &[(1, 0x8000), (2, 0x8000 << 48)]);
+    assert_eq!(cpu.read_vreg(0), 0x7FFF, "sqdmulh saturates at -min * -min");
+
+    // sqrdmulh s0, s1, v2.s[2]: the same, rounded rather than truncated.
+    let cpu = simd1(0x5f82d820, &[(1, 1 << 30), (2, (1u128 << 30) << 64)]);
+    assert_eq!(cpu.read_vreg(0), 1 << 29, "sqrdmulh s0, s1, v2.s[2]");
+
+    // sqdmull s0, h1, v2.h[0]: doubled, kept at twice the width rather than
+    // shifted back down -- so the same inputs give the whole 0x2000_0000.
+    let cpu = simd1(0x5f42b020, &[(1, 0x4000), (2, 0x4000)]);
+    assert_eq!(cpu.read_vreg(0), 0x2000_0000, "sqdmull s0, h1, v2.h[0]");
+    let cpu = simd1(0x5f42b020, &[(1, 0x8000), (2, 0x8000)]);
+    assert_eq!(cpu.read_vreg(0), 0x7FFF_FFFF, "sqdmull saturates");
+
+    // sqdmlal s0, h1, v2.h[5]: 100 + 2*3*4.
+    let cpu = simd1(0x5f523820, &[(0, 100), (1, 3), (2, 4 << 80)]);
+    assert_eq!(cpu.read_vreg(0), 124, "sqdmlal s0, h1, v2.h[5]");
+
+    // sqdmlsl d0, s1, v2.s[1]: 1000 - 2*5*7.
+    let cpu = simd1(0x5fa27020, &[(0, 1000), (1, 5), (2, 7 << 32)]);
+    assert_eq!(cpu.read_vreg(0), 930, "sqdmlsl d0, s1, v2.s[1]");
+
+    // sqrdmlah s0, s1, v2.s[1]: SQRDMULH accumulated into Vd.
+    let cpu = simd1(0x7fa2d020, &[(0, 7), (1, 1 << 30), (2, (1u128 << 30) << 32)]);
+    assert_eq!(cpu.read_vreg(0), (1 << 29) + 7, "sqrdmlah s0, s1, v2.s[1]");
+
+    // sqrdmlsh h0, h1, v2.h[2]: and subtracted from it.
+    let cpu = simd1(0x7f62f020, &[(0, 0x2007), (1, 0x4000), (2, 0x4000 << 32)]);
+    assert_eq!(cpu.read_vreg(0), 7, "sqrdmlsh h0, h1, v2.h[2]");
+}
+
 #[test]
 fn dup_element_to_a_scalar_takes_the_lane_and_zeroes_the_rest() {
     // The AdvSIMD *scalar* copy group holds exactly one instruction: `DUP
@@ -3594,7 +3692,7 @@ fn a_logical_immediate_writes_sp_but_ands_writes_the_zero_register() {
     let cpu = exec(
         &[
             0xd2801fe9, // mov x9, #0xff
-            0xb2400d3f, // orr sp, x9, #0x7
+            0xb2400d3f, // orr sp, x9, #0xf
         ],
         8,
     );
