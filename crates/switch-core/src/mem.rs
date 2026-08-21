@@ -16,12 +16,20 @@ pub const ADDRESS_SPACE_SIZE: u64 = 0x1_0000_0000; // 4 GiB
 /// Number of 4 KiB pages in the 4 GiB space. Computed in u64 first so it
 /// survives the wasm32 (32-bit usize) truncation of the 4 GiB constant.
 const PAGE_COUNT: usize = (ADDRESS_SPACE_SIZE >> PAGE_BITS) as usize;
-/// Hard ceiling on real, host-backed guest RAM. Any homebrew's actual image +
-/// heap + stack use sits far below this; it exists to bound a runaway guest
-/// write (e.g. a stray pointer walking up from a null base, one soft-mapped
-/// page at a time) to a fast, cheap failure instead of ballooning the host
-/// process — a browser tab included — for seconds before anything faults.
-pub const MAX_MAPPED_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
+/// Hard ceiling on real, host-backed guest RAM. It exists to bound a runaway
+/// guest write (e.g. a stray pointer walking up from a null base, one
+/// soft-mapped page at a time) to a fast, cheap failure instead of ballooning
+/// the host process — a browser tab included — for seconds before anything
+/// faults.
+///
+/// Any homebrew sits far below this, and 256 MiB held for as long as homebrew
+/// was all there was. A retail title does not: "A Short Hike" touches 271 MiB
+/// and hit the ceiling inside `svcMapMemory` 1.36 billion instructions in,
+/// which is a real title stopped by a number chosen for a different workload.
+/// 512 MiB clears it with room to spare and still bounds a runaway to
+/// something a browser tab survives — the console being emulated has 4 GiB,
+/// so this is nowhere near a fidelity limit and is expected to rise again.
+pub const MAX_MAPPED_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
 const MAX_MAPPED_PAGES: usize = (MAX_MAPPED_BYTES / PAGE_SIZE as u64) as usize;
 
 #[derive(Debug)]

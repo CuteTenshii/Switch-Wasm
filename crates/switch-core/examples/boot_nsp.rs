@@ -212,6 +212,7 @@ fn main() {
         }
         done += 1;
     }
+    println!("guest RAM touched: {} MiB", cpu.mem.mapped_bytes() / (1024 * 1024));
     println!("frames presented: {}", cpu.nv.gpu.frames);
     println!("gpu stats: {:?}", cpu.nv.gpu.stats);
     println!("--- program console output ({} bytes) ---", cpu.out.len());
