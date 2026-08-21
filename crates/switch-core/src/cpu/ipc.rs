@@ -2119,7 +2119,7 @@ impl Cpu {
                 // Nothing here ever faults the GPU, so the event is handed out
                 // and never signalled.
                 Some(130) => {
-                    let h = self.alloc_event("am:self-controller", true);
+                    let h = self.alloc_event("am:gpu-error", true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 // SetTerminateResult / InitializeGamePlayRecording /
@@ -2160,7 +2160,7 @@ impl Cpu {
                 // holding 0 — the same shape of bug that had `nnSdk`'s system
                 // worker waiting on handle 0.
                 Some(9) | Some(91) => {
-                    let h = self.alloc_event("am:gpu-error", true);
+                    let h = self.alloc_event("am:self-controller", true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 // GetAccumulatedSuspendedTickValue: nothing has ever been
@@ -6082,6 +6082,33 @@ mod tests {
         cpu.register_service_handle(9, "am:common-state-getter");
         cpu.applet_request(TLS, 9, Some(5)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "Handheld");
+    }
+
+    #[test]
+    fn each_applet_event_is_named_after_the_interface_that_hands_it_out() {
+        // These two names were swapped: `IApplicationFunctions`'s
+        // GetGpuErrorDetectedSystemEvent handed out an event called
+        // "am:self-controller", and `ISelfController`'s two events were called
+        // "am:gpu-error". Only `TRACE_WAIT` reads these names, which is
+        // exactly why it mattered -- a wait trace showing "A Short Hike"
+        // blocked on "am:self-controller" sent a debugging session looking for
+        // an applet focus event that was never involved. The event it was
+        // really waiting on is the GPU-error one, which nothing here ever
+        // fires because nothing here ever faults the GPU.
+        let mut cpu = request(false, 130, &[]);
+        cpu.register_service_handle(9, "am:application-functions");
+        cpu.applet_request(TLS, 9, Some(130)).unwrap();
+        let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(event, 0, "GetGpuErrorDetectedSystemEvent handed back no handle");
+        assert_eq!(cpu.event_name(event), Some("am:gpu-error"));
+
+        // ISelfController::GetAccumulatedSuspendedTickChangedEvent.
+        let mut cpu = request(false, 91, &[]);
+        cpu.register_service_handle(9, "am:self-controller");
+        cpu.applet_request(TLS, 9, Some(91)).unwrap();
+        let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(event, 0);
+        assert_eq!(cpu.event_name(event), Some("am:self-controller"));
     }
 
     #[test]
