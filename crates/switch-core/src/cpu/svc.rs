@@ -672,6 +672,17 @@ impl Cpu {
                         | "am:display-controller"
                         | "am:library-applet-creator"
                         | "am:application-functions"
+                        | "am:library-applet-proxy"
+                        | "am:system-applet-proxy"
+                        | "am:library-applet-self-accessor"
+                        | "am:applet-common-functions"
+                        | "am:process-winding-controller"
+                        | "am:home-menu-functions"
+                        | "am:global-state-controller"
+                        | "am:application-creator"
+                        | "am:lock-accessor"
+                        | "am:storage"
+                        | "am:storage-accessor"
                         | "am:debug-functions" => self.applet_request(tls, handle, cmd_id)?,
                         "nifm:u" => {
                             let object_id = self.ipc_domain_object_id(tls);

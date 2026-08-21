@@ -2196,8 +2196,50 @@ impl Cpu {
                     self.reply_with_interface(tls, handle, "am:library-applet-proxy")?;
                     Ok(())
                 }
+                // IAllSystemAppletProxiesService::OpenSystemAppletProxy: what
+                // the *Home Menu* opens. qlaunch is neither an application nor
+                // a library applet — it is the one process that outlives every
+                // title and launches the rest — and it aborts on the spot if
+                // this is refused.
+                Some(100) => {
+                    self.reply_with_interface(tls, handle, "am:system-applet-proxy")?;
+                    Ok(())
+                }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
+            // ISystemAppletProxy's Get* accessors. The first seven are the
+            // same ones `ILibraryAppletProxy` hands out; where a library applet
+            // has its self-accessor and common functions at 20/21, the system
+            // applet has the two interfaces it drives the console with — the
+            // Home Menu's own functions and the global power/sleep state — and
+            // an IApplicationCreator at 22, which is how the Home Menu starts
+            // a game.
+            "am:system-applet-proxy" => {
+                let sub = match cmd_id {
+                    Some(0) => Some("am:common-state-getter"),
+                    Some(1) => Some("am:self-controller"),
+                    Some(2) => Some("am:window-controller"),
+                    Some(3) => Some("am:audio-controller"),
+                    Some(4) => Some("am:display-controller"),
+                    Some(10) => Some("am:process-winding-controller"),
+                    Some(11) => Some("am:library-applet-creator"),
+                    Some(20) => Some("am:home-menu-functions"),
+                    Some(21) => Some("am:global-state-controller"),
+                    Some(22) => Some("am:application-creator"),
+                    // GetAppletCommonFunctions, added at 23 here in 10.0.0 —
+                    // the same interface a library applet fetches at 21.
+                    Some(23) => Some("am:applet-common-functions"),
+                    Some(1000) => Some("am:debug-functions"),
+                    _ => None,
+                };
+                match sub {
+                    Some(name) => {
+                        self.reply_with_interface(tls, handle, name)?;
+                        Ok(())
+                    }
+                    None => self.unimplemented_command(tls, &iface, cmd_id),
+                }
+            }
             // ILibraryAppletProxy's Get* accessors. The first five are the
             // same interfaces `IApplicationProxy` hands out — a library applet
             // has the same lifecycle, window and audio controls as an
@@ -2486,6 +2528,85 @@ impl Cpu {
                 // queue when several ask the system to boost the CPU. There
                 // is one process here and no governor to ask.
                 Some(70) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // IHomeMenuFunctions: what only the Home Menu can do. qlaunch
+            // opens this before it draws anything, so every one of these runs
+            // during boot rather than on a user action.
+            "am:home-menu-functions" => match cmd_id {
+                // RequestToGetForeground / LockForeground / UnlockForeground:
+                // who owns the screen. There is one applet here and it always
+                // owns it.
+                Some(10) | Some(11) | Some(12) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // GetPopFromGeneralChannelEvent: the event that fires when
+                // another process pushes a message onto the general channel —
+                // an nfc tag scan, a Joy-Con pairing. Nothing here pushes one,
+                // so it is handed out and never signalled, and the
+                // PopFromGeneralChannel at command 20 that would drain it is
+                // never reached.
+                Some(21) => {
+                    let h = self.alloc_event("am:general-channel", true);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+                }
+                // GetHomeButtonWriterLockAccessor / GetWriterLockAccessorEx:
+                // the lock the menu takes to suppress the HOME button while a
+                // transition is running.
+                Some(30) | Some(31) => {
+                    self.reply_with_interface(tls, handle, "am:lock-accessor")?;
+                    Ok(())
+                }
+                // IsSleepEnabled / IsRebootEnabled -> bool. Both are what a
+                // retail console with no parental or demo restriction reports;
+                // neither actually happens here, but the menu greys the
+                // entries out when they are false.
+                Some(40) | Some(41) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
+                // IsForceTerminateApplicationDisabledForDebug -> bool.
+                Some(110) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // SetLastApplicationExitReason: recorded for the next crash
+                // report, which nothing here writes.
+                Some(1000) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // ILockAccessor: one of those HOME-button locks. Only the Home
+            // Menu holds one, and nothing else here contends for it.
+            "am:lock-accessor" => match cmd_id {
+                // Unlock.
+                Some(2) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // GetEvent: fires when the lock is released by its holder.
+                Some(3) => {
+                    let h = self.alloc_event("am:lock-accessor", true);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+                }
+                // IsLocked -> bool.
+                Some(4) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // IGlobalStateController: the console-wide power state, which the
+            // Home Menu owns rather than shares. The sequences at 0-4 (sleep,
+            // shutdown, reboot) are deliberately not implemented: they are
+            // user actions, and a console that answers "done" to a shutdown it
+            // did not perform is worse than one that refuses.
+            "am:global-state-controller" => match cmd_id {
+                // IsAutoPowerDownRequested -> bool. The idle timer has not
+                // fired, because there is no idle timer.
+                Some(9) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // LoadAndApplyIdlePolicySettings / NotifyCecSettingsChanged /
+                // SetDefaultHomeButtonLongPressTime /
+                // UpdateDefaultDisplayResolution: settings applied to hardware
+                // that is not here.
+                Some(10) | Some(11) | Some(12) | Some(13) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // ShouldSleepOnBoot -> bool. A console that was put to sleep
+                // rather than shut down resumes straight back to sleep; this
+                // one always boots awake.
+                Some(14) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // GetHdcpAuthenticationFailedEvent: fires when a dock refuses
+                // to authenticate. There is no dock.
+                Some(15) => {
+                    let h = self.alloc_event("am:hdcp-failed", true);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+                }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IProcessWindingController: how an applet is resumed after
@@ -3660,7 +3781,30 @@ impl Cpu {
             // `IServiceGetterInterface`; which system service you opened
             // decides what you are *allowed* to ask for, not what the
             // interface is, and nothing here enforces privilege.
-            "ns:am2" | "ns:ec" | "ns:rid" | "ns:rt" | "ns:web" | "ns:ro" | "ns:su"
+            // `ns:su` is not one more getter service: `ISystemUpdateInterface`
+            // has its own small command set, and it is opened at boot by the
+            // Home Menu — which is the only process that has anywhere to show
+            // "an update is available".
+            "ns:su" => match cmd_id {
+                // GetBackgroundNetworkUpdateState -> u8. Nothing downloads
+                // here, so no update is staged.
+                Some(0) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // NotifyExFatDriverRequired / NotifyBackgroundNetworkUpdate /
+                // NotifySystemUpdateForContentDelivery / PrepareShutdown:
+                // announcements to an update pipeline that is not here.
+                Some(2) | Some(5) | Some(10) | Some(11) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // GetSystemUpdateNotificationEventForContentDelivery: the
+                // event that fires when an update becomes available. Handed
+                // out and never signalled, for the same reason.
+                Some(9) => {
+                    let h = self.alloc_event("ns:system-update", true);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            "ns:am2" | "ns:ec" | "ns:rid" | "ns:rt" | "ns:web" | "ns:ro"
             | "ns:vm" | "ns:dev" => match cmd_id {
                 // The ids are `libnx`'s (`nsGet*Interface` in `ns.c`), which
                 // are Nintendo's own. Everything from 7989 up used to be

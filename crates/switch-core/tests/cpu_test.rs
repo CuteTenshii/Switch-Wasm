@@ -4452,3 +4452,58 @@ fn a_fabricated_out_object_comes_back_as_a_move_handle() {
     ipc_request_plain(&mut cpu, NCM, 4, &[1, 0, 0, 0]);
     assert_eq!(u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap()), storage);
 }
+
+#[test]
+fn the_home_menu_opens_a_system_applet_proxy() {
+    // qlaunch is neither an application nor a library applet. It is the one
+    // process that outlives every title, and it declares that by opening
+    // IAllSystemAppletProxiesService command 100 -- then R_ABORT_UNLESSes on
+    // the spot if the answer is an error. 2010-0221, `cmif`'s "unknown command
+    // id", is exactly what this stub used to reply, so the Home Menu died on
+    // its first applet call with an svcBreak and nothing else to go on.
+    const APPLET: u64 = 0x9300;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(APPLET, "appletAE");
+    let tls = cpu.tls_base();
+
+    // OpenSystemAppletProxy(u64 reserved, pid, process handle) -> ISystemAppletProxy.
+    ipc_request_plain(&mut cpu, APPLET, 100, &0u64.to_le_bytes());
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "the Home Menu was refused");
+    let proxy = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(proxy, 0, "no ISystemAppletProxy came back");
+
+    // GetHomeMenuFunctions, which only this proxy exposes -- a library applet
+    // reaches the same interface at 22, and an application not at all.
+    ipc_request_plain(&mut cpu, proxy, 20, &[]);
+    let home = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(home, 0);
+    // IsSleepEnabled -> bool: what an unrestricted retail console reports.
+    ipc_request_plain(&mut cpu, home, 40, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 1);
+    // GetHomeButtonWriterLockAccessor -> ILockAccessor, and it must be a real
+    // session for the same reason every other out-object must be.
+    ipc_request_plain(&mut cpu, home, 30, &[]);
+    let lock = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(lock, 0, "no ILockAccessor came back");
+    ipc_request_plain(&mut cpu, lock, 4, &[]); // IsLocked
+    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 0);
+
+    // GetGlobalStateController: ShouldSleepOnBoot is false, because a console
+    // that was slept rather than shut down would resume straight back to
+    // sleep, and this one always boots awake.
+    ipc_request_plain(&mut cpu, proxy, 21, &[]);
+    let global = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(global, 0);
+    ipc_request_plain(&mut cpu, global, 14, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 0);
+
+    // The sleep and shutdown sequences stay refused: a console that answers
+    // "done" to a shutdown it did not perform is worse than one that refuses.
+    const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
+    ipc_request_plain(&mut cpu, global, 3, &[]); // StartShutdownSequence
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), UNKNOWN_COMMAND_ID);
+}
