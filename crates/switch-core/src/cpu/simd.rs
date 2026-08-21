@@ -744,6 +744,38 @@ impl Cpu {
             )));
         }
 
+        // ---- scalar copy: DUP (element) ----
+        // `01 0 11110000 imm5 0 0000 1 Rn Rd`. The scalar copy group holds
+        // exactly one instruction -- lifting one lane of a vector into a
+        // scalar register, which is what `mov s1, v0.s[1]` assembles to -- and
+        // it differs from the vector copy group below only in bits[28:21],
+        // 1111 0000 against 0111 0000. So it has to be matched before that
+        // check rejects it.
+        //
+        // Unlike the vector `DUP` further down, the destination is a *scalar*:
+        // the lane is written at the bottom and the rest of the register is
+        // zeroed, rather than the lane being replicated across it.
+        // `dup s1, v0.s[1]` = 0x5e0c0401.
+        if ((insn >> 21) & 0xFF) == 0b11110000
+            && ((insn >> 30) & 0b11) == 0b01
+            && ((insn >> 10) & 0b111111) == 0b000001
+        {
+            let imm5 = (insn >> 16) & 0x1F;
+            let lsb = imm5.trailing_zeros();
+            // imm5 == 0, and any imm5 whose lowest set bit is above bit 3, is
+            // reserved rather than a 128-bit element.
+            if imm5 == 0 || lsb > 3 {
+                return Ok(false);
+            }
+            let esize = 8u32 << lsb;
+            let index = imm5 >> (lsb + 1);
+            let rd = (insn & 0x1F) as usize;
+            let rn = ((insn >> 5) & 0x1F) as usize;
+            let mask = (1u128 << esize) - 1;
+            self.vregs[rd] = (self.vregs[rn] >> (index * esize)) & mask;
+            return Ok(true);
+        }
+
         // ---- copy / element moves, and table lookup ----
         // bits[28:21] == 0111 0000 (bit21 = 0 is what separates this whole
         // space from three-same/three-different/two-reg-misc); bit30 is Q and

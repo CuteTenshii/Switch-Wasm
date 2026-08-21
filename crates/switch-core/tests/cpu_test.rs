@@ -3522,6 +3522,48 @@ fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
 }
 
 #[test]
+fn dup_element_to_a_scalar_takes_the_lane_and_zeroes_the_rest() {
+    // The AdvSIMD *scalar* copy group holds exactly one instruction: `DUP
+    // (element)`, which lifts one lane of a vector into a scalar register.
+    // `mov s1, v0.s[1]` is an alias for it, and it is what a vectorised hash
+    // reaches for to fold its accumulator lanes together -- "A Short Hike"
+    // stops on one 1.29 billion instructions in.
+    //
+    // It differs from the vector copy group only in bits[28:21], so it was
+    // being rejected along with everything else that is not 0111 0000. Unlike
+    // the vector DUP the lane is *not* replicated: it goes at the bottom and
+    // the rest of the register is zeroed.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x4444_4444_3333_3333_2222_2222_1111_1111u128);
+    cpu.mem.map(0x1000, &0x5e0c0401u32.to_le_bytes()).unwrap(); // dup s1, v0.s[1]
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_vreg(1), 0x2222_2222);
+
+    // The lane size comes from the lowest set bit of imm5, the index from the
+    // bits above it: `dup d1, v0.d[1]` = 0x5e180401.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x4444_4444_3333_3333_2222_2222_1111_1111u128);
+    cpu.mem.map(0x1000, &0x5e180401u32.to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_vreg(1), 0x4444_4444_3333_3333);
+
+    // `dup b1, v0.b[3]` = 0x5e070401.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x4444_4444_3333_3333_2222_2222_1111_1111u128);
+    cpu.mem.map(0x1000, &0x5e070401u32.to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_vreg(1), 0x11);
+
+    // The vector form of DUP shares the imm5 encoding and must still
+    // replicate rather than zero: `dup v1.4s, v0.s[1]` = 0x4e0c0401.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x4444_4444_3333_3333_2222_2222_1111_1111u128);
+    cpu.mem.map(0x1000, &0x4e0c0401u32.to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_vreg(1), 0x2222_2222_2222_2222_2222_2222_2222_2222u128);
+}
+
+#[test]
 fn a_logical_immediate_writes_sp_but_ands_writes_the_zero_register() {
     // `AND`, `ORR` and `EOR` (immediate) spell register 31 as **SP**; only
     // `ANDS` -- the `TST` alias -- spells it as the zero register. Treating all
