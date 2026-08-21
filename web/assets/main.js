@@ -76,6 +76,67 @@ function log(msg, cls) {
 function clearConsole() { consoleEl.textContent = ''; }
 $('btn-clear-console').addEventListener('click', clearConsole);
 
+/** The whole on-page log as text, one line per entry.
+ *
+ *  Not `consoleEl.textContent`: every entry is its own `<div>`, and that
+ *  property concatenates their text with nothing in between, so a register
+ *  dump and the trace after it would arrive as one unbroken line. */
+function consoleText() {
+  return Array.from(consoleEl.children).map((node) => node.textContent).join('\n');
+}
+
+const copyBtn = $('btn-copy-console');
+
+/** Say what happened on the button itself and put its label back. A log copy
+ *  is worth confirming -- there is no other sign it worked -- but not worth a
+ *  line in the log it just copied. */
+let copyLabelTimer = 0;
+function flashCopyLabel(text) {
+  clearTimeout(copyLabelTimer);
+  copyBtn.textContent = text;
+  copyLabelTimer = setTimeout(() => { copyBtn.textContent = 'Copy all'; }, 1400);
+}
+
+/** `navigator.clipboard` needs a secure context, which a page served over
+ *  plain http from another machine is not -- and that is exactly how this gets
+ *  opened when someone is testing on a phone. Fall back to a selection copy,
+ *  which has no such requirement. */
+function copyViaSelection(text) {
+  const area = el('textarea');
+  area.value = text;
+  area.setAttribute('readonly', '');
+  // Off-screen rather than hidden: a display:none textarea cannot be selected.
+  area.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0';
+  document.body.appendChild(area);
+  area.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch {
+    ok = false;
+  }
+  area.remove();
+  return ok;
+}
+
+async function copyConsole() {
+  const text = consoleText();
+  if (!text) {
+    flashCopyLabel('Log is empty');
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    flashCopyLabel('Copied');
+    return;
+  } catch {
+    // Fall through: no clipboard API, or the permission was refused.
+  }
+  flashCopyLabel(copyViaSelection(text) ? 'Copied' : 'Copy failed');
+}
+
+copyBtn.addEventListener('click', copyConsole);
+
 async function readLastError() { return await call('last_error'); }
 
 function fmtSize(n) {
