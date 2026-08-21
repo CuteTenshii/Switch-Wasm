@@ -27,6 +27,14 @@ pub struct GpuStats {
     /// Method writes that hit a register with no implemented behaviour. These
     /// are still stored in the register file, so state stays coherent.
     pub inert_methods: u64,
+    /// Draws the rasterizer refused, almost always because the shader used an
+    /// instruction the interpreter does not decode.
+    ///
+    /// Counted because the symptom otherwise carries no information: the draw
+    /// is dropped, the render target keeps whatever was in it, and the frame
+    /// is presented black with nothing to say why. `draws` minus this is what
+    /// actually reached the framebuffer.
+    pub draws_skipped: u64,
 }
 
 pub struct ExecCtx<'a> {

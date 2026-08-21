@@ -518,6 +518,7 @@ impl Engine3D {
     /// real pixels for that draw. `TRACE_GPU` surfaces why.
     fn rasterize_or_log(&self, ctx: &mut ExecCtx) {
         if let Err(e) = raster::draw(self, ctx) {
+            ctx.stats.draws_skipped += 1;
             if ctx.trace {
                 eprintln!("[gpu] raster: {}", e);
             }

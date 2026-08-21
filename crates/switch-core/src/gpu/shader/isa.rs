@@ -1106,6 +1106,32 @@ fn decode_alu_wide(insn: u64) -> Op {
             false,
         );
     }
+    // xmad, immediate form: the register form with a **15-bit** immediate at
+    // 20..35 in place of the b register, and every modifier left exactly
+    // where the register form keeps it.
+    //
+    // The width is what makes this form readable. A 32-bit multiply by a
+    // constant lowers to a pair — `xmad d, a, K, RZ` then
+    // `xmad.psl d, a.h1, K, c` — and both halves multiply by the *same* K.
+    // Reading the immediate as the usual 20 bits makes the second one
+    // multiply by `K | 0x10000` instead, because bit 36 is `psl` and not part
+    // of the immediate at all. Fifteen bits is the width at which the pair
+    // agrees, and it leaves `bh` at 35 where the register form has it.
+    //
+    // Without this arm 59 of "A Short Hike"'s 297 draws were dropped by the
+    // rasterizer and its frames came out black.
+    if insn & 0xffc0_0000_0000_0000 == 0x3600_0000_0000_0000 {
+        return decode_xmad(
+            insn,
+            Operand::Imm(field(insn, 20, 15) as u32),
+            Operand::Reg(reg(insn, 39, 8)),
+            field(insn, 35, 1) != 0,
+            field(insn, 50, 3),
+            field(insn, 38, 1) != 0,
+            field(insn, 36, 1) != 0,
+            field(insn, 37, 1) != 0,
+        );
+    }
 
     // fset — the register-writing form of fsetp.
     if insn & 0xff00_0000_0000_0000 == 0x5800_0000_0000_0000
@@ -1480,6 +1506,39 @@ mod tests {
 
     /// Assemble one instruction: an opcode's top 16 bits, the always-true
     /// guard predicate, and whatever operand fields the caller sets.
+    /// The 32-bit-multiply-by-a-constant pair, as "A Short Hike" emits it.
+    /// Both halves must come out multiplying by the *same* constant: reading
+    /// the immediate as the usual 20 bits makes the second one multiply by
+    /// `K | 0x10000`, because bit 36 is `psl` and not part of the immediate.
+    #[test]
+    fn xmad_immediate_keeps_its_modifiers_where_the_register_form_does() {
+        // xmad R1, R2, 0x7, RZ
+        let lo = asm(0x3600, &[(0, 8, 1), (8, 8, 2), (20, 15, 7), (39, 8, 255)]);
+        match op(lo) {
+            Op::Xmad { dst, a, ah, b, c, psl, mrg, .. } => {
+                assert_eq!((dst, a), (1, 2));
+                assert_eq!(b, Operand::Imm(7));
+                assert_eq!(c, Operand::Reg(255));
+                assert!(!ah && !psl && !mrg);
+            }
+            other => panic!("expected xmad, got {other:?}"),
+        }
+        // xmad.psl R1, R2.h1, 0x7, R0 — the same constant, one bit up.
+        let hi = asm(
+            0x3600,
+            &[(0, 8, 1), (8, 8, 2), (20, 15, 7), (36, 1, 1), (39, 8, 0), (53, 1, 1)],
+        );
+        match op(hi) {
+            Op::Xmad { b, c, ah, psl, .. } => {
+                assert_eq!(b, Operand::Imm(7), "the immediate absorbed the psl bit");
+                assert_eq!(c, Operand::Reg(0));
+                assert!(ah, "a.h1 not decoded");
+                assert!(psl, "psl not decoded");
+            }
+            other => panic!("expected xmad.psl, got {other:?}"),
+        }
+    }
+
     fn asm(opcode: u16, fields: &[(u32, u32, u64)]) -> u64 {
         let mut w = (opcode as u64) << 48;
         w |= 0x7 << 16; // PT, not negated
