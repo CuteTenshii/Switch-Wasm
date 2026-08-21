@@ -7,7 +7,6 @@
 
 use crate::gpu::engine::compute::EngineCompute;
 use crate::gpu::engine::copy::EngineCopy;
-use crate::gpu::engine::inline::{EngineInline, METHOD_RANGE as INLINE_METHODS};
 use crate::gpu::engine::threed::Engine3D;
 use crate::gpu::engine::twod::Engine2D;
 use crate::gpu::engine::{field, Registers, CLASS_2D, CLASS_3D, CLASS_COMPUTE, CLASS_COPY,
@@ -71,7 +70,6 @@ pub struct Channel {
     pub three_d: Engine3D,
     pub two_d: Engine2D,
     pub copy: EngineCopy,
-    pub inline: EngineInline,
     pub compute: EngineCompute,
     /// MAXWELL_CHANNEL_GPFIFO_A's own register file.
     pub gpfifo_regs: Registers,
@@ -91,7 +89,6 @@ impl Channel {
             three_d: Engine3D::new(),
             two_d: Engine2D::new(),
             copy: EngineCopy::new(),
-            inline: EngineInline::new(),
             compute: EngineCompute::new(),
             gpfifo_regs: Registers::new(),
             gpfifo_entries: 0,
@@ -212,14 +209,11 @@ impl Channel {
         }
         match class {
             CLASS_3D => {
-                // The 3D class also exposes the inline-to-memory methods, and
-                // deko3d sends them on the 3D subchannel.
-                if INLINE_METHODS.contains(&method) {
-                    self.inline.write(method, arg, ctx)?;
-                }
                 self.three_d.write(method, arg, last_call, ctx)
             }
-            CLASS_INLINE => self.inline.write(method, arg, ctx),
+            // The standalone class and the 3D class's own methods are one
+            // unit sharing one register file, so they share one instance.
+            CLASS_INLINE => self.three_d.inline.write(method, arg, ctx),
             CLASS_2D => self.two_d.write(method, arg, ctx),
             CLASS_COPY => self.copy.write(method, arg, ctx),
             CLASS_COMPUTE => self.compute.write(method, arg, ctx),

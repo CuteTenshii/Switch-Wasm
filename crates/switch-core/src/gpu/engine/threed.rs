@@ -297,6 +297,12 @@ impl RenderTarget {
 pub struct Engine3D {
     pub regs: Registers,
     pub macros: MacroEngine,
+    /// The inline-to-memory unit, which the 3D class exposes as its own
+    /// methods and which lives here rather than on the channel so that
+    /// **every** route into `write` reaches it. A macro's method writes do not
+    /// go through the channel at all, and this class's inline upload is
+    /// exactly what a macro is used for.
+    pub inline: crate::gpu::engine::inline::EngineInline,
     /// The last draw the engine was asked to perform.
     pub last_draw: DrawCall,
     /// Write cursor for `LoadConstbufData`, in bytes.
@@ -319,6 +325,7 @@ impl Engine3D {
         Engine3D {
             regs: Registers::new(),
             macros: MacroEngine::new(),
+            inline: crate::gpu::engine::inline::EngineInline::new(),
             last_draw: DrawCall::default(),
             constbuf_cursor: 0,
             bound_constbufs: HashMap::new(),
@@ -354,10 +361,17 @@ impl Engine3D {
             DRAW_ELEMENTS_COUNT => self.draw_elements(arg, ctx)?,
             VERTEX_BEGIN_GL => self.last_draw.primitive = field(arg, 0, 15),
             VERTEX_END_GL => {}
-            INLINE_FIRST..=INLINE_LAST => {
-                // Shares the register file with the inline-to-memory class,
-                // which the channel drives; nothing extra to do here.
-            }
+            // The inline-to-memory methods the 3D class shares with
+            // KEPLER_INLINE_TO_MEMORY_B. These used to do nothing here on the
+            // reasoning that the channel drives them — which it does, but only
+            // for methods that arrive in a pushbuffer. A **macro**'s writes go
+            // straight to this engine, and uploading a small buffer from a
+            // macro is precisely what the class is for: "A Short Hike" pushes
+            // 576 `LoadInlineData` words that way, its vertex buffer among
+            // them, and every one of them was dropped on the floor. Its
+            // triangles then came out with all three corners at the same
+            // point, and it presented black frames.
+            INLINE_FIRST..=INLINE_LAST => self.inline.write(method, arg, ctx)?,
             _ => ctx.stats.inert_methods += 1,
         }
         Ok(())
@@ -393,6 +407,9 @@ impl Engine3D {
                     self.engine.regs.get(method)
                 }
                 fn write_method(&mut self, write: MacroWrite) -> Result<()> {
+                    if self.ctx.trace {
+                        eprintln!("[gpu] mme method={:#05x} arg={:#010x}", write.method, write.arg);
+                    }
                     self.engine.write(write.method, write.arg, true, self.ctx)
                 }
             }
@@ -520,7 +537,14 @@ impl Engine3D {
         if let Err(e) = raster::draw(self, ctx) {
             ctx.stats.draws_skipped += 1;
             if ctx.trace {
-                eprintln!("[gpu] raster: {}", e);
+                // With the vertex array the draw was going to read: a draw
+                // that fails and one that reads an empty buffer look the same
+                // on screen, and this is what tells them apart.
+                let va = self.vertex_array(0);
+                eprintln!(
+                    "[gpu] raster: {e} [vtx0 start={:#x} stride={} count={}]",
+                    va.start, va.stride, self.last_draw.count
+                );
             }
         }
     }

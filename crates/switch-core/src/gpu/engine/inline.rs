@@ -40,7 +40,16 @@ impl EngineInline {
     pub fn write(&mut self, method: u32, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
         self.regs.set(method, arg);
         match method {
-            LAUNCH_DMA => self.written = 0,
+            LAUNCH_DMA => {
+                self.written = 0;
+                if ctx.trace {
+                    eprintln!(
+                        "[gpu] inline launch dst={:#x} line_len={} lines={} pitch={} flags={arg:#x}",
+                        self.regs.iova(OFFSET_OUT), self.regs.get(LINE_LENGTH_IN),
+                        self.regs.get(LINE_COUNT), self.regs.get(PITCH_OUT)
+                    );
+                }
+            }
             LOAD_INLINE_DATA => self.load_inline_data(arg, ctx)?,
             _ => {}
         }
