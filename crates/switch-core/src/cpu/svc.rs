@@ -302,6 +302,12 @@ impl Cpu {
                 let owner = self.read_zr(0) as u32;
                 let mutex = self.read_zr(1) as u32;
                 let requester = self.read_zr(2) as u32;
+                if std::env::var("TRACE_WAIT").is_ok() {
+                    eprintln!(
+                        "[wait] lock mutex={mutex:#x} owner={owner:#x} self={requester:#x} thread={:#x}",
+                        self.current_thread_handle()
+                    );
+                }
                 self.write_zr(0, RESULT_OK);
                 self.arbitrate_lock(owner, mutex, requester);
                 Ok(())
@@ -319,6 +325,17 @@ impl Cpu {
                 let mutex = self.read_zr(0) as u32;
                 let key = self.read_zr(1) as u32;
                 let requester = self.read_zr(2) as u32;
+                // Read for the trace below, and not acted on: every
+                // condition-variable wait this has been seen to make is
+                // untimed. A finite one would have to expire against a clock,
+                // and the only clock here is the guest's own presents.
+                let timeout = self.read_zr(3) as i64;
+                if std::env::var("TRACE_WAIT").is_ok() {
+                    eprintln!(
+                        "[wait] condvar key={key:#x} mutex={mutex:#x} timeout={timeout} thread={:#x}",
+                        self.current_thread_handle()
+                    );
+                }
                 self.write_zr(0, RESULT_OK);
                 self.wait_process_wide_key(mutex, key, requester);
                 Ok(())
@@ -327,6 +344,12 @@ impl Cpu {
                 // SignalProcessWideKey(key = X0, count = W1)
                 let key = self.read_zr(0) as u32;
                 let count = self.read_zr(1) as u32 as i32;
+                if std::env::var("TRACE_WAIT").is_ok() {
+                    eprintln!(
+                        "[wait] signal key={key:#x} count={count} thread={:#x}",
+                        self.current_thread_handle()
+                    );
+                }
                 self.write_zr(0, RESULT_OK);
                 self.signal_process_wide_key(key, count);
                 Ok(())
