@@ -736,9 +736,20 @@ impl Cpu {
                 self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[])
             }
             // 60 = OpenSaveDataInfoReader, 61 = ...BySaveDataSpaceId,
-            // 62 = ...OnlyCacheStorage: the enumerator a save manager walks to
-            // find what is on the console.
-            Some(60) | Some(61) | Some(62) => {
+            // 62 = ...OnlyCacheStorage, 68 = ...WithFilter: the enumerator a
+            // save manager walks to find what is on the console. All four hand
+            // out the same `ISaveDataInfoReader`; the filter 68 takes (a save
+            // type, a user id, a title id — which of them apply is a mask) only
+            // narrows what it would report, and nothing is reported either way.
+            //
+            // 68 is the 6.0.0+ form, and it is the one a current JKSV opens.
+            // It used to fall through to the catch-all below, which answers
+            // with success and *no* out-object: `libnx` then read its reader
+            // session handle out of a reply that had no handle in it and sent
+            // `ReadSaveDataInfo` to handle 0 — the "<untracked session> cmd=0"
+            // that the generic object-id reply answered with an object id the
+            // caller read back as an entry count of several billion.
+            Some(60) | Some(61) | Some(62) | Some(68) => {
                 self.reply_with_interface(tls, handle, "fsp-srv-save-info-reader")?;
                 Ok(())
             }
@@ -5285,6 +5296,30 @@ mod tests {
         write_request(&mut cpu, 52, &[0u8; 0x10]);
         cpu.fsp_srv_request(TLS, Some(52), 9).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 2 | (1 << 9), "path not found");
+    }
+
+    #[test]
+    fn the_filtered_save_scan_is_a_reader_too() {
+        // 68 = OpenSaveDataInfoReaderWithFilter, the 6.0.0+ form a current
+        // JKSV opens once per save type. It hands out the same reader as the
+        // unfiltered 60/61/62; falling through to the catch-all instead gave
+        // the caller a success with no out-object, and `libnx` then sent
+        // `ReadSaveDataInfo` to session handle 0.
+        let mut payload = [0u8; 0x48];
+        payload[0] = 1; // FsSaveDataSpaceId::User
+        let mut cpu = request(false, 68, &payload);
+        cpu.record_handle(9, "fsp-srv");
+        cpu.fsp_srv_request(TLS, Some(68), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        let reader = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        assert_ne!(reader, 0, "reader session");
+        assert_eq!(cpu.service_name(reader), Some("fsp-srv-save-info-reader"));
+
+        // A filter can only narrow a list that is already empty.
+        write_request(&mut cpu, 0, &[]);
+        cpu.fs_save_data_info_reader_request(TLS, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "entries");
     }
 
     #[test]
