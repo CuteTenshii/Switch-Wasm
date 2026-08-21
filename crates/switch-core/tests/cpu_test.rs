@@ -4647,20 +4647,74 @@ fn the_display_answers_what_it_is() {
 }
 
 #[test]
+fn nifm_answers_a_system_title_the_same_as_an_application() {
+    // `nifm:u`, `nifm:s` and `nifm:a` are one interface at three privilege
+    // levels, and only the first was routed to the implementation -- so a
+    // system title, which opens `nifm:s`, had every network call answered by
+    // the generic fallback instead.
+    //
+    // The command ids were crossed underneath that: 12 answered with the
+    // connection-status triple and 15 with the IP address, when 12 *is*
+    // GetCurrentIpAddress and 18 is GetInternetConnectionStatus. A caller
+    // asking this console for its own address got `{2, 0, 2}` back.
+    const NIFM: u64 = 0xD100;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(NIFM, "nifm:s");
+    let tls = cpu.tls_base();
+
+    ipc_request_plain(&mut cpu, NIFM, 5, &[]); // CreateGeneralService
+    let general = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(general, 0, "no IGeneralService for nifm:s");
+
+    ipc_request_plain(&mut cpu, general, 12, &[]); // GetCurrentIpAddress
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x20).unwrap().to_le_bytes(),
+        [192, 168, 1, 100],
+        "GetCurrentIpAddress did not answer with an address"
+    );
+    ipc_request_plain(&mut cpu, general, 18, &[]); // GetInternetConnectionStatus
+    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 2, "not an ethernet link");
+    assert_eq!(cpu.mem.read_u8(tls + 0x22).unwrap(), 2, "not connected");
+
+    // A request on a link that is up is accepted the moment it is made, and
+    // the two events a caller waits on for that have already happened.
+    ipc_request_plain(&mut cpu, general, 4, &[]); // CreateRequest
+    let request = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(request, 0, "no IRequest");
+    ipc_request_plain(&mut cpu, request, 0, &[]); // GetRequestState
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 3, "the request was not accepted");
+
+    ipc_request_plain(&mut cpu, request, 2, &[]); // GetSystemEventReadableHandles
+    // { send_pid:1, num_copy:4, num_move:4 }: **two** copy handles. One left
+    // the caller holding a session for the second, and a bare success left it
+    // holding 0 for both.
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 2 << 1);
+    let state = cpu.mem.read_u32(tls + 0x0c).unwrap();
+    let done = cpu.mem.read_u32(tls + 0x10).unwrap();
+    assert_ne!(state, 0);
+    assert_ne!(done, 0);
+    assert_ne!(state, done);
+    assert_eq!(wait_sync(&mut cpu, &[state], 0).0, 0, "the state never settled");
+    assert_eq!(wait_sync(&mut cpu, &[done], 0).0, 0, "the request never finished");
+}
+
+#[test]
 fn a_service_with_no_stub_still_answers_its_control_commands() {
     // The control commands belong to the session, not to whatever is behind
     // it, so a service with no dedicated stub still has to answer them itself.
     // The generic fallback used to hand them the same fabricated object id it
     // hands every other command -- and as a *pointer buffer size* that is a
     // large number, which is how a caller decides to marshal its buffers as
-    // pointer buffers, the one form this IPC layer does not read. `nifm`,
-    // `friend`, `olsc`, `prepo` and `btm` were all being told to send their
-    // data somewhere nothing looks.
+    // pointer buffers, the one form this IPC layer does not read. `friend`,
+    // `olsc`, `prepo` and `btm` were all being told to send their data
+    // somewhere nothing looks.
     const NIFM: u64 = 0xD000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
     cpu.set_pc(0x1000);
-    cpu.register_service_handle(NIFM, "nifm:s");
+    cpu.register_service_handle(NIFM, "btm:sys");
     let tls = cpu.tls_base();
 
     for msg_type in [5u32, 7] {
@@ -4679,7 +4733,7 @@ fn a_service_with_no_stub_still_answers_its_control_commands() {
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
     let object = cpu.mem.read_u32(tls + 0x20).unwrap();
     assert_ne!(object, 0, "no domain object came back");
-    assert_eq!(cpu.domain_interface_name(NIFM, object).as_deref(), Some("nifm:s"));
+    assert_eq!(cpu.domain_interface_name(NIFM, object).as_deref(), Some("btm:sys"));
 }
 
 #[test]

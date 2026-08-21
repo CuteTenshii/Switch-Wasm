@@ -5120,17 +5120,25 @@ impl Cpu {
             .unwrap_or(&APM_DEFAULT_CONFIGURATION[APM_PERFORMANCE_MODE_NORMAL as usize])
     }
 
-    /// `nifm:u`'s root session: session control plus
-    /// `CreateGeneralServiceOld`/`CreateGeneralService`, which hand back the
-    /// `IGeneralService` homebrew actually queries connectivity through.
+    /// `nifm`'s root session (`nifm:u`, `nifm:s`, `nifm:a`): session control
+    /// plus `CreateGeneralServiceOld`/`CreateGeneralService`, which hand back
+    /// the `IGeneralService` connectivity is actually queried through.
+    ///
+    /// The three names are the same interface at three privilege levels, and
+    /// only `nifm:u` used to be routed here — so a system title, which opens
+    /// `nifm:s`, had every one of its network calls answered by the generic
+    /// fallback instead.
     pub(super) fn nifm_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
+                    // Under the session's own name, so the three aliases stay
+                    // distinguishable in a trace.
+                    let name = self.service_name(handle).unwrap_or("nifm:u").to_string();
                     let obj = self.alloc_domain_object();
-                    self.record_domain_object(handle, obj, "nifm:u");
+                    self.record_domain_object(handle, obj, &name);
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
                 }
                 Some(QUERY_POINTER_BUFFER_SIZE) => {
@@ -5153,33 +5161,98 @@ impl Cpu {
     /// `IGeneralService`: reports a wired connection that is up and has
     /// internet access, and hands out `IRequest` objects that immediately
     /// look accepted — there is no real network stack behind this, so every
-    /// homebrew that only checks "is there a connection" sees a permanent
-    /// wired one instead of the emulator looking offline.
+    /// caller that only checks "is there a connection" sees a permanent wired
+    /// one instead of the emulator looking offline.
+    ///
+    /// The command ids used to be crossed: 12 answered with the connection
+    /// status triple and 15 with the IP address, when 12 *is*
+    /// `GetCurrentIpAddress`, 15 is `GetCurrentIpConfigInfo` and 18 is
+    /// `GetInternetConnectionStatus`. So a caller asking for the console's
+    /// address got `{2, 0, 2}` for one, and the one query that matters — is
+    /// there internet — fell through to a bare success.
     pub(super) fn nifm_general_service_request(
         &mut self,
         tls: u32,
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
-        const GET_CLIENT_ID: u32 = 1;
-        const CREATE_REQUEST: u32 = 4;
-        const GET_CURRENT_IP_ADDRESS: u32 = 15;
-        const GET_INTERNET_CONNECTION_STATUS: u32 = 12;
         match cmd_id {
-            Some(GET_CLIENT_ID) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]),
-            Some(CREATE_REQUEST) => {
-                let obj = self.alloc_domain_object();
-                self.record_domain_object(handle, obj, "nifm:request");
-                self.write_ipc_response(tls, 0, &[], &[], &[obj])
+            // GetClientId.
+            Some(1) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]),
+            // CreateScanRequest / CreateRequest / CreateTemporaryNetworkProfile.
+            Some(2) | Some(4) | Some(14) => {
+                self.reply_with_interface(tls, handle, "nifm:request")?;
+                Ok(())
             }
-            // NifmInternetConnectionType_Ethernet, no Wi-Fi strength to
-            // report, NifmInternetConnectionStatus_Connected.
-            Some(GET_INTERNET_CONNECTION_STATUS) => {
-                self.write_ipc_response(tls, 0, &[], &[2u8, 0u8, 2u8], &[])
+            // EnumerateNetworkInterfaces / EnumerateNetworkProfiles: the list
+            // goes in a buffer nothing fills, and the count that comes back
+            // with it is what a caller iterates on. Zero of them.
+            Some(6) | Some(7) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // GetCurrentIpAddress.
+            Some(12) => self.write_ipc_response(tls, 0, &[], &NIFM_LOCAL_IP, &[]),
+            // GetCurrentIpConfigInfo -> IpAddressSetting { bool is_automatic;
+            // address; subnet; gateway } then a DnsSetting. Automatic, with
+            // the address `bsd` also reports, a /24 behind it and the router
+            // at .1 — the three have to agree or a caller computing its own
+            // broadcast address gets one off this subnet.
+            Some(15) => {
+                let mut raw = Vec::with_capacity(0x18);
+                raw.push(1); // is_automatic
+                raw.extend_from_slice(&NIFM_LOCAL_IP);
+                raw.extend_from_slice(&[255, 255, 255, 0]);
+                raw.extend_from_slice(&[NIFM_LOCAL_IP[0], NIFM_LOCAL_IP[1], NIFM_LOCAL_IP[2], 1]);
+                raw.resize(0x18, 0); // the DnsSetting, which resolves nothing
+                self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
-            Some(GET_CURRENT_IP_ADDRESS) => {
-                self.write_ipc_response(tls, 0, &[], &NIFM_LOCAL_IP, &[])
+            // IsWirelessCommunicationEnabled: the link this reports is wired,
+            // so the radio is off — and saying otherwise invites a caller to
+            // scan for access points that do not exist.
+            Some(17) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+            // GetInternetConnectionStatus -> { NifmInternetConnectionType,
+            // wifi strength, status }: Ethernet, no strength to report,
+            // connected.
+            Some(18) => self.write_ipc_response(tls, 0, &[], &[2u8, 0u8, 2u8], &[]),
+            // IsEthernetCommunicationEnabled: that is the link.
+            Some(20) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
+            // IsAnyInternetRequestAccepted / IsAnyForegroundRequestAccepted:
+            // a request made here is accepted the moment it is made, so both.
+            Some(21) | Some(22) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
+            _ => {
+                self.warn_no_implementation("nifm:general-service", cmd_id);
+                self.write_ipc_response(tls, 0, &[], &[], &[])
             }
+        }
+    }
+
+    /// `IRequest`: one application's claim on the network.
+    ///
+    /// The link is up and nothing else is competing for it, so a request is
+    /// **Accepted** from the moment it exists and its result is success.
+    /// The two events it hands out start signalled for the same reason: a
+    /// caller waits on them for the state to settle, and it already has.
+    /// Answering those two with nothing — which is what a bare success does —
+    /// left a caller holding handle 0 for the one and a session for the other.
+    pub(super) fn nifm_request_object_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        match cmd_id {
+            // GetRequestState -> NifmRequestState_Accepted.
+            Some(0) => self.write_ipc_response(tls, 0, &[], &3u32.to_le_bytes(), &[]),
+            // GetSystemEventReadableHandles -> **two** copy handles: the state
+            // change and the request's completion.
+            Some(2) => {
+                let state = self.alloc_event("nifm:request-state", true);
+                let done = self.alloc_event("nifm:request-done", true);
+                self.signal_event(state);
+                self.signal_event(done);
+                self.write_ipc_reply(tls, 0, &[state, done], &[], &[], &[])
+            }
+            // GetRevision.
+            Some(20) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // GetResult, Cancel, Submit, SubmitAndWait and the whole family of
+            // requirement setters: a bare Result, and nothing here to set.
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
         }
     }

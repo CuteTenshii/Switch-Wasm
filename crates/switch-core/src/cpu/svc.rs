@@ -719,16 +719,31 @@ impl Cpu {
                         | "am:storage"
                         | "am:storage-accessor"
                         | "am:debug-functions" => self.applet_request(tls, handle, cmd_id)?,
-                        "nifm:u" => {
+                        // nifm at all three privilege levels: `nifm:u` for an
+                        // application, `nifm:s` for a system title, `nifm:a`
+                        // for the administrator. The same interface behind
+                        // each — and only the first was routed here, so a
+                        // system title's network calls all went to the generic
+                        // fallback.
+                        "nifm:u" | "nifm:s" | "nifm:a" => {
                             let object_id = self.ipc_domain_object_id(tls);
                             match self.domain_interface(handle, object_id) {
                                 Some("nifm:general-service") => {
                                     self.nifm_general_service_request(tls, handle, cmd_id)?
                                 }
-                                Some("nifm:request") => self.write_ipc_response(tls, 0, &[], &[], &[])?,
+                                Some("nifm:request") => {
+                                    self.nifm_request_object_request(tls, cmd_id)?
+                                }
                                 _ => self.nifm_request(tls, cmd_id, handle)?,
                             }
                         }
+                        // The same two over their own session handles, which
+                        // is how a caller that never converts to a domain
+                        // reaches them.
+                        "nifm:general-service" => {
+                            self.nifm_general_service_request(tls, handle, cmd_id)?
+                        }
+                        "nifm:request" => self.nifm_request_object_request(tls, cmd_id)?,
                         // ssl, the system TLS stack, and the contexts it
                         // hands out over either route.
                         "ssl" | "ssl:service" | "ssl:context" => {
