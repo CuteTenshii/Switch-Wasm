@@ -3522,6 +3522,85 @@ fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
 }
 
 #[test]
+fn an_audio_thread_appending_buffers_does_not_starve_the_others() {
+    // `audout` releases every buffer the moment it is appended -- a device
+    // that never falls behind -- so the guest's mixer never has to wait on the
+    // buffer event it registered. Threads here only hand over at a blocking
+    // syscall, and a mixer with nothing to wait for never reaches one: in "A
+    // Short Hike" the FMOD mixer thread took the CPU and kept it, and the main
+    // thread sat `Runnable` and unscheduled for a billion instructions while
+    // the game drew nothing. Appending is a round trip into the audio process
+    // on hardware, so it is a place the caller gives the CPU up.
+    const HANDLE_SLOT: u32 = 0x6100;
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.register_service_handle(0x30, "audout:u");
+    cpu.mem.map_zero(0x4000, 0x2000).unwrap(); // the child's stack
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap(); // the flag main sets, and the handle
+
+    // OpenAudioOut(48 kHz, stereo) -> an IAudioOut as a move handle, which is
+    // the session the mixer below appends to.
+    let mut args = Vec::new();
+    args.extend_from_slice(&48_000u32.to_le_bytes());
+    args.extend_from_slice(&2u32.to_le_bytes());
+    args.extend_from_slice(&0u64.to_le_bytes()); // aruid
+    ipc_request_plain(&mut cpu, 0x30, 1, &args);
+    let device = u64::from(cpu.mem.read_u32(cpu.tls_base() + 0x0c).unwrap());
+    assert_ne!(device, 0, "no IAudioOut came back");
+    cpu.mem.write_u64(HANDLE_SLOT, device).unwrap();
+
+    // main: start the mixer, sleep once to hand it the CPU, and then -- only
+    // if it hands the CPU back -- set the flag and exit.
+    let main = [
+        0xd284_0001u32, // mov x1, #0x2000  (entry)
+        0xd280_0002,    // mov x2, #0       (arg)
+        0xd28a_0003,    // mov x3, #0x5000  (stack top)
+        0x5280_0764,    // mov w4, #0x3b    (priority)
+        0x1280_0005,    // mov w5, #-1      (core)
+        0xd400_0101,    // svc #8           (CreateThread -> handle in x1)
+        0xaa01_03e0,    // mov x0, x1
+        0xd400_0121,    // svc #9           (StartThread)
+        0xd400_0161,    // svc #0xb         (SleepThread -> over to the mixer)
+        0xd28c_0009,    // mov x9, #0x6000
+        0x5280_0aa1,    // mov w1, #0x55
+        0xb900_0121,    // str w1, [x9]
+        0xd400_00e1,    // svc #7           (ExitProcess)
+    ];
+    // The mixer: build an `AppendAudioOutBuffer` CMIF request in its own TLS
+    // block and send it, forever -- no wait, no sleep, nothing that blocks.
+    // Threads get their TLS at THREAD_TLS_BASE + index * stride; this is
+    // thread 1. The request carries no buffer descriptor, so no samples move;
+    // what is under test is who holds the CPU afterwards.
+    let child = [
+        0xd282_0009u32, // mov x9, #0x1000
+        0xf2a3_fc29,    // movk x9, #0x1fe1, lsl #16   (= THREAD_TLS_BASE + stride)
+        0x5280_0081,    // mov w1, #4                  (message type: Request)
+        0xb900_0121,    // str w1, [x9]
+        0x5280_0101,    // mov w1, #8                  (data words)
+        0xb900_0521,    // str w1, [x9, #4]
+        0x5288_ca61,    // mov w1, #0x4653             ("SFCI")
+        0x72a9_2861,    // movk w1, #0x4943, lsl #16
+        0xb900_1121,    // str w1, [x9, #0x10]
+        0x5280_0061,    // mov w1, #3                  (AppendAudioOutBuffer)
+        0xb900_1921,    // str w1, [x9, #0x18]
+        0xd28c_200a,    // mov x10, #0x6100
+        0xf940_0140,    // ldr x0, [x10]               (the IAudioOut handle)
+        0xd400_0421,    // svc #0x21                   (SendSyncRequest)
+        0x17ff_fff4,    // b -0x30                     (round again)
+    ];
+    let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
+    cpu.mem.map_zero(0x1000, 0x100).unwrap();
+    cpu.mem.map(0x1000, &bytes(&main)).unwrap();
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &bytes(&child)).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(10_000).unwrap();
+
+    assert!(cpu.halted, "main never got the CPU back from the mixing thread");
+    assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 0x55);
+}
+
+#[test]
 fn set_thread_activity_takes_a_thread_out_of_the_rotation() {
     // `svcSetThreadActivity` is `nn::os::SuspendThread`/`ResumeThread`. A
     // suspended thread keeps whatever it was doing and simply stops being

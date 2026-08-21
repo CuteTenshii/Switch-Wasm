@@ -4556,6 +4556,16 @@ impl Cpu {
             self.queue_audio(scaled);
         }
         self.signal_event(event);
+        // Give up the CPU here. On hardware this call is a round trip into the
+        // audio process and the caller is descheduled for its duration, but
+        // the reason it matters is scheduling rather than fidelity: releasing
+        // every buffer the instant it is appended (above) means the guest's
+        // mixer never has to wait on the buffer event, and the scheduler only
+        // switches threads at a blocking syscall. A mixer that never blocks
+        // never yields, so it owned the CPU outright -- "A Short Hike"'s main
+        // thread was left `Runnable` and unscheduled for a billion
+        // instructions while FMOD converted float samples to 16-bit forever.
+        self.pending_yield = true;
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
