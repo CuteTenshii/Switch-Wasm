@@ -263,6 +263,17 @@ pub extern "C" fn switch_free_session(handle: u32) {
     }
 }
 
+/// How many message bytes fit in a `maxlen`-byte buffer that also has to hold
+/// a terminating NUL.
+///
+/// The NUL comes out of the **buffer**, not out of the message. Writing this
+/// as `len.min(maxlen).saturating_sub(1)` instead took the byte off the
+/// message every time, however much room was left: with 512 bytes free,
+/// "no container is open" reached the console as "no container is ope".
+fn nul_reserved(maxlen: u32) -> usize {
+    (maxlen as usize).saturating_sub(1)
+}
+
 /// Copy the last error message into `buf` (NUL-terminated). Returns length.
 /// Also surfaces any Rust panic captured by the panic hook.
 #[no_mangle]
@@ -272,7 +283,7 @@ pub extern "C" fn switch_last_error(handle: u32, buf: *mut u8, maxlen: u32) -> u
     let panicked = unsafe { &mut *PANIC_MSG.get() };
     if panicked[0] != 0 {
         let len = panicked.iter().position(|&b| b == 0).unwrap_or(panicked.len());
-        let n = len.min(maxlen as usize).saturating_sub(1);
+        let n = len.min(nul_reserved(maxlen));
         if n > 0 && !buf.is_null() {
             unsafe {
                 std::ptr::copy_nonoverlapping(panicked.as_ptr(), buf, n);
@@ -284,7 +295,7 @@ pub extern "C" fn switch_last_error(handle: u32, buf: *mut u8, maxlen: u32) -> u
     }
     let s = session(handle);
     let bytes = s.last_error.as_bytes();
-    let n = bytes.len().min(maxlen as usize).saturating_sub(1);
+    let n = bytes.len().min(nul_reserved(maxlen));
     if n > 0 && !buf.is_null() {
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), buf, n);
@@ -1626,6 +1637,35 @@ mod tests {
         session(handle).cpu.fs.create_file(r#"/switch/a"b\c"#, 0);
         let json = take_changes(handle);
         assert_eq!(json, r#"[{"path":"/switch/a\"b\\c","kind":"file","size":0}]"#);
+        switch_free_session(handle);
+    }
+
+    #[test]
+    fn an_error_message_keeps_its_last_character() {
+        // The NUL a C string needs comes out of the buffer, not out of the
+        // message. Taking it off the message instead cost every error its last
+        // byte however much room was left, so the console showed "Launch
+        // failed: no container is ope" and read as a truncated console rather
+        // than as a bug in the copy.
+        let (_host, handle) = new_session();
+        const MSG: &str = "no container is open";
+        session(handle).last_error = MSG.to_string();
+
+        let mut buf = [0xAAu8; 64];
+        let n = switch_last_error(handle, buf.as_mut_ptr(), buf.len() as u32);
+        assert_eq!(n as usize, MSG.len());
+        assert_eq!(&buf[..n as usize], MSG.as_bytes());
+        assert_eq!(buf[n as usize], 0, "the copy has to stay NUL-terminated");
+
+        // A message that genuinely does not fit loses the bytes the buffer
+        // cannot hold -- and exactly those, with the NUL inside the buffer.
+        session(handle).last_error = MSG.to_string();
+        let mut small = [0xAAu8; 8];
+        let n = switch_last_error(handle, small.as_mut_ptr(), small.len() as u32);
+        assert_eq!(n as usize, small.len() - 1);
+        assert_eq!(&small[..n as usize], &MSG.as_bytes()[..small.len() - 1]);
+        assert_eq!(small[small.len() - 1], 0);
+
         switch_free_session(handle);
     }
 }

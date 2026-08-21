@@ -579,6 +579,13 @@ $('btn-reset').addEventListener('click', async () => {
   handle = await call('new');
   await stageFont();
   await sdRestore();
+  // Everything else the page is still showing. A new session starts with no
+  // keys, no container and no data archives, while the panel above goes on
+  // reporting all three -- so Launch failed with "no container is open" on a
+  // card that was still sitting on screen.
+  await stageKeys();
+  await restoreArchives();
+  await reopenContainer();
   resetAudio();
   clearConsole();
   lastFrame = 0;
@@ -709,6 +716,26 @@ function handleContainerFile(file) {
   return handleNspFile(file);
 }
 
+// The container the wasm side has open, kept so a new session can be handed
+// the same one. Only the File is held here; nothing is read from it.
+let openContainer = null;
+
+// Give a fresh session the container the page is still showing. Reset means
+// "run this again from the top", not "throw away the file I just picked" --
+// the NSP/NCA card and its Launch button survive a reset either way, and a
+// Launch that then reports "no container is open" is the page lying about its
+// own state.
+async function reopenContainer() {
+  if (!openContainer) return;
+  const { file, kind } = openContainer;
+  const ok = await call(kind === 'nca' ? 'open_nca' : 'open_nsp', file).catch(() => -1);
+  if (ok !== 0) {
+    log('Could not re-open ' + file.name + ' - load it again to launch it.', 'err');
+    openContainer = null;
+    clearNsp();
+  }
+}
+
 // The File itself is handed to the worker, not its bytes: a retail container
 // is larger than anything the emulator can hold - larger, for a modern title,
 // than a wasm32 module can address at all - so it stays on disk and is read a
@@ -722,6 +749,7 @@ async function handleNspFile(file) {
       log('NSP error: ' + await readLastError(), 'err');
       return;
     }
+    openContainer = { file, kind: 'nsp' };
   } catch (e) {
     log('Could not open ' + file.name + ': ' + e.message, 'err');
     return;
@@ -888,6 +916,7 @@ async function handleStandaloneNca(file) {
     out.textContent = 'Could not open ' + file.name + ': ' + e.message;
     return;
   }
+  openContainer = { file, kind: 'nca' };
   const headerLen = Math.min(file.size, 0xC00);
   const header = new Uint8Array(await file.slice(0, headerLen).arrayBuffer());
   const info = await parseAndRenderNca(out, header, file.name, () => launchStandaloneNca(file));
@@ -1031,6 +1060,24 @@ $('title-keys').addEventListener('change', async (e) => {
    persisted the way keys are - the browser will not hand a page a file again
    without being asked - so this is per session. */
 let archiveCount = 0;
+// The archives themselves, so a new session can be given them again. The
+// browser will not hand a page a file it was not asked for, so losing these
+// on reset would mean re-picking a whole firmware dump.
+let firmwareFiles = [];
+
+// Re-register every archive the page still claims to have. Runs before the
+// container is re-opened and after the keys are re-staged, because parsing an
+// NCA header needs them.
+async function restoreArchives() {
+  if (!firmwareFiles.length) return;
+  const kept = [];
+  for (const f of firmwareFiles) {
+    if (await call('add_archive', f).catch(() => -1) === 0) kept.push(f);
+  }
+  firmwareFiles = kept;
+  archiveCount = kept.length;
+  updateFirmwareState();
+}
 
 function updateFirmwareState() {
   $('firmware-state').textContent = archiveCount === 0
@@ -1045,12 +1092,12 @@ $('firmware-ncas').addEventListener('change', async (e) => {
   let added = 0;
   for (const f of files) {
     try {
-      if (await call('add_archive', f) === 0) added++;
+      if (await call('add_archive', f) === 0) { added++; firmwareFiles.push(f); }
     } catch (err) {
       log('Could not read ' + f.name + ': ' + err.message, 'err');
     }
   }
-  archiveCount += added;
+  archiveCount = firmwareFiles.length;
   updateFirmwareState();
   // Most of a firmware dump is programs and metadata, not data archives; only
   // the ones that are get registered, so the skipped count is expected.
