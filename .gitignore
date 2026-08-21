@@ -7,3 +7,6 @@
 *.nsp
 *.nca
 *.xci
+
+# Decrypted game binaries and symbol maps (dump_exefs output).
+out/
