@@ -581,6 +581,9 @@ pub struct Cpu {
     threads: Vec<ThreadContext>,
     /// Which entry of `threads` is running.
     current_thread: usize,
+    /// Instructions the running thread has executed since the scheduler last
+    /// took the CPU away from it, against [`TIME_SLICE`].
+    slice_used: u64,
     /// Set by a service call that answered "nothing is ready yet" and would
     /// have blocked on hardware. The reschedule cannot happen inside the
     /// handler — switching threads swaps the register file, and the syscall
@@ -591,6 +594,24 @@ pub struct Cpu {
 
 /// How many recently-executed instructions the fault trace shows.
 pub const RECENT_LEN: usize = 64;
+
+/// How many instructions a thread runs before the scheduler takes the CPU
+/// away from it.
+///
+/// Without this the only reschedule points were the blocking syscalls, so a
+/// thread that runs a long stretch of arithmetic between two of them kept the
+/// CPU for all of it. That is not a fairness nicety: an applet's audio thread
+/// renders a whole buffer of samples per `AppendAudioOutBuffer`, and measured
+/// at **99.9% of every instruction executed** — the Mii editor's own main loop
+/// got the other 0.1%, which is why three system applets could boot, open a
+/// layer, play their music and never reach a frame.
+///
+/// The number is a compromise against the cost of a switch, which copies the
+/// whole register file including the 32 vector registers. Horizon's own tick
+/// is 1 ms, and at the 1 µs-per-instruction scale `GetSystemTick` reports that
+/// would be 1000 instructions — far more switching than the saving is worth
+/// here, where a guest instruction is hundreds of host ones.
+const TIME_SLICE: u64 = 20_000;
 
 impl Default for Cpu {
     fn default() -> Self {
@@ -672,6 +693,7 @@ impl Cpu {
             trace_nv: std::env::var("TRACE_NV").is_ok(),
             threads: Vec::new(),
             current_thread: 0,
+            slice_used: 0,
             pending_yield: false,
         };
         cpu.nv.gpu.trace = std::env::var("TRACE_GPU").is_ok();
@@ -1037,6 +1059,7 @@ impl Cpu {
     }
 
     fn load_context(&mut self, index: usize) {
+        self.slice_used = 0;
         let thread = self.threads[index].clone();
         self.regs = thread.regs;
         self.sp = thread.sp;
@@ -1924,6 +1947,16 @@ impl Cpu {
     fn step_inner(&mut self) -> Result<()> {
         if self.halted {
             return Err(Error::Cpu("attempted to step a halted CPU".into()));
+        }
+        // Horizon preempts, and until this was here the scheduler only moved
+        // when a thread blocked. Between instructions is a safe place to
+        // switch — the whole architectural state is in the context — and
+        // `yield_thread` is a no-op when nothing else can run, so a
+        // single-threaded guest pays one counter increment for it.
+        self.slice_used += 1;
+        if self.slice_used >= TIME_SLICE {
+            self.slice_used = 0;
+            self.yield_thread();
         }
         let pc = self.pc;
         let insn = match self.mem.fetch(pc) {

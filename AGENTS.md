@@ -177,10 +177,18 @@ highest-set-bit scan inside `nn::os::RegisterSystemWorkerHandler` asserts.
 
 ## Guest threads (`cpu/mod.rs`, `cpu/svc.rs`)
 
-Cooperative: a thread runs until it makes a blocking syscall and only then does
-another get the CPU. Real Horizon preempts, but every libnx synchronization
-primitive re-checks its predicate in a loop, so co-operative switching completes
-the same handshakes.
+**Preemptive, on a `TIME_SLICE` of 20,000 instructions**, plus the blocking
+syscalls. It used to be cooperative only — a thread ran until it blocked — on
+the reasoning that every libnx synchronization primitive re-checks its
+predicate in a loop, so co-operative switching completes the same handshakes.
+It does; what it does not do is share the CPU. A system applet's audio thread
+renders a whole buffer of samples per `AppendAudioOutBuffer` and measured at
+**99.9% of every instruction executed**, leaving the Mii editor's own main loop
+the other 0.1%. Three applets could boot, open a layer, play their music and
+never reach a frame. Between instructions is a safe place to switch (the whole
+architectural state is in the `ThreadContext`), and `yield_thread` is a no-op
+when nothing else can run, so a single-threaded guest pays one counter
+increment.
 
 - `svcCreateThread` builds a `ThreadContext` with its own TLS block (and the
   `ThreadVars` libnx reads through TPIDRRO_EL0); `svcStartThread` marks it

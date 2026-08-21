@@ -3606,6 +3606,52 @@ fn guest_threads_run_and_hand_over_at_blocking_syscalls() {
 }
 
 #[test]
+fn a_thread_that_never_blocks_is_still_taken_off_the_cpu() {
+    // Threads used to hand over only at a blocking syscall, so a thread that
+    // runs a long stretch of arithmetic between two of them kept the CPU for
+    // all of it. That is not a fairness nicety: a system applet's audio thread
+    // renders a whole buffer per AppendAudioOutBuffer, and took **99.9% of
+    // every instruction executed** -- the Mii editor's own main loop got the
+    // other 0.1%, which is why three applets could boot, open a layer, play
+    // their music and never reach a frame.
+    //
+    // Here the child never makes a syscall at all, which is the same problem
+    // with the dial turned all the way up.
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.mem.map_zero(0x4000, 0x2000).unwrap(); // the child's stack
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap(); // the flag main sets at the end
+
+    let main = [
+        0xd284_0001u32, // mov x1, #0x2000  (entry)
+        0xaa1f_03e2,    // mov x2, xzr      (arg)
+        0xd28a_0003,    // mov x3, #0x5000  (stack top)
+        0x5280_0764,    // mov w4, #0x3b    (priority)
+        0x1280_0005,    // mov w5, #-1      (core)
+        0xd400_0101,    // svc #8           (CreateThread -> handle in x1)
+        0xaa01_03e0,    // mov x0, x1
+        0xd400_0121,    // svc #9           (StartThread)
+        0xd400_0161,    // svc #0xb         (SleepThread -> hands over)
+        0xd28c_0009,    // mov x9, #0x6000
+        0x5280_0aa1,    // mov w1, #0x55
+        0xb900_0121,    // str w1, [x9]
+        0xd400_00e1,    // svc #7           (ExitProcess)
+    ];
+    // The child spins forever and never asks the kernel for anything.
+    let child = [0x1400_0000u32]; // b .
+    let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
+    cpu.mem.map_zero(0x1000, 0x100).unwrap();
+    cpu.mem.map(0x1000, &bytes(&main)).unwrap();
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &bytes(&child)).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(200_000).unwrap();
+
+    assert!(cpu.halted, "the spinning child never gave the CPU back");
+    assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 0x55);
+}
+
+#[test]
 fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
     // NXpotify's Zeroconf listener is `if (poll(&pfd, 1, 200) <= 0) continue;`
     // around an idle socket. Nothing here will ever be ready, so the answer is
