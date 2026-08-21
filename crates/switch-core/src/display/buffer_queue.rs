@@ -63,9 +63,10 @@ const STATUS_OK: i32 = 0;
 const STATUS_NO_MEMORY: i32 = -12;
 const STATUS_BAD_VALUE: i32 = -22;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum SlotState {
     /// No buffer registered.
+    #[default]
     Empty,
     /// Registered and available to be dequeued.
     Free,
@@ -73,16 +74,14 @@ enum SlotState {
     Dequeued,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
 struct Slot {
     state: SlotState,
     buffer: Option<DisplayBuffer>,
-}
-
-impl Default for Slot {
-    fn default() -> Self {
-        Slot { state: SlotState::Empty, buffer: None }
-    }
+    /// The flattened `NvGraphicBuffer` this slot was registered with, kept
+    /// verbatim because `REQUEST_BUFFER` has to hand the very same bytes back
+    /// -- see the note there.
+    blob: Option<Vec<u8>>,
 }
 
 /// What the caller must do after a transaction, beyond sending the reply.
@@ -114,7 +113,7 @@ impl Default for BufferQueue {
 impl BufferQueue {
     pub fn new() -> BufferQueue {
         BufferQueue {
-            slots: [Slot::default(); MAX_SLOTS],
+            slots: std::array::from_fn(|_| Slot::default()),
             width: 1280,
             height: 720,
             connected: false,
@@ -132,11 +131,41 @@ impl BufferQueue {
 
         match code {
             REQUEST_BUFFER => {
-                // The app already holds the buffer it preallocated, so report
-                // "no new buffer" and success.
-                let _slot = r.read_i32();
-                w.write_i32(0);
-                w.write_i32(STATUS_OK);
+                // Hand back the flattened `GraphicBuffer` registered in this
+                // slot: `{ nonNull, [buffer], result }`.
+                //
+                // This used to answer `nonNull = 0` with success, on the
+                // reasoning that the app preallocated the buffer and so
+                // already has it. It does -- but its `Surface` caches buffers
+                // per slot and only trusts that cache for a slot it has
+                // requested before, so the first request for each slot is
+                // answered out of an empty cache. "A Short Hike" believed the
+                // success, took the null buffer that came with it, and
+                // dereferenced it: `NvWsi`'s swapchain reads the fence out of
+                // `buffer + 0x60` the instant `dequeueBuffer` returns. That
+                // read lands in the soft-mapped low pages instead of faulting,
+                // so the failure surfaced a long way from here -- the WSI
+                // thread locked a `nn::os::MutexType` at address 0xc7,
+                // deadlocked, and no frame was ever drawn.
+                let slot = r.read_i32();
+                let blob = usize::try_from(slot)
+                    .ok()
+                    .and_then(|index| self.slots.get(index))
+                    .and_then(|entry| entry.blob.as_deref());
+                match blob {
+                    Some(blob) => {
+                        w.write_i32(1);
+                        w.write_flattened(blob);
+                        w.write_i32(STATUS_OK);
+                    }
+                    // Nothing is registered in that slot, which is what
+                    // Android reports as a bad slot index rather than as an
+                    // empty success.
+                    None => {
+                        w.write_i32(0);
+                        w.write_i32(STATUS_BAD_VALUE);
+                    }
+                }
             }
             SET_BUFFER_COUNT | DETACH_BUFFER => {
                 w.write_i32(STATUS_OK);
@@ -303,7 +332,8 @@ impl BufferQueue {
             self.width = buffer.width;
             self.height = buffer.height;
         }
-        self.slots[index] = Slot { state: SlotState::Free, buffer: Some(buffer) };
+        self.slots[index] =
+            Slot { state: SlotState::Free, buffer: Some(buffer), blob: Some(blob.to_vec()) };
     }
 }
 
@@ -398,6 +428,36 @@ mod tests {
         assert_eq!(slot.layout, NV_LAYOUT_BLOCK_LINEAR);
         assert_eq!(slot.block_height_log2, 4);
         assert_eq!(slot.color_format, 0x0100_5321_20);
+    }
+
+    #[test]
+    fn request_buffer_hands_back_the_buffer_registered_in_the_slot() {
+        // `REQUEST_BUFFER` is `{ nonNull, [flattened GraphicBuffer], result }`.
+        // Answering `nonNull = 0` with success -- on the reasoning that the
+        // app preallocated the buffer and so already has it -- is a lie the
+        // caller believes: its `Surface` caches buffers per slot and asks for
+        // each slot once, so the first ask comes out of an empty cache and it
+        // takes the null. "A Short Hike" then read the fence out of
+        // `buffer + 0x60`, which with the low pages soft-mapped does not
+        // fault; its swapchain thread went on to lock a `nn::os::MutexType` at
+        // address 0xc7, deadlocked there, and the title never drew a frame.
+        let mut q = BufferQueue::new();
+        preallocate(&mut q, 0, 7, 0x1000);
+        let expected = graphic_buffer_blob(7, 1280, 720, 0x1000);
+
+        let (reply, action) = q.transact(REQUEST_BUFFER, &request(&words(&[0])));
+        assert_eq!(action, Action::None);
+        let mut r = ParcelReader::new(&reply);
+        assert_eq!(r.read_i32(), 1, "no buffer came back for a registered slot");
+        assert_eq!(r.read_flattened(), Some(&expected[..]));
+        assert_eq!(r.read_i32(), STATUS_OK);
+
+        // A slot nothing was ever registered in is a bad slot index, not an
+        // empty success -- the caller has to be able to tell those apart.
+        let (reply, _) = q.transact(REQUEST_BUFFER, &request(&words(&[5])));
+        let mut r = ParcelReader::new(&reply);
+        assert_eq!(r.read_i32(), 0);
+        assert_eq!(r.read_i32(), STATUS_BAD_VALUE);
     }
 
     #[test]
