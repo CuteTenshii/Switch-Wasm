@@ -853,6 +853,31 @@ impl Cpu {
                              // applet message back and left NX-Shell polling it
                              // 190k times.
                              let name = name.to_string();
+                             // The control commands first. They are not this
+                             // service's commands at all -- every session has
+                             // them, whatever is behind it -- and a fabricated
+                             // object id is a specific kind of wrong answer to
+                             // each: as a *pointer buffer size* it is a large
+                             // number, which is how a caller decides to marshal
+                             // its buffers as pointer buffers, the one form
+                             // this IPC layer does not read. Every service
+                             // without a dedicated stub was telling `nifm`,
+                             // `friend`, `olsc`, `prepo`, `btm` and the rest to
+                             // send their data somewhere nothing looks.
+                             if self.ipc_is_control_request(tls) {
+                                 match cmd_id {
+                                     Some(0) => {
+                                         let obj = self.alloc_domain_object();
+                                         self.record_domain_object(handle, obj, &name);
+                                         self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])?;
+                                     }
+                                     _ => {
+                                         self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])?;
+                                     }
+                                 }
+                                 self.write_zr(0, RESULT_OK);
+                                 return Ok(());
+                             }
                              self.warn_no_implementation(&name, cmd_id);
                              self.reply_with_fabricated_object(tls, handle, &name, cmd_id)?
                          }

@@ -4647,6 +4647,42 @@ fn the_display_answers_what_it_is() {
 }
 
 #[test]
+fn a_service_with_no_stub_still_answers_its_control_commands() {
+    // The control commands belong to the session, not to whatever is behind
+    // it, so a service with no dedicated stub still has to answer them itself.
+    // The generic fallback used to hand them the same fabricated object id it
+    // hands every other command -- and as a *pointer buffer size* that is a
+    // large number, which is how a caller decides to marshal its buffers as
+    // pointer buffers, the one form this IPC layer does not read. `nifm`,
+    // `friend`, `olsc`, `prepo` and `btm` were all being told to send their
+    // data somewhere nothing looks.
+    const NIFM: u64 = 0xD000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(NIFM, "nifm:s");
+    let tls = cpu.tls_base();
+
+    for msg_type in [5u32, 7] {
+        build_ipc_request(&mut cpu, msg_type, None, 3); // QueryPointerBufferSize
+        run_ipc_request(&mut cpu, NIFM);
+        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "type {msg_type} refused");
+        assert_eq!(cpu.mem.read_u16(tls + 0x20).unwrap(), 0, "type {msg_type}: not a size");
+        // And no handle came with it: a size is not an object.
+        assert_eq!(cpu.mem.read_u32(tls + 0x04).unwrap() >> 31, 0, "type {msg_type}: handles");
+    }
+
+    // ConvertToDomain is the other control command, and it *does* answer with
+    // an object id -- the one the session's later requests carry.
+    build_ipc_request(&mut cpu, 5, None, 0);
+    run_ipc_request(&mut cpu, NIFM);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+    let object = cpu.mem.read_u32(tls + 0x20).unwrap();
+    assert_ne!(object, 0, "no domain object came back");
+    assert_eq!(cpu.domain_interface_name(NIFM, object).as_deref(), Some("nifm:s"));
+}
+
+#[test]
 fn the_display_refreshes_without_being_drawn_to() {
     // The vsync event used to be fired by one thing only: the guest's own
     // present. That is a circle a title never gets into, because it waits for
