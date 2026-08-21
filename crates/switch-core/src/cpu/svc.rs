@@ -414,8 +414,11 @@ impl Cpu {
                 // has, so it is what drives vsync: the guest's own present is
                 // what advances the display, and a render loop waiting on
                 // vsync is woken by it rather than by a clock.
-                if self.nv.gpu.frames != self.last_vsync_frame {
+                let refreshed = self.cycles.wrapping_sub(self.last_vsync_cycles)
+                    >= super::VSYNC_PERIOD_CYCLES;
+                if self.nv.gpu.frames != self.last_vsync_frame || refreshed {
                     self.last_vsync_frame = self.nv.gpu.frames;
+                    self.last_vsync_cycles = self.cycles;
                     if let Some(vsync) = self.vsync_event {
                         self.signal_event(vsync);
                     }

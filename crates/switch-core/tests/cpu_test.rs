@@ -4647,6 +4647,43 @@ fn the_display_answers_what_it_is() {
 }
 
 #[test]
+fn the_display_refreshes_without_being_drawn_to() {
+    // The vsync event used to be fired by one thing only: the guest's own
+    // present. That is a circle a title never gets into, because it waits for
+    // vsync *before* it renders the frame that would have fired it. A real
+    // panel refreshes whether or not anything drew, so the event fires on a
+    // period as well -- and a present still fires it, so a guest that draws
+    // faster than the panel is not held to it.
+    const VI: u64 = 0xB500;
+    const RESULT_TIMED_OUT: u64 = 0xEA01;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(VI, "vi:m");
+    let tls = cpu.tls_base();
+
+    ipc_request_plain(&mut cpu, VI, 2, &[]);
+    let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    ipc_request_plain(&mut cpu, display, 5202, &[]);
+    let vsync = cpu.mem.read_u32(tls + 0x0c).unwrap();
+    assert_ne!(vsync, 0);
+
+    // The period has not passed yet, and nothing has been presented.
+    assert_eq!(wait_sync(&mut cpu, &[vsync], 0).0, RESULT_TIMED_OUT, "vsync fired early");
+
+    // Run out the refresh period on nops. The event fires on its own, with no
+    // frame behind it, and being auto-clearing it fires once per period.
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &nop().to_le_bytes()).unwrap();
+    for _ in 0..switch_core::cpu::VSYNC_PERIOD_CYCLES {
+        cpu.set_pc(0x2000);
+        cpu.step().unwrap();
+    }
+    assert_eq!(wait_sync(&mut cpu, &[vsync], 0).0, 0, "the display never refreshed");
+    assert_eq!(wait_sync(&mut cpu, &[vsync], 0).0, RESULT_TIMED_OUT, "it refreshed twice");
+}
+
+#[test]
 fn closing_a_domain_object_is_not_command_zero() {
     // `CmifDomainRequestType_Close` sits where SendMessage's type byte would,
     // and carries no command id at all -- so a close dispatched to a service

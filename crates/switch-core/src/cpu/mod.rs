@@ -428,6 +428,9 @@ pub struct Cpu {
     vsync_event: Option<u64>,
     /// Frame count the vsync event was last fired for.
     last_vsync_frame: u64,
+    /// Cycle count the vsync event was last fired at, for the refresh that
+    /// happens whether or not the guest presented anything.
+    last_vsync_cycles: u64,
     /// Synthetic SD-card directory state for the fsp-srv stub: maps an open
     /// directory handle to the entries it has not yielded yet
     /// (name bytes, entry type, file size). Lets `fsFsOpenDirectory` /
@@ -595,6 +598,17 @@ pub struct Cpu {
 /// How many recently-executed instructions the fault trace shows.
 pub const RECENT_LEN: usize = 64;
 
+/// Instructions between display refreshes: the panel's 60 Hz against the
+/// 1.02 GHz CPU one emulated instruction stands for.
+///
+/// A display refreshes whether or not anything drew, and until this was here
+/// the only thing that fired the vsync event was the guest's own present —
+/// which is a circle a title never gets into, because it waits for vsync
+/// before it renders the frame that would have fired it. A present still
+/// fires it too, so a guest that draws faster than the panel is not held to
+/// this.
+pub const VSYNC_PERIOD_CYCLES: u64 = 1_020_000_000 / 60;
+
 /// How many instructions a thread runs before the scheduler takes the CPU
 /// away from it.
 ///
@@ -650,6 +664,7 @@ impl Cpu {
             events: HashMap::new(),
             vsync_event: None,
             last_vsync_frame: 0,
+            last_vsync_cycles: 0,
             fs_dirs: HashMap::new(),
             fs_files: HashMap::new(),
             data_archives: HashMap::new(),
