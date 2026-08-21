@@ -66,10 +66,28 @@ fn main() {
     }
     cpu.set_program_id(nca.program_id);
     cpu.boot_retail_program(&modules).unwrap();
+    // `WATCH_MEM=<hex addr>` reports the first step at which a 4 KiB window
+    // there stops being all zeroes. A GPU reading zeroes is either looking at
+    // the wrong memory or at memory nothing has filled yet, and this is what
+    // tells the two apart.
+    let watch: Option<u32> = env::var("WATCH_MEM").ok()
+        .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+    let mut seen_nonzero = false;
     let mut done = 0u64;
     while !cpu.halted && cpu.nv.gpu.frames < want && done < 40_000_000_000 {
+        if let Some(w) = watch {
+            if !seen_nonzero && done % 4096 == 0
+                && (0..0x1000u32).step_by(4).any(|k| cpu.mem.read_u32(w + k).unwrap_or(0) != 0)
+            {
+                println!("[watch-mem] {w:#x} first non-zero at step {done}");
+                seen_nonzero = true;
+            }
+        }
         if cpu.step().is_err() { break; }
         done += 1;
+    }
+    if watch.is_some() && !seen_nonzero {
+        println!("[watch-mem] never non-zero");
     }
     println!("steps={done} frames={} stats={:?}", cpu.nv.gpu.frames, cpu.nv.gpu.stats);
     let fb = &cpu.nv.gpu.framebuffer;

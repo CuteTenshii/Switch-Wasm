@@ -468,6 +468,12 @@ impl NvDrv {
                     flags,
                     requested,
                 )?;
+                if self.gpu.trace {
+                    eprintln!(
+                        "[nv] map handle={nvmap_handle} cpu={:#x}+{buffer_offset:#x} size={size:#x} -> gpu_va={offset:#x} (obj cpu={:#x} size={:#x})",
+                        cpu_addr, handle.cpu_addr, handle.size
+                    );
+                }
                 write_u32(data, 0x0C, page_size as u32);
                 write_u64(data, 0x20, offset);
                 Ok(NV_OK)
