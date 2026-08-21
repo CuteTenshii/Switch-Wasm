@@ -798,6 +798,25 @@ fn decode_alu(insn: u64) -> Op {
             }
             Op::Mov { dst: reg(insn, 0, 8), src }
         }
+        // rro — the range-reduction operator that precedes `mufu`.
+        //
+        // On hardware `mufu sin`/`cos`/`ex2` take an argument already folded
+        // into the range their tables cover, and `rro` is what folds it. The
+        // `mufu` here is not a table: it calls the host's `sin`, `cos` and
+        // `exp2`, which take the argument as it comes. So the fold is the
+        // identity, and modelling it as one is what makes the pair compute
+        // the function rather than something adjacent to it.
+        //
+        // The modifiers are refused rather than ignored: a negate or an
+        // absolute value dropped on the floor is a wrong answer that looks
+        // like a right one.
+        0x90 => {
+            let Some(src) = rhs_float else { return un };
+            if field(insn, 45, 1) != 0 || field(insn, 49, 1) != 0 || field(insn, 50, 1) != 0 {
+                return un;
+            }
+            Op::Mov { dst: reg(insn, 0, 8), src }
+        }
         // sel — pred at 39.
         0xa0 => {
             let Some(b) = rhs_int else { return un };
