@@ -428,13 +428,17 @@ pub struct Cpu {
     fs_dirs: HashMap<u64, Vec<crate::vfs::DirEntry>>,
     /// Open `IFile` objects: domain object id to the path it was opened on.
     fs_files: HashMap<u64, String>,
-    /// The current process's own RomFS, decrypted from its Program NCA's
-    /// RomFS section — what `OpenDataStorageByCurrentProcess` hands back as
-    /// an `IStorage`. `None` until the loader calls
-    /// [`Cpu::set_romfs`] (homebrew has no NCA and never sets this; it reads
-    /// its RomFS off the SD card by path instead, through the regular
+    /// The current process's own RomFS — what
+    /// `OpenDataStorageByCurrentProcess` hands back as an `IStorage`. `None`
+    /// until the loader calls [`Cpu::set_romfs`] or
+    /// [`Cpu::set_romfs_source`] (homebrew has no NCA and never sets this; it
+    /// reads its RomFS off the SD card by path instead, through the regular
     /// `IFileSystem`/`IFile` path).
-    romfs: Option<Vec<u8>>,
+    ///
+    /// A source rather than a buffer: a retail title's RomFS is the bulk of a
+    /// container that does not fit in memory, so it stays where it is and is
+    /// decrypted range by range as the guest reads it.
+    romfs: Option<Box<dyn crate::source::ByteSource>>,
     /// Address the guest mapped its hid shared memory to (via `MapSharedMemory`
     /// on the handle hid's IPC returned). The host writes gamepad state into
     /// the libnx `HidSharedMemory` layout there so `padUpdate` sees it; 0 means
@@ -1194,8 +1198,18 @@ impl Cpu {
     /// serves. The caller (the NCA-decryption loader) supplies these — `Cpu`
     /// has no key material and doesn't know how to get from an NCA to a
     /// RomFS image itself.
+    ///
+    /// Only for a RomFS small enough to hold: see [`Cpu::set_romfs_source`]
+    /// for the form a real title's uses.
     pub fn set_romfs(&mut self, data: Vec<u8>) {
-        self.romfs = Some(data);
+        self.romfs = Some(Box::new(crate::source::MemSource(data)));
+    }
+
+    /// Same, backed by a [`ByteSource`](crate::source::ByteSource) that
+    /// decrypts on demand — [`crate::nca::Nca::romfs_source`] over the
+    /// container the title was launched from.
+    pub fn set_romfs_source(&mut self, src: Box<dyn crate::source::ByteSource>) {
+        self.romfs = Some(src);
     }
 
     // ---- register access ----
@@ -1884,7 +1898,7 @@ impl Cpu {
     /// the page actually drains (`switch_drain_trace`), so anything that must
     /// reach a browser user goes through here as well, and is recorded whether
     /// or not per-instruction tracing is on — the same as fault context.
-    pub(crate) fn diagnostic(&mut self, line: &str) {
+    pub fn diagnostic(&mut self, line: &str) {
         eprintln!("{line}");
         self.trace_line(&format!("{line}\n"));
     }

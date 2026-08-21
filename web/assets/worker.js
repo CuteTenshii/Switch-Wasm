@@ -7,13 +7,108 @@
 let api = null;      // wasm exports
 let handle = -1;     // session handle
 
-function alloc(len) { return api.switch_alloc(len); }
+// Every buffer that crosses into wasm goes through here. A refused request
+// comes back as null (switch_alloc will not trap on one), and writing at
+// address 0 would corrupt the module's own data rather than fail, so this is
+// where an impossible size has to stop.
+function alloc(len) {
+  const ptr = api.switch_alloc(len);
+  if (!ptr) throw new Error('cannot allocate ' + len + ' bytes in the emulator');
+  return ptr;
+}
 function toWasm(jsbuf, ptr) {
   const view = new Uint8Array(api.memory.buffer, ptr, jsbuf.length);
   view.set(jsbuf);
 }
 function fromWasm(ptr, len) {
   return new Uint8Array(api.memory.buffer, ptr, len).slice();
+}
+
+// ---------- the open container ----------
+//
+// A retail .nsp runs to several gigabytes: more than a wasm32 module can
+// address, let alone allocate in one buffer, so it is never handed over as
+// one. The File stays with the browser and the wasm side pulls ranges out of
+// it through the `host_read` import below.
+//
+// That import has to answer *synchronously* - the emulator asks for RomFS
+// ranges from inside `switch_run`, with nowhere to await a promise -
+// and `FileReaderSync` exists only in a worker, which is the second reason
+// the emulator lives in one.
+let hostFile = null;
+let hostReader = null;
+
+// Reads land in bursts of a few hundred bytes as the guest walks its RomFS
+// tables, so whole chunks are kept around; a Map iterates in insertion order,
+// which makes it an LRU with no bookkeeping of its own.
+const HOST_CHUNK = 1 << 20;
+const HOST_CACHE_CHUNKS = 32;
+const hostChunks = new Map();
+
+function openHostFile(file) {
+  hostFile = file;
+  if (!hostReader) hostReader = new FileReaderSync();
+  hostChunks.clear();
+  return BigInt(file.size);
+}
+
+function readBlob(start, end) {
+  return new Uint8Array(hostReader.readAsArrayBuffer(hostFile.slice(start, end)));
+}
+
+function hostChunk(index) {
+  const hit = hostChunks.get(index);
+  if (hit) {
+    hostChunks.delete(index);
+    hostChunks.set(index, hit);
+    return hit;
+  }
+  const start = index * HOST_CHUNK;
+  const chunk = readBlob(start, Math.min(start + HOST_CHUNK, hostFile.size));
+  hostChunks.set(index, chunk);
+  if (hostChunks.size > HOST_CACHE_CHUNKS) {
+    hostChunks.delete(hostChunks.keys().next().value);
+  }
+  return chunk;
+}
+
+// The wasm import: fill `len` bytes at `ptr` from `offset` of the open file,
+// and return how many were filled. `offset` arrives as a BigInt (it is an
+// i64), and `ptr`/`len` as signed i32s, hence the `>>> 0`.
+function hostRead(offset, ptr, len) {
+  ptr >>>= 0;
+  len >>>= 0;
+  if (!hostFile || !len) return 0;
+  let at = Number(offset);
+  const end = Math.min(at + len, hostFile.size);
+  if (at >= end) return 0;
+  // The view has to be built here, not cached: growing the heap detaches it.
+  const out = new Uint8Array(api.memory.buffer, ptr, end - at);
+  let written = 0;
+  try {
+    // A read bigger than a chunk is the ExeFS being pulled in one go. Serve
+    // it straight from the file: it would evict the whole cache on its way
+    // through and never be asked for again.
+    if (end - at > HOST_CHUNK) {
+      out.set(readBlob(at, end));
+      return end - at;
+    }
+    while (at < end) {
+      const index = Math.floor(at / HOST_CHUNK);
+      const chunk = hostChunk(index);
+      const from = at - index * HOST_CHUNK;
+      const take = Math.min(chunk.length - from, end - at);
+      if (take <= 0) break;
+      out.set(chunk.subarray(from, from + take), written);
+      written += take;
+      at += take;
+    }
+  } catch (e) {
+    // The file was moved or replaced while it was open. Report the short
+    // read; the wasm side turns that into an error with an offset on it.
+    console.error('[switch-wasm] host read failed:', e);
+  }
+  return written;
 }
 
 function lastError() {
@@ -249,28 +344,26 @@ const CMD = {
     api.switch_free(ptr, bytes.length);
     return entry;
   },
-  load_nsp(bytes) {
-    const ptr = alloc(bytes.length);
-    toWasm(bytes, ptr);
-    const ok = api.switch_load_nsp(handle, ptr, bytes.length);
-    // switch_load_nsp keeps the staging buffer; do not free it.
-    return ok;
+  // Open a container: the File is kept here and read range by range, so this
+  // costs nothing but its PFS0 header no matter how large the file is.
+  open_nsp(file) {
+    return api.switch_open_nsp(handle, openHostFile(file));
+  },
+  // Same, for a standalone .nca - the container is the NCA, with no file
+  // table in front of it.
+  open_nca(file) {
+    return api.switch_open_nca(handle, openHostFile(file));
   },
   // Decrypts NSP file `index` as a Program NCA (with whatever keys are
-  // loaded) and boots its ExeFS `main` executable. Operates on the NSP bytes
-  // already staged in the worker's wasm memory by load_nsp - no extra copy of
-  // the (possibly hundreds-of-MB) NCA crosses the postMessage boundary.
+  // loaded) and boots its ExeFS `main` executable, reading both out of the
+  // open container. Its RomFS is left where it is and decrypted on demand
+  // while the title runs.
   load_nca_from_nsp(index) {
     return Number(api.switch_load_nca_from_nsp(handle, index));
   },
-  // Same, for a standalone .nca file (not inside an NSP): stages the whole
-  // file into wasm memory and boots it.
-  load_nca(bytes) {
-    const ptr = alloc(bytes.length);
-    toWasm(bytes, ptr);
-    const entry = Number(api.switch_load_nca(handle, ptr, bytes.length));
-    // switch_load_nca takes ownership of the staging buffer; do not free it.
-    return entry;
+  // Same, for a container that is itself a single standalone .nca.
+  load_nca() {
+    return Number(api.switch_load_nca(handle));
   },
   load_keys(prod, title) {
     let pptr = 0, plen = 0, tptr = 0, tlen = 0;
@@ -299,6 +392,35 @@ const CMD = {
     api.switch_free(buf, len);
     return b;
   },
+  // The title's name, publisher, version and icon, out of the Control NCA in
+  // the open container. Cheap next to the container itself: a Control NCA is
+  // an icon and a metadata blob, not game data.
+  load_control_from_nsp() { return api.switch_load_control_from_nsp(handle); },
+  // Same, for a container that is itself a single standalone Control NCA.
+  load_control_from_nca() { return api.switch_load_control_from_nca(handle); },
+  control_json() {
+    // Sized for the worst case rather than the usual one: the JSON carries a
+    // 0x200-byte name and a 0x100-byte publisher straight out of the NACP,
+    // and `switch_control_json` truncates silently rather than saying it
+    // overflowed - which would surface as a JSON parse error, not a clue.
+    const cap = 16384;
+    const buf = alloc(cap);
+    const n = api.switch_control_json(handle, buf, cap);
+    const s = new TextDecoder().decode(fromWasm(buf, n));
+    api.switch_free(buf, cap);
+    return s;
+  },
+  // `size` comes from control_json's icon_size: the icon is a JPEG of
+  // unpredictable length, so JS is told how big a buffer to hand over.
+  control_icon(size) {
+    if (!size) return new Uint8Array(0);
+    const buf = alloc(size);
+    const n = Number(api.switch_control_icon(handle, buf, size));
+    const icon = n > 0 ? fromWasm(buf, n) : new Uint8Array(0);
+    api.switch_free(buf, size);
+    return icon;
+  },
+
   parse_nca(header) {
     const buf = alloc(header.length);
     toWasm(header, buf);
@@ -466,8 +588,10 @@ self.onmessage = (e) => {
 (async () => {
   try {
     // instantiateStreaming fetches + compiles in one pass (works in workers).
+    // The one import is how the module reads the open container; see
+    // `hostRead`.
     const { instance } = await WebAssembly.instantiateStreaming(
-      fetch('switch_wasm.wasm'), {});
+      fetch('switch_wasm.wasm'), { env: { host_read: hostRead } });
     api = instance.exports;
     self.postMessage({ type: 'ready' });
   } catch (err) {

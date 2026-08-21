@@ -301,12 +301,24 @@ pub fn aes128_xts_decrypt_sector(key: &[u8; 32], chunk: &[u8], tweak: &[u8; 16],
 /// is the primitive NCA section bodies are encrypted with — the counter's
 /// initial value is derived from the section's FS header (see `nca.rs`).
 pub fn aes128_ctr_xor(key: &[u8; 16], counter: &[u8; 16], data: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(data.len());
+    let mut out = data.to_vec();
+    aes128_ctr_xor_in_place(key, counter, &mut out);
+    out
+}
+
+/// The same keystream, applied to a buffer already in place.
+///
+/// `data` must start on a cipher-block boundary relative to `counter` — the
+/// keystream block a byte gets is decided by its index here, so a caller
+/// decrypting a range out of the middle of a stream aligns the range down to
+/// a multiple of 16 and advances `counter` to match (see
+/// [`crate::nca::SectionSource`], which reads sections that way).
+pub fn aes128_ctr_xor_in_place(key: &[u8; 16], counter: &[u8; 16], data: &mut [u8]) {
     let mut ctr = *counter;
-    for chunk in data.chunks(16) {
+    for chunk in data.chunks_mut(16) {
         let ks = aes128_encrypt_block(key, &ctr);
-        for (i, &b) in chunk.iter().enumerate() {
-            out.push(b ^ ks[i]);
+        for (b, k) in chunk.iter_mut().zip(ks.iter()) {
+            *b ^= k;
         }
         for i in (0..16).rev() {
             ctr[i] = ctr[i].wrapping_add(1);
@@ -315,7 +327,6 @@ pub fn aes128_ctr_xor(key: &[u8; 16], counter: &[u8; 16], data: &[u8]) -> Vec<u8
             }
         }
     }
-    out
 }
 
 const SHA256_H0: [u32; 8] = [

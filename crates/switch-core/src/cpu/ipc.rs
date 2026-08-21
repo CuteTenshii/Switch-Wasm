@@ -785,7 +785,7 @@ impl Cpu {
     /// GetSize — the same shape as `IFile`, but offset-addressed rather than
     /// path-addressed since there's exactly one of these per process.
     pub(super) fn fs_storage_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
-        let romfs = self.romfs.as_deref().unwrap_or(&[]);
+        let size = self.romfs.as_ref().map(|r| r.len()).unwrap_or(0);
         match cmd_id {
             // Read(u64 offset, u64 size) -> bytes into the recv buffer.
             Some(0) => {
@@ -797,28 +797,42 @@ impl Cpu {
                 // storage read came back as "0 bytes at offset 0x50" — the
                 // guest mounted its RomFS, parsed an empty header, and
                 // `nn::fs::OpenDirectory("rom:/Data")` found nothing.
-                let offset = self.mem.read_u64(data)? as usize;
-                let requested = self.mem.read_u64(data.wrapping_add(8))? as usize;
+                let offset = self.mem.read_u64(data)?;
+                let requested = self.mem.read_u64(data.wrapping_add(8))?;
                 if std::env::var("TRACE_IPC").is_ok() {
-                    eprintln!(
-                        "[storage] read offset={offset:#x} size={requested:#x} of {:#x}",
-                        romfs.len()
-                    );
+                    eprintln!("[storage] read offset={offset:#x} size={requested:#x} of {size:#x}");
                 }
-                let start = offset.min(romfs.len());
-                let end = start.saturating_add(requested).min(romfs.len());
-                let chunk = &romfs[start..end];
+                let start = offset.min(size);
+                let end = start.saturating_add(requested).min(size);
                 if let Some(addr) = self.ipc_recv_buffer_addr(tls, 0) {
-                    for (i, &byte) in chunk.iter().enumerate() {
-                        self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
+                    // The RomFS is not a buffer to slice: it is decrypted out
+                    // of the container a range at a time (a retail one is
+                    // gigabytes), so the copy goes through a fixed staging
+                    // buffer no matter how much the guest asked for.
+                    const CHUNK: u64 = 64 * 1024;
+                    let mut buf = vec![0u8; (end - start).min(CHUNK) as usize];
+                    let mut pos = start;
+                    let mut written = 0u32;
+                    while pos < end {
+                        let take = ((end - pos).min(CHUNK)) as usize;
+                        let got = match self.romfs.as_ref() {
+                            Some(romfs) => romfs.read_at(pos, &mut buf[..take])?,
+                            None => 0,
+                        };
+                        if got == 0 {
+                            break;
+                        }
+                        for (i, &byte) in buf[..got].iter().enumerate() {
+                            self.mem.write_u8(addr.wrapping_add(written + i as u32), byte)?;
+                        }
+                        written += got as u32;
+                        pos += got as u64;
                     }
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             // GetSize -> u64
-            Some(4) => {
-                self.write_ipc_response(tls, 0, &[], &(romfs.len() as u64).to_le_bytes(), &[])
-            }
+            Some(4) => self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[]),
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
         }
     }

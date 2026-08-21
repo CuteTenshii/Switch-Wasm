@@ -35,6 +35,7 @@ use switch_core::cpu::{Cpu, TouchPoint};
 use switch_core::elf::load_elf;
 use switch_core::nca::Nca;
 use switch_core::nsp::Pfs0;
+use switch_core::source::{ByteSource, Window};
 
 /// Framebuffer base address, width, height and stride (RGBA, little-endian).
 pub use switch_core::{FB_BASE, FB_HEIGHT, FB_STRIDE, FB_WIDTH};
@@ -43,12 +44,17 @@ pub use switch_core::{FB_BASE, FB_HEIGHT, FB_STRIDE, FB_WIDTH};
 pub const INPUT_ADDR: u32 = switch_core::INPUT_ADDR;
 
 struct Session {
-    /// Cached NSP image (kept so file payloads can be extracted on demand).
-    nsp_data: Vec<u8>,
+    /// The container the frontend has open, read from the host a range at a
+    /// time. `None` until `switch_open_nsp`/`switch_open_nca`.
+    container: Option<HostSource>,
     /// Parsed file table of the last NSP.
     nsp_files: Vec<switch_core::nsp::Pfs0File>,
     /// Keys loaded from prod.keys / title.keys, used to decrypt NCA headers.
     keys: switch_core::keys::KeySet,
+    /// The title's name, developer and icon, from the last Control NCA read.
+    /// Cached because the icon is fetched separately from the text: JS needs
+    /// its size before it can hand over a buffer to copy it into.
+    control: Option<switch_core::control::Control>,
     cpu: Cpu,
     last_error: String,
 }
@@ -91,17 +97,121 @@ fn new_handle(session: Session) -> u32 {
     id
 }
 
-/// Allocate `len` bytes of wasm linear memory for passing buffers in from JS.
-#[no_mangle]
-pub extern "C" fn switch_alloc(len: u32) -> *mut u8 {
-    let layout = Layout::from_size_align(len as usize, 1).unwrap();
-    unsafe { alloc(layout) }
+#[cfg(target_arch = "wasm32")]
+#[link(wasm_import_module = "env")]
+extern "C" {
+    /// Read `len` bytes at `offset` of the container the host has open into
+    /// wasm memory at `ptr`, returning how many were actually read.
+    ///
+    /// This is the only import the module declares. It exists because a
+    /// retail container cannot be handed over as a buffer — it is larger than
+    /// the whole wasm32 address space — so the browser keeps the file where it
+    /// is and serves ranges out of it synchronously (`FileReaderSync`, in the
+    /// worker that owns this module).
+    fn host_read(offset: u64, ptr: *mut u8, len: u32) -> u32;
 }
 
-/// Free a buffer previously returned by `switch_alloc`.
+/// The same read, for host builds (`cargo test -p switch-wasm`), which have
+/// no JS behind them: it serves whatever [`set_host_container`] installed.
+///
+/// # Safety
+/// `ptr` must be valid for writes of `len` bytes.
+#[cfg(not(target_arch = "wasm32"))]
+unsafe fn host_read(offset: u64, ptr: *mut u8, len: u32) -> u32 {
+    // SAFETY: single-threaded wasm; see the `SESSIONS` comment. Host builds
+    // hold the test lock while they use this.
+    let data = unsafe { &*HOST_CONTAINER.get() };
+    if offset >= data.len() as u64 {
+        return 0;
+    }
+    let start = offset as usize;
+    let n = (len as usize).min(data.len() - start);
+    unsafe { std::ptr::copy_nonoverlapping(data.as_ptr().add(start), ptr, n) };
+    n as u32
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static HOST_CONTAINER: SyncCell<Vec<u8>> = SyncCell::new(Vec::new());
+
+/// Install the bytes host builds serve as "the container the host has open",
+/// so the streaming loader can be exercised without a browser. The browser
+/// build has a real file behind `host_read` and never calls this.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn set_host_container(data: Vec<u8>) {
+    // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
+    unsafe { *HOST_CONTAINER.get() = data };
+}
+
+/// A [`ByteSource`] over the container the host has open.
+///
+/// Stateless and `Copy` — the size is all there is to it, since every read
+/// goes straight back out to the host — which is what lets a session hand
+/// copies of it to the file table, the ticket lookup and the RomFS chain
+/// without any of them borrowing the session.
+#[derive(Debug, Clone, Copy)]
+struct HostSource {
+    len: u64,
+}
+
+impl ByteSource for HostSource {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, switch_core::Error> {
+        if offset >= self.len {
+            return Ok(0);
+        }
+        let want = ((out.len() as u64).min(self.len - offset)) as usize;
+        let mut done = 0;
+        while done < want {
+            // The host reports a length in a `u32`; nothing this side asks
+            // for that much at once, but the loop is also what absorbs a
+            // short read at the host's own cache-chunk boundary.
+            let ask = (want - done).min(u32::MAX as usize);
+            let got = unsafe {
+                host_read(offset + done as u64, out[done..].as_mut_ptr(), ask as u32)
+            } as usize;
+            if got == 0 {
+                break;
+            }
+            done += got;
+        }
+        if done != want {
+            return Err(switch_core::Error::Io(format!(
+                "host read of {} bytes at {:#x} returned {}",
+                want, offset, done
+            )));
+        }
+        Ok(done)
+    }
+}
+
+/// Allocate `len` bytes of wasm linear memory for passing buffers in from JS.
+///
+/// Returns null for a request this target cannot serve, rather than trapping
+/// on the way there: `Layout` rejects any size above `isize::MAX` — 2 GiB on
+/// wasm32 — and the `.unwrap()` that used to follow lowered to `unreachable`,
+/// which took the module down with `RuntimeError: unreachable executed` and
+/// nothing to say what had asked for what. Callers must check.
+#[no_mangle]
+pub extern "C" fn switch_alloc(len: u32) -> *mut u8 {
+    match Layout::from_size_align(len as usize, 1) {
+        Ok(layout) => unsafe { alloc(layout) },
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
+/// Free a buffer previously returned by `switch_alloc`. A null pointer (an
+/// allocation that was refused) frees nothing.
 #[no_mangle]
 pub extern "C" fn switch_free(ptr: *mut u8, len: u32) {
-    let layout = Layout::from_size_align(len as usize, 1).unwrap();
+    if ptr.is_null() {
+        return;
+    }
+    let Ok(layout) = Layout::from_size_align(len as usize, 1) else {
+        return;
+    };
     unsafe { dealloc(ptr, layout) }
 }
 
@@ -127,9 +237,10 @@ pub extern "C" fn switch_new() -> u32 {
     // Horizon is the only ABI a session ever runs: the frontend loads NROs,
     // NCAs and NSPs, all of which are real Switch programs.
     new_handle(Session {
-        nsp_data: Vec::new(),
+        container: None,
         nsp_files: Vec::new(),
         keys: switch_core::keys::KeySet::default(),
+        control: None,
         cpu,
         last_error: String::new(),
     })
@@ -176,24 +287,22 @@ pub extern "C" fn switch_last_error(handle: u32, buf: *mut u8, maxlen: u32) -> u
     n as u32
 }
 
-/// Load an NSP image into the session. Takes ownership of the buffer at `ptr`
-/// (do not free it afterwards) — for a multi-GB NSP that halves the wasm
-/// memory footprint versus copying. Returns 0 on success, -1 on error.
+/// Open the `size`-byte container the host has ready as an NSP: read its
+/// PFS0 file table and keep it. Returns 0 on success, -1 on error.
+///
+/// Nothing is copied into wasm memory — the file stays with the host and is
+/// read through `host_read` from here on. It has to be: a retail container
+/// runs to several gigabytes, which is more than this target can address at
+/// all, let alone allocate in one buffer.
 #[no_mangle]
-pub extern "C" fn switch_load_nsp(handle: u32, ptr: *const u8, len: u32) -> i32 {
+pub extern "C" fn switch_open_nsp(handle: u32, size: u64) -> i32 {
     let s = session(handle);
-    if ptr.is_null() {
-        s.last_error = "null NSP buffer".into();
-        return -1;
-    }
-    let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-    match Pfs0::parse(data) {
+    let container = HostSource { len: size };
+    s.container = Some(container);
+    s.nsp_files = Vec::new();
+    s.control = None;
+    match Pfs0::read_from(&container) {
         Ok(pfs0) => {
-            // Move ownership of the staged wasm buffer into the session.
-            // SAFETY: `ptr` came from `switch_alloc(len)` (same global
-            // allocator, same Layout), and the caller no longer frees it.
-            let owned = unsafe { Vec::from_raw_parts(ptr as *mut u8, len as usize, len as usize) };
-            s.nsp_data = owned;
             s.nsp_files = pfs0.files;
             s.last_error.clear();
             0
@@ -201,6 +310,48 @@ pub extern "C" fn switch_load_nsp(handle: u32, ptr: *const u8, len: u32) -> i32 
         Err(e) => {
             s.last_error = e.to_string();
             -1
+        }
+    }
+}
+
+/// Open the `size`-byte container the host has ready as a single standalone
+/// `.nca` — no file table, the whole container is the NCA. Returns 0.
+#[no_mangle]
+pub extern "C" fn switch_open_nca(handle: u32, size: u64) -> i32 {
+    let s = session(handle);
+    s.container = Some(HostSource { len: size });
+    s.nsp_files = Vec::new();
+    s.control = None;
+    s.last_error.clear();
+    0
+}
+
+/// The open container as a source, or an error recorded in the session.
+fn container(s: &mut Session) -> Option<HostSource> {
+    match s.container {
+        Some(c) => Some(c),
+        None => {
+            s.last_error = "no container is open".into();
+            None
+        }
+    }
+}
+
+/// A source over NSP file `index` — the window an NCA is read through.
+fn nsp_file_source(s: &mut Session, index: u32) -> Option<Window<HostSource>> {
+    let container = container(s)?;
+    let f = match s.nsp_files.get(index as usize) {
+        Some(f) => f,
+        None => {
+            s.last_error = "no such NSP file index".into();
+            return None;
+        }
+    };
+    match Window::new(container, f.offset, f.size, &f.name) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            s.last_error = e.to_string();
+            None
         }
     }
 }
@@ -228,34 +379,9 @@ pub extern "C" fn switch_nsp_files_json(handle: u32, buf: *mut u8, maxlen: u32) 
     write_into(buf, maxlen, &out)
 }
 
-/// Copy the payload of NSP file `index` into `buf`. Returns bytes copied or -1.
-#[no_mangle]
-pub extern "C" fn switch_extract_file(
-    handle: u32,
-    index: u32,
-    buf: *mut u8,
-    maxlen: u32,
-) -> i64 {
-    let s = session(handle);
-    if let Some(f) = s.nsp_files.get(index as usize) {
-        let start = f.offset as usize;
-        let end = (start + f.size as usize).min(s.nsp_data.len());
-        let n = (end - start).min(maxlen as usize);
-        if n > 0 && !buf.is_null() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(s.nsp_data.as_ptr().add(start), buf, n);
-            }
-        }
-        n as i64
-    } else {
-        -1
-    }
-}
-
 /// Read a slice of NSP file `index` starting at `file_offset` into `buf`
-/// (clamped to the file). Used to grab just an NCA header without allocating
-/// the whole (potentially huge) payload in wasm memory. Returns bytes copied
-/// or -1.
+/// (clamped to the file). Used to grab just an NCA header rather than the
+/// whole (potentially many-gigabyte) payload. Returns bytes copied or -1.
 #[no_mangle]
 pub extern "C" fn switch_read_file(
     handle: u32,
@@ -265,21 +391,22 @@ pub extern "C" fn switch_read_file(
     maxlen: u32,
 ) -> i64 {
     let s = session(handle);
-    if let Some(f) = s.nsp_files.get(index as usize) {
-        let start = f.offset as usize + file_offset as usize;
-        let end = (f.offset as usize + f.size as usize).min(s.nsp_data.len());
-        if start >= end {
-            return 0;
+    let Some(file) = nsp_file_source(s, index) else {
+        return -1;
+    };
+    if buf.is_null() || maxlen == 0 || file_offset >= file.len() {
+        return 0;
+    }
+    let n = (maxlen as u64).min(file.len() - file_offset) as usize;
+    // SAFETY: JS allocated `maxlen` bytes at `buf` with `switch_alloc`, and
+    // `n` is no larger.
+    let out = unsafe { std::slice::from_raw_parts_mut(buf, n) };
+    match file.read_at(file_offset, out) {
+        Ok(got) => got as i64,
+        Err(e) => {
+            s.last_error = e.to_string();
+            -1
         }
-        let n = (end - start).min(maxlen as usize);
-        if n > 0 && !buf.is_null() {
-            unsafe {
-                std::ptr::copy_nonoverlapping(s.nsp_data.as_ptr().add(start), buf, n);
-            }
-        }
-        n as i64
-    } else {
-        -1
     }
 }
 
@@ -338,6 +465,172 @@ pub extern "C" fn switch_parse_nca(handle: u32, ptr: *const u8, len: u32, buf: *
         }
     }
     write_into(buf, maxlen, &out)
+}
+
+/// Read the title's control data — name, publisher, version and icon — from
+/// the Control NCA in the open container and cache it in the session, for
+/// `switch_control_json` and `switch_control_icon` to read back.
+///
+/// Returns 0 on success, -1 when the container has no readable Control NCA.
+/// That includes having no `prod.keys` loaded: an NCA's content type is
+/// inside its encrypted header, so without the header key none of the
+/// container's NCAs can even be identified.
+#[no_mangle]
+pub extern "C" fn switch_load_control_from_nsp(handle: u32) -> i32 {
+    let s = session(handle);
+    s.control = None;
+    let Some(container) = container(s) else {
+        return -1;
+    };
+    let found = switch_core::control::find_control_nca(&s.nsp_files, &container, &s.keys);
+    let Some((index, nca)) = found else {
+        s.last_error =
+            "no Control NCA in this container (or its header couldn't be decrypted — load prod.keys)"
+                .into();
+        return -1;
+    };
+    // Title-key crypto: as when booting the Program NCA, the section key
+    // isn't in the header's own key area and the ticket that unlocks it
+    // ships next to the content.
+    if nca.has_rights_id() && s.keys.title_key(&nca.rights_id).is_none() {
+        if let Ok(title_key) = switch_core::ticket::find_and_decrypt_title_key_from(
+            &nca.rights_id,
+            &s.nsp_files,
+            &container,
+            &s.keys,
+        ) {
+            s.keys.title_keys.push((nca.rights_id, title_key));
+        }
+    }
+    let Some(file) = nsp_file_source(s, index as u32) else {
+        return -1;
+    };
+    match switch_core::control::Control::from_source(file, &s.keys) {
+        Ok(control) => {
+            s.control = Some(control);
+            s.last_error.clear();
+            0
+        }
+        Err(e) => {
+            s.last_error = e.to_string();
+            -1
+        }
+    }
+}
+
+/// Same, for a container opened as a single standalone Control NCA
+/// (`switch_open_nca`) rather than as a container holding one.
+#[no_mangle]
+pub extern "C" fn switch_load_control_from_nca(handle: u32) -> i32 {
+    let s = session(handle);
+    s.control = None;
+    let Some(container) = container(s) else {
+        return -1;
+    };
+    match switch_core::control::Control::from_source(container, &s.keys) {
+        Ok(control) => {
+            s.control = Some(control);
+            s.last_error.clear();
+            0
+        }
+        Err(e) => {
+            s.last_error = e.to_string();
+            -1
+        }
+    }
+}
+
+/// The cached control data as JSON, or `{}` when none has been read. The
+/// icon itself comes from `switch_control_icon`; `icon_size` here is the
+/// buffer that needs.
+#[no_mangle]
+pub extern "C" fn switch_control_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session(handle);
+    let mut out = Vec::new();
+    let Some(control) = &s.control else {
+        out.extend_from_slice(b"{}");
+        return write_into(buf, maxlen, &out);
+    };
+    let nacp = &control.nacp;
+    out.extend_from_slice(b"{\"title_id\":\"");
+    out.extend_from_slice(format!("{:016x}", control.title_id).as_bytes());
+    out.extend_from_slice(b"\",\"name\":\"");
+    json_escape(&control.name, &mut out);
+    out.extend_from_slice(b"\",\"publisher\":\"");
+    json_escape(&control.publisher, &mut out);
+    out.extend_from_slice(b"\",\"language\":\"");
+    json_escape(control.language, &mut out);
+    out.extend_from_slice(b"\",\"version\":\"");
+    json_escape(&nacp.display_version, &mut out);
+    out.extend_from_slice(b"\",\"isbn\":\"");
+    json_escape(&nacp.isbn, &mut out);
+    out.extend_from_slice(b"\",\"error_code_category\":\"");
+    json_escape(&nacp.application_error_code_category, &mut out);
+    out.extend_from_slice(b"\",\"startup_user_account\":\"");
+    out.extend_from_slice(nacp.startup_user_account.name().as_bytes());
+    out.extend_from_slice(b"\",\"screenshot\":\"");
+    out.extend_from_slice(nacp.screenshot.name().as_bytes());
+    out.extend_from_slice(b"\",\"video_capture\":\"");
+    out.extend_from_slice(nacp.video_capture.name().as_bytes());
+    out.extend_from_slice(b"\",\"demo\":");
+    out.extend_from_slice(if nacp.is_demo { b"true" } else { b"false" });
+    out.extend_from_slice(b",\"languages\":[");
+    for (i, title) in nacp.titles.iter().enumerate() {
+        if i > 0 {
+            out.extend_from_slice(b",");
+        }
+        out.extend_from_slice(b"\"");
+        json_escape(title.language, &mut out);
+        out.extend_from_slice(b"\"");
+    }
+    out.extend_from_slice(b"],\"ratings\":[");
+    for (i, rating) in nacp.ratings.iter().enumerate() {
+        if i > 0 {
+            out.extend_from_slice(b",");
+        }
+        out.extend_from_slice(b"{\"organisation\":\"");
+        json_escape(rating.organisation, &mut out);
+        out.extend_from_slice(b"\",\"age\":");
+        out.extend_from_slice(rating.age.to_string().as_bytes());
+        out.extend_from_slice(b"}");
+    }
+    out.extend_from_slice(b"],\"add_on_content_base_id\":\"");
+    out.extend_from_slice(format!("{:016x}", nacp.add_on_content_base_id).as_bytes());
+    out.extend_from_slice(b"\",\"save_data_owner_id\":\"");
+    out.extend_from_slice(format!("{:016x}", nacp.save_data_owner_id).as_bytes());
+    out.extend_from_slice(b"\",\"user_save_size\":");
+    out.extend_from_slice(nacp.user_account_save_data_size.to_string().as_bytes());
+    out.extend_from_slice(b",\"user_save_journal_size\":");
+    out.extend_from_slice(nacp.user_account_save_data_journal_size.to_string().as_bytes());
+    out.extend_from_slice(b",\"device_save_size\":");
+    out.extend_from_slice(nacp.device_save_data_size.to_string().as_bytes());
+    out.extend_from_slice(b",\"device_save_journal_size\":");
+    out.extend_from_slice(nacp.device_save_data_journal_size.to_string().as_bytes());
+    out.extend_from_slice(b",\"bcat_storage_size\":");
+    out.extend_from_slice(nacp.bcat_delivery_cache_storage_size.to_string().as_bytes());
+    out.extend_from_slice(b",\"icon_mime\":\"");
+    out.extend_from_slice(control.icon_mime().as_bytes());
+    out.extend_from_slice(b"\",\"icon_size\":");
+    out.extend_from_slice(control.icon.len().to_string().as_bytes());
+    out.extend_from_slice(b"}");
+    write_into(buf, maxlen, &out)
+}
+
+/// Copy the cached title icon into `buf`. Returns bytes copied, or -1 when
+/// no control data has been read.
+#[no_mangle]
+pub extern "C" fn switch_control_icon(handle: u32, buf: *mut u8, maxlen: u32) -> i64 {
+    let s = session(handle);
+    let Some(control) = &s.control else {
+        return -1;
+    };
+    let n = control.icon.len().min(maxlen as usize);
+    if n > 0 && !buf.is_null() {
+        unsafe {
+            std::ptr::copy_nonoverlapping(control.icon.as_ptr(), buf, n);
+        }
+    }
+    n as i64
 }
 
 /// Load `prod.keys` / `title.keys` text files into the session. Either pointer
@@ -414,22 +707,24 @@ fn collect_modules<'a>(pfs0: &Pfs0, exefs: &'a [u8]) -> Vec<(&'static str, &'a [
 }
 
 /// Shared by `switch_load_nca` and `switch_load_nca_from_nsp`: decrypt a
-/// Program NCA's ExeFS from `raw` (the full, still-encrypted NCA bytes),
+/// Program NCA's ExeFS from `nca_src` (the whole, still-encrypted NCA),
 /// extract `main` and boot it. Returns entry address or -1.
 ///
-/// Takes `keys`/`cpu`/`last_error` as separate borrows (rather than `&mut
-/// Session`) so a caller can pass `raw` borrowed from another field of the
-/// same `Session` (e.g. a slice of `nsp_data`) without that overlapping with
-/// the `&mut Cpu` borrow — which is what lets `switch_load_nca_from_nsp` boot
-/// straight out of the already-staged NSP buffer instead of copying a
-/// possibly hundreds-of-MB NCA first.
-fn load_and_boot_nca(
+/// `nca_src` is a source rather than a buffer, and is consumed: the title's
+/// RomFS outlives this call as a decrypting view of it, so the container has
+/// to stay readable for as long as the title runs. Nothing but the ExeFS is
+/// ever held in memory.
+///
+/// Takes `keys`/`cpu`/`last_error` as separate borrows rather than `&mut
+/// Session` so the caller can keep reading the session's file table while
+/// this holds `&mut Cpu`.
+fn load_and_boot_nca<S: ByteSource + 'static>(
     keys: &switch_core::keys::KeySet,
     cpu: &mut Cpu,
     last_error: &mut String,
-    raw: &[u8],
+    nca_src: S,
 ) -> i64 {
-    let nca = match Nca::parse_with_keys(raw, Some(keys)) {
+    let nca = match Nca::parse_source(&nca_src, Some(keys)) {
         Ok(nca) => nca,
         Err(e) => {
             *last_error = e.to_string();
@@ -443,7 +738,7 @@ fn load_and_boot_nca(
             return -1;
         }
     };
-    let exefs = match nca.decrypt_pfs0_section(raw, keys, exefs_index) {
+    let exefs = match nca.read_pfs0_section(&nca_src, keys, exefs_index) {
         Ok(v) => v,
         Err(e) => {
             *last_error = e.to_string();
@@ -466,9 +761,13 @@ fn load_and_boot_nca(
     // RomFS is optional (Meta/Control-only content, or a title with no
     // assets of its own, has none) and a failure to decrypt it shouldn't
     // block booting — the title just won't have its asset storage mounted.
+    // The source is handed to the CPU rather than decrypted up front: a
+    // retail RomFS is the entire game, and the guest reads it a range at a
+    // time through `IStorage` anyway.
     if let Some(romfs_index) = nca.romfs_section_index() {
-        if let Ok(romfs) = nca.decrypt_romfs_section(raw, keys, romfs_index) {
-            cpu.set_romfs(romfs);
+        match nca.romfs_source(nca_src, keys, romfs_index) {
+            Ok(romfs) => cpu.set_romfs_source(Box::new(romfs)),
+            Err(e) => cpu.diagnostic(&format!("romfs unavailable: {}", e)),
         }
     }
 
@@ -484,27 +783,21 @@ fn load_and_boot_nca(
     }
 }
 
-/// Decrypt a standalone Program NCA file (using whatever keys are loaded),
-/// extract its ExeFS `main` executable and boot it. Takes ownership of the
-/// buffer at `ptr` (do not free it afterwards) — an NCA can be hundreds of MB,
-/// so this avoids a second copy the way `switch_load_nsp` does. Returns entry
-/// address or -1 — check `switch_last_error` either way, since the entry can
-/// legitimately be 0 for some NSO layouts.
+/// Decrypt the open container as a standalone Program NCA (using whatever
+/// keys are loaded), extract its ExeFS `main` executable and boot it. Returns
+/// entry address or -1 — check `switch_last_error` either way, since the
+/// entry can legitimately be 0 for some NSO layouts.
 ///
 /// This gets a real title as far as its own crt0; there is no Horizon service
 /// surface for a full retail SDK program yet, so expect it to run until the
 /// first missing service rather than to a menu.
 #[no_mangle]
-pub extern "C" fn switch_load_nca(handle: u32, ptr: *const u8, len: u32) -> i64 {
+pub extern "C" fn switch_load_nca(handle: u32) -> i64 {
     let s = session(handle);
-    if ptr.is_null() {
-        s.last_error = "null NCA buffer".into();
+    let Some(container) = container(s) else {
         return -1;
-    }
-    // SAFETY: `ptr` came from `switch_alloc(len)` (same global allocator,
-    // same Layout), and the caller no longer frees it.
-    let owned = unsafe { Vec::from_raw_parts(ptr as *mut u8, len as usize, len as usize) };
-    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, &owned)
+    };
+    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, container)
 }
 
 /// Decrypt NSP file `index` as a Program NCA (using whatever keys are
@@ -518,36 +811,31 @@ pub extern "C" fn switch_load_nca(handle: u32, ptr: *const u8, len: u32) -> i64 
 #[no_mangle]
 pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
     let s = session(handle);
-    let (start, end) = match s.nsp_files.get(index as usize) {
-        Some(f) => match (f.offset as usize).checked_add(f.size as usize) {
-            Some(end) if end <= s.nsp_data.len() => (f.offset as usize, end),
-            _ => {
-                s.last_error = "NCA file entry exceeds the loaded NSP".into();
-                return -1;
-            }
-        },
-        None => {
-            s.last_error = "no such NSP file index".into();
-            return -1;
-        }
+    let Some(container) = container(s) else {
+        return -1;
+    };
+    let Some(nca_src) = nsp_file_source(s, index) else {
+        return -1;
     };
 
     // Title-key crypto: the key doesn't live in the NCA header's own key
     // area, and scene NSP releases almost always bundle the ticket that
     // unlocks it right next to the content — try that before falling back to
     // whatever an external title.keys provided.
-    if let Ok(nca) = switch_core::nca::Nca::parse_with_keys(&s.nsp_data[start..end], Some(&s.keys)) {
+    if let Ok(nca) = Nca::parse_source(&nca_src, Some(&s.keys)) {
         if nca.has_rights_id() && s.keys.title_key(&nca.rights_id).is_none() {
-            if let Ok(title_key) =
-                switch_core::ticket::find_and_decrypt_title_key(&nca.rights_id, &s.nsp_files, &s.nsp_data, &s.keys)
-            {
+            if let Ok(title_key) = switch_core::ticket::find_and_decrypt_title_key_from(
+                &nca.rights_id,
+                &s.nsp_files,
+                &container,
+                &s.keys,
+            ) {
                 s.keys.title_keys.push((nca.rights_id, title_key));
             }
         }
     }
 
-    let raw = &s.nsp_data[start..end];
-    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, raw)
+    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, nca_src)
 }
 
 /// Load an AArch64 ELF into the CPU. Returns entry address or -1.
@@ -1143,6 +1431,103 @@ mod tests {
             -1
         );
         switch_free_session(handle);
+    }
+
+    /// Build a PFS0 container holding `files`, laid out the way a real `.nsp`
+    /// is: header, entry table, string table, then the payloads.
+    fn build_nsp(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut names = Vec::new();
+        let mut name_offsets = Vec::new();
+        for (name, _) in files {
+            name_offsets.push(names.len() as u32);
+            names.extend_from_slice(name.as_bytes());
+            names.push(0);
+        }
+        let entries_end = 0x10 + files.len() * 24;
+        let payload_base = entries_end + names.len();
+
+        let mut image = Vec::new();
+        image.extend_from_slice(&0x3053_4650u32.to_le_bytes()); // "PFS0"
+        image.extend_from_slice(&(files.len() as u32).to_le_bytes());
+        image.extend_from_slice(&(names.len() as u32).to_le_bytes());
+        image.extend_from_slice(&0u32.to_le_bytes());
+        let mut at = payload_base as u64;
+        for (i, (_, payload)) in files.iter().enumerate() {
+            image.extend_from_slice(&at.to_le_bytes());
+            image.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+            image.extend_from_slice(&name_offsets[i].to_le_bytes());
+            image.extend_from_slice(&0u32.to_le_bytes());
+            at += payload.len() as u64;
+        }
+        image.extend_from_slice(&names);
+        for (_, payload) in files {
+            image.extend_from_slice(payload);
+        }
+        image
+    }
+
+    /// The container path end to end, through the same `host_read` the
+    /// browser serves from a file on disk: nothing but the header and the
+    /// ranges actually asked for ever crosses into this side.
+    #[test]
+    fn a_container_is_read_through_the_host_without_being_staged() {
+        let (_host, handle) = new_session();
+        let payload: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        let image = build_nsp(&[("main.nca", &payload), ("notes.txt", b"hello")]);
+        let size = image.len() as u64;
+        set_host_container(image);
+
+        assert_eq!(switch_open_nsp(handle, size), 0);
+
+        let mut buf = vec![0u8; 4096];
+        let n = switch_nsp_files_json(handle, buf.as_mut_ptr(), buf.len() as u32);
+        let json = String::from_utf8(buf[..n as usize].to_vec()).unwrap();
+        assert!(json.contains(r#"{"name":"main.nca","offset":"#), "{json}");
+        assert!(json.contains(r#""size":4096}"#), "{json}");
+        assert!(json.contains(r#"{"name":"notes.txt""#), "{json}");
+
+        // A read is relative to the file inside the container, and stops at
+        // its end rather than running on into the next one.
+        let mut out = vec![0u8; 32];
+        let got = switch_read_file(handle, 0, 0x1000 - 8, out.as_mut_ptr(), out.len() as u32);
+        assert_eq!(got, 8);
+        assert_eq!(&out[..8], &payload[0x1000 - 8..]);
+
+        let got = switch_read_file(handle, 1, 0, out.as_mut_ptr(), out.len() as u32);
+        assert_eq!(got, 5);
+        assert_eq!(&out[..5], b"hello");
+
+        // Past the end of a file is nothing, and past the end of the table is
+        // an error — neither is a read of whatever happens to be next.
+        assert_eq!(switch_read_file(handle, 1, 5, out.as_mut_ptr(), 32), 0);
+        assert_eq!(switch_read_file(handle, 7, 0, out.as_mut_ptr(), 32), -1);
+
+        // The payload is not an NCA, so booting it has to come back as a
+        // readable error rather than a trap — the failure this whole path
+        // replaced was a `RuntimeError: unreachable` with nothing behind it.
+        assert_eq!(switch_load_nca_from_nsp(handle, 0), -1);
+        let mut err = vec![0u8; 512];
+        let n = switch_last_error(handle, err.as_mut_ptr(), err.len() as u32);
+        let text = String::from_utf8(err[..n as usize].to_vec()).unwrap();
+        assert!(text.contains("bad magic"), "{text}");
+
+        switch_free_session(handle);
+    }
+
+    /// The allocator entry point JS calls before every buffer it passes in.
+    /// A request past `isize::MAX` is refused rather than reaching `Layout`,
+    /// whose error path is an `unreachable` that takes down the module.
+    #[test]
+    fn an_impossible_allocation_is_refused_not_fatal() {
+        assert!(!switch_alloc(64).is_null());
+        // Only wasm32 has a `usize` small enough for `switch_alloc`'s `u32`
+        // to reach the limit; on a 64-bit host every `u32` is allocatable, so
+        // the refusal itself is what is checked there.
+        if (u32::MAX as u64) > isize::MAX as u64 {
+            assert!(switch_alloc(u32::MAX).is_null());
+        }
+        // Freeing what was never allocated is a no-op, not a fault.
+        switch_free(std::ptr::null_mut(), 64);
     }
 
     #[test]

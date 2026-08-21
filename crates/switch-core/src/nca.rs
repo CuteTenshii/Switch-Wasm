@@ -45,6 +45,7 @@
 //! byte header rather than just the base 0x400) carries the hash and
 //! encryption metadata needed to actually decrypt and verify the section.
 
+use crate::source::{ByteSource, SliceSource, Window};
 use crate::Error;
 
 pub const NCA_MAGIC: u32 = 0x3341_434e; // "NCA3"
@@ -351,6 +352,21 @@ impl Nca {
         })
     }
 
+    /// Parse an NCA header out of a [`ByteSource`], reading only the
+    /// [`NCA_FULL_HEADER_SIZE`] bytes the header occupies.
+    ///
+    /// This is how an NCA inside a multi-gigabyte container is opened: the
+    /// header is 3 KiB at the front of it, and the sections it describes are
+    /// then read through [`Nca::section_source`] rather than extracted.
+    pub fn parse_source<S: ByteSource>(
+        src: &S,
+        keys: Option<&crate::keys::KeySet>,
+    ) -> Result<Nca, Error> {
+        let want = src.len().min(NCA_FULL_HEADER_SIZE as u64);
+        let header = src.read_vec(0, want)?;
+        Nca::parse_with_keys(&header, keys)
+    }
+
     /// Whether the file body is encrypted. In practice every retail NCA is,
     /// and the key data required to decrypt lives in the header's key area.
     pub fn is_encrypted(&self) -> bool {
@@ -394,13 +410,19 @@ impl Nca {
         Ok(crate::crypto::aes128_decrypt_block(&kek, &block))
     }
 
-    /// Decrypt section `index`'s body from the *raw* (still-encrypted) NCA
-    /// bytes, verifying it against the FS header's master hash when the
-    /// section is `HierarchicalSha256`-hashed (PFS0/ExeFS). A hash mismatch
-    /// means the wrong key was used — decryption with a wrong key still
-    /// "succeeds" (AES-CTR just XORs a different keystream), so this is the
-    /// only real signal.
-    pub fn decrypt_section(&self, raw: &[u8], keys: &crate::keys::KeySet, index: usize) -> Result<Vec<u8>, Error> {
+    /// A decrypting [`ByteSource`] over section `index`'s body.
+    ///
+    /// Nothing is read here: the returned source decrypts on demand, so a
+    /// section far larger than memory (a retail RomFS is the whole game) can
+    /// be served range by range as the guest asks for it. `nca` is a source
+    /// over the *whole* NCA, since a section's AES-CTR counter is derived
+    /// from its absolute position in the file.
+    pub fn section_source<S: ByteSource>(
+        &self,
+        nca: S,
+        keys: &crate::keys::KeySet,
+        index: usize,
+    ) -> Result<SectionSource<S>, Error> {
         let sec = self
             .sections
             .get(index)
@@ -409,48 +431,110 @@ impl Nca {
             .fs_headers
             .get(index)
             .and_then(|o| o.as_ref())
+            .copied()
             .ok_or_else(|| {
                 Error::Nca(
                     "missing FS header — pass the full NCA (>= 0xC00 bytes) with a loaded header_key"
                         .into(),
                 )
             })?;
-        let start = sec.media_offset as usize;
-        let end = start
-            .checked_add(sec.media_size as usize)
-            .ok_or(Error::Overflow)?;
-        if end > raw.len() {
-            return Err(Error::Truncated {
-                what: format!("NCA section {}", index),
-                expected: end,
-                got: raw.len(),
-            });
-        }
-        let body = &raw[start..end];
-        let plain = match fs.encryption_type {
-            ENCRYPTION_AES_CTR => {
-                let key = self.section_key(keys)?;
-                crate::crypto::aes128_ctr_xor(&key, &fs.initial_counter(sec.media_offset), body)
+        let key = match fs.encryption_type {
+            ENCRYPTION_AES_CTR => Some(self.section_key(keys)?),
+            ENCRYPTION_NONE => None,
+            other => {
+                return Err(Error::Nca(format!(
+                    "unsupported section encryption type {}",
+                    other
+                )))
             }
-            ENCRYPTION_NONE => body.to_vec(),
-            other => return Err(Error::Nca(format!("unsupported section encryption type {}", other))),
         };
+        let body = Window::new(
+            nca,
+            sec.media_offset,
+            sec.media_size,
+            &format!("NCA section {}", index),
+        )?;
+        Ok(SectionSource {
+            body,
+            key,
+            fs,
+            nca_offset: sec.media_offset,
+        })
+    }
 
-        if fs.fs_type == HASH_TYPE_SHA256 {
-            let ht_start = fs.hash_table_offset as usize;
-            let ht_end = ht_start
-                .checked_add(fs.hash_table_size as usize)
-                .ok_or(Error::Overflow)?;
-            if ht_end > plain.len() {
-                return Err(Error::Nca("hash table region exceeds decrypted section".into()));
-            }
-            if crate::crypto::sha256(&plain[ht_start..ht_end]) != fs.master_hash {
-                return Err(Error::Nca(
-                    "decrypted section hash mismatch — wrong keys or a corrupt file".into(),
-                ));
-            }
+    /// Check a decrypted section against the FS header's master hash, for the
+    /// `HierarchicalSha256` sections that have one (PFS0/ExeFS).
+    ///
+    /// A wrong key is otherwise undetectable: AES-CTR with the wrong key
+    /// still "succeeds", it just XORs a different keystream, so this is the
+    /// only signal that what came out is the real thing.
+    fn verify_section_hash(&self, plain: &[u8], index: usize) -> Result<(), Error> {
+        let fs = match self.fs_headers.get(index).and_then(|o| o.as_ref()) {
+            Some(fs) if fs.fs_type == HASH_TYPE_SHA256 => fs,
+            _ => return Ok(()),
+        };
+        let ht_start = fs.hash_table_offset as usize;
+        let ht_end = ht_start
+            .checked_add(fs.hash_table_size as usize)
+            .ok_or(Error::Overflow)?;
+        if ht_end > plain.len() {
+            return Err(Error::Nca("hash table region exceeds decrypted section".into()));
         }
+        if crate::crypto::sha256(&plain[ht_start..ht_end]) != fs.master_hash {
+            return Err(Error::Nca(
+                "decrypted section hash mismatch — wrong keys or a corrupt file".into(),
+            ));
+        }
+        Ok(())
+    }
 
+    /// Decrypt section `index`'s body from the *raw* (still-encrypted) NCA
+    /// bytes, verifying it against the FS header's master hash when the
+    /// section is `HierarchicalSha256`-hashed (PFS0/ExeFS).
+    ///
+    /// Holds the whole section in memory, so it is only for sections known to
+    /// be small (an ExeFS) or for a host that has the file mapped anyway; the
+    /// browser reads RomFS through [`Nca::romfs_source`] instead.
+    pub fn decrypt_section(&self, raw: &[u8], keys: &crate::keys::KeySet, index: usize) -> Result<Vec<u8>, Error> {
+        let section = self.section_source(SliceSource(raw), keys, index)?;
+        let plain = section.read_vec(0, section.len())?;
+        self.verify_section_hash(&plain, index)?;
+        Ok(plain)
+    }
+
+    /// Read section `index` as an ExeFS: decrypt it, verify it, and return
+    /// just the PFS0 payload (after the hash table), ready for `Pfs0::parse`.
+    /// Only valid for `HierarchicalSha256`-hashed sections.
+    ///
+    /// An ExeFS is a title's executables — tens of megabytes at the outside —
+    /// so unlike its RomFS this is read in full.
+    pub fn read_pfs0_section<S: ByteSource>(
+        &self,
+        nca: S,
+        keys: &crate::keys::KeySet,
+        index: usize,
+    ) -> Result<Vec<u8>, Error> {
+        let fs = self
+            .fs_headers
+            .get(index)
+            .and_then(|o| o.as_ref())
+            .copied()
+            .ok_or_else(|| Error::Nca(format!("no FS header for section {}", index)))?;
+        let section = self.section_source(nca, keys, index)?;
+        let mut plain = section.read_vec(0, section.len())?;
+        self.verify_section_hash(&plain, index)?;
+        let start = crate::source::alloc_len(fs.data_offset, "PFS0 region offset")?;
+        let end = start
+            .checked_add(crate::source::alloc_len(fs.data_size, "PFS0 region")?)
+            .ok_or(Error::Overflow)?;
+        if end > plain.len() {
+            return Err(Error::Nca("PFS0 region exceeds decrypted section".into()));
+        }
+        // Trim in place rather than copying the payload out: the section is
+        // the largest thing this path holds, and a second copy of it is the
+        // difference between loading a title and running out of memory.
+        plain.truncate(end);
+        plain.drain(..start);
         Ok(plain)
     }
 
@@ -463,21 +547,7 @@ impl Nca {
         keys: &crate::keys::KeySet,
         index: usize,
     ) -> Result<Vec<u8>, Error> {
-        let fs = self
-            .fs_headers
-            .get(index)
-            .and_then(|o| o.as_ref())
-            .copied()
-            .ok_or_else(|| Error::Nca(format!("no FS header for section {}", index)))?;
-        let plain = self.decrypt_section(raw, keys, index)?;
-        let start = fs.data_offset as usize;
-        let end = start
-            .checked_add(fs.data_size as usize)
-            .ok_or(Error::Overflow)?;
-        if end > plain.len() {
-            return Err(Error::Nca("PFS0 region exceeds decrypted section".into()));
-        }
-        Ok(plain[start..end].to_vec())
+        self.read_pfs0_section(SliceSource(raw), keys, index)
     }
 
     /// The index of this NCA's PFS0 (ExeFS) section, if any — `partition_type`
@@ -493,39 +563,141 @@ impl Nca {
             .position(|fs| matches!(fs, Some(h) if h.partition_type == 0 && h.fs_type == HASH_TYPE_IVFC))
     }
 
-    /// Decrypt section `index` as a RomFS image, and slice out the actual
-    /// RomFS body (after the IVFC hash-tree levels) via
-    /// [`FsHeader::romfs_data_offset`]. Sanity-checks the result against
-    /// RomFS's own `header_size` field (always 0x50). Full multi-level IVFC
-    /// hash verification (the way `decrypt_pfs0_section` verifies
+    /// A [`ByteSource`] over section `index`'s RomFS image: the decrypting
+    /// section view, windowed past the IVFC hash-tree levels via
+    /// [`FsHeader::romfs_data_offset`].
+    ///
+    /// Nothing is decrypted up front. This is the only way a modern title's
+    /// RomFS can be served at all — it is the bulk of a container that
+    /// already does not fit in memory — and the guest reads it a range at a
+    /// time through `IStorage` anyway.
+    ///
+    /// Sanity-checks the image against RomFS's own `header_size` field
+    /// (always 0x50), which is what catches a wrong key: full multi-level
+    /// IVFC hash verification (the way [`Nca::read_pfs0_section`] verifies
     /// `HierarchicalSha256`) isn't implemented, so this catches "wrong key"
     /// but not a subtler corruption deep in the hash tree.
-    pub fn decrypt_romfs_section(
+    pub fn romfs_source<S: ByteSource>(
         &self,
-        raw: &[u8],
+        nca: S,
         keys: &crate::keys::KeySet,
         index: usize,
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<Window<SectionSource<S>>, Error> {
         let fs = self
             .fs_headers
             .get(index)
             .and_then(|o| o.as_ref())
             .copied()
             .ok_or_else(|| Error::Nca(format!("no FS header for section {}", index)))?;
-        let plain = self.decrypt_section(raw, keys, index)?;
-        let start = fs.romfs_data_offset as usize;
-        if start >= plain.len() {
+        let section = self.section_source(nca, keys, index)?;
+        if fs.romfs_data_offset >= section.len() {
             return Err(Error::Nca("RomFS data offset exceeds the decrypted section".into()));
         }
-        let body = &plain[start..];
+        let len = section.len() - fs.romfs_data_offset;
+        let romfs = Window::new(section, fs.romfs_data_offset, len, "RomFS image")?;
+        // RomFS's own header starts with its size, always 0x50. With the
+        // wrong key the section decrypts to noise, and this is what says so —
+        // there is no per-block hash to check an IVFC section against.
+        let mut header_size = [0u8; 8];
+        romfs.read_exact_at(0, &mut header_size)?;
         const ROMFS_HEADER_SIZE: u64 = 0x50;
-        let header_size = body.get(0..8).map(|b| u64::from_le_bytes(b.try_into().unwrap()));
-        if header_size != Some(ROMFS_HEADER_SIZE) {
+        if u64::from_le_bytes(header_size) != ROMFS_HEADER_SIZE {
             return Err(Error::Nca(
                 "decrypted RomFS section doesn't start with a valid RomFS header — wrong keys or a corrupt file".into(),
             ));
         }
-        Ok(body.to_vec())
+        Ok(romfs)
+    }
+
+    /// Decrypt section `index` as a RomFS image and return the whole thing.
+    ///
+    /// Only for a host with memory to spare (the native examples): the
+    /// browser composes [`Nca::romfs_source`] into the CPU instead, since a
+    /// retail RomFS is gigabytes.
+    pub fn decrypt_romfs_section(
+        &self,
+        raw: &[u8],
+        keys: &crate::keys::KeySet,
+        index: usize,
+    ) -> Result<Vec<u8>, Error> {
+        let romfs = self.romfs_source(SliceSource(raw), keys, index)?;
+        romfs.read_vec(0, romfs.len())
+    }
+}
+
+/// A decrypting view of one NCA section: [`Nca::section_source`] builds it,
+/// and reads through it come back in the clear.
+///
+/// AES-CTR is seekable — the keystream block a byte gets is decided by its
+/// own position — so a range out of the middle of a section costs exactly
+/// that range, which is what lets a RomFS larger than memory be read at all.
+/// Reads are aligned down to the 16-byte cipher block internally; callers see
+/// plain byte addressing.
+#[derive(Debug, Clone)]
+pub struct SectionSource<S> {
+    /// The section body, still encrypted, addressed from the section start.
+    body: Window<S>,
+    /// The AES-128-CTR section key, or `None` for an unencrypted section.
+    key: Option<[u8; 16]>,
+    fs: FsHeader,
+    /// The section's absolute offset within the NCA, which is what its
+    /// counter blocks are numbered from.
+    nca_offset: u64,
+}
+
+impl<S: ByteSource> SectionSource<S> {
+    /// The section's FS header (hash type, encryption, IVFC layout).
+    pub fn fs_header(&self) -> &FsHeader {
+        &self.fs
+    }
+
+    /// Decrypt `buf`, which must hold the section's bytes starting at the
+    /// 16-byte-aligned section offset `at`.
+    fn decrypt_at(&self, at: u64, buf: &mut [u8]) {
+        if let Some(key) = self.key {
+            let ctr = self.fs.initial_counter(self.nca_offset + at);
+            crate::crypto::aes128_ctr_xor_in_place(&key, &ctr, buf);
+        }
+    }
+}
+
+impl<S: ByteSource> ByteSource for SectionSource<S> {
+    fn len(&self) -> u64 {
+        self.body.len()
+    }
+
+    fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
+        if offset >= self.len() {
+            return Ok(0);
+        }
+        let want = ((out.len() as u64).min(self.len() - offset)) as usize;
+        let aligned = offset & !0xF;
+        let head = (offset - aligned) as usize;
+        let mut done = 0;
+        // A read that starts mid-cipher-block needs that whole block to
+        // decrypt it, so the first one goes through a scratch block and the
+        // rest is decrypted straight into the caller's buffer.
+        if head != 0 {
+            let mut block = [0u8; 16];
+            let got = self.body.read_at(aligned, &mut block)?;
+            self.decrypt_at(aligned, &mut block[..got]);
+            let take = (16 - head).min(want).min(got.saturating_sub(head));
+            out[..take].copy_from_slice(&block[head..head + take]);
+            done = take;
+            // Short here means the section ended inside this very block, so
+            // there is nothing past it to go on with.
+            if take < (16 - head).min(want) {
+                return Ok(done);
+            }
+        }
+        if done < want {
+            let at = aligned + if head != 0 { 16 } else { 0 };
+            let rest = &mut out[done..want];
+            let got = self.body.read_at(at, rest)?;
+            self.decrypt_at(at, &mut rest[..got]);
+            done += got;
+        }
+        Ok(done)
     }
 }
 
@@ -827,8 +999,11 @@ mod decrypt_tests {
     /// Same shape as the ExeFS test above, but for a RomFS (`HierarchicalIntegrity`/IVFC)
     /// section: no `data_offset` sub-slice, no master-hash check — just the
     /// section decrypting to something starting with a valid RomFS header.
-    #[test]
-    fn decrypts_a_synthetic_romfs_section() {
+    /// Build a synthetic *encrypted* Data NCA whose single section is a
+    /// RomFS (`HierarchicalIntegrity`/IVFC): returns the raw NCA bytes, the
+    /// keyset that unlocks them, the section in the clear, and the offset the
+    /// real RomFS image starts at within it.
+    fn build_romfs_nca() -> (Vec<u8>, KeySet, Vec<u8>, u64) {
         use crate::crypto::aes128_ctr_xor;
 
         let header_key = {
@@ -864,14 +1039,17 @@ mod decrypt_tests {
         // The real RomFS data always lives at IVFC level index 5 (hactool
         // reads `level_headers[IVFC_MAX_LEVEL - 1]` unconditionally) — bytes
         // before that are the (unverified here) hash-tree levels. This
-        // exercises the actual bug this test caught against real content:
+        // exercises the actual bug this fixture caught against real content:
         // byte 0 of the section is NOT the RomFS header for a real,
         // multi-level IVFC section.
         const LEVEL5_OFFSET: u64 = 0x40;
         let mut plain_section = vec![0xAAu8; LEVEL5_OFFSET as usize]; // levels 0..4 "hash tables"
         plain_section.extend_from_slice(&0x50u64.to_le_bytes()); // RomFS header_size
-        plain_section.extend_from_slice(&[0x99u8; 0x40]);
-        plain_section.resize(0x200, 0); // pad to a whole media unit for an exact round-trip below
+        // Every byte past the header is a function of its own offset, so a
+        // partial read can be checked for having landed where it claims.
+        while plain_section.len() < 0x200 {
+            plain_section.push((plain_section.len() as u8) ^ 0x5A);
+        }
 
         let at = h + 0x40;
         let start_units = (SECTION_OFFSET / 0x200) as u32;
@@ -907,14 +1085,24 @@ mod decrypt_tests {
         let mut keys = KeySet::default();
         keys.header_key = Some(header_key);
         keys.key_area_key_system[0] = Some(kek);
+        (raw, keys, plain_section, LEVEL5_OFFSET)
+    }
+
+    /// Same shape as the ExeFS test above, but for a RomFS
+    /// (`HierarchicalIntegrity`/IVFC) section: no `data_offset` sub-slice, no
+    /// master-hash check — just the section decrypting to something starting
+    /// with a valid RomFS header.
+    #[test]
+    fn decrypts_a_synthetic_romfs_section() {
+        let (raw, keys, plain_section, level5) = build_romfs_nca();
 
         let nca = Nca::parse_with_keys(&raw, Some(&keys)).expect("parse");
         assert_eq!(nca.romfs_section_index(), Some(0));
         assert_eq!(nca.exefs_section_index(), None);
-        assert_eq!(nca.fs_headers[0].unwrap().romfs_data_offset, LEVEL5_OFFSET);
+        assert_eq!(nca.fs_headers[0].unwrap().romfs_data_offset, level5);
 
         let extracted = nca.decrypt_romfs_section(&raw, &keys, 0).expect("decrypt romfs");
-        assert_eq!(extracted, &plain_section[LEVEL5_OFFSET as usize..]);
+        assert_eq!(extracted, &plain_section[level5 as usize..]);
 
         // A wrong key decrypts to garbage, caught by the header_size check
         // (there's no per-block hash to verify against, unlike PFS0).
@@ -924,5 +1112,55 @@ mod decrypt_tests {
             nca.decrypt_romfs_section(&raw, &wrong_keys, 0),
             Err(Error::Nca(_))
         ));
+    }
+
+    /// The path a real title's RomFS is actually served through: no full
+    /// decryption anywhere, just the ranges the guest asked for.
+    ///
+    /// The ranges deliberately do not line up with anything. AES-CTR numbers
+    /// its keystream blocks by position, so a read starting mid-block has to
+    /// be aligned down to the cipher block, decrypted, and then trimmed —
+    /// get that wrong and only reads that happen to start on a multiple of 16
+    /// come back correct, which most of a RomFS mount's do.
+    #[test]
+    fn a_romfs_source_serves_unaligned_ranges_without_decrypting_the_section() {
+        let (raw, keys, plain_section, level5) = build_romfs_nca();
+        let nca = Nca::parse_with_keys(&raw, Some(&keys)).expect("parse");
+        let romfs = nca
+            .romfs_source(SliceSource(&raw), &keys, 0)
+            .expect("romfs source");
+
+        let want = &plain_section[level5 as usize..];
+        assert_eq!(romfs.len(), want.len() as u64);
+
+        for &(offset, len) in &[
+            (0u64, 8usize),   // the RomFS header itself
+            (1, 1),           // one byte, mid-block
+            (3, 13),          // up to the first block boundary
+            (3, 14),          // and one byte past it
+            (15, 2),          // straddling a block boundary
+            (16, 32),         // exactly aligned, whole blocks
+            (17, 100),        // unaligned start, unaligned end
+            (0x3f, 0x81),     // spanning many blocks
+        ] {
+            let mut out = vec![0u8; len];
+            let got = romfs.read_at(offset, &mut out).unwrap();
+            assert_eq!(got, len, "short read at {:#x}+{:#x}", offset, len);
+            assert_eq!(
+                out,
+                &want[offset as usize..offset as usize + len],
+                "wrong bytes at {:#x}+{:#x}",
+                offset,
+                len
+            );
+        }
+
+        // Reads that run off the end report what they filled rather than
+        // failing, and past it, nothing.
+        let mut out = vec![0u8; 64];
+        let last = romfs.len() - 10;
+        assert_eq!(romfs.read_at(last, &mut out).unwrap(), 10);
+        assert_eq!(&out[..10], &want[last as usize..]);
+        assert_eq!(romfs.read_at(romfs.len(), &mut out).unwrap(), 0);
     }
 }

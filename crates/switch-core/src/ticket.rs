@@ -131,17 +131,34 @@ pub fn find_and_decrypt_title_key(
     nsp_data: &[u8],
     keys: &KeySet,
 ) -> Result<[u8; 16], Error> {
+    find_and_decrypt_title_key_from(rights_id, files, &crate::source::SliceSource(nsp_data), keys)
+}
+
+/// Same, reading the ticket out of a [`ByteSource`] over the container rather
+/// than a buffer holding all of it — which for a retail `.nsp` is the only
+/// form there is.
+pub fn find_and_decrypt_title_key_from<S: crate::source::ByteSource>(
+    rights_id: &[u8; 16],
+    files: &[crate::nsp::Pfs0File],
+    src: &S,
+    keys: &KeySet,
+) -> Result<[u8; 16], Error> {
     let want_name = format!("{}.tik", hex_lower(rights_id));
     let f = files
         .iter()
         .find(|f| f.name.eq_ignore_ascii_case(&want_name))
         .ok_or_else(|| Error::Ticket(format!("no {} in this NSP", want_name)))?;
-    let start = f.offset as usize;
-    let end = start
-        .checked_add(f.size as usize)
-        .filter(|&e| e <= nsp_data.len())
-        .ok_or_else(|| Error::Ticket("ticket entry exceeds the NSP".into()))?;
-    Ticket::parse(&nsp_data[start..end])?.decrypt_title_key(keys)
+    let end = f.offset.saturating_add(f.size);
+    if end > src.len() {
+        return Err(Error::Ticket("ticket entry exceeds the NSP".into()));
+    }
+    // A ticket is a signature block plus a 0x2c0-byte body; the largest
+    // signature type puts the end of the body at 0x3b0. Anything a container
+    // claims past that is padding, and reading it would only be a way for a
+    // malformed entry to ask for an arbitrary allocation.
+    const MAX_TICKET: u64 = 0x1000;
+    let data = src.read_vec(f.offset, f.size.min(MAX_TICKET))?;
+    Ticket::parse(&data)?.decrypt_title_key(keys)
 }
 
 fn hex_lower(bytes: &[u8]) -> String {

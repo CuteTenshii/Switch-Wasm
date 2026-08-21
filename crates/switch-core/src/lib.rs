@@ -14,6 +14,7 @@
 //! program expects, which is a much larger undertaking than homebrew ever
 //! needed and is tracked separately in `PROGRESS.md`.
 
+pub mod control;
 pub mod cpu;
 pub mod crypto;
 pub mod disasm;
@@ -28,6 +29,8 @@ pub mod nca;
 pub mod nro;
 pub mod nso;
 pub mod nsp;
+pub mod romfs;
+pub mod source;
 pub mod ticket;
 pub mod vfs;
 

@@ -709,18 +709,21 @@ function handleContainerFile(file) {
   return handleNspFile(file);
 }
 
+// The File itself is handed to the worker, not its bytes: a retail container
+// is larger than anything the emulator can hold - larger, for a modern title,
+// than a wasm32 module can address at all - so it stays on disk and is read a
+// range at a time. Only its PFS0 header is touched here.
 async function handleNspFile(file) {
   clearNsp();
-  log('Reading ' + file.name + ' (' + fmtSize(file.size) + ') ...');
-  const data = new Uint8Array(await file.arrayBuffer());
+  log('Opening ' + file.name + ' (' + fmtSize(file.size) + ') ...');
   try {
-    const ok = await call('load_nsp', data);
+    const ok = await call('open_nsp', file);
     if (ok !== 0) {
       log('NSP error: ' + await readLastError(), 'err');
       return;
     }
   } catch (e) {
-    log('Failed to stage ' + fmtSize(data.length) + ' in the emulator: ' + e.message, 'err');
+    log('Could not open ' + file.name + ': ' + e.message, 'err');
     return;
   }
   const files = JSON.parse(await call('nsp_files_json'));
@@ -738,9 +741,118 @@ async function handleNspFile(file) {
     ul.appendChild(li);
   });
   $('nsp-result').appendChild(ul);
+  await showTitleCard(() => call('load_control_from_nsp'));
 }
 
 function clearNsp() { $('nsp-result').textContent = ''; }
+
+// ---------- title details ----------
+
+/* What a console's home menu shows for a title - its icon, name and publisher
+   - plus the rest of what its NACP declares, read from the Control NCA that
+   ships alongside the Program NCA in every container.
+
+   Needs prod.keys, and not just for the RomFS: an NCA's content type lives in
+   its encrypted header, so without the header key the Control NCA can't even
+   be picked out of the container. A container that has none is unremarkable
+   (an update or DLC package may ship without one), so this is a dim note
+   rather than an error. */
+async function showTitleCard(loader) {
+  let info;
+  try {
+    if (await loader() !== 0) {
+      log('No title details: ' + await readLastError(), 'dim');
+      return null;
+    }
+    info = JSON.parse(await call('control_json'));
+  } catch (err) {
+    log('No title details: ' + err.message, 'dim');
+    return null;
+  }
+  if (!info.name) return null;
+  const icon = info.icon_size > 0 ? await call('control_icon', info.icon_size) : null;
+  const card = renderTitleCard(info, icon);
+  $('nsp-result').prepend(card);
+  log('Title: ' + info.name + (info.publisher ? ' - ' + info.publisher : ''), 'ok');
+  return info;
+}
+
+function renderTitleCard(info, icon) {
+  const card = el('div', 'title-card');
+  if (icon && icon.length) {
+    const img = el('img', 'title-icon');
+    img.alt = info.name;
+    const url = URL.createObjectURL(new Blob([icon], { type: info.icon_mime }));
+    // The decoded image outlives the URL, so release it as soon as it has
+    // been read rather than leaking a blob per inspected container.
+    img.addEventListener('load', () => URL.revokeObjectURL(url), { once: true });
+    img.src = url;
+    card.appendChild(img);
+  }
+  const meta = el('div', 'title-meta');
+  meta.appendChild(el('div', 'title-name', info.name));
+  if (info.publisher) meta.appendChild(el('div', 'title-publisher', info.publisher));
+  const tags = [];
+  if (info.version) tags.push('v' + info.version);
+  if (info.demo) tags.push('demo');
+  tags.push(info.title_id);
+  meta.appendChild(el('div', 'title-tags', tags.join(' \u00b7 ')));
+  card.appendChild(meta);
+
+  const details = el('div', 'nca-info');
+  appendRows(details, titleRows(info));
+  card.appendChild(details);
+  return card;
+}
+
+/* The NACP fields worth showing, skipping the ones this title left unset -
+   most titles set only a handful, and a column of zeroes says nothing. */
+function titleRows(info) {
+  const rows = [];
+  const push = (k, v) => { if (v) rows.push([k, v]); };
+  push('Language', info.language);
+  push('Localized', (info.languages || []).join(', '));
+  push('Age rating', (info.ratings || []).map((r) => r.organisation + ' ' + r.age).join(', '));
+  push('User account', info.startup_user_account);
+  push('Screenshots', info.screenshot);
+  push('Video capture', info.video_capture);
+  push('Save data', saveDataSummary(info));
+  if (info.add_on_content_base_id && !/^0+$/.test(info.add_on_content_base_id)) {
+    push('DLC base id', info.add_on_content_base_id);
+  }
+  if (info.save_data_owner_id && info.save_data_owner_id !== info.title_id
+      && !/^0+$/.test(info.save_data_owner_id)) {
+    push('Save data owner', info.save_data_owner_id);
+  }
+  push('Error codes', info.error_code_category);
+  push('ISBN', info.isbn);
+  return rows;
+}
+
+/* The three save-data areas a title can reserve, each with a journal on top
+   of it. Written as "user 16 MiB (+2 MiB journal)" so the journal doesn't
+   read as a fourth, separate allocation. */
+function saveDataSummary(info) {
+  const part = (label, size, journal) => {
+    if (!size && !journal) return null;
+    const journalNote = journal ? ' (+' + fmtSize(journal) + ' journal)' : '';
+    return label + ' ' + fmtSize(size) + journalNote;
+  };
+  return [
+    part('user', info.user_save_size, info.user_save_journal_size),
+    part('device', info.device_save_size, info.device_save_journal_size),
+    part('BCAT', info.bcat_storage_size, 0),
+  ].filter(Boolean).join(', ');
+}
+
+function appendRows(out, rows) {
+  for (const [k, v] of rows) {
+    const row = el('div');
+    row.appendChild(el('span', 'k', k + ':'));
+    row.append(' ' + v);
+    out.appendChild(row);
+  }
+}
 
 async function inspectNca(f, index) {
   // Replace any previous inspection result instead of stacking them up.
@@ -763,15 +875,27 @@ async function inspectNca(f, index) {
 }
 
 // Drop/browse a standalone .nca (not inside an NSP): same inspect-then-Launch
-// flow, but the header slice comes straight off the browser File object
-// instead of a staged NSP buffer.
+// flow, with the NCA itself as the open container instead of a file inside
+// one. Opening it is what lets Launch - and the Control NCA card below - read
+// from it later.
 async function handleStandaloneNca(file) {
   clearNsp();
   const out = el('div', 'nca-info', 'Parsing ' + file.name + ' ...');
   $('nsp-result').appendChild(out);
+  try {
+    await call('open_nca', file);
+  } catch (e) {
+    out.textContent = 'Could not open ' + file.name + ': ' + e.message;
+    return;
+  }
   const headerLen = Math.min(file.size, 0xC00);
   const header = new Uint8Array(await file.slice(0, headerLen).arrayBuffer());
-  await parseAndRenderNca(out, header, file.name, () => launchStandaloneNca(file));
+  const info = await parseAndRenderNca(out, header, file.name, () => launchStandaloneNca(file));
+  // A standalone Control NCA is nothing but the title's icon and metadata, so
+  // the same card the container path shows is the whole point of opening one.
+  if (info && info.content_type === 'Control') {
+    await showTitleCard(() => call('load_control_from_nca'));
+  }
 }
 
 async function parseAndRenderNca(out, header, name, onLaunch) {
@@ -780,7 +904,7 @@ async function parseAndRenderNca(out, header, name, onLaunch) {
     info = JSON.parse(await call('parse_nca', header));
   } catch (err) {
     out.textContent = 'parse failed: ' + err.message;
-    return;
+    return null;
   }
   if (info.error) {
     // A CDN NCA stores its header encrypted with the header key, so the NCA3
@@ -789,7 +913,7 @@ async function parseAndRenderNca(out, header, name, onLaunch) {
     out.textContent = /bad magic/.test(info.error)
       ? 'NCA header is encrypted - load prod.keys to decrypt and inspect. (' + info.error + ')'
       : 'NCA: ' + info.error;
-    return;
+    return null;
   }
   out.textContent = '';
   const rows = [
@@ -801,17 +925,13 @@ async function parseAndRenderNca(out, header, name, onLaunch) {
     ['Sections', info.sections.map((s, i) =>
       '#' + i + ' ' + s.fs_type + ' @' + s.offset + ' (' + fmtSize(s.size) + ')').join(', ')],
   ];
-  for (const [k, v] of rows) {
-    const row = el('div');
-    row.appendChild(el('span', 'k', k + ':'));
-    row.append(' ' + v);
-    out.appendChild(row);
-  }
+  appendRows(out, rows);
   if (info.content_type === 'Program') {
     const btn = el('button', 'btn small', 'Launch');
     btn.addEventListener('click', onLaunch);
     out.appendChild(btn);
   }
+  return info;
 }
 
 // Decrypts NSP file `index` as a Program NCA and boots its ExeFS `main`
@@ -823,15 +943,10 @@ async function launchNca(f, index) {
   return doLaunchNca(f.name, () => call('load_nca_from_nsp', index));
 }
 
-// Same as `launchNca`, but for a standalone .nca file: the whole file has to
-// be read and staged now (Launch is the first point a standalone NCA needs
-// its full bytes, not just the header).
+// Same as `launchNca`, but for a standalone .nca file: it is already the open
+// container, so there is nothing to read here that booting won't read itself.
 async function launchStandaloneNca(file) {
-  return doLaunchNca(file.name, async () => {
-    log('Reading ' + file.name + ' (' + fmtSize(file.size) + ') ...');
-    const data = new Uint8Array(await file.arrayBuffer());
-    return call('load_nca', data);
-  });
+  return doLaunchNca(file.name, () => call('load_nca'));
 }
 
 async function doLaunchNca(name, loadFn) {

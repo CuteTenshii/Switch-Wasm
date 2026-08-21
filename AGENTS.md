@@ -20,16 +20,58 @@ Browser-oriented Nintendo Switch emulation core: an ARM64 (A64) integer interpre
 
 ## Architecture
 
-- `crates/switch-core` — the emulation core, zero external deps. Modules: `cpu` (A64 interpreter, split into `mod`/`alu`/`bits`/`fp`/`ipc`/`loadstore`/`simd`/`svc`/`system`), `gpu` (GM20B model), `display` (binder buffer queue), `vfs` (emulated SD card), `mem` (sparse 4 GiB page table), `disasm`, `nsp`/`nca`/`nro`/`elf` (parsers), `error`.
-- `crates/switch-wasm` — `cdylib` for `wasm32-unknown-unknown`, exports a raw `extern "C"` ABI (no wasm-bindgen). Buffers cross the boundary via wasm linear memory (`switch_alloc`/`switch_free`); a handle is an index into a global session table. **No external deps by design** — JSON results are emitted by the hand-rolled `json_escape`/`write_into` helpers in `crates/switch-wasm/src/lib.rs`. Don't add serde/etc.
+- `crates/switch-core` — the emulation core, zero external deps. Modules: `cpu` (A64 interpreter, split into `mod`/`alu`/`bits`/`fp`/`ipc`/`loadstore`/`simd`/`svc`/`system`), `gpu` (GM20B model), `display` (binder buffer queue), `vfs` (emulated SD card), `mem` (sparse 4 GiB page table), `disasm`, `nsp`/`nca`/`nro`/`elf`/`romfs` (parsers), `control` (a title's NACP name/publisher/icon, out of the Control NCA's RomFS), `error`.
+- `crates/switch-wasm` — `cdylib` for `wasm32-unknown-unknown`, exports a raw `extern "C"` ABI (no wasm-bindgen). Buffers cross the boundary via wasm linear memory (`switch_alloc`/`switch_free`); a handle is an index into a global session table. It declares exactly **one import**, `env.host_read` — how it reads the open container (see the container section below). **No external deps by design** — JSON results are emitted by the hand-rolled `json_escape`/`write_into` helpers in `crates/switch-wasm/src/lib.rs`. Don't add serde/etc.
 - `tools/serve.py` — local static server with no-cache headers and the right `application/wasm` MIME type (`instantiateStreaming` refuses anything else). Takes an optional port.
 - `tools/make_og.py` — renders `web/assets/og.png`, the social preview card, around a real captured frame (`web/assets/screenshot.png`).
 - `web/index.html` is the only file at the web root; everything else lives in `web/assets/`, which therefore exists in a fresh checkout. (`*.wasm`/`*.nro` are gitignored, so the directory used to be absent and the Pages build failed on `cp`.)
-- `web/assets/worker.js` hosts the wasm module (`WebAssembly.instantiateStreaming` of `switch_wasm.wasm`) and is the glue over the ABI; `web/assets/main.js` is promise-based RPC over `postMessage` plus the app shell. Step budgets: non-trace 5,000,000 per slice, trace mode 5000.
+- `web/assets/worker.js` hosts the wasm module (`WebAssembly.instantiateStreaming` of `switch_wasm.wasm`, with `{ env: { host_read } }` as its imports) and is the glue over the ABI; `web/assets/main.js` is promise-based RPC over `postMessage` plus the app shell. Step budgets: non-trace 5,000,000 per slice, trace mode 5000.
 - **Path trap**: `new Worker(...)` resolves against the *document*, so main.js says `assets/worker.js`; a `fetch` inside the worker resolves against the *worker script*, so worker.js says `switch_wasm.wasm` with no prefix.
 - The UI is an app shell, not a page: the canvas owns the viewport, the tools drawer is closed by default (backtick toggles it, Space is run/pause), and the canvas resizes to whatever resolution the guest presents. The boot splash is dismissed when a program **loads**, not when the first frame arrives — homebrew can run (or fault) for a long time before presenting, and waiting for a frame made the stage look dead until it crashed. `Res` reads `—` and the canvas stays blank until `frame_count > 0`; `fb_snapshot`'s pre-first-frame fallback (the memory-mapped demo framebuffer) is deliberately *not* painted, since real homebrew never writes that region.
 - Emulated CPU addresses are `u32` (32-bit PC). Memory is a sparse page table (`PAGE_COUNT` computed in `u64` to survive wasm32 `usize` truncation); reads/writes to unmapped addresses fault with `Error::Cpu`.
 - The demo framebuffer is memory-mapped at `FB_BASE = 0x3F00_0000` (640x360 RGBA) and input at `INPUT_ADDR = 0x3F10_0000`. Syscall ABI: `SyscallMode::Horizon` stubs for real homebrew. Commercial encrypted content is out of scope.
+
+## Containers are never staged in memory
+
+**A retail `.nsp` does not fit and never will.** A modern title's container
+runs to several gigabytes; wasm32 linear memory tops out at 4 GiB, and Rust's
+allocator on that target refuses any *single* allocation above `isize::MAX`
+(2 GiB) — `Layout::from_size_align` returns `Err`, and the `.unwrap()` behind
+it lowers to `unreachable`, so an oversized request used to take the whole
+module down as `RuntimeError: unreachable executed` with nothing to say what
+had asked for what. `switch_alloc` now returns null there instead, and
+`worker.js`'s `alloc` throws on it.
+
+Nothing reads a container as a buffer. `switch_core::source::ByteSource` is a
+`u64`-addressed random-access range, and the pieces compose:
+
+    HostSource (the open file)
+      └ Window          — the NCA at file-table entry N
+          └ SectionSource — decrypting view of one NCA section (AES-CTR is
+             │              seekable: the keystream block a byte gets is
+             │              decided by its own position, so a range costs
+             │              exactly that range)
+             └ Window     — the RomFS image, past the IVFC hash levels
+
+- The browser keeps the `File` and serves ranges through the `host_read`
+  import, which **must answer synchronously** — the emulator asks for RomFS
+  ranges from inside `switch_run`, where there is nowhere to await. That is
+  `FileReaderSync`, which exists only in a worker, and is the second reason
+  the emulator lives in one. `worker.js` caches 1 MiB chunks (32 of them, LRU)
+  because a RomFS mount walks its tables in small reads; a read larger than a
+  chunk bypasses the cache rather than evicting it.
+- `switch_open_nsp(handle, size)` / `switch_open_nca(handle, size)` open what
+  the host has ready; only the PFS0 header is read. `switch_load_nca_from_nsp`
+  boots straight out of it.
+- The ExeFS **is** read in full (it is a title's executables, tens of MB at
+  the outside) and hash-verified. The RomFS is not: `Cpu::set_romfs_source`
+  takes the decrypting view, and `IStorage::Read` (`cpu/ipc.rs`) copies
+  through a 64 KiB staging buffer, so a guest can ask for any range of a
+  gigabytes-large RomFS.
+- Offsets stay `u64` end to end. `f.offset as usize` on wasm32 silently
+  truncated every entry past the 4 GiB mark *and* made the bounds check that
+  should have caught it pass — `Pfs0::image_size` is `u64` for the same
+  reason.
 
 ## Homebrew memory layout (cpu.rs constants)
 

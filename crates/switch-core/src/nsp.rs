@@ -18,6 +18,7 @@
 //! references a NUL-terminated string in the string table. All offsets are
 //! relative to the start of the PFS0 header.
 
+use crate::source::{ByteSource, SliceSource};
 use crate::Error;
 
 pub const PFS0_MAGIC: u32 = 0x3053_4650; // "PFS0"
@@ -37,8 +38,11 @@ pub struct Pfs0File {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pfs0 {
     pub files: Vec<Pfs0File>,
-    /// Total size of the image in bytes (used for bounds checks).
-    pub image_size: usize,
+    /// Total size of the image in bytes (used for bounds checks). `u64`, not
+    /// `usize`: a retail `.nsp` is routinely larger than a wasm32 address
+    /// space, and truncating its size here let entries past the 4 GiB mark
+    /// pass a bounds check they should have failed.
+    pub image_size: u64,
 }
 
 impl Pfs0 {
@@ -47,42 +51,59 @@ impl Pfs0 {
     /// Returns an error if the magic does not match, the image is too small
     /// for the declared header, or any file entry falls outside the image.
     pub fn parse(data: &[u8]) -> Result<Pfs0, Error> {
+        Pfs0::read_from(&SliceSource(data))
+    }
+
+    /// Parse a PFS0 image out of a [`ByteSource`], reading only its header.
+    ///
+    /// This is the form a multi-gigabyte `.nsp` is read with: the header
+    /// (magic, entry table and string table) is a few kilobytes at the front
+    /// of the file, and nothing else has to be in memory to know what the
+    /// container holds or where each file starts.
+    pub fn read_from<S: ByteSource>(src: &S) -> Result<Pfs0, Error> {
         const HEADER_SIZE: usize = 0x10;
-        if data.len() < HEADER_SIZE {
+        let mut head = [0u8; HEADER_SIZE];
+        let got = src.read_at(0, &mut head)?;
+        if got < HEADER_SIZE {
             return Err(Error::Truncated {
                 what: "PFS0 header".into(),
                 expected: HEADER_SIZE,
-                got: data.len(),
+                got,
             });
         }
-        if read_u32(data, 0) != PFS0_MAGIC {
+        if read_u32(&head, 0) != PFS0_MAGIC {
             return Err(Error::BadMagic {
                 what: "PFS0".into(),
-                found: read_u32(data, 0),
+                found: read_u32(&head, 0),
             });
         }
 
-        let file_count = read_u32(data, 0x04) as usize;
-        let string_table_size = read_u32(data, 0x08) as usize;
+        let file_count = read_u32(&head, 0x04) as u64;
+        let string_table_size = read_u32(&head, 0x08) as u64;
 
-        // Header + entries + string table must fit within the image.
-        let table_start = HEADER_SIZE;
-        let table_end = table_start
-            .checked_add(file_count.saturating_mul(FILE_ENTRY_SIZE))
-            .ok_or(Error::Overflow)?;
-        let strings_start = table_end;
-        let strings_end = strings_start
-            .checked_add(string_table_size)
-            .ok_or(Error::Overflow)?;
-        if strings_end > data.len() {
+        // Header + entries + string table must fit within the image. Every
+        // term comes from a `u32`, so the `u64` arithmetic cannot overflow —
+        // which is the point of doing it in `u64` on a 32-bit target, where
+        // `file_count * FILE_ENTRY_SIZE` alone can exceed `usize`.
+        let table_start = HEADER_SIZE as u64;
+        let strings_start = table_start + file_count * FILE_ENTRY_SIZE as u64;
+        let strings_end = strings_start + string_table_size;
+        if strings_end > src.len() {
             return Err(Error::Truncated {
                 what: "PFS0 string table".into(),
-                expected: strings_end,
-                got: data.len(),
+                expected: usize::try_from(strings_end).unwrap_or(usize::MAX),
+                got: usize::try_from(src.len()).unwrap_or(usize::MAX),
             });
         }
+        // Only the header region: for a retail container the rest is
+        // gigabytes, and none of it is needed to build the file table.
+        let header = src.read_vec(0, strings_end)?;
+        let strings_start = strings_start as usize;
 
-        let mut files = Vec::with_capacity(file_count);
+        // Not `with_capacity(file_count)`: the count is whatever the file
+        // says, and reserving for a corrupt one is an allocation the target
+        // aborts on rather than an error anyone can read.
+        let mut files = Vec::new();
         // Most PFS0 images store file offsets relative to the file start, but
         // some repack tools emit offsets relative to the end of the header +
         // string table (the payload area). No file can legitimately overlap
@@ -90,15 +111,18 @@ impl Pfs0 {
         // the payload start.
         let payload_base = strings_end;
         let mut rebase = false;
-        for i in 0..file_count {
-            let entry = table_start + i * FILE_ENTRY_SIZE;
-            let offset = read_u64(data, entry);
-            let size = read_u64(data, entry + 8);
-            let name_off = read_u32(data, entry + 16) as usize;
-            if offset < payload_base as u64 {
+        for i in 0..file_count as usize {
+            let entry = HEADER_SIZE + i * FILE_ENTRY_SIZE;
+            let offset = read_u64(&header, entry);
+            let size = read_u64(&header, entry + 8);
+            let name_off = read_u32(&header, entry + 16) as usize;
+            if offset < payload_base {
                 rebase = true;
             }
-            let name = read_cstr(data, strings_start + name_off)
+            // The name has to be NUL-terminated inside the string table —
+            // `header` ends where the table does, so a name offset pointing
+            // past it fails here instead of running into the payload.
+            let name = read_cstr(&header, strings_start.saturating_add(name_off))
                 .ok_or(Error::BadStringTable {
                     index: i,
                     offset: name_off,
@@ -112,7 +136,7 @@ impl Pfs0 {
         }
         if rebase {
             for f in files.iter_mut() {
-                f.offset = f.offset.saturating_add(payload_base as u64);
+                f.offset = f.offset.saturating_add(payload_base);
             }
         }
         for (i, f) in files.iter().enumerate() {
@@ -120,21 +144,37 @@ impl Pfs0 {
                 .offset
                 .checked_add(f.size)
                 .ok_or(Error::Overflow)?;
-            if end as usize > data.len() {
+            if end > src.len() {
                 return Err(Error::FileOutOfBounds {
                     index: i,
                     name: f.name.clone(),
                     offset: f.offset,
                     size: f.size,
-                    image_size: data.len(),
+                    image_size: src.len(),
                 });
             }
         }
 
         Ok(Pfs0 {
             files,
-            image_size: data.len(),
+            image_size: src.len(),
         })
+    }
+
+    /// A [`ByteSource`] over file `index`'s payload, addressed from 0.
+    ///
+    /// This is how an NCA inside a container is read without extracting it:
+    /// the window is a view of the container source, not a copy.
+    pub fn file_source<S: ByteSource>(
+        &self,
+        src: S,
+        index: usize,
+    ) -> Result<crate::source::Window<S>, Error> {
+        let f = self
+            .files
+            .get(index)
+            .ok_or_else(|| Error::Nca(format!("no file at index {} in this PFS0", index)))?;
+        crate::source::Window::new(src, f.offset, f.size, &f.name)
     }
 
     /// Find a file by exact name.
@@ -276,7 +316,6 @@ mod tests {
         assert_eq!(pfs0.find("nope").is_none(), true);
         assert_eq!(pfs0.find_with_suffix(".NCA").unwrap().name, "main.nca");
     }
-}
 
     #[test]
     fn rebases_offsets_relative_to_payload() {
@@ -301,3 +340,64 @@ mod tests {
         assert_eq!(pfs0.files[0].offset, payload_base as u64);
         assert_eq!(&image[pfs0.files[0].offset as usize..][..4], b"DATA");
     }
+
+    /// A container far larger than a wasm32 address space, without needing
+    /// one: it answers `len()` with 5 GiB and serves the header from a real
+    /// buffer, so the entry table can point past the 4 GiB mark.
+    #[derive(Debug)]
+    struct HugeSource {
+        header: Vec<u8>,
+        len: u64,
+    }
+
+    impl ByteSource for HugeSource {
+        fn len(&self) -> u64 {
+            self.len
+        }
+        fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
+            SliceSource(&self.header).read_at(offset, out)
+        }
+    }
+
+    fn huge_container(entry_offset: u64, entry_size: u64, len: u64) -> HugeSource {
+        let mut header = Vec::new();
+        header.extend_from_slice(&PFS0_MAGIC.to_le_bytes());
+        header.extend_from_slice(&1u32.to_le_bytes()); // file count
+        header.extend_from_slice(&9u32.to_le_bytes()); // string table size
+        header.extend_from_slice(&0u32.to_le_bytes());
+        header.extend_from_slice(&entry_offset.to_le_bytes());
+        header.extend_from_slice(&entry_size.to_le_bytes());
+        header.extend_from_slice(&0u32.to_le_bytes()); // name offset
+        header.extend_from_slice(&0u32.to_le_bytes()); // padding
+        header.extend_from_slice(b"main.nca\0");
+        HugeSource { header, len }
+    }
+
+    #[test]
+    fn entries_past_the_four_gib_mark_keep_their_offsets() {
+        // The offset a retail container's program NCA actually lives at. Held
+        // in a `usize` (as this parser used to), it truncates to 0x1000 and
+        // every read lands on the wrong bytes; the bounds check below passes
+        // for the same reason, so nothing catches it.
+        const PAST_4GIB: u64 = 0x1_0000_1000;
+        let src = huge_container(PAST_4GIB, 0x2000, 5 << 30);
+        let pfs0 = Pfs0::read_from(&src).unwrap();
+        assert_eq!(pfs0.image_size, 5 << 30);
+        assert_eq!(pfs0.files[0].name, "main.nca");
+        assert_eq!(pfs0.files[0].offset, PAST_4GIB);
+        assert_eq!(pfs0.files[0].size, 0x2000);
+    }
+
+    #[test]
+    fn an_entry_running_past_the_end_is_still_caught_past_four_gib() {
+        // Same shape, but the extent ends one byte past the container. The
+        // truncating version of this check compared wrapped values and let it
+        // through.
+        let len = 5u64 << 30;
+        let src = huge_container(len - 0x1000, 0x1001, len);
+        assert!(matches!(
+            Pfs0::read_from(&src),
+            Err(Error::FileOutOfBounds { .. })
+        ));
+    }
+}
