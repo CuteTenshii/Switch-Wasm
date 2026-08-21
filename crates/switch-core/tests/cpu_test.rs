@@ -580,23 +580,45 @@ fn mrs_msr_nzcv() {
 
 #[test]
 fn exclusive_load_store() {
+    // STXR succeeds only against a monitor the thread's own LDXR set. A bare
+    // one -- no exclusive load before it -- fails and stores nothing, which is
+    // what makes an interrupted read-modify-write retry instead of completing
+    // across whatever ran in between.
+    let stxr: u32 = 0b11 << 30 | 0b001000000 << 21 | (0 << 16) | (1 << 10) | (1 << 5) | 2;
+    let ldxr: u32 = 0b11 << 30 | 0b001000010 << 21 | (1 << 10) | (1 << 5) | 3;
+    let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
+
     let mut cpu = Cpu::new();
     cpu.set_reg(1, 0x3000);
     cpu.mem.map_zero(0x3000, 8).unwrap();
-    // STXR W0, X2, [X1] ; LDXR X3, [X1]
-    let stxr: u32 = 0b11 << 30 | 0b001000000 << 21 | (0 << 16) | (1 << 10) | (1 << 5) | 2;
-    let ldxr: u32 = 0b11 << 30 | 0b001000010 << 21 | (1 << 10) | (1 << 5) | 3;
-    let mut bytes = Vec::new();
-    for insn in [stxr, ldxr] {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(0x1000, &bytes).unwrap();
+    cpu.mem.map(0x1000, &bytes(&[stxr])).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.set_reg(2, 0x1234_5678_9ABC_DEF0);
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), 0, "a bare STXR stored anyway");
+    assert_eq!(cpu.read_x(0), 1, "a bare STXR reported success");
+
+    // LDXR then STXR to the same address is the pair, and it goes through.
+    let mut cpu = Cpu::new();
+    cpu.set_reg(1, 0x3000);
+    cpu.mem.map_zero(0x3000, 8).unwrap();
+    cpu.mem.map(0x1000, &bytes(&[ldxr, stxr])).unwrap();
     cpu.set_pc(0x1000);
     cpu.set_reg(2, 0x1234_5678_9ABC_DEF0);
     cpu.run(2).unwrap();
+    assert_eq!(cpu.read_x(3), 0, "LDXR read the wrong value");
     assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), 0x1234_5678_9ABC_DEF0);
-    assert_eq!(cpu.read_x(0), 0); // STXR status
-    assert_eq!(cpu.read_x(3), 0x1234_5678_9ABC_DEF0);
+    assert_eq!(cpu.read_x(0), 0, "the pair failed");
+
+    // And the monitor is one-shot: a second STXR after it fails.
+    let mut cpu = Cpu::new();
+    cpu.set_reg(1, 0x3000);
+    cpu.mem.map_zero(0x3000, 8).unwrap();
+    cpu.mem.map(0x1000, &bytes(&[ldxr, stxr, stxr])).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.set_reg(2, 0x1234_5678_9ABC_DEF0);
+    cpu.run(3).unwrap();
+    assert_eq!(cpu.read_x(0), 1, "the monitor survived its own STXR");
 }
 
 #[test]
@@ -3610,6 +3632,67 @@ fn guest_threads_run_and_hand_over_at_blocking_syscalls() {
     assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 0x55, "the child set the flag");
     assert_eq!(cpu.mem.read_u32(0x6004).unwrap(), 0x1234, "with its argument in x0");
     assert_eq!(cpu.thread_count(), 2);
+}
+
+#[test]
+fn a_wait_on_no_handles_is_not_answered() {
+    // `nn::os::detail::MultiWaitImpl::WaitAny` turns whatever
+    // svcWaitSynchronization returns into a holder from its own list. An empty
+    // list has none, so *either* answer is fatal: told "handle 0 fired" it
+    // takes index 0 of nothing, told "timed out" it returns the same null, and
+    // `RegisterSystemWorkerHandler` calls it without checking. "A Short Hike"
+    // faults at pc=0 one instruction later.
+    //
+    // Nothing can ever satisfy a wait on nothing, so it is not answered at
+    // all: the thread parks on the syscall and the CPU goes to somebody who
+    // can make progress.
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.mem.map_zero(0x4000, 0x2000).unwrap(); // the child's stack
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap();
+
+    let main = [
+        0xd284_0001u32, // mov x1, #0x2000  (entry)
+        0xaa1f_03e2,    // mov x2, xzr      (arg)
+        0xd28a_0003,    // mov x3, #0x5000  (stack top)
+        0x5280_0764,    // mov w4, #0x3b
+        0x1280_0005,    // mov w5, #-1
+        0xd400_0101,    // svc #8           (CreateThread)
+        0xaa01_03e0,    // mov x0, x1
+        0xd400_0121,    // svc #9           (StartThread)
+        0xd400_0161,    // svc #0xb         (SleepThread -> hands over)
+        0xd28c_0009,    // mov x9, #0x6000
+        0x5280_0aa1,    // mov w1, #0x55
+        0xb900_0121,    // str w1, [x9]
+        0xd400_00e1,    // svc #7           (ExitProcess)
+    ];
+    // The child waits on an empty handle set, forever, and must never get past
+    // it to record that it did.
+    let child = [
+        0xd28c_0001u32, // mov x1, #0x6000  (handles pointer, unread)
+        0xaa1f_03e2,    // mov x2, xzr      (**no handles**)
+        0x9280_0003,    // mov x3, #-1      (no timeout)
+        0xd400_0301,    // svc #0x18        (WaitSynchronization)
+        0xd28c_0009,    // mov x9, #0x6000
+        0x5285_0ba1,    // mov w1, #0x285d
+        0xb900_0521,    // str w1, [x9, #4]
+        0xd400_0141,    // svc #0xa         (ExitThread)
+    ];
+    let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
+    cpu.mem.map_zero(0x1000, 0x100).unwrap();
+    cpu.mem.map(0x1000, &bytes(&main)).unwrap();
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &bytes(&child)).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(500_000).unwrap();
+
+    assert!(cpu.halted, "main never got the CPU back");
+    assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 0x55);
+    assert_eq!(
+        cpu.mem.read_u32(0x6004).unwrap(),
+        0,
+        "the wait on nothing was answered, and the thread ran on past it"
+    );
 }
 
 #[test]

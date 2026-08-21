@@ -512,28 +512,49 @@ impl Cpu {
             let base = self.read_x(rn);
             match grp_excl {
                 0b001000000 => {
-                    // STXR Ws, Xt, [Xn]
-                    let val = self.read_zr(rt);
-                    self.store_by_size(base as u32, sz, val)?;
-                    self.write_zr(((insn >> 16) & 0x1F) as u8, 0); // success
+                    // STXR Ws, Xt, [Xn]: succeeds only against a monitor this
+                    // thread's own LDXR set at the same address. A failed one
+                    // stores **nothing** and reports 1, which every guest
+                    // answers by looping back to the LDXR.
+                    //
+                    // This used to succeed unconditionally, which was safe
+                    // only while threads could lose the CPU at a blocking
+                    // syscall and nowhere else: no guest puts one between the
+                    // two halves of a read-modify-write, so every pair was
+                    // atomic by construction. Preemption ended that, and "A
+                    // Short Hike" started losing a doubly-linked-list update
+                    // and calling through the null it left behind.
+                    if self.exclusive.take() == Some(base as u32) {
+                        let val = self.read_zr(rt);
+                        self.store_by_size(base as u32, sz, val)?;
+                        self.write_zr(((insn >> 16) & 0x1F) as u8, 0);
+                    } else {
+                        self.write_zr(((insn >> 16) & 0x1F) as u8, 1);
+                    }
                 }
                 0b001000010 => {
                     // LDXR Xt, [Xn]
                     let val = self.load_by_size(base as u32, sz, false)?;
+                    self.exclusive = Some(base as u32);
                     self.write_zr(rt, val);
                 }
                 0b001000001 => {
-                    // STXP: 64-bit pair store
-                    let v0 = self.read_zr(rt);
-                    let v1 = self.read_zr(rt2);
-                    self.mem.write_u64(base as u32, v0)?;
-                    self.mem.write_u64(base.wrapping_add(8) as u32, v1)?;
-                    self.write_zr(((insn >> 16) & 0x1F) as u8, 0);
+                    // STXP: 64-bit pair store, on the same monitor.
+                    if self.exclusive.take() == Some(base as u32) {
+                        let v0 = self.read_zr(rt);
+                        let v1 = self.read_zr(rt2);
+                        self.mem.write_u64(base as u32, v0)?;
+                        self.mem.write_u64(base.wrapping_add(8) as u32, v1)?;
+                        self.write_zr(((insn >> 16) & 0x1F) as u8, 0);
+                    } else {
+                        self.write_zr(((insn >> 16) & 0x1F) as u8, 1);
+                    }
                 }
                 0b001000011 => {
                     // LDXP: 64-bit pair load
                     let v0 = self.mem.read_u64(base as u32)?;
                     let v1 = self.mem.read_u64(base.wrapping_add(8) as u32)?;
+                    self.exclusive = Some(base as u32);
                     self.write_zr(rt, v0);
                     self.write_zr(rt2, v1);
                 }

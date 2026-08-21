@@ -476,6 +476,29 @@ impl Cpu {
                     self.write_zr(0, RESULT_TIMED_OUT);
                     return Ok(());
                 }
+                // A wait on **no handles at all** is the one case where
+                // neither answer is survivable. `nn::os::detail::
+                // MultiWaitImpl::WaitAny` turns whatever comes back into a
+                // holder from its own list, and an empty list has none: told
+                // "handle 0 fired" it takes index 0 of nothing, told "timed
+                // out" it returns the same null, and either way
+                // `RegisterSystemWorkerHandler` calls it without checking and
+                // the thread jumps to 0.
+                //
+                // Nothing can ever satisfy such a wait, so the honest thing is
+                // not to answer it: rewind onto the `svc` and hand the CPU to
+                // somebody who can make progress. The SVC path retires the
+                // instruction before dispatching, which is why the PC has to
+                // go back a word.
+                //
+                // "A Short Hike" faults at `pc=0` one instruction after this
+                // wait. It always did — the thread that makes it simply never
+                // got scheduled until threads started being preempted.
+                if handles.is_empty() && self.has_other_runnable() {
+                    self.pc = self.pc.wrapping_sub(4);
+                    self.yield_thread();
+                    return Ok(());
+                }
                 self.write_zr(0, RESULT_OK);
                 self.write_zr(1, 0);
                 self.yield_thread();

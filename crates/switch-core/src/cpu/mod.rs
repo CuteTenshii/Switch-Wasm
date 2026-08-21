@@ -584,6 +584,14 @@ pub struct Cpu {
     threads: Vec<ThreadContext>,
     /// Which entry of `threads` is running.
     current_thread: usize,
+    /// The address of an outstanding exclusive load (`LDXR`/`LDXP`), or
+    /// `None` when the local monitor is clear.
+    ///
+    /// A `STXR` succeeds only against a monitor its own `LDXR` set, and a
+    /// context switch clears it — which is what a real core does, and what
+    /// makes an interrupted read-modify-write fail and be retried instead of
+    /// silently losing the other thread's update.
+    pub(crate) exclusive: Option<u32>,
     /// Instructions the running thread has executed since the scheduler last
     /// took the CPU away from it, against [`TIME_SLICE`].
     slice_used: u64,
@@ -708,6 +716,7 @@ impl Cpu {
             trace_nv: std::env::var("TRACE_NV").is_ok(),
             threads: Vec::new(),
             current_thread: 0,
+            exclusive: None,
             slice_used: 0,
             pending_yield: false,
         };
@@ -1075,6 +1084,10 @@ impl Cpu {
 
     fn load_context(&mut self, index: usize) {
         self.slice_used = 0;
+        // Taking the CPU away from a thread clears the local monitor, so an
+        // exclusive pair the switch landed inside fails and is retried rather
+        // than completing across the other thread's writes.
+        self.exclusive = None;
         let thread = self.threads[index].clone();
         self.regs = thread.regs;
         self.sp = thread.sp;
