@@ -528,7 +528,18 @@ impl Engine3D {
     /// is set.
     pub fn program(&self, stage: ShaderStage) -> Option<ProgramBinding> {
         let base = SET_PROGRAM + stage.index() * SET_PROGRAM_STRIDE;
-        if field(self.regs.get(base), 0, 0) == 0 {
+        // `VertexB` is the exception: it is the stage a draw cannot do
+        // without, so Maxwell keeps it active whether or not `Config.Enable`
+        // is set, and drivers do not bother setting it. "A Short Hike" never
+        // writes 0x810 at all -- not from the pushbuffer and not from a macro
+        // -- while it writes the Config of every other stage on every draw:
+        // 0x800 = 0 (VertexA off), 0x820/0x830/0x840 (tessellation and
+        // geometry off), 0x850 = 0x51 (fragment on, type 5). It does write
+        // VertexB's *offset* and *register count*, so the program is bound;
+        // only the bit is missing. Requiring it rejected the vertex program
+        // and every one of the title's 325 draws failed with "draw with no
+        // bound vertex program".
+        if stage != ShaderStage::VertexB && field(self.regs.get(base), 0, 0) == 0 {
             return None;
         }
         let offset = self.regs.get(base + 1);
@@ -1154,6 +1165,42 @@ mod tests {
             DrawCall { primitive: 4, first: 6, count: 3, indexed: false, index_format: 0 }
         );
         assert_eq!(h.stats.draws, 1);
+    }
+
+    #[test]
+    fn the_vertex_b_stage_is_bound_without_its_enable_bit() {
+        // VertexB is the stage a draw cannot do without, so Maxwell keeps it
+        // active whether or not `Config.Enable` is set. "A Short Hike" never
+        // writes 0x810 at all -- not from the pushbuffer and not from a macro
+        // -- while it writes every other stage's Config on every draw. It does
+        // write VertexB's offset and register count, so the program is bound
+        // and only the bit is missing; requiring it rejected the vertex
+        // program and every one of the title's 325 draws failed with "draw
+        // with no bound vertex program", leaving the frame black.
+        let mut h = Harness::new(0x1000);
+        let base_addr = h.base;
+        let mut engine = Engine3D::new();
+        let mut ctx = h.ctx();
+        engine.write(SET_PROGRAM_REGION, (base_addr >> 32) as u32, true, &mut ctx).unwrap();
+        engine.write(SET_PROGRAM_REGION + 1, base_addr as u32, true, &mut ctx).unwrap();
+
+        // Offset and register count, and no Config write at all.
+        let base = SET_PROGRAM + ShaderStage::VertexB.index() * SET_PROGRAM_STRIDE;
+        engine.write(base + 1, 0x200, true, &mut ctx).unwrap();
+        engine.write(base + 3, 0xd, true, &mut ctx).unwrap();
+        assert_eq!(
+            engine.program(ShaderStage::VertexB),
+            Some(ProgramBinding { addr: base_addr + 0x200, num_registers: 0xd }),
+        );
+
+        // Every other stage still needs the bit: VertexA sits right next to
+        // VertexB and the title disables it by writing Config = 0, which has
+        // to keep meaning "off".
+        let a = SET_PROGRAM + ShaderStage::VertexA.index() * SET_PROGRAM_STRIDE;
+        engine.write(a, 0, true, &mut ctx).unwrap();
+        engine.write(a + 1, 0x300, true, &mut ctx).unwrap();
+        assert_eq!(engine.program(ShaderStage::VertexA), None);
+        assert_eq!(engine.program(ShaderStage::Geometry), None);
     }
 
     #[test]
