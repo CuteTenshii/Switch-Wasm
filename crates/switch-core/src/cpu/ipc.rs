@@ -3203,8 +3203,9 @@ impl Cpu {
     /// the caller to read its record count out of that.
     ///
     /// Before 3.0.0 `ns:am` *was* the application manager; from 3.0.0 the
-    /// service is a getter and the manager is one of ten interfaces it hands
-    /// out (7988..=7999). Both routes land on the same interfaces here.
+    /// service is a getter and the manager is one of eleven interfaces it
+    /// hands out (7988..=7999, with 7990 unassigned). Both routes land on the
+    /// same interfaces here.
     pub(super) fn ns_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
@@ -3244,16 +3245,24 @@ impl Cpu {
             // interface is, and nothing here enforces privilege.
             "ns:am2" | "ns:ec" | "ns:rid" | "ns:rt" | "ns:web" | "ns:ro" | "ns:su"
             | "ns:vm" | "ns:dev" => match cmd_id {
+                // The ids are `libnx`'s (`nsGet*Interface` in `ns.c`), which
+                // are Nintendo's own. Everything from 7989 up used to be
+                // numbered one too low here, so a caller got the *next*
+                // interface along: `nsInitialize` asks for 7996 and was handed
+                // an `ns:account-proxy` to call `ListApplicationRecord` (cmd 0)
+                // on, which is not a command that interface has. Note the gap
+                // at 7990 — it is genuinely not assigned.
                 Some(7988) => self.ns_reply_with_interface(tls, handle, "ns:dynamic-rights"),
-                Some(7989) => self.ns_reply_with_interface(tls, handle, "ns:read-only-record"),
-                Some(7992) => self.ns_reply_with_interface(tls, handle, "ns:read-only-control"),
-                Some(7993) => self.ns_reply_with_interface(tls, handle, "ns:ecommerce"),
-                Some(7994) => self.ns_reply_with_interface(tls, handle, "ns:app-version"),
-                Some(7995) => self.ns_reply_with_interface(tls, handle, "ns:factory-reset"),
-                Some(7996) => self.ns_reply_with_interface(tls, handle, "ns:account-proxy"),
-                Some(7997) => self.ns_reply_with_interface(tls, handle, "ns:app-manager"),
-                Some(7998) => self.ns_reply_with_interface(tls, handle, "ns:download-task"),
-                Some(7999) => self.ns_reply_with_interface(tls, handle, "ns:content-management"),
+                Some(7989) => self.ns_reply_with_interface(tls, handle, "ns:read-only-control"),
+                Some(7991) => self.ns_reply_with_interface(tls, handle, "ns:read-only-record"),
+                Some(7992) => self.ns_reply_with_interface(tls, handle, "ns:ecommerce"),
+                Some(7993) => self.ns_reply_with_interface(tls, handle, "ns:app-version"),
+                Some(7994) => self.ns_reply_with_interface(tls, handle, "ns:factory-reset"),
+                Some(7995) => self.ns_reply_with_interface(tls, handle, "ns:account-proxy"),
+                Some(7996) => self.ns_reply_with_interface(tls, handle, "ns:app-manager"),
+                Some(7997) => self.ns_reply_with_interface(tls, handle, "ns:download-task"),
+                Some(7998) => self.ns_reply_with_interface(tls, handle, "ns:content-management"),
+                Some(7999) => self.ns_reply_with_interface(tls, handle, "ns:document"),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // `ns:am` is the pre-3.0.0 service, where the application manager
@@ -5964,12 +5973,22 @@ mod tests {
         // From 3.0.0 `ns:am2` is a getter: every interface behind it is
         // reached by asking for it by command id, and answering the wrong one
         // (or a fabricated object) hands the caller an interface whose
-        // commands mean something else entirely.
+        // commands mean something else entirely. That is not hypothetical —
+        // this table used to be shifted one id down from 7989 up, so
+        // `nsInitialize`'s 7996 came back as the account proxy and JKSV's
+        // `ListApplicationRecord` landed on an interface without that command.
         for (command, expected) in [
-            (7989u32, "ns:read-only-record"),
-            (7997, "ns:app-manager"),
-            (7998, "ns:download-task"),
-            (7999, "ns:content-management"),
+            (7988u32, "ns:dynamic-rights"),
+            (7989, "ns:read-only-control"),
+            (7991, "ns:read-only-record"),
+            (7992, "ns:ecommerce"),
+            (7993, "ns:app-version"),
+            (7994, "ns:factory-reset"),
+            (7995, "ns:account-proxy"),
+            (7996, "ns:app-manager"),
+            (7997, "ns:download-task"),
+            (7998, "ns:content-management"),
+            (7999, "ns:document"),
         ] {
             let mut cpu = request(false, command, &[]);
             cpu.register_service_handle(9, "ns:am2");
@@ -5987,9 +6006,9 @@ mod tests {
         // have recorded one, so the list is empty — and the count has to be
         // written even though it is zero, or the caller reads its record
         // count off its own stack.
-        let mut cpu = request(false, 7997, &[]);
+        let mut cpu = request(false, 7996, &[]);
         cpu.register_service_handle(9, "ns:am2");
-        cpu.ns_request(TLS, 9, Some(7997)).unwrap();
+        cpu.ns_request(TLS, 9, Some(7996)).unwrap();
         let manager = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
 
         write_request(&mut cpu, 0, &0i32.to_le_bytes()); // ListApplicationRecord
@@ -5999,9 +6018,9 @@ mod tests {
 
         // And no application id has a record, including the one this process
         // is running as.
-        let mut cpu = request(false, 7989, &[]);
+        let mut cpu = request(false, 7991, &[]);
         cpu.register_service_handle(9, "ns:am2");
-        cpu.ns_request(TLS, 9, Some(7989)).unwrap();
+        cpu.ns_request(TLS, 9, Some(7991)).unwrap();
         let records = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
 
         write_request(&mut cpu, 0, &super::DEFAULT_PROGRAM_ID.to_le_bytes());

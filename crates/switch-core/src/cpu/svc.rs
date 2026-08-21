@@ -708,7 +708,7 @@ impl Cpu {
                         | "ns:read-only-record" | "ns:read-only-control"
                         | "ns:content-management" | "ns:download-task"
                         | "ns:account-proxy" | "ns:app-version" | "ns:factory-reset"
-                        | "ns:ecommerce" | "ns:dynamic-rights" => {
+                        | "ns:ecommerce" | "ns:dynamic-rights" | "ns:document" => {
                             self.ns_request(tls, handle, cmd_id)?
                         }
                         // csrng, the random number generator, and `spl:`,
