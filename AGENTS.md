@@ -302,12 +302,21 @@ everything**. Test control-ness with `Cpu::ipc_is_control_request`, never `type
 `QueryPointerBufferSize` as type 7, and reading it as an ordinary command
 killed the applet chain before it opened.
 
-The generic reply for a service with no dedicated stub answers with a fresh
-object id and nothing else. It used to guess the *applet* state commands
-(`ReceiveMessage` → 15, `GetOperationMode` → 1, …) for any service whose name
-started with "applet"; those numbers leaked — `pl:u`'s `GetLoadState` is also
-command 1, and answering it with 15 left NX-Shell polling the shared-font
-service 190k times.
+The generic reply for a service with no dedicated stub
+(`Cpu::reply_with_fabricated_object`) answers with a fresh object id **and a
+real sub-session**, allocated once per `(session, command)` and reused. The
+handle is not optional: `nnSdk` reads an out-object off a plain session as a
+move handle, and a reply carrying none is not an error to it — the handle
+parses as 0, the client silently skips constructing the proxy, and the command
+still returns **success**. The caller's first virtual call then goes through a
+null pointer, which is how boot2 reached `pc=0` one instruction after `gpio`'s
+`OpenSession2` was answered "successfully", with nothing in the log between the
+lie and the crash.
+
+That reply used to guess the *applet* state commands (`ReceiveMessage` → 15,
+`GetOperationMode` → 1, …) for any service whose name started with "applet";
+those numbers leaked — `pl:u`'s `GetLoadState` is also command 1, and answering
+it with 15 left NX-Shell polling the shared-font service 190k times.
 
 `ssl` (`ssl_request`) is the system TLS stack — Switch does not let a title
 bring its own, so a title asks the OS to build connections

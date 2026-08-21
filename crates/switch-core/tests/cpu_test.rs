@@ -4381,3 +4381,74 @@ fn vi_native_window_names_the_binder_interface() {
     assert_eq!(&name, b"dispdrv\0", "the interface has to name itself");
 }
 
+
+#[test]
+fn an_undriven_gpio_pad_reads_high() {
+    // A GPIO pad is one wire into the SoC, and nothing is wired to this
+    // console. The level an undriven pad reads is not cosmetic: the buttons
+    // are active-low, and boot2 reads the two volume pads and enters
+    // maintenance mode when *both* read Low. Answering 0 here boots the
+    // console into maintenance mode on every single launch.
+    const GPIO: u64 = 0x9100;
+    const VOLUME_UP: u32 = 0x3500_0003;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(GPIO, "gpio");
+    let tls = cpu.tls_base();
+
+    // IManager::OpenSession2(DeviceCode, AccessMode) -> IPadSession.
+    let mut args = Vec::new();
+    args.extend_from_slice(&VOLUME_UP.to_le_bytes());
+    args.extend_from_slice(&1u32.to_le_bytes());
+    ipc_request_plain(&mut cpu, GPIO, 7, &args);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "OpenSession2 failed");
+    // { send_pid:1, num_copy:4, num_move:4 }: the session is a move handle.
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 5);
+    let pad = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(pad, 0, "no IPadSession came back");
+
+    // IPadSession::GetValue -> GpioValue::High.
+    ipc_request_plain(&mut cpu, pad, 9, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "GetValue failed");
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "an undriven pad is High");
+
+    // GetInterruptStatus: nothing drives the pad, so nothing is pending.
+    ipc_request_plain(&mut cpu, pad, 6, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0);
+}
+
+#[test]
+fn a_fabricated_out_object_comes_back_as_a_move_handle() {
+    // The reply for a command nothing implements used to carry only a raw
+    // object id in its data. On a plain session that is not where an
+    // out-object lives -- nnSdk reads one as a move handle, and a reply
+    // carrying none is not an error to it: the handle parses as 0, the client
+    // skips constructing the proxy, and the command still returns *success*.
+    // The caller then makes its first virtual call through a null pointer,
+    // which is how boot2 reached pc=0 one instruction after `gpio`'s
+    // OpenSession2 was answered "successfully".
+    const NCM: u64 = 0x9200;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(NCM, "ncm");
+    let tls = cpu.tls_base();
+
+    // IContentManager::OpenContentStorage(StorageId) -> IContentStorage.
+    ipc_request_plain(&mut cpu, NCM, 4, &[1, 0, 0, 0]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 5, "no move handle");
+    let storage = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(storage, 0, "a success with no object is worse than a failure");
+
+    // The sub-session reaches the same service, so a command on it is
+    // dispatched rather than falling through as an untracked handle.
+    let handles = cpu.service_handles_snapshot();
+    assert!(handles.iter().any(|(h, name)| *h == storage && name == "ncm"));
+
+    // Asked again, the same object comes back: a guest polling a command
+    // nothing implements must not be handed a fresh handle every call.
+    ipc_request_plain(&mut cpu, NCM, 4, &[1, 0, 0, 0]);
+    assert_eq!(u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap()), storage);
+}

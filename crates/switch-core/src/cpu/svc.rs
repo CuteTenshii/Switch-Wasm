@@ -770,12 +770,17 @@ impl Cpu {
                             self.audout_request(tls, cmd_id)?
                         }
                         "audout:iaudioout" => self.audio_out_request(tls, cmd_id, handle)?,
-                        // The Mii database, and the separate database of
-                        // rendered Mii images. `mii:e` is the editor's
-                        // read-write view of the same database `mii:u` reads.
+                        // psc, the power-state manager, and the IPmModule a
+                        // module registers with it to be told about a change.
                         "psc:m" | "psc:service" | "psc:module" => {
                             self.psc_request(tls, handle, cmd_id)?
                         }
+                        // gpio, the discrete wires into the SoC, and the
+                        // IPadSession each one is read through.
+                        "gpio" | "gpio:pad" => self.gpio_request(tls, handle, cmd_id)?,
+                        // The Mii database, and the separate database of
+                        // rendered Mii images. `mii:e` is the editor's
+                        // read-write view of the same database `mii:u` reads.
                         "mii:e" | "mii:u" | "mii:s" => self.mii_request(tls, handle, cmd_id)?,
                         "mii:database" | "mii:static" => self.mii_request(tls, handle, cmd_id)?,
                         "miiimg" => self.miiimg_request(tls, cmd_id)?,
@@ -784,8 +789,10 @@ impl Cpu {
                         "audren:iaudiodevice" => self.audio_device_request(tls, cmd_id, handle)?,
                          name => {
                              // Known service, no dedicated stub: answer with a
-                             // fresh object id so a caller that expects an
-                             // out-object gets something coherent.
+                             // sub-session and an object id, so a caller that
+                             // expects an out-object gets one it can call
+                             // rather than a null it cannot — see
+                             // `reply_with_fabricated_object`.
                              //
                              // This used to special-case any service whose name
                              // starts with "applet", handing back the values
@@ -801,9 +808,7 @@ impl Cpu {
                              // 190k times.
                              let name = name.to_string();
                              self.warn_no_implementation(&name, cmd_id);
-                             let obj = self.next_object_id;
-                             self.next_object_id = obj.wrapping_add(1);
-                             self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])?
+                             self.reply_with_fabricated_object(tls, handle, &name, cmd_id)?
                          }
                     }
                 } else {

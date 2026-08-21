@@ -2064,6 +2064,54 @@ impl Cpu {
         self.write_ipc_response(tls, UNKNOWN_COMMAND_ID, &[], &[], &[])
     }
 
+    /// Answer a command nothing implements with a fabricated success, in a
+    /// shape whose out-object the caller can actually use.
+    ///
+    /// This reply used to carry the fabricated object id in the raw data and
+    /// nothing else. On a plain session that is not where an out-object
+    /// lives: `nnSdk` reads one as a **move handle**, and a reply carrying no
+    /// handle is not an error to it — the handle parses as 0, the client
+    /// quietly skips constructing the proxy, and the command still returns
+    /// **success**. The caller then makes its first virtual call through a
+    /// null `SharedPointer`. That is how boot2 reached `pc=0` one instruction
+    /// after `gpio`'s `OpenSession2` was answered "successfully", with
+    /// nothing in between to say which command had lied.
+    ///
+    /// So the reply now carries a real sub-session — or a real domain
+    /// out-object, when the session is a domain — *as well as* the raw object
+    /// id, which is what a caller reading a plain out value has always read
+    /// here, `ConvertToDomain` most of all.
+    ///
+    /// Both are allocated once per `(session, command)` and reused: a guest
+    /// polling a command nothing implements would otherwise be handed a fresh
+    /// handle on every single call.
+    pub(super) fn reply_with_fabricated_object(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        name: &str,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        let key = (handle, cmd_id.unwrap_or(u32::MAX));
+        let (object_id, sub) = match self.fabricated_objects.get(&key) {
+            Some(&pair) => pair,
+            None => {
+                let object_id = self.next_object_id;
+                self.next_object_id = object_id.wrapping_add(1);
+                let sub = self.alloc_handle();
+                self.fabricated_objects.insert(key, (object_id, sub));
+                (object_id, sub)
+            }
+        };
+        if self.ipc_is_domain_request(tls) {
+            self.record_domain_object(handle, object_id, name);
+            self.write_ipc_response(tls, 0, &[], &object_id.to_le_bytes(), &[object_id])
+        } else {
+            self.record_handle(sub, name);
+            self.write_ipc_response(tls, 0, &[sub], &object_id.to_le_bytes(), &[])
+        }
+    }
+
     /// Note that a service reached over IPC has no implementation behind it at
     /// all, and is about to be answered with a fabricated object id.
     ///
@@ -4760,6 +4808,94 @@ impl Cpu {
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             _ => self.unimplemented_command(tls, &iface, cmd_id),
+        }
+    }
+
+    /// `gpio` (`IManager`), and the `IPadSession` it hands out for one pad.
+    ///
+    /// A GPIO pad is a single wire into the SoC, addressed by a device code.
+    /// Nothing is wired to this console — no volume rocker, no SD card detect
+    /// switch, no dock — so no pad is ever driven and no interrupt ever fires.
+    ///
+    /// An undriven pad reads **High**, and that polarity is load-bearing
+    /// rather than cosmetic: the buttons are active-low, and boot2 enters
+    /// maintenance mode when *both* volume pads read Low, so answering 0 here
+    /// boots this console into maintenance mode every single time.
+    pub(super) fn gpio_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        /// `GpioValue::High`, the level a pad with nothing pulling it down
+        /// sits at — which is what an unpressed active-low button looks like.
+        const HIGH: u32 = 1;
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(0) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "gpio");
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
+        let object_id = self.ipc_domain_object_id(tls);
+        if self.ipc_is_domain_close(tls) {
+            return self.close_domain_object(tls, handle, object_id);
+        }
+        let iface = if self.ipc_is_domain_request(tls) {
+            self.domain_interface(handle, object_id).unwrap_or("gpio").to_string()
+        } else {
+            self.service_name(handle).unwrap_or("gpio").to_string()
+        };
+        match iface.as_str() {
+            "gpio:pad" => match cmd_id {
+                // SetDirection / SetInterruptMode / SetInterruptEnable /
+                // ClearInterruptStatus / SetValue / UnbindInterrupt /
+                // SetDebounceEnabled / SetDebounceTime / SetValueForSleepState:
+                // accepted and dropped. There is no pad on the other end to
+                // change, and nothing reads these back except the getters
+                // below, which answer from the same nothing.
+                Some(0) | Some(2) | Some(4) | Some(7) | Some(8) | Some(11) | Some(12)
+                | Some(14) | Some(16) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // GetDirection (Input) / GetInterruptMode / GetInterruptEnable
+                // / GetInterruptStatus (Inactive) / GetDebounceEnabled /
+                // GetDebounceTime.
+                Some(1) | Some(3) | Some(5) | Some(6) | Some(13) | Some(15) => {
+                    self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
+                }
+                // GetValue / GetValueForSleepState -> GpioValue.
+                Some(9) | Some(17) => self.write_ipc_response(tls, 0, &[], &HIGH.to_le_bytes(), &[]),
+                // BindInterrupt -> the event the pad's interrupt signals.
+                // Handed out and never signalled, because nothing drives it.
+                Some(10) => {
+                    let h = self.alloc_event("gpio:pad", false);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // IManager.
+            _ => match cmd_id {
+                // OpenSessionForDev / OpenSession / OpenSessionForTest /
+                // OpenSession2 -> IPadSession. Which pad was asked for does not
+                // matter; every pad here behaves the same way.
+                Some(0) | Some(1) | Some(2) | Some(7) => {
+                    self.reply_with_interface(tls, handle, "gpio:pad")?;
+                    Ok(())
+                }
+                // IsWakeEventActive / IsWakeEventActive2 -> bool. Nothing here
+                // wakes the console, because nothing here sleeps.
+                Some(3) | Some(8) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // GetWakeEventActiveFlagSet -> the set of pads that would.
+                Some(4) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+                // The debug settings for that same never-taken wake path, plus
+                // SetRetryValues. Firmware moved a `GetWakeEventActiveFlagSet2`
+                // through this range, so these answer with a zeroed word as
+                // well as a success — a setter's caller ignores it, and a
+                // getter's reads the flag set as empty, which is the same
+                // answer command 4 gives.
+                Some(5) | Some(6) | Some(9) | Some(10) | Some(11) => {
+                    self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
         }
     }
 
