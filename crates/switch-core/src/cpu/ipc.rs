@@ -50,7 +50,7 @@ const SPL_DEVICE_ID: u64 = 0x0000_5357_4153_4D00;
 /// the Normal performance mode `apm` does — a docked console runs its GPU at
 /// 768 MHz instead, and claiming that while presenting a 720p handheld
 /// framebuffer would be two answers to the same question.
-const CLOCK_RATES_HZ: [u32; 4] = [1_020_000_000, 384_000_000, 1_600_000_000, 0];
+pub(super) const CLOCK_RATES_HZ: [u32; 4] = [1_020_000_000, 384_000_000, 1_600_000_000, 0];
 
 /// The one display `vi` composes, as (width, height).
 ///

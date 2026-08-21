@@ -5,6 +5,7 @@ use super::{
     GUEST_HEAP_REGION_SIZE, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE,
     PL_SHMEM_SIZE,
 };
+use super::ipc::CLOCK_RATES_HZ;
 use crate::{Error, Result};
 use std::fmt::Write;
 
@@ -478,8 +479,21 @@ impl Cpu {
                 Ok(())
             }
             0x1E => {
-                // GetSystemTick (ns scale, arbitrary)
-                self.write_zr(0, self.cycles * 1000);
+                // GetSystemTick: the 19.2 MHz counter every `nn::os` timing
+                // API is built on, and the only clock a guest has.
+                //
+                // The scale is not arbitrary, which is what it used to be
+                // (`cycles * 1000`). One emulated instruction stands for one
+                // cycle of the 1.02 GHz CPU `apm` reports, so a tick is worth
+                // 1_020_000_000 / 19_200_000 of them — about 53. Counting
+                // 1000 ticks per instruction instead ran the guest's clock
+                // **53,000x fast**: a frame of a hundred thousand
+                // instructions read back as five seconds of wall time, and
+                // anything that measures its own progress against the tick
+                // was being told it had missed every deadline it had.
+                const TICK_HZ: u128 = 19_200_000;
+                let ticks = u128::from(self.cycles) * TICK_HZ / u128::from(CLOCK_RATES_HZ[0]);
+                self.write_zr(0, ticks as u64);
                 Ok(())
             }
             0x1F => {

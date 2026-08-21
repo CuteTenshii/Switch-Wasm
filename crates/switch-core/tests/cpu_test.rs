@@ -709,14 +709,21 @@ fn horizon_syscall_stubs() {
     let report = cpu.run(1).unwrap();
     assert!(report.halted);
 
-    // GetSystemTick returns the cycle count scaled to ns.
+    // GetSystemTick counts the 19.2 MHz tick every `nn::os` timing API is
+    // built on, against the 1.02 GHz CPU `apm` reports -- so one emulated
+    // instruction is a *fraction* of a tick, about 1/53. It used to answer
+    // `cycles * 1000`, running the guest's clock 53,000x fast: a frame of a
+    // hundred thousand instructions read back as five seconds of wall time.
     let mut cpu = cpu_at(0x1000);
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(&nop().to_le_bytes());
+    for _ in 0..5300 {
+        bytes.extend_from_slice(&nop().to_le_bytes());
+    }
     bytes.extend_from_slice(&svc(0x1E).to_le_bytes());
+    cpu.mem.map_zero(0x1000, bytes.len() + 0x10).unwrap();
     cpu.mem.map(0x1000, &bytes).unwrap();
-    cpu.run(2).unwrap();
-    assert_eq!(cpu.read_x(0), 1000); // one nop executed before the svc
+    cpu.run(5301).unwrap();
+    assert_eq!(cpu.read_x(0), 5300 * 19_200_000 / 1_020_000_000);
 
     // ConnectToNamedPort succeeds with a fake handle returned in X1.
     let mut cpu = cpu_at(0x1000);
