@@ -1392,12 +1392,18 @@ impl Cpu {
     }
 
     pub(super) fn vi_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
-        let req_type = self.ipc_message_type(tls);
-        // Control (type 5) requests: cmd 0 = ConvertToDomain, cmd 3 =
+        // Control requests: cmd 0 = ConvertToDomain, cmd 3 =
         // QueryPointerBufferSize. Older libnx always converts the session to a
         // domain before dispatching; hbmenu's libnx (NX_SERVICE_ASSUME_NON_DOMAIN)
         // instead sends cmd 3 and then uses raw non-domain requests.
-        if req_type == 5 {
+        //
+        // Control-ness is `ipc_is_control_request`, never `type == 5`: a
+        // control message has a with-context encoding too (type 7), and that
+        // is the one `nnSdk` sends. Testing for 5 alone read the Home Menu's
+        // QueryPointerBufferSize as command **3 on the binder relay** and ran
+        // a parcel transaction for it, which answered a size query with a
+        // failed binder reply.
+        if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(0) => {
                     let obj = self.alloc_domain_object();

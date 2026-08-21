@@ -520,9 +520,16 @@ impl NvDrv {
             // SetNvmapFd / SetTimeout / ZCullBind / SetErrorNotifier /
             // SetPriority / SetUserData: bookkeeping with no visible effect on
             // the model.
+            // SetTimeslice (0x1D) joins them: how long the channel holds the
+            // GPU before the host1x scheduler moves on is a real knob on
+            // hardware and nothing at all on a command processor that runs
+            // each submission to completion inside its own ioctl. Refusing it
+            // is the one answer that is definitely wrong -- nnSdk's nvn driver
+            // checks, and a channel it failed to configure is one it has no
+            // reason to trust.
             (TYPE_CHANNEL, 0x01) | (TYPE_CHANNEL, 0x03) | (TYPE_CHANNEL, 0x0B)
-            | (TYPE_CHANNEL, 0x0C) | (TYPE_CHANNEL, 0x0D) | (TYPE_CTRL_GPU, 0x14)
-            | (TYPE_NVHOST, 0x07) | (TYPE_NVHOST, 0x08) => Ok(NV_OK),
+            | (TYPE_CHANNEL, 0x0C) | (TYPE_CHANNEL, 0x0D) | (TYPE_CHANNEL, 0x1D)
+            | (TYPE_CTRL_GPU, 0x14) | (TYPE_NVHOST, 0x07) | (TYPE_NVHOST, 0x08) => Ok(NV_OK),
 
             // SubmitGpfifo { u64 gpfifo; num_entries; flags; fence; entries[] }
             (TYPE_CHANNEL, 0x08) => {

@@ -4640,6 +4640,45 @@ fn the_display_answers_what_it_is() {
 }
 
 #[test]
+fn vi_reads_a_control_request_in_either_encoding() {
+    // Control-ness is `ipc_is_control_request`, never `type == 5`: a control
+    // message has a with-context encoding too (type 7), and that is the one
+    // nnSdk sends. Testing for 5 alone read the Home Menu's
+    // QueryPointerBufferSize as command **3 on the binder relay** and ran a
+    // parcel transaction for it, answering a size query with a failed binder
+    // reply.
+    //
+    // The size has to be 0 either way, so that a caller marshals every
+    // `SfBufferAttr_HipcAutoSelect` buffer as a map-alias range -- the only
+    // buffer form this IPC layer implements.
+    const VI: u64 = 0xB400;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(VI, "vi:m");
+    let tls = cpu.tls_base();
+
+    for msg_type in [5u32, 7] {
+        build_ipc_request(&mut cpu, msg_type, None, 3);
+        run_ipc_request(&mut cpu, VI);
+        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "type {msg_type} refused");
+        assert_eq!(
+            cpu.mem.read_u16(tls + 0x20).unwrap(),
+            0,
+            "type {msg_type}: a non-zero pointer buffer size asks for a buffer form \
+             nothing here marshals"
+        );
+    }
+
+    // And ConvertToDomain, the other control command, still hands back an
+    // object id rather than being read as a binder AdjustRefcount.
+    build_ipc_request(&mut cpu, 7, None, 0);
+    run_ipc_request(&mut cpu, VI);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+    assert_ne!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "no domain object came back");
+}
+
+#[test]
 fn an_unfilled_out_parameter_reads_as_zero_not_as_the_request() {
     // A reply is written *over* the request, in the same TLS buffer, and the
     // padding its header declares is four words wide -- room for a small out
