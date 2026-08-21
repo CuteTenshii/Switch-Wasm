@@ -973,6 +973,81 @@ fn adrp_adr_with_nonzero_immlo() {
 }
 
 #[test]
+fn disassembler_agrees_with_llvm_on_load_store_size_and_addressing() {
+    use switch_core::disasm::disassemble;
+    // Every encoding here is what `llvm-mc --show-encoding` assembles the
+    // named instruction to, and every expected string is what `llvm-mc
+    // --disassemble` gives back for it.
+    //
+    // These come from diffing this disassembler against llvm-mc over the
+    // 150,257 distinct instruction encodings "A Short Hike" executes. That
+    // sweep found four wrong answers, all of them here: every store was named
+    // `str` whatever its width, the unscaled and unprivileged offset forms
+    // were named as if their offset were scaled, the register-offset group
+    // matched only 64-bit accesses, and the acquire/release and exclusive
+    // forms dropped both their size and the `o0` bit. The interpreter had all
+    // of them right -- this is what a *trace* says, and a trace that misnames
+    // a one-byte store as a four-byte one sends a debugging session the wrong
+    // way.
+    for (insn, want) in [
+        // Sizes on the indexed forms.
+        (0x38001408u32, "strb w8, [x0], #1"),
+        (0x78002c29, "strh w9, [x1, #2]!"),
+        // Unscaled (stur/ldur): a signed 9-bit *byte* offset, where the
+        // scaled form takes an unsigned 12-bit one.
+        (0xb81fc062, "stur w2, [x3, #-4]"),
+        (0x381ff0a4, "sturb w4, [x5, #-1]"),
+        (0xf85f80e6, "ldur x6, [x7, #-8]"),
+        (0x385fe128, "ldurb w8, [x9, #-2]"),
+        (0xb89fc16a, "ldursw x10, [x11, #-4]"),
+        // Unprivileged.
+        (0x380039ac, "sttrb w12, [x13, #3]"),
+        // Register offset, narrower than 64-bit -- the whole group used to be
+        // rejected unless bits[31:30] were 11.
+        (0x38214913, "strb w19, [x8, w1, uxtw]"),
+        (0x78647862, "ldrh w2, [x3, x4, lsl #1]"),
+        // Acquire/release and exclusive: size, and `o0`.
+        (0x089ffd09, "stlrb w9, [x8]"),
+        (0x48dffcc7, "ldarh w7, [x6]"),
+        (0x0801fc62, "stlxrb w1, w2, [x3]"),
+        (0xc85ffca4, "ldaxr x4, [x5]"),
+        // SIMD&FP loads and stores, which were not decoded at all.
+        (0x3d800420, "str q0, [x1, #0x10]"),
+        (0xbc5fc062, "ldur s2, [x3, #-4]"),
+        (0x6d0127e8, "stp d8, d9, [sp, #0x10]"),
+        (0xacc12c4a, "ldp q10, q11, [x2], #0x20"),
+        // LDPSW is not a 32-bit LDP: two signed words into 64-bit registers.
+        (0x694001b2, "ldpsw x18, x0, [x13, #0x0]"),
+        (0x294114c4, "ldp w4, w5, [x6, #0x8]"),
+    ] {
+        assert_eq!(disassemble(insn), want, "for {insn:#010x}");
+    }
+}
+
+#[test]
+fn disassembler_names_rev_ccmp_and_the_barriers() {
+    use switch_core::disasm::disassemble;
+    // The 32-bit form reverses the whole register, so it is REV; REV32 only
+    // exists in the 64-bit form.
+    assert_eq!(disassemble(0x5ac00808), "rev w8, w0");
+    assert_eq!(disassemble(0xdac00829), "rev32 x9, x1");
+    assert_eq!(disassemble(0xdac00c4a), "rev x10, x2");
+
+    // CCMP and CCMN are not aliases of each other -- one subtracts and one
+    // adds -- and bit 30 chooses. These were named the wrong way round.
+    // (The interpreter always had it right: 0x7a400804 really does set the
+    // carry, which only the subtracting form does.)
+    assert_eq!(disassemble(0x7a400804), "ccmp w0, #0x0, #0x4, eq");
+    assert_eq!(disassemble(0x3a411822), "ccmn w1, #0x1, #0x2, ne");
+
+    // The barriers share the hint encoding space but are their own
+    // instructions; an `isb` reading as `hint` hides it in a trace.
+    assert_eq!(disassemble(0xd5033bbf), "dmb #0xb");
+    assert_eq!(disassemble(0xd5033fdf), "isb #0xf");
+    assert_eq!(disassemble(0xd5033f5f), "clrex");
+}
+
+#[test]
 fn disassembler_produces_readable_output() {
     use switch_core::disasm::disassemble;
     // MOVZ X1, #0x1234
