@@ -4127,6 +4127,25 @@ impl Cpu {
             // `ns:am` is the pre-3.0.0 service, where the application manager
             // is reached directly rather than through a getter.
             "ns:am" | "ns:app-manager" => self.ns_application_manager_request(tls, &iface, cmd_id),
+            // `IContentManagementInterface`: what is on each storage, and
+            // whether the card holding it is there at all.
+            "ns:content-management" => match cmd_id {
+                // CheckSdCardMountStatus. There is an emulated SD card and it
+                // is always mounted, so this succeeds; a *refusal* is how the
+                // Home Menu is told the card it was using has gone, which is
+                // not a state anything here can be in.
+                Some(43) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // GetTotalSpaceSize / GetFreeSpaceSize(StorageId) -> u64. The
+                // same 32 GiB card `fsp-srv` reports, half of it used, so that
+                // a caller doing the arithmetic between the two answers gets a
+                // number that is neither full nor impossible.
+                Some(47) => self.write_ipc_response(tls, 0, &[], &(32u64 << 30).to_le_bytes(), &[]),
+                Some(48) => self.write_ipc_response(tls, 0, &[], &(16u64 << 30).to_le_bytes(), &[]),
+                // CountApplicationContentMeta(u64 application_id) -> u32:
+                // nothing is installed, so nothing has content meta.
+                Some(600) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
             // `IReadOnlyApplicationRecordInterface`: the record half of the
             // manager, for callers that only want to know what is installed.
             "ns:read-only-record" => match cmd_id {
@@ -7166,6 +7185,32 @@ mod tests {
         cpu.ns_request(TLS, 9, Some(3)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u16(TLS + 0x20).unwrap(), 0x1000);
+    }
+
+    #[test]
+    fn ns_reports_the_sd_card_as_mounted() {
+        // `IContentManagementInterface::CheckSdCardMountStatus` answers with a
+        // bare Result, so *refusing* it is how the caller is told the card it
+        // was using has gone. Nothing here can be in that state -- the
+        // emulated card is always there -- and the Home Menu asks before it
+        // has anything to show.
+        let mut cpu = request(false, 43, &[]);
+        cpu.register_service_handle(9, "ns:content-management");
+        cpu.ns_request(TLS, 9, Some(43)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "the card reads as missing");
+
+        // And the two space queries have to be answerable in either order:
+        // free must be no larger than total, or the arithmetic between them
+        // underflows into a card with negative space used.
+        let mut cpu = request(false, 47, &[]);
+        cpu.register_service_handle(9, "ns:content-management");
+        cpu.ns_request(TLS, 9, Some(47)).unwrap();
+        let total = cpu.mem.read_u64(TLS + 0x20).unwrap();
+        let mut cpu = request(false, 48, &[]);
+        cpu.register_service_handle(9, "ns:content-management");
+        cpu.ns_request(TLS, 9, Some(48)).unwrap();
+        let free = cpu.mem.read_u64(TLS + 0x20).unwrap();
+        assert!(free > 0 && free <= total, "free {free} of total {total}");
     }
 
     #[test]
