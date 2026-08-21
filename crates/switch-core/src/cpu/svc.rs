@@ -584,6 +584,24 @@ impl Cpu {
                         return Ok(());
                     }
                 }
+                // Closing a domain object is a request *shape*, not a
+                // command: `CmifDomainRequestType_Close` sits where
+                // SendMessage's type byte would, and there is no command id
+                // behind it at all. Dispatching one to a service reads
+                // whatever follows as command 0 — so the Home Menu's
+                // `IStorage` close ran as a **Read**, with the reply's own
+                // "SFCO" magic for an offset, and the object stayed open.
+                //
+                // Thirteen services checked for this themselves and the rest
+                // did not, which is the wrong shape for a rule that holds for
+                // every domain session there is. It belongs here, before any
+                // of them sees the request.
+                if self.ipc_is_domain_close(tls) {
+                    let object_id = self.ipc_domain_object_id(tls);
+                    self.close_domain_object(tls, handle, object_id)?;
+                    self.write_zr(0, RESULT_OK);
+                    return Ok(());
+                }
                 if let Some(name) = svc_name {
                     let name = name;
                     match name.as_str() {

@@ -4647,6 +4647,48 @@ fn the_display_answers_what_it_is() {
 }
 
 #[test]
+fn closing_a_domain_object_is_not_command_zero() {
+    // `CmifDomainRequestType_Close` sits where SendMessage's type byte would,
+    // and carries no command id at all -- so a close dispatched to a service
+    // is read as command 0, which on most interfaces is a real operation. The
+    // Home Menu's `IStorage` close ran as a **Read**, with the reply's own
+    // "SFCO" magic for an offset, and left the object open behind it.
+    const FS: u64 = 0xC000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(FS, "fsp-srv");
+    let tls = cpu.tls_base();
+
+    // Convert to a domain, then open the process's own RomFS as an IStorage.
+    ipc_request(&mut cpu, FS, 5, None, 0);
+    let root = cpu.mem.read_u32(tls + 0x20).unwrap();
+    cpu.set_romfs(vec![0xAB; 0x400]);
+    ipc_request(&mut cpu, FS, 4, Some(root), 200);
+    let storage = cpu.mem.read_u32(tls + 0x30).unwrap();
+    assert_ne!(storage, 0, "no IStorage came back");
+    assert_eq!(cpu.domain_interface_name(FS, storage), Some("fsp-srv-storage".to_owned()));
+
+    // A close, marshalled the way a caller marshals one: the domain header's
+    // type byte is 2 and there is no CmifInHeader behind it.
+    for i in (0..0x100u32).step_by(4) {
+        cpu.mem.write_u32(tls + i, 0).unwrap();
+    }
+    cpu.mem.write_u32(tls, 4).unwrap();
+    cpu.mem.write_u32(tls + 4, 8).unwrap();
+    cpu.mem.write_u32(tls + 0x10, 2).unwrap(); // CmifDomainRequestType_Close
+    cpu.mem.write_u32(tls + 0x14, storage).unwrap();
+    run_ipc_request(&mut cpu, FS);
+
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "the close was refused");
+    assert_eq!(
+        cpu.domain_interface_name(FS, storage),
+        None,
+        "the object is still open after being closed"
+    );
+}
+
+#[test]
 fn vi_reads_a_control_request_in_either_encoding() {
     // Control-ness is `ipc_is_control_request`, never `type == 5`: a control
     // message has a with-context encoding too (type 7), and that is the one

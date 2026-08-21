@@ -597,11 +597,21 @@ impl Cpu {
     /// and reports that command id — which is why `appletExit`'s teardown used
     /// to look like a flurry of command 0s.
     pub(super) fn ipc_is_domain_close(&self, tls: u32) -> bool {
+        if self.ipc_is_tipc_request(tls) {
+            return false;
+        }
         self.mem.read_u8(tls.wrapping_add(self.ipc_reply_start(tls))).unwrap_or(0) == 2
     }
 
     /// Forget one object and acknowledge the close.
     pub(super) fn close_domain_object(&mut self, tls: u32, handle: u64, object_id: u32) -> Result<()> {
+        // `ssl` counts its live contexts, and this is where one stops being
+        // live. The count lives here rather than in `ssl_request` because a
+        // close never reaches a service handler any more — see the dispatch in
+        // `horizon_syscall`.
+        if self.domain_interface(handle, object_id) == Some("ssl:context") {
+            self.ssl_contexts = self.ssl_contexts.saturating_sub(1);
+        }
         self.domain_objects.remove(&(handle, object_id));
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
@@ -2399,9 +2409,6 @@ impl Cpu {
         // handle instead. Resolving only the domain case left every `nnSdk`
         // request answered as `am:unknown`.
         let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            return self.close_domain_object(tls, handle, object_id);
-        }
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("am:unknown").to_string()
         } else {
@@ -3030,9 +3037,6 @@ impl Cpu {
             };
         }
         let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            return self.close_domain_object(tls, handle, object_id);
-        }
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("lm:service").to_string()
         } else {
@@ -3178,12 +3182,6 @@ impl Cpu {
             };
         }
         let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            if self.domain_interface(handle, object_id) == Some("ssl:context") {
-                self.ssl_contexts = self.ssl_contexts.saturating_sub(1);
-            }
-            return self.close_domain_object(tls, handle, object_id);
-        }
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("ssl:service").to_string()
         } else {
@@ -3301,9 +3299,6 @@ impl Cpu {
             };
         }
         let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            return self.close_domain_object(tls, handle, object_id);
-        }
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("hid:server").to_string()
         } else {
@@ -3546,9 +3541,6 @@ impl Cpu {
             };
         }
         let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            return self.close_domain_object(tls, handle, object_id);
-        }
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("pctl:factory").to_string()
         } else {
@@ -3706,9 +3698,6 @@ impl Cpu {
             };
         }
         let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            return self.close_domain_object(tls, handle, object_id);
-        }
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("acc:u0").to_string()
         } else {
@@ -4063,9 +4052,6 @@ impl Cpu {
             };
         }
         let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            return self.close_domain_object(tls, handle, object_id);
-        }
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("ns:am2").to_string()
         } else {
@@ -4598,9 +4584,6 @@ impl Cpu {
             };
         }
         let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            return self.close_domain_object(tls, handle, object_id);
-        }
         // A session reached over either route — its own handle, or an object
         // id on a domain — is a different interface from the server.
         let iface = if self.ipc_is_domain_request(tls) {
@@ -4729,10 +4712,6 @@ impl Cpu {
                 }
                 _ => self.unimplemented_command(tls, "bsd:control", cmd_id),
             };
-        }
-        let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            return self.close_domain_object(tls, handle, object_id);
         }
         let data = self.ipc_request_data(tls);
         let word = |cpu: &Cpu, index: u32| cpu.mem.read_u32(data.wrapping_add(index * 4)).unwrap_or(0);
@@ -5061,9 +5040,6 @@ impl Cpu {
             };
         }
         let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            return self.close_domain_object(tls, handle, object_id);
-        }
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("apm").to_string()
         } else {
@@ -5228,9 +5204,6 @@ impl Cpu {
             };
         }
         let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            return self.close_domain_object(tls, handle, object_id);
-        }
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("psc:service").to_string()
         } else {
@@ -5298,9 +5271,6 @@ impl Cpu {
             };
         }
         let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            return self.close_domain_object(tls, handle, object_id);
-        }
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("gpio").to_string()
         } else {
@@ -5385,9 +5355,6 @@ impl Cpu {
             };
         }
         let object_id = self.ipc_domain_object_id(tls);
-        if self.ipc_is_domain_close(tls) {
-            return self.close_domain_object(tls, handle, object_id);
-        }
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id).unwrap_or("mii:static").to_string()
         } else {

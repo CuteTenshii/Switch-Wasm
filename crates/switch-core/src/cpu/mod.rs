@@ -1408,6 +1408,14 @@ impl Cpu {
         self.record_handle(handle, name);
     }
 
+    /// Debug: what interface a domain object id on `handle` names, or `None`
+    /// once it has been closed. The counterpart to
+    /// [`Cpu::service_handles_snapshot`] for the objects living on a session
+    /// rather than the sessions themselves.
+    pub fn domain_interface_name(&self, handle: u64, object_id: u32) -> Option<String> {
+        self.domain_interface(handle, object_id).map(|s| s.to_owned())
+    }
+
     /// Debug: dump the fake-handle -> service-name map.
     pub fn service_handles_snapshot(&self) -> Vec<(u64, String)> {
         let mut v: Vec<(u64, String)> = self
