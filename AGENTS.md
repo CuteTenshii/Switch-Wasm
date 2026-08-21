@@ -175,6 +175,31 @@ instructions read both literally (`cmp x0, #0` / `mov w19, w1`):
 `nn::os::GetThreadAvailableCoreMask` an empty mask, whose inlined
 highest-set-bit scan inside `nn::os::RegisterSystemWorkerHandler` asserts.
 
+## How long a run has to be
+
+**One emulated instruction is about one cycle of the 1.02 GHz CPU this
+console claims**, which `svcGetSystemTick` is scaled from. So a billion steps
+is roughly **one second** of console time, and the step budgets that feel
+generous are not:
+
+| steps | console time | reaches |
+| --- | --- | --- |
+| 2,000,000 (`boot_nsp` default) | 2 ms | barely past `rtld` |
+| 400,000,000 | 0.4 s | service init, a layer, the first frame loop |
+| 15,000,000,000 | ~15 s | "A Short Hike" presenting its 300th frame |
+
+A retail title spends **seconds** of console time before its first frame — an
+IL2CPP game longer still. "A Short Hike" was written off as never drawing
+through a whole session of 200M-to-3B-step runs; at 15B it presents hundreds
+of frames at 1920x1080. Before concluding a title does not render, check that
+the run was long enough for it to, and prefer `SHOT=<file.ppm>` over reading
+`frames presented: 0` off a budget that was never going to get there.
+
+Two things make those long runs mean something, and both are recent: threads
+are preempted (before, one busy thread could take 99.9% of the CPU and the
+title's own main loop got the rest), and vsync ticks on a period rather than
+only on a present.
+
 ## Guest threads (`cpu/mod.rs`, `cpu/svc.rs`)
 
 **Preemptive, on a `TIME_SLICE` of 20,000 instructions**, plus the blocking
