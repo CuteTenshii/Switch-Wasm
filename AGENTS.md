@@ -200,6 +200,21 @@ increment.
   a waiter and `svcWaitProcessWideKeyAtomic` has to release the mutex. Returning
   success from those stubs left hbmenu's worker spinning on a lock its main
   thread held.
+- **The exclusive monitor is real, and preemption is why.** `STXR` used to
+  succeed unconditionally, which was safe only while a thread could lose the
+  CPU at a blocking syscall and nowhere else: no guest puts one between the two
+  halves of a read-modify-write, so every pair was atomic by construction.
+  `LDXR`/`LDXP` set `Cpu::exclusive`, `STXR`/`STXP` require and consume it, and
+  a context switch clears it — so an interrupted pair fails and is retried
+  rather than completing across the other thread's writes.
+- **A wait on no handles at all is not answered.**
+  `nn::os::detail::MultiWaitImpl::WaitAny` turns whatever
+  `svcWaitSynchronization` returns into a holder from its own list, and an
+  empty list has none: told "handle 0 fired" it takes index 0 of nothing, told
+  "timed out" it returns the same null, and `RegisterSystemWorkerHandler` calls
+  the result unchecked. Either answer jumps the thread to 0 — "A Short Hike"
+  faults at `pc=0` one instruction after such a wait. So the thread rewinds
+  onto the `svc` and yields instead, unless nothing else can run.
 - The SVC path retires the instruction (`self.pc = next_pc`) *before* dispatching,
   so a syscall that switches threads can install the incoming PC.
 - If every thread is blocked, `reschedule` wakes them all rather than hanging:
