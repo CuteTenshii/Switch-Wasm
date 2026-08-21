@@ -428,6 +428,25 @@ pub struct Cpu {
     fs_dirs: HashMap<u64, Vec<crate::vfs::DirEntry>>,
     /// Open `IFile` objects: domain object id to the path it was opened on.
     fs_files: HashMap<u64, String>,
+    /// `am` `IStorage` contents, keyed by object. A library applet is handed
+    /// its launch arguments as one of these and returns its result in
+    /// another, so the bytes have to outlive the request that made it.
+    am_storages: HashMap<u64, Vec<u8>>,
+    /// The console's system data archives, by data id: the read-only content
+    /// a title mounts that is not its own — an applet's shared assets, the
+    /// system's Mii and amiibo resources. Each is another NCA's RomFS, so
+    /// they are sources rather than buffers, exactly like the running title's.
+    data_archives: HashMap<u64, Box<dyn crate::source::ByteSource>>,
+    /// Which data archive an open `IStorage` is serving. Absent means the
+    /// storage is the process's own RomFS.
+    fs_storage_archive: HashMap<u64, u64>,
+    /// Storages queued for `ILibraryAppletSelfAccessor::PopInData` — what the
+    /// applet's caller would have pushed before starting it.
+    am_in_data: VecDeque<Vec<u8>>,
+    /// Which storage an `IStorageAccessor` reads and writes. The accessor is
+    /// a separate object from the storage it was opened on, and both ends
+    /// have to see the same bytes.
+    am_storage_of: HashMap<u64, u64>,
     /// The current process's own RomFS — what
     /// `OpenDataStorageByCurrentProcess` hands back as an `IStorage`. `None`
     /// until the loader calls [`Cpu::set_romfs`] or
@@ -604,6 +623,11 @@ impl Cpu {
             last_vsync_frame: 0,
             fs_dirs: HashMap::new(),
             fs_files: HashMap::new(),
+            data_archives: HashMap::new(),
+            fs_storage_archive: HashMap::new(),
+            am_in_data: VecDeque::new(),
+            am_storages: HashMap::new(),
+            am_storage_of: HashMap::new(),
             romfs: None,
             touch_sample_counter: 0,
             touch_published: 0,
@@ -1183,6 +1207,25 @@ impl Cpu {
                 .mem_addr
                 .wrapping_add(module.data.file_size)
                 .wrapping_add(module.bss_size);
+            // Where each module actually landed. `rtld` does not take the
+            // layout on trust — it finds modules itself, scanning with
+            // `svcQueryMemory` for R-X regions carrying `MOD0` — so the base
+            // it relocates against is one it worked out, and a fault
+            // afterwards is unreadable without knowing what it was supposed
+            // to have found.
+            self.diagnostic(&format!(
+                "[loader] {} at {:#010x}: text {:#010x}..{:#010x}, rodata {:#010x}..{:#010x}, data {:#010x}..{:#010x}, bss {:#010x}..{:#010x}",
+                name,
+                module.base,
+                module.text.mem_addr,
+                module.text.mem_addr.wrapping_add(module.text.file_size),
+                module.ro.mem_addr,
+                module.ro.mem_addr.wrapping_add(module.ro.file_size),
+                module.data.mem_addr,
+                module.data.mem_addr.wrapping_add(module.data.file_size),
+                module.data.mem_addr.wrapping_add(module.data.file_size),
+                image_end,
+            ));
             base = image_end.wrapping_add(MODULE_ALIGN - 1) & !(MODULE_ALIGN - 1);
             loaded.push(module);
         }
@@ -1191,7 +1234,54 @@ impl Cpu {
             .ok_or_else(|| Error::Cpu("no modules to boot".into()))?
             .entry;
         self.set_pc(entry);
+        self.seed_applet_launch_arguments();
         Ok(loaded)
+    }
+
+    /// Queue what a library applet's caller would have pushed before starting
+    /// it, so `PopInData` has something to hand over.
+    ///
+    /// Every caller pushes `LibAppletCommonArguments` first — the 0x20-byte
+    /// block naming the interface version the two sides agreed on and the
+    /// theme to draw in. Running a library applet directly, as this emulator
+    /// does, there is nobody to push it, and an applet that cannot read its
+    /// own arguments aborts before it draws anything.
+    ///
+    /// Whatever the applet pops *after* that is its own launch struct, which
+    /// only a real caller could fill in; nothing is queued for it.
+    fn seed_applet_launch_arguments(&mut self) {
+        /// How much of an applet-specific launch struct to provide. Bigger
+        /// than any of them; an applet reads the prefix it knows.
+        const APPLET_INPUT_SIZE: usize = 0x100;
+
+        self.am_in_data.clear();
+        if !crate::cpu::ipc::is_library_applet(self.program_id) {
+            return;
+        }
+        const COMMON_ARGS_VERSION: u32 = 1;
+        const COMMON_ARGS_SIZE: u32 = 0x20;
+        let mut args = Vec::with_capacity(COMMON_ARGS_SIZE as usize);
+        args.extend_from_slice(&COMMON_ARGS_VERSION.to_le_bytes());
+        args.extend_from_slice(&COMMON_ARGS_SIZE.to_le_bytes());
+        // LaVersion: the applet-interface revision the caller speaks. Each
+        // applet numbers its own, and a caller that claims one the applet
+        // does not know is refused, so this is the applet's own.
+        args.extend_from_slice(&crate::cpu::ipc::applet_interface_version(self.program_id).to_le_bytes());
+        // ExpectedThemeColor: 0 is the basic white theme.
+        args.extend_from_slice(&0u32.to_le_bytes());
+        // PlayStartupSound, then padding out to the tick field.
+        args.resize(0x18, 0);
+        // The tick the caller started the applet at. Nothing here measures
+        // elapsed time against it.
+        args.extend_from_slice(&0u64.to_le_bytes());
+        self.am_in_data.push_back(args);
+        // Then the applet's own launch struct, which only its caller could
+        // fill in. Zeroed: every one of these starts with a mode or type
+        // selector, and zero is the ordinary entry point for the applets that
+        // have one (the Mii editor opens on the list, the amiibo cabinet on
+        // nickname-and-owner settings). Refusing the pop instead is what a
+        // real applet treats as a launch it cannot honour, and it aborts.
+        self.am_in_data.push_back(vec![0u8; APPLET_INPUT_SIZE]);
     }
 
     /// Set the decrypted RomFS bytes `OpenDataStorageByCurrentProcess`
@@ -1203,6 +1293,18 @@ impl Cpu {
     /// for the form a real title's uses.
     pub fn set_romfs(&mut self, data: Vec<u8>) {
         self.romfs = Some(Box::new(crate::source::MemSource(data)));
+    }
+
+    /// Register a system data archive under its data id, for
+    /// `OpenDataStorageByDataId` to serve.
+    ///
+    /// These live on a real console's NAND as separate Data NCAs, one per
+    /// data id; an applet mounts one to get at assets it ships apart from its
+    /// own RomFS. Nothing here has a NAND, so the host registers whichever it
+    /// has and a request for any other is reported missing rather than
+    /// answered with an empty archive.
+    pub fn add_data_archive(&mut self, data_id: u64, src: Box<dyn crate::source::ByteSource>) {
+        self.data_archives.insert(data_id, src);
     }
 
     /// Same, backed by a [`ByteSource`](crate::source::ByteSource) that

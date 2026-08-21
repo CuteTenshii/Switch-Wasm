@@ -69,6 +69,16 @@ fn main() {
             cpu.set_romfs(r);
         }
     }
+    // The system fonts `pl:u` hands out. Without them a title that draws
+    // text waits for a font that never arrives — the browser stages one at
+    // startup, so a native run that skips it fails in a way the real
+    // frontend never would.
+    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/assets/font.ttf");
+    match fs::read(font) {
+        Ok(bytes) => cpu.set_shared_font(bytes),
+        Err(e) => println!("no font at {font} ({e}): text will not render"),
+    }
+    cpu.set_program_id(nca.program_id);
     cpu.boot_retail_program(&modules).unwrap();
 
     let ring_from = env::var("RING_FROM")

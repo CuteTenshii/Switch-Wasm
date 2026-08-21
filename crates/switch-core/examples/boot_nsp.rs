@@ -136,6 +136,49 @@ fn main() {
     } else {
         println!("no RomFS section in this NCA");
     }
+    // The system fonts `pl:u` hands out. Without them a title that draws
+    // text waits for a font that never arrives — the browser stages one at
+    // startup, so a native run that skips it fails in a way the real
+    // frontend never would.
+    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/assets/font.ttf");
+    match fs::read(font) {
+        Ok(bytes) => cpu.set_shared_font(bytes),
+        Err(e) => println!("no font at {font} ({e}): text will not render"),
+    }
+    // System data archives, if the host pointed at a firmware dump. A title
+    // mounts these by data id for content that is not its own — an applet's
+    // shared assets, the Mii and amiibo models. Each is another Data NCA, and
+    // is served straight off disk rather than read in.
+    if let Ok(dir) = env::var("SWITCH_FIRMWARE") {
+        let mut registered = 0;
+        let entries = fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {dir}: {e}"));
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("nca") {
+                continue;
+            }
+            let Ok(src) = switch_core::source::FileSource::open(&path) else {
+                continue;
+            };
+            let Ok(archive) = switch_core::nca::Nca::parse_source(&src, Some(&keys)) else {
+                continue;
+            };
+            use switch_core::nca::ContentType;
+            if !matches!(archive.content_type, ContentType::Data | ContentType::PublicData) {
+                continue;
+            }
+            let Some(idx) = archive.romfs_section_index() else {
+                continue;
+            };
+            if let Ok(romfs) = archive.romfs_source(src, &keys, idx) {
+                cpu.add_data_archive(archive.title_id, Box::new(romfs));
+                registered += 1;
+            }
+        }
+        println!("registered {registered} system data archive(s) from {dir}");
+    }
+
+    cpu.set_program_id(nca.program_id);
     let loaded = cpu.boot_retail_program(&modules).expect("boot modules");
     for m in &loaded {
         println!("module base={:#010x} entry={:#010x}", m.base, m.entry);

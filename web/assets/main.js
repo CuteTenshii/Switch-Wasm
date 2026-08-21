@@ -1019,6 +1019,45 @@ $('title-keys').addEventListener('change', async (e) => {
   await stageKeys();
   log('title.keys loaded.', 'ok');
 });
+// ---------- system data archives ----------
+
+/* Content a title mounts that is not its own: an applet's shared assets, the
+   system's Mii and amiibo models. Each is a separate NCA on a console's NAND,
+   so there is nothing to find here unless someone hands them over - point this
+   at a firmware dump and every data archive in it is registered by title id.
+
+   Only the File references cross over; nothing is read until a title asks for
+   one, so selecting a few hundred NCAs costs nothing. They cannot be
+   persisted the way keys are - the browser will not hand a page a file again
+   without being asked - so this is per session. */
+let archiveCount = 0;
+
+function updateFirmwareState() {
+  $('firmware-state').textContent = archiveCount === 0
+    ? 'no system data archives - a title that mounts one (an applet\'s shared assets, the Mii and amiibo models) will not find it'
+    : archiveCount + ' system data archive(s) registered';
+}
+
+$('firmware-ncas').addEventListener('change', async (e) => {
+  const files = Array.from(e.target.files || []);
+  if (!files.length) return;
+  log('Reading ' + files.length + ' firmware file(s) ...');
+  let added = 0;
+  for (const f of files) {
+    try {
+      if (await call('add_archive', f) === 0) added++;
+    } catch (err) {
+      log('Could not read ' + f.name + ': ' + err.message, 'err');
+    }
+  }
+  archiveCount += added;
+  updateFirmwareState();
+  // Most of a firmware dump is programs and metadata, not data archives; only
+  // the ones that are get registered, so the skipped count is expected.
+  log('Registered ' + added + ' system data archive(s) of ' + files.length + ' file(s).',
+    added ? 'ok' : 'dim');
+});
+
 $('btn-clear-keys').addEventListener('click', () => {
   prodKeysText = '';
   titleKeysText = '';

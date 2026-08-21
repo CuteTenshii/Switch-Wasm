@@ -35,7 +35,9 @@ function fromWasm(ptr, len) {
 // ranges from inside `switch_run`, with nowhere to await a promise -
 // and `FileReaderSync` exists only in a worker, which is the second reason
 // the emulator lives in one.
-let hostFile = null;
+// File 0 is the container being run; the rest are system data archives the
+// page has added, which a title mounts by data id.
+let hostFiles = [];
 let hostReader = null;
 
 // Reads land in bursts of a few hundred bytes as the guest walks its RomFS
@@ -45,27 +47,39 @@ const HOST_CHUNK = 1 << 20;
 const HOST_CACHE_CHUNKS = 32;
 const hostChunks = new Map();
 
+// Opening a container replaces slot 0 and leaves the rest alone: the wasm
+// side holds sources that address archives by index, so the table can only
+// ever grow. The chunk cache is keyed by index too, hence the flush.
 function openHostFile(file) {
-  hostFile = file;
   if (!hostReader) hostReader = new FileReaderSync();
+  if (hostFiles.length === 0) hostFiles = [null];
+  hostFiles[0] = file;
   hostChunks.clear();
   return BigInt(file.size);
 }
 
-function readBlob(start, end) {
-  return new Uint8Array(hostReader.readAsArrayBuffer(hostFile.slice(start, end)));
+// Add a file the wasm side can read, and return its index. Slot 0 stays
+// reserved for the container even if nothing has been opened yet.
+function addHostFile(file) {
+  if (!hostReader) hostReader = new FileReaderSync();
+  if (hostFiles.length === 0) hostFiles = [null];
+  return hostFiles.push(file) - 1;
 }
 
-function hostChunk(index) {
-  const hit = hostChunks.get(index);
+function readBlob(file, start, end) {
+  return new Uint8Array(hostReader.readAsArrayBuffer(file.slice(start, end)));
+}
+
+function hostChunk(file, index, key) {
+  const hit = hostChunks.get(key);
   if (hit) {
-    hostChunks.delete(index);
-    hostChunks.set(index, hit);
+    hostChunks.delete(key);
+    hostChunks.set(key, hit);
     return hit;
   }
   const start = index * HOST_CHUNK;
-  const chunk = readBlob(start, Math.min(start + HOST_CHUNK, hostFile.size));
-  hostChunks.set(index, chunk);
+  const chunk = readBlob(file, start, Math.min(start + HOST_CHUNK, file.size));
+  hostChunks.set(key, chunk);
   if (hostChunks.size > HOST_CACHE_CHUNKS) {
     hostChunks.delete(hostChunks.keys().next().value);
   }
@@ -75,12 +89,13 @@ function hostChunk(index) {
 // The wasm import: fill `len` bytes at `ptr` from `offset` of the open file,
 // and return how many were filled. `offset` arrives as a BigInt (it is an
 // i64), and `ptr`/`len` as signed i32s, hence the `>>> 0`.
-function hostRead(offset, ptr, len) {
+function hostRead(fileIndex, offset, ptr, len) {
   ptr >>>= 0;
   len >>>= 0;
-  if (!hostFile || !len) return 0;
+  const file = hostFiles[fileIndex >>> 0];
+  if (!file || !len) return 0;
   let at = Number(offset);
-  const end = Math.min(at + len, hostFile.size);
+  const end = Math.min(at + len, file.size);
   if (at >= end) return 0;
   // The view has to be built here, not cached: growing the heap detaches it.
   const out = new Uint8Array(api.memory.buffer, ptr, end - at);
@@ -90,12 +105,12 @@ function hostRead(offset, ptr, len) {
     // it straight from the file: it would evict the whole cache on its way
     // through and never be asked for again.
     if (end - at > HOST_CHUNK) {
-      out.set(readBlob(at, end));
+      out.set(readBlob(file, at, end));
       return end - at;
     }
     while (at < end) {
       const index = Math.floor(at / HOST_CHUNK);
-      const chunk = hostChunk(index);
+      const chunk = hostChunk(file, index, `${fileIndex}:${index}`);
       const from = at - index * HOST_CHUNK;
       const take = Math.min(chunk.length - from, end - at);
       if (take <= 0) break;
@@ -353,6 +368,12 @@ const CMD = {
   // table in front of it.
   open_nca(file) {
     return api.switch_open_nca(handle, openHostFile(file));
+  },
+  // Register a firmware NCA as a system data archive. Costs nothing but the
+  // File reference and its header until a title mounts it.
+  add_archive(file) {
+    const index = addHostFile(file);
+    return api.switch_add_archive(handle, index, BigInt(file.size));
   },
   // Decrypts NSP file `index` as a Program NCA (with whatever keys are
   // loaded) and boots its ExeFS `main` executable, reading both out of the

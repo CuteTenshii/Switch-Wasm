@@ -100,15 +100,16 @@ fn new_handle(session: Session) -> u32 {
 #[cfg(target_arch = "wasm32")]
 #[link(wasm_import_module = "env")]
 extern "C" {
-    /// Read `len` bytes at `offset` of the container the host has open into
-    /// wasm memory at `ptr`, returning how many were actually read.
+    /// Read `len` bytes at `offset` of host file `file`, into wasm memory at
+    /// `ptr`, returning how many were actually read. File 0 is the open
+    /// container; the rest are system data archives the host has added.
     ///
     /// This is the only import the module declares. It exists because a
     /// retail container cannot be handed over as a buffer — it is larger than
     /// the whole wasm32 address space — so the browser keeps the file where it
     /// is and serves ranges out of it synchronously (`FileReaderSync`, in the
     /// worker that owns this module).
-    fn host_read(offset: u64, ptr: *mut u8, len: u32) -> u32;
+    fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32;
 }
 
 /// The same read, for host builds (`cargo test -p switch-wasm`), which have
@@ -117,7 +118,10 @@ extern "C" {
 /// # Safety
 /// `ptr` must be valid for writes of `len` bytes.
 #[cfg(not(target_arch = "wasm32"))]
-unsafe fn host_read(offset: u64, ptr: *mut u8, len: u32) -> u32 {
+unsafe fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32 {
+    if file != 0 {
+        return 0; // host builds serve only the container
+    }
     // SAFETY: single-threaded wasm; see the `SESSIONS` comment. Host builds
     // hold the test lock while they use this.
     let data = unsafe { &*HOST_CONTAINER.get() };
@@ -150,6 +154,9 @@ pub fn set_host_container(data: Vec<u8>) {
 /// without any of them borrowing the session.
 #[derive(Debug, Clone, Copy)]
 struct HostSource {
+    /// Which host file this reads: 0 is the open container, and each system
+    /// data archive the host added has its own.
+    file: u32,
     len: u64,
 }
 
@@ -170,7 +177,7 @@ impl ByteSource for HostSource {
             // short read at the host's own cache-chunk boundary.
             let ask = (want - done).min(u32::MAX as usize);
             let got = unsafe {
-                host_read(offset + done as u64, out[done..].as_mut_ptr(), ask as u32)
+                host_read(self.file, offset + done as u64, out[done..].as_mut_ptr(), ask as u32)
             } as usize;
             if got == 0 {
                 break;
@@ -297,7 +304,7 @@ pub extern "C" fn switch_last_error(handle: u32, buf: *mut u8, maxlen: u32) -> u
 #[no_mangle]
 pub extern "C" fn switch_open_nsp(handle: u32, size: u64) -> i32 {
     let s = session(handle);
-    let container = HostSource { len: size };
+    let container = HostSource { file: 0, len: size };
     s.container = Some(container);
     s.nsp_files = Vec::new();
     s.control = None;
@@ -319,11 +326,55 @@ pub extern "C" fn switch_open_nsp(handle: u32, size: u64) -> i32 {
 #[no_mangle]
 pub extern "C" fn switch_open_nca(handle: u32, size: u64) -> i32 {
     let s = session(handle);
-    s.container = Some(HostSource { len: size });
+    s.container = Some(HostSource { file: 0, len: size });
     s.nsp_files = Vec::new();
     s.control = None;
     s.last_error.clear();
     0
+}
+
+/// Register host file `file` as a system data archive: parse it as an NCA,
+/// take its RomFS, and file it under its title id for
+/// `OpenDataStorageByDataId` to serve.
+///
+/// This is the content a title mounts that is not its own — the system's Mii
+/// and amiibo models, the shared bad-word lists. Each lives in its own NCA on
+/// a console's NAND, so the frontend hands them over one file at a time and
+/// nothing is read until a title actually asks for one.
+///
+/// Returns 0 if it was registered, -1 if the file is not a data archive this
+/// build can read.
+#[no_mangle]
+pub extern "C" fn switch_add_archive(handle: u32, file: u32, size: u64) -> i32 {
+    let s = session(handle);
+    let src = HostSource { file, len: size };
+    let nca = match Nca::parse_source(&src, Some(&s.keys)) {
+        Ok(nca) => nca,
+        Err(e) => {
+            s.last_error = e.to_string();
+            return -1;
+        }
+    };
+    use switch_core::nca::ContentType;
+    if !matches!(nca.content_type, ContentType::Data | ContentType::PublicData) {
+        s.last_error = format!("not a data archive (content type {})", nca.content_type.name());
+        return -1;
+    }
+    let Some(index) = nca.romfs_section_index() else {
+        s.last_error = "data archive has no RomFS section".into();
+        return -1;
+    };
+    match nca.romfs_source(src, &s.keys, index) {
+        Ok(romfs) => {
+            s.cpu.add_data_archive(nca.title_id, Box::new(romfs));
+            s.last_error.clear();
+            0
+        }
+        Err(e) => {
+            s.last_error = e.to_string();
+            -1
+        }
+    }
 }
 
 /// The open container as a source, or an error recorded in the session.
@@ -745,6 +796,23 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
             return -1;
         }
     };
+    // Say whether the bytes about to be executed were checked, not just that
+    // they decrypted: the master hash only vouches for the section's hash
+    // table, and a fault inside a title's own crt0 is worth chasing in the
+    // title only once the image it ran on is known to be intact.
+    match nca.pfs0_hash_coverage(exefs_index) {
+        Some((block, blocks)) => cpu.diagnostic(&format!(
+            "[exefs] {:#x} bytes, {} blocks of {:#x} verified against the section hash table",
+            exefs.len(),
+            blocks,
+            block
+        )),
+        None => cpu.diagnostic(&format!(
+            "[exefs] {:#x} bytes — hash table geometry unrecognised, contents NOT verified",
+            exefs.len()
+        )),
+    }
+
     let pfs0 = match Pfs0::parse(&exefs) {
         Ok(p) => p,
         Err(e) => {
@@ -752,7 +820,27 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
             return -1;
         }
     };
+    // `pm` reports this, and a system applet derives its own `AppletId` from
+    // it — without it every title looks like the same default program.
+    cpu.set_program_id(nca.program_id);
+
     let modules = collect_modules(&pfs0, &exefs);
+    // Everything the ExeFS holds, next to what was actually loaded from it. A
+    // title whose `sdk` or `subsdk0` were silently left behind aborts in its
+    // own init looking exactly like a title that hit a missing service.
+    cpu.diagnostic(&format!(
+        "[exefs] entries: {} — loading: {}",
+        pfs0.files
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        modules
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    ));
     if !modules.iter().any(|(name, _)| *name == "main") {
         *last_error = "no 'main' executable in this NCA's ExeFS".into();
         return -1;

@@ -520,6 +520,14 @@ impl Cpu {
                         self.ipc_message_type(tls),
                         cmd_id
                     );
+                    // The raw message, for when the fields above do not add
+                    // up — the bytes are the only ground truth left.
+                    let words: Vec<String> = (0..8)
+                        .map(|i| {
+                            format!("{:08x}", self.mem.read_u32(tls + i * 4).unwrap_or(0))
+                        })
+                        .collect();
+                    eprintln!("[ipc]   svc={:#x} tls={:#x} {}", imm, tls, words.join(" "));
                 }
                 // A Close request (message type 2) carries no command id at
                 // all: it tears the session down. Dispatching it on whatever
@@ -582,7 +590,7 @@ impl Cpu {
                                     self.fs_file_request(tls, cmd_id, Self::object_key(handle, object_id))?
                                 }
                                 Some("fsp-srv-storage") => {
-                                    self.fs_storage_request(tls, cmd_id)?
+                                    self.fs_storage_request(tls, handle, cmd_id)?
                                 }
                                 Some("fsp-srv-save-info-reader") => {
                                     self.fs_save_data_info_reader_request(tls, cmd_id)?
@@ -600,7 +608,7 @@ impl Cpu {
                         "fsp-srv-fs-file" => {
                             self.fs_file_request(tls, cmd_id, Self::object_key(handle, 0))?
                         }
-                        "fsp-srv-storage" => self.fs_storage_request(tls, cmd_id)?,
+                        "fsp-srv-storage" => self.fs_storage_request(tls, handle, cmd_id)?,
                         "fsp-srv-save-info-reader" => {
                             self.fs_save_data_info_reader_request(tls, cmd_id)?
                         }
@@ -762,8 +770,18 @@ impl Cpu {
                             self.audout_request(tls, cmd_id)?
                         }
                         "audout:iaudioout" => self.audio_out_request(tls, cmd_id, handle)?,
-                        "audren:u" => self.audren_request(tls, cmd_id)?,
+                        // The Mii database, and the separate database of
+                        // rendered Mii images. `mii:e` is the editor's
+                        // read-write view of the same database `mii:u` reads.
+                        "psc:m" | "psc:service" | "psc:module" => {
+                            self.psc_request(tls, handle, cmd_id)?
+                        }
+                        "mii:e" | "mii:u" | "mii:s" => self.mii_request(tls, handle, cmd_id)?,
+                        "mii:database" | "mii:static" => self.mii_request(tls, handle, cmd_id)?,
+                        "miiimg" => self.miiimg_request(tls, cmd_id)?,
+                        "audren:u" => self.audren_request(tls, handle, cmd_id)?,
                         "audren:iaudiorenderer" => self.audren_renderer_request(tls, cmd_id, handle)?,
+                        "audren:iaudiodevice" => self.audio_device_request(tls, cmd_id, handle)?,
                          name => {
                              // Known service, no dedicated stub: answer with a
                              // fresh object id so a caller that expects an

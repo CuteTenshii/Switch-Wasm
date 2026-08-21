@@ -183,6 +183,9 @@ impl Cpu {
     /// The command id a CMIF request carries (`CmifInHeader::command_id`), or
     /// `None` when the buffer doesn't look like a CMIF request.
     pub(super) fn ipc_command_id(&self, tls: u32) -> Option<u32> {
+        if self.ipc_is_tipc_request(tls) {
+            return Some(self.ipc_message_type(tls) - 16);
+        }
         if let Some(offset) = self.ipc_cmif_header_offset(tls) {
             return self.mem.read_u32(tls.wrapping_add(offset + 8)).ok();
         }
@@ -196,29 +199,70 @@ impl Cpu {
         None
     }
 
-    /// Compute where the reply starts in the TLS IPC buffer, mirroring libnx's
-    /// `cmifGetAlignedDataStart`: walk the request's hipc header (16-byte
-    /// message header, optional special header + pid, then buffer descriptors)
-    /// to the data area, and round up to 16 bytes.
-    pub(super) fn ipc_reply_start(&self, tls: u32) -> u32 {
-        let hdr1 = self.mem.read_u32(tls).unwrap_or(0);
+    /// Offset of a hipc request's descriptor area — its first send-static
+    /// descriptor — walking the header the way libnx's `hipcParseRequest`
+    /// does: the 8-byte message header, then the optional special header with
+    /// whatever it declares.
+    ///
+    /// The special header is not just a pid flag. It also carries copy and
+    /// move handle counts, and those handles sit between it and the
+    /// descriptors, so skipping only the pid leaves every offset derived from
+    /// here four bytes short per handle. Every request in this emulator's path
+    /// until now either had no special header or carried nothing but a pid in
+    /// it, which is why that went unnoticed.
+    pub(super) fn ipc_descriptor_start(&self, tls: u32) -> u32 {
         let hdr2 = self.mem.read_u32(tls.wrapping_add(4)).unwrap_or(0);
+        let mut off = 8u32;
+        if (hdr2 >> 31) & 1 != 0 {
+            let special = self.mem.read_u32(tls.wrapping_add(8)).unwrap_or(0);
+            off += 4;
+            if special & 1 != 0 {
+                off += 8; // pid
+            }
+            // `HipcSpecialHeader { send_pid:1, num_copy_handles:4, num_move_handles:4 }`
+            off += 4 * (((special >> 1) & 0xf) + ((special >> 5) & 0xf));
+        }
+        off
+    }
+
+    /// The request's data area: past the header, the descriptors and the
+    /// buffers, with no further alignment. This is where a **TIPC** message's
+    /// arguments begin.
+    pub(super) fn ipc_data_area(&self, tls: u32) -> u32 {
+        let hdr1 = self.mem.read_u32(tls).unwrap_or(0);
         let num_send_statics = (hdr1 >> 16) & 0xf;
         let num_send_buffers = (hdr1 >> 20) & 0xf;
         let num_recv_buffers = (hdr1 >> 24) & 0xf;
         let num_exch_buffers = (hdr1 >> 28) & 0xf;
-        let has_special = (hdr2 >> 31) & 1;
-        let mut data_off = 8u32;
-        if has_special != 0 {
-            data_off += 4;
-            let sphdr = self.mem.read_u32(tls.wrapping_add(8)).unwrap_or(0);
-            if sphdr & 1 != 0 {
-                data_off += 8; // pid
-            }
-        }
-        data_off += 8 * num_send_statics;
-        data_off += 12 * (num_send_buffers + num_recv_buffers + num_exch_buffers);
-        (data_off + 15) & !15
+        let mut off = self.ipc_descriptor_start(tls);
+        off += 8 * num_send_statics;
+        off += 12 * (num_send_buffers + num_recv_buffers + num_exch_buffers);
+        off
+    }
+
+    /// Compute where a **CMIF** reply starts in the TLS IPC buffer, mirroring
+    /// libnx's `cmifGetAlignedDataStart`: the data area, rounded up to 16
+    /// bytes. TIPC does no such rounding — see [`Cpu::ipc_is_tipc_request`].
+    pub(super) fn ipc_reply_start(&self, tls: u32) -> u32 {
+        (self.ipc_data_area(tls) + 15) & !15
+    }
+
+    /// Whether the request is a **TIPC** message rather than a CMIF one.
+    ///
+    /// TIPC is the lighter serialization Nintendo moved `sm:` to in 12.0.0:
+    /// the same hipc header, but the command id is carried *in the type
+    /// field* as `16 + command`, and the data area holds the arguments
+    /// directly — no `SFCI` header, no 16-byte alignment, and no domains. A
+    /// type below 16 is one of the eight hipc command types and therefore
+    /// CMIF; anything at or above it is TIPC.
+    ///
+    /// Every system module built against a new enough SDK talks to `sm:` this
+    /// way, and this emulator only understood CMIF: `cabinet`'s very first
+    /// request came back with no command id at all, so `sm:` answered
+    /// whatever the fallthrough answered and the applet aborted before its
+    /// second syscall.
+    pub(super) fn ipc_is_tipc_request(&self, tls: u32) -> bool {
+        self.ipc_message_type(tls) >= 16
     }
 
     /// Address of a CMIF request's raw payload — the bytes after the 16-byte
@@ -231,6 +275,9 @@ impl Cpu {
     /// `fsp-srv` read its offset and size out of the header, so every read
     /// asked for 0 bytes at offset 0 and `romfsMountSelf` failed.)
     pub(super) fn ipc_request_data(&self, tls: u32) -> u32 {
+        if self.ipc_is_tipc_request(tls) {
+            return tls.wrapping_add(self.ipc_data_area(tls));
+        }
         match self.ipc_cmif_header_offset(tls) {
             Some(offset) => tls.wrapping_add(offset + 0x10),
             None => tls.wrapping_add(self.ipc_reply_start(tls) + 0x10),
@@ -248,23 +295,13 @@ impl Cpu {
     /// Returns `None` if the request has no such buffer.
     pub(super) fn ipc_recv_buffer_addr(&self, tls: u32, index: u32) -> Option<u32> {
         let hdr1 = self.mem.read_u32(tls).unwrap_or(0);
-        let hdr2 = self.mem.read_u32(tls.wrapping_add(4)).unwrap_or(0);
         let num_send_statics = (hdr1 >> 16) & 0xf;
         let num_send_buffers = (hdr1 >> 20) & 0xf;
         let num_recv_buffers = (hdr1 >> 24) & 0xf;
-        let _num_exch_buffers = (hdr1 >> 28) & 0xf;
         if index >= num_recv_buffers {
             return None;
         }
-        let has_special = (hdr2 >> 31) & 1;
-        let mut off = 8u32;
-        if has_special != 0 {
-            off += 4;
-            let sphdr = self.mem.read_u32(tls.wrapping_add(8)).unwrap_or(0);
-            if sphdr & 1 != 0 {
-                off += 8; // pid
-            }
-        }
+        let mut off = self.ipc_descriptor_start(tls);
         off += 8 * num_send_statics;
         off += 12 * (num_send_buffers + index);
         let address_low = self.mem.read_u32(tls.wrapping_add(off + 4)).unwrap_or(0);
@@ -281,20 +318,13 @@ impl Cpu {
     /// hands back as many tags as the guest left room for).
     pub(super) fn ipc_recv_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
         let hdr1 = self.mem.read_u32(tls).unwrap_or(0);
-        let hdr2 = self.mem.read_u32(tls.wrapping_add(4)).unwrap_or(0);
         let num_send_statics = (hdr1 >> 16) & 0xf;
         let num_send_buffers = (hdr1 >> 20) & 0xf;
         let num_recv_buffers = (hdr1 >> 24) & 0xf;
         if index >= num_recv_buffers {
             return None;
         }
-        let mut off = 8u32;
-        if (hdr2 >> 31) & 1 != 0 {
-            off += 4;
-            if self.mem.read_u32(tls.wrapping_add(8)).unwrap_or(0) & 1 != 0 {
-                off += 8; // pid
-            }
-        }
+        let mut off = self.ipc_descriptor_start(tls);
         off += 8 * num_send_statics;
         off += 12 * (num_send_buffers + index);
         let size = self.mem.read_u32(tls.wrapping_add(off)).ok()?;
@@ -312,19 +342,12 @@ impl Cpu {
     /// always zero.
     pub(super) fn ipc_send_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
         let hdr1 = self.mem.read_u32(tls).unwrap_or(0);
-        let hdr2 = self.mem.read_u32(tls.wrapping_add(4)).unwrap_or(0);
         let num_send_statics = (hdr1 >> 16) & 0xf;
         let num_send_buffers = (hdr1 >> 20) & 0xf;
         if index >= num_send_buffers {
             return None;
         }
-        let mut off = 8u32;
-        if (hdr2 >> 31) & 1 != 0 {
-            off += 4;
-            if self.mem.read_u32(tls.wrapping_add(8)).unwrap_or(0) & 1 != 0 {
-                off += 8; // pid
-            }
-        }
+        let mut off = self.ipc_descriptor_start(tls);
         off += 8 * num_send_statics;
         off += 12 * index;
         let size = self.mem.read_u32(tls.wrapping_add(off)).ok()?;
@@ -393,13 +416,7 @@ impl Cpu {
             2 => 1,
             mode => mode - 2,
         };
-        let mut off = 8u32;
-        if (hdr2 >> 31) & 1 != 0 {
-            off += 4;
-            if self.mem.read_u32(tls.wrapping_add(8)).unwrap_or(0) & 1 != 0 {
-                off += 8; // pid
-            }
-        }
+        let mut off = self.ipc_descriptor_start(tls);
         off += 8 * num_send_statics + 12 * num_buffers + 4 * num_data_words;
         (0..count)
             .map(|index| {
@@ -470,6 +487,18 @@ impl Cpu {
         (handle << 32) | u64::from(object_id)
     }
 
+    /// The key *this* request's object files its state under — the same one
+    /// [`Cpu::reply_with_interface`] returned when it handed the object out.
+    /// A domain object is identified by its id within the session, a plain
+    /// sub-session by its own handle.
+    pub(super) fn ipc_object_key(&self, tls: u32, handle: u64) -> u64 {
+        if self.ipc_is_domain_request(tls) {
+            Self::object_key(handle, self.ipc_domain_object_id(tls))
+        } else {
+            Self::object_key(handle, 0)
+        }
+    }
+
     pub(super) fn record_handle(&mut self, handle: u64, name: &str) {
         self.service_handles.insert(handle, name.to_owned());
     }
@@ -535,6 +564,9 @@ impl Cpu {
     /// [`Cpu::ipc_reply_start`] puts the data area avoids misfiring on plain
     /// requests that happen to have a nonzero word in the same spot.
     pub(super) fn ipc_is_domain_request(&self, tls: u32) -> bool {
+        if self.ipc_is_tipc_request(tls) {
+            return false;
+        }
         let start = self.ipc_reply_start(tls);
         self.mem.read_u8(tls.wrapping_add(start)).unwrap_or(0) == 1
     }
@@ -607,6 +639,9 @@ impl Cpu {
         raw_data: &[u8],
         domain_objects: &[u32],
     ) -> Result<()> {
+        if self.ipc_is_tipc_request(tls) {
+            return self.write_tipc_reply(tls, result, copy_handles, move_handles, raw_data);
+        }
         let is_domain = self.ipc_is_domain_request(tls);
         // A reply's `type` field (bits[15:0] of word 0) is 0: the counts in the
         // rest of the word are what matter. libnx ignores the field entirely,
@@ -668,6 +703,43 @@ impl Cpu {
         Ok(())
     }
 
+    /// A **TIPC** reply: the hipc header, the handles, and then the data
+    /// words — which start with the `Result` itself rather than with an SFCO
+    /// header, and are not aligned to 16 bytes the way a CMIF reply's are.
+    fn write_tipc_reply(
+        &mut self,
+        tls: u32,
+        result: u32,
+        copy_handles: &[u64],
+        move_handles: &[u64],
+        raw_data: &[u8],
+    ) -> Result<()> {
+        let raw_words = 1 + raw_data.len().div_ceil(4) as u32;
+        let has_handles = !copy_handles.is_empty() || !move_handles.is_empty();
+        self.mem.write_u32(tls, 0)?;
+        let mut header1 = raw_words;
+        if has_handles {
+            header1 |= 1 << 31;
+        }
+        self.mem.write_u32(tls.wrapping_add(4), header1)?;
+        let mut off = 8u32;
+        if has_handles {
+            let desc = ((copy_handles.len() as u32) << 1) | ((move_handles.len() as u32) << 5);
+            self.mem.write_u32(tls.wrapping_add(off), desc)?;
+            off += 4;
+            for &h in copy_handles.iter().chain(move_handles) {
+                self.mem.write_u32(tls.wrapping_add(off), h as u32)?;
+                off += 4;
+            }
+        }
+        self.mem.write_u32(tls.wrapping_add(off), result)?;
+        off += 4;
+        for (i, &b) in raw_data.iter().enumerate() {
+            self.mem.write_u8(tls.wrapping_add(off + i as u32), b)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn sm_request(&mut self, tls: u32, cmd_id: Option<u32>, _handle: u64) -> Result<()> {
         match cmd_id {
             Some(0) => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -720,6 +792,32 @@ impl Cpu {
                     return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
                 }
                 self.reply_with_interface(tls, handle, "fsp-srv-storage")?;
+                Ok(())
+            }
+            // 202 = OpenDataStorageByDataId(u8 storage_id, u64 data_id):
+            // content that is *not* the calling title's own — an applet's
+            // shared assets, the system's Mii and amiibo resources. On a real
+            // console each is a separate Data NCA on the NAND, mounted by
+            // data id; here the host registers whichever it was given
+            // ([`Cpu::add_data_archive`]).
+            //
+            // A data id nobody registered is reported missing. Handing back an
+            // empty storage instead would be answered as a zero-byte archive,
+            // which is what the caller then blames — `cabinet` reported
+            // `2002-3005` against its own resource load rather than against
+            // the archive not being there.
+            Some(202) => {
+                let data = self.ipc_request_data(tls);
+                let data_id = self.mem.read_u64(data.wrapping_add(8))?;
+                if !self.data_archives.contains_key(&data_id) {
+                    self.diagnostic(&format!(
+                        "[fs] no system data archive registered for data id {data_id:016x}"
+                    ));
+                    const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
+                    return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
+                }
+                let key = self.reply_with_interface(tls, handle, "fsp-srv-storage")?;
+                self.fs_storage_archive.insert(key, data_id);
                 Ok(())
             }
             // 51 = OpenSaveDataFileSystem, 52 = ...BySystemSaveDataId,
@@ -784,8 +882,11 @@ impl Cpu {
     /// ([`Cpu::set_romfs`]). Cmd 0 = Read(u64 offset, u64 size), cmd 4 =
     /// GetSize — the same shape as `IFile`, but offset-addressed rather than
     /// path-addressed since there's exactly one of these per process.
-    pub(super) fn fs_storage_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
-        let size = self.romfs.as_ref().map(|r| r.len()).unwrap_or(0);
+    pub(super) fn fs_storage_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        // Which content this particular storage was opened on: the process's
+        // own RomFS (command 200), or a system data archive (command 202).
+        let archive = self.fs_storage_archive.get(&self.ipc_object_key(tls, handle)).copied();
+        let size = self.storage_source(archive).map_or(0, |s| s.len());
         match cmd_id {
             // Read(u64 offset, u64 size) -> bytes into the recv buffer.
             Some(0) => {
@@ -815,8 +916,8 @@ impl Cpu {
                     let mut written = 0u32;
                     while pos < end {
                         let take = ((end - pos).min(CHUNK)) as usize;
-                        let got = match self.romfs.as_ref() {
-                            Some(romfs) => romfs.read_at(pos, &mut buf[..take])?,
+                        let got = match self.storage_source(archive) {
+                            Some(src) => src.read_at(pos, &mut buf[..take])?,
                             None => 0,
                         };
                         if got == 0 {
@@ -834,6 +935,15 @@ impl Cpu {
             // GetSize -> u64
             Some(4) => self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[]),
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// The content an open `IStorage` is serving: a registered system data
+    /// archive, or the process's own RomFS when it is not one.
+    fn storage_source(&self, archive: Option<u64>) -> Option<&dyn crate::source::ByteSource> {
+        match archive {
+            Some(id) => self.data_archives.get(&id).map(|b| b.as_ref()),
+            None => self.romfs.as_deref(),
         }
     }
 
@@ -1083,7 +1193,14 @@ impl Cpu {
             // GetSharedFontInOrderOfPriority(u64 LanguageCode) ->
             // { u8 Loaded, u8 pad[3], s32 total_fonts }, with the types, the
             // offsets and the sizes of the fonts in three output buffers.
-            Some(5) => {
+            //
+            // Command 6 is the same request asked on behalf of the system
+            // rather than of a title, and is answered from the same font.
+            // It used to fall into the catch-all below and come back as
+            // success with no count and no buffers filled, which a caller
+            // reads as "loaded, zero fonts" and retries forever: `cabinet`
+            // was reopening `pl:u` and asking again for the whole run.
+            Some(5) | Some(6) => {
                 let (_, recv) = self.ipc_map_buffers(tls);
                 let count = if font_size == 0 { 0u32 } else { 1 };
                 if count == 1 {
@@ -1100,7 +1217,7 @@ impl Cpu {
                 raw[4..].copy_from_slice(&count.to_le_bytes());
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
-            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            _ => self.unimplemented_command(tls, "pl:u", cmd_id),
         }
     }
 
@@ -1926,7 +2043,23 @@ impl Cpu {
         const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
         if self.unimplemented_ipc.insert((iface.to_string(), cmd_id)) {
             let pc = self.pc;
-            self.diagnostic(&format!("[ipc] unimplemented: {iface} cmd={cmd_id:?} (pc={pc:#x})"));
+            // The request's shape, which is most of its signature: how many
+            // argument words it carries, and whether it left a buffer for the
+            // reply to fill. Answering a command that wants an out-object or
+            // an out-buffer with a bare success is worse than refusing it —
+            // the caller reads a zero and fails somewhere else entirely — so
+            // this is what says which kind it is.
+            let hdr1 = self.mem.read_u32(tls).unwrap_or(0);
+            let hdr2 = self.mem.read_u32(tls.wrapping_add(4)).unwrap_or(0);
+            let statics = (hdr1 >> 16) & 0xf;
+            let send = (hdr1 >> 20) & 0xf;
+            let recv = (hdr1 >> 24) & 0xf;
+            let recv_static = matches!((hdr2 >> 10) & 0xf, 2..) as u32;
+            let words = hdr2 & 0x3ff;
+            self.diagnostic(&format!(
+                "[ipc] unimplemented: {iface} cmd={cmd_id:?} (pc={pc:#x}, {words} data words, \
+                 buffers: {statics} static/{send} send/{recv} recv/{recv_static} recv-static)"
+            ));
         }
         self.write_ipc_response(tls, UNKNOWN_COMMAND_ID, &[], &[], &[])
     }
@@ -1996,14 +2129,59 @@ impl Cpu {
             }
         };
         match iface.as_str() {
-            // IApplicationProxyService::OpenApplicationProxy.
+            // The root session, which is `IApplicationProxyService` on
+            // `appletOE` and `IAllSystemAppletProxiesService` on `appletAE`.
+            // Which proxy a process opens is how it declares what kind of
+            // applet it is: an application opens cmd 0, a library applet
+            // (`miiEdit`, `swkbd`, `playerSelect` — every one of the system's
+            // own applets) opens cmd 201.
             "am:proxy-service" => match cmd_id {
+                // IApplicationProxyService::OpenApplicationProxy.
                 Some(0) => {
                     self.reply_with_interface(tls, handle, "am:application-proxy")?;
                     Ok(())
                 }
+                // IAllSystemAppletProxiesService::OpenLibraryAppletProxy, and
+                // the pre-3.0.0 `OpenLibraryAppletProxyOld` that differs only
+                // in not taking the applet attribute buffer.
+                Some(200) | Some(201) => {
+                    self.reply_with_interface(tls, handle, "am:library-applet-proxy")?;
+                    Ok(())
+                }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
+            // ILibraryAppletProxy's Get* accessors. The first five are the
+            // same interfaces `IApplicationProxy` hands out — a library applet
+            // has the same lifecycle, window and audio controls as an
+            // application does — and the rest are its own.
+            "am:library-applet-proxy" => {
+                let sub = match cmd_id {
+                    Some(0) => Some("am:common-state-getter"),
+                    Some(1) => Some("am:self-controller"),
+                    Some(2) => Some("am:window-controller"),
+                    Some(3) => Some("am:audio-controller"),
+                    Some(4) => Some("am:display-controller"),
+                    Some(10) => Some("am:process-winding-controller"),
+                    Some(11) => Some("am:library-applet-creator"),
+                    Some(20) => Some("am:library-applet-self-accessor"),
+                    Some(21) => Some("am:applet-common-functions"),
+                    // A library applet fetches these two as well: the same
+                    // pair `ISystemAppletProxy` exposes at 20/21, at the ids
+                    // left over once the self-accessor and common functions
+                    // have taken 20 and 21 here.
+                    Some(22) => Some("am:home-menu-functions"),
+                    Some(23) => Some("am:global-state-controller"),
+                    Some(1000) => Some("am:debug-functions"),
+                    _ => None,
+                };
+                match sub {
+                    Some(name) => {
+                        self.reply_with_interface(tls, handle, name)?;
+                        Ok(())
+                    }
+                    None => self.unimplemented_command(tls, &iface, cmd_id),
+                }
+            }
             // IApplicationProxy's Get* accessors, each handing back one of the
             // sub-interfaces below.
             "am:application-proxy" => {
@@ -2028,6 +2206,10 @@ impl Cpu {
             }
             // ICommonStateGetter: the state `appletMainLoop` polls every frame.
             "am:common-state-getter" => match cmd_id {
+                // GetSettingsPlatformRegion -> SetSysPlatformRegion. 1 is
+                // Global; 2 is the Chinese console, which has a different set
+                // of services and stores behind it.
+                Some(300) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
                 // GetEventHandle: the copy handle the guest waits on before
                 // polling ReceiveMessage.
                 //
@@ -2191,6 +2373,21 @@ impl Cpu {
                 // GetAccumulatedSuspendedTickValue: nothing has ever been
                 // suspended.
                 Some(90) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+                // IsSystemBufferSharingEnabled: whether this applet draws
+                // into a buffer the system shares between applets rather than
+                // a layer of its own.
+                //
+                // It does not, and saying so is what sends it down the
+                // CreateManagedDisplayLayer path below — the one `vi` here
+                // actually models. Reporting it enabled would commit the
+                // caller to asking for a shared buffer handle that nothing
+                // can produce.
+                Some(41) => {
+                    /// `am` description 2: the applet asked about something
+                    /// this system does not offer it.
+                    const NOT_AVAILABLE: u32 = 128 | (2 << 9);
+                    self.write_ipc_response(tls, NOT_AVAILABLE, &[], &[], &[])
+                }
                 // CreateManagedDisplayLayer -> the layer id the caller then
                 // passes to `vi`'s OpenLayer. The display stub only models one
                 // layer and calls it 1 (see [`Cpu::vi_native_window`]), so this
@@ -2234,6 +2431,147 @@ impl Cpu {
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
+            // IAppletCommonFunctions: knobs an applet sets on itself that
+            // are not specific to being an application or a library applet.
+            "am:applet-common-functions" => match cmd_id {
+                // SetCpuBoostRequestPriority: where this applet sits in the
+                // queue when several ask the system to boost the CPU. There
+                // is one process here and no governor to ask.
+                Some(70) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // IProcessWindingController: how an applet is resumed after
+            // "winding" — being paused so another applet can run in front of
+            // it and then unwound back. Nothing here can wind anything: there
+            // is one process and nowhere for it to go.
+            "am:process-winding-controller" => match cmd_id {
+                // GetLaunchReason -> AppletProcessLaunchReason { u8 flag, u8
+                // pad[2], u8 unknown }. All-zero is "started normally", which
+                // is the only way anything starts here — the nonzero flags
+                // mean the process was resumed from a wind or restarted by the
+                // menu.
+                Some(0) => self.write_ipc_response(tls, 0, &[], &[0u8; 4], &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // ILibraryAppletSelfAccessor: what a library applet asks about
+            // *itself*, and how it is handed its caller's arguments.
+            "am:library-applet-self-accessor" => match cmd_id {
+                // GetLibraryAppletInfo -> LibraryAppletInfo { AppletId,
+                // LibraryAppletMode }.
+                //
+                // AllForeground (0) is the mode: this applet owns the screen.
+                // There is no home menu behind it, nothing else drawing, and
+                // no indirect-display path to hand its frames to — so of the
+                // five modes it is the only one that is true here.
+                Some(11) => {
+                    let mut info = [0u8; 8];
+                    info[..4].copy_from_slice(&applet_id_for(self.program_id()).to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &info, &[])
+                }
+                // GetMainAppletIdentityInfo / GetCallerAppletIdentityInfo ->
+                // AppletIdentityInfo { AppletId, pad, u64 title_id }.
+                //
+                // Both are the home menu. A library applet is launched by
+                // whatever is in the foreground, and the only thing that ever
+                // launches one from a standing start is the menu — which is
+                // also the applet that would be behind it on the stack.
+                Some(12) | Some(14) => {
+                    const QLAUNCH_TITLE_ID: u64 = 0x0100_0000_0000_1000;
+                    let mut info = [0u8; 16];
+                    info[..4].copy_from_slice(&3u32.to_le_bytes()); // SystemAppletMenu
+                    info[8..].copy_from_slice(&QLAUNCH_TITLE_ID.to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &info, &[])
+                }
+                // A setter the applet calls during init, carrying 16 bytes
+                // of arguments and expecting nothing back but a Result.
+                // Whatever it is configuring has no equivalent here.
+                Some(160) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // PopInData -> IStorage: the arguments the applet was
+                // launched with, which its caller pushed before starting it.
+                //
+                // There is no caller here — a library applet is being run
+                // directly — so the storage every caller pushes first is
+                // synthesized instead: `LibAppletCommonArguments`, the
+                // 0x20-byte block carrying the API version the two sides
+                // agreed on and the theme to draw in. What the applet pops
+                // after that is its own launch struct, which only its caller
+                // could know; there is no second storage to hand over.
+                Some(0) => match self.am_in_data.pop_front() {
+                    Some(data) => {
+                        let key = self.reply_with_interface(tls, handle, "am:storage")?;
+                        self.am_storages.insert(key, data);
+                        Ok(())
+                    }
+                    None => {
+                        /// `am` description 3: the applet asked for a storage
+                        /// that was never pushed.
+                        const NO_DATA: u32 = 128 | (3 << 9);
+                        self.write_ipc_response(tls, NO_DATA, &[], &[], &[])
+                    }
+                },
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // `am`'s IStorage: a byte buffer passed between applets. Distinct
+            // from `fsp-srv`'s IStorage (the process's RomFS) — same name,
+            // different interface — and reached only through an accessor.
+            "am:storage" => match cmd_id {
+                // Open -> IStorageAccessor. Both objects address the same
+                // bytes, so the accessor records which storage it belongs to
+                // rather than taking a copy that could then diverge.
+                Some(0) => {
+                    let storage = self.ipc_object_key(tls, handle);
+                    let accessor = self.reply_with_interface(tls, handle, "am:storage-accessor")?;
+                    self.am_storage_of.insert(accessor, storage);
+                    Ok(())
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            "am:storage-accessor" => {
+                let storage = self
+                    .am_storage_of
+                    .get(&self.ipc_object_key(tls, handle))
+                    .copied()
+                    .unwrap_or(0);
+                match cmd_id {
+                    // GetSize -> s64.
+                    Some(0) => {
+                        let size = self.am_storages.get(&storage).map_or(0, |d| d.len()) as u64;
+                        self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
+                    }
+                    // Write(s64 offset, buffer<in>) / Read(s64 offset,
+                    // buffer<out>). The offset is the request's only raw
+                    // argument; the bytes travel in a buffer.
+                    Some(10) => {
+                        let offset = self.mem.read_u64(self.ipc_request_data(tls))? as usize;
+                        let Some((addr, len)) = self.ipc_input_buffer(tls, 0) else {
+                            return self.write_ipc_response(tls, 0, &[], &[], &[]);
+                        };
+                        let mut bytes = Vec::with_capacity(len as usize);
+                        for i in 0..len {
+                            bytes.push(self.mem.read_u8(addr.wrapping_add(i))?);
+                        }
+                        let data = self.am_storages.entry(storage).or_default();
+                        if data.len() < offset + bytes.len() {
+                            data.resize(offset + bytes.len(), 0);
+                        }
+                        data[offset..offset + bytes.len()].copy_from_slice(&bytes);
+                        self.write_ipc_response(tls, 0, &[], &[], &[])
+                    }
+                    Some(11) => {
+                        let offset = self.mem.read_u64(self.ipc_request_data(tls))? as usize;
+                        let data = self.am_storages.get(&storage).cloned().unwrap_or_default();
+                        if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
+                            let end = data.len().min(offset.saturating_add(len as usize));
+                            let chunk = if offset < end { &data[offset..end] } else { &[][..] };
+                            for (i, &b) in chunk.iter().enumerate() {
+                                self.mem.write_u8(addr.wrapping_add(i as u32), b)?;
+                            }
+                        }
+                        self.write_ipc_response(tls, 0, &[], &[], &[])
+                    }
+                    _ => self.unimplemented_command(tls, &iface, cmd_id),
+                }
+            }
             // IDisplayController (capture buffers), ILibraryAppletCreator
             // (launching another applet), IDebugFunctions, and any session that
             // never named itself. Nothing here can answer those honestly: a
@@ -2571,8 +2909,14 @@ impl Cpu {
                 // emulator publishes always carries one connected handheld
                 // pad, whatever the caller asks to activate, so accepting the
                 // request is the whole implementation.
+                // The 1000-range commands are the same shape: per-title
+                // configuration of how input is delivered (communication mode,
+                // touch-screen configuration, vibration style), each carrying
+                // a small argument and expecting nothing back. None of it
+                // changes what the shared memory here publishes.
                 Some(1) | Some(11) | Some(21) | Some(31) | Some(66) | Some(67) | Some(103)
-                | Some(104) | Some(107) | Some(109) | Some(122..=125) | Some(128) => {
+                | Some(104) | Some(107) | Some(109) | Some(122..=125) | Some(128)
+                | Some(1000..=1004) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // SetSupportedNpadStyleSet(u32 style_set, aruid) and its
@@ -4355,6 +4699,167 @@ impl Cpu {
         }
     }
 
+    /// `psc:m`: power-state change notifications.
+    ///
+    /// A process registers a module here and is told when the console is
+    /// about to sleep, wake or shut down, so it can save what it is doing.
+    /// This console does none of those things — there is no sleep, no
+    /// shutdown and no battery to run down — so the module registers
+    /// successfully and its event never fires.
+    pub(super) fn psc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
+                Some(0) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "psc:service");
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
+        let object_id = self.ipc_domain_object_id(tls);
+        if self.ipc_is_domain_close(tls) {
+            return self.close_domain_object(tls, handle, object_id);
+        }
+        let iface = if self.ipc_is_domain_request(tls) {
+            self.domain_interface(handle, object_id).unwrap_or("psc:service").to_string()
+        } else {
+            self.service_name(handle).unwrap_or("psc:service").to_string()
+        };
+        match iface.as_str() {
+            // IPmService::GetPmModule -> IPmModule.
+            "psc:m" | "psc:service" => match cmd_id {
+                Some(0) => {
+                    self.reply_with_interface(tls, handle, "psc:module")?;
+                    Ok(())
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            "psc:module" => match cmd_id {
+                // Initialize(u32 module_id, buffer<dependencies>) -> the
+                // event the module waits on for a state change. Handed out
+                // and never signalled: nothing here ever changes power state.
+                Some(0) => {
+                    let h = self.alloc_event("psc:module", true);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+                }
+                // GetRequest -> { PscPmState state, u32 flags }. Only read
+                // after the event fires, which it does not; the honest answer
+                // if it is asked anyway is the state the console is in.
+                Some(1) => {
+                    const PSC_PM_STATE_AWAKE: u32 = 0;
+                    let mut raw = [0u8; 8];
+                    raw[..4].copy_from_slice(&PSC_PM_STATE_AWAKE.to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &raw, &[])
+                }
+                // Acknowledge / Finalize / AcknowledgeEx: the module telling
+                // the system it has finished reacting to a change that never
+                // happened.
+                Some(2) | Some(3) | Some(4) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            _ => self.unimplemented_command(tls, &iface, cmd_id),
+        }
+    }
+
+    /// `mii:e`/`mii:u`: the console's Mii database.
+    ///
+    /// There are no Miis on this console and no NAND to keep them on, so the
+    /// database is real but empty. That is a truthful answer rather than a
+    /// convenient one — an editor asks how many exist before it decides
+    /// whether to open on the list or on "create a new one", and both are
+    /// valid states of a real console.
+    pub(super) fn mii_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                // QueryPointerBufferSize.
+                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
+                // ConvertCurrentObjectToDomain -> the id the session itself
+                // takes in its new domain. `nnSdk` converts this one before
+                // asking for the database, so answering without an object id
+                // leaves every later request addressed to nothing.
+                Some(0) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "mii:static");
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
+        let object_id = self.ipc_domain_object_id(tls);
+        if self.ipc_is_domain_close(tls) {
+            return self.close_domain_object(tls, handle, object_id);
+        }
+        let iface = if self.ipc_is_domain_request(tls) {
+            self.domain_interface(handle, object_id).unwrap_or("mii:static").to_string()
+        } else {
+            "mii:static".to_string()
+        };
+        match iface.as_str() {
+            // IStaticService::GetDatabaseService(u32 key) -> IDatabaseService.
+            "mii:static" => match cmd_id {
+                Some(0) => {
+                    self.reply_with_interface(tls, handle, "mii:database")?;
+                    Ok(())
+                }
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            "mii:database" => match cmd_id {
+                // IsUpdated(SourceFlag) -> bool. Nothing writes the database,
+                // so it has not changed since the caller last looked.
+                Some(0) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
+                // IsFullDatabase -> bool: an empty one is not full.
+                Some(1) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
+                // GetCount(SourceFlag) -> u32.
+                Some(2) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+                // The list reads: each fills a caller-provided buffer with
+                // as many Mii records as it holds and reports how many that
+                // was. An empty database writes nothing and reports none,
+                // which is a state a real console is in until someone makes
+                // their first Mii.
+                Some(4) | Some(8) | Some(9) => {
+                    self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
+                }
+                // SetInterfaceVersion(u32): which revision of the Mii
+                // structures the caller speaks. Nothing here reads them, and
+                // an empty database is the same shape in every revision.
+                Some(22) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            _ => self.unimplemented_command(tls, &iface, cmd_id),
+        }
+    }
+
+    /// `miiimg`: the database of *rendered* Mii images, kept alongside the Mii
+    /// data itself so the menu can show faces without rendering them.
+    ///
+    /// Empty, for the same reason [`Cpu::mii_request`]'s is. Answering its
+    /// count with a fabricated object id — which is what the generic
+    /// no-implementation reply did — left the editor reading a garbage count
+    /// and asking for the attributes of images that were never there, half a
+    /// million times over, which is what a "running but drawing nothing"
+    /// applet turned out to be.
+    pub(super) fn miiimg_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
+        match cmd_id {
+            // Initialize / Reload.
+            Some(0) | Some(10) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // GetCount -> u32.
+            Some(11) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // IsEmpty -> bool.
+            Some(12) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
+            // IsFull -> bool.
+            Some(13) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
+            _ => self.unimplemented_command(tls, "miiimg", cmd_id),
+        }
+    }
+
     /// `audren:u` (`IAudioRendererManager`): the factory for `IAudioRenderer`.
     /// Never converted to a domain (libnx builds it with
     /// `NX_SERVICE_ASSUME_NON_DOMAIN`), so `OpenAudioRenderer` hands its
@@ -4628,7 +5133,7 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &(tags.len() as u32).to_le_bytes(), &[])
     }
 
-    pub(super) fn audren_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn audren_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
@@ -4657,7 +5162,82 @@ impl Cpu {
                 );
                 self.write_ipc_response(tls, 0, &[renderer], &[], &[])
             }
+            // GetAudioDeviceService / GetAudioDeviceServiceWithRevisionInfo
+            // -> IAudioDevice. This used to fall into the catch-all below and
+            // answer *success with no object at all*: the caller stored a null
+            // where its device belonged, closed the session it had just been
+            // given, and jumped through the null vtable several thousand
+            // instructions later, with nothing left to say where it came from.
+            Some(2) | Some(4) => {
+                self.reply_with_interface(tls, handle, "audren:iaudiodevice")?;
+                Ok(())
+            }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// `IAudioDevice`: which output the renderer is playing through, and how
+    /// loud. There is one device here — the host's — and nothing routes
+    /// between outputs, so it answers as a console docked to a TV.
+    pub(super) fn audio_device_request(&mut self, tls: u32, cmd_id: Option<u32>, _handle: u64) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return self.write_ipc_response(tls, 0, &[], &[], &[]);
+        }
+        /// `AudioDeviceName` is a fixed 0x100-byte NUL-padded string.
+        const NAME_LEN: usize = 0x100;
+        const ACTIVE_DEVICE: &[u8] = b"AudioTvOutput";
+        match cmd_id {
+            // ListAudioDeviceName (and its Auto form) -> the names, one
+            // 0x100-byte slot each, plus how many were written.
+            Some(0) | Some(6) => {
+                let names: [&[u8]; 3] = [
+                    ACTIVE_DEVICE,
+                    b"AudioStereoJackOutput",
+                    b"AudioBuiltInSpeakerOutput",
+                ];
+                let mut written = 0u32;
+                if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
+                    for (i, name) in names.iter().enumerate() {
+                        let at = (i * NAME_LEN) as u32;
+                        if at + NAME_LEN as u32 > len {
+                            break;
+                        }
+                        for j in 0..NAME_LEN as u32 {
+                            let byte = name.get(j as usize).copied().unwrap_or(0);
+                            self.mem.write_u8(addr.wrapping_add(at + j), byte)?;
+                        }
+                        written += 1;
+                    }
+                }
+                self.write_ipc_response(tls, 0, &[], &written.to_le_bytes(), &[])
+            }
+            // SetAudioDeviceOutputVolume: there is one volume and the host
+            // owns it.
+            Some(1) | Some(7) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // GetAudioDeviceOutputVolume -> f32, full scale.
+            Some(2) | Some(8) => {
+                self.write_ipc_response(tls, 0, &[], &1.0f32.to_le_bytes(), &[])
+            }
+            // GetActiveAudioDeviceName / ...Auto / GetActiveAudioOutputDeviceName.
+            Some(3) | Some(10) | Some(13) => {
+                if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
+                    for j in 0..NAME_LEN.min(len as usize) as u32 {
+                        let byte = ACTIVE_DEVICE.get(j as usize).copied().unwrap_or(0);
+                        self.mem.write_u8(addr.wrapping_add(j), byte)?;
+                    }
+                }
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // QueryAudioDeviceSystemEvent / ...InputEvent / ...OutputEvent:
+            // copy handles signalled when the audio output changes. Nothing
+            // here ever changes it, so they are handed out and never fire.
+            Some(4) | Some(11) | Some(12) => {
+                let h = self.alloc_event("audren:device", true);
+                self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+            }
+            // GetActiveChannelCount: stereo.
+            Some(5) => self.write_ipc_response(tls, 0, &[], &2u32.to_le_bytes(), &[]),
+            _ => self.unimplemented_command(tls, "audren:iaudiodevice", cmd_id),
         }
     }
 
@@ -4768,17 +5348,10 @@ impl Cpu {
     /// bits 24..27 and address bits 32..35 in bits 28..31.
     pub(super) fn ipc_map_buffers(&self, tls: u32) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
         let hdr1 = self.mem.read_u32(tls).unwrap_or(0);
-        let hdr2 = self.mem.read_u32(tls.wrapping_add(4)).unwrap_or(0);
         let num_send_statics = (hdr1 >> 16) & 0xf;
         let num_send_buffers = (hdr1 >> 20) & 0xf;
         let num_recv_buffers = (hdr1 >> 24) & 0xf;
-        let mut off = 8u32;
-        if (hdr2 >> 31) & 1 != 0 {
-            off += 4;
-            if self.mem.read_u32(tls.wrapping_add(8)).unwrap_or(0) & 1 != 0 {
-                off += 8; // pid
-            }
-        }
+        let mut off = self.ipc_descriptor_start(tls);
         off += 8 * num_send_statics;
 
         let mut read_descriptor = |index: u32| -> (u32, u32) {
@@ -6398,5 +6971,42 @@ mod tests {
         let mut cpu = request(false, 4, &[]);
         cpu.set_request(TLS, Some(4)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "SetRegion_USA");
+    }
+}
+
+/// Whether a title id is one of the firmware's library applets — the ones
+/// launched *by* another applet rather than from the menu.
+pub(crate) fn is_library_applet(program_id: u64) -> bool {
+    matches!(applet_id_for(program_id), 0x0A..=0x1A)
+}
+
+/// The revision of its own launch interface an applet expects its caller to
+/// speak, as `LibAppletCommonArguments::LaVersion`.
+pub(crate) fn applet_interface_version(program_id: u64) -> u32 {
+    match applet_id_for(program_id) {
+        0x12 => 3, // miiEdit
+        _ => 1,
+    }
+}
+
+/// The `AppletId` a system applet reports for itself, from its title id.
+///
+/// The firmware's own applets are `0100000000001000`..`0100000000001013`, and
+/// their ids run in the same order with two breaks in it: the menu and the
+/// overlay applet are not library applets at all and have their own ids.
+/// Anything else is an ordinary application.
+fn applet_id_for(program_id: u64) -> u32 {
+    if program_id & !0xFFFF != 0x0100_0000_0000_0000 {
+        return 0x01; // AppletId_Application
+    }
+    match program_id & 0xFFFF {
+        0x1000 => 0x03, // qlaunch -> SystemAppletMenu
+        0x100C => 0x02, // overlayDisp -> OverlayApplet
+        // auth, cabinet, controller, dataErase, error, netConnect,
+        // playerSelect, swkbd, miiEdit, web, shop.
+        low @ 0x1001..=0x100B => 0x0A + (low as u32 - 0x1001),
+        // photoViewer, set, offlineWeb, loginShare, wifiWebAuth, .., myPage.
+        low @ 0x100D..=0x1013 => 0x15 + (low as u32 - 0x100D),
+        _ => 0x01,
     }
 }

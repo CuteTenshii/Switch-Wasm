@@ -150,6 +150,45 @@ impl ByteSource for MemSource {
     }
 }
 
+/// A source over a file on disk, for hosts that have one — the native
+/// counterpart of the browser's `host_read`.
+///
+/// Reads the range asked for and nothing else, so a multi-gigabyte container
+/// costs a few seeks rather than its own size in memory.
+#[derive(Debug)]
+pub struct FileSource {
+    file: std::cell::RefCell<std::fs::File>,
+    len: u64,
+}
+
+impl FileSource {
+    pub fn open(path: impl AsRef<std::path::Path>) -> std::io::Result<FileSource> {
+        let file = std::fs::File::open(path)?;
+        let len = file.metadata()?.len();
+        Ok(FileSource { file: std::cell::RefCell::new(file), len })
+    }
+}
+
+impl ByteSource for FileSource {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
+        use std::io::{Read, Seek, SeekFrom};
+        if offset >= self.len {
+            return Ok(0);
+        }
+        let want = ((out.len() as u64).min(self.len - offset)) as usize;
+        let mut file = self.file.borrow_mut();
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| Error::Io(format!("seek to {offset:#x}: {e}")))?;
+        file.read_exact(&mut out[..want])
+            .map_err(|e| Error::Io(format!("read {want} bytes at {offset:#x}: {e}")))?;
+        Ok(want)
+    }
+}
+
 /// A sub-range of another source, addressed from 0.
 ///
 /// This is what turns "the whole NSP" into "the NCA at entry 3" and "the

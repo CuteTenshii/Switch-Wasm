@@ -78,6 +78,10 @@ pub enum ContentType {
     Control = 2,
     Manual = 3,
     Data = 4,
+    /// Content shared between titles rather than owned by one — the system's
+    /// Mii and amiibo models, the bad-word lists. Mounted by data id through
+    /// `OpenDataStorageByDataId` exactly as `Data` is.
+    PublicData = 5,
     Unknown(u8),
 }
 
@@ -89,6 +93,7 @@ impl ContentType {
             2 => ContentType::Control,
             3 => ContentType::Manual,
             4 => ContentType::Data,
+            5 => ContentType::PublicData,
             other => ContentType::Unknown(other),
         }
     }
@@ -100,6 +105,7 @@ impl ContentType {
             ContentType::Control => "Control",
             ContentType::Manual => "Manual",
             ContentType::Data => "Data",
+            ContentType::PublicData => "PublicData",
             ContentType::Unknown(_) => "Unknown",
         }
     }
@@ -138,6 +144,10 @@ pub struct FsHeader {
     pub encryption_type: u8,
     /// `HierarchicalSha256` superblock: SHA-256 of the hash-table region.
     pub master_hash: [u8; 32],
+    /// `HierarchicalSha256` superblock: how much data each hash in the table
+    /// covers. The table is one SHA-256 per `block_size` bytes of the data
+    /// region, the last one over whatever is left.
+    pub hash_block_size: u32,
     /// `HierarchicalSha256` superblock: where the per-block hash table lives
     /// within the decrypted section.
     pub hash_table_offset: u64,
@@ -186,6 +196,7 @@ impl FsHeader {
             fs_type,
             encryption_type: fs[4],
             master_hash: fs[0x08..0x28].try_into().unwrap(),
+            hash_block_size: crate::nsp::read_u32(fs, 0x28),
             hash_table_offset: crate::nsp::read_u64(fs, 0x30),
             hash_table_size: crate::nsp::read_u64(fs, 0x38),
             data_offset: crate::nsp::read_u64(fs, 0x40),
@@ -485,6 +496,49 @@ impl Nca {
                 "decrypted section hash mismatch — wrong keys or a corrupt file".into(),
             ));
         }
+        self.verify_data_blocks(plain, fs)
+    }
+
+    /// Check the data region against the per-block hashes in the table the
+    /// master hash just vouched for.
+    ///
+    /// The master hash only says the *table* is intact — every byte the
+    /// emulator goes on to execute is covered by the table, not by it. Left
+    /// unchecked, a single wrong byte anywhere in an ExeFS boots: what
+    /// follows is a fault somewhere inside the title's own crt0, reported
+    /// against whatever garbage the relocations produced, with nothing to
+    /// connect it back to a bad read. This is the check that says so
+    /// directly, and it is also what proves a streamed read was byte-exact.
+    ///
+    /// Skipped unless the geometry is exactly what a two-layer
+    /// `HierarchicalSha256` implies, since an unrecognized layout must not
+    /// turn into a spurious failure.
+    fn verify_data_blocks(&self, plain: &[u8], fs: &FsHeader) -> Result<(), Error> {
+        let Some((block, blocks)) = hash_coverage(fs) else {
+            return Ok(());
+        };
+        let block = block as u64;
+        let data_start = fs.data_offset as usize;
+        let data_end = data_start
+            .checked_add(fs.data_size as usize)
+            .ok_or(Error::Overflow)?;
+        let table_start = fs.hash_table_offset as usize;
+        if data_end > plain.len() {
+            return Err(Error::Nca("data region exceeds decrypted section".into()));
+        }
+        let data = &plain[data_start..data_end];
+        for (i, chunk) in data.chunks(block as usize).enumerate() {
+            let at = table_start + i * 32;
+            if crate::crypto::sha256(chunk) != plain[at..at + 32] {
+                return Err(Error::Nca(format!(
+                    "block {} of {} does not match its hash — the {:#x} bytes at section offset {:#x} are not what this NCA says they are",
+                    i,
+                    blocks,
+                    chunk.len(),
+                    data_start + i * block as usize
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -548,6 +602,18 @@ impl Nca {
         index: usize,
     ) -> Result<Vec<u8>, Error> {
         self.read_pfs0_section(SliceSource(raw), keys, index)
+    }
+
+    /// How much of section `index`'s data the hash table actually covers:
+    /// `(block size, block count)`, or `None` when the geometry is not the
+    /// two-layer `HierarchicalSha256` [`Nca::read_pfs0_section`] can verify.
+    ///
+    /// A loader reports this rather than assuming it: "the ExeFS decrypted"
+    /// and "every byte of the ExeFS is what this NCA says it is" are
+    /// different claims, and only the second one makes a fault further in
+    /// worth chasing anywhere but the reader.
+    pub fn pfs0_hash_coverage(&self, index: usize) -> Option<(u32, u64)> {
+        hash_coverage(self.fs_headers.get(index).and_then(|o| o.as_ref())?)
     }
 
     /// The index of this NCA's PFS0 (ExeFS) section, if any — `partition_type`
@@ -623,6 +689,18 @@ impl Nca {
         let romfs = self.romfs_source(SliceSource(raw), keys, index)?;
         romfs.read_vec(0, romfs.len())
     }
+}
+
+/// The block size and block count a `HierarchicalSha256` section's hash table
+/// covers, when the table is exactly one SHA-256 per block of the data region
+/// and nothing else. Anything that doesn't add up is a layout this code does
+/// not know, and must not be turned into a verification failure.
+fn hash_coverage(fs: &FsHeader) -> Option<(u32, u64)> {
+    if fs.fs_type != HASH_TYPE_SHA256 || fs.hash_block_size == 0 {
+        return None;
+    }
+    let blocks = fs.data_size.div_ceil(fs.hash_block_size as u64);
+    (blocks.checked_mul(32) == Some(fs.hash_table_size)).then_some((fs.hash_block_size, blocks))
 }
 
 /// A decrypting view of one NCA section: [`Nca::section_source`] builds it,
@@ -870,19 +948,14 @@ mod decrypt_tests {
         out
     }
 
-    /// End-to-end: build a synthetic *encrypted* NCA (base header + FS header
-    /// + an AES-CTR-encrypted ExeFS section whose hash matches the FS
-    /// header's master hash), then decrypt and extract it the way a real
-    /// loader would.
-    ///
-    /// This proves the plumbing (XTS header decrypt → key-area unlock →
-    /// AES-CTR section decrypt → hash verification → PFS0 extraction) is
-    /// internally consistent. It cannot prove the exact FS-header field
-    /// offsets or CTR IV layout match a real retail NCA — there is no
-    /// legally includable fixture for that — so treat a real title's
-    /// decryption as unverified until tried against real keys.
-    #[test]
-    fn decrypts_and_extracts_a_synthetic_exefs_section() {
+    /// The block size a real ExeFS's `HierarchicalSha256` table hashes over.
+    const HASH_BLOCK_SIZE: u32 = 0x1_0000;
+
+    /// Build a synthetic *encrypted* Program NCA with an AES-CTR ExeFS
+    /// section, its `HierarchicalSha256` hash table, and a master hash over
+    /// that table — returns the raw NCA bytes, the keyset that unlocks them,
+    /// and the PFS0 payload that should come back out.
+    fn build_exefs_nca() -> (Vec<u8>, KeySet, Vec<u8>) {
         use crate::crypto::{aes128_ctr_xor, sha256};
 
         let header_key = {
@@ -923,7 +996,9 @@ mod decrypt_tests {
         // this test caught).
         const SECTION_OFFSET: usize = 0x1000;
         let pfs0 = build_pfs0("main", b"fake NSO bytes for the test");
-        let hash_table = vec![0x42u8; 0x20];
+        // The real thing: one SHA-256 per HASH_BLOCK_SIZE bytes of the data
+        // region, which for a payload this small is a single hash.
+        let hash_table = sha256(&pfs0).to_vec();
         let plain_section = [hash_table.clone(), pfs0.clone()].concat();
 
         let at = h + 0x40;
@@ -945,6 +1020,8 @@ mod decrypt_tests {
         header[fs0 + 0x02] = 1; // partition_type: Pfs0
         header[fs0 + 0x03] = HASH_TYPE_SHA256;
         header[fs0 + 0x04] = ENCRYPTION_AES_CTR;
+        header[fs0 + 0x28..fs0 + 0x2C].copy_from_slice(&HASH_BLOCK_SIZE.to_le_bytes());
+        header[fs0 + 0x2C..fs0 + 0x30].copy_from_slice(&2u32.to_le_bytes()); // layer count
         header[fs0 + 0x30..fs0 + 0x38].copy_from_slice(&0u64.to_le_bytes()); // hash_table_offset
         header[fs0 + 0x38..fs0 + 0x40].copy_from_slice(&(hash_table.len() as u64).to_le_bytes());
         header[fs0 + 0x40..fs0 + 0x48].copy_from_slice(&(hash_table.len() as u64).to_le_bytes()); // data_offset
@@ -969,6 +1046,21 @@ mod decrypt_tests {
         let mut keys = KeySet::default();
         keys.header_key = Some(header_key);
         keys.key_area_key_system[0] = Some(kek);
+        (raw, keys, pfs0)
+    }
+
+    /// End-to-end: decrypt and extract a synthetic ExeFS the way a real
+    /// loader would.
+    ///
+    /// This proves the plumbing (XTS header decrypt → key-area unlock →
+    /// AES-CTR section decrypt → hash verification → PFS0 extraction) is
+    /// internally consistent. It cannot prove the exact FS-header field
+    /// offsets or CTR IV layout match a real retail NCA — there is no
+    /// legally includable fixture for that — so treat a real title's
+    /// decryption as unverified until tried against real keys.
+    #[test]
+    fn decrypts_and_extracts_a_synthetic_exefs_section() {
+        let (raw, keys, pfs0) = build_exefs_nca();
 
         let nca = Nca::parse_with_keys(&raw, Some(&keys)).expect("parse");
         assert!(nca.fs_headers[0].is_some());
@@ -993,7 +1085,25 @@ mod decrypt_tests {
         assert!(matches!(
             nca.decrypt_pfs0_section(&raw, &wrong_keys, 0),
             Err(Error::Nca(_))
-        ));
+        ));    }
+
+    /// One wrong byte in the data region has to be caught. The master hash
+    /// covers the hash *table* only, so before the per-block check this was
+    /// invisible: the ExeFS extracted "successfully" and the title booted on
+    /// top of a corrupted executable, faulting later somewhere inside its own
+    /// crt0 with nothing pointing back at the read that caused it.
+    #[test]
+    fn a_single_wrong_byte_in_the_data_region_is_caught() {
+        let (mut raw, keys, _) = build_exefs_nca();
+        let nca = Nca::parse_with_keys(&raw, Some(&keys)).expect("parse");
+        let data_start = 0x1000 + nca.fs_headers[0].unwrap().data_offset as usize;
+        raw[data_start + 9] ^= 0x01;
+
+        let err = nca.decrypt_pfs0_section(&raw, &keys, 0).unwrap_err();
+        let Error::Nca(msg) = &err else {
+            panic!("wrong error: {err}");
+        };
+        assert!(msg.contains("block 0"), "{msg}");
     }
 
     /// Same shape as the ExeFS test above, but for a RomFS (`HierarchicalIntegrity`/IVFC)
