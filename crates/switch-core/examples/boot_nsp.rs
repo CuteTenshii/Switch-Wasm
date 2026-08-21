@@ -212,6 +212,18 @@ fn main() {
         }
         done += 1;
     }
+    if let Ok(out) = std::env::var("SHOT") {
+        let fb = &cpu.nv.gpu.framebuffer;
+        if !fb.is_empty() {
+            let mut ppm = format!("P6\n{} {}\n255\n", fb.width, fb.height).into_bytes();
+            for px in &fb.pixels {
+                ppm.extend_from_slice(&[*px as u8, (*px >> 8) as u8, (*px >> 16) as u8]);
+            }
+            std::fs::write(&out, ppm).expect("write ppm");
+            let lit = fb.pixels.iter().filter(|p| **p & 0x00FF_FFFF != 0).count();
+            println!("wrote {out}: {}x{}, {lit}/{} non-black", fb.width, fb.height, fb.pixels.len());
+        }
+    }
     println!("guest RAM touched: {} MiB", cpu.mem.mapped_bytes() / (1024 * 1024));
     println!("frames presented: {}", cpu.nv.gpu.frames);
     println!("gpu stats: {:?}", cpu.nv.gpu.stats);
