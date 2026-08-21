@@ -955,7 +955,10 @@ window.addEventListener('keyup', (e) => {
   if (keysDown.delete(e.key.toLowerCase())) pushInput();
 });
 window.addEventListener('blur', () => {
-  if (keysDown.size) { keysDown.clear(); pushInput(); }
+  if (!keysDown.size && !touchPoints.size) return;
+  keysDown.clear();
+  touchPoints.clear();
+  pushInput();
 });
 
 function keyboardMask() {
@@ -963,6 +966,90 @@ function keyboardMask() {
   for (const code of keysDown) m |= KEY_MAP[code] || 0;
   return m;
 }
+
+// ---------- touchscreen ----------
+//
+// hid reports touches in the console's own 1280x720 digitizer space whatever
+// resolution the guest is presenting at (TOUCH_SCREEN_WIDTH/HEIGHT in
+// cpu/mod.rs), so the canvas is mapped onto that rather than the other way
+// round. Touch is a handheld-only input on real hardware and this console
+// always reports AppletOperationMode_Handheld, so it is always live.
+const TOUCH_W = 1280;
+const TOUCH_H = 720;
+const TOUCH_MAX = 16;
+
+// pointerId -> { slot, x, y }. `slot` is the finger id the guest sees: it has
+// to stay put for the life of the contact so a title can follow a drag, which
+// is why it is claimed from the lowest free one instead of being the pointer's
+// position in the map.
+const touchPoints = new Map();
+let touchWasDown = false;
+
+function claimTouchSlot() {
+  const taken = new Set([...touchPoints.values()].map((t) => t.slot));
+  for (let i = 0; i < TOUCH_MAX; i++) if (!taken.has(i)) return i;
+  return -1;
+}
+
+// The canvas element fills the stage but `object-fit: contain` letterboxes the
+// guest's frame inside it, so a tap has to be mapped through the *contained*
+// rect - going by the element box offsets every tap by the size of the bars.
+// Returns null for a tap that landed on a bar rather than on the screen.
+function touchAt(e) {
+  const rect = screenEl.getBoundingClientRect();
+  const iw = screenEl.width, ih = screenEl.height;
+  if (!iw || !ih || !rect.width || !rect.height) return null;
+  const scale = Math.min(rect.width / iw, rect.height / ih);
+  const dw = iw * scale, dh = ih * scale;
+  const x = (e.clientX - rect.left - (rect.width - dw) / 2) / dw;
+  const y = (e.clientY - rect.top - (rect.height - dh) / 2) / dh;
+  if (x < 0 || x >= 1 || y < 0 || y >= 1) return null;
+  return {
+    x: Math.min(TOUCH_W - 1, Math.floor(x * TOUCH_W)),
+    y: Math.min(TOUCH_H - 1, Math.floor(y * TOUCH_H)),
+  };
+}
+
+function touchTriples() {
+  const out = new Uint32Array(touchPoints.size * 3);
+  let i = 0;
+  for (const t of touchPoints.values()) {
+    out[i++] = t.slot;
+    out[i++] = t.x;
+    out[i++] = t.y;
+  }
+  return out;
+}
+
+screenEl.addEventListener('pointerdown', (e) => {
+  if (e.button !== 0) return; // a right-click is not a finger
+  const p = touchAt(e);
+  if (!p) return;
+  const slot = claimTouchSlot();
+  if (slot < 0) return; // all sixteen contacts are already down
+  touchPoints.set(e.pointerId, { slot, x: p.x, y: p.y });
+  // Capture so a finger that slides off the canvas still reports its lift here
+  // rather than leaving a contact down forever.
+  try { screenEl.setPointerCapture(e.pointerId); } catch {}
+  e.preventDefault();
+  pushInput();
+});
+
+screenEl.addEventListener('pointermove', (e) => {
+  const t = touchPoints.get(e.pointerId);
+  if (!t) return;
+  const p = touchAt(e);
+  // A finger dragged into the letterbox holds its last on-screen position
+  // instead of lifting, which is what the bezel does on the console.
+  if (p) { t.x = p.x; t.y = p.y; }
+  e.preventDefault();
+});
+
+function liftTouch(e) {
+  if (touchPoints.delete(e.pointerId)) pushInput();
+}
+screenEl.addEventListener('pointerup', liftTouch);
+screenEl.addEventListener('pointercancel', liftTouch);
 
 function pushInput() {
   if (!ready) return;
@@ -1003,6 +1090,13 @@ function pushInput() {
     inputStatus('keyboard');
   }
   call('set_input', mask, slx, sly, srx, sry);
+  // Only while something is down, plus the single push that reports the lift -
+  // an idle screen has nothing to say 60 times a second.
+  if (touchPoints.size || touchWasDown) {
+    call('set_touch', touchTriples());
+    touchWasDown = touchPoints.size > 0;
+  }
+  if (touchPoints.size) inputStatus('touch');
   pullVibration(pad);
 }
 

@@ -65,6 +65,17 @@ let latchedButtons = 0n; // pressed, but not yet guaranteed seen by the guest
 let sticks = [0, 0, 0, 0];  // newest analog values
 let latchedSticks = null;   // a deflection held for the same reason as a press
 
+// Touch rides the same latch, for the same reason: a tap that goes down and up
+// inside one run slice would otherwise happen entirely while the guest was not
+// running to see it. Contacts are flat {finger_id, x, y} triples.
+const TOUCH_MAX = 16;
+const NO_TOUCHES = new Uint32Array(0);
+let touches = NO_TOUCHES;      // newest host contacts
+let latchedTouches = null;     // a tap held until the guest has had a frame
+let touchIds = new Set();      // finger ids down at the last host sample
+let touchScratch = 0;          // wasm-side staging buffer, allocated once
+let publishedTouches = 0;      // contacts the guest was last told about
+
 // Frame the latch is waiting on, plus a slice cap so that a program which never
 // presents - or has stopped, mid-load - still releases instead of holding a
 // phantom press until it draws again. A couple of seconds' worth of slices.
@@ -85,6 +96,25 @@ function publishInput() {
   // flick only stands in once the stick has sprung back to centre.
   const s = latchedSticks && !deflected(sticks) ? latchedSticks : sticks;
   api.switch_set_input(handle, heldButtons | latchedButtons, s[0], s[1], s[2], s[3]);
+  publishTouch();
+}
+
+// Same rule as the sticks: live contacts win, a latched tap only stands in once
+// the finger is up. `switch_set_touch` reads {finger_id, x, y} triples out of
+// wasm memory, so they go through a buffer allocated once and reused - the view
+// is rebuilt every time because growing the heap detaches the old one.
+function publishTouch() {
+  const src = touches.length ? touches : latchedTouches || NO_TOUCHES;
+  const count = Math.min(TOUCH_MAX, src.length / 3);
+  // Nothing down and nothing to retract: the guest already knows.
+  if (count === 0 && publishedTouches === 0) return;
+  if (!touchScratch) touchScratch = alloc(TOUCH_MAX * 3 * 4);
+  if (count > 0) {
+    new Uint32Array(api.memory.buffer, touchScratch, count * 3)
+      .set(src.subarray(0, count * 3));
+  }
+  api.switch_set_touch(handle, touchScratch, count);
+  publishedTouches = count;
 }
 
 // A latch armed against the old session's frame counter would outlive a reset,
@@ -94,6 +124,10 @@ function resetInput() {
   latchedButtons = 0n;
   sticks = [0, 0, 0, 0];
   latchedSticks = null;
+  touches = NO_TOUCHES;
+  latchedTouches = null;
+  touchIds = new Set();
+  publishedTouches = 0;
   latchFrame = -1;
   latchSlices = 0;
 }
@@ -109,11 +143,13 @@ function armLatch() {
 // Called once per run slice: drop the latch as soon as the guest has had a
 // whole frame to poll with it visible.
 function releaseLatchIfSeen() {
-  if (handle < 0 || (latchedButtons === 0n && !latchedSticks)) return;
+  if (handle < 0) return;
+  if (latchedButtons === 0n && !latchedSticks && !latchedTouches) return;
   const frames = api.switch_frame_count(handle);
   if (frames - latchFrame < LATCH_FRAMES && ++latchSlices < MAX_LATCH_SLICES) return;
   latchedButtons = 0n;
   latchedSticks = null;
+  latchedTouches = null;
   latchFrame = -1;
   latchSlices = 0;
   publishInput();
@@ -164,6 +200,27 @@ const CMD = {
     publishInput();
     return 0;
   },
+  // Contacts as flat {finger_id, x, y} triples, already in the console's
+  // 1280x720 digitizer space. A finger id the previous sample did not carry is
+  // a new contact, which is what arms the latch.
+  set_touch(points) {
+    const next = points && points.length ? new Uint32Array(points) : NO_TOUCHES;
+    const ids = new Set();
+    let fresh = false;
+    for (let i = 0; i < next.length; i += 3) {
+      ids.add(next[i]);
+      if (!touchIds.has(next[i])) fresh = true;
+    }
+    touches = next;
+    touchIds = ids;
+    if (fresh) {
+      latchedTouches = next;
+      armLatch();
+    }
+    publishInput();
+    return 0;
+  },
+
   set_battery(percent, charging) {
     lastBattery = { percent, charging: !!charging };
     pushBattery();

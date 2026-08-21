@@ -31,7 +31,7 @@ impl<T> SyncCell<T> {
     }
 }
 
-use switch_core::cpu::Cpu;
+use switch_core::cpu::{Cpu, TouchPoint};
 use switch_core::elf::load_elf;
 use switch_core::nca::Nca;
 use switch_core::nsp::Pfs0;
@@ -894,6 +894,30 @@ pub extern "C" fn switch_set_input(
     session(handle)
         .cpu
         .set_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
+}
+
+/// Feed the host's touchscreen contacts to the guest. `ptr` points at `count`
+/// packed `u32` triples - `finger_id`, `x`, `y` - in the console's 1280x720
+/// digitizer space (`TOUCH_SCREEN_WIDTH`/`HEIGHT` in `cpu/mod.rs`), *not* in
+/// whatever resolution the guest happens to be presenting at. `count` above
+/// `TOUCH_MAX` (16) is truncated.
+///
+/// A lift is `count` = 0: the state is republished with no contacts. The guest
+/// only sees any of this once it has mapped hid's shared memory, and nothing is
+/// buffered until then, so the host has to keep calling while a finger is down.
+#[no_mangle]
+pub extern "C" fn switch_set_touch(handle: u32, ptr: *const u32, count: u32) {
+    let n = (count as usize).min(switch_core::cpu::TOUCH_MAX);
+    let mut points = [TouchPoint::default(); switch_core::cpu::TOUCH_MAX];
+    if n > 0 && !ptr.is_null() {
+        let raw = unsafe { std::slice::from_raw_parts(ptr, n * 3) };
+        for (i, point) in points[..n].iter_mut().enumerate() {
+            point.finger_id = raw[i * 3];
+            point.x = raw[i * 3 + 1];
+            point.y = raw[i * 3 + 2];
+        }
+    }
+    session(handle).cpu.set_touch_state(&points[..n]);
 }
 
 /// Set the wall-clock time `time:u`/`time:s` report, as POSIX seconds (UTC).

@@ -166,6 +166,12 @@ body {
   object-fit: contain;
   background: #000;
   image-rendering: pixelated;
+  /* The canvas is the console's touchscreen: a drag across it is a finger, not
+     a page scroll or a pinch-zoom, and a double-tap is two taps. Without this
+     the browser swallows the gesture before pointermove ever fires. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 /* Idle overlay: the "insert cartridge" state. */

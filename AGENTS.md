@@ -613,6 +613,35 @@ releasing it lands on the next slice instead of a slice later (that extra slice
 of stickiness made one d-pad tap step two menu entries). `MAX_LATCH_SLICES` is
 the escape hatch for a program that has stopped presenting.
 
+## Touchscreen (`Cpu::set_touch_state`)
+
+`HidSharedMemory.touch_screen` is at **0x400**, straight after the debug pad's
+0x400, and holds a `HidTouchScreenLifo`: the same 0x20-byte header as the npad
+LIFOs, then storage entries of `{u64 sampling_number, HidTouchScreenState}`.
+That state is `{u64 sampling_number, s32 count, u32 reserved, HidTouchState
+touches[16]}`, and a `HidTouchState` is **0x28** bytes — `delta_time`,
+`attributes`, `finger_id` at **+0x0C**, `x` at **+0x10**, `y` at **+0x14**, the
+two diameters, `rotation_angle`. One entry at index 0 with `tail = 0`,
+`count = 1`, exactly as for the pad.
+
+- **hid reports touches in the console's own 1280x720 digitizer space**
+  (`TOUCH_SCREEN_WIDTH`/`HEIGHT`), *not* in whatever resolution the guest is
+  presenting at, so `main.js` scales the canvas onto that. `#screen` is
+  `object-fit: contain`, so a tap must be mapped through the **contained rect**
+  — going by the element's bounding box offsets every tap by the letterbox bars.
+- Touch is handheld-only on real hardware, and `am`'s `GetOperationMode` already
+  answers `AppletOperationMode_Handheld`, so there is no docked case to
+  suppress. `ActivateTouchScreen` (`hid:server` cmd 11) was already a no-op
+  setter.
+- **A lift is a published state with `count = 0`, not silence.** Nothing is
+  buffered, so the frontend keeps sending while a finger is down — which is also
+  what makes a touch that began before the guest mapped hid's shared memory show
+  up as soon as it has. Vacated slots are zeroed so a reader that scans the
+  array instead of trusting `count` finds no ghost contact.
+- Taps ride the same latch as button presses, for the same reason, and
+  `finger_id` is a slot claimed for the life of the pointer so a title can
+  follow a drag.
+
 ## The shared system font (`cpu/ipc.rs`, `web/assets/font.ttf`)
 
 Homebrew does not ship fonts: it asks `pl:u` for the console's shared fonts and

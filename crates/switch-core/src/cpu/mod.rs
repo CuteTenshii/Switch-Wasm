@@ -192,11 +192,64 @@ mod hid_shmem {
     pub const ATTR_LEFT_WIRED: u32 = 1 << 3;
     pub const ATTR_RIGHT_CONNECTED: u32 = 1 << 4;
     pub const ATTR_RIGHT_WIRED: u32 = 1 << 5;
+
+    /// `offsetof(HidSharedMemory, touch_screen)` - straight after the debug
+    /// pad's 0x400. Its `HidTouchScreenLifo` sits at the start of the region,
+    /// with the same 0x20-byte header the npad LIFOs use.
+    pub const TOUCH_SCREEN: u32 = 0x400;
+    /// The storage entry is `{u64 sampling_number, HidTouchScreenState}`, so
+    /// the state itself begins one `u64` into it.
+    pub const TOUCH_STATE: u32 = 0x08;
+
+    /// Fields of `HidTouchScreenState`: its own sampling number, how many of
+    /// the sixteen touch slots are live, then the slots.
+    pub const TOUCH_SAMPLING_NUMBER: u32 = 0x00;
+    pub const TOUCH_COUNT: u32 = 0x08;
+    pub const TOUCH_TOUCHES: u32 = 0x10;
+
+    /// `sizeof(HidTouchState)` and the fields of one.
+    pub const TOUCH_SIZE: u32 = 0x28;
+    pub const TOUCH_DELTA_TIME: u32 = 0x00;
+    pub const TOUCH_ATTRIBUTES: u32 = 0x08;
+    pub const TOUCH_FINGER_ID: u32 = 0x0C;
+    pub const TOUCH_X: u32 = 0x10;
+    pub const TOUCH_Y: u32 = 0x14;
+    pub const TOUCH_DIAMETER_X: u32 = 0x18;
+    pub const TOUCH_DIAMETER_Y: u32 = 0x1C;
+    pub const TOUCH_ROTATION_ANGLE: u32 = 0x20;
 }
 
 /// Deflection past which hid reports the `HidNpadButton_StickL*`/`StickR*`
 /// pseudo-buttons, which is what `HidNpadButton_AnyLeft` and friends look at.
 const HID_STICK_THRESHOLD: i32 = 0x4000;
+
+/// The console's touchscreen digitizer resolution. This is *not* the resolution
+/// the guest is presenting at - hid reports touches in this space whatever the
+/// title renders in, so the frontend scales its canvas onto it rather than the
+/// other way round.
+pub const TOUCH_SCREEN_WIDTH: u32 = 1280;
+pub const TOUCH_SCREEN_HEIGHT: u32 = 720;
+
+/// `HidTouchScreenState.touches` is a fixed sixteen slots.
+pub const TOUCH_MAX: usize = 16;
+
+/// Contact size reported for every touch. Real hid measures the contact patch;
+/// nothing that runs here does more than check it is non-zero, and a mouse or a
+/// trackpad has no width to report anyway.
+const TOUCH_DIAMETER: u32 = 10;
+
+/// One finger on the touchscreen, in [`TOUCH_SCREEN_WIDTH`] x
+/// [`TOUCH_SCREEN_HEIGHT`] coordinates.
+///
+/// `finger_id` identifies a contact for as long as it stays down, so a title
+/// tracking a drag can follow it; the frontend keeps one id per pointer for the
+/// life of that pointer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TouchPoint {
+    pub finger_id: u32,
+    pub x: u32,
+    pub y: u32,
+}
 
 /// The counts an `OpenAudioRenderer` call fixes for the lifetime of its
 /// `IAudioRenderer` session — how big every later `RequestUpdateAudioRenderer`
@@ -412,6 +465,13 @@ pub struct Cpu {
     ssl_options: HashMap<(u64, u32), u32>,
     /// Monotonic sampling number for the hid shared-memory LIFO entries.
     sample_counter: u64,
+    /// The touchscreen LIFO's own sampling number. Separate from the npad one
+    /// because a reader compares it against the last value *it* saw from this
+    /// LIFO, and pad and touch are published on independent schedules.
+    touch_sample_counter: u64,
+    /// How many touch slots the last publish filled, so the ones a shrinking
+    /// contact count leaves behind can be cleared instead of lingering.
+    touch_published: usize,
     /// The font `pl:u` serves as every shared font type, as a TrueType/OpenType
     /// file. Homebrew reads it out of pl's shared memory and hands it to
     /// FreeType, so an empty vector means no text renders at all.
@@ -541,6 +601,8 @@ impl Cpu {
             fs_dirs: HashMap::new(),
             fs_files: HashMap::new(),
             romfs: None,
+            touch_sample_counter: 0,
+            touch_published: 0,
             hid_shmem_addr: 0,
             hid_shmem_handle: None,
             npad_style_set: 0,
@@ -1402,6 +1464,67 @@ impl Cpu {
         let _ = self.mem.write_u32(entry + h::STATE_STICK_R, rx as u32);
         let _ = self.mem.write_u32(entry + h::STATE_STICK_R + 4, ry as u32);
         let _ = self.mem.write_u32(entry + h::STATE_ATTRIBUTES, attributes);
+    }
+
+    /// Publish the host's touchscreen contacts where `hidGetTouchScreenStates`
+    /// reads them. Touch is a handheld-only input on real hardware and this
+    /// console always reports `AppletOperationMode_Handheld`, so there is no
+    /// docked case to suppress.
+    ///
+    /// An empty slice is how a lift is reported: the state is still published,
+    /// with a contact count of zero. Nothing is remembered between calls, so a
+    /// caller has to keep sending while a finger is down - which is also what
+    /// makes a touch that began before the guest mapped hid's shared memory
+    /// show up as soon as it has.
+    pub fn set_touch_state(&mut self, touches: &[TouchPoint]) {
+        if self.hid_shmem_addr == 0 {
+            return;
+        }
+        use hid_shmem as h;
+        self.touch_sample_counter = self.touch_sample_counter.wrapping_add(1);
+        let sample = self.touch_sample_counter;
+
+        let lifo = self.hid_shmem_addr.wrapping_add(h::TOUCH_SCREEN);
+        let _ = self.mem.write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
+        let _ = self.mem.write_u64(lifo + h::LIFO_TAIL, 0);
+        let _ = self.mem.write_u64(lifo + h::LIFO_COUNT, 1);
+
+        let storage = lifo.wrapping_add(h::LIFO_STORAGE);
+        let _ = self.mem.write_u64(storage + h::STORAGE_SAMPLING_NUMBER, sample);
+        let state = storage.wrapping_add(h::TOUCH_STATE);
+        let _ = self.mem.write_u64(state + h::TOUCH_SAMPLING_NUMBER, sample);
+
+        let count = touches.len().min(TOUCH_MAX);
+        let _ = self.mem.write_u32(state + h::TOUCH_COUNT, count as u32);
+        let slot = |i: usize| state + h::TOUCH_TOUCHES + i as u32 * h::TOUCH_SIZE;
+        for (i, touch) in touches[..count].iter().enumerate() {
+            let e = slot(i);
+            // delta_time is how long this contact has been down. Nothing here
+            // measures it, and a title that wants a duration times its own
+            // frames; reporting a made-up figure would be worse than zero.
+            let _ = self.mem.write_u64(e + h::TOUCH_DELTA_TIME, 0);
+            let _ = self.mem.write_u32(e + h::TOUCH_ATTRIBUTES, 0);
+            let _ = self.mem.write_u32(e + h::TOUCH_FINGER_ID, touch.finger_id);
+            let _ = self
+                .mem
+                .write_u32(e + h::TOUCH_X, touch.x.min(TOUCH_SCREEN_WIDTH - 1));
+            let _ = self
+                .mem
+                .write_u32(e + h::TOUCH_Y, touch.y.min(TOUCH_SCREEN_HEIGHT - 1));
+            let _ = self.mem.write_u32(e + h::TOUCH_DIAMETER_X, TOUCH_DIAMETER);
+            let _ = self.mem.write_u32(e + h::TOUCH_DIAMETER_Y, TOUCH_DIAMETER);
+            let _ = self.mem.write_u32(e + h::TOUCH_ROTATION_ANGLE, 0);
+        }
+        // A reader that trusts the contact count never looks past it, but one
+        // that scans the array would find the fingers a previous, larger sample
+        // left there.
+        for i in count..self.touch_published {
+            let e = slot(i);
+            for off in (0..h::TOUCH_SIZE).step_by(4) {
+                let _ = self.mem.write_u32(e + off, 0);
+            }
+        }
+        self.touch_published = count;
     }
 
     /// What the guest last asked the rumble motors to do, as `(low, high)`

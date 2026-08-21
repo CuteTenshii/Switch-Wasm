@@ -2275,6 +2275,78 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
 }
 
 #[test]
+fn touch_input_writes_the_hid_touchscreen_lifo() {
+    // `HidSharedMemory.touch_screen` sits at 0x400, straight after the debug
+    // pad's 0x400, and holds a `HidTouchScreenLifo`: the same 0x20-byte header
+    // the npad LIFOs use, then storage entries of `{u64 sampling_number,
+    // HidTouchScreenState}`. That state is `{u64 sampling_number, s32 count,
+    // u32 reserved, HidTouchState touches[16]}`, and a `HidTouchState` is 0x28
+    // bytes with finger_id at +0x0C, x at +0x10 and y at +0x14.
+    use switch_core::cpu::TouchPoint;
+    const SHMEM: u32 = 0x3000_0000;
+    const LIFO: u32 = SHMEM + 0x400;
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_reg(1, SHMEM as u64);
+    cpu.set_reg(2, 0x40000);
+    cpu.mem.map(0x1000, &svc(0x13).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), 0);
+
+    cpu.set_touch_state(&[
+        TouchPoint { finger_id: 0, x: 640, y: 360 },
+        TouchPoint { finger_id: 3, x: 100, y: 700 },
+    ]);
+
+    assert_eq!(cpu.mem.read_u64(LIFO + 0x08).unwrap(), 17, "buffer_count");
+    assert_eq!(cpu.mem.read_u64(LIFO + 0x10).unwrap(), 0, "tail");
+    assert_eq!(cpu.mem.read_u64(LIFO + 0x18).unwrap(), 1, "count");
+
+    let storage = LIFO + 0x20;
+    let sample = cpu.mem.read_u64(storage).unwrap();
+    assert!(sample > 0, "sampling number must advance");
+    let state = storage + 8;
+    assert_eq!(cpu.mem.read_u64(state).unwrap(), sample, "state sampling number");
+    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 2, "contact count");
+
+    let touch = |i: u32| state + 0x10 + i * 0x28;
+    assert_eq!(cpu.mem.read_u32(touch(0) + 0x0C).unwrap(), 0, "finger_id");
+    assert_eq!(cpu.mem.read_u32(touch(0) + 0x10).unwrap(), 640, "x");
+    assert_eq!(cpu.mem.read_u32(touch(0) + 0x14).unwrap(), 360, "y");
+    assert!(cpu.mem.read_u32(touch(0) + 0x18).unwrap() > 0, "diameter_x");
+    assert_eq!(cpu.mem.read_u32(touch(1) + 0x0C).unwrap(), 3, "finger_id");
+    assert_eq!(cpu.mem.read_u32(touch(1) + 0x10).unwrap(), 100, "x");
+    assert_eq!(cpu.mem.read_u32(touch(1) + 0x14).unwrap(), 700, "y");
+
+    // Lifting one of the two clears the slot it vacated, so a reader that scans
+    // the array rather than trusting the count finds no ghost contact.
+    cpu.set_touch_state(&[TouchPoint { finger_id: 0, x: 5, y: 6 }]);
+    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 1, "contact count");
+    assert_eq!(cpu.mem.read_u32(touch(1) + 0x10).unwrap(), 0, "vacated x");
+    assert_eq!(cpu.mem.read_u32(touch(1) + 0x14).unwrap(), 0, "vacated y");
+    assert!(cpu.mem.read_u64(storage).unwrap() > sample, "sample must advance");
+
+    // A full lift is a published state carrying no contacts, not silence: a
+    // title polling the LIFO has to see the finger go up.
+    cpu.set_touch_state(&[]);
+    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 0, "contact count");
+
+    // Coordinates are clamped to the digitizer, and the slot count to sixteen.
+    cpu.set_touch_state(&[TouchPoint { finger_id: 0, x: 99_999, y: 99_999 }]);
+    assert_eq!(cpu.mem.read_u32(touch(0) + 0x10).unwrap(), 1279, "clamped x");
+    assert_eq!(cpu.mem.read_u32(touch(0) + 0x14).unwrap(), 719, "clamped y");
+}
+
+#[test]
+fn touch_input_before_hid_shared_memory_is_mapped_is_dropped() {
+    // Nothing is buffered: with no mapping there is nowhere to put a contact,
+    // and the host keeps sending while the finger is down anyway.
+    use switch_core::cpu::TouchPoint;
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_touch_state(&[TouchPoint { finger_id: 0, x: 1, y: 2 }]);
+    assert_eq!(cpu.hid_shmem_addr(), 0);
+}
+
+#[test]
 fn mapping_pl_shared_memory_delivers_the_shared_font() {
     use switch_core::cpu::PL_SHMEM_SIZE;
     // `plInitialize` maps pl's shared memory and homebrew then reads the font
