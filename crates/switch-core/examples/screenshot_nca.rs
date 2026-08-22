@@ -270,6 +270,28 @@ fn main() {
             println!("[cover] {start:#x}..end");
         }
     }
+    // `FIND_MAGIC=SARC` scans guest memory for a four-byte magic. A layout
+    // archive arrives Yaz0-compressed and is decompressed by the guest; if the
+    // decompressed form is nowhere in memory, the decompression produced
+    // nothing and the UI has no panes to draw.
+    if let Ok(magic) = env::var("FIND_MAGIC") {
+        let want = u32::from_le_bytes(
+            magic.as_bytes().first_chunk::<4>().copied().unwrap_or([0; 4]),
+        );
+        let mut hits = 0u32;
+        let mut at = 0u32;
+        while at < 0x8000_0000 {
+            if cpu.mem.read_u32(at) == Ok(want) {
+                println!("[find] {magic} at {at:#x}");
+                hits += 1;
+                if hits >= 12 {
+                    break;
+                }
+            }
+            at += 4;
+        }
+        println!("[find] {magic}: {hits} hit(s)");
+    }
     for (pc, n) in &readers {
         println!("[reader] {pc:#x} {n}");
     }
