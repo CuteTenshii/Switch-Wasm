@@ -2588,8 +2588,15 @@ impl Cpu {
                 // That was `WaitSynchronization` reporting index 1 for a
                 // one-handle wait, and it is fixed where it belongs.)
                 Some(0) => {
-                    let h = self.alloc_event("am:applet-message", true);
-                    if !self.applet_focus_sent {
+                    let h = match self.applet_event {
+                        Some(h) => h,
+                        None => {
+                            let h = self.alloc_event("am:applet-message", true);
+                            self.applet_event = Some(h);
+                            h
+                        }
+                    };
+                    if !self.applet_messages.is_empty() {
                         self.signal_event(h);
                     }
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
@@ -2600,11 +2607,11 @@ impl Cpu {
                 // is what made JKSV think focus kept changing.
                 Some(1) => {
                     const NO_MESSAGES: u32 = 128 | (3 << 9); // am, "no message"
-                    const FOCUS_STATE_CHANGED: u32 = 15;
-                    if std::mem::replace(&mut self.applet_focus_sent, true) {
-                        self.write_ipc_response(tls, NO_MESSAGES, &[], &[], &[])
-                    } else {
-                        self.write_ipc_response(tls, 0, &[], &FOCUS_STATE_CHANGED.to_le_bytes(), &[])
+                    match self.applet_messages.pop_front() {
+                        Some(message) => {
+                            self.write_ipc_response(tls, 0, &[], &message.to_le_bytes(), &[])
+                        }
+                        None => self.write_ipc_response(tls, NO_MESSAGES, &[], &[], &[]),
                     }
                 }
                 // GetOperationMode -> AppletOperationMode. **Handheld is 0**
@@ -2724,8 +2731,26 @@ impl Cpu {
                 // exit-lock behaviour behind them to change, so accepting the
                 // setting really is the complete implementation — unlike the
                 // commands below it, a bare success here is the truth.
-                Some(0..=4) | Some(10..=16) | Some(19) | Some(50) | Some(62) | Some(68)
+                Some(0..=4) | Some(10..=16) | Some(19) | Some(51) | Some(62) | Some(68)
                 | Some(100) | Some(110) | Some(130) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // SetHandlesRequestToDisplay(bool): the applet is taking
+                // responsibility for when it appears. AM answers by queueing
+                // `RequestToDisplay`, and the applet draws its first frame
+                // only once it has read that message and called
+                // `ApproveToDisplay` (51, accepted above -- it used to reach
+                // `unimplemented_command`, which `nnSdk` aborts on).
+                //
+                // Without the message the Home Menu waits for permission that
+                // never comes: it finishes its layer, preallocates both
+                // swapchain buffers, and then runs its frame loop for thirty
+                // seconds of console time without ever dequeuing one.
+                Some(50) => {
+                    let data = self.ipc_request_data(tls);
+                    if self.mem.read_u8(data).unwrap_or(0) != 0 {
+                        self.queue_applet_message(super::AppletMessage::RequestToDisplay);
+                    }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // GetLibraryAppletLaunchableEvent /

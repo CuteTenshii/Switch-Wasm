@@ -77,6 +77,18 @@ pub const THREAD_TLS_BASE: u32 = 0x1FE1_0000;
 /// each keeps the newlib reentrancy struct that follows out of the way too.
 pub const THREAD_TLS_STRIDE: u32 = 0x1000;
 
+/// The AM messages this emulator queues for the running applet. Horizon has
+/// many more; these are the two an applet's own boot turns on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppletMessage {
+    /// The applet's focus changed. AM queues one at startup and then nothing
+    /// until the state really changes.
+    FocusStateChanged = 15,
+    /// AM asking an applet that took charge of its own display
+    /// (`SetHandlesRequestToDisplay`) to show itself.
+    RequestToDisplay = 41,
+}
+
 /// What a guest thread is doing. Threads only switch at the blocking
 /// syscalls, so a critical section that does not block is effectively atomic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -398,12 +410,20 @@ pub struct Cpu {
     /// vi:ihosbd, ...) so the display stub can dispatch binder vs. display
     /// commands on the right session.
     vi_ifaces: HashMap<u64, String>,
-    /// Whether `ICommonStateGetter::ReceiveMessage` has already handed out the
-    /// initial `FocusStateChanged`. Real AM enqueues that message once at
-    /// startup and then reports "no message" until the state actually
-    /// changes; answering every poll with a fresh message made
-    /// `appletMainLoop` re-process a focus change on every call.
-    applet_focus_sent: bool,
+    /// AM's message queue for the running applet, and the event that says it
+    /// is not empty.
+    ///
+    /// Real AM enqueues each state change once and then reports "no message"
+    /// until the next one; answering every poll with a fresh message made
+    /// `appletMainLoop` re-process a focus change on every call. The queue is
+    /// what lets there be more than one such message -- an applet that took
+    /// responsibility for its own display waits for a second one before it
+    /// draws anything at all.
+    applet_messages: VecDeque<u32>,
+    /// The handle handed out by `ICommonStateGetter::GetEventHandle`, kept so
+    /// every caller gets the same event and queueing a message can signal the
+    /// one that is actually being waited on.
+    applet_event: Option<u64>,
     /// Every `(interface, command)` pair already reported as having no
     /// implementation behind it, so the warning naming it prints once instead
     /// of once per call (`appletMainLoop` polls `am` every frame).
@@ -666,7 +686,10 @@ impl Cpu {
             next_domain_object_id: 1,
             domain_objects: HashMap::new(),
             vi_ifaces: HashMap::new(),
-            applet_focus_sent: false,
+            // AM has one message waiting before the applet's first poll:
+            // the focus state it starts in.
+            applet_messages: VecDeque::from([AppletMessage::FocusStateChanged as u32]),
+            applet_event: None,
             unimplemented_ipc: HashSet::new(),
             fabricated_objects: HashMap::new(),
             events: HashMap::new(),
@@ -1405,6 +1428,14 @@ impl Cpu {
     /// What an event handle is for, for diagnostics.
     pub(crate) fn event_name(&self, handle: u64) -> Option<&'static str> {
         self.events.get(&handle).map(|event| event.name)
+    }
+
+    /// Queue an applet message and wake whatever is polling for one.
+    pub(super) fn queue_applet_message(&mut self, message: AppletMessage) {
+        self.applet_messages.push_back(message as u32);
+        if let Some(handle) = self.applet_event {
+            self.signal_event(handle);
+        }
     }
 
     /// Fire an event.

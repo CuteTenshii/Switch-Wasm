@@ -5043,6 +5043,49 @@ fn the_applet_message_event_starts_signalled_and_clears() {
 }
 
 #[test]
+fn an_applet_that_handles_its_own_display_is_asked_to_display() {
+    // `SetHandlesRequestToDisplay(true)` is an applet saying it will decide
+    // when it appears. AM answers by queueing `RequestToDisplay`, and the
+    // applet draws nothing until it has read that message and approved
+    // itself. With only the startup focus change to hand out, the Home Menu
+    // finished its layer, preallocated both swapchain buffers and then ran its
+    // frame loop for thirty seconds of console time without ever dequeuing
+    // one.
+    const REQUEST_TO_DISPLAY: u32 = 41;
+    const FOCUS_STATE_CHANGED: u32 = 15;
+    const NO_MESSAGES: u32 = 128 | (3 << 9);
+    let (mut cpu, applet, proxy, state_getter) = applet_chain();
+    let tls = cpu.tls_base();
+    ipc_request(&mut cpu, applet, 4, Some(proxy), 1); // GetSelfController
+    let self_controller = cpu.mem.read_u32(tls + 0x30).unwrap();
+
+    // Drain the one message AM has waiting before the applet's first poll.
+    ipc_request(&mut cpu, applet, 4, Some(state_getter), 0); // GetEventHandle
+    ipc_request(&mut cpu, applet, 4, Some(state_getter), 1); // ReceiveMessage
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), FOCUS_STATE_CHANGED);
+    ipc_request(&mut cpu, applet, 4, Some(state_getter), 1);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), NO_MESSAGES, "the queue should be empty");
+
+    build_ipc_request(&mut cpu, 4, Some(self_controller), 50);
+    cpu.mem.write_u8(tls + 0x30, 1).unwrap();
+    run_ipc_request(&mut cpu, applet);
+
+    ipc_request(&mut cpu, applet, 4, Some(state_getter), 1);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "nothing was queued to display");
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), REQUEST_TO_DISPLAY);
+
+    // Once, not on every poll -- the mistake that made JKSV re-process a focus
+    // change every frame.
+    ipc_request(&mut cpu, applet, 4, Some(state_getter), 1);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), NO_MESSAGES, "it was queued twice");
+
+    // And the approval that follows is accepted. It used to reach
+    // `unimplemented_command`, which `nnSdk` answers with an svcBreak.
+    ipc_request(&mut cpu, applet, 4, Some(self_controller), 51);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "ApproveToDisplay was refused");
+}
+
+#[test]
 fn parental_control_hands_out_the_events_it_is_asked_for() {
     // The Home Menu opens `pctl`, asks IParentalControlService for its
     // synchronisation event, and R_ABORT_UNLESSes on the answer. Refusing the
