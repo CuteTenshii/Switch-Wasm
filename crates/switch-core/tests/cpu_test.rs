@@ -4938,6 +4938,48 @@ fn vi_reads_a_control_request_in_either_encoding() {
 }
 
 #[test]
+fn the_system_shared_buffer_hands_out_slots_an_applet_can_present() {
+    // The Home Menu and the system's own applets do not render into a layer of
+    // their own. AM shares one buffer between them: the applet asks for a slot
+    // in it, draws there, and presents the slot back. The whole path turns on
+    // `IsSystemBufferSharingEnabled` succeeding -- refuse that and qlaunch
+    // builds a swapchain instead and never draws one triangle into it.
+    const VI: u64 = 0xB500;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(VI, "vi:m");
+    let tls = cpu.tls_base();
+
+    // GetSharedBufferMemoryHandleId -> the nvmap handle the applet maps the
+    // buffer by, and how big it is. The buffer is the system's, so this is
+    // where it comes into being; nothing in the guest ever created it.
+    ipc_request(&mut cpu, VI, 4, None, 8225);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+    assert_ne!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "no nvmap handle came back");
+    assert_eq!(
+        cpu.mem.read_u64(tls + 0x28).unwrap(),
+        u64::from(switch_core::cpu::SHARED_BUFFER_SIZE)
+    );
+
+    // AcquireSharedFrameBuffer -> an empty fence, the slots that exist, and
+    // the one to draw into. Two slots exist and they alternate; handing out
+    // the same one twice would have the applet overwrite the frame the display
+    // is still scanning.
+    let mut acquired = Vec::new();
+    for _ in 0..4 {
+        ipc_request(&mut cpu, VI, 4, None, 8254);
+        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+        assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "the fence should be empty");
+        assert_eq!(cpu.mem.read_u32(tls + 0x44).unwrap(), 0);
+        assert_eq!(cpu.mem.read_u32(tls + 0x48).unwrap(), 1);
+        assert_eq!(cpu.mem.read_u32(tls + 0x4c).unwrap() as i32, -1);
+        acquired.push(cpu.mem.read_u64(tls + 0x58).unwrap());
+    }
+    assert_eq!(acquired, vec![0, 1, 0, 1], "the two slots did not alternate");
+}
+
+#[test]
 fn an_unfilled_out_parameter_reads_as_zero_not_as_the_request() {
     // A reply is written *over* the request, in the same TLS buffer, and the
     // padding its header declares is four words wide -- room for a small out

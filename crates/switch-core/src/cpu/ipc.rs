@@ -1651,9 +1651,130 @@ impl Cpu {
             3204 | 3206 | 3208 => 0u32.to_le_bytes().to_vec(),
             // GetDisplayContrastRatio: unadjusted.
             3210 => 1.0f32.to_le_bytes().to_vec(),
+            // The system shared buffer, which is how the Home Menu and every
+            // system applet actually draw. See [`Cpu::vi_shared_buffer`].
+            8225 | 8250 | 8251 | 8252 | 8253 | 8254 | 8255 | 8256 | 8258 => {
+                return Some(self.vi_shared_buffer(tls, cmd_id?));
+            }
             _ => return None,
         };
         Some(self.write_ipc_response(tls, 0, &[], &raw, &[]))
+    }
+
+    /// `ISystemDisplayService`'s shared-buffer commands.
+    ///
+    /// AM hands the system's applets one buffer between them rather than a
+    /// layer each: an applet asks for a slot, renders into it and presents the
+    /// slot back. This is the path the Home Menu takes, and it takes it the
+    /// moment `IsSystemBufferSharingEnabled` succeeds — refuse that and it
+    /// falls back to building a swapchain of its own, which it then never
+    /// draws a single triangle into.
+    fn vi_shared_buffer(&mut self, tls: u32, cmd_id: u32) -> Result<()> {
+        use super::{
+            SHARED_BUFFER_ADDR, SHARED_BUFFER_HEIGHT, SHARED_BUFFER_SIZE, SHARED_BUFFER_SLOTS,
+            SHARED_BUFFER_SLOT_SIZE, SHARED_BUFFER_STRIDE, SHARED_BUFFER_USABLE_SLOTS,
+            SHARED_BUFFER_WIDTH,
+        };
+        /// `NvMultiFence`: a count and four `{ id, value }` pairs.
+        const FENCE_SIZE: usize = 4 + 4 * 8;
+        match cmd_id {
+            // GetSharedBufferMemoryHandleId(u64 buffer_id, aruid) ->
+            // s32 nvmap_handle, u64 size, and the pool layout in the out
+            // buffer. The buffer is ours, not the guest's, so this is where it
+            // comes into being and gets an nvmap handle to be mapped by.
+            8225 => {
+                let (handle, _) = self.shared_buffer_object();
+                let mut layout = [0u8; 0x188];
+                layout[..4].copy_from_slice(&(SHARED_BUFFER_SLOTS as i32).to_le_bytes());
+                for slot in 0..SHARED_BUFFER_SLOTS as usize {
+                    let at = 8 + slot * 0x18;
+                    let offset = u64::from(SHARED_BUFFER_SLOT_SIZE) * slot as u64;
+                    layout[at..at + 8].copy_from_slice(&offset.to_le_bytes());
+                    layout[at + 8..at + 16]
+                        .copy_from_slice(&u64::from(SHARED_BUFFER_SLOT_SIZE).to_le_bytes());
+                    layout[at + 16..at + 20]
+                        .copy_from_slice(&(SHARED_BUFFER_WIDTH as i32).to_le_bytes());
+                    layout[at + 20..at + 24]
+                        .copy_from_slice(&(SHARED_BUFFER_HEIGHT as i32).to_le_bytes());
+                }
+                self.vi_fill_out_buffer(tls, &layout);
+                let mut raw = Vec::with_capacity(0x10);
+                raw.extend_from_slice(&handle.to_le_bytes());
+                raw.extend_from_slice(&[0; 4]);
+                raw.extend_from_slice(&u64::from(SHARED_BUFFER_SIZE).to_le_bytes());
+                self.write_ipc_response(tls, 0, &[], &raw, &[])
+            }
+            // AcquireSharedFrameBuffer(u64 layer_id) -> fence, s32 slots[4],
+            // s64 target slot. The fence is empty: whatever was drawn into the
+            // slot last time has already been scanned out.
+            8254 => {
+                let slot = self.shared_buffer_slot;
+                self.shared_buffer_slot = (slot + 1) % SHARED_BUFFER_USABLE_SLOTS;
+                let mut raw = vec![0u8; FENCE_SIZE];
+                for i in 0..4i32 {
+                    let index = if (i as u32) < SHARED_BUFFER_USABLE_SLOTS { i } else { -1 };
+                    raw.extend_from_slice(&index.to_le_bytes());
+                }
+                raw.resize(raw.len().next_multiple_of(8), 0);
+                raw.extend_from_slice(&i64::from(slot).to_le_bytes());
+                self.write_ipc_response(tls, 0, &[], &raw, &[])
+            }
+            // PresentSharedFrameBuffer(fence, Rect crop, u32 transform,
+            // s32 swap interval, u64 layer_id, s64 slot). The slot is the last
+            // field, and it is the frame.
+            8255 => {
+                let data = self.ipc_request_data(tls);
+                let slot = self.mem.read_u64(data.wrapping_add(0x48)).unwrap_or(0) as u32;
+                let (_, id) = self.shared_buffer_object();
+                let buffer = crate::gpu::DisplayBuffer {
+                    nvmap_id: id,
+                    offset: SHARED_BUFFER_SLOT_SIZE.wrapping_mul(slot),
+                    width: SHARED_BUFFER_WIDTH,
+                    height: SHARED_BUFFER_HEIGHT,
+                    pitch: SHARED_BUFFER_STRIDE,
+                    layout: crate::gpu::NV_LAYOUT_BLOCK_LINEAR,
+                    block_height_log2: 4,
+                    color_format: 0x01_0053_2120, // A8B8G8R8
+                };
+                self.nv.gpu.present(&self.mem, &buffer)?;
+                if self.trace_nv {
+                    eprintln!(
+                        "[vi] presented shared frame {} from slot {slot}",
+                        self.nv.gpu.frames
+                    );
+                }
+                let _ = SHARED_BUFFER_ADDR;
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // GetSharedFrameBufferAcquirableEvent: a slot is always free, so
+            // the event is signalled and stays that way. An applet waits on it
+            // before every acquire.
+            8256 => {
+                let h = self.alloc_event("vi:shared-buffer", false);
+                self.signal_event(h);
+                self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+            }
+            // Open/Close/Connect/DisconnectSharedLayer, CancelSharedFrameBuffer:
+            // there is one shared layer and it is always connected.
+            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// The system shared buffer's nvmap `(handle, id)`, creating it on first
+    /// use. Unlike every other nvmap object this one is not the guest's — the
+    /// system owns it and the applet is only lent slots in it — so it is
+    /// registered here rather than through `NVMAP_IOC_CREATE`.
+    fn shared_buffer_object(&mut self) -> (u32, u32) {
+        if let Some(pair) = self.shared_buffer {
+            return pair;
+        }
+        let size = super::SHARED_BUFFER_SIZE;
+        let addr = super::SHARED_BUFFER_ADDR;
+        let handle = self.nv.gpu.nvmap.create(size);
+        let _ = self.nv.gpu.nvmap.alloc(handle, 0, 0, 0x1000, 0, addr);
+        let id = self.nv.gpu.nvmap.get(handle).map(|h| h.id).unwrap_or(0);
+        self.shared_buffer = Some((handle, id));
+        (handle, id)
     }
 
     /// Write one element into the request's out buffer, if the caller left
@@ -2779,11 +2900,15 @@ impl Cpu {
                 // actually models. Reporting it enabled would commit the
                 // caller to asking for a shared buffer handle that nothing
                 // can produce.
-                Some(41) => {
-                    /// `am` description 2: the applet asked about something
-                    /// this system does not offer it.
-                    const NOT_AVAILABLE: u32 = 128 | (2 << 9);
-                    self.write_ipc_response(tls, NOT_AVAILABLE, &[], &[], &[])
+                Some(41) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // GetSystemSharedBufferHandle -> buffer id;
+                // GetSystemSharedLayerHandle -> buffer id + layer id.
+                Some(43) => self.write_ipc_response(tls, 0, &[], &1u64.to_le_bytes(), &[]),
+                Some(42) => {
+                    let mut raw = Vec::with_capacity(16);
+                    raw.extend_from_slice(&1u64.to_le_bytes());
+                    raw.extend_from_slice(&1u64.to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &raw, &[])
                 }
                 // CreateManagedDisplayLayer -> the layer id the caller then
                 // passes to `vi`'s OpenLayer. The display stub only models one
@@ -2793,9 +2918,14 @@ impl Cpu {
                 // CreateManagedDisplaySeparableLayer -> the same layer plus a
                 // recording layer, which nothing here records from.
                 Some(44) => {
+                    // The recording layer is reported as 0, not as the layer
+                    // itself. `vi` here models one layer and calls it 1, and
+                    // handing the same id back twice invites the caller to
+                    // open it a second time and rebind the binder underneath
+                    // its own swapchain.
                     let mut raw = Vec::with_capacity(16);
                     raw.extend_from_slice(&1u64.to_le_bytes());
-                    raw.extend_from_slice(&1u64.to_le_bytes());
+                    raw.extend_from_slice(&0u64.to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &raw, &[])
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),

@@ -77,6 +77,28 @@ pub const THREAD_TLS_BASE: u32 = 0x1FE1_0000;
 /// each keeps the newlib reentrancy struct that follows out of the way too.
 pub const THREAD_TLS_STRIDE: u32 = 0x1000;
 
+/// The system shared buffer: the surface the Home Menu and the system's own
+/// applets actually draw into. It is not a layer of their own — AM hands out
+/// one buffer the whole system shares, an applet asks `vi` for a slot in it,
+/// renders there and presents the slot back.
+///
+/// The geometry is the console's, and it is what the applets expect to be
+/// told: seven slots, each a 1280x768 block-linear RGBA8888 image of which
+/// the top 1280x720 is the visible frame. The extra 48 rows are the
+/// block-linear padding, not picture.
+pub const SHARED_BUFFER_ADDR: u32 = 0x7E00_0000;
+pub const SHARED_BUFFER_SLOTS: u32 = 7;
+pub const SHARED_BUFFER_WIDTH: u32 = 1280;
+pub const SHARED_BUFFER_HEIGHT: u32 = 720;
+/// Rows actually allocated per slot, rounded up for the block-linear layout.
+pub const SHARED_BUFFER_SLOT_ROWS: u32 = 768;
+pub const SHARED_BUFFER_STRIDE: u32 = SHARED_BUFFER_WIDTH * 4;
+pub const SHARED_BUFFER_SLOT_SIZE: u32 = SHARED_BUFFER_STRIDE * SHARED_BUFFER_SLOT_ROWS;
+pub const SHARED_BUFFER_SIZE: u32 = SHARED_BUFFER_SLOT_SIZE * SHARED_BUFFER_SLOTS;
+/// Only the first two slots are ever handed out, which is what the console
+/// reports too — `AcquireSharedFrameBuffer` answers `{0, 1, -1, -1}`.
+pub const SHARED_BUFFER_USABLE_SLOTS: u32 = 2;
+
 /// The AM messages this emulator queues for the running applet. Horizon has
 /// many more; these are the two an applet's own boot turns on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,6 +452,10 @@ pub struct Cpu {
     /// waiting before the process's first poll, and reports "no message" ever
     /// after unless the state really changes.
     applet_focus_announced: bool,
+    /// The system shared buffer's nvmap `(handle, id)` once an applet has
+    /// asked for it, and the slot the next acquire hands out.
+    shared_buffer: Option<(u32, u32)>,
+    shared_buffer_slot: u32,
     /// Whether the process opened an *application* proxy. It decides which
     /// message that transition is: an application is told `FocusStateChanged`,
     /// while an applet — every one of the system's own, the Home Menu included
@@ -699,6 +725,8 @@ impl Cpu {
             domain_objects: HashMap::new(),
             vi_ifaces: HashMap::new(),
             applet_messages: VecDeque::new(),
+            shared_buffer: None,
+            shared_buffer_slot: 0,
             applet_focus_announced: false,
             applet_is_application: true,
             applet_event: None,
