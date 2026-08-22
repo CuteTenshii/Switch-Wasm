@@ -1697,6 +1697,13 @@ impl Cpu {
                     layout[at + 20..at + 24]
                         .copy_from_slice(&(SHARED_BUFFER_HEIGHT as i32).to_le_bytes());
                 }
+                if self.trace_nv {
+                    eprintln!(
+                        "[vi] shared pool layout -> recv buffer {:x?}, static {:x?}",
+                        self.ipc_recv_buffer(tls, 0),
+                        self.ipc_recv_static_buffers(tls)
+                    );
+                }
                 self.vi_fill_out_buffer(tls, &layout);
                 let mut raw = Vec::with_capacity(0x10);
                 raw.extend_from_slice(&handle.to_le_bytes());

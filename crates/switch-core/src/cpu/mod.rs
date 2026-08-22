@@ -1525,6 +1525,16 @@ impl Cpu {
         }
     }
 
+    /// `svcResetSignal`: clear a signalled event, reporting whether it *was*
+    /// signalled. An event this emulator does not model counts as signalled,
+    /// which is the same answer a wait on one gets.
+    pub(crate) fn reset_signal(&mut self, handle: u64) -> bool {
+        match self.events.get_mut(&handle) {
+            Some(event) => std::mem::replace(&mut event.signaled, false),
+            None => true,
+        }
+    }
+
     /// Debug/test counterpart to [`Cpu::service_handles_snapshot`]: bind a
     /// handle to a service name without going through `sm`'s GetService, so a
     /// test can drive one service's IPC surface directly.
@@ -2153,6 +2163,21 @@ impl Cpu {
     /// sampling profilers.
     pub fn current_thread_index(&self) -> usize {
         self.current_thread
+    }
+
+    /// Make every thread the guest created but never started runnable, and
+    /// report how many that was. A debugging lever only: it answers "is this
+    /// process idle because a thread it made never ran" without having to find
+    /// the code that would have started it.
+    pub fn start_created_threads(&mut self) -> usize {
+        let mut started = 0;
+        for thread in &mut self.threads {
+            if thread.state == ThreadState::Created {
+                thread.state = ThreadState::Runnable;
+                started += 1;
+            }
+        }
+        started
     }
 
     pub fn thread_dump(&self) -> String {

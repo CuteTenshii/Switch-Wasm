@@ -4937,6 +4937,41 @@ fn vi_reads_a_control_request_in_either_encoding() {
     assert_ne!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "no domain object came back");
 }
 
+/// `svcResetSignal(handle)`.
+fn reset_signal(cpu: &mut Cpu, handle: u32) -> u64 {
+    cpu.set_reg(0, u64::from(handle));
+    let pc = cpu.get_pc();
+    cpu.mem.map(pc, &svc(0x19).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    cpu.set_pc(pc);
+    cpu.read_x(0)
+}
+
+#[test]
+fn reset_signal_reports_whether_the_event_had_fired() {
+    // `svcResetSignal` is `nn::os::TryWaitSystemEvent`: it clears a signalled
+    // event and fails if there was nothing to clear. Succeeding
+    // unconditionally told every guest that every event it ever polled had
+    // fired, so a loop that drains a queue while its event keeps signalling
+    // had no reason to stop.
+    const APPLET: u64 = 0x9800;
+    const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
+    let (mut cpu, applet, _proxy, state_getter) = applet_chain();
+    let _ = APPLET;
+    let tls = cpu.tls_base();
+
+    // The applet message event starts signalled: AM has the startup focus
+    // transition waiting.
+    ipc_request(&mut cpu, applet, 4, Some(state_getter), 0); // GetEventHandle
+    let message = cpu.mem.read_u32(tls + 0x0c).unwrap();
+    assert_eq!(reset_signal(&mut cpu, message), 0, "the queued message did not announce itself");
+    assert_eq!(
+        reset_signal(&mut cpu, message),
+        RESULT_INVALID_STATE,
+        "it announced itself twice"
+    );
+}
+
 #[test]
 fn the_system_shared_buffer_hands_out_slots_an_applet_can_present() {
     // The Home Menu and the system's own applets do not render into a layer of

@@ -90,6 +90,35 @@ fn main() {
     if let Some((lo, hi)) = trap {
         cpu.mem.watch_writes(lo, hi - lo);
     }
+    // `WATCH_PC=<addr>[,...]` reports the guest backtrace the first few times
+    // execution reaches an address. Finding who calls a thin IPC stub is not a
+    // static question here -- they are reached through vtables, so nothing in
+    // the image points at them.
+    let watch_pc: Vec<u32> = env::var("WATCH_PC")
+        .ok()
+        .map(|v| {
+            v.split(',')
+                .filter_map(|a| u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut watch_hits = 0u32;
+    // `COVER=<lo>:<hi>` records which instructions in a range ever execute.
+    // Chasing a call chain statically stops the moment a function has no
+    // reference anywhere in the image; this answers "which of these ran" for a
+    // whole class at once.
+    let cover: Option<(u32, u32)> = env::var("COVER").ok().and_then(|v| {
+        let (a, b) = v.split_once(':')?;
+        let a = u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok()?;
+        let b = u32::from_str_radix(b.trim().trim_start_matches("0x"), 16).ok()?;
+        Some((a, b))
+    });
+    let mut covered: Vec<bool> =
+        cover.map(|(a, b)| vec![false; ((b - a) / 4) as usize]).unwrap_or_default();
+    // `START_THREADS=<step>` makes every created-but-never-started thread
+    // runnable once, at that step.
+    let start_threads: Option<u64> = env::var("START_THREADS").ok().and_then(|v| v.parse().ok());
+    let mut started_threads = false;
     let mut share = [0u64; 32];
     let mut hot: HashMap<(usize, u32), u64> = HashMap::new();
     let mut traps = 0u32;
@@ -114,16 +143,63 @@ fn main() {
             }
             *hot.entry((t, cpu.get_pc())).or_insert(0u64) += 1;
         }
+        if watch_hits < 8 && !watch_pc.is_empty() && watch_pc.contains(&cpu.get_pc()) {
+            println!(
+                "[watch-pc] {:#x} at step {done} bt={:x?}",
+                cpu.get_pc(),
+                cpu.backtrace(10)
+            );
+            watch_hits += 1;
+        }
+        if let Some(at) = start_threads {
+            if !started_threads && done >= at {
+                started_threads = true;
+                println!("[threads] force-started {}", cpu.start_created_threads());
+            }
+        }
+        if let Some((lo, hi)) = cover {
+            let pc = cpu.get_pc();
+            if pc >= lo && pc < hi {
+                covered[((pc - lo) / 4) as usize] = true;
+            }
+        }
         if cpu.step().is_err() {
             break;
         }
         done += 1;
     }
+    if let Some((lo, _)) = cover {
+        let mut run: Option<u32> = None;
+        for (i, &hit) in covered.iter().enumerate() {
+            let at = lo + i as u32 * 4;
+            match (hit, run) {
+                (true, None) => run = Some(at),
+                (false, Some(start)) => {
+                    println!("[cover] {start:#x}..{at:#x}");
+                    run = None;
+                }
+                _ => {}
+            }
+        }
+        if let Some(start) = run {
+            println!("[cover] {start:#x}..end");
+        }
+    }
     println!("[threads] sampled share = {:?}", &share[..]);
     println!("[bt] {:#x} <- {:x?}", cpu.get_pc(), cpu.backtrace(12));
+    let hot_snapshot = hot.clone();
     let mut top: Vec<_> = hot.into_iter().collect();
     top.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
-    for ((t, pc), n) in top.into_iter().take(16) {
+    let mut by_page: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    for (&(_, pc), &n) in &hot_snapshot {
+        *by_page.entry(pc & !0xFFF).or_insert(0) += n;
+    }
+    let mut pages: Vec<_> = by_page.into_iter().collect();
+    pages.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+    for (page, n) in pages.into_iter().take(20) {
+        println!("[hot-page] {page:#x} {n}");
+    }
+    for ((t, pc), n) in top.into_iter().take(10) {
         println!("[hot] thread {t} pc={pc:#x} {n}");
     }
     print!("{}", cpu.thread_dump());

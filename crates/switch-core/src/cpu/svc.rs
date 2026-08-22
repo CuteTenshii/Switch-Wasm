@@ -364,10 +364,24 @@ impl Cpu {
                 self.signal_process_wide_key(key, count);
                 Ok(())
             }
-            0x0C | 0x0D | 0x0E | 0x0F | 0x16 | 0x17 | 0x19 | 0x28 => {
+            0x0C | 0x0D | 0x0E | 0x0F | 0x16 | 0x17 | 0x28 => {
                 // get/set thread priority + core mask / CloseHandle /
-                // ResetSignal / CancelSynchronization / ReturnFromException
+                // CancelSynchronization / ReturnFromException
                 self.write_zr(0, RESULT_OK);
+                Ok(())
+            }
+            0x19 => {
+                // ResetSignal(handle): clear a signalled event, and report
+                // whether it *was* signalled.
+                //
+                // This is `nn::os::TryWaitSystemEvent`, so succeeding
+                // unconditionally told every guest that every event it polled
+                // had fired -- a loop that drains an event queue while the
+                // event keeps signalling has no reason to ever stop.
+                const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
+                let handle = self.read_zr(0);
+                let was_signalled = self.reset_signal(handle);
+                self.write_zr(0, if was_signalled { RESULT_OK } else { RESULT_INVALID_STATE });
                 Ok(())
             }
             0x10 => {
@@ -521,7 +535,10 @@ impl Cpu {
                 // time -- and took 92% of every instruction the process
                 // executed, so the threads that prepare the frame it would
                 // draw never got the CPU.
-                if timeout != 0 && self.vsync_event.is_some_and(|v| handles.contains(&v)) {
+                if timeout != 0
+                    && std::env::var("NO_VSYNC_THROTTLE").is_err()
+                    && self.vsync_event.is_some_and(|v| handles.contains(&v))
+                {
                     if !self.has_other_runnable() {
                         // Nothing else can run, so there is no work to overlap
                         // the wait with: idle straight to the next tick instead
