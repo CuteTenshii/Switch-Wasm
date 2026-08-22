@@ -156,7 +156,7 @@ impl NvDrv {
                 data.len()
             );
         }
-        match (&file, ioc_type) {
+        let outcome = match (&file, ioc_type) {
             (NvFile::NvMap, TYPE_NVMAP) => self.nvmap_ioctl(nr, data),
             (NvFile::NvHostCtrl, TYPE_NVHOST) => self.nvhost_ctrl_ioctl(nr, data),
             (NvFile::NvHostCtrlGpu, TYPE_CTRL_GPU) => self.ctrl_gpu_ioctl(nr, data, inline_out),
@@ -166,7 +166,22 @@ impl NvDrv {
             }
             (NvFile::Unsupported { .. }, _) => Ok(NV_NOT_SUPPORTED),
             _ => Ok(NV_NOT_IMPLEMENTED),
+        };
+        // An ioctl that fails is traced whether or not tracing is on. The
+        // successes are noise and the failures are not: every driver call here
+        // is one the guest believes cannot fail, and the ones that do are
+        // invisible otherwise -- they leave no line at all, because the traces
+        // that would carry them run *after* the work they describe.
+        match &outcome {
+            Ok(code) if *code != NV_OK => eprintln!(
+                "[nv] FAILED {file:?} type={ioc_type:#04x} nr={nr:#04x} -> {code:#x}"
+            ),
+            Err(error) => eprintln!(
+                "[nv] ERROR {file:?} type={ioc_type:#04x} nr={nr:#04x}: {error}"
+            ),
+            _ => {}
         }
+        outcome
     }
 
     /// `nvQueryEvent`: the guest wants a kernel event it can wait on. Work is
