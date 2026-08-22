@@ -19,3 +19,8 @@ make serve
 ```
 
 Then open http://localhost:8000
+
+## Acknowlegments
+
+- [Eden Emulator](https://git.eden-emu.dev/eden-emu/eden)
+- [EnvyTools](https://github.com/envytools/envytools)
