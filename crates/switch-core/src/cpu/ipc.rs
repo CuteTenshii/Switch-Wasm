@@ -964,7 +964,8 @@ impl Cpu {
                 // `nn::fs::OpenDirectory("rom:/Data")` found nothing.
                 let offset = self.mem.read_u64(data)?;
                 let requested = self.mem.read_u64(data.wrapping_add(8))?;
-                if std::env::var("TRACE_IPC").is_ok() {
+                let trace_storage = std::env::var("TRACE_IPC").is_ok();
+                if trace_storage {
                     eprintln!("[storage] read offset={offset:#x} size={requested:#x} of {size:#x}");
                 }
                 let start = offset.min(size);
@@ -993,6 +994,18 @@ impl Cpu {
                         written += got as u32;
                         pos += got as u64;
                     }
+                }
+                if trace_storage {
+                    // What actually landed in the guest's buffer. A read that
+                    // reports a size and delivers zeroes is indistinguishable
+                    // from a successful one until you look.
+                    let head: Vec<u8> = match self.ipc_recv_buffer_addr(tls, 0) {
+                        Some(addr) => (0..16)
+                            .map(|i| self.mem.read_u8(addr.wrapping_add(i)).unwrap_or(0))
+                            .collect(),
+                        None => Vec::new(),
+                    };
+                    eprintln!("[storage]   -> {head:02x?}");
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
