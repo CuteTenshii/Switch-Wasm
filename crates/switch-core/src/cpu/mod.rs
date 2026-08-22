@@ -1379,10 +1379,6 @@ impl Cpu {
     /// Whatever the applet pops *after* that is its own launch struct, which
     /// only a real caller could fill in; nothing is queued for it.
     fn seed_applet_launch_arguments(&mut self) {
-        /// How much of an applet-specific launch struct to provide. Bigger
-        /// than any of them; an applet reads the prefix it knows.
-        const APPLET_INPUT_SIZE: usize = 0x100;
-
         self.am_in_data.clear();
         if !crate::cpu::ipc::is_library_applet(self.program_id) {
             return;
@@ -1404,13 +1400,12 @@ impl Cpu {
         // elapsed time against it.
         args.extend_from_slice(&0u64.to_le_bytes());
         self.am_in_data.push_back(args);
-        // Then the applet's own launch struct, which only its caller could
-        // fill in. Zeroed: every one of these starts with a mode or type
-        // selector, and zero is the ordinary entry point for the applets that
-        // have one (the Mii editor opens on the list, the amiibo cabinet on
-        // nickname-and-owner settings). Refusing the pop instead is what a
-        // real applet treats as a launch it cannot honour, and it aborts.
-        self.am_in_data.push_back(vec![0u8; APPLET_INPUT_SIZE]);
+        // Then the applet's own launch struct — see
+        // [`crate::cpu::ipc::applet_launch_argument`]. Refusing the pop
+        // instead is what a real applet treats as a launch it cannot honour,
+        // and it aborts.
+        let argument = crate::cpu::ipc::applet_launch_argument(self.program_id);
+        self.am_in_data.push_back(argument);
     }
 
     /// Set the decrypted RomFS bytes `OpenDataStorageByCurrentProcess`

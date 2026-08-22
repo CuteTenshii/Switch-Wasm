@@ -1363,6 +1363,27 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
+            // GetInitialLaunchSettings -> nn::settings::system::
+            // InitialLaunchSettings { InitialLaunchFlag flags; pad[4];
+            // SteadyClockTimePoint timestamp; }.
+            //
+            // The flags say whether the console has ever been through
+            // first-time setup: bit 0 completion, bit 8 the user was added,
+            // bit 16 the clock was set. Answering zero means "brand new, never
+            // set up", and the Home Menu will not draw a menu for a console
+            // that has not finished its setup wizard — it waits to hand over
+            // to `starter` instead, which nothing here can launch. This
+            // console has been set up.
+            Some(75) => {
+                const COMPLETION: u32 = 1;
+                const USER_ADDITION: u32 = 1 << 8;
+                const TIMESTAMP: u32 = 1 << 16;
+                let mut settings = [0u8; 0x20];
+                settings[..4].copy_from_slice(
+                    &(COMPLETION | USER_ADDITION | TIMESTAMP).to_le_bytes(),
+                );
+                self.write_ipc_response(tls, 0, &[], &settings, &[])
+            }
             // GetSerialNumber -> SetSysSerialNumber { char number[0x18] }.
             // Real hardware's is burned in at manufacturing and unique per
             // console; this is a fixed placeholder, not a real serial.
@@ -7917,8 +7938,48 @@ pub(crate) fn is_library_applet(program_id: u64) -> bool {
 pub(crate) fn applet_interface_version(program_id: u64) -> u32 {
     match applet_id_for(program_id) {
         0x12 => 3, // miiEdit
+        // swkbd numbers its interface with the firmware it shipped in rather
+        // than from one upwards: 0x8000D is 6.0.0 and later, which is what an
+        // 18.0.1 keyboard understands. Claiming version 1 describes a 1.0.0
+        // caller, whose launch struct is a different shape and half the size.
+        APPLET_SWKBD => 0x8_000D,
         _ => 1,
     }
+}
+
+/// `AppletId_LibraryAppletSwkbd`.
+const APPLET_SWKBD: u32 = 0x11;
+
+/// The applet-specific launch struct a library applet pops after the common
+/// arguments — the one only its caller could fill in.
+///
+/// Every applet defines its own, and gets no further than reading it: a
+/// keyboard with no configuration has no size to draw itself at. Zeroes are
+/// the ordinary entry point for the applets whose struct starts with a mode
+/// selector, so they stay the default; `swkbd` is the exception, because its
+/// configuration is what says how long the text may be and what the confirm
+/// button reads.
+pub(crate) fn applet_launch_argument(program_id: u64) -> Vec<u8> {
+    /// Enough of any other applet's struct for it to read the prefix it knows.
+    const GENERIC_SIZE: usize = 0x100;
+    if applet_id_for(program_id) != APPLET_SWKBD {
+        return vec![0u8; GENERIC_SIZE];
+    }
+    // `SwkbdConfigCommon` followed by `SwkbdConfigNew`, the 6.0.0+ shape.
+    const CONFIG_SIZE: usize = 0x4C8;
+    const OK_TEXT: usize = 0x004;
+    const MAX_TEXT_LENGTH: usize = 0x3AC;
+    const MIN_TEXT_LENGTH: usize = 0x3B0;
+    let mut config = vec![0u8; CONFIG_SIZE];
+    // SwkbdType_Normal, the full alphanumeric keyboard.
+    config[0..4].copy_from_slice(&0u32.to_le_bytes());
+    for (index, unit) in "OK".encode_utf16().enumerate() {
+        let at = OK_TEXT + index * 2;
+        config[at..at + 2].copy_from_slice(&unit.to_le_bytes());
+    }
+    config[MAX_TEXT_LENGTH..MAX_TEXT_LENGTH + 4].copy_from_slice(&32u32.to_le_bytes());
+    config[MIN_TEXT_LENGTH..MIN_TEXT_LENGTH + 4].copy_from_slice(&0u32.to_le_bytes());
+    config
 }
 
 /// The `AppletId` a system applet reports for itself, from its title id.
