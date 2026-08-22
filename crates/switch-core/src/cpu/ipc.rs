@@ -2944,6 +2944,19 @@ impl Cpu {
                 }
                 // SetCpuBoostMode: no clock governor to move.
                 Some(66) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled:
+                // a title that is about to hand the console to another
+                // program (`nn::oe::ExecuteProgram`) asks AM to send it an
+                // Exit message when that happens, so it shuts down instead of
+                // sitting behind the program it launched.
+                //
+                // It is a latch with no argument and no reply — asking is
+                // setting it — and nothing is recorded because nothing here
+                // ever executes a next program, so the message it arms could
+                // never be sent. Tomodachi Life asks for it during startup,
+                // and refusing it aborted `nnSdk` before the title reached a
+                // service.
+                Some(900) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IApplicationFunctions: PopLaunchParameter fails when hbmenu
