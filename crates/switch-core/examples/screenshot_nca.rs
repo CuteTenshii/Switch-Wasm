@@ -46,10 +46,15 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    if let Some(i) = nca.romfs_section_index() {
-        if let Ok(r) = nca.decrypt_romfs_section(&raw, &keys, i) {
-            cpu.set_romfs(r);
-        }
+    match nca.romfs_section_index() {
+        Some(i) => match nca.decrypt_romfs_section(&raw, &keys, i) {
+            Ok(r) => {
+                println!("[romfs] section {i}: {} bytes", r.len());
+                cpu.set_romfs(r);
+            }
+            Err(e) => println!("[romfs] section {i} failed to decrypt: {e}"),
+        },
+        None => println!("[romfs] no romfs section"),
     }
     let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/assets/font.ttf");
     if let Ok(b) = fs::read(font) {
@@ -92,8 +97,8 @@ fn main() {
     let budget: u64 = env::var("STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(40_000_000_000);
     while !cpu.halted && cpu.nv.gpu.frames < want && done < budget {
         if let Some(at) = cpu.mem.take_watch_hit() {
-            if traps < 24 {
-                let v = cpu.mem.read_u32(at & !3).unwrap_or(0);
+            let v = cpu.mem.read_u32(at & !3).unwrap_or(0);
+            if traps < 24 && v != 0 {
                 println!(
                     "[trap] wrote {at:#x} = {v:#010x} at step {done} pc={:#x} bt={:x?}",
                     cpu.get_pc(),
