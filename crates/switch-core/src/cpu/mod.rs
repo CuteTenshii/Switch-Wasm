@@ -452,6 +452,11 @@ pub struct Cpu {
     /// waiting before the process's first poll, and reports "no message" ever
     /// after unless the state really changes.
     applet_focus_announced: bool,
+    /// The applet's sleep-lock event, and whether the lock is held. There is
+    /// one of each per applet — handing out a fresh event per call would
+    /// signal an object nobody is waiting on.
+    sleep_lock_event: Option<u64>,
+    sleep_lock_acquired: bool,
     /// The system shared buffer's nvmap `(handle, id)` once an applet has
     /// asked for it, and the slot the next acquire hands out.
     shared_buffer: Option<(u32, u32)>,
@@ -725,6 +730,8 @@ impl Cpu {
             domain_objects: HashMap::new(),
             vi_ifaces: HashMap::new(),
             applet_messages: VecDeque::new(),
+            sleep_lock_event: None,
+            sleep_lock_acquired: false,
             shared_buffer: None,
             shared_buffer_slot: 0,
             applet_focus_announced: false,
@@ -1522,6 +1529,13 @@ impl Cpu {
             if event.auto_clear {
                 event.signaled = false;
             }
+        }
+    }
+
+    /// Clear an event's signal.
+    pub(crate) fn clear_event(&mut self, handle: u64) {
+        if let Some(event) = self.events.get_mut(&handle) {
+            event.signaled = false;
         }
     }
 

@@ -2760,8 +2760,24 @@ impl Cpu {
                 // changes resolution, so they are handed out and never
                 // signalled — see the note on GetEventHandle above for why a
                 // wait on them still returns.
-                Some(13) | Some(61) => {
-                    let h = self.alloc_event("am:common-state-getter", true);
+                Some(13) => {
+                    let h = match self.sleep_lock_event {
+                        Some(h) => h,
+                        None => {
+                            let h = self.alloc_event("am:sleep-lock", false);
+                            self.sleep_lock_event = Some(h);
+                            h
+                        }
+                    };
+                    if self.sleep_lock_acquired {
+                        self.signal_event(h);
+                    }
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+                }
+                // GetDefaultDisplayResolutionChangeEvent: handed out and never
+                // signalled, because the resolution never changes.
+                Some(61) => {
+                    let h = self.alloc_event("am:display-resolution-changed", true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 // GetDefaultDisplayResolution: the same 1280x720 the display
@@ -2772,13 +2788,28 @@ impl Cpu {
                     raw.extend_from_slice(&720u32.to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &raw, &[])
                 }
-                // RequestToAcquireSleepLock / ReleaseSleepLock /
-                // ReleaseSleepLockTransiently / SetCpuBoostMode: there is no
-                // sleep state or clock governor to move, so accepting the
-                // request is the whole implementation.
-                Some(10) | Some(11) | Some(12) | Some(66) => {
+                // RequestToAcquireSleepLock: nothing else here contends the
+                // lock, so it is granted at once — and the event that says so
+                // fires with it. Handing that event out dark left an applet
+                // waiting for permission to keep the console awake that was
+                // never going to come.
+                Some(10) => {
+                    self.sleep_lock_acquired = true;
+                    if let Some(h) = self.sleep_lock_event {
+                        self.signal_event(h);
+                    }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // ReleaseSleepLock / ReleaseSleepLockTransiently.
+                Some(11) | Some(12) => {
+                    self.sleep_lock_acquired = false;
+                    if let Some(h) = self.sleep_lock_event {
+                        self.clear_event(h);
+                    }
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // SetCpuBoostMode: no clock governor to move.
+                Some(66) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IApplicationFunctions: PopLaunchParameter fails when hbmenu
