@@ -787,7 +787,7 @@ fn horizon_query_memory_and_get_info() {
     assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), 0x0800_0000); // run base
     assert_eq!(cpu.mem.read_u64(0x3008).unwrap(), 0x1_0000); // run size
     assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 3); // type
-    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0b111); // perm (RWX)
+    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0b011); // perm (RW-)
 
     // An untouched soft-mapped page reports as unmapped (type 0, no perm),
     // which is what lets libnx virtmem find free address space.
@@ -2676,7 +2676,7 @@ fn query_memory_writes_40_byte_memoryinfo() {
     assert_eq!(cpu.mem.read_u64(0x3008).unwrap(), 0x1000);
     assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 3);   // type (mapped)
     assert_eq!(cpu.mem.read_u32(0x3014).unwrap(), 0);   // attr
-    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0b111); // perm (RWX)
+    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0b011); // perm (RW-)
     assert_eq!(cpu.mem.read_u32(0x301c).unwrap(), 0);   // device_refcount
     assert_eq!(cpu.mem.read_u32(0x3020).unwrap(), 0);   // ipc_refcount
     assert_eq!(cpu.mem.read_u32(0x3024).unwrap(), 0);   // padding
@@ -2698,6 +2698,47 @@ fn query_memory_writes_40_byte_memoryinfo() {
     assert_eq!(cpu.mem.read_u64(0x3028).unwrap(), 0);
     assert_eq!(cpu.mem.read_u64(0x3040).unwrap(), 0); // pageinfo written via x1? no, x1 holds it
     assert_eq!(cpu.read_x(1), 0); // unmapped soft page -> page info 0
+}
+
+#[test]
+fn query_memory_gives_the_execute_bit_only_to_module_text() {
+    // Retail `rtld` finds the other loaded modules by walking QueryMemory and
+    // keeping every CodeStatic region that is executable, then reading the
+    // candidate's word at +4 as the offset to its `MOD0` signature. While
+    // every mapped page reported RWX, the first writable region also looked
+    // executable — and `rtld`'s own `.rodata` opens with a note whose second
+    // word is 0x1c, exactly where `MOD0` sits from there. `rtld` accepted it
+    // as a module, relocated itself a second time against a base 0x3000 past
+    // its real one, and ran off the end of the address space.
+    //
+    // So: `.text` reports R-X, the pages after it report RW-, and the two are
+    // separate regions.
+    let text = 0x0800_0000u32;
+    let rodata = 0x0800_3000u32;
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map(0x1000, &svc(0x06).to_le_bytes()).unwrap();
+    cpu.mem.map_zero(text, 0x6000).unwrap();
+    cpu.mem.mark_readonly(text, rodata);
+
+    cpu.set_reg(0, 0x3000); // MemoryInfo out
+    cpu.set_reg(1, 0x4000); // PageInfo out
+    cpu.set_reg(2, (text + 0x1000) as u64);
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), text as u64);
+    assert_eq!(cpu.mem.read_u64(0x3008).unwrap(), (rodata - text) as u64);
+    assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 3); // type (CodeStatic)
+    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0b101); // perm (R-X)
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map(0x1000, &svc(0x06).to_le_bytes()).unwrap();
+    cpu.mem.map_zero(text, 0x6000).unwrap();
+    cpu.mem.mark_readonly(text, rodata);
+    cpu.set_reg(0, 0x3000);
+    cpu.set_reg(1, 0x4000);
+    cpu.set_reg(2, rodata as u64);
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), rodata as u64);
+    assert_eq!(cpu.mem.read_u32(0x3018).unwrap() & 0b100, 0); // not executable
 }
 
 #[test]

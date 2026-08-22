@@ -186,20 +186,26 @@ impl Cpu {
                  // QueryMemory(info, pageInfo, addr): report the contiguous
                  // run of pages in the same state (allocated vs untouched) as
                  // the queried page. Real pages (image, stack, heap, anything
-                 // the app has written to) come back as RWX; untouched
-                 // soft-mapped pages come back as unmapped so libnx virtmem
-                 // address-space walks and reservations see free space. The
-                 // old stub reported the whole low 2 GiB as one RWX region,
-                 // which made deko3d's AS reservation fail.
+                 // the app has written to) come back readable and writable;
+                 // untouched soft-mapped pages come back as unmapped so libnx
+                 // virtmem address-space walks and reservations see free
+                 // space. The old stub reported the whole low 2 GiB as one
+                 // RWX region, which made deko3d's AS reservation fail.
                  //
-                 // A module's `.text` reports the real R-X permission code
-                 // (5) instead of blanket RWX: retail `rtld` discovers the
-                 // other loaded modules (`main`/`subsdk*`/`sdk`) by walking
-                 // `QueryMemory` across the address space and filtering for
-                 // exactly `type == CodeStatic (3) && perm == R-X (5)` before
-                 // checking each hit for a `MOD0` signature — reporting RWX
-                 // there makes every module invisible to that scan, so it
-                 // can never resolve a symbol from another module.
+                 // Only a module's `.text` carries the execute bit. Retail
+                 // `rtld` discovers the other loaded modules
+                 // (`main`/`subsdk*`/`sdk`) by walking `QueryMemory` across
+                 // the address space and keeping every region with
+                 // `type == CodeStatic (3)` that is executable, then reading
+                 // the candidate's first words as a module header: word 1 is
+                 // the offset to its `MOD0` signature. Reporting a blanket
+                 // RWX made every writable page look executable, and the
+                 // first such region — `rtld`'s own `.rodata`, whose leading
+                 // note happens to hold 0x1c where a module header keeps that
+                 // offset, and which really does have `MOD0` 0x1c bytes in —
+                 // passed the check. `rtld` then relocated itself a second
+                 // time against a base 0x3000 past its real one and walked
+                 // off the end of the address space.
                  let out = self.read_zr(0) as u32;
                  let addr = self.read_zr(2) as u32;
                  let region = |a: u32| (self.mem.page_mapped(a & !0xFFF), self.mem.is_readonly(a & !0xFFF));
@@ -218,7 +224,7 @@ impl Cpu {
                  for v in [
                      if mapped { 3u32 } else { 0 }, // type (CodeStatic / Unmapped)
                      0,
-                     if text { 5u32 } else if mapped { 0b111 } else { 0 }, // perm (R-X / RWX / none)
+                     if text { 0b101 } else if mapped { 0b011 } else { 0 }, // perm (R-X / RW- / none)
                      0,
                      0,
                      0,
