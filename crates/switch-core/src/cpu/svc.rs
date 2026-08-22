@@ -917,7 +917,7 @@ impl Cpu {
                         // command with an object id and a handle it never
                         // asked for.
                         "hid" | "hid:dbg" | "hid:sys" | "hid:server"
-                        | "hid:applet-resource" | "hid:vibration-devices" => {
+                        | "hid:applet-resource" => {
                             self.hid_request(tls, handle, cmd_id)?
                         }
                         // lm, the log manager: a title's own diagnostic

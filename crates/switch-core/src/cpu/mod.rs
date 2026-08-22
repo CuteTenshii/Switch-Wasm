@@ -545,11 +545,6 @@ pub struct Cpu {
     /// Storages queued for `ILibraryAppletSelfAccessor::PopInData` — what the
     /// applet's caller would have pushed before starting it.
     am_in_data: VecDeque<Vec<u8>>,
-    /// `am`'s launch-parameter table, by `LaunchParameterKind`: what the
-    /// launcher left for the program it started, for `PopLaunchParameter` to
-    /// hand over. Filled by [`Cpu::seed_launch_parameters`], and emptied by
-    /// the pops — each parameter is delivered once, as on a console.
-    am_launch_parameters: HashMap<u32, Vec<u8>>,
     /// Which storage an `IStorageAccessor` reads and writes. The accessor is
     /// a separate object from the storage it was opened on, and both ends
     /// have to see the same bytes.
@@ -789,7 +784,6 @@ impl Cpu {
             fs_mount: HashMap::new(),
             fs_storage_archive: HashMap::new(),
             am_in_data: VecDeque::new(),
-            am_launch_parameters: HashMap::new(),
             am_storages: HashMap::new(),
             am_storage_of: HashMap::new(),
             am_applets: HashMap::new(),
@@ -1567,32 +1561,7 @@ impl Cpu {
             .entry;
         self.set_pc(entry);
         self.seed_applet_launch_arguments();
-        self.seed_launch_parameters();
         Ok(loaded)
-    }
-
-    /// Fill `am`'s launch-parameter table with what a console's launcher would
-    /// have left for the program being started.
-    ///
-    /// The HOME menu chooses the user before it starts an application and
-    /// passes that choice along as a `PreselectedUser` launch parameter.
-    /// `nn::account::Initialize` pops it and caches the uid; with nothing to
-    /// pop the cached uid stays zero, and `nn::account::OpenPreselectedUser`
-    /// fires its assertion rather than returning a handle — which is where
-    /// Just Dance 2019 aborted, before it had asked for a single service.
-    ///
-    /// A library applet is not started by the menu and gets no preselected
-    /// user; what its caller hands it arrives through `PopInData` instead. See
-    /// [`Cpu::seed_applet_launch_arguments`].
-    fn seed_launch_parameters(&mut self) {
-        self.am_launch_parameters.clear();
-        if crate::cpu::ipc::is_library_applet(self.program_id) {
-            return;
-        }
-        self.am_launch_parameters.insert(
-            crate::cpu::ipc::LAUNCH_PARAMETER_PRESELECTED_USER,
-            crate::cpu::ipc::preselected_user_parameter(),
-        );
     }
 
     /// Queue what a library applet's caller would have pushed before starting
