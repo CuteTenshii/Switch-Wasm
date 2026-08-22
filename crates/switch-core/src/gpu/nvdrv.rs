@@ -593,6 +593,9 @@ impl NvDrv {
 
             // GetErrorInfo / GetErrorNotification: no errors to report.
             (TYPE_CHANNEL, 0x16) | (TYPE_CHANNEL, 0x17) => {
+                if self.gpu.trace {
+                    eprintln!("[nv] channel {nr:#04x} in={:02x?}", data);
+                }
                 for byte in data.iter_mut() {
                     *byte = 0;
                 }

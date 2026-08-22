@@ -2452,6 +2452,7 @@ impl Cpu {
             "am:proxy-service" => match cmd_id {
                 // IApplicationProxyService::OpenApplicationProxy.
                 Some(0) => {
+                    self.set_applet_is_application(true);
                     self.reply_with_interface(tls, handle, "am:application-proxy")?;
                     Ok(())
                 }
@@ -2459,6 +2460,7 @@ impl Cpu {
                 // the pre-3.0.0 `OpenLibraryAppletProxyOld` that differs only
                 // in not taking the applet attribute buffer.
                 Some(200) | Some(201) => {
+                    self.set_applet_is_application(false);
                     self.reply_with_interface(tls, handle, "am:library-applet-proxy")?;
                     Ok(())
                 }
@@ -2468,6 +2470,7 @@ impl Cpu {
                 // title and launches the rest — and it aborts on the spot if
                 // this is refused.
                 Some(100) => {
+                    self.set_applet_is_application(false);
                     self.reply_with_interface(tls, handle, "am:system-applet-proxy")?;
                     Ok(())
                 }
@@ -2596,7 +2599,7 @@ impl Cpu {
                             h
                         }
                     };
-                    if !self.applet_messages.is_empty() {
+                    if self.has_applet_message() {
                         self.signal_event(h);
                     }
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
@@ -2607,7 +2610,7 @@ impl Cpu {
                 // is what made JKSV think focus kept changing.
                 Some(1) => {
                     const NO_MESSAGES: u32 = 128 | (3 << 9); // am, "no message"
-                    match self.applet_messages.pop_front() {
+                    match self.next_applet_message() {
                         Some(message) => {
                             self.write_ipc_response(tls, 0, &[], &message.to_le_bytes(), &[])
                         }
@@ -2941,6 +2944,14 @@ impl Cpu {
                     info[..4].copy_from_slice(&applet_id_for(self.program_id()).to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &info, &[])
                 }
+                // ShouldSetGpuTimeSliceManually -> bool. An applet that owns
+                // the screen outright does not have to divide the GPU with a
+                // running application, so it has no time slice to set.
+                //
+                // Refusing it is what killed `swkbd`: it aborted into
+                // `fatal:u` two million instructions in, before any of the
+                // rendering the rest of this is about.
+                Some(150) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
                 // GetMainAppletIdentityInfo / GetCallerAppletIdentityInfo ->
                 // AppletIdentityInfo { AppletId, pad, u64 title_id }.
                 //

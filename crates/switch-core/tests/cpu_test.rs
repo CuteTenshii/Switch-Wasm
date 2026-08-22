@@ -5043,6 +5043,35 @@ fn the_applet_message_event_starts_signalled_and_clears() {
 }
 
 #[test]
+fn an_applet_is_told_it_came_into_the_foreground_not_that_focus_changed() {
+    // `FocusStateChanged` is the *application's* message. An applet -- every
+    // one of the system's own, the Home Menu included -- is told
+    // `ChangeIntoForeground` instead, and which one it gets is decided by
+    // which proxy it opened. Sending an applet the application's message is
+    // sending it one its own framework does not act on.
+    const CHANGE_INTO_FOREGROUND: u32 = 1;
+    const APPLET: u64 = 0x9700;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(APPLET, "appletAE");
+    let tls = cpu.tls_base();
+
+    ipc_request(&mut cpu, APPLET, 5, None, 0);
+    let proxy_service = cpu.mem.read_u32(tls + 0x20).unwrap();
+    // IAllSystemAppletProxiesService::OpenSystemAppletProxy -- what qlaunch
+    // opens, and what says it is not an application.
+    ipc_request(&mut cpu, APPLET, 4, Some(proxy_service), 100);
+    let proxy = cpu.mem.read_u32(tls + 0x30).unwrap();
+    ipc_request(&mut cpu, APPLET, 4, Some(proxy), 0); // ICommonStateGetter
+    let state_getter = cpu.mem.read_u32(tls + 0x30).unwrap();
+
+    ipc_request(&mut cpu, APPLET, 4, Some(state_getter), 1); // ReceiveMessage
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "no message was waiting");
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), CHANGE_INTO_FOREGROUND);
+}
+
+#[test]
 fn an_applet_that_handles_its_own_display_is_asked_to_display() {
     // `SetHandlesRequestToDisplay(true)` is an applet saying it will decide
     // when it appears. AM answers by queueing `RequestToDisplay`, and the

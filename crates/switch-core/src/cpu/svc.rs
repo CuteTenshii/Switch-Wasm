@@ -250,6 +250,9 @@ impl Cpu {
                 let arg = self.read_zr(2);
                 let stack_top = self.read_zr(3);
                 let handle = self.create_thread(entry, arg, stack_top);
+                if std::env::var("TRACE_WAIT").is_ok() {
+                    eprintln!("[thread] create handle={handle:#x} entry={entry:#x}");
+                }
                 self.write_zr(0, RESULT_OK);
                 self.write_zr(1, handle);
                 Ok(())
@@ -258,7 +261,10 @@ impl Cpu {
                 // StartThread: make it runnable. It gets the CPU at the next
                 // point this thread blocks.
                 let handle = self.read_zr(0);
-                self.start_thread(handle);
+                let started = self.start_thread(handle);
+                if std::env::var("TRACE_WAIT").is_ok() {
+                    eprintln!("[thread] start handle={handle:#x} -> {started}");
+                }
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }

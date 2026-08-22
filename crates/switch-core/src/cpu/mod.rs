@@ -87,6 +87,8 @@ pub(crate) enum AppletMessage {
     /// AM asking an applet that took charge of its own display
     /// (`SetHandlesRequestToDisplay`) to show itself.
     RequestToDisplay = 41,
+    /// The same transition told to an *applet* rather than an application.
+    ChangeIntoForeground = 1,
 }
 
 /// What a guest thread is doing. Threads only switch at the blocking
@@ -424,6 +426,16 @@ pub struct Cpu {
     /// every caller gets the same event and queueing a message can signal the
     /// one that is actually being waited on.
     applet_event: Option<u64>,
+    /// Whether the startup focus transition has been handed out yet. AM has it
+    /// waiting before the process's first poll, and reports "no message" ever
+    /// after unless the state really changes.
+    applet_focus_announced: bool,
+    /// Whether the process opened an *application* proxy. It decides which
+    /// message that transition is: an application is told `FocusStateChanged`,
+    /// while an applet — every one of the system's own, the Home Menu included
+    /// — is told `ChangeIntoForeground`. Sending an applet the application's
+    /// message is sending it one it does not act on.
+    applet_is_application: bool,
     /// Every `(interface, command)` pair already reported as having no
     /// implementation behind it, so the warning naming it prints once instead
     /// of once per call (`appletMainLoop` polls `am` every frame).
@@ -686,9 +698,9 @@ impl Cpu {
             next_domain_object_id: 1,
             domain_objects: HashMap::new(),
             vi_ifaces: HashMap::new(),
-            // AM has one message waiting before the applet's first poll:
-            // the focus state it starts in.
-            applet_messages: VecDeque::from([AppletMessage::FocusStateChanged as u32]),
+            applet_messages: VecDeque::new(),
+            applet_focus_announced: false,
+            applet_is_application: true,
             applet_event: None,
             unimplemented_ipc: HashSet::new(),
             fabricated_objects: HashMap::new(),
@@ -1436,6 +1448,31 @@ impl Cpu {
         if let Some(handle) = self.applet_event {
             self.signal_event(handle);
         }
+    }
+
+    /// Note which kind of proxy the process opened, so its focus transition is
+    /// the one its own applet framework is waiting for.
+    pub(super) fn set_applet_is_application(&mut self, is_application: bool) {
+        self.applet_is_application = is_application;
+    }
+
+    /// The next AM message for the running applet, or `None` when the queue is
+    /// empty. The startup focus transition comes first and exactly once.
+    pub(super) fn next_applet_message(&mut self) -> Option<u32> {
+        if !self.applet_focus_announced {
+            self.applet_focus_announced = true;
+            return Some(if self.applet_is_application {
+                AppletMessage::FocusStateChanged as u32
+            } else {
+                AppletMessage::ChangeIntoForeground as u32
+            });
+        }
+        self.applet_messages.pop_front()
+    }
+
+    /// Whether AM has a message waiting, which is what the applet event says.
+    pub(super) fn has_applet_message(&self) -> bool {
+        !self.applet_focus_announced || !self.applet_messages.is_empty()
     }
 
     /// Fire an event.
