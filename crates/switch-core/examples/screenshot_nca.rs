@@ -143,11 +143,13 @@ fn main() {
             }
             *hot.entry((t, cpu.get_pc())).or_insert(0u64) += 1;
         }
-        if watch_hits < 8 && !watch_pc.is_empty() && watch_pc.contains(&cpu.get_pc()) {
+        if watch_hits < 24 && !watch_pc.is_empty() && watch_pc.contains(&cpu.get_pc()) {
             println!(
-                "[watch-pc] {:#x} at step {done} bt={:x?}",
+                "[watch-pc] {:#x} at step {done} x0={:#x} x8={:#x} bt={:x?}",
                 cpu.get_pc(),
-                cpu.backtrace(10)
+                cpu.reg(0),
+                cpu.reg(8),
+                cpu.backtrace(6)
             );
             watch_hits += 1;
         }

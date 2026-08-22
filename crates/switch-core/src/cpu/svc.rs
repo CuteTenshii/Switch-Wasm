@@ -381,6 +381,12 @@ impl Cpu {
                 const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
                 let handle = self.read_zr(0);
                 let was_signalled = self.reset_signal(handle);
+                if std::env::var("TRACE_WAIT").is_ok() {
+                    eprintln!(
+                        "[wait] reset handle={handle:#x} {:?} -> {was_signalled}",
+                        self.event_name(handle)
+                    );
+                }
                 self.write_zr(0, if was_signalled { RESULT_OK } else { RESULT_INVALID_STATE });
                 Ok(())
             }
