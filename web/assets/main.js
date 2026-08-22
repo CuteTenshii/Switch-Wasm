@@ -416,6 +416,17 @@ async function init() {
     await stageKeys();
   }
   updateKeysState();
+  // And then the NAND, which needs those keys to parse a header. Nothing was
+  // restored here before, because nothing survived a reload to restore.
+  const held = await nandRestore();
+  if (held) {
+    archiveCount = held;
+    log('NAND: ' + held + ' system data archive(s) restored.', 'ok');
+  }
+  if (nandTitles.length) {
+    log('NAND: ' + nandTitles.length + ' title(s) installed.', 'dim');
+  }
+  updateFirmwareState();
 }
 
 // ---------- program loading ----------
@@ -1065,24 +1076,197 @@ let archiveCount = 0;
 // on reset would mean re-picking a whole firmware dump.
 let firmwareFiles = [];
 
+/* ---------- the NAND ----------
+
+   A console keeps its system content on internal storage and finds it again
+   every boot. Here the equivalent is IndexedDB, in two stores: `content` holds
+   the NCA bytes by file name, and `titles` holds what each one *is* by title
+   id. Splitting them is what lets the panel list what is installed without
+   reading hundreds of megabytes to find out.
+
+   The bytes are what gets stored, not the File - a page cannot reopen a file
+   it was not handed, which is the whole reason a firmware dump had to be
+   re-picked every session before this existed. */
+
+const NAND_DB_NAME = 'switch-wasm-nand';
+const NAND_CONTENT = 'content';
+const NAND_TITLES = 'titles';
+let nandDb = null;
+
+// What each system title is, for a panel that would otherwise list bare hex.
+// Everything else installed is shown by its id.
+const SYSTEM_TITLES = {
+  '0100000000001000': 'Home Menu',
+  '0100000000001001': 'Auth',
+  '0100000000001002': 'Cabinet (amiibo)',
+  '0100000000001003': 'Controller',
+  '0100000000001004': 'Data Erase',
+  '0100000000001005': 'Error',
+  '0100000000001006': 'Net Connect',
+  '0100000000001007': 'User Select',
+  '0100000000001008': 'Software Keyboard',
+  '0100000000001009': 'Mii Editor',
+  '010000000000100a': 'Web',
+  '010000000000100b': 'Shop',
+  '010000000000100c': 'Overlay',
+  '010000000000100d': 'Album',
+  '010000000000100f': 'Offline Web',
+  '0100000000001010': 'Login Share',
+  '0100000000001011': 'Wi-Fi Web Auth',
+  '0100000000001012': 'Starter',
+  '0100000000001013': 'My Page',
+};
+
+function nandIdb() {
+  if (nandDb) return Promise.resolve(nandDb);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(NAND_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(NAND_CONTENT)) db.createObjectStore(NAND_CONTENT);
+      if (!db.objectStoreNames.contains(NAND_TITLES)) db.createObjectStore(NAND_TITLES);
+    };
+    req.onsuccess = () => { nandDb = req.result; resolve(nandDb); };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function nandGetAll(store) {
+  return nandIdb().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readonly');
+    const s = tx.objectStore(store);
+    const keys = s.getAllKeys();
+    const values = s.getAll();
+    tx.oncomplete = () => resolve(keys.result.map((k, i) => [k, values.result[i]]));
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  }));
+}
+
+function nandGet(store, key) {
+  return nandIdb().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction(store, 'readonly');
+    const req = tx.objectStore(store).get(key);
+    tx.oncomplete = () => resolve(req.result);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  }));
+}
+
+// Install one piece of content: its bytes under its file name, and what it is
+// under its title id. Both in one transaction, so the index can never end up
+// naming content that is not there.
+function nandInstall(name, bytes, titleId, kind) {
+  return nandIdb().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction([NAND_CONTENT, NAND_TITLES], 'readwrite');
+    tx.objectStore(NAND_CONTENT).put(bytes, name);
+    tx.objectStore(NAND_TITLES).put({ name, kind }, titleId);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  }));
+}
+
+function nandErase() {
+  return nandIdb().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction([NAND_CONTENT, NAND_TITLES], 'readwrite');
+    tx.objectStore(NAND_CONTENT).clear();
+    tx.objectStore(NAND_TITLES).clear();
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  }));
+}
+
+// What the NAND holds, as [title id, {name, kind}] pairs. `kind` is 0 for a
+// program and 1 for a data archive, as `switch_nand_identify` reports it.
+let nandTitles = [];
+
+// Hand the stored *data archives* to a fresh session. Programs are not loaded
+// here — an installed title is launched on request, not at boot.
+async function nandRestore() {
+  try {
+    nandTitles = await nandGetAll(NAND_TITLES);
+  } catch (err) {
+    log('NAND: could not be read (' + err.message + ')', 'err');
+    nandTitles = [];
+    return 0;
+  }
+  let restored = 0;
+  for (const [, entry] of nandTitles) {
+    if (entry.kind !== 1) continue;
+    try {
+      const bytes = await nandGet(NAND_CONTENT, entry.name);
+      if (bytes && await call('nand_add_archive', new Uint8Array(bytes))) restored++;
+    } catch { /* one unreadable archive should not cost the rest */ }
+  }
+  renderNandTitles();
+  return restored;
+}
+
+// The installed programs, as launch buttons. A system applet ships as a bare
+// NCA inside firmware with no container around it, so before the NAND kept
+// them there was nothing on the page that could start one.
+function renderNandTitles() {
+  const host = $('nand-titles');
+  if (!host) return;
+  host.textContent = '';
+  const programs = nandTitles.filter(([, entry]) => entry.kind === 0);
+  programs.sort((a, b) => a[0].localeCompare(b[0]));
+  const tools = $('nand-tools');
+  if (tools) tools.hidden = nandTitles.length === 0;
+  if (!programs.length) return;
+  const label = el('p', 'muted tiny', programs.length + ' title(s) installed');
+  host.appendChild(label);
+  for (const [id, entry] of programs) {
+    const button = el('button', 'btn small', SYSTEM_TITLES[id] || id);
+    button.title = id;
+    button.addEventListener('click', () => launchInstalled(id, entry));
+    host.appendChild(button);
+  }
+}
+
+async function launchInstalled(id, entry) {
+  const name = SYSTEM_TITLES[id] || id;
+  let bytes;
+  try {
+    bytes = await nandGet(NAND_CONTENT, entry.name);
+  } catch (err) {
+    log('NAND: ' + err.message, 'err');
+    return;
+  }
+  if (!bytes) {
+    log('NAND: ' + entry.name + ' is indexed but its content is missing.', 'err');
+    return;
+  }
+  // Same path a title picked out of a container takes, so a launch from the
+  // NAND behaves the same and reports the same way.
+  return doLaunchNca(name, () => call('nand_launch', new Uint8Array(bytes)));
+}
+
 // Re-register every archive the page still claims to have. Runs before the
 // container is re-opened and after the keys are re-staged, because parsing an
 // NCA header needs them.
 async function restoreArchives() {
-  if (!firmwareFiles.length) return;
+  // The NAND first: content stored in a previous session, which is the only
+  // kind that survives a reload.
+  const fromNand = await nandRestore();
+  // Then anything picked in *this* session that the NAND does not already
+  // hold - the File references are still good until the page goes away.
   const kept = [];
   for (const f of firmwareFiles) {
     if (await call('add_archive', f).catch(() => -1) === 0) kept.push(f);
   }
   firmwareFiles = kept;
-  archiveCount = kept.length;
+  archiveCount = kept.length + fromNand;
   updateFirmwareState();
 }
 
 function updateFirmwareState() {
+  const held = nandTitles.length ? ', ' + nandTitles.length + ' on the NAND' : '';
   $('firmware-state').textContent = archiveCount === 0
     ? 'no system data archives - a title that mounts one (an applet\'s shared assets, the Mii and amiibo models) will not find it'
-    : archiveCount + ' system data archive(s) registered';
+    : archiveCount + ' system data archive(s) registered' + held;
 }
 
 $('firmware-ncas').addEventListener('change', async (e) => {
@@ -1090,19 +1274,52 @@ $('firmware-ncas').addEventListener('change', async (e) => {
   if (!files.length) return;
   log('Reading ' + files.length + ' firmware file(s) ...');
   let added = 0;
+  let installed = 0;
   for (const f of files) {
     try {
-      if (await call('add_archive', f) === 0) { added++; firmwareFiles.push(f); }
+      // Ask what it is first. That reads a header, not a file: a firmware dump
+      // runs to gigabytes and most of it is metadata neither worth keeping nor
+      // worth pulling through the page to find out.
+      const what = await call('nand_identify', f);
+      if (!what || what.kind === 2) continue;
+      // Now it is worth reading the whole thing, because keeping it is the
+      // point - a browser will not hand the page this file again unprompted,
+      // and an applet that is not on the NAND cannot be launched at all.
+      await nandInstall(f.name, await f.arrayBuffer(), what.id, what.kind);
+      installed++;
+      if (what.kind === 1) {
+        if (await call('add_archive', f) === 0) { added++; firmwareFiles.push(f); }
+      }
     } catch (err) {
       log('Could not read ' + f.name + ': ' + err.message, 'err');
     }
   }
+  try {
+    nandTitles = await nandGetAll(NAND_TITLES);
+  } catch { /* the panel just stays as it was */ }
+  renderNandTitles();
   archiveCount = firmwareFiles.length;
   updateFirmwareState();
   // Most of a firmware dump is programs and metadata, not data archives; only
   // the ones that are get registered, so the skipped count is expected.
-  log('Registered ' + added + ' system data archive(s) of ' + files.length + ' file(s).',
-    added ? 'ok' : 'dim');
+  log('Installed ' + installed + ' title(s) of ' + files.length + ' file(s); '
+    + added + ' registered as system data archives.', installed ? 'ok' : 'dim');
+});
+
+$('btn-erase-nand').addEventListener('click', async () => {
+  // Erasing the NAND does not disturb the running session: content already
+  // registered stays registered until it is replaced, exactly as formatting a
+  // console's storage does not unload what is already running.
+  try {
+    await nandErase();
+  } catch (err) {
+    log('NAND: could not be erased (' + err.message + ')', 'err');
+    return;
+  }
+  nandTitles = [];
+  renderNandTitles();
+  updateFirmwareState();
+  log('NAND erased.', 'ok');
 });
 
 $('btn-clear-keys').addEventListener('click', () => {

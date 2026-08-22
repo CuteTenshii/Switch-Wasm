@@ -388,6 +388,111 @@ pub extern "C" fn switch_add_archive(handle: u32, file: u32, size: u64) -> i32 {
     }
 }
 
+/// Register a system data archive from bytes the host is holding, rather than
+/// from a file it can ask for again later.
+///
+/// The difference is the whole point of a NAND. A browser will not hand a page
+/// a file it was not asked for, so an archive registered through
+/// [`switch_add_archive`] — which keeps only a reference to a `File` — is gone
+/// the moment the page reloads, and a firmware dump has to be re-picked every
+/// session. Bytes can be kept. This is what a console's NAND is here: content
+/// the host stores on the emulator's behalf and hands back unprompted.
+///
+/// Returns the archive's title id, which is what a title asks for it by, or 0
+/// if the bytes are not a data archive this build can read.
+#[no_mangle]
+pub extern "C" fn switch_nand_add_archive(handle: u32, ptr: *const u8, len: u32) -> u64 {
+    let s = session(handle);
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec();
+    let nca = match Nca::parse_with_keys(&bytes, Some(&s.keys)) {
+        Ok(nca) => nca,
+        Err(e) => {
+            s.last_error = e.to_string();
+            return 0;
+        }
+    };
+    use switch_core::nca::ContentType;
+    if !matches!(nca.content_type, ContentType::Data | ContentType::PublicData) {
+        s.last_error = format!("not a data archive (content type {})", nca.content_type.name());
+        return 0;
+    }
+    let Some(index) = nca.romfs_section_index() else {
+        s.last_error = "data archive has no RomFS section".into();
+        return 0;
+    };
+    let title_id = nca.title_id;
+    match nca.romfs_source(switch_core::source::MemSource(bytes), &s.keys, index) {
+        Ok(romfs) => {
+            s.cpu.add_data_archive(title_id, Box::new(romfs));
+            s.last_error.clear();
+            title_id
+        }
+        Err(e) => {
+            s.last_error = e.to_string();
+            0
+        }
+    }
+}
+
+/// What a firmware NCA is, without reading the whole thing.
+///
+/// The host has to sort a firmware dump into what it should keep and what it
+/// should not, and a dump is mostly metadata: reading every file to find out
+/// would mean pulling gigabytes through the page. This reads the header out of
+/// the `File` the host still holds and answers from that.
+///
+/// Writes the content type to `kind_out` — 0 program, 1 data archive, 2
+/// anything else — and returns the title id, or 0 if the file is not an NCA
+/// this build can read.
+#[no_mangle]
+pub extern "C" fn switch_nand_identify(
+    handle: u32,
+    file: u32,
+    size: u64,
+    kind_out: *mut u32,
+) -> u64 {
+    let s = session(handle);
+    let src = HostSource { file, len: size };
+    let nca = match Nca::parse_source(&src, Some(&s.keys)) {
+        Ok(nca) => nca,
+        Err(e) => {
+            s.last_error = e.to_string();
+            return 0;
+        }
+    };
+    use switch_core::nca::ContentType;
+    let kind = match nca.content_type {
+        ContentType::Program => 0,
+        ContentType::Data | ContentType::PublicData => 1,
+        _ => 2,
+    };
+    if !kind_out.is_null() {
+        unsafe { *kind_out = kind };
+    }
+    s.last_error.clear();
+    nca.title_id
+}
+
+/// Boot a Program NCA the host is holding the bytes of — a title installed on
+/// the NAND rather than one opened out of a container the user just picked.
+///
+/// This is what makes an applet launchable: the Home Menu and the Mii editor
+/// ship as bare NCAs inside firmware, so there is no NSP to open them from,
+/// and until the NAND kept them there was nothing to launch.
+///
+/// Returns the entry address, or -1 with the reason in `switch_last_error`.
+#[no_mangle]
+pub extern "C" fn switch_nand_launch(handle: u32, ptr: *const u8, len: u32) -> i64 {
+    let s = session(handle);
+    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec();
+    load_and_boot_nca(
+        &s.keys,
+        &mut s.cpu,
+        &mut s.last_error,
+        switch_core::source::MemSource(bytes),
+    )
+}
+
 /// The open container as a source, or an error recorded in the session.
 fn container(s: &mut Session) -> Option<HostSource> {
     match s.container {

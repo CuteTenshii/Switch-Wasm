@@ -386,3 +386,17 @@ body.panel-open .panel { display: flex; }
   .topbar { gap: 8px; }
   .statusbar .item:nth-child(n+3) { display: none; }
 }
+
+/* The titles installed on the NAND, as launch buttons. A system applet ships
+   as a bare NCA inside firmware with no container around it, so this is the
+   only place on the page one can be started from. */
+.nand-titles {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 0;
+}
+.nand-titles p {
+  flex-basis: 100%;
+  margin: 0;
+}

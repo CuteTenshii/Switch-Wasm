@@ -375,6 +375,52 @@ const CMD = {
     const index = addHostFile(file);
     return api.switch_add_archive(handle, index, BigInt(file.size));
   },
+  // The same, from bytes rather than a File reference - which is what makes
+  // it keepable. A browser will not hand the page a file it was not asked
+  // for, so an archive registered from a File is gone on reload; bytes can be
+  // stored and handed back. Returns the archive's title id as hex, or '' if
+  // the bytes are not one.
+  // What a firmware NCA is, without reading it: a header read through the
+  // File the page is still holding. Returns { id, kind } - kind 0 for a
+  // program, 1 for a data archive, 2 for anything else - or null if it is not
+  // an NCA this build can read. A firmware dump is mostly the third kind, and
+  // this is what keeps the page from pulling all of it through memory to find
+  // that out.
+  nand_identify(file) {
+    const index = addHostFile(file);
+    const kindPtr = alloc(4);
+    let id, kind;
+    try {
+      id = api.switch_nand_identify(handle, index, BigInt(file.size), kindPtr);
+      kind = new DataView(api.memory.buffer).getUint32(kindPtr, true);
+    } finally {
+      api.switch_free(kindPtr, 4);
+    }
+    return id ? { id: id.toString(16).padStart(16, '0'), kind } : null;
+  },
+  // Boot a program the host has the bytes of: a title installed on the NAND
+  // rather than one opened out of a container the user just picked. The
+  // emulator keeps its own copy, so the staging buffer goes back immediately.
+  nand_launch(bytes) {
+    const ptr = alloc(bytes.length);
+    toWasm(bytes, ptr);
+    try {
+      return Number(api.switch_nand_launch(handle, ptr, bytes.length));
+    } finally {
+      api.switch_free(ptr, bytes.length);
+    }
+  },
+  nand_add_archive(bytes) {
+    const ptr = alloc(bytes.length);
+    toWasm(bytes, ptr);
+    let id;
+    try {
+      id = api.switch_nand_add_archive(handle, ptr, bytes.length);
+    } finally {
+      api.switch_free(ptr, bytes.length);
+    }
+    return id ? id.toString(16).padStart(16, '0') : '';
+  },
   // Decrypts NSP file `index` as a Program NCA (with whatever keys are
   // loaded) and boots its ExeFS `main` executable, reading both out of the
   // open container. Its RomFS is left where it is and decrypted on demand
