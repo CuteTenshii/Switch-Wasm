@@ -531,6 +531,11 @@ pub struct Cpu {
     /// a separate object from the storage it was opened on, and both ends
     /// have to see the same bytes.
     am_storage_of: HashMap<u64, u64>,
+    /// Library applets created through `ILibraryAppletCreator`, by accessor
+    /// object. Nothing here runs one — see [`ipc::LibraryApplet`] — but the
+    /// caller drives it across several requests, so what it was asked for and
+    /// how far it got have to outlive each one.
+    am_applets: HashMap<u64, ipc::LibraryApplet>,
     /// The current process's own RomFS — what
     /// `OpenDataStorageByCurrentProcess` hands back as an `IStorage`. `None`
     /// until the loader calls [`Cpu::set_romfs`] or
@@ -763,6 +768,7 @@ impl Cpu {
             am_in_data: VecDeque::new(),
             am_storages: HashMap::new(),
             am_storage_of: HashMap::new(),
+            am_applets: HashMap::new(),
             romfs: None,
             touch_sample_counter: 0,
             touch_published: 0,

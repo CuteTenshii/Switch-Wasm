@@ -2635,6 +2635,37 @@ impl Cpu {
         }
     }
 
+    /// The event an `ILibraryAppletAccessor` hands out for `slot`, allocated
+    /// on first ask and kept: a caller that asks twice has to be given the
+    /// same object, and one that waits on a handle it was handed a second
+    /// copy of would wait on the wrong one.
+    fn library_applet_event(&mut self, key: u64, slot: usize) -> u64 {
+        if let Some(event) = self.am_applets.get(&key).and_then(|applet| applet.events[slot]) {
+            return event;
+        }
+        // Not auto-clearing. What these report is an applet that has ended,
+        // which does not un-end, and `libnx` waits on the state-changed one
+        // in a loop — an auto-clearing event would be consumed by the first
+        // wait and leave the second one hanging.
+        let event = self.alloc_event(LIBRARY_APPLET_EVENT_NAMES[slot], false);
+        self.am_applets.entry(key).or_default().events[slot] = Some(event);
+        event
+    }
+
+    /// Fire one of an applet's events, if the caller has taken it. Allocating
+    /// it here instead would make an event nothing is waiting on.
+    fn signal_library_applet_event(&mut self, key: u64, slot: usize) {
+        if let Some(event) = self.am_applets.get(&key).and_then(|applet| applet.events[slot]) {
+            self.signal_event(event);
+        }
+    }
+
+    /// Whether the applet behind an accessor has ended. One that was never
+    /// created has not: an accessor with no applet is not an applet that ran.
+    fn library_applet_finished(&self, key: u64) -> bool {
+        self.am_applets.get(&key).is_some_and(LibraryApplet::is_finished)
+    }
+
     /// `IApplicationProxyService`/`IApplicationProxy`: the applet-lifecycle
     /// chain homebrew opens as `appletOE` (or `appletAE`, for a non-application
     /// applet). `appletMainLoop` polls `ICommonStateGetter` every frame — the
@@ -3340,6 +3371,170 @@ impl Cpu {
                 },
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
+            // ILibraryAppletCreator: how one applet launches another —
+            // a game asking for the keyboard, a homebrew handing the screen
+            // to the browser.
+            //
+            // The applet itself is a separate process, and this emulator
+            // hosts one. So the accessor handed back here drives an applet
+            // that starts and immediately gives up: see
+            // `am:library-applet-accessor` for why that is more useful than
+            // refusing the creation outright.
+            "am:library-applet-creator" => match cmd_id {
+                // CreateLibraryApplet(u32 AppletId, u32 LibraryAppletMode)
+                // -> ILibraryAppletAccessor.
+                Some(0) => {
+                    let at = self.ipc_request_data(tls);
+                    let id = self.mem.read_u32(at)?;
+                    let mode = self.mem.read_u32(at.wrapping_add(4))?;
+                    self.diagnostic(&format!(
+                        "[am] CreateLibraryApplet: {} (mode {mode}) — nothing here runs it, \
+                         so it will report itself cancelled",
+                        applet_name(id)
+                    ));
+                    let key =
+                        self.reply_with_interface(tls, handle, "am:library-applet-accessor")?;
+                    self.am_applets.insert(key, LibraryApplet::new(id, mode));
+                    Ok(())
+                }
+                // TerminateAllLibraryApplets, and AreAnyLibraryAppletsLeft ->
+                // bool. Nothing was ever left running to terminate.
+                Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                Some(2) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
+                // CreateStorage(s64 size) -> IStorage: the buffer a caller
+                // fills with an applet's launch arguments before pushing it.
+                // The bytes are the storage's own, so it starts as `size`
+                // zeroes and the caller writes through an IStorageAccessor.
+                Some(10) => {
+                    /// Past this, the size is not a launch argument any
+                    /// caller actually sends, and allocating what it asks for
+                    /// is how a bad size becomes an abort.
+                    const MAX_STORAGE: u64 = 64 * 1024 * 1024;
+                    /// `KERNELRESULT(OutOfMemory)`: what a console answers
+                    /// when it cannot allocate the storage.
+                    const OUT_OF_MEMORY: u32 = 1 | (104 << 9);
+                    let size = self.mem.read_u64(self.ipc_request_data(tls))?;
+                    if size > MAX_STORAGE {
+                        return self.write_ipc_response(tls, OUT_OF_MEMORY, &[], &[], &[]);
+                    }
+                    let key = self.reply_with_interface(tls, handle, "am:storage")?;
+                    self.am_storages.insert(key, vec![0u8; size as usize]);
+                    Ok(())
+                }
+                // CreateTransferMemoryStorage and CreateHandleStorage take
+                // the memory their bytes live in as a handle.
+                // `svcCreateTransferMemory` here hands back one fixed handle
+                // and records no address, so there is nothing to read the
+                // contents from: such a storage would be zeroes claiming to
+                // be the caller's data, which is worse than a refusal.
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // ILibraryAppletAccessor: the object a caller drives a launched
+            // applet through — start it, wait for it to finish, read back
+            // what it produced.
+            //
+            // Nothing runs, so the applet finishes the moment it is started
+            // and reports the one honest outcome available: cancelled, the
+            // result a console gives when the user backs out of an applet
+            // without it producing anything. `libnx` reads that as
+            // `LibAppletExitReason_Canceled` and fails the caller's
+            // `libappletStart`, which is a path callers are written to
+            // survive — unlike the alternatives, which are a success whose
+            // output storage is empty (the caller reads zeroes as though the
+            // user had typed them) or a refused command (`nnSdk` treats an
+            // unknown command id as fatal).
+            //
+            // The one thing that must not happen is silence: the caller waits
+            // on the state-changed event forever, so it is signalled here
+            // whether it was fetched before the start or after it.
+            "am:library-applet-accessor" => {
+                let key = self.ipc_object_key(tls, handle);
+                match cmd_id {
+                    // GetAppletStateChangedEvent -> event. A **copy** handle,
+                    // like every other event a service hands out.
+                    Some(0) => {
+                        let event = self.library_applet_event(key, STATE_CHANGED_EVENT);
+                        if self.library_applet_finished(key) {
+                            self.signal_event(event);
+                        }
+                        self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+                    }
+                    // IsCompleted -> bool. What the caller polls between
+                    // waits on the event above; an applet that has been
+                    // started here has already finished.
+                    Some(1) => {
+                        let done = u8::from(self.library_applet_finished(key));
+                        self.write_ipc_response(tls, 0, &[], &done.to_le_bytes(), &[])
+                    }
+                    // Start, RequestExit and Terminate: all three end the
+                    // applet, because it was over before it began.
+                    Some(10) | Some(20) | Some(25) => {
+                        if let Some(applet) = self.am_applets.get_mut(&key) {
+                            applet.finish();
+                        }
+                        self.signal_library_applet_event(key, STATE_CHANGED_EVENT);
+                        self.write_ipc_response(tls, 0, &[], &[], &[])
+                    }
+                    // GetResult: why the applet ended. See the note above the
+                    // interface for why this is a cancellation rather than a
+                    // success.
+                    Some(30) => {
+                        /// `am` description 22, which `libnx` maps to
+                        /// `LibAppletExitReason_Canceled`.
+                        const CANCELLED: u32 = 128 | (22 << 9);
+                        self.write_ipc_response(tls, CANCELLED, &[], &[], &[])
+                    }
+                    // PushInData / PushExtraStorage / PushInteractiveInData:
+                    // the storages the caller hands the applet. Accepted and
+                    // dropped — there is no applet to read them, and the
+                    // caller keeps its own reference to each one.
+                    Some(100) | Some(102) | Some(103) => {
+                        self.write_ipc_response(tls, 0, &[], &[], &[])
+                    }
+                    // PopOutData / PopInteractiveOutData -> IStorage: what
+                    // the applet produced. An applet that never ran produced
+                    // nothing, which is a real answer rather than an empty
+                    // storage — a caller reading a zeroed reply struct
+                    // believes every field in it.
+                    Some(101) | Some(104) => {
+                        /// `am` description 3: no storage to pop.
+                        const NO_DATA: u32 = 128 | (3 << 9);
+                        self.write_ipc_response(tls, NO_DATA, &[], &[], &[])
+                    }
+                    // GetPopOutDataEvent / GetPopInteractiveOutDataEvent:
+                    // fired when there is something to pop, which there never
+                    // is. Handed out and left dark, so a caller that waits on
+                    // one times out instead of reading a handle of 0.
+                    Some(105) => {
+                        let event = self.library_applet_event(key, POP_OUT_DATA_EVENT);
+                        self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+                    }
+                    Some(106) => {
+                        let event = self.library_applet_event(key, POP_INTERACTIVE_OUT_DATA_EVENT);
+                        self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+                    }
+                    // NeedsToExitProcess -> bool: whether the caller has to
+                    // exit for the applet to run. Nothing here does.
+                    Some(110) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
+                    // GetLibraryAppletInfo -> LibraryAppletInfo { AppletId,
+                    // LibraryAppletMode }: what this accessor was created for.
+                    Some(120) => {
+                        let mut info = [0u8; 8];
+                        if let Some(applet) = self.am_applets.get(&key) {
+                            info[..4].copy_from_slice(&applet.id.to_le_bytes());
+                            info[4..].copy_from_slice(&applet.mode.to_le_bytes());
+                        }
+                        self.write_ipc_response(tls, 0, &[], &info, &[])
+                    }
+                    // RequestForAppletToGetForeground: the caller offering
+                    // the screen to an applet that is not there.
+                    Some(150) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                    // GetIndirectLayerConsumerHandle, for the modes that
+                    // compose the applet's frames into the caller's own
+                    // display. There are no frames to compose.
+                    _ => self.unimplemented_command(tls, &iface, cmd_id),
+                }
+            }
             // `am`'s IStorage: a byte buffer passed between applets. Distinct
             // from `fsp-srv`'s IStorage (the process's RomFS) — same name,
             // different interface — and reached only through an accessor.
@@ -3401,11 +3596,9 @@ impl Cpu {
                     _ => self.unimplemented_command(tls, &iface, cmd_id),
                 }
             }
-            // IDisplayController (capture buffers), ILibraryAppletCreator
-            // (launching another applet), IDebugFunctions, and any session that
-            // never named itself. Nothing here can answer those honestly: a
-            // capture buffer has no contents, and a library applet has nowhere
-            // to run.
+            // IDisplayController (capture buffers), IDebugFunctions, and any
+            // session that never named itself. Nothing here can answer those
+            // honestly: a capture buffer has no contents.
             _ => self.unimplemented_command(tls, &iface, cmd_id),
         }
     }
@@ -7898,6 +8091,100 @@ mod tests {
         assert_eq!(cpu.event_name(event), Some("am:self-controller"));
     }
 
+    /// `AppletId_LibraryAppletWeb`, which is what lennytube asks for when it
+    /// hands the screen to the browser.
+    const APPLET_WEB: u32 = 0x13;
+
+    /// Create a library applet on a non-domain session and return the `Cpu`
+    /// and the accessor handle the reply moved back.
+    fn library_applet(applet_id: u32) -> (Cpu, u64) {
+        let mut payload = [0u8; 8];
+        payload[..4].copy_from_slice(&applet_id.to_le_bytes());
+        let mut cpu = request(false, 0, &payload);
+        cpu.register_service_handle(9, "am:library-applet-creator");
+        cpu.applet_request(TLS, 9, Some(0)).unwrap();
+        let accessor = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(accessor, 0, "CreateLibraryApplet moved no object back");
+        assert_eq!(cpu.service_name(accessor), Some("am:library-applet-accessor"));
+        (cpu, accessor)
+    }
+
+    #[test]
+    fn a_library_applet_ends_the_moment_it_is_started() {
+        // Nothing here can run the applet a caller asks for, so the useful
+        // answer is one that ends: the caller waits on the state-changed
+        // event before it does anything else, and an event that never fires
+        // is a hang rather than a failure it can report.
+        let (mut cpu, accessor) = library_applet(APPLET_WEB);
+
+        write_request(&mut cpu, 0, &[]);
+        cpu.applet_request(TLS, accessor, Some(0)).unwrap();
+        let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_eq!(cpu.event_name(event), Some("am:library-applet-state"));
+        assert_eq!(cpu.event_signaled(event), Some(false), "nothing has started it yet");
+
+        write_request(&mut cpu, 10, &[]); // Start
+        cpu.applet_request(TLS, accessor, Some(10)).unwrap();
+        assert_eq!(cpu.event_signaled(event), Some(true));
+
+        write_request(&mut cpu, 1, &[]); // IsCompleted
+        cpu.applet_request(TLS, accessor, Some(1)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap() & 0xff, 1);
+
+        // GetResult: `libnx` reads this one as LibAppletExitReason_Canceled,
+        // which is a path callers survive. A success here would instead have
+        // them read an empty output storage as real input.
+        write_request(&mut cpu, 30, &[]);
+        cpu.applet_request(TLS, accessor, Some(30)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 128 | (22 << 9), "cancelled");
+    }
+
+    #[test]
+    fn the_applet_state_event_is_signalled_when_it_is_asked_for_after_the_start() {
+        // The caller usually takes the event before starting the applet, but
+        // it does not have to, and an applet that has already ended has to
+        // hand back an event that is already fired.
+        let (mut cpu, accessor) = library_applet(APPLET_WEB);
+        write_request(&mut cpu, 10, &[]);
+        cpu.applet_request(TLS, accessor, Some(10)).unwrap();
+
+        write_request(&mut cpu, 0, &[]);
+        cpu.applet_request(TLS, accessor, Some(0)).unwrap();
+        let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_eq!(cpu.event_signaled(event), Some(true));
+    }
+
+    #[test]
+    fn an_applet_that_never_ran_has_no_output_to_pop() {
+        // An empty storage would be worse than a refusal: a caller reads its
+        // reply struct field by field and believes the zeroes.
+        let (mut cpu, accessor) = library_applet(APPLET_WEB);
+        write_request(&mut cpu, 10, &[]);
+        cpu.applet_request(TLS, accessor, Some(10)).unwrap();
+
+        write_request(&mut cpu, 101, &[]); // PopOutData
+        cpu.applet_request(TLS, accessor, Some(101)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 128 | (3 << 9), "no data");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x0c).unwrap(), 0, "and no storage");
+    }
+
+    #[test]
+    fn created_storage_is_as_long_as_the_caller_asked_for() {
+        // The caller writes its launch arguments into this through an
+        // IStorageAccessor, so the bytes have to be there to be written over.
+        let mut cpu = request(false, 10, &0x1000u64.to_le_bytes());
+        cpu.register_service_handle(9, "am:library-applet-creator");
+        cpu.applet_request(TLS, 9, Some(10)).unwrap();
+        let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_eq!(cpu.service_name(storage), Some("am:storage"));
+        assert_eq!(cpu.am_storages[&Cpu::object_key(storage, 0)].len(), 0x1000);
+
+        // A size no caller sends is refused rather than allocated.
+        write_request(&mut cpu, 10, &u64::MAX.to_le_bytes());
+        cpu.applet_request(TLS, 9, Some(10)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 1 | (104 << 9), "out of memory");
+    }
+
     #[test]
     fn sfdnsres_fails_every_lookup_definitively() {
         // getaddrinfo: EAI_NONAME, not EAI_AGAIN. A caller told to try again
@@ -8107,6 +8394,78 @@ mod tests {
         let mut cpu = request(false, 4, &[]);
         cpu.set_request(TLS, Some(4)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "SetRegion_USA");
+    }
+}
+
+/// A library applet created through `ILibraryAppletCreator`, from the
+/// caller's side: what it asked for, and how far the applet got.
+///
+/// There is no process behind this. The applet exists only as the answers its
+/// accessor gives — it is created, started, and finished in that one moment,
+/// having produced nothing.
+#[derive(Debug, Default)]
+pub(crate) struct LibraryApplet {
+    /// `AppletId`, the firmware applet the caller asked to launch.
+    id: u32,
+    /// `LibraryAppletMode`: whether it takes the whole screen or composes
+    /// into the caller's own display.
+    mode: u32,
+    finished: bool,
+    /// The three events an accessor hands out, by the slot constants below.
+    events: [Option<u64>; 3],
+}
+
+impl LibraryApplet {
+    fn new(id: u32, mode: u32) -> Self {
+        Self { id, mode, ..Self::default() }
+    }
+
+    fn finish(&mut self) {
+        self.finished = true;
+    }
+
+    fn is_finished(&self) -> bool {
+        self.finished
+    }
+}
+
+/// `GetAppletStateChangedEvent`, `GetPopOutDataEvent` and
+/// `GetPopInteractiveOutDataEvent`, as slots in [`LibraryApplet::events`].
+const STATE_CHANGED_EVENT: usize = 0;
+const POP_OUT_DATA_EVENT: usize = 1;
+const POP_INTERACTIVE_OUT_DATA_EVENT: usize = 2;
+const LIBRARY_APPLET_EVENT_NAMES: [&str; 3] = [
+    "am:library-applet-state",
+    "am:library-applet-out-data",
+    "am:library-applet-interactive-out-data",
+];
+
+/// The firmware applet an `AppletId` names — the inverse of
+/// [`applet_id_for`], for saying out loud what a caller asked to launch.
+fn applet_name(applet_id: u32) -> &'static str {
+    match applet_id {
+        0x01 => "application",
+        0x02 => "overlayDisp",
+        0x03 => "qlaunch",
+        0x04 => "system application",
+        0x0A => "auth",
+        0x0B => "cabinet",
+        0x0C => "controller",
+        0x0D => "dataErase",
+        0x0E => "error",
+        0x0F => "netConnect",
+        0x10 => "playerSelect",
+        0x11 => "swkbd",
+        0x12 => "miiEdit",
+        0x13 => "web",
+        0x14 => "shop",
+        0x15 => "photoViewer",
+        0x16 => "set",
+        0x17 => "offlineWeb",
+        0x18 => "loginShare",
+        0x19 => "wifiWebAuth",
+        0x1A => "myPage",
+        _ => "unknown applet",
     }
 }
 
