@@ -889,17 +889,26 @@ impl Cpu {
                 Ok(())
             }
             // 51 = OpenSaveDataFileSystem, 52 = ...BySystemSaveDataId,
-            // 53 = OpenReadOnlySaveDataFileSystem. There is no save data on
-            // this console, so every one of these is a request to mount
-            // something that is not there.
+            // 53 = OpenReadOnlySaveDataFileSystem; 22 and 23 are the two
+            // Create forms. All of them address the NAND, which this console
+            // now has: an `IFileSystem` over the save filed under the id the
+            // request names.
             //
-            // Reporting that is not a regression from the catch-all below: an
-            // `IFileSystem` is an out-object, and the catch-all answered with
-            // success and *no* object, leaving the caller to mount whatever
-            // domain object id happened to be in its reply buffer.
-            Some(51) | Some(52) | Some(53) => {
-                const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
-                self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[])
+            // Every one of these used to report "not found", which is a thing
+            // callers act on rather than shrug at — a title that cannot open
+            // its save has nowhere to put anything, and the system applets
+            // open theirs before they will do very much at all.
+            Some(22) | Some(23) | Some(51) | Some(52) | Some(53) => {
+                let id = self.save_data_id(tls);
+                self.save_data_mut(id);
+                // Create answers with a bare Result; Open hands back the
+                // filesystem.
+                if matches!(cmd_id, Some(22) | Some(23)) {
+                    return self.write_ipc_response(tls, 0, &[], &[], &[]);
+                }
+                let key = self.reply_with_interface(tls, handle, "fsp-srv-fs")?;
+                self.set_mount(key, Some(id));
+                Ok(())
             }
             // 60 = OpenSaveDataInfoReader, 61 = ...BySaveDataSpaceId,
             // 62 = ...OnlyCacheStorage, 68 = ...WithFilter: the enumerator a
@@ -943,6 +952,30 @@ impl Cpu {
         match cmd_id {
             Some(0) => self.write_ipc_response(tls, 0, &[], &0i64.to_le_bytes(), &[]),
             _ => self.unimplemented_command(tls, "fsp-srv-save-info-reader", cmd_id),
+        }
+    }
+
+    /// Which save an `fsp-srv` save-data request names.
+    ///
+    /// The request carries a `SaveDataAttribute`: a title id, a user id, and a
+    /// system save id, of which the caller fills in whichever applies. The
+    /// system's own saves are named by system save id; an application's by its
+    /// title id. A request with neither is the running title asking for its
+    /// own save, which is how `nn::fs::MountSaveData` spells it.
+    fn save_data_id(&mut self, tls: u32) -> u64 {
+        /// The attribute follows a `u8` space id, padded out to eight bytes.
+        const ATTRIBUTE: u32 = 8;
+        const SYSTEM_SAVE_DATA_ID: u32 = 0x18;
+        let attribute = self.ipc_request_data(tls).wrapping_add(ATTRIBUTE);
+        let application_id = self.mem.read_u64(attribute).unwrap_or(0);
+        let system_save_id = self
+            .mem
+            .read_u64(attribute.wrapping_add(SYSTEM_SAVE_DATA_ID))
+            .unwrap_or(0);
+        match (system_save_id, application_id) {
+            (0, 0) => self.program_id(),
+            (0, application) => application,
+            (system, _) => system,
         }
     }
 
@@ -1040,8 +1073,12 @@ impl Cpu {
         const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
         const PATH_ALREADY_EXISTS: u32 = 2 | (2 << 9);
         let path = self.ipc_request_path(tls);
+        // Which storage this `IFileSystem` addresses. The SD card and a save
+        // are the same interface and the same paths; only the object they were
+        // opened through tells them apart.
+        let mount = self.mount_of(self.ipc_object_key(tls, handle));
         if std::env::var("TRACE_IPC").is_ok() {
-            eprintln!("[fs] pc={:#x} cmd={:?} path={:?}", self.pc, cmd_id, path);
+            eprintln!("[fs] pc={:#x} cmd={:?} path={:?} mount={mount:x?}", self.pc, cmd_id, path);
         }
         match cmd_id {
             // CreateFile(u32 option, s64 size) / CreateDirectory.
@@ -1055,26 +1092,26 @@ impl Cpu {
             Some(0) => {
                 let data = self.ipc_request_data(tls);
                 let size = self.mem.read_u64(data.wrapping_add(8)).unwrap_or(0);
-                if self.fs.create_file(&path, size) {
+                if self.vfs_for(mount).create_file(&path, size) {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 } else {
                     self.write_ipc_response(tls, PATH_ALREADY_EXISTS, &[], &[], &[])
                 }
             }
             Some(2) => {
-                self.fs.guest_create_dir(&path);
+                self.vfs_for(mount).guest_create_dir(&path);
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             // DeleteFile / DeleteDirectory / DeleteDirectoryRecursively
             Some(1) | Some(3) | Some(4) => {
-                if self.fs.remove(&path) {
+                if self.vfs_for(mount).remove(&path) {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 } else {
                     self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[])
                 }
             }
             // GetEntryType -> FsDirEntryType
-            Some(7) => match self.fs.entry_type(&path) {
+            Some(7) => match self.vfs_for(mount).entry_type(&path) {
                 Some(kind) => {
                     self.write_ipc_response(tls, 0, &[], &(kind as u32).to_le_bytes(), &[])
                 }
@@ -1082,15 +1119,16 @@ impl Cpu {
             },
             // OpenFile(u32 mode) -> IFile
             Some(8) => {
-                if self.fs.entry_type(&path) != Some(crate::vfs::ENTRY_TYPE_FILE) {
+                if self.vfs_for(mount).entry_type(&path) != Some(crate::vfs::ENTRY_TYPE_FILE) {
                     return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
                 }
                 let key = self.reply_with_interface(tls, handle, "fsp-srv-fs-file")?;
                 self.fs_files.insert(key, path);
+                self.set_mount(key, mount);
                 Ok(())
             }
             // OpenDirectory(u32 mode) -> IDirectory
-            Some(9) => match self.fs.read_dir(&path) {
+            Some(9) => match self.vfs_for(mount).read_dir(&path) {
                 Some(entries) => {
                     let key = self.reply_with_interface(tls, handle, "fsp-srv-fs-dir")?;
                     self.fs_dirs.insert(key, entries);
@@ -1109,7 +1147,7 @@ impl Cpu {
             // rather than falling through to the bare success below, which
             // left the caller reading three timestamps off its own stack.
             Some(14) => {
-                if self.fs.entry_type(&path).is_none() {
+                if self.vfs_for(mount).entry_type(&path).is_none() {
                     return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
                 }
                 self.write_ipc_response(tls, 0, &[], &[0u8; 0x20], &[])
@@ -1164,6 +1202,8 @@ impl Cpu {
     pub(super) fn fs_file_request(&mut self, tls: u32, cmd_id: Option<u32>, key: u64) -> Result<()> {
         const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
         let path = self.fs_files.get(&key).cloned().unwrap_or_default();
+        // The storage the file was opened on, inherited from its filesystem.
+        let mount = self.mount_of(key);
         match cmd_id {
             // Read(u32 option, u64 offset, u64 size) -> u64 bytes_read
             Some(0) => {
@@ -1171,7 +1211,7 @@ impl Cpu {
                 let offset = self.mem.read_u64(data.wrapping_add(8))?;
                 let requested = self.mem.read_u64(data.wrapping_add(0x10))? as usize;
                 let mut buf = vec![0u8; requested.min(1 << 24)];
-                let read = self.fs.read(&path, offset, &mut buf).unwrap_or(0);
+                let read = self.vfs_for(mount).read(&path, offset, &mut buf).unwrap_or(0);
                 if std::env::var("TRACE_IPC").is_ok() {
                     eprintln!(
                         "[fs-file] read path={:?} offset={:#x} size={:#x} -> {:#x} buf={:?}",
@@ -1211,7 +1251,7 @@ impl Cpu {
                         bytes.len()
                     );
                 }
-                match self.fs.write(&path, offset, &bytes) {
+                match self.vfs_for(mount).write(&path, offset, &bytes) {
                     Some(_) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                     None => self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]),
                 }
@@ -1222,7 +1262,7 @@ impl Cpu {
             // `O_TRUNC`, so it has to actually shorten it.
             Some(3) => {
                 let size = self.mem.read_u64(self.ipc_request_data(tls))?;
-                if self.fs.set_size(&path, size) {
+                if self.vfs_for(mount).set_size(&path, size) {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 } else {
                     self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[])
@@ -1230,7 +1270,7 @@ impl Cpu {
             }
             // GetSize -> u64
             Some(4) => {
-                let size = self.fs.size(&path).unwrap_or(0);
+                let size = self.vfs_for(mount).size(&path).unwrap_or(0);
                 self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
             }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -6857,11 +6897,68 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "entries");
 
-        // And mounting a save reports there is none, rather than succeeding
-        // with no filesystem for the caller to mount.
-        write_request(&mut cpu, 52, &[0u8; 0x10]);
+        // Mounting one, on the other hand, hands back a filesystem over it.
+        // This console has a NAND now, and a save that has never been written
+        // is created on first open the way a console formats one on first use
+        // -- which is a different thing from a save that does not exist, and
+        // the reason the scan above still reports nothing to enumerate.
+        write_request(&mut cpu, 52, &[0u8; 0x40]);
         cpu.fsp_srv_request(TLS, Some(52), 9).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 2 | (1 << 9), "path not found");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        let saves = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        assert_eq!(cpu.service_name(saves), Some("fsp-srv-fs"));
+    }
+
+    #[test]
+    fn a_save_is_a_different_storage_from_the_sd_card() {
+        // Save data and the SD card are the same interface over the same
+        // paths; only the object a request arrives on says which is meant.
+        // Confusing them would put a title's save on the card, where the next
+        // title to mount the card would find it -- and a console keeps them on
+        // different media for exactly that reason.
+        const SAVE_ID: u64 = 0x0100_0000_0000_1000;
+        /// The `SaveDataAttribute` follows a `u8` space id padded to eight,
+        /// and carries the system save id 0x18 bytes into itself.
+        const SYSTEM_SAVE_ID_AT: usize = 8 + 0x18;
+        let mut cpu = request(false, 52, &[]);
+        cpu.record_handle(9, "fsp-srv");
+
+        let mut attribute = [0u8; 0x48];
+        attribute[SYSTEM_SAVE_ID_AT..SYSTEM_SAVE_ID_AT + 8]
+            .copy_from_slice(&SAVE_ID.to_le_bytes());
+        write_request(&mut cpu, 52, &attribute);
+        cpu.fsp_srv_request(TLS, Some(52), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "opening the save");
+        let saves = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        assert_eq!(cpu.service_name(saves), Some("fsp-srv-fs"));
+
+        // A directory created through that filesystem lands in the save.
+        write_path_request(&mut cpu, 2, "/settings", &[]);
+        cpu.fs_request(TLS, Some(2), saves).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "creating a directory");
+        assert_eq!(
+            cpu.save_data(SAVE_ID).and_then(|save| save.entry_type("/settings")),
+            Some(crate::vfs::ENTRY_TYPE_DIR),
+            "the directory should be in the save"
+        );
+        assert_eq!(
+            cpu.fs.entry_type("/settings"),
+            None,
+            "and must not have landed on the SD card"
+        );
+
+        // Reopening the same id finds it again: a save outlives the handle it
+        // was opened through, which is the whole point of it.
+        write_request(&mut cpu, 52, &attribute);
+        cpu.fsp_srv_request(TLS, Some(52), 9).unwrap();
+        let reopened = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        write_path_request(&mut cpu, 7, "/settings", &[]);
+        cpu.fs_request(TLS, Some(7), reopened).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "GetEntryType");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            u32::from(crate::vfs::ENTRY_TYPE_DIR)
+        );
     }
 
     #[test]

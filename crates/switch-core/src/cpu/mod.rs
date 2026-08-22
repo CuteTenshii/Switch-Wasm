@@ -512,6 +512,15 @@ pub struct Cpu {
     /// system's Mii and amiibo resources. Each is another NCA's RomFS, so
     /// they are sources rather than buffers, exactly like the running title's.
     data_archives: HashMap<u64, Box<dyn crate::source::ByteSource>>,
+    /// Save data, by the id it was opened under. A console keeps these on its
+    /// NAND -- one per application for its own save, one per system save id
+    /// for the system's -- and they are the only writable storage a title has
+    /// that is not the SD card.
+    saves: HashMap<u64, crate::vfs::Vfs>,
+    /// Which storage an `fsp-srv` object addresses: a save id, or absent for
+    /// the SD card. Files and directories inherit it from the filesystem they
+    /// were opened through, so a path means nothing without it.
+    fs_mount: HashMap<u64, u64>,
     /// Which data archive an open `IStorage` is serving. Absent means the
     /// storage is the process's own RomFS.
     fs_storage_archive: HashMap<u64, u64>,
@@ -748,6 +757,8 @@ impl Cpu {
             fs_dirs: HashMap::new(),
             fs_files: HashMap::new(),
             data_archives: HashMap::new(),
+            saves: HashMap::new(),
+            fs_mount: HashMap::new(),
             fs_storage_archive: HashMap::new(),
             am_in_data: VecDeque::new(),
             am_storages: HashMap::new(),
@@ -1458,6 +1469,47 @@ impl Cpu {
     /// answered with an empty archive.
     pub fn add_data_archive(&mut self, data_id: u64, src: Box<dyn crate::source::ByteSource>) {
         self.data_archives.insert(data_id, src);
+    }
+
+    /// The save data filed under `id`, creating it if this is the first time
+    /// anything has asked. A console formats a save on first open too.
+    pub fn save_data_mut(&mut self, id: u64) -> &mut crate::vfs::Vfs {
+        self.saves.entry(id).or_insert_with(crate::vfs::Vfs::empty)
+    }
+
+    /// The save data filed under `id`, if it exists.
+    pub fn save_data(&self, id: u64) -> Option<&crate::vfs::Vfs> {
+        self.saves.get(&id)
+    }
+
+    /// Every save id that has been opened, for a host that persists them.
+    pub fn save_ids(&self) -> Vec<u64> {
+        self.saves.keys().copied().collect()
+    }
+
+    /// The storage an `fsp-srv` object addresses.
+    pub(super) fn vfs_for(&mut self, mount: Option<u64>) -> &mut crate::vfs::Vfs {
+        match mount {
+            Some(id) => self.saves.entry(id).or_insert_with(crate::vfs::Vfs::empty),
+            None => &mut self.fs,
+        }
+    }
+
+    /// Which storage the `fsp-srv` object under `key` addresses.
+    pub(super) fn mount_of(&self, key: u64) -> Option<u64> {
+        self.fs_mount.get(&key).copied()
+    }
+
+    /// Record that the object under `key` addresses `mount`.
+    pub(super) fn set_mount(&mut self, key: u64, mount: Option<u64>) {
+        match mount {
+            Some(id) => {
+                self.fs_mount.insert(key, id);
+            }
+            None => {
+                self.fs_mount.remove(&key);
+            }
+        }
     }
 
     /// Same, backed by a [`ByteSource`](crate::source::ByteSource) that
