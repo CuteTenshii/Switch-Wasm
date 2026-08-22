@@ -2053,6 +2053,12 @@ impl Cpu {
     /// a thread spinning without ever reaching a blocking syscall looks
     /// identical to a busy program until you can see that every other thread
     /// is Runnable and none of them has moved.
+    /// Index of the thread the core is currently running, for host-side
+    /// sampling profilers.
+    pub fn current_thread_index(&self) -> usize {
+        self.current_thread
+    }
+
     pub fn thread_dump(&self) -> String {
         let mut out = String::new();
         for (index, thread) in self.threads.iter().enumerate() {
@@ -2123,6 +2129,12 @@ impl Cpu {
     }
 
     /// Format a full register snapshot for debugging.
+    /// One general-purpose register, for host-side debuggers that need to
+    /// read an argument out of a running call rather than a whole dump.
+    pub fn reg(&self, i: usize) -> u64 {
+        self.regs[i]
+    }
+
     pub fn reg_dump(&self) -> String {
         use std::fmt::Write;
         let mut s = String::with_capacity(1024);

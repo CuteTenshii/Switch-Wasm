@@ -534,6 +534,9 @@ impl Engine3D {
     /// keep running exactly as it did before this existed, just without
     /// real pixels for that draw. `TRACE_GPU` surfaces why.
     fn rasterize_or_log(&self, ctx: &mut ExecCtx) {
+        if ctx.trace && ctx.stats.draws == 1 {
+            self.dump_vertex_input();
+        }
         if let Err(e) = raster::draw(self, ctx) {
             ctx.stats.draws_skipped += 1;
             if ctx.trace {
@@ -546,6 +549,30 @@ impl Engine3D {
                     va.start, va.stride, self.last_draw.count
                 );
             }
+        }
+    }
+
+    /// The whole vertex-input state of the first draw: which streams are
+    /// bound and which attributes read them. A draw whose attributes all point
+    /// at a stream that is off is fed constants, not memory, and an empty
+    /// vertex buffer is then the expected state rather than a missing upload.
+    fn dump_vertex_input(&self) {
+        for i in 0..16 {
+            let a = self.vertex_attrib(i);
+            if a.size == 0 && !a.is_fixed {
+                continue;
+            }
+            eprintln!(
+                "[gpu] attrib{i} buf={} fixed={} off={:#x} size={:#x} ty={}",
+                a.buffer_id, a.is_fixed, a.offset, a.size, a.ty
+            );
+        }
+        for i in 0..8 {
+            let v = self.vertex_array(i);
+            eprintln!(
+                "[gpu] stream{i} en={} stride={} start={:#x} limit={:#x}",
+                v.enabled, v.stride, v.start, v.limit
+            );
         }
     }
 

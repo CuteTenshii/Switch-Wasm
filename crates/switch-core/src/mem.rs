@@ -56,6 +56,14 @@ pub struct Memory {
     /// allocated so reporting guest RAM use never walks the million-entry
     /// page table.
     mapped_pages: usize,
+    /// Watchpoint `[start, end)` and the address of the most recent guest
+    /// write that landed in it. `start >= end` disables it. A host-side
+    /// debugger arms the range and reads [`Memory::take_watch_hit`] after each
+    /// step, which is the only way to attribute a buffer's contents to the
+    /// code that produced them: polling the buffer cannot see a write that
+    /// stores the value already there, and cannot name the writer at all.
+    watch: (u32, u32),
+    watch_hit: Option<u32>,
 }
 
 impl Default for Memory {
@@ -72,6 +80,8 @@ impl Memory {
             readonly: Vec::new(),
             zero: Box::new([0u8; PAGE_SIZE]),
             mapped_pages: 0,
+            watch: (1, 0),
+            watch_hit: None,
         }
     }
 
@@ -248,6 +258,9 @@ impl Memory {
         self.check_writable(addr).ok()?;
         let page = self.page_mut(Self::page_index(addr)).ok()?;
         page[off..off + N].copy_from_slice(&val);
+        if addr < self.watch.1 && addr.wrapping_add(N as u32) > self.watch.0 {
+            self.watch_hit = Some(addr);
+        }
         Some(())
     }
 
@@ -303,6 +316,19 @@ impl Memory {
         self.read_u32(pc)
     }
 
+    /// Arm the write watchpoint over `[start, start + size)`; a zero `size`
+    /// disarms it.
+    pub fn watch_writes(&mut self, start: u32, size: u32) {
+        self.watch = if size == 0 { (1, 0) } else { (start, start.wrapping_add(size)) };
+        self.watch_hit = None;
+    }
+
+    /// The address of the most recent write inside the watched range, clearing
+    /// it so the next call reports only new writes.
+    pub fn take_watch_hit(&mut self) -> Option<u32> {
+        self.watch_hit.take()
+    }
+
     #[inline(always)]
     pub fn write_u8(&mut self, addr: u32, val: u8) -> Result<()> {
         self.check_writable(addr)?;
@@ -310,6 +336,9 @@ impl Memory {
         let off = Self::in_page_offset(addr);
         let page = self.page_mut(idx)?;
         page[off] = val;
+        if addr >= self.watch.0 && addr < self.watch.1 {
+            self.watch_hit = Some(addr);
+        }
         Ok(())
     }
 
