@@ -1298,6 +1298,28 @@ impl Cpu {
         }
     }
 
+    /// `fatal:u` — a process reporting that it cannot continue.
+    ///
+    /// Every one of its commands carries the `Result` that caused it, and that
+    /// value is the only account a guest ever gives of why it stopped.
+    /// Answering the call generically threw it away and left a process that
+    /// had *said* what was wrong looking like one that simply went quiet: the
+    /// Mii editor gives up here, 135 million instructions in.
+    ///
+    /// The report is a diagnostic, not a policy. Nothing here reboots into an
+    /// error screen, so the call succeeds and the guest carries on into
+    /// whatever it does after asking to die.
+    pub(super) fn fatal_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        let result = self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0);
+        let module = result & 0x1FF;
+        let description = (result >> 9) & 0x1FFF;
+        let trace = self.backtrace(10);
+        self.diagnostic(&format!(
+            "[fatal] {result:#010x} = {module}-{description:04} (cmd {cmd_id:?}) bt={trace:x?}"
+        ));
+        self.write_ipc_response(tls, 0, &[], &[], &[])
+    }
+
     pub(super) fn set_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         // Language codes in `SetLanguage` order, as NUL-padded ASCII in a u64.
         const LANGUAGE_CODES: [&str; 18] = [

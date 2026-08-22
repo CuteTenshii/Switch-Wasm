@@ -730,6 +730,10 @@ impl Cpu {
                             self.fs_save_data_info_reader_request(tls, cmd_id)?
                         }
                         "vi:m" | "vi:m:" => self.vi_request(tls, handle, cmd_id)?,
+                        // fatal:u — the guest reporting that it is giving up.
+                        // The Result it carries is the only statement of *why*
+                        // an applet stopped that the applet ever makes.
+                        "fatal:u" | "fatal:p" => self.fatal_request(tls, cmd_id)?,
                         "set" => self.set_request(tls, cmd_id)?,
                         "set:sys" => self.set_sys_request(tls, cmd_id)?,
                         "nvdrv" | "nvdrv:" | "nvdrv:a" | "nvdrv:a:" | "nvdrv:s" | "nvdrv:t" => {

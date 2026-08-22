@@ -26,29 +26,38 @@ fn main() {
     fs::create_dir_all(out_dir).unwrap();
 
     let nsp_data = fs::read(nsp_path).unwrap();
-    let pfs0 = switch_core::nsp::Pfs0::parse(&nsp_data).unwrap();
+    // A retail title arrives as an NSP with the Program NCA inside it; a
+    // system applet ships as the bare NCA, with no PFS0 around it at all.
+    let pfs0 = switch_core::nsp::Pfs0::parse(&nsp_data).ok();
     let prod_text = fs::read_to_string(prod_path).unwrap();
     let mut keys = switch_core::keys::keyset_from_prod(&switch_core::keys::parse_keys_file(&prod_text));
     let title_text = fs::read_to_string(title_path).unwrap();
     keys.title_keys = switch_core::keys::keyset_from_title(&switch_core::keys::parse_keys_file(&title_text));
 
-    let mut program = None;
-    for f in &pfs0.files {
-        if !f.name.to_ascii_lowercase().ends_with(".nca") {
-            continue;
-        }
-        let raw = &nsp_data[f.offset as usize..(f.offset + f.size) as usize];
-        if let Ok(nca) = switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)) {
-            if nca.content_type == switch_core::nca::ContentType::Program {
-                program = Some(f);
+    let span = match &pfs0 {
+        Some(pfs0) => {
+            let mut program = None;
+            for f in &pfs0.files {
+                if !f.name.to_ascii_lowercase().ends_with(".nca") {
+                    continue;
+                }
+                let raw = &nsp_data[f.offset as usize..(f.offset + f.size) as usize];
+                if let Ok(nca) = switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)) {
+                    if nca.content_type == switch_core::nca::ContentType::Program {
+                        program = Some(f);
+                    }
+                }
             }
+            let f = program.expect("no Program NCA in the PFS0");
+            (f.offset as usize, (f.offset + f.size) as usize)
         }
-    }
-    let f = program.unwrap();
-    let raw = &nsp_data[f.offset as usize..(f.offset + f.size) as usize];
+        None => (0, nsp_data.len()),
+    };
+    let raw = &nsp_data[span.0..span.1];
     let nca = switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)).unwrap();
     if nca.has_rights_id() && keys.title_key(&nca.rights_id).is_none() {
-        let tk = switch_core::ticket::find_and_decrypt_title_key(&nca.rights_id, &pfs0.files, &nsp_data, &keys).unwrap();
+        let files = pfs0.as_ref().map(|p| p.files.clone()).unwrap_or_default();
+        let tk = switch_core::ticket::find_and_decrypt_title_key(&nca.rights_id, &files, &nsp_data, &keys).unwrap();
         keys.title_keys.push((nca.rights_id, tk));
     }
     let idx = nca.exefs_section_index().unwrap();
