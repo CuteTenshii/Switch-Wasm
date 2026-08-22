@@ -12,7 +12,7 @@ use crate::gpu::engine::threed::{
 };
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::shader::interp::{
-    ConstantSource, Env, Invocation, MemoryConstants, MemoryTextures, NoTextures, TextureSource,
+    ConstantSource, Env, Invocation, MemoryConstants, MemoryTextures, NoTextures,
 };
 use crate::gpu::shader::{self, Op, Program};
 use crate::{Error, Result};
@@ -507,8 +507,7 @@ fn shade_fragment(
     verts: &[ShadedVertex; 3],
     inv_w: [f32; 3],
     weights: [f32; 3],
-    consts: &dyn ConstantSource,
-    textures: &dyn TextureSource,
+    env: &Env,
 ) -> Result<Option<[f32; 4]>> {
     inv.reset();
     let interp_inv_w = weights[0] * inv_w[0] + weights[1] * inv_w[1] + weights[2] * inv_w[2];
@@ -522,7 +521,7 @@ fn shade_fragment(
             inv.attr_in.set(base + c as u16 * 4, over_w);
         }
     }
-    inv.execute(program, &Env::new(consts, textures))?;
+    inv.execute(program, env)?;
     if inv.discarded {
         return Ok(None);
     }
@@ -653,6 +652,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let attribs: Vec<VertexAttrib> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_attrib(i)).collect();
     let arrays: Vec<VertexArray> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_array(i)).collect();
     let viewport = engine.viewport_transform();
+    let tex_cb_index = engine.tex_cb_index();
     let clip = engine.apply_scissor(ScissorRect { x0: 0, y0: 0, x1: rt.width, y1: rt.height });
     let bounds = Bounds { x0: clip.x0, y0: clip.y0, x1: clip.x1, y1: clip.y1 };
     let depth = engine.depth_target()?;
@@ -662,13 +662,26 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let cull = engine.cull_state();
 
     let index_base = if call.indexed { engine.index_array_start() } else { 0 };
-    let triangles = assemble(Primitive::from_raw(call.primitive)?, call.count);
+    let primitive = Primitive::from_raw(call.primitive)?;
+    // A point or line topology assembles into nothing, and "nothing" is
+    // indistinguishable on screen from a draw that worked and covered no
+    // pixels. Say so, so it lands in `draws_skipped` and the trace, rather
+    // than a whole line-drawn UI reporting a clean frame.
+    if matches!(
+        primitive,
+        Primitive::Points | Primitive::Lines | Primitive::LineLoop | Primitive::LineStrip
+    ) {
+        return Err(Error::Gpu(format!("raster: {primitive:?} is not rasterized")));
+    }
+    let triangles = assemble(primitive, call.count);
     // One shaded vertex per *index*, cached: an indexed mesh reuses vertices
     // heavily, and re-running the vertex shader for each reference is the
     // single most expensive thing this loop can do.
     let mut cache: std::collections::HashMap<u32, ShadedVertex> = std::collections::HashMap::new();
     // One fragment invocation for the whole draw, reset per pixel.
     let mut fragment = Invocation::new();
+    // Parsed TIC/TSC pairs, shared by every fragment of this draw.
+    let descriptors = std::cell::RefCell::new(std::collections::HashMap::new());
 
     for tri in triangles {
         let mut shaded: Vec<ShadedVertex> = Vec::with_capacity(3);
@@ -734,15 +747,17 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         ctx: &*ctx,
                         tex_header_pool: engine.tex_header_pool(),
                         tex_sampler_pool: engine.tex_sampler_pool(),
+                        descriptors: &descriptors,
                     };
+                    let env =
+                        Env::with_tex_cb_index(&fs_consts, &fs_textures, tex_cb_index);
                     shade_fragment(
                         &mut fragment,
                         &fs_program,
                         &shaded,
                         [inv_w[0], inv_w[1], inv_w[2]],
                         [w0, w1, w2],
-                        &fs_consts,
-                        &fs_textures,
+                        &env,
                     )?
                 };
                 // `kil` discards the fragment: no colour, and no depth

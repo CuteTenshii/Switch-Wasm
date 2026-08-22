@@ -8,23 +8,26 @@
 //! | samplerId << 20`, each indexing 32-byte entries in their own pool)
 //! matches devkitPro/deko3d's public `dkMakeTextureHandle` exactly.
 //!
-//! Which constant bank a `texs` immediate indexes was an open question even
-//! after that — resolved empirically against a live JKSV (real Mesa/nouveau
-//! driver, not deko3d) capture: bank 15 is nouveau's reserved "driver
-//! constants" buffer on every stage. The immediate indexes it in **dwords**,
-//! not bytes; [`handle_offset`] carries the story of why that took a second
+//! Which constant bank a `texs` immediate indexes is not a constant at all:
+//! it is `TexCbIndex`, a register the driver programs
+//! ([`Engine3D::tex_cb_index`](crate::gpu::engine::threed::Engine3D::tex_cb_index)).
+//! nouveau reserves bank 15 for its driver constants and writes 15 there;
+//! deko3d writes 0. The immediate indexes that bank in **dwords**, not
+//! bytes; [`handle_offset`] carries the story of why that took a second
 //! look.
 
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::surface::{ColorFormat, Layout, Surface};
 use crate::{Error, Result};
 
-/// The constant-buffer bank nouveau's driver reserves for bindless texture
-/// handles, on every shader stage — see this module's doc comment.
-pub const DRIVER_CONSTBUF_BANK: u8 = 15;
+/// What nouveau programs `TexCbIndex` to: bank 15, the buffer it reserves
+/// for driver constants on every shader stage. Only a default for test
+/// fixtures captured from a Mesa run — a real draw reads the register, since
+/// deko3d answers 0.
+pub const NOUVEAU_TEX_CB_INDEX: u8 = 15;
 
 /// Where a `texs`'s 13-bit immediate reads its handle in
-/// [`DRIVER_CONSTBUF_BANK`], as a byte offset.
+/// the bank `TexCbIndex` names, as a byte offset.
 ///
 /// The immediate is a **dword index**, not a byte offset: nouveau's lowering
 /// pass emits `tex.r = texBindBase / 4 + unit`, so the handle for texture
@@ -85,12 +88,70 @@ pub fn read_sampler(ctx: &ExecCtx, addr: u64) -> Result<Sampler> {
     })
 }
 
+/// Where one component of a sampled texel comes from — `TIC2`'s
+/// `X_SOURCE`..`W_SOURCE`. A texture's channels are not handed to the shader
+/// in memory order: the driver picks, per component, one of the stored
+/// channels or a constant, which is how one `R8` image serves GL's `RED`
+/// (`r,0,0,1`), `ALPHA` (`0,0,0,r`) and `LUMINANCE` (`r,r,r,1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwizzleSource {
+    Zero,
+    R,
+    G,
+    B,
+    A,
+    One,
+}
+
+fn decode_swizzle_source(bits: u32) -> Result<SwizzleSource> {
+    match bits & 0x7 {
+        0 => Ok(SwizzleSource::Zero),
+        2 => Ok(SwizzleSource::R),
+        3 => Ok(SwizzleSource::G),
+        4 => Ok(SwizzleSource::B),
+        5 => Ok(SwizzleSource::A),
+        // ONE_INT and ONE_FLOAT differ only for an integer texture, which
+        // this sampler does not produce; 1 is not a documented value.
+        6 | 7 => Ok(SwizzleSource::One),
+        other => Err(Error::Gpu(format!("texture: unknown TIC swizzle source {other}"))),
+    }
+}
+
+/// A parsed TIC: where the texels are and how to read them, plus the
+/// per-component swizzle to apply once one is decoded.
+#[derive(Debug, Clone, Copy)]
+pub struct Texture {
+    pub surface: Surface,
+    pub swizzle: [SwizzleSource; 4],
+}
+
+/// The [`ColorFormat`] that stores a TIC `COMPONENTS_SIZES` layout.
+///
+/// The two enumerations name channels the same way — most significant
+/// first — so `A8B8G8R8` and `RGBA8Unorm` are the same bytes, and so are
+/// `G8R8`/`RG8Unorm` and `R8`/`R8Unorm`. Only the sizes whose channel order
+/// is unambiguous under that reading are listed; anything else is a clear,
+/// honest error rather than a guess at where its channels sit.
+fn color_format_for_components(components_sizes: u32) -> Result<ColorFormat> {
+    let raw = match components_sizes {
+        0x08 => 0xD5, // A8B8G8R8 -> RGBA8Unorm
+        0x18 => 0xEA, // G8R8     -> RG8Unorm
+        0x1D => 0xF3, // R8       -> R8Unorm
+        other => {
+            return Err(Error::Gpu(format!(
+                "texture: unsupported TIC COMPONENTS_SIZES {other:#x}"
+            )))
+        }
+    };
+    ColorFormat::from_raw(raw)
+}
+
 /// Parse one 32-byte TIC entry (`gm200_texture.xml`'s `TIC2` domain) into a
-/// [`Surface`] ready for `Surface::sample_point`/`sample_bilinear`. Only
-/// `A8B8G8R8`/`UNORM`, 2D, pitch or block-linear is supported — the common
-/// case for a real UI texture; anything else is a clear, honest error
-/// rather than a guess.
-pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Surface> {
+/// [`Texture`] ready for `Surface::sample_point`/`sample_bilinear`. Only
+/// `UNORM`, 2D, pitch or block-linear is supported, in the component sizes
+/// [`color_format_for_components`] lists — the common cases for a real UI
+/// texture; anything else is a clear, honest error rather than a guess.
+pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     let dw = |i: u64| -> Result<u32> { ctx.read_u32(addr + i * 4) };
     let dw0 = dw(0)?;
     let dw1 = dw(1)?;
@@ -99,13 +160,7 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Surface> {
     let dw4 = dw(4)?;
     let dw5 = dw(5)?;
 
-    let components_sizes = dw0 & 0x7f;
-    if components_sizes != 0x08 {
-        return Err(Error::Gpu(format!(
-            "texture: unsupported TIC COMPONENTS_SIZES {:#x} (only A8B8G8R8)",
-            components_sizes
-        )));
-    }
+    let format = color_format_for_components(dw0 & 0x7f)?;
     let r_data_type = (dw0 >> 7) & 0x7;
     if r_data_type != 2 {
         return Err(Error::Gpu(format!(
@@ -113,10 +168,12 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Surface> {
             r_data_type
         )));
     }
-    // A8B8G8R8 + UNORM is byte-for-byte the same layout as the display/
-    // render-target path's RGBA8Unorm (`gpu::display_color_format`'s A8B8G8R8
-    // row): both name channels MSB-first with red in the lowest byte.
-    let format = ColorFormat::from_raw(0xD5)?;
+    let swizzle = [
+        decode_swizzle_source(dw0 >> 19)?,
+        decode_swizzle_source(dw0 >> 22)?,
+        decode_swizzle_source(dw0 >> 25)?,
+        decode_swizzle_source(dw0 >> 28)?,
+    ];
 
     let header_version = (dw2 >> 21) & 0x7;
     let (addr_low, layout) = match header_version {
@@ -144,11 +201,49 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Surface> {
     let width = (dw4 & 0xffff) + 1;
     let height = (dw5 & 0xffff) + 1;
 
-    Ok(Surface { addr: tex_addr, width, height, format, layout })
+    Ok(Texture {
+        surface: Surface { addr: tex_addr, width, height, format, layout },
+        swizzle,
+    })
+}
+
+/// Rearrange a decoded texel into what the shader reads.
+fn apply_swizzle(swizzle: [SwizzleSource; 4], texel: [f32; 4]) -> [f32; 4] {
+    swizzle.map(|source| match source {
+        SwizzleSource::Zero => 0.0,
+        SwizzleSource::R => texel[0],
+        SwizzleSource::G => texel[1],
+        SwizzleSource::B => texel[2],
+        SwizzleSource::A => texel[3],
+        SwizzleSource::One => 1.0,
+    })
+}
+
+/// What one bindless handle resolves to: its TIC and its TSC, both parsed.
+///
+/// Kept as a pair because they are looked up together and, for a given
+/// handle, decode to the same thing for every pixel of a draw.
+#[derive(Debug, Clone, Copy)]
+pub struct Descriptors {
+    pub texture: Texture,
+    pub sampler: Sampler,
 }
 
 /// Resolve a bindless `handle` (as a `texs` instruction's constant-buffer
-/// read produces it) against the bound TIC/TSC pools and sample at
+/// read produces it) against the bound TIC/TSC pools.
+pub fn read_descriptors(
+    ctx: &ExecCtx,
+    tex_header_pool: u64,
+    tex_sampler_pool: u64,
+    handle: u32,
+) -> Result<Descriptors> {
+    Ok(Descriptors {
+        texture: read_image(ctx, tex_header_pool + image_id(handle) as u64 * 32)?,
+        sampler: read_sampler(ctx, tex_sampler_pool + sampler_id(handle) as u64 * 32)?,
+    })
+}
+
+/// Resolve a bindless `handle` against the bound TIC/TSC pools and sample at
 /// normalized texture coordinates `(u, v)`.
 pub fn sample(
     ctx: &ExecCtx,
@@ -158,12 +253,29 @@ pub fn sample(
     u: f64,
     v: f64,
 ) -> Result<[f32; 4]> {
-    let image = read_image(ctx, tex_header_pool + image_id(handle) as u64 * 32)?;
-    let sampler = read_sampler(ctx, tex_sampler_pool + sampler_id(handle) as u64 * 32)?;
+    let descriptors = read_descriptors(ctx, tex_header_pool, tex_sampler_pool, handle)?;
+    sample_with(ctx, &descriptors, u, v)
+}
+
+/// Sample already-resolved descriptors at normalized coordinates `(u, v)`.
+pub fn sample_with(ctx: &ExecCtx, d: &Descriptors, u: f64, v: f64) -> Result<[f32; 4]> {
+    let (texture, sampler) = (&d.texture, d.sampler);
+    let image = &texture.surface;
 
     let wrap = |mode: Wrap, t: f64, size: u32| -> f64 {
         let t = match mode {
-            Wrap::Repeat | Wrap::Mirror => t - t.floor(),
+            Wrap::Repeat => t - t.floor(),
+            // Mirrored repeat folds every other period back on itself, which
+            // is the whole difference from plain repeat: treating it as
+            // repeat puts a seam where the reflection should be.
+            Wrap::Mirror => {
+                let period = t.rem_euclid(2.0);
+                if period > 1.0 {
+                    2.0 - period
+                } else {
+                    period
+                }
+            }
             Wrap::ClampToEdge | Wrap::ClampToBorder => t.clamp(0.0, 1.0),
         };
         t * size as f64
@@ -171,11 +283,14 @@ pub fn sample(
     let px = wrap(sampler.wrap_u, u, image.width);
     let py = wrap(sampler.wrap_v, v, image.height);
 
-    if sampler.mag_linear {
-        image.sample_bilinear(px, py, ctx)
+    // Filtering happens before the swizzle, which is free to do: selecting a
+    // component commutes with interpolating each one.
+    let texel = if sampler.mag_linear {
+        image.sample_bilinear(px, py, ctx)?
     } else {
-        image.sample_point(px, py, ctx)
-    }
+        image.sample_point(px, py, ctx)?
+    };
+    Ok(apply_swizzle(texture.swizzle, texel))
 }
 
 
@@ -185,6 +300,10 @@ mod tests {
     use crate::gpu::syncpt::Host1x;
     use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
     use crate::mem::Memory;
+
+    /// `X_SOURCE=R, Y_SOURCE=G, Z_SOURCE=B, W_SOURCE=A` in TIC dword 0 — the
+    /// identity swizzle, which a plain RGBA texture carries.
+    const IDENTITY_SWIZZLE: u32 = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
 
     fn harness() -> (Memory, AddressSpace, u64) {
         let mut mem = Memory::new();
@@ -207,7 +326,7 @@ mod tests {
         let (mut mem, vmm, base) = harness();
         let tex_addr = base + 0x400;
         // dword0: COMPONENTS_SIZES=A8B8G8R8(0x08), R_DATA_TYPE=UNORM(2)@bit7.
-        vmm.write_u32(&mut mem, base, 0x08 | (2 << 7)).unwrap();
+        vmm.write_u32(&mut mem, base, 0x08 | (2 << 7) | IDENTITY_SWIZZLE).unwrap();
         // dword1: pitch-aligned low address bits (32B units).
         vmm.write_u32(&mut mem, base + 4, ((tex_addr as u32) >> 5) << 5).unwrap();
         // dword2: HEADER_VERSION=PITCH(2)@bits21-23, plus address hi16.
@@ -222,11 +341,46 @@ mod tests {
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
         let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
-        let image = read_image(&ctx, base).unwrap();
+        let image = read_image(&ctx, base).unwrap().surface;
         assert_eq!(image.addr, tex_addr);
         assert_eq!(image.width, 16);
         assert_eq!(image.height, 8);
         assert_eq!(image.layout, Layout::Pitch { pitch: 64 });
+    }
+
+    #[test]
+    fn mirrored_repeat_folds_alternate_periods_back() {
+        // 1.25 is a quarter into the second period, which mirrors to 0.75;
+        // plain repeat would answer 0.25 and put a seam at every integer.
+        let (mut mem, vmm, base) = harness();
+        let tic_addr = base;
+        let tsc_addr = base + 0x100;
+        let tex_addr = base + 0x400;
+
+        vmm.write_u32(&mut mem, tic_addr, 0x08 | (2 << 7) | IDENTITY_SWIZZLE).unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5).unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21)).unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap(); // pitch 32
+        vmm.write_u32(&mut mem, tic_addr + 16, 3).unwrap(); // width 4
+        vmm.write_u32(&mut mem, tic_addr + 20, 0).unwrap(); // height 1
+        // MIRROR on u, clamp on v; nearest on both.
+        vmm.write_u32(&mut mem, tsc_addr, 1 | (2 << 3)).unwrap();
+        vmm.write_u32(&mut mem, tsc_addr + 4, 1 | (1 << 4)).unwrap();
+        for (i, colour) in [0xFF0000FFu32, 0xFF00FF00, 0xFFFF0000, 0xFFFFFFFF].iter().enumerate() {
+            vmm.write_u32(&mut mem, tex_addr + 4 * i as u64, *colour).unwrap();
+        }
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+
+        // u = 1.9 mirrors to 0.1 -> texel 0 (red); plain repeat would give
+        // 0.9 -> texel 3 (white).
+        assert_eq!(sample(&ctx, tic_addr, tsc_addr, 0, 1.9, 0.5).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        // u = -0.1 mirrors to 0.1 as well.
+        assert_eq!(sample(&ctx, tic_addr, tsc_addr, 0, -0.1, 0.5).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        // Inside the first period nothing changes.
+        assert_eq!(sample(&ctx, tic_addr, tsc_addr, 0, 0.9, 0.5).unwrap(), [1.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -254,7 +408,7 @@ mod tests {
         let tsc_addr = base + 0x100;
         let tex_addr = base + 0x400;
 
-        vmm.write_u32(&mut mem, tic_addr, 0x08 | (2 << 7)).unwrap();
+        vmm.write_u32(&mut mem, tic_addr, 0x08 | (2 << 7) | IDENTITY_SWIZZLE).unwrap();
         vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5).unwrap();
         vmm.write_u32(&mut mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21)).unwrap();
         vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap(); // PITCH_BITS_20_TO_5 = 1 -> pitch = 32

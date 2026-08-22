@@ -94,18 +94,34 @@ pub struct MemoryTextures<'a, 'b> {
     pub ctx: &'a ExecCtx<'b>,
     pub tex_header_pool: u64,
     pub tex_sampler_pool: u64,
+    /// The descriptors already parsed for this draw, keyed by handle.
+    ///
+    /// A TIC and a TSC are eight `u32` reads through the GPU address space
+    /// that decode to the same thing for every pixel of a draw, so parsing
+    /// them per sample was pure repetition: a full-screen textured quad paid
+    /// for it 921 600 times. The cache lives in the caller so that this
+    /// struct can still be rebuilt per fragment — it borrows `ctx`, which
+    /// the pixel loop needs mutably between shading calls.
+    pub descriptors: &'a std::cell::RefCell<HashMap<u32, crate::gpu::texture::Descriptors>>,
 }
 
 impl TextureSource for MemoryTextures<'_, '_> {
     fn sample(&self, handle: u32, u: f32, v: f32) -> Result<[f32; 4]> {
-        crate::gpu::texture::sample(
-            self.ctx,
-            self.tex_header_pool,
-            self.tex_sampler_pool,
-            handle,
-            u as f64,
-            v as f64,
-        )
+        let cached = self.descriptors.borrow().get(&handle).copied();
+        let descriptors = match cached {
+            Some(d) => d,
+            None => {
+                let d = crate::gpu::texture::read_descriptors(
+                    self.ctx,
+                    self.tex_header_pool,
+                    self.tex_sampler_pool,
+                    handle,
+                )?;
+                self.descriptors.borrow_mut().insert(handle, d);
+                d
+            }
+        };
+        crate::gpu::texture::sample_with(self.ctx, &descriptors, u as f64, v as f64)
     }
 }
 
@@ -129,11 +145,26 @@ pub struct Env<'a> {
     pub consts: &'a dyn ConstantSource,
     pub textures: &'a dyn TextureSource,
     pub memory: Option<&'a dyn GlobalMemory>,
+    /// Which constant bank a `texs`'s immediate indexes for its texture
+    /// handle — `TexCbIndex`, which the driver programs (see
+    /// [`crate::gpu::engine::threed::Engine3D::tex_cb_index`]).
+    pub tex_cb_index: u8,
 }
 
 impl<'a> Env<'a> {
+    /// An environment whose `texs` handles come from nouveau's bank, which
+    /// is what the fixtures in this module's tests are captured from. A real
+    /// draw uses [`Env::with_tex_cb_index`] with the register's value.
     pub fn new(consts: &'a dyn ConstantSource, textures: &'a dyn TextureSource) -> Env<'a> {
-        Env { consts, textures, memory: None }
+        Env::with_tex_cb_index(consts, textures, crate::gpu::texture::NOUVEAU_TEX_CB_INDEX)
+    }
+
+    pub fn with_tex_cb_index(
+        consts: &'a dyn ConstantSource,
+        textures: &'a dyn TextureSource,
+        tex_cb_index: u8,
+    ) -> Env<'a> {
+        Env { consts, textures, memory: None, tex_cb_index }
     }
 }
 
@@ -785,10 +816,9 @@ impl Invocation {
         // The bindless handle lives in the driver's reserved constant bank,
         // indexed by the shader's own immediate — see `gpu::texture`'s
         // module docs and `texture::handle_offset`.
-        let handle = env.consts.read_const(
-            crate::gpu::texture::DRIVER_CONSTBUF_BANK,
-            crate::gpu::texture::handle_offset(handle),
-        )?;
+        let handle = env
+            .consts
+            .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
         let u = self.reg_f32(coords[0]);
         let v = self.reg_f32(coords[1]);
         let color = env.textures.sample(handle, u, v)?;
@@ -1484,8 +1514,8 @@ mod tests {
         // The immediate 0x20 is a dword index, so the handle is 0x80 bytes in
         // — putting it at 0x20 instead is what made every draw in a page of
         // text resolve to the same texture.
-        consts.insert((crate::gpu::texture::DRIVER_CONSTBUF_BANK, 0x80), f32::from_bits(handle));
-        consts.insert((crate::gpu::texture::DRIVER_CONSTBUF_BANK, 0x20), f32::from_bits(99));
+        consts.insert((crate::gpu::texture::NOUVEAU_TEX_CB_INDEX, 0x80), f32::from_bits(handle));
+        consts.insert((crate::gpu::texture::NOUVEAU_TEX_CB_INDEX, 0x20), f32::from_bits(99));
 
         let textures = RecordingTextures {
             calls: RefCell::new(Vec::new()),

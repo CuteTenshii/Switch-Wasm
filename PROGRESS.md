@@ -17,7 +17,7 @@ out to be stale.
 | `JKSV.nro` | full UI: text, icons and save tiles ([below](#jksv-drew-one-glyph-for-a-whole-page-of-text)) | yes |
 | `nxdumptool.nro` | renders | yes |
 | `NX-Shell.nro` | clean exit at 15.7M steps, no font (below) | no |
-| `Checkpoint.nro` | 6.8M steps, no exit | no |
+| `Checkpoint.nro` | layout, icons and chrome; text still blocks ([below](#checkpoint-was-the-first-deko3d-app-to-draw-anything)) | yes |
 | "A Short Hike" (NSP) | runs 1.5B steps with no fault or abort | not yet |
 
 - **GPU**: the nvdrv/nvmap/GMMU/channel/copy-engine path is real
@@ -1512,6 +1512,72 @@ swapping the barycentrics back on the way out.
 
 hbmenu, NX-Fetch, lennytube and Checkpoint all render byte-identical frames
 across the five fixes.
+
+### Checkpoint was the first deko3d app to draw anything
+
+hbmenu is deko3d, but it issues no draws at all — its whole UI is a copy-
+engine blit. So every 3D path had only ever been exercised by JKSV, and
+everything JKSV's driver does had quietly become "what the hardware does".
+Checkpoint is deko3d *and* draws, and it lost all 70 of its draws a frame.
+
+**`TexCbIndex` (method 0x982) is a register, not a constant.** It names the
+constant bank a `texs`'s immediate indexes for its handle. Mesa writes 15,
+the bank nouveau reserves for driver constants; deko3d writes 0. Hard-coding
+15 sent every deko3d texture fetch at a bank deko3d never binds, and the
+draw was dropped with "read from unbound constant bank 15" — eighteen a
+frame. This is the third thing about `texs` that turned out to be programmed
+rather than fixed, after its destination pair and its dword indexing.
+
+**A TIC's `COMPONENTS_SIZES` is not always `A8B8G8R8`, and its swizzle is not
+always the identity.** Thirty-five more draws sampled `R8` (0x1d) images —
+what a glyph atlas or a mask is — and the parser refused anything but
+`A8B8G8R8`. The four `X_SOURCE`..`W_SOURCE` fields were being ignored
+outright, which matters exactly when the texture is not four-channel: one
+`R8` image serves GL's `RED` (`r,0,0,1`), `ALPHA` (`0,0,0,r`) and
+`LUMINANCE` (`r,r,r,1`), and the swizzle is the only thing that says which.
+Honouring it left every existing frame byte-identical, which is the check
+that the field positions are right: JKSV's textures all carry the identity.
+
+With those two, Checkpoint goes from a blank screen to its real layout —
+sidebar, panes, footer hints — at 25 skipped draws a frame instead of 70.
+
+**What is left there is `SHFL`**, the warp shuffle (`0xef17700cf0170001` is
+`shfl bfly 0x1`), which a fragment shader uses to get at its neighbour's
+value and so compute `dFdx`/`fwidth`. Checkpoint antialiases its text with
+it, which is why the text is still solid blocks. A scalar interpreter cannot
+answer it: the value belongs to another invocation. Doing it properly means
+running a 2x2 fragment quad in lock-step, which is worth gating on "this
+program contains a `SHFL`" so the other 99% of draws keep shading one pixel
+at a time. Returning the source register unchanged would make `fwidth` zero
+and is *not* obviously better than dropping the draw — `smoothstep(a, a, x)`
+is undefined — so it is left failing loudly.
+
+### Where a frame's time actually goes
+
+Measured by ablation on 30 JKSV frames, interleaved and taking the minimum
+because the machine was busy:
+
+| Stage | Share |
+|---|---|
+| Fragment shader interpretation | 36% |
+| Rasterize, depth, blend, pixel I/O | 30% |
+| ARM interpreter | 25% |
+| Texture sampling | 9% |
+
+Two things came out of that, both leaving every frame byte-identical:
+
+- **A TIC and a TSC decode to the same thing for every pixel of a draw.**
+  Parsing them per sample was eight `u32` reads through the GPU address
+  space per fragment; they are cached per draw now, keyed by handle. −9%.
+- **`read_pixel`/`write_pixel` walked a pixel one byte at a time.**
+  `Memory`'s multi-byte accessors cost a single page lookup where `read_u8`
+  costs one each, and `write_u8` re-scans the read-only ranges every call —
+  so a blended pixel paid for that eight times. −8%.
+
+Two things that were *measured and dropped*: interpolating only the varyings
+a program reads is worth ~1.5%, and skipping `Invocation::reset` is inside
+the noise. Neither is where the time is. What is left is the interpreter
+loop itself, on both sides.
 
 ## Frontend
 

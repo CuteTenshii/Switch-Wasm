@@ -69,18 +69,49 @@ impl ExecCtx<'_> {
     /// meant millions of address-space lookups per frame.
     pub fn read_pixel(&self, gpu_va: u64, len: u32) -> Result<u128> {
         let cpu = self.pixel_addr(gpu_va, len)?;
-        let mut v = 0u128;
-        for i in 0..len {
-            v |= u128::from(self.mem.read_u8(cpu.wrapping_add(i))?) << (8 * i);
-        }
-        Ok(v)
+        // One access per machine word rather than per byte. `Memory`'s
+        // multi-byte reads cost a single page lookup where `read_u8` costs
+        // one each, and this runs for every pixel a draw blends, tests
+        // against depth, or samples.
+        Ok(match len {
+            1 => u128::from(self.mem.read_u8(cpu)?),
+            2 => u128::from(self.mem.read_u16(cpu)?),
+            4 => u128::from(self.mem.read_u32(cpu)?),
+            8 => u128::from(self.mem.read_u64(cpu)?),
+            16 => {
+                u128::from(self.mem.read_u64(cpu)?)
+                    | (u128::from(self.mem.read_u64(cpu.wrapping_add(8))?) << 64)
+            }
+            _ => {
+                let mut v = 0u128;
+                for i in 0..len {
+                    v |= u128::from(self.mem.read_u8(cpu.wrapping_add(i))?) << (8 * i);
+                }
+                v
+            }
+        })
     }
 
     /// Write `len` bytes of a surface's raw pixel, little-endian.
     pub fn write_pixel(&mut self, gpu_va: u64, len: u32, value: u128) -> Result<()> {
         let cpu = self.pixel_addr(gpu_va, len)?;
-        for i in 0..len {
-            self.mem.write_u8(cpu.wrapping_add(i), (value >> (8 * i)) as u8)?;
+        // As in `read_pixel`, and more so: `write_u8` re-checks the
+        // read-only ranges on every call, so a byte loop paid for that once
+        // per byte of every pixel written.
+        match len {
+            1 => self.mem.write_u8(cpu, value as u8)?,
+            2 => self.mem.write_u16(cpu, value as u16)?,
+            4 => self.mem.write_u32(cpu, value as u32)?,
+            8 => self.mem.write_u64(cpu, value as u64)?,
+            16 => {
+                self.mem.write_u64(cpu, value as u64)?;
+                self.mem.write_u64(cpu.wrapping_add(8), (value >> 64) as u64)?;
+            }
+            _ => {
+                for i in 0..len {
+                    self.mem.write_u8(cpu.wrapping_add(i), (value >> (8 * i)) as u8)?;
+                }
+            }
         }
         Ok(())
     }

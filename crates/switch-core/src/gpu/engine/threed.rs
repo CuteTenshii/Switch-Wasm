@@ -87,6 +87,7 @@ const VERTEX_ARRAY_STRIDE: u32 = 0x4;
 const VERTEX_ARRAY_LIMIT: u32 = 0x7C0;
 
 // --- Texture/sampler pools ---
+const TEX_CB_INDEX: u32 = 0x982;
 const SET_TEX_SAMPLER_POOL: u32 = 0x557;
 const SET_TEX_HEADER_POOL: u32 = 0x55D;
 
@@ -770,6 +771,18 @@ impl Engine3D {
             scale: [vw / 2.0, -vh / 2.0, 0.5],
             translate: [vx + vw / 2.0, vy + vh / 2.0, 0.5],
         }
+    }
+
+    /// Which constant bank a `texs`'s immediate indexes for its texture
+    /// handle (`TexCbIndex`).
+    ///
+    /// Both drivers this emulator sees program it, to different values:
+    /// nouveau writes 15, the bank it reserves for driver constants, and
+    /// deko3d writes 0. Hard-coding nouveau's answer made every deko3d draw
+    /// that samples a texture read a bank deko3d never binds — Checkpoint
+    /// lost eighteen draws a frame to "read from unbound constant bank 15".
+    pub fn tex_cb_index(&self) -> u8 {
+        self.regs.field(TEX_CB_INDEX, 0, 4) as u8
     }
 
     /// Where the bound index buffer starts.
