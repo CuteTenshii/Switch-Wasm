@@ -507,3 +507,20 @@ pub(crate) fn simd_abs_diff(a: u64, b: u64, bits: u32, unsigned: bool) -> u64 {
         (sa - sb).unsigned_abs()
     }
 }
+
+/// CRC32/CRC32C accumulate over the low `size` bits of `val`.
+///
+/// ARM specifies these in terms of the bit-reversed accumulator and a
+/// polynomial division, which is exactly the classic reflected CRC loop over
+/// the bytes of `val` from least significant upwards.
+pub(crate) fn crc32(acc: u32, val: u64, size: u32, castagnoli: bool) -> u32 {
+    let poly: u32 = if castagnoli { 0x82F6_3B78 } else { 0xEDB8_8320 };
+    let mut crc = acc;
+    for i in 0..size / 8 {
+        crc ^= ((val >> (i * 8)) & 0xFF) as u32;
+        for _ in 0..8 {
+            crc = (crc >> 1) ^ (poly & 0u32.wrapping_sub(crc & 1));
+        }
+    }
+    crc
+}

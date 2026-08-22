@@ -299,6 +299,22 @@ impl Cpu {
                                         (a as u32).rotate_right(amt) as u64
                                     }
                                 }
+                                0b010000..=0b010111 => {
+                                    // CRC32/CRC32C. The accumulator and the
+                                    // result are always 32-bit; only the
+                                    // doubleword form reads a full 64-bit Rm,
+                                    // and it is the only one encoded with sf
+                                    // set.
+                                    let sz = opcode2 & 0b11;
+                                    if (sz == 0b11) != sf {
+                                        return Err(Error::Cpu(format!(
+                                            "malformed CRC32 operand size at {:#x}",
+                                            self.pc
+                                        )));
+                                    }
+                                    let castagnoli = ((opcode2 >> 2) & 1) == 1;
+                                    u64::from(crc32(a as u32, b, 8 << sz, castagnoli))
+                                }
                                 _ => {
                                     return Err(Error::Cpu(format!(
                                         "unimplemented 2-source opcode {} at {:#x}",

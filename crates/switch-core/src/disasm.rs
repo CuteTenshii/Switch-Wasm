@@ -670,10 +670,31 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                     let rd = insn & 0x1F;
                     let rm = (insn >> 16) & 0x1F;
                     if ((insn >> 29) & 0b11) == 0b00 {
+                        if (opcode2 & 0b111000) == 0b010000 {
+                            // CRC32/CRC32C: accumulator and result are always
+                            // W registers, and only the doubleword form takes
+                            // an X for the data operand.
+                            let name = match opcode2 & 0b111 {
+                                0b000 => "crc32b", 0b001 => "crc32h",
+                                0b010 => "crc32w", 0b011 => "crc32x",
+                                0b100 => "crc32cb", 0b101 => "crc32ch",
+                                0b110 => "crc32cw", _ => "crc32cx",
+                            };
+                            let data = if (opcode2 & 0b11) == 0b11 { zr64(rm) } else { zr32(rm) };
+                            return Ok(write!(s, "{} {}, {}, {}", name, zr32(rd), zr32(rn), data).is_ok());
+                        }
+                        // Naming the fallback `rorv` made every unimplemented
+                        // opcode in this group disassemble as a rotate.
                         let name = match opcode2 {
                             0b000010 => "udiv", 0b000011 => "sdiv",
                             0b001000 => "lslv", 0b001001 => "lsrv",
-                            0b001010 => "asrv", _ => "rorv",
+                            0b001010 => "asrv", 0b001011 => "rorv",
+                            _ => {
+                                return Ok(write!(
+                                    s, "dp.2src.{:06b} {}, {}, {}",
+                                    opcode2, zr(rd), zr(rn), zr(rm)
+                                ).is_ok())
+                            }
                         };
                         Ok(write!(s, "{} {}, {}, {}", name, zr(rd), zr(rn), zr(rm)).is_ok())
                     } else if ((insn >> 29) & 0b11) == 0b10 {

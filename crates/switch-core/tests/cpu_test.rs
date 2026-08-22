@@ -5258,3 +5258,41 @@ fn parental_control_hands_out_the_events_it_is_asked_for() {
     ipc_request_plain(&mut cpu, service, 1458, &[]); // IsPlayTimerAlarmDisabled
     assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 1);
 }
+
+// CRC32/CRC32C: sf 0 0 11010110 Rm 010 C sz Rn Rd. sf is set only for the
+// doubleword form, whose data operand is an X register.
+fn crc32(rd: u32, rn: u32, rm: u32, castagnoli: bool, sz: u32) -> u32 {
+    let sf = if sz == 0b11 { 1u32 << 31 } else { 0 };
+    let c = u32::from(castagnoli);
+    sf | 0b11010110 << 21 | (rm << 16) | (0b010 << 13) | (c << 12) | (sz << 10) | (rn << 5) | rd
+}
+
+#[test]
+fn crc32_accumulates_over_the_bytes_of_its_operand() {
+    // The check value of "123456789" for both polynomials, fed in as one
+    // doubleword plus a trailing byte. The instructions accumulate without
+    // the final inversion, so these are the complements of the usual
+    // 0xCBF43926 and 0xE3069283.
+    let mut cpu = Cpu::new();
+    cpu.set_reg(0, u64::from_le_bytes(*b"12345678"));
+    cpu.set_reg(1, 0xFFFF_FFFF);
+    cpu.set_reg(3, u64::from(b'9'));
+    cpu.set_reg(6, 0x3231);
+    cpu.set_reg(8, 0x3433_3231);
+    let cpu = run_program(
+        cpu,
+        0x1000,
+        &[
+            crc32(2, 1, 0, false, 0b11),
+            crc32(2, 2, 3, false, 0b00),
+            crc32(4, 1, 0, true, 0b11),
+            crc32(4, 4, 3, true, 0b00),
+            crc32(5, 31, 6, false, 0b01),
+            crc32(7, 31, 8, false, 0b10),
+        ],
+    );
+    assert_eq!(cpu.read_x(2), 0x340B_C6D9);
+    assert_eq!(cpu.read_x(4), 0x1CF9_6D7C);
+    assert_eq!(cpu.read_x(5), 0x0E8A_5632);
+    assert_eq!(cpu.read_x(7), 0xBAA7_3FBF);
+}
