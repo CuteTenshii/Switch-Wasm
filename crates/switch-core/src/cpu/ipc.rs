@@ -1916,7 +1916,30 @@ impl Cpu {
                 if self.trace_nv {
                     eprintln!("[nv] QueryEvent fd={fd} event={event_id} -> {node}");
                 }
-                let handle = self.alloc_event(node, true);
+                // A syncpoint event stands for work that has already
+                // finished. This emulator runs each submission to completion
+                // inside the ioctl that carried it, so by the time the guest
+                // can ask about the fence, the syncpoint has retired -- hand
+                // the event over already signalled, and manual-reset so every
+                // poll succeeds rather than only the first.
+                //
+                // Left dark, these never fired at all, and a guest polling one
+                // with a zero timeout got "not yet" forever: the Home Menu
+                // asked 22,949 times in two seconds of console time and never
+                // dequeued the buffer it was waiting to draw into.
+                //
+                // The GPU *fault* event is the exception and stays dark and
+                // auto-clearing. It does not mean "your work is done", it
+                // means the channel died, and a guest told that tears down its
+                // renderer.
+                let fault = matches!(
+                    self.nv.file(fd),
+                    Some(crate::gpu::nvdrv::NvFile::NvHostCtrlGpu)
+                );
+                let handle = self.alloc_event(node, fault);
+                if !fault {
+                    self.signal_event(handle);
+                }
                 self.write_ipc_reply(tls, 0, &[handle], &[], &error.to_le_bytes(), &[])
             }
             // SetClientPID / everything else: acknowledge with no out data.
