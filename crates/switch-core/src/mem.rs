@@ -16,6 +16,12 @@ pub const ADDRESS_SPACE_SIZE: u64 = 0x1_0000_0000; // 4 GiB
 /// Number of 4 KiB pages in the 4 GiB space. Computed in u64 first so it
 /// survives the wasm32 (32-bit usize) truncation of the 4 GiB constant.
 const PAGE_COUNT: usize = (ADDRESS_SPACE_SIZE >> PAGE_BITS) as usize;
+/// Pages per entry in the block summary [`Memory`] keeps beside the page
+/// table. 512 pages is 2 MiB: small enough that the summary is a few
+/// kilobytes, large enough that walking a multi-gigabyte untouched region
+/// costs thousands of steps instead of millions. See [`Memory::state_run`].
+const BLOCK_PAGES: usize = 512;
+const BLOCK_COUNT: usize = PAGE_COUNT / BLOCK_PAGES;
 /// Hard ceiling on real, host-backed guest RAM. It exists to bound a runaway
 /// guest write (e.g. a stray pointer walking up from a null base, one
 /// soft-mapped page at a time) to a fast, cheap failure instead of ballooning
@@ -31,6 +37,20 @@ const PAGE_COUNT: usize = (ADDRESS_SPACE_SIZE >> PAGE_BITS) as usize;
 /// so this is nowhere near a fidelity limit and is expected to rise again.
 pub const MAX_MAPPED_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
 const MAX_MAPPED_PAGES: usize = (MAX_MAPPED_BYTES / PAGE_SIZE as u64) as usize;
+
+/// One region as `svcQueryMemory` describes it: the bounds of a run of pages
+/// that share a state, and the state itself. See [`Memory::state_run`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateRun {
+    pub start: u32,
+    /// End-exclusive, and clamped to the limit the run was asked for.
+    pub end: u32,
+    /// Whether the pages hold real storage, as opposed to being untouched
+    /// soft-mapped ones an address-space walk should see as free.
+    pub mapped: bool,
+    /// Whether they are write-protected — in practice a module's `.text`.
+    pub readonly: bool,
+}
 
 #[derive(Debug)]
 pub struct Memory {
@@ -56,6 +76,11 @@ pub struct Memory {
     /// allocated so reporting guest RAM use never walks the million-entry
     /// page table.
     mapped_pages: usize,
+    /// How many pages of each 2 MiB block hold real storage. Maintained
+    /// alongside `pages` so a scan can skip a block that is entirely
+    /// untouched without looking at its pages; that is the case that grows
+    /// with the address space, and the only one that ever got expensive.
+    block_mapped: Vec<u16>,
     /// Watchpoint `[start, end)` and the address of the most recent guest
     /// write that landed in it. `start >= end` disables it. A host-side
     /// debugger arms the range and reads [`Memory::take_watch_hit`] after each
@@ -80,6 +105,7 @@ impl Memory {
     pub fn new() -> Memory {
         Memory {
             pages: vec![None; PAGE_COUNT],
+            block_mapped: vec![0u16; BLOCK_COUNT],
             soft: (1, 0),
             readonly: Vec::new(),
             zero: Box::new([0u8; PAGE_SIZE]),
@@ -162,6 +188,7 @@ impl Memory {
         }
         self.pages[idx] = Some(Box::new([0u8; PAGE_SIZE]));
         self.mapped_pages += 1;
+        self.block_mapped[idx / BLOCK_PAGES] += 1;
         Ok(())
     }
 
@@ -204,6 +231,73 @@ impl Memory {
     /// so address-space walks see genuinely free pages as unmapped.
     pub fn page_mapped(&self, addr: u32) -> bool {
         self.pages[Self::page_index(addr)].is_some()
+    }
+
+    /// Whether any range marked by [`Memory::mark_readonly`] overlaps
+    /// `[start, end)`.
+    fn readonly_intersects(&self, start: u32, end: u32) -> bool {
+        self.readonly.iter().any(|&(s, e)| start < e && s < end)
+    }
+
+    /// The run of pages around `addr` that share its state — backed or not,
+    /// read-only or not — clamped to `[0, limit)`. This is the region
+    /// `svcQueryMemory` reports, and the two facts it reports about it.
+    ///
+    /// Finding the run means finding where the state changes, which the
+    /// syscall used to do one 4 KiB page at a time. That is O(address space),
+    /// and it consulted the read-only list for every page: a guest whose heap
+    /// region is measured in gigabytes made each query walk hundreds of
+    /// thousands of untouched pages, and a title that queries as it allocates
+    /// spent more time inside `svcQueryMemory` than in its own code. Blocks
+    /// with no backed page in them are skipped whole, so the answer is the
+    /// same and the cost follows the number of *regions* rather than the size
+    /// of the address space.
+    pub fn state_run(&self, addr: u32, limit: u32) -> StateRun {
+        const PAGE: u32 = PAGE_SIZE as u32;
+        const BLOCK: u32 = (BLOCK_PAGES * PAGE_SIZE) as u32;
+        let state = |a: u32| (self.page_mapped(a), self.is_readonly(a));
+        let page = addr & !(PAGE - 1);
+        let (mapped, readonly) = state(page);
+        let limit = limit & !(PAGE - 1);
+        // A query past the end of the address space this emulator presents
+        // describes the page it named and nothing around it. Guests probe up
+        // there deliberately (hbmenu reads the failure to size the address
+        // space), so it is an answer rather than an error.
+        if page >= limit {
+            return StateRun { start: page, end: page.saturating_add(PAGE), mapped, readonly };
+        }
+        // Only a run of *untouched, unprotected* pages can be skipped a block
+        // at a time: that is what the summary knows about. Every other run is
+        // bounded by something the page table has to be asked about.
+        let skippable = !mapped && !readonly;
+        let empty = |block_start: u32| {
+            self.block_mapped[(block_start >> PAGE_BITS) as usize / BLOCK_PAGES] == 0
+                && !self.readonly_intersects(block_start, block_start + BLOCK)
+        };
+
+        let mut start = page;
+        while start > 0 {
+            if skippable && start % BLOCK == 0 && start >= BLOCK && empty(start - BLOCK) {
+                start -= BLOCK;
+                continue;
+            }
+            if state(start - PAGE) != (mapped, readonly) {
+                break;
+            }
+            start -= PAGE;
+        }
+        let mut end = page + PAGE;
+        while end < limit {
+            if skippable && end % BLOCK == 0 && limit - end >= BLOCK && empty(end) {
+                end += BLOCK;
+                continue;
+            }
+            if state(end) != (mapped, readonly) {
+                break;
+            }
+            end += PAGE;
+        }
+        StateRun { start, end, mapped, readonly }
     }
 
     /// Map `data` at `addr`, allocating pages as needed and zero-filling any
@@ -466,6 +560,7 @@ impl Memory {
         for idx in first..last.min(PAGE_COUNT as u64) {
             if self.pages[idx as usize].take().is_some() {
                 self.mapped_pages -= 1;
+                self.block_mapped[idx as usize / BLOCK_PAGES] -= 1;
             }
         }
     }
@@ -530,6 +625,64 @@ mod tests {
         }
         assert_eq!(touched, MAX_MAPPED_PAGES as u64);
         assert_eq!(m.mapped_bytes(), MAX_MAPPED_BYTES);
+    }
+
+    #[test]
+    fn a_region_scan_reports_exact_bounds_over_an_empty_address_space() {
+        // The bounds are what `svcQueryMemory` hands the guest, and they have
+        // to be right whether the run is four pages or three gigabytes. What
+        // the block summary changes is the cost: this walks a 3.75 GiB space
+        // whose untouched blocks are skipped whole, and every assertion below
+        // is a boundary the old page-at-a-time scan would have found by
+        // looking at each of a million pages.
+        const LIMIT: u32 = 0xF000_0000;
+        let mut m = Memory::new();
+        m.soft_map_zero(0, LIMIT);
+        m.map_zero(0x1000_0000, PAGE_SIZE * 4).unwrap();
+
+        let run = m.state_run(0x1000_2000, LIMIT);
+        assert_eq!((run.start, run.end), (0x1000_0000, 0x1000_4000));
+        assert!(run.mapped);
+
+        let run = m.state_run(0x0800_0000, LIMIT);
+        assert_eq!((run.start, run.end), (0, 0x1000_0000));
+        assert!(!run.mapped);
+
+        let run = m.state_run(0x8000_0000, LIMIT);
+        assert_eq!((run.start, run.end), (0x1000_4000, LIMIT));
+        assert!(!run.mapped);
+
+        // A page above the limit describes itself and stops. Guests read the
+        // top of the address space on purpose.
+        let run = m.state_run(LIMIT + 0x5000, LIMIT);
+        assert_eq!((run.start, run.end), (LIMIT + 0x5000, LIMIT + 0x6000));
+
+        // Freeing the pages puts the run back together, so the summary has to
+        // come back down with them.
+        m.unmap(0x1000_0000, PAGE_SIZE * 4);
+        let run = m.state_run(0x1000_2000, LIMIT);
+        assert_eq!((run.start, run.end), (0, LIMIT));
+    }
+
+    #[test]
+    fn a_read_only_range_is_a_region_boundary() {
+        // `.text` is mapped like the pages around it and only differs in being
+        // write-protected, which `svcQueryMemory` reports as R-X. A scan that
+        // skipped it along with the rest of a mapped run would tell `rtld`
+        // that a module's code and its data are one region, and `rtld` finds
+        // modules by looking for executable ones.
+        const LIMIT: u32 = 0xF000_0000;
+        let mut m = Memory::new();
+        m.map_zero(0x0800_0000, PAGE_SIZE * 8).unwrap();
+        m.mark_readonly(0x0800_2000, 0x0800_4000);
+
+        let run = m.state_run(0x0800_2000, LIMIT);
+        assert_eq!((run.start, run.end), (0x0800_2000, 0x0800_4000));
+        assert!(run.mapped && run.readonly);
+
+        let run = m.state_run(0x0800_0000, LIMIT);
+        assert_eq!((run.start, run.end), (0x0800_0000, 0x0800_2000));
+        assert!(run.mapped && !run.readonly);
     }
 
     #[test]

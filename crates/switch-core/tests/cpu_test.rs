@@ -705,8 +705,10 @@ fn bootstrap_provides_stack_and_low_memory() {
     // Writes allocate a private page on first touch.
     cpu.mem.write_u32(0xb00, 0xDEAD_BEEF).unwrap();
     assert_eq!(cpu.mem.read_u32(0xb00).unwrap(), 0xDEAD_BEEF);
-    // The soft region ends at the NRO base; reads beyond it still fault.
-    assert!(cpu.mem.read_u32(0x8000_0000 + 0xDEAD).is_err());
+    // The soft region ends where the guest's address space does; reads beyond
+    // it still fault, so a pointer that walks off the top of the last region
+    // is caught rather than answered with more zeros.
+    assert!(cpu.mem.read_u32(switch_core::cpu::GUEST_SPACE_END + 0xDEAD).is_err());
 }
 
 #[test]
@@ -821,7 +823,8 @@ fn horizon_query_memory_and_get_info() {
     // sizes the application heap from — it hands the difference straight to
     // `nn::mem::StandardAllocator::Initialize`, which asserts on a span under
     // 16 KiB. Answering 0 (the old `_ => 0` default) made that difference 0.
-    for (info_type, expected) in [(21u64, 0x1E00_0000u64), (22, 0)] {
+    let total = u64::from(switch_core::cpu::GUEST_TOTAL_MEMORY_SIZE);
+    for (info_type, expected) in [(21u64, total), (22, 0)] {
         let mut cpu = cpu_at(0x1000);
         cpu.set_reg(1, info_type);
         cpu.set_reg(2, 0xffff_8001);
@@ -849,7 +852,7 @@ fn horizon_query_memory_and_get_info() {
     cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
-    assert_eq!(cpu.read_x(1), 0x1E00_0000);
+    assert_eq!(cpu.read_x(1), total);
 
     // InfoType 12 = AslrRegionAddress.
     let mut cpu = cpu_at(0x1000);
@@ -4603,13 +4606,32 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
     ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &TAG.to_le_bytes());
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "AppendAudioOutBuffer failed");
 
-    // The samples reached the host, unchanged, at full volume.
+    // The samples reached the host, unchanged, at full volume. That happens on
+    // arrival: it is the *tag* that waits for the device, not the audio.
     let mut played = [0i16; 8];
     assert_eq!(cpu.take_audio(&mut played), 8);
     assert_eq!(played, samples);
 
-    // The buffer came back: the event fired and its tag is collectable.
-    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0, "the released buffer did not fire");
+    // The buffer is not back yet, because the device has not finished playing
+    // it. Four stereo frames at 48 kHz take 4/48000 of a second, which is
+    // 85,000 of the 1.02 GHz cycles one emulated instruction stands for.
+    // Releasing on arrival is what let Just Dance 2019 run its audio clock at
+    // 205x real time and drop every frame of its boot video.
+    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0xEA01, "released before it could play");
+    ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "a tag came back early");
+
+    // Give the device that long. A branch-to-self is the cheapest way to spend
+    // the cycles, and spending them is the point: the clock is the instruction
+    // count.
+    const SPIN: u32 = 0x9000;
+    cpu.mem.map(SPIN, &0x1400_0000u32.to_le_bytes()).unwrap(); // b .
+    cpu.set_pc(SPIN);
+    cpu.run(90_000).unwrap();
+    cpu.set_pc(0x1000);
+
+    // Now it comes back: the event fires and the tag is collectable.
+    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0, "the played buffer did not fire");
     ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "no tag released");
     assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
@@ -5477,4 +5499,94 @@ fn crc32_accumulates_over_the_bytes_of_its_operand() {
     assert_eq!(cpu.read_x(4), 0x1CF9_6D7C);
     assert_eq!(cpu.read_x(5), 0x0E8A_5632);
     assert_eq!(cpu.read_x(7), 0xBAA7_3FBF);
+}
+
+#[test]
+fn the_vibration_device_list_is_a_hid_session_not_a_fabricated_object() {
+    // `IHidServer::CreateActiveVibrationDeviceList` hands back a sub-session,
+    // and `nn::hid::InitializeVibrationDevice` calls command 0 on it once per
+    // motor. That name was missing from the session router, so every one of
+    // those calls fell through to the fabricated-object fallback -- which
+    // answers a command whose whole reply is a Result with an object id and
+    // two handles nobody asked for, and which said so as
+    // "[ipc] no implementation: hid:vibration-devices" on a real title's boot.
+    const HID: u64 = 0x1000;
+    const SFCO: u32 = 0x4F43_4653;
+    const HAS_HANDLE_DESCRIPTOR: u32 = 1 << 31;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(HID, "hid");
+    let tls = cpu.tls_base();
+
+    ipc_request(&mut cpu, HID, 4, None, 203);
+    let list = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(list, 0, "CreateActiveVibrationDeviceList moved no session back");
+
+    ipc_request(&mut cpu, list, 4, None, 0);
+    assert_eq!(cpu.mem.read_u32(tls + 0x10).unwrap(), SFCO);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+    assert_eq!(
+        cpu.mem.read_u32(tls).unwrap() & HAS_HANDLE_DESCRIPTOR,
+        0,
+        "InitializeVibrationDevice was answered with handles"
+    );
+}
+
+#[test]
+fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
+    // Every region below is carved out of one 4 GiB space, and the guest is
+    // told where each one is and how big. Two that overlap are two subsystems
+    // writing over each other, and it is not hypothetical: `svcSetHeapSize`
+    // granted the 480 MiB `nn::init` asked for inside a 240 MiB heap region,
+    // so a retail title's heap ran over the framebuffer and 224 MiB into the
+    // alias region. Nothing had claimed those addresses yet, which is the only
+    // reason it went unnoticed.
+    use switch_core::cpu::{
+        GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
+        GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR,
+        GUEST_STACK_REGION_SIZE, GUEST_TOTAL_MEMORY_SIZE, SHARED_BUFFER_ADDR, SHARED_BUFFER_SIZE,
+        STACK_TOP,
+    };
+    use switch_core::{FB_BASE, FB_HEIGHT, FB_WIDTH, INPUT_ADDR};
+
+    assert!(GUEST_STACK_REGION_ADDR + GUEST_STACK_REGION_SIZE <= GUEST_HEAP_REGION_ADDR);
+    assert!(STACK_TOP <= u64::from(GUEST_HEAP_REGION_ADDR), "the main stack is below the heap");
+    assert_eq!(GUEST_HEAP_REGION_ADDR + GUEST_HEAP_REGION_SIZE, GUEST_ALIAS_REGION_ADDR);
+    assert!(GUEST_ALIAS_REGION_ADDR + GUEST_ALIAS_REGION_SIZE <= SHARED_BUFFER_ADDR);
+    assert!(SHARED_BUFFER_ADDR + SHARED_BUFFER_SIZE <= FB_BASE);
+    assert!(FB_BASE + FB_WIDTH * FB_HEIGHT * 4 <= INPUT_ADDR);
+    assert!(INPUT_ADDR + 0x1000 <= GUEST_SPACE_END);
+
+    // `nn::init` asks for the whole of what `svcGetInfo` calls total memory,
+    // and takes either route to it, so neither region may be smaller than the
+    // figure both are sized from.
+    assert!(GUEST_TOTAL_MEMORY_SIZE <= GUEST_HEAP_REGION_SIZE);
+    assert!(GUEST_TOTAL_MEMORY_SIZE <= GUEST_ALIAS_REGION_SIZE);
+}
+
+#[test]
+fn a_heap_bigger_than_its_region_is_refused() {
+    // SetHeapSize used to say yes to any size at all and hand back the region
+    // base regardless. A guest that is granted more than the region holds has
+    // no way to find out, and writes past the end of it into whatever is next.
+    use switch_core::cpu::{GUEST_HEAP_REGION_ADDR, GUEST_HEAP_REGION_SIZE};
+    const OUT_OF_MEMORY: u64 = 1 | (104 << 9);
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.mem.map(0x1000, &svc(0x01).to_le_bytes()).unwrap();
+    cpu.set_reg(1, u64::from(GUEST_HEAP_REGION_SIZE));
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), 0, "a heap that exactly fills its region is granted");
+    assert_eq!(cpu.read_x(1), u64::from(GUEST_HEAP_REGION_ADDR));
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.mem.map(0x1000, &svc(0x01).to_le_bytes()).unwrap();
+    cpu.set_reg(1, u64::from(GUEST_HEAP_REGION_SIZE) + 0x1000);
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), OUT_OF_MEMORY);
 }

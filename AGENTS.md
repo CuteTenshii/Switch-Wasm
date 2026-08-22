@@ -39,7 +39,7 @@ Browser-oriented Nintendo Switch emulation core: an ARM64 (A64) integer interpre
 - The worker is started as `new Worker(new URL('../worker/index.ts', import.meta.url), { type: 'module' })` — named by its *source*, which the bundler follows and rewrites. This is what retired the old path trap (a `new Worker` path resolving against the document while a `fetch` inside the worker resolved against the worker script): no built path is written down by hand any more. It does mean the worker is a **module** worker, so `importScripts` is not available in it.
 - The UI is an app shell, not a page: the canvas owns the viewport, the tools drawer is closed by default (backtick toggles it, Space is run/pause), and the canvas resizes to whatever resolution the guest presents. The boot splash is dismissed when a program **loads**, not when the first frame arrives — homebrew can run (or fault) for a long time before presenting, and waiting for a frame made the stage look dead until it crashed. `Res` reads `—` and the canvas stays blank until `frame_count > 0`; `fb_snapshot`'s pre-first-frame fallback (the memory-mapped demo framebuffer) is deliberately *not* painted, since real homebrew never writes that region.
 - Emulated CPU addresses are `u32` (32-bit PC). Memory is a sparse page table (`PAGE_COUNT` computed in `u64` to survive wasm32 `usize` truncation); reads/writes to unmapped addresses fault with `Error::Cpu`.
-- The demo framebuffer is memory-mapped at `FB_BASE = 0x3F00_0000` (640x360 RGBA) and input at `INPUT_ADDR = 0x3F10_0000`. Syscall ABI: `SyscallMode::Horizon` stubs for real homebrew. Commercial encrypted content is out of scope.
+- The demo framebuffer is memory-mapped at `FB_BASE = 0xF200_0000` (640x360 RGBA) and input at `INPUT_ADDR = 0xF210_0000` — above every region a process is given, since the heap now needs the space they used to sit in. Syscall ABI: `SyscallMode::Horizon` stubs for real homebrew. Commercial encrypted content is out of scope.
 
 ## Containers are never staged in memory
 
@@ -87,7 +87,7 @@ Nothing reads a container as a buffer. `switch_core::source::ByteSource` is a
 
 - Stack: `STACK_TOP = 0x1010_0000`, size 1 MiB (so `STACK_BASE = 0x1000_0000`), SP seeded at `STACK_TOP`.
 - TLS base: `tpidr = 0x0FF0_0000` (deliberately clear of the heap). libnx ThreadVars at TLS+0x1E0 (magic `0x21545624` "!TV$"), `_REENT` zeroed at `0x1FF1_0000`.
-- Heap via `svcSetHeapSize` returns `0x3000_0000` (address out-param; deliberately NOT `0x2000_0000` — with a 512 MiB heap there, `malloc`'s arena lands at `STACK_BASE + 0x1a80` and the app's 8 MiB memblock memset overwrites the stack). `svcQueryMemory` reports per-page state (allocated pages = RWX, untouched soft pages = unmapped) so libnx virtmem reservations find free address space. `svcGetInfo` uses the hbmenu libnx InfoType numbering (0/1 Core/Priority mask, 2/3 Alias, 4/5 Heap, 6/7 Total/Used memory, 12/13 Aslr, 14/15 Stack, 16/17 System resource, 21/22 Total/Used non-system memory) — see the memory-region section below. Env block at `ENV_BLOCK_ADDR = 0x0010_0000`.
+- Heap via `svcSetHeapSize` returns `0x3000_0000` (address out-param; deliberately NOT `0x2000_0000` — with a 512 MiB heap there, `malloc`'s arena lands at `STACK_BASE + 0x1a80` and the app's 8 MiB memblock memset overwrites the stack). `svcQueryMemory` reports per-page state (allocated pages = RWX, untouched soft pages = unmapped) so libnx virtmem reservations find free address space; it finds a region's bounds through `Memory::state_run`, which skips 2 MiB blocks that hold no backed page — walking them one page at a time is O(address space), and with a gigabyte-scale heap region a title spent longer inside `svcQueryMemory` than in its own code. `svcGetInfo` uses the hbmenu libnx InfoType numbering (0/1 Core/Priority mask, 2/3 Alias, 4/5 Heap, 6/7 Total/Used memory, 12/13 Aslr, 14/15 Stack, 16/17 System resource, 21/22 Total/Used non-system memory) — see the memory-region section below. Env block at `ENV_BLOCK_ADDR = 0x0010_0000`.
 - `boot_homebrew` (cpu.rs): runs crt0 through the `bl` at entry+0xc0, seeds env/ThreadVars, runs `DT_INIT_ARRAY` (`init_array_entries` in nro.rs parses MOD0/dynamic), then resumes at that `bl`. **Static constructors only run through this path.** That call is libnx's `__libnx_init(ctx, main_thread, saved_lr)`: the constructor pass zeroes the registers, so all three arguments are re-seeded before resuming — including `saved_lr` = `SELF_RETURN_TRAMPOLINE`, which `envSetup` keeps as the exit function pointer. With it left at 0, `__nx_exit` branched to NULL and a clean exit looked like a crash.
 - `nvdrv_request` (cpu/ipc.rs): the real `INvDrvServices` interface — Open/Ioctl/Ioctl2/Ioctl3/Close/Initialize/QueryEvent, dispatched into `gpu::nvdrv`.
 - `svcWaitSynchronization` reports the wait satisfied with X1 = **0**: X1 is
@@ -113,7 +113,7 @@ Nothing reads a container as a buffer. `switch_core::source::ByteSource` is a
 
 **Every region `svcGetInfo` reports has to be an address the emulator can
 actually represent.** Guest memory is indexed with a `u32`, so the whole
-address space is the low 4 GiB and `Cpu::bootstrap` soft-maps 0..0x8000_0000
+address space is the low 4 GiB and `Cpu::bootstrap` soft-maps 0..`GUEST_SPACE_END`
 (unwritten pages read as zeros and allocate on first write — that *is* demand
 paging, and it is why a region can be reported far larger than the
 `MAX_MAPPED_BYTES` RAM cap without costing anything).
@@ -121,9 +121,35 @@ paging, and it is why a region can be reported far larger than the
 `svcGetInfo` used to report Horizon's real region bases literally — alias at
 0x10_0000_0000, heap at 0x2_0000_0000. `nnSdk` took the alias base at its word
 and asked `svcMapPhysicalMemory` to back 0x10_0000_0000, which truncates to 0.
-The regions now live in representable space: alias at
-`GUEST_ALIAS_REGION_ADDR` (0x4000_0000, 1 GiB, up to the end of the soft map),
-heap at `GUEST_HEAP_REGION_ADDR` (0x3000_0000, ending where `FB_BASE` begins).
+The regions now live in representable space, back to back above the stacks:
+
+```text
+0x3000_0000  GUEST_HEAP_REGION_ADDR   heap, 1.5 GiB   (svcSetHeapSize)
+0x9000_0000  GUEST_ALIAS_REGION_ADDR  alias, 1.5 GiB  (svcMapPhysicalMemory)
+0xF000_0000  SHARED_BUFFER_ADDR       system shared buffer, 26 MiB
+0xF200_0000  FB_BASE / INPUT_ADDR     the demo framebuffer and input block
+0xF300_0000  GUEST_SPACE_END          above this a read faults
+```
+
+**Both regions are sized to `GUEST_TOTAL_MEMORY_SIZE`, and that is deliberate.**
+`nn::init` asks for the whole of what `svcGetInfo` calls total memory whichever
+route it takes, so a region smaller than that figure is a region the guest
+overruns — which is what happened: `svcSetHeapSize` said yes to the 480 MiB it
+was asked for inside a 240 MiB heap region, and the heap ran over `FB_BASE` and
+224 MiB into the alias region. Nothing had claimed those addresses yet, which
+is the only reason it went unnoticed. 0x01 now refuses a heap larger than its
+region, and `the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise`
+holds the layout together.
+
+**The figure itself is what a title believes about the console.** It was
+0x1E00_0000 (480 MiB) and Just Dance 2019 sized its heap from it, then asked
+that heap for a 699 MiB graphics pool — a number baked into the game's code,
+not derived from what the console said. `nn::mem` returned null,
+`nvnMemoryPoolBuilderSetStorage` got it, `MemoryPool::Initialize` refused it,
+and the title used the pool object it had just freed: `blr` through a
+free-list link, pc=0. 1.5 GiB is what the address space can offer both routes
+once the image, the stacks and the shared buffer have theirs; a console gives
+an application several GiB, so this is a floor rather than a fidelity target.
 
 - **`svcMapPhysicalMemory` (0x2c) is how a retail title grows its heap**, not
   `svcSetHeapSize` (0x01) — an application built for the 39-bit address space
@@ -209,6 +235,35 @@ Two things make those long runs mean something, and both are recent: threads
 are preempted (before, one busy thread could take 99.9% of the CPU and the
 title's own main loop got the rest), and vsync ticks on a period rather than
 only on a present.
+
+## Audio (`audout`, `cpu/ipc.rs`)
+
+**The device plays in time.** A buffer is released once the emulated CPU has
+run for as long as its samples take at the device's sample rate
+(`Cpu::audio_play_cycles`), queued behind whatever is still playing
+(`AudioOut::free_at`) — the same `cycles` clock the display tick and the thread
+deadlines use. The samples themselves are still copied to the host on arrival;
+it is the *tag* that waits.
+
+Releasing on arrival, which this used to do, is not a harmless simplification:
+it hands the guest an infinitely fast sound card, and a title's audio clock is
+what its video is scheduled against. Just Dance 2019 pushed 19,693,344 samples
+per second of emulated time through a 48 kHz stereo device — **205× real
+time** — and the software WebM player in its own binary (it links libwebm's
+`mkvparser`; there is no `nvdec`) concluded every frame of the boot video was
+too late to show. It presented a white clear sixty times a second and issued
+not one draw.
+
+- **The buffer event fires on the clock, not on the append** (`Cpu::audio_tick`),
+  and a blocking `svcWaitSynchronization` on it is honoured by rewinding onto
+  the `svc` — the same idiom the vsync wait uses, and safe for the same reason:
+  the wake-up is a known cycle count away. With nothing else runnable, `cycles`
+  jumps straight to it rather than spinning through the gap.
+- **Do not answer that wait with a bare success.** `nn::audio`'s mixer takes the
+  event as proof that a buffer is waiting and reads the head of its own queue
+  without checking; woken with nothing released, Just Dance called
+  `nn::audio::GetAudioOutBufferDataPointer` on the `container_of` a null and
+  faulted at 0xffffffd0.
 
 ## Guest threads (`cpu/mod.rs`, `cpu/svc.rs`)
 

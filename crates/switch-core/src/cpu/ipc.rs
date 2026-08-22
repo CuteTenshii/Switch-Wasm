@@ -13,6 +13,43 @@ use std::collections::VecDeque;
 /// `GetLastOpenedUser` concludes nobody is signed in. Spelling it in ASCII
 /// makes it recognisable in a trace, and it is exactly the 16 bytes a uid is.
 const ACCOUNT_UID: [u8; 16] = *b"switch-wasm user";
+/// `am`'s `LaunchParameterKind::PreselectedUser`: the user the launcher had
+/// already chosen when it started the application.
+pub(super) const LAUNCH_PARAMETER_PRESELECTED_USER: u32 = 2;
+
+/// The `PreselectedUser` launch parameter, as `nn::account` reads it: a magic,
+/// a version, then the uid, in a block of a fixed 0x88 bytes.
+///
+/// The HOME menu picks the user before it starts a title and leaves the choice
+/// here; `nn::account::Initialize` pops it and caches the uid, and
+/// `nn::account::OpenPreselectedUser` hands that cached uid back. There is no
+/// menu here, but there is exactly one user ([`ACCOUNT_UID`]) and it is the
+/// one every other `acc` answer names, so it is also the one that was
+/// "selected".
+///
+/// `nn::account::detail::TryPopPreselectedUser` reads the block strictly: a
+/// storage shorter than 0x88 bytes is an assertion, and a magic or version it
+/// does not recognise means no preselected user at all — which it reports as a
+/// zero uid, and which `OpenPreselectedUser` then asserts on.
+pub(super) fn preselected_user_parameter() -> Vec<u8> {
+    /// What the block says it is. `nn::account` compares the first word
+    /// against this and ignores anything else.
+    const MAGIC: u32 = 0xC794_97CA;
+    /// The only layout revision `nn::account` accepts.
+    const VERSION: u8 = 1;
+    /// The size it insists on before it reads a byte.
+    const LEN: usize = 0x88;
+    /// Where the uid sits, past the magic, the version and its padding.
+    const UID_OFFSET: usize = 0x8;
+    let mut data = Vec::with_capacity(LEN);
+    data.extend_from_slice(&MAGIC.to_le_bytes());
+    data.push(VERSION);
+    data.resize(UID_OFFSET, 0);
+    data.extend_from_slice(&ACCOUNT_UID);
+    data.resize(LEN, 0);
+    data
+}
+
 /// `nn::account::ProfileBase`: uid, last-edit timestamp, then the nickname.
 const PROFILE_BASE_LEN: usize = 0x38;
 /// `nn::account::UserData`, the block `IProfile::Get` fills in beside the base
@@ -2990,15 +3027,33 @@ impl Cpu {
                 Some(900) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            // IApplicationFunctions: PopLaunchParameter fails when hbmenu
-            // launched the app without forwarding arguments, same as on real
-            // hardware — an earlier stub's success-with-an-unrelated-object-id
-            // left callers treating that id as a launch-parameter storage
-            // object that was never actually registered as one.
             "am:application-functions" => match cmd_id {
+                // PopLaunchParameter(u32 kind) -> IStorage: what the launcher
+                // left for this program. It is a *pop* — `am` hands the
+                // storage over once and forgets it, so a second ask finds
+                // nothing, and `nn::account` relies on that to only ever cache
+                // the preselected user once.
+                //
+                // Only the kinds [`Cpu::seed_launch_parameters`] filled in are
+                // here. Everything else fails the way it does on hardware for
+                // a program nobody left anything for: an earlier stub's
+                // success-with-an-unrelated-object-id left callers treating
+                // that id as a launch-parameter storage that was never
+                // registered as one.
                 Some(1) => {
-                    const LAUNCH_PARAMETER_NOT_FOUND: u32 = 128 | (2 << 9); // am
-                    self.write_ipc_response(tls, LAUNCH_PARAMETER_NOT_FOUND, &[], &[], &[])
+                    /// `am` description 2: no launch parameter of that kind.
+                    const LAUNCH_PARAMETER_NOT_FOUND: u32 = 128 | (2 << 9);
+                    let kind = self.mem.read_u32(self.ipc_request_data(tls))?;
+                    match self.am_launch_parameters.remove(&kind) {
+                        Some(data) => {
+                            let key = self.reply_with_interface(tls, handle, "am:storage")?;
+                            self.am_storages.insert(key, data);
+                            Ok(())
+                        }
+                        None => {
+                            self.write_ipc_response(tls, LAUNCH_PARAMETER_NOT_FOUND, &[], &[], &[])
+                        }
+                    }
                 }
                 // EnsureSaveData -> the save data size it ensured.
                 Some(20) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
@@ -6203,7 +6258,8 @@ impl Cpu {
                         started: false,
                         volume: 1.0,
                         event,
-                        released: VecDeque::new(),
+                        queued: VecDeque::new(),
+                        free_at: 0,
                         played_frames: 0,
                     },
                 );
@@ -6218,6 +6274,14 @@ impl Cpu {
             }
             _ => self.unimplemented_command(tls, "audout:u", cmd_id),
         }
+    }
+
+    /// How long `frames` samples take to play at `sample_rate`, in the
+    /// emulated CPU cycles that are this machine's only clock. One instruction
+    /// stands for one cycle of [`CLOCK_RATES_HZ`]'s first entry, the same rate
+    /// the display tick and the thread deadlines are counted in.
+    fn audio_play_cycles(frames: u64, sample_rate: u32) -> u64 {
+        frames.saturating_mul(u64::from(CLOCK_RATES_HZ[0])) / u64::from(sample_rate.max(1))
     }
 
     /// `IAudioOut`: one open output device.
@@ -6274,7 +6338,7 @@ impl Cpu {
                 let held = self
                     .audio_outs
                     .get(&handle)
-                    .map(|d| d.released.contains(&tag))
+                    .map(|d| d.queued.iter().any(|&(queued, _)| queued == tag))
                     .unwrap_or(false);
                 self.write_ipc_response(tls, 0, &[], &[u8::from(held)], &[])
             }
@@ -6283,7 +6347,7 @@ impl Cpu {
                 let count = self
                     .audio_outs
                     .get(&handle)
-                    .map(|d| d.released.len() as u32)
+                    .map(|d| d.queued.len() as u32)
                     .unwrap_or(0);
                 self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
             }
@@ -6314,9 +6378,39 @@ impl Cpu {
         }
     }
 
+    /// Fire the buffer event of every device that has just finished playing
+    /// something, and report the earliest cycle at which one of `handles` will
+    /// have a buffer to hand back.
+    ///
+    /// This is the audio counterpart of the display tick in `svcWaitSynchron-
+    /// ization`: nothing here runs in the background, so "the device finished a
+    /// buffer" has to be noticed by somebody, and the guest asking to wait is
+    /// the moment that matters. The deadline it returns is what makes that wait
+    /// safe to honour — a waiter can be put to sleep knowing exactly when the
+    /// device will wake it, which is the one property `Cpu::events` otherwise
+    /// cannot offer.
+    pub(super) fn audio_tick(&mut self, handles: &[u64]) -> Option<u64> {
+        let now = self.cycles;
+        let mut fire = Vec::new();
+        let mut next = None;
+        for device in self.audio_outs.values() {
+            let Some(&(_, done_at)) = device.queued.front() else { continue };
+            if done_at <= now {
+                fire.push(device.event);
+            } else if handles.contains(&device.event) {
+                next = Some(next.map_or(done_at, |soonest: u64| soonest.min(done_at)));
+            }
+        }
+        for event in fire {
+            self.signal_event(event);
+        }
+        next
+    }
+
     /// `AppendAudioOutBuffer`: copy the guest's samples out for the host and
-    /// release the buffer's tag.
+    /// queue the buffer for playback.
     fn audio_out_append(&mut self, tls: u32, handle: u64) -> Result<()> {
+        let now = self.cycles;
         let data = self.ipc_request_data(tls);
         let tag = self.mem.read_u64(data).unwrap_or(0);
         // `AudioOutBuffer`: { next, buffer, buffer_size, data_size,
@@ -6337,10 +6431,16 @@ impl Cpu {
         };
         let channels = device.channel_count.max(1) as usize;
         let format = (device.sample_rate, device.channel_count);
-        device.played_frames += (samples.len() / channels) as u64;
-        device.released.push_back(tag);
+        let frames = (samples.len() / channels) as u64;
+        device.played_frames += frames;
+        // Where this buffer plays: after whatever is still queued, or from now
+        // if the device has caught up. `free_at` is what makes the guest's
+        // audio clock advance at the same rate as its own.
+        let starts_at = device.free_at.max(now);
+        let rate = device.sample_rate;
+        device.free_at = starts_at.wrapping_add(Self::audio_play_cycles(frames, rate));
+        device.queued.push_back((tag, device.free_at));
         let volume = device.volume;
-        let event = device.event;
         // A stopped device is not playing: its buffers still come back (the
         // guest is entitled to its memory) but the samples are not queued.
         let playing = device.started;
@@ -6353,23 +6453,24 @@ impl Cpu {
                 .map(move |s| ((s as f32) * volume).round().clamp(-32768.0, 32767.0) as i16);
             self.queue_audio(scaled);
         }
-        self.signal_event(event);
+        // Nothing is signalled here: the buffer event fires when a buffer
+        // *finishes*, not when one arrives. See [`Cpu::audio_tick`].
         // Give up the CPU here. On hardware this call is a round trip into the
-        // audio process and the caller is descheduled for its duration, but
-        // the reason it matters is scheduling rather than fidelity: releasing
-        // every buffer the instant it is appended (above) means the guest's
-        // mixer never has to wait on the buffer event, and the scheduler only
-        // switches threads at a blocking syscall. A mixer that never blocks
-        // never yields, so it owned the CPU outright -- "A Short Hike"'s main
-        // thread was left `Runnable` and unscheduled for a billion
-        // instructions while FMOD converted float samples to 16-bit forever.
+        // audio process and the caller is descheduled for its duration, and it
+        // matters for scheduling too: the emulator only switches threads at a
+        // blocking syscall, so a mixer that never blocks never yields. It
+        // owned the CPU outright -- "A Short Hike"'s main thread was left
+        // `Runnable` and unscheduled for a billion instructions while FMOD
+        // converted float samples to 16-bit forever.
         self.pending_yield = true;
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
-    /// `GetReleasedAudioOutBuffer`: hand back the tags of finished buffers,
-    /// as many as the guest's out buffer has room for.
+    /// `GetReleasedAudioOutBuffer`: hand back the tags of the buffers the
+    /// device has finished playing, as many as the guest's out buffer has room
+    /// for. A buffer whose samples are still playing is not one of them.
     fn audio_out_release(&mut self, tls: u32, handle: u64) -> Result<()> {
+        let now = self.cycles;
         let room = self
             .ipc_recv_buffer(tls, 0)
             .map(|(_, size)| size / 8)
@@ -6378,9 +6479,12 @@ impl Cpu {
         let mut tags = Vec::new();
         if let Some(device) = self.audio_outs.get_mut(&handle) {
             while (tags.len() as u32) < room {
-                match device.released.pop_front() {
-                    Some(tag) => tags.push(tag),
-                    None => break,
+                match device.queued.front() {
+                    Some(&(tag, done_at)) if done_at <= now => {
+                        device.queued.pop_front();
+                        tags.push(tag);
+                    }
+                    _ => break,
                 }
             }
         }
@@ -6847,6 +6951,17 @@ mod tests {
     fn request(domain: bool, command_id: u32, payload: &[u8]) -> Cpu {
         let mut cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
+        marshal(&mut cpu, domain, command_id, payload);
+        cpu
+    }
+
+    /// Marshal a request into a session's TLS buffer. A reply is written over
+    /// the request it answered, so a second command on the same session has to
+    /// be marshalled again rather than patched.
+    fn marshal(cpu: &mut Cpu, domain: bool, command_id: u32, payload: &[u8]) {
+        for i in (0..0x200u32).step_by(4) {
+            cpu.mem.write_u32(TLS + i, 0).unwrap();
+        }
         cpu.mem.write_u32(TLS, 4).unwrap(); // CmifCommandType_Request
         cpu.mem.write_u32(TLS + 4, 8).unwrap(); // num_data_words
         let mut at = TLS + 0x10; // the aligned data area
@@ -6861,7 +6976,6 @@ mod tests {
         for (i, &byte) in payload.iter().enumerate() {
             cpu.mem.write_u8(at + i as u32, byte).unwrap();
         }
-        cpu
     }
 
     #[test]
@@ -8129,6 +8243,64 @@ mod tests {
         let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
         assert_ne!(event, 0);
         assert_eq!(cpu.event_name(event), Some("am:self-controller"));
+    }
+
+    #[test]
+    fn the_preselected_user_is_handed_over_once_and_then_it_is_gone() {
+        // The HOME menu picks the user before it starts a title and leaves the
+        // choice as a `PreselectedUser` launch parameter.
+        // `nn::account::Initialize` pops it and caches the uid;
+        // `nn::account::OpenPreselectedUser` asserts when that cached uid is
+        // zero. Refusing every kind of launch parameter is what aborted Just
+        // Dance 2019 inside `nn::init::Start`, before it had asked `sm` for a
+        // single service.
+        const LAUNCH_PARAMETER_NOT_FOUND: u32 = 128 | (2 << 9);
+        const SFCO: u32 = 0x4F43_4653;
+
+        let kind = super::LAUNCH_PARAMETER_PRESELECTED_USER.to_le_bytes();
+        let mut cpu = request(false, 1, &kind);
+        cpu.seed_launch_parameters();
+        cpu.register_service_handle(9, "am:application-functions");
+        cpu.applet_request(TLS, 9, Some(1)).unwrap();
+
+        let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(storage, 0, "PopLaunchParameter moved no storage back");
+        assert_eq!(cpu.service_name(storage), Some("am:storage"));
+
+        // What `nn::account::detail::TryPopPreselectedUser` reads: it refuses
+        // anything shorter than 0x88 bytes, checks the magic and the version,
+        // and copies the uid out of offset 8. A uid of zero is what it means
+        // by "nobody", so the one thing this must never hand over is zeroes.
+        let data = cpu.am_storages[&Cpu::object_key(storage, 0)].clone();
+        assert_eq!(data.len(), 0x88);
+        assert_eq!(u32::from_le_bytes(data[..4].try_into().unwrap()), 0xC794_97CA);
+        assert_eq!(data[4], 1, "layout version");
+        assert_eq!(&data[8..0x18], &super::ACCOUNT_UID[..]);
+        assert_ne!(super::ACCOUNT_UID, [0u8; 16]);
+
+        // `am` hands each launch parameter over once and forgets it, which is
+        // what stops a second `nn::account::Initialize` caching a user the
+        // launcher never chose.
+        marshal(&mut cpu, false, 1, &kind);
+        cpu.applet_request(TLS, 9, Some(1)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x10).unwrap(), SFCO);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), LAUNCH_PARAMETER_NOT_FOUND);
+    }
+
+    #[test]
+    fn a_launch_parameter_nobody_left_is_still_refused() {
+        // Only the kinds a launcher actually fills in are here. `UserChannel`
+        // (1) is application-to-application data that nothing here writes, and
+        // answering it with the preselected user's block — or with any
+        // success — would hand the caller bytes it would then parse as its own.
+        const USER_CHANNEL: u32 = 1;
+        const LAUNCH_PARAMETER_NOT_FOUND: u32 = 128 | (2 << 9);
+
+        let mut cpu = request(false, 1, &USER_CHANNEL.to_le_bytes());
+        cpu.seed_launch_parameters();
+        cpu.register_service_handle(9, "am:application-functions");
+        cpu.applet_request(TLS, 9, Some(1)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), LAUNCH_PARAMETER_NOT_FOUND);
     }
 
     /// `AppletId_LibraryAppletWeb`, which is what lennytube asks for when it

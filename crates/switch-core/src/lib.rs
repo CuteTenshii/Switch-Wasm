@@ -38,10 +38,15 @@ pub use error::{Error, Result};
 
 /// Memory-mapped framebuffer (modelled on the Switch GPU's): fixed-size,
 /// little-endian RGBA. Homebrew writes pixels here and the host renders it.
-pub const FB_BASE: u32 = 0x3F00_0000;
+///
+/// It and [`INPUT_ADDR`] sit above every region a Horizon process is given —
+/// see `cpu::GUEST_SPACE_END`. They used to live at 0x3F00_0000, immediately
+/// after a 240 MiB heap region; the heap now needs the address space they
+/// were standing in.
+pub const FB_BASE: u32 = 0xF200_0000;
 pub const FB_WIDTH: u32 = 640;
 pub const FB_HEIGHT: u32 = 360;
 pub const FB_STRIDE: u32 = FB_WIDTH * 4;
 /// Memory-mapped input register: the host writes an ASCII key here and
 /// homebrew acknowledges (writes 0) when consumed.
-pub const INPUT_ADDR: u32 = 0x3F10_0000;
+pub const INPUT_ADDR: u32 = 0xF210_0000;

@@ -2,8 +2,8 @@
 
 use super::{
     ArbiterWait, Cpu, GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
-    GUEST_HEAP_REGION_SIZE, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE,
-    PL_SHMEM_SIZE,
+    GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE,
+    GUEST_TOTAL_MEMORY_SIZE, HID_SHMEM_SIZE, PL_SHMEM_SIZE,
 };
 use super::ipc::CLOCK_RATES_HZ;
 use crate::{Error, Result};
@@ -48,7 +48,7 @@ impl Cpu {
         // What `svcGetInfo` reports as the process's memory pool, and the
         // slice of it the kernel reserves for its own per-process bookkeeping
         // (see InfoType 16 below for why that one is zero).
-        const TOTAL_MEMORY_SIZE: u64 = 0x1E00_0000;
+        const TOTAL_MEMORY_SIZE: u64 = GUEST_TOTAL_MEMORY_SIZE as u64;
         const SYSTEM_RESOURCE_SIZE: u64 = 0;
         // The counterpart of `TRACE_IPC` for everything that is not a service
         // request. `svcSendSyncRequest` (0x21) is excluded because `TRACE_IPC`
@@ -68,8 +68,25 @@ impl Cpu {
         }
         match imm {
             0x01 => {
-                // SetHeapSize: report a heap at a soft-mapped address, the
-                // same one `svcGetInfo`'s HeapRegionAddress names.
+                // SetHeapSize(size): report a heap at a soft-mapped address,
+                // the same one `svcGetInfo`'s HeapRegionAddress names.
+                //
+                // A heap larger than the region it lives in is refused rather
+                // than granted quietly. This used to say yes to any size at
+                // all, and since `nn::init` asks for the whole of what
+                // `svcGetInfo` calls total memory, the heap it was handed ran
+                // 240 MiB past the end of its own region — over the
+                // framebuffer and into the alias region — with nothing to say
+                // so. Nothing had claimed those addresses yet, which is the
+                // only reason it worked.
+                /// `KERNELRESULT(OutOfMemory)`, which is what a console
+                /// answers a heap it cannot back.
+                const RESULT_OUT_OF_MEMORY: u64 = 1 | (104 << 9);
+                let size = self.read_zr(1);
+                if size > u64::from(GUEST_HEAP_REGION_SIZE) {
+                    self.write_zr(0, RESULT_OUT_OF_MEMORY);
+                    return Ok(());
+                }
                 self.write_zr(0, RESULT_OK);
                 self.write_zr(1, u64::from(GUEST_HEAP_REGION_ADDR));
                 Ok(())
@@ -208,16 +225,11 @@ impl Cpu {
                  // off the end of the address space.
                  let out = self.read_zr(0) as u32;
                  let addr = self.read_zr(2) as u32;
-                 let region = |a: u32| (self.mem.page_mapped(a & !0xFFF), self.mem.is_readonly(a & !0xFFF));
-                 let mut base = addr & !0xFFF;
-                 while base >= 0x1000 && region(base - 0x1000) == region(base) {
-                     base -= 0x1000;
-                 }
-                 let (mapped, text) = region(base);
-                 let mut end = base + 0x1000;
-                 while end < 0x8000_0000 && region(end) == (mapped, text) {
-                     end += 0x1000;
-                 }
+                 // `Memory` finds the run, because it is the only thing that
+                 // can do it without walking every page — see
+                 // [`crate::mem::Memory::state_run`].
+                 let run = self.mem.state_run(addr, GUEST_SPACE_END);
+                 let (base, end, mapped, text) = (run.start, run.end, run.mapped, run.readonly);
                  let mut info = Vec::with_capacity(40);
                  info.extend_from_slice(&(base as u64).to_le_bytes());
                  info.extend_from_slice(&((end - base) as u64).to_le_bytes());
@@ -525,6 +537,11 @@ impl Cpu {
                         self.signal_event(vsync);
                     }
                 }
+                // The audio devices get the same treatment as the display: a
+                // buffer whose samples have finished playing fires its event
+                // here, and `next_buffer` is when the soonest one this wait
+                // names will finish. See `Cpu::audio_tick`.
+                let next_buffer = self.audio_tick(&handles);
                 // The first handle that is ready. A handle this emulator does
                 // not model as an event still counts as ready, which is what
                 // keeps thread handles and every unmodelled service handle
@@ -626,6 +643,31 @@ impl Cpu {
                         // it the throttle costs more than it saves.
                         self.cycles =
                             self.last_vsync_cycles.wrapping_add(super::VSYNC_PERIOD_CYCLES);
+                    }
+                    self.pc = self.pc.wrapping_sub(4);
+                    self.yield_thread();
+                    return Ok(());
+                }
+                // A blocking wait on an **audio buffer** event is the other
+                // one that can be honoured, and for the same reason: the
+                // device's queue is timed off `cycles`, so the wait is certain
+                // to end and exactly when is known. Rewinding onto the `svc`
+                // paces the guest's mixer to the rate its own samples play at.
+                //
+                // Telling it the wait was satisfied instead is worse than a
+                // lie about timing. `nn::audio`'s mixer takes the event as
+                // proof that a buffer is waiting for it and reads the head of
+                // its own queue without checking: woken with nothing released,
+                // Just Dance 2019 called `nn::audio::GetAudioOutBufferData-
+                // Pointer` on the `container_of` a null and faulted at
+                // 0xffffffd0.
+                if let Some(done_at) = next_buffer {
+                    if !self.has_other_runnable() {
+                        // Nothing else to overlap the wait with, so idle to the
+                        // moment the buffer finishes rather than spinning
+                        // through the instructions in between — the same idle
+                        // the vsync wait above takes.
+                        self.cycles = done_at;
                     }
                     self.pc = self.pc.wrapping_sub(4);
                     self.yield_thread();
@@ -917,7 +959,7 @@ impl Cpu {
                         // command with an object id and a handle it never
                         // asked for.
                         "hid" | "hid:dbg" | "hid:sys" | "hid:server"
-                        | "hid:applet-resource" => {
+                        | "hid:applet-resource" | "hid:vibration-devices" => {
                             self.hid_request(tls, handle, cmd_id)?
                         }
                         // lm, the log manager: a title's own diagnostic

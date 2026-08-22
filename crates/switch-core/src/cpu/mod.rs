@@ -86,7 +86,7 @@ pub const THREAD_TLS_STRIDE: u32 = 0x1000;
 /// told: seven slots, each a 1280x768 block-linear RGBA8888 image of which
 /// the top 1280x720 is the visible frame. The extra 48 rows are the
 /// block-linear padding, not picture.
-pub const SHARED_BUFFER_ADDR: u32 = 0x7E00_0000;
+pub const SHARED_BUFFER_ADDR: u32 = 0xF000_0000;
 pub const SHARED_BUFFER_SLOTS: u32 = 7;
 pub const SHARED_BUFFER_WIDTH: u32 = 1280;
 pub const SHARED_BUFFER_HEIGHT: u32 = 720;
@@ -177,21 +177,58 @@ const MUTEX_HAS_LISTENERS: u32 = 0x4000_0000;
 pub const GUEST_STACK_REGION_ADDR: u32 = 0x1800_0000;
 pub const GUEST_STACK_REGION_SIZE: u32 = 0x0800_0000;
 
-/// The alias region: where `svcMapPhysicalMemory` backs pages, and how a
-/// 39-bit-address-space application grows its heap. It has to live inside the
-/// soft-mapped low 2 GiB `Cpu::bootstrap` sets up, because this emulator
-/// addresses guest memory with a `u32`. Horizon's own alias region starts at
-/// 0x10_0000_0000, and reporting *that* through `svcGetInfo` had `nnSdk`
-/// asking to map memory at an address the emulator cannot represent at all —
-/// which `svcMapPhysicalMemory` would silently truncate to 0.
-pub const GUEST_ALIAS_REGION_ADDR: u32 = 0x4000_0000;
-pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x4000_0000;
+/// The end of the address space this emulator presents to the guest:
+/// everything below is soft-mapped by [`Cpu::bootstrap`] (reads see zeros, a
+/// write allocates a page), everything above faults. It is also where
+/// `svcQueryMemory` stops looking for the end of a region.
+///
+/// Guest memory is addressed with a `u32`, so the whole space is 4 GiB and
+/// every region below has to be carved out of it. The top is left unmapped on
+/// purpose: a guest that walks off the end of a region should fault rather
+/// than find more zeros, and hbmenu reads the failure at the very top of the
+/// 64-bit range to work out how wide the address space is.
+pub const GUEST_SPACE_END: u32 = 0xF300_0000;
 
-/// The heap region `svcSetHeapSize` grows, for a caller that uses it (`libnx`
-/// does; a retail `nnSdk` title uses the alias region above instead). It ends
-/// where [`crate::FB_BASE`] begins.
+/// The heap region `svcSetHeapSize` grows, and the alias region
+/// `svcMapPhysicalMemory` backs — the two ways a process gets its memory.
+/// `libnx` homebrew and a retail title like Just Dance 2019 take the first;
+/// an `nnSdk` application built for the 39-bit address space (A Short Hike)
+/// picks its own address out of the second.
+///
+/// **Both are sized to [`GUEST_TOTAL_MEMORY_SIZE`], and the two of them plus
+/// everything below 0x3000_0000 is what fits.** `nn::init` asks for the whole
+/// of what `svcGetInfo` reports as total memory, whichever route it takes, so
+/// a region smaller than that figure is a region the guest overruns — which is
+/// what used to happen: `svcSetHeapSize` granted the 480 MiB it asked for at
+/// 0x3000_0000 and the heap ran straight through a 240 MiB region, over the
+/// framebuffer, and into the alias region. On a console these regions are
+/// gigabytes apart in a 39-bit space and neither the sizes nor the collision
+/// arise; here they have to share 4 GiB with the image, the stacks and the
+/// system shared buffer, so an equal split of what is left is what maximises
+/// the figure both routes can be told.
+///
+/// Horizon's own alias region starts at 0x10_0000_0000, and reporting *that*
+/// through `svcGetInfo` had `nnSdk` asking to map memory at an address the
+/// emulator cannot represent at all — which `svcMapPhysicalMemory` would
+/// silently truncate to 0.
 pub const GUEST_HEAP_REGION_ADDR: u32 = 0x3000_0000;
-pub const GUEST_HEAP_REGION_SIZE: u32 = 0x0F00_0000;
+pub const GUEST_HEAP_REGION_SIZE: u32 = 0x6000_0000;
+pub const GUEST_ALIAS_REGION_ADDR: u32 =
+    GUEST_HEAP_REGION_ADDR.wrapping_add(GUEST_HEAP_REGION_SIZE);
+pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x6000_0000;
+
+/// What `svcGetInfo` reports as the memory the process may use, and so the
+/// size `nn::init` asks for as its heap: exactly one region's worth.
+///
+/// A real console hands an application several gigabytes of a 4 GiB machine.
+/// This used to report 0x1E00_0000 — 480 MiB — and a title believes it: Just
+/// Dance 2019 sized its heap from this figure and then asked that heap for a
+/// 699 MiB graphics pool, a number baked into its own code rather than derived
+/// from what the console said. The allocation could not succeed, and the title
+/// used the null it got back. 1.5 GiB is what the address space can offer both
+/// routes; it is well short of a console and far more than the 480 MiB that
+/// stopped a real title from reaching its first frame.
+pub const GUEST_TOTAL_MEMORY_SIZE: u32 = GUEST_HEAP_REGION_SIZE;
 
 /// Size of hid's shared memory, the value libnx passes to `svcMapSharedMemory`.
 /// Used to tell that mapping apart from any other shared memory the guest maps.
@@ -324,9 +361,18 @@ pub(crate) struct AudrenParams {
 ///
 /// A real device releases a buffer once its samples have been clocked out to
 /// the DAC. There is no DAC here — the samples are copied into
-/// [`Cpu::audio_pcm`] for the host to play — so a buffer is released as soon
-/// as it has been copied. The guest sees a device that always keeps up, never
-/// one that succeeded at something it did not do.
+/// [`Cpu::audio_pcm`] for the host to play — but *when* a buffer comes back is
+/// the whole of the guest's audio clock, so the device keeps a clock of its
+/// own: a buffer is released once the emulated CPU has run for as long as its
+/// samples take to play.
+///
+/// Releasing on arrival instead, which this used to do, hands the guest a
+/// device infinitely faster than the panel beside it. Just Dance 2019 fed
+/// 19,693,344 samples per second of emulated time through a 48 kHz stereo
+/// device — **205× real time** — and its video player, which schedules frames
+/// against the audio clock, concluded every frame of the boot video was too
+/// late to show and dropped all of them. The title presented a white clear
+/// sixty times a second and never issued a single draw.
 #[derive(Debug, Clone)]
 pub(crate) struct AudioOut {
     /// Sample rate and channel count the device was opened with.
@@ -339,9 +385,16 @@ pub(crate) struct AudioOut {
     /// Signalled every time a buffer is released — what
     /// `audoutWaitPlayFinish` blocks on.
     pub event: u64,
-    /// Tags of buffers already consumed, waiting for the guest to collect
-    /// them with `GetReleasedAudioOutBuffer`.
-    pub released: VecDeque<u64>,
+    /// Buffers the guest has appended and not yet collected, each with the
+    /// cycle count at which the device will have finished playing it.
+    /// `GetReleasedAudioOutBuffer` hands back the ones whose time has come.
+    pub queued: VecDeque<(u64, u64)>,
+    /// The cycle the device finishes everything queued so far — where the next
+    /// buffer starts playing. A device that has fallen silent starts again
+    /// from the present rather than from whenever it last stopped, so a gap in
+    /// the guest's submissions is a gap in the audio, not a debt the device
+    /// has to work off.
+    pub free_at: u64,
     /// Frames handed over since the device was opened, which is what
     /// `GetAudioOutPlayedSampleCount` reports.
     pub played_frames: u64,
@@ -545,6 +598,11 @@ pub struct Cpu {
     /// Storages queued for `ILibraryAppletSelfAccessor::PopInData` — what the
     /// applet's caller would have pushed before starting it.
     am_in_data: VecDeque<Vec<u8>>,
+    /// `am`'s launch-parameter table, by `LaunchParameterKind`: what the
+    /// launcher left for the program it started, for `PopLaunchParameter` to
+    /// hand over. Filled by [`Cpu::seed_launch_parameters`], and emptied by
+    /// the pops — each parameter is delivered once, as on a console.
+    am_launch_parameters: HashMap<u32, Vec<u8>>,
     /// Which storage an `IStorageAccessor` reads and writes. The accessor is
     /// a separate object from the storage it was opened on, and both ends
     /// have to see the same bytes.
@@ -784,6 +842,7 @@ impl Cpu {
             fs_mount: HashMap::new(),
             fs_storage_archive: HashMap::new(),
             am_in_data: VecDeque::new(),
+            am_launch_parameters: HashMap::new(),
             am_storages: HashMap::new(),
             am_storage_of: HashMap::new(),
             am_applets: HashMap::new(),
@@ -847,12 +906,13 @@ impl Cpu {
     /// unit tests keep SP at 0; only hosts that want to boot real homebrew
     /// should call this.
     pub fn bootstrap(&mut self) {
-        // Present the low 2 GiB address space (everything below the old
-        // 2 GiB NRO base) as lazily mapped: reads return zeros, writes
-        // allocate a page on first touch, so nothing is reserved up front.
-        // This lets libnx-style code read heap/init globals without faulting
-        // even when a baked-in pointer is stale.
-        self.mem.soft_map_zero(0, 0x8000_0000);
+        // Present the whole guest address space (see [`GUEST_SPACE_END`]) as
+        // lazily mapped: reads return zeros, writes allocate a page on first
+        // touch, so nothing is reserved up front. This lets libnx-style code
+        // read heap/init globals without faulting even when a baked-in
+        // pointer is stale, and it is what makes a heap region measured in
+        // gigabytes cost nothing until a title writes to it.
+        self.mem.soft_map_zero(0, GUEST_SPACE_END);
         // 1 MiB full-descending stack; SP starts at the top.
         let _ = self.mem.map_zero((STACK_TOP - STACK_SIZE) as u32, STACK_SIZE as usize);
         self.sp = STACK_TOP;
@@ -1561,7 +1621,32 @@ impl Cpu {
             .entry;
         self.set_pc(entry);
         self.seed_applet_launch_arguments();
+        self.seed_launch_parameters();
         Ok(loaded)
+    }
+
+    /// Fill `am`'s launch-parameter table with what a console's launcher would
+    /// have left for the program being started.
+    ///
+    /// The HOME menu chooses the user before it starts an application and
+    /// passes that choice along as a `PreselectedUser` launch parameter.
+    /// `nn::account::Initialize` pops it and caches the uid; with nothing to
+    /// pop the cached uid stays zero, and `nn::account::OpenPreselectedUser`
+    /// fires its assertion rather than returning a handle — which is where
+    /// Just Dance 2019 aborted, before it had asked for a single service.
+    ///
+    /// A library applet is not started by the menu and gets no preselected
+    /// user; what its caller hands it arrives through `PopInData` instead. See
+    /// [`Cpu::seed_applet_launch_arguments`].
+    fn seed_launch_parameters(&mut self) {
+        self.am_launch_parameters.clear();
+        if crate::cpu::ipc::is_library_applet(self.program_id) {
+            return;
+        }
+        self.am_launch_parameters.insert(
+            crate::cpu::ipc::LAUNCH_PARAMETER_PRESELECTED_USER,
+            crate::cpu::ipc::preselected_user_parameter(),
+        );
     }
 
     /// Queue what a library applet's caller would have pushed before starting

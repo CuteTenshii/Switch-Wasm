@@ -124,9 +124,11 @@ impl Engine2D {
 
         if ctx.trace {
             eprintln!(
-                "[gpu] 2d blit src {:#x} {}x{} fmt={:#x} -> dst {:#x} ({},{}) {}x{} fmt={:#x}",
+                "[gpu] 2d blit src {:#x} {}x{} fmt={:#x} -> dst {:#x} ({},{}) {}x{} fmt={:#x} \
+                 du_dx={du_dx} dv_dy={dv_dy} src0=({src_x0},{src_y0}) layout={:?}/{:?}",
                 src.addr, src.width, src.height, src.format.raw,
-                dst.addr, dst_x0, dst_y0, dst_w, dst_h, dst.format.raw
+                dst.addr, dst_x0, dst_y0, dst_w, dst_h, dst.format.raw,
+                src.layout, dst.layout
             );
         }
 
