@@ -335,19 +335,19 @@ impl Cpu {
                 let mutex = self.read_zr(0) as u32;
                 let key = self.read_zr(1) as u32;
                 let requester = self.read_zr(2) as u32;
-                // Read for the trace below, and not acted on: every
-                // condition-variable wait this has been seen to make is
-                // untimed. A finite one would have to expire against a clock,
-                // and the only clock here is the guest's own presents.
+                // A negative timeout waits forever; a positive one is a
+                // deadline in nanoseconds, and `wait_process_wide_key` turns
+                // it into one against the cycle counter.
                 let timeout = self.read_zr(3) as i64;
                 if std::env::var("TRACE_WAIT").is_ok() {
                     eprintln!(
-                        "[wait] condvar key={key:#x} mutex={mutex:#x} timeout={timeout} thread={:#x}",
-                        self.current_thread_handle()
+                        "[wait] condvar key={key:#x} mutex={mutex:#x} timeout={timeout} thread={:#x} bt={:x?}",
+                        self.current_thread_handle(),
+                        self.backtrace(8)
                     );
                 }
                 self.write_zr(0, RESULT_OK);
-                self.wait_process_wide_key(mutex, key, requester);
+                self.wait_process_wide_key(mutex, key, requester, timeout);
                 Ok(())
             }
             0x1D => {

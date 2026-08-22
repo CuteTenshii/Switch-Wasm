@@ -667,6 +667,19 @@ impl Cpu {
         raw_data: &[u8],
         domain_objects: &[u32],
     ) -> Result<()> {
+        // Every reply that carries an error, named. A refused command prints
+        // itself, but a command that is *answered* with a failure does not,
+        // and that is the shape an initialisation step that quietly gives up
+        // takes: the caller reads the Result, stops, and asks for nothing more.
+        if result != 0 && std::env::var("TRACE_IPC").is_ok() {
+            let module = result & 0x1FF;
+            let description = (result >> 9) & 0x1FFF;
+            eprintln!(
+                "[ipc] error {result:#x} (module {module}, description {description}) from {:?} cmd={:?}",
+                self.service_name(self.read_zr(0)),
+                self.ipc_command_id(tls)
+            );
+        }
         if self.ipc_is_tipc_request(tls) {
             return self.write_tipc_reply(tls, result, copy_handles, move_handles, raw_data);
         }

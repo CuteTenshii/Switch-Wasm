@@ -127,7 +127,9 @@ pub enum ThreadState {
     WaitMutex(u32),
     /// Blocked in `svcWaitProcessWideKeyAtomic` on a condition variable, to
     /// re-acquire `mutex` when woken.
-    WaitKey { key: u32, mutex: u32 },
+    /// Blocked on a condition variable. `deadline` is the cycle count the
+    /// wait expires at, for the timed form — `None` is a wait with no timeout.
+    WaitKey { key: u32, mutex: u32, deadline: Option<u64> },
 }
 
 /// A kernel event a service handed the guest a handle to.
@@ -1065,11 +1067,38 @@ impl Cpu {
 
     /// `svcWaitProcessWideKeyAtomic(mutex_addr, key, self, timeout)`: release
     /// the mutex and block on the condition variable.
-    pub(super) fn wait_process_wide_key(&mut self, mutex: u32, key: u32, _self_handle: u32) {
+    pub(super) fn wait_process_wide_key(
+        &mut self,
+        mutex: u32,
+        key: u32,
+        _self_handle: u32,
+        timeout: i64,
+    ) {
         self.ensure_main_thread();
         self.arbitrate_unlock(mutex);
-        self.threads[self.current_thread].state = ThreadState::WaitKey { key, mutex };
+        // A negative timeout waits forever; a positive one is nanoseconds, and
+        // has to expire. A thread that asked to be woken in 100ms and never was
+        // is a thread that does its work on a timer and never does it again.
+        let deadline = (timeout > 0).then(|| {
+            let cycles = (timeout as u128) * u128::from(crate::cpu::ipc::CLOCK_RATES_HZ[0]) / 1_000_000_000;
+            self.cycles.wrapping_add(cycles as u64)
+        });
+        self.threads[self.current_thread].state = ThreadState::WaitKey { key, mutex, deadline };
         self.reschedule();
+    }
+
+    /// Wake every timed condition-variable wait whose deadline has passed.
+    /// Horizon reports the timeout to the waiter, and `nn::os` answers one by
+    /// re-checking its predicate, so waking is the whole of it.
+    pub(super) fn expire_timed_waits(&mut self) {
+        let now = self.cycles;
+        for thread in &mut self.threads {
+            if let ThreadState::WaitKey { deadline: Some(at), .. } = thread.state {
+                if now >= at {
+                    thread.state = ThreadState::Runnable;
+                }
+            }
+        }
     }
 
     /// `svcSignalProcessWideKey(key, count)`: wake up to `count` waiters
@@ -1082,7 +1111,7 @@ impl Cpu {
             if count >= 0 && woken >= count {
                 break;
             }
-            if let ThreadState::WaitKey { key: waiting, mutex } = self.threads[i].state {
+            if let ThreadState::WaitKey { key: waiting, mutex, .. } = self.threads[i].state {
                 if waiting != key {
                     continue;
                 }
@@ -2107,6 +2136,9 @@ impl Cpu {
         self.slice_used += 1;
         if self.slice_used >= TIME_SLICE {
             self.slice_used = 0;
+            // A timed wait expires on the same tick the scheduler runs on;
+            // the slice is far finer than any timeout a guest asks for.
+            self.expire_timed_waits();
             self.yield_thread();
         }
         let pc = self.pc;
