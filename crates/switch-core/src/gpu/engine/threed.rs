@@ -372,7 +372,12 @@ impl Engine3D {
             // triangles then came out with all three corners at the same
             // point, and it presented black frames.
             INLINE_FIRST..=INLINE_LAST => self.inline.write(method, arg, ctx)?,
-            _ => ctx.stats.inert_methods += 1,
+            _ => {
+                ctx.stats.inert_methods += 1;
+                if ctx.trace {
+                    eprintln!("[gpu] inert method={method:#x} arg={arg:#010x}");
+                }
+            }
         }
         Ok(())
     }

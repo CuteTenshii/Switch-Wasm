@@ -64,6 +64,10 @@ pub struct Memory {
     /// stores the value already there, and cannot name the writer at all.
     watch: (u32, u32),
     watch_hit: Option<u32>,
+    /// The same, for reads. Separate because the read path takes `&self`, so
+    /// the hit is recorded through a `Cell`.
+    read_watch: (u32, u32),
+    read_hit: std::cell::Cell<Option<u32>>,
 }
 
 impl Default for Memory {
@@ -82,6 +86,8 @@ impl Memory {
             mapped_pages: 0,
             watch: (1, 0),
             watch_hit: None,
+            read_watch: (1, 0),
+            read_hit: std::cell::Cell::new(None),
         }
     }
 
@@ -244,6 +250,9 @@ impl Memory {
             return None;
         }
         let page = self.page_ref(Self::page_index(addr)).ok()?;
+        if addr < self.read_watch.1 && addr.wrapping_add(N as u32) > self.read_watch.0 {
+            self.read_hit.set(Some(addr));
+        }
         Some(page[off..off + N].try_into().unwrap())
     }
 
@@ -321,6 +330,20 @@ impl Memory {
     pub fn watch_writes(&mut self, start: u32, size: u32) {
         self.watch = if size == 0 { (1, 0) } else { (start, start.wrapping_add(size)) };
         self.watch_hit = None;
+    }
+
+    /// Arm the read watchpoint over `[start, start + size)`; a zero `size`
+    /// disarms it. Finding every piece of code that *examines* a flag is how
+    /// the one that would clear it gets named, when nothing ever does.
+    pub fn watch_reads(&mut self, start: u32, size: u32) {
+        self.read_watch = if size == 0 { (1, 0) } else { (start, start.wrapping_add(size)) };
+        self.read_hit.set(None);
+    }
+
+    /// The address of the most recent read inside the watched range, clearing
+    /// it so the next call reports only new reads.
+    pub fn take_read_hit(&self) -> Option<u32> {
+        self.read_hit.replace(None)
     }
 
     /// The address of the most recent write inside the watched range, clearing

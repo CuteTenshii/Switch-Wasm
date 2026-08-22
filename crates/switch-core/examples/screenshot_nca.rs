@@ -90,6 +90,18 @@ fn main() {
     if let Some((lo, hi)) = trap {
         cpu.mem.watch_writes(lo, hi - lo);
     }
+    // `TRAP_READ=<addr>:<size>` collects every distinct guest PC that reads a
+    // region.
+    let read_trap: Option<(u32, u32)> = env::var("TRAP_READ").ok().and_then(|v| {
+        let (a, n) = v.split_once(':')?;
+        let a = u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok()?;
+        let n = u32::from_str_radix(n.trim().trim_start_matches("0x"), 16).ok()?;
+        Some((a, a + n))
+    });
+    if let Some((lo, hi)) = read_trap {
+        cpu.mem.watch_reads(lo, hi - lo);
+    }
+    let mut readers: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
     // `WATCH_PC=<addr>[,...]` reports the guest backtrace the first few times
     // execution reaches an address. Finding who calls a thin IPC stub is not a
     // static question here -- they are reached through vtables, so nothing in
@@ -119,8 +131,22 @@ fn main() {
     // runnable once, at that step.
     let start_threads: Option<u64> = env::var("START_THREADS").ok().and_then(|v| v.parse().ok());
     let mut started_threads = false;
+    // `POKE_U32=<addr>:<value>` writes a word into guest memory on every
+    // sampling tick once the run is under way. A latched state flag is only a
+    // theory until you clear it and see what the guest does.
+    let poke: Option<(u32, u32)> = env::var("POKE_U32").ok().and_then(|v| {
+        let (a, b) = v.split_once(':')?;
+        let a = u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok()?;
+        let b = u32::from_str_radix(b.trim().trim_start_matches("0x"), 16).ok()?;
+        Some((a, b))
+    });
     let mut share = [0u64; 32];
     let mut hot: HashMap<(usize, u32), u64> = HashMap::new();
+    // `STACKS=1` counts how often each return address appears on the stack, so
+    // a frame loop's whole call tree comes out of one run instead of one
+    // backtrace at a time.
+    let stacks = env::var("STACKS").is_ok();
+    let mut frames: HashMap<u32, (u64, usize)> = HashMap::new();
     let mut traps = 0u32;
     let mut done = 0u64;
     let budget: u64 = env::var("STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(40_000_000_000);
@@ -142,16 +168,29 @@ fn main() {
                 share[t] += 1;
             }
             *hot.entry((t, cpu.get_pc())).or_insert(0u64) += 1;
+            if stacks {
+                for (depth, frame) in cpu.backtrace(14).into_iter().enumerate() {
+                    let slot = frames.entry(frame).or_insert((0u64, depth));
+                    slot.0 += 1;
+                    slot.1 = slot.1.min(depth);
+                }
+            }
         }
         if watch_hits < 24 && !watch_pc.is_empty() && watch_pc.contains(&cpu.get_pc()) {
             println!(
-                "[watch-pc] {:#x} at step {done} x0={:#x} x8={:#x} bt={:x?}",
+                "[watch-pc] {:#x} at step {done} x0={:#x} x8={:#x} x19={:#x} bt={:x?}",
                 cpu.get_pc(),
                 cpu.reg(0),
                 cpu.reg(8),
+                cpu.reg(19),
                 cpu.backtrace(6)
             );
             watch_hits += 1;
+        }
+        if let Some((addr, value)) = poke {
+            if done > 20_000_000 && done % 65536 == 0 {
+                let _ = cpu.mem.write_u32(addr, value);
+            }
         }
         if let Some(at) = start_threads {
             if !started_threads && done >= at {
@@ -165,8 +204,12 @@ fn main() {
                 covered[((pc - lo) / 4) as usize] = true;
             }
         }
+        let pc_before = cpu.get_pc();
         if cpu.step().is_err() {
             break;
+        }
+        if read_trap.is_some() && cpu.mem.take_read_hit().is_some() {
+            *readers.entry(pc_before).or_insert(0) += 1;
         }
         done += 1;
     }
@@ -187,11 +230,21 @@ fn main() {
             println!("[cover] {start:#x}..end");
         }
     }
+    for (pc, n) in &readers {
+        println!("[reader] {pc:#x} {n}");
+    }
     println!("[threads] sampled share = {:?}", &share[..]);
     println!("[bt] {:#x} <- {:x?}", cpu.get_pc(), cpu.backtrace(12));
     let hot_snapshot = hot.clone();
     let mut top: Vec<_> = hot.into_iter().collect();
     top.sort_by_key(|&(_, n)| std::cmp::Reverse(n));
+    if stacks {
+        let mut fs: Vec<_> = frames.into_iter().collect();
+        fs.sort_by_key(|&(_, (n, _))| std::cmp::Reverse(n));
+        for (addr, (n, min_depth)) in fs.into_iter().take(34) {
+            println!("[stack] {addr:#x} {n} (shallowest depth {min_depth})");
+        }
+    }
     let mut by_page: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
     for (&(_, pc), &n) in &hot_snapshot {
         *by_page.entry(pc & !0xFFF).or_insert(0) += n;
