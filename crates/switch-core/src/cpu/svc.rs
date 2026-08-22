@@ -1,7 +1,7 @@
 //! The Horizon supervisor calls (`SVC`) libnx homebrew issues at runtime.
 
 use super::{
-    Cpu, GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
+    ArbiterWait, Cpu, GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
     GUEST_HEAP_REGION_SIZE, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE,
     PL_SHMEM_SIZE,
 };
@@ -354,6 +354,73 @@ impl Cpu {
                 }
                 self.write_zr(0, RESULT_OK);
                 self.wait_process_wide_key(mutex, key, requester, timeout);
+                Ok(())
+            }
+            0x34 => {
+                // WaitForAddress(address = X0, arb_type = W1, value = W2,
+                // timeout = X3): the address arbiter's wait side. `nn::os`
+                // builds its semaphores, barriers and newer condition
+                // variables on it, so a retail title reaches it long before it
+                // draws — Tomodachi Life stopped here on its way to the first
+                // frame.
+                //
+                // The arbitration type says which predicate has to hold for
+                // the wait to happen at all: `WaitIfLessThan` (0),
+                // `DecrementAndWaitIfLessThan` (1), `WaitIfEqual` (2). When it
+                // does not hold the kernel reports InvalidState rather than
+                // blocking, and the caller takes that as "already done".
+                const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
+                const RESULT_TIMED_OUT: u64 = 0xEA01;
+                let addr = self.read_zr(0) as u32;
+                let arb_type = self.read_zr(1) as u32;
+                let value = self.read_zr(2) as u32 as i32;
+                let timeout = self.read_zr(3) as i64;
+                if std::env::var("TRACE_WAIT").is_ok() {
+                    eprintln!(
+                        "[wait] arbiter addr={addr:#x} type={arb_type} value={value} \
+                         timeout={timeout} thread={:#x}",
+                        self.current_thread_handle()
+                    );
+                }
+                // The result goes in before the block, because blocking hands
+                // the CPU to another thread and X0 stops being this one's: a
+                // blocked thread resumes *after* this syscall and reads
+                // whatever was left there. A timed-out wait therefore also
+                // reports success, and `nn::os` answers that by re-checking
+                // its predicate — the same bargain the condition variables
+                // above make.
+                let outcome = self.arbitrate_address(addr, arb_type, value, timeout);
+                self.write_zr(0, match outcome {
+                    ArbiterWait::Blocked => RESULT_OK,
+                    ArbiterWait::Mismatch => RESULT_INVALID_STATE,
+                    ArbiterWait::TimedOut => RESULT_TIMED_OUT,
+                });
+                if outcome == ArbiterWait::Blocked {
+                    self.block_on_address(addr, timeout);
+                }
+                Ok(())
+            }
+            0x35 => {
+                // SignalToAddress(address = X0, signal_type = W1, value = W2,
+                // count = W3): the wake side. `Signal` (0) just releases
+                // waiters; `SignalAndIncrementIfEqual` (1) and
+                // `SignalAndModifyByWaitingCountIfEqual` (2) first
+                // compare-and-modify the word, and signal nobody when it no
+                // longer holds `value`.
+                const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
+                let addr = self.read_zr(0) as u32;
+                let signal_type = self.read_zr(1) as u32;
+                let value = self.read_zr(2) as u32 as i32;
+                let count = self.read_zr(3) as u32 as i32;
+                if std::env::var("TRACE_WAIT").is_ok() {
+                    eprintln!(
+                        "[wait] arbiter signal addr={addr:#x} type={signal_type} value={value} \
+                         count={count} thread={:#x}",
+                        self.current_thread_handle()
+                    );
+                }
+                let ok = self.signal_to_address(addr, signal_type, value, count);
+                self.write_zr(0, if ok { RESULT_OK } else { RESULT_INVALID_STATE });
                 Ok(())
             }
             0x1D => {
@@ -841,10 +908,16 @@ impl Cpu {
                         "ssl" | "ssl:service" | "ssl:context" => {
                             self.ssl_request(tls, handle, cmd_id)?
                         }
-                        // hid, and the IAppletResource it hands the input
-                        // shared memory over through.
+                        // hid, the IAppletResource it hands the input shared
+                        // memory over through, and the
+                        // IActiveVibrationDeviceList a caller initializes each
+                        // rumble motor through. Leaving that last one off this
+                        // list sent `nn::hid::InitializeVibrationDevice` to
+                        // the fabricated-object fallback, which answers a void
+                        // command with an object id and a handle it never
+                        // asked for.
                         "hid" | "hid:dbg" | "hid:sys" | "hid:server"
-                        | "hid:applet-resource" => {
+                        | "hid:applet-resource" | "hid:vibration-devices" => {
                             self.hid_request(tls, handle, cmd_id)?
                         }
                         // lm, the log manager: a title's own diagnostic

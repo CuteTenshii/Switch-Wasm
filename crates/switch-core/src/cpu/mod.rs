@@ -130,6 +130,24 @@ pub enum ThreadState {
     /// Blocked on a condition variable. `deadline` is the cycle count the
     /// wait expires at, for the timed form — `None` is a wait with no timeout.
     WaitKey { key: u32, mutex: u32, deadline: Option<u64> },
+    /// Blocked in `svcWaitForAddress` on the arbiter word at this address,
+    /// until `svcSignalToAddress` names it or `deadline` passes.
+    WaitAddress { addr: u32, deadline: Option<u64> },
+}
+
+/// How an `svcWaitForAddress` resolved, which the syscall layer turns into a
+/// kernel result code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArbiterWait {
+    /// The predicate held and the caller is now blocked.
+    Blocked,
+    /// The word did not hold what the caller expected, so there was nothing to
+    /// wait for. Horizon reports this rather than waiting, and `nn::os` reads
+    /// it as "the thing you were waiting for already happened".
+    Mismatch,
+    /// The predicate held but the caller passed a zero timeout, so it was
+    /// asking whether it *would* block rather than to block.
+    TimedOut,
 }
 
 /// A kernel event a service handed the guest a handle to.
@@ -527,6 +545,11 @@ pub struct Cpu {
     /// Storages queued for `ILibraryAppletSelfAccessor::PopInData` — what the
     /// applet's caller would have pushed before starting it.
     am_in_data: VecDeque<Vec<u8>>,
+    /// `am`'s launch-parameter table, by `LaunchParameterKind`: what the
+    /// launcher left for the program it started, for `PopLaunchParameter` to
+    /// hand over. Filled by [`Cpu::seed_launch_parameters`], and emptied by
+    /// the pops — each parameter is delivered once, as on a console.
+    am_launch_parameters: HashMap<u32, Vec<u8>>,
     /// Which storage an `IStorageAccessor` reads and writes. The accessor is
     /// a separate object from the storage it was opened on, and both ends
     /// have to see the same bytes.
@@ -766,6 +789,7 @@ impl Cpu {
             fs_mount: HashMap::new(),
             fs_storage_archive: HashMap::new(),
             am_in_data: VecDeque::new(),
+            am_launch_parameters: HashMap::new(),
             am_storages: HashMap::new(),
             am_storage_of: HashMap::new(),
             am_applets: HashMap::new(),
@@ -1093,27 +1117,25 @@ impl Cpu {
     ) {
         self.ensure_main_thread();
         self.arbitrate_unlock(mutex);
-        // A negative timeout waits forever; a positive one is nanoseconds, and
-        // has to expire. A thread that asked to be woken in 100ms and never was
-        // is a thread that does its work on a timer and never does it again.
-        let deadline = (timeout > 0).then(|| {
-            let cycles = (timeout as u128) * u128::from(crate::cpu::ipc::CLOCK_RATES_HZ[0]) / 1_000_000_000;
-            self.cycles.wrapping_add(cycles as u64)
-        });
+        let deadline = self.wait_deadline(timeout);
         self.threads[self.current_thread].state = ThreadState::WaitKey { key, mutex, deadline };
         self.reschedule();
     }
 
-    /// Wake every timed condition-variable wait whose deadline has passed.
-    /// Horizon reports the timeout to the waiter, and `nn::os` answers one by
-    /// re-checking its predicate, so waking is the whole of it.
+    /// Wake every timed wait — condition variable or address arbiter — whose
+    /// deadline has passed. Horizon reports the timeout to the waiter, and
+    /// `nn::os` answers one by re-checking its predicate, so waking is the
+    /// whole of it.
     pub(super) fn expire_timed_waits(&mut self) {
         let now = self.cycles;
         for thread in &mut self.threads {
-            if let ThreadState::WaitKey { deadline: Some(at), .. } = thread.state {
-                if now >= at {
-                    thread.state = ThreadState::Runnable;
-                }
+            let deadline = match thread.state {
+                ThreadState::WaitKey { deadline, .. }
+                | ThreadState::WaitAddress { deadline, .. } => deadline,
+                _ => None,
+            };
+            if deadline.is_some_and(|at| now >= at) {
+                thread.state = ThreadState::Runnable;
             }
         }
     }
@@ -1148,6 +1170,139 @@ impl Cpu {
         }
     }
 
+    /// The cycle count a wait of `timeout` nanoseconds expires at.
+    ///
+    /// A negative timeout waits forever; a positive one has to expire. A
+    /// thread that asked to be woken in 100ms and never was is a thread that
+    /// does its work on a timer and never does it again.
+    fn wait_deadline(&self, timeout: i64) -> Option<u64> {
+        (timeout > 0).then(|| {
+            let cycles =
+                (timeout as u128) * u128::from(crate::cpu::ipc::CLOCK_RATES_HZ[0]) / 1_000_000_000;
+            self.cycles.wrapping_add(cycles as u64)
+        })
+    }
+
+    // ---- the address arbiter ----
+    //
+    // The other half of Horizon's "keep the word in guest memory, call the
+    // kernel only when a thread has to block" design. Unlike the mutex above,
+    // the arbiter word carries no ownership and the kernel never interprets
+    // it: it only compares it against the value the caller passed. `nn::os`
+    // builds its semaphores, barriers and newer condition variables out of one
+    // such word and these two syscalls.
+
+    /// The `svcWaitForAddress(addr, arb_type, value, timeout)` decision: does
+    /// the arbitration type's predicate hold, and whatever it does to the word
+    /// on the way in.
+    ///
+    /// Deciding is separate from [`Cpu::block_on_address`] because blocking
+    /// switches threads, and the caller has to have written its result to X0
+    /// before that happens — afterwards X0 belongs to whichever thread took
+    /// the CPU. Getting that order wrong here handed a freshly started thread
+    /// a zeroed X0 in place of the `nn::os::ThreadType` its entry stub was
+    /// about to install, so every mutex it later took looked like one it
+    /// already owned.
+    pub(super) fn arbitrate_address(
+        &mut self,
+        addr: u32,
+        arb_type: u32,
+        value: i32,
+        timeout: i64,
+    ) -> ArbiterWait {
+        self.ensure_main_thread();
+        let Ok(current) = self.mem.read_u32(addr).map(|w| w as i32) else {
+            return ArbiterWait::Mismatch;
+        };
+        let holds = match arb_type {
+            // WaitIfLessThan, and the same with a decrement the kernel does
+            // atomically with the comparison — that decrement is how a
+            // semaphore's waiter claims its place in the queue.
+            0 | 1 => current < value,
+            // WaitIfEqual.
+            2 => current == value,
+            _ => return ArbiterWait::Mismatch,
+        };
+        if !holds {
+            return ArbiterWait::Mismatch;
+        }
+        if arb_type == 1 {
+            let _ = self.mem.write_u32(addr, current.wrapping_sub(1) as u32);
+        }
+        // A zero timeout is a poll: the caller wanted to know whether it would
+        // have blocked, not to block.
+        if timeout == 0 {
+            return ArbiterWait::TimedOut;
+        }
+        ArbiterWait::Blocked
+    }
+
+    /// Park the running thread on the arbiter word at `addr` and give the CPU
+    /// to someone else. Only ever called after [`Cpu::arbitrate_address`] said
+    /// the wait should happen.
+    pub(super) fn block_on_address(&mut self, addr: u32, timeout: i64) {
+        let deadline = self.wait_deadline(timeout);
+        self.threads[self.current_thread].state = ThreadState::WaitAddress { addr, deadline };
+        self.reschedule();
+    }
+
+    /// `svcSignalToAddress(addr, signal_type, value, count)`: wake up to
+    /// `count` threads waiting on `addr` (`count` < 0 wakes all of them),
+    /// after the compare-and-modify the signal type asks for. Reports whether
+    /// the word still held `value`; when it did not, Horizon signals nobody.
+    pub(super) fn signal_to_address(
+        &mut self,
+        addr: u32,
+        signal_type: u32,
+        value: i32,
+        count: i32,
+    ) -> bool {
+        self.ensure_main_thread();
+        let waiting = self
+            .threads
+            .iter()
+            .filter(|t| matches!(t.state, ThreadState::WaitAddress { addr: a, .. } if a == addr))
+            .count() as i32;
+        if signal_type != 0 {
+            let Ok(current) = self.mem.read_u32(addr).map(|w| w as i32) else {
+                return false;
+            };
+            if current != value {
+                return false;
+            }
+            let updated = match signal_type {
+                // SignalAndIncrementIfEqual.
+                1 => value.wrapping_add(1),
+                // SignalAndModifyByWaitingCountIfEqual: the word ends up
+                // saying how the queue compares to the batch being released —
+                // below it if more threads are still waiting than are woken,
+                // above it if the queue is drained. That is what lets a
+                // semaphore's next release know whether to call the kernel at
+                // all.
+                _ => match (count > 0).then_some(waiting.cmp(&count)) {
+                    Some(std::cmp::Ordering::Greater) => value.wrapping_sub(1),
+                    Some(std::cmp::Ordering::Equal) => value,
+                    Some(std::cmp::Ordering::Less) => value.wrapping_add(1),
+                    None if waiting > 0 => value.wrapping_sub(1),
+                    None => value.wrapping_add(1),
+                },
+            };
+            let _ = self.mem.write_u32(addr, updated as u32);
+        }
+        let mut woken = 0;
+        for i in 0..self.threads.len() {
+            if count >= 0 && woken >= count {
+                break;
+            }
+            if matches!(self.threads[i].state, ThreadState::WaitAddress { addr: a, .. } if a == addr)
+            {
+                self.threads[i].state = ThreadState::Runnable;
+                woken += 1;
+            }
+        }
+        true
+    }
+
     /// Switch away from the running thread after it blocked. If nothing can
     /// run, everything blocked is woken: guests re-check their predicates in a
     /// loop, so a spurious wake degrades to the old spin rather than a hang.
@@ -1158,7 +1313,9 @@ impl Cpu {
         for thread in &mut self.threads {
             if matches!(
                 thread.state,
-                ThreadState::WaitMutex(_) | ThreadState::WaitKey { .. }
+                ThreadState::WaitMutex(_)
+                    | ThreadState::WaitKey { .. }
+                    | ThreadState::WaitAddress { .. }
             ) {
                 thread.state = ThreadState::Runnable;
             }
@@ -1410,7 +1567,32 @@ impl Cpu {
             .entry;
         self.set_pc(entry);
         self.seed_applet_launch_arguments();
+        self.seed_launch_parameters();
         Ok(loaded)
+    }
+
+    /// Fill `am`'s launch-parameter table with what a console's launcher would
+    /// have left for the program being started.
+    ///
+    /// The HOME menu chooses the user before it starts an application and
+    /// passes that choice along as a `PreselectedUser` launch parameter.
+    /// `nn::account::Initialize` pops it and caches the uid; with nothing to
+    /// pop the cached uid stays zero, and `nn::account::OpenPreselectedUser`
+    /// fires its assertion rather than returning a handle — which is where
+    /// Just Dance 2019 aborted, before it had asked for a single service.
+    ///
+    /// A library applet is not started by the menu and gets no preselected
+    /// user; what its caller hands it arrives through `PopInData` instead. See
+    /// [`Cpu::seed_applet_launch_arguments`].
+    fn seed_launch_parameters(&mut self) {
+        self.am_launch_parameters.clear();
+        if crate::cpu::ipc::is_library_applet(self.program_id) {
+            return;
+        }
+        self.am_launch_parameters.insert(
+            crate::cpu::ipc::LAUNCH_PARAMETER_PRESELECTED_USER,
+            crate::cpu::ipc::preselected_user_parameter(),
+        );
     }
 
     /// Queue what a library applet's caller would have pushed before starting
@@ -2271,7 +2453,12 @@ impl Cpu {
     pub fn wake_all_blocked(&mut self) -> usize {
         let mut woken = 0;
         for thread in &mut self.threads {
-            if matches!(thread.state, ThreadState::WaitMutex(_) | ThreadState::WaitKey { .. }) {
+            if matches!(
+                thread.state,
+                ThreadState::WaitMutex(_)
+                    | ThreadState::WaitKey { .. }
+                    | ThreadState::WaitAddress { .. }
+            ) {
                 thread.state = ThreadState::Runnable;
                 woken += 1;
             }

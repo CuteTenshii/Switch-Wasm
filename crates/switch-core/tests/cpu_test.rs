@@ -3706,6 +3706,147 @@ fn guest_threads_run_and_hand_over_at_blocking_syscalls() {
 }
 
 #[test]
+fn the_address_arbiter_compares_before_it_waits() {
+    // `svcWaitForAddress`/`svcSignalToAddress`, the pair `nn::os` builds its
+    // semaphores, barriers and newer condition variables out of. Neither one
+    // waits or wakes unconditionally: each first compares the word in guest
+    // memory against the value the caller passed, and reports InvalidState
+    // when it does not match — which the caller reads as "already happened".
+    const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
+    const RESULT_TIMED_OUT: u64 = 0xEA01;
+
+    // DecrementAndWaitIfLessThan with a zero timeout. The predicate holds
+    // (0 < 1) so the decrement happens — that is how a semaphore's waiter
+    // claims its place in the queue — but a zero timeout asked whether it
+    // *would* block, not to block.
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map(0x1000, &svc(0x34).to_le_bytes()).unwrap();
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap();
+    cpu.set_reg(0, 0x6000);
+    cpu.set_reg(1, 1); // DecrementAndWaitIfLessThan
+    cpu.set_reg(2, 1); // value
+    cpu.set_reg(3, 0); // timeout
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), RESULT_TIMED_OUT);
+    assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), (-1i32) as u32);
+
+    // WaitIfEqual against a word holding something else: no wait, and the
+    // word is left alone.
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map(0x1000, &svc(0x34).to_le_bytes()).unwrap();
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap();
+    cpu.mem.write_u32(0x6000, 7).unwrap();
+    cpu.set_reg(0, 0x6000);
+    cpu.set_reg(1, 2); // WaitIfEqual
+    cpu.set_reg(2, 5);
+    cpu.set_reg(3, u64::MAX); // wait forever
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), RESULT_INVALID_STATE);
+    assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 7);
+
+    // SignalAndIncrementIfEqual moves the word on when it matches...
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map(0x1000, &svc(0x35).to_le_bytes()).unwrap();
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap();
+    cpu.mem.write_u32(0x6000, 7).unwrap();
+    cpu.set_reg(0, 0x6000);
+    cpu.set_reg(1, 1); // SignalAndIncrementIfEqual
+    cpu.set_reg(2, 7);
+    cpu.set_reg(3, 1); // count
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), 0);
+    assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 8);
+
+    // ...and refuses when it does not, without touching it.
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map(0x1000, &svc(0x35).to_le_bytes()).unwrap();
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap();
+    cpu.mem.write_u32(0x6000, 8).unwrap();
+    cpu.set_reg(0, 0x6000);
+    cpu.set_reg(1, 1);
+    cpu.set_reg(2, 99);
+    cpu.set_reg(3, 1);
+    cpu.run(1).unwrap();
+    assert_eq!(cpu.read_x(0), RESULT_INVALID_STATE);
+    assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 8);
+}
+
+#[test]
+fn blocking_on_the_arbiter_leaves_the_next_thread_its_registers() {
+    // A thread that blocks in `svcWaitForAddress` hands the CPU over inside
+    // the syscall, so the syscall's *own* result has to be in X0 before that
+    // happens — after it, X0 belongs to whoever took over.
+    //
+    // Writing it afterwards zeroed the incoming thread's X0. For Tomodachi
+    // Life that thread was one `nn::os` had just started, and X0 was the
+    // `ThreadType` its entry stub installs at TLS+0x1F8 — so the thread ran
+    // with a null current-thread pointer, read its own handle as 0, and every
+    // unlocked mutex it took (lock word 0) compared equal to one it already
+    // held. `pthread_mutex_lock` aborts on that.
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.mem.map_zero(0x4000, 0x2000).unwrap(); // the child's stack
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap();
+
+    // main: arm the arbiter word, start the child, then wait on it.
+    let main = [
+        0xd28c_0009u32, // mov x9, #0x6000
+        0x5280_0021,    // mov w1, #1
+        0xb900_0121,    // str w1, [x9]     (the word the child will signal)
+        0xd284_0001,    // mov x1, #0x2000  (entry)
+        0xd282_4682,    // mov x2, #0x1234  (arg — what must survive)
+        0xd28a_0003,    // mov x3, #0x5000  (stack top)
+        0x5280_0764,    // mov w4, #0x3b    (priority)
+        0x1280_0005,    // mov w5, #-1      (core)
+        0xd400_0101,    // svc #8           (CreateThread → handle in x1)
+        0xaa01_03e0,    // mov x0, x1
+        0xd400_0121,    // svc #9           (StartThread)
+        0xd28c_0000,    // mov x0, #0x6000
+        0x5280_0041,    // mov w1, #2       (WaitIfEqual)
+        0x5280_0022,    // mov w2, #1       (value)
+        0x9280_0003,    // mov x3, #-1      (wait forever)
+        0xd400_0681,    // svc #0x34        (WaitForAddress → blocks)
+        0xd28c_0009,    // mov x9, #0x6000
+        0x5280_0aa1,    // mov w1, #0x55
+        0xb900_0d21,    // str w1, [x9, #12] (main got the CPU back)
+        0xd400_00e1,    // svc #7           (ExitProcess)
+    ];
+    // child: record the argument it was handed, then release main.
+    let child = [
+        0xd28c_0009u32, // mov x9, #0x6000
+        0xb900_0520,    // str w0, [x9, #4]  (the ThreadType stand-in)
+        0x5280_0041,    // mov w1, #2
+        0xb900_0121,    // str w1, [x9]      (so main's predicate stops holding)
+        0xd28c_0000,    // mov x0, #0x6000
+        0x5280_0021,    // mov w1, #1        (SignalAndIncrementIfEqual)
+        0x5280_0042,    // mov w2, #2        (the value it must still hold)
+        0x5280_0023,    // mov w3, #1        (wake one)
+        0xd400_06a1,    // svc #0x35         (SignalToAddress)
+        0xd400_0141,    // svc #0xa          (ExitThread)
+    ];
+    let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
+    cpu.mem.map_zero(0x1000, 0x100).unwrap();
+    cpu.mem.map(0x1000, &bytes(&main)).unwrap();
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &bytes(&child)).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(10_000).unwrap();
+
+    assert_eq!(
+        cpu.mem.read_u32(0x6004).unwrap(),
+        0x1234,
+        "the thread that took the CPU kept the argument in its x0"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(0x6000).unwrap(),
+        3,
+        "the signal's compare-and-increment ran"
+    );
+    assert_eq!(cpu.mem.read_u32(0x600c).unwrap(), 0x55, "main was woken");
+    assert!(cpu.halted, "main reached ExitProcess");
+}
+
+#[test]
 fn a_wait_on_no_handles_is_not_answered() {
     // `nn::os::detail::MultiWaitImpl::WaitAny` turns whatever
     // svcWaitSynchronization returns into a holder from its own list. An empty
