@@ -1317,9 +1317,18 @@ pub extern "C" fn switch_sd_pending_changes(handle: u32) -> u32 {
 /// size the buffer, or changes will be lost.
 #[no_mangle]
 pub extern "C" fn switch_sd_take_changes_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let s = session(handle);
+    let changes = session(handle).cpu.fs.take_changes();
+    write_changes_json(&changes, buf, maxlen)
+}
+
+/// Serialize drained [`Change`](switch_core::vfs::Change)s into `buf`.
+///
+/// Shared by the SD card and by save data, because they are the same
+/// question asked of different storage: what is at this path now, so a host
+/// can store it or drop it from its store without asking again.
+fn write_changes_json(changes: &[switch_core::vfs::Change], buf: *mut u8, maxlen: u32) -> u32 {
     let mut out = Vec::from("[");
-    for (i, change) in s.cpu.fs.take_changes().into_iter().enumerate() {
+    for (i, change) in changes.iter().enumerate() {
         if i > 0 {
             out.push(b',');
         }
@@ -1352,6 +1361,135 @@ pub extern "C" fn switch_sd_take_changes_json(handle: u32, buf: *mut u8, maxlen:
     let dst = unsafe { std::slice::from_raw_parts_mut(buf, n) };
     dst.copy_from_slice(&out[..n]);
     n as u32
+}
+
+// ---------- save data ----------
+//
+// The same shape as the SD card above, with a save id in front of every call.
+// A console keeps saves on its NAND rather than its card, and they are the
+// only writable storage a title has that another title cannot see — so they
+// are stored separately, and a path means nothing without the id it belongs
+// to.
+
+/// Every save the running session has opened, as JSON: `["0100000000001000"]`.
+///
+/// A save is created on first open, so this is also the list of what there is
+/// to persist — a host drains and stores each of these in turn.
+#[no_mangle]
+pub extern "C" fn switch_save_ids_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let mut ids = session(handle).cpu.save_ids();
+    ids.sort_unstable();
+    let mut out = Vec::from("[");
+    for (i, id) in ids.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(format!("\"{id:016x}\"").as_bytes());
+    }
+    out.push(b']');
+    let n = out.len().min(maxlen as usize);
+    let dst = unsafe { std::slice::from_raw_parts_mut(buf, n) };
+    dst.copy_from_slice(&out[..n]);
+    n as u32
+}
+
+/// How many paths the guest has changed in this save and not yet had drained.
+#[no_mangle]
+pub extern "C" fn switch_save_pending_changes(handle: u32, save_id: u64) -> u32 {
+    session(handle).cpu.save_data_mut(save_id).pending_changes() as u32
+}
+
+/// Drain what the guest has changed in this save, in the same JSON as
+/// `switch_sd_take_changes_json`. **The drain happens even if the result does
+/// not fit in `buf`** — size it from `switch_save_pending_changes` first.
+#[no_mangle]
+pub extern "C" fn switch_save_take_changes_json(
+    handle: u32,
+    save_id: u64,
+    buf: *mut u8,
+    maxlen: u32,
+) -> u32 {
+    let changes = session(handle).cpu.save_data_mut(save_id).take_changes();
+    write_changes_json(&changes, buf, maxlen)
+}
+
+/// Put a file into a save, creating the save if this is the first thing in it.
+/// The host's own load path, so — like `switch_sd_write_file` — it is
+/// deliberately not reported as a change: a restored file has not changed.
+#[no_mangle]
+pub extern "C" fn switch_save_write_file(
+    handle: u32,
+    save_id: u64,
+    path_ptr: *const u8,
+    path_len: u32,
+    data_ptr: *const u8,
+    data_len: u32,
+) -> i32 {
+    let s = session(handle);
+    let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
+    let path = sd_path(path_ptr, path_len);
+    s.cpu.save_data_mut(save_id).write_file(&path, data.to_vec());
+    0
+}
+
+/// Create a directory in a save and any missing parents. Not reported as a
+/// change, for the same reason as `switch_save_write_file`.
+#[no_mangle]
+pub extern "C" fn switch_save_create_dir(
+    handle: u32,
+    save_id: u64,
+    path_ptr: *const u8,
+    path_len: u32,
+) -> i32 {
+    let s = session(handle);
+    let path = sd_path(path_ptr, path_len);
+    s.cpu.save_data_mut(save_id).create_dir(&path);
+    0
+}
+
+/// Size of a file in a save, or -1 when the path is not one.
+#[no_mangle]
+pub extern "C" fn switch_save_file_size(
+    handle: u32,
+    save_id: u64,
+    path_ptr: *const u8,
+    path_len: u32,
+) -> i64 {
+    let s = session(handle);
+    let path = sd_path(path_ptr, path_len);
+    match s.cpu.save_data_mut(save_id).size(&path) {
+        Some(size) => size as i64,
+        None => -1,
+    }
+}
+
+/// Copy a file out of a save into `buf`, starting at `offset`. Returns the
+/// bytes copied, or -1 when the path is not a file.
+#[no_mangle]
+pub extern "C" fn switch_save_read_file(
+    handle: u32,
+    save_id: u64,
+    path_ptr: *const u8,
+    path_len: u32,
+    offset: u64,
+    buf: *mut u8,
+    maxlen: u32,
+) -> i64 {
+    let s = session(handle);
+    let path = sd_path(path_ptr, path_len);
+    let out = unsafe { std::slice::from_raw_parts_mut(buf, maxlen as usize) };
+    match s.cpu.save_data_mut(save_id).read(&path, offset, out) {
+        Some(n) => n as i64,
+        None => -1,
+    }
+}
+
+/// Give a fresh session a save it had in an earlier one, so a host can restore
+/// before the guest asks. Returns 0.
+#[no_mangle]
+pub extern "C" fn switch_save_create(handle: u32, save_id: u64) -> i32 {
+    session(handle).cpu.save_data_mut(save_id);
+    0
 }
 
 /// Give the session the font `pl:u` serves as the shared system font, as the
@@ -1559,6 +1697,67 @@ mod tests {
             data.as_ptr(),
             data.len() as u32,
         );
+    }
+
+    #[test]
+    fn save_data_round_trips_and_stays_out_of_the_sd_card() {
+        const SAVE: u64 = 0x0100_0000_0000_1000;
+        let (_host, handle) = new_session();
+
+        // Restoring is the host's own load path, so it must not come back as a
+        // change — otherwise every restored file is written straight back to
+        // the store it was just read from, on the first flush.
+        let path = "/settings.dat";
+        let body = b"saved";
+        assert_eq!(
+            switch_save_write_file(
+                handle,
+                SAVE,
+                path.as_ptr(),
+                path.len() as u32,
+                body.as_ptr(),
+                body.len() as u32,
+            ),
+            0
+        );
+        assert_eq!(switch_save_pending_changes(handle, SAVE), 0);
+
+        // Opening the save is enough to have one to persist.
+        let mut ids = [0u8; 64];
+        let n = switch_save_ids_json(handle, ids.as_mut_ptr(), ids.len() as u32) as usize;
+        assert_eq!(std::str::from_utf8(&ids[..n]).unwrap(), r#"["0100000000001000"]"#);
+
+        // A guest write is a change, and it lands in the save rather than on
+        // the card — the two are different storage, and a title's save is not
+        // something the next title to mount the card should find.
+        session(handle).cpu.save_data_mut(SAVE).write("/settings.dat", 0, b"12345").unwrap();
+        assert_eq!(switch_save_pending_changes(handle, SAVE), 1);
+        let mut buf = [0u8; 256];
+        let n = switch_save_take_changes_json(handle, SAVE, buf.as_mut_ptr(), buf.len() as u32);
+        assert_eq!(
+            std::str::from_utf8(&buf[..n as usize]).unwrap(),
+            r#"[{"path":"/settings.dat","kind":"file","size":5}]"#
+        );
+        assert_eq!(switch_save_pending_changes(handle, SAVE), 0);
+        assert_eq!(session(handle).cpu.fs.entry_type("/settings.dat"), None);
+
+        // And reading it back is how the host gets the bytes to store.
+        assert_eq!(
+            switch_save_file_size(handle, SAVE, path.as_ptr(), path.len() as u32),
+            5
+        );
+        let mut out = [0u8; 16];
+        let read = switch_save_read_file(
+            handle,
+            SAVE,
+            path.as_ptr(),
+            path.len() as u32,
+            0,
+            out.as_mut_ptr(),
+            out.len() as u32,
+        );
+        assert_eq!(read, 5);
+        assert_eq!(&out[..5], b"12345");
     }
 
     #[test]

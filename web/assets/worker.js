@@ -626,6 +626,93 @@ const CMD = {
     try { return JSON.parse(text); } catch { return []; }
   },
 
+  // ---------- save data ----------
+  //
+  // The same calls as the SD card above with a save id in front, because a
+  // console keeps saves on its NAND rather than its card and one title's save
+  // is not something another title can see.
+
+  save_ids() {
+    if (handle < 0) return [];
+    const cap = 4096;
+    const buf = alloc(cap);
+    const n = api.switch_save_ids_json(handle, buf, cap);
+    const text = new TextDecoder().decode(fromWasm(buf, n));
+    api.switch_free(buf, cap);
+    try { return JSON.parse(text); } catch { return []; }
+  },
+
+  save_pending_changes(id) {
+    return handle < 0 ? 0 : api.switch_save_pending_changes(handle, BigInt('0x' + id));
+  },
+
+  // Drains whether or not the JSON fits, so the buffer is sized from the
+  // pending count first — same reasoning as `sd_take_changes`.
+  save_take_changes(id) {
+    if (handle < 0) return [];
+    const save = BigInt('0x' + id);
+    const pending = api.switch_save_pending_changes(handle, save);
+    if (!pending) return [];
+    const cap = 2 + pending * (0x301 * 2 + 64);
+    const buf = alloc(cap);
+    const n = api.switch_save_take_changes_json(handle, save, buf, cap);
+    const text = new TextDecoder().decode(fromWasm(buf, n));
+    api.switch_free(buf, cap);
+    try { return JSON.parse(text); } catch { return []; }
+  },
+
+  save_create(id) {
+    return api.switch_save_create(handle, BigInt('0x' + id));
+  },
+
+  save_write_file(id, path, bytes) {
+    const p = new TextEncoder().encode(path);
+    const pptr = alloc(p.length);
+    toWasm(p, pptr);
+    const dptr = alloc(bytes.length || 1);
+    if (bytes.length) toWasm(bytes, dptr);
+    const rc = api.switch_save_write_file(
+      handle, BigInt('0x' + id), pptr, p.length, dptr, bytes.length);
+    api.switch_free(pptr, p.length);
+    api.switch_free(dptr, bytes.length || 1);
+    return rc;
+  },
+
+  save_create_dir(id, path) {
+    const p = new TextEncoder().encode(path);
+    const ptr = alloc(p.length);
+    toWasm(p, ptr);
+    const rc = api.switch_save_create_dir(handle, BigInt('0x' + id), ptr, p.length);
+    api.switch_free(ptr, p.length);
+    return rc;
+  },
+
+  // The whole file, or null when the path is not one. Sliced, so a large save
+  // does not need one allocation twice its size.
+  save_read_file(id, path) {
+    const save = BigInt('0x' + id);
+    const p = new TextEncoder().encode(path);
+    const pptr = alloc(p.length);
+    toWasm(p, pptr);
+    const size = Number(api.switch_save_file_size(handle, save, pptr, p.length));
+    if (size < 0) { api.switch_free(pptr, p.length); return null; }
+    const out = new Uint8Array(size);
+    const CHUNK = 1 << 20;
+    const cap = Math.min(Math.max(size, 1), CHUNK);
+    const buf = alloc(cap);
+    let off = 0;
+    while (off < size) {
+      const n = Number(
+        api.switch_save_read_file(handle, save, pptr, p.length, BigInt(off), buf, cap));
+      if (n <= 0) break;
+      out.set(fromWasm(buf, n), off);
+      off += n;
+    }
+    api.switch_free(buf, cap);
+    api.switch_free(pptr, p.length);
+    return out;
+  },
+
   fb_snapshot(len) {
     const buf = alloc(len);
     const n = api.switch_fb_snapshot(handle, buf, len);

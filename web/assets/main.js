@@ -404,6 +404,7 @@ async function init() {
   await stageFont();
   await sdRequestPersistence();
   await sdRestore();
+  await saveRestore();
   fbW = await call('fb_width');
   fbH = await call('fb_height');
   fbBytes = fbW * fbH * 4;
@@ -547,6 +548,7 @@ async function run() {
       await drainOutput();
       await drainDiagnostics();
       await sdFlush();
+      await saveFlush();
     }
     // Repaint only when the guest has actually presented a new frame - the
     // snapshot is several megabytes at 1280x720.
@@ -590,6 +592,7 @@ $('btn-reset').addEventListener('click', async () => {
   handle = await call('new');
   await stageFont();
   await sdRestore();
+  await saveRestore();
   // Everything else the page is still showing. A new session starts with no
   // keys, no container and no data archives, while the panel above goes on
   // reporting all three -- so Launch failed with "no container is open" on a
@@ -641,6 +644,7 @@ async function finishRun(steps, stepped) {
   }
   await drainOutput();
   await sdFlush();
+  await saveFlush();
   await renderFb();
   await updatePc();
 }
@@ -1091,6 +1095,10 @@ let firmwareFiles = [];
 const NAND_DB_NAME = 'switch-wasm-nand';
 const NAND_CONTENT = 'content';
 const NAND_TITLES = 'titles';
+// Save data, keyed by "<save id>/<path>". A console keeps saves on its NAND
+// rather than its card, and one title's save is not something another title
+// can see - so they are stored here rather than beside the SD card.
+const NAND_SAVES = 'saves';
 let nandDb = null;
 
 // What each system title is, for a panel that would otherwise list bare hex.
@@ -1120,11 +1128,12 @@ const SYSTEM_TITLES = {
 function nandIdb() {
   if (nandDb) return Promise.resolve(nandDb);
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(NAND_DB_NAME, 1);
+    const req = indexedDB.open(NAND_DB_NAME, 2);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(NAND_CONTENT)) db.createObjectStore(NAND_CONTENT);
       if (!db.objectStoreNames.contains(NAND_TITLES)) db.createObjectStore(NAND_TITLES);
+      if (!db.objectStoreNames.contains(NAND_SAVES)) db.createObjectStore(NAND_SAVES);
     };
     req.onsuccess = () => { nandDb = req.result; resolve(nandDb); };
     req.onerror = () => reject(req.error);
@@ -1202,6 +1211,85 @@ async function nandRestore() {
   }
   renderNandTitles();
   return restored;
+}
+
+/* ---------- save data ----------
+
+   Same shape as the SD card's persistence, one store further in: entries are
+   keyed by "<save id>/<path>", so everything a title saved can be found again
+   by prefix and nothing else can see it. */
+
+// Drained but not yet stored, for the same reason the card keeps a backlog:
+// the core cannot be handed a change back, so anything IndexedDB refuses waits
+// here for the next flush rather than being lost.
+const saveBacklog = new Map();
+let saveFlushing = false;
+
+function saveApply(entries) {
+  return nandIdb().then((db) => new Promise((resolve, reject) => {
+    const tx = db.transaction(NAND_SAVES, 'readwrite');
+    const store = tx.objectStore(NAND_SAVES);
+    for (const [key, value] of entries) {
+      if (value === null) store.delete(key);
+      else store.put(value, key);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  }));
+}
+
+// Put every stored save back into a fresh session, through the host entry
+// points - which do not count as guest changes, so this does not immediately
+// queue everything to be written straight back.
+async function saveRestore() {
+  let entries;
+  try {
+    entries = await nandGetAll(NAND_SAVES);
+  } catch (err) {
+    log('Saves: could not be read (' + err.message + ')', 'err');
+    return;
+  }
+  if (!entries.length) return;
+  // Directories first, so one a title left empty survives on its own.
+  entries.sort((a, b) => (a[1].kind === b[1].kind ? 0 : a[1].kind === 'dir' ? -1 : 1));
+  for (const [key, value] of entries) {
+    const cut = key.indexOf('/');
+    if (cut < 0) continue;
+    const id = key.slice(0, cut);
+    const path = key.slice(cut);
+    if (value.kind === 'dir') await call('save_create_dir', id, path);
+    else await call('save_write_file', id, path, value.data || new Uint8Array(0));
+  }
+  log('Saves: restored ' + entries.length + ' entries', 'dim');
+}
+
+// Write back what the guest changed in any save it has open. Cheap when it
+// changed nothing, which is almost every slice.
+async function saveFlush() {
+  if (saveFlushing || handle < 0) return;
+  saveFlushing = true;
+  try {
+    for (const id of await call('save_ids')) {
+      for (const change of await call('save_take_changes', id)) {
+        const key = id + change.path;
+        if (change.kind === 'deleted') saveBacklog.set(key, null);
+        else if (change.kind === 'dir') saveBacklog.set(key, { kind: 'dir' });
+        else {
+          const data = await call('save_read_file', id, change.path);
+          saveBacklog.set(key, { kind: 'file', data: data || new Uint8Array(0) });
+        }
+      }
+    }
+    if (saveBacklog.size) {
+      await saveApply([...saveBacklog]);
+      saveBacklog.clear();
+    }
+  } catch (err) {
+    log('Saves: could not be written (' + err.message + ') - retrying on the next flush.', 'err');
+  } finally {
+    saveFlushing = false;
+  }
 }
 
 // The installed programs, as launch buttons. A system applet ships as a bare
