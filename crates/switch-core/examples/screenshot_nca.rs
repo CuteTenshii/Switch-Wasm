@@ -157,13 +157,16 @@ fn main() {
     // backtrace at a time.
     let stacks = env::var("STACKS").is_ok();
     let mut frames: HashMap<u32, (u64, usize)> = HashMap::new();
+    // A write of zero is a write. `TRAP_ZERO=1` keeps them, for the case where
+    // what you are hunting is something *clearing* a field.
+    let trap_zero = env::var("TRAP_ZERO").is_ok();
     let mut traps = 0u32;
     let mut done = 0u64;
     let budget: u64 = env::var("STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(40_000_000_000);
     while !cpu.halted && cpu.nv.gpu.frames < want && done < budget {
         if let Some(at) = cpu.mem.take_watch_hit() {
             let v = cpu.mem.read_u32(at & !3).unwrap_or(0);
-            if traps < 24 && v != 0 {
+            if traps < 24 && (v != 0 || trap_zero) {
                 println!(
                     "[trap] wrote {at:#x} = {v:#010x} at step {done} pc={:#x} bt={:x?}",
                     cpu.get_pc(),
@@ -188,11 +191,12 @@ fn main() {
         }
         if watch_hits < 24 && !watch_pc.is_empty() && watch_pc.contains(&cpu.get_pc()) {
             println!(
-                "[watch-pc] {:#x} at step {done} x0={:#x} x8={:#x} x19={:#x} bt={:x?}",
+                "[watch-pc] {:#x} at step {done} x0={:#x} x8={:#x} x19={:#x} x22={:#x} bt={:x?}",
                 cpu.get_pc(),
                 cpu.reg(0),
                 cpu.reg(8),
                 cpu.reg(19),
+                cpu.reg(22),
                 cpu.backtrace(6)
             );
             watch_hits += 1;

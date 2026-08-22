@@ -882,6 +882,10 @@ impl Cpu {
                 }
                 let key = self.reply_with_interface(tls, handle, "fsp-srv-storage")?;
                 self.fs_storage_archive.insert(key, data_id);
+                if std::env::var("TRACE_IPC").is_ok() {
+                    let size = self.storage_source(Some(data_id)).map_or(0, |s| s.len());
+                    eprintln!("[fs] data archive {data_id:016x} -> {size:#x} bytes");
+                }
                 Ok(())
             }
             // 51 = OpenSaveDataFileSystem, 52 = ...BySystemSaveDataId,
