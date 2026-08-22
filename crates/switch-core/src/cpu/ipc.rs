@@ -4365,12 +4365,7 @@ impl Cpu {
             // exists, is signed in, has an open context, and qualifies for
             // whatever the title is about to do — there is no sign-out, and no
             // second account, to make those four lists differ.
-            //
-            // 140 is the one a real title was seen asking for
-            // (`[ipc] unimplemented: acc:u0 cmd=Some(140)`); libnx marshals it
-            // exactly like `ListAllUsers`, an output array plus an `s32`
-            // count.
-            Some(2) | Some(3) | Some(60) | Some(140) => self.acc_write_user_list(tls),
+            Some(2) | Some(3) | Some(60) | Some(141) => self.acc_write_user_list(tls),
             // GetLastOpenedUser -> AccountUid.
             Some(4) => self.write_ipc_response(tls, 0, &[], &ACCOUNT_UID, &[]),
             // GetProfile(AccountUid) -> IProfile.
@@ -4394,9 +4389,27 @@ impl Cpu {
             // DebugActivateOpenContextRetention: retention is unconditional
             // here, since the one user's context is never dropped.
             Some(99) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // InitializeApplicationInfo(u64, pid): the title naming itself to
-            // acc. Nothing here varies by application.
-            Some(100) if application => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // InitializeApplicationInfo: the title naming itself to `acc`,
+            // which it does before asking `acc` anything else. Three command
+            // ids for one call — 100 is the original, 140 replaced it in
+            // 6.0.0, and 160 is what a current SDK sends. All three marshal
+            // the same way and answer with a bare Result, so they share an
+            // arm; nothing here varies by application.
+            //
+            // 160 is the one Tomodachi Life sends, and reading its request off
+            // the wire is what identified it: a domain request of type 6
+            // (RequestWithContext) with the pid flag set, carrying one u64 of
+            // payload — zero, the placeholder the kernel overwrites — and no
+            // buffers, no receive list, nothing for a reply to fill. Its
+            // caller reads nothing back and aborts unless the Result is
+            // success, which is what refusing the command did.
+            //
+            // 140 used to be answered with a user list, on the reading that it
+            // was `ListQualifiedUsers`. That is 141. 140 only ever looked
+            // right because a list reply is also a success.
+            Some(100) | Some(140) | Some(160) if application => {
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
             // GetBaasAccountManagerForApplication(AccountUid) ->
             // IManagerForApplication.
             Some(101) if application => {
@@ -7486,6 +7499,33 @@ mod tests {
         cpu.acc_request(TLS, 9, Some(1)).unwrap();
         assert_eq!(cpu.read_string(TLS + 0x38, 0x20), "Yuuto");
         assert_eq!(cpu.mem.read_u64(TLS + 0x30).unwrap(), 1_700_000_000);
+    }
+
+    #[test]
+    fn acc_initialize_application_info_answers_every_id_it_has_had() {
+        // The title naming itself to `acc`, which it does before asking `acc`
+        // anything else. The command id moved with the SDK — 100, then 140 in
+        // 6.0.0, then 160 — and all three are the same call: the pid and a u64
+        // placeholder go out, a bare Result comes back. Tomodachi Life sends
+        // 160, and refusing it aborted `nnSdk` before the title drew anything.
+        for command in [100u32, 140, 160] {
+            let mut cpu = request(false, command, &0u64.to_le_bytes());
+            cpu.register_service_handle(9, "acc:u0");
+            cpu.acc_request(TLS, 9, Some(command)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "command {command}");
+        }
+
+        // 141 is `ListQualifiedUsers`, and it is the one of these that answers
+        // with the user list. 140 used to, on a misreading that only ever
+        // looked right because a list reply is also a success.
+        const BUFFER: u32 = 0x4000;
+        let mut cpu = request_with_recv_buffer(141, &[], BUFFER, 0x40);
+        cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+        cpu.register_service_handle(9, "acc:u0");
+        cpu.acc_request(TLS, 9, Some(141)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "one user listed");
+        assert_eq!(cpu.read_bytes(BUFFER, 16), super::ACCOUNT_UID.to_vec());
     }
 
     #[test]
