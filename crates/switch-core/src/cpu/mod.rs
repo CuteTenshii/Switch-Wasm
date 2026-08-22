@@ -2179,6 +2179,21 @@ impl Cpu {
         self.current_thread
     }
 
+    /// Make every blocked thread runnable, and report how many that was. A
+    /// debugging lever only: guests re-check their predicates in a loop, so a
+    /// spurious wake degrades to a spin rather than a hang, and this answers
+    /// "is this process idle because a worker it parked was never woken".
+    pub fn wake_all_blocked(&mut self) -> usize {
+        let mut woken = 0;
+        for thread in &mut self.threads {
+            if matches!(thread.state, ThreadState::WaitMutex(_) | ThreadState::WaitKey { .. }) {
+                thread.state = ThreadState::Runnable;
+                woken += 1;
+            }
+        }
+        woken
+    }
+
     /// Make every thread the guest created but never started runnable, and
     /// report how many that was. A debugging lever only: it answers "is this
     /// process idle because a thread it made never ran" without having to find

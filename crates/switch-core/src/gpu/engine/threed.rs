@@ -864,6 +864,21 @@ impl Engine3D {
         let layer = field(arg, 10, 20);
 
         if channels.iter().any(|&c| c) {
+            if ctx.trace {
+                let colour = [
+                    self.regs.float(CLEAR_COLOR),
+                    self.regs.float(CLEAR_COLOR + 1),
+                    self.regs.float(CLEAR_COLOR + 2),
+                    self.regs.float(CLEAR_COLOR + 3),
+                ];
+                match self.render_target(target) {
+                    Ok(Some(rt)) => eprintln!(
+                        "[gpu] clear target={target} addr={:#x} {}x{} colour={colour:?}",
+                        rt.addr, rt.width, rt.height
+                    ),
+                    other => eprintln!("[gpu] clear target={target} -> {other:x?}"),
+                }
+            }
             self.clear_color(target, layer, channels, ctx)?;
         }
         if clear_depth || clear_stencil {

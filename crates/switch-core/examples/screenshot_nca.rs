@@ -131,6 +131,16 @@ fn main() {
     // runnable once, at that step.
     let start_threads: Option<u64> = env::var("START_THREADS").ok().and_then(|v| v.parse().ok());
     let mut started_threads = false;
+    let poke_at: Option<u64> = env::var("POKE_AT").ok().and_then(|v| v.parse().ok());
+    // `GATE_SNIFF=1` finds the applet framework's "reasons to skip this frame"
+    // mask without knowing the object's address: the frame loop reads it with
+    // `ldr w8, [xN, #0x3e8]`, so the first time that instruction executes, the
+    // word it names is the gate. Every system applet is built on the same
+    // framework, so this locates it in any of them.
+    let gate_sniff = env::var("GATE_SNIFF").is_ok();
+    let mut gate: Option<u32> = None;
+    // `WAKE_ALL=<period>` makes every blocked thread runnable that often.
+    let wake_every: u64 = env::var("WAKE_ALL").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
     // `POKE_U32=<addr>:<value>` writes a word into guest memory on every
     // sampling tick once the run is under way. A latched state flag is only a
     // theory until you clear it and see what the guest does.
@@ -188,8 +198,19 @@ fn main() {
             watch_hits += 1;
         }
         if let Some((addr, value)) = poke {
-            if done > 20_000_000 && done % 65536 == 0 {
-                let _ = cpu.mem.write_u32(addr, value);
+            match poke_at {
+                // One shot: does the guest keep the value, or put it back?
+                Some(at) => {
+                    if done == at {
+                        let _ = cpu.mem.write_u32(addr, value);
+                        println!("[poke] {addr:#x} = {value:#x} at step {done}");
+                    }
+                }
+                None => {
+                    if done % 4096 == 0 {
+                        let _ = cpu.mem.write_u32(addr, value);
+                    }
+                }
             }
         }
         if let Some(at) = start_threads {
@@ -198,10 +219,29 @@ fn main() {
                 println!("[threads] force-started {}", cpu.start_created_threads());
             }
         }
+        if wake_every > 0 && done % wake_every == 0 {
+            cpu.wake_all_blocked();
+        }
         if let Some((lo, hi)) = cover {
             let pc = cpu.get_pc();
             if pc >= lo && pc < hi {
                 covered[((pc - lo) / 4) as usize] = true;
+            }
+        }
+        if gate_sniff && gate.is_none() {
+            let pc = cpu.get_pc();
+            if let Ok(insn) = cpu.mem.read_u32(pc) {
+                if insn & 0xFFFF_FC1F == 0xB943_E808 {
+                    let base = cpu.reg(((insn >> 5) & 0x1F) as usize) as u32;
+                    let at = base.wrapping_add(0x3e8);
+                    println!("[gate] found at {at:#x} via pc={pc:#x} step {done}");
+                    gate = Some(at);
+                }
+            }
+        }
+        if let Some(at) = gate {
+            if done % 4096 == 0 {
+                let _ = cpu.mem.write_u32(at, 0);
             }
         }
         let pc_before = cpu.get_pc();

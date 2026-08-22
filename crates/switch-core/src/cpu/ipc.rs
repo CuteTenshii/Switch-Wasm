@@ -2970,6 +2970,36 @@ impl Cpu {
             },
             // IWindowController: foreground rights and the applet resource id
             // every other service tags this process's requests with.
+            // IDisplayController: the applet's view of the *capture* buffers —
+            // the screenshot of whatever was on screen before it, which an
+            // applet composites behind itself so the menu or the game shows
+            // through.
+            //
+            // There is nothing behind any applet here, so every acquire
+            // reports that no capture was written and names no layer. What it
+            // must not do is refuse: `miiEdit` asks for command 26 and
+            // `nnSdk` answers an unknown command id with an svcBreak, which
+            // killed it before it drew anything.
+            "am:display-controller" => match cmd_id {
+                // Acquire{LastApplication,LastForeground,CallerApplet}
+                // CaptureSharedBuffer -> bool written, s32 shared-buffer layer.
+                Some(22) | Some(24) | Some(26) => {
+                    let mut raw = Vec::with_capacity(8);
+                    raw.extend_from_slice(&[0u8; 4]); // was_written = false
+                    raw.extend_from_slice(&(-1i32).to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &raw, &[])
+                }
+                // The matching releases, ClearCaptureBuffer,
+                // ClearAppletTransitionBuffer, and the two screenshot
+                // commands: nothing to release, clear or capture.
+                Some(8) | Some(20) | Some(21) | Some(23) | Some(25) | Some(27) | Some(28) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // Update{LastForeground,CallerApplet}CaptureImage: the same,
+                // and they answer with a bare Result.
+                Some(1) | Some(4) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
             "am:window-controller" => match cmd_id {
                 // GetAppletResourceUserId / GetAppletResourceUserIdOfCallerApplet.
                 // There is one process here, so it gets one id; the `vi` and
@@ -3701,9 +3731,21 @@ impl Cpu {
                 // have — there is one pad, it is always connected, and the
                 // caller is always the foreground applet — so accepting the
                 // request is the whole implementation.
-                Some(111) | Some(131) | Some(151) | Some(303) | Some(503) => {
+                Some(111) | Some(131) | Some(151) | Some(301) | Some(303) | Some(304)
+                | Some(305) | Some(308) | Some(503) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // GetLastActiveNpad -> which controller was used last. There
+                // is one pad and it is Player 1, so it is always npad 0.
+                //
+                // Refusing this is what stopped the Mii editor once
+                // `IDisplayController` let it through: `nnSdk` answers an
+                // unknown command id with an svcBreak.
+                Some(306) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+                // GetNpadFullKeyGripColor -> two RGBA colours for the grips of
+                // a Pro Controller. There is no Pro Controller here; black is
+                // what an unpainted grip reports.
+                Some(309) => self.write_ipc_response(tls, 0, &[], &[0u8; 8], &[]),
                 // GetUniquePadIds -> the ids of the physically attached
                 // controllers, written into a pointer buffer, with the count
                 // returned as an s64. A "unique pad" is a detachable

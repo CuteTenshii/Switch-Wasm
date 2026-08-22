@@ -2164,10 +2164,13 @@ fn applet_unimplemented_command_is_an_error_not_a_fake_success() {
     let (mut cpu, handle, proxy, _state_getter) = applet_chain();
     let tls = cpu.tls_base();
 
-    // IApplicationProxy::GetDisplayController, then a command it does not have.
+    // IApplicationProxy::GetDisplayController, then a command it does not
+    // have. 10 is AcquireLastApplicationCaptureBuffer, which hands back a
+    // transfer memory handle -- exactly the shape a fabricated success gets
+    // wrong, and one of the capture commands still not implemented.
     ipc_request(&mut cpu, handle, 4, Some(proxy), 4);
     let display_controller = cpu.mem.read_u32(tls + 0x30).unwrap();
-    ipc_request(&mut cpu, handle, 4, Some(display_controller), 8);
+    ipc_request(&mut cpu, handle, 4, Some(display_controller), 10);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0x4F43_4653); // "SFCO"
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), UNKNOWN_COMMAND_ID);
 }
