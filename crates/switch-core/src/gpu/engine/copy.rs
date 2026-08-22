@@ -186,6 +186,18 @@ impl RemapComponents {
 /// Address generation for one side of a copy.
 struct SurfaceWalk {
     layout: Layout,
+    /// The surface's row length in bytes. `SetDstWidth`/`SetSrcWidth` count
+    /// **elements**, so this is that width scaled by the element size — the
+    /// remap makes an element as wide as a pixel, and a block-linear
+    /// surface's row length in *bytes* is what decides how many GOBs a row
+    /// spans and therefore where the next block row starts.
+    ///
+    /// Taking the register as bytes worked for every copy with the remap
+    /// off, where an element is one byte and the two readings coincide —
+    /// which is how deko3d drives it. JKSV's Mesa uploads a 256x256 RGBA
+    /// icon with the remap on: 256 elements is 1024 bytes, and calling it
+    /// 256 made the row four GOBs wide instead of sixteen, shredding the
+    /// image into strips.
     width_bytes: u32,
     origin_x_bytes: u32,
     origin_y: u32,
@@ -219,8 +231,8 @@ impl SurfaceWalk {
         }
         Ok(SurfaceWalk {
             layout: Layout::BlockLinear { block_height_gobs: 1 << field(block, 4, 7) },
-            width_bytes: regs.get(width_reg),
-            origin_x_bytes: regs.field(origin_reg, 0, 15),
+            width_bytes: regs.get(width_reg).saturating_mul(element_bytes),
+            origin_x_bytes: regs.field(origin_reg, 0, 15).saturating_mul(element_bytes),
             origin_y: regs.field(origin_reg, 16, 31),
             element_bytes,
         })

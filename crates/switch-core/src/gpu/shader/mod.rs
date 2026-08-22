@@ -364,7 +364,7 @@ mod tests {
         let program = decode_program(&bytes).unwrap();
         assert_eq!(
             program.insns[4].op,
-            Op::Texs { dst: 0, dst2: 2, coords: [2, 0, 1], handle: 0x1a4, dim: TexDim::T2d, mask: [true, true, true, true] }
+            Op::Texs { dst: 0, dst2: 2, coords: [0, 1, RZ], handle: 0x1a4, dim: TexDim::T2d, mask: [true, true, true, true] }
         );
         assert_eq!(program.insns.last().unwrap().op, Op::Exit);
     }

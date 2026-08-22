@@ -8,7 +8,7 @@
 
 use crate::gpu::engine::threed::{
     decode_depth, encode_depth, BlendTarget, CullState, Engine3D, ScissorRect, ShaderStage,
-    VertexArray, VertexAttrib,
+    VertexArray, VertexAttrib, ViewportTransform,
 };
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::shader::interp::{
@@ -154,17 +154,28 @@ pub fn rasterize_triangle_weighted(
         (a.y == b.y && a.x > b.x) || (a.y > b.y)
     }
 
-    let area = edge(v0, v1, v2.x, v2.y);
-    if area == 0.0 {
+    let signed_area = edge(v0, v1, v2.x, v2.y);
+    if signed_area == 0.0 {
         return Vec::new(); // degenerate triangle: zero area, nothing covered.
     }
-    let inside = |e: f32, top_left: bool| {
-        if area > 0.0 {
-            e > 0.0 || (top_left && e == 0.0)
-        } else {
-            e < 0.0 || (top_left && e == 0.0)
-        }
-    };
+    // Wind the triangle counter-clockwise before applying the rule, swapping
+    // the weights back on the way out.
+    //
+    // The top-left tie-break only assigns an on-edge pixel to exactly one of
+    // the two triangles sharing that edge when they *walk the edge in
+    // opposite directions* — which is true of consistently-wound geometry
+    // and false when a quad is emitted as one counter-clockwise and one
+    // clockwise triangle, as SDL's does. There both triangles walk the
+    // shared diagonal the same way, so they agree on `is_top_left` and the
+    // pixels exactly on it belong to both or, when the answer is `false`, to
+    // neither. JKSV's save tiles are 128x128 quads whose diagonal runs at
+    // exactly 45 degrees, so pixel centres land on it — and every tile came
+    // out with a one-pixel gap straight through it.
+    let clockwise = signed_area < 0.0;
+    let (v1, v2) = if clockwise { (v2, v1) } else { (v1, v2) };
+    let area = signed_area.abs();
+
+    let inside = |e: f32, top_left: bool| e > 0.0 || (top_left && e == 0.0);
     let tl01 = is_top_left(v0, v1);
     let tl12 = is_top_left(v1, v2);
     let tl20 = is_top_left(v2, v0);
@@ -182,8 +193,10 @@ pub fn rasterize_triangle_weighted(
             let e12 = edge(v1, v2, px, py);
             let e20 = edge(v2, v0, px, py);
             if inside(e01, tl01) && inside(e12, tl12) && inside(e20, tl20) {
-                // w0 is opposite v0 (edge v1-v2), etc.
-                out.push((x, y, e12 / area, e20 / area, e01 / area));
+                // w0 is opposite v0 (edge v1-v2), etc. The swap above moved
+                // the caller's v1 and v2, so their weights swap back here.
+                let (w0, w1, w2) = (e12 / area, e20 / area, e01 / area);
+                out.push(if clockwise { (x, y, w0, w2, w1) } else { (x, y, w0, w1, w2) });
             }
         }
     }
@@ -398,24 +411,21 @@ fn shade_vertex(
     Ok(ShadedVertex { clip, varyings })
 }
 
-/// Clip position to screen space: perspective-divide, then map NDC's
-/// `[-1, 1]` square onto the viewport rectangle. NDC is y-up; the
-/// framebuffer is y-down, so this flips y — the common GL-on-Maxwell
-/// convention (unverified against real hardware; Stage 9's JKSV screenshot
-/// is the check for this). Also returns NDC z (`[-1, 1]`, GL convention) for
-/// depth testing — like `1/w`, it's already affine in screen space, so it
-/// only needs plain (not perspective-corrected) barycentric interpolation.
-fn to_screen(clip: [f32; 4], viewport: (f32, f32, f32, f32)) -> (ScreenVertex, f32, f32) {
-    let (vx, vy, vw, vh) = viewport;
+/// Clip position to window space: perspective-divide, then apply the
+/// viewport transform the guest programmed — `window = ndc * scale +
+/// translate` per axis. Whether that flips y is the transform's business
+/// (see [`Engine3D::viewport_transform`]), not a convention baked in here.
+///
+/// Also returns `1/w` and the window-space depth. Both are affine in screen
+/// space, so they interpolate with plain (not perspective-corrected)
+/// barycentrics.
+fn to_screen(clip: [f32; 4], vt: ViewportTransform) -> (ScreenVertex, f32, f32) {
     let inv_w = 1.0 / clip[3];
-    let ndc_x = clip[0] * inv_w;
-    let ndc_y = clip[1] * inv_w;
-    let ndc_z = clip[2] * inv_w;
     let screen = ScreenVertex {
-        x: vx + (ndc_x + 1.0) * 0.5 * vw,
-        y: vy + (1.0 - ndc_y) * 0.5 * vh,
+        x: clip[0] * inv_w * vt.scale[0] + vt.translate[0],
+        y: clip[1] * inv_w * vt.scale[1] + vt.translate[1],
     };
-    (screen, inv_w, ndc_z)
+    (screen, inv_w, clip[2] * inv_w * vt.scale[2] + vt.translate[2])
 }
 
 /// `DEPTH_TEST_FUNC`'s real hardware type is `gl_comparison_op`
@@ -521,10 +531,11 @@ fn shade_fragment(
 
 /// Whether `cull` throws this triangle away.
 ///
-/// `to_screen` flips y (NDC is y-up, the framebuffer is y-down), so a
-/// triangle wound counter-clockwise in NDC has a positive signed area in the
-/// y-down screen space this computes it in. A zero-area triangle covers no
-/// pixels either way; reporting it culled saves the rasterizer the walk.
+/// Face determination happens in *window* space, after the viewport
+/// transform — so which winding is front depends on the sign of that
+/// transform's y scale, exactly as it does on hardware, and is not decided
+/// here. A zero-area triangle covers no pixels either way; reporting it
+/// culled saves the rasterizer the walk.
 fn culls(cull: CullState, v: [ScreenVertex; 3]) -> bool {
     if !cull.enabled {
         return false;
@@ -641,7 +652,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
 
     let attribs: Vec<VertexAttrib> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_attrib(i)).collect();
     let arrays: Vec<VertexArray> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_array(i)).collect();
-    let viewport = engine.viewport();
+    let viewport = engine.viewport_transform();
     let clip = engine.apply_scissor(ScissorRect { x0: 0, y0: 0, x1: rt.width, y1: rt.height });
     let bounds = Bounds { x0: clip.x0, y0: clip.y0, x1: clip.x1, y1: clip.y1 };
     let depth = engine.depth_target()?;
@@ -695,7 +706,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 shaded.iter().map(|v| to_screen(v.clip, viewport)).collect();
             let screen = [projected[0].0, projected[1].0, projected[2].0];
             let inv_w = [projected[0].1, projected[1].1, projected[2].1];
-            let ndc_z = [projected[0].2, projected[1].2, projected[2].2];
+            let window_z = [projected[0].2, projected[1].2, projected[2].2];
 
             if culls(cull, screen) {
                 continue;
@@ -704,7 +715,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             for (x, y, w0, w1, w2) in
                 rasterize_triangle_weighted(screen[0], screen[1], screen[2], bounds)
             {
-                let z01 = (w0 * ndc_z[0] + w1 * ndc_z[1] + w2 * ndc_z[2] + 1.0) * 0.5;
+                let z01 = w0 * window_z[0] + w1 * window_z[1] + w2 * window_z[2];
                 if let (true, Some(dt)) = (depth_state.test_enabled, depth) {
                     let dva = dt.addr + dt.layout.offset(x * dt.bytes, y, dt.width * dt.bytes) as u64;
                     let old_raw = ctx.read_pixel(dva, dt.bytes)?;
@@ -803,6 +814,28 @@ mod tests {
             covered,
             vec![(0, 0), (0, 1), (0, 2), (1, 0), (1, 1), (2, 0)]
         );
+    }
+
+    #[test]
+    fn a_quad_split_into_two_oppositely_wound_triangles_is_watertight() {
+        // The six vertices SDL emits for an 8x8 quad: v0,v1,v2 counter-
+        // clockwise and v1,v2,v3 clockwise, so both triangles walk the shared
+        // diagonal in the *same* direction. The diagonal runs at exactly 45
+        // degrees, which puts pixel centres right on it — the case that left
+        // a one-pixel gap through every one of JKSV's save tiles.
+        let (a, b) = (ScreenVertex { x: 0.0, y: 0.0 }, ScreenVertex { x: 8.0, y: 0.0 });
+        let (c, d) = (ScreenVertex { x: 0.0, y: 8.0 }, ScreenVertex { x: 8.0, y: 8.0 });
+        let bounds = Bounds { x0: 0, y0: 0, x1: 8, y1: 8 };
+
+        let mut covered = rasterize_triangle(a, b, c, bounds);
+        covered.extend(rasterize_triangle(b, c, d, bounds));
+        covered.sort();
+
+        let expected: Vec<(u32, u32)> =
+            (0..8).flat_map(|x| (0..8).map(move |y| (x, y))).collect();
+        let mut sorted = expected.clone();
+        sorted.sort();
+        assert_eq!(covered, sorted, "every pixel of the quad exactly once");
     }
 
     #[test]

@@ -27,7 +27,7 @@ use crate::{Error, Result};
 use std::collections::HashMap;
 
 use super::isa::{
-    BoolOp, FCmp, FRound, ICmp, LogicOp, MufuOp, Op, Operand, Pred, RZ,
+    self, BoolOp, FCmp, FRound, ICmp, LogicOp, MufuOp, Op, Operand, Pred, RZ,
 };
 
 /// Resolves a `cN[offset]` operand to its raw 32 bits. `bank` is whatever the
@@ -782,13 +782,15 @@ impl Invocation {
         let Op::Texs { coords, handle, .. } = op else {
             unreachable!("run_texs called with {op:?}");
         };
-        // The bindless handle lives in the driver's reserved constant bank
-        // at the shader's own immediate offset — see `gpu::texture`'s module
-        // docs for how that was confirmed.
-        let handle =
-            env.consts.read_const(crate::gpu::texture::DRIVER_CONSTBUF_BANK, handle)?;
-        let u = self.reg_f32(coords[1]);
-        let v = self.reg_f32(coords[2]);
+        // The bindless handle lives in the driver's reserved constant bank,
+        // indexed by the shader's own immediate — see `gpu::texture`'s
+        // module docs and `texture::handle_offset`.
+        let handle = env.consts.read_const(
+            crate::gpu::texture::DRIVER_CONSTBUF_BANK,
+            crate::gpu::texture::handle_offset(handle),
+        )?;
+        let u = self.reg_f32(coords[0]);
+        let v = self.reg_f32(coords[1]);
         let color = env.textures.sample(handle, u, v)?;
 
         // Where each channel lands was worked out at decode time.
@@ -806,19 +808,16 @@ impl Invocation {
 pub(super) fn texs_writes_for(program: &Program) -> Vec<super::TexsWrites> {
     let mut out = Vec::new();
     for (pc, insn) in program.insns.iter().enumerate() {
-        let Op::Texs { dst, mask, .. } = insn.op else {
+        let Op::Texs { dst, dst2, mask, .. } = insn.op else {
             continue;
         };
-        let mut writes = Vec::new();
-        let mut reg = dst;
-        for (channel, &enabled) in mask.iter().enumerate() {
-            if !enabled {
-                continue;
-            }
-            let due = first_use_after(program, pc + 1, reg).unwrap_or(program.len() - 1);
-            writes.push((channel, reg, due));
-            reg = reg.wrapping_add(1);
-        }
+        let writes = isa::texs_destinations(dst, dst2, mask)
+            .into_iter()
+            .map(|(channel, reg)| {
+                let due = first_use_after(program, pc + 1, reg).unwrap_or(program.len() - 1);
+                (channel, reg, due)
+            })
+            .collect();
         out.push(super::TexsWrites { at: pc, writes });
     }
     out
@@ -967,16 +966,8 @@ fn writes(op: &Op) -> Vec<u8> {
         | Op::F2i { dst, .. }
         | Op::F2f { dst, .. }
         | Op::I2i { dst, .. } => vec![dst],
-        Op::Texs { dst, mask, .. } => {
-            let mut r = dst;
-            let mut v = Vec::new();
-            for &enabled in mask.iter() {
-                if enabled {
-                    v.push(r);
-                    r = r.wrapping_add(1);
-                }
-            }
-            v
+        Op::Texs { dst, dst2, mask, .. } => {
+            isa::texs_destinations(dst, dst2, mask).into_iter().map(|(_, reg)| reg).collect()
         }
         _ => Vec::new(),
     }
@@ -1471,13 +1462,13 @@ mod tests {
     #[test]
     fn texs_resolves_its_handle_from_the_driver_constant_bank_and_writes_the_masked_channels() {
         // tex.frag's real shape, with the roles `isa`'s `decodes_texs` test
-        // documents: dst is REG_00, coords are [REG_28 (unused), REG_08 (u),
-        // REG_20 (v)].
+        // documents: the destinations are REG_00 and REG_28, the coordinates
+        // REG_08 and REG_20.
         let program = prog(&[
             Op::Texs {
                 dst: 2,
-                dst2: 9,
-                coords: [9, 0, 3], // coords[0] unused for t2d; u=r0, v=r3
+                dst2: 4,
+                coords: [0, 3, RZ], // u=r0, v=r3
                 handle: 0x20,
                 dim: TexDim::T2d,
                 mask: [true, true, true, true],
@@ -1490,7 +1481,11 @@ mod tests {
 
         let mut consts = HashMap::new();
         let handle = 7u32 | (2u32 << 20); // imageId=7, samplerId=2
-        consts.insert((crate::gpu::texture::DRIVER_CONSTBUF_BANK, 0x20), f32::from_bits(handle));
+        // The immediate 0x20 is a dword index, so the handle is 0x80 bytes in
+        // — putting it at 0x20 instead is what made every draw in a page of
+        // text resolve to the same texture.
+        consts.insert((crate::gpu::texture::DRIVER_CONSTBUF_BANK, 0x80), f32::from_bits(handle));
+        consts.insert((crate::gpu::texture::DRIVER_CONSTBUF_BANK, 0x20), f32::from_bits(99));
 
         let textures = RecordingTextures {
             calls: RefCell::new(Vec::new()),

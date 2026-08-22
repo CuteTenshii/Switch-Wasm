@@ -20,6 +20,7 @@ const MME_START_ADDRESS_RAM_LOAD: u32 = 0x048;
 const SYNCPT_ACTION: u32 = 0x0B2;
 const RENDER_TARGET_BASE: u32 = 0x200;
 const RENDER_TARGET_STRIDE: u32 = 0x10;
+const VIEWPORT_TRANSFORM_BASE: u32 = 0x280;
 const VIEWPORT_BASE: u32 = 0x300;
 const SCISSOR_BASE: u32 = 0x380;
 // NV9097_OGL_SET_CULL / _FRONT_FACE / _CULL_FACE at methods 0x1918/0x191c/
@@ -236,6 +237,14 @@ pub struct DepthTarget {
     pub bytes: u32,
     /// Depth bits (`0` means 32-bit float, matching `depth_format_layout`).
     pub depth_bits: u32,
+}
+
+/// One viewport's NDC-to-window transform: `window = ndc * scale + translate`
+/// on each of x, y and z. See [`Engine3D::viewport_transform`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewportTransform {
+    pub scale: [f32; 3],
+    pub translate: [f32; 3],
 }
 
 /// A resolved pixel rectangle, `[x0, x1) x [y0, y1)`.
@@ -731,6 +740,36 @@ impl Engine3D {
             self.regs.field(VIEWPORT_BASE, 16, 31) as f32,
             self.regs.field(VIEWPORT_BASE + 1, 16, 31) as f32,
         )
+    }
+
+    /// Viewport 0's NDC-to-window transform, as the hardware actually holds
+    /// it: three scales and three translates, applied per axis.
+    ///
+    /// **Whether y is flipped is this register's business, not a constant.**
+    /// GL's window origin is bottom-left and a render target's row 0 is at
+    /// the top, so Mesa hands the default framebuffer a *negative* `scale_y`
+    /// — and a user FBO, whose contents are sampled back with the same
+    /// convention they were written in, a positive one. JKSV's own capture
+    /// shows both: `scale_y = -360` for the 1280x720 window, `+128` for the
+    /// 256x256 target it renders a save tile into. Hard-coding the flip drew
+    /// every offscreen target upside down, which is how a tile's text came
+    /// out mirrored.
+    pub fn viewport_transform(&self) -> ViewportTransform {
+        let f = |i: u32| f32::from_bits(self.regs.get(VIEWPORT_TRANSFORM_BASE + i));
+        let scale = [f(0), f(1), f(2)];
+        if scale[0] != 0.0 || scale[1] != 0.0 {
+            return ViewportTransform { scale, translate: [f(3), f(4), f(5)] };
+        }
+        // Nothing has written the transform. A zero scale on both axes maps
+        // every vertex to one point, so it cannot be a viewport a guest
+        // meant; it is a register file no draw has configured. Fall back to
+        // the viewport *rectangle* with the window-system flip, which is
+        // what the synthetic fixtures in the rasterizer's tests program.
+        let (vx, vy, vw, vh) = self.viewport();
+        ViewportTransform {
+            scale: [vw / 2.0, -vh / 2.0, 0.5],
+            translate: [vx + vw / 2.0, vy + vh / 2.0, 0.5],
+        }
     }
 
     /// Where the bound index buffer starts.

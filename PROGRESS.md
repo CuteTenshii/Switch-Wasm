@@ -14,7 +14,7 @@ out to be stale.
 | `hbmenu.nro` | full UI, responds to a controller | yes |
 | `sysinfo.nro` | renders | yes |
 | `NX-Fetch.nro` | renders | yes |
-| `JKSV.nro` | renders, 21 draws through the shader core | yes |
+| `JKSV.nro` | full UI: text, icons and save tiles ([below](#jksv-drew-one-glyph-for-a-whole-page-of-text)) | yes |
 | `nxdumptool.nro` | renders | yes |
 | `NX-Shell.nro` | clean exit at 15.7M steps, no font (below) | no |
 | `Checkpoint.nro` | 6.8M steps, no exit | no |
@@ -1314,8 +1314,10 @@ bank, and the bank/offset convention was guessed rather than looked up.
 JKSV's frame differed in 42059 pixels — a 256x269 region turned flat grey —
 and `TRACE_GPU` showed eighteen "read from unbound constant bank 2" errors
 where the baseline had two. The handle comes from the driver constant bank
-(15) at the offset the instruction names, with no scaling; with that fixed
-the frame was byte-identical again and the error counts matched exactly.
+(15) at the offset the instruction names; with that fixed the frame was
+byte-identical again and the error counts matched exactly. (The *bank* was
+right and the *scaling* was not — the immediate is a dword index, which
+[JKSV's text](#jksv-drew-one-glyph-for-a-whole-page-of-text) is what caught.)
 
 A second, subtler one: a *fixed* vertex attribute — bit 6 of
 `VertexAttribState[i]`, meaning "this input has no vertex buffer behind it" —
@@ -1388,6 +1390,11 @@ through SDL2_ttf into GL textures and those draws produce nothing visible, a
 GPU-side gap that is unrelated to either bug here. hbmenu (918713 non-black
 pixels) and JKSV (21 draws, step 83964291) are unchanged.
 
+That text gap was the `texs` destination and handle pair below
+([JKSV](#jksv-drew-one-glyph-for-a-whole-page-of-text)), which is the same
+SDL2-through-Mesa path. **Not re-measured against NXpotify** — the `.nro` is
+not in this tree — so what it renders now is untested rather than fixed.
+
 Two things this cost time on, worth avoiding next time: `[ipc]` goes to
 stdout and `[nv]`/`[vi]` to stderr, so a merged `2>&1 | tail` interleaves them
 by *buffer flush*, not by time — a six-call sequence read as an endless loop
@@ -1440,6 +1447,71 @@ which is the obvious next one — and the rest in the interpreter itself.
 Reusing the `pending` vector across fragments was also tried and measured at
 no effect, so it was dropped rather than kept on the theory that it should
 have helped.
+
+### JKSV drew one glyph for a whole page of text
+
+JKSV came up as a nearly empty grey screen with two rules across it and a
+single letter K at the top left, and it took four separate bugs to get from
+there to its real UI. Each one masked the next, which is why the symptom
+never looked like four things.
+
+**A `texs` has two destination registers, not one run of four.** The `n`th
+enabled channel lands in `dst + n` for the first two and `dst2 + (n - 2)` for
+the rest. The interpreter wrote all four consecutively from `dst`. That is
+*invisible* whenever `dst2 == dst + 2`, which is what the `tex.frag` fixture
+the decoder was first checked against does — so the run-of-four reading
+survived every test. JKSV's glyph shader has `dst = $r4, dst2 = $r2`:
+channels 2 and 3 landed on `$r6`/`$r7`, and `$r6` was holding the `1/w` that
+every later `ipa` multiplies by. Every glyph fragment came out a constant
+`(0, 1, 1, 0)` — alpha zero, so the text was there and completely invisible.
+
+The same instruction's channel *mask* has the same shape of problem: the
+three-bit selector indexes a different row depending on how many destination
+registers the instruction has (`rgb`/`rga`/`rba`/`gba`/`rgba` with two,
+`r`/`g`/`b`/`a`/`rg`/`ra`/`ga`/`ba` with one). Only the two-destination row
+was decoded.
+
+**The handle immediate is a dword index into the driver constant bank, not a
+byte offset.** nouveau's lowering pass emits `tex.r = texBindBase / 4 +
+unit`, and the bank's handle table starts 0x20 bytes in. Reading the
+immediate as bytes lands a quarter of the way along — in the fixed header
+ahead of the table, which begins `0, 1, 2, 3, 4, 5, 6, 7`. That looks
+*exactly* like a handle table of sequential `imageId`s with `samplerId` 0,
+which is why it was believed: every draw resolved to a plausible handle, and
+every draw resolved to the same one. A page of text sampled a single 18x25
+glyph texture over and over — hence the K, in every position, at every size.
+
+**Whether the viewport flips y is a register, not a constant.** GL's window
+origin is bottom-left and a render target's row 0 is at the top, so Mesa
+hands the default framebuffer a negative `VIEWPORT_TRANSFORM.SCALE_Y` and a
+user FBO a positive one. JKSV's own capture shows both: `-360` for the
+1280x720 window, `+128` for the 256x256 target it renders a save tile into.
+`to_screen` hard-coded the flip, so every offscreen target came out upside
+down — a tile's label read `ǝɔıʌǝᗡ`, and the tiles stacked in reverse order.
+The transform is read from the registers now, on all three axes (`z` was
+already `ndc * 0.5 + 0.5`, which is what the registers hold).
+
+**`SetDstWidth` counts elements, not bytes.** A block-linear surface's row
+length in *bytes* is what decides how many GOBs a row spans, so a 256-pixel
+RGBA row is 1024 bytes wide. Taking the register as bytes made the row four
+GOBs wide instead of sixteen and shredded the image into strips — which is
+why JKSV's Settings and Extras icons arrived as enormous curved fragments.
+Every copy with the remap *off* is unaffected, because an element is one
+byte there and the two readings coincide; that is how deko3d drives it, so
+hbmenu never saw it.
+
+One artifact was left after all four: a one-pixel dark diagonal through every
+save tile. SDL emits a quad as one counter-clockwise and one clockwise
+triangle, so both walk the shared diagonal in the *same* direction, agree on
+`is_top_left`, and — when the answer is `false` — neither claims the pixels
+exactly on it. Consistently-wound geometry never hits this because the two
+triangles walk the edge in opposite directions. The tiles are 128x128, so
+their diagonal is exactly 45 degrees and pixel centres land right on it. The
+rasterizer winds a triangle counter-clockwise before applying the rule now,
+swapping the barycentrics back on the way out.
+
+hbmenu, NX-Fetch, lennytube and Checkpoint all render byte-identical frames
+across the five fixes.
 
 ## Frontend
 

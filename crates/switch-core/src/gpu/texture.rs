@@ -8,12 +8,12 @@
 //! | samplerId << 20`, each indexing 32-byte entries in their own pool)
 //! matches devkitPro/deko3d's public `dkMakeTextureHandle` exactly.
 //!
-//! Which constant bank a `texs` immediate offsets into was an open question
-//! even after that — resolved empirically against a live JKSV (real Mesa/
-//! nouveau driver, not deko3d) capture: bank 15 is nouveau's reserved
-//! "driver constants" buffer on every stage, and reading it at the shader's
-//! own immediate offset yields exactly the expected pattern (sequential
-//! small `imageId` values, `samplerId` always 0 in that capture).
+//! Which constant bank a `texs` immediate indexes was an open question even
+//! after that — resolved empirically against a live JKSV (real Mesa/nouveau
+//! driver, not deko3d) capture: bank 15 is nouveau's reserved "driver
+//! constants" buffer on every stage. The immediate indexes it in **dwords**,
+//! not bytes; [`handle_offset`] carries the story of why that took a second
+//! look.
 
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::surface::{ColorFormat, Layout, Surface};
@@ -22,6 +22,23 @@ use crate::{Error, Result};
 /// The constant-buffer bank nouveau's driver reserves for bindless texture
 /// handles, on every shader stage — see this module's doc comment.
 pub const DRIVER_CONSTBUF_BANK: u8 = 15;
+
+/// Where a `texs`'s 13-bit immediate reads its handle in
+/// [`DRIVER_CONSTBUF_BANK`], as a byte offset.
+///
+/// The immediate is a **dword index**, not a byte offset: nouveau's lowering
+/// pass emits `tex.r = texBindBase / 4 + unit`, so the handle for texture
+/// unit *n* sits at `(texBindBase / 4 + n) * 4`. Reading the immediate as a
+/// byte offset lands a quarter of the way into the buffer, in the fixed
+/// header nouveau keeps ahead of the handle table — which on GM107 begins
+/// `0, 1, 2, 3, 4, 5, 6, 7`. That looked exactly like a handle table of
+/// sequential `imageId`s with `samplerId == 0`, which is why the byte
+/// reading survived: every draw resolved to a plausible handle, and every
+/// draw resolved to the *same* one, so a page of text drew one glyph over
+/// and over.
+pub fn handle_offset(immediate: u16) -> u16 {
+    immediate.wrapping_mul(4)
+}
 
 pub fn image_id(handle: u32) -> u32 {
     handle & 0xF_FFFF

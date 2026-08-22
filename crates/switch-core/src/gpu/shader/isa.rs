@@ -302,6 +302,11 @@ pub enum Op {
     // ---- texture ----
     /// `texs dst, coords.., handle, dim, mask` — texture sample with an
     /// immediate handle.
+    ///
+    /// `coords` is in sample order — `u`, `v`, then the third axis — and
+    /// holds [`RZ`] in the slots `dim` does not use. `dst`/`dst2` are the
+    /// two destination registers the enabled channels are split between;
+    /// see [`texs_destinations`].
     Texs { dst: u8, dst2: u8, coords: [u8; 3], handle: u16, dim: TexDim, mask: [bool; 4] },
 
     // ---- control ----
@@ -1195,17 +1200,23 @@ fn decode_alu_wide(insn: u64) -> Op {
     // texs — the immediate-handle sample.
     if insn & 0xf600_0000_0000_0000 == 0xd000_0000_0000_0000 {
         if field(insn, 49, 1) == 0 {
-            if let (Some(dim), Some(mask)) =
-                (decode_tex_dim(field(insn, 53, 4)), decode_tex_mask(field(insn, 50, 3)))
-            {
-                return Op::Texs {
-                    dst: reg(insn, 0, 8),
-                    dst2: reg(insn, 28, 8),
-                    coords: [reg(insn, 28, 8), reg(insn, 8, 8), reg(insn, 20, 8)],
-                    handle: field(insn, 36, 13) as u16,
-                    dim,
-                    mask,
+            let dst = reg(insn, 0, 8);
+            let dst2 = reg(insn, 28, 8);
+            if let (Some(dim), Some(mask)) = (
+                decode_tex_dim(field(insn, 53, 4)),
+                decode_tex_mask(field(insn, 50, 3), dst, dst2),
+            ) {
+                // The two coordinate operands are `REG_08` and `REG_20`; how
+                // many axes they feed, and in what order, is the dimension's
+                // business. Only 3D and cube reach for a third, which is
+                // `REG_08 + 1`.
+                let (a, b) = (reg(insn, 8, 8), reg(insn, 20, 8));
+                let coords = match dim {
+                    TexDim::T1d => [a, RZ, RZ],
+                    TexDim::T2d => [a, b, RZ],
+                    TexDim::T3d | TexDim::TCube => [a, a.wrapping_add(1), b],
                 };
+                return Op::Texs { dst, dst2, coords, handle: field(insn, 36, 13) as u16, dim, mask };
             }
         }
         return un;
@@ -1325,21 +1336,58 @@ fn decode_tex_dim(bits: u64) -> Option<TexDim> {
     }
 }
 
-/// `d200_2`'s multi-channel field (the `rgb`/`rga`/`rba`/`gba`/`rgba` rows).
-fn decode_tex_mask(bits: u64) -> Option<[bool; 4]> {
-    const R: [bool; 4] = [true, false, false, false];
-    const G: [bool; 4] = [false, true, false, false];
-    const B: [bool; 4] = [false, false, true, false];
-    const A: [bool; 4] = [false, false, false, true];
-    let or = |a: [bool; 4], b: [bool; 4]| [a[0] | b[0], a[1] | b[1], a[2] | b[2], a[3] | b[3]];
-    match bits {
-        0 => Some(or(or(R, G), B)),        // rgb
-        1 => Some(or(or(R, G), A)),        // rga
-        2 => Some(or(or(R, B), A)),        // rba
-        3 => Some(or(or(G, B), A)),        // gba
-        4 => Some(or(or(or(R, G), B), A)), // rgba
-        _ => None,
+/// Which colour channels a `texs` writes.
+///
+/// The three-bit selector does not name the channels on its own: it indexes
+/// a different row depending on how many destination registers the
+/// instruction has, since each one takes at most two channels. With both
+/// present the rows are the three- and four-channel sets
+/// (`rgb`/`rga`/`rba`/`gba`/`rgba`); with only one they are the one- and
+/// two-channel sets (`r`/`g`/`b`/`a`/`rg`/`ra`/`ga`/`ba`). Reading the
+/// four-destination row for a single-destination sample turns a one-channel
+/// fetch — which is what a glyph out of an alpha atlas is — into a
+/// three-channel one landing on registers the shader is still using.
+///
+/// The last three selectors of the two-destination row are encodings this
+/// decoder does not know; they come back `None`, which makes the whole
+/// instruction [`Op::Unimplemented`] rather than a guess.
+fn decode_tex_mask(selector: u64, dst: u8, dst2: u8) -> Option<[bool; 4]> {
+    const ONE_DEST: [u8; 8] = [0x1, 0x2, 0x4, 0x8, 0x3, 0x9, 0xa, 0xc];
+    const TWO_DEST: [u8; 8] = [0x7, 0xb, 0xd, 0xe, 0xf, 0x0, 0x0, 0x0];
+    let row = match (dst != RZ, dst2 != RZ) {
+        (false, false) => return None, // a sample with nowhere to land
+        (true, true) => TWO_DEST,
+        _ => ONE_DEST,
+    };
+    let bits = row[selector as usize & 7];
+    if bits == 0 {
+        return None;
     }
+    Some([bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0])
+}
+
+/// Where a `texs`'s enabled colour channels land, as `(channel, register)`.
+///
+/// A `texs` has *two* destination registers, and each holds at most two
+/// channels: the first two enabled channels go to `dst` and `dst + 1`, the
+/// rest to `dst2` and `dst2 + 1`. The pair is not one run of four.
+///
+/// The distinction is invisible whenever `dst2 == dst + 2`, which is what
+/// the `tex.frag` fixture this decoder was first checked against does — so
+/// the run-of-four reading survived until a shader with `dst = $r4,
+/// dst2 = $r2` ran under it. There channels 2 and 3 landed on `$r6`/`$r7`,
+/// and `$r6` was holding the `1/w` every later `ipa` multiplies by.
+pub fn texs_destinations(dst: u8, dst2: u8, mask: [bool; 4]) -> Vec<(usize, u8)> {
+    let mut out = Vec::with_capacity(4);
+    for (channel, &enabled) in mask.iter().enumerate() {
+        if !enabled {
+            continue;
+        }
+        let n = out.len() as u8;
+        let reg = if n < 2 { dst.wrapping_add(n) } else { dst2.wrapping_add(n - 2) };
+        out.push((channel, reg));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1498,20 +1546,49 @@ mod tests {
         // envydis's print order doesn't match this ISA's real dst/coord
         // roles — confirmed empirically (see `interp`'s module docs) by
         // running the decoded program against known texture/colour inputs
-        // and checking the output against `texture.rgba * vColor.rgba`:
-        // the real destination is REG_00 (here 0, i.e. $r0, not the
-        // first-printed $r2), and REG_28 (here 2) is an unused coordinate
-        // slot for a plain 2D sample.
+        // and checking the output against `texture.rgba * vColor.rgba`.
+        // The destinations are REG_00 ($r0) and REG_28 ($r2), which take two
+        // channels each; the coordinates are REG_08 ($r0) and REG_20 ($r1).
         assert_eq!(
             op(0xd8301a40_20170000),
             Op::Texs {
                 dst: 0,
                 dst2: 2,
-                coords: [2, 0, 1],
+                coords: [0, 1, RZ],
                 handle: 0x1a4,
                 dim: TexDim::T2d,
                 mask: [true, true, true, true],
             }
+        );
+        // The same word with the destinations four apart, which is where the
+        // two readings of the pair diverge: rgba lands on $r4/$r5 then
+        // $r2/$r3, never on $r6/$r7.
+        assert_eq!(
+            texs_destinations(4, 2, [true, true, true, true]),
+            vec![(0, 4), (1, 5), (2, 2), (3, 3)]
+        );
+    }
+
+    #[test]
+    fn a_one_destination_texs_reads_the_single_and_double_channel_masks() {
+        // Selector 0 is `rgb` when both destinations are present and plain
+        // `r` when only one is — the case an alpha-atlas glyph fetch hits.
+        assert_eq!(decode_tex_mask(0, 0, 2), Some([true, true, true, false]));
+        assert_eq!(decode_tex_mask(0, 0, RZ), Some([true, false, false, false]));
+        assert_eq!(decode_tex_mask(3, 0, RZ), Some([false, false, false, true]));
+        assert_eq!(decode_tex_mask(7, 0, RZ), Some([false, false, true, true]));
+        // Both destinations, but a selector past the four this decoder knows.
+        assert_eq!(decode_tex_mask(5, 0, 2), None);
+        // Nowhere to put the result at all.
+        assert_eq!(decode_tex_mask(0, RZ, RZ), None);
+    }
+
+    #[test]
+    fn a_two_channel_texs_fills_only_the_first_destination() {
+        // `ga` into $r4: two channels, so $r2 is never touched.
+        assert_eq!(
+            texs_destinations(4, RZ, [false, true, false, true]),
+            vec![(1, 4), (3, 5)]
         );
     }
 
