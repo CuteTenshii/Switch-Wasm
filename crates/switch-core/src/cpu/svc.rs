@@ -94,6 +94,9 @@ impl Cpu {
                     self.write_zr(0, RESULT_INVALID_MEMORY_RANGE);
                     return Ok(());
                 }
+                if std::env::var("TRACE_MAP").is_ok() {
+                    eprintln!("[map] MapMemory dst={dst:#x} src={src:#x} size={size:#x}");
+                }
                 self.mem.copy_range(dst, src, size)?;
                 self.write_zr(0, RESULT_OK);
                 Ok(())
@@ -495,6 +498,33 @@ impl Cpu {
                 // wait. It always did — the thread that makes it simply never
                 // got scheduled until threads started being preempted.
                 if handles.is_empty() && self.has_other_runnable() {
+                    self.pc = self.pc.wrapping_sub(4);
+                    self.yield_thread();
+                    return Ok(());
+                }
+                // A blocking wait on the **vsync** event is the one wait this
+                // emulator can honour by actually waiting: the display tick is
+                // generated from `cycles` a few lines up, so it is certain to
+                // fire, and no other event here has that property. Rewinding
+                // onto the `svc` throttles the guest's render loop to the
+                // refresh rate.
+                //
+                // Answering it immediately instead is what kept the Home Menu
+                // off the screen. Its frame loop ran at tens of kHz -- 58,547
+                // laps of a four-command `pctl` poll in two seconds of console
+                // time -- and took 92% of every instruction the process
+                // executed, so the threads that prepare the frame it would
+                // draw never got the CPU.
+                if timeout != 0 && self.vsync_event.is_some_and(|v| handles.contains(&v)) {
+                    if !self.has_other_runnable() {
+                        // Nothing else can run, so there is no work to overlap
+                        // the wait with: idle straight to the next tick instead
+                        // of stepping seventeen million instructions that do
+                        // nothing. This is the console's own idle, and without
+                        // it the throttle costs more than it saves.
+                        self.cycles =
+                            self.last_vsync_cycles.wrapping_add(super::VSYNC_PERIOD_CYCLES);
+                    }
                     self.pc = self.pc.wrapping_sub(4);
                     self.yield_thread();
                     return Ok(());
