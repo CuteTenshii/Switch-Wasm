@@ -53,6 +53,16 @@ pub struct Change {
 impl Vfs {
     /// An SD card with just the root and the `/switch` directory homebrew
     /// menus expect to exist.
+    /// A filesystem with nothing in it but its root. Save data starts this
+    /// way: a console creates the save empty and the title lays out whatever
+    /// it wants inside, so seeding it with directories nobody asked for would
+    /// invent structure the guest then has to work around.
+    pub fn empty() -> Vfs {
+        let mut vfs = Vfs { nodes: BTreeMap::new(), changed: BTreeSet::new() };
+        vfs.nodes.insert("/".to_owned(), Node::Dir);
+        vfs
+    }
+
     pub fn new() -> Vfs {
         let mut vfs = Vfs { nodes: BTreeMap::new(), changed: BTreeSet::new() };
         vfs.nodes.insert("/".to_owned(), Node::Dir);
@@ -60,15 +70,37 @@ impl Vfs {
         vfs
     }
 
-    /// Normalize a guest path: strip any `device:` prefix and trailing
-    /// slashes, and guarantee a leading slash.
+    /// Normalize a guest path: strip any `device:` prefix, resolve the `.`
+    /// and `..` components, collapse repeated slashes, and guarantee a
+    /// leading slash and no trailing one.
+    ///
+    /// Resolving those components is not cosmetic. A guest builds paths by
+    /// joining, so `.` and `..` arrive in them constantly, and treating them
+    /// as ordinary names creates directories called `.` — `hb-appstore` left
+    /// a tree of `/switch/.`, `/switch/./.get`, `/switch/./.get/packages`
+    /// behind it, none of which it could find again by any other spelling.
     pub fn normalize(path: &str) -> String {
         let without_device = match path.split_once(":/") {
             Some((_, rest)) => rest,
             None => path,
         };
-        let trimmed = without_device.trim_matches('/');
-        if trimmed.is_empty() { "/".to_owned() } else { format!("/{}", trimmed) }
+        let mut parts: Vec<&str> = Vec::new();
+        for part in without_device.split('/') {
+            match part {
+                // An empty component is a leading, trailing or doubled slash,
+                // and `.` is the directory you are already in. Neither names
+                // anything. Note this is an exact match: `.get` is a perfectly
+                // ordinary name that happens to start with a dot.
+                "" | "." => {}
+                // `..` goes up, and stops at the root rather than above it —
+                // a guest does not get out of its own filesystem by asking.
+                ".." => {
+                    parts.pop();
+                }
+                name => parts.push(name),
+            }
+        }
+        if parts.is_empty() { "/".to_owned() } else { format!("/{}", parts.join("/")) }
     }
 
     fn parent_of(path: &str) -> Option<String> {
@@ -270,6 +302,25 @@ impl Vfs {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn normalize_resolves_dot_components() {
+        // Guests build paths by joining, so `.` and `..` turn up in them all
+        // the time. `hb-appstore` asked for "sdmc:/switch/./.get/packages" and
+        // got a directory literally called "." with ".get" inside it, which
+        // it could not find again by any other spelling.
+        assert_eq!(Vfs::normalize("sdmc:/switch/."), "/switch");
+        assert_eq!(Vfs::normalize("sdmc:/switch/./.get/packages"), "/switch/.get/packages");
+        assert_eq!(Vfs::normalize("/switch//a///b/"), "/switch/a/b");
+        assert_eq!(Vfs::normalize("/switch/a/../b"), "/switch/b");
+        // A leading dot is part of a name, not a component of its own.
+        assert_eq!(Vfs::normalize("/.get"), "/.get");
+        assert_eq!(Vfs::normalize("/..."), "/...");
+        // And `..` stops at the root rather than climbing past it.
+        assert_eq!(Vfs::normalize("/../../etc"), "/etc");
+        assert_eq!(Vfs::normalize("sdmc:/"), "/");
+        assert_eq!(Vfs::normalize("/switch/../.."), "/");
+    }
     use super::*;
 
     #[test]
