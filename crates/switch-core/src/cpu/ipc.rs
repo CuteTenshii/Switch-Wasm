@@ -2705,14 +2705,35 @@ impl Cpu {
                     self.reply_with_interface(tls, handle, "am:library-applet-proxy")?;
                     Ok(())
                 }
-                // IAllSystemAppletProxiesService::OpenSystemAppletProxy: what
-                // the *Home Menu* opens. qlaunch is neither an application nor
-                // a library applet — it is the one process that outlives every
-                // title and launches the rest — and it aborts on the spot if
-                // this is refused.
-                Some(100) => {
+                // IAllSystemAppletProxiesService::OpenSystemAppletProxy, and
+                // the `Ex` form at 110 that differs only in taking an applet
+                // attribute. This is what the *Home Menu* opens. qlaunch is
+                // neither an application nor a library applet — it is the one
+                // process that outlives every title and launches the rest —
+                // and it aborts on the spot if this is refused.
+                Some(100) | Some(110) => {
                     self.set_applet_is_application(false);
                     self.reply_with_interface(tls, handle, "am:system-applet-proxy")?;
+                    Ok(())
+                }
+                // OpenSystemApplicationProxy. A system application is still an
+                // application — it gets the same `IApplicationProxy` and the
+                // same focus message — it just ships with the firmware rather
+                // than being installed. `starter`, the applet that runs the
+                // first-boot sequence, opens this and nothing else: refused,
+                // it aborted with `nnSdk`'s unknown-command-id straight into
+                // `fatal:u`.
+                Some(350) => {
+                    self.set_applet_is_application(true);
+                    self.reply_with_interface(tls, handle, "am:application-proxy")?;
+                    Ok(())
+                }
+                // OpenOverlayAppletProxy: `overlayDisp`, which draws over
+                // whatever is running. It has the same lifecycle and window
+                // controls as a library applet does.
+                Some(300) => {
+                    self.set_applet_is_application(false);
+                    self.reply_with_interface(tls, handle, "am:library-applet-proxy")?;
                     Ok(())
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
