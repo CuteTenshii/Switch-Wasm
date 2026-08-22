@@ -9,7 +9,7 @@
 <title>switch-wasm - a Nintendo Switch emulator in your browser</title>
 <meta name="description" content="A from-scratch Nintendo Switch emulator core - an ARM64 interpreter and GM20B GPU emulation - compiled to WebAssembly. Boot homebrew NROs entirely in your browser; nothing is uploaded.">
 <link rel="canonical" href="https://tenshii.moe/Switch-Wasm/">
-<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="./favicon.svg" type="image/svg+xml">
 
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="switch-wasm">
@@ -28,7 +28,7 @@
 <meta name="twitter:image" content="https://tenshii.moe/Switch-Wasm/assets/og.png">
 <meta name="twitter:image:alt" content="switch-wasm: a Nintendo Switch emulator that runs in your browser, showing hbmenu booting at 1280x720.">
 
-<link rel="stylesheet" href="assets/style.css">
+<link rel="stylesheet" href="./style.css">
 </head>
 <body>
 
@@ -102,63 +102,117 @@
 </div>
 
 <aside class="panel" id="panel" aria-label="Tools">
-  <nav class="tabs" role="tablist">
-    <button class="tab is-active" data-tab="console" role="tab" aria-selected="true">Console</button>
-    <button class="tab" data-tab="debug" role="tab" aria-selected="false">Debug</button>
-    <button class="tab" data-tab="files" role="tab" aria-selected="false">Files</button>
-    <button class="tab-close btn icon" id="btn-panel-close" title="Close panel" aria-label="Close panel">&times;</button>
-  </nav>
+  <div class="panel-grip" id="panel-grip" role="separator" aria-orientation="vertical"
+       aria-label="Resize panel" tabindex="0"></div>
+
+  <header class="panel-head">
+    <div class="tabstrip" role="tablist" aria-label="Panel sections">
+      <button class="tab is-active" data-tab="console" role="tab" aria-selected="true">Console</button>
+      <button class="tab" data-tab="debug" role="tab" aria-selected="false">Debug</button>
+      <button class="tab" data-tab="files" role="tab" aria-selected="false">Files</button>
+    </div>
+    <button class="icon-btn" id="btn-panel-close" title="Close panel (`)" aria-label="Close panel">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+    </button>
+  </header>
 
   <section class="tabpanel is-active" data-panel="console">
-    <div class="panel-tools">
-      <button id="btn-copy-console" class="btn small" title="Copy the whole log to the clipboard">Copy all</button>
-      <button id="btn-clear-console" class="btn small">Clear</button>
-      <label class="check"><input type="checkbox" id="autoscroll-cb" checked> Autoscroll</label>
+    <div class="panel-bar">
+      <label class="check"><input type="checkbox" id="autoscroll-cb" checked><span>Autoscroll</span></label>
+      <span class="spacer"></span>
+      <button id="btn-copy-console" class="btn small ghost" title="Copy the whole log to the clipboard">Copy all</button>
+      <button id="btn-clear-console" class="btn small ghost">Clear</button>
     </div>
     <pre class="console" id="console" aria-live="polite"></pre>
   </section>
 
   <section class="tabpanel" data-panel="debug">
-    <div class="panel-tools">
-      <label class="check"><input type="checkbox" id="trace-cb"> Instruction trace</label>
-      <button id="btn-dumptrace" class="btn small">Dump trace</button>
-      <button id="btn-dumpregs" class="btn small">Dump regs</button>
-    </div>
-    <div class="panel-tools">
-      <label class="check">X<input id="reg-idx" type="number" min="0" max="31" value="0" class="num"></label>
-      <button id="btn-readreg" class="btn small">Read</button>
-      <code class="regval" id="reg-val">-</code>
-    </div>
-    <p class="muted tiny">Tracing caps each run slice so the log stays readable.
-      A fault dumps the register snapshot and the last instructions into the console.</p>
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">Tracing</span>
+        <span class="section-note" id="trace-badge">off</span>
+      </summary>
+      <div class="section-body">
+        <label class="check"><input type="checkbox" id="trace-cb"><span>Instruction trace</span></label>
+        <p class="muted tiny">Tracing caps each run slice so the log stays readable. A fault dumps the
+          register snapshot and the last instructions into the console on its own.</p>
+        <div class="panel-tools">
+          <button id="btn-dumptrace" class="btn small">Dump trace</button>
+          <button id="btn-dumpregs" class="btn small">Dump regs</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">Registers</span>
+      </summary>
+      <div class="section-body">
+        <div class="panel-tools">
+          <label class="field" for="reg-idx"><span class="field-label">X</span><input id="reg-idx"
+            type="number" min="0" max="31" value="0" class="num"></label>
+          <button id="btn-readreg" class="btn small">Read</button>
+          <code class="regval" id="reg-val">-</code>
+        </div>
+      </div>
+    </details>
   </section>
 
   <section class="tabpanel" data-panel="files">
-    <p class="muted tiny">Inspect an <code>.nsp</code> container and its NCA headers, or drop a
-      standalone <code>.nca</code>. Encrypted (CDN) headers need <code>prod.keys</code>.</p>
-    <div class="dropzone" id="nsp-drop">
-      Drop <code>.nsp</code> or <code>.nca</code> here, or <label for="nsp-file">browse</label>
-      <input type="file" id="nsp-file" accept=".nsp,.nsz,.xci,.nca" hidden>
-    </div>
-    <div class="panel-tools">
-      <label class="btn small" for="prod-keys">prod.keys</label>
-      <input type="file" id="prod-keys" accept=".keys,.txt" hidden>
-      <label class="btn small" for="title-keys">title.keys</label>
-      <input type="file" id="title-keys" accept=".keys,.txt" hidden>
-      <button id="btn-clear-keys" class="btn small">Clear</button>
-      <label class="btn small" for="firmware-ncas">firmware</label>
-      <input type="file" id="firmware-ncas" accept=".nca" multiple hidden>
-    </div>
-    <p class="muted tiny" id="keys-state">no keys loaded</p>
-    <p class="muted tiny" id="firmware-state">no system data archives - a title that mounts one (an applet's shared assets, the Mii and amiibo models) will not find it</p>
-    <div id="nand-titles" class="nand-titles"></div>
-    <div class="panel-tools" id="nand-tools" hidden>
-      <button id="btn-erase-nand" class="btn small">Erase NAND</button>
-    </div>
-    <div id="nsp-result"></div>
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">Keys</span>
+        <span class="section-note" id="keys-badge">none</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny">An NCA from the CDN keeps its header encrypted, so
+          <code>prod.keys</code> is what makes one readable at all. Kept in this browser.</p>
+        <div class="panel-tools">
+          <label class="btn small" for="prod-keys">prod.keys</label>
+          <input type="file" id="prod-keys" accept=".keys,.txt" hidden>
+          <label class="btn small" for="title-keys">title.keys</label>
+          <input type="file" id="title-keys" accept=".keys,.txt" hidden>
+          <button id="btn-clear-keys" class="btn small ghost">Clear</button>
+        </div>
+        <p class="muted tiny" id="keys-state">no keys loaded</p>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">System &middot; NAND</span>
+        <span class="section-note" id="nand-badge">empty</span>
+      </summary>
+      <div class="section-body">
+        <div id="nand-titles" class="nand-titles"></div>
+        <div class="panel-tools">
+          <label class="btn small" for="firmware-ncas">Install firmware&hellip;</label>
+          <input type="file" id="firmware-ncas" accept=".nca" multiple hidden>
+          <span id="nand-tools" hidden>
+            <button id="btn-erase-nand" class="btn small ghost danger">Erase NAND</button>
+          </span>
+        </div>
+        <p class="muted tiny" id="firmware-state">no system data archives</p>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary class="section-head">
+        <span class="section-title">Container</span>
+        <span class="section-note" id="container-badge">none open</span>
+      </summary>
+      <div class="section-body">
+        <div class="dropzone" id="nsp-drop">
+          <span class="dropzone-title">Drop an <code>.nsp</code> or <code>.nca</code></span>
+          <span class="dropzone-sub">or <label for="nsp-file">browse</label> for one</span>
+          <input type="file" id="nsp-file" accept=".nsp,.nsz,.xci,.nca" hidden>
+        </div>
+        <div id="nsp-result"></div>
+      </div>
+    </details>
   </section>
 </aside>
 
-<script src="assets/main.js"></script>
+<script type="module" src="./main/index.ts"></script>
 </body>
 </html>

@@ -1,4 +1,7 @@
 /target
+/node_modules
+# The built site: `make assets` generates every file in it.
+/dist
 *.wasm
 *.nro
 .DS_Store

@@ -4,29 +4,39 @@ Browser-oriented Nintendo Switch emulation core: an ARM64 (A64) integer interpre
 
 ## Commands
 
-- `make all` — test + wasm + assets (the full pipeline).
+- `make all` — test + assets (the full pipeline; `assets` builds the core first).
 - `make test` — `cargo test -p switch-core`. This is the only crate with tests (unit tests in each module + `crates/switch-core/tests/cpu_test.rs`).
 - `make wasm` — `cargo build --target wasm32-unknown-unknown --release -p switch-wasm`.
-- `make assets` — wasm, then **copies the built `.wasm` into `web/assets/`**.
-- `make serve` — `python3 tools/serve.py` (after assets). Frontend is plain static JS; no bundler.
+- `make assets` — the core **and** the site (`vite build`). This is what produces a complete `dist/`, and the only frontend target in the Makefile: the core is an input to the frontend build, and make is what knows how to build it. Needs `bun install` (vite + typescript are the only dependencies).
+- `bun run dev` — the Vite dev server on :8000, with the stylesheet hot-swapped rather than the page reloaded. `bun run preview` serves a built `dist/` instead, for checking the production bundle. Both need `make wasm` to have run once.
+- `bun run typecheck` — `tsc --noEmit` over both frontend projects. Vite never type-checks; this is the only thing that does.
 - Single test: `cargo test -p switch-core <test_name>`.
 - `python3 tools/difftest.py` — differential-test the decode against **real ARM semantics**: it assembles the instruction list in the script, runs it under `qemu-aarch64`, runs the identical bytes through `cargo run --example difftest`, and prints the first register that differs. `--scalar` does the same for the integer instructions (dumping x0..x25 instead of the vector registers). Needs `clang` + `lld` + `qemu-aarch64`. **Add an instruction there before hand-deriving expected values.** This caught TRN1/TRN2 taking the wrong lanes, and the scalar sweep found seven more in one run (EXTR's operand order, ADCS/SBC's op bit, SDIV's sign extension, SMADDL's operand width, CLS off by one).
 - `rustup target add wasm32-unknown-unknown` is required for the wasm build.
 
 ## Build pipeline traps
 
-- The browser fetches `web/assets/switch_wasm.wasm` and bundled `.nro` files as committed copies. Building `switch-wasm` alone does **not** refresh them — run `make assets`.
+- The `.wasm` is an **input to the frontend build**, not something copied in after it: the worker imports it, so Vite hashes it into `dist/assets` like any other asset. Building `switch-wasm` alone therefore does not update the site — run `make assets`, which builds the core first.
+- **`web/` is source and `dist/` is output — the whole of it.** `dist/` is generated and gitignored, so a fresh checkout has no site at all until `make assets` has run, which is why the Pages workflow installs bun and deploys `dist/` rather than `web/`. Nothing committed ever sits beside a build artifact, which is what the old `web/assets` (committed files plus a generated `.wasm`) got wrong.
+- **`base: './'` in `vite.config.ts` is load-bearing.** The site is published under a path (`tenshii.moe/Switch-Wasm/`), and Vite's default of `'/'` emits `/assets/...`, which 404s anywhere but a host's root — a break that appears only once deployed. Serve `dist/` from inside a subdirectory when testing a change to the build.
 - `make test` only covers `switch-core`; there are no tests for `switch-wasm`.
 
 ## Architecture
 
 - `crates/switch-core` — the emulation core, zero external deps. Modules: `cpu` (A64 interpreter, split into `mod`/`alu`/`bits`/`fp`/`ipc`/`loadstore`/`simd`/`svc`/`system`), `gpu` (GM20B model), `display` (binder buffer queue), `vfs` (emulated SD card), `mem` (sparse 4 GiB page table), `disasm`, `nsp`/`nca`/`nro`/`elf`/`romfs` (parsers), `control` (a title's NACP name/publisher/icon, out of the Control NCA's RomFS), `error`.
 - `crates/switch-wasm` — `cdylib` for `wasm32-unknown-unknown`, exports a raw `extern "C"` ABI (no wasm-bindgen). Buffers cross the boundary via wasm linear memory (`switch_alloc`/`switch_free`); a handle is an index into a global session table. It declares exactly **one import**, `env.host_read` — how it reads the open container (see the container section below). **No external deps by design** — JSON results are emitted by the hand-rolled `json_escape`/`write_into` helpers in `crates/switch-wasm/src/lib.rs`. Don't add serde/etc.
-- `tools/serve.py` — local static server with no-cache headers and the right `application/wasm` MIME type (`instantiateStreaming` refuses anything else). Takes an optional port.
-- `tools/make_og.py` — renders `web/assets/og.png`, the social preview card, around a real captured frame (`web/assets/screenshot.png`).
-- `web/index.html` is the only file at the web root; everything else lives in `web/assets/`, which therefore exists in a fresh checkout. (`*.wasm`/`*.nro` are gitignored, so the directory used to be absent and the Pages build failed on `cp`.)
-- `web/assets/worker.js` hosts the wasm module (`WebAssembly.instantiateStreaming` of `switch_wasm.wasm`, with `{ env: { host_read } }` as its imports) and is the glue over the ABI; `web/assets/main.js` is promise-based RPC over `postMessage` plus the app shell. Step budgets: non-trace 5,000,000 per slice, trace mode 5000.
-- **Path trap**: `new Worker(...)` resolves against the *document*, so main.js says `assets/worker.js`; a `fetch` inside the worker resolves against the *worker script*, so worker.js says `switch_wasm.wasm` with no prefix.
+- `tools/make_og.py` — renders `web/public/assets/og.png`, the social preview card, around a real captured frame (`tools/screenshot.png`, which is an input to the card and is never served).
+- The layout is two directories and one rule:
+  - `web/` — every source file the site is built from, committed: `index.html` (the build's entry point), `style.css`, the font and icon, and the TypeScript in `main/`, `worker/` and `shared/`. Nothing generated.
+  - `web/public/` — the exception: copied verbatim, unhashed. It holds `assets/og.png`, whose URL is baked into other people's caches by the meta tags, and the font's licence.
+  - `dist/` — the site, generated in full by `make assets` and gitignored. `index.html` at the root, everything else content-hashed into `dist/assets/`.
+- **Everything the page needs is hashed**, which is what makes a rebuilt core a *new URL* rather than whatever the browser cached: the two chunks, the stylesheet, the icon, the font and the `.wasm`. That is why the frontend names its assets through the bundler (`import fontUrl from '../font.ttf?url'`, `import wasmUrl from '@core/switch_wasm.wasm?url'`) rather than as literal paths. `@core` is aliased in `vite.config.ts` to cargo's release directory, so the target triple is written down once.
+- The frontend is TypeScript in `web/`, bundled into two ES modules — the page and the worker. No source maps: they are four times the size of the code they map, and the sources are right there in `web/`.
+  - `web/worker/` hosts the wasm module (`WebAssembly.instantiateStreaming` of `switch_wasm.wasm`, with `{ env: { host_read } }` as its imports) and is the glue over the ABI — `wasm.ts` (exports + buffer plumbing), `hostfiles.ts` (the `host_read` import and its chunk cache), `latch.ts` (input held until the guest has seen it), `commands.ts` (one entry per command), `index.ts` (the message loop).
+  - `web/main/` is promise-based RPC over `postMessage` plus the app shell, one module per part of the page; `index.ts` is the composition root that brings a session up and owns Reset.
+  - `web/shared/protocol.ts` is the contract between them: the page's `call('run', slice)` and the worker's handler for it are checked against the same `Commands` interface, so a command whose signature drifts is a build error rather than an `undefined` at runtime.
+  - Step budgets: non-trace 1,000,000 per slice (the slice length *is* the input sampling period), trace mode 5000.
+- The worker is started as `new Worker(new URL('../worker/index.ts', import.meta.url), { type: 'module' })` — named by its *source*, which the bundler follows and rewrites. This is what retired the old path trap (a `new Worker` path resolving against the document while a `fetch` inside the worker resolved against the worker script): no built path is written down by hand any more. It does mean the worker is a **module** worker, so `importScripts` is not available in it.
 - The UI is an app shell, not a page: the canvas owns the viewport, the tools drawer is closed by default (backtick toggles it, Space is run/pause), and the canvas resizes to whatever resolution the guest presents. The boot splash is dismissed when a program **loads**, not when the first frame arrives — homebrew can run (or fault) for a long time before presenting, and waiting for a frame made the stage look dead until it crashed. `Res` reads `—` and the canvas stays blank until `frame_count > 0`; `fb_snapshot`'s pre-first-frame fallback (the memory-mapped demo framebuffer) is deliberately *not* painted, since real homebrew never writes that region.
 - Emulated CPU addresses are `u32` (32-bit PC). Memory is a sparse page table (`PAGE_COUNT` computed in `u64` to survive wasm32 `usize` truncation); reads/writes to unmapped addresses fault with `Error::Cpu`.
 - The demo framebuffer is memory-mapped at `FB_BASE = 0x3F00_0000` (640x360 RGBA) and input at `INPUT_ADDR = 0x3F10_0000`. Syscall ABI: `SyscallMode::Horizon` stubs for real homebrew. Commercial encrypted content is out of scope.
@@ -40,7 +50,7 @@ allocator on that target refuses any *single* allocation above `isize::MAX`
 it lowers to `unreachable`, so an oversized request used to take the whole
 module down as `RuntimeError: unreachable executed` with nothing to say what
 had asked for what. `switch_alloc` now returns null there instead, and
-`worker.js`'s `alloc` throws on it.
+`web/worker/wasm.ts`'s `alloc` throws on it.
 
 Nothing reads a container as a buffer. `switch_core::source::ByteSource` is a
 `u64`-addressed random-access range, and the pieces compose:
@@ -57,7 +67,7 @@ Nothing reads a container as a buffer. `switch_core::source::ByteSource` is a
   import, which **must answer synchronously** — the emulator asks for RomFS
   ranges from inside `switch_run`, where there is nowhere to await. That is
   `FileReaderSync`, which exists only in a worker, and is the second reason
-  the emulator lives in one. `worker.js` caches 1 MiB chunks (32 of them, LRU)
+  the emulator lives in one. `worker/hostfiles.ts` caches 1 MiB chunks (32 of them, LRU)
   because a RomFS mount walks its tables in small reads; a read larger than a
   chunk bypasses the cache rather than evicting it.
 - `switch_open_nsp(handle, size)` / `switch_open_nca(handle, size)` open what
@@ -138,7 +148,7 @@ so an `eprintln!` goes nowhere and `std::env::var` always fails — every
 `TRACE_*`-gated trace is host-CLI-only. A diagnostic that has to reach a
 browser user goes through `Cpu::diagnostic`, which writes stderr *and* the
 trace buffer the page drains (`switch_drain_trace`), and is recorded whether or
-not per-instruction tracing is on. `main.js` drains it every run slice, so
+not per-instruction tracing is on. `main/runloop.ts` drains it every run slice, so
 `[ipc] unimplemented` and `[ipc] no implementation` show up in the page's
 console panel as they happen.
 
@@ -700,7 +710,7 @@ for every path made menus recurse forever. The running NRO is published at
 environment block, which is how libnx's `romfsMountSelf` finds the RomFS
 appended to it.
 
-## Controller input (`cpu/mod.rs`, `web/assets/main.js`)
+## Controller input (`cpu/mod.rs`, `web/main/input.ts`)
 
 `Cpu::set_gamepad_state` publishes the host pad two ways: the memory-mapped
 `INPUT_ADDR` register, and libnx's `HidSharedMemory` layout that `padUpdate`
@@ -755,7 +765,7 @@ two diameters, `rotation_angle`. One entry at index 0 with `tail = 0`,
 
 - **hid reports touches in the console's own 1280x720 digitizer space**
   (`TOUCH_SCREEN_WIDTH`/`HEIGHT`), *not* in whatever resolution the guest is
-  presenting at, so `main.js` scales the canvas onto that. `#screen` is
+  presenting at, so `main/input.ts` scales the canvas onto that. `#screen` is
   `object-fit: contain`, so a tap must be mapped through the **contained rect**
   — going by the element's bounding box offsets every tap by the letterbox bars.
 - Touch is handheld-only on real hardware, and `am`'s `GetOperationMode` already
@@ -771,7 +781,7 @@ two diameters, `rotation_angle`. One entry at index 0 with `tail = 0`,
   `finger_id` is a slot claimed for the life of the pointer so a title can
   follow a drag.
 
-## The shared system font (`cpu/ipc.rs`, `web/assets/font.ttf`)
+## The shared system font (`cpu/ipc.rs`, `web/font.ttf`)
 
 Homebrew does not ship fonts: it asks `pl:u` for the console's shared fonts and
 renders them with its own FreeType (`plGetSharedFont` → `FT_New_Memory_Face`).

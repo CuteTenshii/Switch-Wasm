@@ -2,23 +2,26 @@
 
 Run Switch games on your browser with WebAssembly
 
-An ARM64 (A64) integer interpreter plus PFS0/NSP, NCA, NRO and ELF parsers, compiled to WASM. The frontend is plain static JS with no bundler.
+An ARM64 (A64) integer interpreter plus PFS0/NSP, NCA, NRO and ELF parsers, compiled to WASM. The frontend is TypeScript, bundled with Vite.
 
 ## Build
 
 ```sh
+bun install
 make all
 ```
 
-Requires `rustup target add wasm32-unknown-unknown`.
+Requires `rustup target add wasm32-unknown-unknown`, and [bun](https://bun.com)
+for the frontend.
 
 ## Serve
 
 ```sh
-make serve
+bun run dev       # Vite dev server, http://localhost:8000
+bun run preview   # the built site from dist/
 ```
 
-Then open http://localhost:8000
+Both need the core built once (`make wasm`), since the frontend imports it.
 
 ## Acknowlegments
 

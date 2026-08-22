@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Render the social preview card (web/assets/og.png).
+"""Render the social preview card (web/public/assets/og.png).
 
 Composes an SVG around a real captured frame from the emulator
-(`web/assets/screenshot.png`) and rasterizes it with rsvg-convert, so the
+(`tools/screenshot.png`) and rasterizes it with rsvg-convert, so the
 picture people see when the link is shared is the emulator's actual output
 rather than a mock-up.
 
@@ -15,9 +15,8 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ASSETS = os.path.join(HERE, os.pardir, "web", "assets")
-SCREENSHOT = os.path.join(ASSETS, "screenshot.png")
-OUTPUT = os.path.join(ASSETS, "og.png")
+SCREENSHOT = os.path.join(HERE, "screenshot.png")
+OUTPUT = os.path.join(HERE, os.pardir, "web", "public", "assets", "og.png")
 
 WIDTH, HEIGHT = 1200, 630
 

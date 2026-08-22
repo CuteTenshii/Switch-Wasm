@@ -19,6 +19,13 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - uses: https://github.com/oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
       - name: Build wasm and demo
         run: make assets
 
@@ -26,4 +33,4 @@ jobs:
         with:
           site: https://tenshii.moe/Switch-Wasm/
           token: ${{ forge.token }}
-          source: web/
+          source: dist/

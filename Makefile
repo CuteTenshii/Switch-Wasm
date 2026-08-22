@@ -1,10 +1,10 @@
-.PHONY: all test wasm demo assets serve clean
+.PHONY: all test wasm assets clean
 
 TARGET := wasm32-unknown-unknown
 WASM   := target/$(TARGET)/release/switch_wasm.wasm
-WEB    := web/assets
+DIST   := dist
 
-all: test wasm assets
+all: test assets
 
 # Host test suite: parsers, memory, CPU interpreter, loaders, demo boot, and
 # the host-facing wasm entry points (which build for the host too, so the SD
@@ -17,17 +17,17 @@ test:
 wasm:
 	cargo build --target $(TARGET) --release -p switch-wasm
 
-# Copy build artifacts into the web/ tree.
+# The whole site, from web/index.html down: Vite follows the page to the
+# stylesheet, the worker, the font and the core, and emits every one of them
+# into dist/assets under a content-hashed name.
+#
+# This target exists (where `bun run dev`, `preview` and `typecheck` do not)
+# because the core is an *input* to the frontend build rather than something
+# copied in after it, and only make knows how to build the core.
 assets: wasm
-	cp $(WASM) $(WEB)/switch_wasm.wasm
-	@ls -la $(WEB)
-
-# Serve the frontend locally (no-cache headers so the browser never reuses a
-# stale .wasm/.nro — python's http.server would otherwise let Firefox
-# heuristically cache them).
-serve: assets
-	python3 tools/serve.py
+	bun run build
+	@ls -la $(DIST) $(DIST)/assets
 
 clean:
 	cargo clean
-	rm -f $(WEB)/switch_wasm.wasm
+	rm -rf $(DIST)
