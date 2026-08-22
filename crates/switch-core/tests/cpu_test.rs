@@ -691,8 +691,11 @@ fn bootstrap_provides_stack_and_low_memory() {
     assert_eq!(cpu.sp(), 0);
     cpu.bootstrap();
 
-    // SP points at the top of the mapped stack.
-    assert_eq!(cpu.sp(), 0x1010_0000);
+    // SP points at the top of the mapped stack. Taken from the constant
+    // rather than written out, because where the stack lives has moved once
+    // already -- it sits above the heap and the guest's own stack region now,
+    // and a literal here just goes stale.
+    assert_eq!(cpu.sp(), switch_core::cpu::STACK_TOP);
     cpu.mem.write_u64((cpu.sp() - 8) as u32, 0x1234_5678).unwrap();
     assert_eq!(cpu.mem.read_u64((cpu.sp() - 8) as u32).unwrap(), 0x1234_5678);
 
@@ -898,17 +901,41 @@ fn horizon_map_physical_memory() {
 }
 
 #[test]
-fn tpidr_el0_roundtrip() {
-    // msr tpidrro_el0, x1 ; mrs x2, tpidrro_el0 (the encoding hbmenu uses)
+fn tpidr_el0_roundtrips_and_tpidrro_el0_does_not() {
+    // The two thread pointers are not the same kind of register. TPIDR_EL0 is
+    // the guest's own, to put what it likes in. TPIDRRO_EL0 is the kernel's:
+    // it names the thread's TLS block, the guest reads it to find its own
+    // `nn::os::ThreadType`, and at EL0 it cannot be written -- a `msr` to it
+    // is ignored rather than obeyed.
+    //
+    // Obeying it would be worse than useless. Every thread here is handed its
+    // TLS through that register, so a guest that overwrote it would lose its
+    // own thread's identity, and code that branches on `mrs x9, tpidrro_el0`
+    // -- the Mii editor's IPC dispatcher does -- would take the wrong path.
+    const VALUE: u64 = 0x1234_5678_9ABC_DEF0;
     let mut cpu = Cpu::new();
-    cpu.set_reg(1, 0x1234_5678_9ABC_DEF0);
+    cpu.bootstrap();
+    let tls = cpu.tls_base();
+    cpu.set_reg(1, VALUE);
+    let code = [
+        0xD51B_D041u32, // msr tpidr_el0, x1
+        0xD53B_D042,    // mrs x2, tpidr_el0
+        0xD51B_D061,    // msr tpidrro_el0, x1
+        0xD53B_D063,    // mrs x3, tpidrro_el0
+    ];
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(&(0xD51BD060u32 | 1).to_le_bytes()); // msr tpidrro_el0, x1
-    bytes.extend_from_slice(&(0xD53BD060u32 | 2).to_le_bytes()); // mrs x2, tpidrro_el0
+    for insn in code {
+        bytes.extend_from_slice(&insn.to_le_bytes());
+    }
     cpu.mem.map(0x1000, &bytes).unwrap();
     cpu.set_pc(0x1000);
-    cpu.run(2).unwrap();
-    assert_eq!(cpu.read_x(2), 0x1234_5678_9ABC_DEF0);
+    cpu.run(4).unwrap();
+    assert_eq!(cpu.read_x(2), VALUE, "TPIDR_EL0 is the guest's to write");
+    assert_eq!(
+        cpu.read_x(3),
+        u64::from(tls),
+        "a guest write to TPIDRRO_EL0 must not displace the thread's TLS base"
+    );
 }
 
 #[test]
