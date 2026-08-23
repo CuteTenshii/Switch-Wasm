@@ -267,6 +267,55 @@ fn guest_code_that_rewrites_itself_runs_the_new_instruction() {
     compare(SELF_MODIFYING, 64, "self-modifying code");
 }
 
+/// A loop whose back edge lands in the middle of the block it is already in,
+/// then two `svc`s. Assembled from:
+///
+/// ```text
+///         movz  x0, #0
+///         movz  x1, #0
+/// mid:    add   x1, x1, #7
+///         add   x0, x0, #1
+///         cmp   x0, #3
+///         b.lt  mid
+///         svc   #0xb          // svcSleepThread
+///         add   x2, x1, #1
+///         svc   #0xb
+/// spin:   b     spin
+/// ```
+#[rustfmt::skip]
+const REENTRY: &[u32] = &[
+    0xd2800000, 0xd2800001, 0x91001c21, 0x91000400, 0xf1000c1f,
+    0x54ffffab, 0xd4000161, 0x91000422, 0xd4000161, 0x14000000,
+];
+
+#[test]
+fn control_landing_inside_a_translated_block_re_enters_it() {
+    // The first block runs from the entry to the `b.lt`, so the back edge
+    // targets an address half way through a block that is already cached.
+    // Nothing may be skipped and nothing re-run: a syscall that parks a thread
+    // rewinds the pc onto its own `svc` for exactly this reason, and the `svc`
+    // is never a block entry until it does.
+    compare(REENTRY, 32, "re-entry into a translated block");
+    let mut cpu = loaded(REENTRY, true);
+    cpu.run(32).unwrap();
+    // Three passes over the back edge, each adding 7. x0 counted them but the
+    // first `svc` overwrote it: svcSleepThread writes its result code into x0.
+    assert_eq!(cpu.read_x(1), 21, "the mid-block target was entered the wrong number of times");
+    assert_eq!(cpu.read_x(2), 22, "execution did not continue past the syscall");
+    assert_eq!(cpu.read_x(0), 0, "the syscall did not leave its result in x0");
+}
+
+#[test]
+fn a_syscall_terminates_a_block_and_resumes_after_it() {
+    // `Term::Svc` retires the instruction before dispatching it, because a
+    // syscall that switches threads installs the incoming thread's pc and the
+    // outgoing one has to resume after its own `svc`. Both engines have to
+    // leave the pc in the same place.
+    for steps in 1..=REENTRY.len() as u64 + 4 {
+        compare(REENTRY, steps, &format!("syscall block, {steps} steps"));
+    }
+}
+
 #[test]
 fn a_block_stops_at_the_end_of_its_page() {
     // A block that spanned two pages could not be invalidated by one page's
