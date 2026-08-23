@@ -1,13 +1,19 @@
-//! Interpreter throughput per instruction class: `cargo run --release
-//! -p switch-core --example bench`.
+//! Throughput per instruction class: `cargo run --release -p switch-core
+//! --example bench`.
 //!
 //! Each case is a loop of sixteen copies of one instruction plus a counter
 //! decrement and a branch, so the reported figure is close to the per-instruction
 //! cost of that class. `b .` is the floor: one instruction, decoded by the first
 //! check there is, so it measures what a step costs before any real decode work.
 //! Compare a change against these numbers *and* against a real frame
-//! (`examples/hotspots.rs`, `tools/wasm_bench.mjs`) — a decode reordering that
-//! doubles a microbenchmark can be worth nothing on a real instruction mix.
+//! (`examples/jit_bench.rs`, `examples/hotspots.rs`, `tools/wasm_bench.mjs`) — a
+//! decode reordering that doubles a microbenchmark can be worth nothing on a
+//! real instruction mix.
+//!
+//! This measures whichever engine `Cpu::run` is using, so it reports the block
+//! translator by default and the plain interpreter under `SWITCH_NO_JIT=1`.
+//! A class the translator has no op for shows the two within noise of each
+//! other, which is what says it fell back.
 use std::time::Instant;
 use switch_core::cpu::Cpu;
 

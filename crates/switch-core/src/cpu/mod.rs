@@ -22,10 +22,13 @@ mod alu;
 mod bits;
 mod fp;
 mod ipc;
+mod jit;
 mod loadstore;
 mod simd;
 mod svc;
 mod system;
+
+pub use jit::JitStats;
 
 pub(crate) use bits::decode_bit_mask;
 use bits::*;
@@ -750,6 +753,14 @@ pub struct Cpu {
     /// Instructions the running thread has executed since the scheduler last
     /// took the CPU away from it, against [`TIME_SLICE`].
     slice_used: u64,
+    /// Guest code translated into pre-decoded blocks. See [`jit`].
+    jit: jit::Jit,
+    /// Whether [`Cpu::run`] executes through the translator. On by default;
+    /// `SWITCH_NO_JIT` in the environment turns it off, which is how the host
+    /// tools compare a translated run against an interpreted one. There is no
+    /// environment to read in the browser, so a wasm build is always
+    /// translated unless the host calls [`Cpu::set_jit_enabled`].
+    jit_enabled: bool,
     /// Set by a service call that answered "nothing is ready yet" and would
     /// have blocked on hardware. The reschedule cannot happen inside the
     /// handler — switching threads swaps the register file, and the syscall
@@ -884,6 +895,8 @@ impl Cpu {
             current_thread: 0,
             exclusive: None,
             slice_used: 0,
+            jit: jit::Jit::default(),
+            jit_enabled: std::env::var("SWITCH_NO_JIT").is_err(),
             pending_yield: false,
         };
         cpu.nv.gpu.trace = std::env::var("TRACE_GPU").is_ok();
@@ -2634,7 +2647,15 @@ impl Cpu {
     }
 
     /// Run up to `max_steps` instructions, stopping early on halt or error.
+    ///
+    /// Goes through the block translator when it is enabled (`cpu/jit.rs`),
+    /// which executes the same instructions without decoding them again. Full
+    /// tracing needs a disassembly line per instruction, which only the
+    /// interpreter produces, so it takes that path instead.
     pub fn run(&mut self, max_steps: u64) -> Result<RunReport> {
+        if self.jit_enabled && !self.trace_enabled {
+            return self.run_jit(max_steps);
+        }
         let mut steps = 0u64;
         while steps < max_steps && !self.halted {
             self.step_inner()?;

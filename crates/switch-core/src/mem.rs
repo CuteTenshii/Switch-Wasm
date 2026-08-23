@@ -93,6 +93,20 @@ pub struct Memory {
     /// the hit is recorded through a `Cell`.
     read_watch: (u32, u32),
     read_hit: std::cell::Cell<Option<u32>>,
+    /// Pages the JIT has translated code out of, one bit each. A store that
+    /// lands on one of them invalidates whatever was compiled from it, so the
+    /// translator's view of guest code can never go stale behind its back.
+    ///
+    /// One bit per 4 KiB page is 128 KiB for the whole address space, but a
+    /// program's stores cluster, so the handful of cache lines under them is
+    /// all a run ever touches. It is allocated on the first
+    /// [`Memory::mark_code_page`], so a run with the JIT off does not carry
+    /// it and every store's test misses on the length check alone.
+    code_pages: Vec<u64>,
+    /// Code pages written since the JIT last drained this. A page is recorded
+    /// once — marking it clears its bit — and stays out of the bitmap until
+    /// something is translated from it again.
+    code_dirty: Vec<u32>,
 }
 
 impl Default for Memory {
@@ -114,7 +128,79 @@ impl Memory {
             watch_hit: None,
             read_watch: (1, 0),
             read_hit: std::cell::Cell::new(None),
+            code_pages: Vec::new(),
+            code_dirty: Vec::new(),
         }
+    }
+
+    /// Record that the page holding `addr` has had code translated out of it,
+    /// so a later store there is reported by [`Memory::dirty_code_pages`].
+    pub fn mark_code_page(&mut self, addr: u32) {
+        if self.code_pages.is_empty() {
+            self.code_pages = vec![0u64; PAGE_COUNT / 64];
+        }
+        let idx = Self::page_index(addr);
+        self.code_pages[idx >> 6] |= 1u64 << (idx & 63);
+    }
+
+    /// Note a guest store, invalidating the page's translations if it holds
+    /// any. Inlined into every write path, so it has to answer "no" in a
+    /// couple of instructions: one bounds-checked load from the bitmap (which
+    /// is empty, and so always misses, while nothing has been translated) and
+    /// one bit test. Only the recording is out of line.
+    #[inline(always)]
+    fn note_code_write(&mut self, addr: u32) {
+        let idx = Self::page_index(addr);
+        let bit = 1u64 << (idx & 63);
+        if let Some(&word) = self.code_pages.get(idx >> 6) {
+            if word & bit != 0 {
+                self.mark_code_dirty(idx, bit);
+            }
+        }
+    }
+
+    /// Record that a page's translations are stale. Rare: it happens once per
+    /// page until something is translated out of it again.
+    #[cold]
+    #[inline(never)]
+    fn mark_code_dirty(&mut self, idx: usize, bit: u64) {
+        self.code_pages[idx >> 6] &= !bit;
+        self.code_dirty.push(idx as u32);
+    }
+
+    /// Mark every code page overlapping `[addr, addr + size)` dirty. Used by
+    /// the loader-side paths ([`Memory::map`], [`Memory::map_zero`],
+    /// [`Memory::unmap`]), which move whole segments at a time and do not go
+    /// through the per-store write paths.
+    fn dirty_code_range(&mut self, addr: u32, size: usize) {
+        if self.code_pages.is_empty() || size == 0 {
+            return;
+        }
+        let first = (addr as u64) >> PAGE_BITS;
+        let last = (addr as u64 + size as u64 - 1) >> PAGE_BITS;
+        for idx in first..=last.min(PAGE_COUNT as u64 - 1) {
+            let idx = idx as usize;
+            let bit = 1u64 << (idx & 63);
+            if self.code_pages[idx >> 6] & bit != 0 {
+                self.code_pages[idx >> 6] &= !bit;
+                self.code_dirty.push(idx as u32);
+            }
+        }
+    }
+
+    /// Whether any translated page has been written since it was last
+    /// drained. Checked before every block the JIT enters, so it is a plain
+    /// emptiness test rather than the drain itself.
+    #[inline(always)]
+    pub fn has_dirty_code(&self) -> bool {
+        !self.code_dirty.is_empty()
+    }
+
+    /// Take the pages whose translations are stale, clearing the list. Returns
+    /// an empty (unallocated) vector in the overwhelmingly common case that
+    /// nothing has written to code.
+    pub fn dirty_code_pages(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.code_dirty)
     }
 
     /// Mark `[start, end)` as softly mapped: reads return zeros (served from
@@ -303,6 +389,7 @@ impl Memory {
     /// Map `data` at `addr`, allocating pages as needed and zero-filling any
     /// gap between existing mappings. Wraps around page boundaries.
     pub fn map(&mut self, addr: u32, data: &[u8]) -> Result<()> {
+        self.dirty_code_range(addr, data.len());
         let mut pos = addr as usize;
         for chunk in data.chunks(PAGE_SIZE - (pos & (PAGE_SIZE - 1))) {
             let idx = pos >> PAGE_BITS;
@@ -317,6 +404,7 @@ impl Memory {
 
     /// Map `size` zero-filled bytes at `addr`.
     pub fn map_zero(&mut self, addr: u32, size: usize) -> Result<()> {
+        self.dirty_code_range(addr, size);
         let mut pos = addr as usize;
         let end = pos.saturating_add(size);
         while pos < end {
@@ -364,6 +452,7 @@ impl Memory {
         if addr < self.watch.1 && addr.wrapping_add(N as u32) > self.watch.0 {
             self.watch_hit = Some(addr);
         }
+        self.note_code_write(addr);
         Some(())
     }
 
@@ -456,6 +545,7 @@ impl Memory {
         if addr >= self.watch.0 && addr < self.watch.1 {
             self.watch_hit = Some(addr);
         }
+        self.note_code_write(addr);
         Ok(())
     }
 
@@ -553,6 +643,7 @@ impl Memory {
     /// walks see the range as free again. Partial pages at either end are kept,
     /// since something else may still live in them.
     pub fn unmap(&mut self, addr: u32, size: usize) {
+        self.dirty_code_range(addr, size);
         // Whole pages only, and in page indices: the address space is 4 GiB, so
         // byte counts do not fit a 32-bit usize on wasm.
         let first = (addr as u64 + PAGE_SIZE as u64 - 1) >> PAGE_BITS;

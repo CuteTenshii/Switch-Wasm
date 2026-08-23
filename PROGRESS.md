@@ -172,6 +172,59 @@ second of wall clock — no further reordering fixes this. The next real step fo
 speed is a decoded-block cache (decode each basic block once, execute from
 that); beyond that only generating code (a wasm JIT) reaches real time.
 
+**The decoded-block cache, landed** (`cpu/jit.rs`). The first time control
+reaches an address, the translator walks forward decoding instructions into
+ops with their operands already extracted, their immediates already decoded and
+their PC-relative addresses already resolved, stopping at the first thing that
+can move the PC. That block is cached by entry address and every later visit
+runs it with no decoding at all. What this removes is decode, not dispatch; it
+generates no code. Emitting wasm per translation unit and compiling it at
+runtime is a real JIT and is still the next step for speed — what rules it out
+today is that a generated module can only address its own linear memory, and
+guest memory is a 4 GiB page table inside a wasm32 module rather than a flat
+buffer, so every guest load and store would become an imported host call.
+`cpu/jit.rs` records that in full; flattening the address space behind a
+base-plus-bounds check is the prerequisite.
+
+Measured on hbmenu (`examples/jit_bench.rs`, `tools/wasm_bench.mjs`):
+
+| | interpreted | translated | |
+|---|---|---|---|
+| native | 30M insn/s | 57M insn/s | 1.88x |
+| wasm in V8 | 19M insn/s | 28M insn/s | 1.49x |
+| hbmenu steady frame (wasm) | 0.77 fps | 1.11 fps | |
+
+sdl-hello is 2.1x natively; NX-Shell's first 400k instructions are only 1.09x,
+which is what a run too short to re-enter its blocks looks like — hbmenu enters
+each of its 10,637 blocks 533 times on average.
+
+Three things worth knowing about it:
+
+- **Coverage is a performance question, not a correctness one.** An encoding
+  the translator has no op for becomes `Op::Interpret` and goes straight back
+  to `Cpu::execute`. SIMD, floating point, the exclusive accessors, the
+  divides and bit counts are all still interpreted; they get faster only
+  because the code around them does not. `examples/jit_bench.rs` runs a real
+  program both ways and diffs the two machines — registers, flags, vector
+  registers, retired instruction count, console output and the framebuffer —
+  which is what says the two are the same computation.
+- **`Cpu::step` is still the interpreter**, deliberately: single-stepping is
+  what tracing and the host debugging tools want. Anything that drives the CPU
+  one instruction at a time (`examples/screenshot.rs`, `hotspots.rs`,
+  `retail_trace.rs`) therefore measures the interpreter, not the translator —
+  which is worth remembering before concluding from one of them that
+  translation bought nothing.
+- **Staleness is handled by the memory, not by the translator.** `Memory`
+  keeps a bit per page that has been translated out of, and every store checks
+  it; the JIT drains the list of dirtied pages before each block lookup and
+  drops what came from them. A block never spans a page, so one page's
+  invalidation is exact. Guest code that rewrites itself and runs the new
+  instruction is covered by `tests/jit_test.rs`.
+
+What is left is the GPU. The ARM side of a JKSV frame was 25% before this
+(table below), so even at infinite CPU speed the frame is dominated by
+fragment shading and rasterisation.
+
 **Known interpreter bug, still open**: with a font that carries hinting
 programs (`fpgm`/`prep`/`cvt`), glyphs render with correct heights and advances
 but each bitmap is 1-3px wide, as if the outline's x coordinates collapsed —

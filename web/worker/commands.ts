@@ -5,7 +5,7 @@
    those into replies. Staging buffers are allocated and released around every
    call - the emulator's heap is the browser's memory too. */
 
-import type { CommandHandlers, FsChange } from '../shared/protocol';
+import type { CommandHandlers, FsChange, JitStats } from '../shared/protocol';
 import { addHostFile, openHostFile } from './hostfiles';
 import { releaseLatchIfSeen, resetInput, setGamepad, setTouch } from './latch';
 import {
@@ -70,6 +70,10 @@ export const CMD: CommandHandlers = {
 
   set_trace(on) {
     api().switch_set_trace(handle(), on ? 1 : 0);
+    return 0;
+  },
+  set_jit(on) {
+    api().switch_set_jit(handle(), on ? 1 : 0);
     return 0;
   },
   vibration() {
@@ -244,6 +248,16 @@ export const CMD: CommandHandlers = {
       guest: handle() < 0 ? 0 : Number(api().switch_guest_ram(handle())),
       wasm: api().memory.buffer.byteLength,
     };
+  },
+  jit_stats() {
+    if (handle() < 0) {
+      return { enabled: false, blocks: 0, translated: 0, executed: 0, invalidated: 0 };
+    }
+    return readJson<JitStats>(
+      256,
+      (buf, cap) => api().switch_jit_stats_json(handle(), buf, cap),
+      { enabled: false, blocks: 0, translated: 0, executed: 0, invalidated: 0 },
+    );
   },
   last_error() {
     return lastError();

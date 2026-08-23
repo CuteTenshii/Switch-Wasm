@@ -145,6 +145,22 @@
 
     <details class="section" open>
       <summary class="section-head">
+        <span class="section-title">Translation</span>
+        <span class="section-note" id="jit-badge">on</span>
+      </summary>
+      <div class="section-body">
+        <label class="check"><input type="checkbox" id="jit-cb" checked><span>Translate blocks</span></label>
+        <p class="muted tiny">Guest code is compiled to pre-decoded blocks the first time it runs, so
+          decoding is paid for once instead of on every instruction. Turn it off to run everything
+          through the plain interpreter - the two execute identically, so a difference is a bug.</p>
+        <div class="panel-tools">
+          <button id="btn-jitstats" class="btn small">Block stats</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary class="section-head">
         <span class="section-title">Registers</span>
       </summary>
       <div class="section-body">

@@ -1,5 +1,5 @@
 // Measure the build the browser actually runs:
-//   node tools/wasm_bench.mjs <program.nro> [switch_wasm.wasm]
+//   node tools/wasm_bench.mjs <program.nro> [switch_wasm.wasm] [--no-jit]
 //
 // Reports emulated instructions per second and the cost of one steady-state
 // frame, which is the number that matters for the frontend's frame rate. The
@@ -16,14 +16,21 @@ import { fileURLToPath } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
-const nroPath = process.argv[2];
+const nroPath = process.argv.slice(2).find((a) => !a.startsWith('--'));
 if (!nroPath) {
   console.error('usage: node tools/wasm_bench.mjs <program.nro> [switch_wasm.wasm]');
   process.exit(1);
 }
-const wasmPath = process.argv[3] || join(root, 'target/wasm32-unknown-unknown/release/switch_wasm.wasm');
+const wasmPath =
+  process.argv.slice(2).filter((a) => !a.startsWith('--'))[1] ||
+  join(root, 'target/wasm32-unknown-unknown/release/switch_wasm.wasm');
 
-const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), {});
+// The module's one import: the browser serves ranges of an open container
+// from the file itself, because a retail one does not fit in the wasm address
+// space. An NRO is handed over as a buffer, so nothing here ever asks.
+const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), {
+  env: { host_read: () => 0 },
+});
 const api = instance.exports;
 
 function toWasm(bytes) {
@@ -33,12 +40,16 @@ function toWasm(bytes) {
 }
 
 const handle = api.switch_new();
-api.switch_set_syscall_mode(handle, 2); // Horizon
+// Block translation is on by default. `--no-jit` runs the plain interpreter,
+// which is the comparison that says what translating is worth in V8 rather
+// than under LLVM.
+const noJit = process.argv.includes('--no-jit');
+if (noJit) api.switch_set_jit(handle, 0);
 try {
-  const font = readFileSync(join(root, 'web/assets/font.ttf'));
+  const font = readFileSync(join(root, 'web/font.ttf'));
   api.switch_load_font(handle, toWasm(font), font.length);
 } catch {
-  console.log('no web/assets/font.ttf: the guest will render no text');
+  console.log('no web/font.ttf: the guest will render no text');
 }
 const nro = readFileSync(nroPath);
 const entry = api.switch_load_nro(handle, toWasm(nro), nro.length);
@@ -70,7 +81,10 @@ while (frames < FRAMES) {
 }
 
 const secs = (performance.now() - started) / 1000;
-console.log(`${steps} instructions in ${secs.toFixed(2)}s = ${(Number(steps) / secs / 1e6).toFixed(1)} M/s`);
+console.log(
+  `${steps} instructions in ${secs.toFixed(2)}s = ${(Number(steps) / secs / 1e6).toFixed(1)} M/s` +
+    ` (${noJit ? 'interpreted' : 'translated'})`,
+);
 for (const m of marks) {
   console.log(`  frame ${m.frame}: ${m.steps} instructions, ${(m.ms / 1000).toFixed(2)}s`);
 }

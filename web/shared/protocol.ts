@@ -23,6 +23,18 @@ export interface RamUsage {
   wasm: number;
 }
 
+/** What the block translator has been doing. `executed` counts blocks
+ *  entered, so `executed / translated` is how much each translation paid for
+ *  itself; `invalidated` counts blocks dropped because the guest wrote over
+ *  the code they came from. */
+export interface JitStats {
+  enabled: boolean;
+  blocks: number;
+  translated: number;
+  executed: number;
+  invalidated: number;
+}
+
 /** What a firmware NCA is, without reading it: kind 0 is a program, 1 a data
  *  archive, 2 anything else. */
 export interface NandIdentity {
@@ -95,6 +107,7 @@ export interface Commands {
   free_session(): number;
 
   set_trace(on: number): number;
+  set_jit(on: number): number;
   set_input(mask: number, slx: number, sly: number, srx: number, sry: number): number;
   set_touch(points: Uint32Array): number;
   set_battery(percent: number, charging: number): number;
@@ -131,6 +144,7 @@ export interface Commands {
   get_cycles(): number;
   get_reg(i: number): string;
   ram(): RamUsage;
+  jit_stats(): JitStats;
   last_error(): string;
 
   fb_width(): number;

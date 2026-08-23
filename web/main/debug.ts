@@ -35,6 +35,28 @@ export async function drainTrace(): Promise<string> {
   return '';
 }
 
+const jitCb = $<HTMLInputElement>('jit-cb');
+
+jitCb.addEventListener('change', () => {
+  call('set_jit', jitCb.checked ? 1 : 0);
+  setNote('jit-badge', jitCb.checked ? 'on' : 'off', jitCb.checked);
+  if (!jitCb.checked) log('Block translation disabled - running the plain interpreter.', 'dim');
+});
+
+$('btn-jitstats').addEventListener('click', async () => {
+  const s = await call('jit_stats');
+  openPanel('console');
+  // Blocks entered per translation is the number that says whether
+  // translating was worth it: one means every block was thrown away unused.
+  const reuse = s.translated ? (s.executed / s.translated).toFixed(1) : '0';
+  log(
+    `translation: ${s.enabled ? 'on' : 'off'}, ${s.blocks} blocks cached, ` +
+      `${s.translated} translated, ${s.executed} entered (${reuse}x each), ` +
+      `${s.invalidated} invalidated`,
+    'dim',
+  );
+});
+
 $('btn-dumptrace').addEventListener('click', async () => {
   const t = await drainTrace();
   openPanel('console');

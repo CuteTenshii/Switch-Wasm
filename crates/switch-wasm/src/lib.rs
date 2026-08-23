@@ -1081,6 +1081,33 @@ fn boot_entry_regs(cpu: &mut Cpu, env_addr: u32) {
     cpu.set_reg(30, switch_core::cpu::SELF_RETURN_TRAMPOLINE as u64);
 }
 
+/// Enable/disable the block translator (see `switch_core::cpu::jit`).
+///
+/// On by default. The host-side switch reads `SWITCH_NO_JIT` from the
+/// environment, which a browser does not have, so this is the only way a page
+/// can fall back to the plain interpreter — worth having when a title
+/// misbehaves and the question is whether translation is why.
+#[no_mangle]
+pub extern "C" fn switch_set_jit(handle: u32, enabled: u32) {
+    session(handle).cpu.set_jit_enabled(enabled != 0);
+}
+
+/// What the translator has been doing, as JSON.
+#[no_mangle]
+pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session(handle);
+    let stats = s.cpu.jit_stats();
+    let json = format!(
+        "{{\"enabled\":{},\"blocks\":{},\"translated\":{},\"executed\":{},\"invalidated\":{}}}",
+        s.cpu.jit_enabled(),
+        stats.blocks,
+        stats.translated,
+        stats.executed,
+        stats.invalidated
+    );
+    write_into(buf, maxlen, json.as_bytes())
+}
+
 /// Enable/disable the per-instruction disassembly trace.
 #[no_mangle]
 pub extern "C" fn switch_set_trace(handle: u32, enabled: u32) {
