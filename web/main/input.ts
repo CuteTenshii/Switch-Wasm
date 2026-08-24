@@ -4,7 +4,7 @@
    one state. */
 
 import { $ } from './dom';
-import { call, isReady } from './rpc';
+import { call, hasSession, isReady } from './rpc';
 import { pullVibration } from './rumble';
 import { screenEl } from './shell';
 
@@ -154,7 +154,10 @@ screenEl.addEventListener('pointerup', liftTouch);
 screenEl.addEventListener('pointercancel', liftTouch);
 
 function pushInput(): void {
-  if (!isReady()) return;
+  // Reset frees the session before building another, and between the two there
+  // is nothing to push input at. These three calls are fire-and-forget, so a
+  // rejection from one has nobody to catch it.
+  if (!isReady() || !hasSession()) return;
   const pads = navigator.getGamepads ? navigator.getGamepads() : [];
   const pad = pads.find((p) => p && p.connected);
   let mask = keyboardMask();

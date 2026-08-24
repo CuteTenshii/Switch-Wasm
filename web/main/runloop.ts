@@ -36,6 +36,10 @@ const TRACE_SLICE = 5000;
 
 let running = false;
 let pauseRequested = false;
+// Set when the session itself is going away rather than merely stopping. A
+// pause is polite - it lets the slice finish and tidies up after it - and this
+// is not, because everything the tidying would read is about to be freed.
+let aborted = false;
 
 const PLAY_GLYPH = '▶';
 const PAUSE_GLYPH = '❙❙';
@@ -49,48 +53,65 @@ export async function run(): Promise<void> {
   if (running) { pauseRequested = true; return; }
   running = true;
   pauseRequested = false;
+  aborted = false;
   setRunButton(true);
   setState('running');
   const slice = traceEnabled() ? TRACE_SLICE : RUN_SLICE;
   let steps = 0;
   let tick = 0;
-  for (;;) {
-    steps = await call('run', slice);
-    // Yield so the UI repaints and any queued input is processed.
-    await new Promise((r) => setTimeout(r, 0));
-    // `Cpu::run` only stops short of its budget when the machine halted, so a
-    // short slice means this run is over - no separate `halted` round trip.
-    const done = steps < 0 || steps < slice;
-    // Audio has to track the guest or the stream gaps; the panel does not.
-    await pumpAudio();
-    if (done || ++tick % HOUSEKEEPING_EVERY === 0) {
-      await updatePc();
-      await drainOutput();
-      await drainDiagnostics();
-      await sdFlush();
-      await saveFlush();
+  try {
+    for (;;) {
+      steps = await call('run', slice);
+      // Reset does not wait for the slice already in flight - it is about to
+      // be thrown away - so by the time one returns the session may be gone.
+      // Every call below reads it, so the loop leaves rather than asking.
+      if (aborted) return;
+      // Yield so the UI repaints and any queued input is processed.
+      await new Promise((r) => setTimeout(r, 0));
+      if (aborted) return;
+      // `Cpu::run` only stops short of its budget when the machine halted, so
+      // a short slice means this run is over - no separate `halted` round trip.
+      const done = steps < 0 || steps < slice;
+      // Audio has to track the guest or the stream gaps; the panel does not.
+      await pumpAudio();
+      if (done || ++tick % HOUSEKEEPING_EVERY === 0) {
+        await updatePc();
+        await drainOutput();
+        await drainDiagnostics();
+        await sdFlush();
+        await saveFlush();
+      }
+      await presentIfNewFrame();
+      if (done) break;
+      if (pauseRequested) {
+        // Whatever the guest was about to present, it is not going to now: a
+        // paused machine is not a loading one.
+        endLoad();
+        setState('paused');
+        await renderFb();
+        return;
+      }
     }
-    await presentIfNewFrame();
-    if (done) break;
-    if (pauseRequested) {
-      running = false;
-      setRunButton(false);
-      // Whatever the guest was about to present, it is not going to now: a
-      // paused machine is not a loading one.
-      endLoad();
-      setState('paused');
-      await renderFb();
-      return;
+  } catch (err) {
+    // A reset landing between two of the calls above is the expected way for
+    // one of them to fail, and it has already put the page where it wants it.
+    // Anything else is a real failure of the loop and has to be said out loud.
+    if (!aborted) {
+      setState('fault');
+      log('The run loop stopped: ' + (err as Error).message, 'err');
     }
+    return;
+  } finally {
+    running = false;
+    setRunButton(false);
   }
-  running = false;
-  setRunButton(false);
   await finishRun(steps);
 }
 
 /** Stop the loop because the session itself is going away (Reset). Pausing
  *  politely would be waiting for a slice that is about to be freed. */
 export function abortRun(): void {
+  aborted = true;
   pauseRequested = true;
   running = false;
   setRunButton(false);

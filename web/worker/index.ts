@@ -20,11 +20,27 @@ function reply(message: WorkerMessage, transfer?: Transferable[]): void {
   else ctx.postMessage(message);
 }
 
+// The two commands that mean something with no session open: `new` is what
+// creates one, and `set_battery` caches its reading for whichever session
+// comes next. Everything else works on the session this worker is holding.
+const SESSIONLESS = new Set(['new', 'set_battery']);
+
 ctx.onmessage = (e: MessageEvent<CallRequest>) => {
   const { id, cmd, args } = e.data;
   try {
     const handler = CMD[cmd] as ((...a: unknown[]) => unknown) | undefined;
     if (!handler) throw new Error('unknown command ' + cmd);
+    // A session handle is an index into the module's own session table, and a
+    // miss there is a Rust panic - which on wasm is `unreachable`, taking the
+    // whole core down rather than returning an error. The page cannot order
+    // its way out of this on its own: Reset frees the session without waiting
+    // for the run slice already in flight, so that slice's own follow-up calls
+    // land just after the free. Refusing them here is what keeps a reset from
+    // trapping the module.
+    if (state.handle < 0 && !SESSIONLESS.has(cmd)) {
+      reply({ id, ok: false, error: 'there is no session (it has been freed)' });
+      return;
+    }
     const result = handler(...args);
     if (result instanceof Uint8Array) {
       reply({ id, ok: true, result }, [result.buffer as ArrayBuffer]);

@@ -92,6 +92,9 @@ async function init(): Promise<void> {
 
 $('btn-reset').addEventListener('click', async () => {
   abortRun();
+  // Said before the free is even posted, so that everything which pushes at
+  // the session on a timer stops now rather than one round trip from now.
+  setSession(-1);
   // A reset rebuilds everything a boot built, so it reports itself the same
   // way a boot does instead of freezing the stage on the last frame it drew.
   beginLoad('resetting', 'freeing the session');
