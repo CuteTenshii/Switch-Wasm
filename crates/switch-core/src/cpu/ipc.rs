@@ -50,6 +50,15 @@ pub(super) fn preselected_user_parameter() -> Vec<u8> {
     data
 }
 
+/// What `fsp-srv` answers `QueryPointerBufferSize` with: the size of the
+/// send-static ("pointer") buffer one of its sessions will accept.
+///
+/// A real console reports this same 32 KiB. Only a path has to fit — 0x301
+/// bytes, the whole of `nn::fs`'s limit — but the figure is negotiated once
+/// per session and shared by every command on it, so it is the console's
+/// rather than the smallest that would do.
+const FS_POINTER_BUFFER_SIZE: u16 = 0x8000;
+
 /// `nn::account::ProfileBase`: uid, last-edit timestamp, then the nickname.
 const PROFILE_BASE_LEN: usize = 0x38;
 /// `nn::account::UserData`, the block `IProfile::Get` fills in beside the base
@@ -952,6 +961,33 @@ impl Cpu {
     }
 
     pub(super) fn fsp_srv_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+        const CONVERT_TO_DOMAIN: u32 = 0;
+        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(CONVERT_TO_DOMAIN) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "fsp-srv");
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                // QueryPointerBufferSize: how large a send-static ("pointer")
+                // buffer this session will take. It has to be at least a
+                // path's worth, because a path is what `fsp-srv` sends that
+                // way — and `nnSdk` checks the negotiated size *before* it
+                // marshals anything, so a server claiming zero is refused by
+                // the client rather than by the server.
+                //
+                // Answered with nothing at all until now, which reads back as
+                // zero: `nn::fs::OpenFile` inside the Mii editor failed with
+                // hipc 11-141 (PointerBufferTooSmall) without a request ever
+                // reaching this emulator, and the applet took that for a
+                // broken filesystem and called `fatal:u`.
+                Some(QUERY_POINTER_BUFFER_SIZE) => {
+                    self.write_ipc_response(tls, 0, &[], &FS_POINTER_BUFFER_SIZE.to_le_bytes(), &[])
+                }
+                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            };
+        }
         match cmd_id {
             // 0 = ConvertToDomain: hand back a fresh domain object id so the
             // session becomes a domain (libnx's serviceConvertToDomain reads it
