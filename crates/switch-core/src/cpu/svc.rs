@@ -989,6 +989,12 @@ impl Cpu {
                         | "ns:ecommerce" | "ns:dynamic-rights" | "ns:document" => {
                             self.ns_request(tls, handle, cmd_id)?
                         }
+                        // aoc, the add-on content a title was sold. It is
+                        // its own sysmodule interface rather than one of ns's,
+                        // and having no dedicated stub meant `CountAddOnContent`
+                        // came back as a fabricated object id — a *count* a
+                        // title then went looking for content archives for.
+                        "aoc:u" => self.aoc_request(tls, handle, cmd_id)?,
                         // csrng, the random number generator, and `spl:`,
                         // the security processor it really lives behind.
                         "csrng" => self.csrng_request(tls, cmd_id)?,

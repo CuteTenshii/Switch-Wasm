@@ -3106,6 +3106,31 @@ impl Cpu {
                 Some(22) | Some(66) | Some(67) | Some(131) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // Command 210, added in 20.0.0 and still unnamed on
+                // switchbrew: no input, one out **event**. It sits between
+                // GetLastApplicationExitReason (200) and SetAudioOutputPolicy
+                // (220), beside the exit-request flow the same firmware added
+                // at 310 — so what fires it is the system asking a running
+                // title to quit. Nothing here can ask, so it is handed out and
+                // never signalled, which is a wait that genuinely never
+                // finishes rather than one answered wrongly.
+                //
+                // The name is unknown; the shape is not, and the shape is what
+                // a caller acts on. Tomodachi Life asks for this immediately
+                // after its account setup, and `nnSdk` answers an unknown
+                // command id with an svcBreak — so refusing it ended the boot
+                // there.
+                Some(210) => {
+                    let h = match self.application_functions_210_event {
+                        Some(h) => h,
+                        None => {
+                            let h = self.alloc_event("am:application-functions-210", true);
+                            self.application_functions_210_event = Some(h);
+                            h
+                        }
+                    };
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+                }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // ISelfController: the applet's own lifecycle knobs.
@@ -4826,6 +4851,90 @@ impl Cpu {
     fn ns_reply_with_interface(&mut self, tls: u32, handle: u64, name: &str) -> Result<()> {
         self.reply_with_interface(tls, handle, name)?;
         Ok(())
+    }
+
+    /// `aoc:u` — "nn::aocsrv::detail::IAddOnContentManager", the add-on
+    /// content a title has been given. Every answer here is the one a retail
+    /// console gives a title whose DLC nobody has bought: the list is empty,
+    /// and nothing can arrive to change it.
+    ///
+    /// The service had no implementation at all, so every command reached the
+    /// generic fabricated-object reply — which hands a *void* command an
+    /// object id, a sub-session and an event it never asked for, and hands
+    /// `CountAddOnContent` an object id the caller then reads as a **count**.
+    /// A title that believes it owns two pieces of DLC goes looking for two
+    /// content archives that do not exist.
+    pub(super) fn aoc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        const CONVERT_TO_DOMAIN: u32 = 0;
+        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(CONVERT_TO_DOMAIN) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "aoc:u");
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                Some(QUERY_POINTER_BUFFER_SIZE) => {
+                    self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[])
+                }
+                _ => self.unimplemented_command(tls, "aoc:control", cmd_id),
+            };
+        }
+        match cmd_id {
+            // CountAddOnContent -> s32, and ListAddOnContent(s32 offset, s32
+            // count) -> s32 entries written, with the indices themselves going
+            // into a type-6 out buffer. Nothing is installed, so both answer
+            // zero and the buffer is left untouched — a caller that walks it
+            // walks no entries.
+            Some(2) | Some(3) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+            // GetAddOnContentBaseId -> u64. A title's DLC is numbered upwards
+            // from a base id, and unless its control property overrides it
+            // that base is the program id plus 0x1000 — so DLC #1 of
+            // `0100…0000` is `0100…1001`. It is the number every add-on
+            // content index is built against, so answering 0 would have a
+            // title asking for content ids that belong to no title at all.
+            Some(5) => {
+                let base = self.program_id().wrapping_add(0x1000);
+                self.write_ipc_response(tls, 0, &[], &base.to_le_bytes(), &[])
+            }
+            // PrepareAddOnContent(s32 index): mount one entry of the list. The
+            // list is empty, so no index a title got from it can reach this,
+            // and there is nothing to prepare for one that does.
+            Some(7) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // GetAddOnContentListChangedEvent, and the same event fetched on
+            // another process's behalf (…WithProcessId, which differs only by
+            // taking a pid). It fires when DLC is installed or removed while
+            // the title runs; nothing here installs anything, so it is handed
+            // out and never signalled.
+            Some(8) | Some(10) => {
+                let event = match self.aoc_list_changed_event {
+                    Some(event) => event,
+                    None => {
+                        let event = self.alloc_event("aoc:list-changed", true);
+                        self.aoc_list_changed_event = Some(event);
+                        event
+                    }
+                };
+                self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+            }
+            // GetAddOnContentLostErrorCode -> the `nn::err::ErrorCode` a title
+            // displays when the DLC it was using has gone. There is none to
+            // lose, so there is no code to show.
+            Some(9) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+            // NotifyMountAddOnContent / NotifyUnmountAddOnContent: a title
+            // telling `aocsrv` it is holding content open, so the system does
+            // not delete it underneath. Nothing is being held either way.
+            Some(11) | Some(12) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // IsAddOnContentMountedForDebug -> bool.
+            Some(13) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+            // CheckAddOnContentMountStatus: a title asking whether what it
+            // mounted is still there. There is no out value — the **Result**
+            // is the whole answer, and a failure is how a title is told its
+            // DLC has been removed since it mounted it. That cannot happen to
+            // content that was never there, so this succeeds.
+            Some(50) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            _ => self.unimplemented_command(tls, "aoc:u", cmd_id),
+        }
     }
 
     /// `IApplicationManagerInterface`, the interface a title actually asks
@@ -8301,6 +8410,86 @@ mod tests {
         cpu.register_service_handle(9, "am:application-functions");
         cpu.applet_request(TLS, 9, Some(1)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), LAUNCH_PARAMETER_NOT_FOUND);
+    }
+
+    #[test]
+    fn application_functions_210_hands_out_one_event_and_keeps_handing_out_that_one() {
+        // Command 210 is unnamed on switchbrew, but its shape is documented:
+        // no input, one out event. An out-event is one of the two things a
+        // caller cannot invent for itself, so a bare success here is a caller
+        // waiting on handle 0 -- and `nnSdk` answers a *refusal* with an
+        // svcBreak, which is where Tomodachi Life stopped.
+        let mut cpu = request(false, 210, &[]);
+        cpu.register_service_handle(9, "am:application-functions");
+        cpu.applet_request(TLS, 9, Some(210)).unwrap();
+        let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(event, 0, "command 210 handed back no event handle");
+        assert_eq!(cpu.event_name(event), Some("am:application-functions-210"));
+
+        // Nothing here can ask a title to exit, so the event never fires. A
+        // wait on it is a wait for something that genuinely never happens.
+        assert_eq!(cpu.event_signaled(event), Some(false));
+
+        // Asking again has to give back the event the caller is already
+        // waiting on, not a fresh one nothing will ever signal either.
+        marshal(&mut cpu, false, 210, &[]);
+        cpu.applet_request(TLS, 9, Some(210)).unwrap();
+        assert_eq!(u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap()), event);
+    }
+
+    /// Drive one `aoc:u` command on a session opened under that service.
+    fn aoc(cpu: &mut Cpu, command_id: u32) {
+        cpu.register_service_handle(9, "aoc:u");
+        cpu.aoc_request(TLS, 9, Some(command_id)).unwrap();
+    }
+
+    #[test]
+    fn aoc_reports_a_title_nobody_has_bought_add_on_content_for() {
+        const SFCO: u32 = 0x4F43_4653;
+        const PROGRAM_ID: u64 = 0x0100_4890_117B_2000;
+
+        // CountAddOnContent. This is the answer the generic fabricated-object
+        // reply was getting wrong in the most expensive way: it hands back an
+        // object id, and an object id read as a count is a title looking for
+        // content archives that were never installed.
+        let mut cpu = request(false, 2, &[]);
+        aoc(&mut cpu, 2);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "count");
+
+        // GetAddOnContentBaseId -> the program id plus 0x1000, the base every
+        // add-on content index is built against. Zero would have a title
+        // asking for content ids belonging to no title at all.
+        let mut cpu = request(false, 5, &[]);
+        cpu.set_program_id(PROGRAM_ID);
+        aoc(&mut cpu, 5);
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), PROGRAM_ID + 0x1000);
+
+        // CheckAddOnContentMountStatus: no out value at all -- the Result is
+        // the whole answer, and a failure is how a title is told the DLC it
+        // mounted has gone. Nothing was ever mounted, so nothing can go.
+        let mut cpu = request(false, 50, &[]);
+        aoc(&mut cpu, 50);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x10).unwrap(), SFCO);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
+    }
+
+    #[test]
+    fn the_add_on_content_list_never_changes_so_its_event_never_fires() {
+        // GetAddOnContentListChangedEvent, then the same event fetched through
+        // the ...WithProcessId form a system title uses. They are one event on
+        // hardware, and handing out two would leave a caller waiting on
+        // whichever it asked for second.
+        let mut cpu = request(false, 8, &[]);
+        aoc(&mut cpu, 8);
+        let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(event, 0, "GetAddOnContentListChangedEvent handed back no handle");
+        assert_eq!(cpu.event_name(event), Some("aoc:list-changed"));
+        assert_eq!(cpu.event_signaled(event), Some(false));
+
+        marshal(&mut cpu, false, 10, &[]);
+        cpu.aoc_request(TLS, 9, Some(10)).unwrap();
+        assert_eq!(u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap()), event);
     }
 
     /// `AppletId_LibraryAppletWeb`, which is what lennytube asks for when it

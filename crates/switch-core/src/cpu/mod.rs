@@ -544,6 +544,12 @@ pub struct Cpu {
     /// signal an object nobody is waiting on.
     sleep_lock_event: Option<u64>,
     sleep_lock_acquired: bool,
+    /// The event `IApplicationFunctions` command 210 hands out, and the one
+    /// `aoc`'s add-on-content list changes are reported through. Kept for the
+    /// same reason the sleep lock's is: a caller that asks twice has to be
+    /// given the event it is already waiting on.
+    application_functions_210_event: Option<u64>,
+    aoc_list_changed_event: Option<u64>,
     /// The system shared buffer's nvmap `(handle, id)` once an applet has
     /// asked for it, and the slot the next acquire hands out.
     shared_buffer: Option<(u32, u32)>,
@@ -846,6 +852,8 @@ impl Cpu {
             applet_messages: VecDeque::new(),
             sleep_lock_event: None,
             sleep_lock_acquired: false,
+            application_functions_210_event: None,
+            aoc_list_changed_event: None,
             shared_buffer: None,
             shared_buffer_slot: 0,
             applet_focus_announced: false,
