@@ -1,5 +1,5 @@
 //! Compare the BC decoders against an independent implementation:
-//! `bcn_difftest <vectors.bin>`.
+//! `bcn_difftest <vectors.bin> [blocks] [astc_vectors.bin]`.
 //!
 //! The codecs in `gpu/bcn.rs` are transcriptions of a specification, and the
 //! failure mode of a transcription is a table entry that is wrong in a way no
@@ -28,7 +28,7 @@
 //! and no two vendors agreed on it either.
 use std::env;
 use std::fs;
-use switch_core::gpu::bcn::{decode, Codec};
+use switch_core::gpu::bcn::{decode, decode_into, Codec};
 
 fn main() {
     let path = env::args().nth(1).expect("usage: bcn_difftest <vectors.bin>");
@@ -154,9 +154,62 @@ fn main() {
         };
         println!("{:?}: {differing}/{blocks} blocks differ [{verdict}]", group.codec);
     }
+    if let Some(path) = env::args().nth(3) {
+        any_out_of_tolerance |= !compare_astc(&fs::read(&path).unwrap());
+    }
     if any_out_of_tolerance {
         println!("\nsomething is outside tolerance — investigate");
     } else {
         println!("\nevery codec agrees with the reference");
     }
+}
+
+/// The ASTC fixture is grouped by footprint: each group opens with its block
+/// width, height and count as three little-endian i32, then that many records
+/// of sixteen input bytes and one RGBA8 texel per texel of the footprint.
+///
+/// The reference emits bytes from its own float pipeline as
+/// `clamp(v * 65536 + 0.5, 0, 65535) >> 8`, so the comparison applies exactly
+/// that to this decoder's output rather than rounding some other way.
+fn compare_astc(data: &[u8]) -> bool {
+    let word = |at: usize| i32::from_le_bytes(data[at..at + 4].try_into().unwrap());
+    let mut at = 0usize;
+    let mut all_exact = true;
+    while at + 12 <= data.len() {
+        let (bw, bh, count) = (word(at) as usize, word(at + 4) as usize, word(at + 8) as usize);
+        at += 12;
+        let texels = bw * bh;
+        let record = 16 + texels * 4;
+        let codec = Codec::Astc { width: bw as u8, height: bh as u8 };
+        let mut differing = 0u32;
+        let mut worst = 0i32;
+        for _ in 0..count {
+            if at + record > data.len() {
+                break;
+            }
+            let input = &data[at..at + 16];
+            let expected = &data[at + 16..at + record];
+            at += record;
+            let mut got = [[0.0f32; 4]; switch_core::gpu::bcn::MAX_TEXELS];
+            decode_into(codec, input, &mut got).unwrap();
+            let mut differs = false;
+            for texel in 0..texels {
+                for channel in 0..4 {
+                    let mine = ((got[texel][channel] * 65536.0 + 0.5) as i32).clamp(0, 65535) >> 8;
+                    let theirs = expected[texel * 4 + channel] as i32;
+                    if mine != theirs {
+                        differs = true;
+                        worst = worst.max((mine - theirs).abs());
+                    }
+                }
+            }
+            if differs {
+                differing += 1;
+            }
+        }
+        let verdict = if worst == 0 { "exact".to_string() } else { format!("worst delta {worst}") };
+        println!("ASTC {bw}x{bh}: {differing}/{count} blocks differ [{verdict}]");
+        all_exact &= worst == 0;
+    }
+    all_exact
 }

@@ -343,13 +343,34 @@ fn interpolate(e0: u32, e1: u32, index: u32, bits: u32) -> u8 {
     (((64 - w) * e0 + w * e1 + 32) >> 6) as u8
 }
 
+pub use astc::{decode_astc, MAX_TEXELS};
+mod astc;
+
 pub use bc6h::decode_bc6h;
 mod bc6h;
 
 pub use bc7::decode_bc7;
 mod bc7;
 
-/// Decode one block of `codec` from `bytes`.
+/// Decode one block of `codec` into `out`, which must hold at least as many
+/// texels as [`Codec::block_size`] describes.
+///
+/// This is the general entry point: the BC codecs all cover a 4x4 block, but
+/// an ASTC one covers anything up to 12x12, so a caller cannot assume a
+/// sixteen-texel result.
+pub fn decode_into(codec: Codec, bytes: &[u8], out: &mut [[f32; 4]]) -> Result<()> {
+    if let Codec::Astc { width, height } = codec {
+        return decode_astc(bytes, width as u32, height as u32, out);
+    }
+    let block = decode(codec, bytes)?;
+    if out.len() < 16 {
+        return Err(Error::Gpu("bcn: destination is smaller than one block".into()));
+    }
+    out[..16].copy_from_slice(&block);
+    Ok(())
+}
+
+/// Decode one 4x4 block of `codec` from `bytes`.
 pub fn decode(codec: Codec, bytes: &[u8]) -> Result<Block> {
     if bytes.len() < codec.bytes_per_block() as usize {
         return Err(Error::Gpu(format!(
@@ -360,6 +381,11 @@ pub fn decode(codec: Codec, bytes: &[u8]) -> Result<Block> {
         )));
     }
     Ok(match codec {
+        Codec::Astc { .. } => {
+            return Err(Error::Gpu(
+                "bcn: an ASTC block is not 4x4; decode_into takes its footprint".into(),
+            ))
+        }
         Codec::Bc1 => decode_bc1(bytes),
         Codec::Bc2 => decode_bc2(bytes),
         Codec::Bc3 => decode_bc3(bytes),
@@ -386,15 +412,25 @@ pub enum Codec {
     Bc6hUf16,
     Bc6hSf16,
     Bc7,
+    /// ASTC LDR, whose footprint is chosen per texture rather than fixed.
+    Astc { width: u8, height: u8 },
 }
 
 impl Codec {
-    /// Every BC codec is 4x4; the formats differ only in how many bytes that
-    /// block costs.
+    /// How many bytes one block occupies. Every BC codec is 4x4 and differs
+    /// only in this; ASTC is always sixteen bytes whatever its footprint.
     pub fn bytes_per_block(&self) -> u32 {
         match self {
             Codec::Bc1 | Codec::Bc4Unorm | Codec::Bc4Snorm => 8,
             _ => 16,
+        }
+    }
+
+    /// The footprint one block covers, in texels.
+    pub fn block_size(&self) -> (u32, u32) {
+        match self {
+            Codec::Astc { width, height } => (*width as u32, *height as u32),
+            _ => (4, 4),
         }
     }
 

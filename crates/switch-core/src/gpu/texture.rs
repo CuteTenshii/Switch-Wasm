@@ -167,19 +167,20 @@ impl Texture {
                 // "pixel" of it is a whole block, and a row is as many bytes
                 // as the row has blocks. Reading it in texels instead is the
                 // mistake that shreds a compressed image into diagonal
-                // ribbons, because the stride comes out sixteen times too big.
+                // ribbons, because the stride comes out a whole block too big.
                 let bytes = codec.bytes_per_block();
-                let blocks_wide = self.width.div_ceil(BLOCK_SIZE);
+                let (block_w, block_h) = codec.block_size();
+                let blocks_wide = self.width.div_ceil(block_w);
                 let width_bytes = match self.layout {
                     Layout::Pitch { pitch } => pitch,
                     Layout::BlockLinear { .. } => blocks_wide * bytes,
                 };
                 let va = self.addr
-                    + self.layout.offset((x / BLOCK_SIZE) * bytes, y / BLOCK_SIZE, width_bytes)
-                        as u64;
+                    + self.layout.offset((x / block_w) * bytes, y / block_h, width_bytes) as u64;
                 let raw = ctx.read_pixel(va, bytes)?.to_le_bytes();
-                let block = bcn::decode(codec, &raw[..bytes as usize])?;
-                block[((y % BLOCK_SIZE) * BLOCK_SIZE + (x % BLOCK_SIZE)) as usize]
+                let mut block = [[0.0f32; 4]; bcn::MAX_TEXELS];
+                bcn::decode_into(codec, &raw[..bytes as usize], &mut block)?;
+                block[((y % block_h) * block_w + (x % block_w)) as usize]
             }
         };
         if self.srgb {
@@ -200,8 +201,7 @@ impl Texture {
     }
 }
 
-/// Every BC codec tiles the image into 4x4 blocks.
-const BLOCK_SIZE: u32 = 4;
+
 
 /// How a TIC's `COMPONENTS_SIZES` and `R_DATA_TYPE` pair describes its texels.
 ///
@@ -215,6 +215,9 @@ const BLOCK_SIZE: u32 = 4;
 /// readings of the same block layout. Anything else is a clear, honest error
 /// rather than a guess at where its channels sit.
 fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
+    fn astc(width: u8, height: u8) -> Codec {
+        Codec::Astc { width, height }
+    }
     const SNORM: u32 = 1;
     const UNORM: u32 = 2;
     const FLOAT: u32 = 7;
@@ -229,22 +232,26 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x17, UNORM) => Some(Codec::Bc7),
         (0x10, FLOAT) => Some(Codec::Bc6hSf16), // signed half
         (0x11, FLOAT) => Some(Codec::Bc6hUf16), // unsigned half
+        // ASTC's footprint is part of the format number, not a separate field.
+        // The values are deko3d's `ImageFormat_ASTC_2D_*`; 0x43 is not one.
+        (0x40, UNORM) => Some(astc(4, 4)),
+        (0x41, UNORM) => Some(astc(5, 5)),
+        (0x42, UNORM) => Some(astc(6, 6)),
+        (0x44, UNORM) => Some(astc(8, 8)),
+        (0x45, UNORM) => Some(astc(10, 10)),
+        (0x46, UNORM) => Some(astc(12, 12)),
+        (0x50, UNORM) => Some(astc(5, 4)),
+        (0x51, UNORM) => Some(astc(6, 5)),
+        (0x52, UNORM) => Some(astc(8, 6)),
+        (0x53, UNORM) => Some(astc(10, 8)),
+        (0x54, UNORM) => Some(astc(12, 10)),
+        (0x55, UNORM) => Some(astc(8, 5)),
+        (0x56, UNORM) => Some(astc(10, 5)),
+        (0x57, UNORM) => Some(astc(10, 6)),
         _ => None,
     };
     if let Some(codec) = codec {
         return Ok(TexelKind::Block(codec));
-    }
-    // Name the formats that are recognised but undecoded, so their absence
-    // reads as "not written yet" rather than "not a texture format".
-    let pending = match components_sizes {
-        0x40..=0x57 => Some("ASTC"),
-        _ => None,
-    };
-    if let Some(name) = pending {
-        return Err(Error::Gpu(format!(
-            "texture: {name} ({components_sizes:#x}) is a compressed format this decoder does not \
-             implement yet"
-        )));
     }
     if data_type != UNORM {
         return Err(Error::Gpu(format!(
@@ -577,6 +584,53 @@ mod tests {
     }
 
     /// An sRGB texture stores encoded values and hands the shader linear ones.
+    /// An ASTC texture is addressed in blocks like any other compressed one,
+    /// but its footprint is neither square nor four: 8x5 here, so a decoder
+    /// that transposed the two would put row 5 in the wrong block.
+    #[test]
+    fn an_astc_texture_is_addressed_by_its_own_footprint() {
+        let (mut mem, vmm, base) = harness();
+        let tic_addr = base;
+        let tex_addr = base + 0x400;
+        // COMPONENTS_SIZES = ASTC_2D_8X5 (0x55), UNORM, pitch layout.
+        vmm.write_u32(&mut mem, tic_addr, 0x55 | (2 << 7) | IDENTITY_SWIZZLE).unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5).unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21)).unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap(); // pitch 32 bytes = two blocks
+        vmm.write_u32(&mut mem, tic_addr + 16, 15 | TYPE_2D).unwrap(); // width 16
+        vmm.write_u32(&mut mem, tic_addr + 20, 9).unwrap(); // height 10
+
+        // A void-extent block is the simplest valid ASTC block: one flat
+        // colour, with the "extends nowhere" encoding in its extent fields.
+        let place = |mem: &mut Memory, at: u64, r: u16, g: u16, b: u16| {
+            let low: u64 =
+                0x1FC | (0x1FFF << 12) | (0x1FFF << 25) | (0x1FFF << 38) | (0x1FFF << 51);
+            let high: u64 =
+                r as u64 | ((g as u64) << 16) | ((b as u64) << 32) | ((0xFFFFu64) << 48);
+            vmm.write_u64(mem, tex_addr + at, low).unwrap();
+            vmm.write_u64(mem, tex_addr + at + 8, high).unwrap();
+        };
+        place(&mut mem, 0, 65535, 0, 0); // block (0, 0) red
+        place(&mut mem, 16, 0, 65535, 0); // block (1, 0) green
+        place(&mut mem, 32, 0, 0, 65535); // block (0, 1) blue
+        place(&mut mem, 48, 65535, 65535, 65535); // block (1, 1) white
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let ctx =
+            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let texture = read_image(&ctx, tic_addr).unwrap();
+        assert_eq!(texture.kind, TexelKind::Block(Codec::Astc { width: 8, height: 5 }));
+
+        assert_eq!(texture.texel(0, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texture.texel(7, 4, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0], "last texel of it");
+        assert_eq!(texture.texel(8, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0], "next block across");
+        // Row 5 is the second block row, which it would not be for a 5-tall
+        // footprint read as 8 tall.
+        assert_eq!(texture.texel(0, 5, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(texture.texel(15, 9, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+    }
+
     #[test]
     fn an_srgb_texture_samples_in_linear_light() {
         let (mut mem, vmm, base) = harness();
@@ -609,20 +663,40 @@ mod tests {
     }
 
     #[test]
-    fn the_compressed_formats_this_decoder_lacks_say_so() {
-        // ASTC is recognised, and named, but not decoded.
-        let astc = texel_kind_for(0x40, 2).unwrap_err().to_string();
-        assert!(astc.contains("ASTC"), "{astc}");
+    fn every_compressed_tic_format_maps_to_its_codec() {
         // BC6H's two data types are the signed and unsigned half readings of
         // the same block layout, and deko3d numbers SF16 below UF16.
         assert_eq!(texel_kind_for(0x10, 7).unwrap(), TexelKind::Block(Codec::Bc6hSf16));
         assert_eq!(texel_kind_for(0x11, 7).unwrap(), TexelKind::Block(Codec::Bc6hUf16));
-        // The BC formats that are decoded map to their codecs.
         assert_eq!(texel_kind_for(0x24, 2).unwrap(), TexelKind::Block(Codec::Bc1));
         assert_eq!(texel_kind_for(0x26, 2).unwrap(), TexelKind::Block(Codec::Bc3));
         assert_eq!(texel_kind_for(0x27, 1).unwrap(), TexelKind::Block(Codec::Bc4Snorm));
         assert_eq!(texel_kind_for(0x28, 2).unwrap(), TexelKind::Block(Codec::Bc5Unorm));
         assert_eq!(texel_kind_for(0x17, 2).unwrap(), TexelKind::Block(Codec::Bc7));
+
+        // Every ASTC footprint Maxwell can name, and the fourteen of them are
+        // not contiguous: 0x43 is not a format.
+        let footprints = [
+            (0x40, 4, 4), (0x41, 5, 5), (0x42, 6, 6), (0x44, 8, 8),
+            (0x45, 10, 10), (0x46, 12, 12), (0x50, 5, 4), (0x51, 6, 5),
+            (0x52, 8, 6), (0x53, 10, 8), (0x54, 12, 10), (0x55, 8, 5),
+            (0x56, 10, 5), (0x57, 10, 6),
+        ];
+        for (raw, width, height) in footprints {
+            assert_eq!(
+                texel_kind_for(raw, 2).unwrap(),
+                TexelKind::Block(Codec::Astc { width, height }),
+                "COMPONENTS_SIZES {raw:#x}"
+            );
+        }
+        assert!(texel_kind_for(0x43, 2).is_err(), "0x43 is not an ASTC footprint");
+        // A block never carries more texels than the largest footprint.
+        for (raw, width, height) in footprints {
+            let TexelKind::Block(codec) = texel_kind_for(raw, 2).unwrap() else { panic!() };
+            assert_eq!(codec.block_size(), (width as u32, height as u32));
+            assert_eq!(codec.bytes_per_block(), 16);
+            assert!((width as usize) * (height as usize) <= crate::gpu::bcn::MAX_TEXELS);
+        }
     }
 
     #[test]
