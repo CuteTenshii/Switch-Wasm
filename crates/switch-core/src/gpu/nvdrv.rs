@@ -12,7 +12,8 @@
 
 use crate::gpu::syncpt::NvFence;
 use crate::gpu::vmm::{
-    BIG_REGION_END, FLAG_REMAP_SUB_RANGE, SMALL_PAGE_SIZE, SMALL_REGION_BASE, SMALL_REGION_END,
+    BIG_REGION_END, FLAG_FIXED_OFFSET, FLAG_REMAP_SUB_RANGE, SMALL_PAGE_SIZE, SMALL_REGION_BASE,
+    SMALL_REGION_END,
 };
 use crate::gpu::Gpu;
 use crate::mem::Memory;
@@ -531,6 +532,59 @@ impl NvDrv {
                 }
                 Ok(NV_OK)
             }
+            // Remap { u16 flags, kind; u32 nvmap_handle, map_offset,
+            //         gpu_offset, pages }[], every offset and length in big
+            // pages. Unlike `MapBufferEx` this is a batch, and it names the
+            // GPU VA outright rather than asking for one: it is how a driver
+            // fills in a range it reserved as sparse, and how a title gives
+            // one buffer several block-linear kinds by mapping it repeatedly.
+            // A zero handle means "leave this range unmapped".
+            0x14 => {
+                const OP_SIZE: usize = 0x14;
+                if data.len() < OP_SIZE || data.len() % OP_SIZE != 0 {
+                    return Ok(NV_BAD_PARAMETER);
+                }
+                let trace = self.gpu.trace;
+                for at in (0..data.len()).step_by(OP_SIZE) {
+                    let kind = read_u16(data, at + 2);
+                    let nvmap_handle = read_u32(data, at + 4);
+                    let map_offset = u64::from(read_u32(data, at + 8)) << 16;
+                    let gpu_va = u64::from(read_u32(data, at + 0x0C)) << 16;
+                    let size = u64::from(read_u32(data, at + 0x10)) << 16;
+                    if size == 0 {
+                        return Ok(NV_BAD_PARAMETER);
+                    }
+                    if nvmap_handle == 0 {
+                        self.gpu.address_space_mut(as_id)?.unmap_range(gpu_va, size);
+                        continue;
+                    }
+                    let handle = match self.gpu.nvmap.get(nvmap_handle) {
+                        Some(h) if h.allocated => *h,
+                        Some(_) => return Ok(NV_INVALID_STATE),
+                        None => return Ok(NV_BAD_PARAMETER),
+                    };
+                    let cpu_addr = handle.cpu_addr.wrapping_add(map_offset as u32);
+                    let space = self.gpu.address_space_mut(as_id)?;
+                    let page_size = space.big_page_size;
+                    space.unmap_range(gpu_va, size);
+                    space.map(
+                        cpu_addr,
+                        size,
+                        nvmap_handle,
+                        kind as u8,
+                        page_size,
+                        FLAG_FIXED_OFFSET,
+                        gpu_va,
+                    )?;
+                    if trace {
+                        eprintln!(
+                            "[nv] remap handle={nvmap_handle} cpu={cpu_addr:#x} \
+                             size={size:#x} kind={kind:#x} -> gpu_va={gpu_va:#x}"
+                        );
+                    }
+                }
+                Ok(NV_OK)
+            }
             _ => Ok(NV_NOT_IMPLEMENTED),
         }
     }
@@ -707,6 +761,14 @@ fn read_u32(data: &[u8], at: usize) -> u32 {
     v
 }
 
+fn read_u16(data: &[u8], at: usize) -> u16 {
+    let mut v = 0u16;
+    for i in 0..2 {
+        v |= u16::from(data.get(at + i).copied().unwrap_or(0)) << (8 * i);
+    }
+    v
+}
+
 fn read_u64(data: &[u8], at: usize) -> u64 {
     (read_u32(data, at) as u64) | ((read_u32(data, at + 4) as u64) << 32)
 }
@@ -792,6 +854,50 @@ mod tests {
         write_u32(&mut param, 4, 3); // Base
         assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x09, &mut param), NV_OK);
         assert_eq!(read_u32(&param, 8), 0x3000_0000);
+    }
+
+    #[test]
+    fn remap_fills_a_reserved_range_and_a_zero_handle_clears_it() {
+        // `REMAP` is how a title backs address space it reserved as sparse,
+        // and how it gives one buffer several block-linear kinds. It names
+        // the GPU VA outright and counts everything in big pages, so the
+        // request carries neither a page size nor a "fixed offset" flag.
+        let mut drv = NvDrv::new();
+        let mut mem = Memory::new();
+        mem.map_zero(0x3000_0000, 0x2_0000).unwrap();
+        let (map_fd, _) = drv.open("/dev/nvmap").unwrap();
+        let (as_fd, _) = drv.open("/dev/nvhost-as-gpu").unwrap();
+
+        let mut create = [0u8; 8];
+        write_u32(&mut create, 0, 0x2_0000);
+        ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x01, &mut create);
+        let handle = read_u32(&create, 4);
+        let mut alloc = [0u8; 0x20];
+        write_u32(&mut alloc, 0, handle);
+        write_u64(&mut alloc, 0x18, 0x3000_0000);
+        ioctl(&mut drv, &mut mem, map_fd, TYPE_NVMAP, 0x04, &mut alloc);
+
+        // One op: the second big page of the handle, at GPU VA 0x8_0000,
+        // with kind 0xFE.
+        let mut op = [0u8; 0x14];
+        write_u32(&mut op, 0, 0x00FE_0000); // flags 0, kind 0xFE
+        write_u32(&mut op, 4, handle);
+        write_u32(&mut op, 8, 1); // map offset: one big page in
+        write_u32(&mut op, 0x0C, 8); // gpu offset
+        write_u32(&mut op, 0x10, 1); // one big page
+        assert_eq!(ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x14, &mut op), NV_OK);
+
+        let as_id = match drv.file(as_fd) {
+            Some(NvFile::AddressSpace { as_id }) => *as_id,
+            other => panic!("not an address space: {other:?}"),
+        };
+        let space = drv.gpu.address_space_mut(as_id).unwrap();
+        assert_eq!(space.translate(0x8_0000), Some((0x3001_0000, 0x1_0000)));
+        assert_eq!(space.mapping_at(0x8_0000).map(|m| m.kind), Some(0xFE));
+
+        write_u32(&mut op, 4, 0); // no handle: unmap the range again
+        assert_eq!(ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x14, &mut op), NV_OK);
+        assert_eq!(drv.gpu.address_space_mut(as_id).unwrap().translate(0x8_0000), None);
     }
 
     #[test]

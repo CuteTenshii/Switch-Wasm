@@ -242,6 +242,43 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Clear `[gpu_va, gpu_va + size)`, keeping whatever lies outside it.
+    ///
+    /// `REMAP` addresses a range rather than a whole buffer, so what it
+    /// replaces can be part of a larger mapping or several smaller ones. A
+    /// partly-covered mapping is trimmed instead of dropped, because
+    /// [`AddressSpace::translate`] takes the ranges to be disjoint: leaving an
+    /// old mapping overlapping a new one resolves addresses through whichever
+    /// starts lower, which is not the one the guest just asked for.
+    pub fn unmap_range(&mut self, gpu_va: u64, size: u64) {
+        let end = gpu_va.saturating_add(size);
+        let overlapping: Vec<Mapping> = self
+            .mappings
+            .range(..end)
+            .map(|(_, m)| *m)
+            .filter(|m| m.gpu_va.saturating_add(m.size) > gpu_va)
+            .collect();
+        for mapping in overlapping {
+            let mapping_end = mapping.gpu_va.saturating_add(mapping.size);
+            let piece = |at: u64, size: u64| Mapping {
+                gpu_va: at,
+                size,
+                cpu_addr: mapping.cpu_addr.wrapping_add((at - mapping.gpu_va) as u32),
+                handle: mapping.handle,
+                kind: mapping.kind,
+            };
+            self.mappings.remove(&mapping.gpu_va);
+            if mapping.gpu_va < gpu_va {
+                self.mappings
+                    .insert(mapping.gpu_va, piece(mapping.gpu_va, gpu_va - mapping.gpu_va));
+            }
+            if mapping_end > end {
+                self.mappings.insert(end, piece(end, mapping_end - end));
+            }
+        }
+        self.last_translation.set(None);
+    }
+
     /// Allocate `size` bytes of VA from the region that matches `page_size`,
     /// aligned up to it.
     fn bump(&mut self, size: u64, page_size: u64) -> Result<u64> {
@@ -394,6 +431,29 @@ mod tests {
         let (vmm, va) = space_with_buffer(0x2000_0000, 0x1000);
         assert!(vmm.read_u32(&mem, va + 0xffe).is_err());
         assert!(vmm.read_u32(&mem, va + 0x1000).is_err());
+    }
+
+    #[test]
+    fn unmap_range_trims_what_it_only_partly_covers() {
+        let mut vmm = AddressSpace::new();
+        let va = vmm.map(0x2000_0000, 0x4000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+        vmm.unmap_range(va + 0x1000, 0x1000);
+        // The hole is gone and both sides keep resolving to their own bytes.
+        assert_eq!(vmm.translate(va), Some((0x2000_0000, 0x1000)));
+        assert_eq!(vmm.translate(va + 0x1000), None);
+        assert_eq!(vmm.translate(va + 0x2000), Some((0x2000_2000, 0x2000)));
+    }
+
+    #[test]
+    fn unmap_range_spans_several_mappings() {
+        let mut vmm = AddressSpace::new();
+        let a = vmm.map(0x2000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, FLAG_FIXED_OFFSET, 0x10_0000).unwrap();
+        vmm.map(0x2100_0000, 0x1000, 2, 0, SMALL_PAGE_SIZE, FLAG_FIXED_OFFSET, 0x10_1000).unwrap();
+        vmm.map(0x2200_0000, 0x1000, 3, 0, SMALL_PAGE_SIZE, FLAG_FIXED_OFFSET, 0x10_2000).unwrap();
+        vmm.unmap_range(a, 0x2000);
+        assert_eq!(vmm.translate(a), None);
+        assert_eq!(vmm.translate(a + 0x1000), None);
+        assert_eq!(vmm.translate(a + 0x2000), Some((0x2200_0000, 0x1000)));
     }
 
     #[test]
