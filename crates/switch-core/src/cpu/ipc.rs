@@ -202,17 +202,84 @@ const JPEG_DC_VALUES: [u8; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 const JPEG_AC_BITS: [u8; 16] = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const JPEG_AC_VALUES: [u8; 2] = [JPEG_EOB, 0xF0];
 
-/// What `GetSaveDataSize` reports before anything has read the running title's
-/// NACP: 64 MiB of save data and 16 MiB of journal.
+/// What the save-data commands report before anything has read the running
+/// title's NACP: 64 MiB of save data and 16 MiB of journal.
 ///
-/// The real pair is per-title and only the Control NCA knows it — Tomodachi
-/// Life declares 54 MiB and 10 MiB — so this is a fallback, and it is
-/// deliberately generous. Reporting *more* than a title needs costs nothing,
-/// since nothing here enforces a quota; reporting less is the answer that
-/// hurts, because a title that reads a quota its save does not fit into is a
-/// title that does not write one.
+/// The real figures are per-title and only the Control NCA knows them —
+/// Tomodachi Life declares 54 MiB and 10 MiB — so this is a fallback, and it
+/// is deliberately generous. Reporting *more* than a title needs costs
+/// nothing, since nothing here enforces a quota; reporting less is the answer
+/// that hurts, because a title that reads a quota its save does not fit into
+/// is a title that does not write one.
 pub(crate) const DEFAULT_SAVE_DATA_SIZE: i64 = 0x400_0000;
 pub(crate) const DEFAULT_SAVE_DATA_JOURNAL_SIZE: i64 = 0x100_0000;
+
+/// How many cache storages a title may address when its NACP has not said.
+/// One is enough for a title that asks without declaring: cache storage is
+/// scratch space, and a title that wanted several would have declared them.
+pub(crate) const DEFAULT_CACHE_STORAGE_INDEX_MAX: i32 = 1;
+
+/// What the running title is allowed to store, as its own NACP declares it.
+///
+/// Every figure here is reported by one `IApplicationFunctions` command and
+/// changes nothing else: the emulated NAND has no quota and grows with
+/// whatever a title writes. They matter because a title reads them *before*
+/// it writes — to decide whether its save fits, whether it may grow one, and
+/// how many cache storages it may create — and acts on the answer.
+///
+/// A zero that came from a real NACP is passed through rather than corrected.
+/// A title that declares no ceiling is one that never extends its save, and 0
+/// is what says so; inventing headroom for it would be answering a question it
+/// did not ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SaveDataQuota {
+    /// The size the user-account save is created at, and its journal.
+    pub size: i64,
+    pub journal_size: i64,
+    /// How far either may be extended, which is a separate NACP field and
+    /// commonly 0 even when the size above is not.
+    pub size_max: i64,
+    pub journal_size_max: i64,
+    /// The same pair for the console-wide save, which is not per-profile.
+    pub device_size_max: i64,
+    pub device_journal_size_max: i64,
+    /// Cache storage: the ceiling on one storage's data and journal together,
+    /// and how many of them the title may address.
+    pub cache_storage_size_max: i64,
+    pub cache_storage_index_max: i32,
+}
+
+impl Default for SaveDataQuota {
+    fn default() -> SaveDataQuota {
+        SaveDataQuota {
+            size: DEFAULT_SAVE_DATA_SIZE,
+            journal_size: DEFAULT_SAVE_DATA_JOURNAL_SIZE,
+            // Room to grow, rather than the 0 that would tell a title its save
+            // is already at its ceiling. Nothing here is measuring.
+            size_max: DEFAULT_SAVE_DATA_SIZE,
+            journal_size_max: DEFAULT_SAVE_DATA_JOURNAL_SIZE,
+            device_size_max: DEFAULT_SAVE_DATA_SIZE,
+            device_journal_size_max: DEFAULT_SAVE_DATA_JOURNAL_SIZE,
+            cache_storage_size_max: DEFAULT_SAVE_DATA_SIZE,
+            cache_storage_index_max: DEFAULT_CACHE_STORAGE_INDEX_MAX,
+        }
+    }
+}
+
+impl From<&crate::control::Nacp> for SaveDataQuota {
+    fn from(nacp: &crate::control::Nacp) -> SaveDataQuota {
+        SaveDataQuota {
+            size: nacp.user_account_save_data_size,
+            journal_size: nacp.user_account_save_data_journal_size,
+            size_max: nacp.user_account_save_data_size_max,
+            journal_size_max: nacp.user_account_save_data_journal_size_max,
+            device_size_max: nacp.device_save_data_size_max,
+            device_journal_size_max: nacp.device_save_data_journal_size_max,
+            cache_storage_size_max: nacp.cache_storage_data_and_journal_size_max,
+            cache_storage_index_max: i32::from(nacp.cache_storage_index_max),
+        }
+    }
+}
 
 /// `nn::audio::PcmFormat`: 16-bit signed samples, the only format `audout`
 /// takes here and the one every caller asks for.
@@ -2565,6 +2632,17 @@ impl Cpu {
         }
     }
 
+    /// Reply with the two s64s every `am` save-data size query reports: a
+    /// size and the journal beside it. Three commands differ only in which
+    /// pair they name, and a reply that got the *width* wrong would be read as
+    /// a size by all three.
+    fn write_save_data_pair(&mut self, tls: u32, size: i64, journal_size: i64) -> Result<()> {
+        let mut sizes = Vec::with_capacity(16);
+        sizes.extend_from_slice(&size.to_le_bytes());
+        sizes.extend_from_slice(&journal_size.to_le_bytes());
+        self.write_ipc_response(tls, 0, &[], &sizes, &[])
+    }
+
     /// Answers a command a service does not actually implement.
     ///
     /// Everything `am` hands back is a live kernel object or a piece of applet
@@ -3086,10 +3164,68 @@ impl Cpu {
                 // svcBreak, 452M steps in, with the title's RomFS mounted and
                 // its first assets already decompressing.
                 Some(26) => {
-                    let mut sizes = Vec::with_capacity(16);
-                    sizes.extend_from_slice(&self.save_data_size.to_le_bytes());
-                    sizes.extend_from_slice(&self.save_data_journal_size.to_le_bytes());
-                    self.write_ipc_response(tls, 0, &[], &sizes, &[])
+                    let quota = self.save_data_quota;
+                    self.write_save_data_pair(tls, quota.size, quota.journal_size)
+                }
+                // GetSaveDataSizeMax / GetDeviceSaveDataSizeMax: the same two
+                // s64s, for how far each save may be *extended* rather than
+                // what it was created at. Both take no input.
+                //
+                // A NACP commonly declares a size and no ceiling, and that 0
+                // is reported as it stands: it is the title's own statement
+                // that it never grows this save. Inventing headroom would
+                // answer a question the title did not ask, and the failure it
+                // causes — a title extending a save the system never agreed to
+                // — surfaces nowhere near here.
+                Some(28) => {
+                    let quota = self.save_data_quota;
+                    self.write_save_data_pair(tls, quota.size_max, quota.journal_size_max)
+                }
+                Some(35) => {
+                    let quota = self.save_data_quota;
+                    self.write_save_data_pair(
+                        tls,
+                        quota.device_size_max,
+                        quota.device_journal_size_max,
+                    )
+                }
+                // GetCacheStorageMax -> an s32 and an s64: how many cache
+                // storages the title may address, and the ceiling on one
+                // storage's data and journal together.
+                //
+                // The two are laid out the way `sf` marshals a pair of
+                // outputs, each aligned to its own width — so the s64 is at +8
+                // and +4 is padding, not the second half of a packed struct.
+                Some(29) => {
+                    let quota = self.save_data_quota;
+                    let mut out = Vec::with_capacity(16);
+                    out.extend_from_slice(&quota.cache_storage_index_max.to_le_bytes());
+                    out.extend_from_slice(&[0u8; 4]);
+                    out.extend_from_slice(&quota.cache_storage_size_max.to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &out, &[])
+                }
+                // CreateCacheStorage(u16 index, s64 size, s64 journal) -> the
+                // storage it was put on, and how much room that took.
+                //
+                // Cache storage is scratch: a title asks for some, the system
+                // may delete it again between runs, and a title that finds it
+                // gone rebuilds it. Here there is one storage and it has no
+                // quota, so the request is granted as asked and nothing is
+                // reserved — `fsp-srv` will create the save the first time the
+                // title mounts it, exactly as it does for any other.
+                //
+                // Unlike its neighbours this command's *output* shape is not
+                // documented on switchbrew; it is `libnx`'s (a u32 target
+                // followed by a u64 required size). The reply is a full 0x10
+                // either way, which is the shape that survives being wrong —
+                // a reply may be longer than a caller expects, never shorter.
+                Some(27) => {
+                    let mut out = Vec::with_capacity(16);
+                    // The one storage this console has.
+                    out.extend_from_slice(&1u32.to_le_bytes());
+                    out.extend_from_slice(&[0u8; 4]);
+                    out.extend_from_slice(&0u64.to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &out, &[])
                 }
                 // GetDesiredLanguage -> an `nn::settings::LanguageCode`, which
                 // is the null-padded BCP-47 tag as eight raw bytes.
@@ -8488,12 +8624,83 @@ mod tests {
         const JOURNAL: i64 = 10_485_760;
 
         let mut cpu = request(false, 26, &payload);
-        cpu.set_save_data_sizes(SAVE, JOURNAL);
+        cpu.set_save_data_quota(super::SaveDataQuota {
+            size: SAVE,
+            journal_size: JOURNAL,
+            ..Default::default()
+        });
         cpu.register_service_handle(9, "am:application-functions");
         cpu.applet_request(TLS, 9, Some(26)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap() as i64, SAVE);
         assert_eq!(cpu.mem.read_u64(TLS + 0x28).unwrap() as i64, JOURNAL);
+    }
+
+    #[test]
+    fn the_save_data_ceilings_are_reported_apart_from_the_sizes() {
+        // 26 reports what the save was created at, 28 how far it may be
+        // extended, 35 the same for the console-wide save. Three commands
+        // reporting the same two s64s is exactly the shape where a mixed-up
+        // pair goes unnoticed, so each is checked against a distinct number.
+        let quota = super::SaveDataQuota {
+            size: 1,
+            journal_size: 2,
+            size_max: 3,
+            journal_size_max: 4,
+            device_size_max: 5,
+            device_journal_size_max: 6,
+            ..Default::default()
+        };
+        for (command, expected) in [(26, (1i64, 2i64)), (28, (3, 4)), (35, (5, 6))] {
+            let mut cpu = request(false, command, &[0u8; 0x18]);
+            cpu.set_save_data_quota(quota);
+            cpu.register_service_handle(9, "am:application-functions");
+            cpu.applet_request(TLS, 9, Some(command)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result of {command}");
+            let got = (
+                cpu.mem.read_u64(TLS + 0x20).unwrap() as i64,
+                cpu.mem.read_u64(TLS + 0x28).unwrap() as i64,
+            );
+            assert_eq!(got, expected, "command {command}");
+        }
+    }
+
+    #[test]
+    fn a_declared_ceiling_of_zero_is_reported_as_zero() {
+        // A NACP commonly gives a save a size and no ceiling. That 0 is the
+        // title's own statement that it never extends this save, so it is
+        // reported rather than quietly replaced with headroom the system never
+        // agreed to — the failure that would cause surfaces nowhere near here.
+        let mut cpu = request(false, 28, &[]);
+        cpu.set_save_data_quota(super::SaveDataQuota {
+            size: 56_623_104,
+            journal_size: 10_485_760,
+            size_max: 0,
+            journal_size_max: 0,
+            ..Default::default()
+        });
+        cpu.register_service_handle(9, "am:application-functions");
+        cpu.applet_request(TLS, 9, Some(28)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0);
+        assert_eq!(cpu.mem.read_u64(TLS + 0x28).unwrap(), 0);
+    }
+
+    #[test]
+    fn get_cache_storage_max_aligns_its_size_after_its_count() {
+        // An s32 then an s64, each aligned to its own width the way `sf`
+        // marshals a pair of outputs — so the size is at +8 and +4 is padding.
+        // Packing the two would put the size where the caller reads padding
+        // and report a ceiling of zero.
+        let mut cpu = request(false, 29, &[]);
+        cpu.set_save_data_quota(super::SaveDataQuota {
+            cache_storage_index_max: 3,
+            cache_storage_size_max: 0x40_0000,
+            ..Default::default()
+        });
+        cpu.register_service_handle(9, "am:application-functions");
+        cpu.applet_request(TLS, 9, Some(29)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 3, "index max");
+        assert_eq!(cpu.mem.read_u64(TLS + 0x28).unwrap(), 0x40_0000, "size max");
     }
 
     #[test]

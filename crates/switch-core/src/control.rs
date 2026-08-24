@@ -105,8 +105,26 @@ const BCAT_STORAGE_SIZE_OFFSET: usize = 0x30A0;
 const ERROR_CODE_CATEGORY_OFFSET: usize = 0x30A8;
 const ERROR_CODE_CATEGORY_SIZE: usize = 8;
 /// A real `control.nacp` is 0x4000 bytes, but nothing past the last field
-/// read here is needed — so that, not the full size, is what's required.
+/// *required* here is needed — so that, not the full size, is what's checked.
+///
+/// The ceiling fields below sit past this, and are read only if the NACP
+/// actually extends that far. Raising the minimum to cover them would make a
+/// truncated NACP that parses today stop parsing, and a title's name and icon
+/// do not depend on what its save data is allowed to grow to.
 const NACP_MIN_SIZE: usize = ERROR_CODE_CATEGORY_OFFSET + ERROR_CODE_CATEGORY_SIZE;
+/// How large each save may be *extended* to, as against the sizes above,
+/// which are what it is created at.
+const USER_ACCOUNT_SAVE_DATA_SIZE_MAX_OFFSET: usize = 0x3148;
+const USER_ACCOUNT_SAVE_DATA_JOURNAL_SIZE_MAX_OFFSET: usize = 0x3150;
+const DEVICE_SAVE_DATA_SIZE_MAX_OFFSET: usize = 0x3158;
+const DEVICE_SAVE_DATA_JOURNAL_SIZE_MAX_OFFSET: usize = 0x3160;
+/// Cache storage: scratch space a title may create and the system may delete
+/// again, unlike save data. It is addressed by index, so it has a count as
+/// well as a size.
+const CACHE_STORAGE_SIZE_OFFSET: usize = 0x3170;
+const CACHE_STORAGE_JOURNAL_SIZE_OFFSET: usize = 0x3178;
+const CACHE_STORAGE_DATA_AND_JOURNAL_SIZE_MAX_OFFSET: usize = 0x3180;
+const CACHE_STORAGE_INDEX_MAX_OFFSET: usize = 0x3188;
 
 /// `AttributeFlag` bit 0: the title is a demo build.
 const ATTRIBUTE_DEMO: u32 = 1 << 0;
@@ -216,6 +234,20 @@ pub struct Nacp {
     pub device_save_data_journal_size: i64,
     /// Space reserved for BCAT, the background data-delivery cache.
     pub bcat_delivery_cache_storage_size: i64,
+    /// How far each save may be extended past the size it was created at.
+    /// A title that never grows its save leaves these 0, and so does a NACP
+    /// too short to hold them — they are past [`NACP_MIN_SIZE`].
+    pub user_account_save_data_size_max: i64,
+    pub user_account_save_data_journal_size_max: i64,
+    pub device_save_data_size_max: i64,
+    pub device_save_data_journal_size_max: i64,
+    /// Cache storage: the size one is created at, and the ceiling on data and
+    /// journal together, which is what a title is told it may ask for.
+    pub cache_storage_size: i64,
+    pub cache_storage_journal_size: i64,
+    pub cache_storage_data_and_journal_size_max: i64,
+    /// How many cache storages the title may address, by index.
+    pub cache_storage_index_max: u16,
     /// The prefix of the error codes the title reports (`2181` in
     /// `2181-0002`), empty when it uses the system's.
     pub application_error_code_category: String,
@@ -279,6 +311,32 @@ impl Nacp {
             device_save_data_size: read_i64(data, DEVICE_SAVE_DATA_SIZE_OFFSET),
             device_save_data_journal_size: read_i64(data, DEVICE_SAVE_DATA_JOURNAL_SIZE_OFFSET),
             bcat_delivery_cache_storage_size: read_i64(data, BCAT_STORAGE_SIZE_OFFSET),
+            user_account_save_data_size_max: read_i64_if_present(
+                data,
+                USER_ACCOUNT_SAVE_DATA_SIZE_MAX_OFFSET,
+            ),
+            user_account_save_data_journal_size_max: read_i64_if_present(
+                data,
+                USER_ACCOUNT_SAVE_DATA_JOURNAL_SIZE_MAX_OFFSET,
+            ),
+            device_save_data_size_max: read_i64_if_present(data, DEVICE_SAVE_DATA_SIZE_MAX_OFFSET),
+            device_save_data_journal_size_max: read_i64_if_present(
+                data,
+                DEVICE_SAVE_DATA_JOURNAL_SIZE_MAX_OFFSET,
+            ),
+            cache_storage_size: read_i64_if_present(data, CACHE_STORAGE_SIZE_OFFSET),
+            cache_storage_journal_size: read_i64_if_present(data, CACHE_STORAGE_JOURNAL_SIZE_OFFSET),
+            cache_storage_data_and_journal_size_max: read_i64_if_present(
+                data,
+                CACHE_STORAGE_DATA_AND_JOURNAL_SIZE_MAX_OFFSET,
+            ),
+            cache_storage_index_max: match data.len() >= CACHE_STORAGE_INDEX_MAX_OFFSET + 2 {
+                true => u16::from_le_bytes([
+                    data[CACHE_STORAGE_INDEX_MAX_OFFSET],
+                    data[CACHE_STORAGE_INDEX_MAX_OFFSET + 1],
+                ]),
+                false => 0,
+            },
             application_error_code_category: nul_terminated(
                 &data[ERROR_CODE_CATEGORY_OFFSET..ERROR_CODE_CATEGORY_OFFSET + ERROR_CODE_CATEGORY_SIZE],
             ),
@@ -466,6 +524,17 @@ fn read_i64(data: &[u8], at: usize) -> i64 {
     crate::nsp::read_u64(data, at) as i64
 }
 
+/// The same, for a field past [`NACP_MIN_SIZE`]: 0 when the NACP does not
+/// reach it. A NACP that stops short has not declared the field, and a title
+/// that declares no ceiling is one that never grows the save — which is what
+/// 0 means to every caller of these anyway.
+fn read_i64_if_present(data: &[u8], at: usize) -> i64 {
+    match data.len() >= at + 8 {
+        true => read_i64(data, at),
+        false => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +574,19 @@ mod tests {
         fn i64(mut self, at: usize, value: i64) -> NacpBuilder {
             self.data[at..at + 8].copy_from_slice(&value.to_le_bytes());
             self
+        }
+
+        fn u16(mut self, at: usize, value: u16) -> NacpBuilder {
+            self.data[at..at + 2].copy_from_slice(&value.to_le_bytes());
+            self
+        }
+
+        /// A NACP the full 0x4000 bytes a real one is. [`NacpBuilder::new`]
+        /// stops at [`NACP_MIN_SIZE`], which is short of the ceiling and cache
+        /// storage fields — the point being that a NACP may legitimately stop
+        /// there, so the two cases are built differently on purpose.
+        fn full() -> NacpBuilder {
+            NacpBuilder { data: vec![0u8; 0x4000] }
         }
 
         fn unrated(mut self) -> NacpBuilder {
@@ -641,5 +723,60 @@ mod tests {
         assert_eq!(control.icon_mime(), "image/png");
         control.icon.clear();
         assert_eq!(control.icon_mime(), "");
+    }
+
+    /// A NACP declaring every save-data figure, each a distinct number so a
+    /// pair read out of the wrong offset cannot pass.
+    fn nacp_with_save_data() -> Vec<u8> {
+        NacpBuilder::full()
+            .title(0, "Game", "Studio")
+            .unrated()
+            .i64(USER_ACCOUNT_SAVE_DATA_SIZE_OFFSET, 0x100_0000)
+            .i64(USER_ACCOUNT_SAVE_DATA_JOURNAL_SIZE_OFFSET, 0x20_0000)
+            .i64(USER_ACCOUNT_SAVE_DATA_SIZE_MAX_OFFSET, 0x200_0000)
+            .i64(USER_ACCOUNT_SAVE_DATA_JOURNAL_SIZE_MAX_OFFSET, 0x40_0000)
+            .i64(DEVICE_SAVE_DATA_SIZE_MAX_OFFSET, 0x300_0000)
+            .i64(DEVICE_SAVE_DATA_JOURNAL_SIZE_MAX_OFFSET, 0x50_0000)
+            .i64(CACHE_STORAGE_SIZE_OFFSET, 0x10_0000)
+            .i64(CACHE_STORAGE_JOURNAL_SIZE_OFFSET, 0x8_0000)
+            .i64(CACHE_STORAGE_DATA_AND_JOURNAL_SIZE_MAX_OFFSET, 0x400_0000)
+            .u16(CACHE_STORAGE_INDEX_MAX_OFFSET, 3)
+            .build()
+    }
+
+    #[test]
+    fn every_save_data_figure_a_nacp_declares_reaches_the_cpu() {
+        // `SaveDataQuota::from` is the one call site both loaders use, and a
+        // quota assembled field by field is a quota with a field missing. The
+        // command that reports the missing one answers 0 *with a success*,
+        // which is the failure that does not look like one.
+        let nacp = Nacp::parse(&nacp_with_save_data()).unwrap();
+        let quota = crate::cpu::SaveDataQuota::from(&nacp);
+        assert_eq!(quota.size, 0x100_0000);
+        assert_eq!(quota.journal_size, 0x20_0000);
+        assert_eq!(quota.size_max, 0x200_0000);
+        assert_eq!(quota.journal_size_max, 0x40_0000);
+        assert_eq!(quota.device_size_max, 0x300_0000);
+        assert_eq!(quota.device_journal_size_max, 0x50_0000);
+        assert_eq!(quota.cache_storage_size_max, 0x400_0000);
+        assert_eq!(quota.cache_storage_index_max, 3);
+    }
+
+    #[test]
+    fn a_nacp_that_stops_before_the_ceilings_still_parses() {
+        // The ceiling and cache-storage fields sit past `NACP_MIN_SIZE`.
+        // Requiring them would make a NACP that parses today stop parsing, and
+        // a title's name and icon do not depend on what its save may grow to —
+        // so a short one reports 0 for them and everything else as before.
+        let short = NacpBuilder::new()
+            .title(0, "Game", "Studio")
+            .unrated()
+            .i64(USER_ACCOUNT_SAVE_DATA_SIZE_OFFSET, 0x100_0000)
+            .build();
+        assert!(short.len() < USER_ACCOUNT_SAVE_DATA_SIZE_MAX_OFFSET);
+        let nacp = Nacp::parse(&short).unwrap();
+        assert_eq!(nacp.user_account_save_data_size, 0x100_0000);
+        assert_eq!(nacp.user_account_save_data_size_max, 0);
+        assert_eq!(nacp.cache_storage_index_max, 0);
     }
 }

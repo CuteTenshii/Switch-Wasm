@@ -634,9 +634,9 @@ pub extern "C" fn switch_parse_nca(handle: u32, ptr: *const u8, len: u32, buf: *
     write_into(buf, maxlen, &out)
 }
 
-/// Cache a title's control data on the session, and tell the CPU the two
-/// figures out of it that the running title can ask for: its save-data quota
-/// and its journal's, which `IApplicationFunctions::GetSaveDataSize` reports.
+/// Cache a title's control data on the session, and tell the CPU what the
+/// NACP inside it says the title may store — the figures the
+/// `IApplicationFunctions` save-data commands report back to it.
 ///
 /// The NACP is the only place those numbers exist, and it is in the Control
 /// NCA rather than the Program one — so a title launched without the control
@@ -644,10 +644,7 @@ pub extern "C" fn switch_parse_nca(handle: u32, ptr: *const u8, len: u32, buf: *
 /// page already does to show the title's name and icon, which is why this is
 /// the point they arrive.
 fn cache_control(s: &mut Session, control: switch_core::control::Control) {
-    s.cpu.set_save_data_sizes(
-        control.nacp.user_account_save_data_size,
-        control.nacp.user_account_save_data_journal_size,
-    );
+    s.cpu.set_save_data_quota(switch_core::cpu::SaveDataQuota::from(&control.nacp));
     s.control = Some(control);
 }
 

@@ -140,10 +140,18 @@ fn main() {
                 &keys,
             ) {
                 Ok(control) => {
-                    let size = control.nacp.user_account_save_data_size;
-                    let journal = control.nacp.user_account_save_data_journal_size;
-                    println!("save data: {} bytes (+{} journal), from the NACP", size, journal);
-                    cpu.set_save_data_sizes(size, journal);
+                    let quota = switch_core::cpu::SaveDataQuota::from(&control.nacp);
+                    println!(
+                        "save data: {} bytes (+{} journal), extendable to {} (+{}); \
+                         cache storage: {} x {} bytes — all from the NACP",
+                        quota.size,
+                        quota.journal_size,
+                        quota.size_max,
+                        quota.journal_size_max,
+                        quota.cache_storage_index_max,
+                        quota.cache_storage_size_max,
+                    );
+                    cpu.set_save_data_quota(quota);
                 }
                 Err(e) => println!("Control NCA unreadable, using default save sizes: {}", e),
             }
