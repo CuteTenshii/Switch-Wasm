@@ -634,6 +634,23 @@ pub extern "C" fn switch_parse_nca(handle: u32, ptr: *const u8, len: u32, buf: *
     write_into(buf, maxlen, &out)
 }
 
+/// Cache a title's control data on the session, and tell the CPU the two
+/// figures out of it that the running title can ask for: its save-data quota
+/// and its journal's, which `IApplicationFunctions::GetSaveDataSize` reports.
+///
+/// The NACP is the only place those numbers exist, and it is in the Control
+/// NCA rather than the Program one — so a title launched without the control
+/// having been read reports the CPU's default instead. Reading it is what the
+/// page already does to show the title's name and icon, which is why this is
+/// the point they arrive.
+fn cache_control(s: &mut Session, control: switch_core::control::Control) {
+    s.cpu.set_save_data_sizes(
+        control.nacp.user_account_save_data_size,
+        control.nacp.user_account_save_data_journal_size,
+    );
+    s.control = Some(control);
+}
+
 /// Read the title's control data — name, publisher, version and icon — from
 /// the Control NCA in the open container and cache it in the session, for
 /// `switch_control_json` and `switch_control_icon` to read back.
@@ -674,7 +691,7 @@ pub extern "C" fn switch_load_control_from_nsp(handle: u32) -> i32 {
     };
     match switch_core::control::Control::from_source(file, &s.keys) {
         Ok(control) => {
-            s.control = Some(control);
+            cache_control(s, control);
             s.last_error.clear();
             0
         }
@@ -696,7 +713,7 @@ pub extern "C" fn switch_load_control_from_nca(handle: u32) -> i32 {
     };
     match switch_core::control::Control::from_source(container, &s.keys) {
         Ok(control) => {
-            s.control = Some(control);
+            cache_control(s, control);
             s.last_error.clear();
             0
         }

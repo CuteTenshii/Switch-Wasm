@@ -550,6 +550,18 @@ pub struct Cpu {
     /// given the event it is already waiting on.
     application_functions_210_event: Option<u64>,
     aoc_list_changed_event: Option<u64>,
+    /// The save-data quota the running title was given, and the journal
+    /// beside it, as `IApplicationFunctions::GetSaveDataSize` reports them.
+    ///
+    /// A console reads both out of the title's own NACP
+    /// (`UserAccountSaveDataSize`), which lives in the **Control** NCA rather
+    /// than the Program one — so they arrive through
+    /// [`Cpu::set_save_data_sizes`] once whoever opened the container has read
+    /// it, and stay at the default when nothing has (a bare Program NCA has no
+    /// NACP to read). Nothing here enforces either number: the emulated NAND
+    /// grows with whatever a title writes into it.
+    save_data_size: i64,
+    save_data_journal_size: i64,
     /// The system shared buffer's nvmap `(handle, id)` once an applet has
     /// asked for it, and the slot the next acquire hands out.
     shared_buffer: Option<(u32, u32)>,
@@ -854,6 +866,8 @@ impl Cpu {
             sleep_lock_acquired: false,
             application_functions_210_event: None,
             aoc_list_changed_event: None,
+            save_data_size: ipc::DEFAULT_SAVE_DATA_SIZE,
+            save_data_journal_size: ipc::DEFAULT_SAVE_DATA_JOURNAL_SIZE,
             shared_buffer: None,
             shared_buffer_slot: 0,
             applet_focus_announced: false,
@@ -2337,6 +2351,16 @@ impl Cpu {
     /// Set the program (title) id `pm:info` reports for the running process.
     /// A loader that decrypted an NCA knows it; homebrew has none, and keeps
     /// the Album applet's id it would run under on real hardware.
+    /// Tell the running title how much save data it was allotted, from its
+    /// NACP's `UserAccountSaveDataSize` and `UserAccountSaveDataJournalSize`.
+    /// A title that declares no user-account save reports 0 for both, and that
+    /// is passed through rather than corrected — 0 is the honest answer for a
+    /// title that has no save, and the wrong answer to give one that does.
+    pub fn set_save_data_sizes(&mut self, size: i64, journal_size: i64) {
+        self.save_data_size = size;
+        self.save_data_journal_size = journal_size;
+    }
+
     pub fn set_program_id(&mut self, program_id: u64) {
         self.program_id = program_id;
     }

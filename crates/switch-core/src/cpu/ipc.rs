@@ -202,6 +202,18 @@ const JPEG_DC_VALUES: [u8; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 const JPEG_AC_BITS: [u8; 16] = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 const JPEG_AC_VALUES: [u8; 2] = [JPEG_EOB, 0xF0];
 
+/// What `GetSaveDataSize` reports before anything has read the running title's
+/// NACP: 64 MiB of save data and 16 MiB of journal.
+///
+/// The real pair is per-title and only the Control NCA knows it — Tomodachi
+/// Life declares 54 MiB and 10 MiB — so this is a fallback, and it is
+/// deliberately generous. Reporting *more* than a title needs costs nothing,
+/// since nothing here enforces a quota; reporting less is the answer that
+/// hurts, because a title that reads a quota its save does not fit into is a
+/// title that does not write one.
+pub(crate) const DEFAULT_SAVE_DATA_SIZE: i64 = 0x400_0000;
+pub(crate) const DEFAULT_SAVE_DATA_JOURNAL_SIZE: i64 = 0x100_0000;
+
 /// `nn::audio::PcmFormat`: 16-bit signed samples, the only format `audout`
 /// takes here and the one every caller asks for.
 const PCM_FORMAT_INT16: u32 = 2;
@@ -3057,6 +3069,28 @@ impl Cpu {
                 }
                 // EnsureSaveData -> the save data size it ensured.
                 Some(20) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+                // GetSaveDataSize(u8 SaveDataType, u128 userId) -> two s64s,
+                // the save's size and its journal's. The request confirms that
+                // shape: its `CmifDomainInHeader` declares data_size=0x28, so
+                // 0x18 bytes follow the `CmifInHeader` — a type padded to
+                // eight, then the uid.
+                //
+                // Neither input changes the answer. There is one user here and
+                // one save behind it, and the emulated NAND has no quota to
+                // divide between save data types — so what a title is told is
+                // simply what it was allotted, which is its own NACP's figure
+                // once anything has read it (see `Cpu::set_save_data_sizes`).
+                //
+                // Refusing this is where Tomodachi Life stopped once `am` 210
+                // let it through: `nnSdk` answers an unknown command id with an
+                // svcBreak, 452M steps in, with the title's RomFS mounted and
+                // its first assets already decompressing.
+                Some(26) => {
+                    let mut sizes = Vec::with_capacity(16);
+                    sizes.extend_from_slice(&self.save_data_size.to_le_bytes());
+                    sizes.extend_from_slice(&self.save_data_journal_size.to_le_bytes());
+                    self.write_ipc_response(tls, 0, &[], &sizes, &[])
+                }
                 // GetDesiredLanguage -> an `nn::settings::LanguageCode`, which
                 // is the null-padded BCP-47 tag as eight raw bytes.
                 Some(21) => {
@@ -8435,6 +8469,52 @@ mod tests {
         marshal(&mut cpu, false, 210, &[]);
         cpu.applet_request(TLS, 9, Some(210)).unwrap();
         assert_eq!(u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap()), event);
+    }
+
+    #[test]
+    fn get_save_data_size_reports_the_quota_the_title_was_actually_allotted() {
+        // GetSaveDataSize(u8 SaveDataType, u128 userId) -> two s64s. The
+        // payload is 0x18 bytes: the type padded out to eight, then the uid.
+        // Neither changes the answer -- there is one user and one save behind
+        // it -- so the request is marshalled the way a title sends it and the
+        // reply is checked, not the parse.
+        let mut payload = [0u8; 0x18];
+        payload[0] = 1; // SaveDataType::Account
+        payload[8..].copy_from_slice(&super::ACCOUNT_UID);
+
+        // Tomodachi Life's own NACP figures, which is what a console reads out
+        // of the Control NCA.
+        const SAVE: i64 = 56_623_104;
+        const JOURNAL: i64 = 10_485_760;
+
+        let mut cpu = request(false, 26, &payload);
+        cpu.set_save_data_sizes(SAVE, JOURNAL);
+        cpu.register_service_handle(9, "am:application-functions");
+        cpu.applet_request(TLS, 9, Some(26)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap() as i64, SAVE);
+        assert_eq!(cpu.mem.read_u64(TLS + 0x28).unwrap() as i64, JOURNAL);
+    }
+
+    #[test]
+    fn a_title_whose_nacp_nobody_read_still_gets_room_to_save() {
+        // Nothing has called `set_save_data_sizes` -- a bare Program NCA has no
+        // NACP to read one out of. The fallback has to be a *quota*, not zero:
+        // a title told it has nowhere to put its save is a title that does not
+        // write one, and that failure looks nothing like a missing command.
+        let mut payload = [0u8; 0x18];
+        payload[0] = 1;
+        let mut cpu = request(false, 26, &payload);
+        cpu.register_service_handle(9, "am:application-functions");
+        cpu.applet_request(TLS, 9, Some(26)).unwrap();
+        let size = cpu.mem.read_u64(TLS + 0x20).unwrap() as i64;
+        let journal = cpu.mem.read_u64(TLS + 0x28).unwrap() as i64;
+        assert_eq!(size, super::DEFAULT_SAVE_DATA_SIZE);
+        assert_eq!(journal, super::DEFAULT_SAVE_DATA_JOURNAL_SIZE);
+        // Above what a large retail title asks for: Tomodachi Life's NACP
+        // declares 54 MiB of save and 10 MiB of journal.
+        assert!(size >= 56_623_104, "default quota is smaller than a real title's save");
+        assert!(journal >= 10_485_760, "default journal is smaller than a real title's");
     }
 
     /// Drive one `aoc:u` command on a session opened under that service.

@@ -122,6 +122,34 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
+    // The title's save-data quota, which `IApplicationFunctions::GetSaveDataSize`
+    // reports. It is declared in the NACP, and the NACP is in the *Control*
+    // NCA rather than the Program one booted above — so it has to be read
+    // separately, and a container without one leaves the CPU's default in
+    // place rather than reporting a size this title never asked for.
+    match switch_core::control::find_control_nca(
+        &pfs0.files,
+        &switch_core::source::SliceSource(&nsp_data),
+        &keys,
+    ) {
+        Some((index, _)) => {
+            let cf = &pfs0.files[index];
+            let craw = nsp_data[cf.offset as usize..(cf.offset + cf.size) as usize].to_vec();
+            match switch_core::control::Control::from_source(
+                switch_core::source::MemSource(craw),
+                &keys,
+            ) {
+                Ok(control) => {
+                    let size = control.nacp.user_account_save_data_size;
+                    let journal = control.nacp.user_account_save_data_journal_size;
+                    println!("save data: {} bytes (+{} journal), from the NACP", size, journal);
+                    cpu.set_save_data_sizes(size, journal);
+                }
+                Err(e) => println!("Control NCA unreadable, using default save sizes: {}", e),
+            }
+        }
+        None => println!("no Control NCA in this container: using default save sizes"),
+    }
     // RomFS is optional (Meta/Control-only content, or a title with no
     // assets of its own, has none) and a failure to decrypt it shouldn't
     // block booting — the title just won't have its asset storage mounted.
