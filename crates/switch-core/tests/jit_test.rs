@@ -317,6 +317,51 @@ fn a_syscall_terminates_a_block_and_resumes_after_it() {
 }
 
 #[test]
+fn writing_the_zero_register_never_makes_it_read_back() {
+    // XZR discards every write and reads as zero, whatever names it. That is
+    // easy to get wrong the moment anyone tries to make register access
+    // cheaper - a 32-slot file with a pinned-zero slot 31 removes a branch and
+    // a bounds check from every operand, and is correct only for as long as
+    // nothing ever stores into that slot. (Measured: it is worth nothing
+    // either way, native or wasm, so the file is still 31 slots. The test is
+    // here because the next person to try it should find out from a test
+    // rather than from a title going wrong.)
+    //
+    // Write XZR through every shape of instruction that can name it as a
+    // destination, then read it back.
+    //
+    //   movz xzr, #0x1234        ; wide move
+    //   cmn  x0, #1              ; ADDS immediate, i.e. Rd=31 as ZR not SP
+    //   add  xzr, x0, x0         ; shifted register
+    //   orr  xzr, x0, x0         ; logical shifted register
+    //   madd xzr, x0, x0, x0     ; multiply
+    //   ubfx xzr, x0, #4, #8     ; bitfield, which reads Rd as well
+    //   csel xzr, x0, x0, eq     ; conditional select
+    //   adr  x1, _start          ; a base that is mapped without any setup
+    //   ldr  xzr, [x1]           ; a load whose destination is ZR
+    //   ldp  xzr, x3, [x1]       ; and half of a pair
+    //   movz x2, #0
+    //   add  x2, x2, xzr         ; read it back through Rm
+    #[rustfmt::skip]
+    let code = [
+        0xd282469fu32, 0xb100041f, 0x8b00001f, 0xaa00001f,
+        0x9b00001f, 0xd3442c1f, 0x9a80001f, 0x10ffff21,
+        0xf940003f, 0xa9400c3f, 0xd2800002, 0x8b1f0042,
+    ];
+    for jit in [false, true] {
+        let mut cpu = loaded(&code, jit);
+        cpu.run(code.len() as u64).unwrap();
+        assert_eq!(
+            cpu.read_x(2),
+            0,
+            "the zero register read back non-zero with the translator {}",
+            if jit { "on" } else { "off" }
+        );
+    }
+    compare(&code, code.len() as u64, "writes to the zero register");
+}
+
+#[test]
 fn a_block_stops_at_the_end_of_its_page() {
     // A block that spanned two pages could not be invalidated by one page's
     // worth of dirt, so the translator never lets one. Straight-line code
