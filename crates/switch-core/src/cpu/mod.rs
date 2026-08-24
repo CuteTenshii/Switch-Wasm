@@ -210,27 +210,68 @@ pub const GUEST_SPACE_END: u32 = 0xF300_0000;
 /// an `nnSdk` application built for the 39-bit address space (A Short Hike)
 /// picks its own address out of the second.
 ///
-/// **Both are sized to [`GUEST_TOTAL_MEMORY_SIZE`], and the two of them plus
-/// everything below 0x3000_0000 is what fits.** `nn::init` asks for the whole
-/// of what `svcGetInfo` reports as total memory, whichever route it takes, so
-/// a region smaller than that figure is a region the guest overruns — which is
-/// what used to happen: `svcSetHeapSize` granted the 480 MiB it asked for at
-/// 0x3000_0000 and the heap ran straight through a 240 MiB region, over the
-/// framebuffer, and into the alias region. On a console these regions are
-/// gigabytes apart in a 39-bit space and neither the sizes nor the collision
-/// arise; here they have to share 4 GiB with the image, the stacks and the
-/// system shared buffer, so an equal split of what is left is what maximises
-/// the figure both routes can be told.
+/// `nn::init` asks for the whole of what `svcGetInfo` reports as total
+/// memory, whichever route it takes, so a region smaller than that figure is
+/// a region the guest overruns — which is what used to happen:
+/// `svcSetHeapSize` granted the 480 MiB it asked for at 0x3000_0000 and the
+/// heap ran straight through a 240 MiB region, over the framebuffer, and into
+/// the alias region. On a console these regions are gigabytes apart in a
+/// 39-bit space and neither the sizes nor the collision arise; here they have
+/// to share 4 GiB with the image, the stacks and the system shared buffer.
+///
+/// The two are **not** the same size, and the alias region is the larger by
+/// [`VAMM_ARENA_SIZE`] plus change. That is not a preference — it is what
+/// virtual address memory costs. When `svcGetInfo` reports a non-zero system
+/// resource size (see [`GUEST_SYSTEM_RESOURCE_SIZE`]), `nnSdk` runs its heap
+/// through `nn::os::detail::VammManager`, which reserves address space out of
+/// *this* alias region, and its Horizon implementation opens by claiming a
+/// fixed 1022 MiB arena at the region base — `movz w9, #0x3fe0, lsl #16`,
+/// a constant in the SDK, not a figure derived from anything a kernel says.
+/// Everything the title reserves afterwards, its heap included, has to fit in
+/// what is left. An alias region merely as large as the heap it must hold
+/// therefore cannot work at all: Just Dance 2023 asked for a heap of
+/// `total - system resource` and `nn::os::AllocateAddressRegion` refused it
+/// (os result 3-12) with 1022 MiB of the region already spoken for.
+///
+/// So the alias region carries the arena, a full heap reservation, and
+/// headroom for the reservations a title makes on its own account — Just
+/// Dance asks for five more after its heap (0x13f000, 0x207f000, 0x1ff000,
+/// 0x17f000, 0x7f000), and running out on those aborts exactly as running out
+/// on the heap does. The heap region only has to carry the heap, so it is
+/// sized to [`GUEST_TOTAL_MEMORY_SIZE`] and no more, and what that frees goes
+/// to the alias region. `STACK_TOP` at 0x2810_0000 fixes the bottom of the
+/// pair and `SHARED_BUFFER_ADDR` at 0xF000_0000 the top, so this split is the
+/// largest total the layout can offer once the arena is paid for.
 ///
 /// Horizon's own alias region starts at 0x10_0000_0000, and reporting *that*
 /// through `svcGetInfo` had `nnSdk` asking to map memory at an address the
 /// emulator cannot represent at all — which `svcMapPhysicalMemory` would
 /// silently truncate to 0.
 pub const GUEST_HEAP_REGION_ADDR: u32 = 0x3000_0000;
-pub const GUEST_HEAP_REGION_SIZE: u32 = 0x6000_0000;
+pub const GUEST_HEAP_REGION_SIZE: u32 = 0x3800_0000;
 pub const GUEST_ALIAS_REGION_ADDR: u32 =
     GUEST_HEAP_REGION_ADDR.wrapping_add(GUEST_HEAP_REGION_SIZE);
-pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x6000_0000;
+pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x8800_0000;
+
+/// The arena `nn::os::detail::VammManagerImplByHorizon` claims at the base of
+/// the alias region before a title reserves anything of its own. Hardcoded in
+/// the SDK, so it costs the same whatever this emulator reports; it is here so
+/// the layout invariants can be checked against it rather than rediscovered.
+pub const VAMM_ARENA_SIZE: u32 = 0x3FE0_0000;
+
+/// What `svcGetInfo` reports for `SystemResourceSizeTotal` — the slice of a
+/// process's memory the kernel keeps for its own bookkeeping, and the one
+/// figure `nnSdk` reads to decide whether this process has virtual address
+/// memory at all. `VammManager::IsVirtualAddressMemoryEnabled` is that query
+/// succeeding and returning non-zero, and nothing else.
+///
+/// 16 MiB is what an application's NPDM declares (both A Short Hike's and
+/// Just Dance 2023's do). Reporting 0 was true of the emulator and put every
+/// `nnSdk` title on the plain heap path, which worked right up until a title
+/// called `nn::os::AllocateAddressRegion` itself: with the manager never
+/// initialised its impl pointer is null, and the bump allocator behind it
+/// aborts. Reporting the real figure is what the layout above pays for.
+pub const GUEST_SYSTEM_RESOURCE_SIZE: u32 = 0x0100_0000;
 
 /// What `svcGetInfo` reports as the memory the process may use, and so the
 /// size `nn::init` asks for as its heap: exactly one region's worth.
@@ -243,6 +284,14 @@ pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x6000_0000;
 /// used the null it got back. 1.5 GiB is what the address space can offer both
 /// routes; it is well short of a console and far more than the 480 MiB that
 /// stopped a real title from reaching its first frame.
+///
+/// It is now 896 MiB rather than the 1.5 GiB an equal split allowed, because
+/// the alias region has to hold [`VAMM_ARENA_SIZE`] as well as a heap this
+/// size. That is a real cost and it is visible to every title through
+/// `svcGetInfo`, not only to the ones that would otherwise abort: a title
+/// that sizes a pool from this figure gets a smaller pool and behaves
+/// differently, with nothing to say so. It stays far above the 480 MiB that
+/// stopped Just Dance 2019, whose 699 MiB pool still fits.
 pub const GUEST_TOTAL_MEMORY_SIZE: u32 = GUEST_HEAP_REGION_SIZE;
 
 /// Size of hid's shared memory, the value libnx passes to `svcMapSharedMemory`.

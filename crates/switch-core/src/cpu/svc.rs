@@ -3,7 +3,7 @@
 use super::{
     ArbiterWait, Cpu, GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
     GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE,
-    GUEST_TOTAL_MEMORY_SIZE, HID_SHMEM_SIZE, PL_SHMEM_SIZE,
+    GUEST_SYSTEM_RESOURCE_SIZE, GUEST_TOTAL_MEMORY_SIZE, HID_SHMEM_SIZE, PL_SHMEM_SIZE,
 };
 use super::ipc::CLOCK_RATES_HZ;
 use crate::{Error, Result};
@@ -47,9 +47,9 @@ impl Cpu {
         const RESULT_INVALID_HANDLE: u64 = 1 | (114 << 9);
         // What `svcGetInfo` reports as the process's memory pool, and the
         // slice of it the kernel reserves for its own per-process bookkeeping
-        // (see InfoType 16 below for why that one is zero).
+        // (see InfoType 16 below for what reporting it buys and costs).
         const TOTAL_MEMORY_SIZE: u64 = GUEST_TOTAL_MEMORY_SIZE as u64;
-        const SYSTEM_RESOURCE_SIZE: u64 = 0;
+        const SYSTEM_RESOURCE_SIZE: u64 = GUEST_SYSTEM_RESOURCE_SIZE as u64;
         // The counterpart of `TRACE_IPC` for everything that is not a service
         // request. `svcSendSyncRequest` (0x21) is excluded because `TRACE_IPC`
         // already decodes it, and the two hot ones a running guest issues
@@ -1315,45 +1315,26 @@ impl Cpu {
                      // bookkeeping (page tables, handle tables), carved out of
                      // the application pool and declared in the NPDM.
                      //
-                     // This is **deliberately 0 rather than the 16 MiB "A
-                     // Short Hike"'s `main.npdm` asks for**, and it is the one
-                     // figure here that does not follow the title's own
-                     // manifest. `nnSdk` treats a non-zero answer as "this
-                     // process has virtual address memory", and
-                     // `nn::os::detail::VammManager::InitializeIfEnabled`
-                     // switches the whole heap onto a manager that reserves
-                     // address space out of the alias region and backs it a
-                     // page at a time — kernel machinery this emulator does
-                     // not have. `nn::os::AllocateAddressRegion` then fails
-                     // (os result 3-12) and `nn::mem::StandardAllocator`
-                     // aborts. Reporting 0 says what is actually true here —
-                     // nothing is reserved for the kernel — and puts `nnSdk`
-                     // on its plain heap path, which works.
+                     // This is the one figure `nnSdk` reads to decide whether
+                     // the process has virtual address memory:
+                     // `VammManager::IsVirtualAddressMemoryEnabled` is this
+                     // query succeeding and returning non-zero, nothing else,
+                     // and `InitializeIfEnabled` skips initialising on zero
+                     // and leaves its impl pointer null.
                      //
-                     // This is the whole of what gates that switch, read out
-                     // of a retail `sdk`:
-                     // `VammManager::IsVirtualAddressMemoryEnabled` is
-                     // `svcGetInfo(16)` succeeding *and* returning non-zero,
-                     // nothing else, and `InitializeIfEnabled` skips
-                     // initialising on zero and leaves its impl pointer null.
-                     //
-                     // Which costs something, and it is worth knowing what
-                     // before reaching for the obvious change. A title that
-                     // calls `nn::os::AllocateAddressRegion` itself — not
-                     // through the heap — reaches that null pointer and
+                     // It read 0 for a long time, which was true of the
+                     // emulator and put every title on the plain heap path.
+                     // What that costs is a title that calls
+                     // `nn::os::AllocateAddressRegion` itself rather than
+                     // through the heap: it reaches that null pointer and
                      // aborts on the `cursor >= limit` check of the bump
-                     // allocator behind it. Just Dance 2023 does, from its
-                     // own `nninitStartup`, and dies there.
+                     // allocator behind it. Just Dance 2023 does, from its own
+                     // `nninitStartup`.
                      //
-                     // Raising this to the 16 MiB its NPDM declares does not
-                     // rescue it: measured on that title, VAMM comes on and
-                     // the boot fails *earlier*, at 107.8M steps in
-                     // `nn::mem::StandardAllocator::Initialize`, rather than
-                     // at 119.3M in `AllocateAddressRegion`. Both sides of
-                     // the branch abort, so the figure is not the fix — what
-                     // is missing is the address-space reservation the
-                     // manager expects, and until that exists 0 is the answer
-                     // that gets furthest.
+                     // Reporting the real figure is not free — see
+                     // [`GUEST_ALIAS_REGION_SIZE`] and [`VAMM_ARENA_SIZE`] for
+                     // the address space the manager takes and the reported
+                     // total memory that pays for it.
                      16 => SYSTEM_RESOURCE_SIZE, // SystemResourceSizeTotal
                      17 => 0,                    // SystemResourceSizeUsed
                      // Total/UsedNonSystemMemorySize: the same figures as
