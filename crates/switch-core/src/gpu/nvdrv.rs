@@ -25,7 +25,15 @@ pub const NV_OK: u32 = 0;
 pub const NV_NOT_IMPLEMENTED: u32 = 1;
 pub const NV_NOT_SUPPORTED: u32 = 2;
 pub const NV_BAD_PARAMETER: u32 = 4;
+pub const NV_INSUFFICIENT_MEMORY: u32 = 6;
 pub const NV_INVALID_STATE: u32 = 8;
+
+/// `NVGPU_ZBC_TYPE_*`: which of the two zero-bandwidth-clear tables an entry
+/// belongs to. `INVALID` is not an error — a query passes it to ask for the
+/// table size and nothing else.
+const ZBC_TYPE_INVALID: u32 = 0;
+const ZBC_TYPE_COLOR: u32 = 1;
+const ZBC_TYPE_DEPTH: u32 = 2;
 
 /// ioctl type ("magic") bytes.
 const TYPE_NVHOST: u32 = 0x00;
@@ -48,6 +56,70 @@ pub enum NvFile {
     Unsupported { path: String },
 }
 
+/// Slots in each of the driver's two zero-bandwidth-clear tables
+/// (`GK20A_ZBC_TABLE_SIZE`).
+pub const ZBC_TABLE_SIZE: usize = 16;
+
+/// One zero-bandwidth-clear table entry: a colour (in both the depth-stencil
+/// and the L2 encoding) or a depth value that the hardware can encode into a
+/// surface's compression bits instead of writing out pixels.
+///
+/// Nothing here clears that way — the rasterizer writes the pixels — so the
+/// table changes no rendering. It is kept because it is *readable*:
+/// `ZbcQueryTable` hands back what `ZbcSetTable` put in, and a driver that
+/// asks which clear values it already registered and is told "none, ever"
+/// registers them again until the table it cannot see fills up.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ZbcEntry {
+    pub color_ds: [u32; 4],
+    pub color_l2: [u32; 4],
+    pub depth: u32,
+    /// How many times this value has been registered. `ZbcQueryTable` reports
+    /// it, which is how a driver tells a slot it owns from one it shares.
+    pub ref_cnt: u32,
+    pub format: u32,
+}
+
+/// One of the two tables, filled from the bottom. An entry is never dropped:
+/// the driver interface has no way to remove one, only to add a value it may
+/// already hold.
+#[derive(Debug, Default)]
+pub struct ZbcTable {
+    entries: [ZbcEntry; ZBC_TABLE_SIZE],
+    used: usize,
+}
+
+impl ZbcTable {
+    /// Register `entry`, or take another reference to the slot that already
+    /// holds this value. False when the table is full.
+    fn add(&mut self, entry: ZbcEntry) -> bool {
+        let same = |a: &ZbcEntry| {
+            a.color_ds == entry.color_ds
+                && a.color_l2 == entry.color_l2
+                && a.depth == entry.depth
+                && a.format == entry.format
+        };
+        if let Some(index) = self.entries[..self.used].iter().position(same) {
+            self.entries[index].ref_cnt += 1;
+            return true;
+        }
+        let Some(slot) = self.entries.get_mut(self.used) else {
+            return false;
+        };
+        *slot = ZbcEntry { ref_cnt: 1, ..entry };
+        self.used += 1;
+        true
+    }
+
+    pub fn get(&self, index: usize) -> Option<&ZbcEntry> {
+        self.entries.get(index)
+    }
+
+    pub fn used(&self) -> usize {
+        self.used
+    }
+}
+
 #[derive(Debug)]
 pub struct NvDrv {
     pub gpu: Gpu,
@@ -56,6 +128,10 @@ pub struct NvDrv {
     /// Transfer-memory size the guest handed us in `Initialize`.
     pub transfer_mem_size: u32,
     pub initialized: bool,
+    /// The two zero-bandwidth-clear tables `/dev/nvhost-ctrl-gpu` keeps,
+    /// addressed by `NVGPU_ZBC_TYPE_COLOR` and `..._DEPTH`.
+    pub zbc_color: ZbcTable,
+    pub zbc_depth: ZbcTable,
 }
 
 impl Default for NvDrv {
@@ -72,11 +148,28 @@ impl NvDrv {
             next_fd: 1,
             transfer_mem_size: 0,
             initialized: false,
+            zbc_color: ZbcTable::default(),
+            zbc_depth: ZbcTable::default(),
         }
     }
 
     pub fn file(&self, fd: u32) -> Option<&NvFile> {
         self.files.get(&fd)
+    }
+
+    /// The device node `fd` was opened on, for diagnostics. An ioctl number
+    /// means nothing on its own — the same number is a different command on
+    /// every node — so anything reporting one has to say which node it was.
+    pub fn device_name(&self, fd: u32) -> &str {
+        match self.files.get(&fd) {
+            Some(NvFile::NvMap) => "/dev/nvmap",
+            Some(NvFile::NvHostCtrl) => "/dev/nvhost-ctrl",
+            Some(NvFile::NvHostCtrlGpu) => "/dev/nvhost-ctrl-gpu",
+            Some(NvFile::AddressSpace { .. }) => "/dev/nvhost-as-gpu",
+            Some(NvFile::Channel { .. }) => "/dev/nvhost-gpu",
+            Some(NvFile::Unsupported { path }) => path,
+            None => "(closed)",
+        }
     }
 
     /// `nvOpen`. Returns `(fd, error)`.
@@ -173,10 +266,14 @@ impl NvDrv {
         // is one the guest believes cannot fail, and the ones that do are
         // invisible otherwise -- they leave no line at all, because the traces
         // that would carry them run *after* the work they describe.
+        //
+        // "No handler for this one" is left out: `Cpu::nvdrv_request` reports
+        // that once per command through the diagnostic channel the browser
+        // drains, where this `eprintln!` goes nowhere at all.
         match &outcome {
-            Ok(code) if *code != NV_OK => eprintln!(
-                "[nv] FAILED {file:?} type={ioc_type:#04x} nr={nr:#04x} -> {code:#x}"
-            ),
+            Ok(code) if !matches!(*code, NV_OK | NV_NOT_IMPLEMENTED | NV_NOT_SUPPORTED) => {
+                eprintln!("[nv] FAILED {file:?} type={ioc_type:#04x} nr={nr:#04x} -> {code:#x}")
+            }
             Err(error) => eprintln!(
                 "[nv] ERROR {file:?} type={ioc_type:#04x} nr={nr:#04x}: {error}"
             ),
@@ -315,8 +412,22 @@ impl NvDrv {
                 write_u32(data, 4, value);
                 Ok(NV_OK)
             }
-            // EventSignal / EventRegister / EventUnregister { in event_id }
-            0x1C => Ok(NV_OK),
+            // EventSignal { in u32 event_id }: force a slot signalled without
+            // a fence reaching its threshold, which is how a driver releases
+            // a thread parked on an event it is about to tear down. Answering
+            // a bare success left that thread waiting on a slot nothing would
+            // ever set.
+            0x1C => {
+                let slot = read_u32(data, 0) as usize;
+                match self.gpu.host1x.events.get_mut(slot) {
+                    Some(event) => {
+                        event.signalled = true;
+                        Ok(NV_OK)
+                    }
+                    None => Ok(NV_BAD_PARAMETER),
+                }
+            }
+            // EventRegister / EventUnregister { in event_id }
             0x1F => {
                 self.gpu.host1x.register_event(read_u32(data, 0).min(63))?;
                 Ok(NV_OK)
@@ -337,8 +448,25 @@ impl NvDrv {
                 write_u32(data, 0x0C, slot);
                 Ok(NV_OK)
             }
-            // EventWaitAsync { in syncpt_id, threshold, timeout, event_id }
-            0x1E => Ok(NV_OK),
+            // EventWaitAsync { in syncpt_id, threshold, timeout, event_id }:
+            // the same wait, arming a slot instead of blocking. Submissions
+            // retire inside their own ioctl, so by the time anyone asks the
+            // fence has already passed and the slot is signalled on arrival —
+            // which is the one thing the bare success it used to answer did
+            // not do.
+            0x1E => {
+                let id = read_u32(data, 0);
+                let threshold = read_u32(data, 4);
+                let slot = read_u32(data, 0x0C) as usize;
+                match self.gpu.host1x.events.get_mut(slot) {
+                    Some(event) => {
+                        event.fence = NvFence { id, value: threshold };
+                        event.signalled = true;
+                        Ok(NV_OK)
+                    }
+                    None => Ok(NV_BAD_PARAMETER),
+                }
+            }
             _ => Ok(NV_NOT_IMPLEMENTED),
         }
     }
@@ -364,9 +492,57 @@ impl NvDrv {
                 }
                 Ok(NV_OK)
             }
-            // ZbcSetTable / ZbcQueryTable: the zero-bandwidth-clear cache is
-            // a pure optimisation; accepting the table is enough.
-            0x03 | 0x04 => Ok(NV_OK),
+            // ZbcSetTable { in u32 color_ds[4], color_l2[4], depth, format,
+            //               type }. Registering the same value twice takes a
+            // second reference to the slot that already holds it rather than
+            // spending another, which is what makes a table this small last.
+            0x03 => {
+                let entry = ZbcEntry {
+                    color_ds: [0, 1, 2, 3].map(|i| read_u32(data, i * 4)),
+                    color_l2: [0, 1, 2, 3].map(|i| read_u32(data, 0x10 + i * 4)),
+                    depth: read_u32(data, 0x20),
+                    ref_cnt: 0,
+                    format: read_u32(data, 0x24),
+                };
+                let table = match read_u32(data, 0x28) {
+                    ZBC_TYPE_COLOR => &mut self.zbc_color,
+                    ZBC_TYPE_DEPTH => &mut self.zbc_depth,
+                    _ => return Ok(NV_BAD_PARAMETER),
+                };
+                // A full table is what a driver finds out about here; there
+                // is no eviction, on hardware either.
+                if table.add(entry) { Ok(NV_OK) } else { Ok(NV_INSUFFICIENT_MEMORY) }
+            }
+            // ZbcQueryTable { inout nvioctl_zbc_entry }, whose `type` selects
+            // a table and whose trailing `index_size` field carries the index
+            // in and the table size back out. Type 0 (`INVALID`) asks for
+            // nothing but that size, which is what `libnx`'s wrapper does.
+            0x04 => {
+                let index = read_u32(data, 0x30) as usize;
+                let table = match read_u32(data, 0x2C) {
+                    ZBC_TYPE_INVALID => {
+                        write_u32(data, 0x30, ZBC_TABLE_SIZE as u32);
+                        return Ok(NV_OK);
+                    }
+                    ZBC_TYPE_COLOR => &self.zbc_color,
+                    ZBC_TYPE_DEPTH => &self.zbc_depth,
+                    _ => return Ok(NV_BAD_PARAMETER),
+                };
+                let Some(entry) = table.get(index) else {
+                    return Ok(NV_BAD_PARAMETER);
+                };
+                for (i, value) in entry.color_ds.iter().enumerate() {
+                    write_u32(data, i * 4, *value);
+                }
+                for (i, value) in entry.color_l2.iter().enumerate() {
+                    write_u32(data, 0x10 + i * 4, *value);
+                }
+                write_u32(data, 0x20, entry.depth);
+                write_u32(data, 0x24, entry.ref_cnt);
+                write_u32(data, 0x28, entry.format);
+                write_u32(data, 0x30, ZBC_TABLE_SIZE as u32);
+                Ok(NV_OK)
+            }
             // GetCharacteristics { in u64 buf_size, buf_addr; out gc }.
             // The payload goes both inline (where `nvIoctl` callers read it)
             // and into the inline-output buffer (where `nvIoctl3` callers do).
@@ -403,6 +579,18 @@ impl NvDrv {
                 write_u64(data, 8, 0);
                 Ok(NV_OK)
             }
+            // 0x13 is the one command a real guest reaches that is still
+            // refused, and refusing it is deliberate. `nnSdk`'s bundled
+            // `nvrm_gpu` asks for it once, third in its device probe — after
+            // GetCharacteristics and GetTpcMasks, before the two ZCull
+            // queries — as an `IOWR` with an 8-byte all-zero argument, sent
+            // through `nvIoctl3` with a **4-byte** out-of-line reply buffer.
+            // So it is a per-GPC count or mask of some kind, in the same
+            // block as the TPC masks. Nothing names it: it is in no libnx
+            // header and no other emulator implements it, and its caller
+            // keeps the failure and carries on rather than aborting. An
+            // invented answer would be a number the driver acts on; a refusal
+            // is one it already handles.
             _ => Ok(NV_NOT_IMPLEMENTED),
         }
     }
@@ -854,6 +1042,112 @@ mod tests {
         write_u32(&mut param, 4, 3); // Base
         assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x09, &mut param), NV_OK);
         assert_eq!(read_u32(&param, 8), 0x3000_0000);
+    }
+
+    #[test]
+    fn the_zbc_table_hands_back_the_clear_values_it_was_given() {
+        let mut drv = NvDrv::new();
+        let mut mem = Memory::new();
+        let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
+
+        // ZbcSetTable { color_ds[4], color_l2[4], depth, format, type }.
+        let mut set = [0u8; 0x2C];
+        for i in 0..4 {
+            write_u32(&mut set, i * 4, 0x1111_1111 * (i as u32 + 1));
+            write_u32(&mut set, 0x10 + i * 4, 0x2222_2222 * (i as u32 + 1));
+        }
+        write_u32(&mut set, 0x20, 0x3F80_0000); // depth 1.0
+        write_u32(&mut set, 0x24, 0x0A); // format
+        write_u32(&mut set, 0x28, ZBC_TYPE_COLOR);
+        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set), NV_OK);
+        // The same value again takes a second reference rather than a second
+        // slot: a table of sixteen does not survive a driver that re-registers
+        // its clear colour every frame.
+        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set), NV_OK);
+        assert_eq!(drv.zbc_color.used(), 1);
+        assert_eq!(drv.zbc_depth.used(), 0, "a colour entry landed in the depth table");
+
+        // ZbcQueryTable { inout nvioctl_zbc_entry }: type selects the table,
+        // the trailing field carries the index in and the table size out.
+        let mut query = [0u8; 0x34];
+        write_u32(&mut query, 0x2C, ZBC_TYPE_COLOR);
+        write_u32(&mut query, 0x30, 0);
+        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x04, &mut query), NV_OK);
+        assert_eq!(read_u32(&query, 0x00), 0x1111_1111);
+        assert_eq!(read_u32(&query, 0x0C), 0x4444_4444);
+        assert_eq!(read_u32(&query, 0x10), 0x2222_2222);
+        assert_eq!(read_u32(&query, 0x20), 0x3F80_0000, "depth");
+        assert_eq!(read_u32(&query, 0x24), 2, "ref count");
+        assert_eq!(read_u32(&query, 0x28), 0x0A, "format");
+        assert_eq!(read_u32(&query, 0x30), ZBC_TABLE_SIZE as u32, "table size");
+
+        // Type 0 asks for the size and nothing else, which is the only form
+        // libnx's own wrapper sends.
+        let mut size_only = [0u8; 0x34];
+        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x04, &mut size_only), NV_OK);
+        assert_eq!(read_u32(&size_only, 0x30), ZBC_TABLE_SIZE as u32);
+
+        // Past the end of the table is a refusal, not a zeroed entry.
+        write_u32(&mut query, 0x2C, ZBC_TYPE_COLOR);
+        write_u32(&mut query, 0x30, ZBC_TABLE_SIZE as u32);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x04, &mut query),
+            NV_BAD_PARAMETER
+        );
+    }
+
+    #[test]
+    fn a_full_zbc_table_is_refused_rather_than_silently_dropping_entries() {
+        let mut drv = NvDrv::new();
+        let mut mem = Memory::new();
+        let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
+        let mut set = [0u8; 0x2C];
+        write_u32(&mut set, 0x28, ZBC_TYPE_DEPTH);
+        for i in 0..ZBC_TABLE_SIZE as u32 {
+            write_u32(&mut set, 0x20, i + 1);
+            assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set), NV_OK);
+        }
+        write_u32(&mut set, 0x20, 0xFFFF);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
+            NV_INSUFFICIENT_MEMORY
+        );
+        assert_eq!(drv.zbc_depth.used(), ZBC_TABLE_SIZE);
+    }
+
+    #[test]
+    fn an_event_is_signalled_by_the_ioctls_that_say_so() {
+        let mut drv = NvDrv::new();
+        let mut mem = Memory::new();
+        let (fd, _) = drv.open("/dev/nvhost-ctrl").unwrap();
+
+        let mut arg = [0u8; 0x10];
+        write_u32(&mut arg, 0, 3); // EventRegister slot 3
+        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1F, &mut arg), NV_OK);
+        assert!(!drv.gpu.host1x.events[3].signalled);
+
+        // EventWaitAsync { syncpt_id, threshold, timeout, event_id }: the work
+        // it names retired inside its own submission, so the slot comes back
+        // already signalled instead of waiting for something that will not
+        // happen again.
+        write_u32(&mut arg, 0, 9); // syncpt
+        write_u32(&mut arg, 4, 5); // threshold
+        write_u32(&mut arg, 0x0C, 3); // slot
+        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1E, &mut arg), NV_OK);
+        assert!(drv.gpu.host1x.events[3].signalled);
+        assert_eq!(drv.gpu.host1x.events[3].fence, NvFence { id: 9, value: 5 });
+
+        // EventSignal on a slot that does not exist is refused rather than
+        // reported as a success nothing acted on.
+        let mut signal = [0u8; 4];
+        write_u32(&mut signal, 0, 64);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1C, &mut signal),
+            NV_BAD_PARAMETER
+        );
+        write_u32(&mut signal, 0, 7);
+        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1C, &mut signal), NV_OK);
+        assert!(drv.gpu.host1x.events[7].signalled);
     }
 
     #[test]

@@ -2267,6 +2267,25 @@ impl Cpu {
                 if error != 0 && std::env::var("TRACE_NV").is_ok() {
                     eprintln!("[nv] ioctl fd={fd} request={request:#x} -> error {error}");
                 }
+                // An ioctl the model has no handler for is a gap in the same
+                // sense an unimplemented service command is, and it was
+                // reaching stderr only — which does not exist in the browser,
+                // where the whole GPU stack runs. Reported once per (node,
+                // command), because a driver that is refused usually asks
+                // again every frame.
+                use crate::gpu::nvdrv::{NV_NOT_IMPLEMENTED, NV_NOT_SUPPORTED};
+                if matches!(error, NV_NOT_IMPLEMENTED | NV_NOT_SUPPORTED) {
+                    let node = self.nv.device_name(fd).to_owned();
+                    let nr = request & 0xFF;
+                    if self.unimplemented_ipc.insert((node.clone(), Some(nr))) {
+                        let ioc_type = (request >> 8) & 0xFF;
+                        let pc = self.pc;
+                        self.diagnostic(&format!(
+                            "[nv] unimplemented: {node} ioctl type={ioc_type:#04x} \
+                             nr={nr:#04x} ({size} bytes, pc={pc:#x})"
+                        ));
+                    }
+                }
                 if let Some(&(addr, len)) = recv.first() {
                     for (i, &byte) in argp.iter().take(len as usize).enumerate() {
                         self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;

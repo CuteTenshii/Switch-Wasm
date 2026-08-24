@@ -440,6 +440,49 @@ null handle, which `NvRmGpuDeviceGetInfo` then dereferenced.
 the two ioctls with that shape, and the IPC layer writes it into the second
 receive buffer.
 
+### What is left unimplemented, counted rather than guessed
+
+Tracing every ioctl five guests issue — hbmenu, NX-Shell, sdl-hello, "A Short
+Hike" and Tomodachi Life — and grouping by `(type, nr)` says exactly where the
+gaps are, which is a shorter list than the ioctl tables suggest: every command
+`libnx` can send is implemented, and so is every command those two retail
+titles send bar one.
+
+- **`ZbcSetTable` / `ZbcQueryTable` (`0x47` `0x03`/`0x04`)** used to be one
+  arm answering a bare success, on the reasoning that zero-bandwidth clear is
+  a pure hardware optimisation. It is — nothing here clears through the
+  compression bits — but the table is *readable*, and a driver told "nothing
+  is registered, ever" registers its clear values again every time it asks.
+  Tomodachi Life sets one. The two tables now hold what they are given, sixteen
+  slots each, matching a value already present instead of spending a second
+  slot on it, and refusing a full table (`InsufficientMemory`) the way the
+  hardware does — there is no eviction there either. `ZbcQueryTable` answers
+  from them, including the type-0 form that asks for nothing but the table
+  size, which is the only form `libnx`'s own wrapper sends.
+- **`EventSignal` / `EventWaitAsync` (`0x00` `0x1c`/`0x1e`)** were bare
+  successes over a real event table. Signalling now signals, and an async wait
+  arms the slot and marks it reached — a submission retires inside its own
+  ioctl, so it has, and a driver that parks on the slot instead of polling was
+  parking on something nothing would ever set.
+- **`/dev/nvhost-ctrl-gpu` `0x13`** is the one command a real guest reaches
+  that is still refused, and refusing it is a decision rather than an
+  oversight. `nnSdk`'s bundled `nvrm_gpu` asks for it once, third in its device
+  probe — after `GetCharacteristics` and `GetTpcMasks`, before the two ZCull
+  queries — as an `IOWR` with an 8-byte all-zero argument, sent through
+  `nvIoctl3` with a **4-byte** out-of-line reply buffer. So it is a per-GPC
+  count or mask, in the same block as the TPC masks. Nothing names it: it is in
+  no `libnx` header and no other emulator implements it. Its caller
+  (`sdk!0xd7071c4`) keeps the failure in a register and carries on, so a
+  refusal is something it already handles and an invented number is something
+  it would act on.
+
+The refusal itself is now visible where it matters. An ioctl with no handler
+used to reach `eprintln!` and nothing else, and there is no stderr in the
+browser — where the whole GPU stack runs. It is reported once per `(node,
+command)` through `Cpu::diagnostic`, the channel the page drains, exactly as
+`[ipc] unimplemented` is, and naming the device node because an ioctl number
+means nothing without it.
+
 ## Services (IPC)
 
 - **nvdrv** is the real `INvDrvServices` interface (Open/Ioctl/Ioctl2/Ioctl3/
@@ -1821,7 +1864,8 @@ the retail title render, for the reason recorded there.
    `pc=0xa70b7ec` (A Short Hike) or `pc=0xd4c36f0` (Tomodachi Life) and on
    what. `/dev/nvhost-ctrl-gpu` ioctl 0x13 is the one call either title makes
    that is still answered `NotImplemented`, and nothing has yet been found
-   that depends on it.
+   that depends on it (see [what is left
+   unimplemented](#what-is-left-unimplemented-counted-rather-than-guessed)).
 2. **The rest of the thread syscalls.** The title's own scheduler and IL2CPP's
    garbage collector reach for them one at a time as it runs;
    `SetThreadActivity` and `GetThreadContext3` are done, and whatever it asks
