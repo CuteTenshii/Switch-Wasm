@@ -343,6 +343,9 @@ fn interpolate(e0: u32, e1: u32, index: u32, bits: u32) -> u8 {
     (((64 - w) * e0 + w * e1 + 32) >> 6) as u8
 }
 
+pub use bc6h::decode_bc6h;
+mod bc6h;
+
 pub use bc7::decode_bc7;
 mod bc7;
 
@@ -364,6 +367,8 @@ pub fn decode(codec: Codec, bytes: &[u8]) -> Result<Block> {
         Codec::Bc4Snorm => decode_bc4(bytes, true),
         Codec::Bc5Unorm => decode_bc5(bytes, false),
         Codec::Bc5Snorm => decode_bc5(bytes, true),
+        Codec::Bc6hUf16 => decode_bc6h(bytes, false),
+        Codec::Bc6hSf16 => decode_bc6h(bytes, true),
         Codec::Bc7 => decode_bc7(bytes),
     })
 }
@@ -378,6 +383,8 @@ pub enum Codec {
     Bc4Snorm,
     Bc5Unorm,
     Bc5Snorm,
+    Bc6hUf16,
+    Bc6hSf16,
     Bc7,
 }
 
@@ -389,6 +396,12 @@ impl Codec {
             Codec::Bc1 | Codec::Bc4Unorm | Codec::Bc4Snorm => 8,
             _ => 16,
         }
+    }
+
+    /// Whether the codec carries high dynamic range, so a caller knows not to
+    /// clamp what comes out of it into `[0, 1]`.
+    pub fn is_hdr(&self) -> bool {
+        matches!(self, Codec::Bc6hUf16 | Codec::Bc6hSf16)
     }
 }
 

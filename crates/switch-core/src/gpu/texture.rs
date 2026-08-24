@@ -217,6 +217,7 @@ const BLOCK_SIZE: u32 = 4;
 fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
     const SNORM: u32 = 1;
     const UNORM: u32 = 2;
+    const FLOAT: u32 = 7;
     let codec = match (components_sizes, data_type) {
         (0x24, UNORM) => Some(Codec::Bc1),      // DXT1
         (0x25, UNORM) => Some(Codec::Bc2),      // DXT23
@@ -226,6 +227,8 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x28, UNORM) => Some(Codec::Bc5Unorm), // DXN2
         (0x28, SNORM) => Some(Codec::Bc5Snorm),
         (0x17, UNORM) => Some(Codec::Bc7),
+        (0x10, FLOAT) => Some(Codec::Bc6hSf16), // signed half
+        (0x11, FLOAT) => Some(Codec::Bc6hUf16), // unsigned half
         _ => None,
     };
     if let Some(codec) = codec {
@@ -234,7 +237,6 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
     // Name the formats that are recognised but undecoded, so their absence
     // reads as "not written yet" rather than "not a texture format".
     let pending = match components_sizes {
-        0x10 | 0x11 => Some("BC6H"),
         0x40..=0x57 => Some("ASTC"),
         _ => None,
     };
@@ -608,11 +610,13 @@ mod tests {
 
     #[test]
     fn the_compressed_formats_this_decoder_lacks_say_so() {
-        // ASTC and BC6H are recognised, and named, but not decoded.
+        // ASTC is recognised, and named, but not decoded.
         let astc = texel_kind_for(0x40, 2).unwrap_err().to_string();
         assert!(astc.contains("ASTC"), "{astc}");
-        let bc6h = texel_kind_for(0x10, 7).unwrap_err().to_string();
-        assert!(bc6h.contains("BC6H"), "{bc6h}");
+        // BC6H's two data types are the signed and unsigned half readings of
+        // the same block layout, and deko3d numbers SF16 below UF16.
+        assert_eq!(texel_kind_for(0x10, 7).unwrap(), TexelKind::Block(Codec::Bc6hSf16));
+        assert_eq!(texel_kind_for(0x11, 7).unwrap(), TexelKind::Block(Codec::Bc6hUf16));
         // The BC formats that are decoded map to their codecs.
         assert_eq!(texel_kind_for(0x24, 2).unwrap(), TexelKind::Block(Codec::Bc1));
         assert_eq!(texel_kind_for(0x26, 2).unwrap(), TexelKind::Block(Codec::Bc3));

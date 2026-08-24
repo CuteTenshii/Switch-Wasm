@@ -448,7 +448,7 @@ fn f32_to_f16(v: f32) -> u16 {
     }
 }
 
-fn f16_to_f32(v: u16) -> f32 {
+pub(crate) fn f16_to_f32(v: u16) -> f32 {
     let sign = ((v as u32) & 0x8000) << 16;
     let exp = ((v as u32) >> 10) & 0x1F;
     let mantissa = (v as u32) & 0x3FF;
@@ -456,8 +456,11 @@ fn f16_to_f32(v: u16) -> f32 {
         if mantissa == 0 {
             return f32::from_bits(sign);
         }
-        // Subnormal: normalize it.
-        let shift = mantissa.leading_zeros() - 21;
+        // Subnormal: normalise it. The mantissa occupies the low ten bits
+        // of a u32, so it has at least 22 leading zeros, and the shift that
+        // brings its top set bit to bit 10 is that count less 22. Taking 21
+        // here put every subnormal at half its value.
+        let shift = mantissa.leading_zeros() - 22;
         let exp = 127 - 15 - shift;
         let mantissa = (mantissa << (shift + 1)) & 0x3FF;
         f32::from_bits(sign | (exp << 23) | (mantissa << 13))
@@ -678,6 +681,21 @@ mod tests {
         for v in [0.0f32, 1.0, 0.5, -2.5, 65504.0] {
             assert_eq!(f16_to_f32(f32_to_f16(v)), v, "{}", v);
         }
+    }
+
+    /// Subnormal halves are their own branch, and one nothing reached until
+    /// BC6H started producing them: every value below 2^-14 arrives there.
+    #[test]
+    fn subnormal_halves_decode_to_their_true_value() {
+        // A subnormal's value is its mantissa times 2^-24, exactly.
+        for mantissa in [1u16, 2, 3, 0x155, 0x200, 0x3FF] {
+            let expected = mantissa as f32 * 2.0f32.powi(-24);
+            assert_eq!(f16_to_f32(mantissa), expected, "half {mantissa:#06x}");
+            assert_eq!(f16_to_f32(mantissa | 0x8000), -expected, "negative {mantissa:#06x}");
+        }
+        // The largest subnormal and the smallest normal are adjacent.
+        assert_eq!(f16_to_f32(0x0400), 2.0f32.powi(-14));
+        assert!(f16_to_f32(0x03FF) < f16_to_f32(0x0400));
     }
 
     #[test]
