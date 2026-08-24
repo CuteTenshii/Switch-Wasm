@@ -1329,6 +1329,31 @@ impl Cpu {
                      // aborts. Reporting 0 says what is actually true here —
                      // nothing is reserved for the kernel — and puts `nnSdk`
                      // on its plain heap path, which works.
+                     //
+                     // This is the whole of what gates that switch, read out
+                     // of a retail `sdk`:
+                     // `VammManager::IsVirtualAddressMemoryEnabled` is
+                     // `svcGetInfo(16)` succeeding *and* returning non-zero,
+                     // nothing else, and `InitializeIfEnabled` skips
+                     // initialising on zero and leaves its impl pointer null.
+                     //
+                     // Which costs something, and it is worth knowing what
+                     // before reaching for the obvious change. A title that
+                     // calls `nn::os::AllocateAddressRegion` itself — not
+                     // through the heap — reaches that null pointer and
+                     // aborts on the `cursor >= limit` check of the bump
+                     // allocator behind it. Just Dance 2023 does, from its
+                     // own `nninitStartup`, and dies there.
+                     //
+                     // Raising this to the 16 MiB its NPDM declares does not
+                     // rescue it: measured on that title, VAMM comes on and
+                     // the boot fails *earlier*, at 107.8M steps in
+                     // `nn::mem::StandardAllocator::Initialize`, rather than
+                     // at 119.3M in `AllocateAddressRegion`. Both sides of
+                     // the branch abort, so the figure is not the fix — what
+                     // is missing is the address-space reservation the
+                     // manager expects, and until that exists 0 is the answer
+                     // that gets furthest.
                      16 => SYSTEM_RESOURCE_SIZE, // SystemResourceSizeTotal
                      17 => 0,                    // SystemResourceSizeUsed
                      // Total/UsedNonSystemMemorySize: the same figures as
