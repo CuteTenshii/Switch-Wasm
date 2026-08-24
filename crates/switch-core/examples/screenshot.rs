@@ -12,7 +12,7 @@ fn main() {
     // renders its text with. The frontend fetches the same file.
     let font = args
         .next()
-        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/assets/font.ttf").into());
+        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf").into());
     let data = fs::read(&path).expect("read nro");
 
     let mut cpu = Cpu::new();

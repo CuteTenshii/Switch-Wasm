@@ -56,7 +56,7 @@ fn main() {
         },
         None => println!("[romfs] no romfs section"),
     }
-    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/assets/font.ttf");
+    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf");
     if let Ok(b) = fs::read(font) {
         cpu.set_shared_font(b);
     }

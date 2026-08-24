@@ -73,7 +73,7 @@ fn main() {
     // text waits for a font that never arrives — the browser stages one at
     // startup, so a native run that skips it fails in a way the real
     // frontend never would.
-    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/assets/font.ttf");
+    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf");
     match fs::read(font) {
         Ok(bytes) => cpu.set_shared_font(bytes),
         Err(e) => println!("no font at {font} ({e}): text will not render"),

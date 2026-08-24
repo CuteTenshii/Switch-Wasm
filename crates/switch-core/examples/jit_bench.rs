@@ -103,7 +103,7 @@ fn main() {
     let want = args.next().and_then(|a| a.parse::<u64>().ok()).unwrap_or(40_000_000);
     let font = args
         .next()
-        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/assets/font.ttf").into());
+        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf").into());
     let nro = fs::read(&path).expect("read nro");
     let font = fs::read(&font).ok();
 

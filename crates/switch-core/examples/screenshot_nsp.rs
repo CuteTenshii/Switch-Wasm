@@ -50,7 +50,7 @@ fn main() {
     if let Some(i) = nca.romfs_section_index() {
         if let Ok(r) = nca.decrypt_romfs_section(raw, &keys, i) { cpu.set_romfs(r); }
     }
-    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/assets/font.ttf");
+    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf");
     if let Ok(b) = fs::read(font) { cpu.set_shared_font(b); }
     if let Ok(dir) = env::var("SWITCH_FIRMWARE") {
         for entry in fs::read_dir(&dir).unwrap().flatten() {

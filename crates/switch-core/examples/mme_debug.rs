@@ -15,7 +15,7 @@ fn main() {
     let data = fs::read(&path).expect("read nro");
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    if let Ok(font) = fs::read("web/assets/font.ttf") {
+    if let Ok(font) = fs::read("web/font.ttf") {
         cpu.set_shared_font(font);
     }
     let loaded = cpu.boot_homebrew(&data).expect("boot nro");

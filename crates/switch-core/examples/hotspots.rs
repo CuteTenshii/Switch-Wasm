@@ -19,7 +19,7 @@ fn main() {
     let nro = args.next().expect("usage: hotspots <nro> [font.ttf]");
     let font = args
         .next()
-        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/assets/font.ttf").into());
+        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf").into());
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
