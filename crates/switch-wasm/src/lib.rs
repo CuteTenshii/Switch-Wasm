@@ -1684,17 +1684,29 @@ pub extern "C" fn switch_guest_ram(handle: u32) -> u64 {
 
 // ---- small JSON helpers ----
 
+/// Escape a string into a JSON string body.
+///
+/// Per **character**, not per byte. A `\uXXXX` escape in JSON names a code
+/// point, so escaping the bytes of a multi-byte character one at a time spells
+/// a different string: ® (U+00AE, UTF-8 `C2 AE`) came out as
+/// `\u00c2\u00ae`, which a parser reads back as Â®. A title's name
+/// comes straight out of its NACP and is full of characters like it, so
+/// *JUST DANCE® 2017* reached the page as *JUST DANCEÂ® 2017*.
+///
+/// Everything above ASCII is emitted as itself: a JSON document is UTF-8, and
+/// the page decodes this buffer with a UTF-8 `TextDecoder`.
 fn json_escape(s: &str, out: &mut Vec<u8>) {
-    for b in s.bytes() {
-        match b {
-            b'"' => out.extend_from_slice(b"\\\""),
-            b'\\' => out.extend_from_slice(b"\\\\"),
-            b'\n' => out.extend_from_slice(b"\\n"),
-            b'\r' => out.extend_from_slice(b"\\r"),
-            0x20..=0x7E => out.push(b),
-            _ => {
-                out.extend_from_slice(format!("\\u{:04x}", b).as_bytes());
+    for c in s.chars() {
+        match c {
+            '"' => out.extend_from_slice(b"\\\""),
+            '\\' => out.extend_from_slice(b"\\\\"),
+            '\n' => out.extend_from_slice(b"\\n"),
+            '\r' => out.extend_from_slice(b"\\r"),
+            // The rest of C0 has no shorthand and cannot appear raw.
+            c if (c as u32) < 0x20 => {
+                out.extend_from_slice(format!("\\u{:04x}", c as u32).as_bytes());
             }
+            c => out.extend_from_slice(c.encode_utf8(&mut [0u8; 4]).as_bytes()),
         }
     }
 }
@@ -1995,6 +2007,25 @@ mod tests {
         let json = take_changes(handle);
         assert_eq!(json, r#"[{"path":"/switch/a\"b\\c","kind":"file","size":0}]"#);
         switch_free_session(handle);
+    }
+
+    #[test]
+    fn a_non_ascii_title_name_survives_the_json() {
+        // A `\uXXXX` escape names a code point, so escaping a multi-byte
+        // character one byte at a time spells something else entirely — and
+        // every retail title's name is full of them. This went out as
+        // `\u00c2\u00ae` and came back as "JUST DANCEÂ® 2017".
+        let mut out = Vec::new();
+        json_escape("JUST DANCE® 2017 — 日本語", &mut out);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "JUST DANCE® 2017 — 日本語"
+        );
+
+        // What JSON genuinely cannot carry raw still goes out escaped.
+        let mut out = Vec::new();
+        json_escape("a\"b\\c\nd\u{7}e", &mut out);
+        assert_eq!(String::from_utf8(out).unwrap(), r#"a\"b\\c\nd\u0007e"#);
     }
 
     #[test]
