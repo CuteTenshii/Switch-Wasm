@@ -110,11 +110,22 @@ const LAYER_ID: u64 = 1;
 /// The system version `set:sys` reports, as major/minor/micro.
 ///
 /// libnx seeds `hosversionGet` from this and branches on it everywhere, so the
-/// number is load-bearing rather than decorative: it is picked to sit past the
-/// gates the services here implement (6.0.0 for `acc`'s qualified-user list)
-/// and before the ones they do not (17.0.0, where `ts` moves its measurement
-/// onto a different interface).
-const FIRMWARE_VERSION: (u8, u8, u8) = (12, 1, 0);
+/// number is load-bearing rather than decorative.
+///
+/// It sat at 12.1.0 for a long time, chosen to clear the gates the services
+/// here implement (6.0.0 for `acc`'s qualified-user list) while staying below
+/// the ones they did not — 17.0.0, where `ts` moves its measurement onto a
+/// per-device `ISession`. Both of those are now implemented: `ts` routes
+/// `OpenSession` to `ts:session-internal`/`ts:session-external`, and `acc`
+/// answers `ListQualifiedUsers`. The ceiling the old number was avoiding is
+/// gone, and staying under it meant claiming to be four years older than the
+/// titles being run — Tomodachi Life alone reaches for `am` and `hid`
+/// commands added in 18.0.0 and 20.0.0.
+///
+/// So this reports the current firmware. Nothing here implements everything a
+/// 22.5.0 console does, and it never did at 12.1.0 either — the number says
+/// which side of a feature gate to take, not what is finished behind it.
+const FIRMWARE_VERSION: (u8, u8, u8) = (22, 5, 0);
 
 /// The temperatures `ts` reports, in degrees Celsius: the SoC
 /// (`TsLocation_Internal`) first, the PCB (`TsLocation_External`) second.
