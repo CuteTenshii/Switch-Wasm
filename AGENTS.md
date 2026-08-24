@@ -130,22 +130,31 @@ and asked `svcMapPhysicalMemory` to back 0x10_0000_0000, which truncates to 0.
 The regions now live in representable space, back to back above the stacks:
 
 ```text
-0x3000_0000  GUEST_HEAP_REGION_ADDR   heap, 1.5 GiB   (svcSetHeapSize)
-0x9000_0000  GUEST_ALIAS_REGION_ADDR  alias, 1.5 GiB  (svcMapPhysicalMemory)
-0xF000_0000  SHARED_BUFFER_ADDR       system shared buffer, 26 MiB
-0xF200_0000  FB_BASE / INPUT_ADDR     the demo framebuffer and input block
-0xF300_0000  GUEST_SPACE_END          above this a read faults
+MemoryLayout::PLAIN                MemoryLayout::VIRTUAL_ADDRESS
+0x3000_0000  heap,  2.5 GiB        0x3000_0000  heap,  896 MiB
+0xD000_0000  alias, 512 MiB        0x6800_0000  alias, 2.125 GiB
+
+0xF000_0000  SHARED_BUFFER_ADDR    system shared buffer, 26 MiB
+0xF200_0000  FB_BASE / INPUT_ADDR  the demo framebuffer and input block
+0xF300_0000  GUEST_SPACE_END       above this a read faults
 ```
 
-**Both regions are sized to `GUEST_TOTAL_MEMORY_SIZE`, and that is deliberate.**
-`nn::init` asks for the whole of what `svcGetInfo` calls total memory whichever
-route it takes, so a region smaller than that figure is a region the guest
-overruns — which is what happened: `svcSetHeapSize` said yes to the 480 MiB it
-was asked for inside a 240 MiB heap region, and the heap ran over `FB_BASE` and
-224 MiB into the alias region. Nothing had claimed those addresses yet, which
-is the only reason it went unnoticed. 0x01 now refuses a heap larger than its
-region, and `the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise`
-holds the layout together.
+**Each layout spends the address space on the region its own titles grow
+into.** `nn::init` asks for the whole of what `svcGetInfo` calls total memory,
+so the region it grows into may not be smaller than that figure — which is
+what happened: `svcSetHeapSize` said yes to the 480 MiB it was asked for
+inside a 240 MiB heap region, and the heap ran over `FB_BASE` and 224 MiB into
+the alias region. 0x01 now refuses a heap larger than its region, and
+`the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise` holds the
+layout together.
+
+But *which* region that is follows from the layout, not from the title, so
+sizing both to the total is 1.25 GiB spent on a region nobody asks for.
+`nnSdk` picks its route at init from the same NPDM figure that picks the
+layout: with virtual address memory it reserves alias-region address space,
+and without it, it calls `svcSetHeapSize` and never issues
+`svcMapPhysicalMemory` at all. So the plain layout charges the alias region
+for the heap and the virtual-address one does the reverse.
 
 **The figure itself is what a title believes about the console.** It was
 0x1E00_0000 (480 MiB) and Just Dance 2019 sized its heap from it, then asked
@@ -153,27 +162,33 @@ that heap for a 699 MiB graphics pool — a number baked into the game's code,
 not derived from what the console said. `nn::mem` returned null,
 `nvnMemoryPoolBuilderSetStorage` got it, `MemoryPool::Initialize` refused it,
 and the title used the pool object it had just freed: `blr` through a
-free-list link, pc=0. 1.5 GiB is what the address space can offer both routes
-once the image, the stacks and the shared buffer have theirs; a console gives
-an application several GiB, so this is a floor rather than a fidelity target.
+free-list link, pc=0. A title runs out quietly and crashes somewhere else
+entirely — Tomodachi Life filled 1.5 GiB 800M instructions in and then asked
+`nn::os::CreateThread` to start the null `ThreadType` its allocator had handed
+back, entering the thread at whatever `[null + 0x68]` held. A console gives an
+application several GiB, so 2.5 is a floor rather than a fidelity target.
 
-- **`svcMapPhysicalMemory` (0x2c) is how a retail title grows its heap**, not
-  `svcSetHeapSize` (0x01) — an application built for the 39-bit address space
-  picks the address itself out of the alias region, which is why tracing one
-  shows syscall 0x01 never being issued at all. 0x2c leaves the pages to the
-  soft map and only validates the range; 0x2d (`UnmapPhysicalMemory`) does the
-  real work of handing pages back.
+- **Which syscall grows the heap follows the layout.** A title with virtual
+  address memory uses `svcMapPhysicalMemory` (0x2c), picking the address
+  itself out of the alias region — tracing one shows syscall 0x01 never
+  issued at all. A title without it (Just Dance 2019, Tomodachi Life) issues
+  exactly one `svcSetHeapSize` (0x01), for the whole reported total, and never
+  touches 0x2c. 0x2c leaves the pages to the soft map and only validates the
+  range; 0x2d (`UnmapPhysicalMemory`) does the real work of handing pages back.
 - **InfoType 21/22 (Total/UsedNonSystemMemorySize) size the application
   heap.** `nn::init`'s startup hands their difference straight to
   `nn::mem::StandardAllocator::Initialize`, which asserts on any page-aligned
   span under 16 KiB — so the `_ => 0` default aborted the boot.
-- **InfoType 16 (SystemResourceSizeTotal) is deliberately 0**, and is the one
-  figure not taken from the title's own NPDM (which asks for 16 MiB). A
-  non-zero answer makes `nn::os::detail::VammManager::InitializeIfEnabled`
-  switch the heap onto a virtual-address-memory manager that reserves address
-  space out of the alias region and backs it page by page — kernel machinery
-  that does not exist here — and `nn::os::AllocateAddressRegion` fails with os
-  result 3-12.
+- **InfoType 16 (SystemResourceSizeTotal) is the title's own NPDM figure**,
+  and it is the one query that picks the layout:
+  `nn::os::detail::VammManager::IsVirtualAddressMemoryEnabled` is this
+  answering non-zero and nothing else. A title that declares a system resource
+  runs its heap through a manager that reserves address space out of the alias
+  region and backs it page by page, and needs an alias region big enough for
+  `VAMM_ARENA_SIZE` plus its own reservations or
+  `nn::os::AllocateAddressRegion` fails with os result 3-12. One that declares
+  zero never touches the manager. Both kinds are real, so the emulator answers
+  each title what its own manifest says.
 
 **There is no stderr in the browser.** `wasm32-unknown-unknown` has no WASI,
 so an `eprintln!` goes nowhere and `std::env::var` always fails — every

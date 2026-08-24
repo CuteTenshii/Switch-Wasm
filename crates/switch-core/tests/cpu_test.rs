@@ -5668,10 +5668,15 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     assert!(INPUT_ADDR + 0x1000 <= GUEST_SPACE_END);
 
     // `nn::init` asks for the whole of what `svcGetInfo` calls total memory,
-    // and takes either route to it, so neither region may be smaller than the
-    // figure both are sized from.
+    // so the region it grows into may not be smaller than that figure. Which
+    // region that is follows from the layout rather than from the title:
+    // without virtual address memory it is `svcSetHeapSize` and the heap
+    // region, every time, and the alias region is address space no title on
+    // this layout ever asks for. So it is sized for the one thing that does
+    // read it — `libnx`'s virtmem, which reserves out of it — and the rest is
+    // charged to the heap.
     assert!(GUEST_TOTAL_MEMORY_SIZE <= GUEST_HEAP_REGION_SIZE);
-    assert!(GUEST_TOTAL_MEMORY_SIZE <= GUEST_ALIAS_REGION_SIZE);
+    assert!(GUEST_ALIAS_REGION_SIZE >= 0x1000_0000, "the alias region is still a region");
 
     // What actually binds the alias region is virtual address memory, not the
     // heap. `VammManager` claims `VAMM_ARENA_SIZE` at the region base before

@@ -208,29 +208,39 @@ pub const GUEST_SPACE_END: u32 = 0xF300_0000;
 /// `svcMapPhysicalMemory` backs — the two ways a process gets its memory.
 ///
 /// `nn::init` asks for the whole of what `svcGetInfo` reports as total
-/// memory, whichever route it takes, so a region smaller than that figure is
-/// a region the guest overruns — which is what used to happen:
-/// `svcSetHeapSize` granted the 480 MiB it asked for at 0x3000_0000 and the
-/// heap ran straight through a 240 MiB region, over the framebuffer, and into
-/// the alias region. On a console these regions are gigabytes apart in a
-/// 39-bit space and neither the sizes nor the collision arise; here they have
-/// to share 4 GiB with the image, the stacks and the system shared buffer, so
-/// an equal split of what is left is what maximises the figure both routes
-/// can be told.
+/// memory, so a region smaller than that figure is a region the guest
+/// overruns — which is what used to happen: `svcSetHeapSize` granted the
+/// 480 MiB it asked for at 0x3000_0000 and the heap ran straight through a
+/// 240 MiB region, over the framebuffer, and into the alias region. On a
+/// console these regions are gigabytes apart in a 39-bit space and neither
+/// the sizes nor the collision arise; here they have to share 4 GiB with the
+/// image, the stacks and the system shared buffer.
 ///
-/// These are the sizes for a title that does **not** use virtual address
-/// memory — see [`MemoryLayout`] for the other set and for why one size does
-/// not fit both.
+/// **The two routes are not both live in one process**, which is what decides
+/// the split. `nnSdk` picks one at init from the same manifest figure that
+/// picks the layout: a title with virtual address memory grows its heap by
+/// reserving alias-region address space, and one without — every title on
+/// this layout, plus `libnx` homebrew — calls `svcSetHeapSize` and never
+/// issues `svcMapPhysicalMemory` at all. So the region the layout's own
+/// titles do not use is the one to charge for the other, and each layout
+/// spends its share of the address space on the route its titles take: this
+/// one on the heap, [`MemoryLayout::VIRTUAL_ADDRESS`] on the alias region.
+/// Splitting it evenly instead cost a title 1.25 GiB of the heap it asks for
+/// to reserve a region it will never touch, and Tomodachi Life's own
+/// allocator ran dry 800M instructions in — 30-odd threads later it asked
+/// `nn::os::CreateThread` to start a `ThreadType` that was the null its
+/// allocator had just handed back, and the thread entered at whatever
+/// `[null + 0x68]` happened to hold.
 ///
 /// Horizon's own alias region starts at 0x10_0000_0000, and reporting *that*
 /// through `svcGetInfo` had `nnSdk` asking to map memory at an address the
 /// emulator cannot represent at all — which `svcMapPhysicalMemory` would
 /// silently truncate to 0.
 pub const GUEST_HEAP_REGION_ADDR: u32 = 0x3000_0000;
-pub const GUEST_HEAP_REGION_SIZE: u32 = 0x6000_0000;
+pub const GUEST_HEAP_REGION_SIZE: u32 = 0xA000_0000;
 pub const GUEST_ALIAS_REGION_ADDR: u32 =
     GUEST_HEAP_REGION_ADDR.wrapping_add(GUEST_HEAP_REGION_SIZE);
-pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x6000_0000;
+pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x2000_0000;
 
 /// What `svcGetInfo` reports as the memory the process may use, and so the
 /// size `nn::init` asks for as its heap: exactly one region's worth.
@@ -240,9 +250,10 @@ pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x6000_0000;
 /// Dance 2019 sized its heap from this figure and then asked that heap for a
 /// 699 MiB graphics pool, a number baked into its own code rather than derived
 /// from what the console said. The allocation could not succeed, and the title
-/// used the null it got back. 1.5 GiB is what the address space can offer both
-/// routes; it is well short of a console and far more than the 480 MiB that
-/// stopped a real title from reaching its first frame.
+/// used the null it got back. 2.5 GiB is what is left of the address space
+/// once the image, the stacks, the shared buffer and an alias region are out
+/// of it; it is short of a console and five times the 480 MiB that stopped a
+/// real title from reaching its first frame.
 pub const GUEST_TOTAL_MEMORY_SIZE: u32 = GUEST_HEAP_REGION_SIZE;
 
 /// The arena `nn::os::detail::VammManagerImplByHorizon` claims at the base of
@@ -289,10 +300,11 @@ pub const VAMM_SYSTEM_RESOURCE_SIZE: u32 = 0x0100_0000;
 /// Charging that to a title which never uses the manager is not free either,
 /// and it is worse than it looks because it fails *quietly*: Just Dance 2019
 /// sizes a 699 MiB pool from the reported total, and told 896 MiB rather than
-/// 1.5 GiB it aborts 378.8M steps in, having reached exactly the same place
-/// with the same GPU work as a run that was told the truth. Nothing in that
-/// failure names memory. So the layout follows the manifest, and a title that
-/// asked for no system resource keeps the address space it has always had.
+/// the whole heap it aborts 378.8M steps in, having reached exactly the same
+/// place with the same GPU work as a run that was told the truth. Nothing in
+/// that failure names memory. So the layout follows the manifest, and each
+/// kind of title spends the address space on the region it actually grows
+/// into: the alias region here, the heap on [`MemoryLayout::PLAIN`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemoryLayout {
     pub heap_addr: u32,
