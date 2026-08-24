@@ -171,6 +171,17 @@ pub enum LogicOp {
     PassB,
 }
 
+/// What `lop`'s test form asks of the result before it writes its predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LopTest {
+    /// `.T` — the predicate is set unconditionally.
+    True,
+    /// `.Z` — set when the result is zero.
+    Zero,
+    /// `.NZ` — set when any bit of the result is set.
+    NonZero,
+}
+
 /// `mufu`'s sub-operation (`tab5080_0`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MufuOp {
@@ -237,7 +248,11 @@ pub enum Op {
     Mufu { dst: u8, src: u8, sm: FMod, op: MufuOp, sat: bool },
 
     // ---- integer ALU ----
-    Iadd { dst: u8, a: u8, aneg: bool, b: Operand, bneg: bool },
+    /// `cin` is `IADD.X`, which adds the carry a previous `IADD.CC` left
+    /// behind, and `cout` is that `.CC`. Together they are how a shader adds a
+    /// 64-bit number in two halves — every global-memory address a Maxwell
+    /// program computes is one of these pairs.
+    Iadd { dst: u8, a: u8, aneg: bool, b: Operand, bneg: bool, cin: bool, cout: bool },
     Iadd3 { dst: u8, a: u8, aneg: bool, b: Operand, bneg: bool, c: Operand, cneg: bool },
     Imnmx { dst: u8, a: u8, b: Operand, pred: Pred, signed: bool },
     Iscadd { dst: u8, a: u8, aneg: bool, b: Operand, bneg: bool, shift: u8 },
@@ -259,7 +274,9 @@ pub enum Op {
         psl: bool,
         mrg: bool,
     },
-    Lop { dst: u8, a: u8, ainv: bool, b: Operand, binv: bool, op: LogicOp },
+    /// `pred` is the `.T`/`.Z`/`.NZ` form, which tests the result and writes a
+    /// predicate as well as (usually) discarding the value into `RZ`.
+    Lop { dst: u8, a: u8, ainv: bool, b: Operand, binv: bool, op: LogicOp, pred: Option<(u8, LopTest)> },
     Lop3 { dst: u8, a: u8, b: Operand, c: Operand, lut: u8 },
     Shl { dst: u8, a: u8, b: Operand, wrap: bool },
     Shr { dst: u8, a: u8, b: Operand, signed: bool, wrap: bool },
@@ -314,6 +331,11 @@ pub enum Op {
     /// program, already resolved from the pc-relative encoding.
     Bra { target: u32 },
     /// `ssy target` — push a reconvergence point.
+    /// `brx Ra, imm`: an indexed branch, which is how a `switch` lowers. The
+    /// register holds an entry a jump table in a constant bank supplied, and
+    /// the target is that entry plus this instruction's own pc-relative base —
+    /// so an interpreter, unlike a recompiler, needs no table tracking at all.
+    Brx { base: u32, reg: u8 },
     Ssy { target: u32 },
     /// `sync` — pop one and jump there.
     Sync,
@@ -493,7 +515,7 @@ fn attr_size(bits: u64) -> MemSize {
 /// Where a pc-relative branch lands: the 24-bit signed word at `[20, 44)`,
 /// relative to the instruction *after* this one (envydis's `.addend = 8`).
 fn branch_target(insn: u64, pc: u32) -> u32 {
-    (pc as i64 + 8 + sfield(insn, 20, 24)) as u32
+    super::align_slot((pc as i64 + 8 + sfield(insn, 20, 24)) as u32)
 }
 
 /// Decode a single 8-byte Maxwell instruction word sitting at byte offset
@@ -501,7 +523,18 @@ fn branch_target(insn: u64, pc: u32) -> u32 {
 /// panics: an unrecognised or unsupported bit pattern decodes to
 /// [`Op::Unimplemented`].
 pub fn decode_at(insn: u64, pc: u32) -> Instruction {
-    Instruction { pred: guard(insn), op: decode_op(insn, pc) }
+    let op = decode_op(insn, pc);
+    // `ssy`/`pbk`/`pcnt` have no predicate: the bits every other instruction
+    // keeps its guard in belong to their branch target, and they read as zero
+    // — which is `@p0`, a predicate that is false until something sets it. So
+    // the push was skipped and the `sync`/`brk` that matched it found an empty
+    // reconvergence stack, which is where every one of the Home Menu's 222
+    // textured draws stopped.
+    let pred = match op {
+        Op::Ssy { .. } | Op::Pbk { .. } | Op::Pcnt { .. } => Pred::ALWAYS,
+        _ => guard(insn),
+    };
+    Instruction { pred, op }
 }
 
 /// [`decode_at`] for a program with no branches, where the pc doesn't
@@ -593,6 +626,9 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             0xe2a if field(insn, 5, 1) == 0 => Op::Pbk { target: branch_target(insn, pc) },
             0xe29 if field(insn, 5, 1) == 0 => Op::Ssy { target: branch_target(insn, pc) },
             0xe24 if field(insn, 5, 1) == 0 => Op::Bra { target: branch_target(insn, pc) },
+            0xe25 if field(insn, 5, 1) == 0 => {
+                Op::Brx { base: branch_target(insn, pc), reg: reg(insn, 8, 8) }
+            }
             _ => decode_alu(insn),
         },
     }
@@ -669,8 +705,8 @@ fn decode_alu(insn: u64) -> Op {
         // iadd — sat 50, x 43, a: neg 49, b: neg 48.
         0x10 => {
             let Some(b) = rhs_int else { return un };
-            if field(insn, 50, 1) != 0 || field(insn, 43, 1) != 0 {
-                return un; // saturating / extended-carry add
+            if field(insn, 50, 1) != 0 {
+                return un; // saturating add
             }
             Op::Iadd {
                 dst: reg(insn, 0, 8),
@@ -678,6 +714,8 @@ fn decode_alu(insn: u64) -> Op {
                 aneg: field(insn, 49, 1) != 0,
                 b,
                 bneg: field(insn, 48, 1) != 0,
+                cin: field(insn, 43, 1) != 0,
+                cout: field(insn, 47, 1) != 0,
             }
         }
         // iscadd — shift at 39..44.
@@ -745,14 +783,23 @@ fn decode_alu(insn: u64) -> Op {
         // lop — op at 41..43, inv 39 (a) / 40 (b), x 43.
         0x40 => {
             let Some(b) = rhs_int else { return un };
-            if field(insn, 43, 1) != 0 || field(insn, 44, 2) != 0 {
-                return un; // extended-carry / predicate-writing forms
+            if field(insn, 43, 1) != 0 {
+                return un; // extended-carry form
             }
             let op = match field(insn, 41, 2) {
                 0 => LogicOp::And,
                 1 => LogicOp::Or,
                 2 => LogicOp::Xor,
                 _ => LogicOp::PassB,
+            };
+            // The test form writes a predicate from the result as well as the
+            // register, and the register is usually `RZ`: this is how a shader
+            // asks "are any of these bits set" in one instruction.
+            let pred = match field(insn, 44, 2) {
+                0 => None,
+                1 => Some((reg(insn, 48, 3), LopTest::True)),
+                2 => Some((reg(insn, 48, 3), LopTest::Zero)),
+                _ => Some((reg(insn, 48, 3), LopTest::NonZero)),
             };
             Op::Lop {
                 dst: reg(insn, 0, 8),
@@ -761,6 +808,7 @@ fn decode_alu(insn: u64) -> Op {
                 b,
                 binv: field(insn, 40, 1) != 0,
                 op,
+                pred,
             }
         }
         // shl — wrap 39, x 43.
@@ -1197,27 +1245,19 @@ fn decode_alu_wide(insn: u64) -> Op {
         };
     }
 
-    // texs — the immediate-handle sample.
+    // texs — the immediate-handle sample. Bit 49 is `nodep`, a scheduling
+    // hint with no effect on what the instruction computes, so it is ignored
+    // rather than decoded: refusing it cost the Home Menu 156 of its textured
+    // draws, every one of them an ordinary 2D sample.
     if insn & 0xf600_0000_0000_0000 == 0xd000_0000_0000_0000 {
-        if field(insn, 49, 1) == 0 {
-            let dst = reg(insn, 0, 8);
-            let dst2 = reg(insn, 28, 8);
-            if let (Some(dim), Some(mask)) = (
-                decode_tex_dim(field(insn, 53, 4)),
-                decode_tex_mask(field(insn, 50, 3), dst, dst2),
-            ) {
-                // The two coordinate operands are `REG_08` and `REG_20`; how
-                // many axes they feed, and in what order, is the dimension's
-                // business. Only 3D and cube reach for a third, which is
-                // `REG_08 + 1`.
-                let (a, b) = (reg(insn, 8, 8), reg(insn, 20, 8));
-                let coords = match dim {
-                    TexDim::T1d => [a, RZ, RZ],
-                    TexDim::T2d => [a, b, RZ],
-                    TexDim::T3d | TexDim::TCube => [a, a.wrapping_add(1), b],
-                };
-                return Op::Texs { dst, dst2, coords, handle: field(insn, 36, 13) as u16, dim, mask };
-            }
+        let dst = reg(insn, 0, 8);
+        let dst2 = reg(insn, 28, 8);
+        let (a, b) = (reg(insn, 8, 8), reg(insn, 20, 8));
+        if let (Some((dim, coords)), Some(mask)) = (
+            texs_encoding(field(insn, 53, 4), a, b),
+            decode_tex_mask(field(insn, 50, 3), dst, dst2),
+        ) {
+            return Op::Texs { dst, dst2, coords, handle: field(insn, 36, 13) as u16, dim, mask };
         }
         return un;
     }
@@ -1257,6 +1297,9 @@ fn decode_alu_wide(insn: u64) -> Op {
             aneg: field(insn, 56, 1) != 0,
             b: Operand::Imm(field(insn, 20, 32) as u32),
             bneg: false,
+            cin: false,
+            // `iadd32i` writes the carry from bit 52.
+            cout: field(insn, 52, 1) != 0,
         };
     }
     if insn & 0xfc00_0000_0000_0000 == 0x0400_0000_0000_0000 {
@@ -1274,6 +1317,7 @@ fn decode_alu_wide(insn: u64) -> Op {
             b: Operand::Imm(field(insn, 20, 32) as u32),
             binv: field(insn, 56, 1) != 0,
             op,
+            pred: None,
         };
     }
 
@@ -1326,12 +1370,29 @@ fn decode_xmad(
 }
 
 /// `d000_1`/`d200_1`-shared 4-bit field.
-fn decode_tex_dim(bits: u64) -> Option<TexDim> {
+/// A `texs`'s encoding field: which texture shape it samples, and where its
+/// coordinates come from. The two operand registers are `REG_08` (`a`) and
+/// `REG_20` (`b`), but which axes they feed differs per encoding — a 2D
+/// sample takes `(a, b)`, while one that also carries an explicit LOD takes
+/// `(a, a + 1)` and leaves `b` for the level.
+///
+/// The encodings left out are the ones this rasteriser has no model for:
+/// depth-compare (4, 5, 6, 9) and 2D arrays (7, 8). They decode to
+/// [`Op::Unimplemented`] and their draw is skipped with a reason, which is
+/// better than sampling the wrong thing silently.
+fn texs_encoding(bits: u64, a: u8, b: u8) -> Option<(TexDim, [u8; 3])> {
+    let next = a.wrapping_add(1);
     match bits {
-        0 => Some(TexDim::T1d),
-        1 => Some(TexDim::T2d),
-        4 => Some(TexDim::T3d),
-        6 => Some(TexDim::TCube),
+        // 1D.LZ
+        0 => Some((TexDim::T1d, [a, RZ, RZ])),
+        // 2D, 2D.LZ
+        1 | 2 => Some((TexDim::T2d, [a, b, RZ])),
+        // 2D.LL — `b` is the level, not a coordinate.
+        3 => Some((TexDim::T2d, [a, next, RZ])),
+        // 3D, 3D.LZ
+        10 | 11 => Some((TexDim::T3d, [a, next, b])),
+        // CUBE, CUBE.LL
+        12 | 13 => Some((TexDim::TCube, [a, next, b])),
         _ => None,
     }
 }
@@ -1708,10 +1769,31 @@ mod tests {
 
     #[test]
     fn decodes_the_reconvergence_ops() {
-        assert_eq!(decode_at(asm(0xe290, &[(20, 24, 0x18)]), 0).op, Op::Ssy { target: 0x20 });
+        // 0 + 8 + 0x18 is 0x20, which is a `sched` word rather than an
+        // instruction — so the target is the slot after it. See
+        // [`super::super::align_slot`].
+        assert_eq!(decode_at(asm(0xe290, &[(20, 24, 0x18)]), 0).op, Op::Ssy { target: 0x28 });
+        // And one that lands on a real slot is left alone.
+        assert_eq!(decode_at(asm(0xe290, &[(20, 24, 0x20)]), 0).op, Op::Ssy { target: 0x28 });
         assert_eq!(op(asm(0xf0f8, &[])), Op::Sync);
         assert_eq!(op(asm(0xe340, &[])), Op::Brk);
         assert_eq!(op(asm(0x50b0, &[])), Op::Nop);
+    }
+
+    #[test]
+    fn a_reconvergence_push_is_never_predicated() {
+        // The bits every other instruction keeps its guard in belong to these
+        // three's branch target, and read as zero — which is `@p0`, false
+        // until something sets it. Decoded that way the push is skipped and
+        // the `sync` that matched it finds an empty stack.
+        for opcode in [0xe290u16, 0xe2a0, 0xe2b0] {
+            let raw = asm(opcode, &[(20, 24, 0x20)]);
+            assert!(decode_at(raw, 0).pred.is_always(), "opcode {opcode:#x}");
+        }
+        // `bra` in the same group *is* predicated, and keeps its guard.
+        // `asm` writes PT into those bits, so clear them before setting p3.
+        let bra = (asm(0xe240, &[(20, 24, 0x20)]) & !(0x7 << 16)) | (3 << 16);
+        assert_eq!(decode_at(bra, 0).pred, Pred { reg: 3, negate: false });
     }
 
     #[test]
@@ -1719,7 +1801,7 @@ mod tests {
         // iadd r0, r1, -r2
         assert_eq!(
             op(asm(0x5c10, &[(0, 8, 0), (8, 8, 1), (20, 8, 2), (48, 1, 1)])),
-            Op::Iadd { dst: 0, a: 1, aneg: false, b: Operand::Reg(2), bneg: true }
+            Op::Iadd { dst: 0, a: 1, aneg: false, b: Operand::Reg(2), bneg: true, cin: false, cout: false }
         );
         // shl r3, r4, 0x2 (immediate form)
         assert_eq!(
@@ -1736,6 +1818,7 @@ mod tests {
                 b: Operand::Reg(2),
                 binv: false,
                 op: LogicOp::And,
+                pred: None,
             }
         );
         // mov r5, r6 — the byte-enable mask must be "all four".

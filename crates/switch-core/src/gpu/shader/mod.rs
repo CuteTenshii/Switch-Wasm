@@ -95,6 +95,20 @@ fn is_instruction_slot(offset: u32) -> bool {
     (offset / 8) % 4 != 0
 }
 
+/// A branch target rounded onto the instruction slot it means. A target is a
+/// raw byte offset and can land on the `sched` word that starts a 32-byte
+/// block, which is not an instruction — hardware takes the next slot, so an
+/// unaligned target is the block's first real instruction rather than an
+/// error. Every computed branch goes through this: `bra`, `ssy`, `pbk`,
+/// `pcnt` and `brx` alike.
+pub fn align_slot(offset: u32) -> u32 {
+    if offset % 32 == 0 {
+        offset + 8
+    } else {
+        offset
+    }
+}
+
 /// The next instruction slot after `offset`, skipping the `sched` word that
 /// starts each block.
 pub fn next_slot(offset: u32) -> u32 {
@@ -142,6 +156,14 @@ pub fn decode_program_with(read: &mut dyn FnMut(u32) -> Result<u64>) -> Result<P
                     push(target, &mut worklist, &mut queued);
                     !insn.pred.is_always()
                 }
+                // `brx`'s targets are a jump table in a constant bank, which
+                // is not readable from here. Keep walking past it instead: a
+                // `switch`'s arms are laid out around the branch and are
+                // reached by the linear walk and by the `bra`s that end them,
+                // so they are decoded anyway — and a target that genuinely was
+                // not is a clear error at execution rather than a silent
+                // misdecode.
+                Op::Brx { .. } => true,
                 // `sync`/`brk`/`cont` jump to a point pushed earlier by the
                 // matching `ssy`/`pbk`/`pcnt`, which is already queued.
                 Op::Sync | Op::Brk | Op::Cont => !insn.pred.is_always(),

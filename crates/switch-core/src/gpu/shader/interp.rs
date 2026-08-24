@@ -27,7 +27,7 @@ use crate::{Error, Result};
 use std::collections::HashMap;
 
 use super::isa::{
-    self, BoolOp, FCmp, FRound, ICmp, LogicOp, MufuOp, Op, Operand, Pred, RZ,
+    self, BoolOp, FCmp, FRound, ICmp, LogicOp, LopTest, MufuOp, Op, Operand, Pred, RZ,
 };
 
 /// Resolves a `cN[offset]` operand to its raw 32 bits. `bank` is whatever the
@@ -65,6 +65,23 @@ impl ConstantSource for MemoryConstants<'_, '_> {
             )));
         }
         self.ctx.read_u32(addr + offset as u64)
+    }
+}
+
+/// Reads `ldg`'s global memory straight out of the channel's address space.
+///
+/// A Maxwell shader addresses global memory by full 64-bit GPU virtual
+/// address, which it builds itself out of a constant-buffer pair with
+/// `iadd.cc`/`iadd.x` — so there is nothing to bind and no window to set up.
+/// Translating the address is the whole implementation, and it is the same
+/// translation every other GPU read goes through.
+pub struct MemoryGlobal<'a, 'b> {
+    pub ctx: &'a ExecCtx<'b>,
+}
+
+impl GlobalMemory for MemoryGlobal<'_, '_> {
+    fn read_u32(&self, addr: u64) -> Result<u32> {
+        self.ctx.read_u32(addr)
     }
 }
 
@@ -242,6 +259,9 @@ pub struct Invocation {
     /// `a[]` input and output.
     pub attr_in: Attributes,
     pub attr_out: Attributes,
+    /// The carry `iadd.cc` leaves behind and `iadd.x` reads. One flag, not one
+    /// per thread lane: this interpreter runs a single invocation at a time.
+    carry: bool,
     /// Set by `kil`: this fragment must not be written.
     pub discarded: bool,
     /// `ssy`/`pbk`/`pcnt` push a resume address; `sync`/`brk`/`cont` pop it.
@@ -254,6 +274,7 @@ impl Default for Invocation {
         Invocation {
             gpr: [0; 255],
             pred: [false; 7],
+            carry: false,
             attr_in: Attributes::default(),
             attr_out: Attributes::default(),
             discarded: false,
@@ -400,12 +421,20 @@ impl Invocation {
                     pc = jump(target, &mut pending, self)?;
                     continue;
                 }
+                Op::Brx { base, reg } => {
+                    let target = super::align_slot(base.wrapping_add(self.reg(reg)));
+                    pc = jump(target, &mut pending, self)?;
+                    continue;
+                }
                 Op::Ssy { target } | Op::Pbk { target } | Op::Pcnt { target } => {
                     self.stack.push(target);
                 }
                 Op::Sync | Op::Brk | Op::Cont => {
                     let target = self.stack.pop().ok_or_else(|| {
-                        Error::Gpu("shader: sync/brk/cont with an empty reconvergence stack".into())
+                        let at = program.offsets.get(pc).copied().unwrap_or(0);
+                        Error::Gpu(format!(
+                            "shader: sync/brk/cont at {at:#x} with an empty reconvergence stack"
+                        ))
                     })?;
                     pc = jump(target, &mut pending, self)?;
                     continue;
@@ -504,10 +533,18 @@ impl Invocation {
             }
 
             // ---- integer ----
-            Op::Iadd { dst, a, aneg, b, bneg } => {
+            Op::Iadd { dst, a, aneg, b, bneg, cin, cout } => {
                 let x = ineg_if(self.reg(a), aneg);
                 let y = ineg_if(self.operand(b, env)?, bneg);
-                self.set_reg(dst, x.wrapping_add(y));
+                // Widened, so the carry out is the bit that falls off the top.
+                // A negated operand is already two's-complement here, so a
+                // subtraction carries exactly when it does not borrow — which
+                // is the convention `iadd.x` expects on the high half.
+                let sum = u64::from(x) + u64::from(y) + u64::from(cin && self.carry);
+                self.set_reg(dst, sum as u32);
+                if cout {
+                    self.carry = sum > u64::from(u32::MAX);
+                }
             }
             Op::Iadd3 { dst, a, aneg, b, bneg, c, cneg } => {
                 let x = ineg_if(self.reg(a), aneg);
@@ -577,7 +614,7 @@ impl Invocation {
                 let v = if taken { self.reg(a) } else { self.operand(b, env)? };
                 self.set_reg(dst, v);
             }
-            Op::Lop { dst, a, ainv, b, binv, op } => {
+            Op::Lop { dst, a, ainv, b, binv, op, pred } => {
                 let x = inv_if(self.reg(a), ainv);
                 let y = inv_if(self.operand(b, env)?, binv);
                 let v = match op {
@@ -587,6 +624,14 @@ impl Invocation {
                     LogicOp::PassB => y,
                 };
                 self.set_reg(dst, v);
+                if let Some((p, test)) = pred {
+                    let bit = match test {
+                        LopTest::True => true,
+                        LopTest::Zero => v == 0,
+                        LopTest::NonZero => v != 0,
+                    };
+                    self.set_pred(p, bit);
+                }
             }
             Op::Lop3 { dst, a, b, c, lut } => {
                 let x = self.reg(a);
@@ -771,6 +816,7 @@ impl Invocation {
             | Op::Nop
             | Op::Inert
             | Op::Bra { .. }
+            | Op::Brx { .. }
             | Op::Ssy { .. }
             | Op::Pbk { .. }
             | Op::Pcnt { .. }
@@ -1178,7 +1224,7 @@ fn half(v: u32, high: bool, signed: bool) -> u32 {
 mod tests {
     use super::*;
     use crate::gpu::shader::decode_program;
-    use crate::gpu::shader::isa::{FMod, Instruction, MufuOp, TexDim};
+    use crate::gpu::shader::isa::{FMod, Instruction, TexDim};
     use crate::gpu::shader::Program;
 
     fn no_consts() -> HashMap<(u8, u16), f32> {
@@ -1321,7 +1367,7 @@ mod tests {
             (Op::Mov32i { dst: 1, imm: 0 }, Pred::ALWAYS),
             // loop body, at 0x10
             (
-                Op::Iadd { dst: 1, a: 1, aneg: false, b: Operand::Imm(1), bneg: false },
+                Op::Iadd { dst: 1, a: 1, aneg: false, b: Operand::Imm(1), bneg: false, cin: false, cout: false },
                 Pred::ALWAYS,
             ),
             (
@@ -1391,10 +1437,11 @@ mod tests {
                     b: Operand::Imm(0xffff),
                     binv: false,
                     op: LogicOp::And,
+                    pred: None,
                 },
                 Pred::ALWAYS,
             ),
-            (Op::Iadd { dst: 3, a: 1, aneg: false, b: Operand::Reg(2), bneg: false }, Pred::ALWAYS),
+            (Op::Iadd { dst: 3, a: 1, aneg: false, b: Operand::Reg(2), bneg: false, cin: false, cout: false }, Pred::ALWAYS),
             (Op::Exit, Pred::ALWAYS),
         ]);
         let mut inv = Invocation::new();

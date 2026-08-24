@@ -20,7 +20,7 @@ use crate::gpu::engine::threed::{
 };
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::shader::interp::{
-    ConstantSource, Env, Invocation, MemoryConstants, MemoryTextures, NoTextures,
+    ConstantSource, Env, Invocation, MemoryConstants, MemoryGlobal, MemoryTextures, NoTextures,
 };
 use crate::gpu::shader::{self, Op, Program};
 use crate::gpu::surface::MAX_SAMPLES;
@@ -413,11 +413,14 @@ const NUM_VARYINGS: usize = 4;
 /// fixed range means vertex fetch doesn't need the shader to declare how
 /// many it reads.
 const MAX_VERTEX_ATTRIBS: u32 = 16;
-/// Words of shader binary to scan looking for `exit` before giving up —
-/// generous for 2D UI, not unbounded (see `shader::MAX_INSTRUCTIONS`'s doc
-/// comment for the same reasoning). Reading stops as soon as `exit` is
-/// found, so a short real program never touches memory past its own end.
-const MAX_PROGRAM_WORDS: u64 = 1024;
+/// Words of shader binary to scan looking for `exit` before giving up — not
+/// unbounded (see `shader::MAX_INSTRUCTIONS`'s doc comment for the same
+/// reasoning). Reading stops as soon as `exit` is found, so a short real
+/// program never touches memory past its own end.
+///
+/// 1024 was "generous for 2D UI" and was not: the Home Menu's own UI shaders
+/// run past it, five of them by a single word.
+const MAX_PROGRAM_WORDS: u64 = 8192;
 
 /// One vertex after the vertex shader ran: clip-space position plus every
 /// generic varying, ready for the perspective divide and interpolation.
@@ -463,6 +466,17 @@ fn decode_program_from_memory(ctx: &ExecCtx, addr: u64) -> Result<Program> {
         }
         ctx.read_u64(addr + u64::from(offset))
     })
+    .inspect(|program| {
+        // `TRACE_SHADER=1` prints every program the rasteriser decodes, in
+        // control-flow-walk order. A shader that fails to run says only which
+        // instruction it stopped on; this is how you see what came before it.
+        if std::env::var("TRACE_SHADER").is_ok() {
+            eprintln!("[shader] program at {addr:#x}, {} instructions", program.offsets.len());
+            for (i, &off) in program.offsets.iter().enumerate() {
+                eprintln!("  {off:#06x}: {:?}", program.insns[i]);
+            }
+        }
+    })
 }
 
 fn shade_vertex(
@@ -491,7 +505,10 @@ fn shade_vertex(
             inv.attr_in.set(base + c as u16 * 4, component);
         }
     }
-    inv.execute(program, &Env::new(consts, &NoTextures))?;
+    let global = MemoryGlobal { ctx };
+    let mut env = Env::new(consts, &NoTextures);
+    env.memory = Some(&global);
+    inv.execute(program, &env)?;
 
     let mut clip = [0.0, 0.0, 0.0, 1.0];
     for (c, slot) in clip.iter_mut().enumerate() {
@@ -886,8 +903,10 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                             tex_sampler_pool: engine.tex_sampler_pool(),
                             descriptors: &descriptors,
                         };
-                        let env =
+                        let fs_global = MemoryGlobal { ctx: &*ctx };
+                        let mut env =
                             Env::with_tex_cb_index(&fs_consts, &fs_textures, tex_cb_index);
+                        env.memory = Some(&fs_global);
                         shade_fragment(
                             &mut fragment,
                             &fs_program,
