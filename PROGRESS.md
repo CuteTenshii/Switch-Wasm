@@ -446,7 +446,7 @@ Tracing every ioctl five guests issue — hbmenu, NX-Shell, sdl-hello, "A Short
 Hike" and Tomodachi Life — and grouping by `(type, nr)` says exactly where the
 gaps are, which is a shorter list than the ioctl tables suggest: every command
 `libnx` can send is implemented, and so is every command those two retail
-titles send bar one.
+titles send.
 
 - **`ZbcSetTable` / `ZbcQueryTable` (`0x47` `0x03`/`0x04`)** used to be one
   arm answering a bare success, on the reasoning that zero-bandwidth clear is
@@ -464,24 +464,42 @@ titles send bar one.
   arms the slot and marks it reached — a submission retires inside its own
   ioctl, so it has, and a driver that parks on the slot instead of polling was
   parking on something nothing would ever set.
-- **`/dev/nvhost-ctrl-gpu` `0x13`** is the one command a real guest reaches
-  that is still refused, and refusing it is a decision rather than an
-  oversight. `nnSdk`'s bundled `nvrm_gpu` asks for it once, third in its device
-  probe — after `GetCharacteristics` and `GetTpcMasks`, before the two ZCull
-  queries — as an `IOWR` with an 8-byte all-zero argument, sent through
-  `nvIoctl3` with a **4-byte** out-of-line reply buffer. So it is a per-GPC
-  count or mask, in the same block as the TPC masks. Nothing names it: it is in
-  no `libnx` header and no other emulator implements it. Its caller
-  (`sdk!0xd7071c4`) keeps the failure in a register and carries on, so a
-  refusal is something it already handles and an invented number is something
-  it would act on.
+- **`/dev/nvhost-ctrl-gpu` `0x13` is `VsmsMapping`** — which `(GPC, TPC)` each
+  of the chip's "virtual SMs" sits on, one `{ u8 gpc_index, u8 tpc_index }`
+  entry per TPC. It was the last command a real guest reached and did not get,
+  and both Tomodachi Life and the Home Menu applet ask for it during
+  `nvrm_gpu`'s device probe, third — after `GetCharacteristics` and
+  `GetTpcMasks`, before the two ZCull queries.
 
-The refusal itself is now visible where it matters. An ioctl with no handler
-used to reach `eprintln!` and nothing else, and there is no stderr in the
-browser — where the whole GPU stack runs. It is reported once per `(node,
-command)` through `Cpu::diagnostic`, the channel the page drains, exactly as
-`[ipc] unimplemented` is, and naming the device node because an ioctl number
-means nothing without it.
+  It is in no `libnx` header and no other emulator implements it, so it was
+  identified from its caller rather than from a table. `nvrm_gpu` builds the
+  request inline — `movz w23, #0x4713` / `movk w23, #0xc008` at
+  `sdk!0xd740950` — and hands the driver **two** buffer descriptors: the
+  8-byte argument, and an array of `num_tpc_per_gpc` u16 entries. That is
+  upstream's `nvgpu_gpu_vsms_mapping_args` exactly: the argument is a bare
+  buffer address, which arrives zero because the Switch passes the buffer
+  out-of-line rather than as a pointer, and the entries are
+  `nvgpu_gpu_vsms_mapping_entry`. GM20B's one GPC and two TPCs are the four
+  bytes the guest offers, and `GPU_NUM_GPC`/`GPU_TPC_PER_GPC` now feed the
+  characteristics, the TPC mask and this map alike — a driver told two
+  different chips indexes one with the other's count.
+
+  **It is not what stops the title rendering**, which is worth recording
+  because it was the only line the whole run logged and that makes it look
+  causal. Before it was identified, answering it with a scalar (0, 1, 2, 3,
+  and all-ones, in both argument words) was measured against refusing it at
+  both 1.2B and 4B instructions: byte-identical GPU statistics, the same
+  41 threads in the same states, the same spinning pc. Implementing it
+  properly does not change them either. The emulator only logs the gaps it
+  knows it has, and a title that never issues a draw call logs nothing at all
+  — silence is not evidence.
+
+An ioctl with no handler is now visible where it matters. It used to reach
+`eprintln!` and nothing else, and there is no stderr in the browser — where
+the whole GPU stack runs. It is reported once per `(node, command)` through
+`Cpu::diagnostic`, the channel the page drains, exactly as `[ipc]
+unimplemented` is, and naming the device node because an ioctl number means
+nothing without it.
 
 ## Services (IPC)
 
@@ -1862,10 +1880,13 @@ the retail title render, for the reason recorded there.
    submits four carrying 8032 and zero. Whatever they are waiting on sits
    above the GPU: the next thing to do is find which thread is spinning at
    `pc=0xa70b7ec` (A Short Hike) or `pc=0xd4c36f0` (Tomodachi Life) and on
-   what. `/dev/nvhost-ctrl-gpu` ioctl 0x13 is the one call either title makes
-   that is still answered `NotImplemented`, and nothing has yet been found
-   that depends on it (see [what is left
+   what. Every nvdrv command either title issues is now implemented, and the
+   last one outstanding — `VsmsMapping` — was measured not to matter either
+   way (see [what is left
    unimplemented](#what-is-left-unimplemented-counted-rather-than-guessed)).
+   At 4B instructions Tomodachi Life has 41 threads and all but three are
+   parked in `svcWaitForAddress`; the three awake are the main thread at
+   `sdk!0xd7a7834`, `0x1006` at `0xd4145ac` and `0x104c` at `0xd4c1248`.
 2. **The rest of the thread syscalls.** The title's own scheduler and IL2CPP's
    garbage collector reach for them one at a time as it runs;
    `SetThreadActivity` and `GetThreadContext3` are done, and whatever it asks

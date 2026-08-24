@@ -35,6 +35,13 @@ const ZBC_TYPE_INVALID: u32 = 0;
 const ZBC_TYPE_COLOR: u32 = 1;
 const ZBC_TYPE_DEPTH: u32 = 2;
 
+/// The GM20B's shader units, as `GetCharacteristics` reports them. The TPC
+/// mask and the virtual-SM map are derived from these rather than written out
+/// again: a driver told two different chips reconciles them by indexing one
+/// with the other's count.
+const GPU_NUM_GPC: u32 = 1;
+const GPU_TPC_PER_GPC: u32 = 2;
+
 /// ioctl type ("magic") bytes.
 const TYPE_NVHOST: u32 = 0x00;
 const TYPE_NVMAP: u32 = 0x01;
@@ -560,10 +567,11 @@ impl NvDrv {
             // GetTpcMasks { in bufsize, pad, bufaddr; out u8[8] }, the same
             // shape and so the same two destinations.
             0x06 => {
-                write_u32(data, 0x10, 0x3); // two TPCs in GPC 0
+                let mask = (1u32 << GPU_TPC_PER_GPC) - 1; // the TPCs present in GPC 0
+                write_u32(data, 0x10, mask);
                 write_u32(data, 0x14, 0);
                 inline_out.clear();
-                inline_out.extend_from_slice(&3u32.to_le_bytes());
+                inline_out.extend_from_slice(&mask.to_le_bytes());
                 inline_out.extend_from_slice(&0u32.to_le_bytes());
                 Ok(NV_OK)
             }
@@ -579,18 +587,32 @@ impl NvDrv {
                 write_u64(data, 8, 0);
                 Ok(NV_OK)
             }
-            // 0x13 is the one command a real guest reaches that is still
-            // refused, and refusing it is deliberate. `nnSdk`'s bundled
-            // `nvrm_gpu` asks for it once, third in its device probe — after
-            // GetCharacteristics and GetTpcMasks, before the two ZCull
-            // queries — as an `IOWR` with an 8-byte all-zero argument, sent
-            // through `nvIoctl3` with a **4-byte** out-of-line reply buffer.
-            // So it is a per-GPC count or mask of some kind, in the same
-            // block as the TPC masks. Nothing names it: it is in no libnx
-            // header and no other emulator implements it, and its caller
-            // keeps the failure and carries on rather than aborting. An
-            // invented answer would be a number the driver acts on; a refusal
-            // is one it already handles.
+            // VsmsMapping { in u64 vsms_map_buf_addr }: which (GPC, TPC) each
+            // of the chip's "virtual SMs" sits on, one
+            // `{ u8 gpc_index, u8 tpc_index }` entry per TPC.
+            //
+            // This is in no libnx header and no other emulator implements it,
+            // so it was identified from its caller rather than from a table.
+            // `nnSdk`'s bundled `nvrm_gpu` builds the request inline (`movz
+            // w23, #0x4713` / `movk w23, #0xc008`, at `sdk!0xd740950` in
+            // Tomodachi Life) and hands the driver two buffer descriptors:
+            // the 8-byte argument, and an array of `num_tpc_per_gpc` **u16**
+            // entries. That is upstream's `nvgpu_gpu_vsms_mapping_args`
+            // exactly — the argument is a bare buffer address, zero here
+            // because the Switch passes the buffer out-of-line rather than as
+            // a pointer, and the entries are `nvgpu_gpu_vsms_mapping_entry`.
+            // GM20B's one GPC and two TPCs are the four bytes the guest
+            // actually offers.
+            0x13 => {
+                inline_out.clear();
+                for gpc in 0..GPU_NUM_GPC {
+                    for tpc in 0..GPU_TPC_PER_GPC {
+                        inline_out.push(gpc as u8);
+                        inline_out.push(tpc as u8);
+                    }
+                }
+                Ok(NV_OK)
+            }
             _ => Ok(NV_NOT_IMPLEMENTED),
         }
     }
@@ -906,10 +928,10 @@ static GPU_CHARACTERISTICS: [u8; 0xA0] = {
     put!(out, 0x00, 0x120, 4); // arch: NVGPU_GPU_ARCH_GM200
     put!(out, 0x04, 0x0B, 4); // impl: GM20B
     put!(out, 0x08, 0xA1, 4); // rev A1
-    put!(out, 0x0C, 1, 4); // num_gpc
+    put!(out, 0x0C, GPU_NUM_GPC, 4); // num_gpc
     put!(out, 0x10, 0x40000, 8); // L2 cache size
     put!(out, 0x18, 0, 8); // on-board video memory (none: it is system RAM)
-    put!(out, 0x20, 2, 4); // num_tpc_per_gpc
+    put!(out, 0x20, GPU_TPC_PER_GPC, 4); // num_tpc_per_gpc
     put!(out, 0x24, 0x20, 4); // bus type: AXI
     put!(out, 0x28, 0x20000, 4); // big_page_size
     put!(out, 0x2C, 0x20000, 4); // compression_page_size
@@ -1042,6 +1064,54 @@ mod tests {
         write_u32(&mut param, 4, 3); // Base
         assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x09, &mut param), NV_OK);
         assert_eq!(read_u32(&param, 8), 0x3000_0000);
+    }
+
+    /// The same, keeping the out-of-line reply an `nvIoctl3` caller reads its
+    /// payload from.
+    fn ioctl_out(
+        drv: &mut NvDrv,
+        mem: &mut Memory,
+        fd: u32,
+        ty: u32,
+        nr: u32,
+        data: &mut [u8],
+    ) -> (u32, Vec<u8>) {
+        let mut inline_out = Vec::new();
+        let request = make_ioctl(IOWR, ty, nr, data.len() as u32);
+        let code = drv.ioctl(mem, fd, request, data, &[], &mut inline_out).unwrap();
+        (code, inline_out)
+    }
+
+    #[test]
+    fn the_virtual_sm_map_names_a_gpc_and_a_tpc_for_every_shader_unit() {
+        // `VsmsMapping` is asked for once during `nvrm_gpu`'s device probe,
+        // and the buffer the guest offers is sized from the TPC count it was
+        // given moments earlier by `GetCharacteristics` — so the two have to
+        // agree or the driver indexes one chip with the other's count.
+        let mut drv = NvDrv::new();
+        let mut mem = Memory::new();
+        let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
+        let mut arg = [0u8; 8];
+        let (code, map) = ioctl_out(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x13, &mut arg);
+        assert_eq!(code, NV_OK);
+        assert_eq!(map, vec![0, 0, 0, 1], "a (gpc, tpc) pair per TPC of GPC 0");
+        assert_eq!(
+            map.len() as u32,
+            2 * GPU_NUM_GPC * GPU_TPC_PER_GPC,
+            "the map is sized by the counts GetCharacteristics reports"
+        );
+
+        // And those counts are the ones the characteristics and the TPC mask
+        // are built from, so nothing here can drift apart.
+        let mut chars = [0u8; 0xB0];
+        let (code, gc) = ioctl_out(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x05, &mut chars);
+        assert_eq!(code, NV_OK);
+        assert_eq!(read_u32(&gc, 0x0C), GPU_NUM_GPC, "num_gpc");
+        assert_eq!(read_u32(&gc, 0x20), GPU_TPC_PER_GPC, "num_tpc_per_gpc");
+        let mut masks = [0u8; 0x18];
+        let (code, tpc) = ioctl_out(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x06, &mut masks);
+        assert_eq!(code, NV_OK);
+        assert_eq!(read_u32(&tpc, 0).count_ones(), GPU_TPC_PER_GPC, "a bit per TPC");
     }
 
     #[test]
