@@ -662,15 +662,17 @@ impl Cpu {
                 // Pointer` on the `container_of` a null and faulted at
                 // 0xffffffd0.
                 if let Some(done_at) = next_buffer {
-                    if !self.has_other_runnable() {
-                        // Nothing else to overlap the wait with, so idle to the
-                        // moment the buffer finishes rather than spinning
-                        // through the instructions in between — the same idle
-                        // the vsync wait above takes.
-                        self.cycles = done_at;
-                    }
+                    // Park the thread until the device is done with the buffer,
+                    // rather than spinning on the syscall the way the vsync
+                    // wait does. A frame is a few hundred thousand cycles and
+                    // spinning through one is cheap; an audio buffer is tens of
+                    // millions, and re-entering this handler for each of them
+                    // cost more host time than the guest work it was waiting
+                    // for -- Just Dance fell from 20M emulated instructions per
+                    // second to 1.7M. The PC goes back onto the `svc` so the
+                    // wait is reissued, and its handles rechecked, on waking.
                     self.pc = self.pc.wrapping_sub(4);
-                    self.yield_thread();
+                    self.sleep_until(done_at);
                     return Ok(());
                 }
                 self.write_zr(0, RESULT_OK);

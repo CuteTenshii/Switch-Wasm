@@ -136,6 +136,17 @@ pub enum ThreadState {
     /// Blocked in `svcWaitForAddress` on the arbiter word at this address,
     /// until `svcSignalToAddress` names it or `deadline` passes.
     WaitAddress { addr: u32, deadline: Option<u64> },
+    /// Asleep until `deadline`, with its PC left on the `svc` that parked it
+    /// so the syscall is reissued when it wakes. This is the state for a wait
+    /// on something that runs off the emulator's own clock rather than off
+    /// another thread — an `audout` buffer finishing, today.
+    ///
+    /// Spinning instead is what the vsync wait does, and for a wait of a few
+    /// hundred thousand cycles that is fine. An audio buffer is tens of
+    /// millions, and re-entering the syscall handler for each of them costs
+    /// the host far more than the guest: it took Just Dance from 20M emulated
+    /// instructions per second to 1.7M.
+    Sleeping { deadline: u64 },
 }
 
 /// How an `svcWaitForAddress` resolved, which the syscall layer turns into a
@@ -1199,6 +1210,7 @@ impl Cpu {
             let deadline = match thread.state {
                 ThreadState::WaitKey { deadline, .. }
                 | ThreadState::WaitAddress { deadline, .. } => deadline,
+                ThreadState::Sleeping { deadline } => Some(deadline),
                 _ => None,
             };
             if deadline.is_some_and(|at| now >= at) {
@@ -1370,12 +1382,44 @@ impl Cpu {
         true
     }
 
+    /// Park the running thread until `deadline`. The caller leaves the PC on
+    /// the instruction that parked it, so the syscall is reissued — and its
+    /// predicate rechecked — when the thread wakes.
+    pub(super) fn sleep_until(&mut self, deadline: u64) {
+        self.ensure_main_thread();
+        self.threads[self.current_thread].state = ThreadState::Sleeping { deadline };
+        self.reschedule();
+    }
+
     /// Switch away from the running thread after it blocked. If nothing can
     /// run, everything blocked is woken: guests re-check their predicates in a
     /// loop, so a spurious wake degrades to the old spin rather than a hang.
     fn reschedule(&mut self) {
         if self.switch_to_next_runnable() {
             return;
+        }
+        // Nothing can run, but a sleeping thread has a time it wakes at, so
+        // there is a right answer here rather than a spurious wake: idle the
+        // clock forward to the earliest of them. That is the console's own
+        // idle, and it is what stops a process whose only remaining work is
+        // waiting for audio from stepping tens of millions of instructions to
+        // get there.
+        let earliest = self
+            .threads
+            .iter()
+            .filter_map(|t| match t.state {
+                ThreadState::Sleeping { deadline } if !t.paused => Some(deadline),
+                _ => None,
+            })
+            .min();
+        if let Some(deadline) = earliest {
+            if deadline > self.cycles {
+                self.cycles = deadline;
+            }
+            self.expire_timed_waits();
+            if self.switch_to_next_runnable() {
+                return;
+            }
         }
         for thread in &mut self.threads {
             if matches!(
