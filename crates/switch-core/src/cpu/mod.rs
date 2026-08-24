@@ -206,9 +206,6 @@ pub const GUEST_SPACE_END: u32 = 0xF300_0000;
 
 /// The heap region `svcSetHeapSize` grows, and the alias region
 /// `svcMapPhysicalMemory` backs — the two ways a process gets its memory.
-/// `libnx` homebrew and a retail title like Just Dance 2019 take the first;
-/// an `nnSdk` application built for the 39-bit address space (A Short Hike)
-/// picks its own address out of the second.
 ///
 /// `nn::init` asks for the whole of what `svcGetInfo` reports as total
 /// memory, whichever route it takes, so a region smaller than that figure is
@@ -217,61 +214,23 @@ pub const GUEST_SPACE_END: u32 = 0xF300_0000;
 /// heap ran straight through a 240 MiB region, over the framebuffer, and into
 /// the alias region. On a console these regions are gigabytes apart in a
 /// 39-bit space and neither the sizes nor the collision arise; here they have
-/// to share 4 GiB with the image, the stacks and the system shared buffer.
+/// to share 4 GiB with the image, the stacks and the system shared buffer, so
+/// an equal split of what is left is what maximises the figure both routes
+/// can be told.
 ///
-/// The two are **not** the same size, and the alias region is the larger by
-/// [`VAMM_ARENA_SIZE`] plus change. That is not a preference — it is what
-/// virtual address memory costs. When `svcGetInfo` reports a non-zero system
-/// resource size (see [`GUEST_SYSTEM_RESOURCE_SIZE`]), `nnSdk` runs its heap
-/// through `nn::os::detail::VammManager`, which reserves address space out of
-/// *this* alias region, and its Horizon implementation opens by claiming a
-/// fixed 1022 MiB arena at the region base — `movz w9, #0x3fe0, lsl #16`,
-/// a constant in the SDK, not a figure derived from anything a kernel says.
-/// Everything the title reserves afterwards, its heap included, has to fit in
-/// what is left. An alias region merely as large as the heap it must hold
-/// therefore cannot work at all: Just Dance 2023 asked for a heap of
-/// `total - system resource` and `nn::os::AllocateAddressRegion` refused it
-/// (os result 3-12) with 1022 MiB of the region already spoken for.
-///
-/// So the alias region carries the arena, a full heap reservation, and
-/// headroom for the reservations a title makes on its own account — Just
-/// Dance asks for five more after its heap (0x13f000, 0x207f000, 0x1ff000,
-/// 0x17f000, 0x7f000), and running out on those aborts exactly as running out
-/// on the heap does. The heap region only has to carry the heap, so it is
-/// sized to [`GUEST_TOTAL_MEMORY_SIZE`] and no more, and what that frees goes
-/// to the alias region. `STACK_TOP` at 0x2810_0000 fixes the bottom of the
-/// pair and `SHARED_BUFFER_ADDR` at 0xF000_0000 the top, so this split is the
-/// largest total the layout can offer once the arena is paid for.
+/// These are the sizes for a title that does **not** use virtual address
+/// memory — see [`MemoryLayout`] for the other set and for why one size does
+/// not fit both.
 ///
 /// Horizon's own alias region starts at 0x10_0000_0000, and reporting *that*
 /// through `svcGetInfo` had `nnSdk` asking to map memory at an address the
 /// emulator cannot represent at all — which `svcMapPhysicalMemory` would
 /// silently truncate to 0.
 pub const GUEST_HEAP_REGION_ADDR: u32 = 0x3000_0000;
-pub const GUEST_HEAP_REGION_SIZE: u32 = 0x3800_0000;
+pub const GUEST_HEAP_REGION_SIZE: u32 = 0x6000_0000;
 pub const GUEST_ALIAS_REGION_ADDR: u32 =
     GUEST_HEAP_REGION_ADDR.wrapping_add(GUEST_HEAP_REGION_SIZE);
-pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x8800_0000;
-
-/// The arena `nn::os::detail::VammManagerImplByHorizon` claims at the base of
-/// the alias region before a title reserves anything of its own. Hardcoded in
-/// the SDK, so it costs the same whatever this emulator reports; it is here so
-/// the layout invariants can be checked against it rather than rediscovered.
-pub const VAMM_ARENA_SIZE: u32 = 0x3FE0_0000;
-
-/// What `svcGetInfo` reports for `SystemResourceSizeTotal` — the slice of a
-/// process's memory the kernel keeps for its own bookkeeping, and the one
-/// figure `nnSdk` reads to decide whether this process has virtual address
-/// memory at all. `VammManager::IsVirtualAddressMemoryEnabled` is that query
-/// succeeding and returning non-zero, and nothing else.
-///
-/// 16 MiB is what an application's NPDM declares (both A Short Hike's and
-/// Just Dance 2023's do). Reporting 0 was true of the emulator and put every
-/// `nnSdk` title on the plain heap path, which worked right up until a title
-/// called `nn::os::AllocateAddressRegion` itself: with the manager never
-/// initialised its impl pointer is null, and the bump allocator behind it
-/// aborts. Reporting the real figure is what the layout above pays for.
-pub const GUEST_SYSTEM_RESOURCE_SIZE: u32 = 0x0100_0000;
+pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x6000_0000;
 
 /// What `svcGetInfo` reports as the memory the process may use, and so the
 /// size `nn::init` asks for as its heap: exactly one region's worth.
@@ -284,15 +243,104 @@ pub const GUEST_SYSTEM_RESOURCE_SIZE: u32 = 0x0100_0000;
 /// used the null it got back. 1.5 GiB is what the address space can offer both
 /// routes; it is well short of a console and far more than the 480 MiB that
 /// stopped a real title from reaching its first frame.
-///
-/// It is now 896 MiB rather than the 1.5 GiB an equal split allowed, because
-/// the alias region has to hold [`VAMM_ARENA_SIZE`] as well as a heap this
-/// size. That is a real cost and it is visible to every title through
-/// `svcGetInfo`, not only to the ones that would otherwise abort: a title
-/// that sizes a pool from this figure gets a smaller pool and behaves
-/// differently, with nothing to say so. It stays far above the 480 MiB that
-/// stopped Just Dance 2019, whose 699 MiB pool still fits.
 pub const GUEST_TOTAL_MEMORY_SIZE: u32 = GUEST_HEAP_REGION_SIZE;
+
+/// The arena `nn::os::detail::VammManagerImplByHorizon` claims at the base of
+/// the alias region before a title reserves anything of its own — `movz w9,
+/// #0x3fe0, lsl #16`, a constant compiled into the SDK rather than a figure
+/// derived from anything a kernel says. It costs the same whatever this
+/// emulator reports, which is what makes it a layout constraint.
+pub const VAMM_ARENA_SIZE: u32 = 0x3FE0_0000;
+
+/// The regions and figures for a title that *does* use virtual address
+/// memory. The alias region grows by [`VAMM_ARENA_SIZE`] plus change and the
+/// heap region and total memory shrink to pay for it.
+pub const VAMM_HEAP_REGION_SIZE: u32 = 0x3800_0000;
+pub const VAMM_ALIAS_REGION_ADDR: u32 =
+    GUEST_HEAP_REGION_ADDR.wrapping_add(VAMM_HEAP_REGION_SIZE);
+pub const VAMM_ALIAS_REGION_SIZE: u32 = 0x8800_0000;
+pub const VAMM_TOTAL_MEMORY_SIZE: u32 = VAMM_HEAP_REGION_SIZE;
+/// What `svcGetInfo` reports for `SystemResourceSizeTotal` under that layout:
+/// the 16 MiB an application's NPDM declares.
+pub const VAMM_SYSTEM_RESOURCE_SIZE: u32 = 0x0100_0000;
+
+/// The address space a process is given, which is not the same for every
+/// process.
+///
+/// `nnSdk` decides whether it has virtual address memory by asking
+/// `svcGetInfo` for `SystemResourceSizeTotal`:
+/// `VammManager::IsVirtualAddressMemoryEnabled` is that query succeeding and
+/// returning non-zero, and nothing else. A title that declares a system
+/// resource in its NPDM runs its heap through the manager; one that declares
+/// zero never touches it. Both kinds are real — Just Dance 2023 declares
+/// 16 MiB, Just Dance 2019 declares 0 — so the emulator reports each title
+/// what its own manifest says rather than picking one answer for everybody.
+///
+/// The two want different address spaces, and there is not enough of one to
+/// satisfy both at once. `VammManagerImplByHorizon` opens by claiming
+/// [`VAMM_ARENA_SIZE`] at the base of the alias region, and everything the
+/// title reserves afterwards — its heap included — has to fit above it. An
+/// alias region merely as large as the heap therefore cannot work at all:
+/// Just Dance 2023 asked for a heap of `total - system resource` and
+/// `nn::os::AllocateAddressRegion` refused it with os result 3-12, 1022 MiB
+/// of the region already spoken for. Paying for that arena inside 4 GiB means
+/// taking it from the heap region and from the total, which drops to 896 MiB.
+///
+/// Charging that to a title which never uses the manager is not free either,
+/// and it is worse than it looks because it fails *quietly*: Just Dance 2019
+/// sizes a 699 MiB pool from the reported total, and told 896 MiB rather than
+/// 1.5 GiB it aborts 378.8M steps in, having reached exactly the same place
+/// with the same GPU work as a run that was told the truth. Nothing in that
+/// failure names memory. So the layout follows the manifest, and a title that
+/// asked for no system resource keeps the address space it has always had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryLayout {
+    pub heap_addr: u32,
+    pub heap_size: u32,
+    pub alias_addr: u32,
+    pub alias_size: u32,
+    /// What `svcGetInfo` reports as `TotalMemorySize`.
+    pub total_memory: u32,
+    /// What it reports as `SystemResourceSizeTotal` — zero on [`Self::PLAIN`],
+    /// which is the whole of what keeps `nnSdk` off the manager.
+    pub system_resource: u32,
+}
+
+impl MemoryLayout {
+    /// The layout for a title with no system resource: `libnx` homebrew and
+    /// any `nnSdk` title whose NPDM declares zero.
+    pub const PLAIN: MemoryLayout = MemoryLayout {
+        heap_addr: GUEST_HEAP_REGION_ADDR,
+        heap_size: GUEST_HEAP_REGION_SIZE,
+        alias_addr: GUEST_ALIAS_REGION_ADDR,
+        alias_size: GUEST_ALIAS_REGION_SIZE,
+        total_memory: GUEST_TOTAL_MEMORY_SIZE,
+        system_resource: 0,
+    };
+
+    /// The layout for a title that declares a system resource, sized so that
+    /// [`VAMM_ARENA_SIZE`], a full heap reservation and headroom for the
+    /// title's own reservations all fit the alias region.
+    pub const VIRTUAL_ADDRESS: MemoryLayout = MemoryLayout {
+        heap_addr: GUEST_HEAP_REGION_ADDR,
+        heap_size: VAMM_HEAP_REGION_SIZE,
+        alias_addr: VAMM_ALIAS_REGION_ADDR,
+        alias_size: VAMM_ALIAS_REGION_SIZE,
+        total_memory: VAMM_TOTAL_MEMORY_SIZE,
+        system_resource: VAMM_SYSTEM_RESOURCE_SIZE,
+    };
+
+    /// The layout a title's declared `system_resource_size` selects. Zero —
+    /// which is also what a container with no readable manifest yields —
+    /// means the plain heap.
+    pub fn for_system_resource(size: u32) -> MemoryLayout {
+        if size == 0 {
+            MemoryLayout::PLAIN
+        } else {
+            MemoryLayout::VIRTUAL_ADDRESS
+        }
+    }
+}
 
 /// Size of hid's shared memory, the value libnx passes to `svcMapSharedMemory`.
 /// Used to tell that mapping apart from any other shared memory the guest maps.
@@ -610,6 +658,10 @@ pub struct Cpu {
     /// NACP to read). Nothing here enforces any of them: the emulated NAND
     /// grows with whatever a title writes into it.
     save_data_quota: ipc::SaveDataQuota,
+    /// The address space this process was given, chosen from its NPDM's
+    /// declared system resource size. Defaults to [`MemoryLayout::PLAIN`],
+    /// which is what homebrew and a container with no readable manifest get.
+    memory_layout: MemoryLayout,
     /// The system shared buffer's nvmap `(handle, id)` once an applet has
     /// asked for it, and the slot the next acquire hands out.
     shared_buffer: Option<(u32, u32)>,
@@ -915,6 +967,7 @@ impl Cpu {
             application_functions_210_event: None,
             aoc_list_changed_event: None,
             save_data_quota: ipc::SaveDataQuota::default(),
+            memory_layout: MemoryLayout::PLAIN,
             shared_buffer: None,
             shared_buffer_slot: 0,
             applet_focus_announced: false,
@@ -2412,6 +2465,19 @@ impl Cpu {
     /// What the running title was allotted, for the commands that report it.
     pub fn save_data_quota(&self) -> ipc::SaveDataQuota {
         self.save_data_quota
+    }
+
+    /// Choose this process's address space from the `system_resource_size`
+    /// its `main.npdm` declares — see [`MemoryLayout`]. Call it before
+    /// [`Cpu::boot_retail_program`]; the guest reads the resulting figures
+    /// out of `svcGetInfo` as soon as `nn::init` runs.
+    pub fn set_system_resource_size(&mut self, size: u32) {
+        self.memory_layout = MemoryLayout::for_system_resource(size);
+    }
+
+    /// The address space this process was given.
+    pub fn memory_layout(&self) -> MemoryLayout {
+        self.memory_layout
     }
 
     pub fn set_program_id(&mut self, program_id: u64) {

@@ -64,6 +64,9 @@ fn main() {
             if let Ok(r) = ar.romfs_source(src, &keys, idx) { cpu.add_data_archive(ar.title_id, Box::new(r)); }
         }
     }
+    // The address space this title gets is chosen by its own manifest — see
+    // `MemoryLayout`. Must precede `boot_retail_program`.
+    cpu.set_system_resource_size(switch_core::npdm::Npdm::system_resource_size_of(&pf, &exefs));
     cpu.set_program_id(nca.program_id);
     cpu.boot_retail_program(&modules).unwrap();
     // `WATCH_MEM=<hex addr>` reports the first step at which a 4 KiB window

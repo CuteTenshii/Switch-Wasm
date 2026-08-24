@@ -824,8 +824,7 @@ fn horizon_query_memory_and_get_info() {
     // `nn::mem::StandardAllocator::Initialize`, which asserts on a span under
     // 16 KiB. Answering 0 (the old `_ => 0` default) made that difference 0.
     let total = u64::from(switch_core::cpu::GUEST_TOTAL_MEMORY_SIZE);
-    let system_resource = u64::from(switch_core::cpu::GUEST_SYSTEM_RESOURCE_SIZE);
-    for (info_type, expected) in [(21u64, total - system_resource), (22, 0)] {
+    for (info_type, expected) in [(21u64, total), (22, 0)] {
         let mut cpu = cpu_at(0x1000);
         cpu.set_reg(1, info_type);
         cpu.set_reg(2, 0xffff_8001);
@@ -835,20 +834,19 @@ fn horizon_query_memory_and_get_info() {
         assert_eq!(cpu.read_x(1), expected);
     }
 
-    // InfoType 16 = SystemResourceSizeTotal. Non-zero, and that is the whole
-    // of what switches `nnSdk` onto its virtual address memory manager —
-    // `IsVirtualAddressMemoryEnabled` is this query succeeding and returning
-    // non-zero, nothing else. Zero here leaves the manager uninitialised, and
-    // a title that calls `nn::os::AllocateAddressRegion` itself then aborts on
-    // a null impl pointer.
+    // InfoType 16 = SystemResourceSizeTotal, and this query is the whole of
+    // what switches `nnSdk` onto its virtual address memory manager —
+    // `IsVirtualAddressMemoryEnabled` is it succeeding and returning non-zero,
+    // nothing else. A process whose NPDM declared nothing must read 0 here, or
+    // it is put on a manager it never asked for and charged the address space
+    // that costs.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(1, 16);
     cpu.set_reg(2, 0xffff_8001);
     cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
-    assert_eq!(cpu.read_x(1), system_resource);
-    assert_ne!(cpu.read_x(1), 0, "zero puts every nnSdk title back on the plain heap path");
+    assert_eq!(cpu.read_x(1), 0);
 
     // InfoType 6 = TotalMemorySize.
     let mut cpu = cpu_at(0x1000);
@@ -858,6 +856,33 @@ fn horizon_query_memory_and_get_info() {
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
     assert_eq!(cpu.read_x(1), total);
+
+    // A title whose NPDM declares a system resource is told a different
+    // address space entirely — the alias region has to carry the SDK's arena
+    // as well as the heap, so it grows and the total shrinks to pay for it.
+    // Just Dance 2023 declares 16 MiB and Just Dance 2019 declares 0, and
+    // handing either one the other's figures breaks it: the first aborts in
+    // AllocateAddressRegion, the second in its own allocator 378M steps in.
+    use switch_core::cpu::{
+        VAMM_ALIAS_REGION_ADDR, VAMM_ALIAS_REGION_SIZE, VAMM_SYSTEM_RESOURCE_SIZE,
+        VAMM_TOTAL_MEMORY_SIZE,
+    };
+    for (info_type, expected) in [
+        (6u64, u64::from(VAMM_TOTAL_MEMORY_SIZE)),
+        (16, u64::from(VAMM_SYSTEM_RESOURCE_SIZE)),
+        (21, u64::from(VAMM_TOTAL_MEMORY_SIZE - VAMM_SYSTEM_RESOURCE_SIZE)),
+        (2, u64::from(VAMM_ALIAS_REGION_ADDR)),
+        (3, u64::from(VAMM_ALIAS_REGION_SIZE)),
+    ] {
+        let mut cpu = cpu_at(0x1000);
+        cpu.set_system_resource_size(VAMM_SYSTEM_RESOURCE_SIZE);
+        cpu.set_reg(1, info_type);
+        cpu.set_reg(2, 0xffff_8001);
+        cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
+        cpu.run(1).unwrap();
+        assert_eq!(cpu.read_x(0), 0);
+        assert_eq!(cpu.read_x(1), expected, "InfoType {info_type} under the VAMM layout");
+    }
 
     // InfoType 12 = AslrRegionAddress.
     let mut cpu = cpu_at(0x1000);
@@ -5550,8 +5575,8 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     use switch_core::cpu::{
         GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
         GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR,
-        GUEST_STACK_REGION_SIZE, GUEST_SYSTEM_RESOURCE_SIZE, GUEST_TOTAL_MEMORY_SIZE,
-        SHARED_BUFFER_ADDR, SHARED_BUFFER_SIZE, STACK_TOP, VAMM_ARENA_SIZE,
+        GUEST_STACK_REGION_SIZE, GUEST_TOTAL_MEMORY_SIZE, MemoryLayout, SHARED_BUFFER_ADDR,
+        SHARED_BUFFER_SIZE, STACK_TOP, VAMM_ARENA_SIZE,
     };
     use switch_core::{FB_BASE, FB_HEIGHT, FB_WIDTH, INPUT_ADDR};
 
@@ -5577,16 +5602,43 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     // to the heap alone is what made `nn::os::AllocateAddressRegion` fail
     // with os result 3-12, and it fails as an abort inside the title rather
     // than as anything that names the layout, so it is worth an assert here.
-    assert_ne!(GUEST_SYSTEM_RESOURCE_SIZE, 0, "zero disables VAMM entirely");
-    let heap_reservation = GUEST_TOTAL_MEMORY_SIZE - GUEST_SYSTEM_RESOURCE_SIZE;
+    // Both layouts have to fit the same address space, and the virtual
+    // address one is the one with a third claimant: `VammManager` takes
+    // `VAMM_ARENA_SIZE` at the base of the alias region before the title
+    // reserves a byte, and the heap `nn::init` asks for — total minus the
+    // system resource — has to fit above it, as do the reservations the title
+    // then makes for itself. Sizing that alias region to the heap alone is
+    // what made `nn::os::AllocateAddressRegion` fail with os result 3-12, and
+    // it fails as an abort inside the title rather than as anything naming the
+    // layout, so it is worth an assert here.
+    for layout in [MemoryLayout::PLAIN, MemoryLayout::VIRTUAL_ADDRESS] {
+        assert_eq!(layout.heap_addr + layout.heap_size, layout.alias_addr);
+        assert!(layout.alias_addr + layout.alias_size <= SHARED_BUFFER_ADDR);
+        assert!(STACK_TOP <= u64::from(layout.heap_addr));
+        assert!(layout.total_memory <= layout.heap_size);
+        assert!(layout.system_resource < layout.total_memory);
+    }
+    assert_eq!(MemoryLayout::PLAIN.system_resource, 0, "zero is what keeps a title off VAMM");
+    assert_ne!(MemoryLayout::VIRTUAL_ADDRESS.system_resource, 0);
+    // A title's own manifest picks between them, and 0 has to mean the plain
+    // heap: Just Dance 2019 declares 0 and is broken by the smaller total the
+    // other layout reports, without ever touching the manager.
+    assert_eq!(MemoryLayout::for_system_resource(0), MemoryLayout::PLAIN);
+    assert_eq!(
+        MemoryLayout::for_system_resource(0x0100_0000),
+        MemoryLayout::VIRTUAL_ADDRESS
+    );
+
+    let vamm = MemoryLayout::VIRTUAL_ADDRESS;
+    let heap_reservation = vamm.total_memory - vamm.system_resource;
     assert!(
-        VAMM_ARENA_SIZE + heap_reservation < GUEST_ALIAS_REGION_SIZE,
+        VAMM_ARENA_SIZE + heap_reservation < vamm.alias_size,
         "the alias region must hold the SDK's arena and a full heap reservation"
     );
     // Just Dance 2023 asks for five more regions after its heap, the largest
     // 0x207f000; running out on those aborts exactly as running out on the
     // heap does, so the headroom is part of the layout rather than slack.
-    let headroom = GUEST_ALIAS_REGION_SIZE - VAMM_ARENA_SIZE - heap_reservation;
+    let headroom = vamm.alias_size - VAMM_ARENA_SIZE - heap_reservation;
     assert!(
         headroom >= 0x1000_0000,
         "leave a title room to reserve on its own account, got {headroom:#x}"

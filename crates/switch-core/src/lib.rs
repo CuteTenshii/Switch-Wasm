@@ -28,6 +28,7 @@ pub mod mem;
 pub mod nca;
 pub mod nro;
 pub mod nso;
+pub mod npdm;
 pub mod nsp;
 pub mod romfs;
 pub mod source;

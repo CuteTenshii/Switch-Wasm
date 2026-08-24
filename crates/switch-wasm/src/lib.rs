@@ -989,6 +989,18 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
         }
     }
 
+    // The address space this title gets, chosen by its own manifest: a title
+    // declaring no system resource keeps the plain heap and the larger total
+    // memory, one declaring a system resource gets virtual address memory and
+    // the layout that pays for it. Must precede `boot_retail_program` —
+    // `nn::init` reads the resulting figures as soon as it runs.
+    let system_resource = switch_core::npdm::Npdm::system_resource_size_of(&pfs0, &exefs);
+    cpu.diagnostic(&format!(
+        "[npdm] system resource {system_resource:#x} — {}",
+        if system_resource == 0 { "plain heap" } else { "virtual address memory" }
+    ));
+    cpu.set_system_resource_size(system_resource);
+
     match cpu.boot_retail_program(&modules) {
         Ok(loaded) => {
             last_error.clear();

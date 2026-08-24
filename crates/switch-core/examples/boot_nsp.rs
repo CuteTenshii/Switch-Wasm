@@ -9,6 +9,7 @@ use std::env;
 use std::fs;
 use switch_core::cpu::Cpu;
 use switch_core::nsp::Pfs0;
+use switch_core::source::{ByteSource, FileSource, Window};
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -24,9 +25,15 @@ fn main() {
         .find_map(|s| s.parse::<u64>().ok())
         .unwrap_or(2_000_000);
 
-    let nsp_data = fs::read(nsp_path).expect("read nsp");
-    println!("NSP: {} bytes", nsp_data.len());
-    let pfs0 = Pfs0::parse(&nsp_data).expect("parse nsp");
+    // Read the container off disk rather than into memory. A retail Program
+    // NCA is the whole game — Just Dance 2019's is 7.2 GiB — and reading it in
+    // and then materialising its RomFS beside it wants more RAM than the title
+    // could ever touch, on a machine that also has to hold the guest. The
+    // browser has always streamed this; there is no reason the CLI should be
+    // the build that cannot boot a big title.
+    let src = FileSource::open(nsp_path).expect("open nsp");
+    println!("NSP: {} bytes", src.len());
+    let pfs0 = Pfs0::read_from(&src).expect("parse nsp");
     println!("{} files in NSP", pfs0.files.len());
 
     let prod_text = fs::read_to_string(prod_path).expect("read prod.keys");
@@ -41,46 +48,50 @@ fn main() {
     // Find the Program NCA: parse every .nca's header and pick the one whose
     // content type is Program. (cnmt.nca entries are tiny metadata records,
     // control.nca is the icon/nacp, so this reliably picks the real one.)
-    let mut program: Option<(String, &switch_core::nsp::Pfs0File)> = None;
-    for f in &pfs0.files {
+    let mut program: Option<usize> = None;
+    for (i, f) in pfs0.files.iter().enumerate() {
         if !f.name.to_ascii_lowercase().ends_with(".nca") {
             continue;
         }
-        let start = f.offset as usize;
-        let end = start + f.size as usize;
-        if end > nsp_data.len() {
+        let Ok(window) = pfs0.file_source(&src, i) else {
             continue;
-        }
-        let raw = &nsp_data[start..end];
-        match switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)) {
+        };
+        match switch_core::nca::Nca::parse_source(&window, Some(&keys)) {
             Ok(nca) => {
                 println!(
                     "{}: content_type={:?} title_id={:016x} size={}",
                     f.name, nca.content_type, nca.title_id, f.size
                 );
                 if nca.content_type == switch_core::nca::ContentType::Program {
-                    program = Some((f.name.clone(), f));
+                    program = Some(i);
                 }
             }
             Err(e) => println!("{}: parse failed: {}", f.name, e),
         }
     }
 
-    let Some((name, f)) = program else {
+    let Some(program_index) = program else {
         println!("no Program NCA found");
         return;
     };
-    println!("--- decrypting Program NCA: {} ---", name);
-    let start = f.offset as usize;
-    let end = start + f.size as usize;
-    let raw = &nsp_data[start..end];
-    let nca = switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)).expect("parse program nca");
+    let program_file = &pfs0.files[program_index];
+    println!("--- decrypting Program NCA: {} ---", program_file.name);
+    let program_window = pfs0
+        .file_source(&src, program_index)
+        .expect("window over the program nca");
+    let nca =
+        switch_core::nca::Nca::parse_source(&program_window, Some(&keys)).expect("parse program nca");
 
     // Title-key crypto: no key-area unlock needed, but the title key itself
     // has to come from somewhere. Scene NSP releases bundle the ticket right
     // next to the content, so try that before giving up.
     if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
-        match switch_core::ticket::find_and_decrypt_title_key(&nca.rights_id, &pfs0.files, &nsp_data, &keys) {
+        match switch_core::ticket::find_and_decrypt_title_key_from(
+            &nca.rights_id,
+            &pfs0.files,
+            &src,
+            &keys,
+        ) {
             Ok(title_key) => {
                 println!(
                     "resolved title key from bundled ticket: {}",
@@ -93,10 +104,10 @@ fn main() {
     }
 
     let exefs_index = nca.exefs_section_index().expect("no exefs section");
-    let exefs = match nca.decrypt_pfs0_section(raw, &keys, exefs_index) {
+    let exefs = match nca.read_pfs0_section(&program_window, &keys, exefs_index) {
         Ok(v) => v,
         Err(e) => {
-            println!("decrypt_pfs0_section FAILED: {}", e);
+            println!("read_pfs0_section FAILED: {}", e);
             return;
         }
     };
@@ -127,18 +138,12 @@ fn main() {
     // NCA rather than the Program one booted above — so it has to be read
     // separately, and a container without one leaves the CPU's default in
     // place rather than reporting a size this title never asked for.
-    match switch_core::control::find_control_nca(
-        &pfs0.files,
-        &switch_core::source::SliceSource(&nsp_data),
-        &keys,
-    ) {
+    match switch_core::control::find_control_nca(&pfs0.files, &src, &keys) {
         Some((index, _)) => {
-            let cf = &pfs0.files[index];
-            let craw = nsp_data[cf.offset as usize..(cf.offset + cf.size) as usize].to_vec();
-            match switch_core::control::Control::from_source(
-                switch_core::source::MemSource(craw),
-                &keys,
-            ) {
+            let control_window = pfs0
+                .file_source(&src, index)
+                .expect("window over the control nca");
+            match switch_core::control::Control::from_source(control_window, &keys) {
                 Ok(control) => {
                     let quota = switch_core::cpu::SaveDataQuota::from(&control.nacp);
                     println!(
@@ -161,13 +166,22 @@ fn main() {
     // RomFS is optional (Meta/Control-only content, or a title with no
     // assets of its own, has none) and a failure to decrypt it shouldn't
     // block booting — the title just won't have its asset storage mounted.
+    // Handed to the CPU as a source rather than decrypted up front, for the
+    // same reason the container is streamed: the guest reads its RomFS a range
+    // at a time through `IStorage`, so there is nothing to gain by holding the
+    // whole game in memory and a title's worth of RAM to lose. This needs its
+    // own handle on the file, since the CPU keeps the source for the whole run
+    // and cannot borrow the one the scan above is using.
     if let Some(romfs_index) = nca.romfs_section_index() {
-        match nca.decrypt_romfs_section(raw, &keys, romfs_index) {
+        let owned = FileSource::open(nsp_path).expect("reopen nsp for romfs");
+        let owned_window = Window::new(owned, program_file.offset, program_file.size, "program nca")
+            .expect("window over the program nca");
+        match nca.romfs_source(owned_window, &keys, romfs_index) {
             Ok(romfs) => {
-                println!("RomFS decrypted: {} bytes", romfs.len());
-                cpu.set_romfs(romfs);
+                println!("RomFS: {} bytes, streamed", romfs.len());
+                cpu.set_romfs_source(Box::new(romfs));
             }
-            Err(e) => println!("decrypt_romfs_section FAILED: {}", e),
+            Err(e) => println!("romfs_source FAILED: {}", e),
         }
     } else {
         println!("no RomFS section in this NCA");
@@ -213,6 +227,17 @@ fn main() {
         }
         println!("registered {registered} system data archive(s) from {dir}");
     }
+
+    // The address space this title gets, which its own manifest decides — a
+    // title that declares no system resource keeps the plain heap and the
+    // larger total memory. Must precede `boot_retail_program`, since
+    // `nn::init` reads the resulting figures as soon as it runs.
+    let system_resource = switch_core::npdm::Npdm::system_resource_size_of(&exefs_pfs0, &exefs);
+    println!(
+        "NPDM system resource: {system_resource:#x} — {}",
+        if system_resource == 0 { "plain heap" } else { "virtual address memory" }
+    );
+    cpu.set_system_resource_size(system_resource);
 
     cpu.set_program_id(nca.program_id);
     let loaded = cpu.boot_retail_program(&modules).expect("boot modules");

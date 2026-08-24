@@ -1,9 +1,8 @@
 //! The Horizon supervisor calls (`SVC`) libnx homebrew issues at runtime.
 
 use super::{
-    ArbiterWait, Cpu, GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
-    GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE,
-    GUEST_SYSTEM_RESOURCE_SIZE, GUEST_TOTAL_MEMORY_SIZE, HID_SHMEM_SIZE, PL_SHMEM_SIZE,
+    ArbiterWait, Cpu, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE,
+    HID_SHMEM_SIZE, PL_SHMEM_SIZE,
 };
 use super::ipc::CLOCK_RATES_HZ;
 use crate::{Error, Result};
@@ -48,8 +47,14 @@ impl Cpu {
         // What `svcGetInfo` reports as the process's memory pool, and the
         // slice of it the kernel reserves for its own per-process bookkeeping
         // (see InfoType 16 below for what reporting it buys and costs).
-        const TOTAL_MEMORY_SIZE: u64 = GUEST_TOTAL_MEMORY_SIZE as u64;
-        const SYSTEM_RESOURCE_SIZE: u64 = GUEST_SYSTEM_RESOURCE_SIZE as u64;
+        // Both come from this process's own layout rather than from a
+        // constant: a title that declares no system resource in its NPDM gets
+        // the plain heap and the larger total, and one that declares a system
+        // resource gets virtual address memory and pays for it. See
+        // `MemoryLayout`.
+        let layout = self.memory_layout();
+        let total_memory_size = u64::from(layout.total_memory);
+        let system_resource_size = u64::from(layout.system_resource);
         // The counterpart of `TRACE_IPC` for everything that is not a service
         // request. `svcSendSyncRequest` (0x21) is excluded because `TRACE_IPC`
         // already decodes it, and the two hot ones a running guest issues
@@ -83,12 +88,12 @@ impl Cpu {
                 /// answers a heap it cannot back.
                 const RESULT_OUT_OF_MEMORY: u64 = 1 | (104 << 9);
                 let size = self.read_zr(1);
-                if size > u64::from(GUEST_HEAP_REGION_SIZE) {
+                if size > u64::from(layout.heap_size) {
                     self.write_zr(0, RESULT_OUT_OF_MEMORY);
                     return Ok(());
                 }
                 self.write_zr(0, RESULT_OK);
-                self.write_zr(1, u64::from(GUEST_HEAP_REGION_ADDR));
+                self.write_zr(1, u64::from(layout.heap_addr));
                 Ok(())
             }
             0x02 | 0x03 | 0x14 => {
@@ -1282,11 +1287,11 @@ impl Cpu {
                      // word and asked `svcMapPhysicalMemory` to back
                      // 0x10_0000_0000, which is not a representable address
                      // here. See the region constants for the layout.
-                     2 => u64::from(GUEST_ALIAS_REGION_ADDR), // AliasRegionAddress
-                     3 => u64::from(GUEST_ALIAS_REGION_SIZE), // AliasRegionSize
-                     4 => u64::from(GUEST_HEAP_REGION_ADDR),  // HeapRegionAddress
-                     5 => u64::from(GUEST_HEAP_REGION_SIZE),  // HeapRegionSize
-                     6 => TOTAL_MEMORY_SIZE, // TotalMemorySize
+                     2 => u64::from(layout.alias_addr), // AliasRegionAddress
+                     3 => u64::from(layout.alias_size), // AliasRegionSize
+                     4 => u64::from(layout.heap_addr),  // HeapRegionAddress
+                     5 => u64::from(layout.heap_size),  // HeapRegionSize
+                     6 => total_memory_size, // TotalMemorySize
                      7 => 0,         // UsedMemorySize
                      8 => 0,         // DebuggerAttached
                      9 => 0,         // ResourceLimit
@@ -1335,7 +1340,7 @@ impl Cpu {
                      // [`GUEST_ALIAS_REGION_SIZE`] and [`VAMM_ARENA_SIZE`] for
                      // the address space the manager takes and the reported
                      // total memory that pays for it.
-                     16 => SYSTEM_RESOURCE_SIZE, // SystemResourceSizeTotal
+                     16 => system_resource_size, // SystemResourceSizeTotal
                      17 => 0,                    // SystemResourceSizeUsed
                      // Total/UsedNonSystemMemorySize: the same figures as
                      // 6/7 with the system resource taken out, and what
@@ -1347,7 +1352,7 @@ impl Cpu {
                      // subtraction 0, and the allocator asserts on any span
                      // below its 16 KiB minimum — which is where the retail
                      // boot stopped once `nn::oe::Initialize` was working.
-                     21 => TOTAL_MEMORY_SIZE - SYSTEM_RESOURCE_SIZE,
+                     21 => total_memory_size - system_resource_size,
                      22 => 0,
                      12 => 0x0800_0000, // AslrRegionAddress
                      13 => 0x1F00_0000, // AslrRegionSize
