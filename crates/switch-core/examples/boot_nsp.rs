@@ -79,14 +79,14 @@ fn main() {
     // Title-key crypto: no key-area unlock needed, but the title key itself
     // has to come from somewhere. Scene NSP releases bundle the ticket right
     // next to the content, so try that before giving up.
-    if nca.has_rights_id() && keys.title_key(&nca.rights_id).is_none() {
+    if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
         match switch_core::ticket::find_and_decrypt_title_key(&nca.rights_id, &pfs0.files, &nsp_data, &keys) {
             Ok(title_key) => {
                 println!(
                     "resolved title key from bundled ticket: {}",
                     title_key.iter().map(|b| format!("{:02x}", b)).collect::<String>()
                 );
-                keys.title_keys.push((nca.rights_id, title_key));
+                keys.add_resolved_title_key(nca.rights_id, title_key);
             }
             Err(e) => println!("ticket resolution failed: {}", e),
         }

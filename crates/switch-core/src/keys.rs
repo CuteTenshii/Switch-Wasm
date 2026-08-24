@@ -36,10 +36,18 @@ impl KeyAreaKind {
 pub struct KeySet {
     /// 32-byte NCA header key (directly, if provided).
     pub header_key: Option<[u8; 32]>,
-    /// Title keys by rights id (16 bytes each) from `title.keys`. These are
-    /// already-decrypted per-title keys (what Lockpick_RCM dumps), so no
-    /// further derivation is needed to use one as an NCA section key.
+    /// Title keys by rights id (16 bytes each) exactly as `title.keys`
+    /// stores them: each one is still wrapped, AES-128-ECB, under the
+    /// `titlekek_XX` for its title's key generation. Lockpick_RCM copies a
+    /// ticket's key block into that file verbatim, so an entry here is the
+    /// ciphertext, not a usable NCA section key — [`KeySet::title_key`]
+    /// unwraps it.
     pub title_keys: Vec<([u8; 16], [u8; 16])>,
+    /// Title keys that are already unwrapped, from a ticket bundled in the
+    /// container (see `ticket.rs`). Consulted before [`Self::title_keys`],
+    /// since a ticket that ships with the content is a better answer for it
+    /// than whatever a general-purpose `title.keys` happens to hold.
+    pub resolved_title_keys: Vec<([u8; 16], [u8; 16])>,
     // Sources for deriving the header key (prod.keys).
     pub header_key_source: Option<[u8; 32]>,
     pub header_kek_source: Option<[u8; 16]>,
@@ -61,12 +69,41 @@ pub struct KeySet {
 }
 
 impl KeySet {
-    /// Look up a title key by rights id.
-    pub fn title_key(&self, rights_id: &[u8; 16]) -> Option<&[u8; 16]> {
-        self.title_keys
-            .iter()
-            .find(|(id, _)| id == rights_id)
-            .map(|(_, k)| k)
+    /// Look up an already-unwrapped title key by rights id — a key a ticket
+    /// yielded, not one read out of `title.keys`.
+    pub fn resolved_title_key(&self, rights_id: &[u8; 16]) -> Option<[u8; 16]> {
+        find_key(&self.resolved_title_keys, rights_id)
+    }
+
+    /// Look up a still-`titlekek`-wrapped title key by rights id, as
+    /// `title.keys` stores it.
+    pub fn wrapped_title_key(&self, rights_id: &[u8; 16]) -> Option<[u8; 16]> {
+        find_key(&self.title_keys, rights_id)
+    }
+
+    /// The usable AES-128 title key for `rights_id`: a ticket-derived one if
+    /// this keyset has it, otherwise the `title.keys` entry unwrapped with
+    /// `titlekek_<generation>`.
+    pub fn title_key(&self, rights_id: &[u8; 16], generation: u8) -> Option<[u8; 16]> {
+        if let Some(key) = self.resolved_title_key(rights_id) {
+            return Some(key);
+        }
+        let wrapped = self.wrapped_title_key(rights_id)?;
+        let kek = self.titlekek(generation)?;
+        Some(crate::crypto::aes128_decrypt_block(&kek, &wrapped))
+    }
+
+    /// Record a title key that is already usable as-is (a ticket's, once
+    /// decrypted), so it wins over any `title.keys` entry for the same title.
+    pub fn add_resolved_title_key(&mut self, rights_id: [u8; 16], key: [u8; 16]) {
+        match self
+            .resolved_title_keys
+            .iter_mut()
+            .find(|(id, _)| *id == rights_id)
+        {
+            Some(slot) => slot.1 = key,
+            None => self.resolved_title_keys.push((rights_id, key)),
+        }
     }
 
     /// Look up a key-area key by kind and generation (the NCA header's key
@@ -117,6 +154,13 @@ impl KeySet {
         out.copy_from_slice(&aes128_ecb_decrypt(&src_kek, &key_seed)[..16]);
         Some(out)
     }
+}
+
+fn find_key(table: &[([u8; 16], [u8; 16])], rights_id: &[u8; 16]) -> Option<[u8; 16]> {
+    table
+        .iter()
+        .find(|(id, _)| id == rights_id)
+        .map(|(_, k)| *k)
 }
 
 /// Parse a `prod.keys` / `title.keys` file: `name = hexdigits` lines, `#`
@@ -231,7 +275,10 @@ fn key_area_table_and_generation<'a>(
 }
 
 /// Build a [`KeySet`] title-key list from parsed `title.keys` entries. Keys
-/// are either `titlekey_<rights_id> = hex` or `rights_id = hex` (16-byte).
+/// are either `titlekey_<rights_id> = hex` or `rights_id = hex` (16-byte),
+/// and each value is still `titlekek`-wrapped — the file stores a ticket's
+/// key block as-is. Assign the result to [`KeySet::title_keys`], which is
+/// where that wrapping is accounted for.
 pub fn keyset_from_title(entries: &[(String, Vec<u8>)]) -> Vec<([u8; 16], [u8; 16])> {
     let mut out = Vec::new();
     for (name, val) in entries {
@@ -331,5 +378,42 @@ mod tests {
         assert_eq!(tks.len(), 1);
         assert_eq!(tks[0].0[0], 0x01);
         assert_eq!(tks[0].1[15], 0x10);
+    }
+
+    /// A `title.keys` entry is the ticket's key block, still wrapped: using
+    /// it as-is is what made a real title fail its section hash check with a
+    /// perfectly good key file.
+    #[test]
+    fn unwraps_a_title_keys_entry_with_the_titlekek() {
+        let rights_id = [0xaau8; 16];
+        let plain = [0x11u8; 16];
+        let kek = [0x22u8; 16];
+        let mut ks = KeySet::default();
+        ks.titlekek[0x0d] = Some(kek);
+        ks.title_keys = vec![(rights_id, crate::crypto::aes128_encrypt_block(&kek, &plain))];
+        assert_eq!(ks.title_key(&rights_id, 0x0d), Some(plain));
+        // The stored form is not the usable key, and a generation with no
+        // titlekek can't produce one rather than producing the wrong one.
+        assert_ne!(ks.wrapped_title_key(&rights_id), Some(plain));
+        assert_eq!(ks.title_key(&rights_id, 0x0c), None);
+        assert_eq!(ks.title_key(&[0xbbu8; 16], 0x0d), None);
+    }
+
+    /// The ticket shipped with the content describes that content; a
+    /// `title.keys` entry for the same title is a guess from elsewhere.
+    #[test]
+    fn a_ticket_key_wins_over_a_title_keys_entry() {
+        let rights_id = [0xaau8; 16];
+        let from_ticket = [0x33u8; 16];
+        let mut ks = KeySet::default();
+        ks.titlekek[0x0d] = Some([0x22u8; 16]);
+        ks.title_keys = vec![(rights_id, [0x44u8; 16])];
+        ks.add_resolved_title_key(rights_id, from_ticket);
+        assert_eq!(ks.title_key(&rights_id, 0x0d), Some(from_ticket));
+        // Resolving the same title twice replaces it instead of stacking a
+        // second entry the first would shadow forever.
+        ks.add_resolved_title_key(rights_id, [0x55u8; 16]);
+        assert_eq!(ks.resolved_title_keys.len(), 1);
+        assert_eq!(ks.title_key(&rights_id, 0x0d), Some([0x55u8; 16]));
     }
 }

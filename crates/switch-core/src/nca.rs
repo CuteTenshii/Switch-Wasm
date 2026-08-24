@@ -400,12 +400,27 @@ impl Nca {
     /// The AES-128 key that decrypts this NCA's sections: either the title
     /// key (rights-id crypto) or key-area slot 2, unlocked with the matching
     /// `key_area_key_<kind>_<generation>`.
+    ///
+    /// A `title.keys` entry is not itself that key: the file stores a
+    /// ticket's key block verbatim, still wrapped under `titlekek_XX`, so it
+    /// has to be unwrapped with this NCA's key generation first. Used raw it
+    /// decrypts to noise that only surfaces later as a section hash
+    /// mismatch, which reads as "wrong keys" when the keys were fine.
     pub fn section_key(&self, keys: &crate::keys::KeySet) -> Result<[u8; 16], Error> {
         if self.has_rights_id() {
-            return keys
-                .title_key(&self.rights_id)
-                .copied()
-                .ok_or_else(|| Error::Nca("no title key loaded for this title's rights id".into()));
+            let generation = self.master_key_revision();
+            if let Some(key) = keys.title_key(&self.rights_id, generation) {
+                return Ok(key);
+            }
+            // Which half is missing decides what the user has to go fetch.
+            return Err(if keys.wrapped_title_key(&self.rights_id).is_none() {
+                Error::Nca("no title key loaded for this title's rights id".into())
+            } else {
+                Error::Nca(format!(
+                    "missing titlekek_{:02x} in prod.keys — needed to unwrap this title's key",
+                    generation
+                ))
+            });
         }
         let kind = crate::keys::KeyAreaKind::from_index(self.key_index)
             .ok_or_else(|| Error::Nca(format!("unknown key area index {}", self.key_index)))?;
@@ -814,6 +829,34 @@ mod tests {
         assert_eq!(nca.sections[0].media_offset, 0);
         assert_eq!(nca.sections[0].media_size, 0x2000);
         assert_eq!(nca.sections[0].partition_index, 0);
+    }
+
+    /// A rights-id title's key comes out of `title.keys` still wrapped under
+    /// `titlekek_<key generation - 1>`; `section_key` is where that gets
+    /// undone. Real-world symptom of skipping it: every section decrypts to
+    /// noise and fails its hash, with the keys reported as wrong.
+    #[test]
+    fn section_key_unwraps_a_title_keys_entry() {
+        let mut data = make_nca();
+        let h = NCA_HEADER_OFFSET;
+        data[h + 0x06] = 2; // key generation (old), pinned at 2 once >= 3
+        data[h + 0x20] = 0x0e; // key generation (new)
+        let rights_id = [0x77u8; 16];
+        data[h + 0x30..h + 0x40].copy_from_slice(&rights_id);
+        let nca = Nca::parse(&data).unwrap();
+        assert!(nca.has_rights_id());
+
+        let plain = [0x11u8; 16];
+        let kek = [0x22u8; 16];
+        let mut keys = crate::keys::KeySet::default();
+        keys.titlekek[0x0d] = Some(kek);
+        keys.title_keys = vec![(rights_id, crate::crypto::aes128_encrypt_block(&kek, &plain))];
+        assert_eq!(nca.section_key(&keys).unwrap(), plain);
+
+        // Without the titlekek there is no usable key, and saying so beats
+        // handing back the wrapped bytes for the hash check to reject.
+        keys.titlekek[0x0d] = None;
+        assert!(nca.section_key(&keys).is_err());
     }
 
     #[test]

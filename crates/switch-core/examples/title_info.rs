@@ -81,14 +81,14 @@ fn main() {
         let (index, nca) = switch_core::control::find_control_nca(&pfs0.files, &src, &keys)
             .expect("no Control NCA in this container (is prod.keys right?)");
         println!("Control NCA: {}", pfs0.files[index].name);
-        if nca.has_rights_id() && keys.title_key(&nca.rights_id).is_none() {
+        if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
             match switch_core::ticket::find_and_decrypt_title_key_from(
                 &nca.rights_id,
                 &pfs0.files,
                 &src,
                 &keys,
             ) {
-                Ok(title_key) => keys.title_keys.push((nca.rights_id, title_key)),
+                Ok(title_key) => keys.add_resolved_title_key(nca.rights_id, title_key),
                 Err(e) => println!("ticket resolution failed: {}", e),
             }
         }

@@ -659,14 +659,14 @@ pub extern "C" fn switch_load_control_from_nsp(handle: u32) -> i32 {
     // Title-key crypto: as when booting the Program NCA, the section key
     // isn't in the header's own key area and the ticket that unlocks it
     // ships next to the content.
-    if nca.has_rights_id() && s.keys.title_key(&nca.rights_id).is_none() {
+    if nca.has_rights_id() && s.keys.resolved_title_key(&nca.rights_id).is_none() {
         if let Ok(title_key) = switch_core::ticket::find_and_decrypt_title_key_from(
             &nca.rights_id,
             &s.nsp_files,
             &container,
             &s.keys,
         ) {
-            s.keys.title_keys.push((nca.rights_id, title_key));
+            s.keys.add_resolved_title_key(nca.rights_id, title_key);
         }
     }
     let Some(file) = nsp_file_source(s, index as u32) else {
@@ -1027,14 +1027,14 @@ pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
     // unlocks it right next to the content — try that before falling back to
     // whatever an external title.keys provided.
     if let Ok(nca) = Nca::parse_source(&nca_src, Some(&s.keys)) {
-        if nca.has_rights_id() && s.keys.title_key(&nca.rights_id).is_none() {
+        if nca.has_rights_id() && s.keys.resolved_title_key(&nca.rights_id).is_none() {
             if let Ok(title_key) = switch_core::ticket::find_and_decrypt_title_key_from(
                 &nca.rights_id,
                 &s.nsp_files,
                 &container,
                 &s.keys,
             ) {
-                s.keys.title_keys.push((nca.rights_id, title_key));
+                s.keys.add_resolved_title_key(nca.rights_id, title_key);
             }
         }
     }

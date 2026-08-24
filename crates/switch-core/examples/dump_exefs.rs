@@ -55,10 +55,10 @@ fn main() {
     };
     let raw = &nsp_data[span.0..span.1];
     let nca = switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)).unwrap();
-    if nca.has_rights_id() && keys.title_key(&nca.rights_id).is_none() {
+    if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
         let files = pfs0.as_ref().map(|p| p.files.clone()).unwrap_or_default();
         let tk = switch_core::ticket::find_and_decrypt_title_key(&nca.rights_id, &files, &nsp_data, &keys).unwrap();
-        keys.title_keys.push((nca.rights_id, tk));
+        keys.add_resolved_title_key(nca.rights_id, tk);
     }
     let idx = nca.exefs_section_index().unwrap();
     let exefs = nca.decrypt_pfs0_section(raw, &keys, idx).unwrap();

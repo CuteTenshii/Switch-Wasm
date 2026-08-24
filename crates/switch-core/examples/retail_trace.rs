@@ -39,12 +39,12 @@ fn main() {
     let f = program.unwrap();
     let raw = &nsp_data[f.offset as usize..(f.offset + f.size) as usize];
     let nca = switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)).unwrap();
-    if nca.has_rights_id() && keys.title_key(&nca.rights_id).is_none() {
+    if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
         let tk = switch_core::ticket::find_and_decrypt_title_key(
             &nca.rights_id, &pfs0.files, &nsp_data, &keys,
         )
         .unwrap();
-        keys.title_keys.push((nca.rights_id, tk));
+        keys.add_resolved_title_key(nca.rights_id, tk);
     }
     let exefs = nca
         .decrypt_pfs0_section(raw, &keys, nca.exefs_section_index().unwrap())
