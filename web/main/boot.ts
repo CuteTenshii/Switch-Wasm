@@ -1,6 +1,11 @@
-/* Loading a homebrew program: the Open buttons, and dropping one on the
-   stage. */
+/* Booting from the stage: the Open buttons, and dropping a file on it.
 
+   Anything the emulator can boot is accepted here, homebrew and retail alike.
+   A `.nro` or `.elf` is an executable this loads directly; a `.nsp`, `.xci` or
+   `.nca` is a container the title has to be found inside first, which is
+   `container.ts`'s job. */
+
+import { bootContainer, isContainerFile } from './container';
 import { $, pickedFile } from './dom';
 import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
@@ -48,6 +53,12 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
 }
 
 async function bootFile(file: File): Promise<void> {
+  if (isContainerFile(file.name)) {
+    // A container fills the Files panel on its way past, so what was opened
+    // and what was found in it stay inspectable after the title has started.
+    await bootContainer(file);
+    return;
+  }
   const kind = /\.nro$/i.test(file.name) ? 'nro' : 'elf';
   if (await loadProgram(file, kind)) await run();
 }

@@ -42,6 +42,7 @@ export interface WasmExports {
   switch_load_elf(handle: number, ptr: number, len: number): bigint;
   switch_load_nca(handle: number): bigint;
   switch_load_nca_from_nsp(handle: number, index: number): bigint;
+  switch_program_nca_index(handle: number): number;
 
   switch_set_trace(handle: number, enabled: number): void;
   switch_set_jit(handle: number, enabled: number): void;

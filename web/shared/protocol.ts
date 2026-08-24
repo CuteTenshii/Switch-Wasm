@@ -125,6 +125,7 @@ export interface Commands {
   nand_add_archive(bytes: Bytes): string;
   load_nca_from_nsp(index: number): number;
   load_nca(): number;
+  program_nca_index(): number;
   load_keys(prod: Bytes | null, title: Bytes | null): number;
   nsp_files_json(): string;
   read_file(index: number, offset: number, len: number): Bytes;

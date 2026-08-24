@@ -45,6 +45,8 @@
 //! byte header rather than just the base 0x400) carries the hash and
 //! encryption metadata needed to actually decrypt and verify the section.
 
+use crate::keys::KeySet;
+use crate::nsp::Pfs0File;
 use crate::source::{ByteSource, SliceSource, Window};
 use crate::Error;
 
@@ -794,6 +796,35 @@ impl<S: ByteSource> ByteSource for SectionSource<S> {
     }
 }
 
+/// Find the first NCA of content type `want` in a PFS0 container's file
+/// table, returning its index and parsed header.
+///
+/// Every `.nca` in the container has to be opened to answer: the file names
+/// are content hashes, so what a file *is* shows only in its (possibly
+/// encrypted) header. `keys` therefore needs the header key, or nothing here
+/// is readable at all and this finds nothing.
+///
+/// This is how a title's own executable is picked out of a container. A
+/// retail NSP holds the Program NCA next to a `cnmt` metadata record, the
+/// Control NCA that carries the icon, and often a manual and a legal-info
+/// NCA - all with hash names, so nothing but the content type distinguishes
+/// the one worth booting.
+pub fn find_nca_by_type<S: ByteSource>(
+    files: &[Pfs0File],
+    src: &S,
+    keys: &KeySet,
+    want: ContentType,
+) -> Option<(usize, Nca)> {
+    files.iter().enumerate().find_map(|(index, f)| {
+        if !f.name.to_ascii_lowercase().ends_with(".nca") {
+            return None;
+        }
+        let window = Window::new(src, f.offset, f.size, &f.name).ok()?;
+        let nca = Nca::parse_source(&window, Some(keys)).ok()?;
+        (nca.content_type == want).then_some((index, nca))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -872,6 +903,53 @@ mod tests {
             Nca::parse(&[0u8; 0x300]),
             Err(Error::Truncated { .. })
         ));
+    }
+
+    /// A cleartext NCA header, long enough for the base header to parse.
+    fn nca_header(content_type: u8) -> Vec<u8> {
+        let mut hdr = vec![0u8; NCA_HEADER_OFFSET + 0x200];
+        hdr[0x200..0x204].copy_from_slice(&NCA_MAGIC.to_le_bytes());
+        hdr[0x204] = 2; // distribution type
+        hdr[0x205] = content_type;
+        hdr[0x210..0x218].copy_from_slice(&0x0100_0000_0000_1000u64.to_le_bytes());
+        hdr
+    }
+
+    #[test]
+    fn finds_an_nca_in_a_container_by_content_type() {
+        // What a container actually looks like: hash-named NCAs whose names
+        // say nothing about what they hold, next to metadata that is not an
+        // NCA at all. Only the content type in each header distinguishes them.
+        let parts: [(&str, Vec<u8>); 4] = [
+            ("0100000000001000.cnmt.xml", vec![0u8; 0x40]),
+            ("aaaa.nca", nca_header(1)), // Meta
+            ("bbbb.nca", nca_header(2)), // Control
+            ("cccc.nca", nca_header(0)), // Program
+        ];
+        let mut image: Vec<u8> = Vec::new();
+        let mut files = Vec::new();
+        for (name, bytes) in &parts {
+            files.push(crate::nsp::Pfs0File {
+                offset: image.len() as u64,
+                size: bytes.len() as u64,
+                name: (*name).to_string(),
+            });
+            image.extend_from_slice(bytes);
+        }
+        let src = SliceSource(&image);
+        let keys = KeySet::default();
+
+        let (index, nca) =
+            find_nca_by_type(&files, &src, &keys, ContentType::Program).expect("program nca");
+        assert_eq!(index, 3);
+        assert_eq!(nca.content_type, ContentType::Program);
+        assert_eq!(
+            find_nca_by_type(&files, &src, &keys, ContentType::Control).map(|(i, _)| i),
+            Some(2)
+        );
+        // A type the container does not hold finds nothing, rather than
+        // falling back to the first header that happened to parse.
+        assert!(find_nca_by_type(&files, &src, &keys, ContentType::Manual).is_none());
     }
 }
 

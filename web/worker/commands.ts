@@ -161,6 +161,12 @@ export const CMD: CommandHandlers = {
   load_nca() {
     return Number(api().switch_load_nca(handle()));
   },
+  // Which file in the open container holds the title's executable. Every file
+  // in an NSP is named after its own hash, so this is the only way to boot one
+  // without reading each header through the page to find out.
+  program_nca_index() {
+    return api().switch_program_nca_index(handle());
+  },
   load_keys(prod, title) {
     const prodBytes = prod || new Uint8Array(0);
     const titleBytes = title || new Uint8Array(0);

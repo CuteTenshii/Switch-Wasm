@@ -453,25 +453,14 @@ impl Control {
 }
 
 /// Find the Control NCA in a PFS0 container's file table, returning its index
-/// and parsed header.
-///
-/// Every `.nca` in the container has to be opened to find it: the file names
-/// are content hashes, so which one is the Control NCA is only visible in the
-/// (possibly encrypted) header. `keys` therefore needs the header key, or
-/// nothing here is readable at all.
+/// and parsed header. See [`crate::nca::find_nca_by_type`] for why every
+/// `.nca` in the container has to be opened to answer.
 pub fn find_control_nca<S: ByteSource>(
     files: &[Pfs0File],
     src: &S,
     keys: &KeySet,
 ) -> Option<(usize, Nca)> {
-    files.iter().enumerate().find_map(|(index, f)| {
-        if !f.name.to_ascii_lowercase().ends_with(".nca") {
-            return None;
-        }
-        let window = Window::new(src, f.offset, f.size, &f.name).ok()?;
-        let nca = Nca::parse_source(&window, Some(keys)).ok()?;
-        (nca.content_type == ContentType::Control).then_some((index, nca))
-    })
+    crate::nca::find_nca_by_type(files, src, keys, ContentType::Control)
 }
 
 /// Read the control data of the title in a PFS0 container.

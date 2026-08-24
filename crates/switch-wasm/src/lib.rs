@@ -1030,6 +1030,41 @@ pub extern "C" fn switch_load_nca(handle: u32) -> i64 {
     load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, container)
 }
 
+/// The index of the Program NCA in the open container, or -1 if it has none.
+///
+/// This is what lets a container be booted without being read through first:
+/// every file in an NSP is named after its own hash, so which one holds the
+/// title's executable is visible only in each NCA's (encrypted) header. -1
+/// therefore also covers having no `prod.keys` loaded, and `switch_last_error`
+/// says which of the two it was.
+///
+/// Hand the answer straight back to `switch_load_nca_from_nsp`.
+#[no_mangle]
+pub extern "C" fn switch_program_nca_index(handle: u32) -> i32 {
+    let s = session(handle);
+    let Some(container) = container(s) else {
+        return -1;
+    };
+    let found = switch_core::nca::find_nca_by_type(
+        &s.nsp_files,
+        &container,
+        &s.keys,
+        switch_core::nca::ContentType::Program,
+    );
+    match found {
+        Some((index, _)) => {
+            s.last_error.clear();
+            index as i32
+        }
+        None => {
+            s.last_error =
+                "no Program NCA in this container (or its header couldn't be decrypted — load prod.keys)"
+                    .into();
+            -1
+        }
+    }
+}
+
 /// Decrypt NSP file `index` as a Program NCA (using whatever keys are
 /// loaded), extract its ExeFS `main` executable and boot it. Returns entry
 /// address or -1 — check `switch_last_error` either way, since the entry can

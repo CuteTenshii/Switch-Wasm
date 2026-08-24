@@ -10,7 +10,7 @@ import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
 import { clearConsole, log } from './log';
 import { call, readLastError } from './rpc';
 import { run, updatePc } from './runloop';
-import { setNote, setState, showScreen } from './shell';
+import { openPanel, setNote, setState, showScreen } from './shell';
 
 /** What a launch puts on the loading screen. A title picked out of a container
  *  has its own name and icon; one launched from the NAND is a bare NCA with
@@ -34,14 +34,91 @@ $('nsp-file').addEventListener('change', (e) => {
   if (file) handleContainerFile(file);
 });
 
-function handleContainerFile(file: File): Promise<void> {
-  if (/\.nca$/i.test(file.name)) return handleStandaloneNca(file);
-  return handleNspFile(file);
+async function handleContainerFile(file: File): Promise<void> {
+  if (isStandaloneNca(file)) await handleStandaloneNca(file);
+  else await handleNspFile(file);
+}
+
+// A `.nca` is one piece of content rather than a container of them, so it is
+// opened as itself; everything else here is a PFS0 to look inside.
+function isStandaloneNca(file: File): boolean {
+  return /\.nca$/i.test(file.name);
+}
+
+/** Whether a file picked on the stage should go down the container path rather
+ *  than be treated as a homebrew executable. Kept in step with the panel's own
+ *  accept list, since both end up opening the same thing. */
+export function isContainerFile(name: string): boolean {
+  return /\.(nsp|nsz|xci|nca)$/i.test(name);
+}
+
+/* ---------- booting a container from the stage ----------
+
+   The panel's flow is "look inside this, and maybe launch something out of
+   it"; the stage's is "play this". Both open the container the same way and
+   fill the same panel - what this adds is finding the title's own Program
+   NCA, which someone would otherwise do by clicking down the file list
+   looking for the one whose content type says Program. Every file in an NSP
+   is named after its own hash, so the content type is the only thing that
+   distinguishes it. */
+export async function bootContainer(file: File): Promise<void> {
+  setState('loading');
+  beginLoad(file.name, 'opening the container (' + fmtSize(file.size) + ')');
+  if (isStandaloneNca(file)) {
+    const info = await handleStandaloneNca(file);
+    if (!info) {
+      setState('fault');
+      failLoad('Could not read ' + file.name + '. The Files panel has its header.');
+      // The reason is a line of the panel's own output - an encrypted header
+      // with no prod.keys loaded, most often - so open it on the way past
+      // rather than describing where to go and looking.
+      openPanel('files');
+      return;
+    }
+    // A Control or Meta NCA is a perfectly readable file with nothing
+    // executable in it, and the panel has just shown what it does hold - so
+    // say what is missing rather than letting the launch fail on an absent
+    // ExeFS.
+    if (info.content_type !== 'Program') {
+      const why = file.name + ' is a ' + info.content_type
+        + ' NCA - only a Program NCA holds an executable.';
+      setState('fault');
+      failLoad(why);
+      log(why, 'err');
+      return;
+    }
+    await launchStandaloneNca(file);
+    return;
+  }
+  await handleNspFile(file);
+  // If the open failed, the panel and the log have already said why, and
+  // `openContainer` is still whatever was open before this - so identity, not
+  // nullness, is what tells the two apart.
+  if (openContainer?.file !== file) {
+    setState('fault');
+    failLoad('Could not open ' + file.name + '. The Files panel has the details.');
+    openPanel('files');
+    return;
+  }
+  loadPhase('looking for the title\'s program');
+  const index = await call('program_nca_index');
+  if (index < 0 || !nspFiles[index]) {
+    const why = await readLastError();
+    setState('fault');
+    failLoad(why);
+    log('Nothing to boot in ' + file.name + ': ' + why, 'err');
+    return;
+  }
+  await launchNca(nspFiles[index], index);
 }
 
 // The container the wasm side has open, kept so a new session can be handed
 // the same one. Only the File is held here; nothing is read from it.
 let openContainer: { file: File; kind: 'nsp' | 'nca' } | null = null;
+
+// The open container's file table, so booting one can name the NCA it picked
+// without asking for the table a second time.
+let nspFiles: NspFile[] = [];
 
 // Give a fresh session the container the page is still showing. Reset means
 // "run this again from the top", not "throw away the file I just picked" --
@@ -90,11 +167,11 @@ async function handleNspFile(file: File): Promise<void> {
     return;
   }
   status.remove();
-  const files: NspFile[] = JSON.parse(await call('nsp_files_json'));
-  log('Parsed ' + files.length + ' file(s). Click an .nca to inspect it.', 'ok');
+  nspFiles = JSON.parse(await call('nsp_files_json'));
+  log('Parsed ' + nspFiles.length + ' file(s). Click an .nca to inspect it.', 'ok');
 
   const ul = el('ul', 'nsp-list');
-  files.forEach((f, index) => {
+  nspFiles.forEach((f, index) => {
     const li = el('li');
     li.appendChild(el('span', 'name', f.name));
     li.appendChild(el('span', 'size', fmtSize(f.size)));
@@ -118,6 +195,7 @@ async function handleNspFile(file: File): Promise<void> {
 export function clearNsp(): void {
   $('nsp-result').textContent = '';
   setNote('container-badge', 'none open', false);
+  nspFiles = [];
   holdTitle(null, null);
 }
 
@@ -271,7 +349,7 @@ async function inspectNca(f: NspFile, index: number): Promise<void> {
 // flow, with the NCA itself as the open container instead of a file inside
 // one. Opening it is what lets Launch - and the Control NCA card below - read
 // from it later.
-async function handleStandaloneNca(file: File): Promise<void> {
+async function handleStandaloneNca(file: File): Promise<NcaInfo | null> {
   clearNsp();
   setNote('container-badge', 'opening ' + file.name, false);
   const out = el('div', 'nca-info nca-inspect', 'Parsing ' + file.name + ' ...');
@@ -281,7 +359,7 @@ async function handleStandaloneNca(file: File): Promise<void> {
   } catch (e) {
     out.textContent = 'Could not open ' + file.name + ': ' + (e as Error).message;
     setNote('container-badge', 'none open', false);
-    return;
+    return null;
   }
   openContainer = { file, kind: 'nca' };
   setNote('container-badge', file.name, true);
@@ -295,6 +373,7 @@ async function handleStandaloneNca(file: File): Promise<void> {
     await showTitleCard(() => call('load_control_from_nca'));
     setNote('container-badge', file.name, true);
   }
+  return info;
 }
 
 async function parseAndRenderNca(
