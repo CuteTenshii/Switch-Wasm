@@ -19,6 +19,7 @@ import {
   type NandEntry,
 } from './db';
 import { $, el } from './dom';
+import { beginLoad, failLoad } from './loading';
 import { log } from './log';
 import { call } from './rpc';
 import { setNote } from './shell';
@@ -172,14 +173,20 @@ function nandRow(id: string, entry: NandEntry): HTMLButtonElement {
 
 async function launchInstalled(id: string, entry: NandEntry): Promise<void> {
   const name = titleLabel(id);
+  // An applet is a few hundred megabytes coming back out of IndexedDB before
+  // the launch proper even starts, so the screen goes up here rather than in
+  // `doLaunchNca`, which re-titles it with the same name a moment later.
+  beginLoad(name, 'reading ' + entry.name + ' from the NAND');
   let bytes: ArrayBuffer | undefined;
   try {
     bytes = await idbGet<ArrayBuffer>(await nandIdb(), NAND_CONTENT, entry.name);
   } catch (err) {
+    failLoad('NAND: ' + (err as Error).message);
     log('NAND: ' + (err as Error).message, 'err');
     return;
   }
   if (!bytes) {
+    failLoad(entry.name + ' is indexed but its content is missing.');
     log('NAND: ' + entry.name + ' is indexed but its content is missing.', 'err');
     return;
   }
@@ -221,7 +228,13 @@ $('firmware-ncas').addEventListener('change', async (e) => {
   log('Reading ' + files.length + ' firmware file(s) ...');
   let added = 0;
   let installed = 0;
-  for (const f of files) {
+  // A firmware dump is hundreds of files and several gigabytes through
+  // IndexedDB. It is the panel's work rather than the stage's, so it counts
+  // itself off where it lives instead of behind a loading screen.
+  const stateEl = $('firmware-state');
+  for (const [index, f] of files.entries()) {
+    stateEl.textContent = 'Reading ' + (index + 1) + ' of ' + files.length + ' \u2014 ' + f.name;
+    setNote('nand-badge', (index + 1) + '/' + files.length, false);
     try {
       // Ask what it is first. That reads a header, not a file: a firmware dump
       // runs to gigabytes and most of it is metadata neither worth keeping nor

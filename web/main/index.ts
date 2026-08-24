@@ -20,6 +20,7 @@ import { saveRestore } from './saves';
 import { sdRequestPersistence, sdRestore } from './sdcard';
 import { screenCtx, screenEl, setState, showOverlay } from './shell';
 import { reopenContainer } from './container';
+import { beginLoad, endLoad, failLoad, loadPhase } from './loading';
 
 // Registered for their side effects: each of these owns a part of the page and
 // binds its own controls when it is loaded.
@@ -49,38 +50,75 @@ async function stageFont(): Promise<void> {
   await call('load_font', fontBytes);
 }
 
+// Bringing the core up is the page's own load, and every step of it is
+// something that can take a visible moment on a cold cache or a full SD card.
+// The loading screen is up from first paint (see index.html) so this only ever
+// names the step it has reached.
 async function init(): Promise<void> {
-  initWorker();
-  await whenReady();
-  setSession(await call('new'));
-  await stageFont();
-  await sdRequestPersistence();
-  await sdRestore();
-  await saveRestore();
-  await initFbSize();
-  $('wasm-ver').textContent = 'core ready';
-  log('core ready', 'dim');
-  // Restore persisted keys into the session.
-  if (hasKeys()) await stageKeys();
-  updateKeysState();
-  // And then the NAND, which needs those keys to parse a header.
-  await initNand();
+  try {
+    initWorker();
+    await whenReady();
+    loadPhase('creating a session');
+    setSession(await call('new'));
+    loadPhase('loading the system font');
+    await stageFont();
+    loadPhase('restoring the SD card');
+    await sdRequestPersistence();
+    await sdRestore();
+    loadPhase('restoring save data');
+    await saveRestore();
+    await initFbSize();
+    $('wasm-ver').textContent = 'core ready';
+    log('core ready', 'dim');
+    // Restore persisted keys into the session.
+    if (hasKeys()) {
+      loadPhase('staging keys');
+      await stageKeys();
+    }
+    updateKeysState();
+    // And then the NAND, which needs those keys to parse a header.
+    loadPhase('reading the NAND');
+    await initNand();
+  } catch (err) {
+    // A core that never came up leaves nothing behind it worth uncovering, so
+    // the screen stays and says so rather than handing over to an idle splash
+    // that would invite a boot which cannot work.
+    failLoad('The core could not be started: ' + (err as Error).message);
+    log('core failed to start: ' + (err as Error).message, 'err');
+    return;
+  }
+  endLoad();
 }
 
 $('btn-reset').addEventListener('click', async () => {
   abortRun();
-  await call('free_session');
-  setSession(await call('new'));
-  await stageFont();
-  await sdRestore();
-  await saveRestore();
-  // Everything else the page is still showing. A new session starts with no
-  // keys, no container and no data archives, while the panel above goes on
-  // reporting all three -- so Launch failed with "no container is open" on a
-  // card that was still sitting on screen.
-  await stageKeys();
-  await restoreArchives();
-  await reopenContainer();
+  // A reset rebuilds everything a boot built, so it reports itself the same
+  // way a boot does instead of freezing the stage on the last frame it drew.
+  beginLoad('resetting', 'freeing the session');
+  try {
+    await call('free_session');
+    setSession(await call('new'));
+    loadPhase('loading the system font');
+    await stageFont();
+    loadPhase('restoring the SD card');
+    await sdRestore();
+    loadPhase('restoring save data');
+    await saveRestore();
+    // Everything else the page is still showing. A new session starts with no
+    // keys, no container and no data archives, while the panel above goes on
+    // reporting all three -- so Launch failed with "no container is open" on a
+    // card that was still sitting on screen.
+    loadPhase('staging keys');
+    await stageKeys();
+    loadPhase('restoring system data archives');
+    await restoreArchives();
+    loadPhase('re-opening the container');
+    await reopenContainer();
+  } catch (err) {
+    failLoad('The session could not be rebuilt: ' + (err as Error).message);
+    log('Reset failed: ' + (err as Error).message, 'err');
+    return;
+  }
   resetAudio();
   clearConsole();
   resetDisplay();
@@ -88,6 +126,7 @@ $('btn-reset').addEventListener('click', async () => {
   showOverlay(true);
   screenCtx.clearRect(0, 0, screenEl.width, screenEl.height);
   await updatePc();
+  endLoad();
 });
 
 watchBattery();

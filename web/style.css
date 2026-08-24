@@ -258,6 +258,93 @@ body {
 }
 .dropveil.on { opacity: 1; visibility: visible; }
 
+/* ---------- loading screen ----------
+
+   The state chip says *that* something is loading; this says what, on the
+   surface the eye is already on. It shares the idle overlay's ground so that
+   handing over from one to the other is a crossfade rather than a scene
+   change. */
+
+.loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  text-align: center;
+  background: radial-gradient(120% 80% at 50% 0%, #131a2a 0%, #07080c 60%);
+  transition: opacity .25s ease, visibility .25s;
+}
+.loading.hidden { opacity: 0; visibility: hidden; }
+
+.loading-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: min(420px, 100%);
+}
+
+.loading-icon {
+  width: 88px;
+  height: 88px;
+  margin-bottom: 4px;
+  border-radius: 14px;
+  background: var(--chrome-hi);
+  object-fit: cover;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, .6);
+}
+
+.loading-title { font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+
+.loading-bar {
+  position: relative;
+  width: 100%;
+  height: 3px;
+  margin: 2px 0;
+  border-radius: 999px;
+  background: #1a2033;
+  overflow: hidden;
+}
+/* Indeterminate by default: almost nothing here can say how far along it is,
+   and a bar that fills at a rate nobody measured is a lie with a shape. */
+.loading-bar span {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 38%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, var(--accent), #a06bff, transparent);
+  animation: loading-sweep 1.15s ease-in-out infinite;
+}
+@keyframes loading-sweep {
+  from { transform: translateX(-110%); }
+  to   { transform: translateX(300%); }
+}
+/* A step with a known count is a real proportion, so the bar stops sweeping
+   and fills. The width is set inline, which is why it is absent here. */
+.loading.is-determinate .loading-bar span {
+  animation: none;
+  transform: none;
+  background: linear-gradient(90deg, var(--accent), #a06bff);
+  transition: width .2s ease;
+}
+
+.loading-phase { font-size: 13px; color: var(--muted); }
+/* Holds its line whether or not there is anything on it, so the phase above
+   does not shift every time a detail appears and goes. */
+.loading-detail {
+  min-height: 1.45em;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: #5d6579;
+  overflow-wrap: anywhere;
+}
+
+.loading.is-error .loading-bar span { animation: none; transform: none; background: var(--red); }
+.loading.is-error .loading-phase { color: var(--red); }
+
 /* ---------- status bar ---------- */
 
 .statusbar {
@@ -792,6 +879,9 @@ body.resizing { cursor: col-resize; user-select: none; }
 
 @media (prefers-reduced-motion: reduce) {
   body.panel-open .panel { animation: none; }
+  /* A bar that sweeps for the whole of a boot is exactly the motion this
+     query is asking to be spared; it becomes a dim full-width rule instead. */
+  .loading-bar span { animation: none; width: 100%; opacity: .55; }
   .section-head::before { transition: none; }
   .console div { animation: none; }
 }

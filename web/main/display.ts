@@ -1,6 +1,7 @@
 /* The emulated screen, and the frame counter the fps readout is derived from. */
 
 import { $ } from './dom';
+import { endLoad } from './loading';
 import { call } from './rpc';
 import { screenCtx, screenEl, showOverlay, showScreen } from './shell';
 
@@ -52,6 +53,9 @@ export async function renderFb(): Promise<void> {
     const arr = new Uint8ClampedArray(pixels.buffer, pixels.byteOffset, fbBytes);
     screenCtx.putImageData(new ImageData(arr, fbW, fbH), 0, 0);
     showOverlay(false);
+    // There is now a frame under the loading screen, which is the one thing it
+    // was waiting for.
+    endLoad();
   }
 }
 

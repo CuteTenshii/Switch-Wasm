@@ -86,6 +86,21 @@
       </div>
     </div>
 
+    <!-- Above the idle overlay and below the drop veil: it covers the stage
+         while the machine is busy, and the veil has to stay droppable on top
+         of it. Visible on first paint, because bringing the core up is itself
+         the first thing worth reporting. -->
+    <div class="loading" id="loading" role="status" aria-live="polite">
+      <div class="loading-inner">
+        <img class="loading-icon" id="loading-icon" alt="" hidden>
+        <div class="loading-title" id="loading-title">starting core</div>
+        <div class="loading-bar"><span id="loading-fill"></span></div>
+        <div class="loading-phase" id="loading-phase">fetching and compiling the WebAssembly module</div>
+        <div class="loading-detail" id="loading-detail"></div>
+        <button type="button" class="btn small ghost" id="loading-dismiss" hidden>Dismiss</button>
+      </div>
+    </div>
+
     <div class="dropveil" id="dropveil"><span>Release to boot</span></div>
   </main>
 

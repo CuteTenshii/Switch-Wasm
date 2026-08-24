@@ -5,6 +5,7 @@ import { drainDiagnostics, drainTrace, traceEnabled } from './debug';
 import { presentIfNewFrame, renderFb } from './display';
 import { $ } from './dom';
 import { formatBytes } from './format';
+import { bootDetail, endLoad } from './loading';
 import { log } from './log';
 import { call, readLastError } from './rpc';
 import { saveFlush } from './saves';
@@ -74,6 +75,9 @@ export async function run(): Promise<void> {
     if (pauseRequested) {
       running = false;
       setRunButton(false);
+      // Whatever the guest was about to present, it is not going to now: a
+      // paused machine is not a loading one.
+      endLoad();
       setState('paused');
       await renderFb();
       return;
@@ -120,6 +124,10 @@ export async function drainOutput(): Promise<void> {
 }
 
 async function finishRun(steps: number, stepped?: boolean): Promise<void> {
+  // The run is over however it ended, so a boot that was still being waited on
+  // is over too - including the common case of a program that prints and exits
+  // without ever presenting a frame.
+  endLoad();
   const err = await readLastError();
   if (steps < 0) {
     setState('fault');
@@ -143,8 +151,13 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
 }
 
 export async function updatePc(): Promise<void> {
-  $('pc').textContent = '0x' + (await call('get_pc')).toString(16).padStart(8, '0');
-  $('steps').textContent = (await call('get_cycles')).toLocaleString();
+  const pc = await call('get_pc');
+  const steps = await call('get_cycles');
+  $('pc').textContent = '0x' + pc.toString(16).padStart(8, '0');
+  $('steps').textContent = steps.toLocaleString();
+  // The same two figures on the loading screen, where they are the only sign
+  // that a title still working towards its first frame is working at all.
+  bootDetail(pc, steps);
   await updateRam();
 }
 

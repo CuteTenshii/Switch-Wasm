@@ -6,10 +6,19 @@
 import type { Bytes, ControlInfo, NcaInfo, NspFile } from '../shared/protocol';
 import { $, el, pickedFile } from './dom';
 import { fmtSize } from './format';
+import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
 import { clearConsole, log } from './log';
 import { call, readLastError } from './rpc';
 import { run, updatePc } from './runloop';
 import { setNote, setState, showScreen } from './shell';
+
+/** What a launch puts on the loading screen. A title picked out of a container
+ *  has its own name and icon; one launched from the NAND is a bare NCA with
+ *  nothing but a file name to go on. */
+export interface LaunchIdentity {
+  name: string;
+  iconUrl: string | null;
+}
 
 const nspDrop = $('nsp-drop');
 nspDrop.addEventListener('dragover', (e) => { e.preventDefault(); nspDrop.classList.add('drag'); });
@@ -56,19 +65,31 @@ export async function reopenContainer(): Promise<void> {
 // range at a time. Only its PFS0 header is touched here.
 async function handleNspFile(file: File): Promise<void> {
   clearNsp();
+  // Opening a container is the panel's work, not the stage's, so it reports
+  // itself here rather than behind a loading screen over a screen that may
+  // still be running something.
+  setNote('container-badge', 'opening ' + file.name, false);
+  const status = el('div', 'nca-info', 'Reading the container header \u2026');
+  $('nsp-result').appendChild(status);
   log('Opening ' + file.name + ' (' + fmtSize(file.size) + ') ...');
   try {
     const ok = await call('open_nsp', file);
     if (ok !== 0) {
-      log('NSP error: ' + await readLastError(), 'err');
+      const why = await readLastError();
+      status.textContent = 'NSP error: ' + why;
+      setNote('container-badge', 'none open', false);
+      log('NSP error: ' + why, 'err');
       return;
     }
     openContainer = { file, kind: 'nsp' };
     setNote('container-badge', file.name, true);
   } catch (e) {
+    status.textContent = 'Could not open ' + file.name + ': ' + (e as Error).message;
+    setNote('container-badge', 'none open', false);
     log('Could not open ' + file.name + ': ' + (e as Error).message, 'err');
     return;
   }
+  status.remove();
   const files: NspFile[] = JSON.parse(await call('nsp_files_json'));
   log('Parsed ' + files.length + ' file(s). Click an .nca to inspect it.', 'ok');
 
@@ -86,12 +107,35 @@ async function handleNspFile(file: File): Promise<void> {
     ul.appendChild(li);
   });
   $('nsp-result').appendChild(ul);
+  // Reading the Control NCA means decrypting a section and mounting its RomFS
+  // to pull an icon out of it, which is the slowest part of opening a
+  // container and the one that used to pass in silence.
+  setNote('container-badge', 'reading title details\u2026', false);
   await showTitleCard(() => call('load_control_from_nsp'));
+  setNote('container-badge', file.name, true);
 }
 
 export function clearNsp(): void {
   $('nsp-result').textContent = '';
   setNote('container-badge', 'none open', false);
+  holdTitle(null, null);
+}
+
+/* The title the open container describes, kept so that launching it can show
+   its own name and icon rather than an NCA file name. Exactly one icon URL is
+   alive at a time: replacing the identity revokes the last one, which is what
+   the card's revoke-on-load did before the URL had a second reader. */
+let heldTitle: LaunchIdentity | null = null;
+
+function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity | null {
+  if (heldTitle?.iconUrl) URL.revokeObjectURL(heldTitle.iconUrl);
+  heldTitle = info ? {
+    name: info.name,
+    iconUrl: icon && icon.length
+      ? URL.createObjectURL(new Blob([icon], { type: info.icon_mime }))
+      : null,
+  } : null;
+  return heldTitle;
 }
 
 /* ---------- title details ----------
@@ -119,22 +163,20 @@ async function showTitleCard(loader: () => Promise<number>): Promise<ControlInfo
   }
   if (!info.name) return null;
   const icon = info.icon_size > 0 ? await call('control_icon', info.icon_size) : null;
-  const card = renderTitleCard(info, icon);
+  const card = renderTitleCard(info, holdTitle(info, icon)?.iconUrl ?? null);
   $('nsp-result').prepend(card);
   log('Title: ' + info.name + (info.publisher ? ' - ' + info.publisher : ''), 'ok');
   return info;
 }
 
-function renderTitleCard(info: ControlInfo, icon: Bytes | null): HTMLElement {
+function renderTitleCard(info: ControlInfo, iconUrl: string | null): HTMLElement {
   const card = el('div', 'title-card');
-  if (icon && icon.length) {
+  if (iconUrl) {
     const img = el('img', 'title-icon');
     img.alt = info.name;
-    const url = URL.createObjectURL(new Blob([icon], { type: info.icon_mime }));
-    // The decoded image outlives the URL, so release it as soon as it has
-    // been read rather than leaking a blob per inspected container.
-    img.addEventListener('load', () => URL.revokeObjectURL(url), { once: true });
-    img.src = url;
+    // The URL belongs to `heldTitle`, which the loading screen reads too and
+    // which revokes it when the next container replaces it.
+    img.src = iconUrl;
     card.appendChild(img);
   }
   const meta = el('div', 'title-meta');
@@ -231,12 +273,14 @@ async function inspectNca(f: NspFile, index: number): Promise<void> {
 // from it later.
 async function handleStandaloneNca(file: File): Promise<void> {
   clearNsp();
+  setNote('container-badge', 'opening ' + file.name, false);
   const out = el('div', 'nca-info nca-inspect', 'Parsing ' + file.name + ' ...');
   $('nsp-result').appendChild(out);
   try {
     await call('open_nca', file);
   } catch (e) {
     out.textContent = 'Could not open ' + file.name + ': ' + (e as Error).message;
+    setNote('container-badge', 'none open', false);
     return;
   }
   openContainer = { file, kind: 'nca' };
@@ -247,7 +291,9 @@ async function handleStandaloneNca(file: File): Promise<void> {
   // A standalone Control NCA is nothing but the title's icon and metadata, so
   // the same card the container path shows is the whole point of opening one.
   if (info && info.content_type === 'Control') {
+    setNote('container-badge', 'reading title details\u2026', false);
     await showTitleCard(() => call('load_control_from_nca'));
+    setNote('container-badge', file.name, true);
   }
 }
 
@@ -301,35 +347,48 @@ async function parseAndRenderNca(
 // larger undertaking than the homebrew this emulator otherwise runs), so
 // expect it to run until the first missing service rather than reach a menu.
 function launchNca(f: NspFile, index: number): Promise<void> {
-  return doLaunchNca(f.name, () => call('load_nca_from_nsp', index));
+  return doLaunchNca(f.name, () => call('load_nca_from_nsp', index), heldTitle);
 }
 
 // Same as `launchNca`, but for a standalone .nca file: it is already the open
 // container, so there is nothing to read here that booting won't read itself.
 function launchStandaloneNca(file: File): Promise<void> {
-  return doLaunchNca(file.name, () => call('load_nca'));
+  return doLaunchNca(file.name, () => call('load_nca'), heldTitle);
 }
 
-export async function doLaunchNca(name: string, loadFn: () => Promise<number>): Promise<void> {
+export async function doLaunchNca(
+  name: string,
+  loadFn: () => Promise<number>,
+  identity?: LaunchIdentity | null,
+): Promise<void> {
   clearConsole();
   setState('loading');
+  // A title the container named puts that name and its own icon on the screen;
+  // a bare NCA off the NAND has only the file name to show.
+  beginLoad(identity?.name || name, 'decrypting the program and reading its ExeFS',
+    identity?.iconUrl);
   let entry: number;
   try {
     entry = await loadFn();
   } catch (err) {
     setState('fault');
+    failLoad('Launch failed: ' + (err as Error).message);
     log('Launch failed: ' + (err as Error).message, 'err');
     return;
   }
   if (entry < 0) {
+    const why = await readLastError();
     setState('fault');
-    log('Launch failed: ' + await readLastError(), 'err');
+    failLoad('Launch failed: ' + why);
+    log('Launch failed: ' + why, 'err');
     return;
   }
   log('Launched ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
   log('Decrypted and booted the title\'s own executable; there is no Horizon service support for retail games yet, so expect it to run until the first missing service rather than reach a menu.', 'dim');
   setState('loaded');
+  loadPhase('starting the process');
   showScreen();
+  awaitFirstFrame();
   await updatePc();
   await run();
 }
