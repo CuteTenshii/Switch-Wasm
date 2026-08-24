@@ -4436,6 +4436,70 @@ fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
 }
 
 #[test]
+fn a_timed_out_condvar_wait_comes_back_holding_its_mutex() {
+    // `svcWaitProcessWideKeyAtomic` releases the mutex on the way in and the
+    // kernel re-acquires it on the way out — for a timeout exactly as for a
+    // signal. Waking the waiter without doing that leaves it running outside a
+    // lock it believes it holds, and `nn::os::UnlockMutex` checks: it compares
+    // the word against its own thread tag and aborts on the mismatch. The Mii
+    // editor's boot ended there, one millisecond after a 1 ms
+    // `TimedWaitConditionVariable`.
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.mem.map_zero(0x4000, 0x2000).unwrap();
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap();
+
+    // main: start the child, then spin long enough for the wait to expire —
+    // timed waits are checked on the scheduler's slice boundary, so time only
+    // passes while some other thread is running.
+    let main = [
+        0xd284_0001u32, // mov x1, #0x2000
+        0xd280_0002,    // mov x2, #0
+        0xd28a_0003,    // mov x3, #0x5000
+        0x5280_0764,    // mov w4, #0x3b
+        0x1280_0005,    // mov w5, #-1
+        0xd400_0101,    // svc #8      (CreateThread -> x1 = the child's handle)
+        0xd28c_0109,    // mov x9, #0x6008
+        0xb900_0121,    // str w1, [x9]  (record it for the assertion)
+        0xaa01_03e0,    // mov x0, x1
+        0xd400_0121,    // svc #9      (StartThread)
+        0xd293_880a,    // mov x10, #40000
+        0xf100_054a,    // subs x10, x10, #1
+        0xb5ff_ffea,    // cbnz x10, -4
+        0xd400_00e1,    // svc #7
+    ];
+    // child: wait on a condition variable nobody ever signals, with a short
+    // timeout. What the mutex word held before does not matter — the wait
+    // releases it on the way in — so the only question the test asks is what
+    // it holds on the way out.
+    let child = [
+        0xd28c_2009u32, // mov x9, #0x6100   (the mutex)
+        0xaa09_03e0,    // mov x0, x9
+        0xd28c_4001,    // mov x1, #0x6200   (the condition variable)
+        0xd280_0042,    // mov x2, #2        (self tag; the stub reads the real one)
+        0xd282_7103,    // mov x3, #5000     (nanoseconds)
+        0xd400_0381,    // svc #0x1c         (WaitProcessWideKeyAtomic)
+        0xb940_0122,    // ldr w2, [x9]
+        0xd28c_0009,    // mov x9, #0x6000
+        0xb900_0122,    // str w2, [x9]
+        0xd400_0141,    // svc #0xa
+    ];
+    let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
+    cpu.mem.map_zero(0x1000, 0x100).unwrap();
+    cpu.mem.map(0x1000, &bytes(&main)).unwrap();
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &bytes(&child)).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(500_000).unwrap();
+
+    let observed = cpu.mem.read_u32(0x6000).unwrap();
+    let child_handle = cpu.mem.read_u32(0x6008).unwrap();
+    assert_ne!(child_handle, 0, "the child was created");
+    assert_ne!(observed, 0, "the wait came back to a mutex owned by nobody");
+    assert_eq!(observed & !0x4000_0000, child_handle, "and it is the waiter's own");
+}
+
+#[test]
 fn thirty_two_bit_writes_clear_the_upper_half() {
     // Every write to a W register zeroes bits 63:32. SBFM's sign extension was
     // filling them instead, so `asr w0, w0, #31` produced

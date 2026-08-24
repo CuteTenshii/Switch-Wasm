@@ -1328,16 +1328,50 @@ impl Cpu {
     /// whole of it.
     pub(super) fn expire_timed_waits(&mut self) {
         let now = self.cycles;
-        for thread in &mut self.threads {
-            let deadline = match thread.state {
+        for index in 0..self.threads.len() {
+            let state = self.threads[index].state;
+            let deadline = match state {
                 ThreadState::WaitKey { deadline, .. }
                 | ThreadState::WaitAddress { deadline, .. } => deadline,
                 ThreadState::Sleeping { deadline } => Some(deadline),
                 _ => None,
             };
-            if deadline.is_some_and(|at| now >= at) {
-                thread.state = ThreadState::Runnable;
+            if !deadline.is_some_and(|at| now >= at) {
+                continue;
             }
+            match state {
+                ThreadState::WaitKey { mutex, .. } => self.wake_condvar_waiter(index, mutex),
+                _ => self.threads[index].state = ThreadState::Runnable,
+            }
+        }
+    }
+
+    /// Take a condition variable's waiter off the queue **holding the mutex it
+    /// went to sleep with** — or queued for it, when someone else has it.
+    ///
+    /// `svcWaitProcessWideKeyAtomic` releases the mutex on the way in and the
+    /// kernel re-acquires it on the way out. That is true of every way the
+    /// wait can end, a timeout included, and it is the whole reason a
+    /// `while (!predicate) wait()` loop is safe to write: the predicate is
+    /// re-read under the same lock it was first read under.
+    ///
+    /// Waking one without it leaves the thread running outside a lock it
+    /// believes it holds, and its next unlock releases a mutex owned by
+    /// nobody. `nn::os::UnlockMutex` checks: it compares the word against its
+    /// own thread tag and aborts on a mismatch, which is where the Mii editor
+    /// ended its boot — one millisecond after a 1 ms `TimedWaitConditionVariable`
+    /// that [`Cpu::expire_timed_waits`] woke and left empty-handed.
+    fn wake_condvar_waiter(&mut self, index: usize, mutex: u32) {
+        let handle = self.threads[index].handle as u32;
+        let owner = self.mem.read_u32(mutex).unwrap_or(0);
+        if owner == 0 {
+            let _ = self.mem.write_u32(mutex, handle);
+            self.threads[index].state = ThreadState::Runnable;
+        } else {
+            // Someone holds it: queue up, and mark the word so the owner
+            // arbitrates its unlock instead of just clearing it.
+            let _ = self.mem.write_u32(mutex, owner | MUTEX_HAS_LISTENERS);
+            self.threads[index].state = ThreadState::WaitMutex(mutex);
         }
     }
 
@@ -1355,17 +1389,7 @@ impl Cpu {
                 if waiting != key {
                     continue;
                 }
-                let handle = self.threads[i].handle as u32;
-                let owner = self.mem.read_u32(mutex).unwrap_or(0);
-                if owner == 0 {
-                    let _ = self.mem.write_u32(mutex, handle);
-                    self.threads[i].state = ThreadState::Runnable;
-                } else {
-                    // Someone holds it: queue up, and mark the word so the
-                    // owner arbitrates its unlock instead of just clearing it.
-                    let _ = self.mem.write_u32(mutex, owner | MUTEX_HAS_LISTENERS);
-                    self.threads[i].state = ThreadState::WaitMutex(mutex);
-                }
+                self.wake_condvar_waiter(i, mutex);
                 woken += 1;
             }
         }
@@ -1543,14 +1567,18 @@ impl Cpu {
                 return;
             }
         }
-        for thread in &mut self.threads {
-            if matches!(
-                thread.state,
-                ThreadState::WaitMutex(_)
-                    | ThreadState::WaitKey { .. }
-                    | ThreadState::WaitAddress { .. }
-            ) {
-                thread.state = ThreadState::Runnable;
+        // Nothing has a deadline either, so wake everything rather than
+        // hang. A spurious wake degrades to the old spin for a thread parked
+        // in `svcArbitrateLock` — it re-reads the word and asks again — but a
+        // condition variable's waiter has no such loop to fall back on and
+        // gets the handover a signal would have given it.
+        for index in 0..self.threads.len() {
+            match self.threads[index].state {
+                ThreadState::WaitKey { mutex, .. } => self.wake_condvar_waiter(index, mutex),
+                ThreadState::WaitMutex(_) | ThreadState::WaitAddress { .. } => {
+                    self.threads[index].state = ThreadState::Runnable;
+                }
+                _ => {}
             }
         }
         self.switch_to_next_runnable();
@@ -2714,16 +2742,15 @@ impl Cpu {
     /// "is this process idle because a worker it parked was never woken".
     pub fn wake_all_blocked(&mut self) -> usize {
         let mut woken = 0;
-        for thread in &mut self.threads {
-            if matches!(
-                thread.state,
-                ThreadState::WaitMutex(_)
-                    | ThreadState::WaitKey { .. }
-                    | ThreadState::WaitAddress { .. }
-            ) {
-                thread.state = ThreadState::Runnable;
-                woken += 1;
+        for index in 0..self.threads.len() {
+            match self.threads[index].state {
+                ThreadState::WaitKey { mutex, .. } => self.wake_condvar_waiter(index, mutex),
+                ThreadState::WaitMutex(_) | ThreadState::WaitAddress { .. } => {
+                    self.threads[index].state = ThreadState::Runnable;
+                }
+                _ => continue,
             }
+            woken += 1;
         }
         woken
     }
