@@ -4174,11 +4174,37 @@ impl Cpu {
                 // touch-screen configuration, vibration style), each carrying
                 // a small argument and expecting nothing back. None of it
                 // changes what the shared memory here publishes.
-                Some(1) | Some(11) | Some(21) | Some(31) | Some(66) | Some(67) | Some(103)
-                | Some(104) | Some(107) | Some(109) | Some(122..=125) | Some(128)
+                Some(1) | Some(11) | Some(21) | Some(31) | Some(66) | Some(67) | Some(91)
+                | Some(103) | Some(104) | Some(107) | Some(109) | Some(122..=125) | Some(128)
                 | Some(1000..=1004) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // SetGestureOutputRanges(u32 width, u32 height, u64 aruid),
+                // added in 18.0.0 and named but not described on switchbrew.
+                // The shape is the request Tomodachi Life sends, which is
+                // unambiguous: `00 05 00 00 | d0 02 00 00 | 01 00 …` — 1280,
+                // 720, and the aruid `am`'s window controller handed out.
+                //
+                // It is the coordinate space the gesture engine reports in.
+                // A title sets it to the resolution it is drawing at so that a
+                // swipe comes back in the same units as its own geometry
+                // rather than in the panel's — which is why what arrives here
+                // is exactly [`DISPLAY_SIZE`], the size `vi` and `am` already
+                // agree on.
+                //
+                // Nothing here synthesises gestures, so there is no engine to
+                // point at a range and accepting is the whole implementation.
+                // Refusing was not free: `nnSdk` answers an unknown command id
+                // with an svcBreak, and this is where the title stopped once
+                // its save data was answered — 454,291,947 steps in, the first
+                // blocker outside `am` in a long while.
+                //
+                // ActivateGesture (91) joins the void setters above for the
+                // same reason. This title does not call it — it sets the range
+                // and never turns the engine on — but the two are one pair in
+                // every SDK that uses either, and the one that is missing when
+                // the other is answered is the one that aborts.
+                Some(92) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // SetSupportedNpadStyleSet(u32 style_set, aruid) and its
                 // readback. A caller that sets a style set and reads back
                 // something else decides the pad it wants does not exist —
@@ -8722,6 +8748,31 @@ mod tests {
         // declares 54 MiB of save and 10 MiB of journal.
         assert!(size >= 56_623_104, "default quota is smaller than a real title's save");
         assert!(journal >= 10_485_760, "default journal is smaller than a real title's");
+    }
+
+    #[test]
+    fn the_gesture_pair_is_accepted_rather_than_refused() {
+        // SetGestureOutputRanges(u32 width, u32 height, u64 aruid) and
+        // ActivateGesture. Both are void, and `nnSdk` answers a refusal with
+        // an svcBreak — so what is being pinned here is that neither reaches
+        // `unimplemented_command`, which replies `cmif`'s unknown-command-id.
+        const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
+        // What the title actually sends: the display size both `vi` and `am`
+        // report, then the aruid `am`'s window controller hands out.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&super::DISPLAY_SIZE.0.to_le_bytes());
+        payload.extend_from_slice(&super::DISPLAY_SIZE.1.to_le_bytes());
+        payload.extend_from_slice(&1u64.to_le_bytes());
+        assert_eq!(payload[..4], [0x00, 0x05, 0x00, 0x00], "1280, as the request carries it");
+
+        for command in [92u32, 91] {
+            let mut cpu = request(false, command, &payload);
+            cpu.register_service_handle(9, "hid");
+            cpu.hid_request(TLS, 9, Some(command)).unwrap();
+            let result = cpu.mem.read_u32(TLS + 0x18).unwrap();
+            assert_ne!(result, UNKNOWN_COMMAND_ID, "command {command} was refused");
+            assert_eq!(result, 0, "command {command}");
+        }
     }
 
     /// Drive one `aoc:u` command on a session opened under that service.
