@@ -6965,9 +6965,11 @@ impl Cpu {
         const NAME_LEN: usize = 0x100;
         const ACTIVE_DEVICE: &[u8] = b"AudioTvOutput";
         match cmd_id {
-            // ListAudioDeviceName (and its Auto form) -> the names, one
-            // 0x100-byte slot each, plus how many were written.
-            Some(0) | Some(6) => {
+            // ListAudioDeviceName (its Auto form, and the output-only list
+            // that replaced it) -> the names, one 0x100-byte slot each, plus
+            // how many were written. Every device here is an output, so the
+            // three answers are the same three names.
+            Some(0) | Some(6) | Some(14) => {
                 let names: [&[u8]; 3] = [
                     ACTIVE_DEVICE,
                     b"AudioStereoJackOutput",
@@ -7020,15 +7022,16 @@ impl Cpu {
     }
 
     /// `IAudioRenderer`. `RequestUpdateAudioRenderer` fills in the exact
-    /// shape `audrvUpdate` expects (`AudioRendererUpdateDataHeader` + one
-    /// `AudioRendererMemPoolInfoOut` per mempool + one
-    /// `AudioRendererVoiceInfoOut` per voice + one `AudioRendererSinkInfoOut`
-    /// per sink + the performance/behavior tails), all zeroed — no mempool
-    /// ever needs attaching, no voice ever played anything, so the all-zero
-    /// answer is a truthful "did nothing" rather than a guess. Getting the
-    /// `_sz` fields right matters: `audrvUpdate` rejects a reply whose sizes
-    /// do not match what it computed from the same voice/sink/effect counts,
-    /// and it runs every frame the app is alive, not just at startup.
+    /// shape the caller expects — an `AudioRendererUpdateDataHeader` and then,
+    /// in this order, one status per mempool, per voice, per effect and per
+    /// sink, the performance and behaviour tails, and the renderer info — all
+    /// zeroed, since no mempool ever needs attaching and no voice ever played
+    /// anything, so the all-zero answer is a truthful "did nothing" rather
+    /// than a guess. Getting the `_sz` fields right matters: both `audrvUpdate`
+    /// and `nnSdk` walk the reply section by section against the sizes they
+    /// computed from the same voice/sink/effect counts and abort on the first
+    /// that disagrees, and this runs every frame the app is alive rather than
+    /// just at startup.
     pub(super) fn audren_renderer_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -7062,26 +7065,46 @@ impl Cpu {
             effect_count: 0,
         });
         let mempool_count = params.effect_count + 4 * params.voice_count;
+        let revision = audren_revision(params.revision);
         const HEADER_SZ: u32 = 64;
         const MEMPOOL_OUT_SZ: u32 = 16;
         const VOICE_OUT_SZ: u32 = 16;
         const SINK_OUT_SZ: u32 = 32;
         const PERFMGR_OUT_SZ: u32 = 16;
         const BEHAVIOR_OUT_SZ: u32 = 176;
+        /// `RendererInfoOut`: an elapsed-frame counter and its reserved half,
+        /// the last section of the reply. Revision 5 added it.
+        const RENDER_INFO_OUT_SZ: u32 = 16;
+        /// `EffectOutStatus`, and the wider revision-9 form that carries an
+        /// aux-buffer/limiter report alongside the state byte.
+        const EFFECT_OUT_SZ: u32 = 16;
+        const EFFECT_OUT_V2_SZ: u32 = 0x90;
         let mempools_sz = mempool_count * MEMPOOL_OUT_SZ;
         let voices_sz = params.voice_count * VOICE_OUT_SZ;
+        let effects_sz =
+            params.effect_count * if revision >= 9 { EFFECT_OUT_V2_SZ } else { EFFECT_OUT_SZ };
         let sinks_sz = params.sink_count * SINK_OUT_SZ;
-        let total_sz = HEADER_SZ + mempools_sz + voices_sz + sinks_sz + PERFMGR_OUT_SZ + BEHAVIOR_OUT_SZ;
+        let render_info_sz = if revision >= 5 { RENDER_INFO_OUT_SZ } else { 0 };
+        let total_sz = HEADER_SZ
+            + mempools_sz
+            + voices_sz
+            + effects_sz
+            + sinks_sz
+            + PERFMGR_OUT_SZ
+            + BEHAVIOR_OUT_SZ
+            + render_info_sz;
 
         let mut reply = vec![0u8; total_sz as usize];
         reply[0..4].copy_from_slice(&params.revision.to_le_bytes());
         reply[4..8].copy_from_slice(&BEHAVIOR_OUT_SZ.to_le_bytes());
         reply[8..12].copy_from_slice(&mempools_sz.to_le_bytes());
         reply[12..16].copy_from_slice(&voices_sz.to_le_bytes());
-        // channels_sz, effects_sz, mixes_sz stay 0: not part of this revision's
-        // output layout (libnx's own size helpers don't count them either).
+        reply[20..24].copy_from_slice(&effects_sz.to_le_bytes());
+        // channels_sz and mixes_sz stay 0: the renderer reports nothing back
+        // for either, and neither is a section of the reply.
         reply[28..32].copy_from_slice(&sinks_sz.to_le_bytes());
         reply[32..36].copy_from_slice(&PERFMGR_OUT_SZ.to_le_bytes());
+        reply[40..44].copy_from_slice(&render_info_sz.to_le_bytes());
         reply[60..64].copy_from_slice(&total_sz.to_le_bytes());
         // Every MemPoolInfoOut/VoiceInfoOut/SinkInfoOut/PerformanceBufferInfoOut
         // entry after the header is left zeroed: `AudioRendererMemPoolState_Invalid`
@@ -7143,6 +7166,19 @@ impl Cpu {
             .map(&mut read_descriptor)
             .collect();
         (send, recv)
+    }
+}
+
+/// The version number in an `AudioRendererParameter`'s revision magic —
+/// `REV1`, `REV2`, … — or 0 for anything that is not one. The count runs past
+/// nine into the next ASCII characters (`REV:` is 10), which is why this
+/// subtracts rather than parsing a digit.
+fn audren_revision(magic: u32) -> u32 {
+    let [r, e, v, version] = magic.to_le_bytes();
+    if [r, e, v] == *b"REV" {
+        u32::from(version.wrapping_sub(b'0'))
+    } else {
+        0
     }
 }
 

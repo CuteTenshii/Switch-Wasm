@@ -4755,6 +4755,63 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
 }
 
 #[test]
+fn audren_update_reply_has_a_section_for_every_count_the_renderer_was_opened_with() {
+    // `RequestUpdateAudioRenderer` runs every frame, and both `audrvUpdate`
+    // and `nnSdk` walk its reply section by section against sizes they
+    // computed themselves — a section left out is not ignored, it desynchronises
+    // the walk and aborts. Tomodachi Life opens a revision-15 renderer with 17
+    // effects; the reply had no effects section and no renderer info, and its
+    // audio setup ended the boot on an `nn::audio` result.
+    const AUDREN: u64 = 0xB000;
+    const OUT: u32 = 0x9000;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(AUDREN, "audren:u");
+    let tls = cpu.tls_base();
+
+    // `AudioRendererParameter`: voices at +16, sinks at +20, effects at +24
+    // and the revision magic at +48.
+    let renderer_with = |cpu: &mut Cpu, revision: &[u8; 4]| -> u64 {
+        let mut params = vec![0u8; 52];
+        params[16..20].copy_from_slice(&2u32.to_le_bytes());
+        params[20..24].copy_from_slice(&1u32.to_le_bytes());
+        params[24..28].copy_from_slice(&3u32.to_le_bytes());
+        params[48..52].copy_from_slice(revision);
+        ipc_request_plain(cpu, AUDREN, 0, &params);
+        u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap())
+    };
+    let section = |cpu: &Cpu, at: u32| cpu.mem.read_u32(OUT + at).unwrap();
+
+    let renderer = renderer_with(&mut cpu, b"REV9");
+    assert_ne!(renderer, 0, "no IAudioRenderer came back");
+    ipc_request_plain_with_buffer(&mut cpu, renderer, 4, OUT, 0x1000, true, &[]);
+
+    // One `MemPoolInfoOut` per mempool (effects + four per voice), one
+    // `VoiceInfoOut` per voice, one revision-9 `EffectOutStatus` per effect,
+    // one `SinkInfoOut` per sink, then the performance, behaviour and
+    // renderer-info tails.
+    assert_eq!(section(&cpu, 0x08), (3 + 4 * 2) * 16, "mempools");
+    assert_eq!(section(&cpu, 0x0c), 2 * 16, "voices");
+    assert_eq!(section(&cpu, 0x14), 3 * 0x90, "effects");
+    assert_eq!(section(&cpu, 0x1c), 32, "sinks");
+    assert_eq!(section(&cpu, 0x20), 16, "performance");
+    assert_eq!(section(&cpu, 0x04), 176, "behaviour");
+    assert_eq!(section(&cpu, 0x28), 16, "renderer info");
+    let total = 64 + 176 + 32 + 3 * 0x90 + 32 + 16 + 176 + 16;
+    assert_eq!(section(&cpu, 0x3c), total, "total size");
+
+    // Before revision 5 there is no renderer info at all, and an effect's
+    // status is the narrow form.
+    let renderer = renderer_with(&mut cpu, b"REV4");
+    ipc_request_plain_with_buffer(&mut cpu, renderer, 4, OUT, 0x1000, true, &[]);
+    assert_eq!(section(&cpu, 0x14), 3 * 16, "revision-4 effects");
+    assert_eq!(section(&cpu, 0x28), 0, "revision-4 renderer info");
+    assert_eq!(section(&cpu, 0x3c), 64 + 176 + 32 + 3 * 16 + 32 + 16 + 176, "revision-4 total");
+}
+
+#[test]
 fn audout_reads_the_channel_count_as_sixteen_bits() {
     // `OpenAudioOut` takes the channel count as a 16-bit field, and the two
     // bytes above it are padding the caller never writes. Reading the whole
