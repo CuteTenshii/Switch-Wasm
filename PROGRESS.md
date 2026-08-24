@@ -1634,10 +1634,17 @@ loop itself, on both sides.
 
 ## Frontend
 
-- **PFS0 offset rebasing**: some repacked NSPs (e.g. ROMSLAB) store PFS0 file
-  offsets relative to the end of the string table rather than the file start,
-  so extraction returned the wrong bytes ("bad magic"). The parser now detects
-  an entry pointing inside the header and rebases by the payload start.
+- **PFS0 offset rebasing**: PFS0 file offsets are counted from the end of the
+  string table, not from the start of the image, so reading them as absolute
+  returns the wrong bytes ("bad magic"). The parser first detected this by
+  looking for an entry pointing inside the header — which only works when some
+  file sits at offset 0. A repack that pads its payload area so the first file
+  lands on an alignment boundary has no such entry: Just Dance 2022's 7 GiB
+  `.nsp` starts its `.tik` at 0x7e30 (0x8000 once rebased), so every NCA in it
+  was read a header-length (0x1d0) short and reported `bad magic 0xa279b053`.
+  The base is now chosen from the extents instead — the format's own reading
+  unless rebasing would run a file past the end of the image and leaving the
+  offsets alone would not.
 - **CDN NCA headers are encrypted**: `Nca::parse` fails with "bad magic"
   because the NCA3 magic at 0x200 is scrambled until the header is decrypted
   with the title key. The frontend now says "NCA header is encrypted (CDN) —

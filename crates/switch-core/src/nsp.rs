@@ -8,15 +8,15 @@
 //! 0x04    4     number of files
 //! 0x08    4     size of the string table
 //! 0x0C    4     reserved (must be 0)
-//! 0x10    -     FileEntry[file_count]   (16 bytes each)
+//! 0x10    -     FileEntry[file_count]   (24 bytes each)
 //! -       -     string table
 //! -       -     file data
 //! ```
 //!
-//! Each `FileEntry` is 16 bytes: `u64 offset`, `u64 size`, `u32 name_offset`,
-//! `u32 padding`. `offset`/`size` reference the file payload, `name_offset`
-//! references a NUL-terminated string in the string table. All offsets are
-//! relative to the start of the PFS0 header.
+//! Each `FileEntry` is 24 bytes: `u64 offset`, `u64 size`, `u32 name_offset`,
+//! `u32 padding`. `offset`/`size` reference the file payload and are counted
+//! from the end of the string table, where the payload area begins;
+//! `name_offset` references a NUL-terminated string in the string table.
 
 use crate::source::{ByteSource, SliceSource};
 use crate::Error;
@@ -27,7 +27,9 @@ pub const FILE_ENTRY_SIZE: usize = 24;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pfs0File {
-    /// Byte offset of the file payload, relative to the PFS0 header start.
+    /// Byte offset of the file payload from the start of the image — the
+    /// entry's own offset already resolved against the payload area, so it
+    /// can be read without knowing how long the header was.
     pub offset: u64,
     /// Payload size in bytes.
     pub size: u64,
@@ -104,21 +106,14 @@ impl Pfs0 {
         // says, and reserving for a corrupt one is an allocation the target
         // aborts on rather than an error anyone can read.
         let mut files = Vec::new();
-        // Most PFS0 images store file offsets relative to the file start, but
-        // some repack tools emit offsets relative to the end of the header +
-        // string table (the payload area). No file can legitimately overlap
-        // the header, so if an entry points inside it, rebase every offset by
-        // the payload start.
+        // The payload area starts where the header — entry table and string
+        // table — ends, and that is what PFS0 entry offsets are counted from.
         let payload_base = strings_end;
-        let mut rebase = false;
         for i in 0..file_count as usize {
             let entry = HEADER_SIZE + i * FILE_ENTRY_SIZE;
             let offset = read_u64(&header, entry);
             let size = read_u64(&header, entry + 8);
             let name_off = read_u32(&header, entry + 16) as usize;
-            if offset < payload_base {
-                rebase = true;
-            }
             // The name has to be NUL-terminated inside the string table —
             // `header` ends where the table does, so a name offset pointing
             // past it fails here instead of running into the payload.
@@ -134,10 +129,34 @@ impl Pfs0 {
                 name,
             });
         }
-        if rebase {
-            for f in files.iter_mut() {
-                f.offset = f.offset.saturating_add(payload_base);
-            }
+        // Some repack tools emit offsets already counted from the start of
+        // the image instead. Both readings are tried, the format's own
+        // first, and the entries are taken as absolute only when rebasing
+        // them would run a file past the end of the image while leaving them
+        // alone would not.
+        //
+        // This is decided from the extents rather than from "does any entry
+        // point inside the header", which is what it used to ask. A repack
+        // that pads its payload area — aligning the first file to 0x8000,
+        // say — has no entry at offset 0 to give the relative reading away,
+        // so every offset was left short by the header length and every NCA
+        // in it was read from the wrong place. A 7 GiB Just Dance 2022 `.nsp`
+        // whose first entry starts at 0x7e30 (0x8000 once rebased) is one.
+        let relative_fits = extents_fit(&files, payload_base, src.len());
+        // An absolute offset cannot point into the header its own entry
+        // lives in, so a reading that puts one there is not one.
+        let past_the_header = files.iter().all(|f| f.offset >= payload_base);
+        let absolute_fits = past_the_header && extents_fit(&files, 0, src.len());
+        // A container neither reading fits is malformed, and rebasing it
+        // anyway is what reports the out-of-bounds below against the format's
+        // own reading rather than against the fallback.
+        let base = if absolute_fits && !relative_fits {
+            0
+        } else {
+            payload_base
+        };
+        for f in files.iter_mut() {
+            f.offset = f.offset.saturating_add(base);
         }
         for (i, f) in files.iter().enumerate() {
             let end = f
@@ -191,6 +210,20 @@ impl Pfs0 {
     }
 }
 
+/// Whether every file still lies inside an `image_size`-byte image once its
+/// entry offset is counted from `base`.
+fn extents_fit(files: &[Pfs0File], base: u64, image_size: u64) -> bool {
+    files.iter().all(|f| {
+        let Some(start) = f.offset.checked_add(base) else {
+            return false;
+        };
+        let Some(end) = start.checked_add(f.size) else {
+            return false;
+        };
+        end <= image_size
+    })
+}
+
 pub(crate) fn read_u32(data: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([
         data[at],
@@ -227,6 +260,9 @@ pub(crate) fn read_cstr(data: &[u8], at: usize) -> Option<&str> {
 mod tests {
     use super::*;
 
+    /// Entry offsets here are written from the start of the image, not from
+    /// the payload area — so every test built on this one is also what keeps
+    /// the absolute-offset fallback honest.
     fn build_pfs0(files: &[(&str, &[u8])]) -> Vec<u8> {
         // Layout: header (0x10) + entries + string table, then payloads.
         let file_count = files.len();
@@ -319,10 +355,9 @@ mod tests {
 
     #[test]
     fn rebases_offsets_relative_to_payload() {
-        // Some repack tools emit PFS0 entries whose offsets are relative to
-        // the end of the string table (the payload area) instead of the file
-        // start. Build one: entries claim offset 0/4, but the real payloads
-        // live after the header + string table.
+        // The ordinary case, and what the format says: an entry counts from
+        // the payload area, so the one claiming offset 0 means the first byte
+        // after the header + string table, not the first byte of the image.
         let mut image = Vec::new();
         image.extend_from_slice(&PFS0_MAGIC.to_le_bytes());
         image.extend_from_slice(&1u32.to_le_bytes()); // file count
@@ -338,6 +373,34 @@ mod tests {
         let pfs0 = Pfs0::parse(&image).unwrap();
         assert_eq!(pfs0.files.len(), 1);
         assert_eq!(pfs0.files[0].offset, payload_base as u64);
+        assert_eq!(&image[pfs0.files[0].offset as usize..][..4], b"DATA");
+    }
+
+    #[test]
+    fn a_padded_payload_area_is_still_read_relative_to_the_header() {
+        // The shape a retail repack has: relative offsets, but the payload
+        // area padded so the first file lands on an alignment boundary. No
+        // entry sits at offset 0, which is what the old "does any entry point
+        // inside the header" test needed to notice the offsets were relative
+        // at all — so every file in one was read a header-length short.
+        const PAYLOAD_AT: usize = 0x80;
+        let mut image = Vec::new();
+        image.extend_from_slice(&PFS0_MAGIC.to_le_bytes());
+        image.extend_from_slice(&1u32.to_le_bytes()); // file count
+        image.extend_from_slice(&4u32.to_le_bytes()); // string table size
+        image.extend_from_slice(&0u32.to_le_bytes());
+        let payload_base = (0x10 + FILE_ENTRY_SIZE + 4) as u64;
+        image.extend_from_slice(&(PAYLOAD_AT as u64 - payload_base).to_le_bytes());
+        image.extend_from_slice(&4u64.to_le_bytes()); // size
+        image.extend_from_slice(&0u32.to_le_bytes()); // name offset
+        image.extend_from_slice(&0u32.to_le_bytes()); // padding
+        image.extend_from_slice(b"x\0\0\0");
+        assert_eq!(image.len() as u64, payload_base);
+        image.resize(PAYLOAD_AT, 0);
+        image.extend_from_slice(b"DATA");
+
+        let pfs0 = Pfs0::parse(&image).unwrap();
+        assert_eq!(pfs0.files[0].offset, PAYLOAD_AT as u64);
         assert_eq!(&image[pfs0.files[0].offset as usize..][..4], b"DATA");
     }
 
@@ -359,7 +422,9 @@ mod tests {
         }
     }
 
-    fn huge_container(entry_offset: u64, entry_size: u64, len: u64) -> HugeSource {
+    /// The container, and where its payload area starts — which is what the
+    /// entry offset in it is counted from.
+    fn huge_container(entry_offset: u64, entry_size: u64, len: u64) -> (HugeSource, u64) {
         let mut header = Vec::new();
         header.extend_from_slice(&PFS0_MAGIC.to_le_bytes());
         header.extend_from_slice(&1u32.to_le_bytes()); // file count
@@ -370,7 +435,8 @@ mod tests {
         header.extend_from_slice(&0u32.to_le_bytes()); // name offset
         header.extend_from_slice(&0u32.to_le_bytes()); // padding
         header.extend_from_slice(b"main.nca\0");
-        HugeSource { header, len }
+        let payload_base = header.len() as u64;
+        (HugeSource { header, len }, payload_base)
     }
 
     #[test]
@@ -380,11 +446,11 @@ mod tests {
         // every read lands on the wrong bytes; the bounds check below passes
         // for the same reason, so nothing catches it.
         const PAST_4GIB: u64 = 0x1_0000_1000;
-        let src = huge_container(PAST_4GIB, 0x2000, 5 << 30);
+        let (src, payload_base) = huge_container(PAST_4GIB, 0x2000, 5 << 30);
         let pfs0 = Pfs0::read_from(&src).unwrap();
         assert_eq!(pfs0.image_size, 5 << 30);
         assert_eq!(pfs0.files[0].name, "main.nca");
-        assert_eq!(pfs0.files[0].offset, PAST_4GIB);
+        assert_eq!(pfs0.files[0].offset, PAST_4GIB + payload_base);
         assert_eq!(pfs0.files[0].size, 0x2000);
     }
 
@@ -394,7 +460,7 @@ mod tests {
         // truncating version of this check compared wrapped values and let it
         // through.
         let len = 5u64 << 30;
-        let src = huge_container(len - 0x1000, 0x1001, len);
+        let (src, _) = huge_container(len - 0x1000, 0x1001, len);
         assert!(matches!(
             Pfs0::read_from(&src),
             Err(Error::FileOutOfBounds { .. })
