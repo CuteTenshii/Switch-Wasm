@@ -72,6 +72,160 @@ impl Layout {
     }
 }
 
+/// The most samples per pixel any Maxwell `MsaaMode` names (`4x4`).
+pub const MAX_SAMPLES: usize = 16;
+
+/// How a multisampled surface lays its samples out.
+///
+/// Maxwell stores more than one sample per pixel by expanding the surface
+/// *spatially*: a pixel owns a `samples_x` by `samples_y` tile of texels, so a
+/// 4x-multisampled 1280x720 target is a 2560x1440 surface in memory. The
+/// render- and depth-target registers describe that expanded surface, while
+/// the scissor, the viewport and the clear rectangle stay in pixels — which is
+/// why every write into a multisampled target goes through here to turn a
+/// pixel and a sample number into a texel.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SampleGrid {
+    pub samples_x: u32,
+    pub samples_y: u32,
+    /// Where each sample sits inside its pixel, on `[0, 1)` per axis.
+    positions: [[f32; 2]; MAX_SAMPLES],
+    /// Which texel of the pixel's tile stores each sample.
+    slots: [(u32, u32); MAX_SAMPLES],
+}
+
+impl Default for SampleGrid {
+    fn default() -> SampleGrid {
+        SampleGrid::single()
+    }
+}
+
+impl SampleGrid {
+    /// One sample per pixel, at the pixel centre: a surface whose texels and
+    /// pixels are the same thing.
+    pub fn single() -> SampleGrid {
+        SampleGrid {
+            samples_x: 1,
+            samples_y: 1,
+            positions: [[0.5, 0.5]; MAX_SAMPLES],
+            slots: [(0, 0); MAX_SAMPLES],
+        }
+    }
+
+    /// Build the grid a `MultisampleMode` and a `MultisampleSampleLocations`
+    /// table describe. `locations` holds one packed byte per sample, as the
+    /// four location registers store them.
+    pub fn new(mode: u32, locations: &[u8; MAX_SAMPLES]) -> Result<SampleGrid> {
+        let (samples_x, samples_y) = msaa_mode_grid(mode)?;
+        let count = (samples_x * samples_y) as usize;
+        // A location table nothing has written would put every sample at the
+        // same spot. Fall back to the centre of each sample's own texel, which
+        // is exactly what `sample_slots` then maps back to raster order.
+        let programmed = locations[..count].iter().any(|&b| b != 0);
+        let mut positions = [[0.5f32; 2]; MAX_SAMPLES];
+        for (i, position) in positions.iter_mut().enumerate().take(count) {
+            *position = if programmed {
+                // `x | (y << 4)`, each in sixteenths of a pixel — deko3d's
+                // `encodeSampleLocation`.
+                [
+                    (locations[i] & 0xF) as f32 / 16.0,
+                    (locations[i] >> 4) as f32 / 16.0,
+                ]
+            } else {
+                [
+                    ((i as u32 % samples_x) as f32 + 0.5) / samples_x as f32,
+                    ((i as u32 / samples_x) as f32 + 0.5) / samples_y as f32,
+                ]
+            };
+        }
+        let slots = sample_slots(&positions, count, samples_x, samples_y);
+        Ok(SampleGrid { samples_x, samples_y, positions, slots })
+    }
+
+    pub fn count(&self) -> u32 {
+        self.samples_x * self.samples_y
+    }
+
+    /// Whether each pixel is a single texel, so a caller can keep its
+    /// one-sample fast path instead of walking a grid of one.
+    pub fn is_single(&self) -> bool {
+        self.samples_x == 1 && self.samples_y == 1
+    }
+
+    /// Where `sample` sits inside its pixel — the point the coverage test and
+    /// the depth interpolation use.
+    pub fn position(&self, sample: u32) -> [f32; 2] {
+        self.positions[sample as usize]
+    }
+
+    /// Texel coordinates of `sample` of the pixel at `(x, y)`.
+    pub fn texel(&self, x: u32, y: u32, sample: u32) -> (u32, u32) {
+        let (offset_x, offset_y) = self.slots[sample as usize];
+        (x * self.samples_x + offset_x, y * self.samples_y + offset_y)
+    }
+
+    /// The pixel extent of a surface `width` by `height` *texels* — what the
+    /// target registers hold, converted to what the scissor talks about.
+    pub fn pixels(&self, width: u32, height: u32) -> (u32, u32) {
+        (width / self.samples_x, height / self.samples_y)
+    }
+}
+
+/// The sample tile a `MsaaMode` describes, as `(x, y)`.
+///
+/// Values and their spellings come from deko3d's `MsaaMode` enum
+/// (`texture_image_control_block.h`) paired with the `m_samplesX`/`m_samplesY`
+/// it derives from each (`dk_image.cpp`). The virtual-coverage modes store
+/// their colour samples on the same grid as the plain mode they extend; only
+/// the coverage bits they add on top differ, and nothing here consumes those.
+fn msaa_mode_grid(mode: u32) -> Result<(u32, u32)> {
+    Ok(match mode {
+        0 => (1, 1),               // 1x1
+        1 | 5 => (2, 1),           // 2x1, 2x1_D3D
+        2 | 8 | 9 => (2, 2),       // 2x2, 2x2_VC4, 2x2_VC12
+        3 | 4 | 10 | 11 => (4, 2), // 4x2, 4x2_D3D, 4x2_VC8, 4x2_VC24
+        6 => (4, 4),               // 4x4
+        other => return Err(Error::Gpu(format!("surface: unknown MsaaMode {:#x}", other))),
+    })
+}
+
+/// Which texel of a pixel's tile holds each sample.
+///
+/// Hardware fixes this mapping per mode and constrains a programmable sample
+/// location to stay inside its own texel — so the texel a sample's location
+/// falls in *is* its slot. Deriving it that way reproduces the tables deko3d
+/// ships for 4x and 8x (`locationsMS4`/`locationsMS8`) without hard-coding one
+/// per mode, and it keeps a guest's custom locations stored where a resolve
+/// that box-filters the tile expects to find them.
+///
+/// Two samples landing in one texel is not a table hardware accepts. If one
+/// turns up anyway, fall back to raster order rather than aliasing two samples
+/// onto the same storage and silently losing one.
+fn sample_slots(
+    positions: &[[f32; 2]; MAX_SAMPLES],
+    count: usize,
+    samples_x: u32,
+    samples_y: u32,
+) -> [(u32, u32); MAX_SAMPLES] {
+    let mut slots = [(0u32, 0u32); MAX_SAMPLES];
+    let mut taken = [false; MAX_SAMPLES];
+    let mut distinct = true;
+    for (i, slot) in slots.iter_mut().enumerate().take(count) {
+        let x = ((positions[i][0] * samples_x as f32) as u32).min(samples_x - 1);
+        let y = ((positions[i][1] * samples_y as f32) as u32).min(samples_y - 1);
+        *slot = (x, y);
+        let flat = (y * samples_x + x) as usize;
+        distinct &= !taken[flat];
+        taken[flat] = true;
+    }
+    if !distinct {
+        for (i, slot) in slots.iter_mut().enumerate().take(count) {
+            *slot = (i as u32 % samples_x, i as u32 / samples_x);
+        }
+    }
+    slots
+}
+
 /// A Maxwell colour render-target format (`ColorSurfaceFormat`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorFormat {
@@ -361,6 +515,76 @@ impl Surface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Pack a `MultisampleSampleLocations` register table the way the four
+    /// registers hold it: one byte per sample, low byte first.
+    fn locations(words: [u32; 4]) -> [u8; MAX_SAMPLES] {
+        let mut out = [0u8; MAX_SAMPLES];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = (words[i / 4] >> (8 * (i % 4))) as u8;
+        }
+        out
+    }
+
+    #[test]
+    fn a_4x_grid_matches_deko3ds_sample_table() {
+        // deko3d's `locationsMS4`, which is what Just Dance 2019 programs.
+        let grid = SampleGrid::new(2, &locations([0xEAA2_6E26; 4])).unwrap();
+        assert_eq!((grid.samples_x, grid.samples_y), (2, 2));
+        assert_eq!(grid.count(), 4);
+        // Each byte is `x | (y << 4)`, in sixteenths of a pixel.
+        assert_eq!(grid.position(0), [6.0 / 16.0, 2.0 / 16.0]);
+        assert_eq!(grid.position(3), [10.0 / 16.0, 14.0 / 16.0]);
+        // Every sample stores in the texel its own position falls in.
+        let slots: Vec<(u32, u32)> = (0..4).map(|s| grid.texel(0, 0, s)).collect();
+        assert_eq!(slots, vec![(0, 0), (1, 0), (0, 1), (1, 1)]);
+    }
+
+    #[test]
+    fn an_8x_grid_gives_every_sample_its_own_texel() {
+        // deko3d's `locationsMS8`. Its samples are not in raster order, which
+        // is the case a hard-coded index-to-texel table would get wrong.
+        let table = locations([0x359D_B759, 0x1FFB_71D3, 0x359D_B759, 0x1FFB_71D3]);
+        let grid = SampleGrid::new(4, &table).unwrap(); // 4x2_D3D
+        assert_eq!((grid.samples_x, grid.samples_y), (4, 2));
+        assert_eq!(grid.texel(0, 0, 0), (2, 0));
+        let mut slots: Vec<(u32, u32)> = (0..grid.count()).map(|s| grid.texel(0, 0, s)).collect();
+        slots.sort();
+        slots.dedup();
+        assert_eq!(slots.len(), 8, "two samples share a texel");
+    }
+
+    #[test]
+    fn an_unwritten_location_table_falls_back_to_raster_order() {
+        let grid = SampleGrid::new(2, &[0u8; MAX_SAMPLES]).unwrap();
+        assert_eq!(grid.position(0), [0.25, 0.25]);
+        assert_eq!(grid.position(3), [0.75, 0.75]);
+        let slots: Vec<(u32, u32)> = (0..4).map(|s| grid.texel(0, 0, s)).collect();
+        assert_eq!(slots, vec![(0, 0), (1, 0), (0, 1), (1, 1)]);
+    }
+
+    #[test]
+    fn a_multisampled_surface_holds_more_texels_than_pixels() {
+        let grid = SampleGrid::new(2, &locations([0xEAA2_6E26; 4])).unwrap();
+        // Just Dance 2019's target: 2560x1440 texels is 1280x720 pixels.
+        assert_eq!(grid.pixels(2560, 1440), (1280, 720));
+        assert_eq!(grid.texel(1279, 719, 3), (2559, 1439));
+    }
+
+    #[test]
+    fn a_single_sample_grid_leaves_coordinates_alone() {
+        let grid = SampleGrid::single();
+        assert!(grid.is_single());
+        assert_eq!(grid.count(), 1);
+        assert_eq!(grid.position(0), [0.5, 0.5]);
+        assert_eq!(grid.pixels(1280, 720), (1280, 720));
+        assert_eq!(grid.texel(7, 9, 0), (7, 9));
+    }
+
+    #[test]
+    fn an_unknown_msaa_mode_is_reported() {
+        assert!(SampleGrid::new(7, &[0u8; MAX_SAMPLES]).is_err());
+    }
 
     #[test]
     fn gob_offsets_cover_the_gob_exactly_once() {

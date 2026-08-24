@@ -5,6 +5,14 @@
 //! `draw_elements` call. Everything it calls is independently testable
 //! against synthetic inputs, which is how each earlier stage validated its
 //! own piece before this stage wired them together.
+//!
+//! Coverage is per *sample* and shading is per *pixel*, which is what makes
+//! this multisampling rather than rendering the whole frame at the sample
+//! grid's resolution — see [`crate::gpu::surface::SampleGrid`] for how a
+//! sample becomes a texel. The sample mask and alpha-to-coverage narrow that
+//! coverage; `MultisampleCoverageToColor` and the target-independent
+//! rasterization `SetMultisampleRasterEnable` turns on are not implemented,
+//! and content that switches either on will draw as though it had not.
 
 use crate::gpu::engine::threed::{
     decode_depth, encode_depth, BlendTarget, CullState, Engine3D, ScissorRect, ShaderStage,
@@ -15,6 +23,7 @@ use crate::gpu::shader::interp::{
     ConstantSource, Env, Invocation, MemoryConstants, MemoryTextures, NoTextures,
 };
 use crate::gpu::shader::{self, Op, Program};
+use crate::gpu::surface::MAX_SAMPLES;
 use crate::{Error, Result};
 
 /// The `DkPrimitive` topologies this rasterizer assembles (deko3d.h,
@@ -147,60 +156,151 @@ pub fn rasterize_triangle_weighted(
     v2: ScreenVertex,
     bounds: Bounds,
 ) -> Vec<(u32, u32, f32, f32, f32)> {
-    fn edge(a: ScreenVertex, b: ScreenVertex, px: f32, py: f32) -> f32 {
-        (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x)
-    }
-    fn is_top_left(a: ScreenVertex, b: ScreenVertex) -> bool {
-        (a.y == b.y && a.x > b.x) || (a.y > b.y)
-    }
-
-    let signed_area = edge(v0, v1, v2.x, v2.y);
-    if signed_area == 0.0 {
-        return Vec::new(); // degenerate triangle: zero area, nothing covered.
-    }
-    // Wind the triangle counter-clockwise before applying the rule, swapping
-    // the weights back on the way out.
-    //
-    // The top-left tie-break only assigns an on-edge pixel to exactly one of
-    // the two triangles sharing that edge when they *walk the edge in
-    // opposite directions* — which is true of consistently-wound geometry
-    // and false when a quad is emitted as one counter-clockwise and one
-    // clockwise triangle, as SDL's does. There both triangles walk the
-    // shared diagonal the same way, so they agree on `is_top_left` and the
-    // pixels exactly on it belong to both or, when the answer is `false`, to
-    // neither. JKSV's save tiles are 128x128 quads whose diagonal runs at
-    // exactly 45 degrees, so pixel centres land on it — and every tile came
-    // out with a one-pixel gap straight through it.
-    let clockwise = signed_area < 0.0;
-    let (v1, v2) = if clockwise { (v2, v1) } else { (v1, v2) };
-    let area = signed_area.abs();
-
-    let inside = |e: f32, top_left: bool| e > 0.0 || (top_left && e == 0.0);
-    let tl01 = is_top_left(v0, v1);
-    let tl12 = is_top_left(v1, v2);
-    let tl20 = is_top_left(v2, v0);
-
-    let min_x = v0.x.min(v1.x).min(v2.x).floor().max(bounds.x0 as f32) as u32;
-    let max_x = (v0.x.max(v1.x).max(v2.x).ceil() as u32).min(bounds.x1);
-    let min_y = v0.y.min(v1.y).min(v2.y).floor().max(bounds.y0 as f32) as u32;
-    let max_y = (v0.y.max(v1.y).max(v2.y).ceil() as u32).min(bounds.y1);
-
+    let Some(tri) = TriangleSetup::new(v0, v1, v2) else {
+        return Vec::new();
+    };
+    let (min_x, max_x, min_y, max_y) = tri.bbox(bounds);
     let mut out = Vec::new();
     for y in min_y..max_y {
         for x in min_x..max_x {
-            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
-            let e01 = edge(v0, v1, px, py);
-            let e12 = edge(v1, v2, px, py);
-            let e20 = edge(v2, v0, px, py);
-            if inside(e01, tl01) && inside(e12, tl12) && inside(e20, tl20) {
-                // w0 is opposite v0 (edge v1-v2), etc. The swap above moved
-                // the caller's v1 and v2, so their weights swap back here.
-                let (w0, w1, w2) = (e12 / area, e20 / area, e01 / area);
-                out.push(if clockwise { (x, y, w0, w2, w1) } else { (x, y, w0, w1, w2) });
+            if let Some([w0, w1, w2]) = tri.coverage(x as f32 + 0.5, y as f32 + 0.5) {
+                out.push((x, y, w0, w1, w2));
             }
         }
     }
     out
+}
+
+/// The samples alpha-to-coverage leaves for a fragment of this alpha.
+///
+/// Hardware dithers the mask so that neighbouring pixels of equal alpha keep
+/// *different* samples. Keeping a fixed prefix instead gives every pixel the
+/// same fraction of its samples, which is the same average coverage — the
+/// difference only shows in the spatial noise of the dither, and a resolve
+/// averages that away.
+fn alpha_coverage(alpha: f32, count: u32) -> u32 {
+    let kept = (alpha.clamp(0.0, 1.0) * count as f32).round() as u32;
+    if kept >= count {
+        u32::MAX
+    } else {
+        (1u32 << kept) - 1
+    }
+}
+
+fn edge(a: ScreenVertex, b: ScreenVertex, px: f32, py: f32) -> f32 {
+    (b.x - a.x) * (py - a.y) - (b.y - a.y) * (px - a.x)
+}
+
+fn is_top_left(a: ScreenVertex, b: ScreenVertex) -> bool {
+    (a.y == b.y && a.x > b.x) || (a.y > b.y)
+}
+
+/// A triangle prepared for coverage queries: its edge functions, the top-left
+/// tie-break each edge falls under, and the winding fix-up, all resolved once.
+///
+/// Multisampling is why this is a type rather than a loop: a pixel is asked
+/// about once per sample, at a different point each time, and re-deriving the
+/// winding and the fill rule for every one of them would be both slower and a
+/// chance for the samples of one pixel to disagree about the triangle.
+#[derive(Debug, Clone, Copy)]
+pub struct TriangleSetup {
+    v0: ScreenVertex,
+    v1: ScreenVertex,
+    v2: ScreenVertex,
+    /// The caller's winding was clockwise, so `w1` and `w2` swap back on the
+    /// way out of [`TriangleSetup::weights_from`].
+    clockwise: bool,
+    area: f32,
+    /// Whether each of the edges `v0-v1`, `v1-v2`, `v2-v0` is a top or left
+    /// one, in that order.
+    top_left: [bool; 3],
+}
+
+impl TriangleSetup {
+    /// `None` for a degenerate triangle: zero area, nothing covered.
+    pub fn new(v0: ScreenVertex, v1: ScreenVertex, v2: ScreenVertex) -> Option<TriangleSetup> {
+        let signed_area = edge(v0, v1, v2.x, v2.y);
+        if signed_area == 0.0 {
+            return None;
+        }
+        // Wind the triangle counter-clockwise before applying the fill rule,
+        // swapping the weights back on the way out.
+        //
+        // The top-left tie-break only assigns an on-edge point to exactly one
+        // of the two triangles sharing that edge when they *walk the edge in
+        // opposite directions* — which is true of consistently-wound geometry
+        // and false when a quad is emitted as one counter-clockwise and one
+        // clockwise triangle, as SDL's does. There both triangles walk the
+        // shared diagonal the same way, so they agree on `is_top_left` and the
+        // points exactly on it belong to both or, when the answer is `false`,
+        // to neither. JKSV's save tiles are 128x128 quads whose diagonal runs
+        // at exactly 45 degrees, so pixel centres land on it — and every tile
+        // came out with a one-pixel gap straight through it.
+        let clockwise = signed_area < 0.0;
+        let (v1, v2) = if clockwise { (v2, v1) } else { (v1, v2) };
+        Some(TriangleSetup {
+            v0,
+            v1,
+            v2,
+            clockwise,
+            area: signed_area.abs(),
+            top_left: [is_top_left(v0, v1), is_top_left(v1, v2), is_top_left(v2, v0)],
+        })
+    }
+
+    /// The half-open pixel range the triangle can reach, clipped to `bounds`.
+    pub fn bbox(&self, bounds: Bounds) -> (u32, u32, u32, u32) {
+        let (v0, v1, v2) = (self.v0, self.v1, self.v2);
+        (
+            v0.x.min(v1.x).min(v2.x).floor().max(bounds.x0 as f32) as u32,
+            (v0.x.max(v1.x).max(v2.x).ceil() as u32).min(bounds.x1),
+            v0.y.min(v1.y).min(v2.y).floor().max(bounds.y0 as f32) as u32,
+            (v0.y.max(v1.y).max(v2.y).ceil() as u32).min(bounds.y1),
+        )
+    }
+
+    /// The three edge functions at `(px, py)`, in `v0-v1`, `v1-v2`, `v2-v0`
+    /// order — the same order as `top_left`.
+    fn edges(&self, px: f32, py: f32) -> [f32; 3] {
+        [
+            edge(self.v0, self.v1, px, py),
+            edge(self.v1, self.v2, px, py),
+            edge(self.v2, self.v0, px, py),
+        ]
+    }
+
+    /// `w0` is opposite `v0` (edge `v1-v2`), and so on. The counter-clockwise
+    /// rewind in `new` moved the caller's `v1` and `v2`, so their weights swap
+    /// back here.
+    fn weights_from(&self, e: [f32; 3]) -> [f32; 3] {
+        let (w0, w1, w2) = (e[1] / self.area, e[2] / self.area, e[0] / self.area);
+        if self.clockwise {
+            [w0, w2, w1]
+        } else {
+            [w0, w1, w2]
+        }
+    }
+
+    /// Barycentric weights at `(px, py)` whether or not it is covered.
+    ///
+    /// This is where a fragment shader runs. The default interpolation
+    /// qualifier evaluates at the pixel centre even for a partially covered
+    /// pixel whose centre falls outside the triangle, where the weights come
+    /// out extrapolated — that is the behaviour, not a rounding slip.
+    pub fn weights(&self, px: f32, py: f32) -> [f32; 3] {
+        self.weights_from(self.edges(px, py))
+    }
+
+    /// Weights at `(px, py)`, or `None` where the fill rule leaves it
+    /// uncovered: a point is covered if it is strictly inside, or lies exactly
+    /// on a "top" or "left" edge.
+    pub fn coverage(&self, px: f32, py: f32) -> Option<[f32; 3]> {
+        let e = self.edges(px, py);
+        let inside = |value: f32, top_left: bool| value > 0.0 || (top_left && value == 0.0);
+        (0..3)
+            .all(|i| inside(e[i], self.top_left[i]))
+            .then(|| self.weights_from(e))
+    }
 }
 
 /// `DkVtxAttribSize`'s component count and per-component bit width
@@ -653,7 +753,13 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let arrays: Vec<VertexArray> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_array(i)).collect();
     let viewport = engine.viewport_transform();
     let tex_cb_index = engine.tex_cb_index();
-    let clip = engine.apply_scissor(ScissorRect { x0: 0, y0: 0, x1: rt.width, y1: rt.height });
+    // The scissor, the viewport and this draw's bounds are all in pixels;
+    // `rt.width`/`rt.height` are texels, which differ on a multisampled target.
+    let grid = engine.sample_grid()?;
+    let sample_mask = engine.sample_mask();
+    let alpha_to_coverage = engine.alpha_to_coverage();
+    let (rt_width, rt_height) = grid.pixels(rt.width, rt.height);
+    let clip = engine.apply_scissor(ScissorRect { x0: 0, y0: 0, x1: rt_width, y1: rt_height });
     let bounds = Bounds { x0: clip.x0, y0: clip.y0, x1: clip.x1, y1: clip.y1 };
     let depth = engine.depth_target()?;
     let depth_state = engine.depth_state();
@@ -725,63 +831,108 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 continue;
             }
 
-            for (x, y, w0, w1, w2) in
-                rasterize_triangle_weighted(screen[0], screen[1], screen[2], bounds)
-            {
-                let z01 = w0 * window_z[0] + w1 * window_z[1] + w2 * window_z[2];
-                if let (true, Some(dt)) = (depth_state.test_enabled, depth) {
-                    let dva = dt.addr + dt.layout.offset(x * dt.bytes, y, dt.width * dt.bytes) as u64;
-                    let old_raw = ctx.read_pixel(dva, dt.bytes)?;
-                    let old = decode_depth(old_raw, dt.depth_bits);
-                    if !depth_test_passes(depth_state.func, z01, old) {
+            let Some(tri) = TriangleSetup::new(screen[0], screen[1], screen[2]) else {
+                continue;
+            };
+            let bpp = rt.format.bytes_per_pixel;
+            let (min_x, max_x, min_y, max_y) = tri.bbox(bounds);
+            for y in min_y..max_y {
+                for x in min_x..max_x {
+                    // Coverage and depth are per sample; shading is not. That
+                    // split is what multisampling buys over rendering the
+                    // whole frame at the sample grid's resolution: the edges
+                    // get every sample's worth of coverage, but the fragment
+                    // shader still runs once for the pixel.
+                    let mut covered = 0u32;
+                    let mut sample_z = [0.0f32; MAX_SAMPLES];
+                    for sample in 0..grid.count() {
+                        if sample_mask >> sample & 1 == 0 {
+                            continue;
+                        }
+                        let [offset_x, offset_y] = grid.position(sample);
+                        let Some(w) = tri.coverage(x as f32 + offset_x, y as f32 + offset_y)
+                        else {
+                            continue;
+                        };
+                        let z = w[0] * window_z[0] + w[1] * window_z[1] + w[2] * window_z[2];
+                        if let (true, Some(dt)) = (depth_state.test_enabled, depth) {
+                            let (tx, ty) = grid.texel(x, y, sample);
+                            let dva =
+                                dt.addr + dt.layout.offset(tx * dt.bytes, ty, dt.width * dt.bytes) as u64;
+                            let old_raw = ctx.read_pixel(dva, dt.bytes)?;
+                            let old = decode_depth(old_raw, dt.depth_bits);
+                            if !depth_test_passes(depth_state.func, z, old) {
+                                continue;
+                            }
+                        }
+                        covered |= 1 << sample;
+                        sample_z[sample as usize] = z;
+                    }
+                    if covered == 0 {
                         continue;
                     }
-                }
 
-                let color = {
-                    let fs_consts = MemoryConstants {
-                        ctx: &*ctx,
-                        bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::Fragment, bank as u32),
+                    let [w0, w1, w2] = tri.weights(x as f32 + 0.5, y as f32 + 0.5);
+                    let color = {
+                        let fs_consts = MemoryConstants {
+                            ctx: &*ctx,
+                            bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::Fragment, bank as u32),
+                        };
+                        let fs_textures = MemoryTextures {
+                            ctx: &*ctx,
+                            tex_header_pool: engine.tex_header_pool(),
+                            tex_sampler_pool: engine.tex_sampler_pool(),
+                            descriptors: &descriptors,
+                        };
+                        let env =
+                            Env::with_tex_cb_index(&fs_consts, &fs_textures, tex_cb_index);
+                        shade_fragment(
+                            &mut fragment,
+                            &fs_program,
+                            &shaded,
+                            [inv_w[0], inv_w[1], inv_w[2]],
+                            [w0, w1, w2],
+                            &env,
+                        )?
                     };
-                    let fs_textures = MemoryTextures {
-                        ctx: &*ctx,
-                        tex_header_pool: engine.tex_header_pool(),
-                        tex_sampler_pool: engine.tex_sampler_pool(),
-                        descriptors: &descriptors,
-                    };
-                    let env =
-                        Env::with_tex_cb_index(&fs_consts, &fs_textures, tex_cb_index);
-                    shade_fragment(
-                        &mut fragment,
-                        &fs_program,
-                        &shaded,
-                        [inv_w[0], inv_w[1], inv_w[2]],
-                        [w0, w1, w2],
-                        &env,
-                    )?
-                };
-                // `kil` discards the fragment: no colour, and no depth
-                // write either, which is why the depth store waits until
-                // after shading rather than happening with the test.
-                let Some(color) = color else { continue };
+                    // `kil` discards the fragment: no colour, and no depth
+                    // write either, which is why the depth store waits until
+                    // after shading rather than happening with the test.
+                    let Some(color) = color else { continue };
 
-                if depth_state.test_enabled && depth_state.write_enabled {
-                    if let Some(dt) = depth {
-                        let dva =
-                            dt.addr + dt.layout.offset(x * dt.bytes, y, dt.width * dt.bytes) as u64;
-                        ctx.write_pixel(dva, dt.bytes, encode_depth(z01, dt.depth_bits))?;
+                    // Alpha-to-coverage narrows the mask *after* shading,
+                    // since it is the shaded alpha it turns into coverage.
+                    if alpha_to_coverage {
+                        covered &= alpha_coverage(color[3], grid.count());
+                        if covered == 0 {
+                            continue;
+                        }
+                    }
+
+                    for sample in 0..grid.count() {
+                        if covered & (1 << sample) == 0 {
+                            continue;
+                        }
+                        let (tx, ty) = grid.texel(x, y, sample);
+                        if depth_state.test_enabled && depth_state.write_enabled {
+                            if let Some(dt) = depth {
+                                let dva = dt.addr
+                                    + dt.layout.offset(tx * dt.bytes, ty, dt.width * dt.bytes) as u64;
+                                let z = sample_z[sample as usize];
+                                ctx.write_pixel(dva, dt.bytes, encode_depth(z, dt.depth_bits))?;
+                            }
+                        }
+
+                        let va = rt.addr + rt.texel_offset(tx, ty) as u64;
+                        let out = if blend_target.enabled {
+                            let dst = rt.format.decode(ctx.read_pixel(va, bpp)?)?;
+                            blend(blend_target, blend_constant, color, dst)
+                        } else {
+                            color
+                        };
+                        ctx.write_pixel(va, bpp, rt.format.encode(out)?)?;
                     }
                 }
-
-                let bpp = rt.format.bytes_per_pixel;
-                let va = rt.addr + rt.layout.offset(x * bpp, y, rt.width * bpp) as u64;
-                let out = if blend_target.enabled {
-                    let dst = rt.format.decode(ctx.read_pixel(va, bpp)?)?;
-                    blend(blend_target, blend_constant, color, dst)
-                } else {
-                    color
-                };
-                ctx.write_pixel(va, bpp, rt.format.encode(out)?)?;
             }
         }
     }
@@ -1123,6 +1274,125 @@ mod tests {
         assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
         assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(2 * 4, 2, 16 * 4) as u64).unwrap() as u128, expected);
         assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(12 * 4, 6, 16 * 4) as u64).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_multisampled_edge_covers_some_samples_of_a_pixel_and_not_others() {
+        // The same 16x8 surface, read as 8x4 pixels of 2x2 samples. The
+        // triangle's hypotenuse runs from (8,0) to (0,4) in pixels, so it
+        // crosses pixel (7, 0) — the one pixel a single-sample rasterizer has
+        // to call either wholly covered or wholly empty.
+        let (mut mem, vmm, mut engine) = pipeline_harness();
+        engine.regs.set(0x300, 8 << 16); // viewport width, in pixels
+        engine.regs.set(0x301, 4 << 16); // viewport height, in pixels
+        engine.regs.set(0x54D, 1); // MultisampleEnable
+        engine.regs.set(0x574, 2); // MultisampleMode = 2x2
+        let vbuf_addr = engine.vertex_array(0).start;
+        let color = [1.0f32, 1.0, 1.0, 1.0];
+        write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let mut ctx =
+            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        draw(&engine, &mut ctx).unwrap();
+
+        let rt = engine.render_target(0).unwrap().unwrap();
+        let texel = |ctx: &ExecCtx, x: u32, y: u32| {
+            ctx.read_u32(rt.addr + rt.texel_offset(x, y) as u64).unwrap()
+        };
+        // Pixel (0, 0) is wholly inside: all four of its texels are written.
+        for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            assert_ne!(texel(&ctx, x, y), 0, "texel ({x}, {y}) of a covered pixel");
+        }
+        // Pixel (7, 0) straddles the edge. Only the sample at the top left of
+        // it — texel (14, 0) — falls inside the triangle.
+        assert_ne!(texel(&ctx, 14, 0), 0, "the covered sample of pixel (7, 0)");
+        for (x, y) in [(15, 0), (14, 1), (15, 1)] {
+            assert_eq!(texel(&ctx, x, y), 0, "texel ({x}, {y}) is outside the edge");
+        }
+        // Pixel (7, 3) is wholly outside.
+        for (x, y) in [(14, 6), (15, 6), (14, 7), (15, 7)] {
+            assert_eq!(texel(&ctx, x, y), 0, "texel ({x}, {y}) of an uncovered pixel");
+        }
+    }
+
+    /// The 16x8 target read as 8x4 pixels of 2x2 samples, with a triangle
+    /// that wholly covers pixel (0, 0) so the only thing under test is which
+    /// of that pixel's four samples get written.
+    fn multisampled_harness() -> (Memory, AddressSpace, Engine3D) {
+        let (mut mem, vmm, mut engine) = pipeline_harness();
+        engine.regs.set(0x300, 8 << 16); // viewport width, in pixels
+        engine.regs.set(0x301, 4 << 16); // viewport height, in pixels
+        engine.regs.set(0x54D, 1); // MultisampleEnable
+        engine.regs.set(0x574, 2); // MultisampleMode = 2x2
+        let vbuf_addr = engine.vertex_array(0).start;
+        let color = [1.0f32, 1.0, 1.0, 1.0];
+        write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
+        (mem, vmm, engine)
+    }
+
+    #[test]
+    fn a_sample_mask_keeps_only_the_samples_it_names() {
+        let (mut mem, vmm, mut engine) = multisampled_harness();
+        engine.regs.set(0x3EF, 0b0001); // MultisampleSampleMask: sample 0 only
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let mut ctx =
+            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        draw(&engine, &mut ctx).unwrap();
+
+        let rt = engine.render_target(0).unwrap().unwrap();
+        let texel =
+            |ctx: &ExecCtx, x: u32, y: u32| ctx.read_u32(rt.addr + rt.texel_offset(x, y) as u64).unwrap();
+        assert_ne!(texel(&ctx, 0, 0), 0, "sample 0 is in the mask");
+        for (x, y) in [(1, 0), (0, 1), (1, 1)] {
+            assert_eq!(texel(&ctx, x, y), 0, "texel ({x}, {y}) is masked off");
+        }
+    }
+
+    #[test]
+    fn alpha_to_coverage_turns_half_alpha_into_half_the_samples() {
+        let (mut mem, vmm, mut engine) = multisampled_harness();
+        engine.regs.set(0x54F, 1); // MultisampleControl: AlphaToCoverage
+        let vbuf_addr = engine.vertex_array(0).start;
+        let color = [1.0f32, 1.0, 1.0, 0.5];
+        write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let mut ctx =
+            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        draw(&engine, &mut ctx).unwrap();
+
+        // Half of four samples is two, so the pixel is half covered even
+        // though the triangle covers all of it.
+        let rt = engine.render_target(0).unwrap().unwrap();
+        let texel =
+            |ctx: &ExecCtx, x: u32, y: u32| ctx.read_u32(rt.addr + rt.texel_offset(x, y) as u64).unwrap();
+        assert_ne!(texel(&ctx, 0, 0), 0);
+        assert_ne!(texel(&ctx, 1, 0), 0);
+        assert_eq!(texel(&ctx, 0, 1), 0);
+        assert_eq!(texel(&ctx, 1, 1), 0);
+    }
+
+    #[test]
+    fn alpha_to_coverage_spans_none_to_all_of_the_samples() {
+        assert_eq!(alpha_coverage(0.0, 4), 0);
+        assert_eq!(alpha_coverage(0.25, 4), 0b0001);
+        assert_eq!(alpha_coverage(0.5, 4), 0b0011);
+        assert_eq!(alpha_coverage(1.0, 4), u32::MAX);
+        // Out-of-range alpha clamps rather than shifting past the sample count.
+        assert_eq!(alpha_coverage(2.0, 4), u32::MAX);
+        assert_eq!(alpha_coverage(-1.0, 4), 0);
+        assert_eq!(alpha_coverage(1.0, 16), u32::MAX);
     }
 
     #[test]

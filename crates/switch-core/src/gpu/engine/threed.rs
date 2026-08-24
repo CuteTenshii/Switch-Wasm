@@ -8,7 +8,7 @@ use crate::gpu::engine::{field, Registers};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::macro_engine::{MacroEngine, MacroHost, MacroWrite, MACRO_METHODS_START};
 use crate::gpu::raster;
-use crate::gpu::surface::{ColorFormat, Layout};
+use crate::gpu::surface::{ColorFormat, Layout, SampleGrid, MAX_SAMPLES};
 use crate::{Error, Result};
 use std::collections::HashMap;
 
@@ -115,6 +115,18 @@ const BLEND_FUNC_DST_ALPHA: u32 = 0x4D6;
 const COLOR_BLEND_ENABLE: u32 = 0x4D8;
 const INDEPENDENT_BLEND: u32 = 0x780;
 const INDEPENDENT_BLEND_STRIDE: u32 = 0x8;
+
+// --- Multisampling ---
+// Which samples a draw may write, one bit each; deko3d's
+// `dkCmdBufSetSampleMask` writes the same mask to all four registers.
+const MULTISAMPLE_SAMPLE_MASK: u32 = 0x3EF;
+// Sixteen one-byte sample locations across four registers, as
+// `dkMultisampleStateSetLocations` writes them.
+const MULTISAMPLE_SAMPLE_LOCATIONS: u32 = 0x478;
+const MULTISAMPLE_ENABLE: u32 = 0x54D;
+const MULTISAMPLE_CONTROL: u32 = 0x54F;
+/// A `MsaaMode`; see [`SampleGrid`].
+const MULTISAMPLE_MODE: u32 = 0x574;
 
 // --- Constant-buffer stage binding ---
 // `Bind[slot].Constbuf{Valid, Index}` is a *trigger*, not plain state: on a
@@ -295,8 +307,9 @@ pub struct RenderTarget {
 }
 
 impl RenderTarget {
-    /// Byte offset of a pixel within the target.
-    fn pixel_offset(&self, x: u32, y: u32) -> u32 {
+    /// Byte offset of a *texel* within the target. On a multisampled target a
+    /// texel is one sample, not one pixel — [`SampleGrid::texel`] converts.
+    pub fn texel_offset(&self, x: u32, y: u32) -> u32 {
         let bpp = self.format.bytes_per_pixel;
         let width_bytes = self.width * bpp;
         self.layout.offset(x * bpp, y, width_bytes)
@@ -829,6 +842,43 @@ impl Engine3D {
         }
     }
 
+    /// The sample grid the bound targets are laid out on.
+    ///
+    /// `MultisampleEnable` off means one sample per pixel whatever
+    /// `MultisampleMode` still holds — the mode register survives a pass that
+    /// turns multisampling off, so reading it alone would keep expanding
+    /// coordinates long after the guest stopped asking for it.
+    pub fn sample_grid(&self) -> Result<SampleGrid> {
+        if self.regs.get(MULTISAMPLE_ENABLE) == 0 {
+            return Ok(SampleGrid::single());
+        }
+        let mut locations = [0u8; MAX_SAMPLES];
+        for (i, byte) in locations.iter_mut().enumerate() {
+            let word = self.regs.get(MULTISAMPLE_SAMPLE_LOCATIONS + (i / 4) as u32);
+            *byte = (word >> (8 * (i % 4))) as u8;
+        }
+        SampleGrid::new(self.regs.get(MULTISAMPLE_MODE), &locations)
+    }
+
+    /// Which samples a draw is allowed to write, as a bit per sample.
+    ///
+    /// A register file nothing has written reads as zero, and taking that
+    /// literally would discard every fragment of every draw — so an all-zero
+    /// mask means "unprogrammed", the same reading `apply_scissor` gives an
+    /// unset scissor. Hardware resets this register to all-ones, so no guest
+    /// can tell the difference.
+    pub fn sample_mask(&self) -> u32 {
+        match self.regs.get(MULTISAMPLE_SAMPLE_MASK) {
+            0 => u32::MAX,
+            mask => mask,
+        }
+    }
+
+    /// Whether a fragment's alpha turns into coverage (`MultisampleControl`).
+    pub fn alpha_to_coverage(&self) -> bool {
+        self.regs.bit(MULTISAMPLE_CONTROL, 0)
+    }
+
     /// Resolve colour render target `index` from the register file.
     pub fn render_target(&self, index: u32) -> Result<Option<RenderTarget>> {
         let base = RENDER_TARGET_BASE + index * RENDER_TARGET_STRIDE;
@@ -869,6 +919,12 @@ impl Engine3D {
 
     /// The rectangle a clear covers: the screen scissor, further clipped by
     /// the scissor and viewport when `ClearBufferFlags` asks for it.
+    ///
+    /// Everything here is in **pixels**, so `width`/`height` must be the
+    /// target's pixel extent rather than the texel extent its registers hold.
+    /// The two differ on a multisampled target, and passing the texel extent
+    /// leaves the clear covering only the top-left `1/samples_x` by
+    /// `1/samples_y` of it.
     fn clear_rect(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
         let mut x0 = self.regs.field(SCREEN_SCISSOR_HORIZONTAL, 0, 15);
         let mut y0 = self.regs.field(SCREEN_SCISSOR_VERTICAL, 0, 15);
@@ -925,7 +981,7 @@ impl Engine3D {
                 ];
                 match self.render_target(target) {
                     Ok(Some(rt)) => eprintln!(
-                        "[gpu] clear target={target} addr={:#x} {}x{} colour={colour:?}",
+                        "[gpu] clear target={target} addr={:#x} {}x{} texels colour={colour:?}",
                         rt.addr, rt.width, rt.height
                     ),
                     other => eprintln!("[gpu] clear target={target} -> {other:x?}"),
@@ -967,27 +1023,33 @@ impl Engine3D {
         let bpp = rt.format.bytes_per_pixel;
         let all_channels = channels.iter().all(|&c| c);
         let base = rt.addr + (layer as u64) * (rt.layer_stride as u64) * 4;
-        let (x0, y0, x1, y1) = self.clear_rect(rt.width, rt.height);
+        let grid = self.sample_grid()?;
+        let (width, height) = grid.pixels(rt.width, rt.height);
+        let (x0, y0, x1, y1) = self.clear_rect(width, height);
         if ctx.trace {
             eprintln!(
-                "[gpu] clear color rt{} {:#x} {}x{} fmt={:#x} rect=({},{})..({},{}) rgba={:?}",
-                slot, rt.addr, rt.width, rt.height, rt.format.raw, x0, y0, x1, y1, color
+                "[gpu] clear color rt{} {:#x} {width}x{height}px {}x{} samples fmt={:#x} \
+                 rect=({x0},{y0})..({x1},{y1}) rgba={color:?}",
+                slot, rt.addr, grid.samples_x, grid.samples_y, rt.format.raw
             );
         }
         for y in y0..y1 {
             for x in x0..x1 {
-                let va = base + rt.pixel_offset(x, y) as u64;
-                if all_channels {
-                    ctx.write_pixel(va, bpp, raw)?;
-                } else {
-                    let old = rt.format.decode(ctx.read_pixel(va, bpp)?)?;
-                    let mut merged = old;
-                    for (i, &enabled) in channels.iter().enumerate() {
-                        if enabled {
-                            merged[i] = color[i];
+                for sample in 0..grid.count() {
+                    let (tx, ty) = grid.texel(x, y, sample);
+                    let va = base + rt.texel_offset(tx, ty) as u64;
+                    if all_channels {
+                        ctx.write_pixel(va, bpp, raw)?;
+                    } else {
+                        let old = rt.format.decode(ctx.read_pixel(va, bpp)?)?;
+                        let mut merged = old;
+                        for (i, &enabled) in channels.iter().enumerate() {
+                            if enabled {
+                                merged[i] = color[i];
+                            }
                         }
+                        ctx.write_pixel(va, bpp, rt.format.encode(merged)?)?;
                     }
-                    ctx.write_pixel(va, bpp, rt.format.encode(merged)?)?;
                 }
             }
         }
@@ -1006,30 +1068,36 @@ impl Engine3D {
             return Ok(());
         }
         let (bytes, depth_bits, stencil_shift) = depth_format_layout(raw_format)?;
-        let width = self.regs.get(DEPTH_TARGET_HORIZONTAL);
-        let height = self.regs.get(DEPTH_TARGET_VERTICAL);
+        let texels_x = self.regs.get(DEPTH_TARGET_HORIZONTAL);
+        let texels_y = self.regs.get(DEPTH_TARGET_VERTICAL);
         let tile_mode = self.regs.get(DEPTH_TARGET_TILE_MODE);
         let layout = Layout::BlockLinear { block_height_gobs: 1 << field(tile_mode, 4, 7) };
         let depth = self.regs.float(CLEAR_DEPTH).clamp(0.0, 1.0);
         let stencil = self.regs.get(CLEAR_STENCIL) & 0xFF;
+        let grid = self.sample_grid()?;
+        let (width, height) = grid.pixels(texels_x, texels_y);
         let (x0, y0, x1, y1) = self.clear_rect(width, height);
-        let width_bytes = width * bytes;
+        let width_bytes = texels_x * bytes;
 
         for y in y0..y1 {
             for x in x0..x1 {
-                let va = addr + layout.offset(x * bytes, y, width_bytes) as u64;
-                let mut value = ctx.read_pixel(va, bytes)?;
-                if clear_depth {
-                    let encoded = encode_depth(depth, depth_bits);
-                    let mask = depth_mask(depth_bits);
-                    value = (value & !mask) | (encoded & mask);
-                }
-                if clear_stencil {
-                    if let Some(shift) = stencil_shift {
-                        value = (value & !(0xFFu128 << shift)) | ((stencil as u128) << shift);
+                for sample in 0..grid.count() {
+                    let (tx, ty) = grid.texel(x, y, sample);
+                    let va = addr + layout.offset(tx * bytes, ty, width_bytes) as u64;
+                    let mut value = ctx.read_pixel(va, bytes)?;
+                    if clear_depth {
+                        let encoded = encode_depth(depth, depth_bits);
+                        let mask = depth_mask(depth_bits);
+                        value = (value & !mask) | (encoded & mask);
                     }
+                    if clear_stencil {
+                        if let Some(shift) = stencil_shift {
+                            value =
+                                (value & !(0xFFu128 << shift)) | ((stencil as u128) << shift);
+                        }
+                    }
+                    ctx.write_pixel(va, bytes, value)?;
                 }
-                ctx.write_pixel(va, bytes, value)?;
             }
         }
         Ok(())
@@ -1155,6 +1223,56 @@ mod tests {
         // One past the last row must be untouched.
         assert_eq!(h.mem.read_u32(0x3000_0000 + 8 * 64).unwrap(), 0);
         assert_eq!(h.stats.clears, 1);
+    }
+
+    #[test]
+    fn clear_of_a_multisampled_target_fills_every_sample() {
+        // Just Dance 2019's frame, shrunk: the render target registers hold a
+        // 16x8 *texel* surface, the scissor holds the 8x4 *pixel* area, and
+        // 4x multisampling is what reconciles them. Clamping the clear against
+        // the texel extent covered a quarter of the target and left the rest
+        // of the frame black.
+        let mut h = Harness::new(0x1000);
+        let mut engine = Engine3D::new();
+        setup_pitch_target(&mut engine, h.base, 16, 8);
+        engine.regs.set(SCREEN_SCISSOR_HORIZONTAL, 8 << 16);
+        engine.regs.set(SCREEN_SCISSOR_VERTICAL, 4 << 16);
+        engine.regs.set(MULTISAMPLE_ENABLE, 1);
+        engine.regs.set(MULTISAMPLE_MODE, 2); // 2x2
+        for i in 0..4 {
+            engine.regs.set(MULTISAMPLE_SAMPLE_LOCATIONS + i, 0xEAA2_6E26);
+        }
+        engine.regs.set(CLEAR_COLOR, 1.0f32.to_bits());
+        engine.regs.set(CLEAR_COLOR + 1, 1.0f32.to_bits());
+        engine.regs.set(CLEAR_COLOR + 2, 1.0f32.to_bits());
+        engine.regs.set(CLEAR_COLOR + 3, 1.0f32.to_bits());
+
+        let mut ctx = h.ctx();
+        engine.write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx).unwrap();
+
+        // Every one of the 16x8 texels, not just the 8x4 the scissor names.
+        for y in 0..8u32 {
+            for x in 0..16u32 {
+                assert_eq!(
+                    h.mem.read_u32(0x3000_0000 + y * 64 + x * 4).unwrap(),
+                    0xFFFF_FFFF,
+                    "texel ({x}, {y})"
+                );
+            }
+        }
+        // One past the last row is still outside the target.
+        assert_eq!(h.mem.read_u32(0x3000_0000 + 8 * 64).unwrap(), 0);
+    }
+
+    #[test]
+    fn multisampling_off_leaves_the_mode_register_inert() {
+        // deko3d leaves `MultisampleMode` programmed when it turns
+        // multisampling off, so the mode alone must not expand coordinates.
+        let mut engine = Engine3D::new();
+        engine.regs.set(MULTISAMPLE_MODE, 2);
+        assert!(engine.sample_grid().unwrap().is_single());
+        engine.regs.set(MULTISAMPLE_ENABLE, 1);
+        assert_eq!(engine.sample_grid().unwrap().count(), 4);
     }
 
     #[test]
