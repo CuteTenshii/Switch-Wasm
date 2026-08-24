@@ -12,6 +12,15 @@ use std::collections::VecDeque;
 /// `AccountUid` means by "no user", and a title handed it back from
 /// `GetLastOpenedUser` concludes nobody is signed in. Spelling it in ASCII
 /// makes it recognisable in a trace, and it is exactly the 16 bytes a uid is.
+/// `am` 2, NoDataInChannel: the general channel has nothing queued.
+const AM_NO_DATA_IN_CHANNEL: u32 = 128 | (2 << 9);
+
+/// The size of the emulated SD card, and how much of it is free. `ns` reports
+/// these from two interfaces and a caller does arithmetic between them, so
+/// they are one pair of numbers rather than two.
+const SD_TOTAL_SPACE: u64 = 32 << 30;
+const SD_FREE_SPACE: u64 = 16 << 30;
+
 const ACCOUNT_UID: [u8; 16] = *b"switch-wasm user";
 /// `am`'s `LaunchParameterKind::PreselectedUser`: the user the launcher had
 /// already chosen when it started the application.
@@ -1736,7 +1745,7 @@ impl Cpu {
                     // **copy** handle like every other event a service hands
                     // out. Sent in the move slot it arrives as 0.
                     Some(2) => {
-                        let h = self.alloc_event("vi:binder", true);
+                        let h = self.vi_binder_event();
                         self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                     }
                     Some(3) => self.vi_transact_parcel(tls),
@@ -1817,7 +1826,7 @@ impl Cpu {
                 Some("vi:ihosbd") => match cmd_id {
                     Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                     Some(2) => {
-                        let h = self.alloc_event("vi:binder", true);
+                        let h = self.vi_binder_event();
                         self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                     }
                     Some(3) => self.vi_transact_parcel(tls),
@@ -3055,6 +3064,15 @@ impl Cpu {
                 // Global; 2 is the Chinese console, which has a different set
                 // of services and stores behind it.
                 Some(300) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
+                // GetHomeButtonReaderLockAccessor /
+                // GetReaderLockAccessorEx(u32 button_type) -> ILockAccessor:
+                // the read side of the HOME and capture button locks, the
+                // counterpart to `IHomeMenuFunctions` 30/31. The Home Menu
+                // takes one per button before it will run a transition.
+                Some(30) | Some(31) => {
+                    self.reply_with_interface(tls, handle, "am:lock-accessor")?;
+                    Ok(())
+                }
                 // GetEventHandle: the copy handle the guest waits on before
                 // polling ReceiveMessage.
                 //
@@ -3537,14 +3555,27 @@ impl Cpu {
                 // who owns the screen. There is one applet here and it always
                 // owns it.
                 Some(10) | Some(11) | Some(12) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-                // GetPopFromGeneralChannelEvent: the event that fires when
-                // another process pushes a message onto the general channel —
-                // an nfc tag scan, a Joy-Con pairing. Nothing here pushes one,
-                // so it is handed out and never signalled, and the
-                // PopFromGeneralChannel at command 20 that would drain it is
-                // never reached.
+                // PopFromGeneralChannel -> IStorage. The channel is what
+                // another process pushes a message onto — an nfc tag scan, a
+                // Joy-Con pairing. Nothing here pushes one, and an empty
+                // channel is reported as `am` 2, NoDataInChannel: the Home
+                // Menu drains this until it gets that error, so a *refusal* to
+                // answer at all is what stops it (`nnSdk` aborts on an unknown
+                // command id rather than carrying on).
+                Some(20) => self.write_ipc_response(tls, AM_NO_DATA_IN_CHANNEL, &[], &[], &[]),
+                // GetPopFromGeneralChannelEvent: the event that fires when a
+                // message lands on that channel. Handed out and never
+                // signalled, because nothing here ever pushes one — but the
+                // same event each time, since the menu keeps a waiter on it.
                 Some(21) => {
-                    let h = self.alloc_event("am:general-channel", true);
+                    let h = match self.general_channel_event {
+                        Some(h) => h,
+                        None => {
+                            let h = self.alloc_event("am:general-channel", true);
+                            self.general_channel_event = Some(h);
+                            h
+                        }
+                    };
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 // GetHomeButtonWriterLockAccessor / GetWriterLockAccessorEx:
@@ -3569,11 +3600,23 @@ impl Cpu {
             // ILockAccessor: one of those HOME-button locks. Only the Home
             // Menu holds one, and nothing else here contends for it.
             "am:lock-accessor" => match cmd_id {
+                // TryLock(bool return_handle) -> (bool locked, event). Nothing
+                // else here holds the lock, so it is always taken; the handle
+                // only comes back when the caller asked for it.
+                Some(1) => {
+                    let want_handle = self.mem.read_u8(self.ipc_request_data(tls)).unwrap_or(0) != 0;
+                    let h = self.am_lock_accessor_event();
+                    if want_handle {
+                        self.write_ipc_reply(tls, 0, &[h], &[], &[1u8], &[])
+                    } else {
+                        self.write_ipc_response(tls, 0, &[], &[1u8], &[])
+                    }
+                }
                 // Unlock.
                 Some(2) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-                // GetEvent: fires when the lock is released by its holder.
+                // GetEvent -> the event that says the lock is free.
                 Some(3) => {
-                    let h = self.alloc_event("am:lock-accessor", true);
+                    let h = self.am_lock_accessor_event();
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 // IsLocked -> bool.
@@ -4454,6 +4497,13 @@ impl Cpu {
                     let event = self.alloc_event("hid:sys-capture-button", true);
                     self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                 }
+                // AcquireJoyDetachOnBluetoothOffEventHandle -> a copy handle.
+                // It fires when Joy-Cons are detached because Bluetooth went
+                // off; there is no Bluetooth radio here, so it never does.
+                Some(751) => {
+                    let event = self.alloc_event("hid:sys-joy-detach", true);
+                    self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+                }
                 // Activate{Home,Sleep,Capture}Button, and
                 // ApplyNpadSystemCommonPolicy / EnableAppletToGetInput.
                 // Every one is a setter over state this emulator does not
@@ -4464,6 +4514,20 @@ impl Cpu {
                 | Some(305) | Some(308) | Some(503) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // IsUsbFullKeyControllerEnabled -> bool. There is no USB
+                // controller here, wired or otherwise.
+                Some(850) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // SetTouchScreenMagnification / SetTouchScreenDefaultConfiguration
+                // / SetForceHandheldStyleVibration: settings on a panel this
+                // emulator does not model.
+                Some(1150) | Some(1152) | Some(1155) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // GetTouchScreenDefaultConfiguration ->
+                // nn::hid::TouchScreenConfigurationForNx, 0x10 bytes whose
+                // first is the mode. Zero is `UseSystemSetting`, which is what
+                // a console reports when nothing has overridden the panel.
+                Some(1153) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x10], &[]),
                 // GetLastActiveNpad -> which controller was used last. There
                 // is one pad and it is Player 1, so it is always npad 0.
                 //
@@ -4605,6 +4669,11 @@ impl Cpu {
                 Some(1012) | Some(1032) | Some(1039) | Some(1206) | Some(1424) | Some(1426) => {
                     self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
                 }
+                // GetCurrentSettings -> nn::pctl::RestrictionSettings: a
+                // rating age, and the two "may not post / may not talk" flags.
+                // Nothing is restricted here, and an age of -1 is how that is
+                // said: any rating passes it.
+                Some(1035) => self.write_ipc_response(tls, 0, &[], &[0xffu8, 0, 0], &[]),
                 // The event getters: GetPinCodeChangedEvent (1207),
                 // GetSynchronizationEvent (1432),
                 // GetPlayTimerEventToRequestSuspension (1457) and
@@ -4990,6 +5059,49 @@ impl Cpu {
         uid
     }
 
+    /// The buffer queue's own event, which a producer waits on before it
+    /// dequeues. It is created **signalled** and manual-reset: the queue here
+    /// always has a free buffer — `dequeueBuffer` never refuses — so the state
+    /// it reports is "a buffer is available", permanently and truthfully.
+    ///
+    /// One object per process rather than one per `GetNativeHandle`, because a
+    /// caller that asks twice has to be given the event it is already waiting
+    /// on.
+    fn vi_binder_event(&mut self) -> u64 {
+        match self.binder_event {
+            Some(h) => h,
+            None => {
+                let h = self.alloc_event("vi:binder", false);
+                self.signal_event(h);
+                self.binder_event = Some(h);
+                h
+            }
+        }
+    }
+
+    /// The event an `ILockAccessor` hands out, created **signalled** and
+    /// manual-reset.
+    ///
+    /// That is not a shortcut: hardware hands out a lock nobody is holding,
+    /// and the Home Menu takes the event as proof of that before it will run a
+    /// transition. It polls the event with `nn::os::TryWaitSystemEvent` and
+    /// **aborts** when it comes back clear, which is where qlaunch stopped —
+    /// one `ICommonStateGetter::GetReaderLockAccessorEx` and one `GetEvent`
+    /// after its first scene started.
+    ///
+    /// One object, because nothing here contends for a HOME button.
+    fn am_lock_accessor_event(&mut self) -> u64 {
+        match self.lock_accessor_event {
+            Some(h) => h,
+            None => {
+                let h = self.alloc_event("am:lock-accessor", false);
+                self.signal_event(h);
+                self.lock_accessor_event = Some(h);
+                h
+            }
+        }
+    }
+
     /// `nn::account::ProfileBase`: the uid, when the profile was last edited,
     /// and the nickname as a NUL-padded 0x20-byte field.
     fn acc_profile_base(&self) -> [u8; PROFILE_BASE_LEN] {
@@ -5010,16 +5122,28 @@ impl Cpu {
     /// reply too short for it fails in its CMIF parse rather than in the
     /// command that was actually asked.
     fn acc_write_user_list(&mut self, tls: u32) -> Result<()> {
-        let mut written = 0i32;
+        // The reply is a bare `Result`: these commands carry no count, and the
+        // caller works out how many users there are by reading its own array
+        // and stopping at the first all-zero uid. So the **whole** buffer has
+        // to be written, not just the entry that exists — a server that fills
+        // one slot and leaves the other seven is a console with one user and
+        // seven made of whatever was on the caller's stack. That is what the
+        // Home Menu found: it enumerated three accounts, asked `acc:su` for a
+        // profile editor for each, and aborted when the third uid turned out
+        // to be a pair of pointers.
         if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
-            if addr != 0 && size as usize >= ACCOUNT_UID.len() {
-                for (index, &byte) in ACCOUNT_UID.iter().enumerate() {
-                    self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
+            if addr != 0 {
+                for offset in 0..size {
+                    self.mem.write_u8(addr.wrapping_add(offset), 0)?;
                 }
-                written = 1;
+                if size as usize >= ACCOUNT_UID.len() {
+                    for (index, &byte) in ACCOUNT_UID.iter().enumerate() {
+                        self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
+                    }
+                }
             }
         }
-        self.write_ipc_response(tls, 0, &[], &written.to_le_bytes(), &[])
+        self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
     /// `ns:am2` (`IServiceGetterInterface`) and the interfaces it hands out:
@@ -5136,11 +5260,23 @@ impl Cpu {
                 // same 32 GiB card `fsp-srv` reports, half of it used, so that
                 // a caller doing the arithmetic between the two answers gets a
                 // number that is neither full nor impossible.
-                Some(47) => self.write_ipc_response(tls, 0, &[], &(32u64 << 30).to_le_bytes(), &[]),
-                Some(48) => self.write_ipc_response(tls, 0, &[], &(16u64 << 30).to_le_bytes(), &[]),
+                Some(47) => {
+                    self.write_ipc_response(tls, 0, &[], &SD_TOTAL_SPACE.to_le_bytes(), &[])
+                }
+                Some(48) => {
+                    self.write_ipc_response(tls, 0, &[], &SD_FREE_SPACE.to_le_bytes(), &[])
+                }
                 // CountApplicationContentMeta(u64 application_id) -> u32:
                 // nothing is installed, so nothing has content meta.
                 Some(600) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // `IDownloadTaskInterface`: the background download queue. There
+            // is no network and nothing to download, so the only commands that
+            // mean anything are the two that turn auto-commit on and off.
+            "ns:download-task" => match cmd_id {
+                // EnableAutoCommit / DisableAutoCommit.
+                Some(707) | Some(708) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // `IReadOnlyApplicationRecordInterface`: the record half of the
@@ -5264,6 +5400,67 @@ impl Cpu {
             // its own stack, which is how "no titles installed" turns into
             // several billion of them.
             Some(0) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+            // GenerateApplicationRecordCount -> u64. Same answer as the list
+            // above, in the shape the counting call expects.
+            Some(1) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+            // GetApplicationRecordUpdateSystemEvent -> event. The Home Menu
+            // waits on this before it reads the title list, so it goes out
+            // **signalled** — hardware hands out a record set that is already
+            // current, and a dark event here is a Home Menu that never asks
+            // what is installed. One event per process: a caller that asks
+            // twice has to be given the one it is already waiting on.
+            Some(2) => {
+                let h = match self.application_record_event {
+                    Some(h) => h,
+                    None => {
+                        let h = self.alloc_event("ns:record-update", false);
+                        self.application_record_event = Some(h);
+                        h
+                    }
+                };
+                self.signal_event(h);
+                self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+            }
+            // CheckSdCardMountStatus, and the total/free space of a storage
+            // id. `IContentManagementInterface` answers these too and the
+            // manager delegates to it on hardware, so the answers are the same
+            // ones — see the `ns:content-management` arm.
+            Some(43) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            Some(47) => self.write_ipc_response(tls, 0, &[], &SD_TOTAL_SPACE.to_le_bytes(), &[]),
+            Some(48) => self.write_ipc_response(tls, 0, &[], &SD_FREE_SPACE.to_le_bytes(), &[]),
+            // GetStorageSize(u8 storage_id) -> (s64 total, s64 free): the two
+            // above in one call.
+            Some(71) => {
+                let mut out = [0u8; 16];
+                out[..8].copy_from_slice(&SD_TOTAL_SPACE.to_le_bytes());
+                out[8..].copy_from_slice(&SD_FREE_SPACE.to_le_bytes());
+                self.write_ipc_response(tls, 0, &[], &out, &[])
+            }
+            // ResumeAll: resume the download tasks. There are none.
+            Some(70) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // The media events: SD card mount status, SD card removed, game
+            // card attached, game card update detected, game card mount
+            // failed. Nothing here can change any of that, so they are handed
+            // out dark — but the same object every time, because the Home Menu
+            // keeps one waiter per event for as long as it runs.
+            Some(cmd @ (44 | 45 | 49 | 52 | 505)) => {
+                let h = match self.ns_manager_events.get(&cmd) {
+                    Some(&h) => h,
+                    None => {
+                        let name = match cmd {
+                            44 => "ns:sd-mount-status",
+                            45 => "ns:gamecard-attach",
+                            49 => "ns:sd-removed",
+                            52 => "ns:gamecard-update",
+                            _ => "ns:gamecard-mount-failure",
+                        };
+                        let h = self.alloc_event(name, false);
+                        self.ns_manager_events.insert(cmd, h);
+                        h
+                    }
+                };
+                self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+            }
             _ => self.unimplemented_command(tls, iface, cmd_id),
         }
     }
@@ -8225,14 +8422,22 @@ mod tests {
     }
 
     #[test]
-    fn acc_list_all_users_fills_the_output_buffer_and_counts_what_it_wrote() {
+    fn acc_list_all_users_zeroes_the_slots_it_has_no_user_for() {
+        // These commands carry no count: the caller passes a fixed array and
+        // works out how many users there are by scanning for the first all-zero
+        // uid. So every slot has to be written, not just the one that exists —
+        // and the Home Menu is what proved it, enumerating three accounts out
+        // of an array with one user and two of the caller's own stack in it.
         const BUFFER: u32 = 0x4000;
         let mut cpu = request_with_recv_buffer(2, &[], BUFFER, 0x40);
         cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+        for offset in 0..0x40 {
+            cpu.mem.write_u8(BUFFER + offset, 0xAA).unwrap();
+        }
         acc(&mut cpu, "acc:u0", 2);
 
         assert_eq!(cpu.read_bytes(BUFFER, 16), super::ACCOUNT_UID.to_vec());
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "one uid written");
+        assert_eq!(cpu.read_bytes(BUFFER + 16, 0x30), vec![0u8; 0x30], "stale uids left behind");
     }
 
     #[test]
@@ -8320,8 +8525,8 @@ mod tests {
         cpu.register_service_handle(9, "acc:u0");
         cpu.acc_request(TLS, 9, Some(141)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "one user listed");
         assert_eq!(cpu.read_bytes(BUFFER, 16), super::ACCOUNT_UID.to_vec());
+        assert_eq!(cpu.read_bytes(BUFFER + 16, 0x30), vec![0u8; 0x30], "one user listed");
     }
 
     #[test]

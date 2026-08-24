@@ -16,7 +16,7 @@
 
 use crate::mem::Memory;
 use crate::{Error, Result};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 mod alu;
 mod bits;
@@ -185,6 +185,12 @@ pub(crate) struct Event {
 /// Bit Horizon's mutex words set to mean "someone is blocked on me, so the
 /// unlock has to go through `svcArbitrateUnlock`".
 const MUTEX_HAS_LISTENERS: u32 = 0x4000_0000;
+
+/// Value Horizon writes into a condition variable's own word while a thread is
+/// queued on it. `nn::os::SignalConditionVariable` reads the word first and
+/// makes no syscall at all when it is zero, so the kernel — not the guest — is
+/// what makes a signal reach a waiter.
+const CONDVAR_HAS_WAITERS: u32 = 1;
 
 /// The address-space range `svcGetInfo` reports as the stack region: where
 /// libnx mirrors the stacks of the threads the guest creates. It sits inside the
@@ -682,6 +688,27 @@ pub struct Cpu {
     /// given the event it is already waiting on.
     application_functions_210_event: Option<u64>,
     aoc_list_changed_event: Option<u64>,
+    /// The event `IApplicationManagerInterface::GetApplicationRecordUpdateSystemEvent`
+    /// hands out. It goes out **signalled**, as it does on hardware: the Home
+    /// Menu waits on it before it will read the installed-title list at all.
+    application_record_event: Option<u64>,
+    /// `IApplicationManagerInterface`'s other events, by command id: the SD
+    /// card and game card ones, which report media arriving and leaving. None
+    /// of them ever fires here, but each caller has to be handed back the same
+    /// object it is already waiting on.
+    ns_manager_events: BTreeMap<u32, u64>,
+    /// The event `IHomeMenuFunctions::GetPopFromGeneralChannelEvent` hands
+    /// out. Nothing pushes onto that channel here, so it never fires — but the
+    /// Home Menu keeps one waiter on it, and a fresh handle per call would
+    /// leave that waiter holding an object nobody can signal.
+    general_channel_event: Option<u64>,
+    /// The event every `ILockAccessor` hands out. It is created signalled and
+    /// never cleared: nothing here contends for the HOME or capture button, so
+    /// the lock is always free. See `Cpu::am_lock_accessor_event`.
+    lock_accessor_event: Option<u64>,
+    /// The buffer queue's event, handed out by `IHOSBinderDriver::GetNativeHandle`
+    /// and always signalled. See `Cpu::vi_binder_event`.
+    binder_event: Option<u64>,
     /// What the running title was allotted to store, as its own NACP declares
     /// it — the figures the `IApplicationFunctions` save-data commands report.
     ///
@@ -999,6 +1026,11 @@ impl Cpu {
             sleep_lock_event: None,
             sleep_lock_acquired: false,
             application_functions_210_event: None,
+            application_record_event: None,
+            ns_manager_events: BTreeMap::new(),
+            general_channel_event: None,
+            lock_accessor_event: None,
+            binder_event: None,
             aoc_list_changed_event: None,
             save_data_quota: ipc::SaveDataQuota::default(),
             memory_layout: MemoryLayout::PLAIN,
@@ -1342,6 +1374,13 @@ impl Cpu {
 
     /// `svcWaitProcessWideKeyAtomic(mutex_addr, key, self, timeout)`: release
     /// the mutex and block on the condition variable.
+    ///
+    /// The kernel publishes "a thread is queued here" into the condition
+    /// variable's own word on the way in. That is not bookkeeping: `nn::os`
+    /// reads the word before it signals and returns without a syscall when it
+    /// is zero, so a kernel that never writes it turns every
+    /// `SignalConditionVariable` in the process into a no-op and parks every
+    /// waiter for good.
     pub(super) fn wait_process_wide_key(
         &mut self,
         mutex: u32,
@@ -1350,6 +1389,7 @@ impl Cpu {
         timeout: i64,
     ) {
         self.ensure_main_thread();
+        let _ = self.mem.write_u32(key, CONDVAR_HAS_WAITERS);
         self.arbitrate_unlock(mutex);
         let deadline = self.wait_deadline(timeout);
         self.threads[self.current_thread].state = ThreadState::WaitKey { key, mutex, deadline };
@@ -1426,6 +1466,14 @@ impl Cpu {
                 self.wake_condvar_waiter(i, mutex);
                 woken += 1;
             }
+        }
+        // Emptying the queue clears the word again, so the next signal with
+        // nobody queued costs the guest nothing.
+        let queued = self.threads.iter().any(
+            |t| matches!(t.state, ThreadState::WaitKey { key: waiting, .. } if waiting == key),
+        );
+        if !queued {
+            let _ = self.mem.write_u32(key, 0);
         }
     }
 

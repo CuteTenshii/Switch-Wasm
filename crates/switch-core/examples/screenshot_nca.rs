@@ -194,10 +194,12 @@ fn main() {
         }
         if watch_hits < 24 && !watch_pc.is_empty() && watch_pc.contains(&cpu.get_pc()) {
             println!(
-                "[watch-pc] {:#x} at step {done} x0={:#x} x8={:#x} x19={:#x} x22={:#x} bt={:x?}",
+                "[watch-pc] {:#x} at step {done} x0={:#x} x1={:#x} x8={:#x} x9={:#x} x19={:#x} x22={:#x} bt={:x?}",
                 cpu.get_pc(),
                 cpu.reg(0),
+                cpu.reg(1),
                 cpu.reg(8),
+                cpu.reg(9),
                 cpu.reg(19),
                 cpu.reg(22),
                 cpu.backtrace(6)
@@ -252,7 +254,8 @@ fn main() {
             }
         }
         let pc_before = cpu.get_pc();
-        if cpu.step().is_err() {
+        if let Err(e) = cpu.step() {
+            println!("[step] error at pc={:#x} step {done}: {e:?}", cpu.get_pc());
             break;
         }
         if read_trap.is_some() && cpu.mem.take_read_hit().is_some() {
@@ -302,6 +305,7 @@ fn main() {
     for (pc, n) in &readers {
         println!("[reader] {pc:#x} {n}");
     }
+    println!("[mem] {} MiB mapped", cpu.mem.mapped_bytes() / (1024 * 1024));
     println!("[threads] sampled share = {:?}", &share[..]);
     println!("[bt] {:#x} <- {:x?}", cpu.get_pc(), cpu.backtrace(12));
     let hot_snapshot = hot.clone();

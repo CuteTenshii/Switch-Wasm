@@ -175,6 +175,15 @@ impl Cpu {
                 if Some(self.read_zr(0)) == self.hid_shmem_handle || size == HID_SHMEM_SIZE {
                     self.hid_shmem_addr = addr;
                     self.set_gamepad_state(0, 0, 0, 0, 0);
+                    // And an empty touch sample, for the same reason the pad
+                    // is published: `hid` keeps every LIFO in a valid state
+                    // whether or not anything is producing input, and a header
+                    // left at zero is not "no touches" — it is a ring with no
+                    // capacity. `nn::hid`'s reader takes a count out of it and
+                    // the Home Menu walked a sixteen-entry array several
+                    // hundred million entries long, soft-mapping a page every
+                    // eighty bytes until the guest ran out of memory.
+                    self.set_touch_state(&[]);
                 } else if size == PL_SHMEM_SIZE {
                     self.pl_shmem_addr = addr;
                     self.write_shared_font(addr);
@@ -680,8 +689,26 @@ impl Cpu {
                     self.sleep_until(done_at);
                     return Ok(());
                 }
-                self.write_zr(0, RESULT_OK);
-                self.write_zr(1, 0);
+                // Nothing has fired, and the caller is prepared to block. The
+                // wait is reissued rather than answered: rewind onto the `svc`
+                // and hand the CPU on, so the handles are re-checked every
+                // time this thread is scheduled.
+                //
+                // Answering it as *satisfied* is the alternative, and it does
+                // not merely lie about timing — `svcWaitSynchronization`
+                // reports **which** handle fired, and the caller runs that
+                // object's handler. Naming index 0 unconditionally sent the
+                // Home Menu to `IHomeMenuFunctions::PopFromGeneralChannel`
+                // because `am:general-channel` happened to be first in a
+                // nine-handle wait; the channel was empty, as it always is
+                // here, and qlaunch aborts on that rather than looping.
+                //
+                // Spinning costs cycles, and that is the point: the display
+                // and audio ticks a few lines up are generated from `cycles`,
+                // so a wait that something can eventually satisfy still ends,
+                // and one that nothing can is a deadlock the guest really is
+                // in.
+                self.pc = self.pc.wrapping_sub(4);
                 self.yield_thread();
                 Ok(())
             }
