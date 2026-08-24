@@ -19,6 +19,7 @@ out to be stale.
 | `NX-Shell.nro` | clean exit at 15.7M steps, no font (below) | no |
 | `Checkpoint.nro` | layout, icons and chrome; text still blocks ([below](#checkpoint-was-the-first-deko3d-app-to-draw-anything)) | yes |
 | "A Short Hike" (NSP) | runs 1.5B steps with no fault or abort | not yet |
+| "Tomodachi Life" (NSP) | runs 1.2B steps with no fault or abort ([below](#tomodachi-life-started-a-thread-on-a-null-800m-instructions-in)) | not yet |
 
 - **GPU**: the nvdrv/nvmap/GMMU/channel/copy-engine path is real
   (`crates/switch-core/src/gpu`), and so is the 3D shader core: a Maxwell
@@ -1312,6 +1313,81 @@ budget, not a fault — with no abort and no unimplemented syscall. It still
 presents no frame, and the reason is not the GPU: over that whole run it
 issues no draw call at all (see [the shader core](#the-shader-core)).
 
+### Tomodachi Life started a thread on a null, 800M instructions in
+
+The report was a CPU fault — `unimplemented instruction 0x8625c300 at
+pc=0x862dd300` — and neither number is code. `0x862dd300` is a heap address,
+and the trace's last two instructions are `nn::os::detail::InvokeThread`
+reading its thread's entry point and calling it:
+
+```
+0d3e0bd8: mrs x8, tpidrro_el0
+0d3e0bdc: str x0, [x8, #0x1f8]      ; the current thread is x0 = the ThreadType*
+...
+0d3e0c28: ldp x0, x8, [x20, #0x60]  ; { argument, function }
+0d3e0c2c: blr x8
+```
+
+x20 was **0**, so the load came out of the zero page and the branch went to
+whatever the guest had left at absolute `0x68`. `TRACE_WAIT` named the whole
+chain in one line: thirty-odd `svcCreateThread`s whose `arg` climbs steadily
+through the heap — `0x35415020`, `0x64d43020`, … `0x8635e020` — and then one
+with `arg=0`. The title's own thread constructor allocates a stack and a
+0x1c0-byte `ThreadType`, stores the result **without checking it**, and hands
+it to `nn::os::CreateThread`. Its allocator had run dry.
+
+So the fault was a symptom of the address-space split. `svcGetInfo` reported
+1.5 GiB of total memory, the title asked `svcSetHeapSize` for exactly that
+much, and 800M instructions later it had spent it — most of it on pools it
+sizes *from that same figure*, so it fills whatever it is given and its fixed
+costs have to fit in what is left. The other 1.5 GiB was the alias region,
+which this title never touches: `nnSdk` picks its heap route at init from the
+NPDM's system resource size, and without virtual address memory it is
+`svcSetHeapSize` and nothing else. Confirmed by tracing both kinds — Just
+Dance 2019 (plain) issues syscall 0x01 once and 0x2c never; "A Short Hike"
+(virtual address memory) issues 0x2c 89 times and 0x01 never. `MemoryLayout::PLAIN`
+now spends the space on the region its own titles grow into: 2.5 GiB of heap
+and a 512 MiB alias region, mirroring what `VIRTUAL_ADDRESS` already does in
+the other direction. Just Dance 2019 reaches the same pc with the same GPU
+work and the same thread states at the same step; hbmenu's frame is
+byte-identical.
+
+Past the memory wall the title stops naming *itself* and starts naming
+services, which is the useful kind of failure:
+
+- **`/dev/nvhost-as-gpu` ioctl 0x14 (`Remap`)** was unimplemented, and the
+  title issues 18 of them. Unlike `MapBufferEx` it is a batch, names the GPU
+  VA outright instead of asking for one, and counts every offset and length in
+  big pages; a zero nvmap handle means "leave this range unmapped". These 18
+  map one buffer at 18 consecutive VAs with 18 different block-linear kinds.
+  Implementing it needed `AddressSpace::unmap_range`, which trims what it only
+  partly covers rather than dropping it — `translate` takes the ranges to be
+  disjoint, and an old mapping left overlapping a new one wins on whichever
+  starts lower.
+- **`IAudioDevice::ListAudioOutputDeviceName` (command 14)**, the 13.0.0
+  output-only form of `ListAudioDeviceName`, answered `UnknownCommandId` and
+  the title aborted on it.
+- **`RequestUpdateAudioRenderer`'s reply was missing two sections.** Both
+  `audrvUpdate` and `nnSdk` walk it section by section against sizes they
+  computed themselves, so a section left out does not get ignored — it
+  desynchronises the walk. The reply had no effect statuses and no renderer
+  info, and `nnSdk` aborted on `nn::audio` result 153-41, a constant compiled
+  into the SDK. The arithmetic settles it exactly: the title opens a
+  revision-15 renderer with 401 mempools, 96 voices, 17 effects and 2 sinks
+  and hands over a 0x29f0-byte buffer, and 0x40 + 0x1910 + 0x600 + 17×0x90 +
+  0x40 + 0x10 + 0xb0 + 0x10 is 0x29f0 to the byte. An effect's status is
+  0x90 bytes from revision 9 and 0x10 before it; the renderer info is 0x10
+  from revision 5 and absent before it.
+
+With those, the title runs **1.2 billion** instructions — the step budget, not
+a fault — with no abort and no unimplemented service. Like "A Short Hike" it
+still presents no frame; it has its layer and a stream of `nvdrv` ioctls and
+issues no draw call. One gap is still open and unidentified:
+`/dev/nvhost-ctrl-gpu` ioctl 0x13, called once at startup with an 8-byte
+argument of zeros. Nothing downstream visibly depends on it, and guessing a
+handler for an ioctl nobody has documented is worse than answering
+`NotImplemented`.
+
 ### The shader core
 
 Both halves of this existed before and both were narrow enough that only the
@@ -1736,11 +1812,16 @@ The old item 1, "a Maxwell SASS interpreter plus a software rasterizer", is
 also **resolved** — see [the shader core](#the-shader-core). It did not make
 the retail title render, for the reason recorded there.
 
-1. **Find out why "A Short Hike" issues no draws.** It has its layer, its
-   buffer queue and a stream of `nvdrv` ioctls, and over 1.5 billion
-   instructions it submits one pushbuffer carrying 3536 methods and zero
-   draw calls. Whatever it is waiting on sits above the GPU: the next thing
-   to do is find which thread is spinning at `pc=0xa70b7ec` and on what.
+1. **Find out why a retail title issues no draws.** This is now two titles
+   with the same shape: "A Short Hike" has its layer, its buffer queue and a
+   stream of `nvdrv` ioctls, and over 1.5 billion instructions it submits one
+   pushbuffer carrying 3536 methods and zero draw calls; Tomodachi Life
+   submits four carrying 8032 and zero. Whatever they are waiting on sits
+   above the GPU: the next thing to do is find which thread is spinning at
+   `pc=0xa70b7ec` (A Short Hike) or `pc=0xd4c36f0` (Tomodachi Life) and on
+   what. `/dev/nvhost-ctrl-gpu` ioctl 0x13 is the one call either title makes
+   that is still answered `NotImplemented`, and nothing has yet been found
+   that depends on it.
 2. **The rest of the thread syscalls.** The title's own scheduler and IL2CPP's
    garbage collector reach for them one at a time as it runs;
    `SetThreadActivity` and `GetThreadContext3` are done, and whatever it asks
