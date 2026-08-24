@@ -4355,6 +4355,53 @@ impl Cpu {
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // ---- what a pad is and how it is attached ----
+                //
+                // Each of these takes a `u32 npad_id` and answers about that
+                // one pad, so they all start by asking which of the two this
+                // emulator publishes is being asked about: the handheld slot,
+                // or the Pro Controller in player 1's.
+                //
+                // HasBattery / HasLeftRightBattery -> bool, or one bool per
+                // half. Every controller here runs on a battery; only the
+                // handheld pad's is in two halves, which is the same split
+                // `device_type` already draws between `HandheldLeft|Right` and
+                // a single `FullKey`.
+                //
+                // GetNpadInterfaceType -> u8, and GetNpadLeftRightInterfaceType
+                // -> u8 left, u8 right. `HidNpadInterfaceType` says how the
+                // controller reaches the console: Bluetooth (1), rail (2) or
+                // USB (3). A title reads it to decide what a pad is capable of
+                // — whether it can be told to sleep, how much of a rumble
+                // budget it has, which glyphs to draw for it.
+                //
+                // The shared memory already said which is which: slot 0 is a
+                // Pro Controller carrying `ATTR_WIRED`, and a wired Pro
+                // Controller is one on its USB cable; the handheld slot
+                // carries left- and right-wired, which is what a pair of
+                // Joy-Con report while they sit on the rails. Nothing here is
+                // ever Bluetooth — there is no radio for one to be on the far
+                // end of.
+                Some(403..=406) => {
+                    /// `HidNpadIdType_Handheld`; players 1-8 are 0-7.
+                    const HANDHELD: u32 = 0x20;
+                    /// `HidNpadInterfaceType_Rail` and `_USB`.
+                    const RAIL: u8 = 2;
+                    const USB: u8 = 3;
+                    let handheld = self.mem.read_u32(data)? == HANDHELD;
+                    let reply: &[u8] = match cmd_id {
+                        Some(403) => &[1],
+                        Some(404) if handheld => &[1, 1],
+                        Some(404) => &[0, 0],
+                        // One pad reaches the console one way, so both of its
+                        // halves report the same interface.
+                        Some(406) if handheld => &[RAIL, RAIL],
+                        Some(406) => &[USB, USB],
+                        _ if handheld => &[RAIL],
+                        _ => &[USB],
+                    };
+                    self.write_ipc_response(tls, 0, &[], reply, &[])
+                }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // `IHidSystemServer`: the privileged half of hid, opened as
@@ -9048,6 +9095,52 @@ mod tests {
             assert_ne!(result, UNKNOWN_COMMAND_ID, "command {command} was refused");
             assert_eq!(result, 0, "command {command}");
         }
+    }
+
+    /// Drive one `hid` command carrying a single `u32 npad_id` and hand back
+    /// the bytes it answered with.
+    fn hid_npad_query(command_id: u32, npad_id: u32, len: u32) -> Vec<u8> {
+        let mut cpu = request(false, command_id, &npad_id.to_le_bytes());
+        cpu.register_service_handle(9, "hid");
+        cpu.hid_request(TLS, 9, Some(command_id)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "Result for command {command_id}, npad {npad_id}"
+        );
+        (0..len).map(|i| cpu.mem.read_u8(TLS + 0x20 + i).unwrap()).collect()
+    }
+
+    #[test]
+    fn the_handheld_pad_is_on_its_rails_and_the_pro_controller_on_its_cable() {
+        // GetNpadInterfaceType(u32 npad_id) and its left/right form. The two
+        // pads published into the shared memory are attached differently, and
+        // a single answer for both would contradict the attributes already
+        // written there.
+        const HANDHELD: u32 = 0x20;
+        const PLAYER_1: u32 = 0;
+        const RAIL: u8 = 2;
+        const USB: u8 = 3;
+
+        assert_eq!(hid_npad_query(405, HANDHELD, 1), [RAIL]);
+        assert_eq!(hid_npad_query(406, HANDHELD, 2), [RAIL, RAIL]);
+        assert_eq!(hid_npad_query(405, PLAYER_1, 1), [USB]);
+        assert_eq!(hid_npad_query(406, PLAYER_1, 2), [USB, USB]);
+    }
+
+    #[test]
+    fn every_pad_has_a_battery_and_only_the_handheld_one_has_two() {
+        // HasBattery / HasLeftRightBattery. Both pads run on a battery; the
+        // halves are the handheld pad's alone, which is the split
+        // `device_type` already draws between `HandheldLeft|Right` and a
+        // single `FullKey`.
+        const HANDHELD: u32 = 0x20;
+        const PLAYER_1: u32 = 0;
+
+        assert_eq!(hid_npad_query(403, HANDHELD, 1), [1]);
+        assert_eq!(hid_npad_query(404, HANDHELD, 2), [1, 1]);
+        assert_eq!(hid_npad_query(403, PLAYER_1, 1), [1]);
+        assert_eq!(hid_npad_query(404, PLAYER_1, 2), [0, 0]);
     }
 
     /// Drive one `aoc:u` command on a session opened under that service.

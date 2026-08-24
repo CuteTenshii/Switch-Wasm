@@ -366,6 +366,15 @@ mod hid_shmem {
     pub const FULL_KEY_LIFO: u32 = 0x28;
     pub const HANDHELD_LIFO: u32 = 0x378;
     pub const DEVICE_TYPE: u32 = 0x4188;
+    /// `HidNpadSystemProperties`, and the three `HidPowerInfo` battery levels
+    /// straight after `system_button_properties`. `hidGetNpadPowerInfo*` reads
+    /// one of the three and the two `system_properties` bits that go with it,
+    /// so an entry left at zero is a controller reporting an empty battery.
+    pub const SYSTEM_PROPERTIES: u32 = 0x4190;
+    pub const BATTERY_LEVEL: u32 = 0x4198;
+    /// How many `HidPowerInfo`s one npad has: the pad as a whole, then its
+    /// left and right halves.
+    pub const POWER_INFO_COUNT: u32 = 3;
 
     /// `HidNpadCommonLifo`: a 0x20-byte header then 17 storage entries. The
     /// header's fields are unused/buffer_count/tail/count; a reader takes
@@ -390,6 +399,19 @@ mod hid_shmem {
 
     pub const DEVICE_FULL_KEY: u32 = 1 << 0;
     pub const DEVICE_HANDHELD: u32 = (1 << 2) | (1 << 3); // HandheldLeft|Right
+
+    /// `HidPowerInfo::battery_level` is a quarter-full step, 0 to 4.
+    pub const BATTERY_FULL: u32 = 4;
+
+    /// The `PowerInfo{0,1,2}PowerConnected` bits of `system_properties`. Their
+    /// `Charging` counterparts are bits 0-2 and stay clear: a battery that is
+    /// already full is not taking a charge.
+    pub const SYSTEM_PROP_POWER_CONNECTED: u32 = (1 << 3) | (1 << 4) | (1 << 5);
+    /// The button capabilities in the same word. Both pads published here have
+    /// a full face: ABXY the way a Switch prints them, a plus and a minus, and
+    /// a directional pad.
+    pub const SYSTEM_PROP_FULL_BUTTONS: u32 =
+        (1 << 11) | (1 << 13) | (1 << 14) | (1 << 15);
 
     pub const ATTR_CONNECTED: u32 = 1 << 0;
     pub const ATTR_WIRED: u32 = 1 << 1;
@@ -2277,6 +2299,24 @@ impl Cpu {
         let _ = self.mem.write_u32(base + h::STYLE_SET, style);
         let _ = self.mem.write_u32(base + h::JOY_ASSIGNMENT_MODE, 0); // Dual
         let _ = self.mem.write_u32(base + h::DEVICE_TYPE, device_type);
+
+        // A pad that never writes its power info is a pad reporting an empty
+        // battery: `hidGetNpadPowerInfo*` reads `battery_level` straight out
+        // of here, and the zero an unwritten field holds is its "flat" step,
+        // not a missing reading. Both pads published here are attached to the
+        // console — one on its cable, one on the rails — so both are on
+        // external power with a full battery, and the level is written for the
+        // pad and for each of its halves because a caller asking about a
+        // handheld's left Joy-Con reads the second entry, not the first.
+        let _ = self.mem.write_u32(
+            base + h::SYSTEM_PROPERTIES,
+            h::SYSTEM_PROP_POWER_CONNECTED | h::SYSTEM_PROP_FULL_BUTTONS,
+        );
+        for info in 0..h::POWER_INFO_COUNT {
+            let _ = self
+                .mem
+                .write_u32(base + h::BATTERY_LEVEL + info * 4, h::BATTERY_FULL);
+        }
 
         let lifo = base.wrapping_add(lifo_off);
         let _ = self.mem.write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);

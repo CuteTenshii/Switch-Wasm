@@ -2366,6 +2366,21 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
         assert_eq!(cpu.mem.read_u32(entry + 0x1C).unwrap(), 30000);
         // IsConnected, whatever else the controller reports about its halves.
         assert_eq!(cpu.mem.read_u32(entry + 0x28).unwrap() & 1, 1);
+
+        // Power info, straight after `system_button_properties`: a full
+        // battery for the pad and for each of its two halves. An unwritten
+        // `battery_level` reads back as 0, which is `HidPowerInfo`'s flat
+        // step rather than a missing reading, so a controller UI drew every
+        // pad here as empty.
+        for info in 0..3u32 {
+            let level = cpu.mem.read_u32(base + 0x4198 + info * 4).unwrap();
+            assert_eq!(level, 4, "battery_level[{info}]");
+        }
+        // PowerInfo{0,1,2}PowerConnected set, their Charging counterparts in
+        // bits 0-2 clear: attached to the console, and already full.
+        let properties = cpu.mem.read_u32(base + 0x4190).unwrap();
+        assert_eq!(properties & 0x38, 0x38, "PowerConnected");
+        assert_eq!(properties & 0x7, 0, "Charging");
     }
 }
 
