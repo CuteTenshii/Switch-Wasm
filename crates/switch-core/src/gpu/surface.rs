@@ -278,7 +278,39 @@ impl ColorFormat {
     }
 
     /// Pack a normalized RGBA colour into this format's raw pixel bytes.
+    /// Encode a colour, which is always given in **linear** light, into the
+    /// format's stored representation.
+    ///
+    /// An sRGB format stores sRGB-encoded channels, so this is where the
+    /// transfer function is applied. Doing it here rather than at each call
+    /// site is what keeps the render target, the blitter and the sampler
+    /// agreeing about what the bytes of an sRGB surface mean — they did not,
+    /// and a surface drawn into as though it were linear then sampled as
+    /// though it were sRGB came back darkened.
     pub fn encode(&self, rgba: [f32; 4]) -> Result<u128> {
+        if self.is_srgb() {
+            let mut encoded = rgba;
+            // Alpha is linear even in an sRGB format.
+            for channel in encoded.iter_mut().take(3) {
+                *channel = linear_to_srgb(*channel);
+            }
+            return self.encode_stored(encoded);
+        }
+        self.encode_stored(rgba)
+    }
+
+    /// Decode one stored value into **linear** light; see [`ColorFormat::encode`].
+    pub fn decode(&self, raw: u128) -> Result<[f32; 4]> {
+        let mut rgba = self.decode_stored(raw)?;
+        if self.is_srgb() {
+            for channel in rgba.iter_mut().take(3) {
+                *channel = srgb_to_linear(*channel);
+            }
+        }
+        Ok(rgba)
+    }
+
+    fn encode_stored(&self, rgba: [f32; 4]) -> Result<u128> {
         let unorm8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
         if let Some(order) = self.order8() {
             let (r, g, b, a) = (
@@ -350,7 +382,7 @@ impl ColorFormat {
     }
 
     /// Unpack raw pixel bytes into a normalized RGBA colour.
-    pub fn decode(&self, raw: u128) -> Result<[f32; 4]> {
+    fn decode_stored(&self, raw: u128) -> Result<[f32; 4]> {
         let unorm8 = |v: u32| (v & 0xFF) as f32 / 255.0;
         if let Some(order) = self.order8() {
             let v = raw as u32;
@@ -674,6 +706,50 @@ mod tests {
         let fmt = ColorFormat::from_raw(0xCF).unwrap();
         let raw = fmt.encode([1.0, 0.0, 0.0, 1.0]).unwrap();
         assert_eq!(raw as u32, 0xFFFF_0000);
+    }
+
+    /// An sRGB surface stores sRGB-encoded bytes and hands out linear light.
+    /// Scan-out then re-encodes, so the two compose to a pass-through: the
+    /// byte a guest wrote is the byte the display gets. Before the transfer
+    /// function moved into the format, decode was the identity and scan-out
+    /// encoded anyway, which brightened every sRGB frame.
+    #[test]
+    fn an_srgb_surface_survives_the_trip_to_scan_out_unchanged() {
+        let srgb = ColorFormat::from_raw(0xD6).unwrap(); // RGBA8Unorm_sRGB
+        assert!(srgb.is_srgb());
+        for byte in 0..=255u32 {
+            let stored = byte | (byte << 8) | (byte << 16) | (0xFF << 24);
+            let linear = srgb.decode(stored as u128).unwrap();
+            // Exactly what `Gpu::present` does with the decoded value.
+            let out = (linear_to_srgb(linear[0]).clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+            assert_eq!(out, byte, "stored byte {byte}");
+            assert_eq!(linear[3], 1.0, "alpha is not sRGB-encoded");
+        }
+    }
+
+    #[test]
+    fn an_srgb_format_round_trips_a_linear_colour() {
+        let srgb = ColorFormat::from_raw(0xD6).unwrap();
+        for step in 0..=32u32 {
+            let value = step as f32 / 32.0;
+            let raw = srgb.encode([value, value, value, 1.0]).unwrap();
+            let back = srgb.decode(raw).unwrap();
+            // Eight bits of sRGB is finer than 1/255 of linear near black and
+            // coarser near white; a quarter of a step is the worst of it.
+            assert!((back[0] - value).abs() < 0.01, "{value} came back {}", back[0]);
+        }
+    }
+
+    #[test]
+    fn the_same_bytes_read_darker_through_an_srgb_format() {
+        let linear = ColorFormat::from_raw(0xD5).unwrap(); // RGBA8Unorm
+        let srgb = ColorFormat::from_raw(0xD6).unwrap();
+        assert!(!linear.is_srgb() && srgb.is_srgb());
+        let stored = 0xFF80_8080u32 as u128;
+        assert!(srgb.decode(stored).unwrap()[0] < linear.decode(stored).unwrap()[0]);
+        // Both ends of the range are fixed points of the transfer function.
+        assert_eq!(srgb.decode(0xFF00_0000u32 as u128).unwrap()[0], 0.0);
+        assert_eq!(srgb.decode(0xFFFF_FFFFu32 as u128).unwrap()[0], 1.0);
     }
 
     #[test]

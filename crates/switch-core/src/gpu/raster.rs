@@ -735,8 +735,10 @@ fn clip_near(tri: [ClipVertex; 3]) -> Vec<[ClipVertex; 3]> {
 /// render target.
 pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let call = engine.last_draw;
+    // Logical target 0, through whatever slot RenderTargetControl maps it onto
+    // — the same resolution a clear does.
     let rt = engine
-        .render_target(0)?
+        .render_target(engine.render_target_slot(0))?
         .ok_or_else(|| Error::Gpu("raster: draw with no bound render target".into()))?;
 
     let vs_binding = engine
@@ -1393,6 +1395,43 @@ mod tests {
         assert_eq!(alpha_coverage(2.0, 4), u32::MAX);
         assert_eq!(alpha_coverage(-1.0, 4), 0);
         assert_eq!(alpha_coverage(1.0, 16), u32::MAX);
+    }
+
+    /// RenderTargetControl lets a guest address its targets in an order other
+    /// than the one it bound them in. A clear honoured that mapping and a draw
+    /// did not, so a frame could be cleared on one surface and drawn on
+    /// another; this pins the two to the same answer.
+    #[test]
+    fn a_draw_follows_the_render_target_control_mapping() {
+        let (mut mem, vmm, mut engine) = pipeline_harness();
+        let slot0 = engine.render_target(0).unwrap().unwrap().addr;
+        let slot1 = slot0 + 0x800;
+        // Bind a second target in physical slot 1, same 16x8 pitch-linear form.
+        engine.regs.set(0x210, (slot1 >> 32) as u32);
+        engine.regs.set(0x211, slot1 as u32);
+        engine.regs.set(0x212, 16 * 4);
+        engine.regs.set(0x213, 8);
+        engine.regs.set(0x214, 0xD5);
+        engine.regs.set(0x215, 1 << 12);
+        engine.regs.set(0x216, 1);
+        // One target in use, and logical 0 maps onto physical slot 1.
+        engine.regs.set(0x487, 1 | (1 << 4));
+        assert_eq!(engine.render_target_slot(0), 1);
+
+        let vbuf_addr = engine.vertex_array(0).start;
+        let color = [1.0f32, 1.0, 1.0, 1.0];
+        write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let mut ctx =
+            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        draw(&engine, &mut ctx).unwrap();
+
+        assert_ne!(ctx.read_u32(slot1).unwrap(), 0, "the draw belongs in slot 1");
+        assert_eq!(ctx.read_u32(slot0).unwrap(), 0, "slot 0 is not the mapped target");
     }
 
     #[test]

@@ -879,6 +879,23 @@ impl Engine3D {
         self.regs.bit(MULTISAMPLE_CONTROL, 0)
     }
 
+    /// The physical slot `RenderTargetControl` maps logical colour target
+    /// `index` onto.
+    ///
+    /// A guest may bind its targets in one order and address them in another,
+    /// and the two places that resolve a target — a clear and a draw — have to
+    /// agree about it. They did not: the clear mapped and the draw did not, so
+    /// content that remapped target 0 cleared one surface and drew into
+    /// whichever one happened to be bound in slot 0.
+    pub fn render_target_slot(&self, index: u32) -> u32 {
+        let count = self.regs.field(RENDER_TARGET_CONTROL, 0, 3);
+        if index < count {
+            self.regs.field(RENDER_TARGET_CONTROL, 4 + index * 3, 6 + index * 3)
+        } else {
+            index
+        }
+    }
+
     /// Resolve colour render target `index` from the register file.
     pub fn render_target(&self, index: u32) -> Result<Option<RenderTarget>> {
         let base = RENDER_TARGET_BASE + index * RENDER_TARGET_STRIDE;
@@ -1002,13 +1019,7 @@ impl Engine3D {
         channels: [bool; 4],
         ctx: &mut ExecCtx,
     ) -> Result<()> {
-        // RenderTargetControl maps a logical target id onto a physical slot.
-        let num_targets = self.regs.field(RENDER_TARGET_CONTROL, 0, 3);
-        let slot = if target < num_targets {
-            self.regs.field(RENDER_TARGET_CONTROL, 4 + target * 3, 6 + target * 3)
-        } else {
-            target
-        };
+        let slot = self.render_target_slot(target);
         let rt = match self.render_target(slot)? {
             Some(rt) => rt,
             None => return Ok(()),
