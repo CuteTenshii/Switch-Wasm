@@ -17,7 +17,8 @@
 //! look.
 
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::surface::{ColorFormat, Layout, Surface};
+use crate::gpu::bcn::{self, Codec};
+use crate::gpu::surface::{self, bilinear, ColorFormat, Layout};
 use crate::{Error, Result};
 
 /// What nouveau programs `TexCbIndex` to: bank 15, the buffer it reserves
@@ -117,22 +118,138 @@ fn decode_swizzle_source(bits: u32) -> Result<SwizzleSource> {
     }
 }
 
+/// How a texture's texels are stored.
+///
+/// The distinction is not cosmetic: a plain texel can be read on its own,
+/// while a compressed one only exists as part of a block that has to be
+/// decoded whole. That changes the addressing as well as the decode — a
+/// compressed surface is swizzled in units of blocks, not texels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TexelKind {
+    Plain(ColorFormat),
+    Block(Codec),
+}
+
 /// A parsed TIC: where the texels are and how to read them, plus the
 /// per-component swizzle to apply once one is decoded.
 #[derive(Debug, Clone, Copy)]
 pub struct Texture {
-    pub surface: Surface,
+    pub addr: u64,
+    /// Extent in texels, which for a compressed texture is not its extent in
+    /// blocks — the last block of a row or column may be partly outside it.
+    pub width: u32,
+    pub height: u32,
+    pub layout: Layout,
+    pub kind: TexelKind,
+    /// The stored channels are sRGB-encoded, so sampling converts them back to
+    /// linear light before the shader sees them.
+    pub srgb: bool,
     pub swizzle: [SwizzleSource; 4],
 }
 
-/// The [`ColorFormat`] that stores a TIC `COMPONENTS_SIZES` layout.
+impl Texture {
+    /// Fetch and decode one texel, clamped to the texture's extent.
+    pub fn texel(&self, x: u32, y: u32, ctx: &ExecCtx) -> Result<[f32; 4]> {
+        let x = x.min(self.width.saturating_sub(1));
+        let y = y.min(self.height.saturating_sub(1));
+        let mut texel = match self.kind {
+            TexelKind::Plain(format) => {
+                let bpp = format.bytes_per_pixel;
+                let width_bytes = match self.layout {
+                    Layout::Pitch { pitch } => pitch,
+                    Layout::BlockLinear { .. } => self.width * bpp,
+                };
+                let va = self.addr + self.layout.offset(x * bpp, y, width_bytes) as u64;
+                format.decode(ctx.read_pixel(va, bpp)?)?
+            }
+            TexelKind::Block(codec) => {
+                // The swizzle addresses a compressed surface in blocks: one
+                // "pixel" of it is a whole block, and a row is as many bytes
+                // as the row has blocks. Reading it in texels instead is the
+                // mistake that shreds a compressed image into diagonal
+                // ribbons, because the stride comes out sixteen times too big.
+                let bytes = codec.bytes_per_block();
+                let blocks_wide = self.width.div_ceil(BLOCK_SIZE);
+                let width_bytes = match self.layout {
+                    Layout::Pitch { pitch } => pitch,
+                    Layout::BlockLinear { .. } => blocks_wide * bytes,
+                };
+                let va = self.addr
+                    + self.layout.offset((x / BLOCK_SIZE) * bytes, y / BLOCK_SIZE, width_bytes)
+                        as u64;
+                let raw = ctx.read_pixel(va, bytes)?.to_le_bytes();
+                let block = bcn::decode(codec, &raw[..bytes as usize])?;
+                block[((y % BLOCK_SIZE) * BLOCK_SIZE + (x % BLOCK_SIZE)) as usize]
+            }
+        };
+        if self.srgb {
+            // Alpha is never sRGB-encoded, whatever the colour channels are.
+            for channel in texel.iter_mut().take(3) {
+                *channel = surface::srgb_to_linear(*channel);
+            }
+        }
+        Ok(texel)
+    }
+
+    pub fn sample_point(&self, u: f64, v: f64, ctx: &ExecCtx) -> Result<[f32; 4]> {
+        self.texel(u.max(0.0) as u32, v.max(0.0) as u32, ctx)
+    }
+
+    pub fn sample_bilinear(&self, u: f64, v: f64, ctx: &ExecCtx) -> Result<[f32; 4]> {
+        bilinear(u, v, |x, y| self.texel(x, y, ctx))
+    }
+}
+
+/// Every BC codec tiles the image into 4x4 blocks.
+const BLOCK_SIZE: u32 = 4;
+
+/// How a TIC's `COMPONENTS_SIZES` and `R_DATA_TYPE` pair describes its texels.
 ///
-/// The two enumerations name channels the same way — most significant
-/// first — so `A8B8G8R8` and `RGBA8Unorm` are the same bytes, and so are
-/// `G8R8`/`RG8Unorm` and `R8`/`R8Unorm`. Only the sizes whose channel order
-/// is unambiguous under that reading are listed; anything else is a clear,
-/// honest error rather than a guess at where its channels sit.
-fn color_format_for_components(components_sizes: u32) -> Result<ColorFormat> {
+/// The uncompressed sizes and [`ColorFormat`] name channels the same way —
+/// most significant first — so `A8B8G8R8` and `RGBA8Unorm` are the same bytes,
+/// and so are `G8R8`/`RG8Unorm` and `R8`/`R8Unorm`. Only the sizes whose
+/// channel order is unambiguous under that reading are listed.
+///
+/// The compressed sizes are the `ImageFormat` values deko3d writes
+/// (`image_formats.h`); their data type distinguishes the signed and unsigned
+/// readings of the same block layout. Anything else is a clear, honest error
+/// rather than a guess at where its channels sit.
+fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
+    const SNORM: u32 = 1;
+    const UNORM: u32 = 2;
+    let codec = match (components_sizes, data_type) {
+        (0x24, UNORM) => Some(Codec::Bc1),      // DXT1
+        (0x25, UNORM) => Some(Codec::Bc2),      // DXT23
+        (0x26, UNORM) => Some(Codec::Bc3),      // DXT45
+        (0x27, UNORM) => Some(Codec::Bc4Unorm), // DXN1
+        (0x27, SNORM) => Some(Codec::Bc4Snorm),
+        (0x28, UNORM) => Some(Codec::Bc5Unorm), // DXN2
+        (0x28, SNORM) => Some(Codec::Bc5Snorm),
+        (0x17, UNORM) => Some(Codec::Bc7),
+        _ => None,
+    };
+    if let Some(codec) = codec {
+        return Ok(TexelKind::Block(codec));
+    }
+    // Name the formats that are recognised but undecoded, so their absence
+    // reads as "not written yet" rather than "not a texture format".
+    let pending = match components_sizes {
+        0x10 | 0x11 => Some("BC6H"),
+        0x40..=0x57 => Some("ASTC"),
+        _ => None,
+    };
+    if let Some(name) = pending {
+        return Err(Error::Gpu(format!(
+            "texture: {name} ({components_sizes:#x}) is a compressed format this decoder does not \
+             implement yet"
+        )));
+    }
+    if data_type != UNORM {
+        return Err(Error::Gpu(format!(
+            "texture: unsupported TIC R_DATA_TYPE {data_type} for COMPONENTS_SIZES \
+             {components_sizes:#x} (uncompressed textures are UNORM only)"
+        )));
+    }
     let raw = match components_sizes {
         0x08 => 0xD5, // A8B8G8R8 -> RGBA8Unorm
         0x18 => 0xEA, // G8R8     -> RG8Unorm
@@ -143,7 +260,7 @@ fn color_format_for_components(components_sizes: u32) -> Result<ColorFormat> {
             )))
         }
     };
-    ColorFormat::from_raw(raw)
+    Ok(TexelKind::Plain(ColorFormat::from_raw(raw)?))
 }
 
 /// Parse one 32-byte TIC entry (`gm200_texture.xml`'s `TIC2` domain) into a
@@ -160,14 +277,7 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     let dw4 = dw(4)?;
     let dw5 = dw(5)?;
 
-    let format = color_format_for_components(dw0 & 0x7f)?;
-    let r_data_type = (dw0 >> 7) & 0x7;
-    if r_data_type != 2 {
-        return Err(Error::Gpu(format!(
-            "texture: unsupported TIC R_DATA_TYPE {} (only UNORM)",
-            r_data_type
-        )));
-    }
+    let kind = texel_kind_for(dw0 & 0x7f, (dw0 >> 7) & 0x7)?;
     let swizzle = [
         decode_swizzle_source(dw0 >> 19)?,
         decode_swizzle_source(dw0 >> 22)?,
@@ -198,13 +308,20 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     let addr_hi = (dw2 & 0xffff) as u64;
     let tex_addr = (addr_hi << 32) | addr_low as u64;
 
+    // `TextureType_2D` and `_2DNoMipmap` differ only in whether the image has
+    // levels below the one sampled here; anything else has an extent this
+    // decoder would silently misread as a 2D image's.
+    let texture_type = (dw4 >> 23) & 0xF;
+    if texture_type != 1 && texture_type != 7 {
+        return Err(Error::Gpu(format!(
+            "texture: TIC TextureType {texture_type} is not a plain 2D image"
+        )));
+    }
+    let srgb = (dw4 >> 22) & 1 != 0;
     let width = (dw4 & 0xffff) + 1;
     let height = (dw5 & 0xffff) + 1;
 
-    Ok(Texture {
-        surface: Surface { addr: tex_addr, width, height, format, layout },
-        swizzle,
-    })
+    Ok(Texture { addr: tex_addr, width, height, layout, kind, srgb, swizzle })
 }
 
 /// Rearrange a decoded texel into what the shader reads.
@@ -260,7 +377,7 @@ pub fn sample(
 /// Sample already-resolved descriptors at normalized coordinates `(u, v)`.
 pub fn sample_with(ctx: &ExecCtx, d: &Descriptors, u: f64, v: f64) -> Result<[f32; 4]> {
     let (texture, sampler) = (&d.texture, d.sampler);
-    let image = &texture.surface;
+    let image = texture;
 
     let wrap = |mode: Wrap, t: f64, size: u32| -> f64 {
         let t = match mode {
@@ -304,6 +421,8 @@ mod tests {
     /// `X_SOURCE=R, Y_SOURCE=G, Z_SOURCE=B, W_SOURCE=A` in TIC dword 0 — the
     /// identity swizzle, which a plain RGBA texture carries.
     const IDENTITY_SWIZZLE: u32 = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+    /// `TextureType_2D` in dword4, which every real TIC carries.
+    const TYPE_2D: u32 = 1 << 23;
 
     fn harness() -> (Memory, AddressSpace, u64) {
         let mut mem = Memory::new();
@@ -334,18 +453,172 @@ mod tests {
         // dword3: pitch = 64 bytes, in 32B units -> 2.
         vmm.write_u32(&mut mem, base + 12, 2).unwrap();
         // dword4: width - 1 = 15 (width 16).
-        vmm.write_u32(&mut mem, base + 16, 15).unwrap();
+        vmm.write_u32(&mut mem, base + 16, 15 | TYPE_2D).unwrap();
         // dword5: height - 1 = 7 (height 8).
         vmm.write_u32(&mut mem, base + 20, 7).unwrap();
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
         let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
-        let image = read_image(&ctx, base).unwrap().surface;
+        let image = read_image(&ctx, base).unwrap();
         assert_eq!(image.addr, tex_addr);
         assert_eq!(image.width, 16);
         assert_eq!(image.height, 8);
         assert_eq!(image.layout, Layout::Pitch { pitch: 64 });
+    }
+
+    /// A BC1 block whose endpoints are equal decodes to one flat colour, which
+    /// makes a block's identity readable from any texel inside it.
+    fn flat_bc1_block(rgb565: u16) -> u64 {
+        // Both endpoints the same colour and every index zero, as the eight
+        // little-endian bytes of one block.
+        rgb565 as u64 | ((rgb565 as u64) << 16)
+    }
+
+    const RED: u16 = 0xF800;
+    const GREEN: u16 = 0x07E0;
+    const BLUE: u16 = 0x001F;
+    const WHITE: u16 = 0xFFFF;
+
+    /// Write a BC1 TIC for a `width` x `height` texel image at `tex_addr`.
+    fn write_bc1_tic(
+        mem: &mut Memory,
+        vmm: &AddressSpace,
+        tic_addr: u64,
+        tex_addr: u64,
+        width: u32,
+        height: u32,
+        pitch_bytes: Option<u32>,
+    ) {
+        // COMPONENTS_SIZES = DXT1 (0x24), R_DATA_TYPE = UNORM.
+        vmm.write_u32(mem, tic_addr, 0x24 | (2 << 7) | IDENTITY_SWIZZLE).unwrap();
+        match pitch_bytes {
+            Some(pitch) => {
+                vmm.write_u32(mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5).unwrap();
+                vmm.write_u32(mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21)).unwrap();
+                vmm.write_u32(mem, tic_addr + 12, pitch / 32).unwrap();
+            }
+            None => {
+                vmm.write_u32(mem, tic_addr + 4, ((tex_addr as u32) >> 9) << 9).unwrap();
+                vmm.write_u32(mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (3 << 21)).unwrap();
+                vmm.write_u32(mem, tic_addr + 12, 0).unwrap(); // block_height_gobs = 1
+            }
+        }
+        vmm.write_u32(mem, tic_addr + 16, (width - 1) | TYPE_2D).unwrap();
+        vmm.write_u32(mem, tic_addr + 20, height - 1).unwrap();
+    }
+
+    /// A compressed surface is addressed in blocks. Four 4x4 blocks laid out
+    /// across one 16-texel row must be found at 8-byte steps, not at the
+    /// 8-bytes-per-*texel* steps a decoder that forgot the distinction would
+    /// use — which is the difference between an image and diagonal ribbons.
+    #[test]
+    fn a_pitch_bc1_texture_is_addressed_in_blocks() {
+        let (mut mem, vmm, base) = harness();
+        let tic_addr = base;
+        let tex_addr = base + 0x400;
+        write_bc1_tic(&mut mem, &vmm, tic_addr, tex_addr, 16, 8, Some(32));
+
+        // Row 0: red, green, blue, white. Row 1 starts one 32-byte pitch on.
+        for (i, colour) in [RED, GREEN, BLUE, WHITE].into_iter().enumerate() {
+            vmm.write_u64(&mut mem, tex_addr + i as u64 * 8, flat_bc1_block(colour)).unwrap();
+        }
+        vmm.write_u64(&mut mem, tex_addr + 32, flat_bc1_block(GREEN)).unwrap();
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let ctx =
+            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let texture = read_image(&ctx, tic_addr).unwrap();
+        assert_eq!(texture.kind, TexelKind::Block(Codec::Bc1));
+        assert_eq!(texture.width, 16);
+
+        // Every texel of a block reads as that block's colour.
+        assert_eq!(texture.texel(0, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texture.texel(3, 3, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texture.texel(4, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(texture.texel(8, 2, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(texture.texel(15, 3, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        // The next block *row* is one pitch on, not one block on.
+        assert_eq!(texture.texel(0, 4, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0]);
+    }
+
+    /// The same, swizzled: the block-linear stride of a compressed surface is
+    /// its row length in *blocks*, so a whole GOB holds eight block rows
+    /// rather than eight texel rows.
+    #[test]
+    fn a_block_linear_bc1_texture_swizzles_in_blocks() {
+        use crate::gpu::surface::block_linear_offset;
+        let (mut mem, vmm, base) = harness();
+        let tic_addr = base;
+        let tex_addr = base + 0x600; // 512-byte aligned, as BLOCKLINEAR requires
+        write_bc1_tic(&mut mem, &vmm, tic_addr, tex_addr, 16, 8, None);
+
+        let width_bytes = 4 * 8; // four blocks per row, eight bytes each
+        let place = |mem: &mut Memory, bx: u32, by: u32, colour: u16| {
+            let at = block_linear_offset(bx * 8, by, width_bytes, 1);
+            vmm.write_u64(mem, tex_addr + at as u64, flat_bc1_block(colour)).unwrap();
+        };
+        place(&mut mem, 0, 0, RED);
+        place(&mut mem, 3, 0, WHITE);
+        place(&mut mem, 0, 1, BLUE);
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let ctx =
+            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let texture = read_image(&ctx, tic_addr).unwrap();
+        assert_eq!(texture.layout, Layout::BlockLinear { block_height_gobs: 1 });
+        assert_eq!(texture.texel(1, 1, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texture.texel(13, 2, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(texture.texel(2, 5, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    /// An sRGB texture stores encoded values and hands the shader linear ones.
+    #[test]
+    fn an_srgb_texture_samples_in_linear_light() {
+        let (mut mem, vmm, base) = harness();
+        let tic_addr = base;
+        let tex_addr = base + 0x400;
+        write_bc1_tic(&mut mem, &vmm, tic_addr, tex_addr, 16, 8, Some(32));
+        // Mid grey: 0x8410 is RGB565's closest to 50% in every channel.
+        vmm.write_u64(&mut mem, tex_addr, flat_bc1_block(0x8410)).unwrap();
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let ctx =
+            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let linear = read_image(&ctx, tic_addr).unwrap();
+        assert!(!linear.srgb);
+        let plain = linear.texel(0, 0, &ctx).unwrap()[0];
+
+        // Set the sRGB bit and read the same bytes again.
+        vmm.write_u32(&mut mem, tic_addr + 16, 15 | TYPE_2D | (1 << 22)).unwrap();
+        let ctx =
+            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let encoded = read_image(&ctx, tic_addr).unwrap();
+        assert!(encoded.srgb);
+        let converted = encoded.texel(0, 0, &ctx).unwrap();
+        assert!(converted[0] < plain, "sRGB decoding darkens a mid grey");
+        // 565's mid grey expands to 132/255 = 0.5176, whose linear value is
+        // ((0.5176 + 0.055) / 1.055) ^ 2.4.
+        assert!((converted[0] - 0.2307).abs() < 0.001, "got {}", converted[0]);
+        assert_eq!(converted[3], 1.0, "alpha is never sRGB-encoded");
+    }
+
+    #[test]
+    fn the_compressed_formats_this_decoder_lacks_say_so() {
+        // ASTC and BC6H are recognised, and named, but not decoded.
+        let astc = texel_kind_for(0x40, 2).unwrap_err().to_string();
+        assert!(astc.contains("ASTC"), "{astc}");
+        let bc6h = texel_kind_for(0x10, 7).unwrap_err().to_string();
+        assert!(bc6h.contains("BC6H"), "{bc6h}");
+        // The BC formats that are decoded map to their codecs.
+        assert_eq!(texel_kind_for(0x24, 2).unwrap(), TexelKind::Block(Codec::Bc1));
+        assert_eq!(texel_kind_for(0x26, 2).unwrap(), TexelKind::Block(Codec::Bc3));
+        assert_eq!(texel_kind_for(0x27, 1).unwrap(), TexelKind::Block(Codec::Bc4Snorm));
+        assert_eq!(texel_kind_for(0x28, 2).unwrap(), TexelKind::Block(Codec::Bc5Unorm));
+        assert_eq!(texel_kind_for(0x17, 2).unwrap(), TexelKind::Block(Codec::Bc7));
     }
 
     #[test]
@@ -361,7 +634,7 @@ mod tests {
         vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5).unwrap();
         vmm.write_u32(&mut mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21)).unwrap();
         vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap(); // pitch 32
-        vmm.write_u32(&mut mem, tic_addr + 16, 3).unwrap(); // width 4
+        vmm.write_u32(&mut mem, tic_addr + 16, 3 | TYPE_2D).unwrap(); // width 4
         vmm.write_u32(&mut mem, tic_addr + 20, 0).unwrap(); // height 1
         // MIRROR on u, clamp on v; nearest on both.
         vmm.write_u32(&mut mem, tsc_addr, 1 | (2 << 3)).unwrap();
@@ -412,7 +685,7 @@ mod tests {
         vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5).unwrap();
         vmm.write_u32(&mut mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21)).unwrap();
         vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap(); // PITCH_BITS_20_TO_5 = 1 -> pitch = 32
-        vmm.write_u32(&mut mem, tic_addr + 16, 1).unwrap(); // width - 1 = 1 (width 2)
+        vmm.write_u32(&mut mem, tic_addr + 16, 1 | TYPE_2D).unwrap(); // width - 1 = 1 (width 2)
         vmm.write_u32(&mut mem, tic_addr + 20, 1).unwrap(); // height - 1 = 1 (height 2)
 
         // NEAREST filtering, both axes clamp-to-edge.

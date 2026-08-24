@@ -424,6 +424,16 @@ pub fn linear_to_srgb(v: f32) -> f32 {
     }
 }
 
+/// The inverse of [`linear_to_srgb`] — what a sampler applies on the way *out*
+/// of an sRGB-encoded texture, so that shading happens in linear light.
+pub fn srgb_to_linear(v: f32) -> f32 {
+    if v <= 0.040_45 {
+        v / 12.92
+    } else {
+        ((v + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 fn f32_to_f16(v: f32) -> u16 {
     let bits = v.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
@@ -492,24 +502,37 @@ impl Surface {
     }
 
     pub fn sample_bilinear(&self, u: f64, v: f64, ctx: &ExecCtx) -> Result<[f32; 4]> {
-        let u = (u - 0.5).max(0.0);
-        let v = (v - 0.5).max(0.0);
-        let x0 = u as u32;
-        let y0 = v as u32;
-        let fx = (u - x0 as f64) as f32;
-        let fy = (v - y0 as f64) as f32;
-        let c00 = self.texel(x0, y0, ctx)?;
-        let c10 = self.texel(x0 + 1, y0, ctx)?;
-        let c01 = self.texel(x0, y0 + 1, ctx)?;
-        let c11 = self.texel(x0 + 1, y0 + 1, ctx)?;
-        let mut out = [0.0f32; 4];
-        for i in 0..4 {
-            let top = c00[i] + (c10[i] - c00[i]) * fx;
-            let bottom = c01[i] + (c11[i] - c01[i]) * fx;
-            out[i] = top + (bottom - top) * fy;
-        }
-        Ok(out)
+        bilinear(u, v, |x, y| self.texel(x, y, ctx))
     }
+}
+
+/// Bilinear filtering over whatever `texel` fetches.
+///
+/// Taking the fetch as a callback is what lets a block-compressed texture,
+/// whose texels come out of a decoded block rather than straight from memory,
+/// filter identically to a plain one instead of growing its own copy of this.
+pub fn bilinear(
+    u: f64,
+    v: f64,
+    mut texel: impl FnMut(u32, u32) -> Result<[f32; 4]>,
+) -> Result<[f32; 4]> {
+    let u = (u - 0.5).max(0.0);
+    let v = (v - 0.5).max(0.0);
+    let x0 = u as u32;
+    let y0 = v as u32;
+    let fx = (u - x0 as f64) as f32;
+    let fy = (v - y0 as f64) as f32;
+    let c00 = texel(x0, y0)?;
+    let c10 = texel(x0 + 1, y0)?;
+    let c01 = texel(x0, y0 + 1)?;
+    let c11 = texel(x0 + 1, y0 + 1)?;
+    let mut out = [0.0f32; 4];
+    for i in 0..4 {
+        let top = c00[i] + (c10[i] - c00[i]) * fx;
+        let bottom = c01[i] + (c11[i] - c01[i]) * fx;
+        out[i] = top + (bottom - top) * fy;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

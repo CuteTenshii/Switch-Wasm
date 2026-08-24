@@ -9,6 +9,7 @@
 //! from, because on Tegra it genuinely does: the guest allocates a buffer, and
 //! nvmap plus the GMMU just make that buffer visible at a GPU address.
 
+pub mod bcn;
 pub mod channel;
 pub mod engine;
 pub mod exec;
