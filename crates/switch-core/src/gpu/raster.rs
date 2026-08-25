@@ -940,23 +940,41 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         match crate::gpu::pipeline::Pipeline::of(engine)
             .map_err(|e| Error::Gpu(format!("pipeline: {e}")))
             .and_then(|p| {
+                // The `texs` immediates are the shaders' business, not the
+                // register file's, and the two stages index *different*
+                // constant buffers with the same immediate.
+                let mut immediates: Vec<(ShaderStage, u16)> = Vec::new();
+                for (stage, program) in [
+                    (ShaderStage::VertexB, &vs_program),
+                    (ShaderStage::Fragment, &fs_program),
+                ] {
+                    if let Ok(translated) = crate::gpu::shader::wgsl::translate(program) {
+                        immediates
+                            .extend(translated.textures.iter().map(|&(imm, _)| (stage, imm)));
+                    }
+                }
                 crate::gpu::upload::Uploads::of(
                     engine,
                     &p,
                     &*ctx,
                     crate::gpu::upload::Banks::Bound,
+                    &immediates,
                 )
             })
         {
             Ok(uploads) => eprintln!(
-                "[up] {} bytes: {} vertex ({}), {} index, {} constant ({} banks)",
+                "[up] {} bytes: {} vertex ({}), {} index, {} constant ({} banks), \
+                 {} texture ({})",
                 uploads.len(),
                 uploads.vertex.iter().map(|v| v.bytes.len()).sum::<usize>(),
                 uploads.vertex.len(),
                 uploads.index.as_ref().map_or(0, |i| i.bytes.len()),
                 uploads.constants.iter().map(|c| c.bytes.len()).sum::<usize>(),
                 uploads.constants.len(),
+                uploads.textures.iter().map(|t| t.bytes.len()).sum::<usize>(),
+                uploads.textures.len(),
             ),
+
             Err(e) => eprintln!("[up] cannot resolve: {e:?}"),
         }
     }

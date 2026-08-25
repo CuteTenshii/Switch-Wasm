@@ -70,7 +70,7 @@ fn decode_wrap(bits: u32) -> Wrap {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sampler {
     pub wrap_u: Wrap,
     pub wrap_v: Wrap,
@@ -149,6 +149,12 @@ pub struct Texture {
     /// Bytes from one array layer to the next. Zero for a plain 2D image,
     /// where there is only ever layer 0.
     pub layer_stride: u32,
+    /// How many array layers the image has, and 1 for a plain 2D one.
+    ///
+    /// Sampling never needed this — the shader says which layer it wants —
+    /// but copying the image out does, since nothing else says where it
+    /// ends.
+    pub layers: u32,
 }
 
 impl Texture {
@@ -427,6 +433,10 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     let srgb = (dw4 >> 22) & 1 != 0;
     let width = (dw4 & 0xffff) + 1;
     let height = (dw5 & 0xffff) + 1;
+    // `DEPTH_MINUS_ONE`, which only an array has: a plain 2D image leaves
+    // whatever is in the field, and reading it would give it layers it has
+    // no memory for.
+    let layers = if texture_type == 3 { ((dw5 >> 16) & 0x3fff) + 1 } else { 1 };
     // The TIC carries no layer stride: it is the size of one swizzled slice,
     // worked out from the extent and the layout the same way the offset of a
     // texel inside one is.
@@ -446,7 +456,17 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     };
     let layer_stride = layout.layer_stride(width_bytes, layer_height);
 
-    Ok(Texture { addr: tex_addr, width, height, layout, kind, srgb, swizzle, layer_stride })
+    Ok(Texture {
+        addr: tex_addr,
+        width,
+        height,
+        layout,
+        kind,
+        srgb,
+        swizzle,
+        layer_stride,
+        layers,
+    })
 }
 
 /// Rearrange a decoded texel into what the shader reads.

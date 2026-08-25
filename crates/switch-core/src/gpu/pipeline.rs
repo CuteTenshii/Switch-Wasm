@@ -170,6 +170,24 @@ pub enum Format {
     Depth24PlusStencil8,
     Depth32Float,
     Depth32FloatStencil8,
+    // Compressed, and so sampled-only: nothing renders into these. They are
+    // in the same enum because WebGPU has one format enum for both, and
+    // because a texture upload and a render target ask the same question of
+    // the same raw codes.
+    Bc1RgbaUnorm,
+    Bc1RgbaUnormSrgb,
+    Bc2RgbaUnorm,
+    Bc2RgbaUnormSrgb,
+    Bc3RgbaUnorm,
+    Bc3RgbaUnormSrgb,
+    Bc4RUnorm,
+    Bc4RSnorm,
+    Bc5RgUnorm,
+    Bc5RgSnorm,
+    Bc6hRgbUfloat,
+    Bc6hRgbFloat,
+    Bc7RgbaUnorm,
+    Bc7RgbaUnormSrgb,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -515,7 +533,7 @@ fn depth(layout: DepthLayout, state: DepthState) -> Result<Depth, Unsupported> {
 /// Follows [`crate::gpu::surface`]'s reading of those codes rather than a
 /// second one — the tests below check the two still agree about how wide a
 /// pixel is and whether it is sRGB, which is what would drift.
-fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
+pub(crate) fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
     Ok(match format.raw {
         0xD5 | 0xD7 | 0xD8 | 0xD9 | 0xF9 => Format::Rgba8Unorm,
         0xD6 | 0xFA => Format::Rgba8UnormSrgb,
@@ -752,7 +770,7 @@ mod tests {
             Format::Rgba8UnormSrgb | Format::Bgra8UnormSrgb => (4, true),
             Format::Rgba16Float => (8, false),
             Format::Rgba32Float => (16, false),
-            other => panic!("{other:?} is not a colour format"),
+            other => panic!("{other:?} is not a colour target format"),
         }
     }
 

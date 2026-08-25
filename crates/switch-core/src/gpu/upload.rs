@@ -29,9 +29,12 @@
 //! allocate it. [`MAX_UPLOAD`] is the point at which this reports rather than
 //! tries, because the failure mode of not having one is a machine in swap.
 
+use crate::gpu::bcn::Codec;
 use crate::gpu::engine::threed::{Engine3D, ShaderStage};
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::pipeline::{Pipeline, StepMode};
+use crate::gpu::pipeline::{Format, Pipeline, StepMode};
+use crate::gpu::surface::{ColorFormat, Layout};
+use crate::gpu::texture::{self, Sampler, SwizzleSource, TexelKind, Texture};
 use crate::{Error, Result};
 
 /// Which constant banks to resolve.
@@ -98,12 +101,52 @@ pub struct ConstantUpload {
     pub bytes: Vec<u8>,
 }
 
+/// One texture, deswizzled into the linear rows a device copies from.
+///
+/// A surface in guest memory is *block-linear*: rows are interleaved through
+/// 512-byte GOBs so that a 2D neighbourhood is contiguous, which is what
+/// makes a texture cache work and what makes the bytes unreadable to anything
+/// that expects rows. `WriteTexture` wants rows. So this walks the swizzle
+/// once and writes them out, in the same units the surface addresses — texels
+/// for a plain format, whole blocks for a compressed one.
+///
+/// The blocks of a compressed texture are *not* decoded. WebGPU has the BC
+/// formats natively, and decoding them here would turn 4 bits a texel into
+/// 32 for no reason and then ask the device to sample the result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextureUpload {
+    /// The stage whose constant buffer named this texture. The same
+    /// immediate in the other stage is a different texture.
+    pub stage: ShaderStage,
+    /// The `texs` immediate this was resolved for.
+    pub immediate: u16,
+    /// The bindless handle that immediate named.
+    pub handle: u32,
+    pub format: Format,
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    /// Bytes per row of the linear image — a row of *blocks* for a
+    /// compressed format, which is not `width * bytes_per_texel`.
+    pub row_bytes: u32,
+    /// Rows per layer: the height in texels, or in blocks when compressed.
+    pub rows: u32,
+    /// The layers back to back, each `row_bytes * rows` long.
+    pub bytes: Vec<u8>,
+    /// How the shader expects the channels rearranged. WebGPU has no
+    /// per-texture component swizzle, so a backend applies this itself —
+    /// in the sampling hook, where it costs a shuffle rather than a copy.
+    pub swizzle: [SwizzleSource; 4],
+    pub sampler: Sampler,
+}
+
 /// Everything a draw reads, resolved.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Uploads {
     pub vertex: Vec<VertexUpload>,
     pub index: Option<IndexUpload>,
     pub constants: Vec<ConstantUpload>,
+    pub textures: Vec<TextureUpload>,
 }
 
 impl Uploads {
@@ -112,6 +155,7 @@ impl Uploads {
         self.vertex.iter().map(|v| v.bytes.len()).sum::<usize>()
             + self.index.as_ref().map_or(0, |i| i.bytes.len())
             + self.constants.iter().map(|c| c.bytes.len()).sum::<usize>()
+            + self.textures.iter().map(|t| t.bytes.len()).sum::<usize>()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -123,11 +167,18 @@ impl Uploads {
     /// `pipeline` supplies the vertex layout, so that this and the pipeline
     /// description cannot disagree about which arrays a draw binds or how
     /// they step.
+    /// `immediates` are the `texs` immediates the draw's shaders sample
+    /// with, each paired with the stage it came from — a
+    /// [`crate::gpu::shader::wgsl::Translation`]'s `textures`. They are not
+    /// in the register file: only the shader knows which texture units it
+    /// reaches, and the two stages index *different* constant buffers with
+    /// the same immediate.
     pub fn of(
         engine: &Engine3D,
         pipeline: &Pipeline,
         ctx: &ExecCtx,
         banks: Banks<'_>,
+        immediates: &[(ShaderStage, u16)],
     ) -> Result<Uploads> {
         let call = engine.last_draw;
         let index = if call.indexed {
@@ -203,8 +254,260 @@ impl Uploads {
             }
         }
 
-        Ok(Uploads { vertex, index, constants })
+        let mut textures = Vec::new();
+        for &(stage, immediate) in immediates {
+            if textures.iter().any(|t: &TextureUpload| t.stage == stage && t.immediate == immediate)
+            {
+                continue;
+            }
+            textures.push(read_texture(engine, ctx, stage, immediate)?);
+        }
+
+        Ok(Uploads { vertex, index, constants, textures })
     }
+}
+
+/// Resolve a `texs` immediate to a texture and copy it out.
+///
+/// The immediate is not a handle. It indexes, in dwords, the constant bank
+/// `TexCbIndex` names — a register the driver programs, to 15 under nouveau
+/// and 0 under deko3d — and *that* holds the bindless handle, which in turn
+/// indexes the TIC and TSC pools. Three levels, none of them optional.
+fn read_texture(
+    engine: &Engine3D,
+    ctx: &ExecCtx,
+    stage: ShaderStage,
+    immediate: u16,
+) -> Result<TextureUpload> {
+    let bank = u32::from(engine.tex_cb_index());
+    let (addr, size) = engine.bound_constbuf(stage, bank).ok_or_else(|| {
+        Error::Gpu(format!("upload: {stage:?}'s texture bank {bank} is not bound"))
+    })?;
+    let offset = u32::from(texture::handle_offset(immediate));
+    if offset + 4 > size {
+        return Err(Error::Gpu(format!(
+            "upload: texture handle at c{bank}[{offset:#x}] is past the bound buffer's {size:#x}"
+        )));
+    }
+    let handle = ctx.read_u32(addr + u64::from(offset))?;
+    let descriptors = texture::read_descriptors(
+        ctx,
+        engine.tex_header_pool(),
+        engine.tex_sampler_pool(),
+        handle,
+    )?;
+    let image = descriptors.texture;
+
+    let copy = image_copy(&image)?;
+    let (format, row_bytes, rows) = copy.shape(&image);
+    let layers = image.layers.max(1);
+    let total = u64::from(row_bytes) * u64::from(rows) * u64::from(layers);
+    if total > MAX_UPLOAD {
+        return Err(Error::Gpu(format!(
+            "upload: texture {}x{} is {total} bytes, past the {MAX_UPLOAD}-byte cap",
+            image.width, image.height
+        )));
+    }
+    let mut bytes = Vec::with_capacity(total as usize);
+    for layer in 0..layers {
+        let base = image.addr + u64::from(layer) * u64::from(image.layer_stride);
+        match copy {
+            Copy::Raw { unit } => {
+                deswizzle(ctx, base, image.layout, row_bytes, rows, unit, &mut bytes)?
+            }
+            Copy::Decode { codec } => decode_blocks(ctx, &image, base, codec, &mut bytes)?,
+        }
+    }
+    Ok(TextureUpload {
+        stage,
+        immediate,
+        handle,
+        format,
+        width: image.width,
+        height: image.height,
+        layers,
+        row_bytes,
+        rows,
+        bytes,
+        swizzle: image.swizzle,
+        sampler: descriptors.sampler,
+    })
+}
+
+/// How a surface's bytes get to a device.
+#[derive(Debug, Clone, Copy)]
+enum Copy {
+    /// Deswizzled and handed over in the surface's own units, which is what
+    /// happens whenever WebGPU has a format for them — including every BC
+    /// codec, which stays compressed.
+    Raw { unit: u32 },
+    /// Decoded to `Rgba8Unorm` first, because WebGPU has no format for the
+    /// codec. Turning 1 byte a texel into 4 is a real cost, and the
+    /// alternative is not sampling the texture at all.
+    Decode { codec: Codec },
+}
+
+impl Copy {
+    /// The WebGPU format, and the linear image's row length and count.
+    fn shape(self, image: &Texture) -> (Format, u32, u32) {
+        match self {
+            Copy::Raw { unit } => match image.kind {
+                TexelKind::Plain(plain) => {
+                    (plain_format(plain, image.srgb), image.width * unit, image.height)
+                }
+                TexelKind::Block(codec) => {
+                    let (block_w, block_h) = codec.block_size();
+                    (
+                        block_format(codec, image.srgb),
+                        image.width.div_ceil(block_w) * unit,
+                        image.height.div_ceil(block_h),
+                    )
+                }
+            },
+            // A decoded image is texels again, whatever it was stored as.
+            Copy::Decode { .. } => {
+                let format = if image.srgb { Format::Rgba8UnormSrgb } else { Format::Rgba8Unorm };
+                (format, image.width * 4, image.height)
+            }
+        }
+    }
+}
+
+/// Whether a surface can be handed over as it is.
+fn image_copy(image: &Texture) -> Result<Copy> {
+    Ok(match image.kind {
+        TexelKind::Plain(plain) => {
+            // A format `pipeline` cannot name is one nothing can sample.
+            crate::gpu::pipeline::color_format(plain)
+                .map_err(|e| Error::Gpu(format!("upload: texture format: {e}")))?;
+            Copy::Raw { unit: plain.bytes_per_pixel }
+        }
+        // WebGPU has ASTC only behind the `texture-compression-astc` feature,
+        // which a desktop browser does not offer — and the Home Menu's real
+        // textures are ASTC 4x4, so refusing them would mean refusing the
+        // draws that matter.
+        TexelKind::Block(codec @ Codec::Astc { .. }) => Copy::Decode { codec },
+        TexelKind::Block(codec) => Copy::Raw { unit: codec.bytes_per_block() },
+    })
+}
+
+/// The `srgb` flag is the TIC's, not the format code's: the same raw format
+/// is sampled either way depending on it, which is why this takes both.
+///
+/// Infallible: [`image_copy`] has already refused a format with no name.
+fn plain_format(plain: ColorFormat, srgb: bool) -> Format {
+    let format = crate::gpu::pipeline::color_format(plain).unwrap_or(Format::Rgba8Unorm);
+    match (format, srgb) {
+        (Format::Rgba8Unorm, true) => Format::Rgba8UnormSrgb,
+        (Format::Bgra8Unorm, true) => Format::Bgra8UnormSrgb,
+        (format, _) => format,
+    }
+}
+
+/// Infallible for the same reason as [`plain_format`]: ASTC, the one codec
+/// with no WebGPU format, is decoded rather than named.
+fn block_format(codec: Codec, srgb: bool) -> Format {
+    match (codec, srgb) {
+        (Codec::Bc1, false) => Format::Bc1RgbaUnorm,
+        (Codec::Bc1, true) => Format::Bc1RgbaUnormSrgb,
+        (Codec::Bc2, false) => Format::Bc2RgbaUnorm,
+        (Codec::Bc2, true) => Format::Bc2RgbaUnormSrgb,
+        (Codec::Bc3, false) => Format::Bc3RgbaUnorm,
+        (Codec::Bc3, true) => Format::Bc3RgbaUnormSrgb,
+        (Codec::Bc4Unorm, _) => Format::Bc4RUnorm,
+        (Codec::Bc4Snorm, _) => Format::Bc4RSnorm,
+        (Codec::Bc5Unorm, _) => Format::Bc5RgUnorm,
+        (Codec::Bc5Snorm, _) => Format::Bc5RgSnorm,
+        (Codec::Bc6hUf16, _) => Format::Bc6hRgbUfloat,
+        (Codec::Bc6hSf16, _) => Format::Bc6hRgbFloat,
+        (Codec::Bc7, false) => Format::Bc7RgbaUnorm,
+        (Codec::Bc7, true) => Format::Bc7RgbaUnormSrgb,
+        (Codec::Astc { .. }, true) => Format::Rgba8UnormSrgb,
+        (Codec::Astc { .. }, false) => Format::Rgba8Unorm,
+    }
+}
+
+/// Decode a compressed surface to `Rgba8Unorm`, block by block.
+///
+/// The values a codec yields are what the texture *stores*, so an sRGB image
+/// stays sRGB-encoded here and the format says so — the device applies the
+/// transfer function, exactly as `Texture::texel` applies it for the
+/// rasterizer.
+fn decode_blocks(
+    ctx: &ExecCtx,
+    image: &Texture,
+    base: u64,
+    codec: Codec,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let (block_w, block_h) = codec.block_size();
+    let bytes = codec.bytes_per_block();
+    let blocks_wide = image.width.div_ceil(block_w);
+    let width_bytes = match image.layout {
+        Layout::Pitch { pitch } => pitch,
+        Layout::BlockLinear { .. } => blocks_wide * bytes,
+    };
+    // One row of blocks at a time: a decoded block covers `block_h` output
+    // rows, so the whole strip is decoded before any of it is written.
+    let mut strip: Vec<[f32; 4]> = Vec::new();
+    for block_y in 0..image.height.div_ceil(block_h) {
+        strip.clear();
+        strip.resize((blocks_wide * block_w * block_h) as usize, [0.0; 4]);
+        for block_x in 0..blocks_wide {
+            let at = base + u64::from(image.layout.offset(block_x * bytes, block_y, width_bytes));
+            let raw = ctx.read_pixel(at, bytes)?.to_le_bytes();
+            let mut block = [[0.0f32; 4]; crate::gpu::bcn::MAX_TEXELS];
+            crate::gpu::bcn::decode_into(codec, &raw[..bytes as usize], &mut block)?;
+            for y in 0..block_h {
+                for x in 0..block_w {
+                    let into = (y * blocks_wide * block_w + block_x * block_w + x) as usize;
+                    strip[into] = block[(y * block_w + x) as usize];
+                }
+            }
+        }
+        // The last block of a row or column hangs outside the extent.
+        for y in 0..block_h {
+            if block_y * block_h + y >= image.height {
+                break;
+            }
+            for x in 0..image.width {
+                let texel = strip[(y * blocks_wide * block_w + x) as usize];
+                for channel in texel {
+                    out.push((channel.clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Walk a swizzled surface once and write it out as rows.
+///
+/// `unit` is what the layout addresses: one texel for a plain format, one
+/// whole block for a compressed one. Reading a compressed surface in texels
+/// instead is the mistake that shreds an image into diagonal ribbons, because
+/// the row stride comes out a block too wide.
+fn deswizzle(
+    ctx: &ExecCtx,
+    base: u64,
+    layout: Layout,
+    row_bytes: u32,
+    rows: u32,
+    unit: u32,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    if unit == 0 {
+        return Err(Error::Gpu("upload: a texture with no bytes per texel".into()));
+    }
+    let per_row = row_bytes / unit;
+    for y in 0..rows {
+        for x in 0..per_row {
+            let at = base + u64::from(layout.offset(x * unit, y, row_bytes));
+            let value = ctx.read_pixel(at, unit)?;
+            out.extend_from_slice(&value.to_le_bytes()[..unit as usize]);
+        }
+    }
+    Ok(())
 }
 
 /// Read a draw's indices, widening the 8-bit form WebGPU does not have.
@@ -396,6 +699,121 @@ mod tests {
         assert_eq!(read_range(&ctx, base, 0, "test").unwrap(), Vec::<u8>::new());
     }
 
+    fn image(kind: TexelKind, width: u32, height: u32, srgb: bool) -> Texture {
+        Texture {
+            addr: 0,
+            width,
+            height,
+            layout: Layout::Pitch { pitch: 0 },
+            kind,
+            srgb,
+            swizzle: [SwizzleSource::R, SwizzleSource::G, SwizzleSource::B, SwizzleSource::A],
+            layer_stride: 0,
+            layers: 1,
+        }
+    }
+
+    #[test]
+    fn a_bc_texture_stays_compressed() {
+        // WebGPU has the BC formats natively. Decoding them here would turn
+        // 4 bits a texel into 32 and then ask the device to sample that.
+        let bc1 = image(TexelKind::Block(Codec::Bc1), 64, 64, false);
+        let copy = image_copy(&bc1).unwrap();
+        assert!(matches!(copy, Copy::Raw { unit: 8 }), "{copy:?}");
+        // 16 blocks of 8 bytes across, 16 rows of blocks down.
+        assert_eq!(copy.shape(&bc1), (Format::Bc1RgbaUnorm, 128, 16));
+    }
+
+    #[test]
+    fn an_astc_texture_is_decoded_because_no_desktop_browser_can_sample_one() {
+        // WebGPU has ASTC behind `texture-compression-astc`, which desktop
+        // browsers do not offer — and the Home Menu's real textures are ASTC
+        // 4x4, so refusing them would be refusing the draws that matter.
+        let astc = image(TexelKind::Block(Codec::Astc { width: 4, height: 4 }), 64, 64, false);
+        let copy = image_copy(&astc).unwrap();
+        assert!(matches!(copy, Copy::Decode { .. }), "{copy:?}");
+        // Texels again, whatever it was stored as.
+        assert_eq!(copy.shape(&astc), (Format::Rgba8Unorm, 256, 64));
+    }
+
+    #[test]
+    fn the_tics_srgb_flag_picks_the_format_not_the_format_code() {
+        // The same raw code is sampled either way depending on the flag, so
+        // a format named without it would be a whole transfer function out.
+        let srgb = image(TexelKind::Block(Codec::Bc7), 8, 8, true);
+        assert_eq!(image_copy(&srgb).unwrap().shape(&srgb).0, Format::Bc7RgbaUnormSrgb);
+        let linear = image(TexelKind::Block(Codec::Bc7), 8, 8, false);
+        assert_eq!(image_copy(&linear).unwrap().shape(&linear).0, Format::Bc7RgbaUnorm);
+        // A decoded image keeps the encoding it was stored in; the device
+        // applies the transfer function.
+        let astc = image(TexelKind::Block(Codec::Astc { width: 4, height: 4 }), 8, 8, true);
+        assert_eq!(image_copy(&astc).unwrap().shape(&astc).0, Format::Rgba8UnormSrgb);
+    }
+
+    #[test]
+    fn a_texture_format_nothing_can_sample_is_reported() {
+        let unknown = image(TexelKind::Plain(ColorFormat::from_raw(0xE8).unwrap()), 8, 8, false);
+        assert!(image_copy(&unknown).is_err(), "B5G6R5 has no WebGPU format");
+    }
+
+    #[test]
+    fn a_pitch_surface_comes_out_as_the_rows_it_already_was() {
+        // The simplest layout there is, and the one that says whether the
+        // walk writes rows in the right order at all.
+        let mut h = Harness::new(0x1000);
+        let bytes: Vec<u8> = (0..48u8).collect();
+        h.write(0, &bytes);
+        let base = h.base;
+        let mut out = Vec::new();
+        // Four texels of four bytes per row, three rows, in a surface whose
+        // rows are 16 bytes apart.
+        deswizzle(&h.ctx(), base, Layout::Pitch { pitch: 16 }, 16, 3, 4, &mut out).unwrap();
+        assert_eq!(out, bytes);
+    }
+
+    #[test]
+    fn a_deswizzled_surface_reads_the_same_texels_the_rasterizer_samples() {
+        // The two walks have to agree, or a GPU backend draws a different
+        // image from the one it is compared against.
+        let mut h = Harness::new(0x4000);
+        let bytes: Vec<u8> = (0..=255u8).cycle().take(0x2000).collect();
+        h.write(0, &bytes);
+        let base = h.base;
+        let layout = Layout::BlockLinear { block_height_gobs: 2 };
+        let texture = Texture {
+            addr: base,
+            width: 16,
+            height: 16,
+            layout,
+            kind: TexelKind::Plain(ColorFormat::from_raw(0xD5).unwrap()),
+            srgb: false,
+            swizzle: [SwizzleSource::R, SwizzleSource::G, SwizzleSource::B, SwizzleSource::A],
+            layer_stride: 0,
+            layers: 1,
+        };
+        let mut out = Vec::new();
+        deswizzle(&h.ctx(), base, layout, 16 * 4, 16, 4, &mut out).unwrap();
+        let ctx = h.ctx();
+        for y in 0..16u32 {
+            for x in 0..16u32 {
+                let sampled = texture.texel_cached(x, y, 0, &ctx).unwrap();
+                let at = ((y * 16 + x) * 4) as usize;
+                let copied = [
+                    out[at] as f32 / 255.0,
+                    out[at + 1] as f32 / 255.0,
+                    out[at + 2] as f32 / 255.0,
+                    out[at + 3] as f32 / 255.0,
+                ];
+                for c in 0..4 {
+                    assert!(
+                        (sampled[c] - copied[c]).abs() < 1.0 / 255.0,
+                        "texel ({x}, {y}) channel {c}: sampled {sampled:?}, copied {copied:?}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_drawing_with_nothing_in_it_moves_no_bytes() {
         let uploads = Uploads::default();
@@ -418,6 +836,7 @@ mod tests {
                 bank: 1,
                 bytes: vec![0; 256],
             }],
+            textures: Vec::new(),
         };
         assert_eq!(uploads.len(), 300);
     }
