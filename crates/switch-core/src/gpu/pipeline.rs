@@ -511,17 +511,21 @@ fn depth_compare(code: u32) -> Result<Compare, Unsupported> {
     })
 }
 
-fn depth(layout: DepthLayout, state: DepthState) -> Result<Depth, Unsupported> {
-    let format = match (layout.bytes, layout.depth_bits, layout.stencil_shift.is_some()) {
+/// The WebGPU format a depth surface's layout names.
+pub fn depth_format(layout: DepthLayout) -> Result<Format, Unsupported> {
+    Ok(match (layout.bytes, layout.depth_bits, layout.stencil_shift.is_some()) {
         (2, 16, false) => Format::Depth16Unorm,
         (4, 24, false) => Format::Depth24Plus,
         (4, 24, true) => Format::Depth24PlusStencil8,
         (4, 0, false) => Format::Depth32Float,
         (8, 0, true) => Format::Depth32FloatStencil8,
         _ => return Err(Unsupported::Format { raw: layout.bytes }),
-    };
+    })
+}
+
+fn depth(layout: DepthLayout, state: DepthState) -> Result<Depth, Unsupported> {
     Ok(Depth {
-        format,
+        format: depth_format(layout)?,
         write_enabled: state.write_enabled,
         // A disabled test passes everything, which is what `Always` says.
         compare: if state.test_enabled { depth_compare(state.func)? } else { Compare::Always },

@@ -1,4 +1,4 @@
-//! What a draw reads out of guest memory.
+//! The bytes a draw moves between guest memory and a device.
 //!
 //! [`crate::gpu::shader::wgsl`] says how to shade a draw and
 //! [`crate::gpu::pipeline`] says what state it runs under. Neither says what
@@ -22,6 +22,15 @@
 //! indexed one the lowest and highest index in the index buffer, which has to
 //! be read to be known. Doing that here is not wasted work — the indices have
 //! to be uploaded anyway.
+//!
+//! # And what it writes
+//!
+//! A render target lives in guest memory too. `present` deswizzles
+//! block-linear pixels straight out of it, the 2D blitter copies out of it,
+//! and a shader can sample it — so a backend that keeps its surfaces on the
+//! device owns the question of when to write them back. [`Targets`] says
+//! where they are and [`Target::write`] is the walk that puts them back,
+//! which is [`Target::read`] run backwards.
 //!
 //! # It has a ceiling, on purpose
 //!
@@ -264,6 +273,138 @@ impl Uploads {
         }
 
         Ok(Uploads { vertex, index, constants, textures })
+    }
+}
+
+/// A surface a draw renders into.
+///
+/// The same shape as a [`TextureUpload`], because it is the same question
+/// asked of a different register: where the bytes are, what format they are
+/// in, and how many rows of what length come out once the swizzle is undone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Target {
+    pub format: Format,
+    pub addr: u64,
+    /// Extent in *texels*, which on a multisampled surface is not its extent
+    /// in pixels — one pixel is a grid of texels there.
+    pub width: u32,
+    pub height: u32,
+    pub layout: Layout,
+    /// Bytes per row of the linear image.
+    pub row_bytes: u32,
+    pub rows: u32,
+    /// Bytes per texel, which is what the layout addresses.
+    pub unit: u32,
+}
+
+impl Target {
+    /// How many bytes one copy of this surface is.
+    pub fn len(&self) -> u64 {
+        u64::from(self.row_bytes) * u64::from(self.rows)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Read the surface out as linear rows — what a backend needs before a
+    /// draw that blends, or tests depth, against what is already there.
+    pub fn read(&self, ctx: &ExecCtx) -> Result<Vec<u8>> {
+        if self.len() > MAX_UPLOAD {
+            return Err(Error::Gpu(format!(
+                "upload: a {}x{} target is {} bytes, past the {MAX_UPLOAD}-byte cap",
+                self.width,
+                self.height,
+                self.len()
+            )));
+        }
+        let mut out = Vec::with_capacity(self.len() as usize);
+        deswizzle(ctx, self.addr, self.layout, self.row_bytes, self.rows, self.unit, &mut out)?;
+        Ok(out)
+    }
+
+    /// Put linear rows back, swizzled — the walk of [`Target::read`] run
+    /// backwards, and the thing a backend does before the guest looks at
+    /// what it drew.
+    pub fn write(&self, ctx: &mut ExecCtx, rows: &[u8]) -> Result<()> {
+        let want = self.len() as usize;
+        if rows.len() < want {
+            return Err(Error::Gpu(format!(
+                "upload: writing back {} bytes of a {want}-byte target",
+                rows.len()
+            )));
+        }
+        let per_row = self.row_bytes / self.unit.max(1);
+        for y in 0..self.rows {
+            for x in 0..per_row {
+                let offset = self.layout.offset(x * self.unit, y, self.row_bytes);
+                let at = self.addr + u64::from(offset);
+                let from = ((y * self.row_bytes) + x * self.unit) as usize;
+                let mut value = 0u128;
+                for (i, &byte) in rows[from..from + self.unit as usize].iter().enumerate() {
+                    value |= u128::from(byte) << (8 * i);
+                }
+                ctx.write_pixel(at, self.unit, value)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Where a draw's surfaces are.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Targets {
+    /// Colour target 0, or `None` for a depth-only pass — which is a real
+    /// thing a title does: Just Dance 2017 renders every pass that way.
+    pub color: Option<Target>,
+    pub depth: Option<Target>,
+}
+
+impl Targets {
+    /// Resolve the surfaces the engine has bound.
+    pub fn of(engine: &Engine3D) -> Result<Targets> {
+        let color = engine.render_target(engine.render_target_slot(0))?.and_then(|rt| {
+            let unit = rt.format.bytes_per_pixel;
+            // A disabled target reads back as format 0, which is no pixel at
+            // all rather than a pixel of no bytes.
+            (unit != 0).then(|| {
+                Ok::<Target, Error>(Target {
+                    format: crate::gpu::pipeline::color_format(rt.format)
+                        .map_err(|e| Error::Gpu(format!("upload: colour target: {e}")))?,
+                    addr: rt.addr,
+                    width: rt.width,
+                    height: rt.height,
+                    layout: rt.layout,
+                    row_bytes: rt.width * unit,
+                    rows: rt.height,
+                    unit,
+                })
+            })
+        });
+        let depth = engine.depth_target()?.map(|dt| {
+            Ok::<Target, Error>(Target {
+                format: crate::gpu::pipeline::depth_format(dt.format)
+                    .map_err(|e| Error::Gpu(format!("upload: depth target: {e}")))?,
+                addr: dt.addr,
+                width: dt.width,
+                height: dt.height,
+                layout: dt.layout,
+                row_bytes: dt.width * dt.format.bytes,
+                rows: dt.height,
+                unit: dt.format.bytes,
+            })
+        });
+        Ok(Targets { color: color.transpose()?, depth: depth.transpose()? })
+    }
+
+    /// How many bytes both surfaces are, which is what a round trip through a
+    /// device costs per frame.
+    pub fn len(&self) -> u64 {
+        self.color.map_or(0, |t| t.len()) + self.depth.map_or(0, |t| t.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -812,6 +953,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn a_surface_survives_a_round_trip_through_linear_rows() {
+        // Read and write are the same walk in opposite directions, and a
+        // backend that keeps its surfaces on the device does both every time
+        // the guest is about to look at what it drew. If they disagree, the
+        // frame comes back scrambled in a way that looks like a rendering
+        // bug.
+        let mut h = Harness::new(0x8000);
+        let original: Vec<u8> = (0..=255u8).cycle().take(16 * 16 * 4).collect();
+        let target = Target {
+            format: Format::Rgba8Unorm,
+            addr: h.base,
+            width: 16,
+            height: 16,
+            layout: Layout::BlockLinear { block_height_gobs: 2 },
+            row_bytes: 16 * 4,
+            rows: 16,
+            unit: 4,
+        };
+        target.write(&mut h.ctx(), &original).unwrap();
+        assert_eq!(target.read(&h.ctx()).unwrap(), original);
+        // And the bytes really did get swizzled on the way in, rather than
+        // both walks agreeing to write rows.
+        let mut linear = Vec::new();
+        let base = h.base;
+        deswizzle(&h.ctx(), base, Layout::Pitch { pitch: 64 }, 64, 16, 4, &mut linear).unwrap();
+        assert_ne!(linear, original, "a block-linear surface is not rows");
+    }
+
+    #[test]
+    fn writing_back_less_than_a_surface_is_reported() {
+        let mut h = Harness::new(0x1000);
+        let target = Target {
+            format: Format::Rgba8Unorm,
+            addr: h.base,
+            width: 4,
+            height: 4,
+            layout: Layout::Pitch { pitch: 16 },
+            row_bytes: 16,
+            rows: 4,
+            unit: 4,
+        };
+        assert_eq!(target.len(), 64);
+        assert!(target.write(&mut h.ctx(), &[0; 32]).is_err());
     }
 
     #[test]

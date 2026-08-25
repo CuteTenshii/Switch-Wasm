@@ -977,6 +977,17 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
 
             Err(e) => eprintln!("[up] cannot resolve: {e:?}"),
         }
+        // The other direction: what a backend holding its surfaces on the
+        // device has to hand back before the guest looks at them.
+        match crate::gpu::upload::Targets::of(engine) {
+            Ok(targets) => eprintln!(
+                "[rt] {} bytes back: colour {:?}, depth {:?}",
+                targets.len(),
+                targets.color.map(|t| (t.format, t.width, t.height, t.len())),
+                targets.depth.map(|t| (t.format, t.width, t.height, t.len())),
+            ),
+            Err(e) => eprintln!("[rt] cannot resolve: {e:?}"),
+        }
     }
     // `TRACE_CFG=1`: what each shader's control flow looks like to a
     // translator. Structured control flow is what any shading language wants
