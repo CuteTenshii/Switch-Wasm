@@ -826,9 +826,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let call = engine.last_draw;
     // Logical target 0, through whatever slot RenderTargetControl maps it onto
     // — the same resolution a clear does.
-    let rt = engine
-        .render_target(engine.render_target_slot(0))?
-        .ok_or_else(|| Error::Gpu("raster: draw with no bound render target".into()))?;
+    let rt = engine.render_target(engine.render_target_slot(0))?;
 
     let vs_binding = engine
         .program(ShaderStage::VertexB)
@@ -848,15 +846,30 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let arrays: Vec<VertexArray> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_array(i)).collect();
     let viewport = engine.viewport_transform();
     let tex_cb_index = engine.tex_cb_index();
-    // The scissor, the viewport and this draw's bounds are all in pixels;
-    // `rt.width`/`rt.height` are texels, which differ on a multisampled target.
     let grid = engine.sample_grid()?;
     let sample_mask = engine.sample_mask();
     let alpha_to_coverage = engine.alpha_to_coverage();
-    let (rt_width, rt_height) = grid.pixels(rt.width, rt.height);
+    let depth = engine.depth_target()?;
+    // The scissor, the viewport and this draw's bounds are all in pixels;
+    // a target's width and height are texels, which differ on a multisampled
+    // one.
+    //
+    // A depth-only pass binds no colour target, so the extent comes from
+    // whichever target the draw does have. Just Dance 2017 runs every pass
+    // that way — it binds its Z24S8 surface as colour target 0, which is a
+    // depth surface and so no colour target at all, and does its work in the
+    // depth buffer. Requiring a colour target here cost it every one of its
+    // 1870 draws.
+    let (target_width, target_height) = match (rt, depth) {
+        (Some(rt), _) => (rt.width, rt.height),
+        (None, Some(dt)) => (dt.width, dt.height),
+        (None, None) => {
+            return Err(Error::Gpu("raster: draw with neither a colour nor a depth target".into()))
+        }
+    };
+    let (rt_width, rt_height) = grid.pixels(target_width, target_height);
     let clip = engine.apply_scissor(ScissorRect { x0: 0, y0: 0, x1: rt_width, y1: rt_height });
     let bounds = Bounds { x0: clip.x0, y0: clip.y0, x1: clip.x1, y1: clip.y1 };
-    let depth = engine.depth_target()?;
     let depth_state = engine.depth_state();
     let blend_target = engine.blend_target(0);
     let blend_constant = engine.blend_constant();
@@ -984,7 +997,6 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 tally.degenerate += 1;
                 continue;
             };
-            let bpp = rt.format.bytes_per_pixel;
             let (min_x, max_x, min_y, max_y) = tri.bbox(bounds);
             for y in min_y..max_y {
                 for x in min_x..max_x {
@@ -1095,15 +1107,21 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                             }
                         }
 
-                        let va = rt.addr + rt.texel_offset(tx, ty) as u64;
-                        let out = if blend_target.enabled {
-                            let dst = rt.format.decode(ctx.read_pixel(va, bpp)?)?;
-                            blend(blend_target, blend_constant, color, dst)
-                        } else {
-                            color
-                        };
-                        tally.wrote(out);
-                        ctx.write_pixel(va, bpp, rt.format.encode(out)?)?;
+                        // A depth-only pass shaded the fragment for its `kil`
+                        // and its alpha coverage, and has nowhere to put the
+                        // colour that came out of it.
+                        if let Some(rt) = rt {
+                            let bpp = rt.format.bytes_per_pixel;
+                            let va = rt.addr + rt.texel_offset(tx, ty) as u64;
+                            let out = if blend_target.enabled {
+                                let dst = rt.format.decode(ctx.read_pixel(va, bpp)?)?;
+                                blend(blend_target, blend_constant, color, dst)
+                            } else {
+                                color
+                            };
+                            tally.wrote(out);
+                            ctx.write_pixel(va, bpp, rt.format.encode(out)?)?;
+                        }
                     }
                 }
             }
@@ -2041,6 +2059,57 @@ mod tests {
                 "equation {d3d:#x} and {gl:#x} name the same thing"
             );
         }
+    }
+
+    #[test]
+    fn a_depth_only_pass_draws_without_a_colour_target() {
+        // Just Dance 2017 runs every pass this way: its Z24S8 surface bound
+        // as colour target 0, which is a depth surface and so not a colour
+        // target at all, and the work done in the depth buffer. The draw has
+        // to happen and its colour has to go nowhere.
+        let (mut mem, vmm, mut engine) = pipeline_harness();
+        let vbuf_addr = engine.vertex_array(0).start;
+        let rt_addr = engine.regs.iova(0x200);
+        let depth_addr = vbuf_addr + 0x200; // past the vertex buffer, still mapped.
+
+        engine.regs.set(0x204, 0x14); // colour target 0 in Z24S8, as the title binds it
+        engine.regs.set(0x3F8, (depth_addr >> 32) as u32);
+        engine.regs.set(0x3F9, depth_addr as u32);
+        engine.regs.set(0x3FA, 0x0A); // Z32Float
+        engine.regs.set(0x3FB, 0); // block_height_gobs = 1
+        engine.regs.set(0x48A, 16);
+        engine.regs.set(0x48B, 8);
+        engine.regs.set(0x4B3, 1); // DepthTestEnable
+        engine.regs.set(0x4BA, 1); // DepthWriteEnable
+        engine.regs.set(0x4C3, 0x0201); // DepthTestFunc = GL_LESS
+
+        {
+            let mut host1x = Host1x::new();
+            let mut stats = Default::default();
+            let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+            engine.regs.set(0x364, 1.0f32.to_bits()); // CLEAR_DEPTH = far
+            engine.write(0x674, 0b1, true, &mut ctx).unwrap();
+        }
+
+        let color = [0.2f32, 0.8, 0.2, 1.0];
+        for (i, pos) in [[-1.0f32, 1.0, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0], [-1.0, -1.0, 0.0, 1.0]]
+            .into_iter()
+            .enumerate()
+        {
+            write_vertex(&mut mem, &vmm, vbuf_addr, i as u32, pos, color);
+        }
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        assert!(engine.render_target(0).unwrap().is_none(), "no colour target is bound");
+        draw(&engine, &mut ctx).unwrap();
+
+        // NDC z = 0 is window z = 0.5 through this viewport, and it passes
+        // GL_LESS against the 1.0 the clear left.
+        assert_eq!(f32::from_bits(ctx.read_u32(depth_addr).unwrap()), 0.5);
+        // And nothing was written where a colour target would have been.
+        assert_eq!(ctx.read_u32(rt_addr).unwrap(), 0);
     }
 
     #[test]
