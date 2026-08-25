@@ -42,22 +42,31 @@
 //! emitter records them as it goes rather than scanning first — a second pass
 //! over the opcodes is a second place to get the list wrong.
 //!
-//! # What the host has to supply
+//! # Two layers
 //!
-//! The emitted text calls four functions it does not define, and reaching
-//! outside the shader is exactly what they are for: attribute space, constant
-//! banks and textures all live in guest memory that only the backend knows
-//! how to address. [`HOST_INTERFACE`] is their signatures.
+//! [`translate`] produces the shader's *body*: a function `run` that reaches
+//! outside itself through four calls it does not define, because attribute
+//! space, constant banks and textures live in guest memory that only a
+//! backend knows how to address. [`HOST_INTERFACE`] is their signatures.
+//!
+//! [`module`] wraps that in everything it needs to be a shader module — the
+//! bindings, the attribute storage, real implementations of those four calls,
+//! and the `@vertex` or `@fragment` entry point that fills attribute space in
+//! and takes the result out. What it needs to know to do that is a
+//! [`Layout`], and a layout can be read off the translation itself, because
+//! Maxwell's attribute space *is* the interface: a vertex shader's inputs are
+//! the `a[]` offsets it loads from and its outputs are the ones it stores to.
 //!
 //! # Checking a translation
 //!
 //! Nothing in this crate can parse WGSL, and a translation that is merely
 //! plausible is worth very little. `TRACE_WGSL=<dir>` on a real run writes
-//! every shader a title uses to that directory, each with
-//! [`HOST_INTERFACE`] in front of it so the file is a complete module, and
-//! `naga --validate 31 <file>` then says whether it is one. That is the same
-//! front end Firefox compiles WGSL with, so it is a real answer rather than a
-//! self-check — and it is a development step, not a dependency of this crate.
+//! every shader a title uses to that directory as a complete module, and
+//! `naga` then says whether it is one — `--validate 31` for the front end
+//! Firefox compiles WGSL with, or an output path to compile the whole way
+//! down to SPIR-V, HLSL, MSL or GLSL, which is what a pipeline actually does
+//! with it. Both are development steps; this crate still has no
+//! dependencies.
 
 use super::compiled::{Compiled, NO_TARGET};
 use super::isa::{
@@ -86,6 +95,10 @@ pub enum Unsupported {
     /// A `brx` whose jump table the decoder could not read, so its arms are
     /// unknown; see the jump-table walk in this module's parent.
     IndirectBranch { at: usize },
+    /// A texture dimensionality [`module`] cannot bind. The software
+    /// rasterizer samples every dimension as though it were 2D, which is
+    /// what a `texture_2d` binding would then be lying about.
+    TextureDimension { dim: TexDim },
 }
 
 impl fmt::Display for Unsupported {
@@ -100,6 +113,9 @@ impl fmt::Display for Unsupported {
             Unsupported::IndirectBranch { at } => {
                 write!(f, "instruction {at}: brx with no known targets")
             }
+            Unsupported::TextureDimension { dim } => {
+                write!(f, "no binding for a {dim:?} texture")
+            }
         }
     }
 }
@@ -107,9 +123,10 @@ impl fmt::Display for Unsupported {
 /// The functions the emitted text calls and does not define.
 ///
 /// Given here as compilable WGSL with bodies that answer nothing, so that a
-/// translation can be parsed and checked on its own. A backend replaces them
-/// with the real thing: `attrIn`/`attrOut` reach the vertex attributes and
-/// varyings, `cbRead` a bound constant buffer, `texSample` a bound texture.
+/// bare [`translate`] result can be parsed and checked on its own.
+/// [`module`] supplies the real ones: `attrIn`/`attrOut` reach the attribute
+/// space its entry point fills, `cbRead` a bound constant buffer, and
+/// `texSample` a bound texture.
 ///
 /// `texSample` takes the *immediate* a `texs` carries rather than a texture
 /// handle, because turning one into the other means reading the driver's
@@ -156,6 +173,17 @@ pub struct Translation {
     /// so the register file has to outlive the call. A vertex shader's
     /// outputs go the other way, through `attrOut`.
     pub registers: Vec<u8>,
+    /// Generic `a[]` slots the program reads, ascending — a vertex shader's
+    /// vertex attributes, a fragment shader's varyings.
+    pub loads: Vec<usize>,
+    /// Generic `a[]` slots the program writes, ascending: a vertex shader's
+    /// varyings.
+    pub stores: Vec<usize>,
+    /// The constant banks it reads, ascending.
+    pub const_banks: Vec<u8>,
+    /// The textures it samples, in the order it first mentions them: the
+    /// `texs` immediate and the dimensionality sampled with.
+    pub textures: Vec<(u16, TexDim)>,
 }
 
 /// Translate `program` into a WGSL function `run`, which returns whether the
@@ -167,6 +195,10 @@ pub fn translate(program: &Compiled) -> Result<Translation, Unsupported> {
     Ok(Translation {
         source: emitter.finish(&leaders),
         registers: emitter.regs.iter().copied().collect(),
+        loads: emitter.loads.iter().copied().collect(),
+        stores: emitter.stores.iter().copied().collect(),
+        const_banks: emitter.banks.iter().copied().collect(),
+        textures: emitter.textures.clone(),
     })
 }
 
@@ -431,6 +463,12 @@ struct Emitter<'a> {
     helpers: BTreeSet<&'static str>,
     uses_carry: bool,
     uses_stack: bool,
+    /// The interface the emitted text reaches through, recorded as it is
+    /// emitted so that a binding it calls cannot be left out of the module.
+    loads: BTreeSet<usize>,
+    stores: BTreeSet<usize>,
+    banks: BTreeSet<u8>,
+    textures: Vec<(u16, TexDim)>,
     /// Names `let` bindings apart. WGSL scopes them to their block, but one
     /// counter across the whole function is simpler than reasoning about it.
     temps: usize,
@@ -447,6 +485,10 @@ impl<'a> Emitter<'a> {
             helpers: BTreeSet::new(),
             uses_carry: false,
             uses_stack: false,
+            loads: BTreeSet::new(),
+            stores: BTreeSet::new(),
+            banks: BTreeSet::new(),
+            textures: Vec::new(),
             temps: 0,
         }
     }
@@ -497,7 +539,10 @@ impl<'a> Emitter<'a> {
         match operand {
             Operand::Reg(reg) => self.r(reg),
             Operand::Imm(value) => format!("{value}u"),
-            Operand::Const { bank, offset } => format!("cbRead({bank}u, {offset}u)"),
+            Operand::Const { bank, offset } => {
+                self.banks.insert(bank);
+                format!("cbRead({bank}u, {offset}u)")
+            }
         }
     }
 
@@ -672,6 +717,7 @@ impl Emitter<'_> {
         match op {
             // ---- attribute space ----
             Op::Ld { dst, offset, idx, size } => {
+                self.loads.extend(generic_slot(offset));
                 let base = self.attr_base(offset, idx);
                 for i in 0..size.regs() {
                     let word = i as u32 * 4;
@@ -679,6 +725,7 @@ impl Emitter<'_> {
                 }
             }
             Op::St { offset, idx, src, size } => {
+                self.stores.extend(generic_slot(offset));
                 let base = self.attr_base(offset, idx);
                 for i in 0..size.regs() {
                     let word = i as u32 * 4;
@@ -687,6 +734,7 @@ impl Emitter<'_> {
                 }
             }
             Op::Ipa { dst, offset, mul, perspective, sat } => {
+                self.loads.extend(generic_slot(offset));
                 let mut value = format!("attrIn({offset}u)");
                 if perspective {
                     if let Some(mul) = mul {
@@ -1091,6 +1139,7 @@ impl Emitter<'_> {
 
             // ---- memory ----
             Op::Ldc { dst, bank, offset, idx, size } => {
+                self.banks.insert(bank);
                 let index = self.r(idx);
                 let base = self.bind(&format!("{}u + {index}", offset as u32));
                 for i in 0..size.regs() {
@@ -1104,6 +1153,9 @@ impl Emitter<'_> {
 
             // ---- texture ----
             Op::Texs { coords, handle, dim, .. } => {
+                if !self.textures.iter().any(|&(imm, _)| imm == handle) {
+                    self.textures.push((handle, dim));
+                }
                 let u = self.f(coords[0]);
                 let v = self.f(coords[1]);
                 // An array's layer is an integer in the low half of its
@@ -1380,6 +1432,336 @@ impl Emitter<'_> {
         out.push_str("}\n");
         out
     }
+}
+
+/// Which pipeline stage a module is built for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    Vertex,
+    Fragment,
+}
+
+/// Everything a complete module has to be wired to, as slot and bank numbers.
+///
+/// All of it can be read off the program — see [`Layout::of`] — because
+/// Maxwell's attribute space *is* the interface: a vertex shader's inputs are
+/// the `a[]` offsets it loads from, its outputs are the ones it stores to,
+/// and a fragment shader's inputs are the ones it interpolates. What cannot
+/// be read off the program is how those map to memory, which is a question
+/// about the draw rather than about the shader.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Layout {
+    /// Generic slots a vertex shader loads its inputs from. The slot number
+    /// is the `@location`, and the backend feeds each one four floats —
+    /// whatever the vertex format was, `raster::fetch_attribute` has already
+    /// widened it to that.
+    pub attributes: Vec<usize>,
+    /// Generic slots passed from the vertex stage to the fragment stage.
+    /// Both stages have to name the same ones, so a pair of modules is built
+    /// from one layout rather than two.
+    pub varyings: Vec<usize>,
+    /// Constant banks the program reads, by bind slot.
+    pub const_banks: Vec<u8>,
+    /// The textures the program samples: each `texs` immediate, and the
+    /// dimensionality it samples with.
+    pub textures: Vec<(u16, TexDim)>,
+    /// How many colour targets a fragment shader writes. Each takes four
+    /// consecutive registers from `r0`, so target `n` is `r[4n..4n+4]`.
+    pub targets: u32,
+}
+
+/// `a[]`'s word count: a ten-bit byte address, one `f32` per word.
+const ATTRIBUTE_WORDS: usize = 0x400 / 4;
+/// The `a[]` byte offset of generic slot `n`, and of its component `c`,
+/// is `GENERIC_BASE + n * GENERIC_STRIDE + c * 4`.
+const GENERIC_BASE: usize = 0x80;
+const GENERIC_STRIDE: usize = 0x10;
+const GENERIC_SLOTS: usize = 32;
+/// Clip position, four floats. Its `w` slot is also where a fragment shader
+/// reads `1/w`, which is not a collision: one is a vertex output and the
+/// other a fragment input.
+const POSITION: usize = 0x70;
+/// `InstanceId` and `VertexId`, in that order — the instance is the lower.
+const INSTANCE_ID: usize = 0x2f8;
+const VERTEX_ID: usize = 0x2fc;
+
+/// The bind group everything is in.
+const GROUP: u32 = 0;
+/// Constant bank `b` binds at `b`, and texture `i` at `TEXTURE_BINDING + 2i`
+/// with its sampler beside it. Fixed rather than packed so that a backend can
+/// work out a binding number without re-deriving the layout.
+const TEXTURE_BINDING: u32 = 32;
+
+impl Layout {
+    /// Read a program's interface off what translating it touched.
+    ///
+    /// Derived from the [`Translation`] rather than from a second walk over
+    /// the opcodes, for the same reason the register list is: a pass that
+    /// re-derives what the emitter already knows is a second place for the
+    /// two to disagree, and here they would disagree by leaving out a
+    /// binding the emitted text calls.
+    pub fn of(translated: &Translation, stage: Stage) -> Layout {
+        let (attributes, varyings) = match stage {
+            // A vertex shader loads its inputs and stores its outputs.
+            Stage::Vertex => (translated.loads.clone(), translated.stores.clone()),
+            // A fragment shader's inputs are what it interpolates; anything
+            // it stores to `a[]` goes nowhere, since its output is `r0` on.
+            Stage::Fragment => (Vec::new(), translated.loads.clone()),
+        };
+        Layout {
+            attributes,
+            varyings,
+            const_banks: translated.const_banks.clone(),
+            textures: translated.textures.clone(),
+            targets: 1,
+        }
+    }
+}
+
+/// The generic slot an `a[]` byte offset names, if it is one.
+fn generic_slot(offset: u16) -> Option<usize> {
+    let offset = usize::from(offset);
+    if (GENERIC_BASE..GENERIC_BASE + GENERIC_SLOTS * GENERIC_STRIDE).contains(&offset) {
+        Some((offset - GENERIC_BASE) / GENERIC_STRIDE)
+    } else {
+        None
+    }
+}
+
+/// Wrap a translation in everything it needs to be a shader module: the
+/// bindings it reads through, the attribute space it reads and writes, and
+/// the entry point that fills one in and takes the other out.
+///
+/// # Why the varyings are `@interpolate(linear)`
+///
+/// This is the one place where doing the obvious thing is silently wrong.
+/// Maxwell's `ipa` does not receive a perspective-correct value: it receives
+/// `value/w`, linearly interpolated in screen space, and the shader finishes
+/// the job itself by multiplying by `rcp(a[0x7c])`. Declaring the varyings
+/// `perspective` — which is WGSL's default — would have the hardware divide
+/// as well, and every textured surface would be wrong in a way that looks
+/// like a texture-coordinate bug.
+///
+/// So the vertex stage multiplies each varying by `1/w` on the way out and
+/// the fragment stage interpolates linearly, which reproduces exactly what
+/// `raster::shade_fragment` puts in `attr_in`. `a[0x7c]` is then WGSL's own
+/// `position.w`, which in a fragment shader is already `1/w` interpolated the
+/// same way.
+pub fn module(
+    translated: &Translation,
+    stage: Stage,
+    layout: &Layout,
+) -> Result<String, Unsupported> {
+    let mut out = String::new();
+    for bank in &layout.const_banks {
+        out.push_str(&format!(
+            "@group({GROUP}) @binding({bank}) var<storage, read> cb{bank}: array<u32>;\n"
+        ));
+    }
+    for (index, &(_, dim)) in layout.textures.iter().enumerate() {
+        let binding = TEXTURE_BINDING + 2 * index as u32;
+        out.push_str(&format!(
+            "@group({GROUP}) @binding({binding}) var tex{index}: {};\n",
+            texture_type(dim)?
+        ));
+        out.push_str(&format!(
+            "@group({GROUP}) @binding({}) var smp{index}: sampler;\n",
+            binding + 1
+        ));
+    }
+    if !layout.const_banks.is_empty() || !layout.textures.is_empty() {
+        out.push('\n');
+    }
+
+    // `a[]` is a ten-bit byte address holding one f32 per word. The two
+    // halves are separate because a vertex shader's inputs and its outputs
+    // occupy the same offsets and must not alias — `Invocation` keeps them
+    // apart for the same reason.
+    out.push_str(&format!("var<private> attr_in: array<f32, {ATTRIBUTE_WORDS}>;\n"));
+    out.push_str(&format!("var<private> attr_out: array<f32, {ATTRIBUTE_WORDS}>;\n\n"));
+    let mask = ATTRIBUTE_WORDS - 1;
+    out.push_str(&format!(
+        "fn attrIn(offset: u32) -> f32 {{ return attr_in[(offset >> 2u) & {mask}u]; }}\n"
+    ));
+    out.push_str(&format!(
+        "fn attrOut(offset: u32, value: f32) {{ attr_out[(offset >> 2u) & {mask}u] = value; }}\n\n"
+    ));
+
+    out.push_str("fn cbRead(bank: u32, offset: u32) -> u32 {\n  switch (bank) {\n");
+    for bank in &layout.const_banks {
+        out.push_str(&format!("    case {bank}u: {{ return cb{bank}[offset >> 2u]; }}\n"));
+    }
+    // A bank the program reads but the draw never bound. The interpreter
+    // raises an error there; a shader has nowhere to raise one, and zero is
+    // what an unwritten constant already reads as.
+    out.push_str("    default: { return 0u; }\n  }\n}\n\n");
+
+    // `dim` is unused: which of these a call reaches is decided by the
+    // immediate, and the dimensionality then belongs to the binding's type.
+    // It stays in the signature because it is part of `HOST_INTERFACE`, and
+    // a backend that binds textures some other way may want it.
+    out.push_str(
+        "fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {\n\
+         \x20 switch (imm) {\n",
+    );
+    for (index, &(imm, dim)) in layout.textures.iter().enumerate() {
+        let coords = match dim {
+            TexDim::T2d => "vec2<f32>(u, v), 0.0",
+            TexDim::T2dArray => "vec2<f32>(u, v), layer, 0.0",
+            other => return Err(Unsupported::TextureDimension { dim: other }),
+        };
+        out.push_str(&format!(
+            "    case {imm}u: {{ return textureSampleLevel(tex{index}, smp{index}, {coords}); }}\n"
+        ));
+    }
+    out.push_str("    default: { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }\n  }\n}\n\n");
+
+    out.push_str(&translated.source);
+    out.push('\n');
+    out.push_str(&match stage {
+        Stage::Vertex => vertex_entry(layout),
+        Stage::Fragment => fragment_entry(translated, layout),
+    });
+    Ok(out)
+}
+
+/// The WGSL type a `texs` of this dimensionality samples.
+fn texture_type(dim: TexDim) -> Result<&'static str, Unsupported> {
+    match dim {
+        TexDim::T2d => Ok("texture_2d<f32>"),
+        TexDim::T2dArray => Ok("texture_2d_array<f32>"),
+        other => Err(Unsupported::TextureDimension { dim: other }),
+    }
+}
+
+/// The `attr_in`/`attr_out` word index of generic slot `slot`'s component
+/// `component`.
+fn generic_word(slot: usize, component: usize) -> usize {
+    (GENERIC_BASE + slot * GENERIC_STRIDE) / 4 + component
+}
+
+/// `vec4<f32>(a[base + 0], .., a[base + 3])` out of one of the halves.
+fn gather(array: &str, base: usize) -> String {
+    let words: Vec<String> = (0..4).map(|c| format!("{array}[{}u]", base + c)).collect();
+    format!("vec4<f32>({})", words.join(", "))
+}
+
+fn vertex_entry(layout: &Layout) -> String {
+    let mut out = String::new();
+    if !layout.attributes.is_empty() {
+        out.push_str("struct VertexInput {\n");
+        for slot in &layout.attributes {
+            out.push_str(&format!("  @location({slot}) attr{slot}: vec4<f32>,\n"));
+        }
+        out.push_str("}\n\n");
+    }
+    out.push_str("struct VertexOutput {\n  @builtin(position) position: vec4<f32>,\n");
+    for slot in &layout.varyings {
+        out.push_str(&format!(
+            "  @location({slot}) @interpolate(linear) vary{slot}: vec4<f32>,\n"
+        ));
+    }
+    out.push_str("}\n\n@vertex\nfn vs_main(\n");
+    if !layout.attributes.is_empty() {
+        out.push_str("  input: VertexInput,\n");
+    }
+    out.push_str(
+        "  @builtin(vertex_index) vertex: u32,\n\
+         \x20 @builtin(instance_index) instance: u32,\n\
+         ) -> VertexOutput {\n",
+    );
+    out.push_str(&format!(
+        "  attr_in[{}u] = bitcast<f32>(instance);\n  attr_in[{}u] = bitcast<f32>(vertex);\n",
+        INSTANCE_ID / 4,
+        VERTEX_ID / 4
+    ));
+    for slot in &layout.attributes {
+        for (component, axis) in ["x", "y", "z", "w"].iter().enumerate() {
+            out.push_str(&format!(
+                "  attr_in[{}u] = input.attr{slot}.{axis};\n",
+                generic_word(*slot, component)
+            ));
+        }
+    }
+    // A clip position no `st` writes is (0, 0, 0, 1), which `shade_vertex`
+    // gets from `Attributes::written` answering `None`.
+    out.push_str(&format!("  attr_out[{}u] = 1.0;\n", POSITION / 4 + 3));
+    out.push_str("  run();\n  var out: VertexOutput;\n");
+    out.push_str(&format!("  out.position = {};\n", gather("attr_out", POSITION / 4)));
+    if !layout.varyings.is_empty() {
+        // See this module's note on `@interpolate(linear)`: what the fragment
+        // stage has to receive is value/w, not value.
+        out.push_str("  let over_w = 1.0 / out.position.w;\n");
+        for slot in &layout.varyings {
+            out.push_str(&format!(
+                "  out.vary{slot} = {} * over_w;\n",
+                gather("attr_out", generic_word(*slot, 0))
+            ));
+        }
+    }
+    out.push_str("  return out;\n}\n");
+    out
+}
+
+fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
+    let colour = |target: u32| -> String {
+        let components: Vec<String> = (0..4)
+            .map(|c| {
+                let reg = (target * 4 + c) as u8;
+                if translated.registers.contains(&reg) {
+                    format!("bitcast<f32>(r{reg})")
+                } else {
+                    // A channel the shader never wrote. `Invocation`'s
+                    // register file starts at zero and `shade_fragment` reads
+                    // it out regardless.
+                    "0.0".to_string()
+                }
+            })
+            .collect();
+        format!("vec4<f32>({})", components.join(", "))
+    };
+
+    let mut out =
+        String::from("struct FragmentInput {\n  @builtin(position) position: vec4<f32>,\n");
+    for slot in &layout.varyings {
+        out.push_str(&format!(
+            "  @location({slot}) @interpolate(linear) vary{slot}: vec4<f32>,\n"
+        ));
+    }
+    out.push_str("}\n\n");
+    let targets = layout.targets.max(1);
+    if targets > 1 {
+        out.push_str("struct FragmentOutput {\n");
+        for target in 0..targets {
+            out.push_str(&format!("  @location({target}) target{target}: vec4<f32>,\n"));
+        }
+        out.push_str("}\n\n");
+    }
+    let returns = if targets > 1 { "FragmentOutput" } else { "@location(0) vec4<f32>" };
+    out.push_str(&format!("@fragment\nfn fs_main(input: FragmentInput) -> {returns} {{\n"));
+    // WGSL's fragment `position.w` is `1/w` interpolated linearly, which is
+    // exactly what `a[0x7c]` holds.
+    out.push_str(&format!("  attr_in[{}u] = input.position.w;\n", POSITION / 4 + 3));
+    for slot in &layout.varyings {
+        for (component, axis) in ["x", "y", "z", "w"].iter().enumerate() {
+            out.push_str(&format!(
+                "  attr_in[{}u] = input.vary{slot}.{axis};\n",
+                generic_word(*slot, component)
+            ));
+        }
+    }
+    out.push_str("  if (run()) { discard; }\n");
+    if targets > 1 {
+        out.push_str("  var out: FragmentOutput;\n");
+        for target in 0..targets {
+            out.push_str(&format!("  out.target{target} = {};\n", colour(target)));
+        }
+        out.push_str("  return out;\n");
+    } else {
+        out.push_str(&format!("  return {};\n", colour(0)));
+    }
+    out.push_str("}\n");
+    out
 }
 
 #[cfg(test)]
@@ -1691,6 +2073,193 @@ mod tests {
         for hook in ["attrIn(", "attrOut(", "cbRead(", "texSample("] {
             assert!(wgsl.contains(hook), "nothing emits a call to {hook}");
             assert!(HOST_INTERFACE.contains(hook), "{hook} is not in HOST_INTERFACE");
+        }
+    }
+
+    /// A vertex shader that reads attribute `slot` and writes varying `slot`,
+    /// and a fragment shader that interpolates it — the smallest pair that
+    /// has an interface at all.
+    fn pair(slot: usize) -> (Compiled, Compiled) {
+        let offset = (GENERIC_BASE + slot * GENERIC_STRIDE) as u16;
+        let vs = program(&[
+            (Op::Ld { dst: 1, offset, idx: RZ, size: MemSize::B32 }, ALWAYS),
+            (Op::St { offset, idx: RZ, src: 1, size: MemSize::B32 }, ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]);
+        let fs = program(&[
+            (Op::Ipa { dst: 0, offset, mul: None, perspective: true, sat: false }, ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]);
+        (vs, fs)
+    }
+
+    #[test]
+    fn a_layout_is_read_off_what_translating_the_program_touched() {
+        let (vs, fs) = pair(3);
+        let vs = translate(&vs).unwrap();
+        let fs = translate(&fs).unwrap();
+        assert_eq!(Layout::of(&vs, Stage::Vertex).attributes, vec![3]);
+        assert_eq!(Layout::of(&vs, Stage::Vertex).varyings, vec![3]);
+        // A fragment shader has no vertex attributes, and what it reads out
+        // of `a[]` is a varying.
+        assert_eq!(Layout::of(&fs, Stage::Fragment).attributes, Vec::<usize>::new());
+        assert_eq!(Layout::of(&fs, Stage::Fragment).varyings, vec![3]);
+    }
+
+    #[test]
+    fn a_layout_names_every_binding_the_text_calls_through() {
+        let p = program(&[
+            (Op::Ldc { dst: 1, bank: 5, offset: 0x10, idx: RZ, size: MemSize::B32 }, ALWAYS),
+            (Op::Mov { dst: 2, src: Operand::Const { bank: 1, offset: 0x40 } }, ALWAYS),
+            (
+                Op::Texs {
+                    dst: 4,
+                    dst2: 6,
+                    coords: [7, 8, RZ],
+                    handle: 0x1a4,
+                    dim: TexDim::T2d,
+                    mask: [true, true, true, true],
+                },
+                ALWAYS,
+            ),
+            (Op::Exit, ALWAYS),
+        ]);
+        let translated = translate(&p).unwrap();
+        let layout = Layout::of(&translated, Stage::Fragment);
+        assert_eq!(layout.const_banks, vec![1, 5]);
+        assert_eq!(layout.textures, vec![(0x1a4, TexDim::T2d)]);
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(source.contains("var<storage, read> cb1:"), "{source}");
+        assert!(source.contains("var<storage, read> cb5:"), "{source}");
+        assert!(source.contains("case 420u: { return textureSampleLevel(tex0, smp0"), "{source}");
+    }
+
+    #[test]
+    fn both_stages_name_the_same_location_for_a_varying() {
+        // A pipeline whose stages disagree about a location does not link,
+        // and nothing but the layout keeps them together.
+        let (vs, fs) = pair(7);
+        let vs = translate(&vs).unwrap();
+        let fs = translate(&fs).unwrap();
+        let vs = module(&vs, Stage::Vertex, &Layout::of(&vs, Stage::Vertex)).unwrap();
+        let fs = module(&fs, Stage::Fragment, &Layout::of(&fs, Stage::Fragment)).unwrap();
+        assert!(vs.contains("@location(7) @interpolate(linear) vary7"), "{vs}");
+        assert!(fs.contains("@location(7) @interpolate(linear) vary7"), "{fs}");
+    }
+
+    #[test]
+    fn varyings_interpolate_linearly_because_the_shader_divides_by_w_itself() {
+        // Maxwell's `ipa` is handed value/w and finishes the perspective
+        // divide with `rcp(a[0x7c])`. Letting the hardware correct as well
+        // would divide twice, which looks like a texture-coordinate bug and
+        // is not one.
+        let (vs, _) = pair(0);
+        let vs = translate(&vs).unwrap();
+        let source = module(&vs, Stage::Vertex, &Layout::of(&vs, Stage::Vertex)).unwrap();
+        assert!(source.contains("@interpolate(linear)"), "{source}");
+        assert!(!source.contains("perspective"), "{source}");
+        assert!(source.contains("let over_w = 1.0 / out.position.w;"), "{source}");
+        assert!(source.contains("* over_w;"), "{source}");
+    }
+
+    #[test]
+    fn a_clip_position_no_store_writes_is_the_one_the_rasterizer_defaults_to() {
+        // `shade_vertex` reads (0, 0, 0, 1) when `Attributes::written`
+        // answers `None`; zero-initialised storage gets three of those four
+        // right on its own.
+        let (vs, _) = pair(0);
+        let vs = translate(&vs).unwrap();
+        let source = module(&vs, Stage::Vertex, &Layout::of(&vs, Stage::Vertex)).unwrap();
+        assert!(source.contains("attr_out[31u] = 1.0;"), "{source}");
+    }
+
+    #[test]
+    fn a_vertex_shader_with_no_attributes_declares_no_input_struct() {
+        // WGSL has no empty struct, so one has to be left out rather than
+        // emitted empty.
+        let p = program(&[(Op::Exit, ALWAYS)]);
+        let translated = translate(&p).unwrap();
+        let layout = Layout::of(&translated, Stage::Vertex);
+        assert!(layout.attributes.is_empty());
+        let source = module(&translated, Stage::Vertex, &layout).unwrap();
+        assert!(!source.contains("struct VertexInput"), "{source}");
+        assert!(!source.contains("input: VertexInput"), "{source}");
+    }
+
+    #[test]
+    fn a_colour_channel_the_shader_never_wrote_is_zero_not_a_missing_register() {
+        // `shade_fragment` reads r0 to r3 whatever the shader touched, and a
+        // module that named a register it never declared would not compile.
+        let p = program(&[
+            (Op::Mov { dst: 0, src: Operand::Imm(0x3f80_0000) }, ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]);
+        let translated = translate(&p).unwrap();
+        let layout = Layout::of(&translated, Stage::Fragment);
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(source.contains("return vec4<f32>(bitcast<f32>(r0), 0.0, 0.0, 0.0);"), "{source}");
+    }
+
+    #[test]
+    fn each_extra_colour_target_takes_the_next_four_registers() {
+        let mut entries: Vec<(Op, Pred)> = (0..8u8)
+            .map(|r| (Op::Mov { dst: r, src: Operand::Imm(0) }, ALWAYS))
+            .collect();
+        entries.push((Op::Exit, ALWAYS));
+        let translated = translate(&program(&entries)).unwrap();
+        let mut layout = Layout::of(&translated, Stage::Fragment);
+        layout.targets = 2;
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(source.contains("@location(1) target1: vec4<f32>"), "{source}");
+        assert!(
+            source.contains("out.target1 = vec4<f32>(bitcast<f32>(r4), bitcast<f32>(r5), \
+                             bitcast<f32>(r6), bitcast<f32>(r7));"),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn a_texture_dimension_with_no_binding_is_reported() {
+        // The software rasterizer samples every dimension as though it were
+        // 2D. A `texture_2d` binding for a 3D texture would be a lie the
+        // pipeline finds out about, so this says so instead.
+        let p = program(&[
+            (
+                Op::Texs {
+                    dst: 0,
+                    dst2: 2,
+                    coords: [4, 5, 6],
+                    handle: 1,
+                    dim: TexDim::T3d,
+                    mask: [true, true, true, true],
+                },
+                ALWAYS,
+            ),
+            (Op::Exit, ALWAYS),
+        ]);
+        let translated = translate(&p).unwrap();
+        let layout = Layout::of(&translated, Stage::Fragment);
+        assert_eq!(
+            module(&translated, Stage::Fragment, &layout).unwrap_err(),
+            Unsupported::TextureDimension { dim: TexDim::T3d }
+        );
+    }
+
+    #[test]
+    fn a_module_is_complete_enough_to_stand_on_its_own() {
+        // Nothing here can parse WGSL; what this can check is that the four
+        // hooks `HOST_INTERFACE` describes are all defined in the module
+        // rather than left to a caller, since a module is meant to be handed
+        // to a device as it is.
+        let (vs, fs) = pair(2);
+        for (program, stage) in [(vs, Stage::Vertex), (fs, Stage::Fragment)] {
+            let translated = translate(&program).unwrap();
+            let layout = Layout::of(&translated, stage);
+            let source = module(&translated, stage, &layout).unwrap();
+            for hook in ["fn attrIn(", "fn attrOut(", "fn cbRead(", "fn texSample("] {
+                assert!(source.contains(hook), "{stage:?} module has no {hook}:\n{source}");
+            }
+            assert!(braces_balance(&source), "{stage:?}:\n{source}");
         }
     }
 }

@@ -938,33 +938,44 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             );
         }
     }
-    // `TRACE_WGSL=1`: whether each shader can be translated, and to what.
-    // `TRACE_WGSL=dir` writes each translation to `dir/<stage>_<addr>.wgsl`
-    // instead, which is how the emitted text gets in front of a real shader
-    // compiler — nothing in this crate can parse WGSL.
+    // `TRACE_WGSL=1`: whether each shader can be translated, and what it
+    // needs bound. `TRACE_WGSL=dir` writes each complete module to
+    // `dir/<stage>_<addr>.wgsl` instead, which is how the emitted text gets
+    // in front of a real shader compiler — nothing in this crate can parse
+    // WGSL, so `naga --validate` on those files is the only thing that says
+    // whether a translation is one.
     if let Ok(where_to) = std::env::var("TRACE_WGSL") {
-        for (stage, addr, program) in
-            [("vs", vs_binding.addr, &vs_program), ("fs", fs_binding.addr, &fs_program)]
-        {
-            match crate::gpu::shader::wgsl::translate(program) {
-                Ok(translated) if where_to == "1" => eprintln!(
-                    "[wgsl] {stage}@{addr:#x} {} bytes, {} registers",
-                    translated.source.len(),
-                    translated.registers.len()
+        use crate::gpu::shader::wgsl::{self, Layout, Stage};
+        for (name, stage, addr, program) in [
+            ("vs", Stage::Vertex, vs_binding.addr, &vs_program),
+            ("fs", Stage::Fragment, fs_binding.addr, &fs_program),
+        ] {
+            let translated = match wgsl::translate(program) {
+                Ok(translated) => translated,
+                Err(e) => {
+                    eprintln!("[wgsl] {name}@{addr:#x} untranslated: {e}");
+                    continue;
+                }
+            };
+            let layout = Layout::of(&translated, stage);
+            match wgsl::module(&translated, stage, &layout) {
+                Ok(_) if where_to == "1" => eprintln!(
+                    "[wgsl] {name}@{addr:#x} {} regs, {} attribs, {} varyings, \
+                     {} banks, {} textures",
+                    translated.registers.len(),
+                    layout.attributes.len(),
+                    layout.varyings.len(),
+                    layout.const_banks.len(),
+                    layout.textures.len()
                 ),
-                Ok(translated) => {
-                    let path = format!("{where_to}/{stage}_{addr:x}.wgsl");
-                    let module = format!(
-                        "{}\n{}",
-                        crate::gpu::shader::wgsl::HOST_INTERFACE,
-                        translated.source
-                    );
+                Ok(module) => {
+                    let path = format!("{where_to}/{name}_{addr:x}.wgsl");
                     match std::fs::write(&path, module) {
-                        Ok(()) => eprintln!("[wgsl] {stage}@{addr:#x} -> {path}"),
-                        Err(e) => eprintln!("[wgsl] {stage}@{addr:#x} cannot write {path}: {e}"),
+                        Ok(()) => eprintln!("[wgsl] {name}@{addr:#x} -> {path}"),
+                        Err(e) => eprintln!("[wgsl] {name}@{addr:#x} cannot write {path}: {e}"),
                     }
                 }
-                Err(e) => eprintln!("[wgsl] {stage}@{addr:#x} untranslated: {e}"),
+                Err(e) => eprintln!("[wgsl] {name}@{addr:#x} no module: {e}"),
             }
         }
     }
