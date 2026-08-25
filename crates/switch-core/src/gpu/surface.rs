@@ -70,6 +70,26 @@ impl Layout {
             }
         }
     }
+
+    /// Bytes from one array layer to the next: the size of a whole swizzled
+    /// surface, rounded up to the blocks it is made of.
+    ///
+    /// A 2D array is stored as its layers back to back, and the layer is not
+    /// part of the swizzle — so this is the only thing that distinguishes
+    /// layer *n* from layer 0, and a stride of zero collapses the whole array
+    /// onto its first slice.
+    pub fn layer_stride(&self, width_bytes: u32, height: u32) -> u32 {
+        match *self {
+            Layout::Pitch { pitch } => pitch * height,
+            Layout::BlockLinear { block_height_gobs } => {
+                let block_height_gobs = block_height_gobs.max(1);
+                let width_gobs = width_bytes.div_ceil(GOB_WIDTH).max(1);
+                let block_row_bytes = width_gobs * GOB_SIZE * block_height_gobs;
+                let rows_per_block = GOB_HEIGHT * block_height_gobs;
+                height.div_ceil(rows_per_block) * block_row_bytes
+            }
+        }
+    }
 }
 
 /// The most samples per pixel any Maxwell `MsaaMode` names (`4x4`).

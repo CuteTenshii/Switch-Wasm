@@ -4,7 +4,7 @@
 //! (`source/maxwell/engine_3d.def`), so they match the command streams real
 //! homebrew emits exactly.
 
-use crate::gpu::engine::{field, Registers};
+use crate::gpu::engine::{field, Registers, REGISTER_COUNT};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::macro_engine::{MacroEngine, MacroHost, MacroWrite, MACRO_METHODS_START};
 use crate::gpu::raster;
@@ -46,6 +46,13 @@ const DEPTH_TARGET_HORIZONTAL: u32 = 0x48A;
 const DEPTH_TARGET_VERTICAL: u32 = 0x48B;
 const VERTEX_END_GL: u32 = 0x585;
 const VERTEX_BEGIN_GL: u32 = 0x586;
+/// `VertexBeginGl.InstanceNext`. An instanced draw is not one method with an
+/// instance count: it is one `Begin`/`End` pair per instance, every pair after
+/// the first carrying this bit, which tells the hardware to step its instance
+/// counter rather than reset it. Without it every instance is instance zero —
+/// and a UI that draws each of its elements as one instance of a unit quad
+/// stacks all of them on top of each other.
+const VERTEX_BEGIN_INSTANCE_NEXT: u32 = 1 << 26;
 const DRAW_ELEMENTS_COUNT: u32 = 0x5F8;
 const CLEAR_BUFFERS: u32 = 0x674;
 const REPORT_SEMAPHORE_OFFSET: u32 = 0x6C0;
@@ -319,6 +326,10 @@ impl RenderTarget {
 #[derive(Debug)]
 pub struct Engine3D {
     pub regs: Registers,
+    /// `gl_InstanceID` for the draw about to be issued — see
+    /// [`VERTEX_BEGIN_INSTANCE_NEXT`].
+    instance_id: u32,
+    traced_regs: Option<Vec<u32>>,
     pub macros: MacroEngine,
     /// The inline-to-memory unit, which the 3D class exposes as its own
     /// methods and which lives here rather than on the channel so that
@@ -347,6 +358,8 @@ impl Engine3D {
     pub fn new() -> Engine3D {
         Engine3D {
             regs: Registers::new(),
+            instance_id: 0,
+            traced_regs: None,
             macros: MacroEngine::new(),
             inline: crate::gpu::engine::inline::EngineInline::new(),
             last_draw: DrawCall::default(),
@@ -382,7 +395,14 @@ impl Engine3D {
             BIND..=BIND_LAST => self.bind(method, arg),
             DRAW_ARRAYS_COUNT => self.draw_arrays(arg, ctx)?,
             DRAW_ELEMENTS_COUNT => self.draw_elements(arg, ctx)?,
-            VERTEX_BEGIN_GL => self.last_draw.primitive = field(arg, 0, 15),
+            VERTEX_BEGIN_GL => {
+                self.last_draw.primitive = field(arg, 0, 15);
+                self.instance_id = if arg & VERTEX_BEGIN_INSTANCE_NEXT != 0 {
+                    self.instance_id.wrapping_add(1)
+                } else {
+                    0
+                };
+            }
             VERTEX_END_GL => {}
             // The inline-to-memory methods the 3D class shares with
             // KEPLER_INLINE_TO_MEMORY_B. These used to do nothing here on the
@@ -538,6 +558,7 @@ impl Engine3D {
             index_format: 0,
         };
         ctx.stats.draws += 1;
+        self.trace_reg_diff();
         self.rasterize_or_log(ctx);
         Ok(())
     }
@@ -551,6 +572,7 @@ impl Engine3D {
             index_format: self.regs.get(0x5F6),
         };
         ctx.stats.draws += 1;
+        self.trace_reg_diff();
         self.rasterize_or_log(ctx);
         Ok(())
     }
@@ -561,6 +583,31 @@ impl Engine3D {
     /// — real deko3d/Mesa shaders are far richer than our fixtures — must
     /// keep running exactly as it did before this existed, just without
     /// real pixels for that draw. `TRACE_GPU` surfaces why.
+    /// `TRACE_REGS=1`: which registers this draw changed since the previous
+    /// one. Two draws that read the same state must draw the same thing, so
+    /// when a frame's draws all land on top of each other, this says what the
+    /// guest varied — and by omission, what the rasterizer is failing to read.
+    fn trace_reg_diff(&mut self) {
+        if std::env::var("TRACE_REGS").is_err() {
+            return;
+        }
+        let now: Vec<u32> = (0..REGISTER_COUNT as u32).map(|m| self.regs.get(m)).collect();
+        if let Some(prev) = &self.traced_regs {
+            let diff: Vec<String> = now
+                .iter()
+                .enumerate()
+                .filter(|(i, v)| prev[*i] != **v)
+                .map(|(i, v)| format!("{i:#x}={v:#010x}"))
+                .collect();
+            eprintln!(
+                "[regs] begin={:#010x} {}",
+                self.regs.get(VERTEX_BEGIN_GL),
+                diff.join(" ")
+            );
+        }
+        self.traced_regs = Some(now);
+    }
+
     fn rasterize_or_log(&self, ctx: &mut ExecCtx) {
         if ctx.trace && ctx.stats.draws == 1 {
             self.dump_vertex_input();
@@ -799,6 +846,11 @@ impl Engine3D {
     }
 
     /// Where the bound index buffer starts.
+    /// `gl_InstanceID` for [`Engine3D::last_draw`].
+    pub fn instance_id(&self) -> u32 {
+        self.instance_id
+    }
+
     pub fn index_array_start(&self) -> u64 {
         self.regs.iova(INDEX_ARRAY_START)
     }
@@ -1418,6 +1470,44 @@ mod tests {
             DrawCall { primitive: 4, first: 6, count: 3, indexed: false, index_format: 0 }
         );
         assert_eq!(h.stats.draws, 1);
+    }
+
+    #[test]
+    fn instance_next_steps_the_instance_counter_and_a_plain_begin_resets_it() {
+        // An instanced draw is one Begin/End pair per instance, every pair
+        // after the first carrying `InstanceNext`. The Home Menu draws each
+        // of its UI elements as one instance of a unit quad and reads
+        // `gl_InstanceID` to find that element's position, so a counter stuck
+        // at zero puts all 111 glyphs of a label on the same two pixels.
+        let mut h = Harness::new(0x1000);
+        let mut engine = Engine3D::new();
+        let mut ctx = h.ctx();
+
+        engine.write(VERTEX_BEGIN_GL, 4, true, &mut ctx).unwrap();
+        assert_eq!(engine.instance_id(), 0);
+        for expected in 1..=3 {
+            engine
+                .write(VERTEX_BEGIN_GL, 4 | VERTEX_BEGIN_INSTANCE_NEXT, true, &mut ctx)
+                .unwrap();
+            assert_eq!(engine.instance_id(), expected);
+        }
+
+        // The next draw's first instance starts over.
+        engine.write(VERTEX_BEGIN_GL, 4, true, &mut ctx).unwrap();
+        assert_eq!(engine.instance_id(), 0);
+    }
+
+    #[test]
+    fn instance_next_does_not_disturb_the_primitive() {
+        let mut h = Harness::new(0x1000);
+        let mut engine = Engine3D::new();
+        let mut ctx = h.ctx();
+        engine
+            .write(VERTEX_BEGIN_GL, 4 | VERTEX_BEGIN_INSTANCE_NEXT, true, &mut ctx)
+            .unwrap();
+        engine.write(0x5F7, 0, true, &mut ctx).unwrap();
+        engine.write(DRAW_ELEMENTS_COUNT, 6, true, &mut ctx).unwrap();
+        assert_eq!(engine.last_draw.primitive, 4, "Triangles, not the raw argument");
     }
 
     #[test]

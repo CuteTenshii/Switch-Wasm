@@ -404,11 +404,27 @@ const INV_W_OFFSET: u16 = 0x7c;
 /// `i` — because they're literally the same fixed-function wires.
 const VARYING_BASE: u16 = 0x80;
 const VARYING_STRIDE: u16 = 0x10;
-/// How many generic varying slots get fetched/interpolated. Real Maxwell
-/// supports far more; this is enough for 2D UI (colour, texcoord, a spare)
-/// without needing to know how many a given shader pair actually uses —
-/// unused slots just carry unread zeros.
-const NUM_VARYINGS: usize = 4;
+
+/// `gl_InstanceID`'s and `gl_VertexID`'s slots in a vertex shader's `a[]`
+/// input space. They are integers, not floats: the shader shifts and adds
+/// them, so the register has to hold the value's *bits*, not its numeric
+/// value as an `f32`.
+const INSTANCE_ID_OFFSET: u16 = 0x2f8;
+const VERTEX_ID_OFFSET: u16 = 0x2fc;
+/// How many generic varying slots get fetched/interpolated: the whole of
+/// Maxwell's generic attribute space, `a[0x80]..a[0x280)`.
+///
+/// This used to be four, on the reasoning that colour, texcoord and a spare
+/// is all a 2D UI needs. It is not: the Home Menu's panel shaders interpolate
+/// slots 4, 5 and 6, and a slot past the end reads as zero rather than
+/// failing. Those zeros became the denominator of a normalising `rcp`, which
+/// returned infinity, and a `0 * inf` later turned every one of the panel's
+/// pixels into a NaN that encoded as black.
+///
+/// Interpolating all 32 for every pixel would cost far more than the four
+/// did, so [`Program::interpolated_slots`] narrows it back down to the ones
+/// the fragment shader actually reads.
+const NUM_VARYINGS: usize = 32;
 /// Real Maxwell guarantees at least this many vertex attributes; scanning a
 /// fixed range means vertex fetch doesn't need the shader to declare how
 /// many it reads.
@@ -450,7 +466,11 @@ struct ShadedVertex {
 /// header showing through: retry assuming one.
 const MESA_SHADER_HEADER_BYTES: u64 = 0x50;
 
-fn decode_program_from_memory(ctx: &ExecCtx, addr: u64) -> Result<Program> {
+fn decode_program_from_memory(
+    ctx: &ExecCtx,
+    addr: u64,
+    bindings: &dyn Fn(u8) -> Option<(u64, u32)>,
+) -> Result<Program> {
     let first_real_word = ctx.read_u64(addr + 8)?;
     let addr = if matches!(shader::isa::decode(first_real_word).op, Op::Unimplemented { .. }) {
         addr + MESA_SHADER_HEADER_BYTES
@@ -458,14 +478,26 @@ fn decode_program_from_memory(ctx: &ExecCtx, addr: u64) -> Result<Program> {
         addr
     };
     let limit = MAX_PROGRAM_WORDS * 8;
-    shader::decode_program_with(&mut |offset: u32| {
-        if u64::from(offset) >= limit {
-            return Err(Error::Gpu(format!(
-                "raster: program read at {offset:#x} is past the {limit:#x}-byte cap"
-            )));
-        }
-        ctx.read_u64(addr + u64::from(offset))
-    })
+    shader::decode_program_with_consts(
+        &mut |offset: u32| {
+            if u64::from(offset) >= limit {
+                return Err(Error::Gpu(format!(
+                    "raster: program read at {offset:#x} is past the {limit:#x}-byte cap"
+                )));
+            }
+            ctx.read_u64(addr + u64::from(offset))
+        },
+        &mut |bank: u8, offset: u32| {
+            let (base, size) = bindings(bank)
+                .ok_or_else(|| Error::Gpu(format!("raster: constant bank {bank} is unbound")))?;
+            if offset + 4 > size {
+                return Err(Error::Gpu(format!(
+                    "raster: read of c{bank}[{offset:#x}] is past its {size:#x}-byte end"
+                )));
+            }
+            ctx.read_u32(base + u64::from(offset))
+        },
+    )
     .inspect(|program| {
         // `TRACE_SHADER=1` prints every program the rasteriser decodes, in
         // control-flow-walk order. A shader that fails to run says only which
@@ -484,10 +516,13 @@ fn shade_vertex(
     attribs: &[VertexAttrib],
     arrays: &[VertexArray],
     vertex_index: u32,
+    instance_id: u32,
     ctx: &ExecCtx,
     consts: &dyn ConstantSource,
 ) -> Result<ShadedVertex> {
     let mut inv = Invocation::new();
+    inv.attr_in.set(VERTEX_ID_OFFSET, f32::from_bits(vertex_index));
+    inv.attr_in.set(INSTANCE_ID_OFFSET, f32::from_bits(instance_id));
     for (i, attrib) in attribs.iter().enumerate() {
         // size 0 isn't a valid DkVtxAttribSize — it's what an unconfigured
         // `VertexAttribState` slot reads back as, so it means "not used"
@@ -499,7 +534,11 @@ fn shade_vertex(
         if !array.enabled {
             continue;
         }
-        let v = fetch_attribute(*attrib, array, vertex_index, ctx)?;
+        // A non-zero divisor makes the array instanced: every `divisor`
+        // instances advance it by one element, and the vertex ordinal does
+        // not move it at all.
+        let element = instance_id.checked_div(array.divisor).unwrap_or(vertex_index);
+        let v = fetch_attribute(*attrib, array, element, ctx)?;
         let base = VARYING_BASE + i as u16 * VARYING_STRIDE;
         for (c, &component) in v.iter().enumerate() {
             inv.attr_in.set(base + c as u16 * 4, component);
@@ -572,33 +611,65 @@ fn depth_test_passes(func: u32, new: f32, old: f32) -> bool {
 /// per-channel; the rest just broadcast a scalar.
 fn blend_factor(code: u32, src: [f32; 4], dst: [f32; 4], constant: [f32; 4]) -> [f32; 4] {
     match code {
+        // The D3D numbering. Both numberings name the same set of factors and
+        // the hardware takes either; which one a register holds is down to
+        // whose driver wrote it. Mesa (JKSV) writes the GL enum straight
+        // through, deko3d and nvn write this one — the Home Menu blends every
+        // one of its draws `SrcAlpha`/`OneMinusSrcAlpha`, which fell through
+        // to `One`/`One` here and turned its whole UI into `src + dst`.
+        0x01 => [0.0; 4],                    // Zero
+        0x02 => [1.0; 4],                    // One
+        0x03 => src,                         // SrcColor
+        0x04 => src.map(|c| 1.0 - c),        // OneMinusSrcColor
+        0x05 => [src[3]; 4],                 // SrcAlpha
+        0x06 => [1.0 - src[3]; 4],           // OneMinusSrcAlpha
+        0x07 => [dst[3]; 4],                 // DstAlpha
+        0x08 => [1.0 - dst[3]; 4],           // OneMinusDstAlpha
+        0x09 => dst,                         // DstColor
+        0x0a => dst.map(|c| 1.0 - c),        // OneMinusDstColor
+        0x61 => constant,                    // ConstantColor
+        0x62 => constant.map(|c| 1.0 - c),   // OneMinusConstantColor
+        0x63 => [constant[3]; 4],            // ConstantAlpha
+        0x64 => [1.0 - constant[3]; 4],      // OneMinusConstantAlpha
+
+        // The GL numbering.
         0x4000 => [0.0; 4],                  // Zero
         0x4300 => src,                       // SrcColor
-        0x4301 => src.map(|c| 1.0 - c),       // OneMinusSrcColor
+        0x4301 => src.map(|c| 1.0 - c),      // OneMinusSrcColor
         0x4302 => [src[3]; 4],               // SrcAlpha
         0x4303 => [1.0 - src[3]; 4],         // OneMinusSrcAlpha
         0x4304 => [dst[3]; 4],               // DstAlpha
         0x4305 => [1.0 - dst[3]; 4],         // OneMinusDstAlpha
         0x4306 => dst,                       // DstColor
-        0x4307 => dst.map(|c| 1.0 - c),       // OneMinusDstColor
+        0x4307 => dst.map(|c| 1.0 - c),      // OneMinusDstColor
         0xc001 => constant,                  // ConstantColor
-        0xc002 => constant.map(|c| 1.0 - c),  // OneMinusConstantColor
+        0xc002 => constant.map(|c| 1.0 - c), // OneMinusConstantColor
         0xc003 => [constant[3]; 4],          // ConstantAlpha
         0xc004 => [1.0 - constant[3]; 4],    // OneMinusConstantAlpha
-        _ => [1.0; 4],                        // One (0x4001), and anything unrecognised.
+
+        // SrcAlphaSaturate, in both numberings. Alpha's factor is 1, not the
+        // saturated value the colour channels get.
+        0x0b | 0x4308 => {
+            let f = src[3].min(1.0 - dst[3]);
+            [f, f, f, 1.0]
+        }
+
+        _ => [1.0; 4], // One (0x4001), and anything unrecognised.
     }
 }
 
 /// `BLEND_EQUATION_*`'s real hardware type is `gl_blend_equation`
 /// (`nv_3ddefs.xml`): literal `GL_FUNC_ADD`(0x8006)`..=GL_FUNC_REVERSE_
 /// SUBTRACT`(0x800b), not deko3d's simplified 1-5 `DkBlendOp` numbering.
+/// `BLEND_EQUATION_*` in the D3D numbering the same register also takes —
+/// see [`blend_factor`].
 fn blend_equation(op: u32, src: f32, dst: f32) -> f32 {
     match op {
-        0x800a => src - dst,   // FuncSubtract
-        0x800b => dst - src,   // FuncReverseSubtract
-        0x8007 => src.min(dst), // Min
-        0x8008 => src.max(dst), // Max
-        _ => src + dst,         // FuncAdd (0x8006), and anything unrecognised.
+        0x2 | 0x800a => src - dst,    // FuncSubtract
+        0x3 | 0x800b => dst - src,    // FuncReverseSubtract
+        0x4 | 0x8007 => src.min(dst), // Min
+        0x5 | 0x8008 => src.max(dst), // Max
+        _ => src + dst,               // FuncAdd (1, 0x8006), and anything unrecognised.
     }
 }
 
@@ -629,7 +700,7 @@ fn shade_fragment(
     inv.reset();
     let interp_inv_w = weights[0] * inv_w[0] + weights[1] * inv_w[1] + weights[2] * inv_w[2];
     inv.attr_in.set(INV_W_OFFSET, interp_inv_w);
-    for slot in 0..NUM_VARYINGS {
+    for &slot in program.interpolated_slots() {
         let base = VARYING_BASE + slot as u16 * VARYING_STRIDE;
         for c in 0..4 {
             let over_w = weights[0] * verts[0].varyings[slot][c] * inv_w[0]
@@ -765,8 +836,12 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         .program(ShaderStage::Fragment)
         .ok_or_else(|| Error::Gpu("raster: draw with no bound fragment program".into()))?;
 
-    let vs_program = decode_program_from_memory(&*ctx, vs_binding.addr)?;
-    let fs_program = decode_program_from_memory(&*ctx, fs_binding.addr)?;
+    let vs_program = decode_program_from_memory(&*ctx, vs_binding.addr, &|bank: u8| {
+        engine.bound_constbuf(ShaderStage::VertexB, bank as u32)
+    })?;
+    let fs_program = decode_program_from_memory(&*ctx, fs_binding.addr, &|bank: u8| {
+        engine.bound_constbuf(ShaderStage::Fragment, bank as u32)
+    })?;
 
     let attribs: Vec<VertexAttrib> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_attrib(i)).collect();
     let arrays: Vec<VertexArray> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_array(i)).collect();
@@ -787,6 +862,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let cull = engine.cull_state();
 
     let index_base = if call.indexed { engine.index_array_start() } else { 0 };
+    let instance_id = engine.instance_id();
     let primitive = Primitive::from_raw(call.primitive)?;
     // A point or line topology assembles into nothing, and "nothing" is
     // indistinguishable on screen from a draw that worked and covered no
@@ -799,6 +875,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         return Err(Error::Gpu(format!("raster: {primitive:?} is not rasterized")));
     }
     let triangles = assemble(primitive, call.count);
+    let mut tally = DrawTally::new(&fs_program);
     // One shaded vertex per *index*, cached: an indexed mesh reuses vertices
     // heavily, and re-running the vertex shader for each reference is the
     // single most expensive thing this loop can do.
@@ -824,7 +901,15 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 ctx: &*ctx,
                 bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::VertexB, bank as u32),
             };
-            let v = shade_vertex(&vs_program, &attribs, &arrays, index, &*ctx, &vs_consts)?;
+            let v = shade_vertex(
+                &vs_program,
+                &attribs,
+                &arrays,
+                index,
+                instance_id,
+                &*ctx,
+                &vs_consts,
+            )?;
             cache.insert(index, v);
             shaded.push(v);
         }
@@ -846,11 +931,15 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             let inv_w = [projected[0].1, projected[1].1, projected[2].1];
             let window_z = [projected[0].2, projected[1].2, projected[2].2];
 
+            tally.triangles += 1;
+            tally.geometry(screen);
             if culls(cull, screen) {
+                tally.culled += 1;
                 continue;
             }
 
             let Some(tri) = TriangleSetup::new(screen[0], screen[1], screen[2]) else {
+                tally.degenerate += 1;
                 continue;
             };
             let bpp = rt.format.bytes_per_pixel;
@@ -888,8 +977,10 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         sample_z[sample as usize] = z;
                     }
                     if covered == 0 {
+                        tally.uncovered += 1;
                         continue;
                     }
+                    tally.covered += 1;
 
                     let [w0, w1, w2] = tri.weights(x as f32 + 0.5, y as f32 + 0.5);
                     let color = {
@@ -919,13 +1010,18 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     // `kil` discards the fragment: no colour, and no depth
                     // write either, which is why the depth store waits until
                     // after shading rather than happening with the test.
-                    let Some(color) = color else { continue };
+                    let Some(color) = color else {
+                        tally.killed += 1;
+                        continue;
+                    };
+                    tally.shaded(color);
 
                     // Alpha-to-coverage narrows the mask *after* shading,
                     // since it is the shaded alpha it turns into coverage.
                     if alpha_to_coverage {
                         covered &= alpha_coverage(color[3], grid.count());
                         if covered == 0 {
+                            tally.alpha_killed += 1;
                             continue;
                         }
                     }
@@ -951,13 +1047,120 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         } else {
                             color
                         };
+                        tally.wrote(out);
                         ctx.write_pixel(va, bpp, rt.format.encode(out)?)?;
                     }
                 }
             }
         }
     }
+    tally.report(&call, primitive, blend_target, bounds);
     Ok(())
+}
+
+/// Per-draw fragment accounting for `TRACE_DRAW=1`.
+///
+/// A draw that runs to completion and leaves the framebuffer looking exactly
+/// as it did before is indistinguishable, from the outside, from a draw that
+/// never ran. This says which stage the fragments died at.
+struct DrawTally {
+    enabled: bool,
+    fs_len: usize,
+    triangles: u64,
+    culled: u64,
+    degenerate: u64,
+    uncovered: u64,
+    covered: u64,
+    killed: u64,
+    alpha_killed: u64,
+    written: u64,
+    first_shaded: Option<[f32; 4]>,
+    first_written: Option<[f32; 4]>,
+    first_screen: Option<[ScreenVertex; 3]>,
+}
+
+impl DrawTally {
+    fn new(fs_program: &Program) -> DrawTally {
+        DrawTally {
+            enabled: std::env::var("TRACE_DRAW").is_ok(),
+            fs_len: fs_program.insns.len(),
+            triangles: 0,
+            culled: 0,
+            degenerate: 0,
+            uncovered: 0,
+            covered: 0,
+            killed: 0,
+            alpha_killed: 0,
+            written: 0,
+            first_shaded: None,
+            first_written: None,
+            first_screen: None,
+        }
+    }
+
+    fn geometry(&mut self, screen: [ScreenVertex; 3]) {
+        if self.enabled && self.first_screen.is_none() {
+            self.first_screen = Some(screen);
+        }
+    }
+
+    fn shaded(&mut self, color: [f32; 4]) {
+        if self.enabled && self.first_shaded.is_none() {
+            self.first_shaded = Some(color);
+        }
+    }
+
+    fn wrote(&mut self, color: [f32; 4]) {
+        self.written += 1;
+        if self.enabled && self.first_written.is_none() {
+            self.first_written = Some(color);
+        }
+    }
+
+    fn report(
+        &self,
+        call: &crate::gpu::engine::threed::DrawCall,
+        primitive: Primitive,
+        blend: BlendTarget,
+        bounds: Bounds,
+    ) {
+        if !self.enabled {
+            return;
+        }
+        let blend = if blend.enabled {
+            format!(
+                "{:#x},{:#x},{:#x}/{:#x},{:#x},{:#x}",
+                blend.equation_rgb,
+                blend.func_rgb_src,
+                blend.func_rgb_dst,
+                blend.equation_alpha,
+                blend.func_alpha_src,
+                blend.func_alpha_dst
+            )
+        } else {
+            "off".to_string()
+        };
+        let bounds = (bounds.x0, bounds.y0, bounds.x1, bounds.y1);
+        eprintln!(
+            "[draw] {primitive:?} count={} indexed={} fs_ops={} bounds={bounds:?} \
+             blend={blend} tris={} culled={} degen={} covered={} uncovered={} kil={} \
+             a2c={} wrote={} shaded={:?} out={:?} screen={:?}",
+            call.count,
+            call.indexed,
+            self.fs_len,
+            self.triangles,
+            self.culled,
+            self.degenerate,
+            self.covered,
+            self.uncovered,
+            self.killed,
+            self.alpha_killed,
+            self.written,
+            self.first_shaded,
+            self.first_written,
+            self.first_screen.map(|s| s.map(|v| (v.x, v.y))),
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1636,6 +1839,152 @@ mod tests {
         let dst = [0.0, 0.0, 1.0, 1.0]; // opaque blue
         let out = blend(target, [0.0; 4], src, dst);
         assert_eq!(out, [0.5, 0.0, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn a_vertex_shader_reads_its_vertex_and_instance_ids() {
+        // The Home Menu draws each UI element as one instance of a unit quad
+        // and finds that element by `gl_InstanceID`, so a vertex shader that
+        // reads zero for it draws every element on top of the first.
+        // Both are integers: what has to reach the register is the value's
+        // bit pattern, not its numeric value converted to a float.
+        use crate::gpu::shader::isa::{Instruction, MemSize, Pred, RZ};
+
+        let mut program = Program::default();
+        for (at, op) in [
+            (8u32, Op::Ld { dst: 0, offset: INSTANCE_ID_OFFSET, idx: RZ, size: MemSize::B32 }),
+            (16, Op::Ld { dst: 1, offset: VERTEX_ID_OFFSET, idx: RZ, size: MemSize::B32 }),
+            (24, Op::St { offset: CLIP_POS_OFFSET, idx: RZ, src: 0, size: MemSize::B32 }),
+            (32, Op::St { offset: CLIP_POS_OFFSET + 4, idx: RZ, src: 1, size: MemSize::B32 }),
+            (40, Op::Exit),
+        ] {
+            program.offsets.push(at);
+            program.insns.push(Instruction { pred: Pred::ALWAYS, op });
+        }
+
+        let (mut mem, vmm, _) = harness();
+        let mut stats = Default::default();
+        let mut host1x = Host1x::new();
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let consts: std::collections::HashMap<(u8, u16), f32> = Default::default();
+
+        let v = shade_vertex(&program, &[], &[], 7, 42, &ctx, &consts).unwrap();
+        assert_eq!(v.clip[0].to_bits(), 42, "gl_InstanceID");
+        assert_eq!(v.clip[1].to_bits(), 7, "gl_VertexID");
+    }
+
+    #[test]
+    fn an_instanced_vertex_array_advances_with_the_instance_not_the_vertex() {
+        let (mut mem, vmm, base) = harness();
+        // Four consecutive floats, one per element of a divisor-2 array.
+        for (i, v) in [10.0f32, 20.0, 30.0, 40.0].iter().enumerate() {
+            vmm.write_u32(&mut mem, base + i as u64 * 4, v.to_bits()).unwrap();
+        }
+        let mut stats = Default::default();
+        let mut host1x = Host1x::new();
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let attrib = VertexAttrib {
+            buffer_id: 0,
+            is_fixed: false,
+            offset: 0,
+            size: 0x12, // 1x32
+            ty: ATTRIB_TYPE_FLOAT,
+            is_bgra: false,
+        };
+        let array =
+            VertexArray { enabled: true, stride: 4, start: base, limit: base + 0x1000, divisor: 2 };
+
+        // Instances 0 and 1 share element 0; instances 2 and 3 share element 1.
+        for (instance, expected) in [(0u32, 10.0f32), (1, 10.0), (2, 20.0), (3, 20.0)] {
+            let element = instance / array.divisor;
+            let v = fetch_attribute(attrib, array, element, &ctx).unwrap();
+            assert_eq!(v[0], expected, "instance {instance}");
+        }
+    }
+
+    #[test]
+    fn the_same_blend_state_composites_the_same_in_either_numbering() {
+        // The Home Menu writes its blend state in the D3D numbering, which
+        // this understood as "unrecognised" and therefore `One`/`One` — every
+        // one of its draws came out as `src + dst`, which put 2.0 in the
+        // alpha channel and washed its dark separator lines to white.
+        let gl = BlendTarget {
+            enabled: true,
+            equation_rgb: 0x8006,
+            func_rgb_src: 0x4302,
+            func_rgb_dst: 0x4303,
+            equation_alpha: 0x8006,
+            func_alpha_src: 0x4001,
+            func_alpha_dst: 0x4000,
+        };
+        let d3d = BlendTarget {
+            enabled: true,
+            equation_rgb: 1,   // Add
+            func_rgb_src: 5,   // SrcAlpha
+            func_rgb_dst: 6,   // OneMinusSrcAlpha
+            equation_alpha: 1, // Add
+            func_alpha_src: 2, // One
+            func_alpha_dst: 1, // Zero
+        };
+        let src = [1.0, 0.0, 0.0, 0.5];
+        let dst = [0.0, 0.0, 1.0, 1.0];
+        assert_eq!(blend(d3d, [0.0; 4], src, dst), [0.5, 0.0, 0.5, 0.5]);
+        assert_eq!(blend(d3d, [0.0; 4], src, dst), blend(gl, [0.0; 4], src, dst));
+    }
+
+    #[test]
+    fn blend_factor_reads_the_d3d_numbering_too() {
+        let src = [1.0, 0.5, 0.25, 0.75];
+        let dst = [0.0, 1.0, 0.0, 0.2];
+        let constant = [0.1, 0.2, 0.3, 0.4];
+        for (d3d, gl) in [
+            (0x01u32, 0x4000u32), // Zero
+            (0x02, 0x4001),       // One
+            (0x03, 0x4300),       // SrcColor
+            (0x04, 0x4301),       // OneMinusSrcColor
+            (0x05, 0x4302),       // SrcAlpha
+            (0x06, 0x4303),       // OneMinusSrcAlpha
+            (0x07, 0x4304),       // DstAlpha
+            (0x08, 0x4305),       // OneMinusDstAlpha
+            (0x09, 0x4306),       // DstColor
+            (0x0a, 0x4307),       // OneMinusDstColor
+            (0x0b, 0x4308),       // SrcAlphaSaturate
+            (0x61, 0xc001),       // ConstantColor
+            (0x62, 0xc002),       // OneMinusConstantColor
+            (0x63, 0xc003),       // ConstantAlpha
+            (0x64, 0xc004),       // OneMinusConstantAlpha
+        ] {
+            assert_eq!(
+                blend_factor(d3d, src, dst, constant),
+                blend_factor(gl, src, dst, constant),
+                "factor {d3d:#x} and {gl:#x} name the same thing"
+            );
+        }
+        // SrcAlphaSaturate is min(srcA, 1 - dstA) on colour and 1 on alpha.
+        assert_eq!(blend_factor(0x0b, src, dst, constant), [0.75, 0.75, 0.75, 1.0]);
+    }
+
+    #[test]
+    fn blend_equation_reads_the_d3d_numbering_too() {
+        for (d3d, gl) in [(1u32, 0x8006u32), (2, 0x800a), (3, 0x800b), (4, 0x8007), (5, 0x8008)] {
+            assert_eq!(
+                blend_equation(d3d, 0.75, 0.25),
+                blend_equation(gl, 0.75, 0.25),
+                "equation {d3d:#x} and {gl:#x} name the same thing"
+            );
+        }
     }
 
     #[test]

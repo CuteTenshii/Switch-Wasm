@@ -145,13 +145,19 @@ pub struct Texture {
     /// linear light before the shader sees them.
     pub srgb: bool,
     pub swizzle: [SwizzleSource; 4],
+    /// Bytes from one array layer to the next. Zero for a plain 2D image,
+    /// where there is only ever layer 0.
+    pub layer_stride: u32,
 }
 
 impl Texture {
     /// Fetch and decode one texel, clamped to the texture's extent.
-    pub fn texel(&self, x: u32, y: u32, ctx: &ExecCtx) -> Result<[f32; 4]> {
+    pub fn texel(&self, x: u32, y: u32, layer: u32, ctx: &ExecCtx) -> Result<[f32; 4]> {
         let x = x.min(self.width.saturating_sub(1));
         let y = y.min(self.height.saturating_sub(1));
+        // The layer is not part of the swizzle: an array's slices sit back to
+        // back, each one a whole surface.
+        let layer_base = self.addr + u64::from(layer) * u64::from(self.layer_stride);
         let mut texel = match self.kind {
             TexelKind::Plain(format) => {
                 let bpp = format.bytes_per_pixel;
@@ -159,7 +165,7 @@ impl Texture {
                     Layout::Pitch { pitch } => pitch,
                     Layout::BlockLinear { .. } => self.width * bpp,
                 };
-                let va = self.addr + self.layout.offset(x * bpp, y, width_bytes) as u64;
+                let va = layer_base + self.layout.offset(x * bpp, y, width_bytes) as u64;
                 format.decode(ctx.read_pixel(va, bpp)?)?
             }
             TexelKind::Block(codec) => {
@@ -175,7 +181,7 @@ impl Texture {
                     Layout::Pitch { pitch } => pitch,
                     Layout::BlockLinear { .. } => blocks_wide * bytes,
                 };
-                let va = self.addr
+                let va = layer_base
                     + self.layout.offset((x / block_w) * bytes, y / block_h, width_bytes) as u64;
                 let raw = ctx.read_pixel(va, bytes)?.to_le_bytes();
                 let mut block = [[0.0f32; 4]; bcn::MAX_TEXELS];
@@ -192,12 +198,12 @@ impl Texture {
         Ok(texel)
     }
 
-    pub fn sample_point(&self, u: f64, v: f64, ctx: &ExecCtx) -> Result<[f32; 4]> {
-        self.texel(u.max(0.0) as u32, v.max(0.0) as u32, ctx)
+    pub fn sample_point(&self, u: f64, v: f64, layer: u32, ctx: &ExecCtx) -> Result<[f32; 4]> {
+        self.texel(u.max(0.0) as u32, v.max(0.0) as u32, layer, ctx)
     }
 
-    pub fn sample_bilinear(&self, u: f64, v: f64, ctx: &ExecCtx) -> Result<[f32; 4]> {
-        bilinear(u, v, |x, y| self.texel(x, y, ctx))
+    pub fn sample_bilinear(&self, u: f64, v: f64, layer: u32, ctx: &ExecCtx) -> Result<[f32; 4]> {
+        bilinear(u, v, |x, y| self.texel(x, y, layer, ctx))
     }
 }
 
@@ -320,17 +326,38 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     // `TextureType_2D` and `_2DNoMipmap` differ only in whether the image has
     // levels below the one sampled here; anything else has an extent this
     // decoder would silently misread as a 2D image's.
+    // 1 and 7 are `TextureType_2D` and `_2DNoMipmap`, 3 is `_2DArray`. The
+    // array's slices are laid out back to back and differ from a plain 2D
+    // image only by the stride between them, so the same decode serves both.
     let texture_type = (dw4 >> 23) & 0xF;
-    if texture_type != 1 && texture_type != 7 {
+    if !matches!(texture_type, 1 | 3 | 7) {
         return Err(Error::Gpu(format!(
-            "texture: TIC TextureType {texture_type} is not a plain 2D image"
+            "texture: TIC TextureType {texture_type} is not a 2D image or array"
         )));
     }
     let srgb = (dw4 >> 22) & 1 != 0;
     let width = (dw4 & 0xffff) + 1;
     let height = (dw5 & 0xffff) + 1;
+    // The TIC carries no layer stride: it is the size of one swizzled slice,
+    // worked out from the extent and the layout the same way the offset of a
+    // texel inside one is.
+    let width_bytes = match kind {
+        TexelKind::Plain(format) => width * format.bytes_per_pixel,
+        TexelKind::Block(codec) => {
+            let (block_w, _) = codec.block_size();
+            width.div_ceil(block_w) * codec.bytes_per_block()
+        }
+    };
+    let layer_height = match kind {
+        TexelKind::Plain(_) => height,
+        TexelKind::Block(codec) => {
+            let (_, block_h) = codec.block_size();
+            height.div_ceil(block_h)
+        }
+    };
+    let layer_stride = layout.layer_stride(width_bytes, layer_height);
 
-    Ok(Texture { addr: tex_addr, width, height, layout, kind, srgb, swizzle })
+    Ok(Texture { addr: tex_addr, width, height, layout, kind, srgb, swizzle, layer_stride })
 }
 
 /// Rearrange a decoded texel into what the shader reads.
@@ -378,13 +405,15 @@ pub fn sample(
     handle: u32,
     u: f64,
     v: f64,
+    layer: u32,
 ) -> Result<[f32; 4]> {
     let descriptors = read_descriptors(ctx, tex_header_pool, tex_sampler_pool, handle)?;
-    sample_with(ctx, &descriptors, u, v)
+    sample_with(ctx, &descriptors, u, v, layer)
 }
 
-/// Sample already-resolved descriptors at normalized coordinates `(u, v)`.
-pub fn sample_with(ctx: &ExecCtx, d: &Descriptors, u: f64, v: f64) -> Result<[f32; 4]> {
+/// Sample already-resolved descriptors at normalized coordinates `(u, v)` of
+/// array layer `layer`, which is 0 for everything that is not an array.
+pub fn sample_with(ctx: &ExecCtx, d: &Descriptors, u: f64, v: f64, layer: u32) -> Result<[f32; 4]> {
     let (texture, sampler) = (&d.texture, d.sampler);
     let image = texture;
 
@@ -412,9 +441,9 @@ pub fn sample_with(ctx: &ExecCtx, d: &Descriptors, u: f64, v: f64) -> Result<[f3
     // Filtering happens before the swizzle, which is free to do: selecting a
     // component commutes with interpolating each one.
     let texel = if sampler.mag_linear {
-        image.sample_bilinear(px, py, ctx)?
+        image.sample_bilinear(px, py, layer, ctx)?
     } else {
-        image.sample_point(px, py, ctx)?
+        image.sample_point(px, py, layer, ctx)?
     };
     Ok(apply_swizzle(texture.swizzle, texel))
 }
@@ -543,13 +572,13 @@ mod tests {
         assert_eq!(texture.width, 16);
 
         // Every texel of a block reads as that block's colour.
-        assert_eq!(texture.texel(0, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(texture.texel(3, 3, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(texture.texel(4, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0]);
-        assert_eq!(texture.texel(8, 2, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
-        assert_eq!(texture.texel(15, 3, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(texture.texel(0, 0, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texture.texel(3, 3, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texture.texel(4, 0, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(texture.texel(8, 2, 0, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(texture.texel(15, 3, 0, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
         // The next block *row* is one pitch on, not one block on.
-        assert_eq!(texture.texel(0, 4, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(texture.texel(0, 4, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0]);
     }
 
     /// The same, swizzled: the block-linear stride of a compressed surface is
@@ -578,9 +607,9 @@ mod tests {
             ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
         let texture = read_image(&ctx, tic_addr).unwrap();
         assert_eq!(texture.layout, Layout::BlockLinear { block_height_gobs: 1 });
-        assert_eq!(texture.texel(1, 1, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(texture.texel(13, 2, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
-        assert_eq!(texture.texel(2, 5, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(texture.texel(1, 1, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texture.texel(13, 2, 0, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(texture.texel(2, 5, 0, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
     }
 
     /// An sRGB texture stores encoded values and hands the shader linear ones.
@@ -622,13 +651,13 @@ mod tests {
         let texture = read_image(&ctx, tic_addr).unwrap();
         assert_eq!(texture.kind, TexelKind::Block(Codec::Astc { width: 8, height: 5 }));
 
-        assert_eq!(texture.texel(0, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(texture.texel(7, 4, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0], "last texel of it");
-        assert_eq!(texture.texel(8, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0], "next block across");
+        assert_eq!(texture.texel(0, 0, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texture.texel(7, 4, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0], "last texel of it");
+        assert_eq!(texture.texel(8, 0, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0], "next block across");
         // Row 5 is the second block row, which it would not be for a 5-tall
         // footprint read as 8 tall.
-        assert_eq!(texture.texel(0, 5, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
-        assert_eq!(texture.texel(15, 9, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(texture.texel(0, 5, 0, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(texture.texel(15, 9, 0, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -646,7 +675,7 @@ mod tests {
             ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
         let linear = read_image(&ctx, tic_addr).unwrap();
         assert!(!linear.srgb);
-        let plain = linear.texel(0, 0, &ctx).unwrap()[0];
+        let plain = linear.texel(0, 0, 0, &ctx).unwrap()[0];
 
         // Set the sRGB bit and read the same bytes again.
         vmm.write_u32(&mut mem, tic_addr + 16, 15 | TYPE_2D | (1 << 22)).unwrap();
@@ -654,7 +683,7 @@ mod tests {
             ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
         let encoded = read_image(&ctx, tic_addr).unwrap();
         assert!(encoded.srgb);
-        let converted = encoded.texel(0, 0, &ctx).unwrap();
+        let converted = encoded.texel(0, 0, 0, &ctx).unwrap();
         assert!(converted[0] < plain, "sRGB decoding darkens a mid grey");
         // 565's mid grey expands to 132/255 = 0.5176, whose linear value is
         // ((0.5176 + 0.055) / 1.055) ^ 2.4.
@@ -727,11 +756,11 @@ mod tests {
 
         // u = 1.9 mirrors to 0.1 -> texel 0 (red); plain repeat would give
         // 0.9 -> texel 3 (white).
-        assert_eq!(sample(&ctx, tic_addr, tsc_addr, 0, 1.9, 0.5).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(sample(&ctx, tic_addr, tsc_addr, 0, 1.9, 0.5, 0).unwrap(), [1.0, 0.0, 0.0, 1.0]);
         // u = -0.1 mirrors to 0.1 as well.
-        assert_eq!(sample(&ctx, tic_addr, tsc_addr, 0, -0.1, 0.5).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(sample(&ctx, tic_addr, tsc_addr, 0, -0.1, 0.5, 0).unwrap(), [1.0, 0.0, 0.0, 1.0]);
         // Inside the first period nothing changes.
-        assert_eq!(sample(&ctx, tic_addr, tsc_addr, 0, 0.9, 0.5).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(sample(&ctx, tic_addr, tsc_addr, 0, 0.9, 0.5, 0).unwrap(), [1.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -781,11 +810,11 @@ mod tests {
         let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
 
         let handle = 0u32; // imageId=0, samplerId=0; both pools point straight at our entries.
-        let red = sample(&ctx, tic_addr, tsc_addr, handle, 0.25, 0.25).unwrap();
+        let red = sample(&ctx, tic_addr, tsc_addr, handle, 0.25, 0.25, 0).unwrap();
         assert_eq!(red, [1.0, 0.0, 0.0, 1.0]);
-        let green = sample(&ctx, tic_addr, tsc_addr, handle, 0.75, 0.25).unwrap();
+        let green = sample(&ctx, tic_addr, tsc_addr, handle, 0.75, 0.25, 0).unwrap();
         assert_eq!(green, [0.0, 1.0, 0.0, 1.0]);
-        let blue = sample(&ctx, tic_addr, tsc_addr, handle, 0.25, 0.75).unwrap();
+        let blue = sample(&ctx, tic_addr, tsc_addr, handle, 0.25, 0.75, 0).unwrap();
         assert_eq!(blue, [0.0, 0.0, 1.0, 1.0]);
     }
 }

@@ -27,7 +27,7 @@ use crate::{Error, Result};
 use std::collections::HashMap;
 
 use super::isa::{
-    self, BoolOp, FCmp, FRound, ICmp, LogicOp, LopTest, MufuOp, Op, Operand, Pred, RZ,
+    self, BoolOp, FCmp, FRound, ICmp, LogicOp, LopTest, MufuOp, Op, Operand, Pred, TexDim, RZ,
 };
 
 /// Resolves a `cN[offset]` operand to its raw 32 bits. `bank` is whatever the
@@ -91,7 +91,9 @@ impl GlobalMemory for MemoryGlobal<'_, '_> {
 /// read itself via [`ConstantSource`] before calling this, so this trait only
 /// needs to turn a resolved handle plus UVs into a colour.
 pub trait TextureSource {
-    fn sample(&self, handle: u32, u: f32, v: f32) -> Result<[f32; 4]>;
+    /// Sample `handle` at `(u, v)` of array layer `layer` — 0 for everything
+    /// that is not a 2D array.
+    fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> Result<[f32; 4]>;
 }
 
 /// No texture backend at all — every `texs` is an error. Correct for vertex
@@ -99,7 +101,7 @@ pub trait TextureSource {
 pub struct NoTextures;
 
 impl TextureSource for NoTextures {
-    fn sample(&self, handle: u32, _u: f32, _v: f32) -> Result<[f32; 4]> {
+    fn sample(&self, handle: u32, _u: f32, _v: f32, _layer: u32) -> Result<[f32; 4]> {
         Err(Error::Gpu(format!(
             "shader: texture sample of handle {handle:#x} with no texture source bound"
         )))
@@ -123,7 +125,7 @@ pub struct MemoryTextures<'a, 'b> {
 }
 
 impl TextureSource for MemoryTextures<'_, '_> {
-    fn sample(&self, handle: u32, u: f32, v: f32) -> Result<[f32; 4]> {
+    fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> Result<[f32; 4]> {
         let cached = self.descriptors.borrow().get(&handle).copied();
         let descriptors = match cached {
             Some(d) => d,
@@ -138,7 +140,7 @@ impl TextureSource for MemoryTextures<'_, '_> {
                 d
             }
         };
-        crate::gpu::texture::sample_with(self.ctx, &descriptors, u as f64, v as f64)
+        crate::gpu::texture::sample_with(self.ctx, &descriptors, u as f64, v as f64, layer)
     }
 }
 
@@ -485,8 +487,11 @@ impl Invocation {
                 let y = bm.apply(flush(self.operand_f32(b, env)?, ftz));
                 self.set_reg_f32(dst, saturate(x + y, sat));
             }
-            Op::Fmul { dst, a, b, bm, ftz, sat } => {
-                let x = flush(self.reg_f32(a), ftz);
+            Op::Fmul { dst, a, b, bm, ftz, sat, scale } => {
+                // The pre-scale multiplies the *first* operand, before the
+                // multiply proper — a constant halving or doubling folded into
+                // a multiply the shader was doing anyway.
+                let x = flush(self.reg_f32(a), ftz) * scale.factor();
                 let y = bm.apply(flush(self.operand_f32(b, env)?, ftz));
                 self.set_reg_f32(dst, saturate(x * y, sat));
             }
@@ -613,6 +618,32 @@ impl Invocation {
                 let taken = int_compare(cmp, self.reg(c), 0, signed);
                 let v = if taken { self.reg(a) } else { self.operand(b, env)? };
                 self.set_reg(dst, v);
+            }
+            Op::Bfi { dst, insert, src, base } => {
+                let src = self.operand(src, env)?;
+                let base = self.operand(base, env)?;
+                let offset = src & 0xff;
+                let count = (src >> 8) & 0xff;
+                // Hardware's edge cases, not tidiness: an offset past the word
+                // leaves the base alone, and a width that would run off the end
+                // is clamped to what is left rather than wrapping.
+                let v = if offset >= 32 {
+                    base
+                } else {
+                    let count = count.min(32 - offset);
+                    let mask = if count >= 32 { !0 } else { ((1u32 << count) - 1) << offset };
+                    (base & !mask) | ((self.reg(insert) << offset) & mask)
+                };
+                self.set_reg(dst, v);
+            }
+            Op::R2p { src, mask, byte } => {
+                let bits = self.reg(src) >> (u32::from(byte) * 8);
+                let mask = self.operand(mask, env)?;
+                for index in 0..7u8 {
+                    if mask & (1 << index) != 0 {
+                        self.set_pred(index, bits & (1 << index) != 0);
+                    }
+                }
             }
             Op::Lop { dst, a, ainv, b, binv, op, pred } => {
                 let x = inv_if(self.reg(a), ainv);
@@ -856,7 +887,7 @@ impl Invocation {
         env: &Env,
         pending: &mut Vec<(usize, u8, f32)>,
     ) -> Result<()> {
-        let Op::Texs { coords, handle, .. } = op else {
+        let Op::Texs { coords, handle, dim, .. } = op else {
             unreachable!("run_texs called with {op:?}");
         };
         // The bindless handle lives in the driver's reserved constant bank,
@@ -867,7 +898,13 @@ impl Invocation {
             .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
         let u = self.reg_f32(coords[0]);
         let v = self.reg_f32(coords[1]);
-        let color = env.textures.sample(handle, u, v)?;
+        // An array's layer is an integer in the low half of its register, not
+        // a float like the coordinates beside it.
+        let layer = match dim {
+            TexDim::T2dArray => self.reg(coords[2]) & 0xffff,
+            _ => 0,
+        };
+        let color = env.textures.sample(handle, u, v, layer)?;
 
         // Where each channel lands was worked out at decode time.
         for &(channel, reg, due) in program.texs_writes(pc) {
@@ -1224,7 +1261,7 @@ fn half(v: u32, high: bool, signed: bool) -> u32 {
 mod tests {
     use super::*;
     use crate::gpu::shader::decode_program;
-    use crate::gpu::shader::isa::{FMod, Instruction, TexDim};
+    use crate::gpu::shader::isa::{FMod, FmulScale, Instruction, TexDim};
     use crate::gpu::shader::Program;
 
     fn no_consts() -> HashMap<(u8, u16), f32> {
@@ -1247,13 +1284,13 @@ mod tests {
     /// returns the same colour, so a test can check both what the
     /// interpreter computed and what it fed the texture backend.
     struct RecordingTextures {
-        calls: RefCell<Vec<(u32, f32, f32)>>,
+        calls: RefCell<Vec<(u32, f32, f32, u32)>>,
         color: [f32; 4],
     }
 
     impl TextureSource for RecordingTextures {
-        fn sample(&self, handle: u32, u: f32, v: f32) -> Result<[f32; 4]> {
-            self.calls.borrow_mut().push((handle, u, v));
+        fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> Result<[f32; 4]> {
+            self.calls.borrow_mut().push((handle, u, v, layer));
             Ok(self.color)
         }
     }
@@ -1264,7 +1301,7 @@ mod tests {
         // no constant source is exercised — this is purely the interpreter's
         // execute loop, independent of the decoder and of any real shader.
         let program = prog(&[
-            Op::Fmul { dst: 2, a: 0, b: Operand::Reg(1), bm: FMod::NONE, ftz: true, sat: false },
+            Op::Fmul { dst: 2, a: 0, b: Operand::Reg(1), bm: FMod::NONE, ftz: true, sat: false, scale: FmulScale::None },
             Op::Ffma {
                 dst: 3,
                 a: 2,
@@ -1512,7 +1549,7 @@ mod tests {
     #[test]
     fn rz_reads_as_zero_and_discards_writes() {
         let program = prog(&[
-            Op::Fmul { dst: 0xff, a: 0, b: Operand::Reg(1), bm: FMod::NONE, ftz: true, sat: false },
+            Op::Fmul { dst: 0xff, a: 0, b: Operand::Reg(1), bm: FMod::NONE, ftz: true, sat: false, scale: FmulScale::None },
             Op::Ffma {
                 dst: 2,
                 a: 0xff,
@@ -1571,7 +1608,7 @@ mod tests {
 
         inv.execute(&program, &Env::new(&consts, &textures)).unwrap();
 
-        assert_eq!(textures.calls.borrow().as_slice(), &[(handle, 0.25, 0.75)]);
+        assert_eq!(textures.calls.borrow().as_slice(), &[(handle, 0.25, 0.75, 0)]);
         assert_eq!(inv.reg_f32(2), 0.1);
         assert_eq!(inv.reg_f32(3), 0.2);
         assert_eq!(inv.reg_f32(4), 0.3);
@@ -1827,7 +1864,7 @@ mod tests {
 
         struct StubTex;
         impl TextureSource for StubTex {
-            fn sample(&self, _handle: u32, _u: f32, _v: f32) -> Result<[f32; 4]> {
+            fn sample(&self, _handle: u32, _u: f32, _v: f32, _layer: u32) -> Result<[f32; 4]> {
                 Ok([0.2, 0.4, 0.6, 0.8])
             }
         }

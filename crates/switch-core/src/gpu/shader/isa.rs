@@ -171,6 +171,47 @@ pub enum LogicOp {
     PassB,
 }
 
+/// `fmul`'s pre-scale, applied to its **first** operand before the multiply.
+/// A shader uses it to fold a constant halving or doubling into a multiply it
+/// was doing anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FmulScale {
+    None,
+    D2,
+    D4,
+    D8,
+    M8,
+    M4,
+    M2,
+}
+
+impl FmulScale {
+    fn decode(bits: u64) -> Option<FmulScale> {
+        Some(match bits {
+            0 => FmulScale::None,
+            1 => FmulScale::D2,
+            2 => FmulScale::D4,
+            3 => FmulScale::D8,
+            4 => FmulScale::M8,
+            5 => FmulScale::M4,
+            6 => FmulScale::M2,
+            _ => return None,
+        })
+    }
+
+    pub fn factor(self) -> f32 {
+        match self {
+            FmulScale::None => 1.0,
+            FmulScale::D2 => 0.5,
+            FmulScale::D4 => 0.25,
+            FmulScale::D8 => 0.125,
+            FmulScale::M8 => 8.0,
+            FmulScale::M4 => 4.0,
+            FmulScale::M2 => 2.0,
+        }
+    }
+}
+
 /// What `lop`'s test form asks of the result before it writes its predicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LopTest {
@@ -208,6 +249,10 @@ pub enum FRound {
 pub enum TexDim {
     T1d,
     T2d,
+    /// A 2D array. The third coordinate slot holds the *layer*, as an integer
+    /// in the low half of its register rather than a float — see
+    /// [`texs_encoding`].
+    T2dArray,
     T3d,
     TCube,
 }
@@ -240,7 +285,7 @@ pub enum Op {
 
     // ---- float ALU ----
     Fadd { dst: u8, a: u8, am: FMod, b: Operand, bm: FMod, ftz: bool, sat: bool },
-    Fmul { dst: u8, a: u8, b: Operand, bm: FMod, ftz: bool, sat: bool },
+    Fmul { dst: u8, a: u8, b: Operand, bm: FMod, ftz: bool, sat: bool, scale: FmulScale },
     Ffma { dst: u8, a: u8, b: Operand, bneg: bool, c: Operand, cneg: bool, ftz: bool, sat: bool },
     Fmnmx { dst: u8, a: u8, am: FMod, b: Operand, bm: FMod, pred: Pred, ftz: bool },
     Fsetp { p0: u8, p1: u8, a: u8, am: FMod, b: Operand, bm: FMod, cmp: FCmp, bop: BoolOp, src: Pred },
@@ -259,6 +304,15 @@ pub enum Op {
     Isetp { p0: u8, p1: u8, a: u8, b: Operand, cmp: ICmp, signed: bool, bop: BoolOp, src: Pred },
     Iset { dst: u8, a: u8, b: Operand, cmp: ICmp, signed: bool, bop: BoolOp, src: Pred, bf: bool },
     Icmp { dst: u8, a: u8, b: Operand, c: u8, cmp: ICmp, signed: bool },
+    /// `bfi dst, insert, src, base`: splice `insert` into `base`. `src` packs
+    /// the destination field's offset in its low byte and its width in the
+    /// next — one operand carrying two numbers, which is why a shader building
+    /// a bitfield does it in one instruction rather than a shift and two masks.
+    Bfi { dst: u8, insert: u8, src: Operand, base: Operand },
+    /// `r2p pr, src, mask`: move bits of `src` into the predicate registers,
+    /// one per set bit of `mask`. `byte` selects which byte of `src` supplies
+    /// them.
+    R2p { src: u8, mask: Operand, byte: u8 },
     Imul { dst: u8, a: u8, b: Operand, signed: bool, hi: bool },
     /// `xmad dst, a.h[ah], b.h[bh], c` — the 16x16+32 multiply-accumulate
     /// Maxwell builds every wider integer multiply out of.
@@ -514,8 +568,14 @@ fn attr_size(bits: u64) -> MemSize {
 
 /// Where a pc-relative branch lands: the 24-bit signed word at `[20, 44)`,
 /// relative to the instruction *after* this one (envydis's `.addend = 8`).
+/// A branch's pc-relative displacement resolved to a raw byte offset, before
+/// any slot alignment.
+fn branch_base(insn: u64, pc: u32) -> u32 {
+    (pc as i64 + 8 + sfield(insn, 20, 24)) as u32
+}
+
 fn branch_target(insn: u64, pc: u32) -> u32 {
-    super::align_slot((pc as i64 + 8 + sfield(insn, 20, 24)) as u32)
+    super::align_slot(branch_base(insn, pc))
 }
 
 /// Decode a single 8-byte Maxwell instruction word sitting at byte offset
@@ -627,7 +687,12 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             0xe29 if field(insn, 5, 1) == 0 => Op::Ssy { target: branch_target(insn, pc) },
             0xe24 if field(insn, 5, 1) == 0 => Op::Bra { target: branch_target(insn, pc) },
             0xe25 if field(insn, 5, 1) == 0 => {
-                Op::Brx { base: branch_target(insn, pc), reg: reg(insn, 8, 8) }
+                // The *sum* of the base and the table entry is the target, so
+                // this is where alignment must not happen: a base that is a
+                // multiple of 32 is a real displacement, not a `sched` word to
+                // step over, and rounding it up shifts every arm of the switch
+                // one instruction along.
+                Op::Brx { base: branch_base(insn, pc), reg: reg(insn, 8, 8) }
             }
             _ => decode_alu(insn),
         },
@@ -676,9 +741,7 @@ fn decode_alu(insn: u64) -> Op {
         // fmul — ftz/fmz at 44..46, scale at 41..44, sat 50, b: neg 48.
         0x68 => {
             let Some(b) = rhs_float else { return un };
-            if field(insn, 41, 3) != 0 {
-                return un; // the d2/d4/d8/m2/m4/m8 pre-scales
-            }
+            let Some(scale) = FmulScale::decode(field(insn, 41, 3)) else { return un };
             Op::Fmul {
                 dst: reg(insn, 0, 8),
                 a: reg(insn, 8, 8),
@@ -686,6 +749,7 @@ fn decode_alu(insn: u64) -> Op {
                 bm: FMod { neg: field(insn, 48, 1) != 0, abs: false },
                 ftz: field(insn, 44, 2) == 1,
                 sat: field(insn, 50, 1) != 0,
+                scale,
             }
         }
         // fmnmx — ftz 44, a: neg 48/abs 46, b: neg 45/abs 49, pred at 39.
@@ -700,6 +764,16 @@ fn decode_alu(insn: u64) -> Op {
                 pred: src_pred(insn, 39, 42),
                 ftz: field(insn, 44, 1) != 0,
             }
+        }
+        // r2p — move register bits into the predicate registers. Bit 40
+        // picks the destination file: `PR` (0) is the predicates, `CC` (1) the
+        // condition-code flags, which nothing here models.
+        0xf0 => {
+            let Some(mask) = rhs_int else { return un };
+            if field(insn, 40, 1) != 0 {
+                return un; // the CC form
+            }
+            Op::R2p { src: reg(insn, 8, 8), mask, byte: field(insn, 41, 2) as u8 }
         }
         // ---- integer ----
         // iadd — sat 50, x 43, a: neg 49, b: neg 48.
@@ -1032,10 +1106,10 @@ fn decode_alu_wide(insn: u64) -> Op {
         }
         // icmp — c is the third source; the operand order differs between
         // the register and constant forms.
-        0x5b4 | 0x4b4 | 0x534 => {
-            let (b, c) = match form >> 12 {
-                0x5 if form >> 4 == 0x5b4 => (Operand::Reg(reg(insn, 20, 8)), reg(insn, 39, 8)),
-                0x5 => (const_operand(insn), reg(insn, 39, 8)),
+        0x5b4 | 0x4b4 | 0x534 | 0x364 | 0x374 => {
+            let (b, c) = match form >> 4 {
+                0x5b4 => (Operand::Reg(reg(insn, 20, 8)), reg(insn, 39, 8)),
+                0x364 | 0x374 => (Operand::Imm(imm20(insn)), reg(insn, 39, 8)),
                 _ => (const_operand(insn), reg(insn, 39, 8)),
             };
             return Op::Icmp {
@@ -1046,6 +1120,18 @@ fn decode_alu_wide(insn: u64) -> Op {
                 cmp: icmp(field(insn, 49, 3)),
                 signed: field(insn, 48, 1) != 0,
             };
+        }
+        // bfi — `src` carries the field's offset and width packed into one
+        // operand; `base` is what the insert lands in. The four forms differ
+        // only in where those two come from.
+        0x5bf | 0x4bf | 0x53f | 0x36f | 0x37f => {
+            let (src, base) = match form >> 4 {
+                0x5bf => (Operand::Reg(reg(insn, 20, 8)), Operand::Reg(reg(insn, 39, 8))),
+                0x4bf => (const_operand(insn), Operand::Reg(reg(insn, 39, 8))),
+                0x53f => (Operand::Reg(reg(insn, 39, 8)), const_operand(insn)),
+                _ => (Operand::Imm(imm20(insn)), Operand::Reg(reg(insn, 39, 8))),
+            };
+            return Op::Bfi { dst: reg(insn, 0, 8), insert: reg(insn, 8, 8), src, base };
         }
         // iadd3 — three-way add, negation per source.
         0x5cc | 0x4cc | 0x38c => {
@@ -1287,6 +1373,9 @@ fn decode_alu_wide(insn: u64) -> Op {
             bm: FMod::NONE,
             ftz: field(insn, 55, 1) != 0,
             sat: field(insn, 54, 1) != 0,
+            // `fmul32i` spends the bits a pre-scale would need on its
+            // 32-bit immediate, so it has none.
+            scale: FmulScale::None,
         };
     }
     if insn & 0xfe80_0000_0000_0000 == 0x1c00_0000_0000_0000 {
@@ -1389,6 +1478,9 @@ fn texs_encoding(bits: u64, a: u8, b: u8) -> Option<(TexDim, [u8; 3])> {
         1 | 2 => Some((TexDim::T2d, [a, b, RZ])),
         // 2D.LL — `b` is the level, not a coordinate.
         3 => Some((TexDim::T2d, [a, next, RZ])),
+        // ARRAY_2D, ARRAY_2D.LZ — the layer comes from `a`, and the
+        // coordinates from `a + 1` and `b`.
+        7 | 8 => Some((TexDim::T2dArray, [next, b, a])),
         // 3D, 3D.LZ
         10 | 11 => Some((TexDim::T3d, [a, next, b])),
         // CUBE, CUBE.LL
@@ -1512,6 +1604,7 @@ mod tests {
             Op::Fmul {
                 dst: 4,
                 a: 0,
+                scale: FmulScale::None,
                 b: Operand::Const { bank: 2, offset: 0x0 },
                 bm: FMod::NONE,
                 ftz: true,
@@ -1524,6 +1617,7 @@ mod tests {
             Op::Fmul {
                 dst: 5,
                 a: 0,
+                scale: FmulScale::None,
                 b: Operand::Const { bank: 2, offset: 0x4 },
                 bm: FMod::NONE,
                 ftz: true,
@@ -1540,6 +1634,7 @@ mod tests {
                 bm: FMod::NONE,
                 ftz: true,
                 sat: false,
+                scale: FmulScale::None,
             }
         );
     }

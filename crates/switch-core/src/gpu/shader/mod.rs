@@ -30,6 +30,12 @@ const MAX_INSTRUCTIONS: usize = 4096;
 /// right after that block's `sched` word.
 pub const ENTRY_OFFSET: u32 = 8;
 
+/// Maxwell's generic attribute space: 32 four-component slots, the wires a
+/// vertex shader's outputs reach a fragment shader's inputs on.
+const GENERIC_ATTR_BASE: u16 = 0x80;
+const GENERIC_ATTR_END: u16 = 0x280;
+const GENERIC_ATTR_STRIDE: usize = 0x10;
+
 /// A decoded program: instructions in ascending address order, each paired
 /// with the byte offset it was decoded from so a branch target can be
 /// resolved back to an index.
@@ -41,6 +47,9 @@ pub struct Program {
     /// on first use rather than at construction so that it cannot be left
     /// stale by a `Program` built any other way — see [`Program::texs_writes`].
     texs_writes: std::cell::OnceCell<Vec<TexsWrites>>,
+    /// Which generic varying slots this program interpolates — see
+    /// [`Program::interpolated_slots`].
+    interpolated_slots: std::cell::OnceCell<Vec<usize>>,
 }
 
 /// Where one `texs` instruction's results land.
@@ -77,6 +86,34 @@ impl Program {
             .find(|t| t.at == index)
             .map(|t| t.writes.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// The generic varying slots this program's `ipa`s read, ascending.
+    ///
+    /// Interpolating a varying costs three multiply-adds per component and
+    /// happens once per covered pixel, so a full-screen quad pays for each
+    /// slot 921 600 times. Maxwell's generic attribute space holds 32 of them
+    /// and a real UI shader reads a handful, so the rasterizer interpolates
+    /// what the fragment shader asks for rather than the whole space.
+    ///
+    /// Offsets outside the generic range (`gl_Position`, `1/w`, point-sprite
+    /// coordinates) are not varyings and are handled on their own.
+    pub fn interpolated_slots(&self) -> &[usize] {
+        self.interpolated_slots.get_or_init(|| {
+            let mut slots: Vec<usize> = self
+                .insns
+                .iter()
+                .filter_map(|insn| match insn.op {
+                    Op::Ipa { offset, .. } => Some(offset),
+                    _ => None,
+                })
+                .filter(|&offset| (GENERIC_ATTR_BASE..GENERIC_ATTR_END).contains(&offset))
+                .map(|offset| usize::from(offset - GENERIC_ATTR_BASE) / GENERIC_ATTR_STRIDE)
+                .collect();
+            slots.sort_unstable();
+            slots.dedup();
+            slots
+        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -120,11 +157,98 @@ pub fn next_slot(offset: u32) -> u32 {
     }
 }
 
+/// How far back from a `brx` the jump-table shape is looked for. The clamp,
+/// the scale and the table load are emitted as one run immediately before the
+/// branch; a window this size covers that with room for scheduling to have
+/// moved things around, and bounds the scan on a binary where the shape is
+/// simply not there.
+const BRX_PATTERN_WINDOW: usize = 32;
+
+/// The widest jump table [`brx_targets`] will believe in.
+const MAX_BRX_ARMS: usize = 256;
+
+/// The targets a `brx` can reach, read out of the jump table its shader
+/// compiler put in a constant bank.
+///
+/// A `switch` lowers to a fixed run of instructions: clamp the selector to
+/// the last arm, scale it to a word index, load that entry of the table, and
+/// branch to it. The clamp is the only thing in the binary that records how
+/// many arms the `switch` had, so the walk looks for exactly that shape.
+/// Anything else returns `None` and leaves the caller to fall through — a
+/// guess at a table's length reads whatever follows it as code.
+fn brx_targets(
+    decoded: &BTreeMap<u32, Instruction>,
+    at: u32,
+    base: u32,
+    reg: u8,
+    consts: &mut dyn FnMut(u8, u32) -> Result<u32>,
+) -> Option<Vec<u32>> {
+    let before: Vec<&Instruction> =
+        decoded.range(..at).rev().take(BRX_PATTERN_WINDOW).map(|(_, i)| i).collect();
+
+    let (table_bank, table_offset, mut index_reg, load_at): (u8, i32, u8, usize) =
+        before.iter().enumerate().find_map(|(i, insn)| match insn.op {
+            Op::Ldc { dst, bank, offset, idx, size: isa::MemSize::B32 } if dst == reg => {
+                Some((bank, offset, idx, i))
+            }
+            _ => None,
+        })?;
+
+    // The clamp bounds the table. `imnmx` with the selector as both source and
+    // destination is `min(selector, last_arm)`, so the table has one more
+    // entry than the immediate.
+    let mut arms = None;
+    for insn in &before[load_at + 1..] {
+        match insn.op {
+            Op::Shl { dst, a, b: isa::Operand::Imm(2), .. } if dst == index_reg => {
+                index_reg = a;
+            }
+            // `imnmx` predicated on `PT` is `min`; on anything else it is a
+            // per-lane pick between min and max, which bounds nothing.
+            Op::Imnmx { dst, a, b: isa::Operand::Imm(n), pred, .. }
+                if dst == index_reg && a == index_reg && pred.is_always() =>
+            {
+                arms = Some(n as usize + 1);
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    // A `switch` this wide is not something a shader compiler emits; a match
+    // that produces one has recognised the wrong `imnmx`.
+    let arms = arms.filter(|&n| n <= MAX_BRX_ARMS)?;
+    // Stop at the first entry that cannot be read rather than discarding the
+    // ones that could: a table that runs past the end of its bank means the
+    // arm count is wrong, and the targets already resolved are still real.
+    Some(
+        (0..arms)
+            .map_while(|i| {
+                let offset = table_offset.wrapping_add(i as i32 * 4);
+                let entry = consts(table_bank, u32::try_from(offset).ok()?).ok()?;
+                Some(align_slot(base.wrapping_add(entry)))
+            })
+            .collect(),
+    )
+}
+
 /// Decode a program by walking its control-flow graph from `ENTRY_OFFSET`.
 /// `read` fetches the 8-byte word at a byte offset; it is fallible because a
 /// real one reads guest memory, and a program that runs off the end of what
 /// is mapped is a decode error rather than a panic.
 pub fn decode_program_with(read: &mut dyn FnMut(u32) -> Result<u64>) -> Result<Program> {
+    decode_program_with_consts(read, &mut |_, _| {
+        Err(Error::Gpu("shader: no constant banks bound for this decode".into()))
+    })
+}
+
+/// [`decode_program_with`], plus the constant-bank reader that resolves a
+/// `brx`'s jump table. `consts(bank, byte_offset)` reads one word of a bound
+/// constant buffer.
+pub fn decode_program_with_consts(
+    read: &mut dyn FnMut(u32) -> Result<u64>,
+    consts: &mut dyn FnMut(u8, u32) -> Result<u32>,
+) -> Result<Program> {
     let mut decoded: BTreeMap<u32, Instruction> = BTreeMap::new();
     let mut queued: HashSet<u32> = HashSet::new();
     let mut worklist = vec![ENTRY_OFFSET];
@@ -156,14 +280,22 @@ pub fn decode_program_with(read: &mut dyn FnMut(u32) -> Result<u64>) -> Result<P
                     push(target, &mut worklist, &mut queued);
                     !insn.pred.is_always()
                 }
-                // `brx`'s targets are a jump table in a constant bank, which
-                // is not readable from here. Keep walking past it instead: a
-                // `switch`'s arms are laid out around the branch and are
-                // reached by the linear walk and by the `bra`s that end them,
-                // so they are decoded anyway — and a target that genuinely was
-                // not is a clear error at execution rather than a silent
-                // misdecode.
-                Op::Brx { .. } => true,
+                // `brx` reaches its arms only through a jump table in a
+                // constant bank. The linear walk finds an arm only when the
+                // arm before it falls through, and a `switch` whose arms all
+                // end in `brk` or `bra` has none that do — the Home Menu's
+                // instanced-quad vertex shader is one, and every one of its
+                // 222 draws stopped on an arm no path had decoded.
+                Op::Brx { base, reg } => {
+                    if let Some(targets) =
+                        brx_targets(&decoded, offset, base, reg, consts)
+                    {
+                        for target in targets {
+                            push(target, &mut worklist, &mut queued);
+                        }
+                    }
+                    true
+                }
                 // `sync`/`brk`/`cont` jump to a point pushed earlier by the
                 // matching `ssy`/`pbk`/`pcnt`, which is already queued.
                 Op::Sync | Op::Brk | Op::Cont => !insn.pred.is_always(),
@@ -213,7 +345,8 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use isa::{FMod, MemSize, MufuOp, Operand, TexDim, RZ};
+    use isa::{FMod, FmulScale, MemSize, MufuOp, Operand, TexDim, RZ};
+    use crate::Error;
 
     /// Just the opcodes, for comparing a decode against an expected list.
     fn ops(program: &Program) -> Vec<Op> {
@@ -336,6 +469,7 @@ mod tests {
                 bm: FMod::NONE,
                 ftz: true,
                 sat: false,
+                scale: FmulScale::None,
             }
         );
         assert_eq!(
@@ -389,6 +523,116 @@ mod tests {
             Op::Texs { dst: 0, dst2: 2, coords: [0, 1, RZ], handle: 0x1a4, dim: TexDim::T2d, mask: [true, true, true, true] }
         );
         assert_eq!(program.insns.last().unwrap().op, Op::Exit);
+    }
+
+    /// The Home Menu's instanced-quad vertex shader, from the `brx` that
+    /// picks a corner's texture coordinate through the three arms it selects
+    /// between — transcribed word for word out of a live qlaunch run, along
+    /// with the jump table its `c1` held.
+    fn brx_switch_fixture() -> (Vec<u8>, [u32; 3]) {
+        let mut bytes = vec![0u8; 0x300];
+        // Entry: jump straight to the run that sets up the switch, so the
+        // fixture keeps the real program's offsets (and so its real
+        // displacements) without carrying the 190 instructions before it.
+        bytes[8..16].copy_from_slice(&word(0x2f80000f, 0xe2400000)); // bra 0x308
+        bytes.extend(block(
+            (0xfec007f6, 0x001fd000),
+            (0xfff70c0c, 0x1c0fffff), // iadd r12, r12, -1
+            (0x00270c0c, 0x38200380), // imnmx r12, r12, 2
+            (0x00270c0c, 0x38480000), // shl r12, r12, 2
+        ));
+        bytes.extend(block(
+            (0xffa0073f, 0x001fc002),
+            (0x0c070c0c, 0xef940010), // ld r12, c1[0xc0 + r12]
+            (0xcc870c0f, 0xe2500fff), // brx r12, -0x338
+            (0x0017000a, 0x5c980780), // mov r10, r1      <- arm 0
+        ));
+        bytes.extend(block(
+            (0xfe0007fd, 0x001ff400),
+            (0x0007000f, 0xe3400000), // brk
+            (0x0027000a, 0x5c980780), // mov r10, r2      <- arm 1
+            (0x0007000f, 0xe3400000), // brk
+        ));
+        bytes.extend(block(
+            (0xffa007f0, 0x003fc000),
+            (0x0037000a, 0x5c980780), // mov r10, r3      <- arm 2
+            (0x0007000f, 0xe3400000), // brk
+            (0x00070f00, 0x50b00000), // nop (padding)
+        ));
+        (bytes, [0x338, 0x350, 0x360])
+    }
+
+    fn decode_with_table(bytes: &[u8], table: [u32; 3]) -> Result<Program> {
+        decode_program_with_consts(
+            &mut |offset: u32| {
+                let start = offset as usize;
+                bytes
+                    .get(start..start + 8)
+                    .map(|w| u64::from_le_bytes(w.try_into().expect("8 bytes")))
+                    .ok_or_else(|| Error::Gpu(format!("past the end at {offset:#x}")))
+            },
+            &mut |bank: u8, offset: u32| {
+                let index = (offset as usize).checked_sub(192).map(|d| d / 4);
+                match (bank, index.and_then(|i| table.get(i))) {
+                    (1, Some(&entry)) => Ok(entry),
+                    _ => Err(Error::Gpu(format!("no c{bank}[{offset:#x}]"))),
+                }
+            },
+        )
+    }
+
+    #[test]
+    fn a_brx_reaches_the_arms_its_jump_table_names() {
+        // Every arm of this switch ends in `brk`, so nothing falls through
+        // into the next one: the linear walk finds arm 0 and stops. Arms 1
+        // and 2 exist only in the table, and each of the Home Menu's 222
+        // textured draws stopped on one of them.
+        let (bytes, table) = brx_switch_fixture();
+        let program = decode_with_table(&bytes, table).unwrap();
+
+        for (arm, offset) in [(1u8, 0x338u32), (2, 0x350), (3, 0x368)] {
+            let index = program
+                .index_of(offset)
+                .unwrap_or_else(|| panic!("arm at {offset:#x} was never decoded"));
+            assert_eq!(program.insns[index].op, Op::Mov { dst: 10, src: Operand::Reg(arm) });
+        }
+    }
+
+    #[test]
+    fn a_brx_base_is_not_rounded_onto_an_instruction_slot() {
+        // Only the *sum* of the base and a table entry is a target. This
+        // base is zero, which is a multiple of 32 — rounding it up to the
+        // first real instruction slot would add 8 to every arm and land two
+        // of the three on the `brk` after the arm instead of the arm itself.
+        let (bytes, table) = brx_switch_fixture();
+        let program = decode_with_table(&bytes, table).unwrap();
+        let brx = program.index_of(0x330).expect("the brx itself");
+        assert_eq!(program.insns[brx].op, Op::Brx { base: 0, reg: 12 });
+    }
+
+    #[test]
+    fn a_brx_whose_table_cannot_be_read_still_decodes_what_falls_through() {
+        // No constant banks bound — the decode must not fail, it must just
+        // stop knowing where the arms are.
+        let (bytes, _) = brx_switch_fixture();
+        let program = decode_program(&bytes).unwrap();
+        assert!(program.index_of(0x338).is_some(), "arm 0 falls through");
+        assert!(program.index_of(0x350).is_none(), "arm 1 is only in the table");
+    }
+
+    #[test]
+    fn only_the_varyings_a_program_interpolates_are_listed() {
+        let mut program = Program::default();
+        for (offset, at) in [(0x7cu16, 8u32), (0xc4, 16), (0x80, 24), (0xc0, 40), (0x80, 48)] {
+            program.offsets.push(at);
+            program.insns.push(Instruction {
+                pred: isa::Pred::ALWAYS,
+                op: Op::Ipa { dst: 0, offset, mul: None, perspective: true, sat: false },
+            });
+        }
+        // 0x7c is `1/w`, not a varying; 0x80 is slot 0 twice; 0xc0/0xc4 are
+        // both slot 4.
+        assert_eq!(program.interpolated_slots(), &[0, 4]);
     }
 
     #[test]
