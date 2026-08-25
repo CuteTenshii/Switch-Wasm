@@ -1166,6 +1166,14 @@ impl Cpu {
                         "notif:a" | "notif:s" | "notif:event-accessor" => {
                             self.notif_request(tls, handle, cmd_id)?
                         }
+                        // erpt, the error-report collector: the context
+                        // journal every module keeps current while it runs,
+                        // and the three interfaces `erpt:r` reads the reports
+                        // written out of it back through.
+                        "erpt:c" => self.erpt_context_request(tls, handle, cmd_id)?,
+                        "erpt:r" | "erpt:report" | "erpt:manager" | "erpt:attachment" => {
+                            self.erpt_session_request(tls, handle, cmd_id)?
+                        }
                          name => {
                              // Known service, no dedicated stub: answer with a
                              // sub-session and an object id, so a caller that

@@ -1137,6 +1137,18 @@ pub struct Cpu {
     /// so it has to outlive the request that registered one.
     notif_alarms: Vec<ipc::AlarmSetting>,
     notif_next_alarm_id: u16,
+    /// `erpt`'s journal: one context record per category, the reports written
+    /// out of it, the attachments those reports own, and where each open
+    /// `IReport`/`IAttachment` object has read to. None of it is persisted —
+    /// a console keeps this on the SYSTEM partition, and there is nothing here
+    /// to transfer it to — so the journal lives exactly as long as the session.
+    erpt_contexts: Vec<ipc::ErrorContext>,
+    erpt_reports: Vec<ipc::ErrorReport>,
+    erpt_attachments: Vec<ipc::ErrorReportAttachment>,
+    erpt_readers: HashMap<u64, ipc::ErrorReportReader>,
+    /// The journal's own id, made on the first ask and kept: it tells whoever
+    /// reads reports out of the journal which journal they came from.
+    erpt_journal_id: Option<[u8; ipc::ERPT_UUID_SIZE]>,
     /// Monotonic sampling number for the hid shared-memory LIFO entries.
     sample_counter: u64,
     /// The touchscreen LIFO's own sampling number. Separate from the npad one
@@ -1386,6 +1398,11 @@ impl Cpu {
             // "no alarm" and "the first alarm" the same value in a caller
             // that zero-initializes the id it is about to fill in.
             notif_next_alarm_id: 1,
+            erpt_contexts: Vec::new(),
+            erpt_reports: Vec::new(),
+            erpt_attachments: Vec::new(),
+            erpt_readers: HashMap::new(),
+            erpt_journal_id: None,
             sample_counter: 0,
             shared_font: Vec::new(),
             pl_shmem_image: Vec::new(),

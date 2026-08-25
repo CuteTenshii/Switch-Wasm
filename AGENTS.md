@@ -11,7 +11,7 @@ standing state.
 ## Commands
 
 - `make all` — `test` then `assets`.
-- `make test` — `cargo test` over all three crates. 681 tests.
+- `make test` — `cargo test` over all three crates. 686 tests.
 - `make wasm` — release wasm build `--features gpu`, then `wasm-bindgen
   --target web`. Needs `rustup target add wasm32-unknown-unknown` and a
   `wasm-bindgen-cli` matching the `Cargo.lock` version.
@@ -255,7 +255,8 @@ stderr *and* the trace buffer the page drains every slice.
 
 `TRACE_SVC` (every syscall bar the three hot ones, plus each `svcGetInfo`
 answer), `TRACE_IPC`, `TRACE_WAIT` (events as handed out, and what each wait is
-waiting on), `TRACE_FONT`, `TRACE_AUDIO`, `TRACE_MAP`, `TRACE_REGS`, and the
+waiting on), `TRACE_FONT`, `TRACE_AUDIO`, `TRACE_ERPT` (every context record a
+guest journals, by category), `TRACE_MAP`, `TRACE_REGS`, and the
 GPU set — `TRACE_GPU`, `TRACE_NV`, `TRACE_DRAW`, `TRACE_PIPELINE`,
 `TRACE_SHADER`, `TRACE_CFG`, `TRACE_WGSL`, `TRACE_UPLOAD`. `Cpu::backtrace`
 walks the guest X29 frame chain.
@@ -388,8 +389,15 @@ dispatch, the same split as `fsp-srv-fs` and `time:system-clock`.
   then TLV chunks (key 2 message, key 6 module) in a map-alias buffer, split
   across packets with `flags` bit 0 head / bit 1 tail. Retail builds often
   compile logging out, so an empty log is not evidence of a bug.
-- **`fatal:u`** carries the `Result` that stopped a process — the only account
+- **`fatal:u`** carries the `Result` that stopped a process — the first account
   a guest ever gives of why.
+- **`erpt`** is the second, and far more detailed: a journal of *context*, one
+  record per category (`ErrorInfo`, `GpuCrashInfo`, `ThermalInfo`), resubmitted
+  rather than appended to, which `CreateReport` writes out whole the moment
+  something notices a problem. A report being filed is a `diagnostic`, named by
+  the categories it is about. Nothing persists and nothing uploads, so the
+  journal lives exactly as long as the session — and `IManager`'s report-created
+  event is the one event in these services that genuinely fires.
 - **`ssl`** — contexts and options are real; **`CreateConnection` deliberately
   reports unimplemented** rather than handing back a connection that can never
   connect. Offline titles only call `SetInterfaceVersion`.
