@@ -70,9 +70,9 @@
 
 use super::compiled::{Compiled, NO_TARGET};
 use super::isa::{
-    BoolOp, FCmp, FMod, FRound, ICmp, LogicOp, LopTest, MufuOp, Op, Operand, Pred, TexDim,
-    RZ,
+    BoolOp, FCmp, FMod, FRound, ICmp, LogicOp, LopTest, MufuOp, Op, Operand, Pred, TexDim, RZ,
 };
+use crate::gpu::texture::SwizzleSource;
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -1462,19 +1462,37 @@ pub struct Layout {
     pub varyings: Vec<usize>,
     /// Constant banks the program reads, by bind slot.
     pub const_banks: Vec<u8>,
-    /// The textures the program samples: each `texs` immediate, and the
-    /// dimensionality it samples with.
-    pub textures: Vec<(u16, TexDim)>,
+    /// The textures the module binds.
+    pub textures: Vec<TextureBinding>,
     /// How many colour targets a fragment shader writes. Each takes four
     /// consecutive registers from `r0`, so target `n` is `r[4n..4n+4]`.
     pub targets: u32,
+    /// Which bind group this module's bindings live in.
+    ///
+    /// The two stages must not share one. They index *different* constant
+    /// buffers with the same bank number and different textures with the
+    /// same `texs` immediate, so a single group would have two bindings
+    /// claiming the same slot. One group per stage is the only arrangement
+    /// where a binding number means one thing.
+    pub group: u32,
     /// Whether the vertex entry point negates `position.y`.
     ///
-    /// A driver reconciles GL's bottom-left window origin with a render
-    /// target whose row 0 is at the top by writing a *negative* `scale_y`
-    /// into the viewport transform. WebGPU has no negative viewport height,
-    /// so the flip has to happen in the shader instead. Read it off
-    /// `pipeline::Viewport::flip_y`; nothing in the program says.
+    /// **Not the same as the viewport transform mirroring y.** WebGPU's own
+    /// NDC has y pointing up and its framebuffer has y pointing down, so it
+    /// mirrors already: `ndc_y = +1` is row 0 whatever the viewport says,
+    /// and its height cannot be negative to say otherwise.
+    ///
+    /// Maxwell mirrors only when the guest wrote a negative `scale_y` —
+    /// which a driver does for the window, to reconcile GL's bottom-left
+    /// origin with a target whose row 0 is at the top. So the two agree
+    /// exactly when the guest's transform *does* mirror, and the shader has
+    /// to negate when it does **not**, which is the offscreen case.
+    ///
+    /// Setting this from `pipeline::Viewport::flip_y` directly flips twice.
+    /// It looks almost right, because a full-screen quad is symmetric about
+    /// the centre and so is most of a UI — the Home Menu came out 94.87%
+    /// correct that way, with one off-centre band mirrored onto the other
+    /// side of the screen.
     pub flip_y: bool,
     /// Whether the vertex entry point remaps `position.z` from `-w..w` onto
     /// `0..w`.
@@ -1485,6 +1503,32 @@ pub struct Layout {
     /// transform's z scale, which is 0.5 for a guest using GL's range.
     pub depth_minus_one_to_one: bool,
 }
+
+/// One texture a module samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextureBinding {
+    /// The `texs` immediate that names it.
+    pub immediate: u16,
+    /// What the instruction samples it as, which decides the binding's type.
+    pub dim: TexDim,
+    /// How the descriptor says the channels are rearranged on the way out.
+    ///
+    /// Not something the program says — it is in the TIC, which is guest
+    /// memory the draw points at — so [`Layout::of`] leaves it as the
+    /// identity and a backend fills it in from
+    /// [`crate::gpu::upload::TextureUpload::swizzle`]. WebGPU has no
+    /// per-texture component swizzle, so it happens in the sampling hook,
+    /// where it costs a shuffle rather than a copy.
+    ///
+    /// It is not decoration: two thirds of the Home Menu's draws sample a
+    /// single-channel image swizzled to `[R, R, R, One]`, and reading it as
+    /// the identity gets every one of them wrong.
+    pub swizzle: [SwizzleSource; 4],
+}
+
+/// The swizzle that rearranges nothing.
+pub const IDENTITY_SWIZZLE: [SwizzleSource; 4] =
+    [SwizzleSource::R, SwizzleSource::G, SwizzleSource::B, SwizzleSource::A];
 
 /// `a[]`'s word count: a ten-bit byte address, one `f32` per word.
 const ATTRIBUTE_WORDS: usize = 0x400 / 4;
@@ -1501,8 +1545,6 @@ const POSITION: usize = 0x70;
 const INSTANCE_ID: usize = 0x2f8;
 const VERTEX_ID: usize = 0x2fc;
 
-/// The bind group everything is in.
-const GROUP: u32 = 0;
 /// Constant bank `b` binds at `b`, and texture `i` at `TEXTURE_BINDING + 2i`
 /// with its sampler beside it. Fixed rather than packed so that a backend can
 /// work out a binding number without re-deriving the layout.
@@ -1528,8 +1570,17 @@ impl Layout {
             attributes,
             varyings,
             const_banks: translated.const_banks.clone(),
-            textures: translated.textures.clone(),
+            textures: translated
+                .textures
+                .iter()
+                .map(|&(immediate, dim)| TextureBinding {
+                    immediate,
+                    dim,
+                    swizzle: IDENTITY_SWIZZLE,
+                })
+                .collect(),
             targets: 1,
+            group: 0,
             // Neither is anything the program says; both come from the
             // draw's viewport transform.
             flip_y: false,
@@ -1575,17 +1626,20 @@ pub fn module(
     let mut out = String::new();
     for bank in &layout.const_banks {
         out.push_str(&format!(
-            "@group({GROUP}) @binding({bank}) var<storage, read> cb{bank}: array<u32>;\n"
+            "@group({}) @binding({bank}) var<storage, read> cb{bank}: array<u32>;\n",
+            layout.group
         ));
     }
-    for (index, &(_, dim)) in layout.textures.iter().enumerate() {
+    for (index, texture) in layout.textures.iter().enumerate() {
         let binding = TEXTURE_BINDING + 2 * index as u32;
         out.push_str(&format!(
-            "@group({GROUP}) @binding({binding}) var tex{index}: {};\n",
-            texture_type(dim)?
+            "@group({}) @binding({binding}) var tex{index}: {};\n",
+            layout.group,
+            texture_type(texture.dim)?
         ));
         out.push_str(&format!(
-            "@group({GROUP}) @binding({}) var smp{index}: sampler;\n",
+            "@group({}) @binding({}) var smp{index}: sampler;\n",
+            layout.group,
             binding + 1
         ));
     }
@@ -1624,15 +1678,34 @@ pub fn module(
         "fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {\n\
          \x20 switch (imm) {\n",
     );
-    for (index, &(imm, dim)) in layout.textures.iter().enumerate() {
-        let coords = match dim {
+    for (index, texture) in layout.textures.iter().enumerate() {
+        let coords = match texture.dim {
             TexDim::T2d => "vec2<f32>(u, v), 0.0",
             TexDim::T2dArray => "vec2<f32>(u, v), layer, 0.0",
             other => return Err(Unsupported::TextureDimension { dim: other }),
         };
-        out.push_str(&format!(
-            "    case {imm}u: {{ return textureSampleLevel(tex{index}, smp{index}, {coords}); }}\n"
-        ));
+        let imm = texture.immediate;
+        let sample =
+            format!("textureSampleLevel(tex{index}, smp{index}, {coords})");
+        if texture.swizzle == IDENTITY_SWIZZLE {
+            out.push_str(&format!("    case {imm}u: {{ return {sample}; }}\n"));
+            continue;
+        }
+        let channels: Vec<&str> = texture
+            .swizzle
+            .iter()
+            .map(|source| match source {
+                SwizzleSource::Zero => "0.0",
+                SwizzleSource::R => "sampled.x",
+                SwizzleSource::G => "sampled.y",
+                SwizzleSource::B => "sampled.z",
+                SwizzleSource::A => "sampled.w",
+                SwizzleSource::One => "1.0",
+            })
+            .collect();
+        out.push_str(&format!("    case {imm}u: {{\n"));
+        out.push_str(&format!("      let sampled = {sample};\n"));
+        out.push_str(&format!("      return vec4<f32>({});\n    }}\n", channels.join(", ")));
     }
     out.push_str("    default: { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }\n  }\n}\n\n");
 
@@ -2157,11 +2230,54 @@ mod tests {
         let translated = translate(&p).unwrap();
         let layout = Layout::of(&translated, Stage::Fragment);
         assert_eq!(layout.const_banks, vec![1, 5]);
-        assert_eq!(layout.textures, vec![(0x1a4, TexDim::T2d)]);
+        assert_eq!(
+            layout.textures,
+            vec![TextureBinding {
+                immediate: 0x1a4,
+                dim: TexDim::T2d,
+                swizzle: IDENTITY_SWIZZLE
+            }]
+        );
         let source = module(&translated, Stage::Fragment, &layout).unwrap();
         assert!(source.contains("var<storage, read> cb1:"), "{source}");
         assert!(source.contains("var<storage, read> cb5:"), "{source}");
         assert!(source.contains("case 420u: { return textureSampleLevel(tex0, smp0"), "{source}");
+    }
+
+    #[test]
+    fn a_swizzled_texture_is_rearranged_where_it_is_sampled() {
+        // WebGPU has no per-texture component swizzle, and the descriptor
+        // does: two thirds of the Home Menu's draws sample a single-channel
+        // image as `[R, R, R, One]`, and sampling it as the identity gets
+        // every one of them wrong.
+        let p = program(&[
+            (
+                Op::Texs {
+                    dst: 0,
+                    dst2: 2,
+                    coords: [4, 5, RZ],
+                    handle: 8,
+                    dim: TexDim::T2d,
+                    mask: [true, true, true, true],
+                },
+                ALWAYS,
+            ),
+            (Op::Exit, ALWAYS),
+        ]);
+        let translated = translate(&p).unwrap();
+        let mut layout = Layout::of(&translated, Stage::Fragment);
+        // What a backend fills in from the TIC.
+        layout.textures[0].swizzle =
+            [SwizzleSource::R, SwizzleSource::R, SwizzleSource::R, SwizzleSource::One];
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(
+            source.contains("return vec4<f32>(sampled.x, sampled.x, sampled.x, 1.0);"),
+            "{source}"
+        );
+        // The identity costs nothing.
+        layout.textures[0].swizzle = IDENTITY_SWIZZLE;
+        let plain = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(!plain.contains("let sampled ="), "{plain}");
     }
 
     #[test]

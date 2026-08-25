@@ -467,7 +467,12 @@ struct ShadedVertex {
 /// header showing through: retry assuming one.
 const MESA_SHADER_HEADER_BYTES: u64 = 0x50;
 
-fn decode_program_from_memory(
+/// Decode a bound shader program out of guest memory.
+///
+/// Public because a second backend needs the same answer, and the Mesa
+/// header skip below is exactly the sort of thing two copies would disagree
+/// about.
+pub fn decode_program_from_memory(
     ctx: &ExecCtx,
     addr: u64,
     bindings: &dyn Fn(u8) -> Option<(u64, u32)>,

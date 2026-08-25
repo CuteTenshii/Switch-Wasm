@@ -75,6 +75,29 @@ pub trait Renderer: std::fmt::Debug {
         depth: bool,
         stencil: bool,
     ) -> Result<()>;
+
+    /// Make guest memory agree with whatever the backend is holding.
+    ///
+    /// A backend that keeps its surfaces on a device has to be told when
+    /// something outside it is about to look at them, because a render
+    /// target is guest memory and the guest is entitled to read it. `present`
+    /// is the one that always matters: the display deswizzles the surface
+    /// straight out of memory, so a frame drawn on a device and never handed
+    /// back is a frame the host never sees.
+    ///
+    /// It exists so that [`Renderer::draw`] does not have to hand anything
+    /// back *itself*. A draw that read its target back would be a draw that
+    /// blocked, and in a browser a blocking readback is not slow — it is a
+    /// deadlock, since the promise it waits on can only resolve once the
+    /// event loop runs. Draws encode and return; this is where the waiting
+    /// is allowed to be.
+    ///
+    /// [`Software`] has nothing to hand back: it writes guest memory as it
+    /// goes, so the default is what it wants.
+    fn flush(&mut self, ctx: &mut ExecCtx) -> Result<()> {
+        let _ = ctx;
+        Ok(())
+    }
 }
 
 /// The rasterizer that runs on the CPU: [`crate::gpu::raster`] for draws, and

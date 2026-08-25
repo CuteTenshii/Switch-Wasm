@@ -182,6 +182,28 @@ impl Gpu {
         Ok(fence)
     }
 
+    /// Hand back anything a GPU backend is holding, so that whatever reads a
+    /// render target next reads what was drawn into it.
+    ///
+    /// Called before [`Gpu::present`], which is the reader that always
+    /// matters. A backend with nothing to hand back — the software
+    /// rasterizer, which writes guest memory as it goes — does nothing here.
+    pub fn flush_renderers(&mut self, mem: &mut Memory) -> Result<()> {
+        for channel in self.channels.values_mut() {
+            let Some(as_id) = channel.as_id else { continue };
+            let Some(vmm) = self.address_spaces.get(&as_id) else { continue };
+            let mut ctx = ExecCtx {
+                mem,
+                vmm,
+                host1x: &mut self.host1x,
+                stats: &mut self.stats,
+                trace: self.trace,
+            };
+            channel.three_d.flush_renderer(&mut ctx)?;
+        }
+        Ok(())
+    }
+
     /// Read a surface the display was handed and convert it to the RGBA8888
     /// [`Framebuffer`] the host presents. This is the scan-out step: the guest
     /// renders into a block-linear image, the compositor is given its nvmap

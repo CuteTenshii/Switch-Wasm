@@ -528,7 +528,21 @@ fn image_copy(image: &Texture) -> Result<Copy> {
         // textures are ASTC 4x4, so refusing them would mean refusing the
         // draws that matter.
         TexelKind::Block(codec @ Codec::Astc { .. }) => Copy::Decode { codec },
-        TexelKind::Block(codec) => Copy::Raw { unit: codec.bytes_per_block() },
+        TexelKind::Block(codec) => {
+            let (block_w, block_h) = codec.block_size();
+            // WebGPU will not make a compressed texture whose extent is not a
+            // whole number of blocks, and Maxwell will: the Home Menu binds
+            // 1x1 BC4 and BC5 images as the default texture for its
+            // untextured quads. Rounding the extent up would change what a
+            // normalized coordinate samples — one texel becomes sixteen —
+            // so the partial ones are decoded instead, which
+            // `decode_blocks` already clips to the real extent.
+            if image.width.is_multiple_of(block_w) && image.height.is_multiple_of(block_h) {
+                Copy::Raw { unit: codec.bytes_per_block() }
+            } else {
+                Copy::Decode { codec }
+            }
+        }
     })
 }
 
@@ -863,6 +877,20 @@ mod tests {
         assert!(matches!(copy, Copy::Raw { unit: 8 }), "{copy:?}");
         // 16 blocks of 8 bytes across, 16 rows of blocks down.
         assert_eq!(copy.shape(&bc1), (Format::Bc1RgbaUnorm, 128, 16));
+    }
+
+    #[test]
+    fn a_compressed_texture_that_is_not_whole_blocks_is_decoded() {
+        // WebGPU will not make one, and Maxwell will: the Home Menu binds
+        // 1x1 BC4 and BC5 images as the default texture for its untextured
+        // quads. Rounding the extent up to a block would turn one texel into
+        // sixteen and change what a normalized coordinate samples.
+        let stub = image(TexelKind::Block(Codec::Bc4Unorm), 1, 1, false);
+        assert!(matches!(image_copy(&stub).unwrap(), Copy::Decode { .. }));
+        assert_eq!(image_copy(&stub).unwrap().shape(&stub), (Format::Rgba8Unorm, 4, 1));
+        // A whole number of blocks still goes over compressed.
+        let whole = image(TexelKind::Block(Codec::Bc4Unorm), 8, 8, false);
+        assert!(matches!(image_copy(&whole).unwrap(), Copy::Raw { unit: 8 }));
     }
 
     #[test]

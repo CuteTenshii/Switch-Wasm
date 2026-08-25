@@ -878,6 +878,12 @@ impl Engine3D {
         self.renderer = renderer;
     }
 
+    /// Tell the backend that something outside it is about to read a render
+    /// target — see [`Renderer::flush`].
+    pub fn flush_renderer(&mut self, ctx: &mut ExecCtx) -> Result<()> {
+        self.with_renderer(ctx, |renderer, _, ctx| renderer.flush(ctx))
+    }
+
     /// `gl_InstanceID` for [`Engine3D::last_draw`].
     pub fn instance_id(&self) -> u32 {
         self.instance_id
