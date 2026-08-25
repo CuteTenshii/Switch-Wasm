@@ -706,6 +706,53 @@ system-info or save-management homebrew opens.
   for `0x40000001`/`0x40000002`/`0x40000039` and labels them CPU, GPU and
   Memory. Rates are the **handheld** ones, and a rate a guest sets reads back.
 
+## What the Home Menu opens that a homebrew never does (`cpu/ipc.rs`)
+
+`lbl`, `audctl`, `nfc:sys`, `btm:sys`, `ldn:m`, `lp2p:m`, `ovln:snd`/`ovln:rcv`,
+`olsc:s`, `friend:*`, `news:*`, `bcat:*` and `notif:s`/`notif:a` are the
+services qlaunch reaches for on the way to its first frame, and none of them
+had an implementation — every one was answered by the fabricated-object
+fallback. Four things about that set are worth keeping in mind.
+
+- **Most of them are a creator plus the objects it creates.** `friend:u`
+  command 0 is `CreateFriendService`, `bcat:u` command 0 is
+  `CreateBcatService`, `nfc:sys` command 0 is `CreateSystemInterface`,
+  `btm:sys` command 0 is `GetCore`, and `olsc:s` is *five* objects deep
+  (`GetOlscServiceForSystemService` → `GetTransferTaskListController` → an
+  `INativeHandleHolder` → `GetNativeHandle`). The fabricated object id is not
+  an object a caller can call, so the fallback was ending each of these chains
+  at its first command rather than at the command that was missing. Each
+  sub-interface is handed out under a name of its own (`Cpu::ipc_interface`
+  resolves it from the domain object or the session handle, the same split as
+  `fsp-srv-fs` and `time:system-clock`), and `svc.rs`'s dispatch lists those
+  names beside the service's.
+- **The answer is an empty console, not a broken one.** No friends, no news,
+  no BCAT content, no cloud saves, no local network, no NFC reader, no paired
+  gamepad. Every one of those is a state a retail console genuinely reaches —
+  one that has never been online, with its Joy-Cons detached — so callers have
+  a path for it already. A *failure* would put them on the path built for a
+  radio that broke.
+- **The settings among them are stored, not answered.** `lbl`'s brightness,
+  `audctl`'s per-target volume and mute, `nfc`'s enable flag, `btm`'s radio,
+  `notif`'s alarms: each is written by one caller and read back by another, so
+  they live on `Cpu` (`backlight`, `audio_control`, `notif_alarms`, …) rather
+  than being acknowledged and dropped. The settings applet sets a brightness
+  and then asks what is applied to the backlight; a console that answers those
+  two independently has a slider that does not move.
+- **An event handed out twice must be the same event.** `Cpu::kept_event`
+  keys one per `(purpose, object)` and hands the same handle back on every
+  ask, for the reason `library_applet_event` does: a caller given a second
+  copy waits on an object the service would not signal even if it signalled
+  the first. None of these are ever signalled — a save transfer finishing, a
+  news article arriving, a Bluetooth radio coming on — which is the truthful
+  state rather than the silent one.
+
+`fsp-srv`'s `DisableAutoSaveDataCreation` (1003) is accepted and deliberately
+**not** honoured: saves here are created on open and there is no installer to
+have made them beforehand, so obeying the flag would leave every title —
+qlaunch included — with no save at all.
+
+
 `sfdnsres` (the DNS resolver, `sfdnsres_request`) is the other half of the
 socket stack, opened alongside `bsd:u` by `socketInitialize`. Nothing resolves:
 `EAI_NONAME` for the `getaddrinfo` family, `HOST_NOT_FOUND` for the

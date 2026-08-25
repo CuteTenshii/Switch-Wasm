@@ -1002,6 +1002,31 @@ pub struct Cpu {
     ssl_interface_version: u32,
     ssl_contexts: u32,
     ssl_options: HashMap<(u64, u32), u32>,
+    /// Events a service handed out, keyed by what the event is for and which
+    /// object handed it out. A caller that asks for the same event twice has
+    /// to be given the same handle back, or it waits on a copy nothing would
+    /// signal — see [`Cpu::kept_event`].
+    service_events: HashMap<(&'static str, u64), u64>,
+    /// `lbl`'s backlight settings: brightness, dimming, VR mode. Settings
+    /// rather than facts about a panel, so they are stored and read back.
+    backlight: ipc::Backlight,
+    /// `audctl`'s system-wide audio settings, for the same reason.
+    audio_control: ipc::AudioControl,
+    /// `nfc:sys`: whether the interface has been initialized, and whether NFC
+    /// is switched on in system settings. There is no reader attached either
+    /// way — see [`Cpu::nfc_request`].
+    nfc_initialized: bool,
+    nfc_enabled: bool,
+    /// `btm:sys`: whether the Bluetooth radio is on, and whether a controller
+    /// pairing is running. Both are read back by the Home Menu's
+    /// controller screens; nothing ever pairs.
+    bt_radio_enabled: bool,
+    bt_gamepad_pairing: bool,
+    /// The alarms `notif` is holding, and the id the next one is given. An
+    /// alarm id is the server's to assign and the caller's to address it by,
+    /// so it has to outlive the request that registered one.
+    notif_alarms: Vec<ipc::AlarmSetting>,
+    notif_next_alarm_id: u16,
     /// Monotonic sampling number for the hid shared-memory LIFO entries.
     sample_counter: u64,
     /// The touchscreen LIFO's own sampling number. Separate from the npad one
@@ -1235,6 +1260,20 @@ impl Cpu {
             ssl_interface_version: 0,
             ssl_contexts: 0,
             ssl_options: HashMap::new(),
+            service_events: HashMap::new(),
+            backlight: ipc::Backlight::default(),
+            audio_control: ipc::AudioControl::default(),
+            nfc_initialized: false,
+            nfc_enabled: false,
+            // A console boots with its Bluetooth radio on: that is how it
+            // finds the Joy-Cons it is already paired to.
+            bt_radio_enabled: true,
+            bt_gamepad_pairing: false,
+            notif_alarms: Vec::new(),
+            // Zero is a valid AlarmSettingId, but handing it out first makes
+            // "no alarm" and "the first alarm" the same value in a caller
+            // that zero-initializes the id it is about to fill in.
+            notif_next_alarm_id: 1,
             sample_counter: 0,
             shared_font: Vec::new(),
             pl_shmem_image: Vec::new(),

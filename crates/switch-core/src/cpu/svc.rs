@@ -1101,6 +1101,71 @@ impl Cpu {
                         "audren:u" => self.audren_request(tls, handle, cmd_id)?,
                         "audren:iaudiorenderer" => self.audren_renderer_request(tls, cmd_id, handle)?,
                         "audren:iaudiodevice" => self.audio_device_request(tls, cmd_id, handle)?,
+                        // lbl, the panel backlight. One interface with no
+                        // sub-objects, and almost all of it setter/getter
+                        // pairs that have to agree with each other.
+                        "lbl" => self.lbl_request(tls, handle, cmd_id)?,
+                        // audctl, the system-wide audio settings behind the
+                        // volume buttons and the sound page of settings.
+                        "audctl" => self.audctl_request(tls, handle, cmd_id)?,
+                        // nfc:sys and the ISystem it hands out. There is no
+                        // reader attached to this console — see `nfc_request`.
+                        "nfc:sys" | "nfc:system" => self.nfc_request(tls, handle, cmd_id)?,
+                        // btm:sys, the Bluetooth manager, and the
+                        // IBtmSystemCore every one of its commands goes
+                        // through.
+                        "btm:sys" | "btm:core" => self.btm_request(tls, handle, cmd_id)?,
+                        // ldn:m and lp2p:m, the read-only views of local
+                        // wireless either side of 9.1.0, and the monitor each
+                        // creates. `ldn:u`/`ldn:s` and `lp2p:app`/`lp2p:sys`
+                        // are the *driving* interfaces, not these, and share
+                        // nothing with them.
+                        "ldn:m" | "ldn:monitor" => self.ldn_monitor_request(tls, handle, cmd_id)?,
+                        "lp2p:m" | "lp2p:monitor" => {
+                            self.lp2p_monitor_request(tls, handle, cmd_id)?
+                        }
+                        // ovln, the overlay applet's message queue: both
+                        // service ends, and the ISender / IReceiver each one
+                        // opens.
+                        "ovln:snd" | "ovln:rcv" | "ovln:sender" | "ovln:receiver" => {
+                            self.ovln_request(tls, handle, cmd_id)?
+                        }
+                        // olsc, save-data cloud backup, and the interfaces the
+                        // Home Menu walks five deep into on its way to a save.
+                        // `olsc:u` is the application-facing interface and is
+                        // a different one, so it is not listed here.
+                        "olsc:s" | "olsc:system-service" | "olsc:transfer-task-list"
+                        | "olsc:remote-storage" | "olsc:daemon"
+                        | "olsc:transfer-end-holder" | "olsc:transfer-start-holder"
+                        | "olsc:error-holder" | "olsc:stopper" => {
+                            self.olsc_request(tls, handle, cmd_id)?
+                        }
+                        // friend at all five privilege levels, and the three
+                        // interfaces its IServiceCreator hands out.
+                        "friend:u" | "friend:v" | "friend:m" | "friend:s" | "friend:a"
+                        | "friend:service" | "friend:notification"
+                        | "friend:daemon-suspend-session" => {
+                            self.friend_request(tls, handle, cmd_id)?
+                        }
+                        // news at all five, and the article store behind it.
+                        "news:a" | "news:c" | "news:m" | "news:p" | "news:v"
+                        | "news:service" | "news:arrival-event" | "news:overwrite-event"
+                        | "news:data" | "news:database" => {
+                            self.news_request(tls, handle, cmd_id)?
+                        }
+                        // bcat, the background download, and the delivery
+                        // cache it fills.
+                        "bcat:a" | "bcat:m" | "bcat:u" | "bcat:s" | "bcat:service"
+                        | "bcat:storage" | "bcat:progress" | "bcat:notifier"
+                        | "bcat:suspension" | "bcat:file" | "bcat:directory" => {
+                            self.bcat_request(tls, handle, cmd_id)?
+                        }
+                        // notif, the alarms a title schedules and the
+                        // notifications the Home Menu shows, plus the event
+                        // accessor it hands out.
+                        "notif:a" | "notif:s" | "notif:event-accessor" => {
+                            self.notif_request(tls, handle, cmd_id)?
+                        }
                          name => {
                              // Known service, no dedicated stub: answer with a
                              // sub-session and an object id, so a caller that
