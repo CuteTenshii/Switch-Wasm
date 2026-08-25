@@ -883,7 +883,7 @@ impl Cpu {
                         // The Result it carries is the only statement of *why*
                         // an applet stopped that the applet ever makes.
                         "fatal:u" | "fatal:p" => self.fatal_request(tls, cmd_id)?,
-                        "set" => self.set_request(tls, cmd_id)?,
+                        "set" => self.set_request(tls, handle, cmd_id)?,
                         "set:sys" => self.set_sys_request(tls, cmd_id)?,
                         "nvdrv" | "nvdrv:" | "nvdrv:a" | "nvdrv:a:" | "nvdrv:s" | "nvdrv:t" => {
                             self.nvdrv_request(tls, cmd_id, handle)?

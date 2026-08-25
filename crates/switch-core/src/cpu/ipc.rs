@@ -68,6 +68,10 @@ pub(super) fn preselected_user_parameter() -> Vec<u8> {
 /// rather than the smallest that would do.
 const FS_POINTER_BUFFER_SIZE: u16 = 0x8000;
 
+/// The same, for `set`. Only `GetAvailableLanguageCodes` and `GetKeyCodeMap`
+/// marshal through it, and a page holds either with room to spare.
+const SET_POINTER_BUFFER_SIZE: u16 = 0x1000;
+
 /// `nn::account::ProfileBase`: uid, last-edit timestamp, then the nickname.
 const PROFILE_BASE_LEN: usize = 0x38;
 /// `nn::account::UserData`, the block `IProfile::Get` fills in beside the base
@@ -1060,6 +1064,27 @@ impl Cpu {
                 }
                 Ok(())
             }
+            // 203 = OpenPatchDataStorageByCurrentProcess: the RomFS of the
+            // title's *update*, which is a second NCA this emulator does not
+            // have — it boots the base Program NCA and nothing beside it.
+            // Saying so is the whole implementation, but it has to be said in
+            // the one shape the caller recognises. `nn::fs::QueryMountRomCacheSize`
+            // opens the base storage (200) and then this one, and treats only
+            // fs's 2002-1001 and 2002-1002 (`TargetNotFound`) as "there is no
+            // patch, use the base alone"; every other Result — a success most
+            // of all — it acts on.
+            //
+            // Which is how the catch-all below stopped Just Dance 2017 dead.
+            // A bare success carries no out-object, so `nnSdk`'s
+            // `SharedPointer<IStorage>` stayed null; the SDK wrapped the null
+            // in a `StorageServiceObjectAdapter` regardless, and the first
+            // `Read` through it loaded a vtable from address 0 and branched
+            // there. The fault it produced named `pc=0` and nothing else,
+            // 190 million instructions after the request that caused it.
+            Some(203) => {
+                const TARGET_NOT_FOUND: u32 = 2 | (1002 << 9);
+                self.write_ipc_response(tls, TARGET_NOT_FOUND, &[], &[], &[])
+            }
             // 51 = OpenSaveDataFileSystem, 52 = ...BySystemSaveDataId,
             // 53 = OpenReadOnlySaveDataFileSystem; 22 and 23 are the two
             // Create forms. All of them address the NAND, which this console
@@ -1100,7 +1125,16 @@ impl Cpu {
                 self.reply_with_interface(tls, handle, "fsp-srv-save-info-reader")?;
                 Ok(())
             }
-            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // Still a fabricated success — homebrew that only checks the
+            // Result depends on it — but no longer a silent one. Every
+            // command that reaches here is one whose out-object, out-handle
+            // or out-value the caller is about to read as zero, and the line
+            // this prints is the only warning it will get before that zero
+            // surfaces somewhere else entirely.
+            _ => {
+                self.warn_no_implementation("fsp-srv", cmd_id);
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
         }
     }
 
@@ -1548,7 +1582,33 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
-    pub(super) fn set_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn set_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        const CONVERT_TO_DOMAIN: u32 = 0;
+        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
+        // The control interface every session carries, which has to be
+        // answered before the service's own table is consulted — and `set`
+        // is the case that shows why. It has a command **3** of its own,
+        // `GetAvailableLanguageCodeCount`, so without this the two collided:
+        // `nnSdk` opened the session, asked how large a pointer buffer it may
+        // send through, and was told 18 — the number of language codes this
+        // console has. It will not marshal a command whose buffer does not
+        // fit, so Just Dance 2017 closed the session again without ever
+        // sending a settings command and aborted inside
+        // `nn::settings::LanguageCode::Make`, 660 million instructions in.
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(CONVERT_TO_DOMAIN) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "set");
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                Some(QUERY_POINTER_BUFFER_SIZE) => {
+                    let size = SET_POINTER_BUFFER_SIZE.to_le_bytes();
+                    self.write_ipc_response(tls, 0, &[], &size, &[])
+                }
+                _ => self.unimplemented_command(tls, "set:control", cmd_id),
+            };
+        }
         // Language codes in `SetLanguage` order, as NUL-padded ASCII in a u64.
         const LANGUAGE_CODES: [&str; 18] = [
             "ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW",
@@ -1556,6 +1616,12 @@ impl Cpu {
         ];
         // The language the emulated console is set to (`SetLanguage_ENUS`).
         const SYSTEM_LANGUAGE: usize = 1;
+        // How many of those the pre-4.0.0 pair of commands reports. The five
+        // codes 4.0.0 added — and `pt-BR`, which came later still — are ones a
+        // title built before them has no `SetLanguage` value for, so the old
+        // API keeps reporting the twelve it was compiled against and only the
+        // 4.0.0 pair reports the lot. A console does the same.
+        const LEGACY_LANGUAGE_CODES: usize = 12;
 
         let code = |index: usize| -> u64 {
             let mut packed = [0u8; 8];
@@ -1579,22 +1645,44 @@ impl Cpu {
                 let index = (language as usize).min(LANGUAGE_CODES.len() - 1);
                 self.write_ipc_response(tls, 0, &[], &code(index).to_le_bytes(), &[])
             }
-            // GetAvailableLanguageCodes: fill the out buffer with the codes and
-            // return how many were written.
-            Some(5) => {
-                let (_, recv) = self.ipc_map_buffers(tls);
+            // GetAvailableLanguageCodes (1 = pre-4.0.0) and
+            // GetAvailableLanguageCodes2 (5 = current): fill the out buffer
+            // with the codes and return how many were written. The only
+            // difference between them is how the buffer arrives — 1 offers a
+            // receive-static ("pointer") one, 5 a map-alias one, and
+            // `ipc_output_buffer` takes either.
+            //
+            // 1 was left to the catch-all, which answers with success and no
+            // data at all: `nn::settings::LanguageCode::Make` read the count
+            // back as zero, found no code for the language it had been asked
+            // for, and aborted. That is where Just Dance 2017 stopped once it
+            // had a RomFS to read — it is a pre-4.0.0 title, and 1 is the only
+            // one of the two it knows.
+            Some(1) | Some(5) => {
+                let available = match cmd_id {
+                    Some(1) => LEGACY_LANGUAGE_CODES,
+                    _ => LANGUAGE_CODES.len(),
+                };
                 let mut written = 0usize;
-                if let Some(&(addr, size)) = recv.first() {
-                    written = (size as usize / 8).min(LANGUAGE_CODES.len());
-                    for index in 0..written {
-                        self.mem.write_u64(addr.wrapping_add((index * 8) as u32), code(index))?;
+                if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
+                    if addr != 0 {
+                        written = (size as usize / 8).min(available);
+                        for index in 0..written {
+                            self.mem.write_u64(addr.wrapping_add((index * 8) as u32), code(index))?;
+                        }
                     }
                 }
                 self.write_ipc_response(tls, 0, &[], &(written as u32).to_le_bytes(), &[])
             }
-            // GetAvailableLanguageCodeCount (3 = pre-4.0.0, 6 = current).
+            // GetAvailableLanguageCodeCount (3 = pre-4.0.0, 6 = current). Each
+            // has to agree with the command that fills the buffer beside it: a
+            // count larger than what `GetAvailableLanguageCodes` writes is a
+            // caller indexing past the codes it was given.
             Some(3) | Some(6) => {
-                let total = LANGUAGE_CODES.len() as u32;
+                let total = match cmd_id {
+                    Some(3) => LEGACY_LANGUAGE_CODES,
+                    _ => LANGUAGE_CODES.len(),
+                } as u32;
                 self.write_ipc_response(tls, 0, &[], &total.to_le_bytes(), &[])
             }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -9885,8 +9973,44 @@ mod tests {
     #[test]
     fn set_get_region_code_reports_usa() {
         let mut cpu = request(false, 4, &[]);
-        cpu.set_request(TLS, Some(4)).unwrap();
+        cpu.register_service_handle(9, "set");
+        cpu.set_request(TLS, 9, Some(4)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "SetRegion_USA");
+    }
+
+    #[test]
+    fn set_writes_the_language_codes_into_a_pointer_buffer() {
+        // `GetAvailableLanguageCodes`, the pre-4.0.0 form: the codes come back
+        // through a receive-static buffer rather than a map-alias one, and the
+        // count beside them is what a caller indexes with. Answered with no
+        // data at all, the count read as zero and `nn::settings::LanguageCode::
+        // Make` aborted rather than return a code it had not been given.
+        const BUFFER: u32 = 0x4000;
+        let mut cpu = request_with_recv_static(1, &[], BUFFER, 0x80);
+        cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+        cpu.register_service_handle(9, "set");
+        cpu.set_request(TLS, 9, Some(1)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 12, "the pre-4.0.0 count");
+        assert_eq!(&cpu.read_bytes(BUFFER, 2), b"ja");
+        assert_eq!(&cpu.read_bytes(BUFFER + 8, 5), b"en-US");
+        // And nothing past the twelve it reported: a title from before 4.0.0
+        // has no `SetLanguage` value for `zh-Hans`.
+        assert_eq!(cpu.read_bytes(BUFFER + 12 * 8, 8), vec![0u8; 8]);
+    }
+
+    #[test]
+    fn set_answers_the_pointer_buffer_size_and_not_its_language_count() {
+        // Control command 3 is `QueryPointerBufferSize`; `set`'s own command 3
+        // is `GetAvailableLanguageCodeCount`. Answering the first with the
+        // second told `nnSdk` a session would take 18 bytes, which is smaller
+        // than anything `nn::settings` sends, so it stopped before sending.
+        let mut cpu = control_request(3);
+        cpu.register_service_handle(9, "set");
+        cpu.set_request(TLS, 9, Some(3)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u16(TLS + 0x20).unwrap(), super::SET_POINTER_BUFFER_SIZE);
+        assert_ne!(cpu.mem.read_u16(TLS + 0x20).unwrap(), 18, "the language-code count");
     }
 
     #[test]
