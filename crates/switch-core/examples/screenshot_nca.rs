@@ -166,7 +166,40 @@ fn main() {
     let mut traps = 0u32;
     let mut done = 0u64;
     let budget: u64 = env::var("STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(40_000_000_000);
+    // Every hook below looks at the machine between two instructions, which
+    // `Cpu::step` is the only way to get. `step` is also the interpreter:
+    // `Cpu::run` is what reaches the block translator, and that is 1.8x the
+    // rate on real code. So a run with no hooks armed is driven in slices
+    // instead — the same engine the frontend uses.
+    let instrumented = trap.is_some()
+        || read_trap.is_some()
+        || !watch_pc.is_empty()
+        || poke.is_some()
+        || start_threads.is_some()
+        || wake_every > 0
+        || cover.is_some()
+        || gate_sniff
+        || stacks;
+    // Short enough that the per-thread sampling below keeps the resolution it
+    // had when it ran every 4096 instructions.
+    const SLICE: u64 = 4096;
     while !cpu.halted && cpu.nv.gpu.frames < want && done < budget {
+        if !instrumented {
+            match cpu.run(SLICE.min(budget - done)) {
+                Ok(report) if report.steps == 0 => break,
+                Ok(report) => done += report.steps,
+                Err(e) => {
+                    println!("[step] error at pc={:#x} step {done}: {e:?}", cpu.get_pc());
+                    break;
+                }
+            }
+            let t = cpu.current_thread_index();
+            if t < share.len() {
+                share[t] += 1;
+            }
+            *hot.entry((t, cpu.get_pc())).or_insert(0u64) += 1;
+            continue;
+        }
         if let Some(at) = cpu.mem.take_watch_hit() {
             let v = cpu.mem.read_u32(at & !3).unwrap_or(0);
             if traps < 24 && (v != 0 || trap_zero) {

@@ -23,13 +23,21 @@ fn main() {
     }
     cpu.boot_homebrew(&data).expect("boot");
 
+    // Driven in slices rather than one instruction at a time: `Cpu::step` is
+    // the interpreter, and only `Cpu::run` reaches the block translator. That
+    // is 1.8x the rate on real homebrew, and it is what the frontend gets, so
+    // measuring anything here through `step` measures the wrong engine.
+    const SLICE: u64 = 1 << 20;
     let mut steps = 0u64;
     while !cpu.halted && cpu.nv.gpu.frames < want && steps < 200_000_000 {
-        if let Err(e) = cpu.step() {
-            println!("FAULT at {steps}: {e}");
-            break;
+        match cpu.run(SLICE) {
+            Ok(report) if report.steps == 0 => break,
+            Ok(report) => steps += report.steps,
+            Err(e) => {
+                println!("FAULT at {steps}: {e}");
+                break;
+            }
         }
-        steps += 1;
     }
     let fb = &cpu.nv.gpu.framebuffer;
     println!(

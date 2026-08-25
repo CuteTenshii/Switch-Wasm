@@ -20,6 +20,7 @@ use crate::gpu::exec::ExecCtx;
 use crate::gpu::bcn::{self, Codec};
 use crate::gpu::surface::{self, bilinear, ColorFormat, Layout};
 use crate::{Error, Result};
+use std::cell::RefCell;
 
 /// What nouveau programs `TexCbIndex` to: bank 15, the buffer it reserves
 /// for driver constants on every shader stage. Only a default for test
@@ -152,7 +153,14 @@ pub struct Texture {
 
 impl Texture {
     /// Fetch and decode one texel, clamped to the texture's extent.
-    pub fn texel(&self, x: u32, y: u32, layer: u32, ctx: &ExecCtx) -> Result<[f32; 4]> {
+    pub fn texel(
+        &self,
+        x: u32,
+        y: u32,
+        layer: u32,
+        ctx: &ExecCtx,
+        blocks: &RefCell<BlockCache>,
+    ) -> Result<[f32; 4]> {
         let x = x.min(self.width.saturating_sub(1));
         let y = y.min(self.height.saturating_sub(1));
         // The layer is not part of the swizzle: an array's slices sit back to
@@ -183,10 +191,26 @@ impl Texture {
                 };
                 let va = layer_base
                     + self.layout.offset((x / block_w) * bytes, y / block_h, width_bytes) as u64;
-                let raw = ctx.read_pixel(va, bytes)?.to_le_bytes();
-                let mut block = [[0.0f32; 4]; bcn::MAX_TEXELS];
-                bcn::decode_into(codec, &raw[..bytes as usize], &mut block)?;
-                block[((y % block_h) * block_w + (x % block_w)) as usize]
+                let index = ((y % block_h) * block_w + (x % block_w)) as usize;
+                // Decoding a block yields every texel in it, and the next
+                // fetch almost always wants one of them: bilinear asks for
+                // four texels that are usually two or three of the same block,
+                // and the pixel to the right asks for that block again.
+                // Bound to a local first: the `Ref` a `borrow()` in a match
+                // scrutinee produces lives until the end of the whole match,
+                // which would still be held when the miss arm borrows mutably.
+                let cached = blocks.borrow().get(va).map(|block| block[index]);
+                match cached {
+                    Some(texel) => texel,
+                    None => {
+                        let raw = ctx.read_pixel(va, bytes)?.to_le_bytes();
+                        let mut block = [[0.0f32; 4]; bcn::MAX_TEXELS];
+                        bcn::decode_into(codec, &raw[..bytes as usize], &mut block)?;
+                        let texel = block[index];
+                        blocks.borrow_mut().insert(va, block);
+                        texel
+                    }
+                }
             }
         };
         if self.srgb {
@@ -198,12 +222,77 @@ impl Texture {
         Ok(texel)
     }
 
-    pub fn sample_point(&self, u: f64, v: f64, layer: u32, ctx: &ExecCtx) -> Result<[f32; 4]> {
-        self.texel(u.max(0.0) as u32, v.max(0.0) as u32, layer, ctx)
+    /// [`Texture::texel`] with a cache of its own, for tests that fetch a
+    /// handful of texels and do not care about reuse between them.
+    #[cfg(test)]
+    pub fn texel_cached(&self, x: u32, y: u32, layer: u32, ctx: &ExecCtx) -> Result<[f32; 4]> {
+        self.texel(x, y, layer, ctx, &RefCell::new(BlockCache::default()))
     }
 
-    pub fn sample_bilinear(&self, u: f64, v: f64, layer: u32, ctx: &ExecCtx) -> Result<[f32; 4]> {
-        bilinear(u, v, |x, y| self.texel(x, y, layer, ctx))
+    pub fn sample_point(
+        &self,
+        u: f64,
+        v: f64,
+        layer: u32,
+        ctx: &ExecCtx,
+        blocks: &RefCell<BlockCache>,
+    ) -> Result<[f32; 4]> {
+        self.texel(u.max(0.0) as u32, v.max(0.0) as u32, layer, ctx, blocks)
+    }
+
+    pub fn sample_bilinear(
+        &self,
+        u: f64,
+        v: f64,
+        layer: u32,
+        ctx: &ExecCtx,
+        blocks: &RefCell<BlockCache>,
+    ) -> Result<[f32; 4]> {
+        bilinear(u, v, |x, y| self.texel(x, y, layer, ctx, blocks))
+    }
+}
+
+/// How many decoded blocks [`BlockCache`] keeps.
+const BLOCK_CACHE_WAYS: usize = 4;
+
+/// The most recently decoded compressed blocks, keyed by the address each came
+/// from.
+///
+/// A block-compressed texel is not stored on its own: fetching one decodes the
+/// whole 4x4 block — up to 12x12 for ASTC — that it sits in, and throws the
+/// other 15 (or 143) away. Doing that per fetch was 7% of the Home Menu's
+/// frame in ASTC decoding alone, on top of what it cost inside `texel`.
+///
+/// Four ways, because bilinear filtering straddling a block corner touches
+/// four of them at once. Replacement is round-robin: a texture is walked in
+/// scanline order, so the oldest entry is reliably the one furthest from where
+/// sampling is now.
+pub struct BlockCache {
+    va: [Option<u64>; BLOCK_CACHE_WAYS],
+    texels: Box<[[[f32; 4]; bcn::MAX_TEXELS]; BLOCK_CACHE_WAYS]>,
+    next: usize,
+}
+
+impl Default for BlockCache {
+    fn default() -> BlockCache {
+        BlockCache {
+            va: [None; BLOCK_CACHE_WAYS],
+            texels: Box::new([[[0.0; 4]; bcn::MAX_TEXELS]; BLOCK_CACHE_WAYS]),
+            next: 0,
+        }
+    }
+}
+
+impl BlockCache {
+    fn get(&self, va: u64) -> Option<&[[f32; 4]; bcn::MAX_TEXELS]> {
+        let way = self.va.iter().position(|held| *held == Some(va))?;
+        Some(&self.texels[way])
+    }
+
+    fn insert(&mut self, va: u64, block: [[f32; 4]; bcn::MAX_TEXELS]) {
+        self.va[self.next] = Some(va);
+        self.texels[self.next] = block;
+        self.next = (self.next + 1) % BLOCK_CACHE_WAYS;
     }
 }
 
@@ -408,12 +497,19 @@ pub fn sample(
     layer: u32,
 ) -> Result<[f32; 4]> {
     let descriptors = read_descriptors(ctx, tex_header_pool, tex_sampler_pool, handle)?;
-    sample_with(ctx, &descriptors, u, v, layer)
+    sample_with(ctx, &descriptors, u, v, layer, &RefCell::new(BlockCache::default()))
 }
 
 /// Sample already-resolved descriptors at normalized coordinates `(u, v)` of
 /// array layer `layer`, which is 0 for everything that is not an array.
-pub fn sample_with(ctx: &ExecCtx, d: &Descriptors, u: f64, v: f64, layer: u32) -> Result<[f32; 4]> {
+pub fn sample_with(
+    ctx: &ExecCtx,
+    d: &Descriptors,
+    u: f64,
+    v: f64,
+    layer: u32,
+    blocks: &RefCell<BlockCache>,
+) -> Result<[f32; 4]> {
     let (texture, sampler) = (&d.texture, d.sampler);
     let image = texture;
 
@@ -441,9 +537,9 @@ pub fn sample_with(ctx: &ExecCtx, d: &Descriptors, u: f64, v: f64, layer: u32) -
     // Filtering happens before the swizzle, which is free to do: selecting a
     // component commutes with interpolating each one.
     let texel = if sampler.mag_linear {
-        image.sample_bilinear(px, py, layer, ctx)?
+        image.sample_bilinear(px, py, layer, ctx, blocks)?
     } else {
-        image.sample_point(px, py, layer, ctx)?
+        image.sample_point(px, py, layer, ctx, blocks)?
     };
     Ok(apply_swizzle(texture.swizzle, texel))
 }
@@ -572,13 +668,13 @@ mod tests {
         assert_eq!(texture.width, 16);
 
         // Every texel of a block reads as that block's colour.
-        assert_eq!(texture.texel(0, 0, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(texture.texel(3, 3, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(texture.texel(4, 0, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0]);
-        assert_eq!(texture.texel(8, 2, 0, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
-        assert_eq!(texture.texel(15, 3, 0, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(texture.texel_cached(0, 0, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texture.texel_cached(3, 3, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texture.texel_cached(4, 0, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(texture.texel_cached(8, 2, 0, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(texture.texel_cached(15, 3, 0, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
         // The next block *row* is one pitch on, not one block on.
-        assert_eq!(texture.texel(0, 4, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(texture.texel_cached(0, 4, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0]);
     }
 
     /// The same, swizzled: the block-linear stride of a compressed surface is
@@ -607,9 +703,9 @@ mod tests {
             ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
         let texture = read_image(&ctx, tic_addr).unwrap();
         assert_eq!(texture.layout, Layout::BlockLinear { block_height_gobs: 1 });
-        assert_eq!(texture.texel(1, 1, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(texture.texel(13, 2, 0, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
-        assert_eq!(texture.texel(2, 5, 0, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(texture.texel_cached(1, 1, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texture.texel_cached(13, 2, 0, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(texture.texel_cached(2, 5, 0, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
     }
 
     /// An sRGB texture stores encoded values and hands the shader linear ones.
@@ -651,13 +747,13 @@ mod tests {
         let texture = read_image(&ctx, tic_addr).unwrap();
         assert_eq!(texture.kind, TexelKind::Block(Codec::Astc { width: 8, height: 5 }));
 
-        assert_eq!(texture.texel(0, 0, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(texture.texel(7, 4, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0], "last texel of it");
-        assert_eq!(texture.texel(8, 0, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0], "next block across");
+        assert_eq!(texture.texel_cached(0, 0, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(texture.texel_cached(7, 4, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0], "last texel of it");
+        assert_eq!(texture.texel_cached(8, 0, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0], "next block across");
         // Row 5 is the second block row, which it would not be for a 5-tall
         // footprint read as 8 tall.
-        assert_eq!(texture.texel(0, 5, 0, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
-        assert_eq!(texture.texel(15, 9, 0, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(texture.texel_cached(0, 5, 0, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(texture.texel_cached(15, 9, 0, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
     }
 
     #[test]
@@ -675,7 +771,7 @@ mod tests {
             ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
         let linear = read_image(&ctx, tic_addr).unwrap();
         assert!(!linear.srgb);
-        let plain = linear.texel(0, 0, 0, &ctx).unwrap()[0];
+        let plain = linear.texel_cached(0, 0, 0, &ctx).unwrap()[0];
 
         // Set the sRGB bit and read the same bytes again.
         vmm.write_u32(&mut mem, tic_addr + 16, 15 | TYPE_2D | (1 << 22)).unwrap();
@@ -683,7 +779,7 @@ mod tests {
             ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
         let encoded = read_image(&ctx, tic_addr).unwrap();
         assert!(encoded.srgb);
-        let converted = encoded.texel(0, 0, 0, &ctx).unwrap();
+        let converted = encoded.texel_cached(0, 0, 0, &ctx).unwrap();
         assert!(converted[0] < plain, "sRGB decoding darkens a mid grey");
         // 565's mid grey expands to 132/255 = 0.5176, whose linear value is
         // ((0.5176 + 0.055) / 1.055) ^ 2.4.

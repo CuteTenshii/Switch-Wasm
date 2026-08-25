@@ -882,8 +882,14 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let mut cache: std::collections::HashMap<u32, ShadedVertex> = std::collections::HashMap::new();
     // One fragment invocation for the whole draw, reset per pixel.
     let mut fragment = Invocation::new();
-    // Parsed TIC/TSC pairs, shared by every fragment of this draw.
+    // Parsed TIC/TSC pairs, and the compressed blocks they decode to, shared
+    // by every fragment of this draw.
     let descriptors = std::cell::RefCell::new(std::collections::HashMap::new());
+    let blocks = std::cell::RefCell::new(crate::gpu::texture::BlockCache::default());
+    // A constant buffer cannot change while a draw runs, so each stage reads
+    // every constant it uses from memory once rather than once per invocation.
+    let vs_const_cache = std::cell::RefCell::new(crate::gpu::shader::interp::ConstCache::default());
+    let fs_const_cache = std::cell::RefCell::new(crate::gpu::shader::interp::ConstCache::default());
 
     for tri in triangles {
         let mut shaded: Vec<ShadedVertex> = Vec::with_capacity(3);
@@ -900,6 +906,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             let vs_consts = MemoryConstants {
                 ctx: &*ctx,
                 bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::VertexB, bank as u32),
+                cache: &vs_const_cache,
             };
             let v = shade_vertex(
                 &vs_program,
@@ -987,12 +994,14 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         let fs_consts = MemoryConstants {
                             ctx: &*ctx,
                             bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::Fragment, bank as u32),
+                            cache: &fs_const_cache,
                         };
                         let fs_textures = MemoryTextures {
                             ctx: &*ctx,
                             tex_header_pool: engine.tex_header_pool(),
                             tex_sampler_pool: engine.tex_sampler_pool(),
                             descriptors: &descriptors,
+                            blocks: &blocks,
                         };
                         let fs_global = MemoryGlobal { ctx: &*ctx };
                         let mut env =

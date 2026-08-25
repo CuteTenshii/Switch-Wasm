@@ -52,10 +52,58 @@ impl ConstantSource for HashMap<(u8, u16), f32> {
 pub struct MemoryConstants<'a, 'b> {
     pub ctx: &'a ExecCtx<'b>,
     pub bindings: &'a dyn Fn(u8) -> Option<(u64, u32)>,
+    /// Values already read, shared across the draw — see [`ConstCache`].
+    pub cache: &'a std::cell::RefCell<ConstCache>,
+}
+
+/// How many distinct constants [`ConstCache`] holds. Direct-mapped, so this is
+/// a power of two and the index is the low bits of the key.
+const CONST_CACHE_SLOTS: usize = 512;
+
+/// The constants a draw has already read.
+///
+/// A constant buffer cannot change while a draw is running — the GPU processes
+/// methods in order, and a draw is one method — so every pixel of a draw reads
+/// the same handful of values out of the same buffers, and each read otherwise
+/// costs a bank lookup, a bounds check, a GPU address translation and a guest
+/// memory access. Shading a full-screen quad paid that 921 600 times per
+/// constant.
+pub struct ConstCache {
+    /// `(key, value)`, where the key packs bank and offset. `u32::MAX` is
+    /// empty: a real key is at most `31 << 16 | 0xffff`.
+    slots: Box<[(u32, u32); CONST_CACHE_SLOTS]>,
+}
+
+impl Default for ConstCache {
+    fn default() -> ConstCache {
+        ConstCache { slots: Box::new([(u32::MAX, 0); CONST_CACHE_SLOTS]) }
+    }
+}
+
+impl ConstCache {
+    #[inline]
+    fn key(bank: u8, offset: u16) -> u32 {
+        (bank as u32) << 16 | offset as u32
+    }
+
+    #[inline]
+    fn get(&self, key: u32) -> Option<u32> {
+        let slot = self.slots[key as usize % CONST_CACHE_SLOTS];
+        (slot.0 == key).then_some(slot.1)
+    }
+
+    #[inline]
+    fn insert(&mut self, key: u32, value: u32) {
+        self.slots[key as usize % CONST_CACHE_SLOTS] = (key, value);
+    }
 }
 
 impl ConstantSource for MemoryConstants<'_, '_> {
     fn read_const(&self, bank: u8, offset: u16) -> Result<u32> {
+        let key = ConstCache::key(bank, offset);
+        if let Some(value) = self.cache.borrow().get(key) {
+            return Ok(value);
+        }
         let (addr, size) = (self.bindings)(bank).ok_or_else(|| {
             Error::Gpu(format!("shader: read from unbound constant bank {bank}"))
         })?;
@@ -64,7 +112,9 @@ impl ConstantSource for MemoryConstants<'_, '_> {
                 "shader: constant read c{bank}[{offset:#x}] is past the bound buffer's size {size:#x}"
             )));
         }
-        self.ctx.read_u32(addr + offset as u64)
+        let value = self.ctx.read_u32(addr + offset as u64)?;
+        self.cache.borrow_mut().insert(key, value);
+        Ok(value)
     }
 }
 
@@ -122,6 +172,9 @@ pub struct MemoryTextures<'a, 'b> {
     /// struct can still be rebuilt per fragment — it borrows `ctx`, which
     /// the pixel loop needs mutably between shading calls.
     pub descriptors: &'a std::cell::RefCell<HashMap<u32, crate::gpu::texture::Descriptors>>,
+    /// Decoded compressed blocks, shared by every fragment of the draw for the
+    /// same reason `descriptors` is.
+    pub blocks: &'a std::cell::RefCell<crate::gpu::texture::BlockCache>,
 }
 
 impl TextureSource for MemoryTextures<'_, '_> {
@@ -140,7 +193,14 @@ impl TextureSource for MemoryTextures<'_, '_> {
                 d
             }
         };
-        crate::gpu::texture::sample_with(self.ctx, &descriptors, u as f64, v as f64, layer)
+        crate::gpu::texture::sample_with(
+            self.ctx,
+            &descriptors,
+            u as f64,
+            v as f64,
+            layer,
+            self.blocks,
+        )
     }
 }
 
@@ -1802,7 +1862,8 @@ mod tests {
         let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
 
         let bindings = |bank: u8| if bank == 2 { Some((gpu_va, 0x1000)) } else { None };
-        let source = MemoryConstants { ctx: &ctx, bindings: &bindings };
+        let cache = std::cell::RefCell::new(ConstCache::default());
+        let source = MemoryConstants { ctx: &ctx, bindings: &bindings, cache: &cache };
 
         assert_eq!(f32::from_bits(source.read_const(2, 0x10).unwrap()), 42.5);
         assert!(source.read_const(3, 0x10).is_err()); // unbound bank

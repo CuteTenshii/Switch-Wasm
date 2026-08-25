@@ -71,6 +71,9 @@ struct Reservation {
     page_size: u64,
 }
 
+/// How many mappings [`AddressSpace::translate`] remembers.
+const TRANSLATION_WAYS: usize = 8;
+
 /// One GPU address space (one `/dev/nvhost-as-gpu` fd).
 #[derive(Debug)]
 pub struct AddressSpace {
@@ -82,11 +85,20 @@ pub struct AddressSpace {
     next_small: u64,
     /// Bump pointer for un-fixed big-page allocations.
     next_big: u64,
-    /// The mapping the last translation resolved to, as
-    /// `(gpu_va, cpu_addr, size)`. Engines walk a surface address by address, so
-    /// one entry catches nearly every lookup; without it a blit pays a
-    /// `BTreeMap` search for every pixel it touches.
-    last_translation: Cell<Option<(u64, u32, u64)>>,
+    /// The mappings recent translations resolved to, as
+    /// `(gpu_va, cpu_addr, size)`. Engines walk a surface address by address,
+    /// so without this a blit pays a `BTreeMap` search for every pixel it
+    /// touches.
+    ///
+    /// Several entries rather than one, because a shaded pixel does not stay
+    /// in a single mapping: it reads two or three constant buffers, samples a
+    /// texture and reads and writes the render target, each of which is its
+    /// own. A one-entry cache is evicted by every one of those in turn and
+    /// hits almost never — the `BTreeMap` search was still 5% of the Home
+    /// Menu's frame with it in place.
+    recent_translations: [Cell<Option<(u64, u32, u64)>>; TRANSLATION_WAYS],
+    /// Round-robin replacement cursor for `recent_translations`.
+    next_translation: Cell<usize>,
 }
 
 impl Default for AddressSpace {
@@ -101,7 +113,8 @@ impl AddressSpace {
             big_page_size: BIG_PAGE_SIZE,
             mappings: BTreeMap::new(),
             reservations: BTreeMap::new(),
-            last_translation: Cell::new(None),
+            recent_translations: [const { Cell::new(None) }; TRANSLATION_WAYS],
+            next_translation: Cell::new(0),
             next_small: SMALL_REGION_BASE,
             next_big: SMALL_REGION_END,
         }
@@ -149,7 +162,7 @@ impl AddressSpace {
             .collect();
         for key in doomed {
             self.mappings.remove(&key);
-            self.last_translation.set(None);
+            self.forget_translations();
         }
         Ok(())
     }
@@ -178,7 +191,7 @@ impl AddressSpace {
         };
         self.mappings
             .insert(gpu_va, Mapping { gpu_va, size, cpu_addr, handle, kind });
-        self.last_translation.set(None);
+        self.forget_translations();
         Ok(gpu_va)
     }
 
@@ -231,14 +244,14 @@ impl AddressSpace {
         if end < covering_end {
             self.mappings.insert(end, piece(end, covering_end - end, covering.kind));
         }
-        self.last_translation.set(None);
+        self.forget_translations();
         true
     }
 
     /// Drop the mapping that starts at `gpu_va` (`UNMAP_BUFFER`).
     pub fn unmap(&mut self, gpu_va: u64) -> Result<()> {
         self.mappings.remove(&gpu_va);
-        self.last_translation.set(None);
+        self.forget_translations();
         Ok(())
     }
 
@@ -276,7 +289,7 @@ impl AddressSpace {
                 self.mappings.insert(end, piece(end, mapping_end - end));
             }
         }
-        self.last_translation.set(None);
+        self.forget_translations();
     }
 
     /// Allocate `size` bytes of VA from the region that matches `page_size`,
@@ -305,20 +318,31 @@ impl AddressSpace {
     /// Translate a GPU VA to `(cpu_addr, bytes_left_in_mapping)`.
     #[inline]
     pub fn translate(&self, gpu_va: u64) -> Option<(u32, u64)> {
-        if let Some((base, cpu_addr, size)) = self.last_translation.get() {
-            let off = gpu_va.wrapping_sub(base);
-            if off < size {
-                return Some((cpu_addr.wrapping_add(off as u32), size - off));
+        for slot in &self.recent_translations {
+            if let Some((base, cpu_addr, size)) = slot.get() {
+                let off = gpu_va.wrapping_sub(base);
+                if off < size {
+                    return Some((cpu_addr.wrapping_add(off as u32), size - off));
+                }
             }
         }
         let (_, m) = self.mappings.range(..=gpu_va).next_back()?;
         if !m.contains(gpu_va) {
             return None;
         }
-        self.last_translation
-            .set(Some((m.gpu_va, m.cpu_addr, m.size)));
+        let way = self.next_translation.get();
+        self.recent_translations[way].set(Some((m.gpu_va, m.cpu_addr, m.size)));
+        self.next_translation.set((way + 1) % TRANSLATION_WAYS);
         let off = gpu_va - m.gpu_va;
         Some((m.cpu_addr.wrapping_add(off as u32), m.size - off))
+    }
+
+    /// Drop every cached translation. Called whenever a mapping changes, since
+    /// a cached entry outliving its mapping would hand out a stale address.
+    fn forget_translations(&self) {
+        for slot in &self.recent_translations {
+            slot.set(None);
+        }
     }
 
     /// The mapping covering `gpu_va`, if any.

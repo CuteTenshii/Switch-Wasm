@@ -10,7 +10,6 @@ use crate::gpu::macro_engine::{MacroEngine, MacroHost, MacroWrite, MACRO_METHODS
 use crate::gpu::raster;
 use crate::gpu::surface::{ColorFormat, Layout, SampleGrid, MAX_SAMPLES};
 use crate::{Error, Result};
-use std::collections::HashMap;
 
 // Registers with behaviour attached. Everything else is plain state.
 const MME_INSTRUCTION_RAM_POINTER: u32 = 0x045;
@@ -146,8 +145,13 @@ const MULTISAMPLE_MODE: u32 = 0x574;
 // `VertexB` split, which share a slot (see `ShaderStage::bind_slot`).
 const BIND: u32 = 0x900;
 const BIND_STRIDE: u32 = 0x8;
-const BIND_LAST: u32 = BIND + 5 * BIND_STRIDE - 1;
+/// How many stages have a `Bind` block of their own.
+const BIND_SLOTS: usize = 5;
+const BIND_LAST: u32 = BIND + BIND_SLOTS as u32 * BIND_STRIDE - 1;
 const BIND_CONSTBUF_OFFSET: u32 = 0x4;
+/// `Bind.ConstantBuffer.Index` is five bits wide, so a stage has this many
+/// constant banks.
+const CONSTBUF_BANKS: usize = 32;
 
 /// Which pipeline stage a `SetProgram`/`Bind` entry configures. Numbering
 /// matches `SetProgram[i].Config.StageId`.
@@ -345,7 +349,16 @@ pub struct Engine3D {
     /// each valid `Bind[slot].Constbuf` write — see the constant `BIND`'s
     /// doc comment for why this needs to be its own table rather than a
     /// plain register read.
-    bound_constbufs: HashMap<(u32, u32), (u64, u32)>,
+    /// Where each stage's constant banks are bound, indexed by bind slot and
+    /// bank rather than hashed.
+    ///
+    /// This was a `HashMap<(u32, u32), _>`, which meant a SipHash of the key
+    /// for *every constant a shader reads* — one per instruction with a `c[]`
+    /// operand, once per covered pixel. Hashing was 10% of the Home Menu's
+    /// whole frame time. Both indices are small and bounded by the register
+    /// layout, so an array is both faster and a better description of what the
+    /// hardware has.
+    bound_constbufs: [[Option<(u64, u32)>; CONSTBUF_BANKS]; BIND_SLOTS],
 }
 
 impl Default for Engine3D {
@@ -364,7 +377,7 @@ impl Engine3D {
             inline: crate::gpu::engine::inline::EngineInline::new(),
             last_draw: DrawCall::default(),
             constbuf_cursor: 0,
-            bound_constbufs: HashMap::new(),
+            bound_constbufs: [[None; CONSTBUF_BANKS]; BIND_SLOTS],
         }
     }
 
@@ -540,13 +553,18 @@ impl Engine3D {
         }
         let valid = field(arg, 0, 0) != 0;
         let index = field(arg, 4, 8);
-        if valid {
+        let Some(entry) = self
+            .bound_constbufs
+            .get_mut(slot as usize)
+            .and_then(|banks| banks.get_mut(index as usize))
+        else {
+            return;
+        };
+        *entry = valid.then(|| {
             let addr = self.regs.iova(CONSTBUF_SELECTOR_ADDR);
             let size = self.regs.field(CONSTBUF_SELECTOR_SIZE, 0, 16);
-            self.bound_constbufs.insert((slot, index), (addr, size));
-        } else {
-            self.bound_constbufs.remove(&(slot, index));
-        }
+            (addr, size)
+        });
     }
 
     fn draw_arrays(&mut self, count: u32, ctx: &mut ExecCtx) -> Result<()> {
@@ -716,7 +734,10 @@ impl Engine3D {
     /// The `(addr, size)` of the constant buffer bound to `stage`'s hardware
     /// bank `bank` — see `BIND`'s doc comment.
     pub fn bound_constbuf(&self, stage: ShaderStage, bank: u32) -> Option<(u64, u32)> {
-        self.bound_constbufs.get(&(stage.bind_slot(), bank)).copied()
+        *self
+            .bound_constbufs
+            .get(stage.bind_slot() as usize)?
+            .get(bank as usize)?
     }
 
     /// Resolve `IndependentBlend[index]` plus its `ColorBlendEnable[index]`
