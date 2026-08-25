@@ -79,6 +79,10 @@ fn add_round_key(state: &mut [u8; 16], round_key: &[u8]) {
     }
 }
 
+/// SubBytes, ShiftRows and MixColumns, one pass over the state each — the
+/// textbook shape, kept as the reference [`RoundKeys::encrypt_block`]'s
+/// table-driven round is checked against.
+#[cfg(test)]
 fn sub_bytes(state: &mut [u8; 16]) {
     for b in state.iter_mut() {
         *b = SBOX[*b as usize];
@@ -91,6 +95,7 @@ fn inv_sub_bytes(state: &mut [u8; 16]) {
     }
 }
 
+#[cfg(test)]
 fn shift_rows(state: &mut [u8; 16]) {
     let s = *state;
     // Row 0 unchanged, row 1 left 1, row 2 left 2, row 3 left 3 (column-major).
@@ -133,10 +138,39 @@ fn inv_shift_rows(state: &mut [u8; 16]) {
 }
 
 /// Multiply a byte in GF(2^8) by x (0x02), used by MixColumns.
-fn xtime(a: u8) -> u8 {
+const fn xtime(a: u8) -> u8 {
     (a << 1) ^ (if a & 0x80 != 0 { 0x1b } else { 0 })
 }
 
+/// SubBytes, ShiftRows and MixColumns folded into one table lookup per byte —
+/// the standard way AES is implemented, and four times the rate of doing the
+/// three as separate passes over the state.
+///
+/// `TE[r][x]` is the contribution row `r`'s byte makes to a whole output
+/// column, packed the way [`RoundKeys::encrypt_block`] holds a column: row 0
+/// in the low byte. Four of them XORed together, plus the round key, is the
+/// column.
+///
+/// 4 KiB of tables. Table-driven AES leaks key material through cache timing,
+/// which matters not at all here: what this decrypts is firmware and game
+/// content, with keys the user already has on disk.
+const TE: [[u32; 256]; 4] = {
+    let mut t = [[0u32; 256]; 4];
+    let mut x = 0usize;
+    while x < 256 {
+        let s = SBOX[x] as u32;
+        let s2 = xtime(SBOX[x]) as u32;
+        let s3 = s2 ^ s;
+        t[0][x] = s2 | (s << 8) | (s << 16) | (s3 << 24);
+        t[1][x] = s3 | (s2 << 8) | (s << 16) | (s << 24);
+        t[2][x] = s | (s3 << 8) | (s2 << 16) | (s << 24);
+        t[3][x] = s | (s << 8) | (s3 << 16) | (s2 << 24);
+        x += 1;
+    }
+    t
+};
+
+#[cfg(test)]
 fn mix_columns(state: &mut [u8; 16]) {
     for c in 0..4 {
         let i = c * 4;
@@ -182,58 +216,126 @@ fn gmul(mut a: u8, mut b: u8) -> u8 {
     p
 }
 
-/// Encrypt one 16-byte block.
-pub fn aes128_encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
-    let w = expand_key(key);
-    let mut state = *block;
-    add_round_key(&mut state, &w[0..16]);
-    for round in 1..10 {
-        sub_bytes(&mut state);
-        shift_rows(&mut state);
-        mix_columns(&mut state);
-        add_round_key(&mut state, &w[round * 16..(round + 1) * 16]);
-    }
-    sub_bytes(&mut state);
-    shift_rows(&mut state);
-    add_round_key(&mut state, &w[160..176]);
-    state
+/// Row `r` of the column ShiftRows takes it from, for output column `c`.
+#[inline]
+fn byte_of(state: &[u32; 4], c: usize, r: usize) -> usize {
+    (state[(c + r) % 4] >> (8 * r)) as u8 as usize
 }
 
-/// Decrypt one 16-byte block.
-pub fn aes128_decrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
-    let w = expand_key(key);
-    let mut state = *block;
-    add_round_key(&mut state, &w[160..176]);
-    for round in (1..10).rev() {
+/// Column `c` of a sixteen-byte state, packed with row 0 in the low byte.
+#[inline]
+fn column_word(state: &[u8; 16], c: usize) -> u32 {
+    column_word_at(state, c * 4)
+}
+
+/// The same packing, out of a longer buffer at a byte offset — the round keys
+/// are one flat 176-byte array.
+#[inline]
+fn column_word_at(bytes: &[u8], at: usize) -> u32 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
+}
+
+/// One AES-128 key's expanded round keys.
+///
+/// Held apart from the block operations because every bulk mode uses one
+/// schedule for every block it touches, and deriving it is comparable work to
+/// encrypting with it. Expanding per block made the firmware fonts — 17.7 MB
+/// of AES-CTR across five NCA sections — expand it 1.1 million times, which
+/// was 28% of a Home Menu boot.
+#[derive(Clone)]
+pub struct RoundKeys([u8; 176]);
+
+impl RoundKeys {
+    pub fn new(key: &[u8; 16]) -> RoundKeys {
+        RoundKeys(expand_key(key))
+    }
+
+    /// Encrypt one 16-byte block.
+    ///
+    /// The state is held as four column words rather than sixteen bytes, so a
+    /// round is four table lookups and four XORs per column instead of four
+    /// separate passes over a byte array. `column_word` and the row/column
+    /// indexing are the same convention [`shift_rows`] uses: `state[c * 4 + r]`
+    /// is row `r` of column `c`, and ShiftRows takes row `r` of a column from
+    /// column `c + r`.
+    pub fn encrypt_block(&self, block: &[u8; 16]) -> [u8; 16] {
+        let w = &self.0;
+        let mut s = [0u32; 4];
+        for (c, column) in s.iter_mut().enumerate() {
+            *column = column_word(block, c) ^ column_word_at(w, c * 4);
+        }
+        for round in 1..10 {
+            let rk = round * 16;
+            let mut next = [0u32; 4];
+            for (c, column) in next.iter_mut().enumerate() {
+                *column = TE[0][byte_of(&s, c, 0)]
+                    ^ TE[1][byte_of(&s, c, 1)]
+                    ^ TE[2][byte_of(&s, c, 2)]
+                    ^ TE[3][byte_of(&s, c, 3)]
+                    ^ column_word_at(w, rk + c * 4);
+            }
+            s = next;
+        }
+        // The last round has no MixColumns, so no table: SubBytes and
+        // ShiftRows straight into the output.
+        let mut out = [0u8; 16];
+        for c in 0..4 {
+            for r in 0..4 {
+                out[c * 4 + r] = SBOX[byte_of(&s, c, r)] ^ w[160 + c * 4 + r];
+            }
+        }
+        out
+    }
+
+    /// Decrypt one 16-byte block.
+    pub fn decrypt_block(&self, block: &[u8; 16]) -> [u8; 16] {
+        let w = &self.0;
+        let mut state = *block;
+        add_round_key(&mut state, &w[160..176]);
+        for round in (1..10).rev() {
+            inv_shift_rows(&mut state);
+            inv_sub_bytes(&mut state);
+            add_round_key(&mut state, &w[round * 16..(round + 1) * 16]);
+            inv_mix_columns(&mut state);
+        }
         inv_shift_rows(&mut state);
         inv_sub_bytes(&mut state);
-        add_round_key(&mut state, &w[round * 16..(round + 1) * 16]);
-        inv_mix_columns(&mut state);
+        add_round_key(&mut state, &w[0..16]);
+        state
     }
-    inv_shift_rows(&mut state);
-    inv_sub_bytes(&mut state);
-    add_round_key(&mut state, &w[0..16]);
-    state
+}
+
+/// Encrypt one 16-byte block. Expands the key schedule for this block alone —
+/// use [`RoundKeys`] directly for more than one.
+pub fn aes128_encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
+    RoundKeys::new(key).encrypt_block(block)
+}
+
+/// Decrypt one 16-byte block. See [`aes128_encrypt_block`] on the schedule.
+pub fn aes128_decrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
+    RoundKeys::new(key).decrypt_block(block)
 }
 
 /// AES-128-ECB encrypt of `data` (length must be a multiple of 16).
 pub fn aes128_ecb_encrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    let keys = RoundKeys::new(key);
     let mut out = Vec::with_capacity(data.len());
     for chunk in data.chunks(16) {
         let mut blk = [0u8; 16];
         blk[..chunk.len()].copy_from_slice(chunk);
-        out.extend_from_slice(&aes128_encrypt_block(key, &blk));
+        out.extend_from_slice(&keys.encrypt_block(&blk));
     }
     out
 }
 
 /// AES-128-ECB decrypt of `data` (length must be a multiple of 16).
 pub fn aes128_ecb_decrypt(key: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    let keys = RoundKeys::new(key);
     let mut out = Vec::with_capacity(data.len());
     for chunk in data.chunks(16) {
         let mut blk = [0u8; 16];
         blk[..chunk.len()].copy_from_slice(chunk);
-        out.extend_from_slice(&aes128_decrypt_block(key, &blk));
+        out.extend_from_slice(&keys.decrypt_block(&blk));
     }
     out
 }
@@ -279,7 +381,8 @@ pub fn aes128_xts_decrypt_sector(key: &[u8; 32], chunk: &[u8], tweak: &[u8; 16],
     let mut key2 = [0u8; 16];
     key1.copy_from_slice(&key[..16]);
     key2.copy_from_slice(&key[16..]);
-    let mut tweak = aes128_encrypt_block(&key2, tweak);
+    let data_keys = RoundKeys::new(&key1);
+    let mut tweak = RoundKeys::new(&key2).encrypt_block(tweak);
     for blk in chunk.chunks(16) {
         let mut c = [0u8; 16];
         c[..blk.len()].copy_from_slice(blk);
@@ -287,7 +390,7 @@ pub fn aes128_xts_decrypt_sector(key: &[u8; 32], chunk: &[u8], tweak: &[u8; 16],
         for i in 0..16 {
             x[i] = c[i] ^ tweak[i];
         }
-        let p = aes128_decrypt_block(&key1, &x);
+        let p = data_keys.decrypt_block(&x);
         for i in 0..16 {
             out.push(p[i] ^ tweak[i]);
         }
@@ -314,9 +417,10 @@ pub fn aes128_ctr_xor(key: &[u8; 16], counter: &[u8; 16], data: &[u8]) -> Vec<u8
 /// a multiple of 16 and advances `counter` to match (see
 /// [`crate::nca::SectionSource`], which reads sections that way).
 pub fn aes128_ctr_xor_in_place(key: &[u8; 16], counter: &[u8; 16], data: &mut [u8]) {
+    let keys = RoundKeys::new(key);
     let mut ctr = *counter;
     for chunk in data.chunks_mut(16) {
-        let ks = aes128_encrypt_block(key, &ctr);
+        let ks = keys.encrypt_block(&ctr);
         for (b, k) in chunk.iter_mut().zip(ks.iter()) {
             *b ^= k;
         }
@@ -533,5 +637,69 @@ mod tests {
 
     fn hex_digest(v: &[u8]) -> String {
         v.iter().map(|b| format!("{:02x}", b)).collect()
+    }
+}
+
+#[cfg(test)]
+mod table_driven {
+    use super::*;
+
+    /// AES-128 encryption written the textbook way: one pass over the state
+    /// per step. [`RoundKeys::encrypt_block`] folds three of those steps into
+    /// a table lookup, which is four times the rate and much easier to get
+    /// subtly wrong — so it is checked against this.
+    fn reference(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
+        let w = expand_key(key);
+        let mut state = *block;
+        add_round_key(&mut state, &w[0..16]);
+        for round in 1..10 {
+            sub_bytes(&mut state);
+            shift_rows(&mut state);
+            mix_columns(&mut state);
+            add_round_key(&mut state, &w[round * 16..(round + 1) * 16]);
+        }
+        sub_bytes(&mut state);
+        shift_rows(&mut state);
+        add_round_key(&mut state, &w[160..176]);
+        state
+    }
+
+    #[test]
+    fn the_table_driven_round_matches_the_textbook_one() {
+        // A NIST vector says the cipher is right at one point; this says the
+        // two implementations agree everywhere, which is what a rewrite of a
+        // primitive actually needs. Deterministic inputs, so a failure is
+        // reproducible.
+        let mut key = [0u8; 16];
+        let mut block = [0u8; 16];
+        let mut x = 0x1234_5678u32;
+        for _ in 0..4096 {
+            for byte in key.iter_mut().chain(block.iter_mut()) {
+                // xorshift: any cheap spread of bit patterns will do.
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                *byte = x as u8;
+            }
+            assert_eq!(
+                RoundKeys::new(&key).encrypt_block(&block),
+                reference(&key, &block),
+                "key {key:02x?} block {block:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ctr_stream_still_round_trips() {
+        // CTR is its own inverse, and it is the mode every NCA section body
+        // uses, so this is the path the firmware fonts go through.
+        let key = [0x42u8; 16];
+        let counter = [0x11u8; 16];
+        let plain: Vec<u8> = (0..1000u32).map(|i| (i * 7) as u8).collect();
+        let mut buf = plain.clone();
+        aes128_ctr_xor_in_place(&key, &counter, &mut buf);
+        assert_ne!(buf, plain, "it actually encrypted something");
+        aes128_ctr_xor_in_place(&key, &counter, &mut buf);
+        assert_eq!(buf, plain);
     }
 }
