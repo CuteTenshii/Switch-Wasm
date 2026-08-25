@@ -135,12 +135,14 @@ pub fn next_slot(offset: u32) -> u32 {
     }
 }
 
-/// How far back from a `brx` the jump-table shape is looked for. The clamp,
-/// the scale and the table load are emitted as one run immediately before the
-/// branch; a window this size covers that with room for scheduling to have
-/// moved things around, and bounds the scan on a binary where the shape is
-/// simply not there.
-const BRX_PATTERN_WINDOW: usize = 32;
+/// How many instructions back a jump-table walk will look.
+///
+/// The walk follows a chain of definitions rather than a run of adjacent
+/// instructions, so this is not the size of the idiom — it is a bound on a
+/// binary where the shape is simply not there. The Home Menu's fragment
+/// shaders put 36 instruction slots between the clamp and the branch, which
+/// is exactly why this is not the 32 it used to be.
+const BRX_WALK_LIMIT: usize = 1024;
 
 /// The widest jump table [`brx_targets`] will believe in.
 const MAX_BRX_ARMS: usize = 256;
@@ -148,12 +150,26 @@ const MAX_BRX_ARMS: usize = 256;
 /// The targets a `brx` can reach, read out of the jump table its shader
 /// compiler put in a constant bank.
 ///
-/// A `switch` lowers to a fixed run of instructions: clamp the selector to
-/// the last arm, scale it to a word index, load that entry of the table, and
-/// branch to it. The clamp is the only thing in the binary that records how
-/// many arms the `switch` had, so the walk looks for exactly that shape.
-/// Anything else returns `None` and leaves the caller to fall through — a
-/// guess at a table's length reads whatever follows it as code.
+/// A `switch` lowers to four things: clamp the selector to the last arm,
+/// scale it to a word index, load that entry of the table, and branch to it.
+/// The clamp is the only thing in the binary that records how many arms the
+/// `switch` had, so the walk has to reach it — and it is the one part the
+/// scheduler is free to hoist far away from the rest, because it depends on
+/// nothing but the selector. In the Home Menu's fragment shaders it sits 36
+/// instruction slots ahead of the branch, with the other three packed
+/// together just behind it.
+///
+/// So this walks the selector's *definitions* rather than a window of
+/// adjacent instructions: find what wrote the register the `brx` reads, then
+/// what wrote that instruction's input, and so on until the clamp. Each step
+/// takes the nearest preceding write, which is a use-def chain only if the
+/// preceding code is the code that runs — an assumption this makes and cannot
+/// check, since the control-flow graph is what is being decoded. What keeps
+/// it honest is that the chain must be exactly this idiom: anything else
+/// writing a register the chain is following gives up, and so does a write
+/// that is predicated, because then the register's value depends on which
+/// path reached it. Giving up returns `None` and leaves the caller to fall
+/// through — a guess at a table's length reads whatever follows it as code.
 fn brx_targets(
     decoded: &BTreeMap<u32, Instruction>,
     at: u32,
@@ -161,38 +177,45 @@ fn brx_targets(
     reg: u8,
     consts: &mut dyn FnMut(u8, u32) -> Result<u32>,
 ) -> Option<Vec<u32>> {
-    let before: Vec<&Instruction> =
-        decoded.range(..at).rev().take(BRX_PATTERN_WINDOW).map(|(_, i)| i).collect();
+    // The register whose definition the walk is looking for, rewritten at
+    // each step to the input of the instruction that defined it.
+    let mut selector = reg;
+    let mut table: Option<(u8, i32)> = None;
+    let mut arms: Option<usize> = None;
 
-    let (table_bank, table_offset, mut index_reg, load_at): (u8, i32, u8, usize) =
-        before.iter().enumerate().find_map(|(i, insn)| match insn.op {
-            Op::Ldc { dst, bank, offset, idx, size: isa::MemSize::B32 } if dst == reg => {
-                Some((bank, offset, idx, i))
-            }
-            _ => None,
-        })?;
-
-    // The clamp bounds the table. `imnmx` with the selector as both source and
-    // destination is `min(selector, last_arm)`, so the table has one more
-    // entry than the immediate.
-    let mut arms = None;
-    for insn in &before[load_at + 1..] {
+    for insn in decoded.range(..at).rev().take(BRX_WALK_LIMIT).map(|(_, insn)| insn) {
+        if !interp::writes(&insn.op).contains(&selector) {
+            continue;
+        }
+        if !insn.pred.is_always() {
+            return None;
+        }
         match insn.op {
-            Op::Shl { dst, a, b: isa::Operand::Imm(2), .. } if dst == index_reg => {
-                index_reg = a;
+            Op::Ldc { bank, offset, idx, size: isa::MemSize::B32, .. } if table.is_none() => {
+                table = Some((bank, offset));
+                selector = idx;
             }
-            // `imnmx` predicated on `PT` is `min`; on anything else it is a
-            // per-lane pick between min and max, which bounds nothing.
-            Op::Imnmx { dst, a, b: isa::Operand::Imm(n), pred, .. }
-                if dst == index_reg && a == index_reg && pred.is_always() =>
+            // Scaling the arm number to a byte offset into the table.
+            Op::Shl { a, b: isa::Operand::Imm(2), .. } if table.is_some() => {
+                selector = a;
+            }
+            Op::Mov { src: isa::Operand::Reg(src), .. } if table.is_some() => {
+                selector = src;
+            }
+            // The clamp bounds the table. `imnmx` on `PT` is `min`; on
+            // anything else it is a per-lane pick between min and max, which
+            // bounds nothing. The table has one more entry than the immediate.
+            Op::Imnmx { b: isa::Operand::Imm(n), pred, .. }
+                if table.is_some() && pred.is_always() =>
             {
                 arms = Some(n as usize + 1);
                 break;
             }
-            _ => {}
+            _ => return None,
         }
     }
 
+    let (table_bank, table_offset) = table?;
     // A `switch` this wide is not something a shader compiler emits; a match
     // that produces one has recognised the wrong `imnmx`.
     let arms = arms.filter(|&n| n <= MAX_BRX_ARMS)?;
@@ -596,6 +619,106 @@ mod tests {
         let program = decode_program(&bytes).unwrap();
         assert!(program.index_of(0x338).is_some(), "arm 0 falls through");
         assert!(program.index_of(0x350).is_none(), "arm 1 is only in the table");
+    }
+
+    /// `nop`, which writes nothing and falls through — filler for putting a
+    /// measured distance between two instructions.
+    const NOP: (u32, u32) = (0x00070f00, 0x50b00000);
+    /// `brk`, which ends an arm.
+    const BRK: (u32, u32) = (0x0007000f, 0xe3400000);
+
+    /// `brx r12` at `pc`, encoded so its base is zero and every arm comes out
+    /// of the jump table. The displacement is pc-relative and 24 bits wide at
+    /// bit 20, so it has to be rebuilt for each position rather than reused.
+    fn brx_at(pc: u32) -> (u32, u32) {
+        let field = 0u32.wrapping_sub(pc + 8) & 0xff_ffff;
+        (
+            (0xcc870c0f & !(0xfff << 20)) | ((field & 0xfff) << 20),
+            (0xe2500fff & !0xfffu32) | (field >> 12),
+        )
+    }
+
+    /// The same `switch` as [`brx_switch_fixture`], with `gap` blocks of
+    /// filler between the clamp and the rest of the idiom, and `between`
+    /// spliced in just before the scale. Returns the bytes and the jump table
+    /// its `c1` holds.
+    fn brx_switch_spread(gap: u32, between: Option<(u32, u32)>) -> (Vec<u8>, [u32; 3]) {
+        let mut bytes = block(
+            (0, 0),
+            (0xfff70c0c, 0x1c0fffff), // iadd r12, r12, -1
+            (0x00270c0c, 0x38200380), // imnmx r12, r12, 2
+            NOP,
+        );
+        for _ in 0..gap {
+            bytes.extend(block((0, 0), NOP, NOP, NOP));
+        }
+        if let Some(insn) = between {
+            bytes.extend(block((0, 0), insn, NOP, NOP));
+        }
+        let idiom = bytes.len() as u32;
+        bytes.extend(block(
+            (0, 0),
+            (0x00270c0c, 0x38480000), // shl r12, r12, 2
+            (0x0c070c0c, 0xef940010), // ld r12, c1[0xc0 + r12]
+            brx_at(idiom + 24),
+        ));
+        let arms = bytes.len() as u32;
+        bytes.extend(block(
+            (0, 0),
+            (0x0017000a, 0x5c980780), // mov r10, r1   <- arm 0, falls through
+            BRK,
+            (0x0027000a, 0x5c980780), // mov r10, r2   <- arm 1
+        ));
+        bytes.extend(block(
+            (0, 0),
+            BRK,
+            (0x0037000a, 0x5c980780), // mov r10, r3   <- arm 2
+            BRK,
+        ));
+        (bytes, [arms + 8, arms + 24, arms + 48])
+    }
+
+    #[test]
+    fn a_clamp_hoisted_far_from_its_brx_is_still_found() {
+        // The scheduler is free to move the clamp, because it depends on
+        // nothing but the selector: in the Home Menu's fragment shaders it
+        // ends up 36 instruction slots ahead of the branch, and a walk that
+        // looked at a fixed window of the 32 instructions before the `brx`
+        // read every one of them without ever seeing it. 12 blocks of filler
+        // puts 40 instructions in the way, which is more than that window.
+        let (bytes, table) = brx_switch_spread(12, None);
+        let program = decode_with_table(&bytes, table).unwrap();
+
+        for (arm, offset) in [(1u8, table[0]), (2, table[1]), (3, table[2])] {
+            let index = program
+                .index_of(offset)
+                .unwrap_or_else(|| panic!("arm at {offset:#x} was never decoded"));
+            assert_eq!(program.insns[index].op, Op::Mov { dst: 10, src: Operand::Reg(arm) });
+        }
+    }
+
+    #[test]
+    fn a_predicated_write_to_the_selector_abandons_the_table() {
+        // `@p0 shl r12, r12, 2` — an instruction the walk would otherwise
+        // step straight through, except that only some lanes take it. After
+        // it the selector holds two different values at once, and the clamp
+        // behind it bounds only one of them, so the arm count read from it
+        // would be a guess.
+        let (bytes, table) = brx_switch_spread(1, Some((0x00200c0c, 0x38480000)));
+        let program = decode_with_table(&bytes, table).unwrap();
+        assert!(program.index_of(table[0]).is_some(), "arm 0 falls through");
+        assert!(program.index_of(table[1]).is_none(), "arm 1 is only in the table");
+    }
+
+    #[test]
+    fn an_unrecognised_write_to_the_selector_abandons_the_table() {
+        // `iadd r12, r12, -1` is a real part of this switch's lowering — but
+        // *behind* the clamp, where it changes nothing. In front of it the
+        // walk cannot tell whether the clamp still bounds what the branch
+        // reads, so it stops rather than assuming it does.
+        let (bytes, table) = brx_switch_spread(1, Some((0xfff70c0c, 0x1c0fffff)));
+        let program = decode_with_table(&bytes, table).unwrap();
+        assert!(program.index_of(table[1]).is_none(), "arm 1 is only in the table");
     }
 
     #[test]

@@ -364,8 +364,9 @@ mod tests {
     #[test]
     fn a_brx_with_no_known_targets_stops_the_walk() {
         // The walk reports what stopped it rather than a verdict it did not
-        // reach — three of the Home Menu's fragment shaders end here, with a
-        // `brx` whose selector is computed too far away to track.
+        // reach. Three of the Home Menu's fragment shaders used to end here,
+        // until the jump-table walk learned to follow a selector back to a
+        // clamp the scheduler had hoisted out of its window.
         let p = program(&[(Op::Brx { base: 0, reg: 1 }, ALWAYS), (Op::Exit, ALWAYS)]);
         assert_eq!(
             Cfg::new(&p).pairing(),

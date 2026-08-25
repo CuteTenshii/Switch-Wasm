@@ -1125,7 +1125,7 @@ fn reads(op: &Op) -> Vec<u8> {
 }
 
 /// Registers `op` writes as a destination.
-fn writes(op: &Op) -> Vec<u8> {
+pub(super) fn writes(op: &Op) -> Vec<u8> {
     match *op {
         Op::Ld { dst, size, .. } | Op::Ldg { dst, size, .. } | Op::Ldl { dst, size, .. }
         | Op::Ldc { dst, size, .. } => {
