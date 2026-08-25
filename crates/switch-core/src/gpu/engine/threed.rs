@@ -7,7 +7,7 @@
 use crate::gpu::engine::{field, Registers, REGISTER_COUNT};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::macro_engine::{MacroEngine, MacroHost, MacroWrite, MACRO_METHODS_START};
-use crate::gpu::raster;
+use crate::gpu::renderer::{Renderer, Software};
 use crate::gpu::surface::{ColorFormat, Layout, SampleGrid, MAX_SAMPLES};
 use crate::{Error, Result};
 
@@ -330,6 +330,10 @@ impl RenderTarget {
 #[derive(Debug)]
 pub struct Engine3D {
     pub regs: Registers,
+    /// What turns this engine's draws and clears into pixels. Swappable so a
+    /// GPU backend can be a second implementation rather than a rewrite —
+    /// see [`crate::gpu::renderer`].
+    renderer: Box<dyn Renderer>,
     /// `gl_InstanceID` for the draw about to be issued — see
     /// [`VERTEX_BEGIN_INSTANCE_NEXT`].
     instance_id: u32,
@@ -371,6 +375,7 @@ impl Engine3D {
     pub fn new() -> Engine3D {
         Engine3D {
             regs: Registers::new(),
+            renderer: Box::new(Software),
             instance_id: 0,
             traced_regs: None,
             macros: MacroEngine::new(),
@@ -626,11 +631,12 @@ impl Engine3D {
         self.traced_regs = Some(now);
     }
 
-    fn rasterize_or_log(&self, ctx: &mut ExecCtx) {
+    fn rasterize_or_log(&mut self, ctx: &mut ExecCtx) {
         if ctx.trace && ctx.stats.draws == 1 {
             self.dump_vertex_input();
         }
-        if let Err(e) = raster::draw(self, ctx) {
+        let result = self.with_renderer(ctx, |renderer, engine, ctx| renderer.draw(engine, ctx));
+        if let Err(e) = result {
             ctx.stats.draws_skipped += 1;
             if ctx.trace {
                 // With the vertex array the draw was going to read: a draw
@@ -867,6 +873,14 @@ impl Engine3D {
     }
 
     /// Where the bound index buffer starts.
+    /// Replace the backend this engine draws and clears through.
+    ///
+    /// The one place a GPU backend gets installed — see
+    /// [`crate::gpu::renderer`].
+    pub fn set_renderer(&mut self, renderer: Box<dyn Renderer>) {
+        self.renderer = renderer;
+    }
+
     /// `gl_InstanceID` for [`Engine3D::last_draw`].
     pub fn instance_id(&self) -> u32 {
         self.instance_id
@@ -1048,6 +1062,23 @@ impl Engine3D {
         (x0, y0, x1.min(width), y1.min(height))
     }
 
+    /// Run `f` against the bound renderer.
+    ///
+    /// The renderer is taken out of the engine for the call and put back
+    /// after, because it needs `&mut` while the backend needs `&Engine3D` to
+    /// read the draw's state from — the same swap `write_macro` does with the
+    /// macro engine, and for the same reason.
+    fn with_renderer<T>(
+        &mut self,
+        ctx: &mut ExecCtx,
+        f: impl FnOnce(&mut dyn Renderer, &Engine3D, &mut ExecCtx) -> T,
+    ) -> T {
+        let mut renderer = std::mem::replace(&mut self.renderer, Box::new(Software));
+        let out = f(renderer.as_mut(), self, ctx);
+        self.renderer = renderer;
+        out
+    }
+
     fn clear_buffers(&mut self, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
         ctx.stats.clears += 1;
         let clear_depth = field(arg, 0, 0) != 0;
@@ -1077,15 +1108,21 @@ impl Engine3D {
                     other => eprintln!("[gpu] clear target={target} -> {other:x?}"),
                 }
             }
-            self.clear_color(target, layer, channels, ctx)?;
+            if let Err(e) = self.with_renderer(ctx, |renderer, engine, ctx| {
+                renderer.clear_color(engine, ctx, target, layer, channels)
+            }) {
+                eprintln!("[gpu] EXPERIMENT: skipped colour clear: {e}");
+            }
         }
         if clear_depth || clear_stencil {
-            self.clear_depth_stencil(clear_depth, clear_stencil, ctx)?;
+            self.with_renderer(ctx, |renderer, engine, ctx| {
+                renderer.clear_depth_stencil(engine, ctx, clear_depth, clear_stencil)
+            })?;
         }
         Ok(())
     }
 
-    fn clear_color(
+    pub(crate) fn clear_color(
         &self,
         target: u32,
         layer: u32,
@@ -1140,7 +1177,7 @@ impl Engine3D {
         Ok(())
     }
 
-    fn clear_depth_stencil(
+    pub(crate) fn clear_depth_stencil(
         &self,
         clear_depth: bool,
         clear_stencil: bool,
@@ -1274,6 +1311,52 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Default, PartialEq, Eq)]
+    struct Recorded {
+        draws: u32,
+        color_clears: Vec<(u32, u32, [bool; 4])>,
+        depth_clears: Vec<(bool, bool)>,
+    }
+
+    /// A renderer that records what it was asked to do and writes nothing.
+    ///
+    /// Its whole job is to prove the seam is real: if the engine produced a
+    /// single pixel without going through the bound renderer, the target in
+    /// the test below would not still be zero. It shares its log rather than
+    /// being read back out of the engine, which owns it once installed.
+    #[derive(Debug, Default)]
+    struct Recorder(std::rc::Rc<std::cell::RefCell<Recorded>>);
+
+    impl Renderer for Recorder {
+        fn draw(&mut self, _: &Engine3D, _: &mut ExecCtx) -> Result<()> {
+            self.0.borrow_mut().draws += 1;
+            Ok(())
+        }
+
+        fn clear_color(
+            &mut self,
+            _: &Engine3D,
+            _: &mut ExecCtx,
+            target: u32,
+            layer: u32,
+            channels: [bool; 4],
+        ) -> Result<()> {
+            self.0.borrow_mut().color_clears.push((target, layer, channels));
+            Ok(())
+        }
+
+        fn clear_depth_stencil(
+            &mut self,
+            _: &Engine3D,
+            _: &mut ExecCtx,
+            depth: bool,
+            stencil: bool,
+        ) -> Result<()> {
+            self.0.borrow_mut().depth_clears.push((depth, stencil));
+            Ok(())
+        }
+    }
+
     /// Program a 16x8 pitch-linear RGBA8 render target.
     fn setup_pitch_target(engine: &mut Engine3D, base: u64, width: u32, height: u32) {
         engine.regs.set(0x200, (base >> 32) as u32);
@@ -1285,6 +1368,39 @@ mod tests {
         engine.regs.set(0x206, 1);
         engine.regs.set(SCREEN_SCISSOR_HORIZONTAL, width << 16);
         engine.regs.set(SCREEN_SCISSOR_VERTICAL, height << 16);
+    }
+
+    #[test]
+    fn every_pixel_the_engine_produces_goes_through_the_bound_renderer() {
+        // The seam is only worth anything if nothing gets past it: a GPU
+        // backend whose surfaces live on the GPU cannot have half a frame
+        // written into guest memory behind its back.
+        let mut h = Harness::new(0x1000);
+        let mut engine = Engine3D::new();
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Recorded::default()));
+        engine.set_renderer(Box::new(Recorder(log.clone())));
+        setup_pitch_target(&mut engine, h.base, 16, 8);
+        {
+            let mut ctx = h.ctx();
+            // A colour clear of all four channels, a depth and stencil clear,
+            // and a draw — every way this engine makes pixels.
+            engine.write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx).unwrap();
+            engine.write(CLEAR_BUFFERS, 0b11, true, &mut ctx).unwrap();
+            engine.write(VERTEX_BEGIN_GL, 4, true, &mut ctx).unwrap();
+            engine.write(DRAW_ARRAYS_COUNT, 3, true, &mut ctx).unwrap();
+        }
+
+        let log = log.borrow();
+        assert_eq!(log.draws, 1, "the draw reached the renderer");
+        assert_eq!(log.color_clears, vec![(0, 0, [true; 4])], "and the colour clear");
+        assert_eq!(log.depth_clears, vec![(true, true)], "and the depth clear");
+
+        // And the render target is untouched, because the recorder wrote
+        // nothing. `clear_fills_a_pitch_render_target` runs the same clear
+        // through the software renderer and finds it filled, which is what
+        // makes this assertion mean something.
+        let target = h.mem.dump(0x3000_0000, 16 * 8 * 4).unwrap();
+        assert!(target.iter().all(|&b| b == 0), "no pixel was written past the renderer");
     }
 
     #[test]

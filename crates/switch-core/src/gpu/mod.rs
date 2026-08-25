@@ -17,6 +17,7 @@ pub mod macro_engine;
 pub mod nvdrv;
 pub mod nvmap;
 pub mod raster;
+pub mod renderer;
 pub mod shader;
 pub mod surface;
 pub mod syncpt;
