@@ -938,6 +938,36 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             );
         }
     }
+    // `TRACE_WGSL=1`: whether each shader can be translated, and to what.
+    // `TRACE_WGSL=dir` writes each translation to `dir/<stage>_<addr>.wgsl`
+    // instead, which is how the emitted text gets in front of a real shader
+    // compiler — nothing in this crate can parse WGSL.
+    if let Ok(where_to) = std::env::var("TRACE_WGSL") {
+        for (stage, addr, program) in
+            [("vs", vs_binding.addr, &vs_program), ("fs", fs_binding.addr, &fs_program)]
+        {
+            match crate::gpu::shader::wgsl::translate(program) {
+                Ok(translated) if where_to == "1" => eprintln!(
+                    "[wgsl] {stage}@{addr:#x} {} bytes, {} registers",
+                    translated.source.len(),
+                    translated.registers.len()
+                ),
+                Ok(translated) => {
+                    let path = format!("{where_to}/{stage}_{addr:x}.wgsl");
+                    let module = format!(
+                        "{}\n{}",
+                        crate::gpu::shader::wgsl::HOST_INTERFACE,
+                        translated.source
+                    );
+                    match std::fs::write(&path, module) {
+                        Ok(()) => eprintln!("[wgsl] {stage}@{addr:#x} -> {path}"),
+                        Err(e) => eprintln!("[wgsl] {stage}@{addr:#x} cannot write {path}: {e}"),
+                    }
+                }
+                Err(e) => eprintln!("[wgsl] {stage}@{addr:#x} untranslated: {e}"),
+            }
+        }
+    }
 
     for tri in triangles {
         let mut shaded: Vec<ShadedVertex> = Vec::with_capacity(3);

@@ -17,6 +17,7 @@ pub mod cfg;
 pub mod compiled;
 pub mod interp;
 pub mod isa;
+pub mod wgsl;
 
 pub use isa::{Instruction, Op};
 
