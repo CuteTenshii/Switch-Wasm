@@ -15,8 +15,8 @@
 //! and content that switches either on will draw as though it had not.
 
 use crate::gpu::engine::threed::{
-    decode_depth, encode_depth, BlendTarget, CullState, Engine3D, ScissorRect, ShaderStage,
-    VertexArray, VertexAttrib, ViewportTransform,
+    BlendTarget, CullState, Engine3D, ScissorRect, ShaderStage, VertexArray, VertexAttrib,
+    ViewportTransform,
 };
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::shader::interp::{
@@ -1007,10 +1007,10 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         let z = w[0] * window_z[0] + w[1] * window_z[1] + w[2] * window_z[2];
                         if let (true, Some(dt)) = (depth_state.test_enabled, depth) {
                             let (tx, ty) = grid.texel(x, y, sample);
+                            let bytes = dt.format.bytes;
                             let dva =
-                                dt.addr + dt.layout.offset(tx * dt.bytes, ty, dt.width * dt.bytes) as u64;
-                            let old_raw = ctx.read_pixel(dva, dt.bytes)?;
-                            let old = decode_depth(old_raw, dt.depth_bits);
+                                dt.addr + dt.layout.offset(tx * bytes, ty, dt.width * bytes) as u64;
+                            let old = dt.format.decode_depth(ctx.read_pixel(dva, bytes)?);
                             if !depth_test_passes(depth_state.func, z, old) {
                                 continue;
                             }
@@ -1077,10 +1077,21 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         let (tx, ty) = grid.texel(x, y, sample);
                         if depth_state.test_enabled && depth_state.write_enabled {
                             if let Some(dt) = depth {
+                                let bytes = dt.format.bytes;
                                 let dva = dt.addr
-                                    + dt.layout.offset(tx * dt.bytes, ty, dt.width * dt.bytes) as u64;
+                                    + dt.layout.offset(tx * bytes, ty, dt.width * bytes) as u64;
                                 let z = sample_z[sample as usize];
-                                ctx.write_pixel(dva, dt.bytes, encode_depth(z, dt.depth_bits))?;
+                                // A packed depth-stencil pixel holds a stencil
+                                // byte this draw is not writing. Read it back
+                                // and merge rather than flattening it to zero
+                                // — the extra read is only for the formats
+                                // that actually share the pixel.
+                                let value = if dt.format.packs_stencil() {
+                                    dt.format.with_depth(ctx.read_pixel(dva, bytes)?, z)
+                                } else {
+                                    dt.format.encode_depth(z)
+                                };
+                                ctx.write_pixel(dva, bytes, value)?;
                             }
                         }
 

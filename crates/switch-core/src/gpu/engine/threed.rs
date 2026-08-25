@@ -257,10 +257,8 @@ pub struct DepthTarget {
     pub width: u32,
     pub height: u32,
     pub layout: Layout,
-    /// Bytes per pixel (matches [`depth_format_layout`]'s first field).
-    pub bytes: u32,
-    /// Depth bits (`0` means 32-bit float, matching `depth_format_layout`).
-    pub depth_bits: u32,
+    /// Where this format keeps its depth and its stencil inside a pixel.
+    pub format: DepthLayout,
 }
 
 /// One viewport's NDC-to-window transform: `window = ndc * scale + translate`
@@ -805,15 +803,14 @@ impl Engine3D {
         if addr == 0 || raw_format == 0 {
             return Ok(None);
         }
-        let (bytes, depth_bits, _stencil_shift) = depth_format_layout(raw_format)?;
+        let format = depth_format_layout(raw_format)?;
         let tile_mode = self.regs.get(DEPTH_TARGET_TILE_MODE);
         Ok(Some(DepthTarget {
             addr,
             width: self.regs.get(DEPTH_TARGET_HORIZONTAL),
             height: self.regs.get(DEPTH_TARGET_VERTICAL),
             layout: Layout::BlockLinear { block_height_gobs: 1 << field(tile_mode, 4, 7) },
-            bytes,
-            depth_bits,
+            format,
         }))
     }
 
@@ -991,6 +988,19 @@ impl Engine3D {
         if addr == 0 || raw_format == 0 {
             return Ok(None);
         }
+        // The colour and depth format enums are disjoint, so a depth format
+        // here is not an unrecognised colour one: the guest has bound a depth
+        // surface where a colour target goes. Just Dance 2017 does it for
+        // every depth-only pass it runs — the same Z24S8 surface as both
+        // colour target 0 and the Z target — and then clears it with the
+        // colour channels enabled. There is no colour in a depth surface to
+        // write, so report nothing bound rather than invent an encoding for
+        // it; a clear then does nothing instead of failing, which matters
+        // because a clear that fails takes the channel, and the title, with
+        // it.
+        if depth_format_layout(raw_format).is_ok() {
+            return Ok(None);
+        }
         let format = ColorFormat::from_raw(raw_format)?;
         let tile_mode = self.regs.get(base + 5);
         let horizontal = self.regs.get(base + 2);
@@ -1108,11 +1118,9 @@ impl Engine3D {
                     other => eprintln!("[gpu] clear target={target} -> {other:x?}"),
                 }
             }
-            if let Err(e) = self.with_renderer(ctx, |renderer, engine, ctx| {
+            self.with_renderer(ctx, |renderer, engine, ctx| {
                 renderer.clear_color(engine, ctx, target, layer, channels)
-            }) {
-                eprintln!("[gpu] EXPERIMENT: skipped colour clear: {e}");
-            }
+            })?;
         }
         if clear_depth || clear_stencil {
             self.with_renderer(ctx, |renderer, engine, ctx| {
@@ -1188,7 +1196,8 @@ impl Engine3D {
         if addr == 0 || raw_format == 0 {
             return Ok(());
         }
-        let (bytes, depth_bits, stencil_shift) = depth_format_layout(raw_format)?;
+        let format = depth_format_layout(raw_format)?;
+        let bytes = format.bytes;
         let texels_x = self.regs.get(DEPTH_TARGET_HORIZONTAL);
         let texels_y = self.regs.get(DEPTH_TARGET_VERTICAL);
         let tile_mode = self.regs.get(DEPTH_TARGET_TILE_MODE);
@@ -1207,12 +1216,10 @@ impl Engine3D {
                     let va = addr + layout.offset(tx * bytes, ty, width_bytes) as u64;
                     let mut value = ctx.read_pixel(va, bytes)?;
                     if clear_depth {
-                        let encoded = encode_depth(depth, depth_bits);
-                        let mask = depth_mask(depth_bits);
-                        value = (value & !mask) | (encoded & mask);
+                        value = format.with_depth(value, depth);
                     }
                     if clear_stencil {
-                        if let Some(shift) = stencil_shift {
+                        if let Some(shift) = format.stencil_shift {
                             value =
                                 (value & !(0xFFu128 << shift)) | ((stencil as u128) << shift);
                         }
@@ -1225,52 +1232,103 @@ impl Engine3D {
     }
 }
 
-/// `(bytes per pixel, depth bits, stencil bit offset)` for a depth format.
-/// Depth bits of 32 with a float layout is signalled by `depth_bits == 0`.
-pub(crate) fn depth_format_layout(raw: u32) -> Result<(u32, u32, Option<u32>)> {
-    Ok(match raw {
-        0x0A => (4, 0, None),        // Z32Float
-        0x13 => (2, 16, None),       // Z16Unorm
-        0x14 => (4, 24, Some(24)),   // S8Z24Unorm
-        0x15 => (4, 24, None),       // Z24X8Unorm
-        0x16 => (4, 24, Some(24)),   // Z24S8Unorm
-        0x17 => (1, 0, Some(0)),     // S8Uint
-        0x19 => (8, 0, Some(32)),    // Z32S8X24Float
+/// How a depth format packs depth and stencil into one pixel.
+///
+/// NVIDIA names the fields most significant first, so `Z24S8` keeps its
+/// stencil in the *low* byte and `S8Z24` in the high one — the opposite of
+/// how the names read. Mesa's nv50 format table is what settles it: it maps
+/// `PIPE_FORMAT_Z24_UNORM_S8_UINT`, whose depth is in the low 24 bits, onto
+/// NVIDIA's `S8Z24`, and `PIPE_FORMAT_S8_UINT_Z24_UNORM` onto `Z24S8`. The
+/// table below had those two the wrong way round, which wrote Just Dance
+/// 2017's depth into its stencil byte and its stencil into the top of its
+/// depth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepthLayout {
+    /// Bytes per pixel.
+    pub bytes: u32,
+    /// How many bits of depth, or `0` for a 32-bit float.
+    pub depth_bits: u32,
+    /// Where the depth field starts within the pixel.
+    pub depth_shift: u32,
+    /// Where the stencil byte starts, for the formats that carry one.
+    pub stencil_shift: Option<u32>,
+}
+
+impl DepthLayout {
+    /// The bits of a pixel the depth field occupies.
+    pub fn depth_mask(&self) -> u128 {
+        let width: u128 = match self.depth_bits {
+            0 => 0xFFFF_FFFF,
+            bits => (1u128 << bits) - 1,
+        };
+        width << self.depth_shift
+    }
+
+    /// `depth`, in `0.0..=1.0`, encoded where the pixel keeps it.
+    ///
+    /// The rounding is done in `f64`. In `f32` it cannot be: 24 bits of depth
+    /// scale to 16777215, and `16777215.0 + 0.5` is not representable as an
+    /// `f32` — it rounds up to 16777216, one bit past the field, so a depth
+    /// buffer cleared to 1.0 came back cleared to 0 and every depth test
+    /// against it failed.
+    pub fn encode_depth(&self, depth: f32) -> u128 {
+        let stored = match self.depth_bits {
+            0 => depth.to_bits() as u128,
+            bits => {
+                let max = ((1u64 << bits) - 1) as f64;
+                (depth.clamp(0.0, 1.0) as f64 * max + 0.5) as u128
+            }
+        };
+        stored << self.depth_shift
+    }
+
+    /// Inverse of [`DepthLayout::encode_depth`], from a whole stored pixel.
+    pub fn decode_depth(&self, pixel: u128) -> f32 {
+        let stored = (pixel & self.depth_mask()) >> self.depth_shift;
+        match self.depth_bits {
+            0 => f32::from_bits(stored as u32),
+            bits => {
+                let max = ((1u64 << bits) - 1) as f64;
+                (stored as f64 / max) as f32
+            }
+        }
+    }
+
+    /// `pixel` with its depth replaced and every other bit left alone.
+    pub fn with_depth(&self, pixel: u128, depth: f32) -> u128 {
+        let mask = self.depth_mask();
+        (pixel & !mask) | (self.encode_depth(depth) & mask)
+    }
+
+    /// Whether depth shares its pixel with a stencil byte, and so whether
+    /// writing depth has to read the pixel back rather than overwrite it.
+    pub fn packs_stencil(&self) -> bool {
+        self.stencil_shift.is_some()
+    }
+}
+
+/// The [`DepthLayout`] of a `SET_ZT_FORMAT` value, named as
+/// `NVB197_SET_ZT_FORMAT_V` names it.
+pub(crate) fn depth_format_layout(raw: u32) -> Result<DepthLayout> {
+    // `S8` has no depth field at all; its depth columns are never read,
+    // because a guest that clears depth into a stencil-only surface is
+    // asking for something that does not exist.
+    let (bytes, depth_bits, depth_shift, stencil_shift) = match raw {
+        0x0A => (4, 0, 0, None),      // ZF32
+        0x13 => (2, 16, 0, None),     // Z16
+        0x14 => (4, 24, 8, Some(0)),  // Z24S8
+        0x15 => (4, 24, 0, None),     // X8Z24
+        0x16 => (4, 24, 0, Some(24)), // S8Z24
+        0x17 => (1, 0, 0, Some(0)),   // S8
+        0x19 => (8, 0, 0, Some(32)),  // ZF32_X24S8
         other => {
             return Err(Error::Gpu(format!(
                 "3d: unsupported depth format {:#x}",
                 other
             )))
         }
-    })
-}
-
-pub(crate) fn depth_mask(depth_bits: u32) -> u128 {
-    match depth_bits {
-        0 => 0xFFFF_FFFF,
-        bits => (1u128 << bits) - 1,
-    }
-}
-
-pub(crate) fn encode_depth(depth: f32, depth_bits: u32) -> u128 {
-    match depth_bits {
-        0 => depth.to_bits() as u128,
-        bits => {
-            let max = ((1u64 << bits) - 1) as f32;
-            (depth * max + 0.5) as u128
-        }
-    }
-}
-
-/// Inverse of [`encode_depth`]: a stored depth value back to `0.0..=1.0`.
-pub(crate) fn decode_depth(raw: u128, depth_bits: u32) -> f32 {
-    match depth_bits {
-        0 => f32::from_bits(raw as u32),
-        bits => {
-            let max = ((1u64 << bits) - 1) as f32;
-            (raw & depth_mask(bits)) as f32 / max
-        }
-    }
+    };
+    Ok(DepthLayout { bytes, depth_bits, depth_shift, stencil_shift })
 }
 
 #[cfg(test)]
@@ -1368,6 +1426,18 @@ mod tests {
         engine.regs.set(0x206, 1);
         engine.regs.set(SCREEN_SCISSOR_HORIZONTAL, width << 16);
         engine.regs.set(SCREEN_SCISSOR_VERTICAL, height << 16);
+    }
+
+    /// Program a single-pixel block-linear depth target in `format`.
+    fn setup_depth_target(engine: &mut Engine3D, base: u64, format: u32) {
+        engine.regs.set(DEPTH_TARGET_ADDR, (base >> 32) as u32);
+        engine.regs.set(DEPTH_TARGET_ADDR + 1, base as u32);
+        engine.regs.set(DEPTH_TARGET_FORMAT, format);
+        engine.regs.set(DEPTH_TARGET_TILE_MODE, 0);
+        engine.regs.set(DEPTH_TARGET_HORIZONTAL, 1);
+        engine.regs.set(DEPTH_TARGET_VERTICAL, 1);
+        engine.regs.set(SCREEN_SCISSOR_HORIZONTAL, 1 << 16);
+        engine.regs.set(SCREEN_SCISSOR_VERTICAL, 1 << 16);
     }
 
     #[test]
@@ -1508,6 +1578,72 @@ mod tests {
         engine.write(CLEAR_BUFFERS, 0b100, true, &mut ctx).unwrap();
 
         assert_eq!(h.mem.read_u32(0x3000_0000).unwrap(), 0x1122_33FF);
+    }
+
+    #[test]
+    fn a_colour_target_holding_a_depth_format_is_not_a_colour_target() {
+        // Just Dance 2017 binds one Z24S8 surface as both the Z target and
+        // colour target 0, then clears it with the colour channels enabled.
+        // The clear has to come back having done nothing: a clear that
+        // returns an error takes the channel, and the title, with it.
+        let mut h = Harness::new(0x1000);
+        h.mem.write_u32(0x3000_0000, 0x1122_3344).unwrap();
+        let mut engine = Engine3D::new();
+        setup_pitch_target(&mut engine, h.base, 1, 1);
+        engine.regs.set(0x204, 0x14); // Z24S8, where a colour format goes
+        engine.regs.set(CLEAR_COLOR, 1.0f32.to_bits());
+        {
+            let mut ctx = h.ctx();
+            engine.write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx).unwrap();
+        }
+
+        assert_eq!(engine.render_target(0).unwrap(), None);
+        assert_eq!(h.mem.read_u32(0x3000_0000).unwrap(), 0x1122_3344);
+    }
+
+    #[test]
+    fn a_colour_target_in_a_format_that_is_neither_is_still_an_error() {
+        // Recognising a depth format is not licence to swallow a value that
+        // is not one: that is still the guest, or this model, being wrong.
+        let mut h = Harness::new(0x1000);
+        let mut engine = Engine3D::new();
+        setup_pitch_target(&mut engine, h.base, 1, 1);
+        engine.regs.set(0x204, 0x77);
+        let mut ctx = h.ctx();
+        assert!(engine.write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx).is_err());
+    }
+
+    #[test]
+    fn z24s8_keeps_its_stencil_low_and_s8z24_keeps_it_high() {
+        // The two names are mirror images and read backwards: NVIDIA names
+        // the fields most significant first. Clearing depth to 1.0 and
+        // stencil to 0xAB says which end each one landed on.
+        for (format, expected) in [(0x14u32, 0xFFFF_FFAB_u32), (0x16, 0xABFF_FFFF)] {
+            let mut h = Harness::new(0x1000);
+            let mut engine = Engine3D::new();
+            setup_depth_target(&mut engine, h.base, format);
+            engine.regs.set(CLEAR_DEPTH, 1.0f32.to_bits());
+            engine.regs.set(CLEAR_STENCIL, 0xAB);
+            {
+                let mut ctx = h.ctx();
+                engine.write(CLEAR_BUFFERS, 0b11, true, &mut ctx).unwrap();
+            }
+
+            assert_eq!(h.mem.read_u32(0x3000_0000).unwrap(), expected, "format {format:#x}");
+        }
+    }
+
+    #[test]
+    fn writing_depth_leaves_a_packed_stencil_byte_alone() {
+        let z24s8 = depth_format_layout(0x14).unwrap();
+        assert!(z24s8.packs_stencil());
+        assert_eq!(z24s8.with_depth(0x0000_00AB, 1.0), 0xFFFF_FFAB);
+        assert!((z24s8.decode_depth(z24s8.with_depth(0x0000_00AB, 0.5)) - 0.5).abs() < 1e-6);
+
+        // Z32Float owns its whole pixel, so a depth write need not read first.
+        let zf32 = depth_format_layout(0x0A).unwrap();
+        assert!(!zf32.packs_stencil());
+        assert_eq!(zf32.decode_depth(zf32.encode_depth(0.25)), 0.25);
     }
 
     #[test]
