@@ -37,6 +37,14 @@ fn main() {
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
+    // `DOCKED=1` docks before boot; `DOCK_AT=<frame>` docks once that frame
+    // has been presented, which is what a real dock does — a running title is
+    // told by the AM messages `set_operation_mode` queues, and one that was
+    // never running had nothing to tell.
+    if std::env::var("DOCKED").is_ok() {
+        cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
+    }
+    let dock_at = common::env_u64("DOCK_AT", u64::MAX);
     title.mount_romfs(&mut cpu);
     common::load_fallback_font(&mut cpu);
     common::register_firmware(&mut cpu, &title.keys);
@@ -58,6 +66,9 @@ fn main() {
                         channel.three_d.set_renderer(Box::new(gpu));
                     }
                 }
+            }
+            if cpu.nv.gpu.frames >= dock_at {
+                cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
             }
             if cpu.nv.gpu.frames >= want {
                 Flow::Stop

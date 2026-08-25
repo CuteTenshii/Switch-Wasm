@@ -33,6 +33,10 @@
 //! That is not only a portability change. It is the same change that turns
 //! eighty-eight round trips a frame into one.
 
+/// The `wgpu` this was built against, so a caller that has to name a device
+/// type does not have to guess at a matching version.
+pub use wgpu;
+
 use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::pipeline::{self as state, Format, Pipeline};
@@ -113,6 +117,20 @@ fn blend(blend: state::Blend) -> wgpu::BlendState {
     wgpu::BlendState { color: component(blend.color), alpha: component(blend.alpha) }
 }
 
+/// A readback that has been asked for and not yet copied out.
+///
+/// Kept as a type because asking and collecting are the two halves a browser
+/// has to put an `await` between — see [`Gpu::write_back`], which today does
+/// both with a wait in the middle.
+#[derive(Debug)]
+struct Pending {
+    staging: wgpu::Buffer,
+    target: Target,
+    /// The row stride the copy used, which is the surface's rounded up to
+    /// 256 bytes.
+    padded: u32,
+}
+
 /// A render target held on the device, and where in guest memory it came
 /// from.
 #[derive(Debug)]
@@ -138,6 +156,21 @@ pub struct Gpu {
     /// Kept rather than written back where it happened, so that no draw ever
     /// waits on a device.
     evicted: Vec<Held>,
+    /// Compiled shader modules, by a hash of the WGSL that produced them.
+    ///
+    /// Compiling a module is the whole cost of a draw: WGSL through naga to
+    /// SPIR-V is about 59 ms, against 2 ms to translate the shader and half
+    /// a millisecond to read every buffer the draw touches. The Home Menu
+    /// has five distinct shader pairs and drew eighty-eight times a frame,
+    /// so this is not an optimisation so much as not doing the same work
+    /// eighty-eight times.
+    ///
+    /// Keyed by the source rather than by the shader's address, because the
+    /// source is what the module *is*: two draws whose shaders live at the
+    /// same address but were assembled with a different texture swizzle are
+    /// two different modules, and a guest is free to overwrite a shader in
+    /// place.
+    modules: std::collections::HashMap<u64, wgpu::ShaderModule>,
     /// Set by the device when it rejects something. Read on the next draw,
     /// because asking sooner means waiting.
     failed: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -154,6 +187,10 @@ pub struct Gpu {
     /// Which draw of the current frame this is, counting from the clear that
     /// starts it. Only `GPU_ONLY` reads it.
     in_frame: u32,
+    /// `GPU_TIMES=1` accumulates where a draw's time goes, and prints it
+    /// when this is dropped. Native only: it reads a clock, and a browser's
+    /// answer to that is another question entirely.
+    times: Option<Times>,
     /// `GPU_ONLY=<i>` renders only the i-th draw of each frame here and
     /// leaves the rest to the rasterizer.
     ///
@@ -164,10 +201,56 @@ pub struct Gpu {
     only: Option<u32>,
 }
 
+/// Where a draw's time goes, in microseconds, over a whole run.
+#[derive(Debug, Default, Clone, Copy)]
+struct Times {
+    /// Decoding both shaders out of guest memory and translating them.
+    translate: u128,
+    /// Reading the vertices, indices, constants and textures.
+    upload: u128,
+    /// Generating the WGSL and handing it to the device.
+    modules: u128,
+    /// Building the pipeline and its bind groups.
+    pipeline: u128,
+    /// Encoding and submitting the pass.
+    encode: u128,
+    /// Handing surfaces back to guest memory.
+    flush: u128,
+}
+
 impl Drop for Gpu {
     fn drop(&mut self) {
         eprintln!("[gpu] {} draws rendered, {} fell back", self.drawn, self.fallbacks);
+        if let Some(t) = self.times {
+            let ms = |v: u128| v as f64 / 1000.0;
+            eprintln!(
+                "[gpu] translate {:.0}ms  upload {:.0}ms  modules {:.0}ms  \
+                 pipeline {:.0}ms  encode {:.0}ms  flush {:.0}ms",
+                ms(t.translate),
+                ms(t.upload),
+                ms(t.modules),
+                ms(t.pipeline),
+                ms(t.encode),
+                ms(t.flush),
+            );
+        }
     }
+}
+
+/// Add `at.elapsed()` to `slot`, if timing is on.
+macro_rules! timed {
+    ($self:ident, $field:ident, $body:expr) => {{
+        if $self.times.is_none() {
+            $body
+        } else {
+            let at = std::time::Instant::now();
+            let out = $body;
+            if let Some(t) = $self.times.as_mut() {
+                t.$field += at.elapsed().as_micros();
+            }
+            out
+        }
+    }};
 }
 
 impl Gpu {
@@ -193,6 +276,7 @@ impl Gpu {
             queue,
             held: std::collections::HashMap::new(),
             evicted: Vec::new(),
+            modules: std::collections::HashMap::new(),
             failed,
             software: Software,
             drawn: 0,
@@ -200,6 +284,7 @@ impl Gpu {
             last_fallback: None,
             reasons: Vec::new(),
             in_frame: 0,
+            times: std::env::var("GPU_TIMES").is_ok().then(Times::default),
             only: std::env::var("GPU_ONLY").ok().and_then(|v| v.parse().ok()),
         }
     }
@@ -266,13 +351,25 @@ impl Gpu {
         self.write_back(&held, ctx)
     }
 
-    fn write_back(&self, held: &Held, ctx: &mut ExecCtx) -> Result<()> {
+    /// Ask for a surface back, wait for it, and put it in guest memory.
+    ///
+    /// The wait is why this cannot run in a browser yet, and the two halves
+    /// are kept apart — [`Gpu::start_read_back`] and [`Gpu::land`] — because
+    /// that is where the seam goes when it can. What does *not* work is
+    /// simply deferring the landing to the next flush: the Home Menu
+    /// double-buffers, so the surface `present` reads is always the one whose
+    /// readback was just asked for and never one that has arrived. Tried, and
+    /// it presented a black frame every time.
+    fn write_back(&mut self, held: &Held, ctx: &mut ExecCtx) -> Result<()> {
         // A surface nothing drew into is already what guest memory says.
         if !held.dirty {
             return Ok(());
         }
-        let rows = self.read_back(&held.target, &held.texture)?;
-        held.target.write(ctx, &rows)
+        let pending = self.start_read_back(&held.target, &held.texture);
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| Error::Gpu(format!("waiting for the readback: {e}")))?;
+        self.land(&pending, ctx)
     }
 
     /// Bring a guest surface onto the device.
@@ -327,7 +424,7 @@ impl Gpu {
     /// This is the one place that waits, and the reason [`Renderer::flush`]
     /// exists to be the only caller: on a browser the wait is a deadlock
     /// anywhere the event loop is not free to run.
-    fn read_back(&self, target: &Target, texture: &wgpu::Texture) -> Result<Vec<u8>> {
+    fn start_read_back(&self, target: &Target, texture: &wgpu::Texture) -> Pending {
         let padded = target.row_bytes.div_ceil(COPY_ALIGNMENT) * COPY_ALIGNMENT;
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
@@ -361,22 +458,29 @@ impl Gpu {
         );
         self.queue.submit([encoder.finish()]);
 
-        let slice = staging.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| Error::Gpu(format!("gpu: waiting for the readback: {e}")))?;
+        // Asked for, not waited on. The map completes when the device is next
+        // polled — which on a browser is when the event loop next runs, and
+        // there is no way to make that happen from inside a blocking call.
+        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        Pending { staging, target: *target, padded }
+    }
+
+    /// Copy a finished readback into guest memory, dropping the row padding
+    /// `copyTextureToBuffer` insisted on.
+    fn land(&self, pending: &Pending, ctx: &mut ExecCtx) -> Result<()> {
+        let slice = pending.staging.slice(..);
         let mapped = slice
             .get_mapped_range()
-            .map_err(|e| Error::Gpu(format!("gpu: mapping the readback: {e}")))?;
+            .map_err(|e| Error::Gpu(format!("mapping the readback: {e}")))?;
+        let target = &pending.target;
         let mut rows = Vec::with_capacity((target.row_bytes * target.rows) as usize);
         for y in 0..target.rows {
-            let at = (y * padded) as usize;
+            let at = (y * pending.padded) as usize;
             rows.extend_from_slice(&mapped[at..at + target.row_bytes as usize]);
         }
         drop(mapped);
-        staging.unmap();
-        Ok(rows)
+        pending.staging.unmap();
+        target.write(ctx, &rows)
     }
 }
 
@@ -389,15 +493,17 @@ impl Gpu {
     /// thing it caches.
     fn render(&mut self, p: &Prepared, ctx: &mut ExecCtx) -> std::result::Result<(), String> {
         let target_format = texture_format(p.color.format).map_err(|e| format!("{e:?}"))?;
-        let vs_source = wgsl::module(&p.vs, Stage::Vertex, &p.vs_layout)
-            .map_err(|e| format!("vertex module: {e}"))?;
-        let fs_source = wgsl::module(&p.fs, Stage::Fragment, &p.fs_layout)
-            .map_err(|e| format!("fragment module: {e}"))?;
         if let Some(e) = self.device_error() {
             return Err(format!("the device rejected an earlier draw: {e}"));
         }
-        let vs_module = self.module("vertex", &vs_source);
-        let fs_module = self.module("fragment", &fs_source);
+        let (vs_module, fs_module) = timed!(self, modules, {
+            let vs_source = wgsl::module(&p.vs, Stage::Vertex, &p.vs_layout);
+            let fs_source = wgsl::module(&p.fs, Stage::Fragment, &p.fs_layout);
+            match (vs_source, fs_source) {
+                (Ok(vs), Ok(fs)) => Ok((self.module("vertex", &vs), self.module("fragment", &fs))),
+                (Err(e), _) | (_, Err(e)) => Err(format!("module: {e}")),
+            }
+        })?;
 
         // Vertex buffers, and the attributes the vertex shader actually
         // reads: a draw binds sixteen slots and a shader reads one.
@@ -453,15 +559,17 @@ impl Gpu {
             })
             .collect();
 
-        let (vs_group_layout, vs_group) = self.bind_group(p, ShaderStage::VertexB, 0)?;
-        let (fs_group_layout, fs_group) = self.bind_group(p, ShaderStage::Fragment, 1)?;
+        let (vs_group_layout, vs_group) =
+            timed!(self, pipeline, self.bind_group(p, ShaderStage::VertexB, 0))?;
+        let (fs_group_layout, fs_group) =
+            timed!(self, pipeline, self.bind_group(p, ShaderStage::Fragment, 1))?;
         let pipeline_layout =
             self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("draw"),
                 bind_group_layouts: &[Some(&vs_group_layout), Some(&fs_group_layout)],
                 immediate_size: 0,
             });
-        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let descriptor = wgpu::RenderPipelineDescriptor {
             label: Some("draw"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
@@ -500,7 +608,8 @@ impl Gpu {
             }),
             multiview_mask: None,
             cache: None,
-        });
+        };
+        let pipeline = timed!(self, pipeline, self.device.create_render_pipeline(&descriptor));
 
         // Held across the frame: the first draw brings the surface onto the
         // device and every later one finds it already there.
@@ -586,7 +695,7 @@ impl Gpu {
                 None => pass.draw(0..p.count, instances),
             }
         }
-        self.queue.submit([encoder.finish()]);
+        timed!(self, encode, self.queue.submit([encoder.finish()]));
         Ok(())
     }
 
@@ -770,11 +879,20 @@ impl Gpu {
     /// and is read at the start of the next draw — a frame late, which is
     /// what "do not block" costs and is cheap: the WGSL has already been
     /// through `naga` before it gets here.
-    fn module(&self, what: &str, source: &str) -> wgpu::ShaderModule {
-        self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+    fn module(&mut self, what: &str, source: &str) -> wgpu::ShaderModule {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        source.hash(&mut hasher);
+        let key = hasher.finish();
+        if let Some(module) = self.modules.get(&key) {
+            return module.clone();
+        }
+        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(what),
             source: wgpu::ShaderSource::Wgsl(source.into()),
-        })
+        });
+        self.modules.insert(key, module.clone());
+        module
     }
 
     /// Whatever the device rejected since this was last asked.
@@ -858,7 +976,11 @@ impl Gpu {
     /// Everything this reaches for is `switch-core`'s: the translation, the
     /// pipeline state and the uploads all already exist and are already
     /// tested against the rasterizer. What is left is arranging them.
-    fn prepare(&self, engine: &Engine3D, ctx: &ExecCtx) -> std::result::Result<Prepared, String> {
+    fn prepare(
+        &mut self,
+        engine: &Engine3D,
+        ctx: &ExecCtx,
+    ) -> std::result::Result<Prepared, String> {
         let state = Pipeline::of(engine).map_err(|e| e.to_string())?;
         let color = Targets::of(engine)
             .map_err(|e| format!("{e:?}"))?
@@ -867,8 +989,13 @@ impl Gpu {
 
         // Unfolded, so a module depends only on the shader binary and not on
         // what happened to be in a constant buffer when it was translated.
-        let vs = self.translate(engine, ctx, ShaderStage::VertexB)?;
-        let fs = self.translate(engine, ctx, ShaderStage::Fragment)?;
+        let (vs, fs) = timed!(self, translate, {
+            (
+                self.translate(engine, ctx, ShaderStage::VertexB),
+                self.translate(engine, ctx, ShaderStage::Fragment),
+            )
+        });
+        let (vs, fs) = (vs?, fs?);
 
         let mut vs_layout = Layout::of(&vs, Stage::Vertex);
         let mut fs_layout = Layout::of(&fs, Stage::Fragment);
@@ -898,8 +1025,10 @@ impl Gpu {
         let mut banks: Vec<(ShaderStage, u32)> = Vec::new();
         banks.extend(vs.const_banks.iter().map(|&b| (ShaderStage::VertexB, u32::from(b))));
         banks.extend(fs.const_banks.iter().map(|&b| (ShaderStage::Fragment, u32::from(b))));
-        let uploads = Uploads::of(engine, &state, ctx, Banks::Read(&banks), &immediates)
-            .map_err(|e| format!("{e:?}"))?;
+        let uploads = timed!(self, upload, {
+            Uploads::of(engine, &state, ctx, Banks::Read(&banks), &immediates)
+        })
+        .map_err(|e| format!("{e:?}"))?;
 
         // The swizzle is in the descriptor, which is guest memory the draw
         // points at, so the translation cannot know it and the layout has to
@@ -1016,6 +1145,17 @@ impl Renderer for Gpu {
     }
 
     fn flush(&mut self, ctx: &mut ExecCtx) -> Result<()> {
+        let at = self.times.map(|_| std::time::Instant::now());
+        let result = self.flush_inner(ctx);
+        if let (Some(at), Some(t)) = (at, self.times.as_mut()) {
+            t.flush += at.elapsed().as_micros();
+        }
+        result
+    }
+}
+
+impl Gpu {
+    fn flush_inner(&mut self, ctx: &mut ExecCtx) -> Result<()> {
         for held in std::mem::take(&mut self.evicted) {
             self.write_back(&held, ctx)?;
         }
