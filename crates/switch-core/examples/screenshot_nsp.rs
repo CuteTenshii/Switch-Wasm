@@ -15,48 +15,25 @@ mod common;
 use common::{Flow, Pace};
 use std::env;
 use switch_core::cpu::Cpu;
-use switch_core::nsp::Pfs0;
 
 const USAGE: &str = "screenshot_nsp <path.nsp> <prod.keys> <title.keys> <out.ppm> [frame]";
 
 fn main() {
-    let nsp = common::read(common::arg(1, USAGE));
-    let pfs0 = Pfs0::parse(&nsp).unwrap();
-    let mut keys = common::keys(common::arg(2, USAGE), Some(common::arg(3, USAGE)));
+    let title = common::Title::open_nsp(
+        common::arg(1, USAGE),
+        common::arg(2, USAGE),
+        Some(common::arg(3, USAGE)),
+    );
     let out = common::arg(4, USAGE);
     let want = common::opt_num(5).unwrap_or(1);
-    let f = pfs0.files.iter().find(|f| {
-        if !f.name.to_ascii_lowercase().ends_with(".nca") { return false; }
-        let end = (f.offset + f.size) as usize;
-        if end > nsp.len() { return false; }
-        matches!(switch_core::nca::Nca::parse_with_keys(&nsp[f.offset as usize..end], Some(&keys)),
-            Ok(n) if n.content_type == switch_core::nca::ContentType::Program)
-    }).expect("no Program NCA");
-    let raw = &nsp[f.offset as usize..(f.offset + f.size) as usize];
-    let nca = switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)).unwrap();
-    if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
-        let tk = switch_core::ticket::find_and_decrypt_title_key(&nca.rights_id, &pfs0.files, &nsp, &keys).unwrap();
-        keys.add_resolved_title_key(nca.rights_id, tk);
-    }
-    let exefs = nca.decrypt_pfs0_section(raw, &keys, nca.exefs_section_index().unwrap()).unwrap();
-    let pf = Pfs0::parse(&exefs).unwrap();
-    const ORDER: &[&str] = &["rtld","main","subsdk0","subsdk1","subsdk2","subsdk3","subsdk4","sdk"];
-    let modules: Vec<(&str,&[u8])> = ORDER.iter().filter_map(|&n| {
-        let e = pf.find(n)?;
-        Some((n, &exefs[e.offset as usize..(e.offset + e.size) as usize]))
-    }).collect();
+
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    if let Some(i) = nca.romfs_section_index() {
-        if let Ok(r) = nca.decrypt_romfs_section(raw, &keys, i) { cpu.set_romfs(r); }
-    }
+    title.mount_romfs(&mut cpu);
     common::load_fallback_font(&mut cpu);
-    common::register_firmware(&mut cpu, &keys);
-    // The address space this title gets is chosen by its own manifest — see
-    // `MemoryLayout`. Must precede `boot_retail_program`.
-    cpu.set_system_resource_size(switch_core::npdm::Npdm::system_resource_size_of(&pf, &exefs));
-    cpu.set_program_id(nca.program_id);
-    cpu.boot_retail_program(&modules).unwrap();
+    common::register_firmware(&mut cpu, &title.keys);
+    title.boot(&mut cpu);
+
     // `WATCH_MEM=<hex addr>` reports the first step at which a 4 KiB window
     // there stops being all zeroes. A GPU reading zeroes is either looking at
     // the wrong memory or at memory nothing has filled yet, and this is what

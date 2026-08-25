@@ -16,52 +16,24 @@ use common::{Flow, Pace};
 use std::collections::HashMap;
 use std::env;
 use switch_core::cpu::Cpu;
-use switch_core::nsp::Pfs0;
 
 const USAGE: &str = "screenshot_nca <path.nca> <prod.keys> <title.keys> <out.ppm> [frame]";
 
 fn main() {
-    let raw = common::read(common::arg(1, USAGE));
-    let keys = common::keys(common::arg(2, USAGE), Some(common::arg(3, USAGE)));
+    let title = common::Title::open_nca(
+        common::arg(1, USAGE),
+        common::arg(2, USAGE),
+        Some(common::arg(3, USAGE)),
+    );
     let out = common::arg(4, USAGE);
     let want = common::opt_num(5).unwrap_or(1);
 
-    let nca = switch_core::nca::Nca::parse_with_keys(&raw, Some(&keys)).unwrap();
-    let exefs = nca
-        .decrypt_pfs0_section(&raw, &keys, nca.exefs_section_index().unwrap())
-        .unwrap();
-    let pf = Pfs0::parse(&exefs).unwrap();
-    const ORDER: &[&str] = &[
-        "rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4", "sdk",
-    ];
-    let modules: Vec<(&str, &[u8])> = ORDER
-        .iter()
-        .filter_map(|&n| {
-            let e = pf.find(n)?;
-            Some((n, &exefs[e.offset as usize..(e.offset + e.size) as usize]))
-        })
-        .collect();
-
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    match nca.romfs_section_index() {
-        Some(i) => match nca.decrypt_romfs_section(&raw, &keys, i) {
-            Ok(r) => {
-                println!("[romfs] section {i}: {} bytes", r.len());
-                cpu.set_romfs(r);
-            }
-            Err(e) => println!("[romfs] section {i} failed to decrypt: {e}"),
-        },
-        None => println!("[romfs] no romfs section"),
-    }
+    title.mount_romfs(&mut cpu);
     common::load_fallback_font(&mut cpu);
-    common::register_firmware(&mut cpu, &keys);
-
-    // The address space this title gets is chosen by its own manifest — see
-    // `MemoryLayout`. Must precede `boot_retail_program`.
-    cpu.set_system_resource_size(switch_core::npdm::Npdm::system_resource_size_of(&pf, &exefs));
-    cpu.set_program_id(nca.program_id);
-    cpu.boot_retail_program(&modules).unwrap();
+    common::register_firmware(&mut cpu, &title.keys);
+    title.boot(&mut cpu);
 
     let trap: Option<(u32, u32)> = env::var("TRAP_WRITE").ok().and_then(|v| {
         let (s, n) = v.split_once(':')?;

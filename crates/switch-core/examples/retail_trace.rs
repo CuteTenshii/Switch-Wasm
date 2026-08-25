@@ -10,76 +10,27 @@ mod common;
 
 
 use std::env;
-use std::fs;
 use switch_core::cpu::Cpu;
-use switch_core::nsp::Pfs0;
+
+const USAGE: &str = "retail_trace <nsp> <prod.keys> <title.keys> [tail_len]";
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let nsp_data = fs::read(&args[1]).unwrap();
-    let pfs0 = Pfs0::parse(&nsp_data).unwrap();
-    let mut keys = common::keys(&args[2], Some(&args[3]));
-    let tail: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(4000);
-
-    let mut program = None;
-    for f in &pfs0.files {
-        if !f.name.to_ascii_lowercase().ends_with(".nca") {
-            continue;
-        }
-        let raw = &nsp_data[f.offset as usize..(f.offset + f.size) as usize];
-        if let Ok(nca) = switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)) {
-            if nca.content_type == switch_core::nca::ContentType::Program {
-                program = Some(f);
-            }
-        }
-    }
-    let f = program.unwrap();
-    let raw = &nsp_data[f.offset as usize..(f.offset + f.size) as usize];
-    let nca = switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)).unwrap();
-    if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
-        let tk = switch_core::ticket::find_and_decrypt_title_key(
-            &nca.rights_id, &pfs0.files, &nsp_data, &keys,
-        )
-        .unwrap();
-        keys.add_resolved_title_key(nca.rights_id, tk);
-    }
-    let exefs = nca
-        .decrypt_pfs0_section(raw, &keys, nca.exefs_section_index().unwrap())
-        .unwrap();
-    let exefs_pfs0 = Pfs0::parse(&exefs).unwrap();
-    const ORDER: &[&str] = &[
-        "rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4", "subsdk5",
-        "subsdk6", "subsdk7", "subsdk8", "subsdk9", "sdk",
-    ];
-    let modules: Vec<(&str, &[u8])> = ORDER
-        .iter()
-        .filter_map(|&n| {
-            let f = exefs_pfs0.find(n)?;
-            Some((n, &exefs[f.offset as usize..(f.offset + f.size) as usize]))
-        })
-        .collect();
+    let title = common::Title::open_nsp(
+        common::arg(1, USAGE),
+        common::arg(2, USAGE),
+        Some(common::arg(3, USAGE)),
+    );
+    let tail: usize = common::opt_num(4).unwrap_or(4000) as usize;
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    if let Some(i) = nca.romfs_section_index() {
-        if let Ok(r) = nca.decrypt_romfs_section(raw, &keys, i) {
-            cpu.set_romfs(r);
-        }
-    }
+    title.mount_romfs(&mut cpu);
     // The system fonts `pl:u` hands out. Without them a title that draws
     // text waits for a font that never arrives — the browser stages one at
     // startup, so a native run that skips it fails in a way the real
     // frontend never would.
-    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf");
-    match fs::read(font) {
-        Ok(bytes) => cpu.set_shared_font(bytes),
-        Err(e) => println!("no font at {font} ({e}): text will not render"),
-    }
-    // The address space this title gets is chosen by its own manifest — see
-    // `MemoryLayout`. Must precede `boot_retail_program`.
-    cpu.set_system_resource_size(switch_core::npdm::Npdm::system_resource_size_of(&exefs_pfs0, &exefs));
-    cpu.set_program_id(nca.program_id);
-    cpu.boot_retail_program(&modules).unwrap();
+    common::load_fallback_font(&mut cpu);
+    title.boot(&mut cpu);
 
     let ring_from = env::var("RING_FROM")
         .ok()
