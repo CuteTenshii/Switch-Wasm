@@ -1869,8 +1869,16 @@ impl Cpu {
                 .cloned()
                 .unwrap_or_else(|| "vi:root".to_owned());
             match iface.as_str() {
-                // IHOSBinderDriverRelay: libnx binder protocol — AdjustRefcount
-                // (1), GetNativeHandle (2), TransactParcel (3).
+                // IHOSBinderDriverRelay: the binder protocol — TransactParcel
+                // (0), AdjustRefcount (1), GetNativeHandle (2),
+                // TransactParcelAuto (3).
+                //
+                // 0 and 3 are the same transaction; they differ only in how
+                // the parcel is marshalled, and `ipc_map_buffers` reads either
+                // form. 3 arrived in 3.0.0, so a caller built against an SDK
+                // older than that sends 0 and only 0 — Just Dance 2017 does,
+                // and answering it with an empty success queued every frame it
+                // rendered into nothing.
                 "vi:ihosbd" => match cmd_id {
                     Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                     // GetNativeHandle: the buffer queue's own event, and a
@@ -1880,7 +1888,7 @@ impl Cpu {
                         let h = self.vi_binder_event();
                         self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                     }
-                    Some(3) => self.vi_transact_parcel(tls),
+                    Some(0) | Some(3) => self.vi_transact_parcel(tls),
                     _ => self.vi_unhandled(tls, &iface, cmd_id),
                 },
                 // vi root: cmd 2 hands out the IApplicationDisplayService.
@@ -1961,7 +1969,7 @@ impl Cpu {
                         let h = self.vi_binder_event();
                         self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                     }
-                    Some(3) => self.vi_transact_parcel(tls),
+                    Some(0) | Some(3) => self.vi_transact_parcel(tls),
                     _ => self.vi_unhandled(tls, "vi:ihosbd", cmd_id),
                 },
                 Some("vi:isds") => self.vi_unhandled(tls, "vi:isds", cmd_id),

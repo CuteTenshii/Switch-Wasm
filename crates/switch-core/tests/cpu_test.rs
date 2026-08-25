@@ -4932,6 +4932,138 @@ fn audout_does_not_play_a_stopped_device() {
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1);
 }
 
+/// Build an IPC request carrying one map-alias send buffer *and* one
+/// map-alias receive buffer, the shape `IHOSBinderDriver::TransactParcel`
+/// arrives in, and run it.
+fn ipc_request_plain_with_both_buffers(
+    cpu: &mut Cpu,
+    handle: u64,
+    cmd: u32,
+    send: (u32, u32),
+    recv: (u32, u32),
+    payload: &[u8],
+) {
+    let tls = cpu.tls_base();
+    for i in (0..0x100u32).step_by(4) {
+        cpu.mem.write_u32(tls + i, 0).unwrap();
+    }
+    // Send buffers count in bits 23:20, receive buffers in 27:24.
+    cpu.mem.write_u32(tls, 4 | (1 << 20) | (1 << 24)).unwrap();
+    cpu.mem.write_u32(tls + 4, 0x0c).unwrap();
+    cpu.mem.write_u32(tls + 0x08, send.1).unwrap();
+    cpu.mem.write_u32(tls + 0x0c, send.0).unwrap();
+    cpu.mem.write_u32(tls + 0x10, 0).unwrap();
+    cpu.mem.write_u32(tls + 0x14, recv.1).unwrap();
+    cpu.mem.write_u32(tls + 0x18, recv.0).unwrap();
+    cpu.mem.write_u32(tls + 0x1c, 0).unwrap();
+    // Two descriptors fill the words up to the aligned data area at 0x20.
+    cpu.mem.write_u32(tls + 0x20, 0x4943_4653).unwrap(); // "SFCI"
+    cpu.mem.write_u32(tls + 0x28, cmd).unwrap();
+    for (i, &b) in payload.iter().enumerate() {
+        cpu.mem.write_u8(tls + 0x30 + i as u32, b).unwrap();
+    }
+    run_ipc_request(cpu, handle);
+}
+
+/// One `IGraphicBufferProducer` request parcel: the interface token every
+/// transaction starts with, followed by `body`.
+fn binder_parcel(body: &[u8]) -> Vec<u8> {
+    const NAME: &str = "android.gui.IGraphicBufferProducer";
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&0x100u32.to_le_bytes()); // strict-mode policy
+    payload.extend_from_slice(&(NAME.len() as u32).to_le_bytes());
+    for c in NAME.chars().chain(std::iter::once('\0')) {
+        payload.extend_from_slice(&(c as u16).to_le_bytes());
+    }
+    while payload.len() % 4 != 0 {
+        payload.push(0);
+    }
+    payload.extend_from_slice(body);
+    let mut parcel = Vec::new();
+    parcel.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+    parcel.extend_from_slice(&16u32.to_le_bytes()); // payload offset
+    parcel.extend_from_slice(&0u32.to_le_bytes()); // no flattened objects
+    parcel.extend_from_slice(&(16 + payload.len() as u32).to_le_bytes());
+    parcel.extend_from_slice(&payload);
+    parcel
+}
+
+#[test]
+fn the_binder_transacts_on_the_command_a_pre_3_0_0_sdk_sends() {
+    // `IHOSBinderDriver` has two transactions that do the same work and differ
+    // only in how the parcel is marshalled: `TransactParcel` (0), which takes
+    // map-alias buffers, and `TransactParcelAuto` (3), which takes auto-select
+    // ones and arrived in 3.0.0. An SDK older than that sends 0 and only 0.
+    //
+    // Only 3 was implemented, so 0 fell to the answer `vi_unhandled` gives a
+    // void setter: an empty success, with nothing written into the reply
+    // buffer. Just Dance 2017 -- built against a 2016 SDK -- drove its whole
+    // buffer queue through it, 402 transactions in three billion instructions,
+    // and presented **no frame at all**: every `QUEUE_BUFFER` was accepted and
+    // discarded, so `Action::Present` never reached the GPU.
+    const VI: u64 = 0xB800;
+    const PARCEL: u32 = 0x9000;
+    const REPLY: u32 = 0x9400;
+    /// `NATIVE_WINDOW_WIDTH`, the field `QUERY` is being asked for here.
+    const QUERY_WIDTH: u32 = 0;
+    const QUERY: u32 = 9;
+
+    // Both commands have to answer identically -- that is the whole claim.
+    for cmd in [0u32, 3] {
+        let mut cpu = cpu_at(0x1000);
+        cpu.bootstrap();
+        cpu.set_pc(0x1000);
+        cpu.register_service_handle(VI, "vi:m");
+        let tls = cpu.tls_base();
+
+        // The relay lives two objects down: vi root -> IApplicationDisplayService
+        // (2) -> IHOSBinderDriver (100).
+        ipc_request_plain(&mut cpu, VI, 2, &[]);
+        let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+        assert_ne!(display, 0, "no IApplicationDisplayService");
+        ipc_request_plain(&mut cpu, display, 100, &[]);
+        let relay = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+        assert_ne!(relay, 0, "no IHOSBinderDriver");
+
+        let parcel = binder_parcel(&QUERY_WIDTH.to_le_bytes());
+        for (i, &b) in parcel.iter().enumerate() {
+            cpu.mem.write_u8(PARCEL + i as u32, b).unwrap();
+        }
+        for i in (0..0x100u32).step_by(4) {
+            cpu.mem.write_u32(REPLY + i, 0).unwrap();
+        }
+
+        // `{ s32 binder_id, u32 code, u32 flags }`, the parcel in the send
+        // buffer and the reply into the receive buffer.
+        let mut data = Vec::new();
+        data.extend_from_slice(&1u32.to_le_bytes());
+        data.extend_from_slice(&QUERY.to_le_bytes());
+        data.extend_from_slice(&0u32.to_le_bytes());
+        ipc_request_plain_with_both_buffers(
+            &mut cpu,
+            relay,
+            cmd,
+            (PARCEL, parcel.len() as u32),
+            (REPLY, 0x100),
+            &data,
+        );
+
+        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "cmd {cmd} was refused");
+        // The reply parcel: `{ i32 value, i32 status }` behind the same
+        // four-word header the request carries.
+        let payload_size = cpu.mem.read_u32(REPLY).unwrap();
+        let payload_off = cpu.mem.read_u32(REPLY + 4).unwrap();
+        assert_eq!(payload_off, 16, "cmd {cmd}: no reply parcel came back");
+        assert_eq!(payload_size, 8, "cmd {cmd}: the reply is a value and a status");
+        assert_eq!(
+            cpu.mem.read_u32(REPLY + payload_off).unwrap(),
+            1280,
+            "cmd {cmd}: the queue answered a width query with something else"
+        );
+        assert_eq!(cpu.mem.read_u32(REPLY + payload_off + 4).unwrap(), 0, "cmd {cmd} failed");
+    }
+}
+
 #[test]
 fn vi_native_window_names_the_binder_interface() {
     // `OpenLayer` answers with an Android parcel holding one flattened binder
