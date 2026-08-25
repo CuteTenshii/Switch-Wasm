@@ -4812,6 +4812,65 @@ fn audren_update_reply_has_a_section_for_every_count_the_renderer_was_opened_wit
 }
 
 #[test]
+fn audout_refuses_a_buffer_whose_samples_are_outside_it() {
+    // `data_offset + data_size` has to fit inside `buffer_size`. The Mii
+    // editor submits one where it does not — `buffer` is 6 and `data_offset`
+    // is a pointer — and `buffer + data_offset` then lands inside the
+    // `AudioOutBuffer` struct itself, so what reached the speakers was that
+    // struct's own pointers read as PCM, thousands of times a second. It
+    // buzzed.
+    //
+    // The buffer still comes back to the guest; only its samples are dropped.
+    const AUDOUT: u64 = 0xA000;
+    const DESC: u32 = 0x8000;
+    const PCM: u32 = 0x8100;
+    const TAGS: u32 = 0x8200;
+    const TAG: u64 = 0xFEED_0002;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(AUDOUT, "audout:u");
+    let tls = cpu.tls_base();
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&48_000u32.to_le_bytes());
+    args.extend_from_slice(&2u32.to_le_bytes());
+    args.extend_from_slice(&0u64.to_le_bytes());
+    ipc_request_plain(&mut cpu, AUDOUT, 1, &args);
+    let device = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    ipc_request_plain(&mut cpu, device, 1, &[]); // StartAudioOut
+
+    // Something the device could play, sitting where the bad descriptor's
+    // arithmetic would land, so a failure to check would be audible rather
+    // than silent.
+    for i in 0..8u32 {
+        cpu.mem.write_u16(PCM + i * 2, 0x4000).unwrap();
+    }
+    // buffer_size says 8 bytes; data_offset alone is already past it.
+    cpu.mem.write_u64(DESC, 0).unwrap();
+    cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
+    cpu.mem.write_u64(DESC + 16, 8).unwrap();
+    cpu.mem.write_u64(DESC + 24, 8).unwrap();
+    cpu.mem.write_u64(DESC + 32, 16).unwrap();
+    ipc_request_plain_with_buffer(&mut cpu, device, 7, DESC, 40, false, &TAG.to_le_bytes());
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "the append is still accepted");
+
+    let mut played = [0i16; 8];
+    assert_eq!(cpu.take_audio(&mut played), 0, "unplayable samples reached the host");
+
+    // And the guest gets its buffer back, so its audio thread does not stall
+    // waiting for one it will never see again.
+    let cycles = 200_000;
+    for _ in 0..cycles {
+        let _ = cpu.step();
+    }
+    ipc_request_plain_with_buffer(&mut cpu, device, 8, TAGS, 16, true, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "the buffer was never released");
+    assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
+}
+
+#[test]
 fn audout_reads_the_channel_count_as_sixteen_bits() {
     // `OpenAudioOut` takes the channel count as a 16-bit field, and the two
     // bytes above it are padding the caller never writes. Reading the whole

@@ -7048,13 +7048,46 @@ impl Cpu {
         // data_offset }, all 8 bytes, travelling as an input buffer.
         let mut samples = Vec::new();
         if let Some((desc, _)) = self.ipc_input_buffer(tls, 0) {
+            // `AudioOutBuffer`: { next, buffer, buffer_size, data_size,
+            // data_offset }, all 8 bytes, travelling as an input buffer.
             let buffer = self.mem.read_u64(desc.wrapping_add(8)).unwrap_or(0) as u32;
+            let buffer_size = self.mem.read_u64(desc.wrapping_add(16)).unwrap_or(0) as u32;
             let data_size = self.mem.read_u64(desc.wrapping_add(24)).unwrap_or(0) as u32;
             let data_offset = self.mem.read_u64(desc.wrapping_add(32)).unwrap_or(0) as u32;
-            let start = buffer.wrapping_add(data_offset);
-            for i in 0..data_size / 2 {
-                let sample = self.mem.read_u16(start.wrapping_add(i * 2)).unwrap_or(0);
-                samples.push(sample as i16);
+            if std::env::var("TRACE_AUDIO").is_ok() {
+                eprintln!(
+                    "[audio] append buffer={buffer:#x} cap={buffer_size:#x} \
+                     size={data_size:#x} offset={data_offset:#x}"
+                );
+            }
+            // `data_offset + data_size` has to fit inside `buffer_size`: that
+            // is what the field means, and a device cannot play samples the
+            // guest did not say were there.
+            //
+            // Checking it is not defensive tidiness. The Mii editor submits a
+            // descriptor whose `buffer` is 6 and whose `data_offset` is a
+            // pointer, and `buffer + data_offset` then lands *inside the
+            // AudioOutBuffer struct itself* — so what reached the speakers was
+            // the bytes of that struct's own pointers, read as PCM, several
+            // thousand times a second. That is the buzzing. Hardware's audio
+            // DSP has no way to produce sound from such a descriptor either.
+            //
+            // The buffer is still queued below, because the guest is entitled
+            // to get it back however unplayable it was; only its samples are
+            // dropped.
+            let playable = buffer != 0
+                && u64::from(data_offset) + u64::from(data_size) <= u64::from(buffer_size);
+            if playable {
+                let start = buffer.wrapping_add(data_offset);
+                for i in 0..data_size / 2 {
+                    let sample = self.mem.read_u16(start.wrapping_add(i * 2)).unwrap_or(0);
+                    samples.push(sample as i16);
+                }
+            } else if self.unimplemented_ipc.insert(("audout:unplayable".to_string(), None)) {
+                eprintln!(
+                    "[audio] refusing an unplayable buffer: {data_offset:#x}+{data_size:#x} \
+                     is outside a {buffer_size:#x}-byte buffer at {buffer:#x}"
+                );
             }
         }
         let Some(device) = self.audio_outs.get_mut(&handle) else {
@@ -7118,6 +7151,9 @@ impl Cpu {
                     _ => break,
                 }
             }
+        }
+        if std::env::var("TRACE_AUDIO").is_ok() {
+            eprintln!("[audio] release room={room} addr={addr:x?} tags={tags:#x?}");
         }
         if let Some(addr) = addr {
             for (i, &tag) in tags.iter().enumerate() {
