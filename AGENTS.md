@@ -11,7 +11,7 @@ standing state.
 ## Commands
 
 - `make all` — `test` then `assets`.
-- `make test` — `cargo test` over all three crates. 686 tests.
+- `make test` — `cargo test` over all three crates. 687 tests.
 - `make wasm` — release wasm build `--features gpu`, then `wasm-bindgen
   --target web`. Needs `rustup target add wasm32-unknown-unknown` and a
   `wasm-bindgen-cli` matching the `Cargo.lock` version.
@@ -185,6 +185,15 @@ as "owned by me" and the first `Lock` fires its recursive-lock assertion.
 
 One emulated instruction ≈ one cycle of the 1.02 GHz CPU `svcGetSystemTick` is
 scaled from, so **a billion steps is about a second of console time**.
+
+**The clock and the step count are not the same number.** `Cpu::cycles` is the
+clock, and `reschedule` idles it forward to the earliest sleeper whenever every
+thread is blocked — the console's own idle, covering cycles nobody executed.
+`Cpu::steps` counts retired instructions and the idle never touches it; both
+engines go through `Cpu::retire` so they cannot drift. The page's *Steps*
+readout is `switch_get_steps`, because a figure that leaps while the guest is
+stopped is useless as the loading screen's sign of life: a parked Home Menu
+jumped 24M → 313M having run nothing.
 
 | steps | console time | reaches |
 | --- | --- | --- |

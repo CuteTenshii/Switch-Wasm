@@ -144,6 +144,7 @@ export interface Commands {
   dump_regs(): string;
   get_pc(): number;
   get_cycles(): number;
+  get_steps(): number;
   get_reg(i: number): string;
   ram(): RamUsage;
   jit_stats(): JitStats;

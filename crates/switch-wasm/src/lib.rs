@@ -1750,10 +1750,19 @@ pub extern "C" fn switch_get_pc(handle: u32) -> u32 {
     session(handle).cpu.get_pc()
 }
 
-/// Total instructions executed.
+/// The guest clock, in cycles of the CPU `svcGetSystemTick` is scaled from.
+///
+/// Not an instruction count: it idles forward to the earliest sleeper when
+/// every thread is blocked. [`switch_get_steps`] is the count.
 #[no_mangle]
 pub extern "C" fn switch_get_cycles(handle: u32) -> u64 {
     session(handle).cpu.cycles
+}
+
+/// Instructions actually retired, which the guest's idle never advances.
+#[no_mangle]
+pub extern "C" fn switch_get_steps(handle: u32) -> u64 {
+    session(handle).cpu.steps
 }
 
 /// Guest RAM currently backed by host storage, in bytes — the emulated

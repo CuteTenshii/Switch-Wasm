@@ -860,8 +860,21 @@ pub struct Cpu {
     /// Safety cap on the trace buffer to avoid unbounded growth.
     trace_cap: usize,
     pub halted: bool,
-    /// Instructions executed in total.
+    /// The clock, in cycles of the 1.02 GHz CPU `svcGetSystemTick` is scaled
+    /// from. One retired instruction is one cycle — but it is **not** an
+    /// instruction count, because [`Cpu::reschedule`] idles it forward to the
+    /// earliest sleeper when nothing can run, which is the console's own idle
+    /// and covers instructions nobody executed.
     pub cycles: u64,
+    /// Instructions actually retired, which the idle never touches.
+    ///
+    /// The two were one counter, and the browser's "Steps" readout showed it:
+    /// the Home Menu parks with every thread blocked, the clock leaps to the
+    /// earliest sleep deadline, and 24M became 313M with nothing run in
+    /// between. A figure that moves while the guest is stopped is worse than
+    /// no figure — it is the loading screen's only sign that a title working
+    /// towards its first frame is working at all.
+    pub steps: u64,
     /// Ring buffer of the most recent `RECENT_LEN` `(pc, insn)` pairs, dumped
     /// on fault so the path into a crash is visible without full tracing.
     recent: [(u32, u32); RECENT_LEN],
@@ -1324,6 +1337,7 @@ impl Cpu {
             trace_cap: 512 * 1024,
             halted: false,
             cycles: 0,
+            steps: 0,
             recent: [(0, 0); RECENT_LEN],
             recent_len: 0,
             tpidr: 0,
@@ -2002,6 +2016,17 @@ impl Cpu {
             }
         }
         self.switch_to_next_runnable();
+    }
+
+    /// Account for one retired instruction: a cycle on the clock, and a step.
+    ///
+    /// Both engines call this rather than touching either counter, so the two
+    /// cannot drift — and a third execution path would have to go out of its
+    /// way to count only one of them.
+    #[inline(always)]
+    pub(super) fn retire(&mut self) {
+        self.cycles += 1;
+        self.steps += 1;
     }
 
     /// Round-robin to the next runnable thread. Returns false if there is none
@@ -3273,7 +3298,7 @@ impl Cpu {
         if let Err(e) = &result {
             self.record_fault(e, pc, insn);
         }
-        self.cycles += 1;
+        self.retire();
         result
     }
 
@@ -3794,5 +3819,32 @@ impl Cpu {
             "unimplemented instruction 0x{:08x} at pc={:#x}",
             insn, self.pc
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Cpu;
+
+    #[test]
+    fn the_idle_moves_the_clock_and_leaves_the_step_count_alone() {
+        // With nothing else runnable, `reschedule` idles the clock forward to
+        // the sleeper's own deadline. That is the console's idle and it covers
+        // millions of cycles nobody executed — so a counter that is *both* the
+        // clock and the instruction count stops being the second one.
+        //
+        // The browser's "Steps" readout was that counter: a parked Home Menu,
+        // every thread blocked and three of them sleeping to deadlines around
+        // 313M, jumped from 24M to 313M having run nothing. The loading
+        // screen's only sign that a title is working towards its first frame
+        // was the thing that moved fastest while the guest was stopped.
+        let mut cpu = Cpu::new();
+        cpu.bootstrap();
+        let (clock, steps) = (cpu.cycles, cpu.steps);
+
+        cpu.sleep_until(clock + 1_000_000);
+
+        assert_eq!(cpu.cycles, clock + 1_000_000, "the clock idled to the deadline");
+        assert_eq!(cpu.steps, steps, "the idle executed nothing");
     }
 }

@@ -845,7 +845,7 @@ impl Cpu {
             let insn = block.words[i];
             self.recent[self.recent_len % RECENT_LEN] = (pc, insn);
             self.recent_len = self.recent_len.saturating_add(1);
-            self.cycles += 1;
+            self.retire();
             self.pc = pc;
             if let Err(e) = self.exec_op(block.ops[i], pc) {
                 self.record_fault(&e, pc, insn);
@@ -859,7 +859,7 @@ impl Cpu {
                 let insn = block.words[body];
                 self.recent[self.recent_len % RECENT_LEN] = (pc, insn);
                 self.recent_len = self.recent_len.saturating_add(1);
-                self.cycles += 1;
+                self.retire();
                 self.pc = pc;
                 if let Err(e) = self.exec_term(term, pc) {
                     self.record_fault(&e, pc, insn);

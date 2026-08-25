@@ -258,6 +258,9 @@ export const CMD: CommandHandlers = {
   get_cycles() {
     return Number(api().switch_get_cycles(handle()));
   },
+  get_steps() {
+    return Number(api().switch_get_steps(handle()));
+  },
   get_reg(i) {
     return '0x' + api().switch_get_reg(handle(), i).toString(16).padStart(16, '0');
   },
