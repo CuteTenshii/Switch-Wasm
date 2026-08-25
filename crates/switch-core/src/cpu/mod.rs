@@ -248,6 +248,24 @@ pub const GUEST_ALIAS_REGION_ADDR: u32 =
     GUEST_HEAP_REGION_ADDR.wrapping_add(GUEST_HEAP_REGION_SIZE);
 pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x2000_0000;
 
+/// Where `ldr:ro` maps the modules a title loads at run time.
+///
+/// A dynamically loaded NRO cannot go where the image went — that address
+/// space belongs to the modules the loader laid out at boot — and it must not
+/// go anywhere the guest's own allocators might claim, which rules out the
+/// ASLR region `svcGetInfo` reports ([0x08000000, 0x27000000)), the stack
+/// region, the heap and the alias region. What is left is the run between the
+/// host-provided stack ([`STACK_TOP`]) and the base of the heap, and this is
+/// that run less a margin above the stack: 112 MiB, far more than the handful
+/// of plugin NROs a title loads.
+///
+/// Nothing else maps here, so a module mapped in this region is the only
+/// thing `svcQueryMemory` reports there — which is what a guest that walks
+/// the address space looking for its own modules needs to see.
+pub const RO_MODULE_REGION_ADDR: u32 = 0x2900_0000;
+pub const RO_MODULE_REGION_SIZE: u32 =
+    GUEST_HEAP_REGION_ADDR.wrapping_sub(RO_MODULE_REGION_ADDR);
+
 /// What `svcGetInfo` reports as the memory the process may use, and so the
 /// size `nn::init` asks for as its heap: exactly one region's worth.
 ///
@@ -270,13 +288,52 @@ pub const GUEST_TOTAL_MEMORY_SIZE: u32 = GUEST_HEAP_REGION_SIZE;
 pub const VAMM_ARENA_SIZE: u32 = 0x3FE0_0000;
 
 /// The regions and figures for a title that *does* use virtual address
-/// memory. The alias region grows by [`VAMM_ARENA_SIZE`] plus change and the
-/// heap region and total memory shrink to pay for it.
-pub const VAMM_HEAP_REGION_SIZE: u32 = 0x3800_0000;
+/// memory: nearly the whole address space is the alias region, because under
+/// this layout the alias region is where everything a title reserves lives.
+///
+/// **The heap region is not one of the two the title uses.** A title on this
+/// layout never issues `svcSetHeapSize` at all — Just Dance 2023 makes zero
+/// of them in the first four billion instructions — so the only thing the
+/// heap region does here is be reported by `svcGetInfo` as
+/// `HeapRegionSize`. Address space spent on it is address space nothing
+/// grows into, which is why it is 128 MiB rather than a share of the machine.
+///
+/// [`VAMM_TOTAL_MEMORY_SIZE`] is a separate figure from that region for the
+/// same reason. It is not how much heap region there is; it is what `nn::init`
+/// asks `nn::mem::StandardAllocator` to reserve, and under this layout that
+/// reservation is made **in the alias region**. So the alias region has to be
+/// able to hold [`VAMM_ARENA_SIZE`], plus the total, plus everything the title
+/// then allocates on top:
+///
+/// ```text
+/// VAMM_ALIAS_REGION_SIZE >= VAMM_ARENA_SIZE + VAMM_TOTAL_MEMORY_SIZE + the title's own
+/// ```
+///
+/// That inequality used to leave 274 MiB for the last term, and Just Dance
+/// 2023 needs more. Its block allocator walked the alias region handing out
+/// ~20 MiB segments until the last one ended at 0xEFF0_0000 — one megabyte
+/// short of the region's end — and refused the next request for 4.2 MiB.
+/// **Nothing checked the null it returned**: the dlmalloc behind it took the
+/// failure as a segment at address 0, `init_top`'d a 4 MiB arena there, and
+/// ran on it for 30M instructions. Every pointer it handed out was a bare
+/// offset — 0x5d6e0, 0x5d810 — and every write to one landed on a page this
+/// emulator soft-maps rather than faulting on, so nothing said a word until a
+/// `Reallocate` asked the allocator registry which arena owned 0x5d6e0, was
+/// told none of them, and called a virtual method on the null. The visible
+/// failure was `pc=0` 30M instructions and one whole subsystem away from the
+/// allocation that failed.
+pub const VAMM_HEAP_REGION_SIZE: u32 = 0x0800_0000;
 pub const VAMM_ALIAS_REGION_ADDR: u32 =
     GUEST_HEAP_REGION_ADDR.wrapping_add(VAMM_HEAP_REGION_SIZE);
-pub const VAMM_ALIAS_REGION_SIZE: u32 = 0x8800_0000;
-pub const VAMM_TOTAL_MEMORY_SIZE: u32 = VAMM_HEAP_REGION_SIZE;
+/// Everything from there to the system shared buffer, which is the first
+/// thing above the alias region that is not the title's to use.
+pub const VAMM_ALIAS_REGION_SIZE: u32 =
+    SHARED_BUFFER_ADDR.wrapping_sub(VAMM_ALIAS_REGION_ADDR);
+/// What `svcGetInfo` reports as `TotalMemorySize` — and, through
+/// `TotalNonSystemMemorySize`, the size of the reservation above. Unchanged
+/// at 896 MiB: it is a figure a title believes and sizes itself against, and
+/// the address space it costs is now the alias region's to give.
+pub const VAMM_TOTAL_MEMORY_SIZE: u32 = 0x3800_0000;
 /// What `svcGetInfo` reports for `SystemResourceSizeTotal` under that layout:
 /// the 16 MiB an application's NPDM declares.
 pub const VAMM_SYSTEM_RESOURCE_SIZE: u32 = 0x0100_0000;
@@ -829,6 +886,15 @@ pub struct Cpu {
     /// once and reused, so a guest polling such a command is not handed a
     /// fresh handle on every call.
     fabricated_objects: HashMap<(u64, u32), (u32, u64, u64)>,
+    /// The NROs `ldr:ro` has mapped into the process, keyed by the address it
+    /// mapped each one to — which is the address the guest was handed and the
+    /// one it names again to unload. See [`Cpu::ldr_ro_request`].
+    ro_modules: BTreeMap<u32, ipc::RoModule>,
+    /// The NRRs the guest has registered, by the address it registered each
+    /// at. Nothing here can check an NRR's signature chain, so a registration
+    /// authorizes nothing — the set exists so that unregistering one is not a
+    /// blind success, and so a title that never registers anything is visible.
+    ro_registrations: BTreeMap<u32, u32>,
     /// Handles that name a kernel **event**, and whether each has been
     /// signalled yet. A handle that is not in here is not modelled as an
     /// event, and [`Cpu::horizon_syscall`]'s `WaitSynchronization` keeps
@@ -1140,6 +1206,8 @@ impl Cpu {
             applet_event: None,
             unimplemented_ipc: HashSet::new(),
             fabricated_objects: HashMap::new(),
+            ro_modules: BTreeMap::new(),
+            ro_registrations: BTreeMap::new(),
             events: HashMap::new(),
             vsync_event: None,
             last_vsync_frame: 0,

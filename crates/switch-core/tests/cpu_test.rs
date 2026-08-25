@@ -5937,22 +5937,23 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     // to the heap alone is what made `nn::os::AllocateAddressRegion` fail
     // with os result 3-12, and it fails as an abort inside the title rather
     // than as anything that names the layout, so it is worth an assert here.
-    // Both layouts have to fit the same address space, and the virtual
-    // address one is the one with a third claimant: `VammManager` takes
-    // `VAMM_ARENA_SIZE` at the base of the alias region before the title
-    // reserves a byte, and the heap `nn::init` asks for — total minus the
-    // system resource — has to fit above it, as do the reservations the title
-    // then makes for itself. Sizing that alias region to the heap alone is
-    // what made `nn::os::AllocateAddressRegion` fail with os result 3-12, and
-    // it fails as an abort inside the title rather than as anything naming the
-    // layout, so it is worth an assert here.
     for layout in [MemoryLayout::PLAIN, MemoryLayout::VIRTUAL_ADDRESS] {
         assert_eq!(layout.heap_addr + layout.heap_size, layout.alias_addr);
         assert!(layout.alias_addr + layout.alias_size <= SHARED_BUFFER_ADDR);
         assert!(STACK_TOP <= u64::from(layout.heap_addr));
-        assert!(layout.total_memory <= layout.heap_size);
         assert!(layout.system_resource < layout.total_memory);
     }
+    // The total has to fit the region the title actually grows into — and
+    // *which* region that is, is the whole difference between the two
+    // layouts. A plain title grows the heap region with `svcSetHeapSize`; one
+    // on virtual address memory reserves out of the alias region and never
+    // issues that syscall at all. Requiring the heap region of both is what
+    // charged the VAMM layout 896 MiB of address space nothing ever grows
+    // into, and took it from the region that does.
+    assert!(MemoryLayout::PLAIN.total_memory <= MemoryLayout::PLAIN.heap_size);
+    assert!(
+        MemoryLayout::VIRTUAL_ADDRESS.total_memory <= MemoryLayout::VIRTUAL_ADDRESS.alias_size
+    );
     assert_eq!(MemoryLayout::PLAIN.system_resource, 0, "zero is what keeps a title off VAMM");
     assert_ne!(MemoryLayout::VIRTUAL_ADDRESS.system_resource, 0);
     // A title's own manifest picks between them, and 0 has to mean the plain
@@ -5973,9 +5974,18 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     // Just Dance 2023 asks for five more regions after its heap, the largest
     // 0x207f000; running out on those aborts exactly as running out on the
     // heap does, so the headroom is part of the layout rather than slack.
+    //
+    // 274 MiB of it is measurably not enough. That is what this layout used
+    // to leave, and the title's own block allocator spent all of it in
+    // ~20 MiB segments, ran its last one up to 0xEFF0_0000, and was refused
+    // the next 4.2 MiB. Nothing checked the null — the dlmalloc behind it
+    // built a 4 MiB arena at address **0** and ran on it until a `Reallocate`
+    // dereferenced a pointer no arena claimed. Nothing here can prove any
+    // figure is *enough*; the floor is here so the region is not whittled
+    // back to where a real title is known to fail.
     let headroom = vamm.alias_size - VAMM_ARENA_SIZE - heap_reservation;
     assert!(
-        headroom >= 0x1000_0000,
+        headroom >= 0x2000_0000,
         "leave a title room to reserve on its own account, got {headroom:#x}"
     );
 }
@@ -6004,4 +6014,201 @@ fn a_heap_bigger_than_its_region_is_refused() {
     cpu.set_reg(1, u64::from(GUEST_HEAP_REGION_SIZE) + 0x1000);
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), OUT_OF_MEMORY);
+}
+
+/// A minimal but well-formed NRO image: three 0x1000-byte segments and a
+/// 0x1000-byte BSS, with the "NRO0" header at the offset a real NRO keeps it
+/// (0x10, behind the entry branch and the `MOD0` pointer). Each segment is
+/// filled with a distinct byte so the test can tell what landed where.
+fn test_nro_image() -> Vec<u8> {
+    const SEGMENT: u32 = 0x1000;
+    let mut nro = vec![0u8; 3 * SEGMENT as usize];
+    nro[0..4].copy_from_slice(&0x1400_0010u32.to_le_bytes()); // b entry
+    nro[0x10..0x14].copy_from_slice(b"NRO0");
+    for (offset, value) in [
+        (0x14, 0),                 // version
+        (0x18, 3 * SEGMENT),       // total size
+        (0x1C, 0),                 // flags
+        (0x20, 0),                 // .text offset
+        (0x24, SEGMENT),           // .text size
+        (0x28, SEGMENT),           // .rodata offset
+        (0x2C, SEGMENT),           // .rodata size
+        (0x30, 2 * SEGMENT),       // .data offset
+        (0x34, SEGMENT),           // .data size
+        (0x38, SEGMENT),           // .bss size
+    ] {
+        nro[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    for (segment, fill) in [(1usize, 0xAAu8), (2, 0xBB)] {
+        let start = segment * SEGMENT as usize;
+        nro[start..start + SEGMENT as usize].fill(fill);
+    }
+    nro
+}
+
+/// A bootstrapped CPU with `ldr:ro` bound to a handle and the image above
+/// already in guest memory at `NRO_SOURCE`, ready to be loaded.
+fn ldr_ro_session() -> (Cpu, u64) {
+    const LDR_RO: u64 = 0x2000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(LDR_RO, "ldr:ro");
+    cpu.mem.map(0x1000_0000, &test_nro_image()).unwrap();
+    (cpu, LDR_RO)
+}
+
+/// Where `ldr_ro_session` puts the caller's copy of the NRO, and the BSS
+/// buffer it passes alongside it.
+const NRO_SOURCE: u64 = 0x1000_0000;
+const NRO_BSS: u64 = 0x1010_0000;
+
+/// Marshal an `ldr:ro` request: the `u64` pid placeholder every command on the
+/// interface opens with, then `args`.
+fn ldr_ro_request(cpu: &mut Cpu, handle: u64, cmd: u32, args: &[u64]) {
+    build_ipc_request(cpu, 4, None, cmd);
+    let data = cpu.tls_base() + 0x20;
+    cpu.mem.write_u64(data, 0).unwrap();
+    for (i, &arg) in args.iter().enumerate() {
+        cpu.mem.write_u64(data + 8 + 8 * i as u32, arg).unwrap();
+    }
+    run_ipc_request(cpu, handle);
+}
+
+#[test]
+fn ldr_ro_initialize_is_not_a_fabricated_object() {
+    // RegisterProcessHandle (cmd 4) is the first call `nn::ro::Initialize`
+    // makes, and the one that reported `ldr:ro` as having no implementation at
+    // all. The generic fallback answers it with an object id, a sub-session
+    // and an event — for a command that returns nothing but a Result.
+    let (mut cpu, handle) = ldr_ro_session();
+    let tls = cpu.tls_base();
+
+    ldr_ro_request(&mut cpu, handle, 4, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x10).unwrap(), 0x4F43_4653); // "SFCO"
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+    // No handle descriptor: bit 31 of the second header word is what says a
+    // reply carries handles, and this reply has none to carry.
+    assert_eq!(cpu.mem.read_u32(tls + 4).unwrap() >> 31, 0);
+}
+
+#[test]
+fn ldr_ro_maps_a_module_where_nothing_else_lives() {
+    // LoadModule has to actually map the NRO: the caller relocates against the
+    // address returned here and then jumps into it, so an address with no
+    // image behind it is a branch into whatever the region happened to hold.
+    use switch_core::cpu::{RO_MODULE_REGION_ADDR, RO_MODULE_REGION_SIZE};
+    let (mut cpu, handle) = ldr_ro_session();
+    let tls = cpu.tls_base();
+
+    ldr_ro_request(&mut cpu, handle, 0, &[NRO_SOURCE, 0x3000, NRO_BSS, 0x1000]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+    let base = cpu.mem.read_u64(tls + 0x20).unwrap();
+    assert!(
+        (u64::from(RO_MODULE_REGION_ADDR)
+            ..u64::from(RO_MODULE_REGION_ADDR) + u64::from(RO_MODULE_REGION_SIZE))
+            .contains(&base),
+        "a module must land in the region set aside for one, not at {base:#x}"
+    );
+    let base = base as u32;
+
+    // The three segments, in the order the file has them, and the BSS behind
+    // them — zero-filled, whatever the caller's own buffer held.
+    assert_eq!(cpu.mem.read_u32(base).unwrap(), 0x1400_0010);
+    assert_eq!(cpu.mem.read_u8(base + 0x1000).unwrap(), 0xAA);
+    assert_eq!(cpu.mem.read_u8(base + 0x2000).unwrap(), 0xBB);
+    assert_eq!(cpu.mem.read_u8(base + 0x3000).unwrap(), 0);
+
+    // `.text` is read-execute, the way a real kernel maps it. Its `.data` is
+    // not: that is where the relocations the caller is about to apply land.
+    assert!(cpu.mem.write_u32(base, 0).is_err());
+    assert!(cpu.mem.write_u32(base + 0x2000, 0).is_ok());
+}
+
+#[test]
+fn ldr_ro_unload_frees_the_address_space_and_the_protection() {
+    // A module that has been unloaded has to leave nothing behind: not the
+    // pages, and not the read-only marking on its `.text` — which would
+    // outlive the mapping and fault whatever is loaded over it next.
+    let (mut cpu, handle) = ldr_ro_session();
+    let tls = cpu.tls_base();
+
+    ldr_ro_request(&mut cpu, handle, 0, &[NRO_SOURCE, 0x3000, NRO_BSS, 0x1000]);
+    let base = cpu.mem.read_u64(tls + 0x20).unwrap();
+    ldr_ro_request(&mut cpu, handle, 1, &[base]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+    assert!(cpu.mem.write_u32(base as u32, 0).is_ok());
+
+    // And the address space is free again, so the next load reuses it rather
+    // than walking up the region.
+    ldr_ro_request(&mut cpu, handle, 0, &[NRO_SOURCE, 0x3000, NRO_BSS, 0x1000]);
+    assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), base);
+
+    // Unloading something that was never loaded is `ro`'s NotLoaded, not a
+    // success the caller then treats as a freed module.
+    const NOT_LOADED: u32 = 22 | (1028 << 9);
+    ldr_ro_request(&mut cpu, handle, 1, &[0x2800_0000]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), NOT_LOADED);
+}
+
+#[test]
+fn ldr_ro_two_modules_do_not_overlap() {
+    // The second module has to go behind the first, BSS included: `ro` hands
+    // out one address space between every module a title loads.
+    let (mut cpu, handle) = ldr_ro_session();
+    let tls = cpu.tls_base();
+
+    ldr_ro_request(&mut cpu, handle, 0, &[NRO_SOURCE, 0x3000, NRO_BSS, 0x1000]);
+    let first = cpu.mem.read_u64(tls + 0x20).unwrap();
+    ldr_ro_request(&mut cpu, handle, 0, &[NRO_SOURCE, 0x3000, NRO_BSS, 0x1000]);
+    let second = cpu.mem.read_u64(tls + 0x20).unwrap();
+    assert_eq!(second, first + 0x4000, "image plus BSS, and no gap to waste");
+}
+
+#[test]
+fn ldr_ro_refuses_what_is_not_a_module() {
+    // A bad NRO is refused rather than mapped: the caller jumps into what this
+    // command returns, so "success" over an image with no segment table is a
+    // branch into nothing. Same for a BSS the caller sized too small — the
+    // module's zero-initialized data would land past the mapping, on whatever
+    // is loaded next.
+    const INVALID_NRO: u32 = 22 | (4 << 9);
+    const INVALID_ADDRESS: u32 = 22 | (1025 << 9);
+    const INVALID_SIZE: u32 = 22 | (1026 << 9);
+    let (mut cpu, handle) = ldr_ro_session();
+    let tls = cpu.tls_base();
+
+    ldr_ro_request(&mut cpu, handle, 0, &[0x1100_0000, 0x3000, NRO_BSS, 0x1000]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), INVALID_NRO);
+
+    ldr_ro_request(&mut cpu, handle, 0, &[NRO_SOURCE + 8, 0x3000, NRO_BSS, 0x1000]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), INVALID_ADDRESS);
+
+    ldr_ro_request(&mut cpu, handle, 0, &[NRO_SOURCE, 0x3000, NRO_BSS, 0]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), INVALID_SIZE);
+}
+
+#[test]
+fn ldr_ro_module_info_is_registered_before_it_is_unregistered() {
+    // An NRR cannot be verified here — there is no key to check its signature
+    // chain against — but it can be *tracked*, so unregistering one that was
+    // never registered is an error rather than a success the caller believes.
+    const INVALID_NRR: u32 = 22 | (6 << 9);
+    const NOT_REGISTERED: u32 = 22 | (1029 << 9);
+    const NRR: u64 = 0x1020_0000;
+    let (mut cpu, handle) = ldr_ro_session();
+    let tls = cpu.tls_base();
+
+    ldr_ro_request(&mut cpu, handle, 3, &[NRR]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), NOT_REGISTERED);
+
+    // Nothing is at that address yet, so there is no NRR to register.
+    ldr_ro_request(&mut cpu, handle, 2, &[NRR, 0x1000]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), INVALID_NRR);
+
+    cpu.mem.map(NRR as u32, b"NRR0").unwrap();
+    ldr_ro_request(&mut cpu, handle, 2, &[NRR, 0x1000]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+    ldr_ro_request(&mut cpu, handle, 3, &[NRR]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
 }

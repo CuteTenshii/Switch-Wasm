@@ -1027,6 +1027,12 @@ impl Cpu {
                         // came back as a fabricated object id — a *count* a
                         // title then went looking for content archives for.
                         "aoc:u" => self.aoc_request(tls, handle, cmd_id)?,
+                        // ldr:ro, the dynamic module loader a title reaches
+                        // through `nn::ro`. `ldr:shel`, `ldr:dmnt` and
+                        // `ldr:pm` are the loader's *other* three interfaces
+                        // and share nothing with this one, so they are not
+                        // listed here.
+                        "ldr:ro" => self.ldr_ro_request(tls, handle, cmd_id)?,
                         // csrng, the random number generator, and `spl:`,
                         // the security processor it really lives behind.
                         "csrng" => self.csrng_request(tls, cmd_id)?,

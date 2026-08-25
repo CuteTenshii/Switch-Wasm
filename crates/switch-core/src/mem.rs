@@ -227,6 +227,19 @@ impl Memory {
         self.readonly.clear();
     }
 
+    /// Drop every read-only range that lies inside `[start, end)`.
+    ///
+    /// This is the other half of [`Memory::mark_readonly`], and it exists
+    /// because a module can go away while the process keeps running:
+    /// `ldr:ro`'s `UnloadModule` frees the address space a loaded NRO
+    /// occupied, and leaving its `.text` protected would fault the next thing
+    /// to be mapped over it. Ranges that merely overlap are left alone —
+    /// nothing here splits a protected range, and a partial unmap of somebody
+    /// else's module is not something to guess at.
+    pub fn unmark_readonly(&mut self, start: u32, end: u32) {
+        self.readonly.retain(|&(s, e)| !(s >= start && e <= end));
+    }
+
     /// Whether `addr` falls in a range marked by [`Memory::mark_readonly`] —
     /// in practice, always a loaded module's `.text`. Used by `svcQueryMemory`
     /// to report the real R-X permission code on it instead of a blanket RWX.
