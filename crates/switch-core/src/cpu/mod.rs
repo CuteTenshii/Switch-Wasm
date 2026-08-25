@@ -873,6 +873,13 @@ pub struct Cpu {
     /// Which data archive an open `IStorage` is serving. Absent means the
     /// storage is the process's own RomFS.
     fs_storage_archive: HashMap<u64, u64>,
+    /// The global filesystem access-log mode `fsp-srv` reports, as
+    /// `SetGlobalAccessLogMode` last set it. `fs` keeps this per process and
+    /// hands it straight back, and `nnSdk` reads it once at startup to decide
+    /// whether to build an access log at all -- so it has to round-trip
+    /// rather than be acknowledged and dropped, or a title that turns logging
+    /// on is told it is still off.
+    fs_access_log_mode: u32,
     /// Storages queued for `ILibraryAppletSelfAccessor::PopInData` — what the
     /// applet's caller would have pushed before starting it.
     am_in_data: VecDeque<Vec<u8>>,
@@ -1143,6 +1150,7 @@ impl Cpu {
             saves: HashMap::new(),
             fs_mount: HashMap::new(),
             fs_storage_archive: HashMap::new(),
+            fs_access_log_mode: 0,
             am_in_data: VecDeque::new(),
             am_launch_parameters: HashMap::new(),
             am_storages: HashMap::new(),

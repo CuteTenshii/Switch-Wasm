@@ -1125,6 +1125,38 @@ impl Cpu {
                 self.reply_with_interface(tls, handle, "fsp-srv-save-info-reader")?;
                 Ok(())
             }
+            // 1004 = SetGlobalAccessLogMode(u32), 1005 = GetGlobalAccessLogMode.
+            // `fs`'s access log is a development feature, and its mode is a
+            // per-process setting the server stores and hands straight back.
+            // Zero is "off", which is how a retail console boots and what this
+            // reports until a title says otherwise.
+            //
+            // Neither command hands back an object, so the catch-all below was
+            // survivable here: 1005's out word sits inside the section the
+            // reply zeroes, so it read as "off" rather than as stale TLS. What
+            // the catch-all could not do is *agree* with 1004 — the mode a
+            // title had just set came back as zero, so a caller that reads its
+            // own setting back to decide whether to keep building log strings
+            // was told its request had been ignored, by a reply that claimed
+            // to have honoured it.
+            Some(1004) => {
+                self.fs_access_log_mode = self.mem.read_u32(self.ipc_request_data(tls))?;
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            Some(1005) => {
+                let mode = self.fs_access_log_mode;
+                self.write_ipc_response(tls, 0, &[], &mode.to_le_bytes(), &[])
+            }
+            // 1006 = OutputAccessLogToSdCard, 1014 = OutputMultiProgramTagAccessLog,
+            // 1015 = FlushAccessLogOnSdCard, 1016 = OutputApplicationInfoAccessLog:
+            // the writing end of that same log. Every one of them takes text or
+            // a tag and answers with nothing but a `Result`, so accepting the
+            // write and dropping it is the whole implementation — there is no
+            // access log on this console for them to reach, and a caller only
+            // sends them once 1005 has reported a mode that is not "off".
+            Some(1006) | Some(1014) | Some(1015) | Some(1016) => {
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
             // Still a fabricated success — homebrew that only checks the
             // Result depends on it — but no longer a silent one. Every
             // command that reaches here is one whose out-object, out-handle
@@ -8320,6 +8352,35 @@ mod tests {
         cpu.fs_request(TLS, Some(0), 9).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), PATH_ALREADY_EXISTS);
         assert_eq!(cpu.fs.file("/switch/cfg.json"), Some(&b"{}!!"[..]));
+    }
+
+    #[test]
+    fn the_access_log_mode_a_title_sets_is_the_one_it_reads_back() {
+        // GetGlobalAccessLogMode, before anything has set one: a retail
+        // console boots with the access log off, and so does this.
+        let mut cpu = request(false, 1005, &[]);
+        cpu.record_handle(9, "fsp-srv");
+        cpu.fsp_srv_request(TLS, Some(1005), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "off until set");
+
+        // SetGlobalAccessLogMode(2): log to the SD card. The catch-all
+        // answered this with a success that changed nothing, which is the one
+        // reply a caller cannot tell from a server that agreed.
+        write_request(&mut cpu, 1004, &2u32.to_le_bytes());
+        cpu.fsp_srv_request(TLS, Some(1004), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+
+        write_request(&mut cpu, 1005, &[]);
+        cpu.fsp_srv_request(TLS, Some(1005), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 2, "the mode that was set");
+
+        // OutputApplicationInfoAccessLog, the writing end: a `Result` and
+        // nothing else, which is what makes accepting and dropping it honest.
+        write_request(&mut cpu, 1016, &[0u8; 0x10]);
+        cpu.fsp_srv_request(TLS, Some(1016), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
     }
 
     #[test]
