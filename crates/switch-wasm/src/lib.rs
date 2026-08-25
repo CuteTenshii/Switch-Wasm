@@ -1638,6 +1638,23 @@ pub extern "C" fn switch_set_touch(handle: u32, ptr: *const u32, count: u32) {
     session(handle).cpu.set_touch_state(&points[..n]);
 }
 
+/// Dock or undock the console: 0 handheld, anything else docked.
+///
+/// Safe to call while a title is running, which is the point of it — a real
+/// console is docked mid-game and the title is expected to cope. What makes
+/// it cope is the pair of AM messages this queues, not the number itself: a
+/// title reads the operation mode once and lays out for it, and only goes
+/// back to ask when it is told the mode changed.
+#[no_mangle]
+pub extern "C" fn switch_set_operation_mode(handle: u32, docked: u32) {
+    let mode = if docked == 0 {
+        switch_core::cpu::OperationMode::Handheld
+    } else {
+        switch_core::cpu::OperationMode::Docked
+    };
+    session(handle).cpu.set_operation_mode(mode);
+}
+
 /// Set the wall-clock time `time:u`/`time:s` report, as POSIX seconds (UTC).
 /// `wasm32-unknown-unknown` has no OS clock, so without the host calling this
 /// (with `Date.now() / 1000`) the emulated RTC reads the Unix epoch.

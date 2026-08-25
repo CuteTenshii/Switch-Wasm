@@ -41,6 +41,15 @@ function pushBattery(): void {
   api().switch_set_battery(handle(), lastBattery.percent, lastBattery.charging ? 1 : 0);
 }
 
+// Whether the console is docked. Cached for the same reason the battery is:
+// "reset" builds a fresh session, and a dock the user set before that is
+// still a dock afterwards.
+let docked = false;
+function pushOperationMode(): void {
+  if (handle() < 0) return;
+  api().switch_set_operation_mode(handle(), docked ? 1 : 0);
+}
+
 // A save id travels as hex text: it is a u64, and JSON has no such number.
 const saveId = (id: string) => BigInt('0x' + id);
 
@@ -58,6 +67,7 @@ export const CMD: CommandHandlers = {
     state.handle = api().switch_new();
     resetInput(); // the new session's frame counter restarts at 0
     pushTime();
+    pushOperationMode();
     pushBattery();
     return state.handle;
   },
@@ -90,6 +100,11 @@ export const CMD: CommandHandlers = {
   set_battery(percent, charging) {
     lastBattery = { percent, charging: !!charging };
     pushBattery();
+    return 0;
+  },
+  set_operation_mode(next) {
+    docked = !!next;
+    pushOperationMode();
     return 0;
   },
 

@@ -26,6 +26,7 @@ import { beginLoad, endLoad, failLoad, loadPhase } from './loading';
 // binds its own controls when it is loaded.
 import './boot';
 import './debug';
+import './dock';
 import './input';
 
 // The font the emulator serves as the console's shared system font. Homebrew

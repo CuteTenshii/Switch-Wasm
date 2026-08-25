@@ -53,6 +53,7 @@ export interface WasmExports {
   switch_set_touch(handle: number, ptr: number, count: number): void;
   switch_set_time(handle: number, unixSeconds: bigint): void;
   switch_set_battery(handle: number, percent: number, charging: number): void;
+  switch_set_operation_mode(handle: number, docked: number): void;
   switch_vibration(handle: number): number;
 
   switch_run(handle: number, maxSteps: bigint): bigint;

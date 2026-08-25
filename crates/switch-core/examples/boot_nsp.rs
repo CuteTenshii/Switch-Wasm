@@ -13,6 +13,12 @@
 //! `TRAP_WRITE=<addr>:<hex size>` names the code that writes into a region —
 //! the pc and call stack of the first writes into it, which is how a buffer
 //! nobody admits to owning gets an owner. Same spelling as `screenshot_nsp`'s.
+//!
+//! `PROFILE=<interval>` samples the pc every `interval` steps and reports
+//! where the run spent itself, by thread and by 4 KiB page. A title that runs
+//! for billions of instructions without reaching a frame is not stuck
+//! anywhere a backtrace can be taken; it is *somewhere*, and this is what
+//! says where.
 
 mod common;
 
@@ -341,6 +347,17 @@ fn main() {
     // Only the first few: what is wanted is which code reached a region
     // first, and a region being written to at all is usually a loop.
     let mut traps = 0u32;
+    let profile: Option<u64> = std::env::var("PROFILE").ok().and_then(|v| v.trim().parse().ok());
+    // Samples per (thread handle, pc page). A page rather than an address
+    // because a hot loop is a run of instructions, not one of them, and one
+    // bucket per instruction turns a profile into a list.
+    let mut samples: std::collections::BTreeMap<(u64, u32), u64> = std::collections::BTreeMap::new();
+    // The same samples keyed by the return address instead. The hot page of a
+    // run that spends itself in `memcpy` says nothing on its own -- every
+    // caller in the process shares it -- and for a leaf like that the link
+    // register *is* the caller.
+    let mut callers: std::collections::BTreeMap<(u64, u32), u64> = std::collections::BTreeMap::new();
+    let mut sampled = 0u64;
     let watch: std::collections::HashSet<u32> = std::env::var("WATCH")
         .map(|s| {
             s.split(',')
@@ -359,6 +376,12 @@ fn main() {
             break;
         }
         let pc = cpu.get_pc();
+        if profile.is_some_and(|interval| done % interval == 0) {
+            let thread = cpu.current_thread_handle();
+            *samples.entry((thread, pc & !0xFFF)).or_default() += 1;
+            *callers.entry((thread, cpu.read_x(30) as u32)).or_default() += 1;
+            sampled += 1;
+        }
         if watch.contains(&pc) {
             println!(
                 "[watch] step={done} pc={pc:#x} x0={:#x} x1={:#x} x2={:#x} x3={:#x} x4={:#x} x5={:#x} x6={:#x} x7={:#x} bt={:?}",
@@ -436,6 +459,36 @@ fn main() {
     if let Ok(out) = std::env::var("SHOT") {
         if !cpu.nv.gpu.framebuffer.is_empty() {
             common::write_ppm(&out, &cpu.nv.gpu.framebuffer);
+        }
+    }
+    if sampled > 0 {
+        let mut ranked: Vec<_> = samples.iter().map(|(&k, &v)| (v, k)).collect();
+        ranked.sort_unstable_by(|a, b| b.cmp(a));
+        println!("--- profile: {sampled} samples ---");
+        let mut by_thread: std::collections::BTreeMap<u64, u64> = std::collections::BTreeMap::new();
+        for (count, (thread, _)) in &ranked {
+            *by_thread.entry(*thread).or_default() += count;
+        }
+        let mut threads: Vec<_> = by_thread.into_iter().map(|(t, c)| (c, t)).collect();
+        threads.sort_unstable_by(|a, b| b.cmp(a));
+        for (count, thread) in threads.iter().take(8) {
+            println!("  thread {thread:#x}: {:.1}%", *count as f64 * 100.0 / sampled as f64);
+        }
+        for (count, (thread, page)) in ranked.iter().take(16) {
+            println!(
+                "  {:5.1}%  thread {thread:#x}  {page:#010x}..{:#010x}",
+                *count as f64 * 100.0 / sampled as f64,
+                page + 0x1000,
+            );
+        }
+        let mut by_caller: Vec<_> = callers.iter().map(|(&k, &v)| (v, k)).collect();
+        by_caller.sort_unstable_by(|a, b| b.cmp(a));
+        println!("--- by return address ---");
+        for (count, (thread, page)) in by_caller.iter().take(16) {
+            println!(
+                "  {:5.1}%  thread {thread:#x}  lr {page:#010x}",
+                *count as f64 * 100.0 / sampled as f64,
+            );
         }
     }
     println!("guest RAM touched: {} MiB", cpu.mem.mapped_bytes() / (1024 * 1024));

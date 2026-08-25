@@ -111,6 +111,7 @@ export interface Commands {
   set_input(mask: number, slx: number, sly: number, srx: number, sry: number): number;
   set_touch(points: Uint32Array): number;
   set_battery(percent: number, charging: number): number;
+  set_operation_mode(docked: number): number;
   vibration(): number;
 
   load_font(bytes: Bytes): number;

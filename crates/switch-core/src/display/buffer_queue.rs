@@ -112,13 +112,30 @@ impl Default for BufferQueue {
 
 impl BufferQueue {
     pub fn new() -> BufferQueue {
+        // An undocked console, which is what one is until something docks it —
+        // and the size comes from there rather than from a pair of literals,
+        // because a queue that disagrees with the display is a title drawing
+        // at the wrong scale. `Cpu::set_operation_mode` moves it.
+        let (width, height) = crate::cpu::OperationMode::Handheld.display_size();
         BufferQueue {
             slots: std::array::from_fn(|_| Slot::default()),
-            width: 1280,
-            height: 720,
+            width,
+            height,
             connected: false,
             queued: 0,
         }
+    }
+
+    /// Set the geometry a caller is told about before it has dequeued
+    /// anything — `QUERY_WIDTH`/`QUERY_HEIGHT` and the default in a dequeue
+    /// reply. It is the display's size, so docking the console moves it.
+    ///
+    /// Only the default: `DequeueBuffer` and a queued buffer both overwrite
+    /// these with the size the guest actually asked for, and that one is not
+    /// the dock's to change underneath it.
+    pub fn set_default_size(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
     }
 
     /// Handle one binder transaction. `request` is the raw incoming parcel;

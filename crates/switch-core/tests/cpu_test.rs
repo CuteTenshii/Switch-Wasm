@@ -5588,7 +5588,7 @@ fn the_system_shared_buffer_hands_out_slots_an_applet_can_present() {
     assert_ne!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "no nvmap handle came back");
     assert_eq!(
         cpu.mem.read_u64(tls + 0x28).unwrap(),
-        u64::from(switch_core::cpu::SHARED_BUFFER_SIZE)
+        u64::from(switch_core::cpu::OperationMode::Handheld.shared_buffer_size())
     );
 
     // AcquireSharedFrameBuffer -> an empty fence, the slots that exist, and
@@ -5905,8 +5905,8 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     use switch_core::cpu::{
         GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
         GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR,
-        GUEST_STACK_REGION_SIZE, GUEST_TOTAL_MEMORY_SIZE, MemoryLayout, SHARED_BUFFER_ADDR,
-        SHARED_BUFFER_SIZE, STACK_TOP, VAMM_ARENA_SIZE,
+        GUEST_STACK_REGION_SIZE, GUEST_TOTAL_MEMORY_SIZE, MemoryLayout, OperationMode,
+        SHARED_BUFFER_ADDR, SHARED_BUFFER_RESERVED_SIZE, STACK_TOP, VAMM_ARENA_SIZE,
     };
     use switch_core::{FB_BASE, FB_HEIGHT, FB_WIDTH, INPUT_ADDR};
 
@@ -5914,7 +5914,21 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     assert!(STACK_TOP <= u64::from(GUEST_HEAP_REGION_ADDR), "the main stack is below the heap");
     assert_eq!(GUEST_HEAP_REGION_ADDR + GUEST_HEAP_REGION_SIZE, GUEST_ALIAS_REGION_ADDR);
     assert!(GUEST_ALIAS_REGION_ADDR + GUEST_ALIAS_REGION_SIZE <= SHARED_BUFFER_ADDR);
-    assert!(SHARED_BUFFER_ADDR + SHARED_BUFFER_SIZE <= FB_BASE);
+    // The shared buffer is reserved for the *docked* geometry however the
+    // console starts, because it is allocated once and can be docked
+    // afterwards. Sizing this region to the handheld buffer is how the Home
+    // Menu came to stay 720p in the dock: there was nowhere for a 1080p one
+    // to go.
+    assert_eq!(
+        SHARED_BUFFER_RESERVED_SIZE,
+        OperationMode::Docked.shared_buffer_size(),
+        "the reservation has to cover the larger of the two modes"
+    );
+    assert!(
+        OperationMode::Handheld.shared_buffer_size() <= SHARED_BUFFER_RESERVED_SIZE,
+        "and the smaller"
+    );
+    assert!(SHARED_BUFFER_ADDR + SHARED_BUFFER_RESERVED_SIZE <= FB_BASE);
     assert!(FB_BASE + FB_WIDTH * FB_HEIGHT * 4 <= INPUT_ADDR);
     assert!(INPUT_ADDR + 0x1000 <= GUEST_SPACE_END);
 
@@ -6211,4 +6225,170 @@ fn ldr_ro_module_info_is_registered_before_it_is_unregistered() {
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
     ldr_ro_request(&mut cpu, handle, 3, &[NRR]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+}
+
+#[test]
+fn docking_moves_every_answer_that_depends_on_it() {
+    // The operation mode is not one service's opinion: `am` reports it,
+    // `am` and `apm` both derive the performance mode from it, `vi` sizes the
+    // display by it, `clkrst` clocks the GPU by it, and the touchscreen only
+    // exists on one side of it. A title that picks its render target from one
+    // of those and scans out through another draws at the wrong scale, so what
+    // is pinned here is that they move together.
+    use switch_core::cpu::OperationMode;
+    let (mut cpu, handle, _proxy, state_getter) = applet_chain();
+    let tls = cpu.tls_base();
+    assert_eq!(cpu.operation_mode(), OperationMode::Handheld, "a console starts undocked");
+
+    // Handheld: mode 0, performance Normal (0).
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 5);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0, "GetOperationMode");
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 6);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0, "GetPerformanceMode");
+
+    // The startup focus message, out of the way, so what is left in the queue
+    // below is the dock's doing and nothing else.
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
+
+    cpu.set_operation_mode(OperationMode::Docked);
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 5);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1, "docked is Console (1)");
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 6);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1, "docked is Boost (1)");
+
+    // And the title is *told*, which is the half that makes it act: it read
+    // the mode once at startup and laid out for that answer. Without these it
+    // never goes back to ask, and the new number is one nobody reads.
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "a message is waiting");
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 30, "OperationModeChanged");
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 31, "PerformanceModeChanged");
+
+    // GetDefaultDisplayResolution (60) is the answer that sits *beside* the
+    // mode on a title's own screen, so the two coming from different places
+    // is how NX-Fetch came to print "1280x720 @ 60Hz [Docked]".
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 60);
+    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1920, "docked default width");
+    assert_eq!(cpu.mem.read_u32(tls + 0x34).unwrap(), 1080, "docked default height");
+
+    // Docking a docked console is not a transition. AM does not announce one
+    // that did not happen, and a title told to re-lay-out does the work
+    // whether or not anything changed.
+    const NO_MESSAGES: u32 = 128 | (3 << 9);
+    cpu.set_operation_mode(OperationMode::Docked);
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), NO_MESSAGES);
+}
+
+#[test]
+fn the_dock_resizes_the_display_and_takes_the_touchscreen_away() {
+    use switch_core::cpu::{OperationMode, TouchPoint};
+    const SHMEM: u32 = 0x3000_0000;
+    const LIFO: u32 = SHMEM + 0x400;
+    const VI: u64 = 0x2000;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(VI, "vi:m");
+    let tls = cpu.tls_base();
+
+    // GetDisplayMode (3200) reports width, height and refresh by value.
+    ipc_request(&mut cpu, VI, 6, None, 3200);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1280, "handheld width");
+    assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 720, "handheld height");
+
+    cpu.set_operation_mode(OperationMode::Docked);
+    ipc_request(&mut cpu, VI, 6, None, 3200);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1920, "docked width");
+    assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 1080, "docked height");
+
+    // Touch is handheld-only: the screen is in the dock, so nothing can be on
+    // it. The sample is still published — a LIFO that stops advancing is not
+    // "no touches" to a reader waiting for the next one — but it carries none.
+    cpu.set_reg(1, SHMEM as u64);
+    cpu.set_reg(2, 0x40000);
+    cpu.mem.map(0x1000, &svc(0x13).to_le_bytes()).unwrap();
+    cpu.run(1).unwrap();
+    cpu.set_pc(0x1000);
+    let state = LIFO + 0x20 + 8;
+    let before = cpu.mem.read_u64(LIFO + 0x20).unwrap();
+    cpu.set_touch_state(&[TouchPoint { finger_id: 0, x: 640, y: 360 }]);
+    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 0, "docked reports no contacts");
+    assert!(cpu.mem.read_u64(LIFO + 0x20).unwrap() > before, "the sample still advances");
+
+    // Undocked again, the same contact lands.
+    cpu.set_operation_mode(OperationMode::Handheld);
+    cpu.set_touch_state(&[TouchPoint { finger_id: 0, x: 640, y: 360 }]);
+    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 1, "handheld reports the contact");
+    assert_eq!(cpu.mem.read_u32(state + 0x10 + 0x10).unwrap(), 640, "x");
+}
+
+#[test]
+fn the_home_menu_draws_at_the_docked_resolution_when_docked() {
+    // The Home Menu does not have a layer of its own: it draws into the system
+    // shared buffer, and nowhere else. So a shared buffer pinned at 1280x720
+    // is a Home Menu pinned at 720p however the console is docked — which is
+    // exactly what a second copy of the display size bought. There is one
+    // copy now, on `OperationMode`, and this is what says the buffer follows
+    // it.
+    use switch_core::cpu::OperationMode;
+    const VI: u64 = 0x2000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(VI, "vi:m");
+    let tls = cpu.tls_base();
+
+    // GetSharedBufferMemoryHandleId reports the pool: its total size, and per
+    // slot an offset, a size and the slot's width and height.
+    let slot_geometry = |cpu: &mut Cpu| {
+        ipc_request(cpu, VI, 4, None, 8225);
+        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
+        let total = cpu.mem.read_u64(tls + 0x28).unwrap();
+        // The out buffer holds the layout; slot 0 starts 8 bytes in.
+        (total, cpu.read_x(0))
+    };
+
+    let (handheld_total, _) = slot_geometry(&mut cpu);
+    assert_eq!(handheld_total, u64::from(OperationMode::Handheld.shared_buffer_size()));
+
+    cpu.set_operation_mode(OperationMode::Docked);
+    let (docked_total, _) = slot_geometry(&mut cpu);
+    assert_eq!(docked_total, u64::from(OperationMode::Docked.shared_buffer_size()));
+    assert!(docked_total > handheld_total, "a 1080p pool is bigger than a 720p one");
+
+    // And the numbers behind it are the display's, not a set of their own.
+    assert_eq!(OperationMode::Docked.display_size(), (1920, 1080));
+    assert_eq!(OperationMode::Docked.shared_buffer_stride(), 1920 * 4);
+    // Rows round up to a 128-row block-linear block: 1080 -> 1152, 720 -> 768.
+    assert_eq!(OperationMode::Docked.shared_buffer_rows(), 1152);
+    assert_eq!(OperationMode::Handheld.shared_buffer_rows(), 768);
+}
+
+#[test]
+fn the_resolution_change_event_fires_on_the_dock() {
+    // `GetDefaultDisplayResolutionChangeEvent` is how a title that is not
+    // polling AM's message queue finds out to go and re-read the resolution.
+    // It used to be a fresh event per caller, handed out dark, on the grounds
+    // that the resolution never changed -- so even once one did, nothing could
+    // have signalled the object anybody was actually waiting on.
+    use switch_core::cpu::OperationMode;
+    let (mut cpu, handle, _proxy, state_getter) = applet_chain();
+    let tls = cpu.tls_base();
+
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 61);
+    let event = cpu.mem.read_u32(tls + 0x0c).unwrap() as u64;
+    assert_ne!(event, 0, "an event has to come back in the copy-handle slot");
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 61);
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x0c).unwrap() as u64,
+        event,
+        "asking twice has to give back the object already being waited on"
+    );
+    assert_eq!(cpu.event_signaled(event), Some(false), "dark until something changes");
+
+    cpu.set_operation_mode(OperationMode::Docked);
+    assert_eq!(cpu.event_signaled(event), Some(true), "the dock is what changes it");
 }

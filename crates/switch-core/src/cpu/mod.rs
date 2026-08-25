@@ -87,18 +87,22 @@ pub const THREAD_TLS_STRIDE: u32 = 0x1000;
 /// renders there and presents the slot back.
 ///
 /// The geometry is the console's, and it is what the applets expect to be
-/// told: seven slots, each a 1280x768 block-linear RGBA8888 image of which
-/// the top 1280x720 is the visible frame. The extra 48 rows are the
-/// block-linear padding, not picture.
+/// told: seven slots, each a block-linear RGBA8888 image whose visible part
+/// is the display. It is **the display**, not a size of its own — the Home
+/// Menu draws into this buffer and nowhere else, so a shared buffer pinned at
+/// 720p is a Home Menu pinned at 720p however the console is docked. See
+/// [`OperationMode::shared_buffer_size`] and the rest of that family.
 pub const SHARED_BUFFER_ADDR: u32 = 0xF000_0000;
 pub const SHARED_BUFFER_SLOTS: u32 = 7;
-pub const SHARED_BUFFER_WIDTH: u32 = 1280;
-pub const SHARED_BUFFER_HEIGHT: u32 = 720;
-/// Rows actually allocated per slot, rounded up for the block-linear layout.
-pub const SHARED_BUFFER_SLOT_ROWS: u32 = 768;
-pub const SHARED_BUFFER_STRIDE: u32 = SHARED_BUFFER_WIDTH * 4;
-pub const SHARED_BUFFER_SLOT_SIZE: u32 = SHARED_BUFFER_STRIDE * SHARED_BUFFER_SLOT_ROWS;
-pub const SHARED_BUFFER_SIZE: u32 = SHARED_BUFFER_SLOT_SIZE * SHARED_BUFFER_SLOTS;
+/// Address space set aside for it: the docked geometry, whatever mode the
+/// console is in.
+///
+/// The buffer is allocated once, on the applet's first ask, and the console
+/// can be docked afterwards — so it is reserved for the larger of the two and
+/// reported at the size of the mode it is in. Reserving costs nothing but
+/// address space: the pages behind it are soft-mapped, and only the two slots
+/// [`SHARED_BUFFER_USABLE_SLOTS`] hands out are ever written.
+pub const SHARED_BUFFER_RESERVED_SIZE: u32 = OperationMode::Docked.shared_buffer_size();
 /// Only the first two slots are ever handed out, which is what the console
 /// reports too — `AcquireSharedFrameBuffer` answers `{0, 1, -1, -1}`.
 pub const SHARED_BUFFER_USABLE_SLOTS: u32 = 2;
@@ -115,6 +119,78 @@ pub(crate) enum AppletMessage {
     RequestToDisplay = 41,
     /// The same transition told to an *applet* rather than an application.
     ChangeIntoForeground = 1,
+    /// The console was docked or undocked. A title re-reads
+    /// `GetOperationMode` when it sees this and re-lays out for the new
+    /// screen; without it a mode change is a number nobody looks at again.
+    OperationModeChanged = 30,
+    /// The clock profile changed with it. AM sends both, and a title that
+    /// scales its workload by performance mode watches this one.
+    PerformanceModeChanged = 31,
+}
+
+/// Whether the console is on its own screen or in a dock — Horizon's
+/// `AppletOperationMode`, and the single switch behind the resolution `vi`
+/// reports, the performance mode `am` and `apm` report, the GPU clock
+/// `clkrst` reports, and whether the touchscreen exists at all.
+///
+/// All of those have to agree. Reporting Docked beside a 720p framebuffer is
+/// how NX-Fetch came to print "Docked" next to a handheld resolution, and a
+/// title that picks its render target from one answer and scans out through
+/// another draws at the wrong scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OperationMode {
+    /// On the console's own 720p screen, with a touchscreen.
+    #[default]
+    Handheld = 0,
+    /// In the dock, driving a 1080p display. `AppletOperationMode_Console`.
+    Docked = 1,
+}
+
+impl OperationMode {
+    /// The display `vi` composes for this mode, as (width, height).
+    pub const fn display_size(self) -> (u32, u32) {
+        match self {
+            OperationMode::Handheld => (1280, 720),
+            OperationMode::Docked => (1920, 1080),
+        }
+    }
+
+    /// `ApmPerformanceMode`: Normal handheld, Boost docked.
+    pub const fn performance_mode(self) -> u32 {
+        self as u32
+    }
+
+    /// The GPU clock, in Hz. The CPU and memory clocks do not change with the
+    /// dock on an original console; the GPU doubles.
+    pub const fn gpu_clock_hz(self) -> u32 {
+        match self {
+            OperationMode::Handheld => 384_000_000,
+            OperationMode::Docked => 768_000_000,
+        }
+    }
+
+    /// Bytes per row of a system shared buffer slot.
+    pub const fn shared_buffer_stride(self) -> u32 {
+        self.display_size().0 * 4
+    }
+
+    /// Rows actually allocated per slot: the display height rounded up to the
+    /// 128 rows of a block-linear block (eight-row gobs, `block_height_log2`
+    /// 4). 720 becomes 768 and 1080 becomes 1152, and the extra rows are
+    /// padding rather than picture.
+    pub const fn shared_buffer_rows(self) -> u32 {
+        const BLOCK_ROWS: u32 = 128;
+        self.display_size().1.div_ceil(BLOCK_ROWS) * BLOCK_ROWS
+    }
+
+    /// One slot, and the whole seven-slot pool.
+    pub const fn shared_buffer_slot_size(self) -> u32 {
+        self.shared_buffer_stride() * self.shared_buffer_rows()
+    }
+
+    pub const fn shared_buffer_size(self) -> u32 {
+        self.shared_buffer_slot_size() * SHARED_BUFFER_SLOTS
+    }
 }
 
 /// What a guest thread is doing. Threads only switch at the blocking
@@ -208,7 +284,7 @@ pub const GUEST_STACK_REGION_SIZE: u32 = 0x0800_0000;
 /// purpose: a guest that walks off the end of a region should fault rather
 /// than find more zeros, and hbmenu reads the failure at the very top of the
 /// 64-bit range to work out how wide the address space is.
-pub const GUEST_SPACE_END: u32 = 0xF300_0000;
+pub const GUEST_SPACE_END: u32 = 0xF500_0000;
 
 /// The heap region `svcSetHeapSize` grows, and the alias region
 /// `svcMapPhysicalMemory` backs — the two ways a process gets its memory.
@@ -830,6 +906,12 @@ pub struct Cpu {
     /// given the event it is already waiting on.
     application_functions_210_event: Option<u64>,
     aoc_list_changed_event: Option<u64>,
+    /// The event `ICommonStateGetter::GetDefaultDisplayResolutionChangeEvent`
+    /// hands out, fired when the console is docked or undocked. One per
+    /// process, for the usual reason: a caller that asks twice has to be given
+    /// the object it is already waiting on, or the dock signals one nobody
+    /// holds.
+    display_resolution_event: Option<u64>,
     /// The event `IApplicationManagerInterface::GetApplicationRecordUpdateSystemEvent`
     /// hands out. It goes out **signalled**, as it does on hardware: the Home
     /// Menu waits on it before it will read the installed-title list at all.
@@ -869,6 +951,9 @@ pub struct Cpu {
     /// asked for it, and the slot the next acquire hands out.
     shared_buffer: Option<(u32, u32)>,
     shared_buffer_slot: u32,
+    /// Handheld or docked. Changeable while a title runs — see
+    /// [`Cpu::set_operation_mode`].
+    operation_mode: OperationMode,
     /// Whether the process opened an *application* proxy. It decides which
     /// message that transition is: an application is told `FocusStateChanged`,
     /// while an applet — every one of the system's own, the Home Menu included
@@ -1222,12 +1307,14 @@ impl Cpu {
             lock_accessor_event: None,
             binder_event: None,
             aoc_list_changed_event: None,
+            display_resolution_event: None,
             save_data_quota: ipc::SaveDataQuota::default(),
             memory_layout: MemoryLayout::PLAIN,
             shared_buffer: None,
             shared_buffer_slot: 0,
             applet_focus_announced: false,
             applet_is_application: true,
+            operation_mode: OperationMode::default(),
             applet_event: None,
             unimplemented_ipc: HashSet::new(),
             fabricated_objects: HashMap::new(),
@@ -2301,6 +2388,48 @@ impl Cpu {
         }
     }
 
+    /// Whether the console is docked, as everything that reports it sees it.
+    pub fn operation_mode(&self) -> OperationMode {
+        self.operation_mode
+    }
+
+    /// Dock or undock the console, while a title runs.
+    ///
+    /// The mode itself is only half of it: a title reads `GetOperationMode`
+    /// once and then lays out for that answer, so changing the number under
+    /// one that is already running changes nothing it can see. What makes it
+    /// act is the pair of AM messages a real dock sends — `OperationModeChanged`
+    /// and `PerformanceModeChanged` — which is what sends it back to ask.
+    ///
+    /// Setting the mode it is already in queues nothing. AM does not announce
+    /// a transition that did not happen, and a title told to re-lay-out has to
+    /// do the work whether or not anything actually changed.
+    pub fn set_operation_mode(&mut self, mode: OperationMode) {
+        if self.operation_mode == mode {
+            return;
+        }
+        self.operation_mode = mode;
+        // Undocking is also a lift: the touchscreen does not exist in the
+        // dock, so anything the host had down there is not still down. The
+        // sample is republished either way, which is what tells a reader the
+        // screen it is reading is the new one.
+        self.set_touch_state(&[]);
+        // The buffer queue's *default* geometry — what `QUERY_WIDTH` and
+        // `QUERY_HEIGHT` answer before a guest has dequeued anything. A guest
+        // that has already asked for a size of its own keeps it: DequeueBuffer
+        // overwrites these, and the size a title chose is not the dock's to
+        // change underneath it.
+        let (width, height) = mode.display_size();
+        self.display.set_default_size(width, height);
+        self.queue_applet_message(AppletMessage::OperationModeChanged);
+        self.queue_applet_message(AppletMessage::PerformanceModeChanged);
+        // And the event a title waits on to go and re-read the resolution,
+        // rather than only the message its applet framework polls for.
+        if let Some(event) = self.display_resolution_event {
+            self.signal_event(event);
+        }
+    }
+
     /// Note which kind of proxy the process opened, so its focus transition is
     /// the one its own applet framework is waiting for.
     pub(super) fn set_applet_is_application(&mut self, is_application: bool) {
@@ -2335,7 +2464,10 @@ impl Cpu {
 
     /// Whether `handle` names an event that has fired. `None` means the handle
     /// is not modelled as an event at all.
-    pub(crate) fn event_signaled(&self, handle: u64) -> Option<bool> {
+    ///
+    /// Public for the same reason [`Cpu::signal_event`] is: a host that can
+    /// fire an event can reasonably ask whether one it handed out has fired.
+    pub fn event_signaled(&self, handle: u64) -> Option<bool> {
         self.events.get(&handle).map(|event| event.signaled)
     }
 
@@ -2604,9 +2736,13 @@ impl Cpu {
     }
 
     /// Publish the host's touchscreen contacts where `hidGetTouchScreenStates`
-    /// reads them. Touch is a handheld-only input on real hardware and this
-    /// console always reports `AppletOperationMode_Handheld`, so there is no
-    /// docked case to suppress.
+    /// reads them.
+    ///
+    /// Touch is a handheld-only input on real hardware: docked, the screen is
+    /// in the dock and nothing can be touching it, so contacts are dropped and
+    /// the sample is published empty. The sample is still published, because a
+    /// LIFO that stops advancing is not "no touches" to a reader waiting for
+    /// the next one.
     ///
     /// An empty slice is how a lift is reported: the state is still published,
     /// with a contact count of zero. Nothing is remembered between calls, so a
@@ -2631,7 +2767,10 @@ impl Cpu {
         let state = storage.wrapping_add(h::TOUCH_STATE);
         let _ = self.mem.write_u64(state + h::TOUCH_SAMPLING_NUMBER, sample);
 
-        let count = touches.len().min(TOUCH_MAX);
+        let count = match self.operation_mode {
+            OperationMode::Handheld => touches.len().min(TOUCH_MAX),
+            OperationMode::Docked => 0,
+        };
         let _ = self.mem.write_u32(state + h::TOUCH_COUNT, count as u32);
         let slot = |i: usize| state + h::TOUCH_TOUCHES + i as u32 * h::TOUCH_SIZE;
         for (i, touch) in touches[..count].iter().enumerate() {

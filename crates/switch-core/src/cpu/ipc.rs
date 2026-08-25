@@ -111,13 +111,6 @@ const SPL_DEVICE_ID: u64 = 0x0000_5357_4153_4D00;
 /// framebuffer would be two answers to the same question.
 pub(super) const CLOCK_RATES_HZ: [u32; 4] = [1_020_000_000, 384_000_000, 1_600_000_000, 0];
 
-/// The one display `vi` composes, as (width, height).
-///
-/// Handheld and 720p, to agree with the operation mode `am` reports, with its
-/// `GetDefaultDisplayResolution`, and with the buffer queue's own default. A
-/// caller that sizes its framebuffer from one of those and scans out through
-/// another draws at the wrong scale, so the number cannot differ by place.
-const DISPLAY_SIZE: (u32, u32) = (1280, 720);
 /// The refresh rate `ListDisplayModes` reports, in Hz.
 const DISPLAY_REFRESH_HZ: f32 = 60.0;
 /// That display's name. `OpenDisplay` takes it as a 0x40-byte string and
@@ -2164,7 +2157,7 @@ impl Cpu {
     /// Returns `None` for anything not answered here, so the caller falls
     /// through to its own dispatch.
     fn vi_common_command(&mut self, tls: u32, cmd_id: Option<u32>) -> Option<Result<()>> {
-        let (width, height) = DISPLAY_SIZE;
+        let (width, height) = self.operation_mode().display_size();
         let raw: Vec<u8> = match cmd_id? {
             // ListDisplays: the one display, and a count of one.
             1000 => {
@@ -2261,11 +2254,13 @@ impl Cpu {
     /// falls back to building a swapchain of its own, which it then never
     /// draws a single triangle into.
     fn vi_shared_buffer(&mut self, tls: u32, cmd_id: u32) -> Result<()> {
-        use super::{
-            SHARED_BUFFER_ADDR, SHARED_BUFFER_HEIGHT, SHARED_BUFFER_SIZE, SHARED_BUFFER_SLOTS,
-            SHARED_BUFFER_SLOT_SIZE, SHARED_BUFFER_STRIDE, SHARED_BUFFER_USABLE_SLOTS,
-            SHARED_BUFFER_WIDTH,
-        };
+        use super::{SHARED_BUFFER_ADDR, SHARED_BUFFER_SLOTS, SHARED_BUFFER_USABLE_SLOTS};
+        // The geometry the applet is told, which is the display's — see
+        // [`super::OperationMode`]. Read once here so a dock landing between
+        // two of the answers below cannot make them disagree.
+        let mode = self.operation_mode();
+        let (shared_width, shared_height) = mode.display_size();
+        let slot_size = mode.shared_buffer_slot_size();
         /// `NvMultiFence`: a count and four `{ id, value }` pairs.
         const FENCE_SIZE: usize = 4 + 4 * 8;
         match cmd_id {
@@ -2279,14 +2274,14 @@ impl Cpu {
                 layout[..4].copy_from_slice(&(SHARED_BUFFER_SLOTS as i32).to_le_bytes());
                 for slot in 0..SHARED_BUFFER_SLOTS as usize {
                     let at = 8 + slot * 0x18;
-                    let offset = u64::from(SHARED_BUFFER_SLOT_SIZE) * slot as u64;
+                    let offset = u64::from(slot_size) * slot as u64;
                     layout[at..at + 8].copy_from_slice(&offset.to_le_bytes());
                     layout[at + 8..at + 16]
-                        .copy_from_slice(&u64::from(SHARED_BUFFER_SLOT_SIZE).to_le_bytes());
+                        .copy_from_slice(&u64::from(slot_size).to_le_bytes());
                     layout[at + 16..at + 20]
-                        .copy_from_slice(&(SHARED_BUFFER_WIDTH as i32).to_le_bytes());
+                        .copy_from_slice(&(shared_width as i32).to_le_bytes());
                     layout[at + 20..at + 24]
-                        .copy_from_slice(&(SHARED_BUFFER_HEIGHT as i32).to_le_bytes());
+                        .copy_from_slice(&(shared_height as i32).to_le_bytes());
                 }
                 if self.trace_nv {
                     eprintln!(
@@ -2299,7 +2294,7 @@ impl Cpu {
                 let mut raw = Vec::with_capacity(0x10);
                 raw.extend_from_slice(&handle.to_le_bytes());
                 raw.extend_from_slice(&[0; 4]);
-                raw.extend_from_slice(&u64::from(SHARED_BUFFER_SIZE).to_le_bytes());
+                raw.extend_from_slice(&u64::from(mode.shared_buffer_size()).to_le_bytes());
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
             // AcquireSharedFrameBuffer(u64 layer_id) -> fence, s32 slots[4],
@@ -2326,10 +2321,10 @@ impl Cpu {
                 let (_, id) = self.shared_buffer_object();
                 let buffer = crate::gpu::DisplayBuffer {
                     nvmap_id: id,
-                    offset: SHARED_BUFFER_SLOT_SIZE.wrapping_mul(slot),
-                    width: SHARED_BUFFER_WIDTH,
-                    height: SHARED_BUFFER_HEIGHT,
-                    pitch: SHARED_BUFFER_STRIDE,
+                    offset: slot_size.wrapping_mul(slot),
+                    width: shared_width,
+                    height: shared_height,
+                    pitch: mode.shared_buffer_stride(),
                     layout: crate::gpu::NV_LAYOUT_BLOCK_LINEAR,
                     block_height_log2: 4,
                     color_format: 0x01_0053_2120, // A8B8G8R8
@@ -2369,7 +2364,9 @@ impl Cpu {
         if let Some(pair) = self.shared_buffer {
             return pair;
         }
-        let size = super::SHARED_BUFFER_SIZE;
+        // Reserved for the docked geometry whatever mode this is: the buffer
+        // is created once and the console can be docked afterwards.
+        let size = super::SHARED_BUFFER_RESERVED_SIZE;
         let addr = super::SHARED_BUFFER_ADDR;
         let handle = self.nv.gpu.nvmap.create(size);
         let _ = self.nv.gpu.nvmap.alloc(handle, 0, 0, 0x1000, 0, addr);
@@ -3437,9 +3434,19 @@ impl Cpu {
                 // and Console (docked) is 1; this answered 1 while its comment
                 // said Handheld, so NX-Fetch printed "Docked" beside a 720p
                 // handheld framebuffer, and a title that picks its resolution
-                // by operation mode was being told to render at 1080p.
-                Some(5) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
-                Some(6) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]), // GetPerformanceMode: Normal
+                // by operation mode was being told to render at 1080p. Both
+                // now come from the one switch, so they cannot disagree again:
+                // see [`super::OperationMode`].
+                Some(5) => {
+                    let mode = self.operation_mode() as u32;
+                    self.write_ipc_response(tls, 0, &[], &mode.to_le_bytes(), &[])
+                }
+                // GetPerformanceMode -> ApmPerformanceMode: Normal handheld,
+                // Boost docked.
+                Some(6) => {
+                    let mode = self.operation_mode().performance_mode();
+                    self.write_ipc_response(tls, 0, &[], &mode.to_le_bytes(), &[])
+                }
                 Some(9) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]), // GetCurrentFocusState: InFocus
                 // GetBootMode: Normal.
                 Some(8) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
@@ -3462,18 +3469,33 @@ impl Cpu {
                     }
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
-                // GetDefaultDisplayResolutionChangeEvent: handed out and never
-                // signalled, because the resolution never changes.
+                // GetDefaultDisplayResolutionChangeEvent: fired when the
+                // console is docked or undocked, which is the only thing that
+                // changes the resolution. It used to be handed out dark on the
+                // grounds that the resolution never changed — true when there
+                // was one — and one object per caller, so nothing could have
+                // signalled the one being waited on anyway.
                 Some(61) => {
-                    let h = self.alloc_event("am:display-resolution-changed", true);
+                    let h = match self.display_resolution_event {
+                        Some(h) => h,
+                        None => {
+                            let h = self.alloc_event("am:display-resolution-changed", true);
+                            self.display_resolution_event = Some(h);
+                            h
+                        }
+                    };
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
-                // GetDefaultDisplayResolution: the same 1280x720 the display
-                // stub hands out as its native window.
+                // GetDefaultDisplayResolution: the display's, which is the
+                // dock's — 1280x720 handheld, 1920x1080 docked. Hard-coding
+                // 720p here is what put "1280x720 @ 60Hz [Docked]" on
+                // NX-Fetch's screen: the mode and the resolution beside it
+                // came from two different places.
                 Some(60) => {
+                    let (width, height) = self.operation_mode().display_size();
                     let mut raw = Vec::with_capacity(8);
-                    raw.extend_from_slice(&1280u32.to_le_bytes());
-                    raw.extend_from_slice(&720u32.to_le_bytes());
+                    raw.extend_from_slice(&width.to_le_bytes());
+                    raw.extend_from_slice(&height.to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &raw, &[])
                 }
                 // RequestToAcquireSleepLock: nothing else here contends the
@@ -4610,8 +4632,8 @@ impl Cpu {
                 // A title sets it to the resolution it is drawing at so that a
                 // swipe comes back in the same units as its own geometry
                 // rather than in the panel's — which is why what arrives here
-                // is exactly [`DISPLAY_SIZE`], the size `vi` and `am` already
-                // agree on.
+                // is exactly the handheld display size, the one `vi` and `am`
+                // already agree on (see [`super::OperationMode::display_size`]).
                 //
                 // Nothing here synthesises gestures, so there is no engine to
                 // point at a range and accepting is the whole implementation.
@@ -6353,10 +6375,18 @@ impl Cpu {
     }
 
     /// The rate a module runs at: whatever was last set for it, else the
-    /// idle-handheld default.
+    /// default for the mode the console is in.
+    ///
+    /// Only the GPU's default moves with the dock. The CPU and memory clocks
+    /// are the same either way on an original console, and the CPU's is
+    /// load-bearing beyond this — it is the rate one emulated instruction
+    /// stands for, and what `GetSystemTick` and every timed wait are derived
+    /// from — so it is not a figure the dock gets to change.
     fn clock_rate(&self, module: u32) -> u32 {
+        const GPU: u32 = 1;
         match self.clock_rates.get(&module) {
             Some(&rate) => rate,
+            None if module == GPU => self.operation_mode().gpu_clock_hz(),
             None => CLOCK_RATES_HZ[module as usize],
         }
     }
@@ -6961,10 +6991,14 @@ impl Cpu {
                     self.reply_with_interface(tls, handle, "apm:session")?;
                     Ok(())
                 }
-                // GetPerformanceMode -> ApmPerformanceMode. Normal, which is
-                // the mode `am`'s GetPerformanceMode reports and the one that
-                // goes with a handheld operation mode.
-                Some(1) => self.write_ipc_response(tls, 0, &[], &APM_PERFORMANCE_MODE_NORMAL.to_le_bytes(), &[]),
+                // GetPerformanceMode -> ApmPerformanceMode. The same answer
+                // `am`'s GetPerformanceMode gives, from the same switch: two
+                // services disagreeing about whether the console is docked is
+                // worse than either answer on its own.
+                Some(1) => {
+                    let mode = self.operation_mode().performance_mode();
+                    self.write_ipc_response(tls, 0, &[], &mode.to_le_bytes(), &[])
+                }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // ISession.
@@ -11561,8 +11595,9 @@ mod tests {
         // What the title actually sends: the display size both `vi` and `am`
         // report, then the aruid `am`'s window controller hands out.
         let mut payload = Vec::new();
-        payload.extend_from_slice(&super::DISPLAY_SIZE.0.to_le_bytes());
-        payload.extend_from_slice(&super::DISPLAY_SIZE.1.to_le_bytes());
+        let (width, height) = super::super::OperationMode::Handheld.display_size();
+        payload.extend_from_slice(&width.to_le_bytes());
+        payload.extend_from_slice(&height.to_le_bytes());
         payload.extend_from_slice(&1u64.to_le_bytes());
         assert_eq!(payload[..4], [0x00, 0x05, 0x00, 0x00], "1280, as the request carries it");
 
