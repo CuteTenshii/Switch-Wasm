@@ -368,6 +368,91 @@ pub const HID_SHMEM_SIZE: u32 = 0x4_0000;
 /// (`SHAREDMEMFONT_SIZE` in libnx). Recognised the same way as hid's.
 pub const PL_SHMEM_SIZE: u32 = 0x110_0000;
 
+/// One shared font as `pl:u` reports it: where its TrueType data begins in
+/// pl's shared memory, and how many bytes of it there are.
+///
+/// The offset points *past* the eight-byte header the font is stored behind,
+/// so what the guest is handed is a plain TrueType file — hbmenu passes it
+/// straight to `FT_New_Memory_Face`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontRegion {
+    pub offset: u32,
+    pub size: u32,
+}
+
+/// The shared fonts, in `PlSharedFontType` order: the system data archive
+/// each lives in, and its name inside that archive.
+///
+/// The seventh has no `PlSharedFontType` of its own — `nintendo_ext2_003` is
+/// a second extension face, and a console reports it after the six the enum
+/// names. Matched against Eden's `SHARED_FONTS`, which is the layout nnSdk
+/// accepts.
+const SHARED_FONTS: [(u64, &str); 7] = [
+    (0x0100_0000_0000_0811, "/nintendo_udsg-r_std_003.bfttf"),
+    (0x0100_0000_0000_0814, "/nintendo_udsg-r_org_zh-cn_003.bfttf"),
+    (0x0100_0000_0000_0814, "/nintendo_udsg-r_ext_zh-cn_003.bfttf"),
+    (0x0100_0000_0000_0813, "/nintendo_udjxh-db_zh-tw_003.bfttf"),
+    (0x0100_0000_0000_0812, "/nintendo_udsg-r_ko_003.bfttf"),
+    (0x0100_0000_0000_0810, "/nintendo_ext_003.bfttf"),
+    (0x0100_0000_0000_0810, "/nintendo_ext2_003.bfttf"),
+];
+
+/// A `.bfttf`'s first four bytes, and the repeating key the rest of the file
+/// is xored with.
+///
+/// The key is not a secret and does not have to be derived: a `.bfttf` starts
+/// with a known plaintext (`7f 9a 02 18`) stored xored, so the first four
+/// bytes of every one of these files are the same and the key falls straight
+/// out of them.
+const BFTTF_MAGIC: [u8; 4] = [0x36, 0xf8, 0x1a, 0x1e];
+const BFTTF_KEY: [u8; 4] = [0x49, 0x62, 0x18, 0x06];
+
+/// The eight-byte header a shared font sits behind in pl's shared memory.
+const BFTTF_HEADER: usize = 8;
+
+/// Decode one `.bfttf` into what pl's shared memory holds for it: the header,
+/// then the TrueType file itself.
+///
+/// The size field in the header is left in the form the file carried it —
+/// byte-reversed rather than decoded — which is what a console leaves there
+/// and what Eden reproduces ("re-encrypt the size"). Nothing here reads it;
+/// it is the guest's to interpret.
+pub fn decode_bfttf(file: &[u8]) -> Option<Vec<u8>> {
+    let len = file.len() / 4 * 4;
+    if len < BFTTF_HEADER || file[..4] != BFTTF_MAGIC {
+        return None;
+    }
+    let mut out: Vec<u8> = file[..len]
+        .iter()
+        .zip(BFTTF_KEY.iter().cycle())
+        .map(|(b, k)| b ^ k)
+        .collect();
+    out[4..8].copy_from_slice(&[file[7], file[6], file[5], file[4]]);
+    Some(out)
+}
+
+/// Wrap a plain TrueType file the way a console's `.bfttf` wraps one.
+///
+/// The host-supplied fallback font goes through this and back out through
+/// [`decode_bfttf`], so it lands in shared memory in exactly the layout the
+/// firmware fonts do rather than in one this file would have to special-case.
+///
+/// A `.bfttf` is a whole number of words, so a font whose length is not is
+/// padded rather than trimmed: the trailing zeros are past every table the
+/// font's directory points at, whereas trimming would cut into the last one.
+pub fn encode_bfttf(ttf: &[u8]) -> Vec<u8> {
+    let len = ttf.len().next_multiple_of(4);
+    let mut out = Vec::with_capacity(len + BFTTF_HEADER);
+    out.extend_from_slice(&[0x7f, 0x9a, 0x02, 0x18]);
+    out.extend_from_slice(&(len as u32).to_be_bytes());
+    out.extend_from_slice(ttf);
+    out.resize(len + BFTTF_HEADER, 0);
+    for (i, b) in out.iter_mut().enumerate() {
+        *b ^= BFTTF_KEY[i % 4];
+    }
+    out
+}
+
 /// Offsets into libnx's `HidSharedMemory` (`switch/services/hid.h`): the npad
 /// section, the per-controller stride, and the fields of `HidNpadInternalState`
 /// that `padUpdate` reads.
@@ -857,6 +942,13 @@ pub struct Cpu {
     /// file. Homebrew reads it out of pl's shared memory and hands it to
     /// FreeType, so an empty vector means no text renders at all.
     shared_font: Vec<u8>,
+    /// pl's shared memory as the guest will see it: every shared font, each
+    /// behind its eight-byte header. Assembled once, on first use, by
+    /// [`Cpu::build_shared_fonts`].
+    pl_shmem_image: Vec<u8>,
+    /// Where each font landed in [`Cpu::pl_shmem_image`], in
+    /// `PlSharedFontType` order.
+    shared_font_regions: Vec<FontRegion>,
     /// Address the guest mapped pl's shared memory to, where the font was
     /// written; 0 until the guest calls `plInitialize`.
     pl_shmem_addr: u32,
@@ -1069,6 +1161,8 @@ impl Cpu {
             ssl_options: HashMap::new(),
             sample_counter: 0,
             shared_font: Vec::new(),
+            pl_shmem_image: Vec::new(),
+            shared_font_regions: Vec::new(),
             pl_shmem_addr: 0,
             audren_renderers: HashMap::new(),
             audio_outs: HashMap::new(),
@@ -2510,6 +2604,9 @@ impl Cpu {
     /// without one nothing but pre-rendered bitmaps appears on screen.
     pub fn set_shared_font(&mut self, font: Vec<u8>) {
         self.shared_font = font;
+        // Whatever was assembled from the old font is stale.
+        self.pl_shmem_image.clear();
+        self.shared_font_regions.clear();
         // A guest that already mapped the shared memory keeps the pointer it was
         // given, so refill the region in place.
         if self.pl_shmem_addr != 0 {
@@ -2522,11 +2619,102 @@ impl Cpu {
         self.shared_font.len()
     }
 
-    /// Copy the shared font into pl's shared memory at `addr`.
+    /// Assemble pl's shared memory, if it has not been assembled already.
+    ///
+    /// The real fonts come from the five system data archives a firmware dump
+    /// carries; each holds `.bfttf` files, which are a TrueType file behind an
+    /// eight-byte header with the whole thing xored by a fixed key. A guest
+    /// that has none of those registered — homebrew run without a firmware
+    /// dump, or a web build — gets the host-supplied font
+    /// ([`Cpu::set_shared_font`]) in every slot instead, wrapped identically
+    /// so there is one layout rather than two.
+    ///
+    /// This is deliberately lazy: the archives are registered after the `Cpu`
+    /// exists, and the guest cannot ask for a font before it has run.
+    pub(super) fn build_shared_fonts(&mut self) {
+        if !self.shared_font_regions.is_empty() {
+            return;
+        }
+        // Read each archive at most once: two of them hold two fonts.
+        let mut archives: HashMap<u64, Vec<u8>> = HashMap::new();
+        for (id, _) in SHARED_FONTS {
+            if archives.contains_key(&id) {
+                continue;
+            }
+            let Some(src) = self.data_archives.get(&id) else { continue };
+            let mut image = vec![0u8; src.len() as usize];
+            if src.read_at(0, &mut image).is_err() {
+                continue;
+            }
+            archives.insert(id, image);
+        }
+
+        for (id, name) in SHARED_FONTS {
+            let font = archives
+                .get(&id)
+                .and_then(|image| crate::romfs::RomFs::parse(image).ok()?.read_path(name))
+                .and_then(decode_bfttf);
+            let Some(font) = font else { continue };
+            self.push_shared_font(&font);
+        }
+
+        if self.shared_font_regions.is_empty() && !self.shared_font.is_empty() {
+            // No firmware fonts. The host's font stands in for every type, so
+            // a guest that asks for the extension face gets *something*
+            // rather than an empty region it cannot draw with.
+            let font = decode_bfttf(&encode_bfttf(&self.shared_font.clone()));
+            if let Some(font) = font {
+                for _ in 0..SHARED_FONTS.len() {
+                    self.push_shared_font(&font);
+                }
+            }
+        }
+        if std::env::var("TRACE_FONT").is_ok() {
+            eprintln!("[pl] {} bytes of shared font", self.pl_shmem_image.len());
+            for (i, region) in self.shared_font_regions.iter().enumerate() {
+                eprintln!(
+                    "[pl]  type {i}: offset={:#x} size={:#x}",
+                    region.offset, region.size
+                );
+            }
+        }
+    }
+
+    /// Append one decoded font to the shared-memory image and record where its
+    /// TrueType data starts. A font that would not fit is dropped rather than
+    /// truncated: half a font is not a font.
+    fn push_shared_font(&mut self, font: &[u8]) {
+        let offset = self.pl_shmem_image.len();
+        if offset + font.len() > PL_SHMEM_SIZE as usize {
+            return;
+        }
+        self.pl_shmem_image.extend_from_slice(font);
+        self.shared_font_regions.push(FontRegion {
+            offset: (offset + BFTTF_HEADER) as u32,
+            size: (font.len() - BFTTF_HEADER) as u32,
+        });
+    }
+
+    /// pl's shared memory as the guest sees it, for tests that need to check
+    /// a font really is where `pl:u` said it would be.
+    #[cfg(test)]
+    pub(super) fn shared_font_image(&mut self) -> &[u8] {
+        self.build_shared_fonts();
+        &self.pl_shmem_image
+    }
+
+    /// Where each shared font sits in pl's shared memory.
+    pub(super) fn shared_font_regions(&mut self) -> &[FontRegion] {
+        self.build_shared_fonts();
+        &self.shared_font_regions
+    }
+
+    /// Copy the shared fonts into pl's shared memory at `addr`.
     pub(super) fn write_shared_font(&mut self, addr: u32) {
-        let font = std::mem::take(&mut self.shared_font);
-        let _ = self.mem.map(addr, &font);
-        self.shared_font = font;
+        self.build_shared_fonts();
+        let image = std::mem::take(&mut self.pl_shmem_image);
+        let _ = self.mem.map(addr, &image);
+        self.pl_shmem_image = image;
     }
 
     /// Set the wall-clock time `time:u`/`time:s` reports, as POSIX seconds

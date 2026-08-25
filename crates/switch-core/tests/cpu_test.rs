@@ -2460,9 +2460,12 @@ fn touch_input_before_hid_shared_memory_is_mapped_is_dropped() {
 fn mapping_pl_shared_memory_delivers_the_shared_font() {
     use switch_core::cpu::PL_SHMEM_SIZE;
     // `plInitialize` maps pl's shared memory and homebrew then reads the font
-    // out of it at the offset pl reported (0), so the bytes have to be there by
-    // the time the mapping syscall returns.
+    // out of it at the offset pl reported, so the bytes have to be there by
+    // the time the mapping syscall returns. Each font sits behind the
+    // eight-byte header a console stores it behind, which is why the offset
+    // `GetSharedMemoryAddressOffset` reports is not zero.
     const ADDR: u32 = 0x2000_0000;
+    const HEADER: u32 = 8;
     let font: Vec<u8> = (0..=255u8).cycle().take(0x2000).collect();
     let mut cpu = cpu_at(0x1000);
     cpu.set_shared_font(font.clone());
@@ -2471,13 +2474,13 @@ fn mapping_pl_shared_memory_delivers_the_shared_font() {
     cpu.mem.map(0x1000, &svc(0x13).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
-    assert_eq!(cpu.mem.dump(ADDR, font.len()).unwrap(), font);
+    assert_eq!(cpu.mem.dump(ADDR + HEADER, font.len()).unwrap(), font);
 
     // A font handed over after the guest mapped the region still reaches it:
     // the guest is holding a pointer into memory it already mapped.
     let replacement: Vec<u8> = vec![0xAB; 0x1000];
     cpu.set_shared_font(replacement.clone());
-    assert_eq!(cpu.mem.dump(ADDR, replacement.len()).unwrap(), replacement);
+    assert_eq!(cpu.mem.dump(ADDR + HEADER, replacement.len()).unwrap(), replacement);
 }
 
 #[test]
