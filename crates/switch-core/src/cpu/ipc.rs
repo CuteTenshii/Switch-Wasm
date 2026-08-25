@@ -2255,10 +2255,9 @@ impl Cpu {
     /// draws a single triangle into.
     fn vi_shared_buffer(&mut self, tls: u32, cmd_id: u32) -> Result<()> {
         use super::{SHARED_BUFFER_ADDR, SHARED_BUFFER_SLOTS, SHARED_BUFFER_USABLE_SLOTS};
-        // The geometry the applet is told, which is the display's — see
-        // [`super::OperationMode`]. Read once here so a dock landing between
-        // two of the answers below cannot make them disagree.
-        let mode = self.operation_mode();
+        // The shared layer's geometry, which is not the display's and does
+        // not follow the dock — see [`super::SHARED_BUFFER_GEOMETRY`].
+        let mode = super::SHARED_BUFFER_GEOMETRY;
         let (shared_width, shared_height) = mode.display_size();
         let slot_size = mode.shared_buffer_slot_size();
         /// `NvMultiFence`: a count and four `{ id, value }` pairs.

@@ -5588,7 +5588,7 @@ fn the_system_shared_buffer_hands_out_slots_an_applet_can_present() {
     assert_ne!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "no nvmap handle came back");
     assert_eq!(
         cpu.mem.read_u64(tls + 0x28).unwrap(),
-        u64::from(switch_core::cpu::OperationMode::Handheld.shared_buffer_size())
+        u64::from(switch_core::cpu::SHARED_BUFFER_GEOMETRY.shared_buffer_size())
     );
 
     // AcquireSharedFrameBuffer -> an empty fence, the slots that exist, and
@@ -5915,18 +5915,20 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     assert_eq!(GUEST_HEAP_REGION_ADDR + GUEST_HEAP_REGION_SIZE, GUEST_ALIAS_REGION_ADDR);
     assert!(GUEST_ALIAS_REGION_ADDR + GUEST_ALIAS_REGION_SIZE <= SHARED_BUFFER_ADDR);
     // The shared buffer is reserved for the *docked* geometry however the
-    // console starts, because it is allocated once and can be docked
-    // afterwards. Sizing this region to the handheld buffer is how the Home
-    // Menu came to stay 720p in the dock: there was nowhere for a 1080p one
-    // to go.
+    // console starts. The pool laid out in it is the shared layer's own and
+    // does not follow the dock — the Home Menu stays 720p docked because
+    // qlaunch lays out at 720p, not because of where the buffer ends — so
+    // this is headroom for an applet that does honour the layout it is given,
+    // and what it has to cover is whichever geometry is the larger.
     assert_eq!(
         SHARED_BUFFER_RESERVED_SIZE,
         OperationMode::Docked.shared_buffer_size(),
         "the reservation has to cover the larger of the two modes"
     );
     assert!(
-        OperationMode::Handheld.shared_buffer_size() <= SHARED_BUFFER_RESERVED_SIZE,
-        "and the smaller"
+        switch_core::cpu::SHARED_BUFFER_GEOMETRY.shared_buffer_size()
+            <= SHARED_BUFFER_RESERVED_SIZE,
+        "and the one actually laid out in it"
     );
     assert!(SHARED_BUFFER_ADDR + SHARED_BUFFER_RESERVED_SIZE <= FB_BASE);
     assert!(FB_BASE + FB_WIDTH * FB_HEIGHT * 4 <= INPUT_ADDR);
@@ -6326,14 +6328,20 @@ fn the_dock_resizes_the_display_and_takes_the_touchscreen_away() {
 }
 
 #[test]
-fn the_home_menu_draws_at_the_docked_resolution_when_docked() {
-    // The Home Menu does not have a layer of its own: it draws into the system
-    // shared buffer, and nowhere else. So a shared buffer pinned at 1280x720
-    // is a Home Menu pinned at 720p however the console is docked — which is
-    // exactly what a second copy of the display size bought. There is one
-    // copy now, on `OperationMode`, and this is what says the buffer follows
-    // it.
-    use switch_core::cpu::OperationMode;
+fn the_shared_buffer_does_not_move_when_the_console_is_docked() {
+    // The pool layout is a promise: it goes out once, at
+    // GetSharedBufferMemoryHandleId, and the applet maps it and renders into
+    // it for as long as it holds it. Sizing it by the display broke that
+    // promise on the dock — every slot in the pool moved while qlaunch was
+    // still drawing into the old ones, and the present that followed read
+    // from the wrong offset at the wrong pitch. Thirteen frames after a dock
+    // the Home Menu was 0 of 2073600 pixels non-black, with the guest drawing
+    // perfectly well.
+    //
+    // Nor did the larger pool buy anything: qlaunch lays its UI out at
+    // 1280x720 whatever `vi` reports, so the docked frame was the undocked
+    // frame at the origin, to the pixel, and black across the rest.
+    use switch_core::cpu::{OperationMode, SHARED_BUFFER_GEOMETRY};
     const VI: u64 = 0x2000;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -6341,30 +6349,29 @@ fn the_home_menu_draws_at_the_docked_resolution_when_docked() {
     cpu.register_service_handle(VI, "vi:m");
     let tls = cpu.tls_base();
 
-    // GetSharedBufferMemoryHandleId reports the pool: its total size, and per
+    // GetSharedBufferMemoryHandleId reports the pool's total size, and per
     // slot an offset, a size and the slot's width and height.
-    let slot_geometry = |cpu: &mut Cpu| {
+    let mut pool = |cpu: &mut Cpu| {
         ipc_request(cpu, VI, 4, None, 8225);
         assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
-        let total = cpu.mem.read_u64(tls + 0x28).unwrap();
-        // The out buffer holds the layout; slot 0 starts 8 bytes in.
-        (total, cpu.read_x(0))
+        cpu.mem.read_u64(tls + 0x28).unwrap()
     };
 
-    let (handheld_total, _) = slot_geometry(&mut cpu);
-    assert_eq!(handheld_total, u64::from(OperationMode::Handheld.shared_buffer_size()));
+    let handheld = pool(&mut cpu);
+    assert_eq!(handheld, u64::from(SHARED_BUFFER_GEOMETRY.shared_buffer_size()));
 
     cpu.set_operation_mode(OperationMode::Docked);
-    let (docked_total, _) = slot_geometry(&mut cpu);
-    assert_eq!(docked_total, u64::from(OperationMode::Docked.shared_buffer_size()));
-    assert!(docked_total > handheld_total, "a 1080p pool is bigger than a 720p one");
+    assert_eq!(pool(&mut cpu), handheld, "docking moved the pool the applet had mapped");
 
-    // And the numbers behind it are the display's, not a set of their own.
-    assert_eq!(OperationMode::Docked.display_size(), (1920, 1080));
-    assert_eq!(OperationMode::Docked.shared_buffer_stride(), 1920 * 4);
-    // Rows round up to a 128-row block-linear block: 1080 -> 1152, 720 -> 768.
-    assert_eq!(OperationMode::Docked.shared_buffer_rows(), 1152);
+    // The display did move, though — the pool is the shared layer's geometry
+    // and the display is the panel's, and the two are no longer the same
+    // number.
+    assert_eq!(cpu.operation_mode().display_size(), (1920, 1080));
+    assert_eq!(SHARED_BUFFER_GEOMETRY.display_size(), (1280, 720));
+
+    // Rows round up to a 128-row block-linear block: 720 -> 768, 1080 -> 1152.
     assert_eq!(OperationMode::Handheld.shared_buffer_rows(), 768);
+    assert_eq!(OperationMode::Docked.shared_buffer_rows(), 1152);
 }
 
 #[test]

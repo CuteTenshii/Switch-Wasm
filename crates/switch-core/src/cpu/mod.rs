@@ -86,22 +86,47 @@ pub const THREAD_TLS_STRIDE: u32 = 0x1000;
 /// one buffer the whole system shares, an applet asks `vi` for a slot in it,
 /// renders there and presents the slot back.
 ///
-/// The geometry is the console's, and it is what the applets expect to be
-/// told: seven slots, each a block-linear RGBA8888 image whose visible part
-/// is the display. It is **the display**, not a size of its own — the Home
-/// Menu draws into this buffer and nowhere else, so a shared buffer pinned at
-/// 720p is a Home Menu pinned at 720p however the console is docked. See
-/// [`OperationMode::shared_buffer_size`] and the rest of that family.
+/// Seven slots, each a block-linear RGBA8888 image. See
+/// [`OperationMode::shared_buffer_size`] and the rest of that family for how
+/// one is measured, and [`SHARED_BUFFER_GEOMETRY`] for which geometry it is
+/// measured at.
 pub const SHARED_BUFFER_ADDR: u32 = 0xF000_0000;
 pub const SHARED_BUFFER_SLOTS: u32 = 7;
-/// Address space set aside for it: the docked geometry, whatever mode the
-/// console is in.
+/// The geometry the pool is laid out at — the shared *layer's* size, which is
+/// not the display's and does not follow the dock.
 ///
-/// The buffer is allocated once, on the applet's first ask, and the console
-/// can be docked afterwards — so it is reserved for the larger of the two and
-/// reported at the size of the mode it is in. Reserving costs nothing but
-/// address space: the pages behind it are soft-mapped, and only the two slots
-/// [`SHARED_BUFFER_USABLE_SLOTS`] hands out are ever written.
+/// It is tempting to size the pool by the display, on the reasoning that the
+/// Home Menu draws into this buffer and nowhere else, so a 720p buffer is a
+/// 720p Home Menu however the console is docked. The Home Menu is a 720p Home
+/// Menu either way: qlaunch lays its UI out at 1280x720 whatever it is told.
+/// It never asks `am` for the resolution at all, and `vi` answering 1920x1080
+/// to `ListDisplays`, `ListDisplayModes`, `GetDisplayMode` and the pool layout
+/// itself changes nothing it draws.
+///
+/// So a display-sized pool does not buy a 1080p menu, it costs a working one:
+/// docked, the presented frame was the undocked frame at the origin — to the
+/// pixel, 0 of 921600 different — and pure black across the remaining two
+/// thirds of the screen. Scaling the layer onto the display is the composer's
+/// job, and giving the layer the display's dimensions is not how it is asked
+/// for.
+///
+/// A pool that does not move also cannot move underneath a guest. The layout
+/// goes out once, at `GetSharedBufferMemoryHandleId`, and the applet maps it
+/// and renders to it for as long as it holds it; a slot size that changed
+/// with the dock relocated every slot in the pool while the applet was still
+/// drawing into the old ones, and the present that followed read from the
+/// wrong offset at the wrong pitch — a black screen, thirteen frames after a
+/// dock, with the guest drawing perfectly well.
+pub const SHARED_BUFFER_GEOMETRY: OperationMode = OperationMode::Handheld;
+/// Address space set aside for it: the larger of the two geometries, whatever
+/// [`SHARED_BUFFER_GEOMETRY`] is laid out at today.
+///
+/// Headroom rather than a size. Reserving costs nothing but address space —
+/// the pages behind it are soft-mapped, and only the two slots
+/// [`SHARED_BUFFER_USABLE_SLOTS`] hands out are ever written — and an applet
+/// that does honour the pool layout it is given is the one case where the
+/// pool would have to grow, with nowhere to grow into if this were sized to
+/// what is used.
 pub const SHARED_BUFFER_RESERVED_SIZE: u32 = OperationMode::Docked.shared_buffer_size();
 /// Only the first two slots are ever handed out, which is what the console
 /// reports too — `AcquireSharedFrameBuffer` answers `{0, 1, -1, -1}`.
