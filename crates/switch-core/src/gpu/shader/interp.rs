@@ -22,7 +22,7 @@
 //! came from, which is what makes it independently testable.
 
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::shader::Program;
+use crate::gpu::shader::compiled::{Compiled, NO_TARGET};
 use crate::{Error, Result};
 use std::collections::HashMap;
 
@@ -419,7 +419,7 @@ impl Invocation {
     }
 
     /// Execute `program` from its entry point until it exits.
-    pub fn execute(&mut self, program: &Program, env: &Env) -> Result<()> {
+    pub fn execute(&mut self, program: &Compiled, env: &Env) -> Result<()> {
         if program.is_empty() {
             return Err(Error::Gpu("shader: executing an empty program".into()));
         }
@@ -440,34 +440,49 @@ impl Invocation {
                     "shader: did not terminate within {MAX_STEPS} instructions"
                 )));
             }
-            pending.retain(|&(due, reg, val)| {
-                if due == pc {
-                    self.set_reg_f32(reg, val);
-                    false
-                } else {
-                    true
-                }
-            });
+            // Guarded: a texture result is pending for a handful of steps out
+            // of a program, and `Vec::retain` is a real call even over an
+            // empty vector — one per instruction, per covered pixel.
+            if !pending.is_empty() {
+                pending.retain(|&(due, reg, val)| {
+                    if due == pc {
+                        self.set_reg_f32(reg, val);
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
 
-            let insn = program.insns[pc];
-            if !self.holds(insn.pred) {
+            // The guard first, out of its own dense array: an instruction
+            // whose predicate is false never touches the 32-byte operation.
+            if !self.holds(program.pred(pc)) {
                 pc += 1;
                 continue;
             }
+            let op = program.op(pc);
 
             // Anything that moves the pc other than by one flushes the
             // deferred texture writes first: their landing place was found by
             // scanning forward in program order, which a jump invalidates.
-            let jump = |target: u32, pending: &mut Vec<(usize, u8, f32)>, inv: &mut Self| {
+            //
+            // The target is already an index: resolving it used to mean a
+            // binary search over the program's byte offsets on every taken
+            // branch, which the lowering does once instead.
+            let jump = |index: u32, pending: &mut Vec<(usize, u8, f32)>, inv: &mut Self| {
                 for (_, reg, val) in pending.drain(..) {
                     inv.set_reg_f32(reg, val);
                 }
-                program.index_of(target).ok_or_else(|| {
-                    Error::Gpu(format!("shader: branch to {target:#x}, which was never decoded"))
-                })
+                if index == NO_TARGET {
+                    return Err(Error::Gpu(format!(
+                        "shader: branch at {:#x} goes somewhere that was never decoded",
+                        program.offset(pc)
+                    )));
+                }
+                Ok(index as usize)
             };
 
-            match insn.op {
+            match op {
                 Op::Exit => {
                     for (_, reg, val) in pending.drain(..) {
                         self.set_reg_f32(reg, val);
@@ -479,30 +494,38 @@ impl Invocation {
                     return Ok(());
                 }
                 Op::Nop | Op::Inert => {}
-                Op::Bra { target } => {
-                    pc = jump(target, &mut pending, self)?;
+                Op::Bra { .. } => {
+                    pc = jump(program.target(pc), &mut pending, self)?;
                     continue;
                 }
+                // The one branch whose target is not known until it runs: it
+                // is a register value, so it still costs a lookup.
                 Op::Brx { base, reg } => {
-                    let target = super::align_slot(base.wrapping_add(self.reg(reg)));
-                    pc = jump(target, &mut pending, self)?;
+                    let at = super::align_slot(base.wrapping_add(self.reg(reg)));
+                    let index = program.index_of(at).map(|i| i as u32).unwrap_or(NO_TARGET);
+                    if index == NO_TARGET {
+                        return Err(Error::Gpu(format!(
+                            "shader: branch to {at:#x}, which was never decoded"
+                        )));
+                    }
+                    pc = jump(index, &mut pending, self)?;
                     continue;
                 }
-                Op::Ssy { target } | Op::Pbk { target } | Op::Pcnt { target } => {
-                    self.stack.push(target);
+                Op::Ssy { .. } | Op::Pbk { .. } | Op::Pcnt { .. } => {
+                    self.stack.push(program.target(pc));
                 }
                 Op::Sync | Op::Brk | Op::Cont => {
                     let target = self.stack.pop().ok_or_else(|| {
-                        let at = program.offsets.get(pc).copied().unwrap_or(0);
                         Error::Gpu(format!(
-                            "shader: sync/brk/cont at {at:#x} with an empty reconvergence stack"
+                            "shader: sync/brk/cont at {:#x} with an empty reconvergence stack",
+                            program.offset(pc)
                         ))
                     })?;
                     pc = jump(target, &mut pending, self)?;
                     continue;
                 }
                 Op::Texs { .. } => {
-                    self.run_texs(program, pc, insn.op, env, &mut pending)?;
+                    self.run_texs(program, pc, op, env, &mut pending)?;
                 }
                 other => self.run_alu(other, env)?,
             }
@@ -941,7 +964,7 @@ impl Invocation {
     /// or flushed at the next branch or at `exit`, whichever comes first.
     fn run_texs(
         &mut self,
-        program: &Program,
+        program: &Compiled,
         pc: usize,
         op: Op,
         env: &Env,
@@ -975,19 +998,19 @@ impl Invocation {
     }
 }
 
-/// Work out, for every `texs` in `program`, where each of its results lands.
-/// Called once per decode by [`super::decode_program_with`]; see
+/// Work out, for every `texs` in `insns`, where each of its results lands.
+/// Called once per decode, and once per lowering; see
 /// [`super::Program::texs_writes`] for why it is not done per invocation.
-pub(super) fn texs_writes_for(program: &Program) -> Vec<super::TexsWrites> {
+pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
     let mut out = Vec::new();
-    for (pc, insn) in program.insns.iter().enumerate() {
-        let Op::Texs { dst, dst2, mask, .. } = insn.op else {
+    for (pc, op) in ops.iter().enumerate() {
+        let Op::Texs { dst, dst2, mask, .. } = *op else {
             continue;
         };
         let writes = isa::texs_destinations(dst, dst2, mask)
             .into_iter()
             .map(|(channel, reg)| {
-                let due = first_use_after(program, pc + 1, reg).unwrap_or(program.len() - 1);
+                let due = first_use_after(ops, pc + 1, reg).unwrap_or(ops.len() - 1);
                 (channel, reg, due)
             })
             .collect();
@@ -1002,16 +1025,16 @@ pub(super) fn texs_writes_for(program: &Program) -> Vec<super::TexsWrites> {
 /// it again lands it before the last instruction, so a shader that hands a
 /// `texs` result straight to its output register still ends with the value
 /// hardware would eventually have written.
-fn first_use_after(program: &Program, start: usize, reg: u8) -> Option<usize> {
-    for (idx, insn) in program.insns.iter().enumerate().skip(start) {
-        if reads(&insn.op).contains(&reg) {
+fn first_use_after(ops: &[Op], start: usize, reg: u8) -> Option<usize> {
+    for (idx, op) in ops.iter().enumerate().skip(start) {
+        if reads(op).contains(&reg) {
             return Some(idx);
         }
-        if writes(&insn.op).contains(&reg) {
+        if writes(op).contains(&reg) {
             return None;
         }
     }
-    program.len().checked_sub(1)
+    ops.len().checked_sub(1)
 }
 
 fn operand_reg(op: Operand) -> Option<u8> {
@@ -1322,7 +1345,7 @@ mod tests {
     use super::*;
     use crate::gpu::shader::decode_program;
     use crate::gpu::shader::isa::{FMod, FmulScale, Instruction, TexDim};
-    use crate::gpu::shader::Program;
+    use crate::gpu::shader::compiled::Compiled;
 
     fn no_consts() -> HashMap<(u8, u16), f32> {
         HashMap::new()
@@ -1330,13 +1353,13 @@ mod tests {
 
     /// Build a straight-line program out of unpredicated ops, at the byte
     /// offsets a real 32-byte-block layout would put them at.
-    fn prog(ops: &[Op]) -> Program {
-        let mut p = Program::default();
+    fn prog(ops: &[Op]) -> Compiled {
+        let mut p = crate::gpu::shader::Program::default();
         for (i, &op) in ops.iter().enumerate() {
             p.insns.push(Instruction::always(op));
             p.offsets.push(crate::gpu::shader::ENTRY_OFFSET + i as u32 * 8);
         }
-        p
+        Compiled::new(&p)
     }
     use std::cell::RefCell;
 
@@ -1387,15 +1410,15 @@ mod tests {
     /// A program with real byte offsets, so branch targets resolve. Each
     /// entry is `(op, predicate)`; offsets follow the 32-byte block layout
     /// (slot 0 of every block is a `sched` word, so it is skipped).
-    fn prog_at(entries: &[(Op, Pred)]) -> Program {
-        let mut p = Program::default();
+    fn prog_at(entries: &[(Op, Pred)]) -> Compiled {
+        let mut p = crate::gpu::shader::Program::default();
         let mut offset = crate::gpu::shader::ENTRY_OFFSET;
         for &(op, pred) in entries {
             p.insns.push(Instruction { pred, op });
             p.offsets.push(offset);
             offset = crate::gpu::shader::next_slot(offset);
         }
-        p
+        Compiled::new(&p)
     }
 
     #[test]
@@ -1442,7 +1465,8 @@ mod tests {
             (Op::Exit, Pred::ALWAYS),                       // at 0x38
         ]);
         // Offset 0x20 is a `sched` control word, not an instruction slot.
-        assert_eq!(program.offsets, vec![0x08, 0x10, 0x18, 0x28, 0x30, 0x38]);
+        let offsets: Vec<u32> = (0..program.len()).map(|i| program.offset(i)).collect();
+        assert_eq!(offsets, vec![0x08, 0x10, 0x18, 0x28, 0x30, 0x38]);
 
         let mut taken = Invocation::new();
         taken.set_reg(0, 1);
@@ -1715,7 +1739,7 @@ mod tests {
             (0x00070f00, 0x50b00000),
         ));
 
-        let program = decode_program(&bytes).unwrap();
+        let program = Compiled::new(&decode_program(&bytes).unwrap());
 
         let mut inv = Invocation::new();
         inv.attr_in.set(0x7c, 1.0 / w);
@@ -1793,7 +1817,7 @@ mod tests {
             (0x0807ff00, 0xeff1ff80), // st b128 a[0x80] $r0 0x0
             (0x0007000f, 0xe3000000), // exit
         ));
-        let program = decode_program(&bytes).unwrap();
+        let program = Compiled::new(&decode_program(&bytes).unwrap());
 
         // A std140 mat4 is column-major: column c's four rows sit at bytes
         // [c*16, c*16+16). m[row][col] is the usual math notation.
@@ -1921,7 +1945,7 @@ mod tests {
             (0x0007000f, 0xe3000000), // exit
             (0xff87000f, 0xe2400fff), // bra (padding, never reached)
         ));
-        let program = decode_program(&bytes).unwrap();
+        let program = Compiled::new(&decode_program(&bytes).unwrap());
 
         struct StubTex;
         impl TextureSource for StubTex {

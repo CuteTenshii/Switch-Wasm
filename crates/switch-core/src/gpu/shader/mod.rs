@@ -13,6 +13,7 @@
 //! branch target, and stop each path at whatever ends it. Anything no path
 //! reaches is padding and never decoded.
 
+pub mod compiled;
 pub mod interp;
 pub mod isa;
 
@@ -30,6 +31,31 @@ const MAX_INSTRUCTIONS: usize = 4096;
 /// right after that block's `sched` word.
 pub const ENTRY_OFFSET: u32 = 8;
 
+/// The generic varying slots `insns`' `ipa`s read, ascending.
+///
+/// Interpolating a varying costs three multiply-adds per component and happens
+/// once per covered pixel, so a full-screen quad pays for each slot 921 600
+/// times. Maxwell's generic attribute space holds 32 of them and a real UI
+/// shader reads a handful, so the rasterizer interpolates what the fragment
+/// shader asks for rather than the whole space.
+///
+/// Offsets outside the generic range (`gl_Position`, `1/w`, point-sprite
+/// coordinates) are not varyings and are handled on their own.
+pub fn interpolated_slots(ops: &[Op]) -> Vec<usize> {
+    let mut slots: Vec<usize> = ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Ipa { offset, .. } => Some(*offset),
+            _ => None,
+        })
+        .filter(|&offset| (GENERIC_ATTR_BASE..GENERIC_ATTR_END).contains(&offset))
+        .map(|offset| usize::from(offset - GENERIC_ATTR_BASE) / GENERIC_ATTR_STRIDE)
+        .collect();
+    slots.sort_unstable();
+    slots.dedup();
+    slots
+}
+
 /// Maxwell's generic attribute space: 32 four-component slots, the wires a
 /// vertex shader's outputs reach a fragment shader's inputs on.
 const GENERIC_ATTR_BASE: u16 = 0x80;
@@ -43,13 +69,6 @@ const GENERIC_ATTR_STRIDE: usize = 0x10;
 pub struct Program {
     pub insns: Vec<Instruction>,
     pub offsets: Vec<u32>,
-    /// Where each `texs`'s results land. Derived from `insns`, and worked out
-    /// on first use rather than at construction so that it cannot be left
-    /// stale by a `Program` built any other way — see [`Program::texs_writes`].
-    texs_writes: std::cell::OnceCell<Vec<TexsWrites>>,
-    /// Which generic varying slots this program interpolates — see
-    /// [`Program::interpolated_slots`].
-    interpolated_slots: std::cell::OnceCell<Vec<usize>>,
 }
 
 /// Where one `texs` instruction's results land.
@@ -65,55 +84,6 @@ pub struct TexsWrites {
 impl Program {
     pub fn len(&self) -> usize {
         self.insns.len()
-    }
-
-    /// The deferred register writes the `texs` at instruction `index`
-    /// produces: `(colour channel, destination register, the instruction
-    /// index the write must land before)`.
-    ///
-    /// A texture result arrives late on hardware, so the interpreter parks it
-    /// until just before the first later instruction that reads the register
-    /// (see `interp::texs_writes_for`). Where that is depends only on the
-    /// decoded program, not on the invocation — and rediscovering it meant
-    /// scanning forward through the program, building a `Vec` of read and
-    /// written registers per instruction scanned, *once per covered pixel*.
-    /// That scan was the single most expensive thing in a shaded pixel;
-    /// NXpotify's frame time was 1.8 s, of which 1.5 s was this.
-    pub fn texs_writes(&self, index: usize) -> &[(usize, u8, usize)] {
-        self.texs_writes
-            .get_or_init(|| interp::texs_writes_for(self))
-            .iter()
-            .find(|t| t.at == index)
-            .map(|t| t.writes.as_slice())
-            .unwrap_or(&[])
-    }
-
-    /// The generic varying slots this program's `ipa`s read, ascending.
-    ///
-    /// Interpolating a varying costs three multiply-adds per component and
-    /// happens once per covered pixel, so a full-screen quad pays for each
-    /// slot 921 600 times. Maxwell's generic attribute space holds 32 of them
-    /// and a real UI shader reads a handful, so the rasterizer interpolates
-    /// what the fragment shader asks for rather than the whole space.
-    ///
-    /// Offsets outside the generic range (`gl_Position`, `1/w`, point-sprite
-    /// coordinates) are not varyings and are handled on their own.
-    pub fn interpolated_slots(&self) -> &[usize] {
-        self.interpolated_slots.get_or_init(|| {
-            let mut slots: Vec<usize> = self
-                .insns
-                .iter()
-                .filter_map(|insn| match insn.op {
-                    Op::Ipa { offset, .. } => Some(offset),
-                    _ => None,
-                })
-                .filter(|&offset| (GENERIC_ATTR_BASE..GENERIC_ATTR_END).contains(&offset))
-                .map(|offset| usize::from(offset - GENERIC_ATTR_BASE) / GENERIC_ATTR_STRIDE)
-                .collect();
-            slots.sort_unstable();
-            slots.dedup();
-            slots
-        })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -632,7 +602,8 @@ mod tests {
         }
         // 0x7c is `1/w`, not a varying; 0x80 is slot 0 twice; 0xc0/0xc4 are
         // both slot 4.
-        assert_eq!(program.interpolated_slots(), &[0, 4]);
+        let ops: Vec<Op> = program.insns.iter().map(|i| i.op).collect();
+        assert_eq!(interpolated_slots(&ops), &[0, 4]);
     }
 
     #[test]

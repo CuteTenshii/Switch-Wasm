@@ -22,6 +22,7 @@ use crate::gpu::exec::ExecCtx;
 use crate::gpu::shader::interp::{
     ConstantSource, Env, Invocation, MemoryConstants, MemoryGlobal, MemoryTextures, NoTextures,
 };
+use crate::gpu::shader::compiled::Compiled;
 use crate::gpu::shader::{self, Op, Program};
 use crate::gpu::surface::MAX_SAMPLES;
 use crate::{Error, Result};
@@ -512,7 +513,7 @@ fn decode_program_from_memory(
 }
 
 fn shade_vertex(
-    program: &Program,
+    program: &Compiled,
     attribs: &[VertexAttrib],
     arrays: &[VertexArray],
     vertex_index: u32,
@@ -691,7 +692,7 @@ fn blend(target: BlendTarget, constant: [f32; 4], src: [f32; 4], dst: [f32; 4]) 
 /// full-screen quad covers 921 600 of them.
 fn shade_fragment(
     inv: &mut Invocation,
-    program: &Program,
+    program: &Compiled,
     verts: &[ShadedVertex; 3],
     inv_w: [f32; 3],
     weights: [f32; 3],
@@ -890,6 +891,26 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // every constant it uses from memory once rather than once per invocation.
     let vs_const_cache = std::cell::RefCell::new(crate::gpu::shader::interp::ConstCache::default());
     let fs_const_cache = std::cell::RefCell::new(crate::gpu::shader::interp::ConstCache::default());
+    // Lower both programs for this draw: branch targets resolved to indices,
+    // and every constant the bound banks can supply folded into an immediate.
+    // Both are things the interpreter would otherwise redo per invocation, and
+    // a fragment shader runs once per covered pixel.
+    let vs_program = {
+        let consts = MemoryConstants {
+            ctx: &*ctx,
+            bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::VertexB, bank as u32),
+            cache: &vs_const_cache,
+        };
+        Compiled::with_constants(&vs_program, &consts)
+    };
+    let fs_program = {
+        let consts = MemoryConstants {
+            ctx: &*ctx,
+            bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::Fragment, bank as u32),
+            cache: &fs_const_cache,
+        };
+        Compiled::with_constants(&fs_program, &consts)
+    };
 
     for tri in triangles {
         let mut shaded: Vec<ShadedVertex> = Vec::with_capacity(3);
@@ -1883,6 +1904,7 @@ mod tests {
         };
         let consts: std::collections::HashMap<(u8, u16), f32> = Default::default();
 
+        let program = Compiled::new(&program);
         let v = shade_vertex(&program, &[], &[], 7, 42, &ctx, &consts).unwrap();
         assert_eq!(v.clip[0].to_bits(), 42, "gl_InstanceID");
         assert_eq!(v.clip[1].to_bits(), 7, "gl_VertexID");
