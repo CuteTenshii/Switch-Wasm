@@ -13,6 +13,7 @@
 //! branch target, and stop each path at whatever ends it. Anything no path
 //! reaches is padding and never decoded.
 
+pub mod cfg;
 pub mod compiled;
 pub mod interp;
 pub mod isa;
@@ -69,6 +70,13 @@ const GENERIC_ATTR_STRIDE: usize = 0x10;
 pub struct Program {
     pub insns: Vec<Instruction>,
     pub offsets: Vec<u32>,
+    /// Where each `brx` can go, by the byte offset of the `brx` itself.
+    ///
+    /// Kept because the decoder had to read the jump table to find the
+    /// switch's arms at all (see `brx_targets`), and throwing that away would
+    /// leave anything analysing this program unable to follow the one branch
+    /// whose target is not on the instruction.
+    pub indirect: BTreeMap<u32, Vec<u32>>,
 }
 
 /// Where one `texs` instruction's results land.
@@ -220,6 +228,7 @@ pub fn decode_program_with_consts(
     consts: &mut dyn FnMut(u8, u32) -> Result<u32>,
 ) -> Result<Program> {
     let mut decoded: BTreeMap<u32, Instruction> = BTreeMap::new();
+    let mut indirect: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     let mut queued: HashSet<u32> = HashSet::new();
     let mut worklist = vec![ENTRY_OFFSET];
     queued.insert(ENTRY_OFFSET);
@@ -257,12 +266,11 @@ pub fn decode_program_with_consts(
                 // instanced-quad vertex shader is one, and every one of its
                 // 222 draws stopped on an arm no path had decoded.
                 Op::Brx { base, reg } => {
-                    if let Some(targets) =
-                        brx_targets(&decoded, offset, base, reg, consts)
-                    {
-                        for target in targets {
+                    if let Some(targets) = brx_targets(&decoded, offset, base, reg, consts) {
+                        for &target in &targets {
                             push(target, &mut worklist, &mut queued);
                         }
+                        indirect.insert(offset, targets);
                     }
                     true
                 }
@@ -285,7 +293,7 @@ pub fn decode_program_with_consts(
     if decoded.is_empty() {
         return Err(Error::Gpu("shader: empty program".into()));
     }
-    let mut program = Program::default();
+    let mut program = Program { indirect, ..Program::default() };
     for (offset, insn) in decoded {
         program.offsets.push(offset);
         program.insns.push(insn);

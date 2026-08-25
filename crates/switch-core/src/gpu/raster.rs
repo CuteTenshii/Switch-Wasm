@@ -911,6 +911,20 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         };
         Compiled::with_constants(&fs_program, &consts)
     };
+    // `TRACE_CFG=1`: what each shader's control flow looks like to a
+    // translator. Structured control flow is what any shading language wants
+    // and what Maxwell's reconvergence stack does not have, so this is the
+    // measurement that says how hard translating a given shader would be.
+    if std::env::var("TRACE_CFG").is_ok() {
+        for (stage, addr, program) in
+            [("vs", vs_binding.addr, &vs_program), ("fs", fs_binding.addr, &fs_program)]
+        {
+            eprintln!(
+                "[cfg] {stage}@{addr:#x} {}",
+                crate::gpu::shader::cfg::Cfg::new(program).describe()
+            );
+        }
+    }
 
     for tri in triangles {
         let mut shaded: Vec<ShadedVertex> = Vec::with_capacity(3);

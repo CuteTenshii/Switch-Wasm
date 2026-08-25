@@ -48,6 +48,9 @@ pub struct Compiled {
     texs_writes: Vec<TexsWrites>,
     /// The generic varying slots this program interpolates.
     interpolated_slots: Vec<usize>,
+    /// Where each `brx` can go, by the index of the `brx` itself, resolved
+    /// from the byte offsets the decoder recorded.
+    indirect: std::collections::HashMap<usize, Vec<u32>>,
 }
 
 impl Compiled {
@@ -95,9 +98,22 @@ impl Compiled {
             offsets: program.offsets.clone(),
             texs_writes: Vec::new(),
             interpolated_slots: Vec::new(),
+            indirect: std::collections::HashMap::new(),
         };
         compiled.texs_writes = texs_writes_for(&compiled.ops);
         compiled.interpolated_slots = super::interpolated_slots(&compiled.ops);
+        compiled.indirect = program
+            .indirect
+            .iter()
+            .filter_map(|(at, targets)| {
+                let at = program.index_of(*at)?;
+                let targets = targets
+                    .iter()
+                    .filter_map(|t| program.index_of(*t).map(|i| i as u32))
+                    .collect();
+                Some((at, targets))
+            })
+            .collect();
         compiled
     }
 
@@ -144,6 +160,12 @@ impl Compiled {
     /// this was built.
     pub fn index_of(&self, byte_offset: u32) -> Option<usize> {
         self.offsets.binary_search(&byte_offset).ok()
+    }
+
+    /// Where the `brx` at `index` can go, as indices — the arms of the switch
+    /// it lowers, which nothing on the instruction itself names.
+    pub fn indirect_targets(&self, index: usize) -> Option<&[u32]> {
+        self.indirect.get(&index).map(|t| t.as_slice())
     }
 
     /// The generic varying slots this program's `ipa`s read, ascending — see
