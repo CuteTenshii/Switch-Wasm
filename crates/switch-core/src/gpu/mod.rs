@@ -23,6 +23,7 @@ pub mod shader;
 pub mod surface;
 pub mod syncpt;
 pub mod texture;
+pub mod upload;
 pub mod vmm;
 
 use crate::mem::Memory;

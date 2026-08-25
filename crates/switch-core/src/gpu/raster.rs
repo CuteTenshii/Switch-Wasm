@@ -933,6 +933,33 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             Err(e) => eprintln!("[pipe] undescribable: {e}"),
         }
     }
+    // `TRACE_UPLOAD=1`: how many bytes of guest memory this draw would have
+    // to be handed to a device, which is the number that decides whether
+    // uploading per draw is affordable at all.
+    if std::env::var("TRACE_UPLOAD").is_ok() {
+        match crate::gpu::pipeline::Pipeline::of(engine)
+            .map_err(|e| Error::Gpu(format!("pipeline: {e}")))
+            .and_then(|p| {
+                crate::gpu::upload::Uploads::of(
+                    engine,
+                    &p,
+                    &*ctx,
+                    crate::gpu::upload::Banks::Bound,
+                )
+            })
+        {
+            Ok(uploads) => eprintln!(
+                "[up] {} bytes: {} vertex ({}), {} index, {} constant ({} banks)",
+                uploads.len(),
+                uploads.vertex.iter().map(|v| v.bytes.len()).sum::<usize>(),
+                uploads.vertex.len(),
+                uploads.index.as_ref().map_or(0, |i| i.bytes.len()),
+                uploads.constants.iter().map(|c| c.bytes.len()).sum::<usize>(),
+                uploads.constants.len(),
+            ),
+            Err(e) => eprintln!("[up] cannot resolve: {e:?}"),
+        }
+    }
     // `TRACE_CFG=1`: what each shader's control flow looks like to a
     // translator. Structured control flow is what any shading language wants
     // and what Maxwell's reconvergence stack does not have, so this is the
