@@ -16,6 +16,7 @@ pub mod exec;
 pub mod macro_engine;
 pub mod nvdrv;
 pub mod nvmap;
+pub mod pipeline;
 pub mod raster;
 pub mod renderer;
 pub mod shader;

@@ -924,6 +924,15 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         };
         Compiled::with_constants(&fs_program, &consts)
     };
+    // `TRACE_PIPELINE=1`: the fixed-function state this draw runs under, as
+    // a GPU backend would have to describe it — or what stopped it being
+    // describable, which is the more useful half.
+    if std::env::var("TRACE_PIPELINE").is_ok() {
+        match crate::gpu::pipeline::Pipeline::of(engine) {
+            Ok(pipeline) => eprintln!("[pipe] {pipeline:?}"),
+            Err(e) => eprintln!("[pipe] undescribable: {e}"),
+        }
+    }
     // `TRACE_CFG=1`: what each shader's control flow looks like to a
     // translator. Structured control flow is what any shading language wants
     // and what Maxwell's reconvergence stack does not have, so this is the
@@ -957,7 +966,13 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     continue;
                 }
             };
-            let layout = Layout::of(&translated, stage);
+            let mut layout = Layout::of(&translated, stage);
+            // Neither correction is anything the program says; both come out
+            // of the draw's viewport transform.
+            if let Ok(pipeline) = crate::gpu::pipeline::Pipeline::of(engine) {
+                layout.flip_y = pipeline.viewport.flip_y;
+                layout.depth_minus_one_to_one = pipeline.viewport.depth_minus_one_to_one();
+            }
             match wgsl::module(&translated, stage, &layout) {
                 Ok(_) if where_to == "1" => eprintln!(
                     "[wgsl] {name}@{addr:#x} {} regs, {} attribs, {} varyings, \

@@ -1468,6 +1468,22 @@ pub struct Layout {
     /// How many colour targets a fragment shader writes. Each takes four
     /// consecutive registers from `r0`, so target `n` is `r[4n..4n+4]`.
     pub targets: u32,
+    /// Whether the vertex entry point negates `position.y`.
+    ///
+    /// A driver reconciles GL's bottom-left window origin with a render
+    /// target whose row 0 is at the top by writing a *negative* `scale_y`
+    /// into the viewport transform. WebGPU has no negative viewport height,
+    /// so the flip has to happen in the shader instead. Read it off
+    /// `pipeline::Viewport::flip_y`; nothing in the program says.
+    pub flip_y: bool,
+    /// Whether the vertex entry point remaps `position.z` from `-w..w` onto
+    /// `0..w`.
+    ///
+    /// Maxwell clips z the way GL does and WebGPU clips it the way Vulkan
+    /// does, so a shader whose z is left alone has everything in the near
+    /// half of the frustum clipped away entirely. Read it off the viewport
+    /// transform's z scale, which is 0.5 for a guest using GL's range.
+    pub depth_minus_one_to_one: bool,
 }
 
 /// `a[]`'s word count: a ten-bit byte address, one `f32` per word.
@@ -1514,6 +1530,10 @@ impl Layout {
             const_banks: translated.const_banks.clone(),
             textures: translated.textures.clone(),
             targets: 1,
+            // Neither is anything the program says; both come from the
+            // draw's viewport transform.
+            flip_y: false,
+            depth_minus_one_to_one: false,
         }
     }
 }
@@ -1688,6 +1708,16 @@ fn vertex_entry(layout: &Layout) -> String {
     out.push_str(&format!("  attr_out[{}u] = 1.0;\n", POSITION / 4 + 3));
     out.push_str("  run();\n  var out: VertexOutput;\n");
     out.push_str(&format!("  out.position = {};\n", gather("attr_out", POSITION / 4)));
+    if layout.depth_minus_one_to_one {
+        out.push_str("  // Maxwell clips z from -w to w and WebGPU clips it from 0 to w;\n");
+        out.push_str("  // left alone, the near half of the frustum is clipped away.\n");
+        out.push_str("  out.position.z = (out.position.z + out.position.w) * 0.5;\n");
+    }
+    if layout.flip_y {
+        out.push_str("  // The viewport transform mirrors y, and WebGPU has no\n");
+        out.push_str("  // negative viewport height to mirror it with.\n");
+        out.push_str("  out.position.y = -out.position.y;\n");
+    }
     if !layout.varyings.is_empty() {
         // See this module's note on `@interpolate(linear)`: what the fragment
         // stage has to receive is value/w, not value.
