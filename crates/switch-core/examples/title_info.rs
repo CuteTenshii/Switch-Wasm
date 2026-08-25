@@ -3,6 +3,8 @@
 //! the browser's title card, useful for checking a container without one.
 //!
 //! Usage: cargo run -p switch-core --example title_info -- <path.nsp|path.nca> <prod.keys> [title.keys] [icon_out.jpg]
+mod common;
+
 
 use std::cell::RefCell;
 use std::env;
@@ -58,14 +60,7 @@ fn main() {
     let title_path = args.get(3).filter(|s| s.ends_with(".keys"));
     let icon_path = args.iter().skip(3).find(|s| !s.ends_with(".keys"));
 
-    let prod_text = std::fs::read_to_string(prod_path).expect("read prod.keys");
-    let mut keys =
-        switch_core::keys::keyset_from_prod(&switch_core::keys::parse_keys_file(&prod_text));
-    if let Some(path) = title_path {
-        let title_text = std::fs::read_to_string(path).expect("read title.keys");
-        keys.title_keys =
-            switch_core::keys::keyset_from_title(&switch_core::keys::parse_keys_file(&title_text));
-    }
+    let mut keys = common::keys(prod_path, title_path);
 
     let src = FileSource::open(container_path).expect("open container");
     println!("{}: {} bytes", container_path, src.len());

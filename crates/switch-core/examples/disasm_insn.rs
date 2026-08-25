@@ -1,10 +1,9 @@
+//! Disassemble a single A64 instruction word: `disasm_insn <word>`.
+mod common;
+
 use switch_core::disasm::disassemble;
 
 fn main() {
-    let insn = u32::from_str_radix(
-        std::env::args().nth(1).expect("insn").trim_start_matches("0x"),
-        16,
-    )
-    .expect("insn");
-    println!("{}: {}", insn, disassemble(insn));
+    let insn = common::hex(&common::arg(1, "disasm_insn <word>"));
+    println!("{insn:#010x}: {}", disassemble(insn));
 }

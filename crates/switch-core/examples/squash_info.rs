@@ -1,19 +1,18 @@
-use std::fs;
+//! Print where libtransistor's embedded squashfs image sits in an NRO:
+//! `squash_info <path.nro>`.
+mod common;
+
 use switch_core::nro::symbol_value;
 
+/// Where `load_nro` puts an NRO's first byte.
+const BASE: u64 = 0x0800_0000;
+
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: squash_info <nro>");
-    let data = fs::read(&path).expect("read nro");
-    let base = 0x8000000u64;
-    let names = [
-        "_libtransistor_squashfs_image",
-        "_libtransistor_squashfs_image_end",
-    ];
-    for name in names {
-        if let Some(v) = symbol_value(&data, name) {
-            println!("{} = {:#x}", name, base + v);
-        } else {
-            println!("{} = not found", name);
+    let data = common::read(common::arg(1, "squash_info <path.nro>"));
+    for name in ["_libtransistor_squashfs_image", "_libtransistor_squashfs_image_end"] {
+        match symbol_value(&data, name) {
+            Some(value) => println!("{name} = {:#x}", BASE + value),
+            None => println!("{name} = not found"),
         }
     }
 }

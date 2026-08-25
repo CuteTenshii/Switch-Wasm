@@ -1,14 +1,18 @@
-use std::fs;
+//! Look a symbol up in an NRO and print its load address:
+//! `find_sym <path.nro> <name>`.
+mod common;
+
 use switch_core::nro::symbol_value;
 
+const USAGE: &str = "find_sym <path.nro> <name>";
+/// Where `load_nro` puts an NRO's first byte.
+const BASE: u64 = 0x0800_0000;
+
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: find_sym <nro> <name>");
-    let name = std::env::args().nth(2).expect("name");
-    let data = fs::read(&path).expect("read nro");
-    let base = 0x8000000u64;
-    if let Some(v) = symbol_value(&data, &name) {
-        println!("{} = {:#x}", name, base + v);
-    } else {
-        println!("{} = not found", name);
+    let data = common::read(common::arg(1, USAGE));
+    let name = common::arg(2, USAGE);
+    match symbol_value(&data, &name) {
+        Some(value) => println!("{name} = {:#x}", BASE + value),
+        None => println!("{name} = not found"),
     }
 }

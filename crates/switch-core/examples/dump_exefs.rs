@@ -2,6 +2,8 @@
 //! image plus a symbol map, at the exact addresses `boot_retail_program`
 //! lays them out at. That makes a backtrace from a real run nameable:
 //! `dump_exefs <nsp> <prod.keys> [title.keys] <out_dir>`.
+mod common;
+
 
 use std::env;
 use std::fs;
@@ -29,10 +31,7 @@ fn main() {
     // A retail title arrives as an NSP with the Program NCA inside it; a
     // system applet ships as the bare NCA, with no PFS0 around it at all.
     let pfs0 = switch_core::nsp::Pfs0::parse(&nsp_data).ok();
-    let prod_text = fs::read_to_string(prod_path).unwrap();
-    let mut keys = switch_core::keys::keyset_from_prod(&switch_core::keys::parse_keys_file(&prod_text));
-    let title_text = fs::read_to_string(title_path).unwrap();
-    keys.title_keys = switch_core::keys::keyset_from_title(&switch_core::keys::parse_keys_file(&title_text));
+    let mut keys = common::keys(prod_path, Some(title_path));
 
     let span = match &pfs0 {
         Some(pfs0) => {

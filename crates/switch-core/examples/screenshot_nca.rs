@@ -10,23 +10,21 @@
 //! `SWITCH_FIRMWARE=<dir>` registers the system data archives; an applet needs
 //! them far more than a title does, since its fonts, icons and settings all
 //! live there.
+mod common;
+
+use common::{Flow, Pace};
 use std::collections::HashMap;
 use std::env;
-use std::fs;
 use switch_core::cpu::Cpu;
 use switch_core::nsp::Pfs0;
 
+const USAGE: &str = "screenshot_nca <path.nca> <prod.keys> <title.keys> <out.ppm> [frame]";
+
 fn main() {
-    let a: Vec<String> = env::args().collect();
-    let raw = fs::read(&a[1]).unwrap();
-    let mut keys = switch_core::keys::keyset_from_prod(&switch_core::keys::parse_keys_file(
-        &fs::read_to_string(&a[2]).unwrap(),
-    ));
-    keys.title_keys = switch_core::keys::keyset_from_title(&switch_core::keys::parse_keys_file(
-        &fs::read_to_string(&a[3]).unwrap(),
-    ));
-    let out = a[4].clone();
-    let want: u64 = a.get(5).and_then(|s| s.parse().ok()).unwrap_or(1);
+    let raw = common::read(common::arg(1, USAGE));
+    let keys = common::keys(common::arg(2, USAGE), Some(common::arg(3, USAGE)));
+    let out = common::arg(4, USAGE);
+    let want = common::opt_num(5).unwrap_or(1);
 
     let nca = switch_core::nca::Nca::parse_with_keys(&raw, Some(&keys)).unwrap();
     let exefs = nca
@@ -56,28 +54,9 @@ fn main() {
         },
         None => println!("[romfs] no romfs section"),
     }
-    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf");
-    if let Ok(b) = fs::read(font) {
-        cpu.set_shared_font(b);
-    }
-    if let Ok(dir) = env::var("SWITCH_FIRMWARE") {
-        for entry in fs::read_dir(&dir).unwrap().flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("nca") {
-                continue;
-            }
-            let Ok(src) = switch_core::source::FileSource::open(&path) else { continue };
-            let Ok(ar) = switch_core::nca::Nca::parse_source(&src, Some(&keys)) else { continue };
-            use switch_core::nca::ContentType;
-            if !matches!(ar.content_type, ContentType::Data | ContentType::PublicData) {
-                continue;
-            }
-            let Some(idx) = ar.romfs_section_index() else { continue };
-            if let Ok(r) = ar.romfs_source(src, &keys, idx) {
-                cpu.add_data_archive(ar.title_id, Box::new(r));
-            }
-        }
-    }
+    common::load_fallback_font(&mut cpu);
+    common::register_firmware(&mut cpu, &keys);
+
     // The address space this title gets is chosen by its own manifest — see
     // `MemoryLayout`. Must precede `boot_retail_program`.
     cpu.set_system_resource_size(switch_core::npdm::Npdm::system_resource_size_of(&pf, &exefs));
@@ -164,14 +143,12 @@ fn main() {
     // what you are hunting is something *clearing* a field.
     let trap_zero = env::var("TRAP_ZERO").is_ok();
     let mut traps = 0u32;
-    let mut done = 0u64;
-    let budget: u64 = env::var("STEPS").ok().and_then(|s| s.parse().ok()).unwrap_or(40_000_000_000);
-    // Every hook below looks at the machine between two instructions, which
-    // `Cpu::step` is the only way to get. `step` is also the interpreter:
-    // `Cpu::run` is what reaches the block translator, and that is 1.8x the
-    // rate on real code. So a run with no hooks armed is driven in slices
-    // instead — the same engine the frontend uses.
-    let instrumented = trap.is_some()
+    let budget = common::env_u64("STEPS", 40_000_000_000);
+    // Every hook below reads the machine between two instructions, which is
+    // what `Pace::Instructions` is for — and about half the speed. With none
+    // of them armed the run goes through the block translator instead, which
+    // is the engine the frontend uses.
+    let pace = if trap.is_some()
         || read_trap.is_some()
         || !watch_pc.is_empty()
         || poke.is_some()
@@ -179,27 +156,27 @@ fn main() {
         || wake_every > 0
         || cover.is_some()
         || gate_sniff
-        || stacks;
-    // Short enough that the per-thread sampling below keeps the resolution it
-    // had when it ran every 4096 instructions.
-    const SLICE: u64 = 4096;
-    while !cpu.halted && cpu.nv.gpu.frames < want && done < budget {
-        if !instrumented {
-            match cpu.run(SLICE.min(budget - done)) {
-                Ok(report) if report.steps == 0 => break,
-                Ok(report) => done += report.steps,
-                Err(e) => {
-                    println!("[step] error at pc={:#x} step {done}: {e:?}", cpu.get_pc());
-                    break;
-                }
-            }
-            let t = cpu.current_thread_index();
-            if t < share.len() {
-                share[t] += 1;
-            }
-            *hot.entry((t, cpu.get_pc())).or_insert(0u64) += 1;
-            continue;
+        || stacks
+    {
+        Pace::Instructions
+    } else {
+        Pace::Blocks
+    };
+    // The read watchpoint reports on the step *after* the one that tripped it,
+    // so the PC that did the reading has to be carried across a tick.
+    let mut reader_pc = 0u32;
+    let run = common::drive(&mut cpu, pace, budget, |cpu, done| {
+        if cpu.nv.gpu.frames >= want {
+            return Flow::Stop;
         }
+        let t = cpu.current_thread_index();
+        if t < share.len() {
+            share[t] += 1;
+        }
+        if read_trap.is_some() && cpu.mem.take_read_hit().is_some() {
+            *readers.entry(reader_pc).or_insert(0) += 1;
+        }
+        reader_pc = cpu.get_pc();
         if let Some(at) = cpu.mem.take_watch_hit() {
             let v = cpu.mem.read_u32(at & !3).unwrap_or(0);
             if traps < 24 && (v != 0 || trap_zero) {
@@ -286,15 +263,11 @@ fn main() {
                 let _ = cpu.mem.write_u32(at, 0);
             }
         }
-        let pc_before = cpu.get_pc();
-        if let Err(e) = cpu.step() {
-            println!("[step] error at pc={:#x} step {done}: {e:?}", cpu.get_pc());
-            break;
-        }
-        if read_trap.is_some() && cpu.mem.take_read_hit().is_some() {
-            *readers.entry(pc_before).or_insert(0) += 1;
-        }
-        done += 1;
+        Flow::Continue
+    });
+    let done = run.steps;
+    if let Some(fault) = &run.fault {
+        println!("[step] error at pc={:#x} step {done}: {fault}", cpu.get_pc());
     }
     if let Some((lo, _)) = cover {
         let mut run: Option<u32> = None;
@@ -370,11 +343,5 @@ fn main() {
         println!("no frame");
         return;
     }
-    let mut ppm = format!("P6\n{} {}\n255\n", fb.width, fb.height).into_bytes();
-    for px in &fb.pixels {
-        ppm.extend_from_slice(&[*px as u8, (*px >> 8) as u8, (*px >> 16) as u8]);
-    }
-    fs::write(&out, ppm).unwrap();
-    let lit = fb.pixels.iter().filter(|p| **p & 0x00FF_FFFF != 0).count();
-    println!("wrote {out}: {}x{}, {lit}/{} non-black", fb.width, fb.height, fb.pixels.len());
+    common::write_ppm(&out, fb);
 }

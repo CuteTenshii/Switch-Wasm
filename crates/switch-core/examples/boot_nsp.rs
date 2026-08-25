@@ -5,8 +5,9 @@
 //!
 //! Usage: cargo run -p switch-core --example boot_nsp -- <path.nsp> <prod.keys> [title.keys] [max_steps]
 
+mod common;
+
 use std::env;
-use std::fs;
 use switch_core::cpu::Cpu;
 use switch_core::nsp::Pfs0;
 use switch_core::source::{ByteSource, FileSource, Window};
@@ -36,14 +37,7 @@ fn main() {
     let pfs0 = Pfs0::read_from(&src).expect("parse nsp");
     println!("{} files in NSP", pfs0.files.len());
 
-    let prod_text = fs::read_to_string(prod_path).expect("read prod.keys");
-    let prod_entries = switch_core::keys::parse_keys_file(&prod_text);
-    let mut keys = switch_core::keys::keyset_from_prod(&prod_entries);
-    if let Some(tp) = title_path {
-        let title_text = fs::read_to_string(tp).expect("read title.keys");
-        let title_entries = switch_core::keys::parse_keys_file(&title_text);
-        keys.title_keys = switch_core::keys::keyset_from_title(&title_entries);
-    }
+    let mut keys = common::keys(prod_path, title_path);
 
     // Find the Program NCA: parse every .nca's header and pick the one whose
     // content type is Program. (cnmt.nca entries are tiny metadata records,
@@ -190,42 +184,14 @@ fn main() {
     // text waits for a font that never arrives — the browser stages one at
     // startup, so a native run that skips it fails in a way the real
     // frontend never would.
-    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf");
-    match fs::read(font) {
-        Ok(bytes) => cpu.set_shared_font(bytes),
-        Err(e) => println!("no font at {font} ({e}): text will not render"),
-    }
+    common::load_fallback_font(&mut cpu);
     // System data archives, if the host pointed at a firmware dump. A title
     // mounts these by data id for content that is not its own — an applet's
     // shared assets, the Mii and amiibo models. Each is another Data NCA, and
     // is served straight off disk rather than read in.
-    if let Ok(dir) = env::var("SWITCH_FIRMWARE") {
-        let mut registered = 0;
-        let entries = fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {dir}: {e}"));
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("nca") {
-                continue;
-            }
-            let Ok(src) = switch_core::source::FileSource::open(&path) else {
-                continue;
-            };
-            let Ok(archive) = switch_core::nca::Nca::parse_source(&src, Some(&keys)) else {
-                continue;
-            };
-            use switch_core::nca::ContentType;
-            if !matches!(archive.content_type, ContentType::Data | ContentType::PublicData) {
-                continue;
-            }
-            let Some(idx) = archive.romfs_section_index() else {
-                continue;
-            };
-            if let Ok(romfs) = archive.romfs_source(src, &keys, idx) {
-                cpu.add_data_archive(archive.title_id, Box::new(romfs));
-                registered += 1;
-            }
-        }
-        println!("registered {registered} system data archive(s) from {dir}");
+    let registered = common::register_firmware(&mut cpu, &keys);
+    if registered > 0 {
+        println!("registered {registered} system data archive(s)");
     }
 
     // The address space this title gets, which its own manifest decides — a
@@ -321,15 +287,8 @@ fn main() {
         done += 1;
     }
     if let Ok(out) = std::env::var("SHOT") {
-        let fb = &cpu.nv.gpu.framebuffer;
-        if !fb.is_empty() {
-            let mut ppm = format!("P6\n{} {}\n255\n", fb.width, fb.height).into_bytes();
-            for px in &fb.pixels {
-                ppm.extend_from_slice(&[*px as u8, (*px >> 8) as u8, (*px >> 16) as u8]);
-            }
-            std::fs::write(&out, ppm).expect("write ppm");
-            let lit = fb.pixels.iter().filter(|p| **p & 0x00FF_FFFF != 0).count();
-            println!("wrote {out}: {}x{}, {lit}/{} non-black", fb.width, fb.height, fb.pixels.len());
+        if !cpu.nv.gpu.framebuffer.is_empty() {
+            common::write_ppm(&out, &cpu.nv.gpu.framebuffer);
         }
     }
     println!("guest RAM touched: {} MiB", cpu.mem.mapped_bytes() / (1024 * 1024));

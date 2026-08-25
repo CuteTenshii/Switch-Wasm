@@ -1,11 +1,17 @@
-use std::fs;
+//! Extract libtransistor's embedded squashfs image out of a loaded NRO:
+//! `extract_sqfs <path.nro> <out.bin>`.
+mod common;
+
 use switch_core::cpu::Cpu;
 use switch_core::nro::{load_nro, symbol_value};
 
+const USAGE: &str = "extract_sqfs <path.nro> <out.bin>";
+/// Where `load_nro` puts an NRO's first byte.
+const BASE: u32 = 0x0800_0000;
+
 fn main() {
-    let nro_path = std::env::args().nth(1).expect("usage: extract_sqfs <nro> <out.bin>");
-    let out_path = std::env::args().nth(2).expect("usage: extract_sqfs <nro> <out.bin>");
-    let data = fs::read(&nro_path).expect("read nro");
+    let data = common::read(common::arg(1, USAGE));
+    let out = common::arg(2, USAGE);
     let mut cpu = Cpu::new();
     cpu.bootstrap();
     load_nro(&mut cpu.mem, &data).expect("load nro");
@@ -13,8 +19,8 @@ fn main() {
     let start = symbol_value(&data, "_libtransistor_squashfs_image").expect("start symbol") as u32;
     let end = symbol_value(&data, "_libtransistor_squashfs_image_end").expect("end symbol") as u32;
     let size = end.wrapping_sub(start) as usize;
-    println!("squashfs at {:#x} size {:#x}", 0x8000000u64 + start as u64, size);
-    let bytes = cpu.mem.dump(start + 0x8000000, size).expect("dump");
-    fs::write(&out_path, &bytes).expect("write");
-    println!("wrote {}", out_path);
+    println!("squashfs at {:#x} size {size:#x}", BASE + start);
+    let bytes = cpu.mem.dump(BASE + start, size).expect("dump");
+    std::fs::write(&out, &bytes).expect("write");
+    println!("wrote {out}");
 }

@@ -1,4 +1,6 @@
-use std::fs;
+//! Map an address back to the symbol it falls in, using an NRO's own dynamic
+//! symbol table: `addr2sym <path.nro> <addr>`.
+mod common;
 
 fn read_u32(data: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
@@ -24,12 +26,9 @@ fn read_cstr(data: &[u8], off: usize) -> String {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("nro");
-    let target = u32::from_str_radix(
-        std::env::args().nth(2).expect("addr").trim_start_matches("0x"),
-        16,
-    ).expect("addr");
-    let data = fs::read(&path).expect("read");
+    const USAGE: &str = "addr2sym <path.nro> <addr>";
+    let data = common::read(common::arg(1, USAGE));
+    let target = common::hex(&common::arg(2, USAGE));
     let mod0 = find_mod0(&data).expect("mod0");
     let dyn_off = mod0.wrapping_add(read_u32(&data, mod0 + 4) as usize);
     let mut symtab = 0u64;

@@ -26,13 +26,13 @@
 //! the BPTC endpoint rule both do, or by rounding, which is what `bcdec`
 //! does for those three. Both readings sit inside the tolerance S3TC allows,
 //! and no two vendors agreed on it either.
+mod common;
+
 use std::env;
-use std::fs;
 use switch_core::gpu::bcn::{decode, decode_into, Codec};
 
 fn main() {
-    let path = env::args().nth(1).expect("usage: bcn_difftest <vectors.bin>");
-    let data = fs::read(&path).unwrap();
+    let data = common::read(common::arg(1, "bcn_difftest <vectors.bin> [blocks] [astc_vectors.bin]"));
     // Codec, how many channels the reference wrote per texel, and how this
     // decoder's channels line up with them. BC6H's are floats; the rest bytes.
     struct Group {
@@ -51,7 +51,7 @@ fn main() {
         Group { codec: Codec::Bc6hUf16, channels: 3, mapping: &[0, 1, 2], signed_bit: true },
         Group { codec: Codec::Bc6hSf16, channels: 3, mapping: &[0, 1, 2], signed_bit: true },
     ];
-    let blocks: usize = env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(4000);
+    let blocks = common::opt_num(2).unwrap_or(4000) as usize;
 
     let mut at = 0usize;
     let mut any_out_of_tolerance = false;
@@ -154,8 +154,8 @@ fn main() {
         };
         println!("{:?}: {differing}/{blocks} blocks differ [{verdict}]", group.codec);
     }
-    if let Some(path) = env::args().nth(3) {
-        any_out_of_tolerance |= !compare_astc(&fs::read(&path).unwrap());
+    if let Some(path) = common::opt_arg(3) {
+        any_out_of_tolerance |= !compare_astc(&common::read(&path));
     }
     if any_out_of_tolerance {
         println!("\nsomething is outside tolerance — investigate");

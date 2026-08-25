@@ -1,53 +1,51 @@
-//! Dev tool for tracing a real NRO (e.g. hbmenu.nro) boot under the Horizon
-//! syscall stubs. Usage: `cargo run -p switch-core --example boot_hbmenu -- <path>`.
-use std::env;
-use std::fs;
+//! Trace an NRO's boot under the Horizon syscall stubs, watching one word for
+//! changes: `boot_hbmenu <path.nro> [addr]`.
+mod common;
+
+use common::{Flow, Pace};
 use switch_core::cpu::Cpu;
 use switch_core::nro::load_nro;
 
+/// The word this was written to watch, kept as the default so the tool still
+/// does what it did with no second argument.
+const DEFAULT_WATCH: u32 = 0x0825_3fb8;
+
 fn main() {
-    let path = env::args().nth(1).expect("usage: boot_hbmenu <path-to-.nro>");
-    let data = fs::read(&path).expect("read nro");
+    let data = common::read(common::arg(1, "boot_hbmenu <path.nro> [addr]"));
+    let watch = common::opt_arg(2).map(|a| common::hex(&a)).unwrap_or(DEFAULT_WATCH);
+
     let mut cpu = Cpu::new();
     cpu.bootstrap();
     let loaded = load_nro(&mut cpu.mem, &data).expect("load nro");
-    println!("entry = {:#010x}", loaded.entry);
-    for i in 0..=30u8 {
-        cpu.set_reg(i, 0);
+    println!("entry = {:#010x}, watching {watch:#x}", loaded.entry);
+    for reg in 0..=30u8 {
+        cpu.set_reg(reg, 0);
     }
-    cpu.set_reg(1, 1); // boot_entry_regs: x0=0, x1=1
+    cpu.set_reg(1, 1); // boot_entry_regs: x0 = 0, x1 = 1
     cpu.set_pc(loaded.entry);
     cpu.trace_enabled = true;
 
-    let steps = 5_000_000u64;
-    let mut done = 0u64;
-    loop {
-        if done >= steps {
-            println!("budget exhausted");
-            break;
-        }
-        let before = cpu.mem.read_u32(0x0825_3fb8).unwrap_or(0xFFFF);
-        match cpu.step() {
-            Ok(()) => {}
-            Err(e) => {
-                println!("FAULT at step {done}: {e}");
-                break;
+    let mut last = cpu.mem.read_u32(watch).unwrap_or(0xFFFF);
+    let run = common::drive(
+        &mut cpu,
+        Pace::Instructions,
+        common::env_u64("STEPS", 5_000_000),
+        |cpu, steps| {
+            let now = cpu.mem.read_u32(watch).unwrap_or(0xFFFF);
+            if now != last {
+                println!("step {steps}: [{watch:#x}] {last:#x} -> {now:#x} (pc {:#x})", cpu.get_pc());
+                last = now;
             }
-        }
-        let after = cpu.mem.read_u32(0x0825_3fb8).unwrap_or(0xFFFF);
-        if before != after {
-            println!(
-                "step {done}: [0x823b000] {:#x} -> {:#x} (pc was {:#x})",
-                before, after, cpu.get_pc()
-            );
-        }
-        if cpu.halted {
-            println!("HALTED at step {done} (pc before halt was {:#x})", cpu.get_pc());
-            break;
-        }
-        done += 1;
+            Flow::Continue
+        },
+    );
+    if let Some(fault) = &run.fault {
+        println!("FAULT at step {}: {fault}", run.steps);
+    } else if run.halted {
+        println!("HALTED at step {} (pc {:#x})", run.steps, cpu.get_pc());
+    } else {
+        println!("budget exhausted");
     }
-    println!("stopped at step {done}, pc={:#x}", cpu.get_pc());
-    let trace = String::from_utf8_lossy(&cpu.trace);
-    println!("{}", trace);
+    println!("stopped at step {}, pc={:#x}", run.steps, cpu.get_pc());
+    println!("{}", String::from_utf8_lossy(&cpu.trace));
 }

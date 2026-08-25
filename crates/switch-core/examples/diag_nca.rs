@@ -5,6 +5,8 @@
 //! everything else for sanity-checking.
 //!
 //! Usage: cargo run -p switch-core --example diag_nca -- <path.nca> <prod.keys> [title.keys]
+mod common;
+
 
 use std::env;
 use std::fs;
@@ -22,15 +24,7 @@ fn main() {
     let raw = fs::read(nca_path).expect("read nca");
     println!("file size: {} bytes ({:.1} KiB)", raw.len(), raw.len() as f64 / 1024.0);
 
-    let prod_text = fs::read_to_string(prod_path).expect("read prod.keys");
-    let prod_entries = switch_core::keys::parse_keys_file(&prod_text);
-    let mut keys = switch_core::keys::keyset_from_prod(&prod_entries);
-    if let Some(tp) = title_path {
-        let title_text = fs::read_to_string(tp).expect("read title.keys");
-        let title_entries = switch_core::keys::parse_keys_file(&title_text);
-        keys.title_keys = switch_core::keys::keyset_from_title(&title_entries);
-    }
-    println!("prod.keys entries parsed: {}", prod_entries.len());
+    let keys = common::keys(prod_path, title_path);
     println!("header_key loaded: {}", keys.effective_header_key().is_some());
 
     let nca = match switch_core::nca::Nca::parse_with_keys(&raw, Some(&keys)) {

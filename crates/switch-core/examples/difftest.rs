@@ -7,21 +7,21 @@
 //! hbmenu's JPEG decode was found.
 //!
 //! Usage: `difftest <code.bin> <inputs.bin> <out.bin> <inputs-address-hex>`
-use std::fs;
+mod common;
+
+use common::{Flow, Pace};
 use switch_core::cpu::Cpu;
 
+const USAGE: &str = "difftest <code.bin> <inputs.bin> <out.bin> <inputs-address-hex>";
+
 fn main() {
-    let code = fs::read(std::env::args().nth(1).expect("code.bin")).expect("code");
-    let inputs = fs::read(std::env::args().nth(2).expect("inputs.bin")).expect("inputs");
-    let out = std::env::args().nth(3).expect("out.bin");
+    let code = common::read(common::arg(1, USAGE));
+    let inputs = common::read(common::arg(2, USAGE));
+    let out = common::arg(3, USAGE);
     const CODE: u32 = 0x1000;
     // Must match the test ELF's .data address: the program computes its own
     // scratch pointer with adrp/add against it.
-    let inputs_addr = u32::from_str_radix(
-        std::env::args().nth(4).expect("inputs address").trim_start_matches("0x"),
-        16,
-    )
-    .expect("hex address");
+    let inputs_addr = common::hex(&common::arg(4, USAGE));
     const OUTPUT: u32 = 0x2_0000;
     let mut cpu = Cpu::new();
     cpu.mem.map_zero(CODE, code.len() + 16).unwrap();
@@ -38,20 +38,21 @@ fn main() {
     cpu.set_reg(26, OUTPUT as u64);
     cpu.set_reg(27, inputs_addr as u64);
     cpu.set_reg(28, OUTPUT as u64);
-    let mut steps = 0;
+    // Stepwise: the high-water mark has to be read between instructions,
+    // since it is what says how much of the output buffer the program filled.
     let mut high_water = OUTPUT as u64;
-    while !cpu.halted && steps < code.len() as u64 / 4 {
+    let run = common::drive(&mut cpu, Pace::Instructions, code.len() as u64 / 4, |cpu, _| {
         high_water = high_water.max(cpu.read_reg(1)).max(cpu.read_reg(28));
-        let pc = cpu.get_pc();
-        if let Err(e) = cpu.step() {
-            println!("FAULT at {pc:#x} step {steps}: {e}");
-            break;
-        }
-        steps += 1;
+        Flow::Continue
+    });
+    if let Some(fault) = &run.fault {
+        println!("FAULT at step {} pc={:#x}: {fault}", run.steps, cpu.get_pc());
     }
     let written = (high_water as u32).saturating_sub(OUTPUT).min(512 * 128);
-    println!("dumped {written} bytes after {steps} instructions (halted={})", cpu.halted);
     let dump = cpu.mem.dump(OUTPUT, written as usize).unwrap();
-    fs::write(&out, &dump).unwrap();
-    println!("ran {steps} instructions, dumped {written} bytes");
+    std::fs::write(&out, &dump).unwrap();
+    println!(
+        "ran {} instructions, dumped {written} bytes (halted={})",
+        run.steps, cpu.halted
+    );
 }

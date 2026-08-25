@@ -1,58 +1,37 @@
-//! Boot an NRO and write a presented frame to a PPM:
-//! `screenshot <nro> <out.ppm> [frame-index] [font.ttf]`.
-use std::fs;
+//! Boot an NRO and write the Nth presented frame to a PPM:
+//! `screenshot <path.nro> <out.ppm> [frame] [font.ttf]`.
+mod common;
+
 use switch_core::cpu::Cpu;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: screenshot <nro> <out.ppm> [frame] [font]");
-    let out = args.next().expect("output path");
+    let Some(path) = args.next() else {
+        common::usage("screenshot <path.nro> <out.ppm> [frame] [font.ttf]")
+    };
+    let Some(out) = args.next() else {
+        common::usage("screenshot <path.nro> <out.ppm> [frame] [font.ttf]")
+    };
     let want = args.next().and_then(|a| a.parse::<u64>().ok()).unwrap_or(1);
-    // The shared system font `pl:u` hands to the guest, which is what homebrew
-    // renders its text with. The frontend fetches the same file.
-    let font = args
-        .next()
-        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf").into());
-    let data = fs::read(&path).expect("read nro");
+    let font = args.next();
 
+    let data = common::read(&path);
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    match fs::read(&font) {
-        Ok(bytes) => cpu.set_shared_font(bytes),
-        Err(e) => println!("no font at {font} ({e}): text will not render"),
+    match font {
+        Some(font) => cpu.set_shared_font(common::read(&font)),
+        None => common::load_fallback_font(&mut cpu),
     }
     cpu.boot_homebrew(&data).expect("boot");
 
-    // Driven in slices rather than one instruction at a time: `Cpu::step` is
-    // the interpreter, and only `Cpu::run` reaches the block translator. That
-    // is 1.8x the rate on real homebrew, and it is what the frontend gets, so
-    // measuring anything here through `step` measures the wrong engine.
-    const SLICE: u64 = 1 << 20;
-    let mut steps = 0u64;
-    while !cpu.halted && cpu.nv.gpu.frames < want && steps < 200_000_000 {
-        match cpu.run(SLICE) {
-            Ok(report) if report.steps == 0 => break,
-            Ok(report) => steps += report.steps,
-            Err(e) => {
-                println!("FAULT at {steps}: {e}");
-                break;
-            }
-        }
-    }
-    let fb = &cpu.nv.gpu.framebuffer;
-    println!(
-        "steps={steps} frames={} {}x{} stats={:?}",
-        cpu.nv.gpu.frames, fb.width, fb.height, cpu.nv.gpu.stats
-    );
-    if fb.is_empty() {
+    let run = common::run_to(&mut cpu, common::env_u64("STEPS", 200_000_000), |cpu| {
+        cpu.nv.gpu.frames >= want
+    });
+    common::report(&cpu, &run);
+
+    if cpu.nv.gpu.framebuffer.is_empty() {
         println!("no frame was presented");
         return;
     }
-    let mut ppm = format!("P6\n{} {}\n255\n", fb.width, fb.height).into_bytes();
-    for px in &fb.pixels {
-        ppm.extend_from_slice(&[*px as u8, (*px >> 8) as u8, (*px >> 16) as u8]);
-    }
-    fs::write(&out, ppm).expect("write ppm");
-    let non_black = fb.pixels.iter().filter(|p| **p & 0x00FF_FFFF != 0).count();
-    println!("wrote {out}: {non_black}/{} non-black pixels", fb.pixels.len());
+    common::write_ppm(&out, &cpu.nv.gpu.framebuffer);
 }

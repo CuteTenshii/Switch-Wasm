@@ -1,27 +1,28 @@
-use std::fs;
+//! Boot an NRO and print what it wrote to the console:
+//! `boot_nx <path.nro>`.
+mod common;
+
+use common::{Flow, Pace};
 use switch_core::cpu::Cpu;
+
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: boot_nx <path-to-.nro>");
-    let data = fs::read(&path).expect("read nro");
+    let Some(path) = std::env::args().nth(1) else { common::usage("boot_nx <path.nro>") };
+    let data = common::read(&path);
     let mut cpu = Cpu::new();
     cpu.bootstrap();
     let loaded = cpu.boot_homebrew(&data).expect("boot nro");
     println!("entry = {:#010x}", loaded.entry);
-    let mut done = 0u64;
-    loop {
-        match cpu.step() {
-            Ok(()) => {}
-            Err(e) => {
-                println!("FAULT at step {done}: {e}");
-                break;
-            }
-        }
-        if cpu.halted {
-            println!("HALTED at step {done} pc={:#x} x0={:#x}", cpu.get_pc(), cpu.read_x(0));
-            break;
-        }
-        done += 1;
+
+    let run = common::drive(&mut cpu, Pace::Blocks, common::env_u64("STEPS", u64::MAX), |_, _| {
+        Flow::Continue
+    });
+    if let Some(fault) = &run.fault {
+        println!("FAULT at step {}: {fault}", run.steps);
     }
+    if run.halted {
+        println!("HALTED at step {} pc={:#x} x0={:#x}", run.steps, cpu.get_pc(), cpu.read_x(0));
+    }
+
     println!("--- program console output ({} bytes) ---", cpu.out.len());
     let out = String::from_utf8_lossy(&cpu.out);
     for line in out.lines().take(60) {

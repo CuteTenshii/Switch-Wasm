@@ -11,7 +11,8 @@
 //! blocks are entered thousands of times each, and a good part of a frame is
 //! spent in the GPU rather than in the CPU at all. This is the number that
 //! decides whether translating was worth it.
-use std::fs;
+mod common;
+
 use std::time::Instant;
 use switch_core::cpu::Cpu;
 
@@ -98,14 +99,9 @@ fn compare(a: &Cpu, b: &Cpu) -> usize {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: jit_bench <nro> [instructions] [font.ttf]");
-    let want = args.next().and_then(|a| a.parse::<u64>().ok()).unwrap_or(40_000_000);
-    let font = args
-        .next()
-        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf").into());
-    let nro = fs::read(&path).expect("read nro");
-    let font = fs::read(&font).ok();
+    let nro = common::read(common::arg(1, "jit_bench <path.nro> [instructions] [font.ttf]"));
+    let want = common::opt_num(2).unwrap_or(40_000_000);
+    let font = std::fs::read(common::opt_arg(3).as_deref().unwrap_or(common::FALLBACK_FONT)).ok();
 
     let mut interpreted = boot(&nro, &font, false);
     let mut translated = boot(&nro, &font, true);

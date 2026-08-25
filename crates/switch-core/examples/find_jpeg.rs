@@ -1,3 +1,5 @@
+mod common;
+
 // Temporary debug tool: scan the sdk module .text for adrp+add references to a
 // page (default 0xe06e000, where the deferred-init result slot 0xe06e2ac and
 // once-guard 0xe06e2a8 live) and print each site's offset + the following
@@ -15,8 +17,7 @@ fn main() {
 
     let nsp_data = fs::read(nsp_path).expect("read nsp");
     let pfs0 = Pfs0::parse(&nsp_data).expect("parse nsp");
-    let prod_text = fs::read_to_string(prod_path).expect("read prod.keys");
-    let mut keys = switch_core::keys::keyset_from_prod(&switch_core::keys::parse_keys_file(&prod_text));
+    let mut keys = common::keys(prod_path, None::<&str>);
 
     let mut program: Option<&switch_core::nsp::Pfs0File> = None;
     for f in &pfs0.files {

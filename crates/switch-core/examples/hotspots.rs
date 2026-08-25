@@ -5,7 +5,9 @@
 //! function to blame (hbmenu spends most of a frame in its own software gradient
 //! fill, not in the emulator); the encoding histogram says which decoder paths
 //! are worth optimising.
-use std::fs;
+mod common;
+
+use common::{Flow, Pace};
 use switch_core::cpu::Cpu;
 
 /// Where NROs are loaded, and how much of the space to histogram.
@@ -15,38 +17,36 @@ const IMAGE_SIZE: u32 = 0x0100_0000;
 const BUCKET: usize = 1024;
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let nro = args.next().expect("usage: hotspots <nro> [font.ttf]");
-    let font = args
-        .next()
-        .unwrap_or_else(|| concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf").into());
-
+    let nro = common::read(common::arg(1, "hotspots <path.nro> [font.ttf]"));
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    if let Ok(bytes) = fs::read(&font) {
-        cpu.set_shared_font(bytes);
+    match common::opt_arg(2) {
+        Some(font) => cpu.set_shared_font(common::read(&font)),
+        None => common::load_fallback_font(&mut cpu),
     }
-    cpu.boot_homebrew(&fs::read(&nro).expect("read nro")).expect("boot");
+    cpu.boot_homebrew(&nro).expect("boot");
 
-    // Two frames of startup, so what follows is a steady-state frame.
-    while !cpu.halted && cpu.nv.gpu.frames < 2 {
-        cpu.step().expect("startup");
-    }
+    // Two frames of startup, so what follows is a steady-state frame. Nothing
+    // is sampled here, so it runs through the block translator.
+    common::run_to(&mut cpu, u64::MAX, |cpu| cpu.nv.gpu.frames >= 2);
 
     let mut by_addr = vec![0u32; (IMAGE_SIZE / 4) as usize];
     let mut by_top = [0u64; 256];
     let start = cpu.nv.gpu.frames;
-    let mut total = 0u64;
-    while !cpu.halted && cpu.nv.gpu.frames == start {
+    // Every instruction is counted, so this half is necessarily stepwise.
+    let run = common::drive(&mut cpu, Pace::Instructions, u64::MAX, |cpu, _| {
+        if cpu.nv.gpu.frames != start {
+            return Flow::Stop;
+        }
         let pc = cpu.get_pc();
         if (IMAGE_BASE..IMAGE_BASE + IMAGE_SIZE).contains(&pc) {
             by_addr[((pc - IMAGE_BASE) / 4) as usize] += 1;
             let insn = cpu.mem.read_u32(pc).unwrap_or(0);
             by_top[((insn >> 24) & 0xFF) as usize] += 1;
         }
-        cpu.step().expect("frame");
-        total += 1;
-    }
+        Flow::Continue
+    });
+    let total = run.steps;
     println!("one frame = {total} instructions");
 
     let mut buckets: Vec<(u64, u32)> = by_addr

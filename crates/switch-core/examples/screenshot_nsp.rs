@@ -10,21 +10,21 @@
 //!
 //! `SWITCH_FIRMWARE=<dir>` registers the system data archives, as `boot_nsp`
 //! does.
+mod common;
+
+use common::{Flow, Pace};
 use std::env;
-use std::fs;
 use switch_core::cpu::Cpu;
 use switch_core::nsp::Pfs0;
 
+const USAGE: &str = "screenshot_nsp <path.nsp> <prod.keys> <title.keys> <out.ppm> [frame]";
+
 fn main() {
-    let a: Vec<String> = env::args().collect();
-    let nsp = fs::read(&a[1]).unwrap();
+    let nsp = common::read(common::arg(1, USAGE));
     let pfs0 = Pfs0::parse(&nsp).unwrap();
-    let mut keys = switch_core::keys::keyset_from_prod(&switch_core::keys::parse_keys_file(
-        &fs::read_to_string(&a[2]).unwrap()));
-    keys.title_keys = switch_core::keys::keyset_from_title(&switch_core::keys::parse_keys_file(
-        &fs::read_to_string(&a[3]).unwrap()));
-    let out = a[4].clone();
-    let want: u64 = a[5].parse().unwrap();
+    let mut keys = common::keys(common::arg(2, USAGE), Some(common::arg(3, USAGE)));
+    let out = common::arg(4, USAGE);
+    let want = common::opt_num(5).unwrap_or(1);
     let f = pfs0.files.iter().find(|f| {
         if !f.name.to_ascii_lowercase().ends_with(".nca") { return false; }
         let end = (f.offset + f.size) as usize;
@@ -50,20 +50,8 @@ fn main() {
     if let Some(i) = nca.romfs_section_index() {
         if let Ok(r) = nca.decrypt_romfs_section(raw, &keys, i) { cpu.set_romfs(r); }
     }
-    let font = concat!(env!("CARGO_MANIFEST_DIR"), "/../../web/font.ttf");
-    if let Ok(b) = fs::read(font) { cpu.set_shared_font(b); }
-    if let Ok(dir) = env::var("SWITCH_FIRMWARE") {
-        for entry in fs::read_dir(&dir).unwrap().flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("nca") { continue; }
-            let Ok(src) = switch_core::source::FileSource::open(&path) else { continue };
-            let Ok(ar) = switch_core::nca::Nca::parse_source(&src, Some(&keys)) else { continue };
-            use switch_core::nca::ContentType;
-            if !matches!(ar.content_type, ContentType::Data | ContentType::PublicData) { continue; }
-            let Some(idx) = ar.romfs_section_index() else { continue };
-            if let Ok(r) = ar.romfs_source(src, &keys, idx) { cpu.add_data_archive(ar.title_id, Box::new(r)); }
-        }
-    }
+    common::load_fallback_font(&mut cpu);
+    common::register_firmware(&mut cpu, &keys);
     // The address space this title gets is chosen by its own manifest — see
     // `MemoryLayout`. Must precede `boot_retail_program`.
     cpu.set_system_resource_size(switch_core::npdm::Npdm::system_resource_size_of(&pf, &exefs));
@@ -73,8 +61,7 @@ fn main() {
     // there stops being all zeroes. A GPU reading zeroes is either looking at
     // the wrong memory or at memory nothing has filled yet, and this is what
     // tells the two apart.
-    let watch: Option<u32> = env::var("WATCH_MEM").ok()
-        .and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok());
+    let watch = common::env_hex("WATCH_MEM");
     let trap: Option<(u32, u32)> = env::var("TRAP_WRITE").ok().and_then(|v| {
         let (a, n) = v.split_once(':')?;
         let a = u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok()?;
@@ -93,8 +80,13 @@ fn main() {
     let mut share = [0u64; 32];
     let mut traps = 0u32;
     let mut seen_nonzero = false;
-    let mut done = 0u64;
-    while !cpu.halted && cpu.nv.gpu.frames < want && done < 40_000_000_000 {
+    // Stepwise throughout: every hook below reads the machine between two
+    // instructions. `screenshot_nca` shows the other shape, where the
+    // uninstrumented case runs through the block translator instead.
+    let run = common::drive(&mut cpu, Pace::Instructions, common::env_u64("STEPS", u64::MAX), |cpu, done| {
+        if cpu.nv.gpu.frames >= want {
+            return Flow::Stop;
+        }
         // `TRAP_WRITE=<addr>:<size>` reports the guest PC of each of the first
         // writes into a region -- which code owns a buffer, rather than just
         // whether it was touched.
@@ -137,9 +129,9 @@ fn main() {
             let t = cpu.current_thread_index();
             if t < share.len() { share[t] += 1; }
         }
-        if cpu.step().is_err() { break; }
-        done += 1;
-    }
+        Flow::Continue
+    });
+    let done = run.steps;
     println!("[threads] sampled share = {:?}", &share[..]);
     print!("{}", cpu.thread_dump());
     if watch.is_some() && !seen_nonzero {
@@ -179,13 +171,9 @@ fn main() {
             println!("  {at:#x} +120   : {:?}", &f[30..45]);
         }
     }
-    let fb = &cpu.nv.gpu.framebuffer;
-    if fb.is_empty() { println!("no frame"); return; }
-    let mut ppm = format!("P6\n{} {}\n255\n", fb.width, fb.height).into_bytes();
-    for px in &fb.pixels {
-        ppm.extend_from_slice(&[*px as u8, (*px >> 8) as u8, (*px >> 16) as u8]);
+    if cpu.nv.gpu.framebuffer.is_empty() {
+        println!("no frame");
+        return;
     }
-    fs::write(&out, ppm).unwrap();
-    let lit = fb.pixels.iter().filter(|p| **p & 0x00FF_FFFF != 0).count();
-    println!("wrote {out}: {}x{}, {lit}/{} non-black", fb.width, fb.height, fb.pixels.len());
+    common::write_ppm(&out, &cpu.nv.gpu.framebuffer);
 }

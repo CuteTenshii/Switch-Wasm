@@ -1,21 +1,22 @@
-use std::fs;
+//! Disassemble a run of instructions from a loaded NRO:
+//! `disasm_range <path.nro> <addr> [count]`.
+mod common;
+
 use switch_core::disasm::disassemble;
 use switch_core::mem::Memory;
 use switch_core::nro::load_nro;
 
+const USAGE: &str = "disasm_range <path.nro> <addr> [count]";
+
 fn main() {
-    let path = std::env::args().nth(1).expect("nro path");
-    let start = u32::from_str_radix(
-        std::env::args().nth(2).expect("start").trim_start_matches("0x"),
-        16,
-    ).expect("start");
-    let count = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(64);
-    let data = fs::read(&path).expect("read");
+    let data = common::read(common::arg(1, USAGE));
+    let start = common::hex(&common::arg(2, USAGE));
+    let count = common::opt_num(3).unwrap_or(64) as u32;
     let mut mem = Memory::new();
-    let _loaded = load_nro(&mut mem, &data).expect("load");
+    load_nro(&mut mem, &data).expect("load nro");
     for i in 0..count {
-        let a = start.wrapping_add(i * 4);
-        let insn = mem.fetch(a).unwrap_or(0);
-        println!("{:#010x}: {:#010x} {}", a, insn, disassemble(insn));
+        let at = start.wrapping_add(i * 4);
+        let insn = mem.fetch(at).unwrap_or(0);
+        println!("{at:#010x}: {insn:#010x} {}", disassemble(insn));
     }
 }

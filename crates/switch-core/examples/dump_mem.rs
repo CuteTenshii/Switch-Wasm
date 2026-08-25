@@ -1,14 +1,18 @@
-use std::fs;
+//! Hex-dump guest memory after loading an NRO:
+//! `dump_mem <path.nro> <addr> [len]`.
+mod common;
+
 use switch_core::mem::Memory;
 use switch_core::nro::load_nro;
 
+const USAGE: &str = "dump_mem <path.nro> <addr> [len]";
+
 fn main() {
-    let path = std::env::args().nth(1).expect("nro");
-    let addr = u32::from_str_radix(std::env::args().nth(2).expect("addr").trim_start_matches("0x"), 16).unwrap();
-    let len = std::env::args().nth(3).and_then(|s| s.parse().ok()).unwrap_or(64);
-    let data = fs::read(&path).expect("read");
+    let data = common::read(common::arg(1, USAGE));
+    let addr = common::hex(&common::arg(2, USAGE));
+    let len = common::opt_num(3).unwrap_or(64) as u32;
     let mut mem = Memory::new();
-    load_nro(&mut mem, &data).expect("load");
+    load_nro(&mut mem, &data).expect("load nro");
     for i in 0..len {
         print!("{:02x}", mem.read_u8(addr.wrapping_add(i)).unwrap_or(0));
     }

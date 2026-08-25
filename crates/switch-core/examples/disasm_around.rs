@@ -1,22 +1,27 @@
-use std::fs;
+//! Disassemble the instructions either side of an address in a loaded NRO —
+//! what a fault report needs to be read against: `disasm_around <path.nro> <pc>`.
+mod common;
+
 use switch_core::disasm::disassemble;
 use switch_core::mem::Memory;
 use switch_core::nro::load_nro;
 
+const USAGE: &str = "disasm_around <path.nro> <pc>";
+/// How far either side of the address to show.
+const CONTEXT: u32 = 32;
+
 fn main() {
-    let path = std::env::args().nth(1).expect("nro path");
-    let pc = u32::from_str_radix(
-        std::env::args().nth(2).expect("pc").trim_start_matches("0x"),
-        16,
-    )
-    .expect("pc");
-    let data = fs::read(&path).expect("read");
+    let data = common::read(common::arg(1, USAGE));
+    let pc = common::hex(&common::arg(2, USAGE));
     let mut mem = Memory::new();
-    let loaded = load_nro(&mut mem, &data).expect("load");
-    println!("base={:#x} text_off={:#x} text_size={:#x}", loaded.base, loaded.text.file_offset, loaded.text.file_size);
-    let start = pc.wrapping_sub(32);
-    for a in (start..=pc.wrapping_add(32)).step_by(4) {
-        let insn = mem.fetch(a).unwrap_or(0);
-        println!("{:#010x}: {:#010x} {}", a, insn, disassemble(insn));
+    let loaded = load_nro(&mut mem, &data).expect("load nro");
+    println!(
+        "base={:#x} text_off={:#x} text_size={:#x}",
+        loaded.base, loaded.text.file_offset, loaded.text.file_size
+    );
+    for at in (pc.wrapping_sub(CONTEXT)..=pc.wrapping_add(CONTEXT)).step_by(4) {
+        let insn = mem.fetch(at).unwrap_or(0);
+        let here = if at == pc { " <--" } else { "" };
+        println!("{at:#010x}: {insn:#010x} {}{here}", disassemble(insn));
     }
 }

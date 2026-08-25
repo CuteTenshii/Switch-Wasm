@@ -6,6 +6,8 @@
 //!   RING_FROM=<hex pc>  start recording only once this pc is first hit.
 //!   MARK=<pc>[=name][,...]  print a line each time one of these pcs runs.
 //!   MARK_DUMP=<reg>,<byte offset>,<words>  also dump memory at each mark.
+mod common;
+
 
 use std::env;
 use std::fs;
@@ -16,12 +18,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let nsp_data = fs::read(&args[1]).unwrap();
     let pfs0 = Pfs0::parse(&nsp_data).unwrap();
-    let mut keys = switch_core::keys::keyset_from_prod(&switch_core::keys::parse_keys_file(
-        &fs::read_to_string(&args[2]).unwrap(),
-    ));
-    keys.title_keys = switch_core::keys::keyset_from_title(&switch_core::keys::parse_keys_file(
-        &fs::read_to_string(&args[3]).unwrap(),
-    ));
+    let mut keys = common::keys(&args[2], Some(&args[3]));
     let tail: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(4000);
 
     let mut program = None;

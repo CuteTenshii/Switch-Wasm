@@ -14,6 +14,9 @@
 //! translator by default and the plain interpreter under `SWITCH_NO_JIT=1`.
 //! A class the translator has no op for shows the two within noise of each
 //! other, which is what says it fell back.
+//! This is the one example with no `common` module: it reads no files, takes
+//! no arguments and builds its own machine out of literal instruction words,
+//! so there is nothing for a shared harness to hold.
 use std::time::Instant;
 use switch_core::cpu::Cpu;
 
