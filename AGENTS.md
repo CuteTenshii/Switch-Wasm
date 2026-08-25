@@ -1,985 +1,696 @@
 # AGENTS.md
 
-Browser-oriented Nintendo Switch emulation core: an ARM64 (A64) integer interpreter plus PFS0/NSP, NCA, NRO and ELF parsers, compiled to WASM for the frontend.
+Browser Switch emulator: an A64 interpreter with a block-translating JIT, a
+software GPU with an optional WebGPU backend, and the container stack
+(PFS0/NSP, NCA, NSO/NRO/ELF, RomFS) needed to boot retail titles and system
+applets. Compiled to WASM; frontend is TypeScript on Vite.
+
+PROGRESS.md is the long-form log of what was tried and why. This file is the
+standing state.
 
 ## Commands
 
-- `make all` — test + assets (the full pipeline; `assets` builds the core first).
-- `make test` — `cargo test -p switch-core`. This is the only crate with tests (unit tests in each module + `crates/switch-core/tests/cpu_test.rs`).
-- `make wasm` — `cargo build --target wasm32-unknown-unknown --release -p switch-wasm`.
-- `make assets` — the core **and** the site (`vite build`). This is what produces a complete `dist/`, and the only frontend target in the Makefile: the core is an input to the frontend build, and make is what knows how to build it. Needs `bun install` (vite + typescript are the only dependencies).
-- `bun run dev` — the Vite dev server on :8000, with the stylesheet hot-swapped rather than the page reloaded. `bun run preview` serves a built `dist/` instead, for checking the production bundle. Both need `make wasm` to have run once.
-- `bun run typecheck` — `tsc --noEmit` over both frontend projects. Vite never type-checks; this is the only thing that does.
-- Single test: `cargo test -p switch-core <test_name>`.
-- `python3 tools/difftest.py` — differential-test the decode against **real ARM semantics**: it assembles the instruction list in the script, runs it under `qemu-aarch64`, runs the identical bytes through `cargo run --example difftest`, and prints the first register that differs. `--scalar` does the same for the integer instructions (dumping x0..x25 instead of the vector registers). Needs `clang` + `lld` + `qemu-aarch64`. **Add an instruction there before hand-deriving expected values.** This caught TRN1/TRN2 taking the wrong lanes, and the scalar sweep found seven more in one run (EXTR's operand order, ADCS/SBC's op bit, SDIV's sign extension, SMADDL's operand width, CLS off by one).
-- `rustup target add wasm32-unknown-unknown` is required for the wasm build.
+- `make all` — `test` then `assets`.
+- `make test` — `cargo test` over all three crates. 681 tests.
+- `make wasm` — release wasm build `--features gpu`, then `wasm-bindgen
+  --target web`. Needs `rustup target add wasm32-unknown-unknown` and a
+  `wasm-bindgen-cli` matching the `Cargo.lock` version.
+- `make assets` — `make wasm` + `vite build` → `dist/`. The only frontend
+  target, because the core is an *input* to the frontend build.
+- `bun run dev` (:8000) / `bun run preview` — both need `make wasm` once.
+- `bun run typecheck` — the only thing that type-checks; Vite never does.
+- `python3 tools/difftest.py [--scalar]` — differential-test the decode
+  against real ARM under `qemu-aarch64`. **Add an instruction there before
+  hand-deriving expected values.** Needs `clang` + `lld` + `qemu-aarch64`.
+- `cargo run --release -p switch-core --example jit_bench -- <nro>` — both
+  engines side by side, with every state difference between them.
 
-## Build pipeline traps
+## Crates
 
-- The `.wasm` is an **input to the frontend build**, not something copied in after it: the worker imports it, so Vite hashes it into `dist/assets` like any other asset. Building `switch-wasm` alone therefore does not update the site — run `make assets`, which builds the core first.
-- **`web/` is source and `dist/` is output — the whole of it.** `dist/` is generated and gitignored, so a fresh checkout has no site at all until `make assets` has run, which is why the Pages workflow installs bun and deploys `dist/` rather than `web/`. Nothing committed ever sits beside a build artifact, which is what the old `web/assets` (committed files plus a generated `.wasm`) got wrong.
-- **`base: './'` in `vite.config.ts` is load-bearing.** The site is published under a path (`tenshii.moe/Switch-Wasm/`), and Vite's default of `'/'` emits `/assets/...`, which 404s anywhere but a host's root — a break that appears only once deployed. Serve `dist/` from inside a subdirectory when testing a change to the build.
-- `make test` only covers `switch-core`; there are no tests for `switch-wasm`.
+- `switch-core` — the emulator, **zero dependencies**. `cpu` (`mod`/`alu`/
+  `bits`/`fp`/`ipc`/`jit`/`loadstore`/`simd`/`svc`/`system`), `gpu`, `display`,
+  `mem`, `vfs`, `source`, `crypto`/`keys`/`ticket`, `nsp`/`nca`/`romfs`/`npdm`/
+  `nso`/`nro`/`elf`/`lz4`, `control`, `disasm`, `error`.
+- `switch-gpu` — a `wgpu` backend behind `gpu::renderer::Renderer`. Separate
+  because `wgpu` brings hundreds of crates and the core has none.
+- `switch-wasm` — browser bindings, `cdylib`. Buffers cross via linear memory
+  (`switch_alloc`/`switch_free`); a handle indexes a global session table.
+  JSON is hand-rolled (`json_escape`/`write_into`) — **don't add serde**.
 
-## Architecture
+**The shipped module is a wasm-bindgen module**: `make wasm` always builds
+`--features gpu`, so the worker `import`s generated glue rather than calling
+`WebAssembly.instantiateStreaming`. That also moves the host read into
+wasm-bindgen's world (`raw_module = "@host/files"`, aliased in
+`vite.config.ts`), so the module declares no `env` import at all. Without the
+feature it declares exactly one, `env.host_read`. No WebGPU device → the
+software rasterizer takes the frame.
 
-- `crates/switch-core` — the emulation core, zero external deps. Modules: `cpu` (A64 interpreter, split into `mod`/`alu`/`bits`/`fp`/`ipc`/`loadstore`/`simd`/`svc`/`system`), `gpu` (GM20B model), `display` (binder buffer queue), `vfs` (emulated SD card), `mem` (sparse 4 GiB page table), `disasm`, `nsp`/`nca`/`nro`/`elf`/`romfs` (parsers), `control` (a title's NACP name/publisher/icon, out of the Control NCA's RomFS), `error`.
-- `crates/switch-wasm` — `cdylib` for `wasm32-unknown-unknown`, exports a raw `extern "C"` ABI (no wasm-bindgen). Buffers cross the boundary via wasm linear memory (`switch_alloc`/`switch_free`); a handle is an index into a global session table. It declares exactly **one import**, `env.host_read` — how it reads the open container (see the container section below). **No external deps by design** — JSON results are emitted by the hand-rolled `json_escape`/`write_into` helpers in `crates/switch-wasm/src/lib.rs`. Don't add serde/etc. **`json_escape` walks characters, not bytes**: a `\uXXXX` escape names a code point, so escaping a multi-byte character one byte at a time spells a different string — it used to, and every retail title's name reached the page as mojibake (*JUST DANCE® 2017* as *JUST DANCEÂ® 2017*, ® being U+00AE escaped as its two UTF-8 bytes). Anything above ASCII goes out as itself; the page decodes the buffer with a UTF-8 `TextDecoder`.
-- `tools/make_og.py` — renders `web/public/assets/og.png`, the social preview card, around a real captured frame (`tools/screenshot.png`, which is an input to the card and is never served).
-- The layout is two directories and one rule:
-  - `web/` — every source file the site is built from, committed: `index.html` (the build's entry point), `style.css`, the font and icon, and the TypeScript in `main/`, `worker/` and `shared/`. Nothing generated.
-  - `web/public/` — the exception: copied verbatim, unhashed. It holds `assets/og.png`, whose URL is baked into other people's caches by the meta tags, and the font's licence.
-  - `dist/` — the site, generated in full by `make assets` and gitignored. `index.html` at the root, everything else content-hashed into `dist/assets/`.
-- **Everything the page needs is hashed**, which is what makes a rebuilt core a *new URL* rather than whatever the browser cached: the two chunks, the stylesheet, the icon, the font and the `.wasm`. That is why the frontend names its assets through the bundler (`import fontUrl from '../font.ttf?url'`, `import wasmUrl from '@core/switch_wasm.wasm?url'`) rather than as literal paths. `@core` is aliased in `vite.config.ts` to cargo's release directory, so the target triple is written down once.
-- The frontend is TypeScript in `web/`, bundled into two ES modules — the page and the worker. No source maps: they are four times the size of the code they map, and the sources are right there in `web/`.
-  - `web/worker/` hosts the wasm module (`WebAssembly.instantiateStreaming` of `switch_wasm.wasm`, with `{ env: { host_read } }` as its imports) and is the glue over the ABI — `wasm.ts` (exports + buffer plumbing), `hostfiles.ts` (the `host_read` import and its chunk cache), `latch.ts` (input held until the guest has seen it), `commands.ts` (one entry per command), `index.ts` (the message loop).
-  - `web/main/` is promise-based RPC over `postMessage` plus the app shell, one module per part of the page; `index.ts` is the composition root that brings a session up and owns Reset.
-  - `web/shared/protocol.ts` is the contract between them: the page's `call('run', slice)` and the worker's handler for it are checked against the same `Commands` interface, so a command whose signature drifts is a build error rather than an `undefined` at runtime.
-  - Step budgets: non-trace 1,000,000 per slice (the slice length *is* the input sampling period), trace mode 5000.
-- The worker is started as `new Worker(new URL('../worker/index.ts', import.meta.url), { type: 'module' })` — named by its *source*, which the bundler follows and rewrites. This is what retired the old path trap (a `new Worker` path resolving against the document while a `fetch` inside the worker resolved against the worker script): no built path is written down by hand any more. It does mean the worker is a **module** worker, so `importScripts` is not available in it.
-- **A `switch_*` call on a freed session handle traps the module**, it does not return an error: the handle is an index into the module's session table and a miss is a Rust panic, which on wasm is `unreachable`. Reset frees the session without waiting for the run slice already in flight — deliberately, since that slice is about to be thrown away — so the page cannot order its way out of this on its own. Three things hold it together, and the outermost is the one that matters: `worker/index.ts` refuses any command but `new`/`set_battery` while there is no session; `main/index.ts` says `setSession(-1)` before it even posts the free, so `input.ts`'s 16 ms push loop stops immediately rather than a round trip later; and `runloop.run` leaves the moment `abortRun` has been called rather than running its post-slice housekeeping against a session that is going away. Before this, a Reset while a title was running took the core down with two `RuntimeError: unreachable` rejections nothing surfaced.
-- The UI is an app shell, not a page: the canvas owns the viewport, the tools drawer is closed by default (backtick toggles it, Space is run/pause), and the canvas resizes to whatever resolution the guest presents. `Res` reads `—` and the canvas stays blank until `frame_count > 0`; `fb_snapshot`'s pre-first-frame fallback (the memory-mapped demo framebuffer) is deliberately *not* painted, since real homebrew never writes that region.
-- **Every wait the page makes someone sit through is named on the stage** (`main/loading.ts`, `#loading` in index.html). The state chip says *that* something is loading; the loading screen says which step, with the title's own name and icon where the Control NCA gave us one. It is up from first paint — bringing the core up is itself the first wait — and covers core startup, Reset, loading a program and launching a title.
-  - It does **not** come down when the program loads. It comes down when there is a real frame under it (`display.renderFb`), or when the run ends any other way — a fault, a halt, a pause (`runloop`). The splash used to be dismissed at load because homebrew can run (or fault) for a long time before presenting and a stage stuck on a splash looked dead; a *blank* stage looked just as dead. What was missing was not the uncover, it was the readout — so the screen holds through the boot showing the same pc and step count the status bar has, which is the one thing that says a title still working towards its first frame is working at all. That phase is the only open-ended one, so it is also the only one that shows a Dismiss button.
-  - A failed load leaves the screen up saying why rather than uncovering a black stage and leaving the reason in a panel that is closed by default.
-  - Work that belongs to the **panel** reports itself in the panel, not behind a screen over a stage that may still be running something: opening a container moves the `container-badge` through `opening…` / `reading title details…`, and a firmware install counts *n* of *N* off in `firmware-state`.
-- **The stage accepts containers, not just executables.** A `.nro`/`.elf` is loaded directly; a `.nsp`/`.xci`/`.nca` goes through `container.bootContainer`, which opens it, fills the Files panel exactly as the panel's own flow does, and then finds the title's Program NCA. Every file in an NSP is named after its own hash, so nothing but the content type in each (encrypted) header distinguishes the one worth booting — `nca::find_nca_by_type` is that search, `switch_program_nca_index` exposes it, and `control::find_control_nca` is now one call into it.
-- Emulated CPU addresses are `u32` (32-bit PC). Memory is a sparse page table (`PAGE_COUNT` computed in `u64` to survive wasm32 `usize` truncation); reads/writes to unmapped addresses fault with `Error::Cpu`.
-- The demo framebuffer is memory-mapped at `FB_BASE = 0xF200_0000` (640x360 RGBA) and input at `INPUT_ADDR = 0xF210_0000` — above every region a process is given, since the heap now needs the space they used to sit in. Syscall ABI: `SyscallMode::Horizon` stubs for real homebrew. Commercial encrypted content is out of scope.
+## Frontend
+
+`web/` is source, `dist/` is generated output, and nothing committed sits
+beside a build artifact. `web/public/` is the one verbatim-copied directory
+(the social card, the font licence). Everything else is content-hashed, which
+is what makes a rebuilt core a new URL — so assets are named through the
+bundler (`import fontUrl from '../font.ttf?url'`), never as literal paths.
+`@core` aliases cargo's release dir. No source maps.
+
+- `web/worker/` — `wasm.ts` (exports + buffer plumbing), `hostfiles.ts` (host
+  read, 1 MiB × 32 LRU chunk cache), `latch.ts`, `commands.ts`, `index.ts`.
+- `web/main/` — `rpc.ts` plus one module per part of the page; `index.ts` is
+  the composition root and owns Reset.
+- `web/shared/protocol.ts` — the `Commands` interface both sides are checked
+  against, so a drifted signature is a build error.
+- `runloop.ts`: `RUN_SLICE` 1,000,000, `TRACE_SLICE` 5000,
+  `HOUSEKEEPING_EVERY` 8.
+
+Traps:
+
+- **`base: './'` in `vite.config.ts` is load-bearing.** The site is published
+  under a path; Vite's default `'/'` 404s anywhere but a host's root, and only
+  once deployed. Test by serving `dist/` from a subdirectory.
+- **The worker is a module worker and both halves must say so** — `rpc.ts`'s
+  `{ type: 'module' }` and `worker: { format: 'es' }`. Naming it by its source
+  (`new URL('../worker/index.ts', import.meta.url)`) is what lets the bundler
+  rewrite the path. `importScripts` is unavailable.
+- **A `switch_*` call on a freed handle traps the module** — a table miss is a
+  Rust panic, i.e. `unreachable`. Reset frees without waiting for the slice in
+  flight, so three things guard it: `worker/index.ts` refuses all but
+  `new`/`set_battery` with no session, `main/index.ts` sets `setSession(-1)`
+  before posting the free, and `runloop.run` bails once `abortRun` is called.
+- The `.wasm` is an input to the frontend build; building `switch-wasm` alone
+  does not update the site. `.forgejo/workflows/pages.yml` deploys `dist/`.
 
 ## Containers are never staged in memory
 
-**A retail `.nsp` does not fit and never will.** A modern title's container
-runs to several gigabytes; wasm32 linear memory tops out at 4 GiB, and Rust's
-allocator on that target refuses any *single* allocation above `isize::MAX`
-(2 GiB) — `Layout::from_size_align` returns `Err`, and the `.unwrap()` behind
-it lowers to `unreachable`, so an oversized request used to take the whole
-module down as `RuntimeError: unreachable executed` with nothing to say what
-had asked for what. `switch_alloc` now returns null there instead, and
-`web/worker/wasm.ts`'s `alloc` throws on it.
+A retail `.nsp` runs to gigabytes; wasm32 memory caps at 4 GiB and Rust refuses
+any single allocation over 2 GiB. `switch_alloc` returns null there (it used to
+trap) and `wasm.ts`'s `alloc` throws.
 
-Nothing reads a container as a buffer. `switch_core::source::ByteSource` is a
-`u64`-addressed random-access range, and the pieces compose:
+`source::ByteSource` is a `u64`-addressed random-access range and the pieces
+compose: `HostSource` → `Window` (the NCA) → `SectionSource` (AES-CTR is
+seekable, so a range costs exactly that range) → `Window` (the RomFS past the
+IVFC levels).
 
-    HostSource (the open file)
-      └ Window          — the NCA at file-table entry N
-          └ SectionSource — decrypting view of one NCA section (AES-CTR is
-             │              seekable: the keystream block a byte gets is
-             │              decided by its own position, so a range costs
-             │              exactly that range)
-             └ Window     — the RomFS image, past the IVFC hash levels
+- The host read is `(file, offset, ptr, len)` and **must answer
+  synchronously** — RomFS ranges are asked for inside `switch_run`, where
+  there is nowhere to await. That means `FileReaderSync`, which exists only in
+  a worker: the second reason the emulator lives in one. **File 0 is the open
+  container**; the rest are system data archives (`switch_add_archive`).
+- The ExeFS is read in full and hash-verified. The RomFS is not:
+  `Cpu::set_romfs_source` takes the decrypting view and `IStorage::Read` copies
+  through a 64 KiB staging buffer.
+- **Offsets stay `u64` end to end.** `as usize` on wasm32 truncates past 4 GiB
+  *and* makes the bounds check that should catch it pass.
 
-- The browser keeps the `File` and serves ranges through the `host_read`
-  import, which **must answer synchronously** — the emulator asks for RomFS
-  ranges from inside `switch_run`, where there is nowhere to await. That is
-  `FileReaderSync`, which exists only in a worker, and is the second reason
-  the emulator lives in one. `worker/hostfiles.ts` caches 1 MiB chunks (32 of them, LRU)
-  because a RomFS mount walks its tables in small reads; a read larger than a
-  chunk bypasses the cache rather than evicting it.
-- `switch_open_nsp(handle, size)` / `switch_open_nca(handle, size)` open what
-  the host has ready; only the PFS0 header is read. `switch_load_nca_from_nsp`
-  boots straight out of it.
-- The ExeFS **is** read in full (it is a title's executables, tens of MB at
-  the outside) and hash-verified. The RomFS is not: `Cpu::set_romfs_source`
-  takes the decrypting view, and `IStorage::Read` (`cpu/ipc.rs`) copies
-  through a 64 KiB staging buffer, so a guest can ask for any range of a
-  gigabytes-large RomFS.
-- Offsets stay `u64` end to end. `f.offset as usize` on wasm32 silently
-  truncated every entry past the 4 GiB mark *and* made the bounds check that
-  should have caught it pass — `Pfs0::image_size` is `u64` for the same
-  reason.
+## Guest address space (`cpu/mod.rs`)
 
-## Homebrew memory layout (cpu.rs constants)
-
-- Stack: `STACK_TOP = 0x1010_0000`, size 1 MiB (so `STACK_BASE = 0x1000_0000`), SP seeded at `STACK_TOP`.
-- TLS base: `tpidr = 0x0FF0_0000` (deliberately clear of the heap). libnx ThreadVars at TLS+0x1E0 (magic `0x21545624` "!TV$"), `_REENT` zeroed at `0x1FF1_0000`.
-- Heap via `svcSetHeapSize` returns `0x3000_0000` (address out-param; deliberately NOT `0x2000_0000` — with a 512 MiB heap there, `malloc`'s arena lands at `STACK_BASE + 0x1a80` and the app's 8 MiB memblock memset overwrites the stack). `svcQueryMemory` reports per-page state (allocated pages = RWX, untouched soft pages = unmapped) so libnx virtmem reservations find free address space; it finds a region's bounds through `Memory::state_run`, which skips 2 MiB blocks that hold no backed page — walking them one page at a time is O(address space), and with a gigabyte-scale heap region a title spent longer inside `svcQueryMemory` than in its own code. `svcGetInfo` uses the hbmenu libnx InfoType numbering (0/1 Core/Priority mask, 2/3 Alias, 4/5 Heap, 6/7 Total/Used memory, 12/13 Aslr, 14/15 Stack, 16/17 System resource, 21/22 Total/Used non-system memory) — see the memory-region section below. Env block at `ENV_BLOCK_ADDR = 0x0010_0000`.
-- `boot_homebrew` (cpu.rs): runs crt0 through the `bl` at entry+0xc0, seeds env/ThreadVars, runs `DT_INIT_ARRAY` (`init_array_entries` in nro.rs parses MOD0/dynamic), then resumes at that `bl`. **Static constructors only run through this path.** That call is libnx's `__libnx_init(ctx, main_thread, saved_lr)`: the constructor pass zeroes the registers, so all three arguments are re-seeded before resuming — including `saved_lr` = `SELF_RETURN_TRAMPOLINE`, which `envSetup` keeps as the exit function pointer. With it left at 0, `__nx_exit` branched to NULL and a clean exit looked like a crash.
-- `nvdrv_request` (cpu/ipc.rs): the real `INvDrvServices` interface — Open/Ioctl/Ioctl2/Ioctl3/Close/Initialize/QueryEvent, dispatched into `gpu::nvdrv`.
-- `svcWaitSynchronization` reports the wait satisfied with X1 = **0**: X1 is
-  the *index* of the handle that signaled, and with every object pretended
-  signaled the first one is it. The libnx wrapper stores X1 to the caller's
-  out pointer and callers index their own waiter array by it, so garbage
-  there sends them to the wrong object. It used to answer 1 unconditionally,
-  which is out of range for a single-handle wait — `nnSdk`'s system worker
-  (`nn::os::detail::MultiWaitImpl::WaitAny`) then read a
-  `MultiWaitHolderType` past the end of its list and `blr`'d its null handler.
-  A Timeout (0xEA01) during deko3d device init is treated as fatal
-  (`svcBreak` 0x1159).
-- hbmenu state: **its menu renders correctly** — title, theme background, entry
-  tile and the icon (JPEG-decoded, pixel-exact against a reference decode) all
-  composite through the real path: CPU-drawn linear buffer → deko3d copy-engine
-  blit → swapchain → binder present.
-- **hbmenu does not need the shader core.** `nx_graphics.c` draws with the CPU
-  into a linear memblock and its command list is just
-  `dkCmdBufCopyBufferToImage` + `dkCmdBufSignalFence`; its assets are raw RGBA
-  `.bin` bitmaps. Only the copy engine and syncpoints are involved.
-
-## Guest memory regions (`cpu/mod.rs`, `svcGetInfo`)
-
-**Every region `svcGetInfo` reports has to be an address the emulator can
-actually represent.** Guest memory is indexed with a `u32`, so the whole
-address space is the low 4 GiB and `Cpu::bootstrap` soft-maps 0..`GUEST_SPACE_END`
-(unwritten pages read as zeros and allocate on first write — that *is* demand
-paging, and it is why a region can be reported far larger than the
-`MAX_MAPPED_BYTES` RAM cap without costing anything).
-
-`svcGetInfo` used to report Horizon's real region bases literally — alias at
-0x10_0000_0000, heap at 0x2_0000_0000. `nnSdk` took the alias base at its word
-and asked `svcMapPhysicalMemory` to back 0x10_0000_0000, which truncates to 0.
-The regions now live in representable space, back to back above the stacks:
+Guest memory is `u32`-indexed, so the whole space is the low 4 GiB.
+`Cpu::bootstrap` soft-maps 0..`GUEST_SPACE_END`: unwritten pages read as zeros
+and allocate on first write, which is why a region can be reported far larger
+than the `MAX_MAPPED_BYTES` (512 MiB) cap for free.
 
 ```text
-MemoryLayout::PLAIN                MemoryLayout::VIRTUAL_ADDRESS
-0x3000_0000  heap,  2.5 GiB        0x3000_0000  heap,  896 MiB
-0xD000_0000  alias, 512 MiB        0x6800_0000  alias, 2.125 GiB
-
-0xF000_0000  SHARED_BUFFER_ADDR    system shared buffer, 26 MiB
-0xF200_0000  FB_BASE / INPUT_ADDR  the demo framebuffer and input block
-0xF300_0000  GUEST_SPACE_END       above this a read faults
+0x0010_0000  ENV_BLOCK_ADDR (nro.rs)  homebrew ABI environment block
+0x0800_0000  ASLR region, 496 MiB     svcGetInfo 12/13
+0x1800_0000  GUEST_STACK_REGION_ADDR  thread-stack mirrors, 128 MiB (14/15)
+0x1F00_0000  SELF_RETURN_TRAMPOLINE   +0x100 THREAD_EXIT_TRAMPOLINE
+0x1FE0_0000  main thread TLS          children from THREAD_TLS_BASE, page each
+0x2800_0000  STACK_BASE               main stack 1 MiB, SP at STACK_TOP
+0x2900_0000  RO_MODULE_REGION_ADDR    ldr:ro maps run-time NROs, 112 MiB
+0x3000_0000  heap / alias             per MemoryLayout, below
+0xF000_0000  SHARED_BUFFER_ADDR       system shared buffer, ~59 MiB reserved
+0xF400_0000  FB_BASE (lib.rs)         demo framebuffer, 640x360 RGBA
+0xF410_0000  INPUT_ADDR               memory-mapped input block
+0xF500_0000  GUEST_SPACE_END          above this a read faults
 ```
 
-**Each layout spends the address space on the region its own titles grow
-into.** `nn::init` asks for the whole of what `svcGetInfo` calls total memory,
-so the region it grows into may not be smaller than that figure — which is
-what happened: `svcSetHeapSize` said yes to the 480 MiB it was asked for
-inside a 240 MiB heap region, and the heap ran over `FB_BASE` and 224 MiB into
-the alias region. 0x01 now refuses a heap larger than its region, and
-`the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise` holds the
-layout together.
+**Every region `svcGetInfo` reports must be representable here.** Horizon's
+real bases (alias 0x10_0000_0000) truncate to 0 when `nnSdk` asks
+`svcMapPhysicalMemory` to back them.
 
-But *which* region that is follows from the layout, not from the title, so
-sizing both to the total is 1.25 GiB spent on a region nobody asks for.
-`nnSdk` picks its route at init from the same NPDM figure that picks the
-layout: with virtual address memory it reserves alias-region address space,
-and without it, it calls `svcSetHeapSize` and never issues
-`svcMapPhysicalMemory` at all. So the plain layout charges the alias region
-for the heap and the virtual-address one does the reverse.
+```text
+MemoryLayout::PLAIN                 MemoryLayout::VIRTUAL_ADDRESS
+0x3000_0000  heap,  2.5 GiB         0x3000_0000  heap,  128 MiB
+0xD000_0000  alias, 512 MiB         0x3800_0000  alias, 2.875 GiB
+total memory 2.5 GiB                total memory 896 MiB
+system resource 0                   system resource 16 MiB
+```
 
-**The figure itself is what a title believes about the console.** It was
-0x1E00_0000 (480 MiB) and Just Dance 2019 sized its heap from it, then asked
-that heap for a 699 MiB graphics pool — a number baked into the game's code,
-not derived from what the console said. `nn::mem` returned null,
-`nvnMemoryPoolBuilderSetStorage` got it, `MemoryPool::Initialize` refused it,
-and the title used the pool object it had just freed: `blr` through a
-free-list link, pc=0. A title runs out quietly and crashes somewhere else
-entirely — Tomodachi Life filled 1.5 GiB 800M instructions in and then asked
-`nn::os::CreateThread` to start the null `ThreadType` its allocator had handed
-back, entering the thread at whatever `[null + 0x68]` held. A console gives an
-application several GiB, so 2.5 is a floor rather than a fidelity target.
+- **InfoType 16 picks the layout.** `VammManager::IsVirtualAddressMemoryEnabled`
+  is this answering non-zero and nothing else, and the figure is the title's own
+  NPDM `system_resource_size`. Both kinds of title are real, so each is
+  answered what its manifest says (`npdm.rs`).
+- **The syscall follows the layout.** VAMM titles use `svcMapPhysicalMemory`
+  (0x2c) and never issue 0x01; plain titles issue exactly one `svcSetHeapSize`
+  (0x01) for the whole reported total and never touch 0x2c. So each layout
+  spends its address space on the region its own titles grow into. 0x2c only
+  validates the range; 0x2d does the real unmapping work.
+- **`nn::init` asks for the whole reported total**, so a region smaller than
+  that figure is one the guest overruns. 0x01 refuses a heap larger than its
+  region, and
+  `the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise` holds
+  the layout together.
+- Under VAMM the alias region must satisfy `size >= VAMM_ARENA_SIZE
+  (0x3FE0_0000) + VAMM_TOTAL_MEMORY_SIZE + the title's own`. Falling short
+  fails quietly: allocators here return null, nothing checks it, and the crash
+  lands tens of millions of instructions away.
+- **The reported total is what a title believes about the console.** Titles
+  size pools from it against numbers baked into their own code, so 2.5 GiB is a
+  floor rather than a fidelity target.
+- **InfoType 21/22** size the application heap — their difference goes straight
+  to `nn::mem::StandardAllocator::Initialize`, which asserts under 16 KiB.
+- **InfoType 11 (RandomEntropy) must not be zero** — real `sdk` startup
+  `svcBreak`s on an all-zero pool.
+- **InfoType 0/1** come from the NPDM `ThreadInfo` capability: cores 0..2
+  (`0b111`), priorities 28..59. Zero makes
+  `nn::os::RegisterSystemWorkerHandler` assert on an empty mask.
 
-- **Which syscall grows the heap follows the layout.** A title with virtual
-  address memory uses `svcMapPhysicalMemory` (0x2c), picking the address
-  itself out of the alias region — tracing one shows syscall 0x01 never
-  issued at all. A title without it (Just Dance 2019, Tomodachi Life) issues
-  exactly one `svcSetHeapSize` (0x01), for the whole reported total, and never
-  touches 0x2c. 0x2c leaves the pages to the soft map and only validates the
-  range; 0x2d (`UnmapPhysicalMemory`) does the real work of handing pages back.
-- **InfoType 21/22 (Total/UsedNonSystemMemorySize) size the application
-  heap.** `nn::init`'s startup hands their difference straight to
-  `nn::mem::StandardAllocator::Initialize`, which asserts on any page-aligned
-  span under 16 KiB — so the `_ => 0` default aborted the boot.
-- **InfoType 16 (SystemResourceSizeTotal) is the title's own NPDM figure**,
-  and it is the one query that picks the layout:
-  `nn::os::detail::VammManager::IsVirtualAddressMemoryEnabled` is this
-  answering non-zero and nothing else. A title that declares a system resource
-  runs its heap through a manager that reserves address space out of the alias
-  region and backs it page by page, and needs an alias region big enough for
-  `VAMM_ARENA_SIZE` plus its own reservations or
-  `nn::os::AllocateAddressRegion` fails with os result 3-12. One that declares
-  zero never touches the manager. Both kinds are real, so the emulator answers
-  each title what its own manifest says.
+## Booting
 
-**There is no stderr in the browser.** `wasm32-unknown-unknown` has no WASI,
-so an `eprintln!` goes nowhere and `std::env::var` always fails — every
-`TRACE_*`-gated trace is host-CLI-only. A diagnostic that has to reach a
-browser user goes through `Cpu::diagnostic`, which writes stderr *and* the
-trace buffer the page drains (`switch_drain_trace`), and is recorded whether or
-not per-instruction tracing is on. `main/runloop.ts` drains it every run slice, so
-`[ipc] unimplemented` and `[ipc] no implementation` show up in the page's
-console panel as they happen.
+**Homebrew** (`Cpu::boot_homebrew`): run crt0 to the `bl` at entry+0xc0, seed
+the env block and `ThreadVars` (TLS+0x1E0, magic `0x21545624`, `_REENT` at
+`0x1FF1_0000`), run `DT_INIT_ARRAY`, resume at that `bl`. **Static constructors
+only run through this path.** The constructor pass zeroes registers, so all
+three `__libnx_init` arguments are re-seeded before resuming — including
+`saved_lr` = `SELF_RETURN_TRAMPOLINE`, without which `__nx_exit` branches to
+NULL and a clean exit looks like a crash.
 
-`TRACE_WAIT=1` prints every event as it is handed out and every
-`svcWaitSynchronization` with the state of what it is waiting on — the fastest
-way to see whether a guest is holding a real event handle or 0.
-
-`TRACE_SVC=1` prints every syscall except the three hot ones
-(`SendSyncRequest`, `WaitSynchronization`, `SleepThread`), plus each
-`svcGetInfo` answer. It is the counterpart of `TRACE_IPC` and the fastest way
-to see which InfoType a stuck `nnSdk` is unhappy with.
-
-## Retail process entry (`Cpu::boot_retail_program`)
-
-Horizon's process entry ABI is two registers, and `rtld`'s first two
-instructions read both literally (`cmp x0, #0` / `mov w19, w1`):
-
-- **X0** — the launch argument. `0` for a normal process launch; non-zero only
-  for the homebrew loader's config block, which sends `rtld` down a different
-  path entirely.
-- **X1** — the **main thread's handle** ([`MAIN_THREAD_HANDLE`]). `nnSdk`
-  stores it in the main `nn::os::ThreadType` at **+0x1B0**, and
-  `nn::os::detail::InternalCriticalSectionImplByHorizon::IsLockedByCurrentThread`
-  compares every `SdkMutex` lock word (masked with `0xBFFFFFFF`, dropping the
-  has-waiters bit) against it. Leaving X1 at 0 makes an *unlocked* mutex (lock
-  word 0) compare equal to "owned by the current thread", so the very first
-  `nn::os::SdkMutexType::Lock` fires its recursive-lock assertion and the
-  title aborts inside `nn::oe::Initialize` before reaching any service.
-
-`svcGetInfo`'s CoreMask (0) and PriorityMask (1) come from the NPDM's
-`ThreadInfo` kernel capability; every retail application carries cores 0..2
-(mask `0b111`) and priorities 28..59, which is what "A Short Hike"'s own
-`main.npdm` says. Reporting 0 there hands
-`nn::os::GetThreadAvailableCoreMask` an empty mask, whose inlined
-highest-set-bit scan inside `nn::os::RegisterSystemWorkerHandler` asserts.
+**Retail** (`Cpu::boot_retail_program`): `rtld` reads both entry registers
+literally. **X0** is the launch argument (0 for a normal launch). **X1** is
+`MAIN_THREAD_HANDLE` (1) — `nnSdk` stores it at ThreadType+0x1B0 and compares
+every `SdkMutex` lock word against it, so X1 = 0 makes an *unlocked* mutex read
+as "owned by me" and the first `Lock` fires its recursive-lock assertion.
 
 ## How long a run has to be
 
-**One emulated instruction is about one cycle of the 1.02 GHz CPU this
-console claims**, which `svcGetSystemTick` is scaled from. So a billion steps
-is roughly **one second** of console time, and the step budgets that feel
-generous are not:
+One emulated instruction ≈ one cycle of the 1.02 GHz CPU `svcGetSystemTick` is
+scaled from, so **a billion steps is about a second of console time**.
 
 | steps | console time | reaches |
 | --- | --- | --- |
 | 2,000,000 (`boot_nsp` default) | 2 ms | barely past `rtld` |
 | 400,000,000 | 0.4 s | service init, a layer, the first frame loop |
-| 15,000,000,000 | ~15 s | "A Short Hike" presenting its 300th frame |
+| 1,500,000,000 | 1.5 s | "A Short Hike" running clean, still no frame |
 
-A retail title spends **seconds** of console time before its first frame — an
-IL2CPP game longer still. "A Short Hike" was written off as never drawing
-through a whole session of 200M-to-3B-step runs; at 15B it presents hundreds
-of frames at 1920x1080. Before concluding a title does not render, check that
-the run was long enough for it to, and prefer `SHOT=<file.ppm>` over reading
-`frames presented: 0` off a budget that was never going to get there.
+A retail title spends **seconds** of console time before its first frame, an
+IL2CPP game longer. Before concluding a title does not render, check the run
+was long enough for it to, and prefer `SHOT=<file.ppm>` over reading `frames
+presented: 0` off a budget that was never going to get there. PROGRESS.md's
+status table is where per-title results live; keep it, not this file, current.
 
-Two things make those long runs mean something, and both are recent: threads
-are preempted (before, one busy thread could take 99.9% of the CPU and the
-title's own main loop got the rest), and vsync ticks on a period rather than
-only on a present.
+## Block translation (`cpu/jit.rs`)
 
-## Audio (`audout`, `cpu/ipc.rs`)
+First visit to an address translates forward into `Op`s — operands extracted,
+immediates decoded — until something changes the PC; that plus its terminator
+is a cached `Block`. Worth **1.9–2.1x**. It removes decode, not dispatch, and
+generates no code: every op calls the same helper the interpreter would, so the
+two engines are the same computation and anything untranslated falls back.
+`SWITCH_NO_JIT=1` for host tools, the debug panel's *Translation* section in
+the browser.
 
-**The device plays in time.** A buffer is released once the emulated CPU has
-run for as long as its samples take at the device's sample rate
-(`Cpu::audio_play_cycles`), queued behind whatever is still playing
-(`AudioOut::free_at`) — the same `cycles` clock the display tick and the thread
-deadlines use. The samples themselves are still copied to the host on arrival;
-it is the *tag* that waits.
-
-Releasing on arrival, which this used to do, is not a harmless simplification:
-it hands the guest an infinitely fast sound card, and a title's audio clock is
-what its video is scheduled against. Just Dance 2019 pushed 19,693,344 samples
-per second of emulated time through a 48 kHz stereo device — **205× real
-time** — and the software WebM player in its own binary (it links libwebm's
-`mkvparser`; there is no `nvdec`) concluded every frame of the boot video was
-too late to show. It presented a white clear sixty times a second and issued
-not one draw.
-
-- **The buffer event fires on the clock, not on the append** (`Cpu::audio_tick`),
-  and a blocking `svcWaitSynchronization` on it is honoured by rewinding onto
-  the `svc` — the same idiom the vsync wait uses, and safe for the same reason:
-  the wake-up is a known cycle count away. With nothing else runnable, `cycles`
-  jumps straight to it rather than spinning through the gap.
-- **Do not answer that wait with a bare success.** `nn::audio`'s mixer takes the
-  event as proof that a buffer is waiting and reads the head of its own queue
-  without checking; woken with nothing released, Just Dance called
-  `nn::audio::GetAudioOutBufferDataPointer` on the `container_of` a null and
-  faulted at 0xffffffd0.
+Emitting wasm per block is blocked by the memory model, not the browser: a
+generated module can only address its own linear memory, and guest memory is a
+page table with soft regions, read-only ranges and watchpoints. Flattening the
+address space behind a base-plus-bounds check has to come first.
 
 ## Guest threads (`cpu/mod.rs`, `cpu/svc.rs`)
 
 **Preemptive, on a `TIME_SLICE` of 20,000 instructions**, plus the blocking
-syscalls. It used to be cooperative only — a thread ran until it blocked — on
-the reasoning that every libnx synchronization primitive re-checks its
-predicate in a loop, so co-operative switching completes the same handshakes.
-It does; what it does not do is share the CPU. A system applet's audio thread
-renders a whole buffer of samples per `AppendAudioOutBuffer` and measured at
-**99.9% of every instruction executed**, leaving the Mii editor's own main loop
-the other 0.1%. Three applets could boot, open a layer, play their music and
-never reach a frame. Between instructions is a safe place to switch (the whole
-architectural state is in the `ThreadContext`), and `yield_thread` is a no-op
-when nothing else can run, so a single-threaded guest pays one counter
-increment.
+syscalls. Cooperative switching completes the same handshakes but does not
+*share* the CPU — one applet's audio thread measured 99.9% of all instructions
+executed. Between instructions is safe (all state is in `ThreadContext`), and
+`yield_thread` is a no-op when nothing else can run.
 
-- `svcCreateThread` builds a `ThreadContext` with its own TLS block (and the
-  `ThreadVars` libnx reads through TPIDRRO_EL0); `svcStartThread` marks it
-  runnable; returning from a thread entry hits `THREAD_EXIT_TRAMPOLINE`, which
-  is `svcExitThread`.
-- **Mutexes and condvars are real**: Horizon keeps the lock word in guest memory
-  (owner handle, plus bit30 for "has listeners"), and libnx re-reads it after
-  every arbitration — so `svcArbitrateUnlock` has to actually hand ownership to
-  a waiter and `svcWaitProcessWideKeyAtomic` has to release the mutex. Returning
-  success from those stubs left hbmenu's worker spinning on a lock its main
-  thread held.
-- **The exclusive monitor is real, and preemption is why.** `STXR` used to
-  succeed unconditionally, which was safe only while a thread could lose the
-  CPU at a blocking syscall and nowhere else: no guest puts one between the two
-  halves of a read-modify-write, so every pair was atomic by construction.
-  `LDXR`/`LDXP` set `Cpu::exclusive`, `STXR`/`STXP` require and consume it, and
-  a context switch clears it — so an interrupted pair fails and is retried
-  rather than completing across the other thread's writes.
-- **A wait on no handles at all is not answered.**
-  `nn::os::detail::MultiWaitImpl::WaitAny` turns whatever
-  `svcWaitSynchronization` returns into a holder from its own list, and an
-  empty list has none: told "handle 0 fired" it takes index 0 of nothing, told
-  "timed out" it returns the same null, and `RegisterSystemWorkerHandler` calls
-  the result unchecked. Either answer jumps the thread to 0 — "A Short Hike"
-  faults at `pc=0` one instruction after such a wait. So the thread rewinds
-  onto the `svc` and yields instead, unless nothing else can run.
-- The SVC path retires the instruction (`self.pc = next_pc`) *before* dispatching,
-  so a syscall that switches threads can install the incoming PC.
-- If every thread is blocked, `reschedule` wakes them all rather than hanging:
-  a spurious wake degrades to the old spin.
+- **Mutexes and condvars are real.** Horizon keeps the lock word in guest
+  memory and libnx re-reads it after every arbitration, so
+  `svcArbitrateUnlock` must actually hand ownership over and
+  `svcWaitProcessWideKeyAtomic` must release the mutex. `nn::os` skips the
+  syscall entirely when a condvar's word is zero, so the *kernel* has to write
+  `CONDVAR_HAS_WAITERS`.
+- **The exclusive monitor is real, and preemption is why.** `LDXR`/`LDXP` set
+  `Cpu::exclusive`, `STXR`/`STXP` require and consume it, a context switch
+  clears it.
+- **Thread stacks live in the stack region.** `GUEST_STACK_REGION_ADDR` must
+  have room or `virtmemFindStack` hands back address 0, and `svcMapMemory` must
+  really back the destination or two threads share one stack. Pages are not
+  shareable, so the alias is a copy (`Memory::copy_range`), copied back by
+  `svcUnmapMemory`.
+- The SVC path retires the instruction *before* dispatching, so a syscall that
+  switches threads can install the incoming PC.
+- `svcQueryMemory` finds bounds through `Memory::state_run`, which skips 2 MiB
+  blocks with no backed page — walking page by page is O(address space).
+- **A wait on no handles is not answered.** `MultiWaitImpl::WaitAny` maps any
+  answer onto a holder from its own list, and an empty list has none — either
+  answer jumps the thread to 0. So it rewinds onto the `svc` and yields unless
+  nothing else can run.
+- **A satisfied wait reports X1 = 0** — X1 is the *index* of the handle that
+  signalled, and callers index their own waiter arrays by it.
 
-## Gotchas
+## Diagnostics
 
-- `cargo clippy` on the whole workspace **fails** in `switch-wasm` (deliberate raw-pointer `extern "C"` signatures trigger `not_unsafe_ptr_arg_deref`). `clippy`/`fmt` are not gating; `cargo fmt --check` is also not clean.
-- CPU test encodings in `tests/cpu_test.rs` are hand-assembled and cross-checked against QEMU's `a64.decode`.
-- **SIMD&FP LDR/STR addressing**: the register-offset form has `bits[25:24]=00` (mode 0b00) — it must NOT be detected via bit 21, because bit 21 is the top bit of `imm12` in the immediate (unsigned-offset, mode 0b01) form. `ldr b29, [x0, #0xc80]` was being misread as a register load using a garbage Rm (this broke a hbmenu constructor). Cross-check any new load/store decode against `llvm-mc -triple=aarch64 -disassemble`.
-- **Decode groups whose opcode bits are split**: several AArch64 groups put part of an opcode either side of a fixed field, so matching a contiguous slice silently matches nothing. The scalar-FP 1-source group is `opcode(6) 10000`, i.e. bits[15:10] are `opcode<0>:10000` — testing `bits[15:10] == 0b100000` made the whole group (FMOV/FABS/FSQRT/FRINTx) dead code, and the 3-source group (FMADD family) has its own top byte (`00011111`), so it has to be matched before the `00011110` space. When adding a group, check the guard actually reaches it with a real encoding.
-- **BLR reads its target before linking.** `blr x30` is a legal
-  return-and-relink (hbmenu's NEON IDCT ends that way); writing x30 first makes
-  it branch to itself+4, which looked like an infinite loop inside the JPEG
-  decoder.
-- **The permute trio place their results differently**: TRN takes the even (or
-  odd) elements of *both* operands and interleaves them, ZIP interleaves one
-  half of each, UZP packs every other element of Vn into the low half and Vm's
-  into the high half. Conflating them scrambles a matrix transpose — `trn1`
-  picking Vm's odd elements is what stalled hbmenu's icon decode.
-- **AdvSIMD structure loads/stores** (`LD1`–`LD4`/`ST1`–`ST4`): writeback is bit 23 (the post-index forms) and `Rm == 31` means "increment by the transfer size"; a different `Rm` is a register increment. Keying writeback off `Rm` alone left `ld1 {v1.16b, v2.16b}, [x2], #32` without its base update, so newlib's `strrchr` returned a pointer 32 bytes below the string and `PHYSFS_init` failed on a garbage `argv[0]` directory. The single-lane forms spread their lane index across `Q:S:size`, and `scale == 0b11` is the load-and-replicate group (`LD1R`), not a doubleword lane insert.
-- **BSL/BIT/BIF** differ only in which register is the mask: BSL selects with Vd, BIT and BIF with Vm. Getting that wrong broke newlib's vectorised `strchr` (it folds the "matched" and "end of string" predicates with `bif`), so every `device:` prefix lookup fell through to the default device and `romfs:/…` was looked up on the SD card.
-- **A write to a W register zeroes bits 63:32.** Every 32-bit result has to be truncated: SBFM's sign extension was filling the top half, so `asr w0, w0, #31` produced `0xFFFF_FFFF_FFFF_FFFF` and any later 64-bit use of that register saw a huge value. Related: a 32-bit operand must be sign-extended from *bit 31* before an arithmetic shift or a signed divide — masking it to 32 bits and treating it as a positive `i64` made `asr w, w, w` and `sdiv w, w, w` unsigned, which is how libjpeg-turbo's `HUFF_EXTEND` lost the sign of every JPEG DC difference (hbmenu's icon decoded with grey luma and magenta chroma).
-- **A guard that includes a fixed bit kills the whole group.** Three FP classes were dead code for this reason: the 1-source group (bits[15:10] matched as a unit though the opcode's low bit is bit15), FCSEL/FCCMP (guarded on bit21 == 0 when they have it set), and the int↔float conversions (`rmode`:`opcode` read as bits[21:16], which folds in the fixed bit21 — that made `ucvtf d0, x1` execute as FCVTMU and write **x0**). After adding a group, prove the guard reaches it with a real encoding from `llvm-mc`.
-- The AdvSIMD **scalar** forms are separate encodings from the vector ones: shift-by-immediate has bit28 set, two-register-misc is `01 U 11110 …`. Both share the vector implementation with a one-lane count.
-- **EXT** (`0 Q 101110 00 0 Rm 0 imm4 0 Rn Rd`) shares bits[28:24] with the permute group, which is why permute also has to require bit29 == 0.
-- **TBL/TBX** (`0 Q 001110 00 0 Rm 0 len op 00 Rn Rd`) share bits[29:21] with the copy group (DUP/INS/UMOV/SMOV), so the copy decode has to let them past: every copy encoding sets bit10, table lookup has bit15 == 0 and bits[11:10] == 00. The table is `len+1` consecutive vector registers and **wraps past v31**; an index beyond it reads zero for TBL and leaves the destination byte alone for TBX. This is how a compiler spells a byte shuffle no fixed permute matches — NXpotify's SHA-512 hits `tbl v31.16b, {v29.16b}, v28.16b` (`0x4e1c03bf`) and faulted on it.
-- **Vector FP** lives in two groups the integer three-same decode must not swallow: three-same opcodes from `0b11000` up (where bits[23:22] are `a:sz`, not an element size) and two-register misc (`bits[21:17] == 10000`, `bits[11:10] == 10`), whose FP forms are identified by `(U, size<1>, opcode)` together — opcode `11101` is SCVTF when `size<1> == 0` but FRECPE when it is 1.
-- **CTR_EL0** reports the Cortex-A57 value `0x8444C004`; cache-flush loops stride by `4 << DminLine`, so reporting 0 walked buffers 4 bytes at a time.
+`wasm32-unknown-unknown` has no WASI: `eprintln!` goes nowhere and
+`std::env::var` always fails, so every `TRACE_*` is host-CLI-only. Anything
+that must reach a browser user goes through `Cpu::diagnostic`, which writes
+stderr *and* the trace buffer the page drains every slice.
 
-## GPU (`crates/switch-core/src/gpu`)
+`TRACE_SVC` (every syscall bar the three hot ones, plus each `svcGetInfo`
+answer), `TRACE_IPC`, `TRACE_WAIT` (events as handed out, and what each wait is
+waiting on), `TRACE_FONT`, `TRACE_AUDIO`, `TRACE_MAP`, `TRACE_REGS`, and the
+GPU set — `TRACE_GPU`, `TRACE_NV`, `TRACE_DRAW`, `TRACE_PIPELINE`,
+`TRACE_SHADER`, `TRACE_CFG`, `TRACE_WGSL`, `TRACE_UPLOAD`. `Cpu::backtrace`
+walks the guest X29 frame chain.
 
-A model of the Tegra X1's GM20B, not a stub. Register numbers come from
-deko3d's generated Maxwell headers and the ioctl ABI from libnx's
-`nvidia/ioctl`, so the command streams real homebrew emits are decoded as-is.
+## IPC (`cpu/ipc.rs`, `cpu/svc.rs`)
 
-- `nvdrv` — the driver the guest opens: `/dev/nvmap`, `/dev/nvhost-ctrl`,
-  `/dev/nvhost-ctrl-gpu`, `/dev/nvhost-as-gpu`, `/dev/nvhost-gpu`. ioctl
-  numbers are the Linux-style `dir|size|type|nr` words libnx builds.
-- `nvmap` — memory objects. On Tegra the *guest* allocates the buffer and
-  hands nvmap its CPU address, so GPU memory is ordinary guest memory.
-- `vmm` — the graphics MMU: whole-buffer GPU VA ranges, small-page region at
-  `0x04000000` and big-page region from `0x1_00000000`.
-- `syncpt` — host1x syncpoints and `/dev/nvhost-ctrl` event slots. A
-  submission runs to completion inside its ioctl, so fences are already
-  expired when the guest waits on them.
-- `channel` + `engine/*` — the command processor: GPFIFO entries → pushbuffer
-  → method headers (`Increasing`/`NonIncreasing`/`Inline`/`IncreaseOnce`) →
-  the class bound to that subchannel. Classes: 3D (0xB197), compute (0xB1C0),
-  inline-to-memory (0xA140), 2D (0x902D), copy (0xB0B5), gpfifo (0xB06F).
-- `macro_engine` — the MME. Methods ≥ 0xE00 are macro slots, and deko3d
-  compiles its draws into macros, so nothing draws without it.
-- `surface` — block-linear (GOB) swizzling and the colour formats. A naive
-  memory dump of a Switch framebuffer looks shredded because of this.
+**Two dialects.** libnx ignores the reply's `type` and raw-data size and
+converts `fsp-srv` to a **domain** (sub-interfaces are object ids on one
+handle). libtransistor validates both and never converts, so a sub-interface
+must come back as a **session handle in a move handle**;
+`Cpu::reply_with_interface` picks the shape per request.
 
-Subchannel 6 (`SUBCHANNEL_GPFIFO`) is pre-bound to the channel's own
-`MAXWELL_CHANNEL_GPFIFO_A` class, because nvhost binds it at channel creation and
-userspace never issues a `SetObject` for it — deko3d writes its syncpoint
-increments and cache-flush ops straight there.
+**Two encodings of every message kind**: plain (`Request` 4, `Control` 5) and
+with-context (6, 7), which prefixes a 16-byte tracing context. libnx sends
+plain, **`nnSdk` sends the context form for everything** — so test with
+`Cpu::ipc_is_control_request`, never `type == 5`.
 
-Scan-out: the app hands a finished image to `display::BufferQueue`
-(`QUEUE_BUFFER`), which resolves the `NvGraphicBuffer` to an nvmap id and
-`Gpu::present` de-swizzles it into `Gpu::framebuffer` (RGBA8888). The wasm
-`switch_fb_*`/`switch_frame_count` exports feed that to the canvas, which
-resizes itself to whatever resolution the guest picked.
+A **Close** (type 2) carries no command id; `svc.rs` answers it before dispatch
+and calls `Cpu::forget_handle`, or the leftover id in the TLS buffer runs a
+real command.
 
-Draws are rasterized for real (`gpu/raster.rs`) with the SASS interpreter in
-`gpu/shader/interp.rs` shading each vertex and each covered fragment; compute
-dispatches still record their QMD address without running warps.
+### The bug class: success with an unfilled out parameter
 
-**A fragment shader runs once per covered pixel, so anything per-invocation is
-per-pixel.** A full-screen pass is 921 600 of them, and NXpotify's frame is
-five such passes. That makes the usual instinct — allocate a small `Vec`, use
-a `HashMap` for a sparse thing, rescan the program to answer a question —
-cost whole seconds a frame. Three that did: `texs` rescanned the program to
-find where its result lands (a hundred heap allocations per pixel; it is a
-property of the decoded program and is cached on `Program` now), `a[]` was a
-`HashMap` (it is a 256-word flat array now, with a written-mask so "never
-written" stays distinguishable from "wrote zero"), and the rasterizer built a
-fresh `Invocation` per pixel (one per draw now, reset per pixel). Together
-those were 2.6 s/frame → 0.67 s. Measure before and after with
-`examples/screenshot` at two frame indices; the frames must stay
-byte-identical.
+Not visible from the reply. A reply is written *over* the request in the same
+TLS buffer and declares four words of padding past the SFCO header, so a bare
+success passes every length check and hands back stale *request* bytes.
+`Cpu::write_ipc_reply` clears the section it is about to declare, so
+unimplemented out parameters read as 0 — still wrong, but the same wrong every
+time. When a command *does* have an out parameter, implement it; when its width
+is unclear, reply with a zeroed block **wider** than needed. A reply may be
+longer than expected, never shorter.
 
-## IPC dialects (`cpu/ipc.rs`)
+The same trap in the handle slots. `nnSdk` reads an out-object off a plain
+session as a move handle, and a reply with none is *not an error* to it: the
+handle parses as 0, the proxy is silently skipped, the command returns success,
+and the first virtual call goes through null. So
+`Cpu::reply_with_fabricated_object` carries **a sub-session in the move slot and
+an event in the copy slot**, allocated once per `(session, command)` — nothing
+here can tell which the caller wanted.
 
-Two guest IPC stacks reach these stubs and they disagree about how strict the
-replies are:
+**An unimplemented `am` command must not answer with a bare success** —
+everything `am` returns is a live object or applet state.
+`Cpu::unimplemented_command` reports `cmif`'s `UnknownCommandId` (`0x1ba0a`)
+and warns once per `(interface, command)`. A bare success is still right for a
+genuine setter/notifier, but those are listed by id, never caught by `_`.
 
-- **libnx** (hbmenu, NX-Shell) ignores the reply's `type` field and its raw-data
-  size, and converts `fsp-srv` to a **domain**, so sub-interfaces come back as
-  out-object ids on one session handle.
-- **libtransistor** (sdl-hello) validates both. A reply's `type` must be 0 or 4
-  (`0x40` failed every reply with its error `0x7E0DD`), the move-handle count
-  must match what the caller declared, and the raw-data size must be exactly
-  what the command documents — `nvdrv` `Initialize` really does return a `u32
-  error`, and omitting it failed nv init. It also never converts to a domain, so
-  a sub-interface has to come back as a **session handle in a move handle**;
-  `Cpu::reply_with_interface` picks the right shape per request and files the
-  object's state under `Cpu::object_key(handle, object_id)`.
+`Cpu::warn_no_implementation` logs `[ipc] no implementation` once per pair, and
+that list *is* the inventory of what a guest is asking for and not getting.
 
-There are **two encodings of every message kind**: the plain one (`Request` =
-4, `Control` = 5) and the "with context" one (`RequestWithContext` = 6,
-`ControlWithContext` = 7), which prefixes the raw data with a 16-byte tracing
-context. `libnx` sends the plain form; **`nnSdk` sends the context form for
-everything**. Test control-ness with `Cpu::ipc_is_control_request`, never `type
-== 5` — `appletOE`'s opening message from a retail title is
-`QueryPointerBufferSize` as type 7, and reading it as an ordinary command
-killed the applet chain before it opened.
+### Events
 
-The generic reply for a service with no dedicated stub
-(`Cpu::reply_with_fabricated_object`) answers with a fresh object id, **a real
-sub-session in the move slot and a real event in the copy slot**, all allocated
-once per `(session, command)` and reused. The handles are not optional:
-`nnSdk` reads an out-object off a plain session as a move handle, and a reply
-carrying none is not an error to it — the handle parses as 0, the client
-silently skips constructing the proxy, and the command still returns
-**success**. The caller's first virtual call then goes through a null pointer,
-which is how boot2 reached `pc=0` one instruction after `gpio`'s
-`OpenSession2` was answered "successfully", with nothing in the log between the
-lie and the crash. An out-**event** is the same trap in the other slot and
-nothing here can tell which of the two a given command wanted, so the reply
-carries one of each; that is what the Home Menu's message thread was missing
-when it settled into waiting on handle 0 with three created-but-never-started
-threads behind it.
+`Cpu::alloc_event` records one in `Cpu::events`, and it must reach the guest
+through the **copy** list — a move handle transfers ownership, a copy handle
+duplicates one the server keeps, they occupy different descriptor fields, and
+an event in the move slot reads back as **0**.
 
-**A success with an unfilled out parameter is the whole bug class**, and it is
-not visible from the reply. A reply is written *over* the request, in the same
-TLS buffer, and its header declares four words of padding past the SFCO header
-— room for a small out value — so a bare success passes every length check
-`nnSdk` and `libnx` make and hands the caller stale *request* bytes.
-`Cpu::write_ipc_reply` therefore clears the whole section it is about to
-declare before filling it, so an unimplemented command's out parameters read as
-0: still wrong, but the same wrong every time. Before that, `vi`'s
-`ListDisplayModes` cost the Home Menu a billion instructions walking a buffer
-nothing had written, off a count it had read out of the previous reply's
-leftovers, without making one syscall the whole time. When a command *does*
-have an out parameter, implement it — and when the struct's exact width is not
-pinned down, reply with a zeroed block wider than it needs: a reply may be
-longer than the caller expects, never shorter.
+**An event handed out twice must be the same event** (`Cpu::kept_event`, keyed
+per `(purpose, object)`), or the caller waits on an object the service would
+not signal.
 
-`vi`'s display queries (`ListDisplays`, `ListDisplayModes`,
-`GetDisplayResolution`, …) are dispatched in one place,
-`Cpu::vi_common_command`, ahead of the sub-interface match — the command ids
-do not collide across `IApplicationDisplayService`, `ISystemDisplayService` and
-`IManagerDisplayService`, and the answers are identical on a domain session and
-a plain one. Everything the display reports is one size, `DISPLAY_SIZE`: it has
-to agree with `am`'s `GetDefaultDisplayResolution` and with the buffer queue's
-own default, or a caller sizes its framebuffer from one and scans out through
-another.
+`svcWaitSynchronization`: a handle not in `Cpu::events` counts as ready (do not
+"fix" this without checking homebrew); a **poll** (timeout 0) on unfired events
+reports Timeout; a **blocking** wait with nothing signalled reports the first
+handle ready, which is a deliberate lie — see `WaitAny` above. `vsync_event`
+fires on a period as well as on presents.
 
-That reply used to guess the *applet* state commands (`ReceiveMessage` → 15,
-`GetOperationMode` → 1, …) for any service whose name started with "applet";
-those numbers leaked — `pl:u`'s `GetLoadState` is also command 1, and answering
-it with 15 left NX-Shell polling the shared-font service 190k times.
+### Where headers and payloads land
 
-`ssl` (`ssl_request`) is the system TLS stack — Switch does not let a title
-bring its own, so a title asks the OS to build connections
-(`CreateContext` → `ISslContext::CreateConnection` → an `ISslConnection`
-wrapping a `bsd:u` socket). The local half is implemented, because contexts and
-their options are ordinary objects that exist whether or not anything is
-reachable; **`CreateConnection` deliberately reports itself as unimplemented**
-rather than handing back a connection that can never connect, since there is no
-socket layer under it. An offline retail title only ever calls
-`SetInterfaceVersion`, which `nnSdk` issues at startup because `ssl` is in the
-NPDM service list.
+`Cpu::ipc_cmif_header_offset` finds "SFCI" by walking the request's descriptors
+first, because buffer descriptors push it well past the start (nvdrv's
+`KICKOFF_PB` puts it at 0x40) — a fixed 0x40 scan reported "no command id" and
+answered the whole GPU submit as an unknown command.
 
-`hid` (`hid_request`) is the **negotiation** around input, not the input
-itself. The data — buttons, sticks, touch — lives in a 256 KiB shared memory
-region the guest reads directly with no IPC per frame, which
-`Cpu::set_gamepad_state` already fills. `IHidServer::CreateAppletResource` →
-`IAppletResource::GetSharedMemoryHandle` is what hands that region over, and
-the handle it returns is now what `svcMapSharedMemory` recognises (the old
-match on a 0x40000 size stays as a fallback, and is the reason `libnx` got
-working input out of a fabricated reply while `nnSdk` called a method on a null
-`IAppletResource`).
+`Cpu::ipc_request_data` does the same for the payload: a domain request carries
+a `CmifDomainInHeader` in front, so its payload sits 0x20 rather than 0x10 in.
 
-Two things there are easy to get wrong:
+Buffers: `ipc_input_buffer` / `ipc_output_buffer` try map-alias then pointer,
+`ipc_send_buffer` is the map-alias send side, and `ipc_recv_static_buffers`
+handles the one kind that sits *after* the raw data (at the unaligned data
+offset plus `num_data_words`).
 
-- **`QueryPointerBufferSize` must be non-zero for `hid`.**
-  `nn::hid::SetSupportedNpadIdType` marshals its npad id array as a
-  send-static ("pointer") buffer, and `nnSdk`'s client checks the negotiated
-  size *before* sending, failing outright when the server claims it can take
-  nothing. Note this also changes how `libnx`'s AutoSelect marshals — read
-  input buffers with `Cpu::ipc_input_buffer`, which tries both forms.
-- **The `Set*`/`Get*` pairs have to agree.** `SetSupportedNpadStyleSet` /
-  `GetSupportedNpadStyleSet` and the joy-hold-type pair are read back; a caller
-  that reads back something it did not set decides the controller it wanted is
-  not there.
+**`QueryPointerBufferSize` must be non-zero** wherever pointer buffers are used
+(`hid`, `acc`, `set:sys`) — `nnSdk` checks the negotiated size *before* sending
+and gives up when the server claims no room.
 
-Vibration comes back out the same way: `SendVibrationValue` carries a
-`HidVibrationValue` (amplitude and frequency for a low band and a high band),
-the two amplitudes are kept in `Cpu::vibration`, and the page maps them onto
-the Gamepad API's `dual-rumble` `strongMagnitude`/`weakMagnitude` — Switch
-rumble is two independently driven actuators, which is the same shape.
+**`CloneCurrentObject` (control 2, 4 for Ex) must return a new session handle
+as a move handle.** Answered centrally in `svc.rs`; the clone reaches the same
+interface and inherits the same domain objects. `nnSdk` clones `fsp-srv` before
+mounting anything.
 
-**Events are copy handles, and they start unsignalled.** `Cpu::alloc_event`
-names one and records it in `Cpu::events`; it has to reach the guest through
-`Cpu::write_ipc_reply`'s **copy** list, not the move list — a move handle
-transfers ownership (a sub-session from `reply_with_interface`), a copy handle
-duplicates one the server keeps, they occupy different fields of the handle
-descriptor, and an event sent in the move slot is read back as **0**. That is
-why `nnSdk` spent whole boots waiting on handle 0.
+**Mount names live in the guest** — `nn::fs`'s `MountTable` is client-side, so
+`rom:` needs nothing beyond `OpenDataStorageByCurrentProcess` (200) and a
+storage that reads correctly.
 
-`svcWaitSynchronization` then answers from real state:
+**`IStorage::Read` is `(s64 offset, u64 size)` — not `IFile::Read`**, which
+leads with a `u32 option` and puts its offset at +8.
 
-- A handle that is *not* in `Cpu::events` still counts as ready. Thread handles
-  and every service handle this emulator does not model keep behaving as they
-  always have — do not "fix" this without checking homebrew.
-- A **poll** (timeout 0, which is what `nn::os::TryWaitSystemEvent` and libnx's
-  `waitSingle` issue) on events that have not fired reports Timeout. This is
-  the fix that stopped `nn::oe::GpuErrorHandler` being told the GPU had
-  faulted.
-- A **blocking** wait with nothing signalled still reports the first handle
-  ready, which is a lie and is deliberate. `nn::os::detail::MultiWaitImpl::
-  WaitAny` answers a timeout by returning a **null holder** that
-  `nn::os::RegisterSystemWorkerHandler` calls without checking, so telling that
-  thread the truth jumps to 0; and blocking it for real is worse, because
-  nothing here fires those events and the last runnable thread would have
-  nowhere to go. Fixing this properly needs events that actually fire, not a
-  different answer here.
-- `Cpu::vsync_event` is signalled from the guest's own presented frames, which
-  is the only periodic tick this emulator has — there is no clock behind the
-  display.
+### One console, one answer
 
-**`CloneCurrentObject` (control command 2, and 4 for the Ex form) must hand
-back a new session handle as a move handle.** It is answered centrally in
-`svc.rs`, before per-service dispatch, because it is session management and
-identical for every service: the clone reaches the same interface and inherits
-the same domain objects. Every service's control path used to answer it with a
-bare success and no handle at all, and `nnSdk` clones `fsp-srv` before it
-mounts anything — so `nn::fs::MountRom("rom", …)` failed without ever issuing a
-filesystem command, and the title only noticed much later, when
-`nn::fs::OpenDirectory("rom:/Data")` found no such mount.
+`am`'s operation mode, `apm`'s performance mode, `vi`'s display size, the
+shared buffer's geometry, `clkrst`'s GPU rate and whether touch reports
+contacts all derive from one `OperationMode` (set by the page's dock switch):
+1280x720 handheld / 1920x1080 docked, Normal / Boost, 384 / 768 MHz. Handheld
+is **0**. The display size must agree everywhere or a caller sizes its
+framebuffer from one source and scans out through another; `vi`'s display
+queries are dispatched once in `Cpu::vi_common_command` ahead of the
+sub-interface match.
 
-**Mount names live in the guest, not here.** `nn::fs`'s `MountTable` is
-client-side inside `sdk`: a successful mount registers the name and the
-emulator never sees it. So there is nothing to implement for `rom:` beyond
-making the calls underneath it work — `OpenDataStorageByCurrentProcess`
-(command 200) handing back an `IStorage` over the process's RomFS, and that
-storage reading correctly.
+`SHARED_BUFFER_ADDR` is the one surface the whole system draws into — an applet
+asks `vi` for a slot rather than owning a layer. Seven slots, only the first
+two handed out (as on a console); address space is reserved for the docked
+geometry whatever mode we are in, which costs nothing because the pages are
+soft-mapped.
 
-**`IStorage::Read` is `(s64 offset, u64 size)` — not `IFile::Read`.** A file
-read leads with a `u32 option` and pads to 8, putting its offset at +8 and its
-size at +0x10; a storage read has neither. Reading the file layout on a storage
-made every RomFS read return "0 bytes at offset 0x50", so the guest mounted its
-RomFS, parsed an empty header, and found none of its own files.
+Both IPC routes reach `Cpu::applet_request`: libnx by domain object id, `nnSdk`
+by a session handle per interface — so the `am:*` names are also in `svc.rs`'s
+dispatch, the same split as `fsp-srv-fs` and `time:system-clock`.
 
-`lm` (`lm_request`) is where a title's **own** diagnostic output goes —
-`nnSdk`'s `NN_LOG` and everything on top of it, rather than
-`svcOutputDebugString`. `ILogger::Log` carries one LogPacket in a map-alias
-send buffer (`Cpu::ipc_send_buffer`): a 0x18-byte header (pid, thread id,
-flags, severity, verbosity, payload size) then TLV chunks, of which key 2 is
-the message text and key 6 the module name. A long message is split across
-packets with `flags` bit 0 marking the head and bit 1 the tail, so the text
-accumulates and only the tail ends the line. Output lands in `Cpu::out`,
-alongside the guest's `svcOutputDebugString` writes. Retail builds often
-compile their logging out, so an empty log is not evidence this is broken —
-`lm_writes_the_guests_own_log_to_the_console` is.
+### Services
 
-`pctl` (parental controls, `pctl_request`) reports the console as
-**unrestricted**, which is the true state here — no PIN, no play timer, no
-linked guardian, and the one local account `acc` reports has no Nintendo
-Account behind it. Watch the direction of the answers: a `Confirm*`/
-`Check*Permission` command replies with a bare `Result` where success *is*
-"permitted" (a restriction is an error the caller checks for by value), an
-`IsRestriction*`/`IsRestrictedBy*` query is `false`, and an
-`IsFreeCommunicationAvailable`/`IsStereoVisionPermitted` query is `true`. The
-last family reads the opposite way from the middle one, so a blanket `false`
-would report free communication as unavailable.
+- **`nvdrv`** — the real `INvDrvServices`, dispatched into `gpu::nvdrv`.
+- **`hid`** is the *negotiation*, not the input: the data lives in a 256 KiB
+  shared memory region the guest reads with no IPC per frame.
+  `CreateAppletResource` → `GetSharedMemoryHandle` hands it over. The
+  `Set*`/`Get*` pairs are read back and must agree. Vibration comes back
+  through `SendVibrationValue` → `Cpu::vibration` → the Gamepad API's
+  `dual-rumble`.
+- **`pl:u`/`pl:s`** — the shared fonts; see below.
+- **`lm`** carries a title's own `NN_LOG` output: a 0x18-byte LogPacket header
+  then TLV chunks (key 2 message, key 6 module) in a map-alias buffer, split
+  across packets with `flags` bit 0 head / bit 1 tail. Retail builds often
+  compile logging out, so an empty log is not evidence of a bug.
+- **`fatal:u`** carries the `Result` that stopped a process — the only account
+  a guest ever gives of why.
+- **`ssl`** — contexts and options are real; **`CreateConnection` deliberately
+  reports unimplemented** rather than handing back a connection that can never
+  connect. Offline titles only call `SetInterfaceVersion`.
+- **`bsd`** models a link that is up and a network where nothing answers: local
+  operations succeed, anything needing a peer fails at once with a definite
+  errno (`ECONNREFUSED`, `ENOTCONN`/`ENETUNREACH`, `EAGAIN`). **Errnos are
+  FreeBSD's** (`EAGAIN` is 35) and `fcntl`'s flags are stored verbatim, since
+  what has to hold is that a guest reads back what it set. A `poll` *with* a
+  timeout is a wait, so it asks for a reschedule (`Cpu::pending_yield`) before
+  returning zero — otherwise a poll loop owns the CPU forever.
+- **`sfdnsres`** — `EAI_NONAME` / `HOST_NOT_FOUND`, the *definitive* failure
+  rather than try-again, in the **first** word of `SfdnsresRequestResults`.
+  Error strings are answered properly.
+- **`pctl`** reports the console unrestricted. Watch the direction:
+  `Confirm*`/`Check*Permission` reply with a bare `Result` where success *is*
+  permitted, `IsRestriction*` is `false`, `IsFreeCommunicationAvailable`/
+  `IsStereoVisionPermitted` are `true`.
+- **`acc`** models exactly one user, always signed in, uid `ACCOUNT_UID`
+  (nonzero — 0 is the "no user" sentinel). `acc:u0` and `acc:u1`/`acc:su` share
+  0..=51 but **diverge from 100 up**, so those arms dispatch on the service
+  name. The nickname is real state. `LoadImage` returns a real JPEG.
+- **`apm`** must *agree* with `am`; `GetPerformanceConfiguration` returns what
+  `Set*` was last handed (defaults nonzero — 0 is `Invalid`).
+- **`ts`** reports the SoC and PCB sensors at an idle reading. `MilliC` is
+  `GetTemperature` × 1000 and both sit inside `GetTemperatureRange`.
+  **`ISession` is a different interface from its server** — its
+  `GetTemperature` is command 4, the same id as the server's `OpenSession`. The
+  device code's **high byte** picks the sensor (`0x41…` SoC, `0x43…` PCB).
+- **`set:sys`**'s `GetFirmwareVersion`/`2` are **not cosmetic**: libnx seeds
+  `hosversionGet()` from them and everything version-gated branches on that.
+- **`csrng`** fills from `Cpu::next_random_u64` (splitmix64). Not a CSPRNG —
+  but the generic reply left the buffer untouched, which is non-random *and*
+  undetectably so.
+- **`spl:`** — an Icosa retail console, not in debug mode. Atmosphère's
+  extensions at 65000+ answer zero, i.e. "no CFW", which is true.
+- **`pdm:qry`** — a console nothing has been played on. Factory-fresh is a
+  truthful state; a placeholder is not.
+- **`pm:*`** are four interfaces on four names. `pm`'s process id must equal
+  `svcGetProcessId`'s. `pm:info`'s program id defaults to the Album applet's.
+- **`pcv`/`clkrst`** are the same manager either side of 8.0.0, and their
+  numbering differs **by an offset**: a `clkrst` device code is `0x40000000 +
+  module + 1`. A rate a guest sets reads back.
+- **`fsp-srv`**'s `DisableAutoSaveDataCreation` (1003) is accepted and
+  deliberately **not** honoured — saves are created on open and there is no
+  installer to have made them first.
 
-`acc` (user accounts, `acc_request`) models a console with **exactly one
-user**, always signed in, whose uid is `ACCOUNT_UID` — nonzero, because zero is
-`AccountUid`'s "no user" sentinel and a title handed it back concludes nobody
-is signed in. `acc:u0` is the application-facing service and `acc:u1`/`acc:su`
-the system-facing ones; they share commands 0..=51 and **diverge from 100 up,
-where the same command id means different things** (100 is
-`InitializeApplicationInfo` on `acc:u0` but `GetUserRegistrationNotifier` on
-`acc:u1`), so those arms dispatch on which service the session was opened under
-rather than on the command alone. The nickname is the one piece of real state:
-`IProfileEditor::Store` writes it into `Cpu::account_nickname` and
-`IProfile::GetBase` reads it back out. `LoadImage` hands over a real JPEG that
-`solid_jpeg` encodes — a caller feeds what it gets straight to a decoder, so
-zero bytes is nothing to decode.
+### What the Home Menu opens that homebrew never does
 
-`IProfile::Get` is why `Cpu::ipc_recv_static_buffers` exists: its
-`AccountUserData` comes back through a **receive-static ("pointer") buffer**,
-the one descriptor kind that sits *after* the raw data — at the unaligned data
-offset plus `num_data_words`, which counts the padding that aligns the CMIF
-header. It is also why `acc` answers `QueryPointerBufferSize` with a real size:
-a client told the server has no room marshals no descriptor at all and then
-reads the icon id and background colour back out of its own stack. Read one
-with `Cpu::ipc_output_buffer` (map-alias first, pointer buffer second), the
-mirror of `ipc_input_buffer`.
+`lbl`, `audctl`, `nfc:sys`, `btm:sys`, `ldn:m`, `lp2p:m`, `ovln:*`, `olsc:s`,
+`friend:*`, `news:*`, `bcat:*`, `notif:*`.
 
-`apm` (performance management, `apm_request`) is the clock profiles, and there
-is nothing here to clock — the CPU is an interpreter and the GPU a software
-rasterizer. What it has to do is **agree**: `GetPerformanceMode` reports the
-same Normal that `am`'s `ICommonStateGetter::GetPerformanceMode` does, and
-`GetPerformanceConfiguration` gives back, per mode, whatever
-`SetPerformanceConfiguration` was last handed (the defaults are nonzero, since
-0 is `ApmPerformanceConfiguration_Invalid`).
+- **Most are a creator plus the objects it creates** (`olsc:s` is five deep),
+  and a fabricated object id is not callable — so the fallback ended each chain
+  at its *first* command. Each sub-interface gets a name of its own
+  (`Cpu::ipc_interface`), listed in `svc.rs`'s dispatch.
+- **The answer is an empty console, not a broken one.** No friends, news, BCAT,
+  cloud saves, local network, NFC or paired gamepad — every one a state a real
+  console reaches, so callers already have a path for it. A *failure* puts them
+  on the path built for hardware that broke. None of these events ever signal.
+- **The settings among them are stored, not answered** (`backlight`,
+  `audio_control`, `notif_alarms`, …) — one caller writes, another reads back.
 
-`bsd` (sockets, `bsd_request`) models a console whose link is up — which is
-what `nifm` already claims — and on which **nothing ever answers**. A browser
-tab cannot open a TCP socket and nothing here proxies one, so the split is:
-every genuinely local operation really succeeds (socket, bind, listen,
-get/setsockopt, fcntl, shutdown, close, dup) and every operation needing a peer
-fails immediately with a definite errno — `connect` is `ECONNREFUSED`, the data
-path is `ENOTCONN` for a stream socket and `ENETUNREACH` for a datagram one,
-`accept` on a listening socket is `EAGAIN`, and `select`/`poll` report nothing
-ready. An empty answer is not the same as an *instant* answer, though: a `poll`
-that was handed a timeout is a wait, and `bsd_request` asks for a reschedule
-(`Cpu::pending_yield`, consumed by `svcSendSyncRequest` once the reply and X0
-are written — switching threads swaps the register file) before returning zero.
-Threads here only hand over at blocking syscalls, so without that a guest
-looping on `if (poll(&pfd, 1, 200) <= 0) continue;` around an idle socket owns
-the CPU forever and starves every other thread, its own main one included.
-NXpotify's Zeroconf listener is exactly that loop, and it never drew a frame.
-A `poll` with a zero timeout is an explicit non-blocking probe and still
-returns at once, as it does on hardware. **The errnos are FreeBSD's** (`EAGAIN` is 35, not 11) because that is what the
-real service returns. `fcntl`'s flags word is stored and returned *verbatim*
-rather than decoded — `O_NONBLOCK` is a different bit in FreeBSD, newlib and
-Linux, and what has to hold is that a guest reads back what it set.
+## Audio (`audout`)
 
-`ts` (temperatures, `ts_request`) reports the two sensors real hardware has —
-the SoC (`TsLocation_Internal`) and the PCB (`TsLocation_External`) — at a
-fixed idle reading, which is the true state of a console with no silicon to
-heat. Three things to keep straight. The constraint is internal consistency:
-`GetTemperatureMilliC` is `GetTemperature` times a thousand, and both sit
-inside what `GetTemperatureRange` reports, since a caller scaling a gauge by
-that range would otherwise draw the needle off the end. **`ISession` is a
-different interface from the server it came from**: its `GetTemperature` is
-command 4, the same id the server uses for `OpenSession`, and it returns a
-`float` where the server's commands return integers — one shared dispatch
-answered a session's temperature request with another session object, which
-NX-Fetch printed as "8 C". And the **device code's high byte** picks the
-sensor (`0x41……` SoC, `0x43……` PCB), not its low byte: NX-Fetch asks for
-`0x41000002` and calls the result "CPU".
+**The device plays in time.** A buffer is released once the CPU has run for as
+long as its samples take at the device's rate (`Cpu::audio_play_cycles`),
+queued behind whatever is still playing (`AudioOut::free_at`), on the same
+`cycles` clock the display and thread deadlines use. Samples still copy to the
+host on arrival; it is the *tag* that waits. Releasing on arrival hands the
+guest an infinitely fast sound card, and a title's audio clock is what its
+video is scheduled against — one pushed 205× real time and its software video
+player dropped every frame of the boot video.
 
-`set:sys`'s `GetFirmwareVersion`/`GetFirmwareVersion2` (commands 3 and 4) are
-**not cosmetic**. libnx's `__appInit` seeds `hosversionGet()` from them, and
-everything version-gated branches on that — which `acc` commands exist, which
-`ts` interface carries the measurement, which audio-renderer revision gets
-negotiated. Answering them with the generic empty success left each caller
-reading its own uninitialized buffer as the system version: NX-Fetch reported
-"Horizon OS 115.119.105", which is the ASCII of `switch-wasm user` — the `acc`
-uid this emulator had left in that same buffer earlier. The struct goes back
-through a pointer buffer, so it needs `ipc_output_buffer` and a non-zero
-`QueryPointerBufferSize`, like `acc`'s.
+- **The buffer event fires on the clock, not the append** (`Cpu::audio_tick`),
+  and a blocking wait on it rewinds onto the `svc` — safe because the wake-up
+  is a known cycle count away.
+- **Do not answer that wait with a bare success.** `nn::audio`'s mixer takes
+  the event as proof a buffer is waiting and reads its queue head unchecked.
 
-`csrng`, `spl:`, `pdm:qry`, `pm:*` and `pcv`/`clkrst` are the rest of what a
-system-info or save-management homebrew opens.
+## GPU (`switch-core/src/gpu`, `switch-gpu`)
 
-- **csrng** fills the caller's buffer from `Cpu::next_random_u64` (splitmix64,
-  seeded from the emulated clock). It is **not** a CSPRNG — there is no OS
-  entropy under `wasm32-unknown-unknown` and no security processor here — but
-  the generic reply left the buffer untouched, which is a "random" value that
-  is whatever was on the caller's stack, non-random *and* undetectably so.
-- **spl:** answers `GetConfig`: an original (Icosa) retail console, not in
-  debug mode. Note what a real guest actually asks it for first — NX-Fetch
-  wants **Atmosphère's extensions at 65000+** (CFW API version, emummc type),
-  and zero there reads as "no custom firmware", which is true.
-- **pdm:qry** reports a console **nothing has ever been played on**: empty
-  event lists, an empty available range, zeroed statistics. That is a state a
-  factory-fresh console has, which is what makes it truthful rather than a
-  placeholder.
-- **pm:\*** are four different interfaces on four service names, so
-  `pm_request` dispatches on the name. What they can answer honestly is
-  identity, and `pm`'s process id must equal `svcGetProcessId`'s — the same
-  question through a different door. `pm:info`'s program id defaults to the
-  Album applet's, which is what hbmenu-launched homebrew runs as on hardware;
-  a loader that knows a real title id sets it with `Cpu::set_program_id`.
-- **pcv/clkrst** are the same clock manager either side of 8.0.0. Their
-  numbering differs *by an offset*: a `clkrst` device code is
-  `0x40000000 + module + 1` over the `PcvModule` value `pcv` takes directly,
-  so reading the code's low bits as the module is off by one — NX-Fetch asks
-  for `0x40000001`/`0x40000002`/`0x40000039` and labels them CPU, GPU and
-  Memory. Rates are the **handheld** ones, and a rate a guest sets reads back.
+A model of the Tegra X1's GM20B. Registers from deko3d's generated Maxwell
+headers, ioctls from libnx's `nvidia/ioctl`.
 
-## What the Home Menu opens that a homebrew never does (`cpu/ipc.rs`)
+- `nvdrv` — `/dev/nvmap`, `nvhost-ctrl`, `nvhost-ctrl-gpu`, `nvhost-as-gpu`,
+  `nvhost-gpu`.
+- `nvmap` — on Tegra the *guest* allocates and hands nvmap a CPU address, so
+  GPU memory is ordinary guest memory.
+- `vmm` — small-page region at `0x04000000`, big-page from `0x1_00000000`.
+- `syncpt` — a submission completes inside its ioctl, so fences are already
+  expired when the guest waits.
+- `channel` + `engine/*` — GPFIFO → pushbuffer → method headers → the class on
+  that subchannel. 3D `0xB197`, compute `0xB1C0`, inline `0xA140`, 2D `0x902D`,
+  copy `0xB0B5`, gpfifo `0xB06F`. **Subchannel 6 is pre-bound** to the
+  channel's own gpfifo class — nvhost binds it at creation and userspace never
+  issues `SetObject`.
+- `macro_engine` — methods ≥ 0xE00 are macro slots, and deko3d compiles its
+  draws into macros, so nothing draws without it.
+- `surface` — block-linear (GOB) swizzling; a naive framebuffer dump looks
+  shredded because of this. `texture` + `bcn/` cover BC1–BC7 and ASTC.
+- `shader/` — `isa` (SASS decode), `cfg`, `interp` (software shading), `wgsl`
+  (translation for the backend).
+- `raster` — the software rasterizer, and **the reference every other path must
+  agree with**. Compute dispatches only record their QMD address; no warps run.
 
-`lbl`, `audctl`, `nfc:sys`, `btm:sys`, `ldn:m`, `lp2p:m`, `ovln:snd`/`ovln:rcv`,
-`olsc:s`, `friend:*`, `news:*`, `bcat:*` and `notif:s`/`notif:a` are the
-services qlaunch reaches for on the way to its first frame, and none of them
-had an implementation — every one was answered by the fabricated-object
-fallback. Four things about that set are worth keeping in mind.
+Scan-out: `display::BufferQueue` (`QUEUE_BUFFER`) resolves the
+`NvGraphicBuffer` to an nvmap id and `Gpu::present` de-swizzles into
+`Gpu::framebuffer`.
 
-- **Most of them are a creator plus the objects it creates.** `friend:u`
-  command 0 is `CreateFriendService`, `bcat:u` command 0 is
-  `CreateBcatService`, `nfc:sys` command 0 is `CreateSystemInterface`,
-  `btm:sys` command 0 is `GetCore`, and `olsc:s` is *five* objects deep
-  (`GetOlscServiceForSystemService` → `GetTransferTaskListController` → an
-  `INativeHandleHolder` → `GetNativeHandle`). The fabricated object id is not
-  an object a caller can call, so the fallback was ending each of these chains
-  at its first command rather than at the command that was missing. Each
-  sub-interface is handed out under a name of its own (`Cpu::ipc_interface`
-  resolves it from the domain object or the session handle, the same split as
-  `fsp-srv-fs` and `time:system-clock`), and `svc.rs`'s dispatch lists those
-  names beside the service's.
-- **The answer is an empty console, not a broken one.** No friends, no news,
-  no BCAT content, no cloud saves, no local network, no NFC reader, no paired
-  gamepad. Every one of those is a state a retail console genuinely reaches —
-  one that has never been online, with its Joy-Cons detached — so callers have
-  a path for it already. A *failure* would put them on the path built for a
-  radio that broke.
-- **The settings among them are stored, not answered.** `lbl`'s brightness,
-  `audctl`'s per-target volume and mute, `nfc`'s enable flag, `btm`'s radio,
-  `notif`'s alarms: each is written by one caller and read back by another, so
-  they live on `Cpu` (`backlight`, `audio_control`, `notif_alarms`, …) rather
-  than being acknowledged and dropped. The settings applet sets a brightness
-  and then asks what is applied to the backlight; a console that answers those
-  two independently has a slider that does not move.
-- **An event handed out twice must be the same event.** `Cpu::kept_event`
-  keys one per `(purpose, object)` and hands the same handle back on every
-  ask, for the reason `library_applet_event` does: a caller given a second
-  copy waits on an object the service would not signal even if it signalled
-  the first. None of these are ever signalled — a save transfer finishing, a
-  news article arriving, a Bluetooth radio coming on — which is the truthful
-  state rather than the silent one.
+**The `wgpu` backend never blocks.** Reading a render target back means
+awaiting a promise, and a blocking wait in a browser is not slow but
+*deadlocked*. So a surface stays on the device across every draw targeting it
+and returns to guest memory only at `Renderer::flush`, which the engine calls
+before `present` — eighty-eight round trips a frame become one. Opening the
+device is likewise deferred: `worker/index.ts` calls `switch_gpu_open`
+*between* run slices, since the channel does not exist until the title has run.
+**Any draw the backend cannot express falls back to `Software`** — a backend
+that guessed would produce a frame nobody could check.
 
-`fsp-srv`'s `DisableAutoSaveDataCreation` (1003) is accepted and deliberately
-**not** honoured: saves here are created on open and there is no installer to
-have made them beforehand, so obeying the flag would leave every title —
-qlaunch included — with no save at all.
+**The reference is how you check the backend.** Run `switch-core`'s
+`screenshot_nca` and `switch-gpu`'s `screenshot_gpu` over the same frame and
+`cmp` the PPMs — a byte-identical pair is the only evidence the backend renders
+what the rasterizer does. `GPU_ONLY=<i>` runs only the i-th draw of each frame
+on the device and leaves the rest to the reference, so a difference is exactly
+one draw's. That is what caught a doubled y flip: two flat greys trading places
+is geometry, not colour. The Home Menu's 88 draws all run on the device with no
+fallback, 99.88% pixel-identical, 811 → 513 ms a frame.
 
+**hbmenu is not a shader-core test.** Its menu renders correctly, but
+`nx_graphics.c` draws with the CPU into a linear memblock and its command list
+is just `dkCmdBufCopyBufferToImage` + a fence. Only the copy engine and
+syncpoints are involved.
 
-`sfdnsres` (the DNS resolver, `sfdnsres_request`) is the other half of the
-socket stack, opened alongside `bsd:u` by `socketInitialize`. Nothing resolves:
-`EAI_NONAME` for the `getaddrinfo` family, `HOST_NOT_FOUND` for the
-`gethostbyname` one — the *definitive* failure, not the try-again one, for
-`bsd`'s reason. A numeric address string fails too, which real hardware would
-resolve without any DNS: serializing an `addrinfo` into Horizon's packed form
-is guesswork nothing here can check against a real console, and the connect
-that follows is refused anyway, so the lookup fails where the guest can act on
-it. The failure goes in the **first** word of `SfdnsresRequestResults`, which
-is what makes it robust to the field order; the error *strings* are answered
-properly, so a guest that prints why a lookup failed gets a sentence.
+## Input (`cpu/mod.rs`, `web/main/input.ts`)
 
-**One console, one answer.** These services describe the same machine from
-different angles, and a guest reads several of them: `am`'s operation mode,
-`apm`'s performance mode and `clkrst`'s rates have to describe one console, or
-NX-Fetch prints "Docked" beside a 720p framebuffer clocked for handheld. That
-mismatch was real — `GetOperationMode` answered 1 (Console) under a comment
-saying Handheld, and `AppletOperationMode_Handheld` is 0.
+`Cpu::set_gamepad_state` publishes the pad two ways: the `INPUT_ADDR` register
+and libnx's `HidSharedMemory`. The offsets came from compiling libnx's
+`services/hid.h` on the host and are not guessable: `npad` at **0x9A00**, one
+entry every **0x5000**, `full_key_lifo` **+0x28**, `handheld_lifo` **+0x378**,
+`device_type` **+0x4188**; each LIFO is a 0x20-byte header then 0x30-byte
+entries. One entry at index 0 with `tail = 0`, `count = 1` and
+`IsConnected` is all `hidGetNpadStates*` needs.
 
-**A stub that answers by fabrication says so.** The generic reply for a service
-with no dedicated handler is load-bearing for homebrew that only checks the
-Result, so it still succeeds — but `Cpu::warn_no_implementation` records
-`[ipc] no implementation: <service> cmd=<n>` once per pair, and that list *is*
-the inventory of what a given guest is asking for and not getting.
-
-**An unimplemented `am` command must not answer with a bare success.**
-Everything `am` hands back is a live kernel object or a piece of applet state
-the caller acts on, so a fabricated success is a wrong answer the guest
-believes rather than a neutral placeholder: the old catch-all answered
-`IApplicationFunctions::GetGpuErrorDetectedSystemEvent` (command 130) with
-success and *no copy handle*, and `nnSdk`'s system worker spent the rest of the
-boot waiting on handle 0. `Cpu::unimplemented_command` reports `cmif`'s
-`UnknownCommandId` (module 10, description 221 — `0x1ba0a`) and warns once per
-`(interface, command)` on stderr, which is how you find the next command to
-implement. A bare success is still the *right* answer for a genuine
-setter/notifier whose whole reply is a Result — but those are listed by command
-id, not caught by a `_` arm.
-
-Both callers reach the same `Cpu::applet_request`, by two different routes:
-`libnx` converts `appletOE` to a domain and addresses each sub-interface by
-object id, while `nnSdk` never converts and gets a **session handle per
-interface**, so the `am:*` names are also listed in `svc.rs`'s dispatch (the
-same split as `fsp-srv-fs` and `time:system-clock`).
-
-A **Close** request (message type 2) carries no command id. Dispatching one on
-whatever command id is left in the TLS buffer runs a real command — closing an
-`fsp-srv` session was landing on `CreateFile` and adding an empty file to the SD
-card — so `svc.rs` answers type 2 before dispatch and calls
-`Cpu::forget_handle`.
-
-## Where a CMIF header lands (`cpu/ipc.rs`)
-
-`Cpu::ipc_cmif_header_offset` finds the "SFCI" header by walking the request's
-descriptors (`ipc_reply_start`), checking the domain offset too, and only then
-scanning the message buffer. A request with buffer descriptors pushes the header
-well past the start — nvdrv's `KICKOFF_PB` puts it at 0x40 — and a fixed scan of
-the first 0x40 bytes reported "no command id", so **the GPU submit was answered
-as an unknown command with a generic success**: no pushbuffer ever ran, the frame
-fence never signalled, and hbmenu spun in `dkFenceWait` forever.
-
-## IPC payload offsets (`cpu/ipc.rs`)
-
-`Cpu::ipc_request_data` locates a CMIF request's raw payload by finding the
-"SFCI" magic rather than adding a fixed offset to the data area: a domain
-request carries a `CmifDomainInHeader` in front of the `CmifInHeader`, so its
-payload sits 0x20 rather than 0x10 bytes in. libnx converts the `fsp-srv`
-session to a domain, so assuming 0x10 made `fsFileRead` read its offset and
-size out of the header — every read asked for 0 bytes at offset 0, and
-`romfsMountSelf` failed with `LibnxError_IoError`.
-
-## Emulated SD card (`vfs.rs`)
-
-`fsp-srv` is backed by a real path-addressed tree, so `GetEntryType`,
-`OpenDirectory`, `fsDirRead`, `OpenFile` and `Read` all agree with each other
-and a missing path returns `FsError_PathNotFound`. Returning a fixed listing
-for every path made menus recurse forever. The running NRO is published at
-`nro::HOMEBREW_NRO_PATH` and advertised as `argv[0]` through the homebrew ABI
-environment block, which is how libnx's `romfsMountSelf` finds the RomFS
-appended to it.
-
-## Controller input (`cpu/mod.rs`, `web/main/input.ts`)
-
-`Cpu::set_gamepad_state` publishes the host pad two ways: the memory-mapped
-`INPUT_ADDR` register, and libnx's `HidSharedMemory` layout that `padUpdate`
-reads. The offsets are not guessable — they were taken from libnx's
-`services/hid.h` by compiling the struct on the host: `npad` at **0x9A00**, one
-`HidNpadSharedMemoryEntry` every **0x5000**, `full_key_lifo` at **+0x28** and
-`handheld_lifo` at **+0x378** inside `HidNpadInternalState`, `device_type` at
-**+0x4188**; each LIFO is a 0x20-byte header (unused/buffer_count/tail/count)
-then 0x30-byte entries of `{sampling_number, HidNpadCommonState}`. A single
-entry at index 0 with `tail = 0`, `count = 1` and `HidNpadAttribute_IsConnected`
-is all `hidGetNpadStates*` needs.
-
-The pad is published in **two slots**: player 1 as a Pro Controller and slot 8
-as the handheld controller, because homebrew polls whichever it was built to
-expect and `padUpdate` merges them. Slot 8 is `HidNpadIdType_Handheld`.
-
-The button bits are Horizon's order (A=1<<0 … StickR=1<<5, L=1<<6, ZL=1<<8,
-Plus=1<<10, d-pad from 1<<12), not the old `KEY_*` order, and the
-`HidNpadButton_StickL*`/`StickR*` pseudo-buttons are derived from the analog
-values — `HidNpadButton_AnyUp` and friends are what menus navigate with. Stick Y
-is positive **up**, the opposite of the browser Gamepad API.
+Published in **two slots** — player 1 as a Pro Controller and slot 8 as
+handheld — because software polls whichever it expects and `padUpdate` merges
+them. Buttons are Horizon's order (A=1<<0 … StickR=1<<5, L=1<<6, ZL=1<<8,
+Plus=1<<10, d-pad from 1<<12), the `StickL*`/`StickR*` pseudo-buttons are
+derived from the analog values, and **stick Y is positive up** — the opposite
+of the Gamepad API.
 
 **The run slice is the input sampling period.** The worker is single threaded,
-so a `set_input` posted mid-slice sits in its queue until `switch_run` returns —
-at ~23M steps/s the old 5,000,000-step slice was a 240ms block before the guest
-could see anything. Slice size costs the interpreter nothing (`Cpu::run` is a
-bare loop; throughput is flat from 100k to 5M steps), only the frontend's
-postMessage round trips, which is why `RUN_SLICE` is 1,000,000 and the
-debug-panel refreshes run on their own `HOUSEKEEPING_EVERY` cadence.
+so a `set_input` posted mid-slice waits for `switch_run` to return. Slice size
+costs the interpreter nothing, only postMessage round trips.
 
 The worker latches a press until the **frame counter has advanced twice**, not
-for a fixed number of slices. The guest polls hid once per iteration of its own
-loop, and one of those spans many slices (hbmenu: ~25M instructions, five
-slices), so holding a tap for one slice dropped most taps outright — and the
-poll sits *inside* the loop, so only a complete present-to-present interval is
-guaranteed to contain one. Only bits the guest may not have seen are latched: a
-key the host still reports as down is published from `heldButtons` alone, so
-releasing it lands on the next slice instead of a slice later (that extra slice
-of stickiness made one d-pad tap step two menu entries). `MAX_LATCH_SLICES` is
-the escape hatch for a program that has stopped presenting.
+for a fixed number of slices: the guest polls hid once per iteration of a loop
+that spans many slices, and the poll sits *inside* that loop, so only a
+complete present-to-present interval is guaranteed to contain one. Only bits
+the guest may not have seen are latched — a still-held key publishes from
+`heldButtons` alone, so a release lands on the next slice.
+`MAX_LATCH_SLICES` (64) covers a program that has stopped presenting.
 
-## Touchscreen (`Cpu::set_touch_state`)
+**Touch.** `HidSharedMemory.touch_screen` is at **0x400**; a `HidTouchState` is
+**0x28** bytes with `finger_id` at +0x0C, `x` at +0x10, `y` at +0x14.
 
-`HidSharedMemory.touch_screen` is at **0x400**, straight after the debug pad's
-0x400, and holds a `HidTouchScreenLifo`: the same 0x20-byte header as the npad
-LIFOs, then storage entries of `{u64 sampling_number, HidTouchScreenState}`.
-That state is `{u64 sampling_number, s32 count, u32 reserved, HidTouchState
-touches[16]}`, and a `HidTouchState` is **0x28** bytes — `delta_time`,
-`attributes`, `finger_id` at **+0x0C**, `x` at **+0x10**, `y` at **+0x14**, the
-two diameters, `rotation_angle`. One entry at index 0 with `tail = 0`,
-`count = 1`, exactly as for the pad.
+- hid reports touches in the console's own **1280x720 digitizer space**, not
+  the guest's presented resolution, and `#screen` is `object-fit: contain` — so
+  a tap must be mapped through the **contained rect**, or the letterbox bars
+  offset every one.
+- **Touch is handheld-only**; docked reports zero contacts whatever the page
+  sends.
+- **A lift is a published state with `count = 0`, not silence.** Vacated slots
+  are zeroed so a reader that scans the array finds no ghost contact.
+- Taps ride the same latch, and `finger_id` is held for the life of the pointer
+  so a title can follow a drag.
 
-- **hid reports touches in the console's own 1280x720 digitizer space**
-  (`TOUCH_SCREEN_WIDTH`/`HEIGHT`), *not* in whatever resolution the guest is
-  presenting at, so `main/input.ts` scales the canvas onto that. `#screen` is
-  `object-fit: contain`, so a tap must be mapped through the **contained rect**
-  — going by the element's bounding box offsets every tap by the letterbox bars.
-- Touch is handheld-only on real hardware, and `am`'s `GetOperationMode` already
-  answers `AppletOperationMode_Handheld`, so there is no docked case to
-  suppress. `ActivateTouchScreen` (`hid:server` cmd 11) was already a no-op
-  setter.
-- **A lift is a published state with `count = 0`, not silence.** Nothing is
-  buffered, so the frontend keeps sending while a finger is down — which is also
-  what makes a touch that began before the guest mapped hid's shared memory show
-  up as soon as it has. Vacated slots are zeroed so a reader that scans the
-  array instead of trusting `count` finds no ghost contact.
-- Taps ride the same latch as button presses, for the same reason, and
-  `finger_id` is a slot claimed for the life of the pointer so a title can
-  follow a drag.
+## Shared system font (`cpu/ipc.rs`, `web/font.ttf`)
 
-## The shared system font (`cpu/ipc.rs`, `web/font.ttf`)
+Software ships no fonts: it asks `pl:u` by type, gets an offset and size, and
+reads out of pl's shared memory (mapping the region, recognised by
+`PL_SHMEM_SIZE`, is what fills it).
 
-Homebrew does not ship fonts: it asks `pl:u` for the console's shared fonts and
-renders them with its own FreeType (`plGetSharedFont` → `FT_New_Memory_Face`).
-`Cpu::set_shared_font` takes a TrueType/OpenType file, `stub_pl` reports it as
-every shared font type at offset 0, and mapping pl's shared memory (recognised
-by its size, `PL_SHMEM_SIZE`) fills the region with it. Reporting an empty font
-set — which is what this did before — means **no text renders at all**.
+`Cpu::build_shared_fonts`: **the real fonts come from firmware** — a BFTTF in
+each system data archive's RomFS, decoded by `decode_bfttf`. With no firmware,
+`Cpu::set_shared_font`'s host font stands in for **every** type. Reporting an
+empty set means no text renders at all, and registering one face as only the
+standard type is nearly as bad — the Home Menu asks for the whole set and looks
+each character up in each face in turn.
 
-`tools/make_font.py` builds the shipped subset. It strips the TrueType hinting
-programs for two reasons: hinted glyphs come out collapsed horizontally under
-the interpreter (see PROGRESS.md — a real bug, not a font problem), and running
-the hinting bytecode costs about **8x** more emulated instructions per frame
-(hbmenu's first frame: 46M steps without, 350M with). It also points Nintendo's
-private-use button codepoints (0xE0E0…, 0xE0A0…) at the matching letters so
-on-screen button hints read as "A Launch" instead of arbitrary glyphs.
+`GetSharedFontInOrderOfPriority` (5, and 6 system-side) must fill its three
+output buffers *and* its count, or a caller reads "loaded, zero fonts" and
+retries forever.
 
-## Thread stacks live in the stack region (`cpu/svc.rs`)
+`tools/make_font.py` builds the shipped subset. It strips TrueType hinting
+because hinted glyphs collapse horizontally under the interpreter (a real bug —
+see PROGRESS.md) and the bytecode costs about **8x** more instructions per
+frame. It also points Nintendo's private-use button codepoints (0xE0E0…,
+0xE0A0…) at matching letters.
 
-`threadCreate` allocates a stack on the heap, asks `virtmemFindStack` for a free
-range in the region `svcGetInfo` reports, and `svcMapMemory`s the stack there —
-from then on it uses only that mirror. Two things therefore have to be true:
+## Storage
 
-- The reported stack region (`GUEST_STACK_REGION_ADDR`) must have room. It used
-  to be the 1 MiB the *main* stack already occupied, so every lookup failed,
-  `virtmemFindStack` returned NULL, and each thread's mirror was address 0.
-- `svcMapMemory` must really back the destination. While it was a no-op success,
-  the next lookup saw the range as still free and handed out the same address,
-  so **two threads shared one stack** and silently overwrote each other's
-  frames; the crash only surfaced when input woke the parked thread and it
-  returned through a clobbered link register.
+- **SD card** (`vfs.rs`) — a real path-addressed tree, so `GetEntryType`,
+  `OpenDirectory`, `fsDirRead`, `OpenFile` and `Read` agree with each other and
+  a missing path is `FsError_PathNotFound`. A fixed listing made menus recurse
+  forever. The running NRO is published at `nro::HOMEBREW_NRO_PATH` and
+  advertised as `argv[0]`, which is how `romfsMountSelf` works.
+- **Saves** — the same filesystem one level in, created empty on open.
+- **NAND** — a browser will not hand a page a file it was not asked for, so an
+  archive registered by `switch_add_archive` (a `File` reference) dies on
+  reload. Bytes can be kept: `switch_nand_add_archive` stores them,
+  `switch_nand_identify` reads just an NCA header out of a `File` the host
+  still holds, and `switch_nand_launch` boots a Program NCA from stored bytes —
+  the Home Menu and Mii editor ship as bare NCAs with no NSP to open them from.
 
-Page storage is not shareable, so the alias is a copy (`Memory::copy_range`),
-copied back by `svcUnmapMemory`, which then frees the pages. The guest only ever
-touches one side of such an alias, so it cannot tell the difference.
+All three persist in IndexedDB from the page side (`main/db.ts`, `sdcard.ts`,
+`saves.ts`, `nand.ts`); the core keeps them in memory and reports what changed.
 
-## Performance: measure the wasm build, not just the host
+## Performance
 
-Three tools, and they do not agree — measure the one you care about:
+Four tools, and they disagree — measure the one you care about:
 
-- `cargo run --release -p switch-core --example bench` — per-instruction-class
-  throughput on the host. `b .` is the floor (one instruction, first check in the
-  decoder), so the gap between it and a class is that class's decode+execute cost.
-- `cargo run --release -p switch-core --example hotspots -- <nro>` — every
-  instruction of one steady-state frame, bucketed by guest address and by encoding
-  byte. This is how you find out that 72% of an hbmenu frame is hbmenu's own
-  software gradient fill and only ~10% is the emulator's GPU work.
-- `node tools/wasm_bench.mjs <nro>` — the build the browser runs, reporting the
-  steady-frame cost in fps. `node --cpu-prof` on it produces a profile whose
-  samples name the wasm functions; it is the only profiler available for that
-  build.
+- `--example bench` — per-instruction-class throughput on the host. `b .` is
+  the floor, so the gap to a class is that class's decode+execute cost.
+- `--example hotspots -- <nro>` — one steady frame bucketed by guest address
+  and encoding byte. This is how you learn 72% of an hbmenu frame is hbmenu's
+  own gradient fill and ~10% is the emulator's GPU work.
+- `--example jit_bench -- <nro>` — both engines, with every state difference.
+- `node tools/wasm_bench.mjs <nro>` — the build the browser runs, in fps.
+  `node --cpu-prof` on it names wasm functions; it is the only profiler for
+  that build.
 
 What the numbers taught us:
 
-- **Dispatch order matters on the host, inlining matters in wasm.** Routing by
-  the A64 top-level group (bits 28:25) before running a group's decoder was worth
-  ~25% natively and *nothing* in wasm. Splitting `Memory`'s accessors into an
-  `#[inline(always)]` in-page fast path plus `#[cold]` page-straddling and
-  unmapped fallbacks was worth ~15% in wasm — V8 had been emitting `read_u32` as a
-  real call on the path of every instruction fetch.
-- The interpreter's floor is ~9ns per instruction natively and ~20ns in wasm, so a
-  frame of ~30M guest instructions cannot go below about a second in the browser
-  no matter how the decoder is arranged. Getting past that needs a decoded-block
-  cache (see PROGRESS.md), not more guard reordering.
-- Anything on the per-instruction path is worth checking for accidental cost: the
-  GPU's `read_pixel`/`write_pixel` used to translate a GPU address **per byte**,
-  which is four `BTreeMap` searches per pixel and millions per blit.
+- **Dispatch order matters on the host, inlining matters in wasm.** Top-level
+  group routing was worth ~25% natively and *nothing* in wasm; splitting
+  `Memory`'s accessors into an `#[inline(always)]` fast path plus `#[cold]`
+  fallbacks was worth ~15% in wasm.
+- The interpreter's floor is ~9ns/instruction natively and ~20ns in wasm.
+  Block translation is what got past it; more guard reordering would not have.
+- **A fragment shader runs once per covered pixel**, and a full-screen pass is
+  921,600 of them — so a small `Vec`, a `HashMap` for a sparse thing, or a
+  rescan to answer a question costs whole seconds a frame. Fixing three of
+  those was 2.6 s/frame → 0.67 s. Measure with `examples/screenshot` at two
+  frame indices; the frames must stay byte-identical.
+- Anything on the per-instruction path deserves the same scrutiny: the GPU's
+  `read_pixel`/`write_pixel` used to translate a GPU address **per byte**.
 
-## A64 traps found the hard way
+## A64 decode traps
+
+Cross-check any new decode against `llvm-mc -triple=aarch64 -disassemble` and
+`tools/difftest.py`.
 
 - **Register 31 in ADD/SUB**: SP in the immediate and extended-register forms,
-  XZR in the shifted-register form. `neg x1, x0` is `sub x1, xzr, x0`; reading
-  SP there silently corrupted every `aligned_alloc`.
-- **SIMD&FP load/store mode 0b00** is not just the unscaled STUR/LDUR form:
-  bits[11:10] select unscaled / post-index / pre-index. Missing the write-back
-  left `str q0, [x2], #16` looping forever.
-- `Cpu::backtrace` walks the guest's X29 frame chain (devkitA64 keeps frame
-  pointers), which is the fastest way to find which libnx function issued an
-  IPC request.
+  XZR in the shifted-register form. `neg x1, x0` is `sub x1, xzr, x0`.
+- **A write to a W register zeroes bits 63:32**, and a 32-bit operand must be
+  sign-extended from *bit 31* before an arithmetic shift or signed divide —
+  masking to 32 bits makes `asr w, w, w` and `sdiv w, w, w` unsigned.
+- **BLR reads its target before linking.** `blr x30` is a legal
+  return-and-relink; writing x30 first branches to itself+4.
+- **A guard that includes a fixed bit kills the whole group.** The scalar-FP
+  1-source group is `opcode(6) 10000` (bits[15:10] are `opcode<0>:10000`);
+  FCSEL/FCCMP have bit21 *set*; the int↔float conversions read
+  `rmode`:`opcode` as bits[21:16], which folds in fixed bit21 and made `ucvtf
+  d0, x1` execute as FCVTMU. The 3-source group's top byte is `00011111`, so it
+  must match before the `00011110` space. Prove a new guard reaches a real
+  encoding.
+- **SIMD&FP LDR/STR**: the register-offset form is `bits[25:24]=00` — do *not*
+  detect it via bit 21, which is the top bit of `imm12` in the unsigned-offset
+  form. Mode 0b00 is not only STUR/LDUR either: bits[11:10] select unscaled /
+  post-index / pre-index.
+- **AdvSIMD structure loads/stores**: writeback is **bit 23**, and `Rm == 31`
+  means "increment by the transfer size" while any other `Rm` is a register
+  increment. Single-lane forms spread the index across `Q:S:size`, and
+  `scale == 0b11` is `LD1R`, not a doubleword lane insert.
+- **The permute trio differ**: TRN interleaves the even (or odd) elements of
+  *both* operands, ZIP interleaves one half of each, UZP packs every other
+  element of Vn low and Vm's high.
+- **BSL/BIT/BIF** differ only in the mask register: BSL selects with Vd, BIT
+  and BIF with Vm.
+- **EXT** shares bits[28:24] with the permute group, so permute must also
+  require bit29 == 0.
+- **TBL/TBX** share bits[29:21] with the copy group, so copy must let them past
+  (every copy encoding sets bit10; table lookup has bit15 == 0 and
+  bits[11:10] == 00). The table is `len+1` registers and **wraps past v31**; an
+  out-of-range index reads zero for TBL and leaves the byte alone for TBX.
+- **Vector FP** lives in two groups the integer three-same decode must not
+  swallow: three-same opcodes from `0b11000` up (bits[23:22] are `a:sz`) and
+  two-register misc, whose FP forms need `(U, size<1>, opcode)` together —
+  opcode `11101` is SCVTF when `size<1> == 0` and FRECPE when it is 1.
+- The AdvSIMD **scalar** forms are separate encodings: shift-by-immediate has
+  bit28 set, two-register-misc is `01 U 11110 …`.
+- **CTR_EL0** reports `0x8444C004`; cache-flush loops stride by `4 << DminLine`.
+
+## Gotchas
+
+- `cargo clippy` **fails** in `switch-wasm` — 28 `not_unsafe_ptr_arg_deref` on
+  the deliberate raw-pointer `extern "C"` signatures. Not gating.
+- **The crate is hand-formatted: do not run `cargo fmt`.** `--check` is not
+  clean either.
+- `json_escape` **walks characters, not bytes** — a `\uXXXX` escape names a code
+  point, so escaping a multi-byte character per byte spells a different string.
+  Above-ASCII goes out as itself; the page decodes with a UTF-8 `TextDecoder`.
+- CPU test encodings in `tests/cpu_test.rs` are hand-assembled and cross-checked
+  against QEMU's `a64.decode`.
