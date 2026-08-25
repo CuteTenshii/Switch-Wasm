@@ -455,6 +455,39 @@ impl NvDrv {
                 write_u32(data, 0x0C, slot);
                 Ok(NV_OK)
             }
+            // GetConfig { in char domain[0x41], key[0x41]; out char value[0x101] }
+            //
+            // The driver's settings lookup, and in practice its debug
+            // overrides: `nv!NVRM_GPU_NVGPU_NO_SYNCPOINTS`,
+            // `nv!NVRM_GPU_PREVENT_USE`, `nv!NVN_THROUGH_OPENGL` and some
+            // ninety more, which a retail title asks for one at a time while
+            // it starts. Switchbrew records the ioctl as "not available in
+            // production mode", and a console that boots normally is in
+            // production mode: there is no setting to find, whatever is
+            // asked for.
+            //
+            // So every key is answered with an empty value rather than with
+            // a refusal. The guest cannot tell the two apart -- Just Dance
+            // 2017 issues all 97 of its queries and reaches the same 4658
+            // submissions and 1870 draws either way -- and empty is what
+            // each of these keys means when it is absent, since they are
+            // the booleans and counts the driver parses out of the string
+            // and defaults to off. It is also the quieter of the two: a
+            // refused ioctl is reported as a gap in the model, and this is
+            // a gap no longer.
+            0x1B => {
+                if self.gpu.trace {
+                    eprintln!(
+                        "[nv] GetConfig {}!{} -> unset (production mode)",
+                        ascii_field(data, 0, 0x41),
+                        ascii_field(data, 0x41, 0x41)
+                    );
+                }
+                for byte in data.iter_mut().skip(0x82).take(0x101) {
+                    *byte = 0;
+                }
+                Ok(NV_OK)
+            }
             // EventWaitAsync { in syncpt_id, threshold, timeout, event_id }:
             // the same wait, arming a slot instead of blocking. Submissions
             // retire inside their own ioctl, so by the time anyone asks the
@@ -971,6 +1004,14 @@ fn read_u32(data: &[u8], at: usize) -> u32 {
     v
 }
 
+/// A fixed-width NUL-padded ASCII field, the way the nvhost config ioctls
+/// carry their strings.
+fn ascii_field(data: &[u8], at: usize, len: usize) -> String {
+    let bytes = data.get(at..at + len).unwrap_or(&[]);
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
 fn read_u16(data: &[u8], at: usize) -> u16 {
     let mut v = 0u16;
     for i in 0..2 {
@@ -1183,6 +1224,28 @@ mod tests {
             NV_INSUFFICIENT_MEMORY
         );
         assert_eq!(drv.zbc_depth.used(), ZBC_TABLE_SIZE);
+    }
+
+    #[test]
+    fn get_config_answers_every_key_as_unset() {
+        let mut drv = NvDrv::new();
+        let mut mem = Memory::new();
+        let (fd, _) = drv.open("/dev/nvhost-ctrl").unwrap();
+
+        // domain[0x41], key[0x41], value[0x101].
+        let mut arg = [0u8; 0x183];
+        arg[..2].copy_from_slice(b"nv");
+        arg[0x41..0x41 + 24].copy_from_slice(b"NVRM_GPU_NVGPU_NO_ZCULL\0");
+        // Whatever the caller left in the value field, an unset key is an
+        // empty string and not the caller's own leftovers read back.
+        arg[0x82..0x182].fill(b'x');
+
+        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1B, &mut arg), NV_OK);
+        assert_eq!(arg[0x82], 0, "the value comes back as an empty string");
+        assert!(arg[0x82..].iter().all(|&b| b == 0));
+        // The keys the caller asked about are left where they were.
+        assert_eq!(&arg[..2], b"nv");
+        assert_eq!(&arg[0x41..0x41 + 23], b"NVRM_GPU_NVGPU_NO_ZCULL");
     }
 
     #[test]
