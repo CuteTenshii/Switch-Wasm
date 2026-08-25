@@ -19,6 +19,12 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      # Keep this version in step with the wasm-bindgen crate in Cargo.lock.
+      - name: Install wasm-bindgen
+        run: |
+          curl -sSfL https://github.com/wasm-bindgen/wasm-bindgen/releases/download/0.2.127/wasm-bindgen-0.2.127-x86_64-unknown-linux-musl.tar.gz \
+            | tar -xz -C ~/.cargo/bin --strip-components=1 --wildcards '*/wasm-bindgen'
+
       - uses: https://github.com/oven-sh/setup-bun@v2
         with:
           bun-version: latest
