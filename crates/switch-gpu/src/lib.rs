@@ -14,40 +14,197 @@
 //! hundred crates. Keeping it out here means the core stays what it is, and
 //! the trait is the only thing the two share.
 //!
-//! # What a draw costs, and why it is built this way first
+//! # A draw never blocks
 //!
-//! A render target lives in guest memory, so a draw here reads the surface
-//! in, renders, and writes it back — per draw, which is the slowest possible
-//! arrangement and the only one that is obviously correct. Batching a whole
-//! frame into one pass is the optimisation, and it is worth nothing until the
-//! per-draw version renders the same pixels the rasterizer does.
+//! A render target lives in guest memory, so the obvious arrangement is to
+//! read the surface in, render, and write it back per draw. That is what this
+//! did first, and it was byte-identical to the rasterizer, and it cannot work
+//! in a browser: reading a texture back means waiting on a promise, and a
+//! blocking wait there is not slow but deadlocked, because the event loop
+//! that would resolve it cannot run.
+//!
+//! So a surface stays on the device once it is there, across every draw that
+//! targets it, and goes back to guest memory only at
+//! [`Renderer::flush`] — which the engine calls before `present`, the one
+//! reader that always matters. Draws encode and return. The waiting happens
+//! at the frame boundary, which in a browser is exactly where a worker is
+//! free to await.
+//!
+//! That is not only a portability change. It is the same change that turns
+//! eighty-eight round trips a frame into one.
 
-use switch_core::gpu::engine::threed::Engine3D;
+use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
-use switch_core::gpu::pipeline::Format;
+use switch_core::gpu::pipeline::{self as state, Format, Pipeline};
 use switch_core::gpu::renderer::{Renderer, Software};
-use switch_core::gpu::upload::{Target, Targets};
+use switch_core::gpu::shader::compiled::Compiled;
+use switch_core::gpu::shader::wgsl::{self, Layout, Stage, Translation};
+use switch_core::gpu::upload::{Banks, Target, Targets, Uploads};
 use switch_core::{Error, Result};
 
 /// `copyTextureToBuffer` wants each row of the destination aligned.
 const COPY_ALIGNMENT: u32 = 256;
+
+/// Where a module's textures start binding; see
+/// `switch_core::gpu::shader::wgsl`.
+const TEXTURE_BINDING: u32 = 32;
+
+/// A binding and what fills it, held until the bind group is built.
+enum Resource {
+    Buffer(u32, wgpu::Buffer),
+    Texture(u32, wgpu::Texture, wgpu::TextureViewDimension),
+    Sampler(u32, wgpu::Sampler),
+}
+
+fn topology(topology: state::Topology) -> wgpu::PrimitiveTopology {
+    match topology {
+        state::Topology::PointList => wgpu::PrimitiveTopology::PointList,
+        state::Topology::LineList => wgpu::PrimitiveTopology::LineList,
+        state::Topology::LineStrip => wgpu::PrimitiveTopology::LineStrip,
+        state::Topology::TriangleList => wgpu::PrimitiveTopology::TriangleList,
+        state::Topology::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
+    }
+}
+
+fn vertex_format(format: state::VertexFormat) -> wgpu::VertexFormat {
+    match format {
+        state::VertexFormat::Float32 => wgpu::VertexFormat::Float32,
+        state::VertexFormat::Float32x2 => wgpu::VertexFormat::Float32x2,
+        state::VertexFormat::Float32x3 => wgpu::VertexFormat::Float32x3,
+        state::VertexFormat::Float32x4 => wgpu::VertexFormat::Float32x4,
+        state::VertexFormat::Unorm8x4 => wgpu::VertexFormat::Unorm8x4,
+    }
+}
+
+fn blend_factor(factor: state::BlendFactor) -> wgpu::BlendFactor {
+    match factor {
+        state::BlendFactor::Zero => wgpu::BlendFactor::Zero,
+        state::BlendFactor::One => wgpu::BlendFactor::One,
+        state::BlendFactor::Src => wgpu::BlendFactor::Src,
+        state::BlendFactor::OneMinusSrc => wgpu::BlendFactor::OneMinusSrc,
+        state::BlendFactor::SrcAlpha => wgpu::BlendFactor::SrcAlpha,
+        state::BlendFactor::OneMinusSrcAlpha => wgpu::BlendFactor::OneMinusSrcAlpha,
+        state::BlendFactor::Dst => wgpu::BlendFactor::Dst,
+        state::BlendFactor::OneMinusDst => wgpu::BlendFactor::OneMinusDst,
+        state::BlendFactor::DstAlpha => wgpu::BlendFactor::DstAlpha,
+        state::BlendFactor::OneMinusDstAlpha => wgpu::BlendFactor::OneMinusDstAlpha,
+        state::BlendFactor::SrcAlphaSaturated => wgpu::BlendFactor::SrcAlphaSaturated,
+        state::BlendFactor::Constant => wgpu::BlendFactor::Constant,
+        state::BlendFactor::OneMinusConstant => wgpu::BlendFactor::OneMinusConstant,
+    }
+}
+
+fn blend_operation(operation: state::BlendOperation) -> wgpu::BlendOperation {
+    match operation {
+        state::BlendOperation::Add => wgpu::BlendOperation::Add,
+        state::BlendOperation::Subtract => wgpu::BlendOperation::Subtract,
+        state::BlendOperation::ReverseSubtract => wgpu::BlendOperation::ReverseSubtract,
+        state::BlendOperation::Min => wgpu::BlendOperation::Min,
+        state::BlendOperation::Max => wgpu::BlendOperation::Max,
+    }
+}
+
+fn blend(blend: state::Blend) -> wgpu::BlendState {
+    let component = |c: state::BlendComponent| wgpu::BlendComponent {
+        src_factor: blend_factor(c.src_factor),
+        dst_factor: blend_factor(c.dst_factor),
+        operation: blend_operation(c.operation),
+    };
+    wgpu::BlendState { color: component(blend.color), alpha: component(blend.alpha) }
+}
+
+/// A render target held on the device, and where in guest memory it came
+/// from.
+#[derive(Debug)]
+struct Held {
+    texture: wgpu::Texture,
+    target: Target,
+    /// Whether anything has been drawn into it since it was uploaded. A
+    /// surface nothing touched need not be written back.
+    dirty: bool,
+}
 
 /// A device, and the rasterizer to fall back to.
 #[derive(Debug)]
 pub struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// Surfaces this is holding, by the guest address they came from.
+    ///
+    /// A frame's draws all target the same surface, so this is what makes a
+    /// frame one upload and one readback instead of eighty-eight of each.
+    held: std::collections::HashMap<u64, Held>,
+    /// Surfaces the guest rebound out from under, still owing a write-back.
+    /// Kept rather than written back where it happened, so that no draw ever
+    /// waits on a device.
+    evicted: Vec<Held>,
+    /// Set by the device when it rejects something. Read on the next draw,
+    /// because asking sooner means waiting.
+    failed: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// What this cannot express runs here instead.
     software: Software,
-    /// Draws that fell back, and why the last one did.
+    /// Draws this rendered, and draws that fell back with why the last one
+    /// did — the two numbers that say how much of a frame is really running
+    /// here.
+    pub drawn: u64,
     pub fallbacks: u64,
     pub last_fallback: Option<String>,
+    /// Every distinct reason a draw fell back, in the order first seen.
+    pub reasons: Vec<String>,
+    /// Which draw of the current frame this is, counting from the clear that
+    /// starts it. Only `GPU_ONLY` reads it.
+    in_frame: u32,
+    /// `GPU_ONLY=<i>` renders only the i-th draw of each frame here and
+    /// leaves the rest to the rasterizer.
+    ///
+    /// Which is how you find the draw that renders differently. The
+    /// difference between a frame and the reference is then exactly one
+    /// draw's, and bisecting over the range costs a handful of runs rather
+    /// than reading a shader.
+    only: Option<u32>,
+}
+
+impl Drop for Gpu {
+    fn drop(&mut self) {
+        eprintln!("[gpu] {} draws rendered, {} fell back", self.drawn, self.fallbacks);
+    }
 }
 
 impl Gpu {
-    /// Open a device, or say why not. `None` is a normal answer: a machine
-    /// with no adapter runs the software rasterizer, which is what it did
-    /// before this existed.
+    /// Take a device somebody else opened.
+    ///
+    /// The browser's entry point. Opening a device there is asynchronous —
+    /// `requestAdapter` and `requestDevice` are promises — and nothing in
+    /// this crate may wait on a promise, so the waiting happens outside and
+    /// the result is handed in. [`Gpu::open`] is the native convenience that
+    /// does it by blocking, which is fine on a thread that owns itself.
+    pub fn with_device(device: wgpu::Device, queue: wgpu::Queue) -> Gpu {
+        // Where a rejection lands, since nothing in a draw ever stops to ask.
+        let failed: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = failed.clone();
+        device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
+            if let Ok(mut slot) = sink.lock() {
+                slot.get_or_insert_with(|| e.to_string());
+            }
+        }));
+        Gpu {
+            device,
+            queue,
+            held: std::collections::HashMap::new(),
+            evicted: Vec::new(),
+            failed,
+            software: Software,
+            drawn: 0,
+            fallbacks: 0,
+            last_fallback: None,
+            reasons: Vec::new(),
+            in_frame: 0,
+            only: std::env::var("GPU_ONLY").ok().and_then(|v| v.parse().ok()),
+        }
+    }
+
+    /// Open a device by blocking on it, which only a native thread may do.
     pub fn open() -> std::result::Result<Gpu, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter =
@@ -56,13 +213,7 @@ impl Gpu {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
                 .map_err(|e| format!("no device: {e}"))?;
-        Ok(Gpu {
-            device,
-            queue,
-            software: Software,
-            fallbacks: 0,
-            last_fallback: None,
-        })
+        Ok(Gpu::with_device(device, queue))
     }
 
     /// What adapter this opened.
@@ -72,14 +223,59 @@ impl Gpu {
 
     fn fall_back(&mut self, why: String) {
         self.fallbacks += 1;
+        // Each distinct reason once: a draw that falls back does it every
+        // frame, and the interesting thing is the list rather than the count.
+        if !self.reasons.contains(&why) {
+            eprintln!("[gpu] falling back: {why}");
+            self.reasons.push(why.clone());
+        }
         self.last_fallback = Some(why);
     }
 
-    /// Bring a guest surface onto the device.
+    /// The device texture for a surface, uploading it if this is the first
+    /// draw to reach it.
     ///
-    /// A draw that blends, or tests depth, reads what is already there, so
-    /// the texture starts as a copy of the surface rather than as whatever
-    /// the last draw left on the device.
+    /// A draw that blends reads what is already there. The first time that
+    /// is guest memory; afterwards it is whatever the previous draw left on
+    /// the device, which is the same thing and already in the right place.
+    fn hold(&mut self, target: &Target, ctx: &ExecCtx) -> Result<()> {
+        match self.held.get(&target.addr) {
+            // The same surface as last time. Anything about it having
+            // changed — a different format or extent at the same address —
+            // means the guest rebound it, and the old contents are not this
+            // one's.
+            Some(held) if held.target == *target => return Ok(()),
+            // A different surface at the same address: the guest rebound
+            // it. The old one still has to go back, but not here — a draw
+            // that read a texture back is a draw that blocks.
+            Some(_) => {
+                if let Some(held) = self.held.remove(&target.addr) {
+                    self.evicted.push(held);
+                }
+            }
+            None => {}
+        }
+        let texture = self.upload_target(target, ctx)?;
+        self.held.insert(target.addr, Held { texture, target: *target, dirty: false });
+        Ok(())
+    }
+
+    /// Write one held surface back into guest memory and stop holding it.
+    fn flush_one(&mut self, addr: u64, ctx: &mut ExecCtx) -> Result<()> {
+        let Some(held) = self.held.remove(&addr) else { return Ok(()) };
+        self.write_back(&held, ctx)
+    }
+
+    fn write_back(&self, held: &Held, ctx: &mut ExecCtx) -> Result<()> {
+        // A surface nothing drew into is already what guest memory says.
+        if !held.dirty {
+            return Ok(());
+        }
+        let rows = self.read_back(&held.target, &held.texture)?;
+        held.target.write(ctx, &rows)
+    }
+
+    /// Bring a guest surface onto the device.
     fn upload_target(&self, target: &Target, ctx: &ExecCtx) -> Result<wgpu::Texture> {
         let format = texture_format(target.format)?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
@@ -122,17 +318,16 @@ impl Gpu {
         Ok(texture)
     }
 
-    /// Take a surface back off the device and into guest memory.
+    /// Take a surface off the device.
     ///
     /// `copyTextureToBuffer` wants rows aligned to 256 bytes, which a
     /// surface's own rows need not be, so the padding is added on the way
     /// out and dropped on the way in.
-    fn download_target(
-        &self,
-        target: &Target,
-        texture: &wgpu::Texture,
-        ctx: &mut ExecCtx,
-    ) -> Result<()> {
+    ///
+    /// This is the one place that waits, and the reason [`Renderer::flush`]
+    /// exists to be the only caller: on a browser the wait is a deadlock
+    /// anywhere the event loop is not free to run.
+    fn read_back(&self, target: &Target, texture: &wgpu::Texture) -> Result<Vec<u8>> {
         let padded = target.row_bytes.div_ceil(COPY_ALIGNMENT) * COPY_ALIGNMENT;
         let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("readback"),
@@ -181,7 +376,427 @@ impl Gpu {
         }
         drop(mapped);
         staging.unmap();
-        target.write(ctx, &rows)
+        Ok(rows)
+    }
+}
+
+impl Gpu {
+    /// Build the pipeline and run the pass.
+    ///
+    /// Everything is created per draw: the modules, the pipeline, the
+    /// buffers, the bind groups. That is the slow arrangement and the one
+    /// worth having first, because a cache is only ever as right as the
+    /// thing it caches.
+    fn render(&mut self, p: &Prepared, ctx: &mut ExecCtx) -> std::result::Result<(), String> {
+        let target_format = texture_format(p.color.format).map_err(|e| format!("{e:?}"))?;
+        let vs_source = wgsl::module(&p.vs, Stage::Vertex, &p.vs_layout)
+            .map_err(|e| format!("vertex module: {e}"))?;
+        let fs_source = wgsl::module(&p.fs, Stage::Fragment, &p.fs_layout)
+            .map_err(|e| format!("fragment module: {e}"))?;
+        if let Some(e) = self.device_error() {
+            return Err(format!("the device rejected an earlier draw: {e}"));
+        }
+        let vs_module = self.module("vertex", &vs_source);
+        let fs_module = self.module("fragment", &fs_source);
+
+        // Vertex buffers, and the attributes the vertex shader actually
+        // reads: a draw binds sixteen slots and a shader reads one.
+        let mut bound: Vec<(wgpu::Buffer, Vec<wgpu::VertexAttribute>)> = Vec::new();
+        for buffer in &p.state.vertex_buffers {
+            let attributes: Vec<wgpu::VertexAttribute> = buffer
+                .attributes
+                .iter()
+                .filter(|a| p.vs_layout.attributes.contains(&(a.location as usize)))
+                .map(|a| wgpu::VertexAttribute {
+                    format: vertex_format(a.format),
+                    offset: u64::from(a.offset),
+                    shader_location: a.location,
+                })
+                .collect();
+            if attributes.is_empty() {
+                continue;
+            }
+            if buffer.step == state::StepMode::Instance {
+                // An instanced array is fetched at the absolute instance
+                // index, and only this instance's element was uploaded.
+                return Err("an instanced vertex array".into());
+            }
+            let upload = p
+                .uploads
+                .vertex
+                .iter()
+                .find(|v| v.array == buffer.index)
+                .ok_or("a bound vertex array with no bytes")?;
+            bound.push((
+                self.buffer("vertex", &upload.bytes, wgpu::BufferUsages::VERTEX),
+                attributes,
+            ));
+        }
+        // Every location the shader declares has to be fed, or the pipeline
+        // will not build.
+        let fed: Vec<usize> = bound
+            .iter()
+            .flat_map(|(_, a)| a.iter().map(|a| a.shader_location as usize))
+            .collect();
+        if let Some(missing) = p.vs_layout.attributes.iter().find(|l| !fed.contains(l)) {
+            return Err(format!("attribute {missing} is bound to nothing"));
+        }
+        let layouts: Vec<Option<wgpu::VertexBufferLayout>> = bound
+            .iter()
+            .zip(&p.state.vertex_buffers)
+            .map(|((_, attributes), buffer)| {
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: u64::from(buffer.stride),
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes,
+                })
+            })
+            .collect();
+
+        let (vs_group_layout, vs_group) = self.bind_group(p, ShaderStage::VertexB, 0)?;
+        let (fs_group_layout, fs_group) = self.bind_group(p, ShaderStage::Fragment, 1)?;
+        let pipeline_layout =
+            self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("draw"),
+                bind_group_layouts: &[Some(&vs_group_layout), Some(&fs_group_layout)],
+                immediate_size: 0,
+            });
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("draw"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &vs_module,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &layouts,
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: topology(p.state.topology),
+                strip_index_format: None,
+                front_face: match p.state.front_face {
+                    state::FrontFace::Ccw => wgpu::FrontFace::Ccw,
+                    state::FrontFace::Cw => wgpu::FrontFace::Cw,
+                },
+                cull_mode: match p.state.cull {
+                    state::Cull::None => None,
+                    state::Cull::Front => Some(wgpu::Face::Front),
+                    state::Cull::Back => Some(wgpu::Face::Back),
+                },
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &fs_module,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: p.state.target.and_then(|t| t.blend).map(blend),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // Held across the frame: the first draw brings the surface onto the
+        // device and every later one finds it already there.
+        self.hold(&p.color, ctx).map_err(|e| format!("{e:?}"))?;
+        let held = self.held.get_mut(&p.color.addr).ok_or("the surface was not held")?;
+        held.dirty = true;
+        let view = held.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let index = p.uploads.index.as_ref().map(|index| {
+            (
+                self.buffer("index", &index.bytes, wgpu::BufferUsages::INDEX),
+                match index.format {
+                    switch_core::gpu::upload::IndexFormat::Uint16 => wgpu::IndexFormat::Uint16,
+                    switch_core::gpu::upload::IndexFormat::Uint32 => wgpu::IndexFormat::Uint32,
+                },
+                index.lowest,
+            )
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("draw") });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("draw"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Loaded, never cleared: a clear is its own method,
+                        // and this pass is one draw in the middle of a frame.
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &vs_group, &[]);
+            pass.set_bind_group(1, &fs_group, &[]);
+            for (slot, (buffer, _)) in bound.iter().enumerate() {
+                pass.set_vertex_buffer(slot as u32, buffer.slice(..));
+            }
+            let viewport = &p.state.viewport;
+            pass.set_viewport(
+                viewport.x,
+                viewport.y,
+                viewport.width,
+                viewport.height,
+                viewport.min_depth.clamp(0.0, 1.0),
+                viewport.max_depth.clamp(0.0, 1.0),
+            );
+            let scissor = p.state.scissor;
+            pass.set_scissor_rect(
+                scissor.x0,
+                scissor.y0,
+                scissor.x1.saturating_sub(scissor.x0),
+                scissor.y1.saturating_sub(scissor.y0),
+            );
+            if let Some(constant) = p.state.target.and_then(|t| t.blend) {
+                let _ = constant;
+                let [r, g, b, a] = p.state.blend_constant;
+                pass.set_blend_constant(wgpu::Color {
+                    r: f64::from(r),
+                    g: f64::from(g),
+                    b: f64::from(b),
+                    a: f64::from(a),
+                });
+            }
+            // One instance, numbered so that `@builtin(instance_index)` is
+            // the `gl_InstanceID` the rasterizer would have used.
+            let instances = p.instance..p.instance + 1;
+            match &index {
+                Some((buffer, format, lowest)) => {
+                    pass.set_index_buffer(buffer.slice(..), *format);
+                    // The vertex buffer starts at the draw's lowest index, so
+                    // every index in it is that much too high.
+                    pass.draw_indexed(0..p.count, -(*lowest as i32), instances);
+                }
+                None => pass.draw(0..p.count, instances),
+            }
+        }
+        self.queue.submit([encoder.finish()]);
+        Ok(())
+    }
+
+    /// One stage's bindings: its constant banks, and its textures with
+    /// their samplers.
+    fn bind_group(
+        &self,
+        p: &Prepared,
+        stage: ShaderStage,
+        group: u32,
+    ) -> std::result::Result<(wgpu::BindGroupLayout, wgpu::BindGroup), String> {
+        // The dimensionality is the layout's, because it is what the module
+        // declared the binding as.
+        let declared = if stage == ShaderStage::VertexB { &p.vs_layout } else { &p.fs_layout };
+        let mut entries = Vec::new();
+        let mut resources: Vec<Resource> = Vec::new();
+
+        for upload in p.uploads.constants.iter().filter(|c| c.stage == stage) {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: upload.bank,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            });
+            resources.push(Resource::Buffer(
+                upload.bank,
+                self.buffer("constants", &upload.bytes, wgpu::BufferUsages::STORAGE),
+            ));
+        }
+
+        for (index, upload) in p.uploads.textures.iter().filter(|t| t.stage == stage).enumerate() {
+            let dim = declared
+                .textures
+                .iter()
+                .find(|b| b.immediate == upload.immediate)
+                .map(|b| b.dim)
+                .ok_or("a texture the module never declared")?;
+            let view_dimension = match dim {
+                switch_core::gpu::shader::isa::TexDim::T2dArray => {
+                    wgpu::TextureViewDimension::D2Array
+                }
+                _ => wgpu::TextureViewDimension::D2,
+            };
+            let binding = TEXTURE_BINDING + 2 * index as u32;
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension,
+                    multisampled: false,
+                },
+                count: None,
+            });
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: binding + 1,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+            resources.push(Resource::Texture(binding, self.texture(upload)?, view_dimension));
+            resources.push(Resource::Sampler(binding + 1, self.sampler(upload)));
+        }
+
+        let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("stage"),
+            entries: &entries,
+        });
+        // The views have to outlive the descriptor that borrows them.
+        let views: Vec<Option<wgpu::TextureView>> = resources
+            .iter()
+            .map(|r| match r {
+                Resource::Texture(_, texture, dimension) => {
+                    Some(texture.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(*dimension),
+                        ..Default::default()
+                    }))
+                }
+                _ => None,
+            })
+            .collect();
+        let bindings: Vec<wgpu::BindGroupEntry> = resources
+            .iter()
+            .zip(&views)
+            .map(|(resource, view)| match resource {
+                Resource::Buffer(binding, buffer) => wgpu::BindGroupEntry {
+                    binding: *binding,
+                    resource: buffer.as_entire_binding(),
+                },
+                Resource::Texture(binding, _, _) => wgpu::BindGroupEntry {
+                    binding: *binding,
+                    resource: wgpu::BindingResource::TextureView(view.as_ref().expect("a view")),
+                },
+                Resource::Sampler(binding, sampler) => wgpu::BindGroupEntry {
+                    binding: *binding,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            })
+            .collect();
+        let group_name = format!("group {group}");
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&group_name),
+            layout: &layout,
+            entries: &bindings,
+        });
+        Ok((layout, bind_group))
+    }
+
+    fn texture(
+        &self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+    ) -> std::result::Result<wgpu::Texture, String> {
+        let format = texture_format(upload.format).map_err(|e| format!("{e:?}"))?;
+        let size = wgpu::Extent3d {
+            width: upload.width.max(1),
+            height: upload.height.max(1),
+            depth_or_array_layers: upload.layers.max(1),
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("texture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &upload.bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(upload.row_bytes),
+                rows_per_image: Some(upload.rows),
+            },
+            size,
+        );
+        Ok(texture)
+    }
+
+    fn sampler(&self, upload: &switch_core::gpu::upload::TextureUpload) -> wgpu::Sampler {
+        use switch_core::gpu::texture::Wrap;
+        let wrap = |w: Wrap| match w {
+            Wrap::Repeat => wgpu::AddressMode::Repeat,
+            Wrap::Mirror => wgpu::AddressMode::MirrorRepeat,
+            Wrap::ClampToEdge => wgpu::AddressMode::ClampToEdge,
+            Wrap::ClampToBorder => wgpu::AddressMode::ClampToBorder,
+        };
+        let filter = |linear: bool| {
+            if linear {
+                wgpu::FilterMode::Linear
+            } else {
+                wgpu::FilterMode::Nearest
+            }
+        };
+        self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sampler"),
+            address_mode_u: wrap(upload.sampler.wrap_u),
+            address_mode_v: wrap(upload.sampler.wrap_v),
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: filter(upload.sampler.mag_linear),
+            min_filter: filter(upload.sampler.min_linear),
+            ..Default::default()
+        })
+    }
+
+    /// A shader module, without asking the device whether it liked it.
+    ///
+    /// Asking means an error scope, and popping one means waiting. What the
+    /// device rejects arrives through its uncaptured-error handler instead
+    /// and is read at the start of the next draw — a frame late, which is
+    /// what "do not block" costs and is cheap: the WGSL has already been
+    /// through `naga` before it gets here.
+    fn module(&self, what: &str, source: &str) -> wgpu::ShaderModule {
+        self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(what),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        })
+    }
+
+    /// Whatever the device rejected since this was last asked.
+    fn device_error(&self) -> Option<String> {
+        self.failed.lock().ok().and_then(|mut e| e.take())
+    }
+
+    fn buffer(&self, what: &str, bytes: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+        // Padded to four bytes, which every buffer binding wants and a
+        // twelve-byte index buffer is not.
+        let mut padded = bytes.to_vec();
+        while !padded.len().is_multiple_of(4) || padded.is_empty() {
+            padded.push(0);
+        }
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(what),
+            size: padded.len() as u64,
+            usage: usage | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&buffer, 0, &padded);
+        buffer
     }
 }
 
@@ -221,21 +836,152 @@ fn texture_format(format: Format) -> Result<wgpu::TextureFormat> {
     })
 }
 
-impl Renderer for Gpu {
-    fn draw(&mut self, engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
-        // Not drawing yet. What this proves is the plumbing either side of a
-        // draw: a surface that survives a trip onto the device and back is
-        // one a render pass can be put in the middle of, and a surface that
-        // does not is a bug that would otherwise look like a shader bug.
-        match Targets::of(engine) {
-            Ok(targets) => {
-                if let Some(target) = targets.color {
-                    let texture = self.upload_target(&target, &*ctx)?;
-                    self.download_target(&target, &texture, ctx)?;
+/// One draw, resolved into everything a device needs.
+struct Prepared {
+    state: Pipeline,
+    color: Target,
+    vs: Translation,
+    fs: Translation,
+    vs_layout: Layout,
+    fs_layout: Layout,
+    uploads: Uploads,
+    /// Vertices for a sequential draw, indices for an indexed one.
+    count: u32,
+    /// `gl_InstanceID`, which WebGPU reproduces as the first instance of a
+    /// one-instance draw.
+    instance: u32,
+}
+
+impl Gpu {
+    /// Read a draw out of the engine, or say what stops it running here.
+    ///
+    /// Everything this reaches for is `switch-core`'s: the translation, the
+    /// pipeline state and the uploads all already exist and are already
+    /// tested against the rasterizer. What is left is arranging them.
+    fn prepare(&self, engine: &Engine3D, ctx: &ExecCtx) -> std::result::Result<Prepared, String> {
+        let state = Pipeline::of(engine).map_err(|e| e.to_string())?;
+        let color = Targets::of(engine)
+            .map_err(|e| format!("{e:?}"))?
+            .color
+            .ok_or("a depth-only pass")?;
+
+        // Unfolded, so a module depends only on the shader binary and not on
+        // what happened to be in a constant buffer when it was translated.
+        let vs = self.translate(engine, ctx, ShaderStage::VertexB)?;
+        let fs = self.translate(engine, ctx, ShaderStage::Fragment)?;
+
+        let mut vs_layout = Layout::of(&vs, Stage::Vertex);
+        let mut fs_layout = Layout::of(&fs, Stage::Fragment);
+        // The two stages have to name the same varyings: WebGPU will not
+        // link a fragment input nothing produces. The union is what agrees
+        // with the rasterizer, where a varying the vertex shader never wrote
+        // reads as zero rather than as absent.
+        let mut varyings = vs_layout.varyings.clone();
+        varyings.extend(fs_layout.varyings.iter().copied());
+        varyings.sort_unstable();
+        varyings.dedup();
+        vs_layout.varyings = varyings.clone();
+        fs_layout.varyings = varyings;
+        // Neither correction is anything the program says. Negated, because
+        // WebGPU mirrors y on its own: the two agree exactly when the
+        // guest's transform mirrors too, and the shader has to do it when
+        // the guest's does not. See `Layout::flip_y`.
+        vs_layout.flip_y = !state.viewport.flip_y;
+        vs_layout.depth_minus_one_to_one = state.viewport.depth_minus_one_to_one();
+        // One bind group per stage; see `Layout::group`.
+        vs_layout.group = 0;
+        fs_layout.group = 1;
+
+        let mut immediates: Vec<(ShaderStage, u16)> = Vec::new();
+        immediates.extend(vs.textures.iter().map(|&(imm, _)| (ShaderStage::VertexB, imm)));
+        immediates.extend(fs.textures.iter().map(|&(imm, _)| (ShaderStage::Fragment, imm)));
+        let mut banks: Vec<(ShaderStage, u32)> = Vec::new();
+        banks.extend(vs.const_banks.iter().map(|&b| (ShaderStage::VertexB, u32::from(b))));
+        banks.extend(fs.const_banks.iter().map(|&b| (ShaderStage::Fragment, u32::from(b))));
+        let uploads = Uploads::of(engine, &state, ctx, Banks::Read(&banks), &immediates)
+            .map_err(|e| format!("{e:?}"))?;
+
+        // The swizzle is in the descriptor, which is guest memory the draw
+        // points at, so the translation cannot know it and the layout has to
+        // be told. WebGPU has no per-texture component swizzle.
+        for (layout, stage) in
+            [(&mut vs_layout, ShaderStage::VertexB), (&mut fs_layout, ShaderStage::Fragment)]
+        {
+            for binding in &mut layout.textures {
+                if let Some(upload) = uploads
+                    .textures
+                    .iter()
+                    .find(|t| t.stage == stage && t.immediate == binding.immediate)
+                {
+                    binding.swizzle = upload.swizzle;
                 }
             }
-            Err(e) => self.fall_back(format!("{e:?}")),
         }
+
+        if std::env::var("TRACE_GPU_TEX").is_ok() {
+            for t in &uploads.textures {
+                eprintln!(
+                    "[gpu-tex] imm={} {:?} {}x{} swizzle={:?} sampler={:?}",
+                    t.immediate, t.format, t.width, t.height, t.swizzle, t.sampler
+                );
+            }
+        }
+        Ok(Prepared {
+            state,
+            color,
+            vs,
+            fs,
+            vs_layout,
+            fs_layout,
+            uploads,
+            count: engine.last_draw.count,
+            instance: engine.instance_id(),
+        })
+    }
+
+    fn translate(
+        &self,
+        engine: &Engine3D,
+        ctx: &ExecCtx,
+        stage: ShaderStage,
+    ) -> std::result::Result<Translation, String> {
+        let binding = engine.program(stage).ok_or_else(|| format!("no {stage:?} program"))?;
+        let program = switch_core::gpu::raster::decode_program_from_memory(
+            ctx,
+            binding.addr,
+            &|bank: u8| engine.bound_constbuf(stage, u32::from(bank)),
+        )
+        .map_err(|e| format!("{e:?}"))?;
+        wgsl::translate(&Compiled::new(&program)).map_err(|e| e.to_string())
+    }
+}
+
+impl Renderer for Gpu {
+    fn draw(&mut self, engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
+        // Anything at all going wrong here runs the draw on the rasterizer
+        // instead. That is not timidity: the rasterizer is the reference, so
+        // a frame is always either right or a frame the reference produced,
+        // and `cmp` against it measures how much of the work this actually
+        // did rather than how much it got away with.
+        let index = self.in_frame;
+        self.in_frame += 1;
+        if self.only.is_some_and(|only| only != index) {
+            self.flush(ctx)?;
+            return self.software.draw(engine, ctx);
+        }
+        match self.prepare(engine, &*ctx) {
+            Ok(prepared) => match self.render(&prepared, ctx) {
+                Ok(()) => {
+                    self.drawn += 1;
+                    return Ok(());
+                }
+                Err(why) => self.fall_back(why),
+            },
+            Err(why) => self.fall_back(why),
+        }
+        // The rasterizer reads and writes guest memory, so it has to be the
+        // truth before a draw runs there.
+        self.flush(ctx)?;
         self.software.draw(engine, ctx)
     }
 
@@ -247,6 +993,12 @@ impl Renderer for Gpu {
         layer: u32,
         channels: [bool; 4],
     ) -> Result<()> {
+        // A clear goes through the rasterizer, which writes guest memory —
+        // so anything held has to go back first, or the clear would be
+        // overwritten by a surface handed back after it.
+        self.flush(ctx)?;
+        // A frame starts at its clear.
+        self.in_frame = 0;
         self.software.clear_color(engine, ctx, target, layer, channels)
     }
 
@@ -257,7 +1009,21 @@ impl Renderer for Gpu {
         depth: bool,
         stencil: bool,
     ) -> Result<()> {
+        // A clear goes through the rasterizer, so guest memory has to be the
+        // truth again before it does.
+        self.flush(ctx)?;
         self.software.clear_depth_stencil(engine, ctx, depth, stencil)
+    }
+
+    fn flush(&mut self, ctx: &mut ExecCtx) -> Result<()> {
+        for held in std::mem::take(&mut self.evicted) {
+            self.write_back(&held, ctx)?;
+        }
+        let addresses: Vec<u64> = self.held.keys().copied().collect();
+        for addr in addresses {
+            self.flush_one(addr, ctx)?;
+        }
+        Ok(())
     }
 }
 
