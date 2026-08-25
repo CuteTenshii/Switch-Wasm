@@ -10,3 +10,29 @@ switch-core = { path = "../switch-core" }
 
 [lib]
 crate-type = ["cdylib"]
+
+[features]
+default = []
+# A GPU backend in the browser. A feature rather than a plain dependency
+# because turning it on changes what the module *is*: `wgpu` reaches the
+# WebGPU JS API through `wasm-bindgen`, so the artefact stops being a bare
+# `cdylib` the worker can hand to `WebAssembly.instantiateStreaming` and
+# becomes a wasm-bindgen module with generated glue beside it.
+#
+# Off by default so that a build which does not want that shape does not get
+# it. `make wasm` turns it on, because the site does — see the Makefile for
+# why one shape of core beats two. A machine with no WebGPU still runs: the
+# backend says it could not open a device and the rasterizer takes the frame.
+gpu = ["dep:switch-gpu", "dep:wasm-bindgen", "dep:wasm-bindgen-futures"]
+
+[dependencies.switch-gpu]
+path = "../switch-gpu"
+optional = true
+
+[dependencies.wasm-bindgen]
+version = "0.2"
+optional = true
+
+[dependencies.wasm-bindgen-futures]
+version = "0.4"
+optional = true

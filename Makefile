@@ -12,10 +12,26 @@ all: test assets
 test:
 	cargo test -p switch-core
 	cargo test -p switch-wasm
+	cargo test -p switch-gpu
 
-# Compile the wasm bindings crate.
+# Compile the wasm bindings crate, with the WebGPU backend.
+#
+# Always with it. `wgpu` reaches WebGPU through `wasm-bindgen`, so the
+# artefact is a wasm-bindgen module with generated glue beside it rather than
+# a bare one the worker hands to `WebAssembly.instantiateStreaming` — and
+# carrying two shapes of core, two loaders and two answers to every question
+# about the build costs more than the megabyte it would save. A machine
+# without WebGPU still runs: the backend reports that it could not open a
+# device and the software rasterizer takes the frame, which is what it did
+# before any of this existed.
+#
+# `wasm-bindgen` is a build-time tool and has to match the crate version in
+# Cargo.lock: `cargo install wasm-bindgen-cli --version <that>`.
 wasm:
-	cargo build --target $(TARGET) --release -p switch-wasm
+	cargo build --target $(TARGET) --release -p switch-wasm --features gpu
+	wasm-bindgen --target web \
+	  --out-dir target/$(TARGET)/release \
+	  target/$(TARGET)/release/switch_wasm.wasm
 
 # The whole site, from web/index.html down: Vite follows the page to the
 # stylesheet, the worker, the font and the core, and emits every one of them

@@ -152,7 +152,9 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
   const err = await readLastError();
   if (steps < 0) {
     setState('fault');
-    log('CPU fault: ' + err, 'err');
+    // Not necessarily the CPU's: the error names its own kind, and a
+    // renderer that refused a frame used to be reported as `CPU fault: GPU:`.
+    log('Fault: ' + err, 'err');
     // The fault trace already carries the register snapshot from the CPU.
     const t = await drainTrace();
     if (t) log(t.replace(/\n$/, ''), 'err');

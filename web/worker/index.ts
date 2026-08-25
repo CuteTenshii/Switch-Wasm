@@ -6,8 +6,8 @@
 
 import type { CallRequest, WorkerMessage } from '../shared/protocol';
 import { CMD } from './commands';
-import { hostRead } from './hostfiles';
-import wasmUrl from '@core/switch_wasm.wasm?url';
+import init from '@core/switch_wasm.js';
+import wasmUrl from '@core/switch_wasm_bg.wasm?url';
 import { state, type WasmExports } from './wasm';
 
 // The WebWorker lib types `self` as the shared WorkerGlobalScope, which has no
@@ -24,6 +24,33 @@ function reply(message: WorkerMessage, transfer?: Transferable[]): void {
 // creates one, and `set_battery` caches its reading for whichever session
 // comes next. Everything else works on the session this worker is holding.
 const SESSIONLESS = new Set(['new', 'set_battery']);
+
+/* Installing the GPU backend, once the guest has a channel to install it on.
+
+   It cannot happen at startup: the channel a title draws through is opened by
+   the title, so there is nothing to attach to until it has run. And it cannot
+   happen from inside a run slice either, because opening a device is two
+   promises and a slice has nowhere to await one. So it is tried after run
+   slices, between them, which is exactly where a worker is free to await. */
+let gpu: 'no' | 'trying' | 'done' = 'no';
+
+function tryGpu(): void {
+  if (gpu !== 'no' || state.handle < 0) return;
+  gpu = 'trying';
+  const open = (state.exports as unknown as {
+    switch_gpu_open(handle: number): Promise<string>;
+  }).switch_gpu_open;
+  open(state.handle).then((what) => {
+    // "the title has not opened a channel yet" is the ordinary answer for a
+    // while, and the ordinary response to it is to ask again next slice.
+    if (what.startsWith('rendering on')) {
+      gpu = 'done';
+      console.info('[gpu] ' + what);
+    } else {
+      gpu = 'no';
+    }
+  }).catch(() => { gpu = 'no'; });
+}
 
 ctx.onmessage = (e: MessageEvent<CallRequest>) => {
   const { id, cmd, args } = e.data;
@@ -49,6 +76,7 @@ ctx.onmessage = (e: MessageEvent<CallRequest>) => {
     } else {
       reply({ id, ok: true, result });
     }
+    if (cmd === 'run') tryGpu();
   } catch (err) {
     reply({ id, ok: false, error: String(err) });
   }
@@ -56,12 +84,13 @@ ctx.onmessage = (e: MessageEvent<CallRequest>) => {
 
 (async () => {
   try {
-    // instantiateStreaming fetches + compiles in one pass (works in workers).
-    // The one import is how the module reads the open container; see
-    // `hostRead`.
-    const { instance } = await WebAssembly.instantiateStreaming(
-      fetch(wasmUrl), { env: { host_read: hostRead } });
-    state.exports = instance.exports as unknown as WasmExports;
+    // The core is a wasm-bindgen module, because the GPU backend inside it
+    // reaches WebGPU through wasm-bindgen's glue. `init` builds the import
+    // object itself -- including `hostRead`, which it imports from
+    // `@host/files` -- so there is nothing to pass in here, and the raw
+    // `switch_*` exports are on the object it returns exactly as they were
+    // when the worker instantiated the module itself.
+    state.exports = await init({ module_or_path: wasmUrl }) as unknown as WasmExports;
     reply({ type: 'ready' });
   } catch (err) {
     reply({ type: 'ready', error: String(err) });

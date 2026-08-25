@@ -31,6 +31,9 @@ impl<T> SyncCell<T> {
     }
 }
 
+#[cfg(feature = "gpu")]
+mod gpu;
+
 use switch_core::cpu::{Cpu, TouchPoint};
 use switch_core::elf::load_elf;
 use switch_core::nca::Nca;
@@ -97,7 +100,33 @@ fn new_handle(session: Session) -> u32 {
     id
 }
 
-#[cfg(target_arch = "wasm32")]
+/// The host read, as a `wasm-bindgen` import.
+///
+/// With the `gpu` feature the module is a wasm-bindgen module, and
+/// wasm-bindgen builds the whole import object itself — there is no seam to
+/// hand it an extra `env.host_read` through. So the import moves into its
+/// world too, and the module then declares no `env` at all.
+///
+/// `@host/files` is a bare specifier the bundler resolves (see
+/// `vite.config.ts`), because the generated glue sits in cargo's target
+/// directory and a relative path from there to `web/worker/` is not a thing
+/// worth writing down twice. `ptr` is a `u32` rather than a pointer because
+/// wasm-bindgen has no pointer type; it is the same integer either way.
+#[cfg(all(target_arch = "wasm32", feature = "gpu"))]
+#[wasm_bindgen::prelude::wasm_bindgen(raw_module = "@host/files")]
+extern "C" {
+    #[wasm_bindgen(js_name = hostRead)]
+    fn host_read_js(file: u32, offset: u64, ptr: u32, len: u32) -> u32;
+}
+
+/// # Safety
+/// `ptr` must be valid for writes of `len` bytes.
+#[cfg(all(target_arch = "wasm32", feature = "gpu"))]
+unsafe fn host_read(file: u32, offset: u64, ptr: *mut u8, len: u32) -> u32 {
+    host_read_js(file, offset, ptr as u32, len)
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "gpu")))]
 #[link(wasm_import_module = "env")]
 extern "C" {
     /// Read `len` bytes at `offset` of host file `file`, into wasm memory at
@@ -2108,4 +2137,23 @@ mod tests {
 
         switch_free_session(handle);
     }
+}
+
+/// Install a GPU backend on a session's 3D channel.
+///
+/// The channel a guest draws through does not exist until the guest opens it,
+/// so this is called once the title is running rather than at startup.
+#[cfg(feature = "gpu")]
+fn install_gpu(handle: u32, gpu: switch_gpu::Gpu) -> Result<(), String> {
+    let session = session(handle);
+    let channel = session
+        .cpu
+        .nv
+        .gpu
+        .channels
+        .values_mut()
+        .next()
+        .ok_or("the title has not opened a channel yet")?;
+    channel.three_d.set_renderer(Box::new(gpu));
+    Ok(())
 }

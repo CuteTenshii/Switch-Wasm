@@ -49,7 +49,16 @@ export default defineConfig({
     // cargo's output, imported as an asset. The path lives here rather than in
     // the worker so that the profile and target triple are named once, beside
     // the Makefile variables that build it.
-    alias: { '@core': coreDir },
+    alias: {
+      '@core': coreDir,
+      // The `host_read` import, when the core is built with the `gpu`
+      // feature. wasm-bindgen writes the import into its generated glue,
+      // which lives in cargo's target directory — a bare specifier is what
+      // lets that glue name a file in `web/worker/` without a relative path
+      // between two directories that have no reason to know about each other.
+      '@host/files': fileURLToPath(
+        new URL('./web/worker/hostfiles.ts', import.meta.url)),
+    },
   },
   server: {
     port: 8000,
