@@ -446,14 +446,31 @@ impl Title {
     /// Optional: Meta and Control content has none, and a title without one
     /// boots fine and simply has no asset storage mounted.
     pub fn mount_romfs(&self, cpu: &mut Cpu) {
-        let Some(index) = self.nca.romfs_section_index() else {
-            return;
-        };
-        let window = program_window(&self.path, self.program.0, self.program.1);
-        match self.nca.romfs_source(window, &self.keys, index) {
-            Ok(romfs) => cpu.set_romfs_source(Box::new(romfs)),
-            Err(e) => eprintln!("romfs section {index} could not be opened: {e}"),
+        match self.romfs_source() {
+            Some(Ok(romfs)) => cpu.set_romfs_source(Box::new(romfs)),
+            Some(Err(e)) => eprintln!("this title's RomFS could not be opened: {e}"),
+            None => {}
         }
+    }
+
+    /// The same source [`Title::mount_romfs`] hands the guest, for a tool that
+    /// reads the image itself rather than running the title.
+    ///
+    /// `None` when the NCA has no RomFS section at all, which is a different
+    /// thing from one that would not open.
+    pub fn romfs_source(
+        &self,
+    ) -> Option<Result<
+        switch_core::source::Window<
+            switch_core::nca::SectionSource<
+                switch_core::source::Window<switch_core::source::FileSource>,
+            >,
+        >,
+        switch_core::Error,
+    >> {
+        let index = self.nca.romfs_section_index()?;
+        let window = program_window(&self.path, self.program.0, self.program.1);
+        Some(self.nca.romfs_source(window, &self.keys, index))
     }
 
     /// Boot the title: its address space, its program id, and its modules.
