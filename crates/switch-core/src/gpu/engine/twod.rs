@@ -122,11 +122,21 @@ impl Engine2D {
         let src_y0 = fixed(self.regs.get(SRC_Y0_INT), self.regs.get(SRC_Y0_FRAC));
         let bilinear = self.regs.field(SAMPLE_MODE, 4, 4) == FILTER_BILINEAR;
 
+        // A filter whose taps land exactly on texel centres is not a filter.
+        // `bilinear` weights its four taps by the fractional part of
+        // `(u, v) - 0.5`, so a step and an origin that leave that zero for
+        // every pixel give weights of 1, 0, 0, 0 — `c00` plus three terms
+        // multiplied by zero. Just Dance 2019 resolves its 2x2 MSAA target
+        // with `du_dx=2, dv_dy=2, src0=(0.5,0.5)`, which is exactly that, and
+        // paid four fetches and twelve lerps per pixel to copy one texel.
+        let centred = |origin: f64, step: f64| (origin - 0.5).fract() == 0.0 && step.fract() == 0.0;
+        let filtered = bilinear && !(centred(src_x0, du_dx) && centred(src_y0, dv_dy));
+
         if ctx.trace {
             eprintln!(
                 "[gpu] 2d blit src {:#x} {}x{} fmt={:#x} -> dst {:#x} ({},{}) {}x{} fmt={:#x} \
                  du_dx={du_dx} dv_dy={dv_dy} src0=({src_x0},{src_y0}) bilinear={bilinear} \
-                 layout={:?}/{:?}",
+                 filtered={filtered} layout={:?}/{:?}",
                 src.addr, src.width, src.height, src.format.raw,
                 dst.addr, dst_x0, dst_y0, dst_w, dst_h, dst.format.raw,
                 src.layout, dst.layout
@@ -139,7 +149,7 @@ impl Engine2D {
         // destination. A title that resolves its render target this way does
         // 921,600 of them a frame.
         let byte_exact =
-            !bilinear && src.format.raw == dst.format.raw && dst.format.is_byte_exact();
+            !filtered && src.format.raw == dst.format.raw && dst.format.is_byte_exact();
         let bpp = dst.format.bytes_per_pixel;
         for y in 0..dst_h {
             let v = src_y0 + dv_dy * y as f64;
@@ -151,7 +161,7 @@ impl Engine2D {
                     ctx.write_pixel(va, bpp, raw)?;
                     continue;
                 }
-                let color = if bilinear {
+                let color = if filtered {
                     src.sample_bilinear(u, v, ctx)?
                 } else {
                     src.sample_point(u, v, ctx)?

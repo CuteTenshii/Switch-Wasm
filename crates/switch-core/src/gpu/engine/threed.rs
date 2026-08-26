@@ -1265,25 +1265,63 @@ impl Engine3D {
         let (width, height) = grid.pixels(texels_x, texels_y);
         let (x0, y0, x1, y1) = self.clear_rect(width, height);
         let width_bytes = texels_x * bytes;
+        if ctx.trace {
+            eprintln!(
+                "[gpu] clear depth {addr:#x} {width}x{height}px {}x{} samples fmt={raw_format:#x} \
+                 rect=({x0},{y0})..({x1},{y1}) depth={clear_depth}/{depth} stencil={clear_stencil}/{stencil}",
+                grid.samples_x, grid.samples_y
+            );
+        }
 
-        for y in y0..y1 {
-            for x in x0..x1 {
-                for sample in 0..grid.count() {
-                    let (tx, ty) = grid.texel(x, y, sample);
-                    let va = addr + layout.offset(tx * bytes, ty, width_bytes) as u64;
-                    let mut value = ctx.read_pixel(va, bytes)?;
-                    if clear_depth {
-                        value = format.with_depth(value, depth);
-                    }
-                    if clear_stencil {
-                        if let Some(shift) = format.stencil_shift {
-                            value =
-                                (value & !(0xFFu128 << shift)) | ((stencil as u128) << shift);
-                        }
-                    }
-                    ctx.write_pixel(va, bytes, value)?;
-                }
+        // Which bits this clear owns, and what it puts in them. Both are the
+        // same for every texel, so the whole clear is one masked value —
+        // which is what lets it go run by run instead of texel by texel.
+        let mut written = 0u128;
+        let mut value = 0u128;
+        if clear_depth {
+            let mask = format.depth_mask();
+            written |= mask;
+            value |= format.encode_depth(depth) & mask;
+        }
+        if clear_stencil {
+            if let Some(shift) = format.stencil_shift {
+                written |= 0xFFu128 << shift;
+                value |= u128::from(stencil) << shift;
             }
+        }
+        if written == 0 {
+            return Ok(());
+        }
+
+        // The same GOB walk [`Engine3D::clear_color`] does, and for the same
+        // reason: a GOB is 512 contiguous bytes holding 128 texels in some
+        // permuted order, and this applies one mask and one value to all of
+        // them — an operation that does not care what the order is. Just Dance
+        // 2019 clears depth twice a frame and draws nothing, so this was the
+        // whole cost of its frame.
+        let (tx0, ty0) = (x0 * grid.samples_x, y0 * grid.samples_y);
+        let (tx1, ty1) = (x1 * grid.samples_x, y1 * grid.samples_y);
+        let gob_texels = GOB_WIDTH / bytes;
+        let mut ty = ty0;
+        while ty < ty1 {
+            let gob_row = ty - ty % GOB_HEIGHT;
+            let row_whole = gob_texels > 0 && ty == gob_row && ty + GOB_HEIGHT <= ty1;
+            let mut tx = tx0;
+            while tx < tx1 {
+                let gob_col = if gob_texels > 0 { tx - tx % gob_texels } else { tx };
+                if row_whole && tx == gob_col && tx + gob_texels <= tx1 {
+                    let (offset, _) = layout.run_at(tx * bytes, ty, width_bytes);
+                    let va = addr + offset as u64;
+                    ctx.merge_pixels(va, bytes, value, written, GOB_SIZE / bytes)?;
+                    tx += gob_texels;
+                    continue;
+                }
+                let (offset, run) = layout.run_at(tx * bytes, ty, width_bytes);
+                let count = (run / bytes).max(1).min(tx1 - tx);
+                ctx.merge_pixels(addr + offset as u64, bytes, value, written, count)?;
+                tx += count;
+            }
+            ty += if row_whole { GOB_HEIGHT } else { 1 };
         }
         Ok(())
     }
@@ -1701,6 +1739,74 @@ mod tests {
         let zf32 = depth_format_layout(0x0A).unwrap();
         assert!(!zf32.packs_stencil());
         assert_eq!(zf32.decode_depth(zf32.encode_depth(0.25)), 0.25);
+    }
+
+    /// The depth clear walks runs of texels rather than swizzling each one,
+    /// which is only allowed if it lands in the same place with the same
+    /// bits. `Z24S8` clearing depth alone is the case that can go wrong twice:
+    /// it owns 24 of each pixel's 32 bits and must leave the stencil byte it
+    /// shares with, and a GOB's 128 texels are contiguous only because the
+    /// value written to all of them is the same.
+    #[test]
+    fn a_depth_clear_writes_runs_where_a_per_texel_clear_would() {
+        const WIDTH: u32 = 32;
+        const HEIGHT: u32 = 16;
+        const BYTES: u32 = 4;
+        /// The stencil byte this texel starts with, distinct across the
+        /// surface so that preserving it is visible rather than lucky.
+        fn seeded(tx: u32, ty: u32) -> u32 {
+            0xDEAD_0000 | (tx << 8) | ((tx * 7 + ty) & 0xFF)
+        }
+
+        // A rectangle covering whole GOBs (16x8 texels at four bytes), and one
+        // cutting across them in both directions, so the run path and the
+        // per-texel edges it falls back to are both exercised.
+        for &(rx, rw, ry, rh) in &[(0u32, WIDTH, 0u32, HEIGHT), (4, 20, 3, 9)] {
+            let mut h = Harness::new(0x10000);
+            let layout = Layout::BlockLinear { block_height_gobs: 1 };
+            let width_bytes = WIDTH * BYTES;
+            for ty in 0..HEIGHT {
+                for tx in 0..WIDTH {
+                    let at = 0x3000_0000 + layout.offset(tx * BYTES, ty, width_bytes);
+                    h.mem.write_u32(at, seeded(tx, ty)).unwrap();
+                }
+            }
+
+            let mut engine = Engine3D::new();
+            setup_depth_target(&mut engine, h.base, 0x14);
+            engine.regs.set(DEPTH_TARGET_HORIZONTAL, WIDTH);
+            engine.regs.set(DEPTH_TARGET_VERTICAL, HEIGHT);
+            engine.regs.set(SCREEN_SCISSOR_HORIZONTAL, rx | (rw << 16));
+            engine.regs.set(SCREEN_SCISSOR_VERTICAL, ry | (rh << 16));
+            engine.regs.set(CLEAR_DEPTH, 0.5f32.to_bits());
+            {
+                let mut ctx = h.ctx();
+                engine.write(CLEAR_BUFFERS, 0b01, true, &mut ctx).unwrap();
+            }
+
+            let format = depth_format_layout(0x14).unwrap();
+            for ty in 0..HEIGHT {
+                for tx in 0..WIDTH {
+                    let at = 0x3000_0000 + layout.offset(tx * BYTES, ty, width_bytes);
+                    let old = seeded(tx, ty);
+                    let inside =
+                        (rx..rx + rw).contains(&tx) && (ry..ry + rh).contains(&ty);
+                    let want = if inside {
+                        format.with_depth(u128::from(old), 0.5) as u32
+                    } else {
+                        old
+                    };
+                    assert_eq!(
+                        h.mem.read_u32(at).unwrap(),
+                        want,
+                        "texel ({tx},{ty}) of rect ({rx},{ry}) {rw}x{rh}"
+                    );
+                    if inside {
+                        assert_eq!(want & 0xFF, old & 0xFF, "the stencil byte survived");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

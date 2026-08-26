@@ -661,6 +661,53 @@ impl Memory {
         Ok(())
     }
 
+    /// [`Memory::fill_le`] for a write that only owns some of each unit's
+    /// bits: every unit keeps whatever `mask` does not select.
+    ///
+    /// A depth clear against a packed format is this. `Z24S8` clearing depth
+    /// alone may not touch the stencil byte beside it, so the run cannot be
+    /// filled — but the mask and the value are the same for every unit, so it
+    /// is still one page lookup and a linear walk rather than a translation
+    /// and a swizzle per texel.
+    pub fn merge_le(
+        &mut self,
+        addr: u32,
+        unit: u32,
+        value: u128,
+        mask: u128,
+        count: u32,
+    ) -> Result<()> {
+        let span = (unit as usize) * (count as usize);
+        let off = Self::in_page_offset(addr);
+        if count == 0 {
+            return Ok(());
+        }
+        if off + span > PAGE_SIZE || !matches!(unit, 1 | 2 | 4 | 8 | 16) {
+            for i in 0..count {
+                let at = addr.wrapping_add(i * unit);
+                let old = self.read_le(at, unit)?;
+                self.write_le(at, unit, (old & !mask) | (value & mask))?;
+            }
+            return Ok(());
+        }
+        let end = addr.wrapping_add(span as u32);
+        self.check_writable(addr)?;
+        let keep = (!mask).to_le_bytes();
+        let set = (value & mask).to_le_bytes();
+        let unit = unit as usize;
+        let page = self.page_mut(Self::page_index(addr))?;
+        for slot in page[off..off + span].chunks_exact_mut(unit) {
+            for (i, byte) in slot.iter_mut().enumerate() {
+                *byte = (*byte & keep[i]) | set[i];
+            }
+        }
+        if addr < self.watch.1 && end > self.watch.0 {
+            self.watch_hit = Some(addr);
+        }
+        self.note_code_write(addr);
+        Ok(())
+    }
+
     /// Fetch the next instruction (little-endian AArch64 word).
     #[inline(always)]
     pub fn fetch(&self, pc: u32) -> Result<u32> {

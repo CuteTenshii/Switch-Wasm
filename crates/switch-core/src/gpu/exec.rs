@@ -112,6 +112,40 @@ impl ExecCtx<'_> {
         self.mem.fill_le(cpu, unit, value, count)
     }
 
+    /// [`ExecCtx::fill_pixels`] for a write that owns only the `mask` bits of
+    /// each pixel, leaving the rest as it found them.
+    ///
+    /// What a depth clear needs against a format that packs stencil beside
+    /// depth: the value is uniform across the run even though the write is
+    /// partial, so the run still costs one translation rather than two per
+    /// texel. A mask covering the whole pixel is a fill, and takes that path.
+    pub fn merge_pixels(
+        &mut self,
+        gpu_va: u64,
+        unit: u32,
+        value: u128,
+        mask: u128,
+        count: u32,
+    ) -> Result<()> {
+        let all = if unit >= 16 { u128::MAX } else { (1u128 << (unit * 8)) - 1 };
+        if mask & all == all {
+            return self.fill_pixels(gpu_va, unit, value, count);
+        }
+        let bytes = u64::from(unit) * u64::from(count);
+        let cpu = match self.vmm.translate(gpu_va) {
+            Some((cpu, left)) if left >= bytes => cpu,
+            _ => {
+                for i in 0..count {
+                    let at = gpu_va + u64::from(i) * u64::from(unit);
+                    let old = self.read_pixel(at, unit)?;
+                    self.write_pixel(at, unit, (old & !mask) | (value & mask))?;
+                }
+                return Ok(());
+            }
+        };
+        self.mem.merge_le(cpu, unit, value, mask, count)
+    }
+
     /// Where a pixel's `len` bytes live in guest memory. A pixel never spans two
     /// mappings, so one translation covers all of it.
     fn pixel_addr(&self, gpu_va: u64, len: u32) -> Result<u32> {

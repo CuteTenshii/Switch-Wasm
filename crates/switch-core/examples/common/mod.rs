@@ -18,6 +18,7 @@
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::time::Instant;
 use switch_core::cpu::Cpu;
 use switch_core::gpu::Framebuffer;
 use switch_core::keys::KeySet;
@@ -210,12 +211,78 @@ pub struct Run {
     pub halted: bool,
 }
 
+/// What each presented frame cost in wall clock, printed when `FRAME_TIMES=1`
+/// is set.
+///
+/// Timing two whole processes and subtracting them does not measure a frame
+/// here. A retail title spends most of a run booting — Just Dance 2019 presents
+/// its first frame at step 900,710,775 — and that boot swings by seconds
+/// between runs when anything else on the machine is busy, which is larger than
+/// the frames being measured. Min-of-N does not rescue it either: the minimum
+/// of the boot and the minimum of the boot-plus-frames come from different runs,
+/// so their difference is not any run's frame cost and can even go negative.
+///
+/// Sampling the frame counter *inside* one run has no such term.
+struct FrameTimes {
+    on: bool,
+    last_count: u64,
+    last_at: Instant,
+    deltas: Vec<f64>,
+}
+
+impl FrameTimes {
+    fn new(cpu: &Cpu) -> FrameTimes {
+        FrameTimes {
+            on: env::var("FRAME_TIMES").is_ok(),
+            last_count: cpu.nv.gpu.frames,
+            last_at: Instant::now(),
+            deltas: Vec::new(),
+        }
+    }
+
+    fn sample(&mut self, cpu: &Cpu) {
+        if !self.on || cpu.nv.gpu.frames == self.last_count {
+            return;
+        }
+        let now = Instant::now();
+        // A slice can carry more than one present; share its time out evenly
+        // rather than charge the whole slice to the last of them.
+        let presented = cpu.nv.gpu.frames - self.last_count;
+        let each = now.duration_since(self.last_at).as_secs_f64() / presented as f64;
+        self.deltas.extend(std::iter::repeat_n(each, presented as usize));
+        self.last_count = cpu.nv.gpu.frames;
+        self.last_at = now;
+    }
+
+    /// Report the frames after the first. The first one's "cost" is the whole
+    /// boot, which is not a frame cost and would dominate any average.
+    fn report(&self) {
+        if !self.on || self.deltas.len() < 2 {
+            return;
+        }
+        let steady = &self.deltas[1..];
+        let mut sorted = steady.to_vec();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let ms = |v: f64| v * 1000.0;
+        println!(
+            "[frames] {} after the first: mean {:.1} ms  min {:.1} ms  median {:.1} ms",
+            steady.len(),
+            ms(steady.iter().sum::<f64>() / steady.len() as f64),
+            ms(sorted[0]),
+            ms(sorted[sorted.len() / 2]),
+        );
+    }
+}
+
 /// Run the machine until `tick` says to stop, it halts, it faults, or `budget`
 /// instructions have retired.
 ///
 /// `tick` is called before each instruction under [`Pace::Instructions`] and
 /// before each slice under [`Pace::Blocks`], with the instructions retired so
 /// far. Returning [`Flow::Stop`] ends the run.
+///
+/// `FRAME_TIMES=1` reports what each presented frame cost — see [`FrameTimes`]
+/// for why that has to be measured from in here rather than around the process.
 pub fn drive(
     cpu: &mut Cpu,
     pace: Pace,
@@ -223,7 +290,9 @@ pub fn drive(
     mut tick: impl FnMut(&mut Cpu, u64) -> Flow,
 ) -> Run {
     let mut run = Run::default();
+    let mut frames = FrameTimes::new(cpu);
     while run.steps < budget && !cpu.halted {
+        frames.sample(cpu);
         if tick(cpu, run.steps) == Flow::Stop {
             break;
         }
@@ -246,6 +315,8 @@ pub fn drive(
             },
         }
     }
+    frames.sample(cpu);
+    frames.report();
     run.halted = cpu.halted;
     run
 }
