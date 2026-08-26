@@ -136,10 +136,12 @@ impl Engine2D {
             eprintln!(
                 "[gpu] 2d blit src {:#x} {}x{} fmt={:#x} -> dst {:#x} ({},{}) {}x{} fmt={:#x} \
                  du_dx={du_dx} dv_dy={dv_dy} src0=({src_x0},{src_y0}) bilinear={bilinear} \
-                 filtered={filtered} layout={:?}/{:?}",
+                 filtered={filtered} layout={:?}/{:?} cpu src {:x?} dst {:x?}",
                 src.addr, src.width, src.height, src.format.raw,
                 dst.addr, dst_x0, dst_y0, dst_w, dst_h, dst.format.raw,
-                src.layout, dst.layout
+                src.layout, dst.layout,
+                ctx.vmm.translate(src.addr).map(|(c, _)| c),
+                ctx.vmm.translate(dst.addr).map(|(c, _)| c),
             );
         }
 

@@ -227,6 +227,12 @@ impl Gpu {
             )));
         }
         let base = handle.cpu_addr.wrapping_add(buffer.offset);
+        if self.trace {
+            eprintln!(
+                "[gpu] present nvmap={} offset={:#x} -> cpu {:#x} {}x{}",
+                buffer.nvmap_id, buffer.offset, base, buffer.width, buffer.height
+            );
+        }
         let format = display_color_format(buffer.color_format)?;
         let layout = match buffer.layout {
             NV_LAYOUT_PITCH => Layout::Pitch { pitch: buffer.pitch },
