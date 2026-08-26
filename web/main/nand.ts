@@ -223,8 +223,21 @@ export function updateFirmwareState(): void {
 }
 
 $('firmware-ncas').addEventListener('change', async (e) => {
-  const files = Array.from((e.target as HTMLInputElement).files || []);
-  if (!files.length) return;
+  const input = e.target as HTMLInputElement;
+  const picked = Array.from(input.files || []);
+  input.value = '';
+  if (!picked.length) return;
+  // A dump is selected whole, so the metadata and stray files sitting beside
+  // the NCAs are turned away by name here rather than each costing a header
+  // read through the worker to find out the same thing.
+  const files = picked.filter((f) => /\.nca$/i.test(f.name));
+  if (picked.length !== files.length) {
+    log('Ignoring ' + (picked.length - files.length) + ' file(s) that are not .nca.', 'dim');
+  }
+  if (!files.length) {
+    log('Nothing in that selection is an .nca.', 'err');
+    return;
+  }
   log('Reading ' + files.length + ' firmware file(s) ...');
   let added = 0;
   let installed = 0;

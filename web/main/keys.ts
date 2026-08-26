@@ -4,6 +4,7 @@
    just text; they never leave the browser). */
 
 import { $, pickedFile } from './dom';
+import { readKeysFile } from './filetype';
 import { log } from './log';
 import { call, isReady } from './rpc';
 import { setNote } from './shell';
@@ -38,25 +39,41 @@ export function updateKeysState(): void {
   setNote('keys-badge', parts.length ? parts.length + ' loaded' : 'none', parts.length > 0);
 }
 
-$('prod-keys').addEventListener('change', async (e) => {
-  const f = pickedFile(e);
-  if (!f) return;
-  prodKeysText = await f.text();
+// Anything picked here is persisted and used to decrypt with, so a file that
+// is not keys is refused rather than stored: the alternative is every later
+// NCA failing to open with nothing pointing back at this.
+async function acceptKeys(e: Event, which: 'prod' | 'title'): Promise<void> {
+  const file = pickedFile(e);
+  (e.target as HTMLInputElement).value = '';
+  if (!file) return;
+  let text: string | null;
+  try {
+    text = await readKeysFile(file);
+  } catch (err) {
+    refuseKeys('Could not read ' + file.name + ': ' + (err as Error).message);
+    return;
+  }
+  if (text === null) {
+    refuseKeys(file.name + ' is not a keys file - expected "name = hex" lines.');
+    return;
+  }
+  if (which === 'prod') prodKeysText = text;
+  else titleKeysText = text;
   restoredKeys = false;
-  localStorage.setItem(KEYS_STORE.prod, prodKeysText);
+  localStorage.setItem(KEYS_STORE[which], text);
   await stageKeys();
-  log('prod.keys loaded - NCA header decryption enabled.', 'ok');
-});
+  log(which === 'prod'
+    ? 'prod.keys loaded - NCA header decryption enabled.'
+    : 'title.keys loaded.', 'ok');
+}
 
-$('title-keys').addEventListener('change', async (e) => {
-  const f = pickedFile(e);
-  if (!f) return;
-  titleKeysText = await f.text();
-  restoredKeys = false;
-  localStorage.setItem(KEYS_STORE.title, titleKeysText);
-  await stageKeys();
-  log('title.keys loaded.', 'ok');
-});
+function refuseKeys(why: string): void {
+  $('keys-state').textContent = why;
+  log(why, 'err');
+}
+
+$('prod-keys').addEventListener('change', (e) => acceptKeys(e, 'prod'));
+$('title-keys').addEventListener('change', (e) => acceptKeys(e, 'title'));
 
 $('btn-clear-keys').addEventListener('click', () => {
   prodKeysText = '';

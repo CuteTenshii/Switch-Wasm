@@ -5,6 +5,7 @@
 
 import type { Bytes, ControlInfo, NcaInfo, NspFile } from '../shared/protocol';
 import { $, el, pickedFile } from './dom';
+import { classify } from './filetype';
 import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
 import { clearConsole, log } from './log';
@@ -31,25 +32,24 @@ nspDrop.addEventListener('drop', (e) => {
 });
 $('nsp-file').addEventListener('change', (e) => {
   const file = pickedFile(e);
+  (e.target as HTMLInputElement).value = '';
   if (file) handleContainerFile(file);
 });
 
-async function handleContainerFile(file: File): Promise<void> {
-  if (isStandaloneNca(file)) await handleStandaloneNca(file);
-  else await handleNspFile(file);
-}
-
 // A `.nca` is one piece of content rather than a container of them, so it is
-// opened as itself; everything else here is a PFS0 to look inside.
-function isStandaloneNca(file: File): boolean {
-  return /\.nca$/i.test(file.name);
-}
-
-/** Whether a file picked on the stage should go down the container path rather
- *  than be treated as a homebrew executable. Kept in step with the panel's own
- *  accept list, since both end up opening the same thing. */
-export function isContainerFile(name: string): boolean {
-  return /\.(nsp|nsz|xci|nca)$/i.test(name);
+// opened as itself; a PFS0 is looked inside.
+async function handleContainerFile(file: File): Promise<void> {
+  const verdict = await classify(file, ['pfs0', 'nca'], 'Drop it on the screen to boot it.');
+  if (!verdict.ok) {
+    // Shown where an inspection result goes, and without clearing: an open
+    // container and its Launch buttons should not vanish over a bad drop.
+    $('nsp-result').querySelectorAll('.nca-inspect').forEach((node) => node.remove());
+    $('nsp-result').appendChild(el('div', 'nca-info nca-inspect', verdict.why));
+    log(verdict.why, 'err');
+    return;
+  }
+  if (verdict.format === 'nca') await handleStandaloneNca(file);
+  else await handleNspFile(file);
 }
 
 /* ---------- booting a container from the stage ----------
@@ -61,10 +61,10 @@ export function isContainerFile(name: string): boolean {
    looking for the one whose content type says Program. Every file in an NSP
    is named after its own hash, so the content type is the only thing that
    distinguishes it. */
-export async function bootContainer(file: File): Promise<void> {
+export async function bootContainer(file: File, format: 'pfs0' | 'nca'): Promise<void> {
   setState('loading');
   beginLoad(file.name, 'opening the container (' + fmtSize(file.size) + ')');
-  if (isStandaloneNca(file)) {
+  if (format === 'nca') {
     const info = await handleStandaloneNca(file);
     if (!info) {
       setState('fault');

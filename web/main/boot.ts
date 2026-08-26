@@ -1,12 +1,14 @@
 /* Booting from the stage: the Open buttons, and dropping a file on it.
 
    Anything the emulator can boot is accepted here, homebrew and retail alike.
-   A `.nro` or `.elf` is an executable this loads directly; a `.nsp`, `.xci` or
-   `.nca` is a container the title has to be found inside first, which is
-   `container.ts`'s job. */
+   A `.nro` or `.elf` is an executable this loads directly; a `.nsp` or `.nca`
+   is a container the title has to be found inside first, which is
+   `container.ts`'s job. Which of those a file is comes from its header, not
+   its name - see `filetype.ts`. */
 
-import { bootContainer, isContainerFile } from './container';
+import { bootContainer } from './container';
 import { $, pickedFile } from './dom';
+import { classify } from './filetype';
 import { fmtSize } from './format';
 import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
 import { clearConsole, log } from './log';
@@ -53,14 +55,21 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
 }
 
 async function bootFile(file: File): Promise<void> {
-  if (isContainerFile(file.name)) {
-    // A container fills the Files panel on its way past, so what was opened
-    // and what was found in it stay inspectable after the title has started.
-    await bootContainer(file);
+  const verdict = await classify(file, ['nro', 'elf', 'pfs0', 'nca']);
+  if (!verdict.ok) {
+    // Not a fault: nothing was loaded, and whatever is running stays running
+    // under the message until it is dismissed.
+    failLoad(verdict.why);
+    log(verdict.why, 'err');
     return;
   }
-  const kind = /\.nro$/i.test(file.name) ? 'nro' : 'elf';
-  if (await loadProgram(file, kind)) await run();
+  if (verdict.format === 'pfs0' || verdict.format === 'nca') {
+    // A container fills the Files panel on its way past, so what was opened
+    // and what was found in it stay inspectable after the title has started.
+    await bootContainer(file, verdict.format);
+    return;
+  }
+  if (await loadProgram(file, verdict.format)) await run();
 }
 
 for (const id of ['nro-file', 'nro-file-2']) {
