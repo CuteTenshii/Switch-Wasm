@@ -124,6 +124,19 @@ const COLOR_BLEND_ENABLE: u32 = 0x4D8;
 const INDEPENDENT_BLEND: u32 = 0x780;
 const INDEPENDENT_BLEND_STRIDE: u32 = 0x8;
 
+// --- Colour write mask ---
+// `SetCtWrite[i]` (method 0x1A00), one register per colour target with each
+// channel's enable in a nibble of its own. `ColorMaskCommon` (0x0F90) makes
+// every target read slot 0's mask rather than its own.
+const COLOR_MASK: u32 = 0x680;
+const COLOR_MASK_COMMON: u32 = 0x3E4;
+/// How many colour targets Maxwell has, and so how many masks.
+const COLOR_TARGETS: u32 = 8;
+/// Every channel enabled — hardware's usable state, and what a target whose
+/// mask the guest never writes has to read as. Zero would mean "write
+/// nothing", which is a blank frame for every guest that leaves it alone.
+const COLOR_MASK_ALL: u32 = 0x1111;
+
 // --- Multisampling ---
 // Which samples a draw may write, one bit each; deko3d's
 // `dkCmdBufSetSampleMask` writes the same mask to all four registers.
@@ -383,8 +396,14 @@ impl Default for Engine3D {
 
 impl Engine3D {
     pub fn new() -> Engine3D {
+        let mut regs = Registers::new();
+        // See [`COLOR_MASK_ALL`]: an unwritten mask has to mean "all
+        // channels", not "none".
+        for target in 0..COLOR_TARGETS {
+            regs.set(COLOR_MASK + target, COLOR_MASK_ALL);
+        }
         Engine3D {
-            regs: Registers::new(),
+            regs,
             renderer: Box::new(Software),
             instance_id: 0,
             traced_regs: None,
@@ -996,6 +1015,23 @@ impl Engine3D {
         } else {
             index
         }
+    }
+
+    /// Which channels of colour target `index` a draw may write.
+    ///
+    /// Not a detail: "A Short Hike" turns alpha off for a third of its draws
+    /// and turns every channel off for one, so a rasterizer that writes all
+    /// four regardless overwrites exactly what the title meant to keep — and
+    /// alpha is what the display reads a frame's opacity out of.
+    pub fn color_mask(&self, index: u32) -> [bool; 4] {
+        let slot = if self.regs.get(COLOR_MASK_COMMON) != 0 { 0 } else { index };
+        let raw = self.regs.get(COLOR_MASK + slot.min(COLOR_TARGETS - 1));
+        [
+            field(raw, 0, 0) != 0,
+            field(raw, 4, 4) != 0,
+            field(raw, 8, 8) != 0,
+            field(raw, 12, 12) != 0,
+        ]
     }
 
     /// Resolve colour render target `index` from the register file.

@@ -224,6 +224,10 @@ pub struct ColorTarget {
     pub format: Format,
     /// `None` when blending is off, which is WebGPU's own spelling for it.
     pub blend: Option<Blend>,
+    /// Which of R, G, B, A the draw may write; see `Engine3D::color_mask`.
+    /// Part of the pipeline rather than of the pass because that is where
+    /// WebGPU keeps it, and because it is what the guest changes it with.
+    pub write_mask: [bool; 4],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -326,6 +330,7 @@ impl Pipeline {
             Some(rt) => Some(ColorTarget {
                 format: color_format(rt.format)?,
                 blend: blend(engine.blend_target(0))?,
+                write_mask: engine.color_mask(slot),
             }),
             None => None,
         };

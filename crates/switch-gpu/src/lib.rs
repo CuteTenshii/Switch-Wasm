@@ -70,6 +70,23 @@ fn topology(topology: state::Topology) -> wgpu::PrimitiveTopology {
     }
 }
 
+/// The guest's per-channel colour write enables, as WebGPU spells them.
+fn write_mask(mask: [bool; 4]) -> wgpu::ColorWrites {
+    let channels = [
+        wgpu::ColorWrites::RED,
+        wgpu::ColorWrites::GREEN,
+        wgpu::ColorWrites::BLUE,
+        wgpu::ColorWrites::ALPHA,
+    ];
+    let mut writes = wgpu::ColorWrites::empty();
+    for (enabled, channel) in mask.into_iter().zip(channels) {
+        if enabled {
+            writes |= channel;
+        }
+    }
+    writes
+}
+
 fn vertex_format(format: state::VertexFormat) -> wgpu::VertexFormat {
     match format {
         state::VertexFormat::Float32 => wgpu::VertexFormat::Float32,
@@ -603,7 +620,9 @@ impl Gpu {
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
                     blend: p.state.target.and_then(|t| t.blend).map(blend),
-                    write_mask: wgpu::ColorWrites::ALL,
+                    write_mask: p.state.target.map_or(wgpu::ColorWrites::ALL, |t| {
+                        write_mask(t.write_mask)
+                    }),
                 })],
             }),
             multiview_mask: None,

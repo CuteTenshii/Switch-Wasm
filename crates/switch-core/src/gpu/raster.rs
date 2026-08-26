@@ -823,6 +823,12 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let depth_state = engine.depth_state();
     let blend_target = engine.blend_target(0);
     let blend_constant = engine.blend_constant();
+    // Which channels this draw is allowed into. A mask with nothing set is a
+    // draw that writes depth and no colour at all, which is a real pass rather
+    // than a mistake — so it is resolved once here, not per pixel.
+    let color_mask = engine.color_mask(engine.render_target_slot(0));
+    let writes_all_channels = color_mask == [true; 4];
+    let writes_any_channel = color_mask.iter().any(|&channel| channel);
     let cull = engine.cull_state();
 
     let index_base = if call.indexed { engine.index_array_start() } else { 0 };
@@ -1171,17 +1177,31 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
 
                         // A depth-only pass shaded the fragment for its `kil`
                         // and its alpha coverage, and has nowhere to put the
-                        // colour that came out of it.
-                        if let Some(rt) = rt {
+                        // colour that came out of it — either because no
+                        // colour target is bound or because the write mask
+                        // closed every channel.
+                        if let Some(rt) = rt.filter(|_| writes_any_channel) {
                             let bpp = rt.format.bytes_per_pixel;
                             let va = rt.addr + rt.texel_offset(tx, ty) as u64;
-                            let out = if blend_target.enabled {
-                                let dst = rt.format.decode(ctx.read_pixel(va, bpp)?)?;
-                                let src = source_color(color, rt.format);
-                                blend(blend_target, blend_constant, src, dst)
+                            // Blending and a masked channel both need what the
+                            // target already holds, so read it once for both.
+                            let dst = if blend_target.enabled || !writes_all_channels {
+                                Some(rt.format.decode(ctx.read_pixel(va, bpp)?)?)
                             } else {
-                                color
+                                None
                             };
+                            let mut out = color;
+                            if let Some(dst) = dst {
+                                if blend_target.enabled {
+                                    let src = source_color(color, rt.format);
+                                    out = blend(blend_target, blend_constant, src, dst);
+                                }
+                                for (channel, keep) in color_mask.iter().enumerate() {
+                                    if !keep {
+                                        out[channel] = dst[channel];
+                                    }
+                                }
+                            }
                             tally.wrote(out);
                             ctx.write_pixel(va, bpp, rt.format.encode(out)?)?;
                         }
@@ -1634,6 +1654,67 @@ mod tests {
         assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
         assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(2 * 4, 2, 16 * 4) as u64).unwrap() as u128, expected);
         assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(12 * 4, 6, 16 * 4) as u64).unwrap(), 0);
+    }
+
+    /// The colour write mask keeps the channels it turns off, and a mask with
+    /// nothing set writes no colour at all.
+    ///
+    /// "A Short Hike" turns alpha off for a third of its draws and turns
+    /// every channel off for one of them. Writing all four regardless is how
+    /// a title's own opacity gets overwritten with whatever its shader left
+    /// in alpha.
+    #[test]
+    fn a_masked_channel_keeps_what_the_target_already_held() {
+        let full = [0.2f32, 0.4, 0.6, 0.25];
+        // Whatever the target held before the draw, in the same format.
+        let before = [1.0f32, 1.0, 1.0, 1.0];
+
+        // `0x1111` is every channel, `0x0111` drops alpha, `0` drops all four.
+        for (mask, expected) in [
+            (0x1111u32, Some([full[0], full[1], full[2], full[3]])),
+            (0x0111, Some([full[0], full[1], full[2], before[3]])),
+            (0x1000, Some([before[0], before[1], before[2], full[3]])),
+            (0, None),
+        ] {
+            let (mut mem, vmm, mut engine) = pipeline_harness();
+            engine.regs.set(0x680, mask);
+            let vbuf_addr = engine.vertex_array(0).start;
+            for (i, pos) in [[-1.0f32, 1.0, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0], [-1.0, -1.0, 0.0, 1.0]]
+                .into_iter()
+                .enumerate()
+            {
+                write_vertex(&mut mem, &vmm, vbuf_addr, i as u32, pos, full);
+            }
+
+            let mut host1x = Host1x::new();
+            let mut stats = Default::default();
+            let mut ctx =
+                ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+            let rt = engine.render_target(0).unwrap().unwrap();
+            let held = rt.format.encode(before).unwrap();
+            ctx.write_pixel(rt.addr, rt.format.bytes_per_pixel, held).unwrap();
+
+            draw(&engine, &mut ctx).unwrap();
+
+            let want = match expected {
+                Some(colour) => rt.format.encode(colour).unwrap(),
+                // Nothing written: the target still holds what it did.
+                None => held,
+            };
+            assert_eq!(
+                ctx.read_u32(rt.addr).unwrap() as u128,
+                want,
+                "mask {mask:#06x}"
+            );
+        }
+    }
+
+    /// A guest that never writes the mask registers must still draw. Zero is
+    /// the register file's initial value and would mean "no channels".
+    #[test]
+    fn an_unwritten_write_mask_lets_every_channel_through() {
+        assert_eq!(Engine3D::new().color_mask(0), [true; 4]);
+        assert_eq!(Engine3D::new().color_mask(7), [true; 4]);
     }
 
     #[test]
