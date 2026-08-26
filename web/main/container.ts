@@ -11,6 +11,7 @@ import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
 import { clearConsole, log } from './log';
 import { call, readLastError } from './rpc';
 import { run, updatePc } from './runloop';
+import { noteBooted, recycleSession } from './session';
 import { openPanel, setNote, setState, showScreen } from './shell';
 
 /** What a launch puts on the loading screen. A title picked out of a container
@@ -596,6 +597,18 @@ export async function doLaunchNca(
   // a bare NCA off the NAND has only the file name to show.
   beginLoad(identity?.name || name, 'decrypting the program and reading its ExeFS',
     identity?.iconUrl);
+  // A launch replaces whatever is running, so it gets a console of its own —
+  // and unlike a boot from the stage it needs the container back, since that
+  // is what it is about to read the title out of. A no-op when the boot that
+  // reached here rebuilt the session already.
+  try {
+    await recycleSession({ reopen: reopenContainer });
+  } catch (err) {
+    setState('fault');
+    failLoad('The session could not be replaced: ' + (err as Error).message);
+    log('Reset before launch failed: ' + (err as Error).message, 'err');
+    return;
+  }
   let entry: number;
   try {
     entry = await loadFn();
@@ -613,6 +626,7 @@ export async function doLaunchNca(
     return;
   }
   log('Launched ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
+  noteBooted();
   log('Decrypted and booted the title\'s own executable; there is no Horizon service support for retail games yet, so expect it to run until the first missing service rather than reach a menu.', 'dim');
   setState('loaded');
   loadPhase('starting the process');

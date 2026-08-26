@@ -5,21 +5,20 @@
    the last one persisted, and wires the one action that touches every part of
    the page at once - Reset. */
 
-import fontUrl from '../font.ttf?url';
-import type { Bytes } from '../shared/protocol';
 import { resetAudio } from './audio';
 import { watchBattery } from './battery';
 import { initFbSize, resetDisplay } from './display';
 import { $ } from './dom';
 import { hasKeys, stageKeys, updateKeysState } from './keys';
 import { clearConsole, log } from './log';
-import { initNand, restoreArchives } from './nand';
+import { initNand } from './nand';
 import { call, initWorker, setSession, whenReady } from './rpc';
-import { abortRun, updatePc } from './runloop';
+import { updatePc } from './runloop';
 import { saveRestore } from './saves';
 import { sdRequestPersistence, sdRestore } from './sdcard';
 import { screenCtx, screenEl, setState, showOverlay } from './shell';
 import { reopenContainer } from './container';
+import { recycleSession, stageFont } from './session';
 import { beginLoad, endLoad, failLoad, loadPhase } from './loading';
 
 // Registered for their side effects: each of these owns a part of the page and
@@ -28,28 +27,6 @@ import './boot';
 import './debug';
 import './dock';
 import './input';
-
-// The font the emulator serves as the console's shared system font. Homebrew
-// reads it out of pl:u's shared memory and renders it with its own copy of
-// FreeType, so without it nothing but pre-rendered bitmaps appears on screen.
-// `fontUrl` is the built file's hashed URL, so a replaced font is a fetch the
-// browser cannot answer from its cache.
-let fontBytes: Bytes | null = null;
-
-async function stageFont(): Promise<void> {
-  if (!fontBytes) {
-    try {
-      const res = await fetch(fontUrl);
-      if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
-      fontBytes = new Uint8Array(await res.arrayBuffer());
-    } catch (err) {
-      log('No system font (' + fontUrl + '): ' + (err as Error).message
-        + ' - text will not render.', 'err');
-      return;
-    }
-  }
-  await call('load_font', fontBytes);
-}
 
 // Bringing the core up is the page's own load, and every step of it is
 // something that can take a visible moment on a cold cache or a full SD card.
@@ -92,32 +69,16 @@ async function init(): Promise<void> {
 }
 
 $('btn-reset').addEventListener('click', async () => {
-  abortRun();
-  // Said before the free is even posted, so that everything which pushes at
-  // the session on a timer stops now rather than one round trip from now.
-  setSession(-1);
   // A reset rebuilds everything a boot built, so it reports itself the same
   // way a boot does instead of freezing the stage on the last frame it drew.
+  // Stopping the run and disowning the session are `recycleSession`'s first
+  // two acts, so they are not repeated here.
   beginLoad('resetting', 'freeing the session');
   try {
-    await call('free_session');
-    setSession(await call('new'));
-    loadPhase('loading the system font');
-    await stageFont();
-    loadPhase('restoring the SD card');
-    await sdRestore();
-    loadPhase('restoring save data');
-    await saveRestore();
-    // Everything else the page is still showing. A new session starts with no
-    // keys, no container and no data archives, while the panel above goes on
-    // reporting all three -- so Launch failed with "no container is open" on a
-    // card that was still sitting on screen.
-    loadPhase('staging keys');
-    await stageKeys();
-    loadPhase('restoring system data archives');
-    await restoreArchives();
-    loadPhase('re-opening the container');
-    await reopenContainer();
+    // `force`, because Reset means "give me a new console" whether or not this
+    // one ever booted anything, and `reopen` because the page is left showing
+    // exactly what it was showing before.
+    await recycleSession({ reopen: reopenContainer, force: true });
   } catch (err) {
     failLoad('The session could not be rebuilt: ' + (err as Error).message);
     log('Reset failed: ' + (err as Error).message, 'err');

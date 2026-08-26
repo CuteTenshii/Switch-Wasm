@@ -14,6 +14,7 @@ import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
 import { clearConsole, log } from './log';
 import { call, readLastError } from './rpc';
 import { run, updatePc } from './runloop';
+import { noteBooted, recycleSession } from './session';
 import { dropveilEl, setState, showScreen, stageEl } from './shell';
 
 export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<boolean> {
@@ -42,6 +43,7 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
     return false;
   }
   log('Loaded ' + file.name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
+  noteBooted();
   setState('loaded');
   // Uncover the emulated screen now, but keep the loading screen over it:
   // homebrew can run for a long time (or fault) before it presents anything,
@@ -61,6 +63,18 @@ async function bootFile(file: File): Promise<void> {
     // under the message until it is dismissed.
     failLoad(verdict.why);
     log(verdict.why, 'err');
+    return;
+  }
+  // A title gets a console of its own. Booting used to load straight into
+  // whatever was already running, which left the outgoing title's guest RAM
+  // mapped underneath the new one — see `recycleSession`.
+  try {
+    beginLoad(file.name, 'replacing the running session');
+    await recycleSession();
+  } catch (err) {
+    setState('fault');
+    failLoad('The session could not be replaced: ' + (err as Error).message);
+    log('Reset before boot failed: ' + (err as Error).message, 'err');
     return;
   }
   if (verdict.format === 'pfs0' || verdict.format === 'nca') {
