@@ -443,7 +443,7 @@ impl Cpu {
         // itself, but a command that is *answered* with a failure does not,
         // and that is the shape an initialisation step that quietly gives up
         // takes: the caller reads the Result, stops, and asks for nothing more.
-        if result != 0 && std::env::var("TRACE_IPC").is_ok() {
+        if result != 0 && crate::env_flag!("TRACE_IPC") {
             let module = result & 0x1FF;
             let description = (result >> 9) & 0x1FFF;
             eprintln!(

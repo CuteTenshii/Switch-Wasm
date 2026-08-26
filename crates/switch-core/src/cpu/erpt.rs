@@ -332,7 +332,7 @@ impl Cpu {
                 fields: data.clone(),
             });
         }
-        if std::env::var("TRACE_ERPT").is_ok() {
+        if crate::env_flag!("TRACE_ERPT") {
             for &category in &categories {
                 eprintln!("[erpt] context {}", Self::erpt_category_name(category));
             }
@@ -379,7 +379,7 @@ impl Cpu {
                 .copy_from_slice(&multiple[fields..fields + per_category]);
             let category = u32::from_le_bytes(id.try_into().unwrap());
             self.erpt_record_context(ErrorContext { category, entry, fields: data.clone() });
-            if std::env::var("TRACE_ERPT").is_ok() {
+            if crate::env_flag!("TRACE_ERPT") {
                 eprintln!("[erpt] context {}", Self::erpt_category_name(category));
             }
         }

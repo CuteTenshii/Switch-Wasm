@@ -16,6 +16,7 @@
 
 use crate::mem::Memory;
 use crate::{Error, Result};
+use crate::IdMap;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 // The processor.
@@ -847,7 +848,7 @@ pub struct Cpu {
     /// Maps fake handles returned by `ConnectToNamedPort` or sm:`GetService`
     /// to the named port / service they represent, so `SendSyncRequest` can
     /// dispatch IPC commands to the right stub.
-    service_handles: HashMap<u64, String>,
+    service_handles: IdMap<u64, String>,
     /// Monotonic fake-handle allocator. 0 is invalid, so we start above the
     /// earlier hard-coded `FAKE_HANDLE`.
     next_handle: u32,
@@ -860,7 +861,7 @@ pub struct Cpu {
     /// Maps non-domain vi session handles to their sub-interface (vi:iads,
     /// vi:ihosbd, ...) so the display stub can dispatch binder vs. display
     /// commands on the right session.
-    vi_ifaces: HashMap<u64, String>,
+    vi_ifaces: IdMap<u64, String>,
     /// AM's message queue for the running applet, and the event that says it
     /// is not empty.
     ///
@@ -969,7 +970,7 @@ pub struct Cpu {
     /// event, and [`Cpu::horizon_syscall`]'s `WaitSynchronization` keeps
     /// treating it as immediately signalled — thread handles, and every
     /// service handle a guest happens to wait on.
-    events: HashMap<u64, Event>,
+    events: IdMap<u64, Event>,
     /// The display's vsync event, once `vi` has handed it out. Signalled every
     /// time the guest presents a frame, which is the only periodic tick this
     /// emulator has: a render loop that waits on it has to be woken by
@@ -984,30 +985,30 @@ pub struct Cpu {
     /// directory handle to the entries it has not yielded yet
     /// (name bytes, entry type, file size). Lets `fsFsOpenDirectory` /
     /// `fsDirRead` hand NX-Shell's `FS::GetDirList` a real listing.
-    fs_dirs: HashMap<u64, Vec<crate::vfs::DirEntry>>,
+    fs_dirs: IdMap<u64, Vec<crate::vfs::DirEntry>>,
     /// Open `IFile` objects: domain object id to the path it was opened on.
-    fs_files: HashMap<u64, String>,
+    fs_files: IdMap<u64, String>,
     /// `am` `IStorage` contents, keyed by object. A library applet is handed
     /// its launch arguments as one of these and returns its result in
     /// another, so the bytes have to outlive the request that made it.
-    am_storages: HashMap<u64, Vec<u8>>,
+    am_storages: IdMap<u64, Vec<u8>>,
     /// The console's system data archives, by data id: the read-only content
     /// a title mounts that is not its own — an applet's shared assets, the
     /// system's Mii and amiibo resources. Each is another NCA's RomFS, so
     /// they are sources rather than buffers, exactly like the running title's.
-    data_archives: HashMap<u64, Box<dyn crate::source::ByteSource>>,
+    data_archives: IdMap<u64, Box<dyn crate::source::ByteSource>>,
     /// Save data, by the id it was opened under. A console keeps these on its
     /// NAND -- one per application for its own save, one per system save id
     /// for the system's -- and they are the only writable storage a title has
     /// that is not the SD card.
-    saves: HashMap<u64, crate::vfs::Vfs>,
+    saves: IdMap<u64, crate::vfs::Vfs>,
     /// Which storage an `fsp-srv` object addresses: a save id, or absent for
     /// the SD card. Files and directories inherit it from the filesystem they
     /// were opened through, so a path means nothing without it.
-    fs_mount: HashMap<u64, u64>,
+    fs_mount: IdMap<u64, u64>,
     /// Which data archive an open `IStorage` is serving. Absent means the
     /// storage is the process's own RomFS.
-    fs_storage_archive: HashMap<u64, u64>,
+    fs_storage_archive: IdMap<u64, u64>,
     /// The global filesystem access-log mode `fsp-srv` reports, as
     /// `SetGlobalAccessLogMode` last set it. `fs` keeps this per process and
     /// hands it straight back, and `nnSdk` reads it once at startup to decide
@@ -1022,16 +1023,16 @@ pub struct Cpu {
     /// launcher left for the program it started, for `PopLaunchParameter` to
     /// hand over. Filled by [`Cpu::seed_launch_parameters`], and emptied by
     /// the pops — each parameter is delivered once, as on a console.
-    am_launch_parameters: HashMap<u32, Vec<u8>>,
+    am_launch_parameters: IdMap<u32, Vec<u8>>,
     /// Which storage an `IStorageAccessor` reads and writes. The accessor is
     /// a separate object from the storage it was opened on, and both ends
     /// have to see the same bytes.
-    am_storage_of: HashMap<u64, u64>,
+    am_storage_of: IdMap<u64, u64>,
     /// Library applets created through `ILibraryAppletCreator`, by accessor
     /// object. Nothing here runs one — see [`am::LibraryApplet`] — but the
     /// caller drives it across several requests, so what it was asked for and
     /// how far it got have to outlive each one.
-    am_applets: HashMap<u64, am::LibraryApplet>,
+    am_applets: IdMap<u64, am::LibraryApplet>,
     /// The current process's own RomFS — what
     /// `OpenDataStorageByCurrentProcess` hands back as an `IStorage`. `None`
     /// until the loader calls [`Cpu::set_romfs`] or
@@ -1104,7 +1105,7 @@ pub struct Cpu {
     erpt_contexts: Vec<erpt::ErrorContext>,
     erpt_reports: Vec<erpt::ErrorReport>,
     erpt_attachments: Vec<erpt::ErrorReportAttachment>,
-    erpt_readers: HashMap<u64, erpt::ErrorReportReader>,
+    erpt_readers: IdMap<u64, erpt::ErrorReportReader>,
     /// The journal's own id, made on the first ask and kept: it tells whoever
     /// reads reports out of the journal which journal they came from.
     erpt_journal_id: Option<[u8; erpt::ERPT_UUID_SIZE]>,
@@ -1136,9 +1137,9 @@ pub struct Cpu {
     /// can size its reply the same way the guest sized the buffer it passed
     /// in — `audrvUpdate` rejects a reply whose `mempools_sz`/`voices_sz`
     /// fields don't match what it computed from those same counts.
-    audren_renderers: HashMap<u64, audren::AudioRenderer>,
+    audren_renderers: IdMap<u64, audren::AudioRenderer>,
     /// Every open `IAudioOut`, by session handle.
-    audio_outs: HashMap<u64, audout::AudioOut>,
+    audio_outs: IdMap<u64, audout::AudioOut>,
     /// Interleaved 16-bit PCM the guest has handed to `audout` and the host
     /// has not played yet. Bounded: a host that never drains it (a headless
     /// test, a paused tab) must not be able to grow it without limit.
@@ -1166,7 +1167,7 @@ pub struct Cpu {
     program_id: u64,
     /// The clock rate each module was last *set* to, by module index. A module
     /// with no entry runs at its default in `CLOCK_RATES_HZ`.
-    clock_rates: HashMap<u32, u32>,
+    clock_rates: IdMap<u32, u32>,
     /// State for the pseudo-random generator behind `csrng`, seeded lazily
     /// from the emulated clock. Zero means "not seeded yet".
     rng_state: u64,
@@ -1291,11 +1292,11 @@ impl Cpu {
             tpidr: 0,
             tpidr_rw: 0,
             next_object_id: 1,
-            service_handles: HashMap::new(),
+            service_handles: IdMap::default(),
             next_handle: 0x1000,
             next_domain_object_id: 1,
             domain_objects: HashMap::new(),
-            vi_ifaces: HashMap::new(),
+            vi_ifaces: IdMap::default(),
             applet_messages: VecDeque::new(),
             sleep_lock_event: None,
             sleep_lock_acquired: false,
@@ -1319,22 +1320,22 @@ impl Cpu {
             fabricated_objects: HashMap::new(),
             ro_modules: BTreeMap::new(),
             ro_registrations: BTreeMap::new(),
-            events: HashMap::new(),
+            events: IdMap::default(),
             vsync_event: None,
             last_vsync_frame: 0,
             last_vsync_cycles: 0,
-            fs_dirs: HashMap::new(),
-            fs_files: HashMap::new(),
-            data_archives: HashMap::new(),
-            saves: HashMap::new(),
-            fs_mount: HashMap::new(),
-            fs_storage_archive: HashMap::new(),
+            fs_dirs: IdMap::default(),
+            fs_files: IdMap::default(),
+            data_archives: IdMap::default(),
+            saves: IdMap::default(),
+            fs_mount: IdMap::default(),
+            fs_storage_archive: IdMap::default(),
             fs_access_log_mode: 0,
             am_in_data: VecDeque::new(),
-            am_launch_parameters: HashMap::new(),
-            am_storages: HashMap::new(),
-            am_storage_of: HashMap::new(),
-            am_applets: HashMap::new(),
+            am_launch_parameters: IdMap::default(),
+            am_storages: IdMap::default(),
+            am_storage_of: IdMap::default(),
+            am_applets: IdMap::default(),
             romfs: None,
             touch_sample_counter: 0,
             touch_published: 0,
@@ -1363,15 +1364,15 @@ impl Cpu {
             erpt_contexts: Vec::new(),
             erpt_reports: Vec::new(),
             erpt_attachments: Vec::new(),
-            erpt_readers: HashMap::new(),
+            erpt_readers: IdMap::default(),
             erpt_journal_id: None,
             sample_counter: 0,
             shared_font: Vec::new(),
             pl_shmem_image: Vec::new(),
             shared_font_regions: Vec::new(),
             pl_shmem_addr: 0,
-            audren_renderers: HashMap::new(),
-            audio_outs: HashMap::new(),
+            audren_renderers: IdMap::default(),
+            audio_outs: IdMap::default(),
             audio_pcm: VecDeque::new(),
             audio_format: (0, 0),
             unix_time: 0,
@@ -1379,7 +1380,7 @@ impl Cpu {
             account_edited_at: 0,
             apm_configuration: power::APM_DEFAULT_CONFIGURATION,
             program_id: ipc::DEFAULT_PROGRAM_ID,
-            clock_rates: HashMap::new(),
+            clock_rates: IdMap::default(),
             rng_state: 0,
             bsd_sockets: HashMap::new(),
             bsd_socket_options: HashMap::new(),
@@ -1389,17 +1390,17 @@ impl Cpu {
             fs: crate::vfs::Vfs::new(),
             nv: crate::gpu::nvdrv::NvDrv::new(),
             display: crate::display::BufferQueue::new(),
-            trace_nv: std::env::var("TRACE_NV").is_ok(),
+            trace_nv: crate::env_flag!("TRACE_NV"),
             threads: Vec::new(),
             current_thread: 0,
             exclusive: None,
             slice_used: 0,
             next_expiry: 0,
             jit: jit::Jit::default(),
-            jit_enabled: std::env::var("SWITCH_NO_JIT").is_err(),
+            jit_enabled: !crate::env_flag!("SWITCH_NO_JIT"),
             pending_yield: false,
         };
-        cpu.nv.gpu.trace = std::env::var("TRACE_GPU").is_ok();
+        cpu.nv.gpu.trace = crate::env_flag!("TRACE_GPU");
         // The framebuffer and input registers are fixed hardware-mapped
         // regions: pre-map them so reads never fault and programs (or the
         // host) can touch them before writing.
@@ -2426,7 +2427,7 @@ impl Cpu {
     pub(crate) fn alloc_event(&mut self, name: &'static str, auto_clear: bool) -> u64 {
         let handle = self.alloc_handle();
         self.events.insert(handle, Event { name, signaled: false, auto_clear });
-        if std::env::var("TRACE_WAIT").is_ok() {
+        if crate::env_flag!("TRACE_WAIT") {
             eprintln!("[event] {name} = {handle:#x} auto_clear={auto_clear}");
         }
         handle
@@ -2947,7 +2948,7 @@ impl Cpu {
             return;
         }
         // Read each archive at most once: two of them hold two fonts.
-        let mut archives: HashMap<u64, Vec<u8>> = HashMap::new();
+        let mut archives: IdMap<u64, Vec<u8>> = IdMap::default();
         for (id, _) in SHARED_FONTS {
             if archives.contains_key(&id) {
                 continue;
@@ -2980,7 +2981,7 @@ impl Cpu {
                 }
             }
         }
-        if std::env::var("TRACE_FONT").is_ok() {
+        if crate::env_flag!("TRACE_FONT") {
             eprintln!("[pl] {} bytes of shared font", self.pl_shmem_image.len());
             for (i, region) in self.shared_font_regions.iter().enumerate() {
                 eprintln!(

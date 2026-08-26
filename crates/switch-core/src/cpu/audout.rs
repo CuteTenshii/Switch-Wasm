@@ -383,7 +383,7 @@ impl Cpu {
             let buffer_size = self.mem.read_u64(desc.wrapping_add(16)).unwrap_or(0) as u32;
             let data_size = self.mem.read_u64(desc.wrapping_add(24)).unwrap_or(0) as u32;
             let data_offset = self.mem.read_u64(desc.wrapping_add(32)).unwrap_or(0) as u32;
-            if std::env::var("TRACE_AUDIO").is_ok() {
+            if crate::env_flag!("TRACE_AUDIO") {
                 eprintln!(
                     "[audio] append buffer={buffer:#x} cap={buffer_size:#x} \
                      size={data_size:#x} offset={data_offset:#x}"
@@ -489,7 +489,7 @@ impl Cpu {
                 }
             }
         }
-        if std::env::var("TRACE_AUDIO").is_ok() {
+        if crate::env_flag!("TRACE_AUDIO") {
             eprintln!("[audio] release room={room} addr={addr:x?} tags={tags:#x?}");
         }
         if let Some(addr) = addr {

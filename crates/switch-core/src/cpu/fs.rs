@@ -190,7 +190,7 @@ impl Cpu {
                 }
                 let key = self.reply_with_interface(tls, handle, "fsp-srv-storage")?;
                 self.fs_storage_archive.insert(key, data_id);
-                if std::env::var("TRACE_IPC").is_ok() {
+                if crate::env_flag!("TRACE_IPC") {
                     let size = self.storage_source(Some(data_id)).map_or(0, |s| s.len());
                     eprintln!("[fs] data archive {data_id:016x} -> {size:#x} bytes");
                 }
@@ -385,7 +385,7 @@ impl Cpu {
                 // `nn::fs::OpenDirectory("rom:/Data")` found nothing.
                 let offset = self.mem.read_u64(data)?;
                 let requested = self.mem.read_u64(data.wrapping_add(8))?;
-                let trace_storage = std::env::var("TRACE_IPC").is_ok();
+                let trace_storage = crate::env_flag!("TRACE_IPC");
                 if trace_storage {
                     eprintln!("[storage] read offset={offset:#x} size={requested:#x} of {size:#x}");
                 }
@@ -461,7 +461,7 @@ impl Cpu {
         // are the same interface and the same paths; only the object they were
         // opened through tells them apart.
         let mount = self.mount_of(self.ipc_object_key(tls, handle));
-        if std::env::var("TRACE_IPC").is_ok() {
+        if crate::env_flag!("TRACE_IPC") {
             eprintln!("[fs] pc={:#x} cmd={:?} path={:?} mount={mount:x?}", self.pc, cmd_id, path);
         }
         match cmd_id {
@@ -596,7 +596,7 @@ impl Cpu {
                 let requested = self.mem.read_u64(data.wrapping_add(0x10))? as usize;
                 let mut buf = vec![0u8; requested.min(1 << 24)];
                 let read = self.vfs_for(mount).read(&path, offset, &mut buf).unwrap_or(0);
-                if std::env::var("TRACE_IPC").is_ok() {
+                if crate::env_flag!("TRACE_IPC") {
                     eprintln!(
                         "[fs-file] read path={:?} offset={:#x} size={:#x} -> {:#x} buf={:?}",
                         path,
@@ -626,7 +626,7 @@ impl Cpu {
                     }
                     None => Vec::new(),
                 };
-                if std::env::var("TRACE_IPC").is_ok() {
+                if crate::env_flag!("TRACE_IPC") {
                     eprintln!(
                         "[fs-file] write path={:?} offset={:#x} size={:#x} -> {:#x}",
                         path,

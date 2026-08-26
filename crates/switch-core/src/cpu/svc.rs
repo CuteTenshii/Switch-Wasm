@@ -60,7 +60,7 @@ impl Cpu {
         // already decodes it, and the two hot ones a running guest issues
         // thousands of times a frame — `svcWaitSynchronization` (0x18) and
         // `svcSleepThread` (0x0b) — would bury everything else.
-        if !matches!(imm, 0x21 | 0x18 | 0x0b) && std::env::var("TRACE_SVC").is_ok() {
+        if !matches!(imm, 0x21 | 0x18 | 0x0b) && crate::env_flag!("TRACE_SVC") {
             eprintln!(
                 "[svc] pc={:#x} #{:#04x} x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
                 self.pc,
@@ -116,7 +116,7 @@ impl Cpu {
                     self.write_zr(0, RESULT_INVALID_MEMORY_RANGE);
                     return Ok(());
                 }
-                if std::env::var("TRACE_MAP").is_ok() {
+                if crate::env_flag!("TRACE_MAP") {
                     eprintln!("[map] MapMemory dst={dst:#x} src={src:#x} size={size:#x}");
                 }
                 self.mem.copy_range(dst, src, size)?;
@@ -282,7 +282,7 @@ impl Cpu {
                 let arg = self.read_zr(2);
                 let stack_top = self.read_zr(3);
                 let handle = self.create_thread(entry, arg, stack_top);
-                if std::env::var("TRACE_WAIT").is_ok() {
+                if crate::env_flag!("TRACE_WAIT") {
                     eprintln!("[thread] create handle={handle:#x} entry={entry:#x}");
                 }
                 self.write_zr(0, RESULT_OK);
@@ -294,7 +294,7 @@ impl Cpu {
                 // point this thread blocks.
                 let handle = self.read_zr(0);
                 let started = self.start_thread(handle);
-                if std::env::var("TRACE_WAIT").is_ok() {
+                if crate::env_flag!("TRACE_WAIT") {
                     eprintln!("[thread] start handle={handle:#x} -> {started}");
                 }
                 self.write_zr(0, RESULT_OK);
@@ -370,7 +370,7 @@ impl Cpu {
                 let owner = self.read_zr(0) as u32;
                 let mutex = self.read_zr(1) as u32;
                 let requester = self.read_zr(2) as u32;
-                if std::env::var("TRACE_WAIT").is_ok() {
+                if crate::env_flag!("TRACE_WAIT") {
                     eprintln!(
                         "[wait] lock mutex={mutex:#x} owner={owner:#x} self={requester:#x} thread={:#x}",
                         self.current_thread_handle()
@@ -397,7 +397,7 @@ impl Cpu {
                 // deadline in nanoseconds, and `wait_process_wide_key` turns
                 // it into one against the cycle counter.
                 let timeout = self.read_zr(3) as i64;
-                if std::env::var("TRACE_WAIT").is_ok() {
+                if crate::env_flag!("TRACE_WAIT") {
                     eprintln!(
                         "[wait] condvar key={key:#x} mutex={mutex:#x} timeout={timeout} thread={:#x} bt={:x?}",
                         self.current_thread_handle(),
@@ -427,7 +427,7 @@ impl Cpu {
                 let arb_type = self.read_zr(1) as u32;
                 let value = self.read_zr(2) as u32 as i32;
                 let timeout = self.read_zr(3) as i64;
-                if std::env::var("TRACE_WAIT").is_ok() {
+                if crate::env_flag!("TRACE_WAIT") {
                     eprintln!(
                         "[wait] arbiter addr={addr:#x} type={arb_type} value={value} \
                          timeout={timeout} thread={:#x}",
@@ -464,7 +464,7 @@ impl Cpu {
                 let signal_type = self.read_zr(1) as u32;
                 let value = self.read_zr(2) as u32 as i32;
                 let count = self.read_zr(3) as u32 as i32;
-                if std::env::var("TRACE_WAIT").is_ok() {
+                if crate::env_flag!("TRACE_WAIT") {
                     eprintln!(
                         "[wait] arbiter signal addr={addr:#x} type={signal_type} value={value} \
                          count={count} thread={:#x}",
@@ -479,7 +479,7 @@ impl Cpu {
                 // SignalProcessWideKey(key = X0, count = W1)
                 let key = self.read_zr(0) as u32;
                 let count = self.read_zr(1) as u32 as i32;
-                if std::env::var("TRACE_WAIT").is_ok() {
+                if crate::env_flag!("TRACE_WAIT") {
                     eprintln!(
                         "[wait] signal key={key:#x} count={count} thread={:#x}",
                         self.current_thread_handle()
@@ -506,7 +506,7 @@ impl Cpu {
                 const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
                 let handle = self.read_zr(0);
                 let was_signalled = self.reset_signal(handle);
-                if std::env::var("TRACE_WAIT").is_ok() {
+                if crate::env_flag!("TRACE_WAIT") {
                     eprintln!(
                         "[wait] reset handle={handle:#x} {:?} -> {was_signalled}",
                         self.event_name(handle)
@@ -553,7 +553,7 @@ impl Cpu {
                         u64::from(self.mem.read_u32(handles_ptr.wrapping_add(i * 4)).unwrap_or(0))
                     })
                     .collect();
-                if std::env::var("TRACE_WAIT").is_ok() {
+                if crate::env_flag!("TRACE_WAIT") {
                     let named: Vec<String> = handles
                         .iter()
                         .map(|&h| match (self.event_name(h), self.event_signaled(h)) {
@@ -672,7 +672,7 @@ impl Cpu {
                 // executed, so the threads that prepare the frame it would
                 // draw never got the CPU.
                 if timeout != 0
-                    && std::env::var("NO_VSYNC_THROTTLE").is_err()
+                    && !crate::env_flag!("NO_VSYNC_THROTTLE")
                     && self.vsync_event.is_some_and(|v| handles.contains(&v))
                 {
                     if !self.has_other_runnable() {
@@ -796,7 +796,7 @@ impl Cpu {
                 let handle = self.read_zr(0);
                 let cmd_id = self.ipc_command_id(tls);
                 let svc_name = self.service_name(handle).map(|s| s.to_string());
-                if std::env::var("TRACE_IPC").is_ok() {
+                if crate::env_flag!("TRACE_IPC") {
                     let obj = self.ipc_domain_object_id(tls);
                     let iface = self.domain_interface(handle, obj).map(|s| s.to_string());
                     eprintln!(
@@ -1518,7 +1518,7 @@ impl Cpu {
                      28 => 0,        // AliasRegionExtraSize
                      _ => 0,
                  };
-                 if std::env::var("TRACE_SVC").is_ok() {
+                 if crate::env_flag!("TRACE_SVC") {
                      eprintln!("[svc]   -> GetInfo({info_type}) = {value:#x}");
                  }
                  self.write_zr(1, value);

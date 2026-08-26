@@ -439,7 +439,7 @@ impl Cpu {
     /// `TRACE_IPC`, because when the command did have an out parameter this
     /// line is the only place the silence becomes visible.
     fn vi_unhandled(&mut self, tls: u32, iface: &str, cmd_id: Option<u32>) -> Result<()> {
-        if std::env::var("TRACE_IPC").is_ok() {
+        if crate::env_flag!("TRACE_IPC") {
             eprintln!("[ipc] no implementation: {iface} cmd={cmd_id:?}");
         }
         self.write_ipc_response(tls, 0, &[], &[], &[])

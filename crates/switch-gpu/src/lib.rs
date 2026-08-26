@@ -301,7 +301,7 @@ impl Gpu {
             last_fallback: None,
             reasons: Vec::new(),
             in_frame: 0,
-            times: std::env::var("GPU_TIMES").is_ok().then(Times::default),
+            times: switch_core::env_flag!("GPU_TIMES").then(Times::default),
             only: std::env::var("GPU_ONLY").ok().and_then(|v| v.parse().ok()),
         }
     }
@@ -1066,7 +1066,7 @@ impl Gpu {
             }
         }
 
-        if std::env::var("TRACE_GPU_TEX").is_ok() {
+        if switch_core::env_flag!("TRACE_GPU_TEX") {
             for t in &uploads.textures {
                 eprintln!(
                     "[gpu-tex] imm={} {:?} {}x{} swizzle={:?} sampler={:?}",

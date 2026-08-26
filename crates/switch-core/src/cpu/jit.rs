@@ -73,7 +73,7 @@
 use super::bits::*;
 use super::{Cpu, Result, RunReport, RECENT_LEN, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
 use crate::mem::{Memory, PAGE_SIZE};
-use std::collections::HashMap;
+use crate::IdMap;
 use std::rc::Rc;
 
 /// Longest run of instructions one block may cover. Longer blocks amortize the
@@ -207,10 +207,10 @@ pub(super) struct Jit {
     /// the entry address is checked against the block's own, and `blocks` is
     /// what actually owns the cache.
     lookup: Vec<Option<Rc<Block>>>,
-    blocks: HashMap<u32, Rc<Block>>,
+    blocks: IdMap<u32, Rc<Block>>,
     /// Entry addresses translated out of each page, so a store to that page
     /// drops exactly the blocks that read it.
-    by_page: HashMap<u32, Vec<u32>>,
+    by_page: IdMap<u32, Vec<u32>>,
     translated: u64,
     executed: u64,
     invalidated: u64,
@@ -233,8 +233,8 @@ impl Default for Jit {
     fn default() -> Jit {
         Jit {
             lookup: vec![None; LOOKUP_SLOTS],
-            blocks: HashMap::new(),
-            by_page: HashMap::new(),
+            blocks: IdMap::default(),
+            by_page: IdMap::default(),
             translated: 0,
             executed: 0,
             invalidated: 0,

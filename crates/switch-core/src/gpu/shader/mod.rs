@@ -175,7 +175,7 @@ pub fn decode_program_from_memory(
         // `TRACE_SHADER=1` prints every program decoded, in control-flow-walk
         // order. A shader that fails to run says only which instruction it
         // stopped on; this is how you see what came before it.
-        if std::env::var("TRACE_SHADER").is_ok() {
+        if crate::env_flag!("TRACE_SHADER") {
             eprintln!("[shader] program at {addr:#x}, {} instructions", program.offsets.len());
             for (i, &off) in program.offsets.iter().enumerate() {
                 eprintln!("  {off:#06x}: {:?}", program.insns[i]);

@@ -80,7 +80,7 @@ impl Cpu {
                 let mut inline_out = Vec::new();
                 let error =
                     self.nv.ioctl(&mut self.mem, fd, request, &mut argp, &inline_in, &mut inline_out)?;
-                if error != 0 && std::env::var("TRACE_NV").is_ok() {
+                if error != 0 && crate::env_flag!("TRACE_NV") {
                     eprintln!("[nv] ioctl fd={fd} request={request:#x} -> error {error}");
                 }
                 // An ioctl the model has no handler for is a gap in the same

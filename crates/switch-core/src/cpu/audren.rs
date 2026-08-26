@@ -959,7 +959,7 @@ impl Cpu {
             renderer.elapsed_frames = renderer.elapsed_frames.wrapping_add(1);
         }
 
-        if std::env::var("TRACE_AUDIO").is_ok() {
+        if crate::env_flag!("TRACE_AUDIO") {
             let playing = renderer
                 .voices
                 .iter()

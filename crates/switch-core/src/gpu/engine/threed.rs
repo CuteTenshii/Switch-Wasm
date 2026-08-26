@@ -640,7 +640,7 @@ impl Engine3D {
     /// when a frame's draws all land on top of each other, this says what the
     /// guest varied — and by omission, what the rasterizer is failing to read.
     fn trace_reg_diff(&mut self) {
-        if std::env::var("TRACE_REGS").is_err() {
+        if !crate::env_flag!("TRACE_REGS") {
             return;
         }
         let now: Vec<u32> = (0..REGISTER_COUNT as u32).map(|m| self.regs.get(m)).collect();

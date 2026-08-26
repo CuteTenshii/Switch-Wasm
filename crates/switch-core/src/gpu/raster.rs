@@ -883,7 +883,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // `TRACE_PIPELINE=1`: the fixed-function state this draw runs under, as
     // a GPU backend would have to describe it — or what stopped it being
     // describable, which is the more useful half.
-    if std::env::var("TRACE_PIPELINE").is_ok() {
+    if crate::env_flag!("TRACE_PIPELINE") {
         match crate::gpu::pipeline::Pipeline::of(engine) {
             Ok(pipeline) => eprintln!("[pipe] {pipeline:?}"),
             Err(e) => eprintln!("[pipe] undescribable: {e}"),
@@ -892,7 +892,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // `TRACE_UPLOAD=1`: how many bytes of guest memory this draw would have
     // to be handed to a device, which is the number that decides whether
     // uploading per draw is affordable at all.
-    if std::env::var("TRACE_UPLOAD").is_ok() {
+    if crate::env_flag!("TRACE_UPLOAD") {
         match crate::gpu::pipeline::Pipeline::of(engine)
             .map_err(|e| Error::Gpu(format!("pipeline: {e}")))
             .and_then(|p| {
@@ -949,7 +949,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // translator. Structured control flow is what any shading language wants
     // and what Maxwell's reconvergence stack does not have, so this is the
     // measurement that says how hard translating a given shader would be.
-    if std::env::var("TRACE_CFG").is_ok() {
+    if crate::env_flag!("TRACE_CFG") {
         for (stage, addr, program) in
             [("vs", vs_binding.addr, &vs_program), ("fs", fs_binding.addr, &fs_program)]
         {
@@ -965,7 +965,11 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // in front of a real shader compiler — nothing in this crate can parse
     // WGSL, so `naga --validate` on those files is the only thing that says
     // whether a translation is one.
-    if let Ok(where_to) = std::env::var("TRACE_WGSL") {
+    // Asked as a flag first: this one wants the *value*, and reading it per
+    // draw would put the environment scan back in the path everything else
+    // here was just taken out of.
+    if crate::env_flag!("TRACE_WGSL") {
+        let where_to = std::env::var("TRACE_WGSL").unwrap_or_default();
         use crate::gpu::shader::wgsl::{self, Layout, Stage};
         for (name, stage, addr, program) in [
             ("vs", Stage::Vertex, vs_binding.addr, &vs_program),
@@ -1238,7 +1242,7 @@ struct DrawTally {
 impl DrawTally {
     fn new(fs_program: &Program) -> DrawTally {
         DrawTally {
-            enabled: std::env::var("TRACE_DRAW").is_ok(),
+            enabled: crate::env_flag!("TRACE_DRAW"),
             fs_len: fs_program.insns.len(),
             triangles: 0,
             culled: 0,
