@@ -969,16 +969,31 @@ impl Engine3D {
     /// `MultisampleMode` still holds — the mode register survives a pass that
     /// turns multisampling off, so reading it alone would keep expanding
     /// coordinates long after the guest stopped asking for it.
+    /// How the bound surfaces lay their samples out, and where coverage is
+    /// tested inside a pixel.
+    ///
+    /// **`AntiAliasEnable` does not decide how many texels a pixel owns.**
+    /// `MsaaMode` does, and the render- and depth-target registers describe
+    /// the expanded surface whether or not the bit is set — Eden reads the
+    /// mode alone to size a render target and never reads the enable at all.
+    /// Taking the bit as "one sample per pixel" made "A Short Hike"'s
+    /// 2560x720 2x1 surface a 2560x720 *pixel* one, so its 1280x720 clear
+    /// rect and viewport covered the left half of it and the title's own
+    /// resolve blit shrank that to a quarter of the frame.
+    ///
+    /// What the bit does decide is whether coverage is per sample, which is
+    /// [`SampleGrid::per_pixel_coverage`].
     pub fn sample_grid(&self) -> Result<SampleGrid> {
-        if self.regs.get(MULTISAMPLE_ENABLE) == 0 {
-            return Ok(SampleGrid::single());
-        }
         let mut locations = [0u8; MAX_SAMPLES];
         for (i, byte) in locations.iter_mut().enumerate() {
             let word = self.regs.get(MULTISAMPLE_SAMPLE_LOCATIONS + (i / 4) as u32);
             *byte = (word >> (8 * (i % 4))) as u8;
         }
-        SampleGrid::new(self.regs.get(MULTISAMPLE_MODE), &locations)
+        let grid = SampleGrid::new(self.regs.get(MULTISAMPLE_MODE), &locations)?;
+        if self.regs.get(MULTISAMPLE_ENABLE) == 0 {
+            return Ok(grid.per_pixel_coverage());
+        }
+        Ok(grid)
     }
 
     /// Which samples a draw is allowed to write, as a bit per sample.
@@ -1665,15 +1680,40 @@ mod tests {
         assert_eq!(h.mem.read_u32(0x3000_0000 + 8 * 64).unwrap(), 0);
     }
 
+    /// `MsaaMode` alone says how many texels a pixel owns; `AntiAliasEnable`
+    /// says only where coverage is tested.
+    ///
+    /// This used to read the other way — the enable bit gating the whole grid
+    /// — on the reasoning that a guest might leave a stale mode behind. It
+    /// cannot work: the surface registers count texels either way, so
+    /// answering "one sample per pixel" turns a multisampled target into a
+    /// pixel-space one that many times too wide. That is what made "A Short
+    /// Hike" paint a quarter of its frame, the same way Just Dance 2019
+    /// painted a quarter of its own before any of this was converted at all.
     #[test]
-    fn multisampling_off_leaves_the_mode_register_inert() {
-        // deko3d leaves `MultisampleMode` programmed when it turns
-        // multisampling off, so the mode alone must not expand coordinates.
+    fn the_msaa_mode_sizes_the_surface_and_the_enable_bit_only_moves_coverage() {
         let mut engine = Engine3D::new();
-        engine.regs.set(MULTISAMPLE_MODE, 2);
-        assert!(engine.sample_grid().unwrap().is_single());
+        engine.regs.set(MULTISAMPLE_MODE, 2); // 2x2
+        let off = engine.sample_grid().unwrap();
+        assert_eq!(off.count(), 4, "the surface is multisampled either way");
+        assert_eq!((off.samples_x, off.samples_y), (2, 2));
+        // With antialiasing off every sample tests the pixel's centre, so a
+        // pixel is covered whole or not at all.
+        assert!((0..off.count()).all(|s| off.position(s) == [0.5, 0.5]));
+        // Its samples still land in texels of their own.
+        assert_eq!(off.texel(3, 5, 0), (6, 10));
+        assert_ne!(off.texel(3, 5, 3), off.texel(3, 5, 0));
+
         engine.regs.set(MULTISAMPLE_ENABLE, 1);
-        assert_eq!(engine.sample_grid().unwrap().count(), 4);
+        let on = engine.sample_grid().unwrap();
+        assert_eq!(on.count(), 4);
+        assert!((0..on.count()).any(|s| on.position(s) != [0.5, 0.5]), "coverage is per sample");
+    }
+
+    /// A guest that never touches either register is not multisampled.
+    #[test]
+    fn an_unprogrammed_multisample_mode_is_one_sample_a_pixel() {
+        assert!(Engine3D::new().sample_grid().unwrap().is_single());
     }
 
     #[test]

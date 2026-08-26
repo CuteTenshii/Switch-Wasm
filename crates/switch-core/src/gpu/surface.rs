@@ -204,6 +204,19 @@ impl SampleGrid {
         Ok(SampleGrid { samples_x, samples_y, positions, slots })
     }
 
+    /// The same surface, with coverage evaluated once per pixel: what
+    /// `AntiAliasEnable = 0` means over a multisampled one. Every sample tests
+    /// the pixel's centre, so a pixel is covered whole or not at all — which
+    /// is what GL promises with `GL_MULTISAMPLE` off.
+    ///
+    /// Only the positions move. `slots` still maps each sample to a texel of
+    /// its own, because how many texels a pixel owns is the *surface's*
+    /// property and the enable bit has no say in it.
+    pub fn per_pixel_coverage(mut self) -> SampleGrid {
+        self.positions = [[0.5, 0.5]; MAX_SAMPLES];
+        self
+    }
+
     pub fn count(&self) -> u32 {
         self.samples_x * self.samples_y
     }
