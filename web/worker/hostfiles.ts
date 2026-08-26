@@ -20,9 +20,15 @@ let hostReader: FileReaderSync | null = null;
 // Reads land in bursts of a few hundred bytes as the guest walks its RomFS
 // tables, so whole chunks are kept around; a Map iterates in insertion order,
 // which makes it an LRU with no bookkeeping of its own.
+//
+// One cache per file rather than one shared between them. A title running
+// with an update reads two containers at once - every relocation crossing
+// swaps from one to the other - and a single LRU has them evicting each
+// other's working set at each crossing. The budget is per file and half what
+// the shared one was, so the pair costs what one file used to.
 const HOST_CHUNK = 1 << 20;
-const HOST_CACHE_CHUNKS = 32;
-const hostChunks = new Map<string, Uint8Array>();
+const HOST_CACHE_CHUNKS = 16;
+const hostChunks = new Map<number, Map<number, Uint8Array>>();
 
 function reader(): FileReaderSync {
   if (!hostReader) hostReader = new FileReaderSync();
@@ -31,12 +37,12 @@ function reader(): FileReaderSync {
 
 // Opening a container replaces slot 0 and leaves the rest alone: the wasm
 // side holds sources that address archives by index, so the table can only
-// ever grow. The chunk cache is keyed by index too, hence the flush.
+// ever grow. Only slot 0's cached chunks go with it.
 export function openHostFile(file: File): bigint {
   reader();
   if (hostFiles.length === 0) hostFiles = [null];
   hostFiles[0] = file;
-  hostChunks.clear();
+  hostChunks.delete(0);
   return BigInt(file.size);
 }
 
@@ -52,19 +58,21 @@ function readBlob(file: File, start: number, end: number): Uint8Array {
   return new Uint8Array(reader().readAsArrayBuffer(file.slice(start, end)));
 }
 
-function hostChunk(file: File, index: number, key: string): Uint8Array {
-  const hit = hostChunks.get(key);
+function hostChunk(file: File, fileIndex: number, index: number): Uint8Array {
+  let cache = hostChunks.get(fileIndex);
+  if (!cache) hostChunks.set(fileIndex, (cache = new Map()));
+  const hit = cache.get(index);
   if (hit) {
-    hostChunks.delete(key);
-    hostChunks.set(key, hit);
+    cache.delete(index);
+    cache.set(index, hit);
     return hit;
   }
   const start = index * HOST_CHUNK;
   const chunk = readBlob(file, start, Math.min(start + HOST_CHUNK, file.size));
-  hostChunks.set(key, chunk);
-  if (hostChunks.size > HOST_CACHE_CHUNKS) {
-    const oldest = hostChunks.keys().next();
-    if (!oldest.done) hostChunks.delete(oldest.value);
+  cache.set(index, chunk);
+  if (cache.size > HOST_CACHE_CHUNKS) {
+    const oldest = cache.keys().next();
+    if (!oldest.done) cache.delete(oldest.value);
   }
   return chunk;
 }
@@ -80,7 +88,8 @@ export function hostRead(
 ): number {
   ptr >>>= 0;
   len >>>= 0;
-  const file = hostFiles[fileIndex >>> 0];
+  fileIndex >>>= 0;
+  const file = hostFiles[fileIndex];
   if (!file || !len) return 0;
   let at = Number(offset);
   const end = Math.min(at + len, file.size);
@@ -98,7 +107,7 @@ export function hostRead(
     }
     while (at < end) {
       const index = Math.floor(at / HOST_CHUNK);
-      const chunk = hostChunk(file, index, `${fileIndex}:${index}`);
+      const chunk = hostChunk(file, fileIndex, index);
       const from = at - index * HOST_CHUNK;
       const take = Math.min(chunk.length - from, end - at);
       if (take <= 0) break;

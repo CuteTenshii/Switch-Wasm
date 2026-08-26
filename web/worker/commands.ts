@@ -134,6 +134,26 @@ export const CMD: CommandHandlers = {
     const index = addHostFile(file);
     return api().switch_add_archive(handle(), index, BigInt(file.size));
   },
+  // Register an update container for the title in the open container. Like
+  // `add_archive` this keeps only the File reference, so an update costs its
+  // header and its ticket and nothing else. Returns the title id it patches -
+  // the base game's, which is what the page pairs the two containers by - or
+  // '' if the file is not an update.
+  add_update(file) {
+    const index = addHostFile(file);
+    const id = api().switch_add_update(handle(), index, BigInt(file.size));
+    return id ? id.toString(16).padStart(16, '0') : '';
+  },
+  // The update's own version string, out of its Control NCA's NACP. Empty if
+  // it ships without one.
+  update_version() {
+    return readString(256, (buf, cap) => api().switch_update_version(handle(), buf, cap));
+  },
+  // Drop it again: the next launch is the plain title.
+  clear_update() {
+    api().switch_clear_update(handle());
+    return 0;
+  },
   // What a firmware NCA is, without reading it: a header read through the
   // File the page is still holding. Returns { id, kind } - kind 0 for a
   // program, 1 for a data archive, 2 for anything else - or null if it is not

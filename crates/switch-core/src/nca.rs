@@ -71,6 +71,12 @@ pub const ENCRYPTION_NONE: u8 = 1;
 /// Encryption type byte in an FS header: AES-128-CTR, the form used by
 /// standard-crypto Program NCA sections (ExeFS/RomFS).
 pub const ENCRYPTION_AES_CTR: u8 = 3;
+/// Encryption type byte in an FS header: AES-128-CTR again, but with the
+/// counter's top word chosen per region from the section's own subsection
+/// table rather than fixed for the whole section. Only an update's patch
+/// RomFS is stored this way, alongside the relocation table that says which
+/// of its ranges come from the base title — see [`crate::bktr`].
+pub const ENCRYPTION_AES_CTR_EX: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -167,10 +173,41 @@ pub struct FsHeader {
     /// `header_size` magic at section offset 0 fails even with perfectly
     /// correct decryption.
     pub romfs_data_offset: u64,
+    /// A patch (`AesCtrEx`) section's relocation table: which ranges of the
+    /// patched RomFS come from this section and which from the base title's.
+    /// Zeroed on every other kind of section.
+    pub relocation: BktrTable,
+    /// A patch section's subsection table: which counter each range of this
+    /// section's own bytes was encrypted with.
+    pub subsection: BktrTable,
     /// AES-CTR IV components (hactool's `section_ctr`): the low 8 bytes of
     /// the counter are the block index and start at 0 for the section start.
     pub generation: u32,
     pub secure_value: u32,
+}
+
+/// One of a patch section's two table headers (hactool's `bktr_header_t`),
+/// as the FS header carries it: where the table lives inside the section, how
+/// long it is, and how many entries it holds in total across its buckets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BktrTable {
+    pub offset: u64,
+    pub size: u64,
+    /// "BKTR" on a real patch section, and nothing at all on any other kind —
+    /// which is what [`crate::bktr`] checks before believing the rest.
+    pub magic: u32,
+    pub entries: u32,
+}
+
+impl BktrTable {
+    fn parse(fs: &[u8], at: usize) -> BktrTable {
+        BktrTable {
+            offset: crate::nsp::read_u64(fs, at),
+            size: crate::nsp::read_u64(fs, at + 0x08),
+            magic: crate::nsp::read_u32(fs, at + 0x10),
+            entries: crate::nsp::read_u32(fs, at + 0x18),
+        }
+    }
 }
 
 impl FsHeader {
@@ -204,6 +241,10 @@ impl FsHeader {
             data_offset: crate::nsp::read_u64(fs, 0x40),
             data_size: crate::nsp::read_u64(fs, 0x48),
             romfs_data_offset,
+            // The BKTR superblock overlays the IVFC one from 0x8, putting its
+            // two table headers at 0x100 and 0x120.
+            relocation: BktrTable::parse(fs, 0x100),
+            subsection: BktrTable::parse(fs, 0x120),
             generation: crate::nsp::read_u32(fs, 0x140),
             secure_value: crate::nsp::read_u32(fs, 0x144),
         }
@@ -223,6 +264,22 @@ impl FsHeader {
         ctr[0..4].copy_from_slice(&self.secure_value.to_be_bytes());
         ctr[4..8].copy_from_slice(&self.generation.to_be_bytes());
         ctr[8..16].copy_from_slice(&(media_offset >> 4).to_be_bytes());
+        ctr
+    }
+
+    /// The counter block for one region of a *patch* (`AesCtrEx`) section:
+    /// the same counter, with the *generation* word replaced by the `ctr_val`
+    /// the section's subsection table gives that region. The secure value
+    /// identifies the section and stays put; the generation is what the
+    /// regions vary.
+    ///
+    /// The tables themselves are written before any of this applies and
+    /// decrypt with [`FsHeader::initial_counter`] — which is also why a
+    /// region whose `ctr_val` is the section's own generation reads
+    /// identically either way.
+    pub fn patch_counter(&self, media_offset: u64, ctr_val: u32) -> [u8; 16] {
+        let mut ctr = self.initial_counter(media_offset);
+        ctr[4..8].copy_from_slice(&ctr_val.to_be_bytes());
         ctr
     }
 }
@@ -467,7 +524,11 @@ impl Nca {
                 )
             })?;
         let key = match fs.encryption_type {
-            ENCRYPTION_AES_CTR => Some(self.section_key(keys)?),
+            // A patch section shares the key and takes the same counter; only
+            // its top word varies by region, and the relocation and
+            // subsection tables that say how are themselves written under the
+            // section's own counter, so reading them needs exactly this.
+            ENCRYPTION_AES_CTR | ENCRYPTION_AES_CTR_EX => Some(self.section_key(keys)?),
             ENCRYPTION_NONE => None,
             other => {
                 return Err(Error::Nca(format!(
@@ -646,6 +707,19 @@ impl Nca {
             .position(|fs| matches!(fs, Some(h) if h.partition_type == 0 && h.fs_type == HASH_TYPE_IVFC))
     }
 
+    /// Whether this is an update's Program NCA: one whose RomFS section holds
+    /// a patch over some base title's, rather than a RomFS of its own.
+    ///
+    /// Nothing else distinguishes it. An update's Program NCA carries the
+    /// *base* title id (the `...800` update id appears only on the container's
+    /// Meta NCA), and its ExeFS is a complete replacement set of modules — so
+    /// the patch RomFS is what says the container cannot be booted on its own.
+    pub fn is_update(&self) -> bool {
+        self.romfs_section_index()
+            .and_then(|i| self.fs_headers[i])
+            .is_some_and(|fs| fs.encryption_type == ENCRYPTION_AES_CTR_EX)
+    }
+
     /// A [`ByteSource`] over section `index`'s RomFS image: the decrypting
     /// section view, windowed past the IVFC hash-tree levels via
     /// [`FsHeader::romfs_data_offset`].
@@ -672,6 +746,13 @@ impl Nca {
             .and_then(|o| o.as_ref())
             .copied()
             .ok_or_else(|| Error::Nca(format!("no FS header for section {}", index)))?;
+        if fs.encryption_type == ENCRYPTION_AES_CTR_EX {
+            return Err(Error::Nca(
+                "this section is an update's patch RomFS — it holds only what the update changed, \
+                 and has to be read over the base title's RomFS (see `bktr::patched_romfs_source`)"
+                    .into(),
+            ));
+        }
         let section = self.section_source(nca, keys, index)?;
         if fs.romfs_data_offset >= section.len() {
             return Err(Error::Nca("RomFS data offset exceeds the decrypted section".into()));
@@ -747,21 +828,41 @@ impl<S: ByteSource> SectionSource<S> {
     }
 
     /// Decrypt `buf`, which must hold the section's bytes starting at the
-    /// 16-byte-aligned section offset `at`.
-    fn decrypt_at(&self, at: u64, buf: &mut [u8]) {
+    /// 16-byte-aligned section offset `at`. `ctr_val` is the counter's top
+    /// word for a patch section's region, or `None` for the section's own.
+    fn decrypt_at(&self, at: u64, buf: &mut [u8], ctr_val: Option<u32>) {
         if let Some(key) = self.key {
-            let ctr = self.fs.initial_counter(self.nca_offset + at);
+            let media = self.nca_offset + at;
+            let ctr = match ctr_val {
+                Some(v) => self.fs.patch_counter(media, v),
+                None => self.fs.initial_counter(media),
+            };
             crate::crypto::aes128_ctr_xor_in_place(&key, &ctr, buf);
         }
     }
-}
 
-impl<S: ByteSource> ByteSource for SectionSource<S> {
-    fn len(&self) -> u64 {
-        self.body.len()
+    /// Read a range of a patch (`AesCtrEx`) section that lies within one
+    /// subsection, whose counter top word is `ctr_val`.
+    ///
+    /// The caller splits at subsection boundaries; this is the piece between
+    /// two of them. See [`crate::bktr`].
+    pub(crate) fn read_region(
+        &self,
+        offset: u64,
+        out: &mut [u8],
+        ctr_val: u32,
+    ) -> Result<usize, Error> {
+        self.read_decrypting(offset, out, Some(ctr_val))
     }
 
-    fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
+    /// The body of [`ByteSource::read_at`], with the counter left open so a
+    /// patch section can supply its region's own.
+    fn read_decrypting(
+        &self,
+        offset: u64,
+        out: &mut [u8],
+        ctr_val: Option<u32>,
+    ) -> Result<usize, Error> {
         if offset >= self.len() {
             return Ok(0);
         }
@@ -775,7 +876,7 @@ impl<S: ByteSource> ByteSource for SectionSource<S> {
         if head != 0 {
             let mut block = [0u8; 16];
             let got = self.body.read_at(aligned, &mut block)?;
-            self.decrypt_at(aligned, &mut block[..got]);
+            self.decrypt_at(aligned, &mut block[..got], ctr_val);
             let take = (16 - head).min(want).min(got.saturating_sub(head));
             out[..take].copy_from_slice(&block[head..head + take]);
             done = take;
@@ -789,10 +890,20 @@ impl<S: ByteSource> ByteSource for SectionSource<S> {
             let at = aligned + if head != 0 { 16 } else { 0 };
             let rest = &mut out[done..want];
             let got = self.body.read_at(at, rest)?;
-            self.decrypt_at(at, &mut rest[..got]);
+            self.decrypt_at(at, &mut rest[..got], ctr_val);
             done += got;
         }
         Ok(done)
+    }
+}
+
+impl<S: ByteSource> ByteSource for SectionSource<S> {
+    fn len(&self) -> u64 {
+        self.body.len()
+    }
+
+    fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
+        self.read_decrypting(offset, out, None)
     }
 }
 

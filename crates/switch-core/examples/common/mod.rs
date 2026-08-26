@@ -22,6 +22,7 @@ use std::time::Instant;
 use switch_core::cpu::Cpu;
 use switch_core::gpu::Framebuffer;
 use switch_core::keys::KeySet;
+use switch_core::source::ByteSource;
 
 /// The font `pl:u` serves as every shared font type when no firmware fonts
 /// are registered. A guest with no font at all draws no text.
@@ -408,6 +409,10 @@ pub struct Title {
     /// RomFS source for the whole run and cannot borrow one this shares.
     path: std::path::PathBuf,
     program: (u64, u64),
+    /// The base game, when the NCA above is an *update's* Program NCA. An
+    /// update carries no game of its own, so its RomFS only reads over this
+    /// one. See [`Update`].
+    base: Option<(std::path::PathBuf, (u64, u64), switch_core::nca::Nca)>,
 }
 
 impl Title {
@@ -419,50 +424,18 @@ impl Title {
         title: Option<impl AsRef<Path>>,
     ) -> Title {
         let path = container.as_ref().to_path_buf();
-        let src = open_source(&path);
-        let pfs0 = switch_core::nsp::Pfs0::read_from(&src)
-            .unwrap_or_else(|e| die(&format!("{} is not a PFS0: {e}", path.display())));
         let mut keys = keys(prod, title);
-
-        // The last Program NCA rather than the first: a container that
-        // carries more than one is an update, and the later entry is the one
-        // it updates to. `boot_nsp` picks the same one.
-        let mut found = None;
-        for (index, file) in pfs0.files.iter().enumerate() {
-            if !file.name.to_ascii_lowercase().ends_with(".nca") {
-                continue;
+        let (program, nca) = open_program(&path, &mut keys);
+        // `UPDATE=<path.nsp>` runs the title as patched: the update's own
+        // Program NCA supplies every module, and this container stays open
+        // for the RomFS underneath it.
+        match Update::from_env(&mut keys) {
+            Some(update) => {
+                let base = Some((path, program, nca));
+                Title::finish(update.path, update.program, update.nca, keys, base)
             }
-            let Ok(window) = pfs0.file_source(&src, index) else { continue };
-            match switch_core::nca::Nca::parse_source(&window, Some(&keys)) {
-                Ok(nca) if nca.content_type == switch_core::nca::ContentType::Program => {
-                    found = Some((index, file.offset, file.size));
-                }
-                _ => {}
-            }
+            None => Title::finish(path, program, nca, keys, None),
         }
-        let Some((index, offset, size)) = found else {
-            die(&format!("no Program NCA in {}", path.display()))
-        };
-
-        let window = pfs0
-            .file_source(&src, index)
-            .unwrap_or_else(|e| die(&format!("window over the program nca: {e}")));
-        let nca = switch_core::nca::Nca::parse_source(&window, Some(&keys))
-            .unwrap_or_else(|e| die(&format!("parsing the program nca: {e}")));
-        // Title-key crypto needs the key itself from somewhere. Scene
-        // releases bundle the ticket next to the content.
-        if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
-            match switch_core::ticket::find_and_decrypt_title_key_from(
-                &nca.rights_id,
-                &pfs0.files,
-                &src,
-                &keys,
-            ) {
-                Ok(key) => keys.add_resolved_title_key(nca.rights_id, key),
-                Err(e) => eprintln!("no title key for this container: {e}"),
-            }
-        }
-        Title::finish(path, offset, size, nca, keys)
     }
 
     /// Open a bare Program NCA — a system applet, which ships inside firmware
@@ -478,26 +451,26 @@ impl Title {
         let keys = keys(prod, title);
         let nca = switch_core::nca::Nca::parse_source(&src, Some(&keys))
             .unwrap_or_else(|e| die(&format!("{} is not an NCA: {e}", path.display())));
-        Title::finish(path, 0, size, nca, keys)
+        Title::finish(path, (0, size), nca, keys, None)
     }
 
     /// Read the ExeFS, which is the one part of a container worth holding.
     fn finish(
         path: std::path::PathBuf,
-        offset: u64,
-        size: u64,
+        program: (u64, u64),
         nca: switch_core::nca::Nca,
         keys: KeySet,
+        base: Option<(std::path::PathBuf, (u64, u64), switch_core::nca::Nca)>,
     ) -> Title {
         let index = nca
             .exefs_section_index()
             .unwrap_or_else(|| die(&format!("{} has no ExeFS section", path.display())));
         let exefs = nca
-            .read_pfs0_section(program_window(&path, offset, size), &keys, index)
+            .read_pfs0_section(program_window(&path, program.0, program.1), &keys, index)
             .unwrap_or_else(|e| die(&format!("reading the ExeFS: {e}")));
         let exefs_pfs0 = switch_core::nsp::Pfs0::parse(&exefs)
             .unwrap_or_else(|e| die(&format!("the ExeFS is not a PFS0: {e}")));
-        Title { nca, keys, exefs, exefs_pfs0, path, program: (offset, size) }
+        Title { nca, keys, exefs, exefs_pfs0, path, program, base }
     }
 
     /// The modules to boot, in [`MODULE_ORDER`].
@@ -528,20 +501,31 @@ impl Title {
     /// reads the image itself rather than running the title.
     ///
     /// `None` when the NCA has no RomFS section at all, which is a different
-    /// thing from one that would not open.
-    pub fn romfs_source(
-        &self,
-    ) -> Option<Result<
-        switch_core::source::Window<
-            switch_core::nca::SectionSource<
-                switch_core::source::Window<switch_core::source::FileSource>,
-            >,
-        >,
-        switch_core::Error,
-    >> {
-        let index = self.nca.romfs_section_index()?;
+    /// thing from one that would not open. Boxed because a patched RomFS —
+    /// two containers read as one — is a different type from a plain one, and
+    /// every caller wants the same thing from either.
+    pub fn romfs_source(&self) -> Option<Result<Box<dyn ByteSource>, switch_core::Error>> {
         let window = program_window(&self.path, self.program.0, self.program.1);
-        Some(self.nca.romfs_source(window, &self.keys, index))
+        match &self.base {
+            Some((base_path, base_program, base_nca)) => Some(
+                switch_core::bktr::patched_romfs_source(
+                    &self.nca,
+                    window,
+                    base_nca,
+                    program_window(base_path, base_program.0, base_program.1),
+                    &self.keys,
+                )
+                .map(|romfs| Box::new(romfs) as Box<dyn ByteSource>),
+            ),
+            None => {
+                let index = self.nca.romfs_section_index()?;
+                Some(
+                    self.nca
+                        .romfs_source(window, &self.keys, index)
+                        .map(|romfs| Box::new(romfs) as Box<dyn ByteSource>),
+                )
+            }
+        }
     }
 
     /// Boot the title: its address space, its program id, and its modules.
@@ -573,6 +557,89 @@ impl Title {
 }
 
 /// A handle on the container, or exit saying which one could not be opened.
+/// An update container, which `UPDATE=<path.nsp>` names.
+///
+/// An update NSP holds no game. Its Program NCA carries the patched modules
+/// in full — so an update runs by booting *its* ExeFS — and a RomFS section
+/// holding only the ranges the update changed, which reads over the base
+/// container's RomFS and nowhere else. The browser pairs the two files the
+/// user picked; this is the same pairing for a run without one.
+pub struct Update {
+    pub nca: switch_core::nca::Nca,
+    path: std::path::PathBuf,
+    program: (u64, u64),
+}
+
+impl Update {
+    /// The update `UPDATE=<path.nsp>` names, or `None` when it named none.
+    ///
+    /// Its title key goes into `keys`: an update is signed and ticketed
+    /// separately from the game it patches, so the base container's key does
+    /// not open it.
+    pub fn from_env(keys: &mut KeySet) -> Option<Update> {
+        let path = std::path::PathBuf::from(env::var("UPDATE").ok()?);
+        let (program, nca) = open_program(&path, keys);
+        if !nca.is_update() {
+            die(&format!(
+                "{} is not an update: its RomFS is a title's own, not a patch over one",
+                path.display()
+            ));
+        }
+        Some(Update { nca, path, program })
+    }
+
+    /// A fresh window over this update's Program NCA.
+    pub fn program_window(&self) -> switch_core::source::Window<switch_core::source::FileSource> {
+        program_window(&self.path, self.program.0, self.program.1)
+    }
+}
+
+/// The Program NCA in a container: where it sits, its parsed header, and any
+/// bundled ticket's title key added to `keys`.
+///
+/// The *last* Program NCA rather than the first: a container that carries
+/// more than one is an update, and the later entry is the one it updates to.
+fn open_program(path: &Path, keys: &mut KeySet) -> ((u64, u64), switch_core::nca::Nca) {
+    let src = open_source(path);
+    let pfs0 = switch_core::nsp::Pfs0::read_from(&src)
+        .unwrap_or_else(|e| die(&format!("{} is not a PFS0: {e}", path.display())));
+    let mut found = None;
+    for (index, file) in pfs0.files.iter().enumerate() {
+        if !file.name.to_ascii_lowercase().ends_with(".nca") {
+            continue;
+        }
+        let Ok(window) = pfs0.file_source(&src, index) else { continue };
+        match switch_core::nca::Nca::parse_source(&window, Some(&*keys)) {
+            Ok(nca) if nca.content_type == switch_core::nca::ContentType::Program => {
+                found = Some((index, file.offset, file.size));
+            }
+            _ => {}
+        }
+    }
+    let Some((index, offset, size)) = found else {
+        die(&format!("no Program NCA in {}", path.display()))
+    };
+    let window = pfs0
+        .file_source(&src, index)
+        .unwrap_or_else(|e| die(&format!("window over the program nca: {e}")));
+    let nca = switch_core::nca::Nca::parse_source(&window, Some(&*keys))
+        .unwrap_or_else(|e| die(&format!("parsing the program nca: {e}")));
+    // Title-key crypto needs the key itself from somewhere. Scene releases
+    // bundle the ticket next to the content.
+    if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
+        match switch_core::ticket::find_and_decrypt_title_key_from(
+            &nca.rights_id,
+            &pfs0.files,
+            &src,
+            keys,
+        ) {
+            Ok(key) => keys.add_resolved_title_key(nca.rights_id, key),
+            Err(e) => eprintln!("no title key for {}: {e}", path.display()),
+        }
+    }
+    ((offset, size), nca)
+}
+
 fn open_source(path: &Path) -> switch_core::source::FileSource {
     switch_core::source::FileSource::open(path)
         .unwrap_or_else(|e| die(&format!("cannot open {}: {e}", path.display())))

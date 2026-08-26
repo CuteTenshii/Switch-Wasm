@@ -52,6 +52,10 @@ struct Session {
     container: Option<HostSource>,
     /// Parsed file table of the last NSP.
     nsp_files: Vec<switch_core::nsp::Pfs0File>,
+    /// The update the page has added for the title in the open container, if
+    /// it has added one. Held as another host file, read only when the title
+    /// boots: an update container is as large as any other.
+    update: Option<Update>,
     /// Keys loaded from prod.keys / title.keys, used to decrypt NCA headers.
     keys: switch_core::keys::KeySet,
     /// The title's name, developer and icon, from the last Control NCA read.
@@ -275,6 +279,7 @@ pub extern "C" fn switch_new() -> u32 {
     new_handle(Session {
         container: None,
         nsp_files: Vec::new(),
+        update: None,
         keys: switch_core::keys::KeySet::default(),
         control: None,
         cpu,
@@ -417,6 +422,104 @@ pub extern "C" fn switch_add_archive(handle: u32, file: u32, size: u64) -> i32 {
     }
 }
 
+/// Register the update container the page is holding as the update for the
+/// title it is about to run.
+///
+/// `file` is a host file index, the same way [`switch_add_archive`] takes
+/// one: an update NSP is as large as any other container and is never read
+/// through. Only its header, its file table and its ticket are read here.
+///
+/// Returns the program id the update patches — which is the *base* title's,
+/// so the page can pair the two containers by it — or 0 if the file is not an
+/// update this build can read, with the reason in `switch_last_error`.
+///
+/// The pairing is only checked when the title boots: the page may add the
+/// update before opening the base container or after, and neither order is
+/// the wrong one.
+#[no_mangle]
+pub extern "C" fn switch_add_update(handle: u32, file: u32, size: u64) -> u64 {
+    let s = session(handle);
+    let src = HostSource { file, len: size };
+    let files = match Pfs0::read_from(&src) {
+        Ok(pfs0) => pfs0.files,
+        Err(e) => {
+            s.last_error = format!("an update has to be an NSP: {e}");
+            return 0;
+        }
+    };
+    let Some((index, nca)) = switch_core::nca::find_nca_by_type(
+        &files,
+        &src,
+        &s.keys,
+        switch_core::nca::ContentType::Program,
+    ) else {
+        s.last_error =
+            "no Program NCA in this container (or its header couldn't be decrypted — load prod.keys)"
+                .into();
+        return 0;
+    };
+    // An update is ticketed separately from the game it patches, so its own
+    // title key has to come out of its own container.
+    if nca.has_rights_id() && s.keys.resolved_title_key(&nca.rights_id).is_none() {
+        if let Ok(title_key) = switch_core::ticket::find_and_decrypt_title_key_from(
+            &nca.rights_id,
+            &files,
+            &src,
+            &s.keys,
+        ) {
+            s.keys.add_resolved_title_key(nca.rights_id, title_key);
+        }
+    }
+    // A game is not an update, and saying so here is what keeps the page from
+    // offering to apply one container to another at random.
+    if !nca.is_update() {
+        s.last_error =
+            "this container is a title in its own right, not an update: its RomFS is its own"
+                .into();
+        return 0;
+    }
+    let f = &files[index];
+    let program = (f.offset, f.size);
+    let program_id = nca.program_id;
+    s.update = Some(Update { nca, src, program, files });
+    s.last_error.clear();
+    program_id
+}
+
+/// The update's own version, the way its NACP spells it for a reader
+/// ("1.0.1"), written into `buf` as UTF-8.
+///
+/// An update ships its own Control NCA, and the version in it is what a
+/// console shows beside the title once the update is installed — so it is what
+/// the page shows too, rather than the raw `v65536` in the container's name.
+///
+/// Empty when the update carries no Control NCA (legal: an update that changes
+/// only data need not restate the title's metadata) or when the session has no
+/// update at all.
+#[no_mangle]
+pub extern "C" fn switch_update_version(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session(handle);
+    let version = s
+        .update
+        .as_ref()
+        .and_then(|update| {
+            let (index, _) =
+                switch_core::control::find_control_nca(&update.files, &update.src, &s.keys)?;
+            let f = update.files.get(index)?;
+            let window = Window::new(update.src, f.offset, f.size, &f.name).ok()?;
+            let control = switch_core::control::Control::from_source(window, &s.keys).ok()?;
+            Some(control.nacp.display_version)
+        })
+        .unwrap_or_default();
+    write_into(buf, maxlen, version.as_bytes())
+}
+
+/// Forget the update this session had, so the next boot is the plain title.
+#[no_mangle]
+pub extern "C" fn switch_clear_update(handle: u32) {
+    session(handle).update = None;
+}
+
 /// Register a system data archive from bytes the host is holding, rather than
 /// from a file it can ask for again later.
 ///
@@ -514,12 +617,44 @@ pub extern "C" fn switch_nand_identify(
 pub extern "C" fn switch_nand_launch(handle: u32, ptr: *const u8, len: u32) -> i64 {
     let s = session(handle);
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec();
+    // No update: what the NAND holds is system content, and the page pairs
+    // an update with a container the user picked, not with an applet.
     load_and_boot_nca(
         &s.keys,
         &mut s.cpu,
         &mut s.last_error,
         switch_core::source::MemSource(bytes),
+        None,
     )
+}
+
+/// An update container the page has added for the title it is about to run.
+///
+/// An update NSP holds no game: its Program NCA carries the patched modules
+/// in full — so an update runs by booting *its* ExeFS — and a RomFS section
+/// holding only the ranges the update changed, which reads over the base
+/// container's RomFS and nowhere else. Both files stay with the browser; this
+/// is a handle on the second one, exactly as `container` is on the first.
+struct Update {
+    /// The update's Program NCA, parsed. Its program id is the *base* title's
+    /// — the `...800` update id lives only on the container's Meta NCA — so
+    /// this is what a base container is paired against.
+    nca: Nca,
+    src: HostSource,
+    /// Where the Program NCA sits inside the update container.
+    program: (u64, u64),
+    /// The update container's file table, kept for its Control NCA — an
+    /// update states its own version, and that is what the page shows.
+    files: Vec<switch_core::nsp::Pfs0File>,
+}
+
+impl Update {
+    /// A fresh window over the update's Program NCA. Each reader wants its
+    /// own, and a [`HostSource`] is a handle rather than a buffer, so this
+    /// costs nothing.
+    fn program_window(&self) -> Result<Window<HostSource>, switch_core::Error> {
+        Window::new(self.src, self.program.0, self.program.1, "update program nca")
+    }
 }
 
 /// The open container as a source, or an error recorded in the session.
@@ -925,6 +1060,10 @@ fn collect_modules<'a>(pfs0: &Pfs0, exefs: &'a [u8]) -> Vec<(&'static str, &'a [
 /// to stay readable for as long as the title runs. Nothing but the ExeFS is
 /// ever held in memory.
 ///
+/// `update` applies the update the session holds, when it is this title's:
+/// the modules come from the update's own ExeFS and the RomFS from both
+/// containers read as one.
+///
 /// Takes `keys`/`cpu`/`last_error` as separate borrows rather than `&mut
 /// Session` so the caller can keep reading the session's file table while
 /// this holds `&mut Cpu`.
@@ -933,6 +1072,7 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     cpu: &mut Cpu,
     last_error: &mut String,
     nca_src: S,
+    update: Option<&Update>,
 ) -> i64 {
     let nca = match Nca::parse_source(&nca_src, Some(keys)) {
         Ok(nca) => nca,
@@ -941,25 +1081,54 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
             return -1;
         }
     };
-    let exefs_index = match nca.exefs_section_index() {
+    // An update whose title id is not this one is a mistake worth stopping
+    // for: applying it would compose two unrelated RomFS images, and ignoring
+    // it would silently launch a version the page said it was not launching.
+    let update = match update {
+        Some(u) if u.nca.program_id == nca.program_id => Some(u),
+        Some(u) => {
+            *last_error = format!(
+                "the update added to this session is for title {:016x}, but this container is {:016x}",
+                u.nca.program_id, nca.program_id
+            );
+            return -1;
+        }
+        None => None,
+    };
+    // What boots is the update's Program NCA when there is one: an update's
+    // ExeFS is a complete replacement set of modules, not a delta.
+    let program = update.map_or(&nca, |u| &u.nca);
+    let exefs_index = match program.exefs_section_index() {
         Some(i) => i,
         None => {
             *last_error = "no ExeFS (PFS0) section in this NCA".into();
             return -1;
         }
     };
-    let exefs = match nca.read_pfs0_section(&nca_src, keys, exefs_index) {
+    let exefs = match update {
+        Some(u) => u
+            .program_window()
+            .and_then(|window| program.read_pfs0_section(window, keys, exefs_index)),
+        None => program.read_pfs0_section(&nca_src, keys, exefs_index),
+    };
+    let exefs = match exefs {
         Ok(v) => v,
         Err(e) => {
             *last_error = e.to_string();
             return -1;
         }
     };
+    if update.is_some() {
+        cpu.diagnostic(&format!(
+            "[update] booting the update's modules for {:016x}, over this container's RomFS",
+            nca.program_id
+        ));
+    }
     // Say whether the bytes about to be executed were checked, not just that
     // they decrypted: the master hash only vouches for the section's hash
     // table, and a fault inside a title's own crt0 is worth chasing in the
     // title only once the image it ran on is known to be intact.
-    match nca.pfs0_hash_coverage(exefs_index) {
+    match program.pfs0_hash_coverage(exefs_index) {
         Some((block, blocks)) => cpu.diagnostic(&format!(
             "[exefs] {:#x} bytes, {} blocks of {:#x} verified against the section hash table",
             exefs.len(),
@@ -981,7 +1150,7 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     };
     // `pm` reports this, and a system applet derives its own `AppletId` from
     // it — without it every title looks like the same default program.
-    cpu.set_program_id(nca.program_id);
+    cpu.set_program_id(program.program_id);
 
     let modules = collect_modules(&pfs0, &exefs);
     // Everything the ExeFS holds, next to what was actually loaded from it. A
@@ -1011,10 +1180,25 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     // The source is handed to the CPU rather than decrypted up front: a
     // retail RomFS is the entire game, and the guest reads it a range at a
     // time through `IStorage` anyway.
-    if let Some(romfs_index) = nca.romfs_section_index() {
-        match nca.romfs_source(nca_src, keys, romfs_index) {
-            Ok(romfs) => cpu.set_romfs_source(Box::new(romfs)),
-            Err(e) => cpu.diagnostic(&format!("romfs unavailable: {}", e)),
+    match update {
+        // An update's own RomFS holds only what it changed, indexed against
+        // the base game's — the two are only readable together.
+        Some(u) => {
+            let patched = u.program_window().and_then(|window| {
+                switch_core::bktr::patched_romfs_source(&u.nca, window, &nca, nca_src, keys)
+            });
+            match patched {
+                Ok(romfs) => cpu.set_romfs_source(Box::new(romfs)),
+                Err(e) => cpu.diagnostic(&format!("the update's RomFS is unreadable: {}", e)),
+            }
+        }
+        None => {
+            if let Some(romfs_index) = nca.romfs_section_index() {
+                match nca.romfs_source(nca_src, keys, romfs_index) {
+                    Ok(romfs) => cpu.set_romfs_source(Box::new(romfs)),
+                    Err(e) => cpu.diagnostic(&format!("romfs unavailable: {}", e)),
+                }
+            }
         }
     }
 
@@ -1056,7 +1240,7 @@ pub extern "C" fn switch_load_nca(handle: u32) -> i64 {
     let Some(container) = container(s) else {
         return -1;
     };
-    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, container)
+    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, container, s.update.as_ref())
 }
 
 /// The index of the Program NCA in the open container, or -1 if it has none.
@@ -1129,7 +1313,7 @@ pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
         }
     }
 
-    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, nca_src)
+    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, nca_src, s.update.as_ref())
 }
 
 /// Load an AArch64 ELF into the CPU. Returns entry address or -1.

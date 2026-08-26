@@ -814,6 +814,11 @@ body.resizing { cursor: col-resize; user-select: none; }
   border-top: 1px solid var(--border);
 }
 
+/* The update paired with the open title, or the one the page is waiting for.
+   An accent edge because it is a statement about what Launch will do, not one
+   more field of the container's metadata. */
+.update-note { border-left: 3px solid var(--accent); }
+
 #nsp-result { display: flex; flex-direction: column; gap: 10px; }
 #nsp-result:empty { display: none; }
 

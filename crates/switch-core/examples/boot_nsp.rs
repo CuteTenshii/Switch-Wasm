@@ -163,6 +163,11 @@ fn main() {
 
     let mut keys = common::keys(prod_path, title_path);
 
+    // `UPDATE=<path.nsp>` runs the title as patched. An update NSP holds no
+    // game: its Program NCA carries every module, and its RomFS holds only
+    // what changed — so the container opened above stays open underneath it.
+    let update = common::Update::from_env(&mut keys);
+
     // Find the Program NCA: parse every .nca's header and pick the one whose
     // content type is Program. (cnmt.nca entries are tiny metadata records,
     // control.nca is the icon/nacp, so this reliably picks the real one.)
@@ -221,8 +226,22 @@ fn main() {
         }
     }
 
-    let exefs_index = nca.exefs_section_index().expect("no exefs section");
-    let exefs = match nca.read_pfs0_section(&program_window, &keys, exefs_index) {
+    // What boots is the update's Program NCA when there is one: its ExeFS is
+    // a complete replacement set of modules, not a delta.
+    let program_nca = update.as_ref().map_or(&nca, |u| &u.nca);
+    if let Some(u) = &update {
+        println!(
+            "--- update for {:016x}: its {} modules over this container's RomFS ---",
+            u.nca.program_id,
+            if u.nca.is_update() { "patched" } else { "own" }
+        );
+    }
+    let exefs_index = program_nca.exefs_section_index().expect("no exefs section");
+    let exefs = match &update {
+        Some(u) => u.nca.read_pfs0_section(u.program_window(), &keys, exefs_index),
+        None => nca.read_pfs0_section(&program_window, &keys, exefs_index),
+    };
+    let exefs = match exefs {
         Ok(v) => v,
         Err(e) => {
             println!("read_pfs0_section FAILED: {}", e);
@@ -290,19 +309,38 @@ fn main() {
     // whole game in memory and a title's worth of RAM to lose. This needs its
     // own handle on the file, since the CPU keeps the source for the whole run
     // and cannot borrow the one the scan above is using.
-    if let Some(romfs_index) = nca.romfs_section_index() {
+    let base_window = || {
         let owned = FileSource::open(nsp_path).expect("reopen nsp for romfs");
-        let owned_window = Window::new(owned, program_file.offset, program_file.size, "program nca")
-            .expect("window over the program nca");
-        match nca.romfs_source(owned_window, &keys, romfs_index) {
+        Window::new(owned, program_file.offset, program_file.size, "program nca")
+            .expect("window over the program nca")
+    };
+    match &update {
+        // An update's own RomFS is meaningless on its own — it is the ranges
+        // it changed, indexed against the base game's.
+        Some(u) => match switch_core::bktr::patched_romfs_source(
+            &u.nca,
+            u.program_window(),
+            &nca,
+            base_window(),
+            &keys,
+        ) {
             Ok(romfs) => {
-                println!("RomFS: {} bytes, streamed", romfs.len());
+                println!("RomFS: {} bytes, patched by the update, streamed", romfs.len());
                 cpu.set_romfs_source(Box::new(romfs));
             }
-            Err(e) => println!("romfs_source FAILED: {}", e),
+            Err(e) => println!("patched_romfs_source FAILED: {}", e),
+        },
+        None if nca.romfs_section_index().is_some() => {
+            let index = nca.romfs_section_index().unwrap();
+            match nca.romfs_source(base_window(), &keys, index) {
+                Ok(romfs) => {
+                    println!("RomFS: {} bytes, streamed", romfs.len());
+                    cpu.set_romfs_source(Box::new(romfs));
+                }
+                Err(e) => println!("romfs_source FAILED: {}", e),
+            }
         }
-    } else {
-        println!("no RomFS section in this NCA");
+        None => println!("no RomFS section in this NCA"),
     }
     // The system fonts `pl:u` hands out. Without them a title that draws
     // text waits for a font that never arrives — the browser stages one at

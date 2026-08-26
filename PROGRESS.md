@@ -366,6 +366,23 @@ The other 1.5 GiB was an alias region this title never touches. `nnSdk` picks
 its heap route at init from the NPDM's system resource size, so each layout now
 spends the space on the region its own titles grow into.
 
+**An update NSP holds no game.** Its Program NCA carries a complete ExeFS —
+patched modules, not a delta — and a RomFS section encrypted `AesCtrEx`: the
+BKTR form, holding only the ranges the update changed plus the two tables that
+index them against the base title's. Booting one alone loads and runs and then
+aborts, 114 M instructions in, after `OpenDataStorageByCurrentProcess` answers
+`0x202` three times — which is what Just Dance 2017's `svcBreak` was, not a CPU
+or a GPU bug. `bktr.rs` composes the pair, streaming both containers. Two
+things the format does not say out loud:
+
+- The subsection counter replaces the section counter's **generation** word,
+  not its secure value. The wrong way round is quiet: the tables are written
+  under the section's own counter and still decrypt, so everything validates
+  and every byte of *data* is noise.
+- An update's Program NCA carries the **base** title id — the `...800` update
+  id is only on the container's Meta NCA. So pairing is by program id, and
+  what identifies a container as an update at all is that its RomFS is a patch.
+
 **A `Poll` that returns instantly is not the same as one that reports nothing
 ready.** NXpotify's Zeroconf listener is `if (poll(&pfd, 1, 200) <= 0)
 continue;`. On hardware that sleeps 200 ms; here it turned into a loop with no
@@ -401,6 +418,14 @@ Where a stub would have to invent something unverifiable, it fails instead:
   by looking for an entry pointing inside the header only works when some file
   sits at offset 0; a repack that pads to an alignment boundary has no such
   entry. The base is chosen from the extents instead.
+- **An update is paired, not opened.** Dropping one on the container panel
+  registers it against the open title — either order, since neither file is
+  read until Launch — and the launch boots its modules over the base game's
+  RomFS. A `File` reference dies on reload, so the page remembers which update
+  a title was last launched with and asks for that file again rather than
+  quietly running the base version. Each host file gets its own chunk cache:
+  a patched read crosses between the two containers constantly, and one
+  shared LRU has them evicting each other at every crossing.
 - **Wasm buffers detach on growth**, so a cached view goes stale; staging
   buffers also have to be freed or repeated loads overflow linear memory.
 - The frontend is TypeScript on Vite (`web/main/`, `web/worker/`), and
@@ -417,6 +442,8 @@ The `.nro`/`.nsp` files are gitignored; `test-nros/` holds the local homebrew.
 - `--example boot_nsp <nsp> <prod.keys> [title.keys] [steps]` — the browser's
   Launch button, without a browser. `SHOT=<f.ppm>` writes a frame; prefer it
   over reading `frames presented: 0` off a budget too short to reach one.
+  `UPDATE=<update.nsp>` runs the title patched, which is the page's pairing of
+  the two containers with no page in the way.
 - `--example dump_exefs …` — flat module images at their real load addresses
   plus a sorted `symbols.txt`. **This is what makes a retail backtrace
   readable.** `--example disasm_flat` disassembles them there.

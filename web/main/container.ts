@@ -48,8 +48,125 @@ async function handleContainerFile(file: File): Promise<void> {
     log(verdict.why, 'err');
     return;
   }
-  if (verdict.format === 'nca') await handleStandaloneNca(file);
+  if (verdict.format === 'nca') {
+    await handleStandaloneNca(file);
+    return;
+  }
+  // An update NSP is not a container to open: it holds no game. Asking the
+  // session what it is costs its header and its ticket, and answers with the
+  // title it patches — so this is also how the page knows which game to pair
+  // it with.
+  const patches = await call('add_update', file).catch(() => '');
+  if (patches) await handleUpdateFile(file, patches);
   else await handleNspFile(file);
+}
+
+/* ---------- updates ----------
+
+   An update holds only what it changed. Its Program NCA carries the patched
+   modules in full, and its RomFS is a set of ranges indexed against the base
+   game's — readable over that container and nowhere else. So an update is not
+   opened, it is *paired*: dropped before the game or after, it waits until
+   the title it belongs to is open and is then applied at Launch.
+
+   The pairing lives here rather than in the session because the session
+   refuses to launch a container whose update is for another title, and a
+   page holding one for a game that is not open must not make the game that
+   is open unlaunchable. */
+
+/** An update the page is holding for a title, whether or not it is open. */
+interface HeldUpdate {
+  file: File;
+  titleId: string;
+  /** The update's own version, from its NACP - "1.0.1", not "v65536". */
+  version: string;
+}
+
+let heldUpdate: HeldUpdate | null = null;
+
+// The title the open container describes, which is what an update is paired
+// against. Empty until its Control NCA has been read.
+let openTitleId = '';
+
+// What each title was last launched patched with. A browser will not hand a
+// page a file it was not asked for, so the update itself is gone on reload -
+// but which one it was is worth keeping, so a title that has been patched
+// before says so instead of quietly launching unpatched.
+const UPDATE_MEMORY = 'switch-wasm:updates';
+
+interface RememberedUpdate { name: string; version: string }
+
+function rememberedUpdates(): Record<string, RememberedUpdate> {
+  try {
+    return JSON.parse(localStorage.getItem(UPDATE_MEMORY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function rememberUpdate(u: HeldUpdate): void {
+  const all = rememberedUpdates();
+  all[u.titleId] = { name: u.file.name, version: u.version };
+  try {
+    localStorage.setItem(UPDATE_MEMORY, JSON.stringify(all));
+  } catch {
+    // A full or blocked store costs the page nothing it needs this session.
+  }
+}
+
+async function handleUpdateFile(file: File, titleId: string): Promise<void> {
+  const version = await call('update_version').catch(() => '');
+  heldUpdate = { file, titleId, version };
+  rememberUpdate(heldUpdate);
+  log('Update ' + describeUpdate(heldUpdate) + ' for ' + titleId + ' - '
+    + (titleId === openTitleId
+      ? 'applied when this title launches.'
+      : 'open that game to launch it patched.'), 'ok');
+  await syncUpdate();
+}
+
+function describeUpdate(u: HeldUpdate | RememberedUpdate & { file?: File }): string {
+  const version = 'version' in u && u.version ? 'v' + u.version : '';
+  const name = 'file' in u && u.file ? u.file.name : (u as RememberedUpdate).name;
+  return version || name;
+}
+
+/* Hand the update to the session only while it belongs to the title that is
+   open. Re-run whenever either half changes: a new container, a new update,
+   or a session reset that lost both. */
+async function syncUpdate(): Promise<void> {
+  if (heldUpdate && heldUpdate.titleId === openTitleId) {
+    await call('add_update', heldUpdate.file).catch(() => '');
+  } else {
+    await call('clear_update').catch(() => 0);
+  }
+  showUpdateNote();
+}
+
+/* The update's line on the title card: what is applied, or what is being
+   waited for. Rendered under the card rather than inside it, so that opening
+   another container - which rebuilds the card - cannot leave a stale one. */
+function showUpdateNote(): void {
+  $('nsp-result').querySelectorAll('.update-note').forEach((node) => node.remove());
+  const text = updateNoteText();
+  if (!text) return;
+  const note = el('div', 'nca-info update-note', text);
+  const card = $('nsp-result').querySelector('.title-card');
+  if (card) card.after(note);
+  else $('nsp-result').prepend(note);
+}
+
+function updateNoteText(): string {
+  if (heldUpdate) {
+    return heldUpdate.titleId === openTitleId
+      ? 'Update ' + describeUpdate(heldUpdate) + ' - applied when this title launches.'
+      : 'Update ' + describeUpdate(heldUpdate) + ' held for ' + heldUpdate.titleId
+        + ' - open that game to launch it patched.';
+  }
+  const known = openTitleId ? rememberedUpdates()[openTitleId] : undefined;
+  if (!known) return '';
+  return 'This title was last launched with update ' + describeUpdate(known)
+    + ' (' + known.name + '). Drop that file again to launch it patched.';
 }
 
 /* ---------- booting a container from the stage ----------
@@ -88,6 +205,19 @@ export async function bootContainer(file: File, format: 'pfs0' | 'nca'): Promise
       return;
     }
     await launchStandaloneNca(file);
+    return;
+  }
+  // Dropped on the stage, an update means the same thing it means in the
+  // panel: pair it with the game and launch that. There is nothing in one to
+  // boot on its own.
+  const patches = await call('add_update', file).catch(() => '');
+  if (patches) {
+    await handleUpdateFile(file, patches);
+    setState('idle');
+    failLoad(patches === openTitleId
+      ? 'Update applied - launch ' + (heldTitle?.name || 'the game') + ' to run it patched.'
+      : 'That is an update for ' + patches + ', not a game. Open that title to launch it patched.');
+    openPanel('files');
     return;
   }
   await handleNspFile(file);
@@ -133,7 +263,10 @@ export async function reopenContainer(): Promise<void> {
     log('Could not re-open ' + file.name + ' - load it again to launch it.', 'err');
     openContainer = null;
     clearNsp();
+    return;
   }
+  // A fresh session has no update either, and the page is still showing one.
+  await syncUpdate();
 }
 
 // The File itself is handed to the worker, not its bytes: a retail container
@@ -196,6 +329,10 @@ export function clearNsp(): void {
   $('nsp-result').textContent = '';
   setNote('container-badge', 'none open', false);
   nspFiles = [];
+  // The held update outlives the container: dropping a game while holding its
+  // update is the normal way round. What does not outlive it is the pairing,
+  // which the next title card re-establishes.
+  openTitleId = '';
   holdTitle(null, null);
 }
 
@@ -244,6 +381,10 @@ async function showTitleCard(loader: () => Promise<number>): Promise<ControlInfo
   const card = renderTitleCard(info, holdTitle(info, icon)?.iconUrl ?? null);
   $('nsp-result').prepend(card);
   log('Title: ' + info.name + (info.publisher ? ' - ' + info.publisher : ''), 'ok');
+  // Which title is open is what an update is paired against, and the Control
+  // NCA is where the page learns it.
+  openTitleId = info.title_id;
+  await syncUpdate();
   return info;
 }
 
@@ -426,7 +567,13 @@ async function parseAndRenderNca(
 // larger undertaking than the homebrew this emulator otherwise runs), so
 // expect it to run until the first missing service rather than reach a menu.
 function launchNca(f: NspFile, index: number): Promise<void> {
-  return doLaunchNca(f.name, () => call('load_nca_from_nsp', index), heldTitle);
+  // Said by the page rather than left to the core's own diagnostics: booting
+  // clears the trace buffer those go to, and which version is about to run is
+  // the one thing a launch should not be silent about.
+  const note = heldUpdate && heldUpdate.titleId === openTitleId
+    ? 'Update ' + describeUpdate(heldUpdate) + ' applied: its modules, over the base game\'s data.'
+    : undefined;
+  return doLaunchNca(f.name, () => call('load_nca_from_nsp', index), heldTitle, note);
 }
 
 // Same as `launchNca`, but for a standalone .nca file: it is already the open
@@ -439,8 +586,11 @@ export async function doLaunchNca(
   name: string,
   loadFn: () => Promise<number>,
   identity?: LaunchIdentity | null,
+  note?: string,
 ): Promise<void> {
   clearConsole();
+  // After the clear, or the launch would wipe the line that says what it is.
+  if (note) log(note, 'ok');
   setState('loading');
   // A title the container named puts that name and its own icon on the screen;
   // a bare NCA off the NAND has only the file name to show.

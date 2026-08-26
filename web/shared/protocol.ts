@@ -121,6 +121,9 @@ export interface Commands {
   open_nsp(file: File): number;
   open_nca(file: File): number;
   add_archive(file: File): number;
+  add_update(file: File): string;
+  update_version(): string;
+  clear_update(): number;
   nand_identify(file: File): NandIdentity | null;
   nand_launch(bytes: Bytes): number;
   nand_add_archive(bytes: Bytes): string;
