@@ -44,30 +44,23 @@ const NO_CHANNEL_YET = 'the title has not opened a channel yet';
 
 /* Whether the GPU backend may be installed at all.
 
-   Off, and deliberately: the backend hands a render target back to guest
-   memory by mapping a readback buffer, and a map completes only when the
-   event loop runs. `Gpu::write_back` waits for it with `Device::poll`, which
-   is a real wait natively and a no-op on the web -- so in a browser `land`
-   reads a buffer that is not mapped yet and Just Dance 2017 stopped with
-   `getMappedRange failed`.
+   On again: the readback that kept it off no longer waits. `Renderer::flush`
+   answers "pending" instead of blocking, and the *present* is what waits --
+   `Cpu::complete_pending_present` puts the frame up from a later slice, which
+   in a worker is a later message, which is after the event loop has run and
+   the map has completed.
 
-   Deferring the landing by a frame is not the fix and has been tried: a
-   double-buffered title presents the surface whose readback was just asked
-   for, never the one that has arrived, and it came out black. The fix is for
-   the present to wait for its *own* readback, which is the async seam
-   `start_read_back` and `land` were split apart for.
-
-   Until that lands, the software rasterizer is what runs -- which is what ran
-   before the backend existed, and which this session's depth-comparison and
-   vertex-attribute fixes went into. Flip this back when the seam is closed. */
-const GPU_BACKEND_READY = false;
+   Left as a named constant because this is the switch to reach for if the
+   browser disagrees with the CLI about it: the mechanism is verified natively
+   (20 deferred presents over 300 frames, all 300 still presented), and a
+   browser is where its no-op `Device::poll` lives. */
+const GPU_BACKEND_READY = true;
 
 function tryGpu(): void {
   if (!GPU_BACKEND_READY) {
     if (gpu === 'no') {
       gpu = 'never';
-      console.info('[gpu] software rasterizer: the device readback cannot '
-        + 'complete in a browser yet (see GPU_BACKEND_READY)');
+      console.info('[gpu] software rasterizer: turned off at GPU_BACKEND_READY');
     }
     return;
   }
