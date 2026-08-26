@@ -125,24 +125,38 @@ impl Engine2D {
         if ctx.trace {
             eprintln!(
                 "[gpu] 2d blit src {:#x} {}x{} fmt={:#x} -> dst {:#x} ({},{}) {}x{} fmt={:#x} \
-                 du_dx={du_dx} dv_dy={dv_dy} src0=({src_x0},{src_y0}) layout={:?}/{:?}",
+                 du_dx={du_dx} dv_dy={dv_dy} src0=({src_x0},{src_y0}) bilinear={bilinear} \
+                 layout={:?}/{:?}",
                 src.addr, src.width, src.height, src.format.raw,
                 dst.addr, dst_x0, dst_y0, dst_w, dst_h, dst.format.raw,
                 src.layout, dst.layout
             );
         }
 
+        // Point-sampling between two surfaces of one byte-exact format is a
+        // move, not a conversion: `encode(decode(x))` is `x` there, and the
+        // pair costs a round trip through linear light for every pixel of the
+        // destination. A title that resolves its render target this way does
+        // 921,600 of them a frame.
+        let byte_exact =
+            !bilinear && src.format.raw == dst.format.raw && dst.format.is_byte_exact();
+        let bpp = dst.format.bytes_per_pixel;
         for y in 0..dst_h {
             let v = src_y0 + dv_dy * y as f64;
             for x in 0..dst_w {
                 let u = src_x0 + du_dx * x as f64;
+                let va = dst.addr + dst.offset(dst_x0 + x, dst_y0 + y) as u64;
+                if byte_exact {
+                    let raw = src.texel_raw(u.max(0.0) as u32, v.max(0.0) as u32, ctx)?;
+                    ctx.write_pixel(va, bpp, raw)?;
+                    continue;
+                }
                 let color = if bilinear {
                     src.sample_bilinear(u, v, ctx)?
                 } else {
                     src.sample_point(u, v, ctx)?
                 };
-                let va = dst.addr + dst.offset(dst_x0 + x, dst_y0 + y) as u64;
-                ctx.write_pixel(va, dst.format.bytes_per_pixel, dst.format.encode(color)?)?;
+                ctx.write_pixel(va, bpp, dst.format.encode(color)?)?;
             }
         }
         ctx.stats.copies += 1;

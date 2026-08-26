@@ -8,7 +8,9 @@ use crate::gpu::engine::{field, Registers, REGISTER_COUNT};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::macro_engine::{MacroEngine, MacroHost, MacroWrite, MACRO_METHODS_START};
 use crate::gpu::renderer::{Renderer, Software};
-use crate::gpu::surface::{ColorFormat, Layout, SampleGrid, MAX_SAMPLES};
+use crate::gpu::surface::{
+    ColorFormat, Layout, SampleGrid, GOB_HEIGHT, GOB_SIZE, GOB_WIDTH, MAX_SAMPLES,
+};
 use crate::{Error, Result};
 
 // Registers with behaviour attached. Everything else is plain state.
@@ -322,6 +324,16 @@ impl RenderTarget {
         let bpp = self.format.bytes_per_pixel;
         let width_bytes = self.width * bpp;
         self.layout.offset(x * bpp, y, width_bytes)
+    }
+
+    /// [`Target::texel_offset`], plus how many texels from there on are
+    /// contiguous — what a walk over the whole surface wants, rather than a
+    /// swizzle per texel. At least one, so a caller can always make progress.
+    pub fn texel_run(&self, x: u32, y: u32) -> (u32, u32) {
+        let bpp = self.format.bytes_per_pixel;
+        let width_bytes = self.width * bpp;
+        let (offset, run) = self.layout.run_at(x * bpp, y, width_bytes);
+        (offset, (run / bpp).max(1))
     }
 }
 
@@ -1168,14 +1180,53 @@ impl Engine3D {
                 slot, rt.addr, grid.samples_x, grid.samples_y, rt.format.raw
             );
         }
+        // Every sample of a pixel is a texel of that pixel's own tile, and
+        // `SampleGrid` hands out `samples_x * samples_y` distinct ones — so
+        // clearing whole pixels *is* clearing the texel rectangle they cover.
+        // Written that way it is runs of contiguous texels rather than a
+        // swizzle and an address translation each, which for a 720p target at
+        // 2x2 samples is 3.7 million of them per attachment per frame.
+        if all_channels {
+            let (tx0, ty0) = (x0 * grid.samples_x, y0 * grid.samples_y);
+            let (tx1, ty1) = (x1 * grid.samples_x, y1 * grid.samples_y);
+            // A GOB is 512 *contiguous* bytes -- `gob_offset` is a bijection
+            // from its 64x8 bytes onto them -- and a clear writes one value to
+            // every texel in it. So a GOB that lies entirely inside the
+            // rectangle is one fill of 512 bytes rather than 128 swizzled
+            // writes, and a 2560x1440 target is 28,800 of them instead of 3.7
+            // million. Only the GOBs on the edges of a partial rectangle need
+            // the per-texel walk.
+            let gob_texels = GOB_WIDTH / bpp;
+            let whole_gobs = matches!(rt.layout, Layout::BlockLinear { .. }) && gob_texels > 0;
+            let mut ty = ty0;
+            while ty < ty1 {
+                let gob_row = ty - ty % GOB_HEIGHT;
+                let row_whole = whole_gobs && ty == gob_row && ty + GOB_HEIGHT <= ty1;
+                let mut tx = tx0;
+                while tx < tx1 {
+                    let gob_col = tx - tx % gob_texels;
+                    if row_whole && tx == gob_col && tx + gob_texels <= tx1 {
+                        let (offset, _) = rt.texel_run(tx, ty);
+                        ctx.fill_pixels(base + offset as u64, bpp, raw, GOB_SIZE / bpp)?;
+                        tx += gob_texels;
+                        continue;
+                    }
+                    let (offset, run) = rt.texel_run(tx, ty);
+                    let count = run.min(tx1 - tx);
+                    ctx.fill_pixels(base + offset as u64, bpp, raw, count)?;
+                    tx += count;
+                }
+                ty += if row_whole { GOB_HEIGHT } else { 1 };
+            }
+            return Ok(());
+        }
+
         for y in y0..y1 {
             for x in x0..x1 {
                 for sample in 0..grid.count() {
                     let (tx, ty) = grid.texel(x, y, sample);
                     let va = base + rt.texel_offset(tx, ty) as u64;
-                    if all_channels {
-                        ctx.write_pixel(va, bpp, raw)?;
-                    } else {
+                    {
                         let old = rt.format.decode(ctx.read_pixel(va, bpp)?)?;
                         let mut merged = old;
                         for (i, &enabled) in channels.iter().enumerate() {

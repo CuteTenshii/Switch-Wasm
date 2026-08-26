@@ -236,24 +236,44 @@ impl Gpu {
             Layout::BlockLinear { .. } => buffer.width * bpp,
         };
 
+        // Asked once, not once per pixel: the answer is the same for every
+        // one of the 921,600 in a 720p frame.
+        let srgb = format.is_srgb();
+        let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+
         let mut pixels = Vec::with_capacity((buffer.width * buffer.height) as usize);
         for y in 0..buffer.height {
-            for x in 0..buffer.width {
-                let addr = base.wrapping_add(layout.offset(x * bpp, y, width_bytes));
-                let mut raw = 0u128;
-                for i in 0..bpp {
-                    raw |= (mem.read_u8(addr.wrapping_add(i))? as u128) << (8 * i);
-                }
-                let mut rgba = format.decode(raw)?;
-                if format.is_srgb() {
-                    for c in rgba.iter_mut().take(3) {
-                        *c = surface::linear_to_srgb(*c);
+            // Swizzled once per contiguous run rather than once per pixel:
+            // `Layout::run_at` says how far the addresses stay linear, which
+            // at 32 bits a pixel is four of them.
+            let mut x = 0;
+            while x < buffer.width {
+                let (offset, run) = layout.run_at(x * bpp, y, width_bytes);
+                let addr = base.wrapping_add(offset);
+                let count = (run / bpp).clamp(1, buffer.width - x);
+                for i in 0..count {
+                    let raw = mem.read_le(addr.wrapping_add(i * bpp), bpp)?;
+                    // The common surface is already the word the canvas
+                    // wants; only a format whose decode is real work goes
+                    // through linear light and straight back again.
+                    if let Some(word) = format.host_word(raw as u32) {
+                        pixels.push(word);
+                        continue;
                     }
+                    let mut rgba = format.decode(raw)?;
+                    if srgb {
+                        for c in rgba.iter_mut().take(3) {
+                            *c = surface::linear_to_srgb(*c);
+                        }
+                    }
+                    pixels.push(
+                        to8(rgba[0])
+                            | (to8(rgba[1]) << 8)
+                            | (to8(rgba[2]) << 16)
+                            | (to8(rgba[3]) << 24),
+                    );
                 }
-                let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
-                pixels.push(
-                    to8(rgba[0]) | (to8(rgba[1]) << 8) | (to8(rgba[2]) << 16) | (to8(rgba[3]) << 24),
-                );
+                x += count;
             }
         }
         self.framebuffer = Framebuffer { width: buffer.width, height: buffer.height, pixels };

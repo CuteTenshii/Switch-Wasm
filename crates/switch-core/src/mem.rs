@@ -70,6 +70,17 @@ pub struct Memory {
     /// modules (`rtld`/`main`/`subsdk*`/`sdk`), so this is a list, not a
     /// single range.
     readonly: Vec<(u32, u32)>,
+    /// The envelope of every range in `readonly`, as `(lowest start, highest
+    /// end)`; `start >= end` when there are none.
+    ///
+    /// [`Memory::is_readonly`] runs on **every** guest store and walks that
+    /// list linearly, so a process with four modules loaded paid four
+    /// comparisons per store — against a clear that writes eleven million
+    /// texels a frame, and a heap that writes far more. Every protected range
+    /// is a module's `.text` down in the image, so almost every store a
+    /// running title makes is outside the envelope and answers in two
+    /// comparisons without touching the list at all.
+    readonly_span: (u32, u32),
     /// Shared zero page served for reads inside the soft region.
     zero: Box<[u8; PAGE_SIZE]>,
     /// How many pages currently hold real storage. Counted as they are
@@ -122,6 +133,7 @@ impl Memory {
             block_mapped: vec![0u16; BLOCK_COUNT],
             soft: (1, 0),
             readonly: Vec::new(),
+            readonly_span: (u32::MAX, 0),
             zero: Box::new([0u8; PAGE_SIZE]),
             mapped_pages: 0,
             watch: (1, 0),
@@ -219,12 +231,24 @@ impl Memory {
     /// patched in, not before.
     pub fn mark_readonly(&mut self, start: u32, end: u32) {
         self.readonly.push((start, end));
+        self.refresh_readonly_span();
+    }
+
+    /// Recompute the envelope `is_readonly` tests before it walks the list.
+    /// Called by everything that changes the list, which is the only way the
+    /// envelope can be wrong.
+    fn refresh_readonly_span(&mut self) {
+        self.readonly_span = self
+            .readonly
+            .iter()
+            .fold((u32::MAX, 0), |(lo, hi), &(start, end)| (lo.min(start), hi.max(end)));
     }
 
     /// Drop every read-only range, so a fresh boot in a reused [`Memory`]
     /// doesn't inherit protection left over from a previous title/homebrew.
     pub fn clear_readonly(&mut self) {
         self.readonly.clear();
+        self.refresh_readonly_span();
     }
 
     /// Drop every read-only range that lies inside `[start, end)`.
@@ -238,13 +262,17 @@ impl Memory {
     /// else's module is not something to guess at.
     pub fn unmark_readonly(&mut self, start: u32, end: u32) {
         self.readonly.retain(|&(s, e)| !(s >= start && e <= end));
+        self.refresh_readonly_span();
     }
 
     /// Whether `addr` falls in a range marked by [`Memory::mark_readonly`] —
     /// in practice, always a loaded module's `.text`. Used by `svcQueryMemory`
     /// to report the real R-X permission code on it instead of a blanket RWX.
+    #[inline(always)]
     pub fn is_readonly(&self, addr: u32) -> bool {
-        self.readonly.iter().any(|&(s, e)| addr >= s && addr < e)
+        addr >= self.readonly_span.0
+            && addr < self.readonly_span.1
+            && self.readonly.iter().any(|&(s, e)| addr >= s && addr < e)
     }
 
     #[inline(always)]
@@ -513,6 +541,124 @@ impl Memory {
     #[inline(never)]
     fn read_u64_straddling(&self, addr: u32) -> Result<u64> {
         Ok((self.read_u32(addr)? as u64) | ((self.read_u32(addr.wrapping_add(4))? as u64) << 32))
+    }
+
+    /// Read `len` little-endian bytes as one value: one page lookup per
+    /// machine word rather than one per byte.
+    ///
+    /// This is the shape every pixel walk in the GPU wants. `read_u8` costs a
+    /// page lookup each, so assembling a 4-byte pixel a byte at a time is four
+    /// of them, and the walks that do it run over every pixel of a surface —
+    /// a blit, a scan-out, a blend. Both `ExecCtx::read_pixel` and
+    /// `Gpu::present` used to carry their own copy of this; only one of them
+    /// had been fixed.
+    #[inline(always)]
+    pub fn read_le(&self, addr: u32, len: u32) -> Result<u128> {
+        Ok(match len {
+            1 => u128::from(self.read_u8(addr)?),
+            2 => u128::from(self.read_u16(addr)?),
+            4 => u128::from(self.read_u32(addr)?),
+            8 => u128::from(self.read_u64(addr)?),
+            16 => {
+                u128::from(self.read_u64(addr)?)
+                    | (u128::from(self.read_u64(addr.wrapping_add(8))?) << 64)
+            }
+            _ => self.read_le_odd(addr, len)?,
+        })
+    }
+
+    /// The byte-at-a-time fallback for a width no accessor covers — 3-byte
+    /// formats, and nothing else in practice.
+    #[cold]
+    #[inline(never)]
+    fn read_le_odd(&self, addr: u32, len: u32) -> Result<u128> {
+        let mut value = 0u128;
+        for i in 0..len {
+            value |= u128::from(self.read_u8(addr.wrapping_add(i))?) << (8 * i);
+        }
+        Ok(value)
+    }
+
+    /// Write `len` little-endian bytes of `value`: the counterpart of
+    /// [`Memory::read_le`], and worth more, since `write_u8` re-scans the
+    /// read-only ranges on every call and a byte loop pays for that per byte.
+    #[inline(always)]
+    pub fn write_le(&mut self, addr: u32, len: u32, value: u128) -> Result<()> {
+        match len {
+            1 => self.write_u8(addr, value as u8),
+            2 => self.write_u16(addr, value as u16),
+            4 => self.write_u32(addr, value as u32),
+            8 => self.write_u64(addr, value as u64),
+            16 => {
+                self.write_u64(addr, value as u64)?;
+                self.write_u64(addr.wrapping_add(8), (value >> 64) as u64)
+            }
+            _ => self.write_le_odd(addr, len, value),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn write_le_odd(&mut self, addr: u32, len: u32, value: u128) -> Result<()> {
+        for i in 0..len {
+            self.write_u8(addr.wrapping_add(i), (value >> (8 * i)) as u8)?;
+        }
+        Ok(())
+    }
+
+    /// Write `count` copies of a `unit`-byte little-endian value to
+    /// consecutive addresses, looking the page up **once** for the whole run.
+    ///
+    /// A clear is what wants this: it writes one value across a whole surface,
+    /// and going through [`Memory::write_le`] per unit paid a page lookup and
+    /// a read-only scan for each of the eleven million texels a 720p 2x2 MSAA
+    /// target costs per frame. The GPU hands runs of at most a GOB's linear
+    /// stretch, which never crosses a page — anything that would falls back to
+    /// writing them one at a time.
+    ///
+    /// The watchpoint and the JIT's code-page bookkeeping are kept exactly as
+    /// the per-unit path would leave them: a run that lands in the watched
+    /// range reports its first address, and a run that touches translated code
+    /// invalidates it.
+    pub fn fill_le(&mut self, addr: u32, unit: u32, value: u128, count: u32) -> Result<()> {
+        let span = (unit as usize) * (count as usize);
+        let off = Self::in_page_offset(addr);
+        if count == 0 {
+            return Ok(());
+        }
+        if off + span > PAGE_SIZE || !matches!(unit, 1 | 2 | 4 | 8 | 16) {
+            for i in 0..count {
+                self.write_le(addr.wrapping_add(i * unit), unit, value)?;
+            }
+            return Ok(());
+        }
+        let end = addr.wrapping_add(span as u32);
+        // The whole run shares a page, so it shares its protection too.
+        self.check_writable(addr)?;
+        // Stamped once into a pattern and then memcpy'd, rather than `count`
+        // separate little copies: a GOB-sized clear run is 128 four-byte
+        // writes done the obvious way, and one 512-byte copy done this way.
+        const PATTERN: usize = 512;
+        let unit = unit as usize;
+        let bytes = value.to_le_bytes();
+        let mut pattern = [0u8; PATTERN];
+        let repeats = (PATTERN / unit).max(1);
+        for i in 0..repeats {
+            pattern[i * unit..(i + 1) * unit].copy_from_slice(&bytes[..unit]);
+        }
+        let stride = repeats * unit;
+        let page = self.page_mut(Self::page_index(addr))?;
+        let mut done = 0;
+        while done < span {
+            let n = stride.min(span - done);
+            page[off + done..off + done + n].copy_from_slice(&pattern[..n]);
+            done += n;
+        }
+        if addr < self.watch.1 && end > self.watch.0 {
+            self.watch_hit = Some(addr);
+        }
+        self.note_code_write(addr);
+        Ok(())
     }
 
     /// Fetch the next instruction (little-endian AArch64 word).

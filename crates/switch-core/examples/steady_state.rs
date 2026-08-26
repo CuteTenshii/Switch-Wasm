@@ -90,6 +90,7 @@ fn main() {
     // thousand samples settle as well as a few million.
     let mut stacks: BTreeMap<(u64, Vec<u32>), u64> = BTreeMap::new();
     let mut sampled = 0u64;
+    let started = std::time::Instant::now();
     // Per-instruction pacing, because a sample has to be taken *between* two
     // instructions to read the machine at all.
     let run = common::drive(&mut cpu, Pace::Instructions, steps, |cpu, done| {
@@ -134,12 +135,24 @@ fn main() {
     // stalled title raises: frames that carry no draw are frames the title is
     // not drawing, however many of them there are.
     let after = &cpu.nv.gpu.stats;
+    let frames = cpu.nv.gpu.frames - want_frame;
     println!(
-        "window: frames +{}, draws +{}, clears +{}, copies +{}",
-        cpu.nv.gpu.frames - want_frame,
+        "window: frames +{frames}, draws +{}, clears +{}, copies +{}",
         after.draws - before.draws,
         after.clears - before.clears,
         after.copies - before.copies,
     );
+    // What a frame costs on this host, which is the number the frontend's
+    // frame rate is made of — the browser pays it again, two to three times
+    // over. Reported per frame rather than as a total because a window is a
+    // fixed number of *instructions*, so its frame count moves with the fix.
+    let elapsed = started.elapsed().as_secs_f64();
+    if frames > 0 {
+        println!(
+            "cost: {:.1} ms/frame over {elapsed:.1}s ({:.1} fps here)",
+            elapsed * 1000.0 / frames as f64,
+            frames as f64 / elapsed,
+        );
+    }
     print!("{}", cpu.thread_dump());
 }

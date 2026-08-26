@@ -13,6 +13,22 @@
 use crate::gpu::exec::ExecCtx;
 use crate::{Error, Result};
 
+/// Every `v / 255.0` an 8-bit channel can produce, indexed by the byte.
+///
+/// Decoding a pixel is four of those divisions, and the blitter decodes four
+/// texels for every pixel it filters — fifteen million divisions for one
+/// 720p filtered blit. The table holds exactly the quotients it replaces, so
+/// it is the same number, fetched instead of computed.
+const UNORM8: [f32; 256] = {
+    let mut table = [0.0f32; 256];
+    let mut i = 0;
+    while i < 256 {
+        table[i] = i as f32 / 255.0;
+        i += 1;
+    }
+    table
+};
+
 /// GOB dimensions on Fermi and later.
 pub const GOB_WIDTH: u32 = 64;
 pub const GOB_HEIGHT: u32 = 8;
@@ -68,6 +84,32 @@ impl Layout {
             Layout::BlockLinear { block_height_gobs } => {
                 block_linear_offset(x_bytes, y, width_bytes, block_height_gobs)
             }
+        }
+    }
+
+    /// The offset of `(x_bytes, y)`, and how many bytes from there on are
+    /// contiguous in memory.
+    ///
+    /// Walking a whole surface is what the scan-out, the deswizzler and the
+    /// blitter all do, and none of them needs a full swizzle per pixel. In a
+    /// GOB only `x % 16` is linear — every other term of [`gob_offset`] is
+    /// fixed until the next 16-byte boundary — so block-linear runs 16 bytes
+    /// at a time, and a pitch row is contiguous from `x_bytes` to its end.
+    ///
+    /// Worth having as one answer rather than each caller's own: at 32 bits a
+    /// pixel this is four pixels per swizzle instead of one, and
+    /// [`block_linear_offset`] recomputes four loop-invariant quantities every
+    /// time it is called.
+    #[inline]
+    pub fn run_at(&self, x_bytes: u32, y: u32, width_bytes: u32) -> (u32, u32) {
+        /// The linear stretch inside a GOB: the low four bits of `x`.
+        const RUN: u32 = 16;
+        match *self {
+            Layout::Pitch { pitch } => (y * pitch + x_bytes, width_bytes.saturating_sub(x_bytes)),
+            Layout::BlockLinear { block_height_gobs } => (
+                block_linear_offset(x_bytes, y, width_bytes, block_height_gobs),
+                RUN - (x_bytes % RUN),
+            ),
         }
     }
 
@@ -412,9 +454,52 @@ impl ColorFormat {
         }
     }
 
+    /// The host's `0xAABBGGRR` word for a stored pixel, where the format's
+    /// bytes already *are* that word or a shuffle of it.
+    ///
+    /// [`ColorFormat::decode`] answers in linear light, so an 8-bit UNORM
+    /// channel is divided by 255 for a caller that immediately multiplies it
+    /// back — and scan-out does exactly that, 921,600 times a frame. Where the
+    /// round trip is the identity this is the same answer without it: an
+    /// RGBA8 surface *is* what a canvas wants, byte for byte, and a BGRA8 one
+    /// is two bytes swapped.
+    ///
+    /// `None` where the decode is real work rather than a shuffle — an sRGB
+    /// format carries a transfer function, and everything below 8 bits a
+    /// channel has to be widened.
+    #[inline]
+    pub fn host_word(&self, raw: u32) -> Option<u32> {
+        // sRGB is a curve, not a permutation.
+        if self.is_srgb() {
+            return None;
+        }
+        // An "X" format has no alpha to read, and the host word is opaque.
+        let alpha = if self.has_alpha() { raw & 0xFF00_0000 } else { 0xFF00_0000 };
+        Some(match self.order8()? {
+            Order8::Rgba => (raw & 0x00FF_FFFF) | alpha,
+            Order8::Bgra => {
+                ((raw >> 16) & 0xFF) | (raw & 0x0000_FF00) | ((raw & 0xFF) << 16) | alpha
+            }
+        })
+    }
+
+    /// Whether a stored pixel survives [`ColorFormat::decode`] followed by
+    /// [`ColorFormat::encode`] unchanged, so a copy between two surfaces of
+    /// this format can move the bytes and skip both.
+    ///
+    /// True exactly where the pair is a permutation: an 8-bit-per-channel
+    /// format that is not sRGB (a transfer function through `f32` is not
+    /// promised to round-trip) and has a real alpha channel (an "X" format
+    /// decodes alpha as 1.0 and encodes it back as `0xFF`, which is not what
+    /// was stored).
+    #[inline]
+    pub fn is_byte_exact(&self) -> bool {
+        !self.is_srgb() && self.has_alpha() && self.order8().is_some()
+    }
+
     /// Unpack raw pixel bytes into a normalized RGBA colour.
     fn decode_stored(&self, raw: u128) -> Result<[f32; 4]> {
-        let unorm8 = |v: u32| (v & 0xFF) as f32 / 255.0;
+        let unorm8 = |v: u32| UNORM8[(v & 0xFF) as usize];
         if let Some(order) = self.order8() {
             let v = raw as u32;
             let (c0, c1, c2, c3) = (v, v >> 8, v >> 16, v >> 24);
@@ -561,6 +646,16 @@ impl Surface {
         let y = y.min(self.height.saturating_sub(1));
         let va = self.addr + self.offset(x, y) as u64;
         self.format.decode(ctx.read_pixel(va, self.format.bytes_per_pixel)?)
+    }
+
+    /// The stored bytes of a texel, undecoded. For a copy between surfaces of
+    /// one [`ColorFormat::is_byte_exact`] format this is the whole operation,
+    /// where going through linear light costs a decode and an encode per
+    /// pixel and gives the same bytes back.
+    pub fn texel_raw(&self, x: u32, y: u32, ctx: &ExecCtx) -> Result<u128> {
+        let x = x.min(self.width.saturating_sub(1));
+        let y = y.min(self.height.saturating_sub(1));
+        ctx.read_pixel(self.addr + self.offset(x, y) as u64, self.format.bytes_per_pixel)
     }
 
     pub fn sample_point(&self, u: f64, v: f64, ctx: &ExecCtx) -> Result<[f32; 4]> {

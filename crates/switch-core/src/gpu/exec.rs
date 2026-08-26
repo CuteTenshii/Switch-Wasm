@@ -68,52 +68,41 @@ impl ExecCtx<'_> {
     /// touches every pixel of a 1280x720 surface, and a per-byte translation
     /// meant millions of address-space lookups per frame.
     pub fn read_pixel(&self, gpu_va: u64, len: u32) -> Result<u128> {
-        let cpu = self.pixel_addr(gpu_va, len)?;
-        // One access per machine word rather than per byte. `Memory`'s
-        // multi-byte reads cost a single page lookup where `read_u8` costs
-        // one each, and this runs for every pixel a draw blends, tests
-        // against depth, or samples.
-        Ok(match len {
-            1 => u128::from(self.mem.read_u8(cpu)?),
-            2 => u128::from(self.mem.read_u16(cpu)?),
-            4 => u128::from(self.mem.read_u32(cpu)?),
-            8 => u128::from(self.mem.read_u64(cpu)?),
-            16 => {
-                u128::from(self.mem.read_u64(cpu)?)
-                    | (u128::from(self.mem.read_u64(cpu.wrapping_add(8))?) << 64)
-            }
-            _ => {
-                let mut v = 0u128;
-                for i in 0..len {
-                    v |= u128::from(self.mem.read_u8(cpu.wrapping_add(i))?) << (8 * i);
-                }
-                v
-            }
-        })
+        // One access per machine word rather than per byte, which is
+        // `Memory::read_le` — the same walk `Gpu::present` needs, so it lives
+        // there rather than here.
+        self.mem.read_le(self.pixel_addr(gpu_va, len)?, len)
     }
 
     /// Write `len` bytes of a surface's raw pixel, little-endian.
     pub fn write_pixel(&mut self, gpu_va: u64, len: u32, value: u128) -> Result<()> {
         let cpu = self.pixel_addr(gpu_va, len)?;
-        // As in `read_pixel`, and more so: `write_u8` re-checks the
-        // read-only ranges on every call, so a byte loop paid for that once
-        // per byte of every pixel written.
-        match len {
-            1 => self.mem.write_u8(cpu, value as u8)?,
-            2 => self.mem.write_u16(cpu, value as u16)?,
-            4 => self.mem.write_u32(cpu, value as u32)?,
-            8 => self.mem.write_u64(cpu, value as u64)?,
-            16 => {
-                self.mem.write_u64(cpu, value as u64)?;
-                self.mem.write_u64(cpu.wrapping_add(8), (value >> 64) as u64)?;
-            }
+        self.mem.write_le(cpu, len, value)
+    }
+
+    /// Write `count` consecutive pixels of `unit` bytes with the same value,
+    /// translating the GPU address **once** for the whole run.
+    ///
+    /// The address translation is what a clear spends itself on. A 720p target
+    /// at 2x2 samples is 3.7 million texels, a title that clears three
+    /// attachments does that three times a frame, and Just Dance 2019 pays it
+    /// on frames that carry no draw at all — so a per-texel translation was
+    /// the most expensive thing in a frame with nothing in it.
+    ///
+    /// A run that would leave its own mapping is not a run: that falls back to
+    /// one translation each rather than write past the end of it.
+    pub fn fill_pixels(&mut self, gpu_va: u64, unit: u32, value: u128, count: u32) -> Result<()> {
+        let bytes = u64::from(unit) * u64::from(count);
+        let cpu = match self.vmm.translate(gpu_va) {
+            Some((cpu, left)) if left >= bytes => cpu,
             _ => {
-                for i in 0..len {
-                    self.mem.write_u8(cpu.wrapping_add(i), (value >> (8 * i)) as u8)?;
+                for i in 0..count {
+                    self.write_pixel(gpu_va + u64::from(i) * u64::from(unit), unit, value)?;
                 }
+                return Ok(());
             }
-        }
-        Ok(())
+        };
+        self.mem.fill_le(cpu, unit, value, count)
     }
 
     /// Where a pixel's `len` bytes live in guest memory. A pixel never spans two
