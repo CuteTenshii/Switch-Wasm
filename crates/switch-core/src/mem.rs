@@ -696,9 +696,39 @@ impl Memory {
         let set = (value & mask).to_le_bytes();
         let unit = unit as usize;
         let page = self.page_mut(Self::page_index(addr))?;
-        for slot in page[off..off + span].chunks_exact_mut(unit) {
-            for (i, byte) in slot.iter_mut().enumerate() {
-                *byte = (*byte & keep[i]) | set[i];
+        let run = &mut page[off..off + span];
+        // A unit at a time in its own width, rather than a byte at a time: a
+        // depth clear merges four bytes per texel and 921,600 texels per
+        // attachment, and doing that bytewise is four masks, four loads and
+        // four stores where the hardware has one of each.
+        match unit {
+            4 => {
+                let keep = u32::from_le_bytes([keep[0], keep[1], keep[2], keep[3]]);
+                let set = u32::from_le_bytes([set[0], set[1], set[2], set[3]]);
+                for slot in run.chunks_exact_mut(4) {
+                    let old = u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]);
+                    slot.copy_from_slice(&((old & keep) | set).to_le_bytes());
+                }
+            }
+            2 => {
+                let keep = u16::from_le_bytes([keep[0], keep[1]]);
+                let set = u16::from_le_bytes([set[0], set[1]]);
+                for slot in run.chunks_exact_mut(2) {
+                    let old = u16::from_le_bytes([slot[0], slot[1]]);
+                    slot.copy_from_slice(&((old & keep) | set).to_le_bytes());
+                }
+            }
+            1 => {
+                for byte in run.iter_mut() {
+                    *byte = (*byte & keep[0]) | set[0];
+                }
+            }
+            _ => {
+                for slot in run.chunks_exact_mut(unit) {
+                    for (i, byte) in slot.iter_mut().enumerate() {
+                        *byte = (*byte & keep[i]) | set[i];
+                    }
+                }
             }
         }
         if addr < self.watch.1 && end > self.watch.0 {

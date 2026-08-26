@@ -151,6 +151,53 @@ impl Engine2D {
         let byte_exact =
             !filtered && src.format.raw == dst.format.raw && dst.format.is_byte_exact();
         let bpp = dst.format.bytes_per_pixel;
+
+        // A copy walks both surfaces whole, so their GPU addresses are worth
+        // translating once here rather than once per texel. `Gpu::present`
+        // has always worked this way; the blitter went through `ExecCtx` per
+        // texel and paid an address-space lookup for every pixel it read and
+        // every pixel it wrote, which measured 40% of the copy.
+        //
+        // Only when each surface lies in one mapping: a copy that would walk
+        // off the end of one is left to the general path below, which asks
+        // per texel and so cannot.
+        if byte_exact {
+            if let (Some(src_base), Some(dst_base)) = (mapped(&src, ctx), mapped(&dst, ctx)) {
+                let (src_width, dst_width) = (src.width_bytes(), dst.width_bytes());
+                // A column's half of the swizzle depends on `x` alone, and the
+                // same 1280 columns are walked for every one of 720 rows — so
+                // they are worked out once here instead of 921,600 times, and
+                // the source step's fixed-point arithmetic goes with them.
+                let columns: Vec<(u32, u32)> = (0..dst_w)
+                    .map(|x| {
+                        let u = src_x0 + du_dx * x as f64;
+                        let sx = (u.max(0.0) as u32).min(src.width.saturating_sub(1));
+                        (
+                            src.layout.column_offset(sx * bpp),
+                            dst.layout.column_offset((dst_x0 + x) * bpp),
+                        )
+                    })
+                    .collect();
+                for y in 0..dst_h {
+                    let v = src_y0 + dv_dy * y as f64;
+                    // `Surface::texel_raw` clamps to the surface; reading the
+                    // addresses directly means doing that here instead.
+                    let sy = (v.max(0.0) as u32).min(src.height.saturating_sub(1));
+                    // Both rows are fixed for this pass, so their half of the
+                    // swizzle is computed once rather than 1280 times.
+                    let src_row = src_base.wrapping_add(src.layout.row_offset(sy, src_width));
+                    let dst_row =
+                        dst_base.wrapping_add(dst.layout.row_offset(dst_y0 + y, dst_width));
+                    for &(from, to) in &columns {
+                        let raw = ctx.mem.read_le(src_row.wrapping_add(from), bpp)?;
+                        ctx.mem.write_le(dst_row.wrapping_add(to), bpp, raw)?;
+                    }
+                }
+                ctx.stats.copies += 1;
+                return Ok(());
+            }
+        }
+
         for y in 0..dst_h {
             let v = src_y0 + dv_dy * y as f64;
             for x in 0..dst_w {
@@ -177,6 +224,18 @@ impl Engine2D {
 /// Recombine the 32.32 fixed-point pairs the engine takes.
 fn fixed(int_part: u32, frac: u32) -> f64 {
     int_part as i32 as f64 + frac as f64 / 4_294_967_296.0
+}
+
+/// Where a surface begins in guest memory, if the whole of it is one mapping.
+///
+/// `None` means some of it is not, and the caller has to go on asking per
+/// texel — a translation that covered less than the surface would hand out an
+/// address past the end of the mapping for the rest of it.
+fn mapped(surface: &Surface, ctx: &ExecCtx) -> Option<u32> {
+    match ctx.vmm.translate(surface.addr) {
+        Some((cpu, left)) if left >= u64::from(surface.size()) => Some(cpu),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -43,6 +43,38 @@ pub fn gob_offset(x: u32, y: u32) -> u32 {
     (x / 32) * 256 + (y / 2) * 64 + ((x % 32) / 16) * 32 + (y % 2) * 16 + (x % 16)
 }
 
+/// The part of a block-linear address that depends only on the row.
+///
+/// A block-linear address is a *sum* of a term in `y` and a term in `x` —
+/// every factor of it, [`gob_offset`] included, uses one or the other and
+/// never both. Splitting it that way is what lets a walk over a surface hoist
+/// the row out of its inner loop: this half carries the only two divisions in
+/// the whole calculation, and a per-texel walk paid them for every texel of
+/// every row.
+pub fn block_linear_row(y: u32, width_bytes: u32, block_height_gobs: u32) -> u32 {
+    let block_height_gobs = block_height_gobs.max(1);
+    let width_gobs = width_bytes.div_ceil(GOB_WIDTH).max(1);
+    let block_row_bytes = width_gobs * GOB_SIZE * block_height_gobs;
+    let rows_per_block = GOB_HEIGHT * block_height_gobs;
+
+    let block_y = y / rows_per_block;
+    let gob_y = (y % rows_per_block) / GOB_HEIGHT;
+    // The `y` half of `gob_offset`, which reduces modulo the GOB height.
+    let in_gob = ((y % GOB_HEIGHT) / 2) * 64 + (y % 2) * 16;
+
+    block_y * block_row_bytes + gob_y * GOB_SIZE + in_gob
+}
+
+/// The part of a block-linear address that depends only on the column, the
+/// counterpart to [`block_linear_row`].
+pub fn block_linear_column(x_bytes: u32, block_height_gobs: u32) -> u32 {
+    let block_bytes = GOB_SIZE * block_height_gobs.max(1);
+    let gob_x = x_bytes / GOB_WIDTH;
+    // The `x` half of `gob_offset`.
+    let x = x_bytes % GOB_WIDTH;
+    gob_x * block_bytes + (x / 32) * 256 + ((x % 32) / 16) * 32 + (x % 16)
+}
+
 /// Byte offset of `(x_bytes, y)` in a block-linear 2D surface.
 ///
 /// `width_bytes` is the surface's row length in bytes (it is rounded up to a
@@ -54,17 +86,8 @@ pub fn block_linear_offset(
     width_bytes: u32,
     block_height_gobs: u32,
 ) -> u32 {
-    let block_height_gobs = block_height_gobs.max(1);
-    let width_gobs = width_bytes.div_ceil(GOB_WIDTH).max(1);
-    let block_bytes = GOB_SIZE * block_height_gobs;
-    let block_row_bytes = width_gobs * block_bytes;
-    let rows_per_block = GOB_HEIGHT * block_height_gobs;
-
-    let block_y = y / rows_per_block;
-    let gob_y = (y % rows_per_block) / GOB_HEIGHT;
-    let gob_x = x_bytes / GOB_WIDTH;
-
-    block_y * block_row_bytes + gob_x * block_bytes + gob_y * GOB_SIZE + gob_offset(x_bytes, y)
+    block_linear_row(y, width_bytes, block_height_gobs)
+        + block_linear_column(x_bytes, block_height_gobs)
 }
 
 /// How a surface's rows are arranged in memory.
@@ -79,10 +102,26 @@ pub enum Layout {
 impl Layout {
     /// Byte offset of the pixel at `(x, y)` for a surface `width_bytes` wide.
     pub fn offset(&self, x_bytes: u32, y: u32, width_bytes: u32) -> u32 {
+        self.row_offset(y, width_bytes) + self.column_offset(x_bytes)
+    }
+
+    /// The part of [`Layout::offset`] that depends only on the row, to be
+    /// hoisted out of a walk's inner loop. See [`block_linear_row`].
+    pub fn row_offset(&self, y: u32, width_bytes: u32) -> u32 {
         match *self {
-            Layout::Pitch { pitch } => y * pitch + x_bytes,
+            Layout::Pitch { pitch } => y * pitch,
             Layout::BlockLinear { block_height_gobs } => {
-                block_linear_offset(x_bytes, y, width_bytes, block_height_gobs)
+                block_linear_row(y, width_bytes, block_height_gobs)
+            }
+        }
+    }
+
+    /// The part of [`Layout::offset`] that depends only on the column.
+    pub fn column_offset(&self, x_bytes: u32) -> u32 {
+        match *self {
+            Layout::Pitch { .. } => x_bytes,
+            Layout::BlockLinear { block_height_gobs } => {
+                block_linear_column(x_bytes, block_height_gobs)
             }
         }
     }
@@ -682,13 +721,23 @@ pub struct Surface {
 }
 
 impl Surface {
-    pub fn offset(&self, x: u32, y: u32) -> u32 {
-        let bpp = self.format.bytes_per_pixel;
-        let width_bytes = match self.layout {
+    /// The row length [`Layout`] measures this surface's swizzle against: the
+    /// pitch when it has one, and the packed width otherwise.
+    pub fn width_bytes(&self) -> u32 {
+        match self.layout {
             Layout::Pitch { pitch } => pitch,
-            Layout::BlockLinear { .. } => self.width * bpp,
-        };
-        self.layout.offset(x * bpp, y, width_bytes)
+            Layout::BlockLinear { .. } => self.width * self.format.bytes_per_pixel,
+        }
+    }
+
+    /// How many bytes the whole surface occupies.
+    pub fn size(&self) -> u32 {
+        self.layout.layer_stride(self.width_bytes(), self.height)
+    }
+
+    pub fn offset(&self, x: u32, y: u32) -> u32 {
+        self.layout
+            .offset(x * self.format.bytes_per_pixel, y, self.width_bytes())
     }
 
     pub fn texel(&self, x: u32, y: u32, ctx: &ExecCtx) -> Result<[f32; 4]> {
@@ -865,6 +914,33 @@ mod tests {
     fn pitch_layout_is_row_major() {
         let layout = Layout::Pitch { pitch: 256 };
         assert_eq!(layout.offset(8, 3, 256), 3 * 256 + 8);
+    }
+
+    /// Every walk in the emulator hoists [`Layout::row_offset`] out of its
+    /// inner loop and adds [`Layout::column_offset`] per texel, which is only
+    /// the same address if the two really do sum to it — for every layout, not
+    /// just the one a title happened to use.
+    #[test]
+    fn a_row_and_a_column_sum_to_the_offset() {
+        let layouts = [
+            Layout::Pitch { pitch: 320 },
+            Layout::BlockLinear { block_height_gobs: 1 },
+            Layout::BlockLinear { block_height_gobs: 2 },
+            Layout::BlockLinear { block_height_gobs: 16 },
+        ];
+        for layout in layouts {
+            for width_bytes in [64u32, 128, 320] {
+                for y in 0..40u32 {
+                    for x in 0..width_bytes {
+                        assert_eq!(
+                            layout.offset(x, y, width_bytes),
+                            layout.row_offset(y, width_bytes) + layout.column_offset(x),
+                            "{layout:?} width {width_bytes} at ({x},{y})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
