@@ -17,6 +17,13 @@ import { defineConfig } from 'vite';
 const coreDir = fileURLToPath(
   new URL('./target/wasm32-unknown-unknown/release', import.meta.url));
 
+// Cross-origin isolation, the precondition for `SharedArrayBuffer`. The
+// deployed site asks for the same pair through `web/public/_headers`.
+const crossOriginIsolation = {
+  'Cross-Origin-Opener-Policy': 'same-origin',
+  'Cross-Origin-Embedder-Policy': 'require-corp',
+};
+
 export default defineConfig({
   root: 'web',
   // Relative, because the site is published under a path
@@ -65,5 +72,7 @@ export default defineConfig({
     // The core is outside the project root (it is a cargo artifact), so the
     // dev server has to be allowed to serve it.
     fs: { allow: ['..'] },
+    headers: crossOriginIsolation,
   },
+  preview: { headers: crossOriginIsolation },
 });
