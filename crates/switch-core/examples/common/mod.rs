@@ -430,6 +430,47 @@ pub struct Title {
 impl Title {
     /// Open the Program NCA inside an NSP, resolving its title key from a
     /// bundled ticket if the container has one.
+    /// Open whichever kind of container this is, by looking at it.
+    ///
+    /// A tool that only takes one kind is a tool that cannot be pointed at the
+    /// title you want to debug: `screenshot_gpu` took a bare NCA, so the
+    /// backend it exists to measure could not be run against a retail game at
+    /// all. The web frontend already decides this by header rather than by
+    /// name (`web/main/filetype.ts`); this is the same rule.
+    ///
+    /// `PFS0` sits at offset 0 and the NCA magic at 0x200. An NCA straight off
+    /// the CDN keeps its header encrypted, so its magic is invisible until
+    /// `prod.keys` decrypts it — those fall back to the extension, which is
+    /// what the frontend does with them too.
+    pub fn open(
+        container: impl AsRef<Path>,
+        prod: impl AsRef<Path>,
+        title: Option<impl AsRef<Path>>,
+    ) -> Title {
+        let path = container.as_ref().to_path_buf();
+        let mut head = [0u8; 0x204];
+        // The whole window or nothing: a short read would leave the magic
+        // positions as zeros and quietly look like "not an NCA".
+        let read = {
+            let src = open_source(&path);
+            switch_core::source::ByteSource::read_exact_at(&src, 0, &mut head).is_ok()
+        };
+        let is_pfs0 = read && &head[..4] == b"PFS0";
+        let is_nca = read
+            && matches!(&head[0x200..0x204], b"NCA3" | b"NCA2" | b"NCA0");
+        let by_name = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("nca"));
+        if is_pfs0 {
+            Title::open_nsp(path, prod, title)
+        } else if is_nca || by_name {
+            Title::open_nca(path, prod, title)
+        } else {
+            Title::open_nsp(path, prod, title)
+        }
+    }
+
     pub fn open_nsp(
         container: impl AsRef<Path>,
         prod: impl AsRef<Path>,

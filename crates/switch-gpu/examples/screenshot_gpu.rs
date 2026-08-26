@@ -1,6 +1,10 @@
 //! `screenshot_nca` with the GPU backend installed, so the two can be
 //! compared frame for frame:
-//! `screenshot_gpu <path.nca> <prod.keys> <title.keys> <out.ppm> [frame]`.
+//! `screenshot_gpu <path.nsp|path.nca> <prod.keys> <title.keys> <out.ppm> [frame]`.
+//!
+//! Either kind of container, decided by its header: the backend this exists to
+//! measure is only worth measuring against a title that draws, and those ship
+//! in an NSP.
 //!
 //! The point is the comparison. Run `screenshot_nca` and this over the same
 //! frame and `cmp` the two PPMs — a byte-identical pair is the only evidence
@@ -16,10 +20,10 @@ mod common;
 use common::{Flow, Pace};
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "screenshot_gpu <path.nca> <prod.keys> <title.keys> <out.ppm> [frame]";
+const USAGE: &str = "screenshot_gpu <path.nsp|path.nca> <prod.keys> <title.keys> <out.ppm> [frame]";
 
 fn main() {
-    let title = common::Title::open_nca(
+    let title = common::Title::open(
         common::arg(1, USAGE),
         common::arg(2, USAGE),
         Some(common::arg(3, USAGE)),
