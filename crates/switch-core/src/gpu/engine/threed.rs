@@ -911,7 +911,7 @@ impl Engine3D {
 
     /// Tell the backend that something outside it is about to read a render
     /// target — see [`Renderer::flush`].
-    pub fn flush_renderer(&mut self, ctx: &mut ExecCtx) -> Result<()> {
+    pub fn flush_renderer(&mut self, ctx: &mut ExecCtx) -> Result<crate::gpu::renderer::Flush> {
         self.with_renderer(ctx, |renderer, _, ctx| renderer.flush(ctx))
     }
 

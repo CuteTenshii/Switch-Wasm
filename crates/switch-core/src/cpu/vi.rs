@@ -376,13 +376,16 @@ impl Cpu {
                 };
                 // A GPU backend holds its render targets on the device; the
                 // display reads them out of guest memory.
-                self.nv.gpu.flush_renderers(&mut self.mem)?;
-                self.nv.gpu.present(&self.mem, &buffer)?;
-                if self.trace_nv {
-                    eprintln!(
-                        "[vi] presented shared frame {} from slot {slot}",
-                        self.nv.gpu.frames
-                    );
+                if self.nv.gpu.flush_renderers(&mut self.mem)? == crate::gpu::renderer::Flush::Done {
+                    self.nv.gpu.present(&self.mem, &buffer)?;
+                    if self.trace_nv {
+                        eprintln!(
+                            "[vi] presented shared frame {} from slot {slot}",
+                            self.nv.gpu.frames
+                        );
+                    }
+                } else {
+                    self.pending_present = Some(buffer);
                 }
                 let _ = SHARED_BUFFER_ADDR;
                 self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -481,14 +484,22 @@ impl Cpu {
         if let crate::display::Action::Present(buffer) = action {
             // A GPU backend holds its render targets on the device; the
                 // display reads them out of guest memory.
-                self.nv.gpu.flush_renderers(&mut self.mem)?;
+                // A backend holding this surface on a device may not be able to
+            // hand it back yet; `Cpu::complete_pending_present` puts the frame
+            // up when it can. The software rasterizer is always `Done`.
+            if self.nv.gpu.flush_renderers(&mut self.mem)? == crate::gpu::renderer::Flush::Done {
                 self.nv.gpu.present(&self.mem, &buffer)?;
-            if self.trace_nv {
-                eprintln!(
-                    "[vi] presented frame {} ({}x{})",
-                    self.nv.gpu.frames, buffer.width, buffer.height
-                );
+                if self.trace_nv {
+                    eprintln!(
+                        "[vi] presented frame {} ({}x{})",
+                        self.nv.gpu.frames, buffer.width, buffer.height
+                    );
+                }
+            } else {
+                self.pending_present = Some(buffer);
             }
+            // Paced either way: what the guest is being held to is the
+            // refresh rate, not how fast a readback happens to land.
             self.pace_present();
         }
 

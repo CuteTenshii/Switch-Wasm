@@ -94,10 +94,31 @@ pub trait Renderer: std::fmt::Debug {
     ///
     /// [`Software`] has nothing to hand back: it writes guest memory as it
     /// goes, so the default is what it wants.
-    fn flush(&mut self, ctx: &mut ExecCtx) -> Result<()> {
+    fn flush(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {
         let _ = ctx;
-        Ok(())
+        Ok(Flush::Done)
     }
+}
+
+/// Whether a [`Renderer::flush`] finished, or wants asking again.
+///
+/// A backend that keeps its surfaces on a device gets them back by mapping a
+/// buffer, and a map completes when the host's event loop runs — which it
+/// cannot do underneath a call that is waiting for it. So a flush is allowed
+/// to say "not yet" instead of blocking, and the caller has to let the host
+/// make progress before reading the surface.
+///
+/// The caller may **not** simply carry on and read guest memory anyway. That
+/// is the reading that produced a black frame every time this was tried by
+/// landing a readback one flush late: a double-buffered title presents the
+/// surface whose readback was just asked for, and the copy in guest memory is
+/// whatever was there before the GPU drew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Flush {
+    /// Guest memory agrees with the backend.
+    Done,
+    /// A readback is in flight. Ask again once the host has run.
+    Pending,
 }
 
 /// The rasterizer that runs on the CPU: [`crate::gpu::raster`] for draws, and

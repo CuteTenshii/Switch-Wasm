@@ -59,7 +59,7 @@ pub use wgpu;
 use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
 use switch_core::gpu::pipeline::{self as state, Format, Pipeline};
-use switch_core::gpu::renderer::{Renderer, Software};
+use switch_core::gpu::renderer::{Flush, Renderer, Software};
 use switch_core::gpu::shader::compiled::Compiled;
 use switch_core::gpu::shader::wgsl::{self, Layout, Stage, Translation};
 use switch_core::gpu::upload::{Banks, Target, Targets, Uploads};
@@ -165,7 +165,16 @@ struct Pending {
     /// The row stride the copy used, which is the surface's rounded up to
     /// 256 bytes.
     padded: u32,
+    /// What the map callback reported: [`MAP_WAITING`] until it runs, then
+    /// [`MAP_READY`] or [`MAP_FAILED`]. Read rather than waited on, because
+    /// on the web the callback runs from the event loop and nothing inside a
+    /// slice can make that happen.
+    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
+
+const MAP_WAITING: u8 = 0;
+const MAP_READY: u8 = 1;
+const MAP_FAILED: u8 = 2;
 
 /// A render target held on the device, and where in guest memory it came
 /// from.
@@ -192,6 +201,10 @@ pub struct Gpu {
     /// Kept rather than written back where it happened, so that no draw ever
     /// waits on a device.
     evicted: Vec<Held>,
+    /// Readbacks asked for and not yet collected. A flush that finds one of
+    /// these unfinished answers `Flush::Pending` rather than waiting: the
+    /// wait it would have to do is the one a browser cannot perform.
+    pending: Vec<Pending>,
     /// Compiled shader modules, by a hash of the WGSL that produced them.
     ///
     /// Compiling a module is the whole cost of a draw: WGSL through naga to
@@ -312,6 +325,7 @@ impl Gpu {
             queue,
             held: std::collections::HashMap::new(),
             evicted: Vec::new(),
+            pending: Vec::new(),
             modules: std::collections::HashMap::new(),
             failed,
             software: Software,
@@ -382,30 +396,32 @@ impl Gpu {
     }
 
     /// Write one held surface back into guest memory and stop holding it.
-    fn flush_one(&mut self, addr: u64, ctx: &mut ExecCtx) -> Result<()> {
-        let Some(held) = self.held.remove(&addr) else { return Ok(()) };
-        self.write_back(&held, ctx)
+    fn flush_one(&mut self, addr: u64) {
+        let Some(held) = self.held.remove(&addr) else { return };
+        self.ask_for(&held);
     }
 
-    /// Ask for a surface back, wait for it, and put it in guest memory.
+    /// Ask for a surface back, without waiting for it.
     ///
-    /// The wait is why this cannot run in a browser yet, and the two halves
-    /// are kept apart — [`Gpu::start_read_back`] and [`Gpu::land`] — because
-    /// that is where the seam goes when it can. What does *not* work is
-    /// simply deferring the landing to the next flush: the Home Menu
-    /// double-buffers, so the surface `present` reads is always the one whose
-    /// readback was just asked for and never one that has arrived. Tried, and
-    /// it presented a black frame every time.
-    fn write_back(&mut self, held: &Held, ctx: &mut ExecCtx) -> Result<()> {
+    /// The waiting used to happen here, with `Device::poll`, which is a real
+    /// wait natively and a no-op on the web — WebGPU has no polling, and a map
+    /// completes when the event loop runs. So in a browser the collection read
+    /// a buffer that was not mapped yet.
+    ///
+    /// Nothing waits now. [`Gpu::flush`] collects what has arrived and says
+    /// `Flush::Pending` for what has not, and the *present* is what waits —
+    /// `Cpu::complete_pending_present` puts the frame up from a later slice,
+    /// once the host has had its turn. Which is not the same as landing a
+    /// readback one flush late and presenting guest memory meanwhile: that
+    /// came out black, because a double-buffered title queues the surface
+    /// whose readback was just asked for.
+    fn ask_for(&mut self, held: &Held) {
         // A surface nothing drew into is already what guest memory says.
         if !held.dirty {
-            return Ok(());
+            return;
         }
         let pending = self.start_read_back(&held.target, &held.texture);
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .map_err(|e| Error::Gpu(format!("waiting for the readback: {e}")))?;
-        self.land(&pending, ctx)
+        self.pending.push(pending);
     }
 
     /// Bring a guest surface onto the device.
@@ -497,8 +513,13 @@ impl Gpu {
         // Asked for, not waited on. The map completes when the device is next
         // polled — which on a browser is when the event loop next runs, and
         // there is no way to make that happen from inside a blocking call.
-        staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
-        Pending { staging, target: *target, padded }
+        let state = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(MAP_WAITING));
+        let sink = state.clone();
+        staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let done = if r.is_ok() { MAP_READY } else { MAP_FAILED };
+            sink.store(done, std::sync::atomic::Ordering::Release);
+        });
+        Pending { staging, target: *target, padded, state }
     }
 
     /// Copy a finished readback into guest memory, dropping the row padding
@@ -1219,7 +1240,7 @@ impl Renderer for Gpu {
         self.software.clear_depth_stencil(engine, ctx, depth, stencil)
     }
 
-    fn flush(&mut self, ctx: &mut ExecCtx) -> Result<()> {
+    fn flush(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {
         let at = self.times.map(|_| std::time::Instant::now());
         let result = self.flush_inner(ctx);
         if let (Some(at), Some(t)) = (at, self.times.as_mut()) {
@@ -1230,15 +1251,33 @@ impl Renderer for Gpu {
 }
 
 impl Gpu {
-    fn flush_inner(&mut self, ctx: &mut ExecCtx) -> Result<()> {
-        for held in std::mem::take(&mut self.evicted) {
-            self.write_back(&held, ctx)?;
+    fn flush_inner(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {
+        // Only once per frame: asking again while the first ask is in flight
+        // would copy the same surface twice and read the second copy.
+        if self.pending.is_empty() {
+            for held in std::mem::take(&mut self.evicted) {
+                self.ask_for(&held);
+            }
+            let addresses: Vec<u64> = self.held.keys().copied().collect();
+            for addr in addresses {
+                self.flush_one(addr);
+            }
         }
-        let addresses: Vec<u64> = self.held.keys().copied().collect();
-        for addr in addresses {
-            self.flush_one(addr, ctx)?;
+        // Let the device run its callbacks. Natively this is what completes a
+        // map; on the web it does nothing and the event loop does it between
+        // slices, which is the whole reason this is asked rather than awaited.
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        use std::sync::atomic::Ordering;
+        if self.pending.iter().any(|p| p.state.load(Ordering::Acquire) == MAP_WAITING) {
+            return Ok(Flush::Pending);
         }
-        Ok(())
+        for pending in std::mem::take(&mut self.pending) {
+            if pending.state.load(Ordering::Acquire) == MAP_FAILED {
+                return Err(Error::Gpu("the readback was not mapped".into()));
+            }
+            self.land(&pending, ctx)?;
+        }
+        Ok(Flush::Done)
     }
 }
 

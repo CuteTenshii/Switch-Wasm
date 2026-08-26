@@ -190,7 +190,8 @@ impl Gpu {
     /// Called before [`Gpu::present`], which is the reader that always
     /// matters. A backend with nothing to hand back — the software
     /// rasterizer, which writes guest memory as it goes — does nothing here.
-    pub fn flush_renderers(&mut self, mem: &mut Memory) -> Result<()> {
+    pub fn flush_renderers(&mut self, mem: &mut Memory) -> Result<renderer::Flush> {
+        let mut state = renderer::Flush::Done;
         for channel in self.channels.values_mut() {
             let Some(as_id) = channel.as_id else { continue };
             let Some(vmm) = self.address_spaces.get(&as_id) else { continue };
@@ -201,9 +202,13 @@ impl Gpu {
                 stats: &mut self.stats,
                 trace: self.trace,
             };
-            channel.three_d.flush_renderer(&mut ctx)?;
+            // Every channel is asked, so every readback is started, and one
+            // that is not ready does not stop the others from making progress.
+            if channel.three_d.flush_renderer(&mut ctx)? == renderer::Flush::Pending {
+                state = renderer::Flush::Pending;
+            }
         }
-        Ok(())
+        Ok(state)
     }
 
     /// Read a surface the display was handed and convert it to the RGBA8888

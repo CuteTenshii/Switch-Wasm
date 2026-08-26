@@ -1238,6 +1238,9 @@ pub struct Cpu {
     /// Cycle count the display last accepted a frame at. See
     /// [`Cpu::pace_present`].
     pub(crate) last_present_cycles: u64,
+    /// A frame the display was handed whose surface has not come back from
+    /// the GPU backend yet. See [`Cpu::complete_pending_present`].
+    pub(crate) pending_present: Option<crate::gpu::DisplayBuffer>,
 }
 
 /// How many recently-executed instructions the fault trace shows.
@@ -1408,6 +1411,7 @@ impl Cpu {
             pending_yield: false,
             pending_sleep: None,
             last_present_cycles: 0,
+            pending_present: None,
         };
         cpu.nv.gpu.trace = crate::env_flag!("TRACE_GPU");
         // The framebuffer and input registers are fixed hardware-mapped
@@ -1988,6 +1992,41 @@ impl Cpu {
         }
         // A title slower than the panel is not dragged backwards to it.
         self.last_present_cycles = self.cycles.max(tick);
+    }
+
+    /// Put up a frame whose surface was still on the device when the guest
+    /// handed it over.
+    ///
+    /// A backend that keeps render targets on a device gets them back by
+    /// mapping a buffer, and a map completes only once the host's event loop
+    /// has run — which it cannot do inside the syscall that asked. So the
+    /// present is what waits, not the guest: `vi` keeps the buffer here and
+    /// the display picks it up from a later slice, by which time the host has
+    /// had its turn.
+    ///
+    /// It is the *frame* that is late, by a slice, and never the *contents*:
+    /// this presents the same surface the guest queued, once that surface has
+    /// arrived. Landing a readback one flush later instead — and presenting
+    /// whatever guest memory held meanwhile — is what came out black, because
+    /// a double-buffered title queues the surface whose readback was just
+    /// asked for.
+    fn complete_pending_present(&mut self) {
+        let Some(buffer) = self.pending_present else { return };
+        match self.nv.gpu.flush_renderers(&mut self.mem) {
+            Ok(crate::gpu::renderer::Flush::Pending) => {}
+            Ok(crate::gpu::renderer::Flush::Done) => {
+                self.pending_present = None;
+                if let Err(e) = self.nv.gpu.present(&self.mem, &buffer) {
+                    self.diagnostic(&format!("[vi] the deferred present failed: {e}"));
+                }
+            }
+            Err(e) => {
+                // Dropping the frame is the only other answer: holding it
+                // would stop the display for good over one bad readback.
+                self.pending_present = None;
+                self.diagnostic(&format!("[vi] the deferred readback failed: {e}"));
+            }
+        }
     }
 
     pub(super) fn sleep_until(&mut self, deadline: u64) {
@@ -3507,6 +3546,7 @@ impl Cpu {
     /// tracing needs a disassembly line per instruction, which only the
     /// interpreter produces, so it takes that path instead.
     pub fn run(&mut self, max_steps: u64) -> Result<RunReport> {
+        self.complete_pending_present();
         if self.jit_enabled && !self.trace_enabled {
             return self.run_jit(max_steps);
         }
