@@ -504,14 +504,14 @@ fn blend(target: BlendTarget) -> Result<Option<Blend>, Unsupported> {
 /// claiming to would disagree with the rasterizer it is meant to match.
 fn depth_compare(code: u32) -> Result<Compare, Unsupported> {
     Ok(match code {
-        0x0200 => Compare::Never,
-        0x0201 => Compare::Less,
-        0x0202 => Compare::Equal,
-        0x0203 => Compare::LessEqual,
-        0x0204 => Compare::Greater,
-        0x0205 => Compare::NotEqual,
-        0x0206 => Compare::GreaterEqual,
-        0x0207 => Compare::Always,
+        1 | 0x0200 => Compare::Never,
+        2 | 0x0201 => Compare::Less,
+        3 | 0x0202 => Compare::Equal,
+        4 | 0x0203 => Compare::LessEqual,
+        5 | 0x0204 => Compare::Greater,
+        6 | 0x0205 => Compare::NotEqual,
+        7 | 0x0206 => Compare::GreaterEqual,
+        8 | 0x0207 => Compare::Always,
         code => return Err(Unsupported::DepthCompare { code }),
     })
 }
@@ -753,19 +753,27 @@ mod tests {
     }
 
     #[test]
-    fn a_depth_comparison_the_rasterizer_does_not_implement_is_reported() {
-        // `DepthState`'s doc describes a one-based `DepthTestFunc` numbering
-        // as well as the GL one. Nothing decodes that — `depth_test_passes`
-        // matches 0x200..=0x207 and answers `Always` for everything else — so
-        // a pipeline that accepted 1..=8 would disagree with the rasterizer
-        // it exists to be compared against.
+    fn both_numberings_of_a_depth_comparison_decode_the_same() {
+        // Maxwell's register takes either, and titles use both: Mesa's GL
+        // driver writes 0x200..=0x207, a D3D-shaped path writes 1..=8. Eden's
+        // `ComparisonOp` lists the two side by side. This used to reject
+        // 1..=8 on the grounds that the rasterizer only decoded the GL half —
+        // which was true, and the reason Just Dance 2019 fell back to software
+        // on every draw and then had its depth test ignored there.
         let layout = DepthLayout { bytes: 4, depth_bits: 24, depth_shift: 8, stencil_shift: None };
-        for code in 1..=8u32 {
-            let on = DepthState { test_enabled: true, write_enabled: false, func: code };
-            assert_eq!(depth(layout, on), Err(Unsupported::DepthCompare { code }));
+        let of = |func| {
+            let on = DepthState { test_enabled: true, write_enabled: false, func };
+            depth(layout, on).unwrap().compare
+        };
+        for (d3d, gl) in (1..=8u32).zip(0x0200..=0x0207u32) {
+            assert_eq!(of(d3d), of(gl), "D3D {d3d} against GL {gl:#x}");
         }
-        let on = DepthState { test_enabled: true, write_enabled: false, func: 0x0203 };
-        assert_eq!(depth(layout, on).unwrap().compare, Compare::LessEqual);
+        assert_eq!(of(4), Compare::LessEqual, "the one Just Dance 2019 sends");
+        assert_eq!(of(0x0203), Compare::LessEqual);
+
+        // A code in neither numbering is still reported rather than guessed.
+        let on = DepthState { test_enabled: true, write_enabled: false, func: 0x40 };
+        assert_eq!(depth(layout, on), Err(Unsupported::DepthCompare { code: 0x40 }));
     }
 
     /// How wide a pixel of each colour format is, and whether it is sRGB.

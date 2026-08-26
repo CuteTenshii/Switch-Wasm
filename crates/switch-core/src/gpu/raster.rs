@@ -511,22 +511,31 @@ fn to_screen(clip: [f32; 4], vt: ViewportTransform) -> (ScreenVertex, f32, f32) 
     (screen, inv_w, clip[2] * inv_w * vt.scale[2] + vt.translate[2])
 }
 
-/// `DEPTH_TEST_FUNC`'s real hardware type is `gl_comparison_op`
-/// (`nv_3ddefs.xml`): literal OpenGL `GL_NEVER`(0x0200)`..=GL_ALWAYS`(0x0207)
-/// enum values, not deko3d's simplified 1-8 `DkCompareOp` numbering — real
-/// content goes through Mesa's GL driver (JKSV), which writes the GL enum
-/// straight through. Confirmed by dumping a live JKSV capture's actual
-/// register contents.
+/// `DEPTH_TEST_FUNC` carries **either** numbering, and hardware takes both.
+///
+/// Homebrew going through Mesa's GL driver writes the literal OpenGL enum,
+/// `GL_NEVER`(0x0200)`..=GL_ALWAYS`(0x0207) — confirmed by dumping a live
+/// JKSV capture's registers, which is why only those were decoded here. A
+/// title that came through a D3D-shaped path writes the one-based numbering
+/// instead, and Maxwell's register documents both: Eden's `ComparisonOp`
+/// (`maxwell_3d.h`) lists `Never_D3D = 1 ..= Always_D3D = 8` beside
+/// `Never_GL = 0x200 ..= Always_GL = 0x207`.
+///
+/// Decoding only one of them was not a draw that failed loudly. The
+/// unrecognised half fell into `Always`, so Just Dance 2019's `LessEqual`
+/// (`4`) became "the depth test passes" and every fragment it should have
+/// hidden was drawn. The GPU backend, which refuses what it cannot express,
+/// turned the same value into a fallback for *every* draw in the title.
 fn depth_test_passes(func: u32, new: f32, old: f32) -> bool {
     match func {
-        0x0200 => false,
-        0x0201 => new < old,
-        0x0202 => new == old,
-        0x0203 => new <= old,
-        0x0204 => new > old,
-        0x0205 => new != old,
-        0x0206 => new >= old,
-        _ => true, // GL_ALWAYS (0x0207), and any unrecognised code.
+        1 | 0x0200 => false,
+        2 | 0x0201 => new < old,
+        3 | 0x0202 => new == old,
+        4 | 0x0203 => new <= old,
+        5 | 0x0204 => new > old,
+        6 | 0x0205 => new != old,
+        7 | 0x0206 => new >= old,
+        _ => true, // Always (8 or 0x0207), and any unrecognised code.
     }
 }
 
