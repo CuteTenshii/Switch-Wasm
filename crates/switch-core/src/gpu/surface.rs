@@ -582,17 +582,54 @@ pub fn srgb_to_linear(v: f32) -> f32 {
     }
 }
 
-fn f32_to_f16(v: f32) -> u16 {
+/// Convert to a half, rounding to nearest with ties to even — the mode both
+/// Maxwell's fp16 ALU and WGSL's `pack2x16float` use.
+///
+/// This used to truncate and flush every subnormal to zero, which cost at most
+/// an ulp of an RGBA16Float surface. It stopped being that cheap when the
+/// shader interpreter started running `hadd2`/`hmul2`/`hfma2` through it: a
+/// half instruction rounds once, and rounding it the wrong way biases every
+/// value in a fp16 shader towards zero.
+pub(crate) fn f32_to_f16(v: f32) -> u16 {
     let bits = v.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xFF) as i32 - 127 + 15;
+    let exp = ((bits >> 23) & 0xFF) as i32;
     let mantissa = bits & 0x7F_FFFF;
+    // A NaN keeps a set mantissa so that it stays a NaN rather than becoming
+    // an infinity; an infinity has none and stays one.
+    if exp == 0xFF {
+        return sign | 0x7C00 | if mantissa != 0 { 0x200 } else { 0 };
+    }
+    let exp = exp - 127 + 15;
+    if exp >= 0x1F {
+        return sign | 0x7C00;
+    }
     if exp <= 0 {
-        sign
-    } else if exp >= 0x1F {
-        sign | 0x7C00
+        // Below the smallest normal half the significand — implicit bit and
+        // all — shifts down into a subnormal's ten mantissa bits. Rounding up
+        // may carry into the exponent, which lands on 2^-14 exactly.
+        let shift = (1 - exp) as u32 + 13;
+        if shift > 25 {
+            return sign;
+        }
+        let significand = mantissa | 0x80_0000;
+        return sign | (round_to_nearest_even(significand, shift) as u16);
+    }
+    // Rounded as one number rather than exponent and mantissa separately, so
+    // that a carry out of the mantissa steps the exponent — which at the top
+    // of the range is the overflow to infinity.
+    sign | (round_to_nearest_even(((exp as u32) << 23) | mantissa, 13) as u16)
+}
+
+/// `value >> shift`, rounded to nearest with ties resolved to the even result.
+fn round_to_nearest_even(value: u32, shift: u32) -> u32 {
+    let kept = value >> shift;
+    let dropped = value & ((1 << shift) - 1);
+    let halfway = 1 << (shift - 1);
+    if dropped > halfway || (dropped == halfway && kept & 1 != 0) {
+        kept + 1
     } else {
-        sign | ((exp as u16) << 10) | ((mantissa >> 13) as u16)
+        kept
     }
 }
 
@@ -883,6 +920,33 @@ mod tests {
         for v in [0.0f32, 1.0, 0.5, -2.5, 65504.0] {
             assert_eq!(f16_to_f32(f32_to_f16(v)), v, "{}", v);
         }
+    }
+
+    /// Encoding rounds to nearest, ties to even, and reaches the subnormals —
+    /// which a fp16 shader's arithmetic depends on and truncation did not do.
+    #[test]
+    fn halves_round_to_nearest_even() {
+        // 1 + 2^-11 is exactly halfway between 1.0 (0x3C00) and the next half
+        // up, so it takes the one with the even mantissa: 1.0 itself.
+        assert_eq!(f32_to_f16(1.0 + 2f32.powi(-11)), 0x3C00);
+        // Halfway between 0x3C01 and 0x3C02 goes the other way, to 0x3C02.
+        assert_eq!(f32_to_f16(1.0 + 3.0 * 2f32.powi(-11)), 0x3C02);
+        // Just over halfway rounds up whatever the parity.
+        assert_eq!(f32_to_f16(1.0 + 2f32.powi(-11) * 1.01), 0x3C01);
+        // The subnormals: m * 2^-24 for m in 1..=0x3FF, and the largest of
+        // them is adjacent to the smallest normal.
+        assert_eq!(f32_to_f16(2f32.powi(-24)), 0x0001);
+        assert_eq!(f32_to_f16(-2f32.powi(-24)), 0x8001);
+        assert_eq!(f32_to_f16(0x3FF as f32 * 2f32.powi(-24)), 0x03FF);
+        assert_eq!(f32_to_f16(2f32.powi(-14)), 0x0400);
+        // Half of the smallest subnormal is a tie against zero, so it takes
+        // the even result; anything under that is nearer zero anyway.
+        assert_eq!(f32_to_f16(2f32.powi(-25)), 0x0000);
+        assert_eq!(f32_to_f16(2f32.powi(-30)), 0x0000);
+        // Out of range in both directions.
+        assert_eq!(f32_to_f16(70000.0), 0x7C00);
+        assert_eq!(f32_to_f16(f32::NEG_INFINITY), 0xFC00);
+        assert!(f16_to_f32(f32_to_f16(f32::NAN)).is_nan());
     }
 
     /// Subnormal halves are their own branch, and one nothing reached until

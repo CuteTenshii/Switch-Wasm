@@ -70,7 +70,8 @@
 
 use super::compiled::{Compiled, NO_TARGET};
 use super::isa::{
-    BoolOp, FCmp, FMod, FRound, ICmp, LogicOp, LopTest, MufuOp, Op, Operand, Pred, TexDim, RZ,
+    BoolOp, FCmp, FMod, FRound, HMerge, HPrecision, HSwizzle, ICmp, LogicOp, LopTest, MufuOp, Op,
+    Operand, Pred, TexDim, RZ,
 };
 use crate::gpu::texture::SwizzleSource;
 use std::collections::BTreeSet;
@@ -271,6 +272,32 @@ fn fsat(v: f32) -> f32 {
   // A saturating instruction answers 0 for NaN rather than propagating it.
   if (v != v) { return 0.0; }
   return clamp(v, 0.0, 1.0);
+}",
+    ),
+    (
+        "hftz",
+        "\
+fn hftz(v: vec2<f32>) -> vec2<f32> {
+  // A half instruction's `.ftz` flushes a subnormal *half* to a zero of the
+  // same sign, which starts four orders of magnitude above an f32's.
+  let signs = bitcast<vec2<f32>>(bitcast<vec2<u32>>(v) & vec2<u32>(0x80000000u));
+  return select(v, signs, abs(v) < vec2<f32>(6.103515625e-5));
+}",
+    ),
+    (
+        "ftz2",
+        "\
+fn ftz2(v: vec2<f32>) -> vec2<f32> {
+  let signs = bitcast<vec2<f32>>(bitcast<vec2<u32>>(v) & vec2<u32>(0x80000000u));
+  return select(v, signs, abs(v) < vec2<f32>(1.1754943508222875e-38));
+}",
+    ),
+    (
+        "fsat2",
+        "\
+fn fsat2(v: vec2<f32>) -> vec2<f32> {
+  // A saturating instruction answers 0 for NaN rather than propagating it.
+  return clamp(select(v, vec2<f32>(0.0), v != v), vec2<f32>(0.0), vec2<f32>(1.0));
 }",
     ),
     (
@@ -627,6 +654,103 @@ impl<'a> Emitter<'a> {
         }
     }
 
+    // ---- half-precision ----
+    //
+    // A pair of halves is a `vec2<f32>` here and `pack2x16float` puts it back,
+    // rounding to nearest with ties to even exactly as `f32_to_f16` does — so
+    // the two backends agree on every finite result. They can differ on one
+    // that overflows the half range, which WGSL leaves indeterminate and the
+    // interpreter answers with an infinity.
+
+    /// One source's two lanes, flushed and modified.
+    fn half_source(&mut self, bits: String, m: FMod, sw: HSwizzle, ftz: bool) -> String {
+        let lanes = match sw {
+            HSwizzle::H1H0 => format!("unpack2x16float({bits})"),
+            HSwizzle::H0H0 => format!("unpack2x16float({bits}).xx"),
+            HSwizzle::H1H1 => format!("unpack2x16float({bits}).yy"),
+            // Not a pair at all: one f32 that both lanes read.
+            HSwizzle::F32 => format!("vec2<f32>(bitcast<f32>({bits}))"),
+        };
+        let lanes = if !ftz {
+            lanes
+        } else if sw == HSwizzle::F32 {
+            self.need("ftz2");
+            format!("ftz2({lanes})")
+        } else {
+            self.need("hftz");
+            format!("hftz({lanes})")
+        };
+        self.fmod(m, lanes)
+    }
+
+    fn half_saturate(&mut self, sat: bool, value: String) -> String {
+        if sat {
+            self.need("fsat2");
+            format!("fsat2({value})")
+        } else {
+            value
+        }
+    }
+
+    /// The u32 a half op's two lanes leave in its destination.
+    fn half_merge(&mut self, dst: u8, lanes: &str, merge: HMerge) -> String {
+        match merge {
+            HMerge::H1H0 => format!("pack2x16float({lanes})"),
+            HMerge::F32 => format!("bitcast<u32>(({lanes}).x)"),
+            HMerge::MrgH0 => {
+                let kept = self.r(dst);
+                format!("(({kept} & 0xffff0000u) | (pack2x16float({lanes}) & 0x0000ffffu))")
+            }
+            HMerge::MrgH1 => {
+                let kept = self.r(dst);
+                format!("(({kept} & 0x0000ffffu) | (pack2x16float({lanes}) & 0xffff0000u))")
+            }
+        }
+    }
+
+    /// `.fmz`'s "anything times zero is zero" as a lane-wise condition, or
+    /// `None` where the mode does not apply — saturation answers the same
+    /// question, so hardware does not do both.
+    fn half_fmz(&mut self, prec: HPrecision, sat: bool, a: &str, b: &str) -> Option<String> {
+        if prec != HPrecision::Fmz || sat {
+            return None;
+        }
+        Some(format!("(({a} == vec2<f32>(0.0)) | ({b} == vec2<f32>(0.0)))"))
+    }
+
+    /// Each lane's comparison, combined with the source predicate — the half
+    /// of `hset2` and `hsetp2` that is the same instruction.
+    #[allow(clippy::too_many_arguments)]
+    fn half_compare(
+        &mut self,
+        a: u8,
+        am: FMod,
+        asw: HSwizzle,
+        b: Operand,
+        bm: FMod,
+        bsw: HSwizzle,
+        cmp: FCmp,
+        bop: BoolOp,
+        src: Pred,
+        ftz: bool,
+    ) -> (String, String) {
+        let x = self.r(a);
+        let x = self.half_source(x, am, asw, ftz);
+        let x = self.bind(&x);
+        let y = self.operand(b);
+        let y = self.half_source(y, bm, bsw, ftz);
+        let y = self.bind(&y);
+        let guard = self.holds(src);
+        let guard = self.bind(&guard);
+        let low = self.float_compare(cmp, &format!("{x}.x"), &format!("{y}.x"));
+        let low = self.combine(bop, &low, &guard);
+        let low = self.bind(&low);
+        let high = self.float_compare(cmp, &format!("{x}.y"), &format!("{y}.y"));
+        let high = self.combine(bop, &high, &guard);
+        let high = self.bind(&high);
+        (low, high)
+    }
+
     fn ineg(&mut self, neg: bool, value: String) -> String {
         if neg {
             format!("(0u - ({value}))")
@@ -812,6 +936,81 @@ impl Emitter<'_> {
                 let value = self.saturate(sat, value);
                 self.set_f(dst, &value);
             }
+            // ---- half-precision ----
+            Op::Hadd2 { dst, a, am, asw, b, bm, bsw, merge, ftz, sat } => {
+                let x = self.r(a);
+                let x = self.half_source(x, am, asw, ftz);
+                let y = self.operand(b);
+                let y = self.half_source(y, bm, bsw, ftz);
+                let lanes = self.half_saturate(sat, format!("({x} + {y})"));
+                let value = self.half_merge(dst, &lanes, merge);
+                self.set_r(dst, &value);
+            }
+            Op::Hmul2 { dst, a, am, asw, b, bm, bsw, merge, prec, sat } => {
+                let ftz = prec == HPrecision::Ftz;
+                let x = self.r(a);
+                let x = self.half_source(x, am, asw, ftz);
+                let y = self.operand(b);
+                let y = self.half_source(y, bm, bsw, ftz);
+                let lanes = match self.half_fmz(prec, sat, &x, &y) {
+                    // Bound, because `.fmz` reads both operands twice.
+                    Some(_) => {
+                        let x = self.bind(&x);
+                        let y = self.bind(&y);
+                        let zeroed = self.half_fmz(prec, sat, &x, &y).expect("mode checked above");
+                        format!("select({x} * {y}, vec2<f32>(0.0), {zeroed})")
+                    }
+                    None => format!("({x} * {y})"),
+                };
+                let lanes = self.half_saturate(sat, lanes);
+                let value = self.half_merge(dst, &lanes, merge);
+                self.set_r(dst, &value);
+            }
+            Op::Hfma2 { dst, a, asw, b, bneg, bsw, c, cneg, csw, merge, prec, sat } => {
+                let ftz = prec == HPrecision::Ftz;
+                let x = self.r(a);
+                let x = self.half_source(x, FMod::NONE, asw, ftz);
+                let y = self.operand(b);
+                let y = self.half_source(y, FMod { neg: bneg, abs: false }, bsw, ftz);
+                let z = self.operand(c);
+                let z = self.half_source(z, FMod { neg: cneg, abs: false }, csw, ftz);
+                let lanes = match self.half_fmz(prec, sat, &x, &y) {
+                    // A zeroed product leaves the addend, not zero.
+                    Some(_) => {
+                        let x = self.bind(&x);
+                        let y = self.bind(&y);
+                        let z = self.bind(&z);
+                        let zeroed = self.half_fmz(prec, sat, &x, &y).expect("mode checked above");
+                        format!("select(fma({x}, {y}, {z}), {z}, {zeroed})")
+                    }
+                    None => format!("fma({x}, {y}, {z})"),
+                };
+                let lanes = self.half_saturate(sat, lanes);
+                let value = self.half_merge(dst, &lanes, merge);
+                self.set_r(dst, &value);
+            }
+            Op::Hset2 { dst, a, am, asw, b, bm, bsw, cmp, bop, src, bf, ftz } => {
+                let (low, high) = self.half_compare(a, am, asw, b, bm, bsw, cmp, bop, src, ftz);
+                // Each lane's answer fills its own half of the register:
+                // 1.0h with `.bf`, all ones without.
+                let taken = if bf { "0x3c00u" } else { "0x0000ffffu" };
+                self.set_r(
+                    dst,
+                    &format!("(select(0u, {taken}, {low}) | select(0u, {taken} << 16u, {high}))"),
+                );
+            }
+            Op::Hsetp2 { p0, p1, a, am, asw, b, bm, bsw, cmp, bop, src, and, ftz } => {
+                let (low, high) = self.half_compare(a, am, asw, b, bm, bsw, cmp, bop, src, ftz);
+                if and {
+                    let both = self.bind(&format!("({low} && {high})"));
+                    self.set_p(p0, &both);
+                    self.set_p(p1, &format!("!{both}"));
+                } else {
+                    self.set_p(p0, &low);
+                    self.set_p(p1, &high);
+                }
+            }
+
             Op::Fsetp { p0, p1, a, am, b, bm, cmp, bop, src } => {
                 let x = self.f(a);
                 let x = self.fmod(am, x);
@@ -2412,5 +2611,142 @@ mod tests {
             }
             assert!(braces_balance(&source), "{stage:?}:\n{source}");
         }
+    }
+
+    /// Every half-precision op, in the modes that change what is emitted.
+    fn half_opcodes() -> Vec<Op> {
+        let pair = |asw, bsw, merge| Op::Hadd2 {
+            dst: 1,
+            a: 2,
+            am: NO_MOD,
+            asw,
+            b: Operand::Reg(3),
+            bm: NO_MOD,
+            bsw,
+            merge,
+            ftz: true,
+            sat: true,
+        };
+        vec![
+            pair(HSwizzle::H1H0, HSwizzle::H1H0, HMerge::H1H0),
+            pair(HSwizzle::H0H0, HSwizzle::F32, HMerge::F32),
+            pair(HSwizzle::H1H1, HSwizzle::H1H0, HMerge::MrgH0),
+            pair(HSwizzle::H1H0, HSwizzle::H1H0, HMerge::MrgH1),
+            Op::Hmul2 {
+                dst: 1,
+                a: 2,
+                am: FMod { neg: true, abs: true },
+                asw: HSwizzle::H1H0,
+                b: Operand::Const { bank: 1, offset: 0x10 },
+                bm: NO_MOD,
+                bsw: HSwizzle::F32,
+                merge: HMerge::H1H0,
+                prec: HPrecision::Fmz,
+                sat: false,
+            },
+            Op::Hfma2 {
+                dst: 1,
+                a: 2,
+                asw: HSwizzle::H1H0,
+                b: Operand::Reg(3),
+                bneg: true,
+                bsw: HSwizzle::H1H0,
+                c: Operand::Reg(4),
+                cneg: false,
+                csw: HSwizzle::H1H0,
+                merge: HMerge::H1H0,
+                prec: HPrecision::Fmz,
+                sat: false,
+            },
+            Op::Hfma2 {
+                dst: 1,
+                a: 2,
+                asw: HSwizzle::H1H0,
+                b: Operand::Imm(0x3c00_3c00),
+                bneg: false,
+                bsw: HSwizzle::H1H0,
+                c: Operand::Reg(1),
+                cneg: true,
+                csw: HSwizzle::H1H0,
+                merge: HMerge::H1H0,
+                prec: HPrecision::Ftz,
+                sat: true,
+            },
+            Op::Hset2 {
+                dst: 1,
+                a: 2,
+                am: NO_MOD,
+                asw: HSwizzle::H1H0,
+                b: Operand::Reg(3),
+                bm: NO_MOD,
+                bsw: HSwizzle::H1H0,
+                cmp: FCmp::Gt,
+                bop: BoolOp::And,
+                src: ALWAYS,
+                bf: true,
+                ftz: false,
+            },
+            Op::Hsetp2 {
+                p0: 0,
+                p1: 1,
+                a: 2,
+                am: NO_MOD,
+                asw: HSwizzle::H1H0,
+                b: Operand::Reg(3),
+                bm: NO_MOD,
+                bsw: HSwizzle::H1H0,
+                cmp: FCmp::Lt,
+                bop: BoolOp::Or,
+                src: IF_P0,
+                and: true,
+                ftz: true,
+            },
+            Op::Hsetp2 {
+                p0: 0,
+                p1: 1,
+                a: 2,
+                am: NO_MOD,
+                asw: HSwizzle::H1H0,
+                b: Operand::Reg(3),
+                bm: NO_MOD,
+                bsw: HSwizzle::H1H0,
+                cmp: FCmp::Ne,
+                bop: BoolOp::And,
+                src: ALWAYS,
+                and: false,
+                ftz: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn every_half_opcode_translates() {
+        for op in half_opcodes() {
+            let p = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
+            let wgsl = translate(&p).unwrap_or_else(|e| panic!("{op:?}: {e}")).source;
+            assert!(braces_balance(&wgsl), "{op:?} left a block open:\n{wgsl}");
+        }
+    }
+
+    /// A pair of halves is a `vec2<f32>` here, and the pack that puts it back
+    /// rounds the way `f32_to_f16` does — so the two backends agree on every
+    /// finite result rather than only on the ones that round the same way.
+    #[test]
+    fn a_half_op_unpacks_its_lanes_and_a_merge_keeps_the_other_one() {
+        let ops: Vec<(Op, Pred)> =
+            half_opcodes().into_iter().map(|op| (op, ALWAYS)).chain([(Op::Exit, ALWAYS)]).collect();
+        let wgsl = translate(&program(&ops)).unwrap().source;
+        assert!(wgsl.contains("pack2x16float(fsat2((hftz(unpack2x16float(r2))"), "{wgsl}");
+        // The three swizzles that are not the plain pair.
+        assert!(wgsl.contains("unpack2x16float(r2).xx"), "{wgsl}");
+        assert!(wgsl.contains("unpack2x16float(r2).yy"), "{wgsl}");
+        assert!(wgsl.contains("vec2<f32>(bitcast<f32>(r3))"), "{wgsl}");
+        // A merge writes one half and leaves the other where it was.
+        assert!(wgsl.contains("(r1 & 0xffff0000u) |"), "{wgsl}");
+        assert!(wgsl.contains("(r1 & 0x0000ffffu) |"), "{wgsl}");
+        // `.fmz` reads both operands twice, so both are bound first.
+        assert!(wgsl.contains("== vec2<f32>(0.0)) | ("), "{wgsl}");
+        // An f32 lane keeps the f32 flush threshold, not the half one.
+        assert!(wgsl.contains("ftz2(vec2<f32>(bitcast<f32>(r3)))"), "{wgsl}");
     }
 }

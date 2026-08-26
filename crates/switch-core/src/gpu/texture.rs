@@ -354,19 +354,27 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
     if let Some(codec) = codec {
         return Ok(TexelKind::Block(codec));
     }
-    if data_type != UNORM {
-        return Err(Error::Gpu(format!(
-            "texture: unsupported TIC R_DATA_TYPE {data_type} for COMPONENTS_SIZES \
-             {components_sizes:#x} (uncompressed textures are UNORM only)"
-        )));
-    }
-    let raw = match components_sizes {
-        0x08 => 0xD5, // A8B8G8R8 -> RGBA8Unorm
-        0x18 => 0xEA, // G8R8     -> RG8Unorm
-        0x1D => 0xF3, // R8       -> R8Unorm
-        other => {
+    // An HDR title renders into a float surface and samples it back to
+    // tonemap: "A Short Hike" composites its frame out of an
+    // R16_G16_B16_A16 FLOAT target, and refusing that one sample left the
+    // whole frame transparent. The float sizes here are the ones
+    // [`ColorFormat`] already decodes; the rest stay an honest error.
+    let raw = match (components_sizes, data_type) {
+        (0x08, UNORM) => 0xD5, // A8B8G8R8          -> RGBA8Unorm
+        (0x18, UNORM) => 0xEA, // G8R8              -> RG8Unorm
+        (0x1D, UNORM) => 0xF3, // R8                -> R8Unorm
+        (0x01, FLOAT) => 0xC0, // R32_G32_B32_A32   -> RGBA32Float
+        (0x03, FLOAT) => 0xCA, // R16_G16_B16_A16   -> RGBA16Float
+        (0x0F, FLOAT) => 0xE5, // R32               -> R32Float
+        (other, UNORM) => {
             return Err(Error::Gpu(format!(
                 "texture: unsupported TIC COMPONENTS_SIZES {other:#x}"
+            )))
+        }
+        _ => {
+            return Err(Error::Gpu(format!(
+                "texture: unsupported TIC R_DATA_TYPE {data_type} for COMPONENTS_SIZES \
+                 {components_sizes:#x}"
             )))
         }
     };
@@ -374,10 +382,9 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
 }
 
 /// Parse one 32-byte TIC entry (`gm200_texture.xml`'s `TIC2` domain) into a
-/// [`Texture`] ready for `Surface::sample_point`/`sample_bilinear`. Only
-/// `UNORM`, 2D, pitch or block-linear is supported, in the component sizes
-/// [`color_format_for_components`] lists — the common cases for a real UI
-/// texture; anything else is a clear, honest error rather than a guess.
+/// [`Texture`] ready for `Surface::sample_point`/`sample_bilinear`. Only 2D,
+/// pitch or block-linear is supported, in the texel kinds [`texel_kind_for`]
+/// lists; anything else is a clear, honest error rather than a guess.
 pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     let dw = |i: u64| -> Result<u32> { ctx.read_u32(addr + i * 4) };
     let dw0 = dw(0)?;
@@ -805,6 +812,25 @@ mod tests {
         // ((0.5176 + 0.055) / 1.055) ^ 2.4.
         assert!((converted[0] - 0.2307).abs() < 0.001, "got {}", converted[0]);
         assert_eq!(converted[3], 1.0, "alpha is never sRGB-encoded");
+    }
+
+    /// An HDR pass samples its own float render target back. `0x03`/FLOAT is
+    /// the one "A Short Hike" composites its frame through.
+    #[test]
+    fn the_float_tic_formats_map_to_their_surface_format() {
+        let plain = |sizes, ty| match texel_kind_for(sizes, ty).unwrap() {
+            TexelKind::Plain(format) => format,
+            other => panic!("{sizes:#x}/{ty} is {other:?}, not a plain format"),
+        };
+        assert_eq!(plain(0x03, 7).raw, 0xCA); // R16_G16_B16_A16 -> RGBA16Float
+        assert_eq!(plain(0x03, 7).bytes_per_pixel, 8);
+        assert_eq!(plain(0x01, 7).raw, 0xC0); // R32_G32_B32_A32 -> RGBA32Float
+        assert_eq!(plain(0x0F, 7).raw, 0xE5); // R32             -> R32Float
+        // The UNORM readings of those sizes are a different format, and none
+        // of them is one this decodes.
+        assert!(texel_kind_for(0x03, 2).is_err());
+        // A size that is not a format at all still reports as one.
+        assert!(texel_kind_for(0x09, 7).is_err());
     }
 
     #[test]

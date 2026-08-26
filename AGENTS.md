@@ -11,7 +11,7 @@ standing state.
 ## Commands
 
 - `make all` — `test` then `assets`.
-- `make test` — `cargo test` over all three crates. 735 tests.
+- `make test` — `cargo test` over all three crates. 752 tests.
 - `make wasm` — release wasm build `--features gpu`, then `wasm-bindgen
   --target web`. Needs `rustup target add wasm32-unknown-unknown` and a
   `wasm-bindgen-cli` matching the `Cargo.lock` version.

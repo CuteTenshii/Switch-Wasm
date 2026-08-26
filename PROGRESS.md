@@ -19,16 +19,16 @@ whenever it was last recorded.
 | `sysinfo` / `NX-Fetch` / `nxdumptool` | render | yes | carried |
 | `JKSV.nro` | full UI: text, icons, save tiles | yes | carried |
 | `Checkpoint.nro` | layout and chrome; text still solid blocks (needs `SHFL`) | yes | carried |
-| "A Short Hike" (NSP) | 1.5B steps, no fault, no abort, **no draw calls** | no | carried |
+| "A Short Hike" (NSP) | frame 1 at 2.2B steps, 295 draws, none skipped; composites, but only the clear colour | partial | measured |
 | "Tomodachi Life" (NSP) | 1.2B steps, no fault, no abort, **no draw calls** | no | carried |
 
 A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` →
 `sdk` through real `nnSdk` init, gets its heap, events and input, brings up its
 graphics stack, opens its audio device, and runs on into its own loop. **Every
 service it asks for has a real implementation** — a full boot logs no `no
-implementation` and no `unimplemented` lines. It just never draws.
+implementation` and no `unimplemented` lines.
 
-`make test`: **730 tests, all passing.**
+`make test`: **752 tests, all passing.**
 
 ## Homebrew
 
@@ -137,6 +137,32 @@ draws thrown away over an attribute their shader never reads. And `SetDstWidth`
 counts **elements, not bytes**, which shredded block-linear images into strips.
 Reading from a *disabled* buffer is still an error, because that means a
 register was read wrong and there is no correct value to invent.
+
+**A Unity title is written in `half`, and none of it decoded.** "A Short Hike"
+renders its scene into an RGBA16Float target and composites the frame out of it
+with two full-screen quads. Both quads were dropped — one on sampling a float
+texture, which `texel_kind_for` accepted in UNORM only, and one on the fp16
+ALU — along with 145 other draws. So nothing ever wrote the swapchain buffer
+and it presented the zeros it was allocated with: not a black frame, an
+**empty** one, which on a canvas is transparent rather than dark.
+
+The whole half-precision group (`hadd2`/`hmul2`/`hfma2`/`hset2`/`hsetp2`,
+opcodes and field positions from Eden's `maxwell.inc`) is decoded now. Two
+things about it are worth carrying:
+
+- **110 of the 145 were `hadd2.f32`** — swizzles and merge all `F32`, which is
+  a plain float add issued on the half unit. Most of what a `half` shader costs
+  you is not half arithmetic.
+- **`f32_to_f16` had to stop truncating.** Rounding towards zero cost at most
+  an ulp of a render target; as the rounding step of every fp16 instruction it
+  biases a whole shader. It rounds to nearest, ties to even, and reaches the
+  subnormals — the mode WGSL's `pack2x16float` uses, so both backends agree.
+
+With those closed every one of the 295 draws rasterizes and the frame is no
+longer empty — and **293 of them still cover no pixels**, 161 triangles culled
+and 60 degenerate with all three vertices on the same screen point. Only the
+two full-screen quads write anything, and what they composite is the HDR
+target's clear colour. That is a vertex-stage bug, and it is next.
 
 **`SHFL` is still undecoded**, and it is why Checkpoint's antialiased text is
 solid blocks. A scalar interpreter cannot answer it — the value belongs to

@@ -212,6 +212,81 @@ impl FmulScale {
     }
 }
 
+/// Which halves of a source register feed a half-precision op's two lanes.
+///
+/// `F32` is the odd one out: the source is a single f32 rather than a pair of
+/// halves, and both lanes read it. Maxwell lets one operand of a half
+/// instruction be full precision, which is how a shader multiplies a `half2`
+/// by a `float` without converting anything first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HSwizzle {
+    /// Lane 0 from the low half, lane 1 from the high half.
+    H1H0,
+    F32,
+    /// Both lanes from the low half.
+    H0H0,
+    /// Both lanes from the high half.
+    H1H1,
+}
+
+impl HSwizzle {
+    fn decode(bits: u64) -> HSwizzle {
+        match bits {
+            0 => HSwizzle::H1H0,
+            1 => HSwizzle::F32,
+            2 => HSwizzle::H0H0,
+            _ => HSwizzle::H1H1,
+        }
+    }
+}
+
+/// How a half-precision op writes its two lane results back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HMerge {
+    /// Pack both lanes into the destination.
+    H1H0,
+    /// Widen lane 0 to f32 and write the whole register.
+    F32,
+    /// Replace only the destination's low half, with lane 0.
+    MrgH0,
+    /// Replace only its high half, with lane 1.
+    MrgH1,
+}
+
+impl HMerge {
+    fn decode(bits: u64) -> HMerge {
+        match bits {
+            0 => HMerge::H1H0,
+            1 => HMerge::F32,
+            2 => HMerge::MrgH0,
+            _ => HMerge::MrgH1,
+        }
+    }
+}
+
+/// `hmul2`/`hfma2`'s denormal and zero handling (`HalfPrecision`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HPrecision {
+    None,
+    /// Flush a subnormal operand to zero.
+    Ftz,
+    /// D3D9's rule: anything multiplied by zero is zero, NaN and infinity
+    /// included.
+    Fmz,
+}
+
+impl HPrecision {
+    /// The fourth encoding is hardware's "don't care", which is free to be
+    /// the plain mode.
+    fn decode(bits: u64) -> HPrecision {
+        match bits {
+            1 => HPrecision::Ftz,
+            2 => HPrecision::Fmz,
+            _ => HPrecision::None,
+        }
+    }
+}
+
 /// What `lop`'s test form asks of the result before it writes its predicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LopTest {
@@ -356,6 +431,83 @@ pub enum Op {
     Fsetp { p0: u8, p1: u8, a: u8, am: FMod, b: Operand, bm: FMod, cmp: FCmp, bop: BoolOp, src: Pred },
     Fset { dst: u8, a: u8, am: FMod, b: Operand, bm: FMod, cmp: FCmp, bop: BoolOp, src: Pred, bf: bool },
     Mufu { dst: u8, src: u8, sm: FMod, op: MufuOp, sat: bool },
+
+    // ---- half-precision ALU ----
+    // A register is a pair of halves and each of these computes both lanes at
+    // once, which is why a Unity shader — written in `half` throughout — is
+    // most of these and few of the f32 ops above. [`HSwizzle`] says where each
+    // source's two lanes come from and [`HMerge`] where the result goes.
+    Hadd2 {
+        dst: u8,
+        a: u8,
+        am: FMod,
+        asw: HSwizzle,
+        b: Operand,
+        bm: FMod,
+        bsw: HSwizzle,
+        merge: HMerge,
+        ftz: bool,
+        sat: bool,
+    },
+    Hmul2 {
+        dst: u8,
+        a: u8,
+        am: FMod,
+        asw: HSwizzle,
+        b: Operand,
+        bm: FMod,
+        bsw: HSwizzle,
+        merge: HMerge,
+        prec: HPrecision,
+        sat: bool,
+    },
+    Hfma2 {
+        dst: u8,
+        a: u8,
+        asw: HSwizzle,
+        b: Operand,
+        bneg: bool,
+        bsw: HSwizzle,
+        c: Operand,
+        cneg: bool,
+        csw: HSwizzle,
+        merge: HMerge,
+        prec: HPrecision,
+        sat: bool,
+    },
+    /// The two lanes' comparisons land in the two halves of `dst`.
+    Hset2 {
+        dst: u8,
+        a: u8,
+        am: FMod,
+        asw: HSwizzle,
+        b: Operand,
+        bm: FMod,
+        bsw: HSwizzle,
+        cmp: FCmp,
+        bop: BoolOp,
+        src: Pred,
+        bf: bool,
+        ftz: bool,
+    },
+    /// Unlike `fsetp`, the two destination predicates are the two *lanes*, not
+    /// a result and its inverse — until `and`, which ands them together and
+    /// then writes the inverse into `p1` after all.
+    Hsetp2 {
+        p0: u8,
+        p1: u8,
+        a: u8,
+        am: FMod,
+        asw: HSwizzle,
+        b: Operand,
+        bm: FMod,
+        bsw: HSwizzle,
+        cmp: FCmp,
+        bop: BoolOp,
+        src: Pred,
+        and: bool,
+        ftz: bool,
+    },
 
     // ---- integer ALU ----
     /// `cin` is `IADD.X`, which adds the carry a previous `IADD.CC` left
@@ -1260,6 +1412,12 @@ fn decode_alu_wide(insn: u64) -> Op {
     let un = Op::Unimplemented { raw: insn };
     let form = insn >> 48;
 
+    // The half-precision group first: its opcodes are spread across five
+    // different masks, none of which any arm below claims.
+    if let Some(op) = decode_half(insn) {
+        return op;
+    }
+
     // ---- 0xfff0-masked: fsetp/isetp/iset/icmp/prmt/lop3/bfi ----
     match form >> 4 {
         // fsetp — cmp 48..52, ftz 47, bop 45..47.
@@ -1630,6 +1788,274 @@ fn decode_alu_wide(insn: u64) -> Op {
     }
 
     un
+}
+
+/// The half pair an immediate form of a half-precision op carries: two halves
+/// whose low six mantissa bits the encoding has no room for, each with a sign
+/// bit of its own well away from the rest of it.
+fn half_imm(insn: u64) -> u32 {
+    let low = (field(insn, 20, 9) << 6) | (field(insn, 29, 1) << 15);
+    let high = (field(insn, 30, 9) << 22) | (field(insn, 56, 1) << 31);
+    (low | high) as u32
+}
+
+/// The half-precision group: `hadd2`, `hmul2`, `hfma2`, `hset2` and `hsetp2`,
+/// in every operand form.
+///
+/// Opcodes and field positions come from Eden's `maxwell.inc` and its
+/// `half_floating_point_*.cpp` translators. The forms differ in more than
+/// where the second operand comes from — a register form keeps `b`'s
+/// modifiers below bit 32 and a constant or immediate one puts them up at
+/// 52..57 — so each is written out rather than shared.
+///
+/// Without these, "A Short Hike" lost 145 of its 295 draws, each to the first
+/// `hadd2` in its shader, and with them the two full-screen quads it
+/// composites its frame out of. A Unity shader is written in `half`
+/// throughout, so this is most of its arithmetic rather than a corner of it.
+fn decode_half(insn: u64) -> Option<Op> {
+    let top = insn >> 48;
+    let un = || Some(Op::Unimplemented { raw: insn });
+    let dst = reg(insn, 0, 8);
+    let a = reg(insn, 8, 8);
+    let merge = HMerge::decode(field(insn, 49, 2));
+    let asw = HSwizzle::decode(field(insn, 47, 2));
+    let reg20 = Operand::Reg(reg(insn, 20, 8));
+    let reg39 = Operand::Reg(reg(insn, 39, 8));
+    // Every immediate form carries the same packed pair, and every `32I` form
+    // the same full 32 bits in place of it.
+    let imm = Operand::Imm(half_imm(insn));
+    let imm32 = Operand::Imm(field(insn, 20, 32) as u32);
+    let bsw_reg = HSwizzle::decode(field(insn, 28, 2));
+    let no_mod = FMod::NONE;
+
+    // ---- hadd2 ----
+    if top & 0xfff8 == 0x5d10 {
+        return Some(Op::Hadd2 {
+            dst,
+            a,
+            am: FMod { neg: field(insn, 43, 1) != 0, abs: field(insn, 44, 1) != 0 },
+            asw,
+            b: reg20,
+            bm: FMod { neg: field(insn, 31, 1) != 0, abs: field(insn, 30, 1) != 0 },
+            bsw: bsw_reg,
+            merge,
+            ftz: field(insn, 39, 1) != 0,
+            sat: field(insn, 32, 1) != 0,
+        });
+    }
+    if top & 0xfe80 == 0x7a80 || top & 0xfe80 == 0x7a00 {
+        let cbuf = top & 0x0080 != 0;
+        return Some(Op::Hadd2 {
+            dst,
+            a,
+            am: FMod { neg: field(insn, 43, 1) != 0, abs: field(insn, 44, 1) != 0 },
+            asw,
+            b: if cbuf { const_operand(insn) } else { imm },
+            bm: if cbuf {
+                FMod { neg: field(insn, 56, 1) != 0, abs: field(insn, 54, 1) != 0 }
+            } else {
+                no_mod
+            },
+            bsw: if cbuf { HSwizzle::F32 } else { HSwizzle::H1H0 },
+            merge,
+            ftz: field(insn, 39, 1) != 0,
+            sat: field(insn, 52, 1) != 0,
+        });
+    }
+    // hadd2_32i — its own field positions, and the merge is fixed.
+    if top & 0xfe00 == 0x2c00 {
+        return Some(Op::Hadd2 {
+            dst,
+            a,
+            am: FMod { neg: field(insn, 56, 1) != 0, abs: false },
+            asw: HSwizzle::decode(field(insn, 53, 2)),
+            b: imm32,
+            bm: no_mod,
+            bsw: HSwizzle::H1H0,
+            merge: HMerge::H1H0,
+            ftz: field(insn, 55, 1) != 0,
+            sat: field(insn, 52, 1) != 0,
+        });
+    }
+
+    // ---- hmul2 ----
+    if top & 0xfff8 == 0x5d08 {
+        return Some(Op::Hmul2 {
+            dst,
+            a,
+            am: FMod { neg: false, abs: field(insn, 44, 1) != 0 },
+            asw,
+            b: reg20,
+            bm: FMod { neg: field(insn, 31, 1) != 0, abs: field(insn, 30, 1) != 0 },
+            bsw: bsw_reg,
+            merge,
+            prec: HPrecision::decode(field(insn, 39, 2)),
+            sat: field(insn, 32, 1) != 0,
+        });
+    }
+    if top & 0xfe80 == 0x7880 || top & 0xfe80 == 0x7800 {
+        let cbuf = top & 0x0080 != 0;
+        return Some(Op::Hmul2 {
+            dst,
+            a,
+            am: FMod { neg: field(insn, 43, 1) != 0, abs: field(insn, 44, 1) != 0 },
+            asw,
+            b: if cbuf { const_operand(insn) } else { imm },
+            bm: if cbuf {
+                FMod { neg: false, abs: field(insn, 54, 1) != 0 }
+            } else {
+                no_mod
+            },
+            bsw: if cbuf { HSwizzle::F32 } else { HSwizzle::H1H0 },
+            merge,
+            prec: HPrecision::decode(field(insn, 39, 2)),
+            sat: field(insn, 52, 1) != 0,
+        });
+    }
+    if top & 0xfe00 == 0x2a00 {
+        return Some(Op::Hmul2 {
+            dst,
+            a,
+            am: no_mod,
+            asw: HSwizzle::decode(field(insn, 53, 2)),
+            b: imm32,
+            bm: no_mod,
+            bsw: HSwizzle::H1H0,
+            merge: HMerge::H1H0,
+            prec: HPrecision::decode(field(insn, 55, 2)),
+            sat: field(insn, 52, 1) != 0,
+        });
+    }
+
+    // ---- hfma2 ----
+    if top & 0xfff8 == 0x5d00 {
+        return Some(Op::Hfma2 {
+            dst,
+            a,
+            asw,
+            b: reg20,
+            bneg: field(insn, 31, 1) != 0,
+            bsw: bsw_reg,
+            c: reg39,
+            cneg: field(insn, 30, 1) != 0,
+            csw: HSwizzle::decode(field(insn, 35, 2)),
+            merge,
+            prec: HPrecision::decode(field(insn, 37, 2)),
+            sat: field(insn, 32, 1) != 0,
+        });
+    }
+    // The `rc`, `cr` and `imm` forms share every modifier position and differ
+    // only in which of `b` and `c` is the constant bank.
+    if top & 0xf880 == 0x6080 || top & 0xf880 == 0x7080 || top & 0xf880 == 0x7000 {
+        let (b, bsw, c, csw) = if top & 0xf880 == 0x6080 {
+            (reg39, HSwizzle::decode(field(insn, 53, 2)), const_operand(insn), HSwizzle::F32)
+        } else if top & 0x0080 != 0 {
+            (const_operand(insn), HSwizzle::F32, reg39, HSwizzle::decode(field(insn, 53, 2)))
+        } else {
+            (imm, HSwizzle::H1H0, reg39, HSwizzle::decode(field(insn, 53, 2)))
+        };
+        return Some(Op::Hfma2 {
+            dst,
+            a,
+            asw,
+            b,
+            // The immediate form spends bit 56 on the high half's sign, so it
+            // is the one form with no negate for `b`.
+            bneg: top & 0xf880 != 0x7000 && field(insn, 56, 1) != 0,
+            bsw,
+            c,
+            cneg: field(insn, 51, 1) != 0,
+            csw,
+            merge,
+            prec: HPrecision::decode(field(insn, 57, 2)),
+            sat: field(insn, 52, 1) != 0,
+        });
+    }
+    // hfma2_32i — the addend is the destination register, which is the only
+    // place the encoding has left to name it.
+    if top & 0xfe00 == 0x2800 {
+        return Some(Op::Hfma2 {
+            dst,
+            a,
+            asw: HSwizzle::decode(field(insn, 53, 2)),
+            b: imm32,
+            bneg: false,
+            bsw: HSwizzle::H1H0,
+            c: Operand::Reg(dst),
+            cneg: field(insn, 52, 1) != 0,
+            csw: HSwizzle::H1H0,
+            merge: HMerge::H1H0,
+            prec: HPrecision::decode(field(insn, 55, 2)),
+            sat: false,
+        });
+    }
+
+    // ---- hset2 / hsetp2 ----
+    // Both read `a`'s modifiers, their source predicate and their boolean
+    // combiner from the same places, and `hset2`'s `bf` is `hsetp2`'s `and`.
+    let set_am = FMod { neg: field(insn, 43, 1) != 0, abs: field(insn, 44, 1) != 0 };
+    let src = src_pred(insn, 39, 42);
+    let is_set2 = top & 0xfff8 == 0x5d18 || top & 0xfe00 == 0x7c00;
+    let is_setp2 = top & 0xfff8 == 0x5d20 || top & 0xfe00 == 0x7e00;
+    if is_set2 || is_setp2 {
+        let Some(bop) = bool_op(field(insn, 45, 2)) else { return un() };
+        let register_form = top & 0xf000 == 0x5000;
+        let cbuf = !register_form && top & 0x0080 != 0;
+        let (b, bm, bsw) = if register_form {
+            (
+                reg20,
+                FMod { neg: field(insn, 31, 1) != 0, abs: field(insn, 30, 1) != 0 },
+                bsw_reg,
+            )
+        } else if cbuf {
+            (
+                const_operand(insn),
+                FMod { neg: field(insn, 56, 1) != 0, abs: field(insn, 54, 1) != 0 },
+                HSwizzle::F32,
+            )
+        } else {
+            (imm, no_mod, HSwizzle::H1H0)
+        };
+        // The comparison is four bits either just above the swizzle or up
+        // among the constant form's modifiers.
+        let cmp = fcmp(if register_form { field(insn, 35, 4) } else { field(insn, 49, 4) });
+        let flag = field(insn, if register_form { 49 } else { 53 }, 1) != 0;
+        if is_set2 {
+            return Some(Op::Hset2 {
+                dst,
+                a,
+                am: set_am,
+                asw,
+                b,
+                bm,
+                bsw,
+                cmp,
+                bop,
+                src,
+                bf: flag,
+                ftz: field(insn, if register_form { 50 } else { 54 }, 1) != 0,
+            });
+        }
+        return Some(Op::Hsetp2 {
+            p0: reg(insn, 3, 3),
+            p1: reg(insn, 0, 3),
+            a,
+            am: set_am,
+            asw,
+            b,
+            bm,
+            bsw,
+            cmp,
+            bop,
+            src,
+            and: flag,
+            // `hsetp2` spends its destination predicates on the bits every
+            // other form keeps `ftz` in, so its own sits down at bit 6.
+            ftz: field(insn, 6, 1) != 0,
+        });
+    }
+
+    None
 }
 
 fn decode_ffma(insn: u64, b: Operand, c: Operand) -> Op {
@@ -2329,4 +2755,180 @@ mod tests {
         // c0[0x30] from the JKSV capture: 0xc in the 14-bit field, x4.
         assert_eq!(const_operand(0x4c58100000c70204), Operand::Const { bank: 0, offset: 0x30 });
     }
+
+    /// The six half-precision encodings "A Short Hike" actually issues, taken
+    /// from the words its own draws were skipped on. Between them they cover
+    /// every operand form the group has except `hfma2`'s and the `32I`s.
+    #[test]
+    fn the_half_instructions_a_unity_shader_issues() {
+        // hadd2.f32 $r12 $r12 $r17 — the swizzles and the merge are all F32,
+        // which is a plain float add issued on the half unit. 110 of the 145
+        // skipped draws stopped on one of these.
+        assert_eq!(
+            op(0x5d12800011170c0c),
+            Op::Hadd2 {
+                dst: 12,
+                a: 12,
+                am: FMod::NONE,
+                asw: HSwizzle::F32,
+                b: Operand::Reg(17),
+                bm: FMod::NONE,
+                bsw: HSwizzle::F32,
+                merge: HMerge::F32,
+                ftz: false,
+                sat: false,
+            }
+        );
+        // hmul2.f32 $r0 $r9 $r4
+        assert_eq!(
+            op(0x5d0a800010470900),
+            Op::Hmul2 {
+                dst: 0,
+                a: 9,
+                am: FMod::NONE,
+                asw: HSwizzle::F32,
+                b: Operand::Reg(4),
+                bm: FMod::NONE,
+                bsw: HSwizzle::F32,
+                merge: HMerge::F32,
+                prec: HPrecision::None,
+                sat: false,
+            }
+        );
+        // hmul2.f32 $r4 $r5 c1[0xc] — the constant form keeps `b`'s
+        // modifiers up at 52..57 rather than below 32.
+        assert_eq!(
+            op(0x7882800400370504),
+            Op::Hmul2 {
+                dst: 4,
+                a: 5,
+                am: FMod::NONE,
+                asw: HSwizzle::F32,
+                b: Operand::Const { bank: 1, offset: 0xc },
+                bm: FMod::NONE,
+                bsw: HSwizzle::F32,
+                merge: HMerge::F32,
+                prec: HPrecision::None,
+                sat: false,
+            }
+        );
+        // hadd2 $r0 -$r9 (1.0, 1.0) — a "one minus" through the immediate
+        // form, whose pair is two halves missing their low six mantissa bits.
+        assert_eq!(
+            op(0x7a02883c0f070900),
+            Op::Hadd2 {
+                dst: 0,
+                a: 9,
+                am: FMod { neg: true, abs: false },
+                asw: HSwizzle::F32,
+                b: Operand::Imm(0x3C00_3C00),
+                bm: FMod::NONE,
+                bsw: HSwizzle::H1H0,
+                merge: HMerge::F32,
+                ftz: false,
+                sat: false,
+            }
+        );
+        // hadd2 $r8.h0 -$rZ.h0_h0 c1[0x0] — the merging form, which keeps
+        // the half of $r8 it does not write.
+        assert_eq!(
+            op(0x7a8508040007ff08),
+            Op::Hadd2 {
+                dst: 8,
+                a: RZ,
+                am: FMod { neg: true, abs: false },
+                asw: HSwizzle::H0H0,
+                b: Operand::Const { bank: 1, offset: 0 },
+                bm: FMod::NONE,
+                bsw: HSwizzle::F32,
+                merge: HMerge::MrgH0,
+                ftz: false,
+                sat: false,
+            }
+        );
+        // hsetp2.eq.and $p0 $pT $rZ.h0_h0 c3[0x140] $pT — the two
+        // destinations are the two lanes, and the second is `PT`, which is
+        // not writable.
+        assert_eq!(
+            op(0x7e85038c0507ff07),
+            Op::Hsetp2 {
+                p0: 0,
+                p1: Pred::PT,
+                a: RZ,
+                am: FMod::NONE,
+                asw: HSwizzle::H0H0,
+                b: Operand::Const { bank: 3, offset: 0x140 },
+                bm: FMod::NONE,
+                bsw: HSwizzle::F32,
+                cmp: FCmp::Eq,
+                bop: BoolOp::And,
+                src: Pred::ALWAYS,
+                and: false,
+                ftz: false,
+            }
+        );
+    }
+
+    /// The forms no capture covers yet, assembled from the field positions
+    /// rather than observed — so a transcription slip in one shows up here
+    /// rather than in a frame.
+    #[test]
+    fn every_half_operand_form_reaches_its_op() {
+        // hfma2 $r1 $r2 $r3 $r4, register form.
+        let hfma_reg = asm(0x5d00, &[(0, 8, 1), (8, 8, 2), (20, 8, 3), (39, 8, 4)]);
+        assert!(matches!(
+            op(hfma_reg),
+            Op::Hfma2 { dst: 1, a: 2, b: Operand::Reg(3), c: Operand::Reg(4), .. }
+        ));
+        // hfma2 with the constant bank as `b` (`cr`) and as `c` (`rc`).
+        let hfma_cr = asm(0x7080, &[(0, 8, 1), (8, 8, 2), (39, 8, 4), (20, 14, 3), (34, 5, 2)]);
+        assert!(matches!(
+            op(hfma_cr),
+            Op::Hfma2 { b: Operand::Const { bank: 2, offset: 0xc }, c: Operand::Reg(4), .. }
+        ));
+        let hfma_rc = asm(0x6080, &[(0, 8, 1), (8, 8, 2), (39, 8, 4), (20, 14, 3), (34, 5, 2)]);
+        assert!(matches!(
+            op(hfma_rc),
+            Op::Hfma2 { b: Operand::Reg(4), c: Operand::Const { bank: 2, offset: 0xc }, .. }
+        ));
+        // The `32I` forms take a whole 32-bit pair, and `hfma2`'s addend is
+        // its own destination because the encoding has nowhere else to put it.
+        assert!(matches!(
+            op(asm(0x2c00, &[(0, 8, 1), (8, 8, 2), (20, 32, 0x3c00_3c00)])),
+            Op::Hadd2 { dst: 1, a: 2, b: Operand::Imm(0x3c00_3c00), merge: HMerge::H1H0, .. }
+        ));
+        assert!(matches!(
+            op(asm(0x2a00, &[(0, 8, 1), (8, 8, 2), (20, 32, 0x3c00_3c00)])),
+            Op::Hmul2 { dst: 1, b: Operand::Imm(0x3c00_3c00), merge: HMerge::H1H0, .. }
+        ));
+        assert!(matches!(
+            op(asm(0x2800, &[(0, 8, 1), (8, 8, 2), (20, 32, 0x3c00_3c00)])),
+            Op::Hfma2 { dst: 1, c: Operand::Reg(1), merge: HMerge::H1H0, .. }
+        ));
+        // hset2, whose register form puts its comparison at 35 and its `.bf`
+        // where every other form's merge sits.
+        assert!(matches!(
+            op(asm(0x5d18, &[(0, 8, 1), (8, 8, 2), (20, 8, 3), (35, 4, 4), (49, 1, 1)])),
+            Op::Hset2 { dst: 1, a: 2, b: Operand::Reg(3), cmp: FCmp::Gt, bf: true, .. }
+        ));
+        assert!(matches!(
+            op(asm(0x7c80, &[(0, 8, 1), (8, 8, 2), (49, 4, 4), (20, 14, 3), (34, 5, 2)])),
+            Op::Hset2 { cmp: FCmp::Gt, b: Operand::Const { bank: 2, offset: 0xc }, .. }
+        ));
+        // hsetp2's `.h_and` collapses both lanes into one predicate.
+        assert!(matches!(
+            op(asm(0x5d20, &[(3, 3, 1), (0, 3, 2), (8, 8, 2), (20, 8, 3), (35, 4, 1), (49, 1, 1)])),
+            Op::Hsetp2 { p0: 1, p1: 2, cmp: FCmp::Lt, and: true, .. }
+        ));
+    }
+
+    /// An immediate half pair is two nine-bit fields with their signs stored
+    /// a long way from the rest of them.
+    #[test]
+    fn an_immediate_half_pair_reassembles_both_signs() {
+        // -1.0 in the low half (0xbc00) and +2.0 in the high (0x4000).
+        let insn = asm(0x7a00, &[(20, 9, 0xf0), (29, 1, 1), (30, 9, 0x100), (56, 1, 0)]);
+        assert_eq!(half_imm(insn), 0x4000_bc00);
+    }
 }
+

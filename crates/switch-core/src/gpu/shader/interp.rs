@@ -27,9 +27,10 @@ use crate::{Error, Result};
 use std::collections::HashMap;
 
 use super::isa::{
-    self, AtomOp, AtomSpace, AtomType, BarMode, BoolOp, FCmp, FRound, ICmp, LogicOp, LopTest,
-    MemSize, MufuOp, Op, Operand, Pred, TexDim, RZ,
+    self, AtomOp, AtomSpace, AtomType, BarMode, BoolOp, FCmp, FMod, FRound, HMerge, HPrecision,
+    HSwizzle, ICmp, LogicOp, LopTest, MemSize, MufuOp, Op, Operand, Pred, TexDim, RZ,
 };
+use crate::gpu::surface::{f16_to_f32, f32_to_f16};
 
 /// Resolves a `cN[offset]` operand to its raw 32 bits. `bank` is whatever the
 /// ISA's `Operand::Const` carries — for real programs that's a constant-buffer
@@ -785,6 +786,79 @@ impl Invocation {
                 self.set_reg(dst, set_result(r, bf));
             }
 
+            // ---- half-precision ----
+            // Both lanes are computed in f32 and rounded once, at the merge —
+            // which is what a half instruction does: it rounds its result,
+            // not its arithmetic. So [`HMerge::F32`], whose result is a float,
+            // rounds nowhere, even where one of its sources was a half.
+            Op::Hadd2 { dst, a, am, asw, b, bm, bsw, merge, ftz, sat } => {
+                let x = half_source(self.reg(a), am, asw, ftz);
+                let y = half_source(self.operand(b, env)?, bm, bsw, ftz);
+                let lanes = [saturate(x[0] + y[0], sat), saturate(x[1] + y[1], sat)];
+                let v = half_pack(self.reg(dst), lanes, merge);
+                self.set_reg(dst, v);
+            }
+            Op::Hmul2 { dst, a, am, asw, b, bm, bsw, merge, prec, sat } => {
+                let ftz = prec == HPrecision::Ftz;
+                let x = half_source(self.reg(a), am, asw, ftz);
+                let y = half_source(self.operand(b, env)?, bm, bsw, ftz);
+                let mut lanes = [x[0] * y[0], x[1] * y[1]];
+                for lane in 0..2 {
+                    if fmz_zeroes(prec, sat, x[lane], y[lane]) {
+                        lanes[lane] = 0.0;
+                    }
+                    lanes[lane] = saturate(lanes[lane], sat);
+                }
+                let v = half_pack(self.reg(dst), lanes, merge);
+                self.set_reg(dst, v);
+            }
+            Op::Hfma2 { dst, a, asw, b, bneg, bsw, c, cneg, csw, merge, prec, sat } => {
+                let ftz = prec == HPrecision::Ftz;
+                let x = half_source(self.reg(a), FMod::NONE, asw, ftz);
+                let y = half_source(self.operand(b, env)?, FMod { neg: bneg, abs: false }, bsw, ftz);
+                let z = half_source(self.operand(c, env)?, FMod { neg: cneg, abs: false }, csw, ftz);
+                let mut lanes = [x[0].mul_add(y[0], z[0]), x[1].mul_add(y[1], z[1])];
+                for lane in 0..2 {
+                    // A zeroed product leaves the addend, not zero.
+                    if fmz_zeroes(prec, sat, x[lane], y[lane]) {
+                        lanes[lane] = z[lane];
+                    }
+                    lanes[lane] = saturate(lanes[lane], sat);
+                }
+                let v = half_pack(self.reg(dst), lanes, merge);
+                self.set_reg(dst, v);
+            }
+            Op::Hset2 { dst, a, am, asw, b, bm, bsw, cmp, bop, src, bf, ftz } => {
+                let x = half_source(self.reg(a), am, asw, ftz);
+                let y = half_source(self.operand(b, env)?, bm, bsw, ftz);
+                let s = self.holds(src);
+                // Each lane's answer fills its own half of the register:
+                // 1.0h with `.bf`, all ones without.
+                let taken = if bf { 0x3C00u32 } else { 0xFFFF };
+                let mut out = 0u32;
+                if combine(bop, float_compare(cmp, x[0], y[0]), s) {
+                    out |= taken;
+                }
+                if combine(bop, float_compare(cmp, x[1], y[1]), s) {
+                    out |= taken << 16;
+                }
+                self.set_reg(dst, out);
+            }
+            Op::Hsetp2 { p0, p1, a, am, asw, b, bm, bsw, cmp, bop, src, and, ftz } => {
+                let x = half_source(self.reg(a), am, asw, ftz);
+                let y = half_source(self.operand(b, env)?, bm, bsw, ftz);
+                let s = self.holds(src);
+                let low = combine(bop, float_compare(cmp, x[0], y[0]), s);
+                let high = combine(bop, float_compare(cmp, x[1], y[1]), s);
+                if and {
+                    self.set_pred(p0, low && high);
+                    self.set_pred(p1, !(low && high));
+                } else {
+                    self.set_pred(p0, low);
+                    self.set_pred(p1, high);
+                }
+            }
+
             // ---- integer ----
             Op::Iadd { dst, a, aneg, b, bneg, cin, cout } => {
                 let x = ineg_if(self.reg(a), aneg);
@@ -1333,6 +1407,15 @@ fn operand_reg(op: Operand) -> Option<u8> {
     }
 }
 
+/// The destination register, where a half op's merge mode keeps half of what
+/// is already in it and so reads it back.
+fn half_merge_reads(dst: u8, merge: HMerge) -> Option<u8> {
+    match merge {
+        HMerge::MrgH0 | HMerge::MrgH1 if dst != RZ => Some(dst),
+        _ => None,
+    }
+}
+
 /// Registers `op` reads as a source (never [`RZ`], which is always zero).
 fn reads(op: &Op) -> Vec<u8> {
     let mut out: Vec<u8> = match *op {
@@ -1353,6 +1436,26 @@ fn reads(op: &Op) -> Vec<u8> {
             let mut v = vec![a];
             v.extend(operand_reg(b));
             v.extend(operand_reg(c));
+            v
+        }
+        // A merging half op keeps the half of its destination it does not
+        // write, which makes the destination a source as well.
+        Op::Hfma2 { dst, a, b, c, merge, .. } => {
+            let mut v = vec![a];
+            v.extend(operand_reg(b));
+            v.extend(operand_reg(c));
+            v.extend(half_merge_reads(dst, merge));
+            v
+        }
+        Op::Hadd2 { dst, a, b, merge, .. } | Op::Hmul2 { dst, a, b, merge, .. } => {
+            let mut v = vec![a];
+            v.extend(operand_reg(b));
+            v.extend(half_merge_reads(dst, merge));
+            v
+        }
+        Op::Hset2 { a, b, .. } | Op::Hsetp2 { a, b, .. } => {
+            let mut v = vec![a];
+            v.extend(operand_reg(b));
             v
         }
         Op::Iadd { a, b, .. }
@@ -1427,6 +1530,10 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::Ffma { dst, .. }
         | Op::Fmnmx { dst, .. }
         | Op::Fset { dst, .. }
+        | Op::Hadd2 { dst, .. }
+        | Op::Hmul2 { dst, .. }
+        | Op::Hfma2 { dst, .. }
+        | Op::Hset2 { dst, .. }
         | Op::Mov { dst, .. }
         | Op::Mov32i { dst, .. }
         | Op::S2r { dst, .. }
@@ -1476,6 +1583,72 @@ fn saturate(v: f32, sat: bool) -> f32 {
     } else {
         v
     }
+}
+
+/// The smallest half that is not subnormal, which is what a half
+/// instruction's `.ftz` flushes towards zero.
+const SMALLEST_NORMAL_HALF: f32 = 6.103_515_6e-5;
+
+/// One source of a half-precision op: its two lanes, flushed and modified.
+///
+/// The modifier comes second, exactly as it does for `fadd` — `abs` of a
+/// flushed subnormal is a flushed subnormal, not a subnormal made positive.
+fn half_source(bits: u32, m: FMod, sw: HSwizzle, ftz: bool) -> [f32; 2] {
+    let mut lanes = half_lanes(bits, sw);
+    for lane in lanes.iter_mut() {
+        *lane = m.apply(half_flush(*lane, sw, ftz));
+    }
+    lanes
+}
+
+/// A source register's two lanes, widened to f32.
+fn half_lanes(bits: u32, sw: HSwizzle) -> [f32; 2] {
+    let low = f16_to_f32(bits as u16);
+    let high = f16_to_f32((bits >> 16) as u16);
+    match sw {
+        HSwizzle::H1H0 => [low, high],
+        HSwizzle::H0H0 => [low, low],
+        HSwizzle::H1H1 => [high, high],
+        // Not a pair at all: one f32 that both lanes read.
+        HSwizzle::F32 => [f32::from_bits(bits); 2],
+    }
+}
+
+/// `.ftz` against whichever precision the lane actually came from: an f32
+/// operand of a half instruction is still an f32, and flushing it at the
+/// half threshold would swallow four orders of magnitude of real numbers.
+fn half_flush(v: f32, sw: HSwizzle, ftz: bool) -> f32 {
+    if !ftz {
+        return v;
+    }
+    if sw == HSwizzle::F32 {
+        return flush(v, true);
+    }
+    if v != 0.0 && v.abs() < SMALLEST_NORMAL_HALF {
+        0.0f32.copysign(v)
+    } else {
+        v
+    }
+}
+
+/// Write a half-precision op's two lanes into `dst`'s current value.
+fn half_pack(dst: u32, lanes: [f32; 2], merge: HMerge) -> u32 {
+    let half = |v: f32| u32::from(f32_to_f16(v));
+    match merge {
+        HMerge::H1H0 => half(lanes[0]) | (half(lanes[1]) << 16),
+        HMerge::F32 => lanes[0].to_bits(),
+        HMerge::MrgH0 => (dst & 0xFFFF_0000) | half(lanes[0]),
+        HMerge::MrgH1 => (dst & 0x0000_FFFF) | (half(lanes[1]) << 16),
+    }
+}
+
+/// Whether `.fmz` forces this lane's product to zero: D3D9's rule that
+/// anything times zero is zero, NaN and infinity included.
+///
+/// Saturation already answers that question the same way, so hardware does
+/// not do both — and neither does this.
+fn fmz_zeroes(prec: HPrecision, sat: bool, a: f32, b: f32) -> bool {
+    prec == HPrecision::Fmz && !sat && (a == 0.0 || b == 0.0)
 }
 
 fn neg_if(v: f32, neg: bool) -> f32 {
@@ -2654,5 +2827,221 @@ mod tests {
         assert_eq!(inv.reg_f32(1), 0.4);
         assert_eq!(inv.reg_f32(2), 0.6);
         assert_eq!(inv.reg_f32(3), 0.8);
+    }
+
+    /// Pack two f32s into the pair of halves a register holds.
+    fn halves(low: f32, high: f32) -> u32 {
+        u32::from(f32_to_f16(low)) | (u32::from(f32_to_f16(high)) << 16)
+    }
+
+    fn lanes(bits: u32) -> [f32; 2] {
+        half_lanes(bits, HSwizzle::H1H0)
+    }
+
+    fn hadd2(dst: u8, a: u8, b: u8, asw: HSwizzle, bsw: HSwizzle, merge: HMerge) -> Op {
+        Op::Hadd2 {
+            dst,
+            a,
+            am: FMod::NONE,
+            asw,
+            b: Operand::Reg(b),
+            bm: FMod::NONE,
+            bsw,
+            merge,
+            ftz: false,
+            sat: false,
+        }
+    }
+
+    fn run_half(setup: &[(u8, u32)], ops: &[Op]) -> Invocation {
+        let consts = no_consts();
+        let env = Env::new(&consts, &NoTextures);
+        let mut inv = Invocation::new();
+        for &(reg, value) in setup {
+            inv.set_reg(reg, value);
+        }
+        let mut program: Vec<Op> = ops.to_vec();
+        program.push(Op::Exit);
+        inv.execute(&prog(&program), &env).unwrap();
+        inv
+    }
+
+    #[test]
+    fn a_half_op_computes_both_lanes_at_once() {
+        let inv = run_half(
+            &[(1, halves(1.0, 2.0)), (2, halves(0.5, -4.0))],
+            &[hadd2(0, 1, 2, HSwizzle::H1H0, HSwizzle::H1H0, HMerge::H1H0)],
+        );
+        assert_eq!(lanes(inv.reg(0)), [1.5, -2.0]);
+    }
+
+    /// Every swizzle but `H1_H0` reads one lane twice — and `F32` reads the
+    /// register as a single float rather than as a pair at all, which is how
+    /// a shader multiplies a `half2` by a `float`.
+    #[test]
+    fn a_half_swizzle_chooses_which_lanes_a_source_offers() {
+        let a = halves(1.0, 2.0);
+        let b = halves(10.0, 20.0);
+        let inv = run_half(
+            &[(1, a), (2, b)],
+            &[
+                hadd2(3, 1, 2, HSwizzle::H0H0, HSwizzle::H1H0, HMerge::H1H0),
+                hadd2(4, 1, 2, HSwizzle::H1H1, HSwizzle::H1H0, HMerge::H1H0),
+                hadd2(5, 1, 2, HSwizzle::H1H0, HSwizzle::H0H0, HMerge::H1H0),
+            ],
+        );
+        assert_eq!(lanes(inv.reg(3)), [11.0, 21.0]);
+        assert_eq!(lanes(inv.reg(4)), [12.0, 22.0]);
+        assert_eq!(lanes(inv.reg(5)), [11.0, 12.0]);
+    }
+
+    /// `hadd2.f32` — swizzles and merge all `F32` — is a plain float add
+    /// issued on the half unit, and it is what most of "A Short Hike"'s
+    /// skipped draws stopped on.
+    #[test]
+    fn a_half_op_in_f32_mode_is_an_ordinary_float_op() {
+        let inv = run_half(
+            &[(1, 1.5f32.to_bits()), (2, 2.25f32.to_bits())],
+            &[hadd2(0, 1, 2, HSwizzle::F32, HSwizzle::F32, HMerge::F32)],
+        );
+        assert_eq!(f32::from_bits(inv.reg(0)), 3.75);
+    }
+
+    /// A merging write leaves the other half of the destination alone, which
+    /// also makes the destination one of the instruction's sources.
+    #[test]
+    fn a_merging_half_op_keeps_the_half_it_does_not_write() {
+        let inv = run_half(
+            &[(0, halves(7.0, 9.0)), (1, halves(1.0, 2.0)), (2, halves(0.5, -4.0))],
+            &[hadd2(0, 1, 2, HSwizzle::H1H0, HSwizzle::H1H0, HMerge::MrgH0)],
+        );
+        assert_eq!(lanes(inv.reg(0)), [1.5, 9.0]);
+
+        let inv = run_half(
+            &[(0, halves(7.0, 9.0)), (1, halves(1.0, 2.0)), (2, halves(0.5, -4.0))],
+            &[hadd2(0, 1, 2, HSwizzle::H1H0, HSwizzle::H1H0, HMerge::MrgH1)],
+        );
+        assert_eq!(lanes(inv.reg(0)), [7.0, -2.0]);
+
+        let merging = hadd2(3, 1, 2, HSwizzle::H1H0, HSwizzle::H1H0, HMerge::MrgH1);
+        assert!(reads(&merging).contains(&3), "a merge reads its destination back");
+        let whole = hadd2(3, 1, 2, HSwizzle::H1H0, HSwizzle::H1H0, HMerge::H1H0);
+        assert!(!reads(&whole).contains(&3), "a full write does not");
+    }
+
+    #[test]
+    fn a_half_multiply_add_runs_per_lane() {
+        let inv = run_half(
+            &[(1, halves(2.0, 3.0)), (2, halves(4.0, 5.0)), (3, halves(1.0, -1.0))],
+            &[Op::Hfma2 {
+                dst: 0,
+                a: 1,
+                asw: HSwizzle::H1H0,
+                b: Operand::Reg(2),
+                bneg: false,
+                bsw: HSwizzle::H1H0,
+                c: Operand::Reg(3),
+                cneg: false,
+                csw: HSwizzle::H1H0,
+                merge: HMerge::H1H0,
+                prec: HPrecision::None,
+                sat: false,
+            }],
+        );
+        assert_eq!(lanes(inv.reg(0)), [9.0, 14.0]);
+    }
+
+    /// `.fmz` is D3D9's rule that anything times zero is zero — infinity and
+    /// NaN included, which an ordinary multiply answers with a NaN.
+    #[test]
+    fn fmz_makes_anything_times_zero_zero() {
+        let hmul = |prec| Op::Hmul2 {
+            dst: 0,
+            a: 1,
+            am: FMod::NONE,
+            asw: HSwizzle::H1H0,
+            b: Operand::Reg(2),
+            bm: FMod::NONE,
+            bsw: HSwizzle::H1H0,
+            merge: HMerge::H1H0,
+            prec,
+            sat: false,
+        };
+        let operands = [(1, halves(0.0, 2.0)), (2, halves(f32::INFINITY, 3.0))];
+        let plain = run_half(&operands, &[hmul(HPrecision::None)]);
+        assert!(lanes(plain.reg(0))[0].is_nan());
+        let fmz = run_half(&operands, &[hmul(HPrecision::Fmz)]);
+        assert_eq!(lanes(fmz.reg(0)), [0.0, 6.0]);
+    }
+
+    /// `hsetp2` writes one predicate per lane, unlike `fsetp`'s result and
+    /// its inverse — until `.h_and`, which ands the lanes and then does write
+    /// the inverse.
+    #[test]
+    fn hsetp2_writes_one_predicate_per_lane_until_h_and() {
+        let setp = |and| Op::Hsetp2 {
+            p0: 0,
+            p1: 1,
+            a: 1,
+            am: FMod::NONE,
+            asw: HSwizzle::H1H0,
+            b: Operand::Reg(2),
+            bm: FMod::NONE,
+            bsw: HSwizzle::H1H0,
+            cmp: FCmp::Gt,
+            bop: BoolOp::And,
+            src: Pred::ALWAYS,
+            and,
+            ftz: false,
+        };
+        // Lane 0 compares true, lane 1 false.
+        let operands = [(1, halves(5.0, 1.0)), (2, halves(2.0, 8.0))];
+        let split = run_half(&operands, &[setp(false)]);
+        assert!(split.pred(0) && !split.pred(1));
+        let anded = run_half(&operands, &[setp(true)]);
+        assert!(!anded.pred(0) && anded.pred(1));
+    }
+
+    /// `hset2` puts each lane's answer in its own half of the register.
+    #[test]
+    fn hset2_fills_each_half_with_its_own_lane() {
+        let set = |bf| Op::Hset2 {
+            dst: 0,
+            a: 1,
+            am: FMod::NONE,
+            asw: HSwizzle::H1H0,
+            b: Operand::Reg(2),
+            bm: FMod::NONE,
+            bsw: HSwizzle::H1H0,
+            cmp: FCmp::Gt,
+            bop: BoolOp::And,
+            src: Pred::ALWAYS,
+            bf,
+            ftz: false,
+        };
+        let operands = [(1, halves(5.0, 1.0)), (2, halves(2.0, 8.0))];
+        assert_eq!(run_half(&operands, &[set(false)]).reg(0), 0x0000_FFFF);
+        // `.bf` answers with 1.0h rather than a mask.
+        assert_eq!(run_half(&operands, &[set(true)]).reg(0), halves(1.0, 0.0));
+    }
+
+    /// A half instruction's `.ftz` flushes at the *half* threshold, four
+    /// orders of magnitude above an f32's — but only for lanes that are
+    /// halves.
+    #[test]
+    fn ftz_flushes_a_subnormal_half_but_not_a_small_float() {
+        let subnormal = f16_to_f32(0x0001);
+        let mut add = hadd2(0, 1, 2, HSwizzle::H1H0, HSwizzle::H1H0, HMerge::H1H0);
+        let Op::Hadd2 { ftz, .. } = &mut add else { unreachable!() };
+        *ftz = true;
+        let inv = run_half(&[(1, halves(subnormal, 1.0)), (2, halves(0.0, 0.0))], &[add]);
+        assert_eq!(lanes(inv.reg(0)), [0.0, 1.0]);
+
+        // The same instruction reading an f32 lane leaves that value alone.
+        let mut add = hadd2(0, 1, 2, HSwizzle::F32, HSwizzle::F32, HMerge::F32);
+        let Op::Hadd2 { ftz, .. } = &mut add else { unreachable!() };
+        *ftz = true;
+        let inv = run_half(&[(1, subnormal.to_bits()), (2, 0.0f32.to_bits())], &[add]);
+        assert_eq!(f32::from_bits(inv.reg(0)), subnormal);
     }
 }

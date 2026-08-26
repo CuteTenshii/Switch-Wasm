@@ -235,6 +235,23 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             Op::Fset { dst, a, am, b: f(b), bm, cmp, bop, src, bf }
         }
 
+        // ---- half-precision ----
+        Op::Hadd2 { dst, a, am, asw, b, bm, bsw, merge, ftz, sat } => {
+            Op::Hadd2 { dst, a, am, asw, b: f(b), bm, bsw, merge, ftz, sat }
+        }
+        Op::Hmul2 { dst, a, am, asw, b, bm, bsw, merge, prec, sat } => {
+            Op::Hmul2 { dst, a, am, asw, b: f(b), bm, bsw, merge, prec, sat }
+        }
+        Op::Hfma2 { dst, a, asw, b, bneg, bsw, c, cneg, csw, merge, prec, sat } => {
+            Op::Hfma2 { dst, a, asw, b: f(b), bneg, bsw, c: f(c), cneg, csw, merge, prec, sat }
+        }
+        Op::Hset2 { dst, a, am, asw, b, bm, bsw, cmp, bop, src, bf, ftz } => {
+            Op::Hset2 { dst, a, am, asw, b: f(b), bm, bsw, cmp, bop, src, bf, ftz }
+        }
+        Op::Hsetp2 { p0, p1, a, am, asw, b, bm, bsw, cmp, bop, src, and, ftz } => {
+            Op::Hsetp2 { p0, p1, a, am, asw, b: f(b), bm, bsw, cmp, bop, src, and, ftz }
+        }
+
         // ---- integer ----
         Op::Iadd { dst, a, aneg, b, bneg, cin, cout } => {
             Op::Iadd { dst, a, aneg, b: f(b), bneg, cin, cout }
