@@ -489,6 +489,7 @@ impl Cpu {
                     self.nv.gpu.frames, buffer.width, buffer.height
                 );
             }
+            self.pace_present();
         }
 
         if let Some(&(addr, size)) = recv.first() {

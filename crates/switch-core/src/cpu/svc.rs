@@ -1328,6 +1328,14 @@ impl Cpu {
                 if std::mem::take(&mut self.pending_yield) {
                     self.yield_thread();
                 }
+                // And the same for a service that asked to be parked until a
+                // deadline rather than merely descheduled — `vi`'s present,
+                // which paces a title to the refresh rate. After X0 for the
+                // reason above: `sleep_until` reschedules, and a write past it
+                // lands on whichever thread runs next.
+                if let Some(until) = std::mem::take(&mut self.pending_sleep) {
+                    self.sleep_until(until);
+                }
                 Ok(())
             }
             0x24 => {

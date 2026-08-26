@@ -1231,6 +1231,13 @@ pub struct Cpu {
     /// still has to write its result into the *caller's* X0 — so
     /// `svcSendSyncRequest` acts on this once the reply is in place.
     pub(crate) pending_yield: bool,
+    /// A thread that asked to be parked until a deadline once its reply is in
+    /// place — the timed sibling of [`Cpu::pending_yield`], and applied at the
+    /// same point for the same reason.
+    pub(crate) pending_sleep: Option<u64>,
+    /// Cycle count the display last accepted a frame at. See
+    /// [`Cpu::pace_present`].
+    pub(crate) last_present_cycles: u64,
 }
 
 /// How many recently-executed instructions the fault trace shows.
@@ -1399,6 +1406,8 @@ impl Cpu {
             jit: jit::Jit::default(),
             jit_enabled: !crate::env_flag!("SWITCH_NO_JIT"),
             pending_yield: false,
+            pending_sleep: None,
+            last_present_cycles: 0,
         };
         cpu.nv.gpu.trace = crate::env_flag!("TRACE_GPU");
         // The framebuffer and input registers are fixed hardware-mapped
@@ -1956,6 +1965,31 @@ impl Cpu {
     /// Park the running thread until `deadline`. The caller leaves the PC on
     /// the instruction that parked it, so the syscall is reissued — and its
     /// predicate rechecked — when the thread wakes.
+    /// Hold the presenting thread until the display would actually have taken
+    /// the frame.
+    ///
+    /// A panel refreshes 60 times a second and a title cannot put frames on it
+    /// faster than that; on hardware the swapchain is what stops it. Nothing
+    /// here did, so Just Dance 2019 presented every 0.19 ms of *emulated* time
+    /// against a 16.7 ms refresh — 88 frames of clearing, resolving and
+    /// scanning out for every one a console would have shown, and 87 of them
+    /// identical. The work is not the cost so much as what it displaces: the
+    /// title's loading threads were left with about a fifth of the CPU, and
+    /// pacing this returned three times the guest progress per second.
+    ///
+    /// The thread is parked rather than spun, on a deadline that is certain to
+    /// arrive — the same treatment [`Cpu::audio_tick`]'s buffers get, and for
+    /// the same reason. It takes effect once the caller's reply is written;
+    /// see [`Cpu::pending_sleep`].
+    pub(super) fn pace_present(&mut self) {
+        let tick = self.last_present_cycles.wrapping_add(VSYNC_PERIOD_CYCLES);
+        if self.cycles < tick {
+            self.pending_sleep = Some(tick);
+        }
+        // A title slower than the panel is not dragged backwards to it.
+        self.last_present_cycles = self.cycles.max(tick);
+    }
+
     pub(super) fn sleep_until(&mut self, deadline: u64) {
         self.ensure_main_thread();
         self.threads[self.current_thread].state = ThreadState::Sleeping { deadline };
