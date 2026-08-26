@@ -144,12 +144,13 @@ impl Cpu {
         ];
         // The language the emulated console is set to (`SetLanguage_ENUS`).
         const SYSTEM_LANGUAGE: usize = 1;
-        // How many of those the pre-4.0.0 pair of commands reports. The five
-        // codes 4.0.0 added — and `pt-BR`, which came later still — are ones a
-        // title built before them has no `SetLanguage` value for, so the old
-        // API keeps reporting the twelve it was compiled against and only the
-        // 4.0.0 pair reports the lot. A console does the same.
-        const LEGACY_LANGUAGE_CODES: usize = 12;
+        // How many of those the pre-4.0.0 pair of commands reports. The cap is
+        // that command's own 15-entry array, not the twelve languages that
+        // predate 4.0.0: `nn::settings::detail::MakeLanguageCode` asks command
+        // 1 for 15 codes and indexes the answer by `SetLanguage` directly, so
+        // reporting twelve aborted Minecraft on `fr-CA` (13). Only `zh-Hans`,
+        // `zh-Hant` and `pt-BR` are out of the legacy pair's reach.
+        const LEGACY_LANGUAGE_CODES: usize = 15;
 
         let code = |index: usize| -> u64 {
             let mut packed = [0u8; 8];
@@ -849,12 +850,13 @@ mod tests {
         cpu.register_service_handle(9, "set");
         cpu.set_request(TLS, 9, Some(1)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 12, "the pre-4.0.0 count");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 15, "the pre-4.0.0 count");
         assert_eq!(&cpu.read_bytes(BUFFER, 2), b"ja");
         assert_eq!(&cpu.read_bytes(BUFFER + 8, 5), b"en-US");
-        // And nothing past the twelve it reported: a title from before 4.0.0
-        // has no `SetLanguage` value for `zh-Hans`.
-        assert_eq!(cpu.read_bytes(BUFFER + 12 * 8, 8), vec![0u8; 8]);
+        assert_eq!(&cpu.read_bytes(BUFFER + 13 * 8, 5), b"fr-CA");
+        // And nothing past the fifteen it reported: this command's array stops
+        // there, so `zh-Hans` is only ever reachable through the 4.0.0 pair.
+        assert_eq!(cpu.read_bytes(BUFFER + 15 * 8, 8), vec![0u8; 8]);
     }
 
     #[test]
