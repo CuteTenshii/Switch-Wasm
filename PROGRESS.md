@@ -19,7 +19,7 @@ whenever it was last recorded.
 | `sysinfo` / `NX-Fetch` / `nxdumptool` | render | yes | carried |
 | `JKSV.nro` | full UI: text, icons, save tiles | yes | carried |
 | `Checkpoint.nro` | layout and chrome; text still solid blocks (needs `SHFL`) | yes | carried |
-| "A Short Hike" (NSP) | frame 1 at 2.2B steps, 295 draws, none skipped; composites, but only the clear colour | partial | measured |
+| "A Short Hike" (NSP) | composites a full 1280x720 frame; steady state is 2 draws a frame and never a scene | partial | measured |
 | "Tomodachi Life" (NSP) | 1.2B steps, no fault, no abort, **no draw calls** | no | carried |
 
 A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` →
@@ -28,7 +28,7 @@ graphics stack, opens its audio device, and runs on into its own loop. **Every
 service it asks for has a real implementation** — a full boot logs no `no
 implementation` and no `unimplemented` lines.
 
-`make test`: **752 tests, all passing.**
+`make test`: **758 tests, all passing.**
 
 ## Homebrew
 
@@ -159,10 +159,67 @@ things about it are worth carrying:
   subnormals — the mode WGSL's `pack2x16float` uses, so both backends agree.
 
 With those closed every one of the 295 draws rasterizes and the frame is no
-longer empty — and **293 of them still cover no pixels**, 161 triangles culled
-and 60 degenerate with all three vertices on the same screen point. Only the
-two full-screen quads write anything, and what they composite is the HDR
-target's clear colour. That is a vertex-stage bug, and it is next.
+longer empty. 293 of them still cover no pixels — 161 triangles culled and 60
+degenerate with all three vertices on one screen point — and **that is not a
+bug**: they are one-time Unity shader warm-up, which renders every variant
+once with degenerate geometry on purpose. They happen at frame 1 and never
+again.
+
+**The steady state is two draws a frame, forever.** Frames 30 and 300 are
+byte-identical to frame 1 (519,438 lit pixels), and each costs three clears, a
+blit, two full-screen quads and 1.8M instructions. So the title is not still
+loading — it has settled. `TRACE_IPC` says it asks the system for nothing but
+its two nvdrv ioctls and two `vi` parcels per frame: no filesystem, no `am`,
+nothing pending. Its own code is running — 47% of steady-state instructions
+are the Boehm GC's mark loop, which is IL2CPP working normally — and simply
+produces no renderers.
+
+That is the shape to remember: **Unity culls on the CPU**, so a title whose
+scene or camera is wrong emits *no draw calls at all* rather than draws that
+cover nothing. Zero scene draws is a symptom of the title's own state, not of
+the rasterizer, and chasing it through the GPU is chasing the wrong end. The
+vertex buffer those warm-up draws read is written by the title's own `memcpy`
+from a source that is already zero — real, and a red herring for the same
+reason.
+
+**`AntiAliasEnable` does not size a surface; `MsaaMode` does.** What the frame
+*did* say was that its content sat in exactly the left 640x720 of a 1280x720
+image — half the width, and the same quarter-of-the-frame shape Just Dance
+2019 had before the sample grid existed at all. The title binds a 2560x720
+target and sets `MsaaMode` 5 (`2x1_D3D`) the four times it binds it: that is
+1280x720 *pixels* at two samples each. `sample_grid` answered "one sample per
+pixel" whenever the enable bit was clear, so the surface read as 2560 pixels
+wide, its 1280-pixel clear rect covered the left half, and the title's own
+2:1 resolve blit shrank that to a quarter.
+
+The gate was a guess — that a guest might leave a stale mode behind — and it
+cannot work, because the surface registers count texels either way. Eden sizes
+a render target from `anti_alias_samples_mode` alone and never reads
+`anti_alias_enable` at all. What the bit really means is GL's `GL_MULTISAMPLE`:
+coverage is evaluated once at the pixel centre instead of per sample, which is
+`SampleGrid::per_pixel_coverage` and moves no texels. The frame goes from
+519,438 lit pixels to **921,600** — exactly 1280x720, the whole resolved
+image — with hbmenu and the Home Menu byte-identical.
+
+**Then run it in the mode the frontend actually uses.** Every example booted
+handheld, because that is `OperationMode::default()` and none of them set
+anything else — while the browser's dock toggle is usually on. A title told
+720p whose swapchain is 1080p composites its frame into a corner of that
+buffer, and the corner reads exactly like a rendering bug. It is not one:
+`DOCKED=1` — in `Title::boot`, so every retail and applet example has it —
+fills all **2,073,600** pixels of a 1080p frame, byte-identical to what the
+browser was showing. Two frames that disagree are worth checking for a
+configuration difference before they are worth debugging.
+
+**The colour write mask was unimplemented**, which the same trace turned up:
+`SetCtWrite` (0x680, one register per target, a nibble per channel) plus
+`ColorMaskCommon` (0x3E4). "A Short Hike" writes it 420 times a frame and
+turns **alpha off for 99 of its draws** and every channel off for one. Writing
+all four regardless overwrites exactly what a title meant to keep — and alpha
+is what a frame's opacity is read out of, which is the same failure the fp16
+gap produced by a different route. An unwritten mask has to read as *all*
+channels: zero is the register file's initial value and would blank every
+guest that leaves it alone.
 
 **`SHFL` is still undecoded**, and it is why Checkpoint's antialiased text is
 solid blocks. A scalar interpreter cannot answer it — the value belongs to
@@ -184,6 +241,34 @@ of the *decoded program*, not the invocation. That plus two allocations
 pixel) took it to 0.67 s/frame, every frame byte-identical. Reusing the
 `pending` vector was measured at no effect and dropped rather than kept on the
 theory that it should have helped.
+
+## Performance
+
+**Two things nobody was looking at cost more than everything they were.** A
+`perf` profile of a Home Menu boot came back **37% `getenv`** and **18.7%
+SipHash** — together more than the shader interpreter, the rasterizer and the
+ARM interpreter combined. Neither is emulation:
+
+- `std::env::var("TRACE_...")` is a linear scan of the environment, and forty
+  of those sat in per-syscall, per-IPC and per-draw paths. `env_flag!` reads
+  each switch once into a `OnceLock`. Nothing can change the environment under
+  a running emulator.
+- `HashMap`'s default hasher is built to survive keys an attacker chose. Every
+  key here is a handle or a guest address this emulator minted itself, and
+  `horizon_syscall` looks several up per syscall. `IdMap` is the same map with
+  a multiply for a hash.
+
+Together **73.6 s -> 27.7 s** on the same boot, min-of-3, every frame
+byte-identical. The lesson is the measurement, not the fixes: nothing in the
+tree *looked* slow, and a profile found half the run in code that does no
+work.
+
+One trap worth keeping. The obvious integer hash is one multiply, and it moves
+entropy **upward** only — while `HashMap` picks its bucket with the **low**
+bits. Straight fxhash put all 4096 page-aligned addresses in one bucket. The
+fix is a shift and an xor in `finish`, and the test asks for the birthday
+limit on dense, page-aligned and sector-aligned keys rather than for
+perfection.
 
 ## Retail NCA/NSP
 
