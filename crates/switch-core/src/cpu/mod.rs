@@ -1986,6 +1986,26 @@ impl Cpu {
         true
     }
 
+    /// The soonest a timed wait comes due — a sleep, or a condition variable
+    /// or arbiter wait that was given a timeout.
+    ///
+    /// Only meaningful to a caller about to idle the clock forward: a deadline
+    /// is a time this process is *known* to have work at, so it is the
+    /// furthest such a caller may skip to without inventing idleness that the
+    /// guest did not ask for.
+    pub(super) fn earliest_deadline(&self) -> Option<u64> {
+        self.threads
+            .iter()
+            .filter(|t| !t.paused)
+            .filter_map(|t| match t.state {
+                ThreadState::WaitKey { deadline, .. }
+                | ThreadState::WaitAddress { deadline, .. } => deadline,
+                ThreadState::Sleeping { deadline } => Some(deadline),
+                _ => None,
+            })
+            .min()
+    }
+
     /// Park the running thread until `deadline`. The caller leaves the PC on
     /// the instruction that parked it, so the syscall is reissued — and its
     /// predicate rechecked — when the thread wakes.

@@ -334,9 +334,35 @@ impl Cpu {
                 Ok(())
             }
             0x0B => {
-                // SleepThread: give another thread the CPU.
+                // SleepThread(nanoseconds = X0): park the caller until that
+                // long has passed. Horizon spends the negative values on yield
+                // modes instead — 0 yields, -1 yields with load balancing, -2
+                // yields to any thread — and none of them is a duration, so
+                // they hand the CPU on and come straight back.
+                //
+                // The duration used to be dropped and *every* sleep answered
+                // with a yield, which is not a slower sleep but no sleep at
+                // all: a thread that asks for 15 ms is runnable again the
+                // instant the next one blocks. `nn::os` builds its "wait for
+                // something to be ready" loops out of exactly that call, so
+                // each one became a busy-wait running at the emulator's full
+                // speed, and a process with eight of them spent the CPU on
+                // threads whose whole purpose was to not use it. Just Dance
+                // 2019 gave 12.7% of every instruction it executed to one
+                // 15 ms poll loop while the thread that loads its assets got
+                // 13.9%.
+                //
+                // Sleeping for real also makes the clock right for anything
+                // that measures time by sleeping, and costs nothing when the
+                // process has nothing else to do: `reschedule` idles `cycles`
+                // forward to the earliest sleeper rather than stepping its way
+                // there.
+                let nanoseconds = self.read_zr(0) as i64;
                 self.write_zr(0, RESULT_OK);
-                self.yield_thread();
+                match self.wait_deadline(nanoseconds) {
+                    Some(deadline) => self.sleep_until(deadline),
+                    None => self.yield_thread(),
+                }
                 Ok(())
             }
             0x1A => {
@@ -655,8 +681,24 @@ impl Cpu {
                         // of stepping seventeen million instructions that do
                         // nothing. This is the console's own idle, and without
                         // it the throttle costs more than it saves.
-                        self.cycles =
+                        //
+                        // Not *past* a thread that asked to be woken sooner,
+                        // though. A tick is 16.7 ms away and a loading thread
+                        // sleeps in single milliseconds between work items, so
+                        // skipping to the tick regardless spends a whole frame
+                        // on each of them — the display throttle deciding how
+                        // fast a title is allowed to load. Idle to whichever
+                        // comes first and wake whatever that was.
+                        let tick =
                             self.last_vsync_cycles.wrapping_add(super::VSYNC_PERIOD_CYCLES);
+                        let until = self
+                            .earliest_deadline()
+                            .filter(|&at| at > self.cycles && at < tick)
+                            .unwrap_or(tick);
+                        if until > self.cycles {
+                            self.cycles = until;
+                        }
+                        self.expire_timed_waits();
                     }
                     self.pc = self.pc.wrapping_sub(4);
                     self.yield_thread();
