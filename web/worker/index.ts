@@ -32,7 +32,12 @@ const SESSIONLESS = new Set(['new', 'set_battery']);
    happen from inside a run slice either, because opening a device is two
    promises and a slice has nowhere to await one. So it is tried after run
    slices, between them, which is exactly where a worker is free to await. */
-let gpu: 'no' | 'trying' | 'done' = 'no';
+let gpu: 'no' | 'trying' | 'done' | 'never' = 'no';
+
+// The one answer worth asking again about. A title opens its channel a moment
+// after it starts running, so until it has, there is nothing to attach a
+// backend to and the right response is to try the next slice.
+const NO_CHANNEL_YET = 'the title has not opened a channel yet';
 
 function tryGpu(): void {
   if (gpu !== 'no' || state.handle < 0) return;
@@ -41,15 +46,25 @@ function tryGpu(): void {
     switch_gpu_open(handle: number): Promise<string>;
   }).switch_gpu_open;
   open(state.handle).then((what) => {
-    // "the title has not opened a channel yet" is the ordinary answer for a
-    // while, and the ordinary response to it is to ask again next slice.
     if (what.startsWith('rendering on')) {
       gpu = 'done';
       console.info('[gpu] ' + what);
-    } else {
+    } else if (what === NO_CHANNEL_YET) {
       gpu = 'no';
+    } else {
+      // A browser with no adapter and no device will not grow one. Asking
+      // anyway costs a `wgpu::Instance` and a `requestAdapter` per slice, and
+      // Chrome files two "Failed to create WebGPU Context Provider" warnings
+      // with each of them -- two thousand of them in one sitting, on a build
+      // whose answer was decided before the first. The software rasterizer is
+      // what runs here, and it is what runs from now on.
+      gpu = 'never';
+      console.info('[gpu] software rasterizer: ' + what);
     }
-  }).catch(() => { gpu = 'no'; });
+  }).catch((e) => {
+    gpu = 'never';
+    console.info('[gpu] software rasterizer: ' + String(e));
+  });
 }
 
 ctx.onmessage = (e: MessageEvent<CallRequest>) => {
