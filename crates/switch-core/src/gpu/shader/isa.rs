@@ -257,6 +257,71 @@ pub enum TexDim {
     TCube,
 }
 
+/// `bar`'s sub-operation (`tabf0a8_0`). The reduction forms are decoded so
+/// that one can be named when it is refused: they combine a value across every
+/// lane of a warp, which a scalar interpreter has no way to see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarMode {
+    Sync,
+    Arrive,
+    RedPopc,
+    RedAnd,
+    RedOr,
+    Scan,
+}
+
+/// Which address space an atomic addresses. `atom`/`red` are global,
+/// `atoms` is shared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomSpace {
+    Global,
+    Shared,
+}
+
+/// An atomic's read-modify-write (`tabed00_0`/`tabec00_0`/`tabebf8_0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomOp {
+    Add,
+    Min,
+    Max,
+    /// Increment, wrapping to zero once the value reaches the operand.
+    Inc,
+    /// Decrement, wrapping to the operand once the value reaches zero.
+    Dec,
+    And,
+    Or,
+    Xor,
+    Exch,
+    /// Compare-and-swap: `src` is the comparand and `src + 1` the new value.
+    Cas,
+    /// `safeadd` — an add the hardware may drop under contention. Nothing
+    /// here is contended, so it is an add.
+    SafeAdd,
+}
+
+/// How an atomic interprets the memory it operates on
+/// (`tabed00sz`/`tabec00sz`/`tabebf8sz`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AtomType {
+    U32,
+    S32,
+    U64,
+    S64,
+    F32,
+    U128,
+}
+
+impl AtomType {
+    /// How many 32-bit registers a value of this type covers.
+    pub fn regs(self) -> u8 {
+        match self {
+            AtomType::U64 | AtomType::S64 => 2,
+            AtomType::U128 => 4,
+            _ => 1,
+        }
+    }
+}
+
 /// A decoded instruction: its guard predicate plus what it does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Instruction {
@@ -369,6 +434,21 @@ pub enum Op {
     Ldl { dst: u8, addr: u8, offset: i32, size: MemSize },
     /// `st l[addr + offset], src`.
     Stl { addr: u8, offset: i32, src: u8, size: MemSize },
+    /// `ld dst, s[addr + offset]` — a load from the CTA's shared memory.
+    Lds { dst: u8, addr: u8, offset: i32, size: MemSize },
+    /// `st s[addr + offset], src`.
+    Sts { addr: u8, offset: i32, src: u8, size: MemSize },
+    /// `atom`/`atoms`/`red` — a read-modify-write of one location. `red` is
+    /// this with `dst` = [`RZ`]: the same operation, its old value discarded.
+    Atom {
+        dst: u8,
+        addr: u8,
+        offset: i32,
+        src: u8,
+        op: AtomOp,
+        ty: AtomType,
+        space: AtomSpace,
+    },
 
     // ---- texture ----
     /// `texs dst, coords.., handle, dim, mask` — texture sample with an
@@ -402,6 +482,8 @@ pub enum Op {
     Exit,
     /// `kil` — discard this fragment.
     Kil,
+    /// `bar.<mode>` — a CTA-wide barrier.
+    Bar { mode: BarMode },
     Nop,
     /// A barrier/fence with no effect on a scalar interpreter, kept as a
     /// distinct op so it doesn't read as unsupported.
@@ -656,6 +738,20 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             src: reg(insn, 0, 8),
             size: mem_size(field(insn, 48, 3)),
         },
+        // ld/st s[] — 0xef48/0xef58, the shared-memory pair of the local
+        // ones below and encoded identically.
+        0xef48 => Op::Lds {
+            dst: reg(insn, 0, 8),
+            addr: reg(insn, 8, 8),
+            offset: sfield(insn, 20, 24) as i32,
+            size: mem_size(field(insn, 48, 3)),
+        },
+        0xef58 => Op::Sts {
+            addr: reg(insn, 8, 8),
+            offset: sfield(insn, 20, 24) as i32,
+            src: reg(insn, 0, 8),
+            size: mem_size(field(insn, 48, 3)),
+        },
         // ld/st l[] — 0xef40/0xef50.
         0xef40 => Op::Ldl {
             dst: reg(insn, 0, 8),
@@ -671,9 +767,41 @@ fn decode_op(insn: u64, pc: u32) -> Op {
         },
         // mov dst, sN — 0xf0c8/0xfff8.
         0xf0c8 => Op::S2r { dst: reg(insn, 0, 8), sr: reg(insn, 20, 8) },
-        // depbar/membar/bar: scheduling and memory ordering, both no-ops for
-        // a scalar interpreter that runs one invocation to completion.
-        0xf0f0 | 0xef98 | 0xf0a8 => Op::Inert,
+        // depbar/membar: scheduling and memory ordering, no-ops for a scalar
+        // interpreter that runs one invocation at a time.
+        0xf0f0 | 0xef98 => Op::Inert,
+        // bar — 0xf0a8/0xfff8. The mode's bits are not contiguous.
+        0xf0a8 => match (field(insn, 39, 1) << 4)
+            | (field(insn, 36, 1) << 3)
+            | (field(insn, 35, 1) << 2)
+            | field(insn, 32, 2)
+        {
+            0b00010 => Op::Bar { mode: BarMode::RedPopc },
+            0b00011 => Op::Bar { mode: BarMode::Scan },
+            0b00110 => Op::Bar { mode: BarMode::RedAnd },
+            0b01010 => Op::Bar { mode: BarMode::RedOr },
+            0b10000 => Op::Bar { mode: BarMode::Sync },
+            0b10001 => Op::Bar { mode: BarMode::Arrive },
+            _ => un,
+        },
+        // red — 0xebf8/0xfff8. A global atomic whose old value is discarded,
+        // so it decodes to the same op with RZ as its destination.
+        0xebf8 => {
+            let (Some(op), Some(ty)) =
+                (atom_op(field(insn, 23, 3)), atom_type(field(insn, 20, 3)))
+            else {
+                return un;
+            };
+            Op::Atom {
+                dst: RZ,
+                addr: reg(insn, 8, 8),
+                offset: sfield(insn, 28, 20) as i32,
+                src: reg(insn, 0, 8),
+                op,
+                ty,
+                space: AtomSpace::Global,
+            }
+        }
         // sync — 0xf0f8/0xfff8.
         0xf0f8 => Op::Sync,
         _ => match top(12) {
@@ -694,9 +822,100 @@ fn decode_op(insn: u64, pc: u32) -> Op {
                 // one instruction along.
                 Op::Brx { base: branch_base(insn, pc), reg: reg(insn, 8, 8) }
             }
-            _ => decode_alu(insn),
+            // atom.cas — 0xeef0/0xfff0, whose size field is one bit because
+            // the operation is fixed.
+            0xeef => Op::Atom {
+                dst: reg(insn, 0, 8),
+                addr: reg(insn, 8, 8),
+                offset: sfield(insn, 28, 20) as i32,
+                src: reg(insn, 20, 8),
+                op: AtomOp::Cas,
+                ty: if field(insn, 49, 1) == 0 { AtomType::U32 } else { AtomType::U64 },
+                space: AtomSpace::Global,
+            },
+            _ => decode_memory_atomic(insn).unwrap_or_else(|| decode_alu(insn)),
         },
     }
+}
+
+/// The three atomics whose opcode masks are wider than a nibble: `atom`
+/// (0xed00/0xff00), `atoms` (0xec00/0xff00) and `atoms.cas` (0xee00/0xff80).
+fn decode_memory_atomic(insn: u64) -> Option<Op> {
+    match insn >> 56 {
+        // atom — the op is a full nibble and the type three bits below it.
+        0xed => Some(Op::Atom {
+            dst: reg(insn, 0, 8),
+            addr: reg(insn, 8, 8),
+            offset: sfield(insn, 28, 20) as i32,
+            src: reg(insn, 20, 8),
+            op: atom_op(field(insn, 52, 4))?,
+            ty: atom_type(field(insn, 49, 3))?,
+            space: AtomSpace::Global,
+        }),
+        // atoms — a 22-bit offset stored in dwords, and a two-bit type.
+        0xec => Some(Op::Atom {
+            dst: reg(insn, 0, 8),
+            addr: reg(insn, 8, 8),
+            offset: (sfield(insn, 30, 22) * 4) as i32,
+            src: reg(insn, 20, 8),
+            op: atom_op(field(insn, 52, 4))?,
+            ty: match field(insn, 28, 2) {
+                0 => AtomType::U32,
+                1 => AtomType::S32,
+                2 => AtomType::U64,
+                _ => AtomType::S64,
+            },
+            space: AtomSpace::Shared,
+        }),
+        // atoms.cast/.cas — `cast` is a lock-and-load form nothing here
+        // models, so only the compare-and-swap arm decodes.
+        _ if insn >> 55 == 0x1dc => {
+            if field(insn, 53, 2) != 2 {
+                return None;
+            }
+            Some(Op::Atom {
+                dst: reg(insn, 0, 8),
+                addr: reg(insn, 8, 8),
+                offset: (sfield(insn, 30, 22) * 4) as i32,
+                src: reg(insn, 20, 8),
+                op: AtomOp::Cas,
+                ty: if field(insn, 52, 1) == 0 { AtomType::U32 } else { AtomType::U64 },
+                space: AtomSpace::Shared,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// `tabed00_0`/`tabec00_0` — the same eight operations in the same order for
+/// `atom` and `atoms`, with two more that only `atom` reaches.
+fn atom_op(bits: u64) -> Option<AtomOp> {
+    Some(match bits {
+        0 => AtomOp::Add,
+        1 => AtomOp::Min,
+        2 => AtomOp::Max,
+        3 => AtomOp::Inc,
+        4 => AtomOp::Dec,
+        5 => AtomOp::And,
+        6 => AtomOp::Or,
+        7 => AtomOp::Xor,
+        8 => AtomOp::Exch,
+        0xa => AtomOp::SafeAdd,
+        _ => return None,
+    })
+}
+
+/// `tabed00sz`/`tabebf8sz`.
+fn atom_type(bits: u64) -> Option<AtomType> {
+    Some(match bits {
+        0 => AtomType::U32,
+        1 => AtomType::S32,
+        2 => AtomType::U64,
+        3 => AtomType::F32,
+        4 => AtomType::U128,
+        5 => AtomType::S64,
+        _ => return None,
+    })
 }
 
 fn decode_alu(insn: u64) -> Op {
@@ -1546,6 +1765,156 @@ pub fn texs_destinations(dst: u8, dst2: u8, mask: [bool; 4]) -> Vec<(usize, u8)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The guard-predicate field holding `PT`.
+    const PT: u64 = 7 << 16;
+
+    #[test]
+    fn decodes_the_shared_memory_pair() {
+        // ld/st s[] sit one nibble above their local counterparts and are
+        // encoded identically: a signed 24-bit byte offset off r8.
+        assert_eq!(
+            decode((0xef48u64 | 4) << 48 | PT | 0x20 << 20 | 5 << 8 | 3).op,
+            Op::Lds { dst: 3, addr: 5, offset: 0x20, size: MemSize::B32 }
+        );
+        assert_eq!(
+            decode((0xef58u64 | 5) << 48 | PT | 6 << 8 | 2).op,
+            Op::Sts { addr: 6, offset: 0, src: 2, size: MemSize::B64 }
+        );
+        // Still the local pair, not the shared one.
+        assert_eq!(
+            decode((0xef40u64 | 4) << 48 | PT | 5 << 8 | 3).op,
+            Op::Ldl { dst: 3, addr: 5, offset: 0, size: MemSize::B32 }
+        );
+    }
+
+    #[test]
+    fn a_negative_shared_offset_stays_negative() {
+        let offset = (-8i64 as u64) & 0xFF_FFFF;
+        assert_eq!(
+            decode((0xef48u64 | 4) << 48 | PT | offset << 20 | 5 << 8 | 3).op,
+            Op::Lds { dst: 3, addr: 5, offset: -8, size: MemSize::B32 }
+        );
+    }
+
+    #[test]
+    fn decodes_each_barrier_form() {
+        // The mode's bits are not contiguous: 0x9b at bit 32, which is what
+        // makes `sync` (0x80) and `arrive` (0x81) one bit apart and the
+        // reduction forms scattered below them.
+        let bar = |mode: u64| decode(0xf0a8u64 << 48 | mode << 32 | PT).op;
+        assert_eq!(bar(0x80), Op::Bar { mode: BarMode::Sync });
+        assert_eq!(bar(0x81), Op::Bar { mode: BarMode::Arrive });
+        assert_eq!(bar(0x02), Op::Bar { mode: BarMode::RedPopc });
+        assert_eq!(bar(0x03), Op::Bar { mode: BarMode::Scan });
+        assert_eq!(bar(0x0a), Op::Bar { mode: BarMode::RedAnd });
+        assert_eq!(bar(0x12), Op::Bar { mode: BarMode::RedOr });
+        // membar and depbar are still the no-ops they were.
+        assert_eq!(decode(0xef98u64 << 48 | PT).op, Op::Inert);
+        assert_eq!(decode(0xf0f0u64 << 48 | PT).op, Op::Inert);
+    }
+
+    #[test]
+    fn decodes_a_global_atomic_with_its_operation_and_type() {
+        // atom.max.s32 r3, [r5 + -8], r7
+        let offset = (-8i64 as u64) & 0xF_FFFF;
+        assert_eq!(
+            decode(0xed00u64 << 48 | 2 << 52 | 1 << 49 | offset << 28 | 7 << 20 | PT | 5 << 8 | 3)
+                .op,
+            Op::Atom {
+                dst: 3,
+                addr: 5,
+                offset: -8,
+                src: 7,
+                op: AtomOp::Max,
+                ty: AtomType::S32,
+                space: AtomSpace::Global,
+            }
+        );
+    }
+
+    #[test]
+    fn a_shared_atomic_counts_its_offset_in_dwords() {
+        // The one place the two atomic encodings genuinely differ: `atoms`
+        // stores a dword index where `atom` stores a byte offset, so reading
+        // it as bytes divides every address by four.
+        assert_eq!(
+            decode(0xec00u64 << 48 | 8 << 52 | 3 << 30 | 7 << 20 | PT | 5 << 8 | 3).op,
+            Op::Atom {
+                dst: 3,
+                addr: 5,
+                offset: 12,
+                src: 7,
+                op: AtomOp::Exch,
+                ty: AtomType::U32,
+                space: AtomSpace::Shared,
+            }
+        );
+    }
+
+    #[test]
+    fn red_is_an_atomic_that_discards_its_old_value() {
+        // Which is exactly RZ as the destination, so the interpreter needs no
+        // second path for it.
+        assert_eq!(
+            decode(0xebf8u64 << 48 | 2 << 20 | 4 << 28 | PT | 5 << 8 | 3).op,
+            Op::Atom {
+                dst: RZ,
+                addr: 5,
+                offset: 4,
+                src: 3,
+                op: AtomOp::Add,
+                ty: AtomType::U64,
+                space: AtomSpace::Global,
+            }
+        );
+    }
+
+    #[test]
+    fn decodes_compare_and_swap_in_both_address_spaces() {
+        assert_eq!(
+            decode(0xeef0u64 << 48 | 7 << 20 | PT | 5 << 8 | 3).op,
+            Op::Atom {
+                dst: 3,
+                addr: 5,
+                offset: 0,
+                src: 7,
+                op: AtomOp::Cas,
+                ty: AtomType::U32,
+                space: AtomSpace::Global,
+            }
+        );
+        assert_eq!(
+            decode(0xee00u64 << 48 | 2 << 53 | 1 << 52 | 7 << 20 | PT | 5 << 8 | 3).op,
+            Op::Atom {
+                dst: 3,
+                addr: 5,
+                offset: 0,
+                src: 7,
+                op: AtomOp::Cas,
+                ty: AtomType::U64,
+                space: AtomSpace::Shared,
+            }
+        );
+    }
+
+    #[test]
+    fn an_atomic_operation_this_decoder_has_no_name_for_is_not_invented() {
+        // Slot 9 is unassigned in envydis's table; decoding it as one of its
+        // neighbours would silently run the wrong reduction.
+        assert!(matches!(
+            decode(0xed00u64 << 48 | 9 << 52 | PT).op,
+            Op::Unimplemented { .. }
+        ));
+    }
+
+    /// `compiled::Compiled` holds these in a dense array on the strength of
+    /// an `Op` being 32 bytes; a wider one halves what a cache line carries
+    /// through the loop that runs once per covered pixel.
+    #[test]
+    fn an_op_still_fits_in_thirty_two_bytes() {
+        assert_eq!(std::mem::size_of::<Op>(), 32);
+    }
 
     // Every raw word in the first group below was captured with `envydis -n
     // -i -m gm107` against `uam`-compiled fixtures or a live JKSV run, and

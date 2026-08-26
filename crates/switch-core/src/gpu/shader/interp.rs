@@ -27,7 +27,8 @@ use crate::{Error, Result};
 use std::collections::HashMap;
 
 use super::isa::{
-    self, BoolOp, FCmp, FRound, ICmp, LogicOp, LopTest, MufuOp, Op, Operand, Pred, TexDim, RZ,
+    self, AtomOp, AtomSpace, AtomType, BarMode, BoolOp, FCmp, FRound, ICmp, LogicOp, LopTest,
+    MemSize, MufuOp, Op, Operand, Pred, TexDim, RZ,
 };
 
 /// Resolves a `cN[offset]` operand to its raw 32 bits. `bank` is whatever the
@@ -82,18 +83,18 @@ impl Default for ConstCache {
 
 impl ConstCache {
     #[inline]
-    fn key(bank: u8, offset: u16) -> u32 {
+    pub(crate) fn key(bank: u8, offset: u16) -> u32 {
         (bank as u32) << 16 | offset as u32
     }
 
     #[inline]
-    fn get(&self, key: u32) -> Option<u32> {
+    pub(crate) fn get(&self, key: u32) -> Option<u32> {
         let slot = self.slots[key as usize % CONST_CACHE_SLOTS];
         (slot.0 == key).then_some(slot.1)
     }
 
     #[inline]
-    fn insert(&mut self, key: u32, value: u32) {
+    pub(crate) fn insert(&mut self, key: u32, value: u32) {
         self.slots[key as usize % CONST_CACHE_SLOTS] = (key, value);
     }
 }
@@ -204,11 +205,76 @@ impl TextureSource for MemoryTextures<'_, '_> {
     }
 }
 
-/// Reads a shader's global (`ldg`) address space. Optional: a program that
-/// never issues one doesn't need a backend, and a program that does without
-/// one gets an error naming the address rather than a silent zero.
+/// A shader's global (`ldg`/`stg`/`atom`) address space. Optional: a program
+/// that never issues one doesn't need a backend, and a program that does
+/// without one gets an error naming the address rather than a silent zero.
+///
+/// Writes take `&self` because a compute dispatch shares one of these across
+/// every thread of the grid while the interpreter holds it — the backend owns
+/// whatever interior mutability that needs. They default to an error so that
+/// a read-only source (the rasterizer's) stays a one-method implementation.
 pub trait GlobalMemory {
     fn read_u32(&self, addr: u64) -> Result<u32>;
+
+    fn read_u8(&self, addr: u64) -> Result<u8> {
+        Ok((self.read_u32(addr & !3)? >> ((addr % 4) * 8)) as u8)
+    }
+
+    fn write_u32(&self, addr: u64, _value: u32) -> Result<()> {
+        Err(Error::Gpu(format!(
+            "shader: a global store to {addr:#x} from a stage whose memory is read-only"
+        )))
+    }
+
+    fn write_u8(&self, addr: u64, value: u8) -> Result<()> {
+        let word = addr & !3;
+        let shift = (addr % 4) * 8;
+        let old = self.read_u32(word)?;
+        self.write_u32(word, (old & !(0xFF << shift)) | (u32::from(value) << shift))
+    }
+}
+
+/// A CTA's shared memory (`s[]`). Every thread of one CTA sees the same
+/// bytes, which is the entire point of it, so the scheduler owns it and hands
+/// each thread a reference.
+pub type SharedMemory = std::cell::RefCell<Vec<u8>>;
+
+/// What `s2r` reads.
+///
+/// Zero for every field is right for a draw: a vertex or fragment invocation
+/// has no thread or CTA identity, which is what this returned before compute
+/// gave the registers meaning.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpecialRegs {
+    /// This thread's position in its CTA.
+    pub tid: [u32; 3],
+    /// This CTA's position in the grid.
+    pub ctaid: [u32; 3],
+    /// Bytes of shared memory the CTA was given.
+    pub shared_size: u32,
+    /// Bytes of local memory the thread was given.
+    pub local_size: u32,
+}
+
+impl SpecialRegs {
+    /// `SR_TID`/`SR_NTID`, the forms that pack all three dimensions into one
+    /// register. Compilers emit the per-dimension registers instead, and the
+    /// packing here has not been confirmed against hardware, so reading one
+    /// is refused rather than answered with a layout that might be wrong.
+    const PACKED: [u8; 2] = [0x20, 0x28];
+
+    /// The value of special register `sr`, or `None` if this doesn't model it
+    /// — which the caller answers with zero, as every one of them was
+    /// answered before.
+    pub fn read(&self, sr: u8) -> Option<u32> {
+        Some(match sr {
+            0x21..=0x23 => self.tid[(sr - 0x21) as usize],
+            0x25..=0x27 => self.ctaid[(sr - 0x25) as usize],
+            0x32 => self.shared_size,
+            0x36 => self.local_size,
+            _ => return None,
+        })
+    }
 }
 
 /// The upper bound on instructions one invocation may execute. A shader with
@@ -224,6 +290,10 @@ pub struct Env<'a> {
     pub consts: &'a dyn ConstantSource,
     pub textures: &'a dyn TextureSource,
     pub memory: Option<&'a dyn GlobalMemory>,
+    /// The CTA's shared memory, for the `lds`/`sts`/`atoms` a compute
+    /// dispatch issues. A draw has none.
+    pub shared: Option<&'a SharedMemory>,
+    pub special: SpecialRegs,
     /// Which constant bank a `texs`'s immediate indexes for its texture
     /// handle — `TexCbIndex`, which the driver programs (see
     /// [`crate::gpu::engine::threed::Engine3D::tex_cb_index`]).
@@ -243,7 +313,14 @@ impl<'a> Env<'a> {
         textures: &'a dyn TextureSource,
         tex_cb_index: u8,
     ) -> Env<'a> {
-        Env { consts, textures, memory: None, tex_cb_index }
+        Env {
+            consts,
+            textures,
+            memory: None,
+            shared: None,
+            special: SpecialRegs::default(),
+            tex_cb_index,
+        }
     }
 }
 
@@ -329,6 +406,26 @@ pub struct Invocation {
     /// `ssy`/`pbk`/`pcnt` push a resume address; `sync`/`brk`/`cont` pop it.
     stack: Vec<u32>,
     local: Vec<u8>,
+    /// How much `l[]` this invocation gets. A dispatch sets it from the QMD.
+    local_bytes: usize,
+    /// Where execution is. In the struct rather than in [`Invocation::resume`]
+    /// because a `bar` suspends an invocation mid-program and the scheduler
+    /// resumes it once every other thread of the CTA has arrived.
+    pc: usize,
+    /// Instructions retired, against [`MAX_STEPS`]. Spans suspensions, or a
+    /// program that loops around a barrier would get a fresh budget each time.
+    steps: usize,
+    /// Texture results not yet landed; see `run_texs`.
+    pending: Vec<(usize, u8, f32)>,
+}
+
+/// Why an invocation stopped running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Halt {
+    /// It ran to `exit`, or `kil` discarded it.
+    Exited,
+    /// It reached a `bar` and is waiting for the rest of its CTA.
+    Barrier,
 }
 
 impl Default for Invocation {
@@ -342,6 +439,10 @@ impl Default for Invocation {
             discarded: false,
             stack: Vec::new(),
             local: Vec::new(),
+            local_bytes: LOCAL_MEMORY_BYTES,
+            pc: 0,
+            steps: 0,
+            pending: Vec::new(),
         }
     }
 }
@@ -362,6 +463,15 @@ impl Invocation {
         self.attr_out.clear();
         self.discarded = false;
         self.stack.clear();
+        self.local.clear();
+        self.pc = 0;
+        self.steps = 0;
+        self.pending.clear();
+    }
+
+    /// Give this invocation `bytes` of `l[]`, as a launch's QMD asks for.
+    pub fn set_local_bytes(&mut self, bytes: usize) {
+        self.local_bytes = bytes.max(LOCAL_MEMORY_BYTES);
         self.local.clear();
     }
 
@@ -419,14 +529,52 @@ impl Invocation {
     }
 
     /// Execute `program` from its entry point until it exits.
+    ///
+    /// A `bar` has no meaning outside a CTA, so one reached here is an error
+    /// rather than a suspension — see [`Invocation::resume`], which is what a
+    /// compute dispatch drives instead.
     pub fn execute(&mut self, program: &Compiled, env: &Env) -> Result<()> {
+        self.begin();
+        match self.resume(program, env)? {
+            Halt::Exited => Ok(()),
+            Halt::Barrier => Err(Error::Gpu(format!(
+                "shader: bar at {:#x} outside a compute dispatch, where there is no CTA to \
+                 synchronise with",
+                program.offset(self.pc.saturating_sub(1))
+            ))),
+        }
+    }
+
+    /// Put execution back at the entry point, leaving the register file alone.
+    pub fn begin(&mut self) {
+        self.pc = 0;
+        self.steps = 0;
+        self.pending.clear();
+    }
+
+    /// Run until the program exits or reaches a barrier, continuing from
+    /// wherever the last call stopped.
+    pub fn resume(&mut self, program: &Compiled, env: &Env) -> Result<Halt> {
         if program.is_empty() {
             return Err(Error::Gpu("shader: executing an empty program".into()));
         }
-        // Texture results land late; see `run_texs`.
-        let mut pending: Vec<(usize, u8, f32)> = Vec::new();
-        let mut pc = 0usize;
-        let mut steps = 0usize;
+        // Moved out for the duration so the loop can hold `&mut self`; put
+        // back before every return, since a barrier may suspend with texture
+        // results still in flight.
+        let mut pending = std::mem::take(&mut self.pending);
+        let out = self.run(program, env, &mut pending);
+        self.pending = pending;
+        out
+    }
+
+    fn run(
+        &mut self,
+        program: &Compiled,
+        env: &Env,
+        pending: &mut Vec<(usize, u8, f32)>,
+    ) -> Result<Halt> {
+        let mut pc = self.pc;
+        let mut steps = self.steps;
 
         loop {
             if pc >= program.len() {
@@ -435,6 +583,7 @@ impl Invocation {
                 ));
             }
             steps += 1;
+            self.steps = steps;
             if steps > MAX_STEPS {
                 return Err(Error::Gpu(format!(
                     "shader: did not terminate within {MAX_STEPS} instructions"
@@ -469,6 +618,7 @@ impl Invocation {
             // The target is already an index: resolving it used to mean a
             // binary search over the program's byte offsets on every taken
             // branch, which the lowering does once instead.
+            self.pc = pc;
             let jump = |index: u32, pending: &mut Vec<(usize, u8, f32)>, inv: &mut Self| {
                 for (_, reg, val) in pending.drain(..) {
                     inv.set_reg_f32(reg, val);
@@ -487,15 +637,30 @@ impl Invocation {
                     for (_, reg, val) in pending.drain(..) {
                         self.set_reg_f32(reg, val);
                     }
-                    return Ok(());
+                    return Ok(Halt::Exited);
                 }
                 Op::Kil => {
                     self.discarded = true;
-                    return Ok(());
+                    return Ok(Halt::Exited);
                 }
+                // The pc moves past the barrier before suspending, so the
+                // resume lands after it rather than on it.
+                Op::Bar { mode } => match mode {
+                    BarMode::Sync | BarMode::Arrive => {
+                        self.pc = pc + 1;
+                        return Ok(Halt::Barrier);
+                    }
+                    other => {
+                        return Err(Error::Gpu(format!(
+                            "shader: bar.{other:?} at {:#x} reduces a value across a warp's \
+                             lanes, which a scalar interpreter has none of",
+                            program.offset(pc)
+                        )))
+                    }
+                },
                 Op::Nop | Op::Inert => {}
                 Op::Bra { .. } => {
-                    pc = jump(program.target(pc), &mut pending, self)?;
+                    pc = jump(program.target(pc), pending, self)?;
                     continue;
                 }
                 // The one branch whose target is not known until it runs: it
@@ -508,7 +673,7 @@ impl Invocation {
                             "shader: branch to {at:#x}, which was never decoded"
                         )));
                     }
-                    pc = jump(index, &mut pending, self)?;
+                    pc = jump(index, pending, self)?;
                     continue;
                 }
                 Op::Ssy { .. } | Op::Pbk { .. } | Op::Pcnt { .. } => {
@@ -521,11 +686,11 @@ impl Invocation {
                             program.offset(pc)
                         ))
                     })?;
-                    pc = jump(target, &mut pending, self)?;
+                    pc = jump(target, pending, self)?;
                     continue;
                 }
                 Op::Texs { .. } => {
-                    self.run_texs(program, pc, op, env, &mut pending)?;
+                    self.run_texs(program, pc, op, env, pending)?;
                 }
                 other => self.run_alu(other, env)?,
             }
@@ -859,13 +1024,16 @@ impl Invocation {
             }
             Op::Mov32i { dst, imm } => self.set_reg(dst, imm),
             Op::S2r { dst, sr } => {
-                // Nothing here runs a warp, a CTA or more than one
-                // invocation at a time, so every lane/thread identity is 0.
-                // `invocation_info` and the mask registers are the only ones
-                // whose zero is not obviously right, and no shader this
-                // executes has asked for them.
-                let _ = sr;
-                self.set_reg(dst, 0);
+                if SpecialRegs::PACKED.contains(&sr) {
+                    return Err(Error::Gpu(format!(
+                        "shader: s2r of the packed special register {sr:#x}, whose field \
+                         layout is not confirmed"
+                    )));
+                }
+                // A register this doesn't model still reads zero, which is
+                // what every one of them read before compute gave the thread
+                // and CTA registers meaning.
+                self.set_reg(dst, env.special.read(sr).unwrap_or(0));
             }
             Op::Psetp { p0, p1, a, b, c, op1, op2 } => {
                 let first = combine(op1, self.holds(a), self.holds(b));
@@ -888,37 +1056,67 @@ impl Invocation {
                     Error::Gpu("shader: ldg with no global memory bound".into())
                 })?;
                 let base = (self.reg64(addr) as i64).wrapping_add(offset as i64) as u64;
-                for i in 0..size.regs() {
-                    let v = mem.read_u32(base.wrapping_add(i as u64 * 4))?;
-                    self.set_reg(dst.wrapping_add(i), v);
+                if let Some(raw) = narrow_load(size, |i| mem.read_u8(base + i as u64))? {
+                    self.set_reg(dst, raw);
+                } else {
+                    for i in 0..size.regs() {
+                        let v = mem.read_u32(base.wrapping_add(u64::from(i) * 4))?;
+                        self.set_reg(dst.wrapping_add(i), v);
+                    }
+                }
+            }
+            Op::Stg { addr, offset, src, size } => {
+                let mem = env.memory.ok_or_else(|| {
+                    Error::Gpu("shader: stg with no global memory bound".into())
+                })?;
+                let base = (self.reg64(addr) as i64).wrapping_add(offset as i64) as u64;
+                let (bytes, len) = self.store_value(src, size);
+                if len < 4 {
+                    for (i, byte) in bytes[..len].iter().enumerate() {
+                        mem.write_u8(base + i as u64, *byte)?;
+                    }
+                } else {
+                    for i in 0..size.regs() {
+                        let v = self.reg(src.wrapping_add(i));
+                        mem.write_u32(base.wrapping_add(u64::from(i) * 4), v)?;
+                    }
                 }
             }
             Op::Ldl { dst, addr, offset, size } => {
                 let base = (self.reg(addr) as i64).wrapping_add(offset as i64) as usize;
+                let values = read_scratch(&self.local, base, size);
                 for i in 0..size.regs() {
-                    let at = base + i as usize * 4;
-                    let mut word = [0u8; 4];
-                    if at + 4 <= self.local.len() {
-                        word.copy_from_slice(&self.local[at..at + 4]);
-                    }
-                    self.set_reg(dst.wrapping_add(i), u32::from_le_bytes(word));
+                    self.set_reg(dst.wrapping_add(i), values[i as usize]);
                 }
             }
             Op::Stl { addr, offset, src, size } => {
                 let base = (self.reg(addr) as i64).wrapping_add(offset as i64) as usize;
-                if self.local.len() < LOCAL_MEMORY_BYTES {
-                    self.local.resize(LOCAL_MEMORY_BYTES, 0);
-                }
+                let (bytes, len) = self.store_value(src, size);
+                let cap = self.local_bytes;
+                write_scratch(&mut self.local, cap, base, &bytes[..len]);
+            }
+            Op::Lds { dst, addr, offset, size } => {
+                let shared = env.shared.ok_or_else(|| {
+                    Error::Gpu("shader: lds with no shared memory bound".into())
+                })?;
+                let base = (self.reg(addr) as i64).wrapping_add(offset as i64) as usize;
+                let values = read_scratch(&shared.borrow(), base, size);
                 for i in 0..size.regs() {
-                    let at = base + i as usize * 4;
-                    if at + 4 <= self.local.len() {
-                        let v = self.reg(src.wrapping_add(i)).to_le_bytes();
-                        self.local[at..at + 4].copy_from_slice(&v);
-                    }
+                    self.set_reg(dst.wrapping_add(i), values[i as usize]);
                 }
             }
-            Op::Stg { .. } => {
-                return Err(Error::Gpu("shader: stg (global store) is not implemented".into()))
+            Op::Sts { addr, offset, src, size } => {
+                let shared = env.shared.ok_or_else(|| {
+                    Error::Gpu("shader: sts with no shared memory bound".into())
+                })?;
+                let base = (self.reg(addr) as i64).wrapping_add(offset as i64) as usize;
+                let (bytes, len) = self.store_value(src, size);
+                let mut block = shared.borrow_mut();
+                let cap = block.len();
+                write_scratch(&mut block, cap, base, &bytes[..len]);
+            }
+            Op::Atom { dst, addr, offset, src, op, ty, space } => {
+                self.run_atom(dst, addr, offset, src, op, ty, space, env)?;
             }
 
             Op::Unimplemented { raw } => {
@@ -937,6 +1135,7 @@ impl Invocation {
             | Op::Sync
             | Op::Brk
             | Op::Cont
+            | Op::Bar { .. }
             | Op::Texs { .. } => unreachable!("control flow is dispatched in execute"),
         }
         Ok(())
@@ -951,6 +1150,96 @@ impl Invocation {
     /// A 64-bit address held in a register pair.
     fn reg64(&self, r: u8) -> u64 {
         u64::from(self.reg(r)) | (u64::from(self.reg(r.wrapping_add(1))) << 32)
+    }
+
+    /// A value `width` bytes wide, from `r` and the register after it.
+    fn reg_wide(&self, r: u8, width: usize) -> u64 {
+        if width == 8 {
+            self.reg64(r)
+        } else {
+            u64::from(self.reg(r))
+        }
+    }
+
+    fn set_reg_wide(&mut self, r: u8, width: usize, value: u64) {
+        self.set_reg(r, value as u32);
+        if width == 8 {
+            self.set_reg(r.wrapping_add(1), (value >> 32) as u32);
+        }
+    }
+
+    /// The bytes a store of `size` moves, taken from `src` upwards.
+    fn store_value(&self, src: u8, size: MemSize) -> ([u8; 16], usize) {
+        let mut out = [0u8; 16];
+        for i in 0..size.regs() as usize {
+            let word = self.reg(src.wrapping_add(i as u8)).to_le_bytes();
+            out[i * 4..i * 4 + 4].copy_from_slice(&word);
+        }
+        (out, size.bytes() as usize)
+    }
+
+    /// `atom`/`atoms`/`red`: read one location, combine, write back, and hand
+    /// the *old* value to `dst`. Nothing here runs two threads at once, so
+    /// the read-modify-write is atomic by construction.
+    #[allow(clippy::too_many_arguments)]
+    fn run_atom(
+        &mut self,
+        dst: u8,
+        addr: u8,
+        offset: i32,
+        src: u8,
+        op: AtomOp,
+        ty: AtomType,
+        space: AtomSpace,
+        env: &Env,
+    ) -> Result<()> {
+        let width = match ty {
+            AtomType::U128 => {
+                return Err(Error::Gpu("shader: a 128-bit atomic is not implemented".into()))
+            }
+            AtomType::U64 | AtomType::S64 => 8usize,
+            _ => 4usize,
+        };
+        // `cas` compares against `src` and stores the register after it;
+        // every other operation takes the one operand.
+        let operand = self.reg_wide(src, width);
+        let stored = self.reg_wide(src.wrapping_add((width / 4) as u8), width);
+
+        let old = match space {
+            AtomSpace::Shared => {
+                let shared = env.shared.ok_or_else(|| {
+                    Error::Gpu("shader: a shared atomic with no shared memory bound".into())
+                })?;
+                let base = (self.reg(addr) as i64).wrapping_add(offset as i64) as usize;
+                let block = shared.borrow();
+                let words = read_scratch(&block, base, wide_size(width));
+                drop(block);
+                let old = pack(&words, width);
+                let new = atom_apply(op, ty, old, operand, stored)?;
+                let mut block = shared.borrow_mut();
+                let cap = block.len();
+                write_scratch(&mut block, cap, base, &unpack(new, width)[..width]);
+                old
+            }
+            AtomSpace::Global => {
+                let mem = env.memory.ok_or_else(|| {
+                    Error::Gpu("shader: a global atomic with no global memory bound".into())
+                })?;
+                let base = (self.reg64(addr) as i64).wrapping_add(offset as i64) as u64;
+                let mut old = u64::from(mem.read_u32(base)?);
+                if width == 8 {
+                    old |= u64::from(mem.read_u32(base + 4)?) << 32;
+                }
+                let new = atom_apply(op, ty, old, operand, stored)?;
+                mem.write_u32(base, new as u32)?;
+                if width == 8 {
+                    mem.write_u32(base + 4, (new >> 32) as u32)?;
+                }
+                old
+            }
+        };
+        self.set_reg_wide(dst, width, old);
+        Ok(())
     }
 
     /// Real Maxwell issues `texs` asynchronously: the compiler interleaves
@@ -1340,6 +1629,147 @@ fn half(v: u32, high: bool, signed: bool) -> u32 {
         h
     }
 }
+/// A load narrower than a register: the raw bytes, sign-extended for the
+/// signed forms. `None` means `size` moves whole registers instead.
+fn narrow_load(
+    size: MemSize,
+    mut byte: impl FnMut(usize) -> Result<u8>,
+) -> Result<Option<u32>> {
+    let width = size.bytes() as usize;
+    if size.regs() != 1 || width >= 4 {
+        return Ok(None);
+    }
+    let mut raw = 0u32;
+    for i in 0..width {
+        raw |= u32::from(byte(i)?) << (i * 8);
+    }
+    let signed = matches!(size, MemSize::S8 | MemSize::S16);
+    Ok(Some(if signed { sign_extend(raw, size.bytes() as u8) } else { raw }))
+}
+
+/// The registers a load of `size` from byte-addressed scratch produces. Past
+/// the end reads zero, which is what an out-of-range local access gave before
+/// sub-word sizes were honoured.
+fn read_scratch(bytes: &[u8], base: usize, size: MemSize) -> [u32; 4] {
+    let mut out = [0u32; 4];
+    if let Ok(Some(raw)) =
+        narrow_load(size, |i| Ok(bytes.get(base + i).copied().unwrap_or(0)))
+    {
+        out[0] = raw;
+        return out;
+    }
+    for (i, word) in out.iter_mut().enumerate().take(size.regs() as usize) {
+        let mut raw = [0u8; 4];
+        for (j, b) in raw.iter_mut().enumerate() {
+            *b = bytes.get(base + i * 4 + j).copied().unwrap_or(0);
+        }
+        *word = u32::from_le_bytes(raw);
+    }
+    out
+}
+
+/// Write `value` into byte-addressed scratch, growing it to `cap` first. A
+/// store that would run past the end is dropped rather than growing it.
+fn write_scratch(bytes: &mut Vec<u8>, cap: usize, base: usize, value: &[u8]) {
+    if bytes.len() < cap {
+        bytes.resize(cap, 0);
+    }
+    let end = base + value.len();
+    if end <= bytes.len() {
+        bytes[base..end].copy_from_slice(value);
+    }
+}
+
+/// The [`MemSize`] that moves `width` bytes as whole registers.
+fn wide_size(width: usize) -> MemSize {
+    if width == 8 {
+        MemSize::B64
+    } else {
+        MemSize::B32
+    }
+}
+
+fn pack(words: &[u32; 4], width: usize) -> u64 {
+    if width == 8 {
+        u64::from(words[0]) | (u64::from(words[1]) << 32)
+    } else {
+        u64::from(words[0])
+    }
+}
+
+fn unpack(value: u64, width: usize) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    out[..4].copy_from_slice(&(value as u32).to_le_bytes());
+    if width == 8 {
+        out[4..].copy_from_slice(&((value >> 32) as u32).to_le_bytes());
+    }
+    out
+}
+
+/// What an atomic leaves in memory, given what was there.
+fn atom_apply(op: AtomOp, ty: AtomType, old: u64, b: u64, stored: u64) -> Result<u64> {
+    let wide = matches!(ty, AtomType::U64 | AtomType::S64);
+    let trim = |v: u64| if wide { v } else { v & 0xFFFF_FFFF };
+    let float = matches!(ty, AtomType::F32);
+    Ok(match op {
+        AtomOp::Add | AtomOp::SafeAdd if float => {
+            (f32::from_bits(old as u32) + f32::from_bits(b as u32)).to_bits().into()
+        }
+        AtomOp::Add | AtomOp::SafeAdd => trim(old.wrapping_add(b)),
+        AtomOp::Min => {
+            if atom_less(ty, b, old) {
+                b
+            } else {
+                old
+            }
+        }
+        AtomOp::Max => {
+            if atom_less(ty, old, b) {
+                b
+            } else {
+                old
+            }
+        }
+        // Wrapping counters: `inc` rolls to zero once it reaches the operand,
+        // `dec` rolls back up to it. Both are unsigned however the type reads.
+        AtomOp::Inc => {
+            if old >= b {
+                0
+            } else {
+                trim(old + 1)
+            }
+        }
+        AtomOp::Dec => {
+            if old == 0 || old > b {
+                b
+            } else {
+                old - 1
+            }
+        }
+        AtomOp::And => old & b,
+        AtomOp::Or => old | b,
+        AtomOp::Xor => old ^ b,
+        AtomOp::Exch => b,
+        AtomOp::Cas => {
+            if old == b {
+                stored
+            } else {
+                old
+            }
+        }
+    })
+}
+
+/// `x < y` under the atomic's type, which is what `min`/`max` turn on.
+fn atom_less(ty: AtomType, x: u64, y: u64) -> bool {
+    match ty {
+        AtomType::F32 => f32::from_bits(x as u32) < f32::from_bits(y as u32),
+        AtomType::S32 => (x as u32 as i32) < (y as u32 as i32),
+        AtomType::S64 => (x as i64) < (y as i64),
+        _ => x < y,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1376,6 +1806,258 @@ mod tests {
             self.calls.borrow_mut().push((handle, u, v, layer));
             Ok(self.color)
         }
+    }
+
+    /// A flat byte-addressed global address space, so the memory ops can be
+    /// checked without a GPU address space under them.
+    #[derive(Default)]
+    struct FlatMemory {
+        bytes: RefCell<Vec<u8>>,
+    }
+
+    impl FlatMemory {
+        fn with(size: usize) -> FlatMemory {
+            FlatMemory { bytes: RefCell::new(vec![0; size]) }
+        }
+    }
+
+    impl GlobalMemory for FlatMemory {
+        fn read_u32(&self, addr: u64) -> Result<u32> {
+            let bytes = self.bytes.borrow();
+            let at = addr as usize;
+            let mut word = [0u8; 4];
+            word.copy_from_slice(&bytes[at..at + 4]);
+            Ok(u32::from_le_bytes(word))
+        }
+
+        fn read_u8(&self, addr: u64) -> Result<u8> {
+            Ok(self.bytes.borrow()[addr as usize])
+        }
+
+        fn write_u32(&self, addr: u64, value: u32) -> Result<()> {
+            let at = addr as usize;
+            self.bytes.borrow_mut()[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            Ok(())
+        }
+
+        fn write_u8(&self, addr: u64, value: u8) -> Result<()> {
+            self.bytes.borrow_mut()[addr as usize] = value;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn s2r_answers_the_thread_and_cta_registers_a_dispatch_set() {
+        let consts = no_consts();
+        let mut env = Env::new(&consts, &NoTextures);
+        env.special.tid = [3, 4, 5];
+        env.special.ctaid = [6, 7, 8];
+        env.special.shared_size = 0x400;
+        let mut inv = Invocation::new();
+        inv.execute(
+            &prog(&[
+                Op::S2r { dst: 0, sr: 0x21 },
+                Op::S2r { dst: 1, sr: 0x23 },
+                Op::S2r { dst: 2, sr: 0x25 },
+                Op::S2r { dst: 3, sr: 0x27 },
+                Op::S2r { dst: 4, sr: 0x32 },
+                // Not modelled, and still zero rather than an error: that is
+                // what every one of these read before compute existed.
+                Op::S2r { dst: 5, sr: 0x1d },
+                Op::Exit,
+            ]),
+            &env,
+        )
+        .unwrap();
+        assert_eq!([inv.reg(0), inv.reg(1)], [3, 5]);
+        assert_eq!([inv.reg(2), inv.reg(3)], [6, 8]);
+        assert_eq!(inv.reg(4), 0x400);
+        assert_eq!(inv.reg(5), 0);
+    }
+
+    #[test]
+    fn the_packed_thread_register_is_refused_rather_than_guessed_at() {
+        let consts = no_consts();
+        let env = Env::new(&consts, &NoTextures);
+        let err = Invocation::new()
+            .execute(&prog(&[Op::S2r { dst: 0, sr: 0x20 }, Op::Exit]), &env)
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("packed special register"), "got {err:?}");
+    }
+
+    #[test]
+    fn a_global_store_narrower_than_a_word_touches_only_its_own_bytes() {
+        // The byte and halfword forms used to load a whole word, and had no
+        // store at all. A kernel writing a byte array would have scribbled
+        // over three of its neighbours.
+        let memory = FlatMemory::with(16);
+        memory.write_u32(0, 0xAABB_CCDD).unwrap();
+        let consts = no_consts();
+        let mut env = Env::new(&consts, &NoTextures);
+        env.memory = Some(&memory);
+
+        let mut inv = Invocation::new();
+        inv.set_reg(4, 1);
+        inv.set_reg(5, 0);
+        inv.set_reg(6, 0x77);
+        inv.execute(
+            &prog(&[
+                Op::Stg { addr: 4, offset: 0, src: 6, size: MemSize::U8 },
+                Op::Ldg { dst: 0, addr: 4, offset: 0, size: MemSize::U8 },
+                Op::Ldg { dst: 1, addr: 4, offset: 0, size: MemSize::S8 },
+                Op::Exit,
+            ]),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(memory.read_u32(0).unwrap(), 0xAABB_77DD);
+        assert_eq!(inv.reg(0), 0x77);
+        assert_eq!(inv.reg(1), 0x77);
+    }
+
+    #[test]
+    fn a_signed_narrow_load_extends_its_sign() {
+        let memory = FlatMemory::with(16);
+        memory.write_u32(0, 0x0000_FF80).unwrap();
+        let consts = no_consts();
+        let mut env = Env::new(&consts, &NoTextures);
+        env.memory = Some(&memory);
+
+        let mut inv = Invocation::new();
+        inv.execute(
+            &prog(&[
+                Op::Ldg { dst: 0, addr: 4, offset: 0, size: MemSize::S16 },
+                Op::Ldg { dst: 1, addr: 4, offset: 0, size: MemSize::U16 },
+                Op::Exit,
+            ]),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(inv.reg(0), 0xFFFF_FF80);
+        assert_eq!(inv.reg(1), 0x0000_FF80);
+    }
+
+    #[test]
+    fn a_global_atomic_returns_the_old_value_and_leaves_the_new_one() {
+        let memory = FlatMemory::with(16);
+        memory.write_u32(0, 10).unwrap();
+        let consts = no_consts();
+        let mut env = Env::new(&consts, &NoTextures);
+        env.memory = Some(&memory);
+
+        let mut inv = Invocation::new();
+        inv.set_reg(6, 7);
+        inv.execute(
+            &prog(&[
+                Op::Atom {
+                    dst: 0,
+                    addr: 4,
+                    offset: 0,
+                    src: 6,
+                    op: AtomOp::Add,
+                    ty: AtomType::U32,
+                    space: AtomSpace::Global,
+                },
+                Op::Exit,
+            ]),
+            &env,
+        )
+        .unwrap();
+        assert_eq!(inv.reg(0), 10, "the old value");
+        assert_eq!(memory.read_u32(0).unwrap(), 17);
+    }
+
+    #[test]
+    fn every_atomic_operation_computes_what_its_name_says() {
+        use AtomOp::*;
+        let u32s = AtomType::U32;
+        assert_eq!(atom_apply(Add, u32s, 5, 3, 0).unwrap(), 8);
+        assert_eq!(atom_apply(Min, u32s, 5, 3, 0).unwrap(), 3);
+        assert_eq!(atom_apply(Max, u32s, 5, 3, 0).unwrap(), 5);
+        assert_eq!(atom_apply(And, u32s, 0b110, 0b011, 0).unwrap(), 0b010);
+        assert_eq!(atom_apply(Or, u32s, 0b110, 0b011, 0).unwrap(), 0b111);
+        assert_eq!(atom_apply(Xor, u32s, 0b110, 0b011, 0).unwrap(), 0b101);
+        assert_eq!(atom_apply(Exch, u32s, 5, 3, 0).unwrap(), 3);
+        // A signed minimum is the whole reason the type is carried.
+        let negative = (-4i32) as u32 as u64;
+        assert_eq!(atom_apply(Min, AtomType::S32, negative, 3, 0).unwrap(), negative);
+        assert_eq!(atom_apply(Min, u32s, negative, 3, 0).unwrap(), 3);
+        // `inc` wraps to zero at the operand, `dec` wraps back up to it.
+        assert_eq!(atom_apply(Inc, u32s, 2, 4, 0).unwrap(), 3);
+        assert_eq!(atom_apply(Inc, u32s, 4, 4, 0).unwrap(), 0);
+        assert_eq!(atom_apply(Dec, u32s, 0, 4, 0).unwrap(), 4);
+        assert_eq!(atom_apply(Dec, u32s, 3, 4, 0).unwrap(), 2);
+        // `cas` stores the register after its comparand, and only on a match.
+        assert_eq!(atom_apply(Cas, u32s, 5, 5, 9).unwrap(), 9);
+        assert_eq!(atom_apply(Cas, u32s, 5, 4, 9).unwrap(), 5);
+        let one = 1.0f32.to_bits().into();
+        let two = 2.0f32.to_bits().into();
+        assert_eq!(atom_apply(Add, AtomType::F32, one, two, 0).unwrap(), 3.0f32.to_bits().into());
+    }
+
+    #[test]
+    fn a_barrier_suspends_where_it_stands_and_resumes_after_it() {
+        let consts = no_consts();
+        let env = Env::new(&consts, &NoTextures);
+        let program = prog(&[
+            Op::Mov32i { dst: 0, imm: 1 },
+            Op::Bar { mode: BarMode::Sync },
+            Op::Mov32i { dst: 1, imm: 2 },
+            Op::Exit,
+        ]);
+
+        let mut inv = Invocation::new();
+        inv.begin();
+        assert_eq!(inv.resume(&program, &env).unwrap(), Halt::Barrier);
+        assert_eq!(inv.reg(0), 1);
+        assert_eq!(inv.reg(1), 0, "nothing past the barrier has run");
+        assert_eq!(inv.resume(&program, &env).unwrap(), Halt::Exited);
+        assert_eq!(inv.reg(1), 2);
+    }
+
+    #[test]
+    fn a_barrier_in_a_draw_is_an_error_rather_than_a_silent_no_op() {
+        // It used to decode to `Inert`, which is right for `membar` and wrong
+        // for this: outside a CTA there is nothing to synchronise with.
+        let consts = no_consts();
+        let env = Env::new(&consts, &NoTextures);
+        let err = Invocation::new()
+            .execute(&prog(&[Op::Bar { mode: BarMode::Sync }, Op::Exit]), &env)
+            .unwrap_err();
+        assert!(format!("{err:?}").contains("no CTA"), "got {err:?}");
+    }
+
+    #[test]
+    fn shared_memory_is_addressed_in_bytes_and_shared_between_invocations() {
+        let consts = no_consts();
+        let shared: SharedMemory = RefCell::new(vec![0u8; 64]);
+        let mut env = Env::new(&consts, &NoTextures);
+        env.shared = Some(&shared);
+
+        let mut writer = Invocation::new();
+        writer.set_reg(4, 8);
+        writer.set_reg(5, 0xDEAD);
+        writer
+            .execute(
+                &prog(&[
+                    Op::Sts { addr: 4, offset: 4, src: 5, size: MemSize::B32 },
+                    Op::Exit,
+                ]),
+                &env,
+            )
+            .unwrap();
+
+        let mut reader = Invocation::new();
+        reader
+            .execute(
+                &prog(&[
+                    Op::Lds { dst: 0, addr: RZ, offset: 12, size: MemSize::B32 },
+                    Op::Exit,
+                ]),
+                &env,
+            )
+            .unwrap();
+        assert_eq!(reader.reg(0), 0xDEAD);
     }
 
     #[test]

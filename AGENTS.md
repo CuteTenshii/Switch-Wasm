@@ -11,7 +11,7 @@ standing state.
 ## Commands
 
 - `make all` — `test` then `assets`.
-- `make test` — `cargo test` over all three crates. 687 tests.
+- `make test` — `cargo test` over all three crates. 730 tests.
 - `make wasm` — release wasm build `--features gpu`, then `wasm-bindgen
   --target web`. Needs `rustup target add wasm32-unknown-unknown` and a
   `wasm-bindgen-cli` matching the `Cargo.lock` version.
@@ -510,7 +510,21 @@ headers, ioctls from libnx's `nvidia/ioctl`.
 - `shader/` — `isa` (SASS decode), `cfg`, `interp` (software shading), `wgsl`
   (translation for the backend).
 - `raster` — the software rasterizer, and **the reference every other path must
-  agree with**. Compute dispatches only record their QMD address; no warps run.
+  agree with**. `qmd` + `compute` are its counterpart for a dispatch: the
+  256-byte launch descriptor, then one scalar invocation per thread of the grid.
+
+**A compute dispatch runs on the CPU, one thread at a time.** Almost none of a
+launch is in the class's register file — the channel writes a QMD address and
+the grid, the block, the constant buffers and the shared-memory size come out
+of a 256-byte structure in memory (`clb1c0qmd.h`'s `MW(hi:lo)` fields). Threads
+being sequential is exact for everything except `bar`, where a thread suspends
+and the CTA resumes once every thread has arrived; it also makes an atomic
+atomic by construction, so a kernel whose answer depends on a race gets a valid
+one here and a different one on hardware. Named barriers are not told apart and
+`bar.arrive` synchronises like `bar.sync` — both over-synchronise, which no
+well-formed kernel can detect. `compute::MAX_DISPATCH_THREADS` refuses a grid
+past a million threads: hardware runs one in microseconds, and the worker
+thread the whole GPU stack shares does not.
 
 Scan-out: `display::BufferQueue` (`QUEUE_BUFFER`) resolves the
 `NvGraphicBuffer` to an nvmap id and `Gpu::present` de-swizzles into

@@ -23,7 +23,7 @@ use crate::gpu::shader::interp::{
     ConstantSource, Env, Invocation, MemoryConstants, MemoryGlobal, MemoryTextures, NoTextures,
 };
 use crate::gpu::shader::compiled::Compiled;
-use crate::gpu::shader::{self, Op, Program};
+use crate::gpu::shader::{decode_program_from_memory, Program};
 use crate::gpu::surface::{ColorFormat, MAX_SAMPLES};
 use crate::{Error, Result};
 
@@ -430,91 +430,12 @@ const NUM_VARYINGS: usize = 32;
 /// fixed range means vertex fetch doesn't need the shader to declare how
 /// many it reads.
 const MAX_VERTEX_ATTRIBS: u32 = 16;
-/// Words of shader binary to scan looking for `exit` before giving up — not
-/// unbounded (see `shader::MAX_INSTRUCTIONS`'s doc comment for the same
-/// reasoning). Reading stops as soon as `exit` is found, so a short real
-/// program never touches memory past its own end.
-///
-/// 1024 was "generous for 2D UI" and was not: the Home Menu's own UI shaders
-/// run past it, five of them by a single word.
-const MAX_PROGRAM_WORDS: u64 = 8192;
-
 /// One vertex after the vertex shader ran: clip-space position plus every
 /// generic varying, ready for the perspective divide and interpolation.
 #[derive(Clone, Copy)]
 struct ShadedVertex {
     clip: [f32; 4],
     varyings: [[f32; 4]; NUM_VARYINGS],
-}
-
-/// Decode a shader program straight out of GPU memory, stripping `sched`
-/// words and stopping at the first `exit` (mirrors
-/// `shader::decode_program`, which needs the whole binary as a slice
-/// up front — reading incrementally here means a short real program never
-/// touches memory past its own end).
-/// Nouveau/Mesa's shader upload convention prepends a fixed-size header
-/// (driver bookkeeping, not part of the Maxwell ISA) before the real `sched`/
-/// instruction stream — confirmed empirically against a live JKSV capture
-/// (its vertex and fragment programs both have a recognisable `sched` word,
-/// followed by a real `ld`, starting exactly 0x50 bytes in;
-/// `/tmp/dump_vs.bin`/`dump_fs.bin` via a temporary dump added and removed
-/// for this investigation). `uam`/deko3d-compiled binaries (hbmenu, this
-/// module's own test fixtures) have no such header. The header's own first
-/// bytes aren't reliably zero (they carry real driver metadata), so this
-/// can't be detected by peeking the first word — instead, decode
-/// speculatively assuming no header, and if the very first real instruction
-/// (slot 1, right after the first `sched` word) doesn't decode, that's the
-/// header showing through: retry assuming one.
-const MESA_SHADER_HEADER_BYTES: u64 = 0x50;
-
-/// Decode a bound shader program out of guest memory.
-///
-/// Public because a second backend needs the same answer, and the Mesa
-/// header skip below is exactly the sort of thing two copies would disagree
-/// about.
-pub fn decode_program_from_memory(
-    ctx: &ExecCtx,
-    addr: u64,
-    bindings: &dyn Fn(u8) -> Option<(u64, u32)>,
-) -> Result<Program> {
-    let first_real_word = ctx.read_u64(addr + 8)?;
-    let addr = if matches!(shader::isa::decode(first_real_word).op, Op::Unimplemented { .. }) {
-        addr + MESA_SHADER_HEADER_BYTES
-    } else {
-        addr
-    };
-    let limit = MAX_PROGRAM_WORDS * 8;
-    shader::decode_program_with_consts(
-        &mut |offset: u32| {
-            if u64::from(offset) >= limit {
-                return Err(Error::Gpu(format!(
-                    "raster: program read at {offset:#x} is past the {limit:#x}-byte cap"
-                )));
-            }
-            ctx.read_u64(addr + u64::from(offset))
-        },
-        &mut |bank: u8, offset: u32| {
-            let (base, size) = bindings(bank)
-                .ok_or_else(|| Error::Gpu(format!("raster: constant bank {bank} is unbound")))?;
-            if offset + 4 > size {
-                return Err(Error::Gpu(format!(
-                    "raster: read of c{bank}[{offset:#x}] is past its {size:#x}-byte end"
-                )));
-            }
-            ctx.read_u32(base + u64::from(offset))
-        },
-    )
-    .inspect(|program| {
-        // `TRACE_SHADER=1` prints every program the rasteriser decodes, in
-        // control-flow-walk order. A shader that fails to run says only which
-        // instruction it stopped on; this is how you see what came before it.
-        if std::env::var("TRACE_SHADER").is_ok() {
-            eprintln!("[shader] program at {addr:#x}, {} instructions", program.offsets.len());
-            for (i, &off) in program.offsets.iter().enumerate() {
-                eprintln!("  {off:#06x}: {:?}", program.insns[i]);
-            }
-        }
-    })
 }
 
 fn shade_vertex(
@@ -2095,7 +2016,7 @@ mod tests {
         // reads zero for it draws every element on top of the first.
         // Both are integers: what has to reach the register is the value's
         // bit pattern, not its numeric value converted to a float.
-        use crate::gpu::shader::isa::{Instruction, MemSize, Pred, RZ};
+        use crate::gpu::shader::isa::{Instruction, MemSize, Op, Pred, RZ};
 
         let mut program = Program::default();
         for (at, op) in [

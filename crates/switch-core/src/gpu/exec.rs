@@ -27,6 +27,13 @@ pub struct GpuStats {
     /// Method writes that hit a register with no implemented behaviour. These
     /// are still stored in the register file, so state stays coherent.
     pub inert_methods: u64,
+    /// Compute dispatches launched.
+    pub dispatches: u64,
+    /// Dispatches that did not run — an unparseable QMD, or a kernel using an
+    /// instruction the interpreter does not decode. Counted for the same
+    /// reason `draws_skipped` is: a kernel that never ran leaves memory
+    /// holding whatever was there, and nothing on screen says so.
+    pub dispatches_skipped: u64,
     /// Draws the rasterizer refused, almost always because the shader used an
     /// instruction the interpreter does not decode.
     ///

@@ -11,12 +11,14 @@
 
 pub mod bcn;
 pub mod channel;
+pub mod compute;
 pub mod engine;
 pub mod exec;
 pub mod macro_engine;
 pub mod nvdrv;
 pub mod nvmap;
 pub mod pipeline;
+pub mod qmd;
 pub mod raster;
 pub mod renderer;
 pub mod shader;

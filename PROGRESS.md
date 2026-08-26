@@ -23,8 +23,8 @@ out to be stale.
 
 - **GPU**: the nvdrv/nvmap/GMMU/channel/copy-engine path is real
   (`crates/switch-core/src/gpu`), and so is the 3D shader core: a Maxwell
-  SASS interpreter feeding a software rasterizer. See
-  [GPU](#gpu-gm20b-model).
+  SASS interpreter feeding a software rasterizer. Compute dispatches run on
+  the same interpreter, one thread at a time. See [GPU](#gpu-gm20b-model).
 - **Retail NCA/NSP**: a real, encrypted commercial title can be decrypted, its
   RomFS mounted, and its multi-module boot sequence (`rtld` → `main` →
   `subsdk*` → `sdk`) run through real `nnSdk` init. `nn::init::Start` →
@@ -404,9 +404,8 @@ Working: the nvdrv device/ioctl layer, nvmap, the GMMU, host1x syncpoints,
 channels and the GPFIFO/pushbuffer command processor, the MME macro engine,
 `ClearBuffers`, report semaphores, the copy engine (including block-linear
 conversion and component remap), the 2D blitter, inline-to-memory uploads,
-scan-out, and the 3D shader core — see [the shader core](#the-shader-core).
-
-Not implemented: compute. A dispatch records its QMD without running warps.
+scan-out, the 3D shader core — see [the shader core](#the-shader-core) — and
+compute, see [compute dispatch](#compute-dispatch).
 
 ### nv device init
 
@@ -1529,6 +1528,82 @@ hbmenu, sysinfo, NX-Fetch and nxdumptool still render byte-identical frames.
 one pushbuffer and issues no draw at all: `GpuStats { submissions: 1,
 methods: 3536, clears: 0, draws: 0, copies: 0, macros: 35, inert_methods:
 554 }`. Whatever it is waiting for is upstream of the GPU.
+
+### Compute dispatch
+
+This section used to say "not implemented: compute. A dispatch records its QMD
+without running warps." Dispatches now run.
+
+**The launch descriptor.** Almost nothing about a compute launch is in the
+class's register file. `SendPcasA` takes the QMD's address shifted right by 8,
+`SendSignalingPcasB` starts it, and the grid, the block, the eight constant
+buffers, the shared-memory size, the per-thread local size and the release
+semaphores all come out of a 256-byte structure in memory. `gpu/qmd.rs` parses
+it. Field positions are transcribed from NVIDIA's generated `clb1c0qmd.h`
+(`MW(hi:lo)` bit ranges), not derived from a capture — the class defines two
+versions, `V00_06` and `V01_07`, they agree on every field this reads, and the
+version word is checked so that a wrong QMD address is refused rather than
+launching whatever zeroed memory decodes to. What *is* in the register file is
+the program region a QMD's offset is relative to and the two descriptor pools;
+those sit at the same methods as the 3D class's, which is why `gpu/texture`
+serves both unchanged.
+
+**Threads run one at a time.** `gpu/compute.rs` decodes the program the way a
+draw decodes its shaders and runs one `Invocation` per thread of the grid.
+Being sequential is exact for everything except a barrier, and it makes an
+atomic atomic for free: nothing is concurrent, so no read-modify-write can be
+interleaved and no race can be observed. A kernel whose result depends on one
+gets a valid answer here and a different one on hardware.
+
+**A barrier is the one place a thread's progress depends on the others'.** The
+interpreter's program counter, step budget and pending texture writes moved out
+of `execute`'s stack frame and into `Invocation`, so `bar` can suspend one
+mid-program: `resume` returns `Halt::Barrier`, the scheduler runs every other
+thread of the CTA to its own barrier, and only then does any of them continue.
+A program with no `bar` skips all of it and reuses one invocation, which is the
+common case and much the cheaper one — the cooperative path keeps a whole
+register file per thread alive, up to 1024 of them.
+
+Two honest approximations there: named barriers are not told apart, and
+`bar.arrive` synchronises like `bar.sync`. Both over-synchronise, which no
+well-formed kernel can detect. `bar.red.popc`/`.and`/`.or` and `bar.scan`
+reduce a value across a warp's lanes, which a scalar interpreter has none of,
+so they are decoded in order to be *named* when they are refused.
+
+**Three interpreter gaps had to close first.** `s2r` answered 0 for every
+special register, which gives every thread of a grid the same identity and so
+the same address; it now answers `SR_TIDX/Y/Z`, `SR_CTAIDX/Y/Z`, `smemsz` and
+`lmemlosz`, and still answers 0 for anything it does not model, as all of them
+were answered before. `stg` was an error and `GlobalMemory` was read-only —
+a compute kernel's entire output is `stg`. And the byte and halfword forms of
+`ldg`/`ldl` loaded a whole word regardless of size, with no store at all: a
+kernel writing a byte array would have scribbled over three of its neighbours.
+
+`SR_TID` and `SR_NTID` — the forms packing all three dimensions into one
+register — are **refused**, not answered. Compilers emit the per-dimension
+registers instead, and the packing is not confirmed against hardware; a wrong
+layout here is the same class of bug as the `texs` constant bank that was
+guessed rather than looked up, and that one cost 42059 pixels and a
+screenshot regression to find.
+
+**The tests assemble real SASS.** A hand-written encoder in `compute.rs`'s
+tests emits each instruction and asserts the *decoder* reads back the op it
+meant — so the encodings are checked against the tables rather than being a
+second guess at them — then lays them out in real 32-byte `sched` blocks in
+guest memory and runs the whole path. Eight threads across two CTAs each write
+their own slot; four threads publish to shared memory, cross a barrier and read
+each other's (without the barrier releasing them together, thread 0 reads a
+slot nothing has written and the answer is [0, 0, 0, 3] rather than
+[3, 3, 3, 3]); a second CTA gets its own shared block rather than the first's;
+24 threads accumulate through one global atomic.
+
+**What is still missing.** No compute on the wgpu backend — the `Renderer`
+trait covers draws and clears, and the software path is what a device path
+would have to be checked against, so it comes first. `suld`/`sust` (image
+load/store), `atoms.cast` (the lock-and-load form), 128-bit atomics and `shfl`
+are not decoded. `MAX_DISPATCH_THREADS` refuses a grid past a million threads:
+hardware runs one in microseconds, the worker thread the whole GPU stack shares
+does not, and a refused dispatch that says so beats a tab that stops answering.
 
 ### NXpotify: a missing shuffle, then a thread that never let go
 

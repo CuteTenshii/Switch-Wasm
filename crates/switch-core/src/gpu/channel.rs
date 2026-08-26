@@ -216,7 +216,15 @@ impl Channel {
             CLASS_INLINE => self.three_d.inline.write(method, arg, ctx),
             CLASS_2D => self.two_d.write(method, arg, ctx),
             CLASS_COPY => self.copy.write(method, arg, ctx),
-            CLASS_COMPUTE => self.compute.write(method, arg, ctx),
+            CLASS_COMPUTE => {
+                // A dispatch reads and writes guest memory, and the wgpu
+                // backend keeps a render target on the device until it is
+                // flushed — so a kernel reading one would read stale bytes.
+                if method == crate::gpu::engine::compute::SEND_SIGNALING_PCAS_B {
+                    self.three_d.flush_renderer(ctx)?;
+                }
+                self.compute.write(method, arg, ctx)
+            }
             CLASS_GPFIFO => self.gpfifo_method(method, arg, ctx),
             0 => Err(Error::Gpu(format!(
                 "pfifo: method {:#x} on subchannel {} before any class was bound",

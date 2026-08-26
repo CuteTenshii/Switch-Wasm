@@ -1075,7 +1075,7 @@ impl Gpu {
         stage: ShaderStage,
     ) -> std::result::Result<Translation, String> {
         let binding = engine.program(stage).ok_or_else(|| format!("no {stage:?} program"))?;
-        let program = switch_core::gpu::raster::decode_program_from_memory(
+        let program = switch_core::gpu::shader::decode_program_from_memory(
             ctx,
             binding.addr,
             &|bank: u8| engine.bound_constbuf(stage, u32::from(bank)),

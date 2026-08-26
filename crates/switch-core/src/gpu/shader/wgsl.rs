@@ -1187,12 +1187,17 @@ impl Emitter<'_> {
 
             Op::Nop | Op::Inert => {}
 
-            // Global and local memory need storage buffers, which is a
-            // question about resource binding rather than translation.
+            // Global, local and shared memory need storage buffers, which is
+            // a question about resource binding rather than translation. A
+            // barrier has no meaning in the graphics stages this translates.
             Op::Ldg { .. }
             | Op::Stg { .. }
             | Op::Ldl { .. }
             | Op::Stl { .. }
+            | Op::Lds { .. }
+            | Op::Sts { .. }
+            | Op::Atom { .. }
+            | Op::Bar { .. }
             | Op::Unimplemented { .. } => return Err(Unsupported::Op { at, op }),
 
             // Handled by `emit_terminator`, and `ssy`/`pbk`/`pcnt` by
