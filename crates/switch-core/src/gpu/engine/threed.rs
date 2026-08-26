@@ -664,6 +664,23 @@ impl Engine3D {
         if ctx.trace && ctx.stats.draws == 1 {
             self.dump_vertex_input();
         }
+        if ctx.trace {
+            // Which surface a draw lands in, and where it falls between the
+            // clears and the resolve. A draw that works and a draw that is
+            // painted over afterwards look the same on screen, and only the
+            // order tells them apart.
+            let rt = self.render_target(self.render_target_slot(0));
+            eprintln!(
+                "[gpu] draw {} prim={:#x} count={} -> rt0 {}",
+                ctx.stats.draws,
+                self.last_draw.primitive,
+                self.last_draw.count,
+                match rt {
+                    Ok(Some(rt)) => format!("{:#x} {}x{}", rt.addr, rt.width, rt.height),
+                    other => format!("{other:x?}"),
+                }
+            );
+        }
         let result = self.with_renderer(ctx, |renderer, engine, ctx| renderer.draw(engine, ctx));
         if let Err(e) = result {
             ctx.stats.draws_skipped += 1;
