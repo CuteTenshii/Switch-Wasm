@@ -892,7 +892,16 @@ impl Gpu {
             Wrap::Repeat => wgpu::AddressMode::Repeat,
             Wrap::Mirror => wgpu::AddressMode::MirrorRepeat,
             Wrap::ClampToEdge => wgpu::AddressMode::ClampToEdge,
-            Wrap::ClampToBorder => wgpu::AddressMode::ClampToBorder,
+            // WebGPU has no border mode at all -- `clamp-to-edge`, `repeat`
+            // and `mirror-repeat` are the whole list -- and asking wgpu's web
+            // backend for one is not an error it returns but a panic it
+            // raises, which on wasm stops the core.
+            //
+            // Edge is also what this has to agree with: the rasterizer takes
+            // `ClampToBorder` down the same arm as `ClampToEdge`
+            // (`texture::Wrap`), so neither renderer samples a border colour
+            // and the two match. When one of them learns to, they both must.
+            Wrap::ClampToBorder => wgpu::AddressMode::ClampToEdge,
         };
         let filter = |linear: bool| {
             if linear {
