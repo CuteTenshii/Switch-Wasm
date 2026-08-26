@@ -630,6 +630,24 @@ impl Cpu {
                 }
                 // EnsureSaveData -> the save data size it ensured.
                 Some(20) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+                // ExtendSaveData(u8 SaveDataType, u128 userId, s64 size,
+                // s64 journal) -> an s64 the caller discards. Same argument
+                // shape as GetSaveDataSize below with the two sizes appended,
+                // so they sit at 0x18 and 0x20.
+                //
+                // There is no NAND quota here to grant the extension out of,
+                // so it is granted as asked and *remembered*: a title that
+                // reads its size back must be told what it just set rather
+                // than the NACP figure it has already moved past. Refusing it
+                // is where Minecraft stopped — `nn::fs::ExtendSaveData` aborts
+                // on any error, and an unknown command id is one.
+                Some(25) => {
+                    let data = self.ipc_request_data(tls);
+                    self.save_data_quota.size = self.mem.read_u64(data.wrapping_add(0x18))? as i64;
+                    self.save_data_quota.journal_size =
+                        self.mem.read_u64(data.wrapping_add(0x20))? as i64;
+                    self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[])
+                }
                 // GetSaveDataSize(u8 SaveDataType, u128 userId) -> two s64s,
                 // the save's size and its journal's. The request confirms that
                 // shape: its `CmifDomainInHeader` declares data_size=0x28, so
@@ -1556,6 +1574,33 @@ mod tests {
         cpu.applet_request(TLS, 9, Some(26)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap() as i64, SAVE);
+        assert_eq!(cpu.mem.read_u64(TLS + 0x28).unwrap() as i64, JOURNAL);
+    }
+
+    #[test]
+    fn extending_a_save_grants_it_and_the_size_read_back_is_the_extended_one() {
+        // ExtendSaveData(u8 SaveDataType, u128 userId, s64 size, s64 journal):
+        // GetSaveDataSize's 0x18-byte payload with the two sizes appended.
+        // `nn::fs::ExtendSaveData` aborts on any error, so refusing this is an
+        // svcBreak — which is where Minecraft stopped, 259M steps in.
+        const SIZE: i64 = 0x1200_0000;
+        const JOURNAL: i64 = 0x0100_0000;
+        let mut payload = [0u8; 0x28];
+        payload[0] = 1; // SaveDataType::Account
+        payload[8..0x18].copy_from_slice(&super::ACCOUNT_UID);
+        payload[0x18..0x20].copy_from_slice(&SIZE.to_le_bytes());
+        payload[0x20..].copy_from_slice(&JOURNAL.to_le_bytes());
+
+        let mut cpu = request(false, 25, &payload);
+        cpu.register_service_handle(9, "am:application-functions");
+        cpu.applet_request(TLS, 9, Some(25)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
+
+        // And what 26 reports afterwards is what the title just set, not the
+        // NACP figure it has already moved past.
+        marshal(&mut cpu, false, 26, &[0u8; 0x18]);
+        cpu.applet_request(TLS, 9, Some(26)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap() as i64, SIZE);
         assert_eq!(cpu.mem.read_u64(TLS + 0x28).unwrap() as i64, JOURNAL);
     }
 
