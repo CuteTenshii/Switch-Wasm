@@ -1283,6 +1283,58 @@ impl Gpu {
 
 #[cfg(test)]
 mod tests {
+    /// Why `shader::wgsl` ends its dispatch function with a `return false;`
+    /// nothing can reach — and the check that will say when it can go.
+    ///
+    /// The dispatch loop has no `break`, so control cannot fall out of it.
+    /// Chrome's Tint knows that and warns `code is unreachable` about the
+    /// statement after it, twice per shader module. naga, which validates the
+    /// same WGSL for every native backend, rejects the function without it.
+    /// The two disagree, native has to compile, so the statement stays and the
+    /// warning is what it costs.
+    ///
+    /// The second assertion is the interesting one: when naga learns what Tint
+    /// already knows, this fails, and the trailing statement — and the console
+    /// full of warnings — can go.
+    #[test]
+    fn naga_still_needs_a_return_after_a_loop_that_cannot_fall_through() {
+        let Ok(gpu) = super::Gpu::open() else { return };
+        let module = |name: &str, trailing: &str| {
+            let src = [
+                "fn f() -> bool {",
+                "  var pc: u32 = 0u;",
+                "  loop {",
+                "    switch (pc) {",
+                "      case 0u: { return false; }",
+                "      default: { return false; }",
+                "    }",
+                "  }",
+                trailing,
+                "}",
+                "@fragment fn fs_main() -> @location(0) vec4<f32> {",
+                "  if (f()) { discard; }",
+                "  return vec4<f32>(0.0);",
+                "}",
+            ]
+            .join("\n");
+            let _m = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(name),
+                source: wgpu::ShaderSource::Wgsl(src.into()),
+            });
+            let _ = gpu.device.poll(wgpu::PollType::Poll);
+            gpu.failed.lock().ok().and_then(|mut e| e.take())
+        };
+        assert!(
+            module("with", "  return false;").is_none(),
+            "naga rejected the form `shader::wgsl` actually emits"
+        );
+        assert!(
+            module("without", "").is_some(),
+            "naga now accepts a function whose loop cannot fall through: drop the \
+             trailing `return false;` from `shader::wgsl`, and Tint stops warning"
+        );
+    }
+
     #[test]
     fn there_is_a_device_to_render_on() {
         match super::Gpu::open() {
