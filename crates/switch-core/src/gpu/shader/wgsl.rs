@@ -708,14 +708,10 @@ impl<'a> Emitter<'a> {
         }
     }
 
-    /// `.fmz`'s "anything times zero is zero" as a lane-wise condition, or
-    /// `None` where the mode does not apply — saturation answers the same
-    /// question, so hardware does not do both.
-    fn half_fmz(&mut self, prec: HPrecision, sat: bool, a: &str, b: &str) -> Option<String> {
-        if prec != HPrecision::Fmz || sat {
-            return None;
-        }
-        Some(format!("(({a} == vec2<f32>(0.0)) | ({b} == vec2<f32>(0.0)))"))
+    /// `.fmz`'s "anything times zero is zero", as a lane-wise condition.
+    /// Whether it applies at all is [`HPrecision::zeroes_products`].
+    fn half_zeroed(&mut self, a: &str, b: &str) -> String {
+        format!("(({a} == vec2<f32>(0.0)) | ({b} == vec2<f32>(0.0)))")
     }
 
     /// Each lane's comparison, combined with the source predicate — the half
@@ -952,15 +948,14 @@ impl Emitter<'_> {
                 let x = self.half_source(x, am, asw, ftz);
                 let y = self.operand(b);
                 let y = self.half_source(y, bm, bsw, ftz);
-                let lanes = match self.half_fmz(prec, sat, &x, &y) {
+                let lanes = if prec.zeroes_products(sat) {
                     // Bound, because `.fmz` reads both operands twice.
-                    Some(_) => {
-                        let x = self.bind(&x);
-                        let y = self.bind(&y);
-                        let zeroed = self.half_fmz(prec, sat, &x, &y).expect("mode checked above");
-                        format!("select({x} * {y}, vec2<f32>(0.0), {zeroed})")
-                    }
-                    None => format!("({x} * {y})"),
+                    let x = self.bind(&x);
+                    let y = self.bind(&y);
+                    let zeroed = self.half_zeroed(&x, &y);
+                    format!("select({x} * {y}, vec2<f32>(0.0), {zeroed})")
+                } else {
+                    format!("({x} * {y})")
                 };
                 let lanes = self.half_saturate(sat, lanes);
                 let value = self.half_merge(dst, &lanes, merge);
@@ -974,16 +969,15 @@ impl Emitter<'_> {
                 let y = self.half_source(y, FMod { neg: bneg, abs: false }, bsw, ftz);
                 let z = self.operand(c);
                 let z = self.half_source(z, FMod { neg: cneg, abs: false }, csw, ftz);
-                let lanes = match self.half_fmz(prec, sat, &x, &y) {
+                let lanes = if prec.zeroes_products(sat) {
                     // A zeroed product leaves the addend, not zero.
-                    Some(_) => {
-                        let x = self.bind(&x);
-                        let y = self.bind(&y);
-                        let z = self.bind(&z);
-                        let zeroed = self.half_fmz(prec, sat, &x, &y).expect("mode checked above");
-                        format!("select(fma({x}, {y}, {z}), {z}, {zeroed})")
-                    }
-                    None => format!("fma({x}, {y}, {z})"),
+                    let x = self.bind(&x);
+                    let y = self.bind(&y);
+                    let z = self.bind(&z);
+                    let zeroed = self.half_zeroed(&x, &y);
+                    format!("select(fma({x}, {y}, {z}), {z}, {zeroed})")
+                } else {
+                    format!("fma({x}, {y}, {z})")
                 };
                 let lanes = self.half_saturate(sat, lanes);
                 let value = self.half_merge(dst, &lanes, merge);

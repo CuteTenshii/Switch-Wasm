@@ -285,6 +285,16 @@ impl HPrecision {
             _ => HPrecision::None,
         }
     }
+
+    /// Whether a product one of whose operands is zero answers zero whatever
+    /// the other one is.
+    ///
+    /// Saturation already forces that answer, so hardware does not do both —
+    /// and stating it here is what keeps the interpreter and the WGSL backend
+    /// from each deciding it separately.
+    pub fn zeroes_products(self, sat: bool) -> bool {
+        self == HPrecision::Fmz && !sat
+    }
 }
 
 /// What `lop`'s test form asks of the result before it writes its predicate.
@@ -1799,6 +1809,18 @@ fn half_imm(insn: u64) -> u32 {
     (low | high) as u32
 }
 
+/// The second operand of a half op's constant-or-immediate pair, and where
+/// its two lanes come from. Bit 55 of the opcode picks which form it is, and
+/// the two carry their lanes differently: a constant bank holds one f32 that
+/// both lanes read, an immediate holds a packed pair.
+fn half_cbuf_or_imm(insn: u64, cbuf: bool) -> (Operand, HSwizzle) {
+    if cbuf {
+        (const_operand(insn), HSwizzle::F32)
+    } else {
+        (Operand::Imm(half_imm(insn)), HSwizzle::H1H0)
+    }
+}
+
 /// The half-precision group: `hadd2`, `hmul2`, `hfma2`, `hset2` and `hsetp2`,
 /// in every operand form.
 ///
@@ -1845,18 +1867,21 @@ fn decode_half(insn: u64) -> Option<Op> {
     }
     if top & 0xfe80 == 0x7a80 || top & 0xfe80 == 0x7a00 {
         let cbuf = top & 0x0080 != 0;
+        let (b, bsw) = half_cbuf_or_imm(insn, cbuf);
         return Some(Op::Hadd2 {
             dst,
             a,
             am: FMod { neg: field(insn, 43, 1) != 0, abs: field(insn, 44, 1) != 0 },
             asw,
-            b: if cbuf { const_operand(insn) } else { imm },
+            b,
+            // An immediate form spends the bits a modifier would need on the
+            // pair's own two signs.
             bm: if cbuf {
                 FMod { neg: field(insn, 56, 1) != 0, abs: field(insn, 54, 1) != 0 }
             } else {
                 no_mod
             },
-            bsw: if cbuf { HSwizzle::F32 } else { HSwizzle::H1H0 },
+            bsw,
             merge,
             ftz: field(insn, 39, 1) != 0,
             sat: field(insn, 52, 1) != 0,
@@ -1895,18 +1920,19 @@ fn decode_half(insn: u64) -> Option<Op> {
     }
     if top & 0xfe80 == 0x7880 || top & 0xfe80 == 0x7800 {
         let cbuf = top & 0x0080 != 0;
+        let (b, bsw) = half_cbuf_or_imm(insn, cbuf);
         return Some(Op::Hmul2 {
             dst,
             a,
             am: FMod { neg: field(insn, 43, 1) != 0, abs: field(insn, 44, 1) != 0 },
             asw,
-            b: if cbuf { const_operand(insn) } else { imm },
+            b,
             bm: if cbuf {
                 FMod { neg: false, abs: field(insn, 54, 1) != 0 }
             } else {
                 no_mod
             },
-            bsw: if cbuf { HSwizzle::F32 } else { HSwizzle::H1H0 },
+            bsw,
             merge,
             prec: HPrecision::decode(field(insn, 39, 2)),
             sat: field(insn, 52, 1) != 0,

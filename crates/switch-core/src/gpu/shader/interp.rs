@@ -1643,12 +1643,10 @@ fn half_pack(dst: u32, lanes: [f32; 2], merge: HMerge) -> u32 {
 }
 
 /// Whether `.fmz` forces this lane's product to zero: D3D9's rule that
-/// anything times zero is zero, NaN and infinity included.
-///
-/// Saturation already answers that question the same way, so hardware does
-/// not do both — and neither does this.
+/// anything times zero is zero, NaN and infinity included. Whether the mode
+/// applies at all is [`HPrecision::zeroes_products`].
 fn fmz_zeroes(prec: HPrecision, sat: bool, a: f32, b: f32) -> bool {
-    prec == HPrecision::Fmz && !sat && (a == 0.0 || b == 0.0)
+    prec.zeroes_products(sat) && (a == 0.0 || b == 0.0)
 }
 
 fn neg_if(v: f32, neg: bool) -> f32 {
