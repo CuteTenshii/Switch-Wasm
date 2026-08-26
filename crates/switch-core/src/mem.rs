@@ -22,20 +22,27 @@ const PAGE_COUNT: usize = (ADDRESS_SPACE_SIZE >> PAGE_BITS) as usize;
 /// costs thousands of steps instead of millions. See [`Memory::state_run`].
 const BLOCK_PAGES: usize = 512;
 const BLOCK_COUNT: usize = PAGE_COUNT / BLOCK_PAGES;
-/// Hard ceiling on real, host-backed guest RAM. It exists to bound a runaway
-/// guest write (e.g. a stray pointer walking up from a null base, one
-/// soft-mapped page at a time) to a fast, cheap failure instead of ballooning
-/// the host process — a browser tab included — for seconds before anything
-/// faults.
+/// The default ceiling on real, host-backed guest RAM — see
+/// [`Memory::set_max_mapped_bytes`] to choose another.
 ///
-/// Any homebrew sits far below this, and 256 MiB held for as long as homebrew
-/// was all there was. A retail title does not: "A Short Hike" touches 271 MiB
-/// and hit the ceiling inside `svcMapMemory` 1.36 billion instructions in,
-/// which is a real title stopped by a number chosen for a different workload.
-/// 512 MiB clears it with room to spare and still bounds a runaway to
-/// something a browser tab survives — the console being emulated has 4 GiB,
-/// so this is nowhere near a fidelity limit and is expected to rise again.
-pub const MAX_MAPPED_BYTES: u64 = 512 * 1024 * 1024; // 512 MiB
+/// It exists to bound a runaway guest write (e.g. a stray pointer walking up
+/// from a null base, one soft-mapped page at a time) to a fast, cheap failure
+/// instead of ballooning the host process — a browser tab included — for
+/// seconds before anything faults.
+///
+/// **It may not be smaller than what `svcGetInfo` advertises as
+/// `TotalMemorySize`**, because a title believes that figure and sizes its
+/// pools from it. 512 MiB held here while `GUEST_TOTAL_MEMORY_SIZE` said
+/// 2.5 GiB, and a title took the emulator at its word: it reserved a 1.5 GiB
+/// pool and died part way through `memset`ting it, in a `stp q0, q0` loop with
+/// no allocation in sight. A cap under the advertised total does not limit a
+/// title, it makes the emulator lie to one.
+///
+/// Backing is lazy — a page costs nothing until the guest touches it — so this
+/// only decides when a run fails, never what an idle title reserves. The
+/// console being emulated has 4 GiB, of which an application gets about 3.2,
+/// so this is still short of hardware rather than generous.
+pub const MAX_MAPPED_BYTES: u64 = 0xA000_0000; // 2.5 GiB, `GUEST_TOTAL_MEMORY_SIZE`
 const MAX_MAPPED_PAGES: usize = (MAX_MAPPED_BYTES / PAGE_SIZE as u64) as usize;
 
 /// One region as `svcQueryMemory` describes it: the bounds of a run of pages
@@ -87,6 +94,11 @@ pub struct Memory {
     /// allocated so reporting guest RAM use never walks the million-entry
     /// page table.
     mapped_pages: usize,
+    /// The ceiling `mapped_pages` may reach, from [`MAX_MAPPED_BYTES`] unless
+    /// a caller lowered it. A field rather than a constant so that a host with
+    /// less to give — or a test that wants to reach the cap without allocating
+    /// gigabytes to do it — can say so.
+    max_mapped_pages: usize,
     /// How many pages of each 2 MiB block hold real storage. Maintained
     /// alongside `pages` so a scan can skip a block that is entirely
     /// untouched without looking at its pages; that is the case that grows
@@ -136,6 +148,7 @@ impl Memory {
             readonly_span: (u32::MAX, 0),
             zero: Box::new([0u8; PAGE_SIZE]),
             mapped_pages: 0,
+            max_mapped_pages: MAX_MAPPED_PAGES,
             watch: (1, 0),
             watch_hit: None,
             read_watch: (1, 0),
@@ -307,10 +320,10 @@ impl Memory {
     #[cold]
     #[inline(never)]
     fn allocate_page(&mut self, idx: usize) -> Result<()> {
-        if self.mapped_pages >= MAX_MAPPED_PAGES {
+        if self.mapped_pages >= self.max_mapped_pages {
             return Err(Error::Cpu(format!(
                 "out of guest memory: exceeded the {} MiB cap",
-                MAX_MAPPED_BYTES / (1024 * 1024)
+                self.max_mapped_bytes() / (1024 * 1024)
             )));
         }
         self.pages[idx] = Some(Box::new([0u8; PAGE_SIZE]));
@@ -329,6 +342,20 @@ impl Memory {
     /// has touched inside a soft-mapped region.
     pub fn mapped_bytes(&self) -> u64 {
         self.mapped_pages as u64 * PAGE_SIZE as u64
+    }
+
+    /// The ceiling [`Memory::mapped_bytes`] may reach.
+    pub fn max_mapped_bytes(&self) -> u64 {
+        self.max_mapped_pages as u64 * PAGE_SIZE as u64
+    }
+
+    /// Choose a different ceiling, rounded down to whole pages.
+    ///
+    /// Lower it where the host has less to give than [`MAX_MAPPED_BYTES`]
+    /// assumes. Raising it above what `svcGetInfo` advertises buys nothing:
+    /// a title sizes itself from the advertised figure, not from this.
+    pub fn set_max_mapped_bytes(&mut self, bytes: u64) {
+        self.max_mapped_pages = (bytes / PAGE_SIZE as u64) as usize;
     }
 
     #[inline(always)]
@@ -444,14 +471,33 @@ impl Memory {
     }
 
     /// Map `size` zero-filled bytes at `addr`.
+    ///
+    /// Zero-filled including where a page was already backed. This used to
+    /// allocate the pages and stop, which is the same thing only while every
+    /// page is fresh — and the callers that most need the zeros are the ones
+    /// where it is not. `.bss` shares its first page with `.data`, a recycled
+    /// thread's TLS slot is a page some earlier thread already wrote, and
+    /// `MapSharedMemory` promises the guest a cleared buffer. Each of those
+    /// handed back whatever the last user left.
+    ///
+    /// Exactly `[addr, addr + size)`, never the whole of the end pages: the
+    /// byte before `.bss` is `.data`'s, and it has already been loaded.
     pub fn map_zero(&mut self, addr: u32, size: usize) -> Result<()> {
         self.dirty_code_range(addr, size);
         let mut pos = addr as usize;
         let end = pos.saturating_add(size);
         while pos < end {
             let idx = pos >> PAGE_BITS;
-            self.page_mut(idx)?;
-            pos = (pos & !(PAGE_SIZE - 1)) + PAGE_SIZE;
+            let off = pos & (PAGE_SIZE - 1);
+            let n = (PAGE_SIZE - off).min(end - pos);
+            // A page allocated here is already zero; only one that survived
+            // from an earlier use has to be cleared.
+            let backed = self.pages[idx].is_some();
+            let page = self.page_mut(idx)?;
+            if backed {
+                page[off..off + n].fill(0);
+            }
+            pos += n;
         }
         Ok(())
     }
@@ -924,6 +970,36 @@ mod tests {
         assert_eq!(m.mapped_pages(), 2);
     }
 
+    /// `map_zero` over ground somebody has already used has to hand back
+    /// zeros, and has to stop at the range it was given — the page holding the
+    /// first byte of `.bss` holds the last bytes of `.data` too.
+    #[test]
+    fn map_zero_clears_a_page_that_was_already_backed() {
+        let mut m = Memory::new();
+        m.map_zero(0x1000, PAGE_SIZE * 2).unwrap();
+        for i in 0..PAGE_SIZE as u32 * 2 {
+            m.write_u8(0x1000 + i, 0xAB).unwrap();
+        }
+
+        // A range starting part way into a live page, and running into the
+        // next one.
+        m.map_zero(0x1000 + 0x40, PAGE_SIZE).unwrap();
+        assert_eq!(m.read_u8(0x1000 + 0x3F).unwrap(), 0xAB, "before the range");
+        assert_eq!(m.read_u8(0x1000 + 0x40).unwrap(), 0, "the first byte of it");
+        assert_eq!(
+            m.read_u8(0x1000 + 0x40 + PAGE_SIZE as u32 - 1).unwrap(),
+            0,
+            "the last byte of it"
+        );
+        assert_eq!(
+            m.read_u8(0x1000 + 0x40 + PAGE_SIZE as u32).unwrap(),
+            0xAB,
+            "after the range"
+        );
+        // And it is still the same two pages: clearing is not unmapping.
+        assert_eq!(m.mapped_pages(), 2);
+    }
+
     #[test]
     fn unmmapped_read_faults() {
         let m = Memory::new();
@@ -938,6 +1014,11 @@ mod tests {
         // soon as it has touched the RAM cap's worth of pages, not after
         // exhausting the whole soft region.
         let mut m = Memory::new();
+        // Against its own small cap rather than the default: what is being
+        // tested is that the walk stops at the ceiling, and reaching the real
+        // one would mean allocating gigabytes inside a unit test.
+        const CAP: u64 = 4 * 1024 * 1024;
+        m.set_max_mapped_bytes(CAP);
         m.soft_map_zero(0, 0x8000_0000);
         let mut addr = 0u32;
         let mut touched = 0u64;
@@ -950,8 +1031,8 @@ mod tests {
                 Err(_) => break,
             }
         }
-        assert_eq!(touched, MAX_MAPPED_PAGES as u64);
-        assert_eq!(m.mapped_bytes(), MAX_MAPPED_BYTES);
+        assert_eq!(touched, CAP / PAGE_SIZE as u64);
+        assert_eq!(m.mapped_bytes(), CAP);
     }
 
     #[test]

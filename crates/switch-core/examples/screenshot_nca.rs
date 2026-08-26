@@ -237,10 +237,6 @@ fn main() {
         }
         Flow::Continue
     });
-    let done = run.steps;
-    if let Some(fault) = &run.fault {
-        println!("[step] error at pc={:#x} step {done}: {fault}", cpu.get_pc());
-    }
     if let Some((lo, _)) = cover {
         let mut run: Option<u32> = None;
         for (i, &hit) in covered.iter().enumerate() {
@@ -309,7 +305,7 @@ fn main() {
         println!("[hot] thread {t} pc={pc:#x} {n}");
     }
     print!("{}", cpu.thread_dump());
-    println!("steps={done} frames={} stats={:?}", cpu.nv.gpu.frames, cpu.nv.gpu.stats);
+    common::report(&cpu, &run);
     let fb = &cpu.nv.gpu.framebuffer;
     if fb.is_empty() {
         println!("no frame");

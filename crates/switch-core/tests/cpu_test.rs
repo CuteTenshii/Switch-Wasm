@@ -6549,6 +6549,17 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     // read it — `libnx`'s virtmem, which reserves out of it — and the rest is
     // charged to the heap.
     assert!(GUEST_TOTAL_MEMORY_SIZE <= GUEST_HEAP_REGION_SIZE);
+
+    // And the emulator has to be able to *back* what it advertises. A title
+    // sizes its pools from `TotalMemorySize` and then touches them: with the
+    // cap at 512 MiB against this figure, one reserved 1.5 GiB and faulted
+    // part way through zeroing it, inside a `stp` loop that names no
+    // allocation and no service. Whichever of the two moves, they move
+    // together.
+    assert!(
+        u64::from(GUEST_TOTAL_MEMORY_SIZE) <= switch_core::mem::MAX_MAPPED_BYTES,
+        "advertising {GUEST_TOTAL_MEMORY_SIZE:#x} of memory that cannot be backed"
+    );
     assert!(GUEST_ALIAS_REGION_SIZE >= 0x1000_0000, "the alias region is still a region");
 
     // What actually binds the alias region is virtual address memory, not the

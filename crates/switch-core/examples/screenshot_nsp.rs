@@ -108,13 +108,12 @@ fn main() {
         }
         Flow::Continue
     });
-    let done = run.steps;
     println!("[threads] sampled share = {:?}", &share[..]);
     print!("{}", cpu.thread_dump());
     if watch.is_some() && !seen_nonzero {
         println!("[watch-mem] never non-zero");
     }
-    println!("steps={done} frames={} stats={:?}", cpu.nv.gpu.frames, cpu.nv.gpu.stats);
+    common::report(&cpu, &run);
     // `DUMP_MEM=<addr>[,<addr>]` reads three 60-byte rows there as floats,
     // which is the quickest way to tell a vertex buffer from whatever else
     // happened to be nearby: real positions are ordinary numbers, and a

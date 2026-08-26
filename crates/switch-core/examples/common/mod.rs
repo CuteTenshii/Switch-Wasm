@@ -373,6 +373,18 @@ pub fn report(cpu: &Cpu, run: &Run) {
         "steps={} frames={} stats={:?}",
         run.steps, cpu.nv.gpu.frames, cpu.nv.gpu.stats
     );
+    // How near the run came to the RAM cap. Reaching it fails an allocation
+    // the title may not check, which is a symptom that never names memory —
+    // so the number belongs in every run's report rather than in whichever
+    // tool someone thought to add it to.
+    let used = cpu.mem.mapped_bytes();
+    let cap = cpu.mem.max_mapped_bytes();
+    println!(
+        "memory: {:.1} MiB of {} MiB backed ({:.0}%)",
+        used as f64 / (1024.0 * 1024.0),
+        cap / (1024 * 1024),
+        used as f64 * 100.0 / cap as f64
+    );
 }
 
 /// The order the modules of an ExeFS load in.
