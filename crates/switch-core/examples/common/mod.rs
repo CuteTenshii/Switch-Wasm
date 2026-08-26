@@ -550,6 +550,16 @@ impl Title {
     /// to be set before the modules load, since `nn::init` reads the
     /// resulting figures as soon as it runs.
     pub fn boot(&self, cpu: &mut Cpu) {
+        // `DOCKED=1` boots as a docked console — a 1080p display, which is
+        // what the frontend's dock toggle sets and so what a browser session
+        // is usually looking at. The default here is handheld, and a title
+        // told 720p while its swapchain is 1080p composites its frame into a
+        // corner of it. That is not a rendering bug, it is the two halves
+        // disagreeing, and measuring a retail title in a mode nobody runs it
+        // in is how a corner gets mistaken for one.
+        if env::var("DOCKED").is_ok() {
+            cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
+        }
         cpu.set_system_resource_size(switch_core::npdm::Npdm::system_resource_size_of(
             &self.exefs_pfs0,
             &self.exefs,
