@@ -1268,6 +1268,8 @@ pub struct Cpu {
     /// Instructions the running thread has executed since the scheduler last
     /// took the CPU away from it, against [`TIME_SLICE`].
     slice_used: u64,
+    /// The cycle count [`Cpu::sweep_timed_waits`] next looks at deadlines on.
+    next_expiry: u64,
     /// Guest code translated into pre-decoded blocks. See [`jit`].
     jit: jit::Jit,
     /// Whether [`Cpu::run`] executes through the translator. On by default;
@@ -1446,6 +1448,7 @@ impl Cpu {
             current_thread: 0,
             exclusive: None,
             slice_used: 0,
+            next_expiry: 0,
             jit: jit::Jit::default(),
             jit_enabled: std::env::var("SWITCH_NO_JIT").is_err(),
             pending_yield: false,
@@ -1746,6 +1749,27 @@ impl Cpu {
         let deadline = self.wait_deadline(timeout);
         self.threads[self.current_thread].state = ThreadState::WaitKey { key, mutex, deadline };
         self.reschedule();
+    }
+
+    /// Wake the timed waits whose deadline has passed, at most once every
+    /// [`TIME_SLICE`] cycles.
+    ///
+    /// The sweep used to ride on the preemption tick, and `slice_used` is
+    /// reset by every context switch — so a process whose threads yield more
+    /// often than once every 20,000 instructions never reached it at all. That
+    /// is not a rare shape: three of Album's threads sit on an
+    /// `svcWaitSynchronization` this emulator cannot satisfy, each yielding
+    /// after a handful of instructions, and its main thread's 10 ms sleep
+    /// simply never expired — asleep at cycle 13.7M and still asleep at 500M,
+    /// with the process frozen around it. A deadline has to be measured
+    /// against the clock that advances, not the counter a yield rewinds.
+    #[inline(always)]
+    pub(super) fn sweep_timed_waits(&mut self) {
+        if self.cycles < self.next_expiry {
+            return;
+        }
+        self.next_expiry = self.cycles.wrapping_add(TIME_SLICE);
+        self.expire_timed_waits();
     }
 
     /// Wake every timed wait — condition variable or address arbiter — whose
@@ -3275,11 +3299,9 @@ impl Cpu {
         self.slice_used += 1;
         if self.slice_used >= TIME_SLICE {
             self.slice_used = 0;
-            // A timed wait expires on the same tick the scheduler runs on;
-            // the slice is far finer than any timeout a guest asks for.
-            self.expire_timed_waits();
             self.yield_thread();
         }
+        self.sweep_timed_waits();
         let pc = self.pc;
         let insn = match self.mem.fetch(pc) {
             Ok(i) => i,

@@ -292,6 +292,17 @@ impl ColorFormat {
         matches!(self.raw, 0xD0 | 0xD6 | 0xE7 | 0xFA)
     }
 
+    /// Whether the format's channels are floating point rather than a
+    /// fixed-point value normalised into `[0, 1]`.
+    ///
+    /// The distinction is the blend unit's: a fixed-point target clamps the
+    /// incoming colour before blending it, a float target takes it as it is.
+    /// These are the float formats [`ColorFormat::encode_stored`] knows how to
+    /// write; every other one it can write stores a normalised value.
+    pub fn is_float(&self) -> bool {
+        matches!(self.raw, 0xC0 | 0xC3 | 0xCA | 0xCE | 0xE5)
+    }
+
     /// Whether the alpha channel exists (an "X" format ignores it).
     pub fn has_alpha(&self) -> bool {
         !matches!(self.raw, 0xE6 | 0xE7 | 0xF9 | 0xFA | 0xFD | 0xFE | 0xF8)

@@ -801,9 +801,9 @@ impl Cpu {
             // is the same thing at the scale of a 20,000-instruction slice.
             if self.slice_used >= TIME_SLICE {
                 self.slice_used = 0;
-                self.expire_timed_waits();
                 self.yield_thread();
             }
+            self.sweep_timed_waits();
             let block = self.jit_block_at(self.pc);
             let ran = self.exec_block(&block, max_steps - steps)?;
             self.slice_used += ran;

@@ -890,6 +890,9 @@ impl Cpu {
                         }
                         // pl:u, the shared-font service.
                         "pl:u" | "pl:s" => self.pl_request(tls, cmd_id)?,
+                        // caps:a, the screenshot album. The Album applet is
+                        // the title that reads it.
+                        "caps:a" => self.caps_album_accessor_request(tls, handle, cmd_id)?,
                         // time:*, converted to a domain by libnx the same way
                         // fsp-srv is; the system clock / steady clock /
                         // timezone sub-interfaces come back as out-objects on

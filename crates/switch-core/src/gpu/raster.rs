@@ -24,7 +24,7 @@ use crate::gpu::shader::interp::{
 };
 use crate::gpu::shader::compiled::Compiled;
 use crate::gpu::shader::{self, Op, Program};
-use crate::gpu::surface::MAX_SAMPLES;
+use crate::gpu::surface::{ColorFormat, MAX_SAMPLES};
 use crate::{Error, Result};
 
 /// The `DkPrimitive` topologies this rasterizer assembles (deko3d.h,
@@ -679,6 +679,30 @@ fn blend_equation(op: u32, src: f32, dst: f32) -> f32 {
     }
 }
 
+/// The shader's output colour as the blend unit sees it.
+///
+/// Blending into a **fixed-point** render target clamps the incoming colour
+/// into the range that target can store first — GL says so for a fixed-point
+/// colour buffer, and it is what the ROP does. A float target takes the
+/// colour as it is.
+///
+/// The range is the smaller half of it. What this really settles is **NaN**,
+/// which clamps to zero here and is otherwise indestructible: every blend
+/// factor is a multiply, and `NaN * 0` is `NaN`, so a NaN source survives even
+/// a source alpha of zero and lands in the framebuffer as an opaque black
+/// pixel. That is not a hypothetical — the Album applet's image shaders
+/// normalise a weighted sum of samples by dividing by the total alpha, and a
+/// fully transparent texel makes that `rcp(0)`, an infinity, and then
+/// `0 * inf`. Every icon it drew came out inside a black box.
+fn source_color(color: [f32; 4], format: ColorFormat) -> [f32; 4] {
+    if format.is_float() {
+        return color;
+    }
+    // `f32::max` returns the operand that is not NaN, so this floors a NaN at
+    // zero where `clamp` would carry it straight through.
+    color.map(|c| c.max(0.0).min(1.0))
+}
+
 fn blend(target: BlendTarget, constant: [f32; 4], src: [f32; 4], dst: [f32; 4]) -> [f32; 4] {
     let src_rgb = blend_factor(target.func_rgb_src, src, dst, constant);
     let dst_rgb = blend_factor(target.func_rgb_dst, src, dst, constant);
@@ -1232,7 +1256,8 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                             let va = rt.addr + rt.texel_offset(tx, ty) as u64;
                             let out = if blend_target.enabled {
                                 let dst = rt.format.decode(ctx.read_pixel(va, bpp)?)?;
-                                blend(blend_target, blend_constant, color, dst)
+                                let src = source_color(color, rt.format);
+                                blend(blend_target, blend_constant, src, dst)
                             } else {
                                 color
                             };
@@ -2007,6 +2032,38 @@ mod tests {
         assert_eq!(blend_factor(0x4303, src, dst, constant), [0.25; 4]); // OneMinusSrcAlpha
         assert_eq!(blend_factor(0x4306, src, dst, constant), dst); // DstColor
         assert_eq!(blend_factor(0xc001, src, dst, constant), constant); // ConstantColor
+    }
+
+    #[test]
+    fn a_fixed_point_target_clamps_the_blend_source_and_a_float_one_does_not() {
+        // A NaN is what this is really for. Every blend factor is a multiply
+        // and `NaN * 0` is `NaN`, so a NaN source colour survives a source
+        // alpha of zero and reaches the framebuffer as opaque black — which is
+        // what put a black box around every icon the Album applet drew. A
+        // fixed-point target clamps it to zero before the blend unit ever sees
+        // it; a float target stores what it is given.
+        let unorm = ColorFormat::from_raw(0xD5).unwrap(); // RGBA8Unorm
+        let float = ColorFormat::from_raw(0xCA).unwrap(); // RGBA16Float
+        let color = [f32::NAN, 2.0, -1.0, 0.5];
+        assert_eq!(source_color(color, unorm), [0.0, 1.0, 0.0, 0.5]);
+        let through = source_color(color, float);
+        assert!(through[0].is_nan());
+        assert_eq!(&through[1..], &[2.0, -1.0, 0.5]);
+
+        // And the whole of it: a transparent NaN over an opaque background
+        // leaves the background alone rather than blacking it out.
+        let target = BlendTarget {
+            enabled: true,
+            equation_rgb: 0x8006,   // FuncAdd
+            func_rgb_src: 0x4302,   // SrcAlpha
+            func_rgb_dst: 0x4303,   // OneMinusSrcAlpha
+            equation_alpha: 0x8006,
+            func_alpha_src: 0x4302,
+            func_alpha_dst: 0x4303,
+        };
+        let dst = [0.9, 0.9, 0.9, 1.0];
+        let src = source_color([f32::NAN, f32::NAN, f32::NAN, 0.0], unorm);
+        assert_eq!(blend(target, [0.0; 4], src, dst), dst);
     }
 
     #[test]

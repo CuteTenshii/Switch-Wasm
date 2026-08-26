@@ -3979,11 +3979,25 @@ impl Cpu {
             // killed it before it drew anything.
             "am:display-controller" => match cmd_id {
                 // Acquire{LastApplication,LastForeground,CallerApplet}
-                // CaptureSharedBuffer -> bool written, s32 shared-buffer layer.
+                // CaptureSharedBuffer -> bool written, s32 shared-buffer slot.
+                //
+                // The applet is asking for the screen of whatever was on
+                // display before it — the Album draws its gallery over a
+                // frozen shot of the Home Menu. Nothing was: an applet booted
+                // here is booted alone, so the honest capture is a black one.
+                //
+                // Answering "nothing written, slot -1" is not the way to say
+                // that. `nnSdk` treats it as *not ready yet* and asks again:
+                // the Album applet spent every frame of a 300M-instruction run
+                // in that retry loop and never got as far as a draw. So the
+                // reply names a real slot, and the slot named is the first one
+                // past the two `AcquireSharedFrameBuffer` hands out, which
+                // nothing renders into and nothing has written — its pages are
+                // soft-mapped and read as the zeros this claims they are.
                 Some(22) | Some(24) | Some(26) => {
                     let mut raw = Vec::with_capacity(8);
-                    raw.extend_from_slice(&[0u8; 4]); // was_written = false
-                    raw.extend_from_slice(&(-1i32).to_le_bytes());
+                    raw.extend_from_slice(&[1u8, 0, 0, 0]); // was_written = true
+                    raw.extend_from_slice(&(super::SHARED_BUFFER_USABLE_SLOTS as i32).to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &raw, &[])
                 }
                 // The matching releases, ClearCaptureBuffer,
@@ -5864,6 +5878,70 @@ impl Cpu {
             // content that was never there, so this succeeds.
             Some(50) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             _ => self.unimplemented_command(tls, "aoc:u", cmd_id),
+        }
+    }
+
+    /// `caps:a` — `nn::capsrv::detail::IAlbumAccessorService`, the album of
+    /// screenshots and clips a console keeps on its NAND and its SD card.
+    ///
+    /// This console has neither, so every answer here describes an album that
+    /// is **mounted and empty** — which is what a freshly initialised console
+    /// has, and is a state the Album applet knows how to show. Reporting it
+    /// unmounted instead is a different thing entirely: it is the card-removed
+    /// error, and the applet puts a message on the screen rather than a
+    /// gallery.
+    ///
+    /// Nothing implemented this at all, and the Album applet is precisely the
+    /// title that asks: it polls `IsAlbumMounted` and `GetAutoSavingStorage`
+    /// once a frame, and the fallback answered a **bool** with a fabricated
+    /// object id, which is not 0 or 1 but a large number read one byte at a
+    /// time.
+    pub(super) fn caps_album_accessor_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return match cmd_id {
+                Some(0) => {
+                    let obj = self.alloc_domain_object();
+                    self.record_domain_object(handle, obj, "caps:a");
+                    self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
+                }
+                _ => self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[]),
+            };
+        }
+        match cmd_id {
+            // GetAlbumFileCount(AlbumStorage) -> u64, and GetAlbumFileCountEx0,
+            // which takes the same storage plus a flags byte. No files.
+            Some(0) | Some(100) => {
+                self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[])
+            }
+            // GetAlbumFileList / …Ex0 -> u64 entries written, with the
+            // `AlbumEntry` array itself going into a map-alias out buffer.
+            // None are written, and the count says so — so the buffer is left
+            // exactly as the caller left it and nothing walks it.
+            Some(1) | Some(101) => {
+                self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[])
+            }
+            // DeleteAlbumFile(AlbumFileId). There is no file any list here
+            // could have named, so nothing can reach this with a real id.
+            Some(3) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // IsAlbumMounted(AlbumStorage) -> bool.
+            Some(5) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
+            // GetAlbumMountResult(AlbumStorage) -> Result. Mounted, so the
+            // result *is* the success this reply already carries.
+            Some(16) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // Command 18 has no name on switchbrew and none in `nnSdk`'s
+            // symbols either; Eden calls it `Unknown18` and answers a written
+            // length of zero into a caller-supplied buffer. The Album applet
+            // issues it once, before anything else, with a 0x40-byte buffer.
+            Some(18) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // GetAutoSavingStorage -> bool: whether new captures are written
+            // to the SD card rather than the NAND. There is no SD card.
+            Some(401) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+            _ => self.unimplemented_command(tls, "caps:a", cmd_id),
         }
     }
 
@@ -7929,6 +8007,14 @@ impl Cpu {
     /// `GetReleasedAudioOutBuffer`: hand back the tags of the buffers the
     /// device has finished playing, as many as the guest's out buffer has room
     /// for. A buffer whose samples are still playing is not one of them.
+    ///
+    /// The entry after the last tag is zeroed, because `nn::audio`'s wrapper
+    /// around this command **returns the first entry without looking at the
+    /// count** — it never initialises the stack slot it points the receive
+    /// buffer at, so an empty release leaves the caller reading whatever the
+    /// previous call left on the stack. The Album applet's audio thread did
+    /// exactly that: it took a `bl`'s return address for an `AudioOutBuffer`
+    /// and wrote its de-interleaved samples over its own `.text`.
     fn audio_out_release(&mut self, tls: u32, handle: u64) -> Result<()> {
         let now = self.cycles;
         let room = self
@@ -7954,6 +8040,9 @@ impl Cpu {
         if let Some(addr) = addr {
             for (i, &tag) in tags.iter().enumerate() {
                 let _ = self.mem.write_u64(addr.wrapping_add(i as u32 * 8), tag);
+            }
+            if (tags.len() as u32) < room {
+                let _ = self.mem.write_u64(addr.wrapping_add(tags.len() as u32 * 8), 0);
             }
         }
         self.write_ipc_response(tls, 0, &[], &(tags.len() as u32).to_le_bytes(), &[])

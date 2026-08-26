@@ -4005,6 +4005,78 @@ fn a_thread_that_never_blocks_is_still_taken_off_the_cpu() {
 }
 
 #[test]
+fn a_timed_wait_expires_while_the_other_threads_hand_the_cpu_round() {
+    // Timed waits used to be swept on the preemption tick, and the counter
+    // behind that tick is reset by every context switch. So a process with two
+    // threads that hand the CPU over more often than once every `TIME_SLICE`
+    // instructions never reached the sweep at all, and *nothing that slept
+    // ever woke up*.
+    //
+    // That is the ordinary shape of a stalled applet, not a corner case: three
+    // of the Album applet's threads sat on an `svcWaitSynchronization` this
+    // emulator cannot satisfy, yielding after a handful of instructions each,
+    // and its main thread's 10 ms sleep was still outstanding 480 million
+    // instructions later, with the whole process frozen around it.
+    //
+    // Here two children do nothing but yield, and the parent parks on the
+    // address arbiter for 50 us. Nothing will ever signal that address, so the
+    // only thing that can start the parent again is the sweep.
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    cpu.mem.map_zero(0x4000, 0x4000).unwrap(); // the two children's stacks
+    cpu.mem.map_zero(0x9000, 0x1000).unwrap(); // the flag the parent sets
+
+    let main = [
+        0xd284_0001u32, // mov x1, #0x2000  (entry)
+        0xaa1f_03e2,    // mov x2, xzr      (arg)
+        0xd28c_0003,    // mov x3, #0x6000  (stack top)
+        0x5280_0764,    // mov w4, #0x3b    (priority)
+        0x1280_0005,    // mov w5, #-1      (core)
+        0xd400_0101,    // svc #8           (CreateThread -> handle in x1)
+        0xaa01_03e0,    // mov x0, x1
+        0xd400_0121,    // svc #9           (StartThread)
+        0xd284_0001,    // mov x1, #0x2000
+        0xaa1f_03e2,    // mov x2, xzr
+        0xd290_0003,    // mov x3, #0x8000  (the second child's stack top)
+        0x5280_0764,    // mov w4, #0x3b
+        0x1280_0005,    // mov w5, #-1
+        0xd400_0101,    // svc #8
+        0xaa01_03e0,    // mov x0, x1
+        0xd400_0121,    // svc #9
+        0xd292_0080,    // mov x0, #0x9004  (a word that is zero)
+        0x5280_0041,    // mov w1, #2       (WaitIfEqual)
+        0x2a1f_03e2,    // mov w2, wzr      (and it is)
+        0xd298_6a03,    // movz x3, #50000  (nanoseconds)
+        0xd400_0681,    // svc #0x34        (WaitForAddress -> parks until then)
+        0xd292_0009,    // mov x9, #0x9000
+        0x5280_0aa1,    // mov w1, #0x55
+        0xb900_0121,    // str w1, [x9]
+        0xd400_00e1,    // svc #7           (ExitProcess)
+    ];
+    // A yield is `SleepThread(0)`: Horizon spends the non-positive timeouts on
+    // yield modes rather than durations, so this hands the CPU on and comes
+    // straight back for it.
+    let child = [
+        0xaa1f_03e0u32, // mov x0, xzr
+        0xd400_0161,    // svc #0xb
+        0x17ff_fffe,    // b .-8
+    ];
+    let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
+    cpu.mem.map_zero(0x1000, 0x100).unwrap();
+    cpu.mem.map(0x1000, &bytes(&main)).unwrap();
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &bytes(&child)).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(2_000_000).unwrap();
+
+    assert!(cpu.halted, "the parked parent never woke");
+    assert_eq!(cpu.mem.read_u32(0x9000).unwrap(), 0x55);
+    // And it woke *because the time came*, not because something gave up on
+    // it: 50 us is 51,000 cycles of the 1.02 GHz clock.
+    assert!(cpu.cycles >= 51_000, "woke after only {} cycles", cpu.cycles);
+}
+
+#[test]
 fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
     // NXpotify's Zeroconf listener is `if (poll(&pfd, 1, 200) <= 0) continue;`
     // around an idle socket. Nothing here will ever be ready, so the answer is
@@ -4658,6 +4730,82 @@ fn ipc_request_plain_with_buffer(
 }
 
 #[test]
+fn caps_a_reports_a_mounted_empty_album() {
+    // The Album applet asks three things before it will draw anything: an
+    // unnamed command 18, whether the album is mounted, and whether captures
+    // are being auto-saved to the SD card. Nothing implemented `caps:a` at
+    // all, so each came back as a fabricated object id — as a *bool*, a large
+    // number read one byte at a time.
+    //
+    // There is no NAND album and no SD card here, so what these describe is a
+    // freshly initialised console: mounted, and empty. Reporting it unmounted
+    // is the card-removed error, which is a screen of its own rather than a
+    // gallery.
+    const CAPS: u64 = 0xCA00;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(CAPS, "caps:a");
+    let tls = cpu.tls_base();
+
+    // Unknown18 -> the number of bytes written into the caller's buffer.
+    ipc_request_plain(&mut cpu, CAPS, 18, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "Unknown18 failed");
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "claimed to have written bytes");
+
+    // IsAlbumMounted(AlbumStorage::Nand) -> bool.
+    ipc_request_plain(&mut cpu, CAPS, 5, &0u8.to_le_bytes());
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "IsAlbumMounted failed");
+    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 1, "the album is not mounted");
+
+    // GetAutoSavingStorage -> bool. There is no SD card to save to.
+    ipc_request_plain(&mut cpu, CAPS, 401, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "GetAutoSavingStorage failed");
+    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 0, "captures are being auto-saved");
+
+    // And the album it says is mounted is empty, by both the count and the
+    // list — a caller told "mounted" asks these next, and a count it cannot
+    // trust is worse than no service at all.
+    for cmd in [0u32, 1, 100, 101] {
+        ipc_request_plain(&mut cpu, CAPS, cmd, &0u8.to_le_bytes());
+        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "caps:a {cmd} failed");
+        assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), 0, "caps:a {cmd} found a file");
+    }
+}
+
+#[test]
+fn the_applet_capture_buffer_names_a_slot_nothing_renders_into() {
+    // `AcquireCallerAppletCaptureSharedBuffer` hands back the screen of
+    // whatever was on display before this applet. Booted alone, there is no
+    // such screen — but "nothing written, slot -1" is not how to say so:
+    // `nnSdk` reads it as not-ready-yet and asks again, and the Album applet
+    // spent every frame of a 300M-instruction run in that retry loop without
+    // ever reaching a draw.
+    const APPLET: u64 = 0xA1000;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(APPLET, "am:display-controller");
+    let tls = cpu.tls_base();
+
+    for cmd in [22u32, 24, 26] {
+        ipc_request_plain(&mut cpu, APPLET, cmd, &[]);
+        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "acquire {cmd} failed");
+        assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "acquire {cmd} wrote nothing");
+        // The slot named is past the ones `AcquireSharedFrameBuffer` hands
+        // out, so the black it claims to be stays black.
+        let slot = cpu.mem.read_u32(tls + 0x24).unwrap();
+        assert!(
+            slot >= switch_core::cpu::SHARED_BUFFER_USABLE_SLOTS
+                && slot < switch_core::cpu::SHARED_BUFFER_SLOTS,
+            "slot {slot} is not a spare one"
+        );
+    }
+}
+
+#[test]
 fn audout_plays_the_buffers_the_guest_hands_it() {
     // `audout` is the plain PCM-out device, and the whole interface is the
     // buffer protocol: append a buffer, wait on the event, collect the tags of
@@ -4755,6 +4903,70 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
 
     // And the host is told what to play it at.
     assert_eq!(cpu.audio_format(), (48_000, 2));
+}
+
+#[test]
+fn audout_release_zeroes_the_entry_after_the_last_tag() {
+    // `nn::audio`'s wrapper around `GetReleasedAudioOutBuffer` points the
+    // receive buffer at an uninitialised stack slot and returns that slot
+    // without ever reading the count. So a release that hands back nothing has
+    // to leave a zero there, or the caller takes whatever the last call left
+    // on the stack for an `AudioOutBuffer`. The Album applet's audio thread
+    // took a `bl`'s return address, and de-interleaved its samples over the
+    // `.text` the address pointed into.
+    const AUDOUT: u64 = 0xA000;
+    const DESC: u32 = 0x8000;
+    const PCM: u32 = 0x8100;
+    const TAGS: u32 = 0x8200;
+    const TAG: u64 = 0xFEED_0003;
+    const GARBAGE: u64 = 0x0868_BBF8;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(AUDOUT, "audout:u");
+    let tls = cpu.tls_base();
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&48_000u32.to_le_bytes());
+    args.extend_from_slice(&2u32.to_le_bytes());
+    args.extend_from_slice(&0u64.to_le_bytes());
+    ipc_request_plain(&mut cpu, AUDOUT, 1, &args);
+    let device = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    ipc_request_plain(&mut cpu, device, 1, &[]); // StartAudioOut
+
+    for i in 0..8u32 {
+        cpu.mem.write_u16(PCM + i * 2, 0x4000).unwrap();
+    }
+    cpu.mem.write_u64(DESC, 0).unwrap();
+    cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
+    cpu.mem.write_u64(DESC + 16, 16).unwrap();
+    cpu.mem.write_u64(DESC + 24, 16).unwrap();
+    cpu.mem.write_u64(DESC + 32, 0).unwrap();
+    ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &TAG.to_le_bytes());
+
+    // Nothing has played yet, so the release is empty — and the slot the guest
+    // reads regardless has to say so.
+    cpu.mem.write_u64(TAGS, GARBAGE).unwrap();
+    cpu.mem.write_u64(TAGS + 8, GARBAGE).unwrap();
+    ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "a tag came back early");
+    assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), 0, "the guest kept reading its own stack");
+
+    // Once the device is done with it the tag lands in the first slot, and the
+    // zero moves along to the one after it.
+    const SPIN: u32 = 0x9000;
+    cpu.mem.map(SPIN, &0x1400_0000u32.to_le_bytes()).unwrap(); // b .
+    cpu.set_pc(SPIN);
+    cpu.run(90_000).unwrap();
+    cpu.set_pc(0x1000);
+
+    cpu.mem.write_u64(TAGS, GARBAGE).unwrap();
+    cpu.mem.write_u64(TAGS + 8, GARBAGE).unwrap();
+    ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "no tag released");
+    assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
+    assert_eq!(cpu.mem.read_u64(TAGS + 8).unwrap(), 0, "no terminator after the last tag");
 }
 
 #[test]
