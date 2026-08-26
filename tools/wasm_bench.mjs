@@ -11,8 +11,9 @@
 // functions, which is the only profiler available for the wasm build:
 //   node --cpu-prof --cpu-prof-name=w.cpuprofile tools/wasm_bench.mjs prog.nro
 import { readFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -21,17 +22,31 @@ if (!nroPath) {
   console.error('usage: node tools/wasm_bench.mjs <program.nro> [switch_wasm.wasm]');
   process.exit(1);
 }
+const release = join(root, 'target/wasm32-unknown-unknown/release');
 const wasmPath =
   process.argv.slice(2).filter((a) => !a.startsWith('--'))[1] ||
-  join(root, 'target/wasm32-unknown-unknown/release/switch_wasm.wasm');
+  join(release, 'switch_wasm_bg.wasm');
 
-// The module's one import: the browser serves ranges of an open container
-// from the file itself, because a retail one does not fit in the wasm address
-// space. An NRO is handed over as a buffer, so nothing here ever asks.
-const { instance } = await WebAssembly.instantiate(readFileSync(wasmPath), {
-  env: { host_read: () => 0 },
-});
-const api = instance.exports;
+// The core is a wasm-bindgen module — wgpu reaches WebGPU through its glue —
+// so it cannot be instantiated by hand any more: its imports are
+// wasm-bindgen's own, and doing it the old way died on
+// `__wbindgen_placeholder__`. Load it the way the worker does, through the
+// generated glue.
+//
+// The glue's one bare specifier is `@host/files`, which the frontend build
+// aliases to `web/worker/hostfiles.ts` and node cannot resolve. It is pointed
+// at a stub here: an NRO is handed over as a buffer, so `host_read` is never
+// called. The rewritten glue is written beside the original so that its own
+// relative paths still resolve.
+const stub = 'data:text/javascript,export const hostRead = () => 0;';
+const gluePath = join(release, 'switch_wasm.js');
+const benchGlue = join(release, 'switch_wasm.bench.mjs');
+writeFileSync(
+  benchGlue,
+  readFileSync(gluePath, 'utf8').replace("'@host/files'", JSON.stringify(stub)),
+);
+const init = (await import(pathToFileURL(benchGlue).href)).default;
+const api = await init({ module_or_path: readFileSync(wasmPath) });
 
 function toWasm(bytes) {
   const ptr = api.switch_alloc(bytes.length);
