@@ -98,7 +98,21 @@ export async function run(): Promise<void> {
     // Anything else is a real failure of the loop and has to be said out loud.
     if (!aborted) {
       setState('fault');
-      log('The run loop stopped: ' + (err as Error).message, 'err');
+      // `RuntimeError: unreachable` is what a Rust panic looks like from here:
+      // the release profile aborts on panic, and an abort on wasm is a trap
+      // with nothing in it. The hook `switch_new` installs caught the real
+      // message on the way down, and `switch_last_error` hands it back without
+      // needing a live session -- so ask, rather than report the trap and lose
+      // the one line that says what happened.
+      let why = (err as Error).message;
+      try {
+        const captured = await readLastError();
+        if (captured) why += ' - ' + captured;
+      } catch {
+        // The module may be too far gone to answer. The trap is still worth
+        // saying on its own.
+      }
+      log('The run loop stopped: ' + why, 'err');
     }
     return;
   } finally {

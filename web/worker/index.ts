@@ -23,7 +23,10 @@ function reply(message: WorkerMessage, transfer?: Transferable[]): void {
 // The two commands that mean something with no session open: `new` is what
 // creates one, and `set_battery` caches its reading for whichever session
 // comes next. Everything else works on the session this worker is holding.
-const SESSIONLESS = new Set(['new', 'set_battery']);
+// `last_error` belongs here because the case it exists for is the one where
+// the session is gone or the module has trapped: `switch_last_error` returns a
+// captured panic without consulting a handle at all.
+const SESSIONLESS = new Set(['new', 'set_battery', 'last_error']);
 
 /* Installing the GPU backend, once the guest has a channel to install it on.
 
