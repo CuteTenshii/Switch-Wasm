@@ -319,7 +319,11 @@ fn attrib_shape(size: u32) -> Option<(u32, u32)> {
 }
 
 /// `DkVtxAttribType` (deko3d.h): `Float = 7`, `Unorm = 2`.
+/// `DkVtxAttribType`, as Eden's `VertexAttribute::Type` names them.
+const ATTRIB_TYPE_SNORM: u32 = 1;
 const ATTRIB_TYPE_UNORM: u32 = 2;
+const ATTRIB_TYPE_SINT: u32 = 3;
+const ATTRIB_TYPE_UINT: u32 = 4;
 const ATTRIB_TYPE_FLOAT: u32 = 7;
 
 /// What a "fixed" attribute reads as: the `vec4` default every graphics API
@@ -378,6 +382,33 @@ pub fn fetch_attribute(
             for c in 0..components {
                 let byte = (packed >> (c * 8)) & 0xff;
                 out[c as usize] = byte as f32 / 255.0;
+            }
+        }
+        (ATTRIB_TYPE_SNORM, 8) => {
+            let packed = ctx.read_u32(addr)?;
+            for c in 0..components {
+                let byte = ((packed >> (c * 8)) & 0xff) as u8 as i8;
+                // -128 and -127 both mean -1: the negative side has one more
+                // step than the positive, and every API maps both onto it.
+                out[c as usize] = (byte as f32 / 127.0).max(-1.0);
+            }
+        }
+        // An integer attribute is not a number the shader averages, it is a
+        // value it indexes or masks with — so the slot carries its *bits*,
+        // the same way `shade_vertex` hands over `vertex_id` and
+        // `instance_id`. Converting it to a float instead would read back as
+        // whatever that float's bit pattern happened to be.
+        (ATTRIB_TYPE_SINT, 8) => {
+            let packed = ctx.read_u32(addr)?;
+            for c in 0..components {
+                let byte = ((packed >> (c * 8)) & 0xff) as u8 as i8;
+                out[c as usize] = f32::from_bits(byte as i32 as u32);
+            }
+        }
+        (ATTRIB_TYPE_UINT, 8) => {
+            let packed = ctx.read_u32(addr)?;
+            for c in 0..components {
+                out[c as usize] = f32::from_bits((packed >> (c * 8)) & 0xff);
             }
         }
         (ty, bits) => {
@@ -1468,6 +1499,47 @@ mod tests {
         let v = fetch_attribute(attrib, array, 0, &ctx).unwrap();
         // Decoded as BGRA then swapped to RGBA: R=0xff, G=0x80, B=0x40, A=0x00.
         assert_eq!(v, [1.0, 0x80 as f32 / 255.0, 0x40 as f32 / 255.0, 0.0]);
+    }
+
+    /// An integer attribute carries its bits, not its magnitude — the slot is
+    /// read back as an integer by the shader, the same way `shade_vertex`
+    /// hands over `vertex_id`. Just Dance 2019 binds a signed-byte attribute
+    /// (`size 0xa type 3`), and every draw that read one was dropped: 6,480 of
+    /// 6,844 in a 400-frame run.
+    #[test]
+    fn fetch_attribute_unpacks_the_eight_bit_integer_and_normalised_types() {
+        let (mut mem, vmm, base) = harness();
+        // 0x7F, 0x80, 0x01, 0xFF as four bytes: signed 127, -128, 1, -1.
+        let packed = 0xFFu32 << 24 | 0x01u32 << 16 | 0x80u32 << 8 | 0x7Fu32;
+        vmm.write_u32(&mut mem, base, packed).unwrap();
+        let mut stats = Default::default();
+        let mut host1x = Host1x::new();
+        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let array = VertexArray { enabled: true, stride: 4, start: base, limit: base + 0x1000, divisor: 0 };
+        let fetch = |ty| {
+            let attrib = VertexAttrib { buffer_id: 0, is_fixed: false, offset: 0, size: 0x0a, ty, is_bgra: false };
+            fetch_attribute(attrib, array, 0, &ctx).unwrap()
+        };
+
+        let sint = fetch(ATTRIB_TYPE_SINT);
+        let as_int = |v: f32| v.to_bits() as i32;
+        assert_eq!(
+            [as_int(sint[0]), as_int(sint[1]), as_int(sint[2]), as_int(sint[3])],
+            [127, -128, 1, -1],
+            "sint8 sign-extends, and keeps its bits rather than its value"
+        );
+
+        let uint = fetch(ATTRIB_TYPE_UINT);
+        assert_eq!(
+            [uint[0].to_bits(), uint[1].to_bits(), uint[2].to_bits(), uint[3].to_bits()],
+            [0x7F, 0x80, 0x01, 0xFF],
+            "uint8 is zero-extended"
+        );
+
+        let snorm = fetch(ATTRIB_TYPE_SNORM);
+        assert_eq!(snorm[0], 1.0);
+        assert_eq!(snorm[1], -1.0, "-128 clamps onto -1 rather than past it");
+        assert_eq!(snorm[3], -1.0 / 127.0);
     }
 
     #[test]
