@@ -25,8 +25,14 @@ pub async fn switch_gpu_open(handle: u32) -> String {
         Ok(adapter) => adapter,
         Err(e) => return format!("no adapter: {e}"),
     };
+    // Not `DeviceDescriptor::default()`: that asks for no optional features,
+    // and WebGPU keeps the compressed texture families behind them. A title's
+    // textures are block-compressed, so the first one threw inside
+    // `createTexture` and wgpu unwrapped it — a panic mid-draw, which on wasm
+    // is a bare `unreachable` that stops the core. See
+    // `switch_gpu::device_descriptor`.
     let (device, queue) =
-        match adapter.request_device(&switch_gpu::wgpu::DeviceDescriptor::default()).await {
+        match adapter.request_device(&switch_gpu::device_descriptor(&adapter)).await {
             Ok(pair) => pair,
             Err(e) => return format!("no device: {e}"),
         };

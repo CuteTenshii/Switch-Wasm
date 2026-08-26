@@ -33,6 +33,25 @@
 //! That is not only a portability change. It is the same change that turns
 //! eighty-eight round trips a frame into one.
 
+/// What to ask a device for: the compressed texture families this adapter
+/// actually has, and nothing else.
+///
+/// A Switch title's textures are block-compressed, and WebGPU hands those out
+/// only on request — `DeviceDescriptor::default()` asks for none of them, so
+/// the first BC1 texture threw. Masking against the adapter keeps the request
+/// itself from failing on hardware that lacks a family, and
+/// [`device_texture_format`] turns whatever is still missing into a fallback
+/// rather than a crash.
+pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
+    let wanted = wgpu::Features::TEXTURE_COMPRESSION_BC
+        | wgpu::Features::TEXTURE_COMPRESSION_ASTC
+        | wgpu::Features::TEXTURE_COMPRESSION_ETC2;
+    wgpu::DeviceDescriptor {
+        required_features: adapter.features() & wanted,
+        ..Default::default()
+    }
+}
+
 /// The `wgpu` this was built against, so a caller that has to name a device
 /// type does not have to guess at a matching version.
 pub use wgpu;
@@ -313,7 +332,7 @@ impl Gpu {
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
                 .map_err(|e| format!("no adapter: {e}"))?;
         let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+            pollster::block_on(adapter.request_device(&device_descriptor(&adapter)))
                 .map_err(|e| format!("no device: {e}"))?;
         Ok(Gpu::with_device(device, queue))
     }
@@ -391,7 +410,7 @@ impl Gpu {
 
     /// Bring a guest surface onto the device.
     fn upload_target(&self, target: &Target, ctx: &ExecCtx) -> Result<wgpu::Texture> {
-        let format = texture_format(target.format)?;
+        let format = device_texture_format(&self.device, target.format)?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("render target"),
             size: wgpu::Extent3d {
@@ -509,7 +528,8 @@ impl Gpu {
     /// worth having first, because a cache is only ever as right as the
     /// thing it caches.
     fn render(&mut self, p: &Prepared, ctx: &mut ExecCtx) -> std::result::Result<(), String> {
-        let target_format = texture_format(p.color.format).map_err(|e| format!("{e:?}"))?;
+        let target_format =
+            device_texture_format(&self.device, p.color.format).map_err(|e| format!("{e:?}"))?;
         if let Some(e) = self.device_error() {
             return Err(format!("the device rejected an earlier draw: {e}"));
         }
@@ -831,7 +851,8 @@ impl Gpu {
         &self,
         upload: &switch_core::gpu::upload::TextureUpload,
     ) -> std::result::Result<wgpu::Texture, String> {
-        let format = texture_format(upload.format).map_err(|e| format!("{e:?}"))?;
+        let format =
+            device_texture_format(&self.device, upload.format).map_err(|e| format!("{e:?}"))?;
         let size = wgpu::Extent3d {
             width: upload.width.max(1),
             height: upload.height.max(1),
@@ -935,6 +956,32 @@ impl Gpu {
         self.queue.write_buffer(&buffer, 0, &padded);
         buffer
     }
+}
+
+/// The wgpu name for a format `switch_core::gpu::pipeline` resolved, checked
+/// against what this device was actually given.
+///
+/// WebGPU gates the compressed families behind optional features, and creating
+/// a texture in one the device does not have is not an error you can catch --
+/// `createTexture` throws, and wgpu's web backend unwraps it. That is a panic
+/// in the middle of a draw, which on wasm is a bare `unreachable` that takes
+/// the whole core down: Just Dance 2019 reached its first BC1 texture and the
+/// run loop stopped.
+///
+/// Refusing it here instead makes it what every other thing this backend
+/// cannot express already is -- one draw on the software rasterizer.
+fn device_texture_format(
+    device: &wgpu::Device,
+    format: Format,
+) -> Result<wgpu::TextureFormat> {
+    let wanted = texture_format(format)?;
+    let needs = wanted.required_features();
+    if !device.features().contains(needs) {
+        return Err(Error::Gpu(format!(
+            "the device was not given {needs:?}, which {wanted:?} needs"
+        )));
+    }
+    Ok(wanted)
 }
 
 /// The wgpu name for a format `switch_core::gpu::pipeline` resolved.
