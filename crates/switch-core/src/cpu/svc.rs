@@ -4,7 +4,7 @@ use super::{
     ArbiterWait, Cpu, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE,
     HID_SHMEM_SIZE, PL_SHMEM_SIZE,
 };
-use super::ipc::CLOCK_RATES_HZ;
+use super::power::CLOCK_RATES_HZ;
 use crate::{Error, Result};
 use std::fmt::Write;
 

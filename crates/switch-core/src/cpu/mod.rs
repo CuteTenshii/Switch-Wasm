@@ -18,22 +18,45 @@ use crate::mem::Memory;
 use crate::{Error, Result};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
+// The processor.
 mod alu;
 mod bits;
 mod fp;
-mod ipc;
 mod jit;
 mod loadstore;
 mod simd;
 mod svc;
 mod system;
 
-pub use ipc::SaveDataQuota;
+// Horizon's services. `ipc` is the marshalling every one of them is built on;
+// the rest are one module per domain, reached through `svc.rs`'s dispatch.
+mod acc;
+mod am;
+mod audout;
+mod audren;
+mod erpt;
+mod fs;
+mod hid;
+mod ipc;
+mod ldr;
+mod log;
+mod mii;
+mod net;
+mod ns;
+mod nv;
+mod online;
+mod pl;
+mod power;
+mod settings;
+mod time;
+mod vi;
+
+pub use fs::SaveDataQuota;
 pub use jit::JitStats;
 
 pub(crate) use bits::decode_bit_mask;
 use bits::*;
-use ipc::{DEFAULT_NICKNAME, NICKNAME_LEN};
+use acc::{DEFAULT_NICKNAME, NICKNAME_LEN};
 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -739,84 +762,7 @@ pub struct TouchPoint {
     pub y: u32,
 }
 
-/// The counts an `OpenAudioRenderer` call fixes for the lifetime of its
-/// `IAudioRenderer` session — how big every later `RequestUpdateAudioRenderer`
-/// reply has to be.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct AudrenParams {
-    pub revision: u32,
-    pub voice_count: u32,
-    pub sink_count: u32,
-    pub effect_count: u32,
-}
 
-
-/// One open `IAudioOut` session: what it was opened with, and the buffer
-/// bookkeeping its client polls.
-///
-/// A real device releases a buffer once its samples have been clocked out to
-/// the DAC. There is no DAC here — the samples are copied into
-/// [`Cpu::audio_pcm`] for the host to play — but *when* a buffer comes back is
-/// the whole of the guest's audio clock, so the device keeps a clock of its
-/// own: a buffer is released once the emulated CPU has run for as long as its
-/// samples take to play.
-///
-/// Releasing on arrival instead, which this used to do, hands the guest a
-/// device infinitely faster than the panel beside it. Just Dance 2019 fed
-/// 19,693,344 samples per second of emulated time through a 48 kHz stereo
-/// device — **205× real time** — and its video player, which schedules frames
-/// against the audio clock, concluded every frame of the boot video was too
-/// late to show and dropped all of them. The title presented a white clear
-/// sixty times a second and never issued a single draw.
-#[derive(Debug, Clone)]
-pub(crate) struct AudioOut {
-    /// Sample rate and channel count the device was opened with.
-    pub sample_rate: u32,
-    pub channel_count: u32,
-    /// Whether `StartAudioOut` has been called and `StopAudioOut` has not.
-    pub started: bool,
-    /// The volume the guest set, 0.0..=1.0. Applied when samples are taken.
-    pub volume: f32,
-    /// Signalled every time a buffer is released — what
-    /// `audoutWaitPlayFinish` blocks on.
-    pub event: u64,
-    /// Buffers the guest has appended and not yet collected, each with the
-    /// cycle count at which the device will have finished playing it.
-    /// `GetReleasedAudioOutBuffer` hands back the ones whose time has come.
-    pub queued: VecDeque<(u64, u64)>,
-    /// The cycle the device finishes everything queued so far — where the next
-    /// buffer starts playing. A device that has fallen silent starts again
-    /// from the present rather than from whenever it last stopped, so a gap in
-    /// the guest's submissions is a gap in the audio, not a debt the device
-    /// has to work off.
-    pub free_at: u64,
-    /// Frames handed over since the device was opened, which is what
-    /// `GetAudioOutPlayedSampleCount` reports.
-    pub played_frames: u64,
-}
-
-/// One open `bsd:u` socket.
-///
-/// A socket here can be created, configured, bound and listened on — every
-/// local operation a real one supports — and can never carry a byte, because
-/// there is no network behind this service. See [`Cpu::bsd_request`].
-#[derive(Debug, Clone)]
-pub(crate) struct BsdSocket {
-    /// The address family and socket type it was created with. The family is
-    /// carried for `DuplicateSocket`; the type decides which "went nowhere"
-    /// errno the data path reports.
-    pub domain: u32,
-    pub kind: u32,
-    /// The raw `sockaddr` bytes `bind` was given, which `GetSockName` reports
-    /// back.
-    pub bound: Vec<u8>,
-    /// The flags word `fcntl(F_SETFL)` set, stored verbatim so `F_GETFL` hands
-    /// back exactly what the guest wrote.
-    pub flags: u32,
-    /// Whether `listen` was called — an `accept` on a socket that never
-    /// listened is a different error from one nobody has connected to.
-    pub listening: bool,
-}
 
 #[derive(Debug, Clone)]
 pub struct ThreadContext {
@@ -980,7 +926,7 @@ pub struct Cpu {
     /// it, and stay at the default when nothing has (a bare Program NCA has no
     /// NACP to read). Nothing here enforces any of them: the emulated NAND
     /// grows with whatever a title writes into it.
-    save_data_quota: ipc::SaveDataQuota,
+    save_data_quota: fs::SaveDataQuota,
     /// The address space this process was given, chosen from its NPDM's
     /// declared system resource size. Defaults to [`MemoryLayout::PLAIN`],
     /// which is what homebrew and a container with no readable manifest get.
@@ -1012,7 +958,7 @@ pub struct Cpu {
     /// The NROs `ldr:ro` has mapped into the process, keyed by the address it
     /// mapped each one to — which is the address the guest was handed and the
     /// one it names again to unload. See [`Cpu::ldr_ro_request`].
-    ro_modules: BTreeMap<u32, ipc::RoModule>,
+    ro_modules: BTreeMap<u32, ldr::RoModule>,
     /// The NRRs the guest has registered, by the address it registered each
     /// at. Nothing here can check an NRR's signature chain, so a registration
     /// authorizes nothing — the set exists so that unregistering one is not a
@@ -1082,10 +1028,10 @@ pub struct Cpu {
     /// have to see the same bytes.
     am_storage_of: HashMap<u64, u64>,
     /// Library applets created through `ILibraryAppletCreator`, by accessor
-    /// object. Nothing here runs one — see [`ipc::LibraryApplet`] — but the
+    /// object. Nothing here runs one — see [`am::LibraryApplet`] — but the
     /// caller drives it across several requests, so what it was asked for and
     /// how far it got have to outlive each one.
-    am_applets: HashMap<u64, ipc::LibraryApplet>,
+    am_applets: HashMap<u64, am::LibraryApplet>,
     /// The current process's own RomFS — what
     /// `OpenDataStorageByCurrentProcess` hands back as an `IStorage`. `None`
     /// until the loader calls [`Cpu::set_romfs`] or
@@ -1132,9 +1078,9 @@ pub struct Cpu {
     service_events: HashMap<(&'static str, u64), u64>,
     /// `lbl`'s backlight settings: brightness, dimming, VR mode. Settings
     /// rather than facts about a panel, so they are stored and read back.
-    backlight: ipc::Backlight,
+    backlight: settings::Backlight,
     /// `audctl`'s system-wide audio settings, for the same reason.
-    audio_control: ipc::AudioControl,
+    audio_control: audout::AudioControl,
     /// `nfc:sys`: whether the interface has been initialized, and whether NFC
     /// is switched on in system settings. There is no reader attached either
     /// way — see [`Cpu::nfc_request`].
@@ -1148,20 +1094,20 @@ pub struct Cpu {
     /// The alarms `notif` is holding, and the id the next one is given. An
     /// alarm id is the server's to assign and the caller's to address it by,
     /// so it has to outlive the request that registered one.
-    notif_alarms: Vec<ipc::AlarmSetting>,
+    notif_alarms: Vec<settings::AlarmSetting>,
     notif_next_alarm_id: u16,
     /// `erpt`'s journal: one context record per category, the reports written
     /// out of it, the attachments those reports own, and where each open
     /// `IReport`/`IAttachment` object has read to. None of it is persisted —
     /// a console keeps this on the SYSTEM partition, and there is nothing here
     /// to transfer it to — so the journal lives exactly as long as the session.
-    erpt_contexts: Vec<ipc::ErrorContext>,
-    erpt_reports: Vec<ipc::ErrorReport>,
-    erpt_attachments: Vec<ipc::ErrorReportAttachment>,
-    erpt_readers: HashMap<u64, ipc::ErrorReportReader>,
+    erpt_contexts: Vec<erpt::ErrorContext>,
+    erpt_reports: Vec<erpt::ErrorReport>,
+    erpt_attachments: Vec<erpt::ErrorReportAttachment>,
+    erpt_readers: HashMap<u64, erpt::ErrorReportReader>,
     /// The journal's own id, made on the first ask and kept: it tells whoever
     /// reads reports out of the journal which journal they came from.
-    erpt_journal_id: Option<[u8; ipc::ERPT_UUID_SIZE]>,
+    erpt_journal_id: Option<[u8; erpt::ERPT_UUID_SIZE]>,
     /// Monotonic sampling number for the hid shared-memory LIFO entries.
     sample_counter: u64,
     /// The touchscreen LIFO's own sampling number. Separate from the npad one
@@ -1190,9 +1136,9 @@ pub struct Cpu {
     /// can size its reply the same way the guest sized the buffer it passed
     /// in — `audrvUpdate` rejects a reply whose `mempools_sz`/`voices_sz`
     /// fields don't match what it computed from those same counts.
-    audren_renderers: HashMap<u64, AudrenParams>,
+    audren_renderers: HashMap<u64, audren::AudioRenderer>,
     /// Every open `IAudioOut`, by session handle.
-    audio_outs: HashMap<u64, AudioOut>,
+    audio_outs: HashMap<u64, audout::AudioOut>,
     /// Interleaved 16-bit PCM the guest has handed to `audout` and the host
     /// has not played yet. Bounded: a host that never drains it (a headless
     /// test, a paused tab) must not be able to grow it without limit.
@@ -1227,7 +1173,7 @@ pub struct Cpu {
     /// Every open `bsd` socket, by descriptor, and the socket options set on
     /// them keyed by `(descriptor, level, option)` — options are read back, so
     /// they are stored rather than acknowledged and forgotten.
-    bsd_sockets: HashMap<i32, BsdSocket>,
+    bsd_sockets: HashMap<i32, net::BsdSocket>,
     bsd_socket_options: HashMap<(i32, u32, u32), u32>,
     /// Monotonic descriptor allocator. Starts at 3, past the standard streams
     /// a guest's C library already holds.
@@ -1361,7 +1307,7 @@ impl Cpu {
             binder_event: None,
             aoc_list_changed_event: None,
             display_resolution_event: None,
-            save_data_quota: ipc::SaveDataQuota::default(),
+            save_data_quota: fs::SaveDataQuota::default(),
             memory_layout: MemoryLayout::PLAIN,
             shared_buffer: None,
             shared_buffer_slot: 0,
@@ -1401,8 +1347,8 @@ impl Cpu {
             ssl_contexts: 0,
             ssl_options: HashMap::new(),
             service_events: HashMap::new(),
-            backlight: ipc::Backlight::default(),
-            audio_control: ipc::AudioControl::default(),
+            backlight: settings::Backlight::default(),
+            audio_control: audout::AudioControl::default(),
             nfc_initialized: false,
             nfc_enabled: false,
             // A console boots with its Bluetooth radio on: that is how it
@@ -1431,7 +1377,7 @@ impl Cpu {
             unix_time: 0,
             account_nickname: String::from(DEFAULT_NICKNAME),
             account_edited_at: 0,
-            apm_configuration: ipc::APM_DEFAULT_CONFIGURATION,
+            apm_configuration: power::APM_DEFAULT_CONFIGURATION,
             program_id: ipc::DEFAULT_PROGRAM_ID,
             clock_rates: HashMap::new(),
             rng_state: 0,
@@ -1861,7 +1807,7 @@ impl Cpu {
     fn wait_deadline(&self, timeout: i64) -> Option<u64> {
         (timeout > 0).then(|| {
             let cycles =
-                (timeout as u128) * u128::from(crate::cpu::ipc::CLOCK_RATES_HZ[0]) / 1_000_000_000;
+                (timeout as u128) * u128::from(crate::cpu::power::CLOCK_RATES_HZ[0]) / 1_000_000_000;
             self.cycles.wrapping_add(cycles as u64)
         })
     }
@@ -2336,12 +2282,12 @@ impl Cpu {
     /// [`Cpu::seed_applet_launch_arguments`].
     fn seed_launch_parameters(&mut self) {
         self.am_launch_parameters.clear();
-        if crate::cpu::ipc::is_library_applet(self.program_id) {
+        if crate::cpu::am::is_library_applet(self.program_id) {
             return;
         }
         self.am_launch_parameters.insert(
-            crate::cpu::ipc::LAUNCH_PARAMETER_PRESELECTED_USER,
-            crate::cpu::ipc::preselected_user_parameter(),
+            crate::cpu::am::LAUNCH_PARAMETER_PRESELECTED_USER,
+            crate::cpu::am::preselected_user_parameter(),
         );
     }
 
@@ -2358,7 +2304,7 @@ impl Cpu {
     /// only a real caller could fill in; nothing is queued for it.
     fn seed_applet_launch_arguments(&mut self) {
         self.am_in_data.clear();
-        if !crate::cpu::ipc::is_library_applet(self.program_id) {
+        if !crate::cpu::am::is_library_applet(self.program_id) {
             return;
         }
         const COMMON_ARGS_VERSION: u32 = 1;
@@ -2369,7 +2315,7 @@ impl Cpu {
         // LaVersion: the applet-interface revision the caller speaks. Each
         // applet numbers its own, and a caller that claims one the applet
         // does not know is refused, so this is the applet's own.
-        args.extend_from_slice(&crate::cpu::ipc::applet_interface_version(self.program_id).to_le_bytes());
+        args.extend_from_slice(&crate::cpu::am::applet_interface_version(self.program_id).to_le_bytes());
         // ExpectedThemeColor: 0 is the basic white theme.
         args.extend_from_slice(&0u32.to_le_bytes());
         // PlayStartupSound, then padding out to the tick field.
@@ -2379,10 +2325,10 @@ impl Cpu {
         args.extend_from_slice(&0u64.to_le_bytes());
         self.am_in_data.push_back(args);
         // Then the applet's own launch struct — see
-        // [`crate::cpu::ipc::applet_launch_argument`]. Refusing the pop
+        // [`crate::cpu::am::applet_launch_argument`]. Refusing the pop
         // instead is what a real applet treats as a launch it cannot honour,
         // and it aborts.
-        let argument = crate::cpu::ipc::applet_launch_argument(self.program_id);
+        let argument = crate::cpu::am::applet_launch_argument(self.program_id);
         self.am_in_data.push_back(argument);
     }
 
@@ -3139,12 +3085,12 @@ impl Cpu {
     /// declares no save has none, and a title that declares no ceiling never
     /// extends the one it has. Correcting either would be answering a question
     /// the title did not ask.
-    pub fn set_save_data_quota(&mut self, quota: ipc::SaveDataQuota) {
+    pub fn set_save_data_quota(&mut self, quota: fs::SaveDataQuota) {
         self.save_data_quota = quota;
     }
 
     /// What the running title was allotted, for the commands that report it.
-    pub fn save_data_quota(&self) -> ipc::SaveDataQuota {
+    pub fn save_data_quota(&self) -> fs::SaveDataQuota {
         self.save_data_quota
     }
 

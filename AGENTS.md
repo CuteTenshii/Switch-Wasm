@@ -11,7 +11,7 @@ standing state.
 ## Commands
 
 - `make all` — `test` then `assets`.
-- `make test` — `cargo test` over all three crates. 730 tests.
+- `make test` — `cargo test` over all three crates. 735 tests.
 - `make wasm` — release wasm build `--features gpu`, then `wasm-bindgen
   --target web`. Needs `rustup target add wasm32-unknown-unknown` and a
   `wasm-bindgen-cli` matching the `Cargo.lock` version.
@@ -28,14 +28,37 @@ standing state.
 ## Crates
 
 - `switch-core` — the emulator, **zero dependencies**. `cpu` (`mod`/`alu`/
-  `bits`/`fp`/`ipc`/`jit`/`loadstore`/`simd`/`svc`/`system`), `gpu`, `display`,
-  `mem`, `vfs`, `source`, `crypto`/`keys`/`ticket`, `nsp`/`nca`/`romfs`/`npdm`/
-  `nso`/`nro`/`elf`/`lz4`, `control`, `disasm`, `error`.
+  `bits`/`fp`/`jit`/`loadstore`/`simd`/`svc`/`system`, plus `ipc` and one
+  module per service domain — see below), `gpu`, `display`, `mem`, `vfs`,
+  `source`, `crypto`/`keys`/`ticket`, `nsp`/`nca`/`romfs`/`npdm`/`nso`/`nro`/
+  `elf`/`lz4`, `control`, `disasm`, `error`.
 - `switch-gpu` — a `wgpu` backend behind `gpu::renderer::Renderer`. Separate
   because `wgpu` brings hundreds of crates and the core has none.
 - `switch-wasm` — browser bindings, `cdylib`. Buffers cross via linear memory
   (`switch_alloc`/`switch_free`); a handle indexes a global session table.
   JSON is hand-rolled (`json_escape`/`write_into`) — **don't add serde**.
+
+**Services are one module per domain.** `ipc.rs` is the marshalling layer —
+descriptor walks, domain/control messages, handle bookkeeping,
+`write_ipc_reply` — plus `sm:` and the services whose whole implementation is
+an answer or two (`csrng`, `spl`, `pm`, `btm`, `nfc`). Everything else lives
+beside it: `acc`, `am`, `audout`, `audren`, `erpt`, `fs`, `hid`, `ldr`, `log`,
+`mii`, `net`, `ns`, `nv`, `online`, `pl`, `power`, `settings`, `time`, `vi`.
+`svc.rs` dispatches to them by session name, and each owns its own constants,
+its state structs and its tests. Shared request builders for those tests are
+`ipc::testing`.
+
+- **Decode the header once, through `Cpu::ipc_header`.** Seven walks used to
+  re-derive the same counts with their own shifts, which is how
+  `ipc_static_buffers` came to skip a special header's pid but not the copy and
+  move handles behind it — reading a path out of the handle words.
+- **A map-alias descriptor's address is its low word.** Guest memory is
+  `u32`-indexed, so the packed word's address bits all land above bit 32 and are
+  truncated straight back off. `Cpu::ipc_map_descriptor` is the one decode.
+- **A caller marshals a buffer one of four ways** (map-alias send/receive,
+  send-static, receive-static) and a service that reads only the form it expects
+  reads nothing at all. Reach for `ipc_input_buffer`/`ipc_output_buffer` unless
+  you know which form you are being sent.
 
 **The shipped module is a wasm-bindgen module**: `make wasm` always builds
 `--features gpu`, so the worker `import`s generated glue rather than calling
@@ -469,7 +492,16 @@ dispatch, the same split as `fsp-srv-fs` and `time:system-clock`.
 - **The settings among them are stored, not answered** (`backlight`,
   `audio_control`, `notif_alarms`, …) — one caller writes, another reads back.
 
-## Audio (`audout`)
+## Audio (`audout`, `audren`)
+
+Two paths, and they are not variants of each other. `audout` is a *device* —
+the guest hands it finished PCM. `audren` is a *mixer* — the guest hands it
+sources and gets mixed PCM back. Homebrew mostly takes the first; nearly every
+retail title takes the second, through `nn::audio` or libnx's `audrv`. Both end
+in `Cpu::queue_audio`, and whichever produced samples last sets
+`Cpu::audio_format`.
+
+### `audout`
 
 **The device plays in time.** A buffer is released once the CPU has run for as
 long as its samples take at the device's rate (`Cpu::audio_play_cycles`),
@@ -485,6 +517,44 @@ player dropped every frame of the boot video.
   is a known cycle count away.
 - **Do not answer that wait with a bare success.** `nn::audio`'s mixer takes
   the event as proof a buffer is waiting and reads its queue head unchecked.
+
+### `audren` (`cpu/audren.rs`)
+
+The renderer, and the same clock discipline. One update carries the whole
+renderer state as a flat buffer whose header declares each section's size;
+`Cpu::audren_parse_update` walks it by **those declared sizes, not by strides
+computed here** — that is what makes one parser serve REV1 through REV15, whose
+effect and mix entries are different widths. Layout is libnx's `audren.h`, which
+is the authority; read it before changing an offset.
+
+Signal path: wave buffers → decode (PCM8/16/24/32/float, and Nintendo 4-bit
+ADPCM, which is what retail voices actually are) → linear resample by
+`rate × pitch` → per-voice biquads → per-channel gains into the destination
+mix's buffers → submixes into their destinations, highest mix id first → the
+device sink's channel map → interleaved i16.
+
+- **A frame every 5 ms, counted off `cycles`** (`FRAME_CYCLES`), never "one per
+  update". `Cpu::audren_tick` fires the frame event, `Cpu::audio_tick` folds its
+  deadline in with `audout`'s, and a wait on it parks like any buffer wait.
+  `QuerySystemEvent` must hand back a **real event as a copy handle**: a bare
+  handle is "not an event", which `WaitSynchronization` reads as always ready —
+  `audrenWaitFrame` then returns instantly and the renderer has no clock at all.
+- **`num_wavebufs_consumed` is load-bearing.** The guest advances its own ring
+  head by the delta and refills only what this has accounted for, so a reply
+  that reports zero — which the all-zero stub did — is a title that queues four
+  buffers, waits, and stops.
+- **A renderer opens *started*.** `StartAudioRenderer` exists and libnx never
+  calls it.
+- **Voice state is re-sent whole every update**; only position, ADPCM history
+  and filter state survive, and `is_new` clears those. The playing slot is
+  re-seeded from `wavebuf_head` each update, which is how both sides stay in
+  step without exchanging a position.
+- **`end_sample_offset` is a claim; `size` is the allocation, and it wins.**
+  Same lesson as `audout`'s unplayable descriptor. The buffer is still consumed
+  — a buffer that never comes back stalls the voice that queued it.
+- Not modelled: effects (parsed for sizing, never processed), splitters (stepped
+  over), and the circular-buffer sink (reported once, never written). Each is a
+  truthful zero in the reply rather than a guess.
 
 ## GPU (`switch-core/src/gpu`, `switch-gpu`)
 

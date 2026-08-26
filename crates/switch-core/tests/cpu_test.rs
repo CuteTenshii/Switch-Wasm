@@ -5026,6 +5026,400 @@ fn audren_update_reply_has_a_section_for_every_count_the_renderer_was_opened_wit
     assert_eq!(section(&cpu, 0x3c), 64 + 176 + 32 + 3 * 16 + 32 + 16 + 176, "revision-4 total");
 }
 
+/// The section strides of a `RequestUpdateAudioRenderer` **input**, from
+/// libnx's `audren.h`. They are not the reply's: an input entry and the output
+/// entry describing the same object are different sizes.
+const AUDREN_IN_HEADER: usize = 0x40;
+const AUDREN_IN_BEHAVIOR: usize = 0x10;
+const AUDREN_IN_CHANNEL: usize = 0x70;
+const AUDREN_IN_VOICE: usize = 0x170;
+const AUDREN_IN_MIX: usize = 0x930;
+const AUDREN_IN_SINK: usize = 0x140;
+const AUDREN_IN_PERF: usize = 0x10;
+
+/// `PcmFormat_Int16` and `PcmFormat_Adpcm`.
+const PCM_INT16: u8 = 2;
+const PCM_ADPCM: u8 = 6;
+
+/// One renderer frame in the emulated cycles that are this machine's only
+/// clock: 5 ms of a 1.02 GHz CPU.
+const AUDREN_FRAME_CYCLES: u64 = 1_020_000_000 / 200;
+
+/// One `RequestUpdateAudioRenderer` input buffer, built the way `audrvUpdate`
+/// builds it: a header declaring the size of every section, then the sections.
+struct AudrenUpdate {
+    data: Vec<u8>,
+    channels_at: usize,
+    voices_at: usize,
+    mixes_at: usize,
+    sinks_at: usize,
+}
+
+impl AudrenUpdate {
+    fn new(voices: usize, mixes: usize, sinks: usize) -> Self {
+        let channels_sz = voices * AUDREN_IN_CHANNEL;
+        let voices_sz = voices * AUDREN_IN_VOICE;
+        let mixes_sz = mixes * AUDREN_IN_MIX;
+        let sinks_sz = sinks * AUDREN_IN_SINK;
+        let channels_at = AUDREN_IN_HEADER + AUDREN_IN_BEHAVIOR;
+        let voices_at = channels_at + channels_sz;
+        let mixes_at = voices_at + voices_sz;
+        let sinks_at = mixes_at + mixes_sz;
+        let total = sinks_at + sinks_sz + AUDREN_IN_PERF;
+        let mut update = AudrenUpdate {
+            data: vec![0u8; total],
+            channels_at,
+            voices_at,
+            mixes_at,
+            sinks_at,
+        };
+        update.put(0x00, u32::from_le_bytes(*b"REV9"));
+        update.put(0x04, AUDREN_IN_BEHAVIOR as u32);
+        // No mempools: guest memory is the renderer's memory here, so a voice
+        // plays out of a buffer whether or not a pool was attached over it.
+        update.put(0x08, 0);
+        update.put(0x0c, voices_sz as u32);
+        update.put(0x10, channels_sz as u32);
+        update.put(0x18, mixes_sz as u32);
+        update.put(0x1c, sinks_sz as u32);
+        update.put(0x20, AUDREN_IN_PERF as u32);
+        update.put(0x3c, total as u32);
+        update
+    }
+
+    fn put(&mut self, at: usize, value: u32) {
+        self.data[at..at + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_f32(&mut self, at: usize, value: f32) {
+        self.put(at, value.to_bits());
+    }
+
+    /// A started voice playing one wave buffer of `samples` samples.
+    fn voice(&mut self, id: usize, format: u8, channels: u32, address: u32, size: u32, samples: u32) {
+        let at = self.voices_at + id * AUDREN_IN_VOICE;
+        self.put(at, id as u32);
+        self.data[at + 0x08] = 1; // is_new
+        self.data[at + 0x09] = 1; // is_used
+        self.data[at + 0x0a] = 0; // AudioRendererVoicePlayState_Started
+        self.data[at + 0x0b] = format;
+        self.put(at + 0x0c, 48_000);
+        self.put(at + 0x18, channels);
+        self.put_f32(at + 0x1c, 1.0); // pitch
+        self.put_f32(at + 0x20, 1.0); // volume
+        self.put(at + 0x3c, 1); // one wave buffer,
+        self.data[at + 0x40] = 0; // at the head of the ring
+        self.put(at + 0x58, 0); // playing into the final mix
+        let wavebuf = at + 0x60;
+        self.put(wavebuf, address);
+        self.put(wavebuf + 0x08, size);
+        self.put(wavebuf + 0x10, 0); // start_sample_offset
+        self.put(wavebuf + 0x14, samples); // end_sample_offset
+        for channel in 0..channels as usize {
+            self.put(at + 0x140 + channel * 4, channel as u32);
+        }
+    }
+
+    /// Point a voice at its ADPCM coefficient table.
+    fn extra_params(&mut self, id: usize, address: u32, size: u32) {
+        let at = self.voices_at + id * AUDREN_IN_VOICE;
+        self.put(at + 0x48, address);
+        self.put(at + 0x50, size);
+    }
+
+    /// Send voice channel `channel` into mix buffer `dest` at `gain`.
+    fn route(&mut self, channel: usize, dest: usize, gain: f32) {
+        let at = self.channels_at + channel * AUDREN_IN_CHANNEL;
+        self.put_f32(at + 4 + dest * 4, gain);
+        self.data[at + 0x64] = 1; // is_used
+    }
+
+    /// The final mix, with `buffers` mix buffers and going nowhere but the sink.
+    fn mix(&mut self, buffers: u32) {
+        let at = self.mixes_at;
+        self.put_f32(at, 1.0); // volume
+        self.put(at + 0x08, buffers);
+        self.data[at + 0x0c] = 1; // is_used
+        self.put(at + 0x10, 0); // AUDREN_FINAL_MIX_ID
+        self.put(at + 0x924, 0x7FFF_FFFF); // AUDREN_UNUSED_MIX_ID
+    }
+
+    /// A device sink reading one mix buffer into each output channel.
+    fn sink(&mut self, inputs: &[u8]) {
+        let at = self.sinks_at;
+        self.data[at] = 1; // AudioRendererSinkType_Device
+        self.data[at + 1] = 1; // is_used
+        // The union sits past the type, the node id and three reserved words,
+        // and a device sink's name fills the 0x100 bytes at the top of it.
+        let sink = at + 0x20;
+        self.put(sink + 0x100, inputs.len() as u32);
+        for (i, &input) in inputs.iter().enumerate() {
+            self.data[sink + 0x104 + i] = input;
+        }
+    }
+
+    /// Write it where the guest would have and send it as `RequestUpdate-
+    /// AudioRenderer`, which takes the input and the reply as map-alias
+    /// buffers in that order.
+    fn send(&self, cpu: &mut Cpu, renderer: u64, at: u32, out: u32, out_len: u32) {
+        for (i, &b) in self.data.iter().enumerate() {
+            cpu.mem.write_u8(at + i as u32, b).unwrap();
+        }
+        let send = (at, self.data.len() as u32);
+        ipc_request_plain_with_both_buffers(cpu, renderer, 10, send, (out, out_len), &[]);
+    }
+}
+
+/// `OpenAudioRenderer` at 48 kHz, 240 samples a frame, revision 9.
+fn audren_open(cpu: &mut Cpu, manager: u64, voices: u32, sinks: u32, mix_buffers: u32) -> u64 {
+    // `AudioRendererParameter`: rate, sample_count, mix_buffer_count,
+    // submix_count, voice_count, sink_count, effect_count, … revision.
+    let mut params = vec![0u8; 52];
+    params[0..4].copy_from_slice(&48_000u32.to_le_bytes());
+    params[4..8].copy_from_slice(&240u32.to_le_bytes());
+    params[8..12].copy_from_slice(&mix_buffers.to_le_bytes());
+    params[16..20].copy_from_slice(&voices.to_le_bytes());
+    params[20..24].copy_from_slice(&sinks.to_le_bytes());
+    params[48..52].copy_from_slice(b"REV9");
+    ipc_request_plain(cpu, manager, 0, &params);
+    u64::from(cpu.mem.read_u32(cpu.tls_base() + 0x0c).unwrap())
+}
+
+/// A renderer with one voice, one final mix of two buffers and a stereo device
+/// sink — the smallest arrangement that actually plays — plus the manager and
+/// renderer handles.
+fn audren_stereo(cpu: &mut Cpu) -> u64 {
+    const AUDREN: u64 = 0xB100;
+    cpu.register_service_handle(AUDREN, "audren:u");
+    let renderer = audren_open(cpu, AUDREN, 1, 1, 2);
+    assert_ne!(renderer, 0, "no IAudioRenderer came back");
+    renderer
+}
+
+#[test]
+fn audren_mixes_a_voice_through_to_the_host() {
+    // The renderer is where retail audio actually lives: `nn::audio` and
+    // libnx's `audrv` hand it wave buffers, a pitch and a routing matrix, and
+    // expect mixed PCM out the far end. It used to answer every update with a
+    // correctly shaped, entirely zeroed reply — the right size for the caller
+    // to accept and no sound whatsoever.
+    const IN: u32 = 0x3_0000;
+    const OUT: u32 = 0x4_0000;
+    const PCM: u32 = 0x5_0000;
+    const FRAMES: u32 = 240;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    let renderer = audren_stereo(&mut cpu);
+
+    // A ramp: every sample differs from its neighbours, so an off-by-one in
+    // the resampler shows up as a shift rather than as plausible noise.
+    let samples: Vec<i16> = (0..FRAMES).map(|i| (i as i16 - 120) * 100).collect();
+    for (i, &s) in samples.iter().enumerate() {
+        cpu.mem.write_u16(PCM + i as u32 * 2, s as u16).unwrap();
+    }
+
+    let mut update = AudrenUpdate::new(1, 1, 1);
+    update.voice(0, PCM_INT16, 1, PCM, FRAMES * 2, FRAMES);
+    update.route(0, 0, 1.0);
+    update.route(0, 1, 1.0);
+    update.mix(2);
+    update.sink(&[0, 1]);
+
+    // One frame of emulated time, and one frame is what comes out: the
+    // renderer produces what the clock says has come due and not a sample
+    // more, which is the same rule `AudioOut::free_at` follows and the reason
+    // a title's audio clock runs at 1x rather than at whatever multiple of
+    // real time the emulator manages.
+    cpu.cycles += AUDREN_FRAME_CYCLES;
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+
+    let mut played = vec![0i16; FRAMES as usize * 2];
+    assert_eq!(cpu.take_audio(&mut played), played.len(), "the mix never reached the host");
+    assert_eq!(cpu.audio_format(), (48_000, 2));
+    // The voice is mono into both mix buffers and the sink reads one into each
+    // output channel, so the frame is the source doubled up — and it is
+    // bit-exact, because a 16-bit source at unity gain has no arithmetic done
+    // to it that it should not survive.
+    for (i, &s) in samples.iter().enumerate() {
+        assert_eq!(played[i * 2], s, "left channel at sample {i}");
+        assert_eq!(played[i * 2 + 1], s, "right channel at sample {i}");
+    }
+
+    // And nothing is queued twice: a second update with no time elapsed
+    // renders no further frames.
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+    let mut again = [0i16; 2];
+    assert_eq!(cpu.take_audio(&mut again), 0, "a frame was rendered that no time had come due for");
+}
+
+#[test]
+fn audren_reports_the_wave_buffers_it_finished_with() {
+    // `num_wavebufs_consumed` is the load-bearing number in the reply: the
+    // guest advances its own ring head by the delta and refills only the
+    // buffers this has accounted for. A renderer that reports zero is one
+    // whose title queues four buffers, waits for one back, and stops.
+    const IN: u32 = 0x3_0000;
+    const OUT: u32 = 0x4_0000;
+    const PCM: u32 = 0x5_0000;
+    const FRAMES: u32 = 240;
+    /// The reply's voice section: past the header and one `MemPoolInfoOut`
+    /// per mempool, of which there are four per voice.
+    const VOICE_OUT: u32 = 64 + 4 * 16;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    let renderer = audren_stereo(&mut cpu);
+
+    for i in 0..FRAMES {
+        cpu.mem.write_u16(PCM + i * 2, 0x1234).unwrap();
+    }
+    let mut update = AudrenUpdate::new(1, 1, 1);
+    update.voice(0, PCM_INT16, 1, PCM, FRAMES * 2, FRAMES);
+    update.route(0, 0, 1.0);
+    update.mix(2);
+    update.sink(&[0, 1]);
+
+    cpu.cycles += AUDREN_FRAME_CYCLES;
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+
+    // Exactly one frame of samples, so the buffer is played out exactly.
+    assert_eq!(cpu.mem.read_u64(OUT + VOICE_OUT).unwrap(), u64::from(FRAMES), "played sample count");
+    assert_eq!(cpu.mem.read_u32(OUT + VOICE_OUT + 8).unwrap(), 1, "the wave buffer never came back");
+}
+
+#[test]
+fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
+    // Nintendo's 4-bit ADPCM is what retail voices are stored as — 14 samples
+    // in every 8 bytes, one header byte naming a shift and one of eight
+    // predictor pairs, then seven bytes of nibbles. A renderer that decodes
+    // only PCM is silent on almost everything that ships.
+    const IN: u32 = 0x3_0000;
+    const OUT: u32 = 0x4_0000;
+    const DATA: u32 = 0x5_0000;
+    const COEFS: u32 = 0x5_1000;
+    const SAMPLES: u32 = 28;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    let renderer = audren_stereo(&mut cpu);
+
+    // Two coefficient pairs, chosen so the arithmetic is checkable by hand:
+    // pair 0 predicts nothing, so a sample is its own nibble; pair 1 is 1.0 in
+    // the predictor's Q11, so a sample is its nibble plus the one before it.
+    let coefficients: [i16; 16] = [0, 0, 2048, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    for (i, &c) in coefficients.iter().enumerate() {
+        cpu.mem.write_u16(COEFS + i as u32 * 2, c as u16).unwrap();
+    }
+
+    // Frame 0: pair 0, shift 0, nibbles 1..7 then -8..-2.
+    // Frame 1: pair 1, shift 0, every nibble 1 — a running +1 from the -2 the
+    // first frame ended on.
+    let data: [u8; 16] = [
+        0x00, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE,
+        0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+    ];
+    for (i, &b) in data.iter().enumerate() {
+        cpu.mem.write_u8(DATA + i as u32, b).unwrap();
+    }
+    let expected: [i16; 28] = [
+        1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+    ];
+
+    let mut update = AudrenUpdate::new(1, 1, 1);
+    update.voice(0, PCM_ADPCM, 1, DATA, data.len() as u32, SAMPLES);
+    update.extra_params(0, COEFS, 32);
+    update.route(0, 0, 1.0);
+    update.mix(2);
+    update.sink(&[0, 1]);
+
+    cpu.cycles += AUDREN_FRAME_CYCLES;
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+
+    let mut played = vec![0i16; 240 * 2];
+    assert_eq!(cpu.take_audio(&mut played), played.len());
+    for (i, &want) in expected.iter().enumerate() {
+        assert_eq!(played[i * 2], want, "ADPCM sample {i}");
+    }
+    // Past the end of the wave buffer the voice interpolates down to silence
+    // rather than holding its last sample, which would leave a DC step behind.
+    assert_eq!(played[expected.len() * 2], 0, "the voice kept playing past its data");
+}
+
+#[test]
+fn audren_frame_event_fires_on_the_clock() {
+    // `audrenWaitFrame` blocks on this event, and every mixer built on it
+    // paces itself by how often it comes back. The handle used to be a bare
+    // one — not modelled as an event at all, so `WaitSynchronization` treated
+    // it as permanently ready and the wait returned instantly. That is a
+    // renderer with no clock, which is how a title ends up running its audio
+    // at whatever multiple of real time the emulator manages.
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    let renderer = audren_stereo(&mut cpu);
+    let tls = cpu.tls_base();
+
+    // QuerySystemEvent. Events are *copy* handles: sent as a move handle it
+    // reads back as 0 on the other side.
+    ipc_request_plain(&mut cpu, renderer, 7, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1, "not a copy handle");
+    let event = cpu.mem.read_u32(tls + 0x0c).unwrap();
+    assert_ne!(event, 0, "no frame event came back");
+
+    // No time has passed, so the frame is not due.
+    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0xEA01, "the frame event fired early");
+
+    // Five milliseconds of it, and it is.
+    cpu.cycles += AUDREN_FRAME_CYCLES;
+    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0, "the frame event never fired");
+}
+
+#[test]
+fn audren_refuses_a_wave_buffer_that_is_outside_its_allocation() {
+    // `end_sample_offset` is the guest's claim about its own buffer and `size`
+    // is what it allocated. Where they disagree the allocation wins, because
+    // the samples past it are somebody else's memory read as PCM — which is
+    // exactly the buzzing `audout` produced from the Mii editor's descriptor
+    // until it started checking.
+    //
+    // The buffer is still consumed: the guest is entitled to it back however
+    // unplayable it was, and a buffer that never comes back stalls the voice
+    // that queued it.
+    const IN: u32 = 0x3_0000;
+    const OUT: u32 = 0x4_0000;
+    const PCM: u32 = 0x5_0000;
+    const VOICE_OUT: u32 = 64 + 4 * 16;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    let renderer = audren_stereo(&mut cpu);
+
+    for i in 0..240 {
+        cpu.mem.write_u16(PCM + i * 2, 0x7FFF).unwrap();
+    }
+    let mut update = AudrenUpdate::new(1, 1, 1);
+    // 240 samples claimed out of a buffer with room for none of them.
+    update.voice(0, PCM_INT16, 1, PCM, 0, 240);
+    update.route(0, 0, 1.0);
+    update.route(0, 1, 1.0);
+    update.mix(2);
+    update.sink(&[0, 1]);
+
+    cpu.cycles += AUDREN_FRAME_CYCLES;
+    update.send(&mut cpu, renderer, IN, OUT, 0x2000);
+
+    let mut played = vec![0i16; 240 * 2];
+    assert_eq!(cpu.take_audio(&mut played), played.len(), "the sink stopped producing frames");
+    assert!(played.iter().all(|&s| s == 0), "unplayable samples reached the host");
+    assert_eq!(cpu.mem.read_u32(OUT + VOICE_OUT + 8).unwrap(), 1, "the buffer never came back");
+}
+
 #[test]
 fn audout_refuses_a_buffer_whose_samples_are_outside_it() {
     // `data_offset + data_size` has to fit inside `buffer_size`. The Mii
