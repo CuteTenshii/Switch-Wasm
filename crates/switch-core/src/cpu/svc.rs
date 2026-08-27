@@ -671,9 +671,9 @@ impl Cpu {
                 // A blocking wait on the **vsync** event is the one wait this
                 // emulator can honour by actually waiting: the display tick is
                 // generated from `cycles` a few lines up, so it is certain to
-                // fire, and no other event here has that property. Rewinding
-                // onto the `svc` throttles the guest's render loop to the
-                // refresh rate.
+                // fire, and no other event here has that property. Parking on
+                // the tick throttles the guest's render loop to the refresh
+                // rate.
                 //
                 // Answering it immediately instead is what kept the Home Menu
                 // off the screen. Its frame loop ran at tens of kHz -- 58,547
@@ -685,33 +685,8 @@ impl Cpu {
                     && !crate::env_flag!("NO_VSYNC_THROTTLE")
                     && self.vsync_event.is_some_and(|v| handles.contains(&v))
                 {
-                    if !self.has_other_runnable() {
-                        // Nothing else can run, so there is no work to overlap
-                        // the wait with: idle straight to the next tick instead
-                        // of stepping seventeen million instructions that do
-                        // nothing. This is the console's own idle, and without
-                        // it the throttle costs more than it saves.
-                        //
-                        // Not *past* a thread that asked to be woken sooner,
-                        // though. A tick is 16.7 ms away and a loading thread
-                        // sleeps in single milliseconds between work items, so
-                        // skipping to the tick regardless spends a whole frame
-                        // on each of them — the display throttle deciding how
-                        // fast a title is allowed to load. Idle to whichever
-                        // comes first and wake whatever that was.
-                        let tick =
-                            self.last_vsync_cycles.wrapping_add(super::VSYNC_PERIOD_CYCLES);
-                        let until = self
-                            .earliest_deadline()
-                            .filter(|&at| at > self.cycles && at < tick)
-                            .unwrap_or(tick);
-                        if until > self.cycles {
-                            self.cycles = until;
-                        }
-                        self.expire_timed_waits();
-                    }
                     self.pc = self.pc.wrapping_sub(4);
-                    self.yield_thread();
+                    self.park_on_events(self.next_display_tick());
                     return Ok(());
                 }
                 // A blocking wait on an **audio buffer** event is the other
@@ -728,23 +703,24 @@ impl Cpu {
                 // Pointer` on the `container_of` a null and faulted at
                 // 0xffffffd0.
                 if let Some(done_at) = next_buffer {
-                    // Park the thread until the device is done with the buffer,
-                    // rather than spinning on the syscall the way the vsync
-                    // wait does. A frame is a few hundred thousand cycles and
-                    // spinning through one is cheap; an audio buffer is tens of
-                    // millions, and re-entering this handler for each of them
-                    // cost more host time than the guest work it was waiting
-                    // for -- Just Dance fell from 20M emulated instructions per
-                    // second to 1.7M. The PC goes back onto the `svc` so the
-                    // wait is reissued, and its handles rechecked, on waking.
+                    // Park until the device is done with the buffer rather than
+                    // until the next display tick: the queue's own deadline is
+                    // known, and it is tens of millions of cycles out, so
+                    // waking a hundred times on the way there would be a
+                    // hundred laps of this handler for nothing. Re-entering it
+                    // per buffer once cost more host time than the guest work
+                    // being waited for -- Just Dance fell from 20M emulated
+                    // instructions per second to 1.7M. The PC goes back onto
+                    // the `svc` so the wait is reissued, and its handles
+                    // rechecked, on waking.
                     self.pc = self.pc.wrapping_sub(4);
                     self.sleep_until(done_at);
                     return Ok(());
                 }
                 // Nothing has fired, and the caller is prepared to block. The
                 // wait is reissued rather than answered: rewind onto the `svc`
-                // and hand the CPU on, so the handles are re-checked every
-                // time this thread is scheduled.
+                // and park, so the handles are re-checked when a signal or the
+                // display tick wakes this thread.
                 //
                 // Answering it as *satisfied* is the alternative, and it does
                 // not merely lie about timing — `svcWaitSynchronization`
@@ -755,13 +731,14 @@ impl Cpu {
                 // nine-handle wait; the channel was empty, as it always is
                 // here, and qlaunch aborts on that rather than looping.
                 //
-                // Spinning costs cycles, and that is the point: the display
-                // and audio ticks a few lines up are generated from `cycles`,
-                // so a wait that something can eventually satisfy still ends,
-                // and one that nothing can is a deadlock the guest really is
-                // in.
+                // Re-asking on every scheduler slice is the other alternative,
+                // and it is what this used to do. Only [`Cpu::signal_event`]
+                // can change the answer and it wakes the park, so the extra
+                // laps learn nothing — and a wait nothing will ever satisfy
+                // (`am:gpu-error` is one every `nnSdk` title makes) then costs
+                // the whole machine rather than nothing at all.
                 self.pc = self.pc.wrapping_sub(4);
-                self.yield_thread();
+                self.park_on_events(self.next_display_tick());
                 Ok(())
             }
             0x1E => {

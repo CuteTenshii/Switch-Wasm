@@ -136,8 +136,8 @@ than the `MAX_MAPPED_BYTES` (512 MiB) cap for free.
 0x0010_0000  ENV_BLOCK_ADDR (nro.rs)  homebrew ABI environment block
 0x0800_0000  ASLR region, 496 MiB     svcGetInfo 12/13
 0x1800_0000  GUEST_STACK_REGION_ADDR  thread-stack mirrors, 128 MiB (14/15)
-0x1F00_0000  SELF_RETURN_TRAMPOLINE   +0x100 THREAD_EXIT_TRAMPOLINE
-0x1FE0_0000  main thread TLS          children from THREAD_TLS_BASE, page each
+0x2000_0000  SELF_RETURN_TRAMPOLINE   +0x100 THREAD_EXIT_TRAMPOLINE
+0x2010_0000  main thread TLS          children from THREAD_TLS_BASE, page each
 0x2800_0000  STACK_BASE               main stack 1 MiB, SP at STACK_TOP
 0x2900_0000  RO_MODULE_REGION_ADDR    ldr:ro maps run-time NROs, 112 MiB
 0x3000_0000  heap / alias             per MemoryLayout, below
@@ -266,7 +266,15 @@ executed. Between instructions is safe (all state is in `ThreadContext`), and
   have room or `virtmemFindStack` hands back address 0, and `svcMapMemory` must
   really back the destination or two threads share one stack. Pages are not
   shareable, so the alias is a copy (`Memory::copy_range`), copied back by
-  `svcUnmapMemory`.
+  `svcUnmapMemory`. **Nothing of the emulator's own may be inside it**: a guest
+  picks the address itself and asks only `svcQueryMemory`, so the region stops
+  at `SELF_RETURN_TRAMPOLINE` and the trampolines and TLS blocks live above it.
+- **A blocking wait parks, it does not re-ask.** `ThreadState::WaitEvent` holds
+  the thread with its PC on the `svc`; `signal_event` wakes every parked waiter
+  on an event's *transition* (re-firing a signalled event wakes nobody, or
+  `audio_tick` would wake them on every wait in the process), and the deadline
+  is the display tick. Re-asking on each slice is what it replaced, and it cost
+  the Home Menu 131 of the 170M steps it took to reach frame 10.
 - The SVC path retires the instruction *before* dispatching, so a syscall that
   switches threads can install the incoming PC.
 - `svcQueryMemory` finds bounds through `Memory::state_run`, which skips 2 MiB

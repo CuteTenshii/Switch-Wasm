@@ -89,20 +89,28 @@ pub const STACK_SIZE: u64 = 0x0010_0000;
 pub const STACK_TOP: u64 = 0x2810_0000;
 
 /// Address of the return-address trampoline for direct-entered homebrew.
-pub const SELF_RETURN_TRAMPOLINE: u32 = 0x1F00_0000;
+///
+/// This and everything below it sit **above the stack region**, in the 128 MiB
+/// between it and the main stack. They used to sit inside it, which meant the
+/// emulator's own furniture was standing in the range `svcGetInfo` 14/15 tells
+/// the guest is free for thread stacks — see [`GUEST_STACK_REGION_SIZE`].
+pub const SELF_RETURN_TRAMPOLINE: u32 = 0x2000_0000;
 
 /// Where a guest thread's entry point returns to: a stub that calls
 /// `svcExitThread` (svc 0x0A), the way libnx's thread entry does.
-pub const THREAD_EXIT_TRAMPOLINE: u32 = 0x1F00_0100;
+pub const THREAD_EXIT_TRAMPOLINE: u32 = 0x2000_0100;
 
 /// The handle the main thread is known by (the environment block advertises the
 /// same value as `EntryType_MainThreadHandle`).
 pub const MAIN_THREAD_HANDLE: u64 = 1;
 
+/// The main thread's TLS block, which `Cpu::bootstrap` puts in `tpidr`.
+pub const MAIN_THREAD_TLS_BASE: u32 = 0x2010_0000;
+
 /// Base of the per-thread TLS blocks handed to threads the guest creates. The
-/// main thread keeps `0x1FE0_0000` (see [`Cpu::bootstrap`]); children get a
-/// page each above it, clear of the heap and the stack.
-pub const THREAD_TLS_BASE: u32 = 0x1FE1_0000;
+/// main thread keeps [`MAIN_THREAD_TLS_BASE`]; children get a page each above
+/// it, clear of the heap and the stack.
+pub const THREAD_TLS_BASE: u32 = 0x2011_0000;
 /// Distance between two threads' TLS blocks. Horizon's are 0x200 bytes; a page
 /// each keeps the newlib reentrancy struct that follows out of the way too.
 pub const THREAD_TLS_STRIDE: u32 = 0x1000;
@@ -269,12 +277,25 @@ pub enum ThreadState {
     /// on something that runs off the emulator's own clock rather than off
     /// another thread — an `audout` buffer finishing, today.
     ///
-    /// Spinning instead is what the vsync wait does, and for a wait of a few
-    /// hundred thousand cycles that is fine. An audio buffer is tens of
+    /// Spinning instead is what the vsync wait did, and for a wait of a few
+    /// hundred thousand cycles that would be fine. An audio buffer is tens of
     /// millions, and re-entering the syscall handler for each of them costs
     /// the host far more than the guest: it took Just Dance from 20M emulated
     /// instructions per second to 1.7M.
     Sleeping { deadline: u64 },
+    /// Blocked in `svcWaitSynchronization` on events none of which has fired,
+    /// with its PC left on the `svc` so the wait is reissued — and its handles
+    /// rechecked — when the thread wakes. [`Cpu::signal_event`] wakes it, and
+    /// `deadline` is the display tick, which bounds how long a park can last
+    /// whatever happens.
+    ///
+    /// The alternative is to re-ask on every scheduler slice, which is what
+    /// this used to do. Nothing but a signal can change the answer, so the
+    /// re-asking learns nothing and is not free: `am:gpu-error` is a wait no
+    /// console ever satisfies, and the two threads sitting in one took **70%
+    /// of every instruction Just Dance 2023 retired** — enough to hide the
+    /// fact that the title had stopped making progress at all.
+    WaitEvent { deadline: u64 },
 }
 
 /// How an `svcWaitForAddress` resolved, which the syscall layer turns into a
@@ -322,8 +343,22 @@ const CONDVAR_HAS_WAITERS: u32 = 1;
 /// The address-space range `svcGetInfo` reports as the stack region: where
 /// libnx mirrors the stacks of the threads the guest creates. It sits inside the
 /// ASLR region and clear of the image, the main stack and the heap.
+///
+/// **Everything in it has to be free**, which is not a formality: `nn::os::
+/// CreateThread` maps a thread's stack here at an address it picks itself,
+/// checking only that `svcQueryMemory` calls the range free. It has no idea
+/// this emulator keeps anything of its own. The return trampolines and every
+/// thread's TLS block used to sit in the top 16 MiB of it — Just Dance 2023
+/// was already mapping stacks at 0x1fdc8000, one page short of the main
+/// thread's TLS, and a stack that landed there would have overwritten the
+/// thread pointer every `SdkMutex` reads. They moved up rather than the region
+/// shrinking, because the size is the modulus `nnSdk`'s random placement uses:
+/// taking 16 MiB off it deals every title a different sequence of addresses,
+/// which moved one title off an abort in `nn::os::detail::ThreadManager::
+/// CreateAliasStackUnsafe` and moved another onto it. The region now ends
+/// exactly where they begin, and is the size it always was.
 pub const GUEST_STACK_REGION_ADDR: u32 = 0x1800_0000;
-pub const GUEST_STACK_REGION_SIZE: u32 = 0x0800_0000;
+pub const GUEST_STACK_REGION_SIZE: u32 = SELF_RETURN_TRAMPOLINE - GUEST_STACK_REGION_ADDR;
 
 /// The end of the address space this emulator presents to the guest:
 /// everything below is soft-mapped by [`Cpu::bootstrap`] (reads see zeros, a
@@ -1490,7 +1525,7 @@ impl Cpu {
         // check and the app aborted. Up here, past the stack and well clear of
         // everything the guest's own allocators have been observed to reach,
         // is safe.
-        self.tpidr = 0x1FE0_0000;
+        self.tpidr = u64::from(MAIN_THREAD_TLS_BASE);
         // A return-address trampoline: the loader enters homebrew's `main`
         // directly, so LR is 0 and any early return would branch to NULL.
         // Point LR at a stub that calls ExitProcess (svc 0x07), so main's
@@ -1777,7 +1812,9 @@ impl Cpu {
             let deadline = match state {
                 ThreadState::WaitKey { deadline, .. }
                 | ThreadState::WaitAddress { deadline, .. } => deadline,
-                ThreadState::Sleeping { deadline } => Some(deadline),
+                ThreadState::Sleeping { deadline } | ThreadState::WaitEvent { deadline } => {
+                    Some(deadline)
+                }
                 _ => None,
             };
             if !deadline.is_some_and(|at| now >= at) {
@@ -1994,7 +2031,9 @@ impl Cpu {
             .filter_map(|t| match t.state {
                 ThreadState::WaitKey { deadline, .. }
                 | ThreadState::WaitAddress { deadline, .. } => deadline,
-                ThreadState::Sleeping { deadline } => Some(deadline),
+                ThreadState::Sleeping { deadline } | ThreadState::WaitEvent { deadline } => {
+                    Some(deadline)
+                }
                 _ => None,
             })
             .min()
@@ -2069,6 +2108,22 @@ impl Cpu {
         self.reschedule();
     }
 
+    /// When the display next refreshes. The only deadline this emulator can
+    /// promise a blocked thread: it comes off `cycles` rather than off another
+    /// guest thread, so it arrives whatever the process is doing.
+    pub(super) fn next_display_tick(&self) -> u64 {
+        self.last_vsync_cycles.wrapping_add(VSYNC_PERIOD_CYCLES)
+    }
+
+    /// Park the running thread on the events it is waiting for, until one is
+    /// signalled or `deadline` passes. The caller leaves the PC on the `svc`,
+    /// so the wait is reissued and its handles rechecked either way.
+    pub(super) fn park_on_events(&mut self, deadline: u64) {
+        self.ensure_main_thread();
+        self.threads[self.current_thread].state = ThreadState::WaitEvent { deadline };
+        self.reschedule();
+    }
+
     /// Switch away from the running thread after it blocked. If nothing can
     /// run, everything blocked is woken: guests re-check their predicates in a
     /// loop, so a spurious wake degrades to the old spin rather than a hang.
@@ -2076,21 +2131,19 @@ impl Cpu {
         if self.switch_to_next_runnable() {
             return;
         }
-        // Nothing can run, but a sleeping thread has a time it wakes at, so
+        // Nothing can run, but a parked thread has a time it wakes at, so
         // there is a right answer here rather than a spurious wake: idle the
         // clock forward to the earliest of them. That is the console's own
         // idle, and it is what stops a process whose only remaining work is
         // waiting for audio from stepping tens of millions of instructions to
         // get there.
-        let earliest = self
-            .threads
-            .iter()
-            .filter_map(|t| match t.state {
-                ThreadState::Sleeping { deadline } if !t.paused => Some(deadline),
-                _ => None,
-            })
-            .min();
-        if let Some(deadline) = earliest {
+        //
+        // The earliest across *every* kind of timed wait, not just the
+        // sleepers. A display tick is 16.7 ms away and a loading thread sleeps
+        // in single milliseconds between work items, so idling to the tick
+        // regardless would spend a whole frame on each of them — the display
+        // throttle deciding how fast a title is allowed to load.
+        if let Some(deadline) = self.earliest_deadline() {
             if deadline > self.cycles {
                 self.cycles = deadline;
             }
@@ -2107,7 +2160,9 @@ impl Cpu {
         for index in 0..self.threads.len() {
             match self.threads[index].state {
                 ThreadState::WaitKey { mutex, .. } => self.wake_condvar_waiter(index, mutex),
-                ThreadState::WaitMutex(_) | ThreadState::WaitAddress { .. } => {
+                ThreadState::WaitMutex(_)
+                | ThreadState::WaitAddress { .. }
+                | ThreadState::WaitEvent { .. } => {
                     self.threads[index].state = ThreadState::Runnable;
                 }
                 _ => {}
@@ -2681,10 +2736,30 @@ impl Cpu {
         !self.applet_focus_announced || !self.applet_messages.is_empty()
     }
 
-    /// Fire an event.
+    /// Fire an event, and wake every thread parked on one.
+    ///
+    /// Every waiter rather than only this event's: a parked thread does not
+    /// record which handles it named, and it does not need to — it wakes onto
+    /// the `svc` that parked it, rechecks its own handles and parks again if
+    /// this was not the one it wanted. A signal is rare enough that the extra
+    /// laps cost nothing, and getting the *set* wrong here would be a lost
+    /// wakeup, which is the one failure a wait cannot recover from.
     pub fn signal_event(&mut self, handle: u64) {
-        if let Some(event) = self.events.get_mut(&handle) {
-            event.signaled = true;
+        let Some(event) = self.events.get_mut(&handle) else { return };
+        // Only a *transition* wakes anybody. Re-firing an event that is
+        // already signalled changes nothing a waiter could observe, and this
+        // is not a rare case: [`Cpu::audio_tick`] re-signals a device whose
+        // buffer has come due on every single `svcWaitSynchronization` in the
+        // process, so waking on each of them turned the park back into the
+        // spin it replaced.
+        if event.signaled {
+            return;
+        }
+        event.signaled = true;
+        for thread in &mut self.threads {
+            if matches!(thread.state, ThreadState::WaitEvent { .. }) {
+                thread.state = ThreadState::Runnable;
+            }
         }
     }
 

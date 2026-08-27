@@ -149,6 +149,15 @@ fn msr_nzcv() -> u32 {
     0xD51B4200 | 31
 }
 
+/// `movk x9, #(THREAD_TLS_BASE >> 16), lsl #16` — the second half of building
+/// a guest thread's own TLS address, after `mov x9, #stride` supplies the low
+/// word. Assembled from the constant rather than written out, because the two
+/// starvation tests below reach into thread 1's TLS block by address and a
+/// hand-written `movk` goes on pointing at wherever the block used to be.
+fn movk_x9_tls_high() -> u32 {
+    0xf2a0_0000 | ((switch_core::cpu::THREAD_TLS_BASE >> 16) << 5) | 9
+}
+
 // ---------------- tests ----------------
 
 #[test]
@@ -3959,6 +3968,59 @@ fn a_wait_on_no_handles_is_not_answered() {
 }
 
 #[test]
+fn a_blocking_wait_parks_rather_than_re_asking() {
+    // A wait that cannot be satisfied yet used to rewind onto the `svc` and
+    // hand the CPU on, so the thread re-asked on every scheduler slice. Only a
+    // signal can change the answer, so each of those laps learned nothing --
+    // and a display period is seventeen million cycles of them. The Home Menu
+    // spent 131 of every 170 million steps getting to its tenth frame, and
+    // Just Dance 2023 sat two threads in waits nothing ever satisfies and gave
+    // them 70% of every instruction it retired.
+    const VI: u64 = 0xB500;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(VI, "vi:m");
+    let tls = cpu.tls_base();
+
+    ipc_request_plain(&mut cpu, VI, 2, &[]);
+    let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    ipc_request_plain(&mut cpu, display, 5202, &[]);
+    let vsync = cpu.mem.read_u32(tls + 0x0c).unwrap();
+    assert_ne!(vsync, 0);
+
+    // One thread, waiting on the display for as long as that takes.
+    cpu.mem.map_zero(0x6000, 0x1000).unwrap();
+    cpu.mem.write_u32(0x6000, vsync).unwrap();
+    let code = [
+        0xd28c_0001u32, // mov x1, #0x6000  (the handle list)
+        0xd280_0022,    // mov x2, #1       (one handle)
+        0x9280_0003,    // mov x3, #-1      (no timeout)
+        0xd400_0301,    // svc #0x18        (WaitSynchronization)
+        0xd28c_0009,    // mov x9, #0x6000
+        0x5280_0aa1,    // mov w1, #0x55
+        0xb900_0521,    // str w1, [x9, #4]
+        0xd400_00e1,    // svc #7           (ExitProcess)
+    ];
+    let bytes: Vec<u8> = code.iter().flat_map(|i| i.to_le_bytes()).collect();
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.map(0x2000, &bytes).unwrap();
+    cpu.set_pc(0x2000);
+    let before = cpu.steps;
+    cpu.run(1_000_000).unwrap();
+
+    assert_eq!(cpu.mem.read_u32(0x6004).unwrap(), 0x55, "the wait never ended");
+    assert!(
+        cpu.cycles >= switch_core::cpu::VSYNC_PERIOD_CYCLES,
+        "the wait ended before the display could have refreshed, so it ended for \
+         the wrong reason"
+    );
+    // The clock covered a whole refresh. The CPU did not have to execute one.
+    let retired = cpu.steps - before;
+    assert!(retired < 1000, "the wait re-asked its way through the period: {retired} steps");
+}
+
+#[test]
 fn a_thread_that_never_blocks_is_still_taken_off_the_cpu() {
     // Threads used to hand over only at a blocking syscall, so a thread that
     // runs a long stretch of arithmetic between two of them kept the CPU for
@@ -4112,7 +4174,7 @@ fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
     // THREAD_TLS_BASE + index * stride, and this is thread 1.
     let child = [
         0xd282_0009u32, // mov x9, #0x1000
-        0xf2a3_fc29,    // movk x9, #0x1fe1, lsl #16   (= THREAD_TLS_BASE + stride)
+        movk_x9_tls_high(),                          // (= THREAD_TLS_BASE + stride)
         0x5280_0081,    // mov w1, #4                  (message type: Request)
         0xb900_0121,    // str w1, [x9]
         0x5280_0101,    // mov w1, #8                  (data words)
@@ -4383,7 +4445,7 @@ fn an_audio_thread_appending_buffers_does_not_starve_the_others() {
     // what is under test is who holds the CPU afterwards.
     let child = [
         0xd282_0009u32, // mov x9, #0x1000
-        0xf2a3_fc29,    // movk x9, #0x1fe1, lsl #16   (= THREAD_TLS_BASE + stride)
+        movk_x9_tls_high(),                          // (= THREAD_TLS_BASE + stride)
         0x5280_0081,    // mov w1, #4                  (message type: Request)
         0xb900_0121,    // str w1, [x9]
         0x5280_0101,    // mov w1, #8                  (data words)
@@ -6511,12 +6573,29 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     use switch_core::cpu::{
         GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
         GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR,
-        GUEST_STACK_REGION_SIZE, GUEST_TOTAL_MEMORY_SIZE, MemoryLayout, OperationMode,
-        SHARED_BUFFER_ADDR, SHARED_BUFFER_RESERVED_SIZE, STACK_TOP, VAMM_ARENA_SIZE,
+        GUEST_STACK_REGION_SIZE, GUEST_TOTAL_MEMORY_SIZE, MAIN_THREAD_TLS_BASE, MemoryLayout,
+        OperationMode, SELF_RETURN_TRAMPOLINE, SHARED_BUFFER_ADDR, SHARED_BUFFER_RESERVED_SIZE,
+        STACK_TOP, THREAD_EXIT_TRAMPOLINE, THREAD_TLS_BASE, VAMM_ARENA_SIZE,
     };
     use switch_core::{FB_BASE, FB_HEIGHT, FB_WIDTH, INPUT_ADDR};
 
     assert!(GUEST_STACK_REGION_ADDR + GUEST_STACK_REGION_SIZE <= GUEST_HEAP_REGION_ADDR);
+    // And clear of what the emulator keeps for itself. A guest picks the
+    // address it maps a thread stack at out of this region and asks nobody:
+    // whatever of ours is inside it gets overwritten sooner or later, and the
+    // trampolines and the TLS blocks are the two things a thread cannot lose.
+    for (what, addr) in [
+        ("the self-return trampoline", SELF_RETURN_TRAMPOLINE),
+        ("the thread-exit trampoline", THREAD_EXIT_TRAMPOLINE),
+        ("the main thread's TLS", MAIN_THREAD_TLS_BASE),
+        ("the child threads' TLS", THREAD_TLS_BASE),
+    ] {
+        assert!(
+            addr < GUEST_STACK_REGION_ADDR
+                || addr >= GUEST_STACK_REGION_ADDR + GUEST_STACK_REGION_SIZE,
+            "{what} ({addr:#x}) is inside the stack region the guest is told is free"
+        );
+    }
     assert!(STACK_TOP <= u64::from(GUEST_HEAP_REGION_ADDR), "the main stack is below the heap");
     assert_eq!(GUEST_HEAP_REGION_ADDR + GUEST_HEAP_REGION_SIZE, GUEST_ALIAS_REGION_ADDR);
     assert!(GUEST_ALIAS_REGION_ADDR + GUEST_ALIAS_REGION_SIZE <= SHARED_BUFFER_ADDR);

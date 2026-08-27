@@ -1565,6 +1565,21 @@ fn decode_alu_wide(insn: u64) -> Op {
         return Op::Nop;
     }
 
+    // vote.vtg — 0x50e0/0xfff8, and nothing to do. The vertex-stage vote
+    // writes neither a register nor a predicate: it tells the hardware's
+    // tessellation and stream-out fixed function about the warp, and there is
+    // no such fixed function here. Eden stubs it the same way
+    // (`shader_recompiler/frontend/maxwell/translate/impl/vote.cpp`, where
+    // `VOTE_vtg` logs and emits no IR) while implementing plain `VOTE` fully.
+    //
+    // Refusing it is not free: a refused instruction fails the whole draw, and
+    // this one sits two instructions before `exit` in Just Dance 2023's
+    // loading-screen vertex shader — every draw the title made, all 52 of
+    // them, and the frame it presented was the clear colour and nothing else.
+    if insn & 0xfff8_0000_0000_0000 == 0x50e0_0000_0000_0000 {
+        return Op::Nop;
+    }
+
     // mufu — subop at 20..24, sat 50, src: neg 48 / abs 46.
     if insn & 0xfff8_0000_0000_0000 == 0x5080_0000_0000_0000 {
         let mufu = match field(insn, 20, 4) {
@@ -2694,6 +2709,19 @@ mod tests {
         assert_eq!(op(asm(0xf0f8, &[])), Op::Sync);
         assert_eq!(op(asm(0xe340, &[])), Op::Brk);
         assert_eq!(op(asm(0x50b0, &[])), Op::Nop);
+    }
+
+    /// The exact word Just Dance 2023's loading-screen vertex shader carries,
+    /// two instructions before its `exit`. It has to decode to something, or
+    /// the draw it belongs to never happens.
+    #[test]
+    fn a_vertex_stage_vote_is_a_nop() {
+        assert_eq!(op(0x50e2_4321_1117_0000), Op::Nop);
+        // The whole 0x50e0 group, not just that encoding: the three bits the
+        // mask leaves free are the vote's operands, which nothing here reads.
+        for low in 0..8u64 {
+            assert_eq!(op(0x50e0_0000_0000_0000 | (low << 48)), Op::Nop);
+        }
     }
 
     #[test]

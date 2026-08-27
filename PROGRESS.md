@@ -403,6 +403,61 @@ continue;`. On hardware that sleeps 200 ms; here it turned into a loop with no
 blocking syscall, and threads only hand over at those — so it starved every
 other thread and no frame was ever presented. A non-zero timeout now yields.
 
+**A step counter that keeps climbing is not a title that keeps running.** Just
+Dance 2023 reached seven billion steps with no frame. Profiling it at four
+budgets showed the main thread retiring a *constant* 760M instructions at 1B,
+1.5B, 3B and 6B — it had stopped at 765M and everything after was two threads
+inside `svcWaitSynchronization`, one on `am:gpu-error` and one on `vi:vsync`,
+each rewinding onto the `svc` and yielding on every scheduler slice. 70% of the
+machine, going nowhere, and the *Steps* readout counting all of it. Three
+things came out of it:
+
+- **A blocking wait parks now.** Only `signal_event` can change the answer, so
+  re-asking between signals learns nothing. `ThreadState::WaitEvent` holds the
+  thread with its PC on the `svc` until a signal or the display tick. The Home
+  Menu reaches its tenth frame in **39.2M steps instead of 170.6M**, the frame
+  byte-identical; Just Dance's main thread went from 25% of the machine to 82%.
+  The catch found on the way: waking on every `signal_event` call rather than
+  on an event's *transition* put the spin straight back, because `audio_tick`
+  re-signals a device whose buffer has come due on every wait in the process.
+- **The top 16 MiB of the stack region was not the guest's to have.**
+  `svcGetInfo` 14/15 advertised 0x1800_0000 + 128 MiB, and the return
+  trampolines (0x1F00_0000) and every thread's TLS block (0x1FE0_0000 up) sat
+  inside it. `nn::os::CreateThread` picks an address in there itself: the title
+  was already mapping stacks at 0x1fdc8000, one page short of the main thread's
+  TLS, and a stack that landed on it would overwrite the thread pointer every
+  `SdkMutex` reads. The trampolines and TLS moved to 0x2000_0000, above the
+  region, so the advertised range is free and none of the 128 MiB is lost.
+
+  **Shrinking the region instead is the wrong fix, and it looked like the right
+  one.** Ending it at the trampoline removes the same overlap and costs 16 MiB;
+  Just Dance then got *past* an abort in `nn::os::detail::ThreadManager::
+  CreateAliasStackUnsafe` it had always taken, which read as a cure. It was
+  luck: the region size is the modulus nnSdk's random placement uses, so a
+  different size is a different address sequence. With the region back at 128
+  MiB the title maps the same 38 stacks at the same 38 addresses as before and
+  aborts on the 39th, exactly as it did — and "A Short Hike", which the 16 MiB
+  cost had started aborting in the same function, runs to budget again.
+
+  So **`CreateAliasStackUnsafe` is still an open bug**, and the overlap was
+  never what caused it. `svcMapMemory` here refuses nothing, so those 38 maps
+  all succeeded and the 39th never reached a syscall: whatever asserts is
+  inside `nn::os::detail::AslrSpaceAllocator`'s own bookkeeping, which is built
+  from `svcGetInfo` 12/13 and has the heap and alias regions outside the ASLR
+  region it is told about.
+- **One undecoded opcode cost every draw.** `VOTE.VTG` (0x50e0/0xfff8) sits two
+  instructions before `exit` in the loading screen's vertex shader, and a
+  refused instruction fails the whole draw — all 52 of them, every frame the
+  clear colour. It writes neither register nor predicate: Eden stubs it too
+  (`translate/impl/vote.cpp`). The draws are no longer refused; the frame is
+  still the clear colour, which is a separate question.
+
+Booted **without its update** the same title deadlocks for real at 765M steps —
+main polling a semaphore on a 1 ms timed wait, two workers parked on one
+condvar, the 16-thread job pool idle — and no IPC of any kind follows. Patched
+with 1.0.1 it presents 76 frames and dies elsewhere. The base container's
+deadlock is not chased; the update is the configuration that runs.
+
 ## Services
 
 Every service the retail title asks for is implemented; `usb:hs` and `ncm` are
