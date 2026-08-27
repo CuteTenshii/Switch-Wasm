@@ -73,6 +73,7 @@ use super::isa::{
     BoolOp, FCmp, FMod, FRound, HMerge, HPrecision, HSwizzle, ICmp, LogicOp, LopTest, MufuOp, Op,
     Operand, Pred, TexDim, RZ,
 };
+use crate::gpu::pipeline::AttributeBase;
 use crate::gpu::texture::SwizzleSource;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -1654,6 +1655,16 @@ pub struct Layout {
     /// whatever the vertex format was, `raster::fetch_attribute` has already
     /// widened it to that.
     pub attributes: Vec<usize>,
+    /// The slots of [`Layout::attributes`] whose vertex format carries
+    /// integers instead, and which of the two.
+    ///
+    /// WebGPU makes a shader input's base type part of the match, so an
+    /// integer attribute has to be declared `vec4<i32>`/`vec4<u32>` and
+    /// bitcast into `a[]` — which is the bit pattern `fetch_attribute`
+    /// leaves there for one as well, so the two stages still agree. Nothing
+    /// the program says: the backend fills it in from the draw, the same way
+    /// it does [`Layout::flip_y`].
+    pub integer_attributes: Vec<(usize, AttributeBase)>,
     /// Generic slots passed from the vertex stage to the fragment stage.
     /// Both stages have to name the same ones, so a pair of modules is built
     /// from one layout rather than two.
@@ -1766,6 +1777,7 @@ impl Layout {
         };
         Layout {
             attributes,
+            integer_attributes: Vec::new(),
             varyings,
             const_banks: translated.const_banks.clone(),
             textures: translated
@@ -1784,6 +1796,25 @@ impl Layout {
             flip_y: false,
             depth_minus_one_to_one: false,
         }
+    }
+
+    /// What slot `slot` arrives as. Float unless the draw said otherwise:
+    /// only the integer formats are recorded, since they are the only ones
+    /// that change how the input is declared.
+    pub fn attribute_base(&self, slot: usize) -> AttributeBase {
+        self.integer_attributes
+            .iter()
+            .find(|&&(at, _)| at == slot)
+            .map_or(AttributeBase::Float, |&(_, base)| base)
+    }
+}
+
+/// The WGSL scalar an attribute of this base type is read as.
+fn attribute_scalar(base: AttributeBase) -> &'static str {
+    match base {
+        AttributeBase::Float => "f32",
+        AttributeBase::Sint => "i32",
+        AttributeBase::Uint => "u32",
     }
 }
 
@@ -1942,7 +1973,10 @@ fn vertex_entry(layout: &Layout) -> String {
     if !layout.attributes.is_empty() {
         out.push_str("struct VertexInput {\n");
         for slot in &layout.attributes {
-            out.push_str(&format!("  @location({slot}) attr{slot}: vec4<f32>,\n"));
+            out.push_str(&format!(
+                "  @location({slot}) attr{slot}: vec4<{}>,\n",
+                attribute_scalar(layout.attribute_base(*slot))
+            ));
         }
         out.push_str("}\n\n");
     }
@@ -1967,11 +2001,13 @@ fn vertex_entry(layout: &Layout) -> String {
         VERTEX_ID / 4
     ));
     for slot in &layout.attributes {
+        // An integer attribute is carried as its bits, the way `shade_vertex`
+        // carries one and the way `fetch_attribute` writes one into `a[]`.
+        let integer = layout.attribute_base(*slot) != AttributeBase::Float;
         for (component, axis) in ["x", "y", "z", "w"].iter().enumerate() {
-            out.push_str(&format!(
-                "  attr_in[{}u] = input.attr{slot}.{axis};\n",
-                generic_word(*slot, component)
-            ));
+            let read = format!("input.attr{slot}.{axis}");
+            let read = if integer { format!("bitcast<f32>({read})") } else { read };
+            out.push_str(&format!("  attr_in[{}u] = {read};\n", generic_word(*slot, component)));
         }
     }
     // A clip position no `st` writes is (0, 0, 0, 1), which `shade_vertex`
@@ -2515,6 +2551,30 @@ mod tests {
         let vs = translate(&vs).unwrap();
         let source = module(&vs, Stage::Vertex, &Layout::of(&vs, Stage::Vertex)).unwrap();
         assert!(source.contains("attr_out[31u] = 1.0;"), "{source}");
+    }
+
+    #[test]
+    fn an_integer_attribute_is_declared_as_one_and_carried_as_its_bits() {
+        // WebGPU makes the base type part of the match between a vertex
+        // format and the input it feeds, so a `Sint8x4` attribute fed to a
+        // `vec4<f32>` input is a pipeline that will not build. The bitcast is
+        // what keeps the slot holding the same bits `fetch_attribute` puts
+        // there for an integer attribute.
+        let (vs, _) = pair(3);
+        let vs = translate(&vs).unwrap();
+        let mut layout = Layout::of(&vs, Stage::Vertex);
+        layout.integer_attributes = vec![(3, AttributeBase::Sint)];
+        let source = module(&vs, Stage::Vertex, &layout).unwrap();
+        assert!(source.contains("@location(3) attr3: vec4<i32>"), "{source}");
+        assert!(source.contains("bitcast<f32>(input.attr3.x)"), "{source}");
+        assert!(braces_balance(&source), "{source}");
+
+        // A float attribute is read straight through, and is what a slot the
+        // draw said nothing about is assumed to be.
+        let plain = Layout::of(&vs, Stage::Vertex);
+        let source = module(&vs, Stage::Vertex, &plain).unwrap();
+        assert!(source.contains("@location(3) attr3: vec4<f32>"), "{source}");
+        assert!(!source.contains("bitcast<f32>(input."), "{source}");
     }
 
     #[test]

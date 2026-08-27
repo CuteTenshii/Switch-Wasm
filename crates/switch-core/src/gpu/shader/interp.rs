@@ -173,7 +173,7 @@ pub struct MemoryTextures<'a, 'b> {
     /// for it 921 600 times. The cache lives in the caller so that this
     /// struct can still be rebuilt per fragment — it borrows `ctx`, which
     /// the pixel loop needs mutably between shading calls.
-    pub descriptors: &'a std::cell::RefCell<HashMap<u32, crate::gpu::texture::Descriptors>>,
+    pub descriptors: &'a std::cell::RefCell<crate::IdMap<u32, crate::gpu::texture::Descriptors>>,
     /// Decoded compressed blocks, shared by every fragment of the draw for the
     /// same reason `descriptors` is.
     pub blocks: &'a std::cell::RefCell<crate::gpu::texture::BlockCache>,

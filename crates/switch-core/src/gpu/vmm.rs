@@ -85,10 +85,9 @@ pub struct AddressSpace {
     next_small: u64,
     /// Bump pointer for un-fixed big-page allocations.
     next_big: u64,
-    /// The mappings recent translations resolved to, as
-    /// `(gpu_va, cpu_addr, size)`. Engines walk a surface address by address,
-    /// so without this a blit pays a `BTreeMap` search for every pixel it
-    /// touches.
+    /// The mappings recent translations resolved to. Engines walk a surface
+    /// address by address, so without this a blit pays a `BTreeMap` search
+    /// for every pixel it touches.
     ///
     /// Several entries rather than one, because a shaded pixel does not stay
     /// in a single mapping: it reads two or three constant buffers, samples a
@@ -96,8 +95,16 @@ pub struct AddressSpace {
     /// own. A one-entry cache is evicted by every one of those in turn and
     /// hits almost never — the `BTreeMap` search was still 5% of the Home
     /// Menu's frame with it in place.
-    recent_translations: [Cell<Option<(u64, u32, u64)>>; TRANSLATION_WAYS],
-    /// Round-robin replacement cursor for `recent_translations`.
+    ///
+    /// Split across three arrays because the scan is what runs per pixel and
+    /// it only needs two of the three: a `Cell<Option<(u64, u32, u64)>>` per
+    /// way made rejecting a way copy the whole thirty-two-byte option out of
+    /// the cell. A `size` of zero is an empty way, so no discriminant is
+    /// needed to say so — no mapping is zero bytes long.
+    recent_base: [Cell<u64>; TRANSLATION_WAYS],
+    recent_size: [Cell<u64>; TRANSLATION_WAYS],
+    recent_cpu: [Cell<u32>; TRANSLATION_WAYS],
+    /// Round-robin replacement cursor for the three arrays above.
     next_translation: Cell<usize>,
 }
 
@@ -113,7 +120,9 @@ impl AddressSpace {
             big_page_size: BIG_PAGE_SIZE,
             mappings: BTreeMap::new(),
             reservations: BTreeMap::new(),
-            recent_translations: [const { Cell::new(None) }; TRANSLATION_WAYS],
+            recent_base: [const { Cell::new(0) }; TRANSLATION_WAYS],
+            recent_size: [const { Cell::new(0) }; TRANSLATION_WAYS],
+            recent_cpu: [const { Cell::new(0) }; TRANSLATION_WAYS],
             next_translation: Cell::new(0),
             next_small: SMALL_REGION_BASE,
             next_big: SMALL_REGION_END,
@@ -318,12 +327,11 @@ impl AddressSpace {
     /// Translate a GPU VA to `(cpu_addr, bytes_left_in_mapping)`.
     #[inline]
     pub fn translate(&self, gpu_va: u64) -> Option<(u32, u64)> {
-        for slot in &self.recent_translations {
-            if let Some((base, cpu_addr, size)) = slot.get() {
-                let off = gpu_va.wrapping_sub(base);
-                if off < size {
-                    return Some((cpu_addr.wrapping_add(off as u32), size - off));
-                }
+        for way in 0..TRANSLATION_WAYS {
+            let size = self.recent_size[way].get();
+            let off = gpu_va.wrapping_sub(self.recent_base[way].get());
+            if off < size {
+                return Some((self.recent_cpu[way].get().wrapping_add(off as u32), size - off));
             }
         }
         let (_, m) = self.mappings.range(..=gpu_va).next_back()?;
@@ -331,7 +339,9 @@ impl AddressSpace {
             return None;
         }
         let way = self.next_translation.get();
-        self.recent_translations[way].set(Some((m.gpu_va, m.cpu_addr, m.size)));
+        self.recent_base[way].set(m.gpu_va);
+        self.recent_size[way].set(m.size);
+        self.recent_cpu[way].set(m.cpu_addr);
         self.next_translation.set((way + 1) % TRANSLATION_WAYS);
         let off = gpu_va - m.gpu_va;
         Some((m.cpu_addr.wrapping_add(off as u32), m.size - off))
@@ -340,8 +350,8 @@ impl AddressSpace {
     /// Drop every cached translation. Called whenever a mapping changes, since
     /// a cached entry outliving its mapping would hand out a stale address.
     fn forget_translations(&self) {
-        for slot in &self.recent_translations {
-            slot.set(None);
+        for way in 0..TRANSLATION_WAYS {
+            self.recent_size[way].set(0);
         }
     }
 

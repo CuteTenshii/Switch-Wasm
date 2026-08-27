@@ -18,8 +18,14 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// Answers a message rather than a bool: a machine without WebGPU is a normal
 /// thing, and the answer to it is the software rasterizer, which is what ran
 /// before this existed.
+///
+/// `ignore_depth` is the browser's spelling of the backend's
+/// `GPU_IGNORE_DEPTH`, which a wasm build has no environment to read: it lets
+/// a depth-tested draw render here with no depth test rather than fall back.
+/// See `switch_gpu::Gpu::ignore_depth` for what that costs and when it is
+/// right.
 #[wasm_bindgen]
-pub async fn switch_gpu_open(handle: u32) -> String {
+pub async fn switch_gpu_open(handle: u32, ignore_depth: bool) -> String {
     let instance = switch_gpu::wgpu::Instance::new(switch_gpu::wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = match instance.request_adapter(&switch_gpu::wgpu::RequestAdapterOptions::default()).await {
         Ok(adapter) => adapter,
@@ -37,7 +43,9 @@ pub async fn switch_gpu_open(handle: u32) -> String {
             Err(e) => return format!("no device: {e}"),
         };
     let name = adapter.get_info().name;
-    match crate::install_gpu(handle, switch_gpu::Gpu::with_device(device, queue)) {
+    let mut gpu = switch_gpu::Gpu::with_device(device, queue);
+    gpu.set_ignore_depth(ignore_depth);
+    match crate::install_gpu(handle, gpu) {
         Ok(()) => format!("rendering on {name}"),
         Err(why) => why,
     }

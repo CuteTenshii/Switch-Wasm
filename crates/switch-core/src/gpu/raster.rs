@@ -888,13 +888,15 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let mut tally = DrawTally::new(&fs_program);
     // One shaded vertex per *index*, cached: an indexed mesh reuses vertices
     // heavily, and re-running the vertex shader for each reference is the
-    // single most expensive thing this loop can do.
-    let mut cache: std::collections::HashMap<u32, ShadedVertex> = std::collections::HashMap::new();
+    // single most expensive thing this loop can do. Keyed by an index the
+    // guest minted, so it wants `crate::IdHasher` rather than a hash built to
+    // resist a key being chosen to collide.
+    let mut cache: crate::IdMap<u32, ShadedVertex> = crate::IdMap::default();
     // One fragment invocation for the whole draw, reset per pixel.
     let mut fragment = Invocation::new();
     // Parsed TIC/TSC pairs, and the compressed blocks they decode to, shared
     // by every fragment of this draw.
-    let descriptors = std::cell::RefCell::new(std::collections::HashMap::new());
+    let descriptors = std::cell::RefCell::new(crate::IdMap::default());
     let blocks = std::cell::RefCell::new(crate::gpu::texture::BlockCache::default());
     // A constant buffer cannot change while a draw runs, so each stage reads
     // every constant it uses from memory once rather than once per invocation.

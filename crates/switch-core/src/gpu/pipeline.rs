@@ -190,6 +190,16 @@ pub enum Format {
     Bc7RgbaUnormSrgb,
 }
 
+/// What a vertex format's components arrive as. WebGPU makes this part of
+/// the match between a format and the shader input it feeds, so it decides
+/// whether an attribute is declared `vec4<f32>`, `vec4<i32>` or `vec4<u32>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttributeBase {
+    Float,
+    Sint,
+    Uint,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VertexFormat {
     Float32,
@@ -197,6 +207,22 @@ pub enum VertexFormat {
     Float32x3,
     Float32x4,
     Unorm8x4,
+    Snorm8x4,
+    Sint8x4,
+    Uint8x4,
+}
+
+impl VertexFormat {
+    /// The normalized formats are floats by the time a shader sees them;
+    /// only the integer ones carry their bits through, which is what
+    /// `raster::fetch_attribute` leaves in the slot for one as well.
+    pub fn base(self) -> AttributeBase {
+        match self {
+            VertexFormat::Sint8x4 => AttributeBase::Sint,
+            VertexFormat::Uint8x4 => AttributeBase::Uint,
+            _ => AttributeBase::Float,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -558,8 +584,11 @@ pub(crate) fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
     })
 }
 
-/// `DkVtxAttribType` (deko3d.h): `Unorm = 2`, `Float = 7`.
+/// `DkVtxAttribType` (deko3d.h), as `crate::gpu::raster` also names them.
+const ATTRIB_TYPE_SNORM: u32 = 1;
 const ATTRIB_TYPE_UNORM: u32 = 2;
+const ATTRIB_TYPE_SINT: u32 = 3;
+const ATTRIB_TYPE_UINT: u32 = 4;
 const ATTRIB_TYPE_FLOAT: u32 = 7;
 
 /// The formats [`crate::gpu::raster`]'s `fetch_attribute` decodes, and no
@@ -571,7 +600,14 @@ fn vertex_format(size: u32, ty: u32) -> Result<VertexFormat, Unsupported> {
         (0x02, ATTRIB_TYPE_FLOAT) => VertexFormat::Float32x3,
         (0x04, ATTRIB_TYPE_FLOAT) => VertexFormat::Float32x2,
         (0x12, ATTRIB_TYPE_FLOAT) => VertexFormat::Float32,
+        // Size `0x0a` is `4x8`, the only 8-bit shape both `fetch_attribute`
+        // decodes and WebGPU spells: it has no one- or three-component 8-bit
+        // format, and a shorter one would be padded `(0, 0, 0, 1)` as floats
+        // where the rasterizer pads an integer slot with those *bits*.
         (0x0a, ATTRIB_TYPE_UNORM) => VertexFormat::Unorm8x4,
+        (0x0a, ATTRIB_TYPE_SNORM) => VertexFormat::Snorm8x4,
+        (0x0a, ATTRIB_TYPE_SINT) => VertexFormat::Sint8x4,
+        (0x0a, ATTRIB_TYPE_UINT) => VertexFormat::Uint8x4,
         (size, ty) => return Err(Unsupported::VertexFormat { size, ty }),
     })
 }
@@ -855,6 +891,15 @@ mod tests {
     fn vertex_formats_are_the_ones_the_rasterizer_can_fetch() {
         assert_eq!(vertex_format(0x01, ATTRIB_TYPE_FLOAT), Ok(VertexFormat::Float32x4));
         assert_eq!(vertex_format(0x0a, ATTRIB_TYPE_UNORM), Ok(VertexFormat::Unorm8x4));
+        assert_eq!(vertex_format(0x0a, ATTRIB_TYPE_SNORM), Ok(VertexFormat::Snorm8x4));
+        assert_eq!(vertex_format(0x0a, ATTRIB_TYPE_SINT), Ok(VertexFormat::Sint8x4));
+        assert_eq!(vertex_format(0x0a, ATTRIB_TYPE_UINT), Ok(VertexFormat::Uint8x4));
+        // An integer attribute reaches the shader as its bits, so it is the
+        // one kind that cannot be declared `vec4<f32>`.
+        assert_eq!(VertexFormat::Sint8x4.base(), AttributeBase::Sint);
+        assert_eq!(VertexFormat::Uint8x4.base(), AttributeBase::Uint);
+        assert_eq!(VertexFormat::Snorm8x4.base(), AttributeBase::Float);
+        assert_eq!(VertexFormat::Unorm8x4.base(), AttributeBase::Float);
         // A shape `fetch_attribute` cannot decode. Claiming it would draw
         // something the reference could not be compared against.
         assert_eq!(

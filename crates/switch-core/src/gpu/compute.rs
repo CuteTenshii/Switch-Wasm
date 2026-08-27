@@ -24,7 +24,6 @@ use crate::gpu::shader::{decode_program_from_memory, Op};
 use crate::gpu::texture::{self, BlockCache, Descriptors};
 use crate::{Error, Result};
 use std::cell::RefCell;
-use std::collections::HashMap;
 
 /// The most threads one dispatch may run.
 ///
@@ -72,7 +71,7 @@ pub fn dispatch(engine: &EngineCompute, ctx: &mut ExecCtx) -> Result<()> {
         consts: RefCell::new(ConstCache::default()),
         tex_header_pool: engine.tex_header_pool(),
         tex_sampler_pool: engine.tex_sampler_pool(),
-        descriptors: RefCell::new(HashMap::new()),
+        descriptors: RefCell::new(crate::IdMap::default()),
         blocks: RefCell::new(BlockCache::default()),
     };
 
@@ -207,7 +206,7 @@ struct DispatchMemory<'a, 'b> {
     consts: RefCell<ConstCache>,
     tex_header_pool: u64,
     tex_sampler_pool: u64,
-    descriptors: RefCell<HashMap<u32, Descriptors>>,
+    descriptors: RefCell<crate::IdMap<u32, Descriptors>>,
     blocks: RefCell<BlockCache>,
 }
 

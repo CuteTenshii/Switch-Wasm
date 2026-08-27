@@ -58,7 +58,7 @@ pub use wgpu;
 
 use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
-use switch_core::gpu::pipeline::{self as state, Format, Pipeline};
+use switch_core::gpu::pipeline::{self as state, AttributeBase, Format, Pipeline};
 use switch_core::gpu::renderer::{Flush, Renderer, Software};
 use switch_core::gpu::shader::compiled::Compiled;
 use switch_core::gpu::shader::wgsl::{self, Layout, Stage, Translation};
@@ -113,6 +113,9 @@ fn vertex_format(format: state::VertexFormat) -> wgpu::VertexFormat {
         state::VertexFormat::Float32x3 => wgpu::VertexFormat::Float32x3,
         state::VertexFormat::Float32x4 => wgpu::VertexFormat::Float32x4,
         state::VertexFormat::Unorm8x4 => wgpu::VertexFormat::Unorm8x4,
+        state::VertexFormat::Snorm8x4 => wgpu::VertexFormat::Snorm8x4,
+        state::VertexFormat::Sint8x4 => wgpu::VertexFormat::Sint8x4,
+        state::VertexFormat::Uint8x4 => wgpu::VertexFormat::Uint8x4,
     }
 }
 
@@ -176,6 +179,29 @@ const MAP_WAITING: u8 = 0;
 const MAP_READY: u8 = 1;
 const MAP_FAILED: u8 = 2;
 
+/// Everything a render pipeline is built from, as a value that can be
+/// compared and hashed.
+///
+/// Not the whole of [`Pipeline`]: the viewport, the scissor and the blend
+/// constant are set on the pass rather than baked in, and they are the parts
+/// that change from draw to draw. What is left is what a title reuses.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct PipelineKey {
+    /// The two module cache keys, which are hashes of the WGSL — so two
+    /// draws share a pipeline exactly when they would share both modules.
+    vs: u64,
+    fs: u64,
+    target: wgpu::TextureFormat,
+    blend: Option<state::Blend>,
+    write_mask: [bool; 4],
+    topology: state::Topology,
+    front_face: state::FrontFace,
+    cull: state::Cull,
+    /// `(stride, [(format, offset, location)])` for each bound vertex
+    /// buffer, in the order they are bound.
+    buffers: Vec<(u32, Vec<(wgpu::VertexFormat, u64, u32)>)>,
+}
+
 /// A render target held on the device, and where in guest memory it came
 /// from.
 #[derive(Debug)]
@@ -220,6 +246,25 @@ pub struct Gpu {
     /// two different modules, and a guest is free to overwrite a shader in
     /// place.
     modules: std::collections::HashMap<u64, wgpu::ShaderModule>,
+    /// Render pipelines, by everything they were built from.
+    ///
+    /// Building one is the device validating both modules against the fixed
+    /// function state around them, and it happened once per draw. A title
+    /// draws the same few pipelines over and over: the Home Menu's frame 60
+    /// renders 480 draws through 7 of them, and Just Dance 2019's first 3,481
+    /// through 4. So this is the argument [`Gpu::modules`] makes, one level
+    /// up — and like that one it is unbounded, because a program that walks
+    /// endlessly over fresh shaders is not a thing a title does.
+    pipelines: std::collections::HashMap<PipelineKey, wgpu::RenderPipeline>,
+    /// Bind group layouts, by the entries they describe.
+    ///
+    /// A layout is a description, not a resource, and two draws through the
+    /// same pair of shaders describe the same one — so this hands the same
+    /// object to the pipeline that was built from it and to every later
+    /// draw's bind group. WebGPU matches the two structurally rather than by
+    /// identity, so a cache is not what makes a cached pipeline usable; it is
+    /// what makes it obvious that it is.
+    group_layouts: std::collections::HashMap<Vec<wgpu::BindGroupLayoutEntry>, wgpu::BindGroupLayout>,
     /// Set by the device when it rejects something. Read on the next draw,
     /// because asking sooner means waiting.
     failed: std::sync::Arc<std::sync::Mutex<Option<String>>>,
@@ -240,6 +285,10 @@ pub struct Gpu {
     /// when this is dropped. Native only: it reads a clock, and a browser's
     /// answer to that is another question entirely.
     times: Option<Times>,
+    /// `GPU_IGNORE_DEPTH=1`: render depth-tested draws with no depth buffer
+    /// rather than handing them to the rasterizer. See where it is read for
+    /// what it costs.
+    ignore_depth: bool,
     /// `GPU_ONLY=<i>` renders only the i-th draw of each frame here and
     /// leaves the rest to the rasterizer.
     ///
@@ -269,7 +318,13 @@ struct Times {
 
 impl Drop for Gpu {
     fn drop(&mut self) {
-        eprintln!("[gpu] {} draws rendered, {} fell back", self.drawn, self.fallbacks);
+        eprintln!(
+            "[gpu] {} draws rendered, {} fell back, from {} pipelines and {} modules",
+            self.drawn,
+            self.fallbacks,
+            self.pipelines.len(),
+            self.modules.len()
+        );
         if let Some(t) = self.times {
             let ms = |v: u128| v as f64 / 1000.0;
             eprintln!(
@@ -327,6 +382,8 @@ impl Gpu {
             evicted: Vec::new(),
             pending: Vec::new(),
             modules: std::collections::HashMap::new(),
+            pipelines: std::collections::HashMap::new(),
+            group_layouts: std::collections::HashMap::new(),
             failed,
             software: Software,
             drawn: 0,
@@ -335,6 +392,7 @@ impl Gpu {
             reasons: Vec::new(),
             in_frame: 0,
             times: switch_core::env_flag!("GPU_TIMES").then(Times::default),
+            ignore_depth: switch_core::env_flag!("GPU_IGNORE_DEPTH"),
             only: std::env::var("GPU_ONLY").ok().and_then(|v| v.parse().ok()),
         }
     }
@@ -365,6 +423,14 @@ impl Gpu {
             self.reasons.push(why.clone());
         }
         self.last_fallback = Some(why);
+    }
+
+    /// Render depth-tested draws with no depth buffer rather than handing
+    /// them to the rasterizer — the `GPU_IGNORE_DEPTH` env flag, for the
+    /// build that has no environment to read it from. See where
+    /// [`Gpu::ignore_depth`] is read for what it costs.
+    pub fn set_ignore_depth(&mut self, ignore: bool) {
+        self.ignore_depth = ignore;
     }
 
     /// The device texture for a surface, uploading it if this is the first
@@ -554,7 +620,7 @@ impl Gpu {
         if let Some(e) = self.device_error() {
             return Err(format!("the device rejected an earlier draw: {e}"));
         }
-        let (vs_module, fs_module) = timed!(self, modules, {
+        let ((vs_key, vs_module), (fs_key, fs_module)) = timed!(self, modules, {
             let vs_source = wgsl::module(&p.vs, Stage::Vertex, &p.vs_layout);
             let fs_source = wgsl::module(&p.fs, Stage::Fragment, &p.fs_layout);
             match (vs_source, fs_source) {
@@ -621,6 +687,35 @@ impl Gpu {
             timed!(self, pipeline, self.bind_group(p, ShaderStage::VertexB, 0))?;
         let (fs_group_layout, fs_group) =
             timed!(self, pipeline, self.bind_group(p, ShaderStage::Fragment, 1))?;
+        // A pipeline is keyed by what it is built from, so the cache can be
+        // consulted before any of it is created. The bind group layouts are
+        // not part of the key: they follow from the two modules, and WebGPU
+        // matches a bind group to a pipeline structurally rather than by
+        // identity, so the ones built for this draw fit a cached pipeline.
+        let key = PipelineKey {
+            vs: vs_key,
+            fs: fs_key,
+            target: target_format,
+            blend: p.state.target.and_then(|t| t.blend),
+            write_mask: p.state.target.map_or([true; 4], |t| t.write_mask),
+            topology: p.state.topology,
+            front_face: p.state.front_face,
+            cull: p.state.cull,
+            buffers: bound
+                .iter()
+                .zip(&p.state.vertex_buffers)
+                .map(|((_, attributes), buffer)| {
+                    let attributes = attributes
+                        .iter()
+                        .map(|a| (a.format, a.offset, a.shader_location))
+                        .collect();
+                    (buffer.stride, attributes)
+                })
+                .collect(),
+        };
+        if let Some(pipeline) = self.pipelines.get(&key) {
+            return self.encode(p, &pipeline.clone(), &vs_group, &fs_group, &bound, ctx);
+        }
         let pipeline_layout =
             self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("draw"),
@@ -670,7 +765,23 @@ impl Gpu {
             cache: None,
         };
         let pipeline = timed!(self, pipeline, self.device.create_render_pipeline(&descriptor));
+        self.pipelines.insert(key, pipeline.clone());
+        self.encode(p, &pipeline, &vs_group, &fs_group, &bound, ctx)
+    }
 
+    /// Record and submit one draw against a pipeline that is already built.
+    ///
+    /// Split out from [`Gpu::render`] because it is the half that runs on
+    /// every draw, cached pipeline or not.
+    fn encode(
+        &mut self,
+        p: &Prepared,
+        pipeline: &wgpu::RenderPipeline,
+        vs_group: &wgpu::BindGroup,
+        fs_group: &wgpu::BindGroup,
+        bound: &[(wgpu::Buffer, Vec<wgpu::VertexAttribute>)],
+        ctx: &mut ExecCtx,
+    ) -> std::result::Result<(), String> {
         // Held across the frame: the first draw brings the surface onto the
         // device and every later one finds it already there.
         self.hold(&p.color, ctx).map_err(|e| format!("{e:?}"))?;
@@ -710,9 +821,9 @@ impl Gpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &vs_group, &[]);
-            pass.set_bind_group(1, &fs_group, &[]);
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, vs_group, &[]);
+            pass.set_bind_group(1, fs_group, &[]);
             for (slot, (buffer, _)) in bound.iter().enumerate() {
                 pass.set_vertex_buffer(slot as u32, buffer.slice(..));
             }
@@ -762,7 +873,7 @@ impl Gpu {
     /// One stage's bindings: its constant banks, and its textures with
     /// their samplers.
     fn bind_group(
-        &self,
+        &mut self,
         p: &Prepared,
         stage: ShaderStage,
         group: u32,
@@ -824,10 +935,18 @@ impl Gpu {
             resources.push(Resource::Sampler(binding + 1, self.sampler(upload)));
         }
 
-        let layout = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("stage"),
-            entries: &entries,
-        });
+        let layout = match self.group_layouts.get(&entries) {
+            Some(layout) => layout.clone(),
+            None => {
+                let layout =
+                    self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                        label: Some("stage"),
+                        entries: &entries,
+                    });
+                self.group_layouts.insert(entries, layout.clone());
+                layout
+            }
+        };
         // The views have to outlive the descriptor that borrows them.
         let views: Vec<Option<wgpu::TextureView>> = resources
             .iter()
@@ -949,20 +1068,23 @@ impl Gpu {
     /// and is read at the start of the next draw — a frame late, which is
     /// what "do not block" costs and is cheap: the WGSL has already been
     /// through `naga` before it gets here.
-    fn module(&mut self, what: &str, source: &str) -> wgpu::ShaderModule {
+    /// The module for this WGSL, with the cache key that named it — which is
+    /// a hash of the source, and so identifies the module to a pipeline key
+    /// as well.
+    fn module(&mut self, what: &str, source: &str) -> (u64, wgpu::ShaderModule) {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         source.hash(&mut hasher);
         let key = hasher.finish();
         if let Some(module) = self.modules.get(&key) {
-            return module.clone();
+            return (key, module.clone());
         }
         let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some(what),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         self.modules.insert(key, module.clone());
-        module
+        (key, module)
     }
 
     /// Whatever the device rejected since this was last asked.
@@ -1078,6 +1200,32 @@ impl Gpu {
         ctx: &ExecCtx,
     ) -> std::result::Result<Prepared, String> {
         let state = Pipeline::of(engine).map_err(|e| e.to_string())?;
+        // This backend attaches no depth buffer, so a draw that depends on
+        // one would pass every fragment here and leave the guest's depth
+        // surface untouched — and the rasterizer, which owns that surface,
+        // would then disagree with the frame. Hand it back rather than draw
+        // it wrong. A test of `Always` with writes off depends on nothing.
+        //
+        // `GPU_IGNORE_DEPTH=1` renders them anyway, with no depth test and no
+        // depth written. That is an approximation, not a setting: it is right
+        // only for a title whose draws are already in an order the test does
+        // not change, and it is here because whether a given title is such a
+        // title is a question about *that title* that only a comparison
+        // against the rasterizer can answer. Just Dance 2019 issues 55,465
+        // draws in a six-billion-instruction run and every one of them is
+        // depth-tested, so for that title the flag is the difference between
+        // this backend rendering everything and rendering nothing.
+        if let Some(depth) = state.depth.filter(|_| !self.ignore_depth) {
+            if depth.write_enabled || depth.compare != state::Compare::Always {
+                // The format is in the message because the reasons are
+                // deduplicated: it names every depth surface a title uses,
+                // once each, which is what deciding how to hold one needs.
+                return Err(format!(
+                    "a depth-tested draw into {:?}, and this backend holds no depth buffer",
+                    depth.format
+                ));
+            }
+        }
         let color = Targets::of(engine)
             .map_err(|e| format!("{e:?}"))?
             .color
@@ -1111,6 +1259,15 @@ impl Gpu {
         // the guest's does not. See `Layout::flip_y`.
         vs_layout.flip_y = !state.viewport.flip_y;
         vs_layout.depth_minus_one_to_one = state.viewport.depth_minus_one_to_one();
+        // Nor is which attributes are integers: the format is in the draw's
+        // registers, and WebGPU will not feed one to a `vec4<f32>` input.
+        vs_layout.integer_attributes = state
+            .vertex_buffers
+            .iter()
+            .flat_map(|buffer| &buffer.attributes)
+            .filter(|a| a.format.base() != AttributeBase::Float)
+            .map(|a| (a.location as usize, a.format.base()))
+            .collect();
         // One bind group per stage; see `Layout::group`.
         vs_layout.group = 0;
         fs_layout.group = 1;
