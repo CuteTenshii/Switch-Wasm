@@ -191,6 +191,13 @@ pub fn load_nso(mem: &mut Memory, data: &[u8], base: u32) -> Result<LoadedNso> {
     // .text is never a legitimate relocation target — lock it down the same
     // way the NRO loader does, so a wild guest write faults immediately.
     mem.mark_readonly(text_addr, ro_addr);
+    // The image is two memory states to the guest, not one: `.text`/`.rodata`
+    // static, `.data`/`.bss` mutable. See `Memory::mark_module`.
+    mem.mark_module(
+        (text_addr, data_addr),
+        (data_addr, bss_addr.wrapping_add(bss_size)),
+        false,
+    );
 
     Ok(LoadedNso {
         base,

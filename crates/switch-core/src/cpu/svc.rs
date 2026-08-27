@@ -237,6 +237,16 @@ impl Cpu {
                  // passed the check. `rtld` then relocated itself a second
                  // time against a base 0x3000 past its real one and walked
                  // off the end of the address space.
+                 //
+                 // The type is the loader's, not a guess from the page table:
+                 // a module's static and mutable halves are two states, and
+                 // `nn::ro` reads the boundary between them as the module's
+                 // shape (`Memory::mark_module`). Mapped memory that belongs
+                 // to no module — heap, stacks, TLS — still answers
+                 // `CodeStatic`, which is a lie Horizon would spell `Normal`,
+                 // `Stack` or `ThreadLocal`; nothing has been seen to read it
+                 // yet, and every walk that does read a type filters on the
+                 // execute bit first.
                  let out = self.read_zr(0) as u32;
                  let addr = self.read_zr(2) as u32;
                  // `Memory` finds the run, because it is the only thing that
@@ -248,7 +258,7 @@ impl Cpu {
                  info.extend_from_slice(&(base as u64).to_le_bytes());
                  info.extend_from_slice(&((end - base) as u64).to_le_bytes());
                  for v in [
-                     if mapped { 3u32 } else { 0 }, // type (CodeStatic / Unmapped)
+                     run.state as u32, // type
                      0,
                      if text { 0b101 } else if mapped { 0b011 } else { 0 }, // perm (R-X / RW- / none)
                      0,

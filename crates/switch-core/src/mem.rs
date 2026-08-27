@@ -45,6 +45,26 @@ const BLOCK_COUNT: usize = PAGE_COUNT / BLOCK_PAGES;
 pub const MAX_MAPPED_BYTES: u64 = 0xA000_0000; // 2.5 GiB, `GUEST_TOTAL_MEMORY_SIZE`
 const MAX_MAPPED_PAGES: usize = (MAX_MAPPED_BYTES / PAGE_SIZE as u64) as usize;
 
+/// Horizon's `MemoryState`, as `svcQueryMemory` reports it in the first word
+/// past a region's bounds. Only the states this emulator can tell regions
+/// apart by are here.
+///
+/// A module is **two** states, not one: the kernel maps its static half
+/// (`.text` + `.rodata`) and its mutable half (`.data` + `.bss`) separately,
+/// and SDK code walks from one into the other — see [`Memory::mark_module`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum MemoryState {
+    Unmapped = 0,
+    /// The process image's static half.
+    Code = 3,
+    /// The process image's mutable half.
+    CodeData = 4,
+    /// The same two for a module `ldr:ro` mapped after the process started.
+    AliasCode = 8,
+    AliasCodeData = 9,
+}
+
 /// One region as `svcQueryMemory` describes it: the bounds of a run of pages
 /// that share a state, and the state itself. See [`Memory::state_run`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +77,20 @@ pub struct StateRun {
     pub mapped: bool,
     /// Whether they are write-protected — in practice a module's `.text`.
     pub readonly: bool,
+    /// What the guest is told the run is.
+    pub state: MemoryState,
+}
+
+/// One loaded module's image, split the way the kernel maps it.
+#[derive(Debug, Clone, Copy)]
+struct ModuleImage {
+    /// `.text` + `.rodata`, end-exclusive and page-aligned.
+    static_range: (u32, u32),
+    /// `.data` + `.bss`, likewise.
+    mutable_range: (u32, u32),
+    /// Whether this is an `ldr:ro` module rather than part of the process
+    /// image, which decides between the `Alias*` states and the plain ones.
+    alias: bool,
 }
 
 #[derive(Debug)]
@@ -88,6 +122,13 @@ pub struct Memory {
     /// running title makes is outside the envelope and answers in two
     /// comparisons without touching the list at all.
     readonly_span: (u32, u32),
+    /// Every module image currently mapped, in load order. Small — a retail
+    /// process is four modules plus whatever `ldr:ro` has open.
+    modules: Vec<ModuleImage>,
+    /// The envelope of every range in `modules`, as `(lowest start, highest
+    /// end)`; `start >= end` when there are none. Same trick as
+    /// `readonly_span`: a page outside it is classified in two comparisons.
+    module_span: (u32, u32),
     /// Shared zero page served for reads inside the soft region.
     zero: Box<[u8; PAGE_SIZE]>,
     /// How many pages currently hold real storage. Counted as they are
@@ -146,6 +187,8 @@ impl Memory {
             soft: (1, 0),
             readonly: Vec::new(),
             readonly_span: (u32::MAX, 0),
+            modules: Vec::new(),
+            module_span: (u32::MAX, 0),
             zero: Box::new([0u8; PAGE_SIZE]),
             mapped_pages: 0,
             max_mapped_pages: MAX_MAPPED_PAGES,
@@ -257,11 +300,16 @@ impl Memory {
             .fold((u32::MAX, 0), |(lo, hi), &(start, end)| (lo.min(start), hi.max(end)));
     }
 
-    /// Drop every read-only range, so a fresh boot in a reused [`Memory`]
-    /// doesn't inherit protection left over from a previous title/homebrew.
-    pub fn clear_readonly(&mut self) {
+    /// Forget every loaded module — both its protection and the memory
+    /// states it is reported under — so a fresh boot in a reused [`Memory`]
+    /// doesn't inherit either from a previous title/homebrew. The two are one
+    /// call because a module image that outlived its protection, or the other
+    /// way round, is a state no boot can produce.
+    pub fn clear_modules(&mut self) {
         self.readonly.clear();
         self.refresh_readonly_span();
+        self.modules.clear();
+        self.refresh_module_span();
     }
 
     /// Drop every read-only range that lies inside `[start, end)`.
@@ -286,6 +334,76 @@ impl Memory {
         addr >= self.readonly_span.0
             && addr < self.readonly_span.1
             && self.readonly.iter().any(|&(s, e)| addr >= s && addr < e)
+    }
+
+    /// Record a loaded module's image so `svcQueryMemory` can report the two
+    /// memory states the kernel maps it under. Both ranges are end-exclusive
+    /// and rounded out to whole pages, because a state is a property of a
+    /// page.
+    ///
+    /// A module is not one region to Horizon. Its static half (`.text` +
+    /// `.rodata`) is `Code` and its mutable half (`.data` + `.bss`) is
+    /// `CodeData`, and `nn::ro::detail::GetExceptionInfo` — which every
+    /// `nn::diag` log line and every abort goes through to name the module an
+    /// address belongs to — reads the boundary between them as the module's
+    /// shape: it walks `Code` up from the queried address, then *requires*
+    /// the region immediately above that run to be `CodeData` and walks that
+    /// to find the image's end. Reporting one state for the whole image left
+    /// nothing above the run to be `CodeData`, and it aborted — which is how
+    /// Asphalt 9 died on its first `puts`, 377M steps in, with an assertion
+    /// whose text the release SDK had compiled out.
+    pub fn mark_module(&mut self, static_range: (u32, u32), mutable_range: (u32, u32), alias: bool) {
+        const PAGE: u32 = PAGE_SIZE as u32;
+        let page_out = |(start, end): (u32, u32)| {
+            (start & !(PAGE - 1), end.wrapping_add(PAGE - 1) & !(PAGE - 1))
+        };
+        self.modules.push(ModuleImage {
+            static_range: page_out(static_range),
+            mutable_range: page_out(mutable_range),
+            alias,
+        });
+        self.refresh_module_span();
+    }
+
+    /// Drop every module image that lies inside `[start, end)` — the other
+    /// half of [`Memory::mark_module`], for `ldr:ro`'s `UnloadModule`. Same
+    /// rule as [`Memory::unmark_readonly`]: an image that merely overlaps is
+    /// left alone rather than split.
+    pub fn unmark_module(&mut self, start: u32, end: u32) {
+        self.modules
+            .retain(|m| !(m.static_range.0 >= start && m.mutable_range.1 <= end));
+        self.refresh_module_span();
+    }
+
+    /// Recompute the envelope [`Memory::module_state`] tests before it walks
+    /// the list. Called by everything that changes the list.
+    fn refresh_module_span(&mut self) {
+        self.module_span = self.modules.iter().fold((u32::MAX, 0), |(lo, hi), m| {
+            (lo.min(m.static_range.0), hi.max(m.mutable_range.1))
+        });
+    }
+
+    /// Which half of which module image `addr` falls in, if any.
+    fn module_state(&self, addr: u32) -> Option<MemoryState> {
+        if addr < self.module_span.0 || addr >= self.module_span.1 {
+            return None;
+        }
+        self.modules.iter().find_map(|m| {
+            if addr >= m.static_range.0 && addr < m.static_range.1 {
+                Some(if m.alias { MemoryState::AliasCode } else { MemoryState::Code })
+            } else if addr >= m.mutable_range.0 && addr < m.mutable_range.1 {
+                Some(if m.alias { MemoryState::AliasCodeData } else { MemoryState::CodeData })
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Whether any module image overlaps `[start, end)`.
+    fn module_intersects(&self, start: u32, end: u32) -> bool {
+        start < self.module_span.1
+            && self.module_span.0 < end
+            && self.modules.iter().any(|m| start < m.mutable_range.1 && m.static_range.0 < end)
     }
 
     #[inline(always)]
@@ -409,24 +527,43 @@ impl Memory {
     pub fn state_run(&self, addr: u32, limit: u32) -> StateRun {
         const PAGE: u32 = PAGE_SIZE as u32;
         const BLOCK: u32 = (BLOCK_PAGES * PAGE_SIZE) as u32;
-        let state = |a: u32| (self.page_mapped(a), self.is_readonly(a));
+        // A run is bounded by any of the three facts changing, not just by
+        // backing: a module's `.rodata` and its `.data` are both mapped and
+        // both writable here, and they are still two regions to the guest.
+        let state = |a: u32| {
+            let mapped = self.page_mapped(a);
+            let reported = self.module_state(a).unwrap_or(if mapped {
+                MemoryState::Code
+            } else {
+                MemoryState::Unmapped
+            });
+            (mapped, self.is_readonly(a), reported)
+        };
         let page = addr & !(PAGE - 1);
-        let (mapped, readonly) = state(page);
+        let (mapped, readonly, reported) = state(page);
         let limit = limit & !(PAGE - 1);
         // A query past the end of the address space this emulator presents
         // describes the page it named and nothing around it. Guests probe up
         // there deliberately (hbmenu reads the failure to size the address
         // space), so it is an answer rather than an error.
         if page >= limit {
-            return StateRun { start: page, end: page.saturating_add(PAGE), mapped, readonly };
+            return StateRun {
+                start: page,
+                end: page.saturating_add(PAGE),
+                mapped,
+                readonly,
+                state: reported,
+            };
         }
-        // Only a run of *untouched, unprotected* pages can be skipped a block
-        // at a time: that is what the summary knows about. Every other run is
-        // bounded by something the page table has to be asked about.
-        let skippable = !mapped && !readonly;
+        // Only a run of *untouched, unprotected, unclaimed* pages can be
+        // skipped a block at a time: that is what the summary knows about.
+        // Every other run is bounded by something the page table has to be
+        // asked about.
+        let skippable = !mapped && !readonly && reported == MemoryState::Unmapped;
         let empty = |block_start: u32| {
             self.block_mapped[(block_start >> PAGE_BITS) as usize / BLOCK_PAGES] == 0
                 && !self.readonly_intersects(block_start, block_start + BLOCK)
+                && !self.module_intersects(block_start, block_start + BLOCK)
         };
 
         let mut start = page;
@@ -435,7 +572,7 @@ impl Memory {
                 start -= BLOCK;
                 continue;
             }
-            if state(start - PAGE) != (mapped, readonly) {
+            if state(start - PAGE) != (mapped, readonly, reported) {
                 break;
             }
             start -= PAGE;
@@ -446,12 +583,12 @@ impl Memory {
                 end += BLOCK;
                 continue;
             }
-            if state(end) != (mapped, readonly) {
+            if state(end) != (mapped, readonly, reported) {
                 break;
             }
             end += PAGE;
         }
-        StateRun { start, end, mapped, readonly }
+        StateRun { start, end, mapped, readonly, state: reported }
     }
 
     /// Map `data` at `addr`, allocating pages as needed and zero-filling any
@@ -1091,6 +1228,48 @@ mod tests {
         let run = m.state_run(0x0800_0000, LIMIT);
         assert_eq!((run.start, run.end), (0x0800_0000, 0x0800_2000));
         assert!(run.mapped && !run.readonly);
+    }
+
+    #[test]
+    fn a_module_is_two_memory_states_and_the_boundary_between_them_is_a_region() {
+        // `nn::ro::detail::GetExceptionInfo` walks a module by its states: it
+        // runs `Code` up from an address it was given, then requires the very
+        // next region to be `CodeData` and runs that to find the image's end.
+        // Reporting one state for the whole image leaves nothing above the
+        // run to be `CodeData`, and it aborts — which is exactly what stopped
+        // Asphalt 9 on its first `puts`.
+        const LIMIT: u32 = 0xF000_0000;
+        let mut m = Memory::new();
+        // .text 2 pages, .rodata 2, .data + .bss 4.
+        m.map_zero(0x0800_0000, PAGE_SIZE * 8).unwrap();
+        m.mark_readonly(0x0800_0000, 0x0800_2000);
+        m.mark_module((0x0800_0000, 0x0800_4000), (0x0800_4000, 0x0800_8000), false);
+
+        let run = m.state_run(0x0800_0000, LIMIT);
+        assert_eq!((run.start, run.end), (0x0800_0000, 0x0800_2000), ".text");
+        assert_eq!(run.state, MemoryState::Code);
+        assert!(run.readonly, ".text is the only part that is R-X");
+
+        let run = m.state_run(0x0800_2000, LIMIT);
+        assert_eq!((run.start, run.end), (0x0800_2000, 0x0800_4000), ".rodata");
+        assert_eq!(run.state, MemoryState::Code);
+
+        // The static half ends where the mutable half begins, even though
+        // both are mapped and both are writable here.
+        let run = m.state_run(0x0800_4000, LIMIT);
+        assert_eq!((run.start, run.end), (0x0800_4000, 0x0800_8000), ".data + .bss");
+        assert_eq!(run.state, MemoryState::CodeData);
+
+        // An `ldr:ro` module carries the alias states instead, and gives them
+        // back when it is unloaded.
+        m.map_zero(0x2900_0000, PAGE_SIZE * 4).unwrap();
+        m.mark_module((0x2900_0000, 0x2900_2000), (0x2900_2000, 0x2900_4000), true);
+        assert_eq!(m.state_run(0x2900_0000, LIMIT).state, MemoryState::AliasCode);
+        assert_eq!(m.state_run(0x2900_2000, LIMIT).state, MemoryState::AliasCodeData);
+        m.unmark_module(0x2900_0000, 0x2900_4000);
+        assert_eq!(m.state_run(0x2900_0000, LIMIT).state, MemoryState::Code);
+        // ...and the process image is untouched by that.
+        assert_eq!(m.state_run(0x0800_4000, LIMIT).state, MemoryState::CodeData);
     }
 
     #[test]

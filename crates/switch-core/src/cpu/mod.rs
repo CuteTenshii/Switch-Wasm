@@ -2181,7 +2181,7 @@ impl Cpu {
     /// global is left empty and NX-Shell's `FS::GetDirList` resolves its SD
     /// path to "" and exits. Running the constructors fixes that.
     pub fn boot_homebrew(&mut self, data: &[u8]) -> Result<crate::nro::LoadedNro> {
-        self.mem.clear_readonly();
+        self.mem.clear_modules();
         let loaded = crate::nro::load_nro(&mut self.mem, data)?;
         // Present the NRO on the SD card at the path the environment block
         // advertises as argv[0]: libnx's `romfsMountSelf` re-opens the running
@@ -2294,7 +2294,7 @@ impl Cpu {
         self.trace.clear();
         self.halted = false;
         self.trace_enabled = false;
-        self.mem.clear_readonly();
+        self.mem.clear_modules();
         for i in 0..=30u8 {
             self.set_reg(i, 0);
         }

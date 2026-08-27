@@ -714,6 +714,9 @@ pub fn load_nro(mem: &mut Memory, data: &[u8]) -> Result<LoadedNro> {
     // `.rodata` is left writable — a self-relocating crt0 may still need to
     // patch RELR entries living in `.data.rel.ro` there.
     mem.mark_readonly(text_addr, ro_addr);
+    // The image is two memory states to the guest, not one: `.text`/`.rodata`
+    // static, `.data`/`.bss` mutable. See `Memory::mark_module`.
+    mem.mark_module((text_addr, data_addr), (data_addr, image_end), false);
 
     let env_addr = if has_self_relocating_crt0(data) {
         setup_env_block(mem)

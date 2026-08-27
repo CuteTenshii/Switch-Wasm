@@ -216,6 +216,14 @@ impl Cpu {
         // the protection would outlive the mapping and fault whatever is
         // mapped over it next.
         self.mem.mark_readonly(text.0, text.1);
+        // A module mapped after the process started carries the `Alias*`
+        // memory states rather than the process image's. See
+        // `Memory::mark_module`.
+        self.mem.mark_module(
+            (text.0, base.wrapping_add(header.data_offset)),
+            (base.wrapping_add(header.data_offset), base.wrapping_add(size)),
+            true,
+        );
         self.ro_modules.insert(
             base,
             RoModule { source: nro_address as u32, base, size, text },
@@ -257,6 +265,7 @@ impl Cpu {
             return self.write_ipc_response(tls, NOT_LOADED, &[], &[], &[]);
         };
         self.mem.unmark_readonly(module.text.0, module.text.1);
+        self.mem.unmark_module(module.base, module.base.wrapping_add(module.size));
         self.mem.unmap(module.base, module.size as usize);
         self.diagnostic(&format!(
             "[ro] unmapped the module at {:#010x} ({:#x} bytes)",
