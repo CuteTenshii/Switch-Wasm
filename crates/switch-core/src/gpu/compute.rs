@@ -6,10 +6,11 @@
 //! decodes its shaders, and runs one [`Invocation`] per thread of the grid.
 //!
 //! The interpreter is scalar, so a CTA's threads run one after another rather
-//! than in lockstep. That is exact for everything except a barrier, which is
-//! the one place a thread's progress depends on the others': threads run to
-//! the next `bar`, and only once every one of them has arrived does any of
-//! them continue. Since nothing runs concurrently, an atomic needs no locking
+//! than in lockstep. That is exact for everything except a barrier and a warp
+//! shuffle, the two places a thread's progress depends on the others':
+//! threads run to the next `bar`, and only once every one of them has arrived
+//! does any of them continue; a `shfl` suspends the same way and is answered
+//! once its warp has caught up. Since nothing runs concurrently, an atomic needs no locking
 //! and a race cannot be observed — a kernel whose result depends on one gets a
 //! valid answer here and a different one on hardware.
 
@@ -18,7 +19,8 @@ use crate::gpu::exec::ExecCtx;
 use crate::gpu::qmd::{ConstantBuffer, Qmd, Release, CONSTANT_BUFFERS, QMD_WORDS};
 use crate::gpu::shader::compiled::Compiled;
 use crate::gpu::shader::interp::{
-    ConstCache, ConstantSource, Env, GlobalMemory, Halt, Invocation, SharedMemory, TextureSource,
+    resolve_shuffles, ConstCache, ConstantSource, Env, GlobalMemory, Halt, Invocation,
+    SharedMemory, TextureSource, WARP_LANES,
 };
 use crate::gpu::shader::{decode_program_from_memory, Op};
 use crate::gpu::texture::{self, BlockCache, Descriptors};
@@ -88,9 +90,14 @@ pub fn dispatch(engine: &EngineCompute, ctx: &mut ExecCtx) -> Result<()> {
     env.special.shared_size = qmd.shared_memory_size;
     env.special.local_size = qmd.local_memory_size;
 
-    // A program with no barrier needs no scheduler and no per-thread state
-    // kept alive, which is the common case and much the cheaper one.
-    let cooperative = program.ops().iter().any(|op| matches!(op, Op::Bar { .. }));
+    // A program with neither a barrier nor a warp shuffle needs no scheduler
+    // and no per-thread state kept alive, which is the common case and much
+    // the cheaper one. Both are places a thread's progress depends on the
+    // others', and nothing else is.
+    let cooperative = program
+        .ops()
+        .iter()
+        .any(|op| matches!(op, Op::Bar { .. } | Op::Shfl { .. }));
     let mut threads = Threads::new(&qmd, cooperative);
 
     for z in 0..qmd.cta_raster[2] {
@@ -147,21 +154,33 @@ impl Threads {
                 }
                 let mut waiting = vec![true; invocations.len()];
                 // Each pass runs every thread that is still going until it
-                // exits or reaches a barrier. A pass that ends with nothing
-                // waiting is the barrier every thread arrived at, released.
+                // exits, reaches a barrier, or reaches a shuffle. A pass that
+                // ends with nothing waiting is the barrier every thread
+                // arrived at, released.
                 loop {
                     let mut arrived = false;
+                    let mut shuffled = false;
                     for (thread, invocation) in invocations.iter_mut().enumerate() {
                         if !waiting[thread] {
                             continue;
                         }
+                        env.special.lane = thread as u32 % WARP_LANES as u32;
                         env.special.tid = tid(thread as u32, qmd);
                         match invocation.resume(program, env)? {
                             Halt::Exited => waiting[thread] = false,
                             Halt::Barrier => arrived = true,
+                            Halt::Shuffle => shuffled = true,
                         }
                     }
-                    if !arrived {
+                    // A shuffle reaches across one warp, not the whole CTA:
+                    // threads are numbered in the order they were launched,
+                    // so a warp is a run of [`WARP_LANES`] of them.
+                    if shuffled {
+                        for warp in invocations.chunks_mut(WARP_LANES) {
+                            resolve_shuffles(warp);
+                        }
+                    }
+                    if !arrived && !shuffled {
                         return Ok(());
                     }
                 }
@@ -349,6 +368,30 @@ mod tests {
                 | u64::from(addr) << 8
                 | u64::from(src),
             Op::Sts { addr, offset: offset as i32, src, size: MemSize::B32 },
+        )
+    }
+
+    /// `shfl.bfly p0, dst, src, index, mask` — the lane whose number differs
+    /// from this one's in the bits `index` names.
+    fn shfl_bfly(dst: u8, src: u8, index: u32, mask: u32) -> u64 {
+        encode(
+            0xef10u64 << 48
+                | u64::from(mask) << 34
+                | 3 << 30
+                | 1 << 29
+                | 1 << 28
+                | u64::from(index) << 20
+                | PT
+                | u64::from(src) << 8
+                | u64::from(dst),
+            Op::Shfl {
+                dst,
+                pred: 0,
+                src,
+                index: Operand::Imm(index),
+                mask: Operand::Imm(mask),
+                mode: isa::ShflMode::Bfly,
+            },
         )
     }
 
@@ -562,6 +605,28 @@ mod tests {
             Launch { grid: [1, 1, 1], block: [4, 1, 1], shared: 64, ..Launch::default() };
         run(&mut h, &launch, &program).unwrap();
         assert_eq!(h.read_output(4), vec![3, 3, 3, 3]);
+    }
+
+    #[test]
+    fn a_thread_reads_another_lane_of_its_warp_through_a_shuffle() {
+        // Each thread puts its own id in r0 and then reads the id of the
+        // lane beside it. Threads run one at a time here, so the exchange
+        // only has an answer because a shuffle suspends the thread the same
+        // way a barrier does.
+        let mut h = Harness::new();
+        let out = h.base + OUTPUT_AT;
+        let program = [
+            s2r(0, SR_TIDX),
+            shfl_bfly(1, 0, 1, 0x1f),
+            mov32i(4, out as u32),
+            iscadd(2, 0, 4, 2),
+            mov32i(3, (out >> 32) as u32),
+            stg(2, 0, 1),
+            exit(),
+        ];
+        let launch = Launch { grid: [1, 1, 1], block: [4, 1, 1], ..Launch::default() };
+        run(&mut h, &launch, &program).unwrap();
+        assert_eq!(h.read_output(4), vec![1, 0, 3, 2]);
     }
 
     #[test]

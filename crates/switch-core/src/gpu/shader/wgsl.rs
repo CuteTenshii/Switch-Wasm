@@ -1384,7 +1384,15 @@ impl Emitter<'_> {
             // Global, local and shared memory need storage buffers, which is
             // a question about resource binding rather than translation. A
             // barrier has no meaning in the graphics stages this translates.
-            Op::Ldg { .. }
+            //
+            // `shfl`/`fswzadd` read a value that belongs to another lane of
+            // the quad. WGSL has no subgroup operations at all, and the
+            // derivative built-ins are not the same thing: a shader is free
+            // to shuffle whatever it likes, and only some of those shuffles
+            // are a `dpdx`. The rasterizer runs those draws instead.
+            Op::Shfl { .. }
+            | Op::Fswzadd { .. }
+            | Op::Ldg { .. }
             | Op::Stg { .. }
             | Op::Ldl { .. }
             | Op::Stl { .. }
@@ -2104,7 +2112,7 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu::shader::isa::{FmulScale, Instruction, MemSize};
+    use crate::gpu::shader::isa::{FmulScale, Instruction, MemSize, ShflMode};
     use crate::gpu::shader::{next_slot, Program, ENTRY_OFFSET};
     use std::collections::BTreeMap;
 
@@ -2286,6 +2294,23 @@ mod tests {
         // resources rather than about translating instructions. Saying so is
         // what lets a caller fall back for that draw.
         let op = Op::Ldg { dst: 1, addr: 2, offset: 0, size: MemSize::B32 };
+        let p = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
+        assert_eq!(translate(&p).unwrap_err(), Unsupported::Op { at: 0, op });
+    }
+
+    #[test]
+    fn a_warp_shuffle_is_reported_rather_than_translated_as_a_derivative() {
+        // WGSL has no subgroup operations, and `dpdx` is not the same thing:
+        // it is one of the things a shuffle can be used for. The rasterizer
+        // runs those draws, in the 2x2 quads a shuffle needs.
+        let op = Op::Shfl {
+            dst: 1,
+            pred: 0,
+            src: 2,
+            index: Operand::Imm(1),
+            mask: Operand::Imm(0x1c),
+            mode: ShflMode::Bfly,
+        };
         let p = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
         assert_eq!(translate(&p).unwrap_err(), Unsupported::Op { at: 0, op });
     }

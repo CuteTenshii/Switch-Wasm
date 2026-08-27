@@ -18,7 +18,7 @@ whenever it was last recorded.
 | Home Menu (`qlaunch`) | draws; 88 draws a frame on the WebGPU backend | yes | AGENTS.md |
 | `sysinfo` / `NX-Fetch` / `nxdumptool` | render | yes | carried |
 | `JKSV.nro` | full UI: text, icons, save tiles | yes | carried |
-| `Checkpoint.nro` | layout and chrome; text still solid blocks (needs `SHFL`) | yes | carried |
+| `Checkpoint.nro` | layout and chrome; text was solid blocks for want of `SHFL`, unchecked since | yes | carried |
 | "A Short Hike" (NSP) | composites a full 1280x720 frame; steady state is 2 draws a frame and never a scene | partial | measured |
 | "Tomodachi Life" (NSP) | 1.2B steps, no fault, no abort, **no draw calls** | no | carried |
 
@@ -221,12 +221,34 @@ gap produced by a different route. An unwritten mask has to read as *all*
 channels: zero is the register file's initial value and would blank every
 guest that leaves it alone.
 
-**`SHFL` is still undecoded**, and it is why Checkpoint's antialiased text is
-solid blocks. A scalar interpreter cannot answer it — the value belongs to
-another invocation — so it needs a 2x2 fragment quad in lock-step, gated on
-"this program contains a `SHFL`". Returning the source unchanged makes `fwidth`
-zero, which is *not* obviously better than dropping the draw, so it fails
-loudly instead.
+**`SHFL` is decoded now, and it took a quad to run.** A scalar interpreter
+cannot answer it — the value belongs to another invocation — so the four pixels
+of a 2x2 quad run in lock-step: each lane runs to its next shuffle, the warp
+exchanges, and all of them go on. That is the barrier machinery a compute
+dispatch already had (`Halt::Shuffle` beside `Halt::Barrier`), which is why the
+same resolver serves a fragment quad and a kernel's warp of 32. Three things
+came out of it:
+
+- **A shuffle is only half of a derivative.** `SHFL.BFLY` fetches the
+  neighbour's value and `FSWZADD` subtracts it in whichever direction the
+  lane's own position in the quad calls for — two lanes add and two subtract,
+  one instruction, no branch. Decoding the shuffle alone would leave every one
+  of those shaders failing on the instruction *after* the one just
+  implemented.
+- **Both of its operands are a register or an immediate, and the immediate
+  sits in a different field from the register** (lane index: five bits at 20
+  or a register at 20; clamp/segment: thirteen bits at 34 or a register at
+  39), with a flag apiece. Reading the wrong field gives a *plausible* lane
+  number rather than an error — the same shape as the `texs` handle bug.
+- **Helper lanes are the point, not an artefact.** A quad shades the pixels
+  its triangle misses and throws the colour away, because they are what the
+  covered lanes difference against. That is real work no other draw does, so
+  the quad walk is gated on the program containing a `SHFL` or `FSWZADD`;
+  everything else keeps the pixel-at-a-time loop. The Home Menu's frame is
+  byte-identical across the change.
+
+Checkpoint's `.nro` is not in the tree, so the text it draws with these has
+not been looked at since.
 
 **Where a frame's time goes** (ablation on 30 JKSV frames): fragment shader
 interpretation 36%, rasterize/depth/blend/pixel I/O 30%, ARM interpreter 25%,
@@ -563,7 +585,9 @@ The `.nro`/`.nsp` files are gitignored; `test-nros/` holds the local homebrew.
    not the retail path's.
 2. **NX-Shell regressed** to 433,783 steps with no output. Cheapest bisect
    here — the `.nro` is in the tree.
-3. **`SHFL`**, which is what leaves Checkpoint's text as blocks.
+3. **Check Checkpoint's text.** `SHFL`/`FSWZADD` and the quad that runs them
+   are implemented and tested, but the title itself has never been run against
+   them — its `.nro` is not in the tree.
 4. **`usb:hs` and `ncm`**, the last two services. Homebrew also still opens a
    service under an **empty name** (Checkpoint does), and `sm` hands out a
    working handle instead of failing the way real `sm` would.

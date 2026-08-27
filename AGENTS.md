@@ -625,13 +625,27 @@ launch is in the class's register file — the channel writes a QMD address and
 the grid, the block, the constant buffers and the shared-memory size come out
 of a 256-byte structure in memory (`clb1c0qmd.h`'s `MW(hi:lo)` fields). Threads
 being sequential is exact for everything except `bar`, where a thread suspends
-and the CTA resumes once every thread has arrived; it also makes an atomic
-atomic by construction, so a kernel whose answer depends on a race gets a valid
-one here and a different one on hardware. Named barriers are not told apart and
+and the CTA resumes once every thread has arrived, and `shfl`, which suspends
+the same way and is answered once its warp of 32 has caught up; it also makes
+an atomic atomic by construction, so a kernel whose answer depends on a race
+gets a valid one here and a different one on hardware. Named barriers are not told apart and
 `bar.arrive` synchronises like `bar.sync` — both over-synchronise, which no
 well-formed kernel can detect. `compute::MAX_DISPATCH_THREADS` refuses a grid
 past a million threads: hardware runs one in microseconds, and the worker
 thread the whole GPU stack shares does not.
+
+**A fragment shader that shuffles runs in 2x2 quads.** `shfl` reads a register
+belonging to *another* invocation — which is what `dFdx`/`fwidth` are built out
+of — so the four pixels of a quad have to reach the instruction together.
+`Halt::Shuffle` suspends a lane the way a barrier suspends a thread, and
+`interp::resolve_shuffles` answers every lane of the warp at once. Lanes are
+the pixels `(x, y)`, `(x+1, y)`, `(x, y+1)`, `(x+1, y+1)`, and `sr0`
+(`SR_LANEID`) is which one this is. The quad walk is gated on the program
+containing a `shfl` or an `fswzadd`: the pixels a quad shades that the triangle
+misses are work no other draw has to do, and this is a draw's innermost loop.
+Neither op translates to WGSL — it has no subgroup operations, and `dpdx` is
+one of the things a shuffle can be used for rather than what it is — so those
+draws fall back to the rasterizer.
 
 Scan-out: `display::BufferQueue` (`QUEUE_BUFFER`) resolves the
 `NvGraphicBuffer` to an nvmap id and `Gpu::present` de-swizzles into

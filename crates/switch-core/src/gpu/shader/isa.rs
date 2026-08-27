@@ -355,6 +355,19 @@ pub enum BarMode {
     Scan,
 }
 
+/// Which lane a `shfl` reads (`ShuffleMode` in Eden's `warp_shuffle.cpp`).
+///
+/// Every mode names a source lane relative to the one executing it: an
+/// absolute index, a fixed distance below or above, or the lane whose id
+/// differs in the bits `index` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShflMode {
+    Idx,
+    Up,
+    Down,
+    Bfly,
+}
+
 /// Which address space an atomic addresses. `atom`/`red` are global,
 /// `atoms` is shared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -621,6 +634,23 @@ pub enum Op {
     /// two destination registers the enabled channels are split between;
     /// see [`texs_destinations`].
     Texs { dst: u8, dst2: u8, coords: [u8; 3], handle: u16, dim: TexDim, mask: [bool; 4] },
+
+    // ---- warp ----
+    /// `shfl.<mode> p, dst, src, index, mask` — read another lane's `src`.
+    ///
+    /// `index` selects the lane the mode's own way, and `mask` packs two
+    /// fields: a clamp in its low five bits and a segment mask at bit 8,
+    /// which together bound which lanes this one may reach. `pred` is set to
+    /// whether the lane it computed was inside that bound; a lane that was
+    /// not keeps its own value.
+    Shfl { dst: u8, pred: u8, src: u8, index: Operand, mask: Operand, mode: ShflMode },
+    /// `fswzadd dst, a, b, swizzle` — add `a` and `b` with a sign per lane,
+    /// the two-bit code for this one selected out of `swizzle` by `laneid`.
+    ///
+    /// It is the other half of a derivative: `shfl` fetches the neighbour's
+    /// value and this subtracts in whichever direction the lane's position in
+    /// the quad calls for.
+    Fswzadd { dst: u8, a: u8, b: u8, swizzle: u8, ftz: bool },
 
     // ---- control ----
     /// `bra target` — `target` is an instruction's byte offset within the
@@ -962,6 +992,35 @@ fn decode_op(insn: u64, pc: u32) -> Op {
                 op,
                 ty,
                 space: AtomSpace::Global,
+            }
+        }
+        // shfl — 0xef10/0xfff8 (Eden's `maxwell.inc`,
+        // "1110 1111 0001 0---"). Both operands can be a register or an
+        // immediate, and each has its own flag saying which — the lane index
+        // five bits at 20, the clamp/segment pair thirteen at 34.
+        0xef10 => {
+            let index = if field(insn, 28, 1) != 0 {
+                Operand::Imm(field(insn, 20, 5) as u32)
+            } else {
+                Operand::Reg(reg(insn, 20, 8))
+            };
+            let mask = if field(insn, 29, 1) != 0 {
+                Operand::Imm(field(insn, 34, 13) as u32)
+            } else {
+                Operand::Reg(reg(insn, 39, 8))
+            };
+            Op::Shfl {
+                dst: reg(insn, 0, 8),
+                pred: reg(insn, 48, 3),
+                src: reg(insn, 8, 8),
+                index,
+                mask,
+                mode: match field(insn, 30, 2) {
+                    0 => ShflMode::Idx,
+                    1 => ShflMode::Up,
+                    2 => ShflMode::Down,
+                    _ => ShflMode::Bfly,
+                },
             }
         }
         // sync — 0xf0f8/0xfff8.
@@ -1578,6 +1637,25 @@ fn decode_alu_wide(insn: u64) -> Op {
     // them, and the frame it presented was the clear colour and nothing else.
     if insn & 0xfff8_0000_0000_0000 == 0x50e0_0000_0000_0000 {
         return Op::Nop;
+    }
+
+    // fswzadd — 0x50f8/0xfff8. `ndv` at 38 is a scheduling hint about
+    // divergence and has no effect here; the condition-code write at 47 is
+    // refused rather than dropped, since a shader that reads the flag would
+    // read whatever was left there. Only round-to-nearest is decoded: this
+    // is the tail of a derivative, and a rounding mode silently ignored
+    // biases every one of them.
+    if insn & 0xfff8_0000_0000_0000 == 0x50f8_0000_0000_0000 {
+        if field(insn, 47, 1) != 0 || field(insn, 39, 2) != 0 {
+            return un;
+        }
+        return Op::Fswzadd {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            b: reg(insn, 20, 8),
+            swizzle: field(insn, 28, 8) as u8,
+            ftz: field(insn, 44, 1) != 0,
+        };
     }
 
     // mufu — subop at 20..24, sat 50, src: neg 48 / abs 46.
@@ -2279,6 +2357,78 @@ mod tests {
         // membar and depbar are still the no-ops they were.
         assert_eq!(decode(0xef98u64 << 48 | PT).op, Op::Inert);
         assert_eq!(decode(0xf0f0u64 << 48 | PT).op, Op::Inert);
+    }
+
+    /// `shfl` carries two operands that are each either a register or an
+    /// immediate, with a flag apiece saying which — and the immediates sit in
+    /// different fields from the registers, so reading the wrong one gives a
+    /// plausible lane number rather than an error.
+    #[test]
+    fn decodes_a_warp_shuffle_in_each_mode_and_operand_form() {
+        // shfl.<mode> p0, r3, r4, 0x1, 0x1c
+        let immediate = |mode: u64| {
+            decode(
+                0xef10u64 << 48
+                    | 0x1c << 34
+                    | mode << 30
+                    | 1 << 29
+                    | 1 << 28
+                    | 1 << 20
+                    | PT
+                    | 4 << 8
+                    | 3,
+            )
+            .op
+        };
+        for (bits, mode) in
+            [(0, ShflMode::Idx), (1, ShflMode::Up), (2, ShflMode::Down), (3, ShflMode::Bfly)]
+        {
+            assert_eq!(
+                immediate(bits),
+                Op::Shfl {
+                    dst: 3,
+                    pred: 0,
+                    src: 4,
+                    index: Operand::Imm(1),
+                    mask: Operand::Imm(0x1c),
+                    mode,
+                }
+            );
+        }
+
+        // The same instruction with both operands in registers: the lane
+        // index at 20 and the clamp/segment pair at 39.
+        assert_eq!(
+            decode(0xef10u64 << 48 | 3 << 30 | 6 << 39 | 5 << 20 | PT | 4 << 8 | 3 | 2 << 48).op,
+            Op::Shfl {
+                dst: 3,
+                pred: 2,
+                src: 4,
+                index: Operand::Reg(5),
+                mask: Operand::Reg(6),
+                mode: ShflMode::Bfly,
+            }
+        );
+    }
+
+    #[test]
+    fn decodes_the_per_lane_add_a_derivative_ends_with() {
+        // fswzadd r3, r1, r2, 0xe4
+        let fswzadd = |extra: u64| decode(0x50f8u64 << 48 | extra | 0xe4 << 28 | 2 << 20 | PT | 1 << 8 | 3).op;
+        assert_eq!(
+            fswzadd(0),
+            Op::Fswzadd { dst: 3, a: 1, b: 2, swizzle: 0xe4, ftz: false }
+        );
+        assert_eq!(
+            fswzadd(1 << 44),
+            Op::Fswzadd { dst: 3, a: 1, b: 2, swizzle: 0xe4, ftz: true }
+        );
+        // A condition-code write and a rounding mode other than nearest are
+        // refused rather than dropped: both change what a later instruction
+        // reads, and this one is the tail of every derivative in the shader.
+        for extra in [1u64 << 47, 1 << 39, 2 << 39] {
+            assert!(matches!(fswzadd(extra), Op::Unimplemented { .. }), "{extra:#x}");
+        }
     }
 
     #[test]

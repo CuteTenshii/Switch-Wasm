@@ -15,16 +15,17 @@
 //! and content that switches either on will draw as though it had not.
 
 use crate::gpu::engine::threed::{
-    BlendTarget, CullState, Engine3D, ScissorRect, ShaderStage, VertexArray, VertexAttrib,
-    ViewportTransform,
+    BlendTarget, CullState, DepthState, DepthTarget, Engine3D, RenderTarget, ScissorRect,
+    ShaderStage, VertexArray, VertexAttrib, ViewportTransform,
 };
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::shader::interp::{
-    ConstantSource, Env, Invocation, MemoryConstants, MemoryGlobal, MemoryTextures, NoTextures,
+    resolve_shuffles, ConstantSource, Env, Halt, Invocation, MemoryConstants, MemoryGlobal,
+    MemoryTextures, NoTextures,
 };
 use crate::gpu::shader::compiled::Compiled;
-use crate::gpu::shader::{decode_program_from_memory, Program};
-use crate::gpu::surface::{ColorFormat, MAX_SAMPLES};
+use crate::gpu::shader::{decode_program_from_memory, Op, Program};
+use crate::gpu::surface::{ColorFormat, SampleGrid, MAX_SAMPLES};
 use crate::{Error, Result};
 
 /// The `DkPrimitive` topologies this rasterizer assembles (deko3d.h,
@@ -677,17 +678,18 @@ fn blend(target: BlendTarget, constant: [f32; 4], src: [f32; 4], dst: [f32; 4]) 
     out
 }
 
-/// Shade one covered pixel. `inv` is threaded in rather than created here so
-/// that a draw allocates one invocation instead of one per covered pixel — a
-/// full-screen quad covers 921 600 of them.
-fn shade_fragment(
+/// Put one fragment's interpolated inputs in place, ready to run.
+///
+/// `inv` is threaded in rather than created here so that a draw allocates one
+/// invocation instead of one per covered pixel — a full-screen quad covers
+/// 921 600 of them.
+fn seed_fragment(
     inv: &mut Invocation,
     program: &Compiled,
     verts: &[ShadedVertex; 3],
     inv_w: [f32; 3],
     weights: [f32; 3],
-    env: &Env,
-) -> Result<Option<[f32; 4]>> {
+) {
     inv.reset();
     let interp_inv_w = weights[0] * inv_w[0] + weights[1] * inv_w[1] + weights[2] * inv_w[2];
     inv.attr_in.set(INV_W_OFFSET, interp_inv_w);
@@ -700,11 +702,267 @@ fn shade_fragment(
             inv.attr_in.set(base + c as u16 * 4, over_w);
         }
     }
-    inv.execute(program, env)?;
+}
+
+/// The colour an invocation that has run to `exit` leaves behind, or `None`
+/// if `kil` discarded the fragment.
+fn fragment_color(inv: &Invocation) -> Option<[f32; 4]> {
     if inv.discarded {
-        return Ok(None);
+        return None;
     }
-    Ok(Some([inv.reg_f32(0), inv.reg_f32(1), inv.reg_f32(2), inv.reg_f32(3)]))
+    Some([inv.reg_f32(0), inv.reg_f32(1), inv.reg_f32(2), inv.reg_f32(3)])
+}
+
+/// Shade one covered pixel.
+fn shade_fragment(
+    inv: &mut Invocation,
+    program: &Compiled,
+    verts: &[ShadedVertex; 3],
+    inv_w: [f32; 3],
+    weights: [f32; 3],
+    env: &Env,
+) -> Result<Option<[f32; 4]>> {
+    seed_fragment(inv, program, verts, inv_w, weights);
+    inv.execute(program, env)?;
+    Ok(fragment_color(inv))
+}
+
+/// The four pixels hardware shades together, in lane order: `(x, y)`,
+/// `(x + 1, y)`, `(x, y + 1)`, `(x + 1, y + 1)`.
+pub const QUAD: usize = 4;
+
+/// Where lane `lane` of a quad based at `(x, y)` sits.
+fn quad_pixel(x: u32, y: u32, lane: usize) -> (u32, u32) {
+    (x + lane as u32 % 2, y + lane as u32 / 2)
+}
+
+/// Shade a 2x2 quad of pixels in lock-step.
+///
+/// A warp shuffle reads a register belonging to another invocation, so the
+/// four pixels have to reach it together: each lane runs to its next shuffle,
+/// and only once every lane that is still going has arrived does the exchange
+/// happen and all of them go on. Lanes whose pixel the triangle misses are
+/// shaded anyway and their colour thrown away — they exist so that the
+/// covered lanes have a neighbour to difference against, which is the whole
+/// reason a derivative can be computed at all.
+///
+/// Lanes that diverge — one at a shuffle, another somewhere else entirely —
+/// are answered from wherever the other lane happens to be. Hardware answers
+/// them from an inactive lane, which is to say with a value the shader is not
+/// entitled to rely on either.
+fn shade_quad(
+    lanes: &mut [Invocation; QUAD],
+    program: &Compiled,
+    verts: &[ShadedVertex; 3],
+    inv_w: [f32; 3],
+    weights: [[f32; 3]; QUAD],
+    env: &mut Env,
+) -> Result<[Option<[f32; 4]>; QUAD]> {
+    for (lane, invocation) in lanes.iter_mut().enumerate() {
+        seed_fragment(invocation, program, verts, inv_w, weights[lane]);
+        invocation.begin();
+    }
+    let mut running = [true; QUAD];
+    loop {
+        let mut shuffled = false;
+        for (lane, invocation) in lanes.iter_mut().enumerate() {
+            if !running[lane] {
+                continue;
+            }
+            env.special.lane = lane as u32;
+            match invocation.resume(program, env)? {
+                Halt::Exited => running[lane] = false,
+                Halt::Shuffle => shuffled = true,
+                Halt::Barrier => {
+                    return Err(Error::Gpu(
+                        "raster: bar in a fragment shader, where there is no CTA to \
+                         synchronise with"
+                            .into(),
+                    ))
+                }
+            }
+        }
+        if !shuffled {
+            break;
+        }
+        resolve_shuffles(lanes);
+    }
+    Ok(std::array::from_fn(|lane| fragment_color(&lanes[lane])))
+}
+
+/// The per-pixel half of a draw: which samples of a pixel a triangle covers
+/// and passes the depth test at, and what a shaded colour does to the
+/// targets.
+///
+/// Held apart from the loop over pixels because there are two such loops — a
+/// shader containing a warp shuffle is walked in 2x2 quads instead of pixel
+/// by pixel — and they do exactly this to every pixel they reach.
+struct Fragments {
+    grid: SampleGrid,
+    sample_mask: u32,
+    depth: Option<DepthTarget>,
+    depth_state: DepthState,
+    rt: Option<RenderTarget>,
+    blend_target: BlendTarget,
+    blend_constant: [f32; 4],
+    color_mask: [bool; 4],
+    writes_all_channels: bool,
+    writes_any_channel: bool,
+    alpha_to_coverage: bool,
+}
+
+impl Fragments {
+    /// Which samples of pixel `(x, y)` this triangle covers and the depth
+    /// test lets through, and the interpolated depth at each of them.
+    ///
+    /// Coverage and depth are per sample; shading is not. That split is what
+    /// multisampling buys over rendering the whole frame at the sample grid's
+    /// resolution: the edges get every sample's worth of coverage, but the
+    /// fragment shader still runs once for the pixel.
+    fn coverage(
+        &self,
+        tri: &TriangleSetup,
+        window_z: [f32; 3],
+        (x, y): (u32, u32),
+        ctx: &mut ExecCtx,
+    ) -> Result<(u32, [f32; MAX_SAMPLES])> {
+        let mut covered = 0u32;
+        let mut sample_z = [0.0f32; MAX_SAMPLES];
+        for sample in 0..self.grid.count() {
+            if self.sample_mask >> sample & 1 == 0 {
+                continue;
+            }
+            let [offset_x, offset_y] = self.grid.position(sample);
+            let Some(w) = tri.coverage(x as f32 + offset_x, y as f32 + offset_y) else {
+                continue;
+            };
+            let z = w[0] * window_z[0] + w[1] * window_z[1] + w[2] * window_z[2];
+            if let (true, Some(dt)) = (self.depth_state.test_enabled, self.depth) {
+                let (tx, ty) = self.grid.texel(x, y, sample);
+                let bytes = dt.format.bytes;
+                let dva = dt.addr + dt.layout.offset(tx * bytes, ty, dt.width * bytes) as u64;
+                let old = dt.format.decode_depth(ctx.read_pixel(dva, bytes)?);
+                if !depth_test_passes(self.depth_state.func, z, old) {
+                    continue;
+                }
+            }
+            covered |= 1 << sample;
+            sample_z[sample as usize] = z;
+        }
+        Ok((covered, sample_z))
+    }
+
+    /// Put a shaded pixel into the targets, for every sample of it still
+    /// covered.
+    fn write(
+        &self,
+        (x, y): (u32, u32),
+        covered: u32,
+        sample_z: &[f32; MAX_SAMPLES],
+        color: [f32; 4],
+        ctx: &mut ExecCtx,
+        tally: &mut DrawTally,
+    ) -> Result<()> {
+        tally.shaded(color);
+
+        // Alpha-to-coverage narrows the mask *after* shading, since it is the
+        // shaded alpha it turns into coverage.
+        let mut covered = covered;
+        if self.alpha_to_coverage {
+            covered &= alpha_coverage(color[3], self.grid.count());
+            if covered == 0 {
+                tally.alpha_killed += 1;
+                return Ok(());
+            }
+        }
+
+        for sample in 0..self.grid.count() {
+            if covered & (1 << sample) == 0 {
+                continue;
+            }
+            let (tx, ty) = self.grid.texel(x, y, sample);
+            if self.depth_state.test_enabled && self.depth_state.write_enabled {
+                if let Some(dt) = self.depth {
+                    let bytes = dt.format.bytes;
+                    let dva = dt.addr + dt.layout.offset(tx * bytes, ty, dt.width * bytes) as u64;
+                    let z = sample_z[sample as usize];
+                    // A packed depth-stencil pixel holds a stencil byte this
+                    // draw is not writing. Read it back and merge rather than
+                    // flattening it to zero — the extra read is only for the
+                    // formats that actually share the pixel.
+                    let value = if dt.format.packs_stencil() {
+                        dt.format.with_depth(ctx.read_pixel(dva, bytes)?, z)
+                    } else {
+                        dt.format.encode_depth(z)
+                    };
+                    ctx.write_pixel(dva, bytes, value)?;
+                }
+            }
+
+            // A depth-only pass shaded the fragment for its `kil` and its
+            // alpha coverage, and has nowhere to put the colour that came out
+            // of it — either because no colour target is bound or because the
+            // write mask closed every channel.
+            if let Some(rt) = self.rt.filter(|_| self.writes_any_channel) {
+                let bpp = rt.format.bytes_per_pixel;
+                let va = rt.addr + rt.texel_offset(tx, ty) as u64;
+                // Blending and a masked channel both need what the target
+                // already holds, so read it once for both.
+                let dst = if self.blend_target.enabled || !self.writes_all_channels {
+                    Some(rt.format.decode(ctx.read_pixel(va, bpp)?)?)
+                } else {
+                    None
+                };
+                let mut out = color;
+                if let Some(dst) = dst {
+                    if self.blend_target.enabled {
+                        let src = source_color(color, rt.format);
+                        out = blend(self.blend_target, self.blend_constant, src, dst);
+                    }
+                    for (channel, keep) in self.color_mask.iter().enumerate() {
+                        if !keep {
+                            out[channel] = dst[channel];
+                        }
+                    }
+                }
+                tally.wrote(out);
+                ctx.write_pixel(va, bpp, rt.format.encode(out)?)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Build the environment a fragment shader runs under and hand it to `f`.
+///
+/// Every source in it borrows the execution context immutably, and the pixel
+/// loop needs that context mutably to write what comes out — so the
+/// environment cannot outlive one shading step, which is what the callback is
+/// for.
+fn with_fragment_env<T>(
+    engine: &Engine3D,
+    ctx: &ExecCtx,
+    consts: &std::cell::RefCell<crate::gpu::shader::interp::ConstCache>,
+    descriptors: &std::cell::RefCell<crate::IdMap<u32, crate::gpu::texture::Descriptors>>,
+    blocks: &std::cell::RefCell<crate::gpu::texture::BlockCache>,
+    f: impl FnOnce(&mut Env) -> Result<T>,
+) -> Result<T> {
+    let fs_consts = MemoryConstants {
+        ctx,
+        bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::Fragment, bank as u32),
+        cache: consts,
+    };
+    let fs_textures = MemoryTextures {
+        ctx,
+        tex_header_pool: engine.tex_header_pool(),
+        tex_sampler_pool: engine.tex_sampler_pool(),
+        descriptors,
+        blocks,
+    };
+    let fs_global = MemoryGlobal { ctx };
+    let mut env = Env::with_tex_cb_index(&fs_consts, &fs_textures, engine.tex_cb_index());
+    env.memory = Some(&fs_global);
+    f(&mut env)
 }
 
 /// Whether `cull` throws this triangle away.
@@ -835,7 +1093,6 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let attribs: Vec<VertexAttrib> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_attrib(i)).collect();
     let arrays: Vec<VertexArray> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_array(i)).collect();
     let viewport = engine.viewport_transform();
-    let tex_cb_index = engine.tex_cb_index();
     let grid = engine.sample_grid()?;
     let sample_mask = engine.sample_mask();
     let alpha_to_coverage = engine.alpha_to_coverage();
@@ -894,6 +1151,19 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let mut cache: crate::IdMap<u32, ShadedVertex> = crate::IdMap::default();
     // One fragment invocation for the whole draw, reset per pixel.
     let mut fragment = Invocation::new();
+    let fragments = Fragments {
+        grid,
+        sample_mask,
+        depth,
+        depth_state,
+        rt,
+        blend_target,
+        blend_constant,
+        color_mask,
+        writes_all_channels,
+        writes_any_channel,
+        alpha_to_coverage,
+    };
     // Parsed TIC/TSC pairs, and the compressed blocks they decode to, shared
     // by every fragment of this draw.
     let descriptors = std::cell::RefCell::new(crate::IdMap::default());
@@ -922,6 +1192,16 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         };
         Compiled::with_constants(&fs_program, &consts)
     };
+    // A shader that reads a register belonging to another lane has to be run
+    // the way hardware runs it: four pixels of a quad in lock-step, helper
+    // lanes and all. Nothing else is, because those helpers are work no other
+    // draw has to do and this is a draw's innermost loop.
+    let mut quad: Option<Box<[Invocation; QUAD]>> = fs_program
+        .ops()
+        .iter()
+        .any(|op| matches!(op, Op::Shfl { .. } | Op::Fswzadd { .. }))
+        .then(|| Box::new(std::array::from_fn(|_| Invocation::new())));
+
     // `TRACE_PIPELINE=1`: the fixed-function state this draw runs under, as
     // a GPU backend would have to describe it — or what stopped it being
     // describable, which is the more useful half.
@@ -1112,145 +1392,107 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 continue;
             };
             let (min_x, max_x, min_y, max_y) = tri.bbox(bounds);
-            for y in min_y..max_y {
-                for x in min_x..max_x {
-                    // Coverage and depth are per sample; shading is not. That
-                    // split is what multisampling buys over rendering the
-                    // whole frame at the sample grid's resolution: the edges
-                    // get every sample's worth of coverage, but the fragment
-                    // shader still runs once for the pixel.
-                    let mut covered = 0u32;
-                    let mut sample_z = [0.0f32; MAX_SAMPLES];
-                    for sample in 0..grid.count() {
-                        if sample_mask >> sample & 1 == 0 {
-                            continue;
-                        }
-                        let [offset_x, offset_y] = grid.position(sample);
-                        let Some(w) = tri.coverage(x as f32 + offset_x, y as f32 + offset_y)
-                        else {
-                            continue;
-                        };
-                        let z = w[0] * window_z[0] + w[1] * window_z[1] + w[2] * window_z[2];
-                        if let (true, Some(dt)) = (depth_state.test_enabled, depth) {
-                            let (tx, ty) = grid.texel(x, y, sample);
-                            let bytes = dt.format.bytes;
-                            let dva =
-                                dt.addr + dt.layout.offset(tx * bytes, ty, dt.width * bytes) as u64;
-                            let old = dt.format.decode_depth(ctx.read_pixel(dva, bytes)?);
-                            if !depth_test_passes(depth_state.func, z, old) {
-                                continue;
-                            }
-                        }
-                        covered |= 1 << sample;
-                        sample_z[sample as usize] = z;
-                    }
-                    if covered == 0 {
-                        tally.uncovered += 1;
-                        continue;
-                    }
-                    tally.covered += 1;
-
-                    let [w0, w1, w2] = tri.weights(x as f32 + 0.5, y as f32 + 0.5);
-                    let color = {
-                        let fs_consts = MemoryConstants {
-                            ctx: &*ctx,
-                            bindings: &|bank: u8| engine.bound_constbuf(ShaderStage::Fragment, bank as u32),
-                            cache: &fs_const_cache,
-                        };
-                        let fs_textures = MemoryTextures {
-                            ctx: &*ctx,
-                            tex_header_pool: engine.tex_header_pool(),
-                            tex_sampler_pool: engine.tex_sampler_pool(),
-                            descriptors: &descriptors,
-                            blocks: &blocks,
-                        };
-                        let fs_global = MemoryGlobal { ctx: &*ctx };
-                        let mut env =
-                            Env::with_tex_cb_index(&fs_consts, &fs_textures, tex_cb_index);
-                        env.memory = Some(&fs_global);
-                        shade_fragment(
-                            &mut fragment,
-                            &fs_program,
-                            &shaded,
-                            [inv_w[0], inv_w[1], inv_w[2]],
-                            [w0, w1, w2],
-                            &env,
-                        )?
-                    };
-                    // `kil` discards the fragment: no colour, and no depth
-                    // write either, which is why the depth store waits until
-                    // after shading rather than happening with the test.
-                    let Some(color) = color else {
-                        tally.killed += 1;
-                        continue;
-                    };
-                    tally.shaded(color);
-
-                    // Alpha-to-coverage narrows the mask *after* shading,
-                    // since it is the shaded alpha it turns into coverage.
-                    if alpha_to_coverage {
-                        covered &= alpha_coverage(color[3], grid.count());
+            let Some(quad) = quad.as_mut() else {
+                for y in min_y..max_y {
+                    for x in min_x..max_x {
+                        let (covered, sample_z) =
+                            fragments.coverage(&tri, window_z, (x, y), ctx)?;
                         if covered == 0 {
-                            tally.alpha_killed += 1;
+                            tally.uncovered += 1;
                             continue;
+                        }
+                        tally.covered += 1;
+
+                        let weights = tri.weights(x as f32 + 0.5, y as f32 + 0.5);
+                        let color = with_fragment_env(
+                            engine,
+                            &*ctx,
+                            &fs_const_cache,
+                            &descriptors,
+                            &blocks,
+                            |env| {
+                                shade_fragment(
+                                    &mut fragment,
+                                    &fs_program,
+                                    &shaded,
+                                    inv_w,
+                                    weights,
+                                    env,
+                                )
+                            },
+                        )?;
+                        // `kil` discards the fragment: no colour, and no depth
+                        // write either, which is why the depth store waits
+                        // until after shading rather than happening with the
+                        // test.
+                        let Some(color) = color else {
+                            tally.killed += 1;
+                            continue;
+                        };
+                        fragments.write((x, y), covered, &sample_z, color, ctx, &mut tally)?;
+                    }
+                }
+                continue;
+            };
+
+            // The quad walk: the same work, in the 2x2 groups a warp shuffle
+            // needs. It starts at the even pixel at or below the bounding
+            // box's corner, since which pixels share a quad is a property of
+            // the grid rather than of the triangle. Pixels outside the box are
+            // never sampled — they are outside the scissor as well, and a
+            // depth test there would read a target this draw has no business
+            // touching — but they are still shaded, as the neighbours the
+            // covered lanes difference against.
+            for y in ((min_y & !1)..max_y).step_by(2) {
+                for x in ((min_x & !1)..max_x).step_by(2) {
+                    let mut covered = [0u32; QUAD];
+                    let mut sample_z = [[0.0f32; MAX_SAMPLES]; QUAD];
+                    let mut weights = [[0.0f32; 3]; QUAD];
+                    let mut any_covered = false;
+                    for lane in 0..QUAD {
+                        let (px, py) = quad_pixel(x, y, lane);
+                        weights[lane] = tri.weights(px as f32 + 0.5, py as f32 + 0.5);
+                        if px < min_x || px >= max_x || py < min_y || py >= max_y {
+                            continue;
+                        }
+                        let (mask, z) = fragments.coverage(&tri, window_z, (px, py), ctx)?;
+                        covered[lane] = mask;
+                        sample_z[lane] = z;
+                        if mask == 0 {
+                            tally.uncovered += 1;
+                        } else {
+                            tally.covered += 1;
+                            any_covered = true;
                         }
                     }
+                    if !any_covered {
+                        continue;
+                    }
 
-                    for sample in 0..grid.count() {
-                        if covered & (1 << sample) == 0 {
+                    let colors = with_fragment_env(
+                        engine,
+                        &*ctx,
+                        &fs_const_cache,
+                        &descriptors,
+                        &blocks,
+                        |env| shade_quad(quad, &fs_program, &shaded, inv_w, weights, env),
+                    )?;
+                    for lane in 0..QUAD {
+                        if covered[lane] == 0 {
                             continue;
                         }
-                        let (tx, ty) = grid.texel(x, y, sample);
-                        if depth_state.test_enabled && depth_state.write_enabled {
-                            if let Some(dt) = depth {
-                                let bytes = dt.format.bytes;
-                                let dva = dt.addr
-                                    + dt.layout.offset(tx * bytes, ty, dt.width * bytes) as u64;
-                                let z = sample_z[sample as usize];
-                                // A packed depth-stencil pixel holds a stencil
-                                // byte this draw is not writing. Read it back
-                                // and merge rather than flattening it to zero
-                                // — the extra read is only for the formats
-                                // that actually share the pixel.
-                                let value = if dt.format.packs_stencil() {
-                                    dt.format.with_depth(ctx.read_pixel(dva, bytes)?, z)
-                                } else {
-                                    dt.format.encode_depth(z)
-                                };
-                                ctx.write_pixel(dva, bytes, value)?;
-                            }
-                        }
-
-                        // A depth-only pass shaded the fragment for its `kil`
-                        // and its alpha coverage, and has nowhere to put the
-                        // colour that came out of it — either because no
-                        // colour target is bound or because the write mask
-                        // closed every channel.
-                        if let Some(rt) = rt.filter(|_| writes_any_channel) {
-                            let bpp = rt.format.bytes_per_pixel;
-                            let va = rt.addr + rt.texel_offset(tx, ty) as u64;
-                            // Blending and a masked channel both need what the
-                            // target already holds, so read it once for both.
-                            let dst = if blend_target.enabled || !writes_all_channels {
-                                Some(rt.format.decode(ctx.read_pixel(va, bpp)?)?)
-                            } else {
-                                None
-                            };
-                            let mut out = color;
-                            if let Some(dst) = dst {
-                                if blend_target.enabled {
-                                    let src = source_color(color, rt.format);
-                                    out = blend(blend_target, blend_constant, src, dst);
-                                }
-                                for (channel, keep) in color_mask.iter().enumerate() {
-                                    if !keep {
-                                        out[channel] = dst[channel];
-                                    }
-                                }
-                            }
-                            tally.wrote(out);
-                            ctx.write_pixel(va, bpp, rt.format.encode(out)?)?;
-                        }
+                        let Some(color) = colors[lane] else {
+                            tally.killed += 1;
+                            continue;
+                        };
+                        fragments.write(
+                            quad_pixel(x, y, lane),
+                            covered[lane],
+                            &sample_z[lane],
+                            color,
+                            ctx,
+                            &mut tally,
+                        )?;
                     }
                 }
             }
@@ -1638,12 +1880,40 @@ mod tests {
         bytes
     }
 
+    /// `oColor.r = vColor.r - vColor.r of the pixel beside me`, which is a
+    /// horizontal derivative: the `ipa` chain of [`solid_fragment_shader`] up
+    /// to the first component, then a `shfl.bfly` reading the lane whose
+    /// number differs in the low bit and a subtract.
+    ///
+    /// The result lands in `r0`, the neighbour's own value stays in `r1`, and
+    /// `r3` is still the `w` the interpolation needed — so the colour written
+    /// is `(dFdx, neighbour, 0, 1)`.
+    fn derivative_fragment_shader() -> Vec<u8> {
+        let mut bytes = block(
+            (0xe1a0070f, 0x00240401),
+            (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+            (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+            (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+        );
+        bytes.extend(block(
+            (0xb0400341, 0x055c8400),
+            (0xf0170001, 0xef100070), // shfl.bfly $p0 $r1 $r0 0x1 0x1c
+            (0x00170000, 0x5c590000), // fadd $r0 -$r0 $r1
+            (0x0007000f, 0xe3000000), // exit
+        ));
+        bytes
+    }
+
     /// Lay out a render target, both programs, and a 3-vertex buffer
     /// (position vec4 @ offset 0, colour vec4 @ offset 16, stride 32) in one
     /// mapped region, and program `engine`'s registers to match. Returns
     /// `(mem, vmm, engine)`; the caller still needs to write vertex data and
     /// call [`draw`].
     fn pipeline_harness() -> (Memory, AddressSpace, Engine3D) {
+        pipeline_harness_with(solid_fragment_shader())
+    }
+
+    fn pipeline_harness_with(fragment_shader: Vec<u8>) -> (Memory, AddressSpace, Engine3D) {
         let mut mem = Memory::new();
         mem.map_zero(0x7000_0000, 0x2000).unwrap();
         let mut vmm = AddressSpace::new();
@@ -1658,10 +1928,9 @@ mod tests {
             let mut host1x = Host1x::new();
             let mut stats = Default::default();
             let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
-            for (words, addr) in [
-                (passthrough_vertex_shader(), vs_addr),
-                (solid_fragment_shader(), fs_addr),
-            ] {
+            for (words, addr) in
+                [(passthrough_vertex_shader(), vs_addr), (fragment_shader, fs_addr)]
+            {
                 for (i, chunk) in words.chunks_exact(4).enumerate() {
                     let word = u32::from_le_bytes(chunk.try_into().unwrap());
                     ctx.write_u32(addr + i as u64 * 4, word).unwrap();
@@ -1741,6 +2010,49 @@ mod tests {
         assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
         assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(2 * 4, 2, 16 * 4) as u64).unwrap() as u128, expected);
         assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(12 * 4, 6, 16 * 4) as u64).unwrap(), 0);
+    }
+
+    /// A shader that reads its neighbour's register gets the neighbour, not
+    /// its own value: the four pixels of a quad run in lock-step so that the
+    /// shuffle has something to read.
+    ///
+    /// This is what Checkpoint's antialiased text is drawn with — a coverage
+    /// differenced against the pixel beside it. Run one pixel at a time,
+    /// every lane reads whatever it holds itself and the difference is zero,
+    /// which is why the text came out as solid blocks.
+    #[test]
+    fn a_shuffling_fragment_shader_reads_the_pixel_beside_it() {
+        let (mut mem, vmm, engine) = pipeline_harness_with(derivative_fragment_shader());
+        let vbuf_addr = engine.vertex_array(0).start;
+        // Red ramps from 0 at the left edge of the 16-pixel target to 1 at
+        // the right, so it is exactly `(x + 0.5) / 16` at each pixel centre
+        // and the difference between neighbours is 1/16 everywhere.
+        write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        draw(&engine, &mut ctx).unwrap();
+
+        let rt = engine.render_target(0).unwrap().unwrap();
+        let pixel = |ctx: &mut ExecCtx, x: u32, y: u32| {
+            let raw = ctx.read_pixel(rt.addr + rt.texel_offset(x, y) as u64, 4).unwrap();
+            rt.format.decode(raw).unwrap()
+        };
+        let close = |got: f32, want: f32| (got - want).abs() < 1.0 / 255.0;
+
+        // Lane 0 of the quad reads lane 1, which is half a pixel further
+        // along the ramp in each direction.
+        let left = pixel(&mut ctx, 0, 0);
+        assert!(close(left[0], 1.0 / 16.0), "dFdx at (0,0): {left:?}");
+        assert!(close(left[1], 1.5 / 16.0), "the neighbour's own value: {left:?}");
+        // Lane 1 differences the other way, and a negative colour clamps at
+        // zero on the way into an unorm target.
+        let right = pixel(&mut ctx, 1, 0);
+        assert!(close(right[0], 0.0), "dFdx at (1,0): {right:?}");
+        assert!(close(right[1], 0.5 / 16.0), "the neighbour's own value: {right:?}");
     }
 
     /// The colour write mask keeps the channels it turns off, and a mask with

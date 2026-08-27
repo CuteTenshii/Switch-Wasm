@@ -28,7 +28,7 @@ use std::collections::HashMap;
 
 use super::isa::{
     self, AtomOp, AtomSpace, AtomType, BarMode, BoolOp, FCmp, FMod, FRound, HMerge, HPrecision,
-    HSwizzle, ICmp, LogicOp, LopTest, MemSize, MufuOp, Op, Operand, Pred, TexDim, RZ,
+    HSwizzle, ICmp, LogicOp, LopTest, MemSize, MufuOp, Op, Operand, Pred, ShflMode, TexDim, RZ,
 };
 use crate::gpu::surface::{f16_to_f32, f32_to_f16};
 
@@ -247,6 +247,11 @@ pub type SharedMemory = std::cell::RefCell<Vec<u8>>;
 /// gave the registers meaning.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpecialRegs {
+    /// This invocation's lane within its warp — which of a fragment quad's
+    /// four pixels it is shading, and the one thing a warp shuffle is
+    /// relative to. Zero for anything run on its own, which is what every
+    /// caller but the quad shader and a cooperative dispatch does.
+    pub lane: u32,
     /// This thread's position in its CTA.
     pub tid: [u32; 3],
     /// This CTA's position in the grid.
@@ -269,6 +274,7 @@ impl SpecialRegs {
     /// answered before.
     pub fn read(&self, sr: u8) -> Option<u32> {
         Some(match sr {
+            0x00 => self.lane,
             0x21..=0x23 => self.tid[(sr - 0x21) as usize],
             0x25..=0x27 => self.ctaid[(sr - 0x25) as usize],
             0x32 => self.shared_size,
@@ -418,6 +424,25 @@ pub struct Invocation {
     steps: usize,
     /// Texture results not yet landed; see `run_texs`.
     pending: Vec<(usize, u8, f32)>,
+    /// The shuffle this invocation is suspended on, waiting for the rest of
+    /// its warp to reach one too — see [`resolve_shuffles`].
+    shuffle: Option<Shuffle>,
+}
+
+/// A `shfl` that has been decoded and had its operands read, and is waiting
+/// for the lane it names to be readable.
+///
+/// The operands are resolved here rather than at resolution time because
+/// only the invocation can read its own registers and constants; what is
+/// left is a question about lanes, which only the warp can answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Shuffle {
+    mode: ShflMode,
+    dst: u8,
+    pred: u8,
+    src: u8,
+    index: u32,
+    mask: u32,
 }
 
 /// Why an invocation stopped running.
@@ -427,6 +452,9 @@ pub enum Halt {
     Exited,
     /// It reached a `bar` and is waiting for the rest of its CTA.
     Barrier,
+    /// It reached a `shfl` and is waiting for the rest of its warp, which
+    /// [`resolve_shuffles`] releases it from.
+    Shuffle,
 }
 
 impl Default for Invocation {
@@ -444,6 +472,7 @@ impl Default for Invocation {
             pc: 0,
             steps: 0,
             pending: Vec::new(),
+            shuffle: None,
         }
     }
 }
@@ -468,6 +497,7 @@ impl Invocation {
         self.pc = 0;
         self.steps = 0;
         self.pending.clear();
+        self.shuffle = None;
     }
 
     /// Give this invocation `bytes` of `l[]`, as a launch's QMD asks for.
@@ -543,6 +573,11 @@ impl Invocation {
                  synchronise with",
                 program.offset(self.pc.saturating_sub(1))
             ))),
+            Halt::Shuffle => Err(Error::Gpu(format!(
+                "shader: shfl at {:#x} reads a register of another lane, and this invocation \
+                 is running on its own",
+                program.offset(self.pc.saturating_sub(1))
+            ))),
         }
     }
 
@@ -551,6 +586,7 @@ impl Invocation {
         self.pc = 0;
         self.steps = 0;
         self.pending.clear();
+        self.shuffle = None;
     }
 
     /// Run until the program exits or reaches a barrier, continuing from
@@ -659,6 +695,23 @@ impl Invocation {
                         )))
                     }
                 },
+                // Like a barrier, and for the same reason: the pc moves
+                // past it before suspending, so the resume lands after the
+                // shuffle rather than on it. The deferred texture writes stay
+                // deferred — nothing has jumped, so where they land is still
+                // the place the lowering found.
+                Op::Shfl { dst, pred, src, index, mask, mode } => {
+                    self.shuffle = Some(Shuffle {
+                        mode,
+                        dst,
+                        pred,
+                        src,
+                        index: self.operand(index, env)?,
+                        mask: self.operand(mask, env)?,
+                    });
+                    self.pc = pc + 1;
+                    return Ok(Halt::Shuffle);
+                }
                 Op::Nop | Op::Inert => {}
                 Op::Bra { .. } => {
                     pc = jump(program.target(pc), pending, self)?;
@@ -770,6 +823,17 @@ impl Invocation {
                     MufuOp::Sqrt => x.sqrt(),
                 };
                 self.set_reg_f32(dst, saturate(v, sat));
+            }
+            // The signs are a property of *which pixel of the quad this
+            // is*: two lanes of a derivative subtract and the other two add,
+            // which is how one instruction serves both halves of a
+            // difference without a branch.
+            Op::Fswzadd { dst, a, b, swizzle, ftz } => {
+                let code = (swizzle >> ((env.special.lane & 3) * 2)) & 3;
+                let x = flush(self.reg_f32(a), ftz);
+                let y = flush(self.reg_f32(b), ftz);
+                let (ka, kb) = FSWZ_SIGNS[code as usize];
+                self.set_reg_f32(dst, ka * x + kb * y);
             }
             Op::Fsetp { p0, p1, a, am, b, bm, cmp, bop, src } => {
                 let x = am.apply(self.reg_f32(a));
@@ -1210,6 +1274,7 @@ impl Invocation {
             | Op::Brk
             | Op::Cont
             | Op::Bar { .. }
+            | Op::Shfl { .. }
             | Op::Texs { .. } => unreachable!("control flow is dispatched in execute"),
         }
         Ok(())
@@ -1510,6 +1575,13 @@ fn reads(op: &Op) -> Vec<u8> {
             v
         }
         Op::Texs { coords, .. } => coords.to_vec(),
+        Op::Shfl { src, index, mask, .. } => {
+            let mut v = vec![src];
+            v.extend(operand_reg(index));
+            v.extend(operand_reg(mask));
+            v
+        }
+        Op::Fswzadd { a, b, .. } => vec![a, b],
         _ => Vec::new(),
     };
     out.retain(|&r| r != RZ);
@@ -1557,12 +1629,101 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::I2f { dst, .. }
         | Op::F2i { dst, .. }
         | Op::F2f { dst, .. }
-        | Op::I2i { dst, .. } => vec![dst],
+        | Op::I2i { dst, .. }
+        | Op::Shfl { dst, .. }
+        | Op::Fswzadd { dst, .. } => vec![dst],
         Op::Texs { dst, dst2, mask, .. } => {
             isa::texs_destinations(dst, dst2, mask).into_iter().map(|(_, reg)| reg).collect()
         }
         _ => Vec::new(),
     }
+}
+
+/// `fswzadd`'s two multipliers per two-bit swizzle code — the constant
+/// tables Eden's GLSL backend emits as `FSWZ_A`/`FSWZ_B`
+/// (`glsl_emit_context.cpp`).
+const FSWZ_SIGNS: [(f32, f32); 4] = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (0.0, -1.0)];
+
+/// How many lanes a warp shuffle is bounded by on hardware. A fragment quad
+/// is four of them and a CTA's threads are grouped into warps of this many;
+/// either way the clamp and segment mask a `shfl` carries are written against
+/// this width, so the arithmetic below has to be done in it.
+pub const WARP_LANES: usize = 32;
+
+/// Complete every shuffle the lanes of one warp are suspended on.
+///
+/// `warp` is the warp in lane order, so an invocation's index is its lane.
+/// Every source register is read before any destination is written: a shuffle
+/// is an exchange between lanes of one instruction, so no lane may see
+/// another's result.
+///
+/// A lane the clamp allows but this warp does not hold — a quad is four lanes
+/// of a hardware warp's thirty-two — reads as the requesting lane's own
+/// value, which is what an inactive lane gives on hardware. The predicate
+/// still reports what the clamp said, since that is a property of the lane
+/// numbers rather than of who is running.
+pub fn resolve_shuffles(warp: &mut [Invocation]) {
+    let requests: Vec<Option<Shuffle>> =
+        warp.iter_mut().map(|invocation| invocation.shuffle.take()).collect();
+    let sources: Vec<Option<(u8, u8, u32, bool)>> = requests
+        .iter()
+        .enumerate()
+        .map(|(lane, request)| {
+            let &Some(shuffle) = request else { return None };
+            let (from, in_bounds) = shuffle_source(shuffle, lane as u32);
+            let value = match warp.get(from as usize).filter(|_| in_bounds) {
+                Some(peer) => peer.reg(shuffle.src),
+                None => warp[lane].reg(shuffle.src),
+            };
+            Some((shuffle.dst, shuffle.pred, value, in_bounds))
+        })
+        .collect();
+    for (invocation, source) in warp.iter_mut().zip(sources) {
+        let Some((dst, pred, value, in_bounds)) = source else {
+            continue;
+        };
+        invocation.set_reg(dst, value);
+        invocation.set_pred(pred, in_bounds);
+    }
+}
+
+/// Which lane `shuffle` reads when `lane` executes it, and whether that lane
+/// was within the bound its clamp and segment mask describe.
+///
+/// The clamp bounds the lanes this one may reach and the segment mask splits
+/// the warp into independent groups; every mode composes them the same way,
+/// differing only in where it looks. Signed, because a lane below the segment
+/// (`shfl.up` at its bottom) must read as out of bounds rather than wrapping
+/// around to the top of the warp.
+fn shuffle_source(shuffle: Shuffle, lane: u32) -> (u32, bool) {
+    let clamp = (shuffle.mask & 0x1f) as i32;
+    let segment = ((shuffle.mask >> 8) & 0x1f) as i32;
+    let lane = lane as i32;
+    let index = shuffle.index as i32;
+    // The bottom of this lane's segment, and how far up it may reach.
+    let floor = lane & segment;
+    let ceiling = floor | (clamp & !segment);
+    let (from, in_bounds) = match shuffle.mode {
+        ShflMode::Idx => {
+            let from = (index & !segment) | floor;
+            (from, from <= ceiling)
+        }
+        // `up` is the one mode the bound holds from below: it reads towards
+        // the bottom of the segment, so it is the floor it must not cross.
+        ShflMode::Up => {
+            let from = lane - index;
+            (from, from >= ceiling)
+        }
+        ShflMode::Down => {
+            let from = lane + index;
+            (from, from <= ceiling)
+        }
+        ShflMode::Bfly => {
+            let from = lane ^ index;
+            (from, from <= ceiling)
+        }
+    };
+    (from.max(0) as u32, in_bounds && from >= 0)
 }
 
 fn flush(v: f32, ftz: bool) -> f32 {
@@ -2196,6 +2357,127 @@ mod tests {
             .execute(&prog(&[Op::Bar { mode: BarMode::Sync }, Op::Exit]), &env)
             .unwrap_err();
         assert!(format!("{err:?}").contains("no CTA"), "got {err:?}");
+    }
+
+    /// Four lanes exchanging a register is the whole point of a quad: this
+    /// is `dFdx`'s fetch, where each lane reads the value its horizontal
+    /// neighbour holds at the same instruction.
+    #[test]
+    fn a_shuffle_suspends_until_the_rest_of_its_warp_can_answer_it() {
+        let consts = no_consts();
+        let env = Env::new(&consts, &NoTextures);
+        let program = prog(&[
+            Op::Shfl {
+                dst: 1,
+                pred: 0,
+                src: 0,
+                index: Operand::Imm(1),
+                mask: Operand::Imm(0x1c),
+                mode: ShflMode::Bfly,
+            },
+            Op::Exit,
+        ]);
+
+        // `begin` rather than `reset`: the seeded registers are the values
+        // the lanes are exchanging.
+        let mut warp: [Invocation; 4] = std::array::from_fn(|_| Invocation::new());
+        for (lane, invocation) in warp.iter_mut().enumerate() {
+            invocation.set_reg(0, 10 + lane as u32);
+            invocation.begin();
+        }
+
+        for invocation in warp.iter_mut() {
+            assert_eq!(invocation.resume(&program, &env).unwrap(), Halt::Shuffle);
+            assert_eq!(invocation.reg(1), 0, "nothing has been exchanged yet");
+        }
+        resolve_shuffles(&mut warp);
+        for invocation in warp.iter_mut() {
+            assert_eq!(invocation.resume(&program, &env).unwrap(), Halt::Exited);
+        }
+
+        // `bfly 1` pairs the lanes whose numbers differ in the low bit.
+        assert_eq!(warp.each_ref().map(|lane| lane.reg(1)), [11, 10, 13, 12]);
+        assert!(warp.iter().all(|lane| lane.pred(0)), "every lane was in bounds");
+    }
+
+    /// A lane the clamp puts out of reach keeps its own value, and says so in
+    /// the predicate. `shfl.up` at the bottom of a segment is the case that
+    /// happens: there is nothing below it to read.
+    #[test]
+    fn a_shuffle_that_reaches_past_its_segment_keeps_the_lane_s_own_value() {
+        let consts = no_consts();
+        let env = Env::new(&consts, &NoTextures);
+        let program = prog(&[
+            Op::Shfl {
+                dst: 1,
+                pred: 0,
+                src: 0,
+                index: Operand::Imm(1),
+                mask: Operand::Imm(0),
+                mode: ShflMode::Up,
+            },
+            Op::Exit,
+        ]);
+
+        let mut warp: [Invocation; 2] = std::array::from_fn(|_| Invocation::new());
+        for (lane, invocation) in warp.iter_mut().enumerate() {
+            invocation.set_reg(0, 10 + lane as u32);
+            invocation.begin();
+        }
+        for invocation in warp.iter_mut() {
+            assert_eq!(invocation.resume(&program, &env).unwrap(), Halt::Shuffle);
+        }
+        resolve_shuffles(&mut warp);
+
+        assert_eq!(warp[0].reg(1), 10, "lane 0 has nothing below it to read");
+        assert!(!warp[0].pred(0));
+        assert_eq!(warp[1].reg(1), 10);
+        assert!(warp[1].pred(0));
+    }
+
+    #[test]
+    fn a_shuffle_outside_a_warp_is_an_error_rather_than_a_lane_reading_itself() {
+        let consts = no_consts();
+        let env = Env::new(&consts, &NoTextures);
+        let program = prog(&[
+            Op::Shfl {
+                dst: 1,
+                pred: 0,
+                src: 0,
+                index: Operand::Imm(1),
+                mask: Operand::Imm(0x1c),
+                mode: ShflMode::Bfly,
+            },
+            Op::Exit,
+        ]);
+        let err = Invocation::new().execute(&program, &env).unwrap_err();
+        assert!(format!("{err:?}").contains("another lane"), "got {err:?}");
+    }
+
+    /// The other half of a derivative: which sign each lane adds with is a
+    /// property of where it sits in the quad, and `sr0` is how a shader asks
+    /// where that is.
+    #[test]
+    fn the_per_lane_add_takes_its_signs_from_the_lane_it_runs_on() {
+        let consts = no_consts();
+        let program = prog(&[
+            Op::S2r { dst: 5, sr: 0x00 },
+            // 0xe4 is the identity swizzle: lane n takes code n.
+            Op::Fswzadd { dst: 0, a: 1, b: 2, swizzle: 0xe4, ftz: false },
+            Op::Exit,
+        ]);
+
+        // (-a - b), (a - b), (-a + b), (0 - b) — the four codes in order.
+        for (lane, expected) in [-4.0f32, 2.0, -2.0, -1.0].into_iter().enumerate() {
+            let mut env = Env::new(&consts, &NoTextures);
+            env.special.lane = lane as u32;
+            let mut invocation = Invocation::new();
+            invocation.set_reg_f32(1, 3.0);
+            invocation.set_reg_f32(2, 1.0);
+            invocation.execute(&program, &env).unwrap();
+            assert_eq!(invocation.reg_f32(0), expected, "lane {lane}");
+            assert_eq!(invocation.reg(5), lane as u32);
+        }
     }
 
     #[test]
