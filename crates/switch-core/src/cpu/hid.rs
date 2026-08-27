@@ -316,6 +316,20 @@ impl Cpu {
                     let event = self.alloc_event("hid:sys-joy-detach", true);
                     self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                 }
+                // AcquireConnectionTriggerTimeoutEvent (544) and
+                // AcquireDeviceRegisteredEventForControllerSupport (546): the
+                // pair the controller-support applet waits on while it asks
+                // for a button press on a controller to pair. Nothing here
+                // pairs, so neither the registration nor the timeout arrives.
+                Some(544) | Some(546) => {
+                    let name = if cmd_id == Some(544) {
+                        "hid:sys-connection-trigger-timeout"
+                    } else {
+                        "hid:sys-device-registered"
+                    };
+                    let event = self.alloc_event(name, true);
+                    self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+                }
                 // Activate{Home,Sleep,Capture}Button, and
                 // ApplyNpadSystemCommonPolicy / EnableAppletToGetInput.
                 // Every one is a setter over state this emulator does not
@@ -326,6 +340,12 @@ impl Cpu {
                 | Some(305) | Some(308) | Some(503) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // InitializeFirmwareUpdate (1000) and its USB form,
+                // InitializeUsbFirmwareUpdateWithoutMemory (1135): both open a
+                // controller firmware update. The pad here is the console's
+                // own and has no firmware to flash, so there is nothing to
+                // refuse and nothing to do.
+                Some(1000) | Some(1135) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // IsUsbFullKeyControllerEnabled -> bool. There is no USB
                 // controller here, wired or otherwise.
                 Some(850) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),

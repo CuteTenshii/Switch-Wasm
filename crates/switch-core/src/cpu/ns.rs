@@ -326,6 +326,11 @@ impl Cpu {
             // GetAutoSavingStorage -> bool: whether new captures are written
             // to the SD card rather than the NAND. There is no SD card.
             Some(401) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+            // GetAlbumAccessResultForDebug -> the result code 50012 injects to
+            // make the album's access functions fail. Nothing has injected one,
+            // so the code read back is success — and switchbrew notes the
+            // command itself returns 0 either way, so the reply carries both.
+            Some(50011) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
             _ => self.unimplemented_command(tls, "caps:a", cmd_id),
         }
     }
@@ -409,6 +414,35 @@ impl Cpu {
                 };
                 self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
             }
+            // 20.0.0+, unnamed, and both event getters that Eden's
+            // `application_manager_interface.cpp` answers with one handler —
+            // signalling the event before handing it over, so a caller that
+            // waits on it does not block. Kept per command, like the media
+            // events above, because a second ask must be the same object as
+            // the first.
+            Some(cmd @ (4022 | 4088)) => {
+                let h = match self.ns_manager_events.get(&cmd) {
+                    Some(&h) => h,
+                    None => {
+                        let name = if cmd == 4022 {
+                            "ns:app-manager-4022"
+                        } else {
+                            "ns:app-manager-4088"
+                        };
+                        let h = self.alloc_event(name, false);
+                        self.signal_event(h);
+                        self.ns_manager_events.insert(cmd, h);
+                        h
+                    }
+                };
+                self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+            }
+            // 20.0.0+, and unnamed: switchbrew lists the id and nothing else.
+            // Eden's `ns/application_manager_interface.cpp` reads it as one u64
+            // out and answers 0, which is the only account of its shape there
+            // is — and with nothing installed here, zero is what every other
+            // count and id above reports too.
+            Some(4023) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             _ => self.unimplemented_command(tls, iface, cmd_id),
         }
     }

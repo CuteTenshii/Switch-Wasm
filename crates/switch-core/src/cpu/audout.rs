@@ -638,7 +638,46 @@ impl Cpu {
                 let event = self.kept_event("audctl:target", handle);
                 self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
             }
+            // 19.0.0+, and unnamed: switchbrew lists the id and nothing else.
+            // Eden's `audio/audio_controller.cpp` reads it as handing back a
+            // second reference to the same `IAudioController`, which is what
+            // this does — every setting above lives on the console rather than
+            // on the object, so the two sessions cannot drift apart.
+            Some(5000) => {
+                self.reply_with_interface(tls, handle, "audctl")?;
+                Ok(())
+            }
             _ => self.unimplemented_command(tls, "audctl", cmd_id),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cpu::ipc::testing::*;
+
+    #[test]
+    fn audctl_5000_hands_back_a_second_session_onto_the_same_settings() {
+        // The command returns an interface, and `nnSdk` reads one as a move
+        // handle: answered with a bare success it would read handle 0, skip
+        // constructing the proxy, and fault on its first call through it.
+        let mut cpu = request(false, 5000, &[]);
+        cpu.register_service_handle(9, "audctl");
+        cpu.audctl_request(TLS, 9, Some(5000)).unwrap();
+        let duplicate = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(duplicate, 0, "audctl 5000 moved no session back");
+        assert_eq!(cpu.service_name(duplicate), Some("audctl"));
+
+        // Both sessions address the console's settings rather than the
+        // object's, so a volume set through one reads back through the other.
+        marshal(&mut cpu, false, 1, &[]);
+        let _ = cpu.mem.write_u32(TLS + 0x20, 0);
+        let _ = cpu.mem.write_u32(TLS + 0x24, 7);
+        cpu.audctl_request(TLS, 9, Some(1)).unwrap();
+
+        marshal(&mut cpu, false, 0, &[]);
+        let _ = cpu.mem.write_u32(TLS + 0x20, 0);
+        cpu.audctl_request(TLS, duplicate, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 7);
     }
 }

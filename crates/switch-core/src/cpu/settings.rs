@@ -441,11 +441,27 @@ impl Cpu {
                     let h = self.alloc_event(name, true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
+                // GetPlayTimerRemainingTime -> s32. There is no timer running
+                // (1453 says so), and a timer that is not running has no
+                // deadline: zero here would read as *time is up*, which is the
+                // restricted answer 1455 already denies.
+                Some(1454) => {
+                    self.write_ipc_response(tls, 0, &[], &i32::MAX.to_le_bytes(), &[])
+                }
+                // GetPlayTimerRemainingTimeDisplayInfo -> 0x18 bytes, whose
+                // fields nobody has named: Eden's `parental_control_service.cpp`
+                // records the width and writes none of it. Zeroed, like the
+                // settings block below, rather than guessed at field by field.
+                Some(1459) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x18], &[]),
                 // GetPlayTimerSettings: an unset settings block. Zeroed and
                 // sized past `nn::pctl::PlayTimerSettings` so that a wider
                 // struct still reads as unset rather than as reply padding —
                 // a reply may be longer than the caller needs, never shorter.
                 Some(1456) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x40], &[]),
+                // The 18.0.0+ id for the same thing, which turned 1456 into
+                // the `Old` form. Its block widened to 0x44 bytes in 21.0.0,
+                // and that is the width answered here for the reason above.
+                Some(145601) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x44], &[]),
                 // StartPlayTimer / StopPlayTimer / RequestPostEvents /
                 // ClearUnlinkedEvent / DisableFeaturesForReset /
                 // NotifyApplicationDownloadStarted /

@@ -661,6 +661,20 @@ impl Cpu {
             // goes in a buffer nothing fills, and the count that comes back
             // with it is what a caller iterates on. Zero of them.
             Some(6) | Some(7) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // GetCurrentNetworkProfile: the whole answer is an
+            // `SfNetworkProfileData` written into the caller's buffer, with
+            // nothing in the raw reply. The link reported here is wired, and a
+            // wired link genuinely has no wireless profile — but the buffer
+            // still has to be *written*, because a caller handed a success and
+            // an untouched buffer reads its profile off its own stack.
+            Some(5) => {
+                if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
+                    for i in 0..len {
+                        self.mem.write_u8(addr.wrapping_add(i), 0)?;
+                    }
+                }
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
             // GetCurrentIpAddress.
             Some(12) => self.write_ipc_response(tls, 0, &[], &NIFM_LOCAL_IP, &[]),
             // GetCurrentIpConfigInfo -> IpAddressSetting { bool is_automatic;

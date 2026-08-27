@@ -343,6 +343,19 @@ impl Cpu {
                     self.reply_with_interface(tls, handle, "am:library-applet-proxy")?;
                     Ok(())
                 }
+                // GetSystemProcessCommonFunctions (19.0.0+) and
+                // GetAppletAlternativeFunctions (20.0.0+). Unlike every
+                // command above them these open no proxy, so they say nothing
+                // about which kind of applet the caller is and must leave that
+                // flag alone.
+                Some(450) => {
+                    self.reply_with_interface(tls, handle, "am:system-process-common-functions")?;
+                    Ok(())
+                }
+                Some(460) => {
+                    self.reply_with_interface(tls, handle, "am:applet-alternative-functions")?;
+                    Ok(())
+                }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // ISystemAppletProxy's Get* accessors. The first seven are the
@@ -976,6 +989,25 @@ impl Cpu {
                 // queue when several ask the system to boost the CPU. There
                 // is one process here and no governor to ask.
                 Some(70) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // 20.0.0+, and unnamed: switchbrew's table stops at 341. Eden's
+                // `am/service/applet_common_functions.cpp` reads it as one u16
+                // out and answers 0, which is the only account of its shape
+                // there is — and a scalar is the one kind of answer that cannot
+                // leave the caller holding an object that was never handed over.
+                Some(350) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
+            // ISystemProcessCommonFunctions: one command, which hands back an
+            // IApplicationObserver — the interface a system process watches a
+            // running application through. The observer's own commands (1, 2,
+            // 10, 20, 30, 40) have no published names or signatures, so they
+            // stop at [`Cpu::unimplemented_command`] and name themselves there
+            // rather than being guessed at.
+            "am:system-process-common-functions" => match cmd_id {
+                Some(1) => {
+                    self.reply_with_interface(tls, handle, "am:application-observer")?;
+                    Ok(())
+                }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IHomeMenuFunctions: what only the Home Menu can do. qlaunch
@@ -1426,6 +1458,42 @@ mod tests {
     /// hands the screen to the browser.
     const APPLET_WEB: u32 = 0x13;
 
+
+    #[test]
+    fn the_system_process_common_functions_chain_hands_back_real_sessions() {
+        // `appletAE` 450 and the observer behind it both return an interface,
+        // and `nnSdk` reads one as a move handle: answering either with a bare
+        // success leaves the client constructing a null `SharedPointer` and
+        // faulting on its first virtual call, rather than failing here.
+        let mut cpu = request(false, 450, &[]);
+        cpu.register_service_handle(9, "appletAE");
+        // Set against the default, so a 450 that wrongly reached for
+        // `set_applet_is_application` could not pass by matching it.
+        cpu.set_applet_is_application(false);
+        cpu.applet_request(TLS, 9, Some(450)).unwrap();
+        let functions = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(functions, 0, "GetSystemProcessCommonFunctions moved no session back");
+        assert_eq!(cpu.service_name(functions), Some("am:system-process-common-functions"));
+
+        marshal(&mut cpu, false, 1, &[]);
+        cpu.applet_request(TLS, functions, Some(1)).unwrap();
+        let observer = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(observer, 0, "cmd 1 moved no observer back");
+        assert_eq!(cpu.service_name(observer), Some("am:application-observer"));
+
+        // GetAppletAlternativeFunctions, the command the same caller reaches
+        // next, has the same shape and the same failure when refused.
+        marshal(&mut cpu, false, 460, &[]);
+        cpu.applet_request(TLS, 9, Some(460)).unwrap();
+        let alternative = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(alternative, 0, "GetAppletAlternativeFunctions moved no session back");
+        assert_eq!(cpu.service_name(alternative), Some("am:applet-alternative-functions"));
+
+        // Neither opens a proxy, so the flag every Open*Proxy beside them sets
+        // — which decides whether the applet is told `FocusStateChanged` or
+        // `ChangeIntoForeground` — stays where it was.
+        assert!(!cpu.applet_is_application);
+    }
 
     #[test]
     fn am_reports_the_handheld_operation_mode_it_always_claimed_to() {
