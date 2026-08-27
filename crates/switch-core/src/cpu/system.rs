@@ -1,6 +1,7 @@
 //! System instructions: MRS/MSR, barriers, hints and the cache maintenance
 //! operations (`DC ZVA`) that memset implementations rely on.
 
+use super::bits::{FPCR_MASK, FPSR_MASK};
 use super::Cpu;
 use crate::{Error, Result};
 
@@ -32,8 +33,11 @@ impl Cpu {
                 // read-only at EL0 on real hardware, so there is no
                 // corresponding MSR case below.
                 0b11_011_1101_0000_011 => self.tpidr,
-                // FPCR: 3:0:4:4:0
-                0b11_000_0100_0100_000 => 0,
+                // FPCR (3:3:4:4:0) and FPSR (3:3:4:4:1). The op1 field is 3
+                // at EL0, not 0 — reading it as 3:0:... meant a guest's
+                // `mrs x0, fpcr` fell through to the catch-all zero.
+                0b11_011_0100_0100_000 => u64::from(self.fpcr),
+                0b11_011_0100_0100_001 => u64::from(self.fpsr),
                 // DCZID_EL0: 3:3:0:0:7 — report the Cortex-A57 DC ZVA block
                 // size (BS=4 → 64 bytes). musl/newlib memset strides the
                 // cache-zero loop with `4 << BS`; BS=0 makes it run away.
@@ -95,6 +99,10 @@ impl Cpu {
             let sysreg = (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2;
             match sysreg {
                 0b11_011_0100_0010_000 => self.nzcv = self.read_zr(rt) as u32,
+                // Only the bits the architecture defines stick, so a guest
+                // that reads back what it wrote sees the same value.
+                0b11_011_0100_0100_000 => self.fpcr = self.read_zr(rt) as u32 & FPCR_MASK,
+                0b11_011_0100_0100_001 => self.fpsr = self.read_zr(rt) as u32 & FPSR_MASK,
                 0b11_011_1101_0000_010 => {
                     self.tpidr_rw = self.read_zr(rt)
                 }

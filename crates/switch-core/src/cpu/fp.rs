@@ -133,6 +133,10 @@ impl Cpu {
             // FABS/FNEG are bit operations on the sign, and single-precision
             // FSQRT/FRINTx round once — computing them in f64 and narrowing
             // would round twice.
+            let mode = fpcr_rounding(self.fpcr);
+            if op == 0b000011 && self.fp_sqrt_is_invalid(rn, double) {
+                self.fpsr |= FPSR_IOC;
+            }
             if double {
                 let a = self.fp_get_f64(rn);
                 let r = match op {
@@ -144,9 +148,9 @@ impl Cpu {
                     0b001010 => a.floor(),           // FRINTM
                     0b001011 => a.trunc(),           // FRINTZ
                     0b001100 => a.round(),           // FRINTA (ties away)
-                    // FRINTX/FRINTI round to the current mode, which is
-                    // round-to-nearest-even here.
-                    0b001110 | 0b001111 => a.round_ties_even(),
+                    // FRINTX/FRINTI are the two that round to whatever mode
+                    // FPCR currently selects.
+                    0b001110 | 0b001111 => round_to_integral(a, mode),
                     _ => return Ok(false),
                 };
                 self.fp_set_f64(rd, r);
@@ -161,7 +165,7 @@ impl Cpu {
                     0b001010 => a.floor(),
                     0b001011 => a.trunc(),
                     0b001100 => a.round(),
-                    0b001110 | 0b001111 => a.round_ties_even(),
+                    0b001110 | 0b001111 => round_to_integral(f64::from(a), mode) as f32,
                     _ => return Ok(false),
                 };
                 self.fp_set_f32(rd, r);
@@ -265,7 +269,9 @@ impl Cpu {
                     } else {
                         f64::from(self.fp_get_f32(rn))
                     };
-                    let r = round_to_int_sized(f, rounding, signed, if wide { 64 } else { 32 });
+                    let width = if wide { 64 } else { 32 };
+                    self.note_convert_exceptions(f, rounding, signed, width);
+                    let r = round_to_int_sized(f, rounding, signed, width);
                     self.write_zr(rd, r);
                     Ok(true)
                 }
@@ -466,6 +472,9 @@ impl Cpu {
         if double {
             let a = self.fp_get_f64(rn);
             let b = self.fp_get_f64(rm);
+            if op == 3 {
+                self.note_divide_exceptions(a, b);
+            }
             let r = match op {
                 1 => a * b,            // FMUL
                 3 => a / b,            // FDIV
@@ -482,6 +491,9 @@ impl Cpu {
         } else {
             let a = self.fp_get_f32(rn);
             let b = self.fp_get_f32(rm);
+            if op == 3 {
+                self.note_divide_exceptions(f64::from(a), f64::from(b));
+            }
             let r = match op {
                 1 => a * b,
                 3 => a / b,
@@ -497,6 +509,44 @@ impl Cpu {
             self.fp_set_f32(rd, r);
         }
         Ok(true)
+    }
+
+    /// The Invalid and Inexact flags a float-to-integer convert raises: a NaN
+    /// or a result the destination cannot hold is Invalid (and saturates), and
+    /// anything that lost a fraction is Inexact.
+    fn note_convert_exceptions(&mut self, v: f64, r: Rounding, signed: bool, bits: u32) {
+        if v.is_nan() {
+            self.fpsr |= FPSR_IOC;
+            return;
+        }
+        let rounded = round_to_integral(v, r);
+        let (min, upper) = if signed {
+            (-(2f64.powi(bits as i32 - 1)), 2f64.powi(bits as i32 - 1))
+        } else {
+            (0.0, 2f64.powi(bits as i32))
+        };
+        if !rounded.is_finite() || rounded < min || rounded >= upper {
+            self.fpsr |= FPSR_IOC;
+        } else if rounded != v {
+            self.fpsr |= FPSR_IXC;
+        }
+    }
+
+    /// The square root of a negative has no real answer, which is Invalid.
+    /// Negative zero is not negative for this purpose.
+    fn fp_sqrt_is_invalid(&self, rn: u8, double: bool) -> bool {
+        let v = if double { self.fp_get_f64(rn) } else { f64::from(self.fp_get_f32(rn)) };
+        v < 0.0
+    }
+
+    /// Division raises Divide-by-zero for a finite numerator over zero, and
+    /// Invalid for the two forms with no answer at all.
+    fn note_divide_exceptions(&mut self, a: f64, b: f64) {
+        if (a == 0.0 && b == 0.0) || (a.is_infinite() && b.is_infinite()) {
+            self.fpsr |= FPSR_IOC;
+        } else if b == 0.0 && a.is_finite() && !a.is_nan() {
+            self.fpsr |= FPSR_DZC;
+        }
     }
 
     /// Compare two FP values and set NZCV.

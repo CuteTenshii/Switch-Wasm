@@ -8,6 +8,46 @@ pub(crate) fn elem_mask(bits: u32) -> u128 {
     (1u128 << bits) - 1
 }
 
+/// The FPCR bits this core observes: RMode (23:22), plus the FZ/DN/AH
+/// controls it stores so a guest reads back what it wrote.
+pub(crate) const FPCR_MASK: u32 = 0x07FF_9F00;
+/// FPSR: the cumulative exception flags (IDC, IXC, UFC, OFC, DZC, IOC) and
+/// QC, the sticky saturation flag.
+pub(crate) const FPSR_MASK: u32 = 0x0800_009F;
+
+/// FPSR cumulative exception flags.
+/// Only the two the core actually raises are named. Overflow, underflow and
+/// QC are storage the guest can write and read back, not signals we set.
+pub(crate) const FPSR_IOC: u32 = 1 << 0;
+pub(crate) const FPSR_DZC: u32 = 1 << 1;
+pub(crate) const FPSR_IXC: u32 = 1 << 4;
+
+/// The rounding mode FPCR.RMode selects, for the instructions the
+/// architecture defines as rounding "to the current mode".
+pub(crate) fn fpcr_rounding(fpcr: u32) -> Rounding {
+    match (fpcr >> 22) & 0b11 {
+        0b00 => Rounding::TiesEven,
+        0b01 => Rounding::TowardPos,
+        0b10 => Rounding::TowardNeg,
+        _ => Rounding::TowardZero,
+    }
+}
+
+/// Round a float to an integral float value in the given mode — FRINTX and
+/// FRINTI, which take their mode from FPCR rather than from the opcode.
+pub(crate) fn round_to_integral(v: f64, r: Rounding) -> f64 {
+    if !v.is_finite() {
+        return v;
+    }
+    match r {
+        Rounding::TiesEven => v.round_ties_even(),
+        Rounding::TowardPos => v.ceil(),
+        Rounding::TowardNeg => v.floor(),
+        Rounding::TowardZero => v.trunc(),
+        Rounding::TiesAway => v.round(),
+    }
+}
+
 /// Rounding mode for the float-to-integer conversion instructions.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rounding {
@@ -99,32 +139,68 @@ pub(crate) fn saturating_sub(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
     }
 }
 
-/// Shift a lane left by the amount in `b`'s low bits; negative shifts shift
-/// right (arithmetically for SSHL, logically for USHL).
-pub(crate) fn shift_by_reg(a: u64, b: u64, bits: u32, unsigned: bool) -> u64 {
-    let mask = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
-    let a = a & mask;
-    let shift = (b & mask) as i64;
-    if shift >= 0 {
-        let sh = shift as u32;
-        if sh >= bits { 0 } else { (a << sh) & mask }
+/// Saturate a wide intermediate back into a `bits`-wide lane.
+pub(crate) fn saturate_to(v: i128, bits: u32, unsigned: bool) -> u64 {
+    if unsigned {
+        let max = if bits == 64 { i128::from(u64::MAX) } else { (1i128 << bits) - 1 };
+        v.clamp(0, max) as u64
     } else {
-        let sh = (-shift) as u32;
-        if unsigned {
-            if sh >= bits { 0 } else { a >> sh }
-        } else {
-            // Sign-extend the lane before the arithmetic shift.
-            let sa = if bits == 64 {
-                a as i64
+        let max = (1i128 << (bits - 1)) - 1;
+        v.clamp(-(1i128 << (bits - 1)), max) as u64 & (elem_mask(bits) as u64)
+    }
+}
+
+/// The variable-shift family: SSHL/USHL, plus the saturating (SQSHL/UQSHL),
+/// rounding (SRSHL/URSHL) and both (SQRSHL/UQRSHL) forms. A negative amount
+/// shifts right.
+///
+/// The amount is the low **8 bits** of `b` sign-extended, not the whole lane:
+/// masking it to the element width made a negative amount impossible below
+/// 64 bits, so `sshl v0.4s, v1.4s, v2.4s` could only ever shift left.
+pub(crate) fn shift_by_reg(
+    a: u64,
+    b: u64,
+    bits: u32,
+    unsigned: bool,
+    rounding: bool,
+    saturating: bool,
+) -> u64 {
+    let amount = sext_u64(b & 0xFF, 8) as i64;
+    let value = if unsigned {
+        i128::from(a & (elem_mask(bits) as u64))
+    } else {
+        i128::from(sext_u64(a, bits) as i64)
+    };
+    let shifted = if amount >= 0 {
+        let sh = amount as u32;
+        // Any lane is at most 64 bits, so a shift that far always overflows
+        // and the saturated answer only depends on the sign.
+        if sh >= 64 {
+            if value == 0 {
+                0
+            } else if !saturating {
+                return 0;
             } else {
-                ((a << (64 - bits)) as i64) >> (64 - bits)
-            };
-            if sh >= bits {
-                if sa < 0 { mask } else { 0 }
-            } else {
-                ((sa >> sh) as u64) & mask
+                return saturate_to(
+                    if value > 0 { i128::MAX } else { i128::MIN },
+                    bits,
+                    unsigned,
+                );
             }
+        } else {
+            value << sh
         }
+    } else {
+        // 127 rather than the true 128: the rounding constant would overflow,
+        // and both shift every bit of a 64-bit lane away regardless.
+        let sh = (-amount as u32).min(127);
+        let rounded = if rounding { value + (1i128 << (sh - 1)) } else { value };
+        rounded >> sh
+    };
+    if saturating {
+        saturate_to(shifted, bits, unsigned)
+    } else {
+        (shifted as u64) & (elem_mask(bits) as u64)
     }
 }
 

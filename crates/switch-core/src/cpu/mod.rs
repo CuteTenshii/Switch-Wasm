@@ -814,6 +814,8 @@ pub struct Cpu {
     /// instruction count, because [`Cpu::reschedule`] idles it forward to the
     /// earliest sleeper when nothing can run, which is the console's own idle
     /// and covers instructions nobody executed.
+    fpcr: u32,
+    fpsr: u32,
     pub cycles: u64,
     /// Instructions actually retired, which the idle never touches.
     ///
@@ -832,6 +834,12 @@ pub struct Cpu {
     /// Base of the kernel-fixed Thread Local Region (TPIDRRO_EL0): where the
     /// IPC message buffer lives and where `create_thread` points each
     /// thread's own TLS block. Real hardware makes this read-only at EL0 —
+    /// FPCR: the guest's rounding mode, flush-to-zero and default-NaN
+    /// controls. Held per thread, since it is part of the FP context.
+    fpcr: u32,
+    /// FPSR: the cumulative exception flags a guest reads with
+    /// `fetestexcept`. Sticky — set by an operation, cleared only by a write.
+    fpsr: u32,
     /// only the kernel sets it — unlike [`Cpu::tpidr_rw`] below.
     tpidr: u64,
     /// TPIDR_EL0: freely readable *and writable* by guest code, unlike
@@ -1339,6 +1347,8 @@ impl Cpu {
             shared_buffer: None,
             shared_buffer_slot: 0,
             applet_focus_announced: false,
+            fpcr: 0,
+            fpsr: 0,
             applet_is_application: true,
             operation_mode: OperationMode::default(),
             applet_event: None,
@@ -1550,6 +1560,8 @@ impl Cpu {
             handle,
             state: ThreadState::Created,
             paused: false,
+                fpcr: self.fpcr,
+                fpsr: 0,
             regs,
             sp: stack_top,
             pc: entry,
@@ -1588,6 +1600,8 @@ impl Cpu {
     /// Fill the 0x320-byte `ThreadContext` `svcGetThreadContext3` hands back:
     /// x0..x28, fp, lr, sp, pc, pstate, the vector registers, fpcr/fpsr and
     /// the thread pointer. IL2CPP's garbage collector suspends every thread
+            fpcr: 0,
+            fpsr: 0,
     /// and reads this to find the roots living in their registers, so the
     /// register file has to be the real one — the running thread's live, a
     /// switched-out thread's as saved when it last gave up the CPU.
@@ -1596,11 +1610,14 @@ impl Cpu {
         let Some(index) = self.threads.iter().position(|t| t.handle == handle) else {
             return false;
         };
-        let (regs, sp, pc, nzcv, vregs, tpidr) = if index == self.current_thread {
-            (self.regs, self.sp, self.pc, self.nzcv, self.vregs, self.tpidr)
+        let (regs, sp, pc, nzcv, vregs, fpcr, fpsr, tpidr) = if index == self.current_thread {
+            (
+                self.regs, self.sp, self.pc, self.nzcv, self.vregs, self.fpcr, self.fpsr,
+                self.tpidr,
+            )
         } else {
             let t = &self.threads[index];
-            (t.regs, t.sp, t.pc, t.nzcv, t.vregs, t.tpidr)
+            (t.regs, t.sp, t.pc, t.nzcv, t.vregs, t.fpcr, t.fpsr, t.tpidr)
         };
         let put64 = |cpu: &mut Self, off: u32, v: u64| {
             let _ = cpu.mem.write_u64(out.wrapping_add(off), v);
@@ -1619,10 +1636,8 @@ impl Cpu {
             put64(self, at, v as u64);
             put64(self, at + 8, (v >> 64) as u64);
         }
-        // No FPCR/FPSR is modelled: rounding mode and the accrued exception
-        // flags are both at their reset value.
-        let _ = self.mem.write_u32(out.wrapping_add(0x310), 0);
-        let _ = self.mem.write_u32(out.wrapping_add(0x314), 0);
+        let _ = self.mem.write_u32(out.wrapping_add(0x310), fpcr);
+        let _ = self.mem.write_u32(out.wrapping_add(0x314), fpsr);
         put64(self, 0x318, tpidr);
         true
     }
@@ -2193,6 +2208,8 @@ impl Cpu {
         self.trace.clear();
         self.halted = false;
         self.trace_enabled = false;
+        thread.fpcr = self.fpcr;
+        thread.fpsr = self.fpsr;
         for i in 0..=30u8 {
             self.set_reg(i, 0);
         }
@@ -2209,6 +2226,8 @@ impl Cpu {
             let is_bl = matches!(main_insn, Some(i) if (i & 0xFC00_0000) == 0x9400_0000);
             if is_bl {
                 self.set_pc(loaded.entry);
+        self.fpcr = thread.fpcr;
+        self.fpsr = thread.fpsr;
                 for _ in 0..5_000_000u64 {
                     if self.halted || self.get_pc() == main_call {
                         break;

@@ -596,6 +596,31 @@ impl Cpu {
         {
             return self.simd_fp_three_same(insn, true);
         }
+        // Scalar integer three-same, the variable shifts: same encoding, an
+        // opcode below the FP ones. SSHL and SRSHL are doubleword-only; the
+        // saturating pair carries its own element size because saturation
+        // needs to know the width.
+        if ((insn >> 30) & 0b11) == 0b01
+            && ((insn >> 24) & 0x1F) == 0b11110
+            && ((insn >> 21) & 1) == 1
+            && ((insn >> 10) & 1) == 1
+            && (0b01000..=0b01011).contains(&((insn >> 11) & 0x1F))
+        {
+            let op = (insn >> 11) & 0x1F;
+            let size = (insn >> 22) & 0b11;
+            let saturating = op & 1 == 1;
+            if !saturating && size != 0b11 {
+                return Ok(false); // SSHL/SRSHL have no narrow scalar form
+            }
+            let esize = 8u32 << size;
+            let unsigned = (insn >> 29) & 1 == 1;
+            let rounding = op & 0b10 != 0;
+            let a = self.vregs[((insn >> 5) & 0x1F) as usize] as u64;
+            let b = self.vregs[((insn >> 16) & 0x1F) as usize] as u64;
+            let v = shift_by_reg(a, b, esize, unsigned, rounding, saturating);
+            self.vregs[(insn & 0x1F) as usize] = u128::from(v);
+            return Ok(true);
+        }
         // The same group's scalar forms: `01 U 11110 size 10000 opcode(5) 10`.
         // One lane, and the rest of the register is zeroed.
         // `ucvtf s13, s13` = 0x7e21d9ad.
@@ -703,11 +728,14 @@ impl Cpu {
                         });
                         return Ok(true);
                     }
-                    0b01000 => {
-                        // SSHL / USHL: shift left by register (negative shift
-                        // amounts shift right).
+                    // The variable-shift family. The opcode's low two bits
+                    // are the saturating and rounding flags: SSHL/USHL,
+                    // SQSHL/UQSHL, SRSHL/URSHL, SQRSHL/UQRSHL.
+                    0b01000..=0b01011 => {
+                        let saturating = op & 1 == 1;
+                        let rounding = op & 0b10 != 0;
                         self.simd_elem(rd, rn, rm, q, esize, |a, b| {
-                            shift_by_reg(a, b, esize, u != 0)
+                            shift_by_reg(a, b, esize, u != 0, rounding, saturating)
                         });
                         return Ok(true);
                     }
@@ -1740,6 +1768,7 @@ impl Cpu {
             // FRSQRTE are modelled exactly rather than as the architectural
             // 8-bit estimate; Newton-Raphson refinement converges either way.
             0x7f | 0x18 | 0x19 | 0x38 | 0x39 | 0x58 | 0x59 | 0x79 | 0x3d | 0x7d => {
+                let mode = fpcr_rounding(self.fpcr);
                 self.simd_lane_unary_n(rd, rn, lanes(esize), esize, move |v| {
                     if double {
                         let a = f64::from_bits(v);
@@ -1750,7 +1779,7 @@ impl Cpu {
                             0x38 => a.ceil(),            // FRINTP
                             0x39 => a.trunc(),           // FRINTZ
                             0x58 => a.round(),           // FRINTA
-                            0x59 | 0x79 => a.round_ties_even(), // FRINTX / FRINTI
+                            0x59 | 0x79 => round_to_integral(a, mode), // FRINTX / FRINTI
                             0x3d => 1.0 / a,             // FRECPE
                             _ => 1.0 / a.sqrt(),         // FRSQRTE
                         };
@@ -1764,7 +1793,7 @@ impl Cpu {
                             0x38 => a.ceil(),
                             0x39 => a.trunc(),
                             0x58 => a.round(),
-                            0x59 | 0x79 => a.round_ties_even(),
+                            0x59 | 0x79 => round_to_integral(f64::from(a), mode) as f32,
                             0x3d => 1.0 / a,
                             _ => 1.0 / a.sqrt(),
                         };

@@ -7443,3 +7443,320 @@ fn the_vector_half_conversions_move_four_lanes() {
         "fcvtn did not narrow back to the halves it started from"
     );
 }
+
+// ---------------- variable (register) shifts ----------------
+
+// Vector three-same: 0 Q U 01110 size 1 Rm opcode(5) 1 Rn Rd
+fn simd_shift_reg(q: u32, u: u32, size: u32, op: u32, rd: u32, rn: u32, rm: u32) -> u32 {
+    (q << 30) | (u << 29) | 0b01110 << 24 | (size << 22) | 1 << 21 | (rm << 16)
+        | (op << 11) | 1 << 10 | (rn << 5) | rd
+}
+
+// Scalar three-same: 01 U 11110 size 1 Rm opcode(5) 1 Rn Rd
+fn scalar_shift_reg(u: u32, size: u32, op: u32, rd: u32, rn: u32, rm: u32) -> u32 {
+    0b01 << 30 | (u << 29) | 0b11110 << 24 | (size << 22) | 1 << 21 | (rm << 16)
+        | (op << 11) | 1 << 10 | (rn << 5) | rd
+}
+
+const SSHL: u32 = 0b01000;
+const SQSHL: u32 = 0b01001;
+const SRSHL: u32 = 0b01010;
+const SQRSHL: u32 = 0b01011;
+
+/// The shift amount is the low **byte** of the lane sign-extended, so a
+/// negative one shifts right. Reading the whole lane instead made that
+/// impossible below 64 bits — `sshl` could only ever shift left.
+#[test]
+fn sshl_shifts_right_on_a_negative_amount_in_every_lane_width() {
+    for (size, esize) in [(0u32, 8u32), (1, 16), (2, 32), (3, 64)] {
+        let lane = |v: u64| {
+            let mut out = 0u128;
+            for i in 0..(128 / esize) {
+                out |= u128::from(v & (u64::MAX >> (64 - esize))) << (esize * i);
+            }
+            out
+        };
+        let mut cpu = cpu_at(0x1000);
+        cpu.set_vreg(0, lane(0x40));
+        cpu.set_vreg(1, lane(0xFE)); // -2 as a signed byte
+        let cpu = run_program(cpu, 0x1000, &[simd_shift_reg(1, 0, size, SSHL, 2, 0, 1)]);
+        assert_eq!(
+            cpu.read_vreg(2),
+            lane(0x10),
+            "sshl by -2 with {esize}-bit lanes did not divide by four"
+        );
+    }
+}
+
+#[test]
+fn ushl_shifts_in_zeros_and_sshl_shifts_in_the_sign() {
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0xF000_0000u32 as u128); // one 32-bit lane, negative
+    cpu.set_vreg(1, 0xFC); // -4
+    let cpu = run_program(
+        cpu,
+        0x1000,
+        &[
+            simd_shift_reg(0, 0, 0b10, SSHL, 2, 0, 1),
+            simd_shift_reg(0, 1, 0b10, SSHL, 3, 0, 1),
+        ],
+    );
+    assert_eq!(cpu.read_vreg(2) as u32, 0xFF00_0000, "sshl is arithmetic");
+    assert_eq!(cpu.read_vreg(3) as u32, 0x0F00_0000, "ushl is logical");
+}
+
+#[test]
+fn the_saturating_shift_clamps_instead_of_dropping_bits() {
+    // Signed 32-bit: 0x40000000 << 2 overflows to INT_MAX rather than wrapping.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x4000_0000);
+    cpu.set_vreg(1, 2);
+    let cpu = run_program(cpu, 0x1000, &[simd_shift_reg(0, 0, 0b10, SQSHL, 2, 0, 1)]);
+    assert_eq!(cpu.read_vreg(2) as u32, 0x7FFF_FFFF, "sqshl did not saturate high");
+
+    // And the negative direction saturates to INT_MIN.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0xC000_0000);
+    cpu.set_vreg(1, 2);
+    let cpu = run_program(cpu, 0x1000, &[simd_shift_reg(0, 0, 0b10, SQSHL, 2, 0, 1)]);
+    assert_eq!(cpu.read_vreg(2) as u32, 0x8000_0000, "sqshl did not saturate low");
+
+    // Unsigned saturates to UINT_MAX.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x4000_0000);
+    cpu.set_vreg(1, 2);
+    let cpu = run_program(cpu, 0x1000, &[simd_shift_reg(0, 1, 0b10, SQSHL, 2, 0, 1)]);
+    assert_eq!(cpu.read_vreg(2) as u32, 0xFFFF_FFFF, "uqshl did not saturate");
+}
+
+#[test]
+fn the_rounding_shift_rounds_the_bits_it_drops() {
+    // 0b110 >> 1 is 3 exactly; 0b111 >> 1 is 3.5, which rounds away to 4.
+    for (input, expect) in [(0b110u32, 3u32), (0b111, 4), (0b101, 3), (0b100, 2)] {
+        let mut cpu = cpu_at(0x1000);
+        cpu.set_vreg(0, u128::from(input));
+        cpu.set_vreg(1, 0xFF); // -1
+        let cpu = run_program(cpu, 0x1000, &[simd_shift_reg(0, 0, 0b10, SRSHL, 2, 0, 1)]);
+        assert_eq!(cpu.read_vreg(2) as u32, expect, "srshl of {input:#b}");
+        // The plain shift truncates instead.
+        let mut cpu = cpu_at(0x1000);
+        cpu.set_vreg(0, u128::from(input));
+        cpu.set_vreg(1, 0xFF);
+        let cpu = run_program(cpu, 0x1000, &[simd_shift_reg(0, 0, 0b10, SSHL, 2, 0, 1)]);
+        assert_eq!(cpu.read_vreg(2) as u32, input >> 1, "sshl of {input:#b} truncates");
+    }
+}
+
+#[test]
+fn a_shift_past_the_lane_width_empties_or_saturates_it() {
+    // Left past the width: everything is gone.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x1234);
+    cpu.set_vreg(1, 40);
+    let cpu = run_program(cpu, 0x1000, &[simd_shift_reg(0, 0, 0b10, SSHL, 2, 0, 1)]);
+    assert_eq!(cpu.read_vreg(2) as u32, 0);
+
+    // The saturating form clamps rather than emptying.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x1234);
+    cpu.set_vreg(1, 40);
+    let cpu = run_program(cpu, 0x1000, &[simd_shift_reg(0, 0, 0b10, SQSHL, 2, 0, 1)]);
+    assert_eq!(cpu.read_vreg(2) as u32, 0x7FFF_FFFF);
+
+    // Right past the width: zero unsigned, the sign signed.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0xFFFF_FFFF);
+    cpu.set_vreg(1, 0x80); // -128
+    let cpu = run_program(
+        cpu,
+        0x1000,
+        &[
+            simd_shift_reg(0, 0, 0b10, SSHL, 2, 0, 1),
+            simd_shift_reg(0, 1, 0b10, SSHL, 3, 0, 1),
+        ],
+    );
+    assert_eq!(cpu.read_vreg(2) as u32, 0xFFFF_FFFF, "the sign fills a signed lane");
+    assert_eq!(cpu.read_vreg(3) as u32, 0, "zero fills an unsigned one");
+}
+
+#[test]
+fn the_scalar_variable_shifts_decode_and_clear_the_rest_of_the_register() {
+    // SSHL/SRSHL are doubleword-only; the saturating pair carries a size.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, u128::MAX);
+    cpu.set_vreg(1, 0xF8); // -8
+    let cpu = run_program(cpu, 0x1000, &[scalar_shift_reg(1, 0b11, SSHL, 2, 0, 1)]);
+    assert_eq!(
+        cpu.read_vreg(2),
+        u128::from(u64::MAX >> 8),
+        "ushl d2 should shift one 64-bit lane and clear the top half"
+    );
+
+    // SQSHL at 16-bit scalar width saturates to a halfword.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x4000);
+    cpu.set_vreg(1, 4);
+    let cpu = run_program(cpu, 0x1000, &[scalar_shift_reg(0, 0b01, SQSHL, 2, 0, 1)]);
+    assert_eq!(cpu.read_vreg(2), 0x7FFF);
+
+    // SQRSHL rounds and saturates together.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0b111);
+    cpu.set_vreg(1, 0xFF); // -1
+    let cpu = run_program(cpu, 0x1000, &[scalar_shift_reg(0, 0b11, SQRSHL, 2, 0, 1)]);
+    assert_eq!(cpu.read_vreg(2), 4);
+}
+
+// ---------------- FPCR and FPSR ----------------
+
+// `1101010100 L op0 op1 CRn CRm op2 Rt` — op0 is bits[20:19], so it does not
+// fit in the 0xD53 prefix. `mrs x0, fpcr` is 0xD53B4400.
+fn sysreg_move(read: bool, rt: u32, op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> u32 {
+    0b1101010100 << 22
+        | u32::from(read) << 21
+        | (op0 << 19)
+        | (op1 << 16)
+        | (crn << 12)
+        | (crm << 8)
+        | (op2 << 5)
+        | rt
+}
+fn mrs(rt: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> u32 {
+    sysreg_move(true, rt, 3, op1, crn, crm, op2)
+}
+fn msr(rt: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> u32 {
+    sysreg_move(false, rt, 3, op1, crn, crm, op2)
+}
+const FPCR_REG: (u32, u32, u32, u32) = (3, 4, 4, 0);
+const FPSR_REG: (u32, u32, u32, u32) = (3, 4, 4, 1);
+
+#[test]
+fn the_sysreg_move_helper_encodes_what_the_assembler_does() {
+    assert_eq!(mrs(0, 3, 4, 4, 0), 0xD53B_4400, "mrs x0, fpcr");
+    assert_eq!(msr(0, 3, 4, 4, 0), 0xD51B_4400, "msr fpcr, x0");
+    assert_eq!(mrs(1, 3, 4, 4, 1), 0xD53B_4421, "mrs x1, fpsr");
+}
+
+fn fdiv_d(rd: u32, rn: u32, rm: u32) -> u32 {
+    0x1E << 24 | 1 << 22 | 1 << 21 | (rm << 16) | 0b0001 << 12 | 0b10 << 10 | (rn << 5) | rd
+}
+
+/// `fegetround`/`fesetround` are an MRS/MSR pair on FPCR, so the register has
+/// to be real storage before either can mean anything.
+#[test]
+fn fpcr_and_fpsr_round_trip_through_mrs_and_msr() {
+    let (a, b, c, d) = FPCR_REG;
+    let cpu = run_program(
+        cpu_at(0x1000),
+        0x1000,
+        &[movz(0, 0x00C0, 1, true), msr(0, a, b, c, d), mrs(1, a, b, c, d)],
+    );
+    assert_eq!(cpu.read_x(1), 0x00C0_0000, "fpcr did not read back what was written");
+
+    let (a, b, c, d) = FPSR_REG;
+    let cpu = run_program(
+        cpu_at(0x1000),
+        0x1000,
+        &[movz(0, 0x001F, 0, true), msr(0, a, b, c, d), mrs(1, a, b, c, d)],
+    );
+    assert_eq!(cpu.read_x(1), 0x1F, "fpsr did not read back the exception flags");
+}
+
+/// FRINTX and FRINTI are the two that round to whatever mode FPCR names, so
+/// changing the mode has to change their answer.
+#[test]
+fn frinti_follows_the_rounding_mode_in_fpcr() {
+    let (a, b, c, d) = FPCR_REG;
+    let frinti = |rd: u32, rn: u32| {
+        0x1E << 24 | 1 << 22 | 1 << 21 | 0b001111 << 15 | 0b10000 << 10 | (rn << 5) | rd
+    };
+    for (rmode, input, expect) in [
+        (0b00u32, 2.5f64, 2.0f64), // nearest, ties to even
+        (0b00, 3.5, 4.0),
+        (0b01, 2.1, 3.0),  // toward +inf
+        (0b10, 2.9, 2.0),  // toward -inf
+        (0b10, -2.1, -3.0),
+        (0b11, 2.9, 2.0),  // toward zero
+        (0b11, -2.9, -2.0),
+    ] {
+        let mut cpu = cpu_at(0x1000);
+        cpu.set_vreg(5, u128::from(input.to_bits()));
+        let cpu = run_program(
+            cpu,
+            0x1000,
+            &[movz(0, rmode << 6, 1, true), msr(0, a, b, c, d), frinti(6, 5)],
+        );
+        let got = f64::from_bits(cpu.read_vreg(6) as u64);
+        assert_eq!(got, expect, "frinti of {input} in mode {rmode:#b}");
+    }
+}
+
+#[test]
+fn dividing_by_zero_raises_the_divide_by_zero_flag() {
+    let (a, b, c, d) = FPSR_REG;
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, u128::from(1.0f64.to_bits()));
+    cpu.set_vreg(1, 0);
+    let cpu = run_program(cpu, 0x1000, &[fdiv_d(2, 0, 1), mrs(3, a, b, c, d)]);
+    assert_eq!(cpu.read_x(3) & 0b10, 0b10, "DZC was not raised by 1.0 / 0.0");
+    assert_eq!(cpu.read_x(3) & 1, 0, "and 1.0 / 0.0 is not Invalid");
+
+    // 0/0 has no answer at all, which is Invalid rather than divide-by-zero.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0);
+    cpu.set_vreg(1, 0);
+    let cpu = run_program(cpu, 0x1000, &[fdiv_d(2, 0, 1), mrs(3, a, b, c, d)]);
+    assert_eq!(cpu.read_x(3) & 1, 1, "IOC was not raised by 0.0 / 0.0");
+    assert_eq!(cpu.read_x(3) & 0b10, 0, "and it is not divide-by-zero");
+}
+
+#[test]
+fn a_convert_that_cannot_fit_or_loses_a_fraction_says_so() {
+    let (a, b, c, d) = FPSR_REG;
+    // FCVTZS Wd, Dn
+    let fcvtzs = |rd: u32, rn: u32| 0x1E << 24 | 1 << 22 | 1 << 21 | 0b11 << 19 | (rn << 5) | rd;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, u128::from(4.0f64.to_bits()));
+    let cpu = run_program(cpu, 0x1000, &[fcvtzs(1, 0), mrs(2, a, b, c, d)]);
+    assert_eq!(cpu.read_x(1), 4);
+    assert_eq!(cpu.read_x(2) & 0x1F, 0, "an exact convert raised a flag");
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, u128::from(4.5f64.to_bits()));
+    let cpu = run_program(cpu, 0x1000, &[fcvtzs(1, 0), mrs(2, a, b, c, d)]);
+    assert_eq!(cpu.read_x(1), 4);
+    assert_eq!(cpu.read_x(2) & 0b10000, 0b10000, "IXC was not raised by 4.5");
+
+    for input in [f64::NAN, 1.0e30] {
+        let mut cpu = cpu_at(0x1000);
+        cpu.set_vreg(0, u128::from(input.to_bits()));
+        let cpu = run_program(cpu, 0x1000, &[fcvtzs(1, 0), mrs(2, a, b, c, d)]);
+        assert_eq!(cpu.read_x(2) & 1, 1, "IOC was not raised converting {input}");
+    }
+}
+
+/// The flags are sticky: only a write clears them.
+#[test]
+fn the_exception_flags_are_sticky_until_written() {
+    let (a, b, c, d) = FPSR_REG;
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, u128::from(1.0f64.to_bits()));
+    cpu.set_vreg(1, 0);
+    cpu.set_vreg(3, u128::from(6.0f64.to_bits()));
+    cpu.set_vreg(4, u128::from(2.0f64.to_bits()));
+    let cpu = run_program(
+        cpu,
+        0x1000,
+        &[
+            fdiv_d(2, 0, 1), // raises DZC
+            fdiv_d(5, 3, 4), // a clean divide must not clear it
+            mrs(6, a, b, c, d),
+            movz(7, 0, 0, true),
+            msr(7, a, b, c, d),
+            mrs(8, a, b, c, d),
+        ],
+    );
+    assert_eq!(cpu.read_x(6) & 0b10, 0b10, "a later clean divide cleared DZC");
+    assert_eq!(cpu.read_x(8), 0, "writing FPSR did not clear the flags");
+}
