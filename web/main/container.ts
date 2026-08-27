@@ -3,7 +3,7 @@
    Inspecting what a container holds, showing the title it describes, and
    launching the program inside it. */
 
-import type { Bytes, ControlInfo, NcaInfo, NspFile } from '../shared/protocol';
+import type { Bytes, ControlInfo, DlcEntry, NcaInfo, NspFile } from '../shared/protocol';
 import { $, el, pickedFile } from './dom';
 import { classify } from './filetype';
 import { fmtSize } from './format';
@@ -58,8 +58,18 @@ async function handleContainerFile(file: File): Promise<void> {
   // title it patches — so this is also how the page knows which game to pair
   // it with.
   const patches = await call('add_update', file).catch(() => '');
-  if (patches) await handleUpdateFile(file, patches);
-  else await handleNspFile(file);
+  if (patches) {
+    await handleUpdateFile(file, patches);
+    return;
+  }
+  // Add-on content is the other container that holds no game: data archives
+  // numbered against a title, with no program in them at all.
+  const packs = await call('add_dlc', file).catch(() => 0);
+  if (packs > 0) {
+    await handleDlcFile(file, packs);
+    return;
+  }
+  await handleNspFile(file);
 }
 
 /* ---------- updates ----------
@@ -85,6 +95,17 @@ interface HeldUpdate {
 
 let heldUpdate: HeldUpdate | null = null;
 
+/** One container of add-on content the page is holding. */
+interface HeldDlc {
+  file: File;
+  /** The base title its content is numbered against. */
+  titleId: string;
+  /** The indices the title will know its pieces by. */
+  indices: number[];
+}
+
+let heldDlc: HeldDlc[] = [];
+
 // The title the open container describes, which is what an update is paired
 // against. Empty until its Control NCA has been read.
 let openTitleId = '';
@@ -94,6 +115,7 @@ let openTitleId = '';
 // but which one it was is worth keeping, so a title that has been patched
 // before says so instead of quietly launching unpatched.
 const UPDATE_MEMORY = 'switch-wasm:updates';
+const DLC_MEMORY = 'switch-wasm:dlc';
 
 interface RememberedUpdate { name: string; version: string }
 
@@ -115,6 +137,48 @@ function rememberUpdate(u: HeldUpdate): void {
   }
 }
 
+function rememberedDlc(): Record<string, string[]> {
+  try {
+    return JSON.parse(localStorage.getItem(DLC_MEMORY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function rememberDlc(titleId: string, name: string): void {
+  const all = rememberedDlc();
+  const names = new Set(all[titleId] || []);
+  names.add(name);
+  all[titleId] = [...names];
+  try {
+    localStorage.setItem(DLC_MEMORY, JSON.stringify(all));
+  } catch {
+    // A full or blocked store costs the page nothing it needs this session.
+  }
+}
+
+async function handleDlcFile(file: File, packs: number): Promise<void> {
+  const entries: DlcEntry[] = JSON.parse(await call('dlc_json').catch(() => '[]'));
+  // The session holds every piece ever added; this container's are the ones
+  // that were not there before, which is what `add_dlc` just returned a count
+  // of. Taking them from the tail keeps the page's list and the session's in
+  // step without a second identifier.
+  const mine = entries.slice(-packs);
+  const titleId = mine[0]?.title_id ?? '';
+  heldDlc = heldDlc.filter((held) => held.file.name !== file.name);
+  heldDlc.push({ file, titleId, indices: mine.map((e) => e.index) });
+  rememberDlc(titleId, file.name);
+  log(describeDlc(packs) + ' for ' + titleId + ' - '
+    + (titleId === openTitleId
+      ? 'mounted when this title launches.'
+      : 'open that game to launch it with them.'), 'ok');
+  showPairedNotes();
+}
+
+function describeDlc(packs: number): string {
+  return packs === 1 ? '1 add-on content pack' : packs + ' add-on content packs';
+}
+
 async function handleUpdateFile(file: File, titleId: string): Promise<void> {
   const version = await call('update_version').catch(() => '');
   heldUpdate = { file, titleId, version };
@@ -123,7 +187,7 @@ async function handleUpdateFile(file: File, titleId: string): Promise<void> {
     + (titleId === openTitleId
       ? 'applied when this title launches.'
       : 'open that game to launch it patched.'), 'ok');
-  await syncUpdate();
+  await syncPaired();
 }
 
 function describeUpdate(u: HeldUpdate | RememberedUpdate & { file?: File }): string {
@@ -132,42 +196,77 @@ function describeUpdate(u: HeldUpdate | RememberedUpdate & { file?: File }): str
   return version || name;
 }
 
-/* Hand the update to the session only while it belongs to the title that is
-   open. Re-run whenever either half changes: a new container, a new update,
-   or a session reset that lost both. */
-async function syncUpdate(): Promise<void> {
+/* Hand the paired content to the session only while it belongs to the title
+   that is open. Re-run whenever either half changes: a new container, a new
+   update or DLC, or a session reset that lost all of it.
+
+   The update is gated here because the session refuses to launch a container
+   whose update is for another title. Add-on content is not: a title mounts
+   what is numbered against it and reports the rest, so handing it over early
+   costs nothing and means a piece added before its game is there when the
+   game arrives. */
+async function syncPaired(): Promise<void> {
   if (heldUpdate && heldUpdate.titleId === openTitleId) {
     await call('add_update', heldUpdate.file).catch(() => '');
   } else {
     await call('clear_update').catch(() => 0);
   }
-  showUpdateNote();
+  await call('clear_dlc').catch(() => 0);
+  for (const held of heldDlc) {
+    await call('add_dlc', held.file).catch(() => 0);
+  }
+  showPairedNotes();
 }
 
-/* The update's line on the title card: what is applied, or what is being
-   waited for. Rendered under the card rather than inside it, so that opening
-   another container - which rebuilds the card - cannot leave a stale one. */
-function showUpdateNote(): void {
-  $('nsp-result').querySelectorAll('.update-note').forEach((node) => node.remove());
-  const text = updateNoteText();
-  if (!text) return;
-  const note = el('div', 'nca-info update-note', text);
-  const card = $('nsp-result').querySelector('.title-card');
-  if (card) card.after(note);
-  else $('nsp-result').prepend(note);
+/* What is paired with the open title, as lines under its card: an update, its
+   add-on content, and whatever the page remembers it last ran with. Rendered
+   under the card rather than inside it, so that opening another container -
+   which rebuilds the card - cannot leave a stale one behind. */
+function showPairedNotes(): void {
+  $('nsp-result').querySelectorAll('.paired-note').forEach((node) => node.remove());
+  let after: Element | null = $('nsp-result').querySelector('.title-card');
+  for (const line of pairedNotes()) {
+    const note = el('div', 'nca-info paired-note', line);
+    if (after) after.after(note);
+    else $('nsp-result').prepend(note);
+    after = note;
+  }
 }
 
-function updateNoteText(): string {
+function pairedNotes(): string[] {
+  const lines: string[] = [];
   if (heldUpdate) {
-    return heldUpdate.titleId === openTitleId
+    lines.push(heldUpdate.titleId === openTitleId
       ? 'Update ' + describeUpdate(heldUpdate) + ' - applied when this title launches.'
       : 'Update ' + describeUpdate(heldUpdate) + ' held for ' + heldUpdate.titleId
-        + ' - open that game to launch it patched.';
+        + ' - open that game to launch it patched.');
+  } else {
+    const known = openTitleId ? rememberedUpdates()[openTitleId] : undefined;
+    if (known) {
+      lines.push('This title was last launched with update ' + describeUpdate(known)
+        + ' (' + known.name + '). Drop that file again to launch it patched.');
+    }
   }
-  const known = openTitleId ? rememberedUpdates()[openTitleId] : undefined;
-  if (!known) return '';
-  return 'This title was last launched with update ' + describeUpdate(known)
-    + ' (' + known.name + '). Drop that file again to launch it patched.';
+
+  const mine = heldDlc.filter((held) => held.titleId === openTitleId);
+  const packs = mine.reduce((n, held) => n + held.indices.length, 0);
+  if (packs) {
+    lines.push(describeDlc(packs) + ' - mounted when this title launches ('
+      + mine.map((held) => held.file.name).join(', ') + ').');
+  }
+  for (const held of heldDlc.filter((h) => h.titleId !== openTitleId)) {
+    lines.push(describeDlc(held.indices.length) + ' held for ' + held.titleId
+      + ' - open that game to launch it with them.');
+  }
+  if (!packs && openTitleId) {
+    const known = rememberedDlc()[openTitleId] || [];
+    const missing = known.filter((name) => !heldDlc.some((h) => h.file.name === name));
+    if (missing.length) {
+      lines.push('This title was last launched with add-on content ('
+        + missing.join(', ') + '). Drop those files again to launch it with them.');
+    }
+  }
+  return lines;
 }
 
 /* ---------- booting a container from the stage ----------
@@ -208,9 +307,9 @@ export async function bootContainer(file: File, format: 'pfs0' | 'nca'): Promise
     await launchStandaloneNca(file);
     return;
   }
-  // Dropped on the stage, an update means the same thing it means in the
-  // panel: pair it with the game and launch that. There is nothing in one to
-  // boot on its own.
+  // Dropped on the stage, an update or a pack of add-on content means the
+  // same thing it means in the panel: pair it with the game and launch that.
+  // There is nothing in either to boot on its own.
   const patches = await call('add_update', file).catch(() => '');
   if (patches) {
     await handleUpdateFile(file, patches);
@@ -218,6 +317,19 @@ export async function bootContainer(file: File, format: 'pfs0' | 'nca'): Promise
     failLoad(patches === openTitleId
       ? 'Update applied - launch ' + (heldTitle?.name || 'the game') + ' to run it patched.'
       : 'That is an update for ' + patches + ', not a game. Open that title to launch it patched.');
+    openPanel('files');
+    return;
+  }
+  const packs = await call('add_dlc', file).catch(() => 0);
+  if (packs > 0) {
+    await handleDlcFile(file, packs);
+    const held = heldDlc[heldDlc.length - 1];
+    setState('idle');
+    failLoad(held.titleId === openTitleId
+      ? describeDlc(packs) + ' added - launch ' + (heldTitle?.name || 'the game')
+        + ' to run with them.'
+      : 'That is add-on content for ' + held.titleId + ', not a game. Open that title'
+        + ' to launch it with them.');
     openPanel('files');
     return;
   }
@@ -266,8 +378,8 @@ export async function reopenContainer(): Promise<void> {
     clearNsp();
     return;
   }
-  // A fresh session has no update either, and the page is still showing one.
-  await syncUpdate();
+  // A fresh session has none of this either, and the page is still showing it.
+  await syncPaired();
 }
 
 // The File itself is handed to the worker, not its bytes: a retail container
@@ -385,7 +497,7 @@ async function showTitleCard(loader: () => Promise<number>): Promise<ControlInfo
   // Which title is open is what an update is paired against, and the Control
   // NCA is where the page learns it.
   openTitleId = info.title_id;
-  await syncUpdate();
+  await syncPaired();
   return info;
 }
 
@@ -571,10 +683,17 @@ function launchNca(f: NspFile, index: number): Promise<void> {
   // Said by the page rather than left to the core's own diagnostics: booting
   // clears the trace buffer those go to, and which version is about to run is
   // the one thing a launch should not be silent about.
-  const note = heldUpdate && heldUpdate.titleId === openTitleId
-    ? 'Update ' + describeUpdate(heldUpdate) + ' applied: its modules, over the base game\'s data.'
-    : undefined;
-  return doLaunchNca(f.name, () => call('load_nca_from_nsp', index), heldTitle, note);
+  const notes = [];
+  if (heldUpdate && heldUpdate.titleId === openTitleId) {
+    notes.push('Update ' + describeUpdate(heldUpdate)
+      + ' applied: its modules, over the base game\'s data.');
+  }
+  const packs = heldDlc
+    .filter((held) => held.titleId === openTitleId)
+    .reduce((n, held) => n + held.indices.length, 0);
+  if (packs) notes.push(describeDlc(packs) + ' mounted.');
+  return doLaunchNca(f.name, () => call('load_nca_from_nsp', index), heldTitle,
+    notes.join(' '));
 }
 
 // Same as `launchNca`, but for a standalone .nca file: it is already the open

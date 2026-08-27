@@ -606,6 +606,10 @@ impl Title {
         if let Err(e) = cpu.boot_retail_program(&modules) {
             die(&format!("booting {} modules: {e:?}", modules.len()))
         }
+        // After the program id, which is what add-on content is numbered
+        // against, and after the modules, which is where the browser has to
+        // do it — booting clears the diagnostics it reads them through.
+        mount_add_on_content(cpu, &self.keys);
     }
 }
 
@@ -644,6 +648,88 @@ impl Update {
     /// A fresh window over this update's Program NCA.
     pub fn program_window(&self) -> switch_core::source::Window<switch_core::source::FileSource> {
         program_window(&self.path, self.program.0, self.program.1)
+    }
+}
+
+/// Give the running title the add-on content `DLC=<a.nsp>,<b.nsp>` names.
+///
+/// A DLC container is nothing like an update: no program, no patch, no base to
+/// read over. Each is one Data NCA with an ordinary RomFS whose title id is
+/// the title's add-on base plus an index, and a title mounts it by that id —
+/// so all this does is decrypt each one and hand it over. Content belonging to
+/// another title is reported and skipped, since an index the title cannot
+/// number is one nothing will ever ask for.
+///
+/// Reads its own keys out of each container: a DLC is bought, and so ticketed,
+/// separately from the game and from every other piece of it.
+pub fn mount_add_on_content(cpu: &mut Cpu, keys: &KeySet) {
+    let Ok(list) = env::var("DLC") else { return };
+    for path in list.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let path = Path::new(path);
+        let src = open_source(path);
+        let pfs0 = match switch_core::nsp::Pfs0::read_from(&src) {
+            Ok(pfs0) => pfs0,
+            Err(e) => {
+                eprintln!("{} is not a PFS0: {e}", path.display());
+                continue;
+            }
+        };
+        let mut keys = keys.clone();
+        for (index, file) in pfs0.files.iter().enumerate() {
+            if !file.name.to_ascii_lowercase().ends_with(".nca") {
+                continue;
+            }
+            let Ok(window) = pfs0.file_source(&src, index) else { continue };
+            let Ok(nca) = switch_core::nca::Nca::parse_source(&window, Some(&keys)) else {
+                continue;
+            };
+            use switch_core::nca::ContentType;
+            if !matches!(nca.content_type, ContentType::Data | ContentType::PublicData) {
+                continue;
+            }
+            if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
+                match switch_core::ticket::find_and_decrypt_title_key_from(
+                    &nca.rights_id,
+                    &pfs0.files,
+                    &src,
+                    &keys,
+                ) {
+                    Ok(key) => keys.add_resolved_title_key(nca.rights_id, key),
+                    Err(e) => eprintln!("no title key for {}: {e}", file.name),
+                }
+            }
+            let Some(section) = nca.romfs_section_index() else { continue };
+            // Its own handle on the file: the CPU keeps every archive for the
+            // whole run and cannot borrow the one this scan is using.
+            let owned = match switch_core::source::Window::new(
+                open_source(path),
+                file.offset,
+                file.size,
+                "add-on content nca",
+            ) {
+                Ok(owned) => owned,
+                Err(e) => {
+                    eprintln!("{}: {e}", file.name);
+                    continue;
+                }
+            };
+            match nca.romfs_source(owned, &keys, section) {
+                Ok(romfs) => {
+                    let size = romfs.len();
+                    match cpu.add_add_on_content(nca.title_id, Box::new(romfs)) {
+                    Some(index) => println!(
+                        "add-on content {:016x} mounted as index {index}, {size:#x} bytes",
+                        nca.title_id
+                    ),
+                    None => println!(
+                        "add-on content {:016x} is not this title's — not mounted",
+                        nca.title_id
+                    ),
+                    }
+                }
+                Err(e) => println!("add-on content {:016x} unreadable: {e}", nca.title_id),
+            }
+        }
     }
 }
 

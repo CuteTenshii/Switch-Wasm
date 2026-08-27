@@ -383,6 +383,20 @@ things the format does not say out loud:
   id is only on the container's Meta NCA. So pairing is by program id, and
   what identifies a container as an update at all is that its RomFS is a patch.
 
+**DLC is not an update, and is much less than one.** A DLC container has no
+Program NCA and no patch: it is one Data NCA with an ordinary RomFS, whose
+title id is the base title's plus an index — `0100bee017fc1001` is Just Dance
+2023's add-on content #1 — and a title mounts it by that id through
+`OpenDataStorageByDataId`, the same path a system data archive takes. So the
+reading half was already built. What was missing was `aoc:u` saying the content
+exists: it answered `CountAddOnContent` with 0 by design, and a title never
+asks for content the list does not have. It now reports what the host
+registered, and `ListAddOnContent` writes the real indices into the caller's
+buffer — both halves out of one registration, since an index listed but not
+mountable is worse than one never listed. The base id comes from the NACP when
+it declares one and is derived (base program id, low 13 bits masked, plus
+0x1000) when it does not, which is what Eden's `IAddOnContentManager` does.
+
 **A `Poll` that returns instantly is not the same as one that reports nothing
 ready.** NXpotify's Zeroconf listener is `if (poll(&pfd, 1, 200) <= 0)
 continue;`. On hardware that sleeps 200 ms; here it turned into a loop with no
@@ -418,10 +432,10 @@ Where a stub would have to invent something unverifiable, it fails instead:
   by looking for an entry pointing inside the header only works when some file
   sits at offset 0; a repack that pads to an alignment boundary has no such
   entry. The base is chosen from the extents instead.
-- **An update is paired, not opened.** Dropping one on the container panel
-  registers it against the open title — either order, since neither file is
-  read until Launch — and the launch boots its modules over the base game's
-  RomFS. A `File` reference dies on reload, so the page remembers which update
+- **An update is paired, not opened, and so is DLC.** Dropping either on the
+  container panel registers it against the open title — either order, since
+  neither file is read until Launch — and the launch boots the update's
+  modules over the base game's RomFS and mounts the add-on content beside it. A `File` reference dies on reload, so the page remembers which update
   a title was last launched with and asks for that file again rather than
   quietly running the base version. Each host file gets its own chunk cache:
   a patched read crosses between the two containers constantly, and one
@@ -442,8 +456,9 @@ The `.nro`/`.nsp` files are gitignored; `test-nros/` holds the local homebrew.
 - `--example boot_nsp <nsp> <prod.keys> [title.keys] [steps]` — the browser's
   Launch button, without a browser. `SHOT=<f.ppm>` writes a frame; prefer it
   over reading `frames presented: 0` off a budget too short to reach one.
-  `UPDATE=<update.nsp>` runs the title patched, which is the page's pairing of
-  the two containers with no page in the way.
+  `UPDATE=<update.nsp>` runs the title patched and `DLC=<a.nsp>,<b.nsp>` mounts
+  its add-on content, which is the page's pairing of the containers with no
+  page in the way.
 - `--example dump_exefs …` — flat module images at their real load addresses
   plus a sorted `symbols.txt`. **This is what makes a retail backtrace
   readable.** `--example disasm_flat` disassembles them there.

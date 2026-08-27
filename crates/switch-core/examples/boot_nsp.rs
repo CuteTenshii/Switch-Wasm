@@ -294,6 +294,9 @@ fn main() {
                         quota.cache_storage_size_max,
                     );
                     cpu.set_save_data_quota(quota);
+                    // The id this title's DLC is numbered from, when its NACP
+                    // names one rather than leaving it to be derived.
+                    cpu.set_add_on_content_base_id(control.nacp.add_on_content_base_id);
                 }
                 Err(e) => println!("Control NCA unreadable, using default save sizes: {}", e),
             }
@@ -369,6 +372,8 @@ fn main() {
 
     cpu.set_program_id(nca.program_id);
     let loaded = cpu.boot_retail_program(&modules).expect("boot modules");
+    // After the program id, which is what add-on content is numbered against.
+    common::mount_add_on_content(&mut cpu, &keys);
     for m in &loaded {
         println!("module base={:#010x} entry={:#010x}", m.base, m.entry);
     }

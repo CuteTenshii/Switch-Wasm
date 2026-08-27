@@ -42,6 +42,15 @@ export interface NandIdentity {
   kind: number;
 }
 
+/** One piece of add-on content the session holds, as `switch_dlc_json`
+ *  reports it: its own content id, the base title it belongs to, and the index
+ *  the title knows it by. */
+export interface DlcEntry {
+  id: string;
+  title_id: string;
+  index: number;
+}
+
 /** A file inside the open PFS0 container. */
 export interface NspFile {
   name: string;
@@ -123,6 +132,9 @@ export interface Commands {
   add_archive(file: File): number;
   add_update(file: File): string;
   update_version(): string;
+  add_dlc(file: File): number;
+  dlc_json(): string;
+  clear_dlc(): number;
   clear_update(): number;
   nand_identify(file: File): NandIdentity | null;
   nand_launch(bytes: Bytes): number;

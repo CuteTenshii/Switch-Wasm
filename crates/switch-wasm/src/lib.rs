@@ -56,6 +56,10 @@ struct Session {
     /// it has added one. Held as another host file, read only when the title
     /// boots: an update container is as large as any other.
     update: Option<Update>,
+    /// The add-on content the page has added, one entry per DLC archive. Also
+    /// held as host files and read at boot, when the title id they are
+    /// numbered against is finally known.
+    dlc: Vec<Dlc>,
     /// Keys loaded from prod.keys / title.keys, used to decrypt NCA headers.
     keys: switch_core::keys::KeySet,
     /// The title's name, developer and icon, from the last Control NCA read.
@@ -280,6 +284,7 @@ pub extern "C" fn switch_new() -> u32 {
         container: None,
         nsp_files: Vec::new(),
         update: None,
+        dlc: Vec::new(),
         keys: switch_core::keys::KeySet::default(),
         control: None,
         cpu,
@@ -514,6 +519,121 @@ pub extern "C" fn switch_update_version(handle: u32, buf: *mut u8, maxlen: u32) 
     write_into(buf, maxlen, version.as_bytes())
 }
 
+/// Register a container of add-on content for the title the page has open.
+///
+/// `file` is a host file index, as [`switch_add_archive`] takes one: nothing
+/// is read but the container's header, its file table and its tickets, and
+/// each archive stays where it is until the title mounts it.
+///
+/// Returns how many pieces of add-on content the container holds — a DLC
+/// package usually carries one, but nothing says it must — or 0 if it holds
+/// none, with the reason in `switch_last_error`.
+///
+/// Which title they belong to is not settled here. An add-on content id is a
+/// base title's plus an index, and a page may add one before opening the game
+/// it goes with; the pairing is checked at boot, against the id the title
+/// actually declares.
+#[no_mangle]
+pub extern "C" fn switch_add_dlc(handle: u32, file: u32, size: u64) -> u32 {
+    let s = session(handle);
+    let src = HostSource { file, len: size };
+    let files = match Pfs0::read_from(&src) {
+        Ok(pfs0) => pfs0.files,
+        Err(e) => {
+            s.last_error = format!("add-on content has to be an NSP: {e}");
+            return 0;
+        }
+    };
+    // A container with a Program NCA is a game or an update, whatever else it
+    // also holds. Saying so here is what keeps the page from offering to
+    // "add" a title to itself.
+    if switch_core::nca::find_nca_by_type(
+        &files,
+        &src,
+        &s.keys,
+        switch_core::nca::ContentType::Program,
+    )
+    .is_some()
+    {
+        s.last_error = "this container holds a program — add-on content is data only".into();
+        return 0;
+    }
+
+    let mut found = 0;
+    for f in &files {
+        if !f.name.to_ascii_lowercase().ends_with(".nca") {
+            continue;
+        }
+        let Ok(window) = Window::new(src, f.offset, f.size, &f.name) else { continue };
+        let Ok(nca) = Nca::parse_source(&window, Some(&s.keys)) else { continue };
+        use switch_core::nca::ContentType;
+        if !matches!(nca.content_type, ContentType::Data | ContentType::PublicData)
+            || !is_add_on_content_id(nca.title_id)
+        {
+            continue;
+        }
+        // Each piece is ticketed on its own — a DLC is bought separately from
+        // the game and from every other piece of it.
+        if nca.has_rights_id() && s.keys.resolved_title_key(&nca.rights_id).is_none() {
+            if let Ok(title_key) = switch_core::ticket::find_and_decrypt_title_key_from(
+                &nca.rights_id,
+                &files,
+                &src,
+                &s.keys,
+            ) {
+                s.keys.add_resolved_title_key(nca.rights_id, title_key);
+            }
+        }
+        if nca.romfs_section_index().is_none() {
+            continue;
+        }
+        s.dlc.retain(|held| held.content_id != nca.title_id);
+        s.dlc.push(Dlc { content_id: nca.title_id, src, nca: (f.offset, f.size) });
+        found += 1;
+    }
+    if found == 0 {
+        s.last_error = "no add-on content in this container".into();
+    } else {
+        s.last_error.clear();
+    }
+    found
+}
+
+/// The add-on content this session holds, as JSON: the content id, the index
+/// it is numbered with, and the base title it belongs to.
+///
+/// The page pairs on the base title so it can say which game a piece of
+/// content is waiting for; the title itself settles it at boot.
+#[no_mangle]
+pub extern "C" fn switch_dlc_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session(handle);
+    let mut out = Vec::new();
+    out.push(b'[');
+    for (i, dlc) in s.dlc.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(
+            format!(
+                "{{\"id\":\"{:016x}\",\"title_id\":\"{:016x}\",\"index\":{}}}",
+                dlc.content_id,
+                dlc.content_id & !0x1FFF,
+                dlc.content_id & 0x7FF
+            )
+            .as_bytes(),
+        );
+    }
+    out.push(b']');
+    write_into(buf, maxlen, &out)
+}
+
+/// Forget the add-on content this session holds, so the next boot is the
+/// title on its own.
+#[no_mangle]
+pub extern "C" fn switch_clear_dlc(handle: u32) {
+    session(handle).dlc.clear();
+}
+
 /// Forget the update this session had, so the next boot is the plain title.
 #[no_mangle]
 pub extern "C" fn switch_clear_update(handle: u32) {
@@ -624,7 +744,7 @@ pub extern "C" fn switch_nand_launch(handle: u32, ptr: *const u8, len: u32) -> i
         &mut s.cpu,
         &mut s.last_error,
         switch_core::source::MemSource(bytes),
-        None,
+        Added::default(),
     )
 }
 
@@ -655,6 +775,42 @@ impl Update {
     fn program_window(&self) -> Result<Window<HostSource>, switch_core::Error> {
         Window::new(self.src, self.program.0, self.program.1, "update program nca")
     }
+}
+
+/// One piece of add-on content the page has added for the title it is about
+/// to run.
+///
+/// A DLC container is nothing like an update: no Program NCA, no patch, no
+/// base to read over. It is one Data NCA with an ordinary RomFS, whose title
+/// id is the title's add-on base plus an index — and a title mounts it by
+/// that id exactly as it mounts a system data archive. All `aoc:u` adds is
+/// telling the title the index exists.
+#[derive(Debug, Clone, Copy)]
+struct Dlc {
+    content_id: u64,
+    src: HostSource,
+    /// Where the Data NCA sits inside the container.
+    nca: (u64, u64),
+}
+
+impl Dlc {
+    fn window(&self) -> Result<Window<HostSource>, switch_core::Error> {
+        Window::new(self.src, self.nca.0, self.nca.1, "add-on content nca")
+    }
+}
+
+/// What the page has added beside the container being launched.
+#[derive(Default, Clone, Copy)]
+struct Added<'a> {
+    update: Option<&'a Update>,
+    dlc: &'a [Dlc],
+}
+
+/// Whether a title id is an add-on content id: a base title's, plus an index.
+/// The add-on offset is 0x1000 and the index is 11 bits, so `...1001` is a
+/// title's DLC #1 and `...0800` — an update — is not add-on content at all.
+fn is_add_on_content_id(title_id: u64) -> bool {
+    (0x1000..0x1800).contains(&(title_id & 0x1FFF))
 }
 
 /// The open container as a source, or an error recorded in the session.
@@ -799,16 +955,17 @@ pub extern "C" fn switch_parse_nca(handle: u32, ptr: *const u8, len: u32, buf: *
 }
 
 /// Cache a title's control data on the session, and tell the CPU what the
-/// NACP inside it says the title may store — the figures the
-/// `IApplicationFunctions` save-data commands report back to it.
+/// NACP inside it says — the save-data figures the `IApplicationFunctions`
+/// commands report back, and the id its add-on content is numbered from.
 ///
-/// The NACP is the only place those numbers exist, and it is in the Control
-/// NCA rather than the Program one — so a title launched without the control
-/// having been read reports the CPU's default instead. Reading it is what the
+/// The NACP is the only place those exist, and it is in the Control NCA
+/// rather than the Program one — so a title launched without the control
+/// having been read gets the CPU's defaults instead. Reading it is what the
 /// page already does to show the title's name and icon, which is why this is
 /// the point they arrive.
 fn cache_control(s: &mut Session, control: switch_core::control::Control) {
     s.cpu.set_save_data_quota(switch_core::cpu::SaveDataQuota::from(&control.nacp));
+    s.cpu.set_add_on_content_base_id(control.nacp.add_on_content_base_id);
     s.control = Some(control);
 }
 
@@ -1060,9 +1217,9 @@ fn collect_modules<'a>(pfs0: &Pfs0, exefs: &'a [u8]) -> Vec<(&'static str, &'a [
 /// to stay readable for as long as the title runs. Nothing but the ExeFS is
 /// ever held in memory.
 ///
-/// `update` applies the update the session holds, when it is this title's:
-/// the modules come from the update's own ExeFS and the RomFS from both
-/// containers read as one.
+/// `added` is what the page put beside the container: an update, whose modules
+/// and patched RomFS replace this one's, and add-on content, which mounts
+/// alongside it once the title id it is numbered against is known.
 ///
 /// Takes `keys`/`cpu`/`last_error` as separate borrows rather than `&mut
 /// Session` so the caller can keep reading the session's file table while
@@ -1072,7 +1229,7 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     cpu: &mut Cpu,
     last_error: &mut String,
     nca_src: S,
-    update: Option<&Update>,
+    added: Added<'_>,
 ) -> i64 {
     let nca = match Nca::parse_source(&nca_src, Some(keys)) {
         Ok(nca) => nca,
@@ -1084,7 +1241,7 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     // An update whose title id is not this one is a mistake worth stopping
     // for: applying it would compose two unrelated RomFS images, and ignoring
     // it would silently launch a version the page said it was not launching.
-    let update = match update {
+    let update = match added.update {
         Some(u) if u.nca.program_id == nca.program_id => Some(u),
         Some(u) => {
             *last_error = format!(
@@ -1216,12 +1373,54 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
 
     match cpu.boot_retail_program(&modules) {
         Ok(loaded) => {
+            // After the modules, not before: booting clears the diagnostic
+            // buffer, and what mounted is worth saying where it can be read.
+            // Nothing has run yet, so nothing can have asked for content that
+            // is not there.
+            mount_add_on_content(cpu, keys, added.dlc);
             last_error.clear();
             loaded[0].entry as i64
         }
         Err(e) => {
             *last_error = e.to_string();
             -1
+        }
+    }
+}
+
+/// Give the title the add-on content the page added for it.
+///
+/// Called once the program id is set, because that — with the NACP's own
+/// override, which arrives with the Control NCA — is what an add-on content
+/// id is numbered against. Content belonging to another title is reported and
+/// skipped rather than mounted under an id nothing will ask for.
+fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[Dlc]) {
+    for entry in dlc {
+        let romfs = entry.window().and_then(|window| {
+            let nca = Nca::parse_source(&window, Some(keys))?;
+            let index = nca
+                .romfs_section_index()
+                .ok_or_else(|| switch_core::Error::Nca("no RomFS in this archive".into()))?;
+            nca.romfs_source(window, keys, index)
+        });
+        match romfs {
+            Ok(romfs) => {
+                let size = romfs.len();
+                match cpu.add_add_on_content(entry.content_id, Box::new(romfs)) {
+                Some(index) => cpu.diagnostic(&format!(
+                    "[aoc] {:016x} mounted as add-on content {index}, {size:#x} bytes",
+                    entry.content_id
+                )),
+                None => cpu.diagnostic(&format!(
+                    "[aoc] {:016x} is not this title's add-on content — not mounted",
+                    entry.content_id
+                )),
+                }
+            }
+            Err(e) => cpu.diagnostic(&format!(
+                "[aoc] {:016x} could not be read: {e}",
+                entry.content_id
+            )),
         }
     }
 }
@@ -1240,7 +1439,8 @@ pub extern "C" fn switch_load_nca(handle: u32) -> i64 {
     let Some(container) = container(s) else {
         return -1;
     };
-    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, container, s.update.as_ref())
+    let added = Added { update: s.update.as_ref(), dlc: &s.dlc };
+    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, container, added)
 }
 
 /// The index of the Program NCA in the open container, or -1 if it has none.
@@ -1313,7 +1513,8 @@ pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
         }
     }
 
-    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, nca_src, s.update.as_ref())
+    let added = Added { update: s.update.as_ref(), dlc: &s.dlc };
+    load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, nca_src, added)
 }
 
 /// Load an AArch64 ELF into the CPU. Returns entry address or -1.

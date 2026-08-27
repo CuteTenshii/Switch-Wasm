@@ -997,6 +997,16 @@ pub struct Cpu {
     /// system's Mii and amiibo resources. Each is another NCA's RomFS, so
     /// they are sources rather than buffers, exactly like the running title's.
     data_archives: IdMap<u64, Box<dyn crate::source::ByteSource>>,
+    /// The add-on content indices `aoc:u` reports, one per DLC container the
+    /// host registered for this title. The content itself is in
+    /// `data_archives` under its own id: a title mounts DLC exactly the way it
+    /// mounts a system data archive, by data id, and the only thing `aoc` adds
+    /// is knowing that it is there to be asked for.
+    add_on_content: std::collections::BTreeSet<u32>,
+    /// The id a title's DLC is numbered upwards from, as its NACP declares it.
+    /// Zero means the NACP set none (or none was read), and the id is derived
+    /// from the program id instead — see [`Cpu::add_on_content_base_id`].
+    add_on_content_base_id: u64,
     /// Save data, by the id it was opened under. A console keeps these on its
     /// NAND -- one per application for its own save, one per system save id
     /// for the system's -- and they are the only writable storage a title has
@@ -1337,6 +1347,8 @@ impl Cpu {
             fs_dirs: IdMap::default(),
             fs_files: IdMap::default(),
             data_archives: IdMap::default(),
+            add_on_content: std::collections::BTreeSet::new(),
+            add_on_content_base_id: 0,
             saves: IdMap::default(),
             fs_mount: IdMap::default(),
             fs_storage_archive: IdMap::default(),
@@ -2427,6 +2439,63 @@ impl Cpu {
     /// answered with an empty archive.
     pub fn add_data_archive(&mut self, data_id: u64, src: Box<dyn crate::source::ByteSource>) {
         self.data_archives.insert(data_id, src);
+    }
+
+    /// The id this title's add-on content is numbered upwards from.
+    ///
+    /// The NACP declares it, and a title that declares none gets the derived
+    /// one: the base program id (the low 13 bits are the program index and the
+    /// update flag, so they are masked off) plus 0x1000. DLC #1 of
+    /// `0100bee017fc0000` is `0100bee017fc1001`.
+    pub fn add_on_content_base_id(&self) -> u64 {
+        match self.add_on_content_base_id {
+            0 => (self.program_id & !0x1FFF) + 0x1000,
+            declared => declared,
+        }
+    }
+
+    /// Take the DLC base id out of the title's own NACP —
+    /// `nacp.add_on_content_base_id` is the whole call site — since a title
+    /// whose DLC is numbered from somewhere else says so there.
+    pub fn set_add_on_content_base_id(&mut self, base: u64) {
+        self.add_on_content_base_id = base;
+    }
+
+    /// Register one piece of add-on content: its RomFS under its own content
+    /// id, so `OpenDataStorageByDataId` serves it, and its index, so `aoc:u`
+    /// lists it.
+    ///
+    /// Returns the index, or `None` when the content belongs to another title
+    /// — a DLC's id is its base title's plus an index below 0x800, and one
+    /// that is not cannot be numbered against this title at all.
+    pub fn add_add_on_content(
+        &mut self,
+        content_id: u64,
+        src: Box<dyn crate::source::ByteSource>,
+    ) -> Option<u32> {
+        let index = content_id.checked_sub(self.add_on_content_base_id())?;
+        if index > 0x7FF {
+            return None;
+        }
+        self.data_archives.insert(content_id, src);
+        self.add_on_content.insert(index as u32);
+        // A title running when content arrives is told to look again. One that
+        // has not asked for the event yet reads the list when it does.
+        if let Some(event) = self.aoc_list_changed_event {
+            self.signal_event(event);
+        }
+        Some(index as u32)
+    }
+
+    /// Whether anything is registered under `data_id`, which is the question
+    /// `OpenDataStorageByDataId` answers by serving it or reporting it missing.
+    pub fn has_data_archive(&self, data_id: u64) -> bool {
+        self.data_archives.contains_key(&data_id)
+    }
+
+    /// The add-on content indices this title has, in order.
+    pub fn add_on_content(&self) -> Vec<u32> {
+        self.add_on_content.iter().copied().collect()
     }
 
     /// The save data filed under `id`, creating it if this is the first time

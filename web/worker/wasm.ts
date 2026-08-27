@@ -22,6 +22,9 @@ export interface WasmExports {
   switch_add_archive(handle: number, file: number, size: bigint): number;
   switch_add_update(handle: number, file: number, size: bigint): bigint;
   switch_update_version(handle: number, buf: number, maxlen: number): number;
+  switch_add_dlc(handle: number, file: number, size: bigint): number;
+  switch_dlc_json(handle: number, buf: number, maxlen: number): number;
+  switch_clear_dlc(handle: number): void;
   switch_clear_update(handle: number): void;
   switch_nand_add_archive(handle: number, ptr: number, len: number): bigint;
   switch_nand_identify(handle: number, file: number, size: bigint, kindOut: number): bigint;

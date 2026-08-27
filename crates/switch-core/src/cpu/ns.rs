@@ -164,9 +164,10 @@ impl Cpu {
     }
 
     /// `aoc:u` — "nn::aocsrv::detail::IAddOnContentManager", the add-on
-    /// content a title has been given. Every answer here is the one a retail
-    /// console gives a title whose DLC nobody has bought: the list is empty,
-    /// and nothing can arrive to change it.
+    /// content a title has been given. With nothing registered every answer
+    /// here is the one a retail console gives a title whose DLC nobody has
+    /// bought: the list is empty. What the host adds through
+    /// [`Cpu::add_add_on_content`] shows up in it.
     ///
     /// The service had no implementation at all, so every command reached the
     /// generic fabricated-object reply — which hands a *void* command an
@@ -191,25 +192,43 @@ impl Cpu {
             };
         }
         match cmd_id {
-            // CountAddOnContent -> s32, and ListAddOnContent(s32 offset, s32
-            // count) -> s32 entries written, with the indices themselves going
-            // into a type-6 out buffer. Nothing is installed, so both answer
-            // zero and the buffer is left untouched — a caller that walks it
-            // walks no entries.
-            Some(2) | Some(3) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
-            // GetAddOnContentBaseId -> u64. A title's DLC is numbered upwards
-            // from a base id, and unless its control property overrides it
-            // that base is the program id plus 0x1000 — so DLC #1 of
-            // `0100…0000` is `0100…1001`. It is the number every add-on
-            // content index is built against, so answering 0 would have a
-            // title asking for content ids that belong to no title at all.
+            // CountAddOnContent -> u32.
+            Some(2) => {
+                let count = self.add_on_content().len() as u32;
+                self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
+            }
+            // ListAddOnContent(u32 offset, u32 count) -> u32 written, with the
+            // indices themselves going into an out buffer. What a title does
+            // with them is ask `fsp-srv` for base id + index, so an index that
+            // is listed and then not mountable is worse than one never listed:
+            // both halves come from the same registration.
+            Some(3) => {
+                let args = self.ipc_request_data(tls);
+                let offset = self.mem.read_u32(args)? as usize;
+                let count = self.mem.read_u32(args.wrapping_add(4))? as usize;
+                let all = self.add_on_content();
+                let listed = all.get(offset..).unwrap_or(&[]);
+                let (addr, size) = self.ipc_output_buffer(tls, 0).unwrap_or((0, 0));
+                let room = if addr == 0 { 0 } else { size as usize / 4 };
+                let written = listed.len().min(count).min(room);
+                for (i, index) in listed[..written].iter().enumerate() {
+                    self.mem
+                        .write_u32(addr.wrapping_add(4 * i as u32), *index)?;
+                }
+                self.write_ipc_response(tls, 0, &[], &(written as u32).to_le_bytes(), &[])
+            }
+            // GetAddOnContentBaseId -> u64, the number every add-on content
+            // index is built against. Answering 0 would have a title asking
+            // for content ids that belong to no title at all.
             Some(5) => {
-                let base = self.program_id().wrapping_add(0x1000);
+                let base = self.add_on_content_base_id();
                 self.write_ipc_response(tls, 0, &[], &base.to_le_bytes(), &[])
             }
-            // PrepareAddOnContent(s32 index): mount one entry of the list. The
-            // list is empty, so no index a title got from it can reach this,
-            // and there is nothing to prepare for one that does.
+            // PrepareAddOnContent(s32 index): make one entry of the list ready
+            // to mount. Everything registered here already is — the host
+            // handed over the container before the title started — so this is
+            // the acknowledgement and nothing else, which is what Eden's
+            // `IAddOnContentManager::PrepareAddOnContent` does too.
             Some(7) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // GetAddOnContentListChangedEvent, and the same event fetched on
             // another process's behalf (…WithProcessId, which differs only by
@@ -228,8 +247,8 @@ impl Cpu {
                 self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
             }
             // GetAddOnContentLostErrorCode -> the `nn::err::ErrorCode` a title
-            // displays when the DLC it was using has gone. There is none to
-            // lose, so there is no code to show.
+            // displays when the DLC it was using has gone. Nothing here can
+            // take content away mid-run, so there is no code to show.
             Some(9) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             // NotifyMountAddOnContent / NotifyUnmountAddOnContent: a title
             // telling `aocsrv` it is holding content open, so the system does
@@ -240,8 +259,8 @@ impl Cpu {
             // CheckAddOnContentMountStatus: a title asking whether what it
             // mounted is still there. There is no out value — the **Result**
             // is the whole answer, and a failure is how a title is told its
-            // DLC has been removed since it mounted it. That cannot happen to
-            // content that was never there, so this succeeds.
+            // DLC has been removed since it mounted it. Nothing here removes
+            // content once it is registered, so this succeeds.
             Some(50) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             _ => self.unimplemented_command(tls, "aoc:u", cmd_id),
         }
@@ -597,6 +616,76 @@ mod tests {
         aoc(&mut cpu, 50);
         assert_eq!(cpu.mem.read_u32(TLS + 0x10).unwrap(), SFCO);
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
+    }
+
+    #[test]
+    fn registered_add_on_content_is_counted_listed_and_mountable() {
+        const PROGRAM_ID: u64 = 0x0100_BEE0_17FC_0000;
+        const BUFFER: u32 = 0x4000;
+        // Just Dance 2023's two DLC containers: base + 0x1000 + index, so
+        // `...1001` and `...1004` are indices 1 and 4.
+        let content = [PROGRAM_ID + 0x1001, PROGRAM_ID + 0x1004];
+
+        let register = |cpu: &mut Cpu| {
+            cpu.set_program_id(PROGRAM_ID);
+            for id in content {
+                let src = crate::source::MemSource(vec![0u8; 0x20]);
+                assert_eq!(cpu.add_add_on_content(id, Box::new(src)), Some((id - PROGRAM_ID - 0x1000) as u32));
+            }
+        };
+
+        // CountAddOnContent reports what was registered, not an object id.
+        let mut cpu = request(false, 2, &[]);
+        register(&mut cpu);
+        aoc(&mut cpu, 2);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 2, "count");
+
+        // ListAddOnContent writes the indices themselves into the caller's
+        // buffer: what a title does with one is ask for base id + index, so an
+        // index listed but not mountable is worse than one never listed.
+        let mut list_args = [0u8; 8];
+        list_args[4..].copy_from_slice(&8u32.to_le_bytes()); // offset 0, room for 8
+        let mut cpu = request_with_recv_buffer(3, &list_args, BUFFER, 0x20);
+        cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+        register(&mut cpu);
+        cpu.register_service_handle(9, "aoc:u");
+        cpu.aoc_request(TLS, 9, Some(3)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 2, "written");
+        assert_eq!(cpu.mem.read_u32(BUFFER).unwrap(), 1);
+        assert_eq!(cpu.mem.read_u32(BUFFER + 4).unwrap(), 4);
+
+        // An offset past the end is not an error, it is the end of the list —
+        // a title paging through one asks once more than there is content.
+        let mut args = [0u8; 8];
+        args[..4].copy_from_slice(&2u32.to_le_bytes());
+        args[4..].copy_from_slice(&8u32.to_le_bytes());
+        let mut cpu = request_with_recv_buffer(3, &args, BUFFER, 0x20);
+        cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+        register(&mut cpu);
+        cpu.register_service_handle(9, "aoc:u");
+        cpu.aoc_request(TLS, 9, Some(3)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "written");
+
+        // And the content is mountable by the id those indices are built
+        // against: `fsp-srv`'s OpenDataStorageByDataId is the other half.
+        let mut cpu = Cpu::new();
+        register(&mut cpu);
+        assert!(cpu.has_data_archive(content[0]));
+    }
+
+    #[test]
+    fn add_on_content_belonging_to_another_title_is_refused() {
+        // A DLC's id is its base title's plus an index below 0x800. Anything
+        // else cannot be numbered against this title, and registering it would
+        // list an index whose content id nothing will ever ask for.
+        let mut cpu = Cpu::new();
+        cpu.set_program_id(0x0100_BEE0_17FC_0000);
+        let src = || Box::new(crate::source::MemSource(vec![0u8; 0x10]));
+        assert_eq!(cpu.add_add_on_content(0x0100_0000_0000_1001, src()), None);
+        assert_eq!(cpu.add_add_on_content(0x0100_BEE0_17FC_1801, src()), None);
+        assert!(cpu.add_on_content().is_empty());
     }
 
     #[test]

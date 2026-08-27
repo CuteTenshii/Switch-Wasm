@@ -149,6 +149,22 @@ export const CMD: CommandHandlers = {
   update_version() {
     return readString(256, (buf, cap) => api().switch_update_version(handle(), buf, cap));
   },
+  // Register a container of add-on content. Like `add_archive` this keeps
+  // only the File reference; which title the content belongs to is settled at
+  // launch, against the id the title itself declares. Returns how many pieces
+  // the container holds.
+  add_dlc(file) {
+    const index = addHostFile(file);
+    return api().switch_add_dlc(handle(), index, BigInt(file.size));
+  },
+  // What the session holds: content id, base title id and index, per piece.
+  dlc_json() {
+    return readString(8192, (buf, cap) => api().switch_dlc_json(handle(), buf, cap));
+  },
+  clear_dlc() {
+    api().switch_clear_dlc(handle());
+    return 0;
+  },
   // Drop it again: the next launch is the plain title.
   clear_update() {
     api().switch_clear_update(handle());
