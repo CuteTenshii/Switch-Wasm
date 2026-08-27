@@ -1143,6 +1143,9 @@ impl Cpu {
                         "mii:e" | "mii:u" | "mii:s" => self.mii_request(tls, handle, cmd_id)?,
                         "mii:database" | "mii:static" => self.mii_request(tls, handle, cmd_id)?,
                         "miiimg" => self.miiimg_request(tls, cmd_id)?,
+                        // hwopus, the Opus decoder, and every decoder object
+                        // it hands out.
+                        "hwopus" | "hwopus:decoder" => self.hwopus_request(tls, handle, cmd_id)?,
                         "audren:u" => self.audren_request(tls, handle, cmd_id)?,
                         "audren:iaudiorenderer" => self.audren_renderer_request(tls, cmd_id, handle)?,
                         "audren:iaudiodevice" => self.audio_device_request(tls, cmd_id, handle)?,

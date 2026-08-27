@@ -7016,3 +7016,165 @@ fn the_resolution_change_event_fires_on_the_dock() {
     cpu.set_operation_mode(OperationMode::Docked);
     assert_eq!(cpu.event_signaled(event), Some(true), "the dock is what changes it");
 }
+
+/// One 20 ms CELT-only Opus packet, 48 kHz mono, from the reference
+/// encoder. Its decode is 960 samples per channel.
+const OPUS_PACKET: [u8; 164] = [
+    0xf8, 0x9f, 0xf7, 0xda, 0x9b, 0x32, 0x2b, 0xce, 0x91, 0xf2, 0x50, 0x86,
+    0xd0, 0xbe, 0x88, 0x91, 0xe5, 0xfc, 0xff, 0xd1, 0xb8, 0x45, 0x4f, 0x82,
+    0x93, 0xbc, 0xa6, 0x61, 0x9e, 0x76, 0x03, 0x86, 0x83, 0xf1, 0x65, 0x96,
+    0x94, 0xab, 0x3a, 0x3a, 0xaa, 0xb0, 0x12, 0x91, 0x97, 0xb5, 0x53, 0xd8,
+    0x2f, 0x4d, 0xf4, 0x71, 0xc9, 0xdc, 0x90, 0xc5, 0x89, 0xdd, 0x76, 0xf2,
+    0xf0, 0x6d, 0xd1, 0x23, 0x1a, 0xe6, 0x16, 0xcb, 0x37, 0x81, 0x53, 0xe9,
+    0x70, 0x84, 0x65, 0xc0, 0x8b, 0xb0, 0x29, 0x32, 0x7b, 0xf2, 0x56, 0x71,
+    0x16, 0xc0, 0xc9, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x0d, 0xb2, 0x65, 0x69, 0x55, 0x44, 0x5f, 0x55, 0x62, 0xab, 0xe7, 0x8b,
+    0x74, 0x5b, 0x50, 0x1f, 0x0f, 0xb4, 0x32, 0x07, 0xa3, 0xe8, 0x5d, 0x0a,
+    0xbe, 0x45, 0xd7, 0x13, 0xc8, 0xc5, 0x34, 0x08, 0x98, 0x83, 0xc0, 0x29,
+    0x72, 0xf6, 0x33, 0xd6, 0xe2, 0x01, 0x31, 0x70, 0xfc, 0x4e, 0x5b, 0x77,
+    0xf3, 0x98, 0x1c, 0x97, 0x17, 0xf6, 0xa4, 0xe7, 0x70, 0x96, 0x5b, 0x3e,
+    0x09, 0x53, 0x28, 0x6a, 0xd9, 0xe3, 0xaa, 0x85,
+];
+
+#[test]
+fn hwopus_reports_a_work_buffer_size_before_it_opens_anything() {
+    // `nn::codec` asks for the work buffer size, allocates that much as
+    // transfer memory, and only then opens a decoder. A size of zero — which
+    // is what the generic fallback answered — is an allocation that fails, so
+    // nothing ever gets as far as decoding.
+    const HWOPUS: u64 = 0xC000;
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(HWOPUS, "hwopus");
+    let tls = cpu.tls_base();
+
+    // GetWorkBufferSizeEx { sample_rate, channel_count, use_large_frame_size }.
+    let mut args = Vec::new();
+    args.extend_from_slice(&48_000u32.to_le_bytes());
+    args.extend_from_slice(&2u32.to_le_bytes());
+    args.extend_from_slice(&0u64.to_le_bytes());
+    ipc_request_plain(&mut cpu, HWOPUS, 5, &args);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "GetWorkBufferSizeEx failed");
+    let stereo = cpu.mem.read_u32(tls + 0x20).unwrap();
+    assert!(stereo > 0x1000, "a work buffer of {stereo:#x} bytes is not one");
+
+    // The large-frame form asks for room for a 120 ms packet, so it is bigger.
+    args[8] = 1;
+    ipc_request_plain(&mut cpu, HWOPUS, 5, &args);
+    let large = cpu.mem.read_u32(tls + 0x20).unwrap();
+    assert!(large > stereo, "the large-frame size {large:#x} is not above {stereo:#x}");
+
+    // A rate Opus does not have is refused rather than sized.
+    let mut bad = Vec::new();
+    bad.extend_from_slice(&44_100u32.to_le_bytes());
+    bad.extend_from_slice(&2u32.to_le_bytes());
+    bad.extend_from_slice(&0u64.to_le_bytes());
+    ipc_request_plain(&mut cpu, HWOPUS, 5, &bad);
+    let result = cpu.mem.read_u32(tls + 0x18).unwrap();
+    assert_eq!(result & 0x1FF, 111, "not an hwopus error: {result:#x}");
+    assert_eq!(result >> 9, 1001, "not the invalid-sample-rate error: {result:#x}");
+}
+
+#[test]
+fn hwopus_decodes_a_packet_into_the_buffer_the_caller_offered() {
+    // The packet does not arrive bare: `nn::codec` puts an eight-byte
+    // big-endian { size, final_range } header in front of it, and the reply's
+    // "bytes consumed" counts that header. A decoder that read the header as
+    // little-endian, or reported only the payload, would leave the caller
+    // walking its own buffer wrong and desynchronising after one packet.
+    const HWOPUS: u64 = 0xC000;
+    const INPUT: u32 = 0x9000;
+    const OUTPUT: u32 = 0x9400;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.mem.map_zero(INPUT, 0x400).unwrap();
+    cpu.mem.map_zero(OUTPUT, 0x1000).unwrap();
+    cpu.register_service_handle(HWOPUS, "hwopus");
+    let tls = cpu.tls_base();
+
+    // OpenHardwareOpusDecoderEx { rate, channels, large_frame } + work size.
+    let mut args = Vec::new();
+    args.extend_from_slice(&48_000u32.to_le_bytes());
+    args.extend_from_slice(&1u32.to_le_bytes());
+    args.extend_from_slice(&0u64.to_le_bytes());
+    args.extend_from_slice(&0x8000u32.to_le_bytes());
+    ipc_request_plain(&mut cpu, HWOPUS, 4, &args);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "OpenHardwareOpusDecoderEx failed");
+    // { send_pid:1, num_copy:4, num_move:4 }: the decoder is a move handle.
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 5);
+    let decoder = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    assert_ne!(decoder, 0, "no IHardwareOpusDecoder came back");
+
+    let len = OPUS_PACKET.len() as u32;
+    for (i, &byte) in (len).to_be_bytes().iter().enumerate() {
+        cpu.mem.write_u8(INPUT + i as u32, byte).unwrap();
+    }
+    for (i, &byte) in OPUS_PACKET.iter().enumerate() {
+        cpu.mem.write_u8(INPUT + 8 + i as u32, byte).unwrap();
+    }
+
+    // DecodeInterleaved: reset flag in, { bytes read, samples } out.
+    ipc_request_plain_with_both_buffers(
+        &mut cpu,
+        decoder,
+        8,
+        (INPUT, 8 + len),
+        (OUTPUT, 0x1000),
+        &[0u8, 0, 0, 0],
+    );
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "DecodeInterleaved failed");
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 8 + len, "wrong byte count");
+    assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 960, "a 20 ms frame is 960 samples");
+
+    // The samples are 16-bit and are not all zero: a decoder that answered
+    // success and wrote nothing would pass every check above.
+    let loudest = (0..960)
+        .map(|i| i32::from(cpu.mem.read_u16(OUTPUT + i * 2).unwrap() as i16).abs())
+        .max()
+        .unwrap();
+    assert!(loudest > 1000, "the decode is silent (loudest sample {loudest})");
+}
+
+#[test]
+fn hwopus_refuses_a_packet_shorter_than_its_own_header() {
+    // The header says how long the packet is. A size longer than the buffer,
+    // or a buffer with no room for the header at all, is a caller that has
+    // lost its place in the stream; decoding whatever follows would turn that
+    // into noise rather than an error it can act on.
+    const HWOPUS: u64 = 0xC000;
+    const INPUT: u32 = 0x9000;
+    const OUTPUT: u32 = 0x9400;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.mem.map_zero(INPUT, 0x400).unwrap();
+    cpu.mem.map_zero(OUTPUT, 0x1000).unwrap();
+    cpu.register_service_handle(HWOPUS, "hwopus");
+    let tls = cpu.tls_base();
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&48_000u32.to_le_bytes());
+    args.extend_from_slice(&1u32.to_le_bytes());
+    args.extend_from_slice(&0u64.to_le_bytes());
+    args.extend_from_slice(&0x8000u32.to_le_bytes());
+    ipc_request_plain(&mut cpu, HWOPUS, 4, &args);
+    let decoder = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+
+    // A header claiming more payload than the buffer holds.
+    for (i, &byte) in 0x1000u32.to_be_bytes().iter().enumerate() {
+        cpu.mem.write_u8(INPUT + i as u32, byte).unwrap();
+    }
+    ipc_request_plain_with_both_buffers(&mut cpu, decoder, 8, (INPUT, 64), (OUTPUT, 0x1000), &[0u8; 4]);
+    let result = cpu.mem.read_u32(tls + 0x18).unwrap();
+    assert_eq!(result & 0x1FF, 111, "not an hwopus error: {result:#x}");
+    assert_eq!(result >> 9, 3, "not the buffer-too-small error: {result:#x}");
+
+    // A buffer with nothing but the header in it.
+    ipc_request_plain_with_both_buffers(&mut cpu, decoder, 8, (INPUT, 8), (OUTPUT, 0x1000), &[0u8; 4]);
+    let result = cpu.mem.read_u32(tls + 0x18).unwrap();
+    assert_eq!(result >> 9, 8, "not the input-too-small error: {result:#x}");
+}

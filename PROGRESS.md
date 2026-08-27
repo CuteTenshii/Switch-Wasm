@@ -28,7 +28,7 @@ graphics stack, opens its audio device, and runs on into its own loop. **Every
 service it asks for has a real implementation** — a full boot logs no `no
 implementation` and no `unimplemented` lines.
 
-`make test`: **758 tests, all passing.**
+`make test`: **783 tests, all passing.**
 
 ## Homebrew
 
@@ -426,6 +426,20 @@ Where a stub would have to invent something unverifiable, it fails instead:
 `EAI_NONAME`, not a try-again that invites a spin), `acc`'s `LoadIdTokenCache`
 (zero bytes, so authentication fails where the missing piece actually is).
 
+**`hwopus` is the exception to all of that**: there is nothing to answer *as*,
+because the caller wants audio back. So `src/opus/` is a full Opus decoder —
+range coder, CELT, SILK, hybrid, concealment and multi-stream, no
+dependencies — and `cpu/hwopus.rs` is the thin service in front of it. The
+work buffer the caller allocates as transfer memory is sized and never read;
+the decode happens on this side. Just Dance 2023 was the title that reported
+`hwopus` missing.
+
+Conformance is checked rather than assumed. `--example opus_testvectors` runs
+the RFC 8251 vectors and requires the range coder's final state to match on
+every packet of all twelve, decoded both to stereo and to mono; the samples
+score 96-100% on `opus_compare`, which is what libopus's own float build
+scores against the same references. Throughput is ~350x real time.
+
 ## Frontend
 
 - **PFS0 offsets are counted from the end of the string table.** Detecting that
@@ -475,6 +489,13 @@ The `.nro`/`.nsp` files are gitignored; `test-nros/` holds the local homebrew.
   `TRACE_WAIT`, `TRACE_NV`, `TRACE_GPU`, and a dozen more): wasm has no WASI,
   so `std::env::var` always fails there. Browser diagnostics go through
   `Cpu::diagnostic`.
+- `--example opus_testvectors <dir>` — the Opus decoder against the RFC 8251
+  vectors (`opus_testvectors-rfc8251.tar.gz` from opus-codec.org). It fails on
+  the first packet whose range coder state disagrees with the encoder's, and
+  writes `<name>.rs.dec` beside each vector for `opus_compare` to score.
+  `--example opus_difftest <dir>` does the same against a reference decode you
+  generate yourself, which is how the output rates below 48 kHz and the
+  multi-stream layouts get covered.
 - Browser: `make wasm` once, then `bun run dev`. Tests: `make test`.
 
 ## Next

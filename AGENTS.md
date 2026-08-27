@@ -556,6 +556,35 @@ device sink's channel map → interleaved i16.
   over), and the circular-buffer sink (reported once, never written). Each is a
   truthful zero in the reply rather than a guess.
 
+### `hwopus` (`cpu/hwopus.rs`, `src/opus/`)
+
+The Opus decoder, and the one service whose implementation is a codec. On
+hardware the decode runs on the audio DSP out of a work buffer the caller
+allocates as transfer memory; here it runs in `src/opus/` and that buffer is
+sized and never read. `GetWorkBufferSize*` still has to answer, because the
+caller allocates *before* it opens anything and a zero is an allocation that
+fails.
+
+- **The packets are not bare Opus.** Each carries an eight-byte
+  `{ size, final_range }` header, **big-endian**, and the reply's bytes-consumed
+  counts it. Reading that header little-endian, or reporting only the payload,
+  desynchronises the caller after one packet.
+- **The decoder is conformant, and that is checked**, not assumed:
+  `--example opus_testvectors` runs the RFC 8251 vectors from opus-codec.org
+  and requires the range coder's state to match the encoder's on *every*
+  packet. That is the format's own proof that both ends read the same symbols;
+  the samples themselves only have to pass `opus_compare`, because Opus is
+  specified in floating point above the SILK layer and no two float decoders
+  are bit identical.
+- **SILK is integer arithmetic and has to be.** Its decoder is specified in
+  fixed point — the filter a frame ends with is what the next frame predicts
+  from, so a float implementation drifts. CELT's is float, and matches the
+  reference to the last bit on every frame that is not concealed.
+- **Concealment is where the two diverge.** Extrapolating a lost frame runs an
+  LPC analysis over the history, which amplifies a difference of one ulp into
+  an audible one. Ours tracks the reference to within `opus_compare`'s
+  tolerance and no closer, and that is the most a float decoder can promise.
+
 ## GPU (`switch-core/src/gpu`, `switch-gpu`)
 
 A model of the Tegra X1's GM20B. Registers from deko3d's generated Maxwell

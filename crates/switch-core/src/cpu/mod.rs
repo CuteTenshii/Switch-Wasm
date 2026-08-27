@@ -38,6 +38,7 @@ mod audren;
 mod erpt;
 mod fs;
 mod hid;
+mod hwopus;
 mod ipc;
 mod ldr;
 mod log;
@@ -1150,6 +1151,10 @@ pub struct Cpu {
     audren_renderers: IdMap<u64, audren::AudioRenderer>,
     /// Every open `IAudioOut`, by session handle.
     audio_outs: IdMap<u64, audout::AudioOut>,
+    /// Every open `IHardwareOpusDecoder`, by object key. The work buffer the
+    /// guest allocated for each one is never touched: the decode happens
+    /// here, not in guest memory.
+    opus_decoders: IdMap<u64, hwopus::HwOpus>,
     /// Interleaved 16-bit PCM the guest has handed to `audout` and the host
     /// has not played yet. Bounded: a host that never drains it (a headless
     /// test, a paused tab) must not be able to grow it without limit.
@@ -1395,6 +1400,7 @@ impl Cpu {
             pl_shmem_addr: 0,
             audren_renderers: IdMap::default(),
             audio_outs: IdMap::default(),
+            opus_decoders: IdMap::default(),
             audio_pcm: VecDeque::new(),
             audio_format: (0, 0),
             unix_time: 0,

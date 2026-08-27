@@ -624,6 +624,7 @@ impl Cpu {
         self.fs_files.retain(|&key, _| key & !0xFFFF_FFFF != session);
         self.fs_dirs.retain(|&key, _| key & !0xFFFF_FFFF != session);
         self.erpt_readers.retain(|&key, _| key & !0xFFFF_FFFF != session);
+        self.opus_decoders.retain(|&key, _| key & !0xFFFF_FFFF != session);
     }
 
     pub(super) fn service_name(&self, handle: u64) -> Option<&str> {
@@ -740,6 +741,9 @@ impl Cpu {
         if self.domain_interface(handle, object_id) == Some("ssl:context") {
             self.ssl_contexts = self.ssl_contexts.saturating_sub(1);
         }
+        // An Opus decoder holds a megabyte of filter state; a title that
+        // opens one per track and closes them would otherwise accumulate.
+        self.opus_decoders.remove(&Self::object_key(handle, object_id));
         self.domain_objects.remove(&(handle, object_id));
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }

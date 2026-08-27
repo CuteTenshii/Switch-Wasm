@@ -44,6 +44,7 @@ Both need the core built once (`make wasm`), since the frontend imports it.
 ## Acknowledgments
 
 - [Eden Emulator](https://git.eden-emu.dev/eden-emu/eden)
+- [libopus](https://opus-codec.org)
 - [EnvyTools](https://github.com/envytools/envytools)
 - [libnx](https://github.com/switchbrew/libnx)
 - [SwitchBrew](https://switchbrew.org)
