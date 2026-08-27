@@ -597,10 +597,13 @@ mod tests {
     }
 
     /// A keyset holding the patch section's key, the way a container's own
-    /// ticket supplies it.
+    /// ticket supplies it: wrapped under the `titlekek` for the synthetic
+    /// NCA's key generation, which is 0.
     fn patch_keys() -> KeySet {
+        const TITLEKEK: [u8; 16] = [0x5a; 16];
         let mut keys = KeySet::default();
-        keys.add_resolved_title_key(RIGHTS_ID, PATCH_KEY);
+        keys.titlekek[0] = Some(TITLEKEK);
+        keys.add_title_key(RIGHTS_ID, crate::crypto::aes128_encrypt_block(&TITLEKEK, &PATCH_KEY));
         keys
     }
 

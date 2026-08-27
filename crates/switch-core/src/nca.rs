@@ -460,11 +460,16 @@ impl Nca {
     /// key (rights-id crypto) or key-area slot 2, unlocked with the matching
     /// `key_area_key_<kind>_<generation>`.
     ///
-    /// A `title.keys` entry is not itself that key: the file stores a
-    /// ticket's key block verbatim, still wrapped under `titlekek_XX`, so it
-    /// has to be unwrapped with this NCA's key generation first. Used raw it
-    /// decrypts to noise that only surfaces later as a section hash
-    /// mismatch, which reads as "wrong keys" when the keys were fine.
+    /// A stored title key is not itself that key: `title.keys` holds a
+    /// ticket's key block verbatim, still wrapped under `titlekek_XX`, and a
+    /// ticket read out of a container holds the same block, so it has to be
+    /// unwrapped with this NCA's key generation first. Used raw it decrypts
+    /// to noise that only surfaces later as a section hash mismatch, which
+    /// reads as "wrong keys" when the keys were fine.
+    ///
+    /// This NCA's generation, specifically: the ticket carries a generation
+    /// of its own and it is not reliable — Asphalt 9's says 0 where the
+    /// content needs `titlekek_07`.
     pub fn section_key(&self, keys: &crate::keys::KeySet) -> Result<[u8; 16], Error> {
         if self.has_rights_id() {
             let generation = self.master_key_revision();

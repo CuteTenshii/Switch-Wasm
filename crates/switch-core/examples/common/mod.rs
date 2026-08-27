@@ -687,16 +687,10 @@ pub fn mount_add_on_content(cpu: &mut Cpu, keys: &KeySet) {
             if !matches!(nca.content_type, ContentType::Data | ContentType::PublicData) {
                 continue;
             }
-            if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
-                match switch_core::ticket::find_and_decrypt_title_key_from(
-                    &nca.rights_id,
-                    &pfs0.files,
-                    &src,
-                    &keys,
-                ) {
-                    Ok(key) => keys.add_resolved_title_key(nca.rights_id, key),
-                    Err(e) => eprintln!("no title key for {}: {e}", file.name),
-                }
+            if let Err(e) =
+                switch_core::ticket::load_bundled_title_key(&mut keys, &nca, &pfs0.files, &src)
+            {
+                eprintln!("no title key for {}: {e}", file.name);
             }
             let Some(section) = nca.romfs_section_index() else { continue };
             // Its own handle on the file: the CPU keeps every archive for the
@@ -765,16 +759,8 @@ fn open_program(path: &Path, keys: &mut KeySet) -> ((u64, u64), switch_core::nca
         .unwrap_or_else(|e| die(&format!("parsing the program nca: {e}")));
     // Title-key crypto needs the key itself from somewhere. Scene releases
     // bundle the ticket next to the content.
-    if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
-        match switch_core::ticket::find_and_decrypt_title_key_from(
-            &nca.rights_id,
-            &pfs0.files,
-            &src,
-            keys,
-        ) {
-            Ok(key) => keys.add_resolved_title_key(nca.rights_id, key),
-            Err(e) => eprintln!("no title key for {}: {e}", path.display()),
-        }
+    if let Err(e) = switch_core::ticket::load_bundled_title_key(keys, &nca, &pfs0.files, &src) {
+        eprintln!("no title key for {}: {e}", path.display());
     }
     ((offset, size), nca)
 }

@@ -1,12 +1,17 @@
-//! ES ticket (`.tik`) parsing and title-key decryption.
+//! ES ticket (`.tik`) parsing and title-key extraction.
 //!
 //! A ticket carries the AES-128 key that decrypts a title-key-crypto NCA's
 //! sections (a nonzero `rights_id` in the NCA header selects this path
 //! instead of the header's own key area). Scene NSP releases bundle the
 //! ticket right next to the content, so the title key is available without a
 //! separate personal `title.keys` dump — as long as the ticket uses "Common"
-//! crypto (the overwhelming majority do), decrypting it only needs a public
+//! crypto (the overwhelming majority do), unwrapping it only needs a public
 //! `titlekek_XX` from `prod.keys`.
+//!
+//! What a ticket yields here is the key block *still wrapped*, exactly as
+//! `title.keys` stores it. Which `titlekek_XX` unwraps it is the NCA's key
+//! generation, not anything the ticket says — so unwrapping belongs to
+//! [`crate::nca::Nca::section_key`], which is the only place that knows it.
 //!
 //! Layout: a fixed-size signature block (size depends on the signature type)
 //! followed by the ticket body. Offsets below are relative to the body, and
@@ -17,19 +22,19 @@
 //! ```text
 //! body + 0x00  issuer [0x40]
 //! body + 0x40  title key block [0x100] (Common crypto: first 16 bytes are
-//!              the AES-128-ECB-encrypted title key; Personalized crypto
+//!              the AES-128-ECB-wrapped title key; Personalized crypto
 //!              RSA-wraps it instead, which needs a console's ETicket key —
 //!              out of scope here)
 //! body + 0x140 format_version (u8)
 //! body + 0x141 titlekey_type (u8): 0 = Common, 1 = Personalized
 //! body + 0x142 ticket_version (u16)
 //! body + 0x144 license_type (u8)
-//! body + 0x145 common_key_id (u8): which `titlekek_XX` decrypts the key block
+//! body + 0x145 common_key_id (u8)
 //! body + 0x160 rights_id [0x10]
 //! ```
 
-use crate::crypto::aes128_decrypt_block;
 use crate::keys::KeySet;
+use crate::source::ByteSource;
 use crate::Error;
 
 const BODY_OFFSET_TITLEKEY_BLOCK: usize = 0x40;
@@ -41,14 +46,18 @@ const BODY_MIN_SIZE: usize = BODY_OFFSET_RIGHTS_ID + 0x10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ticket {
     pub rights_id: [u8; 16],
-    /// 0 = Common (a public `titlekek` decrypts it), 1 = Personalized (needs
+    /// 0 = Common (a public `titlekek` unwraps it), 1 = Personalized (needs
     /// a console's ETicket RSA key — not supported).
     pub titlekey_type: u8,
-    /// Selects `titlekek_<common_key_id>`.
+    /// The ticket's own idea of which `titlekek_XX` its key block belongs to.
+    /// Reported for diagnostics only: a retail ticket may leave this 0 while
+    /// the content it unlocks needs a much later generation (Asphalt 9's
+    /// reads 0 against a `titlekek_07` title), so nothing selects a key with
+    /// it. The NCA's key generation is what does.
     pub common_key_id: u8,
-    /// First 16 bytes of the title-key block: the AES-128-ECB-encrypted
-    /// title key (Common crypto only).
-    pub encrypted_title_key: [u8; 16],
+    /// First 16 bytes of the title-key block: the title key, still
+    /// AES-128-ECB-wrapped under a `titlekek` (Common crypto only).
+    pub wrapped_title_key: [u8; 16],
 }
 
 /// Body offset for each ES signature type (signature size, then padded to a
@@ -83,8 +92,8 @@ impl Ticket {
             });
         }
 
-        let mut encrypted_title_key = [0u8; 16];
-        encrypted_title_key.copy_from_slice(&data[body + BODY_OFFSET_TITLEKEY_BLOCK..body + BODY_OFFSET_TITLEKEY_BLOCK + 16]);
+        let mut wrapped_title_key = [0u8; 16];
+        wrapped_title_key.copy_from_slice(&data[body + BODY_OFFSET_TITLEKEY_BLOCK..body + BODY_OFFSET_TITLEKEY_BLOCK + 16]);
         let titlekey_type = data[body + BODY_OFFSET_TITLEKEY_TYPE];
         let common_key_id = data[body + BODY_OFFSET_COMMON_KEY_ID];
         let mut rights_id = [0u8; 16];
@@ -94,54 +103,29 @@ impl Ticket {
             rights_id,
             titlekey_type,
             common_key_id,
-            encrypted_title_key,
+            wrapped_title_key,
         })
     }
 
-    /// The master-key revision `common_key_id` selects: like the NCA header's
-    /// key-area generation, the stored value is one more than the actual
-    /// `titlekek_XX` index (confirmed against a real ticket — `common_key_id`
-    /// 0x0b decrypts with `titlekek_0a`, not `titlekek_0b`), except that 0
-    /// stays 0.
-    fn master_key_revision(&self) -> u8 {
-        self.common_key_id.saturating_sub(1)
-    }
-
-    /// Decrypt the title key (Common crypto only).
-    pub fn decrypt_title_key(&self, keys: &KeySet) -> Result<[u8; 16], Error> {
+    /// The still-`titlekek`-wrapped title key, for the keyset to hold
+    /// alongside `title.keys`' entries — Common crypto only.
+    pub fn title_key_block(&self) -> Result<[u8; 16], Error> {
         if self.titlekey_type != 0 {
             return Err(Error::Ticket(
                 "personalized ticket — its title key is RSA-wrapped with a console's ETicket key, which this emulator doesn't have".into(),
             ));
         }
-        let generation = self.master_key_revision();
-        let kek = keys.titlekek(generation).ok_or_else(|| {
-            Error::Ticket(format!("missing titlekek_{:02x} in prod.keys", generation))
-        })?;
-        Ok(aes128_decrypt_block(&kek, &self.encrypted_title_key))
+        Ok(self.wrapped_title_key)
     }
 }
 
-/// Find `<rights_id-hex>.tik` among an NSP's files (scene releases bundle the
-/// ticket right next to the content it unlocks) and decrypt its title key.
-/// `nsp_data` is the full NSP buffer; `files` its parsed PFS0 file table.
-pub fn find_and_decrypt_title_key(
-    rights_id: &[u8; 16],
-    files: &[crate::nsp::Pfs0File],
-    nsp_data: &[u8],
-    keys: &KeySet,
-) -> Result<[u8; 16], Error> {
-    find_and_decrypt_title_key_from(rights_id, files, &crate::source::SliceSource(nsp_data), keys)
-}
-
-/// Same, reading the ticket out of a [`ByteSource`] over the container rather
-/// than a buffer holding all of it — which for a retail `.nsp` is the only
-/// form there is.
-pub fn find_and_decrypt_title_key_from<S: crate::source::ByteSource>(
+/// Find `<rights_id-hex>.tik` among a container's files (scene releases
+/// bundle the ticket right next to the content it unlocks) and return its
+/// still-wrapped title key.
+pub fn find_wrapped_title_key<S: ByteSource>(
     rights_id: &[u8; 16],
     files: &[crate::nsp::Pfs0File],
     src: &S,
-    keys: &KeySet,
 ) -> Result<[u8; 16], Error> {
     let want_name = format!("{}.tik", hex_lower(rights_id));
     let f = files
@@ -158,7 +142,35 @@ pub fn find_and_decrypt_title_key_from<S: crate::source::ByteSource>(
     // malformed entry to ask for an arbitrary allocation.
     const MAX_TICKET: u64 = 0x1000;
     let data = src.read_vec(f.offset, f.size.min(MAX_TICKET))?;
-    Ticket::parse(&data)?.decrypt_title_key(keys)
+    Ticket::parse(&data)?.title_key_block()
+}
+
+/// Give `keys` the title key `nca` needs, from a ticket bundled in the same
+/// container. Answers whether one was adopted: `false` when the NCA doesn't
+/// use title-key crypto at all, or when the container has no ticket but the
+/// keyset already carries this title's key from elsewhere.
+///
+/// The container's own ticket wins over a `title.keys` entry for the same
+/// rights id: it ships with the content it unlocks, where `title.keys` is a
+/// dump that may be for a different revision of it.
+pub fn load_bundled_title_key<S: ByteSource>(
+    keys: &mut KeySet,
+    nca: &crate::nca::Nca,
+    files: &[crate::nsp::Pfs0File],
+    src: &S,
+) -> Result<bool, Error> {
+    if !nca.has_rights_id() {
+        return Ok(false);
+    }
+    match find_wrapped_title_key(&nca.rights_id, files, src) {
+        Ok(wrapped) => {
+            keys.add_title_key(nca.rights_id, wrapped);
+            Ok(true)
+        }
+        // No ticket here is only a problem when nothing else has the key.
+        Err(_) if keys.has_title_key(&nca.rights_id) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -168,13 +180,14 @@ fn hex_lower(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::SliceSource;
 
-    fn build_ticket(rights_id: [u8; 16], titlekey_type: u8, common_key_id: u8, encrypted_key: [u8; 16]) -> Vec<u8> {
+    fn build_ticket(rights_id: [u8; 16], titlekey_type: u8, common_key_id: u8, wrapped_key: [u8; 16]) -> Vec<u8> {
         let mut data = vec![0u8; 0x140 + 0x170];
         data[0..4].copy_from_slice(&0x010004u32.to_le_bytes()); // RSA-2048 SHA-256
         let body = 0x140;
         data[body + BODY_OFFSET_TITLEKEY_BLOCK..body + BODY_OFFSET_TITLEKEY_BLOCK + 16]
-            .copy_from_slice(&encrypted_key);
+            .copy_from_slice(&wrapped_key);
         data[body + BODY_OFFSET_TITLEKEY_TYPE] = titlekey_type;
         data[body + BODY_OFFSET_COMMON_KEY_ID] = common_key_id;
         data[body + BODY_OFFSET_RIGHTS_ID..body + BODY_OFFSET_RIGHTS_ID + 16].copy_from_slice(&rights_id);
@@ -187,55 +200,32 @@ mod tests {
         // rights_id/titlekey_type/common_key_id all land where this parser
         // expects for signature type 0x010004.
         let rights_id = *b"\x01\x00\x48\x90\x11\x7b\x20\x00\x00\x00\x00\x00\x00\x00\x00\x0b";
-        let enc_key = [0xAAu8; 16];
-        let data = build_ticket(rights_id, 0, 0x0b, enc_key);
+        let wrapped = [0xAAu8; 16];
+        let data = build_ticket(rights_id, 0, 0x0b, wrapped);
         let tik = Ticket::parse(&data).unwrap();
         assert_eq!(tik.rights_id, rights_id);
         assert_eq!(tik.titlekey_type, 0);
         assert_eq!(tik.common_key_id, 0x0b);
-        assert_eq!(tik.encrypted_title_key, enc_key);
+        assert_eq!(tik.wrapped_title_key, wrapped);
     }
 
+    /// Asphalt 9's ticket says `common_key_id` 0 and its content needs
+    /// `titlekek_07`. A ticket hands over the key block untouched precisely
+    /// so that field can never pick the generation.
     #[test]
-    fn decrypts_common_crypto_title_key() {
-        let kek = [0x11u8; 16];
-        let title_key = [0x22u8; 16];
-        let encrypted = crate::crypto::aes128_encrypt_block(&kek, &title_key);
-        let data = build_ticket([0u8; 16], 0, 0x05, encrypted);
-        let tik = Ticket::parse(&data).unwrap();
-
-        // common_key_id 0x05 selects titlekek_04 (the stored value is one
-        // more than the actual generation, except 0 stays 0).
-        let mut keys = KeySet::default();
-        keys.titlekek[0x04] = Some(kek);
-        assert_eq!(tik.decrypt_title_key(&keys).unwrap(), title_key);
-    }
-
-    #[test]
-    fn common_key_id_zero_stays_zero() {
-        let kek = [0x33u8; 16];
-        let title_key = [0x44u8; 16];
-        let encrypted = crate::crypto::aes128_encrypt_block(&kek, &title_key);
-        let data = build_ticket([0u8; 16], 0, 0, encrypted);
-        let tik = Ticket::parse(&data).unwrap();
-
-        let mut keys = KeySet::default();
-        keys.titlekek[0] = Some(kek);
-        assert_eq!(tik.decrypt_title_key(&keys).unwrap(), title_key);
+    fn a_ticket_hands_over_the_key_block_unwrapped_by_itself() {
+        let wrapped = [0x22u8; 16];
+        for common_key_id in [0u8, 0x07, 0x0b] {
+            let data = build_ticket([0u8; 16], 0, common_key_id, wrapped);
+            assert_eq!(Ticket::parse(&data).unwrap().title_key_block().unwrap(), wrapped);
+        }
     }
 
     #[test]
     fn rejects_personalized_crypto() {
         let data = build_ticket([0u8; 16], 1, 0, [0u8; 16]);
         let tik = Ticket::parse(&data).unwrap();
-        assert!(matches!(tik.decrypt_title_key(&KeySet::default()), Err(Error::Ticket(_))));
-    }
-
-    #[test]
-    fn reports_missing_titlekek() {
-        let data = build_ticket([0u8; 16], 0, 0x1f, [0u8; 16]);
-        let tik = Ticket::parse(&data).unwrap();
-        assert!(matches!(tik.decrypt_title_key(&KeySet::default()), Err(Error::Ticket(_))));
+        assert!(matches!(tik.title_key_block(), Err(Error::Ticket(_))));
     }
 
     #[test]
@@ -254,29 +244,89 @@ mod tests {
         assert!(matches!(Ticket::parse(&data), Err(Error::Truncated { .. })));
     }
 
-    #[test]
-    fn finds_and_decrypts_ticket_from_nsp_file_list() {
-        let rights_id = [0x01u8, 0x00, 0x48, 0x90, 0x11, 0x7b, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b];
-        let kek = [0x77u8; 16];
-        let title_key = [0x88u8; 16];
-        let encrypted = crate::crypto::aes128_encrypt_block(&kek, &title_key);
-        let tik_bytes = build_ticket(rights_id, 0, 0x09, encrypted);
-        // Lay out a fake NSP buffer: some padding, then the ticket.
+    /// Lay out a fake NSP buffer: some padding, then the ticket.
+    fn nsp_with_ticket(tik_bytes: &[u8], rights_id: &[u8; 16]) -> (Vec<u8>, Vec<crate::nsp::Pfs0File>) {
         let tik_offset = 0x1000;
         let mut nsp_data = vec![0u8; tik_offset + tik_bytes.len()];
-        nsp_data[tik_offset..].copy_from_slice(&tik_bytes);
+        nsp_data[tik_offset..].copy_from_slice(tik_bytes);
         let files = vec![crate::nsp::Pfs0File {
             offset: tik_offset as u64,
             size: tik_bytes.len() as u64,
-            name: format!("{}.tik", hex_lower(&rights_id)),
+            name: format!("{}.tik", hex_lower(rights_id)),
         }];
+        (nsp_data, files)
+    }
+
+    #[test]
+    fn finds_a_ticket_from_an_nsp_file_list() {
+        let rights_id = [0x01u8, 0x00, 0x48, 0x90, 0x11, 0x7b, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b];
+        let wrapped = [0x88u8; 16];
+        let (nsp_data, files) = nsp_with_ticket(&build_ticket(rights_id, 0, 0x09, wrapped), &rights_id);
+
+        let src = SliceSource(&nsp_data);
+        assert_eq!(find_wrapped_title_key(&rights_id, &files, &src).unwrap(), wrapped);
+        // A rights id with no matching ticket file reports a clear error.
+        assert!(find_wrapped_title_key(&[0xffu8; 16], &files, &src).is_err());
+    }
+
+    /// An NCA that carries nothing but the two fields this path reads.
+    fn rights_id_nca(rights_id: [u8; 16], key_generation: u8) -> crate::nca::Nca {
+        crate::nca::Nca {
+            distribution_type: 0,
+            content_type: crate::nca::ContentType::Program,
+            content_type_raw: 0,
+            title_id: 0,
+            sdk_version: 0,
+            crypto_type: 0,
+            sections: Vec::new(),
+            file_size: 0,
+            program_id: 0,
+            rights_id,
+            key_index: 0,
+            key_generation_old: 0,
+            key_generation_new: key_generation,
+            encrypted_key_area: [0; 0x40],
+            fs_headers: Default::default(),
+        }
+    }
+
+    /// The whole point of loading a ticket: the key it yields is unwrapped
+    /// with the *NCA's* generation, and the section key comes out right even
+    /// though the ticket's own `common_key_id` names a different one.
+    #[test]
+    fn a_bundled_ticket_unwraps_with_the_ncas_generation() {
+        let rights_id = [0x33u8; 16];
+        let kek = [0x44u8; 16];
+        let title_key = [0x55u8; 16];
+        let wrapped = crate::crypto::aes128_encrypt_block(&kek, &title_key);
+        // `common_key_id` 0 against content whose key generation is 8 —
+        // Asphalt 9's shape exactly.
+        let (nsp_data, files) = nsp_with_ticket(&build_ticket(rights_id, 0, 0, wrapped), &rights_id);
+        let nca = rights_id_nca(rights_id, 8);
 
         let mut keys = KeySet::default();
-        keys.titlekek[0x08] = Some(kek); // common_key_id 0x09 -> titlekek_08
-        let resolved = find_and_decrypt_title_key(&rights_id, &files, &nsp_data, &keys).unwrap();
-        assert_eq!(resolved, title_key);
+        keys.titlekek[0x07] = Some(kek);
+        assert!(load_bundled_title_key(&mut keys, &nca, &files, &SliceSource(&nsp_data)).unwrap());
+        assert_eq!(nca.section_key(&keys).unwrap(), title_key);
+    }
 
-        // A rights id with no matching ticket file reports a clear error.
-        assert!(find_and_decrypt_title_key(&[0xffu8; 16], &files, &nsp_data, &keys).is_err());
+    /// A container with no ticket is only a failure when nothing else has
+    /// the key — and a bundled ticket replaces a `title.keys` entry rather
+    /// than stacking behind it.
+    #[test]
+    fn a_missing_ticket_defers_to_the_keyset() {
+        let rights_id = [0x33u8; 16];
+        let nca = rights_id_nca(rights_id, 1);
+
+        let mut keys = KeySet::default();
+        assert!(load_bundled_title_key(&mut keys, &nca, &[], &SliceSource(&[])).is_err());
+        keys.add_title_key(rights_id, [0x66u8; 16]);
+        assert!(!load_bundled_title_key(&mut keys, &nca, &[], &SliceSource(&[])).unwrap());
+
+        let wrapped = [0x77u8; 16];
+        let (nsp_data, files) = nsp_with_ticket(&build_ticket(rights_id, 0, 0, wrapped), &rights_id);
+        assert!(load_bundled_title_key(&mut keys, &nca, &files, &SliceSource(&nsp_data)).unwrap());
+        assert_eq!(keys.wrapped_title_key(&rights_id), Some(wrapped));
+        assert_eq!(keys.title_keys.len(), 1);
     }
 }

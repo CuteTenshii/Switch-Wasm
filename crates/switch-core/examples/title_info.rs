@@ -76,16 +76,10 @@ fn main() {
         let (index, nca) = switch_core::control::find_control_nca(&pfs0.files, &src, &keys)
             .expect("no Control NCA in this container (is prod.keys right?)");
         println!("Control NCA: {}", pfs0.files[index].name);
-        if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
-            match switch_core::ticket::find_and_decrypt_title_key_from(
-                &nca.rights_id,
-                &pfs0.files,
-                &src,
-                &keys,
-            ) {
-                Ok(title_key) => keys.add_resolved_title_key(nca.rights_id, title_key),
-                Err(e) => println!("ticket resolution failed: {}", e),
-            }
+        if let Err(e) =
+            switch_core::ticket::load_bundled_title_key(&mut keys, &nca, &pfs0.files, &src)
+        {
+            println!("ticket resolution failed: {}", e);
         }
         pfs0.file_source(&src, index)
             .and_then(|window| Control::from_source(window, &keys))

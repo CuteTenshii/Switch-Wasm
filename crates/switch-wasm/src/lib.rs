@@ -465,16 +465,7 @@ pub extern "C" fn switch_add_update(handle: u32, file: u32, size: u64) -> u64 {
     };
     // An update is ticketed separately from the game it patches, so its own
     // title key has to come out of its own container.
-    if nca.has_rights_id() && s.keys.resolved_title_key(&nca.rights_id).is_none() {
-        if let Ok(title_key) = switch_core::ticket::find_and_decrypt_title_key_from(
-            &nca.rights_id,
-            &files,
-            &src,
-            &s.keys,
-        ) {
-            s.keys.add_resolved_title_key(nca.rights_id, title_key);
-        }
-    }
+    let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &files, &src);
     // A game is not an update, and saying so here is what keeps the page from
     // offering to apply one container to another at random.
     if !nca.is_update() {
@@ -574,16 +565,7 @@ pub extern "C" fn switch_add_dlc(handle: u32, file: u32, size: u64) -> u32 {
         }
         // Each piece is ticketed on its own — a DLC is bought separately from
         // the game and from every other piece of it.
-        if nca.has_rights_id() && s.keys.resolved_title_key(&nca.rights_id).is_none() {
-            if let Ok(title_key) = switch_core::ticket::find_and_decrypt_title_key_from(
-                &nca.rights_id,
-                &files,
-                &src,
-                &s.keys,
-            ) {
-                s.keys.add_resolved_title_key(nca.rights_id, title_key);
-            }
-        }
+        let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &files, &src);
         if nca.romfs_section_index().is_none() {
             continue;
         }
@@ -994,16 +976,7 @@ pub extern "C" fn switch_load_control_from_nsp(handle: u32) -> i32 {
     // Title-key crypto: as when booting the Program NCA, the section key
     // isn't in the header's own key area and the ticket that unlocks it
     // ships next to the content.
-    if nca.has_rights_id() && s.keys.resolved_title_key(&nca.rights_id).is_none() {
-        if let Ok(title_key) = switch_core::ticket::find_and_decrypt_title_key_from(
-            &nca.rights_id,
-            &s.nsp_files,
-            &container,
-            &s.keys,
-        ) {
-            s.keys.add_resolved_title_key(nca.rights_id, title_key);
-        }
-    }
+    let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &s.nsp_files, &container);
     let Some(file) = nsp_file_source(s, index as u32) else {
         return -1;
     };
@@ -1501,16 +1474,7 @@ pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
     // unlocks it right next to the content — try that before falling back to
     // whatever an external title.keys provided.
     if let Ok(nca) = Nca::parse_source(&nca_src, Some(&s.keys)) {
-        if nca.has_rights_id() && s.keys.resolved_title_key(&nca.rights_id).is_none() {
-            if let Ok(title_key) = switch_core::ticket::find_and_decrypt_title_key_from(
-                &nca.rights_id,
-                &s.nsp_files,
-                &container,
-                &s.keys,
-            ) {
-                s.keys.add_resolved_title_key(nca.rights_id, title_key);
-            }
-        }
+        let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &s.nsp_files, &container);
     }
 
     let added = Added { update: s.update.as_ref(), dlc: &s.dlc };

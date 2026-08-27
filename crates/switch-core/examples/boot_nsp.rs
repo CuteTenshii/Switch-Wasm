@@ -208,22 +208,18 @@ fn main() {
     // Title-key crypto: no key-area unlock needed, but the title key itself
     // has to come from somewhere. Scene NSP releases bundle the ticket right
     // next to the content, so try that before giving up.
-    if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
-        match switch_core::ticket::find_and_decrypt_title_key_from(
-            &nca.rights_id,
-            &pfs0.files,
-            &src,
-            &keys,
-        ) {
-            Ok(title_key) => {
-                println!(
-                    "resolved title key from bundled ticket: {}",
-                    title_key.iter().map(|b| format!("{:02x}", b)).collect::<String>()
-                );
-                keys.add_resolved_title_key(nca.rights_id, title_key);
-            }
-            Err(e) => println!("ticket resolution failed: {}", e),
-        }
+    match switch_core::ticket::load_bundled_title_key(&mut keys, &nca, &pfs0.files, &src) {
+        // The usable key rather than the stored one: it is the unwrapping
+        // that can go wrong, and printing its result is what says it didn't.
+        Ok(true) => match nca.section_key(&keys) {
+            Ok(key) => println!(
+                "title key from bundled ticket: {}",
+                key.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            ),
+            Err(e) => println!("bundled ticket found, but {}", e),
+        },
+        Ok(false) => {}
+        Err(e) => println!("ticket resolution failed: {}", e),
     }
 
     // What boots is the update's Program NCA when there is one: its ExeFS is

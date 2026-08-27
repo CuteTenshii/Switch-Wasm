@@ -42,12 +42,12 @@ pub struct KeySet {
     /// ticket's key block into that file verbatim, so an entry here is the
     /// ciphertext, not a usable NCA section key — [`KeySet::title_key`]
     /// unwraps it.
+    ///
+    /// A ticket bundled in a container lands here too, in the same wrapped
+    /// form (see [`crate::ticket::load_bundled_title_key`]): this is the only
+    /// representation of a title key the keyset holds, so the generation that
+    /// unwraps one is always the NCA's, never a ticket field's.
     pub title_keys: Vec<([u8; 16], [u8; 16])>,
-    /// Title keys that are already unwrapped, from a ticket bundled in the
-    /// container (see `ticket.rs`). Consulted before [`Self::title_keys`],
-    /// since a ticket that ships with the content is a better answer for it
-    /// than whatever a general-purpose `title.keys` happens to hold.
-    pub resolved_title_keys: Vec<([u8; 16], [u8; 16])>,
     // Sources for deriving the header key (prod.keys).
     pub header_key_source: Option<[u8; 32]>,
     pub header_kek_source: Option<[u8; 16]>,
@@ -69,40 +69,34 @@ pub struct KeySet {
 }
 
 impl KeySet {
-    /// Look up an already-unwrapped title key by rights id — a key a ticket
-    /// yielded, not one read out of `title.keys`.
-    pub fn resolved_title_key(&self, rights_id: &[u8; 16]) -> Option<[u8; 16]> {
-        find_key(&self.resolved_title_keys, rights_id)
-    }
-
     /// Look up a still-`titlekek`-wrapped title key by rights id, as
-    /// `title.keys` stores it.
+    /// `title.keys` and a bundled ticket both store it.
     pub fn wrapped_title_key(&self, rights_id: &[u8; 16]) -> Option<[u8; 16]> {
         find_key(&self.title_keys, rights_id)
     }
 
-    /// The usable AES-128 title key for `rights_id`: a ticket-derived one if
-    /// this keyset has it, otherwise the `title.keys` entry unwrapped with
-    /// `titlekek_<generation>`.
+    /// Whether this keyset carries a title key for `rights_id` at all,
+    /// wrapped or not — which is a different question from whether the
+    /// `titlekek` that unwraps it is present.
+    pub fn has_title_key(&self, rights_id: &[u8; 16]) -> bool {
+        self.wrapped_title_key(rights_id).is_some()
+    }
+
+    /// The usable AES-128 title key for `rights_id`: the stored key block
+    /// unwrapped with `titlekek_<generation>`, where `generation` is the
+    /// NCA's key generation.
     pub fn title_key(&self, rights_id: &[u8; 16], generation: u8) -> Option<[u8; 16]> {
-        if let Some(key) = self.resolved_title_key(rights_id) {
-            return Some(key);
-        }
         let wrapped = self.wrapped_title_key(rights_id)?;
         let kek = self.titlekek(generation)?;
         Some(crate::crypto::aes128_decrypt_block(&kek, &wrapped))
     }
 
-    /// Record a title key that is already usable as-is (a ticket's, once
-    /// decrypted), so it wins over any `title.keys` entry for the same title.
-    pub fn add_resolved_title_key(&mut self, rights_id: [u8; 16], key: [u8; 16]) {
-        match self
-            .resolved_title_keys
-            .iter_mut()
-            .find(|(id, _)| *id == rights_id)
-        {
-            Some(slot) => slot.1 = key,
-            None => self.resolved_title_keys.push((rights_id, key)),
+    /// Record a title key in its stored, `titlekek`-wrapped form, replacing
+    /// any entry this keyset already had for the same title.
+    pub fn add_title_key(&mut self, rights_id: [u8; 16], wrapped: [u8; 16]) {
+        match self.title_keys.iter_mut().find(|(id, _)| *id == rights_id) {
+            Some(slot) => slot.1 = wrapped,
+            None => self.title_keys.push((rights_id, wrapped)),
         }
     }
 
@@ -402,18 +396,19 @@ mod tests {
     /// The ticket shipped with the content describes that content; a
     /// `title.keys` entry for the same title is a guess from elsewhere.
     #[test]
-    fn a_ticket_key_wins_over_a_title_keys_entry() {
+    fn a_ticket_key_replaces_a_title_keys_entry() {
         let rights_id = [0xaau8; 16];
+        let kek = [0x22u8; 16];
         let from_ticket = [0x33u8; 16];
         let mut ks = KeySet::default();
-        ks.titlekek[0x0d] = Some([0x22u8; 16]);
+        ks.titlekek[0x0d] = Some(kek);
         ks.title_keys = vec![(rights_id, [0x44u8; 16])];
-        ks.add_resolved_title_key(rights_id, from_ticket);
+        ks.add_title_key(rights_id, crate::crypto::aes128_encrypt_block(&kek, &from_ticket));
         assert_eq!(ks.title_key(&rights_id, 0x0d), Some(from_ticket));
-        // Resolving the same title twice replaces it instead of stacking a
+        // Recording the same title twice replaces it instead of stacking a
         // second entry the first would shadow forever.
-        ks.add_resolved_title_key(rights_id, [0x55u8; 16]);
-        assert_eq!(ks.resolved_title_keys.len(), 1);
-        assert_eq!(ks.title_key(&rights_id, 0x0d), Some([0x55u8; 16]));
+        ks.add_title_key(rights_id, [0x55u8; 16]);
+        assert_eq!(ks.title_keys.len(), 1);
+        assert_eq!(ks.wrapped_title_key(&rights_id), Some([0x55u8; 16]));
     }
 }

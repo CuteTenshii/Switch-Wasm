@@ -32,11 +32,12 @@ fn main() {
     let f = program.expect("no program nca");
     let raw = &nsp_data[f.offset as usize..(f.offset + f.size) as usize];
     let nca = switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)).expect("parse program nca");
-    if nca.has_rights_id() && keys.resolved_title_key(&nca.rights_id).is_none() {
-        if let Ok(tk) = switch_core::ticket::find_and_decrypt_title_key(&nca.rights_id, &pfs0.files, &nsp_data, &keys) {
-            keys.add_resolved_title_key(nca.rights_id, tk);
-        }
-    }
+    let _ = switch_core::ticket::load_bundled_title_key(
+        &mut keys,
+        &nca,
+        &pfs0.files,
+        &switch_core::source::SliceSource(&nsp_data),
+    );
     let exefs = nca.decrypt_pfs0_section(raw, &keys, nca.exefs_section_index().expect("exefs")).expect("exefs");
     let exefs_pfs0 = Pfs0::parse(&exefs).expect("pfs0");
     let sdk = exefs_pfs0.find("sdk").expect("sdk");
