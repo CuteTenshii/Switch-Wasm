@@ -13,10 +13,3 @@
 
 # Decrypted game binaries and symbol maps (dump_exefs output).
 out/
-
-# Decrypted game binaries staged for static analysis. The READMEs beside them
-# are the analysis and stay tracked; the images are 165 MB and are reproducible
-# from the container with `dump_exefs`.
-/home_menu_bn/*.bin
-/home_menu_bn/raw_*
-/tomodachi_bn/*.bin
