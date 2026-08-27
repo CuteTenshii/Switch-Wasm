@@ -2497,21 +2497,39 @@ mod tests {
     }
 }
 
+/// What [`crate::gpu::switch_gpu_open`] answers before the guest has opened a
+/// channel. Named because the worker matches on it to know the attempt is
+/// worth repeating rather than abandoning.
+#[cfg(feature = "gpu")]
+pub(crate) const NO_CHANNEL_YET: &str = "the title has not opened a channel yet";
+
+/// Whether the guest has opened the 3D channel a backend installs on.
+///
+/// Asked before a device is opened rather than after. `requestDevice` builds a
+/// real device in the GPU process whether or not there is anywhere to put it,
+/// and wgpu's web backend frees nothing when one is dropped — so every attempt
+/// made too early left a whole device behind. The Home Menu opens its channel
+/// 11.6M steps in, which against a 1M-step run slice is eleven of them before
+/// the twelfth attempt lands.
+#[cfg(feature = "gpu")]
+pub(crate) fn gpu_channel_open(handle: u32) -> bool {
+    session(handle).cpu.nv.gpu.channels.values().next().is_some()
+}
+
 /// Install a GPU backend on a session's 3D channel.
 ///
 /// The channel a guest draws through does not exist until the guest opens it,
-/// so this is called once the title is running rather than at startup.
+/// so this is called once the title is running rather than at startup. The
+/// backend comes back on failure, because a device that is not installed is
+/// one somebody has to give back.
 #[cfg(feature = "gpu")]
-fn install_gpu(handle: u32, gpu: switch_gpu::Gpu) -> Result<(), String> {
+fn install_gpu(handle: u32, gpu: switch_gpu::Gpu) -> Result<(), (switch_gpu::Gpu, String)> {
     let session = session(handle);
-    let channel = session
-        .cpu
-        .nv
-        .gpu
-        .channels
-        .values_mut()
-        .next()
-        .ok_or("the title has not opened a channel yet")?;
-    channel.three_d.set_renderer(Box::new(gpu));
-    Ok(())
+    match session.cpu.nv.gpu.channels.values_mut().next() {
+        Some(channel) => {
+            channel.three_d.set_renderer(Box::new(gpu));
+            Ok(())
+        }
+        None => Err((gpu, NO_CHANNEL_YET.to_string())),
+    }
 }

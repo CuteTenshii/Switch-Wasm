@@ -106,6 +106,18 @@ fn write_mask(mask: [bool; 4]) -> wgpu::ColorWrites {
     writes
 }
 
+/// Write a draw's two WGSL modules under `dir`, named by their hash, so the
+/// exact source a title makes can be compiled somewhere other than here.
+fn dump_wgsl(dir: &str, vs: &str, fs: &str) {
+    let _ = std::fs::create_dir_all(dir);
+    for (what, src) in [("vs", vs), ("fs", fs)] {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(src, &mut h);
+        let key = std::hash::Hasher::finish(&h);
+        let _ = std::fs::write(format!("{dir}/{key:016x}.{what}.wgsl"), src);
+    }
+}
+
 /// `GPU_ONLY`'s value: one draw index, or the half-open range `a..b`.
 fn draw_range(spec: &str) -> Option<std::ops::Range<u32>> {
     match spec.trim().split_once("..") {
@@ -234,6 +246,19 @@ struct Held {
 /// A device, and the rasterizer to fall back to.
 #[derive(Debug)]
 pub struct Gpu {
+    /// The instance and adapter the device came from, held for as long as it
+    /// is — never read again, and not droppable either.
+    ///
+    /// A browser loses a device when the last *external* reference to the
+    /// instance behind it goes, and reports it as "A valid external Instance
+    /// reference no longer exists". Dropping these at the end of the call that
+    /// opened the device is what released it: the device's own handle does not
+    /// count as one, so the loss arrived whenever the collector next ran, and
+    /// from then on every readback failed to map and every frame was dropped.
+    /// Natively they are held for nothing — wgpu-core keeps the instance alive
+    /// behind the device — which is why this cost a browser to find.
+    _instance: wgpu::Instance,
+    _adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
     /// Surfaces this is holding, by the guest address they came from.
@@ -301,6 +326,21 @@ pub struct Gpu {
     /// Set by the device when it rejects something. Read on the next draw,
     /// because asking sooner means waiting.
     failed: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Set when the device is lost, with the browser's reason.
+    ///
+    /// The one failure nothing else here can see: a lost device raises no
+    /// error and rejects nothing. It accepts every submission and performs
+    /// none of them, and the only symptom is a readback that never maps —
+    /// which read as "the readback was not mapped", every frame, for as long
+    /// as the title ran.
+    lost: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Whether [`Gpu::give_up`] has already handed the frame back.
+    gave_up: bool,
+    /// The loss, kept for the first flush after it.
+    ///
+    /// A browser discards what `eprintln!` writes, and a flush's error is the
+    /// only way a reason reaches the frontend's diagnostics from here.
+    report: Option<String>,
     /// What this cannot express runs here instead.
     software: Software,
     /// Draws this rendered, and draws that fell back with why the last one
@@ -400,7 +440,15 @@ impl Gpu {
     /// this crate may wait on a promise, so the waiting happens outside and
     /// the result is handed in. [`Gpu::open`] is the native convenience that
     /// does it by blocking, which is fine on a thread that owns itself.
-    pub fn with_device(device: wgpu::Device, queue: wgpu::Queue) -> Gpu {
+    ///
+    /// The instance and the adapter come too, and are not optional: see
+    /// [`Gpu::_instance`] for what a browser does when they are dropped.
+    pub fn with_device(
+        instance: wgpu::Instance,
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    ) -> Gpu {
         // Where a rejection lands, since nothing in a draw ever stops to ask.
         let failed: std::sync::Arc<std::sync::Mutex<Option<String>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -410,7 +458,18 @@ impl Gpu {
                 slot.get_or_insert_with(|| e.to_string());
             }
         }));
+        // Asked for by name, because a lost device is silent everywhere else.
+        let lost: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = lost.clone();
+        device.set_device_lost_callback(move |reason, message| {
+            if let Ok(mut slot) = sink.lock() {
+                slot.get_or_insert(format!("{reason:?}: {message}"));
+            }
+        });
         Gpu {
+            _instance: instance,
+            _adapter: adapter,
             device,
             queue,
             held: std::collections::HashMap::new(),
@@ -421,6 +480,9 @@ impl Gpu {
             pipelines: std::collections::HashMap::new(),
             group_layouts: std::collections::HashMap::new(),
             failed,
+            lost,
+            gave_up: false,
+            report: None,
             software: Software,
             drawn: 0,
             fallbacks: 0,
@@ -442,12 +504,20 @@ impl Gpu {
         let (device, queue) =
             pollster::block_on(adapter.request_device(&device_descriptor(&adapter)))
                 .map_err(|e| format!("no device: {e}"))?;
-        Ok(Gpu::with_device(device, queue))
+        Ok(Gpu::with_device(instance, adapter, device, queue))
     }
 
     /// What adapter this opened.
     pub fn describe(&self) -> String {
         format!("{:?}", self.device.limits().max_texture_dimension_2d)
+    }
+
+    /// Give the device back, for one that will not be used.
+    ///
+    /// Dropping it does not: wgpu's web backend frees nothing on drop, so an
+    /// abandoned device lives in the GPU process until the collector runs.
+    pub fn destroy(&self) {
+        self.device.destroy();
     }
 
     fn fall_back(&mut self, why: String) {
@@ -459,6 +529,32 @@ impl Gpu {
             self.reasons.push(why.clone());
         }
         self.last_fallback = Some(why);
+    }
+
+    /// Hand the frame back to the rasterizer for good, once the device is
+    /// lost. Answers whether it has been.
+    ///
+    /// A lost device cannot copy a surface back, so everything held on it is
+    /// gone and what guest memory holds is the last thing the rasterizer
+    /// wrote. That is what the display gets from here on — which is the
+    /// point: the alternative, and what this replaces, was a readback that
+    /// failed and a frame that was dropped, once per frame, forever.
+    fn give_up(&mut self) -> bool {
+        if self.gave_up {
+            return true;
+        }
+        let Some(why) = self.lost.lock().ok().and_then(|slot| slot.clone()) else {
+            return false;
+        };
+        self.gave_up = true;
+        let said = format!("the device was lost ({why}); the rasterizer has the frame from here");
+        eprintln!("[gpu] {said}");
+        self.report = Some(said);
+        self.held.clear();
+        self.evicted.clear();
+        self.pending.clear();
+        self.scratch.clear();
+        true
     }
 
     /// Render depth-tested draws with no depth buffer rather than handing
@@ -664,7 +760,12 @@ impl Gpu {
             let vs_source = wgsl::module(&p.vs, Stage::Vertex, &p.vs_layout);
             let fs_source = wgsl::module(&p.fs, Stage::Fragment, &p.fs_layout);
             match (vs_source, fs_source) {
-                (Ok(vs), Ok(fs)) => Ok((self.module("vertex", &vs), self.module("fragment", &fs))),
+                (Ok(vs), Ok(fs)) => {
+                    if let Ok(dir) = std::env::var("GPU_DUMP_WGSL") {
+                        dump_wgsl(&dir, &vs, &fs);
+                    }
+                    Ok((self.module("vertex", &vs), self.module("fragment", &fs)))
+                }
                 (Err(e), _) | (_, Err(e)) => Err(format!("module: {e}")),
             }
         })?;
@@ -1396,6 +1497,9 @@ impl Gpu {
 
 impl Renderer for Gpu {
     fn draw(&mut self, engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
+        if self.give_up() {
+            return self.software.draw(engine, ctx);
+        }
         // Anything at all going wrong here runs the draw on the rasterizer
         // instead. That is not timidity: the rasterizer is the reference, so
         // a frame is always either right or a frame the reference produced,
@@ -1469,6 +1573,15 @@ impl Renderer for Gpu {
 
 impl Gpu {
     fn flush_inner(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {
+        if self.give_up() {
+            // The first flush after the loss carries the reason out; every one
+            // after it says the frame is ready, because guest memory is now
+            // the whole truth and there is nothing left to wait for.
+            return match self.report.take() {
+                Some(why) => Err(Error::Gpu(why)),
+                None => Ok(Flush::Done),
+            };
+        }
         // Only once per frame: asking again while the first ask is in flight
         // would copy the same surface twice and read the second copy.
         if self.pending.is_empty() {
@@ -1490,7 +1603,13 @@ impl Gpu {
         }
         for pending in std::mem::take(&mut self.pending) {
             if pending.state.load(Ordering::Acquire) == MAP_FAILED {
-                return Err(Error::Gpu("the readback was not mapped".into()));
+                // With the reason, if the device left one: on its own this
+                // message names the symptom and nothing else, and the cause is
+                // in the browser rather than in the frame.
+                return Err(Error::Gpu(match self.device_error() {
+                    Some(e) => format!("the readback was not mapped: {e}"),
+                    None => "the readback was not mapped".into(),
+                }));
             }
             self.land(&pending, ctx)?;
         }

@@ -26,6 +26,13 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// right.
 #[wasm_bindgen]
 pub async fn switch_gpu_open(handle: u32, ignore_depth: bool) -> String {
+    // Before anything is opened, not after. `requestDevice` builds a device in
+    // the GPU process whether or not there is a channel to install it on, and
+    // one built too early used to be dropped — which on wgpu's web backend
+    // frees nothing. See [`crate::gpu_channel_open`].
+    if !crate::gpu_channel_open(handle) {
+        return crate::NO_CHANNEL_YET.to_string();
+    }
     let instance = switch_gpu::wgpu::Instance::new(switch_gpu::wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = match instance.request_adapter(&switch_gpu::wgpu::RequestAdapterOptions::default()).await {
         Ok(adapter) => adapter,
@@ -43,10 +50,19 @@ pub async fn switch_gpu_open(handle: u32, ignore_depth: bool) -> String {
             Err(e) => return format!("no device: {e}"),
         };
     let name = adapter.get_info().name;
-    let mut gpu = switch_gpu::Gpu::with_device(device, queue);
+    // The instance and the adapter are handed over rather than dropped here:
+    // see `switch_gpu::Gpu::_instance` for what a browser does to a device
+    // whose instance has no external reference left.
+    let mut gpu = switch_gpu::Gpu::with_device(instance, adapter, device, queue);
     gpu.set_ignore_depth(ignore_depth);
     match crate::install_gpu(handle, gpu) {
         Ok(()) => format!("rendering on {name}"),
-        Err(why) => why,
+        Err((gpu, why)) => {
+            // The check above makes this unreachable in practice — a slice
+            // only ever adds channels — but `install_gpu` owns the answer,
+            // and a device nobody installed has to be given back.
+            gpu.destroy();
+            why
+        }
     }
 }
