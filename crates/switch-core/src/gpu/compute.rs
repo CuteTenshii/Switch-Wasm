@@ -20,7 +20,7 @@ use crate::gpu::qmd::{ConstantBuffer, Qmd, Release, CONSTANT_BUFFERS, QMD_WORDS}
 use crate::gpu::shader::compiled::Compiled;
 use crate::gpu::shader::interp::{
     resolve_shuffles, ConstCache, ConstantSource, Env, GlobalMemory, Halt, Invocation,
-    SharedMemory, TextureSource, WARP_LANES,
+    ShaderResult, SharedMemory, TextureSource, WARP_LANES,
 };
 use crate::gpu::shader::{decode_program_from_memory, Op};
 use crate::gpu::texture::{self, BlockCache, Descriptors};
@@ -236,21 +236,21 @@ impl DispatchMemory<'_, '_> {
 }
 
 impl ConstantSource for DispatchMemory<'_, '_> {
-    fn read_const(&self, bank: u8, offset: u16) -> Result<u32> {
+    fn read_const(&self, bank: u8, offset: u16) -> ShaderResult<u32> {
         let key = ConstCache::key(bank, offset);
         if let Some(value) = self.consts.borrow().get(key) {
             return Ok(value);
         }
         let (addr, size) = self.bank(bank).ok_or_else(|| {
-            Error::Gpu(format!(
+            Box::new(Error::Gpu(format!(
                 "compute: read from constant bank {bank}, which the QMD did not bind"
-            ))
+            )))
         })?;
         if u32::from(offset) + 4 > size {
-            return Err(Error::Gpu(format!(
+            return Err(Box::new(Error::Gpu(format!(
                 "compute: constant read c{bank}[{offset:#x}] is past the bound \
                  buffer's size {size:#x}"
-            )));
+            ))));
         }
         let value = self.ctx.borrow().read_u32(addr + u64::from(offset))?;
         self.consts.borrow_mut().insert(key, value);
@@ -259,25 +259,25 @@ impl ConstantSource for DispatchMemory<'_, '_> {
 }
 
 impl GlobalMemory for DispatchMemory<'_, '_> {
-    fn read_u32(&self, addr: u64) -> Result<u32> {
-        self.ctx.borrow().read_u32(addr)
+    fn read_u32(&self, addr: u64) -> ShaderResult<u32> {
+        Ok(self.ctx.borrow().read_u32(addr)?)
     }
 
-    fn read_u8(&self, addr: u64) -> Result<u8> {
-        self.ctx.borrow().vmm_read_u8(addr)
+    fn read_u8(&self, addr: u64) -> ShaderResult<u8> {
+        Ok(self.ctx.borrow().vmm_read_u8(addr)?)
     }
 
-    fn write_u32(&self, addr: u64, value: u32) -> Result<()> {
-        self.ctx.borrow_mut().write_u32(addr, value)
+    fn write_u32(&self, addr: u64, value: u32) -> ShaderResult<()> {
+        Ok(self.ctx.borrow_mut().write_u32(addr, value)?)
     }
 
-    fn write_u8(&self, addr: u64, value: u8) -> Result<()> {
-        self.ctx.borrow_mut().vmm_write_u8(addr, value)
+    fn write_u8(&self, addr: u64, value: u8) -> ShaderResult<()> {
+        Ok(self.ctx.borrow_mut().vmm_write_u8(addr, value)?)
     }
 }
 
 impl TextureSource for DispatchMemory<'_, '_> {
-    fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> Result<[f32; 4]> {
+    fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> ShaderResult<[f32; 4]> {
         let cached = self.descriptors.borrow().get(&handle).copied();
         let ctx = self.ctx.borrow();
         let descriptors = match cached {
@@ -293,7 +293,7 @@ impl TextureSource for DispatchMemory<'_, '_> {
                 d
             }
         };
-        texture::sample_with(&ctx, &descriptors, f64::from(u), f64::from(v), layer, &self.blocks)
+        Ok(texture::sample_with(&ctx, &descriptors, f64::from(u), f64::from(v), layer, &self.blocks)?)
     }
 }
 

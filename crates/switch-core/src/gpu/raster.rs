@@ -819,15 +819,19 @@ impl Fragments {
     /// multisampling buys over rendering the whole frame at the sample grid's
     /// resolution: the edges get every sample's worth of coverage, but the
     /// fragment shader still runs once for the pixel.
+    /// `sample_z` is filled for the samples the returned mask names, and left
+    /// alone for the rest — so the caller may reuse one buffer across pixels
+    /// without clearing it. [`Fragments::write`] reads exactly the samples the
+    /// mask names, and alpha-to-coverage only narrows that mask.
     fn coverage(
         &self,
         tri: &TriangleSetup,
         window_z: [f32; 3],
         (x, y): (u32, u32),
+        sample_z: &mut [f32; MAX_SAMPLES],
         ctx: &mut ExecCtx,
-    ) -> Result<(u32, [f32; MAX_SAMPLES])> {
+    ) -> Result<u32> {
         let mut covered = 0u32;
-        let mut sample_z = [0.0f32; MAX_SAMPLES];
         for sample in 0..self.grid.count() {
             if self.sample_mask >> sample & 1 == 0 {
                 continue;
@@ -849,7 +853,7 @@ impl Fragments {
             covered |= 1 << sample;
             sample_z[sample as usize] = z;
         }
-        Ok((covered, sample_z))
+        Ok(covered)
     }
 
     /// Put a shaded pixel into the targets, for every sample of it still
@@ -1393,10 +1397,11 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             };
             let (min_x, max_x, min_y, max_y) = tri.bbox(bounds);
             let Some(quad) = quad.as_mut() else {
+                let mut sample_z = [0.0f32; MAX_SAMPLES];
                 for y in min_y..max_y {
                     for x in min_x..max_x {
-                        let (covered, sample_z) =
-                            fragments.coverage(&tri, window_z, (x, y), ctx)?;
+                        let covered =
+                            fragments.coverage(&tri, window_z, (x, y), &mut sample_z, ctx)?;
                         if covered == 0 {
                             tally.uncovered += 1;
                             continue;
@@ -1443,10 +1448,10 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             // depth test there would read a target this draw has no business
             // touching — but they are still shaded, as the neighbours the
             // covered lanes difference against.
+            let mut sample_z = [[0.0f32; MAX_SAMPLES]; QUAD];
             for y in ((min_y & !1)..max_y).step_by(2) {
                 for x in ((min_x & !1)..max_x).step_by(2) {
                     let mut covered = [0u32; QUAD];
-                    let mut sample_z = [[0.0f32; MAX_SAMPLES]; QUAD];
                     let mut weights = [[0.0f32; 3]; QUAD];
                     let mut any_covered = false;
                     for lane in 0..QUAD {
@@ -1455,9 +1460,9 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         if px < min_x || px >= max_x || py < min_y || py >= max_y {
                             continue;
                         }
-                        let (mask, z) = fragments.coverage(&tri, window_z, (px, py), ctx)?;
+                        let mask =
+                            fragments.coverage(&tri, window_z, (px, py), &mut sample_z[lane], ctx)?;
                         covered[lane] = mask;
-                        sample_z[lane] = z;
                         if mask == 0 {
                             tally.uncovered += 1;
                         } else {

@@ -142,6 +142,11 @@ impl Compiled {
         &self.ops
     }
 
+    /// Every guard, in order. Always as long as [`Compiled::ops`].
+    pub fn preds(&self) -> &[Pred] {
+        &self.preds
+    }
+
     /// The resolved target of the branch at `index`, or [`NO_TARGET`].
     #[inline]
     pub fn target(&self, index: usize) -> u32 {
@@ -310,9 +315,9 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gpu::shader::interp::{Env, Invocation, NoTextures};
+    use crate::gpu::shader::interp::{Env, Invocation, NoTextures, ShaderResult};
     use crate::gpu::shader::isa::{FMod, Instruction};
-    use crate::{Error, Result};
+    use crate::Error;
     use std::collections::HashMap;
 
     /// A straight-line program at the byte offsets a real 32-byte-block
@@ -331,8 +336,8 @@ mod tests {
     /// A constant source that has nothing, the way an unbound bank behaves.
     struct Unbound;
     impl ConstantSource for Unbound {
-        fn read_const(&self, bank: u8, _offset: u16) -> Result<u32> {
-            Err(Error::Gpu(format!("no bank {bank}")))
+        fn read_const(&self, bank: u8, _offset: u16) -> ShaderResult<u32> {
+            Err(Box::new(Error::Gpu(format!("no bank {bank}"))))
         }
     }
 

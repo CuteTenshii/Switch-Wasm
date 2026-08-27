@@ -32,17 +32,32 @@ use super::isa::{
 };
 use crate::gpu::surface::{f16_to_f32, f32_to_f16};
 
+/// What everything the interpreter runs per instruction returns.
+///
+/// The error is boxed because [`Error`] is 56 bytes, which is too big to come
+/// back in registers: a `Result<u32, Error>` is written to the stack through a
+/// hidden pointer, and an operand read returns one of those *per source, per
+/// instruction, per covered pixel*. That was 8% of a Home Menu frame. Boxed,
+/// the whole `Result` is a register pair, and nothing allocates until a draw
+/// is about to stop. `?` converts an [`Error`] into one on its own.
+pub type ShaderResult<T> = std::result::Result<T, Box<Error>>;
+
+/// A shader fault, boxed for [`ShaderResult`].
+fn fault(message: String) -> Box<Error> {
+    Box::new(Error::Gpu(message))
+}
+
 /// Resolves a `cN[offset]` operand to its raw 32 bits. `bank` is whatever the
 /// ISA's `Operand::Const` carries — for real programs that's a constant-buffer
 /// *bind slot* (`Bind[]`'s index, not a raw GPU address), so a real source
 /// still needs its own way to turn that into bytes; see [`MemoryConstants`].
 /// Reads are fallible because a real one touches guest memory.
 pub trait ConstantSource {
-    fn read_const(&self, bank: u8, offset: u16) -> Result<u32>;
+    fn read_const(&self, bank: u8, offset: u16) -> ShaderResult<u32>;
 }
 
 impl ConstantSource for HashMap<(u8, u16), f32> {
-    fn read_const(&self, bank: u8, offset: u16) -> Result<u32> {
+    fn read_const(&self, bank: u8, offset: u16) -> ShaderResult<u32> {
         Ok(self.get(&(bank, offset)).copied().unwrap_or(0.0).to_bits())
     }
 }
@@ -101,7 +116,7 @@ impl ConstCache {
 }
 
 impl ConstantSource for MemoryConstants<'_, '_> {
-    fn read_const(&self, bank: u8, offset: u16) -> Result<u32> {
+    fn read_const(&self, bank: u8, offset: u16) -> ShaderResult<u32> {
         let key = ConstCache::key(bank, offset);
         if let Some(value) = self.cache.borrow().get(key) {
             return Ok(value);
@@ -110,7 +125,7 @@ impl ConstantSource for MemoryConstants<'_, '_> {
             Error::Gpu(format!("shader: read from unbound constant bank {bank}"))
         })?;
         if offset as u32 + 4 > size {
-            return Err(Error::Gpu(format!(
+            return Err(fault(format!(
                 "shader: constant read c{bank}[{offset:#x}] is past the bound buffer's size {size:#x}"
             )));
         }
@@ -132,8 +147,8 @@ pub struct MemoryGlobal<'a, 'b> {
 }
 
 impl GlobalMemory for MemoryGlobal<'_, '_> {
-    fn read_u32(&self, addr: u64) -> Result<u32> {
-        self.ctx.read_u32(addr)
+    fn read_u32(&self, addr: u64) -> ShaderResult<u32> {
+        Ok(self.ctx.read_u32(addr)?)
     }
 }
 
@@ -145,7 +160,7 @@ impl GlobalMemory for MemoryGlobal<'_, '_> {
 pub trait TextureSource {
     /// Sample `handle` at `(u, v)` of array layer `layer` — 0 for everything
     /// that is not a 2D array.
-    fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> Result<[f32; 4]>;
+    fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> ShaderResult<[f32; 4]>;
 }
 
 /// No texture backend at all — every `texs` is an error. Correct for vertex
@@ -153,8 +168,8 @@ pub trait TextureSource {
 pub struct NoTextures;
 
 impl TextureSource for NoTextures {
-    fn sample(&self, handle: u32, _u: f32, _v: f32, _layer: u32) -> Result<[f32; 4]> {
-        Err(Error::Gpu(format!(
+    fn sample(&self, handle: u32, _u: f32, _v: f32, _layer: u32) -> ShaderResult<[f32; 4]> {
+        Err(fault(format!(
             "shader: texture sample of handle {handle:#x} with no texture source bound"
         )))
     }
@@ -180,7 +195,7 @@ pub struct MemoryTextures<'a, 'b> {
 }
 
 impl TextureSource for MemoryTextures<'_, '_> {
-    fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> Result<[f32; 4]> {
+    fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> ShaderResult<[f32; 4]> {
         let cached = self.descriptors.borrow().get(&handle).copied();
         let descriptors = match cached {
             Some(d) => d,
@@ -195,14 +210,14 @@ impl TextureSource for MemoryTextures<'_, '_> {
                 d
             }
         };
-        crate::gpu::texture::sample_with(
+        Ok(crate::gpu::texture::sample_with(
             self.ctx,
             &descriptors,
             u as f64,
             v as f64,
             layer,
             self.blocks,
-        )
+        )?)
     }
 }
 
@@ -215,19 +230,19 @@ impl TextureSource for MemoryTextures<'_, '_> {
 /// whatever interior mutability that needs. They default to an error so that
 /// a read-only source (the rasterizer's) stays a one-method implementation.
 pub trait GlobalMemory {
-    fn read_u32(&self, addr: u64) -> Result<u32>;
+    fn read_u32(&self, addr: u64) -> ShaderResult<u32>;
 
-    fn read_u8(&self, addr: u64) -> Result<u8> {
+    fn read_u8(&self, addr: u64) -> ShaderResult<u8> {
         Ok((self.read_u32(addr & !3)? >> ((addr % 4) * 8)) as u8)
     }
 
-    fn write_u32(&self, addr: u64, _value: u32) -> Result<()> {
-        Err(Error::Gpu(format!(
+    fn write_u32(&self, addr: u64, _value: u32) -> ShaderResult<()> {
+        Err(fault(format!(
             "shader: a global store to {addr:#x} from a stage whose memory is read-only"
         )))
     }
 
-    fn write_u8(&self, addr: u64, value: u8) -> Result<()> {
+    fn write_u8(&self, addr: u64, value: u8) -> ShaderResult<()> {
         let word = addr & !3;
         let shift = (addr % 4) * 8;
         let old = self.read_u32(word)?;
@@ -398,7 +413,10 @@ impl Default for Attributes {
 }
 
 pub struct Invocation {
-    gpr: [u32; 255],
+    /// 256 rather than 255 so `RZ` has a slot of its own: indexing by a `u8`
+    /// is then provably in bounds, which takes the check *and* the branch off
+    /// the hottest read in the interpreter. The slot is kept at zero.
+    gpr: [u32; 256],
     /// `p0`..`p6`. `p7` is `PT`, which always reads true and can't be
     /// written, so it isn't stored.
     pred: [bool; 7],
@@ -460,7 +478,7 @@ pub enum Halt {
 impl Default for Invocation {
     fn default() -> Self {
         Invocation {
-            gpr: [0; 255],
+            gpr: [0; 256],
             pred: [false; 7],
             carry: false,
             attr_in: Attributes::default(),
@@ -487,7 +505,7 @@ impl Invocation {
     /// register-file wipe and two map allocations for every covered pixel;
     /// this is the same state, without the allocations.
     pub fn reset(&mut self) {
-        self.gpr = [0; 255];
+        self.gpr = [0; 256];
         self.pred = [false; 7];
         self.attr_in.clear();
         self.attr_out.clear();
@@ -515,17 +533,14 @@ impl Invocation {
     }
 
     pub fn reg(&self, r: u8) -> u32 {
-        if r == RZ {
-            0
-        } else {
-            self.gpr[r as usize]
-        }
+        self.gpr[r as usize]
     }
 
     pub fn set_reg(&mut self, r: u8, v: u32) {
-        if r != RZ {
-            self.gpr[r as usize] = v;
-        }
+        self.gpr[r as usize] = v;
+        // Cheaper than not writing it: a store that is always taken beats a
+        // branch that is almost never taken.
+        self.gpr[RZ as usize] = 0;
     }
 
     pub fn pred(&self, p: u8) -> bool {
@@ -547,7 +562,8 @@ impl Invocation {
         self.pred(p.reg) != p.negate
     }
 
-    fn operand(&self, op: Operand, env: &Env) -> Result<u32> {
+    #[inline(always)]
+    fn operand(&self, op: Operand, env: &Env) -> ShaderResult<u32> {
         match op {
             Operand::Reg(r) => Ok(self.reg(r)),
             Operand::Imm(v) => Ok(v),
@@ -555,7 +571,8 @@ impl Invocation {
         }
     }
 
-    fn operand_f32(&self, op: Operand, env: &Env) -> Result<f32> {
+    #[inline(always)]
+    fn operand_f32(&self, op: Operand, env: &Env) -> ShaderResult<f32> {
         Ok(f32::from_bits(self.operand(op, env)?))
     }
 
@@ -601,7 +618,9 @@ impl Invocation {
         let mut pending = std::mem::take(&mut self.pending);
         let out = self.run(program, env, &mut pending);
         self.pending = pending;
-        out
+        // The boundary of the boxed error: everything below runs per
+        // instruction and pays for `Error`'s size, everything above does not.
+        out.map_err(|boxed| *boxed)
     }
 
     fn run(
@@ -609,20 +628,26 @@ impl Invocation {
         program: &Compiled,
         env: &Env,
         pending: &mut Vec<(usize, u8, f32)>,
-    ) -> Result<Halt> {
+    ) -> ShaderResult<Halt> {
         let mut pc = self.pc;
         let mut steps = self.steps;
+        // Sliced to one length so the bounds check on each is the same check
+        // the loop already makes: the two indexed reads per instruction were
+        // 7% of a Home Menu frame as `Vec` accesses through `&self`.
+        let len = program.len();
+        let ops = &program.ops()[..len];
+        let preds = &program.preds()[..len];
 
         loop {
-            if pc >= program.len() {
-                return Err(Error::Gpu(
+            if pc >= len {
+                return Err(fault(
                     "shader: ran off the end of the program without an exit".into(),
                 ));
             }
             steps += 1;
             self.steps = steps;
             if steps > MAX_STEPS {
-                return Err(Error::Gpu(format!(
+                return Err(fault(format!(
                     "shader: did not terminate within {MAX_STEPS} instructions"
                 )));
             }
@@ -642,11 +667,11 @@ impl Invocation {
 
             // The guard first, out of its own dense array: an instruction
             // whose predicate is false never touches the 32-byte operation.
-            if !self.holds(program.pred(pc)) {
+            if !self.holds(preds[pc]) {
                 pc += 1;
                 continue;
             }
-            let op = program.op(pc);
+            let op = ops[pc];
 
             // Anything that moves the pc other than by one flushes the
             // deferred texture writes first: their landing place was found by
@@ -688,7 +713,7 @@ impl Invocation {
                         return Ok(Halt::Barrier);
                     }
                     other => {
-                        return Err(Error::Gpu(format!(
+                        return Err(fault(format!(
                             "shader: bar.{other:?} at {:#x} reduces a value across a warp's \
                              lanes, which a scalar interpreter has none of",
                             program.offset(pc)
@@ -723,7 +748,7 @@ impl Invocation {
                     let at = super::align_slot(base.wrapping_add(self.reg(reg)));
                     let index = program.index_of(at).map(|i| i as u32).unwrap_or(NO_TARGET);
                     if index == NO_TARGET {
-                        return Err(Error::Gpu(format!(
+                        return Err(fault(format!(
                             "shader: branch to {at:#x}, which was never decoded"
                         )));
                     }
@@ -753,7 +778,7 @@ impl Invocation {
     }
 
     /// Everything that isn't control flow or a texture fetch.
-    fn run_alu(&mut self, op: Op, env: &Env) -> Result<()> {
+    fn run_alu(&mut self, op: Op, env: &Env) -> ShaderResult<()> {
         match op {
             // ---- attribute space ----
             Op::Ld { dst, offset, idx, size } => {
@@ -1163,7 +1188,7 @@ impl Invocation {
             Op::Mov32i { dst, imm } => self.set_reg(dst, imm),
             Op::S2r { dst, sr } => {
                 if SpecialRegs::PACKED.contains(&sr) {
-                    return Err(Error::Gpu(format!(
+                    return Err(fault(format!(
                         "shader: s2r of the packed special register {sr:#x}, whose field \
                          layout is not confirmed"
                     )));
@@ -1258,7 +1283,7 @@ impl Invocation {
             }
 
             Op::Unimplemented { raw } => {
-                return Err(Error::Gpu(format!("shader: unimplemented instruction {raw:#018x}")))
+                return Err(fault(format!("shader: unimplemented instruction {raw:#018x}")))
             }
             // Handled by `execute`.
             Op::Exit
@@ -1331,10 +1356,10 @@ impl Invocation {
         ty: AtomType,
         space: AtomSpace,
         env: &Env,
-    ) -> Result<()> {
+    ) -> ShaderResult<()> {
         let width = match ty {
             AtomType::U128 => {
-                return Err(Error::Gpu("shader: a 128-bit atomic is not implemented".into()))
+                return Err(fault("shader: a 128-bit atomic is not implemented".into()))
             }
             AtomType::U64 | AtomType::S64 => 8usize,
             _ => 4usize,
@@ -1397,7 +1422,7 @@ impl Invocation {
         op: Op,
         env: &Env,
         pending: &mut Vec<(usize, u8, f32)>,
-    ) -> Result<()> {
+    ) -> ShaderResult<()> {
         let Op::Texs { coords, handle, dim, .. } = op else {
             unreachable!("run_texs called with {op:?}");
         };
@@ -1965,8 +1990,8 @@ fn half(v: u32, high: bool, signed: bool) -> u32 {
 /// signed forms. `None` means `size` moves whole registers instead.
 fn narrow_load(
     size: MemSize,
-    mut byte: impl FnMut(usize) -> Result<u8>,
-) -> Result<Option<u32>> {
+    mut byte: impl FnMut(usize) -> ShaderResult<u8>,
+) -> ShaderResult<Option<u32>> {
     let width = size.bytes() as usize;
     if size.regs() != 1 || width >= 4 {
         return Ok(None);
@@ -2039,7 +2064,7 @@ fn unpack(value: u64, width: usize) -> [u8; 8] {
 }
 
 /// What an atomic leaves in memory, given what was there.
-fn atom_apply(op: AtomOp, ty: AtomType, old: u64, b: u64, stored: u64) -> Result<u64> {
+fn atom_apply(op: AtomOp, ty: AtomType, old: u64, b: u64, stored: u64) -> ShaderResult<u64> {
     let wide = matches!(ty, AtomType::U64 | AtomType::S64);
     let trim = |v: u64| if wide { v } else { v & 0xFFFF_FFFF };
     let float = matches!(ty, AtomType::F32);
@@ -2134,7 +2159,7 @@ mod tests {
     }
 
     impl TextureSource for RecordingTextures {
-        fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> Result<[f32; 4]> {
+        fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> ShaderResult<[f32; 4]> {
             self.calls.borrow_mut().push((handle, u, v, layer));
             Ok(self.color)
         }
@@ -2154,7 +2179,7 @@ mod tests {
     }
 
     impl GlobalMemory for FlatMemory {
-        fn read_u32(&self, addr: u64) -> Result<u32> {
+        fn read_u32(&self, addr: u64) -> ShaderResult<u32> {
             let bytes = self.bytes.borrow();
             let at = addr as usize;
             let mut word = [0u8; 4];
@@ -2162,17 +2187,17 @@ mod tests {
             Ok(u32::from_le_bytes(word))
         }
 
-        fn read_u8(&self, addr: u64) -> Result<u8> {
+        fn read_u8(&self, addr: u64) -> ShaderResult<u8> {
             Ok(self.bytes.borrow()[addr as usize])
         }
 
-        fn write_u32(&self, addr: u64, value: u32) -> Result<()> {
+        fn write_u32(&self, addr: u64, value: u32) -> ShaderResult<()> {
             let at = addr as usize;
             self.bytes.borrow_mut()[at..at + 4].copy_from_slice(&value.to_le_bytes());
             Ok(())
         }
 
-        fn write_u8(&self, addr: u64, value: u8) -> Result<()> {
+        fn write_u8(&self, addr: u64, value: u8) -> ShaderResult<()> {
             self.bytes.borrow_mut()[addr as usize] = value;
             Ok(())
         }
@@ -3084,7 +3109,7 @@ mod tests {
 
         struct StubTex;
         impl TextureSource for StubTex {
-            fn sample(&self, _handle: u32, _u: f32, _v: f32, _layer: u32) -> Result<[f32; 4]> {
+            fn sample(&self, _handle: u32, _u: f32, _v: f32, _layer: u32) -> ShaderResult<[f32; 4]> {
                 Ok([0.2, 0.4, 0.6, 0.8])
             }
         }

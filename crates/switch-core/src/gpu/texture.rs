@@ -210,11 +210,14 @@ impl Texture {
                     Some(texel) => texel,
                     None => {
                         let raw = ctx.read_pixel(va, bytes)?.to_le_bytes();
-                        let mut block = [[0.0f32; 4]; bcn::MAX_TEXELS];
-                        bcn::decode_into(codec, &raw[..bytes as usize], &mut block)?;
-                        let texel = block[index];
-                        blocks.borrow_mut().insert(va, block);
-                        texel
+                        let mut cache = blocks.borrow_mut();
+                        // Decoded straight into the way it will live in: an
+                        // ASTC block is 2.3 KiB of texels, and building one on
+                        // the stack to copy it in cost that twice per miss.
+                        let way = cache.claim();
+                        bcn::decode_into(codec, &raw[..bytes as usize], &mut cache.texels[way])?;
+                        cache.va[way] = Some(va);
+                        cache.texels[way][index]
                     }
                 }
             }
@@ -295,10 +298,14 @@ impl BlockCache {
         Some(&self.texels[way])
     }
 
-    fn insert(&mut self, va: u64, block: [[f32; 4]; bcn::MAX_TEXELS]) {
-        self.va[self.next] = Some(va);
-        self.texels[self.next] = block;
+    /// Take the next way to decode into, leaving it invalid until the caller
+    /// sets its address — so a decode that fails does not leave the way
+    /// claiming to hold texels it never wrote.
+    fn claim(&mut self) -> usize {
+        let way = self.next;
+        self.va[way] = None;
         self.next = (self.next + 1) % BLOCK_CACHE_WAYS;
+        way
     }
 }
 
