@@ -131,8 +131,18 @@ impl Cpu {
                 // something else decides the pad it wants does not exist —
                 // which is what the generic reply's incrementing object id
                 // looked like.
+                // It also decides which style the pad is *published* in — see
+                // `NPAD_PRESENTATIONS` — so a set that changes changes what is
+                // in shared memory, which is precisely what 106's event
+                // reports.
                 Some(100) => {
-                    self.npad_style_set = self.mem.read_u32(data)?;
+                    let styles = self.mem.read_u32(data)?;
+                    if styles != self.npad_style_set {
+                        self.npad_style_set = styles;
+                        if let Some(event) = self.npad_style_update_event {
+                            self.signal_event(event);
+                        }
+                    }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 Some(101) => {
@@ -145,10 +155,25 @@ impl Cpu {
                 Some(102) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // AcquireNpadStyleSetUpdateEventHandle(npad_id, aruid, u64):
                 // fires when a controller is connected or its style changes.
-                // Nothing here hot-plugs, so it is handed out and never
-                // signalled.
+                // Nothing here hot-plugs, but the style does change — 100
+                // above signals it — and the pad is already published by the
+                // time anyone asks, so it starts **signalled**: a caller
+                // waiting to be told the pad has settled is waiting for
+                // something that has already happened.
+                //
+                // One object, for the reason every other kept event here is
+                // one: handed a second copy, a caller waits on a handle that
+                // 100 does not signal.
                 Some(106) => {
-                    let event = self.alloc_event("hid:npad-style-update", true);
+                    let event = match self.npad_style_update_event {
+                        Some(event) => event,
+                        None => {
+                            let event = self.alloc_event("hid:npad-style-update", true);
+                            self.npad_style_update_event = Some(event);
+                            event
+                        }
+                    };
+                    self.signal_event(event);
                     self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                 }
                 // GetPlayerLedPattern(npad_id) -> the four player LEDs. One
@@ -157,6 +182,10 @@ impl Cpu {
                 // Set/GetNpadJoyHoldType(aruid, u64).
                 Some(120) => {
                     self.npad_joy_hold_type = self.mem.read_u64(data.wrapping_add(8))?;
+                    // `GetNpadJoyHoldType` reads this out of shared memory
+                    // rather than asking for it, so setting it here and not
+                    // there would leave the two answers disagreeing.
+                    self.write_npad_condition();
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 Some(121) => {
@@ -432,6 +461,124 @@ mod tests {
             assert_ne!(result, UNKNOWN_COMMAND_ID, "command {command} was refused");
             assert_eq!(result, 0, "command {command}");
         }
+    }
+
+    #[test]
+    fn the_pad_is_published_in_a_style_the_title_actually_asked_for() {
+        // A title that accepts a pair of Joy-Cons and not a Pro Controller is
+        // an ordinary thing to be. This used to publish FullKey and Handheld
+        // whatever the title supported, so such a title found every slot in a
+        // style it had not asked for and `nnSdk` aborted in the npad layer
+        // with 2202-0710 — one description along from the out-of-range npad id
+        // it sits beside. `SetSupportedNpadStyleSet` was stored and read back
+        // by its own getter and used for nothing else.
+        use crate::cpu::hid_shmem as h;
+        const SHMEM: u32 = 0x3000_0000;
+
+        let mut cpu = request(false, 100, &h::STYLE_JOY_DUAL.to_le_bytes());
+        cpu.mem.map_zero(SHMEM, 0x40000).unwrap();
+        cpu.hid_shmem_addr = SHMEM;
+        cpu.register_service_handle(9, "hid");
+        cpu.hid_request(TLS, 9, Some(100)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+
+        cpu.set_gamepad_state(0x3, 0, 0, 0, 0);
+
+        // Player 1 is a dual pair: the style it asked for, both halves as the
+        // device type, and the state in the *joy_dual* LIFO. A style's states
+        // are only ever read out of its own LIFO.
+        let slot = SHMEM + h::NPAD;
+        assert_eq!(cpu.mem.read_u32(slot + h::STYLE_SET).unwrap(), h::STYLE_JOY_DUAL);
+        assert_eq!(
+            cpu.mem.read_u32(slot + h::DEVICE_TYPE).unwrap(),
+            h::DEVICE_JOY_LEFT | h::DEVICE_JOY_RIGHT
+        );
+        let entry = slot + h::JOY_DUAL_LIFO + h::LIFO_STORAGE;
+        assert_eq!(cpu.mem.read_u64(entry + h::STATE_BUTTONS).unwrap(), 0x3);
+        assert_eq!(cpu.mem.read_u32(entry + h::STATE_ATTRIBUTES).unwrap() & 1, 1);
+        // And nothing was left in the Pro Controller's LIFO for a reader that
+        // asked for FullKey to find.
+        let full_key = slot + h::FULL_KEY_LIFO + h::LIFO_STORAGE;
+        assert_eq!(cpu.mem.read_u64(full_key + h::STATE_BUTTONS).unwrap(), 0);
+
+        // The handheld slot is still published, as it always was: a title
+        // that did not name the style just never reads it, and withholding it
+        // could only cost a title that works today.
+        let handheld = SHMEM + h::NPAD + h::HANDHELD_SLOT * h::ENTRY_SIZE;
+        assert_eq!(
+            cpu.mem.read_u32(handheld + h::STYLE_SET).unwrap(),
+            h::STYLE_HANDHELD
+        );
+    }
+
+    #[test]
+    fn the_npad_condition_is_published_so_the_hold_type_can_be_read_at_all() {
+        // `nn::hid::GetNpadJoyHoldType` does not ask `hid` for the hold type —
+        // it reads `nn::hid::NpadCondition` straight out of shared memory and
+        // refuses the value unless `is_valid` is set. Left at its mapped
+        // zeroes the region is not a default hold type, it is one that was
+        // never published, and `nnSdk` answers that with an abort: 2202-0710,
+        // which is where the 21.2.0 Home Menu stopped with no service request
+        // anywhere near the fault.
+        use crate::cpu::hid_shmem as h;
+        const SHMEM: u32 = 0x3000_0000;
+        const HORIZONTAL: u64 = 1;
+
+        let mut cpu = request(false, 120, &[]);
+        cpu.mem.map_zero(SHMEM, 0x40000).unwrap();
+        cpu.hid_shmem_addr = SHMEM;
+        cpu.register_service_handle(9, "hid");
+        cpu.set_gamepad_state(0, 0, 0, 0, 0);
+
+        let at = SHMEM + h::NPAD_CONDITION;
+        assert_eq!(cpu.mem.read_u32(at + h::NPAD_CONDITION_VALID).unwrap(), 1, "is_valid");
+        assert_eq!(
+            cpu.mem.read_u32(at + h::NPAD_CONDITION_INITIALIZED).unwrap(),
+            1,
+            "is_initialized"
+        );
+
+        // SetNpadJoyHoldType(aruid, u64) puts the hold type at +8 of the
+        // request. Shared memory has to follow it: the same fact is published
+        // here and answered by command 121, and the two cannot disagree.
+        marshal(&mut cpu, false, 120, &[]);
+        let data = cpu.ipc_request_data(TLS);
+        cpu.mem.write_u64(data + 8, HORIZONTAL).unwrap();
+        cpu.hid_request(TLS, 9, Some(120)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(at + h::NPAD_CONDITION_HOLD_TYPE).unwrap() as u64,
+            HORIZONTAL
+        );
+
+        marshal(&mut cpu, false, 121, &[]);
+        cpu.hid_request(TLS, 9, Some(121)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), HORIZONTAL, "command 121 agrees");
+    }
+
+    #[test]
+    fn a_title_that_names_no_styles_still_gets_the_pair_that_always_worked() {
+        // `libnx` homebrew never calls SetSupportedNpadStyleSet and relies on
+        // the defaults, so a style set of zero has to keep meaning what it
+        // meant before any of this: a Pro Controller in slot 0 and a handheld
+        // in slot 8.
+        use crate::cpu::hid_shmem as h;
+        assert_eq!(super::super::npad_presentation_for(0).style, h::STYLE_FULL_KEY);
+        // A set naming only styles this console cannot be has to resolve to
+        // something rather than to nothing.
+        assert_eq!(
+            super::super::npad_presentation_for(1 << 10).style,
+            h::STYLE_FULL_KEY
+        );
+        // And the order is best-first: a title taking both gets the Pro
+        // Controller rather than the pair.
+        assert_eq!(
+            super::super::npad_presentation_for(h::STYLE_FULL_KEY | h::STYLE_JOY_DUAL).style,
+            h::STYLE_FULL_KEY
+        );
+        assert_eq!(
+            super::super::npad_presentation_for(h::STYLE_JOY_RIGHT).style,
+            h::STYLE_JOY_RIGHT
+        );
     }
 
     /// Drive one `hid` command carrying a single `u32 npad_id` and hand back

@@ -687,6 +687,16 @@ mod hid_shmem {
     pub const JOY_ASSIGNMENT_MODE: u32 = 0x04;
     pub const FULL_KEY_LIFO: u32 = 0x28;
     pub const HANDHELD_LIFO: u32 = 0x378;
+    /// The rest of `HidNpadInternalState`'s per-style LIFOs, which follow
+    /// those two at a fixed 0x350 stride: a pair of Joy-Cons driving one npad,
+    /// then each held alone, then the system style past Palma's.
+    ///
+    /// A style's states are only ever read out of its own LIFO, so publishing
+    /// into the wrong one is publishing into none.
+    pub const JOY_DUAL_LIFO: u32 = 0x6C8;
+    pub const JOY_LEFT_LIFO: u32 = 0xA18;
+    pub const JOY_RIGHT_LIFO: u32 = 0xD68;
+    pub const SYSTEM_EXT_LIFO: u32 = 0x1408;
     pub const DEVICE_TYPE: u32 = 0x4188;
     /// `HidNpadSystemProperties`, and the three `HidPowerInfo` battery levels
     /// straight after `system_button_properties`. `hidGetNpadPowerInfo*` reads
@@ -716,11 +726,25 @@ mod hid_shmem {
     pub const STATE_STICK_R: u32 = 0x20;
     pub const STATE_ATTRIBUTES: u32 = 0x28;
 
+    /// `HidNpadStyleTag`, the bits a title names in
+    /// `SetSupportedNpadStyleSet` and the same bits an npad's `style_set`
+    /// reports back.
     pub const STYLE_FULL_KEY: u32 = 1 << 0;
     pub const STYLE_HANDHELD: u32 = 1 << 1;
+    pub const STYLE_JOY_DUAL: u32 = 1 << 2;
+    pub const STYLE_JOY_LEFT: u32 = 1 << 3;
+    pub const STYLE_JOY_RIGHT: u32 = 1 << 4;
+    pub const STYLE_SYSTEM_EXT: u32 = 1 << 29;
 
     pub const DEVICE_FULL_KEY: u32 = 1 << 0;
     pub const DEVICE_HANDHELD: u32 = (1 << 2) | (1 << 3); // HandheldLeft|Right
+    pub const DEVICE_JOY_LEFT: u32 = 1 << 4;
+    pub const DEVICE_JOY_RIGHT: u32 = 1 << 5;
+
+    /// `HidNpadJoyAssignmentMode`: whether the npad is driven by a pair of
+    /// Joy-Cons or by one on its own.
+    pub const JOY_ASSIGNMENT_DUAL: u32 = 0;
+    pub const JOY_ASSIGNMENT_SINGLE: u32 = 1;
 
     /// `HidPowerInfo::battery_level` is a quarter-full step, 0 to 4.
     pub const BATTERY_FULL: u32 = 4;
@@ -741,6 +765,24 @@ mod hid_shmem {
     pub const ATTR_LEFT_WIRED: u32 = 1 << 3;
     pub const ATTR_RIGHT_CONNECTED: u32 = 1 << 4;
     pub const ATTR_RIGHT_WIRED: u32 = 1 << 5;
+
+    /// `offsetof(HidSharedMemory, npad_condition)` — `nn::hid::NpadCondition`,
+    /// the console-wide controller condition that sits past the ten npads, the
+    /// gesture block and the console six-axis sensor.
+    ///
+    /// **`nn::hid::GetNpadJoyHoldType` reads it directly and aborts on it.**
+    /// It is not fetched over IPC at all: the client reads `hold_type` here
+    /// and refuses it unless `is_valid` is set, so a region left at its mapped
+    /// zeroes is a *hold type that was never published* rather than a default
+    /// one. `nnSdk` answers that with `nn::diag::detail::AbortImpl` and
+    /// `2202-0710` — which is where the 21.2.0 Home Menu stopped, with no
+    /// service request anywhere near the fault to say so.
+    pub const NPAD_CONDITION: u32 = 0x3E200;
+    /// Its four words: a reserved one, then the two flags a reader checks and
+    /// the hold type between them.
+    pub const NPAD_CONDITION_INITIALIZED: u32 = 0x04;
+    pub const NPAD_CONDITION_HOLD_TYPE: u32 = 0x08;
+    pub const NPAD_CONDITION_VALID: u32 = 0x0C;
 
     /// `offsetof(HidSharedMemory, touch_screen)` - straight after the debug
     /// pad's 0x400. Its `HidTouchScreenLifo` sits at the start of the region,
@@ -766,6 +808,118 @@ mod hid_shmem {
     pub const TOUCH_DIAMETER_X: u32 = 0x18;
     pub const TOUCH_DIAMETER_Y: u32 = 0x1C;
     pub const TOUCH_ROTATION_ANGLE: u32 = 0x20;
+}
+
+/// One way this console's single pad can present itself in hid's shared
+/// memory: the style a title asks for, and everything that has to agree with
+/// it once it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NpadPresentation {
+    /// The `HidNpadStyleTag` bit, which is both what a title names in
+    /// `SetSupportedNpadStyleSet` and what the npad's `style_set` reports.
+    style: u32,
+    /// `HidDeviceTypeBits`, which says which physical halves are there.
+    device_type: u32,
+    /// The per-style LIFO the states go in.
+    lifo: u32,
+    /// `HidNpadAttribute`: which halves are attached, and how.
+    attributes: u32,
+    /// `HidNpadJoyAssignmentMode`.
+    joy_assignment: u32,
+}
+
+/// The styles this console's pad can honestly be published as, best first.
+///
+/// **A style nobody supports is the same to `nn::hid` as no pad at all.** This
+/// used to publish a Pro Controller and a handheld and nothing else, whatever
+/// the title had asked for, and `SetSupportedNpadStyleSet` was stored only to
+/// be read back by its own getter. A title that accepts a pair of Joy-Cons and
+/// not a Pro Controller — which is an ordinary thing to accept — therefore
+/// found every slot in a style it had not asked for, and `nnSdk` aborted in
+/// the npad layer with `2202-0710`, one description along from the
+/// out-of-range npad id it sits beside.
+///
+/// The order is how much of a dual-stick pad survives the presentation. The
+/// first three carry every button and both sticks; a single Joy-Con is last
+/// because half the pad has nowhere to go in it.
+const NPAD_PRESENTATIONS: [NpadPresentation; 5] = [
+    NpadPresentation {
+        style: hid_shmem::STYLE_FULL_KEY,
+        device_type: hid_shmem::DEVICE_FULL_KEY,
+        lifo: hid_shmem::FULL_KEY_LIFO,
+        attributes: hid_shmem::ATTR_CONNECTED | hid_shmem::ATTR_WIRED,
+        joy_assignment: hid_shmem::JOY_ASSIGNMENT_DUAL,
+    },
+    NpadPresentation {
+        style: hid_shmem::STYLE_JOY_DUAL,
+        device_type: hid_shmem::DEVICE_JOY_LEFT | hid_shmem::DEVICE_JOY_RIGHT,
+        lifo: hid_shmem::JOY_DUAL_LIFO,
+        attributes: hid_shmem::ATTR_CONNECTED
+            | hid_shmem::ATTR_WIRED
+            | hid_shmem::ATTR_LEFT_CONNECTED
+            | hid_shmem::ATTR_LEFT_WIRED
+            | hid_shmem::ATTR_RIGHT_CONNECTED
+            | hid_shmem::ATTR_RIGHT_WIRED,
+        joy_assignment: hid_shmem::JOY_ASSIGNMENT_DUAL,
+    },
+    // The Home Menu's own style. It is not a controller a shop sells, but it
+    // has the full face this pad does, so nothing is lost presenting as one.
+    NpadPresentation {
+        style: hid_shmem::STYLE_SYSTEM_EXT,
+        device_type: hid_shmem::DEVICE_FULL_KEY,
+        lifo: hid_shmem::SYSTEM_EXT_LIFO,
+        attributes: hid_shmem::ATTR_CONNECTED | hid_shmem::ATTR_WIRED,
+        joy_assignment: hid_shmem::JOY_ASSIGNMENT_DUAL,
+    },
+    NpadPresentation {
+        style: hid_shmem::STYLE_JOY_LEFT,
+        device_type: hid_shmem::DEVICE_JOY_LEFT,
+        lifo: hid_shmem::JOY_LEFT_LIFO,
+        attributes: hid_shmem::ATTR_CONNECTED
+            | hid_shmem::ATTR_WIRED
+            | hid_shmem::ATTR_LEFT_CONNECTED
+            | hid_shmem::ATTR_LEFT_WIRED,
+        joy_assignment: hid_shmem::JOY_ASSIGNMENT_SINGLE,
+    },
+    NpadPresentation {
+        style: hid_shmem::STYLE_JOY_RIGHT,
+        device_type: hid_shmem::DEVICE_JOY_RIGHT,
+        lifo: hid_shmem::JOY_RIGHT_LIFO,
+        attributes: hid_shmem::ATTR_CONNECTED
+            | hid_shmem::ATTR_WIRED
+            | hid_shmem::ATTR_RIGHT_CONNECTED
+            | hid_shmem::ATTR_RIGHT_WIRED,
+        joy_assignment: hid_shmem::JOY_ASSIGNMENT_SINGLE,
+    },
+];
+
+/// The handheld pad, which is its own npad slot rather than one of player 1's
+/// styles: on hardware `HidNpadIdType_Handheld` is a different id, not a
+/// different way of holding the same controller.
+const NPAD_HANDHELD: NpadPresentation = NpadPresentation {
+    style: hid_shmem::STYLE_HANDHELD,
+    device_type: hid_shmem::DEVICE_HANDHELD,
+    lifo: hid_shmem::HANDHELD_LIFO,
+    attributes: hid_shmem::ATTR_CONNECTED
+        | hid_shmem::ATTR_LEFT_CONNECTED
+        | hid_shmem::ATTR_LEFT_WIRED
+        | hid_shmem::ATTR_RIGHT_CONNECTED
+        | hid_shmem::ATTR_RIGHT_WIRED,
+    joy_assignment: hid_shmem::JOY_ASSIGNMENT_DUAL,
+};
+
+/// Which presentation player 1 gets, given the styles the title said it takes.
+///
+/// A `style_set` of zero is a title that has not called
+/// `SetSupportedNpadStyleSet` at all — `libnx` homebrew leaves it to the
+/// defaults — and one that names nothing this console can be has to be given
+/// something regardless. Both get the Pro Controller, which is what was
+/// published unconditionally before.
+fn npad_presentation_for(style_set: u32) -> NpadPresentation {
+    NPAD_PRESENTATIONS
+        .into_iter()
+        .find(|presentation| style_set & presentation.style != 0)
+        .unwrap_or(NPAD_PRESENTATIONS[0])
 }
 
 /// Deflection past which hid reports the `HidNpadButton_StickL*`/`StickR*`
@@ -1114,6 +1268,11 @@ pub struct Cpu {
     /// caller that reads back something it did not set decides the controller
     /// it wanted is not there.
     npad_style_set: u32,
+    /// The handle handed out by `AcquireNpadStyleSetUpdateEventHandle`, kept
+    /// for the reason [`Cpu::applet_event`] is: a caller handed a second copy
+    /// waits on an event nothing signals. Auto-clearing, so the wait that
+    /// collects a style change consumes it and the next one blocks again.
+    npad_style_update_event: Option<u64>,
     npad_joy_hold_type: u64,
     /// The amplitudes of the two rumble bands the guest last asked for, low
     /// then high. Switch rumble is two linear resonant actuators driven
@@ -1415,6 +1574,7 @@ impl Cpu {
             hid_shmem_addr: 0,
             hid_shmem_handle: None,
             npad_style_set: 0,
+            npad_style_update_event: None,
             npad_joy_hold_type: 0,
             vibration: (0.0, 0.0),
             ssl_interface_version: 0,
@@ -2393,6 +2553,11 @@ impl Cpu {
         const MODULE_ALIGN: u32 = 0x1000;
         let mut base = crate::nso::NSO_BASE;
         let mut loaded = Vec::with_capacity(modules.len());
+        // Which title the addresses below belong to. Every pc in a fatal is
+        // only meaningful against the binary it came from, and a report
+        // carrying the ranges but not the id has more than once been read
+        // against the wrong title's dump.
+        self.diagnostic(&format!("[loader] program {:#018x}", self.program_id));
         for (name, data) in modules {
             let module = crate::nso::load_nso(&mut self.mem, data, base).map_err(|e| {
                 Error::Cpu(format!("loading module {:?} at {:#x}: {}", name, base, e))
@@ -2942,34 +3107,36 @@ impl Cpu {
     }
 
     /// Mirror the gamepad state into libnx's `HidSharedMemory`. The host pad is
-    /// published both as player 1 holding a Pro Controller and as the handheld
-    /// controller, because homebrew polls whichever of the two it was built to
-    /// expect; `padUpdate` merges the slots it was asked for, so a program that
-    /// reads both still sees one pad's worth of input.
+    /// published both as player 1 and as the handheld controller, because
+    /// homebrew polls whichever of the two it was built to expect; `padUpdate`
+    /// merges the slots it was asked for, so a program that reads both still
+    /// sees one pad's worth of input.
+    ///
+    /// Which *style* each is published in follows the title's own
+    /// `SetSupportedNpadStyleSet` — see [`NPAD_PRESENTATIONS`] for why a fixed
+    /// pair of styles is not enough.
     fn write_hid_gamepad_state(&mut self, buttons: u64, lx: i32, ly: i32, rx: i32, ry: i32) {
         use hid_shmem as h;
         self.sample_counter = self.sample_counter.wrapping_add(1);
         let sample = self.sample_counter;
+        let supported = self.npad_style_set;
+        // The console-wide condition beside the per-pad state. It is published
+        // here so that mapping the shared memory publishes it too, before the
+        // guest has read a single pad.
+        self.write_npad_condition();
         self.write_npad_slot(
             0,
-            h::STYLE_FULL_KEY,
-            h::DEVICE_FULL_KEY,
-            h::FULL_KEY_LIFO,
-            h::ATTR_CONNECTED | h::ATTR_WIRED,
+            npad_presentation_for(supported),
             sample,
             buttons,
             (lx, ly, rx, ry),
         );
+        // The handheld slot is published unconditionally, as it always was. A
+        // title that did not name the style simply never reads it, and taking
+        // it away is a change that can only cost a title that works today.
         self.write_npad_slot(
             h::HANDHELD_SLOT,
-            h::STYLE_HANDHELD,
-            h::DEVICE_HANDHELD,
-            h::HANDHELD_LIFO,
-            h::ATTR_CONNECTED
-                | h::ATTR_LEFT_CONNECTED
-                | h::ATTR_LEFT_WIRED
-                | h::ATTR_RIGHT_CONNECTED
-                | h::ATTR_RIGHT_WIRED,
+            NPAD_HANDHELD,
             sample,
             buttons,
             (lx, ly, rx, ry),
@@ -2980,14 +3147,29 @@ impl Cpu {
     /// type, then a single-entry LIFO holding the current button/stick state.
     /// A reader takes `count` entries ending at `tail`, so one entry at index 0
     /// is all `hidGetNpadStates*` needs.
-    #[allow(clippy::too_many_arguments)]
+    /// Publish `nn::hid::NpadCondition`, the console-wide controller state
+    /// that `GetNpadJoyHoldType` reads straight out of shared memory.
+    ///
+    /// The hold type is the one `SetNpadJoyHoldType` stored, so the value here
+    /// and the one `hid`'s own getter answers cannot disagree — they are the
+    /// same field, published twice.
+    pub(super) fn write_npad_condition(&mut self) {
+        use hid_shmem as h;
+        if self.hid_shmem_addr == 0 {
+            return;
+        }
+        let at = self.hid_shmem_addr.wrapping_add(h::NPAD_CONDITION);
+        let _ = self.mem.write_u32(at + h::NPAD_CONDITION_INITIALIZED, 1);
+        let _ = self
+            .mem
+            .write_u32(at + h::NPAD_CONDITION_HOLD_TYPE, self.npad_joy_hold_type as u32);
+        let _ = self.mem.write_u32(at + h::NPAD_CONDITION_VALID, 1);
+    }
+
     fn write_npad_slot(
         &mut self,
         slot: u32,
-        style: u32,
-        device_type: u32,
-        lifo_off: u32,
-        attributes: u32,
+        presentation: NpadPresentation,
         sample: u64,
         buttons: u64,
         sticks: (i32, i32, i32, i32),
@@ -2998,9 +3180,11 @@ impl Cpu {
             .hid_shmem_addr
             .wrapping_add(h::NPAD)
             .wrapping_add(slot.wrapping_mul(h::ENTRY_SIZE));
-        let _ = self.mem.write_u32(base + h::STYLE_SET, style);
-        let _ = self.mem.write_u32(base + h::JOY_ASSIGNMENT_MODE, 0); // Dual
-        let _ = self.mem.write_u32(base + h::DEVICE_TYPE, device_type);
+        let _ = self.mem.write_u32(base + h::STYLE_SET, presentation.style);
+        let _ = self
+            .mem
+            .write_u32(base + h::JOY_ASSIGNMENT_MODE, presentation.joy_assignment);
+        let _ = self.mem.write_u32(base + h::DEVICE_TYPE, presentation.device_type);
 
         // A pad that never writes its power info is a pad reporting an empty
         // battery: `hidGetNpadPowerInfo*` reads `battery_level` straight out
@@ -3020,7 +3204,7 @@ impl Cpu {
                 .write_u32(base + h::BATTERY_LEVEL + info * 4, h::BATTERY_FULL);
         }
 
-        let lifo = base.wrapping_add(lifo_off);
+        let lifo = base.wrapping_add(presentation.lifo);
         let _ = self.mem.write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
         let _ = self.mem.write_u64(lifo + h::LIFO_TAIL, 0);
         let _ = self.mem.write_u64(lifo + h::LIFO_COUNT, 1);
@@ -3033,7 +3217,9 @@ impl Cpu {
         let _ = self.mem.write_u32(entry + h::STATE_STICK_L + 4, ly as u32);
         let _ = self.mem.write_u32(entry + h::STATE_STICK_R, rx as u32);
         let _ = self.mem.write_u32(entry + h::STATE_STICK_R + 4, ry as u32);
-        let _ = self.mem.write_u32(entry + h::STATE_ATTRIBUTES, attributes);
+        let _ = self
+            .mem
+            .write_u32(entry + h::STATE_ATTRIBUTES, presentation.attributes);
     }
 
     /// Publish the host's touchscreen contacts where `hidGetTouchScreenStates`
