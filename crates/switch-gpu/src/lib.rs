@@ -106,6 +106,17 @@ fn write_mask(mask: [bool; 4]) -> wgpu::ColorWrites {
     writes
 }
 
+/// `GPU_ONLY`'s value: one draw index, or the half-open range `a..b`.
+fn draw_range(spec: &str) -> Option<std::ops::Range<u32>> {
+    match spec.trim().split_once("..") {
+        Some((from, to)) => Some(from.trim().parse().ok()?..to.trim().parse().ok()?),
+        None => {
+            let one: u32 = spec.trim().parse().ok()?;
+            Some(one..one + 1)
+        }
+    }
+}
+
 fn vertex_format(format: state::VertexFormat) -> wgpu::VertexFormat {
     match format {
         state::VertexFormat::Float32 => wgpu::VertexFormat::Float32,
@@ -202,6 +213,13 @@ struct PipelineKey {
     buffers: Vec<(u32, Vec<(wgpu::VertexFormat, u64, u32)>)>,
 }
 
+/// One resource a single draw made, held only until that draw is submitted.
+#[derive(Debug)]
+enum Scratch {
+    Buffer(wgpu::Buffer),
+    Texture(wgpu::Texture),
+}
+
 /// A render target held on the device, and where in guest memory it came
 /// from.
 #[derive(Debug)]
@@ -223,6 +241,21 @@ pub struct Gpu {
     /// A frame's draws all target the same surface, so this is what makes a
     /// frame one upload and one readback instead of eighty-eight of each.
     held: std::collections::HashMap<u64, Held>,
+    /// The buffers and textures the draw in progress made, destroyed once it
+    /// has been submitted.
+    ///
+    /// A draw's vertices, indices, constants and textures are built fresh
+    /// every time, and dropping them is not enough to give the memory back:
+    /// `wgpu` frees a dropped resource when the device is next polled, and a
+    /// browser never polls — WebGPU reclaims on garbage collection, which
+    /// does not run per draw and cannot be made to. Just Dance 2019 issues
+    /// 55,465 draws in a six-billion-instruction run, each with a texture and
+    /// three or four buffers, and an 8 GB card answered
+    /// `VK_ERROR_OUT_OF_DEVICE_MEMORY` a long way short of the end of them.
+    /// So each is destroyed outright, which WebGPU defines as safe once the
+    /// submission that reads it has been made: the memory comes back when
+    /// that work finishes rather than when the call does.
+    scratch: Vec<Scratch>,
     /// Surfaces the guest rebound out from under, still owing a write-back.
     /// Kept rather than written back where it happened, so that no draw ever
     /// waits on a device.
@@ -290,13 +323,15 @@ pub struct Gpu {
     /// what it costs.
     ignore_depth: bool,
     /// `GPU_ONLY=<i>` renders only the i-th draw of each frame here and
-    /// leaves the rest to the rasterizer.
+    /// leaves the rest to the rasterizer; `GPU_ONLY=<a>..<b>` renders the
+    /// half-open range of them.
     ///
     /// Which is how you find the draw that renders differently. The
-    /// difference between a frame and the reference is then exactly one
-    /// draw's, and bisecting over the range costs a handful of runs rather
-    /// than reading a shader.
-    only: Option<u32>,
+    /// difference between a frame and the reference is then exactly that
+    /// range's — and it takes a range rather than an index because that is
+    /// what a bisection needs: a frame is a hundred draws, and halving turns
+    /// that into seven runs instead of a hundred.
+    only: Option<std::ops::Range<u32>>,
 }
 
 /// Where a draw's time goes, in microseconds, over a whole run.
@@ -379,6 +414,7 @@ impl Gpu {
             device,
             queue,
             held: std::collections::HashMap::new(),
+            scratch: Vec::new(),
             evicted: Vec::new(),
             pending: Vec::new(),
             modules: std::collections::HashMap::new(),
@@ -393,7 +429,7 @@ impl Gpu {
             in_frame: 0,
             times: switch_core::env_flag!("GPU_TIMES").then(Times::default),
             ignore_depth: switch_core::env_flag!("GPU_IGNORE_DEPTH"),
-            only: std::env::var("GPU_ONLY").ok().and_then(|v| v.parse().ok()),
+            only: std::env::var("GPU_ONLY").ok().as_deref().and_then(draw_range),
         }
     }
 
@@ -603,6 +639,10 @@ impl Gpu {
         }
         drop(mapped);
         pending.staging.unmap();
+        // Destroyed rather than merely dropped, for the reason
+        // [`Gpu::scratch`] gives: a readback is a whole surface, several a
+        // frame, and in a browser a dropped buffer waits on a collector.
+        pending.staging.destroy();
         target.write(ctx, &rows)
     }
 }
@@ -988,7 +1028,7 @@ impl Gpu {
     }
 
     fn texture(
-        &self,
+        &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
     ) -> std::result::Result<wgpu::Texture, String> {
         let format =
@@ -1023,6 +1063,7 @@ impl Gpu {
             },
             size,
         );
+        self.scratch.push(Scratch::Texture(texture.clone()));
         Ok(texture)
     }
 
@@ -1092,7 +1133,9 @@ impl Gpu {
         self.failed.lock().ok().and_then(|mut e| e.take())
     }
 
-    fn buffer(&self, what: &str, bytes: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+    /// A buffer holding `bytes`, for the draw in progress — see
+    /// [`Gpu::scratch`].
+    fn buffer(&mut self, what: &str, bytes: &[u8], usage: wgpu::BufferUsages) -> wgpu::Buffer {
         // Padded to four bytes, which every buffer binding wants and a
         // twelve-byte index buffer is not.
         let mut padded = bytes.to_vec();
@@ -1106,7 +1149,20 @@ impl Gpu {
             mapped_at_creation: false,
         });
         self.queue.write_buffer(&buffer, 0, &padded);
+        self.scratch.push(Scratch::Buffer(buffer.clone()));
         buffer
+    }
+
+    /// Give back everything the draw that has just finished made — whether it
+    /// was submitted or handed to the rasterizer, nothing will read any of it
+    /// again.
+    fn release_scratch(&mut self) {
+        for made in self.scratch.drain(..) {
+            match made {
+                Scratch::Buffer(buffer) => buffer.destroy(),
+                Scratch::Texture(texture) => texture.destroy(),
+            }
+        }
     }
 }
 
@@ -1347,18 +1403,22 @@ impl Renderer for Gpu {
         // did rather than how much it got away with.
         let index = self.in_frame;
         self.in_frame += 1;
-        if self.only.is_some_and(|only| only != index) {
+        if self.only.as_ref().is_some_and(|only| !only.contains(&index)) {
             self.flush(ctx)?;
             return self.software.draw(engine, ctx);
         }
-        match self.prepare(engine, &*ctx) {
-            Ok(prepared) => match self.render(&prepared, ctx) {
-                Ok(()) => {
-                    self.drawn += 1;
-                    return Ok(());
-                }
-                Err(why) => self.fall_back(why),
-            },
+        let attempt = match self.prepare(engine, &*ctx) {
+            Ok(prepared) => self.render(&prepared, ctx),
+            Err(why) => Err(why),
+        };
+        // Whether it was submitted or abandoned, nothing reads this draw's
+        // buffers and textures again — see [`Gpu::scratch`].
+        self.release_scratch();
+        match attempt {
+            Ok(()) => {
+                self.drawn += 1;
+                return Ok(());
+            }
             Err(why) => self.fall_back(why),
         }
         // The rasterizer reads and writes guest memory, so it has to be the
