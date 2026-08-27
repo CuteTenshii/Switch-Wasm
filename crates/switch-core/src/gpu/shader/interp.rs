@@ -455,7 +455,7 @@ pub struct Invocation {
     /// program that loops around a barrier would get a fresh budget each time.
     steps: usize,
     /// Texture results not yet landed; see `run_texs`.
-    pending: Vec<(usize, u8, f32)>,
+    pending: Vec<(usize, u8, u32)>,
     /// The shuffle this invocation is suspended on, waiting for the rest of
     /// its warp to reach one too — see [`resolve_shuffles`].
     shuffle: Option<Shuffle>,
@@ -641,7 +641,7 @@ impl Invocation {
         &mut self,
         program: &Compiled,
         env: &Env,
-        pending: &mut Vec<(usize, u8, f32)>,
+        pending: &mut Vec<(usize, u8, u32)>,
     ) -> ShaderResult<Halt> {
         let mut pc = self.pc;
         let mut steps = self.steps;
@@ -671,7 +671,7 @@ impl Invocation {
             if !pending.is_empty() {
                 pending.retain(|&(due, reg, val)| {
                     if due == pc {
-                        self.set_reg_f32(reg, val);
+                        self.set_reg(reg, val);
                         false
                     } else {
                         true
@@ -695,9 +695,9 @@ impl Invocation {
             // binary search over the program's byte offsets on every taken
             // branch, which the lowering does once instead.
             self.pc = pc;
-            let jump = |index: u32, pending: &mut Vec<(usize, u8, f32)>, inv: &mut Self| {
+            let jump = |index: u32, pending: &mut Vec<(usize, u8, u32)>, inv: &mut Self| {
                 for (_, reg, val) in pending.drain(..) {
-                    inv.set_reg_f32(reg, val);
+                    inv.set_reg(reg, val);
                 }
                 if index == NO_TARGET {
                     return Err(Error::Gpu(format!(
@@ -711,7 +711,7 @@ impl Invocation {
             match op {
                 Op::Exit => {
                     for (_, reg, val) in pending.drain(..) {
-                        self.set_reg_f32(reg, val);
+                        self.set_reg(reg, val);
                     }
                     return Ok(Halt::Exited);
                 }
@@ -1435,7 +1435,7 @@ impl Invocation {
         pc: usize,
         op: Op,
         env: &Env,
-        pending: &mut Vec<(usize, u8, f32)>,
+        pending: &mut Vec<(usize, u8, u32)>,
     ) -> ShaderResult<()> {
         let Op::Texs { coords, handle, dim, .. } = op else {
             unreachable!("run_texs called with {op:?}");
@@ -1457,9 +1457,20 @@ impl Invocation {
         let color = env.textures.sample(handle, u, v, layer)?;
 
         // Where each channel lands was worked out at decode time.
-        for &(channel, reg, due) in program.texs_writes(pc) {
+        for &(reg, store, due) in program.texs_writes(pc) {
+            let raw = match store {
+                isa::TexsStore::Float(channel) => color[channel].to_bits(),
+                // Low half first. An odd channel count pads with zero, which
+                // is what hardware leaves in the unused half.
+                isa::TexsStore::Halves(low, high) => {
+                    let pack = |c: Option<usize>| {
+                        u32::from(f32_to_f16(c.map_or(0.0, |channel| color[channel])))
+                    };
+                    pack(Some(low)) | pack(high) << 16
+                }
+            };
             pending.retain(|&(_, r, _)| r != reg);
-            pending.push((due, reg, color[channel]));
+            pending.push((due, reg, raw));
         }
         Ok(())
     }
@@ -1471,14 +1482,14 @@ impl Invocation {
 pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
     let mut out = Vec::new();
     for (pc, op) in ops.iter().enumerate() {
-        let Op::Texs { dst, dst2, mask, .. } = *op else {
+        let Op::Texs { dst, dst2, mask, f16, .. } = *op else {
             continue;
         };
-        let writes = isa::texs_destinations(dst, dst2, mask)
+        let writes = isa::texs_destinations(dst, dst2, mask, f16)
             .into_iter()
-            .map(|(channel, reg)| {
+            .map(|(reg, store)| {
                 let due = first_use_after(ops, pc + 1, reg).unwrap_or(ops.len() - 1);
-                (channel, reg, due)
+                (reg, store, due)
             })
             .collect();
         out.push(super::TexsWrites { at: pc, writes });
@@ -1671,8 +1682,8 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::I2i { dst, .. }
         | Op::Shfl { dst, .. }
         | Op::Fswzadd { dst, .. } => vec![dst],
-        Op::Texs { dst, dst2, mask, .. } => {
-            isa::texs_destinations(dst, dst2, mask).into_iter().map(|(_, reg)| reg).collect()
+        Op::Texs { dst, dst2, mask, f16, .. } => {
+            isa::texs_destinations(dst, dst2, mask, f16).into_iter().map(|(reg, _)| reg).collect()
         }
         _ => Vec::new(),
     }
@@ -2855,6 +2866,7 @@ mod tests {
                 handle: 0x20,
                 dim: TexDim::T2d,
                 mask: [true, true, true, true],
+                f16: false,
             },
             Op::Exit,
         ]);
@@ -3157,6 +3169,84 @@ mod tests {
         assert_eq!(inv.reg_f32(1), 0.4);
         assert_eq!(inv.reg_f32(2), 0.6);
         assert_eq!(inv.reg_f32(3), 0.8);
+    }
+
+    #[test]
+    fn an_f16_texs_lands_its_channels_packed_as_halves() {
+        // Asphalt 9's splash shader: `texs` in the packed form, whose result
+        // the `h*2` ops after it read back as half pairs. Landing four floats
+        // in four registers instead left every colour after the sample being
+        // read as a pair of halves of an f32 bit pattern -- a red car came out
+        // green.
+        let sample = [0.25f32, 0.5, 0.75, 1.0];
+        struct StubTex([f32; 4]);
+        impl TextureSource for StubTex {
+            fn sample(&self, _handle: u32, _u: f32, _v: f32, _layer: u32) -> ShaderResult<[f32; 4]> {
+                Ok(self.0)
+            }
+        }
+
+        // dst = $r1, dst2 = $r0, all four channels, precision bit clear.
+        let texs = Op::Texs {
+            dst: 1,
+            dst2: 0,
+            coords: [4, 5, RZ],
+            handle: 0,
+            dim: TexDim::T2d,
+            mask: [true, true, true, true],
+            f16: true,
+        };
+        let program = Compiled::new(&super::super::Program {
+            insns: vec![
+                Instruction { pred: Pred { reg: 7, negate: false }, op: texs },
+                Instruction { pred: Pred { reg: 7, negate: false }, op: Op::Exit },
+            ],
+            offsets: vec![8, 0x10],
+            ..Default::default()
+        });
+
+        let no_consts: HashMap<(u8, u16), f32> = HashMap::new();
+        let mut inv = Invocation::new();
+        inv.execute(&program, &Env::new(&no_consts, &StubTex(sample))).unwrap();
+
+        // Two registers, not four: r1 holds (r, g) and r0 holds (b, a).
+        assert_eq!(inv.reg(1), halves(sample[0], sample[1]));
+        assert_eq!(inv.reg(0), halves(sample[2], sample[3]));
+    }
+
+    #[test]
+    fn an_odd_channel_count_pads_its_second_half_with_zero() {
+        struct StubTex;
+        impl TextureSource for StubTex {
+            fn sample(&self, _handle: u32, _u: f32, _v: f32, _layer: u32) -> ShaderResult<[f32; 4]> {
+                Ok([0.25, 0.5, 0.75, 1.0])
+            }
+        }
+        let program = Compiled::new(&super::super::Program {
+            insns: vec![
+                Instruction {
+                    pred: Pred { reg: 7, negate: false },
+                    op: Op::Texs {
+                        dst: 2,
+                        dst2: 4,
+                        coords: [4, 5, RZ],
+                        handle: 0,
+                        dim: TexDim::T2d,
+                        mask: [true, true, true, false],
+                        f16: true,
+                    },
+                },
+                Instruction { pred: Pred { reg: 7, negate: false }, op: Op::Exit },
+            ],
+            offsets: vec![8, 0x10],
+            ..Default::default()
+        });
+
+        let no_consts: HashMap<(u8, u16), f32> = HashMap::new();
+        let mut inv = Invocation::new();
+        inv.execute(&program, &Env::new(&no_consts, &StubTex)).unwrap();
+        assert_eq!(inv.reg(2), halves(0.25, 0.5));
+        assert_eq!(inv.reg(4), halves(0.75, 0.0));
     }
 
     /// Pack two f32s into the pair of halves a register holds.

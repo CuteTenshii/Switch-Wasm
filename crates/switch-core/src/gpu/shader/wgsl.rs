@@ -71,7 +71,7 @@
 use super::compiled::{Compiled, NO_TARGET};
 use super::isa::{
     BoolOp, FCmp, FMod, FRound, HMerge, HPrecision, HSwizzle, ICmp, LogicOp, LopTest, MufuOp, Op,
-    Operand, Pred, TexDim, RZ,
+    Operand, Pred, TexDim, TexsStore, RZ,
 };
 use crate::gpu::pipeline::AttributeBase;
 use crate::gpu::texture::SwizzleSource;
@@ -1372,10 +1372,31 @@ impl Emitter<'_> {
                 // the two differ is a destination overwritten before any read
                 // — the interpreter still lands the sample afterwards, and
                 // hardware does not.
-                let writes: Vec<(usize, u8, usize)> = self.program.texs_writes(at).to_vec();
-                for (channel, reg, _) in writes {
-                    let component = ["x", "y", "z", "w"][channel];
-                    self.set_f(reg, &format!("{color}.{component}"));
+                let writes = self.program.texs_writes(at).to_vec();
+                for (reg, store, _) in writes {
+                    const COMPONENT: [&str; 4] = ["x", "y", "z", "w"];
+                    match store {
+                        TexsStore::Float(channel) => {
+                            self.set_f(reg, &format!("{color}.{}", COMPONENT[channel]));
+                        }
+                        // The `.F16` form packs two channels into the register
+                        // as halves, which is what the `h*2` ops that read it
+                        // back are expecting to unpack.
+                        TexsStore::Halves(low, high) => {
+                            let half = |c: Option<usize>| match c {
+                                Some(channel) => format!("{color}.{}", COMPONENT[channel]),
+                                None => "0.0".to_string(),
+                            };
+                            self.set_r(
+                                reg,
+                                &format!(
+                                    "pack2x16float(vec2<f32>({}, {}))",
+                                    half(Some(low)),
+                                    half(high)
+                                ),
+                            );
+                        }
+                    }
                 }
             }
 
@@ -2193,7 +2214,15 @@ mod tests {
             Op::Fset { dst: 1, a: 2, am: NO_MOD, b: Operand::Reg(3), bm: NO_MOD, cmp: FCmp::Ge, bop: BoolOp::And, src: ALWAYS, bf: true },
             Op::R2p { src: 1, mask: Operand::Imm(0x7f), byte: 0 },
             Op::Ld { offset: 0x80, idx: RZ, dst: 1, size: MemSize::B32 },
-            Op::Texs { dst: 1, dst2: 3, coords: [4, 5, RZ], handle: 0x1a4, dim: TexDim::T2d, mask: [true, true, true, true] },
+            Op::Texs {
+                dst: 1,
+                dst2: 3,
+                coords: [4, 5, RZ],
+                handle: 0x1a4,
+                dim: TexDim::T2d,
+                mask: [true, true, true, true],
+                f16: false,
+            },
             Op::Icmp { dst: 1, a: 2, b: Operand::Reg(3), c: 4, cmp: ICmp::Ne, signed: true },
             Op::Iadd3 { dst: 1, a: 2, aneg: false, b: Operand::Reg(3), bneg: false, c: Operand::Reg(4), cneg: false },
             Op::Bfe { dst: 1, a: 2, b: Operand::Imm(0x0810), signed: false },
@@ -2481,6 +2510,7 @@ mod tests {
                     handle: 0x1a4,
                     dim: TexDim::T2d,
                     mask: [true, true, true, true],
+                    f16: false,
                 },
                 ALWAYS,
             ),
@@ -2518,6 +2548,7 @@ mod tests {
                     handle: 8,
                     dim: TexDim::T2d,
                     mask: [true, true, true, true],
+                    f16: false,
                 },
                 ALWAYS,
             ),
@@ -2661,6 +2692,7 @@ mod tests {
                     handle: 1,
                     dim: TexDim::T3d,
                     mask: [true, true, true, true],
+                    f16: false,
                 },
                 ALWAYS,
             ),

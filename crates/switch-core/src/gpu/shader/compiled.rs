@@ -51,6 +51,8 @@ pub struct Compiled {
     /// Where each `brx` can go, by the index of the `brx` itself, resolved
     /// from the byte offsets the decoder recorded.
     indirect: std::collections::HashMap<usize, Vec<u32>>,
+    /// The Shader Program Header, when the program had one.
+    header: Option<super::ProgramHeader>,
 }
 
 impl Compiled {
@@ -99,6 +101,7 @@ impl Compiled {
             texs_writes: Vec::new(),
             interpolated_slots: Vec::new(),
             indirect: std::collections::HashMap::new(),
+            header: program.header,
         };
         compiled.texs_writes = texs_writes_for(&compiled.ops);
         compiled.interpolated_slots = super::interpolated_slots(&compiled.ops);
@@ -115,6 +118,11 @@ impl Compiled {
             })
             .collect();
         compiled
+    }
+
+    /// The Shader Program Header, when this program was preceded by one.
+    pub fn header(&self) -> Option<super::ProgramHeader> {
+        self.header
     }
 
     pub fn len(&self) -> usize {
@@ -181,7 +189,7 @@ impl Compiled {
 
     /// The deferred register writes the `texs` at `index` produces — see
     /// [`Program::texs_writes`].
-    pub fn texs_writes(&self, index: usize) -> &[(usize, u8, usize)] {
+    pub fn texs_writes(&self, index: usize) -> &[(u8, super::isa::TexsStore, usize)] {
         self.texs_writes
             .iter()
             .find(|t| t.at == index)

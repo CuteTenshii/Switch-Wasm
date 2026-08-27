@@ -78,6 +78,66 @@ pub struct Program {
     /// leave anything analysing this program unable to follow the one branch
     /// whose target is not on the instruction.
     pub indirect: BTreeMap<u32, Vec<u32>>,
+    /// The Shader Program Header this program was preceded by, when it had
+    /// one. A fragment program's output register assignment is in it and
+    /// nowhere else.
+    pub header: Option<ProgramHeader>,
+}
+
+/// The Shader Program Header ("SPH"): the 0x50 bytes a real driver writes in
+/// front of a program, describing it to the hardware rather than to the
+/// shader core.
+///
+/// Only the fragment output map is read out of it so far, because that is the
+/// part with no other source. Everything else the rasterizer needs it either
+/// gets from a register or works out from the instructions themselves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ProgramHeader {
+    /// `omap.target`: a nibble per render target, one bit per component,
+    /// saying which of them the program writes.
+    pub omap_target: u32,
+    /// The program writes a coverage mask after its colours.
+    pub omap_sample_mask: bool,
+    /// The program writes a depth value after that.
+    pub omap_depth: bool,
+}
+
+/// Where the fragment output map sits in the header: `omap.target` is the
+/// nineteenth word and its flags the twentieth, which is the end of the 0x50.
+const OMAP_TARGET_WORD: u64 = 18;
+
+impl ProgramHeader {
+    /// Which register holds component `component` of render target `rt`, or
+    /// `None` if the program does not write it.
+    ///
+    /// Registers are handed out in render-target order, and a target the
+    /// program writes *nothing* to is skipped whole — but inside a target it
+    /// writes anything to, a disabled component still costs its register.
+    /// Reading `r0..r3` as RGBA instead is what turned Asphalt 9's red car
+    /// green: its program leaves a component to the driver, and every colour
+    /// after it sat one register along from where it was being read.
+    pub fn fragment_output_reg(&self, rt: u32, component: u32) -> Option<u8> {
+        let mut reg = 0u32;
+        for target in 0..8 {
+            let bits = (self.omap_target >> (target * 4)) & 0xF;
+            if bits == 0 {
+                continue;
+            }
+            for c in 0..4 {
+                let enabled = bits >> c & 1 != 0;
+                if target == rt && c == component {
+                    return enabled.then_some(reg as u8);
+                }
+                reg += 1;
+            }
+        }
+        None
+    }
+
+    /// Whether the program writes any colour at all.
+    pub fn writes_any_color(&self) -> bool {
+        self.omap_target != 0
+    }
 }
 
 /// Where one `texs` instruction's results land.
@@ -85,9 +145,10 @@ pub struct Program {
 pub struct TexsWrites {
     /// Index of the `texs` itself.
     pub at: usize,
-    /// One entry per enabled colour channel: `(channel, destination
-    /// register, the instruction index the write must land before)`.
-    pub writes: Vec<(usize, u8, usize)>,
+    /// One entry per destination register: `(register, what lands in it, the
+    /// instruction index the write must land before)`. A register rather than
+    /// a channel, because the `.F16` form puts two channels in one.
+    pub writes: Vec<(u8, isa::TexsStore, usize)>,
 }
 
 impl Program {
@@ -145,13 +206,26 @@ pub fn decode_program_from_memory(
     bindings: &dyn Fn(u8) -> Option<(u64, u32)>,
 ) -> Result<Program> {
     let first_real_word = ctx.read_u64(addr + 8)?;
-    let addr = if matches!(isa::decode(first_real_word).op, Op::Unimplemented { .. }) {
-        addr + MESA_SHADER_HEADER_BYTES
-    } else {
-        addr
+    let header_at = matches!(isa::decode(first_real_word).op, Op::Unimplemented { .. })
+        .then_some(addr);
+    let header = match header_at {
+        Some(at) => {
+            let target = ctx.read_u32(at + OMAP_TARGET_WORD * 4)?;
+            let flags = ctx.read_u32(at + (OMAP_TARGET_WORD + 1) * 4)?;
+            Some(ProgramHeader {
+                omap_target: target,
+                omap_sample_mask: flags & 1 != 0,
+                omap_depth: flags >> 1 & 1 != 0,
+            })
+        }
+        None => None,
+    };
+    let addr = match header_at {
+        Some(at) => at + MESA_SHADER_HEADER_BYTES,
+        None => addr,
     };
     let limit = MAX_PROGRAM_WORDS * 8;
-    decode_program_with_consts(
+    let mut program = decode_program_with_consts(
         &mut |offset: u32| {
             if u64::from(offset) >= limit {
                 return Err(Error::Gpu(format!(
@@ -181,7 +255,12 @@ pub fn decode_program_from_memory(
                 eprintln!("  {off:#06x}: {:?}", program.insns[i]);
             }
         }
-    })
+    })?;
+    program.header = header;
+    if crate::env_flag!("TRACE_SPH") {
+        eprintln!("[sph] program at {addr:#x} {header:?}");
+    }
+    Ok(program)
 }
 
 /// Whether `offset` names a real instruction rather than a `sched` control
@@ -564,6 +643,33 @@ mod tests {
     }
 
     #[test]
+    fn the_output_map_hands_out_a_register_per_component_of_a_written_target() {
+        // All four components of target 0: the ordinary case, and the one
+        // reading `r0..r3` happened to get right.
+        let all = ProgramHeader { omap_target: 0xF, ..ProgramHeader::default() };
+        for c in 0..4 {
+            assert_eq!(all.fragment_output_reg(0, c), Some(c as u8));
+        }
+
+        // A component the program leaves to the driver still costs its
+        // register, so everything after it sits one along.
+        let no_red = ProgramHeader { omap_target: 0xE, ..ProgramHeader::default() };
+        assert_eq!(no_red.fragment_output_reg(0, 0), None);
+        assert_eq!(no_red.fragment_output_reg(0, 1), Some(1));
+        assert_eq!(no_red.fragment_output_reg(0, 3), Some(3));
+
+        // A target written nothing at all is skipped whole, so the next one
+        // starts at r0 rather than r4.
+        let second_only = ProgramHeader { omap_target: 0xF0, ..ProgramHeader::default() };
+        assert_eq!(second_only.fragment_output_reg(0, 0), None);
+        assert_eq!(second_only.fragment_output_reg(1, 0), Some(0));
+        assert_eq!(second_only.fragment_output_reg(1, 3), Some(3));
+
+        assert!(!ProgramHeader::default().writes_any_color());
+        assert!(all.writes_any_color());
+    }
+
+    #[test]
     fn tex_fragment_shader_fixture_decodes_the_texs() {
         // tex.frag in full: ipa pass + mufu rcp for perspective correction,
         // a texs sample, then the vertex-color modulation.
@@ -601,7 +707,15 @@ mod tests {
         let program = decode_program(&bytes).unwrap();
         assert_eq!(
             program.insns[4].op,
-            Op::Texs { dst: 0, dst2: 2, coords: [0, 1, RZ], handle: 0x1a4, dim: TexDim::T2d, mask: [true, true, true, true] }
+            Op::Texs {
+                dst: 0,
+                dst2: 2,
+                coords: [0, 1, RZ],
+                handle: 0x1a4,
+                dim: TexDim::T2d,
+                mask: [true, true, true, true],
+                f16: false,
+            }
         );
         assert_eq!(program.insns.last().unwrap().op, Op::Exit);
     }

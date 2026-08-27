@@ -633,7 +633,17 @@ pub enum Op {
     /// holds [`RZ`] in the slots `dim` does not use. `dst`/`dst2` are the
     /// two destination registers the enabled channels are split between;
     /// see [`texs_destinations`].
-    Texs { dst: u8, dst2: u8, coords: [u8; 3], handle: u16, dim: TexDim, mask: [bool; 4] },
+    Texs {
+        dst: u8,
+        dst2: u8,
+        coords: [u8; 3],
+        handle: u16,
+        dim: TexDim,
+        mask: [bool; 4],
+        /// The `.F16` form, which packs two channels into each destination
+        /// register as halves instead of giving each one a register.
+        f16: bool,
+    },
 
     // ---- warp ----
     /// `shfl.<mode> p, dst, src, index, mask` — read another lane's `src`.
@@ -1823,7 +1833,17 @@ fn decode_alu_wide(insn: u64) -> Op {
             texs_encoding(field(insn, 53, 4), a, b),
             decode_tex_mask(field(insn, 50, 3), dst, dst2),
         ) {
-            return Op::Texs { dst, dst2, coords, handle: field(insn, 36, 13) as u16, dim, mask };
+            return Op::Texs {
+                dst,
+                dst2,
+                coords,
+                handle: field(insn, 36, 13) as u16,
+                dim,
+                mask,
+                // `Precision` counts F16 as 0 and F32 as 1, so the bit
+                // being *clear* is the packed form.
+                f16: field(insn, 59, 1) == 0,
+            };
         }
         return un;
     }
@@ -2283,6 +2303,16 @@ fn decode_tex_mask(selector: u64, dst: u8, dst2: u8) -> Option<[bool; 4]> {
     Some([bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0])
 }
 
+/// What one of a `texs`'s destination registers ends up holding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TexsStore {
+    /// The whole register is one channel, as an `f32`.
+    Float(usize),
+    /// Two channels packed as halves, low first. The second is `None` when an
+    /// odd number of channels is enabled, which hardware pads with zero.
+    Halves(usize, Option<usize>),
+}
+
 /// Where a `texs`'s enabled colour channels land, as `(channel, register)`.
 ///
 /// A `texs` has *two* destination registers, and each holds at most two
@@ -2294,17 +2324,39 @@ fn decode_tex_mask(selector: u64, dst: u8, dst2: u8) -> Option<[bool; 4]> {
 /// the run-of-four reading survived until a shader with `dst = $r4,
 /// dst2 = $r2` ran under it. There channels 2 and 3 landed on `$r6`/`$r7`,
 /// and `$r6` was holding the `1/w` every later `ipa` multiplies by.
-pub fn texs_destinations(dst: u8, dst2: u8, mask: [bool; 4]) -> Vec<(usize, u8)> {
-    let mut out = Vec::with_capacity(4);
-    for (channel, &enabled) in mask.iter().enumerate() {
-        if !enabled {
-            continue;
-        }
-        let n = out.len() as u8;
-        let reg = if n < 2 { dst.wrapping_add(n) } else { dst2.wrapping_add(n - 2) };
-        out.push((channel, reg));
+pub fn texs_destinations(
+    dst: u8,
+    dst2: u8,
+    mask: [bool; 4],
+    f16: bool,
+) -> Vec<(u8, TexsStore)> {
+    let enabled: Vec<usize> =
+        mask.iter().enumerate().filter(|(_, &on)| on).map(|(channel, _)| channel).collect();
+    if !f16 {
+        return enabled
+            .into_iter()
+            .enumerate()
+            .map(|(n, channel)| {
+                let reg = if n < 2 {
+                    dst.wrapping_add(n as u8)
+                } else {
+                    dst2.wrapping_add(n as u8 - 2)
+                };
+                (reg, TexsStore::Float(channel))
+            })
+            .collect();
     }
-    out
+    // Two channels to a register, `dst` then `dst2` — so four channels need
+    // two registers rather than four, and the shader reads them back with the
+    // half swizzles the `h*2` ops carry.
+    enabled
+        .chunks(2)
+        .enumerate()
+        .map(|(n, pair)| {
+            let reg = if n == 0 { dst } else { dst2 };
+            (reg, TexsStore::Halves(pair[0], pair.get(1).copied()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2700,15 +2752,52 @@ mod tests {
                 handle: 0x1a4,
                 dim: TexDim::T2d,
                 mask: [true, true, true, true],
+                f16: false,
             }
         );
         // The same word with the destinations four apart, which is where the
         // two readings of the pair diverge: rgba lands on $r4/$r5 then
         // $r2/$r3, never on $r6/$r7.
         assert_eq!(
-            texs_destinations(4, 2, [true, true, true, true]),
-            vec![(0, 4), (1, 5), (2, 2), (3, 3)]
+            texs_destinations(4, 2, [true, true, true, true], false),
+            vec![
+                (4, TexsStore::Float(0)),
+                (5, TexsStore::Float(1)),
+                (2, TexsStore::Float(2)),
+                (3, TexsStore::Float(3)),
+            ]
         );
+    }
+
+    #[test]
+    fn an_f16_texs_packs_two_channels_into_each_destination() {
+        // Bit 59 halves the register count: rgba lands as two packed pairs
+        // rather than four floats, which is what the `h*2` ops that read the
+        // result back are expecting. Reading it as four floats is what drew
+        // Asphalt 9's red car green.
+        assert_eq!(
+            texs_destinations(1, 0, [true, true, true, true], true),
+            vec![(1, TexsStore::Halves(0, Some(1))), (0, TexsStore::Halves(2, Some(3)))]
+        );
+        // An odd count pads the unused half with zero rather than spilling
+        // into another register.
+        assert_eq!(
+            texs_destinations(4, 6, [true, true, true, false], true),
+            vec![(4, TexsStore::Halves(0, Some(1))), (6, TexsStore::Halves(2, None))]
+        );
+        assert_eq!(
+            texs_destinations(4, RZ, [false, false, false, true], true),
+            vec![(4, TexsStore::Halves(3, None))]
+        );
+    }
+
+    #[test]
+    fn the_precision_bit_is_decoded_and_its_polarity_is_backwards() {
+        // `Precision` numbers F16 as 0 and F32 as 1, so a set bit is the
+        // *unpacked* form. The captured fixture above has it set, which is
+        // why it was right to read as four floats.
+        assert!(matches!(op(0xd8301a40_20170000), Op::Texs { f16: false, .. }));
+        assert!(matches!(op(0xd8301a40_20170000 & !(1 << 59)), Op::Texs { f16: true, .. }));
     }
 
     #[test]
@@ -2729,8 +2818,8 @@ mod tests {
     fn a_two_channel_texs_fills_only_the_first_destination() {
         // `ga` into $r4: two channels, so $r2 is never touched.
         assert_eq!(
-            texs_destinations(4, RZ, [false, true, false, true]),
-            vec![(1, 4), (3, 5)]
+            texs_destinations(4, RZ, [false, true, false, true], false),
+            vec![(4, TexsStore::Float(1)), (5, TexsStore::Float(3))]
         );
     }
 

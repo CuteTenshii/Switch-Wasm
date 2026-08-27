@@ -470,7 +470,7 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     };
     let layer_stride = layout.layer_stride(width_bytes, layer_height);
 
-    Ok(Texture {
+    let texture = Texture {
         addr: tex_addr,
         width,
         height,
@@ -480,7 +480,55 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
         swizzle,
         layer_stride,
         layers,
-    })
+    };
+    if let Some(dir) = dump_textures() {
+        dump_texture(&texture, ctx, dir)?;
+    }
+    if trace_textures() {
+        eprintln!(
+            "[tex] {addr:#x} dw={dw0:#010x},{dw1:#010x},{dw2:#010x},{dw3:#010x},{dw4:#010x},\
+             {dw5:#010x} sizes={:#04x} type={:#x} -> {texture:x?}",
+            dw0 & 0x7f,
+            (dw0 >> 7) & 0x7,
+        );
+    }
+    Ok(texture)
+}
+
+/// Where to write every texture as a PPM (`DUMP_TEX=<dir>`), if anywhere.
+fn dump_textures() -> Option<&'static str> {
+    static DIR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| std::env::var("DUMP_TEX").ok()).as_deref()
+}
+
+/// Decode a whole texture through the same path a sample takes and write it
+/// out, so that "the image is the right shape and the wrong colour" can be
+/// pinned on the decoder or ruled out in one look.
+fn dump_texture(texture: &Texture, ctx: &ExecCtx, dir: &str) -> Result<()> {
+    let (w, h) = (texture.width.min(4096), texture.height.min(4096));
+    let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
+    let blocks = RefCell::new(BlockCache::default());
+    for y in 0..h {
+        for x in 0..w {
+            let texel = texture.texel(x, y, 0, ctx, &blocks)?;
+            for channel in &texel[..3] {
+                ppm.push((channel.clamp(0.0, 1.0) * 255.0).round() as u8);
+            }
+        }
+    }
+    let path = format!("{dir}/tex_{:x}_{w}x{h}.ppm", texture.addr);
+    std::fs::write(&path, ppm).map_err(|e| Error::Io(format!("{path}: {e}")))?;
+    eprintln!("[tex] wrote {path}");
+    Ok(())
+}
+
+/// Whether to print every TIC as it is parsed (`TRACE_TEX=1`).
+///
+/// Its own switch rather than `TRACE_GPU`'s: a frame is a million method
+/// traces and a few dozen textures, and the descriptor is what says why a
+/// correctly-shaped image came out the wrong colour.
+fn trace_textures() -> bool {
+    crate::env_flag!("TRACE_TEX")
 }
 
 /// Rearrange a decoded texel into what the shader reads.

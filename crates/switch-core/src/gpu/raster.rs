@@ -708,11 +708,27 @@ fn seed_fragment(
 
 /// The colour an invocation that has run to `exit` leaves behind, or `None`
 /// if `kil` discarded the fragment.
-fn fragment_color(inv: &Invocation) -> Option<[f32; 4]> {
+///
+/// Which register holds which component is the program header's business: a
+/// program that leaves a component to the driver still spends a register on
+/// it, and one that writes nothing to a target spends none at all. A program
+/// with no header — `uam`/deko3d builds, and this module's own fixtures —
+/// keeps the plain `r0..r3`.
+fn fragment_color(inv: &Invocation, program: &Compiled) -> Option<[f32; 4]> {
     if inv.discarded {
         return None;
     }
-    Some([inv.reg_f32(0), inv.reg_f32(1), inv.reg_f32(2), inv.reg_f32(3)])
+    let Some(header) = program.header().filter(|h| h.writes_any_color()) else {
+        return Some([inv.reg_f32(0), inv.reg_f32(1), inv.reg_f32(2), inv.reg_f32(3)]);
+    };
+    Some(std::array::from_fn(|component| {
+        match header.fragment_output_reg(0, component as u32) {
+            Some(reg) => inv.reg_f32(reg),
+            // Nothing wrote it: colour reads zero and alpha opaque, which is
+            // what a blend against it expects rather than a stale register.
+            None => (component == 3) as u32 as f32,
+        }
+    }))
 }
 
 /// Shade one covered pixel.
@@ -726,7 +742,7 @@ fn shade_fragment(
 ) -> Result<Option<[f32; 4]>> {
     seed_fragment(inv, program, verts, inv_w, weights);
     inv.execute(program, env)?;
-    Ok(fragment_color(inv))
+    Ok(fragment_color(inv, program))
 }
 
 /// The four pixels hardware shades together, in lane order: `(x, y)`,
@@ -789,7 +805,7 @@ fn shade_quad(
         }
         resolve_shuffles(lanes);
     }
-    Ok(std::array::from_fn(|lane| fragment_color(&lanes[lane])))
+    Ok(std::array::from_fn(|lane| fragment_color(&lanes[lane], program)))
 }
 
 /// The per-pixel half of a draw: which samples of a pixel a triangle covers
