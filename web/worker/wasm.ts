@@ -134,8 +134,13 @@ export function handle(): number {
 // comes back as null (switch_alloc will not trap on one), and writing at
 // address 0 would corrupt the module's own data rather than fail, so this is
 // where an impossible size has to stop.
+//
+// `>>> 0` for the same reason `hostRead` applies it to the pointer it is
+// handed: the export returns a wasm i32, which JS reads signed, so every
+// allocation past 2 GiB arrives negative - and a negative byteOffset is what
+// the views below refuse rather than address.
 export function alloc(len: number): number {
-  const ptr = api().switch_alloc(len);
+  const ptr = api().switch_alloc(len) >>> 0;
   if (!ptr) throw new Error('cannot allocate ' + len + ' bytes in the emulator');
   return ptr;
 }
