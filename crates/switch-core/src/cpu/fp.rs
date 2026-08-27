@@ -77,24 +77,48 @@ impl Cpu {
             let op = (insn >> 15) & 0x3F;
             let rn = ((insn >> 5) & 0x1F) as u8;
             let rd = (insn & 0x1F) as u8;
-            let double = match (insn >> 22) & 0b11 {
-                0b00 => false,
-                0b01 => true,
-                _ => return Ok(false), // half precision: out of scope
-            };
+            let ftype = (insn >> 22) & 0b11;
             // FCVT is the one form whose destination width differs from its
-            // source, so it can't share the write-back below.
-            match (op, double) {
-                (0b000100, true) => {
+            // source, so it can't share the write-back below — and the only
+            // scalar form that reaches half precision at all.
+            let half = |v: &Self| f16_to_f32(v.vregs[rn as usize] as u16);
+            match (op, ftype) {
+                (0b000100, 0b01) => {
                     self.fp_set_f32(rd, self.fp_get_f64(rn) as f32);
                     return Ok(true);
                 }
-                (0b000101, false) => {
+                (0b000100, 0b11) => {
+                    self.fp_set_f32(rd, half(self));
+                    return Ok(true);
+                }
+                (0b000101, 0b00) => {
                     self.fp_set_f64(rd, f64::from(self.fp_get_f32(rn)));
+                    return Ok(true);
+                }
+                (0b000101, 0b11) => {
+                    self.fp_set_f64(rd, f64::from(half(self)));
+                    return Ok(true);
+                }
+                // FCVT Hd, Sn/Dn. A half is a 16-bit write, so it clears the
+                // rest of the register like every other scalar FP write.
+                // Singles go via a double, which is exact, so they round once.
+                (0b000111, 0b00) => {
+                    let v = f64::from(self.fp_get_f32(rn));
+                    self.vregs[rd as usize] = u128::from(f64_to_f16(v));
+                    return Ok(true);
+                }
+                (0b000111, 0b01) => {
+                    self.vregs[rd as usize] = u128::from(f64_to_f16(self.fp_get_f64(rn)));
                     return Ok(true);
                 }
                 _ => {}
             }
+            let double = match ftype {
+                0b00 => false,
+                0b01 => true,
+                // Half-precision *arithmetic* is ARMv8.2 and not on the A57.
+                _ => return Ok(false),
+            };
             if op == 0 {
                 // FMOV Sd/Dd, Sn/Dn: a bit-exact copy, so it must not go
                 // through a float conversion (that can canonicalize NaNs).

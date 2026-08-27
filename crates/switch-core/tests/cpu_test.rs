@@ -7178,3 +7178,268 @@ fn hwopus_refuses_a_packet_shorter_than_its_own_header() {
     let result = cpu.mem.read_u32(tls + 0x18).unwrap();
     assert_eq!(result >> 9, 8, "not the input-too-small error: {result:#x}");
 }
+
+// ---------------- cryptographic extension and half-precision ----------------
+
+// AESE/AESD/AESMC/AESIMC: 0100 1110 00 10100 opcode(5) 10 Rn Rd
+fn aes(opcode: u32, rd: u32, rn: u32) -> u32 {
+    0x4E << 24 | 0b10100 << 17 | (opcode << 12) | 0b10 << 10 | (rn << 5) | rd
+}
+
+// Three-register SHA: 0101 1110 000 Rm 0 opcode(3) 00 Rn Rd
+fn sha3(opcode: u32, rd: u32, rn: u32, rm: u32) -> u32 {
+    0x5E << 24 | (rm << 16) | (opcode << 12) | (rn << 5) | rd
+}
+
+// Two-register SHA: 0101 1110 00 10100 opcode(5) 10 Rn Rd
+fn sha2(opcode: u32, rd: u32, rn: u32) -> u32 {
+    0x5E << 24 | 0b10100 << 17 | (opcode << 12) | 0b10 << 10 | (rn << 5) | rd
+}
+
+// PMULL/PMULL2: 0 Q 0 01110 size 1 Rm 1110 00 Rn Rd
+fn pmull(q: u32, size: u32, rd: u32, rn: u32, rm: u32) -> u32 {
+    (q << 30) | 0b01110 << 24 | (size << 22) | 1 << 21 | (rm << 16) | 0b1110 << 12 | (rn << 5) | rd
+}
+
+// Scalar FCVT: 0001 1110 ftype 1 0001 opc(2) 10000 Rn Rd
+fn fcvt(ftype: u32, opc: u32, rd: u32, rn: u32) -> u32 {
+    0x1E << 24 | (ftype << 22) | 1 << 21 | 0b0001 << 17 | (opc << 15) | 0b10000 << 10 | (rn << 5) | rd
+}
+
+/// AESE then AESMC is one AES round bar the key schedule, so FIPS-197's own
+/// round-1 vector pins both instructions and the decoder that reaches them.
+#[test]
+fn the_aes_instructions_run_a_fips_197_round() {
+    let mut cpu = cpu_at(0x1000);
+    // The round input, and a zero key so AESE's XOR leaves it alone.
+    cpu.set_vreg(0, u128::from_le_bytes([
+        0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70,
+        0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0,
+    ]));
+    cpu.set_vreg(1, 0);
+    let cpu = run_program(cpu, 0x1000, &[aes(0b00100, 0, 1), aes(0b00110, 0, 0)]);
+    assert_eq!(
+        cpu.read_vreg(0),
+        u128::from_le_bytes([
+            0x5f, 0x72, 0x64, 0x15, 0x57, 0xf5, 0xbc, 0x92,
+            0xf7, 0xbe, 0x3b, 0x29, 0x1d, 0xb9, 0xf9, 0x1a,
+        ]),
+        "aese/aesmc did not produce the FIPS-197 round-1 state"
+    );
+}
+
+#[test]
+fn aesd_and_aesimc_invert_the_encrypting_pair() {
+    let state = 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100u128;
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, state);
+    cpu.set_vreg(1, 0);
+    let cpu = run_program(
+        cpu,
+        0x1000,
+        &[
+            aes(0b00100, 0, 1), // AESE v0, v1  (SubBytes/ShiftRows)
+            aes(0b00110, 0, 0), // AESMC v0, v0
+            aes(0b00111, 0, 0), // AESIMC v0, v0
+            aes(0b00101, 0, 1), // AESD v0, v1
+        ],
+    );
+    assert_eq!(cpu.read_vreg(0), state, "the decrypting pair did not invert");
+}
+
+/// SHA1H is a bare rotate, and SHA1SU0's three-way XOR is the schedule step —
+/// both cheap enough to state the expected value outright.
+#[test]
+fn the_sha1_instructions_decode_and_compute() {
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x1234_5678);
+    let cpu = run_program(cpu, 0x1000, &[sha2(0b00000, 1, 0)]);
+    assert_eq!(
+        cpu.read_vreg(1),
+        u128::from(0x1234_5678u32.rotate_left(30)),
+        "sha1h is a 30-bit rotate of the low word into a cleared register"
+    );
+
+    let (d, n, m) = (0x1111u128, 0x2222u128 << 64, 0x3333u128);
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, d);
+    cpu.set_vreg(1, n);
+    cpu.set_vreg(2, m);
+    let cpu = run_program(cpu, 0x1000, &[sha3(0b011, 0, 1, 2)]);
+    assert_eq!(cpu.read_vreg(0), ((d >> 64) | (n << 64)) ^ d ^ m);
+}
+
+/// SHA256H and SHA256H2 keep opposite halves of the same four rounds, so a
+/// state where both are driven from the same inputs must not come back equal.
+#[test]
+fn the_sha256_round_instructions_keep_opposite_halves() {
+    let (x, y, w) = (
+        0x0000_0004_0000_0003_0000_0002_0000_0001u128,
+        0x0000_0008_0000_0007_0000_0006_0000_0005u128,
+        0x0000_000c_0000_000b_0000_000a_0000_0009u128,
+    );
+    let mut cpu = cpu_at(0x1000);
+    for (i, v) in [(0u8, x), (1, y), (2, w)] {
+        cpu.set_vreg(i, v);
+    }
+    cpu.set_vreg(3, y);
+    cpu.set_vreg(4, x);
+    let cpu = run_program(
+        cpu,
+        0x1000,
+        &[
+            sha3(0b100, 0, 1, 2), // SHA256H  q0, q1, v2.4s
+            sha3(0b101, 3, 4, 2), // SHA256H2 q3, q4, v2.4s
+        ],
+    );
+    let (part1, part2) = (cpu.read_vreg(0), cpu.read_vreg(3));
+    assert_ne!(part1, x, "sha256h did not advance the state");
+    assert_ne!(part2, y, "sha256h2 did not advance the state");
+    assert_ne!(part1, part2, "the two halves came back identical");
+}
+
+#[test]
+fn pmull_multiplies_without_carrying() {
+    let mut cpu = cpu_at(0x1000);
+    // 8-bit lanes: 0b11 * 0b11 is 0b101, not 0b1001.
+    cpu.set_vreg(0, 0x03);
+    cpu.set_vreg(1, 0x03);
+    let cpu = run_program(cpu, 0x1000, &[pmull(0, 0b00, 2, 0, 1)]);
+    assert_eq!(cpu.read_vreg(2) & 0xFFFF, 0b101);
+
+    // 64-bit lanes, and PMULL2 reads the top half of each source.
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, (1u128 << 63) << 64);
+    cpu.set_vreg(1, (1u128 << 63) << 64);
+    let cpu = run_program(cpu, 0x1000, &[pmull(1, 0b11, 2, 0, 1)]);
+    assert_eq!(cpu.read_vreg(2), 1u128 << 126);
+}
+
+/// `fcvt` to and from a half is ARMv8.0 baseline — the half-precision
+/// *arithmetic* the A57 lacks is a separate thing.
+#[test]
+fn fcvt_converts_to_and_from_half_precision() {
+    // 1.0 as a half is 0x3C00; as a single 0x3F800000, as a double 0x3FF0...
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, 0x3C00);
+    let cpu = run_program(
+        cpu,
+        0x1000,
+        &[
+            fcvt(0b11, 0b00, 1, 0), // FCVT s1, h0
+            fcvt(0b11, 0b01, 2, 0), // FCVT d2, h0
+        ],
+    );
+    assert_eq!(cpu.read_vreg(1), u128::from(1.0f32.to_bits()));
+    assert_eq!(cpu.read_vreg(2), u128::from(1.0f64.to_bits()));
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, u128::from((-2.5f32).to_bits()));
+    cpu.set_vreg(1, u128::from(65504.0f64.to_bits())); // the largest half
+    let cpu = run_program(
+        cpu,
+        0x1000,
+        &[
+            fcvt(0b00, 0b11, 2, 0), // FCVT h2, s0
+            fcvt(0b01, 0b11, 3, 1), // FCVT h3, d1
+        ],
+    );
+    assert_eq!(cpu.read_vreg(2), 0xC100, "-2.5 is not the expected half");
+    assert_eq!(cpu.read_vreg(3), 0x7BFF, "65504 should be the largest finite half");
+}
+
+#[test]
+fn narrowing_to_half_saturates_rounds_and_flushes_at_the_edges() {
+    let cases: [(f64, u16); 7] = [
+        (0.0, 0x0000),
+        (-0.0, 0x8000),
+        (70000.0, 0x7C00),            // beyond the range: infinity
+        (65520.0, 0x7C00),            // rounds up past the largest finite half
+        (65519.0, 0x7BFF),            // still rounds down to it
+        (6.0e-8, 0x0001),             // above half the smallest subnormal
+        (2.0f64.powi(-25), 0x0000),   // exactly a tie, so down to zero
+    ];
+    for (input, expect) in cases {
+        let mut cpu = cpu_at(0x1000);
+        cpu.set_vreg(0, u128::from(input.to_bits()));
+        let cpu = run_program(cpu, 0x1000, &[fcvt(0b01, 0b11, 1, 0)]);
+        assert_eq!(
+            cpu.read_vreg(1) as u16,
+            expect,
+            "fcvt h, d of {input} gave {:#06x}",
+            cpu.read_vreg(1) as u16
+        );
+    }
+}
+
+#[test]
+fn widening_from_half_handles_subnormals_and_infinities() {
+    let cases: [(u16, f32); 5] = [
+        (0x0001, 5.960_464_5e-8),  // the smallest subnormal, 2^-24
+        (0x03FF, 6.097_555_2e-5),  // the largest subnormal
+        (0x0400, 6.103_515_6e-5),  // the smallest normal, 2^-14
+        (0x7C00, f32::INFINITY),
+        (0xFC00, f32::NEG_INFINITY),
+    ];
+    for (input, expect) in cases {
+        let mut cpu = cpu_at(0x1000);
+        cpu.set_vreg(0, u128::from(input));
+        let cpu = run_program(cpu, 0x1000, &[fcvt(0b11, 0b00, 1, 0)]);
+        let got = f32::from_bits(cpu.read_vreg(1) as u32);
+        assert_eq!(got, expect, "fcvt s, h of {input:#06x} gave {got}");
+    }
+}
+
+/// Every half a single can represent exactly must survive the round trip.
+#[test]
+fn every_half_survives_a_round_trip_through_single() {
+    let code = [fcvt(0b11, 0b00, 1, 0), fcvt(0b00, 0b11, 2, 1)];
+    let mut cpu = cpu_at(0x1000);
+    let mut bytes = Vec::new();
+    for insn in &code {
+        bytes.extend_from_slice(&insn.to_le_bytes());
+    }
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    for raw in 0u32..=0xFFFF {
+        let half = raw as u16;
+        if (half >> 10) & 0x1F == 0x1F {
+            continue; // infinities and NaNs have no single canonical form
+        }
+        cpu.set_vreg(0, u128::from(half));
+        cpu.set_pc(0x1000);
+        cpu.run(code.len() as u64).unwrap();
+        assert_eq!(
+            cpu.read_vreg(2) as u16,
+            half,
+            "half {half:#06x} did not survive the round trip"
+        );
+    }
+}
+
+/// FCVTL/FCVTN move a whole vector of halves, and are the form the vectorised
+/// half-float packing in shader and texture code actually uses.
+#[test]
+fn the_vector_half_conversions_move_four_lanes() {
+    // FCVTL v1.4s, v0.4h : 0 Q 0 01110 size 10000 10111 10 Rn Rd, size = 00
+    let fcvtl = |q: u32, rd: u32, rn: u32| {
+        (q << 30) | 0b01110 << 24 | 0b10000 << 17 | 0b10111 << 12 | 0b10 << 10 | (rn << 5) | rd
+    };
+    let fcvtn = |q: u32, rd: u32, rn: u32| {
+        (q << 30) | 0b01110 << 24 | 0b10000 << 17 | 0b10110 << 12 | 0b10 << 10 | (rn << 5) | rd
+    };
+    // 1.0, 2.0, -1.0, 0.5 as halves.
+    let halves: u64 = 0x3800_BC00_4000_3C00;
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(0, u128::from(halves));
+    let cpu = run_program(cpu, 0x1000, &[fcvtl(0, 1, 0), fcvtn(0, 2, 1)]);
+    let widened = cpu.read_vreg(1);
+    for (i, expect) in [1.0f32, 2.0, -1.0, 0.5].into_iter().enumerate() {
+        let lane = f32::from_bits((widened >> (32 * i)) as u32);
+        assert_eq!(lane, expect, "fcvtl lane {i}");
+    }
+    assert_eq!(
+        cpu.read_vreg(2),
+        u128::from(halves),
+        "fcvtn did not narrow back to the halves it started from"
+    );
+}

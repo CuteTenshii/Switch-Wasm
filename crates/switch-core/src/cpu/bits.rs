@@ -524,3 +524,86 @@ pub(crate) fn crc32(acc: u32, val: u64, size: u32, castagnoli: bool) -> u32 {
     }
     crc
 }
+
+/// Widen an IEEE-754 half to a single. Exact for every input, so the callers
+/// that want a double can promote the result without rounding twice.
+pub(crate) fn f16_to_f32(h: u16) -> f32 {
+    let sign = u32::from(h & 0x8000) << 16;
+    let exp = u32::from((h >> 10) & 0x1F);
+    let mant = u32::from(h & 0x3FF);
+    if exp == 0x1F {
+        // Infinity, or a NaN whose payload carries over quieted.
+        let bits = if mant == 0 {
+            sign | 0x7F80_0000
+        } else {
+            sign | 0x7FC0_0000 | (mant << 13)
+        };
+        return f32::from_bits(bits);
+    }
+    if exp == 0 {
+        if mant == 0 {
+            return f32::from_bits(sign);
+        }
+        // Subnormal halves are normal singles: shift the leading one up into
+        // the implicit position and pay for it in the exponent.
+        let mut m = mant;
+        let mut e: i32 = -14;
+        while m & 0x400 == 0 {
+            m <<= 1;
+            e -= 1;
+        }
+        let bits = sign | (((e + 127) as u32) << 23) | ((m & 0x3FF) << 13);
+        return f32::from_bits(bits);
+    }
+    f32::from_bits(sign | ((exp + 127 - 15) << 23) | (mant << 13))
+}
+
+/// Narrow a double to an IEEE-754 half, rounding to nearest-even once.
+///
+/// Singles come through here promoted (which is exact), so `fcvt h, s` rounds
+/// once rather than once into a double and again into the half.
+pub(crate) fn f64_to_f16(v: f64) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 48) as u16) & 0x8000;
+    if v.is_nan() {
+        // Keep the top of the payload and force it quiet, so the result cannot
+        // decay into an infinity.
+        return sign | 0x7C00 | 0x200 | (((bits >> 42) as u16) & 0x1FF);
+    }
+    if v.is_infinite() {
+        return sign | 0x7C00;
+    }
+    let exp = (((bits >> 52) & 0x7FF) as i32) - 1023;
+    // Beyond the half's range in either direction the answer is fixed: 2^-25 is
+    // the largest magnitude that still ties down to zero.
+    if v == 0.0 || exp < -25 {
+        return sign;
+    }
+    if exp > 15 {
+        return sign | 0x7C00;
+    }
+    // Round the 53-bit significand down to the 11 bits a normal half keeps, or
+    // to whatever fewer bits the fixed 2^-24 subnormal step leaves.
+    let sig = (1u64 << 52) | (bits & 0x000F_FFFF_FFFF_FFFF);
+    let shift = if exp >= -14 { 42 } else { (28 - exp) as u32 };
+    let truncated = sig >> shift;
+    let rem = sig & ((1u64 << shift) - 1);
+    let halfway = 1u64 << (shift - 1);
+    let rounded = if rem > halfway || (rem == halfway && truncated & 1 == 1) {
+        truncated + 1
+    } else {
+        truncated
+    };
+    if exp < -14 {
+        // A subnormal that rounds up to 0x400 lands on the smallest normal,
+        // which is what that bit pattern already means.
+        return sign | (rounded as u16);
+    }
+    let mut half_exp = exp + 15;
+    let mut mant = rounded;
+    if mant == 0x800 {
+        mant = 0x400;
+        half_exp += 1;
+    }
+    sign | ((half_exp as u16) << 10) | ((mant as u16) & 0x3FF)
+}

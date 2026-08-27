@@ -3,6 +3,7 @@
 //! element moves libnx's string and memory routines are built from).
 
 use super::bits::*;
+use super::crypto::poly_mul;
 use super::Cpu;
 use crate::{Error, Result};
 
@@ -16,6 +17,13 @@ impl Cpu {
     /// * `MOV <Xd>, <Vn>.D[<m>]` (UMOV) — copy a 64-bit lane to a GPR
     ///   (`bits[15:10] == 001111`, 64-bit lane form `imm5 == 01000 | m`).
     pub(super) fn try_simd(&mut self, insn: u32) -> Result<bool> {
+        // ---- AES and SHA ----
+        // The three-register SHA forms share bits[28:21] with the scalar DUP
+        // below, so the crypto group has to get first look at the encoding.
+        if self.try_crypto(insn)? {
+            return Ok(true);
+        }
+
         // ---- narrowing shifts (SHRN / RSHRN / SQSHRN / ...) ----
         // bits[31]=0, bits[28:24]=01111, bit23=0. These share the group with
         // MOVI (bits[28:23]=011110), so they must be checked first; the
@@ -160,6 +168,22 @@ impl Cpu {
             let opcode = (insn >> 12) & 0xF;
             let rn = ((insn >> 5) & 0x1F) as u8;
             let rd = (insn & 0x1F) as u8;
+            // PMULL/PMULL2 is the one form with a 64-bit source element, so it
+            // is decoded before the size check the rest of the group needs.
+            if opcode == 0b1110 && u == 0 {
+                let half = if q { 64 } else { 0 };
+                let a = (self.vregs[rn as usize] >> half) as u64;
+                let b = (self.vregs[rm as usize] >> half) as u64;
+                self.vregs[rd as usize] = match size {
+                    0b00 => (0..8u32).fold(0u128, |acc, i| {
+                        let lane = poly_mul((a >> (8 * i)) & 0xFF, (b >> (8 * i)) & 0xFF, 8);
+                        acc | (lane << (16 * i))
+                    }),
+                    0b11 => poly_mul(a, b, 64),
+                    _ => return Ok(false), // 16- and 32-bit sources are undefined
+                };
+                return Ok(true);
+            }
             if size == 0b11 {
                 return Ok(false); // no 128-bit destination elements
             }
@@ -1593,33 +1617,50 @@ impl Cpu {
                 self.vregs[rd as usize] = out;
                 return Ok(true);
             }
-            // FCVTL / FCVTN: single <-> double (the half-precision forms are
-            // out of scope). Q selects which half of the wide vector is used.
-            (0, 0b10111) if size == 0b01 => {
+            // FCVTL / FCVTN: half <-> single (size 00) and single <-> double
+            // (size 01). Q selects which half of the narrow vector is used.
+            (0, 0b10111) if size <= 0b01 => {
                 if scalar {
                     return Ok(false);
                 }
                 let src = self.vregs[rn as usize];
                 let base = if q { 64 } else { 0 };
                 let mut out: u128 = 0;
-                for i in 0..2u32 {
-                    let bits = ((src >> (base + 32 * i)) & 0xFFFF_FFFF) as u32;
-                    let wide = f64::from(f32::from_bits(bits)).to_bits();
-                    out |= u128::from(wide) << (64 * i);
+                if size == 0b00 {
+                    for i in 0..4u32 {
+                        let h = ((src >> (base + 16 * i)) & 0xFFFF) as u16;
+                        out |= u128::from(f16_to_f32(h).to_bits()) << (32 * i);
+                    }
+                } else {
+                    for i in 0..2u32 {
+                        let bits = ((src >> (base + 32 * i)) & 0xFFFF_FFFF) as u32;
+                        let wide = f64::from(f32::from_bits(bits)).to_bits();
+                        out |= u128::from(wide) << (64 * i);
+                    }
                 }
                 self.vregs[rd as usize] = out;
                 return Ok(true);
             }
-            (0, 0b10110) if size == 0b01 => {
+            (0, 0b10110) if size <= 0b01 => {
                 if scalar {
                     return Ok(false);
                 }
                 let src = self.vregs[rn as usize];
                 let mut narrowed: u128 = 0;
-                for i in 0..2u32 {
-                    let bits = (src >> (64 * i)) as u64;
-                    let narrow = (f64::from_bits(bits) as f32).to_bits();
-                    narrowed |= u128::from(narrow) << (32 * i);
+                if size == 0b00 {
+                    // Promoting to double before narrowing is exact, so the
+                    // half is rounded once rather than once per step.
+                    for i in 0..4u32 {
+                        let bits = ((src >> (32 * i)) & 0xFFFF_FFFF) as u32;
+                        let h = f64_to_f16(f64::from(f32::from_bits(bits)));
+                        narrowed |= u128::from(h) << (16 * i);
+                    }
+                } else {
+                    for i in 0..2u32 {
+                        let bits = (src >> (64 * i)) as u64;
+                        let narrow = (f64::from_bits(bits) as f32).to_bits();
+                        narrowed |= u128::from(narrow) << (32 * i);
+                    }
                 }
                 self.vregs[rd as usize] = if q {
                     (self.vregs[rd as usize] & ((1u128 << 64) - 1)) | (narrowed << 64)

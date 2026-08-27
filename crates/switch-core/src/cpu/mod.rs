@@ -22,6 +22,7 @@ use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 // The processor.
 mod alu;
 mod bits;
+mod crypto;
 mod fp;
 mod jit;
 mod loadstore;

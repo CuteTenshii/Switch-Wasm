@@ -80,23 +80,22 @@ fn add_round_key(state: &mut [u8; 16], round_key: &[u8]) {
 }
 
 /// SubBytes, ShiftRows and MixColumns, one pass over the state each — the
-/// textbook shape, kept as the reference [`RoundKeys::encrypt_block`]'s
-/// table-driven round is checked against.
-#[cfg(test)]
-fn sub_bytes(state: &mut [u8; 16]) {
+/// textbook shape. It is both the reference [`RoundKeys::encrypt_block`]'s
+/// table-driven round is checked against and what the guest's own AES
+/// instructions run, since those expose the steps individually.
+pub(crate) fn sub_bytes(state: &mut [u8; 16]) {
     for b in state.iter_mut() {
         *b = SBOX[*b as usize];
     }
 }
 
-fn inv_sub_bytes(state: &mut [u8; 16]) {
+pub(crate) fn inv_sub_bytes(state: &mut [u8; 16]) {
     for b in state.iter_mut() {
         *b = INV_SBOX[*b as usize];
     }
 }
 
-#[cfg(test)]
-fn shift_rows(state: &mut [u8; 16]) {
+pub(crate) fn shift_rows(state: &mut [u8; 16]) {
     let s = *state;
     // Row 0 unchanged, row 1 left 1, row 2 left 2, row 3 left 3 (column-major).
     state[0] = s[0];
@@ -117,7 +116,7 @@ fn shift_rows(state: &mut [u8; 16]) {
     state[15] = s[11];
 }
 
-fn inv_shift_rows(state: &mut [u8; 16]) {
+pub(crate) fn inv_shift_rows(state: &mut [u8; 16]) {
     let s = *state;
     state[0] = s[0];
     state[1] = s[13];
@@ -170,8 +169,7 @@ const TE: [[u32; 256]; 4] = {
     t
 };
 
-#[cfg(test)]
-fn mix_columns(state: &mut [u8; 16]) {
+pub(crate) fn mix_columns(state: &mut [u8; 16]) {
     for c in 0..4 {
         let i = c * 4;
         let a = state[i];
@@ -185,7 +183,7 @@ fn mix_columns(state: &mut [u8; 16]) {
     }
 }
 
-fn inv_mix_columns(state: &mut [u8; 16]) {
+pub(crate) fn inv_mix_columns(state: &mut [u8; 16]) {
     for c in 0..4 {
         let i = c * 4;
         let a = state[i];
