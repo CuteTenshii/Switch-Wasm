@@ -816,6 +816,8 @@ pub struct ThreadContext {
     pc: u32,
     nzcv: u32,
     vregs: [u128; 32],
+    fpcr: u32,
+    fpsr: u32,
     tpidr: u64,
     tpidr_rw: u64,
 }
@@ -834,6 +836,12 @@ pub struct Cpu {
     /// instructions libnx's `memset`/`memcpy` rely on are implemented;
     /// full NEON is out of scope for Phase 1.
     vregs: [u128; 32],
+    /// FPCR: the guest's rounding mode, flush-to-zero and default-NaN
+    /// controls. Held per thread, since it is part of the FP context.
+    fpcr: u32,
+    /// FPSR: the cumulative exception flags a guest reads with
+    /// `fetestexcept`. Sticky — set by an operation, cleared only by a write.
+    fpsr: u32,
     /// Console output accumulated by the UART syscall mode.
     pub out: Vec<u8>,
     /// Debug trace: per-instruction disassembly (when enabled) plus fault
@@ -849,8 +857,6 @@ pub struct Cpu {
     /// instruction count, because [`Cpu::reschedule`] idles it forward to the
     /// earliest sleeper when nothing can run, which is the console's own idle
     /// and covers instructions nobody executed.
-    fpcr: u32,
-    fpsr: u32,
     pub cycles: u64,
     /// Instructions actually retired, which the idle never touches.
     ///
@@ -869,12 +875,6 @@ pub struct Cpu {
     /// Base of the kernel-fixed Thread Local Region (TPIDRRO_EL0): where the
     /// IPC message buffer lives and where `create_thread` points each
     /// thread's own TLS block. Real hardware makes this read-only at EL0 —
-    /// FPCR: the guest's rounding mode, flush-to-zero and default-NaN
-    /// controls. Held per thread, since it is part of the FP context.
-    fpcr: u32,
-    /// FPSR: the cumulative exception flags a guest reads with
-    /// `fetestexcept`. Sticky — set by an operation, cleared only by a write.
-    fpsr: u32,
     /// only the kernel sets it — unlike [`Cpu::tpidr_rw`] below.
     tpidr: u64,
     /// TPIDR_EL0: freely readable *and writable* by guest code, unlike
@@ -1349,6 +1349,8 @@ impl Cpu {
             pc: 0,
             nzcv: 0,
             vregs: [0; 32],
+            fpcr: 0,
+            fpsr: 0,
             out: Vec::new(),
             trace: Vec::new(),
             trace_enabled: false,
@@ -1382,8 +1384,6 @@ impl Cpu {
             shared_buffer: None,
             shared_buffer_slot: 0,
             applet_focus_announced: false,
-            fpcr: 0,
-            fpsr: 0,
             applet_is_application: true,
             operation_mode: OperationMode::default(),
             applet_event: None,
@@ -1562,6 +1562,8 @@ impl Cpu {
                 pc: 0,
                 nzcv: 0,
                 vregs: [0; 32],
+                fpcr: self.fpcr,
+                fpsr: 0,
                 tpidr: self.tpidr,
                 tpidr_rw: self.tpidr_rw,
             });
@@ -1595,13 +1597,13 @@ impl Cpu {
             handle,
             state: ThreadState::Created,
             paused: false,
-                fpcr: self.fpcr,
-                fpsr: 0,
             regs,
             sp: stack_top,
             pc: entry,
             nzcv: 0,
             vregs: [0; 32],
+            fpcr: 0,
+            fpsr: 0,
             tpidr: u64::from(tls),
             tpidr_rw: 0,
         });
@@ -1635,8 +1637,6 @@ impl Cpu {
     /// Fill the 0x320-byte `ThreadContext` `svcGetThreadContext3` hands back:
     /// x0..x28, fp, lr, sp, pc, pstate, the vector registers, fpcr/fpsr and
     /// the thread pointer. IL2CPP's garbage collector suspends every thread
-            fpcr: 0,
-            fpsr: 0,
     /// and reads this to find the roots living in their registers, so the
     /// register file has to be the real one — the running thread's live, a
     /// switched-out thread's as saved when it last gave up the CPU.
@@ -2210,6 +2210,8 @@ impl Cpu {
         thread.pc = self.pc;
         thread.nzcv = self.nzcv;
         thread.vregs = self.vregs;
+        thread.fpcr = self.fpcr;
+        thread.fpsr = self.fpsr;
         thread.tpidr = self.tpidr;
         thread.tpidr_rw = self.tpidr_rw;
     }
@@ -2226,6 +2228,8 @@ impl Cpu {
         self.pc = thread.pc;
         self.nzcv = thread.nzcv;
         self.vregs = thread.vregs;
+        self.fpcr = thread.fpcr;
+        self.fpsr = thread.fpsr;
         self.tpidr = thread.tpidr;
         self.tpidr_rw = thread.tpidr_rw;
         self.current_thread = index;
@@ -2263,8 +2267,6 @@ impl Cpu {
         self.trace.clear();
         self.halted = false;
         self.trace_enabled = false;
-        thread.fpcr = self.fpcr;
-        thread.fpsr = self.fpsr;
         for i in 0..=30u8 {
             self.set_reg(i, 0);
         }
@@ -2281,8 +2283,6 @@ impl Cpu {
             let is_bl = matches!(main_insn, Some(i) if (i & 0xFC00_0000) == 0x9400_0000);
             if is_bl {
                 self.set_pc(loaded.entry);
-        self.fpcr = thread.fpcr;
-        self.fpsr = thread.fpsr;
                 for _ in 0..5_000_000u64 {
                     if self.halted || self.get_pc() == main_call {
                         break;
