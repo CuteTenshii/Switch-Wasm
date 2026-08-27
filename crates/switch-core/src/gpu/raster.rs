@@ -474,10 +474,11 @@ fn shade_vertex(
     program: &Compiled,
     attribs: &[VertexAttrib],
     arrays: &[VertexArray],
-    vertex_index: u32,
-    instance_id: u32,
+    // The two ordinals that pick this invocation's data out of the arrays.
+    (vertex_index, instance_id): (u32, u32),
     ctx: &ExecCtx,
     consts: &dyn ConstantSource,
+    y_negate: bool,
 ) -> Result<ShadedVertex> {
     let mut inv = Invocation::new();
     inv.attr_in.set(VERTEX_ID_OFFSET, f32::from_bits(vertex_index));
@@ -506,6 +507,7 @@ fn shade_vertex(
     let global = MemoryGlobal { ctx };
     let mut env = Env::new(consts, &NoTextures);
     env.memory = Some(&global);
+    env.special.y_negate = y_negate;
     inv.execute(program, &env)?;
 
     let mut clip = [0.0, 0.0, 0.0, 1.0];
@@ -966,6 +968,7 @@ fn with_fragment_env<T>(
     let fs_global = MemoryGlobal { ctx };
     let mut env = Env::with_tex_cb_index(&fs_consts, &fs_textures, engine.tex_cb_index());
     env.memory = Some(&fs_global);
+    env.special.y_negate = engine.window_origin().lower_left;
     f(&mut env)
 }
 
@@ -1358,10 +1361,10 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 &vs_program,
                 &attribs,
                 &arrays,
-                index,
-                instance_id,
+                (index, instance_id),
                 &*ctx,
                 &vs_consts,
+                engine.window_origin().lower_left,
             )?;
             cache.insert(index, v);
             shaded.push(v);
@@ -2528,7 +2531,7 @@ mod tests {
         let consts: std::collections::HashMap<(u8, u16), f32> = Default::default();
 
         let program = Compiled::new(&program);
-        let v = shade_vertex(&program, &[], &[], 7, 42, &ctx, &consts).unwrap();
+        let v = shade_vertex(&program, &[], &[], (7, 42), &ctx, &consts, false).unwrap();
         assert_eq!(v.clip[0].to_bits(), 42, "gl_InstanceID");
         assert_eq!(v.clip[1].to_bits(), 7, "gl_VertexID");
     }

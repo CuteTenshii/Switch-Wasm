@@ -41,6 +41,12 @@ const DEPTH_TARGET_FORMAT: u32 = 0x3FA;
 const DEPTH_TARGET_TILE_MODE: u32 = 0x3FB;
 const SCREEN_SCISSOR_HORIZONTAL: u32 = 0x3FD;
 const SCREEN_SCISSOR_VERTICAL: u32 = 0x3FE;
+/// `SET_WINDOW_ORIGIN_MODE` (`0x13AC`). The other half of the question
+/// [`Engine3D::viewport_transform`] answers: a driver may flip y by handing
+/// the viewport a negative scale, or by leaving the scale alone and asking
+/// here for a bottom-left window origin. nnSdk does the second, so a title
+/// built against it drew upside down while this register was inert.
+const WINDOW_ORIGIN: u32 = 0x4EB;
 const CLEAR_BUFFER_FLAGS: u32 = 0x43E;
 const RENDER_TARGET_CONTROL: u32 = 0x487;
 const DEPTH_TARGET_HORIZONTAL: u32 = 0x48A;
@@ -282,6 +288,20 @@ pub struct DepthTarget {
 pub struct ViewportTransform {
     pub scale: [f32; 3],
     pub translate: [f32; 3],
+}
+
+/// Which corner window coordinates are measured from, and which winding the
+/// front face is.
+///
+/// The two are separate registers' worth of meaning in one word: `mode`
+/// reflects the viewport and the scissor about the surface clip's height,
+/// while `flip_y` only swaps which winding counts as front.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowOrigin {
+    /// Window y is measured from the bottom of the surface clip.
+    pub lower_left: bool,
+    /// The front face is the opposite winding to `OGL_SET_FRONT_FACE`'s.
+    pub flip_y: bool,
 }
 
 /// A resolved pixel rectangle, `[x0, x1) x [y0, y1)`.
@@ -887,11 +907,41 @@ impl Engine3D {
     /// 256x256 target it renders a save tile into. Hard-coding the flip drew
     /// every offscreen target upside down, which is how a tile's text came
     /// out mirrored.
+    /// What `SET_WINDOW_ORIGIN_MODE` says about y and about winding.
+    pub fn window_origin(&self) -> WindowOrigin {
+        WindowOrigin {
+            lower_left: self.regs.bit(WINDOW_ORIGIN, 0),
+            flip_y: self.regs.bit(WINDOW_ORIGIN, 4),
+        }
+    }
+
+    /// The height a bottom-left window origin is measured against — the
+    /// surface clip's, which is what hardware reflects about and not the
+    /// render target's own.
+    fn surface_clip_height(&self) -> u32 {
+        self.regs.field(SCREEN_SCISSOR_VERTICAL, 16, 31)
+    }
+
+    /// Reflect a viewport about the surface clip when the window origin is at
+    /// the bottom. The rectangle keeps its extent and its distance from the
+    /// far edge, which for a viewport that is not the whole surface is not
+    /// the same as negating the scale.
+    fn flip_window_y(&self, mut vt: ViewportTransform) -> ViewportTransform {
+        if !self.window_origin().lower_left {
+            return vt;
+        }
+        // The register holds `top = translate - scale` and `height = 2 scale`;
+        // hardware maps that to `top + clip_height` and `-height`.
+        vt.translate[1] += self.surface_clip_height() as f32 - 2.0 * vt.scale[1];
+        vt.scale[1] = -vt.scale[1];
+        vt
+    }
+
     pub fn viewport_transform(&self) -> ViewportTransform {
         let f = |i: u32| f32::from_bits(self.regs.get(VIEWPORT_TRANSFORM_BASE + i));
         let scale = [f(0), f(1), f(2)];
         if scale[0] != 0.0 || scale[1] != 0.0 {
-            return ViewportTransform { scale, translate: [f(3), f(4), f(5)] };
+            return self.flip_window_y(ViewportTransform { scale, translate: [f(3), f(4), f(5)] });
         }
         // Nothing has written the transform. A zero scale on both axes maps
         // every vertex to one point, so it cannot be a viewport a guest
@@ -899,10 +949,10 @@ impl Engine3D {
         // the viewport *rectangle* with the window-system flip, which is
         // what the synthetic fixtures in the rasterizer's tests program.
         let (vx, vy, vw, vh) = self.viewport();
-        ViewportTransform {
+        self.flip_window_y(ViewportTransform {
             scale: [vw / 2.0, -vh / 2.0, 0.5],
             translate: [vx + vw / 2.0, vy + vh / 2.0, 0.5],
-        }
+        })
     }
 
     /// Which constant bank a `texs`'s immediate indexes for its texture
@@ -947,6 +997,20 @@ impl Engine3D {
     /// Both are skipped when unset rather than treated as empty: a register
     /// file that has never been written would otherwise clip every draw to
     /// nothing, and "no scissor programmed" means "do not clip".
+    /// The per-viewport scissor's y bounds in window coordinates. A bottom-left
+    /// origin measures them from the far edge of the surface clip, so they
+    /// swap as well as move.
+    fn scissor_y(&self) -> (u32, u32) {
+        let y0 = self.regs.field(SCISSOR_BASE + 2, 0, 15);
+        let y1 = self.regs.field(SCISSOR_BASE + 2, 16, 31);
+        if self.window_origin().lower_left {
+            let height = self.surface_clip_height();
+            (height.saturating_sub(y1), height.saturating_sub(y0))
+        } else {
+            (y0, y1)
+        }
+    }
+
     pub fn apply_scissor(&self, rect: ScissorRect) -> ScissorRect {
         let mut out = rect;
         let screen_w = self.regs.field(SCREEN_SCISSOR_HORIZONTAL, 16, 31);
@@ -960,10 +1024,11 @@ impl Engine3D {
             out.y1 = out.y1.min(y0 + screen_h);
         }
         if self.regs.get(SCISSOR_BASE) != 0 {
+            let (y0, y1) = self.scissor_y();
             out.x0 = out.x0.max(self.regs.field(SCISSOR_BASE + 1, 0, 15));
             out.x1 = out.x1.min(self.regs.field(SCISSOR_BASE + 1, 16, 31));
-            out.y0 = out.y0.max(self.regs.field(SCISSOR_BASE + 2, 0, 15));
-            out.y1 = out.y1.min(self.regs.field(SCISSOR_BASE + 2, 16, 31));
+            out.y0 = out.y0.max(y0);
+            out.y1 = out.y1.min(y1);
         }
         ScissorRect { x0: out.x0, y0: out.y0, x1: out.x1.max(out.x0), y1: out.y1.max(out.y0) }
     }
@@ -974,7 +1039,11 @@ impl Engine3D {
         let face = self.regs.get(OGL_SET_CULL_FACE);
         CullState {
             enabled: field(self.regs.get(OGL_SET_CULL), 0, 0) != 0,
-            front_ccw: self.regs.get(OGL_SET_FRONT_FACE) != 0x900,
+            // `flip_y` swaps which winding is front without touching the
+            // viewport, so it cannot come out of the transform's sign the way
+            // a lower-left origin does.
+            front_ccw: (self.regs.get(OGL_SET_FRONT_FACE) != 0x900)
+                != self.window_origin().flip_y,
             cull_front: face == 0x404 || face == 0x408,
             cull_back: face == 0x405 || face == 0x408,
         }
@@ -1133,10 +1202,11 @@ impl Engine3D {
 
         let flags = self.regs.get(CLEAR_BUFFER_FLAGS);
         if field(flags, 8, 8) != 0 && self.regs.get(SCISSOR_BASE) != 0 {
+            let (sy0, sy1) = self.scissor_y();
             x0 = x0.max(self.regs.field(SCISSOR_BASE + 1, 0, 15));
             x1 = x1.min(self.regs.field(SCISSOR_BASE + 1, 16, 31));
-            y0 = y0.max(self.regs.field(SCISSOR_BASE + 2, 0, 15));
-            y1 = y1.min(self.regs.field(SCISSOR_BASE + 2, 16, 31));
+            y0 = y0.max(sy0);
+            y1 = y1.min(sy1);
         }
         if field(flags, 12, 12) != 0 {
             let vx = self.regs.field(VIEWPORT_BASE, 0, 15);
@@ -2191,6 +2261,81 @@ mod tests {
             (bt.equation_rgb, bt.func_rgb_src, bt.func_rgb_dst, bt.equation_alpha, bt.func_alpha_src, bt.func_alpha_dst),
             (1, 5, 6, 1, 2, 1)
         );
+    }
+
+    #[test]
+    fn a_lower_left_window_origin_flips_the_viewport() {
+        // nnSdk programs the viewport with a *positive* y scale and asks for
+        // the flip here; Mesa hands over a negative scale and leaves this
+        // alone. Reading only the scale drew Asphalt 9 upside down.
+        let mut engine = Engine3D::new();
+        engine.regs.set(SCREEN_SCISSOR_VERTICAL, 720 << 16);
+        engine.regs.set(VIEWPORT_TRANSFORM_BASE, 640.0f32.to_bits());
+        engine.regs.set(VIEWPORT_TRANSFORM_BASE + 1, 360.0f32.to_bits());
+        engine.regs.set(VIEWPORT_TRANSFORM_BASE + 3, 640.0f32.to_bits());
+        engine.regs.set(VIEWPORT_TRANSFORM_BASE + 4, 360.0f32.to_bits());
+
+        let upper = engine.viewport_transform();
+        assert_eq!(upper.scale[1], 360.0, "untouched, so no flip");
+
+        engine.regs.set(WINDOW_ORIGIN, 1);
+        let lower = engine.viewport_transform();
+        assert_eq!(lower.scale[1], -360.0);
+        assert_eq!(lower.translate[1], 360.0);
+        // NDC +1 is the top of the screen once flipped, which is row 0.
+        assert_eq!(lower.scale[1] + lower.translate[1], 0.0);
+    }
+
+    #[test]
+    fn a_flipped_viewport_keeps_its_distance_from_the_far_edge() {
+        // A viewport covering the bottom 240 rows of a 720-row surface must
+        // come out covering the top 240, not merely have its scale negated.
+        let mut engine = Engine3D::new();
+        engine.regs.set(SCREEN_SCISSOR_VERTICAL, 720 << 16);
+        engine.regs.set(WINDOW_ORIGIN, 1);
+        engine.regs.set(VIEWPORT_TRANSFORM_BASE, 640.0f32.to_bits());
+        engine.regs.set(VIEWPORT_TRANSFORM_BASE + 1, 120.0f32.to_bits());
+        engine.regs.set(VIEWPORT_TRANSFORM_BASE + 3, 640.0f32.to_bits());
+        engine.regs.set(VIEWPORT_TRANSFORM_BASE + 4, 120.0f32.to_bits());
+
+        let vt = engine.viewport_transform();
+        // Was rows 0..240 measured from the bottom; is rows 480..720 from the
+        // top, so NDC -1 lands on 720 and +1 on 480.
+        assert_eq!(vt.translate[1] - vt.scale[1], 720.0);
+        assert_eq!(vt.translate[1] + vt.scale[1], 480.0);
+    }
+
+    #[test]
+    fn a_lower_left_window_origin_flips_the_scissor() {
+        let mut engine = Engine3D::new();
+        engine.regs.set(SCREEN_SCISSOR_VERTICAL, 720 << 16);
+        engine.regs.set(SCREEN_SCISSOR_HORIZONTAL, 1280 << 16);
+        engine.regs.set(SCISSOR_BASE, 1);
+        engine.regs.set(SCISSOR_BASE + 1, 1280 << 16);
+        engine.regs.set(SCISSOR_BASE + 2, 100 | (200 << 16));
+        let full = ScissorRect { x0: 0, y0: 0, x1: 1280, y1: 720 };
+
+        assert_eq!(engine.apply_scissor(full).y0, 100);
+        assert_eq!(engine.apply_scissor(full).y1, 200);
+
+        engine.regs.set(WINDOW_ORIGIN, 1);
+        // Measured from the bottom, rows 100..200 are rows 520..620 down.
+        assert_eq!(engine.apply_scissor(full).y0, 520);
+        assert_eq!(engine.apply_scissor(full).y1, 620);
+    }
+
+    #[test]
+    fn flip_y_swaps_which_winding_is_front() {
+        // Bit 4 is not bit 0: it changes the front face and nothing else, so
+        // it cannot fall out of the viewport's sign the way the origin does.
+        let mut engine = Engine3D::new();
+        engine.regs.set(OGL_SET_FRONT_FACE, 0x901); // counter-clockwise
+        assert!(engine.cull_state().front_ccw);
+        assert_eq!(engine.viewport_transform().scale[1], 0.0);
+
+        engine.regs.set(WINDOW_ORIGIN, 1 << 4);
+        assert!(!engine.cull_state().front_ccw);
+        assert_eq!(engine.viewport_transform().scale[1], 0.0, "the viewport is untouched");
     }
 
     #[test]

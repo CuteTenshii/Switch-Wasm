@@ -275,6 +275,9 @@ pub struct SpecialRegs {
     pub shared_size: u32,
     /// Bytes of local memory the thread was given.
     pub local_size: u32,
+    /// Whether window y grows upward, which is what `SR_Y_DIRECTION` reports
+    /// as -1.0 rather than +1.0. Follows `SET_WINDOW_ORIGIN_MODE`.
+    pub y_negate: bool,
 }
 
 impl SpecialRegs {
@@ -293,6 +296,17 @@ impl SpecialRegs {
             0x21..=0x23 => self.tid[(sr - 0x21) as usize],
             0x25..=0x27 => self.ctaid[(sr - 0x25) as usize],
             0x32 => self.shared_size,
+            // `SR_Y_DIRECTION` is a float, and the sign is the whole content:
+            // a shader that derives a screen-space direction multiplies by it,
+            // so the zero every unmodelled special register used to read
+            // collapsed that direction to nothing rather than reversing it.
+            0x12 => {
+                if self.y_negate {
+                    (-1.0f32).to_bits()
+                } else {
+                    1.0f32.to_bits()
+                }
+            }
             0x36 => self.local_size,
             _ => return None,
         })
@@ -2201,6 +2215,17 @@ mod tests {
             self.bytes.borrow_mut()[addr as usize] = value;
             Ok(())
         }
+    }
+
+    #[test]
+    fn sr_y_direction_reads_a_sign_and_never_a_zero() {
+        // A shader multiplies a screen-space direction by this. Answering the
+        // zero an unmodelled special register gets does not flip anything --
+        // it deletes it.
+        let up = SpecialRegs { y_negate: false, ..SpecialRegs::default() };
+        assert_eq!(f32::from_bits(up.read(0x12).unwrap()), 1.0);
+        let down = SpecialRegs { y_negate: true, ..SpecialRegs::default() };
+        assert_eq!(f32::from_bits(down.read(0x12).unwrap()), -1.0);
     }
 
     #[test]
