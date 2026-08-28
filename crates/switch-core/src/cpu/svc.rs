@@ -890,6 +890,13 @@ impl Cpu {
                                 Some("fsp-srv-save-info-reader") => {
                                     self.fs_save_data_info_reader_request(tls, cmd_id)?
                                 }
+                                Some("fsp-srv-device-operator") => {
+                                    self.fs_device_operator_request(tls, cmd_id)?
+                                }
+                                Some("fsp-srv-sd-detection")
+                                | Some("fsp-srv-gamecard-detection") => {
+                                    self.fs_detection_notifier_request(tls, handle, cmd_id)?
+                                }
                                 _ => self.fsp_srv_request(tls, cmd_id, handle)?,
                             }
                         }
@@ -906,6 +913,12 @@ impl Cpu {
                         "fsp-srv-storage" => self.fs_storage_request(tls, handle, cmd_id)?,
                         "fsp-srv-save-info-reader" => {
                             self.fs_save_data_info_reader_request(tls, cmd_id)?
+                        }
+                        "fsp-srv-device-operator" => {
+                            self.fs_device_operator_request(tls, cmd_id)?
+                        }
+                        "fsp-srv-sd-detection" | "fsp-srv-gamecard-detection" => {
+                            self.fs_detection_notifier_request(tls, handle, cmd_id)?
                         }
                         "vi:m" | "vi:m:" => self.vi_request(tls, handle, cmd_id)?,
                         // fatal:u — the guest reporting that it is giving up.

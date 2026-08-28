@@ -1225,6 +1225,16 @@ pub struct Cpu {
     /// rather than be acknowledged and dropped, or a title that turns logging
     /// on is told it is still off.
     fs_access_log_mode: u32,
+    /// The speed emulation `IDeviceOperator` reports, as
+    /// `SetSpeedEmulationMode` last set it. Nothing here slows a read to
+    /// match; the mode round-trips so that a caller reading its own setting
+    /// back is not told it was refused.
+    fs_speed_emulation_mode: u32,
+    /// The event each card slot's `IEventNotifier` hands out, by the `fsp-srv`
+    /// command that opened it. One per slot rather than one per caller: a
+    /// guest that asks twice has to be given the event it is already waiting
+    /// on, not a second one that will never fire either.
+    fs_detection_events: BTreeMap<u32, u64>,
     /// Storages queued for `ILibraryAppletSelfAccessor::PopInData` — what the
     /// applet's caller would have pushed before starting it.
     am_in_data: VecDeque<Vec<u8>>,
@@ -1563,6 +1573,8 @@ impl Cpu {
             fs_mount: IdMap::default(),
             fs_storage_archive: IdMap::default(),
             fs_access_log_mode: 0,
+            fs_speed_emulation_mode: 0,
+            fs_detection_events: BTreeMap::new(),
             am_in_data: VecDeque::new(),
             am_launch_parameters: IdMap::default(),
             am_storages: IdMap::default(),

@@ -24,6 +24,27 @@ pub(super) const SD_FREE_SPACE: u64 = 16 << 30;
 /// rather than the smallest that would do.
 const FS_POINTER_BUFFER_SIZE: u16 = 0x8000;
 
+/// `nn::fs::SdCardSpeedMode::Sdr104` and `nn::fs::MmcSpeedMode::Hs400`: the
+/// fastest mode each bus negotiates. Nothing here is on a bus, but 0 in either
+/// enum is `Identification` — a device that never finished initialising, which
+/// is a fault rather than a missing measurement.
+const SD_CARD_SPEED_MODE: i64 = 6;
+
+const MMC_SPEED_MODE: i64 = 4;
+
+/// The emulated eMMC: its user area is the same storage the SD card reports,
+/// because both are the same host memory, and the two boot partitions beside
+/// it are the 4 MiB a Tegra X1's eMMC carries.
+const MMC_USER_AREA_SIZE: i64 = SD_TOTAL_SPACE as i64;
+
+const MMC_BOOT_PARTITION_SIZE: i64 = 4 << 20;
+
+/// The two `IEventNotifier`s `fsp-srv` hands out, named apart because the
+/// event behind each one is a different slot's — and one handler serves both.
+const SD_CARD_DETECTION: &str = "fsp-srv-sd-detection";
+
+const GAME_CARD_DETECTION: &str = "fsp-srv-gamecard-detection";
+
 /// What the save-data commands report before anything has read the running
 /// title's NACP: 64 MiB of save data and 16 MiB of journal.
 ///
@@ -257,6 +278,30 @@ impl Cpu {
                 self.reply_with_interface(tls, handle, "fsp-srv-save-info-reader")?;
                 Ok(())
             }
+            // 400 = OpenDeviceOperator: the interface that answers for the
+            // storage *devices* rather than the filesystems on them — whether
+            // a card is in either slot, how big it is, and what the controller
+            // has logged. It hands back an object, which is what the catch-all
+            // below could not do: a caller reads one as a move handle, parses
+            // the missing handle as 0, and makes its first call through a null
+            // `SharedPointer` while the reply still says success.
+            Some(400) => {
+                self.reply_with_interface(tls, handle, "fsp-srv-device-operator")?;
+                Ok(())
+            }
+            // 500 = OpenSdCardDetectionEventNotifier, 501 = ...GameCard...:
+            // the other half of what the device operator above answers, for a
+            // caller that would rather be told when a slot changes than ask.
+            // Both hand back an `IEventNotifier`, and both used to be a bare
+            // success — the same null out-object as 400, one command apart.
+            Some(500) | Some(501) => {
+                let name = match cmd_id {
+                    Some(500) => SD_CARD_DETECTION,
+                    _ => GAME_CARD_DETECTION,
+                };
+                self.reply_with_interface(tls, handle, name)?;
+                Ok(())
+            }
             // 1003 = DisableAutoSaveDataCreation. `ns` sends this once at
             // boot so that `fs` stops conjuring a save the moment a title
             // opens one, leaving the creation to `ns`'s own explicit call —
@@ -337,6 +382,151 @@ impl Cpu {
             Some(0) => self.write_ipc_response(tls, 0, &[], &0i64.to_le_bytes(), &[]),
             _ => self.unimplemented_command(tls, "fsp-srv-save-info-reader", cmd_id),
         }
+    }
+
+    /// `IDeviceOperator`: what a console's two storage devices — the SD card
+    /// and the internal eMMC — report about themselves, and whether a game
+    /// card is in the slot.
+    ///
+    /// Most of it is diagnostic, collected into a crash report rather than
+    /// acted on. The presence bools are the exception, and they are the two
+    /// answers this console is certain of: there is an SD card
+    /// ([`crate::vfs`]), and there is nothing that could hold a game card.
+    pub(super) fn fs_device_operator_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        /// A CID is 0x10 bytes and an eMMC's extended CSD 0x200, whatever
+        /// width the caller sized its buffer at.
+        const CID_SIZE: usize = 0x10;
+        const EXTENDED_CSD_SIZE: usize = 0x200;
+        match cmd_id {
+            // 0 = IsSdCardInserted, 200 = IsGameCardInserted.
+            Some(0) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
+            Some(200) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+            // 1 = GetSdCardSpeedMode, 101 = GetMmcSpeedMode -> s64.
+            Some(1) => self.write_ipc_response(tls, 0, &[], &SD_CARD_SPEED_MODE.to_le_bytes(), &[]),
+            Some(101) => self.write_ipc_response(tls, 0, &[], &MMC_SPEED_MODE.to_le_bytes(), &[]),
+            // 2 = GetSdCardCid, 100 = GetMmcCid: a card identification
+            // register into an out buffer, sized by an input s64. No physical
+            // card stands behind either, so both are zero — still worth
+            // writing, because a caller reads the full width back whether the
+            // server filled it or not.
+            Some(2) | Some(100) => {
+                let requested = self.mem.read_u64(self.ipc_request_data(tls)).unwrap_or(0);
+                self.write_out_buffer(tls, &[0u8; CID_SIZE], requested)?;
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // 3 = GetSdCardUserAreaSize, 4 = GetSdCardProtectedAreaSize -> s64.
+            // The user area is the card `fsp-srv` and `ns` already report; the
+            // protected area is the CPRM reserve, which this card has none of.
+            Some(3) => {
+                let size = SD_TOTAL_SPACE as i64;
+                self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
+            }
+            Some(4) => self.write_ipc_response(tls, 0, &[], &0i64.to_le_bytes(), &[]),
+            // 5 = GetAndClearSdCardErrorInfo, 113 = GetAndClearMmcErrorInfo ->
+            // (StorageErrorInfo, s64 log size). Four failure counters and the
+            // length of a log, all zero: nothing has failed, and there is no
+            // controller that would have recorded it if it had.
+            Some(5) | Some(113) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x18], &[]),
+            // 111 = GetMmcPartitionSize(MmcPartition) -> s64. 0 is the user
+            // data this console's saves live on; 1 and 2 are the boot
+            // partitions.
+            Some(111) => {
+                let size = match self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0) {
+                    0 => MMC_USER_AREA_SIZE,
+                    _ => MMC_BOOT_PARTITION_SIZE,
+                };
+                self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
+            }
+            // 112 = GetMmcPatrolCount -> u32: how many times the background
+            // scrub has swept the NAND. There is no scrub, so it never has.
+            Some(112) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // 114 = GetMmcExtendedCsd: the eMMC's 0x200-byte configuration
+            // register. Zero reads as "not defined" in every field of it,
+            // including the three bytes a NAND-health check looks at.
+            Some(114) => {
+                let requested = self.mem.read_u64(self.ipc_request_data(tls)).unwrap_or(0);
+                self.write_out_buffer(tls, &[0u8; EXTENDED_CSD_SIZE], requested)?;
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // 115/116 = Suspend/ResumeMmcPatrol, 400/401 = Suspend/Resume-
+            // SdmmcControl: stop and start machinery this console does not
+            // run. Accepting them promises nothing, which is what separates
+            // them from the commands refused below.
+            Some(115) | Some(116) | Some(400) | Some(401) => {
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // 300 = SetSpeedEmulationMode, 301 = GetSpeedEmulationMode. No
+            // read here is slowed to match, but the mode round-trips: a caller
+            // whose setting reads back as `None` was told it had been refused.
+            Some(300) => {
+                self.fs_speed_emulation_mode =
+                    self.mem.read_u32(self.ipc_request_data(tls)).unwrap_or(0);
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            Some(301) => {
+                let mode = self.fs_speed_emulation_mode;
+                self.write_ipc_response(tls, 0, &[], &mode.to_le_bytes(), &[])
+            }
+            // The rest of the game-card commands, and the erase and
+            // direct-write ones beside them. A caller reaches those only once
+            // 200 has said a card is there, which it never does — so they are
+            // refused rather than answered with a fabricated card.
+            _ => self.unimplemented_command(tls, "fsp-srv-device-operator", cmd_id),
+        }
+    }
+
+    /// `IEventNotifier`: cmd 0 = GetEventHandle, the event `fs` signals when a
+    /// card arrives in a slot or leaves one.
+    ///
+    /// It goes out **dark** and stays dark. A waiter here is waiting for a
+    /// *change* — the SD card is already mounted at boot and never leaves, and
+    /// there is no game card slot to change at all — so this is an event that
+    /// genuinely never fires, rather than one that should have. The same
+    /// reasoning `ns` applies to its own media events.
+    ///
+    /// One event per slot, handed back to every caller that asks: a poller
+    /// given a fresh handle per call leaks one per call.
+    pub(super) fn fs_detection_notifier_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        let game_card = self.ipc_interface(tls, handle, SD_CARD_DETECTION) == GAME_CARD_DETECTION;
+        let (slot, name) = if game_card {
+            (501u32, GAME_CARD_DETECTION)
+        } else {
+            (500u32, SD_CARD_DETECTION)
+        };
+        match cmd_id {
+            // The handle is a **copy** handle: `fs` keeps the event and the
+            // caller gets a duplicate, which is what `eventLoadRemote` expects.
+            Some(0) => {
+                let event = match self.fs_detection_events.get(&slot) {
+                    Some(&event) => event,
+                    None => {
+                        let event = self.alloc_event(name, false);
+                        self.fs_detection_events.insert(slot, event);
+                        event
+                    }
+                };
+                self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+            }
+            _ => self.unimplemented_command(tls, name, cmd_id),
+        }
+    }
+
+    /// Fill a command's map-alias out buffer with `bytes`, clamped to both the
+    /// buffer the caller mapped and the width it asked for.
+    fn write_out_buffer(&mut self, tls: u32, bytes: &[u8], requested: u64) -> Result<()> {
+        let Some((addr, len)) = self.ipc_recv_buffer(tls, 0) else {
+            return Ok(());
+        };
+        let take = requested.min(bytes.len() as u64).min(u64::from(len)) as usize;
+        for (index, &byte) in bytes[..take].iter().enumerate() {
+            self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
+        }
+        Ok(())
     }
 
     /// Which save an `fsp-srv` save-data request names.
@@ -894,5 +1084,119 @@ mod tests {
         cpu.fs_save_data_info_reader_request(TLS, Some(0)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "entries");
+    }
+
+    #[test]
+    fn the_device_operator_reports_the_card_this_console_has_and_the_one_it_has_not() {
+        // OpenDeviceOperator hands back an object, and the catch-all answered
+        // it with a bare success — `nnSdk` reads an out-object on a plain
+        // session as a move handle, parses the missing one as 0, and still
+        // reports success, so the first call lands on a null proxy.
+        let mut cpu = request(false, 400, &[]);
+        cpu.record_handle(9, "fsp-srv");
+        cpu.fsp_srv_request(TLS, Some(400), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        let operator = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        assert_ne!(operator, 0, "operator session");
+        assert_eq!(cpu.service_name(operator), Some("fsp-srv-device-operator"));
+
+        // The two presence bools, which are the only answers here that
+        // anything decides on.
+        write_request(&mut cpu, 0, &[]);
+        cpu.fs_device_operator_request(TLS, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 1, "sd card inserted");
+
+        write_request(&mut cpu, 200, &[]);
+        cpu.fs_device_operator_request(TLS, Some(200)).unwrap();
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "no game card");
+
+        // GetSdCardUserAreaSize reports the same card `fsp-srv` and `ns` do.
+        write_request(&mut cpu, 3, &[]);
+        cpu.fs_device_operator_request(TLS, Some(3)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), super::SD_TOTAL_SPACE);
+
+        // GetGameCardHandle is refused rather than answered with a handle to a
+        // card that is not in the slot the command before just denied.
+        const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
+        write_request(&mut cpu, 202, &[]);
+        cpu.fs_device_operator_request(TLS, Some(202)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), UNKNOWN_COMMAND_ID);
+    }
+
+    #[test]
+    fn a_device_operator_register_is_written_over_whatever_the_buffer_held() {
+        // GetSdCardCid reports nothing but a Result, so a caller reads the
+        // whole 0x10 back whether the server filled it or not — a success that
+        // writes nothing hands it its own stack as a card serial.
+        const BUFFER: u32 = 0x4000;
+        let mut cpu = request_with_recv_buffer(2, &0x10u64.to_le_bytes(), BUFFER, 0x10);
+        cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+        for offset in 0..0x20 {
+            cpu.mem.write_u8(BUFFER + offset, 0xAA).unwrap();
+        }
+        cpu.fs_device_operator_request(TLS, Some(2)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.read_bytes(BUFFER, 0x10), vec![0u8; 0x10], "no card, so no serial");
+        assert_eq!(cpu.read_bytes(BUFFER + 0x10, 0x10), vec![0xAA; 0x10], "past the buffer");
+    }
+
+    #[test]
+    fn the_speed_emulation_mode_a_caller_sets_is_the_one_it_reads_back() {
+        // Nothing here is slowed to match, but a mode that reads back as
+        // `None` is a request the caller was told had been refused.
+        let mut cpu = request(false, 301, &[]);
+        cpu.fs_device_operator_request(TLS, Some(301)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "none until set");
+
+        write_request(&mut cpu, 300, &2u32.to_le_bytes());
+        cpu.fs_device_operator_request(TLS, Some(300)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+
+        write_request(&mut cpu, 301, &[]);
+        cpu.fs_device_operator_request(TLS, Some(301)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 2, "SpeedEmulationMode::Slower");
+    }
+
+    #[test]
+    fn each_card_slot_has_its_own_detection_event_and_neither_ever_fires() {
+        // OpenSdCardDetectionEventNotifier: the same null out-object the
+        // device operator was, one command along. The notifier is an object,
+        // and the event only reaches the caller through it.
+        let mut cpu = request(false, 500, &[]);
+        cpu.record_handle(9, "fsp-srv");
+        cpu.fsp_srv_request(TLS, Some(500), 9).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        let sd = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        assert_eq!(cpu.service_name(sd), Some("fsp-srv-sd-detection"));
+
+        write_request(&mut cpu, 501, &[]);
+        cpu.fsp_srv_request(TLS, Some(501), 9).unwrap();
+        let game_card = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        assert_eq!(cpu.service_name(game_card), Some("fsp-srv-gamecard-detection"));
+
+        // GetEventHandle on each. A card arriving in one slot is not a card
+        // arriving in the other, so one shared event would wake both waiters.
+        write_request(&mut cpu, 0, &[]);
+        cpu.fs_detection_notifier_request(TLS, sd, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        let sd_event = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        assert_ne!(sd_event, 0, "sd detection event");
+
+        write_request(&mut cpu, 0, &[]);
+        cpu.fs_detection_notifier_request(TLS, game_card, Some(0)).unwrap();
+        let game_card_event = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
+        assert_ne!(game_card_event, sd_event, "one event per slot");
+
+        // Neither is ever signalled: a waiter is waiting for a slot to
+        // *change*, and nothing here can change one.
+        assert_eq!(cpu.event_signaled(sd_event), Some(false));
+        assert_eq!(cpu.event_signaled(game_card_event), Some(false));
+
+        // Asking twice hands back the event already being waited on rather
+        // than a second one — a poller would otherwise leak a handle per call.
+        write_request(&mut cpu, 0, &[]);
+        cpu.fs_detection_notifier_request(TLS, sd, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64, sd_event);
     }
 }
