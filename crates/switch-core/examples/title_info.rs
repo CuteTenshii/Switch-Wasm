@@ -1,13 +1,13 @@
 //! Print a title's control data — icon, name, publisher and the rest of its
-//! NACP — from an `.nsp` or a standalone Control `.nca`. The CLI equivalent of
+//! NACP — from an `.nsp`, an `.xci` or a standalone Control `.nca`. The CLI equivalent of
 //! the browser's title card, useful for checking a container without one.
 //!
-//! Usage: cargo run -p switch-core --example title_info -- <path.nsp|path.nca> <prod.keys> [title.keys] [icon_out.jpg]
+//! Usage: cargo run -p switch-core --example title_info -- <container> <prod.keys> [title.keys] [icon_out.jpg]
 mod common;
 
 use switch_core::source::{ByteSource, FileSource};
 
-const USAGE: &str = "title_info <path.nsp|path.nca> <prod.keys> [title.keys] [icon_out.jpg]";
+const USAGE: &str = "title_info <container> <prod.keys> [title.keys] [icon_out.jpg]";
 
 fn main() {
     let args = common::container_args(USAGE);

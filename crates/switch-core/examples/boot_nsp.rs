@@ -1,8 +1,9 @@
-//! Boot a real game from its container: find the Program NCA, decrypt the
-//! ExeFS, load every module and run it — the CLI equivalent of the browser's
-//! NSP/NCA panel "Launch" button, useful for debugging without a browser.
+//! Boot a real game from its container — an `.nsp`, an `.xci` or a bare
+//! Program `.nca`: find the Program NCA, decrypt the ExeFS, load every module
+//! and run it. The CLI equivalent of the browser's panel "Launch" button,
+//! useful for debugging without a browser.
 //!
-//! Usage: cargo run -p switch-core --example boot_nsp -- <path.nsp|path.nca> <prod.keys> [title.keys] [max_steps]
+//! Usage: cargo run -p switch-core --example boot_nsp -- <container> <prod.keys> [title.keys] [max_steps]
 //!
 //! `PROFILE=<interval>` samples the pc every `interval` steps and reports
 //! where the run spent itself, by thread and by 4 KiB page. A title that runs
@@ -20,7 +21,7 @@ use common::{Flow, Pace};
 use std::collections::BTreeMap;
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "boot_nsp <path.nsp|path.nca> <prod.keys> [title.keys] [max_steps]";
+const USAGE: &str = "boot_nsp <container> <prod.keys> [title.keys] [max_steps]";
 
 /// Where `PROFILE=` found the run: by thread, by page, and by return address.
 fn report_profile(

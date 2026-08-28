@@ -22,9 +22,11 @@ The `.nro`/`.nsp` files are gitignored.
   address, as in `DUMP=x23+0x1830:0x40`. Each used to live in one tool and be
   spelled differently in the next.
 - Every tool that reads a container takes `<container> <prod.keys>
-  [title.keys]`, in that order: the container may be an NSP or a bare NCA
-  (decided by its header, not its name), and `title.keys` may be left out when
-  `prod.keys` already opens the title.
+  [title.keys]`, in that order: the container may be an NSP, an XCI or a bare
+  NCA (decided by its header, not its name), and `title.keys` may be left out
+  when `prod.keys` already opens the title. A cartridge image is read through
+  its `secure` partition — its `update` partition is a firmware bundle and is
+  never the title.
 - `--example dump_exefs …` — flat module images at their real load addresses
   plus a sorted `symbols.txt`. **This is what makes a retail backtrace
   readable.** `--example disasm_flat` disassembles them there.

@@ -1,6 +1,6 @@
 //! Where a title that presents frames but draws nothing spends its time once
 //! it has stopped getting anywhere:
-//! `steady_state <nsp> <prod.keys> [title.keys] [frame] [steps]`.
+//! `steady_state <container> <prod.keys> [title.keys] [frame] [steps]`.
 //!
 //! `boot_nsp`'s `PROFILE=` samples a whole run, and for a title that spends a
 //! billion instructions booting and then stalls, that is a profile of the part
@@ -23,7 +23,7 @@ use common::{Flow, Pace};
 use std::collections::BTreeMap;
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "steady_state <nsp> <prod.keys> [title.keys] [frame] [steps]";
+const USAGE: &str = "steady_state <container> <prod.keys> [title.keys] [frame] [steps]";
 
 /// How many instructions to sample once the frame is reached. Enough to cover
 /// a few seconds of a stalled title's own loop.

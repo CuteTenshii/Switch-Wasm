@@ -19,12 +19,6 @@ const FORMAT_NAME: Record<FileFormat, string> = {
   nca: 'NCA',
 };
 
-// Recognised, but nothing here can open one - so it is turned away as what it
-// is rather than as a PFS0 with bad magic.
-const UNREADABLE: Partial<Record<FileFormat, string>> = {
-  xci: 'a cartridge image, and only PFS0 containers (.nsp, .nsz) are read here',
-};
-
 // Far enough in for the NCA magic at 0x200, the deepest of these.
 const HEAD_LEN = 0x204;
 
@@ -83,9 +77,8 @@ export async function classify<F extends FileFormat>(
     };
   }
   if (!(accept as readonly FileFormat[]).includes(format)) {
-    const unreadable = UNREADABLE[format];
-    const why = unreadable || 'an ' + FORMAT_NAME[format] + '; this takes ' + nameList(accept);
-    return { ok: false, why: file.name + ' is ' + why + '.' + (!unreadable && hint ? ' ' + hint : '') };
+    const why = 'an ' + FORMAT_NAME[format] + '; this takes ' + nameList(accept);
+    return { ok: false, why: file.name + ' is ' + why + '.' + (hint ? ' ' + hint : '') };
   }
   return { ok: true, format: format as F };
 }

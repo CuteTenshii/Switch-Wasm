@@ -130,6 +130,7 @@ pub mod romfs;
 pub mod source;
 pub mod ticket;
 pub mod vfs;
+pub mod xci;
 
 pub use error::{Error, Result};
 

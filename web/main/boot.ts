@@ -1,8 +1,8 @@
 /* Booting from the stage: the Open buttons, and dropping a file on it.
 
    Anything the emulator can boot is accepted here, homebrew and retail alike.
-   A `.nro` or `.elf` is an executable this loads directly; a `.nsp` or `.nca`
-   is a container the title has to be found inside first, which is
+   A `.nro` or `.elf` is an executable this loads directly; a `.nsp`, `.xci`
+   or `.nca` is a container the title has to be found inside first, which is
    `container.ts`'s job. Which of those a file is comes from its header, not
    its name - see `filetype.ts`. */
 
@@ -57,7 +57,7 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
 }
 
 async function bootFile(file: File): Promise<void> {
-  const verdict = await classify(file, ['nro', 'elf', 'pfs0', 'nca']);
+  const verdict = await classify(file, ['nro', 'elf', 'pfs0', 'xci', 'nca']);
   if (!verdict.ok) {
     // Not a fault: nothing was loaded, and whatever is running stays running
     // under the message until it is dismissed.
@@ -77,7 +77,7 @@ async function bootFile(file: File): Promise<void> {
     log('Reset before boot failed: ' + (err as Error).message, 'err');
     return;
   }
-  if (verdict.format === 'pfs0' || verdict.format === 'nca') {
+  if (verdict.format === 'pfs0' || verdict.format === 'xci' || verdict.format === 'nca') {
     // A container fills the Files panel on its way past, so what was opened
     // and what was found in it stay inspectable after the title has started.
     await bootContainer(file, verdict.format);

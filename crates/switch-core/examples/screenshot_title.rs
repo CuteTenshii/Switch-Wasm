@@ -1,6 +1,7 @@
-//! Boot a retail title — an NSP or a bare Program NCA, decided by the
-//! container's header — and write the Nth presented frame to a PPM:
-//! `screenshot_title <path.nsp|path.nca> <prod.keys> [title.keys] <out.ppm> [frame]`.
+//! Boot a retail title — an NSP, a cartridge image or a bare Program NCA,
+//! decided by the container's header — and write the Nth presented frame to a
+//! PPM:
+//! `screenshot_title <container> <prod.keys> [title.keys] <out.ppm> [frame]`.
 //!
 //! The counterpart to `screenshot` for a title rather than an NRO. The
 //! difference from `boot_nsp SHOT=` is that this stops *at* the frame rather
@@ -60,8 +61,7 @@ use std::collections::HashMap;
 use std::env;
 use switch_core::cpu::Cpu;
 
-const USAGE: &str =
-    "screenshot_title <path.nsp|path.nca> <prod.keys> [title.keys] <out.ppm> [frame]";
+const USAGE: &str = "screenshot_title <container> <prod.keys> [title.keys] <out.ppm> [frame]";
 
 /// The sampling interval `STACKS=1` implies when `PROFILE=` names none. Short
 /// enough that a hot loop still resolves.

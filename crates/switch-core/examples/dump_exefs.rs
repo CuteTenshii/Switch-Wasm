@@ -1,7 +1,7 @@
 //! Decrypt a retail container's Program ExeFS and dump every module as a flat
 //! image plus a symbol map, at the exact addresses `boot_retail_program`
 //! lays them out at. That makes a backtrace from a real run nameable:
-//! `dump_exefs <path.nsp|path.nca> <prod.keys> [title.keys] <out_dir>`.
+//! `dump_exefs <container> <prod.keys> [title.keys] <out_dir>`.
 mod common;
 
 use std::fs;
@@ -17,7 +17,7 @@ fn read_cstr(d: &[u8], off: usize) -> String {
     String::from_utf8_lossy(&d[off..end]).into_owned()
 }
 
-const USAGE: &str = "dump_exefs <path.nsp|path.nca> <prod.keys> [title.keys] <out_dir>";
+const USAGE: &str = "dump_exefs <container> <prod.keys> [title.keys] <out_dir>";
 
 fn main() {
     let args = common::container_args(USAGE);

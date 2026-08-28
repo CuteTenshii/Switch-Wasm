@@ -57,6 +57,8 @@ pub enum Error {
     /// decrypted (unknown signature type, personalized crypto, missing
     /// titlekek).
     Ticket(String),
+    /// A cartridge image's partitions could not be walked.
+    Xci(String),
     /// A CPU fault (bad memory access, invalid state, unreachable).
     Cpu(String),
     /// A GPU fault: an unmapped GPU address, a malformed command stream, or a
@@ -119,6 +121,7 @@ impl fmt::Display for Error {
             Error::Elf(msg) => write!(f, "ELF: {}", msg),
             Error::Nro(msg) => write!(f, "NRO: {}", msg),
             Error::Nca(msg) => write!(f, "NCA: {}", msg),
+            Error::Xci(msg) => write!(f, "XCI: {}", msg),
             Error::Nso(msg) => write!(f, "NSO: {}", msg),
             Error::RomFs(msg) => write!(f, "RomFS: {}", msg),
             Error::Ticket(msg) => write!(f, "ticket: {}", msg),

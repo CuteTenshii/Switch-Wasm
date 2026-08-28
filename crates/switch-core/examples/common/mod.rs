@@ -733,12 +733,14 @@ const MODULE_ORDER: &[&str] = &[
 
 /// What a container turned out to be, decided by looking at it.
 ///
-/// `PFS0` sits at offset 0 and the NCA magic at 0x200. An NCA straight off the
-/// CDN keeps its header encrypted, so its magic is invisible until `prod.keys`
-/// decrypts it — those fall back to the extension, which is what the frontend
-/// does with them too (`web/main/filetype.ts`).
+/// `PFS0` sits at offset 0, an XCI's `HEAD` at 0x100 and the NCA magic at
+/// 0x200; the first two are containers holding files and are read the same
+/// way from here on ([`switch_core::xci::read_container`]). An NCA straight
+/// off the CDN keeps its header encrypted, so its magic is invisible until
+/// `prod.keys` decrypts it — those fall back to the extension, which is what
+/// the frontend does with them too (`web/main/filetype.ts`).
 enum Kind {
-    Pfs0,
+    Container,
     Nca,
 }
 
@@ -747,8 +749,8 @@ fn container_kind(path: &Path) -> Kind {
     // The whole window or nothing: a short read would leave the magic
     // positions as zeros and quietly look like "not an NCA".
     let read = open_source(path).read_exact_at(0, &mut head).is_ok();
-    if read && &head[..4] == b"PFS0" {
-        return Kind::Pfs0;
+    if read && (&head[..4] == b"PFS0" || &head[0x100..0x104] == b"HEAD") {
+        return Kind::Container;
     }
     let is_nca = read && matches!(&head[0x200..0x204], b"NCA3" | b"NCA2" | b"NCA0");
     let by_name = path
@@ -758,7 +760,7 @@ fn container_kind(path: &Path) -> Kind {
     if is_nca || by_name {
         Kind::Nca
     } else {
-        Kind::Pfs0
+        Kind::Container
     }
 }
 
@@ -778,8 +780,8 @@ pub fn open_control(
     let src = open_source(path);
     match container_kind(path) {
         Kind::Nca => switch_core::control::Control::from_source(&src, keys),
-        Kind::Pfs0 => {
-            let pfs0 = switch_core::nsp::Pfs0::read_from(&src)?;
+        Kind::Container => {
+            let pfs0 = switch_core::xci::read_container(&src)?;
             let Some((index, nca)) =
                 switch_core::control::find_control_nca(&pfs0.files, &src, keys)
             else {
@@ -845,13 +847,14 @@ impl Title {
         let path = container.as_ref().to_path_buf();
         match container_kind(&path) {
             Kind::Nca => Title::open_nca(path, prod, title),
-            Kind::Pfs0 => Title::open_nsp(path, prod, title),
+            Kind::Container => Title::open_container(path, prod, title),
         }
     }
 
-    /// Open the Program NCA inside an NSP, resolving its title key from a
-    /// bundled ticket if the container has one.
-    pub fn open_nsp(
+    /// Open the Program NCA inside a container — an `.nsp`, or a cartridge
+    /// image whose partitions present the same file table — resolving its
+    /// title key from a bundled ticket if there is one.
+    pub fn open_container(
         container: impl AsRef<Path>,
         prod: impl AsRef<Path>,
         title: Option<impl AsRef<Path>>,
@@ -1070,10 +1073,10 @@ pub fn mount_add_on_content(cpu: &mut Cpu, keys: &KeySet) {
     for path in list.split(',').map(str::trim).filter(|p| !p.is_empty()) {
         let path = Path::new(path);
         let src = open_source(path);
-        let pfs0 = match switch_core::nsp::Pfs0::read_from(&src) {
+        let pfs0 = match switch_core::xci::read_container(&src) {
             Ok(pfs0) => pfs0,
             Err(e) => {
-                eprintln!("{} is not a PFS0: {e}", path.display());
+                eprintln!("{} is not a container this reads: {e}", path.display());
                 continue;
             }
         };
@@ -1144,8 +1147,12 @@ pub fn mount_add_on_content(cpu: &mut Cpu, keys: &KeySet) {
 /// more than one is an update, and the later entry is the one it updates to.
 fn open_program(path: &Path, keys: &mut KeySet) -> ((u64, u64), switch_core::nca::Nca) {
     let src = open_source(path);
-    let pfs0 = switch_core::nsp::Pfs0::read_from(&src)
-        .unwrap_or_else(|e| die(&format!("{} is not a PFS0: {e}", path.display())));
+    let pfs0 = switch_core::xci::read_container(&src).unwrap_or_else(|e| {
+        die(&format!(
+            "{} is not a container this reads: {e}",
+            path.display()
+        ))
+    });
     let mut found = None;
     for (index, file) in pfs0.files.iter().enumerate() {
         if !file.name.to_ascii_lowercase().ends_with(".nca") {

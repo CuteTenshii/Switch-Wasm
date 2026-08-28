@@ -38,9 +38,9 @@ $('nsp-file').addEventListener('change', (e) => {
 });
 
 // A `.nca` is one piece of content rather than a container of them, so it is
-// opened as itself; a PFS0 is looked inside.
+// opened as itself; a PFS0 or a cartridge image is looked inside.
 async function handleContainerFile(file: File): Promise<void> {
-  const verdict = await classify(file, ['pfs0', 'nca'], 'Drop it on the screen to boot it.');
+  const verdict = await classify(file, ['pfs0', 'xci', 'nca'], 'Drop it on the screen to boot it.');
   if (!verdict.ok) {
     // Shown where an inspection result goes, and without clearing: an open
     // container and its Launch buttons should not vanish over a bad drop.
@@ -277,8 +277,12 @@ function pairedNotes(): string[] {
    NCA, which someone would otherwise do by clicking down the file list
    looking for the one whose content type says Program. Every file in an NSP
    is named after its own hash, so the content type is the only thing that
-   distinguishes it. */
-export async function bootContainer(file: File, format: 'pfs0' | 'nca'): Promise<void> {
+   distinguishes it.
+
+   A cartridge image goes through here as an NSP does: the wasm side flattens
+   its partitions into one file table, so nothing on this side has to know
+   which of the two it opened. */
+export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'): Promise<void> {
   setState('loading');
   beginLoad(file.name, 'opening the container (' + fmtSize(file.size) + ')');
   if (format === 'nca') {

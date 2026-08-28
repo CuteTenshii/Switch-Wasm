@@ -352,8 +352,13 @@ pub extern "C" fn switch_last_error(handle: u32, buf: *mut u8, maxlen: u32) -> u
     n as u32
 }
 
-/// Open the `size`-byte container the host has ready as an NSP: read its
-/// PFS0 file table and keep it. Returns 0 on success, -1 on error.
+/// Open the `size`-byte container the host has ready: read its file table
+/// and keep it. Returns 0 on success, -1 on error.
+///
+/// Either kind of container — an `.nsp`, or a cartridge image whose
+/// partitions flatten into the same table — so the page hands both here and
+/// everything downstream (the Program NCA scan, the Control NCA, the file
+/// list) is one path.
 ///
 /// Nothing is copied into wasm memory — the file stays with the host and is
 /// read through `host_read` from here on. It has to be: a retail container
@@ -366,7 +371,7 @@ pub extern "C" fn switch_open_nsp(handle: u32, size: u64) -> i32 {
     s.container = Some(container);
     s.nsp_files = Vec::new();
     s.control = None;
-    match Pfs0::read_from(&container) {
+    match switch_core::xci::read_container(&container) {
         Ok(pfs0) => {
             s.nsp_files = pfs0.files;
             s.last_error.clear();
@@ -2524,6 +2529,47 @@ mod tests {
         let n = switch_last_error(handle, err.as_mut_ptr(), err.len() as u32);
         let text = String::from_utf8(err[..n as usize].to_vec()).unwrap();
         assert!(text.contains("bad magic"), "{text}");
+
+        switch_free_session(handle);
+    }
+
+    /// A cartridge image is opened through the same entry point as an
+    /// `.nsp`, and presents the page the same file list — the whole of what
+    /// the browser needed to boot one.
+    #[test]
+    fn a_cartridge_image_opens_as_a_container() {
+        use switch_core::nsp::testing::partition_fs;
+        use switch_core::nsp::PartitionKind;
+
+        let (_host, handle) = new_session();
+        let payload: Vec<u8> = (0..=255u8).cycle().take(2048).collect();
+        let secure = partition_fs(
+            PartitionKind::Hfs0,
+            &[("program.nca", &payload), ("meta.cnmt.nca", b"cnmt")],
+        );
+        // A cartridge carries a firmware bundle beside the title, and the
+        // page must not be shown its NCAs as if they were the game's.
+        let update = partition_fs(PartitionKind::Hfs0, &[("system.nca", b"firmware")]);
+        let image =
+            switch_core::xci::testing::cartridge(&[("update", &update), ("secure", &secure)]);
+        let size = image.len() as u64;
+        set_host_container(image);
+
+        assert_eq!(switch_open_nsp(handle, size), 0);
+
+        let mut buf = vec![0u8; 4096];
+        let n = switch_nsp_files_json(handle, buf.as_mut_ptr(), buf.len() as u32);
+        let json = String::from_utf8(buf[..n as usize].to_vec()).unwrap();
+        assert!(json.contains(r#"{"name":"program.nca""#), "{json}");
+        assert!(json.contains(r#"{"name":"meta.cnmt.nca""#), "{json}");
+        assert!(!json.contains("system.nca"), "{json}");
+
+        // The offsets in it are the image's own, so a read through them lands
+        // on the file and not on a partition header.
+        let mut out = vec![0u8; 16];
+        let got = switch_read_file(handle, 0, 0x700, out.as_mut_ptr(), out.len() as u32);
+        assert_eq!(got, 16);
+        assert_eq!(out[..], payload[0x700..0x710]);
 
         switch_free_session(handle);
     }

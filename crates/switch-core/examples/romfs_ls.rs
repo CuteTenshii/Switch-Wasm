@@ -1,5 +1,5 @@
 //! What a title's RomFS holds, and which file a byte offset falls in:
-//! `romfs_ls <path.nsp|path.nca> <prod.keys> [title.keys] [offset,...]`.
+//! `romfs_ls <container> <prod.keys> [title.keys] [offset,...]`.
 //!
 //! `TRACE_IPC`'s `[storage] read offset=…` lines name a byte range and nothing
 //! else, so a trace of a title loading its assets says how much it read and
@@ -18,7 +18,7 @@ mod common;
 
 use switch_core::source::ByteSource;
 
-const USAGE: &str = "romfs_ls <path.nsp|path.nca> <prod.keys> [title.keys] [offset,...]";
+const USAGE: &str = "romfs_ls <container> <prod.keys> [title.keys] [offset,...]";
 
 /// The RomFS header's declared size. The format carries no magic number, so
 /// this doubles as the check that the section decrypted to a RomFS at all.

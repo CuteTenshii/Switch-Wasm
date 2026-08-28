@@ -60,8 +60,8 @@
     <div class="topbar-actions">
       <button id="btn-dock" class="btn" title="Dock or undock the console (Handheld: 720p and a touchscreen; Docked: 1080p and boost clocks)"
               aria-pressed="false">Handheld</button>
-      <label class="btn" for="nro-file" title="Open a .nro, .elf, .nsp or .nca">Open</label>
-      <input type="file" id="nro-file" accept=".nro,.elf,.bin,.nsp,.nsz,.nca" hidden>
+      <label class="btn" for="nro-file" title="Open a .nro, .elf, .nsp, .xci or .nca">Open</label>
+      <input type="file" id="nro-file" accept=".nro,.elf,.bin,.nsp,.nsz,.xci,.nca" hidden>
       <button id="btn-fullscreen" class="btn icon" title="Fullscreen" aria-label="Fullscreen">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path
           d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4"/></svg>
@@ -79,14 +79,14 @@
 
     <div class="overlay" id="overlay">
       <div class="overlay-inner">
-        <h1>Drop a homebrew <code>.nro</code> or a title <code>.nsp</code> to boot</h1>
+        <h1>Drop a homebrew <code>.nro</code> or a title <code>.nsp</code> / <code>.xci</code> to boot</h1>
         <p class="muted">…or open one. Everything runs locally in your browser.</p>
         <div class="overlay-actions">
           <label class="btn primary big" for="nro-file-2">Open .nro / .elf / .nsp</label>
-          <input type="file" id="nro-file-2" accept=".nro,.elf,.bin,.nsp,.nsz,.nca" hidden>
+          <input type="file" id="nro-file-2" accept=".nro,.elf,.bin,.nsp,.nsz,.xci,.nca" hidden>
         </div>
         <p class="muted tiny">A container is opened where it sits and read a range at a time, so a
-          retail <code>.nsp</code> never has to fit in memory. It needs <code>prod.keys</code>,
+          retail <code>.nsp</code> or cartridge image never has to fit in memory. It needs <code>prod.keys</code>,
           which the Files panel takes.</p>
         <p class="muted tiny">Keyboard: arrows = D-pad · Z/X = A/B · A/S = X/Y · Q/E = L/R · Enter = + · Shift = −.
           A connected gamepad is used automatically.</p>
@@ -241,9 +241,9 @@
       </summary>
       <div class="section-body">
         <div class="dropzone" id="nsp-drop">
-          <span class="dropzone-title">Drop an <code>.nsp</code> or <code>.nca</code></span>
+          <span class="dropzone-title">Drop an <code>.nsp</code>, <code>.xci</code> or <code>.nca</code></span>
           <span class="dropzone-sub">or <label for="nsp-file">browse</label> for one</span>
-          <input type="file" id="nsp-file" accept=".nsp,.nsz,.nca" hidden>
+          <input type="file" id="nsp-file" accept=".nsp,.nsz,.xci,.nca" hidden>
         </div>
         <div id="nsp-result"></div>
       </div>

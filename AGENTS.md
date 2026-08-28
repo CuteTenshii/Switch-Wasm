@@ -2,8 +2,8 @@
 
 Browser Switch emulator: an A64 interpreter with a block-translating JIT, a
 software GPU with an optional WebGPU backend, and the container stack
-(PFS0/NSP, NCA, NSO/NRO/ELF, RomFS) needed to boot retail titles and system
-applets. Compiled to WASM; frontend is TypeScript on Vite.
+(PFS0/NSP, XCI, NCA, NSO/NRO/ELF, RomFS) needed to boot retail titles and
+system applets. Compiled to WASM; frontend is TypeScript on Vite.
 
 PROGRESS.md is the long-form log of what was tried and why. `docs/` holds the
 reference material that is looked up rather than read. This file is the
@@ -12,7 +12,7 @@ standing state.
 ## Commands
 
 - `make all` — `test` then `assets`.
-- `make test` — `cargo test` over all three crates. 889 tests.
+- `make test` — `cargo test` over all three crates. 908 tests.
 - `make wasm` — release wasm build `--features gpu`, then `wasm-bindgen
   --target web`. Needs `rustup target add wasm32-unknown-unknown` and a
   `wasm-bindgen-cli` matching the `Cargo.lock` version.
@@ -31,7 +31,7 @@ standing state.
 - `switch-core` — the emulator, **zero dependencies**. `cpu` (`mod`/`alu`/
   `bits`/`fp`/`jit`/`loadstore`/`simd`/`svc`/`system`, plus `ipc` and one
   module per service domain — see below), `gpu`, `display`, `mem`, `vfs`,
-  `source`, `crypto`/`keys`/`ticket`, `nsp`/`nca`/`romfs`/`npdm`/`nso`/`nro`/
+  `source`, `crypto`/`keys`/`ticket`, `nsp`/`xci`/`nca`/`romfs`/`npdm`/`nso`/`nro`/
   `elf`/`lz4`, `control`, `disasm`, `error`.
 - `switch-gpu` — a `wgpu` backend behind `gpu::renderer::Renderer`. Separate
   because `wgpu` brings hundreds of crates and the core has none.

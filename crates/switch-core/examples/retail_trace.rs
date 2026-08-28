@@ -2,7 +2,7 @@
 //! executed instructions and dump it when the guest halts — the fastest way
 //! to see how an `nnSdk` abort was reached without tracing 117M steps.
 //!
-//! Usage: retail_trace <nsp> <prod.keys> [title.keys] [tail_len]
+//! Usage: retail_trace <container> <prod.keys> [title.keys] [tail_len]
 //!   RING_FROM=<hex pc>  start recording only once this pc is first hit.
 //!   MARK=<pc>[=name][,...]  print a line each time one of these pcs runs.
 //!   MARK_DUMP=<reg>,<byte offset>,<words>  also dump memory at each mark.
@@ -11,7 +11,7 @@ mod common;
 use std::env;
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "retail_trace <nsp> <prod.keys> [title.keys] [tail_len]";
+const USAGE: &str = "retail_trace <container> <prod.keys> [title.keys] [tail_len]";
 
 fn main() {
     let args = common::container_args(USAGE);

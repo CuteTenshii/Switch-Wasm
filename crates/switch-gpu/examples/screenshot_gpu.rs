@@ -1,6 +1,6 @@
 //! `screenshot_title` with the GPU backend installed, so the two can be
 //! compared frame for frame:
-//! `screenshot_gpu <path.nsp|path.nca> <prod.keys> [title.keys] <out.ppm> [frame]`.
+//! `screenshot_gpu <container> <prod.keys> [title.keys] <out.ppm> [frame]`.
 //!
 //! Either kind of container, decided by its header: the backend this exists to
 //! measure is only worth measuring against a title that draws, and those ship
@@ -20,7 +20,7 @@ mod common;
 use common::{Flow, Pace};
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "screenshot_gpu <path.nsp|path.nca> <prod.keys> [title.keys] <out.ppm> [frame]";
+const USAGE: &str = "screenshot_gpu <container> <prod.keys> [title.keys] <out.ppm> [frame]";
 
 fn main() {
     let args = common::container_args(USAGE);

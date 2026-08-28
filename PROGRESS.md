@@ -29,7 +29,7 @@ graphics stack, opens its audio device, and runs on into its own loop. **Every
 service it asks for has a real implementation** — a full boot logs no `no
 implementation` and no `unimplemented` lines.
 
-`make test`: **889 tests, all passing.**
+`make test`: **908 tests, all passing.**
 
 ## Homebrew
 
@@ -345,6 +345,29 @@ limit on dense, page-aligned and sector-aligned keys rather than for
 perfection.
 
 ## Retail NCA/NSP
+
+**A cartridge image is the same container one layer down.** An XCI's root is
+an HFS0 whose entries are the cartridge's partitions — `update`, `normal`,
+`secure`, `logo` — and each of those is an HFS0 holding NCAs; HFS0 is PFS0
+with a 0x40-byte entry that adds a hash. So the reader is `Pfs0`'s, given an
+offset to start at and an entry stride (`Pfs0::read_partition_at`), and
+`Xci::content` flattens the partitions into the one file table every reader
+above already takes. Nothing else changed: the Program NCA scan, the Control
+NCA, the bundled ticket, the browser's file list and `switch_open_nsp` were
+already written against a file table and a source.
+
+Two rules the flattening has to keep. The `update` partition is left out — it
+is a firmware bundle, dozens of system NCAs with Program content among them,
+and every search that follows is "the first/last NCA of type X" — and `secure`
+goes last, because the Program scan keeps the *last* match (the rule that
+picks an update's program over the base game's). The absolute-offset fallback
+that reads repacked `.nsp`s is off for a nested partition: inside an image an
+offset that "fits" measured from byte 0 is a coincidence, not a producer's
+intent.
+
+Verified end to end by repacking "A Short Hike" into an XCI and booting it:
+same NACP and icon, same frame 3.
+
 
 **Decryption is verified against a real commercial title**, not a synthetic
 test: a Program NCA's ExeFS decrypts and its SHA-256 matches Nintendo's own
