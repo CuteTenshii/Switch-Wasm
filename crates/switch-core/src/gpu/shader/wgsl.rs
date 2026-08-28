@@ -181,6 +181,9 @@ pub struct Translation {
     /// Generic `a[]` slots the program writes, ascending: a vertex shader's
     /// varyings.
     pub stores: Vec<usize>,
+    /// The subset of [`Translation::loads`] a fragment shader interpolates
+    /// with `ipa.centroid`, ascending.
+    pub centroid_loads: Vec<usize>,
     /// The constant banks it reads, ascending.
     pub const_banks: Vec<u8>,
     /// The textures it samples, in the order it first mentions them: the
@@ -199,6 +202,7 @@ pub fn translate(program: &Compiled) -> Result<Translation, Unsupported> {
         registers: emitter.regs.iter().copied().collect(),
         loads: emitter.loads.iter().copied().collect(),
         stores: emitter.stores.iter().copied().collect(),
+        centroid_loads: emitter.centroid_loads.iter().copied().collect(),
         const_banks: emitter.banks.iter().copied().collect(),
         textures: emitter.textures.clone(),
     })
@@ -495,6 +499,7 @@ struct Emitter<'a> {
     /// emitted so that a binding it calls cannot be left out of the module.
     loads: BTreeSet<usize>,
     stores: BTreeSet<usize>,
+    centroid_loads: BTreeSet<usize>,
     banks: BTreeSet<u8>,
     textures: Vec<(u16, TexDim)>,
     /// Names `let` bindings apart. WGSL scopes them to their block, but one
@@ -515,6 +520,7 @@ impl<'a> Emitter<'a> {
             uses_stack: false,
             loads: BTreeSet::new(),
             stores: BTreeSet::new(),
+            centroid_loads: BTreeSet::new(),
             banks: BTreeSet::new(),
             textures: Vec::new(),
             temps: 0,
@@ -854,8 +860,11 @@ impl Emitter<'_> {
                     self.line(&format!("attrOut({base} + {word}u, {value});"));
                 }
             }
-            Op::Ipa { dst, offset, mul, perspective, sat } => {
+            Op::Ipa { dst, offset, mul, perspective, sat, centroid } => {
                 self.loads.extend(generic_slot(offset));
+                if centroid {
+                    self.centroid_loads.extend(generic_slot(offset));
+                }
                 let mut value = format!("attrIn({offset}u)");
                 if perspective {
                     if let Some(mul) = mul {
@@ -1698,6 +1707,11 @@ pub struct Layout {
     /// Both stages have to name the same ones, so a pair of modules is built
     /// from one layout rather than two.
     pub varyings: Vec<usize>,
+    /// The subset of [`Layout::varyings`] the fragment shader reads with
+    /// `ipa.centroid`, which both stages must qualify the same way — an
+    /// `@interpolate` that differs between them is a pipeline that will not
+    /// build. Only the fragment program says so; the vertex stage is told.
+    pub centroid_varyings: Vec<usize>,
     /// Constant banks the program reads, by bind slot.
     pub const_banks: Vec<u8>,
     /// The textures the module binds.
@@ -1855,6 +1869,12 @@ impl Layout {
             attributes,
             integer_attributes: Vec::new(),
             varyings,
+            // A vertex shader has no `ipa` to say it with; the backend copies
+            // the fragment stage's answer over before building the pair.
+            centroid_varyings: match stage {
+                Stage::Vertex => Vec::new(),
+                Stage::Fragment => translated.centroid_loads.clone(),
+            },
             const_banks: translated.const_banks.clone(),
             textures: translated
                 .textures
@@ -1873,6 +1893,23 @@ impl Layout {
             depth_minus_one_to_one: false,
             bgra_attributes: Vec::new(),
             coverage: None,
+        }
+    }
+
+    /// The sampling half of a varying's `@interpolate`, as the text that
+    /// follows `linear` — `", centroid"` or nothing.
+    ///
+    /// WGSL's default is `center`, and in a single-sampled pass the two are
+    /// the same point. It is still said, because the expanded-multisample
+    /// route is not the only one the backend has: with `GPU_DEVICE_MSAA` the
+    /// pass is genuinely multisampled, and there centroid is what keeps a
+    /// varying from being extrapolated outside the primitive at a partly
+    /// covered edge.
+    fn sampling(&self, slot: usize) -> &'static str {
+        if self.centroid_varyings.contains(&slot) {
+            ", centroid"
+        } else {
+            ""
         }
     }
 
@@ -2061,7 +2098,8 @@ fn vertex_entry(layout: &Layout) -> String {
     out.push_str("struct VertexOutput {\n  @builtin(position) position: vec4<f32>,\n");
     for slot in &layout.varyings {
         out.push_str(&format!(
-            "  @location({slot}) @interpolate(linear) vary{slot}: vec4<f32>,\n"
+            "  @location({slot}) @interpolate(linear{}) vary{slot}: vec4<f32>,\n",
+            layout.sampling(*slot)
         ));
     }
     out.push_str("}\n\n@vertex\nfn vs_main(\n");
@@ -2147,7 +2185,8 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         String::from("struct FragmentInput {\n  @builtin(position) position: vec4<f32>,\n");
     for slot in &layout.varyings {
         out.push_str(&format!(
-            "  @location({slot}) @interpolate(linear) vary{slot}: vec4<f32>,\n"
+            "  @location({slot}) @interpolate(linear{}) vary{slot}: vec4<f32>,\n",
+            layout.sampling(*slot)
         ));
     }
     out.push_str("}\n\n");
@@ -2325,7 +2364,7 @@ mod tests {
             Op::F2i { dst: 1, src: Operand::Reg(2), sm: NO_MOD, dst_bytes: 4, dst_signed: true, round: FRound::Trunc, ftz: true },
             Op::Iscadd { dst: 1, a: 2, aneg: false, b: Operand::Reg(3), bneg: false, shift: 2 },
             Op::Iset { dst: 1, a: 2, b: Operand::Imm(3), cmp: ICmp::Eq, signed: true, bop: BoolOp::And, src: ALWAYS, bf: false },
-            Op::Ipa { dst: 1, offset: 0x80, mul: Some(2), perspective: true, sat: false },
+            Op::Ipa { dst: 1, offset: 0x80, mul: Some(2), perspective: true, sat: false, centroid: false },
             Op::Fmnmx { dst: 1, a: 2, am: NO_MOD, b: Operand::Reg(3), bm: NO_MOD, pred: ALWAYS, ftz: true },
             Op::Ldc { dst: 1, bank: 1, offset: 0x14, idx: 2, size: MemSize::B32 },
             Op::St { offset: 0x70, idx: RZ, src: 1, size: MemSize::B32 },
@@ -2600,7 +2639,7 @@ mod tests {
             (Op::Exit, ALWAYS),
         ]);
         let fs = program(&[
-            (Op::Ipa { dst: 0, offset, mul: None, perspective: true, sat: false }, ALWAYS),
+            (Op::Ipa { dst: 0, offset, mul: None, perspective: true, sat: false, centroid: false }, ALWAYS),
             (Op::Exit, ALWAYS),
         ]);
         (vs, fs)
@@ -2703,6 +2742,32 @@ mod tests {
         let fs = module(&fs, Stage::Fragment, &Layout::of(&fs, Stage::Fragment)).unwrap();
         assert!(vs.contains("@location(7) @interpolate(linear) vary7"), "{vs}");
         assert!(fs.contains("@location(7) @interpolate(linear) vary7"), "{fs}");
+    }
+
+    /// Only the fragment program's `ipa` says a varying is sampled at the
+    /// centroid, and an `@interpolate` the two stages spell differently is a
+    /// pipeline that will not build — so the vertex stage is told, the way
+    /// `Gpu::pipeline` tells it.
+    #[test]
+    fn a_centroid_varying_is_qualified_the_same_way_in_both_stages() {
+        let offset = (GENERIC_BASE + 5 * GENERIC_STRIDE) as u16;
+        let (vs, _) = pair(5);
+        let fs = program(&[
+            (Op::Ipa { dst: 0, offset, mul: None, perspective: true, sat: false, centroid: true }, ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]);
+        let vs = translate(&vs).unwrap();
+        let fs = translate(&fs).unwrap();
+        let fs_layout = Layout::of(&fs, Stage::Fragment);
+        assert_eq!(fs_layout.centroid_varyings, vec![5]);
+        let mut vs_layout = Layout::of(&vs, Stage::Vertex);
+        assert_eq!(vs_layout.centroid_varyings, Vec::<usize>::new(), "a vertex shader has no ipa");
+        vs_layout.centroid_varyings = fs_layout.centroid_varyings.clone();
+
+        let vs = module(&vs, Stage::Vertex, &vs_layout).unwrap();
+        let fs = module(&fs, Stage::Fragment, &fs_layout).unwrap();
+        assert!(vs.contains("@location(5) @interpolate(linear, centroid) vary5"), "{vs}");
+        assert!(fs.contains("@location(5) @interpolate(linear, centroid) vary5"), "{fs}");
     }
 
     #[test]

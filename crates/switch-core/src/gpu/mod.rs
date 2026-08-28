@@ -72,7 +72,24 @@ pub struct DisplayBuffer {
     /// Low byte of `NvColorFormat` is bits-per-pixel; the whole value selects
     /// the channel order.
     pub color_format: u64,
+    /// The `NATIVE_WINDOW_TRANSFORM_*` bits the producer queued the buffer
+    /// with — how the image is stored versus how it is to be shown.
+    ///
+    /// A title that finds it cheaper to render y-down says so here rather
+    /// than by mirroring its viewport, and the display is what puts it the
+    /// right way up. Minecraft queues every frame `FLIP_V`; A Short Hike and
+    /// the Home Menu queue `0`.
+    pub transform: u32,
 }
+
+/// `NATIVE_WINDOW_TRANSFORM_FLIP_H`: mirror the image left to right.
+pub const TRANSFORM_FLIP_H: u32 = 0x01;
+/// `NATIVE_WINDOW_TRANSFORM_FLIP_V`: mirror the image top to bottom.
+pub const TRANSFORM_FLIP_V: u32 = 0x02;
+/// `NATIVE_WINDOW_TRANSFORM_ROT_90`. Not applied: it transposes the frame,
+/// so the surface a guest queued and the image it asked to be shown are
+/// different shapes, and nothing seen so far queues one.
+pub const TRANSFORM_ROT_90: u32 = 0x04;
 
 /// `NvLayout_Pitch`.
 pub const NV_LAYOUT_PITCH: u32 = 1;
@@ -275,8 +292,22 @@ impl Gpu {
         raw_bytes.resize(swizzled, 0);
         let held = mem.read_into(base, &mut raw_bytes[..swizzled]).is_ok();
 
+        let flip_v = buffer.transform & TRANSFORM_FLIP_V != 0;
+        let flip_h = buffer.transform & TRANSFORM_FLIP_H != 0;
+        if buffer.transform & TRANSFORM_ROT_90 != 0 {
+            // Said once rather than rotated wrongly: the frame would come out
+            // the other way round from the surface that holds it.
+            return Err(Error::Gpu(format!(
+                "present: no rotation for queue transform {:#x}",
+                buffer.transform
+            )));
+        }
+
         let mut pixels = Vec::with_capacity((buffer.width * buffer.height) as usize);
         for y in 0..buffer.height {
+            // The row of the *surface* this row of the image comes from.
+            let y = if flip_v { buffer.height - 1 - y } else { y };
+            let row_start = pixels.len();
             // Swizzled once per contiguous run rather than once per pixel:
             // `Layout::run_at` says how far the addresses stay linear, which
             // at 32 bits a pixel is four of them.
@@ -321,6 +352,9 @@ impl Gpu {
                     );
                 }
                 x += count;
+            }
+            if flip_h {
+                pixels[row_start..].reverse();
             }
         }
         self.scan_out = raw_bytes;
@@ -430,6 +464,7 @@ mod tests {
                 layout: NV_LAYOUT_BLOCK_LINEAR,
                 block_height_log2: 0,
                 color_format: 0x0100_5321_20,
+                transform: 0,
             },
         )
         .unwrap();
@@ -439,6 +474,52 @@ mod tests {
         assert_eq!(gpu.framebuffer.pixels[1], 0xFF00_0000);
         assert_eq!(gpu.framebuffer.pixels[16], 0x0000_00FF);
         assert_eq!(gpu.frames, 1);
+    }
+
+    /// A producer that renders y-down queues the buffer `FLIP_V` rather than
+    /// mirroring its viewport, and the display is what puts it up the right
+    /// way. Minecraft queues every frame that way; discarding the field drew
+    /// the whole title upside down.
+    #[test]
+    fn a_flipped_queue_transform_turns_the_frame_over() {
+        let mut gpu = Gpu::new();
+        let mut mem = Memory::new();
+        mem.map_zero(0x4000_0000, 0x1000).unwrap();
+        let handle = gpu.nvmap.create(0x1000);
+        gpu.nvmap.alloc(handle, 0, 0, 0x1000, 0, 0x4000_0000).unwrap();
+        let id = gpu.nvmap.get(handle).unwrap().id;
+        let at = |x: u32, y: u32| 0x4000_0000 + surface::gob_offset(x * 4, y);
+        // A pixel in the top row and one in the bottom row of an 8-row image.
+        mem.write_u32(at(0, 0), 0xFF00_0000).unwrap();
+        mem.write_u32(at(0, 7), 0x0000_00FF).unwrap();
+        let buffer = |transform| DisplayBuffer {
+            nvmap_id: id,
+            offset: 0,
+            width: 16,
+            height: 8,
+            pitch: 64,
+            layout: NV_LAYOUT_BLOCK_LINEAR,
+            block_height_log2: 0,
+            color_format: 0x0100_5321_20,
+            transform,
+        };
+
+        gpu.present(&mem, &buffer(0)).unwrap();
+        assert_eq!(gpu.framebuffer.pixels[0], 0xFF00_0000);
+        assert_eq!(gpu.framebuffer.pixels[7 * 16], 0x0000_00FF);
+
+        gpu.present(&mem, &buffer(TRANSFORM_FLIP_V)).unwrap();
+        assert_eq!(gpu.framebuffer.pixels[0], 0x0000_00FF, "the last row is shown first");
+        assert_eq!(gpu.framebuffer.pixels[7 * 16], 0xFF00_0000);
+
+        // Left to right, about the same image.
+        mem.write_u32(at(15, 0), 0x00FF_0000).unwrap();
+        gpu.present(&mem, &buffer(TRANSFORM_FLIP_H)).unwrap();
+        assert_eq!(gpu.framebuffer.pixels[15], 0xFF00_0000);
+        assert_eq!(gpu.framebuffer.pixels[0], 0x00FF_0000);
+
+        // A rotation is refused rather than shown the wrong shape.
+        assert!(gpu.present(&mem, &buffer(TRANSFORM_ROT_90)).is_err());
     }
 
     #[test]
@@ -456,6 +537,7 @@ mod tests {
                 layout: NV_LAYOUT_PITCH,
                 block_height_log2: 0,
                 color_format: 0x0100_5321_20,
+                transform: 0,
             },
         );
         assert!(err.is_err());

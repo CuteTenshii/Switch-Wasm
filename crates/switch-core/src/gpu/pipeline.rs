@@ -204,6 +204,16 @@ pub enum VertexFormat {
     Float32x2,
     Float32x3,
     Float32x4,
+    Float16x2,
+    Float16x4,
+    Unorm16x2,
+    Unorm16x4,
+    Snorm16x2,
+    Snorm16x4,
+    Sint16x2,
+    Sint16x4,
+    Uint16x2,
+    Uint16x4,
     Unorm8x4,
     Snorm8x4,
     Sint8x4,
@@ -216,8 +226,12 @@ impl VertexFormat {
     /// `raster::fetch_attribute` leaves in the slot for one as well.
     pub fn base(self) -> AttributeBase {
         match self {
-            VertexFormat::Sint8x4 => AttributeBase::Sint,
-            VertexFormat::Uint8x4 => AttributeBase::Uint,
+            VertexFormat::Sint16x2 | VertexFormat::Sint16x4 | VertexFormat::Sint8x4 => {
+                AttributeBase::Sint
+            }
+            VertexFormat::Uint16x2 | VertexFormat::Uint16x4 | VertexFormat::Uint8x4 => {
+                AttributeBase::Uint
+            }
             _ => AttributeBase::Float,
         }
     }
@@ -631,6 +645,20 @@ fn vertex_format(size: u32, ty: u32) -> Result<VertexFormat, Unsupported> {
         (0x02, ATTRIB_TYPE_FLOAT) => VertexFormat::Float32x3,
         (0x04, ATTRIB_TYPE_FLOAT) => VertexFormat::Float32x2,
         (0x12, ATTRIB_TYPE_FLOAT) => VertexFormat::Float32,
+        // Sizes `0x03` (`4x16`) and `0x0f` (`2x16`), the two 16-bit shapes
+        // WebGPU spells. `3x16` and `1x16` are left to the rasterizer for the
+        // same reason the odd 8-bit shapes are: there is no such vertex
+        // format to build a pipeline out of.
+        (0x03, ATTRIB_TYPE_FLOAT) => VertexFormat::Float16x4,
+        (0x03, ATTRIB_TYPE_UNORM) => VertexFormat::Unorm16x4,
+        (0x03, ATTRIB_TYPE_SNORM) => VertexFormat::Snorm16x4,
+        (0x03, ATTRIB_TYPE_SINT) => VertexFormat::Sint16x4,
+        (0x03, ATTRIB_TYPE_UINT) => VertexFormat::Uint16x4,
+        (0x0f, ATTRIB_TYPE_FLOAT) => VertexFormat::Float16x2,
+        (0x0f, ATTRIB_TYPE_UNORM) => VertexFormat::Unorm16x2,
+        (0x0f, ATTRIB_TYPE_SNORM) => VertexFormat::Snorm16x2,
+        (0x0f, ATTRIB_TYPE_SINT) => VertexFormat::Sint16x2,
+        (0x0f, ATTRIB_TYPE_UINT) => VertexFormat::Uint16x2,
         // Size `0x0a` is `4x8`, the only 8-bit shape both `fetch_attribute`
         // decodes and WebGPU spells: it has no one- or three-component 8-bit
         // format, and a shorter one would be padded `(0, 0, 0, 1)` as floats
@@ -931,11 +959,28 @@ mod tests {
         assert_eq!(VertexFormat::Uint8x4.base(), AttributeBase::Uint);
         assert_eq!(VertexFormat::Snorm8x4.base(), AttributeBase::Float);
         assert_eq!(VertexFormat::Unorm8x4.base(), AttributeBase::Float);
-        // A shape `fetch_attribute` cannot decode. Claiming it would draw
-        // something the reference could not be compared against.
+        // The 16-bit shapes WebGPU spells. `4x16` float is what Minecraft's
+        // every draw is built out of, and refusing it put the whole title on
+        // the rasterizer, which then could not fetch it either.
+        assert_eq!(vertex_format(0x03, ATTRIB_TYPE_FLOAT), Ok(VertexFormat::Float16x4));
+        assert_eq!(vertex_format(0x0f, ATTRIB_TYPE_FLOAT), Ok(VertexFormat::Float16x2));
+        assert_eq!(vertex_format(0x03, ATTRIB_TYPE_SNORM), Ok(VertexFormat::Snorm16x4));
+        assert_eq!(vertex_format(0x0f, ATTRIB_TYPE_UINT), Ok(VertexFormat::Uint16x2));
+        assert_eq!(VertexFormat::Sint16x4.base(), AttributeBase::Sint);
+        assert_eq!(VertexFormat::Uint16x2.base(), AttributeBase::Uint);
+        assert_eq!(VertexFormat::Float16x4.base(), AttributeBase::Float);
+        // `3x16` is a shape `fetch_attribute` decodes and WebGPU has no
+        // vertex format for, so it is the rasterizer's — the same split the
+        // odd 8-bit shapes are on.
         assert_eq!(
-            vertex_format(0x03, ATTRIB_TYPE_FLOAT),
-            Err(Unsupported::VertexFormat { size: 0x03, ty: ATTRIB_TYPE_FLOAT })
+            vertex_format(0x05, ATTRIB_TYPE_FLOAT),
+            Err(Unsupported::VertexFormat { size: 0x05, ty: ATTRIB_TYPE_FLOAT })
+        );
+        // A shape neither renderer decodes: `10_10_10_2`. Claiming it would
+        // draw something the reference could not be compared against.
+        assert_eq!(
+            vertex_format(0x30, ATTRIB_TYPE_UNORM),
+            Err(Unsupported::VertexFormat { size: 0x30, ty: ATTRIB_TYPE_UNORM })
         );
     }
 

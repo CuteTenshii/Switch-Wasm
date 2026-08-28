@@ -363,6 +363,16 @@ fn vertex_format(format: state::VertexFormat) -> wgpu::VertexFormat {
         state::VertexFormat::Float32x2 => wgpu::VertexFormat::Float32x2,
         state::VertexFormat::Float32x3 => wgpu::VertexFormat::Float32x3,
         state::VertexFormat::Float32x4 => wgpu::VertexFormat::Float32x4,
+        state::VertexFormat::Float16x2 => wgpu::VertexFormat::Float16x2,
+        state::VertexFormat::Float16x4 => wgpu::VertexFormat::Float16x4,
+        state::VertexFormat::Unorm16x2 => wgpu::VertexFormat::Unorm16x2,
+        state::VertexFormat::Unorm16x4 => wgpu::VertexFormat::Unorm16x4,
+        state::VertexFormat::Snorm16x2 => wgpu::VertexFormat::Snorm16x2,
+        state::VertexFormat::Snorm16x4 => wgpu::VertexFormat::Snorm16x4,
+        state::VertexFormat::Sint16x2 => wgpu::VertexFormat::Sint16x2,
+        state::VertexFormat::Sint16x4 => wgpu::VertexFormat::Sint16x4,
+        state::VertexFormat::Uint16x2 => wgpu::VertexFormat::Uint16x2,
+        state::VertexFormat::Uint16x4 => wgpu::VertexFormat::Uint16x4,
         state::VertexFormat::Unorm8x4 => wgpu::VertexFormat::Unorm8x4,
         state::VertexFormat::Snorm8x4 => wgpu::VertexFormat::Snorm8x4,
         state::VertexFormat::Sint8x4 => wgpu::VertexFormat::Sint8x4,
@@ -2828,6 +2838,10 @@ impl Gpu {
         varyings.dedup();
         vs_layout.varyings = varyings.clone();
         fs_layout.varyings = varyings;
+        // And on the same qualifier for each of them. Only the fragment
+        // program's `ipa` says which are sampled at the centroid, so the
+        // vertex stage is told rather than asked.
+        vs_layout.centroid_varyings = fs_layout.centroid_varyings.clone();
         // Neither correction is anything the program says. Negated, because
         // WebGPU mirrors y on its own: the two agree exactly when the
         // guest's transform mirrors too, and the shader has to do it when

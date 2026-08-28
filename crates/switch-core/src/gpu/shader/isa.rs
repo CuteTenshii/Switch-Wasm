@@ -441,10 +441,12 @@ pub enum Op {
     Ld { dst: u8, offset: u16, idx: u8, size: MemSize },
     /// `st.<size> a[offset], src` — attribute-space store.
     St { offset: u16, idx: u8, src: u8, size: MemSize },
-    /// `ipa[.pass] dst, a[offset], mul` — fixed-function interpolation.
-    /// `perspective = false` is `ipa pass`; `perspective = true` multiplies
-    /// the fetched value by `mul` (`RZ` decodes to `None`).
-    Ipa { dst: u8, offset: u16, mul: Option<u8>, perspective: bool, sat: bool },
+    /// `ipa[.pass][.centroid] dst, a[offset], mul` — fixed-function
+    /// interpolation. `perspective = false` is `ipa pass`; `perspective =
+    /// true` multiplies the fetched value by `mul` (`RZ` decodes to `None`).
+    /// `centroid` samples the varying inside the primitive's covered area
+    /// rather than at the pixel centre.
+    Ipa { dst: u8, offset: u16, mul: Option<u8>, perspective: bool, sat: bool, centroid: bool },
 
     // ---- float ALU ----
     Fadd { dst: u8, a: u8, am: FMod, b: Operand, bm: FMod, ftz: bool, sat: bool },
@@ -1809,8 +1811,13 @@ fn decode_alu_wide(insn: u64) -> Op {
     // ipa — a[]-relative, non-indexed.
     if insn & 0xff00_0040_0000_ff00 == 0xe000_0000_0000_ff00 {
         let mode = field(insn, 54, 2);
-        if field(insn, 52, 2) != 0 || mode > 1 {
-            return un; // centroid/offset sampling, and the sc/constant modes
+        // The sample mode (`SampleMode` in Eden's decode): 0 default, 1
+        // centroid, 2 offset. Offset samples wherever a register points,
+        // which is a per-invocation position neither renderer has; the
+        // sc/constant interpolation modes are not interpolation at all.
+        let sample = field(insn, 52, 2);
+        if sample > 1 || mode > 1 {
+            return un;
         }
         return Op::Ipa {
             dst: reg(insn, 0, 8),
@@ -1818,6 +1825,7 @@ fn decode_alu_wide(insn: u64) -> Op {
             mul: opt_reg(reg(insn, 20, 8)),
             perspective: mode == 1,
             sat: field(insn, 51, 1) != 0,
+            centroid: sample == 1,
         };
     }
 
@@ -2601,7 +2609,7 @@ mod tests {
         // solid.frag: "ipa pass $r0 a[0x7c] 0x0 0x0 0x1"
         assert_eq!(
             op(0xe003ff87cff7ff00),
-            Op::Ipa { dst: 0, offset: 0x7c, mul: None, perspective: false, sat: false }
+            Op::Ipa { dst: 0, offset: 0x7c, mul: None, perspective: false, sat: false, centroid: false }
         );
         // "mufu rcp $r3 $r0"
         assert_eq!(
@@ -2611,8 +2619,24 @@ mod tests {
         // "ipa $r0 a[0x80] $r3 0x0 0x1"
         assert_eq!(
             op(0xe043ff880037ff00),
-            Op::Ipa { dst: 0, offset: 0x80, mul: Some(3), perspective: true, sat: false }
+            Op::Ipa { dst: 0, offset: 0x80, mul: Some(3), perspective: true, sat: false, centroid: false }
         );
+    }
+
+    /// Bits 52..54 are the sample mode, and Minecraft's fragment shaders
+    /// open with `ipa.centroid` — refusing it dropped every draw of the
+    /// title, first from the backend and then from the rasterizer it fell
+    /// back to. `Offset` stays refused: it samples wherever a register
+    /// points, which is a position neither renderer has.
+    #[test]
+    fn decodes_the_ipa_sample_modes() {
+        assert_eq!(
+            op(0xe013ff87cff7ff06),
+            Op::Ipa { dst: 6, offset: 0x7c, mul: None, perspective: false, sat: false, centroid: true }
+        );
+        // The same instruction with sample mode 2 (offset) and 3.
+        assert!(matches!(op(0xe023ff87cff7ff06), Op::Unimplemented { .. }));
+        assert!(matches!(op(0xe033ff87cff7ff06), Op::Unimplemented { .. }));
     }
 
     #[test]

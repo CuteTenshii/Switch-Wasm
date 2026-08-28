@@ -25,7 +25,7 @@ use crate::gpu::shader::interp::{
 };
 use crate::gpu::shader::compiled::Compiled;
 use crate::gpu::shader::{decode_program_from_memory, Op, Program};
-use crate::gpu::surface::{ColorFormat, SampleGrid, MAX_SAMPLES};
+use crate::gpu::surface::{f16_to_f32, ColorFormat, SampleGrid, MAX_SAMPLES};
 use crate::{Error, Result};
 
 /// The `DkPrimitive` topologies this rasterizer assembles (deko3d.h,
@@ -314,6 +314,10 @@ fn attrib_shape(size: u32) -> Option<(u32, u32)> {
         0x02 => Some((3, 32)), // 3x32
         0x04 => Some((2, 32)), // 2x32
         0x12 => Some((1, 32)), // 1x32
+        0x03 => Some((4, 16)), // 4x16
+        0x05 => Some((3, 16)), // 3x16
+        0x0f => Some((2, 16)), // 2x16
+        0x1b => Some((1, 16)), // 1x16
         0x0a => Some((4, 8)),  // 4x8
         _ => None,
     }
@@ -376,6 +380,42 @@ pub fn fetch_attribute(
             for c in 0..components {
                 let bits = ctx.read_u32(addr + c as u64 * 4)?;
                 out[c as usize] = f32::from_bits(bits);
+            }
+        }
+        // The 16-bit shapes, read as one packed value the way the 8-bit ones
+        // are: `read_pixel` translates the address once for the whole
+        // attribute rather than once per component.
+        (ATTRIB_TYPE_FLOAT, 16) => {
+            let packed = ctx.read_pixel(addr, components * 2)?;
+            for c in 0..components {
+                out[c as usize] = f16_to_f32((packed >> (c * 16)) as u16);
+            }
+        }
+        (ATTRIB_TYPE_UNORM, 16) => {
+            let packed = ctx.read_pixel(addr, components * 2)?;
+            for c in 0..components {
+                out[c as usize] = f32::from((packed >> (c * 16)) as u16) / 65535.0;
+            }
+        }
+        (ATTRIB_TYPE_SNORM, 16) => {
+            let packed = ctx.read_pixel(addr, components * 2)?;
+            for c in 0..components {
+                let value = (packed >> (c * 16)) as u16 as i16;
+                // -32768 and -32767 both mean -1, as at eight bits.
+                out[c as usize] = (f32::from(value) / 32767.0).max(-1.0);
+            }
+        }
+        (ATTRIB_TYPE_SINT, 16) => {
+            let packed = ctx.read_pixel(addr, components * 2)?;
+            for c in 0..components {
+                let value = (packed >> (c * 16)) as u16 as i16;
+                out[c as usize] = f32::from_bits(i32::from(value) as u32);
+            }
+        }
+        (ATTRIB_TYPE_UINT, 16) => {
+            let packed = ctx.read_pixel(addr, components * 2)?;
+            for c in 0..components {
+                out[c as usize] = f32::from_bits(u32::from((packed >> (c * 16)) as u16));
             }
         }
         (ATTRIB_TYPE_UNORM, 8) => {
@@ -1229,6 +1269,15 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // a GPU backend would have to describe it — or what stopped it being
     // describable, which is the more useful half.
     if crate::env_flag!("TRACE_PIPELINE") {
+        // What the viewport was resolved *from* as well as what it resolved
+        // to: `Viewport::flip_y` is the sign of a scale the window origin may
+        // already have flipped, and the two are not the same claim.
+        eprintln!(
+            "[pipe] {:?} {:?} clip_height={}",
+            engine.viewport_transform(),
+            engine.window_origin(),
+            engine.surface_clip_height()
+        );
         match crate::gpu::pipeline::Pipeline::of(engine) {
             Ok(pipeline) => eprintln!("[pipe] {pipeline:?}"),
             Err(e) => eprintln!("[pipe] undescribable: {e}"),
@@ -1808,6 +1857,64 @@ mod tests {
         assert_eq!(snorm[0], 1.0);
         assert_eq!(snorm[1], -1.0, "-128 clamps onto -1 rather than past it");
         assert_eq!(snorm[3], -1.0 / 127.0);
+    }
+
+    /// Minecraft's every draw reads `4x16` halves (`size 0x3 type 7`), and
+    /// with no shape for them all 110 of a frame's 110 draws were dropped —
+    /// by the backend, which had no vertex format to build a pipeline from,
+    /// and then by the rasterizer it fell back to.
+    #[test]
+    fn fetch_attribute_unpacks_the_sixteen_bit_types() {
+        let (mut mem, vmm, base) = harness();
+        // 1.0, -2.0, 0.5, 65504 (the largest finite half) as four halves.
+        let halves: [u16; 4] = [0x3C00, 0xC000, 0x3800, 0x7BFF];
+        let packed = halves
+            .iter()
+            .enumerate()
+            .fold(0u64, |acc, (i, &h)| acc | u64::from(h) << (i * 16));
+        vmm.write_u64(&mut mem, base, packed).unwrap();
+        // The signed pattern, eight bytes on: 0x8000 is -32768, the one value
+        // both ends of the range map onto -1, and 0x7FFF is +1 exactly.
+        vmm.write_u64(&mut mem, base + 8, 0x0001_7FFF_8000_8001).unwrap();
+        let mut stats = Default::default();
+        let mut host1x = Host1x::new();
+        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let array = VertexArray { enabled: true, stride: 16, start: base, limit: base + 0x1000, divisor: 0 };
+        let fetch = |size, ty, offset| {
+            let attrib = VertexAttrib { buffer_id: 0, is_fixed: false, offset, size, ty, is_bgra: false };
+            fetch_attribute(attrib, array, 0, &ctx).unwrap()
+        };
+
+        assert_eq!(fetch(0x03, ATTRIB_TYPE_FLOAT, 0), [1.0, -2.0, 0.5, 65504.0]);
+        // A shape that carries fewer than four components pads the rest
+        // `(0, 0, 0, 1)`, which is what WebGPU hands a `vec4<f32>` too.
+        assert_eq!(fetch(0x0f, ATTRIB_TYPE_FLOAT, 0), [1.0, -2.0, 0.0, 1.0]);
+        assert_eq!(fetch(0x05, ATTRIB_TYPE_FLOAT, 0), [1.0, -2.0, 0.5, 1.0]);
+        assert_eq!(fetch(0x1b, ATTRIB_TYPE_FLOAT, 0), [1.0, 0.0, 0.0, 1.0]);
+
+        let sint = fetch(0x03, ATTRIB_TYPE_SINT, 0);
+        let as_int = |v: f32| v.to_bits() as i32;
+        assert_eq!(
+            [as_int(sint[0]), as_int(sint[1]), as_int(sint[2]), as_int(sint[3])],
+            [0x3C00, -0x4000, 0x3800, 0x7BFF],
+            "sint16 sign-extends, and keeps its bits rather than its value"
+        );
+
+        let uint = fetch(0x03, ATTRIB_TYPE_UINT, 0);
+        assert_eq!(
+            [uint[0].to_bits(), uint[1].to_bits(), uint[2].to_bits(), uint[3].to_bits()],
+            [0x3C00, 0xC000, 0x3800, 0x7BFF],
+            "uint16 is zero-extended"
+        );
+
+        let unorm = fetch(0x03, ATTRIB_TYPE_UNORM, 0);
+        assert_eq!(unorm[0], 0x3C00 as f32 / 65535.0);
+
+        let snorm = fetch(0x03, ATTRIB_TYPE_SNORM, 8);
+        assert_eq!(snorm[0], -1.0, "-32767 is -1");
+        assert_eq!(snorm[1], -1.0, "-32768 clamps onto -1 rather than past it");
+        assert_eq!(snorm[2], 1.0);
+        assert_eq!(snorm[3], 1.0 / 32767.0);
     }
 
     #[test]

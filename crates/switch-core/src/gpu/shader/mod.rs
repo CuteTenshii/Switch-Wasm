@@ -558,12 +558,12 @@ mod tests {
         assert_eq!(
             ops(&program),
             vec![
-                Op::Ipa { dst: 0, offset: 0x7c, mul: None, perspective: false, sat: false },
+                Op::Ipa { dst: 0, offset: 0x7c, mul: None, perspective: false, sat: false, centroid: false },
                 Op::Mufu { dst: 3, src: 0, sm: FMod::NONE, op: MufuOp::Rcp, sat: false },
-                Op::Ipa { dst: 0, offset: 0x80, mul: Some(3), perspective: true, sat: false },
-                Op::Ipa { dst: 1, offset: 0x84, mul: Some(3), perspective: true, sat: false },
-                Op::Ipa { dst: 2, offset: 0x88, mul: Some(3), perspective: true, sat: false },
-                Op::Ipa { dst: 3, offset: 0x8c, mul: Some(3), perspective: true, sat: false },
+                Op::Ipa { dst: 0, offset: 0x80, mul: Some(3), perspective: true, sat: false, centroid: false },
+                Op::Ipa { dst: 1, offset: 0x84, mul: Some(3), perspective: true, sat: false, centroid: false },
+                Op::Ipa { dst: 2, offset: 0x88, mul: Some(3), perspective: true, sat: false, centroid: false },
+                Op::Ipa { dst: 3, offset: 0x8c, mul: Some(3), perspective: true, sat: false, centroid: false },
                 Op::Exit,
             ]
         );
@@ -922,7 +922,7 @@ mod tests {
             program.offsets.push(at);
             program.insns.push(Instruction {
                 pred: isa::Pred::ALWAYS,
-                op: Op::Ipa { dst: 0, offset, mul: None, perspective: true, sat: false },
+                op: Op::Ipa { dst: 0, offset, mul: None, perspective: true, sat: false, centroid: false },
             });
         }
         // 0x7c is `1/w`, not a varying; 0x80 is slot 0 twice; 0xc0/0xc4 are

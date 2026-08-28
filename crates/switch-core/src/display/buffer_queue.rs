@@ -51,6 +51,12 @@ const PLANE_PITCH: usize = 0x14;
 const PLANE_OFFSET: usize = 0x1C;
 const PLANE_BLOCK_HEIGHT_LOG2: usize = 0x24;
 
+/// Byte offset of `transform` inside the flattened `QueueBufferInput`
+/// (`{ s64 timestamp, s32 isAutoTimestamp, Rect crop, s32 scalingMode,
+/// u32 transform, ... }`) — how the queued image is stored versus how it is
+/// to be shown. Discarding it drew every Minecraft frame upside down.
+const INPUT_TRANSFORM_OFFSET: usize = 32;
+
 /// `NATIVE_WINDOW_*` selectors for `QUERY`.
 const QUERY_WIDTH: i32 = 0;
 const QUERY_HEIGHT: i32 = 1;
@@ -215,8 +221,13 @@ impl BufferQueue {
             }
             QUEUE_BUFFER => {
                 let slot = r.read_i32();
-                let _input = r.read_flattened();
-                action = match self.queue(slot) {
+                let transform = r
+                    .read_flattened()
+                    .and_then(|input| {
+                        input.get(INPUT_TRANSFORM_OFFSET..INPUT_TRANSFORM_OFFSET + 4)
+                    })
+                    .map_or(0, |bytes| read_u32(bytes, 0));
+                action = match self.queue(slot, transform) {
                     Some(buffer) => Action::Present(buffer),
                     None => Action::None,
                 };
@@ -293,10 +304,11 @@ impl BufferQueue {
 
     /// Mark a dequeued slot as presented. Because scan-out happens
     /// immediately, the slot goes straight back to free.
-    fn queue(&mut self, slot: i32) -> Option<DisplayBuffer> {
+    fn queue(&mut self, slot: i32, transform: u32) -> Option<DisplayBuffer> {
         let index = usize::try_from(slot).ok()?;
         let entry = self.slots.get_mut(index)?;
-        let buffer = entry.buffer?;
+        let mut buffer = entry.buffer?;
+        buffer.transform = transform;
         entry.state = SlotState::Free;
         self.queued += 1;
         Some(buffer)
@@ -344,6 +356,8 @@ impl BufferQueue {
             layout: plane(PLANE_LAYOUT),
             block_height_log2: plane(PLANE_BLOCK_HEIGHT_LOG2),
             color_format,
+            // The producer names it per queued frame, not per slot.
+            transform: 0,
         };
         if buffer.width != 0 && buffer.height != 0 {
             self.width = buffer.width;

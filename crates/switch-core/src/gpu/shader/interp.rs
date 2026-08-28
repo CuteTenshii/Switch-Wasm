@@ -809,7 +809,12 @@ impl Invocation {
                     self.attr_out.set(base + i as u16 * 4, v);
                 }
             }
-            Op::Ipa { dst, offset, mul, perspective, sat } => {
+            // `centroid` is not read here, and that is exact rather than a
+            // gap: this rasterizer shades one invocation per *sample*, at
+            // that sample's own centre, and an invocation only runs where
+            // its sample is covered. The centroid of the area this
+            // invocation covers is therefore where it is already sampling.
+            Op::Ipa { dst, offset, mul, perspective, sat, centroid: _ } => {
                 let mut v = self.attr_in.get(offset);
                 if perspective {
                     if let Some(m) = mul {

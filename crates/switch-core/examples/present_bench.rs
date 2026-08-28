@@ -66,6 +66,7 @@ fn main() {
         layout: NV_LAYOUT_BLOCK_LINEAR,
         block_height_log2: BLOCK_HEIGHT_LOG2,
         color_format: COLOR_FORMAT,
+        transform: 0,
     };
 
     // One outside the timing, so a cold page table is not counted as scan-out.

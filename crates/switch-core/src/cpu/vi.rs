@@ -373,6 +373,13 @@ impl Cpu {
                     layout: crate::gpu::NV_LAYOUT_BLOCK_LINEAR,
                     block_height_log2: 4,
                     color_format: 0x01_0053_2120, // A8B8G8R8
+                    // Not read. The signature names a transform between the
+                    // crop and the swap interval, but where it sits in this
+                    // request is unverified: at the offset the field widths
+                    // imply (0x38) the Home Menu reads back `FLIP_H`, and it
+                    // is plainly not mirrored. An applet that wanted one
+                    // would be a reason to work the layout out; none does.
+                    transform: 0,
                 };
                 // A GPU backend holds its render targets on the device; the
                 // display reads them out of guest memory.

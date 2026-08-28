@@ -20,6 +20,7 @@ whenever it was last recorded.
 | `JKSV.nro` | full UI: text, icons, save tiles | yes | carried |
 | `Checkpoint.nro` | layout and chrome; text was solid blocks for want of `SHFL`, unchecked since | yes | carried |
 | "A Short Hike" (NSP) | composites a full 1280x720 frame; steady state is 2 draws a frame and never a scene | partial | measured |
+| "Minecraft" (NSP) | the world, on the device: 110 draws a frame, none falling back | yes | measured |
 | "Tomodachi Life" (NSP) | 1.2B steps, no fault, no abort, **no draw calls** | no | carried |
 
 A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` →
@@ -28,7 +29,7 @@ graphics stack, opens its audio device, and runs on into its own loop. **Every
 service it asks for has a real implementation** — a full boot logs no `no
 implementation` and no `unimplemented` lines.
 
-`make test`: **783 tests, all passing.**
+`make test`: **888 tests, all passing.**
 
 ## Homebrew
 
@@ -263,6 +264,47 @@ of the *decoded program*, not the invocation. That plus two allocations
 pixel) took it to 0.67 s/frame, every frame byte-identical. Reusing the
 `pending` vector was measured at no effect and dropped rather than kept on the
 theory that it should have helped.
+
+### Minecraft: three gaps, and each one hid the next
+
+The title ran at ~5 fps in a browser and presented black frames. Three separate
+faults, found in that order:
+
+**Every draw read a `4x16` half-float attribute, and nothing could fetch one.**
+`vertex_format` had no WebGPU spelling for `DkVtxAttribSize_4x16`, so the
+backend refused all 110 draws of a frame; `attrib_shape` had no entry either,
+so the rasterizer they fell back to refused them again. 110 draws, 110
+`draws_skipped`, **0 of 921,600 pixels lit** — and in a browser the first
+fallback latches `Gpu::software_frame`, which is where the frame time went. All
+four 16-bit shapes are decoded now; `4x16` and `2x16` also build a pipeline,
+`3x16` and `1x16` are the rasterizer's for want of a WebGPU format, exactly as
+the odd 8-bit shapes are.
+
+**Then every fragment shader opened with `ipa.centroid`.** Sample mode 1 was
+refused with offset sampling, and `Op::Unimplemented` is fatal to the shader
+interpreter as well as untranslatable to WGSL — so the draws still went
+nowhere. Centroid is exact for both renderers here: each shades one invocation
+per sample, at that sample's own centre, and only runs where the sample is
+covered. It is still declared `@interpolate(linear, centroid)`, which the
+vertex stage has to be *told* because only the fragment program's `ipa` says
+it, and stages that spell an `@interpolate` differently do not link.
+
+**Then the frame came out upside down.** Not the viewport: Minecraft programs
+`scale_y = +360` where the Home Menu programs `-360`, and the backend's negate
+is right for both — mirroring the transform instead culled every triangle,
+which is the proof it was right. The title renders y-down and queues the
+buffer `NATIVE_WINDOW_TRANSFORM_FLIP_V`, and `QUEUE_BUFFER` threw the whole
+`QueueBufferInput` away. `Gpu::present` reads the row the transform names. A
+Short Hike queues `0` and is unaffected; the Home Menu is byte-identical.
+
+The applet path (`PresentSharedFrameBuffer`) still passes `0`. Its signature
+names a transform between the crop and the swap interval, but at the offset the
+field widths imply the Home Menu reads back `FLIP_H` and is plainly not
+mirrored, so the layout is unverified and nothing is applied.
+
+**What is left is the CPU.** With every draw on the device, a steady frame is
+still 173-220 ms, and the software rasterizer is not in it: 21.9 billion
+instructions buys 20 frames. Minecraft is CPU-bound here, not GPU-bound.
 
 ## Performance
 
