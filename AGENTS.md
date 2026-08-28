@@ -736,7 +736,17 @@ default route renders exactly that, one fragment per texel. Its coverage is
 tested at texel centres, which is where Maxwell's samples are, so it reproduces
 the rasterizer's frame texel for texel; the sample mask and alpha-to-coverage
 are then the fragment shader's job (`wgsl::Coverage`), because there is no
-multisample state to carry them. `GPU_DEVICE_MSAA=1` lets the device do the
+multisample state to carry them.
+
+Two multisampled draws still fall back, both deliberately. A guest that
+programs `MultisampleSampleLocations` away from the texel centres is asking for
+coverage neither route can express, and `SampleGrid::samples_at_texel_centres`
+says so rather than drawing a fraction of a texel wrong — a table naming the
+centres in sixteenths *is* the same grid and still renders here. And per-pixel
+coverage with a *partial* sample mask has nothing to act on, since every texel
+of a pixel's tile takes the same value there.
+
+`GPU_DEVICE_MSAA=1` lets the device do the
 multisampling instead where it offers the sample count — shading once per pixel
 rather than once per sample, which at `4x4` is sixteen times less fragment work
 — through a *companion* texture gathered on the way in and scattered on the way
