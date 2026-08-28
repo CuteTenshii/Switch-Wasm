@@ -15,6 +15,10 @@
 //! whole module and uses the piece it needs.
 #![allow(dead_code)]
 
+/// Reading an image's metadata tables, for the tools that speak in file names
+/// rather than in offsets.
+pub mod romfs;
+
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -969,6 +973,24 @@ impl Title {
                         .map(|romfs| Box::new(romfs) as Box<dyn ByteSource>),
                 )
             }
+        }
+    }
+
+    /// Open this title's RomFS and read its metadata tables, or say which of
+    /// the two failed and stop.
+    ///
+    /// The source comes back with the metadata because the tools that read
+    /// one read the other: a file's extent is only useful next to something
+    /// that can read those bytes.
+    pub fn romfs(&self, usage_line: &str) -> (Box<dyn ByteSource>, romfs::Image) {
+        let source = match self.romfs_source() {
+            Some(Ok(source)) => source,
+            Some(Err(e)) => usage(&format!("this title's RomFS could not be opened: {e}")),
+            None => usage("this NCA has no RomFS section"),
+        };
+        match romfs::read(&*source) {
+            Ok(image) => (source, image),
+            Err(why) => usage(&format!("{why} ({usage_line})")),
         }
     }
 

@@ -125,7 +125,16 @@ IVFC levels).
   container**; the rest are system data archives (`switch_add_archive`).
 - The ExeFS is read in full and hash-verified. The RomFS is not:
   `Cpu::set_romfs_source` takes the decrypting view and `IStorage::Read` copies
-  through a 64 KiB staging buffer.
+  through a 64 KiB staging buffer. So a byte the compression layer gets wrong
+  is served and believed, and it surfaces as a title misbehaving hundreds of
+  millions of instructions later. `--example romfs_selftest -- <container>
+  <prod.keys>` is the check that needs no reference image: **the bytes of a
+  range must not depend on how the range was asked for**, so it reads sampled
+  ranges whole, in pieces of five sizes, backwards, with the block cache
+  evicted between pieces, and again. `INJECT=1` puts a boundary bug in front
+  of the reader and expects to be told — run it once, or the "consistent"
+  line means nothing. Self-consistency is not correctness: a decompressor
+  that is wrong the same way every time passes.
 - **Offsets stay `u64` end to end.** `as usize` on wasm32 truncates past 4 GiB
   *and* makes the bounds check that should catch it pass.
 
