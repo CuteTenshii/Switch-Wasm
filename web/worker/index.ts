@@ -100,11 +100,15 @@ const GPU_INTERLEAVE = false;
 /* What the browser calls the adapter, for the frequent case where the core
    arrives with no name for it.
 
-   wgpu names an adapter from `GPUAdapterInfo.description`, and Chrome and
-   Firefox both leave that empty on macOS rather than say which machine this
-   is; `vendor` and `architecture` are the fields they do fill. Reading them
-   costs a second `requestAdapter`, so it is asked only for an adapter that
-   came back unnamed, and only once -- the caller is the success path. */
+   wgpu names an adapter from `GPUAdapterInfo.description` alone, and Chrome
+   leaves that empty on macOS; `vendor` and `architecture` are what it fills
+   there. Reading them costs a second `requestAdapter`, so it is asked only
+   for an adapter that came back unnamed, and only once.
+
+   On Firefox this cannot succeed and is not meant to: `dom/webgpu/Adapter.h`
+   hardcodes all four fields to the empty string against fingerprinting, and
+   the real ones are `[ChromeOnly]`, for `about:support`. `an unnamed adapter`
+   is the whole truth there -- do not go looking for the name again. */
 type AdapterInfo = {
   vendor?: string;
   architecture?: string;

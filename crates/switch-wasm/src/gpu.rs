@@ -59,8 +59,8 @@ pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -
             Ok(pair) => pair,
             Err(e) => return format!("no device: {e}"),
         };
-    // wgpu takes this from `GPUAdapterInfo.description`, which Chrome and
-    // Firefox leave empty on macOS; the worker names those from `vendor`.
+    // wgpu takes this from `GPUAdapterInfo.description`, which Chrome leaves
+    // empty on macOS and Firefox leaves empty always. The worker names those.
     let name = adapter.get_info().name;
     // The instance and the adapter are handed over rather than dropped here:
     // see `switch_gpu::Gpu::_instance` for what a browser does to a device
