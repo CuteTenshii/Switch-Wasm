@@ -66,12 +66,17 @@ First visit to an address translates forward into ops — operands extracted,
 immediates decoded — until something moves the PC; that block is cached and
 every later visit runs it with no decoding. It removes **decode, not dispatch**,
 and generates no code, so anything untranslated falls back to the interpreter
-and the two are the same computation (`jit_bench` diffs the two machines and
-they agree).
+and the two are the same computation (`jit_difftest` diffs the two machines
+and they agree).
 
-Worth ~1.9-2.3x. Take the *ratio*, from a min-of-N — the absolute throughput is
-the machine's, not the tree's. hbmenu enters each of its 10,645 blocks 535
-times, which is why it pays; a run too short to re-enter its blocks shows 1.09x.
+Worth ~1.9-2.3x — **measured on the host, and that ratio does not transfer**.
+It came from two engines timed through rustc's x86-64 backend; the browser
+recompiles the same wasm with its own register allocator and a bounds check on
+every guest load, and the two builds do not disagree by a constant. What does
+transfer is the work: hbmenu enters each of its 10,645 blocks 535 times, which
+is why it pays, and a run too short to re-enter its blocks shows no benefit at
+all. `--example jit_coverage` names what is still untranslated and
+`tools/wasm_bench.mjs` is where a speedup is confirmed.
 
 Staleness is the memory's job, not the translator's: `Memory` keeps a dirty bit
 per page and the JIT drops blocks from dirtied pages. A block never spans a
@@ -583,9 +588,9 @@ is what libopus's own float build scores. Throughput is ~350x real time.
 ## Repro
 
 `docs/repro.md` — the examples (`screenshot`, `boot_nsp`, `dump_exefs`,
-`retail_trace`, `jit_bench`, `opus_testvectors`), the environment switches they
-take (`SHOT=`, `UPDATE=`, `DLC=`, `RING_MIN`, `MARK`), and how to check the
-WebGPU backend against the rasterizer.
+`retail_trace`, `jit_difftest`, `opus_testvectors`), the environment switches
+they take (`SHOT=`, `UPDATE=`, `DLC=`, `RING_MIN`, `MARK`), and how to check
+the WebGPU backend against the rasterizer.
 
 ## Next
 

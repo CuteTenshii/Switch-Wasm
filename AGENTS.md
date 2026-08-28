@@ -23,7 +23,7 @@ standing state.
 - `python3 tools/difftest.py [--scalar]` — differential-test the decode
   against real ARM under `qemu-aarch64`. **Add an instruction there before
   hand-deriving expected values.** Needs `clang` + `lld` + `qemu-aarch64`.
-- `cargo run --release -p switch-core --example jit_bench -- <nro>` — both
+- `cargo run --release -p switch-core --example jit_difftest -- <nro>` — both
   engines side by side, with every state difference between them.
 
 ## Crates
@@ -724,21 +724,43 @@ All three persist in IndexedDB from the page side (`main/db.ts`, `sdcard.ts`,
 
 ## Performance
 
-Four tools, and they disagree — measure the one you care about:
+**One tool holds a clock, and it is not a host example.** A frame costs the
+work it asks for times what that work costs on the machine running it, and only
+the first half is a fact about this emulator. The second is a fact about a
+compiler: the host examples are x86-64 out of rustc's backend, over 64-bit
+pointers and an unbounded address space, and what ships is wasm32 recompiled by
+a browser with its own register allocator and a bounds check on every guest
+load. hbmenu's boot-to-frame-4 is ~79 M instructions/s here and ~59 M/s under
+V8 on the same machine (min of three, the same 130 M instructions), and that
+1.3x is not a constant — removing a libcall only wasm pays for was ~1.15x
+natively and ~1.44x in the browser. So the host tools count, and `wasm_bench`
+times.
 
-- `--example bench` — per-instruction-class throughput on the host. `b .` is
-  the floor, so the gap to a class is its decode+execute cost.
+- `node tools/wasm_bench.mjs <nro>` — the artefact `make wasm` produced, timed
+  from inside one run. **The only tool here whose milliseconds mean anything**,
+  and with `node --cpu-prof` the only profiler for that build. It loads the
+  shipped module through its own wasm-bindgen glue rather than building one, so
+  what it times is what the site serves.
+- `--example frame_work -- <nro>` — one steady frame as work: instructions,
+  block entries, fallbacks, methods, draws, clears, copies, pixels. Every count
+  is the same under V8, and its instructions/frame should match `wasm_bench`'s.
+- `--example jit_coverage -- <nro>` — the instructions a real frame runs that
+  the translator has no op for, hottest first and disassembled, then rolled up
+  by encoding group to read against `hotspots`. This is where the next block of
+  CPU speed is.
+- `--example present_work` — scan-out as bytes lifted, deswizzle lookups and
+  pixels converted, per layout and crop. It runs whatever the renderer drew, so
+  a title issuing no draws still pays it in full.
 - `--example hotspots -- <nro>` — one steady frame bucketed by guest address.
   It counts **guest** instructions only and cannot see the emulator's own cost:
   what falls outside the image buckets is more guest code, not GPU work.
-- `--example jit_bench -- <nro>` — both engines, with every state difference.
-- `node tools/wasm_bench.mjs <nro>` — the build the browser runs; `node
-  --cpu-prof` names wasm functions. The only profiler for that build.
+- `--example jit_difftest -- <nro>` — both engines over the same program, with
+  every state difference. A correctness tool: the interpreter is the reference,
+  and a translated run that disagrees is wrong however fast it was.
 
-**Rank by `wasm_bench`, not `jit_bench`.** The two builds disagree by more than
-the 2-3x wasm tax — removing a branch or a libcall only wasm pays for was
-~1.15x natively and ~1.44x in the browser. `perf` on the host finds *where*,
-not *how much*.
+**A change that moves no count and looks faster on the host made this host
+faster.** Fix what the work counters name, then confirm it under `wasm_bench`.
+`perf` on the host still finds *where*, never *how much*.
 
 **The per-pixel and per-instruction paths are where whole seconds hide.** A
 full-screen pass is 921,600 fragment invocations, so a small `Vec`, a `HashMap`

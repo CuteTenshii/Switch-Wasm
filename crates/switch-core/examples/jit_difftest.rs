@@ -1,19 +1,31 @@
 //! The block translator against the interpreter, on real homebrew:
-//! `jit_bench <nro> [instructions] [font.ttf]`.
+//! `jit_difftest <nro> [instructions] [font.ttf]`.
 //!
 //! Boots the same program twice — once with [`Cpu::set_jit_enabled`] off, once
 //! with it on — runs the same number of instructions through both, and reports
-//! what each managed per second along with whether the two machines ended up
-//! in the same state.
+//! every way the two machines ended up disagreeing.
 //!
-//! `examples/bench.rs` measures one instruction class at a time, which says
-//! what a decode costs but not what a program costs: real code is a mix, its
-//! blocks are entered thousands of times each, and a good part of a frame is
-//! spent in the GPU rather than in the CPU at all. This is the number that
-//! decides whether translating was worth it.
+//! This is a correctness tool, not a benchmark, and it used to be both. The
+//! benchmark half reported what each engine managed per second *on this host*,
+//! and the browser is what this project runs in: a ratio between two engines
+//! measured through rustc's x86-64 backend is not the ratio between them under
+//! a browser's, which recompiles the same wasm with its own register
+//! allocator, its own inlining and a bounds check on every guest load. That
+//! number belongs to `tools/wasm_bench.mjs`, which runs the artefact the
+//! browser runs.
+//!
+//! What survives here is the part that was never about speed. The translator
+//! resolves at translation time what the interpreter re-derives per execution,
+//! so the two have to agree on every register, the flags, memory, the console
+//! and the framebuffer — and if they ever do not, the translated run is wrong
+//! however fast it was. The interpreter is the reference.
+//!
+//! The work counters below say the same thing the timing tried to, without a
+//! clock: how many blocks were translated, how often each was re-entered, and
+//! how much of the run the translator handed straight back to the interpreter
+//! because it had no op for it. Those numbers are identical on every target.
 mod common;
 
-use std::time::Instant;
 use switch_core::cpu::Cpu;
 
 fn boot(nro: &[u8], font: &Option<Vec<u8>>, jit: bool) -> Cpu {
@@ -27,12 +39,13 @@ fn boot(nro: &[u8], font: &Option<Vec<u8>>, jit: bool) -> Cpu {
     cpu
 }
 
-/// Run up to `want` instructions, in slices, and report the rate. Sliced
-/// because that is how the frontend drives a session — a frame's worth per
-/// call — and re-entering blocks is part of what is being measured.
-fn drive(cpu: &mut Cpu, want: u64) -> (u64, f64) {
+/// Run up to `want` instructions, in slices, and report how many retired.
+///
+/// Sliced because that is how the frontend drives a session — a frame's worth
+/// per call — and re-entering blocks across those calls is part of what is
+/// being checked.
+fn drive(cpu: &mut Cpu, want: u64) -> u64 {
     const SLICE: u64 = 1_000_000;
-    let start = Instant::now();
     let mut done = 0u64;
     while done < want && !cpu.halted {
         match cpu.run(SLICE.min(want - done)) {
@@ -43,7 +56,7 @@ fn drive(cpu: &mut Cpu, want: u64) -> (u64, f64) {
             }
         }
     }
-    (done, done as f64 / start.elapsed().as_secs_f64() / 1e6)
+    done
 }
 
 /// Report every difference between the two machines rather than only the
@@ -111,7 +124,7 @@ fn compare(a: &Cpu, b: &Cpu) -> usize {
 fn main() {
     let nro = common::read(common::arg(
         1,
-        "jit_bench <path.nro> [instructions] [font.ttf]",
+        "jit_difftest <path.nro> [instructions] [font.ttf]",
     ));
     let want = common::opt_num(2).unwrap_or(40_000_000);
     let font = std::fs::read(
@@ -123,26 +136,31 @@ fn main() {
 
     let mut interpreted = boot(&nro, &font, false);
     let mut translated = boot(&nro, &font, true);
-    let (steps_i, rate_i) = drive(&mut interpreted, want);
-    let (steps_t, rate_t) = drive(&mut translated, want);
+    let steps_i = drive(&mut interpreted, want);
+    let steps_t = drive(&mut translated, want);
 
-    println!("interpreted  {steps_i:>10} steps  {rate_i:>6.1} M/s");
-    println!(
-        "translated   {steps_t:>10} steps  {rate_t:>6.1} M/s  ({:.2}x)",
-        rate_t / rate_i
-    );
+    println!("interpreted  {steps_i:>10} steps");
+    println!("translated   {steps_t:>10} steps");
+
     let stats = translated.jit_stats();
+    let per = |n: u64, of: u64| if of == 0 { 0.0 } else { n as f64 / of as f64 };
     println!(
         "  {} blocks, {} translated, {} entered ({:.0}x each), {} invalidated",
         stats.blocks,
         stats.translated,
         stats.executed,
-        if stats.translated == 0 {
-            0.0
-        } else {
-            stats.executed as f64 / stats.translated as f64
-        },
+        per(stats.executed, stats.translated),
         stats.invalidated,
+    );
+    // The share of the run the translator did not translate. Every one of
+    // these re-derived the instruction's group, form and fields on the way
+    // past, which is the work the translator exists to do once — so this is
+    // where the next block of speed is, and it reads the same under any
+    // compiler on any target.
+    println!(
+        "  {} instructions fell back to the interpreter ({:.2}% of the run)",
+        stats.interpreted,
+        per(stats.interpreted, steps_t) * 100.0,
     );
 
     if steps_i != steps_t {

@@ -21,7 +21,7 @@ The `.nro`/`.nsp` files are gitignored.
   on halt or fault. `RING_MIN` past `rtld` (`0x08004000`), whose lazy-binding
   resolver would otherwise fill the whole ring. `MARK`/`MARK_DUMP` watch an API
   being called in order without recording the steps between.
-- `--example jit_bench <nro>` — both engines, with every state difference.
+- `--example jit_difftest <nro>` — both engines, with every state difference.
   `SWITCH_NO_JIT=1` disables translation for host tools.
 - **Checking the WebGPU backend**: run `screenshot_nca` and `switch-gpu`'s
   `screenshot_gpu` over the same frame and `cmp` the PPMs. `GPU_ONLY=<i>` puts

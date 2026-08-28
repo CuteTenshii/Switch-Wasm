@@ -55,7 +55,7 @@ mod time;
 mod vi;
 
 pub use fs::SaveDataQuota;
-pub use jit::JitStats;
+pub use jit::{translates, JitStats};
 
 use acc::{DEFAULT_NICKNAME, NICKNAME_LEN};
 pub(crate) use bits::decode_bit_mask;

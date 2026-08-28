@@ -1613,12 +1613,13 @@ pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) 
     let s = session(handle);
     let stats = s.cpu.jit_stats();
     let json = format!(
-        "{{\"enabled\":{},\"blocks\":{},\"translated\":{},\"executed\":{},\"invalidated\":{}}}",
+        "{{\"enabled\":{},\"blocks\":{},\"translated\":{},\"executed\":{},\"invalidated\":{},\"interpreted\":{}}}",
         s.cpu.jit_enabled(),
         stats.blocks,
         stats.translated,
         stats.executed,
-        stats.invalidated
+        stats.invalidated,
+        stats.interpreted
     );
     write_into(buf, maxlen, json.as_bytes())
 }

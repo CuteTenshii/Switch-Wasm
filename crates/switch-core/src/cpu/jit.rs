@@ -50,7 +50,7 @@
 //! Two smaller things point the same way: compiling a module goes out through
 //! JS, so a basic block is far too small a unit to pay for one, and generated
 //! code would not exist in host builds — leaving the test suite and
-//! `examples/jit_bench.rs` covering only one of the two engines. Flattening
+//! `examples/jit_difftest.rs` covering only one of the two engines. Flattening
 //! the guest address space behind a base-plus-bounds check is the change that
 //! has to come first.
 //!
@@ -577,6 +577,7 @@ pub(super) struct Jit {
     translated: u64,
     executed: u64,
     invalidated: u64,
+    interpreted: u64,
 }
 
 /// What the translator has been doing, for host-side diagnostics.
@@ -590,6 +591,31 @@ pub struct JitStats {
     pub executed: u64,
     /// Blocks dropped because the memory they came from was written.
     pub invalidated: u64,
+    /// Instructions that reached the interpreter's dispatcher anyway, because
+    /// the translator had no op for them.
+    ///
+    /// Against `Cpu::run`'s step count this is the share of a run the
+    /// translator did not actually translate — the one number here that says
+    /// where the next block of speed is, and the same number on any target.
+    pub interpreted: u64,
+}
+
+/// Whether the block translator has a real op for `insn`, or hands it back to
+/// the interpreter to decode again on every execution.
+///
+/// Exact, and the same answer on every target — which is why it is worth
+/// asking. The alternative is to time two engines against each other and call
+/// a class translated when they come out within noise of one another, and
+/// noise on a desktop is not evidence about the browser.
+///
+/// PC-relative forms decode against an address; which one makes no difference
+/// to whether the encoding is translated, so any aligned address answers.
+pub fn translates(insn: u32) -> bool {
+    const REPRESENTATIVE_PC: u32 = 0x0800_0000;
+    !matches!(
+        decode(insn, REPRESENTATIVE_PC),
+        Decoded::Op(Op::Interpret { .. }) | Decoded::Term(Term::Interpret { .. })
+    )
 }
 
 impl Default for Jit {
@@ -601,6 +627,7 @@ impl Default for Jit {
             translated: 0,
             executed: 0,
             invalidated: 0,
+            interpreted: 0,
         }
     }
 }
@@ -675,6 +702,7 @@ impl Jit {
             translated: self.translated,
             executed: self.executed,
             invalidated: self.invalidated,
+            interpreted: self.interpreted,
         }
     }
 }
@@ -1752,6 +1780,7 @@ impl Cpu {
             // PC-relative forms from it, and every fault message names it.
             Op::Interpret { insn } => {
                 self.pc = pc;
+                self.jit.interpreted += 1;
                 self.execute(insn, pc.wrapping_add(4))?;
             }
             Op::Fp { insn, scalar, form } => {
@@ -2267,9 +2296,13 @@ impl Cpu {
                 self.pc = next;
                 self.syscall(imm)?;
             }
-            Term::Interpret { insn, next } => self.execute(insn, next)?,
+            Term::Interpret { insn, next } => {
+                self.jit.interpreted += 1;
+                self.execute(insn, next)?;
+            }
             Term::Fetch => {
                 let insn = self.mem.fetch(pc)?;
+                self.jit.interpreted += 1;
                 self.execute(insn, pc.wrapping_add(4))?;
             }
         }
