@@ -2094,6 +2094,11 @@ impl Emitter<'_> {
             | Op::Cont
             | Op::Exit
             | Op::Kil => unreachable!("control flow is emitted by emit_instruction"),
+            // The general `tex` needs the operands `texs` has no room for —
+            // an explicit level, a texel offset — and each of those is a
+            // separate WGSL builtin. Until they are emitted, a shader with
+            // one is the rasterizer's.
+            Op::Tex { .. } => return Err(Unsupported::Op { at, op }),
         }
         Ok(())
     }

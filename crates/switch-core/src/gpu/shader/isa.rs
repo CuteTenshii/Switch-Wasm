@@ -970,6 +970,33 @@ pub enum Op {
         f16: bool,
     },
 
+    /// `tex dst, coords.., handle, dim, mask` — the general texture sample.
+    ///
+    /// [`Op::Texs`] is a short encoding of the common cases; this is the full
+    /// one, and carries the operands that encoding has no room for. The
+    /// results land in consecutive registers from `dst`, one per set mask
+    /// bit, rather than in `texs`'s two-register split.
+    Tex {
+        dst: u8,
+        /// The coordinate registers, `dim` of them.
+        coords: [u8; 3],
+        /// An array's layer, an integer in the register *before* the
+        /// coordinates rather than after them as in `texs`.
+        layer: Option<u8>,
+        /// A shadow sample's reference (`.DC`).
+        dref: Option<u8>,
+        /// `.AOFFI`'s register: a signed four-bit texel offset per axis,
+        /// packed into one word.
+        offset: Option<u8>,
+        /// The register the `.LL`/`.LB` modes take their level or bias from.
+        /// Decoded because it decides where the operands after it sit, not
+        /// because a sampler with one mip level can use it.
+        lod: Option<u8>,
+        handle: u16,
+        dim: TexDim,
+        mask: [bool; 4],
+    },
+
     // ---- warp ----
     /// `shfl.<mode> p, dst, src, index, mask` — read another lane's `src`.
     ///
@@ -2437,6 +2464,12 @@ fn decode_alu_wide(insn: u64) -> Op {
         return un;
     }
 
+    // tex — the general sample, whose operands are spread over the meta
+    // register rather than packed into `texs`'s two.
+    if insn & 0xf800_0000_0000_0000 == 0xc000_0000_0000_0000 {
+        return decode_tex(insn);
+    }
+
     // The 32-bit-immediate forms.
     if insn & 0xfff0_0000_0000_0000 == 0x0100_0000_0000_0000 {
         return Op::Mov32i {
@@ -2974,6 +3007,68 @@ fn decode_tex_mask(selector: u64, dst: u8, dst2: u8) -> Option<[bool; 4]> {
         return None;
     }
     Some([bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0])
+}
+
+/// Decode `tex`, whose operands are read out of one register in a fixed order
+/// — level of detail, then texel offset, then shadow reference — each present
+/// only if its own modifier bit is set. Getting that order wrong reads a
+/// coordinate as an offset, so it is written the way Eden's
+/// `texture_fetch.cpp` walks it.
+fn decode_tex(insn: u64) -> Op {
+    let un = Op::Unimplemented { raw: insn };
+    // `.LC`, a level-of-detail clamp, has nothing to clamp in a sampler with
+    // one level, and saying so is better than sampling as if it were absent.
+    if field(insn, 58, 1) != 0 {
+        return un;
+    }
+    // The dimensionalities `TexDim` names. 1D arrays, 3D arrays and cube
+    // arrays are the ones it does not.
+    let dim = match field(insn, 28, 3) {
+        0 => TexDim::T1d,
+        2 => TexDim::T2d,
+        3 => TexDim::T2dArray,
+        4 => TexDim::T3d,
+        6 => TexDim::TCube,
+        _ => return un,
+    };
+    let dst = reg(insn, 0, 8);
+    let bits = field(insn, 31, 4);
+    if bits == 0 || dst == RZ {
+        return un; // a sample with nowhere to land
+    }
+    let coord = reg(insn, 8, 8);
+    // An array's layer sits in the first coordinate register and the
+    // coordinates start one along; every other dimensionality starts at it.
+    let (layer, first) = match dim {
+        TexDim::T2dArray => (Some(coord), coord.wrapping_add(1)),
+        _ => (None, coord),
+    };
+    let mut meta = reg(insn, 20, 8);
+    let mut take = || {
+        let r = meta;
+        meta = meta.wrapping_add(1);
+        r
+    };
+    // `blod`: 0 none, 1 `.LZ`, 2 `.LB`, 3 `.LL`, 6 `.LBA`, 7 `.LLA`. Only the
+    // four that carry a register consume one; 4 and 5 are not modes at all.
+    let lod = match field(insn, 55, 3) {
+        0 | 1 => None,
+        2 | 3 | 6 | 7 => Some(take()),
+        _ => return un,
+    };
+    let offset = (field(insn, 54, 1) != 0).then(&mut take);
+    let dref = (field(insn, 50, 1) != 0).then(&mut take);
+    Op::Tex {
+        dst,
+        coords: [first, first.wrapping_add(1), first.wrapping_add(2)],
+        layer,
+        dref,
+        offset,
+        lod,
+        handle: field(insn, 36, 13) as u16,
+        dim,
+        mask: [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0],
+    }
 }
 
 /// What one of a `texs`'s destination registers ends up holding.
@@ -3743,6 +3838,65 @@ mod tests {
                 sat: false,
             }
         );
+    }
+
+    #[test]
+    fn decodes_tex() {
+        // Both words are Persona 5 Royal's, from the fragment shaders of the
+        // post-process chain its loading spinner is drawn by. The first
+        // samples one channel with a texel offset; the second samples three
+        // at an explicit level, which pushes its offset a register along.
+        assert_eq!(
+            op(0xc07a0080a0770401),
+            Op::Tex {
+                dst: 1,
+                coords: [4, 5, 6],
+                layer: None,
+                dref: None,
+                offset: Some(7),
+                lod: None,
+                handle: 8,
+                dim: TexDim::T2d,
+                mask: [true, false, false, false],
+            }
+        );
+        assert_eq!(
+            op(0xc0f80083a0b70e08),
+            Op::Tex {
+                dst: 8,
+                coords: [14, 15, 16],
+                layer: None,
+                dref: None,
+                offset: Some(11),
+                lod: None,
+                handle: 8,
+                dim: TexDim::T2d,
+                mask: [true, true, true, false],
+            }
+        );
+        // `.LL` takes a level out of the meta register, so everything after
+        // it moves along one — reading the offset from the wrong register is
+        // how a texel offset becomes a coordinate.
+        let ll = 0xc07a0080a0770401 | 3 << 55;
+        assert!(matches!(
+            op(ll),
+            Op::Tex {
+                lod: Some(7),
+                offset: Some(8),
+                ..
+            }
+        ));
+        // A level-of-detail clamp has nothing to clamp here, and a sample
+        // with nowhere to land is not one.
+        assert!(matches!(op(ll | 1 << 58), Op::Unimplemented { .. }));
+        assert!(matches!(
+            op(0xc07a0080a0770401 & !(0xf << 31)),
+            Op::Unimplemented { .. }
+        ));
+        assert!(matches!(
+            op(0xc07a0080a0770401 | u64::from(RZ)),
+            Op::Unimplemented { .. }
+        ));
     }
 
     #[test]

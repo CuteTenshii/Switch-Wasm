@@ -545,6 +545,14 @@ headers, ioctls from libnx's `nvidia/ioctl`.
 - `raster` — the software rasterizer, and **the reference every other path must
   agree with**. `qmd` + `compute` are its counterpart for a dispatch.
 
+**`texs` is the short texture sample and `tex` is the general one.** The
+operands `texs` has no room for — an explicit level, an `.AOFFI` texel offset,
+a shadow reference — come out of one register in that order, each present only
+if its own modifier bit is set, so getting the order wrong reads a coordinate
+as an offset. The offset is scaled by `TextureSource::texel_step` and added to
+the normalized coordinate, which differs from hardware only outside the image
+and only for the wrap modes that do not clamp.
+
 **`exit` carries a condition-code test beside its predicate**, and both have
 to hold. `EXIT.F` and `EXIT.FCSM_TR` never fire, so they are decoded as `nop`
 and the walk carries on past them — Persona 5 Royal's vertex shaders open with

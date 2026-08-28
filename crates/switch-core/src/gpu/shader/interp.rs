@@ -180,6 +180,20 @@ pub trait TextureSource {
         )))
     }
 
+    /// One texel of `handle` in normalized coordinates — `(1/width,
+    /// 1/height)`.
+    ///
+    /// A `tex.aoffi`'s offset is in texels and this sampler takes normalized
+    /// coordinates, so the offset has to be scaled by this before it is
+    /// added. Hardware adds it after the coordinate is scaled *and* clamped
+    /// per axis; adding it beforehand differs only where a sample would land
+    /// outside the image, and only for the wrap modes that do not clamp.
+    fn texel_step(&self, handle: u32) -> ShaderResult<(f32, f32)> {
+        Err(fault(format!(
+            "shader: texel offset on handle {handle:#x} with no texture source bound"
+        )))
+    }
+
     /// A shadow sample: how `reference` compares against the depth there,
     /// as `[c, c, c, 1.0]`. Defaulted to an error so that a source with no
     /// depth textures behind it stays a one-method implementation.
@@ -256,6 +270,14 @@ impl TextureSource for MemoryTextures<'_, '_> {
             layer,
             self.blocks,
         )?)
+    }
+
+    fn texel_step(&self, handle: u32) -> ShaderResult<(f32, f32)> {
+        let texture = self.descriptors_for(handle)?.texture;
+        Ok((
+            1.0 / texture.width.max(1) as f32,
+            1.0 / texture.height.max(1) as f32,
+        ))
     }
 
     fn sample_3d(&self, handle: u32, u: f32, v: f32, w: f32) -> ShaderResult<[f32; 4]> {
@@ -876,6 +898,9 @@ impl Invocation {
                 }
                 Op::Texs { .. } => {
                     self.run_texs(program, pc, op, env, pending)?;
+                }
+                Op::Tex { .. } => {
+                    self.run_tex(program, pc, op, env, pending)?;
                 }
                 other => self.run_alu(other, env)?,
             }
@@ -1823,7 +1848,8 @@ impl Invocation {
             | Op::Cont
             | Op::Bar { .. }
             | Op::Shfl { .. }
-            | Op::Texs { .. } => unreachable!("control flow is dispatched in execute"),
+            | Op::Texs { .. }
+            | Op::Tex { .. } => unreachable!("control flow is dispatched in execute"),
         }
         Ok(())
     }
@@ -1987,8 +2013,83 @@ impl Invocation {
             }
             (None, _) => env.textures.sample(handle, u, v, layer)?,
         };
+        self.land_texture(program, pc, color, pending);
+        Ok(())
+    }
 
-        // Where each channel lands was worked out at decode time.
+    /// The general `tex`. It differs from [`Self::run_texs`] in where its
+    /// operands sit — the level of detail, the texel offset and the shadow
+    /// reference come out of one register in that order, and an array's layer
+    /// sits *before* the coordinates rather than after them — not in what it
+    /// samples.
+    fn run_tex(
+        &mut self,
+        program: &Compiled,
+        pc: usize,
+        op: Op,
+        env: &Env,
+        pending: &mut Vec<(usize, u8, u32)>,
+    ) -> ShaderResult<()> {
+        let Op::Tex {
+            coords,
+            layer,
+            dref,
+            offset,
+            handle,
+            dim,
+            ..
+        } = op
+        else {
+            unreachable!("run_tex called with {op:?}");
+        };
+        let handle = env
+            .consts
+            .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
+        let mut u = self.reg_f32(coords[0]);
+        // A 1D image has one coordinate, and the register after it belongs to
+        // something else.
+        let mut v = match dim {
+            TexDim::T1d => 0.0,
+            _ => self.reg_f32(coords[1]),
+        };
+        // `.AOFFI` packs a signed four-bit offset per axis into one register.
+        // Persona 5 Royal's blur taps are one texel apart and every one of
+        // them read the same texel without this.
+        if let Some(reg) = offset {
+            let packed = self.reg(reg);
+            let axis = |shift: u32| ((packed >> shift) as i32) << 28 >> 28;
+            let (du, dv) = env.textures.texel_step(handle)?;
+            u += axis(0) as f32 * du;
+            v += axis(4) as f32 * dv;
+        }
+        let layer = layer.map_or(0, |reg| self.reg(reg) & 0xffff);
+        let color = match (dref, dim) {
+            (Some(reg), _) => {
+                env.textures
+                    .sample_compare(handle, u, v, layer, self.reg_f32(reg))?
+            }
+            (None, TexDim::T3d) => env
+                .textures
+                .sample_3d(handle, u, v, self.reg_f32(coords[2]))?,
+            (None, TexDim::TCube) => {
+                env.textures
+                    .sample_cube(handle, u, v, self.reg_f32(coords[2]))?
+            }
+            (None, _) => env.textures.sample(handle, u, v, layer)?,
+        };
+        self.land_texture(program, pc, color, pending);
+        Ok(())
+    }
+
+    /// Queue a sample's channels into the destination registers worked out at
+    /// decode time, each due right before the first instruction that reads it.
+    fn land_texture(
+        &self,
+        program: &Compiled,
+        pc: usize,
+        color: [f32; 4],
+        pending: &mut Vec<(usize, u8, u32)>,
+    ) {
         for &(reg, store, due) in program.texs_writes(pc) {
             let raw = match store {
                 isa::TexsStore::Float(channel) => color[channel].to_bits(),
@@ -2004,7 +2105,6 @@ impl Invocation {
             pending.retain(|&(_, r, _)| r != reg);
             pending.push((due, reg, raw));
         }
-        Ok(())
     }
 }
 
@@ -2014,17 +2114,27 @@ impl Invocation {
 pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
     let mut out = Vec::new();
     for (pc, op) in ops.iter().enumerate() {
-        let Op::Texs {
-            dst,
-            dst2,
-            mask,
-            f16,
-            ..
-        } = *op
-        else {
-            continue;
+        let destinations = match *op {
+            Op::Texs {
+                dst,
+                dst2,
+                mask,
+                f16,
+                ..
+            } => isa::texs_destinations(dst, dst2, mask, f16),
+            // `tex` has no two-register split and no packed-halves form: its
+            // channels land in consecutive registers from `dst`, one per set
+            // mask bit, as whole floats.
+            Op::Tex { dst, mask, .. } => mask
+                .iter()
+                .enumerate()
+                .filter(|(_, &wanted)| wanted)
+                .zip(0u8..)
+                .map(|((channel, _), n)| (dst.wrapping_add(n), isa::TexsStore::Float(channel)))
+                .collect(),
+            _ => continue,
         };
-        let writes = isa::texs_destinations(dst, dst2, mask, f16)
+        let writes = destinations
             .into_iter()
             .map(|(reg, store)| {
                 let due = first_use_after(ops, pc + 1, reg).unwrap_or(ops.len() - 1);
@@ -4301,6 +4411,62 @@ mod tests {
         assert_eq!(run_half(&operands, &[set(false)]).reg(0), 0x0000_FFFF);
         // `.bf` answers with 1.0h rather than a mask.
         assert_eq!(run_half(&operands, &[set(true)]).reg(0), halves(1.0, 0.0));
+    }
+
+    /// `tex.aoffi` is a *texel* offset and the sampler takes normalized
+    /// coordinates, so the offset has to be scaled by the level's size. Every
+    /// tap of Persona 5 Royal's blur read the same texel without it.
+    #[test]
+    fn a_tex_texel_offset_moves_the_sample_by_one_texel() {
+        fn word(lo: u32, hi: u32) -> [u8; 8] {
+            let mut out = [0u8; 8];
+            out[..4].copy_from_slice(&lo.to_le_bytes());
+            out[4..].copy_from_slice(&hi.to_le_bytes());
+            out
+        }
+        // One of the title's own: `tex.aoffi $r1 $r4 $r7 0x8 t2d r`, then
+        // `exit`. Coordinates in $r4/$r5, the packed offset in $r7.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&word(0, 0)); // sched
+        bytes.extend_from_slice(&word(0xa0770401, 0xc07a0080));
+        bytes.extend_from_slice(&word(0x0007000f, 0xe3000000)); // exit
+        bytes.extend_from_slice(&word(0, 0));
+        let program = Compiled::new(&super::super::decode_program(&bytes).unwrap());
+
+        /// A 64x32 image whose sample reports where it was asked to look.
+        struct Probe(std::cell::Cell<(f32, f32)>);
+        impl TextureSource for Probe {
+            fn sample(&self, _h: u32, u: f32, v: f32, _l: u32) -> ShaderResult<[f32; 4]> {
+                self.0.set((u, v));
+                Ok([1.0, 0.0, 0.0, 1.0])
+            }
+            fn texel_step(&self, _h: u32) -> ShaderResult<(f32, f32)> {
+                Ok((1.0 / 64.0, 1.0 / 32.0))
+            }
+        }
+
+        let mut consts: HashMap<(u8, u16), f32> = HashMap::new();
+        consts.insert(
+            (
+                crate::gpu::texture::NOUVEAU_TEX_CB_INDEX,
+                crate::gpu::texture::handle_offset(8),
+            ),
+            f32::from_bits(1),
+        );
+        // +1 texel in x, -1 in y: each axis is a signed four-bit field.
+        for (packed, want) in [
+            (0x00u32, (0.5, 0.5)),
+            (0x01, (0.5 + 1.0 / 64.0, 0.5)),
+            (0xF0, (0.5, 0.5 - 1.0 / 32.0)),
+        ] {
+            let probe = Probe(std::cell::Cell::new((0.0, 0.0)));
+            let mut inv = Invocation::new();
+            inv.set_reg_f32(4, 0.5);
+            inv.set_reg_f32(5, 0.5);
+            inv.set_reg(7, packed);
+            inv.execute(&program, &Env::new(&consts, &probe)).unwrap();
+            assert_eq!(probe.0.get(), want, "offset {packed:#04x}");
+        }
     }
 
     /// A half instruction's `.ftz` flushes at the *half* threshold, four
