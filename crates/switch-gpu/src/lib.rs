@@ -645,6 +645,63 @@ pub struct Gpu {
     /// which read as "the readback was not mapped", every frame, for as long
     /// as the title ran.
     lost: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Whether a flush has ever answered [`Flush::Pending`] — that is,
+    /// whether a readback on this host completes later than the call that
+    /// asked for it.
+    ///
+    /// Natively it does not: the flush waits, so guest memory is the truth by
+    /// the time the call returns and a draw may hand itself to the rasterizer
+    /// in the middle of a frame. In a browser it does, because a map completes
+    /// from the event loop and nothing inside a run slice can make that
+    /// happen — and there a mid-frame fallback reads what was in memory
+    /// *before* the device drew, then has the readback land on top of what it
+    /// wrote.
+    ///
+    /// Observed rather than compiled in, because it is a fact about how the
+    /// host answers and not about which target this was built for.
+    deferred_readbacks: bool,
+    /// `GPU_DEFER_READBACKS=1`: do not wait for a readback even where waiting
+    /// is possible, so that a native run reproduces what a browser does. See
+    /// [`Gpu::deferred_readbacks`], which this is the way to provoke.
+    defer_readbacks: bool,
+    /// `GPU_INTERLEAVE=1`: keep handing single draws to the rasterizer in the
+    /// middle of a device frame even where readbacks land late, instead of
+    /// giving the whole frame to the rasterizer.
+    ///
+    /// It is wrong, and it is not very wrong, and how wrong is measurable:
+    /// with `GPU_DEFER_READBACKS=1` to make a native run behave like a
+    /// browser, the Home Menu's frame 60 comes out with **795 of its 921,600
+    /// pixels** written by a draw the readback then overwrote — 0.09% of the
+    /// frame, in the places the fallback draws touched. Against that, the
+    /// latch costs the Home Menu every device draw after the first frame,
+    /// which is 0.10 s a frame becoming 1.03 s.
+    ///
+    /// So it is a real trade and the numbers are per title: a title the
+    /// translator covers has nothing to trade, and one where the device draws
+    /// half the frame would lose more than 795 pixels. Off, because a frame
+    /// nobody produced is the one thing this backend is built not to make.
+    interleave: bool,
+    /// Whether the rasterizer has the frame, and every frame after it.
+    ///
+    /// The answer to a readback that cannot land inside a slice is not to
+    /// interleave more carefully — it is not to interleave. A frame the
+    /// device cannot render *all* of is one it renders none of: guest memory
+    /// is then the only copy of every surface, and no readback is ever owed.
+    ///
+    /// It latches, because nothing can tell it to unlatch. A draw falls back
+    /// on the shader it runs, a title runs the same shaders every frame, and
+    /// a frame rendered entirely on the rasterizer never discovers whether
+    /// the next one would have fallen back — so alternating is the one
+    /// behaviour this must not have.
+    ///
+    /// **What buys the acceleration back is `shader::wgsl`.** Every fallback
+    /// this latches on today is an opcode with no WGSL form, not anything
+    /// WebGPU withholds: the Home Menu's are one `ldg b128`, and A Short
+    /// Hike's are a handful of `Unimplemented`. A title the translator covers
+    /// completely never reaches this.
+    software_frame: bool,
+    /// Whether anything fell back during the frame in progress.
+    fell_back_this_frame: bool,
     /// Whether [`Gpu::give_up`] has already handed the frame back.
     gave_up: bool,
     /// The loss, kept for the first flush after it.
@@ -806,6 +863,11 @@ impl Gpu {
             resample_pipelines: std::collections::HashMap::new(),
             failed,
             lost,
+            deferred_readbacks: false,
+            defer_readbacks: switch_core::env_flag!("GPU_DEFER_READBACKS"),
+            interleave: switch_core::env_flag!("GPU_INTERLEAVE"),
+            software_frame: false,
+            fell_back_this_frame: false,
             gave_up: false,
             device_msaa: switch_core::env_flag!("GPU_DEVICE_MSAA"),
             report: None,
@@ -851,6 +913,7 @@ impl Gpu {
 
     fn fall_back(&mut self, why: String) {
         self.fallbacks += 1;
+        self.fell_back_this_frame = true;
         // Each distinct reason once: a draw that falls back does it every
         // frame, and the interesting thing is the list rather than the count.
         if !self.reasons.contains(&why) {
@@ -884,6 +947,14 @@ impl Gpu {
         self.pending.clear();
         self.scratch.clear();
         true
+    }
+
+    /// Keep interleaving single fallback draws into a device frame on a host
+    /// whose readbacks land late — the `GPU_INTERLEAVE` flag, for the build
+    /// with no environment to read it from. See [`Gpu::interleave`] for what
+    /// it trades and what it costs.
+    pub fn set_interleave(&mut self, interleave: bool) {
+        self.interleave = interleave;
     }
 
     /// Let the device do the multisampling where it offers the sample count
@@ -1971,10 +2042,19 @@ impl Gpu {
                 .into_iter()
                 .flatten()
                 .all(|format| self.samples_supported(format, state.samples));
-        Ok(match offered {
-            true => Render::Companion(Shape::Multisampled(state.samples)),
-            false => Render::Expanded,
-        })
+        if offered {
+            return Ok(Render::Companion(Shape::Multisampled(state.samples)));
+        }
+        // The expanded route tests coverage at texel centres, because that is
+        // where a fragment is. A guest that has moved its samples somewhere
+        // else inside their texels is asking for coverage neither route can
+        // express — the device's positions are fixed by the spec and not
+        // Maxwell's either — so this is a draw to hand back rather than one
+        // to draw a fraction of a texel wrong.
+        if !state.grid.samples_at_texel_centres() {
+            return Err("a draw with programmed sample locations".into());
+        }
+        Ok(Render::Expanded)
     }
 
     /// Whether this adapter will render `samples` samples into `format`.
@@ -2915,6 +2995,13 @@ impl Renderer for Gpu {
             self.flush(ctx)?;
             return self.software.draw(engine, ctx);
         }
+        // A frame the device is not rendering all of, it is not rendering any
+        // of — see [`Gpu::software_frame`]. Nothing is held, so the flush
+        // here has nothing to hand back after the first draw of it.
+        if self.software_frame {
+            self.flush(ctx)?;
+            return self.software.draw(engine, ctx);
+        }
         let mut route = None;
         let attempt = match self.prepare(engine, &*ctx) {
             Ok(prepared) => {
@@ -2954,9 +3041,25 @@ impl Renderer for Gpu {
         layer: u32,
         channels: [bool; 4],
     ) -> Result<()> {
-        // A frame starts at its clear.
+        // A frame starts at its clear, which is where the last one's answer
+        // becomes this one's decision.
         self.in_frame = 0;
-        if self.give_up() {
+        if self.deferred_readbacks
+            && self.fell_back_this_frame
+            && !self.software_frame
+            && !self.interleave
+        {
+            self.software_frame = true;
+            eprintln!(
+                "[gpu] a draw fell back where a readback lands later than the call that \
+                 asked for it; the rasterizer has every frame from here. The fallbacks \
+                 are opcodes `shader::wgsl` does not translate: {:?}",
+                self.reasons
+            );
+        }
+        self.fell_back_this_frame = false;
+        if self.give_up() || self.software_frame {
+            self.flush(ctx)?;
             return self.software.clear_color(engine, ctx, target, layer, channels);
         }
         let attempt = self.clear_color_here(engine, ctx, target, layer, channels);
@@ -2981,7 +3084,8 @@ impl Renderer for Gpu {
         depth: bool,
         stencil: bool,
     ) -> Result<()> {
-        if self.give_up() {
+        if self.give_up() || self.software_frame {
+            self.flush(ctx)?;
             return self.software.clear_depth_stencil(engine, ctx, depth, stencil);
         }
         // The device holds no stencil at all — `depth32float` and
@@ -3067,12 +3171,24 @@ impl Gpu {
         // rather than anything WebGPU withholds — and the fallback set it
         // matters for is itself a shortfall in `shader::wgsl`, not a fact
         // about the platform.
-        let _ = self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: Some(std::time::Duration::from_secs(5)),
-        });
+        // `GPU_DEFER_READBACKS=1` declines the wait, so a native run behaves
+        // the way a browser does — the map completes on some later call
+        // rather than this one. It is how the browser-only half of this is
+        // measured at all.
+        let _ = if self.defer_readbacks {
+            self.device.poll(wgpu::PollType::Poll)
+        } else {
+            self.device.poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(5)),
+            })
+        };
         use std::sync::atomic::Ordering;
         if self.pending.iter().any(|p| p.state.load(Ordering::Acquire) == MAP_WAITING) {
+            // The one place that learns a readback does not land inside the
+            // call that asked for it. From here on a frame is all one
+            // renderer's — see [`Gpu::deferred_readbacks`].
+            self.deferred_readbacks = true;
             return Ok(Flush::Pending);
         }
         for pending in std::mem::take(&mut self.pending) {
@@ -3318,6 +3434,59 @@ mod tests {
             let raw = h.engine.regs.get(0x459);
             h.engine.regs.set(0x459, raw | 1 << 31);
         });
+    }
+
+    /// What a host whose readbacks land late does with a frame the device
+    /// cannot render all of.
+    ///
+    /// Natively a flush waits, so this never arises and a frame interleaves
+    /// freely. In a browser the map completes from the event loop and nothing
+    /// inside a run slice can make that happen — so a mid-frame fallback read
+    /// guest memory the device had not written back yet, and the readback
+    /// then landed on top of what the rasterizer wrote. The frame after such
+    /// a fallback is the rasterizer's whole, and so is every frame after it.
+    #[test]
+    fn a_frame_the_device_cannot_finish_is_a_frame_it_does_not_start() {
+        let Ok(mut gpu) = super::Gpu::open() else { return };
+        // What a browser teaches it on its first present.
+        gpu.deferred_readbacks = true;
+        let colour = [1.0f32, 0.0, 1.0, 1.0];
+
+        let mut h = Harness::new();
+        h.triangle(colour);
+        h.clear_with(&mut gpu, [true; 4]).expect("the clear");
+        assert!(!gpu.software_frame, "nothing has fallen back yet");
+        // A line loop is a topology neither renderer draws and no pipeline
+        // can describe, so this is a draw that must fall back.
+        h.engine.last_draw.primitive = 2;
+        // The rasterizer will not draw one either, and says so — which is
+        // what a fallback landing somewhere that also refuses looks like. The
+        // fallback is the part under test.
+        let _ = h.draw_with(&mut gpu);
+        assert!(gpu.fell_back_this_frame, "a line loop should not have been expressible");
+
+        // The next frame's clear is where that becomes a decision.
+        h.engine.last_draw.primitive = 4;
+        h.clear_with(&mut gpu, [true; 4]).expect("the clear");
+        assert!(gpu.software_frame, "the frame after a fallback is the rasterizer's");
+        let drawn = gpu.drawn;
+        h.draw_with(&mut gpu).expect("the draw");
+        assert_eq!(gpu.drawn, drawn, "a draw ran on the device in a rasterizer's frame");
+
+        // What guest memory holds is the frame the rasterizer draws — read
+        // before anything clears it again.
+        let got = h.target();
+        let mut want = Harness::new();
+        want.triangle(colour);
+        want.clear_with(&mut Software, [true; 4]).expect("the clear");
+        want.draw_with(&mut Software).expect("the draw");
+        assert_eq!(got, want.target());
+
+        // It latches: a frame that renders nothing on the device cannot
+        // discover that the next one would have been fine, and alternating is
+        // the one behaviour this must not have.
+        h.clear_with(&mut gpu, [true; 4]).expect("the clear");
+        assert!(gpu.software_frame, "the decision came undone");
     }
 
     #[test]

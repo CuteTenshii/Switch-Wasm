@@ -284,6 +284,31 @@ impl SampleGrid {
         self.slots[sample as usize]
     }
 
+    /// Whether every sample sits at the centre of the texel that stores it.
+    ///
+    /// That is where an unprogrammed grid puts them, and it is the one
+    /// arrangement a backend can reproduce by rendering the expanded surface
+    /// a texel at a time — a fragment is tested at its own centre and nowhere
+    /// else. A guest that programs `MultisampleSampleLocations` to anything
+    /// else is asking for coverage this cannot express, and a backend that
+    /// drew it anyway would be off by a fraction of a texel with nothing
+    /// saying so.
+    ///
+    /// A programmed table that happens to name the centres — `4/16` and
+    /// `12/16` over a 2x2 grid — answers `true`, because it *is* the same
+    /// grid. Comparing the positions rather than whether anything was written
+    /// is what makes that work.
+    pub fn samples_at_texel_centres(&self) -> bool {
+        (0..self.count()).all(|sample| {
+            let (dx, dy) = self.slot(sample);
+            let centre = [
+                (dx as f32 + 0.5) / self.samples_x as f32,
+                (dy as f32 + 0.5) / self.samples_y as f32,
+            ];
+            self.position(sample) == centre
+        })
+    }
+
     /// The inverse of [`SampleGrid::slot`]: which sample each texel of a
     /// pixel's tile holds, indexed by `dy * samples_x + dx`.
     ///
@@ -883,6 +908,48 @@ mod tests {
         assert_eq!(grid.position(0), [0.5, 0.5]);
         assert_eq!(grid.pixels(1280, 720), (1280, 720));
         assert_eq!(grid.texel(7, 9, 0), (7, 9));
+    }
+
+    #[test]
+    fn an_unprogrammed_grid_puts_every_sample_at_its_texel_centre() {
+        // Which is the whole reason a backend can render an expanded
+        // multisample surface a texel at a time and get the rasterizer's
+        // coverage: a fragment is tested at its own centre.
+        for mode in [0, 1, 2, 3, 6] {
+            let grid = SampleGrid::new(mode, &[0; MAX_SAMPLES]).unwrap();
+            assert!(grid.samples_at_texel_centres(), "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn a_programmed_table_is_told_apart_from_the_centres_it_may_still_name() {
+        // deko3d's `encodeSampleLocation` packs each axis in sixteenths, so
+        // the centres of a 2x2 grid are 4/16 and 12/16 — a table that names
+        // those *is* the unprogrammed grid, and saying otherwise would hand
+        // back a draw that could have been rendered exactly.
+        let centres = [
+            0x4 | (0x4 << 4),
+            0xC | (0x4 << 4),
+            0x4 | (0xC << 4),
+            0xC | (0xC << 4),
+        ];
+        let mut locations = [0u8; MAX_SAMPLES];
+        locations[..4].copy_from_slice(&centres);
+        assert!(SampleGrid::new(2, &locations).unwrap().samples_at_texel_centres());
+
+        // Moved a sixteenth of a pixel off centre, and no longer expressible.
+        let mut moved = locations;
+        moved[0] = 0x5 | (0x4 << 4);
+        assert!(!SampleGrid::new(2, &moved).unwrap().samples_at_texel_centres());
+    }
+
+    #[test]
+    fn coverage_per_pixel_is_not_the_texel_centres() {
+        // Every sample at the pixel centre is a different arrangement, and
+        // the one `AntiAliasEnable` off asks for — a backend renders it at
+        // pixel resolution rather than pretending it is the grid.
+        let grid = SampleGrid::new(2, &[0; MAX_SAMPLES]).unwrap();
+        assert!(!grid.per_pixel_coverage().samples_at_texel_centres());
     }
 
     #[test]

@@ -146,6 +146,30 @@ impl ExecCtx<'_> {
         self.mem.merge_le(cpu, unit, value, mask, count)
     }
 
+    /// The CPU address of a whole `len`-byte span, if one mapping holds all
+    /// of it.
+    ///
+    /// A render target usually is one mapping, and answering so is what lets
+    /// a read or a write of the whole surface cost one address translation
+    /// instead of one per texel. `None` means it is not, and the caller walks
+    /// it the slow way.
+    pub fn span(&self, gpu_va: u64, len: u64) -> Option<u32> {
+        match self.vmm.translate(gpu_va) {
+            Some((cpu, left)) if left >= len => Some(cpu),
+            _ => None,
+        }
+    }
+
+    /// Copy a mapped span out of guest memory in one walk.
+    pub fn read_span(&self, cpu: u32, out: &mut [u8]) -> Result<()> {
+        self.mem.read_into(cpu, out)
+    }
+
+    /// Put a mapped span back in one walk.
+    pub fn write_span(&mut self, cpu: u32, bytes: &[u8]) -> Result<()> {
+        self.mem.write_from(cpu, bytes)
+    }
+
     /// Where a pixel's `len` bytes live in guest memory. A pixel never spans two
     /// mappings, so one translation covers all of it.
     fn pixel_addr(&self, gpu_va: u64, len: u32) -> Result<u32> {

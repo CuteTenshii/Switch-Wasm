@@ -25,8 +25,13 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// which is four and only four. That shades once per pixel instead of once
 /// per sample, and anti-aliases every edge differently from the rasterizer —
 /// see `switch_gpu::Gpu::route` for the trade.
+/// `interleave` is the browser's spelling of `GPU_INTERLEAVE`: keep handing
+/// single fallback draws to the rasterizer inside a device frame, rather than
+/// giving the frame after one to the rasterizer whole. A browser's readback
+/// lands after the call that asked for it, which is what makes the difference
+/// — see `switch_gpu::Gpu::interleave` for the measured trade.
 #[wasm_bindgen]
-pub async fn switch_gpu_open(handle: u32, device_msaa: bool) -> String {
+pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -> String {
     // Before anything is opened, not after. `requestDevice` builds a device in
     // the GPU process whether or not there is a channel to install it on, and
     // one built too early used to be dropped — which on wgpu's web backend
@@ -56,6 +61,7 @@ pub async fn switch_gpu_open(handle: u32, device_msaa: bool) -> String {
     // whose instance has no external reference left.
     let mut gpu = switch_gpu::Gpu::with_device(instance, adapter, device, queue);
     gpu.set_device_msaa(device_msaa);
+    gpu.set_interleave(interleave);
     match crate::install_gpu(handle, gpu) {
         Ok(()) => format!("rendering on {name}"),
         Err((gpu, why)) => {

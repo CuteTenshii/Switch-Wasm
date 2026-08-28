@@ -233,12 +233,22 @@ status table is where per-title results live; keep it, not this file, current.
 ## Block translation (`cpu/jit.rs`)
 
 First visit to an address translates forward into `Op`s — operands extracted,
-immediates decoded — until something changes the PC; that plus its terminator
-is a cached `Block`. Worth **1.9–2.1x**. It removes decode, not dispatch, and
-generates no code: every op calls the same helper the interpreter would, so the
-two engines are the same computation and anything untranslated falls back.
-`SWITCH_NO_JIT=1` for host tools, the debug panel's *Translation* section in
-the browser.
+immediates decoded, and every field the interpreter re-reads per execution
+(load width and direction, register-offset extension, add-vs-subtract, which
+system register, which floating-point form) resolved to the one thing the
+instruction does. Translation runs *through* `b.cond`/`cbz`/`tbz`, which become
+`Exit`s checked on the way past, so only an always-taken branch ends a block:
+hbmenu averages 13 instructions per block entry, not 7. Worth **2.5x**
+(hbmenu 30 -> 80 M/s). It generates no code: every op calls the same helper the
+interpreter would, so the two engines are the same computation and anything
+untranslated falls back. `SWITCH_NO_JIT=1` for host tools, the debug panel's
+*Translation* section in the browser.
+
+Two traps this cost real time to learn. `Memory::fill_le` stamps a 512-byte
+pattern before copying, so it is *slower* than a plain loop for a small run —
+`DC ZVA`'s 64 bytes went through eight `write_u64`s instead. And a segment loop
+that recomputes `pc` from the index rather than carrying it costs more than the
+block-entry it saves.
 
 Emitting wasm per block is blocked by the memory model, not the browser: a
 generated module can only address its own linear memory, and guest memory is a
@@ -303,7 +313,9 @@ walks the guest X29 frame chain.
 
 The `wgpu` backend's own flags are not traces but switches: `GPU_ONLY=<i>` or
 `<a>..<b>` renders only those draws of each frame on the device,
-`GPU_DEVICE_MSAA=1` lets the device do the multisampling, `GPU_TIMES=1` says
+`GPU_DEVICE_MSAA=1` lets the device do the multisampling, `GPU_INTERLEAVE=1`
+keeps fallback draws inside a device frame where readbacks land late,
+`GPU_DEFER_READBACKS=1` makes them land late on purpose, `GPU_TIMES=1` says
 where a draw's time went, and `GPU_DUMP_WGSL=<dir>` writes each draw's two
 modules out.
 
@@ -673,10 +685,33 @@ So the browser still gets `Flush::Pending` and the present still waits for a
 later slice. It matters because a flush also runs before a draw hands itself to
 the rasterizer, and the rasterizer reads guest memory: a flush that answered
 "not yet" there left the draw reading what was in memory before the device drew
-and the readback landing on top of what it wrote. **That is still true in a
-browser, and the fix is to yield** — the backend says it needs the event loop,
-the channel suspends the pushbuffer at that method, and the next slice resumes
-with the readback landed. Not implemented.
+and the readback landing on top of what it wrote.
+
+**Where a readback lands late, a frame is all one renderer's.** In a browser
+the map completes from the event loop and nothing inside a run slice can make
+that happen, so the wait above buys nothing there. The answer is not to
+interleave more carefully but not to interleave: the first flush that answers
+`Pending` sets `Gpu::deferred_readbacks`, and from then on a frame in which
+anything fell back makes every frame after it the rasterizer's whole
+(`Gpu::software_frame`). Guest memory is then the only copy of every surface
+and no readback is ever owed. It latches, because a frame rendered entirely on
+the rasterizer never discovers whether the next one would have been fine, and
+alternating is the one behaviour this must not have.
+
+**What buys the acceleration back is `shader::wgsl`.** Every fallback that
+latches it today is an opcode with no WGSL form — the Home Menu's is one `ldg
+b128`, A Short Hike's are a handful of `Unimplemented` — not anything WebGPU
+withholds. A title the translator covers completely never reaches it.
+
+`GPU_DEFER_READBACKS=1` makes a native run behave the way a browser does — the
+map completes on a later call rather than this one — which is the only way the
+browser-only half of any of this is measurable. With it, the Home Menu at frame
+60: interleaving (`GPU_INTERLEAVE=1`) loses **795 of 921,600 pixels** to draws
+a readback overwrote and keeps 0.10 s frames; the latch is **byte-identical**
+and costs 1.03 s frames, since the Home Menu then never renders on the device
+at all. The switch is off — a frame nobody produced is the one thing this
+backend is built not to make — and `web/worker/index.ts` names it so the trade
+can be taken deliberately.
 
 **A copy out of a held surface flushes first.** The 2D blitter and the copy
 engine read guest memory, so `channel.rs` hands the surfaces back before
@@ -850,6 +885,11 @@ What the numbers taught us:
   fallbacks was worth ~15% in wasm.
 - The interpreter's floor is ~9ns/instruction natively and ~20ns in wasm.
   Block translation is what got past it; more guard reordering would not have.
+- **What is left after translation is real work, not bookkeeping.** hbmenu's
+  translated profile is 72% `exec_block`, 14% `try_fp` (the floating-point
+  arithmetic itself) and 5% block dispatch. Anything further needs ops for the
+  scalar FP forms — `scvtf`, `fcvt`, `fadd`/`fsub`/`fmul`, `fcmpe` are the four
+  that matter — or real wasm codegen, not more dispatch work.
 - **A fragment shader runs once per covered pixel**, and a full-screen pass is
   921,600 of them — so a small `Vec`, a `HashMap` for a sparse thing, or a
   rescan to answer a question costs whole seconds a frame. Fixing three of

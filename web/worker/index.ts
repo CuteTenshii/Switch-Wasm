@@ -72,6 +72,27 @@ const GPU_BACKEND_READY = true;
    way here whatever this says. */
 const GPU_DEVICE_MSAA = false;
 
+/* Whether a fallback draw may still be interleaved into a device frame.
+
+   A browser's readback completes from the event loop, not from the call that
+   asked for it -- so a draw that hands itself to the software rasterizer in
+   the middle of a frame reads guest memory the device has not written back
+   yet, and the readback then lands on top of what it wrote. With this off, the
+   frame after any fallback is the rasterizer's whole, and so is every frame
+   after that.
+
+   It is off, and it is expensive. Measured on the Home Menu at frame 60,
+   natively with the readback deliberately deferred: interleaving loses 795 of
+   921,600 pixels and keeps 0.10 s frames; not interleaving is byte-identical
+   to the rasterizer and costs 1.03 s frames, because the Home Menu has a
+   shader `gpu::shader::wgsl` cannot translate and so never renders on the
+   device at all.
+
+   **The thing to fix is the translator, not this switch.** Turn it on to trade
+   those 795 pixels for the ten-fold frame time, knowing that the number is
+   this title's and another's could be a whole background. */
+const GPU_INTERLEAVE = false;
+
 function tryGpu(): void {
   if (!GPU_BACKEND_READY) {
     if (gpu === 'no') {
@@ -83,9 +104,9 @@ function tryGpu(): void {
   if (gpu !== 'no' || state.handle < 0) return;
   gpu = 'trying';
   const open = (state.exports as unknown as {
-    switch_gpu_open(handle: number, deviceMsaa: boolean): Promise<string>;
+    switch_gpu_open(handle: number, deviceMsaa: boolean, interleave: boolean): Promise<string>;
   }).switch_gpu_open;
-  open(state.handle, GPU_DEVICE_MSAA).then((what) => {
+  open(state.handle, GPU_DEVICE_MSAA, GPU_INTERLEAVE).then((what) => {
     if (what.startsWith('rendering on')) {
       gpu = 'done';
       console.info('[gpu] ' + what);

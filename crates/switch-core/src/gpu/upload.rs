@@ -361,6 +361,21 @@ impl Target {
             )));
         }
         let per_row = self.row_bytes / self.unit.max(1);
+        // The same one-translation walk [`deswizzle`] makes, run backwards.
+        // The surface is read first and patched rather than built from
+        // nothing, because a block-linear surface is padded out to whole
+        // blocks and those bytes are not this surface's to zero.
+        if let Some((cpu, mut raw)) = self.mapped(ctx)? {
+            let unit = self.unit as usize;
+            for y in 0..self.rows {
+                for x in 0..per_row {
+                    let at = self.layout.offset(x * self.unit, y, self.row_bytes) as usize;
+                    let from = ((y * self.row_bytes) + x * self.unit) as usize;
+                    raw[at..at + unit].copy_from_slice(&rows[from..from + unit]);
+                }
+            }
+            return ctx.write_span(cpu, &raw);
+        }
         for y in 0..self.rows {
             for x in 0..per_row {
                 let offset = self.layout.offset(x * self.unit, y, self.row_bytes);
@@ -374,6 +389,16 @@ impl Target {
             }
         }
         Ok(())
+    }
+
+    /// The surface's swizzled bytes, and where they live, when one mapping
+    /// holds all of them.
+    fn mapped(&self, ctx: &ExecCtx) -> Result<Option<(u32, Vec<u8>)>> {
+        let swizzled = u64::from(self.layout.layer_stride(self.row_bytes, self.rows));
+        let Some(cpu) = ctx.span(self.addr, swizzled) else { return Ok(None) };
+        let mut raw = vec![0u8; swizzled as usize];
+        ctx.read_span(cpu, &mut raw)?;
+        Ok(Some((cpu, raw)))
     }
 
     /// How a device would hold this surface, for the target that is a depth
@@ -415,6 +440,30 @@ impl Target {
                 "upload: writing back {} bytes of a {want}-byte depth target",
                 values.len()
             )));
+        }
+        // The whole surface in one translation where one mapping holds it,
+        // which also makes the stencil byte free: it is already in `raw`.
+        if let Some((cpu, mut raw)) = self.mapped(ctx)? {
+            let texel = self.unit as usize;
+            for y in 0..self.rows {
+                for x in 0..per_row {
+                    let at = self.layout.offset(x * self.unit, y, self.row_bytes) as usize;
+                    let from = (y * per_row + x) as usize * unit;
+                    let depth = kind.decode(&values[from..from + unit]);
+                    let value = if layout.packs_stencil() {
+                        let mut old = 0u128;
+                        for (i, &byte) in raw[at..at + texel].iter().enumerate() {
+                            old |= u128::from(byte) << (8 * i);
+                        }
+                        layout.with_depth(old, depth)
+                    } else {
+                        layout.encode_depth(depth)
+                    };
+                    raw[at..at + texel]
+                        .copy_from_slice(&value.to_le_bytes()[..texel]);
+                }
+            }
+            return ctx.write_span(cpu, &raw);
         }
         for y in 0..self.rows {
             for x in 0..per_row {
@@ -822,6 +871,22 @@ fn deswizzle(
         return Err(Error::Gpu("upload: a texture with no bytes per texel".into()));
     }
     let per_row = row_bytes / unit;
+    // One translation for the whole surface where one mapping holds it, which
+    // a render target's does. The walk is then arithmetic over a slice
+    // instead of 3.7 million address translations — see [`ExecCtx::span`].
+    let swizzled = u64::from(layout.layer_stride(row_bytes, rows));
+    if let Some(cpu) = ctx.span(base, swizzled) {
+        let mut raw = vec![0u8; swizzled as usize];
+        ctx.read_span(cpu, &mut raw)?;
+        let unit = unit as usize;
+        for y in 0..rows {
+            for x in 0..per_row {
+                let at = layout.offset(x * unit as u32, y, row_bytes) as usize;
+                out.extend_from_slice(&raw[at..at + unit]);
+            }
+        }
+        return Ok(());
+    }
     for y in 0..rows {
         for x in 0..per_row {
             let at = base + u64::from(layout.offset(x * unit, y, row_bytes));

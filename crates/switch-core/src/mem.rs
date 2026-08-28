@@ -1035,6 +1035,33 @@ impl Memory {
         Ok(())
     }
 
+    /// Copy `buf` into guest memory at `addr` — [`Memory::read_into`] run
+    /// backwards, one page at a time rather than one word at a time.
+    ///
+    /// What a render target's write-back needs. A 720p surface at 2x2 samples
+    /// is 3.7 million texels, and putting one back through `write_le` is 3.7
+    /// million bounds checks and page lookups for what is a handful of
+    /// `copy_from_slice` calls.
+    pub fn write_from(&mut self, addr: u32, buf: &[u8]) -> Result<()> {
+        self.check_writable(addr)?;
+        let mut pos = addr as usize;
+        let end = pos.saturating_add(buf.len());
+        let mut at = 0usize;
+        while pos < end {
+            let idx = pos >> PAGE_BITS;
+            let off = pos & (PAGE_SIZE - 1);
+            let n = (PAGE_SIZE - off).min(end - pos);
+            let page = self.page_mut(idx)?;
+            page[off..off + n].copy_from_slice(&buf[at..at + n]);
+            pos += n;
+            at += n;
+        }
+        // A surface is not code, but nothing here knows that, and the
+        // translator has to be told about any write it did not see.
+        self.dirty_code_range(addr, buf.len());
+        Ok(())
+    }
+
     /// Copy `size` bytes from `src` to `dst`, backing the destination with real
     /// pages. Horizon's `svcMapMemory` aliases two ranges; page storage here is
     /// not shareable, so the bytes are copied instead and copied back when the
