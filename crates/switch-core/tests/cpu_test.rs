@@ -2221,10 +2221,24 @@ fn storage_read_uses_the_istorage_field_layout() {
     // Nothing past the requested size is touched.
     assert_eq!(cpu.mem.read_u8(OUT + 8).unwrap(), 0);
 
-    // A read that runs off the end is clamped rather than faulting.
+    // A read that runs off the end is refused, not clamped: `fs` checks the
+    // range against the storage and reports 2002-3005 rather than filling
+    // what exists. It used to be clamped, which reports success over a buffer
+    // the caller's own bytes are still in — and a caller that trusts the
+    // Result reads those as data.
+    const OUT_OF_RANGE: u32 = 2 | (3005 << 9);
+    cpu.mem.write_u8(OUT, 0xAA).unwrap();
     let mut args = Vec::new();
     args.extend_from_slice(&(romfs.len() as u64 - 2).to_le_bytes());
     args.extend_from_slice(&64u64.to_le_bytes());
+    ipc_request_with_buffer(&mut cpu, FS, 1, 0, OUT, 64, true, &args);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), OUT_OF_RANGE);
+    assert_eq!(cpu.mem.read_u8(OUT).unwrap(), 0xAA, "buffer left alone");
+
+    // The same read, sized to what is actually there, succeeds.
+    let mut args = Vec::new();
+    args.extend_from_slice(&(romfs.len() as u64 - 2).to_le_bytes());
+    args.extend_from_slice(&2u64.to_le_bytes());
     ipc_request_with_buffer(&mut cpu, FS, 1, 0, OUT, 64, true, &args);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
     assert_eq!(cpu.mem.read_u8(OUT).unwrap(), romfs[romfs.len() - 2]);

@@ -34,12 +34,9 @@
 //! split is a paging detail of the on-disk form, not something a lookup needs.
 
 use crate::keys::KeySet;
-use crate::nca::{BktrTable, Nca, SectionSource, ENCRYPTION_AES_CTR_EX};
+use crate::nca::{BktrTable, Nca, RomFsImage, SectionSource, BKTR_MAGIC, ENCRYPTION_AES_CTR_EX};
 use crate::source::{ByteSource, Window};
 use crate::Error;
-
-/// "BKTR", on both of a patch section's table headers.
-const BKTR_MAGIC: u32 = 0x5254_4b42;
 
 /// Both tables are paged: one page of header, then one page per bucket.
 const BUCKET_SIZE: u64 = 0x4000;
@@ -179,7 +176,7 @@ pub fn patched_romfs_source<P: ByteSource, B: ByteSource>(
     base: &Nca,
     base_src: B,
     keys: &KeySet,
-) -> Result<Window<PatchedSection<P, B>>, Error> {
+) -> Result<RomFsImage<Window<PatchedSection<P, B>>>, Error> {
     let patch_index = patch
         .romfs_section_index()
         .ok_or_else(|| Error::Nca("the update's Program NCA has no RomFS section".into()))?;
@@ -236,12 +233,17 @@ pub fn patched_romfs_source<P: ByteSource, B: ByteSource>(
         subsections,
         len: virtual_size,
     };
-    let romfs = Window::new(
+    let stored = Window::new(
         section,
         fs.romfs_data_offset,
         virtual_size - fs.romfs_data_offset,
         "patched RomFS image",
     )?;
+    // The update's own header says how the patched image is stored, the same
+    // way it does for a title that ships without one. Either half being
+    // sparse needed nothing here: `section_source` reassembles a sparse
+    // section before the relocation table ever sees it.
+    let romfs = RomFsImage::open(stored, fs.compression)?;
     // The same header check [`Nca::romfs_source`] makes, and it means more
     // here: it is the one place where the base game and the update are read
     // through together, so a mismatched pair shows up as a bad header rather
@@ -494,6 +496,16 @@ mod tests {
     const CTR_VAL: u32 = 7;
 
     fn fs_header(encryption: u8, tables: Option<(u64, u64)>) -> crate::nca::FsHeader {
+        fs_header_with(encryption, tables, None)
+    }
+
+    /// The same, for a patch section whose composed image is stored
+    /// compressed — the update's own header is what says so.
+    fn fs_header_with(
+        encryption: u8,
+        tables: Option<(u64, u64)>,
+        compression: Option<BktrTable>,
+    ) -> crate::nca::FsHeader {
         let mut raw = [0u8; 0x200];
         raw[2] = 0; // RomFs partition
         raw[3] = 3; // HierarchicalIntegrity
@@ -506,6 +518,14 @@ mod tests {
                 raw[at + 8..at + 16].copy_from_slice(&(BUCKET_SIZE * 2).to_le_bytes());
                 raw[at + 0x10..at + 0x14].copy_from_slice(&BKTR_MAGIC.to_le_bytes());
             }
+        }
+        if let Some(table) = compression {
+            let at = 0x178;
+            raw[at..at + 8].copy_from_slice(&table.offset.to_le_bytes());
+            raw[at + 8..at + 16].copy_from_slice(&table.size.to_le_bytes());
+            raw[at + 0x10..at + 0x14].copy_from_slice(&table.magic.to_le_bytes());
+            raw[at + 0x14..at + 0x18].copy_from_slice(&1u32.to_le_bytes()); // version
+            raw[at + 0x18..at + 0x1C].copy_from_slice(&table.entries.to_le_bytes());
         }
         crate::nca::FsHeader::parse(&raw)
     }
@@ -696,5 +716,99 @@ mod tests {
             each_entry(&bytes, 0x14, "test", |_| {}),
             Err(Error::Nca(_))
         ));
+    }
+
+    /// An update whose composed image is compressed: the relocation table
+    /// puts the stored image back together out of both containers, and the
+    /// compression layer over that is what the guest actually mounts.
+    ///
+    /// The split is deliberately in two places, so the LZ4 data crosses from
+    /// the update into the base game and the table describing it crosses
+    /// back.
+    #[test]
+    fn a_patched_image_that_is_compressed_is_composed_and_then_decompressed() {
+        use crate::compressed::testing::{build, Block};
+
+        // The composed image has to start with a RomFS header, the same as an
+        // unpatched one — and here that byte pattern only exists once the LZ4
+        // block it is inside has been decompressed.
+        let mut first = 0x50u64.to_le_bytes().to_vec();
+        first.extend((8..0x100u32).map(|i| i as u8));
+        let (stored, plain, table) = build(&[
+            Block::Lz4(first),
+            Block::Zeros(0x40),
+            Block::Lz4(vec![0x5A; 0x100]),
+        ]);
+        assert!(stored.len() > 0x4000, "the table alone is bigger than that");
+
+        // Where the composed image changes container, in its own coordinates.
+        const TO_BASE: usize = 0x80;
+        const BACK_TO_PATCH: usize = 0x4000;
+        const BASE_AT: u64 = 0x80;
+
+        let mut base_bytes = vec![0u8; BASE_AT as usize];
+        base_bytes.extend_from_slice(&stored[TO_BASE..BACK_TO_PATCH]);
+
+        let mut patch_bytes = vec![0xEEu8; ROMFS_AT as usize];
+        patch_bytes.extend_from_slice(&stored[..TO_BASE]);
+        patch_bytes.extend_from_slice(&stored[BACK_TO_PATCH..]);
+        let patch_data = patch_bytes.len() as u64;
+        let virtual_len = ROMFS_AT + stored.len() as u64;
+
+        let relocations = [
+            relocation(0, 0, true),
+            relocation(ROMFS_AT + TO_BASE as u64, BASE_AT, false),
+            relocation(
+                ROMFS_AT + BACK_TO_PATCH as u64,
+                ROMFS_AT + TO_BASE as u64,
+                true,
+            ),
+        ];
+        patch_bytes.extend(table_pages(virtual_len, 0x14, &relocations, virtual_len));
+        let subsection_end = patch_data + BUCKET_SIZE * 2;
+        let mut subsection = vec![0u8; 0x10];
+        subsection[0xC..0x10].copy_from_slice(&CTR_VAL.to_le_bytes());
+        patch_bytes.extend(table_pages(
+            subsection_end,
+            0x10,
+            &[subsection],
+            subsection_end,
+        ));
+
+        let patch_nca = one_section_nca(
+            patch_bytes.len() as u64,
+            fs_header_with(
+                ENCRYPTION_AES_CTR_EX,
+                Some((patch_data, subsection_end)),
+                Some(table),
+            ),
+        );
+        let fs = patch_nca.fs_headers[0].unwrap();
+        crate::crypto::aes128_ctr_xor_in_place(
+            &PATCH_KEY,
+            &fs.patch_counter(0, CTR_VAL),
+            &mut patch_bytes[..patch_data as usize],
+        );
+        crate::crypto::aes128_ctr_xor_in_place(
+            &PATCH_KEY,
+            &fs.initial_counter(patch_data),
+            &mut patch_bytes[patch_data as usize..],
+        );
+        let base_nca = one_section_nca(
+            base_bytes.len() as u64,
+            fs_header(crate::nca::ENCRYPTION_NONE, None),
+        );
+
+        let romfs = patched_romfs_source(
+            &patch_nca,
+            crate::source::SliceSource(&patch_bytes),
+            &base_nca,
+            crate::source::SliceSource(&base_bytes),
+            &patch_keys(),
+        )
+        .expect("compose and decompress the patched romfs");
+        assert!(matches!(romfs, RomFsImage::Compressed(_)));
+        assert_eq!(romfs.len(), plain.len() as u64);
+        assert_eq!(romfs.read_vec(0, romfs.len()).unwrap(), plain);
     }
 }

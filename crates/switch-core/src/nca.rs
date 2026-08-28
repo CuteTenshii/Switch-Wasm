@@ -173,6 +173,11 @@ pub struct FsHeader {
     /// `header_size` magic at section offset 0 fails even with perfectly
     /// correct decryption.
     pub romfs_data_offset: u64,
+    /// How long that last IVFC level is — the exact size of the RomFS image,
+    /// where the section's own size is rounded up to a media unit and can
+    /// overstate it by most of a sector. 0 on a section with no IVFC
+    /// superblock, and treated as "unstated" rather than "empty".
+    pub romfs_data_size: u64,
     /// A patch (`AesCtrEx`) section's relocation table: which ranges of the
     /// patched RomFS come from this section and which from the base title's.
     /// Zeroed on every other kind of section.
@@ -180,21 +185,44 @@ pub struct FsHeader {
     /// A patch section's subsection table: which counter each range of this
     /// section's own bytes was encrypted with.
     pub subsection: BktrTable,
+    /// The sparse layer's table (`SparseInfo`, 0x148): a section stored with
+    /// holes, whose unwritten ranges are not in the file at all. See
+    /// [`crate::sparse`].
+    pub sparse: BktrTable,
+    /// Where a sparse section's stored body really is in the NCA
+    /// (`SparseInfo` + 0x20). The section table's own offset describes the
+    /// section after the holes are put back, and so points nowhere.
+    pub sparse_physical_offset: u64,
+    /// The generation word the sparse *table's* own bytes are encrypted under
+    /// (`SparseInfo` + 0x28), which is not the section's.
+    pub sparse_generation: u32,
+    /// The compression layer's table (`CompressionInfo`, 0x178): which LZ4
+    /// block covers which range of the image. See [`crate::compressed`].
+    pub compression: BktrTable,
     /// AES-CTR IV components (hactool's `section_ctr`): the low 8 bytes of
     /// the counter are the block index and start at 0 for the section start.
     pub generation: u32,
     pub secure_value: u32,
 }
 
-/// One of a patch section's two table headers (hactool's `bktr_header_t`),
-/// as the FS header carries it: where the table lives inside the section, how
-/// long it is, and how many entries it holds in total across its buckets.
+/// "BKTR", the magic on every bucket-tree header the FS header carries: a
+/// patch section's two tables, and a compressed section's one.
+pub const BKTR_MAGIC: u32 = 0x5254_4b42;
+
+/// A bucket-tree table header (hactool's `bktr_header_t`), as the FS header
+/// carries it: where the table lives inside the section, how long it is, and
+/// how many entries it holds in total across its buckets.
+///
+/// The same shape describes a patch section's relocation and subsection
+/// tables ([`crate::bktr`]) and a compressed section's entry table
+/// ([`crate::compressed`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BktrTable {
     pub offset: u64,
     pub size: u64,
-    /// "BKTR" on a real patch section, and nothing at all on any other kind —
-    /// which is what [`crate::bktr`] checks before believing the rest.
+    /// [`BKTR_MAGIC`] on a table that is really there, and nothing at all on
+    /// a section that has none — which is what the readers check before
+    /// believing the rest.
     pub magic: u32,
     pub entries: u32,
 }
@@ -215,6 +243,7 @@ impl FsHeader {
     pub fn parse(fs: &[u8]) -> FsHeader {
         let fs_type = fs[3];
         let mut romfs_data_offset = 0u64;
+        let mut romfs_data_size = 0u64;
         if fs_type == HASH_TYPE_IVFC {
             // ivfc_hdr_t (at fs_header+0x08): magic(4) id(4) master_hash_size(4)
             // num_levels(4) then level_headers[6] (24 bytes each: u64
@@ -228,6 +257,7 @@ impl FsHeader {
             const IVFC_MAX_LEVEL: usize = 6;
             let entry_off = 0x18 + (IVFC_MAX_LEVEL - 1) * 24;
             romfs_data_offset = crate::nsp::read_u64(fs, entry_off);
+            romfs_data_size = crate::nsp::read_u64(fs, entry_off + 8);
         }
         FsHeader {
             version: u16::from_le_bytes([fs[0], fs[1]]),
@@ -241,10 +271,17 @@ impl FsHeader {
             data_offset: crate::nsp::read_u64(fs, 0x40),
             data_size: crate::nsp::read_u64(fs, 0x48),
             romfs_data_offset,
+            romfs_data_size,
             // The BKTR superblock overlays the IVFC one from 0x8, putting its
-            // two table headers at 0x100 and 0x120.
+            // two table headers at 0x100 and 0x120. The sparse and
+            // compression tables sit past both, in the fixed part of the
+            // header that no superblock overlays.
             relocation: BktrTable::parse(fs, 0x100),
             subsection: BktrTable::parse(fs, 0x120),
+            sparse: BktrTable::parse(fs, 0x148),
+            sparse_physical_offset: crate::nsp::read_u64(fs, 0x148 + 0x20),
+            sparse_generation: u32::from(u16::from_le_bytes([fs[0x148 + 0x28], fs[0x148 + 0x29]])),
+            compression: BktrTable::parse(fs, 0x178),
             generation: crate::nsp::read_u32(fs, 0x140),
             secure_value: crate::nsp::read_u32(fs, 0x144),
         }
@@ -280,6 +317,18 @@ impl FsHeader {
     pub fn patch_counter(&self, media_offset: u64, ctr_val: u32) -> [u8; 16] {
         let mut ctr = self.initial_counter(media_offset);
         ctr[4..8].copy_from_slice(&ctr_val.to_be_bytes());
+        ctr
+    }
+
+    /// The counter block for a *sparse* section's table, whose generation
+    /// word is `SparseInfo`'s own rather than the section's — and shifted
+    /// into the high half, the way `NcaSparseInfo::MakeAesCtrUpperIv` does
+    /// it. The section's data is not written under this: only the table is,
+    /// and only because it lives at a physical offset the rest of the
+    /// section's counter has no relation to.
+    pub fn sparse_counter(&self, media_offset: u64) -> [u8; 16] {
+        let mut ctr = self.initial_counter(media_offset);
+        ctr[4..8].copy_from_slice(&(self.sparse_generation << 16).to_be_bytes());
         ctr
     }
 }
@@ -546,17 +595,40 @@ impl Nca {
                 )))
             }
         };
-        let body = Window::new(
-            nca,
-            sec.media_offset,
-            sec.media_size,
-            &format!("NCA section {}", index),
-        )?;
+        // A sparse section is not where the section table says it is: that
+        // extent describes the section with its holes put back, and can run
+        // past the end of the file. What is really there is the stored body,
+        // and the table that says how to spread it out.
+        let (body, sparse) = if fs.sparse.magic == BKTR_MAGIC {
+            let stored = fs
+                .sparse
+                .offset
+                .checked_add(fs.sparse.size)
+                .ok_or(Error::Overflow)?;
+            let body = Window::new(
+                nca,
+                fs.sparse_physical_offset,
+                stored,
+                &format!("NCA section {} sparse body", index),
+            )?;
+            let table = read_sparse_table(&body, &fs, key)?;
+            (body, Some(table))
+        } else {
+            let body = Window::new(
+                nca,
+                sec.media_offset,
+                sec.media_size,
+                &format!("NCA section {}", index),
+            )?;
+            (body, None)
+        };
         Ok(SectionSource {
             body,
             key,
             fs,
             nca_offset: sec.media_offset,
+            len: sec.media_size,
+            sparse,
         })
     }
 
@@ -678,6 +750,15 @@ impl Nca {
         if end > plain.len() {
             return Err(Error::Nca("PFS0 region exceeds decrypted section".into()));
         }
+        // The hashes cover the section as stored, so they are checked above
+        // this: what the compression layer describes is the image the hash
+        // layer exposes, and decompressing first would leave nothing the
+        // hash table could be compared against.
+        if fs.compression.magic == BKTR_MAGIC {
+            let stored = SliceSource(&plain[start..end]);
+            let image = crate::compressed::CompressedStorage::new(stored, fs.compression)?;
+            return image.read_vec(0, image.len());
+        }
         // Trim in place rather than copying the payload out: the section is
         // the largest thing this path holds, and a second copy of it is the
         // difference between loading a title and running out of memory.
@@ -740,7 +821,8 @@ impl Nca {
 
     /// A [`ByteSource`] over section `index`'s RomFS image: the decrypting
     /// section view, windowed past the IVFC hash-tree levels via
-    /// [`FsHeader::romfs_data_offset`].
+    /// [`FsHeader::romfs_data_offset`], with the compression layer over it
+    /// when the section has one.
     ///
     /// Nothing is decrypted up front. This is the only way a modern title's
     /// RomFS can be served at all — it is the bulk of a container that
@@ -757,7 +839,7 @@ impl Nca {
         nca: S,
         keys: &crate::keys::KeySet,
         index: usize,
-    ) -> Result<Window<SectionSource<S>>, Error> {
+    ) -> Result<RomFsImage<Window<SectionSource<S>>>, Error> {
         let fs = self
             .fs_headers
             .get(index)
@@ -771,14 +853,25 @@ impl Nca {
                     .into(),
             ));
         }
+        // A sparse section needs nothing here: `section_source` reassembles
+        // it, because the holes go back underneath the decryption and so
+        // below everything this composes.
         let section = self.section_source(nca, keys, index)?;
         if fs.romfs_data_offset >= section.len() {
             return Err(Error::Nca(
                 "RomFS data offset exceeds the decrypted section".into(),
             ));
         }
-        let len = section.len() - fs.romfs_data_offset;
-        let romfs = Window::new(section, fs.romfs_data_offset, len, "RomFS image")?;
+        // The IVFC level's own size when it states one: a section's size is
+        // rounded up to a media unit, so it can run most of a sector past the
+        // end of the image and there is nothing in that tail to serve.
+        let available = section.len() - fs.romfs_data_offset;
+        let len = match fs.romfs_data_size {
+            0 => available,
+            stated => stated.min(available),
+        };
+        let stored = Window::new(section, fs.romfs_data_offset, len, "RomFS image")?;
+        let romfs = RomFsImage::open(stored, fs.compression)?;
         // RomFS's own header starts with its size, always 0x50. With the
         // wrong key the section decrypts to noise, and this is what says so —
         // there is no per-block hash to check an IVFC section against.
@@ -839,6 +932,11 @@ pub struct SectionSource<S> {
     /// The section's absolute offset within the NCA, which is what its
     /// counter blocks are numbered from.
     nca_offset: u64,
+    /// The section's size as the section table declares it. Same as the
+    /// body's, except when the body is sparse and stores less than that.
+    len: u64,
+    /// How to put a sparse section's holes back, when it has any.
+    sparse: Option<crate::sparse::SparseTable>,
 }
 
 impl<S: ByteSource> SectionSource<S> {
@@ -875,6 +973,19 @@ impl<S: ByteSource> SectionSource<S> {
         self.read_decrypting(offset, out, Some(ctr_val))
     }
 
+    /// The section's bytes as they will be decrypted, which for a sparse
+    /// section means reassembled first.
+    ///
+    /// Still encrypted: the counter is numbered from the position a byte
+    /// occupies *here*, not from where it was stored, so the sparse layer has
+    /// to be underneath the decryption rather than beside it.
+    fn read_raw(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
+        match &self.sparse {
+            None => self.body.read_at(offset, out),
+            Some(table) => table.read_raw(&self.body, self.len, offset, out),
+        }
+    }
+
     /// The body of [`ByteSource::read_at`], with the counter left open so a
     /// patch section can supply its region's own.
     fn read_decrypting(
@@ -895,7 +1006,7 @@ impl<S: ByteSource> SectionSource<S> {
         // rest is decrypted straight into the caller's buffer.
         if head != 0 {
             let mut block = [0u8; 16];
-            let got = self.body.read_at(aligned, &mut block)?;
+            let got = self.read_raw(aligned, &mut block)?;
             self.decrypt_at(aligned, &mut block[..got], ctr_val);
             let take = (16 - head).min(want).min(got.saturating_sub(head));
             out[..take].copy_from_slice(&block[head..head + take]);
@@ -909,7 +1020,7 @@ impl<S: ByteSource> SectionSource<S> {
         if done < want {
             let at = aligned + if head != 0 { 16 } else { 0 };
             let rest = &mut out[done..want];
-            let got = self.body.read_at(at, rest)?;
+            let got = self.read_raw(at, rest)?;
             self.decrypt_at(at, &mut rest[..got], ctr_val);
             done += got;
         }
@@ -919,11 +1030,79 @@ impl<S: ByteSource> SectionSource<S> {
 
 impl<S: ByteSource> ByteSource for SectionSource<S> {
     fn len(&self) -> u64 {
-        self.body.len()
+        self.len
     }
 
     fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
         self.read_decrypting(offset, out, None)
+    }
+}
+
+/// Read and decrypt a sparse section's table out of its stored body.
+///
+/// The table is the one part of a sparse section encrypted at the offset it
+/// is actually stored at, under a generation of its own — everything else is
+/// numbered from where it lands once the holes are back.
+fn read_sparse_table<S: ByteSource>(
+    body: &S,
+    fs: &FsHeader,
+    key: Option<[u8; 16]>,
+) -> Result<crate::sparse::SparseTable, Error> {
+    if fs.sparse.offset % 16 != 0 {
+        return Err(Error::Nca(format!(
+            "sparse table starts at {:#x}, which is not a counter block boundary",
+            fs.sparse.offset
+        )));
+    }
+    let mut meta = body.read_vec(fs.sparse.offset, fs.sparse.size)?;
+    if let Some(key) = key {
+        let at = fs
+            .sparse_physical_offset
+            .checked_add(fs.sparse.offset)
+            .ok_or(Error::Overflow)?;
+        crate::crypto::aes128_ctr_xor_in_place(&key, &fs.sparse_counter(at), &mut meta);
+    }
+    crate::sparse::SparseTable::parse(&meta, fs.sparse, fs.sparse.offset)
+}
+
+/// A title's RomFS image, however its section stores it: [`Nca::romfs_source`]
+/// and [`crate::bktr::patched_romfs_source`] hand back one of these and every
+/// caller reads it the same way.
+#[derive(Debug)]
+pub enum RomFsImage<S: ByteSource> {
+    /// The image is what the hash layer exposes, as it is.
+    Plain(S),
+    /// The image is a run of LZ4 blocks within that.
+    Compressed(crate::compressed::CompressedStorage<S>),
+}
+
+impl<S: ByteSource> RomFsImage<S> {
+    /// Put the compression layer over `stored` when the FS header declares
+    /// one. `compression` is `CompressionInfo`, zeroed on a section without.
+    pub fn open(stored: S, compression: BktrTable) -> Result<RomFsImage<S>, Error> {
+        if compression.magic == BKTR_MAGIC {
+            Ok(RomFsImage::Compressed(
+                crate::compressed::CompressedStorage::new(stored, compression)?,
+            ))
+        } else {
+            Ok(RomFsImage::Plain(stored))
+        }
+    }
+}
+
+impl<S: ByteSource> ByteSource for RomFsImage<S> {
+    fn len(&self) -> u64 {
+        match self {
+            RomFsImage::Plain(s) => s.len(),
+            RomFsImage::Compressed(s) => s.len(),
+        }
+    }
+
+    fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
+        match self {
+            RomFsImage::Plain(s) => s.read_at(offset, out),
+            RomFsImage::Compressed(s) => s.read_at(offset, out),
+        }
     }
 }
 
@@ -1208,6 +1387,12 @@ mod decrypt_tests {
     /// that table — returns the raw NCA bytes, the keyset that unlocks them,
     /// and the PFS0 payload that should come back out.
     fn build_exefs_nca() -> (Vec<u8>, KeySet, Vec<u8>) {
+        build_exefs_nca_with(false)
+    }
+
+    /// The same, with the ExeFS optionally stored compressed — which is what
+    /// the hash layer then covers, since compression sits above it.
+    fn build_exefs_nca_with(compressed: bool) -> (Vec<u8>, KeySet, Vec<u8>) {
         use crate::crypto::{aes128_ctr_xor, sha256};
 
         let header_key = {
@@ -1248,10 +1433,20 @@ mod decrypt_tests {
         // this test caught).
         const SECTION_OFFSET: usize = 0x1000;
         let pfs0 = build_pfs0("main", b"fake NSO bytes for the test");
+        // What the section holds is the image as *stored*, which for a
+        // compressed one is LZ4 blocks and the table describing them.
+        let (stored, compression) = if compressed {
+            use crate::compressed::testing::{build, Block};
+            let (image, plain, table) = build(&[Block::Lz4(pfs0.clone())]);
+            assert_eq!(plain, pfs0, "the fixture must compress the real payload");
+            (image, Some(table))
+        } else {
+            (pfs0.clone(), None)
+        };
         // The real thing: one SHA-256 per HASH_BLOCK_SIZE bytes of the data
         // region, which for a payload this small is a single hash.
-        let hash_table = sha256(&pfs0).to_vec();
-        let plain_section = [hash_table.clone(), pfs0.clone()].concat();
+        let hash_table = sha256(&stored).to_vec();
+        let plain_section = [hash_table.clone(), stored.clone()].concat();
 
         let at = h + 0x40;
         let start_units = (SECTION_OFFSET / 0x200) as u32;
@@ -1277,9 +1472,17 @@ mod decrypt_tests {
         header[fs0 + 0x30..fs0 + 0x38].copy_from_slice(&0u64.to_le_bytes()); // hash_table_offset
         header[fs0 + 0x38..fs0 + 0x40].copy_from_slice(&(hash_table.len() as u64).to_le_bytes());
         header[fs0 + 0x40..fs0 + 0x48].copy_from_slice(&(hash_table.len() as u64).to_le_bytes()); // data_offset
-        header[fs0 + 0x48..fs0 + 0x50].copy_from_slice(&(pfs0.len() as u64).to_le_bytes());
+        header[fs0 + 0x48..fs0 + 0x50].copy_from_slice(&(stored.len() as u64).to_le_bytes());
         header[fs0 + 0x140..fs0 + 0x144].copy_from_slice(&generation.to_le_bytes());
         header[fs0 + 0x144..fs0 + 0x148].copy_from_slice(&secure_value.to_le_bytes());
+        if let Some(table) = compression {
+            let at = fs0 + 0x178;
+            header[at..at + 8].copy_from_slice(&table.offset.to_le_bytes());
+            header[at + 8..at + 16].copy_from_slice(&table.size.to_le_bytes());
+            header[at + 0x10..at + 0x14].copy_from_slice(&table.magic.to_le_bytes());
+            header[at + 0x14..at + 0x18].copy_from_slice(&1u32.to_le_bytes()); // version
+            header[at + 0x18..at + 0x1C].copy_from_slice(&table.entries.to_le_bytes());
+        }
         let master_hash = sha256(&hash_table);
         header[fs0 + 0x08..fs0 + 0x28].copy_from_slice(&master_hash);
 
@@ -1363,11 +1566,316 @@ mod decrypt_tests {
     /// Same shape as the ExeFS test above, but for a RomFS (`HierarchicalIntegrity`/IVFC)
     /// section: no `data_offset` sub-slice, no master-hash check — just the
     /// section decrypting to something starting with a valid RomFS header.
+    /// The path Echoes of Wisdom needs: the section holds LZ4 blocks and a
+    /// bucket tree, and what the guest mounts is what they decompress to.
+    ///
+    /// Nothing above [`Nca::romfs_source`] knows the difference, which is the
+    /// point — the compression layer is chosen from the FS header and the
+    /// caller reads the image either way.
+    #[test]
+    fn a_compressed_romfs_section_is_served_decompressed() {
+        use crate::compressed::testing::{build, Block};
+
+        // A RomFS header, then blocks of each kind: what a real image has at
+        // its front is stored uncompressed, which is why a section this
+        // emulator could not decompress still passed the header check.
+        let mut header = vec![0u8; 0x50];
+        header[..8].copy_from_slice(&0x50u64.to_le_bytes());
+        let (stored, plain, table) = build(&[
+            Block::Raw(header),
+            Block::Lz4((0..=0xFFu8).map(|b| b ^ 0x33).collect()),
+            Block::Zeros(0x40),
+            Block::Lz4(vec![0x11; 0x180]),
+        ]);
+        // The compressed form is smaller than the image it stands for, which
+        // is the whole reason a title ships one.
+        assert!(stored.len() < plain.len() + table.size as usize);
+
+        let (raw, keys, _, _) = build_romfs_nca_with(stored, Some(table));
+        let nca = Nca::parse_with_keys(&raw, Some(&keys)).expect("parse");
+        assert_eq!(nca.fs_headers[0].unwrap().compression.magic, BKTR_MAGIC);
+
+        let romfs = nca
+            .romfs_source(SliceSource(&raw), &keys, 0)
+            .expect("romfs source");
+        assert!(matches!(romfs, RomFsImage::Compressed(_)));
+        // The decompressed size, not the stored one.
+        assert_eq!(romfs.len(), plain.len() as u64);
+        assert_eq!(romfs.read_vec(0, romfs.len()).unwrap(), plain);
+
+        // Ranges that start and end inside a block, and across boundaries.
+        for &(offset, len) in &[(0u64, 8usize), (0x4f, 2), (0x51, 0x7f), (0x14f, 0x60)] {
+            let mut out = vec![0u8; len];
+            assert_eq!(romfs.read_at(offset, &mut out).unwrap(), len);
+            assert_eq!(out, &plain[offset as usize..offset as usize + len]);
+        }
+
+        // A wrong key still fails at the header check rather than deep in the
+        // decompressor: the first block is stored, so it decrypts to noise.
+        let mut wrong_keys = keys.clone();
+        wrong_keys.key_area_key_system[0] = Some([0u8; 16]);
+        assert!(matches!(
+            nca.romfs_source(SliceSource(&raw), &wrong_keys, 0),
+            Err(Error::Nca(_))
+        ));
+    }
+
+    /// A section that claims a sparse layer and then does not describe one is
+    /// refused. Reading it as if the bytes underneath were the image is what
+    /// moves the failure hundreds of millions of instructions downstream,
+    /// into the title's own mount.
+    #[test]
+    fn a_sparse_layer_that_describes_nothing_is_refused() {
+        let (mut raw, keys, _, _) = build_romfs_nca();
+        // The FS header is inside the XTS-encrypted header, so the fixture's
+        // own encryption has to be redone around the edited field.
+        let header_key = keys.header_key.expect("header key");
+        let mut header = aes128_xts_decrypt(&header_key, &raw[..NCA_FULL_HEADER_SIZE], 0, 0x200);
+        header[0x400 + 0x148 + 0x10..0x400 + 0x148 + 0x14]
+            .copy_from_slice(&BKTR_MAGIC.to_le_bytes());
+        let encrypted = encrypt_xts(&header_key, &header, 0, 0x200);
+        raw[..NCA_FULL_HEADER_SIZE].copy_from_slice(&encrypted);
+
+        let nca = Nca::parse_with_keys(&raw, Some(&keys)).expect("parse");
+        assert_eq!(nca.fs_headers[0].unwrap().sparse.magic, BKTR_MAGIC);
+        let err = nca
+            .romfs_source(SliceSource(&raw), &keys, 0)
+            .expect_err("an empty sparse table describes no section");
+        assert!(format!("{err}").contains("sparse"), "{err}");
+    }
+
+    /// An ExeFS can be stored compressed too, and then the hashes cover the
+    /// compressed bytes: the layer sits above the hash one, so verifying
+    /// after decompressing would have nothing to compare against.
+    #[test]
+    fn a_compressed_exefs_section_is_extracted_decompressed() {
+        let (raw, keys, pfs0) = build_exefs_nca_with(true);
+        let nca = Nca::parse_with_keys(&raw, Some(&keys)).expect("parse");
+        assert_eq!(nca.fs_headers[0].unwrap().compression.magic, BKTR_MAGIC);
+
+        let extracted = nca
+            .decrypt_pfs0_section(&raw, &keys, 0)
+            .expect("decrypt + hash-verify + decompress");
+        assert_eq!(extracted, pfs0);
+
+        let inner = crate::nsp::Pfs0::parse(&extracted).expect("valid PFS0");
+        let main = inner.find("main").expect("main entry");
+        assert_eq!(
+            &extracted[main.offset as usize..][..main.size as usize],
+            b"fake NSO bytes for the test"
+        );
+
+        // A wrong byte in the compressed data is still caught by the hash
+        // table, which is the check the compression layer must not move.
+        let mut corrupt = raw.clone();
+        let data_start = 0x1000 + nca.fs_headers[0].unwrap().data_offset as usize;
+        corrupt[data_start + 9] ^= 0x01;
+        assert!(matches!(
+            nca.decrypt_pfs0_section(&corrupt, &keys, 0),
+            Err(Error::Nca(_))
+        ));
+    }
+
+    /// Build a synthetic *encrypted* NCA whose RomFS section is sparse: only
+    /// part of it is in the file, and the section table describes where it
+    /// lands once the holes are back — an extent this fixture deliberately
+    /// puts past the end of the file, so anything reading that rather than
+    /// the stored body fails outright instead of quietly.
+    ///
+    /// Returns the raw NCA, the keyset, and the section as it must read back.
+    fn build_sparse_romfs_nca() -> (Vec<u8>, KeySet, Vec<u8>) {
+        use crate::crypto::aes128_ctr_xor;
+        use crate::sparse::{STORAGE_DATA, STORAGE_HOLE};
+
+        let mut header_key = [0u8; 32];
+        for (i, b) in header_key.iter_mut().enumerate() {
+            *b = (0x10 + i) as u8;
+        }
+        let mut kek = [0u8; 16];
+        for (i, b) in kek.iter_mut().enumerate() {
+            *b = 0xE0 + i as u8;
+        }
+        let mut section_key = [0u8; 16];
+        for (i, b) in section_key.iter_mut().enumerate() {
+            *b = 0xF0 + i as u8;
+        }
+
+        // Where the section *lands*, which is not where anything is stored —
+        // and past the end of the file this fixture writes.
+        const SECTION_OFFSET: u64 = 0x20000;
+        const BODY_OFFSET: u64 = 0x1000;
+        const SECTION_SIZE: u64 = 0x400;
+        const LEVEL5_OFFSET: u64 = 0x40;
+        // [0, 0x100) is kept, [0x100, 0x200) is a hole, [0x200, 0x400) is kept.
+        const HOLE: std::ops::Range<usize> = 0x100..0x200;
+        const TABLE_AT: u64 = 0x300;
+
+        let generation: u32 = 0x05;
+        let secure_value: u32 = 0x1122_3344;
+        let sparse_generation: u16 = 0x0007;
+
+        let counter = |at: u64| {
+            let mut ctr = [0u8; 16];
+            ctr[0..4].copy_from_slice(&secure_value.to_be_bytes());
+            ctr[4..8].copy_from_slice(&generation.to_be_bytes());
+            ctr[8..16].copy_from_slice(&(at >> 4).to_be_bytes());
+            ctr
+        };
+
+        // The section as it must read back. A hole is stored as nothing, so
+        // it decrypts to the keystream — see `crate::sparse`. Writing that
+        // into the expectation is what makes the round trip checkable.
+        let mut plain: Vec<u8> = (0..SECTION_SIZE).map(|i| (i as u8) ^ 0x3C).collect();
+        plain[LEVEL5_OFFSET as usize..LEVEL5_OFFSET as usize + 8]
+            .copy_from_slice(&0x50u64.to_le_bytes()); // RomFS header_size
+        let keystream = aes128_ctr_xor(
+            &section_key,
+            &counter(SECTION_OFFSET + HOLE.start as u64),
+            &vec![0u8; HOLE.len()],
+        );
+        plain[HOLE].copy_from_slice(&keystream);
+
+        // Encrypting the whole section and then dropping the hole is the same
+        // thing the packer does: the hole's ciphertext is already all zeroes.
+        let cipher = aes128_ctr_xor(&section_key, &counter(SECTION_OFFSET), &plain);
+        assert!(cipher[HOLE].iter().all(|&b| b == 0), "a hole stores nothing");
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&cipher[..HOLE.start]);
+        body.extend_from_slice(&cipher[HOLE.end..]);
+        let entries = [
+            (0u64, 0u64, STORAGE_DATA),
+            (HOLE.start as u64, 0, STORAGE_HOLE),
+            (HOLE.end as u64, HOLE.start as u64, STORAGE_DATA),
+        ];
+        let meta = crate::sparse::testing::write_table(&entries, SECTION_SIZE);
+        body.resize(TABLE_AT as usize, 0);
+        // The table has a counter of its own: it is the one part of the
+        // section encrypted where it is actually stored.
+        let mut sparse_ctr = counter(BODY_OFFSET + TABLE_AT);
+        sparse_ctr[4..8].copy_from_slice(&(u32::from(sparse_generation) << 16).to_be_bytes());
+        body.extend_from_slice(&aes128_ctr_xor(&section_key, &sparse_ctr, &meta));
+
+        let mut header = vec![0u8; NCA_FULL_HEADER_SIZE];
+        let h = NCA_HEADER_OFFSET;
+        header[h..h + 4].copy_from_slice(&NCA_MAGIC.to_le_bytes());
+        header[h + 0x05] = 4; // content type: Data
+        header[h + 0x07] = 2; // key index: System
+        header[h + 0x1C] = 1; // crypto type: encrypted
+        let at = h + 0x40;
+        header[at..at + 4].copy_from_slice(&((SECTION_OFFSET / 0x200) as u32).to_le_bytes());
+        header[at + 4..at + 8]
+            .copy_from_slice(&(((SECTION_OFFSET + SECTION_SIZE) / 0x200) as u32).to_le_bytes());
+        header[h + 0x120..h + 0x130]
+            .copy_from_slice(&crate::crypto::aes128_encrypt_block(&kek, &section_key));
+
+        let fs0 = 0x400;
+        header[fs0 + 0x02] = 0; // partition_type: RomFs
+        header[fs0 + 0x03] = HASH_TYPE_IVFC;
+        header[fs0 + 0x04] = ENCRYPTION_AES_CTR;
+        header[fs0 + 0x18 + 5 * 24..fs0 + 0x18 + 5 * 24 + 8]
+            .copy_from_slice(&LEVEL5_OFFSET.to_le_bytes());
+        header[fs0 + 0x18 + 5 * 24 + 8..fs0 + 0x18 + 5 * 24 + 16]
+            .copy_from_slice(&(SECTION_SIZE - LEVEL5_OFFSET).to_le_bytes());
+        header[fs0 + 0x140..fs0 + 0x144].copy_from_slice(&generation.to_le_bytes());
+        header[fs0 + 0x144..fs0 + 0x148].copy_from_slice(&secure_value.to_le_bytes());
+        let sp = fs0 + 0x148;
+        header[sp..sp + 8].copy_from_slice(&TABLE_AT.to_le_bytes());
+        header[sp + 8..sp + 16].copy_from_slice(&(meta.len() as u64).to_le_bytes());
+        header[sp + 0x10..sp + 0x14].copy_from_slice(&BKTR_MAGIC.to_le_bytes());
+        header[sp + 0x14..sp + 0x18].copy_from_slice(&1u32.to_le_bytes()); // version
+        header[sp + 0x18..sp + 0x1C].copy_from_slice(&(entries.len() as u32).to_le_bytes());
+        header[sp + 0x20..sp + 0x28].copy_from_slice(&BODY_OFFSET.to_le_bytes());
+        header[sp + 0x28..sp + 0x2A].copy_from_slice(&sparse_generation.to_le_bytes());
+
+        let mut raw = vec![0u8; BODY_OFFSET as usize];
+        raw[..NCA_FULL_HEADER_SIZE].copy_from_slice(&encrypt_xts(&header_key, &header, 0, 0x200));
+        raw.extend_from_slice(&body);
+        assert!(
+            (raw.len() as u64) < SECTION_OFFSET,
+            "the declared extent must not be in the file"
+        );
+
+        let mut keys = KeySet::default();
+        keys.header_key = Some(header_key);
+        keys.key_area_key_system[0] = Some(kek);
+        (raw, keys, plain)
+    }
+
+    /// A sparse section reads as the section it describes, not as the bytes
+    /// that were kept — and the reassembly happens underneath the decryption,
+    /// so every consumer of `section_source` gets it for free.
+    #[test]
+    fn a_sparse_section_is_reassembled_before_it_is_decrypted() {
+        let (raw, keys, plain) = build_sparse_romfs_nca();
+        let nca = Nca::parse_with_keys(&raw, Some(&keys)).expect("parse");
+        let fs = nca.fs_headers[0].expect("fs header");
+        assert_eq!(fs.sparse.magic, BKTR_MAGIC);
+        assert_eq!(fs.sparse_physical_offset, 0x1000);
+        assert_eq!(fs.sparse_generation, 7);
+
+        let section = nca
+            .section_source(SliceSource(&raw), &keys, 0)
+            .expect("section source");
+        // 0x300 bytes were kept for a 0x400-byte section; the rest is a hole,
+        // and the extent the section table declares is not in the file at all.
+        assert_eq!(section.len(), plain.len() as u64);
+        assert_eq!(section.len(), 0x400);
+        assert_eq!(section.read_vec(0, section.len()).unwrap(), plain);
+
+        // Ranges that start and end inside each kind of range and across
+        // every boundary, unaligned so the head-block path runs too.
+        for &(offset, len) in &[
+            (0u64, 1usize),
+            (0xff, 2),    // the last kept byte and the first of the hole
+            (0x101, 0x7f), // unaligned inside the hole
+            (0x1ff, 3),   // out of the hole and into the kept range past it
+            (0x37, 0x200),
+        ] {
+            let mut out = vec![0u8; len];
+            assert_eq!(
+                section.read_at(offset, &mut out).unwrap(),
+                len,
+                "short read at {offset:#x}+{len:#x}"
+            );
+            assert_eq!(
+                out,
+                &plain[offset as usize..offset as usize + len],
+                "wrong bytes at {offset:#x}+{len:#x}"
+            );
+        }
+
+        // And the RomFS on top of it, which is the thing a title mounts.
+        let romfs = nca
+            .romfs_source(SliceSource(&raw), &keys, 0)
+            .expect("romfs source");
+        assert_eq!(romfs.len(), plain.len() as u64 - 0x40);
+        assert_eq!(romfs.read_vec(0, romfs.len()).unwrap(), &plain[0x40..]);
+    }
+
     /// Build a synthetic *encrypted* Data NCA whose single section is a
     /// RomFS (`HierarchicalIntegrity`/IVFC): returns the raw NCA bytes, the
     /// keyset that unlocks them, the section in the clear, and the offset the
     /// real RomFS image starts at within it.
     fn build_romfs_nca() -> (Vec<u8>, KeySet, Vec<u8>, u64) {
+        let mut image = vec![0u8; 0x1C0];
+        image[..8].copy_from_slice(&0x50u64.to_le_bytes()); // RomFS header_size
+        // Every byte past the header is a function of its own offset, so a
+        // partial read can be checked for having landed where it claims.
+        for (i, byte) in image.iter_mut().enumerate().skip(8) {
+            *byte = (i as u8).wrapping_add(0x40) ^ 0x5A;
+        }
+        build_romfs_nca_with(image, None)
+    }
+
+    /// The same, with the RomFS image and the compression table it is stored
+    /// under chosen by the caller. `image` is what the guest must end up
+    /// reading; when `compression` is `Some`, `image` is already the
+    /// compressed form and the table describes it.
+    fn build_romfs_nca_with(
+        image: Vec<u8>,
+        compression: Option<BktrTable>,
+    ) -> (Vec<u8>, KeySet, Vec<u8>, u64) {
         use crate::crypto::aes128_ctr_xor;
 
         let header_key = {
@@ -1407,13 +1915,13 @@ mod decrypt_tests {
         // byte 0 of the section is NOT the RomFS header for a real,
         // multi-level IVFC section.
         const LEVEL5_OFFSET: u64 = 0x40;
+        let level5_size = image.len() as u64;
         let mut plain_section = vec![0xAAu8; LEVEL5_OFFSET as usize]; // levels 0..4 "hash tables"
-        plain_section.extend_from_slice(&0x50u64.to_le_bytes()); // RomFS header_size
-                                                                 // Every byte past the header is a function of its own offset, so a
-                                                                 // partial read can be checked for having landed where it claims.
-        while plain_section.len() < 0x200 {
-            plain_section.push((plain_section.len() as u8) ^ 0x5A);
-        }
+        plain_section.extend_from_slice(&image);
+        // A section is a whole number of media units, so the image ends
+        // before the section does — which is what `romfs_data_size` is for.
+        let padded = plain_section.len().next_multiple_of(0x200);
+        plain_section.resize(padded, 0xEE);
 
         let at = h + 0x40;
         let start_units = (SECTION_OFFSET / 0x200) as u32;
@@ -1432,6 +1940,16 @@ mod decrypt_tests {
         header[fs0 + 0x04] = ENCRYPTION_AES_CTR;
         header[fs0 + 0x18 + 5 * 24..fs0 + 0x18 + 5 * 24 + 8]
             .copy_from_slice(&LEVEL5_OFFSET.to_le_bytes()); // level[5].logical_offset
+        header[fs0 + 0x18 + 5 * 24 + 8..fs0 + 0x18 + 5 * 24 + 16]
+            .copy_from_slice(&level5_size.to_le_bytes()); // level[5].hash_data_size
+        if let Some(table) = compression {
+            let at = fs0 + 0x178;
+            header[at..at + 8].copy_from_slice(&table.offset.to_le_bytes());
+            header[at + 8..at + 16].copy_from_slice(&table.size.to_le_bytes());
+            header[at + 0x10..at + 0x14].copy_from_slice(&table.magic.to_le_bytes());
+            header[at + 0x14..at + 0x18].copy_from_slice(&1u32.to_le_bytes()); // version
+            header[at + 0x18..at + 0x1C].copy_from_slice(&table.entries.to_le_bytes());
+        }
         header[fs0 + 0x140..fs0 + 0x144].copy_from_slice(&generation.to_le_bytes());
         header[fs0 + 0x144..fs0 + 0x148].copy_from_slice(&secure_value.to_le_bytes());
 

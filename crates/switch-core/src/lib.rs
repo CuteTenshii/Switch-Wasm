@@ -109,6 +109,8 @@ impl std::hash::Hasher for IdHasher {
 pub type IdMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<IdHasher>>;
 
 pub mod bktr;
+pub mod bucket;
+pub mod compressed;
 pub mod control;
 pub mod cpu;
 pub mod crypto;
@@ -128,6 +130,7 @@ pub mod nsp;
 pub mod opus;
 pub mod romfs;
 pub mod source;
+pub mod sparse;
 pub mod ticket;
 pub mod vfs;
 pub mod xci;

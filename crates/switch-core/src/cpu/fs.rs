@@ -596,8 +596,19 @@ impl Cpu {
                 if trace_storage {
                     eprintln!("[storage] read offset={offset:#x} size={requested:#x} of {size:#x}");
                 }
-                let start = offset.min(size);
-                let end = start.saturating_add(requested).min(size);
+                // A storage read is all or nothing: real `fs` checks the range
+                // against the storage's size and refuses one that runs past
+                // it. Clamping instead reports success over a buffer the
+                // guest's own bytes are still in, and it acts on them — which
+                // is how a RomFS layout this emulator did not implement
+                // surfaced as `MountRom` calling the image corrupt, a hundred
+                // million instructions from the section that caused it.
+                const OUT_OF_RANGE: u32 = 2 | (3005 << 9);
+                if offset > size || requested > size - offset {
+                    return self.write_ipc_response(tls, OUT_OF_RANGE, &[], &[], &[]);
+                }
+                let start = offset;
+                let end = start + requested;
                 if let Some(addr) = self.ipc_recv_buffer_addr(tls, 0) {
                     // The RomFS is not a buffer to slice: it is decrypted out
                     // of the container a range at a time (a retail one is
@@ -1257,5 +1268,55 @@ mod tests {
         write_request(&mut cpu, 0, &[]);
         cpu.fs_detection_notifier_request(TLS, sd, Some(0)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64, sd_event);
+    }
+
+    /// `IStorage::Read` is not a short read: real `fs` refuses a range that
+    /// runs past the storage.
+    #[test]
+    fn a_storage_read_past_the_end_is_refused_rather_than_clamped() {
+        const BUFFER: u32 = 0x4000;
+        const OUT_OF_RANGE: u32 = 2 | (3005 << 9);
+        let romfs: Vec<u8> = (0..=0xFFu8).collect();
+
+        // `IStorage::Read(s64 offset, u64 size)` — no leading option word.
+        let read = |offset: u64, size: u64| {
+            let mut payload = [0u8; 0x10];
+            payload[..8].copy_from_slice(&offset.to_le_bytes());
+            payload[8..].copy_from_slice(&size.to_le_bytes());
+            payload
+        };
+
+        let mut cpu = request_with_recv_buffer(0, &read(0x10, 0x20), BUFFER, 0x40);
+        cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+        cpu.set_romfs(romfs.clone());
+        cpu.fs_storage_request(TLS, 1, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.read_bytes(BUFFER, 0x20), romfs[0x10..0x30]);
+
+        // The whole storage exactly, which is in range and must stay so.
+        write_map_buffer_request(&mut cpu, 0, &read(0, 0x100), BUFFER, 0x100, false);
+        cpu.fs_storage_request(TLS, 1, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.read_bytes(BUFFER, 0x100), romfs);
+
+        // One byte past it is not. The buffer keeps whatever the caller left
+        // there — the point of refusing is that it never reads it as data.
+        for offset in 0..0x100 {
+            cpu.mem.write_u8(BUFFER + offset, 0xAA).unwrap();
+        }
+        write_map_buffer_request(&mut cpu, 0, &read(0xF0, 0x11), BUFFER, 0x40, false);
+        cpu.fs_storage_request(TLS, 1, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), OUT_OF_RANGE);
+        assert_eq!(cpu.read_bytes(BUFFER, 0x20), vec![0xAA; 0x20]);
+
+        // And so is a read that starts past the end, however small.
+        write_map_buffer_request(&mut cpu, 0, &read(0x100, 1), BUFFER, 0x40, false);
+        cpu.fs_storage_request(TLS, 1, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), OUT_OF_RANGE);
+
+        // GetSize is what a caller sizes those reads against.
+        write_request(&mut cpu, 4, &[]);
+        cpu.fs_storage_request(TLS, 1, Some(4)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0x100);
     }
 }
