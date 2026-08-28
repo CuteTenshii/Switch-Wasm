@@ -182,6 +182,31 @@ impl ExecCtx<'_> {
         }
     }
 
+    /// Read a contiguous run of a surface in **one** address translation.
+    ///
+    /// A run that would leave its own mapping is not a run, and falls back to
+    /// a byte at a time — the same bargain [`ExecCtx::fill_pixels`] makes.
+    pub fn read_run(&self, gpu_va: u64, out: &mut [u8]) -> Result<()> {
+        if let Some(cpu) = self.span(gpu_va, out.len() as u64) {
+            return self.read_span(cpu, out);
+        }
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = self.vmm_read_u8(gpu_va + i as u64)?;
+        }
+        Ok(())
+    }
+
+    /// [`ExecCtx::read_run`] backwards: put a contiguous run back in one walk.
+    pub fn write_run(&mut self, gpu_va: u64, bytes: &[u8]) -> Result<()> {
+        if let Some(cpu) = self.span(gpu_va, bytes.len() as u64) {
+            return self.write_span(cpu, bytes);
+        }
+        for (i, byte) in bytes.iter().enumerate() {
+            self.vmm_write_u8(gpu_va + i as u64, *byte)?;
+        }
+        Ok(())
+    }
+
     pub fn vmm_read_u8(&self, gpu_va: u64) -> Result<u8> {
         match self.vmm.translate(gpu_va) {
             Some((cpu, _)) => self.mem.read_u8(cpu),

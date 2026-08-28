@@ -37,11 +37,14 @@ const REMAP_NO_WRITE: u32 = 6;
 #[derive(Debug, Default)]
 pub struct EngineCopy {
     pub regs: Registers,
+    /// One source run in flight, kept between launches rather than allocated
+    /// per line — hbmenu's present copies 720 of them a frame.
+    run: Vec<u8>,
 }
 
 impl EngineCopy {
     pub fn new() -> EngineCopy {
-        EngineCopy { regs: Registers::new() }
+        EngineCopy { regs: Registers::new(), run: Vec::new() }
     }
 
     pub fn write(&mut self, method: u32, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
@@ -64,11 +67,10 @@ impl EngineCopy {
         let line_count = if multi_line { self.regs.get(LINE_COUNT).max(1) } else { 1 };
 
         if !multi_line && !remap {
-            // Plain 1D copy.
-            for i in 0..line_length {
-                let byte = ctx.vmm_read_u8(src_base + i as u64)?;
-                ctx.vmm_write_u8(dst_base + i as u64, byte)?;
-            }
+            // Plain 1D copy: contiguous on both sides, so it is one run.
+            self.run.resize(line_length as usize, 0);
+            ctx.read_run(src_base, &mut self.run)?;
+            ctx.write_run(dst_base, &self.run)?;
             ctx.stats.copies += 1;
             return Ok(());
         }
@@ -98,6 +100,12 @@ impl EngineCopy {
             dst_element,
         )?;
 
+        if !remap {
+            self.copy_runs(ctx, &src.based_at(src_base), &dst.based_at(dst_base), line_length, line_count)?;
+            ctx.stats.copies += 1;
+            return Ok(());
+        }
+
         let consts = [self.regs.get(SET_REMAP_CONST), self.regs.get(SET_REMAP_CONST + 1)];
         let component_size = components.component_size;
 
@@ -105,13 +113,6 @@ impl EngineCopy {
             for element in 0..line_length {
                 let src_off = src.offset(element, line);
                 let dst_off = dst.offset(element, line);
-                if !remap {
-                    for byte in 0..src_element {
-                        let v = ctx.vmm_read_u8(src_base + (src_off + byte) as u64)?;
-                        ctx.vmm_write_u8(dst_base + (dst_off + byte) as u64, v)?;
-                    }
-                    continue;
-                }
                 // Read the source components, then scatter them per the remap.
                 let mut source = [0u32; 4];
                 for (i, s) in source.iter_mut().enumerate().take(components.num_src as usize) {
@@ -146,6 +147,46 @@ impl EngineCopy {
             }
         }
         ctx.stats.copies += 1;
+        Ok(())
+    }
+
+    /// The remap-off copy, a contiguous run at a time rather than a byte.
+    ///
+    /// Every byte used to cost a block-linear swizzle and a GPU address
+    /// translation on each side. hbmenu's present is one 1280x720x4 copy, so
+    /// that was 3.7 million of each per frame and about a fifth of the frame.
+    /// A pitch row is contiguous to its end and a block-linear one in
+    /// sixteens, which is what `run_at` reports.
+    ///
+    /// An element is a byte here — that is what makes this the remap-off path.
+    fn copy_runs(
+        &mut self,
+        ctx: &mut ExecCtx,
+        src: &SurfaceWalk,
+        dst: &SurfaceWalk,
+        line_length: u32,
+        line_count: u32,
+    ) -> Result<()> {
+        for line in 0..line_count {
+            let mut x = 0;
+            while x < line_length {
+                let (src_at, src_run) = src.run_at(x, line);
+                // A pitch shorter than the line reports no run at all; one
+                // byte still makes progress, as the byte loop did.
+                let take = src_run.min(line_length - x).max(1);
+                self.run.resize(take as usize, 0);
+                ctx.read_run(src_at, &mut self.run)?;
+
+                let mut done = 0usize;
+                while done < take as usize {
+                    let (dst_at, dst_run) = dst.run_at(x + done as u32, line);
+                    let n = (dst_run as usize).min(take as usize - done).max(1);
+                    ctx.write_run(dst_at, &self.run[done..done + n])?;
+                    done += n;
+                }
+                x += take;
+            }
+        }
         Ok(())
     }
 
@@ -186,8 +227,12 @@ impl RemapComponents {
 }
 
 /// Address generation for one side of a copy.
+#[derive(Clone, Copy)]
 struct SurfaceWalk {
     layout: Layout,
+    /// The GPU address this side starts at, so a walk yields addresses rather
+    /// than offsets its caller has to rebase.
+    base: u64,
     /// The surface's row length in bytes. `SetDstWidth`/`SetSrcWidth` count
     /// **elements**, so this is that width scaled by the element size — the
     /// remap makes an element as wide as a pixel, and a block-linear
@@ -219,6 +264,7 @@ impl SurfaceWalk {
         if pitch {
             return Ok(SurfaceWalk {
                 layout: Layout::Pitch { pitch: regs.get(pitch_reg) },
+                base: 0,
                 width_bytes: regs.get(pitch_reg),
                 origin_x_bytes: 0,
                 origin_y: 0,
@@ -233,6 +279,7 @@ impl SurfaceWalk {
         }
         Ok(SurfaceWalk {
             layout: Layout::BlockLinear { block_height_gobs: 1 << field(block, 4, 7) },
+            base: 0,
             width_bytes: regs.get(width_reg).saturating_mul(element_bytes),
             origin_x_bytes: regs.field(origin_reg, 0, 15).saturating_mul(element_bytes),
             origin_y: regs.field(origin_reg, 16, 31),
@@ -243,6 +290,18 @@ impl SurfaceWalk {
     fn offset(&self, element: u32, line: u32) -> u32 {
         let x = self.origin_x_bytes + element * self.element_bytes;
         self.layout.offset(x, self.origin_y + line, self.width_bytes)
+    }
+
+    fn based_at(&self, base: u64) -> SurfaceWalk {
+        SurfaceWalk { base, ..*self }
+    }
+
+    /// The GPU address of `(element, line)`, plus how many bytes from there
+    /// are contiguous in memory.
+    fn run_at(&self, element: u32, line: u32) -> (u64, u32) {
+        let x = self.origin_x_bytes + element * self.element_bytes;
+        let (offset, run) = self.layout.run_at(x, self.origin_y + line, self.width_bytes);
+        (self.base + u64::from(offset), run)
     }
 }
 

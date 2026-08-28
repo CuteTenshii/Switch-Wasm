@@ -787,7 +787,8 @@ draws, the rest being `mufu rcp` precision and the half-way rounding above.
 **hbmenu is not a shader-core test.** Its menu renders correctly, but
 `nx_graphics.c` draws with the CPU into a linear memblock and its command list
 is just `dkCmdBufCopyBufferToImage` + a fence. Only the copy engine and
-syncpoints are involved.
+syncpoints are involved — and that one copy was a fifth of the frame until
+`copy_runs` walked it a contiguous run at a time instead of a byte.
 
 ## Input (`cpu/mod.rs`, `web/main/input.ts`)
 
@@ -881,7 +882,11 @@ Four tools, and they disagree — measure the one you care about:
   the floor, so the gap to a class is that class's decode+execute cost.
 - `--example hotspots -- <nro>` — one steady frame bucketed by guest address
   and encoding byte. This is how you learn 72% of an hbmenu frame is hbmenu's
-  own gradient fill and ~10% is the emulator's GPU work.
+  own gradient fill. It counts **guest** instructions only, so it cannot see
+  the emulator's own cost at all: what falls outside the image buckets is more
+  guest code, not GPU work, and reading it as "~10% is the emulator's GPU work"
+  is what let 23% of a wasm frame hide in the copy engine. For the emulator's
+  own share, `wasm_bench --cpu-prof`.
 - `--example jit_bench -- <nro>` — both engines, with every state difference.
 - `node tools/wasm_bench.mjs <nro>` — the build the browser runs, in fps.
   `node --cpu-prof` on it names wasm functions; it is the only profiler for
@@ -906,7 +911,12 @@ What the numbers taught us:
   those was 2.6 s/frame → 0.67 s. Measure with `examples/screenshot` at two
   frame indices; the frames must stay byte-identical.
 - Anything on the per-instruction path deserves the same scrutiny: the GPU's
-  `read_pixel`/`write_pixel` used to translate a GPU address **per byte**.
+  `read_pixel`/`write_pixel` used to translate a GPU address **per byte**, and
+  so did the copy engine. Its remap-off walk cost hbmenu's one present 3.7
+  million block-linear swizzles and 7.4 million translations a frame — 23% of
+  the frame in wasm, 2.8% now. `Layout::run_at` already reported the
+  contiguous runs (a pitch row to its end, a block-linear one in sixteens);
+  it simply had no caller there. 0.59 -> 0.43 s a frame, byte-identical.
 
 ## A64 decode traps
 
