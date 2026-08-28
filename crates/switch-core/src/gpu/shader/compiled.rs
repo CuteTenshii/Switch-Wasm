@@ -87,9 +87,10 @@ impl Compiled {
             .insns
             .iter()
             .map(|insn| match branch_target(insn.op) {
-                Some(target) => {
-                    program.index_of(target).map(|i| i as u32).unwrap_or(NO_TARGET)
-                }
+                Some(target) => program
+                    .index_of(target)
+                    .map(|i| i as u32)
+                    .unwrap_or(NO_TARGET),
                 None => NO_TARGET,
             })
             .collect();
@@ -229,90 +230,533 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
     let f = |operand| value(operand, consts);
     match op {
         // ---- float ----
-        Op::Fadd { dst, a, am, b, bm, ftz, sat } => {
-            Op::Fadd { dst, a, am, b: f(b), bm, ftz, sat }
-        }
-        Op::Fmul { dst, a, b, bm, ftz, sat, scale } => {
-            Op::Fmul { dst, a, b: f(b), bm, ftz, sat, scale }
-        }
-        Op::Ffma { dst, a, b, bneg, c, cneg, ftz, sat } => {
-            Op::Ffma { dst, a, b: f(b), bneg, c: f(c), cneg, ftz, sat }
-        }
-        Op::Fmnmx { dst, a, am, b, bm, pred, ftz } => {
-            Op::Fmnmx { dst, a, am, b: f(b), bm, pred, ftz }
-        }
-        Op::Fsetp { p0, p1, a, am, b, bm, cmp, bop, src } => {
-            Op::Fsetp { p0, p1, a, am, b: f(b), bm, cmp, bop, src }
-        }
-        Op::Fset { dst, a, am, b, bm, cmp, bop, src, bf } => {
-            Op::Fset { dst, a, am, b: f(b), bm, cmp, bop, src, bf }
-        }
+        Op::Fadd {
+            dst,
+            a,
+            am,
+            b,
+            bm,
+            ftz,
+            sat,
+        } => Op::Fadd {
+            dst,
+            a,
+            am,
+            b: f(b),
+            bm,
+            ftz,
+            sat,
+        },
+        Op::Fmul {
+            dst,
+            a,
+            b,
+            bm,
+            ftz,
+            sat,
+            scale,
+        } => Op::Fmul {
+            dst,
+            a,
+            b: f(b),
+            bm,
+            ftz,
+            sat,
+            scale,
+        },
+        Op::Ffma {
+            dst,
+            a,
+            b,
+            bneg,
+            c,
+            cneg,
+            ftz,
+            sat,
+        } => Op::Ffma {
+            dst,
+            a,
+            b: f(b),
+            bneg,
+            c: f(c),
+            cneg,
+            ftz,
+            sat,
+        },
+        Op::Fmnmx {
+            dst,
+            a,
+            am,
+            b,
+            bm,
+            pred,
+            ftz,
+        } => Op::Fmnmx {
+            dst,
+            a,
+            am,
+            b: f(b),
+            bm,
+            pred,
+            ftz,
+        },
+        Op::Fsetp {
+            p0,
+            p1,
+            a,
+            am,
+            b,
+            bm,
+            cmp,
+            bop,
+            src,
+        } => Op::Fsetp {
+            p0,
+            p1,
+            a,
+            am,
+            b: f(b),
+            bm,
+            cmp,
+            bop,
+            src,
+        },
+        Op::Fset {
+            dst,
+            a,
+            am,
+            b,
+            bm,
+            cmp,
+            bop,
+            src,
+            bf,
+        } => Op::Fset {
+            dst,
+            a,
+            am,
+            b: f(b),
+            bm,
+            cmp,
+            bop,
+            src,
+            bf,
+        },
 
         // ---- half-precision ----
-        Op::Hadd2 { dst, a, am, asw, b, bm, bsw, merge, ftz, sat } => {
-            Op::Hadd2 { dst, a, am, asw, b: f(b), bm, bsw, merge, ftz, sat }
-        }
-        Op::Hmul2 { dst, a, am, asw, b, bm, bsw, merge, prec, sat } => {
-            Op::Hmul2 { dst, a, am, asw, b: f(b), bm, bsw, merge, prec, sat }
-        }
-        Op::Hfma2 { dst, a, asw, b, bneg, bsw, c, cneg, csw, merge, prec, sat } => {
-            Op::Hfma2 { dst, a, asw, b: f(b), bneg, bsw, c: f(c), cneg, csw, merge, prec, sat }
-        }
-        Op::Hset2 { dst, a, am, asw, b, bm, bsw, cmp, bop, src, bf, ftz } => {
-            Op::Hset2 { dst, a, am, asw, b: f(b), bm, bsw, cmp, bop, src, bf, ftz }
-        }
-        Op::Hsetp2 { p0, p1, a, am, asw, b, bm, bsw, cmp, bop, src, and, ftz } => {
-            Op::Hsetp2 { p0, p1, a, am, asw, b: f(b), bm, bsw, cmp, bop, src, and, ftz }
-        }
+        Op::Hadd2 {
+            dst,
+            a,
+            am,
+            asw,
+            b,
+            bm,
+            bsw,
+            merge,
+            ftz,
+            sat,
+        } => Op::Hadd2 {
+            dst,
+            a,
+            am,
+            asw,
+            b: f(b),
+            bm,
+            bsw,
+            merge,
+            ftz,
+            sat,
+        },
+        Op::Hmul2 {
+            dst,
+            a,
+            am,
+            asw,
+            b,
+            bm,
+            bsw,
+            merge,
+            prec,
+            sat,
+        } => Op::Hmul2 {
+            dst,
+            a,
+            am,
+            asw,
+            b: f(b),
+            bm,
+            bsw,
+            merge,
+            prec,
+            sat,
+        },
+        Op::Hfma2 {
+            dst,
+            a,
+            asw,
+            b,
+            bneg,
+            bsw,
+            c,
+            cneg,
+            csw,
+            merge,
+            prec,
+            sat,
+        } => Op::Hfma2 {
+            dst,
+            a,
+            asw,
+            b: f(b),
+            bneg,
+            bsw,
+            c: f(c),
+            cneg,
+            csw,
+            merge,
+            prec,
+            sat,
+        },
+        Op::Hset2 {
+            dst,
+            a,
+            am,
+            asw,
+            b,
+            bm,
+            bsw,
+            cmp,
+            bop,
+            src,
+            bf,
+            ftz,
+        } => Op::Hset2 {
+            dst,
+            a,
+            am,
+            asw,
+            b: f(b),
+            bm,
+            bsw,
+            cmp,
+            bop,
+            src,
+            bf,
+            ftz,
+        },
+        Op::Hsetp2 {
+            p0,
+            p1,
+            a,
+            am,
+            asw,
+            b,
+            bm,
+            bsw,
+            cmp,
+            bop,
+            src,
+            and,
+            ftz,
+        } => Op::Hsetp2 {
+            p0,
+            p1,
+            a,
+            am,
+            asw,
+            b: f(b),
+            bm,
+            bsw,
+            cmp,
+            bop,
+            src,
+            and,
+            ftz,
+        },
 
         // ---- integer ----
-        Op::Iadd { dst, a, aneg, b, bneg, cin, cout } => {
-            Op::Iadd { dst, a, aneg, b: f(b), bneg, cin, cout }
-        }
-        Op::Iadd3 { dst, a, aneg, b, bneg, c, cneg } => {
-            Op::Iadd3 { dst, a, aneg, b: f(b), bneg, c: f(c), cneg }
-        }
-        Op::Imnmx { dst, a, b, pred, signed } => Op::Imnmx { dst, a, b: f(b), pred, signed },
-        Op::Iscadd { dst, a, aneg, b, bneg, shift } => {
-            Op::Iscadd { dst, a, aneg, b: f(b), bneg, shift }
-        }
-        Op::Isetp { p0, p1, a, b, cmp, signed, bop, src } => {
-            Op::Isetp { p0, p1, a, b: f(b), cmp, signed, bop, src }
-        }
-        Op::Iset { dst, a, b, cmp, signed, bop, src, bf } => {
-            Op::Iset { dst, a, b: f(b), cmp, signed, bop, src, bf }
-        }
-        Op::Icmp { dst, a, b, c, cmp, signed } => Op::Icmp { dst, a, b: f(b), c, cmp, signed },
-        Op::Imul { dst, a, b, signed, hi } => Op::Imul { dst, a, b: f(b), signed, hi },
+        Op::Iadd {
+            dst,
+            a,
+            aneg,
+            b,
+            bneg,
+            cin,
+            cout,
+        } => Op::Iadd {
+            dst,
+            a,
+            aneg,
+            b: f(b),
+            bneg,
+            cin,
+            cout,
+        },
+        Op::Iadd3 {
+            dst,
+            a,
+            aneg,
+            b,
+            bneg,
+            c,
+            cneg,
+        } => Op::Iadd3 {
+            dst,
+            a,
+            aneg,
+            b: f(b),
+            bneg,
+            c: f(c),
+            cneg,
+        },
+        Op::Imnmx {
+            dst,
+            a,
+            b,
+            pred,
+            signed,
+        } => Op::Imnmx {
+            dst,
+            a,
+            b: f(b),
+            pred,
+            signed,
+        },
+        Op::Iscadd {
+            dst,
+            a,
+            aneg,
+            b,
+            bneg,
+            shift,
+        } => Op::Iscadd {
+            dst,
+            a,
+            aneg,
+            b: f(b),
+            bneg,
+            shift,
+        },
+        Op::Isetp {
+            p0,
+            p1,
+            a,
+            b,
+            cmp,
+            signed,
+            bop,
+            src,
+        } => Op::Isetp {
+            p0,
+            p1,
+            a,
+            b: f(b),
+            cmp,
+            signed,
+            bop,
+            src,
+        },
+        Op::Iset {
+            dst,
+            a,
+            b,
+            cmp,
+            signed,
+            bop,
+            src,
+            bf,
+        } => Op::Iset {
+            dst,
+            a,
+            b: f(b),
+            cmp,
+            signed,
+            bop,
+            src,
+            bf,
+        },
+        Op::Icmp {
+            dst,
+            a,
+            b,
+            c,
+            cmp,
+            signed,
+        } => Op::Icmp {
+            dst,
+            a,
+            b: f(b),
+            c,
+            cmp,
+            signed,
+        },
+        Op::Imul {
+            dst,
+            a,
+            b,
+            signed,
+            hi,
+        } => Op::Imul {
+            dst,
+            a,
+            b: f(b),
+            signed,
+            hi,
+        },
 
         // ---- bit manipulation ----
-        Op::Bfi { dst, insert, src, base } => Op::Bfi { dst, insert, src: f(src), base: f(base) },
-        Op::R2p { src, mask, byte } => Op::R2p { src, mask: f(mask), byte },
-        Op::Lop { dst, a, ainv, b, binv, op, pred } => {
-            Op::Lop { dst, a, ainv, b: f(b), binv, op, pred }
-        }
-        Op::Lop3 { dst, a, b, c, lut } => Op::Lop3 { dst, a, b: f(b), c: f(c), lut },
-        Op::Shl { dst, a, b, wrap } => Op::Shl { dst, a, b: f(b), wrap },
-        Op::Shr { dst, a, b, signed, wrap } => Op::Shr { dst, a, b: f(b), signed, wrap },
-        Op::Shf { dst, lo, shift, hi, left, wrap, hi_out } => {
-            Op::Shf { dst, lo, shift: f(shift), hi, left, wrap, hi_out }
-        }
-        Op::Bfe { dst, a, b, signed } => Op::Bfe { dst, a, b: f(b), signed },
+        Op::Bfi {
+            dst,
+            insert,
+            src,
+            base,
+        } => Op::Bfi {
+            dst,
+            insert,
+            src: f(src),
+            base: f(base),
+        },
+        Op::R2p { src, mask, byte } => Op::R2p {
+            src,
+            mask: f(mask),
+            byte,
+        },
+        Op::Lop {
+            dst,
+            a,
+            ainv,
+            b,
+            binv,
+            op,
+            pred,
+        } => Op::Lop {
+            dst,
+            a,
+            ainv,
+            b: f(b),
+            binv,
+            op,
+            pred,
+        },
+        Op::Lop3 { dst, a, b, c, lut } => Op::Lop3 {
+            dst,
+            a,
+            b: f(b),
+            c: f(c),
+            lut,
+        },
+        Op::Shl { dst, a, b, wrap } => Op::Shl {
+            dst,
+            a,
+            b: f(b),
+            wrap,
+        },
+        Op::Shr {
+            dst,
+            a,
+            b,
+            signed,
+            wrap,
+        } => Op::Shr {
+            dst,
+            a,
+            b: f(b),
+            signed,
+            wrap,
+        },
+        Op::Shf {
+            dst,
+            lo,
+            shift,
+            hi,
+            left,
+            wrap,
+            hi_out,
+        } => Op::Shf {
+            dst,
+            lo,
+            shift: f(shift),
+            hi,
+            left,
+            wrap,
+            hi_out,
+        },
+        Op::Bfe { dst, a, b, signed } => Op::Bfe {
+            dst,
+            a,
+            b: f(b),
+            signed,
+        },
         Op::Popc { dst, b, inv } => Op::Popc { dst, b: f(b), inv },
-        Op::Flo { dst, b, signed, shift, inv } => Op::Flo { dst, b: f(b), signed, shift, inv },
-        Op::Sel { dst, a, b, pred } => Op::Sel { dst, a, b: f(b), pred },
+        Op::Flo {
+            dst,
+            b,
+            signed,
+            shift,
+            inv,
+        } => Op::Flo {
+            dst,
+            b: f(b),
+            signed,
+            shift,
+            inv,
+        },
+        Op::Sel { dst, a, b, pred } => Op::Sel {
+            dst,
+            a,
+            b: f(b),
+            pred,
+        },
 
         // ---- moves and conversions ----
         Op::Mov { dst, src } => Op::Mov { dst, src: f(src) },
-        Op::I2f { dst, src, sm, src_bytes, src_signed, sel } => {
-            Op::I2f { dst, src: f(src), sm, src_bytes, src_signed, sel }
-        }
-        Op::F2i { dst, src, sm, dst_bytes, dst_signed, round, ftz } => {
-            Op::F2i { dst, src: f(src), sm, dst_bytes, dst_signed, round, ftz }
-        }
-        Op::F2f { dst, src, sm, round, ftz, sat } => {
-            Op::F2f { dst, src: f(src), sm, round, ftz, sat }
-        }
+        Op::I2f {
+            dst,
+            src,
+            sm,
+            src_bytes,
+            src_signed,
+            sel,
+        } => Op::I2f {
+            dst,
+            src: f(src),
+            sm,
+            src_bytes,
+            src_signed,
+            sel,
+        },
+        Op::F2i {
+            dst,
+            src,
+            sm,
+            dst_bytes,
+            dst_signed,
+            round,
+            ftz,
+        } => Op::F2i {
+            dst,
+            src: f(src),
+            sm,
+            dst_bytes,
+            dst_signed,
+            round,
+            ftz,
+        },
+        Op::F2f {
+            dst,
+            src,
+            sm,
+            round,
+            ftz,
+            sat,
+        } => Op::F2f {
+            dst,
+            src: f(src),
+            sm,
+            round,
+            ftz,
+            sat,
+        },
 
         // Everything else carries no constant-bank operand — `ldc`'s bank is
         // indexed by a register, so its value is not known until it runs.
@@ -356,14 +800,20 @@ mod tests {
             dst: 0,
             a: 1,
             am: FMod::NONE,
-            b: Operand::Const { bank: 3, offset: 16 },
+            b: Operand::Const {
+                bank: 3,
+                offset: 16,
+            },
             bm: FMod::NONE,
             ftz: false,
             sat: false,
         }]);
         let compiled = Compiled::with_constants(&p, &consts);
         match compiled.op(0) {
-            Op::Fadd { b: Operand::Imm(bits), .. } => assert_eq!(f32::from_bits(bits), 2.5),
+            Op::Fadd {
+                b: Operand::Imm(bits),
+                ..
+            } => assert_eq!(f32::from_bits(bits), 2.5),
             other => panic!("not folded: {other:?}"),
         }
     }
@@ -386,7 +836,10 @@ mod tests {
         let consts: HashMap<(u8, u16), f32> =
             [((0, 0), 3.0f32), ((0, 4), 0.5f32)].into_iter().collect();
         let ops = [
-            Op::Mov { dst: 1, src: Operand::Imm(2.0f32.to_bits()) },
+            Op::Mov {
+                dst: 1,
+                src: Operand::Imm(2.0f32.to_bits()),
+            },
             Op::Fmul {
                 dst: 2,
                 a: 1,
@@ -413,7 +866,9 @@ mod tests {
         let mut plain = Invocation::new();
         plain.execute(&Compiled::new(&p), &env).unwrap();
         let mut folded = Invocation::new();
-        folded.execute(&Compiled::with_constants(&p, &consts), &env).unwrap();
+        folded
+            .execute(&Compiled::with_constants(&p, &consts), &env)
+            .unwrap();
 
         for reg in 0..4u8 {
             assert_eq!(plain.reg(reg), folded.reg(reg), "r{reg}");
@@ -427,7 +882,9 @@ mod tests {
         // branch, which is most of what this lowering is for.
         let p = program(&[
             Op::Nop,
-            Op::Bra { target: crate::gpu::shader::ENTRY_OFFSET },
+            Op::Bra {
+                target: crate::gpu::shader::ENTRY_OFFSET,
+            },
             Op::Exit,
         ]);
         let compiled = Compiled::new(&p);

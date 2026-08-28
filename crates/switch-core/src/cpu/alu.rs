@@ -86,9 +86,9 @@ impl Cpu {
                     })?;
                     let a = self.read_zr(rn) & Self::mask(sf);
                     let r = match opc {
-                        0b00 => a & mask,         // AND
-                        0b01 => a | mask,         // ORR
-                        0b10 => a ^ mask,         // EOR
+                        0b00 => a & mask, // AND
+                        0b01 => a | mask, // ORR
+                        0b10 => a ^ mask, // EOR
                         _ => {
                             let r = a & mask;
                             let nbit = (r >> (if sf { 63 } else { 31 })) & 1;
@@ -163,7 +163,9 @@ impl Cpu {
                             (((insn >> 10) & 0x3F), true)
                         }
                     } else {
-                        if ((insn >> 22) & 1) == 1 || ((insn >> 21) & 1) == 1 || ((insn >> 15) & 1) == 1
+                        if ((insn >> 22) & 1) == 1
+                            || ((insn >> 21) & 1) == 1
+                            || ((insn >> 15) & 1) == 1
                         {
                             (0, false)
                         } else {
@@ -182,7 +184,8 @@ impl Cpu {
                     let r = if imm == 0 {
                         b
                     } else {
-                        ((b >> imm) | (a.wrapping_shl((size as u32).wrapping_sub(imm)))) & Self::mask(sf)
+                        ((b >> imm) | (a.wrapping_shl((size as u32).wrapping_sub(imm))))
+                            & Self::mask(sf)
                     };
                     self.write_zr(rd, r);
                     Ok(true)
@@ -225,7 +228,8 @@ impl Cpu {
                         let z = (r == 0) as u64;
                         let c = (self.nzcv >> 29) & 1;
                         let v = (self.nzcv >> 28) & 1;
-                        self.nzcv = ((nbit as u32) << 31) | ((z as u32) << 30) | (c << 29) | (v << 28);
+                        self.nzcv =
+                            ((nbit as u32) << 31) | ((z as u32) << 30) | (c << 29) | (v << 28);
                         r
                     }
                 };
@@ -329,7 +333,7 @@ impl Cpu {
                             let a = self.read_zr(rn) & Self::mask(sf);
                             let size = if sf { 64 } else { 32 };
                             let r = match opcode2 {
-                                0b000000 => reverse_bits(a, size),   // RBIT
+                                0b000000 => reverse_bits(a, size),     // RBIT
                                 0b000001 => reverse_16_lanes(a, size), // REV16
                                 0b000010 => reverse_32_lanes(a, size), // REV32
                                 0b000011 => {
@@ -430,7 +434,7 @@ impl Cpu {
                     Ok(true)
                 }
             }
-             0b11011 => {
+            0b11011 => {
                 // Data processing (3-source) / multiply.
                 let rn = ((insn >> 5) & 0x1F) as u8;
                 let rd = (insn & 0x1F) as u8;

@@ -152,7 +152,11 @@ impl AddressSpace {
         };
         self.reservations.insert(
             base,
-            Reservation { base, size, page_size: page_size as u64 },
+            Reservation {
+                base,
+                size,
+                page_size: page_size as u64,
+            },
         );
         Ok(base)
     }
@@ -192,14 +196,26 @@ impl AddressSpace {
         if size == 0 {
             return Err(Error::Gpu("as: zero-sized buffer mapping".into()));
         }
-        let page_size = if page_size == 0 { SMALL_PAGE_SIZE } else { page_size as u64 };
+        let page_size = if page_size == 0 {
+            SMALL_PAGE_SIZE
+        } else {
+            page_size as u64
+        };
         let gpu_va = if flags & FLAG_FIXED_OFFSET != 0 {
             requested
         } else {
             self.bump(size, page_size)?
         };
-        self.mappings
-            .insert(gpu_va, Mapping { gpu_va, size, cpu_addr, handle, kind });
+        self.mappings.insert(
+            gpu_va,
+            Mapping {
+                gpu_va,
+                size,
+                cpu_addr,
+                handle,
+                kind,
+            },
+        );
         self.forget_translations();
         Ok(gpu_va)
     }
@@ -240,18 +256,23 @@ impl AddressSpace {
         let piece = |gpu_va: u64, size: u64, kind: u8| Mapping {
             gpu_va,
             size,
-            cpu_addr: covering.cpu_addr.wrapping_add((gpu_va - covering.gpu_va) as u32),
+            cpu_addr: covering
+                .cpu_addr
+                .wrapping_add((gpu_va - covering.gpu_va) as u32),
             handle: covering.handle,
             kind,
         };
         self.mappings.remove(&covering.gpu_va);
         if gpu_va > covering.gpu_va {
-            self.mappings
-                .insert(covering.gpu_va, piece(covering.gpu_va, gpu_va - covering.gpu_va, covering.kind));
+            self.mappings.insert(
+                covering.gpu_va,
+                piece(covering.gpu_va, gpu_va - covering.gpu_va, covering.kind),
+            );
         }
         self.mappings.insert(gpu_va, piece(gpu_va, size, kind));
         if end < covering_end {
-            self.mappings.insert(end, piece(end, covering_end - end, covering.kind));
+            self.mappings
+                .insert(end, piece(end, covering_end - end, covering.kind));
         }
         self.forget_translations();
         true
@@ -291,8 +312,10 @@ impl AddressSpace {
             };
             self.mappings.remove(&mapping.gpu_va);
             if mapping.gpu_va < gpu_va {
-                self.mappings
-                    .insert(mapping.gpu_va, piece(mapping.gpu_va, gpu_va - mapping.gpu_va));
+                self.mappings.insert(
+                    mapping.gpu_va,
+                    piece(mapping.gpu_va, gpu_va - mapping.gpu_va),
+                );
             }
             if mapping_end > end {
                 self.mappings.insert(end, piece(end, mapping_end - end));
@@ -331,7 +354,10 @@ impl AddressSpace {
             let size = self.recent_size[way].get();
             let off = gpu_va.wrapping_sub(self.recent_base[way].get());
             if off < size {
-                return Some((self.recent_cpu[way].get().wrapping_add(off as u32), size - off));
+                return Some((
+                    self.recent_cpu[way].get().wrapping_add(off as u32),
+                    size - off,
+                ));
             }
         }
         let (_, m) = self.mappings.range(..=gpu_va).next_back()?;
@@ -358,7 +384,11 @@ impl AddressSpace {
     /// The mapping covering `gpu_va`, if any.
     pub fn mapping_at(&self, gpu_va: u64) -> Option<&Mapping> {
         let (_, m) = self.mappings.range(..=gpu_va).next_back()?;
-        if m.contains(gpu_va) { Some(m) } else { None }
+        if m.contains(gpu_va) {
+            Some(m)
+        } else {
+            None
+        }
     }
 
     /// Every live mapping, in ascending GPU VA order.
@@ -408,7 +438,9 @@ mod tests {
 
     fn space_with_buffer(cpu_addr: u32, size: u64) -> (AddressSpace, u64) {
         let mut vmm = AddressSpace::new();
-        let va = vmm.map(cpu_addr, size, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+        let va = vmm
+            .map(cpu_addr, size, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
         (vmm, va)
     }
 
@@ -423,8 +455,12 @@ mod tests {
     #[test]
     fn unfixed_allocations_do_not_overlap() {
         let mut vmm = AddressSpace::new();
-        let a = vmm.map(0x2000_0000, 0x2000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
-        let b = vmm.map(0x2100_0000, 0x2000, 2, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+        let a = vmm
+            .map(0x2000_0000, 0x2000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
+        let b = vmm
+            .map(0x2100_0000, 0x2000, 2, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
         assert!(b >= a + 0x2000);
     }
 
@@ -433,7 +469,15 @@ mod tests {
         let mut vmm = AddressSpace::new();
         let base = vmm.alloc_space(16, 0x1_0000, 0, 0).unwrap();
         let va = vmm
-            .map(0x2000_0000, 0x1_0000, 3, 0, BIG_PAGE_SIZE, FLAG_FIXED_OFFSET, base)
+            .map(
+                0x2000_0000,
+                0x1_0000,
+                3,
+                0,
+                BIG_PAGE_SIZE,
+                FLAG_FIXED_OFFSET,
+                base,
+            )
             .unwrap();
         assert_eq!(va, base);
         assert_eq!(vmm.translate(base), Some((0x2000_0000, 0x1_0000)));
@@ -442,8 +486,12 @@ mod tests {
     #[test]
     fn big_and_small_regions_are_separate() {
         let mut vmm = AddressSpace::new();
-        let small = vmm.map(0x2000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
-        let big = vmm.map(0x2100_0000, 0x1_0000, 2, 0, BIG_PAGE_SIZE, 0, 0).unwrap();
+        let small = vmm
+            .map(0x2000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
+        let big = vmm
+            .map(0x2100_0000, 0x1_0000, 2, 0, BIG_PAGE_SIZE, 0, 0)
+            .unwrap();
         assert!(small < SMALL_REGION_END);
         assert!(big >= SMALL_REGION_END);
     }
@@ -470,7 +518,9 @@ mod tests {
     #[test]
     fn unmap_range_trims_what_it_only_partly_covers() {
         let mut vmm = AddressSpace::new();
-        let va = vmm.map(0x2000_0000, 0x4000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+        let va = vmm
+            .map(0x2000_0000, 0x4000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
         vmm.unmap_range(va + 0x1000, 0x1000);
         // The hole is gone and both sides keep resolving to their own bytes.
         assert_eq!(vmm.translate(va), Some((0x2000_0000, 0x1000)));
@@ -481,9 +531,37 @@ mod tests {
     #[test]
     fn unmap_range_spans_several_mappings() {
         let mut vmm = AddressSpace::new();
-        let a = vmm.map(0x2000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, FLAG_FIXED_OFFSET, 0x10_0000).unwrap();
-        vmm.map(0x2100_0000, 0x1000, 2, 0, SMALL_PAGE_SIZE, FLAG_FIXED_OFFSET, 0x10_1000).unwrap();
-        vmm.map(0x2200_0000, 0x1000, 3, 0, SMALL_PAGE_SIZE, FLAG_FIXED_OFFSET, 0x10_2000).unwrap();
+        let a = vmm
+            .map(
+                0x2000_0000,
+                0x1000,
+                1,
+                0,
+                SMALL_PAGE_SIZE,
+                FLAG_FIXED_OFFSET,
+                0x10_0000,
+            )
+            .unwrap();
+        vmm.map(
+            0x2100_0000,
+            0x1000,
+            2,
+            0,
+            SMALL_PAGE_SIZE,
+            FLAG_FIXED_OFFSET,
+            0x10_1000,
+        )
+        .unwrap();
+        vmm.map(
+            0x2200_0000,
+            0x1000,
+            3,
+            0,
+            SMALL_PAGE_SIZE,
+            FLAG_FIXED_OFFSET,
+            0x10_2000,
+        )
+        .unwrap();
         vmm.unmap_range(a, 0x2000);
         assert_eq!(vmm.translate(a), None);
         assert_eq!(vmm.translate(a + 0x1000), None);
@@ -494,8 +572,16 @@ mod tests {
     fn free_space_drops_mappings_inside_it() {
         let mut vmm = AddressSpace::new();
         let base = vmm.alloc_space(4, 0x1_0000, 0, 0).unwrap();
-        vmm.map(0x2000_0000, 0x1_0000, 1, 0, BIG_PAGE_SIZE, FLAG_FIXED_OFFSET, base)
-            .unwrap();
+        vmm.map(
+            0x2000_0000,
+            0x1_0000,
+            1,
+            0,
+            BIG_PAGE_SIZE,
+            FLAG_FIXED_OFFSET,
+            base,
+        )
+        .unwrap();
         vmm.free_space(base, 4, 0x1_0000).unwrap();
         assert!(vmm.translate(base).is_none());
     }

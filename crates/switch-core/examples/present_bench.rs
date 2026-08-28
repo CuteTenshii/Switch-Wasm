@@ -42,20 +42,25 @@ fn main() {
     // A block-linear surface the size the display gets. `Layout::offset` is
     // what decides where a texel lives, so filling through it puts every byte
     // exactly where `present` will look for it.
-    let layout = Layout::BlockLinear { block_height_gobs: 1 << BLOCK_HEIGHT_LOG2 };
+    let layout = Layout::BlockLinear {
+        block_height_gobs: 1 << BLOCK_HEIGHT_LOG2,
+    };
     let width_bytes = width * 4;
     let size = layout.layer_stride(width_bytes, height);
     mem.map_zero(BASE, size as usize).expect("map the surface");
     for y in 0..height {
         for x in 0..width {
-            let texel = (x * 4 & 0xFF) | ((y * 4 & 0xFF) << 8) | (((x ^ y) & 0xFF) << 16) | 0xFF00_0000;
+            let texel =
+                (x * 4 & 0xFF) | ((y * 4 & 0xFF) << 8) | (((x ^ y) & 0xFF) << 16) | 0xFF00_0000;
             let at = BASE.wrapping_add(layout.offset(x * 4, y, width_bytes));
             mem.write_u32(at, texel).expect("fill the surface");
         }
     }
 
     let handle = gpu.nvmap.create(size);
-    gpu.nvmap.alloc(handle, 0, 0, 0x1000, 0, BASE).expect("alloc the surface");
+    gpu.nvmap
+        .alloc(handle, 0, 0, 0x1000, 0, BASE)
+        .expect("alloc the surface");
     let id = gpu.nvmap.get(handle).expect("the handle we just made").id;
     let buffer = DisplayBuffer {
         nvmap_id: id,

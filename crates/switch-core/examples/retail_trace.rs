@@ -8,7 +8,6 @@
 //!   MARK_DUMP=<reg>,<byte offset>,<words>  also dump memory at each mark.
 mod common;
 
-
 use std::env;
 use switch_core::cpu::Cpu;
 
@@ -47,7 +46,9 @@ fn main() {
 
     // Stop this many steps after recording starts, so the ring holds the
     // *beginning* of a function rather than the last N steps before the halt.
-    let stop_after = env::var("RING_STOP_AFTER").ok().and_then(|s| s.parse::<u64>().ok());
+    let stop_after = env::var("RING_STOP_AFTER")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok());
     let mut recorded = 0u64;
     // Print a line every time one of these addresses is executed. Pass a
     // comma-separated list of hex pcs (a function's entry, say) to watch a
@@ -81,7 +82,11 @@ fn main() {
         if let Some(name) = marks.get(&pc) {
             println!(
                 "[mark] {done} {name} x0={:#x} x1={:#x} x2={:#x} x3={:#x} lr={:#x}",
-                cpu.read_x(0), cpu.read_x(1), cpu.read_x(2), cpu.read_x(3), cpu.read_x(30)
+                cpu.read_x(0),
+                cpu.read_x(1),
+                cpu.read_x(2),
+                cpu.read_x(3),
+                cpu.read_x(30)
             );
             if let Some((reg, off, len)) = mark_dump {
                 let at = (cpu.read_x(reg) as i64 + off) as u32;
@@ -132,7 +137,16 @@ fn main() {
             ring.push_back((
                 done,
                 pc,
-                [cpu.read_x(0), cpu.read_x(1), cpu.read_x(2), cpu.read_x(3), cpu.read_x(8), cpu.read_x(19), cpu.read_x(30), cpu.sp()],
+                [
+                    cpu.read_x(0),
+                    cpu.read_x(1),
+                    cpu.read_x(2),
+                    cpu.read_x(3),
+                    cpu.read_x(8),
+                    cpu.read_x(19),
+                    cpu.read_x(30),
+                    cpu.sp(),
+                ],
             ));
         }
         if let Err(e) = cpu.step() {

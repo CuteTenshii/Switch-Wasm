@@ -1,10 +1,10 @@
 //! The Horizon supervisor calls (`SVC`) libnx homebrew issues at runtime.
 
+use super::power::CLOCK_RATES_HZ;
 use super::{
     ArbiterWait, Cpu, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE,
     HID_SHMEM_SIZE, PL_SHMEM_SIZE,
 };
-use super::power::CLOCK_RATES_HZ;
 use crate::{Error, Result};
 use std::fmt::Write;
 
@@ -140,7 +140,9 @@ impl Cpu {
                 // it could not run on this host either way.
                 let addr = self.read_zr(0);
                 let size = self.read_zr(1);
-                let fits = addr.checked_add(size).is_some_and(|end| end <= u64::from(u32::MAX) + 1);
+                let fits = addr
+                    .checked_add(size)
+                    .is_some_and(|end| end <= u64::from(u32::MAX) + 1);
                 if size == 0 || (addr & 0xFFF) != 0 || (size & 0xFFF) != 0 || !fits {
                     self.write_zr(0, RESULT_INVALID_MEMORY_RANGE);
                     return Ok(());
@@ -213,67 +215,73 @@ impl Cpu {
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
-             0x06 => {
-                 // QueryMemory(info, pageInfo, addr): report the contiguous
-                 // run of pages in the same state (allocated vs untouched) as
-                 // the queried page. Real pages (image, stack, heap, anything
-                 // the app has written to) come back readable and writable;
-                 // untouched soft-mapped pages come back as unmapped so libnx
-                 // virtmem address-space walks and reservations see free
-                 // space. The old stub reported the whole low 2 GiB as one
-                 // RWX region, which made deko3d's AS reservation fail.
-                 //
-                 // Only a module's `.text` carries the execute bit. Retail
-                 // `rtld` discovers the other loaded modules
-                 // (`main`/`subsdk*`/`sdk`) by walking `QueryMemory` across
-                 // the address space and keeping every region with
-                 // `type == CodeStatic (3)` that is executable, then reading
-                 // the candidate's first words as a module header: word 1 is
-                 // the offset to its `MOD0` signature. Reporting a blanket
-                 // RWX made every writable page look executable, and the
-                 // first such region — `rtld`'s own `.rodata`, whose leading
-                 // note happens to hold 0x1c where a module header keeps that
-                 // offset, and which really does have `MOD0` 0x1c bytes in —
-                 // passed the check. `rtld` then relocated itself a second
-                 // time against a base 0x3000 past its real one and walked
-                 // off the end of the address space.
-                 //
-                 // The type is the loader's, not a guess from the page table:
-                 // a module's static and mutable halves are two states, and
-                 // `nn::ro` reads the boundary between them as the module's
-                 // shape (`Memory::mark_module`). Mapped memory that belongs
-                 // to no module — heap, stacks, TLS — still answers
-                 // `CodeStatic`, which is a lie Horizon would spell `Normal`,
-                 // `Stack` or `ThreadLocal`; nothing has been seen to read it
-                 // yet, and every walk that does read a type filters on the
-                 // execute bit first.
-                 let out = self.read_zr(0) as u32;
-                 let addr = self.read_zr(2) as u32;
-                 // `Memory` finds the run, because it is the only thing that
-                 // can do it without walking every page — see
-                 // [`crate::mem::Memory::state_run`].
-                 let run = self.mem.state_run(addr, GUEST_SPACE_END);
-                 let (base, end, mapped, text) = (run.start, run.end, run.mapped, run.readonly);
-                 let mut info = Vec::with_capacity(40);
-                 info.extend_from_slice(&(base as u64).to_le_bytes());
-                 info.extend_from_slice(&((end - base) as u64).to_le_bytes());
-                 for v in [
-                     run.state as u32, // type
-                     0,
-                     if text { 0b101 } else if mapped { 0b011 } else { 0 }, // perm (R-X / RW- / none)
-                     0,
-                     0,
-                     0,
-                 ] {
-                     info.extend_from_slice(&v.to_le_bytes());
-                 }
-                 for (i, &b) in info.iter().enumerate() {
-                     self.mem.write_u8(out.wrapping_add(i as u32), b)?;
-                 }
-                 self.write_zr(0, RESULT_OK);
-                 self.write_zr(1, if mapped { 0x1000 } else { 0 }); // page info
-                 Ok(())
-             }
+            0x06 => {
+                // QueryMemory(info, pageInfo, addr): report the contiguous
+                // run of pages in the same state (allocated vs untouched) as
+                // the queried page. Real pages (image, stack, heap, anything
+                // the app has written to) come back readable and writable;
+                // untouched soft-mapped pages come back as unmapped so libnx
+                // virtmem address-space walks and reservations see free
+                // space. The old stub reported the whole low 2 GiB as one
+                // RWX region, which made deko3d's AS reservation fail.
+                //
+                // Only a module's `.text` carries the execute bit. Retail
+                // `rtld` discovers the other loaded modules
+                // (`main`/`subsdk*`/`sdk`) by walking `QueryMemory` across
+                // the address space and keeping every region with
+                // `type == CodeStatic (3)` that is executable, then reading
+                // the candidate's first words as a module header: word 1 is
+                // the offset to its `MOD0` signature. Reporting a blanket
+                // RWX made every writable page look executable, and the
+                // first such region — `rtld`'s own `.rodata`, whose leading
+                // note happens to hold 0x1c where a module header keeps that
+                // offset, and which really does have `MOD0` 0x1c bytes in —
+                // passed the check. `rtld` then relocated itself a second
+                // time against a base 0x3000 past its real one and walked
+                // off the end of the address space.
+                //
+                // The type is the loader's, not a guess from the page table:
+                // a module's static and mutable halves are two states, and
+                // `nn::ro` reads the boundary between them as the module's
+                // shape (`Memory::mark_module`). Mapped memory that belongs
+                // to no module — heap, stacks, TLS — still answers
+                // `CodeStatic`, which is a lie Horizon would spell `Normal`,
+                // `Stack` or `ThreadLocal`; nothing has been seen to read it
+                // yet, and every walk that does read a type filters on the
+                // execute bit first.
+                let out = self.read_zr(0) as u32;
+                let addr = self.read_zr(2) as u32;
+                // `Memory` finds the run, because it is the only thing that
+                // can do it without walking every page — see
+                // [`crate::mem::Memory::state_run`].
+                let run = self.mem.state_run(addr, GUEST_SPACE_END);
+                let (base, end, mapped, text) = (run.start, run.end, run.mapped, run.readonly);
+                let mut info = Vec::with_capacity(40);
+                info.extend_from_slice(&(base as u64).to_le_bytes());
+                info.extend_from_slice(&((end - base) as u64).to_le_bytes());
+                for v in [
+                    run.state as u32, // type
+                    0,
+                    if text {
+                        0b101
+                    } else if mapped {
+                        0b011
+                    } else {
+                        0
+                    }, // perm (R-X / RW- / none)
+                    0,
+                    0,
+                    0,
+                ] {
+                    info.extend_from_slice(&v.to_le_bytes());
+                }
+                for (i, &b) in info.iter().enumerate() {
+                    self.mem.write_u8(out.wrapping_add(i as u32), b)?;
+                }
+                self.write_zr(0, RESULT_OK);
+                self.write_zr(1, if mapped { 0x1000 } else { 0 }); // page info
+                Ok(())
+            }
             0x07 => {
                 // ExitProcess
                 self.halted = true;
@@ -452,11 +460,14 @@ impl Cpu {
                 // its predicate — the same bargain the condition variables
                 // above make.
                 let outcome = self.arbitrate_address(addr, arb_type, value, timeout);
-                self.write_zr(0, match outcome {
-                    ArbiterWait::Blocked => RESULT_OK,
-                    ArbiterWait::Mismatch => RESULT_INVALID_STATE,
-                    ArbiterWait::TimedOut => RESULT_TIMED_OUT,
-                });
+                self.write_zr(
+                    0,
+                    match outcome {
+                        ArbiterWait::Blocked => RESULT_OK,
+                        ArbiterWait::Mismatch => RESULT_INVALID_STATE,
+                        ArbiterWait::TimedOut => RESULT_TIMED_OUT,
+                    },
+                );
                 if outcome == ArbiterWait::Blocked {
                     self.block_on_address(addr, timeout);
                 }
@@ -522,7 +533,14 @@ impl Cpu {
                         self.event_name(handle)
                     );
                 }
-                self.write_zr(0, if was_signalled { RESULT_OK } else { RESULT_INVALID_STATE });
+                self.write_zr(
+                    0,
+                    if was_signalled {
+                        RESULT_OK
+                    } else {
+                        RESULT_INVALID_STATE
+                    },
+                );
                 Ok(())
             }
             0x10 => {
@@ -560,7 +578,11 @@ impl Cpu {
                 let timeout = self.read_zr(3) as i64;
                 let handles: Vec<u64> = (0..count)
                     .map(|i| {
-                        u64::from(self.mem.read_u32(handles_ptr.wrapping_add(i * 4)).unwrap_or(0))
+                        u64::from(
+                            self.mem
+                                .read_u32(handles_ptr.wrapping_add(i * 4))
+                                .unwrap_or(0),
+                        )
                     })
                     .collect();
                 if crate::env_flag!("TRACE_WAIT") {
@@ -578,8 +600,8 @@ impl Cpu {
                 // has, so it is what drives vsync: the guest's own present is
                 // what advances the display, and a render loop waiting on
                 // vsync is woken by it rather than by a clock.
-                let refreshed = self.cycles.wrapping_sub(self.last_vsync_cycles)
-                    >= super::VSYNC_PERIOD_CYCLES;
+                let refreshed =
+                    self.cycles.wrapping_sub(self.last_vsync_cycles) >= super::VSYNC_PERIOD_CYCLES;
                 if self.nv.gpu.frames != self.last_vsync_frame || refreshed {
                     self.last_vsync_frame = self.nv.gpu.frames;
                     self.last_vsync_cycles = self.cycles;
@@ -800,9 +822,7 @@ impl Cpu {
                     // The raw message, for when the fields above do not add
                     // up — the bytes are the only ground truth left.
                     let words: Vec<String> = (0..8)
-                        .map(|i| {
-                            format!("{:08x}", self.mem.read_u32(tls + i * 4).unwrap_or(0))
-                        })
+                        .map(|i| format!("{:08x}", self.mem.read_u32(tls + i * 4).unwrap_or(0)))
                         .collect();
                     eprintln!("[ipc]   svc={:#x} tls={:#x} {}", imm, tls, words.join(" "));
                 }
@@ -878,12 +898,16 @@ impl Cpu {
                             let object_id = self.ipc_domain_object_id(tls);
                             match self.domain_interface(handle, object_id) {
                                 Some("fsp-srv-fs") => self.fs_request(tls, cmd_id, handle)?,
-                                Some("fsp-srv-fs-dir") => {
-                                    self.fs_dir_request(tls, cmd_id, Self::object_key(handle, object_id))?
-                                }
-                                Some("fsp-srv-fs-file") => {
-                                    self.fs_file_request(tls, cmd_id, Self::object_key(handle, object_id))?
-                                }
+                                Some("fsp-srv-fs-dir") => self.fs_dir_request(
+                                    tls,
+                                    cmd_id,
+                                    Self::object_key(handle, object_id),
+                                )?,
+                                Some("fsp-srv-fs-file") => self.fs_file_request(
+                                    tls,
+                                    cmd_id,
+                                    Self::object_key(handle, object_id),
+                                )?,
                                 Some("fsp-srv-storage") => {
                                     self.fs_storage_request(tls, handle, cmd_id)?
                                 }
@@ -977,7 +1001,8 @@ impl Cpu {
                         // converts the root session to a domain (`nnSdk`) uses
                         // them — the fsp-srv-fs / time:system-clock split
                         // above, again.
-                        "appletOE" | "appletAE"
+                        "appletOE"
+                        | "appletAE"
                         | "am:proxy-service"
                         | "am:application-proxy"
                         | "am:common-state-getter"
@@ -1040,10 +1065,12 @@ impl Cpu {
                         // the fabricated-object fallback, which answers a void
                         // command with an object id and a handle it never
                         // asked for.
-                        "hid" | "hid:dbg" | "hid:sys" | "hid:server"
-                        | "hid:applet-resource" | "hid:vibration-devices" => {
-                            self.hid_request(tls, handle, cmd_id)?
-                        }
+                        "hid"
+                        | "hid:dbg"
+                        | "hid:sys"
+                        | "hid:server"
+                        | "hid:applet-resource"
+                        | "hid:vibration-devices" => self.hid_request(tls, handle, cmd_id)?,
                         // lm, the log manager: a title's own diagnostic
                         // output, and its ILogger over either route.
                         "lm" | "lm:service" | "lm:logger" => {
@@ -1053,22 +1080,34 @@ impl Cpu {
                         // application, `acc:u1`/`acc:su` for the system side,
                         // plus the profile / manager / async-context objects
                         // they hand out over either route.
-                        "acc:u0" | "acc:u1" | "acc:su" | "acc:profile"
-                        | "acc:profile-editor" | "acc:manager"
-                        | "acc:async-context" | "acc:notifier" => {
+                        "acc:u0" | "acc:u1" | "acc:su" | "acc:profile" | "acc:profile-editor"
+                        | "acc:manager" | "acc:async-context" | "acc:notifier" => {
                             self.acc_request(tls, handle, cmd_id)?
                         }
                         // ns, the record of what is installed: the getter
                         // services either side of 3.0.0, plus the interfaces
                         // they hand out over either route.
-                        "ns:am" | "ns:am2" | "ns:ec" | "ns:rid" | "ns:rt" | "ns:web"
-                        | "ns:ro" | "ns:su" | "ns:vm" | "ns:dev" | "ns:app-manager"
-                        | "ns:read-only-record" | "ns:read-only-control"
-                        | "ns:content-management" | "ns:download-task"
-                        | "ns:account-proxy" | "ns:app-version" | "ns:factory-reset"
-                        | "ns:ecommerce" | "ns:dynamic-rights" | "ns:document" => {
-                            self.ns_request(tls, handle, cmd_id)?
-                        }
+                        "ns:am"
+                        | "ns:am2"
+                        | "ns:ec"
+                        | "ns:rid"
+                        | "ns:rt"
+                        | "ns:web"
+                        | "ns:ro"
+                        | "ns:su"
+                        | "ns:vm"
+                        | "ns:dev"
+                        | "ns:app-manager"
+                        | "ns:read-only-record"
+                        | "ns:read-only-control"
+                        | "ns:content-management"
+                        | "ns:download-task"
+                        | "ns:account-proxy"
+                        | "ns:app-version"
+                        | "ns:factory-reset"
+                        | "ns:ecommerce"
+                        | "ns:dynamic-rights"
+                        | "ns:document" => self.ns_request(tls, handle, cmd_id)?,
                         // aoc, the add-on content a title was sold. It is
                         // its own sysmodule interface rather than one of ns's,
                         // and having no dedicated stub meant `CountAddOnContent`
@@ -1084,12 +1123,11 @@ impl Cpu {
                         // csrng, the random number generator, and `spl:`,
                         // the security processor it really lives behind.
                         "csrng" => self.csrng_request(tls, cmd_id)?,
-                        "spl:" | "spl:mig" | "spl:fs" | "spl:ssl" | "spl:es"
-                        | "spl:manu" => self.spl_request(tls, cmd_id)?,
-                        // pdm, the play-history database.
-                        "pdm:qry" | "pdm:ntfy" | "pdm:info" => {
-                            self.pdm_request(tls, cmd_id)?
+                        "spl:" | "spl:mig" | "spl:fs" | "spl:ssl" | "spl:es" | "spl:manu" => {
+                            self.spl_request(tls, cmd_id)?
                         }
+                        // pdm, the play-history database.
+                        "pdm:qry" | "pdm:ntfy" | "pdm:info" => self.pdm_request(tls, cmd_id)?,
                         // pm, the process manager, whose four services are
                         // four different interfaces.
                         "pm:shell" | "pm:dmnt" | "pm:info" | "pm:bm" => {
@@ -1097,15 +1135,13 @@ impl Cpu {
                         }
                         // pcv and clkrst, the clock manager either side of
                         // 8.0.0, plus the per-module sessions clkrst hands out.
-                        "pcv" | "clkrst" | "clkrst:i" | "clkrst:session-0"
-                        | "clkrst:session-1" | "clkrst:session-2"
-                        | "clkrst:session-3" => {
+                        "pcv" | "clkrst" | "clkrst:i" | "clkrst:session-0" | "clkrst:session-1"
+                        | "clkrst:session-2" | "clkrst:session-3" => {
                             self.pcv_request(tls, handle, cmd_id)?
                         }
                         // ts, the temperature sensors, and the ISession
                         // later firmware moved the measurement onto.
-                        "ts" | "ts:u" | "ts:s" | "ts:session-internal"
-                        | "ts:session-external" => {
+                        "ts" | "ts:u" | "ts:s" | "ts:session-internal" | "ts:session-external" => {
                             self.ts_request(tls, handle, cmd_id)?
                         }
                         // sfdnsres, the DNS resolver: the other half of the
@@ -1128,9 +1164,7 @@ impl Cpu {
                         // audout, the plain PCM output device. `audout:a`
                         // and `audout:d` are the same interface at higher
                         // privilege; nothing here distinguishes them.
-                        "audout:u" | "audout:a" | "audout:d" => {
-                            self.audout_request(tls, cmd_id)?
-                        }
+                        "audout:u" | "audout:a" | "audout:d" => self.audout_request(tls, cmd_id)?,
                         "audout:iaudioout" => self.audio_out_request(tls, cmd_id, handle)?,
                         // psc, the power-state manager, and the IPmModule a
                         // module registers with it to be told about a change.
@@ -1150,7 +1184,9 @@ impl Cpu {
                         // it hands out.
                         "hwopus" | "hwopus:decoder" => self.hwopus_request(tls, handle, cmd_id)?,
                         "audren:u" => self.audren_request(tls, handle, cmd_id)?,
-                        "audren:iaudiorenderer" => self.audren_renderer_request(tls, cmd_id, handle)?,
+                        "audren:iaudiorenderer" => {
+                            self.audren_renderer_request(tls, cmd_id, handle)?
+                        }
                         "audren:iaudiodevice" => self.audio_device_request(tls, cmd_id, handle)?,
                         // lbl, the panel backlight. One interface with no
                         // sub-objects, and almost all of it setter/getter
@@ -1185,25 +1221,38 @@ impl Cpu {
                         // Home Menu walks five deep into on its way to a save.
                         // `olsc:u` is the application-facing interface and is
                         // a different one, so it is not listed here.
-                        "olsc:s" | "olsc:system-service" | "olsc:transfer-task-list"
-                        | "olsc:remote-storage" | "olsc:daemon"
-                        | "olsc:transfer-end-holder" | "olsc:transfer-start-holder"
-                        | "olsc:error-holder" | "olsc:stopper" => {
-                            self.olsc_request(tls, handle, cmd_id)?
-                        }
+                        "olsc:s"
+                        | "olsc:system-service"
+                        | "olsc:transfer-task-list"
+                        | "olsc:remote-storage"
+                        | "olsc:daemon"
+                        | "olsc:transfer-end-holder"
+                        | "olsc:transfer-start-holder"
+                        | "olsc:error-holder"
+                        | "olsc:stopper" => self.olsc_request(tls, handle, cmd_id)?,
                         // friend at all five privilege levels, and the three
                         // interfaces its IServiceCreator hands out.
-                        "friend:u" | "friend:v" | "friend:m" | "friend:s" | "friend:a"
-                        | "friend:service" | "friend:notification"
+                        "friend:u"
+                        | "friend:v"
+                        | "friend:m"
+                        | "friend:s"
+                        | "friend:a"
+                        | "friend:service"
+                        | "friend:notification"
                         | "friend:daemon-suspend-session" => {
                             self.friend_request(tls, handle, cmd_id)?
                         }
                         // news at all five, and the article store behind it.
-                        "news:a" | "news:c" | "news:m" | "news:p" | "news:v"
-                        | "news:service" | "news:arrival-event" | "news:overwrite-event"
-                        | "news:data" | "news:database" => {
-                            self.news_request(tls, handle, cmd_id)?
-                        }
+                        "news:a"
+                        | "news:c"
+                        | "news:m"
+                        | "news:p"
+                        | "news:v"
+                        | "news:service"
+                        | "news:arrival-event"
+                        | "news:overwrite-event"
+                        | "news:data"
+                        | "news:database" => self.news_request(tls, handle, cmd_id)?,
                         // bcat, the background download, and the delivery
                         // cache it fills.
                         "bcat:a" | "bcat:m" | "bcat:u" | "bcat:s" | "bcat:service"
@@ -1225,54 +1274,66 @@ impl Cpu {
                         "erpt:r" | "erpt:report" | "erpt:manager" | "erpt:attachment" => {
                             self.erpt_session_request(tls, handle, cmd_id)?
                         }
-                         name => {
-                             // Known service, no dedicated stub: answer with a
-                             // sub-session and an object id, so a caller that
-                             // expects an out-object gets one it can call
-                             // rather than a null it cannot — see
-                             // `reply_with_fabricated_object`.
-                             //
-                             // This used to special-case any service whose name
-                             // starts with "applet", handing back the values
-                             // ICommonStateGetter's pollers expect (command 1 →
-                             // FocusStateChanged, 5 → Handheld, 6 → Normal, 9 →
-                             // InFocus) for *whatever* command carried those
-                             // ids. `appletOE`/`appletAE` have had a real
-                             // dispatch of their own for a while now, so the
-                             // guess only ever applied to some other applet
-                             // service that would have been answered wrong —
-                             // the same way `pl:u`'s GetLoadState once got the
-                             // applet message back and left NX-Shell polling it
-                             // 190k times.
-                             let name = name.to_string();
-                             // The control commands first. They are not this
-                             // service's commands at all -- every session has
-                             // them, whatever is behind it -- and a fabricated
-                             // object id is a specific kind of wrong answer to
-                             // each: as a *pointer buffer size* it is a large
-                             // number, which is how a caller decides to marshal
-                             // its buffers as pointer buffers, the one form
-                             // this IPC layer does not read. Every service
-                             // without a dedicated stub was telling `nifm`,
-                             // `friend`, `olsc`, `prepo`, `btm` and the rest to
-                             // send their data somewhere nothing looks.
-                             if self.ipc_is_control_request(tls) {
-                                 match cmd_id {
-                                     Some(0) => {
-                                         let obj = self.alloc_domain_object();
-                                         self.record_domain_object(handle, obj, &name);
-                                         self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])?;
-                                     }
-                                     _ => {
-                                         self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])?;
-                                     }
-                                 }
-                                 self.write_zr(0, RESULT_OK);
-                                 return Ok(());
-                             }
-                             self.warn_no_implementation(&name, cmd_id);
-                             self.reply_with_fabricated_object(tls, handle, &name, cmd_id)?
-                         }
+                        name => {
+                            // Known service, no dedicated stub: answer with a
+                            // sub-session and an object id, so a caller that
+                            // expects an out-object gets one it can call
+                            // rather than a null it cannot — see
+                            // `reply_with_fabricated_object`.
+                            //
+                            // This used to special-case any service whose name
+                            // starts with "applet", handing back the values
+                            // ICommonStateGetter's pollers expect (command 1 →
+                            // FocusStateChanged, 5 → Handheld, 6 → Normal, 9 →
+                            // InFocus) for *whatever* command carried those
+                            // ids. `appletOE`/`appletAE` have had a real
+                            // dispatch of their own for a while now, so the
+                            // guess only ever applied to some other applet
+                            // service that would have been answered wrong —
+                            // the same way `pl:u`'s GetLoadState once got the
+                            // applet message back and left NX-Shell polling it
+                            // 190k times.
+                            let name = name.to_string();
+                            // The control commands first. They are not this
+                            // service's commands at all -- every session has
+                            // them, whatever is behind it -- and a fabricated
+                            // object id is a specific kind of wrong answer to
+                            // each: as a *pointer buffer size* it is a large
+                            // number, which is how a caller decides to marshal
+                            // its buffers as pointer buffers, the one form
+                            // this IPC layer does not read. Every service
+                            // without a dedicated stub was telling `nifm`,
+                            // `friend`, `olsc`, `prepo`, `btm` and the rest to
+                            // send their data somewhere nothing looks.
+                            if self.ipc_is_control_request(tls) {
+                                match cmd_id {
+                                    Some(0) => {
+                                        let obj = self.alloc_domain_object();
+                                        self.record_domain_object(handle, obj, &name);
+                                        self.write_ipc_response(
+                                            tls,
+                                            0,
+                                            &[],
+                                            &obj.to_le_bytes(),
+                                            &[],
+                                        )?;
+                                    }
+                                    _ => {
+                                        self.write_ipc_response(
+                                            tls,
+                                            0,
+                                            &[],
+                                            &0u16.to_le_bytes(),
+                                            &[],
+                                        )?;
+                                    }
+                                }
+                                self.write_zr(0, RESULT_OK);
+                                return Ok(());
+                            }
+                            self.warn_no_implementation(&name, cmd_id);
+                            self.reply_with_fabricated_object(tls, handle, &name, cmd_id)?
+                        }
                     }
                 } else {
                     // Unrecognized session handle. The display service's session
@@ -1311,7 +1372,9 @@ impl Cpu {
                         for i in 0..4u32 {
                             let _ = self.mem.write_u32(tls.wrapping_add(start + i * 4), 0);
                         }
-                        let _ = self.mem.write_u32(tls.wrapping_add(start + 0x10), 0x4F43_4653);
+                        let _ = self
+                            .mem
+                            .write_u32(tls.wrapping_add(start + 0x10), 0x4F43_4653);
                         let _ = self.mem.write_u32(tls.wrapping_add(start + 0x14), 0);
                         let _ = self.mem.write_u32(tls.wrapping_add(start + 0x18), 0);
                         let _ = self.mem.write_u32(tls.wrapping_add(start + 0x1C), 0);
@@ -1424,121 +1487,121 @@ impl Cpu {
                 }
                 Ok(())
             }
-             0x29 => {
-                 // GetInfo(out, infoType, handle, infoSubValue): report the
-                 // value in X1 (the libnx wrapper stores it to the out
-                 // pointer). The InfoType numbering here matches the libnx
-                 // build hbmenu is compiled against: 0/1 Core/Priority mask,
-                 // 2/3 Alias, 4/5 Heap, 6/7 Total/Used memory,
-                 // 11 RandomEntropy, 12/13 Aslr, 14/15 Stack.
-                 let info_type = self.read_zr(1);
-                 let value = match info_type {
-                     // CoreMask / PriorityMask describe what the process is
-                     // allowed to schedule on, and they come from the NPDM's
-                     // `ThreadInfo` kernel capability. "A Short Hike"'s
-                     // `main.npdm` carries the ordinary application values —
-                     // cores 0..2 and priorities 28..59 — which is what every
-                     // retail application gets. Reporting 0 (the old `_ => 0`
-                     // default) makes `nn::os::GetThreadAvailableCoreMask`
-                     // hand `nn::os::RegisterSystemWorkerHandler` an empty
-                     // mask, whose "highest set bit" scan then asserts.
-                     0 => 0b0000_0111, // CoreMask: cores 0, 1, 2
-                     1 => 0x0FFF_FFFF_F000_0000, // PriorityMask: 28..=59
-                     // Alias/Heap region. Real Horizon puts these far above
-                     // the 32-bit range (alias at 0x10_0000_0000, heap at
-                     // 0x2_0000_0000) and this used to report those figures
-                     // literally — but the emulator addresses guest memory
-                     // with a `u32`, so `nnSdk` took the alias address at its
-                     // word and asked `svcMapPhysicalMemory` to back
-                     // 0x10_0000_0000, which is not a representable address
-                     // here. See the region constants for the layout.
-                     2 => u64::from(layout.alias_addr), // AliasRegionAddress
-                     3 => u64::from(layout.alias_size), // AliasRegionSize
-                     4 => u64::from(layout.heap_addr),  // HeapRegionAddress
-                     5 => u64::from(layout.heap_size),  // HeapRegionSize
-                     6 => total_memory_size, // TotalMemorySize
-                     7 => 0,         // UsedMemorySize
-                     8 => 0,         // DebuggerAttached
-                     9 => 0,         // ResourceLimit
-                     // RandomEntropy: 4 words (infoSubValue 0..3) of kernel-
-                     // supplied randomness, real hardware's seed for stack
-                     // canaries/ASLR cookies. Real `sdk` startup (confirmed by
-                     // tracing "A Short Hike"'s actual `rtld`+`sdk` boot)
-                     // fetches two of these words and aborts
-                     // (`svcBreak`/Panic) if what comes back looks unusable —
-                     // an all-zero entropy pool reads as "broken RNG", not
-                     // "no RNG", to security-conscious SDK init. There's no
-                     // real entropy source to draw on here, so this returns
-                     // *some* non-zero, per-subvalue-varying bits (SplitMix64
-                     // keyed by the subvalue) rather than a cryptographically
-                     // meaningful seed — it only needs to satisfy that "not
-                     // obviously broken" check, not actually secure anything.
-                     11 => {
-                         let sub = self.read_zr(3).wrapping_add(1);
-                         let mut z = sub.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-                         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-                         z ^ (z >> 31)
-                     }
-                     // The system resource is the slice of the process's
-                     // memory the kernel keeps for its own per-process
-                     // bookkeeping (page tables, handle tables), carved out of
-                     // the application pool and declared in the NPDM.
-                     //
-                     // This is the one figure `nnSdk` reads to decide whether
-                     // the process has virtual address memory:
-                     // `VammManager::IsVirtualAddressMemoryEnabled` is this
-                     // query succeeding and returning non-zero, nothing else,
-                     // and `InitializeIfEnabled` skips initialising on zero
-                     // and leaves its impl pointer null.
-                     //
-                     // It read 0 for a long time, which was true of the
-                     // emulator and put every title on the plain heap path.
-                     // What that costs is a title that calls
-                     // `nn::os::AllocateAddressRegion` itself rather than
-                     // through the heap: it reaches that null pointer and
-                     // aborts on the `cursor >= limit` check of the bump
-                     // allocator behind it. Just Dance 2023 does, from its own
-                     // `nninitStartup`.
-                     //
-                     // Reporting the real figure is not free — see
-                     // [`GUEST_ALIAS_REGION_SIZE`] and [`VAMM_ARENA_SIZE`] for
-                     // the address space the manager takes and the reported
-                     // total memory that pays for it.
-                     16 => system_resource_size, // SystemResourceSizeTotal
-                     17 => 0,                    // SystemResourceSizeUsed
-                     // Total/UsedNonSystemMemorySize: the same figures as
-                     // 6/7 with the system resource taken out, and what
-                     // `nnSdk` actually sizes the application heap from —
-                     // `nn::init`'s startup asks for
-                     // `TotalNonSystem - UsedNonSystem` and hands the result
-                     // straight to `nn::mem::StandardAllocator::Initialize`.
-                     // Falling into the `_ => 0` default made that
-                     // subtraction 0, and the allocator asserts on any span
-                     // below its 16 KiB minimum — which is where the retail
-                     // boot stopped once `nn::oe::Initialize` was working.
-                     21 => total_memory_size - system_resource_size,
-                     22 => 0,
-                     12 => 0x0800_0000, // AslrRegionAddress
-                     13 => 0x1F00_0000, // AslrRegionSize
-                     // Where thread stacks get mirrored. It has to be clear of
-                     // the main stack (`STACK_TOP`) and big enough for several
-                     // stacks plus the guard pages libnx leaves around them:
-                     // when a lookup finds no free range it hands back a null
-                     // mirror address, and every thread ends up on one stack.
-                     14 => u64::from(GUEST_STACK_REGION_ADDR),
-                     15 => u64::from(GUEST_STACK_REGION_SIZE),
-                     20 => 0,        // UserExceptionContextAddress
-                     28 => 0,        // AliasRegionExtraSize
-                     _ => 0,
-                 };
-                 if crate::env_flag!("TRACE_SVC") {
-                     eprintln!("[svc]   -> GetInfo({info_type}) = {value:#x}");
-                 }
-                 self.write_zr(1, value);
-                 self.write_zr(0, RESULT_OK);
-                 Ok(())
-             }
+            0x29 => {
+                // GetInfo(out, infoType, handle, infoSubValue): report the
+                // value in X1 (the libnx wrapper stores it to the out
+                // pointer). The InfoType numbering here matches the libnx
+                // build hbmenu is compiled against: 0/1 Core/Priority mask,
+                // 2/3 Alias, 4/5 Heap, 6/7 Total/Used memory,
+                // 11 RandomEntropy, 12/13 Aslr, 14/15 Stack.
+                let info_type = self.read_zr(1);
+                let value = match info_type {
+                    // CoreMask / PriorityMask describe what the process is
+                    // allowed to schedule on, and they come from the NPDM's
+                    // `ThreadInfo` kernel capability. "A Short Hike"'s
+                    // `main.npdm` carries the ordinary application values —
+                    // cores 0..2 and priorities 28..59 — which is what every
+                    // retail application gets. Reporting 0 (the old `_ => 0`
+                    // default) makes `nn::os::GetThreadAvailableCoreMask`
+                    // hand `nn::os::RegisterSystemWorkerHandler` an empty
+                    // mask, whose "highest set bit" scan then asserts.
+                    0 => 0b0000_0111,           // CoreMask: cores 0, 1, 2
+                    1 => 0x0FFF_FFFF_F000_0000, // PriorityMask: 28..=59
+                    // Alias/Heap region. Real Horizon puts these far above
+                    // the 32-bit range (alias at 0x10_0000_0000, heap at
+                    // 0x2_0000_0000) and this used to report those figures
+                    // literally — but the emulator addresses guest memory
+                    // with a `u32`, so `nnSdk` took the alias address at its
+                    // word and asked `svcMapPhysicalMemory` to back
+                    // 0x10_0000_0000, which is not a representable address
+                    // here. See the region constants for the layout.
+                    2 => u64::from(layout.alias_addr), // AliasRegionAddress
+                    3 => u64::from(layout.alias_size), // AliasRegionSize
+                    4 => u64::from(layout.heap_addr),  // HeapRegionAddress
+                    5 => u64::from(layout.heap_size),  // HeapRegionSize
+                    6 => total_memory_size,            // TotalMemorySize
+                    7 => 0,                            // UsedMemorySize
+                    8 => 0,                            // DebuggerAttached
+                    9 => 0,                            // ResourceLimit
+                    // RandomEntropy: 4 words (infoSubValue 0..3) of kernel-
+                    // supplied randomness, real hardware's seed for stack
+                    // canaries/ASLR cookies. Real `sdk` startup (confirmed by
+                    // tracing "A Short Hike"'s actual `rtld`+`sdk` boot)
+                    // fetches two of these words and aborts
+                    // (`svcBreak`/Panic) if what comes back looks unusable —
+                    // an all-zero entropy pool reads as "broken RNG", not
+                    // "no RNG", to security-conscious SDK init. There's no
+                    // real entropy source to draw on here, so this returns
+                    // *some* non-zero, per-subvalue-varying bits (SplitMix64
+                    // keyed by the subvalue) rather than a cryptographically
+                    // meaningful seed — it only needs to satisfy that "not
+                    // obviously broken" check, not actually secure anything.
+                    11 => {
+                        let sub = self.read_zr(3).wrapping_add(1);
+                        let mut z = sub.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                        z ^ (z >> 31)
+                    }
+                    // The system resource is the slice of the process's
+                    // memory the kernel keeps for its own per-process
+                    // bookkeeping (page tables, handle tables), carved out of
+                    // the application pool and declared in the NPDM.
+                    //
+                    // This is the one figure `nnSdk` reads to decide whether
+                    // the process has virtual address memory:
+                    // `VammManager::IsVirtualAddressMemoryEnabled` is this
+                    // query succeeding and returning non-zero, nothing else,
+                    // and `InitializeIfEnabled` skips initialising on zero
+                    // and leaves its impl pointer null.
+                    //
+                    // It read 0 for a long time, which was true of the
+                    // emulator and put every title on the plain heap path.
+                    // What that costs is a title that calls
+                    // `nn::os::AllocateAddressRegion` itself rather than
+                    // through the heap: it reaches that null pointer and
+                    // aborts on the `cursor >= limit` check of the bump
+                    // allocator behind it. Just Dance 2023 does, from its own
+                    // `nninitStartup`.
+                    //
+                    // Reporting the real figure is not free — see
+                    // [`GUEST_ALIAS_REGION_SIZE`] and [`VAMM_ARENA_SIZE`] for
+                    // the address space the manager takes and the reported
+                    // total memory that pays for it.
+                    16 => system_resource_size, // SystemResourceSizeTotal
+                    17 => 0,                    // SystemResourceSizeUsed
+                    // Total/UsedNonSystemMemorySize: the same figures as
+                    // 6/7 with the system resource taken out, and what
+                    // `nnSdk` actually sizes the application heap from —
+                    // `nn::init`'s startup asks for
+                    // `TotalNonSystem - UsedNonSystem` and hands the result
+                    // straight to `nn::mem::StandardAllocator::Initialize`.
+                    // Falling into the `_ => 0` default made that
+                    // subtraction 0, and the allocator asserts on any span
+                    // below its 16 KiB minimum — which is where the retail
+                    // boot stopped once `nn::oe::Initialize` was working.
+                    21 => total_memory_size - system_resource_size,
+                    22 => 0,
+                    12 => 0x0800_0000, // AslrRegionAddress
+                    13 => 0x1F00_0000, // AslrRegionSize
+                    // Where thread stacks get mirrored. It has to be clear of
+                    // the main stack (`STACK_TOP`) and big enough for several
+                    // stacks plus the guard pages libnx leaves around them:
+                    // when a lookup finds no free range it hands back a null
+                    // mirror address, and every thread ends up on one stack.
+                    14 => u64::from(GUEST_STACK_REGION_ADDR),
+                    15 => u64::from(GUEST_STACK_REGION_SIZE),
+                    20 => 0, // UserExceptionContextAddress
+                    28 => 0, // AliasRegionExtraSize
+                    _ => 0,
+                };
+                if crate::env_flag!("TRACE_SVC") {
+                    eprintln!("[svc]   -> GetInfo({info_type}) = {value:#x}");
+                }
+                self.write_zr(1, value);
+                self.write_zr(0, RESULT_OK);
+                Ok(())
+            }
             0x6F => {
                 // GetSystemInfo(out, handle, infoType): value in X1, as above.
                 let info_type = self.read_zr(2);
@@ -1551,7 +1614,10 @@ impl Cpu {
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
-            _ => Err(Error::Cpu(format!("unimplemented Horizon syscall #{:#x}", imm))),
+            _ => Err(Error::Cpu(format!(
+                "unimplemented Horizon syscall #{:#x}",
+                imm
+            ))),
         }
     }
 }

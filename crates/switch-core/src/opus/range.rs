@@ -134,7 +134,11 @@ impl<'a> RangeDecoder<'a> {
     pub(super) fn update(&mut self, fl: u32, fh: u32, ft: u32) {
         let s = self.ext.wrapping_mul(ft - fh);
         self.val = self.val.wrapping_sub(s);
-        self.rng = if fl > 0 { self.ext.wrapping_mul(fh - fl) } else { self.rng - s };
+        self.rng = if fl > 0 {
+            self.ext.wrapping_mul(fh - fl)
+        } else {
+            self.rng - s
+        };
         self.normalize();
     }
 

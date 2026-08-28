@@ -106,8 +106,7 @@ impl std::hash::Hasher for IdHasher {
 
 /// A [`std::collections::HashMap`] keyed by an integer this emulator minted;
 /// see [`IdHasher`] for why it does not need a cryptographic hash.
-pub type IdMap<K, V> =
-    std::collections::HashMap<K, V, std::hash::BuildHasherDefault<IdHasher>>;
+pub type IdMap<K, V> = std::collections::HashMap<K, V, std::hash::BuildHasherDefault<IdHasher>>;
 
 pub mod bktr;
 pub mod control;
@@ -122,11 +121,11 @@ pub mod keys;
 pub mod lz4;
 pub mod mem;
 pub mod nca;
+pub mod npdm;
 pub mod nro;
 pub mod nso;
-pub mod npdm;
-pub mod opus;
 pub mod nsp;
+pub mod opus;
 pub mod romfs;
 pub mod source;
 pub mod ticket;
@@ -164,17 +163,28 @@ mod tests {
         for (name, keys) in [
             ("handles", (0x1000u64..0x1000 + 4096).collect::<Vec<_>>()),
             ("page-aligned", (0..4096u64).map(|i| i * 0x1000).collect()),
-            ("sector-aligned", (0..4096u64).map(|i| 0x8000_0000 + i * 0x200).collect()),
+            (
+                "sector-aligned",
+                (0..4096u64).map(|i| 0x8000_0000 + i * 0x200).collect(),
+            ),
         ] {
             let hashes: std::collections::HashSet<u64> =
                 keys.iter().map(|k| build.hash_one(k)).collect();
-            assert_eq!(hashes.len(), keys.len(), "{name}: every key hashed to its own value");
+            assert_eq!(
+                hashes.len(),
+                keys.len(),
+                "{name}: every key hashed to its own value"
+            );
             // 4096 keys into 4096 buckets is a birthday problem: about
             // 4096 * (1 - 1/e) = 2589 of them end up occupied however good the
             // hash is, so this asks for that and not for perfection.
             let buckets: std::collections::HashSet<u64> =
                 keys.iter().map(|k| build.hash_one(k) & 0xFFF).collect();
-            assert!(buckets.len() > 2400, "{name}: {} buckets of 4096", buckets.len());
+            assert!(
+                buckets.len() > 2400,
+                "{name}: {} buckets of 4096",
+                buckets.len()
+            );
         }
     }
 

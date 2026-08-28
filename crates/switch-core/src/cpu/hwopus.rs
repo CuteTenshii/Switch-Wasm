@@ -85,7 +85,11 @@ impl core::fmt::Debug for HwOpus {
             Decoder::Single(_) => "single",
             Decoder::Multi(_) => "multistream",
         };
-        write!(f, "HwOpus({kind}, {} channels, max {} samples)", self.channels, self.max_frame)
+        write!(
+            f,
+            "HwOpus({kind}, {} channels, max {} samples)",
+            self.channels, self.max_frame
+        )
     }
 }
 
@@ -102,7 +106,11 @@ fn valid_sample_rate(rate: u32) -> bool {
 /// The base is the decoder object itself; on top of it goes one frame of
 /// scratch at the requested rate, and a fixed allowance for the rest of the
 /// object's bookkeeping.
-fn work_buffer_size(sample_rate: u32, channels: u32, large_frame: bool) -> core::result::Result<u32, u32> {
+fn work_buffer_size(
+    sample_rate: u32,
+    channels: u32,
+    large_frame: bool,
+) -> core::result::Result<u32, u32> {
     if !matches!(channels, 1 | 2) {
         return Err(OPUS_INVALID_CHANNEL_COUNT);
     }
@@ -132,20 +140,30 @@ fn work_buffer_size_multistream(
     // The sample-rate error for a bad stream count is the console's own
     // answer, not a slip: the real service checks all three against one
     // result.
-    if total_streams == 0 || stereo_streams > total_streams || total_streams + stereo_streams > channels {
+    if total_streams == 0
+        || stereo_streams > total_streams
+        || total_streams + stereo_streams > channels
+    {
         return Err(OPUS_INVALID_SAMPLE_RATE);
     }
     let mono_streams = total_streams - stereo_streams;
-    let base = 0x100 + stereo_streams * DECODER_STATE_SIZE[1] + mono_streams * DECODER_STATE_SIZE[0];
+    let base =
+        0x100 + stereo_streams * DECODER_STATE_SIZE[1] + mono_streams * DECODER_STATE_SIZE[0];
     let frame = if large_frame { 5760 } else { 1920 };
-    let scratch = align_up(1500 * total_streams, 64) + align_up((frame * channels) / (48000 / sample_rate), 64);
+    let scratch = align_up(1500 * total_streams, 64)
+        + align_up((frame * channels) / (48000 / sample_rate), 64);
     Ok(base + scratch)
 }
 
 impl Cpu {
     /// `hwopus`: the decoder factory, and every `IHardwareOpusDecoder` it
     /// hands out.
-    pub(super) fn hwopus_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn hwopus_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         if self.ipc_answer_control(tls, handle, "hwopus", cmd_id)? {
             return Ok(());
         }
@@ -179,7 +197,12 @@ impl Cpu {
             Some(3) => {
                 let p = self.hwopus_multistream_params(tls, false);
                 let size = work_buffer_size_multistream(
-                    p.sample_rate, p.channels, p.total_streams, p.stereo_streams, p.large_frame);
+                    p.sample_rate,
+                    p.channels,
+                    p.total_streams,
+                    p.stereo_streams,
+                    p.large_frame,
+                );
                 self.hwopus_reply_size(tls, size)
             }
             // OpenHardwareOpusDecoderEx: as command 0, plus the large-frame
@@ -206,7 +229,12 @@ impl Cpu {
             Some(7) | Some(9) => {
                 let p = self.hwopus_multistream_params(tls, true);
                 let size = work_buffer_size_multistream(
-                    p.sample_rate, p.channels, p.total_streams, p.stereo_streams, p.large_frame);
+                    p.sample_rate,
+                    p.channels,
+                    p.total_streams,
+                    p.stereo_streams,
+                    p.large_frame,
+                );
                 self.hwopus_reply_size(tls, size)
             }
             _ => self.unimplemented_command(tls, "hwopus", cmd_id),
@@ -220,7 +248,14 @@ impl Cpu {
         }
     }
 
-    fn hwopus_open(&mut self, tls: u32, handle: u64, sample_rate: u32, channels: u32, large: bool) -> Result<()> {
+    fn hwopus_open(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        sample_rate: u32,
+        channels: u32,
+        large: bool,
+    ) -> Result<()> {
         if let Err(error) = work_buffer_size(sample_rate, channels, large) {
             return self.write_ipc_response(tls, error, &[], &[], &[]);
         }
@@ -256,12 +291,18 @@ impl Cpu {
         let read = |offset: u32| self.mem.read_u32(addr.wrapping_add(offset)).unwrap_or(0);
         let channels = read(4);
         let (large_frame, mapping_at) = if extended {
-            (self.mem.read_u8(addr.wrapping_add(16)).unwrap_or(0) != 0, 0x18)
+            (
+                self.mem.read_u8(addr.wrapping_add(16)).unwrap_or(0) != 0,
+                0x18,
+            )
         } else {
             (false, 0x10)
         };
         let mapping = if mapping_at < size {
-            self.read_bytes(addr.wrapping_add(mapping_at), channels.min(size - mapping_at))
+            self.read_bytes(
+                addr.wrapping_add(mapping_at),
+                channels.min(size - mapping_at),
+            )
         } else {
             Vec::new()
         };
@@ -275,7 +316,12 @@ impl Cpu {
         }
     }
 
-    fn hwopus_open_multistream(&mut self, tls: u32, handle: u64, params: MultiStreamParams) -> Result<()> {
+    fn hwopus_open_multistream(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        params: MultiStreamParams,
+    ) -> Result<()> {
         let sizing = work_buffer_size_multistream(
             params.sample_rate,
             params.channels,
@@ -317,9 +363,13 @@ impl Cpu {
     /// multi-stream.
     fn hwopus_decoder_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         /// Whether the command's reply carries the decode time.
-        const WITH_PERF: [bool; 10] = [false, false, false, false, true, true, true, true, true, true];
+        const WITH_PERF: [bool; 10] = [
+            false, false, false, false, true, true, true, true, true, true,
+        ];
         /// Whether the command's request carries a reset flag.
-        const WITH_RESET: [bool; 10] = [false, false, false, false, false, false, true, true, true, true];
+        const WITH_RESET: [bool; 10] = [
+            false, false, false, false, false, false, true, true, true, true,
+        ];
 
         let key = self.ipc_object_key(tls, handle);
         match cmd_id {
@@ -352,7 +402,9 @@ impl Cpu {
             return self.write_ipc_response(tls, OPUS_BUFFER_TOO_SMALL, &[], &[], &[]);
         }
         let packet = self.read_bytes(input.wrapping_add(PACKET_HEADER_LEN), size);
-        let output_room = self.ipc_output_buffer(tls, 0).map_or(0, |(_, size)| size as usize);
+        let output_room = self
+            .ipc_output_buffer(tls, 0)
+            .map_or(0, |(_, size)| size as usize);
 
         let Some(decoder) = self.opus_decoders.get_mut(&key) else {
             return self.write_ipc_response(tls, OPUS_INVALID_PACKET, &[], &[], &[]);
@@ -382,7 +434,10 @@ impl Cpu {
             Err(_) => return self.write_ipc_response(tls, OPUS_INVALID_PACKET, &[], &[], &[]),
         };
 
-        let bytes: Vec<u8> = pcm[..samples * channels].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let bytes: Vec<u8> = pcm[..samples * channels]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
         self.write_output_buffer(tls, 0, &bytes);
 
         let mut raw = Vec::with_capacity(16);

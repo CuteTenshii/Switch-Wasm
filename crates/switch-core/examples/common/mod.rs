@@ -92,10 +92,14 @@ pub fn keys(prod: impl AsRef<Path>, title: Option<impl AsRef<Path>>) -> KeySet {
         let title = title.as_ref();
         match fs::read_to_string(title) {
             Ok(text) => {
-                set.title_keys =
-                    switch_core::keys::keyset_from_title(&switch_core::keys::parse_keys_file(&text));
+                set.title_keys = switch_core::keys::keyset_from_title(
+                    &switch_core::keys::parse_keys_file(&text),
+                );
             }
-            Err(e) => eprintln!("cannot read {}: {e} (continuing without title keys)", title.display()),
+            Err(e) => eprintln!(
+                "cannot read {}: {e} (continuing without title keys)",
+                title.display()
+            ),
         }
     }
     set
@@ -103,7 +107,10 @@ pub fn keys(prod: impl AsRef<Path>, title: Option<impl AsRef<Path>>) -> KeySet {
 
 /// A `u64` from the environment, or `default`.
 pub fn env_u64(name: &str, default: u64) -> u64 {
-    env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// A hexadecimal `u32` from the environment (`0x` optional).
@@ -151,7 +158,9 @@ pub fn load_fallback_font(cpu: &mut Cpu) {
 /// Does nothing when the variable is unset, so an example that calls this
 /// still works without a firmware dump.
 pub fn register_firmware(cpu: &mut Cpu, keys: &KeySet) -> usize {
-    let Ok(dir) = env::var("SWITCH_FIRMWARE") else { return 0 };
+    let Ok(dir) = env::var("SWITCH_FIRMWARE") else {
+        return 0;
+    };
     let Ok(entries) = fs::read_dir(&dir) else {
         eprintln!("SWITCH_FIRMWARE={dir} cannot be read");
         return 0;
@@ -162,13 +171,22 @@ pub fn register_firmware(cpu: &mut Cpu, keys: &KeySet) -> usize {
         if path.extension().and_then(|e| e.to_str()) != Some("nca") {
             continue;
         }
-        let Ok(src) = switch_core::source::FileSource::open(&path) else { continue };
-        let Ok(archive) = switch_core::nca::Nca::parse_source(&src, Some(keys)) else { continue };
+        let Ok(src) = switch_core::source::FileSource::open(&path) else {
+            continue;
+        };
+        let Ok(archive) = switch_core::nca::Nca::parse_source(&src, Some(keys)) else {
+            continue;
+        };
         use switch_core::nca::ContentType;
-        if !matches!(archive.content_type, ContentType::Data | ContentType::PublicData) {
+        if !matches!(
+            archive.content_type,
+            ContentType::Data | ContentType::PublicData
+        ) {
             continue;
         }
-        let Some(section) = archive.romfs_section_index() else { continue };
+        let Some(section) = archive.romfs_section_index() else {
+            continue;
+        };
         if let Ok(romfs) = archive.romfs_source(src, keys, section) {
             cpu.add_data_archive(archive.title_id, Box::new(romfs));
             registered += 1;
@@ -250,7 +268,8 @@ impl FrameTimes {
         // rather than charge the whole slice to the last of them.
         let presented = cpu.nv.gpu.frames - self.last_count;
         let each = now.duration_since(self.last_at).as_secs_f64() / presented as f64;
-        self.deltas.extend(std::iter::repeat_n(each, presented as usize));
+        self.deltas
+            .extend(std::iter::repeat_n(each, presented as usize));
         self.last_count = cpu.nv.gpu.frames;
         self.last_at = now;
     }
@@ -367,7 +386,11 @@ pub fn write_ppm(path: impl AsRef<Path>, fb: &Framebuffer) -> usize {
 /// Report a finished run the way every example that boots one does.
 pub fn report(cpu: &Cpu, run: &Run) {
     if let Some(fault) = &run.fault {
-        println!("[fault] at step {} pc={:#x}: {fault}", run.steps, cpu.get_pc());
+        println!(
+            "[fault] at step {} pc={:#x}: {fault}",
+            run.steps,
+            cpu.get_pc()
+        );
     }
     println!(
         "steps={} frames={} stats={:?}",
@@ -456,8 +479,7 @@ impl Title {
             switch_core::source::ByteSource::read_exact_at(&src, 0, &mut head).is_ok()
         };
         let is_pfs0 = read && &head[..4] == b"PFS0";
-        let is_nca = read
-            && matches!(&head[0x200..0x204], b"NCA3" | b"NCA2" | b"NCA0");
+        let is_nca = read && matches!(&head[0x200..0x204], b"NCA3" | b"NCA2" | b"NCA0");
         let by_name = path
             .extension()
             .and_then(|e| e.to_str())
@@ -523,7 +545,15 @@ impl Title {
             .unwrap_or_else(|e| die(&format!("reading the ExeFS: {e}")));
         let exefs_pfs0 = switch_core::nsp::Pfs0::parse(&exefs)
             .unwrap_or_else(|e| die(&format!("the ExeFS is not a PFS0: {e}")));
-        Title { nca, keys, exefs, exefs_pfs0, path, program, base }
+        Title {
+            nca,
+            keys,
+            exefs,
+            exefs_pfs0,
+            path,
+            program,
+            base,
+        }
     }
 
     /// The modules to boot, in [`MODULE_ORDER`].
@@ -679,12 +709,17 @@ pub fn mount_add_on_content(cpu: &mut Cpu, keys: &KeySet) {
             if !file.name.to_ascii_lowercase().ends_with(".nca") {
                 continue;
             }
-            let Ok(window) = pfs0.file_source(&src, index) else { continue };
+            let Ok(window) = pfs0.file_source(&src, index) else {
+                continue;
+            };
             let Ok(nca) = switch_core::nca::Nca::parse_source(&window, Some(&keys)) else {
                 continue;
             };
             use switch_core::nca::ContentType;
-            if !matches!(nca.content_type, ContentType::Data | ContentType::PublicData) {
+            if !matches!(
+                nca.content_type,
+                ContentType::Data | ContentType::PublicData
+            ) {
                 continue;
             }
             if let Err(e) =
@@ -692,7 +727,9 @@ pub fn mount_add_on_content(cpu: &mut Cpu, keys: &KeySet) {
             {
                 eprintln!("no title key for {}: {e}", file.name);
             }
-            let Some(section) = nca.romfs_section_index() else { continue };
+            let Some(section) = nca.romfs_section_index() else {
+                continue;
+            };
             // Its own handle on the file: the CPU keeps every archive for the
             // whole run and cannot borrow the one this scan is using.
             let owned = match switch_core::source::Window::new(
@@ -711,14 +748,14 @@ pub fn mount_add_on_content(cpu: &mut Cpu, keys: &KeySet) {
                 Ok(romfs) => {
                     let size = romfs.len();
                     match cpu.add_add_on_content(nca.title_id, Box::new(romfs)) {
-                    Some(index) => println!(
-                        "add-on content {:016x} mounted as index {index}, {size:#x} bytes",
-                        nca.title_id
-                    ),
-                    None => println!(
-                        "add-on content {:016x} is not this title's — not mounted",
-                        nca.title_id
-                    ),
+                        Some(index) => println!(
+                            "add-on content {:016x} mounted as index {index}, {size:#x} bytes",
+                            nca.title_id
+                        ),
+                        None => println!(
+                            "add-on content {:016x} is not this title's — not mounted",
+                            nca.title_id
+                        ),
                     }
                 }
                 Err(e) => println!("add-on content {:016x} unreadable: {e}", nca.title_id),
@@ -741,7 +778,9 @@ fn open_program(path: &Path, keys: &mut KeySet) -> ((u64, u64), switch_core::nca
         if !file.name.to_ascii_lowercase().ends_with(".nca") {
             continue;
         }
-        let Ok(window) = pfs0.file_source(&src, index) else { continue };
+        let Ok(window) = pfs0.file_source(&src, index) else {
+            continue;
+        };
         match switch_core::nca::Nca::parse_source(&window, Some(&*keys)) {
             Ok(nca) if nca.content_type == switch_core::nca::ContentType::Program => {
                 found = Some((index, file.offset, file.size));

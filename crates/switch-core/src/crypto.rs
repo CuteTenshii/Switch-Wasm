@@ -44,7 +44,9 @@ const INV_SBOX: [u8; 256] = [
     0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26, 0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d,
 ];
 
-const RCON: [u8; 11] = [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
+const RCON: [u8; 11] = [
+    0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36,
+];
 
 /// Expand a 128-bit key into the 11 round keys (176 bytes).
 fn expand_key(key: &[u8; 16]) -> [u8; 176] {
@@ -374,7 +376,12 @@ pub fn aes128_xts_decrypt(key: &[u8; 32], data: &[u8], sector: u64, sector_size:
     out
 }
 
-pub fn aes128_xts_decrypt_sector(key: &[u8; 32], chunk: &[u8], tweak: &[u8; 16], out: &mut Vec<u8>) {
+pub fn aes128_xts_decrypt_sector(
+    key: &[u8; 32],
+    chunk: &[u8],
+    tweak: &[u8; 16],
+    out: &mut Vec<u8>,
+) {
     let mut key1 = [0u8; 16];
     let mut key2 = [0u8; 16];
     key1.copy_from_slice(&key[..16]);

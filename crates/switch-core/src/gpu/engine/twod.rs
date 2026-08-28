@@ -51,7 +51,9 @@ pub struct Engine2D {
 
 impl Engine2D {
     pub fn new() -> Engine2D {
-        Engine2D { regs: Registers::new() }
+        Engine2D {
+            regs: Registers::new(),
+        }
     }
 
     /// Which method write launches a blit, so a caller can hand a GPU
@@ -91,7 +93,9 @@ impl Engine2D {
         let format = ColorFormat::from_raw(self.regs.get(format))?;
         let pitch_linear = self.regs.get(layout_reg) == MEMORY_LAYOUT_PITCH;
         let layout = if pitch_linear {
-            Layout::Pitch { pitch: self.regs.get(pitch_reg) }
+            Layout::Pitch {
+                pitch: self.regs.get(pitch_reg),
+            }
         } else {
             Layout::BlockLinear {
                 block_height_gobs: 1 << self.regs.field(block_reg, 4, 6),
@@ -141,9 +145,18 @@ impl Engine2D {
                 "[gpu] 2d blit src {:#x} {}x{} fmt={:#x} -> dst {:#x} ({},{}) {}x{} fmt={:#x} \
                  du_dx={du_dx} dv_dy={dv_dy} src0=({src_x0},{src_y0}) bilinear={bilinear} \
                  filtered={filtered} layout={:?}/{:?} cpu src {:x?} dst {:x?}",
-                src.addr, src.width, src.height, src.format.raw,
-                dst.addr, dst_x0, dst_y0, dst_w, dst_h, dst.format.raw,
-                src.layout, dst.layout,
+                src.addr,
+                src.width,
+                src.height,
+                src.format.raw,
+                dst.addr,
+                dst_x0,
+                dst_y0,
+                dst_w,
+                dst_h,
+                dst.format.raw,
+                src.layout,
+                dst.layout,
                 ctx.vmm.translate(src.addr).map(|(c, _)| c),
                 ctx.vmm.translate(dst.addr).map(|(c, _)| c),
             );
@@ -265,7 +278,9 @@ mod tests {
             mem.write_u32(0x3000_0000 + i * 4, 0xFF00_0000 | i).unwrap();
         }
         let mut vmm = AddressSpace::new();
-        let base = vmm.map(0x3000_0000, 0x2000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+        let base = vmm
+            .map(0x3000_0000, 0x2000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
         let mut host1x = Host1x::new();
         let mut stats = GpuStats::default();
 

@@ -7,7 +7,6 @@
 //! Usage: cargo run -p switch-core --example diag_nca -- <path.nca> <prod.keys> [title.keys]
 mod common;
 
-
 use std::env;
 use std::fs;
 
@@ -22,10 +21,17 @@ fn main() {
     let title_path = args.get(3);
 
     let raw = fs::read(nca_path).expect("read nca");
-    println!("file size: {} bytes ({:.1} KiB)", raw.len(), raw.len() as f64 / 1024.0);
+    println!(
+        "file size: {} bytes ({:.1} KiB)",
+        raw.len(),
+        raw.len() as f64 / 1024.0
+    );
 
     let keys = common::keys(prod_path, title_path);
-    println!("header_key loaded: {}", keys.effective_header_key().is_some());
+    println!(
+        "header_key loaded: {}",
+        keys.effective_header_key().is_some()
+    );
 
     let nca = match switch_core::nca::Nca::parse_with_keys(&raw, Some(&keys)) {
         Ok(n) => n,
@@ -35,11 +41,17 @@ fn main() {
         }
     };
 
-    println!("content_type: {:?} (raw {})", nca.content_type, nca.content_type_raw);
+    println!(
+        "content_type: {:?} (raw {})",
+        nca.content_type, nca.content_type_raw
+    );
     println!("title_id: {:016x}", nca.title_id);
     println!("program_id: {:016x}", nca.program_id);
     println!("sdk_version: {:08x}", nca.sdk_version);
-    println!("crypto_type (existing field, offset 0x21C): {}", nca.crypto_type);
+    println!(
+        "crypto_type (existing field, offset 0x21C): {}",
+        nca.crypto_type
+    );
     println!("key_index (offset 0x207): {}", nca.key_index);
     println!(
         "key_generation_old/new (0x206/0x220): {} / {}",
@@ -47,7 +59,10 @@ fn main() {
     );
     println!("rights_id: {}", hex(&nca.rights_id));
     println!("has_rights_id: {}", nca.has_rights_id());
-    println!("encrypted_key_area (0x300..0x340): {}", hex(&nca.encrypted_key_area));
+    println!(
+        "encrypted_key_area (0x300..0x340): {}",
+        hex(&nca.encrypted_key_area)
+    );
     println!("exefs_section_index: {:?}", nca.exefs_section_index());
 
     for (i, sec) in nca.sections.iter().enumerate() {

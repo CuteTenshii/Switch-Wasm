@@ -64,7 +64,9 @@ impl Cpu {
         }
         let object_id = self.ipc_domain_object_id(tls);
         let iface = if self.ipc_is_domain_request(tls) {
-            self.domain_interface(handle, object_id).unwrap_or("lm:service").to_string()
+            self.domain_interface(handle, object_id)
+                .unwrap_or("lm:service")
+                .to_string()
         } else {
             match self.service_name(handle) {
                 Some("lm") | None => "lm:service".to_string(),
@@ -126,9 +128,14 @@ impl Cpu {
         let mut text = String::new();
         let mut off = 0u32;
         while off + 2 <= end {
-            let key = self.mem.read_u8(addr.wrapping_add(HEADER_LEN + off)).unwrap_or(0);
+            let key = self
+                .mem
+                .read_u8(addr.wrapping_add(HEADER_LEN + off))
+                .unwrap_or(0);
             let len = u32::from(
-                self.mem.read_u8(addr.wrapping_add(HEADER_LEN + off + 1)).unwrap_or(0),
+                self.mem
+                    .read_u8(addr.wrapping_add(HEADER_LEN + off + 1))
+                    .unwrap_or(0),
             );
             off += 2;
             if off + len > end {

@@ -220,7 +220,9 @@ impl Cpu {
         }
         let object_id = self.ipc_domain_object_id(tls);
         let iface = if self.ipc_is_domain_request(tls) {
-            self.domain_interface(handle, object_id).unwrap_or("ssl:service").to_string()
+            self.domain_interface(handle, object_id)
+                .unwrap_or("ssl:service")
+                .to_string()
         } else {
             match self.service_name(handle) {
                 Some("ssl") | None => "ssl:service".to_string(),
@@ -407,7 +409,8 @@ impl Cpu {
             };
         }
         let data = self.ipc_request_data(tls);
-        let word = |cpu: &Cpu, index: u32| cpu.mem.read_u32(data.wrapping_add(index * 4)).unwrap_or(0);
+        let word =
+            |cpu: &Cpu, index: u32| cpu.mem.read_u32(data.wrapping_add(index * 4)).unwrap_or(0);
         match cmd_id {
             // RegisterClient(BsdInitConfig, pid, tmem_size, tmem) -> u64. The
             // transfer memory is the buffer pool a real bsd server allocates
@@ -468,9 +471,10 @@ impl Cpu {
             Some(6) => {
                 let timeout = word(self, 1) as i32;
                 let mut ready = 0;
-                if let (Some((src, src_size)), Some((dst, dst_size))) =
-                    (self.ipc_input_buffer(tls, 0), self.ipc_output_buffer(tls, 0))
-                {
+                if let (Some((src, src_size)), Some((dst, dst_size))) = (
+                    self.ipc_input_buffer(tls, 0),
+                    self.ipc_output_buffer(tls, 0),
+                ) {
                     // struct pollfd { s32 fd; s16 events; s16 revents; }
                     for offset in (0..src_size.min(dst_size)).step_by(8) {
                         let fd = self.mem.read_u32(src.wrapping_add(offset)).unwrap_or(0);
@@ -605,7 +609,11 @@ impl Cpu {
                 if !self.bsd_sockets.contains_key(&fd) {
                     return self.bsd_reply(tls, -1, BSD_EBADF);
                 }
-                let value = self.bsd_socket_options.get(&(fd, level, option)).copied().unwrap_or(0);
+                let value = self
+                    .bsd_socket_options
+                    .get(&(fd, level, option))
+                    .copied()
+                    .unwrap_or(0);
                 let mut written = 0;
                 if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
                     if size >= 4 {
@@ -841,7 +849,11 @@ impl Cpu {
         let Some((ip, port)) = sockaddr_in(&address) else {
             return address;
         };
-        let port = if port == 0 { self.bsd_assign_port() } else { port };
+        let port = if port == 0 {
+            self.bsd_assign_port()
+        } else {
+            port
+        };
         sockaddr_in_bytes(ip, port)
     }
 
@@ -854,7 +866,11 @@ impl Cpu {
         let mut port = self.next_bsd_port;
         for _ in 0..range {
             let candidate = port;
-            port = if candidate == u16::MAX { BSD_FIRST_EPHEMERAL_PORT } else { candidate + 1 };
+            port = if candidate == u16::MAX {
+                BSD_FIRST_EPHEMERAL_PORT
+            } else {
+                candidate + 1
+            };
             let taken = self
                 .bsd_sockets
                 .values()
@@ -907,16 +923,21 @@ impl Cpu {
         // The accepted end answers on the listener's own address, which is
         // what `GetSockName` on it has to report.
         let mut accepted = BsdSocket::new(domain, kind);
-        accepted.bound =
-            self.bsd_sockets.get(&listener).map(|l| l.bound.clone()).unwrap_or_default();
+        accepted.bound = self
+            .bsd_sockets
+            .get(&listener)
+            .map(|l| l.bound.clone())
+            .unwrap_or_default();
         accepted.peer = Some(fd);
         let accepted_fd = self.alloc_bsd_fd();
         self.bsd_sockets.insert(accepted_fd, accepted);
 
         // A client that never bound gets an address now, so that
         // `GetPeerName` on the accepted end names something.
-        let unbound =
-            self.bsd_sockets.get(&fd).is_some_and(|socket| socket.bound.is_empty());
+        let unbound = self
+            .bsd_sockets
+            .get(&fd)
+            .is_some_and(|socket| socket.bound.is_empty());
         let client_address =
             unbound.then(|| sockaddr_in_bytes(BSD_LOOPBACK_IP, self.bsd_assign_port()));
         if let Some(socket) = self.bsd_sockets.get_mut(&fd) {
@@ -963,7 +984,11 @@ impl Cpu {
         let Some(index) = address_buffer else {
             return self.bsd_reply(tls, ret, errno);
         };
-        let address = if ret >= 0 { self.bsd_peer_address(fd) } else { Vec::new() };
+        let address = if ret >= 0 {
+            self.bsd_peer_address(fd)
+        } else {
+            Vec::new()
+        };
         let written = self.bsd_write_address(tls, index, &address)?;
         self.bsd_reply_len(tls, ret, errno, written)
     }
@@ -981,8 +1006,11 @@ impl Cpu {
         match self.bsd_sockets.get(&fd) {
             None => return Ok((-1, BSD_EBADF)),
             Some(socket) if socket.peer.is_none() && !socket.peer_closed => {
-                let unconnected =
-                    if socket.kind == BSD_SOCK_DGRAM { BSD_ENETUNREACH } else { BSD_ENOTCONN };
+                let unconnected = if socket.kind == BSD_SOCK_DGRAM {
+                    BSD_ENETUNREACH
+                } else {
+                    BSD_ENOTCONN
+                };
                 return Ok((-1, unconnected));
             }
             Some(_) => {}
@@ -1114,7 +1142,8 @@ impl Cpu {
         let Some(socket) = self.bsd_sockets.remove(&fd) else {
             return;
         };
-        self.bsd_socket_options.retain(|&(owner, _, _), _| owner != fd);
+        self.bsd_socket_options
+            .retain(|&(owner, _, _), _| owner != fd);
         if let Some(peer) = socket.peer.and_then(|peer| self.bsd_sockets.get_mut(&peer)) {
             peer.peer_closed = true;
         }
@@ -1131,7 +1160,12 @@ impl Cpu {
     /// only `nifm:u` used to be routed here — so a system title, which opens
     /// `nifm:s`, had every one of its network calls answered by the generic
     /// fallback instead.
-    pub(super) fn nifm_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+    pub(super) fn nifm_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+        handle: u64,
+    ) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
@@ -1386,7 +1420,11 @@ mod tests {
         write_map_buffer_request(cpu, 8, &fd.to_le_bytes(), AT, len, false);
         cpu.bsd_request(TLS, 9, Some(8)).unwrap();
         let result = bsd_result(cpu);
-        let read = if result.0 > 0 { cpu.read_bytes(AT, result.0 as u32) } else { Vec::new() };
+        let read = if result.0 > 0 {
+            cpu.read_bytes(AT, result.0 as u32)
+        } else {
+            Vec::new()
+        };
         (result, read)
     }
 
@@ -1396,7 +1434,10 @@ mod tests {
         // tries again, and there is no other thread here to run while it does.
         let mut cpu = request(false, 6, &[]);
         cpu.sfdnsres_request(TLS, Some(6)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap() as i32, super::SFDNSRES_EAI_NONAME);
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap() as i32,
+            super::SFDNSRES_EAI_NONAME
+        );
         // Nothing was serialized into the caller's buffer, and no errno is
         // claimed behind the failure.
         assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), 0, "errno");
@@ -1405,7 +1446,10 @@ mod tests {
         // gethostbyname reports through h_errno, which has its own numbering.
         let mut cpu = request(false, 2, &[]);
         cpu.sfdnsres_request(TLS, Some(2)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap() as i32, super::SFDNSRES_HOST_NOT_FOUND);
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap() as i32,
+            super::SFDNSRES_HOST_NOT_FOUND
+        );
     }
 
     #[test]
@@ -1422,7 +1466,10 @@ mod tests {
     #[test]
     fn bsd_hands_out_descriptors_and_takes_them_back() {
         let (mut cpu, fd) = bsd_socket(1);
-        assert!(fd >= 3, "past the standard streams a C library already holds");
+        assert!(
+            fd >= 3,
+            "past the standard streams a C library already holds"
+        );
 
         write_request(&mut cpu, 26, &fd.to_le_bytes());
         cpu.bsd_request(TLS, 9, Some(26)).unwrap();
@@ -1556,14 +1603,25 @@ mod tests {
         assert_eq!(bsd_result(&cpu), (0, 0));
         // The third word is the one that was missing, and the one nnSdk hands
         // to whatever the caller does next.
-        assert_eq!(bsd_result_len(&cpu), 16, "the length of the reported address");
+        assert_eq!(
+            bsd_result_len(&cpu),
+            16,
+            "the length of the reported address"
+        );
 
         let reported = cpu.read_bytes(SCRATCH, 16);
         assert_eq!(reported[0], 16, "sin_len");
         assert_eq!(reported[1], 2, "AF_INET");
-        assert_eq!(&reported[4..8], &[127, 0, 0, 1], "the address stays the one bound");
+        assert_eq!(
+            &reported[4..8],
+            &[127, 0, 0, 1],
+            "the address stays the one bound"
+        );
         let port = u16::from_be_bytes([reported[2], reported[3]]);
-        assert!(port >= super::BSD_FIRST_EPHEMERAL_PORT, "an ephemeral port, not 0: {port}");
+        assert!(
+            port >= super::BSD_FIRST_EPHEMERAL_PORT,
+            "an ephemeral port, not 0: {port}"
+        );
 
         // A port the caller *did* ask for is its own, not one reassigned.
         let other = open_socket(&mut cpu, 1);
@@ -1590,7 +1648,11 @@ mod tests {
         // `interrupt()` writes one byte...
         assert_eq!(send_on(&mut cpu, client, &[0x7f]), (1, 0), "send");
         // ...and `reset()` drains it at the other end.
-        assert_eq!(recv_on(&mut cpu, server, 0x20), ((1, 0), vec![0x7f]), "recv");
+        assert_eq!(
+            recv_on(&mut cpu, server, 0x20),
+            ((1, 0), vec![0x7f]),
+            "recv"
+        );
         // Drained, not merely peeked at: the second read finds nothing.
         assert_eq!(recv_on(&mut cpu, server, 0x20).0, (-1, super::BSD_EAGAIN));
 
@@ -1616,8 +1678,7 @@ mod tests {
         cpu.mem.map_zero(SETS, 6 * SET as usize).unwrap();
         let (client, server) = connected_pair(&mut cpu, listener);
 
-        let sets: Vec<(u32, u32)> =
-            (0..6).map(|index| (SETS + index * SET, SET)).collect();
+        let sets: Vec<(u32, u32)> = (0..6).map(|index| (SETS + index * SET, SET)).collect();
         let select = |cpu: &mut Cpu, watch: i32, seconds: u64| {
             for offset in 0..6 * SET {
                 cpu.mem.write_u8(SETS + offset, 0).unwrap();
@@ -1631,7 +1692,10 @@ mod tests {
             cpu.pending_yield = false;
             cpu.bsd_request(TLS, 9, Some(5)).unwrap();
             let ready = bsd_result(cpu);
-            let out = cpu.mem.read_u8(SETS + 3 * SET + (watch as u32 / 8)).unwrap();
+            let out = cpu
+                .mem
+                .read_u8(SETS + 3 * SET + (watch as u32 / 8))
+                .unwrap();
             (ready, out & bit != 0)
         };
 
@@ -1679,7 +1743,11 @@ mod tests {
         place(&mut cpu, SCRATCH, &loopback_sockaddr(9999));
         write_map_buffer_request(&mut cpu, 14, &fd.to_le_bytes(), SCRATCH, 16, true);
         cpu.bsd_request(TLS, 9, Some(14)).unwrap();
-        assert_eq!(bsd_result(&cpu), (-1, super::BSD_ECONNREFUSED), "nothing is listening");
+        assert_eq!(
+            bsd_result(&cpu),
+            (-1, super::BSD_ECONNREFUSED),
+            "nothing is listening"
+        );
 
         // And an address off this console has no route at all.
         let mut remote = loopback_sockaddr(53);
@@ -1687,7 +1755,11 @@ mod tests {
         place(&mut cpu, SCRATCH, &remote);
         write_map_buffer_request(&mut cpu, 14, &fd.to_le_bytes(), SCRATCH, 16, true);
         cpu.bsd_request(TLS, 9, Some(14)).unwrap();
-        assert_eq!(bsd_result(&cpu), (-1, super::BSD_ECONNREFUSED), "off the console");
+        assert_eq!(
+            bsd_result(&cpu),
+            (-1, super::BSD_ECONNREFUSED),
+            "off the console"
+        );
 
         // A second connect on a socket that already has a peer is the
         // caller's mistake, not another connection.

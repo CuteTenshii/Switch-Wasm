@@ -99,7 +99,11 @@ fn snapshot(cpu: &Cpu) -> State {
 /// two opaque structs.
 fn assert_same(interpreted: &State, translated: &State, what: &str) {
     for i in 0..32 {
-        let name = if i == 31 { String::from("sp") } else { format!("x{i}") };
+        let name = if i == 31 {
+            String::from("sp")
+        } else {
+            format!("x{i}")
+        };
         assert_eq!(
             interpreted.regs[i], translated.regs[i],
             "{what}: {name} differs ({:#x} interpreted, {:#x} translated)",
@@ -115,9 +119,18 @@ fn assert_same(interpreted: &State, translated: &State, what: &str) {
     }
     assert_eq!(interpreted.pc, translated.pc, "{what}: pc differs");
     assert_eq!(interpreted.nzcv, translated.nzcv, "{what}: nzcv differs");
-    assert_eq!(interpreted.cycles, translated.cycles, "{what}: cycle count differs");
-    assert_eq!(interpreted.halted, translated.halted, "{what}: halt state differs");
-    assert_eq!(interpreted.data, translated.data, "{what}: guest memory differs");
+    assert_eq!(
+        interpreted.cycles, translated.cycles,
+        "{what}: cycle count differs"
+    );
+    assert_eq!(
+        interpreted.halted, translated.halted,
+        "{what}: halt state differs"
+    );
+    assert_eq!(
+        interpreted.data, translated.data,
+        "{what}: guest memory differs"
+    );
 }
 
 /// A CPU with `code` mapped at [`CODE`], a data region at [`DATA`], and the
@@ -207,7 +220,11 @@ fn a_fault_inside_a_block_reports_what_the_interpreter_would() {
         translated.get_pc(),
         "a fault left the pc somewhere else"
     );
-    assert_eq!(interpreted.get_pc(), CODE, "the pc should be on the faulting load");
+    assert_eq!(
+        interpreted.get_pc(),
+        CODE,
+        "the pc should be on the faulting load"
+    );
 }
 
 #[test]
@@ -220,7 +237,11 @@ fn a_host_write_into_translated_code_is_noticed() {
     cpu.mem.write_u32(CODE, 0xd2800040).unwrap(); // movz x0, #2
     cpu.set_pc(CODE);
     cpu.run(8).unwrap();
-    assert_eq!(cpu.read_x(0), 2, "the block was re-run from the old instruction");
+    assert_eq!(
+        cpu.read_x(0),
+        2,
+        "the block was re-run from the old instruction"
+    );
     assert!(
         cpu.jit_stats().translated > before,
         "the patched block was never translated again"
@@ -300,9 +321,21 @@ fn control_landing_inside_a_translated_block_re_enters_it() {
     cpu.run(32).unwrap();
     // Three passes over the back edge, each adding 7. x0 counted them but the
     // first `svc` overwrote it: svcSleepThread writes its result code into x0.
-    assert_eq!(cpu.read_x(1), 21, "the mid-block target was entered the wrong number of times");
-    assert_eq!(cpu.read_x(2), 22, "execution did not continue past the syscall");
-    assert_eq!(cpu.read_x(0), 0, "the syscall did not leave its result in x0");
+    assert_eq!(
+        cpu.read_x(1),
+        21,
+        "the mid-block target was entered the wrong number of times"
+    );
+    assert_eq!(
+        cpu.read_x(2),
+        22,
+        "execution did not continue past the syscall"
+    );
+    assert_eq!(
+        cpu.read_x(0),
+        0,
+        "the syscall did not leave its result in x0"
+    );
 }
 
 #[test]
@@ -374,7 +407,9 @@ fn a_block_stops_at_the_end_of_its_page() {
         .iter()
         .enumerate()
     {
-        cpu.mem.map(start + 4 * i as u32, &insn.to_le_bytes()).unwrap();
+        cpu.mem
+            .map(start + 4 * i as u32, &insn.to_le_bytes())
+            .unwrap();
     }
     cpu.set_pc(start);
     cpu.run(8).unwrap();
@@ -420,7 +455,11 @@ fn turning_the_translator_off_drops_what_it_had_cached() {
     assert!(cpu.jit_stats().blocks > 0);
     cpu.set_jit_enabled(false);
     assert!(!cpu.jit_enabled());
-    assert_eq!(cpu.jit_stats().blocks, 0, "the cache outlived the translator");
+    assert_eq!(
+        cpu.jit_stats().blocks,
+        0,
+        "the cache outlived the translator"
+    );
 }
 
 #[test]
@@ -432,5 +471,9 @@ fn tracing_a_run_still_produces_a_line_per_instruction() {
     cpu.trace_enabled = true;
     cpu.run(32).unwrap();
     let trace = String::from_utf8_lossy(&cpu.trace);
-    assert_eq!(trace.lines().count(), 32, "one line per instruction was expected");
+    assert_eq!(
+        trace.lines().count(),
+        32,
+        "one line per instruction was expected"
+    );
 }

@@ -57,8 +57,9 @@ fn main() {
         let frame_size = frame48 * rate as usize / 48000;
 
         let mut single = (streams == 0).then(|| Decoder::new(rate, channels).expect("decoder"));
-        let mut multi = (streams != 0)
-            .then(|| MultiStreamDecoder::new(rate, channels, streams, coupled, mapping).expect("decoder"));
+        let mut multi = (streams != 0).then(|| {
+            MultiStreamDecoder::new(rate, channels, streams, coupled, mapping).expect("decoder")
+        });
         let mut pcm = vec![0.0f32; frame_size * channels * 2];
         let mut at = 28usize;
         let mut ref_at = 0usize;
@@ -128,7 +129,11 @@ fn main() {
 
         let rms = (sum_sq / counted.max(1) as f64).sqrt();
         let ref_rms = (sum_ref_sq / counted.max(1) as f64).sqrt();
-        let snr = if rms > 0.0 { 20.0 * (ref_rms / rms).log10() } else { f64::INFINITY };
+        let snr = if rms > 0.0 {
+            20.0 * (ref_rms / rms).log10()
+        } else {
+            f64::INFINITY
+        };
         let mut verdict = "ok";
         if let Some((frame, got, want)) = wrong_length {
             println!("{name:<24} frame {frame}: {got} samples, expected {want}");

@@ -80,7 +80,13 @@ fn str64(rt: u32, rn: u32, imm: u32) -> u32 {
 }
 // LDUR Xt, [Xn, #imm]
 fn ldur64(rt: u32, rn: u32, imm: i64) -> u32 {
-    0b11 << 30 | 0b111 << 27 | 0b00 << 24 | 0b01 << 22 | ((imm as u32 & 0x1FF) << 12) | (rn << 5) | rt
+    0b11 << 30
+        | 0b111 << 27
+        | 0b00 << 24
+        | 0b01 << 22
+        | ((imm as u32 & 0x1FF) << 12)
+        | (rn << 5)
+        | rt
 }
 
 // B #imm
@@ -115,7 +121,11 @@ fn cbz(rt: u32, imm: i32, sf: bool, nz: bool) -> u32 {
 // TBZ/TBNZ Xt, #bit, #imm
 fn tbz(rt: u32, bit: u32, imm: i32, nz: bool) -> u32 {
     let sf = (bit >> 5) << 31;
-    sf | 0b011011 << 25 | ((nz as u32) << 24) | ((bit & 0x1F) << 19) | ((imm >> 2) as u32 & 0x3FFF) << 5 | rt
+    sf | 0b011011 << 25
+        | ((nz as u32) << 24)
+        | ((bit & 0x1F) << 19)
+        | ((imm >> 2) as u32 & 0x3FFF) << 5
+        | rt
 }
 // SVC #imm
 fn svc(imm: u32) -> u32 {
@@ -179,10 +189,7 @@ fn movz_movn_movk_build_64bit() {
 
 #[test]
 fn add_immediate_sets_flags() {
-    let cpu = exec(
-        &[add_imm(1, 31, 5, true), add_imm(2, 1, 0xFFF, false)],
-        100,
-    );
+    let cpu = exec(&[add_imm(1, 31, 5, true), add_imm(2, 1, 0xFFF, false)], 100);
     // x1 = SP(0) + 5
     assert_eq!(cpu.read_x(1), 5);
     // w2 = w1 + 0xFFF
@@ -201,7 +208,7 @@ fn sub_and_flags() {
         100,
     );
     assert_eq!(cpu.nzcv() & (1 << 30), 1 << 30); // Z
-    assert_eq!(cpu.nzcv() & (1 << 31), 0);       // N clear
+    assert_eq!(cpu.nzcv() & (1 << 31), 0); // N clear
 
     // SUBS XZR, X1, X2 with x1=1, x2=3 → N set, C clear
     cpu = exec(
@@ -213,7 +220,7 @@ fn sub_and_flags() {
         100,
     );
     assert_eq!(cpu.nzcv() & (1 << 31), 1 << 31); // N
-    assert_eq!(cpu.nzcv() & (1 << 29), 0);       // C clear (borrow)
+    assert_eq!(cpu.nzcv() & (1 << 29), 0); // C clear (borrow)
 }
 
 #[test]
@@ -242,7 +249,7 @@ fn load_store_immediate() {
     assert_eq!(cpu.mem.read_u64(0x3008).unwrap(), 0x1122_3344_5566_7788);
     assert_eq!(cpu.read_x(4), 0x1122_3344_5566_7788);
     assert_eq!(cpu.read_x(5), 0xDEAD_BEEF_CAFE_F00D); // LDUR negative offset into 0x2FF8
-    assert_eq!(cpu.read_x(6), 0xCAFE_F00D);            // LDR 32-bit zero-extended
+    assert_eq!(cpu.read_x(6), 0xCAFE_F00D); // LDR 32-bit zero-extended
 }
 
 #[test]
@@ -264,8 +271,14 @@ fn stp_ldp_pre_index() {
     cpu.set_reg(0, 0x1111_1111_1111_1111);
     cpu.set_reg(1, 0x2222_2222_2222_2222);
     cpu.run(3).unwrap();
-    assert_eq!(cpu.mem.read_u64(0x4000 - 32).unwrap(), 0x1111_1111_1111_1111);
-    assert_eq!(cpu.mem.read_u64(0x4000 - 24).unwrap(), 0x2222_2222_2222_2222);
+    assert_eq!(
+        cpu.mem.read_u64(0x4000 - 32).unwrap(),
+        0x1111_1111_1111_1111
+    );
+    assert_eq!(
+        cpu.mem.read_u64(0x4000 - 24).unwrap(),
+        0x2222_2222_2222_2222
+    );
     assert_eq!(cpu.read_x(2), 0x1111_1111_1111_1111);
     assert_eq!(cpu.read_x(3), 0x2222_2222_2222_2222);
     assert_eq!(cpu.sp(), 0x4000); // after post-index add back
@@ -406,9 +419,14 @@ fn logical_immediate_masks() {
     // AND X1, X2, #0xFF  → encoding N=0, immr=0, imms=7
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(2, 0xABCD_EF12_3456_78FF);
-    let code: [u32; 1] = [
-        0b0 << 31 | 0b00 << 29 | 0b100100 << 23 | 0 << 22 | (0 << 16) | (7 << 10) | (2 << 5) | 1,
-    ];
+    let code: [u32; 1] = [0b0 << 31
+        | 0b00 << 29
+        | 0b100100 << 23
+        | 0 << 22
+        | (0 << 16)
+        | (7 << 10)
+        | (2 << 5)
+        | 1];
     let mut bytes = Vec::new();
     for insn in code {
         bytes.extend_from_slice(&insn.to_le_bytes());
@@ -521,7 +539,8 @@ fn bitfield_extract_and_insert() {
     // UBFX X1, X2, #4, #8  → UBFM X1, X2, #4, #11 (immr=4, imms=11)
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(2, 0xABCD_EF12_3456_78FF);
-    let ubfm = 1u32 << 31 | 0b10 << 29 | 0b100110 << 23 | 1 << 22 | (4 << 16) | (11 << 10) | (2 << 5) | 1;
+    let ubfm =
+        1u32 << 31 | 0b10 << 29 | 0b100110 << 23 | 1 << 22 | (4 << 16) | (11 << 10) | (2 << 5) | 1;
     let mut bytes = Vec::new();
     for insn in [ubfm] {
         bytes.extend_from_slice(&insn.to_le_bytes());
@@ -532,7 +551,8 @@ fn bitfield_extract_and_insert() {
     assert_eq!(cpu.read_x(1), (0xABCD_EF12_3456_78FFu64 >> 4) & 0xFF);
 
     // SBFX: SBFM X3, X2, #0, #7 (sign-extend 8 bits) → -1
-    let sbfm = 1u32 << 31 | 0b00 << 29 | 0b100110 << 23 | 1 << 22 | (0 << 16) | (7 << 10) | (2 << 5) | 3;
+    let sbfm =
+        1u32 << 31 | 0b00 << 29 | 0b100110 << 23 | 1 << 22 | (0 << 16) | (7 << 10) | (2 << 5) | 3;
     let mut bytes = Vec::new();
     for insn in [sbfm] {
         bytes.extend_from_slice(&insn.to_le_bytes());
@@ -576,7 +596,13 @@ fn halt_via_svc() {
 fn mrs_msr_nzcv() {
     // CMP to set flags then MRS NZCV
     let mut cpu = Cpu::new();
-    let code = [movz(1, 3, 0, true), movz(2, 3, 0, true), cmp_reg(1, 2, true), mrs_nzcv(4), svc(0)];
+    let code = [
+        movz(1, 3, 0, true),
+        movz(2, 3, 0, true),
+        cmp_reg(1, 2, true),
+        mrs_nzcv(4),
+        svc(0),
+    ];
     let mut bytes = Vec::new();
     for insn in code {
         bytes.extend_from_slice(&insn.to_le_bytes());
@@ -604,7 +630,11 @@ fn exclusive_load_store() {
     cpu.set_pc(0x1000);
     cpu.set_reg(2, 0x1234_5678_9ABC_DEF0);
     cpu.run(1).unwrap();
-    assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), 0, "a bare STXR stored anyway");
+    assert_eq!(
+        cpu.mem.read_u64(0x3000).unwrap(),
+        0,
+        "a bare STXR stored anyway"
+    );
     assert_eq!(cpu.read_x(0), 1, "a bare STXR reported success");
 
     // LDXR then STXR to the same address is the pair, and it goes through.
@@ -665,9 +695,9 @@ fn reverse_and_count_ops() {
     cpu.set_pc(0x1000);
     cpu.run(4).unwrap();
     assert_eq!(cpu.read_x(2), 0x0F00_0000_0000_0000); // bit-reversed
-    assert_eq!(cpu.read_x(3), 56);                     // clz(0xF0) = 56
-    assert_eq!(cpu.read_x(4), 4);                      // ctz(0xF0) = 4
-    assert_eq!(cpu.read_x(5), 0xF000_0000);            // rev32 of 0x...00F0
+    assert_eq!(cpu.read_x(3), 56); // clz(0xF0) = 56
+    assert_eq!(cpu.read_x(4), 4); // ctz(0xF0) = 4
+    assert_eq!(cpu.read_x(5), 0xF000_0000); // rev32 of 0x...00F0
 }
 
 #[test]
@@ -676,9 +706,9 @@ fn add_immediate_preserves_flags() {
     let mut cpu = Cpu::new();
     cpu.set_reg(1, 5);
     let code = [
-        cmp_reg(1, 1, true), // Z=1
+        cmp_reg(1, 1, true),     // Z=1
         add_imm(2, 1, 48, true), // must NOT clear flags
-        bcond(0x0, 8),       // B.EQ +8 -> taken only if Z still set
+        bcond(0x0, 8),           // B.EQ +8 -> taken only if Z still set
         movz(3, 0xEE, 0, true),
         movz(4, 0xFF, 0, true),
     ];
@@ -690,7 +720,7 @@ fn add_immediate_preserves_flags() {
     cpu.set_pc(0x1000);
     cpu.run(4).unwrap();
     assert_eq!(cpu.read_x(2), 5 + 48);
-    assert_eq!(cpu.read_x(3), 0);      // EQ branch taken → movz(3) skipped
+    assert_eq!(cpu.read_x(3), 0); // EQ branch taken → movz(3) skipped
     assert_eq!(cpu.read_x(4), 0xFF);
 }
 
@@ -705,8 +735,13 @@ fn bootstrap_provides_stack_and_low_memory() {
     // already -- it sits above the heap and the guest's own stack region now,
     // and a literal here just goes stale.
     assert_eq!(cpu.sp(), switch_core::cpu::STACK_TOP);
-    cpu.mem.write_u64((cpu.sp() - 8) as u32, 0x1234_5678).unwrap();
-    assert_eq!(cpu.mem.read_u64((cpu.sp() - 8) as u32).unwrap(), 0x1234_5678);
+    cpu.mem
+        .write_u64((cpu.sp() - 8) as u32, 0x1234_5678)
+        .unwrap();
+    assert_eq!(
+        cpu.mem.read_u64((cpu.sp() - 8) as u32).unwrap(),
+        0x1234_5678
+    );
 
     // Reads from untouched low memory return zero instead of faulting — the
     // exact `ldr x0, [x0]` at 0x244498 a real libnx binary hit.
@@ -717,12 +752,14 @@ fn bootstrap_provides_stack_and_low_memory() {
     // The soft region ends where the guest's address space does; reads beyond
     // it still fault, so a pointer that walks off the top of the last region
     // is caught rather than answered with more zeros.
-    assert!(cpu.mem.read_u32(switch_core::cpu::GUEST_SPACE_END + 0xDEAD).is_err());
+    assert!(cpu
+        .mem
+        .read_u32(switch_core::cpu::GUEST_SPACE_END + 0xDEAD)
+        .is_err());
 }
 
 #[test]
 fn horizon_syscall_stubs() {
-
     // OutputDebugString(0x3000, 5) logs the string to the console.
     let mut cpu = cpu_at(0x1000);
     cpu.mem.map(0x3000, b"hello").unwrap();
@@ -782,7 +819,6 @@ fn horizon_syscall_stubs() {
 
 #[test]
 fn horizon_query_memory_and_get_info() {
-
     // QueryMemory writes a MemoryInfo struct to the out pointer and returns
     // the page info in X1. It reports the contiguous run of pages in the same
     // state as the queried address.
@@ -810,8 +846,8 @@ fn horizon_query_memory_and_get_info() {
     cpu.mem.map(0x1000, &svc(0x06).to_le_bytes()).unwrap();
     cpu.set_pc(0x1000);
     cpu.run(1).unwrap();
-    assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 0);   // type (unmapped)
-    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0);   // perm
+    assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 0); // type (unmapped)
+    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0); // perm
 
     // GetInfo returns the requested value in X1 (the libnx wrapper stores it
     // to the out pointer). InfoType 4 = HeapRegionAddress. Every region this
@@ -825,7 +861,10 @@ fn horizon_query_memory_and_get_info() {
     cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
-    assert_eq!(cpu.read_x(1), u64::from(switch_core::cpu::GUEST_HEAP_REGION_ADDR));
+    assert_eq!(
+        cpu.read_x(1),
+        u64::from(switch_core::cpu::GUEST_HEAP_REGION_ADDR)
+    );
     assert!(cpu.read_x(1) <= u64::from(u32::MAX));
 
     // InfoType 21/22 = Total/UsedNonSystemMemorySize, which is what `nnSdk`
@@ -879,7 +918,10 @@ fn horizon_query_memory_and_get_info() {
     for (info_type, expected) in [
         (6u64, u64::from(VAMM_TOTAL_MEMORY_SIZE)),
         (16, u64::from(VAMM_SYSTEM_RESOURCE_SIZE)),
-        (21, u64::from(VAMM_TOTAL_MEMORY_SIZE - VAMM_SYSTEM_RESOURCE_SIZE)),
+        (
+            21,
+            u64::from(VAMM_TOTAL_MEMORY_SIZE - VAMM_SYSTEM_RESOURCE_SIZE),
+        ),
         (2, u64::from(VAMM_ALIAS_REGION_ADDR)),
         (3, u64::from(VAMM_ALIAS_REGION_SIZE)),
     ] {
@@ -890,7 +932,11 @@ fn horizon_query_memory_and_get_info() {
         cpu.mem.map(0x1000, &svc(0x29).to_le_bytes()).unwrap();
         cpu.run(1).unwrap();
         assert_eq!(cpu.read_x(0), 0);
-        assert_eq!(cpu.read_x(1), expected, "InfoType {info_type} under the VAMM layout");
+        assert_eq!(
+            cpu.read_x(1),
+            expected,
+            "InfoType {info_type} under the VAMM layout"
+        );
     }
 
     // InfoType 12 = AslrRegionAddress.
@@ -1021,8 +1067,8 @@ fn adds_shifted_register() {
     cpu.mem.map(0x1000, &bytes).unwrap();
     cpu.set_pc(0x1000);
     cpu.run(4).unwrap();
-    assert_eq!(cpu.read_x(2), 0x30);   // 0x10 + 0x20, not subtraction
-    assert_eq!(cpu.read_x(3), 0xEE);   // Z clear (result nonzero) -> branch not taken
+    assert_eq!(cpu.read_x(2), 0x30); // 0x10 + 0x20, not subtraction
+    assert_eq!(cpu.read_x(3), 0xEE); // Z clear (result nonzero) -> branch not taken
 }
 
 #[test]
@@ -1051,8 +1097,14 @@ fn fault_trace_shows_recent_instructions() {
     cpu.set_pc(0x1000);
     assert!(cpu.run(10).is_err());
     let trace = String::from_utf8_lossy(&cpu.trace).to_string();
-    assert!(trace.contains("movz x1, #0x7"), "fault trace must show the run-up:\n{trace}");
-    assert!(trace.contains(".word 0x00000000"), "fault trace must show the faulting word:\n{trace}");
+    assert!(
+        trace.contains("movz x1, #0x7"),
+        "fault trace must show the run-up:\n{trace}"
+    );
+    assert!(
+        trace.contains(".word 0x00000000"),
+        "fault trace must show the faulting word:\n{trace}"
+    );
 }
 
 #[test]
@@ -1061,8 +1113,8 @@ fn adrp_adr_with_nonzero_immlo() {
     // ADR  X1, #0x5    → pc(0x1004) + 5 = 0x1009          (immlo = 01)
     let cpu = exec(
         &[
-            1u32 << 31 | 1 << 29 | 0b10000 << 24,      // adrp x0, #0x1000
-            0b10000 << 24 | 1 << 29 | 1 << 5 | 1,      // adr x1, #0x5
+            1u32 << 31 | 1 << 29 | 0b10000 << 24, // adrp x0, #0x1000
+            0b10000 << 24 | 1 << 29 | 1 << 5 | 1, // adr x1, #0x5
         ],
         100,
     );
@@ -1181,10 +1233,7 @@ fn movk32_shift_is_bit21() {
     // movz w1, #0x4653 ; movk w1, #0x4f43, lsl #16 → 0x4f434653.
     // The 32-bit hw/shift bit is bit 21 (not bit 22) — a regression from the
     // hbmenu MOD0-magic check that miscomputed w1 as 0x4f43.
-    let cpu = exec(
-        &[movz(1, 0x4653, 0, false), movk(1, 0x4f43, 1, false)],
-        2,
-    );
+    let cpu = exec(&[movz(1, 0x4653, 0, false), movk(1, 0x4f43, 1, false)], 2);
     assert_eq!(cpu.read_x(1), 0x4f43_4653);
 }
 
@@ -1264,13 +1313,28 @@ fn umov_d0(rd: u32, rn: u32) -> u32 {
 }
 // SUB <Vd>.4S, <Vn>.4S, <Vm>.4S
 fn sub4s(rd: u32, rn: u32, rm: u32) -> u32 {
-    (1u32 << 30) | (1u32 << 29) | (0b1110 << 24) | (0b10 << 22) | (1 << 21)
-        | (rm << 16) | (0b10000 << 11) | (1 << 10) | (rn << 5) | rd
+    (1u32 << 30)
+        | (1u32 << 29)
+        | (0b1110 << 24)
+        | (0b10 << 22)
+        | (1 << 21)
+        | (rm << 16)
+        | (0b10000 << 11)
+        | (1 << 10)
+        | (rn << 5)
+        | rd
 }
 // CMEQ <Vd>.16B, <Vn>.16B, <Vm>.16B
 fn cmeq16(rd: u32, rn: u32, rm: u32) -> u32 {
-    (1u32 << 30) | (1u32 << 29) | (0b1110 << 24) | (1 << 21) | (rm << 16)
-        | (0b10001 << 11) | (1 << 10) | (rn << 5) | rd
+    (1u32 << 30)
+        | (1u32 << 29)
+        | (0b1110 << 24)
+        | (1 << 21)
+        | (rm << 16)
+        | (0b10001 << 11)
+        | (1 << 10)
+        | (rn << 5)
+        | rd
 }
 // UHADD <Vd>.16B, <Vn>.16B, <Vm>.16B
 fn uhadd16(rd: u32, rn: u32, rm: u32) -> u32 {
@@ -1278,11 +1342,25 @@ fn uhadd16(rd: u32, rn: u32, rm: u32) -> u32 {
     // every other helper here sets it, and this one used to leave it clear.
     // The decoder ignored bit21, so the malformed encoding still reached
     // UHADD; it is really an INS (element) opcode.
-    (1u32 << 30) | (1u32 << 29) | (0b1110 << 24) | (1 << 21) | (rm << 16) | (1 << 10) | (rn << 5) | rd
+    (1u32 << 30)
+        | (1u32 << 29)
+        | (0b1110 << 24)
+        | (1 << 21)
+        | (rm << 16)
+        | (1 << 10)
+        | (rn << 5)
+        | rd
 }
 // ADDP <Vd>.16B, <Vn>.16B, <Vm>.16B
 fn addp16(rd: u32, rn: u32, rm: u32) -> u32 {
-    (1u32 << 30) | (0b1110 << 24) | (1 << 21) | (rm << 16) | (0b10111 << 11) | (1 << 10) | (rn << 5) | rd
+    (1u32 << 30)
+        | (0b1110 << 24)
+        | (1 << 21)
+        | (rm << 16)
+        | (0b10111 << 11)
+        | (1 << 10)
+        | (rn << 5)
+        | rd
 }
 // ZIP1 <Vd>.16B, <Vn>.16B, <Vm>.16B
 fn zip1_16(rd: u32, rn: u32, rm: u32) -> u32 {
@@ -1293,7 +1371,13 @@ fn zip1_16(rd: u32, rn: u32, rm: u32) -> u32 {
 fn simd_three_same_add_sub_compare() {
     // dup v0.16b, w1 (0x3d) ; dup v1.16b, w2 (0x3d) ; sub v2.4s, v0.4s, v1.4s
     // → lanes of 0x3d3d3d3d - 0x3d3d3d3d = 0 ; mov x3, v2.d[0]
-    let code = [dup16(0, 1), dup16(1, 2), sub4s(2, 0, 1), umov_d0(3, 2), nop()];
+    let code = [
+        dup16(0, 1),
+        dup16(1, 2),
+        sub4s(2, 0, 1),
+        umov_d0(3, 2),
+        nop(),
+    ];
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(1, 0x3d);
     cpu.set_reg(2, 0x3d);
@@ -1301,7 +1385,13 @@ fn simd_three_same_add_sub_compare() {
     assert_eq!(cpu.read_x(3), 0);
 
     // cmeq v4.16b, v0.16b, v1.16b → all-ones since equal ; mov x5, v4.d[0]
-    let code = [dup16(0, 1), dup16(1, 2), cmeq16(4, 0, 1), umov_d0(5, 4), nop()];
+    let code = [
+        dup16(0, 1),
+        dup16(1, 2),
+        cmeq16(4, 0, 1),
+        umov_d0(5, 4),
+        nop(),
+    ];
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(1, 0x3d);
     cpu.set_reg(2, 0x3d);
@@ -1309,7 +1399,13 @@ fn simd_three_same_add_sub_compare() {
     assert_eq!(cpu.read_x(5), u64::MAX);
 
     // uhadd v6.16b, v0.16b, v1.16b with unequal bytes (1 + 3) >> 1 = 2
-    let code = [dup16(0, 1), dup16(1, 2), uhadd16(6, 0, 1), umov_d0(7, 6), nop()];
+    let code = [
+        dup16(0, 1),
+        dup16(1, 2),
+        uhadd16(6, 0, 1),
+        umov_d0(7, 6),
+        nop(),
+    ];
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(1, 1);
     cpu.set_reg(2, 3);
@@ -1321,7 +1417,13 @@ fn simd_three_same_add_sub_compare() {
 fn simd_pairwise_addp() {
     // v1 = {1,1,...}, v2 = {2,2,...}; addp v3.16b, v1.16b, v2.16b →
     // v3[0..7] = v1 pairwise (2), v3[8..15] = v2 pairwise (4).
-    let code = [dup16(1, 1), dup16(2, 2), addp16(3, 1, 2), umov_d0(4, 3), nop()];
+    let code = [
+        dup16(1, 1),
+        dup16(2, 2),
+        addp16(3, 1, 2),
+        umov_d0(4, 3),
+        nop(),
+    ];
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(1, 1);
     cpu.set_reg(2, 2);
@@ -1340,12 +1442,8 @@ fn simd_zip1_interleave() {
     cpu.mem.map_zero(0x3000, 0x40).unwrap();
     // ldr q0, [x0] ; ldr q1, [x0, #0x10] ; zip1 v2.16b, v0.16b, v1.16b ;
     // str q2, [x0, #0x20]
-    let ldr_q = |rt: u32, imm: u32| {
-        0x3DC0_0000u32 | rt | ((imm >> 4) << 10)
-    };
-    let str_q = |rt: u32, imm: u32| {
-        0x3D80_0000u32 | rt | ((imm >> 4) << 10)
-    };
+    let ldr_q = |rt: u32, imm: u32| 0x3DC0_0000u32 | rt | ((imm >> 4) << 10);
+    let str_q = |rt: u32, imm: u32| 0x3D80_0000u32 | rt | ((imm >> 4) << 10);
     let code = [
         ldr_q(0, 0),
         ldr_q(1, 0x10),
@@ -1360,7 +1458,10 @@ fn simd_zip1_interleave() {
     let cpu = run_program(cpu, 0x1000, &code);
     for i in 0..8u32 {
         assert_eq!(cpu.mem.read_u8(0x3020 + 2 * i).unwrap(), i as u8);
-        assert_eq!(cpu.mem.read_u8(0x3020 + 2 * i + 1).unwrap(), 0x10u8 + i as u8);
+        assert_eq!(
+            cpu.mem.read_u8(0x3020 + 2 * i + 1).unwrap(),
+            0x10u8 + i as u8
+        );
     }
 }
 
@@ -1507,14 +1608,23 @@ fn simd_table_lookup_spans_several_registers() {
         nop(),
     ];
     let cpu = run_program(cpu, 0x1000, &code);
-    let out: Vec<u8> = (0..5).map(|i| cpu.mem.read_u8(0x3040 + i).unwrap()).collect();
+    let out: Vec<u8> = (0..5)
+        .map(|i| cpu.mem.read_u8(0x3040 + i).unwrap())
+        .collect();
     assert_eq!(out, vec![0x10, 0x1f, 0x20, 0x2f, 0x00]);
 }
 
 // AdvSIMD across lanes: `0 Q U 01110 size 11000 opcode(5) 10 Rn Rd`.
 fn across_lanes(q: u32, u: u32, size: u32, opcode: u32, rd: u32, rn: u32) -> u32 {
-    (q << 30) | (u << 29) | (0b01110 << 24) | (size << 22) | (0b11000 << 17)
-        | (opcode << 12) | (0b10 << 10) | (rn << 5) | rd
+    (q << 30)
+        | (u << 29)
+        | (0b01110 << 24)
+        | (size << 22)
+        | (0b11000 << 17)
+        | (opcode << 12)
+        | (0b10 << 10)
+        | (rn << 5)
+        | rd
 }
 
 #[test]
@@ -1530,7 +1640,14 @@ fn simd_across_lanes_reduce() {
     // smaxv s1, v0.4s = 0x4eb0a801 ; sminv s2, v0.4s = 0x4eb1a802
     let smaxv = across_lanes(1, 0, 0b10, 0b01010, 1, 0);
     let sminv = across_lanes(1, 0, 0b10, 0b11010, 2, 0);
-    let code = [ldr_q(0, 0), smaxv, sminv, umov_d0(3, 1), umov_d0(4, 2), nop()];
+    let code = [
+        ldr_q(0, 0),
+        smaxv,
+        sminv,
+        umov_d0(3, 1),
+        umov_d0(4, 2),
+        nop(),
+    ];
     let cpu = run_program(cpu, 0x1000, &code);
     assert_eq!(cpu.read_x(3) as u32, 7); // signed max ignores the -1 lane.
     assert_eq!(cpu.read_x(4) as u32, 0xFFFF_FFFF); // signed min picks it.
@@ -1711,7 +1828,9 @@ fn ipc_request_with_buffer(
     // hdr1: type 4 (Request), one buffer — send buffers count in bits 23:20,
     // receive buffers in 27:24. Either way it is one 12-byte descriptor, so
     // the aligned data area lands at 0x20.
-    cpu.mem.write_u32(tls, 4 | (1 << if recv { 24 } else { 20 })).unwrap();
+    cpu.mem
+        .write_u32(tls, 4 | (1 << if recv { 24 } else { 20 }))
+        .unwrap();
     cpu.mem.write_u32(tls + 4, 0x0c).unwrap();
     // HipcBufferDescriptor: size, address, then the high bits (all zero for a
     // 32-bit guest address).
@@ -1735,7 +1854,13 @@ fn ipc_request_with_buffer(
 }
 
 /// Write one `lm` LogPacket at `addr` and return its total length.
-fn write_log_packet(cpu: &mut Cpu, addr: u32, flags: u8, severity: u8, tlvs: &[(u8, &[u8])]) -> u32 {
+fn write_log_packet(
+    cpu: &mut Cpu,
+    addr: u32,
+    flags: u8,
+    severity: u8,
+    tlvs: &[(u8, &[u8])],
+) -> u32 {
     let mut payload = Vec::new();
     for &(key, data) in tlvs {
         payload.push(key);
@@ -1747,7 +1872,9 @@ fn write_log_packet(cpu: &mut Cpu, addr: u32, flags: u8, severity: u8, tlvs: &[(
     }
     cpu.mem.write_u8(addr + 0x10, flags).unwrap();
     cpu.mem.write_u8(addr + 0x12, severity).unwrap();
-    cpu.mem.write_u32(addr + 0x14, payload.len() as u32).unwrap();
+    cpu.mem
+        .write_u32(addr + 0x14, payload.len() as u32)
+        .unwrap();
     for (i, &b) in payload.iter().enumerate() {
         cpu.mem.write_u8(addr + 0x18 + i as u32, b).unwrap();
     }
@@ -2054,7 +2181,9 @@ fn control_clone_hands_back_a_working_session() {
 
     // The clone reaches the same service, holding the same domain objects.
     let handles = cpu.service_handles_snapshot();
-    assert!(handles.iter().any(|(h, name)| *h == clone && name == "fsp-srv"));
+    assert!(handles
+        .iter()
+        .any(|(h, name)| *h == clone && name == "fsp-srv"));
     ipc_request(&mut cpu, clone, 4, Some(object), 1); // SetCurrentProcess
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
 }
@@ -2083,7 +2212,11 @@ fn storage_read_uses_the_istorage_field_layout() {
     ipc_request_with_buffer(&mut cpu, FS, 1, 0, OUT, 16, true, &args);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
     for i in 0..8u32 {
-        assert_eq!(cpu.mem.read_u8(OUT + i).unwrap(), romfs[4 + i as usize], "byte {i}");
+        assert_eq!(
+            cpu.mem.read_u8(OUT + i).unwrap(),
+            romfs[4 + i as usize],
+            "byte {i}"
+        );
     }
     // Nothing past the requested size is touched.
     assert_eq!(cpu.mem.read_u8(OUT + 8).unwrap(), 0);
@@ -2131,7 +2264,10 @@ fn lm_writes_the_guests_own_log_to_the_console() {
         &[(KEY_MODULE, b"Game"), (KEY_TEXT, b"hello world")],
     );
     ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len, false, &[]);
-    assert_eq!(String::from_utf8_lossy(&cpu.out), "[lm/ERROR/Game] hello world\n");
+    assert_eq!(
+        String::from_utf8_lossy(&cpu.out),
+        "[lm/ERROR/Game] hello world\n"
+    );
 
     // A message split across packets: only the head carries the prefix and
     // only the tail ends the line, so the two halves join into one message.
@@ -2140,12 +2276,21 @@ fn lm_writes_the_guests_own_log_to_the_console() {
     ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len, false, &[]);
     let len = write_log_packet(&mut cpu, PACKET, TAIL, 1, &[(KEY_TEXT, b"message")]);
     ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len, false, &[]);
-    assert_eq!(String::from_utf8_lossy(&cpu.out), "[lm/INFO] split message\n");
+    assert_eq!(
+        String::from_utf8_lossy(&cpu.out),
+        "[lm/INFO] split message\n"
+    );
 
     // A packet claiming more payload than the buffer holds is trusted only as
     // far as the buffer goes, rather than walking off the end of the mapping.
     cpu.out.clear();
-    let len = write_log_packet(&mut cpu, PACKET, HEAD | TAIL, 0, &[(KEY_TEXT, b"truncated")]);
+    let len = write_log_packet(
+        &mut cpu,
+        PACKET,
+        HEAD | TAIL,
+        0,
+        &[(KEY_TEXT, b"truncated")],
+    );
     cpu.mem.write_u32(PACKET + 0x14, 0xFFFF).unwrap();
     ipc_request_with_buffer(&mut cpu, LM, logger, 0, PACKET, len, false, &[]);
     assert_eq!(String::from_utf8_lossy(&cpu.out), "[lm/TRACE] truncated\n");
@@ -2179,7 +2324,11 @@ fn pctl_reports_parental_controls_off() {
     for cmd in [1031u32, 1010, 1453, 1455] {
         ipc_request(&mut cpu, PCTL, 4, Some(service), cmd);
         assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "cmd {cmd}");
-        assert_eq!(cpu.mem.read_u8(tls + 0x30).unwrap(), 0, "cmd {cmd} restricted");
+        assert_eq!(
+            cpu.mem.read_u8(tls + 0x30).unwrap(),
+            0,
+            "cmd {cmd} restricted"
+        );
     }
     for cmd in [1018u32, 1065] {
         ipc_request(&mut cpu, PCTL, 4, Some(service), cmd);
@@ -2357,11 +2506,15 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
     );
 
     for (base, lifo_off, style, device) in [
-        (NPAD, 0x28, 1 << 0, 1 << 0),                    // player 1, Pro Controller
-        (HANDHELD, 0x378, 1 << 1, (1 << 2) | (1 << 3)),  // handheld
+        (NPAD, 0x28, 1 << 0, 1 << 0), // player 1, Pro Controller
+        (HANDHELD, 0x378, 1 << 1, (1 << 2) | (1 << 3)), // handheld
     ] {
         assert_eq!(cpu.mem.read_u32(base).unwrap(), style, "style_set");
-        assert_eq!(cpu.mem.read_u32(base + 0x4188).unwrap(), device, "device_type");
+        assert_eq!(
+            cpu.mem.read_u32(base + 0x4188).unwrap(),
+            device,
+            "device_type"
+        );
         let lifo = base + lifo_off;
         assert_eq!(cpu.mem.read_u64(lifo + 0x08).unwrap(), 17, "buffer_count");
         assert_eq!(cpu.mem.read_u64(lifo + 0x10).unwrap(), 0, "tail");
@@ -2371,7 +2524,10 @@ fn gamepad_input_writes_input_reg_and_hid_shmem() {
         assert!(sample > 0, "sampling number must advance");
         assert_eq!(cpu.mem.read_u64(entry + 0x08).unwrap(), sample);
         assert_eq!(cpu.mem.read_u64(entry + 0x10).unwrap(), expected_buttons);
-        assert_eq!(cpu.mem.read_u32(entry + 0x18).unwrap(), 1000u32.wrapping_neg());
+        assert_eq!(
+            cpu.mem.read_u32(entry + 0x18).unwrap(),
+            1000u32.wrapping_neg()
+        );
         assert_eq!(cpu.mem.read_u32(entry + 0x1C).unwrap(), 30000);
         // IsConnected, whatever else the controller reports about its halves.
         assert_eq!(cpu.mem.read_u32(entry + 0x28).unwrap() & 1, 1);
@@ -2412,8 +2568,16 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
     assert_eq!(cpu.read_x(0), 0);
 
     cpu.set_touch_state(&[
-        TouchPoint { finger_id: 0, x: 640, y: 360 },
-        TouchPoint { finger_id: 3, x: 100, y: 700 },
+        TouchPoint {
+            finger_id: 0,
+            x: 640,
+            y: 360,
+        },
+        TouchPoint {
+            finger_id: 3,
+            x: 100,
+            y: 700,
+        },
     ]);
 
     assert_eq!(cpu.mem.read_u64(LIFO + 0x08).unwrap(), 17, "buffer_count");
@@ -2424,7 +2588,11 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
     let sample = cpu.mem.read_u64(storage).unwrap();
     assert!(sample > 0, "sampling number must advance");
     let state = storage + 8;
-    assert_eq!(cpu.mem.read_u64(state).unwrap(), sample, "state sampling number");
+    assert_eq!(
+        cpu.mem.read_u64(state).unwrap(),
+        sample,
+        "state sampling number"
+    );
     assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 2, "contact count");
 
     let touch = |i: u32| state + 0x10 + i * 0x28;
@@ -2438,11 +2606,18 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
 
     // Lifting one of the two clears the slot it vacated, so a reader that scans
     // the array rather than trusting the count finds no ghost contact.
-    cpu.set_touch_state(&[TouchPoint { finger_id: 0, x: 5, y: 6 }]);
+    cpu.set_touch_state(&[TouchPoint {
+        finger_id: 0,
+        x: 5,
+        y: 6,
+    }]);
     assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 1, "contact count");
     assert_eq!(cpu.mem.read_u32(touch(1) + 0x10).unwrap(), 0, "vacated x");
     assert_eq!(cpu.mem.read_u32(touch(1) + 0x14).unwrap(), 0, "vacated y");
-    assert!(cpu.mem.read_u64(storage).unwrap() > sample, "sample must advance");
+    assert!(
+        cpu.mem.read_u64(storage).unwrap() > sample,
+        "sample must advance"
+    );
 
     // A full lift is a published state carrying no contacts, not silence: a
     // title polling the LIFO has to see the finger go up.
@@ -2450,8 +2625,16 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
     assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 0, "contact count");
 
     // Coordinates are clamped to the digitizer, and the slot count to sixteen.
-    cpu.set_touch_state(&[TouchPoint { finger_id: 0, x: 99_999, y: 99_999 }]);
-    assert_eq!(cpu.mem.read_u32(touch(0) + 0x10).unwrap(), 1279, "clamped x");
+    cpu.set_touch_state(&[TouchPoint {
+        finger_id: 0,
+        x: 99_999,
+        y: 99_999,
+    }]);
+    assert_eq!(
+        cpu.mem.read_u32(touch(0) + 0x10).unwrap(),
+        1279,
+        "clamped x"
+    );
     assert_eq!(cpu.mem.read_u32(touch(0) + 0x14).unwrap(), 719, "clamped y");
 }
 
@@ -2461,7 +2644,11 @@ fn touch_input_before_hid_shared_memory_is_mapped_is_dropped() {
     // and the host keeps sending while the finger is down anyway.
     use switch_core::cpu::TouchPoint;
     let mut cpu = cpu_at(0x1000);
-    cpu.set_touch_state(&[TouchPoint { finger_id: 0, x: 1, y: 2 }]);
+    cpu.set_touch_state(&[TouchPoint {
+        finger_id: 0,
+        x: 1,
+        y: 2,
+    }]);
     assert_eq!(cpu.hid_shmem_addr(), 0);
 }
 
@@ -2489,7 +2676,10 @@ fn mapping_pl_shared_memory_delivers_the_shared_font() {
     // the guest is holding a pointer into memory it already mapped.
     let replacement: Vec<u8> = vec![0xAB; 0x1000];
     cpu.set_shared_font(replacement.clone());
-    assert_eq!(cpu.mem.dump(ADDR + HEADER, replacement.len()).unwrap(), replacement);
+    assert_eq!(
+        cpu.mem.dump(ADDR + HEADER, replacement.len()).unwrap(),
+        replacement
+    );
 }
 
 #[test]
@@ -2637,12 +2827,17 @@ fn ccmp_eq_sets_carry_for_unsigned_ge() {
     ];
     let mut cpu = cpu_at(0x1000);
     let mut bytes = Vec::new();
-    for insn in &code { bytes.extend_from_slice(&insn.to_le_bytes()); }
+    for insn in &code {
+        bytes.extend_from_slice(&insn.to_le_bytes());
+    }
     cpu.mem.map(0x1000, &bytes).unwrap();
     cpu.set_pc(0x1000);
     cpu.run(code.len() as u64).unwrap();
-    assert_eq!(cpu.get_pc(), 0x1010 + 20,
-        "b.hs should have been taken; ccmp produced wrong flags");
+    assert_eq!(
+        cpu.get_pc(),
+        0x1010 + 20,
+        "b.hs should have been taken; ccmp produced wrong flags"
+    );
 }
 
 #[test]
@@ -2659,7 +2854,11 @@ fn ccmp_subtract_carry_in() {
     ];
     let cpu = exec(&code, 100);
     assert_eq!(cpu.nzcv() & (1 << 30), 1 << 30, "Z must be set for 0-0");
-    assert_eq!(cpu.nzcv() & (1 << 29), 1 << 29, "C must be set for 0-0 (no borrow)");
+    assert_eq!(
+        cpu.nzcv() & (1 << 29),
+        1 << 29,
+        "C must be set for 0-0 (no borrow)"
+    );
     assert_eq!(cpu.nzcv() & (1 << 31), 0, "N must be clear for 0-0");
 }
 
@@ -2696,7 +2895,8 @@ fn simd_scalar_byte_load_and_stur_q() {
     cpu.mem.map_zero(0x3000, 0x300).unwrap();
     cpu.mem.write_u8(0x3280, 0xAB).unwrap();
     // ldr b29, [x0, #0x280]: size=00, V=1, mode=01, opc=01, imm12=0x280, rn=0, rt=29
-    let ldr_b = 0b00u32 << 30 | 0b111 << 27 | (1 << 26) | (0b01 << 24) | (0b01 << 22) | (0x280 << 10) | 29;
+    let ldr_b =
+        0b00u32 << 30 | 0b111 << 27 | (1 << 26) | (0b01 << 24) | (0b01 << 22) | (0x280 << 10) | 29;
     assert_eq!(ldr_b, 0x3d4a_001d);
     let code = [ldr_b, nop()];
     let cpu = run_program(cpu, 0x1000, &code);
@@ -2710,7 +2910,15 @@ fn simd_scalar_byte_load_and_stur_q() {
     cpu.set_vreg(17, 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00);
     let code = [0x3c80_8011u32, nop()];
     let cpu = run_program(cpu, 0x1000, &code);
-    assert_eq!(cpu.mem.read_into(0x3008, &mut [0u8; 16]).and_then(|_| Ok(u128::from_le_bytes(cpu.mem.dump(0x3008, 16).unwrap().try_into().unwrap()))).unwrap(), 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00);
+    assert_eq!(
+        cpu.mem
+            .read_into(0x3008, &mut [0u8; 16])
+            .and_then(|_| Ok(u128::from_le_bytes(
+                cpu.mem.dump(0x3008, 16).unwrap().try_into().unwrap()
+            )))
+            .unwrap(),
+        0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00
+    );
 }
 
 #[test]
@@ -2721,8 +2929,8 @@ fn query_memory_writes_40_byte_memoryinfo() {
     // bytes; when the app's info pointer sat near the top of its stack this
     // clobbered main's saved LR and made NX-Shell's main "return" to 0.
     let mut cpu = cpu_at(0x1000);
-    cpu.set_reg(0, 0x3000);   // info out pointer
-    cpu.set_reg(1, 0x3040);   // page info out pointer
+    cpu.set_reg(0, 0x3000); // info out pointer
+    cpu.set_reg(1, 0x3040); // page info out pointer
     cpu.set_reg(2, 0x1234000); // address
     cpu.mem.map_zero(0x1234000, 0x1000).unwrap();
     cpu.mem.map_zero(0x3000, 0x60).unwrap();
@@ -2734,12 +2942,12 @@ fn query_memory_writes_40_byte_memoryinfo() {
     // Only the first 40 bytes are written; byte 40+ must stay untouched (0).
     assert_eq!(cpu.mem.read_u64(0x3000).unwrap(), 0x1234000);
     assert_eq!(cpu.mem.read_u64(0x3008).unwrap(), 0x1000);
-    assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 3);   // type (mapped)
-    assert_eq!(cpu.mem.read_u32(0x3014).unwrap(), 0);   // attr
+    assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 3); // type (mapped)
+    assert_eq!(cpu.mem.read_u32(0x3014).unwrap(), 0); // attr
     assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0b011); // perm (RW-)
-    assert_eq!(cpu.mem.read_u32(0x301c).unwrap(), 0);   // device_refcount
-    assert_eq!(cpu.mem.read_u32(0x3020).unwrap(), 0);   // ipc_refcount
-    assert_eq!(cpu.mem.read_u32(0x3024).unwrap(), 0);   // padding
+    assert_eq!(cpu.mem.read_u32(0x301c).unwrap(), 0); // device_refcount
+    assert_eq!(cpu.mem.read_u32(0x3020).unwrap(), 0); // ipc_refcount
+    assert_eq!(cpu.mem.read_u32(0x3024).unwrap(), 0); // padding
 
     // An untouched soft-mapped page reports as unmapped (type 0, no perm),
     // which is what lets libnx virtmem find free address space.
@@ -2752,9 +2960,9 @@ fn query_memory_writes_40_byte_memoryinfo() {
     cpu.set_pc(0x1000);
     cpu.run(1).unwrap();
     // 0x1234000 is inside the soft-mapped range but never written -> unmapped.
-    assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 0);   // type (unmapped)
-    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0);   // perm
-    // The old bug wrote 24 more bytes here; 0x3028+ must be untouched zeros.
+    assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 0); // type (unmapped)
+    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0); // perm
+                                                      // The old bug wrote 24 more bytes here; 0x3028+ must be untouched zeros.
     assert_eq!(cpu.mem.read_u64(0x3028).unwrap(), 0);
     assert_eq!(cpu.mem.read_u64(0x3040).unwrap(), 0); // pageinfo written via x1? no, x1 holds it
     assert_eq!(cpu.read_x(1), 0); // unmapped soft page -> page info 0
@@ -3014,9 +3222,18 @@ fn ld2_and_st2_interleave_lanes() {
     let cpu = run_program(cpu, 0x1000, &[0x4c40_800b, 0x4c00_806b, nop()]);
     let evens: Vec<u8> = (0..32u8).filter(|b| b % 2 == 0).collect();
     let odds: Vec<u8> = (0..32u8).filter(|b| b % 2 == 1).collect();
-    assert_eq!(cpu.read_vreg(11), u128::from_le_bytes(evens.try_into().unwrap()));
-    assert_eq!(cpu.read_vreg(12), u128::from_le_bytes(odds.try_into().unwrap()));
-    assert_eq!(cpu.mem.dump(0x3100, 32).unwrap(), (0..32u8).collect::<Vec<u8>>());
+    assert_eq!(
+        cpu.read_vreg(11),
+        u128::from_le_bytes(evens.try_into().unwrap())
+    );
+    assert_eq!(
+        cpu.read_vreg(12),
+        u128::from_le_bytes(odds.try_into().unwrap())
+    );
+    assert_eq!(
+        cpu.mem.dump(0x3100, 32).unwrap(),
+        (0..32u8).collect::<Vec<u8>>()
+    );
 
     // `ld4 {v16.4s, v17.4s, v18.4s, v19.4s}, [x0], #64` = 0x4cdf0810 takes
     // every fourth word into each register.
@@ -3173,11 +3390,19 @@ fn ctr_el0_reports_64_byte_cache_lines() {
 
 /// Pack four 32-bit lanes, lane 0 in the low bits.
 fn u32x4(lanes: [u32; 4]) -> u128 {
-    lanes.iter().rev().fold(0u128, |acc, &l| (acc << 32) | u128::from(l))
+    lanes
+        .iter()
+        .rev()
+        .fold(0u128, |acc, &l| (acc << 32) | u128::from(l))
 }
 
 fn f32x4(lanes: [f32; 4]) -> u128 {
-    u32x4([lanes[0].to_bits(), lanes[1].to_bits(), lanes[2].to_bits(), lanes[3].to_bits()])
+    u32x4([
+        lanes[0].to_bits(),
+        lanes[1].to_bits(),
+        lanes[2].to_bits(),
+        lanes[3].to_bits(),
+    ])
 }
 
 fn u64x2(lanes: [u64; 2]) -> u128 {
@@ -3209,7 +3434,10 @@ fn vector_integer_float_conversions() {
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(3, u32x4([1, 2, 3, 0xFFFF_FFFF]));
     let cpu = run_program(cpu, 0x1000, &[0x6e21_d862, nop()]);
-    assert_eq!(lanes_f32(cpu.read_vreg(2)), [1.0, 2.0, 3.0, 4_294_967_295.0]);
+    assert_eq!(
+        lanes_f32(cpu.read_vreg(2)),
+        [1.0, 2.0, 3.0, 4_294_967_295.0]
+    );
 
     // FCVTZS truncates toward zero and saturates at the lane width.
     let mut cpu = cpu_at(0x1000);
@@ -3351,9 +3579,15 @@ fn vector_two_register_misc_integer_ops() {
         nop(),
     ];
     let cpu = run_program(cpu, 0x1000, &code);
-    assert_eq!(lanes_u32(cpu.read_vreg(0)), [8, 0x0101_0101, 0, 0x0100_0001]);
+    assert_eq!(
+        lanes_u32(cpu.read_vreg(0)),
+        [8, 0x0101_0101, 0, 0x0100_0001]
+    );
     assert_eq!(lanes_u32(cpu.read_vreg(2)), [31, 0, 32, 16]);
-    assert_eq!(lanes_u32(cpu.read_vreg(4)), [u32::MAX, 0, 0xEDCB_A987, u32::MAX]);
+    assert_eq!(
+        lanes_u32(cpu.read_vreg(4)),
+        [u32::MAX, 0, 0xEDCB_A987, u32::MAX]
+    );
     assert_eq!(lanes_u32(cpu.read_vreg(6)), [0x0000_0080, 0, 0, 0]);
 
     // ABS / NEG / CMGT #0 / CMLT #0 / CLS.
@@ -3373,7 +3607,10 @@ fn vector_two_register_misc_integer_ops() {
     ];
     let cpu = run_program(cpu, 0x1000, &code);
     assert_eq!(lanes_u32(cpu.read_vreg(8)), [1, 2, 0, i32::MIN as u32]);
-    assert_eq!(lanes_u32(cpu.read_vreg(10)), [(-1i32) as u32, 2, 0, (-5i32) as u32]);
+    assert_eq!(
+        lanes_u32(cpu.read_vreg(10)),
+        [(-1i32) as u32, 2, 0, (-5i32) as u32]
+    );
     assert_eq!(lanes_u32(cpu.read_vreg(0)), [u32::MAX, 0, 0, u32::MAX]);
     assert_eq!(lanes_u32(cpu.read_vreg(2)), [0, u32::MAX, 0, 0]);
     assert_eq!(lanes_u32(cpu.read_vreg(6)), [30, 31, 0, 31]);
@@ -3426,7 +3663,10 @@ fn vector_two_register_misc_integer_ops() {
     assert_eq!(cpu.read_vreg(20), 0x7F80_02FF);
     // Unsigned saturation: 0x0001_0000 -> 0xFFFF, 0xFF stays.
     assert_eq!(cpu.read_vreg(22), 0xFFFF_00FF);
-    assert_eq!(cpu.read_vreg(24), u64x2([0x0002_0000_0001_0000, 0x0004_0000_0003_0000]));
+    assert_eq!(
+        cpu.read_vreg(24),
+        u64x2([0x0002_0000_0001_0000, 0x0004_0000_0003_0000])
+    );
     assert_eq!(lanes_u32(cpu.read_vreg(4)), [3, 7, 11, 15]);
 
     // FCVTL widens 2S to 2D and FCVTN narrows back.
@@ -3463,7 +3703,10 @@ fn scalar_integer_float_conversions_and_rounding_modes() {
         nop(),
     ];
     let cpu = run_program(cpu, 0x1000, &code);
-    assert_eq!(f64::from_bits(cpu.read_vreg(0) as u64), 18_446_744_073_709_551_615.0);
+    assert_eq!(
+        f64::from_bits(cpu.read_vreg(0) as u64),
+        18_446_744_073_709_551_615.0
+    );
     assert_eq!(f64::from_bits(cpu.read_vreg(2) as u64), -3.0);
     assert_eq!(f32::from_bits(cpu.read_vreg(4) as u32), 4_294_967_295.0);
 
@@ -3591,7 +3834,11 @@ fn fcsel_fccmp_and_fixed_point_conversions() {
     // Set flags with `fcmp s31, s30` (1.5 < 2.5 → not GT) then select.
     cpu.set_reg(0, 0);
     let cpu = run_program(cpu, 0x1000, &[0x1e3e_23e0, 0x1e3e_cffe, nop()]);
-    assert_eq!(f32::from_bits(cpu.read_vreg(30) as u32), 2.5, "GT false → Vm");
+    assert_eq!(
+        f32::from_bits(cpu.read_vreg(30) as u32),
+        2.5,
+        "GT false → Vm"
+    );
 
     // With the condition true it takes Vn.
     let mut cpu = cpu_at(0x1000);
@@ -3653,7 +3900,11 @@ fn blr_reads_its_target_before_linking() {
     // blr x30 = 0xd63f03c0
     let cpu = run_program(cpu, 0x1000, &[0xd63f_03c0u32]);
     assert_eq!(cpu.get_pc(), 0x2000, "branched to the old x30");
-    assert_eq!(cpu.read_reg(30), 0x1004, "and linked to the next instruction");
+    assert_eq!(
+        cpu.read_reg(30),
+        0x1004,
+        "and linked to the next instruction"
+    );
 }
 
 #[test]
@@ -3668,18 +3919,44 @@ fn permutes_follow_the_zip_uzp_trn_definitions() {
     let cpu = run_program(
         cpu,
         0x1000,
-        &[0x4e43_285c, 0x4e43_6850, 0x4e43_384a, 0x4e43_784b, 0x4e43_184c, 0x4e43_584d, nop()],
+        &[
+            0x4e43_285c,
+            0x4e43_6850,
+            0x4e43_384a,
+            0x4e43_784b,
+            0x4e43_184c,
+            0x4e43_584d,
+            nop(),
+        ],
     );
     // TRN1 takes the even elements of both, interleaved.
-    assert_eq!(cpu.read_vreg(28), u64x2([0x0004_3000_0001_1000, 0x0040_7000_0010_5000]));
+    assert_eq!(
+        cpu.read_vreg(28),
+        u64x2([0x0004_3000_0001_1000, 0x0040_7000_0010_5000])
+    );
     // TRN2 the odd ones.
-    assert_eq!(cpu.read_vreg(16), u64x2([0x0008_4000_0002_2000, 0x0080_8000_0020_6000]));
+    assert_eq!(
+        cpu.read_vreg(16),
+        u64x2([0x0008_4000_0002_2000, 0x0080_8000_0020_6000])
+    );
     // ZIP1 interleaves the low halves, ZIP2 the high halves.
-    assert_eq!(cpu.read_vreg(10), u64x2([0x0002_2000_0001_1000, 0x0008_4000_0004_3000]));
-    assert_eq!(cpu.read_vreg(11), u64x2([0x0020_6000_0010_5000, 0x0080_8000_0040_7000]));
+    assert_eq!(
+        cpu.read_vreg(10),
+        u64x2([0x0002_2000_0001_1000, 0x0008_4000_0004_3000])
+    );
+    assert_eq!(
+        cpu.read_vreg(11),
+        u64x2([0x0020_6000_0010_5000, 0x0080_8000_0040_7000])
+    );
     // UZP1 packs Vn's even elements then Vm's; UZP2 the odd ones.
-    assert_eq!(cpu.read_vreg(12), u64x2([0x7000_5000_3000_1000, 0x0040_0010_0004_0001]));
-    assert_eq!(cpu.read_vreg(13), u64x2([0x8000_6000_4000_2000, 0x0080_0020_0008_0002]));
+    assert_eq!(
+        cpu.read_vreg(12),
+        u64x2([0x7000_5000_3000_1000, 0x0040_0010_0004_0001])
+    );
+    assert_eq!(
+        cpu.read_vreg(13),
+        u64x2([0x8000_6000_4000_2000, 0x0080_0020_0008_0002])
+    );
 }
 
 #[test]
@@ -3708,10 +3985,7 @@ fn widening_and_by_element_multiplies() {
     // smull v5.4s, v2.4h, v3.4h
     let cpu = run_program(cpu, 0x1000, &[0x0e63_c045, nop()]);
     // 1*4, 2*3, 3*2, 4*-1
-    assert_eq!(
-        lanes_u32(cpu.read_vreg(5)),
-        [4, 6, 6, (-4i32) as u32]
-    );
+    assert_eq!(lanes_u32(cpu.read_vreg(5)), [4, 6, 6, (-4i32) as u32]);
 }
 
 #[test]
@@ -3749,9 +4023,7 @@ fn guest_threads_run_and_hand_over_at_blocking_syscalls() {
         0xb900_0121,    // str w1, [x9]
         0xd400_0141,    // svc #0xa         (ExitThread)
     ];
-    let bytes = |code: &[u32]| -> Vec<u8> {
-        code.iter().flat_map(|i| i.to_le_bytes()).collect()
-    };
+    let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
     cpu.mem.map_zero(0x1000, 0x100).unwrap();
     cpu.mem.map(0x1000, &bytes(&main)).unwrap();
     cpu.mem.map_zero(0x2000, 0x100).unwrap();
@@ -3759,9 +4031,20 @@ fn guest_threads_run_and_hand_over_at_blocking_syscalls() {
     cpu.set_pc(0x1000);
     cpu.run(10_000).unwrap();
 
-    assert!(cpu.halted, "main should reach ExitProcess once the child ran");
-    assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 0x55, "the child set the flag");
-    assert_eq!(cpu.mem.read_u32(0x6004).unwrap(), 0x1234, "with its argument in x0");
+    assert!(
+        cpu.halted,
+        "main should reach ExitProcess once the child ran"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(0x6000).unwrap(),
+        0x55,
+        "the child set the flag"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(0x6004).unwrap(),
+        0x1234,
+        "with its argument in x0"
+    );
     assert_eq!(cpu.thread_count(), 2);
 }
 
@@ -4009,7 +4292,11 @@ fn a_blocking_wait_parks_rather_than_re_asking() {
     let before = cpu.steps;
     cpu.run(1_000_000).unwrap();
 
-    assert_eq!(cpu.mem.read_u32(0x6004).unwrap(), 0x55, "the wait never ended");
+    assert_eq!(
+        cpu.mem.read_u32(0x6004).unwrap(),
+        0x55,
+        "the wait never ended"
+    );
     assert!(
         cpu.cycles >= switch_core::cpu::VSYNC_PERIOD_CYCLES,
         "the wait ended before the display could have refreshed, so it ended for \
@@ -4017,7 +4304,10 @@ fn a_blocking_wait_parks_rather_than_re_asking() {
     );
     // The clock covered a whole refresh. The CPU did not have to execute one.
     let retired = cpu.steps - before;
-    assert!(retired < 1000, "the wait re-asked its way through the period: {retired} steps");
+    assert!(
+        retired < 1000,
+        "the wait re-asked its way through the period: {retired} steps"
+    );
 }
 
 #[test]
@@ -4135,7 +4425,11 @@ fn a_timed_wait_expires_while_the_other_threads_hand_the_cpu_round() {
     assert_eq!(cpu.mem.read_u32(0x9000).unwrap(), 0x55);
     // And it woke *because the time came*, not because something gave up on
     // it: 50 us is 51,000 cycles of the 1.02 GHz clock.
-    assert!(cpu.cycles >= 51_000, "woke after only {} cycles", cpu.cycles);
+    assert!(
+        cpu.cycles >= 51_000,
+        "woke after only {} cycles",
+        cpu.cycles
+    );
 }
 
 #[test]
@@ -4173,24 +4467,24 @@ fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
     // own TLS block and send it, forever. Threads get their TLS at
     // THREAD_TLS_BASE + index * stride, and this is thread 1.
     let child = [
-        0xd282_0009u32, // mov x9, #0x1000
-        movk_x9_tls_high(),                          // (= THREAD_TLS_BASE + stride)
-        0x5280_0081,    // mov w1, #4                  (message type: Request)
-        0xb900_0121,    // str w1, [x9]
-        0x5280_0101,    // mov w1, #8                  (data words)
-        0xb900_0521,    // str w1, [x9, #4]
-        0x5288_ca61,    // mov w1, #0x4653             ("SFCI")
-        0x72a9_2861,    // movk w1, #0x4943, lsl #16
-        0xb900_1121,    // str w1, [x9, #0x10]
-        0x5280_00c1,    // mov w1, #6                  (command: Poll)
-        0xb900_1921,    // str w1, [x9, #0x18]
-        0x5280_0021,    // mov w1, #1                  (nfds)
-        0xb900_2121,    // str w1, [x9, #0x20]
-        0x5280_1901,    // mov w1, #200                (timeout, ms)
-        0xb900_2521,    // str w1, [x9, #0x24]
-        0xd280_0600,    // mov x0, #0x30               (the bsd:u handle)
-        0xd400_0421,    // svc #0x21                   (SendSyncRequest)
-        0x17ff_ffef,    // b -0x44                     (round again)
+        0xd282_0009u32,     // mov x9, #0x1000
+        movk_x9_tls_high(), // (= THREAD_TLS_BASE + stride)
+        0x5280_0081,        // mov w1, #4                  (message type: Request)
+        0xb900_0121,        // str w1, [x9]
+        0x5280_0101,        // mov w1, #8                  (data words)
+        0xb900_0521,        // str w1, [x9, #4]
+        0x5288_ca61,        // mov w1, #0x4653             ("SFCI")
+        0x72a9_2861,        // movk w1, #0x4943, lsl #16
+        0xb900_1121,        // str w1, [x9, #0x10]
+        0x5280_00c1,        // mov w1, #6                  (command: Poll)
+        0xb900_1921,        // str w1, [x9, #0x18]
+        0x5280_0021,        // mov w1, #1                  (nfds)
+        0xb900_2121,        // str w1, [x9, #0x20]
+        0x5280_1901,        // mov w1, #200                (timeout, ms)
+        0xb900_2521,        // str w1, [x9, #0x24]
+        0xd280_0600,        // mov x0, #0x30               (the bsd:u handle)
+        0xd400_0421,        // svc #0x21                   (SendSyncRequest)
+        0x17ff_ffef,        // b -0x44                     (round again)
     ];
     let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
     cpu.mem.map_zero(0x1000, 0x100).unwrap();
@@ -4200,7 +4494,10 @@ fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
     cpu.set_pc(0x1000);
     cpu.run(10_000).unwrap();
 
-    assert!(cpu.halted, "main never got the CPU back from the polling thread");
+    assert!(
+        cpu.halted,
+        "main never got the CPU back from the polling thread"
+    );
     assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 0x55);
 }
 
@@ -4237,23 +4534,36 @@ fn advsimd_scalar_by_element_multiplies() {
     // fmul s3, s4, v3.s[0] -- Rd and Rm are the same register here, which is
     // the real instruction from the title, so it also pins that reading Vm
     // happens before writing Vd.
-    let cpu = simd1(0x5f839083, &[(4, f32b(3.0)), (3, f32b(2.0) | (f32b(9.0) << 32))]);
+    let cpu = simd1(
+        0x5f839083,
+        &[(4, f32b(3.0)), (3, f32b(2.0) | (f32b(9.0) << 32))],
+    );
     assert_eq!(cpu.read_vreg(3), f32b(6.0), "fmul s3, s4, v3.s[0]");
 
     // fmul d0, d1, v2.d[1] -- the index picks the *high* half of Vm, and the
     // 64-bit result must not leave the old top half of Vd behind.
     let cpu = simd1(
         0x5fc29820,
-        &[(1, f64b(1.5)), (2, f64b(1.0) | (f64b(4.0) << 64)), (0, u128::MAX)],
+        &[
+            (1, f64b(1.5)),
+            (2, f64b(1.0) | (f64b(4.0) << 64)),
+            (0, u128::MAX),
+        ],
     );
     assert_eq!(cpu.read_vreg(0), f64b(6.0), "fmul d0, d1, v2.d[1]");
 
     // fmla s0, s1, v2.s[3]: Vd is the accumulator, so 1 + 2*3.
-    let cpu = simd1(0x5fa21820, &[(0, f32b(1.0)), (1, f32b(2.0)), (2, f32b(3.0) << 96)]);
+    let cpu = simd1(
+        0x5fa21820,
+        &[(0, f32b(1.0)), (1, f32b(2.0)), (2, f32b(3.0) << 96)],
+    );
     assert_eq!(cpu.read_vreg(0), f32b(7.0), "fmla s0, s1, v2.s[3]");
 
     // fmls d5, d6, v7.d[0]: 10 - 2*3.
-    let cpu = simd1(0x5fc750c5, &[(5, f64b(10.0)), (6, f64b(2.0)), (7, f64b(3.0))]);
+    let cpu = simd1(
+        0x5fc750c5,
+        &[(5, f64b(10.0)), (6, f64b(2.0)), (7, f64b(3.0))],
+    );
     assert_eq!(cpu.read_vreg(5), f64b(4.0), "fmls d5, d6, v7.d[0]");
 
     // fmulx s0, s1, v2.s[0]: an ordinary multiply...
@@ -4264,7 +4574,11 @@ fn advsimd_scalar_by_element_multiplies() {
     let cpu = simd1(0x7f829020, &[(1, f32b(0.0)), (2, f32b(f32::INFINITY))]);
     assert_eq!(cpu.read_vreg(0), f32b(2.0), "fmulx 0 * inf");
     let cpu = simd1(0x7f829020, &[(1, f32b(-0.0)), (2, f32b(f32::INFINITY))]);
-    assert_eq!(cpu.read_vreg(0), f32b(-2.0), "fmulx -0 * inf keeps the sign");
+    assert_eq!(
+        cpu.read_vreg(0),
+        f32b(-2.0),
+        "fmulx -0 * inf keeps the sign"
+    );
 
     // sqdmulh h0, h1, v2.h[3]: the doubled product's high half. 2*0x4000*0x4000
     // is 0x2000_0000, and the top 16 bits of that are 0x2000.
@@ -4294,7 +4608,10 @@ fn advsimd_scalar_by_element_multiplies() {
     assert_eq!(cpu.read_vreg(0), 930, "sqdmlsl d0, s1, v2.s[1]");
 
     // sqrdmlah s0, s1, v2.s[1]: SQRDMULH accumulated into Vd.
-    let cpu = simd1(0x7fa2d020, &[(0, 7), (1, 1 << 30), (2, (1u128 << 30) << 32)]);
+    let cpu = simd1(
+        0x7fa2d020,
+        &[(0, 7), (1, 1 << 30), (2, (1u128 << 30) << 32)],
+    );
     assert_eq!(cpu.read_vreg(0), (1 << 29) + 7, "sqrdmlah s0, s1, v2.s[1]");
 
     // sqrdmlsh h0, h1, v2.h[2]: and subtracted from it.
@@ -4341,7 +4658,10 @@ fn dup_element_to_a_scalar_takes_the_lane_and_zeroes_the_rest() {
     cpu.set_vreg(0, 0x4444_4444_3333_3333_2222_2222_1111_1111u128);
     cpu.mem.map(0x1000, &0x4e0c0401u32.to_le_bytes()).unwrap();
     cpu.run(1).unwrap();
-    assert_eq!(cpu.read_vreg(1), 0x2222_2222_2222_2222_2222_2222_2222_2222u128);
+    assert_eq!(
+        cpu.read_vreg(1),
+        0x2222_2222_2222_2222_2222_2222_2222_2222u128
+    );
 }
 
 #[test]
@@ -4368,7 +4688,11 @@ fn a_logical_immediate_writes_sp_but_ands_writes_the_zero_register() {
         ],
         8,
     );
-    assert_eq!(cpu.sp(), 0x40, "and (immediate) has to write SP, not discard");
+    assert_eq!(
+        cpu.sp(),
+        0x40,
+        "and (immediate) has to write SP, not discard"
+    );
 
     // ORR is the same register field; `mov sp, x9` is `orr sp, x9, #0` in
     // disguise for exactly this reason.
@@ -4444,21 +4768,21 @@ fn an_audio_thread_appending_buffers_does_not_starve_the_others() {
     // thread 1. The request carries no buffer descriptor, so no samples move;
     // what is under test is who holds the CPU afterwards.
     let child = [
-        0xd282_0009u32, // mov x9, #0x1000
-        movk_x9_tls_high(),                          // (= THREAD_TLS_BASE + stride)
-        0x5280_0081,    // mov w1, #4                  (message type: Request)
-        0xb900_0121,    // str w1, [x9]
-        0x5280_0101,    // mov w1, #8                  (data words)
-        0xb900_0521,    // str w1, [x9, #4]
-        0x5288_ca61,    // mov w1, #0x4653             ("SFCI")
-        0x72a9_2861,    // movk w1, #0x4943, lsl #16
-        0xb900_1121,    // str w1, [x9, #0x10]
-        0x5280_0061,    // mov w1, #3                  (AppendAudioOutBuffer)
-        0xb900_1921,    // str w1, [x9, #0x18]
-        0xd28c_200a,    // mov x10, #0x6100
-        0xf940_0140,    // ldr x0, [x10]               (the IAudioOut handle)
-        0xd400_0421,    // svc #0x21                   (SendSyncRequest)
-        0x17ff_fff4,    // b -0x30                     (round again)
+        0xd282_0009u32,     // mov x9, #0x1000
+        movk_x9_tls_high(), // (= THREAD_TLS_BASE + stride)
+        0x5280_0081,        // mov w1, #4                  (message type: Request)
+        0xb900_0121,        // str w1, [x9]
+        0x5280_0101,        // mov w1, #8                  (data words)
+        0xb900_0521,        // str w1, [x9, #4]
+        0x5288_ca61,        // mov w1, #0x4653             ("SFCI")
+        0x72a9_2861,        // movk w1, #0x4943, lsl #16
+        0xb900_1121,        // str w1, [x9, #0x10]
+        0x5280_0061,        // mov w1, #3                  (AppendAudioOutBuffer)
+        0xb900_1921,        // str w1, [x9, #0x18]
+        0xd28c_200a,        // mov x10, #0x6100
+        0xf940_0140,        // ldr x0, [x10]               (the IAudioOut handle)
+        0xd400_0421,        // svc #0x21                   (SendSyncRequest)
+        0x17ff_fff4,        // b -0x30                     (round again)
     ];
     let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
     cpu.mem.map_zero(0x1000, 0x100).unwrap();
@@ -4468,7 +4792,10 @@ fn an_audio_thread_appending_buffers_does_not_starve_the_others() {
     cpu.set_pc(0x1000);
     cpu.run(10_000).unwrap();
 
-    assert!(cpu.halted, "main never got the CPU back from the mixing thread");
+    assert!(
+        cpu.halted,
+        "main never got the CPU back from the mixing thread"
+    );
     assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 0x55);
 }
 
@@ -4522,8 +4849,16 @@ fn set_thread_activity_takes_a_thread_out_of_the_rotation() {
     cpu.run(10_000).unwrap();
 
     assert!(cpu.halted, "main should reach ExitProcess");
-    assert_eq!(cpu.mem.read_u32(0x6004).unwrap(), 0, "a suspended thread must not run");
-    assert_eq!(cpu.mem.read_u32(0x6000).unwrap(), 0x55, "and must run once resumed");
+    assert_eq!(
+        cpu.mem.read_u32(0x6004).unwrap(),
+        0,
+        "a suspended thread must not run"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(0x6000).unwrap(),
+        0x55,
+        "and must run once resumed"
+    );
 }
 
 #[test]
@@ -4568,9 +4903,7 @@ fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
         0xb900_0122,    // str w2, [x9]
         0xd400_0141,    // svc #0xa
     ];
-    let bytes = |code: &[u32]| -> Vec<u8> {
-        code.iter().flat_map(|i| i.to_le_bytes()).collect()
-    };
+    let bytes = |code: &[u32]| -> Vec<u8> { code.iter().flat_map(|i| i.to_le_bytes()).collect() };
     cpu.mem.map_zero(0x1000, 0x100).unwrap();
     cpu.mem.map(0x1000, &bytes(&main)).unwrap();
     cpu.mem.map_zero(0x2000, 0x100).unwrap();
@@ -4648,7 +4981,11 @@ fn a_timed_out_condvar_wait_comes_back_holding_its_mutex() {
     let child_handle = cpu.mem.read_u32(0x6008).unwrap();
     assert_ne!(child_handle, 0, "the child was created");
     assert_ne!(observed, 0, "the wait came back to a mutex owned by nobody");
-    assert_eq!(observed & !0x4000_0000, child_handle, "and it is the waiter's own");
+    assert_eq!(
+        observed & !0x4000_0000,
+        child_handle,
+        "and it is the waiter's own"
+    );
 }
 
 #[test]
@@ -4777,7 +5114,9 @@ fn ipc_request_plain_with_buffer(
         cpu.mem.write_u32(tls + i, 0).unwrap();
     }
     // Send buffers count in bits 23:20, receive buffers in 27:24.
-    cpu.mem.write_u32(tls, 4 | (1 << if recv { 24 } else { 20 })).unwrap();
+    cpu.mem
+        .write_u32(tls, 4 | (1 << if recv { 24 } else { 20 }))
+        .unwrap();
     cpu.mem.write_u32(tls + 4, 0x0c).unwrap();
     cpu.mem.write_u32(tls + 0x08, len).unwrap();
     cpu.mem.write_u32(tls + 0x0c, buf).unwrap();
@@ -4814,25 +5153,53 @@ fn caps_a_reports_a_mounted_empty_album() {
     // Unknown18 -> the number of bytes written into the caller's buffer.
     ipc_request_plain(&mut cpu, CAPS, 18, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "Unknown18 failed");
-    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "claimed to have written bytes");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        0,
+        "claimed to have written bytes"
+    );
 
     // IsAlbumMounted(AlbumStorage::Nand) -> bool.
     ipc_request_plain(&mut cpu, CAPS, 5, &0u8.to_le_bytes());
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "IsAlbumMounted failed");
-    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 1, "the album is not mounted");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "IsAlbumMounted failed"
+    );
+    assert_eq!(
+        cpu.mem.read_u8(tls + 0x20).unwrap(),
+        1,
+        "the album is not mounted"
+    );
 
     // GetAutoSavingStorage -> bool. There is no SD card to save to.
     ipc_request_plain(&mut cpu, CAPS, 401, &[]);
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "GetAutoSavingStorage failed");
-    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 0, "captures are being auto-saved");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "GetAutoSavingStorage failed"
+    );
+    assert_eq!(
+        cpu.mem.read_u8(tls + 0x20).unwrap(),
+        0,
+        "captures are being auto-saved"
+    );
 
     // And the album it says is mounted is empty, by both the count and the
     // list — a caller told "mounted" asks these next, and a count it cannot
     // trust is worse than no service at all.
     for cmd in [0u32, 1, 100, 101] {
         ipc_request_plain(&mut cpu, CAPS, cmd, &0u8.to_le_bytes());
-        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "caps:a {cmd} failed");
-        assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), 0, "caps:a {cmd} found a file");
+        assert_eq!(
+            cpu.mem.read_u32(tls + 0x18).unwrap(),
+            0,
+            "caps:a {cmd} failed"
+        );
+        assert_eq!(
+            cpu.mem.read_u64(tls + 0x20).unwrap(),
+            0,
+            "caps:a {cmd} found a file"
+        );
     }
 }
 
@@ -4854,8 +5221,16 @@ fn the_applet_capture_buffer_names_a_slot_nothing_renders_into() {
 
     for cmd in [22u32, 24, 26] {
         ipc_request_plain(&mut cpu, APPLET, cmd, &[]);
-        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "acquire {cmd} failed");
-        assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "acquire {cmd} wrote nothing");
+        assert_eq!(
+            cpu.mem.read_u32(tls + 0x18).unwrap(),
+            0,
+            "acquire {cmd} failed"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(tls + 0x20).unwrap(),
+            1,
+            "acquire {cmd} wrote nothing"
+        );
         // The slot named is past the ones `AcquireSharedFrameBuffer` hands
         // out, so the black it claims to be stays black.
         let slot = cpu.mem.read_u32(tls + 0x24).unwrap();
@@ -4892,11 +5267,19 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
     args.extend_from_slice(&2u32.to_le_bytes());
     args.extend_from_slice(&0u64.to_le_bytes()); // aruid
     ipc_request_plain(&mut cpu, AUDOUT, 1, &args);
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "OpenAudioOut failed");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "OpenAudioOut failed"
+    );
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 48_000);
     assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 2);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 2, "PcmFormat::Int16");
-    assert_eq!(cpu.mem.read_u32(tls + 0x2c).unwrap(), 1, "a device opens stopped");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x2c).unwrap(),
+        1,
+        "a device opens stopped"
+    );
     // { send_pid:1, num_copy:4, num_move:4 }: one move handle, no copy ones.
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 5);
     let device = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
@@ -4908,7 +5291,11 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
     let event = cpu.mem.read_u32(tls + 0x0c).unwrap();
     assert_ne!(event, 0);
     // Nothing has been played, so nothing has been released.
-    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0xEA01, "event fired early");
+    assert_eq!(
+        wait_sync(&mut cpu, &[event], 0).0,
+        0xEA01,
+        "event fired early"
+    );
 
     // StartAudioOut, then hand over one buffer of four stereo frames.
     ipc_request_plain(&mut cpu, device, 1, &[]);
@@ -4926,7 +5313,11 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
     cpu.mem.write_u64(DESC + 24, 16).unwrap();
     cpu.mem.write_u64(DESC + 32, 0).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &TAG.to_le_bytes());
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "AppendAudioOutBuffer failed");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "AppendAudioOutBuffer failed"
+    );
 
     // The samples reached the host, unchanged, at full volume. That happens on
     // arrival: it is the *tag* that waits for the device, not the audio.
@@ -4939,9 +5330,17 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
     // 85,000 of the 1.02 GHz cycles one emulated instruction stands for.
     // Releasing on arrival is what let Just Dance 2019 run its audio clock at
     // 205x real time and drop every frame of its boot video.
-    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0xEA01, "released before it could play");
+    assert_eq!(
+        wait_sync(&mut cpu, &[event], 0).0,
+        0xEA01,
+        "released before it could play"
+    );
     ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
-    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "a tag came back early");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        0,
+        "a tag came back early"
+    );
 
     // Give the device that long. A branch-to-self is the cheapest way to spend
     // the cycles, and spending them is the point: the clock is the instruction
@@ -4953,7 +5352,11 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
     cpu.set_pc(0x1000);
 
     // Now it comes back: the event fires and the tag is collectable.
-    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0, "the played buffer did not fire");
+    assert_eq!(
+        wait_sync(&mut cpu, &[event], 0).0,
+        0,
+        "the played buffer did not fire"
+    );
     ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "no tag released");
     assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
@@ -5012,8 +5415,16 @@ fn audout_release_zeroes_the_entry_after_the_last_tag() {
     cpu.mem.write_u64(TAGS, GARBAGE).unwrap();
     cpu.mem.write_u64(TAGS + 8, GARBAGE).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
-    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "a tag came back early");
-    assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), 0, "the guest kept reading its own stack");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        0,
+        "a tag came back early"
+    );
+    assert_eq!(
+        cpu.mem.read_u64(TAGS).unwrap(),
+        0,
+        "the guest kept reading its own stack"
+    );
 
     // Once the device is done with it the tag lands in the first slot, and the
     // zero moves along to the one after it.
@@ -5028,7 +5439,11 @@ fn audout_release_zeroes_the_entry_after_the_last_tag() {
     ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "no tag released");
     assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
-    assert_eq!(cpu.mem.read_u64(TAGS + 8).unwrap(), 0, "no terminator after the last tag");
+    assert_eq!(
+        cpu.mem.read_u64(TAGS + 8).unwrap(),
+        0,
+        "no terminator after the last tag"
+    );
 }
 
 #[test]
@@ -5085,7 +5500,11 @@ fn audren_update_reply_has_a_section_for_every_count_the_renderer_was_opened_wit
     ipc_request_plain_with_buffer(&mut cpu, renderer, 4, OUT, 0x1000, true, &[]);
     assert_eq!(section(&cpu, 0x14), 3 * 16, "revision-4 effects");
     assert_eq!(section(&cpu, 0x28), 0, "revision-4 renderer info");
-    assert_eq!(section(&cpu, 0x3c), 64 + 176 + 32 + 3 * 16 + 32 + 16 + 176, "revision-4 total");
+    assert_eq!(
+        section(&cpu, 0x3c),
+        64 + 176 + 32 + 3 * 16 + 32 + 16 + 176,
+        "revision-4 total"
+    );
 }
 
 /// The section strides of a `RequestUpdateAudioRenderer` **input**, from
@@ -5158,7 +5577,15 @@ impl AudrenUpdate {
     }
 
     /// A started voice playing one wave buffer of `samples` samples.
-    fn voice(&mut self, id: usize, format: u8, channels: u32, address: u32, size: u32, samples: u32) {
+    fn voice(
+        &mut self,
+        id: usize,
+        format: u8,
+        channels: u32,
+        address: u32,
+        size: u32,
+        samples: u32,
+    ) {
         let at = self.voices_at + id * AUDREN_IN_VOICE;
         self.put(at, id as u32);
         self.data[at + 0x08] = 1; // is_new
@@ -5211,8 +5638,8 @@ impl AudrenUpdate {
         let at = self.sinks_at;
         self.data[at] = 1; // AudioRendererSinkType_Device
         self.data[at + 1] = 1; // is_used
-        // The union sits past the type, the node id and three reserved words,
-        // and a device sink's name fills the 0x100 bytes at the top of it.
+                               // The union sits past the type, the node id and three reserved words,
+                               // and a device sink's name fills the 0x100 bytes at the top of it.
         let sink = at + 0x20;
         self.put(sink + 0x100, inputs.len() as u32);
         for (i, &input) in inputs.iter().enumerate() {
@@ -5298,7 +5725,11 @@ fn audren_mixes_a_voice_through_to_the_host() {
     update.send(&mut cpu, renderer, IN, OUT, 0x2000);
 
     let mut played = vec![0i16; FRAMES as usize * 2];
-    assert_eq!(cpu.take_audio(&mut played), played.len(), "the mix never reached the host");
+    assert_eq!(
+        cpu.take_audio(&mut played),
+        played.len(),
+        "the mix never reached the host"
+    );
     assert_eq!(cpu.audio_format(), (48_000, 2));
     // The voice is mono into both mix buffers and the sink reads one into each
     // output channel, so the frame is the source doubled up — and it is
@@ -5313,7 +5744,11 @@ fn audren_mixes_a_voice_through_to_the_host() {
     // renders no further frames.
     update.send(&mut cpu, renderer, IN, OUT, 0x2000);
     let mut again = [0i16; 2];
-    assert_eq!(cpu.take_audio(&mut again), 0, "a frame was rendered that no time had come due for");
+    assert_eq!(
+        cpu.take_audio(&mut again),
+        0,
+        "a frame was rendered that no time had come due for"
+    );
 }
 
 #[test]
@@ -5348,8 +5783,16 @@ fn audren_reports_the_wave_buffers_it_finished_with() {
     update.send(&mut cpu, renderer, IN, OUT, 0x2000);
 
     // Exactly one frame of samples, so the buffer is played out exactly.
-    assert_eq!(cpu.mem.read_u64(OUT + VOICE_OUT).unwrap(), u64::from(FRAMES), "played sample count");
-    assert_eq!(cpu.mem.read_u32(OUT + VOICE_OUT + 8).unwrap(), 1, "the wave buffer never came back");
+    assert_eq!(
+        cpu.mem.read_u64(OUT + VOICE_OUT).unwrap(),
+        u64::from(FRAMES),
+        "played sample count"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(OUT + VOICE_OUT + 8).unwrap(),
+        1,
+        "the wave buffer never came back"
+    );
 }
 
 #[test]
@@ -5381,15 +5824,15 @@ fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
     // Frame 1: pair 1, shift 0, every nibble 1 — a running +1 from the -2 the
     // first frame ended on.
     let data: [u8; 16] = [
-        0x00, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE,
-        0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x00, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+        0x11,
     ];
     for (i, &b) in data.iter().enumerate() {
         cpu.mem.write_u8(DATA + i as u32, b).unwrap();
     }
     let expected: [i16; 28] = [
-        1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2,
-        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+        1, 2, 3, 4, 5, 6, 7, -8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
+        12,
     ];
 
     let mut update = AudrenUpdate::new(1, 1, 1);
@@ -5409,7 +5852,11 @@ fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
     }
     // Past the end of the wave buffer the voice interpolates down to silence
     // rather than holding its last sample, which would leave a DC step behind.
-    assert_eq!(played[expected.len() * 2], 0, "the voice kept playing past its data");
+    assert_eq!(
+        played[expected.len() * 2],
+        0,
+        "the voice kept playing past its data"
+    );
 }
 
 #[test]
@@ -5429,16 +5876,28 @@ fn audren_frame_event_fires_on_the_clock() {
     // QuerySystemEvent. Events are *copy* handles: sent as a move handle it
     // reads back as 0 on the other side.
     ipc_request_plain(&mut cpu, renderer, 7, &[]);
-    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1, "not a copy handle");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x08).unwrap(),
+        1 << 1,
+        "not a copy handle"
+    );
     let event = cpu.mem.read_u32(tls + 0x0c).unwrap();
     assert_ne!(event, 0, "no frame event came back");
 
     // No time has passed, so the frame is not due.
-    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0xEA01, "the frame event fired early");
+    assert_eq!(
+        wait_sync(&mut cpu, &[event], 0).0,
+        0xEA01,
+        "the frame event fired early"
+    );
 
     // Five milliseconds of it, and it is.
     cpu.cycles += AUDREN_FRAME_CYCLES;
-    assert_eq!(wait_sync(&mut cpu, &[event], 0).0, 0, "the frame event never fired");
+    assert_eq!(
+        wait_sync(&mut cpu, &[event], 0).0,
+        0,
+        "the frame event never fired"
+    );
 }
 
 #[test]
@@ -5477,9 +5936,20 @@ fn audren_refuses_a_wave_buffer_that_is_outside_its_allocation() {
     update.send(&mut cpu, renderer, IN, OUT, 0x2000);
 
     let mut played = vec![0i16; 240 * 2];
-    assert_eq!(cpu.take_audio(&mut played), played.len(), "the sink stopped producing frames");
-    assert!(played.iter().all(|&s| s == 0), "unplayable samples reached the host");
-    assert_eq!(cpu.mem.read_u32(OUT + VOICE_OUT + 8).unwrap(), 1, "the buffer never came back");
+    assert_eq!(
+        cpu.take_audio(&mut played),
+        played.len(),
+        "the sink stopped producing frames"
+    );
+    assert!(
+        played.iter().all(|&s| s == 0),
+        "unplayable samples reached the host"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(OUT + VOICE_OUT + 8).unwrap(),
+        1,
+        "the buffer never came back"
+    );
 }
 
 #[test]
@@ -5525,10 +5995,18 @@ fn audout_refuses_a_buffer_whose_samples_are_outside_it() {
     cpu.mem.write_u64(DESC + 24, 8).unwrap();
     cpu.mem.write_u64(DESC + 32, 16).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 7, DESC, 40, false, &TAG.to_le_bytes());
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "the append is still accepted");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "the append is still accepted"
+    );
 
     let mut played = [0i16; 8];
-    assert_eq!(cpu.take_audio(&mut played), 0, "unplayable samples reached the host");
+    assert_eq!(
+        cpu.take_audio(&mut played),
+        0,
+        "unplayable samples reached the host"
+    );
 
     // And the guest gets its buffer back, so its audio thread does not stall
     // waiting for one it will never see again.
@@ -5537,7 +6015,11 @@ fn audout_refuses_a_buffer_whose_samples_are_outside_it() {
         let _ = cpu.step();
     }
     ipc_request_plain_with_buffer(&mut cpu, device, 8, TAGS, 16, true, &[]);
-    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "the buffer was never released");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        1,
+        "the buffer was never released"
+    );
     assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
 }
 
@@ -5560,8 +6042,16 @@ fn audout_reads_the_channel_count_as_sixteen_bits() {
     args.extend_from_slice(&0xcafe_0002u32.to_le_bytes()); // stereo, plus junk
     args.extend_from_slice(&0u64.to_le_bytes()); // aruid
     ipc_request_plain(&mut cpu, AUDOUT, 1, &args);
-    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 48_000, "device default rate");
-    assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 2, "the padding leaked through");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        48_000,
+        "device default rate"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x24).unwrap(),
+        2,
+        "the padding leaked through"
+    );
 }
 
 #[test]
@@ -5594,7 +6084,11 @@ fn audout_does_not_play_a_stopped_device() {
     ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &7u64.to_le_bytes());
 
     let mut played = [0i16; 4];
-    assert_eq!(cpu.take_audio(&mut played), 0, "a stopped device played something");
+    assert_eq!(
+        cpu.take_audio(&mut played),
+        0,
+        "a stopped device played something"
+    );
     // The tag still comes back.
     ipc_request_plain(&mut cpu, device, 9, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1);
@@ -5716,19 +6210,30 @@ fn the_binder_transacts_on_the_command_a_pre_3_0_0_sdk_sends() {
             &data,
         );
 
-        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "cmd {cmd} was refused");
+        assert_eq!(
+            cpu.mem.read_u32(tls + 0x18).unwrap(),
+            0,
+            "cmd {cmd} was refused"
+        );
         // The reply parcel: `{ i32 value, i32 status }` behind the same
         // four-word header the request carries.
         let payload_size = cpu.mem.read_u32(REPLY).unwrap();
         let payload_off = cpu.mem.read_u32(REPLY + 4).unwrap();
         assert_eq!(payload_off, 16, "cmd {cmd}: no reply parcel came back");
-        assert_eq!(payload_size, 8, "cmd {cmd}: the reply is a value and a status");
+        assert_eq!(
+            payload_size, 8,
+            "cmd {cmd}: the reply is a value and a status"
+        );
         assert_eq!(
             cpu.mem.read_u32(REPLY + payload_off).unwrap(),
             1280,
             "cmd {cmd}: the queue answered a width query with something else"
         );
-        assert_eq!(cpu.mem.read_u32(REPLY + payload_off + 4).unwrap(), 0, "cmd {cmd} failed");
+        assert_eq!(
+            cpu.mem.read_u32(REPLY + payload_off + 4).unwrap(),
+            0,
+            "cmd {cmd} failed"
+        );
     }
 }
 
@@ -5769,10 +6274,18 @@ fn vi_native_window_names_the_binder_interface() {
     assert_eq!(payload_off, 0x10);
     assert_eq!(objects_size, 4, "one object in the offset table");
     assert_eq!(objects_off, payload_off + payload_size);
-    assert_eq!(size, objects_off + objects_size, "the reported size must cover it all");
+    assert_eq!(
+        size,
+        objects_off + objects_size,
+        "the reported size must cover it all"
+    );
 
     let payload = WINDOW + payload_off;
-    assert_eq!(cpu.mem.read_u32(payload).unwrap(), 2, "flat_binder_object type");
+    assert_eq!(
+        cpu.mem.read_u32(payload).unwrap(),
+        2,
+        "flat_binder_object type"
+    );
     let binder = cpu.mem.read_u64(payload + 8).unwrap();
     assert_ne!(binder, 0, "no IGraphicBufferProducer id");
     let mut name = [0u8; 8];
@@ -5781,7 +6294,6 @@ fn vi_native_window_names_the_binder_interface() {
     }
     assert_eq!(&name, b"dispdrv\0", "the interface has to name itself");
 }
-
 
 #[test]
 fn an_undriven_gpio_pad_reads_high() {
@@ -5803,7 +6315,11 @@ fn an_undriven_gpio_pad_reads_high() {
     args.extend_from_slice(&VOLUME_UP.to_le_bytes());
     args.extend_from_slice(&1u32.to_le_bytes());
     ipc_request_plain(&mut cpu, GPIO, 7, &args);
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "OpenSession2 failed");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "OpenSession2 failed"
+    );
     // { send_pid:1, num_copy:4, num_move:4 }: the session is a move handle.
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 5);
     let pad = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
@@ -5812,7 +6328,11 @@ fn an_undriven_gpio_pad_reads_high() {
     // IPadSession::GetValue -> GpioValue::High.
     ipc_request_plain(&mut cpu, pad, 9, &[]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "GetValue failed");
-    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "an undriven pad is High");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        1,
+        "an undriven pad is High"
+    );
 
     // GetInterruptStatus: nothing drives the pad, so nothing is pending.
     ipc_request_plain(&mut cpu, pad, 6, &[]);
@@ -5848,17 +6368,29 @@ fn a_fabricated_reply_fills_both_handle_slots() {
     // first in the reply, so the event is at +0x0c and the object at +0x10,
     // and the raw section starts at the next 16-byte boundary after them.
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), (1 << 1) | (1 << 5));
-    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "OpenContentStorage failed");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x28).unwrap(),
+        0,
+        "OpenContentStorage failed"
+    );
     let event = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     let storage = u64::from(cpu.mem.read_u32(tls + 0x10).unwrap());
-    assert_ne!(storage, 0, "a success with no object is worse than a failure");
-    assert_ne!(event, 0, "a success with no event is the same bug in the other slot");
+    assert_ne!(
+        storage, 0,
+        "a success with no object is worse than a failure"
+    );
+    assert_ne!(
+        event, 0,
+        "a success with no event is the same bug in the other slot"
+    );
     assert_ne!(event, storage);
 
     // The sub-session reaches the same service, so a command on it is
     // dispatched rather than falling through as an untracked handle.
     let handles = cpu.service_handles_snapshot();
-    assert!(handles.iter().any(|(h, name)| *h == storage && name == "ncm"));
+    assert!(handles
+        .iter()
+        .any(|(h, name)| *h == storage && name == "ncm"));
 
     // The event is real and quiet: a caller that waits on it is waiting for
     // something that never happens, which is the truth, rather than acting on
@@ -5889,7 +6421,11 @@ fn the_home_menu_opens_a_system_applet_proxy() {
 
     // OpenSystemAppletProxy(u64 reserved, pid, process handle) -> ISystemAppletProxy.
     ipc_request_plain(&mut cpu, APPLET, 100, &0u64.to_le_bytes());
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "the Home Menu was refused");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "the Home Menu was refused"
+    );
     let proxy = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(proxy, 0, "no ISystemAppletProxy came back");
 
@@ -5953,11 +6489,19 @@ fn the_display_answers_what_it_is() {
     // ListDisplays -> one DisplayInfo { char name[0x40]; bool limited; pad[7];
     // u64 layer_limit; u64 width; u64 height }, and a count of one.
     ipc_request_plain_with_buffer(&mut cpu, display, 1000, BUF, 0xc0, true, &[]);
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "ListDisplays failed");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "ListDisplays failed"
+    );
     assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), 1, "no displays");
     let name: Vec<u8> = (0..7).map(|i| cpu.mem.read_u8(BUF + i).unwrap()).collect();
     assert_eq!(&name, b"Default");
-    assert_eq!(cpu.mem.read_u8(BUF + 0x40).unwrap(), 1, "layer limit not enabled");
+    assert_eq!(
+        cpu.mem.read_u8(BUF + 0x40).unwrap(),
+        1,
+        "layer limit not enabled"
+    );
     assert_eq!(cpu.mem.read_u64(BUF + 0x50).unwrap(), 1280);
     assert_eq!(cpu.mem.read_u64(BUF + 0x58).unwrap(), 720);
 
@@ -5967,7 +6511,10 @@ fn the_display_answers_what_it_is() {
     open[..7].copy_from_slice(b"Default");
     ipc_request_plain(&mut cpu, display, 1010, &open);
     let display_id = cpu.mem.read_u64(tls + 0x20).unwrap();
-    assert_ne!(display_id, 0, "a display id of 0 is the no-display sentinel");
+    assert_ne!(
+        display_id, 0,
+        "a display id of 0 is the no-display sentinel"
+    );
 
     // GetDisplayResolution, on the same interface, has to agree with it.
     ipc_request_plain(&mut cpu, display, 1102, &display_id.to_le_bytes());
@@ -5983,9 +6530,25 @@ fn the_display_answers_what_it_is() {
     for i in 0..0x40u32 {
         cpu.mem.write_u32(BUF + i * 4, 0xDEAD_BEEF).unwrap();
     }
-    ipc_request_plain_with_buffer(&mut cpu, system, 3000, BUF, 0x100, true, &display_id.to_le_bytes());
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "ListDisplayModes failed");
-    assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), 1, "no modes to pick from");
+    ipc_request_plain_with_buffer(
+        &mut cpu,
+        system,
+        3000,
+        BUF,
+        0x100,
+        true,
+        &display_id.to_le_bytes(),
+    );
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "ListDisplayModes failed"
+    );
+    assert_eq!(
+        cpu.mem.read_u64(tls + 0x20).unwrap(),
+        1,
+        "no modes to pick from"
+    );
     assert_eq!(cpu.mem.read_u32(BUF).unwrap(), 1280);
     assert_eq!(cpu.mem.read_u32(BUF + 4).unwrap(), 720);
     assert_eq!(f32::from_bits(cpu.mem.read_u32(BUF + 8).unwrap()), 60.0);
@@ -6020,7 +6583,11 @@ fn nifm_answers_a_system_title_the_same_as_an_application() {
         "GetCurrentIpAddress did not answer with an address"
     );
     ipc_request_plain(&mut cpu, general, 18, &[]); // GetInternetConnectionStatus
-    assert_eq!(cpu.mem.read_u8(tls + 0x20).unwrap(), 2, "not an ethernet link");
+    assert_eq!(
+        cpu.mem.read_u8(tls + 0x20).unwrap(),
+        2,
+        "not an ethernet link"
+    );
     assert_eq!(cpu.mem.read_u8(tls + 0x22).unwrap(), 2, "not connected");
 
     // A request on a link that is up is accepted the moment it is made, and
@@ -6029,20 +6596,32 @@ fn nifm_answers_a_system_title_the_same_as_an_application() {
     let request = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(request, 0, "no IRequest");
     ipc_request_plain(&mut cpu, request, 0, &[]); // GetRequestState
-    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 3, "the request was not accepted");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        3,
+        "the request was not accepted"
+    );
 
     ipc_request_plain(&mut cpu, request, 2, &[]); // GetSystemEventReadableHandles
-    // { send_pid:1, num_copy:4, num_move:4 }: **two** copy handles. One left
-    // the caller holding a session for the second, and a bare success left it
-    // holding 0 for both.
+                                                  // { send_pid:1, num_copy:4, num_move:4 }: **two** copy handles. One left
+                                                  // the caller holding a session for the second, and a bare success left it
+                                                  // holding 0 for both.
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 2 << 1);
     let state = cpu.mem.read_u32(tls + 0x0c).unwrap();
     let done = cpu.mem.read_u32(tls + 0x10).unwrap();
     assert_ne!(state, 0);
     assert_ne!(done, 0);
     assert_ne!(state, done);
-    assert_eq!(wait_sync(&mut cpu, &[state], 0).0, 0, "the state never settled");
-    assert_eq!(wait_sync(&mut cpu, &[done], 0).0, 0, "the request never finished");
+    assert_eq!(
+        wait_sync(&mut cpu, &[state], 0).0,
+        0,
+        "the state never settled"
+    );
+    assert_eq!(
+        wait_sync(&mut cpu, &[done], 0).0,
+        0,
+        "the request never finished"
+    );
 }
 
 #[test]
@@ -6065,10 +6644,22 @@ fn a_service_with_no_stub_still_answers_its_control_commands() {
     for msg_type in [5u32, 7] {
         build_ipc_request(&mut cpu, msg_type, None, 3); // QueryPointerBufferSize
         run_ipc_request(&mut cpu, NIFM);
-        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "type {msg_type} refused");
-        assert_eq!(cpu.mem.read_u16(tls + 0x20).unwrap(), 0, "type {msg_type}: not a size");
+        assert_eq!(
+            cpu.mem.read_u32(tls + 0x18).unwrap(),
+            0,
+            "type {msg_type} refused"
+        );
+        assert_eq!(
+            cpu.mem.read_u16(tls + 0x20).unwrap(),
+            0,
+            "type {msg_type}: not a size"
+        );
         // And no handle came with it: a size is not an object.
-        assert_eq!(cpu.mem.read_u32(tls + 0x04).unwrap() >> 31, 0, "type {msg_type}: handles");
+        assert_eq!(
+            cpu.mem.read_u32(tls + 0x04).unwrap() >> 31,
+            0,
+            "type {msg_type}: handles"
+        );
     }
 
     // ConvertToDomain is the other control command, and it *does* answer with
@@ -6078,7 +6669,10 @@ fn a_service_with_no_stub_still_answers_its_control_commands() {
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
     let object = cpu.mem.read_u32(tls + 0x20).unwrap();
     assert_ne!(object, 0, "no domain object came back");
-    assert_eq!(cpu.domain_interface_name(NIFM, object).as_deref(), Some("btm:sys"));
+    assert_eq!(
+        cpu.domain_interface_name(NIFM, object).as_deref(),
+        Some("btm:sys")
+    );
 }
 
 #[test]
@@ -6104,7 +6698,11 @@ fn the_display_refreshes_without_being_drawn_to() {
     assert_ne!(vsync, 0);
 
     // The period has not passed yet, and nothing has been presented.
-    assert_eq!(wait_sync(&mut cpu, &[vsync], 0).0, RESULT_TIMED_OUT, "vsync fired early");
+    assert_eq!(
+        wait_sync(&mut cpu, &[vsync], 0).0,
+        RESULT_TIMED_OUT,
+        "vsync fired early"
+    );
 
     // Run out the refresh period on nops. The event fires on its own, with no
     // frame behind it, and being auto-clearing it fires once per period.
@@ -6114,8 +6712,16 @@ fn the_display_refreshes_without_being_drawn_to() {
         cpu.set_pc(0x2000);
         cpu.step().unwrap();
     }
-    assert_eq!(wait_sync(&mut cpu, &[vsync], 0).0, 0, "the display never refreshed");
-    assert_eq!(wait_sync(&mut cpu, &[vsync], 0).0, RESULT_TIMED_OUT, "it refreshed twice");
+    assert_eq!(
+        wait_sync(&mut cpu, &[vsync], 0).0,
+        0,
+        "the display never refreshed"
+    );
+    assert_eq!(
+        wait_sync(&mut cpu, &[vsync], 0).0,
+        RESULT_TIMED_OUT,
+        "it refreshed twice"
+    );
 }
 
 #[test]
@@ -6139,7 +6745,10 @@ fn closing_a_domain_object_is_not_command_zero() {
     ipc_request(&mut cpu, FS, 4, Some(root), 200);
     let storage = cpu.mem.read_u32(tls + 0x30).unwrap();
     assert_ne!(storage, 0, "no IStorage came back");
-    assert_eq!(cpu.domain_interface_name(FS, storage), Some("fsp-srv-storage".to_owned()));
+    assert_eq!(
+        cpu.domain_interface_name(FS, storage),
+        Some("fsp-srv-storage".to_owned())
+    );
 
     // A close, marshalled the way a caller marshals one: the domain header's
     // type byte is 2 and there is no CmifInHeader behind it.
@@ -6152,7 +6761,11 @@ fn closing_a_domain_object_is_not_command_zero() {
     cpu.mem.write_u32(tls + 0x14, storage).unwrap();
     run_ipc_request(&mut cpu, FS);
 
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "the close was refused");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "the close was refused"
+    );
     assert_eq!(
         cpu.domain_interface_name(FS, storage),
         None,
@@ -6182,7 +6795,11 @@ fn vi_reads_a_control_request_in_either_encoding() {
     for msg_type in [5u32, 7] {
         build_ipc_request(&mut cpu, msg_type, None, 3);
         run_ipc_request(&mut cpu, VI);
-        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "type {msg_type} refused");
+        assert_eq!(
+            cpu.mem.read_u32(tls + 0x18).unwrap(),
+            0,
+            "type {msg_type} refused"
+        );
         assert_eq!(
             cpu.mem.read_u16(tls + 0x20).unwrap(),
             0,
@@ -6196,7 +6813,11 @@ fn vi_reads_a_control_request_in_either_encoding() {
     build_ipc_request(&mut cpu, 7, None, 0);
     run_ipc_request(&mut cpu, VI);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
-    assert_ne!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "no domain object came back");
+    assert_ne!(
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        0,
+        "no domain object came back"
+    );
 }
 
 /// `svcResetSignal(handle)`.
@@ -6226,7 +6847,11 @@ fn reset_signal_reports_whether_the_event_had_fired() {
     // transition waiting.
     ipc_request(&mut cpu, applet, 4, Some(state_getter), 0); // GetEventHandle
     let message = cpu.mem.read_u32(tls + 0x0c).unwrap();
-    assert_eq!(reset_signal(&mut cpu, message), 0, "the queued message did not announce itself");
+    assert_eq!(
+        reset_signal(&mut cpu, message),
+        0,
+        "the queued message did not announce itself"
+    );
     assert_eq!(
         reset_signal(&mut cpu, message),
         RESULT_INVALID_STATE,
@@ -6253,7 +6878,11 @@ fn the_system_shared_buffer_hands_out_slots_an_applet_can_present() {
     // where it comes into being; nothing in the guest ever created it.
     ipc_request(&mut cpu, VI, 4, None, 8225);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
-    assert_ne!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "no nvmap handle came back");
+    assert_ne!(
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        0,
+        "no nvmap handle came back"
+    );
     assert_eq!(
         cpu.mem.read_u64(tls + 0x28).unwrap(),
         u64::from(switch_core::cpu::SHARED_BUFFER_GEOMETRY.shared_buffer_size())
@@ -6267,13 +6896,21 @@ fn the_system_shared_buffer_hands_out_slots_an_applet_can_present() {
     for _ in 0..4 {
         ipc_request(&mut cpu, VI, 4, None, 8254);
         assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
-        assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "the fence should be empty");
+        assert_eq!(
+            cpu.mem.read_u32(tls + 0x20).unwrap(),
+            0,
+            "the fence should be empty"
+        );
         assert_eq!(cpu.mem.read_u32(tls + 0x44).unwrap(), 0);
         assert_eq!(cpu.mem.read_u32(tls + 0x48).unwrap(), 1);
         assert_eq!(cpu.mem.read_u32(tls + 0x4c).unwrap() as i32, -1);
         acquired.push(cpu.mem.read_u64(tls + 0x58).unwrap());
     }
-    assert_eq!(acquired, vec![0, 1, 0, 1], "the two slots did not alternate");
+    assert_eq!(
+        acquired,
+        vec![0, 1, 0, 1],
+        "the two slots did not alternate"
+    );
 }
 
 #[test]
@@ -6301,7 +6938,11 @@ fn an_unfilled_out_parameter_reads_as_zero_not_as_the_request() {
     }
     run_ipc_request(&mut cpu, display);
 
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "CloseDisplay refused");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "CloseDisplay refused"
+    );
     for i in 0..4u32 {
         assert_eq!(
             cpu.mem.read_u32(tls + 0x20 + i * 4).unwrap(),
@@ -6339,7 +6980,11 @@ fn the_vsync_event_is_a_copy_handle_on_a_plain_session() {
     const RESULT_TIMED_OUT: u64 = 0xEA01;
     assert_eq!(wait_sync(&mut cpu, &[vsync], 0).0, RESULT_TIMED_OUT);
     cpu.signal_event(u64::from(vsync));
-    assert_eq!(wait_sync(&mut cpu, &[vsync], 0).0, 0, "a signalled vsync did not fire");
+    assert_eq!(
+        wait_sync(&mut cpu, &[vsync], 0).0,
+        0,
+        "a signalled vsync did not fire"
+    );
 }
 
 #[test]
@@ -6367,17 +7012,33 @@ fn the_applet_message_event_starts_signalled_and_clears() {
     let state_getter = cpu.mem.read_u32(tls + 0x30).unwrap();
 
     ipc_request(&mut cpu, APPLET, 4, Some(state_getter), 0); // GetEventHandle
-    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1, "events are copy handles");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x08).unwrap(),
+        1 << 1,
+        "events are copy handles"
+    );
     let message = cpu.mem.read_u32(tls + 0x0c).unwrap();
-    assert_eq!(wait_sync(&mut cpu, &[message], 0).0, 0, "the queued message never announced itself");
-    assert_eq!(wait_sync(&mut cpu, &[message], 0).0, RESULT_TIMED_OUT, "it announced itself twice");
+    assert_eq!(
+        wait_sync(&mut cpu, &[message], 0).0,
+        0,
+        "the queued message never announced itself"
+    );
+    assert_eq!(
+        wait_sync(&mut cpu, &[message], 0).0,
+        RESULT_TIMED_OUT,
+        "it announced itself twice"
+    );
 
     // And the message behind it is the focus change.
     const FOCUS_STATE_CHANGED: u32 = 15;
     // A domain reply with no handles carries its CmifDomainOutHeader first,
     // so the result and the data sit 0x10 further in than on a plain session.
     ipc_request(&mut cpu, APPLET, 4, Some(state_getter), 1); // ReceiveMessage
-    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "no message was queued");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x28).unwrap(),
+        0,
+        "no message was queued"
+    );
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), FOCUS_STATE_CHANGED);
 }
 
@@ -6406,8 +7067,15 @@ fn an_applet_is_told_it_came_into_the_foreground_not_that_focus_changed() {
     let state_getter = cpu.mem.read_u32(tls + 0x30).unwrap();
 
     ipc_request(&mut cpu, APPLET, 4, Some(state_getter), 1); // ReceiveMessage
-    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "no message was waiting");
-    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), CHANGE_INTO_FOREGROUND);
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x28).unwrap(),
+        0,
+        "no message was waiting"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x30).unwrap(),
+        CHANGE_INTO_FOREGROUND
+    );
 }
 
 #[test]
@@ -6432,25 +7100,41 @@ fn an_applet_that_handles_its_own_display_is_asked_to_display() {
     ipc_request(&mut cpu, applet, 4, Some(state_getter), 1); // ReceiveMessage
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), FOCUS_STATE_CHANGED);
     ipc_request(&mut cpu, applet, 4, Some(state_getter), 1);
-    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), NO_MESSAGES, "the queue should be empty");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x28).unwrap(),
+        NO_MESSAGES,
+        "the queue should be empty"
+    );
 
     build_ipc_request(&mut cpu, 4, Some(self_controller), 50);
     cpu.mem.write_u8(tls + 0x30, 1).unwrap();
     run_ipc_request(&mut cpu, applet);
 
     ipc_request(&mut cpu, applet, 4, Some(state_getter), 1);
-    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "nothing was queued to display");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x28).unwrap(),
+        0,
+        "nothing was queued to display"
+    );
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), REQUEST_TO_DISPLAY);
 
     // Once, not on every poll -- the mistake that made JKSV re-process a focus
     // change every frame.
     ipc_request(&mut cpu, applet, 4, Some(state_getter), 1);
-    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), NO_MESSAGES, "it was queued twice");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x28).unwrap(),
+        NO_MESSAGES,
+        "it was queued twice"
+    );
 
     // And the approval that follows is accepted. It used to reach
     // `unimplemented_command`, which `nnSdk` answers with an svcBreak.
     ipc_request(&mut cpu, applet, 4, Some(self_controller), 51);
-    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "ApproveToDisplay was refused");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x28).unwrap(),
+        0,
+        "ApproveToDisplay was refused"
+    );
 }
 
 #[test]
@@ -6475,11 +7159,23 @@ fn parental_control_hands_out_the_events_it_is_asked_for() {
 
     for cmd in [1207u32, 1432, 1457, 1473] {
         ipc_request_plain(&mut cpu, service, cmd, &[]);
-        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "pctl {cmd} refused");
-        assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1, "pctl {cmd} is not a copy handle");
+        assert_eq!(
+            cpu.mem.read_u32(tls + 0x18).unwrap(),
+            0,
+            "pctl {cmd} refused"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(tls + 0x08).unwrap(),
+            1 << 1,
+            "pctl {cmd} is not a copy handle"
+        );
         let event = cpu.mem.read_u32(tls + 0x0c).unwrap();
         assert_ne!(event, 0, "pctl {cmd} handed back no event");
-        assert_eq!(wait_sync(&mut cpu, &[event], 0).0, RESULT_TIMED_OUT, "pctl {cmd} fired");
+        assert_eq!(
+            wait_sync(&mut cpu, &[event], 0).0,
+            RESULT_TIMED_OUT,
+            "pctl {cmd} fired"
+        );
     }
 
     // Nothing restricts anything here, and the two families of query read in
@@ -6549,7 +7245,10 @@ fn the_vibration_device_list_is_a_hid_session_not_a_fabricated_object() {
 
     ipc_request(&mut cpu, HID, 4, None, 203);
     let list = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
-    assert_ne!(list, 0, "CreateActiveVibrationDeviceList moved no session back");
+    assert_ne!(
+        list, 0,
+        "CreateActiveVibrationDeviceList moved no session back"
+    );
 
     ipc_request(&mut cpu, list, 4, None, 0);
     assert_eq!(cpu.mem.read_u32(tls + 0x10).unwrap(), SFCO);
@@ -6571,11 +7270,11 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     // alias region. Nothing had claimed those addresses yet, which is the only
     // reason it went unnoticed.
     use switch_core::cpu::{
-        GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
-        GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR,
-        GUEST_STACK_REGION_SIZE, GUEST_TOTAL_MEMORY_SIZE, MAIN_THREAD_TLS_BASE, MemoryLayout,
-        OperationMode, SELF_RETURN_TRAMPOLINE, SHARED_BUFFER_ADDR, SHARED_BUFFER_RESERVED_SIZE,
-        STACK_TOP, THREAD_EXIT_TRAMPOLINE, THREAD_TLS_BASE, VAMM_ARENA_SIZE,
+        MemoryLayout, OperationMode, GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE,
+        GUEST_HEAP_REGION_ADDR, GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR,
+        GUEST_STACK_REGION_SIZE, GUEST_TOTAL_MEMORY_SIZE, MAIN_THREAD_TLS_BASE,
+        SELF_RETURN_TRAMPOLINE, SHARED_BUFFER_ADDR, SHARED_BUFFER_RESERVED_SIZE, STACK_TOP,
+        THREAD_EXIT_TRAMPOLINE, THREAD_TLS_BASE, VAMM_ARENA_SIZE,
     };
     use switch_core::{FB_BASE, FB_HEIGHT, FB_WIDTH, INPUT_ADDR};
 
@@ -6596,8 +7295,14 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
             "{what} ({addr:#x}) is inside the stack region the guest is told is free"
         );
     }
-    assert!(STACK_TOP <= u64::from(GUEST_HEAP_REGION_ADDR), "the main stack is below the heap");
-    assert_eq!(GUEST_HEAP_REGION_ADDR + GUEST_HEAP_REGION_SIZE, GUEST_ALIAS_REGION_ADDR);
+    assert!(
+        STACK_TOP <= u64::from(GUEST_HEAP_REGION_ADDR),
+        "the main stack is below the heap"
+    );
+    assert_eq!(
+        GUEST_HEAP_REGION_ADDR + GUEST_HEAP_REGION_SIZE,
+        GUEST_ALIAS_REGION_ADDR
+    );
     assert!(GUEST_ALIAS_REGION_ADDR + GUEST_ALIAS_REGION_SIZE <= SHARED_BUFFER_ADDR);
     // The shared buffer is reserved for the *docked* geometry however the
     // console starts. The pool laid out in it is the shared layer's own and
@@ -6639,7 +7344,10 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
         u64::from(GUEST_TOTAL_MEMORY_SIZE) <= switch_core::mem::MAX_MAPPED_BYTES,
         "advertising {GUEST_TOTAL_MEMORY_SIZE:#x} of memory that cannot be backed"
     );
-    assert!(GUEST_ALIAS_REGION_SIZE >= 0x1000_0000, "the alias region is still a region");
+    assert!(
+        GUEST_ALIAS_REGION_SIZE >= 0x1000_0000,
+        "the alias region is still a region"
+    );
 
     // What actually binds the alias region is virtual address memory, not the
     // heap. `VammManager` claims `VAMM_ARENA_SIZE` at the region base before
@@ -6663,10 +7371,12 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     // charged the VAMM layout 896 MiB of address space nothing ever grows
     // into, and took it from the region that does.
     assert!(MemoryLayout::PLAIN.total_memory <= MemoryLayout::PLAIN.heap_size);
-    assert!(
-        MemoryLayout::VIRTUAL_ADDRESS.total_memory <= MemoryLayout::VIRTUAL_ADDRESS.alias_size
+    assert!(MemoryLayout::VIRTUAL_ADDRESS.total_memory <= MemoryLayout::VIRTUAL_ADDRESS.alias_size);
+    assert_eq!(
+        MemoryLayout::PLAIN.system_resource,
+        0,
+        "zero is what keeps a title off VAMM"
     );
-    assert_eq!(MemoryLayout::PLAIN.system_resource, 0, "zero is what keeps a title off VAMM");
     assert_ne!(MemoryLayout::VIRTUAL_ADDRESS.system_resource, 0);
     // A title's own manifest picks between them, and 0 has to mean the plain
     // heap: Just Dance 2019 declares 0 and is broken by the smaller total the
@@ -6716,7 +7426,11 @@ fn a_heap_bigger_than_its_region_is_refused() {
     cpu.mem.map(0x1000, &svc(0x01).to_le_bytes()).unwrap();
     cpu.set_reg(1, u64::from(GUEST_HEAP_REGION_SIZE));
     cpu.run(1).unwrap();
-    assert_eq!(cpu.read_x(0), 0, "a heap that exactly fills its region is granted");
+    assert_eq!(
+        cpu.read_x(0),
+        0,
+        "a heap that exactly fills its region is granted"
+    );
     assert_eq!(cpu.read_x(1), u64::from(GUEST_HEAP_REGION_ADDR));
 
     let mut cpu = cpu_at(0x1000);
@@ -6738,16 +7452,16 @@ fn test_nro_image() -> Vec<u8> {
     nro[0..4].copy_from_slice(&0x1400_0010u32.to_le_bytes()); // b entry
     nro[0x10..0x14].copy_from_slice(b"NRO0");
     for (offset, value) in [
-        (0x14, 0),                 // version
-        (0x18, 3 * SEGMENT),       // total size
-        (0x1C, 0),                 // flags
-        (0x20, 0),                 // .text offset
-        (0x24, SEGMENT),           // .text size
-        (0x28, SEGMENT),           // .rodata offset
-        (0x2C, SEGMENT),           // .rodata size
-        (0x30, 2 * SEGMENT),       // .data offset
-        (0x34, SEGMENT),           // .data size
-        (0x38, SEGMENT),           // .bss size
+        (0x14, 0),           // version
+        (0x18, 3 * SEGMENT), // total size
+        (0x1C, 0),           // flags
+        (0x20, 0),           // .text offset
+        (0x24, SEGMENT),     // .text size
+        (0x28, SEGMENT),     // .rodata offset
+        (0x2C, SEGMENT),     // .rodata size
+        (0x30, 2 * SEGMENT), // .data offset
+        (0x34, SEGMENT),     // .data size
+        (0x38, SEGMENT),     // .bss size
     ] {
         nro[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
@@ -6874,7 +7588,11 @@ fn ldr_ro_two_modules_do_not_overlap() {
     let first = cpu.mem.read_u64(tls + 0x20).unwrap();
     ldr_ro_request(&mut cpu, handle, 0, &[NRO_SOURCE, 0x3000, NRO_BSS, 0x1000]);
     let second = cpu.mem.read_u64(tls + 0x20).unwrap();
-    assert_eq!(second, first + 0x4000, "image plus BSS, and no gap to waste");
+    assert_eq!(
+        second,
+        first + 0x4000,
+        "image plus BSS, and no gap to waste"
+    );
 }
 
 #[test]
@@ -6893,7 +7611,12 @@ fn ldr_ro_refuses_what_is_not_a_module() {
     ldr_ro_request(&mut cpu, handle, 0, &[0x1100_0000, 0x3000, NRO_BSS, 0x1000]);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), INVALID_NRO);
 
-    ldr_ro_request(&mut cpu, handle, 0, &[NRO_SOURCE + 8, 0x3000, NRO_BSS, 0x1000]);
+    ldr_ro_request(
+        &mut cpu,
+        handle,
+        0,
+        &[NRO_SOURCE + 8, 0x3000, NRO_BSS, 0x1000],
+    );
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), INVALID_ADDRESS);
 
     ldr_ro_request(&mut cpu, handle, 0, &[NRO_SOURCE, 0x3000, NRO_BSS, 0]);
@@ -6936,13 +7659,21 @@ fn docking_moves_every_answer_that_depends_on_it() {
     use switch_core::cpu::OperationMode;
     let (mut cpu, handle, _proxy, state_getter) = applet_chain();
     let tls = cpu.tls_base();
-    assert_eq!(cpu.operation_mode(), OperationMode::Handheld, "a console starts undocked");
+    assert_eq!(
+        cpu.operation_mode(),
+        OperationMode::Handheld,
+        "a console starts undocked"
+    );
 
     // Handheld: mode 0, performance Normal (0).
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 5);
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0, "GetOperationMode");
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 6);
-    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 0, "GetPerformanceMode");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x30).unwrap(),
+        0,
+        "GetPerformanceMode"
+    );
 
     // The startup focus message, out of the way, so what is left in the queue
     // below is the dock's doing and nothing else.
@@ -6950,25 +7681,53 @@ fn docking_moves_every_answer_that_depends_on_it() {
 
     cpu.set_operation_mode(OperationMode::Docked);
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 5);
-    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1, "docked is Console (1)");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x30).unwrap(),
+        1,
+        "docked is Console (1)"
+    );
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 6);
-    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1, "docked is Boost (1)");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x30).unwrap(),
+        1,
+        "docked is Boost (1)"
+    );
 
     // And the title is *told*, which is the half that makes it act: it read
     // the mode once at startup and laid out for that answer. Without these it
     // never goes back to ask, and the new number is one nobody reads.
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
-    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "a message is waiting");
-    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 30, "OperationModeChanged");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x28).unwrap(),
+        0,
+        "a message is waiting"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x30).unwrap(),
+        30,
+        "OperationModeChanged"
+    );
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
-    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 31, "PerformanceModeChanged");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x30).unwrap(),
+        31,
+        "PerformanceModeChanged"
+    );
 
     // GetDefaultDisplayResolution (60) is the answer that sits *beside* the
     // mode on a title's own screen, so the two coming from different places
     // is how NX-Fetch came to print "1280x720 @ 60Hz [Docked]".
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 60);
-    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 1920, "docked default width");
-    assert_eq!(cpu.mem.read_u32(tls + 0x34).unwrap(), 1080, "docked default height");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x30).unwrap(),
+        1920,
+        "docked default width"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x34).unwrap(),
+        1080,
+        "docked default height"
+    );
 
     // Docking a docked console is not a transition. AM does not announce one
     // that did not happen, and a title told to re-lay-out does the work
@@ -6994,8 +7753,16 @@ fn the_dock_resizes_the_display_and_takes_the_touchscreen_away() {
 
     // GetDisplayMode (3200) reports width, height and refresh by value.
     ipc_request(&mut cpu, VI, 6, None, 3200);
-    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1280, "handheld width");
-    assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 720, "handheld height");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        1280,
+        "handheld width"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x24).unwrap(),
+        720,
+        "handheld height"
+    );
 
     cpu.set_operation_mode(OperationMode::Docked);
     ipc_request(&mut cpu, VI, 6, None, 3200);
@@ -7012,14 +7779,33 @@ fn the_dock_resizes_the_display_and_takes_the_touchscreen_away() {
     cpu.set_pc(0x1000);
     let state = LIFO + 0x20 + 8;
     let before = cpu.mem.read_u64(LIFO + 0x20).unwrap();
-    cpu.set_touch_state(&[TouchPoint { finger_id: 0, x: 640, y: 360 }]);
-    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 0, "docked reports no contacts");
-    assert!(cpu.mem.read_u64(LIFO + 0x20).unwrap() > before, "the sample still advances");
+    cpu.set_touch_state(&[TouchPoint {
+        finger_id: 0,
+        x: 640,
+        y: 360,
+    }]);
+    assert_eq!(
+        cpu.mem.read_u32(state + 0x08).unwrap(),
+        0,
+        "docked reports no contacts"
+    );
+    assert!(
+        cpu.mem.read_u64(LIFO + 0x20).unwrap() > before,
+        "the sample still advances"
+    );
 
     // Undocked again, the same contact lands.
     cpu.set_operation_mode(OperationMode::Handheld);
-    cpu.set_touch_state(&[TouchPoint { finger_id: 0, x: 640, y: 360 }]);
-    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 1, "handheld reports the contact");
+    cpu.set_touch_state(&[TouchPoint {
+        finger_id: 0,
+        x: 640,
+        y: 360,
+    }]);
+    assert_eq!(
+        cpu.mem.read_u32(state + 0x08).unwrap(),
+        1,
+        "handheld reports the contact"
+    );
     assert_eq!(cpu.mem.read_u32(state + 0x10 + 0x10).unwrap(), 640, "x");
 }
 
@@ -7054,10 +7840,17 @@ fn the_shared_buffer_does_not_move_when_the_console_is_docked() {
     };
 
     let handheld = pool(&mut cpu);
-    assert_eq!(handheld, u64::from(SHARED_BUFFER_GEOMETRY.shared_buffer_size()));
+    assert_eq!(
+        handheld,
+        u64::from(SHARED_BUFFER_GEOMETRY.shared_buffer_size())
+    );
 
     cpu.set_operation_mode(OperationMode::Docked);
-    assert_eq!(pool(&mut cpu), handheld, "docking moved the pool the applet had mapped");
+    assert_eq!(
+        pool(&mut cpu),
+        handheld,
+        "docking moved the pool the applet had mapped"
+    );
 
     // The display did move, though — the pool is the shared layer's geometry
     // and the display is the panel's, and the two are no longer the same
@@ -7083,36 +7876,44 @@ fn the_resolution_change_event_fires_on_the_dock() {
 
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 61);
     let event = cpu.mem.read_u32(tls + 0x0c).unwrap() as u64;
-    assert_ne!(event, 0, "an event has to come back in the copy-handle slot");
+    assert_ne!(
+        event, 0,
+        "an event has to come back in the copy-handle slot"
+    );
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 61);
     assert_eq!(
         cpu.mem.read_u32(tls + 0x0c).unwrap() as u64,
         event,
         "asking twice has to give back the object already being waited on"
     );
-    assert_eq!(cpu.event_signaled(event), Some(false), "dark until something changes");
+    assert_eq!(
+        cpu.event_signaled(event),
+        Some(false),
+        "dark until something changes"
+    );
 
     cpu.set_operation_mode(OperationMode::Docked);
-    assert_eq!(cpu.event_signaled(event), Some(true), "the dock is what changes it");
+    assert_eq!(
+        cpu.event_signaled(event),
+        Some(true),
+        "the dock is what changes it"
+    );
 }
 
 /// One 20 ms CELT-only Opus packet, 48 kHz mono, from the reference
 /// encoder. Its decode is 960 samples per channel.
 const OPUS_PACKET: [u8; 164] = [
-    0xf8, 0x9f, 0xf7, 0xda, 0x9b, 0x32, 0x2b, 0xce, 0x91, 0xf2, 0x50, 0x86,
-    0xd0, 0xbe, 0x88, 0x91, 0xe5, 0xfc, 0xff, 0xd1, 0xb8, 0x45, 0x4f, 0x82,
-    0x93, 0xbc, 0xa6, 0x61, 0x9e, 0x76, 0x03, 0x86, 0x83, 0xf1, 0x65, 0x96,
-    0x94, 0xab, 0x3a, 0x3a, 0xaa, 0xb0, 0x12, 0x91, 0x97, 0xb5, 0x53, 0xd8,
-    0x2f, 0x4d, 0xf4, 0x71, 0xc9, 0xdc, 0x90, 0xc5, 0x89, 0xdd, 0x76, 0xf2,
-    0xf0, 0x6d, 0xd1, 0x23, 0x1a, 0xe6, 0x16, 0xcb, 0x37, 0x81, 0x53, 0xe9,
-    0x70, 0x84, 0x65, 0xc0, 0x8b, 0xb0, 0x29, 0x32, 0x7b, 0xf2, 0x56, 0x71,
-    0x16, 0xc0, 0xc9, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x0d, 0xb2, 0x65, 0x69, 0x55, 0x44, 0x5f, 0x55, 0x62, 0xab, 0xe7, 0x8b,
-    0x74, 0x5b, 0x50, 0x1f, 0x0f, 0xb4, 0x32, 0x07, 0xa3, 0xe8, 0x5d, 0x0a,
-    0xbe, 0x45, 0xd7, 0x13, 0xc8, 0xc5, 0x34, 0x08, 0x98, 0x83, 0xc0, 0x29,
-    0x72, 0xf6, 0x33, 0xd6, 0xe2, 0x01, 0x31, 0x70, 0xfc, 0x4e, 0x5b, 0x77,
-    0xf3, 0x98, 0x1c, 0x97, 0x17, 0xf6, 0xa4, 0xe7, 0x70, 0x96, 0x5b, 0x3e,
-    0x09, 0x53, 0x28, 0x6a, 0xd9, 0xe3, 0xaa, 0x85,
+    0xf8, 0x9f, 0xf7, 0xda, 0x9b, 0x32, 0x2b, 0xce, 0x91, 0xf2, 0x50, 0x86, 0xd0, 0xbe, 0x88, 0x91,
+    0xe5, 0xfc, 0xff, 0xd1, 0xb8, 0x45, 0x4f, 0x82, 0x93, 0xbc, 0xa6, 0x61, 0x9e, 0x76, 0x03, 0x86,
+    0x83, 0xf1, 0x65, 0x96, 0x94, 0xab, 0x3a, 0x3a, 0xaa, 0xb0, 0x12, 0x91, 0x97, 0xb5, 0x53, 0xd8,
+    0x2f, 0x4d, 0xf4, 0x71, 0xc9, 0xdc, 0x90, 0xc5, 0x89, 0xdd, 0x76, 0xf2, 0xf0, 0x6d, 0xd1, 0x23,
+    0x1a, 0xe6, 0x16, 0xcb, 0x37, 0x81, 0x53, 0xe9, 0x70, 0x84, 0x65, 0xc0, 0x8b, 0xb0, 0x29, 0x32,
+    0x7b, 0xf2, 0x56, 0x71, 0x16, 0xc0, 0xc9, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x0d, 0xb2, 0x65, 0x69, 0x55, 0x44, 0x5f, 0x55, 0x62, 0xab, 0xe7, 0x8b, 0x74, 0x5b, 0x50, 0x1f,
+    0x0f, 0xb4, 0x32, 0x07, 0xa3, 0xe8, 0x5d, 0x0a, 0xbe, 0x45, 0xd7, 0x13, 0xc8, 0xc5, 0x34, 0x08,
+    0x98, 0x83, 0xc0, 0x29, 0x72, 0xf6, 0x33, 0xd6, 0xe2, 0x01, 0x31, 0x70, 0xfc, 0x4e, 0x5b, 0x77,
+    0xf3, 0x98, 0x1c, 0x97, 0x17, 0xf6, 0xa4, 0xe7, 0x70, 0x96, 0x5b, 0x3e, 0x09, 0x53, 0x28, 0x6a,
+    0xd9, 0xe3, 0xaa, 0x85,
 ];
 
 #[test]
@@ -7134,15 +7935,25 @@ fn hwopus_reports_a_work_buffer_size_before_it_opens_anything() {
     args.extend_from_slice(&2u32.to_le_bytes());
     args.extend_from_slice(&0u64.to_le_bytes());
     ipc_request_plain(&mut cpu, HWOPUS, 5, &args);
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "GetWorkBufferSizeEx failed");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "GetWorkBufferSizeEx failed"
+    );
     let stereo = cpu.mem.read_u32(tls + 0x20).unwrap();
-    assert!(stereo > 0x1000, "a work buffer of {stereo:#x} bytes is not one");
+    assert!(
+        stereo > 0x1000,
+        "a work buffer of {stereo:#x} bytes is not one"
+    );
 
     // The large-frame form asks for room for a 120 ms packet, so it is bigger.
     args[8] = 1;
     ipc_request_plain(&mut cpu, HWOPUS, 5, &args);
     let large = cpu.mem.read_u32(tls + 0x20).unwrap();
-    assert!(large > stereo, "the large-frame size {large:#x} is not above {stereo:#x}");
+    assert!(
+        large > stereo,
+        "the large-frame size {large:#x} is not above {stereo:#x}"
+    );
 
     // A rate Opus does not have is refused rather than sized.
     let mut bad = Vec::new();
@@ -7152,7 +7963,11 @@ fn hwopus_reports_a_work_buffer_size_before_it_opens_anything() {
     ipc_request_plain(&mut cpu, HWOPUS, 5, &bad);
     let result = cpu.mem.read_u32(tls + 0x18).unwrap();
     assert_eq!(result & 0x1FF, 111, "not an hwopus error: {result:#x}");
-    assert_eq!(result >> 9, 1001, "not the invalid-sample-rate error: {result:#x}");
+    assert_eq!(
+        result >> 9,
+        1001,
+        "not the invalid-sample-rate error: {result:#x}"
+    );
 }
 
 #[test]
@@ -7181,7 +7996,11 @@ fn hwopus_decodes_a_packet_into_the_buffer_the_caller_offered() {
     args.extend_from_slice(&0u64.to_le_bytes());
     args.extend_from_slice(&0x8000u32.to_le_bytes());
     ipc_request_plain(&mut cpu, HWOPUS, 4, &args);
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "OpenHardwareOpusDecoderEx failed");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "OpenHardwareOpusDecoderEx failed"
+    );
     // { send_pid:1, num_copy:4, num_move:4 }: the decoder is a move handle.
     assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 5);
     let decoder = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
@@ -7204,9 +8023,21 @@ fn hwopus_decodes_a_packet_into_the_buffer_the_caller_offered() {
         (OUTPUT, 0x1000),
         &[0u8, 0, 0, 0],
     );
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "DecodeInterleaved failed");
-    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 8 + len, "wrong byte count");
-    assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 960, "a 20 ms frame is 960 samples");
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x18).unwrap(),
+        0,
+        "DecodeInterleaved failed"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        8 + len,
+        "wrong byte count"
+    );
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x24).unwrap(),
+        960,
+        "a 20 ms frame is 960 samples"
+    );
 
     // The samples are 16-bit and are not all zero: a decoder that answered
     // success and wrote nothing would pass every check above.
@@ -7214,7 +8045,10 @@ fn hwopus_decodes_a_packet_into_the_buffer_the_caller_offered() {
         .map(|i| i32::from(cpu.mem.read_u16(OUTPUT + i * 2).unwrap() as i16).abs())
         .max()
         .unwrap();
-    assert!(loudest > 1000, "the decode is silent (loudest sample {loudest})");
+    assert!(
+        loudest > 1000,
+        "the decode is silent (loudest sample {loudest})"
+    );
 }
 
 #[test]
@@ -7247,13 +8081,31 @@ fn hwopus_refuses_a_packet_shorter_than_its_own_header() {
     for (i, &byte) in 0x1000u32.to_be_bytes().iter().enumerate() {
         cpu.mem.write_u8(INPUT + i as u32, byte).unwrap();
     }
-    ipc_request_plain_with_both_buffers(&mut cpu, decoder, 8, (INPUT, 64), (OUTPUT, 0x1000), &[0u8; 4]);
+    ipc_request_plain_with_both_buffers(
+        &mut cpu,
+        decoder,
+        8,
+        (INPUT, 64),
+        (OUTPUT, 0x1000),
+        &[0u8; 4],
+    );
     let result = cpu.mem.read_u32(tls + 0x18).unwrap();
     assert_eq!(result & 0x1FF, 111, "not an hwopus error: {result:#x}");
-    assert_eq!(result >> 9, 3, "not the buffer-too-small error: {result:#x}");
+    assert_eq!(
+        result >> 9,
+        3,
+        "not the buffer-too-small error: {result:#x}"
+    );
 
     // A buffer with nothing but the header in it.
-    ipc_request_plain_with_both_buffers(&mut cpu, decoder, 8, (INPUT, 8), (OUTPUT, 0x1000), &[0u8; 4]);
+    ipc_request_plain_with_both_buffers(
+        &mut cpu,
+        decoder,
+        8,
+        (INPUT, 8),
+        (OUTPUT, 0x1000),
+        &[0u8; 4],
+    );
     let result = cpu.mem.read_u32(tls + 0x18).unwrap();
     assert_eq!(result >> 9, 8, "not the input-too-small error: {result:#x}");
 }
@@ -7282,7 +8134,14 @@ fn pmull(q: u32, size: u32, rd: u32, rn: u32, rm: u32) -> u32 {
 
 // Scalar FCVT: 0001 1110 ftype 1 0001 opc(2) 10000 Rn Rd
 fn fcvt(ftype: u32, opc: u32, rd: u32, rn: u32) -> u32 {
-    0x1E << 24 | (ftype << 22) | 1 << 21 | 0b0001 << 17 | (opc << 15) | 0b10000 << 10 | (rn << 5) | rd
+    0x1E << 24
+        | (ftype << 22)
+        | 1 << 21
+        | 0b0001 << 17
+        | (opc << 15)
+        | 0b10000 << 10
+        | (rn << 5)
+        | rd
 }
 
 /// AESE then AESMC is one AES round bar the key schedule, so FIPS-197's own
@@ -7291,17 +8150,20 @@ fn fcvt(ftype: u32, opc: u32, rd: u32, rn: u32) -> u32 {
 fn the_aes_instructions_run_a_fips_197_round() {
     let mut cpu = cpu_at(0x1000);
     // The round input, and a zero key so AESE's XOR leaves it alone.
-    cpu.set_vreg(0, u128::from_le_bytes([
-        0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70,
-        0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0,
-    ]));
+    cpu.set_vreg(
+        0,
+        u128::from_le_bytes([
+            0x00, 0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0,
+            0xe0, 0xf0,
+        ]),
+    );
     cpu.set_vreg(1, 0);
     let cpu = run_program(cpu, 0x1000, &[aes(0b00100, 0, 1), aes(0b00110, 0, 0)]);
     assert_eq!(
         cpu.read_vreg(0),
         u128::from_le_bytes([
-            0x5f, 0x72, 0x64, 0x15, 0x57, 0xf5, 0xbc, 0x92,
-            0xf7, 0xbe, 0x3b, 0x29, 0x1d, 0xb9, 0xf9, 0x1a,
+            0x5f, 0x72, 0x64, 0x15, 0x57, 0xf5, 0xbc, 0x92, 0xf7, 0xbe, 0x3b, 0x29, 0x1d, 0xb9,
+            0xf9, 0x1a,
         ]),
         "aese/aesmc did not produce the FIPS-197 round-1 state"
     );
@@ -7323,7 +8185,11 @@ fn aesd_and_aesimc_invert_the_encrypting_pair() {
             aes(0b00101, 0, 1), // AESD v0, v1
         ],
     );
-    assert_eq!(cpu.read_vreg(0), state, "the decrypting pair did not invert");
+    assert_eq!(
+        cpu.read_vreg(0),
+        state,
+        "the decrypting pair did not invert"
+    );
 }
 
 /// SHA1H is a bare rotate, and SHA1SU0's three-way XOR is the schedule step —
@@ -7424,7 +8290,11 @@ fn fcvt_converts_to_and_from_half_precision() {
         ],
     );
     assert_eq!(cpu.read_vreg(2), 0xC100, "-2.5 is not the expected half");
-    assert_eq!(cpu.read_vreg(3), 0x7BFF, "65504 should be the largest finite half");
+    assert_eq!(
+        cpu.read_vreg(3),
+        0x7BFF,
+        "65504 should be the largest finite half"
+    );
 }
 
 #[test]
@@ -7432,11 +8302,11 @@ fn narrowing_to_half_saturates_rounds_and_flushes_at_the_edges() {
     let cases: [(f64, u16); 7] = [
         (0.0, 0x0000),
         (-0.0, 0x8000),
-        (70000.0, 0x7C00),            // beyond the range: infinity
-        (65520.0, 0x7C00),            // rounds up past the largest finite half
-        (65519.0, 0x7BFF),            // still rounds down to it
-        (6.0e-8, 0x0001),             // above half the smallest subnormal
-        (2.0f64.powi(-25), 0x0000),   // exactly a tie, so down to zero
+        (70000.0, 0x7C00),          // beyond the range: infinity
+        (65520.0, 0x7C00),          // rounds up past the largest finite half
+        (65519.0, 0x7BFF),          // still rounds down to it
+        (6.0e-8, 0x0001),           // above half the smallest subnormal
+        (2.0f64.powi(-25), 0x0000), // exactly a tie, so down to zero
     ];
     for (input, expect) in cases {
         let mut cpu = cpu_at(0x1000);
@@ -7454,9 +8324,9 @@ fn narrowing_to_half_saturates_rounds_and_flushes_at_the_edges() {
 #[test]
 fn widening_from_half_handles_subnormals_and_infinities() {
     let cases: [(u16, f32); 5] = [
-        (0x0001, 5.960_464_5e-8),  // the smallest subnormal, 2^-24
-        (0x03FF, 6.097_555_2e-5),  // the largest subnormal
-        (0x0400, 6.103_515_6e-5),  // the smallest normal, 2^-14
+        (0x0001, 5.960_464_5e-8), // the smallest subnormal, 2^-24
+        (0x03FF, 6.097_555_2e-5), // the largest subnormal
+        (0x0400, 6.103_515_6e-5), // the smallest normal, 2^-14
         (0x7C00, f32::INFINITY),
         (0xFC00, f32::NEG_INFINITY),
     ];
@@ -7527,14 +8397,30 @@ fn the_vector_half_conversions_move_four_lanes() {
 
 // Vector three-same: 0 Q U 01110 size 1 Rm opcode(5) 1 Rn Rd
 fn simd_shift_reg(q: u32, u: u32, size: u32, op: u32, rd: u32, rn: u32, rm: u32) -> u32 {
-    (q << 30) | (u << 29) | 0b01110 << 24 | (size << 22) | 1 << 21 | (rm << 16)
-        | (op << 11) | 1 << 10 | (rn << 5) | rd
+    (q << 30)
+        | (u << 29)
+        | 0b01110 << 24
+        | (size << 22)
+        | 1 << 21
+        | (rm << 16)
+        | (op << 11)
+        | 1 << 10
+        | (rn << 5)
+        | rd
 }
 
 // Scalar three-same: 01 U 11110 size 1 Rm opcode(5) 1 Rn Rd
 fn scalar_shift_reg(u: u32, size: u32, op: u32, rd: u32, rn: u32, rm: u32) -> u32 {
-    0b01 << 30 | (u << 29) | 0b11110 << 24 | (size << 22) | 1 << 21 | (rm << 16)
-        | (op << 11) | 1 << 10 | (rn << 5) | rd
+    0b01 << 30
+        | (u << 29)
+        | 0b11110 << 24
+        | (size << 22)
+        | 1 << 21
+        | (rm << 16)
+        | (op << 11)
+        | 1 << 10
+        | (rn << 5)
+        | rd
 }
 
 const SSHL: u32 = 0b01000;
@@ -7591,21 +8477,33 @@ fn the_saturating_shift_clamps_instead_of_dropping_bits() {
     cpu.set_vreg(0, 0x4000_0000);
     cpu.set_vreg(1, 2);
     let cpu = run_program(cpu, 0x1000, &[simd_shift_reg(0, 0, 0b10, SQSHL, 2, 0, 1)]);
-    assert_eq!(cpu.read_vreg(2) as u32, 0x7FFF_FFFF, "sqshl did not saturate high");
+    assert_eq!(
+        cpu.read_vreg(2) as u32,
+        0x7FFF_FFFF,
+        "sqshl did not saturate high"
+    );
 
     // And the negative direction saturates to INT_MIN.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(0, 0xC000_0000);
     cpu.set_vreg(1, 2);
     let cpu = run_program(cpu, 0x1000, &[simd_shift_reg(0, 0, 0b10, SQSHL, 2, 0, 1)]);
-    assert_eq!(cpu.read_vreg(2) as u32, 0x8000_0000, "sqshl did not saturate low");
+    assert_eq!(
+        cpu.read_vreg(2) as u32,
+        0x8000_0000,
+        "sqshl did not saturate low"
+    );
 
     // Unsigned saturates to UINT_MAX.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(0, 0x4000_0000);
     cpu.set_vreg(1, 2);
     let cpu = run_program(cpu, 0x1000, &[simd_shift_reg(0, 1, 0b10, SQSHL, 2, 0, 1)]);
-    assert_eq!(cpu.read_vreg(2) as u32, 0xFFFF_FFFF, "uqshl did not saturate");
+    assert_eq!(
+        cpu.read_vreg(2) as u32,
+        0xFFFF_FFFF,
+        "uqshl did not saturate"
+    );
 }
 
 #[test]
@@ -7622,7 +8520,11 @@ fn the_rounding_shift_rounds_the_bits_it_drops() {
         cpu.set_vreg(0, u128::from(input));
         cpu.set_vreg(1, 0xFF);
         let cpu = run_program(cpu, 0x1000, &[simd_shift_reg(0, 0, 0b10, SSHL, 2, 0, 1)]);
-        assert_eq!(cpu.read_vreg(2) as u32, input >> 1, "sshl of {input:#b} truncates");
+        assert_eq!(
+            cpu.read_vreg(2) as u32,
+            input >> 1,
+            "sshl of {input:#b} truncates"
+        );
     }
 }
 
@@ -7654,7 +8556,11 @@ fn a_shift_past_the_lane_width_empties_or_saturates_it() {
             simd_shift_reg(0, 1, 0b10, SSHL, 3, 0, 1),
         ],
     );
-    assert_eq!(cpu.read_vreg(2) as u32, 0xFFFF_FFFF, "the sign fills a signed lane");
+    assert_eq!(
+        cpu.read_vreg(2) as u32,
+        0xFFFF_FFFF,
+        "the sign fills a signed lane"
+    );
     assert_eq!(cpu.read_vreg(3) as u32, 0, "zero fills an unsigned one");
 }
 
@@ -7728,17 +8634,33 @@ fn fpcr_and_fpsr_round_trip_through_mrs_and_msr() {
     let cpu = run_program(
         cpu_at(0x1000),
         0x1000,
-        &[movz(0, 0x00C0, 1, true), msr(0, a, b, c, d), mrs(1, a, b, c, d)],
+        &[
+            movz(0, 0x00C0, 1, true),
+            msr(0, a, b, c, d),
+            mrs(1, a, b, c, d),
+        ],
     );
-    assert_eq!(cpu.read_x(1), 0x00C0_0000, "fpcr did not read back what was written");
+    assert_eq!(
+        cpu.read_x(1),
+        0x00C0_0000,
+        "fpcr did not read back what was written"
+    );
 
     let (a, b, c, d) = FPSR_REG;
     let cpu = run_program(
         cpu_at(0x1000),
         0x1000,
-        &[movz(0, 0x001F, 0, true), msr(0, a, b, c, d), mrs(1, a, b, c, d)],
+        &[
+            movz(0, 0x001F, 0, true),
+            msr(0, a, b, c, d),
+            mrs(1, a, b, c, d),
+        ],
     );
-    assert_eq!(cpu.read_x(1), 0x1F, "fpsr did not read back the exception flags");
+    assert_eq!(
+        cpu.read_x(1),
+        0x1F,
+        "fpsr did not read back the exception flags"
+    );
 }
 
 /// FRINTX and FRINTI are the two that round to whatever mode FPCR names, so
@@ -7752,10 +8674,10 @@ fn frinti_follows_the_rounding_mode_in_fpcr() {
     for (rmode, input, expect) in [
         (0b00u32, 2.5f64, 2.0f64), // nearest, ties to even
         (0b00, 3.5, 4.0),
-        (0b01, 2.1, 3.0),  // toward +inf
-        (0b10, 2.9, 2.0),  // toward -inf
+        (0b01, 2.1, 3.0), // toward +inf
+        (0b10, 2.9, 2.0), // toward -inf
         (0b10, -2.1, -3.0),
-        (0b11, 2.9, 2.0),  // toward zero
+        (0b11, 2.9, 2.0), // toward zero
         (0b11, -2.9, -2.0),
     ] {
         let mut cpu = cpu_at(0x1000);
@@ -7763,7 +8685,11 @@ fn frinti_follows_the_rounding_mode_in_fpcr() {
         let cpu = run_program(
             cpu,
             0x1000,
-            &[movz(0, rmode << 6, 1, true), msr(0, a, b, c, d), frinti(6, 5)],
+            &[
+                movz(0, rmode << 6, 1, true),
+                msr(0, a, b, c, d),
+                frinti(6, 5),
+            ],
         );
         let got = f64::from_bits(cpu.read_vreg(6) as u64);
         assert_eq!(got, expect, "frinti of {input} in mode {rmode:#b}");
@@ -7777,7 +8703,11 @@ fn dividing_by_zero_raises_the_divide_by_zero_flag() {
     cpu.set_vreg(0, u128::from(1.0f64.to_bits()));
     cpu.set_vreg(1, 0);
     let cpu = run_program(cpu, 0x1000, &[fdiv_d(2, 0, 1), mrs(3, a, b, c, d)]);
-    assert_eq!(cpu.read_x(3) & 0b10, 0b10, "DZC was not raised by 1.0 / 0.0");
+    assert_eq!(
+        cpu.read_x(3) & 0b10,
+        0b10,
+        "DZC was not raised by 1.0 / 0.0"
+    );
     assert_eq!(cpu.read_x(3) & 1, 0, "and 1.0 / 0.0 is not Invalid");
 
     // 0/0 has no answer at all, which is Invalid rather than divide-by-zero.
@@ -7805,13 +8735,21 @@ fn a_convert_that_cannot_fit_or_loses_a_fraction_says_so() {
     cpu.set_vreg(0, u128::from(4.5f64.to_bits()));
     let cpu = run_program(cpu, 0x1000, &[fcvtzs(1, 0), mrs(2, a, b, c, d)]);
     assert_eq!(cpu.read_x(1), 4);
-    assert_eq!(cpu.read_x(2) & 0b10000, 0b10000, "IXC was not raised by 4.5");
+    assert_eq!(
+        cpu.read_x(2) & 0b10000,
+        0b10000,
+        "IXC was not raised by 4.5"
+    );
 
     for input in [f64::NAN, 1.0e30] {
         let mut cpu = cpu_at(0x1000);
         cpu.set_vreg(0, u128::from(input.to_bits()));
         let cpu = run_program(cpu, 0x1000, &[fcvtzs(1, 0), mrs(2, a, b, c, d)]);
-        assert_eq!(cpu.read_x(2) & 1, 1, "IOC was not raised converting {input}");
+        assert_eq!(
+            cpu.read_x(2) & 1,
+            1,
+            "IOC was not raised converting {input}"
+        );
     }
 }
 
@@ -7836,7 +8774,11 @@ fn the_exception_flags_are_sticky_until_written() {
             mrs(8, a, b, c, d),
         ],
     );
-    assert_eq!(cpu.read_x(6) & 0b10, 0b10, "a later clean divide cleared DZC");
+    assert_eq!(
+        cpu.read_x(6) & 0b10,
+        0b10,
+        "a later clean divide cleared DZC"
+    );
     assert_eq!(cpu.read_x(8), 0, "writing FPSR did not clear the flags");
 }
 
@@ -7874,9 +8816,21 @@ fn a_signed_32_bit_extend_keeps_its_low_bits() {
     // clamp cannot pass by accident.
     let (jit, interp) = both_engines(&[(1, 0xFFFF_FFFF_8000_8080), (2, 0)], code);
     for cpu in [&jit, &interp] {
-        assert_eq!(cpu.read_x(0), 0xFFFF_FF80, "sxtb clamped instead of truncating");
-        assert_eq!(cpu.read_x(7), 0xFFFF_8080, "sxth clamped instead of truncating");
-        assert_eq!(cpu.read_x(9), 0x8000_8080, "sxtw clamped instead of truncating");
+        assert_eq!(
+            cpu.read_x(0),
+            0xFFFF_FF80,
+            "sxtb clamped instead of truncating"
+        );
+        assert_eq!(
+            cpu.read_x(7),
+            0xFFFF_8080,
+            "sxth clamped instead of truncating"
+        );
+        assert_eq!(
+            cpu.read_x(9),
+            0x8000_8080,
+            "sxtw clamped instead of truncating"
+        );
     }
 }
 
@@ -7898,6 +8852,10 @@ fn bic_and_friends_invert_after_shifting() {
     for cpu in [&jit, &interp] {
         assert_eq!(cpu.read_x(0), 0x0F, "bic inverted before shifting");
         assert_eq!(cpu.read_x(3), 0xFFFF_00FF, "orn inverted before shifting");
-        assert_eq!(cpu.read_x(8), 0xFFFF_FFFF_FFFF_FFF0, "eon inverted before shifting");
+        assert_eq!(
+            cpu.read_x(8),
+            0xFFFF_FFFF_FFFF_FFF0,
+            "eon inverted before shifting"
+        );
     }
 }

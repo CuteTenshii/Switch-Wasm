@@ -436,7 +436,10 @@ fn blend(blend: state::Blend) -> wgpu::BlendState {
         dst_factor: blend_factor(c.dst_factor),
         operation: blend_operation(c.operation),
     };
-    wgpu::BlendState { color: component(blend.color), alpha: component(blend.alpha) }
+    wgpu::BlendState {
+        color: component(blend.color),
+        alpha: component(blend.alpha),
+    }
 }
 
 /// A readback that has been asked for and not yet copied out.
@@ -626,7 +629,8 @@ pub struct Gpu {
     /// draw's bind group. WebGPU matches the two structurally rather than by
     /// identity, so a cache is not what makes a cached pipeline usable; it is
     /// what makes it obvious that it is.
-    group_layouts: std::collections::HashMap<Vec<wgpu::BindGroupLayoutEntry>, wgpu::BindGroupLayout>,
+    group_layouts:
+        std::collections::HashMap<Vec<wgpu::BindGroupLayoutEntry>, wgpu::BindGroupLayout>,
     /// The pipeline that puts a guest depth surface onto the device, by the
     /// depth format it writes. See [`LOAD_DEPTH_WGSL`].
     depth_loaders: std::collections::HashMap<wgpu::TextureFormat, wgpu::RenderPipeline>,
@@ -892,7 +896,10 @@ impl Gpu {
             per_pixel: 0,
             in_frame: 0,
             times: switch_core::env_flag!("GPU_TIMES").then(Times::default),
-            only: std::env::var("GPU_ONLY").ok().as_deref().and_then(draw_range),
+            only: std::env::var("GPU_ONLY")
+                .ok()
+                .as_deref()
+                .and_then(draw_range),
         }
     }
 
@@ -998,14 +1005,23 @@ impl Gpu {
             None => {}
         }
         let texture = self.upload_target(target, ctx)?;
-        self.held
-            .insert(target.addr, Held { texture, target: *target, dirty: false, companion: None });
+        self.held.insert(
+            target.addr,
+            Held {
+                texture,
+                target: *target,
+                dirty: false,
+                companion: None,
+            },
+        );
         Ok(())
     }
 
     /// Write one held surface back into guest memory and stop holding it.
     fn flush_one(&mut self, addr: u64) {
-        let Some(held) = self.held.remove(&addr) else { return };
+        let Some(held) = self.held.remove(&addr) else {
+            return;
+        };
         self.ask_for(held);
     }
 
@@ -1183,7 +1199,9 @@ impl Gpu {
         let target = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("depth upload") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("depth upload"),
+            });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("depth upload"),
@@ -1215,33 +1233,35 @@ impl Gpu {
             return pipeline.clone();
         }
         let (_, module) = self.module("load depth", LOAD_DEPTH_WGSL);
-        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("load depth"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("load depth"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
         self.depth_loaders.insert(format, pipeline.clone());
         pipeline
     }
@@ -1275,7 +1295,9 @@ impl Gpu {
         });
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("readback") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("readback"),
+            });
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
                 texture,
@@ -1308,7 +1330,13 @@ impl Gpu {
             let done = if r.is_ok() { MAP_READY } else { MAP_FAILED };
             sink.store(done, std::sync::atomic::Ordering::Release);
         });
-        Pending { staging, target: *target, row_bytes, padded, state }
+        Pending {
+            staging,
+            target: *target,
+            row_bytes,
+            padded,
+            state,
+        }
     }
 
     /// Copy a finished readback into guest memory, dropping the row padding
@@ -1351,7 +1379,10 @@ impl Gpu {
             ),
             None => None,
         };
-        let depth_format = p.depth.and_then(|d| d.depth_kind()).map(depth_texture_format);
+        let depth_format = p
+            .depth
+            .and_then(|d| d.depth_kind())
+            .map(depth_texture_format);
         // The sample mask and alpha-to-coverage belong to the device only on
         // the route where the device is doing the multisampling. On the
         // expanded route the fragment shader has them, and saying them twice
@@ -1499,15 +1530,20 @@ impl Gpu {
                         .iter()
                         .map(|a| (a.format, a.offset, a.shader_location))
                         .collect();
-                    (b.stride as u32, b.step == wgpu::VertexStepMode::Instance, attributes)
+                    (
+                        b.stride as u32,
+                        b.step == wgpu::VertexStepMode::Instance,
+                        attributes,
+                    )
                 })
                 .collect(),
         };
         if let Some(pipeline) = self.pipelines.get(&key) {
             return self.encode(p, &pipeline.clone(), &vs_group, &fs_group, &bound, ctx);
         }
-        let pipeline_layout =
-            self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("draw"),
                 bind_group_layouts: &[Some(&vs_group_layout), Some(&fs_group_layout)],
                 immediate_size: 0,
@@ -1574,7 +1610,11 @@ impl Gpu {
             multiview_mask: None,
             cache: None,
         };
-        let pipeline = timed!(self, pipeline, self.device.create_render_pipeline(&descriptor));
+        let pipeline = timed!(
+            self,
+            pipeline,
+            self.device.create_render_pipeline(&descriptor)
+        );
         self.pipelines.insert(key, pipeline.clone());
         self.encode(p, &pipeline, &vs_group, &fs_group, &bound, ctx)
     }
@@ -1616,8 +1656,7 @@ impl Gpu {
             // the draw it came from was: the triangles are a list of
             // ordinals, and that is what an index buffer is.
             Some((indices, base)) => {
-                let bytes: Vec<u8> =
-                    indices.iter().flat_map(|i| i.to_le_bytes()).collect();
+                let bytes: Vec<u8> = indices.iter().flat_map(|i| i.to_le_bytes()).collect();
                 Some((
                     self.buffer("assembled", &bytes, wgpu::BufferUsages::INDEX),
                     wgpu::IndexFormat::Uint32,
@@ -1638,7 +1677,9 @@ impl Gpu {
 
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("draw") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("draw"),
+            });
         {
             let colour: Vec<Option<wgpu::RenderPassColorAttachment>> = colour_view
                 .as_ref()
@@ -1767,7 +1808,11 @@ impl Gpu {
     ) -> std::result::Result<(wgpu::BindGroupLayout, wgpu::BindGroup), String> {
         // The dimensionality is the layout's, because it is what the module
         // declared the binding as.
-        let declared = if stage == ShaderStage::VertexB { &p.vs_layout } else { &p.fs_layout };
+        let declared = if stage == ShaderStage::VertexB {
+            &p.vs_layout
+        } else {
+            &p.fs_layout
+        };
         let mut entries = Vec::new();
         let mut resources: Vec<Resource> = Vec::new();
 
@@ -1788,7 +1833,13 @@ impl Gpu {
             ));
         }
 
-        for (index, upload) in p.uploads.textures.iter().filter(|t| t.stage == stage).enumerate() {
+        for (index, upload) in p
+            .uploads
+            .textures
+            .iter()
+            .filter(|t| t.stage == stage)
+            .enumerate()
+        {
             let dim = declared
                 .textures
                 .iter()
@@ -1818,7 +1869,11 @@ impl Gpu {
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             });
-            resources.push(Resource::Texture(binding, self.texture(upload)?, view_dimension));
+            resources.push(Resource::Texture(
+                binding,
+                self.texture(upload)?,
+                view_dimension,
+            ));
             resources.push(Resource::Sampler(binding + 1, self.sampler(upload)));
         }
 
@@ -1826,10 +1881,11 @@ impl Gpu {
             Some(layout) => layout.clone(),
             None => {
                 let layout =
-                    self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                        label: Some("stage"),
-                        entries: &entries,
-                    });
+                    self.device
+                        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                            label: Some("stage"),
+                            entries: &entries,
+                        });
                 self.group_layouts.insert(entries, layout.clone());
                 layout
             }
@@ -1967,10 +2023,12 @@ impl Gpu {
         if let Some(module) = self.modules.get(&key) {
             return (key, module.clone());
         }
-        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some(what),
-            source: wgpu::ShaderSource::Wgsl(source.into()),
-        });
+        let module = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(what),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
         self.modules.insert(key, module.clone());
         (key, module)
     }
@@ -2029,9 +2087,7 @@ impl Gpu {
             // that keeps some of them and not others has nothing to act on.
             let all = (1u64 << state.samples) - 1;
             if u64::from(state.sample_mask) & all != all || state.alpha_to_coverage {
-                return Err(
-                    "a draw with coverage per pixel and a mask that is per sample".into()
-                );
+                return Err("a draw with coverage per pixel and a mask that is per sample".into());
             }
             return Ok(Render::Companion(Shape::PerPixel));
         }
@@ -2117,7 +2173,11 @@ impl Gpu {
         let format = held.texture.format();
         let companion = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("companion"),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: samples,
             dimension: wgpu::TextureDimension::D2,
@@ -2130,12 +2190,21 @@ impl Gpu {
         // What is already in the surface has to be in the companion, or a
         // draw that blends against it — or tests depth against it — reads a
         // texture nothing has written.
-        let source = self.held.get(&addr).ok_or("the surface was not held")?.texture.clone();
+        let source = self
+            .held
+            .get(&addr)
+            .ok_or("the surface was not held")?
+            .texture
+            .clone();
         self.resample(
             &companion,
             &source,
             ResampleKey {
-                entry: if samples > 1 { "fs_gather" } else { "fs_gather_flat" },
+                entry: if samples > 1 {
+                    "fs_gather"
+                } else {
+                    "fs_gather_flat"
+                },
                 dst: format,
                 samples,
                 ms_source: false,
@@ -2144,7 +2213,11 @@ impl Gpu {
             grid,
         )?;
         let held = self.held.get_mut(&addr).ok_or("the surface was not held")?;
-        held.companion = Some(Companion { shape, texture: companion, grid });
+        held.companion = Some(Companion {
+            shape,
+            texture: companion,
+            grid,
+        });
         Ok(())
     }
 
@@ -2161,8 +2234,12 @@ impl Gpu {
     /// Put what the companion of the surface at `addr` holds back into it,
     /// and stop holding it.
     fn resolve_companion(&mut self, addr: u64) -> std::result::Result<(), String> {
-        let Some(held) = self.held.get_mut(&addr) else { return Ok(()) };
-        let Some(companion) = held.companion.take() else { return Ok(()) };
+        let Some(held) = self.held.get_mut(&addr) else {
+            return Ok(());
+        };
+        let Some(companion) = held.companion.take() else {
+            return Ok(());
+        };
         let surface = held.texture.clone();
         let depth = held.target.depth_kind().is_some();
         self.resolve_into(&surface, &companion, depth)
@@ -2207,7 +2284,10 @@ impl Gpu {
             label: Some("resample"),
             layout: &layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                },
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&source),
@@ -2217,7 +2297,9 @@ impl Gpu {
         let view = dst.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("resample") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("resample"),
+            });
         {
             let colour: Vec<Option<wgpu::RenderPassColorAttachment>> = (!key.depth)
                 .then(|| {
@@ -2272,14 +2354,16 @@ impl Gpu {
         let (sampled, load) = match (key.depth, key.ms_source, key.entry) {
             (false, false, "fs_scatter") => ("texture_2d<f32>", "textureLoad(src, pixel, 0)"),
             (false, false, _) => ("texture_2d<f32>", "textureLoad(src, texel, 0)"),
-            (false, true, _) => {
-                ("texture_multisampled_2d<f32>", "textureLoad(src, pixel, sample)")
-            }
+            (false, true, _) => (
+                "texture_multisampled_2d<f32>",
+                "textureLoad(src, pixel, sample)",
+            ),
             (true, false, "fs_scatter") => ("texture_depth_2d", "textureLoad(src, pixel, 0)"),
             (true, false, _) => ("texture_depth_2d", "textureLoad(src, texel, 0)"),
-            (true, true, _) => {
-                ("texture_depth_multisampled_2d", "textureLoad(src, pixel, sample)")
-            }
+            (true, true, _) => (
+                "texture_depth_multisampled_2d",
+                "textureLoad(src, pixel, sample)",
+            ),
         };
         let (_, module) = {
             let source = resample_wgsl(sampled, load, key.depth);
@@ -2295,33 +2379,38 @@ impl Gpu {
             })
             .into_iter()
             .collect();
-        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("resample"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: key.depth.then(|| wgpu::DepthStencilState {
-                format: key.dst,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState { count: key.samples, ..Default::default() },
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some(key.entry),
-                compilation_options: Default::default(),
-                targets: &targets,
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("resample"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: key.depth.then(|| wgpu::DepthStencilState {
+                    format: key.dst,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: key.samples,
+                    ..Default::default()
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(key.entry),
+                    compilation_options: Default::default(),
+                    targets: &targets,
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
         self.resample_pipelines.insert(key, pipeline.clone());
         Ok(pipeline)
     }
@@ -2372,9 +2461,15 @@ impl Gpu {
                 // holds outside the rectangle survives it.
                 self.resolve_companion(target.addr)?;
             }
-            let held = self.held.get_mut(&target.addr).ok_or("the surface was not held")?;
+            let held = self
+                .held
+                .get_mut(&target.addr)
+                .ok_or("the surface was not held")?;
             held.dirty = true;
-            views.push(held.texture.create_view(&wgpu::TextureViewDescriptor::default()));
+            views.push(
+                held.texture
+                    .create_view(&wgpu::TextureViewDescriptor::default()),
+            );
         }
         let mut view = views.into_iter();
         let colour_view = color.map(|_| view.next().expect("a colour view"));
@@ -2409,18 +2504,26 @@ impl Gpu {
             Some(_) => Some(self.clear_pipeline(key)?),
             None => None,
         };
-        let group = pipeline.as_ref().zip(uniform.as_ref()).map(|(pipeline, buffer)| {
-            let layout = pipeline.get_bind_group_layout(0);
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("clear"),
-                layout: &layout,
-                entries: &[wgpu::BindGroupEntry { binding: 0, resource: buffer.as_entire_binding() }],
-            })
-        });
+        let group = pipeline
+            .as_ref()
+            .zip(uniform.as_ref())
+            .map(|(pipeline, buffer)| {
+                let layout = pipeline.get_bind_group_layout(0);
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("clear"),
+                    layout: &layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    }],
+                })
+            });
 
         let mut encoder = self
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("clear") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("clear"),
+            });
         {
             let attachments: Vec<Option<wgpu::RenderPassColorAttachment>> = colour_view
                 .as_ref()
@@ -2470,12 +2573,7 @@ impl Gpu {
             if let (Some(pipeline), Some(group)) = (&pipeline, &group) {
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, group, &[]);
-                pass.set_scissor_rect(
-                    rect.x0,
-                    rect.y0,
-                    rect.x1 - rect.x0,
-                    rect.y1 - rect.y0,
-                );
+                pass.set_scissor_rect(rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0);
                 pass.draw(0..3, 0..1);
             }
         }
@@ -2504,7 +2602,12 @@ impl Gpu {
             return Ok(());
         };
         let rect = self.clear_texels(engine, &surface)?;
-        self.clear_on_device(Some((surface, engine.clear_color_value(), channels)), None, rect, ctx)
+        self.clear_on_device(
+            Some((surface, engine.clear_color_value(), channels)),
+            None,
+            rect,
+            ctx,
+        )
     }
 
     /// Clear the depth surface, on the device.
@@ -2558,8 +2661,15 @@ impl Gpu {
             None => {}
         }
         let texture = self.blank_target(target)?;
-        self.held
-            .insert(target.addr, Held { texture, target: *target, dirty: false, companion: None });
+        self.held.insert(
+            target.addr,
+            Held {
+                texture,
+                target: *target,
+                dirty: false,
+                companion: None,
+            },
+        );
         Ok(())
     }
 
@@ -2598,7 +2708,10 @@ impl Gpu {
 
     /// The pipeline that clears a rectangle of these formats, built once per
     /// combination. See [`CLEAR_RECT_WGSL`].
-    fn clear_pipeline(&mut self, key: ClearKey) -> std::result::Result<wgpu::RenderPipeline, String> {
+    fn clear_pipeline(
+        &mut self,
+        key: ClearKey,
+    ) -> std::result::Result<wgpu::RenderPipeline, String> {
         if let Some(pipeline) = self.clear_pipelines.get(&key) {
             return Ok(pipeline.clone());
         }
@@ -2614,33 +2727,39 @@ impl Gpu {
             })
             .into_iter()
             .collect();
-        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("clear"),
-            layout: None,
-            vertex: wgpu::VertexState {
-                module: &module,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[],
-            },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: key.depth.map(|format| wgpu::DepthStencilState {
-                format,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Always),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &module,
-                entry_point: Some(if key.color.is_some() { "fs_color" } else { "fs_depth" }),
-                compilation_options: Default::default(),
-                targets: &targets,
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("clear"),
+                layout: None,
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: key.depth.map(|format| wgpu::DepthStencilState {
+                    format,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some(if key.color.is_some() {
+                        "fs_color"
+                    } else {
+                        "fs_depth"
+                    }),
+                    compilation_options: Default::default(),
+                    targets: &targets,
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
         self.clear_pipelines.insert(key, pipeline.clone());
         Ok(pipeline)
     }
@@ -2670,10 +2789,7 @@ impl Gpu {
 ///
 /// Refusing it here instead makes it what every other thing this backend
 /// cannot express already is -- one draw on the software rasterizer.
-fn device_texture_format(
-    device: &wgpu::Device,
-    format: Format,
-) -> Result<wgpu::TextureFormat> {
+fn device_texture_format(device: &wgpu::Device, format: Format) -> Result<wgpu::TextureFormat> {
     let wanted = texture_format(format)?;
     let needs = wanted.required_features();
     if !device.features().contains(needs) {
@@ -2885,11 +3001,27 @@ impl Gpu {
         fs_layout.group = 1;
 
         let mut immediates: Vec<(ShaderStage, u16)> = Vec::new();
-        immediates.extend(vs.textures.iter().map(|&(imm, _)| (ShaderStage::VertexB, imm)));
-        immediates.extend(fs.textures.iter().map(|&(imm, _)| (ShaderStage::Fragment, imm)));
+        immediates.extend(
+            vs.textures
+                .iter()
+                .map(|&(imm, _)| (ShaderStage::VertexB, imm)),
+        );
+        immediates.extend(
+            fs.textures
+                .iter()
+                .map(|&(imm, _)| (ShaderStage::Fragment, imm)),
+        );
         let mut banks: Vec<(ShaderStage, u32)> = Vec::new();
-        banks.extend(vs.const_banks.iter().map(|&b| (ShaderStage::VertexB, u32::from(b))));
-        banks.extend(fs.const_banks.iter().map(|&b| (ShaderStage::Fragment, u32::from(b))));
+        banks.extend(
+            vs.const_banks
+                .iter()
+                .map(|&b| (ShaderStage::VertexB, u32::from(b))),
+        );
+        banks.extend(
+            fs.const_banks
+                .iter()
+                .map(|&b| (ShaderStage::Fragment, u32::from(b))),
+        );
         let uploads = timed!(self, upload, {
             Uploads::of(engine, &state, ctx, Banks::Read(&banks), &immediates)
         })
@@ -2898,9 +3030,10 @@ impl Gpu {
         // The swizzle is in the descriptor, which is guest memory the draw
         // points at, so the translation cannot know it and the layout has to
         // be told. WebGPU has no per-texture component swizzle.
-        for (layout, stage) in
-            [(&mut vs_layout, ShaderStage::VertexB), (&mut fs_layout, ShaderStage::Fragment)]
-        {
+        for (layout, stage) in [
+            (&mut vs_layout, ShaderStage::VertexB),
+            (&mut fs_layout, ShaderStage::Fragment),
+        ] {
             for binding in &mut layout.textures {
                 if let Some(upload) = uploads
                     .textures
@@ -2917,7 +3050,8 @@ impl Gpu {
         // and what the rasterizer does to them too.
         let assembled = match state.expand {
             Some(primitive) => {
-                let triangles = switch_core::gpu::raster::assemble(primitive, engine.last_draw.count);
+                let triangles =
+                    switch_core::gpu::raster::assemble(primitive, engine.last_draw.count);
                 let mut indices = Vec::with_capacity(triangles.len() * 3);
                 match &uploads.index {
                     // An indexed draw's triples are positions in its index
@@ -2982,13 +3116,14 @@ impl Gpu {
         ctx: &ExecCtx,
         stage: ShaderStage,
     ) -> std::result::Result<Translation, String> {
-        let binding = engine.program(stage).ok_or_else(|| format!("no {stage:?} program"))?;
-        let program = switch_core::gpu::shader::decode_program_from_memory(
-            ctx,
-            binding.addr,
-            &|bank: u8| engine.bound_constbuf(stage, u32::from(bank)),
-        )
-        .map_err(|e| format!("{e:?}"))?;
+        let binding = engine
+            .program(stage)
+            .ok_or_else(|| format!("no {stage:?} program"))?;
+        let program =
+            switch_core::gpu::shader::decode_program_from_memory(ctx, binding.addr, &|bank: u8| {
+                engine.bound_constbuf(stage, u32::from(bank))
+            })
+            .map_err(|e| format!("{e:?}"))?;
         wgsl::translate(&Compiled::new(&program)).map_err(|e| e.to_string())
     }
 }
@@ -3005,7 +3140,11 @@ impl Renderer for Gpu {
         // did rather than how much it got away with.
         let index = self.in_frame;
         self.in_frame += 1;
-        if self.only.as_ref().is_some_and(|only| !only.contains(&index)) {
+        if self
+            .only
+            .as_ref()
+            .is_some_and(|only| !only.contains(&index))
+        {
             self.flush(ctx)?;
             return self.software.draw(engine, ctx);
         }
@@ -3074,7 +3213,9 @@ impl Renderer for Gpu {
         self.fell_back_this_frame = false;
         if self.give_up() || self.software_frame {
             self.flush(ctx)?;
-            return self.software.clear_color(engine, ctx, target, layer, channels);
+            return self
+                .software
+                .clear_color(engine, ctx, target, layer, channels);
         }
         let attempt = self.clear_color_here(engine, ctx, target, layer, channels);
         self.release_scratch();
@@ -3086,7 +3227,8 @@ impl Renderer for Gpu {
                 // go back before it does — or the clear would be overwritten
                 // by a surface handed back after it.
                 self.flush(ctx)?;
-                self.software.clear_color(engine, ctx, target, layer, channels)
+                self.software
+                    .clear_color(engine, ctx, target, layer, channels)
             }
         }
     }
@@ -3100,7 +3242,9 @@ impl Renderer for Gpu {
     ) -> Result<()> {
         if self.give_up() || self.software_frame {
             self.flush(ctx)?;
-            return self.software.clear_depth_stencil(engine, ctx, depth, stencil);
+            return self
+                .software
+                .clear_depth_stencil(engine, ctx, depth, stencil);
         }
         // The device holds no stencil at all — `depth32float` and
         // `depth16unorm` are the two formats a readback can reach, and
@@ -3110,7 +3254,8 @@ impl Renderer for Gpu {
         // where it was. No flush is owed, because the two never touch the
         // same bits.
         if stencil {
-            self.software.clear_depth_stencil(engine, ctx, false, true)?;
+            self.software
+                .clear_depth_stencil(engine, ctx, false, true)?;
         }
         if !depth {
             return Ok(());
@@ -3198,7 +3343,11 @@ impl Gpu {
             })
         };
         use std::sync::atomic::Ordering;
-        if self.pending.iter().any(|p| p.state.load(Ordering::Acquire) == MAP_WAITING) {
+        if self
+            .pending
+            .iter()
+            .any(|p| p.state.load(Ordering::Acquire) == MAP_WAITING)
+        {
             // The one place that learns a readback does not land inside the
             // call that asked for it. From here on a frame is all one
             // renderer's — see [`Gpu::deferred_readbacks`].
@@ -3257,10 +3406,12 @@ mod tests {
                 "}",
             ]
             .join("\n");
-            let _m = gpu.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(name),
-                source: wgpu::ShaderSource::Wgsl(src.into()),
-            });
+            let _m = gpu
+                .device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(name),
+                    source: wgpu::ShaderSource::Wgsl(src.into()),
+                });
             let _ = gpu.device.poll(wgpu::PollType::Poll);
             gpu.failed.lock().ok().and_then(|mut e| e.take())
         };
@@ -3299,7 +3450,9 @@ mod tests {
     /// is the whole of what multisampling is, and the whole of what the two
     /// routes through it have to get right.
     fn compare(mode: u32, samples_x: u32, samples_y: u32, set_up: impl Fn(&mut Harness)) {
-        let Ok(mut gpu) = super::Gpu::open() else { return };
+        let Ok(mut gpu) = super::Gpu::open() else {
+            return;
+        };
         let colour = [1.0f32, 1.0, 1.0, 1.0];
 
         let build = |gpu: Option<&mut super::Gpu>| {
@@ -3340,7 +3493,9 @@ mod tests {
     /// One draw, set up by `set_up`, rendered by the rasterizer and by the
     /// device — colour and depth both.
     fn agrees(set_up: impl Fn(&mut Harness)) {
-        let Ok(mut gpu) = super::Gpu::open() else { return };
+        let Ok(mut gpu) = super::Gpu::open() else {
+            return;
+        };
         let build = |gpu: Option<&mut super::Gpu>| {
             let mut h = Harness::new();
             set_up(&mut h);
@@ -3431,7 +3586,11 @@ mod tests {
                 h.triangle([0.0, 0.0, 0.0, 1.0]);
                 h.instanced_colour(
                     instance,
-                    &[[1.0, 0.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0]],
+                    &[
+                        [1.0, 0.0, 0.0, 1.0],
+                        [0.0, 1.0, 0.0, 1.0],
+                        [0.0, 0.0, 1.0, 1.0],
+                    ],
                 );
             });
         }
@@ -3461,7 +3620,9 @@ mod tests {
     /// a fallback is the rasterizer's whole, and so is every frame after it.
     #[test]
     fn a_frame_the_device_cannot_finish_is_a_frame_it_does_not_start() {
-        let Ok(mut gpu) = super::Gpu::open() else { return };
+        let Ok(mut gpu) = super::Gpu::open() else {
+            return;
+        };
         // What a browser teaches it on its first present.
         gpu.deferred_readbacks = true;
         let colour = [1.0f32, 0.0, 1.0, 1.0];
@@ -3477,22 +3638,32 @@ mod tests {
         // what a fallback landing somewhere that also refuses looks like. The
         // fallback is the part under test.
         let _ = h.draw_with(&mut gpu);
-        assert!(gpu.fell_back_this_frame, "a line loop should not have been expressible");
+        assert!(
+            gpu.fell_back_this_frame,
+            "a line loop should not have been expressible"
+        );
 
         // The next frame's clear is where that becomes a decision.
         h.engine.last_draw.primitive = 4;
         h.clear_with(&mut gpu, [true; 4]).expect("the clear");
-        assert!(gpu.software_frame, "the frame after a fallback is the rasterizer's");
+        assert!(
+            gpu.software_frame,
+            "the frame after a fallback is the rasterizer's"
+        );
         let drawn = gpu.drawn;
         h.draw_with(&mut gpu).expect("the draw");
-        assert_eq!(gpu.drawn, drawn, "a draw ran on the device in a rasterizer's frame");
+        assert_eq!(
+            gpu.drawn, drawn,
+            "a draw ran on the device in a rasterizer's frame"
+        );
 
         // What guest memory holds is the frame the rasterizer draws — read
         // before anything clears it again.
         let got = h.target();
         let mut want = Harness::new();
         want.triangle(colour);
-        want.clear_with(&mut Software, [true; 4]).expect("the clear");
+        want.clear_with(&mut Software, [true; 4])
+            .expect("the clear");
         want.draw_with(&mut Software).expect("the draw");
         assert_eq!(got, want.target());
 
@@ -3507,7 +3678,9 @@ mod tests {
     fn a_clear_writes_what_the_rasterizer_would_have_written() {
         // Clears used to go to the rasterizer, which meant handing every
         // surface back first — a whole frame's readback, at every clear.
-        let Ok(mut gpu) = super::Gpu::open() else { return };
+        let Ok(mut gpu) = super::Gpu::open() else {
+            return;
+        };
         for channels in [[true; 4], [true, false, true, false], [false; 4]] {
             let build = |gpu: Option<&mut super::Gpu>| {
                 let mut h = Harness::new();
@@ -3535,7 +3708,11 @@ mod tests {
             let want = build(None);
             let before = gpu.fallbacks;
             let got = build(Some(&mut gpu));
-            assert_eq!(gpu.fallbacks, before, "the clear fell back: {:?}", gpu.last_fallback);
+            assert_eq!(
+                gpu.fallbacks, before,
+                "the clear fell back: {:?}",
+                gpu.last_fallback
+            );
             let _ = gpu.device.poll(wgpu::PollType::Poll);
             assert_eq!(gpu.device_error(), None, "the device rejected the clear");
             assert_eq!(got, want, "a clear of channels {channels:?}");
@@ -3582,7 +3759,9 @@ mod tests {
     /// and only the pixels an edge crosses are free to differ.
     #[test]
     fn the_device_route_agrees_wherever_an_edge_is_not() {
-        let Ok(mut gpu) = super::Gpu::open() else { return };
+        let Ok(mut gpu) = super::Gpu::open() else {
+            return;
+        };
         gpu.set_device_msaa(true);
         let colour = [1.0f32, 1.0, 1.0, 1.0];
         let mut ran = 0;
@@ -3631,7 +3810,10 @@ mod tests {
                 }
             }
         }
-        assert!(ran > 0, "this device offered none of the sample counts under test");
+        assert!(
+            ran > 0,
+            "this device offered none of the sample counts under test"
+        );
     }
 
     #[test]
@@ -3677,12 +3859,16 @@ mod tests {
 
     #[test]
     fn every_pass_the_backend_builds_for_itself_compiles() {
-        let Ok(mut gpu) = super::Gpu::open() else { return };
+        let Ok(mut gpu) = super::Gpu::open() else {
+            return;
+        };
         // A surface format that is certainly multisampled, and the two depth
         // formats a readback can reach.
         let colour = wgpu::TextureFormat::Bgra8Unorm;
-        let depths =
-            [wgpu::TextureFormat::Depth16Unorm, wgpu::TextureFormat::Depth32Float];
+        let depths = [
+            wgpu::TextureFormat::Depth16Unorm,
+            wgpu::TextureFormat::Depth32Float,
+        ];
 
         for depth in depths {
             let _ = gpu.depth_loader(depth);
@@ -3709,9 +3895,7 @@ mod tests {
             gpu.samples_supported(colour, samples),
             "an adapter that will not multisample {colour:?} four ways"
         );
-        for (dst, is_depth) in
-            [(colour, false), (depths[0], true), (depths[1], true)]
-        {
+        for (dst, is_depth) in [(colour, false), (depths[0], true), (depths[1], true)] {
             if is_depth && !gpu.samples_supported(dst, samples) {
                 continue;
             }
@@ -3748,12 +3932,17 @@ mod tests {
                     depth: is_depth,
                 },
             ] {
-                gpu.resample_pipeline(key).unwrap_or_else(|e| panic!("{key:?}: {e}"));
+                gpu.resample_pipeline(key)
+                    .unwrap_or_else(|e| panic!("{key:?}: {e}"));
             }
         }
 
         let _ = gpu.device.poll(wgpu::PollType::Poll);
-        assert_eq!(gpu.device_error(), None, "the device rejected one of its own passes");
+        assert_eq!(
+            gpu.device_error(),
+            None,
+            "the device rejected one of its own passes"
+        );
     }
 
     /// The grid tables the resampling passes read, which are the only thing
@@ -3765,7 +3954,12 @@ mod tests {
         assert_eq!(grid.count(), 4);
         let bytes = super::grid_bytes(grid);
         let word = |i: usize| {
-            u32::from_le_bytes([bytes[i * 4], bytes[i * 4 + 1], bytes[i * 4 + 2], bytes[i * 4 + 3]])
+            u32::from_le_bytes([
+                bytes[i * 4],
+                bytes[i * 4 + 1],
+                bytes[i * 4 + 2],
+                bytes[i * 4 + 3],
+            ])
         };
         assert_eq!(bytes.len(), 8 + 3 * 16 * 4);
         assert_eq!((word(0), word(1)), (2, 2), "the tile a pixel owns");

@@ -34,7 +34,10 @@ pub struct EngineInline {
 
 impl EngineInline {
     pub fn new() -> EngineInline {
-        EngineInline { regs: Registers::new(), written: 0 }
+        EngineInline {
+            regs: Registers::new(),
+            written: 0,
+        }
     }
 
     pub fn write(&mut self, method: u32, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
@@ -66,11 +69,18 @@ impl EngineInline {
         }
         let base = self.regs.iova(OFFSET_OUT);
         let (layout, width_bytes) = if pitch_layout {
-            (Layout::Pitch { pitch: self.regs.get(PITCH_OUT) }, self.regs.get(PITCH_OUT))
+            (
+                Layout::Pitch {
+                    pitch: self.regs.get(PITCH_OUT),
+                },
+                self.regs.get(PITCH_OUT),
+            )
         } else {
             let block = self.regs.get(SET_DST_BLOCK_SIZE);
             (
-                Layout::BlockLinear { block_height_gobs: 1 << field(block, 4, 7) },
+                Layout::BlockLinear {
+                    block_height_gobs: 1 << field(block, 4, 7),
+                },
                 self.regs.get(SET_DST_WIDTH),
             )
         };
@@ -102,7 +112,9 @@ mod tests {
         let mut mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x1000).unwrap();
         let mut vmm = AddressSpace::new();
-        let base = vmm.map(0x3000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+        let base = vmm
+            .map(0x3000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
         let mut host1x = Host1x::new();
         let mut stats = GpuStats::default();
 
@@ -121,8 +133,12 @@ mod tests {
             trace: false,
         };
         engine.write(LAUNCH_DMA, 1, &mut ctx).unwrap(); // pitch destination
-        engine.write(LOAD_INLINE_DATA, 0x1122_3344, &mut ctx).unwrap();
-        engine.write(LOAD_INLINE_DATA, 0x5566_7788, &mut ctx).unwrap();
+        engine
+            .write(LOAD_INLINE_DATA, 0x1122_3344, &mut ctx)
+            .unwrap();
+        engine
+            .write(LOAD_INLINE_DATA, 0x5566_7788, &mut ctx)
+            .unwrap();
 
         assert_eq!(mem.read_u32(0x3000_0000).unwrap(), 0x1122_3344);
         assert_eq!(mem.read_u32(0x3000_0004).unwrap(), 0x5566_7788);
@@ -133,7 +149,9 @@ mod tests {
         let mut mem = Memory::new();
         mem.map_zero(0x3000_0000, 0x1000).unwrap();
         let mut vmm = AddressSpace::new();
-        let base = vmm.map(0x3000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+        let base = vmm
+            .map(0x3000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
         let mut host1x = Host1x::new();
         let mut stats = GpuStats::default();
 
@@ -152,8 +170,12 @@ mod tests {
             trace: false,
         };
         engine.write(LAUNCH_DMA, 1, &mut ctx).unwrap();
-        engine.write(LOAD_INLINE_DATA, 0xAABB_CCDD, &mut ctx).unwrap();
-        engine.write(LOAD_INLINE_DATA, 0x1122_3344, &mut ctx).unwrap();
+        engine
+            .write(LOAD_INLINE_DATA, 0xAABB_CCDD, &mut ctx)
+            .unwrap();
+        engine
+            .write(LOAD_INLINE_DATA, 0x1122_3344, &mut ctx)
+            .unwrap();
 
         assert_eq!(mem.read_u32(0x3000_0000).unwrap(), 0xAABB_CCDD);
         assert_eq!(mem.read_u32(0x3000_0020).unwrap(), 0x1122_3344);

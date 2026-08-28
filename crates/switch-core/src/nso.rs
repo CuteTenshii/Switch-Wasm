@@ -84,9 +84,8 @@ fn entry_offset(text: &[u8]) -> u32 {
     }
     let reserved = read_u32(text, 0);
     let mod0_offset = read_u32(text, 4) as usize;
-    let has_mod0 = reserved == 0
-        && mod0_offset + 4 <= text.len()
-        && read_u32(text, mod0_offset) == MOD0_MAGIC;
+    let has_mod0 =
+        reserved == 0 && mod0_offset + 4 <= text.len() && read_u32(text, mod0_offset) == MOD0_MAGIC;
     if has_mod0 {
         NSO_ENTRY_OFFSET
     } else {
@@ -235,13 +234,14 @@ fn extract_segment(
         seg.decompressed_size
     } as usize;
     let start = seg.file_offset as usize;
-    let end = start
-        .checked_add(on_disk_size)
-        .ok_or(Error::Overflow)?;
+    let end = start.checked_add(on_disk_size).ok_or(Error::Overflow)?;
     if end > data.len() {
         return Err(Error::Nso(format!(
             "{} segment [{:#x}, {:#x}) exceeds input data ({} bytes)",
-            name, start, end, data.len()
+            name,
+            start,
+            end,
+            data.len()
         )));
     }
     let raw = &data[start..end];
@@ -299,7 +299,8 @@ mod tests {
         assert_eq!(mem.read_u32(loaded.data.mem_addr).unwrap(), 0xEFBEADDE);
         // BSS zero-filled right after .data.
         assert_eq!(
-            mem.read_u8(loaded.data.mem_addr + loaded.data.file_size).unwrap(),
+            mem.read_u8(loaded.data.mem_addr + loaded.data.file_size)
+                .unwrap(),
             0
         );
     }
@@ -352,7 +353,10 @@ mod tests {
     fn rejects_bad_magic() {
         let mut nso = build_nso(&[0u8; 4], &[], &[], 0);
         nso[0] = b'X';
-        assert!(matches!(load_nso(&mut Memory::new(), &nso, NSO_BASE), Err(Error::BadMagic { .. })));
+        assert!(matches!(
+            load_nso(&mut Memory::new(), &nso, NSO_BASE),
+            Err(Error::BadMagic { .. })
+        ));
     }
 
     #[test]

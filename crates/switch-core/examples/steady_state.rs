@@ -37,7 +37,10 @@ const BOOT_BUDGET: u64 = 20_000_000_000;
 
 /// Print one ranked table of samples, as percentages of `total`.
 fn report(title: &str, counts: &BTreeMap<(u64, u32), u64>, total: u64, rows: usize, label: &str) {
-    let mut ranked: Vec<_> = counts.iter().map(|(&(thread, at), &count)| (count, thread, at)).collect();
+    let mut ranked: Vec<_> = counts
+        .iter()
+        .map(|(&(thread, at), &count)| (count, thread, at))
+        .collect();
     ranked.sort_unstable_by(|a, b| b.cmp(a));
     println!("--- {title} ---");
     for (count, thread, at) in ranked.iter().take(rows) {
@@ -114,20 +117,30 @@ fn main() {
     threads.sort_unstable_by(|a, b| b.cmp(a));
     println!("--- {sampled} samples over {} instructions ---", run.steps);
     for (count, thread) in threads.iter().take(8) {
-        println!("  thread {thread:#x}: {:.1}%", *count as f64 * 100.0 / sampled as f64);
+        println!(
+            "  thread {thread:#x}: {:.1}%",
+            *count as f64 * 100.0 / sampled as f64
+        );
     }
     report("by page", &pages, sampled, 20, "");
     report("by return address", &callers, sampled, 20, "lr");
 
     let taken: u64 = stacks.values().sum();
-    let mut ranked: Vec<_> = stacks.iter().map(|((thread, stack), count)| (count, thread, stack)).collect();
+    let mut ranked: Vec<_> = stacks
+        .iter()
+        .map(|((thread, stack), count)| (count, thread, stack))
+        .collect();
     ranked.sort_unstable_by(|a, b| b.0.cmp(a.0));
     println!("--- by call stack ({taken} stacks) ---");
     for (count, thread, stack) in ranked.iter().take(8) {
         println!(
             "  {:5.1}%  thread {thread:#x}  {}",
             **count as f64 * 100.0 / taken as f64,
-            stack.iter().map(|pc| format!("{pc:#010x}")).collect::<Vec<_>>().join(" <- ")
+            stack
+                .iter()
+                .map(|pc| format!("{pc:#010x}"))
+                .collect::<Vec<_>>()
+                .join(" <- ")
         );
     }
 

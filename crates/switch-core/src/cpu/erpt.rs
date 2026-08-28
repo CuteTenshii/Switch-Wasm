@@ -125,49 +125,163 @@ const ERPT_NOT_FOUND: u32 = 147 | (8 << 9);
 /// listing numbers. A category this table predates prints as its number, which
 /// is still the answer.
 const ERPT_CATEGORIES: [&str; 157] = [
-    "Test", "ErrorInfo", "ConnectionStatusInfo", "NetworkInfo", "NXMacAddressInfo",
-    "StealthNetworkInfo", "LimitHighCapacityInfo", "NATTypeInfo", "WirelessAPMacAddressInfo",
-    "GlobalIPAddressInfo", "EnableWirelessInterfaceInfo", "EnableWifiInfo",
-    "EnableBluetoothInfo", "EnableNFCInfo", "NintendoZoneSSIDListVersionInfo",
-    "LANAdapterMacAddressInfo", "ApplicationInfo", "OccurrenceInfo", "ProductModelInfo",
-    "CurrentLanguageInfo", "UseNetworkTimeProtocolInfo", "TimeZoneInfo",
-    "ControllerFirmwareInfo", "VideoOutputInfo", "NANDFreeSpaceInfo", "SDCardFreeSpaceInfo",
-    "ScreenBrightnessInfo", "AudioFormatInfo", "MuteOnHeadsetUnpluggedInfo",
-    "NumUserRegisteredInfo", "DataDeletionInfo", "ControllerVibrationInfo", "LockScreenInfo",
-    "InternalBatteryLotNumberInfo", "LeftControllerSerialNumberInfo",
-    "RightControllerSerialNumberInfo", "NotificationInfo", "TVInfo", "SleepInfo",
-    "ConnectionInfo", "NetworkErrorInfo", "FileAccessPathInfo", "GameCardCIDInfo",
-    "NANDCIDInfoDeprecated", "MicroSDCIDInfoDeprecated", "NANDSpeedModeInfo",
-    "MicroSDSpeedModeInfo", "GameCardSpeedModeInfo", "UserAccountInternalIDInfo",
-    "NetworkServiceAccountInternalIDInfo", "NintendoAccountInternalIDInfo", "USB3AvailableInfo",
-    "CallStackInfo", "SystemStartupLogInfo", "RegionSettingInfo", "NintendoZoneConnectedInfo",
-    "ForceSleepInfo", "ChargerInfo", "RadioStrengthInfo", "ErrorInfoAuto", "AccessPointInfo",
-    "ErrorInfoDefaults", "SystemPowerStateInfo", "PerformanceInfo", "ThrottlingInfo",
-    "GameCardErrorInfo", "EdidInfo", "ThermalInfo", "CradleFirmwareInfo",
-    "RunningApplicationInfo", "RunningAppletInfo", "FocusedAppletHistoryInfo", "CompositorInfo",
-    "BatteryChargeInfo", "NANDExtendedCsdDeprecated", "NANDPatrolInfo", "NANDErrorInfo",
-    "NANDDriverLog", "SdCardSizeSpec", "SdCardErrorInfo", "", "FsProxyErrorInfo",
-    "SystemAppletSceneInfo", "VideoInfo", "GpuErrorInfo", "PowerClockInfo", "AdspErrorInfo",
-    "NvDispDeviceInfo", "NvDispDcWindowInfo", "NvDispDpModeInfo", "NvDispDpLinkSpec",
-    "NvDispDpLinkStatus", "NvDispDpHdcpInfo", "NvDispDpAuxCecInfo", "NvDispDcInfo",
-    "NvDispDsiInfo", "NvDispErrIDInfo", "SdCardMountInfo", "RetailInteractiveDisplayInfo",
-    "CompositorStateInfo", "CompositorLayerInfo", "CompositorDisplayInfo", "CompositorHWCInfo",
-    "MonitorCapability", "ErrorReportSharePermissionInfo", "MultimediaInfo",
-    "ConnectedControllerInfo", "FsMemoryInfo", "UserClockContextInfo",
-    "NetworkClockContextInfo", "AcpGeneralSettingsInfo", "AcpPlayLogSettingsInfo",
-    "AcpAocSettingsInfo", "AcpBcatSettingsInfo", "AcpStorageSettingsInfo",
-    "AcpRatingSettingsInfo", "MonitorSettings", "RebootlessSystemUpdateVersionInfo",
-    "NifmConnectionTestInfo", "PcieLoggedStateInfo", "NetworkSecurityCertificateInfo",
-    "AcpNeighborDetectionInfo", "GpuCrashInfo", "UsbStateInfo", "NvHostErrInfo",
-    "RunningUlaInfo", "InternalPanelInfo", "ResourceLimitInfo",
-    "ResourceLimitPeakInfoDeprecated", "TouchScreenInfo", "AcpUserAccountSettingsInfo",
-    "AudioDeviceInfo", "AbnormalWakeInfo", "ServiceProfileInfo", "BluetoothAudioInfoDeprecated",
-    "BluetoothPairingCountInfo", "FsProxyErrorInfo2", "BuiltInWirelessOUIInfo",
-    "WirelessAPOUIInfo", "EthernetAdapterOUIInfo", "NANDTypeInfoDeprecated", "MicroSDTypeInfo",
-    "AttachmentFileInfo", "WlanInfo", "HalfAwakeStateInfo", "PctlSettingInfo",
-    "GameCardLogInfo", "WlanIoctlErrorInfo", "SdCardActivationInfo",
-    "GameCardDetailedErrorInfo", "NetworkInfo2", "SystemSettingInfo", "MigrationStateInfo",
-    "WinVdInfo", "PscTransitionStateInfo", "FsProxyErrorInfo3", "BluetoothErrorInfo",
+    "Test",
+    "ErrorInfo",
+    "ConnectionStatusInfo",
+    "NetworkInfo",
+    "NXMacAddressInfo",
+    "StealthNetworkInfo",
+    "LimitHighCapacityInfo",
+    "NATTypeInfo",
+    "WirelessAPMacAddressInfo",
+    "GlobalIPAddressInfo",
+    "EnableWirelessInterfaceInfo",
+    "EnableWifiInfo",
+    "EnableBluetoothInfo",
+    "EnableNFCInfo",
+    "NintendoZoneSSIDListVersionInfo",
+    "LANAdapterMacAddressInfo",
+    "ApplicationInfo",
+    "OccurrenceInfo",
+    "ProductModelInfo",
+    "CurrentLanguageInfo",
+    "UseNetworkTimeProtocolInfo",
+    "TimeZoneInfo",
+    "ControllerFirmwareInfo",
+    "VideoOutputInfo",
+    "NANDFreeSpaceInfo",
+    "SDCardFreeSpaceInfo",
+    "ScreenBrightnessInfo",
+    "AudioFormatInfo",
+    "MuteOnHeadsetUnpluggedInfo",
+    "NumUserRegisteredInfo",
+    "DataDeletionInfo",
+    "ControllerVibrationInfo",
+    "LockScreenInfo",
+    "InternalBatteryLotNumberInfo",
+    "LeftControllerSerialNumberInfo",
+    "RightControllerSerialNumberInfo",
+    "NotificationInfo",
+    "TVInfo",
+    "SleepInfo",
+    "ConnectionInfo",
+    "NetworkErrorInfo",
+    "FileAccessPathInfo",
+    "GameCardCIDInfo",
+    "NANDCIDInfoDeprecated",
+    "MicroSDCIDInfoDeprecated",
+    "NANDSpeedModeInfo",
+    "MicroSDSpeedModeInfo",
+    "GameCardSpeedModeInfo",
+    "UserAccountInternalIDInfo",
+    "NetworkServiceAccountInternalIDInfo",
+    "NintendoAccountInternalIDInfo",
+    "USB3AvailableInfo",
+    "CallStackInfo",
+    "SystemStartupLogInfo",
+    "RegionSettingInfo",
+    "NintendoZoneConnectedInfo",
+    "ForceSleepInfo",
+    "ChargerInfo",
+    "RadioStrengthInfo",
+    "ErrorInfoAuto",
+    "AccessPointInfo",
+    "ErrorInfoDefaults",
+    "SystemPowerStateInfo",
+    "PerformanceInfo",
+    "ThrottlingInfo",
+    "GameCardErrorInfo",
+    "EdidInfo",
+    "ThermalInfo",
+    "CradleFirmwareInfo",
+    "RunningApplicationInfo",
+    "RunningAppletInfo",
+    "FocusedAppletHistoryInfo",
+    "CompositorInfo",
+    "BatteryChargeInfo",
+    "NANDExtendedCsdDeprecated",
+    "NANDPatrolInfo",
+    "NANDErrorInfo",
+    "NANDDriverLog",
+    "SdCardSizeSpec",
+    "SdCardErrorInfo",
+    "",
+    "FsProxyErrorInfo",
+    "SystemAppletSceneInfo",
+    "VideoInfo",
+    "GpuErrorInfo",
+    "PowerClockInfo",
+    "AdspErrorInfo",
+    "NvDispDeviceInfo",
+    "NvDispDcWindowInfo",
+    "NvDispDpModeInfo",
+    "NvDispDpLinkSpec",
+    "NvDispDpLinkStatus",
+    "NvDispDpHdcpInfo",
+    "NvDispDpAuxCecInfo",
+    "NvDispDcInfo",
+    "NvDispDsiInfo",
+    "NvDispErrIDInfo",
+    "SdCardMountInfo",
+    "RetailInteractiveDisplayInfo",
+    "CompositorStateInfo",
+    "CompositorLayerInfo",
+    "CompositorDisplayInfo",
+    "CompositorHWCInfo",
+    "MonitorCapability",
+    "ErrorReportSharePermissionInfo",
+    "MultimediaInfo",
+    "ConnectedControllerInfo",
+    "FsMemoryInfo",
+    "UserClockContextInfo",
+    "NetworkClockContextInfo",
+    "AcpGeneralSettingsInfo",
+    "AcpPlayLogSettingsInfo",
+    "AcpAocSettingsInfo",
+    "AcpBcatSettingsInfo",
+    "AcpStorageSettingsInfo",
+    "AcpRatingSettingsInfo",
+    "MonitorSettings",
+    "RebootlessSystemUpdateVersionInfo",
+    "NifmConnectionTestInfo",
+    "PcieLoggedStateInfo",
+    "NetworkSecurityCertificateInfo",
+    "AcpNeighborDetectionInfo",
+    "GpuCrashInfo",
+    "UsbStateInfo",
+    "NvHostErrInfo",
+    "RunningUlaInfo",
+    "InternalPanelInfo",
+    "ResourceLimitInfo",
+    "ResourceLimitPeakInfoDeprecated",
+    "TouchScreenInfo",
+    "AcpUserAccountSettingsInfo",
+    "AudioDeviceInfo",
+    "AbnormalWakeInfo",
+    "ServiceProfileInfo",
+    "BluetoothAudioInfoDeprecated",
+    "BluetoothPairingCountInfo",
+    "FsProxyErrorInfo2",
+    "BuiltInWirelessOUIInfo",
+    "WirelessAPOUIInfo",
+    "EthernetAdapterOUIInfo",
+    "NANDTypeInfoDeprecated",
+    "MicroSDTypeInfo",
+    "AttachmentFileInfo",
+    "WlanInfo",
+    "HalfAwakeStateInfo",
+    "PctlSettingInfo",
+    "GameCardLogInfo",
+    "WlanIoctlErrorInfo",
+    "SdCardActivationInfo",
+    "GameCardDetailedErrorInfo",
+    "NetworkInfo2",
+    "SystemSettingInfo",
+    "MigrationStateInfo",
+    "WinVdInfo",
+    "PscTransitionStateInfo",
+    "FsProxyErrorInfo3",
+    "BluetoothErrorInfo",
 ];
 
 impl Cpu {
@@ -289,9 +403,7 @@ impl Cpu {
             // so the reply is the same either way; what differs is only
             // whether a report is filed, and filing one nobody asked for would
             // put an empty report in the journal.
-            Some(4) | Some(5) | Some(7) | Some(8) => {
-                self.write_ipc_response(tls, 0, &[], &[], &[])
-            }
+            Some(4) | Some(5) | Some(7) | Some(8) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // RegisterRunningApplet / UnregisterRunningApplet /
             // UpdateAppletSuspendedDuration, and the forced-shutdown detector
             // a clean shutdown invalidates on its way out. Nothing here loses
@@ -323,7 +435,9 @@ impl Cpu {
         let mut categories = Vec::new();
         for entry in array.chunks_exact(ERPT_CONTEXT_ENTRY_SIZE) {
             let category = u32::from_le_bytes(
-                entry[ERPT_CONTEXT_CATEGORY..ERPT_CONTEXT_CATEGORY + 4].try_into().unwrap(),
+                entry[ERPT_CONTEXT_CATEGORY..ERPT_CONTEXT_CATEGORY + 4]
+                    .try_into()
+                    .unwrap(),
             );
             categories.push(category);
             self.erpt_record_context(ErrorContext {
@@ -378,7 +492,11 @@ impl Cpu {
             entry[0xC..0xC + per_category]
                 .copy_from_slice(&multiple[fields..fields + per_category]);
             let category = u32::from_le_bytes(id.try_into().unwrap());
-            self.erpt_record_context(ErrorContext { category, entry, fields: data.clone() });
+            self.erpt_record_context(ErrorContext {
+                category,
+                entry,
+                fields: data.clone(),
+            });
             if crate::env_flag!("TRACE_ERPT") {
                 eprintln!("[erpt] context {}", Self::erpt_category_name(category));
             }
@@ -388,7 +506,11 @@ impl Cpu {
     /// File one context record, replacing the one the journal already holds
     /// for that category.
     fn erpt_record_context(&mut self, record: ErrorContext) {
-        match self.erpt_contexts.iter_mut().find(|held| held.category == record.category) {
+        match self
+            .erpt_contexts
+            .iter_mut()
+            .find(|held| held.category == record.category)
+        {
             Some(held) => *held = record,
             None => self.erpt_contexts.push(record),
         }
@@ -414,8 +536,9 @@ impl Cpu {
             body.extend_from_slice(&context.fields);
         }
         for attachment in &mut self.erpt_attachments {
-            let named =
-                attachments.iter().any(|wanted| Self::erpt_same_id(wanted, &attachment.id));
+            let named = attachments
+                .iter()
+                .any(|wanted| Self::erpt_same_id(wanted, &attachment.id));
             if named {
                 attachment.owner = id;
             }
@@ -490,8 +613,19 @@ impl Cpu {
 
     /// A report id in the grouped form a UUID is written in, for diagnostics.
     fn erpt_id_text(id: &[u8]) -> String {
-        let hex: String = id.iter().take(ERPT_UUID_SIZE).map(|b| format!("{b:02x}")).collect();
-        format!("{}-{}-{}-{}-{}", &hex[..8], &hex[8..12], &hex[12..16], &hex[16..20], &hex[20..])
+        let hex: String = id
+            .iter()
+            .take(ERPT_UUID_SIZE)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        format!(
+            "{}-{}-{}-{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..]
+        )
     }
 
     /// `nn::erpt::ReportType`. `Any` is a filter rather than a kind, and only
@@ -514,7 +648,11 @@ impl Cpu {
             1003 => "BluetoothAudioInfo",
             id => ERPT_CATEGORIES.get(id as usize).copied().unwrap_or(""),
         };
-        if name.is_empty() { format!("category {category}") } else { name.to_owned() }
+        if name.is_empty() {
+            format!("category {category}")
+        } else {
+            name.to_owned()
+        }
     }
 
     /// `erpt:r` — "nn::erpt::sf::ISession", and the three interfaces it opens
@@ -540,9 +678,15 @@ impl Cpu {
             "erpt:manager" => self.erpt_manager_request(tls, handle, cmd_id),
             _ => match cmd_id {
                 // OpenReport / OpenManager / OpenAttachment.
-                Some(0) => self.reply_with_interface(tls, handle, "erpt:report").map(|_| ()),
-                Some(1) => self.reply_with_interface(tls, handle, "erpt:manager").map(|_| ()),
-                Some(2) => self.reply_with_interface(tls, handle, "erpt:attachment").map(|_| ()),
+                Some(0) => self
+                    .reply_with_interface(tls, handle, "erpt:report")
+                    .map(|_| ()),
+                Some(1) => self
+                    .reply_with_interface(tls, handle, "erpt:manager")
+                    .map(|_| ()),
+                Some(2) => self
+                    .reply_with_interface(tls, handle, "erpt:attachment")
+                    .map(|_| ()),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
         }
@@ -558,7 +702,11 @@ impl Cpu {
         cmd_id: Option<u32>,
         attachment: bool,
     ) -> Result<()> {
-        let iface = if attachment { "erpt:attachment" } else { "erpt:report" };
+        let iface = if attachment {
+            "erpt:attachment"
+        } else {
+            "erpt:report"
+        };
         let key = self.ipc_object_key(tls, handle);
         match cmd_id {
             // Open(ReportId / AttachmentId).
@@ -570,7 +718,13 @@ impl Cpu {
                 let mut stored = [0u8; ERPT_ID_SIZE];
                 let len = id.len().min(ERPT_ID_SIZE);
                 stored[..len].copy_from_slice(&id[..len]);
-                self.erpt_readers.insert(key, ErrorReportReader { id: stored, offset: 0 });
+                self.erpt_readers.insert(
+                    key,
+                    ErrorReportReader {
+                        id: stored,
+                        offset: 0,
+                    },
+                );
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             // Read -> as much as is left into the output buffer, and how many
@@ -638,19 +792,31 @@ impl Cpu {
     /// filed under it.
     fn erpt_body(&self, id: &[u8], attachment: bool) -> Option<Vec<u8>> {
         if attachment {
-            let held = self.erpt_attachments.iter().find(|a| Self::erpt_same_id(&a.id, id))?;
+            let held = self
+                .erpt_attachments
+                .iter()
+                .find(|a| Self::erpt_same_id(&a.id, id))?;
             Some(held.data.clone())
         } else {
-            let held = self.erpt_reports.iter().find(|r| Self::erpt_same_id(&r.id, id))?;
+            let held = self
+                .erpt_reports
+                .iter()
+                .find(|r| Self::erpt_same_id(&r.id, id))?;
             Some(held.body.clone())
         }
     }
 
     fn erpt_flags(&self, id: &[u8], attachment: bool) -> Option<u32> {
         if attachment {
-            self.erpt_attachments.iter().find(|a| Self::erpt_same_id(&a.id, id)).map(|a| a.flags)
+            self.erpt_attachments
+                .iter()
+                .find(|a| Self::erpt_same_id(&a.id, id))
+                .map(|a| a.flags)
         } else {
-            self.erpt_reports.iter().find(|r| Self::erpt_same_id(&r.id, id)).map(|r| r.flags)
+            self.erpt_reports
+                .iter()
+                .find(|r| Self::erpt_same_id(&r.id, id))
+                .map(|r| r.flags)
         }
     }
 
@@ -726,8 +892,10 @@ impl Cpu {
             // DeleteReport(ReportId), and the attachments it owns.
             Some(3) => {
                 let id = self.read_bytes(self.ipc_request_data(tls), ERPT_ID_SIZE as u32);
-                self.erpt_reports.retain(|report| !Self::erpt_same_id(&report.id, &id));
-                self.erpt_attachments.retain(|held| !Self::erpt_same_id(&held.owner, &id));
+                self.erpt_reports
+                    .retain(|report| !Self::erpt_same_id(&report.id, &id));
+                self.erpt_attachments
+                    .retain(|held| !Self::erpt_same_id(&held.owner, &id));
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             // GetStorageUsageStatistics -> what the journal is costing. All of
@@ -737,10 +905,22 @@ impl Cpu {
                 let mut stats = [0u8; 0x38];
                 let journal = self.erpt_journal_id();
                 stats[..ERPT_UUID_SIZE].copy_from_slice(&journal);
-                let used: usize = self.erpt_reports.iter().map(|r| r.body.len()).sum::<usize>()
-                    + self.erpt_attachments.iter().map(|a| a.data.len()).sum::<usize>();
-                let largest =
-                    self.erpt_reports.iter().map(|r| r.body.len()).max().unwrap_or(0) as i64;
+                let used: usize = self
+                    .erpt_reports
+                    .iter()
+                    .map(|r| r.body.len())
+                    .sum::<usize>()
+                    + self
+                        .erpt_attachments
+                        .iter()
+                        .map(|a| a.data.len())
+                        .sum::<usize>();
+                let largest = self
+                    .erpt_reports
+                    .iter()
+                    .map(|r| r.body.len())
+                    .max()
+                    .unwrap_or(0) as i64;
                 stats[0x10..0x14].copy_from_slice(&(used as u32).to_le_bytes());
                 stats[0x18..0x20].copy_from_slice(&largest.to_le_bytes());
                 for kind in 0..2u32 {
@@ -862,8 +1042,15 @@ mod tests {
 
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "a plain success");
         let categories: Vec<u32> = cpu.erpt_contexts.iter().map(|held| held.category).collect();
-        assert_eq!(categories, vec![1, 67], "ErrorInfo and ThermalInfo, once each");
-        assert_eq!(cpu.erpt_contexts[0].entry[0x10], 0xC3, "the newest ErrorInfo wins");
+        assert_eq!(
+            categories,
+            vec![1, 67],
+            "ErrorInfo and ThermalInfo, once each"
+        );
+        assert_eq!(
+            cpu.erpt_contexts[0].entry[0x10], 0xC3,
+            "the newest ErrorInfo wins"
+        );
     }
 
     #[test]
@@ -893,7 +1080,11 @@ mod tests {
             &mut cpu,
             1,
             &0u32.to_le_bytes(),
-            &[(CONTEXT, entry.len() as u32), (0, 0), (META, super::ERPT_META_SIZE as u32)],
+            &[
+                (CONTEXT, entry.len() as u32),
+                (0, 0),
+                (META, super::ERPT_META_SIZE as u32),
+            ],
         );
         cpu.erpt_context_request(TLS, 9, Some(1)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "CreateReportV0");
@@ -921,7 +1112,11 @@ mod tests {
 
         marshal(&mut cpu, false, 5, &[]);
         cpu.erpt_session_request(TLS, object, Some(5)).unwrap();
-        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), report.body.len() as u64, "GetSize");
+        assert_eq!(
+            cpu.mem.read_u64(TLS + 0x20).unwrap(),
+            report.body.len() as u64,
+            "GetSize"
+        );
 
         let size = report.body.len() as u32;
         write_map_buffer_request(&mut cpu, 1, &[], OUT, size, false);
@@ -943,7 +1138,10 @@ mod tests {
         write_map_buffer_request(&mut cpu, 0, &2u32.to_le_bytes(), OUT, 0x1600, false);
         cpu.erpt_session_request(TLS, manager, Some(0)).unwrap();
         assert_eq!(cpu.mem.read_u32(OUT).unwrap(), 1, "one report listed");
-        assert_eq!(cpu.read_bytes(OUT + 0x0C, super::ERPT_ID_SIZE as u32), report.id.to_vec());
+        assert_eq!(
+            cpu.read_bytes(OUT + 0x0C, super::ERPT_ID_SIZE as u32),
+            report.id.to_vec()
+        );
         assert_eq!(
             cpu.mem.read_u64(OUT + 0x58).unwrap(),
             report.body.len() as u64,
@@ -986,9 +1184,16 @@ mod tests {
         write_send_buffer_request(&mut cpu, 9, &[], &[(NAME, 8), (DATA, 4)]);
         cpu.erpt_context_request(TLS, 9, Some(9)).unwrap();
         let id = cpu.read_bytes(TLS + 0x20, super::ERPT_ID_SIZE as u32);
-        assert_ne!(id, vec![0u8; super::ERPT_ID_SIZE], "no AttachmentId handed back");
+        assert_ne!(
+            id,
+            vec![0u8; super::ERPT_ID_SIZE],
+            "no AttachmentId handed back"
+        );
         assert_eq!(cpu.erpt_attachments[0].name, "log.bin");
-        assert_eq!(cpu.erpt_attachments[0].data, 0xDEAD_BEEFu32.to_le_bytes().to_vec());
+        assert_eq!(
+            cpu.erpt_attachments[0].data,
+            0xDEAD_BEEFu32.to_le_bytes().to_vec()
+        );
 
         // CreateReportWithAttachments(ReportType, ..., AttachmentId[]).
         for (index, &byte) in id.iter().enumerate() {
@@ -1011,7 +1216,10 @@ mod tests {
         cpu.erpt_session_request(TLS, 10, Some(6)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "one attachment");
         assert_eq!(cpu.mem.read_u32(OUT).unwrap(), 1);
-        assert_eq!(cpu.read_bytes(OUT + 8 + 0x14, super::ERPT_ID_SIZE as u32), id);
+        assert_eq!(
+            cpu.read_bytes(OUT + 8 + 0x14, super::ERPT_ID_SIZE as u32),
+            id
+        );
     }
 
     #[test]

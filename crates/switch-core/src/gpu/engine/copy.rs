@@ -44,7 +44,10 @@ pub struct EngineCopy {
 
 impl EngineCopy {
     pub fn new() -> EngineCopy {
-        EngineCopy { regs: Registers::new(), run: Vec::new() }
+        EngineCopy {
+            regs: Registers::new(),
+            run: Vec::new(),
+        }
     }
 
     pub fn write(&mut self, method: u32, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
@@ -64,7 +67,11 @@ impl EngineCopy {
         let src_base = self.regs.iova(OFFSET_IN);
         let dst_base = self.regs.iova(OFFSET_OUT);
         let line_length = self.regs.get(LINE_LENGTH_IN);
-        let line_count = if multi_line { self.regs.get(LINE_COUNT).max(1) } else { 1 };
+        let line_count = if multi_line {
+            self.regs.get(LINE_COUNT).max(1)
+        } else {
+            1
+        };
 
         if !multi_line && !remap {
             // Plain 1D copy: contiguous on both sides, so it is one run.
@@ -101,12 +108,21 @@ impl EngineCopy {
         )?;
 
         if !remap {
-            self.copy_runs(ctx, &src.based_at(src_base), &dst.based_at(dst_base), line_length, line_count)?;
+            self.copy_runs(
+                ctx,
+                &src.based_at(src_base),
+                &dst.based_at(dst_base),
+                line_length,
+                line_count,
+            )?;
             ctx.stats.copies += 1;
             return Ok(());
         }
 
-        let consts = [self.regs.get(SET_REMAP_CONST), self.regs.get(SET_REMAP_CONST + 1)];
+        let consts = [
+            self.regs.get(SET_REMAP_CONST),
+            self.regs.get(SET_REMAP_CONST + 1),
+        ];
         let component_size = components.component_size;
 
         for line in 0..line_count {
@@ -115,7 +131,11 @@ impl EngineCopy {
                 let dst_off = dst.offset(element, line);
                 // Read the source components, then scatter them per the remap.
                 let mut source = [0u32; 4];
-                for (i, s) in source.iter_mut().enumerate().take(components.num_src as usize) {
+                for (i, s) in source
+                    .iter_mut()
+                    .enumerate()
+                    .take(components.num_src as usize)
+                {
                     let mut v = 0u32;
                     for b in 0..component_size {
                         let addr = src_base + (src_off + i as u32 * component_size + b) as u64;
@@ -208,7 +228,11 @@ impl EngineCopy {
             num_src,
             num_dst,
         };
-        Ok((num_src * component_size, num_dst * component_size, components))
+        Ok((
+            num_src * component_size,
+            num_dst * component_size,
+            components,
+        ))
     }
 }
 
@@ -222,7 +246,12 @@ struct RemapComponents {
 
 impl RemapComponents {
     fn identity() -> RemapComponents {
-        RemapComponents { dst: [0, 1, 2, 3], component_size: 1, num_src: 1, num_dst: 1 }
+        RemapComponents {
+            dst: [0, 1, 2, 3],
+            component_size: 1,
+            num_src: 1,
+            num_dst: 1,
+        }
     }
 }
 
@@ -263,7 +292,9 @@ impl SurfaceWalk {
     ) -> Result<SurfaceWalk> {
         if pitch {
             return Ok(SurfaceWalk {
-                layout: Layout::Pitch { pitch: regs.get(pitch_reg) },
+                layout: Layout::Pitch {
+                    pitch: regs.get(pitch_reg),
+                },
                 base: 0,
                 width_bytes: regs.get(pitch_reg),
                 origin_x_bytes: 0,
@@ -278,7 +309,9 @@ impl SurfaceWalk {
             ));
         }
         Ok(SurfaceWalk {
-            layout: Layout::BlockLinear { block_height_gobs: 1 << field(block, 4, 7) },
+            layout: Layout::BlockLinear {
+                block_height_gobs: 1 << field(block, 4, 7),
+            },
             base: 0,
             width_bytes: regs.get(width_reg).saturating_mul(element_bytes),
             origin_x_bytes: regs.field(origin_reg, 0, 15).saturating_mul(element_bytes),
@@ -289,7 +322,8 @@ impl SurfaceWalk {
 
     fn offset(&self, element: u32, line: u32) -> u32 {
         let x = self.origin_x_bytes + element * self.element_bytes;
-        self.layout.offset(x, self.origin_y + line, self.width_bytes)
+        self.layout
+            .offset(x, self.origin_y + line, self.width_bytes)
     }
 
     fn based_at(&self, base: u64) -> SurfaceWalk {
@@ -300,7 +334,9 @@ impl SurfaceWalk {
     /// are contiguous in memory.
     fn run_at(&self, element: u32, line: u32) -> (u64, u32) {
         let x = self.origin_x_bytes + element * self.element_bytes;
-        let (offset, run) = self.layout.run_at(x, self.origin_y + line, self.width_bytes);
+        let (offset, run) = self
+            .layout
+            .run_at(x, self.origin_y + line, self.width_bytes);
         (self.base + u64::from(offset), run)
     }
 }
@@ -326,8 +362,16 @@ mod tests {
             let mut mem = Memory::new();
             mem.map_zero(0x3000_0000, 0x8000).unwrap();
             let mut vmm = AddressSpace::new();
-            let base = vmm.map(0x3000_0000, 0x8000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
-            Harness { mem, vmm, host1x: Host1x::new(), stats: GpuStats::default(), base }
+            let base = vmm
+                .map(0x3000_0000, 0x8000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+                .unwrap();
+            Harness {
+                mem,
+                vmm,
+                host1x: Host1x::new(),
+                stats: GpuStats::default(),
+                base,
+            }
         }
 
         fn ctx(&mut self) -> ExecCtx<'_> {
@@ -371,7 +415,9 @@ mod tests {
         let mut h = Harness::new();
         for y in 0..4u32 {
             for x in 0..8u32 {
-                h.mem.write_u8(0x3000_0000 + y * 16 + x, (y * 8 + x) as u8).unwrap();
+                h.mem
+                    .write_u8(0x3000_0000 + y * 16 + x, (y * 8 + x) as u8)
+                    .unwrap();
             }
         }
         let mut engine = EngineCopy::new();
@@ -384,7 +430,9 @@ mod tests {
 
         let mut ctx = h.ctx();
         // Multi-line, both sides pitch-linear.
-        engine.write(LAUNCH_DMA, (1 << 7) | (1 << 8) | (1 << 9), &mut ctx).unwrap();
+        engine
+            .write(LAUNCH_DMA, (1 << 7) | (1 << 8) | (1 << 9), &mut ctx)
+            .unwrap();
 
         for y in 0..4u32 {
             for x in 0..8u32 {
@@ -414,7 +462,11 @@ mod tests {
 
         let mut ctx = h.ctx();
         engine
-            .write(LAUNCH_DMA, (1 << 7) | (1 << 8) | (1 << 9) | (1 << 10), &mut ctx)
+            .write(
+                LAUNCH_DMA,
+                (1 << 7) | (1 << 8) | (1 << 9) | (1 << 10),
+                &mut ctx,
+            )
             .unwrap();
 
         for i in 0..4u32 {
@@ -438,7 +490,9 @@ mod tests {
         engine.regs.set(LINE_COUNT, 1);
 
         let mut ctx = h.ctx();
-        engine.write(LAUNCH_DMA, (1 << 7) | (1 << 9), &mut ctx).unwrap();
+        engine
+            .write(LAUNCH_DMA, (1 << 7) | (1 << 9), &mut ctx)
+            .unwrap();
 
         // Row 0 of a GOB lands at 0..16, 32..48, 256..272, 288..304.
         assert_eq!(h.mem.read_u8(0x3000_1000).unwrap(), 1);

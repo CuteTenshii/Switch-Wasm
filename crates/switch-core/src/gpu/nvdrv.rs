@@ -56,11 +56,17 @@ pub enum NvFile {
     NvHostCtrl,
     NvHostCtrlGpu,
     /// `/dev/nvhost-as-gpu`, owning one GPU address space.
-    AddressSpace { as_id: u32 },
+    AddressSpace {
+        as_id: u32,
+    },
     /// `/dev/nvhost-gpu`, owning one channel.
-    Channel { channel_id: u32 },
+    Channel {
+        channel_id: u32,
+    },
     /// A node we recognise but do not model (nvdec, vic, …).
-    Unsupported { path: String },
+    Unsupported {
+        path: String,
+    },
 }
 
 /// Slots in each of the driver's two zero-bandwidth-clear tables
@@ -113,7 +119,10 @@ impl ZbcTable {
         let Some(slot) = self.entries.get_mut(self.used) else {
             return false;
         };
-        *slot = ZbcEntry { ref_cnt: 1, ..entry };
+        *slot = ZbcEntry {
+            ref_cnt: 1,
+            ..entry
+        };
         self.used += 1;
         true
     }
@@ -185,16 +194,27 @@ impl NvDrv {
             "/dev/nvmap" => NvFile::NvMap,
             "/dev/nvhost-ctrl" => NvFile::NvHostCtrl,
             "/dev/nvhost-ctrl-gpu" => NvFile::NvHostCtrlGpu,
-            "/dev/nvhost-as-gpu" => NvFile::AddressSpace { as_id: self.gpu.create_address_space() },
-            "/dev/nvhost-gpu" => NvFile::Channel { channel_id: self.gpu.create_channel()? },
-            other => NvFile::Unsupported { path: other.to_owned() },
+            "/dev/nvhost-as-gpu" => NvFile::AddressSpace {
+                as_id: self.gpu.create_address_space(),
+            },
+            "/dev/nvhost-gpu" => NvFile::Channel {
+                channel_id: self.gpu.create_channel()?,
+            },
+            other => NvFile::Unsupported {
+                path: other.to_owned(),
+            },
         };
         let unsupported = matches!(file, NvFile::Unsupported { .. });
         let fd = self.next_fd;
         self.next_fd += 1;
         self.files.insert(fd, file);
         if self.gpu.trace {
-            eprintln!("[nv] open {} -> fd {}{}", path, fd, if unsupported { " (unsupported)" } else { "" });
+            eprintln!(
+                "[nv] open {} -> fd {}{}",
+                path,
+                fd,
+                if unsupported { " (unsupported)" } else { "" }
+            );
         }
         Ok((fd, if unsupported { NV_NOT_SUPPORTED } else { NV_OK }))
     }
@@ -281,9 +301,9 @@ impl NvDrv {
             Ok(code) if !matches!(*code, NV_OK | NV_NOT_IMPLEMENTED | NV_NOT_SUPPORTED) => {
                 eprintln!("[nv] FAILED {file:?} type={ioc_type:#04x} nr={nr:#04x} -> {code:#x}")
             }
-            Err(error) => eprintln!(
-                "[nv] ERROR {file:?} type={ioc_type:#04x} nr={nr:#04x}: {error}"
-            ),
+            Err(error) => {
+                eprintln!("[nv] ERROR {file:?} type={ioc_type:#04x} nr={nr:#04x}: {error}")
+            }
             _ => {}
         }
         outcome
@@ -339,10 +359,19 @@ impl NvDrv {
                     // GPU address space pointing at the old memory, which is
                     // the kind of thing that shows up as a buffer full of
                     // zeroes and nothing else to explain it.
-                    let was = self.gpu.nvmap.get(handle).map(|h| (h.cpu_addr, h.allocated));
-                    eprintln!("[nv] nvmap alloc handle={handle} addr={:#x} (was {was:x?})", addr as u32);
+                    let was = self
+                        .gpu
+                        .nvmap
+                        .get(handle)
+                        .map(|h| (h.cpu_addr, h.allocated));
+                    eprintln!(
+                        "[nv] nvmap alloc handle={handle} addr={:#x} (was {was:x?})",
+                        addr as u32
+                    );
                 }
-                self.gpu.nvmap.alloc(handle, heap_mask, flags, align, kind, addr as u32)?;
+                self.gpu
+                    .nvmap
+                    .alloc(handle, heap_mask, flags, align, kind, addr as u32)?;
                 Ok(NV_OK)
             }
             // Free { in handle; pad; out u64 refcount; out u32 size; out u32 flags }
@@ -440,7 +469,9 @@ impl NvDrv {
                 Ok(NV_OK)
             }
             0x20 => {
-                self.gpu.host1x.unregister_event(read_u32(data, 0).min(63))?;
+                self.gpu
+                    .host1x
+                    .unregister_event(read_u32(data, 0).min(63))?;
                 Ok(NV_OK)
             }
             // EventWait { in syncpt_id, threshold, timeout; inout value }
@@ -449,7 +480,10 @@ impl NvDrv {
                 let threshold = read_u32(data, 4);
                 let slot = read_u32(data, 0x0C);
                 if let Some(event) = self.gpu.host1x.events.get_mut(slot.min(63) as usize) {
-                    event.fence = NvFence { id, value: threshold };
+                    event.fence = NvFence {
+                        id,
+                        value: threshold,
+                    };
                     event.signalled = true;
                 }
                 write_u32(data, 0x0C, slot);
@@ -500,7 +534,10 @@ impl NvDrv {
                 let slot = read_u32(data, 0x0C) as usize;
                 match self.gpu.host1x.events.get_mut(slot) {
                     Some(event) => {
-                        event.fence = NvFence { id, value: threshold };
+                        event.fence = NvFence {
+                            id,
+                            value: threshold,
+                        };
                         event.signalled = true;
                         Ok(NV_OK)
                     }
@@ -513,7 +550,12 @@ impl NvDrv {
 
     // -- /dev/nvhost-ctrl-gpu --------------------------------------------
 
-    fn ctrl_gpu_ioctl(&mut self, nr: u32, data: &mut [u8], inline_out: &mut Vec<u8>) -> Result<u32> {
+    fn ctrl_gpu_ioctl(
+        &mut self,
+        nr: u32,
+        data: &mut [u8],
+        inline_out: &mut Vec<u8>,
+    ) -> Result<u32> {
         match nr {
             // ZCullGetCtxSize { out u32 }
             0x01 => {
@@ -551,7 +593,11 @@ impl NvDrv {
                 };
                 // A full table is what a driver finds out about here; there
                 // is no eviction, on hardware either.
-                if table.add(entry) { Ok(NV_OK) } else { Ok(NV_INSUFFICIENT_MEMORY) }
+                if table.add(entry) {
+                    Ok(NV_OK)
+                } else {
+                    Ok(NV_INSUFFICIENT_MEMORY)
+                }
             }
             // ZbcQueryTable { inout nvioctl_zbc_entry }, whose `type` selects
             // a table and whose trailing `index_size` field carries the index
@@ -672,8 +718,10 @@ impl NvDrv {
                 let page_size = read_u32(data, 4);
                 let flags = read_u32(data, 8);
                 let requested = read_u64(data, 0x10);
-                let offset =
-                    self.gpu.address_space_mut(as_id)?.alloc_space(pages, page_size, flags, requested)?;
+                let offset = self
+                    .gpu
+                    .address_space_mut(as_id)?
+                    .alloc_space(pages, page_size, flags, requested)?;
                 write_u64(data, 0x10, offset);
                 Ok(NV_OK)
             }
@@ -682,7 +730,9 @@ impl NvDrv {
                 let offset = read_u64(data, 0);
                 let pages = read_u32(data, 8);
                 let page_size = read_u32(data, 0x0C);
-                self.gpu.address_space_mut(as_id)?.free_space(offset, pages, page_size)?;
+                self.gpu
+                    .address_space_mut(as_id)?
+                    .free_space(offset, pages, page_size)?;
                 Ok(NV_OK)
             }
             // UnmapBuffer { in u64 offset }
@@ -723,9 +773,21 @@ impl NvDrv {
                     Some(_) => return Ok(NV_INVALID_STATE),
                     None => return Ok(NV_BAD_PARAMETER),
                 };
-                let size = if mapping_size != 0 { mapping_size } else { handle.size as u64 };
-                let kind = if kind == u32::MAX { handle.kind } else { kind as u8 };
-                let page_size = if page_size == 0 { SMALL_PAGE_SIZE } else { page_size as u64 };
+                let size = if mapping_size != 0 {
+                    mapping_size
+                } else {
+                    handle.size as u64
+                };
+                let kind = if kind == u32::MAX {
+                    handle.kind
+                } else {
+                    kind as u8
+                };
+                let page_size = if page_size == 0 {
+                    SMALL_PAGE_SIZE
+                } else {
+                    page_size as u64
+                };
                 let cpu_addr = handle.cpu_addr.wrapping_add(buffer_offset as u32);
                 let offset = self.gpu.address_space_mut(as_id)?.map(
                     cpu_addr,
@@ -750,7 +812,11 @@ impl NvDrv {
             0x08 => {
                 write_u32(data, 8, 2 * 24);
                 let regions = [
-                    (SMALL_REGION_BASE, SMALL_PAGE_SIZE, (SMALL_REGION_END - SMALL_REGION_BASE) / SMALL_PAGE_SIZE),
+                    (
+                        SMALL_REGION_BASE,
+                        SMALL_PAGE_SIZE,
+                        (SMALL_REGION_END - SMALL_REGION_BASE) / SMALL_PAGE_SIZE,
+                    ),
                     (
                         SMALL_REGION_END,
                         self.gpu.address_space_mut(as_id)?.big_page_size,
@@ -854,9 +920,15 @@ impl NvDrv {
             // is the one answer that is definitely wrong -- nnSdk's nvn driver
             // checks, and a channel it failed to configure is one it has no
             // reason to trust.
-            (TYPE_CHANNEL, 0x01) | (TYPE_CHANNEL, 0x03) | (TYPE_CHANNEL, 0x0B)
-            | (TYPE_CHANNEL, 0x0C) | (TYPE_CHANNEL, 0x0D) | (TYPE_CHANNEL, 0x1D)
-            | (TYPE_CTRL_GPU, 0x14) | (TYPE_NVHOST, 0x07) | (TYPE_NVHOST, 0x08) => Ok(NV_OK),
+            (TYPE_CHANNEL, 0x01)
+            | (TYPE_CHANNEL, 0x03)
+            | (TYPE_CHANNEL, 0x0B)
+            | (TYPE_CHANNEL, 0x0C)
+            | (TYPE_CHANNEL, 0x0D)
+            | (TYPE_CHANNEL, 0x1D)
+            | (TYPE_CTRL_GPU, 0x14)
+            | (TYPE_NVHOST, 0x07)
+            | (TYPE_NVHOST, 0x08) => Ok(NV_OK),
 
             // SubmitGpfifo { u64 gpfifo; num_entries; flags; fence; entries[] }
             (TYPE_CHANNEL, 0x08) => {
@@ -1062,7 +1134,8 @@ mod tests {
     fn ioctl(drv: &mut NvDrv, mem: &mut Memory, fd: u32, ty: u32, nr: u32, data: &mut [u8]) -> u32 {
         let mut inline_out = Vec::new();
         let request = make_ioctl(IOWR, ty, nr, data.len() as u32);
-        drv.ioctl(mem, fd, request, data, &[], &mut inline_out).unwrap()
+        drv.ioctl(mem, fd, request, data, &[], &mut inline_out)
+            .unwrap()
     }
 
     #[test]
@@ -1089,7 +1162,10 @@ mod tests {
 
         let mut create = [0u8; 8];
         write_u32(&mut create, 0, 0x2000);
-        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x01, &mut create), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x01, &mut create),
+            NV_OK
+        );
         let handle = read_u32(&create, 4);
         assert_ne!(handle, 0);
 
@@ -1098,12 +1174,18 @@ mod tests {
         write_u32(&mut alloc, 0x0C, 0x1000);
         alloc[0x10] = 0xFE;
         write_u64(&mut alloc, 0x18, 0x3000_0000);
-        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x04, &mut alloc), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x04, &mut alloc),
+            NV_OK
+        );
 
         let mut param = [0u8; 0x0C];
         write_u32(&mut param, 0, handle);
         write_u32(&mut param, 4, 3); // Base
-        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x09, &mut param), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_NVMAP, 0x09, &mut param),
+            NV_OK
+        );
         assert_eq!(read_u32(&param, 8), 0x3000_0000);
     }
 
@@ -1119,7 +1201,9 @@ mod tests {
     ) -> (u32, Vec<u8>) {
         let mut inline_out = Vec::new();
         let request = make_ioctl(IOWR, ty, nr, data.len() as u32);
-        let code = drv.ioctl(mem, fd, request, data, &[], &mut inline_out).unwrap();
+        let code = drv
+            .ioctl(mem, fd, request, data, &[], &mut inline_out)
+            .unwrap();
         (code, inline_out)
     }
 
@@ -1152,7 +1236,11 @@ mod tests {
         let mut masks = [0u8; 0x18];
         let (code, tpc) = ioctl_out(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x06, &mut masks);
         assert_eq!(code, NV_OK);
-        assert_eq!(read_u32(&tpc, 0).count_ones(), GPU_TPC_PER_GPC, "a bit per TPC");
+        assert_eq!(
+            read_u32(&tpc, 0).count_ones(),
+            GPU_TPC_PER_GPC,
+            "a bit per TPC"
+        );
     }
 
     #[test]
@@ -1170,20 +1258,33 @@ mod tests {
         write_u32(&mut set, 0x20, 0x3F80_0000); // depth 1.0
         write_u32(&mut set, 0x24, 0x0A); // format
         write_u32(&mut set, 0x28, ZBC_TYPE_COLOR);
-        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
+            NV_OK
+        );
         // The same value again takes a second reference rather than a second
         // slot: a table of sixteen does not survive a driver that re-registers
         // its clear colour every frame.
-        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
+            NV_OK
+        );
         assert_eq!(drv.zbc_color.used(), 1);
-        assert_eq!(drv.zbc_depth.used(), 0, "a colour entry landed in the depth table");
+        assert_eq!(
+            drv.zbc_depth.used(),
+            0,
+            "a colour entry landed in the depth table"
+        );
 
         // ZbcQueryTable { inout nvioctl_zbc_entry }: type selects the table,
         // the trailing field carries the index in and the table size out.
         let mut query = [0u8; 0x34];
         write_u32(&mut query, 0x2C, ZBC_TYPE_COLOR);
         write_u32(&mut query, 0x30, 0);
-        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x04, &mut query), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x04, &mut query),
+            NV_OK
+        );
         assert_eq!(read_u32(&query, 0x00), 0x1111_1111);
         assert_eq!(read_u32(&query, 0x0C), 0x4444_4444);
         assert_eq!(read_u32(&query, 0x10), 0x2222_2222);
@@ -1195,7 +1296,10 @@ mod tests {
         // Type 0 asks for the size and nothing else, which is the only form
         // libnx's own wrapper sends.
         let mut size_only = [0u8; 0x34];
-        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x04, &mut size_only), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x04, &mut size_only),
+            NV_OK
+        );
         assert_eq!(read_u32(&size_only, 0x30), ZBC_TABLE_SIZE as u32);
 
         // Past the end of the table is a refusal, not a zeroed entry.
@@ -1216,7 +1320,10 @@ mod tests {
         write_u32(&mut set, 0x28, ZBC_TYPE_DEPTH);
         for i in 0..ZBC_TABLE_SIZE as u32 {
             write_u32(&mut set, 0x20, i + 1);
-            assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set), NV_OK);
+            assert_eq!(
+                ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x03, &mut set),
+                NV_OK
+            );
         }
         write_u32(&mut set, 0x20, 0xFFFF);
         assert_eq!(
@@ -1240,7 +1347,10 @@ mod tests {
         // empty string and not the caller's own leftovers read back.
         arg[0x82..0x182].fill(b'x');
 
-        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1B, &mut arg), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1B, &mut arg),
+            NV_OK
+        );
         assert_eq!(arg[0x82], 0, "the value comes back as an empty string");
         assert!(arg[0x82..].iter().all(|&b| b == 0));
         // The keys the caller asked about are left where they were.
@@ -1256,7 +1366,10 @@ mod tests {
 
         let mut arg = [0u8; 0x10];
         write_u32(&mut arg, 0, 3); // EventRegister slot 3
-        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1F, &mut arg), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1F, &mut arg),
+            NV_OK
+        );
         assert!(!drv.gpu.host1x.events[3].signalled);
 
         // EventWaitAsync { syncpt_id, threshold, timeout, event_id }: the work
@@ -1266,7 +1379,10 @@ mod tests {
         write_u32(&mut arg, 0, 9); // syncpt
         write_u32(&mut arg, 4, 5); // threshold
         write_u32(&mut arg, 0x0C, 3); // slot
-        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1E, &mut arg), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1E, &mut arg),
+            NV_OK
+        );
         assert!(drv.gpu.host1x.events[3].signalled);
         assert_eq!(drv.gpu.host1x.events[3].fence, NvFence { id: 9, value: 5 });
 
@@ -1279,7 +1395,10 @@ mod tests {
             NV_BAD_PARAMETER
         );
         write_u32(&mut signal, 0, 7);
-        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1C, &mut signal), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1C, &mut signal),
+            NV_OK
+        );
         assert!(drv.gpu.host1x.events[7].signalled);
     }
 
@@ -1312,7 +1431,10 @@ mod tests {
         write_u32(&mut op, 8, 1); // map offset: one big page in
         write_u32(&mut op, 0x0C, 8); // gpu offset
         write_u32(&mut op, 0x10, 1); // one big page
-        assert_eq!(ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x14, &mut op), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x14, &mut op),
+            NV_OK
+        );
 
         let as_id = match drv.file(as_fd) {
             Some(NvFile::AddressSpace { as_id }) => *as_id,
@@ -1323,8 +1445,17 @@ mod tests {
         assert_eq!(space.mapping_at(0x8_0000).map(|m| m.kind), Some(0xFE));
 
         write_u32(&mut op, 4, 0); // no handle: unmap the range again
-        assert_eq!(ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x14, &mut op), NV_OK);
-        assert_eq!(drv.gpu.address_space_mut(as_id).unwrap().translate(0x8_0000), None);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x14, &mut op),
+            NV_OK
+        );
+        assert_eq!(
+            drv.gpu
+                .address_space_mut(as_id)
+                .unwrap()
+                .translate(0x8_0000),
+            None
+        );
     }
 
     #[test]
@@ -1353,7 +1484,10 @@ mod tests {
         let mut map = [0u8; 0x28];
         write_u32(&mut map, 8, handle);
         write_u64(&mut map, 0x18, 0x4000);
-        assert_eq!(ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut map), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut map),
+            NV_OK
+        );
         let gpu_va = read_u64(&map, 0x20);
 
         // Re-map the middle 0x1000 bytes with kind 0xdb (a block-linear
@@ -1364,7 +1498,10 @@ mod tests {
         write_u64(&mut remap, 0x10, 0x1000); // buffer_offset
         write_u64(&mut remap, 0x18, 0x1000); // mapping_size
         write_u64(&mut remap, 0x20, gpu_va);
-        assert_eq!(ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut remap), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut remap),
+            NV_OK
+        );
         assert_eq!(read_u64(&remap, 0x20), gpu_va + 0x1000);
 
         let NvFile::AddressSpace { as_id } = *drv.file(as_fd).unwrap() else {
@@ -1383,7 +1520,10 @@ mod tests {
         }
         // Only the re-mapped range carries the new kind.
         assert_eq!(space.mapping_at(gpu_va).map(|m| m.kind), Some(0));
-        assert_eq!(space.mapping_at(gpu_va + 0x1000).map(|m| m.kind), Some(0xdb));
+        assert_eq!(
+            space.mapping_at(gpu_va + 0x1000).map(|m| m.kind),
+            Some(0xdb)
+        );
         assert_eq!(space.mapping_at(gpu_va + 0x2000).map(|m| m.kind), Some(0));
 
         // A range no mapping covers is the one thing this really cannot do.
@@ -1403,7 +1543,10 @@ mod tests {
         let mut mem = Memory::new();
         let (fd, _) = drv.open("/dev/nvhost-ctrl-gpu").unwrap();
         let mut data = [0u8; 0x10 + 0xA0];
-        assert_eq!(ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x05, &mut data), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, fd, TYPE_CTRL_GPU, 0x05, &mut data),
+            NV_OK
+        );
         assert_eq!(read_u32(&data, 0x10), 0x120); // arch
         assert_eq!(read_u32(&data, 0x10 + 0x5C), 0xB197); // threed_class
         assert_eq!(read_u64(&data, 0x10 + 0x90), 0x62_3032_6D67); // "gm20b"
@@ -1429,7 +1572,10 @@ mod tests {
         let mut map = [0u8; 0x28];
         write_u32(&mut map, 8, handle);
         write_u64(&mut map, 0x18, 0x1000); // mapping size
-        assert_eq!(ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut map), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x06, &mut map),
+            NV_OK
+        );
         let gpu_va = read_u64(&map, 0x20);
         assert_ne!(gpu_va, 0);
 
@@ -1451,7 +1597,10 @@ mod tests {
 
         let mut bind = [0u8; 4];
         write_u32(&mut bind, 0, chan_fd);
-        assert_eq!(ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x01, &mut bind), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, as_fd, TYPE_AS_GPU, 0x01, &mut bind),
+            NV_OK
+        );
 
         let NvFile::Channel { channel_id } = *drv.file(chan_fd).unwrap() else {
             panic!("expected a channel fd");
@@ -1501,7 +1650,10 @@ mod tests {
         let mut submit = vec![0u8; 0x18 + 8];
         write_u32(&mut submit, 8, 1); // num_entries
         write_u64(&mut submit, 0x18, entry);
-        assert_eq!(ioctl(&mut drv, &mut mem, chan_fd, TYPE_CHANNEL, 0x08, &mut submit), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, chan_fd, TYPE_CHANNEL, 0x08, &mut submit),
+            NV_OK
+        );
 
         let fence_id = read_u32(&submit, 0x10);
         let fence_value = read_u32(&submit, 0x14);
@@ -1510,7 +1662,15 @@ mod tests {
         let NvFile::Channel { channel_id } = *drv.file(chan_fd).unwrap() else {
             panic!("expected a channel fd");
         };
-        assert_eq!(drv.gpu.channel_mut(channel_id).unwrap().three_d.regs.get(0x360), 0x55);
+        assert_eq!(
+            drv.gpu
+                .channel_mut(channel_id)
+                .unwrap()
+                .three_d
+                .regs
+                .get(0x360),
+            0x55
+        );
     }
 
     #[test]
@@ -1521,7 +1681,10 @@ mod tests {
         drv.gpu.host1x.set(9, 3).unwrap();
         let mut data = [0u8; 8];
         write_u32(&mut data, 0, 9);
-        assert_eq!(ioctl(&mut drv, &mut mem, ctrl_fd, TYPE_NVHOST, 0x14, &mut data), NV_OK);
+        assert_eq!(
+            ioctl(&mut drv, &mut mem, ctrl_fd, TYPE_NVHOST, 0x14, &mut data),
+            NV_OK
+        );
         assert_eq!(read_u32(&data, 4), 3);
     }
 

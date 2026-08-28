@@ -12,7 +12,9 @@ const DEFAULT_WATCH: u32 = 0x0825_3fb8;
 
 fn main() {
     let data = common::read(common::arg(1, "boot_hbmenu <path.nro> [addr]"));
-    let watch = common::opt_arg(2).map(|a| common::hex(&a)).unwrap_or(DEFAULT_WATCH);
+    let watch = common::opt_arg(2)
+        .map(|a| common::hex(&a))
+        .unwrap_or(DEFAULT_WATCH);
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
@@ -33,7 +35,10 @@ fn main() {
         |cpu, steps| {
             let now = cpu.mem.read_u32(watch).unwrap_or(0xFFFF);
             if now != last {
-                println!("step {steps}: [{watch:#x}] {last:#x} -> {now:#x} (pc {:#x})", cpu.get_pc());
+                println!(
+                    "step {steps}: [{watch:#x}] {last:#x} -> {now:#x} (pc {:#x})",
+                    cpu.get_pc()
+                );
                 last = now;
             }
             Flow::Continue

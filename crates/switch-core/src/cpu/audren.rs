@@ -173,7 +173,10 @@ pub(crate) struct ChannelResource {
 
 impl Default for ChannelResource {
     fn default() -> Self {
-        ChannelResource { is_used: false, mix: [0.0; MAX_MIX_BUFFERS] }
+        ChannelResource {
+            is_used: false,
+            mix: [0.0; MAX_MIX_BUFFERS],
+        }
     }
 }
 
@@ -366,7 +369,11 @@ pub(crate) fn audren_revision(magic: u32) -> u32 {
 /// Sign-extend the low four bits of an ADPCM nibble.
 fn adpcm_nibble(raw: u8) -> i64 {
     let value = i64::from(raw & 0xF);
-    if value >= 8 { value - 16 } else { value }
+    if value >= 8 {
+        value - 16
+    } else {
+        value
+    }
 }
 
 impl AudioRenderer {
@@ -384,7 +391,12 @@ impl AudioRenderer {
 impl Cpu {
     /// `IAudioRendererManager` (`audren:u`): opens renderers, and hands out the
     /// device interface that says which output they play through.
-    pub(super) fn audren_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn audren_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
@@ -414,7 +426,11 @@ impl Cpu {
                 let now = self.cycles;
                 // A rate of 0 is a caller that did not fill the field in;
                 // 48 kHz is what every renderer that names a rate asks for.
-                let sample_rate = if sample_rate == 0 { 48_000 } else { sample_rate };
+                let sample_rate = if sample_rate == 0 {
+                    48_000
+                } else {
+                    sample_rate
+                };
                 let sample_count = if sample_count == 0 {
                     (sample_rate / FRAMES_PER_SECOND as u32).max(1)
                 } else {
@@ -464,7 +480,12 @@ impl Cpu {
     /// `IAudioDevice`: which output the renderer is playing through, and how
     /// loud. There is one device here — the host's — and nothing routes
     /// between outputs, so it answers as a console docked to a TV.
-    pub(super) fn audio_device_request(&mut self, tls: u32, cmd_id: Option<u32>, _handle: u64) -> Result<()> {
+    pub(super) fn audio_device_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+        _handle: u64,
+    ) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
@@ -502,9 +523,7 @@ impl Cpu {
             // owns it.
             Some(1) | Some(7) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // GetAudioDeviceOutputVolume -> f32, full scale.
-            Some(2) | Some(8) => {
-                self.write_ipc_response(tls, 0, &[], &1.0f32.to_le_bytes(), &[])
-            }
+            Some(2) | Some(8) => self.write_ipc_response(tls, 0, &[], &1.0f32.to_le_bytes(), &[]),
             // GetActiveAudioDeviceName / ...Auto / GetActiveAudioOutputDeviceName.
             Some(3) | Some(10) | Some(13) => {
                 if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
@@ -529,7 +548,12 @@ impl Cpu {
     }
 
     /// `IAudioRenderer`.
-    pub(super) fn audren_renderer_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+    pub(super) fn audren_renderer_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+        handle: u64,
+    ) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
@@ -551,8 +575,11 @@ impl Cpu {
             }
             // GetState: 0 while the renderer is running, 1 once it is stopped.
             Some(3) => {
-                let started =
-                    self.audren_renderers.get(&handle).map(|r| r.started).unwrap_or(false);
+                let started = self
+                    .audren_renderers
+                    .get(&handle)
+                    .map(|r| r.started)
+                    .unwrap_or(false);
                 let state = u32::from(!started);
                 self.write_ipc_response(tls, 0, &[], &state.to_le_bytes(), &[])
             }
@@ -586,7 +613,11 @@ impl Cpu {
             // `audrenWaitFrame` return at once, which is a renderer with no
             // clock at all.
             Some(7) => {
-                let event = match self.audren_renderers.get(&handle).and_then(|r| r.frame_event) {
+                let event = match self
+                    .audren_renderers
+                    .get(&handle)
+                    .and_then(|r| r.frame_event)
+                {
                     Some(event) => event,
                     None => {
                         let event = self.alloc_event("audren:frame", true);
@@ -620,7 +651,9 @@ impl Cpu {
         let mut fire = Vec::new();
         let mut next = None;
         for renderer in self.audren_renderers.values_mut() {
-            let Some(event) = renderer.frame_event else { continue };
+            let Some(event) = renderer.frame_event else {
+                continue;
+            };
             if !renderer.started {
                 continue;
             }
@@ -659,7 +692,9 @@ impl Cpu {
     /// a walk that assumed a stride would land mid-struct on the next section
     /// and read a voice out of a mix.
     fn audren_parse_update(&mut self, handle: u64, addr: u32, size: u32) {
-        let Some(mut renderer) = self.audren_renderers.remove(&handle) else { return };
+        let Some(mut renderer) = self.audren_renderers.remove(&handle) else {
+            return;
+        };
         let read_u32 = |cpu: &Cpu, at: u32| cpu.mem.read_u32(at).unwrap_or(0);
 
         if size < HEADER_SZ {
@@ -684,7 +719,10 @@ impl Cpu {
         self.audren_parse_channels(&mut renderer, at, channels_sz);
         at = at.wrapping_add(channels_sz);
         self.audren_parse_voices(&mut renderer, at, voices_sz);
-        at = at.wrapping_add(voices_sz).wrapping_add(effects_sz).wrapping_add(splitters_sz);
+        at = at
+            .wrapping_add(voices_sz)
+            .wrapping_add(effects_sz)
+            .wrapping_add(splitters_sz);
         self.audren_parse_mixes(&mut renderer, at, mixes_sz);
         at = at.wrapping_add(mixes_sz);
         self.audren_parse_sinks(&mut renderer, at, sinks_sz);
@@ -721,7 +759,10 @@ impl Cpu {
             let at = addr.wrapping_add(i as u32 * CHANNEL_IN_SZ);
             let channel = &mut renderer.channels[i];
             for slot in 0..MAX_MIX_BUFFERS {
-                let raw = self.mem.read_u32(at.wrapping_add(4 + slot as u32 * 4)).unwrap_or(0);
+                let raw = self
+                    .mem
+                    .read_u32(at.wrapping_add(4 + slot as u32 * 4))
+                    .unwrap_or(0);
                 let gain = f32::from_bits(raw);
                 channel.mix[slot] = if gain.is_finite() { gain } else { 0.0 };
             }
@@ -763,7 +804,11 @@ impl Cpu {
             voice.format = format;
             voice.sample_rate = sample_rate;
             voice.channel_count = channel_count.min(MAX_VOICE_CHANNELS as u32);
-            voice.pitch = if pitch.is_finite() && pitch > 0.0 { pitch } else { 1.0 };
+            voice.pitch = if pitch.is_finite() && pitch > 0.0 {
+                pitch
+            } else {
+                1.0
+            };
             voice.volume = if volume.is_finite() { volume } else { 0.0 };
             voice.dest_mix_id = dest_mix_id;
 
@@ -772,11 +817,17 @@ impl Cpu {
                 let biquad = &mut voice.biquads[filter];
                 biquad.enabled = self.mem.read_u8(base).unwrap_or(0) != 0;
                 for n in 0..3 {
-                    let raw = self.mem.read_u16(base.wrapping_add(2 + n as u32 * 2)).unwrap_or(0);
+                    let raw = self
+                        .mem
+                        .read_u16(base.wrapping_add(2 + n as u32 * 2))
+                        .unwrap_or(0);
                     biquad.numerator[n] = raw as i16;
                 }
                 for n in 0..2 {
-                    let raw = self.mem.read_u16(base.wrapping_add(8 + n as u32 * 2)).unwrap_or(0);
+                    let raw = self
+                        .mem
+                        .read_u16(base.wrapping_add(8 + n as u32 * 2))
+                        .unwrap_or(0);
                     biquad.denominator[n] = raw as i16;
                 }
             }
@@ -797,7 +848,9 @@ impl Cpu {
             }
 
             for channel in 0..MAX_VOICE_CHANNELS {
-                let raw = self.mem.read_u32(at.wrapping_add(0x140 + channel as u32 * 4));
+                let raw = self
+                    .mem
+                    .read_u32(at.wrapping_add(0x140 + channel as u32 * 4));
                 voice.channel_ids[channel] = raw.unwrap_or(0);
             }
 
@@ -937,7 +990,9 @@ impl Cpu {
     /// however fast or slow the emulator is running.
     fn audren_render(&mut self, handle: u64) {
         let now = self.cycles;
-        let Some(mut renderer) = self.audren_renderers.remove(&handle) else { return };
+        let Some(mut renderer) = self.audren_renderers.remove(&handle) else {
+            return;
+        };
         if !renderer.started {
             renderer.rendered_through = now;
             self.audren_renderers.insert(handle, renderer);
@@ -1018,8 +1073,12 @@ impl Cpu {
 
         let mempools_sz = mempool_count * MEMPOOL_OUT_SZ;
         let voices_sz = voice_count * VOICE_OUT_SZ;
-        let effects_sz =
-            effect_count * if revision >= 9 { EFFECT_OUT_V2_SZ } else { EFFECT_OUT_SZ };
+        let effects_sz = effect_count
+            * if revision >= 9 {
+                EFFECT_OUT_V2_SZ
+            } else {
+                EFFECT_OUT_SZ
+            };
         let sinks_sz = sink_count * SINK_OUT_SZ;
         let render_info_sz = if revision >= 5 { RENDER_INFO_OUT_SZ } else { 0 };
         let total_sz = HEADER_OUT_SZ
@@ -1122,7 +1181,11 @@ fn render_frame(mem: &Memory, renderer: &mut AudioRenderer, out: &mut Vec<i16>) 
         if !mix.is_used || mix.dest_mix_id == UNUSED_MIX_ID || mix.matrix.is_empty() {
             continue;
         }
-        let Some(dest) = renderer.mixes.iter().find(|m| m.mix_id == mix.dest_mix_id).cloned()
+        let Some(dest) = renderer
+            .mixes
+            .iter()
+            .find(|m| m.mix_id == mix.dest_mix_id)
+            .cloned()
         else {
             continue;
         };
@@ -1169,10 +1232,17 @@ fn render_frame(mem: &Memory, renderer: &mut AudioRenderer, out: &mut Vec<i16>) 
 /// Mix one voice into the buffers of the mix it plays into: decode its source
 /// samples, resample them to the renderer's rate, filter them, and add them at
 /// the gain its channel resources name.
-fn render_voice(mem: &Memory, renderer: &mut AudioRenderer, index: usize, buffers: &mut [Vec<f32>]) {
+fn render_voice(
+    mem: &Memory,
+    renderer: &mut AudioRenderer,
+    index: usize,
+    buffers: &mut [Vec<f32>],
+) {
     let frames = renderer.sample_count as usize;
     let rate = renderer.sample_rate.max(1);
-    let Some(voice) = renderer.voices.get(index) else { return };
+    let Some(voice) = renderer.voices.get(index) else {
+        return;
+    };
     if !voice.in_use || !voice.playing || voice.channel_count == 0 || voice.remaining == 0 {
         return;
     }
@@ -1456,7 +1526,9 @@ fn decode_adpcm(mem: &Memory, voice: &mut Voice, wavebuf: WaveBuf, index: u32) -
     let coef0 = i64::from(voice.adpcm_coefficients[coefficient * 2]);
     let coef1 = i64::from(voice.adpcm_coefficients[coefficient * 2 + 1]);
 
-    let byte = mem.read_u8(frame_at.wrapping_add(1 + within / 2)).unwrap_or(0);
+    let byte = mem
+        .read_u8(frame_at.wrapping_add(1 + within / 2))
+        .unwrap_or(0);
     let raw = if within % 2 == 0 { byte >> 4 } else { byte };
     let nibble = adpcm_nibble(raw);
 
@@ -1506,7 +1578,11 @@ fn decode_pcm(mem: &Memory, voice: &Voice, wavebuf: WaveBuf, index: u32, channel
         PCM_FLOAT => {
             let at = wavebuf.address.wrapping_add(slot.wrapping_mul(4));
             let value = f32::from_bits(mem.read_u32(at).unwrap_or(0));
-            if value.is_finite() { value } else { 0.0 }
+            if value.is_finite() {
+                value
+            } else {
+                0.0
+            }
         }
         _ => 0.0,
     }

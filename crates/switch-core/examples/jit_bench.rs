@@ -56,13 +56,21 @@ fn compare(a: &Cpu, b: &Cpu) -> usize {
     };
     for i in 0..32u8 {
         if a.read_x(i) != b.read_x(i) {
-            let name = if i == 31 { String::from("sp") } else { format!("x{i}") };
+            let name = if i == 31 {
+                String::from("sp")
+            } else {
+                format!("x{i}")
+            };
             differs(format!("{name} {:#x} vs {:#x}", a.read_x(i), b.read_x(i)));
         }
     }
     for i in 0..32u8 {
         if a.read_vreg(i) != b.read_vreg(i) {
-            differs(format!("v{i} {:#x} vs {:#x}", a.read_vreg(i), b.read_vreg(i)));
+            differs(format!(
+                "v{i} {:#x} vs {:#x}",
+                a.read_vreg(i),
+                b.read_vreg(i)
+            ));
         }
     }
     if a.get_pc() != b.get_pc() {
@@ -81,27 +89,37 @@ fn compare(a: &Cpu, b: &Cpu) -> usize {
         differs(String::from("console output"));
     }
     if a.nv.gpu.frames != b.nv.gpu.frames {
-        differs(format!("frames presented {} vs {}", a.nv.gpu.frames, b.nv.gpu.frames));
+        differs(format!(
+            "frames presented {} vs {}",
+            a.nv.gpu.frames, b.nv.gpu.frames
+        ));
     }
     if a.nv.gpu.framebuffer.pixels != b.nv.gpu.framebuffer.pixels {
-        let differing = a
-            .nv
-            .gpu
-            .framebuffer
-            .pixels
-            .iter()
-            .zip(&b.nv.gpu.framebuffer.pixels)
-            .filter(|(x, y)| x != y)
-            .count();
+        let differing =
+            a.nv.gpu
+                .framebuffer
+                .pixels
+                .iter()
+                .zip(&b.nv.gpu.framebuffer.pixels)
+                .filter(|(x, y)| x != y)
+                .count();
         differs(format!("{differing} framebuffer pixels"));
     }
     bad
 }
 
 fn main() {
-    let nro = common::read(common::arg(1, "jit_bench <path.nro> [instructions] [font.ttf]"));
+    let nro = common::read(common::arg(
+        1,
+        "jit_bench <path.nro> [instructions] [font.ttf]",
+    ));
     let want = common::opt_num(2).unwrap_or(40_000_000);
-    let font = std::fs::read(common::opt_arg(3).as_deref().unwrap_or(common::FALLBACK_FONT)).ok();
+    let font = std::fs::read(
+        common::opt_arg(3)
+            .as_deref()
+            .unwrap_or(common::FALLBACK_FONT),
+    )
+    .ok();
 
     let mut interpreted = boot(&nro, &font, false);
     let mut translated = boot(&nro, &font, true);
@@ -109,14 +127,21 @@ fn main() {
     let (steps_t, rate_t) = drive(&mut translated, want);
 
     println!("interpreted  {steps_i:>10} steps  {rate_i:>6.1} M/s");
-    println!("translated   {steps_t:>10} steps  {rate_t:>6.1} M/s  ({:.2}x)", rate_t / rate_i);
+    println!(
+        "translated   {steps_t:>10} steps  {rate_t:>6.1} M/s  ({:.2}x)",
+        rate_t / rate_i
+    );
     let stats = translated.jit_stats();
     println!(
         "  {} blocks, {} translated, {} entered ({:.0}x each), {} invalidated",
         stats.blocks,
         stats.translated,
         stats.executed,
-        if stats.translated == 0 { 0.0 } else { stats.executed as f64 / stats.translated as f64 },
+        if stats.translated == 0 {
+            0.0
+        } else {
+            stats.executed as f64 / stats.translated as f64
+        },
         stats.invalidated,
     );
 

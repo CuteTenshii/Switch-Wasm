@@ -58,10 +58,16 @@ impl Npdm {
         }
         let magic = crate::nsp::read_u32(data, 0);
         if magic != NPDM_MAGIC {
-            return Err(Error::BadMagic { what: "NPDM".into(), found: magic });
+            return Err(Error::BadMagic {
+                what: "NPDM".into(),
+                found: magic,
+            });
         }
         let name_bytes = &data[0x20..0x30];
-        let end = name_bytes.iter().position(|&b| b == 0).unwrap_or(name_bytes.len());
+        let end = name_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(name_bytes.len());
         Ok(Npdm {
             system_resource_size: crate::nsp::read_u32(data, 0x14),
             main_thread_stack_size: crate::nsp::read_u32(data, 0x1C),
@@ -128,6 +134,9 @@ mod tests {
         let mut data = npdm(0);
         data[0] = b'X';
         assert!(matches!(Npdm::parse(&data), Err(Error::BadMagic { .. })));
-        assert!(matches!(Npdm::parse(&data[..8]), Err(Error::Truncated { .. })));
+        assert!(matches!(
+            Npdm::parse(&data[..8]),
+            Err(Error::Truncated { .. })
+        ));
     }
 }

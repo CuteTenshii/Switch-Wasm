@@ -107,9 +107,7 @@ impl Cpu {
                 // that reads back what it wrote sees the same value.
                 0b11_011_0100_0100_000 => self.fpcr = self.read_zr(rt) as u32 & FPCR_MASK,
                 0b11_011_0100_0100_001 => self.fpsr = self.read_zr(rt) as u32 & FPSR_MASK,
-                0b11_011_1101_0000_010 => {
-                    self.tpidr_rw = self.read_zr(rt)
-                }
+                0b11_011_1101_0000_010 => self.tpidr_rw = self.read_zr(rt),
                 _ => {}
             }
             self.pc = next_pc;

@@ -199,7 +199,11 @@ fn tid(thread: u32, qmd: &Qmd) -> [u32; 3] {
 /// Write whichever release semaphores the launch asked for.
 fn release(qmd: &Qmd, ctx: &mut ExecCtx) -> Result<()> {
     for release in qmd.releases.into_iter().flatten() {
-        let Release { addr, payload, one_word } = release;
+        let Release {
+            addr,
+            payload,
+            one_word,
+        } = release;
         if one_word {
             ctx.write_u32(addr, payload)?;
         } else {
@@ -231,7 +235,11 @@ struct DispatchMemory<'a, 'b> {
 
 impl DispatchMemory<'_, '_> {
     fn bank(&self, bank: u8) -> Option<(u64, u32)> {
-        self.banks.get(bank as usize).copied().flatten().map(|c| (c.addr, c.size))
+        self.banks
+            .get(bank as usize)
+            .copied()
+            .flatten()
+            .map(|c| (c.addr, c.size))
     }
 }
 
@@ -293,7 +301,14 @@ impl TextureSource for DispatchMemory<'_, '_> {
                 d
             }
         };
-        Ok(texture::sample_with(&ctx, &descriptors, f64::from(u), f64::from(v), layer, &self.blocks)?)
+        Ok(texture::sample_with(
+            &ctx,
+            &descriptors,
+            f64::from(u),
+            f64::from(v),
+            layer,
+            &self.blocks,
+        )?)
     }
 }
 
@@ -330,7 +345,10 @@ mod tests {
     }
 
     fn s2r(dst: u8, sr: u8) -> u64 {
-        encode(0xf0c8u64 << 48 | u64::from(sr) << 20 | PT | u64::from(dst), Op::S2r { dst, sr })
+        encode(
+            0xf0c8u64 << 48 | u64::from(sr) << 20 | PT | u64::from(dst),
+            Op::S2r { dst, sr },
+        )
     }
 
     /// `iscadd dst, a, b, shift` — `(a << shift) + b`, which is every
@@ -343,7 +361,14 @@ mod tests {
                 | PT
                 | u64::from(a) << 8
                 | u64::from(dst),
-            Op::Iscadd { dst, a, aneg: false, b: Operand::Reg(b), bneg: false, shift },
+            Op::Iscadd {
+                dst,
+                a,
+                aneg: false,
+                b: Operand::Reg(b),
+                bneg: false,
+                shift,
+            },
         )
     }
 
@@ -356,7 +381,12 @@ mod tests {
                 | PT
                 | u64::from(addr) << 8
                 | u64::from(src),
-            Op::Stg { addr, offset: offset as i32, src, size: MemSize::B32 },
+            Op::Stg {
+                addr,
+                offset: offset as i32,
+                src,
+                size: MemSize::B32,
+            },
         )
     }
 
@@ -367,7 +397,12 @@ mod tests {
                 | PT
                 | u64::from(addr) << 8
                 | u64::from(src),
-            Op::Sts { addr, offset: offset as i32, src, size: MemSize::B32 },
+            Op::Sts {
+                addr,
+                offset: offset as i32,
+                src,
+                size: MemSize::B32,
+            },
         )
     }
 
@@ -402,12 +437,22 @@ mod tests {
                 | PT
                 | u64::from(addr) << 8
                 | u64::from(dst),
-            Op::Lds { dst, addr, offset: offset as i32, size: MemSize::B32 },
+            Op::Lds {
+                dst,
+                addr,
+                offset: offset as i32,
+                size: MemSize::B32,
+            },
         )
     }
 
     fn bar_sync() -> u64 {
-        encode(0xf0a8u64 << 48 | 1 << 39 | PT, Op::Bar { mode: isa::BarMode::Sync })
+        encode(
+            0xf0a8u64 << 48 | 1 << 39 | PT,
+            Op::Bar {
+                mode: isa::BarMode::Sync,
+            },
+        )
     }
 
     fn atom_add_u32(dst: u8, addr: u8, src: u8) -> u64 {
@@ -458,8 +503,16 @@ mod tests {
             let mut mem = Memory::new();
             mem.map_zero(0x3000_0000, 0x1_0000).unwrap();
             let mut vmm = AddressSpace::new();
-            let base = vmm.map(0x3000_0000, 0x1_0000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
-            Harness { mem, vmm, host1x: Host1x::new(), stats: GpuStats::default(), base }
+            let base = vmm
+                .map(0x3000_0000, 0x1_0000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+                .unwrap();
+            Harness {
+                mem,
+                vmm,
+                host1x: Host1x::new(),
+                stats: GpuStats::default(),
+                base,
+            }
         }
 
         fn ctx(&mut self) -> ExecCtx<'_> {
@@ -503,8 +556,9 @@ mod tests {
             let program = self.base + PROGRAM_AT;
             engine.regs.set(0x582, (program >> 32) as u32);
             engine.regs.set(0x583, program as u32);
-            engine.last_dispatch =
-                Some(crate::gpu::engine::compute::Dispatch { qmd_addr: self.base + QMD_AT });
+            engine.last_dispatch = Some(crate::gpu::engine::compute::Dispatch {
+                qmd_addr: self.base + QMD_AT,
+            });
             engine
         }
     }
@@ -576,7 +630,11 @@ mod tests {
             stg(2, 0, 0),
             exit(),
         ];
-        let launch = Launch { grid: [2, 1, 1], block: [4, 1, 1], ..Launch::default() };
+        let launch = Launch {
+            grid: [2, 1, 1],
+            block: [4, 1, 1],
+            ..Launch::default()
+        };
         run(&mut h, &launch, &program).unwrap();
         assert_eq!(h.read_output(8), vec![0, 1, 2, 3, 4, 5, 6, 7]);
     }
@@ -601,8 +659,12 @@ mod tests {
             stg(2, 0, 6),
             exit(),
         ];
-        let launch =
-            Launch { grid: [1, 1, 1], block: [4, 1, 1], shared: 64, ..Launch::default() };
+        let launch = Launch {
+            grid: [1, 1, 1],
+            block: [4, 1, 1],
+            shared: 64,
+            ..Launch::default()
+        };
         run(&mut h, &launch, &program).unwrap();
         assert_eq!(h.read_output(4), vec![3, 3, 3, 3]);
     }
@@ -624,7 +686,11 @@ mod tests {
             stg(2, 0, 1),
             exit(),
         ];
-        let launch = Launch { grid: [1, 1, 1], block: [4, 1, 1], ..Launch::default() };
+        let launch = Launch {
+            grid: [1, 1, 1],
+            block: [4, 1, 1],
+            ..Launch::default()
+        };
         run(&mut h, &launch, &program).unwrap();
         assert_eq!(h.read_output(4), vec![1, 0, 3, 2]);
     }
@@ -654,8 +720,12 @@ mod tests {
             stg(2, 0, 6),
             exit(),
         ];
-        let launch =
-            Launch { grid: [2, 1, 1], block: [2, 1, 1], shared: 32, ..Launch::default() };
+        let launch = Launch {
+            grid: [2, 1, 1],
+            block: [2, 1, 1],
+            shared: 32,
+            ..Launch::default()
+        };
         run(&mut h, &launch, &program).unwrap();
         // Every thread reads slot 1, which its own CTA's thread 1 wrote as 2.
         assert_eq!(h.read_output(4), vec![2, 2, 2, 2]);
@@ -672,7 +742,11 @@ mod tests {
             atom_add_u32(0, 2, 1),
             exit(),
         ];
-        let launch = Launch { grid: [3, 2, 1], block: [4, 1, 1], ..Launch::default() };
+        let launch = Launch {
+            grid: [3, 2, 1],
+            block: [4, 1, 1],
+            ..Launch::default()
+        };
         run(&mut h, &launch, &program).unwrap();
         assert_eq!(h.read_output(1), vec![24]);
     }
@@ -710,8 +784,11 @@ mod tests {
     #[test]
     fn a_grid_past_what_this_runs_in_software_is_refused_rather_than_started() {
         let mut h = Harness::new();
-        let launch =
-            Launch { grid: [0x10_0000, 4, 1], block: [64, 1, 1], ..Launch::default() };
+        let launch = Launch {
+            grid: [0x10_0000, 4, 1],
+            block: [64, 1, 1],
+            ..Launch::default()
+        };
         let err = run(&mut h, &launch, &[exit()]).unwrap_err();
         assert!(format!("{err:?}").contains("past the"), "got {err:?}");
     }
@@ -732,7 +809,11 @@ mod tests {
             unknown,
             exit(),
         ];
-        let launch = Launch { grid: [1, 1, 1], block: [1, 1, 1], ..Launch::default() };
+        let launch = Launch {
+            grid: [1, 1, 1],
+            block: [1, 1, 1],
+            ..Launch::default()
+        };
         let err = run(&mut h, &launch, &program).unwrap_err();
         assert!(format!("{err:?}").contains("unimplemented"), "got {err:?}");
     }
@@ -741,7 +822,10 @@ mod tests {
     fn a_thread_index_walks_x_fastest() {
         let qmd = Qmd::parse(&{
             let mut words = [0u32; QMD_WORDS];
-            let launch = Launch { block: [2, 3, 2], ..Launch::default() };
+            let launch = Launch {
+                block: [2, 3, 2],
+                ..Launch::default()
+            };
             words.copy_from_slice(&launch.words());
             words
         })

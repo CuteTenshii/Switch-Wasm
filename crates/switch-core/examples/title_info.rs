@@ -5,7 +5,6 @@
 //! Usage: cargo run -p switch-core --example title_info -- <path.nsp|path.nca> <prod.keys> [title.keys] [icon_out.jpg]
 mod common;
 
-
 use std::cell::RefCell;
 use std::env;
 use std::fs::File;
@@ -28,7 +27,10 @@ impl FileSource {
     fn open(path: &str) -> std::io::Result<FileSource> {
         let file = File::open(path)?;
         let len = file.metadata()?.len();
-        Ok(FileSource { file: RefCell::new(file), len })
+        Ok(FileSource {
+            file: RefCell::new(file),
+            len,
+        })
     }
 }
 
@@ -42,9 +44,11 @@ impl ByteSource for FileSource {
             return Ok(0);
         }
         let mut file = self.file.borrow_mut();
-        file.seek(SeekFrom::Start(offset)).map_err(|e| Error::Io(e.to_string()))?;
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|e| Error::Io(e.to_string()))?;
         let want = ((out.len() as u64).min(self.len - offset)) as usize;
-        file.read_exact(&mut out[..want]).map_err(|e| Error::Io(e.to_string()))?;
+        file.read_exact(&mut out[..want])
+            .map_err(|e| Error::Io(e.to_string()))?;
         Ok(want)
     }
 }
@@ -101,7 +105,11 @@ fn main() {
     println!("language shown: {}", control.language);
     println!(
         "localized:      {}",
-        nacp.titles.iter().map(|t| t.language).collect::<Vec<_>>().join(", ")
+        nacp.titles
+            .iter()
+            .map(|t| t.language)
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     if !nacp.ratings.is_empty() {
         println!(
@@ -137,7 +145,11 @@ fn main() {
     if !nacp.isbn.is_empty() {
         println!("isbn:           {}", nacp.isbn);
     }
-    println!("icon:           {} bytes, {}", control.icon.len(), control.icon_mime());
+    println!(
+        "icon:           {} bytes, {}",
+        control.icon.len(),
+        control.icon_mime()
+    );
 
     if let Some(path) = icon_path {
         if control.icon.is_empty() {

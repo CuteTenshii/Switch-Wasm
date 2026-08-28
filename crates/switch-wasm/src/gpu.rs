@@ -43,8 +43,13 @@ pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -
     if !crate::gpu_channel_open(handle) {
         return crate::NO_CHANNEL_YET.to_string();
     }
-    let instance = switch_gpu::wgpu::Instance::new(switch_gpu::wgpu::InstanceDescriptor::new_without_display_handle());
-    let adapter = match instance.request_adapter(&switch_gpu::wgpu::RequestAdapterOptions::default()).await {
+    let instance = switch_gpu::wgpu::Instance::new(
+        switch_gpu::wgpu::InstanceDescriptor::new_without_display_handle(),
+    );
+    let adapter = match instance
+        .request_adapter(&switch_gpu::wgpu::RequestAdapterOptions::default())
+        .await
+    {
         Ok(adapter) => adapter,
         Err(e) => return format!("no adapter: {e}"),
     };
@@ -54,11 +59,13 @@ pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -
     // `createTexture` and wgpu unwrapped it — a panic mid-draw, which on wasm
     // is a bare `unreachable` that stops the core. See
     // `switch_gpu::device_descriptor`.
-    let (device, queue) =
-        match adapter.request_device(&switch_gpu::device_descriptor(&adapter)).await {
-            Ok(pair) => pair,
-            Err(e) => return format!("no device: {e}"),
-        };
+    let (device, queue) = match adapter
+        .request_device(&switch_gpu::device_descriptor(&adapter))
+        .await
+    {
+        Ok(pair) => pair,
+        Err(e) => return format!("no device: {e}"),
+    };
     // wgpu takes this from `GPUAdapterInfo.description`, which Chrome leaves
     // empty on macOS and Firefox leaves empty always. The worker names those.
     let name = adapter.get_info().name;

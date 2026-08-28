@@ -63,15 +63,18 @@ pub fn parse_elf(data: &[u8]) -> Result<LoadedElf> {
     let phentsize = u16::from_le_bytes([data[0x36], data[0x37]]) as usize;
     let phnum = u16::from_le_bytes([data[0x38], data[0x39]]) as usize;
     if phentsize < 56 {
-        return Err(Error::Elf(format!("program header size {} too small", phentsize)));
+        return Err(Error::Elf(format!(
+            "program header size {} too small",
+            phentsize
+        )));
     }
 
     let mut segments = Vec::new();
     for i in 0..phnum {
         let off = phoff.checked_add(i * phentsize).ok_or(Error::Overflow)?;
-        let ph = data.get(off..off + phentsize).ok_or_else(|| {
-            Error::Elf(format!("program header {} outside file", i))
-        })?;
+        let ph = data
+            .get(off..off + phentsize)
+            .ok_or_else(|| Error::Elf(format!("program header {} outside file", i)))?;
         let p_type = u32::from_le_bytes(ph[0..4].try_into().unwrap());
         if p_type != PT_LOAD {
             continue;
@@ -82,10 +85,7 @@ pub fn parse_elf(data: &[u8]) -> Result<LoadedElf> {
         let p_memsz = u64::from_le_bytes(ph[0x28..0x30].try_into().unwrap());
         let p_flags = u32::from_le_bytes(ph[0x04..0x08].try_into().unwrap());
         if p_filesz as usize > data.len().saturating_sub(p_offset) {
-            return Err(Error::Elf(format!(
-                "segment {} filesz exceeds file",
-                i
-            )));
+            return Err(Error::Elf(format!("segment {} filesz exceeds file", i)));
         }
         segments.push(LoadSegment {
             vaddr: p_vaddr,

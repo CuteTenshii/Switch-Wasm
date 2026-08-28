@@ -48,7 +48,15 @@ impl Fft {
     /// sub-transforms of `m = n/p` points, then combine them with a `p`-point
     /// DFT. `stride` walks the input, `fstride` is `self.n / n` — how far one
     /// step of this level's twiddle moves in the full table.
-    fn recurse(&self, input: &[Cpx], offset: usize, stride: usize, out: &mut [Cpx], n: usize, fstride: usize) {
+    fn recurse(
+        &self,
+        input: &[Cpx],
+        offset: usize,
+        stride: usize,
+        out: &mut [Cpx],
+        n: usize,
+        fstride: usize,
+    ) {
         if n == 1 {
             out[0] = input[offset];
             return;
@@ -63,7 +71,14 @@ impl Fft {
             }
         } else {
             for q in 0..p {
-                self.recurse(input, offset + q * stride, stride * p, &mut out[q * m..(q + 1) * m], m, fstride * p);
+                self.recurse(
+                    input,
+                    offset + q * stride,
+                    stride * p,
+                    &mut out[q * m..(q + 1) * m],
+                    m,
+                    fstride * p,
+                );
             }
         }
         // `W_n^(q·j)` gathers the sub-transforms; `W_p^(q·t)` is the p-point
@@ -179,7 +194,13 @@ impl Mdct {
             );
             ffts.push(Fft::new(size >> 2));
         }
-        Mdct { n, spectrum: vec![(0.0, 0.0); n >> 2], transformed: vec![(0.0, 0.0); n >> 2], trig, ffts }
+        Mdct {
+            n,
+            spectrum: vec![(0.0, 0.0); n >> 2],
+            transformed: vec![(0.0, 0.0); n >> 2],
+            trig,
+            ffts,
+        }
     }
 
     /// Transform `input` — `n>>shift` halved, taken every `stride` values —

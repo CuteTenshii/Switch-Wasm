@@ -206,8 +206,8 @@ pub fn decode_program_from_memory(
     bindings: &dyn Fn(u8) -> Option<(u64, u32)>,
 ) -> Result<Program> {
     let first_real_word = ctx.read_u64(addr + 8)?;
-    let header_at = matches!(isa::decode(first_real_word).op, Op::Unimplemented { .. })
-        .then_some(addr);
+    let header_at =
+        matches!(isa::decode(first_real_word).op, Op::Unimplemented { .. }).then_some(addr);
     let header = match header_at {
         Some(at) => {
             let target = ctx.read_u32(at + OMAP_TARGET_WORD * 4)?;
@@ -250,7 +250,10 @@ pub fn decode_program_from_memory(
         // order. A shader that fails to run says only which instruction it
         // stopped on; this is how you see what came before it.
         if crate::env_flag!("TRACE_SHADER") {
-            eprintln!("[shader] program at {addr:#x}, {} instructions", program.offsets.len());
+            eprintln!(
+                "[shader] program at {addr:#x}, {} instructions",
+                program.offsets.len()
+            );
             for (i, &off) in program.offsets.iter().enumerate() {
                 eprintln!("  {off:#06x}: {:?}", program.insns[i]);
             }
@@ -342,7 +345,12 @@ fn brx_targets(
     let mut table: Option<(u8, i32)> = None;
     let mut arms: Option<usize> = None;
 
-    for insn in decoded.range(..at).rev().take(BRX_WALK_LIMIT).map(|(_, insn)| insn) {
+    for insn in decoded
+        .range(..at)
+        .rev()
+        .take(BRX_WALK_LIMIT)
+        .map(|(_, insn)| insn)
+    {
         if !interp::writes(&insn.op).contains(&selector) {
             continue;
         }
@@ -350,23 +358,38 @@ fn brx_targets(
             return None;
         }
         match insn.op {
-            Op::Ldc { bank, offset, idx, size: isa::MemSize::B32, .. } if table.is_none() => {
+            Op::Ldc {
+                bank,
+                offset,
+                idx,
+                size: isa::MemSize::B32,
+                ..
+            } if table.is_none() => {
                 table = Some((bank, offset));
                 selector = idx;
             }
             // Scaling the arm number to a byte offset into the table.
-            Op::Shl { a, b: isa::Operand::Imm(2), .. } if table.is_some() => {
+            Op::Shl {
+                a,
+                b: isa::Operand::Imm(2),
+                ..
+            } if table.is_some() => {
                 selector = a;
             }
-            Op::Mov { src: isa::Operand::Reg(src), .. } if table.is_some() => {
+            Op::Mov {
+                src: isa::Operand::Reg(src),
+                ..
+            } if table.is_some() => {
                 selector = src;
             }
             // The clamp bounds the table. `imnmx` on `PT` is `min`; on
             // anything else it is a per-lane pick between min and max, which
             // bounds nothing. The table has one more entry than the immediate.
-            Op::Imnmx { b: isa::Operand::Imm(n), pred, .. }
-                if table.is_some() && pred.is_always() =>
-            {
+            Op::Imnmx {
+                b: isa::Operand::Imm(n),
+                pred,
+                ..
+            } if table.is_some() && pred.is_always() => {
                 arms = Some(n as usize + 1);
                 break;
             }
@@ -398,7 +421,9 @@ fn brx_targets(
 /// is mapped is a decode error rather than a panic.
 pub fn decode_program_with(read: &mut dyn FnMut(u32) -> Result<u64>) -> Result<Program> {
     decode_program_with_consts(read, &mut |_, _| {
-        Err(Error::Gpu("shader: no constant banks bound for this decode".into()))
+        Err(Error::Gpu(
+            "shader: no constant banks bound for this decode".into(),
+        ))
     })
 }
 
@@ -475,7 +500,10 @@ pub fn decode_program_with_consts(
     if decoded.is_empty() {
         return Err(Error::Gpu("shader: empty program".into()));
     }
-    let mut program = Program { indirect, ..Program::default() };
+    let mut program = Program {
+        indirect,
+        ..Program::default()
+    };
     for (offset, insn) in decoded {
         program.offsets.push(offset);
         program.insns.push(insn);
@@ -497,7 +525,9 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program> {
             .get(start..start + 8)
             .map(|w| u64::from_le_bytes(w.try_into().expect("8 bytes")))
             .ok_or_else(|| {
-                Error::Gpu(format!("shader: program read at {offset:#x} is past its end"))
+                Error::Gpu(format!(
+                    "shader: program read at {offset:#x} is past its end"
+                ))
             })
     })
 }
@@ -505,8 +535,8 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use isa::{FMod, FmulScale, MemSize, MufuOp, Operand, TexDim, RZ};
     use crate::Error;
+    use isa::{FMod, FmulScale, MemSize, MufuOp, Operand, TexDim, RZ};
 
     /// Just the opcodes, for comparing a decode against an expected list.
     fn ops(program: &Program) -> Vec<Op> {
@@ -558,12 +588,53 @@ mod tests {
         assert_eq!(
             ops(&program),
             vec![
-                Op::Ipa { dst: 0, offset: 0x7c, mul: None, perspective: false, sat: false, centroid: false },
-                Op::Mufu { dst: 3, src: 0, sm: FMod::NONE, op: MufuOp::Rcp, sat: false },
-                Op::Ipa { dst: 0, offset: 0x80, mul: Some(3), perspective: true, sat: false, centroid: false },
-                Op::Ipa { dst: 1, offset: 0x84, mul: Some(3), perspective: true, sat: false, centroid: false },
-                Op::Ipa { dst: 2, offset: 0x88, mul: Some(3), perspective: true, sat: false, centroid: false },
-                Op::Ipa { dst: 3, offset: 0x8c, mul: Some(3), perspective: true, sat: false, centroid: false },
+                Op::Ipa {
+                    dst: 0,
+                    offset: 0x7c,
+                    mul: None,
+                    perspective: false,
+                    sat: false,
+                    centroid: false
+                },
+                Op::Mufu {
+                    dst: 3,
+                    src: 0,
+                    sm: FMod::NONE,
+                    op: MufuOp::Rcp,
+                    sat: false
+                },
+                Op::Ipa {
+                    dst: 0,
+                    offset: 0x80,
+                    mul: Some(3),
+                    perspective: true,
+                    sat: false,
+                    centroid: false
+                },
+                Op::Ipa {
+                    dst: 1,
+                    offset: 0x84,
+                    mul: Some(3),
+                    perspective: true,
+                    sat: false,
+                    centroid: false
+                },
+                Op::Ipa {
+                    dst: 2,
+                    offset: 0x88,
+                    mul: Some(3),
+                    perspective: true,
+                    sat: false,
+                    centroid: false
+                },
+                Op::Ipa {
+                    dst: 3,
+                    offset: 0x8c,
+                    mul: Some(3),
+                    perspective: true,
+                    sat: false,
+                    centroid: false
+                },
                 Op::Exit,
             ]
         );
@@ -619,13 +690,24 @@ mod tests {
 
         let program = decode_program(&bytes).unwrap();
         assert_eq!(program.len(), 21);
-        assert_eq!(program.insns[0].op, Op::Ld { dst: 0, offset: 0x80, idx: RZ, size: MemSize::B128 });
+        assert_eq!(
+            program.insns[0].op,
+            Op::Ld {
+                dst: 0,
+                offset: 0x80,
+                idx: RZ,
+                size: MemSize::B128
+            }
+        );
         assert_eq!(
             program.insns[1].op,
             Op::Fmul {
                 dst: 4,
                 a: 0,
-                b: Operand::Const { bank: 2, offset: 0x0 },
+                b: Operand::Const {
+                    bank: 2,
+                    offset: 0x0
+                },
                 bm: FMod::NONE,
                 ftz: true,
                 sat: false,
@@ -634,11 +716,47 @@ mod tests {
         );
         assert_eq!(
             program.insns[5].op,
-            Op::Ffma { dst: 4, a: 1, b: Operand::Const { bank: 2, offset: 0x10 }, bneg: false, c: Operand::Reg(4), cneg: false, ftz: true, sat: false }
+            Op::Ffma {
+                dst: 4,
+                a: 1,
+                b: Operand::Const {
+                    bank: 2,
+                    offset: 0x10
+                },
+                bneg: false,
+                c: Operand::Reg(4),
+                cneg: false,
+                ftz: true,
+                sat: false
+            }
         );
-        assert_eq!(program.insns[17].op, Op::St { offset: 0x70, idx: RZ, src: 0, size: MemSize::B128 });
-        assert_eq!(program.insns[18].op, Op::Ld { dst: 0, offset: 0x90, idx: RZ, size: MemSize::B128 });
-        assert_eq!(program.insns[19].op, Op::St { offset: 0x80, idx: RZ, src: 0, size: MemSize::B128 });
+        assert_eq!(
+            program.insns[17].op,
+            Op::St {
+                offset: 0x70,
+                idx: RZ,
+                src: 0,
+                size: MemSize::B128
+            }
+        );
+        assert_eq!(
+            program.insns[18].op,
+            Op::Ld {
+                dst: 0,
+                offset: 0x90,
+                idx: RZ,
+                size: MemSize::B128
+            }
+        );
+        assert_eq!(
+            program.insns[19].op,
+            Op::St {
+                offset: 0x80,
+                idx: RZ,
+                src: 0,
+                size: MemSize::B128
+            }
+        );
         assert_eq!(program.insns[20].op, Op::Exit);
     }
 
@@ -646,21 +764,30 @@ mod tests {
     fn the_output_map_hands_out_a_register_per_component_of_a_written_target() {
         // All four components of target 0: the ordinary case, and the one
         // reading `r0..r3` happened to get right.
-        let all = ProgramHeader { omap_target: 0xF, ..ProgramHeader::default() };
+        let all = ProgramHeader {
+            omap_target: 0xF,
+            ..ProgramHeader::default()
+        };
         for c in 0..4 {
             assert_eq!(all.fragment_output_reg(0, c), Some(c as u8));
         }
 
         // A component the program leaves to the driver still costs its
         // register, so everything after it sits one along.
-        let no_red = ProgramHeader { omap_target: 0xE, ..ProgramHeader::default() };
+        let no_red = ProgramHeader {
+            omap_target: 0xE,
+            ..ProgramHeader::default()
+        };
         assert_eq!(no_red.fragment_output_reg(0, 0), None);
         assert_eq!(no_red.fragment_output_reg(0, 1), Some(1));
         assert_eq!(no_red.fragment_output_reg(0, 3), Some(3));
 
         // A target written nothing at all is skipped whole, so the next one
         // starts at r0 rather than r4.
-        let second_only = ProgramHeader { omap_target: 0xF0, ..ProgramHeader::default() };
+        let second_only = ProgramHeader {
+            omap_target: 0xF0,
+            ..ProgramHeader::default()
+        };
         assert_eq!(second_only.fragment_output_reg(0, 0), None);
         assert_eq!(second_only.fragment_output_reg(1, 0), Some(0));
         assert_eq!(second_only.fragment_output_reg(1, 3), Some(3));
@@ -789,7 +916,13 @@ mod tests {
             let index = program
                 .index_of(offset)
                 .unwrap_or_else(|| panic!("arm at {offset:#x} was never decoded"));
-            assert_eq!(program.insns[index].op, Op::Mov { dst: 10, src: Operand::Reg(arm) });
+            assert_eq!(
+                program.insns[index].op,
+                Op::Mov {
+                    dst: 10,
+                    src: Operand::Reg(arm)
+                }
+            );
         }
     }
 
@@ -812,7 +945,10 @@ mod tests {
         let (bytes, _) = brx_switch_fixture();
         let program = decode_program(&bytes).unwrap();
         assert!(program.index_of(0x338).is_some(), "arm 0 falls through");
-        assert!(program.index_of(0x350).is_none(), "arm 1 is only in the table");
+        assert!(
+            program.index_of(0x350).is_none(),
+            "arm 1 is only in the table"
+        );
     }
 
     /// `nop`, which writes nothing and falls through — filler for putting a
@@ -887,7 +1023,13 @@ mod tests {
             let index = program
                 .index_of(offset)
                 .unwrap_or_else(|| panic!("arm at {offset:#x} was never decoded"));
-            assert_eq!(program.insns[index].op, Op::Mov { dst: 10, src: Operand::Reg(arm) });
+            assert_eq!(
+                program.insns[index].op,
+                Op::Mov {
+                    dst: 10,
+                    src: Operand::Reg(arm)
+                }
+            );
         }
     }
 
@@ -901,7 +1043,10 @@ mod tests {
         let (bytes, table) = brx_switch_spread(1, Some((0x00200c0c, 0x38480000)));
         let program = decode_with_table(&bytes, table).unwrap();
         assert!(program.index_of(table[0]).is_some(), "arm 0 falls through");
-        assert!(program.index_of(table[1]).is_none(), "arm 1 is only in the table");
+        assert!(
+            program.index_of(table[1]).is_none(),
+            "arm 1 is only in the table"
+        );
     }
 
     #[test]
@@ -912,17 +1057,33 @@ mod tests {
         // reads, so it stops rather than assuming it does.
         let (bytes, table) = brx_switch_spread(1, Some((0xfff70c0c, 0x1c0fffff)));
         let program = decode_with_table(&bytes, table).unwrap();
-        assert!(program.index_of(table[1]).is_none(), "arm 1 is only in the table");
+        assert!(
+            program.index_of(table[1]).is_none(),
+            "arm 1 is only in the table"
+        );
     }
 
     #[test]
     fn only_the_varyings_a_program_interpolates_are_listed() {
         let mut program = Program::default();
-        for (offset, at) in [(0x7cu16, 8u32), (0xc4, 16), (0x80, 24), (0xc0, 40), (0x80, 48)] {
+        for (offset, at) in [
+            (0x7cu16, 8u32),
+            (0xc4, 16),
+            (0x80, 24),
+            (0xc0, 40),
+            (0x80, 48),
+        ] {
             program.offsets.push(at);
             program.insns.push(Instruction {
                 pred: isa::Pred::ALWAYS,
-                op: Op::Ipa { dst: 0, offset, mul: None, perspective: true, sat: false, centroid: false },
+                op: Op::Ipa {
+                    dst: 0,
+                    offset,
+                    mul: None,
+                    perspective: true,
+                    sat: false,
+                    centroid: false,
+                },
             });
         }
         // 0x7c is `1/w`, not a varying; 0x80 is slot 0 twice; 0xc0/0xc4 are

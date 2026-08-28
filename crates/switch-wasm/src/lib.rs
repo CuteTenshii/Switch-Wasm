@@ -214,7 +214,12 @@ impl ByteSource for HostSource {
             // short read at the host's own cache-chunk boundary.
             let ask = (want - done).min(u32::MAX as usize);
             let got = unsafe {
-                host_read(self.file, offset + done as u64, out[done..].as_mut_ptr(), ask as u32)
+                host_read(
+                    self.file,
+                    offset + done as u64,
+                    out[done..].as_mut_ptr(),
+                    ask as u32,
+                )
             } as usize;
             if got == 0 {
                 break;
@@ -321,7 +326,10 @@ pub extern "C" fn switch_last_error(handle: u32, buf: *mut u8, maxlen: u32) -> u
     // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
     let panicked = unsafe { &mut *PANIC_MSG.get() };
     if panicked[0] != 0 {
-        let len = panicked.iter().position(|&b| b == 0).unwrap_or(panicked.len());
+        let len = panicked
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(panicked.len());
         let n = len.min(nul_reserved(maxlen));
         if n > 0 && !buf.is_null() {
             unsafe {
@@ -406,8 +414,14 @@ pub extern "C" fn switch_add_archive(handle: u32, file: u32, size: u64) -> i32 {
         }
     };
     use switch_core::nca::ContentType;
-    if !matches!(nca.content_type, ContentType::Data | ContentType::PublicData) {
-        s.last_error = format!("not a data archive (content type {})", nca.content_type.name());
+    if !matches!(
+        nca.content_type,
+        ContentType::Data | ContentType::PublicData
+    ) {
+        s.last_error = format!(
+            "not a data archive (content type {})",
+            nca.content_type.name()
+        );
         return -1;
     }
     let Some(index) = nca.romfs_section_index() else {
@@ -477,7 +491,12 @@ pub extern "C" fn switch_add_update(handle: u32, file: u32, size: u64) -> u64 {
     let f = &files[index];
     let program = (f.offset, f.size);
     let program_id = nca.program_id;
-    s.update = Some(Update { nca, src, program, files });
+    s.update = Some(Update {
+        nca,
+        src,
+        program,
+        files,
+    });
     s.last_error.clear();
     program_id
 }
@@ -555,11 +574,17 @@ pub extern "C" fn switch_add_dlc(handle: u32, file: u32, size: u64) -> u32 {
         if !f.name.to_ascii_lowercase().ends_with(".nca") {
             continue;
         }
-        let Ok(window) = Window::new(src, f.offset, f.size, &f.name) else { continue };
-        let Ok(nca) = Nca::parse_source(&window, Some(&s.keys)) else { continue };
+        let Ok(window) = Window::new(src, f.offset, f.size, &f.name) else {
+            continue;
+        };
+        let Ok(nca) = Nca::parse_source(&window, Some(&s.keys)) else {
+            continue;
+        };
         use switch_core::nca::ContentType;
-        if !matches!(nca.content_type, ContentType::Data | ContentType::PublicData)
-            || !is_add_on_content_id(nca.title_id)
+        if !matches!(
+            nca.content_type,
+            ContentType::Data | ContentType::PublicData
+        ) || !is_add_on_content_id(nca.title_id)
         {
             continue;
         }
@@ -570,7 +595,11 @@ pub extern "C" fn switch_add_dlc(handle: u32, file: u32, size: u64) -> u32 {
             continue;
         }
         s.dlc.retain(|held| held.content_id != nca.title_id);
-        s.dlc.push(Dlc { content_id: nca.title_id, src, nca: (f.offset, f.size) });
+        s.dlc.push(Dlc {
+            content_id: nca.title_id,
+            src,
+            nca: (f.offset, f.size),
+        });
         found += 1;
     }
     if found == 0 {
@@ -646,8 +675,14 @@ pub extern "C" fn switch_nand_add_archive(handle: u32, ptr: *const u8, len: u32)
         }
     };
     use switch_core::nca::ContentType;
-    if !matches!(nca.content_type, ContentType::Data | ContentType::PublicData) {
-        s.last_error = format!("not a data archive (content type {})", nca.content_type.name());
+    if !matches!(
+        nca.content_type,
+        ContentType::Data | ContentType::PublicData
+    ) {
+        s.last_error = format!(
+            "not a data archive (content type {})",
+            nca.content_type.name()
+        );
         return 0;
     }
     let Some(index) = nca.romfs_section_index() else {
@@ -755,7 +790,12 @@ impl Update {
     /// own, and a [`HostSource`] is a handle rather than a buffer, so this
     /// costs nothing.
     fn program_window(&self) -> Result<Window<HostSource>, switch_core::Error> {
-        Window::new(self.src, self.program.0, self.program.1, "update program nca")
+        Window::new(
+            self.src,
+            self.program.0,
+            self.program.1,
+            "update program nca",
+        )
     }
 }
 
@@ -882,7 +922,13 @@ pub extern "C" fn switch_read_file(
 /// Parse an NCA from `ptr`/`len` and return a JSON summary. If the session has
 /// keys loaded and the header is encrypted, it is decrypted transparently.
 #[no_mangle]
-pub extern "C" fn switch_parse_nca(handle: u32, ptr: *const u8, len: u32, buf: *mut u8, maxlen: u32) -> u32 {
+pub extern "C" fn switch_parse_nca(
+    handle: u32,
+    ptr: *const u8,
+    len: u32,
+    buf: *mut u8,
+    maxlen: u32,
+) -> u32 {
     let s = session(handle);
     let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     let mut out = Vec::new();
@@ -897,7 +943,11 @@ pub extern "C" fn switch_parse_nca(handle: u32, ptr: *const u8, len: u32, buf: *
             out.extend_from_slice(b"\",\"crypto_type\":");
             out.extend_from_slice(nca.crypto_type.to_string().as_bytes());
             out.extend_from_slice(b",\"encrypted\":");
-            out.extend_from_slice(if nca.is_encrypted() { b"true" } else { b"false" });
+            out.extend_from_slice(if nca.is_encrypted() {
+                b"true"
+            } else {
+                b"false"
+            });
             out.extend_from_slice(b",\"file_size\":");
             out.extend_from_slice(nca.file_size.to_string().as_bytes());
             out.extend_from_slice(b",\"sections\":[");
@@ -917,7 +967,11 @@ pub extern "C" fn switch_parse_nca(handle: u32, ptr: *const u8, len: u32, buf: *
                 // have the base header, in which case this is unknown.
                 let fs_type = match nca.fs_headers.get(i).and_then(|o| o.as_ref()) {
                     Some(fs) if sec.media_size > 0 => {
-                        if fs.fs_type == 1 { "PFS0" } else { "ROMFS" }
+                        if fs.fs_type == 1 {
+                            "PFS0"
+                        } else {
+                            "ROMFS"
+                        }
                     }
                     _ => "?",
                 };
@@ -946,8 +1000,10 @@ pub extern "C" fn switch_parse_nca(handle: u32, ptr: *const u8, len: u32, buf: *
 /// page already does to show the title's name and icon, which is why this is
 /// the point they arrive.
 fn cache_control(s: &mut Session, control: switch_core::control::Control) {
-    s.cpu.set_save_data_quota(switch_core::cpu::SaveDataQuota::from(&control.nacp));
-    s.cpu.set_add_on_content_base_id(control.nacp.add_on_content_base_id);
+    s.cpu
+        .set_save_data_quota(switch_core::cpu::SaveDataQuota::from(&control.nacp));
+    s.cpu
+        .set_add_on_content_base_id(control.nacp.add_on_content_base_id);
     s.control = Some(control);
 }
 
@@ -976,7 +1032,8 @@ pub extern "C" fn switch_load_control_from_nsp(handle: u32) -> i32 {
     // Title-key crypto: as when booting the Program NCA, the section key
     // isn't in the header's own key area and the ticket that unlocks it
     // ships next to the content.
-    let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &s.nsp_files, &container);
+    let _ =
+        switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &s.nsp_files, &container);
     let Some(file) = nsp_file_source(s, index as u32) else {
         return -1;
     };
@@ -1076,7 +1133,11 @@ pub extern "C" fn switch_control_json(handle: u32, buf: *mut u8, maxlen: u32) ->
     out.extend_from_slice(b"\",\"user_save_size\":");
     out.extend_from_slice(nacp.user_account_save_data_size.to_string().as_bytes());
     out.extend_from_slice(b",\"user_save_journal_size\":");
-    out.extend_from_slice(nacp.user_account_save_data_journal_size.to_string().as_bytes());
+    out.extend_from_slice(
+        nacp.user_account_save_data_journal_size
+            .to_string()
+            .as_bytes(),
+    );
     out.extend_from_slice(b",\"device_save_size\":");
     out.extend_from_slice(nacp.device_save_data_size.to_string().as_bytes());
     out.extend_from_slice(b",\"device_save_journal_size\":");
@@ -1340,7 +1401,11 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     let system_resource = switch_core::npdm::Npdm::system_resource_size_of(&pfs0, &exefs);
     cpu.diagnostic(&format!(
         "[npdm] system resource {system_resource:#x} — {}",
-        if system_resource == 0 { "plain heap" } else { "virtual address memory" }
+        if system_resource == 0 {
+            "plain heap"
+        } else {
+            "virtual address memory"
+        }
     ));
     cpu.set_system_resource_size(system_resource);
 
@@ -1380,14 +1445,14 @@ fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[
             Ok(romfs) => {
                 let size = romfs.len();
                 match cpu.add_add_on_content(entry.content_id, Box::new(romfs)) {
-                Some(index) => cpu.diagnostic(&format!(
-                    "[aoc] {:016x} mounted as add-on content {index}, {size:#x} bytes",
-                    entry.content_id
-                )),
-                None => cpu.diagnostic(&format!(
-                    "[aoc] {:016x} is not this title's add-on content — not mounted",
-                    entry.content_id
-                )),
+                    Some(index) => cpu.diagnostic(&format!(
+                        "[aoc] {:016x} mounted as add-on content {index}, {size:#x} bytes",
+                        entry.content_id
+                    )),
+                    None => cpu.diagnostic(&format!(
+                        "[aoc] {:016x} is not this title's add-on content — not mounted",
+                        entry.content_id
+                    )),
                 }
             }
             Err(e) => cpu.diagnostic(&format!(
@@ -1412,7 +1477,10 @@ pub extern "C" fn switch_load_nca(handle: u32) -> i64 {
     let Some(container) = container(s) else {
         return -1;
     };
-    let added = Added { update: s.update.as_ref(), dlc: &s.dlc };
+    let added = Added {
+        update: s.update.as_ref(),
+        dlc: &s.dlc,
+    };
     load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, container, added)
 }
 
@@ -1474,10 +1542,18 @@ pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
     // unlocks it right next to the content — try that before falling back to
     // whatever an external title.keys provided.
     if let Ok(nca) = Nca::parse_source(&nca_src, Some(&s.keys)) {
-        let _ = switch_core::ticket::load_bundled_title_key(&mut s.keys, &nca, &s.nsp_files, &container);
+        let _ = switch_core::ticket::load_bundled_title_key(
+            &mut s.keys,
+            &nca,
+            &s.nsp_files,
+            &container,
+        );
     }
 
-    let added = Added { update: s.update.as_ref(), dlc: &s.dlc };
+    let added = Added {
+        update: s.update.as_ref(),
+        dlc: &s.dlc,
+    };
     load_and_boot_nca(&s.keys, &mut s.cpu, &mut s.last_error, nca_src, added)
 }
 
@@ -1628,13 +1704,21 @@ pub extern "C" fn switch_audio_pull(handle: u32, buf: *mut u8, max_samples: u32)
 #[no_mangle]
 pub extern "C" fn switch_fb_width(handle: u32) -> u32 {
     let s = session(handle);
-    if s.cpu.nv.gpu.frames > 0 { s.cpu.nv.gpu.framebuffer.width } else { FB_WIDTH }
+    if s.cpu.nv.gpu.frames > 0 {
+        s.cpu.nv.gpu.framebuffer.width
+    } else {
+        FB_WIDTH
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn switch_fb_height(handle: u32) -> u32 {
     let s = session(handle);
-    if s.cpu.nv.gpu.frames > 0 { s.cpu.nv.gpu.framebuffer.height } else { FB_HEIGHT }
+    if s.cpu.nv.gpu.frames > 0 {
+        s.cpu.nv.gpu.framebuffer.height
+    } else {
+        FB_HEIGHT
+    }
 }
 
 /// Number of frames the guest has presented. JS polls this to know when the
@@ -1715,7 +1799,9 @@ pub extern "C" fn switch_sd_write_file(
 ) -> i32 {
     let s = session(handle);
     let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
-    s.cpu.fs.write_file(&sd_path(path_ptr, path_len), data.to_vec());
+    s.cpu
+        .fs
+        .write_file(&sd_path(path_ptr, path_len), data.to_vec());
     0
 }
 
@@ -1723,7 +1809,10 @@ pub extern "C" fn switch_sd_write_file(
 /// path" reasoning as `switch_sd_write_file`: not reported as a change.
 #[no_mangle]
 pub extern "C" fn switch_sd_create_dir(handle: u32, path_ptr: *const u8, path_len: u32) -> i32 {
-    session(handle).cpu.fs.create_dir(&sd_path(path_ptr, path_len));
+    session(handle)
+        .cpu
+        .fs
+        .create_dir(&sd_path(path_ptr, path_len));
     0
 }
 
@@ -1894,7 +1983,9 @@ pub extern "C" fn switch_save_write_file(
     let s = session(handle);
     let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
     let path = sd_path(path_ptr, path_len);
-    s.cpu.save_data_mut(save_id).write_file(&path, data.to_vec());
+    s.cpu
+        .save_data_mut(save_id)
+        .write_file(&path, data.to_vec());
     0
 }
 
@@ -2046,7 +2137,9 @@ pub extern "C" fn switch_set_time(handle: u32, unix_seconds: i64) {
 /// Status API, where available.
 #[no_mangle]
 pub extern "C" fn switch_set_battery(handle: u32, percent: u32, charging: u32) {
-    session(handle).cpu.set_battery(percent.min(100) as u8, charging != 0);
+    session(handle)
+        .cpu
+        .set_battery(percent.min(100) as u8, charging != 0);
 }
 
 /// Run up to `max_steps` instructions. Returns steps executed or -1 on error.
@@ -2229,12 +2322,19 @@ mod tests {
         // Opening the save is enough to have one to persist.
         let mut ids = [0u8; 64];
         let n = switch_save_ids_json(handle, ids.as_mut_ptr(), ids.len() as u32) as usize;
-        assert_eq!(std::str::from_utf8(&ids[..n]).unwrap(), r#"["0100000000001000"]"#);
+        assert_eq!(
+            std::str::from_utf8(&ids[..n]).unwrap(),
+            r#"["0100000000001000"]"#
+        );
 
         // A guest write is a change, and it lands in the save rather than on
         // the card — the two are different storage, and a title's save is not
         // something the next title to mount the card should find.
-        session(handle).cpu.save_data_mut(SAVE).write("/settings.dat", 0, b"12345").unwrap();
+        session(handle)
+            .cpu
+            .save_data_mut(SAVE)
+            .write("/settings.dat", 0, b"12345")
+            .unwrap();
         assert_eq!(switch_save_pending_changes(handle, SAVE), 1);
         let mut buf = [0u8; 256];
         let n = switch_save_take_changes_json(handle, SAVE, buf.as_mut_ptr(), buf.len() as u32);
@@ -2297,7 +2397,10 @@ mod tests {
 
         // Reading a file back out is how the page gets the bytes to store.
         let path = "/switch/cfg.json";
-        assert_eq!(switch_sd_file_size(handle, path.as_ptr(), path.len() as u32), 7);
+        assert_eq!(
+            switch_sd_file_size(handle, path.as_ptr(), path.len() as u32),
+            7
+        );
         let mut out = [0u8; 16];
         let n = switch_sd_read_file(
             handle,
@@ -2324,7 +2427,10 @@ mod tests {
 
         // A directory is not a file, and neither is a path with nothing at it.
         let dir = "/switch";
-        assert_eq!(switch_sd_file_size(handle, dir.as_ptr(), dir.len() as u32), -1);
+        assert_eq!(
+            switch_sd_file_size(handle, dir.as_ptr(), dir.len() as u32),
+            -1
+        );
         let missing = "/switch/nope";
         assert_eq!(
             switch_sd_read_file(
@@ -2444,7 +2550,10 @@ mod tests {
         let (_host, handle) = new_session();
         session(handle).cpu.fs.create_file(r#"/switch/a"b\c"#, 0);
         let json = take_changes(handle);
-        assert_eq!(json, r#"[{"path":"/switch/a\"b\\c","kind":"file","size":0}]"#);
+        assert_eq!(
+            json,
+            r#"[{"path":"/switch/a\"b\\c","kind":"file","size":0}]"#
+        );
         switch_free_session(handle);
     }
 
@@ -2456,10 +2565,7 @@ mod tests {
         // `\u00c2\u00ae` and came back as "JUST DANCEÂ® 2017".
         let mut out = Vec::new();
         json_escape("JUST DANCE® 2017 — 日本語", &mut out);
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "JUST DANCE® 2017 — 日本語"
-        );
+        assert_eq!(String::from_utf8(out).unwrap(), "JUST DANCE® 2017 — 日本語");
 
         // What JSON genuinely cannot carry raw still goes out escaped.
         let mut out = Vec::new();
@@ -2513,7 +2619,14 @@ pub(crate) const NO_CHANNEL_YET: &str = "the title has not opened a channel yet"
 /// the twelfth attempt lands.
 #[cfg(feature = "gpu")]
 pub(crate) fn gpu_channel_open(handle: u32) -> bool {
-    session(handle).cpu.nv.gpu.channels.values().next().is_some()
+    session(handle)
+        .cpu
+        .nv
+        .gpu
+        .channels
+        .values()
+        .next()
+        .is_some()
 }
 
 /// Install a GPU backend on a session's 3D channel.

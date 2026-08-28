@@ -102,9 +102,11 @@ impl<P: ByteSource, B: ByteSource> PatchedSection<P, B> {
                 break;
             }
             let take = (out.len() - done).min((end - at) as usize);
-            let got = self
-                .patch
-                .read_region(at, &mut out[done..done + take], self.subsections[i].ctr_val)?;
+            let got = self.patch.read_region(
+                at,
+                &mut out[done..done + take],
+                self.subsections[i].ctr_val,
+            )?;
             done += got;
             if got < take {
                 break;
@@ -565,7 +567,12 @@ mod tests {
         let subsection_end = PATCH_DATA + BUCKET_SIZE * 2;
         let mut subsection = vec![0u8; 0x10];
         subsection[0xC..0x10].copy_from_slice(&CTR_VAL.to_le_bytes());
-        patch_bytes.extend(table_pages(subsection_end, 0x10, &[subsection], subsection_end));
+        patch_bytes.extend(table_pages(
+            subsection_end,
+            0x10,
+            &[subsection],
+            subsection_end,
+        ));
 
         let patch_len = patch_bytes.len() as u64;
         let patch_nca = one_section_nca(
@@ -603,7 +610,10 @@ mod tests {
         const TITLEKEK: [u8; 16] = [0x5a; 16];
         let mut keys = KeySet::default();
         keys.titlekek[0] = Some(TITLEKEK);
-        keys.add_title_key(RIGHTS_ID, crate::crypto::aes128_encrypt_block(&TITLEKEK, &PATCH_KEY));
+        keys.add_title_key(
+            RIGHTS_ID,
+            crate::crypto::aes128_encrypt_block(&TITLEKEK, &PATCH_KEY),
+        );
         keys
     }
 
@@ -636,7 +646,12 @@ mod tests {
         let moved = romfs.read_vec(0x100 - ROMFS_AT, 0x10).unwrap();
         assert_eq!(moved, p.patch_plain[0x20..0x30]);
         // And the image ends where the relocation table says it does.
-        assert_eq!(romfs.read_at(VIRTUAL_LEN - ROMFS_AT, &mut [0u8; 16]).unwrap(), 0);
+        assert_eq!(
+            romfs
+                .read_at(VIRTUAL_LEN - ROMFS_AT, &mut [0u8; 16])
+                .unwrap(),
+            0
+        );
     }
 
     /// A container that is not an update, and an update that is not this

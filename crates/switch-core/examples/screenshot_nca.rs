@@ -79,8 +79,9 @@ fn main() {
         let b = u32::from_str_radix(b.trim().trim_start_matches("0x"), 16).ok()?;
         Some((a, b))
     });
-    let mut covered: Vec<bool> =
-        cover.map(|(a, b)| vec![false; ((b - a) / 4) as usize]).unwrap_or_default();
+    let mut covered: Vec<bool> = cover
+        .map(|(a, b)| vec![false; ((b - a) / 4) as usize])
+        .unwrap_or_default();
     // `START_THREADS=<step>` makes every created-but-never-started thread
     // runnable once, at that step.
     let start_threads: Option<u64> = env::var("START_THREADS").ok().and_then(|v| v.parse().ok());
@@ -94,7 +95,10 @@ fn main() {
     let gate_sniff = env::var("GATE_SNIFF").is_ok();
     let mut gate: Option<u32> = None;
     // `WAKE_ALL=<period>` makes every blocked thread runnable that often.
-    let wake_every: u64 = env::var("WAKE_ALL").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let wake_every: u64 = env::var("WAKE_ALL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     // `POKE_U32=<addr>:<value>` writes a word into guest memory on every
     // sampling tick once the run is under way. A latched state flag is only a
     // theory until you clear it and see what the guest does.
@@ -260,7 +264,11 @@ fn main() {
     // nothing and the UI has no panes to draw.
     if let Ok(magic) = env::var("FIND_MAGIC") {
         let want = u32::from_le_bytes(
-            magic.as_bytes().first_chunk::<4>().copied().unwrap_or([0; 4]),
+            magic
+                .as_bytes()
+                .first_chunk::<4>()
+                .copied()
+                .unwrap_or([0; 4]),
         );
         let mut hits = 0u32;
         let mut at = 0u32;
@@ -279,7 +287,10 @@ fn main() {
     for (pc, n) in &readers {
         println!("[reader] {pc:#x} {n}");
     }
-    println!("[mem] {} MiB mapped", cpu.mem.mapped_bytes() / (1024 * 1024));
+    println!(
+        "[mem] {} MiB mapped",
+        cpu.mem.mapped_bytes() / (1024 * 1024)
+    );
     println!("[threads] sampled share = {:?}", &share[..]);
     println!("[bt] {:#x} <- {:x?}", cpu.get_pc(), cpu.backtrace(12));
     let hot_snapshot = hot.clone();

@@ -321,12 +321,9 @@ impl Cpu {
                     let at = 8 + slot * 0x18;
                     let offset = u64::from(slot_size) * slot as u64;
                     layout[at..at + 8].copy_from_slice(&offset.to_le_bytes());
-                    layout[at + 8..at + 16]
-                        .copy_from_slice(&u64::from(slot_size).to_le_bytes());
-                    layout[at + 16..at + 20]
-                        .copy_from_slice(&(shared_width as i32).to_le_bytes());
-                    layout[at + 20..at + 24]
-                        .copy_from_slice(&(shared_height as i32).to_le_bytes());
+                    layout[at + 8..at + 16].copy_from_slice(&u64::from(slot_size).to_le_bytes());
+                    layout[at + 16..at + 20].copy_from_slice(&(shared_width as i32).to_le_bytes());
+                    layout[at + 20..at + 24].copy_from_slice(&(shared_height as i32).to_le_bytes());
                 }
                 if self.trace_nv {
                     eprintln!(
@@ -350,7 +347,11 @@ impl Cpu {
                 self.shared_buffer_slot = (slot + 1) % SHARED_BUFFER_USABLE_SLOTS;
                 let mut raw = vec![0u8; FENCE_SIZE];
                 for i in 0..4i32 {
-                    let index = if (i as u32) < SHARED_BUFFER_USABLE_SLOTS { i } else { -1 };
+                    let index = if (i as u32) < SHARED_BUFFER_USABLE_SLOTS {
+                        i
+                    } else {
+                        -1
+                    };
                     raw.extend_from_slice(&index.to_le_bytes());
                 }
                 raw.resize(raw.len().next_multiple_of(8), 0);
@@ -383,7 +384,8 @@ impl Cpu {
                 };
                 // A GPU backend holds its render targets on the device; the
                 // display reads them out of guest memory.
-                if self.nv.gpu.flush_renderers(&mut self.mem)? == crate::gpu::renderer::Flush::Done {
+                if self.nv.gpu.flush_renderers(&mut self.mem)? == crate::gpu::renderer::Flush::Done
+                {
                     self.nv.gpu.present(&self.mem, &buffer)?;
                     if self.trace_nv {
                         eprintln!(
@@ -486,12 +488,16 @@ impl Cpu {
         if self.trace_nv {
             // The binder transaction code, not the IPC command: this is the
             // level a stuck buffer-queue loop shows up at.
-            eprintln!("[vi] transact code={code} in={} out={} bytes", request.len(), reply.len());
+            eprintln!(
+                "[vi] transact code={code} in={} out={} bytes",
+                request.len(),
+                reply.len()
+            );
         }
         if let crate::display::Action::Present(buffer) = action {
             // A GPU backend holds its render targets on the device; the
-                // display reads them out of guest memory.
-                // A backend holding this surface on a device may not be able to
+            // display reads them out of guest memory.
+            // A backend holding this surface on a device may not be able to
             // hand it back yet; `Cpu::complete_pending_present` puts the frame
             // up when it can. The software rasterizer is always `Done`.
             if self.nv.gpu.flush_renderers(&mut self.mem)? == crate::gpu::renderer::Flush::Done {

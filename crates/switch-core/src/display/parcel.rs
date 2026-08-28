@@ -77,7 +77,9 @@ pub struct ParcelWriter {
 
 impl ParcelWriter {
     pub fn new() -> ParcelWriter {
-        ParcelWriter { payload: Vec::new() }
+        ParcelWriter {
+            payload: Vec::new(),
+        }
     }
 
     pub fn write_u32(&mut self, value: u32) {

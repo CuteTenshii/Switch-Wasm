@@ -396,8 +396,12 @@ impl Nca {
                 for (i, slot) in fs_headers.iter_mut().enumerate() {
                     let start = 0x400 + i * 0x200;
                     let sector = 2 + i as u64;
-                    let plain =
-                        crate::crypto::aes128_xts_decrypt(&key, &raw[start..start + 0x200], sector, 0x200);
+                    let plain = crate::crypto::aes128_xts_decrypt(
+                        &key,
+                        &raw[start..start + 0x200],
+                        sector,
+                        0x200,
+                    );
                     *slot = Some(FsHeader::parse(&plain));
                 }
             }
@@ -572,7 +576,9 @@ impl Nca {
             .checked_add(fs.hash_table_size as usize)
             .ok_or(Error::Overflow)?;
         if ht_end > plain.len() {
-            return Err(Error::Nca("hash table region exceeds decrypted section".into()));
+            return Err(Error::Nca(
+                "hash table region exceeds decrypted section".into(),
+            ));
         }
         if crate::crypto::sha256(&plain[ht_start..ht_end]) != fs.master_hash {
             return Err(Error::Nca(
@@ -632,7 +638,12 @@ impl Nca {
     /// Holds the whole section in memory, so it is only for sections known to
     /// be small (an ExeFS) or for a host that has the file mapped anyway; the
     /// browser reads RomFS through [`Nca::romfs_source`] instead.
-    pub fn decrypt_section(&self, raw: &[u8], keys: &crate::keys::KeySet, index: usize) -> Result<Vec<u8>, Error> {
+    pub fn decrypt_section(
+        &self,
+        raw: &[u8],
+        keys: &crate::keys::KeySet,
+        index: usize,
+    ) -> Result<Vec<u8>, Error> {
         let section = self.section_source(SliceSource(raw), keys, index)?;
         let plain = section.read_vec(0, section.len())?;
         self.verify_section_hash(&plain, index)?;
@@ -702,14 +713,16 @@ impl Nca {
     /// The index of this NCA's PFS0 (ExeFS) section, if any — `partition_type`
     /// is 1 for PartitionFS, 0 for RomFS.
     pub fn exefs_section_index(&self) -> Option<usize> {
-        self.fs_headers.iter().position(|fs| matches!(fs, Some(h) if h.partition_type == 1))
+        self.fs_headers
+            .iter()
+            .position(|fs| matches!(fs, Some(h) if h.partition_type == 1))
     }
 
     /// The index of this NCA's RomFS section, if any.
     pub fn romfs_section_index(&self) -> Option<usize> {
-        self.fs_headers
-            .iter()
-            .position(|fs| matches!(fs, Some(h) if h.partition_type == 0 && h.fs_type == HASH_TYPE_IVFC))
+        self.fs_headers.iter().position(
+            |fs| matches!(fs, Some(h) if h.partition_type == 0 && h.fs_type == HASH_TYPE_IVFC),
+        )
     }
 
     /// Whether this is an update's Program NCA: one whose RomFS section holds
@@ -760,7 +773,9 @@ impl Nca {
         }
         let section = self.section_source(nca, keys, index)?;
         if fs.romfs_data_offset >= section.len() {
-            return Err(Error::Nca("RomFS data offset exceeds the decrypted section".into()));
+            return Err(Error::Nca(
+                "RomFS data offset exceeds the decrypted section".into(),
+            ));
         }
         let len = section.len() - fs.romfs_data_offset;
         let romfs = Window::new(section, fs.romfs_data_offset, len, "RomFS image")?;
@@ -955,9 +970,9 @@ mod tests {
         data[h + 0x10..h + 0x18].copy_from_slice(&0x0100_0000_0010_5A00u64.to_le_bytes()); // program/title id
         data[h + 0x18..h + 0x1C].copy_from_slice(&0x0001_000Au32.to_le_bytes()); // sdk version
         data[h + 0x1C] = 0x01; // crypto type
-        // section 0: a PFS0 image starting at media unit 0, 0x10 units
-        // (0x2000 bytes) long — the entry is `u32 start; u32 end`, both in
-        // 0x200-byte media units, not a byte offset/size pair.
+                               // section 0: a PFS0 image starting at media unit 0, 0x10 units
+                               // (0x2000 bytes) long — the entry is `u32 start; u32 end`, both in
+                               // 0x200-byte media units, not a byte offset/size pair.
         data[h + 0x40..h + 0x44].copy_from_slice(&0u32.to_le_bytes());
         data[h + 0x44..h + 0x48].copy_from_slice(&0x10u32.to_le_bytes());
         data
@@ -1278,7 +1293,8 @@ mod decrypt_tests {
         let media_size_bytes = size_units as usize * 0x200;
         let mut raw = vec![0u8; SECTION_OFFSET + media_size_bytes];
         raw[..encrypted_header.len()].copy_from_slice(&encrypted_header);
-        raw[SECTION_OFFSET..SECTION_OFFSET + encrypted_section.len()].copy_from_slice(&encrypted_section);
+        raw[SECTION_OFFSET..SECTION_OFFSET + encrypted_section.len()]
+            .copy_from_slice(&encrypted_section);
 
         let mut keys = KeySet::default();
         keys.header_key = Some(header_key);
@@ -1322,7 +1338,8 @@ mod decrypt_tests {
         assert!(matches!(
             nca.decrypt_pfs0_section(&raw, &wrong_keys, 0),
             Err(Error::Nca(_))
-        ));    }
+        ));
+    }
 
     /// One wrong byte in the data region has to be caught. The master hash
     /// covers the hash *table* only, so before the per-block check this was
@@ -1392,8 +1409,8 @@ mod decrypt_tests {
         const LEVEL5_OFFSET: u64 = 0x40;
         let mut plain_section = vec![0xAAu8; LEVEL5_OFFSET as usize]; // levels 0..4 "hash tables"
         plain_section.extend_from_slice(&0x50u64.to_le_bytes()); // RomFS header_size
-        // Every byte past the header is a function of its own offset, so a
-        // partial read can be checked for having landed where it claims.
+                                                                 // Every byte past the header is a function of its own offset, so a
+                                                                 // partial read can be checked for having landed where it claims.
         while plain_section.len() < 0x200 {
             plain_section.push((plain_section.len() as u8) ^ 0x5A);
         }
@@ -1413,7 +1430,8 @@ mod decrypt_tests {
         header[fs0 + 0x02] = 0; // partition_type: RomFs
         header[fs0 + 0x03] = HASH_TYPE_IVFC;
         header[fs0 + 0x04] = ENCRYPTION_AES_CTR;
-        header[fs0 + 0x18 + 5 * 24..fs0 + 0x18 + 5 * 24 + 8].copy_from_slice(&LEVEL5_OFFSET.to_le_bytes()); // level[5].logical_offset
+        header[fs0 + 0x18 + 5 * 24..fs0 + 0x18 + 5 * 24 + 8]
+            .copy_from_slice(&LEVEL5_OFFSET.to_le_bytes()); // level[5].logical_offset
         header[fs0 + 0x140..fs0 + 0x144].copy_from_slice(&generation.to_le_bytes());
         header[fs0 + 0x144..fs0 + 0x148].copy_from_slice(&secure_value.to_le_bytes());
 
@@ -1427,7 +1445,8 @@ mod decrypt_tests {
         let media_size_bytes = size_units as usize * 0x200;
         let mut raw = vec![0u8; SECTION_OFFSET + media_size_bytes];
         raw[..encrypted_header.len()].copy_from_slice(&encrypted_header);
-        raw[SECTION_OFFSET..SECTION_OFFSET + encrypted_section.len()].copy_from_slice(&encrypted_section);
+        raw[SECTION_OFFSET..SECTION_OFFSET + encrypted_section.len()]
+            .copy_from_slice(&encrypted_section);
 
         let mut keys = KeySet::default();
         keys.header_key = Some(header_key);
@@ -1448,7 +1467,9 @@ mod decrypt_tests {
         assert_eq!(nca.exefs_section_index(), None);
         assert_eq!(nca.fs_headers[0].unwrap().romfs_data_offset, level5);
 
-        let extracted = nca.decrypt_romfs_section(&raw, &keys, 0).expect("decrypt romfs");
+        let extracted = nca
+            .decrypt_romfs_section(&raw, &keys, 0)
+            .expect("decrypt romfs");
         assert_eq!(extracted, &plain_section[level5 as usize..]);
 
         // A wrong key decrypts to garbage, caught by the header_size check
@@ -1481,14 +1502,14 @@ mod decrypt_tests {
         assert_eq!(romfs.len(), want.len() as u64);
 
         for &(offset, len) in &[
-            (0u64, 8usize),   // the RomFS header itself
-            (1, 1),           // one byte, mid-block
-            (3, 13),          // up to the first block boundary
-            (3, 14),          // and one byte past it
-            (15, 2),          // straddling a block boundary
-            (16, 32),         // exactly aligned, whole blocks
-            (17, 100),        // unaligned start, unaligned end
-            (0x3f, 0x81),     // spanning many blocks
+            (0u64, 8usize), // the RomFS header itself
+            (1, 1),         // one byte, mid-block
+            (3, 13),        // up to the first block boundary
+            (3, 14),        // and one byte past it
+            (15, 2),        // straddling a block boundary
+            (16, 32),       // exactly aligned, whole blocks
+            (17, 100),      // unaligned start, unaligned end
+            (0x3f, 0x81),   // spanning many blocks
         ] {
             let mut out = vec![0u8; len];
             let got = romfs.read_at(offset, &mut out).unwrap();

@@ -38,7 +38,9 @@ impl Default for Registers {
 
 impl Registers {
     pub fn new() -> Registers {
-        Registers { words: vec![0; REGISTER_COUNT] }
+        Registers {
+            words: vec![0; REGISTER_COUNT],
+        }
     }
 
     #[inline]
@@ -69,7 +71,11 @@ impl Registers {
     #[inline]
     pub fn field(&self, method: u32, lo: u32, hi: u32) -> u32 {
         let width = hi - lo + 1;
-        let mask = if width >= 32 { u32::MAX } else { (1u32 << width) - 1 };
+        let mask = if width >= 32 {
+            u32::MAX
+        } else {
+            (1u32 << width) - 1
+        };
         (self.get(method) >> lo) & mask
     }
 
@@ -83,7 +89,11 @@ impl Registers {
 #[inline]
 pub fn field(value: u32, lo: u32, hi: u32) -> u32 {
     let width = hi - lo + 1;
-    let mask = if width >= 32 { u32::MAX } else { (1u32 << width) - 1 };
+    let mask = if width >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << width) - 1
+    };
     (value >> lo) & mask
 }
 

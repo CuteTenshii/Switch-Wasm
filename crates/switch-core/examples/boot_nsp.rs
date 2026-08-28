@@ -71,7 +71,14 @@ fn parse_dump_specs(spec: &str) -> Vec<DumpSpec> {
             let (base, offset) = match addr.rfind(['+', '-']).filter(|&i| i > 0) {
                 Some(i) => {
                     let value = parse_hex(&addr[i + 1..])? as i64;
-                    (&addr[..i], if addr.as_bytes()[i] == b'-' { -value } else { value })
+                    (
+                        &addr[..i],
+                        if addr.as_bytes()[i] == b'-' {
+                            -value
+                        } else {
+                            value
+                        },
+                    )
                 }
                 None => (addr, 0),
             };
@@ -81,7 +88,12 @@ fn parse_dump_specs(spec: &str) -> Vec<DumpSpec> {
                 name if name.starts_with('x') => DumpBase::Register(name[1..].parse().ok()?),
                 absolute => DumpBase::Absolute(parse_hex(absolute)? as u32),
             };
-            Some(DumpSpec { label: entry.to_string(), base, offset, len })
+            Some(DumpSpec {
+                label: entry.to_string(),
+                base,
+                offset,
+                len,
+            })
         })
         .collect()
 }
@@ -110,7 +122,11 @@ fn dump_regions(cpu: &Cpu, specs: &[DumpSpec]) {
                 let value = cpu.mem.read_u32(addr.wrapping_add(word * 4)).unwrap_or(0);
                 words.push_str(&format!(" {value:08x}"));
                 for byte in value.to_le_bytes() {
-                    ascii.push(if (0x20..0x7f).contains(&byte) { byte as char } else { '.' });
+                    ascii.push(if (0x20..0x7f).contains(&byte) {
+                        byte as char
+                    } else {
+                        '.'
+                    });
                 }
             }
             println!("  {addr:#010x}:{words}  {ascii}");
@@ -131,7 +147,11 @@ fn dump_stop_state(cpu: &Cpu, specs: &[DumpSpec]) {
     print!("{}", cpu.reg_dump());
     println!(
         "backtrace: {}",
-        cpu.backtrace(24).iter().map(|pc| format!("{pc:#010x}")).collect::<Vec<_>>().join(" <- ")
+        cpu.backtrace(24)
+            .iter()
+            .map(|pc| format!("{pc:#010x}"))
+            .collect::<Vec<_>>()
+            .join(" <- ")
     );
     dump_regions(cpu, specs);
 }
@@ -144,7 +164,9 @@ fn main() {
     }
     let nsp_path = &args[1];
     let prod_path = &args[2];
-    let title_path = args.get(3).filter(|s| !s.chars().all(|c| c.is_ascii_digit()));
+    let title_path = args
+        .get(3)
+        .filter(|s| !s.chars().all(|c| c.is_ascii_digit()));
     let max_steps: u64 = args
         .iter()
         .find_map(|s| s.parse::<u64>().ok())
@@ -202,8 +224,8 @@ fn main() {
     let program_window = pfs0
         .file_source(&src, program_index)
         .expect("window over the program nca");
-    let nca =
-        switch_core::nca::Nca::parse_source(&program_window, Some(&keys)).expect("parse program nca");
+    let nca = switch_core::nca::Nca::parse_source(&program_window, Some(&keys))
+        .expect("parse program nca");
 
     // Title-key crypto: no key-area unlock needed, but the title key itself
     // has to come from somewhere. Scene NSP releases bundle the ticket right
@@ -234,7 +256,9 @@ fn main() {
     }
     let exefs_index = program_nca.exefs_section_index().expect("no exefs section");
     let exefs = match &update {
-        Some(u) => u.nca.read_pfs0_section(u.program_window(), &keys, exefs_index),
+        Some(u) => u
+            .nca
+            .read_pfs0_section(u.program_window(), &keys, exefs_index),
         None => nca.read_pfs0_section(&program_window, &keys, exefs_index),
     };
     let exefs = match exefs {
@@ -262,7 +286,11 @@ fn main() {
             Some((name, &exefs[start..end]))
         })
         .collect();
-    println!("--- booting {} modules: {:?} ---", modules.len(), modules.iter().map(|(n, _)| *n).collect::<Vec<_>>());
+    println!(
+        "--- booting {} modules: {:?} ---",
+        modules.len(),
+        modules.iter().map(|(n, _)| *n).collect::<Vec<_>>()
+    );
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
@@ -324,7 +352,10 @@ fn main() {
             &keys,
         ) {
             Ok(romfs) => {
-                println!("RomFS: {} bytes, patched by the update, streamed", romfs.len());
+                println!(
+                    "RomFS: {} bytes, patched by the update, streamed",
+                    romfs.len()
+                );
                 cpu.set_romfs_source(Box::new(romfs));
             }
             Err(e) => println!("patched_romfs_source FAILED: {}", e),
@@ -362,7 +393,11 @@ fn main() {
     let system_resource = switch_core::npdm::Npdm::system_resource_size_of(&exefs_pfs0, &exefs);
     println!(
         "NPDM system resource: {system_resource:#x} — {}",
-        if system_resource == 0 { "plain heap" } else { "virtual address memory" }
+        if system_resource == 0 {
+            "plain heap"
+        } else {
+            "virtual address memory"
+        }
     );
     cpu.set_system_resource_size(system_resource);
 
@@ -375,7 +410,9 @@ fn main() {
     }
 
     let mut done = 0u64;
-    let dump_specs = std::env::var("DUMP").map(|s| parse_dump_specs(&s)).unwrap_or_default();
+    let dump_specs = std::env::var("DUMP")
+        .map(|s| parse_dump_specs(&s))
+        .unwrap_or_default();
     let trap_write = std::env::var("TRAP_WRITE").ok().and_then(|v| {
         let (addr, size) = v.split_once(':')?;
         Some((parse_hex(addr)? as u32, parse_hex(size)? as u32))
@@ -386,16 +423,20 @@ fn main() {
     // Only the first few: what is wanted is which code reached a region
     // first, and a region being written to at all is usually a loop.
     let mut traps = 0u32;
-    let profile: Option<u64> = std::env::var("PROFILE").ok().and_then(|v| v.trim().parse().ok());
+    let profile: Option<u64> = std::env::var("PROFILE")
+        .ok()
+        .and_then(|v| v.trim().parse().ok());
     // Samples per (thread handle, pc page). A page rather than an address
     // because a hot loop is a run of instructions, not one of them, and one
     // bucket per instruction turns a profile into a list.
-    let mut samples: std::collections::BTreeMap<(u64, u32), u64> = std::collections::BTreeMap::new();
+    let mut samples: std::collections::BTreeMap<(u64, u32), u64> =
+        std::collections::BTreeMap::new();
     // The same samples keyed by the return address instead. The hot page of a
     // run that spends itself in `memcpy` says nothing on its own -- every
     // caller in the process shares it -- and for a leaf like that the link
     // register *is* the caller.
-    let mut callers: std::collections::BTreeMap<(u64, u32), u64> = std::collections::BTreeMap::new();
+    let mut callers: std::collections::BTreeMap<(u64, u32), u64> =
+        std::collections::BTreeMap::new();
     let mut sampled = 0u64;
     let watch: std::collections::HashSet<u32> = std::env::var("WATCH")
         .map(|s| {
@@ -471,11 +512,28 @@ fn main() {
             }
         }
         if cpu.halted {
-            println!("HALTED at step {done} pc={:#x} x0={:#x}", cpu.get_pc(), cpu.read_x(0));
+            println!(
+                "HALTED at step {done} pc={:#x} x0={:#x}",
+                cpu.get_pc(),
+                cpu.read_x(0)
+            );
             dump_stop_state(&cpu, &dump_specs);
             if std::env::var("DUMP_REGS").is_ok() {
                 println!("{}", cpu.reg_dump());
-                for a in [0xdffb790u32, 0xdffdaf0, 0xdffd080, 0xdffdaa0, 0xdffc2a8, 0xdffc298, 0xdffc2c0, 0xdffc2d0, 0xdffd028, 0xdffd018, 0xdffd020, 0xdffd010] {
+                for a in [
+                    0xdffb790u32,
+                    0xdffdaf0,
+                    0xdffd080,
+                    0xdffdaa0,
+                    0xdffc2a8,
+                    0xdffc298,
+                    0xdffc2c0,
+                    0xdffc2d0,
+                    0xdffd028,
+                    0xdffd018,
+                    0xdffd020,
+                    0xdffd010,
+                ] {
                     if let Ok(v) = cpu.mem.read_u64(a) {
                         println!("data@{a:#x} -> fx {v:#x}");
                     }
@@ -511,7 +569,10 @@ fn main() {
         let mut threads: Vec<_> = by_thread.into_iter().map(|(t, c)| (c, t)).collect();
         threads.sort_unstable_by(|a, b| b.cmp(a));
         for (count, thread) in threads.iter().take(8) {
-            println!("  thread {thread:#x}: {:.1}%", *count as f64 * 100.0 / sampled as f64);
+            println!(
+                "  thread {thread:#x}: {:.1}%",
+                *count as f64 * 100.0 / sampled as f64
+            );
         }
         for (count, (thread, page)) in ranked.iter().take(16) {
             println!(
@@ -530,7 +591,10 @@ fn main() {
             );
         }
     }
-    println!("guest RAM touched: {} MiB", cpu.mem.mapped_bytes() / (1024 * 1024));
+    println!(
+        "guest RAM touched: {} MiB",
+        cpu.mem.mapped_bytes() / (1024 * 1024)
+    );
     println!("frames presented: {}", cpu.nv.gpu.frames);
     println!("gpu stats: {:?}", cpu.nv.gpu.stats);
     println!("--- program console output ({} bytes) ---", cpu.out.len());

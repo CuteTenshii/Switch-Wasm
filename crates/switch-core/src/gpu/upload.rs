@@ -112,9 +112,11 @@ impl IndexUpload {
     /// eight-bit list.
     pub fn indices(&self) -> Vec<u32> {
         match self.format {
-            IndexFormat::Uint16 => {
-                self.bytes.chunks_exact(2).map(|b| u32::from(u16::from_le_bytes([b[0], b[1]]))).collect()
-            }
+            IndexFormat::Uint16 => self
+                .bytes
+                .chunks_exact(2)
+                .map(|b| u32::from(u16::from_le_bytes([b[0], b[1]])))
+                .collect(),
             IndexFormat::Uint32 => self
                 .bytes
                 .chunks_exact(4)
@@ -286,14 +288,21 @@ impl Uploads {
 
         let mut textures = Vec::new();
         for &(stage, immediate) in immediates {
-            if textures.iter().any(|t: &TextureUpload| t.stage == stage && t.immediate == immediate)
+            if textures
+                .iter()
+                .any(|t: &TextureUpload| t.stage == stage && t.immediate == immediate)
             {
                 continue;
             }
             textures.push(read_texture(engine, ctx, stage, immediate)?);
         }
 
-        Ok(Uploads { vertex, index, constants, textures })
+        Ok(Uploads {
+            vertex,
+            index,
+            constants,
+            textures,
+        })
     }
 }
 
@@ -345,7 +354,15 @@ impl Target {
             )));
         }
         let mut out = Vec::with_capacity(self.len() as usize);
-        deswizzle(ctx, self.addr, self.layout, self.row_bytes, self.rows, self.unit, &mut out)?;
+        deswizzle(
+            ctx,
+            self.addr,
+            self.layout,
+            self.row_bytes,
+            self.rows,
+            self.unit,
+            &mut out,
+        )?;
         Ok(out)
     }
 
@@ -395,7 +412,9 @@ impl Target {
     /// holds all of them.
     fn mapped(&self, ctx: &ExecCtx) -> Result<Option<(u32, Vec<u8>)>> {
         let swizzled = u64::from(self.layout.layer_stride(self.row_bytes, self.rows));
-        let Some(cpu) = ctx.span(self.addr, swizzled) else { return Ok(None) };
+        let Some(cpu) = ctx.span(self.addr, swizzled) else {
+            return Ok(None);
+        };
         let mut raw = vec![0u8; swizzled as usize];
         ctx.read_span(cpu, &mut raw)?;
         Ok(Some((cpu, raw)))
@@ -459,15 +478,15 @@ impl Target {
                     } else {
                         layout.encode_depth(depth)
                     };
-                    raw[at..at + texel]
-                        .copy_from_slice(&value.to_le_bytes()[..texel]);
+                    raw[at..at + texel].copy_from_slice(&value.to_le_bytes()[..texel]);
                 }
             }
             return ctx.write_span(cpu, &raw);
         }
         for y in 0..self.rows {
             for x in 0..per_row {
-                let at = self.addr + u64::from(self.layout.offset(x * self.unit, y, self.row_bytes));
+                let at =
+                    self.addr + u64::from(self.layout.offset(x * self.unit, y, self.row_bytes));
                 let from = (y * per_row + x) as usize * unit;
                 let depth = kind.decode(&values[from..from + unit]);
                 // Reading the pixel back is only worth its cost where
@@ -491,7 +510,9 @@ impl Target {
     /// through a second walk of the register file is a second place for the
     /// two to disagree about what a surface is.
     pub fn color(engine: &Engine3D, slot: u32) -> Result<Option<Target>> {
-        let Some(rt) = engine.render_target(slot)? else { return Ok(None) };
+        let Some(rt) = engine.render_target(slot)? else {
+            return Ok(None);
+        };
         let unit = rt.format.bytes_per_pixel;
         // A disabled target reads back as format 0, which is no pixel at all
         // rather than a pixel of no bytes.
@@ -514,7 +535,9 @@ impl Target {
 
     /// The depth surface the engine has bound, or `None`.
     pub fn depth_surface(engine: &Engine3D) -> Result<Option<Target>> {
-        let Some(dt) = engine.depth_target()? else { return Ok(None) };
+        let Some(dt) = engine.depth_target()? else {
+            return Ok(None);
+        };
         Ok(Some(Target {
             format: crate::gpu::pipeline::depth_format(dt.format)
                 .map_err(|e| Error::Gpu(format!("upload: depth target: {e}")))?,
@@ -585,12 +608,8 @@ impl DepthKind {
     /// Inverse of [`DepthKind::encode`], from `unit` bytes of a device texel.
     fn decode(self, bytes: &[u8]) -> f32 {
         match self {
-            DepthKind::Unorm16 => {
-                f32::from(u16::from_le_bytes([bytes[0], bytes[1]])) / 65535.0
-            }
-            DepthKind::Float32 => {
-                f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
-            }
+            DepthKind::Unorm16 => f32::from(u16::from_le_bytes([bytes[0], bytes[1]])) / 65535.0,
+            DepthKind::Float32 => f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
         }
     }
 }
@@ -638,7 +657,9 @@ fn read_texture(
 ) -> Result<TextureUpload> {
     let bank = u32::from(engine.tex_cb_index());
     let (addr, size) = engine.bound_constbuf(stage, bank).ok_or_else(|| {
-        Error::Gpu(format!("upload: {stage:?}'s texture bank {bank} is not bound"))
+        Error::Gpu(format!(
+            "upload: {stage:?}'s texture bank {bank} is not bound"
+        ))
     })?;
     let offset = u32::from(texture::handle_offset(immediate));
     if offset + 4 > size {
@@ -709,9 +730,11 @@ impl Copy {
     fn shape(self, image: &Texture) -> (Format, u32, u32) {
         match self {
             Copy::Raw { unit } => match image.kind {
-                TexelKind::Plain(plain) => {
-                    (plain_format(plain, image.srgb), image.width * unit, image.height)
-                }
+                TexelKind::Plain(plain) => (
+                    plain_format(plain, image.srgb),
+                    image.width * unit,
+                    image.height,
+                ),
                 TexelKind::Block(codec) => {
                     let (block_w, block_h) = codec.block_size();
                     (
@@ -723,7 +746,11 @@ impl Copy {
             },
             // A decoded image is texels again, whatever it was stored as.
             Copy::Decode { .. } => {
-                let format = if image.srgb { Format::Rgba8UnormSrgb } else { Format::Rgba8Unorm };
+                let format = if image.srgb {
+                    Format::Rgba8UnormSrgb
+                } else {
+                    Format::Rgba8Unorm
+                };
                 (format, image.width * 4, image.height)
             }
         }
@@ -737,7 +764,9 @@ fn image_copy(image: &Texture) -> Result<Copy> {
             // A format `pipeline` cannot name is one nothing can sample.
             crate::gpu::pipeline::color_format(plain)
                 .map_err(|e| Error::Gpu(format!("upload: texture format: {e}")))?;
-            Copy::Raw { unit: plain.bytes_per_pixel }
+            Copy::Raw {
+                unit: plain.bytes_per_pixel,
+            }
         }
         // WebGPU has ASTC only behind the `texture-compression-astc` feature,
         // which a desktop browser does not offer — and the Home Menu's real
@@ -754,7 +783,9 @@ fn image_copy(image: &Texture) -> Result<Copy> {
             // so the partial ones are decoded instead, which
             // `decode_blocks` already clips to the real extent.
             if image.width.is_multiple_of(block_w) && image.height.is_multiple_of(block_h) {
-                Copy::Raw { unit: codec.bytes_per_block() }
+                Copy::Raw {
+                    unit: codec.bytes_per_block(),
+                }
             } else {
                 Copy::Decode { codec }
             }
@@ -868,7 +899,9 @@ fn deswizzle(
     out: &mut Vec<u8>,
 ) -> Result<()> {
     if unit == 0 {
-        return Err(Error::Gpu("upload: a texture with no bytes per texel".into()));
+        return Err(Error::Gpu(
+            "upload: a texture with no bytes per texel".into(),
+        ));
     }
     let per_row = row_bytes / unit;
     // One translation for the whole surface where one mapping holds it, which
@@ -913,7 +946,11 @@ fn read_indices(
         2 => (4, IndexFormat::Uint32),
         other => return Err(Error::Gpu(format!("upload: unknown index format {other}"))),
     };
-    let out_width = if out_format == IndexFormat::Uint16 { 2 } else { 4 };
+    let out_width = if out_format == IndexFormat::Uint16 {
+        2
+    } else {
+        4
+    };
     if u64::from(count) * out_width > MAX_UPLOAD {
         return Err(Error::Gpu(format!(
             "upload: {count} indices is past the {MAX_UPLOAD}-byte cap"
@@ -940,7 +977,12 @@ fn read_indices(
     if count == 0 {
         lowest = 0;
     }
-    Ok(IndexUpload { format: out_format, bytes, lowest, highest })
+    Ok(IndexUpload {
+        format: out_format,
+        bytes,
+        lowest,
+        highest,
+    })
 }
 
 /// `len` bytes from a GPU virtual address.
@@ -990,8 +1032,16 @@ mod tests {
             let mut mem = Memory::new();
             mem.map_zero(0x3000_0000, size as usize).unwrap();
             let mut vmm = AddressSpace::new();
-            let base = vmm.map(0x3000_0000, size as u64, 1, 0, 0x1000, 0, 0).unwrap();
-            Harness { mem, vmm, host1x: Host1x::new(), stats: GpuStats::default(), base }
+            let base = vmm
+                .map(0x3000_0000, size as u64, 1, 0, 0x1000, 0, 0)
+                .unwrap();
+            Harness {
+                mem,
+                vmm,
+                host1x: Host1x::new(),
+                stats: GpuStats::default(),
+                base,
+            }
         }
 
         fn ctx(&mut self) -> ExecCtx<'_> {
@@ -1006,7 +1056,9 @@ mod tests {
 
         fn write(&mut self, offset: u64, bytes: &[u8]) {
             for (i, &byte) in bytes.iter().enumerate() {
-                self.mem.write_u8(0x3000_0000 + offset as u32 + i as u32, byte).unwrap();
+                self.mem
+                    .write_u8(0x3000_0000 + offset as u32 + i as u32, byte)
+                    .unwrap();
             }
         }
     }
@@ -1081,7 +1133,10 @@ mod tests {
         let base = h.base;
         let ctx = h.ctx();
         assert_eq!(read_range(&ctx, base, 32, "test").unwrap(), bytes);
-        assert_eq!(read_range(&ctx, base + 1, 30, "test").unwrap(), bytes[1..31]);
+        assert_eq!(
+            read_range(&ctx, base + 1, 30, "test").unwrap(),
+            bytes[1..31]
+        );
         assert_eq!(read_range(&ctx, base + 3, 5, "test").unwrap(), bytes[3..8]);
         assert_eq!(read_range(&ctx, base, 0, "test").unwrap(), Vec::<u8>::new());
     }
@@ -1094,7 +1149,12 @@ mod tests {
             layout: Layout::Pitch { pitch: 0 },
             kind,
             srgb,
-            swizzle: [SwizzleSource::R, SwizzleSource::G, SwizzleSource::B, SwizzleSource::A],
+            swizzle: [
+                SwizzleSource::R,
+                SwizzleSource::G,
+                SwizzleSource::B,
+                SwizzleSource::A,
+            ],
             layer_stride: 0,
             layers: 1,
         }
@@ -1119,7 +1179,10 @@ mod tests {
         // sixteen and change what a normalized coordinate samples.
         let stub = image(TexelKind::Block(Codec::Bc4Unorm), 1, 1, false);
         assert!(matches!(image_copy(&stub).unwrap(), Copy::Decode { .. }));
-        assert_eq!(image_copy(&stub).unwrap().shape(&stub), (Format::Rgba8Unorm, 4, 1));
+        assert_eq!(
+            image_copy(&stub).unwrap().shape(&stub),
+            (Format::Rgba8Unorm, 4, 1)
+        );
         // A whole number of blocks still goes over compressed.
         let whole = image(TexelKind::Block(Codec::Bc4Unorm), 8, 8, false);
         assert!(matches!(image_copy(&whole).unwrap(), Copy::Raw { unit: 8 }));
@@ -1130,7 +1193,15 @@ mod tests {
         // WebGPU has ASTC behind `texture-compression-astc`, which desktop
         // browsers do not offer — and the Home Menu's real textures are ASTC
         // 4x4, so refusing them would be refusing the draws that matter.
-        let astc = image(TexelKind::Block(Codec::Astc { width: 4, height: 4 }), 64, 64, false);
+        let astc = image(
+            TexelKind::Block(Codec::Astc {
+                width: 4,
+                height: 4,
+            }),
+            64,
+            64,
+            false,
+        );
         let copy = image_copy(&astc).unwrap();
         assert!(matches!(copy, Copy::Decode { .. }), "{copy:?}");
         // Texels again, whatever it was stored as.
@@ -1142,18 +1213,40 @@ mod tests {
         // The same raw code is sampled either way depending on the flag, so
         // a format named without it would be a whole transfer function out.
         let srgb = image(TexelKind::Block(Codec::Bc7), 8, 8, true);
-        assert_eq!(image_copy(&srgb).unwrap().shape(&srgb).0, Format::Bc7RgbaUnormSrgb);
+        assert_eq!(
+            image_copy(&srgb).unwrap().shape(&srgb).0,
+            Format::Bc7RgbaUnormSrgb
+        );
         let linear = image(TexelKind::Block(Codec::Bc7), 8, 8, false);
-        assert_eq!(image_copy(&linear).unwrap().shape(&linear).0, Format::Bc7RgbaUnorm);
+        assert_eq!(
+            image_copy(&linear).unwrap().shape(&linear).0,
+            Format::Bc7RgbaUnorm
+        );
         // A decoded image keeps the encoding it was stored in; the device
         // applies the transfer function.
-        let astc = image(TexelKind::Block(Codec::Astc { width: 4, height: 4 }), 8, 8, true);
-        assert_eq!(image_copy(&astc).unwrap().shape(&astc).0, Format::Rgba8UnormSrgb);
+        let astc = image(
+            TexelKind::Block(Codec::Astc {
+                width: 4,
+                height: 4,
+            }),
+            8,
+            8,
+            true,
+        );
+        assert_eq!(
+            image_copy(&astc).unwrap().shape(&astc).0,
+            Format::Rgba8UnormSrgb
+        );
     }
 
     #[test]
     fn a_texture_format_nothing_can_sample_is_reported() {
-        let unknown = image(TexelKind::Plain(ColorFormat::from_raw(0xE8).unwrap()), 8, 8, false);
+        let unknown = image(
+            TexelKind::Plain(ColorFormat::from_raw(0xE8).unwrap()),
+            8,
+            8,
+            false,
+        );
         assert!(image_copy(&unknown).is_err(), "B5G6R5 has no WebGPU format");
     }
 
@@ -1168,7 +1261,16 @@ mod tests {
         let mut out = Vec::new();
         // Four texels of four bytes per row, three rows, in a surface whose
         // rows are 16 bytes apart.
-        deswizzle(&h.ctx(), base, Layout::Pitch { pitch: 16 }, 16, 3, 4, &mut out).unwrap();
+        deswizzle(
+            &h.ctx(),
+            base,
+            Layout::Pitch { pitch: 16 },
+            16,
+            3,
+            4,
+            &mut out,
+        )
+        .unwrap();
         assert_eq!(out, bytes);
     }
 
@@ -1180,7 +1282,9 @@ mod tests {
         let bytes: Vec<u8> = (0..=255u8).cycle().take(0x2000).collect();
         h.write(0, &bytes);
         let base = h.base;
-        let layout = Layout::BlockLinear { block_height_gobs: 2 };
+        let layout = Layout::BlockLinear {
+            block_height_gobs: 2,
+        };
         let texture = Texture {
             addr: base,
             width: 16,
@@ -1188,7 +1292,12 @@ mod tests {
             layout,
             kind: TexelKind::Plain(ColorFormat::from_raw(0xD5).unwrap()),
             srgb: false,
-            swizzle: [SwizzleSource::R, SwizzleSource::G, SwizzleSource::B, SwizzleSource::A],
+            swizzle: [
+                SwizzleSource::R,
+                SwizzleSource::G,
+                SwizzleSource::B,
+                SwizzleSource::A,
+            ],
             layer_stride: 0,
             layers: 1,
         };
@@ -1229,7 +1338,9 @@ mod tests {
             addr: h.base,
             width: 16,
             height: 16,
-            layout: Layout::BlockLinear { block_height_gobs: 2 },
+            layout: Layout::BlockLinear {
+                block_height_gobs: 2,
+            },
             row_bytes: 16 * 4,
             rows: 16,
             unit: 4,
@@ -1241,13 +1352,27 @@ mod tests {
         // both walks agreeing to write rows.
         let mut linear = Vec::new();
         let base = h.base;
-        deswizzle(&h.ctx(), base, Layout::Pitch { pitch: 64 }, 64, 16, 4, &mut linear).unwrap();
+        deswizzle(
+            &h.ctx(),
+            base,
+            Layout::Pitch { pitch: 64 },
+            64,
+            16,
+            4,
+            &mut linear,
+        )
+        .unwrap();
         assert_ne!(linear, original, "a block-linear surface is not rows");
     }
 
     /// A `Z24S8` target, four by four, pitch-linear.
     fn packed_depth_target(addr: u64) -> Target {
-        let format = DepthLayout { bytes: 4, depth_bits: 24, depth_shift: 8, stencil_shift: Some(0) };
+        let format = DepthLayout {
+            bytes: 4,
+            depth_bits: 24,
+            depth_shift: 8,
+            stencil_shift: Some(0),
+        };
         Target {
             format: Format::Depth24PlusStencil8,
             addr,
@@ -1289,7 +1414,9 @@ mod tests {
         // gets cleared by a pass that never mentioned it.
         let mut h = Harness::new(0x1000);
         let target = packed_depth_target(h.base);
-        let original: Vec<u8> = (0..16).flat_map(|i: u32| (0x00AB_CD00 | (i + 1)).to_le_bytes()).collect();
+        let original: Vec<u8> = (0..16)
+            .flat_map(|i: u32| (0x00AB_CD00 | (i + 1)).to_le_bytes())
+            .collect();
         target.write(&mut h.ctx(), &original).unwrap();
         target.write_depth(&mut h.ctx(), &[0u8; 16 * 4]).unwrap();
         let after = target.read(&h.ctx()).unwrap();
@@ -1305,7 +1432,12 @@ mod tests {
         // `depth16unorm` is the one depth format a copy may write *into*, so
         // Z16 is the one packing that reaches a device without a pass to put
         // it there.
-        let format = DepthLayout { bytes: 2, depth_bits: 16, depth_shift: 0, stencil_shift: None };
+        let format = DepthLayout {
+            bytes: 2,
+            depth_bits: 16,
+            depth_shift: 0,
+            stencil_shift: None,
+        };
         assert_eq!(DepthKind::of(format), DepthKind::Unorm16);
         assert_eq!(DepthKind::Unorm16.unit(), 2);
         let mut h = Harness::new(0x1000);
@@ -1320,11 +1452,13 @@ mod tests {
             unit: 2,
             depth: Some(format),
         };
-        let original: Vec<u8> =
-            (0..8u16).flat_map(|i| (i * 0x1234).to_le_bytes()).collect();
+        let original: Vec<u8> = (0..8u16).flat_map(|i| (i * 0x1234).to_le_bytes()).collect();
         target.write(&mut h.ctx(), &original).unwrap();
         let device = target.read_depth(&h.ctx()).unwrap();
-        assert_eq!(device, original, "a Z16 texel is already what the device holds");
+        assert_eq!(
+            device, original,
+            "a Z16 texel is already what the device holds"
+        );
         target.write_depth(&mut h.ctx(), &device).unwrap();
         assert_eq!(target.read(&h.ctx()).unwrap(), original);
     }
@@ -1375,7 +1509,12 @@ mod tests {
     #[test]
     fn the_total_is_every_buffer_a_draw_would_move() {
         let uploads = Uploads {
-            vertex: vec![VertexUpload { array: 0, first: 0, stride: 8, bytes: vec![0; 32] }],
+            vertex: vec![VertexUpload {
+                array: 0,
+                first: 0,
+                stride: 8,
+                bytes: vec![0; 32],
+            }],
             index: Some(IndexUpload {
                 format: IndexFormat::Uint16,
                 bytes: vec![0; 12],

@@ -58,13 +58,19 @@ impl Vfs {
     /// it wants inside, so seeding it with directories nobody asked for would
     /// invent structure the guest then has to work around.
     pub fn empty() -> Vfs {
-        let mut vfs = Vfs { nodes: BTreeMap::new(), changed: BTreeSet::new() };
+        let mut vfs = Vfs {
+            nodes: BTreeMap::new(),
+            changed: BTreeSet::new(),
+        };
         vfs.nodes.insert("/".to_owned(), Node::Dir);
         vfs
     }
 
     pub fn new() -> Vfs {
-        let mut vfs = Vfs { nodes: BTreeMap::new(), changed: BTreeSet::new() };
+        let mut vfs = Vfs {
+            nodes: BTreeMap::new(),
+            changed: BTreeSet::new(),
+        };
         vfs.nodes.insert("/".to_owned(), Node::Dir);
         vfs.create_dir("/switch");
         vfs
@@ -100,7 +106,11 @@ impl Vfs {
                 name => parts.push(name),
             }
         }
-        if parts.is_empty() { "/".to_owned() } else { format!("/{}", parts.join("/")) }
+        if parts.is_empty() {
+            "/".to_owned()
+        } else {
+            format!("/{}", parts.join("/"))
+        }
     }
 
     fn parent_of(path: &str) -> Option<String> {
@@ -153,7 +163,8 @@ impl Vfs {
         if let Some(parent) = Self::parent_of(&path) {
             self.guest_create_dir(&parent);
         }
-        self.nodes.insert(path.clone(), Node::File(vec![0; size as usize]));
+        self.nodes
+            .insert(path.clone(), Node::File(vec![0; size as usize]));
         self.changed.insert(path);
         true
     }
@@ -264,7 +275,11 @@ impl Vfs {
         if !matches!(self.nodes.get(&dir), Some(Node::Dir)) {
             return None;
         }
-        let prefix = if dir == "/" { String::from("/") } else { format!("{}/", dir) };
+        let prefix = if dir == "/" {
+            String::from("/")
+        } else {
+            format!("{}/", dir)
+        };
         let mut out = Vec::new();
         for (candidate, node) in &self.nodes {
             if candidate == &dir || !candidate.starts_with(&prefix) {
@@ -310,7 +325,10 @@ mod tests {
         // got a directory literally called "." with ".get" inside it, which
         // it could not find again by any other spelling.
         assert_eq!(Vfs::normalize("sdmc:/switch/."), "/switch");
-        assert_eq!(Vfs::normalize("sdmc:/switch/./.get/packages"), "/switch/.get/packages");
+        assert_eq!(
+            Vfs::normalize("sdmc:/switch/./.get/packages"),
+            "/switch/.get/packages"
+        );
         assert_eq!(Vfs::normalize("/switch//a///b/"), "/switch/a/b");
         assert_eq!(Vfs::normalize("/switch/a/../b"), "/switch/b");
         // A leading dot is part of a name, not a component of its own.
@@ -352,15 +370,37 @@ mod tests {
         assert_eq!(
             root,
             vec![
-                DirEntry { name: "switch".into(), kind: ENTRY_TYPE_DIR, size: 0 },
-                DirEntry { name: "top.txt".into(), kind: ENTRY_TYPE_FILE, size: 2 },
+                DirEntry {
+                    name: "switch".into(),
+                    kind: ENTRY_TYPE_DIR,
+                    size: 0
+                },
+                DirEntry {
+                    name: "top.txt".into(),
+                    kind: ENTRY_TYPE_FILE,
+                    size: 2
+                },
             ]
         );
 
         let mut switch = vfs.read_dir("/switch").unwrap();
         switch.sort_by(|a, b| a.name.cmp(&b.name));
-        assert_eq!(switch[0], DirEntry { name: "app.nro".into(), kind: ENTRY_TYPE_FILE, size: 3 });
-        assert_eq!(switch[1], DirEntry { name: "tools".into(), kind: ENTRY_TYPE_DIR, size: 0 });
+        assert_eq!(
+            switch[0],
+            DirEntry {
+                name: "app.nro".into(),
+                kind: ENTRY_TYPE_FILE,
+                size: 3
+            }
+        );
+        assert_eq!(
+            switch[1],
+            DirEntry {
+                name: "tools".into(),
+                kind: ENTRY_TYPE_DIR,
+                size: 0
+            }
+        );
     }
 
     #[test]
@@ -427,7 +467,10 @@ mod tests {
         // A gap between the end and the write is zero-filled rather than
         // left holding whatever the allocation had.
         assert_eq!(vfs.write("/data.bin", 8, &[7]), Some(1));
-        assert_eq!(vfs.file("/data.bin"), Some(&[1, 9, 9, 4, 5, 6, 0, 0, 7][..]));
+        assert_eq!(
+            vfs.file("/data.bin"),
+            Some(&[1, 9, 9, 4, 5, 6, 0, 0, 7][..])
+        );
         // Neither a directory nor a missing path is writable.
         assert_eq!(vfs.write("/switch", 0, &[1]), None);
         assert_eq!(vfs.write("/nope", 0, &[1]), None);
@@ -462,8 +505,10 @@ mod tests {
         vfs.remove("/switch/olddir");
 
         let changes = vfs.take_changes();
-        let by_path: Vec<(&str, Option<u8>, u64)> =
-            changes.iter().map(|c| (c.path.as_str(), c.kind, c.size)).collect();
+        let by_path: Vec<(&str, Option<u8>, u64)> = changes
+            .iter()
+            .map(|c| (c.path.as_str(), c.kind, c.size))
+            .collect();
         assert_eq!(
             by_path,
             vec![

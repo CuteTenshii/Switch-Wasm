@@ -98,8 +98,11 @@ impl Qmd {
             )));
         }
 
-        let cta_threads =
-            [mw(words, 592, 607), mw(words, 608, 623), mw(words, 624, 639)];
+        let cta_threads = [
+            mw(words, 592, 607),
+            mw(words, 608, 623),
+            mw(words, 624, 639),
+        ];
         let threads = cta_threads[0] * cta_threads[1] * cta_threads[2];
         if threads > MAX_CTA_THREADS {
             return Err(Error::Gpu(format!(
@@ -128,7 +131,11 @@ impl Qmd {
         Ok(Qmd {
             version,
             program_offset: mw(words, 256, 287),
-            cta_raster: [mw(words, 384, 415), mw(words, 416, 431), mw(words, 432, 447)],
+            cta_raster: [
+                mw(words, 384, 415),
+                mw(words, 416, 431),
+                mw(words, 432, 447),
+            ],
             cta_threads,
             shared_memory_size: mw(words, 544, 561),
             local_memory_size: mw(words, 1440, 1463),
@@ -235,7 +242,10 @@ mod tests {
         assert_eq!(qmd.constant_buffers[0], None);
         assert_eq!(
             qmd.constant_buffers[1],
-            Some(ConstantBuffer { addr: 0x1_0000_2000, size: 0x400 })
+            Some(ConstantBuffer {
+                addr: 0x1_0000_2000,
+                size: 0x400
+            })
         );
         assert_eq!(qmd.constant_buffers[2], None);
     }
@@ -254,11 +264,19 @@ mod tests {
         let qmd = Qmd::parse(&words).unwrap();
         assert_eq!(
             qmd.releases[0],
-            Some(Release { addr: 0x1000, payload: 0x11, one_word: true })
+            Some(Release {
+                addr: 0x1000,
+                payload: 0x11,
+                one_word: true
+            })
         );
         assert_eq!(
             qmd.releases[1],
-            Some(Release { addr: 0x2000, payload: 0x22, one_word: false })
+            Some(Release {
+                addr: 0x2000,
+                payload: 0x22,
+                one_word: false
+            })
         );
     }
 
@@ -284,7 +302,10 @@ mod tests {
         // Zeroed memory reads as version 0.0 — what a wrong QMD address
         // hands us.
         let err = Qmd::parse(&[0u32; QMD_WORDS]).unwrap_err();
-        assert!(format!("{err:?}").contains("not a Maxwell compute QMD"), "got {err:?}");
+        assert!(
+            format!("{err:?}").contains("not a Maxwell compute QMD"),
+            "got {err:?}"
+        );
     }
 
     #[test]

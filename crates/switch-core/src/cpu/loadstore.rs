@@ -53,7 +53,10 @@ impl Cpu {
                     let s = (insn >> 12) & 1;
                     let shift = if s == 1 { bytes.trailing_zeros() } else { 0 };
                     (
-                        (self.read_x(rn).wrapping_add(self.read_x(rm).wrapping_shl(shift))) as u32,
+                        (self
+                            .read_x(rn)
+                            .wrapping_add(self.read_x(rm).wrapping_shl(shift)))
+                            as u32,
                         None,
                     )
                 }
@@ -66,9 +69,9 @@ impl Cpu {
                     let base = self.read_x(rn) as i64;
                     let updated = base.wrapping_add(imm) as u64;
                     match (insn >> 10) & 0b11 {
-                        0b01 => (base as u32, Some(updated)), // post-index
+                        0b01 => (base as u32, Some(updated)),    // post-index
                         0b11 => (updated as u32, Some(updated)), // pre-index
-                        _ => (updated as u32, None),          // unscaled
+                        _ => (updated as u32, None),             // unscaled
                     }
                 }
                 _ => return Ok(false),
@@ -192,10 +195,7 @@ impl Cpu {
         // bit21=0, Rm=bits[20:16], opcode=bits[15:12] selects (rpt, selem),
         // size=bits[11:10]. `selem` > 1 is the interleaving LD2/LD3/LD4 and
         // ST2/ST3/ST4 group.
-        if ((insn >> 31) & 1) == 0
-            && ((insn >> 24) & 0x3F) == 0b001100
-            && ((insn >> 21) & 1) == 0
-        {
+        if ((insn >> 31) & 1) == 0 && ((insn >> 24) & 0x3F) == 0b001100 && ((insn >> 21) & 1) == 0 {
             let q = (insn >> 30) & 1;
             let wback = (insn >> 23) & 1 == 1;
             let load = (insn >> 22) & 1 == 1;
@@ -443,10 +443,7 @@ impl Cpu {
                         self.mem.read_u64(addr)? as u128,
                         self.mem.read_u64(addr.wrapping_add(bytes))? as u128,
                     ),
-                    _ => (
-                        self.load_q(addr)?,
-                        self.load_q(addr.wrapping_add(bytes))?,
-                    ),
+                    _ => (self.load_q(addr)?, self.load_q(addr.wrapping_add(bytes))?),
                 };
                 self.vregs[rt as usize] = v0;
                 self.vregs[rt2 as usize] = v1;
@@ -454,11 +451,13 @@ impl Cpu {
                 match size {
                     0 => {
                         self.mem.write_u32(addr, self.vregs[rt as usize] as u32)?;
-                        self.mem.write_u32(addr.wrapping_add(bytes), self.vregs[rt2 as usize] as u32)?;
+                        self.mem
+                            .write_u32(addr.wrapping_add(bytes), self.vregs[rt2 as usize] as u32)?;
                     }
                     1 => {
                         self.mem.write_u64(addr, self.vregs[rt as usize] as u64)?;
-                        self.mem.write_u64(addr.wrapping_add(bytes), self.vregs[rt2 as usize] as u64)?;
+                        self.mem
+                            .write_u64(addr.wrapping_add(bytes), self.vregs[rt2 as usize] as u64)?;
                     }
                     _ => {
                         self.store_q(addr, self.vregs[rt as usize])?;
@@ -476,7 +475,8 @@ impl Cpu {
 
     #[inline]
     pub(super) fn load_q(&self, addr: u32) -> Result<u128> {
-        Ok((self.mem.read_u64(addr)? as u128) | ((self.mem.read_u64(addr.wrapping_add(8))? as u128) << 64))
+        Ok((self.mem.read_u64(addr)? as u128)
+            | ((self.mem.read_u64(addr.wrapping_add(8))? as u128) << 64))
     }
 
     #[inline]
@@ -501,7 +501,10 @@ impl Cpu {
     pub(super) fn try_load_store(&mut self, insn: u32, _next_pc: &mut u32) -> Result<bool> {
         // Exclusive accessors.
         let grp_excl = (insn >> 21) & 0x1FF;
-        if (0b001000000..=0b001000011).contains(&grp_excl) || grp_excl == 0b001000100 || grp_excl == 0b001000110 {
+        if (0b001000000..=0b001000011).contains(&grp_excl)
+            || grp_excl == 0b001000100
+            || grp_excl == 0b001000110
+        {
             let sz = (insn >> 30) & 0b11;
             let rn = ((insn >> 5) & 0x1F) as u8;
             let rt = (insn & 0x1F) as u8;
@@ -611,10 +614,7 @@ impl Cpu {
                     0b10 => 4,
                     _ => 8,
                 };
-                let addr = self
-                    .read_x(rn)
-                    .wrapping_add(imm.wrapping_mul(scale))
-                    as u32;
+                let addr = self.read_x(rn).wrapping_add(imm.wrapping_mul(scale)) as u32;
                 self.ld_st_opc(addr, rt, sz, opc)?;
                 return Ok(true);
             }
@@ -625,8 +625,8 @@ impl Cpu {
                 let base = self.read_x(rn);
                 let (addr, writeback) = match idx {
                     0b00 | 0b10 => (base.wrapping_add(imm as u64), false),
-                    0b01 => (base, true),                                  // post-index
-                    _ => (base.wrapping_add(imm as u64), true),            // pre-index
+                    0b01 => (base, true),                       // post-index
+                    _ => (base.wrapping_add(imm as u64), true), // pre-index
                 };
                 self.ld_st_opc(addr as u32, rt, sz, opc)?;
                 if writeback {
@@ -644,10 +644,7 @@ impl Cpu {
         // Paired load/store: bits[29:27] == 101, V=0. The bit25==0 check
         // distinguishes pairs from the SUBS-shifted-register space (which has
         // bits[29:27]=101 too but bit25=1).
-        if ((insn >> 27) & 0b111) == 0b101
-            && ((insn >> 26) & 1) == 0
-            && ((insn >> 25) & 1) == 0
-        {
+        if ((insn >> 27) & 0b111) == 0b101 && ((insn >> 26) & 1) == 0 && ((insn >> 25) & 1) == 0 {
             return self.try_pair(insn);
         }
 
@@ -723,10 +720,10 @@ impl Cpu {
         // 111/110 as in some tables. A byte/halfword extend here is an
         // UNDEFINED encoding, so it faults rather than guessing.
         let ext = match opt {
-            0b010 => (v as u32) as u64,        // UXTW
-            0b011 => v,                        // LSL / UXTX
-            0b110 => sext_u64(v, 32),          // SXTW
-            0b111 => v,                        // SXTX
+            0b010 => (v as u32) as u64, // UXTW
+            0b011 => v,                 // LSL / UXTX
+            0b110 => sext_u64(v, 32),   // SXTW
+            0b111 => v,                 // SXTX
             _ => return Err(Error::Cpu(format!("bad register offset option {}", opt))),
         };
         Ok((ext.wrapping_shl(shift)) as i64)
@@ -759,9 +756,9 @@ impl Cpu {
 
         let base = self.read_x(rn);
         let (addr, writeback, wb_val) = match mode {
-            0b00 => (base.wrapping_add(scaled), false, 0),        // signed offset
-            0b01 => (base, true, base.wrapping_add(scaled)),      // post-index
-            0b10 => (base.wrapping_add(scaled), false, 0),        // offset
+            0b00 => (base.wrapping_add(scaled), false, 0), // signed offset
+            0b01 => (base, true, base.wrapping_add(scaled)), // post-index
+            0b10 => (base.wrapping_add(scaled), false, 0), // offset
             _ => (base.wrapping_add(scaled), true, base.wrapping_add(scaled)), // pre-index
         };
         let addr = addr as u32;
@@ -794,10 +791,12 @@ impl Cpu {
             // STP: store rt, rt2
             if sz == 0b11 {
                 self.mem.write_u64(addr, self.read_zr(rt))?;
-                self.mem.write_u64(addr.wrapping_add(8), self.read_zr(rt2))?;
+                self.mem
+                    .write_u64(addr.wrapping_add(8), self.read_zr(rt2))?;
             } else {
                 self.mem.write_u32(addr, self.read_zr(rt) as u32)?;
-                self.mem.write_u32(addr.wrapping_add(4), self.read_zr(rt2) as u32)?;
+                self.mem
+                    .write_u32(addr.wrapping_add(4), self.read_zr(rt2) as u32)?;
             }
         }
         if writeback {

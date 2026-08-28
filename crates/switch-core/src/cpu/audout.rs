@@ -191,7 +191,11 @@ impl Cpu {
                 let asked_channels = self.mem.read_u16(data.wrapping_add(4)).unwrap_or(0);
                 // A guest that asks for 0 means "whatever the device is".
                 let sample_rate = if asked_rate == 0 { 48_000 } else { asked_rate };
-                let channel_count = u32::from(if asked_channels == 0 { 2 } else { asked_channels });
+                let channel_count = u32::from(if asked_channels == 0 {
+                    2
+                } else {
+                    asked_channels
+                });
 
                 if let Some(buf) = self.ipc_recv_buffer_addr(tls, 0) {
                     for i in 0..NAME_LEN {
@@ -259,9 +263,16 @@ impl Cpu {
         match cmd_id {
             // GetAudioOutState.
             Some(0) => {
-                let started =
-                    self.audio_outs.get(&handle).map(|d| d.started).unwrap_or(false);
-                let state = if started { AUDIO_OUT_STARTED } else { AUDIO_OUT_STOPPED };
+                let started = self
+                    .audio_outs
+                    .get(&handle)
+                    .map(|d| d.started)
+                    .unwrap_or(false);
+                let state = if started {
+                    AUDIO_OUT_STARTED
+                } else {
+                    AUDIO_OUT_STOPPED
+                };
                 self.write_ipc_response(tls, 0, &[], &state.to_le_bytes(), &[])
             }
             // StartAudioOut / StopAudioOut.
@@ -306,8 +317,11 @@ impl Cpu {
             }
             // GetAudioOutPlayedSampleCount.
             Some(10) => {
-                let frames =
-                    self.audio_outs.get(&handle).map(|d| d.played_frames).unwrap_or(0);
+                let frames = self
+                    .audio_outs
+                    .get(&handle)
+                    .map(|d| d.played_frames)
+                    .unwrap_or(0);
                 self.write_ipc_response(tls, 0, &[], &frames.to_le_bytes(), &[])
             }
             // FlushAudioOutBuffers: nothing is ever in flight, so nothing is
@@ -318,13 +332,20 @@ impl Cpu {
                 let data = self.ipc_request_data(tls);
                 let volume = f32::from_bits(self.mem.read_u32(data).unwrap_or(0));
                 if let Some(device) = self.audio_outs.get_mut(&handle) {
-                    device.volume = if volume.is_finite() { volume.clamp(0.0, 1.0) } else { 1.0 };
+                    device.volume = if volume.is_finite() {
+                        volume.clamp(0.0, 1.0)
+                    } else {
+                        1.0
+                    };
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             Some(13) => {
-                let volume =
-                    self.audio_outs.get(&handle).map(|d| d.volume).unwrap_or(1.0);
+                let volume = self
+                    .audio_outs
+                    .get(&handle)
+                    .map(|d| d.volume)
+                    .unwrap_or(1.0);
                 self.write_ipc_response(tls, 0, &[], &volume.to_bits().to_le_bytes(), &[])
             }
             _ => self.unimplemented_command(tls, "audout:iaudioout", cmd_id),
@@ -347,7 +368,9 @@ impl Cpu {
         let mut fire = Vec::new();
         let mut next = None;
         for device in self.audio_outs.values() {
-            let Some(&(_, done_at)) = device.queued.front() else { continue };
+            let Some(&(_, done_at)) = device.queued.front() else {
+                continue;
+            };
             if done_at <= now {
                 fire.push(device.event);
             } else if handles.contains(&device.event) {
@@ -412,7 +435,10 @@ impl Cpu {
                     let sample = self.mem.read_u16(start.wrapping_add(i * 2)).unwrap_or(0);
                     samples.push(sample as i16);
                 }
-            } else if self.unimplemented_ipc.insert(("audout:unplayable".to_string(), None)) {
+            } else if self
+                .unimplemented_ipc
+                .insert(("audout:unplayable".to_string(), None))
+            {
                 eprintln!(
                     "[audio] refusing an unplayable buffer: {data_offset:#x}+{data_size:#x} \
                      is outside a {buffer_size:#x}-byte buffer at {buffer:#x}"
@@ -497,7 +523,9 @@ impl Cpu {
                 let _ = self.mem.write_u64(addr.wrapping_add(i as u32 * 8), tag);
             }
             if (tags.len() as u32) < room {
-                let _ = self.mem.write_u64(addr.wrapping_add(tags.len() as u32 * 8), 0);
+                let _ = self
+                    .mem
+                    .write_u64(addr.wrapping_add(tags.len() as u32 * 8), 0);
             }
         }
         self.write_ipc_response(tls, 0, &[], &(tags.len() as u32).to_le_bytes(), &[])
@@ -514,7 +542,12 @@ impl Cpu {
     /// that the only output target is the speaker and the only layout is
     /// stereo — `audout` opens a two-channel device, and "one console, one
     /// answer" means `audctl` cannot claim 5.1.
-    pub(super) fn audctl_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn audctl_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         if self.ipc_answer_control(tls, handle, "audctl", cmd_id)? {
             return Ok(());
         }
@@ -536,9 +569,7 @@ impl Cpu {
             // GetTargetVolumeMin / GetTargetVolumeMax. Both are fixed in the
             // firmware rather than derived from the output device.
             Some(2) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
-            Some(3) => {
-                self.write_ipc_response(tls, 0, &[], &AUDIO_VOLUME_MAX.to_le_bytes(), &[])
-            }
+            Some(3) => self.write_ipc_response(tls, 0, &[], &AUDIO_VOLUME_MAX.to_le_bytes(), &[]),
             // IsTargetMute(target) -> bool, and SetTargetMute, whose bool
             // comes *before* its target.
             Some(4) => {

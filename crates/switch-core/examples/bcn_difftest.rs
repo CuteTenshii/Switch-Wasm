@@ -32,7 +32,10 @@ use std::env;
 use switch_core::gpu::bcn::{decode, decode_into, Codec};
 
 fn main() {
-    let data = common::read(common::arg(1, "bcn_difftest <vectors.bin> [blocks] [astc_vectors.bin]"));
+    let data = common::read(common::arg(
+        1,
+        "bcn_difftest <vectors.bin> [blocks] [astc_vectors.bin]",
+    ));
     // Codec, how many channels the reference wrote per texel, and how this
     // decoder's channels line up with them. BC6H's are floats; the rest bytes.
     struct Group {
@@ -42,14 +45,54 @@ fn main() {
         signed_bit: bool,
     }
     let groups = [
-        Group { codec: Codec::Bc1, channels: 4, mapping: &[0, 1, 2, 3], signed_bit: false },
-        Group { codec: Codec::Bc2, channels: 4, mapping: &[0, 1, 2, 3], signed_bit: false },
-        Group { codec: Codec::Bc3, channels: 4, mapping: &[0, 1, 2, 3], signed_bit: false },
-        Group { codec: Codec::Bc7, channels: 4, mapping: &[0, 1, 2, 3], signed_bit: false },
-        Group { codec: Codec::Bc4Unorm, channels: 1, mapping: &[0], signed_bit: false },
-        Group { codec: Codec::Bc5Unorm, channels: 2, mapping: &[0, 1], signed_bit: false },
-        Group { codec: Codec::Bc6hUf16, channels: 3, mapping: &[0, 1, 2], signed_bit: true },
-        Group { codec: Codec::Bc6hSf16, channels: 3, mapping: &[0, 1, 2], signed_bit: true },
+        Group {
+            codec: Codec::Bc1,
+            channels: 4,
+            mapping: &[0, 1, 2, 3],
+            signed_bit: false,
+        },
+        Group {
+            codec: Codec::Bc2,
+            channels: 4,
+            mapping: &[0, 1, 2, 3],
+            signed_bit: false,
+        },
+        Group {
+            codec: Codec::Bc3,
+            channels: 4,
+            mapping: &[0, 1, 2, 3],
+            signed_bit: false,
+        },
+        Group {
+            codec: Codec::Bc7,
+            channels: 4,
+            mapping: &[0, 1, 2, 3],
+            signed_bit: false,
+        },
+        Group {
+            codec: Codec::Bc4Unorm,
+            channels: 1,
+            mapping: &[0],
+            signed_bit: false,
+        },
+        Group {
+            codec: Codec::Bc5Unorm,
+            channels: 2,
+            mapping: &[0, 1],
+            signed_bit: false,
+        },
+        Group {
+            codec: Codec::Bc6hUf16,
+            channels: 3,
+            mapping: &[0, 1, 2],
+            signed_bit: true,
+        },
+        Group {
+            codec: Codec::Bc6hSf16,
+            channels: 3,
+            mapping: &[0, 1, 2],
+            signed_bit: true,
+        },
     ];
     let blocks = common::opt_num(2).unwrap_or(4000) as usize;
 
@@ -78,8 +121,7 @@ fn main() {
                     let index = texel * group.channels + slot;
                     if float_record {
                         let raw = &expected[index * 4..index * 4 + 4];
-                        let theirs =
-                            f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as f64;
+                        let theirs = f32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]) as f64;
                         let mine = rgba[channel] as f64;
                         if mine == theirs || (mine.is_nan() && theirs.is_nan()) {
                             continue;
@@ -117,8 +159,7 @@ fn main() {
                     });
                     println!("    first differing texel: {first_bad:?}");
                     for texel in first_bad.into_iter() {
-                        let mine: Vec<f32> =
-                            group.mapping.iter().map(|&c| got[texel][c]).collect();
+                        let mine: Vec<f32> = group.mapping.iter().map(|&c| got[texel][c]).collect();
                         let theirs: Vec<f32> = (0..group.channels)
                             .map(|slot| {
                                 let index = texel * group.channels + slot;
@@ -152,7 +193,10 @@ fn main() {
                 }
             }
         };
-        println!("{:?}: {differing}/{blocks} blocks differ [{verdict}]", group.codec);
+        println!(
+            "{:?}: {differing}/{blocks} blocks differ [{verdict}]",
+            group.codec
+        );
     }
     if let Some(path) = common::opt_arg(3) {
         any_out_of_tolerance |= !compare_astc(&common::read(&path));
@@ -176,11 +220,18 @@ fn compare_astc(data: &[u8]) -> bool {
     let mut at = 0usize;
     let mut all_exact = true;
     while at + 12 <= data.len() {
-        let (bw, bh, count) = (word(at) as usize, word(at + 4) as usize, word(at + 8) as usize);
+        let (bw, bh, count) = (
+            word(at) as usize,
+            word(at + 4) as usize,
+            word(at + 8) as usize,
+        );
         at += 12;
         let texels = bw * bh;
         let record = 16 + texels * 4;
-        let codec = Codec::Astc { width: bw as u8, height: bh as u8 };
+        let codec = Codec::Astc {
+            width: bw as u8,
+            height: bh as u8,
+        };
         let mut differing = 0u32;
         let mut worst = 0i32;
         for _ in 0..count {
@@ -207,7 +258,11 @@ fn compare_astc(data: &[u8]) -> bool {
                 differing += 1;
             }
         }
-        let verdict = if worst == 0 { "exact".to_string() } else { format!("worst delta {worst}") };
+        let verdict = if worst == 0 {
+            "exact".to_string()
+        } else {
+            format!("worst delta {worst}")
+        };
         println!("ASTC {bw}x{bh}: {differing}/{count} blocks differ [{verdict}]");
         all_exact &= worst == 0;
     }

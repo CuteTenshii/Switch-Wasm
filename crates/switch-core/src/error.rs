@@ -67,7 +67,11 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Truncated { what, expected, got } => write!(
+            Error::Truncated {
+                what,
+                expected,
+                got,
+            } => write!(
                 f,
                 "{}: expected at least {} bytes, got {}",
                 what, expected, got
@@ -80,12 +84,27 @@ impl fmt::Display for Error {
                 "PFS0 string table: entry {} name offset {} out of range",
                 index, offset
             ),
-            Error::FileOutOfBounds { index, name, offset, size, image_size } => write!(
+            Error::FileOutOfBounds {
+                index,
+                name,
+                offset,
+                size,
+                image_size,
+            } => write!(
                 f,
                 "PFS0 file {} ('{}'): range [{:#x}, {:#x}) exceeds image size {}",
-                index, name, offset, offset + size, image_size
+                index,
+                name,
+                offset,
+                offset + size,
+                image_size
             ),
-            Error::OutOfRange { what, start, end, available } => write!(
+            Error::OutOfRange {
+                what,
+                start,
+                end,
+                available,
+            } => write!(
                 f,
                 "{}: range [{:#x}, {:#x}) exceeds the {} bytes available",
                 what, start, end, available

@@ -54,15 +54,30 @@ struct F {
 
 impl F {
     const fn bits(target: u8, shift: u8, count: u8) -> F {
-        F { target, shift, count, reversed: false }
+        F {
+            target,
+            shift,
+            count,
+            reversed: false,
+        }
     }
 
     const fn reversed(target: u8, shift: u8, count: u8) -> F {
-        F { target, shift, count, reversed: true }
+        F {
+            target,
+            shift,
+            count,
+            reversed: true,
+        }
     }
 
     const fn partition(count: u8) -> F {
-        F { target: PARTITION, shift: 0, count, reversed: false }
+        F {
+            target: PARTITION,
+            shift: 0,
+            count,
+            reversed: false,
+        }
     }
 }
 
@@ -476,7 +491,11 @@ fn finish_unquantize(value: i32, signed: bool) -> u16 {
     if !signed {
         ((value * 31) >> 6) as u16
     } else {
-        let scaled = if value < 0 { -(((-value) * 31) >> 5) } else { (value * 31) >> 5 };
+        let scaled = if value < 0 {
+            -(((-value) * 31) >> 5)
+        } else {
+            (value * 31) >> 5
+        };
         if scaled < 0 {
             0x8000 | (-scaled) as u16
         } else {
@@ -488,10 +507,15 @@ fn finish_unquantize(value: i32, signed: bool) -> u16 {
 pub fn decode_bc6h(block: &[u8], signed: bool) -> Block {
     let mut reader = BitReader::new(block);
     let prefix = reader.read(2);
-    let raw = if prefix > 1 { prefix | (reader.read(3) << 2) } else { prefix };
+    let raw = if prefix > 1 {
+        prefix | (reader.read(3) << 2)
+    } else {
+        prefix
+    };
     let raw_bits = if prefix > 1 { 5 } else { 2 };
-    let Some(mode_index) =
-        MODES.iter().position(|m| m.raw_bits == raw_bits && m.raw as u32 == raw)
+    let Some(mode_index) = MODES
+        .iter()
+        .position(|m| m.raw_bits == raw_bits && m.raw as u32 == raw)
     else {
         // Four of the five-bit prefixes are reserved. The specification says a
         // block using one decodes to zero rather than to anything diagnostic.
@@ -555,8 +579,11 @@ pub fn decode_bc6h(block: &[u8], signed: bool) -> Block {
     let weights: &[u32] = if two_subsets { &WEIGHTS_3 } else { &WEIGHTS_4 };
     let mut out = [[0.0f32, 0.0, 0.0, 1.0]; 16];
     for (texel, slot) in out.iter_mut().enumerate() {
-        let subset =
-            if two_subsets { PARTITIONS_2[partition][texel] as usize } else { 0 };
+        let subset = if two_subsets {
+            PARTITIONS_2[partition][texel] as usize
+        } else {
+            0
+        };
         let is_anchor = if two_subsets {
             anchor(2, partition, subset) == texel
         } else {
@@ -611,8 +638,12 @@ mod tests {
     #[test]
     fn the_partition_number_stays_inside_the_shared_table() {
         for mode in MODES.iter().take(10) {
-            let bits: u32 =
-                mode.fields.iter().filter(|f| f.target == PARTITION).map(|f| f.count as u32).sum();
+            let bits: u32 = mode
+                .fields
+                .iter()
+                .filter(|f| f.target == PARTITION)
+                .map(|f| f.count as u32)
+                .sum();
             assert_eq!(bits, 5, "a five-bit partition indexes 32 of the 64 rows");
         }
     }

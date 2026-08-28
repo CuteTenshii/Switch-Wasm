@@ -19,8 +19,16 @@ pub(crate) fn elem_mask(bits: u32) -> u128 {
 #[inline(always)]
 pub(crate) fn lane(v: u128, esize: u32, index: u32) -> u64 {
     let off = esize * index;
-    let (half, shift) = if off >= 64 { ((v >> 64) as u64, off - 64) } else { (v as u64, off) };
-    let mask = if esize >= 64 { u64::MAX } else { (1u64 << esize) - 1 };
+    let (half, shift) = if off >= 64 {
+        ((v >> 64) as u64, off - 64)
+    } else {
+        (v as u64, off)
+    };
+    let mask = if esize >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << esize) - 1
+    };
     (half >> shift) & mask
 }
 
@@ -28,7 +36,11 @@ pub(crate) fn lane(v: u128, esize: u32, index: u32) -> u64 {
 #[inline(always)]
 pub(crate) fn set_lane(v: u128, esize: u32, index: u32, val: u64) -> u128 {
     let off = esize * index;
-    let mask = if esize >= 64 { u64::MAX } else { (1u64 << esize) - 1 };
+    let mask = if esize >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << esize) - 1
+    };
     let (mut lo, mut hi) = (v as u64, (v >> 64) as u64);
     if off >= 64 {
         let s = off - 64;
@@ -110,7 +122,11 @@ pub(crate) fn round_to_int(f: f64, r: Rounding, signed: bool) -> u64 {
     };
     let clipped = rounded.clamp(
         i64::MIN as f64,
-        if signed { i64::MAX as f64 } else { u64::MAX as f64 },
+        if signed {
+            i64::MAX as f64
+        } else {
+            u64::MAX as f64
+        },
     );
     if signed {
         (clipped as i64) as u64
@@ -153,7 +169,11 @@ pub(crate) fn saturating_add(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
         let (min, max) = (i64::MIN >> (64 - bits), (1i64 << (bits - 1)) - 1);
         sum.clamp(min as i128, max as i128) as u64
     } else {
-        let max = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let max = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
         (sum as u128).min(max as u128) as u64
     }
 }
@@ -165,7 +185,11 @@ pub(crate) fn saturating_sub(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
         let (min, max) = (i64::MIN >> (64 - bits), (1i64 << (bits - 1)) - 1);
         diff.clamp(min as i128, max as i128) as u64
     } else {
-        let max = if bits == 64 { u64::MAX } else { (1u64 << bits) - 1 };
+        let max = if bits == 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
         diff.clamp(0, max as i128) as u64
     }
 }
@@ -173,7 +197,11 @@ pub(crate) fn saturating_sub(a: u64, b: u64, bits: u32, signed: bool) -> u64 {
 /// Saturate a wide intermediate back into a `bits`-wide lane.
 pub(crate) fn saturate_to(v: i128, bits: u32, unsigned: bool) -> u64 {
     if unsigned {
-        let max = if bits == 64 { i128::from(u64::MAX) } else { (1i128 << bits) - 1 };
+        let max = if bits == 64 {
+            i128::from(u64::MAX)
+        } else {
+            (1i128 << bits) - 1
+        };
         v.clamp(0, max) as u64
     } else {
         let max = (1i128 << (bits - 1)) - 1;
@@ -225,7 +253,11 @@ pub(crate) fn shift_by_reg(
         // 127 rather than the true 128: the rounding constant would overflow,
         // and both shift every bit of a 64-bit lane away regardless.
         let sh = (-amount as u32).min(127);
-        let rounded = if rounding { value + (1i128 << (sh - 1)) } else { value };
+        let rounded = if rounding {
+            value + (1i128 << (sh - 1))
+        } else {
+            value
+        };
         rounded >> sh
     };
     if saturating {
@@ -244,7 +276,11 @@ pub(crate) fn shift_by_reg(
 /// infinity has to multiply back to a finite number.
 pub(crate) fn fmulx(x: f64, y: f64) -> f64 {
     if (x == 0.0 && y.is_infinite()) || (x.is_infinite() && y == 0.0) {
-        return if x.is_sign_negative() != y.is_sign_negative() { -2.0 } else { 2.0 };
+        return if x.is_sign_negative() != y.is_sign_negative() {
+            -2.0
+        } else {
+            2.0
+        };
     }
     x * y
 }
@@ -364,14 +400,14 @@ pub(crate) fn shift_var(v: u64, amt: u64, kind: u32, sf: bool) -> u64 {
 #[inline(always)]
 pub(crate) fn extend_reg(v: u64, option: u8, sf: bool) -> u64 {
     let extended = match option {
-        0b000 => v as u8 as u64,        // UXTB
-        0b001 => v as u16 as u64,       // UXTH
-        0b010 => v as u32 as u64,       // UXTW
-        0b011 => v,                     // UXTX / LSL
-        0b100 => sext_u64(v, 8),        // SXTB
-        0b101 => sext_u64(v, 16),       // SXTH
-        0b110 => sext_u64(v, 32),       // SXTW
-        0b111 => v,                     // SXTX
+        0b000 => v as u8 as u64,  // UXTB
+        0b001 => v as u16 as u64, // UXTH
+        0b010 => v as u32 as u64, // UXTW
+        0b011 => v,               // UXTX / LSL
+        0b100 => sext_u64(v, 8),  // SXTB
+        0b101 => sext_u64(v, 16), // SXTH
+        0b110 => sext_u64(v, 32), // SXTW
+        0b111 => v,               // SXTX
         _ => v,
     };
     // Truncate to the operation width, don't clamp to it. `min` turned every
@@ -606,11 +642,14 @@ pub(crate) fn ctz(v: u64, size: u32) -> u64 {
     }) as u64
 }
 
-
 /// Absolute difference of two `bits`-wide lanes (SABD/UABD).
 pub(crate) fn simd_abs_diff(a: u64, b: u64, bits: u32, unsigned: bool) -> u64 {
     if unsigned {
-        if a >= b { a - b } else { b - a }
+        if a >= b {
+            a - b
+        } else {
+            b - a
+        }
     } else {
         let sa = sext_u64(a, bits) as i64;
         let sb = sext_u64(b, bits) as i64;

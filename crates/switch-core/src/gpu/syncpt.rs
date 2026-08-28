@@ -34,7 +34,10 @@ impl NvFence {
     pub const INVALID_ID: u32 = 0xFFFF_FFFF;
 
     pub fn invalid() -> NvFence {
-        NvFence { id: NvFence::INVALID_ID, value: 0 }
+        NvFence {
+            id: NvFence::INVALID_ID,
+            value: 0,
+        }
     }
 
     pub fn is_valid(&self) -> bool {
@@ -166,7 +169,11 @@ impl Host1x {
             .events
             .get_mut(slot as usize)
             .ok_or_else(|| Error::Gpu(format!("host1x: event slot {} out of range", slot)))?;
-        *e = EventSlot { registered: true, fence: NvFence::invalid(), signalled: false };
+        *e = EventSlot {
+            registered: true,
+            fence: NvFence::invalid(),
+            signalled: false,
+        };
         Ok(())
     }
 

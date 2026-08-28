@@ -64,7 +64,12 @@ fn main() {
         println!("{addr:#010x}  {count:>12}  {:5.2}%", pct(*count, total));
     }
 
-    let mut tops: Vec<(u64, usize)> = by_top.iter().copied().zip(0..256).filter(|(n, _)| *n > 0).collect();
+    let mut tops: Vec<(u64, usize)> = by_top
+        .iter()
+        .copied()
+        .zip(0..256)
+        .filter(|(n, _)| *n > 0)
+        .collect();
     tops.sort_by_key(|(n, _)| std::cmp::Reverse(*n));
     println!("--- instruction mix (bits 31:24) ---");
     for (count, top) in tops.iter().take(16) {

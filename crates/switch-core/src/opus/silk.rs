@@ -445,7 +445,10 @@ struct PlcState {
 
 /// Which entropy table and which backward predictor each NLSF coefficient
 /// uses, both packed into one byte per pair by the first-stage index.
-fn nlsf_unpack(cb: &NlsfCodebook, cb1_index: usize) -> ([usize; MAX_LPC_ORDER], [u8; MAX_LPC_ORDER]) {
+fn nlsf_unpack(
+    cb: &NlsfCodebook,
+    cb1_index: usize,
+) -> ([usize; MAX_LPC_ORDER], [u8; MAX_LPC_ORDER]) {
     let mut ec_ix = [0usize; MAX_LPC_ORDER];
     let mut pred_q8 = [0u8; MAX_LPC_ORDER];
     let base = cb1_index * cb.order / 2;
@@ -461,7 +464,13 @@ fn nlsf_unpack(cb: &NlsfCodebook, cb1_index: usize) -> ([usize; MAX_LPC_ORDER], 
 
 /// The second-stage residual, dequantised backwards so each coefficient's
 /// predictor sees the one above it.
-fn nlsf_residual_dequant(x_q10: &mut [i16], indices: &[i8], pred_coef_q8: &[u8], quant_step_size_q16: i32, order: usize) {
+fn nlsf_residual_dequant(
+    x_q10: &mut [i16],
+    indices: &[i8],
+    pred_coef_q8: &[u8],
+    quant_step_size_q16: i32,
+    order: usize,
+) {
     let mut out_q10 = 0i32;
     for i in (0..order).rev() {
         let pred_q10 = smulbb(out_q10, i32::from(pred_coef_q8[i])) >> 8;
@@ -488,7 +497,8 @@ fn nlsf_stabilize(nlsf_q15: &mut [i16], ndelta_min_q15: &[i16], l: usize) {
         let mut min_diff_q15 = i32::from(nlsf_q15[0]) - i32::from(ndelta_min_q15[0]);
         let mut idx = 0usize;
         for i in 1..l {
-            let diff = i32::from(nlsf_q15[i]) - (i32::from(nlsf_q15[i - 1]) + i32::from(ndelta_min_q15[i]));
+            let diff = i32::from(nlsf_q15[i])
+                - (i32::from(nlsf_q15[i - 1]) + i32::from(ndelta_min_q15[i]));
             if diff < min_diff_q15 {
                 min_diff_q15 = diff;
                 idx = i;
@@ -545,14 +555,21 @@ fn nlsf_decode(nlsf_q15: &mut [i16], indices: &[i8], cb: &NlsfCodebook) {
     let cb1 = indices[0] as usize;
     let (_, pred_q8) = nlsf_unpack(cb, cb1);
     let mut res_q10 = [0i16; MAX_LPC_ORDER];
-    nlsf_residual_dequant(&mut res_q10, &indices[1..], &pred_q8, cb.quant_step_size_q16, cb.order);
+    nlsf_residual_dequant(
+        &mut res_q10,
+        &indices[1..],
+        &pred_q8,
+        cb.quant_step_size_q16,
+        cb.order,
+    );
 
     let element = &cb.cb1_nlsf_q8[cb1 * cb.order..];
     let wght = &cb.cb1_wght_q9[cb1 * cb.order..];
     for i in 0..cb.order {
         // The first-stage weights are inverse square-rooted, so the residual
         // is divided by them rather than multiplied.
-        let tmp = ((i32::from(res_q10[i]) << 14) / i32::from(wght[i])) + (i32::from(element[i]) << 7);
+        let tmp =
+            ((i32::from(res_q10[i]) << 14) / i32::from(wght[i])) + (i32::from(element[i]) << 7);
         nlsf_q15[i] = tmp.clamp(0, 32767) as i16;
     }
     nlsf_stabilize(nlsf_q15, cb.delta_min_q15, cb.order);
@@ -593,7 +610,8 @@ fn lpc_fit(a_qout: &mut [i16], a_qin: &mut [i32], qout: u32, qin: u32, d: usize)
         maxabs = rshift_round(maxabs, qin - qout);
         if maxabs > 32767 {
             maxabs = maxabs.min(163838);
-            let chirp_q16 = 65471 - (((maxabs - 32767) << 14) / ((maxabs.wrapping_mul(idx as i32 + 1)) >> 2));
+            let chirp_q16 =
+                65471 - (((maxabs - 32767) << 14) / ((maxabs.wrapping_mul(idx as i32 + 1)) >> 2));
             bwexpander_32(a_qin, d, chirp_q16);
         } else {
             break;
@@ -662,7 +680,10 @@ fn lpc_inverse_pred_gain_qa(a_qa: &mut [i32], order: usize) -> i32 {
             let tmp1 = a_qa[n];
             let tmp2 = a_qa[k - n - 1];
             let t = rshift_round64(
-                i64::from(sub_sat32(tmp1, rshift_round64(i64::from(tmp2) * i64::from(rc_q31), 31) as i32)) * i64::from(rc_mult2),
+                i64::from(sub_sat32(
+                    tmp1,
+                    rshift_round64(i64::from(tmp2) * i64::from(rc_q31), 31) as i32,
+                )) * i64::from(rc_mult2),
                 mult2q,
             );
             if t > i64::from(i32::MAX) || t < i64::from(i32::MIN) {
@@ -670,7 +691,10 @@ fn lpc_inverse_pred_gain_qa(a_qa: &mut [i32], order: usize) -> i32 {
             }
             a_qa[n] = t as i32;
             let t = rshift_round64(
-                i64::from(sub_sat32(tmp2, rshift_round64(i64::from(tmp1) * i64::from(rc_q31), 31) as i32)) * i64::from(rc_mult2),
+                i64::from(sub_sat32(
+                    tmp2,
+                    rshift_round64(i64::from(tmp1) * i64::from(rc_q31), 31) as i32,
+                )) * i64::from(rc_mult2),
                 mult2q,
             );
             if t > i64::from(i32::MAX) || t < i64::from(i32::MIN) {
@@ -760,7 +784,13 @@ fn nlsf2a(a_q12: &mut [i16], nlsf: &[i16], d: usize) {
 /// The first gain of a frame is either absolute or a delta from the previous
 /// frame's last; the rest are always deltas, with a coarser step once they
 /// run past the top of the table.
-fn gains_dequant(gain_q16: &mut [i32], ind: &[i8], prev_ind: &mut i8, conditional: bool, nb_subfr: usize) {
+fn gains_dequant(
+    gain_q16: &mut [i32],
+    ind: &[i8],
+    prev_ind: &mut i8,
+    conditional: bool,
+    nb_subfr: usize,
+) {
     for k in 0..nb_subfr {
         if k == 0 && !conditional {
             // A gain may not fall more than 16 steps, about 21.8 dB, in one
@@ -768,7 +798,8 @@ fn gains_dequant(gain_q16: &mut [i32], ind: &[i8], prev_ind: &mut i8, conditiona
             *prev_ind = i8::max(ind[k], prev_ind.saturating_sub(16));
         } else {
             let ind_tmp = i32::from(ind[k]) + MIN_DELTA_GAIN_QUANT;
-            let double_step_size_threshold = 2 * MAX_DELTA_GAIN_QUANT - N_LEVELS_QGAIN + i32::from(*prev_ind);
+            let double_step_size_threshold =
+                2 * MAX_DELTA_GAIN_QUANT - N_LEVELS_QGAIN + i32::from(*prev_ind);
             let next = if ind_tmp > double_step_size_threshold {
                 i32::from(*prev_ind) + (ind_tmp << 1) - double_step_size_threshold
             } else {
@@ -777,12 +808,19 @@ fn gains_dequant(gain_q16: &mut [i32], ind: &[i8], prev_ind: &mut i8, conditiona
             *prev_ind = next.clamp(-128, 127) as i8;
         }
         *prev_ind = (i32::from(*prev_ind)).clamp(0, N_LEVELS_QGAIN - 1) as i8;
-        gain_q16[k] = log2lin((smulwb(GAIN_INV_SCALE_Q16, i32::from(*prev_ind)) + GAIN_OFFSET).min(3967));
+        gain_q16[k] =
+            log2lin((smulwb(GAIN_INV_SCALE_Q16, i32::from(*prev_ind)) + GAIN_OFFSET).min(3967));
     }
 }
 
 /// The per-subframe pitch lags, as a base lag plus a coded contour.
-fn decode_pitch(lag_index: i16, contour_index: i8, pitch_lags: &mut [i32], fs_khz: i32, nb_subfr: usize) {
+fn decode_pitch(
+    lag_index: i16,
+    contour_index: i8,
+    pitch_lags: &mut [i32],
+    fs_khz: i32,
+    nb_subfr: usize,
+) {
     let (cb, cbk_size): (&[i8], usize) = if fs_khz == 8 {
         if nb_subfr == MAX_NB_SUBFR {
             (&CB_LAGS_STAGE2, 11)
@@ -798,14 +836,16 @@ fn decode_pitch(lag_index: i16, contour_index: i8, pitch_lags: &mut [i32], fs_kh
     let max_lag = PE_MAX_LAG_MS * fs_khz;
     let lag = min_lag + i32::from(lag_index);
     for k in 0..nb_subfr {
-        pitch_lags[k] = (lag + i32::from(cb[k * cbk_size + contour_index as usize])).clamp(min_lag, max_lag);
+        pitch_lags[k] =
+            (lag + i32::from(cb[k * cbk_size + contour_index as usize])).clamp(min_lag, max_lag);
     }
 }
 
 /// One node of the shell code: split `p` pulses between two halves.
 fn decode_split(dec: &mut RangeDecoder, p: i32, table: &[u8]) -> (i32, i32) {
     if p > 0 {
-        let child1 = dec.decode_icdf(&table[SHELL_CODE_TABLE_OFFSETS[p as usize] as usize..], 8) as i32;
+        let child1 =
+            dec.decode_icdf(&table[SHELL_CODE_TABLE_OFFSETS[p as usize] as usize..], 8) as i32;
         (child1, p - child1)
     } else {
         (0, 0)
@@ -842,7 +882,14 @@ fn shell_decoder(pulses0: &mut [i16], dec: &mut RangeDecoder, pulses4: i32) {
 /// Attach a sign to every non-zero pulse. The sign's probability depends on
 /// how many pulses the block holds, because a dense block is more likely to
 /// be noise than a sparse one.
-fn decode_signs(dec: &mut RangeDecoder, pulses: &mut [i16], length: usize, signal_type: i32, quant_offset_type: i32, sum_pulses: &[i32]) {
+fn decode_signs(
+    dec: &mut RangeDecoder,
+    pulses: &mut [i16],
+    length: usize,
+    signal_type: i32,
+    quant_offset_type: i32,
+    sum_pulses: &[i32],
+) {
     let base = 7 * ((quant_offset_type + (signal_type << 1)) as usize);
     let blocks = (length + SHELL_CODEC_FRAME_LENGTH / 2) >> LOG2_SHELL_CODEC_FRAME_LENGTH;
     for i in 0..blocks {
@@ -861,7 +908,13 @@ fn decode_signs(dec: &mut RangeDecoder, pulses: &mut [i16], length: usize, signa
 
 /// Decode the whole excitation: a rate level, a pulse count per 16-sample
 /// block, the shell code that places them, any extra low bits, and signs.
-fn decode_pulses(dec: &mut RangeDecoder, pulses: &mut [i16], signal_type: i32, quant_offset_type: i32, frame_length: usize) {
+fn decode_pulses(
+    dec: &mut RangeDecoder,
+    pulses: &mut [i16],
+    signal_type: i32,
+    quant_offset_type: i32,
+    frame_length: usize,
+) {
     let rate_level = dec.decode_icdf(&RATE_LEVELS_ICDF[(signal_type >> 1) as usize * 9..], 8);
 
     let mut iter = frame_length >> LOG2_SHELL_CODEC_FRAME_LENGTH;
@@ -879,7 +932,8 @@ fn decode_pulses(dec: &mut RangeDecoder, pulses: &mut [i16], signal_type: i32, q
         // shift at a time.
         while sum_pulses[i] == SILK_MAX_PULSES + 1 {
             n_lshifts[i] += 1;
-            let table = &PULSES_PER_BLOCK_ICDF[(N_RATE_LEVELS - 1) * 18 + usize::from(n_lshifts[i] == 10)..];
+            let table = &PULSES_PER_BLOCK_ICDF
+                [(N_RATE_LEVELS - 1) * 18 + usize::from(n_lshifts[i] == 10)..];
             sum_pulses[i] = dec.decode_icdf(table, 8) as i32;
         }
     }
@@ -887,7 +941,11 @@ fn decode_pulses(dec: &mut RangeDecoder, pulses: &mut [i16], signal_type: i32, q
     for i in 0..iter {
         let at = i * SHELL_CODEC_FRAME_LENGTH;
         if sum_pulses[i] > 0 {
-            shell_decoder(&mut pulses[at..at + SHELL_CODEC_FRAME_LENGTH], dec, sum_pulses[i]);
+            shell_decoder(
+                &mut pulses[at..at + SHELL_CODEC_FRAME_LENGTH],
+                dec,
+                sum_pulses[i],
+            );
         } else {
             pulses[at..at + SHELL_CODEC_FRAME_LENGTH].fill(0);
         }
@@ -911,7 +969,14 @@ fn decode_pulses(dec: &mut RangeDecoder, pulses: &mut [i16], signal_type: i32, q
         }
     }
 
-    decode_signs(dec, pulses, frame_length, signal_type, quant_offset_type, &sum_pulses);
+    decode_signs(
+        dec,
+        pulses,
+        frame_length,
+        signal_type,
+        quant_offset_type,
+        &sum_pulses,
+    );
 }
 
 /// The LPC analysis filter: run the signal through `1 - A(z)` to recover the
@@ -1081,7 +1146,13 @@ impl ChannelState {
     }
 
     /// Read one frame's side information.
-    fn decode_indices(&mut self, dec: &mut RangeDecoder, frame_index: usize, decode_lbrr: bool, cond_coding: CondCoding) {
+    fn decode_indices(
+        &mut self,
+        dec: &mut RangeDecoder,
+        frame_index: usize,
+        decode_lbrr: bool,
+        cond_coding: CondCoding,
+    ) {
         let ix = if decode_lbrr || self.vad_flags[frame_index] {
             dec.decode_icdf(&TYPE_OFFSET_VAD_ICDF, 8) as i32 + 2
         } else {
@@ -1095,7 +1166,8 @@ impl ChannelState {
         } else {
             // Independent coding: three MSBs against a signal-type-dependent
             // model, then three raw LSBs.
-            let msb = dec.decode_icdf(&GAIN_ICDF[self.indices.signal_type as usize * 8..], 8) as i32;
+            let msb =
+                dec.decode_icdf(&GAIN_ICDF[self.indices.signal_type as usize * 8..], 8) as i32;
             let lsb = dec.decode_icdf(&UNIFORM8_ICDF, 8) as i32;
             self.indices.gains[0] = ((msb << 3) + lsb) as i8;
         }
@@ -1104,8 +1176,10 @@ impl ChannelState {
         }
 
         let cb = self.nlsf_cb;
-        self.indices.nlsf[0] =
-            dec.decode_icdf(&cb.cb1_icdf[(self.indices.signal_type >> 1) as usize * cb.n_vectors..], 8) as i8;
+        self.indices.nlsf[0] = dec.decode_icdf(
+            &cb.cb1_icdf[(self.indices.signal_type >> 1) as usize * cb.n_vectors..],
+            8,
+        ) as i8;
         let (ec_ix, _) = nlsf_unpack(cb, self.indices.nlsf[0] as usize);
         for i in 0..cb.order {
             let mut value = dec.decode_icdf(&cb.ec_icdf[ec_ix[i]..], 8) as i32;
@@ -1144,7 +1218,8 @@ impl ChannelState {
             self.indices.contour_index = dec.decode_icdf(self.pitch_contour_icdf, 8) as i8;
             self.indices.per_index = dec.decode_icdf(&LTP_PER_INDEX_ICDF, 8);
             for k in 0..self.nb_subfr {
-                self.indices.ltp[k] = dec.decode_icdf(ltp_gain_icdf(self.indices.per_index), 8) as i8;
+                self.indices.ltp[k] =
+                    dec.decode_icdf(ltp_gain_icdf(self.indices.per_index), 8) as i8;
             }
             self.indices.ltp_scale_index = if cond_coding == CondCoding::Independently {
                 dec.decode_icdf(&LTP_SCALE_ICDF, 8)
@@ -1192,8 +1267,16 @@ impl ChannelState {
         // After a loss the filter is a guess; widening it keeps the guess
         // from ringing when the real signal comes back.
         if self.loss_cnt != 0 {
-            bwexpander(&mut ctrl.pred_coef_q12[0], self.lpc_order, BWE_AFTER_LOSS_Q16);
-            bwexpander(&mut ctrl.pred_coef_q12[1], self.lpc_order, BWE_AFTER_LOSS_Q16);
+            bwexpander(
+                &mut ctrl.pred_coef_q12[0],
+                self.lpc_order,
+                BWE_AFTER_LOSS_Q16,
+            );
+            bwexpander(
+                &mut ctrl.pred_coef_q12[1],
+                self.lpc_order,
+                BWE_AFTER_LOSS_Q16,
+            );
         }
 
         if self.indices.signal_type == TYPE_VOICED {
@@ -1227,7 +1310,8 @@ impl ChannelState {
     /// subframe gain.
     fn decode_core(&mut self, ctrl: &mut FrameControl, xq: &mut [i16], pulses: &[i16]) {
         let offset_q10 = i32::from(
-            QUANTIZATION_OFFSETS_Q10[(self.indices.signal_type >> 1) as usize * 2 + self.indices.quant_offset_type as usize],
+            QUANTIZATION_OFFSETS_Q10[(self.indices.signal_type >> 1) as usize * 2
+                + self.indices.quant_offset_type as usize],
         );
         let nlsf_interpolation_flag = self.indices.nlsf_interp_coef_q2 < 4;
 
@@ -1301,7 +1385,8 @@ impl ChannelState {
                     // to be re-whitened through the new one.
                     let start_idx = self.ltp_mem_length - lag - self.lpc_order - LTP_ORDER / 2;
                     if k == 2 {
-                        self.out_buf[self.ltp_mem_length..self.ltp_mem_length + 2 * self.subfr_length]
+                        self.out_buf
+                            [self.ltp_mem_length..self.ltp_mem_length + 2 * self.subfr_length]
                             .copy_from_slice(&xq[..2 * self.subfr_length]);
                     }
                     let src_start = start_idx + k * self.subfr_length;
@@ -1327,7 +1412,8 @@ impl ChannelState {
                     }
                 } else if gain_adj_q16 != 1 << 16 {
                     for i in 0..lag + LTP_ORDER / 2 {
-                        s_ltp_q15[s_ltp_buf_idx - i - 1] = smulww(gain_adj_q16, s_ltp_q15[s_ltp_buf_idx - i - 1]);
+                        s_ltp_q15[s_ltp_buf_idx - i - 1] =
+                            smulww(gain_adj_q16, s_ltp_q15[s_ltp_buf_idx - i - 1]);
                     }
                 }
             }
@@ -1341,7 +1427,8 @@ impl ChannelState {
                     // prediction down.
                     let mut ltp_pred_q13 = 2i32;
                     for j in 0..LTP_ORDER {
-                        ltp_pred_q13 = smlawb(ltp_pred_q13, s_ltp_q15[pred_lag - j], i32::from(b_q14[j]));
+                        ltp_pred_q13 =
+                            smlawb(ltp_pred_q13, s_ltp_q15[pred_lag - j], i32::from(b_q14[j]));
                     }
                     pred_lag += 1;
                     res_q14[i] = self.exc_q14[pexc + i].wrapping_add(ltp_pred_q13 << 1);
@@ -1353,16 +1440,27 @@ impl ChannelState {
             for i in 0..self.subfr_length {
                 let mut lpc_pred_q10 = (self.lpc_order >> 1) as i32;
                 for j in 0..self.lpc_order {
-                    lpc_pred_q10 = smlawb(lpc_pred_q10, s_lpc_q14[MAX_LPC_ORDER + i - 1 - j], i32::from(a_q12[j]));
+                    lpc_pred_q10 = smlawb(
+                        lpc_pred_q10,
+                        s_lpc_q14[MAX_LPC_ORDER + i - 1 - j],
+                        i32::from(a_q12[j]),
+                    );
                 }
-                let excitation = if signal_type == TYPE_VOICED { res_q14[i] } else { self.exc_q14[pexc + i] };
+                let excitation = if signal_type == TYPE_VOICED {
+                    res_q14[i]
+                } else {
+                    self.exc_q14[pexc + i]
+                };
                 s_lpc_q14[MAX_LPC_ORDER + i] = add_sat32(excitation, lshift_sat32(lpc_pred_q10, 4));
-                xq[k * self.subfr_length + i] =
-                    sat16(rshift_round(smulww(s_lpc_q14[MAX_LPC_ORDER + i], gain_q10), 8));
+                xq[k * self.subfr_length + i] = sat16(rshift_round(
+                    smulww(s_lpc_q14[MAX_LPC_ORDER + i], gain_q10),
+                    8,
+                ));
             }
             s_lpc_q14.copy_within(self.subfr_length..self.subfr_length + MAX_LPC_ORDER, 0);
         }
-        self.s_lpc_q14_buf.copy_from_slice(&s_lpc_q14[..MAX_LPC_ORDER]);
+        self.s_lpc_q14_buf
+            .copy_from_slice(&s_lpc_q14[..MAX_LPC_ORDER]);
     }
 }
 
@@ -1380,10 +1478,15 @@ impl ChannelState {
                     break;
                 }
                 let base = (self.nb_subfr - 1 - j) * LTP_ORDER;
-                let temp: i32 = ctrl.ltp_coef_q14[base..base + LTP_ORDER].iter().map(|&v| i32::from(v)).sum();
+                let temp: i32 = ctrl.ltp_coef_q14[base..base + LTP_ORDER]
+                    .iter()
+                    .map(|&v| i32::from(v))
+                    .sum();
                 if temp > ltp_gain_q14 {
                     ltp_gain_q14 = temp;
-                    self.plc.ltp_coef_q14.copy_from_slice(&ctrl.ltp_coef_q14[base..base + LTP_ORDER]);
+                    self.plc
+                        .ltp_coef_q14
+                        .copy_from_slice(&ctrl.ltp_coef_q14[base..base + LTP_ORDER]);
                     self.plc.pitch_l_q8 = ctrl.pitch_l[self.nb_subfr - 1 - j] << 8;
                 }
                 j += 1;
@@ -1409,7 +1512,8 @@ impl ChannelState {
             self.plc.ltp_coef_q14 = [0; LTP_ORDER];
         }
 
-        self.plc.prev_lpc_q12[..self.lpc_order].copy_from_slice(&ctrl.pred_coef_q12[1][..self.lpc_order]);
+        self.plc.prev_lpc_q12[..self.lpc_order]
+            .copy_from_slice(&ctrl.pred_coef_q12[1][..self.lpc_order]);
         self.plc.prev_ltp_scale_q14 = ctrl.ltp_scale_q14;
         self.plc.prev_gain_q16[0] = ctrl.gains_q16[self.nb_subfr - 2];
         self.plc.prev_gain_q16[1] = ctrl.gains_q16[self.nb_subfr - 1];
@@ -1421,7 +1525,10 @@ impl ChannelState {
     /// LPC filter, driven by noise taken from the last frame's own
     /// excitation, and fade everything down.
     fn plc_conceal(&mut self, ctrl: &mut FrameControl, frame: &mut [i16]) {
-        let prev_gain_q10 = [self.plc.prev_gain_q16[0] >> 6, self.plc.prev_gain_q16[1] >> 6];
+        let prev_gain_q10 = [
+            self.plc.prev_gain_q16[0] >> 6,
+            self.plc.prev_gain_q16[1] >> 6,
+        ];
         if self.first_frame_after_reset {
             self.plc.prev_lpc_q12 = [0; MAX_LPC_ORDER];
         }
@@ -1432,16 +1539,23 @@ impl ChannelState {
         for k in 0..2 {
             for i in 0..self.subfr_length {
                 exc_buf[k * self.subfr_length + i] = sat16(
-                    smulww(self.exc_q14[i + (k + self.nb_subfr - 2) * self.subfr_length], prev_gain_q10[k]) >> 8,
+                    smulww(
+                        self.exc_q14[i + (k + self.nb_subfr - 2) * self.subfr_length],
+                        prev_gain_q10[k],
+                    ) >> 8,
                 );
             }
         }
         let (energy1, shift1) = sum_sqr_shift(&exc_buf[..self.subfr_length]);
         let (energy2, shift2) = sum_sqr_shift(&exc_buf[self.subfr_length..]);
         let rand_base = if (energy1 >> shift2) < (energy2 >> shift1) {
-            0.max((self.plc.nb_subfr as i32 - 1) * self.plc.subfr_length as i32 - RAND_BUF_SIZE as i32) as usize
+            0.max(
+                (self.plc.nb_subfr as i32 - 1) * self.plc.subfr_length as i32
+                    - RAND_BUF_SIZE as i32,
+            ) as usize
         } else {
-            0.max(self.plc.nb_subfr as i32 * self.plc.subfr_length as i32 - RAND_BUF_SIZE as i32) as usize
+            0.max(self.plc.nb_subfr as i32 * self.plc.subfr_length as i32 - RAND_BUF_SIZE as i32)
+                as usize
         };
 
         let mut rand_scale_q14 = self.plc.rand_scale_q14;
@@ -1468,7 +1582,8 @@ impl ChannelState {
                 // An unvoiced frame under a resonant filter needs less noise
                 // driving it, or the concealment rings.
                 let inv_gain_q30 = lpc_inverse_pred_gain(&self.plc.prev_lpc_q12, self.lpc_order);
-                let mut down_scale_q30 = ((1i32 << 30) >> LOG2_INV_LPC_GAIN_HIGH_THRES).min(inv_gain_q30);
+                let mut down_scale_q30 =
+                    ((1i32 << 30) >> LOG2_INV_LPC_GAIN_HIGH_THRES).min(inv_gain_q30);
                 down_scale_q30 = down_scale_q30.max((1i32 << 30) >> LOG2_INV_LPC_GAIN_LOW_THRES);
                 down_scale_q30 <<= LOG2_INV_LPC_GAIN_HIGH_THRES;
                 rand_gain_q15 = smulwb(down_scale_q30, rand_gain_q15) >> 14;
@@ -1504,13 +1619,17 @@ impl ChannelState {
             for _ in 0..self.subfr_length {
                 let mut ltp_pred_q12 = 2i32;
                 for j in 0..LTP_ORDER {
-                    ltp_pred_q12 = smlawb(ltp_pred_q12, s_ltp_q14[pred_lag - j], i32::from(b_q14[j]));
+                    ltp_pred_q12 =
+                        smlawb(ltp_pred_q12, s_ltp_q14[pred_lag - j], i32::from(b_q14[j]));
                 }
                 pred_lag += 1;
                 rand_seed = silk_rand(rand_seed);
                 let noise = ((rand_seed >> 25) & RAND_BUF_MASK) as usize;
-                s_ltp_q14[s_ltp_buf_idx] =
-                    smlawb(ltp_pred_q12, self.exc_q14[rand_base + noise], rand_scale_q14) << 2;
+                s_ltp_q14[s_ltp_buf_idx] = smlawb(
+                    ltp_pred_q12,
+                    self.exc_q14[rand_base + noise],
+                    rand_scale_q14,
+                ) << 2;
                 s_ltp_buf_idx += 1;
             }
             // Fade the pitch and the noise, and let the lag drift, so a long
@@ -1519,8 +1638,15 @@ impl ChannelState {
                 *v = (smulbb(harm_gain_q15, i32::from(*v)) >> 15) as i16;
             }
             rand_scale_q14 = smulbb(rand_scale_q14, rand_gain_q15) >> 15;
-            self.plc.pitch_l_q8 = smlawb(self.plc.pitch_l_q8, self.plc.pitch_l_q8, PITCH_DRIFT_FAC_Q16);
-            self.plc.pitch_l_q8 = self.plc.pitch_l_q8.min(smulbb(MAX_PITCH_LAG_MS, self.fs_khz) << 8);
+            self.plc.pitch_l_q8 = smlawb(
+                self.plc.pitch_l_q8,
+                self.plc.pitch_l_q8,
+                PITCH_DRIFT_FAC_Q16,
+            );
+            self.plc.pitch_l_q8 = self
+                .plc
+                .pitch_l_q8
+                .min(smulbb(MAX_PITCH_LAG_MS, self.fs_khz) << 8);
             lag = rshift_round(self.plc.pitch_l_q8, 8) as usize;
         }
 
@@ -1535,8 +1661,10 @@ impl ChannelState {
             s_ltp_q14[at] = add_sat32(s_ltp_q14[at], lshift_sat32(lpc_pred_q10, 4));
             frame[i] = sat16(rshift_round(smulww(s_ltp_q14[at], prev_gain_q10[1]), 8));
         }
-        self.s_lpc_q14_buf
-            .copy_from_slice(&s_ltp_q14[lpc_base + MAX_LPC_ORDER + self.frame_length - MAX_LPC_ORDER..][..MAX_LPC_ORDER]);
+        self.s_lpc_q14_buf.copy_from_slice(
+            &s_ltp_q14[lpc_base + MAX_LPC_ORDER + self.frame_length - MAX_LPC_ORDER..]
+                [..MAX_LPC_ORDER],
+        );
 
         self.plc.rand_seed = rand_seed;
         self.plc.rand_scale_q14 = rand_scale_q14;
@@ -1606,7 +1734,8 @@ impl ChannelState {
         if self.loss_cnt == 0 && self.prev_signal_type == TYPE_NO_VOICE_ACTIVITY {
             for i in 0..self.lpc_order {
                 let diff = i32::from(self.prev_nlsf_q15[i]) - i32::from(self.cng.smth_nlsf_q15[i]);
-                self.cng.smth_nlsf_q15[i] = (i32::from(self.cng.smth_nlsf_q15[i]) + smulwb(diff, CNG_NLSF_SMTH_Q16)) as i16;
+                self.cng.smth_nlsf_q15[i] =
+                    (i32::from(self.cng.smth_nlsf_q15[i]) + smulwb(diff, CNG_NLSF_SMTH_Q16)) as i16;
             }
             let mut max_gain_q16 = 0i32;
             let mut subfr = 0usize;
@@ -1616,14 +1745,19 @@ impl ChannelState {
                     subfr = i;
                 }
             }
-            self.cng
-                .exc_buf_q14
-                .copy_within(0..(self.nb_subfr - 1) * self.subfr_length, self.subfr_length);
-            self.cng.exc_buf_q14[..self.subfr_length]
-                .copy_from_slice(&self.exc_q14[subfr * self.subfr_length..(subfr + 1) * self.subfr_length]);
+            self.cng.exc_buf_q14.copy_within(
+                0..(self.nb_subfr - 1) * self.subfr_length,
+                self.subfr_length,
+            );
+            self.cng.exc_buf_q14[..self.subfr_length].copy_from_slice(
+                &self.exc_q14[subfr * self.subfr_length..(subfr + 1) * self.subfr_length],
+            );
 
             for i in 0..self.nb_subfr {
-                self.cng.smth_gain_q16 += smulwb(ctrl.gains_q16[i] - self.cng.smth_gain_q16, CNG_GAIN_SMTH_Q16);
+                self.cng.smth_gain_q16 += smulwb(
+                    ctrl.gains_q16[i] - self.cng.smth_gain_q16,
+                    CNG_GAIN_SMTH_Q16,
+                );
                 // Track a fall faster than a rise: noise that stays too loud
                 // is more audible than noise that stays too quiet.
                 if smulww(self.cng.smth_gain_q16, CNG_GAIN_SMTH_THRESHOLD_Q16) > ctrl.gains_q16[i] {
@@ -1640,11 +1774,13 @@ impl ChannelState {
         let mut gain_q16 = smulww(self.plc.rand_scale_q14, self.plc.prev_gain_q16[1]);
         if gain_q16 >= (1 << 21) || self.cng.smth_gain_q16 > (1 << 23) {
             gain_q16 = smultt(gain_q16, gain_q16);
-            gain_q16 = smultt(self.cng.smth_gain_q16, self.cng.smth_gain_q16).wrapping_sub(gain_q16 << 5);
+            gain_q16 =
+                smultt(self.cng.smth_gain_q16, self.cng.smth_gain_q16).wrapping_sub(gain_q16 << 5);
             gain_q16 = sqrt_approx(gain_q16) << 16;
         } else {
             gain_q16 = smulww(gain_q16, gain_q16);
-            gain_q16 = smulww(self.cng.smth_gain_q16, self.cng.smth_gain_q16).wrapping_sub(gain_q16 << 5);
+            gain_q16 =
+                smulww(self.cng.smth_gain_q16, self.cng.smth_gain_q16).wrapping_sub(gain_q16 << 5);
             gain_q16 = sqrt_approx(gain_q16) << 8;
         }
         let gain_q10 = gain_q16 >> 6;
@@ -1668,14 +1804,27 @@ impl ChannelState {
         for i in 0..length {
             let mut lpc_pred_q10 = (self.lpc_order >> 1) as i32;
             for j in 0..self.lpc_order {
-                lpc_pred_q10 = smlawb(lpc_pred_q10, cng_sig_q14[MAX_LPC_ORDER + i - 1 - j], i32::from(a_q12[j]));
+                lpc_pred_q10 = smlawb(
+                    lpc_pred_q10,
+                    cng_sig_q14[MAX_LPC_ORDER + i - 1 - j],
+                    i32::from(a_q12[j]),
+                );
             }
-            cng_sig_q14[MAX_LPC_ORDER + i] = add_sat32(cng_sig_q14[MAX_LPC_ORDER + i], lshift_sat32(lpc_pred_q10, 4));
+            cng_sig_q14[MAX_LPC_ORDER + i] = add_sat32(
+                cng_sig_q14[MAX_LPC_ORDER + i],
+                lshift_sat32(lpc_pred_q10, 4),
+            );
             frame[i] = sat16(
-                i32::from(frame[i]) + i32::from(sat16(rshift_round(smulww(cng_sig_q14[MAX_LPC_ORDER + i], gain_q10), 8))),
+                i32::from(frame[i])
+                    + i32::from(sat16(rshift_round(
+                        smulww(cng_sig_q14[MAX_LPC_ORDER + i], gain_q10),
+                        8,
+                    ))),
             );
         }
-        self.cng.synth_state.copy_from_slice(&cng_sig_q14[length..length + MAX_LPC_ORDER]);
+        self.cng
+            .synth_state
+            .copy_from_slice(&cng_sig_q14[length..length + MAX_LPC_ORDER]);
     }
 }
 
@@ -1842,7 +1991,8 @@ impl Resampler {
                 let table_index = smulwb(index_q16 & 0xFFFF, 12) as usize;
                 let b = (index_q16 >> 16) as usize;
                 let near = &RESAMPLER_FRAC_FIR_12[table_index * 4..table_index * 4 + 4];
-                let far = &RESAMPLER_FRAC_FIR_12[(11 - table_index) * 4..(11 - table_index) * 4 + 4];
+                let far =
+                    &RESAMPLER_FRAC_FIR_12[(11 - table_index) * 4..(11 - table_index) * 4 + 4];
                 let mut res_q15 = smulbb(i32::from(buf[b]), i32::from(near[0]));
                 res_q15 = smlabb(res_q15, i32::from(buf[b + 1]), i32::from(near[1]));
                 res_q15 = smlabb(res_q15, i32::from(buf[b + 2]), i32::from(near[2]));
@@ -1862,7 +2012,8 @@ impl Resampler {
             }
             buf.copy_within(n_samples_in << 1..(n_samples_in << 1) + 8, 0);
         }
-        self.s_fir_i16.copy_from_slice(&buf[n_samples_in << 1..(n_samples_in << 1) + 8]);
+        self.s_fir_i16
+            .copy_from_slice(&buf[n_samples_in << 1..(n_samples_in << 1) + 8]);
     }
 
     /// Anti-alias with a second-order AR filter, then decimate with a
@@ -1891,7 +2042,8 @@ impl Resampler {
                 let b = (index_q16 >> 16) as usize;
                 let res_q6 = match self.fir_order {
                     18 => {
-                        let interpol_ind = smulwb(index_q16 & 0xFFFF, self.fir_fracs as i32) as usize;
+                        let interpol_ind =
+                            smulwb(index_q16 & 0xFFFF, self.fir_fracs as i32) as usize;
                         let near = &fir_coefs[9 * interpol_ind..];
                         let far = &fir_coefs[9 * (self.fir_fracs - 1 - interpol_ind)..];
                         let mut acc = smulwb(buf[b], i32::from(near[0]));
@@ -1907,7 +2059,11 @@ impl Resampler {
                         let half = order / 2;
                         let mut acc = smulwb(buf[b] + buf[b + order - 1], i32::from(fir_coefs[0]));
                         for j in 1..half {
-                            acc = smlawb(acc, buf[b + j] + buf[b + order - 1 - j], i32::from(fir_coefs[j]));
+                            acc = smlawb(
+                                acc,
+                                buf[b + j] + buf[b + order - 1 - j],
+                                i32::from(fir_coefs[j]),
+                            );
                         }
                         acc
                     }
@@ -1923,7 +2079,8 @@ impl Resampler {
             }
             buf.copy_within(n_samples_in..n_samples_in + self.fir_order, 0);
         }
-        self.s_fir_i32[..self.fir_order].copy_from_slice(&buf[n_samples_in..n_samples_in + self.fir_order]);
+        self.s_fir_i32[..self.fir_order]
+            .copy_from_slice(&buf[n_samples_in..n_samples_in + self.fir_order]);
     }
 
     fn process(&mut self, out: &mut [i16], input: &[i16]) {
@@ -1940,7 +2097,8 @@ impl Resampler {
     fn resample(&mut self, out: &mut [i16], input: &[i16]) {
         let in_len = input.len();
         let n_samples = self.fs_in_khz - self.input_delay;
-        self.delay_buf[self.input_delay..self.input_delay + n_samples].copy_from_slice(&input[..n_samples]);
+        self.delay_buf[self.input_delay..self.input_delay + n_samples]
+            .copy_from_slice(&input[..n_samples]);
         let head: Vec<i16> = self.delay_buf[..self.fs_in_khz].to_vec();
         self.process(out, &head);
         // The tail starts where the delay buffer's copy ended but stops a
@@ -1974,7 +2132,10 @@ fn stereo_decode_pred(dec: &mut RangeDecoder) -> [i32; 2] {
     for n in 0..2 {
         ix[n][0] += 3 * ix[n][2];
         let low_q13 = i32::from(STEREO_PRED_QUANT_Q13[ix[n][0] as usize]);
-        let step_q13 = smulwb(i32::from(STEREO_PRED_QUANT_Q13[ix[n][0] as usize + 1]) - low_q13, 6554);
+        let step_q13 = smulwb(
+            i32::from(STEREO_PRED_QUANT_Q13[ix[n][0] as usize + 1]) - low_q13,
+            6554,
+        );
         pred_q13[n] = smlabb(low_q13, step_q13, 2 * ix[n][1] + 1);
     }
     // The first weight is stored relative to the second, which is the form
@@ -1986,13 +2147,24 @@ fn stereo_decode_pred(dec: &mut RangeDecoder) -> [i32; 2] {
 /// Turn a decoded mid/side pair back into left and right, ramping the
 /// prediction weights over the first 8 ms so a change between frames is not
 /// heard as a step in the stereo image.
-fn stereo_ms_to_lr(state: &mut StereoState, x1: &mut [i16], x2: &mut [i16], pred_q13: &[i32; 2], fs_khz: usize, frame_length: usize) {
+fn stereo_ms_to_lr(
+    state: &mut StereoState,
+    x1: &mut [i16],
+    x2: &mut [i16],
+    pred_q13: &[i32; 2],
+    fs_khz: usize,
+    frame_length: usize,
+) {
     x1[0] = state.s_mid[0];
     x1[1] = state.s_mid[1];
     x2[0] = state.s_side[0];
     x2[1] = state.s_side[1];
-    state.s_mid.copy_from_slice(&x1[frame_length..frame_length + 2]);
-    state.s_side.copy_from_slice(&x2[frame_length..frame_length + 2]);
+    state
+        .s_mid
+        .copy_from_slice(&x1[frame_length..frame_length + 2]);
+    state
+        .s_side
+        .copy_from_slice(&x2[frame_length..frame_length + 2]);
 
     let mut pred0_q13 = state.pred_prev_q13[0];
     let mut pred1_q13 = state.pred_prev_q13[1];
@@ -2073,7 +2245,11 @@ impl SilkDecoder {
         mut dec: Option<&mut RangeDecoder>,
         pcm: &mut [i16],
     ) -> Result<usize, SilkError> {
-        let lost_flag = if lost { LostFlag::PacketLost } else { LostFlag::Normal };
+        let lost_flag = if lost {
+            LostFlag::PacketLost
+        } else {
+            LostFlag::Normal
+        };
         let internal = control.channels_internal;
 
         if first_frame {
@@ -2109,7 +2285,10 @@ impl SilkDecoder {
             }
         }
 
-        if control.channels_api == 2 && internal == 2 && (self.n_channels_api == 1 || self.n_channels_internal == 1) {
+        if control.channels_api == 2
+            && internal == 2
+            && (self.n_channels_api == 1 || self.n_channels_internal == 1)
+        {
             self.stereo.pred_prev_q13 = [0; 2];
             self.stereo.s_side = [0; 2];
             let resampler = self.channels[0].resampler.clone();
@@ -2206,7 +2385,11 @@ impl SilkDecoder {
         let frame_length = self.channels[0].frame_length;
         let mut tmp: [Vec<i16>; 2] = [vec![0i16; frame_length + 2], vec![0i16; frame_length + 2]];
 
-        let has_side = if lost_flag == LostFlag::Normal { !decode_only_middle } else { !self.prev_decode_only_middle };
+        let has_side = if lost_flag == LostFlag::Normal {
+            !decode_only_middle
+        } else {
+            !self.prev_decode_only_middle
+        };
 
         for n in 0..internal {
             if n == 0 || has_side {
@@ -2231,18 +2414,29 @@ impl SilkDecoder {
 
         if control.channels_api == 2 && internal == 2 {
             let (a, b) = tmp.split_at_mut(1);
-            stereo_ms_to_lr(&mut self.stereo, &mut a[0], &mut b[0], &ms_pred_q13, self.channels[0].fs_khz as usize, frame_length);
+            stereo_ms_to_lr(
+                &mut self.stereo,
+                &mut a[0],
+                &mut b[0],
+                &ms_pred_q13,
+                self.channels[0].fs_khz as usize,
+                frame_length,
+            );
         } else {
             tmp[0][0] = self.stereo.s_mid[0];
             tmp[0][1] = self.stereo.s_mid[1];
-            self.stereo.s_mid.copy_from_slice(&tmp[0][frame_length..frame_length + 2]);
+            self.stereo
+                .s_mid
+                .copy_from_slice(&tmp[0][frame_length..frame_length + 2]);
         }
 
-        let n_samples_out =
-            (frame_length * control.api_sample_rate as usize) / (self.channels[0].fs_khz as usize * 1000);
+        let n_samples_out = (frame_length * control.api_sample_rate as usize)
+            / (self.channels[0].fs_khz as usize * 1000);
         let mut resampled = vec![0i16; n_samples_out];
         for n in 0..control.channels_api.min(internal) {
-            self.channels[n].resampler.resample(&mut resampled, &tmp[n][1..1 + frame_length]);
+            self.channels[n]
+                .resampler
+                .resample(&mut resampled, &tmp[n][1..1 + frame_length]);
             if control.channels_api == 2 {
                 for i in 0..n_samples_out {
                     pcm[n + 2 * i] = resampled[i];
@@ -2257,7 +2451,9 @@ impl SilkDecoder {
                 // The right channel's resampler has been idle; run it over
                 // the same signal so it is warm if the stream goes back to
                 // stereo.
-                self.channels[1].resampler.resample(&mut resampled, &tmp[0][1..1 + frame_length]);
+                self.channels[1]
+                    .resampler
+                    .resample(&mut resampled, &tmp[0][1..1 + frame_length]);
                 for i in 0..n_samples_out {
                     pcm[1 + 2 * i] = resampled[i];
                 }
@@ -2283,7 +2479,13 @@ impl SilkDecoder {
 
 impl ChannelState {
     /// Decode one SILK frame of one channel into `out`.
-    fn decode_frame(&mut self, dec: Option<&mut RangeDecoder>, out: &mut [i16], lost_flag: LostFlag, cond_coding: CondCoding) {
+    fn decode_frame(
+        &mut self,
+        dec: Option<&mut RangeDecoder>,
+        out: &mut [i16],
+        lost_flag: LostFlag,
+        cond_coding: CondCoding,
+    ) {
         let length = self.frame_length;
         let mut ctrl = FrameControl::default();
 
@@ -2293,7 +2495,8 @@ impl ChannelState {
             (true, Some(dec)) => {
                 let mut pulses = [0i16; MAX_FRAME_LENGTH + SHELL_CODEC_FRAME_LENGTH];
                 self.decode_indices(dec, self.n_frames_decoded, false, cond_coding);
-                let (signal_type, offset_type) = (self.indices.signal_type, self.indices.quant_offset_type);
+                let (signal_type, offset_type) =
+                    (self.indices.signal_type, self.indices.quant_offset_type);
                 decode_pulses(dec, &mut pulses, signal_type, offset_type, length);
                 self.decode_parameters(&mut ctrl, cond_coding);
                 self.decode_core(&mut ctrl, out, &pulses);

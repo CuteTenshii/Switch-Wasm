@@ -68,7 +68,9 @@ impl Cpu {
         }
         let object_id = self.ipc_domain_object_id(tls);
         let iface = if self.ipc_is_domain_request(tls) {
-            self.domain_interface(handle, object_id).unwrap_or("hid:server").to_string()
+            self.domain_interface(handle, object_id)
+                .unwrap_or("hid:server")
+                .to_string()
         } else {
             Self::hid_interface_for(self.service_name(handle))
         };
@@ -97,9 +99,7 @@ impl Cpu {
                 // changes what the shared memory here publishes.
                 Some(1) | Some(11) | Some(21) | Some(31) | Some(66) | Some(67) | Some(91)
                 | Some(103) | Some(104) | Some(107) | Some(109) | Some(122..=125) | Some(128)
-                | Some(1000..=1004) => {
-                    self.write_ipc_response(tls, 0, &[], &[], &[])
-                }
+                | Some(1000..=1004) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // SetGestureOutputRanges(u32 width, u32 height, u64 aruid),
                 // added in 18.0.0 and named but not described on switchbrew.
                 // The shape is the request Tomodachi Life sends, which is
@@ -237,9 +237,7 @@ impl Cpu {
                     Ok(())
                 }
                 // PermitVibration / Begin/EndPermitVibrationSession.
-                Some(204) | Some(209) | Some(210) => {
-                    self.write_ipc_response(tls, 0, &[], &[], &[])
-                }
+                Some(204) | Some(209) | Some(210) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // IsVibrationPermitted / IsVibrationDeviceMounted: there is a
                 // pad and the page decides whether it can actually rumble.
                 Some(205) | Some(211) => {
@@ -451,7 +449,11 @@ mod tests {
         payload.extend_from_slice(&width.to_le_bytes());
         payload.extend_from_slice(&height.to_le_bytes());
         payload.extend_from_slice(&1u64.to_le_bytes());
-        assert_eq!(payload[..4], [0x00, 0x05, 0x00, 0x00], "1280, as the request carries it");
+        assert_eq!(
+            payload[..4],
+            [0x00, 0x05, 0x00, 0x00],
+            "1280, as the request carries it"
+        );
 
         for command in [92u32, 91] {
             let mut cpu = request(false, command, &payload);
@@ -488,14 +490,20 @@ mod tests {
         // device type, and the state in the *joy_dual* LIFO. A style's states
         // are only ever read out of its own LIFO.
         let slot = SHMEM + h::NPAD;
-        assert_eq!(cpu.mem.read_u32(slot + h::STYLE_SET).unwrap(), h::STYLE_JOY_DUAL);
+        assert_eq!(
+            cpu.mem.read_u32(slot + h::STYLE_SET).unwrap(),
+            h::STYLE_JOY_DUAL
+        );
         assert_eq!(
             cpu.mem.read_u32(slot + h::DEVICE_TYPE).unwrap(),
             h::DEVICE_JOY_LEFT | h::DEVICE_JOY_RIGHT
         );
         let entry = slot + h::JOY_DUAL_LIFO + h::LIFO_STORAGE;
         assert_eq!(cpu.mem.read_u64(entry + h::STATE_BUTTONS).unwrap(), 0x3);
-        assert_eq!(cpu.mem.read_u32(entry + h::STATE_ATTRIBUTES).unwrap() & 1, 1);
+        assert_eq!(
+            cpu.mem.read_u32(entry + h::STATE_ATTRIBUTES).unwrap() & 1,
+            1
+        );
         // And nothing was left in the Pro Controller's LIFO for a reader that
         // asked for FullKey to find.
         let full_key = slot + h::FULL_KEY_LIFO + h::LIFO_STORAGE;
@@ -531,9 +539,15 @@ mod tests {
         cpu.set_gamepad_state(0, 0, 0, 0, 0);
 
         let at = SHMEM + h::NPAD_CONDITION;
-        assert_eq!(cpu.mem.read_u32(at + h::NPAD_CONDITION_VALID).unwrap(), 1, "is_valid");
         assert_eq!(
-            cpu.mem.read_u32(at + h::NPAD_CONDITION_INITIALIZED).unwrap(),
+            cpu.mem.read_u32(at + h::NPAD_CONDITION_VALID).unwrap(),
+            1,
+            "is_valid"
+        );
+        assert_eq!(
+            cpu.mem
+                .read_u32(at + h::NPAD_CONDITION_INITIALIZED)
+                .unwrap(),
             1,
             "is_initialized"
         );
@@ -552,7 +566,11 @@ mod tests {
 
         marshal(&mut cpu, false, 121, &[]);
         cpu.hid_request(TLS, 9, Some(121)).unwrap();
-        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), HORIZONTAL, "command 121 agrees");
+        assert_eq!(
+            cpu.mem.read_u64(TLS + 0x20).unwrap(),
+            HORIZONTAL,
+            "command 121 agrees"
+        );
     }
 
     #[test]
@@ -562,7 +580,10 @@ mod tests {
         // meant before any of this: a Pro Controller in slot 0 and a handheld
         // in slot 8.
         use crate::cpu::hid_shmem as h;
-        assert_eq!(super::super::npad_presentation_for(0).style, h::STYLE_FULL_KEY);
+        assert_eq!(
+            super::super::npad_presentation_for(0).style,
+            h::STYLE_FULL_KEY
+        );
         // A set naming only styles this console cannot be has to resolve to
         // something rather than to nothing.
         assert_eq!(
@@ -592,7 +613,9 @@ mod tests {
             0,
             "Result for command {command_id}, npad {npad_id}"
         );
-        (0..len).map(|i| cpu.mem.read_u8(TLS + 0x20 + i).unwrap()).collect()
+        (0..len)
+            .map(|i| cpu.mem.read_u8(TLS + 0x20 + i).unwrap())
+            .collect()
     }
 
     #[test]

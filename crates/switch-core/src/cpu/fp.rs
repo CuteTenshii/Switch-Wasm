@@ -73,7 +73,8 @@ impl Cpu {
         if ((insn >> 24) & 0xFF) == 0b00011110
             && ((insn >> 21) & 1) == 1
             && ((insn >> 10) & 0b111) == 0b100
-            && ((insn >> 5) & 0x1F) == 0 {
+            && ((insn >> 5) & 0x1F) == 0
+        {
             return FpForm::MovImm;
         }
         // Scalar FP 1-source: bits[31:24] = 00011110, bit21 = 1,
@@ -84,14 +85,16 @@ impl Cpu {
         // `fcvt s0, d0` = 0x1E624000, `fmov s0, s15` = 0x1E2041E0.
         if ((insn >> 24) & 0xFF) == 0b00011110
             && ((insn >> 21) & 1) == 1
-            && ((insn >> 10) & 0x1F) == 0b10000 {
+            && ((insn >> 10) & 0x1F) == 0b10000
+        {
             return FpForm::OneSource;
         }
         // FMOV (register): move between GPR and a vector lane. bits[30:24] =
         // 0011110, bits[15:10] = 000000, bits[21:16] select direction/size.
         if ((insn >> 24) & 0x7F) == 0b0011110
             && ((insn >> 10) & 0x3F) == 0
-            && matches!((insn >> 16) & 0x3F, 0b100110 | 0b100111) {
+            && matches!((insn >> 16) & 0x3F, 0b100110 | 0b100111)
+        {
             return FpForm::MovReg;
         }
         // Conversion between floating-point and integer: bits[30:24] =
@@ -104,7 +107,8 @@ impl Cpu {
         // clobbered pointer).
         if ((insn >> 24) & 0x7F) == 0b0011110
             && ((insn >> 21) & 1) == 1
-            && ((insn >> 10) & 0x3F) == 0 {
+            && ((insn >> 10) & 0x3F) == 0
+        {
             return FpForm::IntConv;
         }
         // Floating-point <-> fixed-point conversion: bits[30:24] = 0011110
@@ -124,7 +128,8 @@ impl Cpu {
             && ((insn >> 30) & 0b11) == 0b01
             && ((insn >> 25) & 0b1111) == 0b1111
             && ((insn >> 21) & 0xF) == 0b0111
-            && ((insn >> 16) & 0x1F) == 0 {
+            && ((insn >> 16) & 0x1F) == 0
+        {
             return FpForm::CmpZero;
         }
         // 3-source fused ops: bits[31:24] = 00011111, `type` in bits[23:22],
@@ -496,100 +501,100 @@ impl Cpu {
     }
 
     pub(super) fn fp_data_proc(&mut self, insn: u32) -> Result<bool> {
-    let double = ((insn >> 22) & 1) == 1;
-    let rn = ((insn >> 5) & 0x1F) as u8;
-    let rd = (insn & 0x1F) as u8;
-    let rm = ((insn >> 16) & 0x1F) as u8;
-    // bit21 == 1. The 1-source group is handled above; bits[11:10] split the
-    // rest: 01 = FCCMP, 11 = FCSEL, 10 = the 2-source ops, 00 = FCMP. Both
-    // conditional forms have bit21 SET — testing for 0 made them dead code,
-    // so `fcsel s30, s31, s30, gt` came out unimplemented.
-    let cond = ((insn >> 12) & 0xF) as u8;
-    match (insn >> 10) & 0b11 {
-        0b01 => {
-            // FCCMP: compare, or set NZCV from the immediate when the
-            // condition fails.
-            if self.condition_holds(cond) {
+        let double = ((insn >> 22) & 1) == 1;
+        let rn = ((insn >> 5) & 0x1F) as u8;
+        let rd = (insn & 0x1F) as u8;
+        let rm = ((insn >> 16) & 0x1F) as u8;
+        // bit21 == 1. The 1-source group is handled above; bits[11:10] split the
+        // rest: 01 = FCCMP, 11 = FCSEL, 10 = the 2-source ops, 00 = FCMP. Both
+        // conditional forms have bit21 SET — testing for 0 made them dead code,
+        // so `fcsel s30, s31, s30, gt` came out unimplemented.
+        let cond = ((insn >> 12) & 0xF) as u8;
+        match (insn >> 10) & 0b11 {
+            0b01 => {
+                // FCCMP: compare, or set NZCV from the immediate when the
+                // condition fails.
+                if self.condition_holds(cond) {
+                    self.fp_cmp(rn, rm, double);
+                } else {
+                    self.nzcv = ((insn & 0xF) as u32) << 28;
+                }
+                return Ok(true);
+            }
+            0b11 => {
+                // FCSEL: select Vn or Vm on the condition.
+                let v = if self.condition_holds(cond) { rn } else { rm };
+                if double {
+                    let f = self.fp_get_f64(v);
+                    self.fp_set_f64(rd, f);
+                } else {
+                    let f = self.fp_get_f32(v);
+                    self.fp_set_f32(rd, f);
+                }
+                return Ok(true);
+            }
+            _ => {}
+        }
+        let fixed = (insn >> 10) & 0x3F;
+        if fixed == 0b001000 {
+            // FCMP / FCMPE. `opcode2` is bits[4:0]: bit3 selects the
+            // compare-with-zero form and bit4 the signalling (E) variant, which
+            // only differs in which NaNs raise an exception - not modelled.
+            // Reading them from bits[9:8] took them out of Rn instead, so
+            // `fcmp d0, #0.0` compared d0 with d0 and `fcmp d8, #0.0` compared
+            // against whatever v0 held.
+            let z = (insn >> 3) & 1;
+            if z == 1 {
+                self.fp_cmp_zero(rn, double);
+            } else {
                 self.fp_cmp(rn, rm, double);
-            } else {
-                self.nzcv = ((insn & 0xF) as u32) << 28;
             }
             return Ok(true);
         }
-        0b11 => {
-            // FCSEL: select Vn or Vm on the condition.
-            let v = if self.condition_holds(cond) { rn } else { rm };
-            if double {
-                let f = self.fp_get_f64(v);
-                self.fp_set_f64(rd, f);
-            } else {
-                let f = self.fp_get_f32(v);
-                self.fp_set_f32(rd, f);
+        // 2-source: opcode in bits[15:11] (its low bit is the fixed 1 of
+        // bits[11:10] = 10). Single precision is computed in f32 rather than in
+        // f64 and narrowed, which would round twice.
+        let op = (insn >> 11) & 0x1F;
+        if double {
+            let a = self.fp_get_f64(rn);
+            let b = self.fp_get_f64(rm);
+            if op == 3 {
+                self.note_divide_exceptions(a, b);
             }
-            return Ok(true);
-        }
-        _ => {}
-    }
-    let fixed = (insn >> 10) & 0x3F;
-    if fixed == 0b001000 {
-        // FCMP / FCMPE. `opcode2` is bits[4:0]: bit3 selects the
-        // compare-with-zero form and bit4 the signalling (E) variant, which
-        // only differs in which NaNs raise an exception - not modelled.
-        // Reading them from bits[9:8] took them out of Rn instead, so
-        // `fcmp d0, #0.0` compared d0 with d0 and `fcmp d8, #0.0` compared
-        // against whatever v0 held.
-        let z = (insn >> 3) & 1;
-        if z == 1 {
-            self.fp_cmp_zero(rn, double);
+            let r = match op {
+                1 => a * b,            // FMUL
+                3 => a / b,            // FDIV
+                5 => a + b,            // FADD
+                7 => a - b,            // FSUB
+                9 => fp_max(a, b),     // FMAX
+                11 => fp_min(a, b),    // FMIN
+                13 => fp_maxnum(a, b), // FMAXNM
+                15 => fp_minnum(a, b), // FMINNM
+                17 => -(a * b),        // FNMUL
+                _ => return Ok(false),
+            };
+            self.fp_set_f64(rd, r);
         } else {
-            self.fp_cmp(rn, rm, double);
+            let a = self.fp_get_f32(rn);
+            let b = self.fp_get_f32(rm);
+            if op == 3 {
+                self.note_divide_exceptions(f64::from(a), f64::from(b));
+            }
+            let r = match op {
+                1 => a * b,
+                3 => a / b,
+                5 => a + b,
+                7 => a - b,
+                9 => fp_max(f64::from(a), f64::from(b)) as f32,
+                11 => fp_min(f64::from(a), f64::from(b)) as f32,
+                13 => fp_maxnum(f64::from(a), f64::from(b)) as f32,
+                15 => fp_minnum(f64::from(a), f64::from(b)) as f32,
+                17 => -(a * b),
+                _ => return Ok(false),
+            };
+            self.fp_set_f32(rd, r);
         }
-        return Ok(true);
-    }
-    // 2-source: opcode in bits[15:11] (its low bit is the fixed 1 of
-    // bits[11:10] = 10). Single precision is computed in f32 rather than in
-    // f64 and narrowed, which would round twice.
-    let op = (insn >> 11) & 0x1F;
-    if double {
-        let a = self.fp_get_f64(rn);
-        let b = self.fp_get_f64(rm);
-        if op == 3 {
-            self.note_divide_exceptions(a, b);
-        }
-        let r = match op {
-            1 => a * b,            // FMUL
-            3 => a / b,            // FDIV
-            5 => a + b,            // FADD
-            7 => a - b,            // FSUB
-            9 => fp_max(a, b),     // FMAX
-            11 => fp_min(a, b),    // FMIN
-            13 => fp_maxnum(a, b), // FMAXNM
-            15 => fp_minnum(a, b), // FMINNM
-            17 => -(a * b),        // FNMUL
-            _ => return Ok(false),
-        };
-        self.fp_set_f64(rd, r);
-    } else {
-        let a = self.fp_get_f32(rn);
-        let b = self.fp_get_f32(rm);
-        if op == 3 {
-            self.note_divide_exceptions(f64::from(a), f64::from(b));
-        }
-        let r = match op {
-            1 => a * b,
-            3 => a / b,
-            5 => a + b,
-            7 => a - b,
-            9 => fp_max(f64::from(a), f64::from(b)) as f32,
-            11 => fp_min(f64::from(a), f64::from(b)) as f32,
-            13 => fp_maxnum(f64::from(a), f64::from(b)) as f32,
-            15 => fp_minnum(f64::from(a), f64::from(b)) as f32,
-            17 => -(a * b),
-            _ => return Ok(false),
-        };
-        self.fp_set_f32(rd, r);
-    }
-    Ok(true)
+        Ok(true)
     }
 
     /// `2^n` as an `f64`, built rather than computed.
@@ -629,7 +634,11 @@ impl Cpu {
     /// The square root of a negative has no real answer, which is Invalid.
     /// Negative zero is not negative for this purpose.
     fn fp_sqrt_is_invalid(&self, rn: u8, double: bool) -> bool {
-        let v = if double { self.fp_get_f64(rn) } else { f64::from(self.fp_get_f32(rn)) };
+        let v = if double {
+            self.fp_get_f64(rn)
+        } else {
+            f64::from(self.fp_get_f32(rn))
+        };
         v < 0.0
     }
 

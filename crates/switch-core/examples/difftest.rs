@@ -41,12 +41,21 @@ fn main() {
     // Stepwise: the high-water mark has to be read between instructions,
     // since it is what says how much of the output buffer the program filled.
     let mut high_water = OUTPUT as u64;
-    let run = common::drive(&mut cpu, Pace::Instructions, code.len() as u64 / 4, |cpu, _| {
-        high_water = high_water.max(cpu.read_reg(1)).max(cpu.read_reg(28));
-        Flow::Continue
-    });
+    let run = common::drive(
+        &mut cpu,
+        Pace::Instructions,
+        code.len() as u64 / 4,
+        |cpu, _| {
+            high_water = high_water.max(cpu.read_reg(1)).max(cpu.read_reg(28));
+            Flow::Continue
+        },
+    );
     if let Some(fault) = &run.fault {
-        println!("FAULT at step {} pc={:#x}: {fault}", run.steps, cpu.get_pc());
+        println!(
+            "FAULT at step {} pc={:#x}: {fault}",
+            run.steps,
+            cpu.get_pc()
+        );
     }
     let written = (high_water as u32).saturating_sub(OUTPUT).min(512 * 128);
     let dump = cpu.mem.dump(OUTPUT, written as usize).unwrap();

@@ -126,7 +126,12 @@ impl From<&crate::control::Nacp> for SaveDataQuota {
 }
 
 impl Cpu {
-    pub(super) fn fsp_srv_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+    pub(super) fn fsp_srv_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+        handle: u64,
+    ) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
@@ -392,7 +397,11 @@ impl Cpu {
     /// acted on. The presence bools are the exception, and they are the two
     /// answers this console is certain of: there is an SD card
     /// ([`crate::vfs`]), and there is nothing that could hold a game card.
-    pub(super) fn fs_device_operator_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn fs_device_operator_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         /// A CID is 0x10 bytes and an eMMC's extended CSD 0x200, whatever
         /// width the caller sized its buffer at.
         const CID_SIZE: usize = 0x10;
@@ -557,10 +566,18 @@ impl Cpu {
     /// ([`Cpu::set_romfs`]). Cmd 0 = Read(u64 offset, u64 size), cmd 4 =
     /// GetSize — the same shape as `IFile`, but offset-addressed rather than
     /// path-addressed since there's exactly one of these per process.
-    pub(super) fn fs_storage_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn fs_storage_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         // Which content this particular storage was opened on: the process's
         // own RomFS (command 200), or a system data archive (command 202).
-        let archive = self.fs_storage_archive.get(&self.ipc_object_key(tls, handle)).copied();
+        let archive = self
+            .fs_storage_archive
+            .get(&self.ipc_object_key(tls, handle))
+            .copied();
         let size = self.storage_source(archive).map_or(0, |s| s.len());
         match cmd_id {
             // Read(u64 offset, u64 size) -> bytes into the recv buffer.
@@ -600,7 +617,8 @@ impl Cpu {
                             break;
                         }
                         for (i, &byte) in buf[..got].iter().enumerate() {
-                            self.mem.write_u8(addr.wrapping_add(written + i as u32), byte)?;
+                            self.mem
+                                .write_u8(addr.wrapping_add(written + i as u32), byte)?;
                         }
                         written += got as u32;
                         pos += got as u64;
@@ -652,7 +670,10 @@ impl Cpu {
         // opened through tells them apart.
         let mount = self.mount_of(self.ipc_object_key(tls, handle));
         if crate::env_flag!("TRACE_IPC") {
-            eprintln!("[fs] pc={:#x} cmd={:?} path={:?} mount={mount:x?}", self.pc, cmd_id, path);
+            eprintln!(
+                "[fs] pc={:#x} cmd={:?} path={:?} mount={mount:x?}",
+                self.pc, cmd_id, path
+            );
         }
         match cmd_id {
             // CreateFile(u32 option, s64 size) / CreateDirectory.
@@ -756,8 +777,7 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
             }
             Some(1) => {
-                let count =
-                    self.fs_dirs.get(&key).map(|v| v.len() as u64).unwrap_or(0);
+                let count = self.fs_dirs.get(&key).map(|v| v.len() as u64).unwrap_or(0);
                 self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
             }
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -773,7 +793,12 @@ impl Cpu {
     /// settings can say so, but one told it *did* write them has no reason to
     /// doubt the zero bytes it reads next. Checkpoint wrote its `config.json`,
     /// re-opened it, found nothing, and gave up before its first frame.
-    pub(super) fn fs_file_request(&mut self, tls: u32, cmd_id: Option<u32>, key: u64) -> Result<()> {
+    pub(super) fn fs_file_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+        key: u64,
+    ) -> Result<()> {
         const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
         let path = self.fs_files.get(&key).cloned().unwrap_or_default();
         // The storage the file was opened on, inherited from its filesystem.
@@ -785,7 +810,10 @@ impl Cpu {
                 let offset = self.mem.read_u64(data.wrapping_add(8))?;
                 let requested = self.mem.read_u64(data.wrapping_add(0x10))? as usize;
                 let mut buf = vec![0u8; requested.min(1 << 24)];
-                let read = self.vfs_for(mount).read(&path, offset, &mut buf).unwrap_or(0);
+                let read = self
+                    .vfs_for(mount)
+                    .read(&path, offset, &mut buf)
+                    .unwrap_or(0);
                 if crate::env_flag!("TRACE_IPC") {
                     eprintln!(
                         "[fs-file] read path={:?} offset={:#x} size={:#x} -> {:#x} buf={:?}",
@@ -811,9 +839,7 @@ impl Cpu {
                 let offset = self.mem.read_u64(data.wrapping_add(8))?;
                 let requested = self.mem.read_u64(data.wrapping_add(0x10))?;
                 let bytes = match self.ipc_send_buffer(tls, 0) {
-                    Some((addr, len)) => {
-                        self.read_bytes(addr, (len as u64).min(requested) as u32)
-                    }
+                    Some((addr, len)) => self.read_bytes(addr, (len as u64).min(requested) as u32),
                     None => Vec::new(),
                 };
                 if crate::env_flag!("TRACE_IPC") {
@@ -855,7 +881,12 @@ impl Cpu {
     /// size and the journal beside it. Three commands differ only in which
     /// pair they name, and a reply that got the *width* wrong would be read as
     /// a size by all three.
-    pub(super) fn write_save_data_pair(&mut self, tls: u32, size: i64, journal_size: i64) -> Result<()> {
+    pub(super) fn write_save_data_pair(
+        &mut self,
+        tls: u32,
+        size: i64,
+        journal_size: i64,
+    ) -> Result<()> {
         let mut sizes = Vec::with_capacity(16);
         sizes.extend_from_slice(&size.to_le_bytes());
         sizes.extend_from_slice(&journal_size.to_le_bytes());
@@ -922,7 +953,11 @@ mod tests {
         cpu.fs.remove("/switch/cfg.json");
         write_request(&mut cpu, 3, &0u64.to_le_bytes());
         cpu.fs_file_request(TLS, Some(3), key).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 2 | (1 << 9), "path not found");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            2 | (1 << 9),
+            "path not found"
+        );
     }
 
     #[test]
@@ -967,7 +1002,11 @@ mod tests {
         write_request(&mut cpu, 1005, &[]);
         cpu.fsp_srv_request(TLS, Some(1005), 9).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 2, "the mode that was set");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            2,
+            "the mode that was set"
+        );
 
         // OutputApplicationInfoAccessLog, the writing end: a `Result` and
         // nothing else, which is what makes accepting and dropping it honest.
@@ -1025,8 +1064,7 @@ mod tests {
         cpu.record_handle(9, "fsp-srv");
 
         let mut attribute = [0u8; 0x48];
-        attribute[SYSTEM_SAVE_ID_AT..SYSTEM_SAVE_ID_AT + 8]
-            .copy_from_slice(&SAVE_ID.to_le_bytes());
+        attribute[SYSTEM_SAVE_ID_AT..SYSTEM_SAVE_ID_AT + 8].copy_from_slice(&SAVE_ID.to_le_bytes());
         write_request(&mut cpu, 52, &attribute);
         cpu.fsp_srv_request(TLS, Some(52), 9).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "opening the save");
@@ -1036,9 +1074,14 @@ mod tests {
         // A directory created through that filesystem lands in the save.
         write_path_request(&mut cpu, 2, "/settings", &[]);
         cpu.fs_request(TLS, Some(2), saves).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "creating a directory");
         assert_eq!(
-            cpu.save_data(SAVE_ID).and_then(|save| save.entry_type("/settings")),
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "creating a directory"
+        );
+        assert_eq!(
+            cpu.save_data(SAVE_ID)
+                .and_then(|save| save.entry_type("/settings")),
             Some(crate::vfs::ENTRY_TYPE_DIR),
             "the directory should be in the save"
         );
@@ -1137,8 +1180,16 @@ mod tests {
         }
         cpu.fs_device_operator_request(TLS, Some(2)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-        assert_eq!(cpu.read_bytes(BUFFER, 0x10), vec![0u8; 0x10], "no card, so no serial");
-        assert_eq!(cpu.read_bytes(BUFFER + 0x10, 0x10), vec![0xAA; 0x10], "past the buffer");
+        assert_eq!(
+            cpu.read_bytes(BUFFER, 0x10),
+            vec![0u8; 0x10],
+            "no card, so no serial"
+        );
+        assert_eq!(
+            cpu.read_bytes(BUFFER + 0x10, 0x10),
+            vec![0xAA; 0x10],
+            "past the buffer"
+        );
     }
 
     #[test]
@@ -1155,7 +1206,11 @@ mod tests {
 
         write_request(&mut cpu, 301, &[]);
         cpu.fs_device_operator_request(TLS, Some(301)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 2, "SpeedEmulationMode::Slower");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            2,
+            "SpeedEmulationMode::Slower"
+        );
     }
 
     #[test]
@@ -1173,7 +1228,10 @@ mod tests {
         write_request(&mut cpu, 501, &[]);
         cpu.fsp_srv_request(TLS, Some(501), 9).unwrap();
         let game_card = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
-        assert_eq!(cpu.service_name(game_card), Some("fsp-srv-gamecard-detection"));
+        assert_eq!(
+            cpu.service_name(game_card),
+            Some("fsp-srv-gamecard-detection")
+        );
 
         // GetEventHandle on each. A card arriving in one slot is not a card
         // arriving in the other, so one shared event would wake both waiters.
@@ -1184,7 +1242,8 @@ mod tests {
         assert_ne!(sd_event, 0, "sd detection event");
 
         write_request(&mut cpu, 0, &[]);
-        cpu.fs_detection_notifier_request(TLS, game_card, Some(0)).unwrap();
+        cpu.fs_detection_notifier_request(TLS, game_card, Some(0))
+            .unwrap();
         let game_card_event = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
         assert_ne!(game_card_event, sd_event, "one event per slot");
 

@@ -120,7 +120,9 @@ impl Harness {
         let mut mem = Memory::new();
         mem.map_zero(0x7000_0000, 0x4000).unwrap();
         let mut vmm = AddressSpace::new();
-        let base = vmm.map(0x7000_0000, 0x4000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+        let base = vmm
+            .map(0x7000_0000, 0x4000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
 
         let rt_addr = base;
         let vs_addr = base + 0x200;
@@ -137,9 +139,10 @@ impl Harness {
                 stats: &mut stats,
                 trace: false,
             };
-            for (words, addr) in
-                [(passthrough_vertex_shader(), vs_addr), (fragment_shader, fs_addr)]
-            {
+            for (words, addr) in [
+                (passthrough_vertex_shader(), vs_addr),
+                (fragment_shader, fs_addr),
+            ] {
                 for (i, chunk) in words.chunks_exact(4).enumerate() {
                     let word = u32::from_le_bytes(chunk.try_into().unwrap());
                     ctx.write_u32(addr + i as u64 * 4, word).unwrap();
@@ -173,7 +176,9 @@ impl Harness {
         // VertexAttribState[0] = aPosition: buffer 0, offset 0, 4x32 float.
         engine.regs.set(0x458, 0x01 << 21 | 7 << 27);
         // VertexAttribState[1] = aColor: buffer 0, offset 16, 4x32 float.
-        engine.regs.set(0x458 + 1, (16 << 7) | (0x01 << 21) | (7 << 27));
+        engine
+            .regs
+            .set(0x458 + 1, (16 << 7) | (0x01 << 21) | (7 << 27));
         // VertexArray[0]: stride 32, enabled.
         engine.regs.set(0x700, 32 | (1 << 12));
         engine.regs.set(0x701, (vbuf_addr >> 32) as u32);
@@ -181,9 +186,21 @@ impl Harness {
         engine.regs.set(0x7C0, (vbuf_addr >> 32) as u32);
         engine.regs.set(0x7C1, vbuf_addr as u32 + 3 * 32);
 
-        engine.last_draw =
-            DrawCall { primitive: 4, first: 0, count: 3, indexed: false, index_format: 0 };
-        Harness { mem, vmm, engine, host1x: Host1x::new(), stats: GpuStats::default(), base }
+        engine.last_draw = DrawCall {
+            primitive: 4,
+            first: 0,
+            count: 3,
+            indexed: false,
+            index_format: 0,
+        };
+        Harness {
+            mem,
+            vmm,
+            engine,
+            host1x: Host1x::new(),
+            stats: GpuStats::default(),
+            base,
+        }
     }
 
     /// Issue the draw through `renderer`.
@@ -258,10 +275,14 @@ impl Harness {
     pub fn write_vertex(&mut self, index: u32, pos: [f32; 4], color: [f32; 4]) {
         let addr = self.vertices() + index as u64 * 32;
         for (i, v) in pos.iter().enumerate() {
-            self.vmm.write_u32(&mut self.mem, addr + i as u64 * 4, v.to_bits()).unwrap();
+            self.vmm
+                .write_u32(&mut self.mem, addr + i as u64 * 4, v.to_bits())
+                .unwrap();
         }
         for (i, v) in color.iter().enumerate() {
-            self.vmm.write_u32(&mut self.mem, addr + 16 + i as u64 * 4, v.to_bits()).unwrap();
+            self.vmm
+                .write_u32(&mut self.mem, addr + 16 + i as u64 * 4, v.to_bits())
+                .unwrap();
         }
     }
 
@@ -279,7 +300,9 @@ impl Harness {
         let addr = self.base;
         // A depth-only pass has no colour surface, and there is nothing to
         // read rather than nothing to say about it.
-        let Some(rt) = self.engine.render_target(0).unwrap() else { return Vec::new() };
+        let Some(rt) = self.engine.render_target(0).unwrap() else {
+            return Vec::new();
+        };
         let (width, height) = (rt.width, rt.height);
         let ctx = self.ctx();
         let mut out = Vec::with_capacity((width * height) as usize);
@@ -296,7 +319,9 @@ impl Harness {
     pub fn texel(&mut self, x: u32, y: u32) -> u32 {
         let addr = self.base;
         let width = self.engine.render_target(0).unwrap().unwrap().width;
-        self.ctx().read_u32(addr + u64::from(y * width + x) * 4).unwrap()
+        self.ctx()
+            .read_u32(addr + u64::from(y * width + x) * 4)
+            .unwrap()
     }
 
     /// Move the colour attribute onto vertex array 1, stepped once per
@@ -321,7 +346,9 @@ impl Harness {
         self.engine.regs.set(0x706, addr as u32);
         self.engine.regs.set(0x707, 1); // divisor
         self.engine.regs.set(0x7C2, (addr >> 32) as u32);
-        self.engine.regs.set(0x7C3, addr as u32 + colours.len() as u32 * 16 - 1);
+        self.engine
+            .regs
+            .set(0x7C3, addr as u32 + colours.len() as u32 * 16 - 1);
         self.engine.set_instance_id(instance);
     }
 
@@ -365,8 +392,12 @@ impl Harness {
     pub fn multisample(&mut self, mode: u32, samples_x: u32, samples_y: u32) {
         self.engine.regs.set(MULTISAMPLE_ENABLE, 1);
         self.engine.regs.set(MULTISAMPLE_MODE, mode);
-        self.engine.regs.set(0x300, (TARGET_WIDTH / samples_x) << 16);
-        self.engine.regs.set(0x301, (TARGET_HEIGHT / samples_y) << 16);
+        self.engine
+            .regs
+            .set(0x300, (TARGET_WIDTH / samples_x) << 16);
+        self.engine
+            .regs
+            .set(0x301, (TARGET_HEIGHT / samples_y) << 16);
     }
 }
 

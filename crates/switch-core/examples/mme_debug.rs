@@ -13,7 +13,10 @@ fn main() {
     cpu.bootstrap();
     common::load_fallback_font(&mut cpu);
     let loaded = cpu.boot_homebrew(&data).expect("boot nro");
-    println!("entry = {:#010x}, env = {:#x}", loaded.entry, loaded.env_addr);
+    println!(
+        "entry = {:#010x}, env = {:#x}",
+        loaded.entry, loaded.env_addr
+    );
 
     let run = common::drive(&mut cpu, Pace::Blocks, budget, |_, _| Flow::Continue);
     match &run.fault {

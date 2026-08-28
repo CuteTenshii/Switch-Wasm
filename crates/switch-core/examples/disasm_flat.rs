@@ -13,7 +13,9 @@ fn main() {
     let count = common::opt_num(4).unwrap_or(48) as u32;
     for i in 0..count {
         let va = addr.wrapping_add(i * 4);
-        let Some(word) = data.get((va.wrapping_sub(base)) as usize..).and_then(|s| s.first_chunk::<4>())
+        let Some(word) = data
+            .get((va.wrapping_sub(base)) as usize..)
+            .and_then(|s| s.first_chunk::<4>())
         else {
             break;
         };

@@ -93,11 +93,15 @@ impl Ticket {
         }
 
         let mut wrapped_title_key = [0u8; 16];
-        wrapped_title_key.copy_from_slice(&data[body + BODY_OFFSET_TITLEKEY_BLOCK..body + BODY_OFFSET_TITLEKEY_BLOCK + 16]);
+        wrapped_title_key.copy_from_slice(
+            &data[body + BODY_OFFSET_TITLEKEY_BLOCK..body + BODY_OFFSET_TITLEKEY_BLOCK + 16],
+        );
         let titlekey_type = data[body + BODY_OFFSET_TITLEKEY_TYPE];
         let common_key_id = data[body + BODY_OFFSET_COMMON_KEY_ID];
         let mut rights_id = [0u8; 16];
-        rights_id.copy_from_slice(&data[body + BODY_OFFSET_RIGHTS_ID..body + BODY_OFFSET_RIGHTS_ID + 16]);
+        rights_id.copy_from_slice(
+            &data[body + BODY_OFFSET_RIGHTS_ID..body + BODY_OFFSET_RIGHTS_ID + 16],
+        );
 
         Ok(Ticket {
             rights_id,
@@ -182,7 +186,12 @@ mod tests {
     use super::*;
     use crate::source::SliceSource;
 
-    fn build_ticket(rights_id: [u8; 16], titlekey_type: u8, common_key_id: u8, wrapped_key: [u8; 16]) -> Vec<u8> {
+    fn build_ticket(
+        rights_id: [u8; 16],
+        titlekey_type: u8,
+        common_key_id: u8,
+        wrapped_key: [u8; 16],
+    ) -> Vec<u8> {
         let mut data = vec![0u8; 0x140 + 0x170];
         data[0..4].copy_from_slice(&0x010004u32.to_le_bytes()); // RSA-2048 SHA-256
         let body = 0x140;
@@ -190,7 +199,8 @@ mod tests {
             .copy_from_slice(&wrapped_key);
         data[body + BODY_OFFSET_TITLEKEY_TYPE] = titlekey_type;
         data[body + BODY_OFFSET_COMMON_KEY_ID] = common_key_id;
-        data[body + BODY_OFFSET_RIGHTS_ID..body + BODY_OFFSET_RIGHTS_ID + 16].copy_from_slice(&rights_id);
+        data[body + BODY_OFFSET_RIGHTS_ID..body + BODY_OFFSET_RIGHTS_ID + 16]
+            .copy_from_slice(&rights_id);
         data
     }
 
@@ -217,7 +227,10 @@ mod tests {
         let wrapped = [0x22u8; 16];
         for common_key_id in [0u8, 0x07, 0x0b] {
             let data = build_ticket([0u8; 16], 0, common_key_id, wrapped);
-            assert_eq!(Ticket::parse(&data).unwrap().title_key_block().unwrap(), wrapped);
+            assert_eq!(
+                Ticket::parse(&data).unwrap().title_key_block().unwrap(),
+                wrapped
+            );
         }
     }
 
@@ -245,7 +258,10 @@ mod tests {
     }
 
     /// Lay out a fake NSP buffer: some padding, then the ticket.
-    fn nsp_with_ticket(tik_bytes: &[u8], rights_id: &[u8; 16]) -> (Vec<u8>, Vec<crate::nsp::Pfs0File>) {
+    fn nsp_with_ticket(
+        tik_bytes: &[u8],
+        rights_id: &[u8; 16],
+    ) -> (Vec<u8>, Vec<crate::nsp::Pfs0File>) {
         let tik_offset = 0x1000;
         let mut nsp_data = vec![0u8; tik_offset + tik_bytes.len()];
         nsp_data[tik_offset..].copy_from_slice(tik_bytes);
@@ -259,12 +275,18 @@ mod tests {
 
     #[test]
     fn finds_a_ticket_from_an_nsp_file_list() {
-        let rights_id = [0x01u8, 0x00, 0x48, 0x90, 0x11, 0x7b, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b];
+        let rights_id = [
+            0x01u8, 0x00, 0x48, 0x90, 0x11, 0x7b, 0x20, 0, 0, 0, 0, 0, 0, 0, 0, 0x0b,
+        ];
         let wrapped = [0x88u8; 16];
-        let (nsp_data, files) = nsp_with_ticket(&build_ticket(rights_id, 0, 0x09, wrapped), &rights_id);
+        let (nsp_data, files) =
+            nsp_with_ticket(&build_ticket(rights_id, 0, 0x09, wrapped), &rights_id);
 
         let src = SliceSource(&nsp_data);
-        assert_eq!(find_wrapped_title_key(&rights_id, &files, &src).unwrap(), wrapped);
+        assert_eq!(
+            find_wrapped_title_key(&rights_id, &files, &src).unwrap(),
+            wrapped
+        );
         // A rights id with no matching ticket file reports a clear error.
         assert!(find_wrapped_title_key(&[0xffu8; 16], &files, &src).is_err());
     }
@@ -301,7 +323,8 @@ mod tests {
         let wrapped = crate::crypto::aes128_encrypt_block(&kek, &title_key);
         // `common_key_id` 0 against content whose key generation is 8 —
         // Asphalt 9's shape exactly.
-        let (nsp_data, files) = nsp_with_ticket(&build_ticket(rights_id, 0, 0, wrapped), &rights_id);
+        let (nsp_data, files) =
+            nsp_with_ticket(&build_ticket(rights_id, 0, 0, wrapped), &rights_id);
         let nca = rights_id_nca(rights_id, 8);
 
         let mut keys = KeySet::default();
@@ -324,7 +347,8 @@ mod tests {
         assert!(!load_bundled_title_key(&mut keys, &nca, &[], &SliceSource(&[])).unwrap());
 
         let wrapped = [0x77u8; 16];
-        let (nsp_data, files) = nsp_with_ticket(&build_ticket(rights_id, 0, 0, wrapped), &rights_id);
+        let (nsp_data, files) =
+            nsp_with_ticket(&build_ticket(rights_id, 0, 0, wrapped), &rights_id);
         assert!(load_bundled_title_key(&mut keys, &nca, &files, &SliceSource(&nsp_data)).unwrap());
         assert_eq!(keys.wrapped_title_key(&rights_id), Some(wrapped));
         assert_eq!(keys.title_keys.len(), 1);

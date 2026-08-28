@@ -16,8 +16,8 @@
 //! bytes; [`handle_offset`] carries the story of why that took a second
 //! look.
 
-use crate::gpu::exec::ExecCtx;
 use crate::gpu::bcn::{self, Codec};
+use crate::gpu::exec::ExecCtx;
 use crate::gpu::surface::{self, bilinear, ColorFormat, Layout};
 use crate::{Error, Result};
 use std::cell::RefCell;
@@ -115,7 +115,9 @@ fn decode_swizzle_source(bits: u32) -> Result<SwizzleSource> {
         // ONE_INT and ONE_FLOAT differ only for an integer texture, which
         // this sampler does not produce; 1 is not a documented value.
         6 | 7 => Ok(SwizzleSource::One),
-        other => Err(Error::Gpu(format!("texture: unknown TIC swizzle source {other}"))),
+        other => Err(Error::Gpu(format!(
+            "texture: unknown TIC swizzle source {other}"
+        ))),
     }
 }
 
@@ -196,7 +198,10 @@ impl Texture {
                     Layout::BlockLinear { .. } => blocks_wide * bytes,
                 };
                 let va = layer_base
-                    + self.layout.offset((x / block_w) * bytes, y / block_h, width_bytes) as u64;
+                    + self
+                        .layout
+                        .offset((x / block_w) * bytes, y / block_h, width_bytes)
+                        as u64;
                 let index = ((y % block_h) * block_w + (x % block_w)) as usize;
                 // Decoding a block yields every texel in it, and the next
                 // fetch almost always wants one of them: bilinear asks for
@@ -308,8 +313,6 @@ impl BlockCache {
         way
     }
 }
-
-
 
 /// How a TIC's `COMPONENTS_SIZES` and `R_DATA_TYPE` pair describes its texels.
 ///
@@ -450,7 +453,11 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     // `DEPTH_MINUS_ONE`, which only an array has: a plain 2D image leaves
     // whatever is in the field, and reading it would give it layers it has
     // no memory for.
-    let layers = if texture_type == 3 { ((dw5 >> 16) & 0x3fff) + 1 } else { 1 };
+    let layers = if texture_type == 3 {
+        ((dw5 >> 16) & 0x3fff) + 1
+    } else {
+        1
+    };
     // The TIC carries no layer stride: it is the size of one swizzled slice,
     // worked out from the extent and the layout the same way the offset of a
     // texel inside one is.
@@ -498,7 +505,8 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
 /// Where to write every texture as a PPM (`DUMP_TEX=<dir>`), if anywhere.
 fn dump_textures() -> Option<&'static str> {
     static DIR: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| std::env::var("DUMP_TEX").ok()).as_deref()
+    DIR.get_or_init(|| std::env::var("DUMP_TEX").ok())
+        .as_deref()
 }
 
 /// Decode a whole texture through the same path a sample takes and write it
@@ -579,7 +587,14 @@ pub fn sample(
     layer: u32,
 ) -> Result<[f32; 4]> {
     let descriptors = read_descriptors(ctx, tex_header_pool, tex_sampler_pool, handle)?;
-    sample_with(ctx, &descriptors, u, v, layer, &RefCell::new(BlockCache::default()))
+    sample_with(
+        ctx,
+        &descriptors,
+        u,
+        v,
+        layer,
+        &RefCell::new(BlockCache::default()),
+    )
 }
 
 /// Sample already-resolved descriptors at normalized coordinates `(u, v)` of
@@ -626,7 +641,6 @@ pub fn sample_with(
     Ok(apply_swizzle(texture.swizzle, texel))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -644,7 +658,9 @@ mod tests {
         let mut mem = Memory::new();
         mem.map_zero(0x8000_0000, 0x2000).unwrap();
         let mut vmm = AddressSpace::new();
-        let base = vmm.map(0x8000_0000, 0x2000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+        let base = vmm
+            .map(0x8000_0000, 0x2000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
         (mem, vmm, base)
     }
 
@@ -661,11 +677,14 @@ mod tests {
         let (mut mem, vmm, base) = harness();
         let tex_addr = base + 0x400;
         // dword0: COMPONENTS_SIZES=A8B8G8R8(0x08), R_DATA_TYPE=UNORM(2)@bit7.
-        vmm.write_u32(&mut mem, base, 0x08 | (2 << 7) | IDENTITY_SWIZZLE).unwrap();
+        vmm.write_u32(&mut mem, base, 0x08 | (2 << 7) | IDENTITY_SWIZZLE)
+            .unwrap();
         // dword1: pitch-aligned low address bits (32B units).
-        vmm.write_u32(&mut mem, base + 4, ((tex_addr as u32) >> 5) << 5).unwrap();
+        vmm.write_u32(&mut mem, base + 4, ((tex_addr as u32) >> 5) << 5)
+            .unwrap();
         // dword2: HEADER_VERSION=PITCH(2)@bits21-23, plus address hi16.
-        vmm.write_u32(&mut mem, base + 8, ((tex_addr >> 32) as u32) | (2 << 21)).unwrap();
+        vmm.write_u32(&mut mem, base + 8, ((tex_addr >> 32) as u32) | (2 << 21))
+            .unwrap();
         // dword3: pitch = 64 bytes, in 32B units -> 2.
         vmm.write_u32(&mut mem, base + 12, 2).unwrap();
         // dword4: width - 1 = 15 (width 16).
@@ -675,7 +694,13 @@ mod tests {
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         let image = read_image(&ctx, base).unwrap();
         assert_eq!(image.addr, tex_addr);
         assert_eq!(image.width, 16);
@@ -707,20 +732,26 @@ mod tests {
         pitch_bytes: Option<u32>,
     ) {
         // COMPONENTS_SIZES = DXT1 (0x24), R_DATA_TYPE = UNORM.
-        vmm.write_u32(mem, tic_addr, 0x24 | (2 << 7) | IDENTITY_SWIZZLE).unwrap();
+        vmm.write_u32(mem, tic_addr, 0x24 | (2 << 7) | IDENTITY_SWIZZLE)
+            .unwrap();
         match pitch_bytes {
             Some(pitch) => {
-                vmm.write_u32(mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5).unwrap();
-                vmm.write_u32(mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21)).unwrap();
+                vmm.write_u32(mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+                    .unwrap();
+                vmm.write_u32(mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21))
+                    .unwrap();
                 vmm.write_u32(mem, tic_addr + 12, pitch / 32).unwrap();
             }
             None => {
-                vmm.write_u32(mem, tic_addr + 4, ((tex_addr as u32) >> 9) << 9).unwrap();
-                vmm.write_u32(mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (3 << 21)).unwrap();
+                vmm.write_u32(mem, tic_addr + 4, ((tex_addr as u32) >> 9) << 9)
+                    .unwrap();
+                vmm.write_u32(mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (3 << 21))
+                    .unwrap();
                 vmm.write_u32(mem, tic_addr + 12, 0).unwrap(); // block_height_gobs = 1
             }
         }
-        vmm.write_u32(mem, tic_addr + 16, (width - 1) | TYPE_2D).unwrap();
+        vmm.write_u32(mem, tic_addr + 16, (width - 1) | TYPE_2D)
+            .unwrap();
         vmm.write_u32(mem, tic_addr + 20, height - 1).unwrap();
     }
 
@@ -737,26 +768,51 @@ mod tests {
 
         // Row 0: red, green, blue, white. Row 1 starts one 32-byte pitch on.
         for (i, colour) in [RED, GREEN, BLUE, WHITE].into_iter().enumerate() {
-            vmm.write_u64(&mut mem, tex_addr + i as u64 * 8, flat_bc1_block(colour)).unwrap();
+            vmm.write_u64(&mut mem, tex_addr + i as u64 * 8, flat_bc1_block(colour))
+                .unwrap();
         }
-        vmm.write_u64(&mut mem, tex_addr + 32, flat_bc1_block(GREEN)).unwrap();
+        vmm.write_u64(&mut mem, tex_addr + 32, flat_bc1_block(GREEN))
+            .unwrap();
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let ctx =
-            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         let texture = read_image(&ctx, tic_addr).unwrap();
         assert_eq!(texture.kind, TexelKind::Block(Codec::Bc1));
         assert_eq!(texture.width, 16);
 
         // Every texel of a block reads as that block's colour.
-        assert_eq!(texture.texel_cached(0, 0, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(texture.texel_cached(3, 3, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(texture.texel_cached(4, 0, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0]);
-        assert_eq!(texture.texel_cached(8, 2, 0, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
-        assert_eq!(texture.texel_cached(15, 3, 0, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(
+            texture.texel_cached(0, 0, 0, &ctx).unwrap(),
+            [1.0, 0.0, 0.0, 1.0]
+        );
+        assert_eq!(
+            texture.texel_cached(3, 3, 0, &ctx).unwrap(),
+            [1.0, 0.0, 0.0, 1.0]
+        );
+        assert_eq!(
+            texture.texel_cached(4, 0, 0, &ctx).unwrap(),
+            [0.0, 1.0, 0.0, 1.0]
+        );
+        assert_eq!(
+            texture.texel_cached(8, 2, 0, &ctx).unwrap(),
+            [0.0, 0.0, 1.0, 1.0]
+        );
+        assert_eq!(
+            texture.texel_cached(15, 3, 0, &ctx).unwrap(),
+            [1.0, 1.0, 1.0, 1.0]
+        );
         // The next block *row* is one pitch on, not one block on.
-        assert_eq!(texture.texel_cached(0, 4, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0]);
+        assert_eq!(
+            texture.texel_cached(0, 4, 0, &ctx).unwrap(),
+            [0.0, 1.0, 0.0, 1.0]
+        );
     }
 
     /// The same, swizzled: the block-linear stride of a compressed surface is
@@ -773,7 +829,8 @@ mod tests {
         let width_bytes = 4 * 8; // four blocks per row, eight bytes each
         let place = |mem: &mut Memory, bx: u32, by: u32, colour: u16| {
             let at = block_linear_offset(bx * 8, by, width_bytes, 1);
-            vmm.write_u64(mem, tex_addr + at as u64, flat_bc1_block(colour)).unwrap();
+            vmm.write_u64(mem, tex_addr + at as u64, flat_bc1_block(colour))
+                .unwrap();
         };
         place(&mut mem, 0, 0, RED);
         place(&mut mem, 3, 0, WHITE);
@@ -781,13 +838,32 @@ mod tests {
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let ctx =
-            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         let texture = read_image(&ctx, tic_addr).unwrap();
-        assert_eq!(texture.layout, Layout::BlockLinear { block_height_gobs: 1 });
-        assert_eq!(texture.texel_cached(1, 1, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(texture.texel_cached(13, 2, 0, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
-        assert_eq!(texture.texel_cached(2, 5, 0, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
+        assert_eq!(
+            texture.layout,
+            Layout::BlockLinear {
+                block_height_gobs: 1
+            }
+        );
+        assert_eq!(
+            texture.texel_cached(1, 1, 0, &ctx).unwrap(),
+            [1.0, 0.0, 0.0, 1.0]
+        );
+        assert_eq!(
+            texture.texel_cached(13, 2, 0, &ctx).unwrap(),
+            [1.0, 1.0, 1.0, 1.0]
+        );
+        assert_eq!(
+            texture.texel_cached(2, 5, 0, &ctx).unwrap(),
+            [0.0, 0.0, 1.0, 1.0]
+        );
     }
 
     /// An sRGB texture stores encoded values and hands the shader linear ones.
@@ -800,11 +876,19 @@ mod tests {
         let tic_addr = base;
         let tex_addr = base + 0x400;
         // COMPONENTS_SIZES = ASTC_2D_8X5 (0x55), UNORM, pitch layout.
-        vmm.write_u32(&mut mem, tic_addr, 0x55 | (2 << 7) | IDENTITY_SWIZZLE).unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5).unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21)).unwrap();
+        vmm.write_u32(&mut mem, tic_addr, 0x55 | (2 << 7) | IDENTITY_SWIZZLE)
+            .unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+            .unwrap();
+        vmm.write_u32(
+            &mut mem,
+            tic_addr + 8,
+            ((tex_addr >> 32) as u32) | (2 << 21),
+        )
+        .unwrap();
         vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap(); // pitch 32 bytes = two blocks
-        vmm.write_u32(&mut mem, tic_addr + 16, 15 | TYPE_2D).unwrap(); // width 16
+        vmm.write_u32(&mut mem, tic_addr + 16, 15 | TYPE_2D)
+            .unwrap(); // width 16
         vmm.write_u32(&mut mem, tic_addr + 20, 9).unwrap(); // height 10
 
         // A void-extent block is the simplest valid ASTC block: one flat
@@ -824,18 +908,46 @@ mod tests {
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let ctx =
-            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         let texture = read_image(&ctx, tic_addr).unwrap();
-        assert_eq!(texture.kind, TexelKind::Block(Codec::Astc { width: 8, height: 5 }));
+        assert_eq!(
+            texture.kind,
+            TexelKind::Block(Codec::Astc {
+                width: 8,
+                height: 5
+            })
+        );
 
-        assert_eq!(texture.texel_cached(0, 0, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(texture.texel_cached(7, 4, 0, &ctx).unwrap(), [1.0, 0.0, 0.0, 1.0], "last texel of it");
-        assert_eq!(texture.texel_cached(8, 0, 0, &ctx).unwrap(), [0.0, 1.0, 0.0, 1.0], "next block across");
+        assert_eq!(
+            texture.texel_cached(0, 0, 0, &ctx).unwrap(),
+            [1.0, 0.0, 0.0, 1.0]
+        );
+        assert_eq!(
+            texture.texel_cached(7, 4, 0, &ctx).unwrap(),
+            [1.0, 0.0, 0.0, 1.0],
+            "last texel of it"
+        );
+        assert_eq!(
+            texture.texel_cached(8, 0, 0, &ctx).unwrap(),
+            [0.0, 1.0, 0.0, 1.0],
+            "next block across"
+        );
         // Row 5 is the second block row, which it would not be for a 5-tall
         // footprint read as 8 tall.
-        assert_eq!(texture.texel_cached(0, 5, 0, &ctx).unwrap(), [0.0, 0.0, 1.0, 1.0]);
-        assert_eq!(texture.texel_cached(15, 9, 0, &ctx).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(
+            texture.texel_cached(0, 5, 0, &ctx).unwrap(),
+            [0.0, 0.0, 1.0, 1.0]
+        );
+        assert_eq!(
+            texture.texel_cached(15, 9, 0, &ctx).unwrap(),
+            [1.0, 1.0, 1.0, 1.0]
+        );
     }
 
     #[test]
@@ -845,27 +957,43 @@ mod tests {
         let tex_addr = base + 0x400;
         write_bc1_tic(&mut mem, &vmm, tic_addr, tex_addr, 16, 8, Some(32));
         // Mid grey: 0x8410 is RGB565's closest to 50% in every channel.
-        vmm.write_u64(&mut mem, tex_addr, flat_bc1_block(0x8410)).unwrap();
+        vmm.write_u64(&mut mem, tex_addr, flat_bc1_block(0x8410))
+            .unwrap();
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let ctx =
-            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         let linear = read_image(&ctx, tic_addr).unwrap();
         assert!(!linear.srgb);
         let plain = linear.texel_cached(0, 0, 0, &ctx).unwrap()[0];
 
         // Set the sRGB bit and read the same bytes again.
-        vmm.write_u32(&mut mem, tic_addr + 16, 15 | TYPE_2D | (1 << 22)).unwrap();
-        let ctx =
-            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        vmm.write_u32(&mut mem, tic_addr + 16, 15 | TYPE_2D | (1 << 22))
+            .unwrap();
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         let encoded = read_image(&ctx, tic_addr).unwrap();
         assert!(encoded.srgb);
         let converted = encoded.texel_cached(0, 0, 0, &ctx).unwrap();
         assert!(converted[0] < plain, "sRGB decoding darkens a mid grey");
         // 565's mid grey expands to 132/255 = 0.5176, whose linear value is
         // ((0.5176 + 0.055) / 1.055) ^ 2.4.
-        assert!((converted[0] - 0.2307).abs() < 0.001, "got {}", converted[0]);
+        assert!(
+            (converted[0] - 0.2307).abs() < 0.001,
+            "got {}",
+            converted[0]
+        );
         assert_eq!(converted[3], 1.0, "alpha is never sRGB-encoded");
     }
 
@@ -881,8 +1009,8 @@ mod tests {
         assert_eq!(plain(0x03, 7).bytes_per_pixel, 8);
         assert_eq!(plain(0x01, 7).raw, 0xC0); // R32_G32_B32_A32 -> RGBA32Float
         assert_eq!(plain(0x0F, 7).raw, 0xE5); // R32             -> R32Float
-        // The UNORM readings of those sizes are a different format, and none
-        // of them is one this decodes.
+                                              // The UNORM readings of those sizes are a different format, and none
+                                              // of them is one this decodes.
         assert!(texel_kind_for(0x03, 2).is_err());
         // A size that is not a format at all still reports as one.
         assert!(texel_kind_for(0x09, 7).is_err());
@@ -892,21 +1020,52 @@ mod tests {
     fn every_compressed_tic_format_maps_to_its_codec() {
         // BC6H's two data types are the signed and unsigned half readings of
         // the same block layout, and deko3d numbers SF16 below UF16.
-        assert_eq!(texel_kind_for(0x10, 7).unwrap(), TexelKind::Block(Codec::Bc6hSf16));
-        assert_eq!(texel_kind_for(0x11, 7).unwrap(), TexelKind::Block(Codec::Bc6hUf16));
-        assert_eq!(texel_kind_for(0x24, 2).unwrap(), TexelKind::Block(Codec::Bc1));
-        assert_eq!(texel_kind_for(0x26, 2).unwrap(), TexelKind::Block(Codec::Bc3));
-        assert_eq!(texel_kind_for(0x27, 1).unwrap(), TexelKind::Block(Codec::Bc4Snorm));
-        assert_eq!(texel_kind_for(0x28, 2).unwrap(), TexelKind::Block(Codec::Bc5Unorm));
-        assert_eq!(texel_kind_for(0x17, 2).unwrap(), TexelKind::Block(Codec::Bc7));
+        assert_eq!(
+            texel_kind_for(0x10, 7).unwrap(),
+            TexelKind::Block(Codec::Bc6hSf16)
+        );
+        assert_eq!(
+            texel_kind_for(0x11, 7).unwrap(),
+            TexelKind::Block(Codec::Bc6hUf16)
+        );
+        assert_eq!(
+            texel_kind_for(0x24, 2).unwrap(),
+            TexelKind::Block(Codec::Bc1)
+        );
+        assert_eq!(
+            texel_kind_for(0x26, 2).unwrap(),
+            TexelKind::Block(Codec::Bc3)
+        );
+        assert_eq!(
+            texel_kind_for(0x27, 1).unwrap(),
+            TexelKind::Block(Codec::Bc4Snorm)
+        );
+        assert_eq!(
+            texel_kind_for(0x28, 2).unwrap(),
+            TexelKind::Block(Codec::Bc5Unorm)
+        );
+        assert_eq!(
+            texel_kind_for(0x17, 2).unwrap(),
+            TexelKind::Block(Codec::Bc7)
+        );
 
         // Every ASTC footprint Maxwell can name, and the fourteen of them are
         // not contiguous: 0x43 is not a format.
         let footprints = [
-            (0x40, 4, 4), (0x41, 5, 5), (0x42, 6, 6), (0x44, 8, 8),
-            (0x45, 10, 10), (0x46, 12, 12), (0x50, 5, 4), (0x51, 6, 5),
-            (0x52, 8, 6), (0x53, 10, 8), (0x54, 12, 10), (0x55, 8, 5),
-            (0x56, 10, 5), (0x57, 10, 6),
+            (0x40, 4, 4),
+            (0x41, 5, 5),
+            (0x42, 6, 6),
+            (0x44, 8, 8),
+            (0x45, 10, 10),
+            (0x46, 12, 12),
+            (0x50, 5, 4),
+            (0x51, 6, 5),
+            (0x52, 8, 6),
+            (0x53, 10, 8),
+            (0x54, 12, 10),
+            (0x55, 8, 5),
+            (0x56, 10, 5),
+            (0x57, 10, 6),
         ];
         for (raw, width, height) in footprints {
             assert_eq!(
@@ -915,10 +1074,15 @@ mod tests {
                 "COMPONENTS_SIZES {raw:#x}"
             );
         }
-        assert!(texel_kind_for(0x43, 2).is_err(), "0x43 is not an ASTC footprint");
+        assert!(
+            texel_kind_for(0x43, 2).is_err(),
+            "0x43 is not an ASTC footprint"
+        );
         // A block never carries more texels than the largest footprint.
         for (raw, width, height) in footprints {
-            let TexelKind::Block(codec) = texel_kind_for(raw, 2).unwrap() else { panic!() };
+            let TexelKind::Block(codec) = texel_kind_for(raw, 2).unwrap() else {
+                panic!()
+            };
             assert_eq!(codec.block_size(), (width as u32, height as u32));
             assert_eq!(codec.bytes_per_block(), 16);
             assert!((width as usize) * (height as usize) <= crate::gpu::bcn::MAX_TEXELS);
@@ -934,30 +1098,56 @@ mod tests {
         let tsc_addr = base + 0x100;
         let tex_addr = base + 0x400;
 
-        vmm.write_u32(&mut mem, tic_addr, 0x08 | (2 << 7) | IDENTITY_SWIZZLE).unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5).unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21)).unwrap();
+        vmm.write_u32(&mut mem, tic_addr, 0x08 | (2 << 7) | IDENTITY_SWIZZLE)
+            .unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+            .unwrap();
+        vmm.write_u32(
+            &mut mem,
+            tic_addr + 8,
+            ((tex_addr >> 32) as u32) | (2 << 21),
+        )
+        .unwrap();
         vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap(); // pitch 32
         vmm.write_u32(&mut mem, tic_addr + 16, 3 | TYPE_2D).unwrap(); // width 4
         vmm.write_u32(&mut mem, tic_addr + 20, 0).unwrap(); // height 1
-        // MIRROR on u, clamp on v; nearest on both.
+                                                            // MIRROR on u, clamp on v; nearest on both.
         vmm.write_u32(&mut mem, tsc_addr, 1 | (2 << 3)).unwrap();
         vmm.write_u32(&mut mem, tsc_addr + 4, 1 | (1 << 4)).unwrap();
-        for (i, colour) in [0xFF0000FFu32, 0xFF00FF00, 0xFFFF0000, 0xFFFFFFFF].iter().enumerate() {
-            vmm.write_u32(&mut mem, tex_addr + 4 * i as u64, *colour).unwrap();
+        for (i, colour) in [0xFF0000FFu32, 0xFF00FF00, 0xFFFF0000, 0xFFFFFFFF]
+            .iter()
+            .enumerate()
+        {
+            vmm.write_u32(&mut mem, tex_addr + 4 * i as u64, *colour)
+                .unwrap();
         }
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
 
         // u = 1.9 mirrors to 0.1 -> texel 0 (red); plain repeat would give
         // 0.9 -> texel 3 (white).
-        assert_eq!(sample(&ctx, tic_addr, tsc_addr, 0, 1.9, 0.5, 0).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(
+            sample(&ctx, tic_addr, tsc_addr, 0, 1.9, 0.5, 0).unwrap(),
+            [1.0, 0.0, 0.0, 1.0]
+        );
         // u = -0.1 mirrors to 0.1 as well.
-        assert_eq!(sample(&ctx, tic_addr, tsc_addr, 0, -0.1, 0.5, 0).unwrap(), [1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(
+            sample(&ctx, tic_addr, tsc_addr, 0, -0.1, 0.5, 0).unwrap(),
+            [1.0, 0.0, 0.0, 1.0]
+        );
         // Inside the first period nothing changes.
-        assert_eq!(sample(&ctx, tic_addr, tsc_addr, 0, 0.9, 0.5, 0).unwrap(), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(
+            sample(&ctx, tic_addr, tsc_addr, 0, 0.9, 0.5, 0).unwrap(),
+            [1.0, 1.0, 1.0, 1.0]
+        );
     }
 
     #[test]
@@ -970,7 +1160,13 @@ mod tests {
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         let sampler = read_sampler(&ctx, base).unwrap();
         assert_eq!(sampler.wrap_u, Wrap::Repeat);
         assert_eq!(sampler.wrap_v, Wrap::ClampToEdge);
@@ -985,9 +1181,16 @@ mod tests {
         let tsc_addr = base + 0x100;
         let tex_addr = base + 0x400;
 
-        vmm.write_u32(&mut mem, tic_addr, 0x08 | (2 << 7) | IDENTITY_SWIZZLE).unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5).unwrap();
-        vmm.write_u32(&mut mem, tic_addr + 8, ((tex_addr >> 32) as u32) | (2 << 21)).unwrap();
+        vmm.write_u32(&mut mem, tic_addr, 0x08 | (2 << 7) | IDENTITY_SWIZZLE)
+            .unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+            .unwrap();
+        vmm.write_u32(
+            &mut mem,
+            tic_addr + 8,
+            ((tex_addr >> 32) as u32) | (2 << 21),
+        )
+        .unwrap();
         vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap(); // PITCH_BITS_20_TO_5 = 1 -> pitch = 32
         vmm.write_u32(&mut mem, tic_addr + 16, 1 | TYPE_2D).unwrap(); // width - 1 = 1 (width 2)
         vmm.write_u32(&mut mem, tic_addr + 20, 1).unwrap(); // height - 1 = 1 (height 2)
@@ -1004,7 +1207,13 @@ mod tests {
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
 
         let handle = 0u32; // imageId=0, samplerId=0; both pools point straight at our entries.
         let red = sample(&ctx, tic_addr, tsc_addr, handle, 0.25, 0.25, 0).unwrap();

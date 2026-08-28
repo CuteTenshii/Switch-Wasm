@@ -23,43 +23,83 @@ fn simm(v: i64) -> String {
 }
 
 fn reg64(i: u32) -> String {
-    if i == 31 { "sp".into() } else { format!("x{}", i) }
+    if i == 31 {
+        "sp".into()
+    } else {
+        format!("x{}", i)
+    }
 }
 fn reg32(i: u32) -> String {
-    if i == 31 { "wsp".into() } else { format!("w{}", i) }
+    if i == 31 {
+        "wsp".into()
+    } else {
+        format!("w{}", i)
+    }
 }
 fn zr64(i: u32) -> String {
-    if i == 31 { "xzr".into() } else { format!("x{}", i) }
+    if i == 31 {
+        "xzr".into()
+    } else {
+        format!("x{}", i)
+    }
 }
 fn zr32(i: u32) -> String {
-    if i == 31 { "wzr".into() } else { format!("w{}", i) }
+    if i == 31 {
+        "wzr".into()
+    } else {
+        format!("w{}", i)
+    }
 }
 
 fn cond(c: u32) -> &'static str {
     match c & 0xF {
-        0x0 => "eq", 0x1 => "ne", 0x2 => "cs", 0x3 => "cc",
-        0x4 => "mi", 0x5 => "pl", 0x6 => "vs", 0x7 => "vc",
-        0x8 => "hi", 0x9 => "ls", 0xA => "ge", 0xB => "lt",
-        0xC => "gt", 0xD => "le", _ => "al",
+        0x0 => "eq",
+        0x1 => "ne",
+        0x2 => "cs",
+        0x3 => "cc",
+        0x4 => "mi",
+        0x5 => "pl",
+        0x6 => "vs",
+        0x7 => "vc",
+        0x8 => "hi",
+        0x9 => "ls",
+        0xA => "ge",
+        0xB => "lt",
+        0xC => "gt",
+        0xD => "le",
+        _ => "al",
     }
 }
 
 fn shift_name(st: u32) -> &'static str {
     match st {
-        0 => "lsl", 1 => "lsr", 2 => "asr", _ => "ror",
+        0 => "lsl",
+        1 => "lsr",
+        2 => "asr",
+        _ => "ror",
     }
 }
 
 fn ext_name(opt: u32) -> &'static str {
     match opt {
-        0b000 => "uxtb", 0b001 => "uxth", 0b010 => "uxtw", 0b011 => "uxtx",
-        0b100 => "sxtb", 0b101 => "sxth", 0b110 => "sxtw", _ => "sxtx",
+        0b000 => "uxtb",
+        0b001 => "uxth",
+        0b010 => "uxtw",
+        0b011 => "uxtx",
+        0b100 => "sxtb",
+        0b101 => "sxth",
+        0b110 => "sxtw",
+        _ => "sxtx",
     }
 }
 
 /// Register name for a load/store width: sz 3 => 64-bit, otherwise 32-bit.
 fn mem_reg(sz: u32, i: u32) -> String {
-    if sz == 3 { zr64(i) } else { zr32(i) }
+    if sz == 3 {
+        zr64(i)
+    } else {
+        zr32(i)
+    }
 }
 
 /// Disassemble one A64 instruction into a readable mnemonic line.
@@ -265,7 +305,11 @@ fn ldst_reg(v: bool, width: u32, opc: u32, i: u32) -> String {
         return if is64 { zr64(i) } else { zr32(i) };
     }
     let c = match width {
-        0 => 'b', 1 => 'h', 2 => 's', 3 => 'd', _ => 'q',
+        0 => 'b',
+        1 => 'h',
+        2 => 's',
+        3 => 'd',
+        _ => 'q',
     };
     format!("{c}{i}")
 }
@@ -274,7 +318,11 @@ fn ldst_reg(v: bool, width: u32, opc: u32, i: u32) -> String {
 /// extra high bit -- that is what makes `size == 00` mean a 128-bit `q`
 /// access rather than a byte.
 fn simd_ldst_width(sz: u32, opc: u32) -> u32 {
-    if opc & 0b10 != 0 { 4 } else { sz }
+    if opc & 0b10 != 0 {
+        4
+    } else {
+        sz
+    }
 }
 
 /// Name a load/store. `infix` is what distinguishes the addressing forms that
@@ -286,12 +334,20 @@ fn simd_ldst_width(sz: u32, opc: u32) -> u32 {
 /// #1` -- a four-byte store where the encoding says one.
 fn ldst_name(v: bool, sz: u32, opc: u32, infix: &str) -> String {
     if v {
-        return if opc & 1 == 1 { format!("ld{infix}r") } else { format!("st{infix}r") };
+        return if opc & 1 == 1 {
+            format!("ld{infix}r")
+        } else {
+            format!("st{infix}r")
+        };
     }
     // size == 11 with opc 1x is PRFM (prefetch hint), not a sign-extending
     // load (e.g. `prfm pldl1keep, [x1]` = 0xF9800020).
     if sz == 3 && opc >= 0b10 {
-        return if infix.is_empty() { "prfm".to_string() } else { format!("prf{infix}m") };
+        return if infix.is_empty() {
+            "prfm".to_string()
+        } else {
+            format!("prf{infix}m")
+        };
     }
     let suffix = match sz {
         0 => "b",
@@ -345,7 +401,15 @@ fn disasm_ld_st(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
             }
             0b001000001 => {
                 let n = if o0 { "stlxp" } else { "stxp" };
-                write!(s, "{n} w{}, {}, {}, [{}]", rs, zr64(rt), zr64(rt2), reg64(rn)).is_ok()
+                write!(
+                    s,
+                    "{n} w{}, {}, {}, [{}]",
+                    rs,
+                    zr64(rt),
+                    zr64(rt2),
+                    reg64(rn)
+                )
+                .is_ok()
             }
             0b001000011 => {
                 let n = if o0 { "ldaxp" } else { "ldxp" };
@@ -360,10 +424,7 @@ fn disasm_ld_st(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
     // bits[29:27] select the group; bits[31:30] are the access *size*, so
     // requiring them to be 11 here matched only the 64-bit forms and dropped
     // every byte, halfword and 32-bit register-offset access on the floor.
-    if ((insn >> 27) & 0b111) == 0b111
-        && ((insn >> 24) & 0b11) == 0b00
-        && ((insn >> 21) & 1) == 1
-    {
+    if ((insn >> 27) & 0b111) == 0b111 && ((insn >> 24) & 0b11) == 0b00 && ((insn >> 21) & 1) == 1 {
         let sz = (insn >> 30) & 0b11;
         let opc = (insn >> 22) & 0b11;
         let v = (insn >> 26) & 1 == 1;
@@ -378,7 +439,14 @@ fn disasm_ld_st(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
         // The index register is 32-bit for the extending options (`uxtw`,
         // `sxtw`) and 64-bit for `lsl`/`sxtx` -- option<0> says which.
         let rm_s = if opt & 1 == 0 { zr32(rm) } else { zr64(rm) };
-        write!(s, "{} {}, [{}, {}", name, ldst_reg(v, width, opc, rt), reg64(rn), rm_s)?;
+        write!(
+            s,
+            "{} {}, [{}, {}",
+            name,
+            ldst_reg(v, width, opc, rt),
+            reg64(rn),
+            rm_s
+        )?;
         if opt == 0b011 {
             if shift > 0 {
                 write!(s, ", lsl #{}", shift)?;
@@ -452,23 +520,75 @@ fn disasm_ld_st(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
         // 64-bit registers. It is not a 32-bit LDP, and its offset scales by 4
         // rather than 8.
         let ldpsw = !v && opc == 0b01 && l == 1;
-        let width = if v { opc + 2 } else if opc == 0b10 { 3 } else { 2 };
+        let width = if v {
+            opc + 2
+        } else if opc == 0b10 {
+            3
+        } else {
+            2
+        };
         let scale = 1i64 << width;
-        let name = if ldpsw { "ldpsw" } else if l == 1 { "ldp" } else { "stp" };
+        let name = if ldpsw {
+            "ldpsw"
+        } else if l == 1 {
+            "ldp"
+        } else {
+            "stp"
+        };
         // The base register is always 64-bit; only the transferred pair
         // changes width.
         let (rn_l, rt_l, rt2_l) = if v {
-            (reg64(rn), ldst_reg(true, width, 0, rt), ldst_reg(true, width, 0, rt2))
+            (
+                reg64(rn),
+                ldst_reg(true, width, 0, rt),
+                ldst_reg(true, width, 0, rt2),
+            )
         } else if width == 3 || ldpsw {
             (reg64(rn), zr64(rt), zr64(rt2))
         } else {
             (reg64(rn), zr32(rt), zr32(rt2))
         };
         return Ok(match mode {
-            0b00 => write!(s, "{} {}, {}, [{}, #{}]", name, rt_l, rt2_l, rn_l, simm(imm * scale)).is_ok(),
-            0b01 => write!(s, "{} {}, {}, [{}], #{}", name, rt_l, rt2_l, rn_l, simm(imm * scale)).is_ok(),
-            0b10 => write!(s, "{} {}, {}, [{}, #{}]", name, rt_l, rt2_l, rn_l, simm(imm * scale)).is_ok(),
-            _ => write!(s, "{} {}, {}, [{}, #{}]!", name, rt_l, rt2_l, rn_l, simm(imm * scale)).is_ok(),
+            0b00 => write!(
+                s,
+                "{} {}, {}, [{}, #{}]",
+                name,
+                rt_l,
+                rt2_l,
+                rn_l,
+                simm(imm * scale)
+            )
+            .is_ok(),
+            0b01 => write!(
+                s,
+                "{} {}, {}, [{}], #{}",
+                name,
+                rt_l,
+                rt2_l,
+                rn_l,
+                simm(imm * scale)
+            )
+            .is_ok(),
+            0b10 => write!(
+                s,
+                "{} {}, {}, [{}, #{}]",
+                name,
+                rt_l,
+                rt2_l,
+                rn_l,
+                simm(imm * scale)
+            )
+            .is_ok(),
+            _ => write!(
+                s,
+                "{} {}, {}, [{}, #{}]!",
+                name,
+                rt_l,
+                rt2_l,
+                rn_l,
+                simm(imm * scale)
+            )
+            .is_ok(),
         });
     }
     Ok(false)
@@ -500,7 +620,10 @@ fn disasm_dp_imm(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                 return Ok(write!(s, "{} {}, #{:#x}", name, sp(rn), imm).is_ok());
             }
             let name = match op {
-                0b00 => "add", 0b01 => "adds", 0b10 => "sub", _ => "subs",
+                0b00 => "add",
+                0b01 => "adds",
+                0b10 => "sub",
+                _ => "subs",
             };
             Ok(write!(s, "{} {}, {}, #{:#x}", name, sp(rd), sp(rn), imm).is_ok())
         }
@@ -516,7 +639,9 @@ fn disasm_dp_imm(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                 // thing a listing of a `Result` constant is read for.
                 let hw = (insn >> 21) & 0b11;
                 let name = match opc {
-                    0b00 => "movn", 0b10 => "movz", _ => "movk",
+                    0b00 => "movn",
+                    0b10 => "movz",
+                    _ => "movk",
                 };
                 let imm = (imm16 as u64) << (hw * 16);
                 return Ok(write!(s, "{} {}, #{:#x}", name, zr(rd), imm).is_ok());
@@ -528,7 +653,10 @@ fn disasm_dp_imm(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
             let rn = (insn >> 5) & 0x1F;
             let rd = insn & 0x1F;
             let name = match opc {
-                0b00 => "and", 0b01 => "orr", 0b10 => "eor", _ => "ands",
+                0b00 => "and",
+                0b01 => "orr",
+                0b10 => "eor",
+                _ => "ands",
             };
             let mask = crate::cpu::decode_bit_mask(sf == 1, n, immr, imms).unwrap_or(0);
             // Rd 31 is SP for and/orr/eor and the zero register for ands, so
@@ -553,23 +681,59 @@ fn disasm_dp_imm(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                 let name = match opc {
                     0b00 => {
                         if msb >= lsb {
-                            format!("sbfx {}, {}, #{}, #{}", z_l(rd), z_l(rn), lsb, msb - lsb + 1)
+                            format!(
+                                "sbfx {}, {}, #{}, #{}",
+                                z_l(rd),
+                                z_l(rn),
+                                lsb,
+                                msb - lsb + 1
+                            )
                         } else {
-                            format!("sbfiz {}, {}, #{}, #{}", z_l(rd), z_l(rn), datasize - lsb, msb + 1)
+                            format!(
+                                "sbfiz {}, {}, #{}, #{}",
+                                z_l(rd),
+                                z_l(rn),
+                                datasize - lsb,
+                                msb + 1
+                            )
                         }
                     }
                     0b01 => {
                         if msb >= lsb {
-                            format!("bfxil {}, {}, #{}, #{}", z_l(rd), z_l(rn), lsb, msb - lsb + 1)
+                            format!(
+                                "bfxil {}, {}, #{}, #{}",
+                                z_l(rd),
+                                z_l(rn),
+                                lsb,
+                                msb - lsb + 1
+                            )
                         } else {
-                            format!("bfi {}, {}, #{}, #{}", z_l(rd), z_l(rn), datasize - lsb, msb + 1)
+                            format!(
+                                "bfi {}, {}, #{}, #{}",
+                                z_l(rd),
+                                z_l(rn),
+                                datasize - lsb,
+                                msb + 1
+                            )
                         }
                     }
                     _ => {
                         if msb >= lsb {
-                            format!("ubfx {}, {}, #{}, #{}", z_l(rd), z_l(rn), lsb, msb - lsb + 1)
+                            format!(
+                                "ubfx {}, {}, #{}, #{}",
+                                z_l(rd),
+                                z_l(rn),
+                                lsb,
+                                msb - lsb + 1
+                            )
                         } else {
-                            format!("ubfiz {}, {}, #{}, #{}", z_l(rd), z_l(rn), datasize - lsb, msb + 1)
+                            format!(
+                                "ubfiz {}, {}, #{}, #{}",
+                                z_l(rd),
+                                z_l(rn),
+                                datasize - lsb,
+                                msb + 1
+                            )
                         }
                     }
                 };
@@ -615,10 +779,14 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                 return Ok(true);
             }
             let base = match (opc, invert) {
-                (0b00, 0) => "and", (0b00, 1) => "bic",
-                (0b01, 0) => "orr", (0b01, 1) => "orn",
-                (0b10, 0) => "eor", (0b10, 1) => "eon",
-                (0b11, 0) => "ands", _ => "bics",
+                (0b00, 0) => "and",
+                (0b00, 1) => "bic",
+                (0b01, 0) => "orr",
+                (0b01, 1) => "orn",
+                (0b10, 0) => "eor",
+                (0b10, 1) => "eon",
+                (0b11, 0) => "ands",
+                _ => "bics",
             };
             write!(s, "{} {}, {}, {}", base, zr(rd), zr(rn), zr(rm))?;
             if sa > 0 || st != 0 {
@@ -633,10 +801,17 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
             let rm = (insn >> 16) & 0x1F;
             let compare = rd == 31 && (op == 0b01 || op == 0b11);
             let name = if compare {
-                if op == 0b01 { "cmn" } else { "cmp" }
+                if op == 0b01 {
+                    "cmn"
+                } else {
+                    "cmp"
+                }
             } else {
                 match op {
-                    0b00 => "add", 0b01 => "adds", 0b10 => "sub", _ => "subs",
+                    0b00 => "add",
+                    0b01 => "adds",
+                    0b10 => "sub",
+                    _ => "subs",
                 }
             };
             if ((insn >> 21) & 0b111) == 0b001 {
@@ -645,7 +820,15 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                 if compare {
                     write!(s, "{} {}, {}, {}", name, sp(rn), zr(rm), ext_name(option))?;
                 } else {
-                    write!(s, "{} {}, {}, {}, {}", name, sp(rd), sp(rn), zr(rm), ext_name(option))?;
+                    write!(
+                        s,
+                        "{} {}, {}, {}, {}",
+                        name,
+                        sp(rd),
+                        sp(rn),
+                        zr(rm),
+                        ext_name(option)
+                    )?;
                 }
                 if shift > 0 {
                     write!(s, " #{}", shift)?;
@@ -680,25 +863,43 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                             // W registers, and only the doubleword form takes
                             // an X for the data operand.
                             let name = match opcode2 & 0b111 {
-                                0b000 => "crc32b", 0b001 => "crc32h",
-                                0b010 => "crc32w", 0b011 => "crc32x",
-                                0b100 => "crc32cb", 0b101 => "crc32ch",
-                                0b110 => "crc32cw", _ => "crc32cx",
+                                0b000 => "crc32b",
+                                0b001 => "crc32h",
+                                0b010 => "crc32w",
+                                0b011 => "crc32x",
+                                0b100 => "crc32cb",
+                                0b101 => "crc32ch",
+                                0b110 => "crc32cw",
+                                _ => "crc32cx",
                             };
-                            let data = if (opcode2 & 0b11) == 0b11 { zr64(rm) } else { zr32(rm) };
-                            return Ok(write!(s, "{} {}, {}, {}", name, zr32(rd), zr32(rn), data).is_ok());
+                            let data = if (opcode2 & 0b11) == 0b11 {
+                                zr64(rm)
+                            } else {
+                                zr32(rm)
+                            };
+                            return Ok(
+                                write!(s, "{} {}, {}, {}", name, zr32(rd), zr32(rn), data).is_ok()
+                            );
                         }
                         // Naming the fallback `rorv` made every unimplemented
                         // opcode in this group disassemble as a rotate.
                         let name = match opcode2 {
-                            0b000010 => "udiv", 0b000011 => "sdiv",
-                            0b001000 => "lslv", 0b001001 => "lsrv",
-                            0b001010 => "asrv", 0b001011 => "rorv",
+                            0b000010 => "udiv",
+                            0b000011 => "sdiv",
+                            0b001000 => "lslv",
+                            0b001001 => "lsrv",
+                            0b001010 => "asrv",
+                            0b001011 => "rorv",
                             _ => {
                                 return Ok(write!(
-                                    s, "dp.2src.{:06b} {}, {}, {}",
-                                    opcode2, zr(rd), zr(rn), zr(rm)
-                                ).is_ok())
+                                    s,
+                                    "dp.2src.{:06b} {}, {}, {}",
+                                    opcode2,
+                                    zr(rd),
+                                    zr(rn),
+                                    zr(rm)
+                                )
+                                .is_ok())
                             }
                         };
                         Ok(write!(s, "{} {}, {}, {}", name, zr(rd), zr(rn), zr(rm)).is_ok())
@@ -710,7 +911,13 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                             // The 32-bit form reverses the whole register, so
                             // it is REV; only the 64-bit form has a REV32 that
                             // reverses within each word.
-                            0b000010 => if sf { "rev32" } else { "rev" },
+                            0b000010 => {
+                                if sf {
+                                    "rev32"
+                                } else {
+                                    "rev"
+                                }
+                            }
                             0b000011 => "rev",
                             0b000100 => "clz",
                             0b000101 => "cls",
@@ -732,9 +939,27 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                     // carry. (The interpreter has always had it right.)
                     let name = if op == 1 { "ccmp" } else { "ccmn" };
                     if imm_flag == 1 {
-                        Ok(write!(s, "{} {}, #{:#x}, #{:#x}, {}", name, zr(rn), (insn >> 16) & 0x1F, nzcv, cond(c)).is_ok())
+                        Ok(write!(
+                            s,
+                            "{} {}, #{:#x}, #{:#x}, {}",
+                            name,
+                            zr(rn),
+                            (insn >> 16) & 0x1F,
+                            nzcv,
+                            cond(c)
+                        )
+                        .is_ok())
                     } else {
-                        Ok(write!(s, "{} {}, {}, #{:#x}, {}", name, zr(rn), zr((insn >> 16) & 0x1F), nzcv, cond(c)).is_ok())
+                        Ok(write!(
+                            s,
+                            "{} {}, {}, #{:#x}, {}",
+                            name,
+                            zr(rn),
+                            zr((insn >> 16) & 0x1F),
+                            nzcv,
+                            cond(c)
+                        )
+                        .is_ok())
                     }
                 }
             } else if ((insn >> 23) & 1) == 1 {
@@ -745,17 +970,31 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                 let rd = insn & 0x1F;
                 let rm = (insn >> 16) & 0x1F;
                 let name = match (else_inv, else_inc) {
-                    (0, 0) => "csel", (0, 1) => "csinc",
-                    (1, 0) => "csinv", _ => "csneg",
+                    (0, 0) => "csel",
+                    (0, 1) => "csinc",
+                    (1, 0) => "csinv",
+                    _ => "csneg",
                 };
-                Ok(write!(s, "{} {}, {}, {}, {}", name, zr(rd), zr(rn), zr(rm), cond(c)).is_ok())
+                Ok(write!(
+                    s,
+                    "{} {}, {}, {}, {}",
+                    name,
+                    zr(rd),
+                    zr(rn),
+                    zr(rm),
+                    cond(c)
+                )
+                .is_ok())
             } else {
                 let op = (insn >> 29) & 0b11;
                 let rn = (insn >> 5) & 0x1F;
                 let rd = insn & 0x1F;
                 let rm = (insn >> 16) & 0x1F;
                 let name = match op {
-                    0b00 => "adc", 0b01 => "adcs", 0b10 => "sbc", _ => "sbcs",
+                    0b00 => "adc",
+                    0b01 => "adcs",
+                    0b10 => "sbc",
+                    _ => "sbcs",
                 };
                 Ok(write!(s, "{} {}, {}, {}", name, zr(rd), zr(rn), zr(rm)).is_ok())
             }
@@ -792,7 +1031,10 @@ fn disasm_dp_reg(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                     name
                 };
                 if operands {
-                    Ok(write!(s, "{} {}, {}, {}, {}", name, zr(rd), zr(rn), zr(rm), zr(ra)).is_ok())
+                    Ok(
+                        write!(s, "{} {}, {}, {}, {}", name, zr(rd), zr(rn), zr(rm), zr(ra))
+                            .is_ok(),
+                    )
                 } else {
                     Ok(write!(s, "{} {}, {}, {}", name, zr(rd), zr(rn), zr(rm)).is_ok())
                 }

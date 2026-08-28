@@ -78,7 +78,11 @@ pub(crate) struct LibraryApplet {
 
 impl LibraryApplet {
     fn new(id: u32, mode: u32) -> Self {
-        Self { id, mode, ..Self::default() }
+        Self {
+            id,
+            mode,
+            ..Self::default()
+        }
     }
 
     fn finish(&mut self) {
@@ -216,7 +220,11 @@ impl Cpu {
     /// same object, and one that waits on a handle it was handed a second
     /// copy of would wait on the wrong one.
     fn library_applet_event(&mut self, key: u64, slot: usize) -> u64 {
-        if let Some(event) = self.am_applets.get(&key).and_then(|applet| applet.events[slot]) {
+        if let Some(event) = self
+            .am_applets
+            .get(&key)
+            .and_then(|applet| applet.events[slot])
+        {
             return event;
         }
         // Not auto-clearing. What these report is an applet that has ended,
@@ -231,7 +239,11 @@ impl Cpu {
     /// Fire one of an applet's events, if the caller has taken it. Allocating
     /// it here instead would make an event nothing is waiting on.
     fn signal_library_applet_event(&mut self, key: u64, slot: usize) {
-        if let Some(event) = self.am_applets.get(&key).and_then(|applet| applet.events[slot]) {
+        if let Some(event) = self
+            .am_applets
+            .get(&key)
+            .and_then(|applet| applet.events[slot])
+        {
             self.signal_event(event);
         }
     }
@@ -239,7 +251,9 @@ impl Cpu {
     /// Whether the applet behind an accessor has ended. One that was never
     /// created has not: an accessor with no applet is not an applet that ran.
     fn library_applet_finished(&self, key: u64) -> bool {
-        self.am_applets.get(&key).is_some_and(LibraryApplet::is_finished)
+        self.am_applets
+            .get(&key)
+            .is_some_and(LibraryApplet::is_finished)
     }
 
     /// `IApplicationProxyService`/`IApplicationProxy`: the applet-lifecycle
@@ -256,7 +270,12 @@ impl Cpu {
     /// Only the commands listed below are implemented. Everything else goes to
     /// [`Cpu::unimplemented_command`] rather than a fabricated success — see there
     /// for why.
-    pub(super) fn applet_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn applet_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
@@ -281,7 +300,9 @@ impl Cpu {
         // request answered as `am:unknown`.
         let object_id = self.ipc_domain_object_id(tls);
         let iface = if self.ipc_is_domain_request(tls) {
-            self.domain_interface(handle, object_id).unwrap_or("am:unknown").to_string()
+            self.domain_interface(handle, object_id)
+                .unwrap_or("am:unknown")
+                .to_string()
         } else {
             match self.service_name(handle) {
                 // The root session before any ConvertToDomain *is*
@@ -942,7 +963,9 @@ impl Cpu {
                 Some(22) | Some(24) | Some(26) => {
                     let mut raw = Vec::with_capacity(8);
                     raw.extend_from_slice(&[1u8, 0, 0, 0]); // was_written = true
-                    raw.extend_from_slice(&(super::SHARED_BUFFER_USABLE_SLOTS as i32).to_le_bytes());
+                    raw.extend_from_slice(
+                        &(super::SHARED_BUFFER_USABLE_SLOTS as i32).to_le_bytes(),
+                    );
                     self.write_ipc_response(tls, 0, &[], &raw, &[])
                 }
                 // The matching releases, ClearCaptureBuffer,
@@ -960,15 +983,11 @@ impl Cpu {
                 // GetAppletResourceUserId / GetAppletResourceUserIdOfCallerApplet.
                 // There is one process here, so it gets one id; the `vi` and
                 // `hid` stubs ignore which id a request carries.
-                Some(1) | Some(2) => {
-                    self.write_ipc_response(tls, 0, &[], &1u64.to_le_bytes(), &[])
-                }
+                Some(1) | Some(2) => self.write_ipc_response(tls, 0, &[], &1u64.to_le_bytes(), &[]),
                 // AcquireForegroundRights / ReleaseForegroundRights /
                 // RejectToChangeIntoBackground: nothing else is competing for
                 // the foreground.
-                Some(10) | Some(11) | Some(12) => {
-                    self.write_ipc_response(tls, 0, &[], &[], &[])
-                }
+                Some(10) | Some(11) | Some(12) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IAudioController: the applet's volume relative to the system's.
@@ -1067,7 +1086,8 @@ impl Cpu {
                 // else here holds the lock, so it is always taken; the handle
                 // only comes back when the caller asked for it.
                 Some(1) => {
-                    let want_handle = self.mem.read_u8(self.ipc_request_data(tls)).unwrap_or(0) != 0;
+                    let want_handle =
+                        self.mem.read_u8(self.ipc_request_data(tls)).unwrap_or(0) != 0;
                     let h = self.am_lock_accessor_event();
                     if want_handle {
                         self.write_ipc_reply(tls, 0, &[h], &[], &[1u8], &[])
@@ -1408,7 +1428,11 @@ impl Cpu {
                         let data = self.am_storages.get(&storage).cloned().unwrap_or_default();
                         if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {
                             let end = data.len().min(offset.saturating_add(len as usize));
-                            let chunk = if offset < end { &data[offset..end] } else { &[][..] };
+                            let chunk = if offset < end {
+                                &data[offset..end]
+                            } else {
+                                &[][..]
+                            };
                             for (i, &b) in chunk.iter().enumerate() {
                                 self.mem.write_u8(addr.wrapping_add(i as u32), b)?;
                             }
@@ -1458,7 +1482,6 @@ mod tests {
     /// hands the screen to the browser.
     const APPLET_WEB: u32 = 0x13;
 
-
     #[test]
     fn the_system_process_common_functions_chain_hands_back_real_sessions() {
         // `appletAE` 450 and the observer behind it both return an interface,
@@ -1472,8 +1495,14 @@ mod tests {
         cpu.set_applet_is_application(false);
         cpu.applet_request(TLS, 9, Some(450)).unwrap();
         let functions = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
-        assert_ne!(functions, 0, "GetSystemProcessCommonFunctions moved no session back");
-        assert_eq!(cpu.service_name(functions), Some("am:system-process-common-functions"));
+        assert_ne!(
+            functions, 0,
+            "GetSystemProcessCommonFunctions moved no session back"
+        );
+        assert_eq!(
+            cpu.service_name(functions),
+            Some("am:system-process-common-functions")
+        );
 
         marshal(&mut cpu, false, 1, &[]);
         cpu.applet_request(TLS, functions, Some(1)).unwrap();
@@ -1486,8 +1515,14 @@ mod tests {
         marshal(&mut cpu, false, 460, &[]);
         cpu.applet_request(TLS, 9, Some(460)).unwrap();
         let alternative = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
-        assert_ne!(alternative, 0, "GetAppletAlternativeFunctions moved no session back");
-        assert_eq!(cpu.service_name(alternative), Some("am:applet-alternative-functions"));
+        assert_ne!(
+            alternative, 0,
+            "GetAppletAlternativeFunctions moved no session back"
+        );
+        assert_eq!(
+            cpu.service_name(alternative),
+            Some("am:applet-alternative-functions")
+        );
 
         // Neither opens a proxy, so the flag every Open*Proxy beside them sets
         // — which decides whether the applet is told `FocusStateChanged` or
@@ -1521,7 +1556,10 @@ mod tests {
         cpu.register_service_handle(9, "am:application-functions");
         cpu.applet_request(TLS, 9, Some(130)).unwrap();
         let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
-        assert_ne!(event, 0, "GetGpuErrorDetectedSystemEvent handed back no handle");
+        assert_ne!(
+            event, 0,
+            "GetGpuErrorDetectedSystemEvent handed back no handle"
+        );
         assert_eq!(cpu.event_name(event), Some("am:gpu-error"));
 
         // ISelfController::GetAccumulatedSuspendedTickChangedEvent.
@@ -1561,7 +1599,10 @@ mod tests {
         // by "nobody", so the one thing this must never hand over is zeroes.
         let data = cpu.am_storages[&Cpu::object_key(storage, 0)].clone();
         assert_eq!(data.len(), 0x88);
-        assert_eq!(u32::from_le_bytes(data[..4].try_into().unwrap()), 0xC794_97CA);
+        assert_eq!(
+            u32::from_le_bytes(data[..4].try_into().unwrap()),
+            0xC794_97CA
+        );
         assert_eq!(data[4], 1, "layout version");
         assert_eq!(&data[8..0x18], &super::ACCOUNT_UID[..]);
         assert_ne!(super::ACCOUNT_UID, [0u8; 16]);
@@ -1572,7 +1613,10 @@ mod tests {
         marshal(&mut cpu, false, 1, &kind);
         cpu.applet_request(TLS, 9, Some(1)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x10).unwrap(), SFCO);
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), LAUNCH_PARAMETER_NOT_FOUND);
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            LAUNCH_PARAMETER_NOT_FOUND
+        );
     }
 
     #[test]
@@ -1588,7 +1632,10 @@ mod tests {
         cpu.seed_launch_parameters();
         cpu.register_service_handle(9, "am:application-functions");
         cpu.applet_request(TLS, 9, Some(1)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), LAUNCH_PARAMETER_NOT_FOUND);
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            LAUNCH_PARAMETER_NOT_FOUND
+        );
     }
 
     #[test]
@@ -1692,7 +1739,11 @@ mod tests {
             cpu.set_save_data_quota(quota);
             cpu.register_service_handle(9, "am:application-functions");
             cpu.applet_request(TLS, 9, Some(command)).unwrap();
-            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result of {command}");
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                0,
+                "Result of {command}"
+            );
             let got = (
                 cpu.mem.read_u64(TLS + 0x20).unwrap() as i64,
                 cpu.mem.read_u64(TLS + 0x28).unwrap() as i64,
@@ -1756,8 +1807,14 @@ mod tests {
         assert_eq!(journal, crate::cpu::fs::DEFAULT_SAVE_DATA_JOURNAL_SIZE);
         // Above what a large retail title asks for: Tomodachi Life's NACP
         // declares 54 MiB of save and 10 MiB of journal.
-        assert!(size >= 56_623_104, "default quota is smaller than a real title's save");
-        assert!(journal >= 10_485_760, "default journal is smaller than a real title's");
+        assert!(
+            size >= 56_623_104,
+            "default quota is smaller than a real title's save"
+        );
+        assert!(
+            journal >= 10_485_760,
+            "default journal is smaller than a real title's"
+        );
     }
 
     /// Create a library applet on a non-domain session and return the `Cpu`
@@ -1770,7 +1827,10 @@ mod tests {
         cpu.applet_request(TLS, 9, Some(0)).unwrap();
         let accessor = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
         assert_ne!(accessor, 0, "CreateLibraryApplet moved no object back");
-        assert_eq!(cpu.service_name(accessor), Some("am:library-applet-accessor"));
+        assert_eq!(
+            cpu.service_name(accessor),
+            Some("am:library-applet-accessor")
+        );
         (cpu, accessor)
     }
 
@@ -1786,7 +1846,11 @@ mod tests {
         cpu.applet_request(TLS, accessor, Some(0)).unwrap();
         let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
         assert_eq!(cpu.event_name(event), Some("am:library-applet-state"));
-        assert_eq!(cpu.event_signaled(event), Some(false), "nothing has started it yet");
+        assert_eq!(
+            cpu.event_signaled(event),
+            Some(false),
+            "nothing has started it yet"
+        );
 
         write_request(&mut cpu, 10, &[]); // Start
         cpu.applet_request(TLS, accessor, Some(10)).unwrap();
@@ -1801,7 +1865,11 @@ mod tests {
         // them read an empty output storage as real input.
         write_request(&mut cpu, 30, &[]);
         cpu.applet_request(TLS, accessor, Some(30)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 128 | (22 << 9), "cancelled");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            128 | (22 << 9),
+            "cancelled"
+        );
     }
 
     #[test]
@@ -1829,7 +1897,11 @@ mod tests {
 
         write_request(&mut cpu, 101, &[]); // PopOutData
         cpu.applet_request(TLS, accessor, Some(101)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 128 | (3 << 9), "no data");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            128 | (3 << 9),
+            "no data"
+        );
         assert_eq!(cpu.mem.read_u32(TLS + 0x0c).unwrap(), 0, "and no storage");
     }
 
@@ -1847,6 +1919,10 @@ mod tests {
         // A size no caller sends is refused rather than allocated.
         write_request(&mut cpu, 10, &u64::MAX.to_le_bytes());
         cpu.applet_request(TLS, 9, Some(10)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 1 | (104 << 9), "out of memory");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            1 | (104 << 9),
+            "out of memory"
+        );
     }
 }

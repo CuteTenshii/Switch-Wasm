@@ -165,7 +165,10 @@ impl FileSource {
     pub fn open(path: impl AsRef<std::path::Path>) -> std::io::Result<FileSource> {
         let file = std::fs::File::open(path)?;
         let len = file.metadata()?.len();
-        Ok(FileSource { file: std::cell::RefCell::new(file), len })
+        Ok(FileSource {
+            file: std::cell::RefCell::new(file),
+            len,
+        })
     }
 }
 

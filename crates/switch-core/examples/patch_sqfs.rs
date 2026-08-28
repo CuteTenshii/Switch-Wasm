@@ -27,13 +27,21 @@ fn main() {
     cpu.set_reg(1, 1); // boot_entry_regs: x0 = 0, x1 = 1
     cpu.set_pc(BASE);
 
-    let run = common::drive(&mut cpu, Pace::Blocks, common::env_u64("STEPS", 5_000_000), |_, _| {
-        Flow::Continue
-    });
+    let run = common::drive(
+        &mut cpu,
+        Pace::Blocks,
+        common::env_u64("STEPS", 5_000_000),
+        |_, _| Flow::Continue,
+    );
     if let Some(fault) = &run.fault {
         println!("FAULT at step {}: {fault}", run.steps);
     } else if run.halted {
-        println!("HALTED at step {} pc={:#x} x0={:#x}", run.steps, cpu.get_pc(), cpu.read_x(0));
+        println!(
+            "HALTED at step {} pc={:#x} x0={:#x}",
+            run.steps,
+            cpu.get_pc(),
+            cpu.read_x(0)
+        );
     } else {
         println!("BUDGET exhausted at step {}", run.steps);
     }

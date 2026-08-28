@@ -177,33 +177,33 @@ fn default_mii_char_info(index: u32) -> Option<[u8; MII_CHAR_INFO_LEN]> {
         12, // eye_y
         mii.eyebrow_type,
         MII_HAIR_COLORS[mii.eyebrow_color as usize],
-        4,  // eyebrow_scale
-        3,  // eyebrow_aspect
-        6,  // eyebrow_rotate
-        2,  // eyebrow_x
-        10, // eyebrow_y
-        1,  // nose_type
-        4,  // nose_scale
-        9,  // nose_y
-        23,   // mouth_type
-        0x13, // mouth_color: the one the default Miis use, already translated
-        4,    // mouth_scale
-        3,    // mouth_aspect
-        13,   // mouth_y
+        4,                  // eyebrow_scale
+        3,                  // eyebrow_aspect
+        6,                  // eyebrow_rotate
+        2,                  // eyebrow_x
+        10,                 // eyebrow_y
+        1,                  // nose_type
+        4,                  // nose_scale
+        9,                  // nose_y
+        23,                 // mouth_type
+        0x13,               // mouth_color: the one the default Miis use, already translated
+        4,                  // mouth_scale
+        3,                  // mouth_aspect
+        13,                 // mouth_y
         MII_HAIR_COLORS[0], // beard_color
-        0,  // beard_type: none, so the colour above never shows
-        0,  // mustache_type: none either
-        4,  // mustache_scale
-        10, // mustache_y
-        0,  // glass_type: none
-        8,  // glass_color: the glasses palette's first, as unseen as the beard
-        4,  // glass_scale
-        10, // glass_y
-        0,  // mole_type: none
-        4,  // mole_scale
-        2,  // mole_x
-        20, // mole_y
-        0,  // padding
+        0,                  // beard_type: none, so the colour above never shows
+        0,                  // mustache_type: none either
+        4,                  // mustache_scale
+        10,                 // mustache_y
+        0,                  // glass_type: none
+        8,                  // glass_color: the glasses palette's first, as unseen as the beard
+        4,                  // glass_scale
+        10,                 // glass_y
+        0,                  // mole_type: none
+        4,                  // mole_scale
+        2,                  // mole_x
+        20,                 // mole_y
+        0,                  // padding
     ]);
     Some(info)
 }
@@ -257,7 +257,9 @@ impl Cpu {
         }
         let object_id = self.ipc_domain_object_id(tls);
         let iface = if self.ipc_is_domain_request(tls) {
-            self.domain_interface(handle, object_id).unwrap_or("mii:static").to_string()
+            self.domain_interface(handle, object_id)
+                .unwrap_or("mii:static")
+                .to_string()
         } else {
             "mii:static".to_string()
         };
@@ -349,23 +351,36 @@ mod tests {
             let info = super::default_mii_char_info(index).expect("a default Mii");
 
             let create_id = &info[..super::MII_CREATE_ID_LEN];
-            assert_ne!(create_id, [0u8; super::MII_CREATE_ID_LEN], "a zero id is no id");
+            assert_ne!(
+                create_id,
+                [0u8; super::MII_CREATE_ID_LEN],
+                "a zero id is no id"
+            );
             assert_eq!(create_id[6] & 0xF0, 0x40, "RFC 4122 version 4");
             assert_eq!(create_id[8] & 0xC0, 0x80, "RFC 4122 variant");
-            assert!(!create_ids.contains(&create_id.to_vec()), "two Miis, one identity");
+            assert!(
+                !create_ids.contains(&create_id.to_vec()),
+                "two Miis, one identity"
+            );
             create_ids.push(create_id.to_vec());
 
             let name: Vec<u16> = info[super::MII_CHAR_INFO_NICKNAME..super::MII_CHAR_INFO_FEATURES]
                 .chunks(2)
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect();
-            let end = name.iter().position(|&unit| unit == 0).expect("a terminator");
+            let end = name
+                .iter()
+                .position(|&unit| unit == 0)
+                .expect("a terminator");
             assert_eq!(String::from_utf16(&name[..end]).unwrap(), "no name");
 
             // Three Miis with a male build, then three with a female one.
             assert_eq!(u32::from(info[0x28]), u32::from(index >= 3), "gender");
         }
-        assert!(super::default_mii_char_info(6).is_none(), "there is no seventh");
+        assert!(
+            super::default_mii_char_info(6).is_none(),
+            "there is no seventh"
+        );
 
         // The table is written in the older colour palette, so a hair colour
         // of 0 has to come out as the newer palette's 8. Handing the raw
@@ -390,7 +405,11 @@ mod tests {
         let expected = super::default_mii_char_info(3).unwrap();
         for (offset, &byte) in expected.iter().enumerate() {
             let at = TLS + 0x30 + offset as u32;
-            assert_eq!(cpu.mem.read_u8(at).unwrap(), byte, "CharInfo byte {offset:#x}");
+            assert_eq!(
+                cpu.mem.read_u8(at).unwrap(),
+                byte,
+                "CharInfo byte {offset:#x}"
+            );
         }
 
         // An index past the six is the caller's mistake, and the one failure
@@ -399,6 +418,9 @@ mod tests {
         let mut cpu = request(true, 7, &6u32.to_le_bytes());
         cpu.record_domain_object(9, 7, "mii:database");
         cpu.mii_request(TLS, 9, Some(7)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), super::MII_INVALID_ARGUMENT);
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x28).unwrap(),
+            super::MII_INVALID_ARGUMENT
+        );
     }
 }

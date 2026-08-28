@@ -30,7 +30,9 @@ fn run(name: &str, code: &[u32], steps: u64, setup: impl Fn(&mut Cpu)) {
     cpu.mem.map_zero(CODE, 0x1000).unwrap();
     cpu.mem.map_zero(DATA, 0x1000).unwrap();
     for (i, insn) in code.iter().enumerate() {
-        cpu.mem.map(CODE + 4 * i as u32, &insn.to_le_bytes()).unwrap();
+        cpu.mem
+            .map(CODE + 4 * i as u32, &insn.to_le_bytes())
+            .unwrap();
     }
     setup(&mut cpu);
     cpu.set_pc(CODE);

@@ -297,7 +297,9 @@ impl Memory {
         self.readonly_span = self
             .readonly
             .iter()
-            .fold((u32::MAX, 0), |(lo, hi), &(start, end)| (lo.min(start), hi.max(end)));
+            .fold((u32::MAX, 0), |(lo, hi), &(start, end)| {
+                (lo.min(start), hi.max(end))
+            });
     }
 
     /// Forget every loaded module — both its protection and the memory
@@ -352,10 +354,18 @@ impl Memory {
     /// nothing above the run to be `CodeData`, and it aborted — which is how
     /// Asphalt 9 died on its first `puts`, 377M steps in, with an assertion
     /// whose text the release SDK had compiled out.
-    pub fn mark_module(&mut self, static_range: (u32, u32), mutable_range: (u32, u32), alias: bool) {
+    pub fn mark_module(
+        &mut self,
+        static_range: (u32, u32),
+        mutable_range: (u32, u32),
+        alias: bool,
+    ) {
         const PAGE: u32 = PAGE_SIZE as u32;
         let page_out = |(start, end): (u32, u32)| {
-            (start & !(PAGE - 1), end.wrapping_add(PAGE - 1) & !(PAGE - 1))
+            (
+                start & !(PAGE - 1),
+                end.wrapping_add(PAGE - 1) & !(PAGE - 1),
+            )
         };
         self.modules.push(ModuleImage {
             static_range: page_out(static_range),
@@ -390,9 +400,17 @@ impl Memory {
         }
         self.modules.iter().find_map(|m| {
             if addr >= m.static_range.0 && addr < m.static_range.1 {
-                Some(if m.alias { MemoryState::AliasCode } else { MemoryState::Code })
+                Some(if m.alias {
+                    MemoryState::AliasCode
+                } else {
+                    MemoryState::Code
+                })
             } else if addr >= m.mutable_range.0 && addr < m.mutable_range.1 {
-                Some(if m.alias { MemoryState::AliasCodeData } else { MemoryState::CodeData })
+                Some(if m.alias {
+                    MemoryState::AliasCodeData
+                } else {
+                    MemoryState::CodeData
+                })
             } else {
                 None
             }
@@ -403,13 +421,19 @@ impl Memory {
     fn module_intersects(&self, start: u32, end: u32) -> bool {
         start < self.module_span.1
             && self.module_span.0 < end
-            && self.modules.iter().any(|m| start < m.mutable_range.1 && m.static_range.0 < end)
+            && self
+                .modules
+                .iter()
+                .any(|m| start < m.mutable_range.1 && m.static_range.0 < end)
     }
 
     #[inline(always)]
     fn check_writable(&self, addr: u32) -> Result<()> {
         if self.is_readonly(addr) {
-            Err(Error::Cpu(format!("write to read-only address {:#010x}", addr)))
+            Err(Error::Cpu(format!(
+                "write to read-only address {:#010x}",
+                addr
+            )))
         } else {
             Ok(())
         }
@@ -495,7 +519,10 @@ impl Memory {
         if addr >= self.soft.0 as usize && addr < self.soft.1 as usize {
             return Ok(&self.zero);
         }
-        Err(Error::Cpu(format!("read from unmapped address {:#010x}", addr)))
+        Err(Error::Cpu(format!(
+            "read from unmapped address {:#010x}",
+            addr
+        )))
     }
 
     /// Whether a real page has been allocated at `addr` (as opposed to a
@@ -588,7 +615,13 @@ impl Memory {
             }
             end += PAGE;
         }
-        StateRun { start, end, mapped, readonly, state: reported }
+        StateRun {
+            start,
+            end,
+            mapped,
+            readonly,
+            state: reported,
+        }
     }
 
     /// Map `data` at `addr`, allocating pages as needed and zero-filling any
@@ -930,7 +963,11 @@ impl Memory {
     /// Arm the write watchpoint over `[start, start + size)`; a zero `size`
     /// disarms it.
     pub fn watch_writes(&mut self, start: u32, size: u32) {
-        self.watch = if size == 0 { (1, 0) } else { (start, start.wrapping_add(size)) };
+        self.watch = if size == 0 {
+            (1, 0)
+        } else {
+            (start, start.wrapping_add(size))
+        };
         self.watch_hit = None;
     }
 
@@ -938,7 +975,11 @@ impl Memory {
     /// disarms it. Finding every piece of code that *examines* a flag is how
     /// the one that would clear it gets named, when nothing ever does.
     pub fn watch_reads(&mut self, start: u32, size: u32) {
-        self.read_watch = if size == 0 { (1, 0) } else { (start, start.wrapping_add(size)) };
+        self.read_watch = if size == 0 {
+            (1, 0)
+        } else {
+            (start, start.wrapping_add(size))
+        };
         self.read_hit.set(None);
     }
 
@@ -1270,7 +1311,11 @@ mod tests {
         // .text 2 pages, .rodata 2, .data + .bss 4.
         m.map_zero(0x0800_0000, PAGE_SIZE * 8).unwrap();
         m.mark_readonly(0x0800_0000, 0x0800_2000);
-        m.mark_module((0x0800_0000, 0x0800_4000), (0x0800_4000, 0x0800_8000), false);
+        m.mark_module(
+            (0x0800_0000, 0x0800_4000),
+            (0x0800_4000, 0x0800_8000),
+            false,
+        );
 
         let run = m.state_run(0x0800_0000, LIMIT);
         assert_eq!((run.start, run.end), (0x0800_0000, 0x0800_2000), ".text");
@@ -1284,15 +1329,25 @@ mod tests {
         // The static half ends where the mutable half begins, even though
         // both are mapped and both are writable here.
         let run = m.state_run(0x0800_4000, LIMIT);
-        assert_eq!((run.start, run.end), (0x0800_4000, 0x0800_8000), ".data + .bss");
+        assert_eq!(
+            (run.start, run.end),
+            (0x0800_4000, 0x0800_8000),
+            ".data + .bss"
+        );
         assert_eq!(run.state, MemoryState::CodeData);
 
         // An `ldr:ro` module carries the alias states instead, and gives them
         // back when it is unloaded.
         m.map_zero(0x2900_0000, PAGE_SIZE * 4).unwrap();
         m.mark_module((0x2900_0000, 0x2900_2000), (0x2900_2000, 0x2900_4000), true);
-        assert_eq!(m.state_run(0x2900_0000, LIMIT).state, MemoryState::AliasCode);
-        assert_eq!(m.state_run(0x2900_2000, LIMIT).state, MemoryState::AliasCodeData);
+        assert_eq!(
+            m.state_run(0x2900_0000, LIMIT).state,
+            MemoryState::AliasCode
+        );
+        assert_eq!(
+            m.state_run(0x2900_2000, LIMIT).state,
+            MemoryState::AliasCodeData
+        );
         m.unmark_module(0x2900_0000, 0x2900_4000);
         assert_eq!(m.state_run(0x2900_0000, LIMIT).state, MemoryState::Code);
         // ...and the process image is untouched by that.

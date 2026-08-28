@@ -65,7 +65,9 @@ pub(super) struct Mode {
 
 impl Mode {
     pub(super) fn new() -> Self {
-        Mode { mdct: Mdct::new(MDCT_SIZE, MAX_LM) }
+        Mode {
+            mdct: Mdct::new(MDCT_SIZE, MAX_LM),
+        }
     }
 }
 
@@ -194,7 +196,10 @@ fn get_pulses(i: i32) -> i32 {
 /// entries, and `bits[q]` is one less than the bits `q` pseudo-pulses cost.
 fn cache_row(band: usize, lm: i32) -> &'static [u8] {
     let index = CACHE_INDEX50[((lm + 1) as usize) * NB_EBANDS + band];
-    debug_assert!(index >= 0, "pulse cache row for a band with no coefficients");
+    debug_assert!(
+        index >= 0,
+        "pulse cache row for a band with no coefficients"
+    );
     &CACHE_BITS50[index.max(0) as usize..]
 }
 
@@ -212,7 +217,11 @@ fn bits2pulses(band: usize, lm: i32, bits: i32) -> i32 {
             lo = mid;
         }
     }
-    let below = if lo == 0 { -1 } else { i32::from(cache[lo as usize]) };
+    let below = if lo == 0 {
+        -1
+    } else {
+        i32::from(cache[lo as usize])
+    };
     if bits - below <= i32::from(cache[hi as usize]) - bits {
         lo
     } else {
@@ -312,10 +321,19 @@ fn unquant_coarse_energy(
     total_bytes: usize,
 ) {
     const PRED_COEF: [f32; 4] = [29440.0 / 32768.0, 26112.0 / 32768.0, 21248.0 / 32768.0, 0.5];
-    const BETA_COEF: [f32; 4] = [30147.0 / 32768.0, 22282.0 / 32768.0, 12124.0 / 32768.0, 6554.0 / 32768.0];
+    const BETA_COEF: [f32; 4] = [
+        30147.0 / 32768.0,
+        22282.0 / 32768.0,
+        12124.0 / 32768.0,
+        6554.0 / 32768.0,
+    ];
     const BETA_INTRA: f32 = 4915.0 / 32768.0;
 
-    let (coef, beta) = if intra { (0.0, BETA_INTRA) } else { (PRED_COEF[lm], BETA_COEF[lm]) };
+    let (coef, beta) = if intra {
+        (0.0, BETA_INTRA)
+    } else {
+        (PRED_COEF[lm], BETA_COEF[lm])
+    };
     let budget = (total_bytes * 8) as i32;
     let model = &E_PROB_MODEL[(lm * 2 + usize::from(intra)) * 42..][..42];
     let mut prev = [0.0f32; 2];
@@ -325,7 +343,11 @@ fn unquant_coarse_energy(
             let tell = dec.tell();
             let qi = if budget - tell >= 15 {
                 let pi = 2 * i.min(20);
-                laplace_decode(dec, u32::from(model[pi]) << 7, i32::from(model[pi + 1]) << 6)
+                laplace_decode(
+                    dec,
+                    u32::from(model[pi]) << 7,
+                    i32::from(model[pi + 1]) << 6,
+                )
             } else if budget - tell >= 2 {
                 let qi = dec.decode_icdf(&SMALL_ENERGY_ICDF, 2) as i32;
                 (qi >> 1) ^ -(qi & 1)
@@ -469,7 +491,15 @@ fn renormalise_vector(x: &mut [f32], gain: f32) {
 
 /// Decode one band's shape: a PVQ codeword, scaled to the gain the caller
 /// worked out from the energy split.
-fn alg_unquant(x: &mut [f32], n: usize, k: i32, spread: usize, blocks: usize, dec: &mut RangeDecoder, gain: f32) -> u32 {
+fn alg_unquant(
+    x: &mut [f32],
+    n: usize,
+    k: i32,
+    spread: usize,
+    blocks: usize,
+    dec: &mut RangeDecoder,
+    gain: f32,
+) -> u32 {
     let mut iy = vec![0i32; n];
     let ryy = decode_pulses(&mut iy, n, k as usize, dec);
     let g = gain / ryy.sqrt();
@@ -499,7 +529,11 @@ fn deinterleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: bool
     let n = n0 * stride;
     let mut tmp = vec![0.0f32; n];
     for i in 0..stride {
-        let dest = if hadamard { ORDERY_TABLE[stride - 2 + i] } else { i };
+        let dest = if hadamard {
+            ORDERY_TABLE[stride - 2 + i]
+        } else {
+            i
+        };
         for j in 0..n0 {
             tmp[dest * n0 + j] = x[j * stride + i];
         }
@@ -511,7 +545,11 @@ fn interleave_hadamard(x: &mut [f32], n0: usize, stride: usize, hadamard: bool) 
     let n = n0 * stride;
     let mut tmp = vec![0.0f32; n];
     for i in 0..stride {
-        let src = if hadamard { ORDERY_TABLE[stride - 2 + i] } else { i };
+        let src = if hadamard {
+            ORDERY_TABLE[stride - 2 + i]
+        } else {
+            i
+        };
         for j in 0..n0 {
             tmp[j * stride + i] = x[src * n0 + j];
         }
@@ -574,7 +612,12 @@ fn compute_theta(
     fill: &mut i32,
 ) -> SplitCtx {
     let pulse_cap = i32::from(LOG_N400[ctx.band]) + lm * (1 << BITRES);
-    let offset = (pulse_cap >> 1) - if stereo && n == 2 { QTHETA_OFFSET_TWOPHASE } else { QTHETA_OFFSET };
+    let offset = (pulse_cap >> 1)
+        - if stereo && n == 2 {
+            QTHETA_OFFSET_TWOPHASE
+        } else {
+            QTHETA_OFFSET
+        };
     let mut qn = compute_qn(n, *b, offset, pulse_cap, stereo);
     if stereo && ctx.band >= ctx.intensity {
         qn = 1;
@@ -591,11 +634,18 @@ fn compute_theta(
             let x0 = (qn / 2) as u32;
             let ft = p0 * (x0 + 1) + x0;
             let fs = ctx.dec.decode(ft);
-            let value = if fs < (x0 + 1) * p0 { fs / p0 } else { x0 + 1 + (fs - (x0 + 1) * p0) };
+            let value = if fs < (x0 + 1) * p0 {
+                fs / p0
+            } else {
+                x0 + 1 + (fs - (x0 + 1) * p0)
+            };
             let (fl, fh) = if value <= x0 {
                 (p0 * value, p0 * (value + 1))
             } else {
-                ((value - 1 - x0) + (x0 + 1) * p0, (value - x0) + (x0 + 1) * p0)
+                (
+                    (value - 1 - x0) + (x0 + 1) * p0,
+                    (value - x0) + (x0 + 1) * p0,
+                )
             };
             ctx.dec.update(fl, fh, ft);
             itheta = value as i32;
@@ -650,7 +700,14 @@ fn compute_theta(
         // The mid/side bit split that minimises squared error in this band.
         delta = frac_mul16((n as i32 - 1) << 7, bitexact_log2tan(iside, imid));
     }
-    SplitCtx { inv, imid, iside, delta, itheta, qalloc }
+    SplitCtx {
+        inv,
+        imid,
+        iside,
+        delta,
+        itheta,
+        qalloc,
+    }
 }
 
 /// Integer square root, matching the reference's exactly — the triangular
@@ -771,21 +828,59 @@ fn quant_partition(
         let rebalance = ctx.remaining_bits;
         let cm;
         if mbits >= sbits {
-            cm = quant_partition(ctx, xl, half, mbits, blocks, lb_lo.take(), lm, gain * mid, fill);
+            cm = quant_partition(
+                ctx,
+                xl,
+                half,
+                mbits,
+                blocks,
+                lb_lo.take(),
+                lm,
+                gain * mid,
+                fill,
+            );
             let spent = mbits - (rebalance - ctx.remaining_bits);
             if spent > 3 << BITRES && sctx.itheta != 0 {
                 sbits += spent - (3 << BITRES);
             }
-            cm | quant_partition(ctx, xr, half, sbits, blocks, lb_hi.take(), lm, gain * side, fill >> blocks)
-                << (b0 >> 1)
+            cm | quant_partition(
+                ctx,
+                xr,
+                half,
+                sbits,
+                blocks,
+                lb_hi.take(),
+                lm,
+                gain * side,
+                fill >> blocks,
+            ) << (b0 >> 1)
         } else {
-            let cm2 = quant_partition(ctx, xr, half, sbits, blocks, lb_hi.take(), lm, gain * side, fill >> blocks)
-                << (b0 >> 1);
+            let cm2 = quant_partition(
+                ctx,
+                xr,
+                half,
+                sbits,
+                blocks,
+                lb_hi.take(),
+                lm,
+                gain * side,
+                fill >> blocks,
+            ) << (b0 >> 1);
             let spent = sbits - (rebalance - ctx.remaining_bits);
             if spent > 3 << BITRES && sctx.itheta != 16384 {
                 mbits += spent - (3 << BITRES);
             }
-            cm2 | quant_partition(ctx, xl, half, mbits, blocks, lb_lo.take(), lm, gain * mid, fill)
+            cm2 | quant_partition(
+                ctx,
+                xl,
+                half,
+                mbits,
+                blocks,
+                lb_lo.take(),
+                lm,
+                gain * mid,
+                fill,
+            )
         }
     } else {
         let mut q = bits2pulses(ctx.band, lm, b);
@@ -824,7 +919,11 @@ fn quant_partition(
                         // about 48 dB below the normal folding level.
                         for j in 0..n {
                             ctx.seed = lcg_rand(ctx.seed);
-                            let tmp = if ctx.seed & 0x8000 != 0 { 1.0 / 256.0 } else { -1.0 / 256.0 };
+                            let tmp = if ctx.seed & 0x8000 != 0 {
+                                1.0 / 256.0
+                            } else {
+                                -1.0 / 256.0
+                            };
                             x[j] = lb[j] + tmp;
                         }
                         renormalise_vector(&mut x[..n], gain);
@@ -974,13 +1073,32 @@ fn quant_band_stereo(
         let swapped = sctx.itheta > 8192;
         ctx.remaining_bits -= sctx.qalloc + sbits;
 
-        let sign = if sbits != 0 { ctx.dec.decode_bits(1) } else { 0 };
+        let sign = if sbits != 0 {
+            ctx.dec.decode_bits(1)
+        } else {
+            0
+        };
         let sign = 1.0 - 2.0 * sign as f32;
 
-        let (x2, y2) = if swapped { (&mut *y, &mut *x) } else { (&mut *x, &mut *y) };
+        let (x2, y2) = if swapped {
+            (&mut *y, &mut *x)
+        } else {
+            (&mut *x, &mut *y)
+        };
         // `orig_fill`, not `fill`: the side is still folded even when the
         // angle cleared the low bits.
-        cm = quant_band(ctx, x2, n, mbits, blocks, lowband, lm, lowband_out, 1.0, orig_fill);
+        cm = quant_band(
+            ctx,
+            x2,
+            n,
+            mbits,
+            blocks,
+            lowband,
+            lm,
+            lowband_out,
+            1.0,
+            orig_fill,
+        );
         y2[0] = -sign * x2[1];
         y2[1] = sign * x2[0];
 
@@ -1002,19 +1120,65 @@ fn quant_band_stereo(
 
         if mbits >= sbits {
             // The mid keeps unit gain because later bands fold from it.
-            let cm0 = quant_band(ctx, x, n, mbits, blocks, lowband, lm, lowband_out, 1.0, fill);
+            let cm0 = quant_band(
+                ctx,
+                x,
+                n,
+                mbits,
+                blocks,
+                lowband,
+                lm,
+                lowband_out,
+                1.0,
+                fill,
+            );
             let spent = mbits - (rebalance - ctx.remaining_bits);
             if spent > 3 << BITRES && sctx.itheta != 0 {
                 sbits += spent - (3 << BITRES);
             }
-            cm = cm0 | quant_band(ctx, y, n, sbits, blocks, None, lm, None, side, fill >> blocks);
+            cm = cm0
+                | quant_band(
+                    ctx,
+                    y,
+                    n,
+                    sbits,
+                    blocks,
+                    None,
+                    lm,
+                    None,
+                    side,
+                    fill >> blocks,
+                );
         } else {
-            let cm0 = quant_band(ctx, y, n, sbits, blocks, None, lm, None, side, fill >> blocks);
+            let cm0 = quant_band(
+                ctx,
+                y,
+                n,
+                sbits,
+                blocks,
+                None,
+                lm,
+                None,
+                side,
+                fill >> blocks,
+            );
             let spent = sbits - (rebalance - ctx.remaining_bits);
             if spent > 3 << BITRES && sctx.itheta != 16384 {
                 mbits += spent - (3 << BITRES);
             }
-            cm = cm0 | quant_band(ctx, x, n, mbits, blocks, lowband, lm, lowband_out, 1.0, fill);
+            cm = cm0
+                | quant_band(
+                    ctx,
+                    x,
+                    n,
+                    mbits,
+                    blocks,
+                    lowband,
+                    lm,
+                    lowband_out,
+                    1.0,
+                    fill,
+                );
         }
     }
 
@@ -1142,7 +1306,11 @@ fn quant_all_bands(
             lowband_offset = i;
         }
         if i == start + 1 {
-            let norm2_ref = if channels == 2 { Some(norm2.as_mut_slice()) } else { None };
+            let norm2_ref = if channels == 2 {
+                Some(norm2.as_mut_slice())
+            } else {
+                None
+            };
             special_hybrid_folding(&mut norm, norm2_ref, start, m);
         }
 
@@ -1214,7 +1382,11 @@ fn quant_all_bands(
                 blocks,
                 lowband.as_deref_mut(),
                 lm as i32,
-                if last { None } else { Some(&mut norm[split..split + n]) },
+                if last {
+                    None
+                } else {
+                    Some(&mut norm[split..split + n])
+                },
                 1.0,
                 x_cm as i32,
             );
@@ -1226,7 +1398,11 @@ fn quant_all_bands(
                 blocks,
                 lowband2.as_deref_mut(),
                 lm as i32,
-                if last { None } else { Some(&mut norm2[split..split + n]) },
+                if last {
+                    None
+                } else {
+                    Some(&mut norm2[split..split + n])
+                },
                 1.0,
                 y_cm as i32,
             );
@@ -1240,7 +1416,11 @@ fn quant_all_bands(
                 blocks,
                 lowband.as_deref_mut(),
                 lm as i32,
-                if last { None } else { Some(&mut norm[split..split + n]) },
+                if last {
+                    None
+                } else {
+                    Some(&mut norm[split..split + n])
+                },
                 (x_cm | y_cm) as i32,
             );
             y_cm = x_cm;
@@ -1253,7 +1433,11 @@ fn quant_all_bands(
                 blocks,
                 lowband.as_deref_mut(),
                 lm as i32,
-                if last { None } else { Some(&mut norm[split..split + n]) },
+                if last {
+                    None
+                } else {
+                    Some(&mut norm[split..split + n])
+                },
                 1.0,
                 (x_cm | y_cm) as i32,
             );
@@ -1525,8 +1709,12 @@ fn compute_allocation(
         let width = (EBAND_5MS[j + 1] - EBAND_5MS[j]) as i32;
         // Below this a band gets no PVQ bits at all.
         thresh[j] = ((channels as i32) << BITRES).max(((3 * width) << lm << BITRES) >> 4);
-        trim_offset[j] =
-            (channels as i32 * width * (alloc_trim - 5 - lm as i32) * (end - j - 1) as i32 * (1i32 << (lm + BITRES as usize))) >> 6;
+        trim_offset[j] = (channels as i32
+            * width
+            * (alloc_trim - 5 - lm as i32)
+            * (end - j - 1) as i32
+            * (1i32 << (lm + BITRES as usize)))
+            >> 6;
         // A band of one coefficient gains more from a coarse value per
         // coefficient than from resolution, so give it less.
         if width << lm == 1 {
@@ -1542,7 +1730,10 @@ fn compute_allocation(
         let mut done = false;
         for j in (start..end).rev() {
             let n = (EBAND_5MS[j + 1] - EBAND_5MS[j]) as i32;
-            let mut bitsj = (channels as i32 * n * i32::from(BAND_ALLOCATION[mid as usize * NB_EBANDS + j])) << lm >> 2;
+            let mut bitsj =
+                (channels as i32 * n * i32::from(BAND_ALLOCATION[mid as usize * NB_EBANDS + j]))
+                    << lm
+                    >> 2;
             if bitsj > 0 {
                 bitsj = 0.max(bitsj + trim_offset[j]);
             }
@@ -1565,11 +1756,14 @@ fn compute_allocation(
 
     for j in start..end {
         let n = (EBAND_5MS[j + 1] - EBAND_5MS[j]) as i32;
-        let mut bits1j = (channels as i32 * n * i32::from(BAND_ALLOCATION[lo as usize * NB_EBANDS + j])) << lm >> 2;
+        let mut bits1j =
+            (channels as i32 * n * i32::from(BAND_ALLOCATION[lo as usize * NB_EBANDS + j])) << lm
+                >> 2;
         let mut bits2j = if hi >= NB_ALLOC_VECTORS as i32 {
             cap[j]
         } else {
-            (channels as i32 * n * i32::from(BAND_ALLOCATION[hi as usize * NB_EBANDS + j])) << lm >> 2
+            (channels as i32 * n * i32::from(BAND_ALLOCATION[hi as usize * NB_EBANDS + j])) << lm
+                >> 2
         };
         if bits1j > 0 {
             bits1j = 0.max(bits1j + trim_offset[j]);
@@ -1589,14 +1783,40 @@ fn compute_allocation(
     }
 
     interp_bits2pulses(
-        start, end, skip_start, &bits1, &bits2, &thresh, cap, total, balance, skip_rsv, intensity,
-        intensity_rsv, dual_stereo, dual_stereo_rsv, pulses, ebits, fine_priority, channels, lm, dec,
+        start,
+        end,
+        skip_start,
+        &bits1,
+        &bits2,
+        &thresh,
+        cap,
+        total,
+        balance,
+        skip_rsv,
+        intensity,
+        intensity_rsv,
+        dual_stereo,
+        dual_stereo_rsv,
+        pulses,
+        ebits,
+        fine_priority,
+        channels,
+        lm,
+        dec,
     )
 }
 
 /// Read the per-band time-frequency resolution changes, then the one bit that
 /// selects which of two interpretations of them the frame meant.
-fn tf_decode(start: usize, end: usize, is_transient: bool, tf_res: &mut [i32], lm: usize, dec: &mut RangeDecoder, total_bytes: usize) {
+fn tf_decode(
+    start: usize,
+    end: usize,
+    is_transient: bool,
+    tf_res: &mut [i32],
+    lm: usize,
+    dec: &mut RangeDecoder,
+    total_bytes: usize,
+) {
     let mut budget = (total_bytes * 8) as i32;
     let mut tell = dec.tell();
     let mut logp = if is_transient { 2 } else { 4 };
@@ -1757,11 +1977,23 @@ fn comb_filter(
     let t0 = t0.max(COMBFILTER_MINPERIOD);
     let t1 = t1.max(COMBFILTER_MINPERIOD);
     let g = [
-        [g0 * COMB_GAINS[tapset0][0], g0 * COMB_GAINS[tapset0][1], g0 * COMB_GAINS[tapset0][2]],
-        [g1 * COMB_GAINS[tapset1][0], g1 * COMB_GAINS[tapset1][1], g1 * COMB_GAINS[tapset1][2]],
+        [
+            g0 * COMB_GAINS[tapset0][0],
+            g0 * COMB_GAINS[tapset0][1],
+            g0 * COMB_GAINS[tapset0][2],
+        ],
+        [
+            g1 * COMB_GAINS[tapset1][0],
+            g1 * COMB_GAINS[tapset1][1],
+            g1 * COMB_GAINS[tapset1][2],
+        ],
     ];
     // No change means no cross-fade to do.
-    let overlap = if g0 == g1 && t0 == t1 && tapset0 == tapset1 { 0 } else { overlap };
+    let overlap = if g0 == g1 && t0 == t1 && tapset0 == tapset1 {
+        0
+    } else {
+        overlap
+    };
 
     let mut i = 0usize;
     if let Some(window) = window {
@@ -1790,13 +2022,25 @@ fn comb_filter(
 
 /// The same filter with no cross-fade, reading one buffer and writing
 /// another. Only the concealment path needs this shape.
-fn comb_filter_const(out: &mut [f32], src: &[f32], at: usize, t: usize, n: usize, g: f32, tapset: usize) {
+fn comb_filter_const(
+    out: &mut [f32],
+    src: &[f32],
+    at: usize,
+    t: usize,
+    n: usize,
+    g: f32,
+    tapset: usize,
+) {
     if g == 0.0 {
         out[..n].copy_from_slice(&src[at..at + n]);
         return;
     }
     let t = t.max(COMBFILTER_MINPERIOD);
-    let (g0, g1, g2) = (g * COMB_GAINS[tapset][0], g * COMB_GAINS[tapset][1], g * COMB_GAINS[tapset][2]);
+    let (g0, g1, g2) = (
+        g * COMB_GAINS[tapset][0],
+        g * COMB_GAINS[tapset][1],
+        g * COMB_GAINS[tapset][2],
+    );
     for i in 0..n {
         out[i] = src[at + i]
             + g0 * src[at + i - t]
@@ -1809,7 +2053,15 @@ fn comb_filter_const(out: &mut [f32], src: &[f32], at: usize, t: usize, n: usize
 ///
 /// The filter has state across frames, so this is also what makes a decoder
 /// that skipped a frame sound different from one that did not.
-fn deemphasis(channels: &[Vec<f32>], at: usize, pcm: &mut [f32], n: usize, cc: usize, downsample: usize, mem: &mut [f32; 2]) {
+fn deemphasis(
+    channels: &[Vec<f32>],
+    at: usize,
+    pcm: &mut [f32],
+    n: usize,
+    cc: usize,
+    downsample: usize,
+    mem: &mut [f32; 2],
+) {
     let nd = n / downsample;
     let mut scratch = vec![0.0f32; n];
     for c in 0..cc {
@@ -1868,7 +2120,14 @@ fn celt_lpc(lpc: &mut [f32], ac: &[f32], p: usize) {
 
 /// Autocorrelation over `x`, tapered at both ends by `window` so the estimate
 /// is not dominated by the discontinuity at the edges.
-fn celt_autocorr(x: &[f32], ac: &mut [f32], window: Option<&[f32]>, overlap: usize, lag: usize, n: usize) {
+fn celt_autocorr(
+    x: &[f32],
+    ac: &mut [f32],
+    window: Option<&[f32]>,
+    overlap: usize,
+    lag: usize,
+    n: usize,
+) {
     let windowed;
     let src: &[f32] = match window {
         None => &x[..n],
@@ -1922,12 +2181,16 @@ fn celt_iir(x: &[f32], den: &[f32], y: &mut [f32], n: usize, ord: usize, mem: &m
 /// quarter as much to find.
 fn pitch_downsample(channels: &[Vec<f32>], x_lp: &mut [f32], len: usize, cc: usize) {
     for i in 1..len >> 1 {
-        x_lp[i] = 0.25 * channels[0][2 * i - 1] + 0.25 * channels[0][2 * i + 1] + 0.5 * channels[0][2 * i];
+        x_lp[i] = 0.25 * channels[0][2 * i - 1]
+            + 0.25 * channels[0][2 * i + 1]
+            + 0.5 * channels[0][2 * i];
     }
     x_lp[0] = 0.25 * channels[0][1] + 0.5 * channels[0][0];
     if cc == 2 {
         for i in 1..len >> 1 {
-            x_lp[i] += 0.25 * channels[1][2 * i - 1] + 0.25 * channels[1][2 * i + 1] + 0.5 * channels[1][2 * i];
+            x_lp[i] += 0.25 * channels[1][2 * i - 1]
+                + 0.25 * channels[1][2 * i + 1]
+                + 0.5 * channels[1][2 * i];
         }
         x_lp[0] += 0.25 * channels[1][1] + 0.5 * channels[1][0];
     }
@@ -1949,7 +2212,13 @@ fn pitch_downsample(channels: &[Vec<f32>], x_lp: &mut [f32], len: usize, cc: usi
     }
     // Add a zero at 0.8, which flattens the spectrum further.
     let c1 = 0.8f32;
-    let lpc2 = [lpc[0] + 0.8, lpc[1] + c1 * lpc[0], lpc[2] + c1 * lpc[1], lpc[3] + c1 * lpc[2], c1 * lpc[3]];
+    let lpc2 = [
+        lpc[0] + 0.8,
+        lpc[1] + c1 * lpc[0],
+        lpc[2] + c1 * lpc[1],
+        lpc[3] + c1 * lpc[2],
+        c1 * lpc[3],
+    ];
     let mut mem = [0.0f32; 5];
     for i in 0..len >> 1 {
         let mut sum = x_lp[i];
@@ -1965,7 +2234,13 @@ fn pitch_downsample(channels: &[Vec<f32>], x_lp: &mut [f32], len: usize, cc: usi
 }
 
 /// The two best normalised correlation peaks, and where they are.
-fn find_best_pitch(xcorr: &[f32], y: &[f32], len: usize, max_pitch: usize, best_pitch: &mut [usize; 2]) {
+fn find_best_pitch(
+    xcorr: &[f32],
+    y: &[f32],
+    len: usize,
+    max_pitch: usize,
+    best_pitch: &mut [usize; 2],
+) {
     let mut syy = 1.0f32;
     let mut best_num = [-1.0f32; 2];
     let mut best_den = [0.0f32; 2];
@@ -2010,7 +2285,13 @@ fn pitch_search(x_lp: &[f32], y: &[f32], len: usize, max_pitch: usize) -> usize 
         xcorr[i] = (0..len >> 2).map(|j| x_lp4[j] * y_lp4[i + j]).sum();
     }
     let mut best_pitch = [0usize; 2];
-    find_best_pitch(&xcorr[..max_pitch >> 2], &y_lp4, len >> 2, max_pitch >> 2, &mut best_pitch);
+    find_best_pitch(
+        &xcorr[..max_pitch >> 2],
+        &y_lp4,
+        len >> 2,
+        max_pitch >> 2,
+        &mut best_pitch,
+    );
 
     for i in 0..max_pitch >> 1 {
         xcorr[i] = 0.0;
@@ -2070,28 +2351,71 @@ fn celt_synthesis(
 
     if cc == 2 && c == 1 {
         // One coded channel played out of two.
-        denormalise_bands(x, &mut freq, old_bande, start, eff_end, m, downsample, silence);
+        denormalise_bands(
+            x, &mut freq, old_bande, start, eff_end, m, downsample, silence,
+        );
         for out in 0..2 {
             for b in 0..blocks {
-                mdct.backward(&freq[b..], &mut decode_mem[out][at + nb * b..], &WINDOW120, OVERLAP, shift, blocks);
+                mdct.backward(
+                    &freq[b..],
+                    &mut decode_mem[out][at + nb * b..],
+                    &WINDOW120,
+                    OVERLAP,
+                    shift,
+                    blocks,
+                );
             }
         }
     } else if cc == 1 && c == 2 {
         // Two coded channels played out of one.
         let mut freq2 = vec![0.0f32; n];
-        denormalise_bands(x, &mut freq, old_bande, start, eff_end, m, downsample, silence);
-        denormalise_bands(&x[n..], &mut freq2, &old_bande[NB_EBANDS..], start, eff_end, m, downsample, silence);
+        denormalise_bands(
+            x, &mut freq, old_bande, start, eff_end, m, downsample, silence,
+        );
+        denormalise_bands(
+            &x[n..],
+            &mut freq2,
+            &old_bande[NB_EBANDS..],
+            start,
+            eff_end,
+            m,
+            downsample,
+            silence,
+        );
         for i in 0..n {
             freq[i] = 0.5 * freq[i] + 0.5 * freq2[i];
         }
         for b in 0..blocks {
-            mdct.backward(&freq[b..], &mut decode_mem[0][at + nb * b..], &WINDOW120, OVERLAP, shift, blocks);
+            mdct.backward(
+                &freq[b..],
+                &mut decode_mem[0][at + nb * b..],
+                &WINDOW120,
+                OVERLAP,
+                shift,
+                blocks,
+            );
         }
     } else {
         for ch in 0..cc {
-            denormalise_bands(&x[ch * n..], &mut freq, &old_bande[ch * NB_EBANDS..], start, eff_end, m, downsample, silence);
+            denormalise_bands(
+                &x[ch * n..],
+                &mut freq,
+                &old_bande[ch * NB_EBANDS..],
+                start,
+                eff_end,
+                m,
+                downsample,
+                silence,
+            );
             for b in 0..blocks {
-                mdct.backward(&freq[b..], &mut decode_mem[ch][at + nb * b..], &WINDOW120, OVERLAP, shift, blocks);
+                mdct.backward(
+                    &freq[b..],
+                    &mut decode_mem[ch][at + nb * b..],
+                    &WINDOW120,
+                    OVERLAP,
+                    shift,
+                    blocks,
+                );
             }
         }
     }
@@ -2216,7 +2540,8 @@ impl CeltDecoder {
             for c in 0..cc {
                 for i in start..end {
                     let idx = c * NB_EBANDS + i;
-                    self.old_bande[idx] = self.background_loge[idx].max(self.old_bande[idx] - decay);
+                    self.old_bande[idx] =
+                        self.background_loge[idx].max(self.old_bande[idx] - decay);
                 }
             }
             let mut seed = self.rng;
@@ -2233,8 +2558,19 @@ impl CeltDecoder {
             }
             self.rng = seed;
             celt_synthesis(
-                &mut self.mode.mdct, &x, &mut self.decode_mem, at, &self.old_bande, start, eff_end, cc, cc,
-                false, lm, self.downsample, false,
+                &mut self.mode.mdct,
+                &x,
+                &mut self.decode_mem,
+                at,
+                &self.old_bande,
+                start,
+                eff_end,
+                cc,
+                cc,
+                false,
+                lm,
+                self.downsample,
+                false,
             );
         } else {
             let pitch_index = if loss_duration == 0 {
@@ -2263,7 +2599,14 @@ impl CeltDecoder {
                 }
                 if loss_duration == 0 {
                     let mut ac = [0.0f32; LPC_ORDER + 1];
-                    celt_autocorr(&exc[LPC_ORDER..], &mut ac, Some(&WINDOW120), OVERLAP, LPC_ORDER, MAX_PERIOD);
+                    celt_autocorr(
+                        &exc[LPC_ORDER..],
+                        &mut ac,
+                        Some(&WINDOW120),
+                        OVERLAP,
+                        LPC_ORDER,
+                        MAX_PERIOD,
+                    );
                     ac[0] *= 1.0001;
                     for i in 1..=LPC_ORDER {
                         ac[i] -= ac[i] * (0.008 * 0.008) * (i * i) as f32;
@@ -2278,7 +2621,8 @@ impl CeltDecoder {
                     exc_length,
                     LPC_ORDER,
                 );
-                exc[LPC_ORDER + MAX_PERIOD - exc_length..LPC_ORDER + MAX_PERIOD].copy_from_slice(&fir_tmp);
+                exc[LPC_ORDER + MAX_PERIOD - exc_length..LPC_ORDER + MAX_PERIOD]
+                    .copy_from_slice(&fir_tmp);
 
                 // Is the waveform decaying, and how fast?
                 let decay_length = exc_length >> 1;
@@ -2305,8 +2649,10 @@ impl CeltDecoder {
                         j -= pitch_index;
                         attenuation *= decay;
                     }
-                    self.decode_mem[c][at + i] = attenuation * exc[LPC_ORDER + extrapolation_offset + j];
-                    let tmp = self.decode_mem[c][DECODE_BUFFER_SIZE - MAX_PERIOD - n + extrapolation_offset + j];
+                    self.decode_mem[c][at + i] =
+                        attenuation * exc[LPC_ORDER + extrapolation_offset + j];
+                    let tmp = self.decode_mem[c]
+                        [DECODE_BUFFER_SIZE - MAX_PERIOD - n + extrapolation_offset + j];
                     s1 += tmp * tmp;
                     j += 1;
                 }
@@ -2317,7 +2663,14 @@ impl CeltDecoder {
                     }
                     let input: Vec<f32> = self.decode_mem[c][at..at + extrapolation_len].to_vec();
                     let mut out = vec![0.0f32; extrapolation_len];
-                    celt_iir(&input, &self.lpc[c], &mut out, extrapolation_len, LPC_ORDER, &mut lpc_mem);
+                    celt_iir(
+                        &input,
+                        &self.lpc[c],
+                        &mut out,
+                        extrapolation_len,
+                        LPC_ORDER,
+                        &mut lpc_mem,
+                    );
                     self.decode_mem[c][at..at + extrapolation_len].copy_from_slice(&out);
                 }
 
@@ -2393,7 +2746,15 @@ impl CeltDecoder {
             Some(dec) if len > 1 => dec,
             _ => {
                 self.decode_lost(n, lm);
-                deemphasis(&self.decode_mem, at, pcm, n, cc, self.downsample, &mut self.preemph_mem);
+                deemphasis(
+                    &self.decode_mem,
+                    at,
+                    pcm,
+                    n,
+                    cc,
+                    self.downsample,
+                    &mut self.preemph_mem,
+                );
                 return frame_size / self.downsample;
             }
         };
@@ -2513,8 +2874,21 @@ impl CeltDecoder {
         let mut dual_stereo = false;
         let mut balance = 0i32;
         let coded_bands = compute_allocation(
-            start, end, &offsets, &cap, alloc_trim, &mut intensity, &mut dual_stereo, bits,
-            &mut balance, &mut pulses, &mut fine_quant, &mut fine_priority, c, lm, dec,
+            start,
+            end,
+            &offsets,
+            &cap,
+            alloc_trim,
+            &mut intensity,
+            &mut dual_stereo,
+            bits,
+            &mut balance,
+            &mut pulses,
+            &mut fine_quant,
+            &mut fine_priority,
+            c,
+            lm,
+            dec,
         );
 
         unquant_fine_energy(start, end, &mut self.old_bande, &fine_quant, dec, c);
@@ -2563,8 +2937,18 @@ impl CeltDecoder {
 
         if anti_collapse_on {
             anti_collapse(
-                &mut x, &collapse_masks, lm, c, n, start, end, &self.old_bande, &self.old_loge,
-                &self.old_loge2, &pulses, self.rng,
+                &mut x,
+                &collapse_masks,
+                lm,
+                c,
+                n,
+                start,
+                end,
+                &self.old_bande,
+                &self.old_loge,
+                &self.old_loge2,
+                &pulses,
+                self.rng,
             );
         }
         if silence {
@@ -2574,8 +2958,19 @@ impl CeltDecoder {
         }
 
         celt_synthesis(
-            &mut self.mode.mdct, &x, &mut self.decode_mem, at, &self.old_bande, start, eff_end, c, cc,
-            is_transient, lm, self.downsample, silence,
+            &mut self.mode.mdct,
+            &x,
+            &mut self.decode_mem,
+            at,
+            &self.old_bande,
+            start,
+            eff_end,
+            c,
+            cc,
+            is_transient,
+            lm,
+            self.downsample,
+            silence,
         );
 
         for ch in 0..cc {
@@ -2638,7 +3033,8 @@ impl CeltDecoder {
         // of lost packets it may make up all of what it missed at once.
         let max_background_increase = 160.min(self.loss_duration + (1 << lm)) as f32 * 0.001;
         for i in 0..2 * NB_EBANDS {
-            self.background_loge[i] = (self.background_loge[i] + max_background_increase).min(self.old_bande[i]);
+            self.background_loge[i] =
+                (self.background_loge[i] + max_background_increase).min(self.old_bande[i]);
         }
         for ch in 0..2 {
             for i in 0..start {
@@ -2654,7 +3050,15 @@ impl CeltDecoder {
         }
         self.rng = dec.rng();
 
-        deemphasis(&self.decode_mem, at, pcm, n, cc, self.downsample, &mut self.preemph_mem);
+        deemphasis(
+            &self.decode_mem,
+            at,
+            pcm,
+            n,
+            cc,
+            self.downsample,
+            &mut self.preemph_mem,
+        );
         self.loss_duration = 0;
         frame_size / self.downsample
     }

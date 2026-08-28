@@ -13,8 +13,9 @@ use crate::gpu::engine::compute::EngineCompute;
 use crate::gpu::engine::copy::EngineCopy;
 use crate::gpu::engine::threed::Engine3D;
 use crate::gpu::engine::twod::Engine2D;
-use crate::gpu::engine::{field, Registers, CLASS_2D, CLASS_3D, CLASS_COMPUTE, CLASS_COPY,
-    CLASS_GPFIFO, CLASS_INLINE};
+use crate::gpu::engine::{
+    field, Registers, CLASS_2D, CLASS_3D, CLASS_COMPUTE, CLASS_COPY, CLASS_GPFIFO, CLASS_INLINE,
+};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::syncpt::NvFence;
 use crate::{Error, Result};
@@ -66,7 +67,11 @@ enum Command {
         increment_once: bool,
     },
     /// One method write whose argument is carried in the header itself.
-    Immediate { method: u32, subchannel: u32, arg: u32 },
+    Immediate {
+        method: u32,
+        subchannel: u32,
+        arg: u32,
+    },
     /// Sub-device mask bookkeeping: which GPUs of an SLI set run what follows.
     /// There is exactly one GPU here, so every mask selects it.
     SubDeviceMask,
@@ -111,7 +116,11 @@ impl Command {
                 non_incrementing: true,
                 increment_once: false,
             }),
-            4 => Ok(Command::Immediate { method, subchannel, arg: count }),
+            4 => Ok(Command::Immediate {
+                method,
+                subchannel,
+                arg: count,
+            }),
             5 => Ok(Command::Methods {
                 method,
                 subchannel,
@@ -181,12 +190,7 @@ impl Channel {
 
     /// Run every pushbuffer referenced by `entries`, then retire the channel's
     /// syncpoint to `fence`.
-    pub fn submit(
-        &mut self,
-        entries: &[u64],
-        fence: NvFence,
-        ctx: &mut ExecCtx,
-    ) -> Result<()> {
+    pub fn submit(&mut self, entries: &[u64], fence: NvFence, ctx: &mut ExecCtx) -> Result<()> {
         ctx.stats.submissions += 1;
         for &entry in entries {
             self.run_gpfifo_entry(entry, ctx)?;
@@ -231,11 +235,26 @@ impl Channel {
                 continue;
             }
             match Command::decode(word)? {
-                Command::Methods { method, subchannel, count, non_incrementing, increment_once } => {
-                    self.pfifo =
-                        Pfifo { method, subchannel, remaining: count, non_incrementing, increment_once };
+                Command::Methods {
+                    method,
+                    subchannel,
+                    count,
+                    non_incrementing,
+                    increment_once,
+                } => {
+                    self.pfifo = Pfifo {
+                        method,
+                        subchannel,
+                        remaining: count,
+                        non_incrementing,
+                        increment_once,
+                    };
                 }
-                Command::Immediate { method, subchannel, arg } => {
+                Command::Immediate {
+                    method,
+                    subchannel,
+                    arg,
+                } => {
                     self.method(subchannel, method, arg, true, ctx)?;
                 }
                 Command::SubDeviceMask => {}
@@ -271,7 +290,10 @@ impl Channel {
         ctx.stats.methods += 1;
         let slot = subchannel as usize;
         if slot >= SUBCHANNEL_COUNT {
-            return Err(Error::Gpu(format!("pfifo: subchannel {} out of range", subchannel)));
+            return Err(Error::Gpu(format!(
+                "pfifo: subchannel {} out of range",
+                subchannel
+            )));
         }
         if method < HOST_METHOD_COUNT {
             return self.host_method(slot, method, arg, ctx);
@@ -284,9 +306,7 @@ impl Channel {
             );
         }
         match class {
-            CLASS_3D => {
-                self.three_d.write(method, arg, last_call, ctx)
-            }
+            CLASS_3D => self.three_d.write(method, arg, last_call, ctx),
             // The standalone class and the 3D class's own methods are one
             // unit sharing one register file, so they share one instance.
             CLASS_INLINE => self.three_d.inline.write(method, arg, ctx),
@@ -335,13 +355,7 @@ impl Channel {
 
     /// The channel's own methods -- class binding, semaphores, syncpoints --
     /// which PFIFO answers on whichever subchannel they arrive on.
-    fn host_method(
-        &mut self,
-        slot: usize,
-        method: u32,
-        arg: u32,
-        ctx: &mut ExecCtx,
-    ) -> Result<()> {
+    fn host_method(&mut self, slot: usize, method: u32, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
         self.gpfifo_regs.set(method, arg);
         match method {
             SET_OBJECT => {
@@ -421,8 +435,16 @@ mod tests {
             let mut mem = Memory::new();
             mem.map_zero(0x3000_0000, 0x4000).unwrap();
             let mut vmm = AddressSpace::new();
-            let base = vmm.map(0x3000_0000, 0x4000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
-            Harness { mem, vmm, host1x: Host1x::new(), stats: GpuStats::default(), base }
+            let base = vmm
+                .map(0x3000_0000, 0x4000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+                .unwrap();
+            Harness {
+                mem,
+                vmm,
+                host1x: Host1x::new(),
+                stats: GpuStats::default(),
+                base,
+            }
         }
 
         fn ctx(&mut self) -> ExecCtx<'_> {
@@ -495,7 +517,14 @@ mod tests {
     fn non_increasing_mode_rewrites_one_method() {
         let mut h = Harness::new();
         let mut chan = Channel::new(1, 8);
-        let pb = pushbuffer(&[header(3, 1, 0, 0), CLASS_3D, header(3, 3, 0, 0x360), 7, 8, 9]);
+        let pb = pushbuffer(&[
+            header(3, 1, 0, 0),
+            CLASS_3D,
+            header(3, 3, 0, 0x360),
+            7,
+            8,
+            9,
+        ]);
         let mut ctx = h.ctx();
         chan.run_pushbuffer(&pb, &mut ctx).unwrap();
         assert_eq!(chan.three_d.regs.get(0x360), 9);
@@ -506,7 +535,14 @@ mod tests {
     fn increase_once_advances_only_after_the_first_word() {
         let mut h = Harness::new();
         let mut chan = Channel::new(1, 8);
-        let pb = pushbuffer(&[header(3, 1, 0, 0), CLASS_3D, header(5, 3, 0, 0x360), 7, 8, 9]);
+        let pb = pushbuffer(&[
+            header(3, 1, 0, 0),
+            CLASS_3D,
+            header(5, 3, 0, 0x360),
+            7,
+            8,
+            9,
+        ]);
         let mut ctx = h.ctx();
         chan.run_pushbuffer(&pb, &mut ctx).unwrap();
         assert_eq!(chan.three_d.regs.get(0x360), 7);
@@ -540,8 +576,10 @@ mod tests {
         let mut h = Harness::new();
         let mut chan = Channel::new(1, 8);
         let mut ctx = h.ctx();
-        chan.run_pushbuffer(&pushbuffer(&[header(3, 1, 0, 0), CLASS_3D]), &mut ctx).unwrap();
-        chan.run_pushbuffer(&pushbuffer(&[header(1, 4, 0, 0x360), 1, 2]), &mut ctx).unwrap();
+        chan.run_pushbuffer(&pushbuffer(&[header(3, 1, 0, 0), CLASS_3D]), &mut ctx)
+            .unwrap();
+        chan.run_pushbuffer(&pushbuffer(&[header(1, 4, 0, 0x360), 1, 2]), &mut ctx)
+            .unwrap();
         assert_eq!(chan.three_d.regs.get(0x362), 0, "the group is not done yet");
         chan.run_pushbuffer(&pushbuffer(&[3, 4]), &mut ctx).unwrap();
         assert_eq!(chan.three_d.regs.get(0x360), 1);
@@ -555,8 +593,10 @@ mod tests {
         let mut h = Harness::new();
         let mut chan = Channel::new(1, 8);
         let mut ctx = h.ctx();
-        chan.run_pushbuffer(&pushbuffer(&[header(3, 1, 0, 0), CLASS_3D]), &mut ctx).unwrap();
-        chan.run_pushbuffer(&pushbuffer(&[header(5, 3, 0, 0x360), 7]), &mut ctx).unwrap();
+        chan.run_pushbuffer(&pushbuffer(&[header(3, 1, 0, 0), CLASS_3D]), &mut ctx)
+            .unwrap();
+        chan.run_pushbuffer(&pushbuffer(&[header(5, 3, 0, 0x360), 7]), &mut ctx)
+            .unwrap();
         chan.run_pushbuffer(&pushbuffer(&[8, 9]), &mut ctx).unwrap();
         assert_eq!(chan.three_d.regs.get(0x360), 7);
         assert_eq!(chan.three_d.regs.get(0x361), 9);
@@ -568,7 +608,13 @@ mod tests {
         // still reach the method it belongs to.
         let mut h = Harness::new();
         let mut chan = Channel::new(1, 8);
-        let pb = pushbuffer(&[header(3, 1, 0, 0), CLASS_3D, header(1, 2, 0, 0x360), 0xE000_0000, 7]);
+        let pb = pushbuffer(&[
+            header(3, 1, 0, 0),
+            CLASS_3D,
+            header(1, 2, 0, 0x360),
+            0xE000_0000,
+            7,
+        ]);
         let mut ctx = h.ctx();
         chan.run_pushbuffer(&pb, &mut ctx).unwrap();
         assert_eq!(chan.three_d.regs.get(0x360), 0xE000_0000);
@@ -620,7 +666,12 @@ mod tests {
         let mut h = Harness::new();
         let mut chan = Channel::new(1, 8);
         // `use_sub_dev_mask`, then a real command that must still be decoded.
-        let pb = pushbuffer(&[3 << 16, header(3, 1, 0, 0), CLASS_3D, header(4, 0x55, 0, 0x360)]);
+        let pb = pushbuffer(&[
+            3 << 16,
+            header(3, 1, 0, 0),
+            CLASS_3D,
+            header(4, 0x55, 0, 0x360),
+        ]);
         let mut ctx = h.ctx();
         chan.run_pushbuffer(&pb, &mut ctx).unwrap();
         assert_eq!(chan.three_d.regs.get(0x360), 0x55);

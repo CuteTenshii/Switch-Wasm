@@ -15,8 +15,8 @@
 //! against QEMU's `target/arm/tcg/a64.decode`.
 
 use crate::mem::Memory;
-use crate::{Error, Result};
 use crate::IdMap;
+use crate::{Error, Result};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 // The processor.
@@ -57,10 +57,9 @@ mod vi;
 pub use fs::SaveDataQuota;
 pub use jit::JitStats;
 
+use acc::{DEFAULT_NICKNAME, NICKNAME_LEN};
 pub(crate) use bits::decode_bit_mask;
 use bits::*;
-use acc::{DEFAULT_NICKNAME, NICKNAME_LEN};
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunReport {
@@ -268,7 +267,11 @@ pub enum ThreadState {
     /// re-acquire `mutex` when woken.
     /// Blocked on a condition variable. `deadline` is the cycle count the
     /// wait expires at, for the timed form — `None` is a wait with no timeout.
-    WaitKey { key: u32, mutex: u32, deadline: Option<u64> },
+    WaitKey {
+        key: u32,
+        mutex: u32,
+        deadline: Option<u64>,
+    },
     /// Blocked in `svcWaitForAddress` on the arbiter word at this address,
     /// until `svcSignalToAddress` names it or `deadline` passes.
     WaitAddress { addr: u32, deadline: Option<u64> },
@@ -425,8 +428,7 @@ pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x2000_0000;
 /// thing `svcQueryMemory` reports there — which is what a guest that walks
 /// the address space looking for its own modules needs to see.
 pub const RO_MODULE_REGION_ADDR: u32 = 0x2900_0000;
-pub const RO_MODULE_REGION_SIZE: u32 =
-    GUEST_HEAP_REGION_ADDR.wrapping_sub(RO_MODULE_REGION_ADDR);
+pub const RO_MODULE_REGION_SIZE: u32 = GUEST_HEAP_REGION_ADDR.wrapping_sub(RO_MODULE_REGION_ADDR);
 
 /// What `svcGetInfo` reports as the memory the process may use, and so the
 /// size `nn::init` asks for as its heap: exactly one region's worth.
@@ -485,12 +487,10 @@ pub const VAMM_ARENA_SIZE: u32 = 0x3FE0_0000;
 /// failure was `pc=0` 30M instructions and one whole subsystem away from the
 /// allocation that failed.
 pub const VAMM_HEAP_REGION_SIZE: u32 = 0x0800_0000;
-pub const VAMM_ALIAS_REGION_ADDR: u32 =
-    GUEST_HEAP_REGION_ADDR.wrapping_add(VAMM_HEAP_REGION_SIZE);
+pub const VAMM_ALIAS_REGION_ADDR: u32 = GUEST_HEAP_REGION_ADDR.wrapping_add(VAMM_HEAP_REGION_SIZE);
 /// Everything from there to the system shared buffer, which is the first
 /// thing above the alias region that is not the title's to use.
-pub const VAMM_ALIAS_REGION_SIZE: u32 =
-    SHARED_BUFFER_ADDR.wrapping_sub(VAMM_ALIAS_REGION_ADDR);
+pub const VAMM_ALIAS_REGION_SIZE: u32 = SHARED_BUFFER_ADDR.wrapping_sub(VAMM_ALIAS_REGION_ADDR);
 /// What `svcGetInfo` reports as `TotalMemorySize` — and, through
 /// `TotalNonSystemMemorySize`, the size of the reservation above. Unchanged
 /// at 896 MiB: it is a figure a title believes and sizes itself against, and
@@ -608,8 +608,14 @@ pub struct FontRegion {
 /// accepts.
 const SHARED_FONTS: [(u64, &str); 7] = [
     (0x0100_0000_0000_0811, "/nintendo_udsg-r_std_003.bfttf"),
-    (0x0100_0000_0000_0814, "/nintendo_udsg-r_org_zh-cn_003.bfttf"),
-    (0x0100_0000_0000_0814, "/nintendo_udsg-r_ext_zh-cn_003.bfttf"),
+    (
+        0x0100_0000_0000_0814,
+        "/nintendo_udsg-r_org_zh-cn_003.bfttf",
+    ),
+    (
+        0x0100_0000_0000_0814,
+        "/nintendo_udsg-r_ext_zh-cn_003.bfttf",
+    ),
     (0x0100_0000_0000_0813, "/nintendo_udjxh-db_zh-tw_003.bfttf"),
     (0x0100_0000_0000_0812, "/nintendo_udsg-r_ko_003.bfttf"),
     (0x0100_0000_0000_0810, "/nintendo_ext_003.bfttf"),
@@ -756,8 +762,7 @@ mod hid_shmem {
     /// The button capabilities in the same word. Both pads published here have
     /// a full face: ABXY the way a Switch prints them, a plus and a minus, and
     /// a directional pad.
-    pub const SYSTEM_PROP_FULL_BUTTONS: u32 =
-        (1 << 11) | (1 << 13) | (1 << 14) | (1 << 15);
+    pub const SYSTEM_PROP_FULL_BUTTONS: u32 = (1 << 11) | (1 << 13) | (1 << 14) | (1 << 15);
 
     pub const ATTR_CONNECTED: u32 = 1 << 0;
     pub const ATTR_WIRED: u32 = 1 << 1;
@@ -953,8 +958,6 @@ pub struct TouchPoint {
     pub x: u32,
     pub y: u32,
 }
-
-
 
 #[derive(Debug, Clone)]
 pub struct ThreadContext {
@@ -1678,9 +1681,10 @@ impl Cpu {
         // The framebuffer and input registers are fixed hardware-mapped
         // regions: pre-map them so reads never fault and programs (or the
         // host) can touch them before writing.
-        let _ = cpu
-            .mem
-            .map_zero(crate::FB_BASE, (crate::FB_WIDTH * crate::FB_HEIGHT * 4) as usize);
+        let _ = cpu.mem.map_zero(
+            crate::FB_BASE,
+            (crate::FB_WIDTH * crate::FB_HEIGHT * 4) as usize,
+        );
         let _ = cpu.mem.map_zero(crate::INPUT_ADDR, 4096);
         cpu
     }
@@ -1702,7 +1706,9 @@ impl Cpu {
         // gigabytes cost nothing until a title writes to it.
         self.mem.soft_map_zero(0, GUEST_SPACE_END);
         // 1 MiB full-descending stack; SP starts at the top.
-        let _ = self.mem.map_zero((STACK_TOP - STACK_SIZE) as u32, STACK_SIZE as usize);
+        let _ = self
+            .mem
+            .map_zero((STACK_TOP - STACK_SIZE) as u32, STACK_SIZE as usize);
         self.regs[SP_SLOT] = STACK_TOP;
         // libnx reads TPIDR_EL0 expecting the loader (HBL/kernel) to have set
         // the thread-local-storage base. Point it at a writable region clear of
@@ -1729,12 +1735,16 @@ impl Cpu {
         // return surfaces as a clean exit code instead of a NULL jump.
         let _ = self.mem.map_zero(SELF_RETURN_TRAMPOLINE, 0x10);
         self.mem.write_u32(SELF_RETURN_TRAMPOLINE, 0xD400_00E1).ok(); // svc #7
-        self.mem.write_u32(SELF_RETURN_TRAMPOLINE + 4, 0x1400_0000).ok(); // b .
-        // The same for a thread's entry point: returning from it is
-        // `svcExitThread` (svc 0x0A), not a process exit.
+        self.mem
+            .write_u32(SELF_RETURN_TRAMPOLINE + 4, 0x1400_0000)
+            .ok(); // b .
+                   // The same for a thread's entry point: returning from it is
+                   // `svcExitThread` (svc 0x0A), not a process exit.
         let _ = self.mem.map_zero(THREAD_EXIT_TRAMPOLINE, 0x10);
         self.mem.write_u32(THREAD_EXIT_TRAMPOLINE, 0xD400_0141).ok(); // svc #0xa
-        self.mem.write_u32(THREAD_EXIT_TRAMPOLINE + 4, 0x1400_0000).ok(); // b .
+        self.mem
+            .write_u32(THREAD_EXIT_TRAMPOLINE + 4, 0x1400_0000)
+            .ok(); // b .
     }
 
     // ---- guest threads ----
@@ -1842,7 +1852,9 @@ impl Cpu {
             return false;
         };
         let (regs, pc, nzcv, vregs, fpcr, fpsr, tpidr) = if index == self.current_thread {
-            (self.regs, self.pc, self.nzcv, self.vregs, self.fpcr, self.fpsr, self.tpidr)
+            (
+                self.regs, self.pc, self.nzcv, self.vregs, self.fpcr, self.fpsr, self.tpidr,
+            )
         } else {
             let t = &self.threads[index];
             (t.regs, t.pc, t.nzcv, t.vregs, t.fpcr, t.fpsr, t.tpidr)
@@ -1970,7 +1982,11 @@ impl Cpu {
         let _ = self.mem.write_u32(key, CONDVAR_HAS_WAITERS);
         self.arbitrate_unlock(mutex);
         let deadline = self.wait_deadline(timeout);
-        self.threads[self.current_thread].state = ThreadState::WaitKey { key, mutex, deadline };
+        self.threads[self.current_thread].state = ThreadState::WaitKey {
+            key,
+            mutex,
+            deadline,
+        };
         self.reschedule();
     }
 
@@ -2060,7 +2076,12 @@ impl Cpu {
             if count >= 0 && woken >= count {
                 break;
             }
-            if let ThreadState::WaitKey { key: waiting, mutex, .. } = self.threads[i].state {
+            if let ThreadState::WaitKey {
+                key: waiting,
+                mutex,
+                ..
+            } = self.threads[i].state
+            {
                 if waiting != key {
                     continue;
                 }
@@ -2085,8 +2106,8 @@ impl Cpu {
     /// does its work on a timer and never does it again.
     fn wait_deadline(&self, timeout: i64) -> Option<u64> {
         (timeout > 0).then(|| {
-            let cycles =
-                (timeout as u128) * u128::from(crate::cpu::power::CLOCK_RATES_HZ[0]) / 1_000_000_000;
+            let cycles = (timeout as u128) * u128::from(crate::cpu::power::CLOCK_RATES_HZ[0])
+                / 1_000_000_000;
             self.cycles.wrapping_add(cycles as u64)
         })
     }
@@ -2278,7 +2299,9 @@ impl Cpu {
     /// a double-buffered title queues the surface whose readback was just
     /// asked for.
     fn complete_pending_present(&mut self) {
-        let Some(buffer) = self.pending_present else { return };
+        let Some(buffer) = self.pending_present else {
+            return;
+        };
         match self.nv.gpu.flush_renderers(&mut self.mem) {
             Ok(crate::gpu::renderer::Flush::Pending) => {}
             Ok(crate::gpu::renderer::Flush::Done) => {
@@ -2457,7 +2480,9 @@ impl Cpu {
 
     /// Handle of the thread that is running, as the guest knows it.
     pub fn current_thread_handle(&self) -> u64 {
-        self.threads.get(self.current_thread).map_or(MAIN_THREAD_HANDLE, |t| t.handle)
+        self.threads
+            .get(self.current_thread)
+            .map_or(MAIN_THREAD_HANDLE, |t| t.handle)
     }
 
     /// How many threads the guest has created (including the main thread).
@@ -2482,7 +2507,8 @@ impl Cpu {
         // advertises as argv[0]: libnx's `romfsMountSelf` re-opens the running
         // NRO through the filesystem to read the RomFS appended to it, which
         // is where homebrew keeps its assets.
-        self.fs.write_file(crate::nro::HOMEBREW_NRO_PATH, data.to_vec());
+        self.fs
+            .write_file(crate::nro::HOMEBREW_NRO_PATH, data.to_vec());
         self.out.clear();
         self.trace.clear();
         self.halted = false;
@@ -2584,7 +2610,10 @@ impl Cpu {
     /// Horizon service surface a full SDK program expects, which this
     /// emulator does not have yet; this gets it as far as that surface, the
     /// same "boot as far as it goes" spirit as `boot_homebrew`.
-    pub fn boot_retail_program(&mut self, modules: &[(&str, &[u8])]) -> Result<Vec<crate::nso::LoadedNso>> {
+    pub fn boot_retail_program(
+        &mut self,
+        modules: &[(&str, &[u8])],
+    ) -> Result<Vec<crate::nso::LoadedNso>> {
         self.out.clear();
         self.trace.clear();
         self.halted = false;
@@ -2707,7 +2736,9 @@ impl Cpu {
         // LaVersion: the applet-interface revision the caller speaks. Each
         // applet numbers its own, and a caller that claims one the applet
         // does not know is refused, so this is the applet's own.
-        args.extend_from_slice(&crate::cpu::am::applet_interface_version(self.program_id).to_le_bytes());
+        args.extend_from_slice(
+            &crate::cpu::am::applet_interface_version(self.program_id).to_le_bytes(),
+        );
         // ExpectedThemeColor: 0 is the basic white theme.
         args.extend_from_slice(&0u32.to_le_bytes());
         // PlayStartupSound, then padding out to the tick field.
@@ -2874,7 +2905,14 @@ impl Cpu {
     /// reach the guest as a **copy** handle — see [`Cpu::write_ipc_reply`].
     pub(crate) fn alloc_event(&mut self, name: &'static str, auto_clear: bool) -> u64 {
         let handle = self.alloc_handle();
-        self.events.insert(handle, Event { name, signaled: false, auto_clear });
+        self.events.insert(
+            handle,
+            Event {
+                name,
+                signaled: false,
+                auto_clear,
+            },
+        );
         if crate::env_flag!("TRACE_WAIT") {
             eprintln!("[event] {name} = {handle:#x} auto_clear={auto_clear}");
         }
@@ -2970,7 +3008,9 @@ impl Cpu {
     /// laps cost nothing, and getting the *set* wrong here would be a lost
     /// wakeup, which is the one failure a wait cannot recover from.
     pub fn signal_event(&mut self, handle: u64) {
-        let Some(event) = self.events.get_mut(&handle) else { return };
+        let Some(event) = self.events.get_mut(&handle) else {
+            return;
+        };
         // Only a *transition* wakes anybody. Re-firing an event that is
         // already signalled changes nothing a waiter could observe, and this
         // is not a rare case: [`Cpu::audio_tick`] re-signals a device whose
@@ -3035,7 +3075,8 @@ impl Cpu {
     /// [`Cpu::service_handles_snapshot`] for the objects living on a session
     /// rather than the sessions themselves.
     pub fn domain_interface_name(&self, handle: u64, object_id: u32) -> Option<String> {
-        self.domain_interface(handle, object_id).map(|s| s.to_owned())
+        self.domain_interface(handle, object_id)
+            .map(|s| s.to_owned())
     }
 
     /// Debug: dump the fake-handle -> service-name map.
@@ -3151,7 +3192,14 @@ impl Cpu {
     /// and *up* as Horizon reports them. The stick pseudo-buttons
     /// (`StickLLeft`..`StickRDown`, bits 16-23) are derived here, so a caller
     /// only has to pass the analog values.
-    pub fn set_gamepad_state(&mut self, buttons: u64, stick_lx: i32, stick_ly: i32, stick_rx: i32, stick_ry: i32) {
+    pub fn set_gamepad_state(
+        &mut self,
+        buttons: u64,
+        stick_lx: i32,
+        stick_ly: i32,
+        stick_rx: i32,
+        stick_ry: i32,
+    ) {
         let buttons = buttons | Self::stick_pseudo_buttons(stick_lx, stick_ly, stick_rx, stick_ry);
 
         // Simple host→guest register: a u64 mask, then two analog sticks.
@@ -3244,9 +3292,10 @@ impl Cpu {
         }
         let at = self.hid_shmem_addr.wrapping_add(h::NPAD_CONDITION);
         let _ = self.mem.write_u32(at + h::NPAD_CONDITION_INITIALIZED, 1);
-        let _ = self
-            .mem
-            .write_u32(at + h::NPAD_CONDITION_HOLD_TYPE, self.npad_joy_hold_type as u32);
+        let _ = self.mem.write_u32(
+            at + h::NPAD_CONDITION_HOLD_TYPE,
+            self.npad_joy_hold_type as u32,
+        );
         let _ = self.mem.write_u32(at + h::NPAD_CONDITION_VALID, 1);
     }
 
@@ -3268,7 +3317,9 @@ impl Cpu {
         let _ = self
             .mem
             .write_u32(base + h::JOY_ASSIGNMENT_MODE, presentation.joy_assignment);
-        let _ = self.mem.write_u32(base + h::DEVICE_TYPE, presentation.device_type);
+        let _ = self
+            .mem
+            .write_u32(base + h::DEVICE_TYPE, presentation.device_type);
 
         // A pad that never writes its power info is a pad reporting an empty
         // battery: `hidGetNpadPowerInfo*` reads `battery_level` straight out
@@ -3289,12 +3340,16 @@ impl Cpu {
         }
 
         let lifo = base.wrapping_add(presentation.lifo);
-        let _ = self.mem.write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
+        let _ = self
+            .mem
+            .write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
         let _ = self.mem.write_u64(lifo + h::LIFO_TAIL, 0);
         let _ = self.mem.write_u64(lifo + h::LIFO_COUNT, 1);
 
         let entry = lifo.wrapping_add(h::LIFO_STORAGE);
-        let _ = self.mem.write_u64(entry + h::STORAGE_SAMPLING_NUMBER, sample);
+        let _ = self
+            .mem
+            .write_u64(entry + h::STORAGE_SAMPLING_NUMBER, sample);
         let _ = self.mem.write_u64(entry + h::STATE_SAMPLING_NUMBER, sample);
         let _ = self.mem.write_u64(entry + h::STATE_BUTTONS, buttons);
         let _ = self.mem.write_u32(entry + h::STATE_STICK_L, lx as u32);
@@ -3329,12 +3384,16 @@ impl Cpu {
         let sample = self.touch_sample_counter;
 
         let lifo = self.hid_shmem_addr.wrapping_add(h::TOUCH_SCREEN);
-        let _ = self.mem.write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
+        let _ = self
+            .mem
+            .write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
         let _ = self.mem.write_u64(lifo + h::LIFO_TAIL, 0);
         let _ = self.mem.write_u64(lifo + h::LIFO_COUNT, 1);
 
         let storage = lifo.wrapping_add(h::LIFO_STORAGE);
-        let _ = self.mem.write_u64(storage + h::STORAGE_SAMPLING_NUMBER, sample);
+        let _ = self
+            .mem
+            .write_u64(storage + h::STORAGE_SAMPLING_NUMBER, sample);
         let state = storage.wrapping_add(h::TOUCH_STATE);
         let _ = self.mem.write_u64(state + h::TOUCH_SAMPLING_NUMBER, sample);
 
@@ -3382,7 +3441,13 @@ impl Cpu {
     }
 
     pub(crate) fn set_vibration(&mut self, low: f32, high: f32) {
-        let clamp = |v: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 };
+        let clamp = |v: f32| {
+            if v.is_finite() {
+                v.clamp(0.0, 1.0)
+            } else {
+                0.0
+            }
+        };
         self.vibration = (clamp(low), clamp(high));
     }
 
@@ -3466,7 +3531,9 @@ impl Cpu {
             if archives.contains_key(&id) {
                 continue;
             }
-            let Some(src) = self.data_archives.get(&id) else { continue };
+            let Some(src) = self.data_archives.get(&id) else {
+                continue;
+            };
             let mut image = vec![0u8; src.len() as usize];
             if src.read_at(0, &mut image).is_err() {
                 continue;
@@ -3641,9 +3708,8 @@ impl Cpu {
     /// generic reply — leaving the caller's buffer untouched — did not.
     pub(crate) fn next_random_u64(&mut self) -> u64 {
         if self.rng_state == 0 {
-            self.rng_state = (self.unix_time as u64)
-                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-                ^ 0xA076_1D64_78BD_642F;
+            self.rng_state =
+                (self.unix_time as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xA076_1D64_78BD_642F;
         }
         self.rng_state = self.rng_state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.rng_state;
@@ -3664,27 +3730,31 @@ impl Cpu {
         let c = (self.nzcv >> 29) & 1;
         let v = (self.nzcv >> 28) & 1;
         match cond & 0xF {
-            0x0 => z == 1,                 // EQ
-            0x1 => z == 0,                 // NE
-            0x2 => c == 1,                 // CS
-            0x3 => c == 0,                 // CC
-            0x4 => n == 1,                 // MI
-            0x5 => n == 0,                 // PL
-            0x6 => v == 1,                 // VS
-            0x7 => v == 0,                 // VC
-            0x8 => c == 1 && z == 0,       // HI
-            0x9 => c == 0 || z == 1,       // LS
-            0xA => n == v,                 // GE
-            0xB => n != v,                 // LT
-            0xC => z == 0 && n == v,       // GT
-            0xD => z == 1 || n != v,       // LE
-            _ => true,                     // AL / NV
+            0x0 => z == 1,           // EQ
+            0x1 => z == 0,           // NE
+            0x2 => c == 1,           // CS
+            0x3 => c == 0,           // CC
+            0x4 => n == 1,           // MI
+            0x5 => n == 0,           // PL
+            0x6 => v == 1,           // VS
+            0x7 => v == 0,           // VC
+            0x8 => c == 1 && z == 0, // HI
+            0x9 => c == 0 || z == 1, // LS
+            0xA => n == v,           // GE
+            0xB => n != v,           // LT
+            0xC => z == 0 && n == v, // GT
+            0xD => z == 1 || n != v, // LE
+            _ => true,               // AL / NV
         }
     }
 
     #[inline(always)]
     fn mask(sf: bool) -> u64 {
-        if sf { u64::MAX } else { u32::MAX as u64 }
+        if sf {
+            u64::MAX
+        } else {
+            u32::MAX as u64
+        }
     }
 
     /// Compute `a + b + carry_in`, returning (result, carry-out, overflow).
@@ -3747,7 +3817,11 @@ impl Cpu {
         sf: bool,
         sp_form: bool,
     ) {
-        let a = if sp_form { self.read_x(rn) } else { self.read_zr(rn) } & Self::mask(sf);
+        let a = if sp_form {
+            self.read_x(rn)
+        } else {
+            self.read_zr(rn)
+        } & Self::mask(sf);
         let (result, carry, overflow) = if sub {
             Self::add_carry_overflow(a, !rhs, 1, sf)
         } else {
@@ -3803,7 +3877,12 @@ impl Cpu {
         self.record_run(pc, 1);
         let result = self.execute(insn, next_pc);
         if self.trace_enabled {
-            self.trace_line(&format!("{:08x}: {:08x}  {}\n", pc, insn, crate::disasm::disassemble(insn)));
+            self.trace_line(&format!(
+                "{:08x}: {:08x}  {}\n",
+                pc,
+                insn,
+                crate::disasm::disassemble(insn)
+            ));
         }
         if let Err(e) = &result {
             self.record_fault(e, pc, insn);
@@ -3933,8 +4012,7 @@ impl Cpu {
     fn trace_line(&mut self, line: &str) {
         if self.trace.len() >= self.trace_cap {
             if !self.trace.ends_with(b"\n[TRACE TRUNCATED]\n") {
-                self.trace
-                    .extend_from_slice(b"\n[TRACE TRUNCATED]\n");
+                self.trace.extend_from_slice(b"\n[TRACE TRUNCATED]\n");
             }
             return;
         }
@@ -4113,7 +4191,9 @@ impl Cpu {
 
     /// `LDR Xt, label` and friends: the literal (PC-relative) load forms.
     fn try_load_literal(&mut self, insn: u32) -> Result<bool> {
-        if ((insn >> 27) & 0b111) != 0b011 || ((insn >> 26) & 1) != 0 || ((insn >> 24) & 0b11) != 0b00
+        if ((insn >> 27) & 0b111) != 0b011
+            || ((insn >> 26) & 1) != 0
+            || ((insn >> 24) & 0b11) != 0b00
         {
             return Ok(false);
         }
@@ -4238,7 +4318,11 @@ impl Cpu {
                         // surfaces as a clean ExitProcess instead of a NULL
                         // fetch.
                         let tgt = self.read_zr(rn) as u32;
-                        self.pc = if tgt == 0 { SELF_RETURN_TRAMPOLINE } else { tgt };
+                        self.pc = if tgt == 0 {
+                            SELF_RETURN_TRAMPOLINE
+                        } else {
+                            tgt
+                        };
                         Ok(true)
                     }
                     _ => Err(Error::Cpu(format!(
@@ -4260,7 +4344,10 @@ impl Cpu {
                         self.syscall(imm)?;
                         Ok(true)
                     } else {
-                        Err(Error::Cpu(format!("unimplemented HVC/SMC at {:#x}", self.pc)))
+                        Err(Error::Cpu(format!(
+                            "unimplemented HVC/SMC at {:#x}",
+                            self.pc
+                        )))
                     }
                 }
                 0b001 => {
@@ -4367,7 +4454,11 @@ mod tests {
 
         cpu.sleep_until(clock + 1_000_000);
 
-        assert_eq!(cpu.cycles, clock + 1_000_000, "the clock idled to the deadline");
+        assert_eq!(
+            cpu.cycles,
+            clock + 1_000_000,
+            "the clock idled to the deadline"
+        );
         assert_eq!(cpu.steps, steps, "the idle executed nothing");
     }
 }

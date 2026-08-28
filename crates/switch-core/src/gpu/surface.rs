@@ -80,12 +80,7 @@ pub fn block_linear_column(x_bytes: u32, block_height_gobs: u32) -> u32 {
 /// `width_bytes` is the surface's row length in bytes (it is rounded up to a
 /// whole number of GOBs, as the hardware does) and `block_height_gobs` is
 /// `2^height` from the surface's tile mode.
-pub fn block_linear_offset(
-    x_bytes: u32,
-    y: u32,
-    width_bytes: u32,
-    block_height_gobs: u32,
-) -> u32 {
+pub fn block_linear_offset(x_bytes: u32, y: u32, width_bytes: u32, block_height_gobs: u32) -> u32 {
     block_linear_row(y, width_bytes, block_height_gobs)
         + block_linear_column(x_bytes, block_height_gobs)
 }
@@ -240,7 +235,12 @@ impl SampleGrid {
             };
         }
         let slots = sample_slots(&positions, count, samples_x, samples_y);
-        Ok(SampleGrid { samples_x, samples_y, positions, slots })
+        Ok(SampleGrid {
+            samples_x,
+            samples_y,
+            positions,
+            slots,
+        })
     }
 
     /// The same surface, with coverage evaluated once per pixel: what
@@ -345,7 +345,12 @@ fn msaa_mode_grid(mode: u32) -> Result<(u32, u32)> {
         2 | 8 | 9 => (2, 2),       // 2x2, 2x2_VC4, 2x2_VC12
         3 | 4 | 10 | 11 => (4, 2), // 4x2, 4x2_D3D, 4x2_VC8, 4x2_VC24
         6 => (4, 4),               // 4x4
-        other => return Err(Error::Gpu(format!("surface: unknown MsaaMode {:#x}", other))),
+        other => {
+            return Err(Error::Gpu(format!(
+                "surface: unknown MsaaMode {:#x}",
+                other
+            )))
+        }
     })
 }
 
@@ -403,8 +408,8 @@ enum Order8 {
 impl ColorFormat {
     pub fn from_raw(raw: u32) -> Result<ColorFormat> {
         let bytes_per_pixel = match raw {
-            0xC0..=0xC5 => 16,                     // RGBA32 / RGBX32
-            0xC6..=0xCE => 8,                      // RGBA16 / RG32 / RGBX16
+            0xC0..=0xC5 => 16,                                   // RGBA32 / RGBX32
+            0xC6..=0xCE => 8,                                    // RGBA16 / RG32 / RGBX16
             0xCF..=0xE7 | 0xF9 | 0xFA | 0xFD | 0xFE | 0xFF => 4, // 32-bit formats
             0xE8 | 0xE9 | 0xEA..=0xEF | 0xF0..=0xF2 | 0xF8 | 0xFB | 0xFC => 2,
             0xF3..=0xF7 => 1,
@@ -416,7 +421,10 @@ impl ColorFormat {
                 )))
             }
         };
-        Ok(ColorFormat { raw, bytes_per_pixel })
+        Ok(ColorFormat {
+            raw,
+            bytes_per_pixel,
+        })
     }
 
     fn order8(&self) -> Option<Order8> {
@@ -488,7 +496,11 @@ impl ColorFormat {
                 unorm8(rgba[0]),
                 unorm8(rgba[1]),
                 unorm8(rgba[2]),
-                if self.has_alpha() { unorm8(rgba[3]) } else { 0xFF },
+                if self.has_alpha() {
+                    unorm8(rgba[3])
+                } else {
+                    0xFF
+                },
             );
             return Ok(match order {
                 Order8::Rgba => (r | (g << 8) | (b << 16) | (a << 24)) as u128,
@@ -572,7 +584,11 @@ impl ColorFormat {
             return None;
         }
         // An "X" format has no alpha to read, and the host word is opaque.
-        let alpha = if self.has_alpha() { raw & 0xFF00_0000 } else { 0xFF00_0000 };
+        let alpha = if self.has_alpha() {
+            raw & 0xFF00_0000
+        } else {
+            0xFF00_0000
+        };
         Some(match self.order8()? {
             Order8::Rgba => (raw & 0x00FF_FFFF) | alpha,
             Order8::Bgra => {
@@ -623,7 +639,11 @@ impl ColorFormat {
                     ((v >> 10) & 0x1F) as f32 / 31.0,
                     ((v >> 5) & 0x1F) as f32 / 31.0,
                     (v & 0x1F) as f32 / 31.0,
-                    if self.raw == 0xE9 && (v >> 15) & 1 == 0 { 0.0 } else { 1.0 },
+                    if self.raw == 0xE9 && (v >> 15) & 1 == 0 {
+                        0.0
+                    } else {
+                        1.0
+                    },
                 ])
             }
             0xD1 | 0xDF => {
@@ -632,7 +652,11 @@ impl ColorFormat {
                 let c1 = ((v >> 10) & 0x3FF) as f32 / 1023.0;
                 let c2 = ((v >> 20) & 0x3FF) as f32 / 1023.0;
                 let a = ((v >> 30) & 3) as f32 / 3.0;
-                Ok(if self.raw == 0xD1 { [c0, c1, c2, a] } else { [c2, c1, c0, a] })
+                Ok(if self.raw == 0xD1 {
+                    [c0, c1, c2, a]
+                } else {
+                    [c2, c1, c0, a]
+                })
             }
             0xE5 => Ok([f32::from_bits(raw as u32), 0.0, 0.0, 1.0]),
             0xC0 | 0xC3 => {
@@ -790,7 +814,8 @@ impl Surface {
         let x = x.min(self.width.saturating_sub(1));
         let y = y.min(self.height.saturating_sub(1));
         let va = self.addr + self.offset(x, y) as u64;
-        self.format.decode(ctx.read_pixel(va, self.format.bytes_per_pixel)?)
+        self.format
+            .decode(ctx.read_pixel(va, self.format.bytes_per_pixel)?)
     }
 
     /// The stored bytes of a texel, undecoded. For a copy between surfaces of
@@ -800,7 +825,10 @@ impl Surface {
     pub fn texel_raw(&self, x: u32, y: u32, ctx: &ExecCtx) -> Result<u128> {
         let x = x.min(self.width.saturating_sub(1));
         let y = y.min(self.height.saturating_sub(1));
-        ctx.read_pixel(self.addr + self.offset(x, y) as u64, self.format.bytes_per_pixel)
+        ctx.read_pixel(
+            self.addr + self.offset(x, y) as u64,
+            self.format.bytes_per_pixel,
+        )
     }
 
     pub fn sample_point(&self, u: f64, v: f64, ctx: &ExecCtx) -> Result<[f32; 4]> {
@@ -935,12 +963,16 @@ mod tests {
         ];
         let mut locations = [0u8; MAX_SAMPLES];
         locations[..4].copy_from_slice(&centres);
-        assert!(SampleGrid::new(2, &locations).unwrap().samples_at_texel_centres());
+        assert!(SampleGrid::new(2, &locations)
+            .unwrap()
+            .samples_at_texel_centres());
 
         // Moved a sixteenth of a pixel off centre, and no longer expressible.
         let mut moved = locations;
         moved[0] = 0x5 | (0x4 << 4);
-        assert!(!SampleGrid::new(2, &moved).unwrap().samples_at_texel_centres());
+        assert!(!SampleGrid::new(2, &moved)
+            .unwrap()
+            .samples_at_texel_centres());
     }
 
     #[test]
@@ -1012,9 +1044,15 @@ mod tests {
     fn a_row_and_a_column_sum_to_the_offset() {
         let layouts = [
             Layout::Pitch { pitch: 320 },
-            Layout::BlockLinear { block_height_gobs: 1 },
-            Layout::BlockLinear { block_height_gobs: 2 },
-            Layout::BlockLinear { block_height_gobs: 16 },
+            Layout::BlockLinear {
+                block_height_gobs: 1,
+            },
+            Layout::BlockLinear {
+                block_height_gobs: 2,
+            },
+            Layout::BlockLinear {
+                block_height_gobs: 16,
+            },
         ];
         for layout in layouts {
             for width_bytes in [64u32, 128, 320] {
@@ -1076,7 +1114,11 @@ mod tests {
             let back = srgb.decode(raw).unwrap();
             // Eight bits of sRGB is finer than 1/255 of linear near black and
             // coarser near white; a quarter of a step is the worst of it.
-            assert!((back[0] - value).abs() < 0.01, "{value} came back {}", back[0]);
+            assert!(
+                (back[0] - value).abs() < 0.01,
+                "{value} came back {}",
+                back[0]
+            );
         }
     }
 
@@ -1134,7 +1176,11 @@ mod tests {
         for mantissa in [1u16, 2, 3, 0x155, 0x200, 0x3FF] {
             let expected = mantissa as f32 * 2.0f32.powi(-24);
             assert_eq!(f16_to_f32(mantissa), expected, "half {mantissa:#06x}");
-            assert_eq!(f16_to_f32(mantissa | 0x8000), -expected, "negative {mantissa:#06x}");
+            assert_eq!(
+                f16_to_f32(mantissa | 0x8000),
+                -expected,
+                "negative {mantissa:#06x}"
+            );
         }
         // The largest subnormal and the smallest normal are adjacent.
         assert_eq!(f16_to_f32(0x0400), 2.0f32.powi(-14));

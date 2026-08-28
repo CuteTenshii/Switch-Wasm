@@ -335,8 +335,11 @@ impl Cpu {
     /// buffer if the request carries one, else a receive-static pointer
     /// buffer.
     pub(super) fn ipc_output_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
-        self.ipc_recv_buffer(tls, index)
-            .or_else(|| self.ipc_recv_static_buffers(tls).get(index as usize).copied())
+        self.ipc_recv_buffer(tls, index).or_else(|| {
+            self.ipc_recv_static_buffers(tls)
+                .get(index as usize)
+                .copied()
+        })
     }
 
     /// The NUL-terminated path a filesystem request sent in its first
@@ -352,7 +355,11 @@ impl Cpu {
             None => raw.trim_start_matches('/'),
         };
         let trimmed = without_device.trim_matches('/');
-        if trimmed.is_empty() { "/".to_owned() } else { format!("/{}", trimmed) }
+        if trimmed.is_empty() {
+            "/".to_owned()
+        } else {
+            format!("/{}", trimmed)
+        }
     }
 
     /// Read `len` bytes of guest memory, stopping at the first fault.
@@ -510,7 +517,8 @@ impl Cpu {
             self.mem.write_u8(tls.wrapping_add(off + i), 0)?;
         }
         if is_domain {
-            self.mem.write_u32(tls.wrapping_add(off), domain_objects.len() as u32)?;
+            self.mem
+                .write_u32(tls.wrapping_add(off), domain_objects.len() as u32)?;
             self.mem.write_u32(tls.wrapping_add(off + 4), 0)?;
             self.mem.write_u32(tls.wrapping_add(off + 8), 0)?;
             self.mem.write_u32(tls.wrapping_add(off + 12), 0)?;
@@ -529,7 +537,8 @@ impl Cpu {
         off += raw_data_words * 4;
         // Domain object ids.
         for (i, &obj) in domain_objects.iter().enumerate() {
-            self.mem.write_u32(tls.wrapping_add(off + (i as u32) * 4), obj)?;
+            self.mem
+                .write_u32(tls.wrapping_add(off + (i as u32) * 4), obj)?;
         }
         Ok(())
     }
@@ -621,10 +630,13 @@ impl Cpu {
         self.service_handles.remove(&handle);
         self.domain_objects.retain(|&(owner, _), _| owner != handle);
         let session = handle << 32;
-        self.fs_files.retain(|&key, _| key & !0xFFFF_FFFF != session);
+        self.fs_files
+            .retain(|&key, _| key & !0xFFFF_FFFF != session);
         self.fs_dirs.retain(|&key, _| key & !0xFFFF_FFFF != session);
-        self.erpt_readers.retain(|&key, _| key & !0xFFFF_FFFF != session);
-        self.opus_decoders.retain(|&key, _| key & !0xFFFF_FFFF != session);
+        self.erpt_readers
+            .retain(|&key, _| key & !0xFFFF_FFFF != session);
+        self.opus_decoders
+            .retain(|&key, _| key & !0xFFFF_FFFF != session);
     }
 
     pub(super) fn service_name(&self, handle: u64) -> Option<&str> {
@@ -660,7 +672,9 @@ impl Cpu {
     pub(super) fn ipc_interface(&self, tls: u32, handle: u64, root: &'static str) -> String {
         if self.ipc_is_domain_request(tls) {
             let object_id = self.ipc_domain_object_id(tls);
-            self.domain_interface(handle, object_id).unwrap_or(root).to_owned()
+            self.domain_interface(handle, object_id)
+                .unwrap_or(root)
+                .to_owned()
         } else {
             self.service_name(handle).unwrap_or(root).to_owned()
         }
@@ -729,11 +743,19 @@ impl Cpu {
         if self.ipc_is_tipc_request(tls) {
             return false;
         }
-        self.mem.read_u8(tls.wrapping_add(self.ipc_reply_start(tls))).unwrap_or(0) == 2
+        self.mem
+            .read_u8(tls.wrapping_add(self.ipc_reply_start(tls)))
+            .unwrap_or(0)
+            == 2
     }
 
     /// Forget one object and acknowledge the close.
-    pub(super) fn close_domain_object(&mut self, tls: u32, handle: u64, object_id: u32) -> Result<()> {
+    pub(super) fn close_domain_object(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        object_id: u32,
+    ) -> Result<()> {
         // `ssl` counts its live contexts, and this is where one stops being
         // live. The count lives here rather than in `ssl_request` because a
         // close never reaches a service handler any more — see the dispatch in
@@ -743,28 +765,38 @@ impl Cpu {
         }
         // An Opus decoder holds a megabyte of filter state; a title that
         // opens one per track and closes them would otherwise accumulate.
-        self.opus_decoders.remove(&Self::object_key(handle, object_id));
+        self.opus_decoders
+            .remove(&Self::object_key(handle, object_id));
         self.domain_objects.remove(&(handle, object_id));
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
     pub(super) fn ipc_domain_object_id(&self, tls: u32) -> u32 {
         let start = self.ipc_reply_start(tls);
-        self.mem.read_u32(tls.wrapping_add(start + 4)).unwrap_or(0xFFFFFFFF)
+        self.mem
+            .read_u32(tls.wrapping_add(start + 4))
+            .unwrap_or(0xFFFFFFFF)
     }
 
     pub(super) fn alloc_domain_object(&mut self) -> u32 {
         let id = self.next_domain_object_id;
         self.next_domain_object_id = id.wrapping_add(1);
-        if id == 0 { 1 } else { id }
+        if id == 0 {
+            1
+        } else {
+            id
+        }
     }
 
     pub(super) fn record_domain_object(&mut self, handle: u64, object_id: u32, name: &str) {
-        self.domain_objects.insert((handle, object_id), name.to_owned());
+        self.domain_objects
+            .insert((handle, object_id), name.to_owned());
     }
 
     pub(super) fn domain_interface(&self, handle: u64, object_id: u32) -> Option<&str> {
-        self.domain_objects.get(&(handle, object_id)).map(|s| s.as_str())
+        self.domain_objects
+            .get(&(handle, object_id))
+            .map(|s| s.as_str())
     }
 
     /// Answer the session-management commands every service session has, if
@@ -923,7 +955,14 @@ impl Cpu {
         };
         if self.ipc_is_domain_request(tls) {
             self.record_domain_object(handle, object_id, name);
-            self.write_ipc_reply(tls, 0, &[event], &[], &object_id.to_le_bytes(), &[object_id])
+            self.write_ipc_reply(
+                tls,
+                0,
+                &[event],
+                &[],
+                &object_id.to_le_bytes(),
+                &[object_id],
+            )
         } else {
             self.record_handle(sub, name);
             self.write_ipc_reply(tls, 0, &[event], &[sub], &object_id.to_le_bytes(), &[])
@@ -939,7 +978,9 @@ impl Cpu {
     /// the list of services a guest is asking for and not getting.
     pub(super) fn warn_no_implementation(&mut self, service: &str, cmd_id: Option<u32>) {
         if self.unimplemented_ipc.insert((service.to_string(), cmd_id)) {
-            self.diagnostic(&format!("[ipc] no implementation: {service} cmd={cmd_id:?}"));
+            self.diagnostic(&format!(
+                "[ipc] no implementation: {service} cmd={cmd_id:?}"
+            ));
         }
     }
 
@@ -1157,8 +1198,11 @@ impl Cpu {
                 // itself. The bool is not the radio's state: it is whether
                 // this caller got the one event the service has.
                 Some(7) | Some(8) => {
-                    let purpose =
-                        if cmd_id == Some(7) { "btm:radio" } else { "btm:gamepad-pairing" };
+                    let purpose = if cmd_id == Some(7) {
+                        "btm:radio"
+                    } else {
+                        "btm:gamepad-pairing"
+                    };
                     let event = self.kept_event(purpose, handle);
                     self.write_ipc_reply(tls, 0, &[event], &[], &[1u8], &[])
                 }
@@ -1368,7 +1412,8 @@ pub(super) mod testing {
     #[test]
     fn reply_header_type_is_zero_and_carries_the_move_handle() {
         let mut cpu = request(false, 1, &[]);
-        cpu.write_ipc_response(TLS, 0, &[0x1234], &7u32.to_le_bytes(), &[]).unwrap();
+        cpu.write_ipc_response(TLS, 0, &[0x1234], &7u32.to_le_bytes(), &[])
+            .unwrap();
 
         // A reply's type field is 0. libnx ignores it, but libtransistor
         // rejects anything other than 0 or 4 with its error 0x7E0DD, which is
@@ -1379,7 +1424,7 @@ pub(super) mod testing {
         let header1 = cpu.mem.read_u32(TLS + 4).unwrap();
         assert_eq!(header1 >> 31, 1);
         assert_eq!(header1 & 0x1FF, 4 + 1 + 4); // SFCO + one word + padding
-        // Handle descriptor: one move handle, no pid, no copy handles.
+                                                // Handle descriptor: one move handle, no pid, no copy handles.
         assert_eq!(cpu.mem.read_u32(TLS + 8).unwrap(), 1 << 5);
         assert_eq!(cpu.mem.read_u32(TLS + 12).unwrap(), 0x1234);
         // The data section is 16-byte aligned: SFCO, version, result, token,
@@ -1412,7 +1457,9 @@ pub(super) mod testing {
         cpu.mem.write_u32(TLS + 4, 8 | (1 << 31)).unwrap();
         cpu.mem.write_u32(TLS + 8, (2 << 1) | (1 << 5)).unwrap();
         for slot in 0..3 {
-            cpu.mem.write_u32(TLS + 12 + slot * 4, 0xDEAD_0000 + slot).unwrap();
+            cpu.mem
+                .write_u32(TLS + 12 + slot * 4, 0xDEAD_0000 + slot)
+                .unwrap();
         }
         // `{ index:6, address_high:6, address_mid:4, size:16 }`, then the
         // low word of the address.
@@ -1423,7 +1470,6 @@ pub(super) mod testing {
         assert_eq!(cpu.ipc_static_buffers(TLS), vec![(PATH, 0x10)]);
         assert_eq!(cpu.ipc_request_path(TLS), "/save/data.bin");
     }
-
 
     /// A CMIF request whose first send-static ("pointer") buffer carries a
     /// path, the way every `IFileSystem` command names the file it acts on.
@@ -1450,7 +1496,9 @@ pub(super) mod testing {
         cpu.mem.write_u8(PATH_AT + path.len() as u32, 0).unwrap();
         cpu.mem.write_u32(TLS, 4 | (1 << 16)).unwrap(); // one send-static
         cpu.mem.write_u32(TLS + 4, 12).unwrap();
-        cpu.mem.write_u32(TLS + 8, (path.len() as u32 + 1) << 16).unwrap();
+        cpu.mem
+            .write_u32(TLS + 8, (path.len() as u32 + 1) << 16)
+            .unwrap();
         cpu.mem.write_u32(TLS + 12, PATH_AT).unwrap();
         let at = TLS + 0x20;
         cpu.mem.write_u32(at, SFCI).unwrap();
@@ -1465,7 +1513,8 @@ pub(super) mod testing {
         let mut cpu = Cpu::new();
         cpu.record_handle(9, "fsp-srv");
         cpu.record_domain_object(9, 1, "fsp-srv-fs");
-        cpu.fs_files.insert(Cpu::object_key(9, 1), "/a.txt".to_owned());
+        cpu.fs_files
+            .insert(Cpu::object_key(9, 1), "/a.txt".to_owned());
         cpu.record_handle(10, "vi:m");
         cpu.forget_handle(9);
         assert!(cpu.service_name(9).is_none());
@@ -1494,7 +1543,12 @@ pub(super) mod testing {
 
     /// A CMIF request carrying one map-alias **receive** buffer, the way
     /// `ListAllUsers` marshals the array the server fills.
-    pub(crate) fn request_with_recv_buffer(command_id: u32, payload: &[u8], buffer: u32, size: u32) -> Cpu {
+    pub(crate) fn request_with_recv_buffer(
+        command_id: u32,
+        payload: &[u8],
+        buffer: u32,
+        size: u32,
+    ) -> Cpu {
         let mut cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         write_map_buffer_request(&mut cpu, command_id, payload, buffer, size, false);
@@ -1512,7 +1566,11 @@ pub(super) mod testing {
         send: bool,
     ) {
         let one = [(buffer, size)];
-        let (send, recv) = if send { (&one[..], &[][..]) } else { (&[][..], &one[..]) };
+        let (send, recv) = if send {
+            (&one[..], &[][..])
+        } else {
+            (&[][..], &one[..])
+        };
         write_buffer_request(cpu, command_id, payload, send, recv);
     }
 
@@ -1556,7 +1614,12 @@ pub(super) mod testing {
     /// A CMIF request offering one receive-static ("pointer") output buffer,
     /// the way `IProfile::Get` marshals its `AccountUserData`. Unlike every
     /// other descriptor, this one sits *after* the data words.
-    pub(crate) fn request_with_recv_static(command_id: u32, payload: &[u8], buffer: u32, size: u32) -> Cpu {
+    pub(crate) fn request_with_recv_static(
+        command_id: u32,
+        payload: &[u8],
+        buffer: u32,
+        size: u32,
+    ) -> Cpu {
         let mut cpu = request(false, command_id, payload);
         // Two words of padding aligning the CmifInHeader, the header, then the
         // payload — what the walk has to skip to reach the receive list.
@@ -1568,7 +1631,6 @@ pub(super) mod testing {
         cpu.mem.write_u32(at + 4, size << 16).unwrap();
         cpu
     }
-
 
     /// Marshal a request carrying `buffers` map-alias **send** buffers into an
     /// existing session's TLS — the shape `erpt`'s context commands arrive in,
@@ -1595,7 +1657,10 @@ pub(super) mod testing {
         cpu.csrng_request(TLS, Some(0)).unwrap();
         let first = cpu.read_bytes(BUFFER, 0x20);
         assert_ne!(first, vec![0u8; 0x20], "the buffer was written");
-        assert!(first.windows(8).any(|w| w != &first[..8]), "not one value repeated");
+        assert!(
+            first.windows(8).any(|w| w != &first[..8]),
+            "not one value repeated"
+        );
 
         write_map_buffer_request(&mut cpu, 0, &[], BUFFER, 0x20, false);
         cpu.csrng_request(TLS, Some(0)).unwrap();
@@ -1610,7 +1675,11 @@ pub(super) mod testing {
         for (item, expected) in [(4u32, 0u64), (5, 1), (10, 0)] {
             let mut cpu = request(false, 0, &item.to_le_bytes());
             cpu.spl_request(TLS, Some(0)).unwrap();
-            assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), expected, "config item {item}");
+            assert_eq!(
+                cpu.mem.read_u64(TLS + 0x20).unwrap(),
+                expected,
+                "config item {item}"
+            );
         }
         // The device id is fixed, but it must not read as "no device".
         let mut cpu = request(false, 0, &7u32.to_le_bytes());
@@ -1649,6 +1718,4 @@ pub(super) mod testing {
         cpu.pm_request(TLS, 9, Some(0)).unwrap();
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0x0100_4890_117B_2000);
     }
-
 }
-

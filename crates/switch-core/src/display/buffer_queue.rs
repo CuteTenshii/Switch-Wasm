@@ -223,16 +223,18 @@ impl BufferQueue {
                 let slot = r.read_i32();
                 let transform = r
                     .read_flattened()
-                    .and_then(|input| {
-                        input.get(INPUT_TRANSFORM_OFFSET..INPUT_TRANSFORM_OFFSET + 4)
-                    })
+                    .and_then(|input| input.get(INPUT_TRANSFORM_OFFSET..INPUT_TRANSFORM_OFFSET + 4))
                     .map_or(0, |bytes| read_u32(bytes, 0));
                 action = match self.queue(slot, transform) {
                     Some(buffer) => Action::Present(buffer),
                     None => Action::None,
                 };
                 self.write_buffer_output(&mut w);
-                w.write_i32(if action == Action::None { STATUS_BAD_VALUE } else { STATUS_OK });
+                w.write_i32(if action == Action::None {
+                    STATUS_BAD_VALUE
+                } else {
+                    STATUS_OK
+                });
             }
             CANCEL_BUFFER => {
                 let slot = r.read_i32();
@@ -345,8 +347,8 @@ impl BufferQueue {
             read_u32(blob, BLOB_INTS_OFFSET + offset - NATIVE_HANDLE_SIZE)
         };
         let plane = |offset: usize| -> u32 { field(GB_PLANES + offset) };
-        let color_format = (plane(PLANE_COLOR_FORMAT) as u64)
-            | ((plane(PLANE_COLOR_FORMAT + 4) as u64) << 32);
+        let color_format =
+            (plane(PLANE_COLOR_FORMAT) as u64) | ((plane(PLANE_COLOR_FORMAT + 4) as u64) << 32);
         let buffer = DisplayBuffer {
             nvmap_id: field(GB_NVMAP_ID),
             offset: plane(PLANE_OFFSET),
@@ -363,8 +365,11 @@ impl BufferQueue {
             self.width = buffer.width;
             self.height = buffer.height;
         }
-        self.slots[index] =
-            Slot { state: SlotState::Free, buffer: Some(buffer), blob: Some(blob.to_vec()) };
+        self.slots[index] = Slot {
+            state: SlotState::Free,
+            buffer: Some(buffer),
+            blob: Some(blob.to_vec()),
+        };
     }
 }
 
@@ -442,8 +447,10 @@ mod tests {
         body.write_flattened(&blob);
         let raw = body.finish();
         let payload_len = read_u32(&raw, 0) as usize;
-        let (_, action) =
-            queue.transact(SET_PREALLOCATED_BUFFER, &request(&raw[16..16 + payload_len]));
+        let (_, action) = queue.transact(
+            SET_PREALLOCATED_BUFFER,
+            &request(&raw[16..16 + payload_len]),
+        );
         assert_eq!(action, Action::None);
     }
 

@@ -60,7 +60,22 @@ pub const LANGUAGES: [&str; 16] = [
 /// renamed, and which repack tools still emit for the icon files. Indexed
 /// alongside [`LANGUAGES`], empty where the name never differed.
 const LEGACY_LANGUAGE_NAMES: [&str; 16] = [
-    "", "", "", "", "", "", "", "", "", "", "", "", "", "Taiwanese", "Chinese", "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "Taiwanese",
+    "Chinese",
+    "",
 ];
 
 /// The rating boards the age-rating array has a slot for, in slot order.
@@ -276,7 +291,11 @@ impl Nacp {
             if name.is_empty() && publisher.is_empty() {
                 continue;
             }
-            titles.push(Title { language, name, publisher });
+            titles.push(Title {
+                language,
+                name,
+                publisher,
+            });
         }
 
         let mut ratings = Vec::new();
@@ -286,7 +305,10 @@ impl Nacp {
             debug_assert!(slot < RATING_AGE_SLOTS);
             let age = data[RATING_AGE_OFFSET + slot] as i8;
             if age != RATING_UNRATED {
-                ratings.push(Rating { organisation, age: age as u8 });
+                ratings.push(Rating {
+                    organisation,
+                    age: age as u8,
+                });
             }
         }
 
@@ -325,7 +347,10 @@ impl Nacp {
                 DEVICE_SAVE_DATA_JOURNAL_SIZE_MAX_OFFSET,
             ),
             cache_storage_size: read_i64_if_present(data, CACHE_STORAGE_SIZE_OFFSET),
-            cache_storage_journal_size: read_i64_if_present(data, CACHE_STORAGE_JOURNAL_SIZE_OFFSET),
+            cache_storage_journal_size: read_i64_if_present(
+                data,
+                CACHE_STORAGE_JOURNAL_SIZE_OFFSET,
+            ),
             cache_storage_data_and_journal_size_max: read_i64_if_present(
                 data,
                 CACHE_STORAGE_DATA_AND_JOURNAL_SIZE_MAX_OFFSET,
@@ -338,7 +363,8 @@ impl Nacp {
                 false => 0,
             },
             application_error_code_category: nul_terminated(
-                &data[ERROR_CODE_CATEGORY_OFFSET..ERROR_CODE_CATEGORY_OFFSET + ERROR_CODE_CATEGORY_SIZE],
+                &data[ERROR_CODE_CATEGORY_OFFSET
+                    ..ERROR_CODE_CATEGORY_OFFSET + ERROR_CODE_CATEGORY_SIZE],
             ),
         })
     }
@@ -534,7 +560,9 @@ mod tests {
 
     impl NacpBuilder {
         fn new() -> NacpBuilder {
-            NacpBuilder { data: vec![0u8; NACP_MIN_SIZE] }
+            NacpBuilder {
+                data: vec![0u8; NACP_MIN_SIZE],
+            }
         }
 
         fn title(mut self, slot: usize, name: &str, publisher: &str) -> NacpBuilder {
@@ -575,7 +603,9 @@ mod tests {
         /// storage fields — the point being that a NACP may legitimately stop
         /// there, so the two cases are built differently on purpose.
         fn full() -> NacpBuilder {
-            NacpBuilder { data: vec![0u8; 0x4000] }
+            NacpBuilder {
+                data: vec![0u8; 0x4000],
+            }
         }
 
         fn unrated(mut self) -> NacpBuilder {
@@ -624,7 +654,10 @@ mod tests {
     #[test]
     fn falls_back_to_the_first_localized_slot() {
         let nacp = Nacp::parse(
-            &NacpBuilder::new().title(4, "Ein Spiel", "Ein Studio").unrated().build(),
+            &NacpBuilder::new()
+                .title(4, "Ein Spiel", "Ein Studio")
+                .unrated()
+                .build(),
         )
         .unwrap();
         let title = nacp.preferred().unwrap();
@@ -682,8 +715,13 @@ mod tests {
 
     #[test]
     fn a_title_with_no_ratings_reports_none() {
-        let nacp =
-            Nacp::parse(&NacpBuilder::new().title(0, "Game", "Studio").unrated().build()).unwrap();
+        let nacp = Nacp::parse(
+            &NacpBuilder::new()
+                .title(0, "Game", "Studio")
+                .unrated()
+                .build(),
+        )
+        .unwrap();
         assert!(nacp.ratings.is_empty());
         assert!(!nacp.is_demo);
         assert_eq!(nacp.startup_user_account, StartupUserAccount::None);
@@ -692,13 +730,21 @@ mod tests {
 
     #[test]
     fn rejects_a_truncated_nacp() {
-        assert!(matches!(Nacp::parse(&[0u8; 0x100]), Err(Error::Truncated { .. })));
+        assert!(matches!(
+            Nacp::parse(&[0u8; 0x100]),
+            Err(Error::Truncated { .. })
+        ));
     }
 
     #[test]
     fn icon_mime_is_sniffed_not_assumed() {
-        let nacp = Nacp::parse(&NacpBuilder::new().title(0, "Game", "Studio").unrated().build())
-            .unwrap();
+        let nacp = Nacp::parse(
+            &NacpBuilder::new()
+                .title(0, "Game", "Studio")
+                .unrated()
+                .build(),
+        )
+        .unwrap();
         let mut control = Control {
             title_id: 0,
             language: LANGUAGES[0],

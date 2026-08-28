@@ -28,22 +28,102 @@ struct Mode {
 }
 
 const MODES: [Mode; 8] = [
-    Mode { subsets: 3, partition_bits: 4, rotation_bits: 0, index_selection: false,
-           colour_bits: 4, alpha_bits: 0, endpoint_p_bits: true,  shared_p_bits: false, index_bits: 3, index_bits_2: 0 },
-    Mode { subsets: 2, partition_bits: 6, rotation_bits: 0, index_selection: false,
-           colour_bits: 6, alpha_bits: 0, endpoint_p_bits: false, shared_p_bits: true,  index_bits: 3, index_bits_2: 0 },
-    Mode { subsets: 3, partition_bits: 6, rotation_bits: 0, index_selection: false,
-           colour_bits: 5, alpha_bits: 0, endpoint_p_bits: false, shared_p_bits: false, index_bits: 2, index_bits_2: 0 },
-    Mode { subsets: 2, partition_bits: 6, rotation_bits: 0, index_selection: false,
-           colour_bits: 7, alpha_bits: 0, endpoint_p_bits: true,  shared_p_bits: false, index_bits: 2, index_bits_2: 0 },
-    Mode { subsets: 1, partition_bits: 0, rotation_bits: 2, index_selection: true,
-           colour_bits: 5, alpha_bits: 6, endpoint_p_bits: false, shared_p_bits: false, index_bits: 2, index_bits_2: 3 },
-    Mode { subsets: 1, partition_bits: 0, rotation_bits: 2, index_selection: false,
-           colour_bits: 7, alpha_bits: 8, endpoint_p_bits: false, shared_p_bits: false, index_bits: 2, index_bits_2: 2 },
-    Mode { subsets: 1, partition_bits: 0, rotation_bits: 0, index_selection: false,
-           colour_bits: 7, alpha_bits: 7, endpoint_p_bits: true,  shared_p_bits: false, index_bits: 4, index_bits_2: 0 },
-    Mode { subsets: 2, partition_bits: 6, rotation_bits: 0, index_selection: false,
-           colour_bits: 5, alpha_bits: 5, endpoint_p_bits: true,  shared_p_bits: false, index_bits: 2, index_bits_2: 0 },
+    Mode {
+        subsets: 3,
+        partition_bits: 4,
+        rotation_bits: 0,
+        index_selection: false,
+        colour_bits: 4,
+        alpha_bits: 0,
+        endpoint_p_bits: true,
+        shared_p_bits: false,
+        index_bits: 3,
+        index_bits_2: 0,
+    },
+    Mode {
+        subsets: 2,
+        partition_bits: 6,
+        rotation_bits: 0,
+        index_selection: false,
+        colour_bits: 6,
+        alpha_bits: 0,
+        endpoint_p_bits: false,
+        shared_p_bits: true,
+        index_bits: 3,
+        index_bits_2: 0,
+    },
+    Mode {
+        subsets: 3,
+        partition_bits: 6,
+        rotation_bits: 0,
+        index_selection: false,
+        colour_bits: 5,
+        alpha_bits: 0,
+        endpoint_p_bits: false,
+        shared_p_bits: false,
+        index_bits: 2,
+        index_bits_2: 0,
+    },
+    Mode {
+        subsets: 2,
+        partition_bits: 6,
+        rotation_bits: 0,
+        index_selection: false,
+        colour_bits: 7,
+        alpha_bits: 0,
+        endpoint_p_bits: true,
+        shared_p_bits: false,
+        index_bits: 2,
+        index_bits_2: 0,
+    },
+    Mode {
+        subsets: 1,
+        partition_bits: 0,
+        rotation_bits: 2,
+        index_selection: true,
+        colour_bits: 5,
+        alpha_bits: 6,
+        endpoint_p_bits: false,
+        shared_p_bits: false,
+        index_bits: 2,
+        index_bits_2: 3,
+    },
+    Mode {
+        subsets: 1,
+        partition_bits: 0,
+        rotation_bits: 2,
+        index_selection: false,
+        colour_bits: 7,
+        alpha_bits: 8,
+        endpoint_p_bits: false,
+        shared_p_bits: false,
+        index_bits: 2,
+        index_bits_2: 2,
+    },
+    Mode {
+        subsets: 1,
+        partition_bits: 0,
+        rotation_bits: 0,
+        index_selection: false,
+        colour_bits: 7,
+        alpha_bits: 7,
+        endpoint_p_bits: true,
+        shared_p_bits: false,
+        index_bits: 4,
+        index_bits_2: 0,
+    },
+    Mode {
+        subsets: 2,
+        partition_bits: 6,
+        rotation_bits: 0,
+        index_selection: false,
+        colour_bits: 5,
+        alpha_bits: 5,
+        endpoint_p_bits: true,
+        shared_p_bits: false,
+        index_bits: 2,
+        index_bits_2: 0,
+    },
 ];
 
 /// Left-justify an endpoint channel to eight bits, replicating its high bits
@@ -72,7 +152,11 @@ pub fn decode_bc7(block: &[u8]) -> Block {
 
     let partition = reader.read(mode.partition_bits) as usize;
     let rotation = reader.read(mode.rotation_bits);
-    let index_selection = if mode.index_selection { reader.read_bit() } else { 0 };
+    let index_selection = if mode.index_selection {
+        reader.read_bit()
+    } else {
+        0
+    };
 
     // Endpoints are stored channel-major: every endpoint's red, then every
     // green, then blue, then alpha.
@@ -84,7 +168,11 @@ pub fn decode_bc7(block: &[u8]) -> Block {
         }
     }
     for endpoint in endpoints.iter_mut().take(endpoint_count) {
-        endpoint[3] = if mode.alpha_bits > 0 { reader.read(mode.alpha_bits) } else { 255 };
+        endpoint[3] = if mode.alpha_bits > 0 {
+            reader.read(mode.alpha_bits)
+        } else {
+            255
+        };
     }
 
     // A P-bit is one more low bit of precision, either per endpoint or shared
@@ -149,19 +237,23 @@ pub fn decode_bc7(block: &[u8]) -> Block {
         for (texel, slot) in secondary.iter_mut().enumerate() {
             // The second index set has a single subset, so only texel 0 is an
             // anchor however the block is partitioned.
-            let bits = if texel == 0 { mode.index_bits_2 - 1 } else { mode.index_bits_2 };
+            let bits = if texel == 0 {
+                mode.index_bits_2 - 1
+            } else {
+                mode.index_bits_2
+            };
             *slot = reader.read(bits);
         }
     }
 
-    let (colour_index, colour_index_bits, alpha_index, alpha_index_bits) =
-        if mode.index_bits_2 == 0 {
-            (primary, mode.index_bits, primary, mode.index_bits)
-        } else if index_selection == 0 {
-            (primary, mode.index_bits, secondary, mode.index_bits_2)
-        } else {
-            (secondary, mode.index_bits_2, primary, mode.index_bits)
-        };
+    let (colour_index, colour_index_bits, alpha_index, alpha_index_bits) = if mode.index_bits_2 == 0
+    {
+        (primary, mode.index_bits, primary, mode.index_bits)
+    } else if index_selection == 0 {
+        (primary, mode.index_bits, secondary, mode.index_bits_2)
+    } else {
+        (secondary, mode.index_bits_2, primary, mode.index_bits)
+    };
 
     let mut out = [[0.0f32; 4]; 16];
     for (texel, slot) in out.iter_mut().enumerate() {
@@ -234,9 +326,15 @@ mod tests {
                 assert_eq!(mode.subsets, 1, "mode {index}");
             }
             if mode.index_selection {
-                assert!(mode.index_bits_2 > 0, "mode {index} selects between one index set");
+                assert!(
+                    mode.index_bits_2 > 0,
+                    "mode {index} selects between one index set"
+                );
             }
-            assert!(!(mode.endpoint_p_bits && mode.shared_p_bits), "mode {index}");
+            assert!(
+                !(mode.endpoint_p_bits && mode.shared_p_bits),
+                "mode {index}"
+            );
         }
     }
 }

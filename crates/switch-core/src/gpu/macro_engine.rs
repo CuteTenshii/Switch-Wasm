@@ -197,7 +197,12 @@ impl MacroEngine {
                     slot, MAX_STEPS, entry
                 );
                 for (pc, word) in trace.iter().rev().take(40).rev() {
-                    detail.push_str(&format!("  {:#06x}: {:#010x}  {}\n", pc, word, disasm(*word)));
+                    detail.push_str(&format!(
+                        "  {:#06x}: {:#010x}  {}\n",
+                        pc,
+                        word,
+                        disasm(*word)
+                    ));
                 }
                 return Err(Error::Gpu(detail));
             }
@@ -265,7 +270,11 @@ impl MacroState<'_> {
     }
 
     fn gpr(&self, index: u32) -> u32 {
-        if index == 0 { 0 } else { self.gprs[(index & 7) as usize] }
+        if index == 0 {
+            0
+        } else {
+            self.gprs[(index & 7) as usize]
+        }
     }
 
     fn set_gpr(&mut self, index: u32, value: u32) {
@@ -280,7 +289,10 @@ impl MacroState<'_> {
     }
 
     fn send<H: MacroHost + ?Sized>(&mut self, value: u32, host: &mut H) -> Result<()> {
-        host.write_method(MacroWrite { method: self.method_address, arg: value })?;
+        host.write_method(MacroWrite {
+            method: self.method_address,
+            arg: value,
+        })?;
         self.method_address = self.method_address.wrapping_add(self.method_increment) & 0xFFF;
         Ok(())
     }
@@ -298,7 +310,13 @@ impl MacroState<'_> {
             // The immediate is relative to the branch instruction, and the
             // pc has already advanced past it.
             let target = self.pc.wrapping_sub(1).wrapping_add(imm(word) as u32);
-            return Ok(Flow { is_branch: true, taken, target, annul, exit });
+            return Ok(Flow {
+                is_branch: true,
+                taken,
+                target,
+                annul,
+                exit,
+            });
         }
         let result = self.alu(word, host)?;
         let dst = (word >> 8) & 7;
@@ -338,7 +356,13 @@ impl MacroState<'_> {
                 self.send((result >> 12) & 0x3F, host)?;
             }
         }
-        Ok(Flow { is_branch: false, taken: false, target: 0, annul: false, exit })
+        Ok(Flow {
+            is_branch: false,
+            taken: false,
+            target: 0,
+            annul: false,
+            exit,
+        })
     }
 
     fn alu<H: MacroHost + ?Sized>(&mut self, word: u32, host: &mut H) -> Result<u32> {
@@ -390,7 +414,11 @@ impl MacroState<'_> {
                 let src_bit = (word >> 17) & 0x1F;
                 let size = (word >> 22) & 0x1F;
                 let dst_bit = (word >> 27) & 0x1F;
-                let mask = if size >= 32 { u32::MAX } else { (1u32 << size) - 1 };
+                let mask = if size >= 32 {
+                    u32::MAX
+                } else {
+                    (1u32 << size) - 1
+                };
                 Ok(match word & 7 {
                     // Bitfield replace: splice B's field into A.
                     2 => {
@@ -439,9 +467,17 @@ pub fn disasm(word: u32) -> String {
             let size = (word >> 22) & 0x1F;
             let dst_bit = (word >> 27) & 0x1F;
             match op {
-                2 =>                 format!("insrt r{dst} = r{a}[{dst_bit}:{size}] <- r{b} (assign {assign}){exit}"),
-                3 => format!("extr r{dst} = r{b}[r{a}:{}] << {} (assign {assign}){exit}", size, dst_bit),
-                _ => format!("extr r{dst} = r{b}[{}:{}] << r{a} (assign {assign}){exit}", src_bit, size),
+                2 => {
+                    format!("insrt r{dst} = r{a}[{dst_bit}:{size}] <- r{b} (assign {assign}){exit}")
+                }
+                3 => format!(
+                    "extr r{dst} = r{b}[r{a}:{}] << {} (assign {assign}){exit}",
+                    size, dst_bit
+                ),
+                _ => format!(
+                    "extr r{dst} = r{b}[{}:{}] << r{a} (assign {assign}){exit}",
+                    src_bit, size
+                ),
             }
         }
         0 => {
@@ -490,7 +526,10 @@ mod tests {
             }
         }
         let mut writes = Vec::new();
-        let mut host = Host { read, writes: &mut writes };
+        let mut host = Host {
+            read,
+            writes: &mut writes,
+        };
         engine.run(&mut host)?;
         Ok(writes)
     }
@@ -512,7 +551,13 @@ mod tests {
         engine.start(0, 0x360); // method 0x360, increment 0
         engine.push_argument(0x1234);
         let writes = run_collect(&mut engine, |_| 0).unwrap();
-        assert_eq!(writes, vec![MacroWrite { method: 0x360, arg: 0x1234 }]);
+        assert_eq!(
+            writes,
+            vec![MacroWrite {
+                method: 0x360,
+                arg: 0x1234
+            }]
+        );
     }
 
     #[test]
@@ -533,7 +578,13 @@ mod tests {
         engine.push_argument(0xAA);
         engine.push_argument(0xBB);
         let writes = run_collect(&mut engine, |_| 0).unwrap();
-        assert_eq!(writes[0], MacroWrite { method: 0x100, arg: 0xAA });
+        assert_eq!(
+            writes[0],
+            MacroWrite {
+                method: 0x100,
+                arg: 0xAA
+            }
+        );
     }
 
     #[test]
@@ -553,7 +604,8 @@ mod tests {
             ],
         );
         engine.start(0, 0x200);
-        let writes = run_collect(&mut engine, |method| if method == 0x200 { 0x99 } else { 0 }).unwrap();
+        let writes =
+            run_collect(&mut engine, |method| if method == 0x200 { 0x99 } else { 0 }).unwrap();
         // The macro only sets the method here; what matters is that `read`
         // resolved without faulting and the program exited.
         assert!(writes.is_empty());
@@ -563,7 +615,11 @@ mod tests {
     fn runaway_macro_is_caught() {
         let mut engine = MacroEngine::new();
         // Unconditional-ish backward branch on R0 == 0, never exits.
-        load(&mut engine, 0, &[7 | (0 << 4) | (0 << 11) | ((0i32 as u32) << 14)]);
+        load(
+            &mut engine,
+            0,
+            &[7 | (0 << 4) | (0 << 11) | ((0i32 as u32) << 14)],
+        );
         engine.start(0, 0);
         assert!(run_collect(&mut engine, |_| 0).is_err());
     }
@@ -574,33 +630,48 @@ mod tests {
     #[test]
     fn branch_delay_slot_cancels_exit() {
         fn branch(src: u32, on_not_zero: bool, annul: bool, imm: i32) -> u32 {
-            7 | ((on_not_zero as u32) << 4) | ((annul as u32) << 5) | (src << 11) | ((imm as u32) << 14)
+            7 | ((on_not_zero as u32) << 4)
+                | ((annul as u32) << 5)
+                | (src << 11)
+                | ((imm as u32) << 14)
         }
         let mut engine = MacroEngine::new();
         load(
             &mut engine,
             0,
             &[
-                add_imm(2, 1, 0, 5, false), // method addr = R1, fetch count -> R2
-                add_imm(3, 0, 0, 0, false), // fetch value -> R3
+                add_imm(2, 1, 0, 5, false),  // method addr = R1, fetch count -> R2
+                add_imm(3, 0, 0, 0, false),  // fetch value -> R3
                 add_imm(2, 2, -1, 1, false), // dec R2
-                branch(2, true, false, -1), // bnz R2 loop
-                add_imm(0, 3, 0, 4, true),  // *send R3 (exit)
-                add_imm(0, 0, 0, 1, false), // nop (delay slot of the exit)
+                branch(2, true, false, -1),  // bnz R2 loop
+                add_imm(0, 3, 0, 4, true),   // *send R3 (exit)
+                add_imm(0, 0, 0, 1, false),  // nop (delay slot of the exit)
             ],
         );
         engine.start(0, 0x100);
         engine.push_argument(3); // three writes
         engine.push_argument(0xAA);
         let writes = run_collect(&mut engine, |_| 0).unwrap();
-        assert_eq!(writes, vec![MacroWrite { method: 0x100, arg: 0xAA }; 3]);
+        assert_eq!(
+            writes,
+            vec![
+                MacroWrite {
+                    method: 0x100,
+                    arg: 0xAA
+                };
+                3
+            ]
+        );
     }
 
     #[test]
     fn branch_with_exit_exits_only_when_not_taken() {
         fn branch(src: u32, on_not_zero: bool, annul: bool, imm: i32, exit: bool) -> u32 {
-            7 | ((on_not_zero as u32) << 4) | ((annul as u32) << 5) | ((exit as u32) << 7)
-                | (src << 11) | ((imm as u32) << 14)
+            7 | ((on_not_zero as u32) << 4)
+                | ((annul as u32) << 5)
+                | ((exit as u32) << 7)
+                | (src << 11)
+                | ((imm as u32) << 14)
         }
         let mut engine = MacroEngine::new();
         // deko3d's `CommonClearLoop` shape: send, then branch-with-exit back to
@@ -609,11 +680,11 @@ mod tests {
             &mut engine,
             0,
             &[
-                add_imm(2, 1, 0, 5, false), // method addr = R1, fetch count -> R2
-                add_imm(2, 2, -1, 1, false), // dec R2
-                add_imm(0, 1, 0, 4, false),  // send R1
+                add_imm(2, 1, 0, 5, false),       // method addr = R1, fetch count -> R2
+                add_imm(2, 2, -1, 1, false),      // dec R2
+                add_imm(0, 1, 0, 4, false),       // send R1
                 branch(2, true, false, -2, true), // *bnz R2 loop
-                add_imm(1, 1, 1, 1, false),  // delay slot: R1 += 1
+                add_imm(1, 1, 1, 1, false),       // delay slot: R1 += 1
             ],
         );
         engine.start(0, 0x200);
@@ -621,7 +692,16 @@ mod tests {
         let writes = run_collect(&mut engine, |_| 0).unwrap();
         assert_eq!(
             writes,
-            vec![MacroWrite { method: 0x200, arg: 0x200 }, MacroWrite { method: 0x200, arg: 0x201 }]
+            vec![
+                MacroWrite {
+                    method: 0x200,
+                    arg: 0x200
+                },
+                MacroWrite {
+                    method: 0x200,
+                    arg: 0x201
+                }
+            ]
         );
     }
 }

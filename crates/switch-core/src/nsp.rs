@@ -123,11 +123,7 @@ impl Pfs0 {
                     offset: name_off,
                 })?
                 .to_string();
-            files.push(Pfs0File {
-                offset,
-                size,
-                name,
-            });
+            files.push(Pfs0File { offset, size, name });
         }
         // Some repack tools emit offsets already counted from the start of
         // the image instead. Both readings are tried, the format's own
@@ -159,10 +155,7 @@ impl Pfs0 {
             f.offset = f.offset.saturating_add(base);
         }
         for (i, f) in files.iter().enumerate() {
-            let end = f
-                .offset
-                .checked_add(f.size)
-                .ok_or(Error::Overflow)?;
+            let end = f.offset.checked_add(f.size).ok_or(Error::Overflow)?;
             if end > src.len() {
                 return Err(Error::FileOutOfBounds {
                     index: i,
@@ -225,12 +218,7 @@ fn extents_fit(files: &[Pfs0File], base: u64, image_size: u64) -> bool {
 }
 
 pub(crate) fn read_u32(data: &[u8], at: usize) -> u32 {
-    u32::from_le_bytes([
-        data[at],
-        data[at + 1],
-        data[at + 2],
-        data[at + 3],
-    ])
+    u32::from_le_bytes([data[at], data[at + 1], data[at + 2], data[at + 3]])
 }
 
 pub(crate) fn read_u64(data: &[u8], at: usize) -> u64 {
@@ -287,8 +275,7 @@ mod tests {
             let (name_offset, _) = entries[i];
             let entry = 0x10 + i * FILE_ENTRY_SIZE;
             image[entry..entry + 8].copy_from_slice(&(payload_start as u64).to_le_bytes());
-            image[entry + 8..entry + 16]
-                .copy_from_slice(&(payload.len() as u64).to_le_bytes());
+            image[entry + 8..entry + 16].copy_from_slice(&(payload.len() as u64).to_le_bytes());
             image[entry + 16..entry + 20].copy_from_slice(&(name_offset as u32).to_le_bytes());
             image.extend_from_slice(payload);
             payload_start += payload.len();

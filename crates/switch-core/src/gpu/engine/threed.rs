@@ -523,7 +523,10 @@ impl Engine3D {
                 }
                 fn write_method(&mut self, write: MacroWrite) -> Result<()> {
                     if self.ctx.trace {
-                        eprintln!("[gpu] mme method={:#05x} arg={:#010x}", write.method, write.arg);
+                        eprintln!(
+                            "[gpu] mme method={:#05x} arg={:#010x}",
+                            write.method, write.arg
+                        );
                     }
                     self.engine.write(write.method, write.arg, true, self.ctx)
                 }
@@ -663,7 +666,9 @@ impl Engine3D {
         if !crate::env_flag!("TRACE_REGS") {
             return;
         }
-        let now: Vec<u32> = (0..REGISTER_COUNT as u32).map(|m| self.regs.get(m)).collect();
+        let now: Vec<u32> = (0..REGISTER_COUNT as u32)
+            .map(|m| self.regs.get(m))
+            .collect();
         if let Some(prev) = &self.traced_regs {
             let diff: Vec<String> = now
                 .iter()
@@ -761,8 +766,14 @@ impl Engine3D {
         }
         let offset = self.regs.get(base + 1);
         let num_registers = self.regs.get(base + 3);
-        let addr = self.regs.iova(SET_PROGRAM_REGION).wrapping_add(u64::from(offset));
-        Some(ProgramBinding { addr, num_registers })
+        let addr = self
+            .regs
+            .iova(SET_PROGRAM_REGION)
+            .wrapping_add(u64::from(offset));
+        Some(ProgramBinding {
+            addr,
+            num_registers,
+        })
     }
 
     /// Resolve `VertexAttribState[i]`.
@@ -877,7 +888,9 @@ impl Engine3D {
             addr,
             width: self.regs.get(DEPTH_TARGET_HORIZONTAL),
             height: self.regs.get(DEPTH_TARGET_VERTICAL),
-            layout: Layout::BlockLinear { block_height_gobs: 1 << field(tile_mode, 4, 7) },
+            layout: Layout::BlockLinear {
+                block_height_gobs: 1 << field(tile_mode, 4, 7),
+            },
             format,
         }))
     }
@@ -941,7 +954,10 @@ impl Engine3D {
         let f = |i: u32| f32::from_bits(self.regs.get(VIEWPORT_TRANSFORM_BASE + i));
         let scale = [f(0), f(1), f(2)];
         if scale[0] != 0.0 || scale[1] != 0.0 {
-            return self.flip_window_y(ViewportTransform { scale, translate: [f(3), f(4), f(5)] });
+            return self.flip_window_y(ViewportTransform {
+                scale,
+                translate: [f(3), f(4), f(5)],
+            });
         }
         // Nothing has written the transform. A zero scale on both axes maps
         // every vertex to one point, so it cannot be a viewport a guest
@@ -1037,7 +1053,12 @@ impl Engine3D {
             out.y0 = out.y0.max(y0);
             out.y1 = out.y1.min(y1);
         }
-        ScissorRect { x0: out.x0, y0: out.y0, x1: out.x1.max(out.x0), y1: out.y1.max(out.y0) }
+        ScissorRect {
+            x0: out.x0,
+            y0: out.y0,
+            x1: out.x1.max(out.x0),
+            y1: out.y1.max(out.y0),
+        }
     }
 
     /// Face culling, as `OGL_SET_CULL`/`_FRONT_FACE`/`_CULL_FACE` describe
@@ -1049,8 +1070,7 @@ impl Engine3D {
             // `flip_y` swaps which winding is front without touching the
             // viewport, so it cannot come out of the transform's sign the way
             // a lower-left origin does.
-            front_ccw: (self.regs.get(OGL_SET_FRONT_FACE) != 0x900)
-                != self.window_origin().flip_y,
+            front_ccw: (self.regs.get(OGL_SET_FRONT_FACE) != 0x900) != self.window_origin().flip_y,
             cull_front: face == 0x404 || face == 0x408,
             cull_back: face == 0x405 || face == 0x408,
         }
@@ -1131,7 +1151,8 @@ impl Engine3D {
     pub fn render_target_slot(&self, index: u32) -> u32 {
         let count = self.regs.field(RENDER_TARGET_CONTROL, 0, 3);
         if index < count {
-            self.regs.field(RENDER_TARGET_CONTROL, 4 + index * 3, 6 + index * 3)
+            self.regs
+                .field(RENDER_TARGET_CONTROL, 4 + index * 3, 6 + index * 3)
         } else {
             index
         }
@@ -1144,7 +1165,11 @@ impl Engine3D {
     /// four regardless overwrites exactly what the title meant to keep — and
     /// alpha is what the display reads a frame's opacity out of.
     pub fn color_mask(&self, index: u32) -> [bool; 4] {
-        let slot = if self.regs.get(COLOR_MASK_COMMON) != 0 { 0 } else { index };
+        let slot = if self.regs.get(COLOR_MASK_COMMON) != 0 {
+            0
+        } else {
+            index
+        };
         let raw = self.regs.get(COLOR_MASK + slot.min(COLOR_TARGETS - 1));
         [
             field(raw, 0, 0) != 0,
@@ -1181,7 +1206,10 @@ impl Engine3D {
         let vertical = self.regs.get(base + 3);
         let is_linear = tile_mode >> 12 & 1 != 0;
         let (layout, width) = if is_linear {
-            (Layout::Pitch { pitch: horizontal }, horizontal / format.bytes_per_pixel.max(1))
+            (
+                Layout::Pitch { pitch: horizontal },
+                horizontal / format.bytes_per_pixel.max(1),
+            )
         } else {
             let block_width_gobs = field(tile_mode, 0, 3);
             if block_width_gobs != 0 {
@@ -1449,7 +1477,9 @@ impl Engine3D {
         let texels_x = self.regs.get(DEPTH_TARGET_HORIZONTAL);
         let texels_y = self.regs.get(DEPTH_TARGET_VERTICAL);
         let tile_mode = self.regs.get(DEPTH_TARGET_TILE_MODE);
-        let layout = Layout::BlockLinear { block_height_gobs: 1 << field(tile_mode, 4, 7) };
+        let layout = Layout::BlockLinear {
+            block_height_gobs: 1 << field(tile_mode, 4, 7),
+        };
         let depth = self.regs.float(CLEAR_DEPTH).clamp(0.0, 1.0);
         let stencil = self.regs.get(CLEAR_STENCIL) & 0xFF;
         let grid = self.sample_grid()?;
@@ -1499,7 +1529,11 @@ impl Engine3D {
             let row_whole = gob_texels > 0 && ty == gob_row && ty + GOB_HEIGHT <= ty1;
             let mut tx = tx0;
             while tx < tx1 {
-                let gob_col = if gob_texels > 0 { tx - tx % gob_texels } else { tx };
+                let gob_col = if gob_texels > 0 {
+                    tx - tx % gob_texels
+                } else {
+                    tx
+                };
                 if row_whole && tx == gob_col && tx + gob_texels <= tx1 {
                     let (offset, _) = layout.run_at(tx * bytes, ty, width_bytes);
                     let va = addr + offset as u64;
@@ -1614,7 +1648,12 @@ pub(crate) fn depth_format_layout(raw: u32) -> Result<DepthLayout> {
             )))
         }
     };
-    Ok(DepthLayout { bytes, depth_bits, depth_shift, stencil_shift })
+    Ok(DepthLayout {
+        bytes,
+        depth_bits,
+        depth_shift,
+        stencil_shift,
+    })
 }
 
 #[cfg(test)]
@@ -1641,7 +1680,13 @@ mod tests {
             let base = vmm
                 .map(0x3000_0000, size as u64, 1, 0, SMALL_PAGE_SIZE, 0, 0)
                 .unwrap();
-            Harness { mem, vmm, host1x: Host1x::new(), stats: GpuStats::default(), base }
+            Harness {
+                mem,
+                vmm,
+                host1x: Host1x::new(),
+                stats: GpuStats::default(),
+                base,
+            }
         }
 
         fn ctx(&mut self) -> ExecCtx<'_> {
@@ -1685,7 +1730,10 @@ mod tests {
             layer: u32,
             channels: [bool; 4],
         ) -> Result<()> {
-            self.0.borrow_mut().color_clears.push((target, layer, channels));
+            self.0
+                .borrow_mut()
+                .color_clears
+                .push((target, layer, channels));
             Ok(())
         }
 
@@ -1740,7 +1788,9 @@ mod tests {
             let mut ctx = h.ctx();
             // A colour clear of all four channels, a depth and stencil clear,
             // and a draw — every way this engine makes pixels.
-            engine.write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx).unwrap();
+            engine
+                .write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx)
+                .unwrap();
             engine.write(CLEAR_BUFFERS, 0b11, true, &mut ctx).unwrap();
             engine.write(VERTEX_BEGIN_GL, 4, true, &mut ctx).unwrap();
             engine.write(DRAW_ARRAYS_COUNT, 3, true, &mut ctx).unwrap();
@@ -1748,7 +1798,11 @@ mod tests {
 
         let log = log.borrow();
         assert_eq!(log.draws, 1, "the draw reached the renderer");
-        assert_eq!(log.color_clears, vec![(0, 0, [true; 4])], "and the colour clear");
+        assert_eq!(
+            log.color_clears,
+            vec![(0, 0, [true; 4])],
+            "and the colour clear"
+        );
         assert_eq!(log.depth_clears, vec![(true, true)], "and the depth clear");
 
         // And the render target is untouched, because the recorder wrote
@@ -1756,7 +1810,10 @@ mod tests {
         // through the software renderer and finds it filled, which is what
         // makes this assertion mean something.
         let target = h.mem.dump(0x3000_0000, 16 * 8 * 4).unwrap();
-        assert!(target.iter().all(|&b| b == 0), "no pixel was written past the renderer");
+        assert!(
+            target.iter().all(|&b| b == 0),
+            "no pixel was written past the renderer"
+        );
     }
 
     #[test]
@@ -1771,7 +1828,9 @@ mod tests {
 
         let mut ctx = h.ctx();
         // Clear all four colour channels of target 0.
-        engine.write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx).unwrap();
+        engine
+            .write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx)
+            .unwrap();
 
         assert_eq!(h.mem.read_u32(0x3000_0000).unwrap(), 0xFF00_00FF);
         assert_eq!(h.mem.read_u32(0x3000_0000 + 15 * 4).unwrap(), 0xFF00_00FF);
@@ -1796,7 +1855,9 @@ mod tests {
         engine.regs.set(MULTISAMPLE_ENABLE, 1);
         engine.regs.set(MULTISAMPLE_MODE, 2); // 2x2
         for i in 0..4 {
-            engine.regs.set(MULTISAMPLE_SAMPLE_LOCATIONS + i, 0xEAA2_6E26);
+            engine
+                .regs
+                .set(MULTISAMPLE_SAMPLE_LOCATIONS + i, 0xEAA2_6E26);
         }
         engine.regs.set(CLEAR_COLOR, 1.0f32.to_bits());
         engine.regs.set(CLEAR_COLOR + 1, 1.0f32.to_bits());
@@ -1804,7 +1865,9 @@ mod tests {
         engine.regs.set(CLEAR_COLOR + 3, 1.0f32.to_bits());
 
         let mut ctx = h.ctx();
-        engine.write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx).unwrap();
+        engine
+            .write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx)
+            .unwrap();
 
         // Every one of the 16x8 texels, not just the 8x4 the scissor names.
         for y in 0..8u32 {
@@ -1847,7 +1910,10 @@ mod tests {
         engine.regs.set(MULTISAMPLE_ENABLE, 1);
         let on = engine.sample_grid().unwrap();
         assert_eq!(on.count(), 4);
-        assert!((0..on.count()).any(|s| on.position(s) != [0.5, 0.5]), "coverage is per sample");
+        assert!(
+            (0..on.count()).any(|s| on.position(s) != [0.5, 0.5]),
+            "coverage is per sample"
+        );
     }
 
     /// A guest that never touches either register is not multisampled.
@@ -1868,7 +1934,9 @@ mod tests {
         engine.regs.set(SCISSOR_BASE + 2, 0 | (8 << 16));
 
         let mut ctx = h.ctx();
-        engine.write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx).unwrap();
+        engine
+            .write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx)
+            .unwrap();
 
         assert_eq!(h.mem.read_u32(0x3000_0000 + 3 * 4).unwrap(), 0);
         assert_eq!(h.mem.read_u32(0x3000_0000 + 4 * 4).unwrap(), 0xFF00_0000);
@@ -1905,7 +1973,9 @@ mod tests {
         engine.regs.set(CLEAR_COLOR, 1.0f32.to_bits());
         {
             let mut ctx = h.ctx();
-            engine.write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx).unwrap();
+            engine
+                .write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx)
+                .unwrap();
         }
 
         assert_eq!(engine.render_target(0).unwrap(), None);
@@ -1921,7 +1991,9 @@ mod tests {
         setup_pitch_target(&mut engine, h.base, 1, 1);
         engine.regs.set(0x204, 0x77);
         let mut ctx = h.ctx();
-        assert!(engine.write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx).is_err());
+        assert!(engine
+            .write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx)
+            .is_err());
     }
 
     #[test]
@@ -1940,7 +2012,11 @@ mod tests {
                 engine.write(CLEAR_BUFFERS, 0b11, true, &mut ctx).unwrap();
             }
 
-            assert_eq!(h.mem.read_u32(0x3000_0000).unwrap(), expected, "format {format:#x}");
+            assert_eq!(
+                h.mem.read_u32(0x3000_0000).unwrap(),
+                expected,
+                "format {format:#x}"
+            );
         }
     }
 
@@ -1979,7 +2055,9 @@ mod tests {
         // per-texel edges it falls back to are both exercised.
         for &(rx, rw, ry, rh) in &[(0u32, WIDTH, 0u32, HEIGHT), (4, 20, 3, 9)] {
             let mut h = Harness::new(0x10000);
-            let layout = Layout::BlockLinear { block_height_gobs: 1 };
+            let layout = Layout::BlockLinear {
+                block_height_gobs: 1,
+            };
             let width_bytes = WIDTH * BYTES;
             for ty in 0..HEIGHT {
                 for tx in 0..WIDTH {
@@ -2005,8 +2083,7 @@ mod tests {
                 for tx in 0..WIDTH {
                     let at = 0x3000_0000 + layout.offset(tx * BYTES, ty, width_bytes);
                     let old = seeded(tx, ty);
-                    let inside =
-                        (rx..rx + rw).contains(&tx) && (ry..ry + rh).contains(&ty);
+                    let inside = (rx..rx + rw).contains(&tx) && (ry..ry + rh).contains(&ty);
                     let want = if inside {
                         format.with_depth(u128::from(old), 0.5) as u32
                     } else {
@@ -2040,7 +2117,9 @@ mod tests {
         engine.regs.set(CLEAR_COLOR + 3, 1.0f32.to_bits());
 
         let mut ctx = h.ctx();
-        engine.write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx).unwrap();
+        engine
+            .write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx)
+            .unwrap();
 
         // A 16x8 RGBA8 surface is exactly one GOB; every byte of it is written.
         for i in 0..512u32 / 4 {
@@ -2058,13 +2137,17 @@ mod tests {
         let mut h = Harness::new(0x1000);
         let base = h.base;
         let mut engine = Engine3D::new();
-        engine.regs.set(REPORT_SEMAPHORE_OFFSET, (base >> 32) as u32);
+        engine
+            .regs
+            .set(REPORT_SEMAPHORE_OFFSET, (base >> 32) as u32);
         engine.regs.set(REPORT_SEMAPHORE_OFFSET + 1, base as u32);
         engine.regs.set(REPORT_SEMAPHORE_PAYLOAD, 0x1234_5678);
 
         let mut ctx = h.ctx();
         // Release, one-word structure.
-        engine.write(REPORT_SEMAPHORE, 1 << 28, true, &mut ctx).unwrap();
+        engine
+            .write(REPORT_SEMAPHORE, 1 << 28, true, &mut ctx)
+            .unwrap();
         assert_eq!(h.mem.read_u32(0x3000_0000).unwrap(), 0x1234_5678);
     }
 
@@ -2073,7 +2156,9 @@ mod tests {
         let mut h = Harness::new(0x1000);
         let mut engine = Engine3D::new();
         let mut ctx = h.ctx();
-        engine.write(SYNCPT_ACTION, 9 | (1 << 20), true, &mut ctx).unwrap();
+        engine
+            .write(SYNCPT_ACTION, 9 | (1 << 20), true, &mut ctx)
+            .unwrap();
         assert_eq!(h.host1x.read(9).unwrap(), 1);
     }
 
@@ -2087,9 +2172,15 @@ mod tests {
         engine.regs.set(CONSTBUF_SELECTOR_ADDR + 1, base as u32);
 
         let mut ctx = h.ctx();
-        engine.write(LOAD_CONSTBUF_OFFSET, 0, true, &mut ctx).unwrap();
-        engine.write(LOAD_CONSTBUF_DATA, 0xAAAA_AAAA, false, &mut ctx).unwrap();
-        engine.write(LOAD_CONSTBUF_DATA, 0xBBBB_BBBB, true, &mut ctx).unwrap();
+        engine
+            .write(LOAD_CONSTBUF_OFFSET, 0, true, &mut ctx)
+            .unwrap();
+        engine
+            .write(LOAD_CONSTBUF_DATA, 0xAAAA_AAAA, false, &mut ctx)
+            .unwrap();
+        engine
+            .write(LOAD_CONSTBUF_DATA, 0xBBBB_BBBB, true, &mut ctx)
+            .unwrap();
 
         assert_eq!(h.mem.read_u32(0x3000_0000).unwrap(), 0xAAAA_AAAA);
         assert_eq!(h.mem.read_u32(0x3000_0004).unwrap(), 0xBBBB_BBBB);
@@ -2105,7 +2196,9 @@ mod tests {
         engine.regs.set(CONSTBUF_SELECTOR_ADDR + 1, base as u32);
 
         let mut ctx = h.ctx();
-        engine.write(LOAD_CONSTBUF_DATA, 1, false, &mut ctx).unwrap();
+        engine
+            .write(LOAD_CONSTBUF_DATA, 1, false, &mut ctx)
+            .unwrap();
         assert!(engine.write(LOAD_CONSTBUF_DATA, 2, true, &mut ctx).is_err());
     }
 
@@ -2119,7 +2212,13 @@ mod tests {
         engine.write(DRAW_ARRAYS_COUNT, 3, true, &mut ctx).unwrap();
         assert_eq!(
             engine.last_draw,
-            DrawCall { primitive: 4, first: 6, count: 3, indexed: false, index_format: 0 }
+            DrawCall {
+                primitive: 4,
+                first: 6,
+                count: 3,
+                indexed: false,
+                index_format: 0
+            }
         );
         assert_eq!(h.stats.draws, 1);
     }
@@ -2139,7 +2238,12 @@ mod tests {
         assert_eq!(engine.instance_id(), 0);
         for expected in 1..=3 {
             engine
-                .write(VERTEX_BEGIN_GL, 4 | VERTEX_BEGIN_INSTANCE_NEXT, true, &mut ctx)
+                .write(
+                    VERTEX_BEGIN_GL,
+                    4 | VERTEX_BEGIN_INSTANCE_NEXT,
+                    true,
+                    &mut ctx,
+                )
                 .unwrap();
             assert_eq!(engine.instance_id(), expected);
         }
@@ -2155,11 +2259,21 @@ mod tests {
         let mut engine = Engine3D::new();
         let mut ctx = h.ctx();
         engine
-            .write(VERTEX_BEGIN_GL, 4 | VERTEX_BEGIN_INSTANCE_NEXT, true, &mut ctx)
+            .write(
+                VERTEX_BEGIN_GL,
+                4 | VERTEX_BEGIN_INSTANCE_NEXT,
+                true,
+                &mut ctx,
+            )
             .unwrap();
         engine.write(0x5F7, 0, true, &mut ctx).unwrap();
-        engine.write(DRAW_ELEMENTS_COUNT, 6, true, &mut ctx).unwrap();
-        assert_eq!(engine.last_draw.primitive, 4, "Triangles, not the raw argument");
+        engine
+            .write(DRAW_ELEMENTS_COUNT, 6, true, &mut ctx)
+            .unwrap();
+        assert_eq!(
+            engine.last_draw.primitive, 4,
+            "Triangles, not the raw argument"
+        );
     }
 
     #[test]
@@ -2176,8 +2290,12 @@ mod tests {
         let base_addr = h.base;
         let mut engine = Engine3D::new();
         let mut ctx = h.ctx();
-        engine.write(SET_PROGRAM_REGION, (base_addr >> 32) as u32, true, &mut ctx).unwrap();
-        engine.write(SET_PROGRAM_REGION + 1, base_addr as u32, true, &mut ctx).unwrap();
+        engine
+            .write(SET_PROGRAM_REGION, (base_addr >> 32) as u32, true, &mut ctx)
+            .unwrap();
+        engine
+            .write(SET_PROGRAM_REGION + 1, base_addr as u32, true, &mut ctx)
+            .unwrap();
 
         // Offset and register count, and no Config write at all.
         let base = SET_PROGRAM + ShaderStage::VertexB.index() * SET_PROGRAM_STRIDE;
@@ -2185,7 +2303,10 @@ mod tests {
         engine.write(base + 3, 0xd, true, &mut ctx).unwrap();
         assert_eq!(
             engine.program(ShaderStage::VertexB),
-            Some(ProgramBinding { addr: base_addr + 0x200, num_registers: 0xd }),
+            Some(ProgramBinding {
+                addr: base_addr + 0x200,
+                num_registers: 0xd
+            }),
         );
 
         // Every other stage still needs the bit: VertexA sits right next to
@@ -2204,8 +2325,12 @@ mod tests {
         let base_addr = h.base;
         let mut engine = Engine3D::new();
         let mut ctx = h.ctx();
-        engine.write(SET_PROGRAM_REGION, (base_addr >> 32) as u32, true, &mut ctx).unwrap();
-        engine.write(SET_PROGRAM_REGION + 1, base_addr as u32, true, &mut ctx).unwrap();
+        engine
+            .write(SET_PROGRAM_REGION, (base_addr >> 32) as u32, true, &mut ctx)
+            .unwrap();
+        engine
+            .write(SET_PROGRAM_REGION + 1, base_addr as u32, true, &mut ctx)
+            .unwrap();
         // Fragment (StageId 5) enabled, at +0x100, using 4 registers.
         let base = SET_PROGRAM + 5 * SET_PROGRAM_STRIDE;
         engine.write(base, 1 | (5 << 4), true, &mut ctx).unwrap();
@@ -2214,7 +2339,10 @@ mod tests {
 
         assert_eq!(
             engine.program(ShaderStage::Fragment),
-            Some(ProgramBinding { addr: base_addr + 0x100, num_registers: 4 })
+            Some(ProgramBinding {
+                addr: base_addr + 0x100,
+                num_registers: 4
+            })
         );
         assert_eq!(engine.program(ShaderStage::Geometry), None);
     }
@@ -2226,7 +2354,9 @@ mod tests {
         let mut ctx = h.ctx();
         // BufferId=2, IsFixed=0, Offset=0x10, Size=0x1F, Type=3, IsBgra=1.
         let raw = 2 | (0x10 << 7) | (0x1F << 21) | (3 << 27) | (1 << 31);
-        engine.write(VERTEX_ATTRIB_STATE + 3, raw, true, &mut ctx).unwrap();
+        engine
+            .write(VERTEX_ATTRIB_STATE + 3, raw, true, &mut ctx)
+            .unwrap();
 
         let attrib = engine.vertex_attrib(3);
         assert_eq!(attrib.buffer_id, 2);
@@ -2244,13 +2374,31 @@ mod tests {
         let mut engine = Engine3D::new();
         let mut ctx = h.ctx();
         let base = VERTEX_ARRAY + 2 * VERTEX_ARRAY_STRIDE;
-        engine.write(base, 0x20 | (1 << 12), true, &mut ctx).unwrap(); // stride 0x20, enabled
-        engine.write(base + 1, (base_addr >> 32) as u32, true, &mut ctx).unwrap();
-        engine.write(base + 2, base_addr as u32, true, &mut ctx).unwrap();
-        engine.write(base + 3, 5, true, &mut ctx).unwrap(); // divisor
-        engine.write(VERTEX_ARRAY_LIMIT + 2 * 2, (base_addr >> 32) as u32, true, &mut ctx).unwrap();
         engine
-            .write(VERTEX_ARRAY_LIMIT + 2 * 2 + 1, base_addr as u32 + 0x1000, true, &mut ctx)
+            .write(base, 0x20 | (1 << 12), true, &mut ctx)
+            .unwrap(); // stride 0x20, enabled
+        engine
+            .write(base + 1, (base_addr >> 32) as u32, true, &mut ctx)
+            .unwrap();
+        engine
+            .write(base + 2, base_addr as u32, true, &mut ctx)
+            .unwrap();
+        engine.write(base + 3, 5, true, &mut ctx).unwrap(); // divisor
+        engine
+            .write(
+                VERTEX_ARRAY_LIMIT + 2 * 2,
+                (base_addr >> 32) as u32,
+                true,
+                &mut ctx,
+            )
+            .unwrap();
+        engine
+            .write(
+                VERTEX_ARRAY_LIMIT + 2 * 2 + 1,
+                base_addr as u32 + 0x1000,
+                true,
+                &mut ctx,
+            )
             .unwrap();
 
         let va = engine.vertex_array(2);
@@ -2267,26 +2415,54 @@ mod tests {
         let base_addr = h.base;
         let mut engine = Engine3D::new();
         let mut ctx = h.ctx();
-        engine.write(CONSTBUF_SELECTOR_SIZE, 0x40, true, &mut ctx).unwrap();
-        engine.write(CONSTBUF_SELECTOR_ADDR, (base_addr >> 32) as u32, true, &mut ctx).unwrap();
-        engine.write(CONSTBUF_SELECTOR_ADDR + 1, base_addr as u32, true, &mut ctx).unwrap();
+        engine
+            .write(CONSTBUF_SELECTOR_SIZE, 0x40, true, &mut ctx)
+            .unwrap();
+        engine
+            .write(
+                CONSTBUF_SELECTOR_ADDR,
+                (base_addr >> 32) as u32,
+                true,
+                &mut ctx,
+            )
+            .unwrap();
+        engine
+            .write(CONSTBUF_SELECTOR_ADDR + 1, base_addr as u32, true, &mut ctx)
+            .unwrap();
 
         // Fragment's bind slot (4), bank 2, valid.
         let base = BIND + 4 * BIND_STRIDE;
-        engine.write(base + BIND_CONSTBUF_OFFSET, 1 | (2 << 4), true, &mut ctx).unwrap();
+        engine
+            .write(base + BIND_CONSTBUF_OFFSET, 1 | (2 << 4), true, &mut ctx)
+            .unwrap();
 
-        assert_eq!(engine.bound_constbuf(ShaderStage::Fragment, 2), Some((base_addr, 0x40)));
+        assert_eq!(
+            engine.bound_constbuf(ShaderStage::Fragment, 2),
+            Some((base_addr, 0x40))
+        );
         assert_eq!(engine.bound_constbuf(ShaderStage::Fragment, 3), None);
         // Vertex shares Fragment's data source but not its bank slot.
         assert_eq!(engine.bound_constbuf(ShaderStage::VertexB, 2), None);
 
         // A later selector change must not retroactively affect an already
         // bound bank — binding really does snapshot, not alias.
-        engine.write(CONSTBUF_SELECTOR_ADDR + 1, base_addr as u32 + 0x40, true, &mut ctx).unwrap();
-        assert_eq!(engine.bound_constbuf(ShaderStage::Fragment, 2), Some((base_addr, 0x40)));
+        engine
+            .write(
+                CONSTBUF_SELECTOR_ADDR + 1,
+                base_addr as u32 + 0x40,
+                true,
+                &mut ctx,
+            )
+            .unwrap();
+        assert_eq!(
+            engine.bound_constbuf(ShaderStage::Fragment, 2),
+            Some((base_addr, 0x40))
+        );
 
         // Unbinding forgets it.
-        engine.write(base + BIND_CONSTBUF_OFFSET, 0 | (2 << 4), true, &mut ctx).unwrap();
+        engine
+            .write(base + BIND_CONSTBUF_OFFSET, 0 | (2 << 4), true, &mut ctx)
+            .unwrap();
         assert_eq!(engine.bound_constbuf(ShaderStage::Fragment, 2), None);
     }
 
@@ -2303,15 +2479,28 @@ mod tests {
         engine.write(BLEND_EQUATION_RGB, 1, true, &mut ctx).unwrap(); // Add
         engine.write(BLEND_FUNC_SRC_RGB, 5, true, &mut ctx).unwrap(); // SrcAlpha
         engine.write(BLEND_FUNC_DST_RGB, 6, true, &mut ctx).unwrap(); // InvSrcAlpha
-        engine.write(BLEND_EQUATION_ALPHA, 1, true, &mut ctx).unwrap();
-        engine.write(BLEND_FUNC_SRC_ALPHA, 2, true, &mut ctx).unwrap(); // One
-        engine.write(BLEND_FUNC_DST_ALPHA, 1, true, &mut ctx).unwrap(); // Zero
+        engine
+            .write(BLEND_EQUATION_ALPHA, 1, true, &mut ctx)
+            .unwrap();
+        engine
+            .write(BLEND_FUNC_SRC_ALPHA, 2, true, &mut ctx)
+            .unwrap(); // One
+        engine
+            .write(BLEND_FUNC_DST_ALPHA, 1, true, &mut ctx)
+            .unwrap(); // Zero
 
         assert!(!engine.independent_blend_enabled());
         let bt = engine.blend_target(0);
         assert!(bt.enabled);
         assert_eq!(
-            (bt.equation_rgb, bt.func_rgb_src, bt.func_rgb_dst, bt.equation_alpha, bt.func_alpha_src, bt.func_alpha_dst),
+            (
+                bt.equation_rgb,
+                bt.func_rgb_src,
+                bt.func_rgb_dst,
+                bt.equation_alpha,
+                bt.func_alpha_src,
+                bt.func_alpha_dst
+            ),
             (1, 5, 6, 1, 2, 1)
         );
     }
@@ -2324,9 +2513,15 @@ mod tests {
         let mut engine = Engine3D::new();
         engine.regs.set(SCREEN_SCISSOR_VERTICAL, 720 << 16);
         engine.regs.set(VIEWPORT_TRANSFORM_BASE, 640.0f32.to_bits());
-        engine.regs.set(VIEWPORT_TRANSFORM_BASE + 1, 360.0f32.to_bits());
-        engine.regs.set(VIEWPORT_TRANSFORM_BASE + 3, 640.0f32.to_bits());
-        engine.regs.set(VIEWPORT_TRANSFORM_BASE + 4, 360.0f32.to_bits());
+        engine
+            .regs
+            .set(VIEWPORT_TRANSFORM_BASE + 1, 360.0f32.to_bits());
+        engine
+            .regs
+            .set(VIEWPORT_TRANSFORM_BASE + 3, 640.0f32.to_bits());
+        engine
+            .regs
+            .set(VIEWPORT_TRANSFORM_BASE + 4, 360.0f32.to_bits());
 
         let upper = engine.viewport_transform();
         assert_eq!(upper.scale[1], 360.0, "untouched, so no flip");
@@ -2347,9 +2542,15 @@ mod tests {
         engine.regs.set(SCREEN_SCISSOR_VERTICAL, 720 << 16);
         engine.regs.set(WINDOW_ORIGIN, 1);
         engine.regs.set(VIEWPORT_TRANSFORM_BASE, 640.0f32.to_bits());
-        engine.regs.set(VIEWPORT_TRANSFORM_BASE + 1, 120.0f32.to_bits());
-        engine.regs.set(VIEWPORT_TRANSFORM_BASE + 3, 640.0f32.to_bits());
-        engine.regs.set(VIEWPORT_TRANSFORM_BASE + 4, 120.0f32.to_bits());
+        engine
+            .regs
+            .set(VIEWPORT_TRANSFORM_BASE + 1, 120.0f32.to_bits());
+        engine
+            .regs
+            .set(VIEWPORT_TRANSFORM_BASE + 3, 640.0f32.to_bits());
+        engine
+            .regs
+            .set(VIEWPORT_TRANSFORM_BASE + 4, 120.0f32.to_bits());
 
         let vt = engine.viewport_transform();
         // Was rows 0..240 measured from the bottom; is rows 480..720 from the
@@ -2366,7 +2567,12 @@ mod tests {
         engine.regs.set(SCISSOR_BASE, 1);
         engine.regs.set(SCISSOR_BASE + 1, 1280 << 16);
         engine.regs.set(SCISSOR_BASE + 2, 100 | (200 << 16));
-        let full = ScissorRect { x0: 0, y0: 0, x1: 1280, y1: 720 };
+        let full = ScissorRect {
+            x0: 0,
+            y0: 0,
+            x1: 1280,
+            y1: 720,
+        };
 
         assert_eq!(engine.apply_scissor(full).y0, 100);
         assert_eq!(engine.apply_scissor(full).y1, 200);
@@ -2388,7 +2594,11 @@ mod tests {
 
         engine.regs.set(WINDOW_ORIGIN, 1 << 4);
         assert!(!engine.cull_state().front_ccw);
-        assert_eq!(engine.viewport_transform().scale[1], 0.0, "the viewport is untouched");
+        assert_eq!(
+            engine.viewport_transform().scale[1],
+            0.0,
+            "the viewport is untouched"
+        );
     }
 
     #[test]
@@ -2396,23 +2606,34 @@ mod tests {
         let mut h = Harness::new(0x1000);
         let mut engine = Engine3D::new();
         let mut ctx = h.ctx();
-        engine.write(COLOR_BLEND_ENABLE + 1, 1, true, &mut ctx).unwrap();
+        engine
+            .write(COLOR_BLEND_ENABLE + 1, 1, true, &mut ctx)
+            .unwrap();
         let base = INDEPENDENT_BLEND + 1 * INDEPENDENT_BLEND_STRIDE;
         engine.write(base + 1, 1, true, &mut ctx).unwrap(); // EquationRgb = FUNC_ADD
         engine.write(base + 2, 1, true, &mut ctx).unwrap(); // FuncRgbSrc = ONE
         engine.write(base + 3, 0, true, &mut ctx).unwrap(); // FuncRgbDst = ZERO
-        engine.write(INDEPENDENT_BLEND_ENABLE, 1, true, &mut ctx).unwrap();
+        engine
+            .write(INDEPENDENT_BLEND_ENABLE, 1, true, &mut ctx)
+            .unwrap();
         engine.write(DEPTH_TEST_ENABLE, 1, true, &mut ctx).unwrap();
         engine.write(DEPTH_WRITE_ENABLE, 1, true, &mut ctx).unwrap();
         engine.write(DEPTH_TEST_FUNC, 4, true, &mut ctx).unwrap(); // Lequal
 
         let bt = engine.blend_target(1);
         assert!(bt.enabled);
-        assert_eq!((bt.equation_rgb, bt.func_rgb_src, bt.func_rgb_dst), (1, 1, 0));
+        assert_eq!(
+            (bt.equation_rgb, bt.func_rgb_src, bt.func_rgb_dst),
+            (1, 1, 0)
+        );
         assert!(engine.independent_blend_enabled());
         assert_eq!(
             engine.depth_state(),
-            DepthState { test_enabled: true, write_enabled: true, func: 4 }
+            DepthState {
+                test_enabled: true,
+                write_enabled: true,
+                func: 4
+            }
         );
     }
 }

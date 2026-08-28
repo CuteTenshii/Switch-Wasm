@@ -112,7 +112,11 @@ const MAX_VISITS: usize = 1 << 16;
 impl<'a> Cfg<'a> {
     /// Walk `program` from its entry, tracking the reconvergence stack.
     pub fn new(program: &'a Compiled) -> Cfg<'a> {
-        let mut cfg = Cfg { program, stacks: HashMap::new(), pairing: Pairing::Static };
+        let mut cfg = Cfg {
+            program,
+            stacks: HashMap::new(),
+            pairing: Pairing::Static,
+        };
         cfg.walk();
         cfg
     }
@@ -285,7 +289,10 @@ mod tests {
 
     const ALWAYS: Pred = Pred::ALWAYS;
     /// `@p0` — the guard a two-armed branch is built out of.
-    const IF_P0: Pred = Pred { reg: 0, negate: false };
+    const IF_P0: Pred = Pred {
+        reg: 0,
+        negate: false,
+    };
 
     #[test]
     fn a_two_armed_branch_pairs_statically() {

@@ -116,7 +116,7 @@ mod tests {
         // low=0 (match len nibble) -> 0x40.
         let mut input = vec![0x40, b'a', b'b', b'c', b'd'];
         input.extend_from_slice(&4u16.to_le_bytes()); // offset
-        // No trailing match-length extra needed (nibble != 15).
+                                                      // No trailing match-length extra needed (nibble != 15).
         let out = decompress_block(&input, 8).unwrap();
         assert_eq!(out, b"abcdabcd");
     }

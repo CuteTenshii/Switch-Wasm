@@ -34,10 +34,10 @@ use crate::{Error, Result};
 use channel::Channel;
 use exec::{ExecCtx, GpuStats};
 use nvmap::NvMap;
+use std::collections::HashMap;
 use surface::{ColorFormat, Layout};
 use syncpt::{Host1x, NvFence};
 use vmm::AddressSpace;
-use std::collections::HashMap;
 
 /// An image ready for display, as 32-bit `0xAABBGGRR` pixels (what a canvas
 /// `ImageData` wants).
@@ -178,23 +178,27 @@ impl Gpu {
         increments: u32,
     ) -> Result<NvFence> {
         let syncpt = {
-            let chan = self
-                .channels
-                .get(&channel_id)
-                .ok_or_else(|| Error::Gpu(format!("gpu: submit on unknown channel {}", channel_id)))?;
+            let chan = self.channels.get(&channel_id).ok_or_else(|| {
+                Error::Gpu(format!("gpu: submit on unknown channel {}", channel_id))
+            })?;
             chan.syncpt
         };
         let value = self.host1x.incr_max(syncpt, increments.max(1))?;
         let fence = NvFence { id: syncpt, value };
 
-        let chan = self.channels.get_mut(&channel_id).expect("channel checked above");
-        let as_id = chan
-            .as_id
-            .ok_or_else(|| Error::Gpu(format!("gpu: channel {} has no address space", channel_id)))?;
-        let vmm = self
-            .address_spaces
-            .get(&as_id)
-            .ok_or_else(|| Error::Gpu(format!("gpu: channel {} bound to missing address space {}", channel_id, as_id)))?;
+        let chan = self
+            .channels
+            .get_mut(&channel_id)
+            .expect("channel checked above");
+        let as_id = chan.as_id.ok_or_else(|| {
+            Error::Gpu(format!("gpu: channel {} has no address space", channel_id))
+        })?;
+        let vmm = self.address_spaces.get(&as_id).ok_or_else(|| {
+            Error::Gpu(format!(
+                "gpu: channel {} bound to missing address space {}",
+                channel_id, as_id
+            ))
+        })?;
         let mut ctx = ExecCtx {
             mem,
             vmm,
@@ -216,7 +220,9 @@ impl Gpu {
         let mut state = renderer::Flush::Done;
         for channel in self.channels.values_mut() {
             let Some(as_id) = channel.as_id else { continue };
-            let Some(vmm) = self.address_spaces.get(&as_id) else { continue };
+            let Some(vmm) = self.address_spaces.get(&as_id) else {
+                continue;
+            };
             let mut ctx = ExecCtx {
                 mem,
                 vmm,
@@ -238,10 +244,12 @@ impl Gpu {
     /// renders into a block-linear image, the compositor is given its nvmap
     /// id, and the display controller de-swizzles it on the way to the panel.
     pub fn present(&mut self, mem: &Memory, buffer: &DisplayBuffer) -> Result<()> {
-        let handle = self
-            .nvmap
-            .by_id(buffer.nvmap_id)
-            .ok_or_else(|| Error::Gpu(format!("present: no nvmap object with id {}", buffer.nvmap_id)))?;
+        let handle = self.nvmap.by_id(buffer.nvmap_id).ok_or_else(|| {
+            Error::Gpu(format!(
+                "present: no nvmap object with id {}",
+                buffer.nvmap_id
+            ))
+        })?;
         if !handle.allocated {
             return Err(Error::Gpu(format!(
                 "present: nvmap object {} has no memory yet",
@@ -257,12 +265,17 @@ impl Gpu {
         }
         let format = display_color_format(buffer.color_format)?;
         let layout = match buffer.layout {
-            NV_LAYOUT_PITCH => Layout::Pitch { pitch: buffer.pitch },
+            NV_LAYOUT_PITCH => Layout::Pitch {
+                pitch: buffer.pitch,
+            },
             NV_LAYOUT_BLOCK_LINEAR => Layout::BlockLinear {
                 block_height_gobs: 1 << buffer.block_height_log2,
             },
             other => {
-                return Err(Error::Gpu(format!("present: unsupported NvLayout {}", other)))
+                return Err(Error::Gpu(format!(
+                    "present: unsupported NvLayout {}",
+                    other
+                )))
             }
         };
         let bpp = format.bytes_per_pixel;
@@ -358,7 +371,11 @@ impl Gpu {
             }
         }
         self.scan_out = raw_bytes;
-        self.framebuffer = Framebuffer { width: buffer.width, height: buffer.height, pixels };
+        self.framebuffer = Framebuffer {
+            width: buffer.width,
+            height: buffer.height,
+            pixels,
+        };
         self.frames += 1;
         Ok(())
     }
@@ -444,7 +461,9 @@ mod tests {
         let mut mem = Memory::new();
         mem.map_zero(0x4000_0000, 0x1000).unwrap();
         let handle = gpu.nvmap.create(0x1000);
-        gpu.nvmap.alloc(handle, 0, 1, 0x1000, 0, 0x4000_0000).unwrap();
+        gpu.nvmap
+            .alloc(handle, 0, 1, 0x1000, 0, 0x4000_0000)
+            .unwrap();
         let id = gpu.nvmap.get(handle).unwrap().id;
 
         // A 16x8 RGBA8 image is exactly one GOB; write a distinct value at the
@@ -486,7 +505,9 @@ mod tests {
         let mut mem = Memory::new();
         mem.map_zero(0x4000_0000, 0x1000).unwrap();
         let handle = gpu.nvmap.create(0x1000);
-        gpu.nvmap.alloc(handle, 0, 0, 0x1000, 0, 0x4000_0000).unwrap();
+        gpu.nvmap
+            .alloc(handle, 0, 0, 0x1000, 0, 0x4000_0000)
+            .unwrap();
         let id = gpu.nvmap.get(handle).unwrap().id;
         let at = |x: u32, y: u32| 0x4000_0000 + surface::gob_offset(x * 4, y);
         // A pixel in the top row and one in the bottom row of an 8-row image.
@@ -509,7 +530,10 @@ mod tests {
         assert_eq!(gpu.framebuffer.pixels[7 * 16], 0x0000_00FF);
 
         gpu.present(&mem, &buffer(TRANSFORM_FLIP_V)).unwrap();
-        assert_eq!(gpu.framebuffer.pixels[0], 0x0000_00FF, "the last row is shown first");
+        assert_eq!(
+            gpu.framebuffer.pixels[0], 0x0000_00FF,
+            "the last row is shown first"
+        );
         assert_eq!(gpu.framebuffer.pixels[7 * 16], 0xFF00_0000);
 
         // Left to right, about the same image.

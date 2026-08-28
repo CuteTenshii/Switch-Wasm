@@ -89,8 +89,14 @@ pub struct Pred {
 
 impl Pred {
     pub const PT: u8 = 7;
-    pub const ALWAYS: Pred = Pred { reg: Pred::PT, negate: false };
-    pub const NEVER: Pred = Pred { reg: Pred::PT, negate: true };
+    pub const ALWAYS: Pred = Pred {
+        reg: Pred::PT,
+        negate: false,
+    };
+    pub const NEVER: Pred = Pred {
+        reg: Pred::PT,
+        negate: true,
+    };
 
     pub fn is_always(self) -> bool {
         self.reg == Pred::PT && !self.negate
@@ -106,7 +112,10 @@ pub struct FMod {
 }
 
 impl FMod {
-    pub const NONE: FMod = FMod { neg: false, abs: false };
+    pub const NONE: FMod = FMod {
+        neg: false,
+        abs: false,
+    };
 
     pub fn apply(self, v: f32) -> f32 {
         let v = if self.abs { v.abs() } else { v };
@@ -430,7 +439,10 @@ pub struct Instruction {
 impl Instruction {
     /// An unpredicated instruction, which is what most of them are.
     pub fn always(op: Op) -> Instruction {
-        Instruction { pred: Pred::ALWAYS, op }
+        Instruction {
+            pred: Pred::ALWAYS,
+            op,
+        }
     }
 }
 
@@ -438,24 +450,100 @@ impl Instruction {
 pub enum Op {
     // ---- attribute space ----
     /// `ld.<size> dst, a[offset]` — attribute-space load.
-    Ld { dst: u8, offset: u16, idx: u8, size: MemSize },
+    Ld {
+        dst: u8,
+        offset: u16,
+        idx: u8,
+        size: MemSize,
+    },
     /// `st.<size> a[offset], src` — attribute-space store.
-    St { offset: u16, idx: u8, src: u8, size: MemSize },
+    St {
+        offset: u16,
+        idx: u8,
+        src: u8,
+        size: MemSize,
+    },
     /// `ipa[.pass][.centroid] dst, a[offset], mul` — fixed-function
     /// interpolation. `perspective = false` is `ipa pass`; `perspective =
     /// true` multiplies the fetched value by `mul` (`RZ` decodes to `None`).
     /// `centroid` samples the varying inside the primitive's covered area
     /// rather than at the pixel centre.
-    Ipa { dst: u8, offset: u16, mul: Option<u8>, perspective: bool, sat: bool, centroid: bool },
+    Ipa {
+        dst: u8,
+        offset: u16,
+        mul: Option<u8>,
+        perspective: bool,
+        sat: bool,
+        centroid: bool,
+    },
 
     // ---- float ALU ----
-    Fadd { dst: u8, a: u8, am: FMod, b: Operand, bm: FMod, ftz: bool, sat: bool },
-    Fmul { dst: u8, a: u8, b: Operand, bm: FMod, ftz: bool, sat: bool, scale: FmulScale },
-    Ffma { dst: u8, a: u8, b: Operand, bneg: bool, c: Operand, cneg: bool, ftz: bool, sat: bool },
-    Fmnmx { dst: u8, a: u8, am: FMod, b: Operand, bm: FMod, pred: Pred, ftz: bool },
-    Fsetp { p0: u8, p1: u8, a: u8, am: FMod, b: Operand, bm: FMod, cmp: FCmp, bop: BoolOp, src: Pred },
-    Fset { dst: u8, a: u8, am: FMod, b: Operand, bm: FMod, cmp: FCmp, bop: BoolOp, src: Pred, bf: bool },
-    Mufu { dst: u8, src: u8, sm: FMod, op: MufuOp, sat: bool },
+    Fadd {
+        dst: u8,
+        a: u8,
+        am: FMod,
+        b: Operand,
+        bm: FMod,
+        ftz: bool,
+        sat: bool,
+    },
+    Fmul {
+        dst: u8,
+        a: u8,
+        b: Operand,
+        bm: FMod,
+        ftz: bool,
+        sat: bool,
+        scale: FmulScale,
+    },
+    Ffma {
+        dst: u8,
+        a: u8,
+        b: Operand,
+        bneg: bool,
+        c: Operand,
+        cneg: bool,
+        ftz: bool,
+        sat: bool,
+    },
+    Fmnmx {
+        dst: u8,
+        a: u8,
+        am: FMod,
+        b: Operand,
+        bm: FMod,
+        pred: Pred,
+        ftz: bool,
+    },
+    Fsetp {
+        p0: u8,
+        p1: u8,
+        a: u8,
+        am: FMod,
+        b: Operand,
+        bm: FMod,
+        cmp: FCmp,
+        bop: BoolOp,
+        src: Pred,
+    },
+    Fset {
+        dst: u8,
+        a: u8,
+        am: FMod,
+        b: Operand,
+        bm: FMod,
+        cmp: FCmp,
+        bop: BoolOp,
+        src: Pred,
+        bf: bool,
+    },
+    Mufu {
+        dst: u8,
+        src: u8,
+        sm: FMod,
+        op: MufuOp,
+        sat: bool,
+    },
 
     // ---- half-precision ALU ----
     // A register is a pair of halves and each of these computes both lanes at
@@ -539,23 +627,92 @@ pub enum Op {
     /// behind, and `cout` is that `.CC`. Together they are how a shader adds a
     /// 64-bit number in two halves — every global-memory address a Maxwell
     /// program computes is one of these pairs.
-    Iadd { dst: u8, a: u8, aneg: bool, b: Operand, bneg: bool, cin: bool, cout: bool },
-    Iadd3 { dst: u8, a: u8, aneg: bool, b: Operand, bneg: bool, c: Operand, cneg: bool },
-    Imnmx { dst: u8, a: u8, b: Operand, pred: Pred, signed: bool },
-    Iscadd { dst: u8, a: u8, aneg: bool, b: Operand, bneg: bool, shift: u8 },
-    Isetp { p0: u8, p1: u8, a: u8, b: Operand, cmp: ICmp, signed: bool, bop: BoolOp, src: Pred },
-    Iset { dst: u8, a: u8, b: Operand, cmp: ICmp, signed: bool, bop: BoolOp, src: Pred, bf: bool },
-    Icmp { dst: u8, a: u8, b: Operand, c: u8, cmp: ICmp, signed: bool },
+    Iadd {
+        dst: u8,
+        a: u8,
+        aneg: bool,
+        b: Operand,
+        bneg: bool,
+        cin: bool,
+        cout: bool,
+    },
+    Iadd3 {
+        dst: u8,
+        a: u8,
+        aneg: bool,
+        b: Operand,
+        bneg: bool,
+        c: Operand,
+        cneg: bool,
+    },
+    Imnmx {
+        dst: u8,
+        a: u8,
+        b: Operand,
+        pred: Pred,
+        signed: bool,
+    },
+    Iscadd {
+        dst: u8,
+        a: u8,
+        aneg: bool,
+        b: Operand,
+        bneg: bool,
+        shift: u8,
+    },
+    Isetp {
+        p0: u8,
+        p1: u8,
+        a: u8,
+        b: Operand,
+        cmp: ICmp,
+        signed: bool,
+        bop: BoolOp,
+        src: Pred,
+    },
+    Iset {
+        dst: u8,
+        a: u8,
+        b: Operand,
+        cmp: ICmp,
+        signed: bool,
+        bop: BoolOp,
+        src: Pred,
+        bf: bool,
+    },
+    Icmp {
+        dst: u8,
+        a: u8,
+        b: Operand,
+        c: u8,
+        cmp: ICmp,
+        signed: bool,
+    },
     /// `bfi dst, insert, src, base`: splice `insert` into `base`. `src` packs
     /// the destination field's offset in its low byte and its width in the
     /// next — one operand carrying two numbers, which is why a shader building
     /// a bitfield does it in one instruction rather than a shift and two masks.
-    Bfi { dst: u8, insert: u8, src: Operand, base: Operand },
+    Bfi {
+        dst: u8,
+        insert: u8,
+        src: Operand,
+        base: Operand,
+    },
     /// `r2p pr, src, mask`: move bits of `src` into the predicate registers,
     /// one per set bit of `mask`. `byte` selects which byte of `src` supplies
     /// them.
-    R2p { src: u8, mask: Operand, byte: u8 },
-    Imul { dst: u8, a: u8, b: Operand, signed: bool, hi: bool },
+    R2p {
+        src: u8,
+        mask: Operand,
+        byte: u8,
+    },
+    Imul {
+        dst: u8,
+        a: u8,
+        b: Operand,
+        signed: bool,
+        hi: bool,
+    },
     /// `xmad dst, a.h[ah], b.h[bh], c` — the 16x16+32 multiply-accumulate
     /// Maxwell builds every wider integer multiply out of.
     Xmad {
@@ -572,49 +729,186 @@ pub enum Op {
     },
     /// `pred` is the `.T`/`.Z`/`.NZ` form, which tests the result and writes a
     /// predicate as well as (usually) discarding the value into `RZ`.
-    Lop { dst: u8, a: u8, ainv: bool, b: Operand, binv: bool, op: LogicOp, pred: Option<(u8, LopTest)> },
-    Lop3 { dst: u8, a: u8, b: Operand, c: Operand, lut: u8 },
-    Shl { dst: u8, a: u8, b: Operand, wrap: bool },
-    Shr { dst: u8, a: u8, b: Operand, signed: bool, wrap: bool },
-    Shf { dst: u8, lo: u8, shift: Operand, hi: u8, left: bool, wrap: bool, hi_out: bool },
-    Bfe { dst: u8, a: u8, b: Operand, signed: bool },
-    Popc { dst: u8, b: Operand, inv: bool },
-    Flo { dst: u8, b: Operand, signed: bool, shift: bool, inv: bool },
-    Sel { dst: u8, a: u8, b: Operand, pred: Pred },
+    Lop {
+        dst: u8,
+        a: u8,
+        ainv: bool,
+        b: Operand,
+        binv: bool,
+        op: LogicOp,
+        pred: Option<(u8, LopTest)>,
+    },
+    Lop3 {
+        dst: u8,
+        a: u8,
+        b: Operand,
+        c: Operand,
+        lut: u8,
+    },
+    Shl {
+        dst: u8,
+        a: u8,
+        b: Operand,
+        wrap: bool,
+    },
+    Shr {
+        dst: u8,
+        a: u8,
+        b: Operand,
+        signed: bool,
+        wrap: bool,
+    },
+    Shf {
+        dst: u8,
+        lo: u8,
+        shift: Operand,
+        hi: u8,
+        left: bool,
+        wrap: bool,
+        hi_out: bool,
+    },
+    Bfe {
+        dst: u8,
+        a: u8,
+        b: Operand,
+        signed: bool,
+    },
+    Popc {
+        dst: u8,
+        b: Operand,
+        inv: bool,
+    },
+    Flo {
+        dst: u8,
+        b: Operand,
+        signed: bool,
+        shift: bool,
+        inv: bool,
+    },
+    Sel {
+        dst: u8,
+        a: u8,
+        b: Operand,
+        pred: Pred,
+    },
 
     // ---- conversions ----
     /// Integer -> float. `src_bytes`/`src_signed` describe the source's
     /// integer width; the destination is always f32 here.
-    I2f { dst: u8, src: Operand, sm: FMod, src_bytes: u8, src_signed: bool, sel: u8 },
+    I2f {
+        dst: u8,
+        src: Operand,
+        sm: FMod,
+        src_bytes: u8,
+        src_signed: bool,
+        sel: u8,
+    },
     /// Float -> integer, with an explicit rounding mode.
-    F2i { dst: u8, src: Operand, sm: FMod, dst_bytes: u8, dst_signed: bool, round: FRound, ftz: bool },
+    F2i {
+        dst: u8,
+        src: Operand,
+        sm: FMod,
+        dst_bytes: u8,
+        dst_signed: bool,
+        round: FRound,
+        ftz: bool,
+    },
     /// Float -> float: on f32 this is only ever a round/saturate.
-    F2f { dst: u8, src: Operand, sm: FMod, round: FRound, sat: bool, ftz: bool },
+    F2f {
+        dst: u8,
+        src: Operand,
+        sm: FMod,
+        round: FRound,
+        sat: bool,
+        ftz: bool,
+    },
     /// Integer -> integer: a width conversion, optionally saturating.
-    I2i { dst: u8, src: Operand, sm: FMod, src_bytes: u8, src_signed: bool, dst_signed: bool, sat: bool, sel: u8 },
+    I2i {
+        dst: u8,
+        src: Operand,
+        sm: FMod,
+        src_bytes: u8,
+        src_signed: bool,
+        dst_signed: bool,
+        sat: bool,
+        sel: u8,
+    },
 
     // ---- moves ----
-    Mov { dst: u8, src: Operand },
-    Mov32i { dst: u8, imm: u32 },
+    Mov {
+        dst: u8,
+        src: Operand,
+    },
+    Mov32i {
+        dst: u8,
+        imm: u32,
+    },
     /// `mov dst, sN` — a special register (`tid`, `laneid`, ...).
-    S2r { dst: u8, sr: u8 },
-    Psetp { p0: u8, p1: u8, a: Pred, b: Pred, c: Pred, op1: BoolOp, op2: BoolOp },
+    S2r {
+        dst: u8,
+        sr: u8,
+    },
+    Psetp {
+        p0: u8,
+        p1: u8,
+        a: Pred,
+        b: Pred,
+        c: Pred,
+        op1: BoolOp,
+        op2: BoolOp,
+    },
 
     // ---- memory ----
     /// `ld cN[idx + offset]` — a constant-buffer load into registers.
-    Ldc { dst: u8, bank: u8, offset: i32, idx: u8, size: MemSize },
+    Ldc {
+        dst: u8,
+        bank: u8,
+        offset: i32,
+        idx: u8,
+        size: MemSize,
+    },
     /// `ldg dst, [addr + offset]` — a global load.
-    Ldg { dst: u8, addr: u8, offset: i32, size: MemSize },
+    Ldg {
+        dst: u8,
+        addr: u8,
+        offset: i32,
+        size: MemSize,
+    },
     /// `stg [addr + offset], src` — a global store.
-    Stg { addr: u8, offset: i32, src: u8, size: MemSize },
+    Stg {
+        addr: u8,
+        offset: i32,
+        src: u8,
+        size: MemSize,
+    },
     /// `ld dst, l[addr + offset]` — a local (per-thread scratch) load.
-    Ldl { dst: u8, addr: u8, offset: i32, size: MemSize },
+    Ldl {
+        dst: u8,
+        addr: u8,
+        offset: i32,
+        size: MemSize,
+    },
     /// `st l[addr + offset], src`.
-    Stl { addr: u8, offset: i32, src: u8, size: MemSize },
+    Stl {
+        addr: u8,
+        offset: i32,
+        src: u8,
+        size: MemSize,
+    },
     /// `ld dst, s[addr + offset]` — a load from the CTA's shared memory.
-    Lds { dst: u8, addr: u8, offset: i32, size: MemSize },
+    Lds {
+        dst: u8,
+        addr: u8,
+        offset: i32,
+        size: MemSize,
+    },
     /// `st s[addr + offset], src`.
-    Sts { addr: u8, offset: i32, src: u8, size: MemSize },
+    Sts {
+        addr: u8,
+        offset: i32,
+        src: u8,
+        size: MemSize,
+    },
     /// `atom`/`atoms`/`red` — a read-modify-write of one location. `red` is
     /// this with `dst` = [`RZ`]: the same operation, its old value discarded.
     Atom {
@@ -655,39 +949,65 @@ pub enum Op {
     /// which together bound which lanes this one may reach. `pred` is set to
     /// whether the lane it computed was inside that bound; a lane that was
     /// not keeps its own value.
-    Shfl { dst: u8, pred: u8, src: u8, index: Operand, mask: Operand, mode: ShflMode },
+    Shfl {
+        dst: u8,
+        pred: u8,
+        src: u8,
+        index: Operand,
+        mask: Operand,
+        mode: ShflMode,
+    },
     /// `fswzadd dst, a, b, swizzle` — add `a` and `b` with a sign per lane,
     /// the two-bit code for this one selected out of `swizzle` by `laneid`.
     ///
     /// It is the other half of a derivative: `shfl` fetches the neighbour's
     /// value and this subtracts in whichever direction the lane's position in
     /// the quad calls for.
-    Fswzadd { dst: u8, a: u8, b: u8, swizzle: u8, ftz: bool },
+    Fswzadd {
+        dst: u8,
+        a: u8,
+        b: u8,
+        swizzle: u8,
+        ftz: bool,
+    },
 
     // ---- control ----
     /// `bra target` — `target` is an instruction's byte offset within the
     /// program, already resolved from the pc-relative encoding.
-    Bra { target: u32 },
+    Bra {
+        target: u32,
+    },
     /// `ssy target` — push a reconvergence point.
     /// `brx Ra, imm`: an indexed branch, which is how a `switch` lowers. The
     /// register holds an entry a jump table in a constant bank supplied, and
     /// the target is that entry plus this instruction's own pc-relative base —
     /// so an interpreter, unlike a recompiler, needs no table tracking at all.
-    Brx { base: u32, reg: u8 },
-    Ssy { target: u32 },
+    Brx {
+        base: u32,
+        reg: u8,
+    },
+    Ssy {
+        target: u32,
+    },
     /// `sync` — pop one and jump there.
     Sync,
     /// `pbk target` — push a loop-break point.
-    Pbk { target: u32 },
+    Pbk {
+        target: u32,
+    },
     Brk,
     /// `pcnt target` — push a loop-continue point.
-    Pcnt { target: u32 },
+    Pcnt {
+        target: u32,
+    },
     Cont,
     Exit,
     /// `kil` — discard this fragment.
     Kil,
     /// `bar.<mode>` — a CTA-wide barrier.
-    Bar { mode: BarMode },
+    Bar {
+        mode: BarMode,
+    },
     Nop,
     /// A barrier/fence with no effect on a scalar interpreter, kept as a
     /// distinct op so it doesn't read as unsupported.
@@ -695,7 +1015,9 @@ pub enum Op {
 
     /// A bit pattern this decoder doesn't recognise, or recognises but with
     /// an unhandled modifier. Carries the raw bits.
-    Unimplemented { raw: u64 },
+    Unimplemented {
+        raw: u64,
+    },
 }
 
 fn field(insn: u64, pos: u32, len: u32) -> u64 {
@@ -730,12 +1052,18 @@ fn opt_reg(r: u8) -> Option<u8> {
 /// The guard predicate every instruction carries: `PRED16` at `[16, 19)`
 /// with its negate flag at bit 19.
 fn guard(insn: u64) -> Pred {
-    Pred { reg: reg(insn, 16, 3), negate: field(insn, 19, 1) != 0 }
+    Pred {
+        reg: reg(insn, 16, 3),
+        negate: field(insn, 19, 1) != 0,
+    }
 }
 
 /// A source predicate at `[pos, pos+3)` with its negate flag at `not`.
 fn src_pred(insn: u64, pos: u32, not: u32) -> Pred {
-    Pred { reg: reg(insn, pos, 3), negate: field(insn, not, 1) != 0 }
+    Pred {
+        reg: reg(insn, pos, 3),
+        negate: field(insn, not, 1) != 0,
+    }
 }
 
 /// `C34_RZ_O14_20`: bank at `[34, 39)`, offset a signed 14-bit word index at
@@ -970,7 +1298,10 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             size: mem_size(field(insn, 48, 3)),
         },
         // mov dst, sN — 0xf0c8/0xfff8.
-        0xf0c8 => Op::S2r { dst: reg(insn, 0, 8), sr: reg(insn, 20, 8) },
+        0xf0c8 => Op::S2r {
+            dst: reg(insn, 0, 8),
+            sr: reg(insn, 20, 8),
+        },
         // depbar/membar: scheduling and memory ordering, no-ops for a scalar
         // interpreter that runs one invocation at a time.
         0xf0f0 | 0xef98 => Op::Inert,
@@ -980,19 +1311,30 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             | (field(insn, 35, 1) << 2)
             | field(insn, 32, 2)
         {
-            0b00010 => Op::Bar { mode: BarMode::RedPopc },
-            0b00011 => Op::Bar { mode: BarMode::Scan },
-            0b00110 => Op::Bar { mode: BarMode::RedAnd },
-            0b01010 => Op::Bar { mode: BarMode::RedOr },
-            0b10000 => Op::Bar { mode: BarMode::Sync },
-            0b10001 => Op::Bar { mode: BarMode::Arrive },
+            0b00010 => Op::Bar {
+                mode: BarMode::RedPopc,
+            },
+            0b00011 => Op::Bar {
+                mode: BarMode::Scan,
+            },
+            0b00110 => Op::Bar {
+                mode: BarMode::RedAnd,
+            },
+            0b01010 => Op::Bar {
+                mode: BarMode::RedOr,
+            },
+            0b10000 => Op::Bar {
+                mode: BarMode::Sync,
+            },
+            0b10001 => Op::Bar {
+                mode: BarMode::Arrive,
+            },
             _ => un,
         },
         // red — 0xebf8/0xfff8. A global atomic whose old value is discarded,
         // so it decodes to the same op with RZ as its destination.
         0xebf8 => {
-            let (Some(op), Some(ty)) =
-                (atom_op(field(insn, 23, 3)), atom_type(field(insn, 20, 3)))
+            let (Some(op), Some(ty)) = (atom_op(field(insn, 23, 3)), atom_type(field(insn, 20, 3)))
             else {
                 return un;
             };
@@ -1043,17 +1385,28 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             0xe34 => Op::Brk,
             0xe33 => Op::Kil,
             0xe30 => Op::Exit,
-            0xe2b if field(insn, 5, 1) == 0 => Op::Pcnt { target: branch_target(insn, pc) },
-            0xe2a if field(insn, 5, 1) == 0 => Op::Pbk { target: branch_target(insn, pc) },
-            0xe29 if field(insn, 5, 1) == 0 => Op::Ssy { target: branch_target(insn, pc) },
-            0xe24 if field(insn, 5, 1) == 0 => Op::Bra { target: branch_target(insn, pc) },
+            0xe2b if field(insn, 5, 1) == 0 => Op::Pcnt {
+                target: branch_target(insn, pc),
+            },
+            0xe2a if field(insn, 5, 1) == 0 => Op::Pbk {
+                target: branch_target(insn, pc),
+            },
+            0xe29 if field(insn, 5, 1) == 0 => Op::Ssy {
+                target: branch_target(insn, pc),
+            },
+            0xe24 if field(insn, 5, 1) == 0 => Op::Bra {
+                target: branch_target(insn, pc),
+            },
             0xe25 if field(insn, 5, 1) == 0 => {
                 // The *sum* of the base and the table entry is the target, so
                 // this is where alignment must not happen: a base that is a
                 // multiple of 32 is a real displacement, not a `sched` word to
                 // step over, and rounding it up shifts every arm of the switch
                 // one instruction along.
-                Op::Brx { base: branch_base(insn, pc), reg: reg(insn, 8, 8) }
+                Op::Brx {
+                    base: branch_base(insn, pc),
+                    reg: reg(insn, 8, 8),
+                }
             }
             // atom.cas — 0xeef0/0xfff0, whose size field is one bit because
             // the operation is fixed.
@@ -1063,7 +1416,11 @@ fn decode_op(insn: u64, pc: u32) -> Op {
                 offset: sfield(insn, 28, 20) as i32,
                 src: reg(insn, 20, 8),
                 op: AtomOp::Cas,
-                ty: if field(insn, 49, 1) == 0 { AtomType::U32 } else { AtomType::U64 },
+                ty: if field(insn, 49, 1) == 0 {
+                    AtomType::U32
+                } else {
+                    AtomType::U64
+                },
                 space: AtomSpace::Global,
             },
             _ => decode_memory_atomic(insn).unwrap_or_else(|| decode_alu(insn)),
@@ -1112,7 +1469,11 @@ fn decode_memory_atomic(insn: u64) -> Option<Op> {
                 offset: (sfield(insn, 30, 22) * 4) as i32,
                 src: reg(insn, 20, 8),
                 op: AtomOp::Cas,
-                ty: if field(insn, 52, 1) == 0 { AtomType::U32 } else { AtomType::U64 },
+                ty: if field(insn, 52, 1) == 0 {
+                    AtomType::U32
+                } else {
+                    AtomType::U64
+                },
                 space: AtomSpace::Shared,
             })
         }
@@ -1164,7 +1525,10 @@ fn decode_alu(insn: u64) -> Op {
     // [`decode_alu_wide`].
     let form = insn >> 48;
     let (rhs_int, rhs_float) = match form >> 8 {
-        0x5c => (Operand::Reg(reg(insn, 20, 8)), Operand::Reg(reg(insn, 20, 8))),
+        0x5c => (
+            Operand::Reg(reg(insn, 20, 8)),
+            Operand::Reg(reg(insn, 20, 8)),
+        ),
         0x4c => (const_operand(insn), const_operand(insn)),
         0x38 | 0x39 => (Operand::Imm(imm20(insn)), Operand::Imm(imm20f(insn))),
         _ => return decode_alu_wide(insn),
@@ -1183,9 +1547,15 @@ fn decode_alu(insn: u64) -> Op {
             Op::Fadd {
                 dst: reg(insn, 0, 8),
                 a: reg(insn, 8, 8),
-                am: FMod { neg: field(insn, 48, 1) != 0, abs: field(insn, 46, 1) != 0 },
+                am: FMod {
+                    neg: field(insn, 48, 1) != 0,
+                    abs: field(insn, 46, 1) != 0,
+                },
                 b,
-                bm: FMod { neg: field(insn, 45, 1) != 0, abs: field(insn, 49, 1) != 0 },
+                bm: FMod {
+                    neg: field(insn, 45, 1) != 0,
+                    abs: field(insn, 49, 1) != 0,
+                },
                 ftz: field(insn, 44, 1) != 0,
                 sat: field(insn, 50, 1) != 0,
             }
@@ -1193,12 +1563,17 @@ fn decode_alu(insn: u64) -> Op {
         // fmul — ftz/fmz at 44..46, scale at 41..44, sat 50, b: neg 48.
         0x68 => {
             let Some(b) = rhs_float else { return un };
-            let Some(scale) = FmulScale::decode(field(insn, 41, 3)) else { return un };
+            let Some(scale) = FmulScale::decode(field(insn, 41, 3)) else {
+                return un;
+            };
             Op::Fmul {
                 dst: reg(insn, 0, 8),
                 a: reg(insn, 8, 8),
                 b,
-                bm: FMod { neg: field(insn, 48, 1) != 0, abs: false },
+                bm: FMod {
+                    neg: field(insn, 48, 1) != 0,
+                    abs: false,
+                },
                 ftz: field(insn, 44, 2) == 1,
                 sat: field(insn, 50, 1) != 0,
                 scale,
@@ -1210,9 +1585,15 @@ fn decode_alu(insn: u64) -> Op {
             Op::Fmnmx {
                 dst: reg(insn, 0, 8),
                 a: reg(insn, 8, 8),
-                am: FMod { neg: field(insn, 48, 1) != 0, abs: field(insn, 46, 1) != 0 },
+                am: FMod {
+                    neg: field(insn, 48, 1) != 0,
+                    abs: field(insn, 46, 1) != 0,
+                },
                 b,
-                bm: FMod { neg: field(insn, 45, 1) != 0, abs: field(insn, 49, 1) != 0 },
+                bm: FMod {
+                    neg: field(insn, 45, 1) != 0,
+                    abs: field(insn, 49, 1) != 0,
+                },
                 pred: src_pred(insn, 39, 42),
                 ftz: field(insn, 44, 1) != 0,
             }
@@ -1225,7 +1606,11 @@ fn decode_alu(insn: u64) -> Op {
             if field(insn, 40, 1) != 0 {
                 return un; // the CC form
             }
-            Op::R2p { src: reg(insn, 8, 8), mask, byte: field(insn, 41, 2) as u8 }
+            Op::R2p {
+                src: reg(insn, 8, 8),
+                mask,
+                byte: field(insn, 41, 2) as u8,
+            }
         }
         // ---- integer ----
         // iadd — sat 50, x 43, a: neg 49, b: neg 48.
@@ -1366,7 +1751,11 @@ fn decode_alu(insn: u64) -> Op {
         // popc — inv 40.
         0x08 => {
             let Some(b) = rhs_int else { return un };
-            Op::Popc { dst: reg(insn, 0, 8), b, inv: field(insn, 40, 1) != 0 }
+            Op::Popc {
+                dst: reg(insn, 0, 8),
+                b,
+                inv: field(insn, 40, 1) != 0,
+            }
         }
         // ---- moves and selects ----
         // mov — the 4-bit byte-enable mask at 39..43 must be "all".
@@ -1375,7 +1764,10 @@ fn decode_alu(insn: u64) -> Op {
             if field(insn, 39, 4) != 0xf {
                 return un;
             }
-            Op::Mov { dst: reg(insn, 0, 8), src }
+            Op::Mov {
+                dst: reg(insn, 0, 8),
+                src,
+            }
         }
         // rro — the range-reduction operator that precedes `mufu`.
         //
@@ -1394,7 +1786,10 @@ fn decode_alu(insn: u64) -> Op {
             if field(insn, 45, 1) != 0 || field(insn, 49, 1) != 0 || field(insn, 50, 1) != 0 {
                 return un;
             }
-            Op::Mov { dst: reg(insn, 0, 8), src }
+            Op::Mov {
+                dst: reg(insn, 0, 8),
+                src,
+            }
         }
         // sel — pred at 39.
         0xa0 => {
@@ -1415,11 +1810,16 @@ fn decode_alu(insn: u64) -> Op {
                 return un; // only f32 destinations
             }
             let bits = field(insn, 10, 2) | (field(insn, 13, 1) << 2);
-            let Some((src_bytes, src_signed)) = int_type(bits) else { return un };
+            let Some((src_bytes, src_signed)) = int_type(bits) else {
+                return un;
+            };
             Op::I2f {
                 dst: reg(insn, 0, 8),
                 src,
-                sm: FMod { neg: field(insn, 45, 1) != 0, abs: field(insn, 49, 1) != 0 },
+                sm: FMod {
+                    neg: field(insn, 45, 1) != 0,
+                    abs: field(insn, 49, 1) != 0,
+                },
                 src_bytes,
                 src_signed,
                 sel: field(insn, 41, 2) as u8,
@@ -1433,11 +1833,16 @@ fn decode_alu(insn: u64) -> Op {
                 return un; // only f32 sources
             }
             let bits = field(insn, 8, 2) | (field(insn, 12, 1) << 2);
-            let Some((dst_bytes, dst_signed)) = int_type(bits) else { return un };
+            let Some((dst_bytes, dst_signed)) = int_type(bits) else {
+                return un;
+            };
             Op::F2i {
                 dst: reg(insn, 0, 8),
                 src,
-                sm: FMod { neg: field(insn, 45, 1) != 0, abs: field(insn, 49, 1) != 0 },
+                sm: FMod {
+                    neg: field(insn, 45, 1) != 0,
+                    abs: field(insn, 49, 1) != 0,
+                },
                 dst_bytes,
                 dst_signed,
                 round: fround(field(insn, 39, 2)),
@@ -1456,7 +1861,10 @@ fn decode_alu(insn: u64) -> Op {
             Op::F2f {
                 dst: reg(insn, 0, 8),
                 src,
-                sm: FMod { neg: field(insn, 45, 1) != 0, abs: field(insn, 49, 1) != 0 },
+                sm: FMod {
+                    neg: field(insn, 45, 1) != 0,
+                    abs: field(insn, 49, 1) != 0,
+                },
                 round: fround(field(insn, 39, 2)),
                 sat: field(insn, 50, 1) != 0,
                 ftz: field(insn, 44, 1) != 0,
@@ -1475,7 +1883,10 @@ fn decode_alu(insn: u64) -> Op {
             Op::I2i {
                 dst: reg(insn, 0, 8),
                 src,
-                sm: FMod { neg: field(insn, 45, 1) != 0, abs: field(insn, 49, 1) != 0 },
+                sm: FMod {
+                    neg: field(insn, 45, 1) != 0,
+                    abs: field(insn, 49, 1) != 0,
+                },
                 src_bytes,
                 src_signed,
                 dst_signed,
@@ -1508,14 +1919,22 @@ fn decode_alu_wide(insn: u64) -> Op {
                 0x4 => const_operand(insn),
                 _ => Operand::Imm(imm20f(insn)),
             };
-            let Some(bop) = bool_op(field(insn, 45, 2)) else { return un };
+            let Some(bop) = bool_op(field(insn, 45, 2)) else {
+                return un;
+            };
             return Op::Fsetp {
                 p0: reg(insn, 3, 3),
                 p1: reg(insn, 0, 3),
                 a: reg(insn, 8, 8),
-                am: FMod { neg: field(insn, 43, 1) != 0, abs: field(insn, 7, 1) != 0 },
+                am: FMod {
+                    neg: field(insn, 43, 1) != 0,
+                    abs: field(insn, 7, 1) != 0,
+                },
                 b,
-                bm: FMod { neg: field(insn, 6, 1) != 0, abs: field(insn, 44, 1) != 0 },
+                bm: FMod {
+                    neg: field(insn, 6, 1) != 0,
+                    abs: field(insn, 44, 1) != 0,
+                },
                 cmp: fcmp(field(insn, 48, 4)),
                 bop,
                 src: src_pred(insn, 39, 42),
@@ -1528,7 +1947,9 @@ fn decode_alu_wide(insn: u64) -> Op {
                 0x4 => const_operand(insn),
                 _ => Operand::Imm(imm20(insn)),
             };
-            let Some(bop) = bool_op(field(insn, 45, 2)) else { return un };
+            let Some(bop) = bool_op(field(insn, 45, 2)) else {
+                return un;
+            };
             if field(insn, 43, 1) != 0 {
                 return un; // extended-carry compare
             }
@@ -1550,7 +1971,9 @@ fn decode_alu_wide(insn: u64) -> Op {
                 0x4 => const_operand(insn),
                 _ => Operand::Imm(imm20(insn)),
             };
-            let Some(bop) = bool_op(field(insn, 45, 2)) else { return un };
+            let Some(bop) = bool_op(field(insn, 45, 2)) else {
+                return un;
+            };
             return Op::Iset {
                 dst: reg(insn, 0, 8),
                 a: reg(insn, 8, 8),
@@ -1584,17 +2007,28 @@ fn decode_alu_wide(insn: u64) -> Op {
         // only in where those two come from.
         0x5bf | 0x4bf | 0x53f | 0x36f | 0x37f => {
             let (src, base) = match form >> 4 {
-                0x5bf => (Operand::Reg(reg(insn, 20, 8)), Operand::Reg(reg(insn, 39, 8))),
+                0x5bf => (
+                    Operand::Reg(reg(insn, 20, 8)),
+                    Operand::Reg(reg(insn, 39, 8)),
+                ),
                 0x4bf => (const_operand(insn), Operand::Reg(reg(insn, 39, 8))),
                 0x53f => (Operand::Reg(reg(insn, 39, 8)), const_operand(insn)),
                 _ => (Operand::Imm(imm20(insn)), Operand::Reg(reg(insn, 39, 8))),
             };
-            return Op::Bfi { dst: reg(insn, 0, 8), insert: reg(insn, 8, 8), src, base };
+            return Op::Bfi {
+                dst: reg(insn, 0, 8),
+                insert: reg(insn, 8, 8),
+                src,
+                base,
+            };
         }
         // iadd3 — three-way add, negation per source.
         0x5cc | 0x4cc | 0x38c => {
             let (b, c) = match form >> 12 {
-                0x5 => (Operand::Reg(reg(insn, 20, 8)), Operand::Reg(reg(insn, 39, 8))),
+                0x5 => (
+                    Operand::Reg(reg(insn, 20, 8)),
+                    Operand::Reg(reg(insn, 39, 8)),
+                ),
                 0x4 => (const_operand(insn), Operand::Reg(reg(insn, 39, 8))),
                 _ => (Operand::Imm(imm20(insn)), Operand::Reg(reg(insn, 39, 8))),
             };
@@ -1685,7 +2119,10 @@ fn decode_alu_wide(insn: u64) -> Op {
         return Op::Mufu {
             dst: reg(insn, 0, 8),
             src: reg(insn, 8, 8),
-            sm: FMod { neg: field(insn, 48, 1) != 0, abs: field(insn, 46, 1) != 0 },
+            sm: FMod {
+                neg: field(insn, 48, 1) != 0,
+                abs: field(insn, 46, 1) != 0,
+            },
             op: mufu,
             sat: field(insn, 50, 1) != 0,
         };
@@ -1716,7 +2153,11 @@ fn decode_alu_wide(insn: u64) -> Op {
 
     // ffma — three operand orders across four opcodes.
     if insn & 0xff80_0000_0000_0000 == 0x5980_0000_0000_0000 {
-        return decode_ffma(insn, Operand::Reg(reg(insn, 20, 8)), Operand::Reg(reg(insn, 39, 8)));
+        return decode_ffma(
+            insn,
+            Operand::Reg(reg(insn, 20, 8)),
+            Operand::Reg(reg(insn, 39, 8)),
+        );
     }
     if insn & 0xff80_0000_0000_0000 == 0x4980_0000_0000_0000 {
         return decode_ffma(insn, const_operand(insn), Operand::Reg(reg(insn, 39, 8)));
@@ -1726,7 +2167,11 @@ fn decode_alu_wide(insn: u64) -> Op {
         return decode_ffma(insn, Operand::Reg(reg(insn, 39, 8)), const_operand(insn));
     }
     if insn & 0xfe80_0000_0000_0000 == 0x3280_0000_0000_0000 {
-        return decode_ffma(insn, Operand::Imm(imm20f(insn)), Operand::Reg(reg(insn, 39, 8)));
+        return decode_ffma(
+            insn,
+            Operand::Imm(imm20f(insn)),
+            Operand::Reg(reg(insn, 39, 8)),
+        );
     }
 
     // xmad — 16x16 multiply-accumulate. Only the plain modes are decoded:
@@ -1798,9 +2243,15 @@ fn decode_alu_wide(insn: u64) -> Op {
         return Op::Fset {
             dst: reg(insn, 0, 8),
             a: reg(insn, 8, 8),
-            am: FMod { neg: field(insn, 43, 1) != 0, abs: field(insn, 54, 1) != 0 },
+            am: FMod {
+                neg: field(insn, 43, 1) != 0,
+                abs: field(insn, 54, 1) != 0,
+            },
             b,
-            bm: FMod { neg: field(insn, 53, 1) != 0, abs: field(insn, 44, 1) != 0 },
+            bm: FMod {
+                neg: field(insn, 53, 1) != 0,
+                abs: field(insn, 44, 1) != 0,
+            },
             cmp: fcmp(field(insn, 48, 4)),
             bop,
             src: src_pred(insn, 39, 42),
@@ -1858,14 +2309,20 @@ fn decode_alu_wide(insn: u64) -> Op {
 
     // The 32-bit-immediate forms.
     if insn & 0xfff0_0000_0000_0000 == 0x0100_0000_0000_0000 {
-        return Op::Mov32i { dst: reg(insn, 0, 8), imm: field(insn, 20, 32) as u32 };
+        return Op::Mov32i {
+            dst: reg(insn, 0, 8),
+            imm: field(insn, 20, 32) as u32,
+        };
     }
     if insn & 0xfc00_0000_0000_0000 == 0x0800_0000_0000_0000 {
         // fadd32i
         return Op::Fadd {
             dst: reg(insn, 0, 8),
             a: reg(insn, 8, 8),
-            am: FMod { neg: field(insn, 56, 1) != 0, abs: field(insn, 54, 1) != 0 },
+            am: FMod {
+                neg: field(insn, 56, 1) != 0,
+                abs: field(insn, 54, 1) != 0,
+            },
             b: Operand::Imm(field(insn, 20, 32) as u32),
             bm: FMod::NONE,
             ftz: field(insn, 55, 1) != 0,
@@ -1976,10 +2433,16 @@ fn decode_half(insn: u64) -> Option<Op> {
         return Some(Op::Hadd2 {
             dst,
             a,
-            am: FMod { neg: field(insn, 43, 1) != 0, abs: field(insn, 44, 1) != 0 },
+            am: FMod {
+                neg: field(insn, 43, 1) != 0,
+                abs: field(insn, 44, 1) != 0,
+            },
             asw,
             b: reg20,
-            bm: FMod { neg: field(insn, 31, 1) != 0, abs: field(insn, 30, 1) != 0 },
+            bm: FMod {
+                neg: field(insn, 31, 1) != 0,
+                abs: field(insn, 30, 1) != 0,
+            },
             bsw: bsw_reg,
             merge,
             ftz: field(insn, 39, 1) != 0,
@@ -1992,13 +2455,19 @@ fn decode_half(insn: u64) -> Option<Op> {
         return Some(Op::Hadd2 {
             dst,
             a,
-            am: FMod { neg: field(insn, 43, 1) != 0, abs: field(insn, 44, 1) != 0 },
+            am: FMod {
+                neg: field(insn, 43, 1) != 0,
+                abs: field(insn, 44, 1) != 0,
+            },
             asw,
             b,
             // An immediate form spends the bits a modifier would need on the
             // pair's own two signs.
             bm: if cbuf {
-                FMod { neg: field(insn, 56, 1) != 0, abs: field(insn, 54, 1) != 0 }
+                FMod {
+                    neg: field(insn, 56, 1) != 0,
+                    abs: field(insn, 54, 1) != 0,
+                }
             } else {
                 no_mod
             },
@@ -2013,7 +2482,10 @@ fn decode_half(insn: u64) -> Option<Op> {
         return Some(Op::Hadd2 {
             dst,
             a,
-            am: FMod { neg: field(insn, 56, 1) != 0, abs: false },
+            am: FMod {
+                neg: field(insn, 56, 1) != 0,
+                abs: false,
+            },
             asw: HSwizzle::decode(field(insn, 53, 2)),
             b: imm32,
             bm: no_mod,
@@ -2029,10 +2501,16 @@ fn decode_half(insn: u64) -> Option<Op> {
         return Some(Op::Hmul2 {
             dst,
             a,
-            am: FMod { neg: false, abs: field(insn, 44, 1) != 0 },
+            am: FMod {
+                neg: false,
+                abs: field(insn, 44, 1) != 0,
+            },
             asw,
             b: reg20,
-            bm: FMod { neg: field(insn, 31, 1) != 0, abs: field(insn, 30, 1) != 0 },
+            bm: FMod {
+                neg: field(insn, 31, 1) != 0,
+                abs: field(insn, 30, 1) != 0,
+            },
             bsw: bsw_reg,
             merge,
             prec: HPrecision::decode(field(insn, 39, 2)),
@@ -2045,11 +2523,17 @@ fn decode_half(insn: u64) -> Option<Op> {
         return Some(Op::Hmul2 {
             dst,
             a,
-            am: FMod { neg: field(insn, 43, 1) != 0, abs: field(insn, 44, 1) != 0 },
+            am: FMod {
+                neg: field(insn, 43, 1) != 0,
+                abs: field(insn, 44, 1) != 0,
+            },
             asw,
             b,
             bm: if cbuf {
-                FMod { neg: false, abs: field(insn, 54, 1) != 0 }
+                FMod {
+                    neg: false,
+                    abs: field(insn, 54, 1) != 0,
+                }
             } else {
                 no_mod
             },
@@ -2095,11 +2579,26 @@ fn decode_half(insn: u64) -> Option<Op> {
     // only in which of `b` and `c` is the constant bank.
     if top & 0xf880 == 0x6080 || top & 0xf880 == 0x7080 || top & 0xf880 == 0x7000 {
         let (b, bsw, c, csw) = if top & 0xf880 == 0x6080 {
-            (reg39, HSwizzle::decode(field(insn, 53, 2)), const_operand(insn), HSwizzle::F32)
+            (
+                reg39,
+                HSwizzle::decode(field(insn, 53, 2)),
+                const_operand(insn),
+                HSwizzle::F32,
+            )
         } else if top & 0x0080 != 0 {
-            (const_operand(insn), HSwizzle::F32, reg39, HSwizzle::decode(field(insn, 53, 2)))
+            (
+                const_operand(insn),
+                HSwizzle::F32,
+                reg39,
+                HSwizzle::decode(field(insn, 53, 2)),
+            )
         } else {
-            (imm, HSwizzle::H1H0, reg39, HSwizzle::decode(field(insn, 53, 2)))
+            (
+                imm,
+                HSwizzle::H1H0,
+                reg39,
+                HSwizzle::decode(field(insn, 53, 2)),
+            )
         };
         return Some(Op::Hfma2 {
             dst,
@@ -2140,24 +2639,35 @@ fn decode_half(insn: u64) -> Option<Op> {
     // ---- hset2 / hsetp2 ----
     // Both read `a`'s modifiers, their source predicate and their boolean
     // combiner from the same places, and `hset2`'s `bf` is `hsetp2`'s `and`.
-    let set_am = FMod { neg: field(insn, 43, 1) != 0, abs: field(insn, 44, 1) != 0 };
+    let set_am = FMod {
+        neg: field(insn, 43, 1) != 0,
+        abs: field(insn, 44, 1) != 0,
+    };
     let src = src_pred(insn, 39, 42);
     let is_set2 = top & 0xfff8 == 0x5d18 || top & 0xfe00 == 0x7c00;
     let is_setp2 = top & 0xfff8 == 0x5d20 || top & 0xfe00 == 0x7e00;
     if is_set2 || is_setp2 {
-        let Some(bop) = bool_op(field(insn, 45, 2)) else { return un() };
+        let Some(bop) = bool_op(field(insn, 45, 2)) else {
+            return un();
+        };
         let register_form = top & 0xf000 == 0x5000;
         let cbuf = !register_form && top & 0x0080 != 0;
         let (b, bm, bsw) = if register_form {
             (
                 reg20,
-                FMod { neg: field(insn, 31, 1) != 0, abs: field(insn, 30, 1) != 0 },
+                FMod {
+                    neg: field(insn, 31, 1) != 0,
+                    abs: field(insn, 30, 1) != 0,
+                },
                 bsw_reg,
             )
         } else if cbuf {
             (
                 const_operand(insn),
-                FMod { neg: field(insn, 56, 1) != 0, abs: field(insn, 54, 1) != 0 },
+                FMod {
+                    neg: field(insn, 56, 1) != 0,
+                    abs: field(insn, 54, 1) != 0,
+                },
                 HSwizzle::F32,
             )
         } else {
@@ -2165,7 +2675,11 @@ fn decode_half(insn: u64) -> Option<Op> {
         };
         // The comparison is four bits either just above the swizzle or up
         // among the constant form's modifiers.
-        let cmp = fcmp(if register_form { field(insn, 35, 4) } else { field(insn, 49, 4) });
+        let cmp = fcmp(if register_form {
+            field(insn, 35, 4)
+        } else {
+            field(insn, 49, 4)
+        });
         let flag = field(insn, if register_form { 49 } else { 53 }, 1) != 0;
         if is_set2 {
             return Some(Op::Hset2 {
@@ -2332,14 +2846,13 @@ pub enum TexsStore {
 /// the run-of-four reading survived until a shader with `dst = $r4,
 /// dst2 = $r2` ran under it. There channels 2 and 3 landed on `$r6`/`$r7`,
 /// and `$r6` was holding the `1/w` every later `ipa` multiplies by.
-pub fn texs_destinations(
-    dst: u8,
-    dst2: u8,
-    mask: [bool; 4],
-    f16: bool,
-) -> Vec<(u8, TexsStore)> {
-    let enabled: Vec<usize> =
-        mask.iter().enumerate().filter(|(_, &on)| on).map(|(channel, _)| channel).collect();
+pub fn texs_destinations(dst: u8, dst2: u8, mask: [bool; 4], f16: bool) -> Vec<(u8, TexsStore)> {
+    let enabled: Vec<usize> = mask
+        .iter()
+        .enumerate()
+        .filter(|(_, &on)| on)
+        .map(|(channel, _)| channel)
+        .collect();
     if !f16 {
         return enabled
             .into_iter()
@@ -2380,16 +2893,31 @@ mod tests {
         // encoded identically: a signed 24-bit byte offset off r8.
         assert_eq!(
             decode((0xef48u64 | 4) << 48 | PT | 0x20 << 20 | 5 << 8 | 3).op,
-            Op::Lds { dst: 3, addr: 5, offset: 0x20, size: MemSize::B32 }
+            Op::Lds {
+                dst: 3,
+                addr: 5,
+                offset: 0x20,
+                size: MemSize::B32
+            }
         );
         assert_eq!(
             decode((0xef58u64 | 5) << 48 | PT | 6 << 8 | 2).op,
-            Op::Sts { addr: 6, offset: 0, src: 2, size: MemSize::B64 }
+            Op::Sts {
+                addr: 6,
+                offset: 0,
+                src: 2,
+                size: MemSize::B64
+            }
         );
         // Still the local pair, not the shared one.
         assert_eq!(
             decode((0xef40u64 | 4) << 48 | PT | 5 << 8 | 3).op,
-            Op::Ldl { dst: 3, addr: 5, offset: 0, size: MemSize::B32 }
+            Op::Ldl {
+                dst: 3,
+                addr: 5,
+                offset: 0,
+                size: MemSize::B32
+            }
         );
     }
 
@@ -2398,7 +2926,12 @@ mod tests {
         let offset = (-8i64 as u64) & 0xFF_FFFF;
         assert_eq!(
             decode((0xef48u64 | 4) << 48 | PT | offset << 20 | 5 << 8 | 3).op,
-            Op::Lds { dst: 3, addr: 5, offset: -8, size: MemSize::B32 }
+            Op::Lds {
+                dst: 3,
+                addr: 5,
+                offset: -8,
+                size: MemSize::B32
+            }
         );
     }
 
@@ -2408,12 +2941,42 @@ mod tests {
         // makes `sync` (0x80) and `arrive` (0x81) one bit apart and the
         // reduction forms scattered below them.
         let bar = |mode: u64| decode(0xf0a8u64 << 48 | mode << 32 | PT).op;
-        assert_eq!(bar(0x80), Op::Bar { mode: BarMode::Sync });
-        assert_eq!(bar(0x81), Op::Bar { mode: BarMode::Arrive });
-        assert_eq!(bar(0x02), Op::Bar { mode: BarMode::RedPopc });
-        assert_eq!(bar(0x03), Op::Bar { mode: BarMode::Scan });
-        assert_eq!(bar(0x0a), Op::Bar { mode: BarMode::RedAnd });
-        assert_eq!(bar(0x12), Op::Bar { mode: BarMode::RedOr });
+        assert_eq!(
+            bar(0x80),
+            Op::Bar {
+                mode: BarMode::Sync
+            }
+        );
+        assert_eq!(
+            bar(0x81),
+            Op::Bar {
+                mode: BarMode::Arrive
+            }
+        );
+        assert_eq!(
+            bar(0x02),
+            Op::Bar {
+                mode: BarMode::RedPopc
+            }
+        );
+        assert_eq!(
+            bar(0x03),
+            Op::Bar {
+                mode: BarMode::Scan
+            }
+        );
+        assert_eq!(
+            bar(0x0a),
+            Op::Bar {
+                mode: BarMode::RedAnd
+            }
+        );
+        assert_eq!(
+            bar(0x12),
+            Op::Bar {
+                mode: BarMode::RedOr
+            }
+        );
         // membar and depbar are still the no-ops they were.
         assert_eq!(decode(0xef98u64 << 48 | PT).op, Op::Inert);
         assert_eq!(decode(0xf0f0u64 << 48 | PT).op, Op::Inert);
@@ -2440,9 +3003,12 @@ mod tests {
             )
             .op
         };
-        for (bits, mode) in
-            [(0, ShflMode::Idx), (1, ShflMode::Up), (2, ShflMode::Down), (3, ShflMode::Bfly)]
-        {
+        for (bits, mode) in [
+            (0, ShflMode::Idx),
+            (1, ShflMode::Up),
+            (2, ShflMode::Down),
+            (3, ShflMode::Bfly),
+        ] {
             assert_eq!(
                 immediate(bits),
                 Op::Shfl {
@@ -2474,20 +3040,37 @@ mod tests {
     #[test]
     fn decodes_the_per_lane_add_a_derivative_ends_with() {
         // fswzadd r3, r1, r2, 0xe4
-        let fswzadd = |extra: u64| decode(0x50f8u64 << 48 | extra | 0xe4 << 28 | 2 << 20 | PT | 1 << 8 | 3).op;
+        let fswzadd = |extra: u64| {
+            decode(0x50f8u64 << 48 | extra | 0xe4 << 28 | 2 << 20 | PT | 1 << 8 | 3).op
+        };
         assert_eq!(
             fswzadd(0),
-            Op::Fswzadd { dst: 3, a: 1, b: 2, swizzle: 0xe4, ftz: false }
+            Op::Fswzadd {
+                dst: 3,
+                a: 1,
+                b: 2,
+                swizzle: 0xe4,
+                ftz: false
+            }
         );
         assert_eq!(
             fswzadd(1 << 44),
-            Op::Fswzadd { dst: 3, a: 1, b: 2, swizzle: 0xe4, ftz: true }
+            Op::Fswzadd {
+                dst: 3,
+                a: 1,
+                b: 2,
+                swizzle: 0xe4,
+                ftz: true
+            }
         );
         // A condition-code write and a rounding mode other than nearest are
         // refused rather than dropped: both change what a later instruction
         // reads, and this one is the tail of every derivative in the shader.
         for extra in [1u64 << 47, 1 << 39, 2 << 39] {
-            assert!(matches!(fswzadd(extra), Op::Unimplemented { .. }), "{extra:#x}");
+            assert!(
+                matches!(fswzadd(extra), Op::Unimplemented { .. }),
+                "{extra:#x}"
+            );
         }
     }
 
@@ -2609,17 +3192,37 @@ mod tests {
         // solid.frag: "ipa pass $r0 a[0x7c] 0x0 0x0 0x1"
         assert_eq!(
             op(0xe003ff87cff7ff00),
-            Op::Ipa { dst: 0, offset: 0x7c, mul: None, perspective: false, sat: false, centroid: false }
+            Op::Ipa {
+                dst: 0,
+                offset: 0x7c,
+                mul: None,
+                perspective: false,
+                sat: false,
+                centroid: false
+            }
         );
         // "mufu rcp $r3 $r0"
         assert_eq!(
             op(0x5080000000470003),
-            Op::Mufu { dst: 3, src: 0, sm: FMod::NONE, op: MufuOp::Rcp, sat: false }
+            Op::Mufu {
+                dst: 3,
+                src: 0,
+                sm: FMod::NONE,
+                op: MufuOp::Rcp,
+                sat: false
+            }
         );
         // "ipa $r0 a[0x80] $r3 0x0 0x1"
         assert_eq!(
             op(0xe043ff880037ff00),
-            Op::Ipa { dst: 0, offset: 0x80, mul: Some(3), perspective: true, sat: false, centroid: false }
+            Op::Ipa {
+                dst: 0,
+                offset: 0x80,
+                mul: Some(3),
+                perspective: true,
+                sat: false,
+                centroid: false
+            }
         );
     }
 
@@ -2632,7 +3235,14 @@ mod tests {
     fn decodes_the_ipa_sample_modes() {
         assert_eq!(
             op(0xe013ff87cff7ff06),
-            Op::Ipa { dst: 6, offset: 0x7c, mul: None, perspective: false, sat: false, centroid: true }
+            Op::Ipa {
+                dst: 6,
+                offset: 0x7c,
+                mul: None,
+                perspective: false,
+                sat: false,
+                centroid: true
+            }
         );
         // The same instruction with sample mode 2 (offset) and 3.
         assert!(matches!(op(0xe023ff87cff7ff06), Op::Unimplemented { .. }));
@@ -2649,12 +3259,22 @@ mod tests {
         // mvp.vert: "ld b128 $r0 a[0x80] 0x0"
         assert_eq!(
             op(0xefd9ff80_0807ff00),
-            Op::Ld { dst: 0, offset: 0x80, idx: RZ, size: MemSize::B128 }
+            Op::Ld {
+                dst: 0,
+                offset: 0x80,
+                idx: RZ,
+                size: MemSize::B128
+            }
         );
         // "st b128 a[0x70] $r0 0x0"
         assert_eq!(
             op(0xeff1ff80_0707ff00),
-            Op::St { offset: 0x70, idx: RZ, src: 0, size: MemSize::B128 }
+            Op::St {
+                offset: 0x70,
+                idx: RZ,
+                src: 0,
+                size: MemSize::B128
+            }
         );
     }
 
@@ -2667,7 +3287,10 @@ mod tests {
                 dst: 4,
                 a: 0,
                 scale: FmulScale::None,
-                b: Operand::Const { bank: 2, offset: 0x0 },
+                b: Operand::Const {
+                    bank: 2,
+                    offset: 0x0
+                },
                 bm: FMod::NONE,
                 ftz: true,
                 sat: false,
@@ -2680,7 +3303,10 @@ mod tests {
                 dst: 5,
                 a: 0,
                 scale: FmulScale::None,
-                b: Operand::Const { bank: 2, offset: 0x4 },
+                b: Operand::Const {
+                    bank: 2,
+                    offset: 0x4
+                },
                 bm: FMod::NONE,
                 ftz: true,
                 sat: false,
@@ -2711,7 +3337,10 @@ mod tests {
                 dst: 4,
                 a: 2,
                 am: FMod::NONE,
-                b: Operand::Const { bank: 0, offset: 0x30 },
+                b: Operand::Const {
+                    bank: 0,
+                    offset: 0x30
+                },
                 bm: FMod::NONE,
                 ftz: true,
                 sat: false,
@@ -2723,7 +3352,13 @@ mod tests {
     fn decodes_mov32i() {
         // Captured from a live JKSV run: "mov32i $r0 0x3f800000" (loads the
         // float bit pattern for 1.0).
-        assert_eq!(op(0x0103f8000007f000), Op::Mov32i { dst: 0, imm: 0x3f800000 });
+        assert_eq!(
+            op(0x0103f8000007f000),
+            Op::Mov32i {
+                dst: 0,
+                imm: 0x3f800000
+            }
+        );
     }
 
     #[test]
@@ -2734,7 +3369,10 @@ mod tests {
             Op::Ffma {
                 dst: 4,
                 a: 1,
-                b: Operand::Const { bank: 2, offset: 0x10 },
+                b: Operand::Const {
+                    bank: 2,
+                    offset: 0x10
+                },
                 bneg: false,
                 c: Operand::Reg(4),
                 cneg: false,
@@ -2748,7 +3386,10 @@ mod tests {
             Op::Ffma {
                 dst: 0,
                 a: 3,
-                b: Operand::Const { bank: 2, offset: 0x30 },
+                b: Operand::Const {
+                    bank: 2,
+                    offset: 0x30
+                },
                 bneg: false,
                 c: Operand::Reg(1),
                 cneg: false,
@@ -2801,13 +3442,19 @@ mod tests {
         // Asphalt 9's red car green.
         assert_eq!(
             texs_destinations(1, 0, [true, true, true, true], true),
-            vec![(1, TexsStore::Halves(0, Some(1))), (0, TexsStore::Halves(2, Some(3)))]
+            vec![
+                (1, TexsStore::Halves(0, Some(1))),
+                (0, TexsStore::Halves(2, Some(3)))
+            ]
         );
         // An odd count pads the unused half with zero rather than spilling
         // into another register.
         assert_eq!(
             texs_destinations(4, 6, [true, true, true, false], true),
-            vec![(4, TexsStore::Halves(0, Some(1))), (6, TexsStore::Halves(2, None))]
+            vec![
+                (4, TexsStore::Halves(0, Some(1))),
+                (6, TexsStore::Halves(2, None))
+            ]
         );
         assert_eq!(
             texs_destinations(4, RZ, [false, false, false, true], true),
@@ -2820,8 +3467,14 @@ mod tests {
         // `Precision` numbers F16 as 0 and F32 as 1, so a set bit is the
         // *unpacked* form. The captured fixture above has it set, which is
         // why it was right to read as four floats.
-        assert!(matches!(op(0xd8301a40_20170000), Op::Texs { f16: false, .. }));
-        assert!(matches!(op(0xd8301a40_20170000 & !(1 << 59)), Op::Texs { f16: true, .. }));
+        assert!(matches!(
+            op(0xd8301a40_20170000),
+            Op::Texs { f16: false, .. }
+        ));
+        assert!(matches!(
+            op(0xd8301a40_20170000 & !(1 << 59)),
+            Op::Texs { f16: true, .. }
+        ));
     }
 
     #[test]
@@ -2866,7 +3519,16 @@ mod tests {
         // xmad R1, R2, 0x7, RZ
         let lo = asm(0x3600, &[(0, 8, 1), (8, 8, 2), (20, 15, 7), (39, 8, 255)]);
         match op(lo) {
-            Op::Xmad { dst, a, ah, b, c, psl, mrg, .. } => {
+            Op::Xmad {
+                dst,
+                a,
+                ah,
+                b,
+                c,
+                psl,
+                mrg,
+                ..
+            } => {
                 assert_eq!((dst, a), (1, 2));
                 assert_eq!(b, Operand::Imm(7));
                 assert_eq!(c, Operand::Reg(255));
@@ -2877,7 +3539,14 @@ mod tests {
         // xmad.psl R1, R2.h1, 0x7, R0 — the same constant, one bit up.
         let hi = asm(
             0x3600,
-            &[(0, 8, 1), (8, 8, 2), (20, 15, 7), (36, 1, 1), (39, 8, 0), (53, 1, 1)],
+            &[
+                (0, 8, 1),
+                (8, 8, 2),
+                (20, 15, 7),
+                (36, 1, 1),
+                (39, 8, 0),
+                (53, 1, 1),
+            ],
         );
         match op(hi) {
             Op::Xmad { b, c, ah, psl, .. } => {
@@ -2907,7 +3576,13 @@ mod tests {
         let raw = 0xe3000000_0007000f & !(0xf << 16) | (1 << 16) | (1 << 19);
         let insn = decode(raw);
         assert_eq!(insn.op, Op::Exit);
-        assert_eq!(insn.pred, Pred { reg: 1, negate: true });
+        assert_eq!(
+            insn.pred,
+            Pred {
+                reg: 1,
+                negate: true
+            }
+        );
         assert!(!insn.pred.is_always());
         assert!(decode(0xe3000000_0007000f).pred.is_always());
     }
@@ -2915,13 +3590,19 @@ mod tests {
     #[test]
     fn decodes_source_modifiers_on_fadd() {
         // fadd $r0, -|$r1|, $r2 — neg 48 / abs 46 on a, both clear on b.
-        let raw = asm(0x5c58, &[(0, 8, 0), (8, 8, 1), (20, 8, 2), (48, 1, 1), (46, 1, 1)]);
+        let raw = asm(
+            0x5c58,
+            &[(0, 8, 0), (8, 8, 1), (20, 8, 2), (48, 1, 1), (46, 1, 1)],
+        );
         assert_eq!(
             op(raw),
             Op::Fadd {
                 dst: 0,
                 a: 1,
-                am: FMod { neg: true, abs: true },
+                am: FMod {
+                    neg: true,
+                    abs: true
+                },
                 b: Operand::Reg(2),
                 bm: FMod::NONE,
                 ftz: false,
@@ -2936,7 +3617,15 @@ mod tests {
         // destinations at [3,6) and [0,3), source predicate at [39,42).
         let raw = asm(
             0x5b60,
-            &[(0, 3, 7), (3, 3, 0), (8, 8, 1), (20, 8, 2), (39, 3, 7), (48, 1, 1), (49, 3, 1)],
+            &[
+                (0, 3, 7),
+                (3, 3, 0),
+                (8, 8, 1),
+                (20, 8, 2),
+                (39, 3, 7),
+                (48, 1, 1),
+                (49, 3, 1),
+            ],
         );
         assert_eq!(
             op(raw),
@@ -2966,9 +3655,15 @@ mod tests {
         // 0 + 8 + 0x18 is 0x20, which is a `sched` word rather than an
         // instruction — so the target is the slot after it. See
         // [`super::super::align_slot`].
-        assert_eq!(decode_at(asm(0xe290, &[(20, 24, 0x18)]), 0).op, Op::Ssy { target: 0x28 });
+        assert_eq!(
+            decode_at(asm(0xe290, &[(20, 24, 0x18)]), 0).op,
+            Op::Ssy { target: 0x28 }
+        );
         // And one that lands on a real slot is left alone.
-        assert_eq!(decode_at(asm(0xe290, &[(20, 24, 0x20)]), 0).op, Op::Ssy { target: 0x28 });
+        assert_eq!(
+            decode_at(asm(0xe290, &[(20, 24, 0x20)]), 0).op,
+            Op::Ssy { target: 0x28 }
+        );
         assert_eq!(op(asm(0xf0f8, &[])), Op::Sync);
         assert_eq!(op(asm(0xe340, &[])), Op::Brk);
         assert_eq!(op(asm(0x50b0, &[])), Op::Nop);
@@ -3000,7 +3695,13 @@ mod tests {
         // `bra` in the same group *is* predicated, and keeps its guard.
         // `asm` writes PT into those bits, so clear them before setting p3.
         let bra = (asm(0xe240, &[(20, 24, 0x20)]) & !(0x7 << 16)) | (3 << 16);
-        assert_eq!(decode_at(bra, 0).pred, Pred { reg: 3, negate: false });
+        assert_eq!(
+            decode_at(bra, 0).pred,
+            Pred {
+                reg: 3,
+                negate: false
+            }
+        );
     }
 
     #[test]
@@ -3008,12 +3709,25 @@ mod tests {
         // iadd r0, r1, -r2
         assert_eq!(
             op(asm(0x5c10, &[(0, 8, 0), (8, 8, 1), (20, 8, 2), (48, 1, 1)])),
-            Op::Iadd { dst: 0, a: 1, aneg: false, b: Operand::Reg(2), bneg: true, cin: false, cout: false }
+            Op::Iadd {
+                dst: 0,
+                a: 1,
+                aneg: false,
+                b: Operand::Reg(2),
+                bneg: true,
+                cin: false,
+                cout: false
+            }
         );
         // shl r3, r4, 0x2 (immediate form)
         assert_eq!(
             op(asm(0x3848, &[(0, 8, 3), (8, 8, 4), (20, 19, 2)])),
-            Op::Shl { dst: 3, a: 4, b: Operand::Imm(2), wrap: false }
+            Op::Shl {
+                dst: 3,
+                a: 4,
+                b: Operand::Imm(2),
+                wrap: false
+            }
         );
         // lop.and r0, r1, r2
         assert_eq!(
@@ -3031,7 +3745,10 @@ mod tests {
         // mov r5, r6 — the byte-enable mask must be "all four".
         assert_eq!(
             op(asm(0x5c98, &[(0, 8, 5), (20, 8, 6), (39, 4, 0xf)])),
-            Op::Mov { dst: 5, src: Operand::Reg(6) }
+            Op::Mov {
+                dst: 5,
+                src: Operand::Reg(6)
+            }
         );
     }
 
@@ -3039,7 +3756,10 @@ mod tests {
     fn decodes_conversions() {
         // i2f.f32.s32 r0, r1
         assert_eq!(
-            op(asm(0x5cb8, &[(0, 8, 0), (20, 8, 1), (8, 2, 2), (10, 2, 2), (13, 1, 1)])),
+            op(asm(
+                0x5cb8,
+                &[(0, 8, 0), (20, 8, 1), (8, 2, 2), (10, 2, 2), (13, 1, 1)]
+            )),
             Op::I2f {
                 dst: 0,
                 src: Operand::Reg(1),
@@ -3053,7 +3773,14 @@ mod tests {
         assert_eq!(
             op(asm(
                 0x5cb0,
-                &[(0, 8, 2), (20, 8, 3), (10, 2, 2), (8, 2, 2), (12, 1, 1), (39, 2, 3)]
+                &[
+                    (0, 8, 2),
+                    (20, 8, 3),
+                    (10, 2, 2),
+                    (8, 2, 2),
+                    (12, 1, 1),
+                    (39, 2, 3)
+                ]
             )),
             Op::F2i {
                 dst: 2,
@@ -3070,7 +3797,13 @@ mod tests {
     #[test]
     fn a_constant_offset_is_a_signed_word_index_scaled_by_four() {
         // c0[0x30] from the JKSV capture: 0xc in the 14-bit field, x4.
-        assert_eq!(const_operand(0x4c58100000c70204), Operand::Const { bank: 0, offset: 0x30 });
+        assert_eq!(
+            const_operand(0x4c58100000c70204),
+            Operand::Const {
+                bank: 0,
+                offset: 0x30
+            }
+        );
     }
 
     /// The six half-precision encodings "A Short Hike" actually issues, taken
@@ -3121,7 +3854,10 @@ mod tests {
                 a: 5,
                 am: FMod::NONE,
                 asw: HSwizzle::F32,
-                b: Operand::Const { bank: 1, offset: 0xc },
+                b: Operand::Const {
+                    bank: 1,
+                    offset: 0xc
+                },
                 bm: FMod::NONE,
                 bsw: HSwizzle::F32,
                 merge: HMerge::F32,
@@ -3136,7 +3872,10 @@ mod tests {
             Op::Hadd2 {
                 dst: 0,
                 a: 9,
-                am: FMod { neg: true, abs: false },
+                am: FMod {
+                    neg: true,
+                    abs: false
+                },
                 asw: HSwizzle::F32,
                 b: Operand::Imm(0x3C00_3C00),
                 bm: FMod::NONE,
@@ -3153,7 +3892,10 @@ mod tests {
             Op::Hadd2 {
                 dst: 8,
                 a: RZ,
-                am: FMod { neg: true, abs: false },
+                am: FMod {
+                    neg: true,
+                    abs: false
+                },
                 asw: HSwizzle::H0H0,
                 b: Operand::Const { bank: 1, offset: 0 },
                 bm: FMod::NONE,
@@ -3174,7 +3916,10 @@ mod tests {
                 a: RZ,
                 am: FMod::NONE,
                 asw: HSwizzle::H0H0,
-                b: Operand::Const { bank: 3, offset: 0x140 },
+                b: Operand::Const {
+                    bank: 3,
+                    offset: 0x140
+                },
                 bm: FMod::NONE,
                 bsw: HSwizzle::F32,
                 cmp: FCmp::Eq,
@@ -3195,47 +3940,125 @@ mod tests {
         let hfma_reg = asm(0x5d00, &[(0, 8, 1), (8, 8, 2), (20, 8, 3), (39, 8, 4)]);
         assert!(matches!(
             op(hfma_reg),
-            Op::Hfma2 { dst: 1, a: 2, b: Operand::Reg(3), c: Operand::Reg(4), .. }
+            Op::Hfma2 {
+                dst: 1,
+                a: 2,
+                b: Operand::Reg(3),
+                c: Operand::Reg(4),
+                ..
+            }
         ));
         // hfma2 with the constant bank as `b` (`cr`) and as `c` (`rc`).
-        let hfma_cr = asm(0x7080, &[(0, 8, 1), (8, 8, 2), (39, 8, 4), (20, 14, 3), (34, 5, 2)]);
+        let hfma_cr = asm(
+            0x7080,
+            &[(0, 8, 1), (8, 8, 2), (39, 8, 4), (20, 14, 3), (34, 5, 2)],
+        );
         assert!(matches!(
             op(hfma_cr),
-            Op::Hfma2 { b: Operand::Const { bank: 2, offset: 0xc }, c: Operand::Reg(4), .. }
+            Op::Hfma2 {
+                b: Operand::Const {
+                    bank: 2,
+                    offset: 0xc
+                },
+                c: Operand::Reg(4),
+                ..
+            }
         ));
-        let hfma_rc = asm(0x6080, &[(0, 8, 1), (8, 8, 2), (39, 8, 4), (20, 14, 3), (34, 5, 2)]);
+        let hfma_rc = asm(
+            0x6080,
+            &[(0, 8, 1), (8, 8, 2), (39, 8, 4), (20, 14, 3), (34, 5, 2)],
+        );
         assert!(matches!(
             op(hfma_rc),
-            Op::Hfma2 { b: Operand::Reg(4), c: Operand::Const { bank: 2, offset: 0xc }, .. }
+            Op::Hfma2 {
+                b: Operand::Reg(4),
+                c: Operand::Const {
+                    bank: 2,
+                    offset: 0xc
+                },
+                ..
+            }
         ));
         // The `32I` forms take a whole 32-bit pair, and `hfma2`'s addend is
         // its own destination because the encoding has nowhere else to put it.
         assert!(matches!(
             op(asm(0x2c00, &[(0, 8, 1), (8, 8, 2), (20, 32, 0x3c00_3c00)])),
-            Op::Hadd2 { dst: 1, a: 2, b: Operand::Imm(0x3c00_3c00), merge: HMerge::H1H0, .. }
+            Op::Hadd2 {
+                dst: 1,
+                a: 2,
+                b: Operand::Imm(0x3c00_3c00),
+                merge: HMerge::H1H0,
+                ..
+            }
         ));
         assert!(matches!(
             op(asm(0x2a00, &[(0, 8, 1), (8, 8, 2), (20, 32, 0x3c00_3c00)])),
-            Op::Hmul2 { dst: 1, b: Operand::Imm(0x3c00_3c00), merge: HMerge::H1H0, .. }
+            Op::Hmul2 {
+                dst: 1,
+                b: Operand::Imm(0x3c00_3c00),
+                merge: HMerge::H1H0,
+                ..
+            }
         ));
         assert!(matches!(
             op(asm(0x2800, &[(0, 8, 1), (8, 8, 2), (20, 32, 0x3c00_3c00)])),
-            Op::Hfma2 { dst: 1, c: Operand::Reg(1), merge: HMerge::H1H0, .. }
+            Op::Hfma2 {
+                dst: 1,
+                c: Operand::Reg(1),
+                merge: HMerge::H1H0,
+                ..
+            }
         ));
         // hset2, whose register form puts its comparison at 35 and its `.bf`
         // where every other form's merge sits.
         assert!(matches!(
-            op(asm(0x5d18, &[(0, 8, 1), (8, 8, 2), (20, 8, 3), (35, 4, 4), (49, 1, 1)])),
-            Op::Hset2 { dst: 1, a: 2, b: Operand::Reg(3), cmp: FCmp::Gt, bf: true, .. }
+            op(asm(
+                0x5d18,
+                &[(0, 8, 1), (8, 8, 2), (20, 8, 3), (35, 4, 4), (49, 1, 1)]
+            )),
+            Op::Hset2 {
+                dst: 1,
+                a: 2,
+                b: Operand::Reg(3),
+                cmp: FCmp::Gt,
+                bf: true,
+                ..
+            }
         ));
         assert!(matches!(
-            op(asm(0x7c80, &[(0, 8, 1), (8, 8, 2), (49, 4, 4), (20, 14, 3), (34, 5, 2)])),
-            Op::Hset2 { cmp: FCmp::Gt, b: Operand::Const { bank: 2, offset: 0xc }, .. }
+            op(asm(
+                0x7c80,
+                &[(0, 8, 1), (8, 8, 2), (49, 4, 4), (20, 14, 3), (34, 5, 2)]
+            )),
+            Op::Hset2 {
+                cmp: FCmp::Gt,
+                b: Operand::Const {
+                    bank: 2,
+                    offset: 0xc
+                },
+                ..
+            }
         ));
         // hsetp2's `.h_and` collapses both lanes into one predicate.
         assert!(matches!(
-            op(asm(0x5d20, &[(3, 3, 1), (0, 3, 2), (8, 8, 2), (20, 8, 3), (35, 4, 1), (49, 1, 1)])),
-            Op::Hsetp2 { p0: 1, p1: 2, cmp: FCmp::Lt, and: true, .. }
+            op(asm(
+                0x5d20,
+                &[
+                    (3, 3, 1),
+                    (0, 3, 2),
+                    (8, 8, 2),
+                    (20, 8, 3),
+                    (35, 4, 1),
+                    (49, 1, 1)
+                ]
+            )),
+            Op::Hsetp2 {
+                p0: 1,
+                p1: 2,
+                cmp: FCmp::Lt,
+                and: true,
+                ..
+            }
         ));
     }
 
@@ -3244,8 +4067,10 @@ mod tests {
     #[test]
     fn an_immediate_half_pair_reassembles_both_signs() {
         // -1.0 in the low half (0xbc00) and +2.0 in the high (0x4000).
-        let insn = asm(0x7a00, &[(20, 9, 0xf0), (29, 1, 1), (30, 9, 0x100), (56, 1, 0)]);
+        let insn = asm(
+            0x7a00,
+            &[(20, 9, 0xf0), (29, 1, 1), (30, 9, 0x100), (56, 1, 0)],
+        );
         assert_eq!(half_imm(insn), 0x4000_bc00);
     }
 }
-

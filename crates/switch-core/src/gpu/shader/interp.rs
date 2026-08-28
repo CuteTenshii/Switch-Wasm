@@ -93,7 +93,9 @@ pub struct ConstCache {
 
 impl Default for ConstCache {
     fn default() -> ConstCache {
-        ConstCache { slots: Box::new([(u32::MAX, 0); CONST_CACHE_SLOTS]) }
+        ConstCache {
+            slots: Box::new([(u32::MAX, 0); CONST_CACHE_SLOTS]),
+        }
     }
 }
 
@@ -121,9 +123,8 @@ impl ConstantSource for MemoryConstants<'_, '_> {
         if let Some(value) = self.cache.borrow().get(key) {
             return Ok(value);
         }
-        let (addr, size) = (self.bindings)(bank).ok_or_else(|| {
-            Error::Gpu(format!("shader: read from unbound constant bank {bank}"))
-        })?;
+        let (addr, size) = (self.bindings)(bank)
+            .ok_or_else(|| Error::Gpu(format!("shader: read from unbound constant bank {bank}")))?;
         if offset as u32 + 4 > size {
             return Err(fault(format!(
                 "shader: constant read c{bank}[{offset:#x}] is past the bound buffer's size {size:#x}"
@@ -422,7 +423,10 @@ impl Attributes {
 
 impl Default for Attributes {
     fn default() -> Self {
-        Attributes { words: [0.0; Attributes::WORDS], written: [0; Attributes::WORDS / 64] }
+        Attributes {
+            words: [0.0; Attributes::WORDS],
+            written: [0; Attributes::WORDS / 64],
+        }
     }
 }
 
@@ -739,7 +743,14 @@ impl Invocation {
                 // shuffle rather than on it. The deferred texture writes stay
                 // deferred — nothing has jumped, so where they land is still
                 // the place the lowering found.
-                Op::Shfl { dst, pred, src, index, mask, mode } => {
+                Op::Shfl {
+                    dst,
+                    pred,
+                    src,
+                    index,
+                    mask,
+                    mode,
+                } => {
                     self.shuffle = Some(Shuffle {
                         mode,
                         dst,
@@ -795,14 +806,24 @@ impl Invocation {
     fn run_alu(&mut self, op: Op, env: &Env) -> ShaderResult<()> {
         match op {
             // ---- attribute space ----
-            Op::Ld { dst, offset, idx, size } => {
+            Op::Ld {
+                dst,
+                offset,
+                idx,
+                size,
+            } => {
                 let base = offset.wrapping_add(self.attr_index(idx));
                 for i in 0..size.regs() {
                     let v = self.attr_in.get(base + i as u16 * 4);
                     self.set_reg_f32(dst.wrapping_add(i), v);
                 }
             }
-            Op::St { offset, idx, src, size } => {
+            Op::St {
+                offset,
+                idx,
+                src,
+                size,
+            } => {
                 let base = offset.wrapping_add(self.attr_index(idx));
                 for i in 0..size.regs() {
                     let v = self.reg_f32(src.wrapping_add(i));
@@ -814,7 +835,14 @@ impl Invocation {
             // that sample's own centre, and an invocation only runs where
             // its sample is covered. The centroid of the area this
             // invocation covers is therefore where it is already sampling.
-            Op::Ipa { dst, offset, mul, perspective, sat, centroid: _ } => {
+            Op::Ipa {
+                dst,
+                offset,
+                mul,
+                perspective,
+                sat,
+                centroid: _,
+            } => {
                 let mut v = self.attr_in.get(offset);
                 if perspective {
                     if let Some(m) = mul {
@@ -828,12 +856,28 @@ impl Invocation {
             }
 
             // ---- float ----
-            Op::Fadd { dst, a, am, b, bm, ftz, sat } => {
+            Op::Fadd {
+                dst,
+                a,
+                am,
+                b,
+                bm,
+                ftz,
+                sat,
+            } => {
                 let x = am.apply(flush(self.reg_f32(a), ftz));
                 let y = bm.apply(flush(self.operand_f32(b, env)?, ftz));
                 self.set_reg_f32(dst, saturate(x + y, sat));
             }
-            Op::Fmul { dst, a, b, bm, ftz, sat, scale } => {
+            Op::Fmul {
+                dst,
+                a,
+                b,
+                bm,
+                ftz,
+                sat,
+                scale,
+            } => {
                 // The pre-scale multiplies the *first* operand, before the
                 // multiply proper — a constant halving or doubling folded into
                 // a multiply the shader was doing anyway.
@@ -841,13 +885,30 @@ impl Invocation {
                 let y = bm.apply(flush(self.operand_f32(b, env)?, ftz));
                 self.set_reg_f32(dst, saturate(x * y, sat));
             }
-            Op::Ffma { dst, a, b, bneg, c, cneg, ftz, sat } => {
+            Op::Ffma {
+                dst,
+                a,
+                b,
+                bneg,
+                c,
+                cneg,
+                ftz,
+                sat,
+            } => {
                 let x = flush(self.reg_f32(a), ftz);
                 let y = neg_if(flush(self.operand_f32(b, env)?, ftz), bneg);
                 let z = neg_if(flush(self.operand_f32(c, env)?, ftz), cneg);
                 self.set_reg_f32(dst, saturate(x.mul_add(y, z), sat));
             }
-            Op::Fmnmx { dst, a, am, b, bm, pred, ftz } => {
+            Op::Fmnmx {
+                dst,
+                a,
+                am,
+                b,
+                bm,
+                pred,
+                ftz,
+            } => {
                 let x = am.apply(flush(self.reg_f32(a), ftz));
                 let y = bm.apply(flush(self.operand_f32(b, env)?, ftz));
                 // The predicate selects which end: true picks the minimum,
@@ -855,7 +916,13 @@ impl Invocation {
                 let v = if self.holds(pred) { x.min(y) } else { x.max(y) };
                 self.set_reg_f32(dst, v);
             }
-            Op::Mufu { dst, src, sm, op, sat } => {
+            Op::Mufu {
+                dst,
+                src,
+                sm,
+                op,
+                sat,
+            } => {
                 let x = sm.apply(self.reg_f32(src));
                 let v = match op {
                     MufuOp::Cos => x.cos(),
@@ -872,14 +939,30 @@ impl Invocation {
             // is*: two lanes of a derivative subtract and the other two add,
             // which is how one instruction serves both halves of a
             // difference without a branch.
-            Op::Fswzadd { dst, a, b, swizzle, ftz } => {
+            Op::Fswzadd {
+                dst,
+                a,
+                b,
+                swizzle,
+                ftz,
+            } => {
                 let code = (swizzle >> ((env.special.lane & 3) * 2)) & 3;
                 let x = flush(self.reg_f32(a), ftz);
                 let y = flush(self.reg_f32(b), ftz);
                 let (ka, kb) = FSWZ_SIGNS[code as usize];
                 self.set_reg_f32(dst, ka * x + kb * y);
             }
-            Op::Fsetp { p0, p1, a, am, b, bm, cmp, bop, src } => {
+            Op::Fsetp {
+                p0,
+                p1,
+                a,
+                am,
+                b,
+                bm,
+                cmp,
+                bop,
+                src,
+            } => {
                 let x = am.apply(self.reg_f32(a));
                 let y = bm.apply(self.operand_f32(b, env)?);
                 let r = float_compare(cmp, x, y);
@@ -887,7 +970,17 @@ impl Invocation {
                 self.set_pred(p0, combine(bop, r, s));
                 self.set_pred(p1, combine(bop, !r, s));
             }
-            Op::Fset { dst, a, am, b, bm, cmp, bop, src, bf } => {
+            Op::Fset {
+                dst,
+                a,
+                am,
+                b,
+                bm,
+                cmp,
+                bop,
+                src,
+                bf,
+            } => {
                 let x = am.apply(self.reg_f32(a));
                 let y = bm.apply(self.operand_f32(b, env)?);
                 let r = combine(bop, float_compare(cmp, x, y), self.holds(src));
@@ -899,14 +992,36 @@ impl Invocation {
             // which is what a half instruction does: it rounds its result,
             // not its arithmetic. So [`HMerge::F32`], whose result is a float,
             // rounds nowhere, even where one of its sources was a half.
-            Op::Hadd2 { dst, a, am, asw, b, bm, bsw, merge, ftz, sat } => {
+            Op::Hadd2 {
+                dst,
+                a,
+                am,
+                asw,
+                b,
+                bm,
+                bsw,
+                merge,
+                ftz,
+                sat,
+            } => {
                 let x = half_source(self.reg(a), am, asw, ftz);
                 let y = half_source(self.operand(b, env)?, bm, bsw, ftz);
                 let lanes = [saturate(x[0] + y[0], sat), saturate(x[1] + y[1], sat)];
                 let v = half_pack(self.reg(dst), lanes, merge);
                 self.set_reg(dst, v);
             }
-            Op::Hmul2 { dst, a, am, asw, b, bm, bsw, merge, prec, sat } => {
+            Op::Hmul2 {
+                dst,
+                a,
+                am,
+                asw,
+                b,
+                bm,
+                bsw,
+                merge,
+                prec,
+                sat,
+            } => {
                 let ftz = prec == HPrecision::Ftz;
                 let x = half_source(self.reg(a), am, asw, ftz);
                 let y = half_source(self.operand(b, env)?, bm, bsw, ftz);
@@ -920,11 +1035,40 @@ impl Invocation {
                 let v = half_pack(self.reg(dst), lanes, merge);
                 self.set_reg(dst, v);
             }
-            Op::Hfma2 { dst, a, asw, b, bneg, bsw, c, cneg, csw, merge, prec, sat } => {
+            Op::Hfma2 {
+                dst,
+                a,
+                asw,
+                b,
+                bneg,
+                bsw,
+                c,
+                cneg,
+                csw,
+                merge,
+                prec,
+                sat,
+            } => {
                 let ftz = prec == HPrecision::Ftz;
                 let x = half_source(self.reg(a), FMod::NONE, asw, ftz);
-                let y = half_source(self.operand(b, env)?, FMod { neg: bneg, abs: false }, bsw, ftz);
-                let z = half_source(self.operand(c, env)?, FMod { neg: cneg, abs: false }, csw, ftz);
+                let y = half_source(
+                    self.operand(b, env)?,
+                    FMod {
+                        neg: bneg,
+                        abs: false,
+                    },
+                    bsw,
+                    ftz,
+                );
+                let z = half_source(
+                    self.operand(c, env)?,
+                    FMod {
+                        neg: cneg,
+                        abs: false,
+                    },
+                    csw,
+                    ftz,
+                );
                 let mut lanes = [x[0].mul_add(y[0], z[0]), x[1].mul_add(y[1], z[1])];
                 for lane in 0..2 {
                     // A zeroed product leaves the addend, not zero.
@@ -936,7 +1080,20 @@ impl Invocation {
                 let v = half_pack(self.reg(dst), lanes, merge);
                 self.set_reg(dst, v);
             }
-            Op::Hset2 { dst, a, am, asw, b, bm, bsw, cmp, bop, src, bf, ftz } => {
+            Op::Hset2 {
+                dst,
+                a,
+                am,
+                asw,
+                b,
+                bm,
+                bsw,
+                cmp,
+                bop,
+                src,
+                bf,
+                ftz,
+            } => {
                 let x = half_source(self.reg(a), am, asw, ftz);
                 let y = half_source(self.operand(b, env)?, bm, bsw, ftz);
                 let s = self.holds(src);
@@ -952,7 +1109,21 @@ impl Invocation {
                 }
                 self.set_reg(dst, out);
             }
-            Op::Hsetp2 { p0, p1, a, am, asw, b, bm, bsw, cmp, bop, src, and, ftz } => {
+            Op::Hsetp2 {
+                p0,
+                p1,
+                a,
+                am,
+                asw,
+                b,
+                bm,
+                bsw,
+                cmp,
+                bop,
+                src,
+                and,
+                ftz,
+            } => {
                 let x = half_source(self.reg(a), am, asw, ftz);
                 let y = half_source(self.operand(b, env)?, bm, bsw, ftz);
                 let s = self.holds(src);
@@ -968,7 +1139,15 @@ impl Invocation {
             }
 
             // ---- integer ----
-            Op::Iadd { dst, a, aneg, b, bneg, cin, cout } => {
+            Op::Iadd {
+                dst,
+                a,
+                aneg,
+                b,
+                bneg,
+                cin,
+                cout,
+            } => {
                 let x = ineg_if(self.reg(a), aneg);
                 let y = ineg_if(self.operand(b, env)?, bneg);
                 // Widened, so the carry out is the bit that falls off the top.
@@ -981,18 +1160,39 @@ impl Invocation {
                     self.carry = sum > u64::from(u32::MAX);
                 }
             }
-            Op::Iadd3 { dst, a, aneg, b, bneg, c, cneg } => {
+            Op::Iadd3 {
+                dst,
+                a,
+                aneg,
+                b,
+                bneg,
+                c,
+                cneg,
+            } => {
                 let x = ineg_if(self.reg(a), aneg);
                 let y = ineg_if(self.operand(b, env)?, bneg);
                 let z = ineg_if(self.operand(c, env)?, cneg);
                 self.set_reg(dst, x.wrapping_add(y).wrapping_add(z));
             }
-            Op::Iscadd { dst, a, aneg, b, bneg, shift } => {
+            Op::Iscadd {
+                dst,
+                a,
+                aneg,
+                b,
+                bneg,
+                shift,
+            } => {
                 let x = ineg_if(self.reg(a), aneg).wrapping_shl(shift as u32);
                 let y = ineg_if(self.operand(b, env)?, bneg);
                 self.set_reg(dst, x.wrapping_add(y));
             }
-            Op::Imnmx { dst, a, b, pred, signed } => {
+            Op::Imnmx {
+                dst,
+                a,
+                b,
+                pred,
+                signed,
+            } => {
                 let x = self.reg(a);
                 let y = self.operand(b, env)?;
                 let take_min = self.holds(pred);
@@ -1006,7 +1206,13 @@ impl Invocation {
                 };
                 self.set_reg(dst, v);
             }
-            Op::Imul { dst, a, b, signed, hi } => {
+            Op::Imul {
+                dst,
+                a,
+                b,
+                signed,
+                hi,
+            } => {
                 let x = self.reg(a);
                 let y = self.operand(b, env)?;
                 let full = if signed {
@@ -1016,7 +1222,18 @@ impl Invocation {
                 };
                 self.set_reg(dst, if hi { (full >> 32) as u32 } else { full as u32 });
             }
-            Op::Xmad { dst, a, ah, asigned, b, bh, bsigned, c, psl, mrg } => {
+            Op::Xmad {
+                dst,
+                a,
+                ah,
+                asigned,
+                b,
+                bh,
+                bsigned,
+                c,
+                psl,
+                mrg,
+            } => {
                 let av = half(self.reg(a), ah, asigned);
                 let bv = half(self.operand(b, env)?, bh, bsigned);
                 let mut product = (av.wrapping_mul(bv)) as u32;
@@ -1032,24 +1249,58 @@ impl Invocation {
                 }
                 self.set_reg(dst, v);
             }
-            Op::Isetp { p0, p1, a, b, cmp, signed, bop, src } => {
+            Op::Isetp {
+                p0,
+                p1,
+                a,
+                b,
+                cmp,
+                signed,
+                bop,
+                src,
+            } => {
                 let r = int_compare(cmp, self.reg(a), self.operand(b, env)?, signed);
                 let s = self.holds(src);
                 self.set_pred(p0, combine(bop, r, s));
                 self.set_pred(p1, combine(bop, !r, s));
             }
-            Op::Iset { dst, a, b, cmp, signed, bop, src, bf } => {
+            Op::Iset {
+                dst,
+                a,
+                b,
+                cmp,
+                signed,
+                bop,
+                src,
+                bf,
+            } => {
                 let r = int_compare(cmp, self.reg(a), self.operand(b, env)?, signed);
                 let r = combine(bop, r, self.holds(src));
                 self.set_reg(dst, set_result(r, bf));
             }
-            Op::Icmp { dst, a, b, c, cmp, signed } => {
+            Op::Icmp {
+                dst,
+                a,
+                b,
+                c,
+                cmp,
+                signed,
+            } => {
                 // `icmp dst, a, b, c` is "dst = compare(c, 0) ? a : b".
                 let taken = int_compare(cmp, self.reg(c), 0, signed);
-                let v = if taken { self.reg(a) } else { self.operand(b, env)? };
+                let v = if taken {
+                    self.reg(a)
+                } else {
+                    self.operand(b, env)?
+                };
                 self.set_reg(dst, v);
             }
-            Op::Bfi { dst, insert, src, base } => {
+            Op::Bfi {
+                dst,
+                insert,
+                src,
+                base,
+            } => {
                 let src = self.operand(src, env)?;
                 let base = self.operand(base, env)?;
                 let offset = src & 0xff;
@@ -1061,7 +1312,11 @@ impl Invocation {
                     base
                 } else {
                     let count = count.min(32 - offset);
-                    let mask = if count >= 32 { !0 } else { ((1u32 << count) - 1) << offset };
+                    let mask = if count >= 32 {
+                        !0
+                    } else {
+                        ((1u32 << count) - 1) << offset
+                    };
                     (base & !mask) | ((self.reg(insert) << offset) & mask)
                 };
                 self.set_reg(dst, v);
@@ -1075,7 +1330,15 @@ impl Invocation {
                     }
                 }
             }
-            Op::Lop { dst, a, ainv, b, binv, op, pred } => {
+            Op::Lop {
+                dst,
+                a,
+                ainv,
+                b,
+                binv,
+                op,
+                pred,
+            } => {
                 let x = inv_if(self.reg(a), ainv);
                 let y = inv_if(self.operand(b, env)?, binv);
                 let v = match op {
@@ -1105,7 +1368,13 @@ impl Invocation {
                 let n = if wrap { n & 31 } else { n };
                 self.set_reg(dst, if n >= 32 { 0 } else { self.reg(a) << n });
             }
-            Op::Shr { dst, a, b, signed, wrap } => {
+            Op::Shr {
+                dst,
+                a,
+                b,
+                signed,
+                wrap,
+            } => {
                 let n = self.operand(b, env)?;
                 let n = if wrap { n & 31 } else { n };
                 let x = self.reg(a);
@@ -1122,12 +1391,31 @@ impl Invocation {
                 };
                 self.set_reg(dst, v);
             }
-            Op::Shf { dst, lo, shift, hi, left, wrap, hi_out } => {
+            Op::Shf {
+                dst,
+                lo,
+                shift,
+                hi,
+                left,
+                wrap,
+                hi_out,
+            } => {
                 let n = self.operand(shift, env)?;
                 let n = if wrap { n & 63 } else { n };
                 let pair = ((self.reg(hi) as u64) << 32) | self.reg(lo) as u64;
-                let shifted = if left { pair.wrapping_shl(n) } else { pair.wrapping_shr(n) };
-                self.set_reg(dst, if hi_out { (shifted >> 32) as u32 } else { shifted as u32 });
+                let shifted = if left {
+                    pair.wrapping_shl(n)
+                } else {
+                    pair.wrapping_shr(n)
+                };
+                self.set_reg(
+                    dst,
+                    if hi_out {
+                        (shifted >> 32) as u32
+                    } else {
+                        shifted as u32
+                    },
+                );
             }
             Op::Bfe { dst, a, b, signed } => {
                 let desc = self.operand(b, env)?;
@@ -1139,21 +1427,42 @@ impl Invocation {
                 let v = inv_if(self.operand(b, env)?, inv);
                 self.set_reg(dst, v.count_ones());
             }
-            Op::Flo { dst, b, signed, shift, inv } => {
+            Op::Flo {
+                dst,
+                b,
+                signed,
+                shift,
+                inv,
+            } => {
                 let v = inv_if(self.operand(b, env)?, inv);
                 // The highest set bit, counting from bit 0; for a signed
                 // search the sign bits at the top don't count.
                 let v = if signed && (v as i32) < 0 { !v } else { v };
-                let idx = if v == 0 { 0xffff_ffff } else { 31 - v.leading_zeros() };
+                let idx = if v == 0 {
+                    0xffff_ffff
+                } else {
+                    31 - v.leading_zeros()
+                };
                 self.set_reg(dst, if shift && v != 0 { 31 - idx } else { idx });
             }
             Op::Sel { dst, a, b, pred } => {
-                let v = if self.holds(pred) { self.reg(a) } else { self.operand(b, env)? };
+                let v = if self.holds(pred) {
+                    self.reg(a)
+                } else {
+                    self.operand(b, env)?
+                };
                 self.set_reg(dst, v);
             }
 
             // ---- conversions ----
-            Op::I2f { dst, src, sm, src_bytes, src_signed, sel } => {
+            Op::I2f {
+                dst,
+                src,
+                sm,
+                src_bytes,
+                src_signed,
+                sel,
+            } => {
                 let raw = self.operand(src, env)?;
                 let raw = raw >> (sel as u32 * 8);
                 let v = if src_signed {
@@ -1163,24 +1472,56 @@ impl Invocation {
                 };
                 self.set_reg_f32(dst, sm.apply(v));
             }
-            Op::F2i { dst, src, sm, dst_bytes, dst_signed, round, ftz } => {
+            Op::F2i {
+                dst,
+                src,
+                sm,
+                dst_bytes,
+                dst_signed,
+                round,
+                ftz,
+            } => {
                 let x = sm.apply(flush(self.operand_f32(src, env)?, ftz));
                 let r = apply_round(x, round);
                 let v = if dst_signed {
                     let lo = -(2f64.powi(dst_bytes as i32 * 8 - 1)) as f32;
                     let hi = (2f64.powi(dst_bytes as i32 * 8 - 1) - 1.0) as f32;
-                    if r.is_nan() { 0 } else { r.clamp(lo, hi) as i32 as u32 }
+                    if r.is_nan() {
+                        0
+                    } else {
+                        r.clamp(lo, hi) as i32 as u32
+                    }
                 } else {
                     let hi = (2f64.powi(dst_bytes as i32 * 8) - 1.0) as f32;
-                    if r.is_nan() { 0 } else { r.clamp(0.0, hi) as u32 }
+                    if r.is_nan() {
+                        0
+                    } else {
+                        r.clamp(0.0, hi) as u32
+                    }
                 };
                 self.set_reg(dst, v);
             }
-            Op::F2f { dst, src, sm, round, sat, ftz } => {
+            Op::F2f {
+                dst,
+                src,
+                sm,
+                round,
+                sat,
+                ftz,
+            } => {
                 let x = sm.apply(flush(self.operand_f32(src, env)?, ftz));
                 self.set_reg_f32(dst, saturate(apply_round(x, round), sat));
             }
-            Op::I2i { dst, src, sm, src_bytes, src_signed, dst_signed, sat, sel } => {
+            Op::I2i {
+                dst,
+                src,
+                sm,
+                src_bytes,
+                src_signed,
+                dst_signed,
+                sat,
+                sel,
+            } => {
                 let raw = self.operand(src, env)? >> (sel as u32 * 8);
                 let mut v = if src_signed {
                     sign_extend(raw, src_bytes)
@@ -1217,7 +1558,15 @@ impl Invocation {
                 // and CTA registers meaning.
                 self.set_reg(dst, env.special.read(sr).unwrap_or(0));
             }
-            Op::Psetp { p0, p1, a, b, c, op1, op2 } => {
+            Op::Psetp {
+                p0,
+                p1,
+                a,
+                b,
+                c,
+                op1,
+                op2,
+            } => {
                 let first = combine(op1, self.holds(a), self.holds(b));
                 let r = combine(op2, first, self.holds(c));
                 self.set_pred(p0, r);
@@ -1225,7 +1574,13 @@ impl Invocation {
             }
 
             // ---- memory ----
-            Op::Ldc { dst, bank, offset, idx, size } => {
+            Op::Ldc {
+                dst,
+                bank,
+                offset,
+                idx,
+                size,
+            } => {
                 let base = offset.wrapping_add(self.reg(idx) as i32);
                 for i in 0..size.regs() {
                     let at = base.wrapping_add(i as i32 * 4);
@@ -1233,10 +1588,15 @@ impl Invocation {
                     self.set_reg(dst.wrapping_add(i), v);
                 }
             }
-            Op::Ldg { dst, addr, offset, size } => {
-                let mem = env.memory.ok_or_else(|| {
-                    Error::Gpu("shader: ldg with no global memory bound".into())
-                })?;
+            Op::Ldg {
+                dst,
+                addr,
+                offset,
+                size,
+            } => {
+                let mem = env
+                    .memory
+                    .ok_or_else(|| Error::Gpu("shader: ldg with no global memory bound".into()))?;
                 let base = (self.reg64(addr) as i64).wrapping_add(offset as i64) as u64;
                 if let Some(raw) = narrow_load(size, |i| mem.read_u8(base + i as u64))? {
                     self.set_reg(dst, raw);
@@ -1247,10 +1607,15 @@ impl Invocation {
                     }
                 }
             }
-            Op::Stg { addr, offset, src, size } => {
-                let mem = env.memory.ok_or_else(|| {
-                    Error::Gpu("shader: stg with no global memory bound".into())
-                })?;
+            Op::Stg {
+                addr,
+                offset,
+                src,
+                size,
+            } => {
+                let mem = env
+                    .memory
+                    .ok_or_else(|| Error::Gpu("shader: stg with no global memory bound".into()))?;
                 let base = (self.reg64(addr) as i64).wrapping_add(offset as i64) as u64;
                 let (bytes, len) = self.store_value(src, size);
                 if len < 4 {
@@ -1264,45 +1629,75 @@ impl Invocation {
                     }
                 }
             }
-            Op::Ldl { dst, addr, offset, size } => {
+            Op::Ldl {
+                dst,
+                addr,
+                offset,
+                size,
+            } => {
                 let base = (self.reg(addr) as i64).wrapping_add(offset as i64) as usize;
                 let values = read_scratch(&self.local, base, size);
                 for i in 0..size.regs() {
                     self.set_reg(dst.wrapping_add(i), values[i as usize]);
                 }
             }
-            Op::Stl { addr, offset, src, size } => {
+            Op::Stl {
+                addr,
+                offset,
+                src,
+                size,
+            } => {
                 let base = (self.reg(addr) as i64).wrapping_add(offset as i64) as usize;
                 let (bytes, len) = self.store_value(src, size);
                 let cap = self.local_bytes;
                 write_scratch(&mut self.local, cap, base, &bytes[..len]);
             }
-            Op::Lds { dst, addr, offset, size } => {
-                let shared = env.shared.ok_or_else(|| {
-                    Error::Gpu("shader: lds with no shared memory bound".into())
-                })?;
+            Op::Lds {
+                dst,
+                addr,
+                offset,
+                size,
+            } => {
+                let shared = env
+                    .shared
+                    .ok_or_else(|| Error::Gpu("shader: lds with no shared memory bound".into()))?;
                 let base = (self.reg(addr) as i64).wrapping_add(offset as i64) as usize;
                 let values = read_scratch(&shared.borrow(), base, size);
                 for i in 0..size.regs() {
                     self.set_reg(dst.wrapping_add(i), values[i as usize]);
                 }
             }
-            Op::Sts { addr, offset, src, size } => {
-                let shared = env.shared.ok_or_else(|| {
-                    Error::Gpu("shader: sts with no shared memory bound".into())
-                })?;
+            Op::Sts {
+                addr,
+                offset,
+                src,
+                size,
+            } => {
+                let shared = env
+                    .shared
+                    .ok_or_else(|| Error::Gpu("shader: sts with no shared memory bound".into()))?;
                 let base = (self.reg(addr) as i64).wrapping_add(offset as i64) as usize;
                 let (bytes, len) = self.store_value(src, size);
                 let mut block = shared.borrow_mut();
                 let cap = block.len();
                 write_scratch(&mut block, cap, base, &bytes[..len]);
             }
-            Op::Atom { dst, addr, offset, src, op, ty, space } => {
+            Op::Atom {
+                dst,
+                addr,
+                offset,
+                src,
+                op,
+                ty,
+                space,
+            } => {
                 self.run_atom(dst, addr, offset, src, op, ty, space, env)?;
             }
 
             Op::Unimplemented { raw } => {
-                return Err(fault(format!("shader: unimplemented instruction {raw:#018x}")))
+                return Err(fault(format!(
+                    "shader: unimplemented instruction {raw:#018x}"
+                )))
             }
             // Handled by `execute`.
             Op::Exit
@@ -1442,7 +1837,13 @@ impl Invocation {
         env: &Env,
         pending: &mut Vec<(usize, u8, u32)>,
     ) -> ShaderResult<()> {
-        let Op::Texs { coords, handle, dim, .. } = op else {
+        let Op::Texs {
+            coords,
+            handle,
+            dim,
+            ..
+        } = op
+        else {
             unreachable!("run_texs called with {op:?}");
         };
         // The bindless handle lives in the driver's reserved constant bank,
@@ -1487,7 +1888,14 @@ impl Invocation {
 pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
     let mut out = Vec::new();
     for (pc, op) in ops.iter().enumerate() {
-        let Op::Texs { dst, dst2, mask, f16, .. } = *op else {
+        let Op::Texs {
+            dst,
+            dst2,
+            mask,
+            f16,
+            ..
+        } = *op
+        else {
             continue;
         };
         let writes = isa::texs_destinations(dst, dst2, mask, f16)
@@ -1560,14 +1968,26 @@ fn reads(op: &Op) -> Vec<u8> {
         }
         // A merging half op keeps the half of its destination it does not
         // write, which makes the destination a source as well.
-        Op::Hfma2 { dst, a, b, c, merge, .. } => {
+        Op::Hfma2 {
+            dst,
+            a,
+            b,
+            c,
+            merge,
+            ..
+        } => {
             let mut v = vec![a];
             v.extend(operand_reg(b));
             v.extend(operand_reg(c));
             v.extend(half_merge_reads(dst, merge));
             v
         }
-        Op::Hadd2 { dst, a, b, merge, .. } | Op::Hmul2 { dst, a, b, merge, .. } => {
+        Op::Hadd2 {
+            dst, a, b, merge, ..
+        }
+        | Op::Hmul2 {
+            dst, a, b, merge, ..
+        } => {
             let mut v = vec![a];
             v.extend(operand_reg(b));
             v.extend(half_merge_reads(dst, merge));
@@ -1624,13 +2044,20 @@ fn reads(op: &Op) -> Vec<u8> {
         }
         Op::Ldc { idx, .. } => vec![idx],
         Op::Ldg { addr, .. } | Op::Ldl { addr, .. } => vec![addr, addr.wrapping_add(1)],
-        Op::Stg { addr, src, size, .. } | Op::Stl { addr, src, size, .. } => {
+        Op::Stg {
+            addr, src, size, ..
+        }
+        | Op::Stl {
+            addr, src, size, ..
+        } => {
             let mut v = vec![addr, addr.wrapping_add(1)];
             v.extend((0..size.regs()).map(|i| src.wrapping_add(i)));
             v
         }
         Op::Texs { coords, .. } => coords.to_vec(),
-        Op::Shfl { src, index, mask, .. } => {
+        Op::Shfl {
+            src, index, mask, ..
+        } => {
             let mut v = vec![src];
             v.extend(operand_reg(index));
             v.extend(operand_reg(mask));
@@ -1646,10 +2073,10 @@ fn reads(op: &Op) -> Vec<u8> {
 /// Registers `op` writes as a destination.
 pub(super) fn writes(op: &Op) -> Vec<u8> {
     match *op {
-        Op::Ld { dst, size, .. } | Op::Ldg { dst, size, .. } | Op::Ldl { dst, size, .. }
-        | Op::Ldc { dst, size, .. } => {
-            (0..size.regs()).map(|i| dst.wrapping_add(i)).collect()
-        }
+        Op::Ld { dst, size, .. }
+        | Op::Ldg { dst, size, .. }
+        | Op::Ldl { dst, size, .. }
+        | Op::Ldc { dst, size, .. } => (0..size.regs()).map(|i| dst.wrapping_add(i)).collect(),
         Op::Ipa { dst, .. }
         | Op::Mufu { dst, .. }
         | Op::Fadd { dst, .. }
@@ -1687,9 +2114,16 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::I2i { dst, .. }
         | Op::Shfl { dst, .. }
         | Op::Fswzadd { dst, .. } => vec![dst],
-        Op::Texs { dst, dst2, mask, f16, .. } => {
-            isa::texs_destinations(dst, dst2, mask, f16).into_iter().map(|(reg, _)| reg).collect()
-        }
+        Op::Texs {
+            dst,
+            dst2,
+            mask,
+            f16,
+            ..
+        } => isa::texs_destinations(dst, dst2, mask, f16)
+            .into_iter()
+            .map(|(reg, _)| reg)
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -1718,8 +2152,10 @@ pub const WARP_LANES: usize = 32;
 /// still reports what the clamp said, since that is a property of the lane
 /// numbers rather than of who is running.
 pub fn resolve_shuffles(warp: &mut [Invocation]) {
-    let requests: Vec<Option<Shuffle>> =
-        warp.iter_mut().map(|invocation| invocation.shuffle.take()).collect();
+    let requests: Vec<Option<Shuffle>> = warp
+        .iter_mut()
+        .map(|invocation| invocation.shuffle.take())
+        .collect();
     let sources: Vec<Option<(u8, u8, u32, bool)>> = requests
         .iter()
         .enumerate()
@@ -2031,7 +2467,11 @@ fn narrow_load(
         raw |= u32::from(byte(i)?) << (i * 8);
     }
     let signed = matches!(size, MemSize::S8 | MemSize::S16);
-    Ok(Some(if signed { sign_extend(raw, size.bytes() as u8) } else { raw }))
+    Ok(Some(if signed {
+        sign_extend(raw, size.bytes() as u8)
+    } else {
+        raw
+    }))
 }
 
 /// The registers a load of `size` from byte-addressed scratch produces. Past
@@ -2039,9 +2479,7 @@ fn narrow_load(
 /// sub-word sizes were honoured.
 fn read_scratch(bytes: &[u8], base: usize, size: MemSize) -> [u32; 4] {
     let mut out = [0u32; 4];
-    if let Ok(Some(raw)) =
-        narrow_load(size, |i| Ok(bytes.get(base + i).copied().unwrap_or(0)))
-    {
+    if let Ok(Some(raw)) = narrow_load(size, |i| Ok(bytes.get(base + i).copied().unwrap_or(0))) {
         out[0] = raw;
         return out;
     }
@@ -2099,9 +2537,10 @@ fn atom_apply(op: AtomOp, ty: AtomType, old: u64, b: u64, stored: u64) -> Shader
     let trim = |v: u64| if wide { v } else { v & 0xFFFF_FFFF };
     let float = matches!(ty, AtomType::F32);
     Ok(match op {
-        AtomOp::Add | AtomOp::SafeAdd if float => {
-            (f32::from_bits(old as u32) + f32::from_bits(b as u32)).to_bits().into()
-        }
+        AtomOp::Add | AtomOp::SafeAdd if float => (f32::from_bits(old as u32)
+            + f32::from_bits(b as u32))
+        .to_bits()
+        .into(),
         AtomOp::Add | AtomOp::SafeAdd => trim(old.wrapping_add(b)),
         AtomOp::Min => {
             if atom_less(ty, b, old) {
@@ -2160,9 +2599,9 @@ fn atom_less(ty: AtomType, x: u64, y: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gpu::shader::compiled::Compiled;
     use crate::gpu::shader::decode_program;
     use crate::gpu::shader::isa::{FMod, FmulScale, Instruction, TexDim};
-    use crate::gpu::shader::compiled::Compiled;
 
     fn no_consts() -> HashMap<(u8, u16), f32> {
         HashMap::new()
@@ -2174,7 +2613,8 @@ mod tests {
         let mut p = crate::gpu::shader::Program::default();
         for (i, &op) in ops.iter().enumerate() {
             p.insns.push(Instruction::always(op));
-            p.offsets.push(crate::gpu::shader::ENTRY_OFFSET + i as u32 * 8);
+            p.offsets
+                .push(crate::gpu::shader::ENTRY_OFFSET + i as u32 * 8);
         }
         Compiled::new(&p)
     }
@@ -2204,7 +2644,9 @@ mod tests {
 
     impl FlatMemory {
         fn with(size: usize) -> FlatMemory {
-            FlatMemory { bytes: RefCell::new(vec![0; size]) }
+            FlatMemory {
+                bytes: RefCell::new(vec![0; size]),
+            }
         }
     }
 
@@ -2238,9 +2680,15 @@ mod tests {
         // A shader multiplies a screen-space direction by this. Answering the
         // zero an unmodelled special register gets does not flip anything --
         // it deletes it.
-        let up = SpecialRegs { y_negate: false, ..SpecialRegs::default() };
+        let up = SpecialRegs {
+            y_negate: false,
+            ..SpecialRegs::default()
+        };
         assert_eq!(f32::from_bits(up.read(0x12).unwrap()), 1.0);
-        let down = SpecialRegs { y_negate: true, ..SpecialRegs::default() };
+        let down = SpecialRegs {
+            y_negate: true,
+            ..SpecialRegs::default()
+        };
         assert_eq!(f32::from_bits(down.read(0x12).unwrap()), -1.0);
     }
 
@@ -2280,7 +2728,10 @@ mod tests {
         let err = Invocation::new()
             .execute(&prog(&[Op::S2r { dst: 0, sr: 0x20 }, Op::Exit]), &env)
             .unwrap_err();
-        assert!(format!("{err:?}").contains("packed special register"), "got {err:?}");
+        assert!(
+            format!("{err:?}").contains("packed special register"),
+            "got {err:?}"
+        );
     }
 
     #[test]
@@ -2300,9 +2751,24 @@ mod tests {
         inv.set_reg(6, 0x77);
         inv.execute(
             &prog(&[
-                Op::Stg { addr: 4, offset: 0, src: 6, size: MemSize::U8 },
-                Op::Ldg { dst: 0, addr: 4, offset: 0, size: MemSize::U8 },
-                Op::Ldg { dst: 1, addr: 4, offset: 0, size: MemSize::S8 },
+                Op::Stg {
+                    addr: 4,
+                    offset: 0,
+                    src: 6,
+                    size: MemSize::U8,
+                },
+                Op::Ldg {
+                    dst: 0,
+                    addr: 4,
+                    offset: 0,
+                    size: MemSize::U8,
+                },
+                Op::Ldg {
+                    dst: 1,
+                    addr: 4,
+                    offset: 0,
+                    size: MemSize::S8,
+                },
                 Op::Exit,
             ]),
             &env,
@@ -2324,8 +2790,18 @@ mod tests {
         let mut inv = Invocation::new();
         inv.execute(
             &prog(&[
-                Op::Ldg { dst: 0, addr: 4, offset: 0, size: MemSize::S16 },
-                Op::Ldg { dst: 1, addr: 4, offset: 0, size: MemSize::U16 },
+                Op::Ldg {
+                    dst: 0,
+                    addr: 4,
+                    offset: 0,
+                    size: MemSize::S16,
+                },
+                Op::Ldg {
+                    dst: 1,
+                    addr: 4,
+                    offset: 0,
+                    size: MemSize::U16,
+                },
                 Op::Exit,
             ]),
             &env,
@@ -2378,7 +2854,10 @@ mod tests {
         assert_eq!(atom_apply(Exch, u32s, 5, 3, 0).unwrap(), 3);
         // A signed minimum is the whole reason the type is carried.
         let negative = (-4i32) as u32 as u64;
-        assert_eq!(atom_apply(Min, AtomType::S32, negative, 3, 0).unwrap(), negative);
+        assert_eq!(
+            atom_apply(Min, AtomType::S32, negative, 3, 0).unwrap(),
+            negative
+        );
         assert_eq!(atom_apply(Min, u32s, negative, 3, 0).unwrap(), 3);
         // `inc` wraps to zero at the operand, `dec` wraps back up to it.
         assert_eq!(atom_apply(Inc, u32s, 2, 4, 0).unwrap(), 3);
@@ -2390,7 +2869,10 @@ mod tests {
         assert_eq!(atom_apply(Cas, u32s, 5, 4, 9).unwrap(), 5);
         let one = 1.0f32.to_bits().into();
         let two = 2.0f32.to_bits().into();
-        assert_eq!(atom_apply(Add, AtomType::F32, one, two, 0).unwrap(), 3.0f32.to_bits().into());
+        assert_eq!(
+            atom_apply(Add, AtomType::F32, one, two, 0).unwrap(),
+            3.0f32.to_bits().into()
+        );
     }
 
     #[test]
@@ -2399,7 +2881,9 @@ mod tests {
         let env = Env::new(&consts, &NoTextures);
         let program = prog(&[
             Op::Mov32i { dst: 0, imm: 1 },
-            Op::Bar { mode: BarMode::Sync },
+            Op::Bar {
+                mode: BarMode::Sync,
+            },
             Op::Mov32i { dst: 1, imm: 2 },
             Op::Exit,
         ]);
@@ -2420,7 +2904,15 @@ mod tests {
         let consts = no_consts();
         let env = Env::new(&consts, &NoTextures);
         let err = Invocation::new()
-            .execute(&prog(&[Op::Bar { mode: BarMode::Sync }, Op::Exit]), &env)
+            .execute(
+                &prog(&[
+                    Op::Bar {
+                        mode: BarMode::Sync,
+                    },
+                    Op::Exit,
+                ]),
+                &env,
+            )
             .unwrap_err();
         assert!(format!("{err:?}").contains("no CTA"), "got {err:?}");
     }
@@ -2463,7 +2955,10 @@ mod tests {
 
         // `bfly 1` pairs the lanes whose numbers differ in the low bit.
         assert_eq!(warp.each_ref().map(|lane| lane.reg(1)), [11, 10, 13, 12]);
-        assert!(warp.iter().all(|lane| lane.pred(0)), "every lane was in bounds");
+        assert!(
+            warp.iter().all(|lane| lane.pred(0)),
+            "every lane was in bounds"
+        );
     }
 
     /// A lane the clamp puts out of reach keeps its own value, and says so in
@@ -2529,7 +3024,13 @@ mod tests {
         let program = prog(&[
             Op::S2r { dst: 5, sr: 0x00 },
             // 0xe4 is the identity swizzle: lane n takes code n.
-            Op::Fswzadd { dst: 0, a: 1, b: 2, swizzle: 0xe4, ftz: false },
+            Op::Fswzadd {
+                dst: 0,
+                a: 1,
+                b: 2,
+                swizzle: 0xe4,
+                ftz: false,
+            },
             Op::Exit,
         ]);
 
@@ -2559,7 +3060,12 @@ mod tests {
         writer
             .execute(
                 &prog(&[
-                    Op::Sts { addr: 4, offset: 4, src: 5, size: MemSize::B32 },
+                    Op::Sts {
+                        addr: 4,
+                        offset: 4,
+                        src: 5,
+                        size: MemSize::B32,
+                    },
                     Op::Exit,
                 ]),
                 &env,
@@ -2570,7 +3076,12 @@ mod tests {
         reader
             .execute(
                 &prog(&[
-                    Op::Lds { dst: 0, addr: RZ, offset: 12, size: MemSize::B32 },
+                    Op::Lds {
+                        dst: 0,
+                        addr: RZ,
+                        offset: 12,
+                        size: MemSize::B32,
+                    },
                     Op::Exit,
                 ]),
                 &env,
@@ -2585,7 +3096,15 @@ mod tests {
         // no constant source is exercised — this is purely the interpreter's
         // execute loop, independent of the decoder and of any real shader.
         let program = prog(&[
-            Op::Fmul { dst: 2, a: 0, b: Operand::Reg(1), bm: FMod::NONE, ftz: true, sat: false, scale: FmulScale::None },
+            Op::Fmul {
+                dst: 2,
+                a: 0,
+                b: Operand::Reg(1),
+                bm: FMod::NONE,
+                ftz: true,
+                sat: false,
+                scale: FmulScale::None,
+            },
             Op::Ffma {
                 dst: 3,
                 a: 2,
@@ -2602,7 +3121,8 @@ mod tests {
         inv.set_reg_f32(0, 2.0);
         inv.set_reg_f32(1, 3.0);
 
-        inv.execute(&program, &Env::new(&no_consts(), &NoTextures)).unwrap();
+        inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .unwrap();
 
         assert_eq!(inv.reg_f32(2), 6.0);
         assert_eq!(inv.reg_f32(3), 20.0);
@@ -2626,13 +3146,38 @@ mod tests {
     fn a_guard_predicate_skips_the_instruction() {
         // r1 = 1.0 always; r2 = 2.0 only if p0; r3 = 3.0 only if !p0.
         let program = prog_at(&[
-            (Op::Mov32i { dst: 1, imm: 1.0f32.to_bits() }, Pred::ALWAYS),
-            (Op::Mov32i { dst: 2, imm: 2.0f32.to_bits() }, Pred { reg: 0, negate: false }),
-            (Op::Mov32i { dst: 3, imm: 3.0f32.to_bits() }, Pred { reg: 0, negate: true }),
+            (
+                Op::Mov32i {
+                    dst: 1,
+                    imm: 1.0f32.to_bits(),
+                },
+                Pred::ALWAYS,
+            ),
+            (
+                Op::Mov32i {
+                    dst: 2,
+                    imm: 2.0f32.to_bits(),
+                },
+                Pred {
+                    reg: 0,
+                    negate: false,
+                },
+            ),
+            (
+                Op::Mov32i {
+                    dst: 3,
+                    imm: 3.0f32.to_bits(),
+                },
+                Pred {
+                    reg: 0,
+                    negate: true,
+                },
+            ),
             (Op::Exit, Pred::ALWAYS),
         ]);
         let mut inv = Invocation::new();
-        inv.execute(&program, &Env::new(&no_consts(), &NoTextures)).unwrap();
+        inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .unwrap();
         // p0 starts false.
         assert_eq!(inv.reg_f32(1), 1.0);
         assert_eq!(inv.reg(2), 0, "a false guard must skip the write");
@@ -2659,11 +3204,17 @@ mod tests {
                 Pred::ALWAYS,
             ),
             // @!p0 bra else
-            (Op::Bra { target: 0x30 }, Pred { reg: 0, negate: true }),
+            (
+                Op::Bra { target: 0x30 },
+                Pred {
+                    reg: 0,
+                    negate: true,
+                },
+            ),
             (Op::Mov32i { dst: 2, imm: 10 }, Pred::ALWAYS),
             (Op::Bra { target: 0x38 }, Pred::ALWAYS), // skip the else
             (Op::Mov32i { dst: 2, imm: 20 }, Pred::ALWAYS), // else, at 0x30
-            (Op::Exit, Pred::ALWAYS),                       // at 0x38
+            (Op::Exit, Pred::ALWAYS),                 // at 0x38
         ]);
         // Offset 0x20 is a `sched` control word, not an instruction slot.
         let offsets: Vec<u32> = (0..program.len()).map(|i| program.offset(i)).collect();
@@ -2672,13 +3223,17 @@ mod tests {
         let mut taken = Invocation::new();
         taken.set_reg(0, 1);
         taken.set_reg(1, 2);
-        taken.execute(&program, &Env::new(&no_consts(), &NoTextures)).unwrap();
+        taken
+            .execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .unwrap();
         assert_eq!(taken.reg(2), 10);
 
         let mut not_taken = Invocation::new();
         not_taken.set_reg(0, 5);
         not_taken.set_reg(1, 2);
-        not_taken.execute(&program, &Env::new(&no_consts(), &NoTextures)).unwrap();
+        not_taken
+            .execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .unwrap();
         assert_eq!(not_taken.reg(2), 20);
     }
 
@@ -2689,7 +3244,15 @@ mod tests {
             (Op::Mov32i { dst: 1, imm: 0 }, Pred::ALWAYS),
             // loop body, at 0x10
             (
-                Op::Iadd { dst: 1, a: 1, aneg: false, b: Operand::Imm(1), bneg: false, cin: false, cout: false },
+                Op::Iadd {
+                    dst: 1,
+                    a: 1,
+                    aneg: false,
+                    b: Operand::Imm(1),
+                    bneg: false,
+                    cin: false,
+                    cout: false,
+                },
                 Pred::ALWAYS,
             ),
             (
@@ -2705,11 +3268,18 @@ mod tests {
                 },
                 Pred::ALWAYS,
             ),
-            (Op::Bra { target: 0x10 }, Pred { reg: 0, negate: false }),
+            (
+                Op::Bra { target: 0x10 },
+                Pred {
+                    reg: 0,
+                    negate: false,
+                },
+            ),
             (Op::Exit, Pred::ALWAYS),
         ]);
         let mut inv = Invocation::new();
-        inv.execute(&program, &Env::new(&no_consts(), &NoTextures)).unwrap();
+        inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .unwrap();
         assert_eq!(inv.reg(1), 4);
     }
 
@@ -2723,7 +3293,8 @@ mod tests {
             (Op::Exit, Pred::ALWAYS),
         ]);
         let mut inv = Invocation::new();
-        inv.execute(&program, &Env::new(&no_consts(), &NoTextures)).unwrap();
+        inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .unwrap();
         assert_eq!(inv.reg(1), 7);
         assert_eq!(inv.reg(2), 9);
     }
@@ -2732,14 +3303,17 @@ mod tests {
     fn a_program_that_never_exits_fails_instead_of_hanging() {
         let program = prog_at(&[(Op::Bra { target: 0x08 }, Pred::ALWAYS)]);
         let mut inv = Invocation::new();
-        assert!(inv.execute(&program, &Env::new(&no_consts(), &NoTextures)).is_err());
+        assert!(inv
+            .execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .is_err());
     }
 
     #[test]
     fn kil_discards_the_fragment() {
         let program = prog_at(&[(Op::Kil, Pred::ALWAYS), (Op::Exit, Pred::ALWAYS)]);
         let mut inv = Invocation::new();
-        inv.execute(&program, &Env::new(&no_consts(), &NoTextures)).unwrap();
+        inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .unwrap();
         assert!(inv.discarded);
     }
 
@@ -2749,8 +3323,23 @@ mod tests {
         // and a float three instructions later, so an integer op must not
         // round-trip through f32.
         let program = prog_at(&[
-            (Op::Mov32i { dst: 0, imm: 0x1234_5678 }, Pred::ALWAYS),
-            (Op::Shr { dst: 1, a: 0, b: Operand::Imm(16), signed: false, wrap: false }, Pred::ALWAYS),
+            (
+                Op::Mov32i {
+                    dst: 0,
+                    imm: 0x1234_5678,
+                },
+                Pred::ALWAYS,
+            ),
+            (
+                Op::Shr {
+                    dst: 1,
+                    a: 0,
+                    b: Operand::Imm(16),
+                    signed: false,
+                    wrap: false,
+                },
+                Pred::ALWAYS,
+            ),
             (
                 Op::Lop {
                     dst: 2,
@@ -2763,11 +3352,23 @@ mod tests {
                 },
                 Pred::ALWAYS,
             ),
-            (Op::Iadd { dst: 3, a: 1, aneg: false, b: Operand::Reg(2), bneg: false, cin: false, cout: false }, Pred::ALWAYS),
+            (
+                Op::Iadd {
+                    dst: 3,
+                    a: 1,
+                    aneg: false,
+                    b: Operand::Reg(2),
+                    bneg: false,
+                    cin: false,
+                    cout: false,
+                },
+                Pred::ALWAYS,
+            ),
             (Op::Exit, Pred::ALWAYS),
         ]);
         let mut inv = Invocation::new();
-        inv.execute(&program, &Env::new(&no_consts(), &NoTextures)).unwrap();
+        inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .unwrap();
         assert_eq!(inv.reg(1), 0x1234);
         assert_eq!(inv.reg(2), 0x5678);
         assert_eq!(inv.reg(3), 0x1234 + 0x5678);
@@ -2786,7 +3387,13 @@ mod tests {
     #[test]
     fn conversions_round_the_way_the_instruction_asks() {
         let program = prog_at(&[
-            (Op::Mov32i { dst: 0, imm: (-2.5f32).to_bits() }, Pred::ALWAYS),
+            (
+                Op::Mov32i {
+                    dst: 0,
+                    imm: (-2.5f32).to_bits(),
+                },
+                Pred::ALWAYS,
+            ),
             (
                 Op::F2i {
                     dst: 1,
@@ -2825,7 +3432,8 @@ mod tests {
             (Op::Exit, Pred::ALWAYS),
         ]);
         let mut inv = Invocation::new();
-        inv.execute(&program, &Env::new(&no_consts(), &NoTextures)).unwrap();
+        inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .unwrap();
         assert_eq!(inv.reg(1) as i32, -2);
         assert_eq!(inv.reg(2) as i32, -3);
         assert_eq!(inv.reg_f32(3), -2.0);
@@ -2834,7 +3442,15 @@ mod tests {
     #[test]
     fn rz_reads_as_zero_and_discards_writes() {
         let program = prog(&[
-            Op::Fmul { dst: 0xff, a: 0, b: Operand::Reg(1), bm: FMod::NONE, ftz: true, sat: false, scale: FmulScale::None },
+            Op::Fmul {
+                dst: 0xff,
+                a: 0,
+                b: Operand::Reg(1),
+                bm: FMod::NONE,
+                ftz: true,
+                sat: false,
+                scale: FmulScale::None,
+            },
             Op::Ffma {
                 dst: 2,
                 a: 0xff,
@@ -2852,7 +3468,8 @@ mod tests {
         inv.set_reg_f32(1, 3.0);
         inv.set_reg_f32(5, 7.0);
 
-        inv.execute(&program, &Env::new(&no_consts(), &NoTextures)).unwrap();
+        inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .unwrap();
 
         // dst=RZ: the write to r255 is discarded, not aliased to some slot.
         assert_eq!(inv.reg_f32(2), 0.0 * 3.0 + 7.0);
@@ -2881,20 +3498,30 @@ mod tests {
 
         let mut consts = HashMap::new();
         let handle = 7u32 | (2u32 << 20); // imageId=7, samplerId=2
-        // The immediate 0x20 is a dword index, so the handle is 0x80 bytes in
-        // — putting it at 0x20 instead is what made every draw in a page of
-        // text resolve to the same texture.
-        consts.insert((crate::gpu::texture::NOUVEAU_TEX_CB_INDEX, 0x80), f32::from_bits(handle));
-        consts.insert((crate::gpu::texture::NOUVEAU_TEX_CB_INDEX, 0x20), f32::from_bits(99));
+                                          // The immediate 0x20 is a dword index, so the handle is 0x80 bytes in
+                                          // — putting it at 0x20 instead is what made every draw in a page of
+                                          // text resolve to the same texture.
+        consts.insert(
+            (crate::gpu::texture::NOUVEAU_TEX_CB_INDEX, 0x80),
+            f32::from_bits(handle),
+        );
+        consts.insert(
+            (crate::gpu::texture::NOUVEAU_TEX_CB_INDEX, 0x20),
+            f32::from_bits(99),
+        );
 
         let textures = RecordingTextures {
             calls: RefCell::new(Vec::new()),
             color: [0.1, 0.2, 0.3, 0.4],
         };
 
-        inv.execute(&program, &Env::new(&consts, &textures)).unwrap();
+        inv.execute(&program, &Env::new(&consts, &textures))
+            .unwrap();
 
-        assert_eq!(textures.calls.borrow().as_slice(), &[(handle, 0.25, 0.75, 0)]);
+        assert_eq!(
+            textures.calls.borrow().as_slice(),
+            &[(handle, 0.25, 0.75, 0)]
+        );
         assert_eq!(inv.reg_f32(2), 0.1);
         assert_eq!(inv.reg_f32(3), 0.2);
         assert_eq!(inv.reg_f32(4), 0.3);
@@ -2950,7 +3577,8 @@ mod tests {
         inv.attr_in.set(0x88, color[2] / w);
         inv.attr_in.set(0x8c, color[3] / w);
 
-        inv.execute(&program, &Env::new(&no_consts(), &NoTextures)).unwrap();
+        inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
+            .unwrap();
 
         // Fragment output RT0 is registers r0-r3.
         assert_eq!(inv.reg_f32(0), color[0]);
@@ -3048,7 +3676,8 @@ mod tests {
         inv.attr_in.set(0x98, color[2]);
         inv.attr_in.set(0x9c, color[3]);
 
-        inv.execute(&program, &Env::new(&consts, &NoTextures)).unwrap();
+        inv.execute(&program, &Env::new(&consts, &NoTextures))
+            .unwrap();
 
         let expected = [
             (0..4).map(|c| m[0][c] * pos[c]).sum::<f32>(),
@@ -3078,18 +3707,42 @@ mod tests {
         mem.map_zero(0x5000_0000, 0x1000).unwrap();
         let mut vmm = AddressSpace::new();
         let gpu_va = vmm
-            .map(0x5000_0000, 0x1000, 1, 0, crate::gpu::vmm::SMALL_PAGE_SIZE, 0, 0)
+            .map(
+                0x5000_0000,
+                0x1000,
+                1,
+                0,
+                crate::gpu::vmm::SMALL_PAGE_SIZE,
+                0,
+                0,
+            )
             .unwrap();
         vmm.write_u32(&mut mem, gpu_va + 0x10, 42.5f32.to_bits())
             .unwrap();
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
 
-        let bindings = |bank: u8| if bank == 2 { Some((gpu_va, 0x1000)) } else { None };
+        let bindings = |bank: u8| {
+            if bank == 2 {
+                Some((gpu_va, 0x1000))
+            } else {
+                None
+            }
+        };
         let cache = std::cell::RefCell::new(ConstCache::default());
-        let source = MemoryConstants { ctx: &ctx, bindings: &bindings, cache: &cache };
+        let source = MemoryConstants {
+            ctx: &ctx,
+            bindings: &bindings,
+            cache: &cache,
+        };
 
         assert_eq!(f32::from_bits(source.read_const(2, 0x10).unwrap()), 42.5);
         assert!(source.read_const(3, 0x10).is_err()); // unbound bank
@@ -3151,7 +3804,13 @@ mod tests {
 
         struct StubTex;
         impl TextureSource for StubTex {
-            fn sample(&self, _handle: u32, _u: f32, _v: f32, _layer: u32) -> ShaderResult<[f32; 4]> {
+            fn sample(
+                &self,
+                _handle: u32,
+                _u: f32,
+                _v: f32,
+                _layer: u32,
+            ) -> ShaderResult<[f32; 4]> {
                 Ok([0.2, 0.4, 0.6, 0.8])
             }
         }
@@ -3168,7 +3827,8 @@ mod tests {
         inv.attr_in.set(0x8c, color[3] / w);
 
         let no_consts: HashMap<(u8, u16), f32> = HashMap::new();
-        inv.execute(&program, &Env::new(&no_consts, &StubTex)).unwrap();
+        inv.execute(&program, &Env::new(&no_consts, &StubTex))
+            .unwrap();
 
         assert_eq!(inv.reg_f32(0), 0.2);
         assert_eq!(inv.reg_f32(1), 0.4);
@@ -3186,7 +3846,13 @@ mod tests {
         let sample = [0.25f32, 0.5, 0.75, 1.0];
         struct StubTex([f32; 4]);
         impl TextureSource for StubTex {
-            fn sample(&self, _handle: u32, _u: f32, _v: f32, _layer: u32) -> ShaderResult<[f32; 4]> {
+            fn sample(
+                &self,
+                _handle: u32,
+                _u: f32,
+                _v: f32,
+                _layer: u32,
+            ) -> ShaderResult<[f32; 4]> {
                 Ok(self.0)
             }
         }
@@ -3203,8 +3869,20 @@ mod tests {
         };
         let program = Compiled::new(&super::super::Program {
             insns: vec![
-                Instruction { pred: Pred { reg: 7, negate: false }, op: texs },
-                Instruction { pred: Pred { reg: 7, negate: false }, op: Op::Exit },
+                Instruction {
+                    pred: Pred {
+                        reg: 7,
+                        negate: false,
+                    },
+                    op: texs,
+                },
+                Instruction {
+                    pred: Pred {
+                        reg: 7,
+                        negate: false,
+                    },
+                    op: Op::Exit,
+                },
             ],
             offsets: vec![8, 0x10],
             ..Default::default()
@@ -3212,7 +3890,8 @@ mod tests {
 
         let no_consts: HashMap<(u8, u16), f32> = HashMap::new();
         let mut inv = Invocation::new();
-        inv.execute(&program, &Env::new(&no_consts, &StubTex(sample))).unwrap();
+        inv.execute(&program, &Env::new(&no_consts, &StubTex(sample)))
+            .unwrap();
 
         // Two registers, not four: r1 holds (r, g) and r0 holds (b, a).
         assert_eq!(inv.reg(1), halves(sample[0], sample[1]));
@@ -3223,14 +3902,23 @@ mod tests {
     fn an_odd_channel_count_pads_its_second_half_with_zero() {
         struct StubTex;
         impl TextureSource for StubTex {
-            fn sample(&self, _handle: u32, _u: f32, _v: f32, _layer: u32) -> ShaderResult<[f32; 4]> {
+            fn sample(
+                &self,
+                _handle: u32,
+                _u: f32,
+                _v: f32,
+                _layer: u32,
+            ) -> ShaderResult<[f32; 4]> {
                 Ok([0.25, 0.5, 0.75, 1.0])
             }
         }
         let program = Compiled::new(&super::super::Program {
             insns: vec![
                 Instruction {
-                    pred: Pred { reg: 7, negate: false },
+                    pred: Pred {
+                        reg: 7,
+                        negate: false,
+                    },
                     op: Op::Texs {
                         dst: 2,
                         dst2: 4,
@@ -3241,7 +3929,13 @@ mod tests {
                         f16: true,
                     },
                 },
-                Instruction { pred: Pred { reg: 7, negate: false }, op: Op::Exit },
+                Instruction {
+                    pred: Pred {
+                        reg: 7,
+                        negate: false,
+                    },
+                    op: Op::Exit,
+                },
             ],
             offsets: vec![8, 0x10],
             ..Default::default()
@@ -3249,7 +3943,8 @@ mod tests {
 
         let no_consts: HashMap<(u8, u16), f32> = HashMap::new();
         let mut inv = Invocation::new();
-        inv.execute(&program, &Env::new(&no_consts, &StubTex)).unwrap();
+        inv.execute(&program, &Env::new(&no_consts, &StubTex))
+            .unwrap();
         assert_eq!(inv.reg(2), halves(0.25, 0.5));
         assert_eq!(inv.reg(4), halves(0.75, 0.0));
     }
@@ -3337,19 +4032,44 @@ mod tests {
     #[test]
     fn a_merging_half_op_keeps_the_half_it_does_not_write() {
         let inv = run_half(
-            &[(0, halves(7.0, 9.0)), (1, halves(1.0, 2.0)), (2, halves(0.5, -4.0))],
-            &[hadd2(0, 1, 2, HSwizzle::H1H0, HSwizzle::H1H0, HMerge::MrgH0)],
+            &[
+                (0, halves(7.0, 9.0)),
+                (1, halves(1.0, 2.0)),
+                (2, halves(0.5, -4.0)),
+            ],
+            &[hadd2(
+                0,
+                1,
+                2,
+                HSwizzle::H1H0,
+                HSwizzle::H1H0,
+                HMerge::MrgH0,
+            )],
         );
         assert_eq!(lanes(inv.reg(0)), [1.5, 9.0]);
 
         let inv = run_half(
-            &[(0, halves(7.0, 9.0)), (1, halves(1.0, 2.0)), (2, halves(0.5, -4.0))],
-            &[hadd2(0, 1, 2, HSwizzle::H1H0, HSwizzle::H1H0, HMerge::MrgH1)],
+            &[
+                (0, halves(7.0, 9.0)),
+                (1, halves(1.0, 2.0)),
+                (2, halves(0.5, -4.0)),
+            ],
+            &[hadd2(
+                0,
+                1,
+                2,
+                HSwizzle::H1H0,
+                HSwizzle::H1H0,
+                HMerge::MrgH1,
+            )],
         );
         assert_eq!(lanes(inv.reg(0)), [7.0, -2.0]);
 
         let merging = hadd2(3, 1, 2, HSwizzle::H1H0, HSwizzle::H1H0, HMerge::MrgH1);
-        assert!(reads(&merging).contains(&3), "a merge reads its destination back");
+        assert!(
+            reads(&merging).contains(&3),
+            "a merge reads its destination back"
+        );
         let whole = hadd2(3, 1, 2, HSwizzle::H1H0, HSwizzle::H1H0, HMerge::H1H0);
         assert!(!reads(&whole).contains(&3), "a full write does not");
     }
@@ -3357,7 +4077,11 @@ mod tests {
     #[test]
     fn a_half_multiply_add_runs_per_lane() {
         let inv = run_half(
-            &[(1, halves(2.0, 3.0)), (2, halves(4.0, 5.0)), (3, halves(1.0, -1.0))],
+            &[
+                (1, halves(2.0, 3.0)),
+                (2, halves(4.0, 5.0)),
+                (3, halves(1.0, -1.0)),
+            ],
             &[Op::Hfma2 {
                 dst: 0,
                 a: 1,
@@ -3457,14 +4181,21 @@ mod tests {
     fn ftz_flushes_a_subnormal_half_but_not_a_small_float() {
         let subnormal = f16_to_f32(0x0001);
         let mut add = hadd2(0, 1, 2, HSwizzle::H1H0, HSwizzle::H1H0, HMerge::H1H0);
-        let Op::Hadd2 { ftz, .. } = &mut add else { unreachable!() };
+        let Op::Hadd2 { ftz, .. } = &mut add else {
+            unreachable!()
+        };
         *ftz = true;
-        let inv = run_half(&[(1, halves(subnormal, 1.0)), (2, halves(0.0, 0.0))], &[add]);
+        let inv = run_half(
+            &[(1, halves(subnormal, 1.0)), (2, halves(0.0, 0.0))],
+            &[add],
+        );
         assert_eq!(lanes(inv.reg(0)), [0.0, 1.0]);
 
         // The same instruction reading an f32 lane leaves that value alone.
         let mut add = hadd2(0, 1, 2, HSwizzle::F32, HSwizzle::F32, HMerge::F32);
-        let Op::Hadd2 { ftz, .. } = &mut add else { unreachable!() };
+        let Op::Hadd2 { ftz, .. } = &mut add else {
+            unreachable!()
+        };
         *ftz = true;
         let inv = run_half(&[(1, subnormal.to_bits()), (2, 0.0f32.to_bits())], &[add]);
         assert_eq!(f32::from_bits(inv.reg(0)), subnormal);

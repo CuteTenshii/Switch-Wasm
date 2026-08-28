@@ -118,7 +118,11 @@ fn solid_jpeg(size: u16, rgb: (u8, u8, u8)) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::new();
     out.extend_from_slice(&[0xFF, JPEG_SOI]);
     // APP0/JFIF: version 1.1, no density units, no thumbnail.
-    segment(&mut out, JPEG_APP0, b"JFIF\0\x01\x01\x00\x00\x01\x00\x01\x00\x00");
+    segment(
+        &mut out,
+        JPEG_APP0,
+        b"JFIF\0\x01\x01\x00\x00\x01\x00\x01\x00\x00",
+    );
     // One quantization table (id 0), 8-bit precision, used by all three
     // components.
     let mut quant = vec![0u8];
@@ -171,14 +175,22 @@ fn solid_jpeg(size: u16, rgb: (u8, u8, u8)) -> Vec<u8> {
             // component carries the whole value, every later one differs from
             // its predecessor by nothing.
             let diff = if mcu == 0 { component - 128 } else { 0 };
-            let category = if diff == 0 { 0 } else { 32 - diff.unsigned_abs().leading_zeros() };
+            let category = if diff == 0 {
+                0
+            } else {
+                32 - diff.unsigned_abs().leading_zeros()
+            };
             let (code, length) = code_for(&dc_codes, category as u8);
             bits.push(code, length);
             if category > 0 {
                 // A negative difference is sent as its one's complement in
                 // `category` bits, which is what makes the leading bit the
                 // sign.
-                let value = if diff > 0 { diff } else { diff + (1 << category) - 1 };
+                let value = if diff > 0 {
+                    diff
+                } else {
+                    diff + (1 << category) - 1
+                };
                 bits.push(value as u32, category);
             }
             // Every AC coefficient of a constant block is zero.
@@ -305,7 +317,9 @@ impl Cpu {
         }
         let object_id = self.ipc_domain_object_id(tls);
         let iface = if self.ipc_is_domain_request(tls) {
-            self.domain_interface(handle, object_id).unwrap_or("acc:u0").to_string()
+            self.domain_interface(handle, object_id)
+                .unwrap_or("acc:u0")
+                .to_string()
         } else {
             match self.service_name(handle) {
                 Some(name) => name.to_string(),
@@ -692,7 +706,11 @@ mod tests {
         acc(&mut cpu, "acc:u0", 2);
 
         assert_eq!(cpu.read_bytes(BUFFER, 16), super::ACCOUNT_UID.to_vec());
-        assert_eq!(cpu.read_bytes(BUFFER + 16, 0x30), vec![0u8; 0x30], "stale uids left behind");
+        assert_eq!(
+            cpu.read_bytes(BUFFER + 16, 0x30),
+            vec![0u8; 0x30],
+            "stale uids left behind"
+        );
     }
 
     #[test]
@@ -710,7 +728,10 @@ mod tests {
         // the one user's profile under someone else's id.
         let mut cpu = request(false, 5, &[0xAB; 16]);
         acc(&mut cpu, "acc:u0", 5);
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), super::ACCOUNT_USER_NOT_EXIST);
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            super::ACCOUNT_USER_NOT_EXIST
+        );
     }
 
     #[test]
@@ -728,7 +749,11 @@ mod tests {
         cpu.register_service_handle(9, "acc:profile");
         cpu.acc_request(TLS, 9, Some(0)).unwrap();
 
-        assert_eq!(cpu.read_bytes(BUFFER, 0x80), vec![0u8; 0x80], "userdata zeroed, not left as stack garbage");
+        assert_eq!(
+            cpu.read_bytes(BUFFER, 0x80),
+            vec![0u8; 0x80],
+            "userdata zeroed, not left as stack garbage"
+        );
         // ProfileBase: the uid, then the never-edited timestamp, then the
         // nickname.
         assert_eq!(cpu.read_bytes(TLS + 0x20, 16), super::ACCOUNT_UID.to_vec());
@@ -768,7 +793,11 @@ mod tests {
             let mut cpu = request(false, command, &0u64.to_le_bytes());
             cpu.register_service_handle(9, "acc:u0");
             cpu.acc_request(TLS, 9, Some(command)).unwrap();
-            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "command {command}");
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                0,
+                "command {command}"
+            );
         }
 
         // 141 is `ListQualifiedUsers`, and it is the one of these that answers
@@ -781,7 +810,11 @@ mod tests {
         cpu.acc_request(TLS, 9, Some(141)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
         assert_eq!(cpu.read_bytes(BUFFER, 16), super::ACCOUNT_UID.to_vec());
-        assert_eq!(cpu.read_bytes(BUFFER + 16, 0x30), vec![0u8; 0x30], "one user listed");
+        assert_eq!(
+            cpu.read_bytes(BUFFER + 16, 0x30),
+            vec![0u8; 0x30],
+            "one user listed"
+        );
     }
 
     #[test]
@@ -823,7 +856,9 @@ mod tests {
         assert!(advertised > 0, "an icon of no bytes is nothing to decode");
 
         let mut cpu = request_with_recv_buffer(11, &[], BUFFER, advertised);
-        cpu.mem.map_zero(BUFFER, advertised as usize + 0x100).unwrap();
+        cpu.mem
+            .map_zero(BUFFER, advertised as usize + 0x100)
+            .unwrap();
         cpu.register_service_handle(9, "acc:profile");
         cpu.acc_request(TLS, 9, Some(11)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), advertised);
@@ -956,7 +991,10 @@ mod tests {
         }
         let dc_table = &tables.iter().find(|(id, _)| *id == 0x00).unwrap().1;
         let ac_table = &tables.iter().find(|(id, _)| *id == 0x10).unwrap().1;
-        let mut reader = Reader { data: &scan, bit: 0 };
+        let mut reader = Reader {
+            data: &scan,
+            bit: 0,
+        };
 
         // Every block, in MCU order: a DC difference then an immediate
         // end-of-block, with the DC predictor carried per component.
@@ -980,7 +1018,11 @@ mod tests {
                     };
                 }
                 predictor[component] += diff;
-                assert_eq!(reader.symbol(ac_table), super::JPEG_EOB, "AC of a flat block");
+                assert_eq!(
+                    reader.symbol(ac_table),
+                    super::JPEG_EOB,
+                    "AC of a flat block"
+                );
 
                 // Dequantize and undo the level shift: the inverse DCT of a
                 // lone DC coefficient is that coefficient over 8, everywhere.
@@ -992,7 +1034,11 @@ mod tests {
                     1 => -0.168_736 * red - 0.331_264 * green + 0.5 * blue + 128.0,
                     _ => 0.5 * red - 0.418_688 * green - 0.081_312 * blue + 128.0,
                 };
-                assert_eq!(value, expected.round() as i32, "mcu {mcu} component {component}");
+                assert_eq!(
+                    value,
+                    expected.round() as i32,
+                    "mcu {mcu} component {component}"
+                );
             }
         }
         // Only the 1-padding of the last byte may be left over.

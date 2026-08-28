@@ -15,7 +15,12 @@ impl Cpu {
     /// Every one of them answers with a `u32` NvError (Open also returns the
     /// fd), and the ioctl argument struct travels as a map-alias buffer in
     /// each direction.
-    pub(super) fn nvdrv_request(&mut self, tls: u32, cmd_id: Option<u32>, _handle: u64) -> Result<()> {
+    pub(super) fn nvdrv_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+        _handle: u64,
+    ) -> Result<()> {
         // Control requests (message type 5) are session management, not the
         // nv interface. QueryPointerBufferSize must report 0 so libnx's
         // `SfBufferAttr_HipcAutoSelect` buffers are marshalled as map-alias
@@ -78,8 +83,14 @@ impl Cpu {
                 };
                 argp.resize(size, 0);
                 let mut inline_out = Vec::new();
-                let error =
-                    self.nv.ioctl(&mut self.mem, fd, request, &mut argp, &inline_in, &mut inline_out)?;
+                let error = self.nv.ioctl(
+                    &mut self.mem,
+                    fd,
+                    request,
+                    &mut argp,
+                    &inline_in,
+                    &mut inline_out,
+                )?;
                 if error != 0 && crate::env_flag!("TRACE_NV") {
                     eprintln!("[nv] ioctl fd={fd} request={request:#x} -> error {error}");
                 }

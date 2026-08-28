@@ -57,11 +57,15 @@ fn walk(dirs: &[u8], files: &[u8], data_offset: u64) -> Vec<Entry> {
     let mut out = Vec::new();
     let mut pending = vec![(0u32, String::new())];
     while let Some((dir_offset, prefix)) = pending.pop() {
-        let Some(dir) = entry(dirs, dir_offset, DIR_ENTRY_SIZE) else { continue };
+        let Some(dir) = entry(dirs, dir_offset, DIR_ENTRY_SIZE) else {
+            continue;
+        };
         let mut file_offset = read_u32(dir, 0x0C);
         while file_offset != INVALID_OFFSET && budget > 0 {
             budget -= 1;
-            let Some(file) = entry(files, file_offset, FILE_ENTRY_SIZE) else { break };
+            let Some(file) = entry(files, file_offset, FILE_ENTRY_SIZE) else {
+                break;
+            };
             out.push(Entry {
                 path: format!("{prefix}/{}", name(file, FILE_ENTRY_SIZE)),
                 start: data_offset + read_u64(file, 0x08),
@@ -72,8 +76,13 @@ fn walk(dirs: &[u8], files: &[u8], data_offset: u64) -> Vec<Entry> {
         let mut child_offset = read_u32(dir, 0x08);
         while child_offset != INVALID_OFFSET && budget > 0 {
             budget -= 1;
-            let Some(child) = entry(dirs, child_offset, DIR_ENTRY_SIZE) else { break };
-            pending.push((child_offset, format!("{prefix}/{}", name(child, DIR_ENTRY_SIZE))));
+            let Some(child) = entry(dirs, child_offset, DIR_ENTRY_SIZE) else {
+                break;
+            };
+            pending.push((
+                child_offset,
+                format!("{prefix}/{}", name(child, DIR_ENTRY_SIZE)),
+            ));
             child_offset = read_u32(child, 0x04);
         }
     }
@@ -103,7 +112,8 @@ fn main() {
     // whose keys are all in `prod.keys` should not have to name a file that
     // does not exist just to reach the fourth argument.
     let third = common::opt_arg(3);
-    let is_offsets = |s: &String| s.starts_with("0x") || s.starts_with(|c: char| c.is_ascii_digit());
+    let is_offsets =
+        |s: &String| s.starts_with("0x") || s.starts_with(|c: char| c.is_ascii_digit());
     let title = third.clone().filter(|s| !is_offsets(s));
     let wanted: Vec<u64> = third
         .filter(is_offsets)
@@ -122,7 +132,9 @@ fn main() {
         None => common::usage("this NCA has no RomFS section"),
     };
 
-    let header = romfs.read_vec(0, HEADER_SIZE).expect("read the RomFS header");
+    let header = romfs
+        .read_vec(0, HEADER_SIZE)
+        .expect("read the RomFS header");
     if read_u64(&header, 0) != HEADER_SIZE {
         common::usage("that section does not start with a RomFS header");
     }
@@ -154,7 +166,10 @@ fn main() {
     // come out of a trace, and one that lands in no file at all is a finding
     // rather than a typo.
     for at in wanted {
-        match entries.iter().find(|e| at >= e.start && at < e.start + e.size) {
+        match entries
+            .iter()
+            .find(|e| at >= e.start && at < e.start + e.size)
+        {
             Some(e) => println!(
                 "{at:#014x} -> {} +{:#x} (file at {:#x}, {:#x} bytes)",
                 e.path,

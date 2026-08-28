@@ -127,7 +127,11 @@ impl ExecCtx<'_> {
         mask: u128,
         count: u32,
     ) -> Result<()> {
-        let all = if unit >= 16 { u128::MAX } else { (1u128 << (unit * 8)) - 1 };
+        let all = if unit >= 16 {
+            u128::MAX
+        } else {
+            (1u128 << (unit * 8)) - 1
+        };
         if mask & all == all {
             return self.fill_pixels(gpu_va, unit, value, count);
         }

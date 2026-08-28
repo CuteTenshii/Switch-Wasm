@@ -197,7 +197,8 @@ impl Cpu {
                     if addr != 0 {
                         written = (size as usize / 8).min(available);
                         for index in 0..written {
-                            self.mem.write_u64(addr.wrapping_add((index * 8) as u32), code(index))?;
+                            self.mem
+                                .write_u64(addr.wrapping_add((index * 8) as u32), code(index))?;
                         }
                     }
                 }
@@ -247,9 +248,7 @@ impl Cpu {
                 let version = Self::firmware_version();
                 if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
                     if addr != 0 {
-                        for (index, &byte) in
-                            version.iter().take(size as usize).enumerate()
-                        {
+                        for (index, &byte) in version.iter().take(size as usize).enumerate() {
                             self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
                         }
                     }
@@ -272,9 +271,8 @@ impl Cpu {
                 const USER_ADDITION: u32 = 1 << 8;
                 const TIMESTAMP: u32 = 1 << 16;
                 let mut settings = [0u8; 0x20];
-                settings[..4].copy_from_slice(
-                    &(COMPLETION | USER_ADDITION | TIMESTAMP).to_le_bytes(),
-                );
+                settings[..4]
+                    .copy_from_slice(&(COMPLETION | USER_ADDITION | TIMESTAMP).to_le_bytes());
                 self.write_ipc_response(tls, 0, &[], &settings, &[])
             }
             // GetSerialNumber -> SetSysSerialNumber { char number[0x18] }.
@@ -311,7 +309,11 @@ impl Cpu {
             FIRMWARE_VERSION.0, FIRMWARE_VERSION.1, FIRMWARE_VERSION.2
         );
         write(0x68, &display, 0x18);
-        write(0x80, &format!("NintendoSDK Firmware for NX {display}-1.0"), 0x80);
+        write(
+            0x80,
+            &format!("NintendoSDK Firmware for NX {display}-1.0"),
+            0x80,
+        );
         version
     }
 
@@ -330,7 +332,12 @@ impl Cpu {
     /// A retail title asks for this early: "A Short Hike" opens all four
     /// aliases before it touches the filesystem, and `nnSdk` will not start an
     /// application it believes is restricted.
-    pub(super) fn pctl_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn pctl_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
@@ -348,7 +355,9 @@ impl Cpu {
         }
         let object_id = self.ipc_domain_object_id(tls);
         let iface = if self.ipc_is_domain_request(tls) {
-            self.domain_interface(handle, object_id).unwrap_or("pctl:factory").to_string()
+            self.domain_interface(handle, object_id)
+                .unwrap_or("pctl:factory")
+                .to_string()
         } else {
             match self.service_name(handle) {
                 // The root session is IParentalControlServiceFactory itself.
@@ -445,9 +454,7 @@ impl Cpu {
                 // (1453 says so), and a timer that is not running has no
                 // deadline: zero here would read as *time is up*, which is the
                 // restricted answer 1455 already denies.
-                Some(1454) => {
-                    self.write_ipc_response(tls, 0, &[], &i32::MAX.to_le_bytes(), &[])
-                }
+                Some(1454) => self.write_ipc_response(tls, 0, &[], &i32::MAX.to_le_bytes(), &[]),
                 // GetPlayTimerRemainingTimeDisplayInfo -> 0x18 bytes, whose
                 // fields nobody has named: Eden's `parental_control_service.cpp`
                 // records the width and writes none of it. Zeroed, like the
@@ -526,7 +533,11 @@ impl Cpu {
             // actually running at, which is the setting while the panel is on
             // and nothing at all while it is off.
             Some(5) => {
-                let applied = if self.backlight.on { self.backlight.setting } else { 0.0 };
+                let applied = if self.backlight.on {
+                    self.backlight.setting
+                } else {
+                    0.0
+                };
                 self.write_ipc_response(tls, 0, &[], &applied.to_bits().to_le_bytes(), &[])
             }
             // SwitchBacklightOn / SwitchBacklightOff, each taking the fade
@@ -536,8 +547,11 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             Some(8) => {
-                let status =
-                    if self.backlight.on { BACKLIGHT_ENABLED } else { BACKLIGHT_DISABLED };
+                let status = if self.backlight.on {
+                    BACKLIGHT_ENABLED
+                } else {
+                    BACKLIGHT_DISABLED
+                };
                 self.write_ipc_response(tls, 0, &[], &status.to_le_bytes(), &[])
             }
             // EnableDimming / DisableDimming / IsDimmingEnabled.
@@ -654,8 +668,17 @@ impl Cpu {
     /// with it. What is *not* modelled is an alarm ever firing: they are
     /// scheduled against a clock the console keeps while it sleeps, and this
     /// console does not sleep.
-    pub(super) fn notif_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
-        let root = if self.service_name(handle) == Some("notif:a") { "notif:a" } else { "notif:s" };
+    pub(super) fn notif_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        let root = if self.service_name(handle) == Some("notif:a") {
+            "notif:a"
+        } else {
+            "notif:s"
+        };
         if self.ipc_answer_control(tls, handle, root, cmd_id)? {
             return Ok(());
         }
@@ -677,9 +700,9 @@ impl Cpu {
             // and it is written back into the stored copy so the listing
             // agrees with what the caller was told.
             Some(500) => {
-                let setting = self.ipc_input_buffer(tls, 0).map(|(addr, size)| {
-                    self.read_bytes(addr, size.min(ALARM_SETTING_SIZE as u32))
-                });
+                let setting = self
+                    .ipc_input_buffer(tls, 0)
+                    .map(|(addr, size)| self.read_bytes(addr, size.min(ALARM_SETTING_SIZE as u32)));
                 let mut setting = setting.unwrap_or_default();
                 setting.resize(ALARM_SETTING_SIZE, 0);
                 let parameter = self
@@ -688,9 +711,12 @@ impl Cpu {
                     .unwrap_or_default();
                 let id = self.notif_next_alarm_id;
                 self.notif_next_alarm_id = self.notif_next_alarm_id.wrapping_add(1);
-                setting[ALARM_SETTING_ID..ALARM_SETTING_ID + 2]
-                    .copy_from_slice(&id.to_le_bytes());
-                self.notif_alarms.push(AlarmSetting { id, setting, parameter });
+                setting[ALARM_SETTING_ID..ALARM_SETTING_ID + 2].copy_from_slice(&id.to_le_bytes());
+                self.notif_alarms.push(AlarmSetting {
+                    id,
+                    setting,
+                    parameter,
+                });
                 self.write_ipc_response(tls, 0, &[], &id.to_le_bytes(), &[])
             }
             // UpdateAlarmSetting(AlarmSetting, ApplicationParameter): the
@@ -698,9 +724,7 @@ impl Cpu {
             Some(510) => {
                 let setting = self
                     .ipc_input_buffer(tls, 0)
-                    .map(|(addr, size)| {
-                        self.read_bytes(addr, size.min(ALARM_SETTING_SIZE as u32))
-                    })
+                    .map(|(addr, size)| self.read_bytes(addr, size.min(ALARM_SETTING_SIZE as u32)))
                     .unwrap_or_default();
                 let parameter = self
                     .ipc_input_buffer(tls, 1)
@@ -842,7 +866,9 @@ mod tests {
         // The display strings agree with the numbers above them.
         let display = format!("{major}.{minor}.{micro}");
         assert_eq!(cpu.read_string(BUFFER + 0x68, 0x18), display);
-        assert!(cpu.read_string(BUFFER + 0x80, 0x80).ends_with(&format!("{display}-1.0")));
+        assert!(cpu
+            .read_string(BUFFER + 0x80, 0x80)
+            .ends_with(&format!("{display}-1.0")));
     }
 
     #[test]
@@ -866,7 +892,11 @@ mod tests {
         cpu.register_service_handle(9, "set");
         cpu.set_request(TLS, 9, Some(1)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 15, "the pre-4.0.0 count");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            15,
+            "the pre-4.0.0 count"
+        );
         assert_eq!(&cpu.read_bytes(BUFFER, 2), b"ja");
         assert_eq!(&cpu.read_bytes(BUFFER + 8, 5), b"en-US");
         assert_eq!(&cpu.read_bytes(BUFFER + 13 * 8, 5), b"fr-CA");
@@ -885,7 +915,14 @@ mod tests {
         cpu.register_service_handle(9, "set");
         cpu.set_request(TLS, 9, Some(3)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-        assert_eq!(cpu.mem.read_u16(TLS + 0x20).unwrap(), super::SET_POINTER_BUFFER_SIZE);
-        assert_ne!(cpu.mem.read_u16(TLS + 0x20).unwrap(), 18, "the language-code count");
+        assert_eq!(
+            cpu.mem.read_u16(TLS + 0x20).unwrap(),
+            super::SET_POINTER_BUFFER_SIZE
+        );
+        assert_ne!(
+            cpu.mem.read_u16(TLS + 0x20).unwrap(),
+            18,
+            "the language-code count"
+        );
     }
 }

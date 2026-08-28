@@ -84,7 +84,11 @@ impl Cpu {
             }
             Some(GET_CHARGER_TYPE) => {
                 let (_, charging) = self.battery();
-                let charger = if charging { CHARGER_ENOUGH_POWER } else { CHARGER_UNCONNECTED };
+                let charger = if charging {
+                    CHARGER_ENOUGH_POWER
+                } else {
+                    CHARGER_UNCONNECTED
+                };
                 self.write_ipc_response(tls, 0, &[], &charger.to_le_bytes(), &[])
             }
             // EnableBatteryCharging/DisableBatteryCharging: accepted, but
@@ -93,9 +97,7 @@ impl Cpu {
             Some(ENABLE_BATTERY_CHARGING) | Some(DISABLE_BATTERY_CHARGING) => {
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            Some(IS_BATTERY_CHARGING_ENABLED) => {
-                self.write_ipc_response(tls, 0, &[], &[1u8], &[])
-            }
+            Some(IS_BATTERY_CHARGING_ENABLED) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
             Some(OPEN_SESSION) => {
                 self.reply_with_interface(tls, handle, "psm-session")?;
                 Ok(())
@@ -218,7 +220,11 @@ impl Cpu {
         const PCV_MODULE_CPU_BUS: u32 = 0;
         const PCV_MODULE_GPU: u32 = 1;
         const PCV_MODULE_EMC: u32 = 0x38;
-        let module = if code >= 0x4000_0000 { (code & 0xFF).wrapping_sub(1) } else { code };
+        let module = if code >= 0x4000_0000 {
+            (code & 0xFF).wrapping_sub(1)
+        } else {
+            code
+        };
         match module {
             PCV_MODULE_CPU_BUS => 0,
             PCV_MODULE_GPU => 1,
@@ -288,7 +294,9 @@ impl Cpu {
         // A session reached over either route — its own handle, or an object
         // id on a domain — is a different interface from the server.
         let iface = if self.ipc_is_domain_request(tls) {
-            self.domain_interface(handle, object_id).unwrap_or("ts").to_string()
+            self.domain_interface(handle, object_id)
+                .unwrap_or("ts")
+                .to_string()
         } else {
             self.service_name(handle).unwrap_or("ts").to_string()
         };
@@ -405,7 +413,9 @@ impl Cpu {
         }
         let object_id = self.ipc_domain_object_id(tls);
         let iface = if self.ipc_is_domain_request(tls) {
-            self.domain_interface(handle, object_id).unwrap_or("apm").to_string()
+            self.domain_interface(handle, object_id)
+                .unwrap_or("apm")
+                .to_string()
         } else {
             match self.service_name(handle) {
                 Some(name) => name.to_string(),
@@ -470,7 +480,8 @@ impl Cpu {
                 // ApmPerformanceConfiguration, for the mode the console is
                 // actually in.
                 Some(7) => {
-                    let configuration = self.apm_configuration(APM_PERFORMANCE_MODE_NORMAL as usize);
+                    let configuration =
+                        self.apm_configuration(APM_PERFORMANCE_MODE_NORMAL as usize);
                     self.write_ipc_response(tls, 0, &[], &configuration.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
@@ -509,9 +520,13 @@ impl Cpu {
         }
         let object_id = self.ipc_domain_object_id(tls);
         let iface = if self.ipc_is_domain_request(tls) {
-            self.domain_interface(handle, object_id).unwrap_or("psc:service").to_string()
+            self.domain_interface(handle, object_id)
+                .unwrap_or("psc:service")
+                .to_string()
         } else {
-            self.service_name(handle).unwrap_or("psc:service").to_string()
+            self.service_name(handle)
+                .unwrap_or("psc:service")
+                .to_string()
         };
         match iface.as_str() {
             // IPmService::GetPmModule -> IPmModule.
@@ -559,7 +574,12 @@ impl Cpu {
     /// rather than cosmetic: the buttons are active-low, and boot2 enters
     /// maintenance mode when *both* volume pads read Low, so answering 0 here
     /// boots this console into maintenance mode every single time.
-    pub(super) fn gpio_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn gpio_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         /// `GpioValue::High`, the level a pad with nothing pulling it down
         /// sits at — which is what an unpressed active-low button looks like.
         const HIGH: u32 = 1;
@@ -576,7 +596,9 @@ impl Cpu {
         }
         let object_id = self.ipc_domain_object_id(tls);
         let iface = if self.ipc_is_domain_request(tls) {
-            self.domain_interface(handle, object_id).unwrap_or("gpio").to_string()
+            self.domain_interface(handle, object_id)
+                .unwrap_or("gpio")
+                .to_string()
         } else {
             self.service_name(handle).unwrap_or("gpio").to_string()
         };
@@ -597,7 +619,9 @@ impl Cpu {
                     self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
                 }
                 // GetValue / GetValueForSleepState -> GpioValue.
-                Some(9) | Some(17) => self.write_ipc_response(tls, 0, &[], &HIGH.to_le_bytes(), &[]),
+                Some(9) | Some(17) => {
+                    self.write_ipc_response(tls, 0, &[], &HIGH.to_le_bytes(), &[])
+                }
                 // BindInterrupt -> the event the pad's interrupt signals.
                 // Handed out and never signalled, because nothing drives it.
                 Some(10) => {
@@ -649,11 +673,19 @@ mod tests {
         let mut cpu = request(false, 1, &[]);
         cpu.set_battery(42, false);
         cpu.psm_request(TLS, Some(1), 9).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "not charging -> Unconnected");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            0,
+            "not charging -> Unconnected"
+        );
 
         cpu.set_battery(100, true);
         cpu.psm_request(TLS, Some(1), 9).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "charging -> EnoughPower");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            1,
+            "charging -> EnoughPower"
+        );
     }
 
     #[test]
@@ -662,14 +694,19 @@ mod tests {
         // NX-Fetch asks for 0x41000002 and labels what comes back "CPU", so
         // reading the *low* byte handed it the PCB's temperature under the
         // SoC's name.
-        for (device_code, expected) in
-            [(0x4100_0002u32, "ts:session-internal"), (0x4300_0001, "ts:session-external")]
-        {
+        for (device_code, expected) in [
+            (0x4100_0002u32, "ts:session-internal"),
+            (0x4300_0001, "ts:session-external"),
+        ] {
             let mut cpu = request(false, 4, &device_code.to_le_bytes());
             cpu.register_service_handle(9, "ts");
             cpu.ts_request(TLS, 9, Some(4)).unwrap();
             let session = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
-            assert_eq!(cpu.service_name(session), Some(expected), "{device_code:#x}");
+            assert_eq!(
+                cpu.service_name(session),
+                Some(expected),
+                "{device_code:#x}"
+            );
         }
     }
 
@@ -686,9 +723,7 @@ mod tests {
             let mut cpu = request(false, 4, &[]);
             cpu.register_service_handle(9, iface);
             cpu.ts_request(TLS, 9, Some(4)).unwrap();
-            let reading = f32::from_le_bytes(
-                cpu.read_bytes(TLS + 0x20, 4).try_into().unwrap(),
-            );
+            let reading = f32::from_le_bytes(cpu.read_bytes(TLS + 0x20, 4).try_into().unwrap());
             assert_eq!(reading, expected as f32, "{iface}");
         }
     }
@@ -715,7 +750,10 @@ mod tests {
             cpu.ts_request(TLS, 9, Some(0)).unwrap();
             let low = cpu.mem.read_u32(TLS + 0x20).unwrap() as i32;
             let high = cpu.mem.read_u32(TLS + 0x24).unwrap() as i32;
-            assert!(low <= celsius && celsius <= high, "{celsius} outside {low}..={high}");
+            assert!(
+                low <= celsius && celsius <= high,
+                "{celsius} outside {low}..={high}"
+            );
         }
     }
 
@@ -757,7 +795,10 @@ mod tests {
         let mut cpu2 = request(false, 3, &0u32.to_le_bytes());
         cpu2.register_service_handle(9, "pcv");
         cpu2.pcv_request(TLS, 9, Some(3)).unwrap();
-        assert_eq!(cpu2.mem.read_u32(TLS + 0x20).unwrap(), super::CLOCK_RATES_HZ[0]);
+        assert_eq!(
+            cpu2.mem.read_u32(TLS + 0x20).unwrap(),
+            super::CLOCK_RATES_HZ[0]
+        );
     }
 
     #[test]
@@ -799,7 +840,10 @@ mod tests {
         // separate settings.
         write_request(&mut cpu, 1, &0u32.to_le_bytes());
         cpu.apm_request(TLS, session, Some(1)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), super::APM_DEFAULT_CONFIGURATION[0]);
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            super::APM_DEFAULT_CONFIGURATION[0]
+        );
         assert_ne!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "0 is Invalid");
     }
 }

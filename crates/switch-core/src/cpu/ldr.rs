@@ -88,7 +88,10 @@ impl Cpu {
         let data = self.ipc_request_data(tls);
         let mut args = [0u64; 4];
         for (index, arg) in args.iter_mut().enumerate() {
-            *arg = self.mem.read_u64(data.wrapping_add(8 * (index as u32 + 1))).unwrap_or(0);
+            *arg = self
+                .mem
+                .read_u64(data.wrapping_add(8 * (index as u32 + 1)))
+                .unwrap_or(0);
         }
         match cmd_id {
             // LoadModule(pid, nro_address, nro_size, bss_address, bss_size)
@@ -208,7 +211,8 @@ impl Cpu {
         self.mem.map(base, &mapped)?;
         let text = (
             base.wrapping_add(header.text_offset),
-            base.wrapping_add(header.text_offset).wrapping_add(header.text_size),
+            base.wrapping_add(header.text_offset)
+                .wrapping_add(header.text_size),
         );
         // `.text` is never a relocation target, and a real kernel maps an
         // NRO's code segment read-execute — so a write into it is a bug worth
@@ -221,12 +225,20 @@ impl Cpu {
         // `Memory::mark_module`.
         self.mem.mark_module(
             (text.0, base.wrapping_add(header.data_offset)),
-            (base.wrapping_add(header.data_offset), base.wrapping_add(size)),
+            (
+                base.wrapping_add(header.data_offset),
+                base.wrapping_add(size),
+            ),
             true,
         );
         self.ro_modules.insert(
             base,
-            RoModule { source: nro_address as u32, base, size, text },
+            RoModule {
+                source: nro_address as u32,
+                base,
+                size,
+                text,
+            },
         );
         self.diagnostic(&format!(
             "[ro] mapped the module at {nro_address:#010x} to {base:#010x}: text \
@@ -235,9 +247,11 @@ impl Cpu {
             text.0,
             text.1,
             base.wrapping_add(header.ro_offset),
-            base.wrapping_add(header.ro_offset).wrapping_add(header.ro_size),
+            base.wrapping_add(header.ro_offset)
+                .wrapping_add(header.ro_size),
             base.wrapping_add(header.data_offset),
-            base.wrapping_add(header.data_offset).wrapping_add(header.data_size),
+            base.wrapping_add(header.data_offset)
+                .wrapping_add(header.data_size),
             base.wrapping_add(nro_size as u32),
             base.wrapping_add(size),
         ));
@@ -259,13 +273,17 @@ impl Cpu {
         let base = if self.ro_modules.contains_key(&address) {
             Some(address)
         } else {
-            self.ro_modules.values().find(|m| m.source == address).map(|m| m.base)
+            self.ro_modules
+                .values()
+                .find(|m| m.source == address)
+                .map(|m| m.base)
         };
         let Some(module) = base.and_then(|base| self.ro_modules.remove(&base)) else {
             return self.write_ipc_response(tls, NOT_LOADED, &[], &[], &[]);
         };
         self.mem.unmark_readonly(module.text.0, module.text.1);
-        self.mem.unmark_module(module.base, module.base.wrapping_add(module.size));
+        self.mem
+            .unmark_module(module.base, module.base.wrapping_add(module.size));
         self.mem.unmap(module.base, module.size as usize);
         self.diagnostic(&format!(
             "[ro] unmapped the module at {:#010x} ({:#x} bytes)",
@@ -306,7 +324,8 @@ impl Cpu {
             self.diagnostic(&format!("[ro] no NRR at {nrr_address:#010x}"));
             return self.write_ipc_response(tls, INVALID_NRR, &[], &[], &[]);
         }
-        self.ro_registrations.insert(nrr_address as u32, nrr_size as u32);
+        self.ro_registrations
+            .insert(nrr_address as u32, nrr_size as u32);
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 

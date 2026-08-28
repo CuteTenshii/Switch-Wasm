@@ -51,19 +51,32 @@ pub enum Unsupported {
     Topology(Primitive),
     /// A blend factor with no equivalent, or a code neither numbering
     /// recognises.
-    BlendFactor { code: u32 },
-    BlendEquation { code: u32 },
+    BlendFactor {
+        code: u32,
+    },
+    BlendEquation {
+        code: u32,
+    },
     /// A depth comparison the software rasterizer does not implement either
     /// — see [`Depth::compare`].
-    DepthCompare { code: u32 },
+    DepthCompare {
+        code: u32,
+    },
     /// A colour or depth surface format with no equivalent.
-    Format { raw: u32 },
+    Format {
+        raw: u32,
+    },
     /// A vertex attribute's component count and type, as
     /// `DkVtxAttribSize`/`DkVtxAttribType`.
-    VertexFormat { size: u32, ty: u32 },
+    VertexFormat {
+        size: u32,
+        ty: u32,
+    },
     /// A vertex array stepped once every `divisor` instances. WebGPU steps
     /// per instance or per vertex and has nothing in between.
-    InstanceDivisor { divisor: u32 },
+    InstanceDivisor {
+        divisor: u32,
+    },
     /// The engine could not resolve a piece of state at all.
     State(String),
 }
@@ -376,14 +389,18 @@ impl Pipeline {
     pub fn of(engine: &Engine3D) -> Result<Pipeline, Unsupported> {
         let state = |what: &str, e: crate::Error| Unsupported::State(format!("{what}: {e:?}"));
 
-        let primitive = Primitive::from_raw(engine.last_draw.primitive)
-            .map_err(|e| state("primitive", e))?;
+        let primitive =
+            Primitive::from_raw(engine.last_draw.primitive).map_err(|e| state("primitive", e))?;
         let cull = engine.cull_state();
         let viewport = viewport(engine.viewport_transform());
 
         let slot = engine.render_target_slot(0);
-        let rt = engine.render_target(slot).map_err(|e| state("colour target", e))?;
-        let dt = engine.depth_target().map_err(|e| state("depth target", e))?;
+        let rt = engine
+            .render_target(slot)
+            .map_err(|e| state("colour target", e))?;
+        let dt = engine
+            .depth_target()
+            .map_err(|e| state("depth target", e))?;
         let target = match rt {
             Some(rt) => Some(ColorTarget {
                 format: color_format(rt.format)?,
@@ -410,7 +427,12 @@ impl Pipeline {
             }
         };
         let (width, height) = grid.pixels(extent.0, extent.1);
-        let scissor = engine.apply_scissor(ScissorRect { x0: 0, y0: 0, x1: width, y1: height });
+        let scissor = engine.apply_scissor(ScissorRect {
+            x0: 0,
+            y0: 0,
+            x1: width,
+            y1: height,
+        });
 
         let (vertex_buffers, fixed_attributes) = vertex_buffers(engine)?;
 
@@ -506,10 +528,9 @@ fn topology(primitive: Primitive) -> Result<(Topology, Option<Primitive>), Unsup
         Primitive::LineStrip => Ok((Topology::LineStrip, None)),
         Primitive::Triangles => Ok((Topology::TriangleList, None)),
         Primitive::TriangleStrip => Ok((Topology::TriangleStrip, None)),
-        Primitive::TriangleFan
-        | Primitive::Quads
-        | Primitive::QuadStrip
-        | Primitive::Polygon => Ok((Topology::TriangleList, Some(primitive))),
+        Primitive::TriangleFan | Primitive::Quads | Primitive::QuadStrip | Primitive::Polygon => {
+            Ok((Topology::TriangleList, Some(primitive)))
+        }
         other => Err(Unsupported::Topology(other)),
     }
 }
@@ -589,14 +610,20 @@ fn depth_compare(code: u32) -> Result<Compare, Unsupported> {
 
 /// The WebGPU format a depth surface's layout names.
 pub fn depth_format(layout: DepthLayout) -> Result<Format, Unsupported> {
-    Ok(match (layout.bytes, layout.depth_bits, layout.stencil_shift.is_some()) {
-        (2, 16, false) => Format::Depth16Unorm,
-        (4, 24, false) => Format::Depth24Plus,
-        (4, 24, true) => Format::Depth24PlusStencil8,
-        (4, 0, false) => Format::Depth32Float,
-        (8, 0, true) => Format::Depth32FloatStencil8,
-        _ => return Err(Unsupported::Format { raw: layout.bytes }),
-    })
+    Ok(
+        match (
+            layout.bytes,
+            layout.depth_bits,
+            layout.stencil_shift.is_some(),
+        ) {
+            (2, 16, false) => Format::Depth16Unorm,
+            (4, 24, false) => Format::Depth24Plus,
+            (4, 24, true) => Format::Depth24PlusStencil8,
+            (4, 0, false) => Format::Depth32Float,
+            (8, 0, true) => Format::Depth32FloatStencil8,
+            _ => return Err(Unsupported::Format { raw: layout.bytes }),
+        },
+    )
 }
 
 fn depth(layout: DepthLayout, state: DepthState) -> Result<Depth, Unsupported> {
@@ -604,7 +631,11 @@ fn depth(layout: DepthLayout, state: DepthState) -> Result<Depth, Unsupported> {
         format: depth_format(layout)?,
         write_enabled: state.write_enabled,
         // A disabled test passes everything, which is what `Always` says.
-        compare: if state.test_enabled { depth_compare(state.func)? } else { Compare::Always },
+        compare: if state.test_enabled {
+            depth_compare(state.func)?
+        } else {
+            Compare::Always
+        },
     })
 }
 
@@ -766,7 +797,10 @@ mod tests {
         // rasterizer that must produce a pixel has to do. A description can
         // say it does not know, and saying so is what sends the draw to the
         // rasterizer instead of drawing it differently.
-        assert_eq!(blend_factor(0x1234), Err(Unsupported::BlendFactor { code: 0x1234 }));
+        assert_eq!(
+            blend_factor(0x1234),
+            Err(Unsupported::BlendFactor { code: 0x1234 })
+        );
     }
 
     #[test]
@@ -791,7 +825,10 @@ mod tests {
             assert_eq!(blend_equation(simple), Ok(expected));
             assert_eq!(blend_equation(gl), Ok(expected));
         }
-        assert_eq!(blend_equation(0x77), Err(Unsupported::BlendEquation { code: 0x77 }));
+        assert_eq!(
+            blend_equation(0x77),
+            Err(Unsupported::BlendEquation { code: 0x77 })
+        );
     }
 
     #[test]
@@ -816,27 +853,50 @@ mod tests {
         // Every one of these is a triangle list once `raster::assemble` has
         // rewritten the indices, and saying so is what keeps the draw on the
         // device. A line loop is not: nothing assembles it.
-        for primitive in
-            [Primitive::TriangleFan, Primitive::Quads, Primitive::QuadStrip, Primitive::Polygon]
-        {
-            assert_eq!(topology(primitive), Ok((Topology::TriangleList, Some(primitive))));
+        for primitive in [
+            Primitive::TriangleFan,
+            Primitive::Quads,
+            Primitive::QuadStrip,
+            Primitive::Polygon,
+        ] {
+            assert_eq!(
+                topology(primitive),
+                Ok((Topology::TriangleList, Some(primitive)))
+            );
             assert!(
                 !crate::gpu::raster::assemble(primitive, 6).is_empty(),
                 "{primitive:?} names an expansion the rasterizer does not perform"
             );
         }
-        assert_eq!(topology(Primitive::LineLoop), Err(Unsupported::Topology(Primitive::LineLoop)));
-        assert_eq!(topology(Primitive::Triangles), Ok((Topology::TriangleList, None)));
-        assert_eq!(topology(Primitive::TriangleStrip), Ok((Topology::TriangleStrip, None)));
+        assert_eq!(
+            topology(Primitive::LineLoop),
+            Err(Unsupported::Topology(Primitive::LineLoop))
+        );
+        assert_eq!(
+            topology(Primitive::Triangles),
+            Ok((Topology::TriangleList, None))
+        );
+        assert_eq!(
+            topology(Primitive::TriangleStrip),
+            Ok((Topology::TriangleStrip, None))
+        );
     }
 
     #[test]
     fn a_depth_test_that_is_off_compares_always() {
         // What a disabled test does, said in the only vocabulary a pipeline
         // has for it. The `func` here is nonsense and never read.
-        let layout =
-            DepthLayout { bytes: 4, depth_bits: 24, depth_shift: 8, stencil_shift: Some(0) };
-        let off = DepthState { test_enabled: false, write_enabled: true, func: 0xdead };
+        let layout = DepthLayout {
+            bytes: 4,
+            depth_bits: 24,
+            depth_shift: 8,
+            stencil_shift: Some(0),
+        };
+        let off = DepthState {
+            test_enabled: false,
+            write_enabled: true,
+            func: 0xdead,
+        };
         assert_eq!(
             depth(layout, off),
             Ok(Depth {
@@ -855,9 +915,18 @@ mod tests {
         // 1..=8 on the grounds that the rasterizer only decoded the GL half —
         // which was true, and the reason Just Dance 2019 fell back to software
         // on every draw and then had its depth test ignored there.
-        let layout = DepthLayout { bytes: 4, depth_bits: 24, depth_shift: 8, stencil_shift: None };
+        let layout = DepthLayout {
+            bytes: 4,
+            depth_bits: 24,
+            depth_shift: 8,
+            stencil_shift: None,
+        };
         let of = |func| {
-            let on = DepthState { test_enabled: true, write_enabled: false, func };
+            let on = DepthState {
+                test_enabled: true,
+                write_enabled: false,
+                func,
+            };
             depth(layout, on).unwrap().compare
         };
         for (d3d, gl) in (1..=8u32).zip(0x0200..=0x0207u32) {
@@ -867,8 +936,15 @@ mod tests {
         assert_eq!(of(0x0203), Compare::LessEqual);
 
         // A code in neither numbering is still reported rather than guessed.
-        let on = DepthState { test_enabled: true, write_enabled: false, func: 0x40 };
-        assert_eq!(depth(layout, on), Err(Unsupported::DepthCompare { code: 0x40 }));
+        let on = DepthState {
+            test_enabled: true,
+            write_enabled: false,
+            func: 0x40,
+        };
+        assert_eq!(
+            depth(layout, on),
+            Err(Unsupported::DepthCompare { code: 0x40 })
+        );
     }
 
     /// How wide a pixel of each colour format is, and whether it is sRGB.
@@ -893,8 +969,12 @@ mod tests {
         // every code named here has to have the width and the transfer
         // function `surface` gives it, or one of the two is wrong.
         for raw in 0u32..=0xff {
-            let Ok(format) = ColorFormat::from_raw(raw) else { continue };
-            let Ok(named) = color_format(format) else { continue };
+            let Ok(format) = ColorFormat::from_raw(raw) else {
+                continue;
+            };
+            let Ok(named) = color_format(format) else {
+                continue;
+            };
             let (bytes, srgb) = shape(named);
             assert_eq!(bytes, format.bytes_per_pixel, "{raw:#x} is {named:?}");
             assert_eq!(srgb, format.is_srgb(), "{raw:#x} is {named:?}");
@@ -927,32 +1007,60 @@ mod tests {
         // shader's z is expected to span — which decides whether a vertex
         // entry point has to remap it. Every transform this has seen is the
         // first shape.
-        let gl = viewport(ViewportTransform { scale: [1.0, 1.0, 0.5], translate: [0.0, 0.0, 0.5] });
+        let gl = viewport(ViewportTransform {
+            scale: [1.0, 1.0, 0.5],
+            translate: [0.0, 0.0, 0.5],
+        });
         assert_eq!((gl.min_depth, gl.max_depth), (0.0, 1.0));
         assert!(gl.depth_minus_one_to_one());
-        let vulkan =
-            viewport(ViewportTransform { scale: [1.0, 1.0, 1.0], translate: [0.0, 0.0, 0.0] });
+        let vulkan = viewport(ViewportTransform {
+            scale: [1.0, 1.0, 1.0],
+            translate: [0.0, 0.0, 0.0],
+        });
         assert!(!vulkan.depth_minus_one_to_one());
     }
 
     #[test]
     fn an_instance_step_webgpu_cannot_take_is_reported() {
-        let array =
-            |divisor| VertexArray { enabled: true, stride: 16, start: 0, limit: 0, divisor };
+        let array = |divisor| VertexArray {
+            enabled: true,
+            stride: 16,
+            start: 0,
+            limit: 0,
+            divisor,
+        };
         assert_eq!(step_mode(array(0)), Ok(StepMode::Vertex));
         assert_eq!(step_mode(array(1)), Ok(StepMode::Instance));
         // Every two instances: WebGPU steps per instance or per vertex and
         // has nothing in between.
-        assert_eq!(step_mode(array(2)), Err(Unsupported::InstanceDivisor { divisor: 2 }));
+        assert_eq!(
+            step_mode(array(2)),
+            Err(Unsupported::InstanceDivisor { divisor: 2 })
+        );
     }
 
     #[test]
     fn vertex_formats_are_the_ones_the_rasterizer_can_fetch() {
-        assert_eq!(vertex_format(0x01, ATTRIB_TYPE_FLOAT), Ok(VertexFormat::Float32x4));
-        assert_eq!(vertex_format(0x0a, ATTRIB_TYPE_UNORM), Ok(VertexFormat::Unorm8x4));
-        assert_eq!(vertex_format(0x0a, ATTRIB_TYPE_SNORM), Ok(VertexFormat::Snorm8x4));
-        assert_eq!(vertex_format(0x0a, ATTRIB_TYPE_SINT), Ok(VertexFormat::Sint8x4));
-        assert_eq!(vertex_format(0x0a, ATTRIB_TYPE_UINT), Ok(VertexFormat::Uint8x4));
+        assert_eq!(
+            vertex_format(0x01, ATTRIB_TYPE_FLOAT),
+            Ok(VertexFormat::Float32x4)
+        );
+        assert_eq!(
+            vertex_format(0x0a, ATTRIB_TYPE_UNORM),
+            Ok(VertexFormat::Unorm8x4)
+        );
+        assert_eq!(
+            vertex_format(0x0a, ATTRIB_TYPE_SNORM),
+            Ok(VertexFormat::Snorm8x4)
+        );
+        assert_eq!(
+            vertex_format(0x0a, ATTRIB_TYPE_SINT),
+            Ok(VertexFormat::Sint8x4)
+        );
+        assert_eq!(
+            vertex_format(0x0a, ATTRIB_TYPE_UINT),
+            Ok(VertexFormat::Uint8x4)
+        );
         // An integer attribute reaches the shader as its bits, so it is the
         // one kind that cannot be declared `vec4<f32>`.
         assert_eq!(VertexFormat::Sint8x4.base(), AttributeBase::Sint);
@@ -962,10 +1070,22 @@ mod tests {
         // The 16-bit shapes WebGPU spells. `4x16` float is what Minecraft's
         // every draw is built out of, and refusing it put the whole title on
         // the rasterizer, which then could not fetch it either.
-        assert_eq!(vertex_format(0x03, ATTRIB_TYPE_FLOAT), Ok(VertexFormat::Float16x4));
-        assert_eq!(vertex_format(0x0f, ATTRIB_TYPE_FLOAT), Ok(VertexFormat::Float16x2));
-        assert_eq!(vertex_format(0x03, ATTRIB_TYPE_SNORM), Ok(VertexFormat::Snorm16x4));
-        assert_eq!(vertex_format(0x0f, ATTRIB_TYPE_UINT), Ok(VertexFormat::Uint16x2));
+        assert_eq!(
+            vertex_format(0x03, ATTRIB_TYPE_FLOAT),
+            Ok(VertexFormat::Float16x4)
+        );
+        assert_eq!(
+            vertex_format(0x0f, ATTRIB_TYPE_FLOAT),
+            Ok(VertexFormat::Float16x2)
+        );
+        assert_eq!(
+            vertex_format(0x03, ATTRIB_TYPE_SNORM),
+            Ok(VertexFormat::Snorm16x4)
+        );
+        assert_eq!(
+            vertex_format(0x0f, ATTRIB_TYPE_UINT),
+            Ok(VertexFormat::Uint16x2)
+        );
         assert_eq!(VertexFormat::Sint16x4.base(), AttributeBase::Sint);
         assert_eq!(VertexFormat::Uint16x2.base(), AttributeBase::Uint);
         assert_eq!(VertexFormat::Float16x4.base(), AttributeBase::Float);
@@ -974,13 +1094,19 @@ mod tests {
         // odd 8-bit shapes are on.
         assert_eq!(
             vertex_format(0x05, ATTRIB_TYPE_FLOAT),
-            Err(Unsupported::VertexFormat { size: 0x05, ty: ATTRIB_TYPE_FLOAT })
+            Err(Unsupported::VertexFormat {
+                size: 0x05,
+                ty: ATTRIB_TYPE_FLOAT
+            })
         );
         // A shape neither renderer decodes: `10_10_10_2`. Claiming it would
         // draw something the reference could not be compared against.
         assert_eq!(
             vertex_format(0x30, ATTRIB_TYPE_UNORM),
-            Err(Unsupported::VertexFormat { size: 0x30, ty: ATTRIB_TYPE_UNORM })
+            Err(Unsupported::VertexFormat {
+                size: 0x30,
+                ty: ATTRIB_TYPE_UNORM
+            })
         );
     }
 
@@ -991,7 +1117,9 @@ mod tests {
         let engine = Engine3D::new();
         assert_eq!(
             Pipeline::of(&engine),
-            Err(Unsupported::State("a draw with neither a colour nor a depth target".into()))
+            Err(Unsupported::State(
+                "a draw with neither a colour nor a depth target".into()
+            ))
         );
     }
 }

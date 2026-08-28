@@ -250,7 +250,9 @@ fn key_area_table_and_generation<'a>(
     ks: &'a mut KeySet,
     name: &str,
 ) -> Option<(&'a mut [Option<[u8; 16]>; KEY_GENERATION_COUNT], usize)> {
-    let suffix = name.strip_prefix("key_area_key_application_").map(|s| (s, 0));
+    let suffix = name
+        .strip_prefix("key_area_key_application_")
+        .map(|s| (s, 0));
     let suffix = suffix.or_else(|| name.strip_prefix("key_area_key_ocean_").map(|s| (s, 1)));
     let suffix = suffix.or_else(|| name.strip_prefix("key_area_key_system_").map(|s| (s, 2)));
     let suffix = suffix.or_else(|| name.strip_prefix("titlekek_").map(|s| (s, 3)));
@@ -338,7 +340,10 @@ mod tests {
             ks.key_area_key(KeyAreaKind::Application, 1),
             Some([0x11u8; 16])
         );
-        assert_eq!(ks.key_area_key(KeyAreaKind::Ocean, 0x1f), Some([0x22u8; 16]));
+        assert_eq!(
+            ks.key_area_key(KeyAreaKind::Ocean, 0x1f),
+            Some([0x22u8; 16])
+        );
         assert_eq!(ks.key_area_key(KeyAreaKind::System, 5), Some([0x33u8; 16]));
         // Unset generations and the wrong kind both miss.
         assert_eq!(ks.key_area_key(KeyAreaKind::Application, 2), None);
@@ -403,7 +408,10 @@ mod tests {
         let mut ks = KeySet::default();
         ks.titlekek[0x0d] = Some(kek);
         ks.title_keys = vec![(rights_id, [0x44u8; 16])];
-        ks.add_title_key(rights_id, crate::crypto::aes128_encrypt_block(&kek, &from_ticket));
+        ks.add_title_key(
+            rights_id,
+            crate::crypto::aes128_encrypt_block(&kek, &from_ticket),
+        );
         assert_eq!(ks.title_key(&rights_id, 0x0d), Some(from_ticket));
         // Recording the same title twice replaces it instead of stacking a
         // second entry the first would shadow forever.

@@ -110,7 +110,10 @@ impl fmt::Display for Unsupported {
                 write!(f, "instruction {at}: no WGSL form for {op:?}")
             }
             Unsupported::UndecodedTarget { at } => {
-                write!(f, "instruction {at}: branches to a target that was never decoded")
+                write!(
+                    f,
+                    "instruction {at}: branches to a target that was never decoded"
+                )
             }
             Unsupported::IndirectBranch { at } => {
                 write!(f, "instruction {at}: brx with no known targets")
@@ -217,13 +220,7 @@ pub fn translate(program: &Compiled) -> Result<Translation, Unsupported> {
 fn is_terminator(op: Op) -> bool {
     matches!(
         op,
-        Op::Bra { .. }
-            | Op::Brx { .. }
-            | Op::Exit
-            | Op::Kil
-            | Op::Sync
-            | Op::Brk
-            | Op::Cont
+        Op::Bra { .. } | Op::Brx { .. } | Op::Exit | Op::Kil | Op::Sync | Op::Brk | Op::Cont
     )
 }
 
@@ -635,7 +632,11 @@ impl<'a> Emitter<'a> {
     // ---- expression builders ----
 
     fn fmod(&mut self, modifier: FMod, value: String) -> String {
-        let value = if modifier.abs { format!("abs({value})") } else { value };
+        let value = if modifier.abs {
+            format!("abs({value})")
+        } else {
+            value
+        };
         if modifier.neg {
             format!("-({value})")
         } else {
@@ -843,7 +844,12 @@ impl Emitter<'_> {
     fn emit_alu(&mut self, at: usize, op: Op) -> Result<(), Unsupported> {
         match op {
             // ---- attribute space ----
-            Op::Ld { dst, offset, idx, size } => {
+            Op::Ld {
+                dst,
+                offset,
+                idx,
+                size,
+            } => {
                 self.loads.extend(generic_slot(offset));
                 let base = self.attr_base(offset, idx);
                 for i in 0..size.regs() {
@@ -851,7 +857,12 @@ impl Emitter<'_> {
                     self.set_f(dst.wrapping_add(i), &format!("attrIn({base} + {word}u)"));
                 }
             }
-            Op::St { offset, idx, src, size } => {
+            Op::St {
+                offset,
+                idx,
+                src,
+                size,
+            } => {
                 self.stores.extend(generic_slot(offset));
                 let base = self.attr_base(offset, idx);
                 for i in 0..size.regs() {
@@ -860,7 +871,14 @@ impl Emitter<'_> {
                     self.line(&format!("attrOut({base} + {word}u, {value});"));
                 }
             }
-            Op::Ipa { dst, offset, mul, perspective, sat, centroid } => {
+            Op::Ipa {
+                dst,
+                offset,
+                mul,
+                perspective,
+                sat,
+                centroid,
+            } => {
                 self.loads.extend(generic_slot(offset));
                 if centroid {
                     self.centroid_loads.extend(generic_slot(offset));
@@ -877,7 +895,15 @@ impl Emitter<'_> {
             }
 
             // ---- float ----
-            Op::Fadd { dst, a, am, b, bm, ftz, sat } => {
+            Op::Fadd {
+                dst,
+                a,
+                am,
+                b,
+                bm,
+                ftz,
+                sat,
+            } => {
                 let x = self.f(a);
                 let x = self.flush(ftz, x);
                 let x = self.fmod(am, x);
@@ -887,20 +913,41 @@ impl Emitter<'_> {
                 let value = self.saturate(sat, format!("({x} + {y})"));
                 self.set_f(dst, &value);
             }
-            Op::Fmul { dst, a, b, bm, ftz, sat, scale } => {
+            Op::Fmul {
+                dst,
+                a,
+                b,
+                bm,
+                ftz,
+                sat,
+                scale,
+            } => {
                 // The pre-scale multiplies the first operand, before the
                 // multiply proper.
                 let x = self.f(a);
                 let x = self.flush(ftz, x);
                 let factor = scale.factor();
-                let x = if factor == 1.0 { x } else { format!("({x} * {factor:?})") };
+                let x = if factor == 1.0 {
+                    x
+                } else {
+                    format!("({x} * {factor:?})")
+                };
                 let y = self.operand_f(b);
                 let y = self.flush(ftz, y);
                 let y = self.fmod(bm, y);
                 let value = self.saturate(sat, format!("({x} * {y})"));
                 self.set_f(dst, &value);
             }
-            Op::Ffma { dst, a, b, bneg, c, cneg, ftz, sat } => {
+            Op::Ffma {
+                dst,
+                a,
+                b,
+                bneg,
+                c,
+                cneg,
+                ftz,
+                sat,
+            } => {
                 let x = self.f(a);
                 let x = self.flush(ftz, x);
                 let y = self.operand_f(b);
@@ -912,7 +959,15 @@ impl Emitter<'_> {
                 let value = self.saturate(sat, format!("fma({x}, {y}, {z})"));
                 self.set_f(dst, &value);
             }
-            Op::Fmnmx { dst, a, am, b, bm, pred, ftz } => {
+            Op::Fmnmx {
+                dst,
+                a,
+                am,
+                b,
+                bm,
+                pred,
+                ftz,
+            } => {
                 let x = self.f(a);
                 let x = self.flush(ftz, x);
                 let x = self.fmod(am, x);
@@ -927,7 +982,13 @@ impl Emitter<'_> {
                 let value = format!("select(max({x}, {y}), min({x}, {y}), {take_min})");
                 self.set_f(dst, &value);
             }
-            Op::Mufu { dst, src, sm, op: mufu, sat } => {
+            Op::Mufu {
+                dst,
+                src,
+                sm,
+                op: mufu,
+                sat,
+            } => {
                 let x = self.f(src);
                 let x = self.fmod(sm, x);
                 let value = match mufu {
@@ -943,7 +1004,18 @@ impl Emitter<'_> {
                 self.set_f(dst, &value);
             }
             // ---- half-precision ----
-            Op::Hadd2 { dst, a, am, asw, b, bm, bsw, merge, ftz, sat } => {
+            Op::Hadd2 {
+                dst,
+                a,
+                am,
+                asw,
+                b,
+                bm,
+                bsw,
+                merge,
+                ftz,
+                sat,
+            } => {
                 let x = self.r(a);
                 let x = self.half_source(x, am, asw, ftz);
                 let y = self.operand(b);
@@ -952,7 +1024,18 @@ impl Emitter<'_> {
                 let value = self.half_merge(dst, &lanes, merge);
                 self.set_r(dst, &value);
             }
-            Op::Hmul2 { dst, a, am, asw, b, bm, bsw, merge, prec, sat } => {
+            Op::Hmul2 {
+                dst,
+                a,
+                am,
+                asw,
+                b,
+                bm,
+                bsw,
+                merge,
+                prec,
+                sat,
+            } => {
                 let ftz = prec == HPrecision::Ftz;
                 let x = self.r(a);
                 let x = self.half_source(x, am, asw, ftz);
@@ -971,14 +1054,43 @@ impl Emitter<'_> {
                 let value = self.half_merge(dst, &lanes, merge);
                 self.set_r(dst, &value);
             }
-            Op::Hfma2 { dst, a, asw, b, bneg, bsw, c, cneg, csw, merge, prec, sat } => {
+            Op::Hfma2 {
+                dst,
+                a,
+                asw,
+                b,
+                bneg,
+                bsw,
+                c,
+                cneg,
+                csw,
+                merge,
+                prec,
+                sat,
+            } => {
                 let ftz = prec == HPrecision::Ftz;
                 let x = self.r(a);
                 let x = self.half_source(x, FMod::NONE, asw, ftz);
                 let y = self.operand(b);
-                let y = self.half_source(y, FMod { neg: bneg, abs: false }, bsw, ftz);
+                let y = self.half_source(
+                    y,
+                    FMod {
+                        neg: bneg,
+                        abs: false,
+                    },
+                    bsw,
+                    ftz,
+                );
                 let z = self.operand(c);
-                let z = self.half_source(z, FMod { neg: cneg, abs: false }, csw, ftz);
+                let z = self.half_source(
+                    z,
+                    FMod {
+                        neg: cneg,
+                        abs: false,
+                    },
+                    csw,
+                    ftz,
+                );
                 let lanes = if prec.zeroes_products(sat) {
                     // A zeroed product leaves the addend, not zero.
                     let x = self.bind(&x);
@@ -993,7 +1105,20 @@ impl Emitter<'_> {
                 let value = self.half_merge(dst, &lanes, merge);
                 self.set_r(dst, &value);
             }
-            Op::Hset2 { dst, a, am, asw, b, bm, bsw, cmp, bop, src, bf, ftz } => {
+            Op::Hset2 {
+                dst,
+                a,
+                am,
+                asw,
+                b,
+                bm,
+                bsw,
+                cmp,
+                bop,
+                src,
+                bf,
+                ftz,
+            } => {
                 let (low, high) = self.half_compare(a, am, asw, b, bm, bsw, cmp, bop, src, ftz);
                 // Each lane's answer fills its own half of the register:
                 // 1.0h with `.bf`, all ones without.
@@ -1003,7 +1128,21 @@ impl Emitter<'_> {
                     &format!("(select(0u, {taken}, {low}) | select(0u, {taken} << 16u, {high}))"),
                 );
             }
-            Op::Hsetp2 { p0, p1, a, am, asw, b, bm, bsw, cmp, bop, src, and, ftz } => {
+            Op::Hsetp2 {
+                p0,
+                p1,
+                a,
+                am,
+                asw,
+                b,
+                bm,
+                bsw,
+                cmp,
+                bop,
+                src,
+                and,
+                ftz,
+            } => {
                 let (low, high) = self.half_compare(a, am, asw, b, bm, bsw, cmp, bop, src, ftz);
                 if and {
                     let both = self.bind(&format!("({low} && {high})"));
@@ -1015,7 +1154,17 @@ impl Emitter<'_> {
                 }
             }
 
-            Op::Fsetp { p0, p1, a, am, b, bm, cmp, bop, src } => {
+            Op::Fsetp {
+                p0,
+                p1,
+                a,
+                am,
+                b,
+                bm,
+                cmp,
+                bop,
+                src,
+            } => {
                 let x = self.f(a);
                 let x = self.fmod(am, x);
                 let y = self.operand_f(b);
@@ -1029,7 +1178,17 @@ impl Emitter<'_> {
                 let clear = self.combine(bop, &format!("!{taken}"), &guard);
                 self.set_p(p1, &clear);
             }
-            Op::Fset { dst, a, am, b, bm, cmp, bop, src, bf } => {
+            Op::Fset {
+                dst,
+                a,
+                am,
+                b,
+                bm,
+                cmp,
+                bop,
+                src,
+                bf,
+            } => {
                 let x = self.f(a);
                 let x = self.fmod(am, x);
                 let y = self.operand_f(b);
@@ -1042,7 +1201,15 @@ impl Emitter<'_> {
             }
 
             // ---- integer ----
-            Op::Iadd { dst, a, aneg, b, bneg, cin, cout } => {
+            Op::Iadd {
+                dst,
+                a,
+                aneg,
+                b,
+                bneg,
+                cin,
+                cout,
+            } => {
                 let x = self.r(a);
                 let x = self.ineg(aneg, x);
                 let x = self.bind(&x);
@@ -1065,7 +1232,15 @@ impl Emitter<'_> {
                     self.line(&format!("carry = ({sum} < {x}) || ({total} < {sum});"));
                 }
             }
-            Op::Iadd3 { dst, a, aneg, b, bneg, c, cneg } => {
+            Op::Iadd3 {
+                dst,
+                a,
+                aneg,
+                b,
+                bneg,
+                c,
+                cneg,
+            } => {
                 let x = self.r(a);
                 let x = self.ineg(aneg, x);
                 let y = self.operand(b);
@@ -1074,7 +1249,14 @@ impl Emitter<'_> {
                 let z = self.ineg(cneg, z);
                 self.set_r(dst, &format!("{x} + ({y}) + ({z})"));
             }
-            Op::Iscadd { dst, a, aneg, b, bneg, shift } => {
+            Op::Iscadd {
+                dst,
+                a,
+                aneg,
+                b,
+                bneg,
+                shift,
+            } => {
                 let x = self.r(a);
                 let x = self.ineg(aneg, x);
                 let y = self.operand(b);
@@ -1082,7 +1264,13 @@ impl Emitter<'_> {
                 let shift = u32::from(shift) & 31;
                 self.set_r(dst, &format!("(({x}) << {shift}u) + ({y})"));
             }
-            Op::Imnmx { dst, a, b, pred, signed } => {
+            Op::Imnmx {
+                dst,
+                a,
+                b,
+                pred,
+                signed,
+            } => {
                 let x = self.r(a);
                 let y = self.operand(b);
                 let take_min = self.holds(pred);
@@ -1096,7 +1284,13 @@ impl Emitter<'_> {
                 };
                 self.set_r(dst, &value);
             }
-            Op::Imul { dst, a, b, signed, hi } => {
+            Op::Imul {
+                dst,
+                a,
+                b,
+                signed,
+                hi,
+            } => {
                 let x = self.r(a);
                 let y = self.operand(b);
                 let value = match (hi, signed) {
@@ -1112,23 +1306,49 @@ impl Emitter<'_> {
                 };
                 self.set_r(dst, &value);
             }
-            Op::Xmad { dst, a, ah, asigned, b, bh, bsigned, c, psl, mrg } => {
+            Op::Xmad {
+                dst,
+                a,
+                ah,
+                asigned,
+                b,
+                bh,
+                bsigned,
+                c,
+                psl,
+                mrg,
+            } => {
                 let x = self.r(a);
                 let x = self.half(&x, ah, asigned);
                 let y = self.operand(b);
                 let y = self.half(&y, bh, bsigned);
                 let product = self.bind(&format!("({x}) * ({y})"));
-                let product =
-                    if psl { self.bind(&format!("{product} << 16u")) } else { product };
+                let product = if psl {
+                    self.bind(&format!("{product} << 16u"))
+                } else {
+                    product
+                };
                 let z = self.operand(c);
                 let sum = self.bind(&format!("{product} + ({z})"));
                 // `.mrg` keeps the product's low half in the result's high
                 // half instead of adding it there.
-                let value =
-                    if mrg { format!("({sum} & 0xffffu) | ({product} << 16u)") } else { sum };
+                let value = if mrg {
+                    format!("({sum} & 0xffffu) | ({product} << 16u)")
+                } else {
+                    sum
+                };
                 self.set_r(dst, &value);
             }
-            Op::Isetp { p0, p1, a, b, cmp, signed, bop, src } => {
+            Op::Isetp {
+                p0,
+                p1,
+                a,
+                b,
+                cmp,
+                signed,
+                bop,
+                src,
+            } => {
                 let x = self.r(a);
                 let y = self.operand(b);
                 let taken = self.int_compare(cmp, &x, &y, signed);
@@ -1140,7 +1360,16 @@ impl Emitter<'_> {
                 let clear = self.combine(bop, &format!("!{taken}"), &guard);
                 self.set_p(p1, &clear);
             }
-            Op::Iset { dst, a, b, cmp, signed, bop, src, bf } => {
+            Op::Iset {
+                dst,
+                a,
+                b,
+                cmp,
+                signed,
+                bop,
+                src,
+                bf,
+            } => {
                 let x = self.r(a);
                 let y = self.operand(b);
                 let taken = self.int_compare(cmp, &x, &y, signed);
@@ -1149,7 +1378,14 @@ impl Emitter<'_> {
                 let value = self.set_result(&taken, bf);
                 self.set_r(dst, &value);
             }
-            Op::Icmp { dst, a, b, c, cmp, signed } => {
+            Op::Icmp {
+                dst,
+                a,
+                b,
+                c,
+                cmp,
+                signed,
+            } => {
                 // `icmp dst, a, b, c` is "dst = compare(c, 0) ? a : b".
                 let selector = self.r(c);
                 let taken = self.int_compare(cmp, &selector, "0u", signed);
@@ -1157,7 +1393,12 @@ impl Emitter<'_> {
                 let y = self.operand(b);
                 self.set_r(dst, &format!("select({y}, {x}, {taken})"));
             }
-            Op::Bfi { dst, insert, src, base } => {
+            Op::Bfi {
+                dst,
+                insert,
+                src,
+                base,
+            } => {
                 self.need("bfi");
                 let insert = self.r(insert);
                 let src = self.operand(src);
@@ -1182,7 +1423,15 @@ impl Emitter<'_> {
                     self.line("}");
                 }
             }
-            Op::Lop { dst, a, ainv, b, binv, op: logic, pred } => {
+            Op::Lop {
+                dst,
+                a,
+                ainv,
+                b,
+                binv,
+                op: logic,
+                pred,
+            } => {
                 let x = self.r(a);
                 let x = self.inv(ainv, x);
                 let y = self.operand(b);
@@ -1217,7 +1466,13 @@ impl Emitter<'_> {
                 let n = self.shift_count(b, wrap);
                 self.set_r(dst, &format!("shl32({x}, {n})"));
             }
-            Op::Shr { dst, a, b, signed, wrap } => {
+            Op::Shr {
+                dst,
+                a,
+                b,
+                signed,
+                wrap,
+            } => {
                 let x = self.r(a);
                 let n = self.shift_count(b, wrap);
                 if signed {
@@ -1228,13 +1483,28 @@ impl Emitter<'_> {
                     self.set_r(dst, &format!("shr32({x}, {n})"));
                 }
             }
-            Op::Shf { dst, lo, shift, hi, left, wrap, hi_out } => {
+            Op::Shf {
+                dst,
+                lo,
+                shift,
+                hi,
+                left,
+                wrap,
+                hi_out,
+            } => {
                 self.need("shf");
                 let low = self.r(lo);
                 let high = self.r(hi);
                 let count = self.operand(shift);
-                let count = if wrap { format!("(({count}) & 63u)") } else { count };
-                self.set_r(dst, &format!("shf({low}, {high}, {count}, {left}, {hi_out})"));
+                let count = if wrap {
+                    format!("(({count}) & 63u)")
+                } else {
+                    count
+                };
+                self.set_r(
+                    dst,
+                    &format!("shf({low}, {high}, {count}, {left}, {hi_out})"),
+                );
             }
             Op::Bfe { dst, a, b, signed } => {
                 self.need("bfe");
@@ -1251,7 +1521,13 @@ impl Emitter<'_> {
                 let value = self.inv(inv, value);
                 self.set_r(dst, &format!("countOneBits({value})"));
             }
-            Op::Flo { dst, b, signed, shift, inv } => {
+            Op::Flo {
+                dst,
+                b,
+                signed,
+                shift,
+                inv,
+            } => {
                 self.need("flo");
                 let value = self.operand(b);
                 let value = self.inv(inv, value);
@@ -1265,7 +1541,14 @@ impl Emitter<'_> {
             }
 
             // ---- conversions ----
-            Op::I2f { dst, src, sm, src_bytes, src_signed, sel } => {
+            Op::I2f {
+                dst,
+                src,
+                sm,
+                src_bytes,
+                src_signed,
+                sel,
+            } => {
                 let raw = self.operand(src);
                 let raw = self.narrow(&raw, sel, src_bytes, src_signed);
                 let value = if src_signed {
@@ -1276,7 +1559,15 @@ impl Emitter<'_> {
                 let value = self.fmod(sm, value);
                 self.set_f(dst, &value);
             }
-            Op::F2i { dst, src, sm, dst_bytes, dst_signed, round, ftz } => {
+            Op::F2i {
+                dst,
+                src,
+                sm,
+                dst_bytes,
+                dst_signed,
+                round,
+                ftz,
+            } => {
                 let x = self.operand_f(src);
                 let x = self.flush(ftz, x);
                 let x = self.fmod(sm, x);
@@ -1290,7 +1581,14 @@ impl Emitter<'_> {
                 };
                 self.set_r(dst, &value);
             }
-            Op::F2f { dst, src, sm, round, sat, ftz } => {
+            Op::F2f {
+                dst,
+                src,
+                sm,
+                round,
+                sat,
+                ftz,
+            } => {
                 let x = self.operand_f(src);
                 let x = self.flush(ftz, x);
                 let x = self.fmod(sm, x);
@@ -1298,10 +1596,23 @@ impl Emitter<'_> {
                 let value = self.saturate(sat, x);
                 self.set_f(dst, &value);
             }
-            Op::I2i { dst, src, sm, src_bytes, src_signed, dst_signed, sat, sel } => {
+            Op::I2i {
+                dst,
+                src,
+                sm,
+                src_bytes,
+                src_signed,
+                dst_signed,
+                sat,
+                sel,
+            } => {
                 let raw = self.operand(src);
                 let value = self.narrow(&raw, sel, src_bytes, src_signed);
-                let value = if sm.neg { format!("(0u - ({value}))") } else { value };
+                let value = if sm.neg {
+                    format!("(0u - ({value}))")
+                } else {
+                    value
+                };
                 let value = if sm.abs {
                     let bound = self.bind(&value);
                     format!("select({bound}, 0u - {bound}, bitcast<i32>({bound}) < 0)")
@@ -1329,7 +1640,15 @@ impl Emitter<'_> {
                 // answer the interpreter gives.
                 self.set_r(dst, "0u");
             }
-            Op::Psetp { p0, p1, a, b, c, op1, op2 } => {
+            Op::Psetp {
+                p0,
+                p1,
+                a,
+                b,
+                c,
+                op1,
+                op2,
+            } => {
                 let x = self.holds(a);
                 let y = self.holds(b);
                 let first = self.combine(op1, &x, &y);
@@ -1341,7 +1660,13 @@ impl Emitter<'_> {
             }
 
             // ---- memory ----
-            Op::Ldc { dst, bank, offset, idx, size } => {
+            Op::Ldc {
+                dst,
+                bank,
+                offset,
+                idx,
+                size,
+            } => {
                 self.banks.insert(bank);
                 let index = self.r(idx);
                 let base = self.bind(&format!("{}u + {index}", offset as u32));
@@ -1355,7 +1680,12 @@ impl Emitter<'_> {
             }
 
             // ---- texture ----
-            Op::Texs { coords, handle, dim, .. } => {
+            Op::Texs {
+                coords,
+                handle,
+                dim,
+                ..
+            } => {
                 if !self.textures.iter().any(|&(imm, _)| imm == handle) {
                     self.textures.push((handle, dim));
                 }
@@ -1484,8 +1814,11 @@ impl Emitter<'_> {
     /// width and sign- or zero-extended back to 32 bits.
     fn narrow(&mut self, raw: &str, sel: u8, bytes: u8, signed: bool) -> String {
         let shift = u32::from(sel) * 8;
-        let shifted =
-            if shift == 0 { raw.to_string() } else { format!("(({raw}) >> {shift}u)") };
+        let shifted = if shift == 0 {
+            raw.to_string()
+        } else {
+            format!("(({raw}) >> {shift}u)")
+        };
         if signed {
             self.need("sext");
             format!("sext({shifted}, {bytes}u)")
@@ -1599,8 +1932,7 @@ impl Emitter<'_> {
                 // A target landing on the `sched` word that starts a 32-byte
                 // block means that block's first real instruction, which is
                 // what `align_slot` resolves it to.
-                let slot =
-                    self.bind(&format!("select({raw}, {raw} + 8u, ({raw} & 31u) == 0u)"));
+                let slot = self.bind(&format!("select({raw}, {raw} + 8u, ({raw} & 31u) == 0u)"));
                 self.line(&format!("switch ({slot}) {{"));
                 self.indent += 1;
                 for target in targets {
@@ -1648,7 +1980,9 @@ impl Emitter<'_> {
             out.push_str("  var carry: bool = false;\n");
         }
         if self.uses_stack {
-            out.push_str(&format!("  var stack: array<u32, {RECONVERGENCE_DEPTH}>;\n"));
+            out.push_str(&format!(
+                "  var stack: array<u32, {RECONVERGENCE_DEPTH}>;\n"
+            ));
             out.push_str("  var sp: i32 = 0;\n");
         }
         out.push_str("  var pc: u32 = 0u;\n");
@@ -1826,8 +2160,12 @@ pub struct TextureBinding {
 }
 
 /// The swizzle that rearranges nothing.
-pub const IDENTITY_SWIZZLE: [SwizzleSource; 4] =
-    [SwizzleSource::R, SwizzleSource::G, SwizzleSource::B, SwizzleSource::A];
+pub const IDENTITY_SWIZZLE: [SwizzleSource; 4] = [
+    SwizzleSource::R,
+    SwizzleSource::G,
+    SwizzleSource::B,
+    SwizzleSource::A,
+];
 
 /// `a[]`'s word count: a ten-bit byte address, one `f32` per word.
 const ATTRIBUTE_WORDS: usize = 0x400 / 4;
@@ -1995,8 +2333,12 @@ pub fn module(
     // halves are separate because a vertex shader's inputs and its outputs
     // occupy the same offsets and must not alias — `Invocation` keeps them
     // apart for the same reason.
-    out.push_str(&format!("var<private> attr_in: array<f32, {ATTRIBUTE_WORDS}>;\n"));
-    out.push_str(&format!("var<private> attr_out: array<f32, {ATTRIBUTE_WORDS}>;\n\n"));
+    out.push_str(&format!(
+        "var<private> attr_in: array<f32, {ATTRIBUTE_WORDS}>;\n"
+    ));
+    out.push_str(&format!(
+        "var<private> attr_out: array<f32, {ATTRIBUTE_WORDS}>;\n\n"
+    ));
     let mask = ATTRIBUTE_WORDS - 1;
     out.push_str(&format!(
         "fn attrIn(offset: u32) -> f32 {{ return attr_in[(offset >> 2u) & {mask}u]; }}\n"
@@ -2007,7 +2349,9 @@ pub fn module(
 
     out.push_str("fn cbRead(bank: u32, offset: u32) -> u32 {\n  switch (bank) {\n");
     for bank in &layout.const_banks {
-        out.push_str(&format!("    case {bank}u: {{ return cb{bank}[offset >> 2u]; }}\n"));
+        out.push_str(&format!(
+            "    case {bank}u: {{ return cb{bank}[offset >> 2u]; }}\n"
+        ));
     }
     // A bank the program reads but the draw never bound. The interpreter
     // raises an error there; a shader has nowhere to raise one, and zero is
@@ -2029,8 +2373,7 @@ pub fn module(
             other => return Err(Unsupported::TextureDimension { dim: other }),
         };
         let imm = texture.immediate;
-        let sample =
-            format!("textureSampleLevel(tex{index}, smp{index}, {coords})");
+        let sample = format!("textureSampleLevel(tex{index}, smp{index}, {coords})");
         if texture.swizzle == IDENTITY_SWIZZLE {
             out.push_str(&format!("    case {imm}u: {{ return {sample}; }}\n"));
             continue;
@@ -2049,7 +2392,10 @@ pub fn module(
             .collect();
         out.push_str(&format!("    case {imm}u: {{\n"));
         out.push_str(&format!("      let sampled = {sample};\n"));
-        out.push_str(&format!("      return vec4<f32>({});\n    }}\n", channels.join(", ")));
+        out.push_str(&format!(
+            "      return vec4<f32>({});\n    }}\n",
+            channels.join(", ")
+        ));
     }
     out.push_str("    default: { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }\n  }\n}\n\n");
 
@@ -2129,15 +2475,25 @@ fn vertex_entry(layout: &Layout) -> String {
         };
         for (component, axis) in axes.iter().enumerate() {
             let read = format!("input.attr{slot}.{axis}");
-            let read = if integer { format!("bitcast<f32>({read})") } else { read };
-            out.push_str(&format!("  attr_in[{}u] = {read};\n", generic_word(*slot, component)));
+            let read = if integer {
+                format!("bitcast<f32>({read})")
+            } else {
+                read
+            };
+            out.push_str(&format!(
+                "  attr_in[{}u] = {read};\n",
+                generic_word(*slot, component)
+            ));
         }
     }
     // A clip position no `st` writes is (0, 0, 0, 1), which `shade_vertex`
     // gets from `Attributes::written` answering `None`.
     out.push_str(&format!("  attr_out[{}u] = 1.0;\n", POSITION / 4 + 3));
     out.push_str("  run();\n  var out: VertexOutput;\n");
-    out.push_str(&format!("  out.position = {};\n", gather("attr_out", POSITION / 4)));
+    out.push_str(&format!(
+        "  out.position = {};\n",
+        gather("attr_out", POSITION / 4)
+    ));
     if layout.depth_minus_one_to_one {
         out.push_str("  // Maxwell clips z from -w to w and WebGPU clips it from 0 to w;\n");
         out.push_str("  // left alone, the near half of the frustum is clipped away.\n");
@@ -2194,7 +2550,9 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
     if targets > 1 {
         out.push_str("struct FragmentOutput {\n");
         for target in 0..targets {
-            out.push_str(&format!("  @location({target}) target{target}: vec4<f32>,\n"));
+            out.push_str(&format!(
+                "  @location({target}) target{target}: vec4<f32>,\n"
+            ));
         }
         out.push_str("}\n\n");
     }
@@ -2203,7 +2561,9 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         1 => " -> @location(0) vec4<f32>".to_string(),
         _ => " -> FragmentOutput".to_string(),
     };
-    out.push_str(&format!("@fragment\nfn fs_main(input: FragmentInput){returns} {{\n"));
+    out.push_str(&format!(
+        "@fragment\nfn fs_main(input: FragmentInput){returns} {{\n"
+    ));
     // Coverage first, because the sample mask is coverage: a sample the mask
     // excludes is one the fragment never had, and `Fragments::coverage`
     // applies it before anything is shaded.
@@ -2218,7 +2578,10 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
     }
     // WGSL's fragment `position.w` is `1/w` interpolated linearly, which is
     // exactly what `a[0x7c]` holds.
-    out.push_str(&format!("  attr_in[{}u] = input.position.w;\n", POSITION / 4 + 3));
+    out.push_str(&format!(
+        "  attr_in[{}u] = input.position.w;\n",
+        POSITION / 4 + 3
+    ));
     for slot in &layout.varyings {
         for (component, axis) in ["x", "y", "z", "w"].iter().enumerate() {
             out.push_str(&format!(
@@ -2263,7 +2626,11 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
 /// `var` rather than a `const` because it is indexed by a value only known at
 /// run time, and that is the form every WGSL implementation accepts.
 fn sample_index(coverage: &Coverage) -> String {
-    let slots: Vec<String> = coverage.sample_of_slot.iter().map(|s| format!("{s}u")).collect();
+    let slots: Vec<String> = coverage
+        .sample_of_slot
+        .iter()
+        .map(|s| format!("{s}u"))
+        .collect();
     let count = slots.len();
     format!(
         "  var sample_of_slot = array<u32, {count}>({});\n\
@@ -2300,7 +2667,10 @@ mod tests {
 
     const ALWAYS: Pred = Pred::ALWAYS;
     /// `@p0` — the guard a two-armed branch is built out of.
-    const IF_P0: Pred = Pred { reg: 0, negate: false };
+    const IF_P0: Pred = Pred {
+        reg: 0,
+        negate: false,
+    };
     const NO_MOD: FMod = FMod::NONE;
 
     /// The byte offset instruction `index` lands at in a real 32-byte-block
@@ -2318,7 +2688,10 @@ mod tests {
     }
 
     fn build(entries: &[(Op, Pred)], indirect: BTreeMap<u32, Vec<u32>>) -> Compiled {
-        let mut p = Program { indirect, ..Program::default() };
+        let mut p = Program {
+            indirect,
+            ..Program::default()
+        };
         for (index, &(op, pred)) in entries.iter().enumerate() {
             p.insns.push(Instruction { pred, op });
             p.offsets.push(at(index));
@@ -2350,31 +2723,201 @@ mod tests {
     /// the front half of a GPU backend is finished.
     fn home_menu_opcodes() -> Vec<Op> {
         vec![
-            Op::Ffma { dst: 1, a: 2, b: Operand::Reg(3), bneg: false, c: Operand::Imm(0), cneg: false, ftz: true, sat: false },
-            Op::Fadd { dst: 1, a: 2, am: NO_MOD, b: Operand::Reg(3), bm: NO_MOD, ftz: true, sat: false },
-            Op::Fmul { dst: 1, a: 2, b: Operand::Reg(3), bm: NO_MOD, ftz: true, sat: false, scale: FmulScale::None },
-            Op::Mov { dst: 1, src: Operand::Reg(2) },
-            Op::Fsetp { p0: 0, p1: 7, a: 1, am: NO_MOD, b: Operand::Reg(2), bm: NO_MOD, cmp: FCmp::Lt, bop: BoolOp::And, src: ALWAYS },
-            Op::Isetp { p0: 0, p1: 7, a: 1, b: Operand::Imm(3), cmp: ICmp::Eq, signed: true, bop: BoolOp::And, src: ALWAYS },
-            Op::Mov32i { dst: 1, imm: 0x3f80_0000 },
-            Op::Iadd { dst: 1, a: 2, aneg: false, b: Operand::Imm(1), bneg: false, cin: false, cout: true },
-            Op::Lop { dst: 1, a: 2, ainv: false, b: Operand::Imm(0xff), binv: false, op: LogicOp::And, pred: Some((1, LopTest::NonZero)) },
-            Op::Mufu { dst: 1, src: 2, sm: NO_MOD, op: MufuOp::Rcp, sat: false },
-            Op::Shr { dst: 1, a: 2, b: Operand::Imm(4), signed: false, wrap: false },
-            Op::F2i { dst: 1, src: Operand::Reg(2), sm: NO_MOD, dst_bytes: 4, dst_signed: true, round: FRound::Trunc, ftz: true },
-            Op::Iscadd { dst: 1, a: 2, aneg: false, b: Operand::Reg(3), bneg: false, shift: 2 },
-            Op::Iset { dst: 1, a: 2, b: Operand::Imm(3), cmp: ICmp::Eq, signed: true, bop: BoolOp::And, src: ALWAYS, bf: false },
-            Op::Ipa { dst: 1, offset: 0x80, mul: Some(2), perspective: true, sat: false, centroid: false },
-            Op::Fmnmx { dst: 1, a: 2, am: NO_MOD, b: Operand::Reg(3), bm: NO_MOD, pred: ALWAYS, ftz: true },
-            Op::Ldc { dst: 1, bank: 1, offset: 0x14, idx: 2, size: MemSize::B32 },
-            Op::St { offset: 0x70, idx: RZ, src: 1, size: MemSize::B32 },
-            Op::I2f { dst: 1, src: Operand::Reg(2), sm: NO_MOD, src_bytes: 4, src_signed: true, sel: 0 },
-            Op::Shl { dst: 1, a: 2, b: Operand::Imm(2), wrap: false },
-            Op::Bfi { dst: 1, insert: 2, src: Operand::Reg(3), base: Operand::Reg(4) },
-            Op::Imnmx { dst: 1, a: 2, b: Operand::Imm(4), pred: ALWAYS, signed: false },
-            Op::Fset { dst: 1, a: 2, am: NO_MOD, b: Operand::Reg(3), bm: NO_MOD, cmp: FCmp::Ge, bop: BoolOp::And, src: ALWAYS, bf: true },
-            Op::R2p { src: 1, mask: Operand::Imm(0x7f), byte: 0 },
-            Op::Ld { offset: 0x80, idx: RZ, dst: 1, size: MemSize::B32 },
+            Op::Ffma {
+                dst: 1,
+                a: 2,
+                b: Operand::Reg(3),
+                bneg: false,
+                c: Operand::Imm(0),
+                cneg: false,
+                ftz: true,
+                sat: false,
+            },
+            Op::Fadd {
+                dst: 1,
+                a: 2,
+                am: NO_MOD,
+                b: Operand::Reg(3),
+                bm: NO_MOD,
+                ftz: true,
+                sat: false,
+            },
+            Op::Fmul {
+                dst: 1,
+                a: 2,
+                b: Operand::Reg(3),
+                bm: NO_MOD,
+                ftz: true,
+                sat: false,
+                scale: FmulScale::None,
+            },
+            Op::Mov {
+                dst: 1,
+                src: Operand::Reg(2),
+            },
+            Op::Fsetp {
+                p0: 0,
+                p1: 7,
+                a: 1,
+                am: NO_MOD,
+                b: Operand::Reg(2),
+                bm: NO_MOD,
+                cmp: FCmp::Lt,
+                bop: BoolOp::And,
+                src: ALWAYS,
+            },
+            Op::Isetp {
+                p0: 0,
+                p1: 7,
+                a: 1,
+                b: Operand::Imm(3),
+                cmp: ICmp::Eq,
+                signed: true,
+                bop: BoolOp::And,
+                src: ALWAYS,
+            },
+            Op::Mov32i {
+                dst: 1,
+                imm: 0x3f80_0000,
+            },
+            Op::Iadd {
+                dst: 1,
+                a: 2,
+                aneg: false,
+                b: Operand::Imm(1),
+                bneg: false,
+                cin: false,
+                cout: true,
+            },
+            Op::Lop {
+                dst: 1,
+                a: 2,
+                ainv: false,
+                b: Operand::Imm(0xff),
+                binv: false,
+                op: LogicOp::And,
+                pred: Some((1, LopTest::NonZero)),
+            },
+            Op::Mufu {
+                dst: 1,
+                src: 2,
+                sm: NO_MOD,
+                op: MufuOp::Rcp,
+                sat: false,
+            },
+            Op::Shr {
+                dst: 1,
+                a: 2,
+                b: Operand::Imm(4),
+                signed: false,
+                wrap: false,
+            },
+            Op::F2i {
+                dst: 1,
+                src: Operand::Reg(2),
+                sm: NO_MOD,
+                dst_bytes: 4,
+                dst_signed: true,
+                round: FRound::Trunc,
+                ftz: true,
+            },
+            Op::Iscadd {
+                dst: 1,
+                a: 2,
+                aneg: false,
+                b: Operand::Reg(3),
+                bneg: false,
+                shift: 2,
+            },
+            Op::Iset {
+                dst: 1,
+                a: 2,
+                b: Operand::Imm(3),
+                cmp: ICmp::Eq,
+                signed: true,
+                bop: BoolOp::And,
+                src: ALWAYS,
+                bf: false,
+            },
+            Op::Ipa {
+                dst: 1,
+                offset: 0x80,
+                mul: Some(2),
+                perspective: true,
+                sat: false,
+                centroid: false,
+            },
+            Op::Fmnmx {
+                dst: 1,
+                a: 2,
+                am: NO_MOD,
+                b: Operand::Reg(3),
+                bm: NO_MOD,
+                pred: ALWAYS,
+                ftz: true,
+            },
+            Op::Ldc {
+                dst: 1,
+                bank: 1,
+                offset: 0x14,
+                idx: 2,
+                size: MemSize::B32,
+            },
+            Op::St {
+                offset: 0x70,
+                idx: RZ,
+                src: 1,
+                size: MemSize::B32,
+            },
+            Op::I2f {
+                dst: 1,
+                src: Operand::Reg(2),
+                sm: NO_MOD,
+                src_bytes: 4,
+                src_signed: true,
+                sel: 0,
+            },
+            Op::Shl {
+                dst: 1,
+                a: 2,
+                b: Operand::Imm(2),
+                wrap: false,
+            },
+            Op::Bfi {
+                dst: 1,
+                insert: 2,
+                src: Operand::Reg(3),
+                base: Operand::Reg(4),
+            },
+            Op::Imnmx {
+                dst: 1,
+                a: 2,
+                b: Operand::Imm(4),
+                pred: ALWAYS,
+                signed: false,
+            },
+            Op::Fset {
+                dst: 1,
+                a: 2,
+                am: NO_MOD,
+                b: Operand::Reg(3),
+                bm: NO_MOD,
+                cmp: FCmp::Ge,
+                bop: BoolOp::And,
+                src: ALWAYS,
+                bf: true,
+            },
+            Op::R2p {
+                src: 1,
+                mask: Operand::Imm(0x7f),
+                byte: 0,
+            },
+            Op::Ld {
+                offset: 0x80,
+                idx: RZ,
+                dst: 1,
+                size: MemSize::B32,
+            },
             Op::Texs {
                 dst: 1,
                 dst2: 3,
@@ -2384,9 +2927,29 @@ mod tests {
                 mask: [true, true, true, true],
                 f16: false,
             },
-            Op::Icmp { dst: 1, a: 2, b: Operand::Reg(3), c: 4, cmp: ICmp::Ne, signed: true },
-            Op::Iadd3 { dst: 1, a: 2, aneg: false, b: Operand::Reg(3), bneg: false, c: Operand::Reg(4), cneg: false },
-            Op::Bfe { dst: 1, a: 2, b: Operand::Imm(0x0810), signed: false },
+            Op::Icmp {
+                dst: 1,
+                a: 2,
+                b: Operand::Reg(3),
+                c: 4,
+                cmp: ICmp::Ne,
+                signed: true,
+            },
+            Op::Iadd3 {
+                dst: 1,
+                a: 2,
+                aneg: false,
+                b: Operand::Reg(3),
+                bneg: false,
+                c: Operand::Reg(4),
+                cneg: false,
+            },
+            Op::Bfe {
+                dst: 1,
+                a: 2,
+                b: Operand::Imm(0x0810),
+                signed: false,
+            },
         ]
     }
 
@@ -2397,7 +2960,9 @@ mod tests {
         // shaped around them rather than a straight line.
         for op in home_menu_opcodes() {
             let p = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
-            let wgsl = translate(&p).unwrap_or_else(|e| panic!("{op:?}: {e}")).source;
+            let wgsl = translate(&p)
+                .unwrap_or_else(|e| panic!("{op:?}: {e}"))
+                .source;
             assert!(braces_balance(&wgsl), "{op:?} left a block open:\n{wgsl}");
         }
     }
@@ -2405,7 +2970,13 @@ mod tests {
     #[test]
     fn a_guard_becomes_a_conditional_rather_than_a_dropped_instruction() {
         let p = program(&[
-            (Op::Mov { dst: 1, src: Operand::Imm(7) }, IF_P0),
+            (
+                Op::Mov {
+                    dst: 1,
+                    src: Operand::Imm(7),
+                },
+                IF_P0,
+            ),
             (Op::Exit, ALWAYS),
         ]);
         let wgsl = translate(&p).unwrap().source;
@@ -2439,7 +3010,10 @@ mod tests {
         let wgsl = translate(&p).unwrap().source;
         assert!(wgsl.contains("stack[sp] = 3u;"), "the push:\n{wgsl}");
         assert!(wgsl.contains("sp = sp - 1;"), "the pop:\n{wgsl}");
-        assert!(wgsl.contains("pc = stack[sp];"), "and where it goes:\n{wgsl}");
+        assert!(
+            wgsl.contains("pc = stack[sp];"),
+            "and where it goes:\n{wgsl}"
+        );
     }
 
     #[test]
@@ -2461,7 +3035,10 @@ mod tests {
         );
         let wgsl = translate(&p).unwrap().source;
         assert!(wgsl.contains("0u + r16"), "the computed address:\n{wgsl}");
-        assert!(wgsl.contains("& 31u) == 0u"), "rounded onto a slot:\n{wgsl}");
+        assert!(
+            wgsl.contains("& 31u) == 0u"),
+            "rounded onto a slot:\n{wgsl}"
+        );
         assert!(
             wgsl.contains(&format!("case {}u: {{ pc = 3u; }}", at(3))),
             "arm 0:\n{wgsl}"
@@ -2475,7 +3052,10 @@ mod tests {
     #[test]
     fn a_brx_with_no_known_arms_is_reported_rather_than_guessed() {
         let p = program(&[(Op::Brx { base: 0, reg: 16 }, ALWAYS), (Op::Exit, ALWAYS)]);
-        assert_eq!(translate(&p).unwrap_err(), Unsupported::IndirectBranch { at: 0 });
+        assert_eq!(
+            translate(&p).unwrap_err(),
+            Unsupported::IndirectBranch { at: 0 }
+        );
     }
 
     #[test]
@@ -2483,7 +3063,12 @@ mod tests {
         // `ldg` needs a storage buffer, which is a question about binding
         // resources rather than about translating instructions. Saying so is
         // what lets a caller fall back for that draw.
-        let op = Op::Ldg { dst: 1, addr: 2, offset: 0, size: MemSize::B32 };
+        let op = Op::Ldg {
+            dst: 1,
+            addr: 2,
+            offset: 0,
+            size: MemSize::B32,
+        };
         let p = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
         assert_eq!(translate(&p).unwrap_err(), Unsupported::Op { at: 0, op });
     }
@@ -2511,7 +3096,10 @@ mod tests {
         // block to jump to. The interpreter raises this where the branch is
         // taken; a translation has to know first.
         let p = program(&[(Op::Bra { target: 0x9999 }, ALWAYS), (Op::Exit, ALWAYS)]);
-        assert_eq!(translate(&p).unwrap_err(), Unsupported::UndecodedTarget { at: 0 });
+        assert_eq!(
+            translate(&p).unwrap_err(),
+            Unsupported::UndecodedTarget { at: 0 }
+        );
     }
 
     #[test]
@@ -2533,15 +3121,30 @@ mod tests {
     #[test]
     fn only_the_registers_a_program_touches_are_declared() {
         let p = program(&[
-            (Op::Mov { dst: 9, src: Operand::Reg(4) }, ALWAYS),
+            (
+                Op::Mov {
+                    dst: 9,
+                    src: Operand::Reg(4),
+                },
+                ALWAYS,
+            ),
             (Op::Exit, ALWAYS),
         ]);
         let wgsl = translate(&p).unwrap().source;
         assert!(wgsl.contains("var<private> r4: u32 = 0u;"), "{wgsl}");
         assert!(wgsl.contains("var<private> r9: u32 = 0u;"), "{wgsl}");
-        assert!(!wgsl.contains(" r5:"), "declared a register nothing uses:\n{wgsl}");
-        assert!(!wgsl.contains("var carry"), "declared a carry nothing sets:\n{wgsl}");
-        assert!(!wgsl.contains("var stack"), "declared a stack nothing pushes:\n{wgsl}");
+        assert!(
+            !wgsl.contains(" r5:"),
+            "declared a register nothing uses:\n{wgsl}"
+        );
+        assert!(
+            !wgsl.contains("var carry"),
+            "declared a carry nothing sets:\n{wgsl}"
+        );
+        assert!(
+            !wgsl.contains("var stack"),
+            "declared a stack nothing pushes:\n{wgsl}"
+        );
     }
 
     #[test]
@@ -2551,15 +3154,29 @@ mod tests {
         // did not outlive `run` would leave a backend with nothing to write
         // to the render target.
         let p = program(&[
-            (Op::Mov { dst: 0, src: Operand::Imm(0x3f80_0000) }, ALWAYS),
-            (Op::Mov { dst: 3, src: Operand::Imm(0) }, ALWAYS),
+            (
+                Op::Mov {
+                    dst: 0,
+                    src: Operand::Imm(0x3f80_0000),
+                },
+                ALWAYS,
+            ),
+            (
+                Op::Mov {
+                    dst: 3,
+                    src: Operand::Imm(0),
+                },
+                ALWAYS,
+            ),
             (Op::Exit, ALWAYS),
         ]);
         let translated = translate(&p).unwrap();
         assert_eq!(translated.registers, vec![0, 3]);
         for reg in &translated.registers {
             assert!(
-                translated.source.contains(&format!("var<private> r{reg}: u32")),
+                translated
+                    .source
+                    .contains(&format!("var<private> r{reg}: u32")),
                 "r{reg} does not outlive the call:\n{}",
                 translated.source
             );
@@ -2569,7 +3186,13 @@ mod tests {
     #[test]
     fn the_zero_register_reads_as_zero_and_discards_what_is_written_to_it() {
         let p = program(&[
-            (Op::Mov { dst: RZ, src: Operand::Reg(RZ) }, ALWAYS),
+            (
+                Op::Mov {
+                    dst: RZ,
+                    src: Operand::Reg(RZ),
+                },
+                ALWAYS,
+            ),
             (Op::Exit, ALWAYS),
         ]);
         let wgsl = translate(&p).unwrap().source;
@@ -2589,12 +3212,23 @@ mod tests {
     #[test]
     fn only_the_helpers_a_program_reaches_are_emitted() {
         let p = program(&[
-            (Op::Shl { dst: 1, a: 2, b: Operand::Imm(2), wrap: false }, ALWAYS),
+            (
+                Op::Shl {
+                    dst: 1,
+                    a: 2,
+                    b: Operand::Imm(2),
+                    wrap: false,
+                },
+                ALWAYS,
+            ),
             (Op::Exit, ALWAYS),
         ]);
         let wgsl = translate(&p).unwrap().source;
         assert!(wgsl.contains("fn shl32("), "{wgsl}");
-        assert!(!wgsl.contains("fn lop3("), "carried a helper it never calls:\n{wgsl}");
+        assert!(
+            !wgsl.contains("fn lop3("),
+            "carried a helper it never calls:\n{wgsl}"
+        );
     }
 
     #[test]
@@ -2602,7 +3236,16 @@ mod tests {
         // `mulhi_s` corrects `mulhi_u`'s result; emitting it alone would not
         // compile.
         let p = program(&[
-            (Op::Imul { dst: 1, a: 2, b: Operand::Reg(3), signed: true, hi: true }, ALWAYS),
+            (
+                Op::Imul {
+                    dst: 1,
+                    a: 2,
+                    b: Operand::Reg(3),
+                    signed: true,
+                    hi: true,
+                },
+                ALWAYS,
+            ),
             (Op::Exit, ALWAYS),
         ]);
         let wgsl = translate(&p).unwrap().source;
@@ -2624,7 +3267,10 @@ mod tests {
         }
         for hook in ["attrIn(", "attrOut(", "cbRead(", "texSample("] {
             assert!(wgsl.contains(hook), "nothing emits a call to {hook}");
-            assert!(HOST_INTERFACE.contains(hook), "{hook} is not in HOST_INTERFACE");
+            assert!(
+                HOST_INTERFACE.contains(hook),
+                "{hook} is not in HOST_INTERFACE"
+            );
         }
     }
 
@@ -2634,12 +3280,38 @@ mod tests {
     fn pair(slot: usize) -> (Compiled, Compiled) {
         let offset = (GENERIC_BASE + slot * GENERIC_STRIDE) as u16;
         let vs = program(&[
-            (Op::Ld { dst: 1, offset, idx: RZ, size: MemSize::B32 }, ALWAYS),
-            (Op::St { offset, idx: RZ, src: 1, size: MemSize::B32 }, ALWAYS),
+            (
+                Op::Ld {
+                    dst: 1,
+                    offset,
+                    idx: RZ,
+                    size: MemSize::B32,
+                },
+                ALWAYS,
+            ),
+            (
+                Op::St {
+                    offset,
+                    idx: RZ,
+                    src: 1,
+                    size: MemSize::B32,
+                },
+                ALWAYS,
+            ),
             (Op::Exit, ALWAYS),
         ]);
         let fs = program(&[
-            (Op::Ipa { dst: 0, offset, mul: None, perspective: true, sat: false, centroid: false }, ALWAYS),
+            (
+                Op::Ipa {
+                    dst: 0,
+                    offset,
+                    mul: None,
+                    perspective: true,
+                    sat: false,
+                    centroid: false,
+                },
+                ALWAYS,
+            ),
             (Op::Exit, ALWAYS),
         ]);
         (vs, fs)
@@ -2654,15 +3326,36 @@ mod tests {
         assert_eq!(Layout::of(&vs, Stage::Vertex).varyings, vec![3]);
         // A fragment shader has no vertex attributes, and what it reads out
         // of `a[]` is a varying.
-        assert_eq!(Layout::of(&fs, Stage::Fragment).attributes, Vec::<usize>::new());
+        assert_eq!(
+            Layout::of(&fs, Stage::Fragment).attributes,
+            Vec::<usize>::new()
+        );
         assert_eq!(Layout::of(&fs, Stage::Fragment).varyings, vec![3]);
     }
 
     #[test]
     fn a_layout_names_every_binding_the_text_calls_through() {
         let p = program(&[
-            (Op::Ldc { dst: 1, bank: 5, offset: 0x10, idx: RZ, size: MemSize::B32 }, ALWAYS),
-            (Op::Mov { dst: 2, src: Operand::Const { bank: 1, offset: 0x40 } }, ALWAYS),
+            (
+                Op::Ldc {
+                    dst: 1,
+                    bank: 5,
+                    offset: 0x10,
+                    idx: RZ,
+                    size: MemSize::B32,
+                },
+                ALWAYS,
+            ),
+            (
+                Op::Mov {
+                    dst: 2,
+                    src: Operand::Const {
+                        bank: 1,
+                        offset: 0x40,
+                    },
+                },
+                ALWAYS,
+            ),
             (
                 Op::Texs {
                     dst: 4,
@@ -2691,7 +3384,10 @@ mod tests {
         let source = module(&translated, Stage::Fragment, &layout).unwrap();
         assert!(source.contains("var<storage, read> cb1:"), "{source}");
         assert!(source.contains("var<storage, read> cb5:"), "{source}");
-        assert!(source.contains("case 420u: { return textureSampleLevel(tex0, smp0"), "{source}");
+        assert!(
+            source.contains("case 420u: { return textureSampleLevel(tex0, smp0"),
+            "{source}"
+        );
     }
 
     #[test]
@@ -2718,8 +3414,12 @@ mod tests {
         let translated = translate(&p).unwrap();
         let mut layout = Layout::of(&translated, Stage::Fragment);
         // What a backend fills in from the TIC.
-        layout.textures[0].swizzle =
-            [SwizzleSource::R, SwizzleSource::R, SwizzleSource::R, SwizzleSource::One];
+        layout.textures[0].swizzle = [
+            SwizzleSource::R,
+            SwizzleSource::R,
+            SwizzleSource::R,
+            SwizzleSource::One,
+        ];
         let source = module(&translated, Stage::Fragment, &layout).unwrap();
         assert!(
             source.contains("return vec4<f32>(sampled.x, sampled.x, sampled.x, 1.0);"),
@@ -2740,8 +3440,14 @@ mod tests {
         let fs = translate(&fs).unwrap();
         let vs = module(&vs, Stage::Vertex, &Layout::of(&vs, Stage::Vertex)).unwrap();
         let fs = module(&fs, Stage::Fragment, &Layout::of(&fs, Stage::Fragment)).unwrap();
-        assert!(vs.contains("@location(7) @interpolate(linear) vary7"), "{vs}");
-        assert!(fs.contains("@location(7) @interpolate(linear) vary7"), "{fs}");
+        assert!(
+            vs.contains("@location(7) @interpolate(linear) vary7"),
+            "{vs}"
+        );
+        assert!(
+            fs.contains("@location(7) @interpolate(linear) vary7"),
+            "{fs}"
+        );
     }
 
     /// Only the fragment program's `ipa` says a varying is sampled at the
@@ -2753,7 +3459,17 @@ mod tests {
         let offset = (GENERIC_BASE + 5 * GENERIC_STRIDE) as u16;
         let (vs, _) = pair(5);
         let fs = program(&[
-            (Op::Ipa { dst: 0, offset, mul: None, perspective: true, sat: false, centroid: true }, ALWAYS),
+            (
+                Op::Ipa {
+                    dst: 0,
+                    offset,
+                    mul: None,
+                    perspective: true,
+                    sat: false,
+                    centroid: true,
+                },
+                ALWAYS,
+            ),
             (Op::Exit, ALWAYS),
         ]);
         let vs = translate(&vs).unwrap();
@@ -2761,13 +3477,23 @@ mod tests {
         let fs_layout = Layout::of(&fs, Stage::Fragment);
         assert_eq!(fs_layout.centroid_varyings, vec![5]);
         let mut vs_layout = Layout::of(&vs, Stage::Vertex);
-        assert_eq!(vs_layout.centroid_varyings, Vec::<usize>::new(), "a vertex shader has no ipa");
+        assert_eq!(
+            vs_layout.centroid_varyings,
+            Vec::<usize>::new(),
+            "a vertex shader has no ipa"
+        );
         vs_layout.centroid_varyings = fs_layout.centroid_varyings.clone();
 
         let vs = module(&vs, Stage::Vertex, &vs_layout).unwrap();
         let fs = module(&fs, Stage::Fragment, &fs_layout).unwrap();
-        assert!(vs.contains("@location(5) @interpolate(linear, centroid) vary5"), "{vs}");
-        assert!(fs.contains("@location(5) @interpolate(linear, centroid) vary5"), "{fs}");
+        assert!(
+            vs.contains("@location(5) @interpolate(linear, centroid) vary5"),
+            "{vs}"
+        );
+        assert!(
+            fs.contains("@location(5) @interpolate(linear, centroid) vary5"),
+            "{fs}"
+        );
     }
 
     #[test]
@@ -2781,7 +3507,10 @@ mod tests {
         let source = module(&vs, Stage::Vertex, &Layout::of(&vs, Stage::Vertex)).unwrap();
         assert!(source.contains("@interpolate(linear)"), "{source}");
         assert!(!source.contains("perspective"), "{source}");
-        assert!(source.contains("let over_w = 1.0 / out.position.w;"), "{source}");
+        assert!(
+            source.contains("let over_w = 1.0 / out.position.w;"),
+            "{source}"
+        );
         assert!(source.contains("* over_w;"), "{source}");
     }
 
@@ -2827,17 +3556,29 @@ mod tests {
         // skipped the shader entirely would lose `kil` — which is a reason a
         // fragment is not there, and so a reason depth is not written.
         let p = program(&[
-            (Op::Mov { dst: 0, src: Operand::Imm(0x3f80_0000) }, ALWAYS),
+            (
+                Op::Mov {
+                    dst: 0,
+                    src: Operand::Imm(0x3f80_0000),
+                },
+                ALWAYS,
+            ),
             (Op::Exit, ALWAYS),
         ]);
         let translated = translate(&p).unwrap();
         let mut layout = Layout::of(&translated, Stage::Fragment);
         layout.targets = 0;
         let source = module(&translated, Stage::Fragment, &layout).unwrap();
-        assert!(source.contains("fn fs_main(input: FragmentInput) {"), "{source}");
+        assert!(
+            source.contains("fn fs_main(input: FragmentInput) {"),
+            "{source}"
+        );
         assert!(!source.contains("@location(0) vec4<f32>"), "{source}");
         assert!(source.contains("if (run()) { discard; }"), "{source}");
-        let entry = source.split("@fragment").nth(1).expect("a fragment entry point");
+        let entry = source
+            .split("@fragment")
+            .nth(1)
+            .expect("a fragment entry point");
         assert!(!entry.contains("return"), "{source}");
         assert!(braces_balance(&source), "{source}");
 
@@ -2846,7 +3587,10 @@ mod tests {
         layout.coverage = Some(quad_coverage(u32::MAX, true));
         let shaded = module(&translated, Stage::Fragment, &layout).unwrap();
         assert!(shaded.contains("let target0 = vec4<f32>("), "{shaded}");
-        assert!(shaded.contains("if (sample >= u32(floor(clamp(target0.w"), "{shaded}");
+        assert!(
+            shaded.contains("if (sample >= u32(floor(clamp(target0.w"),
+            "{shaded}"
+        );
         assert!(!shaded.contains("return target0;"), "{shaded}");
         assert!(braces_balance(&shaded), "{shaded}");
     }
@@ -2895,9 +3639,15 @@ mod tests {
         let mut layout = Layout::of(&translated, Stage::Fragment);
         layout.coverage = Some(quad_coverage(0b0001, false));
         let source = module(&translated, Stage::Fragment, &layout).unwrap();
-        assert!(source.contains("var sample_of_slot = array<u32, 4>(0u, 1u, 2u, 3u);"), "{source}");
+        assert!(
+            source.contains("var sample_of_slot = array<u32, 4>(0u, 1u, 2u, 3u);"),
+            "{source}"
+        );
         assert!(source.contains("u32(input.position.x) % 2u"), "{source}");
-        assert!(source.contains("if ((1u >> sample) & 1u) == 0u { discard; }"), "{source}");
+        assert!(
+            source.contains("if ((1u >> sample) & 1u) == 0u { discard; }"),
+            "{source}"
+        );
         assert!(braces_balance(&source), "{source}");
 
         // An all-ones mask excludes nothing, and is what an unprogrammed
@@ -2962,29 +3712,51 @@ mod tests {
         // `shade_fragment` reads r0 to r3 whatever the shader touched, and a
         // module that named a register it never declared would not compile.
         let p = program(&[
-            (Op::Mov { dst: 0, src: Operand::Imm(0x3f80_0000) }, ALWAYS),
+            (
+                Op::Mov {
+                    dst: 0,
+                    src: Operand::Imm(0x3f80_0000),
+                },
+                ALWAYS,
+            ),
             (Op::Exit, ALWAYS),
         ]);
         let translated = translate(&p).unwrap();
         let layout = Layout::of(&translated, Stage::Fragment);
         let source = module(&translated, Stage::Fragment, &layout).unwrap();
-        assert!(source.contains("return vec4<f32>(bitcast<f32>(r0), 0.0, 0.0, 0.0);"), "{source}");
+        assert!(
+            source.contains("return vec4<f32>(bitcast<f32>(r0), 0.0, 0.0, 0.0);"),
+            "{source}"
+        );
     }
 
     #[test]
     fn each_extra_colour_target_takes_the_next_four_registers() {
         let mut entries: Vec<(Op, Pred)> = (0..8u8)
-            .map(|r| (Op::Mov { dst: r, src: Operand::Imm(0) }, ALWAYS))
+            .map(|r| {
+                (
+                    Op::Mov {
+                        dst: r,
+                        src: Operand::Imm(0),
+                    },
+                    ALWAYS,
+                )
+            })
             .collect();
         entries.push((Op::Exit, ALWAYS));
         let translated = translate(&program(&entries)).unwrap();
         let mut layout = Layout::of(&translated, Stage::Fragment);
         layout.targets = 2;
         let source = module(&translated, Stage::Fragment, &layout).unwrap();
-        assert!(source.contains("@location(1) target1: vec4<f32>"), "{source}");
         assert!(
-            source.contains("out.target1 = vec4<f32>(bitcast<f32>(r4), bitcast<f32>(r5), \
-                             bitcast<f32>(r6), bitcast<f32>(r7));"),
+            source.contains("@location(1) target1: vec4<f32>"),
+            "{source}"
+        );
+        assert!(
+            source.contains(
+                "out.target1 = vec4<f32>(bitcast<f32>(r4), bitcast<f32>(r5), \
+                             bitcast<f32>(r6), bitcast<f32>(r7));"
+            ),
             "{source}"
         );
     }
@@ -3029,7 +3801,10 @@ mod tests {
             let layout = Layout::of(&translated, stage);
             let source = module(&translated, stage, &layout).unwrap();
             for hook in ["fn attrIn(", "fn attrOut(", "fn cbRead(", "fn texSample("] {
-                assert!(source.contains(hook), "{stage:?} module has no {hook}:\n{source}");
+                assert!(
+                    source.contains(hook),
+                    "{stage:?} module has no {hook}:\n{source}"
+                );
             }
             assert!(braces_balance(&source), "{stage:?}:\n{source}");
         }
@@ -3057,9 +3832,15 @@ mod tests {
             Op::Hmul2 {
                 dst: 1,
                 a: 2,
-                am: FMod { neg: true, abs: true },
+                am: FMod {
+                    neg: true,
+                    abs: true,
+                },
                 asw: HSwizzle::H1H0,
-                b: Operand::Const { bank: 1, offset: 0x10 },
+                b: Operand::Const {
+                    bank: 1,
+                    offset: 0x10,
+                },
                 bm: NO_MOD,
                 bsw: HSwizzle::F32,
                 merge: HMerge::H1H0,
@@ -3145,7 +3926,9 @@ mod tests {
     fn every_half_opcode_translates() {
         for op in half_opcodes() {
             let p = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
-            let wgsl = translate(&p).unwrap_or_else(|e| panic!("{op:?}: {e}")).source;
+            let wgsl = translate(&p)
+                .unwrap_or_else(|e| panic!("{op:?}: {e}"))
+                .source;
             assert!(braces_balance(&wgsl), "{op:?} left a block open:\n{wgsl}");
         }
     }
@@ -3155,10 +3938,16 @@ mod tests {
     /// finite result rather than only on the ones that round the same way.
     #[test]
     fn a_half_op_unpacks_its_lanes_and_a_merge_keeps_the_other_one() {
-        let ops: Vec<(Op, Pred)> =
-            half_opcodes().into_iter().map(|op| (op, ALWAYS)).chain([(Op::Exit, ALWAYS)]).collect();
+        let ops: Vec<(Op, Pred)> = half_opcodes()
+            .into_iter()
+            .map(|op| (op, ALWAYS))
+            .chain([(Op::Exit, ALWAYS)])
+            .collect();
         let wgsl = translate(&program(&ops)).unwrap().source;
-        assert!(wgsl.contains("pack2x16float(fsat2((hftz(unpack2x16float(r2))"), "{wgsl}");
+        assert!(
+            wgsl.contains("pack2x16float(fsat2((hftz(unpack2x16float(r2))"),
+            "{wgsl}"
+        );
         // The three swizzles that are not the plain pair.
         assert!(wgsl.contains("unpack2x16float(r2).xx"), "{wgsl}");
         assert!(wgsl.contains("unpack2x16float(r2).yy"), "{wgsl}");

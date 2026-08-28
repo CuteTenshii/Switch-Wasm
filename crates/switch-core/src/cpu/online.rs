@@ -64,7 +64,9 @@ impl Cpu {
                 Some(3) => self.write_ipc_response(tls, 0, &[], &0i16.to_le_bytes(), &[]),
                 // GetSecurityParameter / GetNetworkConfig -> the credentials
                 // and the shape of the network that was joined.
-                Some(4) => self.write_ipc_response(tls, 0, &[], &[0u8; SECURITY_PARAMETER_SIZE], &[]),
+                Some(4) => {
+                    self.write_ipc_response(tls, 0, &[], &[0u8; SECURITY_PARAMETER_SIZE], &[])
+                }
                 Some(5) => self.write_ipc_response(tls, 0, &[], &[0u8; NETWORK_CONFIG_SIZE], &[]),
                 // Initialize / Finalize. Both return 0 on a real console
                 // whatever the radio is doing, and official software aborts
@@ -146,8 +148,17 @@ impl Cpu {
     /// message sent into it has nowhere to arrive. Sends are accepted and
     /// dropped, and the receiver's queue is permanently empty — which is
     /// exactly what a receiver sees on a console where nothing has happened.
-    pub(super) fn ovln_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
-        let root = if self.service_name(handle) == Some("ovln:rcv") { "ovln:rcv" } else { "ovln:snd" };
+    pub(super) fn ovln_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        let root = if self.service_name(handle) == Some("ovln:rcv") {
+            "ovln:rcv"
+        } else {
+            "ovln:snd"
+        };
         if self.ipc_answer_control(tls, handle, root, cmd_id)? {
             return Ok(());
         }
@@ -180,7 +191,11 @@ impl Cpu {
             // IReceiverService::OpenReceiver, both command 0.
             _ => match cmd_id {
                 Some(0) => {
-                    let name = if root == "ovln:rcv" { "ovln:receiver" } else { "ovln:sender" };
+                    let name = if root == "ovln:rcv" {
+                        "ovln:receiver"
+                    } else {
+                        "ovln:sender"
+                    };
                     self.reply_with_interface(tls, handle, name)?;
                     Ok(())
                 }
@@ -206,7 +221,12 @@ impl Cpu {
     /// Nothing is backed up. There is no account linked to a Nintendo
     /// Account, no network under it, and no transfer queue — so the task
     /// list is empty, the error list is empty, and the events never fire.
-    pub(super) fn olsc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn olsc_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         if self.ipc_answer_control(tls, handle, "olsc:s", cmd_id)? {
             return Ok(());
         }
@@ -283,9 +303,7 @@ impl Cpu {
                 // GetGlobalAutoUploadSetting / GetGlobalAutoDownloadSetting.
                 // Automatic backup is off, and cannot be otherwise without an
                 // account behind it.
-                Some(0) | Some(2) | Some(5) => {
-                    self.write_ipc_response(tls, 0, &[], &[0u8], &[])
-                }
+                Some(0) | Some(2) | Some(5) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
                 // The matching setters, plus RunTransferTaskAutonomyRegistration.
                 Some(1) | Some(3) | Some(4) | Some(6) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -372,7 +390,12 @@ impl Cpu {
     /// `CreateFriendService` is command 0 and the start of all of it, so the
     /// fallback's fabricated object id meant the *whole* interface was
     /// unreachable rather than merely unimplemented.
-    pub(super) fn friend_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn friend_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         /// `friends` (module 121) description 15: the notification queue is
         /// empty. `Pop` reports this rather than handing back a zeroed
         /// notification, which a caller would act on as a real event.
@@ -482,7 +505,12 @@ impl Cpu {
     /// Nothing has arrived and nothing can: there is no CDN behind this and
     /// no news savedata to have cached one. The database is empty rather than
     /// absent, which is what a console reports before its first sync.
-    pub(super) fn news_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn news_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         let root = self.service_name(handle).unwrap_or("news:p");
         let root: &'static str = match root {
             "news:a" => "news:a",
@@ -619,7 +647,12 @@ impl Cpu {
     /// directory or a file within it), and each level is a separate object.
     /// The fallback answered `CreateBcatService` with an object id that is
     /// not an object, so nothing past the first command was reachable.
-    pub(super) fn bcat_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn bcat_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         let root = self.service_name(handle).unwrap_or("bcat:u");
         let root: &'static str = match root {
             "bcat:a" => "bcat:a",

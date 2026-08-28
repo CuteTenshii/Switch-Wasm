@@ -70,7 +70,17 @@ impl Cpu {
                         _ => unreachable!(),
                     };
                     let saturating = op & 0b10 != 0 || to_unsigned;
-                    self.simd_shrn(rd, rn, q, dest_esize, shift, rounding, signed_src, to_unsigned, saturating);
+                    self.simd_shrn(
+                        rd,
+                        rn,
+                        q,
+                        dest_esize,
+                        shift,
+                        rounding,
+                        signed_src,
+                        to_unsigned,
+                        saturating,
+                    );
                     return Ok(true);
                 }
             }
@@ -82,13 +92,9 @@ impl Cpu {
         // narrowing opcodes are handled above). Scalar: `01 U 111110 …`, which
         // differs only in bit28 and always works on one 64-bit lane —
         // `ushr d30, d31, #32` = 0x7f6007fe.
-        let scalar_shift =
-            ((insn >> 30) & 0b11) == 0b01 && ((insn >> 23) & 0x3F) == 0b111110;
+        let scalar_shift = ((insn >> 30) & 0b11) == 0b01 && ((insn >> 23) & 0x3F) == 0b111110;
         let vector_shift = ((insn >> 31) & 1) == 0 && ((insn >> 23) & 0x3F) == 0b011110;
-        if (vector_shift || scalar_shift)
-            && ((insn >> 10) & 1) == 1
-            && ((insn >> 19) & 0xF) != 0
-        {
+        if (vector_shift || scalar_shift) && ((insn >> 10) & 1) == 1 && ((insn >> 19) & 0xF) != 0 {
             let opcode = (insn >> 11) & 0x1F;
             if !matches!(opcode, 0b10000 | 0b10001 | 0b10010 | 0b10011) {
                 let q = vector_shift && (insn >> 30) & 1 == 1;
@@ -103,7 +109,9 @@ impl Cpu {
                     0b0100..=0b0111 => 32,
                     _ => 64,
                 };
-                return self.simd_shift_imm(rd, rn, q, u, opcode, esize, imm).map(|()| true);
+                return self
+                    .simd_shift_imm(rd, rn, q, u, opcode, esize, imm)
+                    .map(|()| true);
             }
         }
 
@@ -111,7 +119,10 @@ impl Cpu {
         // The 8-bit immediate is NOT contiguous: `abcdefgh` sits at bits 18:16
         // (a:b:c) and 9:5 (d:e:f:g:h), with bits 15:12 = cmode, bit 29 = op
         // (0 = MOVI, 1 = MVNI/bitwise). Cross-checked against QEMU.
-        if ((insn >> 31) & 1) == 0 && ((insn >> 23) & 0x3F) == 0b011110 && ((insn >> 19) & 0b1111) == 0b0000 {
+        if ((insn >> 31) & 1) == 0
+            && ((insn >> 23) & 0x3F) == 0b011110
+            && ((insn >> 19) & 0b1111) == 0b0000
+        {
             let q = (insn >> 30) & 1;
             let op = (insn >> 29) & 1;
             let rd = (insn & 0x1F) as u8;
@@ -258,13 +269,13 @@ impl Cpu {
                     }
                 };
                 let value = match opcode {
-                    0b0000 | 0b0001 => a + b,                        // SADDL/W, UADDL/W
-                    0b0010 | 0b0011 => a - b,                        // SSUBL/W, USUBL/W
-                    0b0101 => acc + (a - b).abs(),                   // SABAL, UABAL
-                    0b0111 => (a - b).abs(),                         // SABDL, UABDL
-                    0b1000 => acc + a * b,                           // SMLAL, UMLAL
-                    0b1010 => acc - a * b,                           // SMLSL, UMLSL
-                    0b1100 => a * b,                                 // SMULL, UMULL
+                    0b0000 | 0b0001 => a + b,      // SADDL/W, UADDL/W
+                    0b0010 | 0b0011 => a - b,      // SSUBL/W, USUBL/W
+                    0b0101 => acc + (a - b).abs(), // SABAL, UABAL
+                    0b0111 => (a - b).abs(),       // SABDL, UABDL
+                    0b1000 => acc + a * b,         // SMLAL, UMLAL
+                    0b1010 => acc - a * b,         // SMLSL, UMLSL
+                    0b1100 => a * b,               // SMULL, UMULL
                     _ => {
                         return Err(Error::Cpu(format!(
                             "unimplemented SIMD three-different u={} opcode={:#06b} at {:#x}",
@@ -312,7 +323,8 @@ impl Cpu {
             let elem = ((self.vregs[rm] >> (index * esize)) & elem_mask(esize)) as u64;
             let a = (self.vregs[rn] & elem_mask(esize)) as u64;
             let signed = |v: u64, bits: u32| -> i128 { sext_u64(v, bits) as i64 as i128 };
-            let lane = |reg: usize, bits: u32| -> u64 { (self.vregs[reg] & elem_mask(bits)) as u64 };
+            let lane =
+                |reg: usize, bits: u32| -> u64 { (self.vregs[reg] & elem_mask(bits)) as u64 };
 
             // Saturate to a signed field of `bits`, which every form here but
             // the floating-point four ends with.
@@ -327,7 +339,11 @@ impl Cpu {
             // ...and its high half, rounded or truncated back to the source
             // width.
             let high_half = |rounding: bool| -> i128 {
-                let product = if rounding { doubled + (1i128 << (esize - 1)) } else { doubled };
+                let product = if rounding {
+                    doubled + (1i128 << (esize - 1))
+                } else {
+                    doubled
+                };
                 product >> esize
             };
 
@@ -380,7 +396,11 @@ impl Cpu {
                     let wide = esize * 2;
                     let acc = signed(lane(rd, wide), wide);
                     let product = signed(sat(doubled, wide), wide);
-                    let sum = if key == 0x03 { acc + product } else { acc - product };
+                    let sum = if key == 0x03 {
+                        acc + product
+                    } else {
+                        acc - product
+                    };
                     (sat(sum, wide), wide)
                 }
                 // SQDMULH / SQRDMULH: the doubled product's high half, the
@@ -390,7 +410,11 @@ impl Cpu {
                 0x1d | 0x1f => {
                     let acc = signed(lane(rd, esize), esize);
                     let product = high_half(true);
-                    let sum = if key == 0x1d { acc + product } else { acc - product };
+                    let sum = if key == 0x1d {
+                        acc + product
+                    } else {
+                        acc - product
+                    };
                     (sat(sum, esize), esize)
                 }
                 _ => {
@@ -411,10 +435,7 @@ impl Cpu {
         // one selected lane of Vm. Shares bits[28:24] with MOVI and the
         // immediate shifts, which all have bit10 = 1.
         // `smull2 v19.4s, v18.8h, v0.h[2]` = 0x4f60a253.
-        if ((insn >> 31) & 1) == 0
-            && ((insn >> 24) & 0x1F) == 0b01111
-            && ((insn >> 10) & 1) == 0
-        {
+        if ((insn >> 31) & 1) == 0 && ((insn >> 24) & 0x1F) == 0b01111 && ((insn >> 10) & 1) == 0 {
             let q = (insn >> 30) & 1 == 1;
             let u = (insn >> 29) & 1;
             let size = (insn >> 22) & 0b11;
@@ -463,7 +484,7 @@ impl Cpu {
                     let value = match key & 0xF {
                         0x02 => (acc as i128).wrapping_add(product), // SMLAL/UMLAL
                         0x06 => (acc as i128).wrapping_sub(product), // SMLSL/UMLSL
-                        _ => product,                               // SMULL/UMULL
+                        _ => product,                                // SMULL/UMULL
                     };
                     out |= ((value as u128) & elem_mask(dest_esize)) << (dest_esize * i);
                 }
@@ -741,7 +762,7 @@ impl Cpu {
                     }
                     0b10000 => {
                         // ADD (signed group) / SUB (unsigned group).
-                                    self.simd_elem(rd, rn, rm, q, esize, |a, b| {
+                        self.simd_elem(rd, rn, rm, q, esize, |a, b| {
                             if u == 0 {
                                 a.wrapping_add(b)
                             } else {
@@ -754,7 +775,11 @@ impl Cpu {
                         // CMTST (signed group) / CMEQ (unsigned group).
                         self.simd_elem(rd, rn, rm, q, esize, |a, b| {
                             if u == 0 {
-                                if a & b != 0 { u64::MAX } else { 0 }
+                                if a & b != 0 {
+                                    u64::MAX
+                                } else {
+                                    0
+                                }
                             } else if a == b {
                                 u64::MAX
                             } else {
@@ -771,7 +796,11 @@ impl Cpu {
                             } else {
                                 a >= b
                             };
-                            if ge { u64::MAX } else { 0 }
+                            if ge {
+                                u64::MAX
+                            } else {
+                                0
+                            }
                         });
                         return Ok(true);
                     }
@@ -783,7 +812,11 @@ impl Cpu {
                             } else {
                                 a > b
                             };
-                            if gt { u64::MAX } else { 0 }
+                            if gt {
+                                u64::MAX
+                            } else {
+                                0
+                            }
                         });
                         return Ok(true);
                     }
@@ -791,7 +824,11 @@ impl Cpu {
                         // SMAX / UMAX.
                         self.simd_elem(rd, rn, rm, q, esize, |a, b| {
                             if u == 0 {
-                                if Self::sge(a, b, esize) { a } else { b }
+                                if Self::sge(a, b, esize) {
+                                    a
+                                } else {
+                                    b
+                                }
                             } else {
                                 a.max(b)
                             }
@@ -802,7 +839,11 @@ impl Cpu {
                         // SMIN / UMIN.
                         self.simd_elem(rd, rn, rm, q, esize, |a, b| {
                             if u == 0 {
-                                if Self::sge(a, b, esize) { b } else { a }
+                                if Self::sge(a, b, esize) {
+                                    b
+                                } else {
+                                    a
+                                }
                             } else {
                                 a.min(b)
                             }
@@ -827,7 +868,11 @@ impl Cpu {
                         // MLA (signed group) / MLS (unsigned group).
                         self.simd_elem_acc(rd, rn, rm, q, esize, |a, b, d| {
                             let product = a.wrapping_mul(b);
-                            if u == 0 { d.wrapping_add(product) } else { d.wrapping_sub(product) }
+                            if u == 0 {
+                                d.wrapping_add(product)
+                            } else {
+                                d.wrapping_sub(product)
+                            }
                         });
                         return Ok(true);
                     }
@@ -863,7 +908,11 @@ impl Cpu {
                         // SMAXP (signed group) / UMAXP (unsigned group).
                         self.simd_pairwise(rd, rn, rm, q, esize, |a, b| {
                             if u == 0 {
-                                if Self::sge(a, b, esize) { a } else { b }
+                                if Self::sge(a, b, esize) {
+                                    a
+                                } else {
+                                    b
+                                }
                             } else {
                                 a.max(b)
                             }
@@ -874,7 +923,11 @@ impl Cpu {
                         // SMINP (signed group) / UMINP (unsigned group).
                         self.simd_pairwise(rd, rn, rm, q, esize, |a, b| {
                             if u == 0 {
-                                if Self::sge(a, b, esize) { b } else { a }
+                                if Self::sge(a, b, esize) {
+                                    b
+                                } else {
+                                    a
+                                }
                             } else {
                                 a.min(b)
                             }
@@ -890,11 +943,11 @@ impl Cpu {
                         let full = if q { u128::MAX } else { (1u128 << 64) - 1 };
                         let d = self.vregs[rd as usize];
                         let r = match (u, sub) {
-                            (0, 0b001) => a & b,        // AND
-                            (0, 0b011) => a & !b,        // BIC
-                            (0, 0b101) => a | b,         // ORR
-                            (0, 0b111) => a | !b,        // ORN
-                            (1, 0b001) => a ^ b,         // EOR
+                            (0, 0b001) => a & b,  // AND
+                            (0, 0b011) => a & !b, // BIC
+                            (0, 0b101) => a | b,  // ORR
+                            (0, 0b111) => a | !b, // ORN
+                            (1, 0b001) => a ^ b,  // EOR
                             // The insert/select trio differ only in which
                             // register is the mask: BSL selects with Vd, BIT
                             // and BIF with Vm (BIF taking Vn where the mask bit
@@ -913,9 +966,20 @@ impl Cpu {
                 }
             } else if op == 0b10011 && rm == 0 && u == 0 {
                 // CMEQ <Vd>.<T>, <Vn>.<T>, #0 (compare against zero).
-                self.simd_elem(rd, rn, rm, q, esize, |a, _| {
-                    if a == 0 { u64::MAX } else { 0 }
-                });
+                self.simd_elem(
+                    rd,
+                    rn,
+                    rm,
+                    q,
+                    esize,
+                    |a, _| {
+                        if a == 0 {
+                            u64::MAX
+                        } else {
+                            0
+                        }
+                    },
+                );
                 return Ok(true);
             }
             return Err(Error::Cpu(format!(
@@ -1134,7 +1198,15 @@ impl Cpu {
 
     /// Element-wise SIMD binary op over `esize`-bit lanes (little-endian lane
     /// order), `q` selects 128-bit vs 64-bit registers.
-    pub(super) fn simd_elem<F: Fn(u64, u64) -> u64>(&mut self, rd: u8, rn: u8, rm: u8, q: bool, esize: u32, f: F) {
+    pub(super) fn simd_elem<F: Fn(u64, u64) -> u64>(
+        &mut self,
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        q: bool,
+        esize: u32,
+        f: F,
+    ) {
         let lanes = if q { 128 / esize } else { 64 / esize };
         let a = self.vregs[rn as usize];
         let b = self.vregs[rm as usize];
@@ -1186,7 +1258,11 @@ impl Cpu {
                 let start = u32::from(op == 0b010110);
                 for i in 0..lanes {
                     let index = start + 2 * (i % half);
-                    let v = if i < half { get(a, index) } else { get(b, index) };
+                    let v = if i < half {
+                        get(a, index)
+                    } else {
+                        get(b, index)
+                    };
                     out |= v << (esize * i);
                 }
             }
@@ -1239,7 +1315,15 @@ impl Cpu {
 
     /// Pairwise SIMD binary op (ADDP/SMAXP/UMAXP): the destination's first
     /// half pairs up Vn's lanes, the second half Vm's.
-    pub(super) fn simd_pairwise<F: Fn(u64, u64) -> u64>(&mut self, rd: u8, rn: u8, rm: u8, q: bool, esize: u32, f: F) {
+    pub(super) fn simd_pairwise<F: Fn(u64, u64) -> u64>(
+        &mut self,
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        q: bool,
+        esize: u32,
+        f: F,
+    ) {
         let lanes = if q { 128 / esize } else { 64 / esize };
         let half = lanes / 2;
         let mask = (1u128 << esize) - 1;
@@ -1288,7 +1372,11 @@ impl Cpu {
                 let mut sum: i128 = 0;
                 for i in 0..lanes {
                     let v = elem(i);
-                    sum += if signed { sext_u64(v, esize) as i64 as i128 } else { v as i128 };
+                    sum += if signed {
+                        sext_u64(v, esize) as i64 as i128
+                    } else {
+                        v as i128
+                    };
                 }
                 (sum as u128) & ((1u128 << (esize * 2)) - 1)
             }
@@ -1299,7 +1387,11 @@ impl Cpu {
                 for i in 1..lanes {
                     let v = elem(i);
                     let v_wins = if signed {
-                        if want_max { !Self::sge(best, v, esize) } else { Self::sge(best, v, esize) && best != v }
+                        if want_max {
+                            !Self::sge(best, v, esize)
+                        } else {
+                            Self::sge(best, v, esize) && best != v
+                        }
                     } else if want_max {
                         v > best
                     } else {
@@ -1343,7 +1435,11 @@ impl Cpu {
         esize: u32,
         imm: u32,
     ) -> Result<()> {
-        let mask: u128 = if esize >= 128 { u128::MAX } else { (1u128 << esize) - 1 };
+        let mask: u128 = if esize >= 128 {
+            u128::MAX
+        } else {
+            (1u128 << esize) - 1
+        };
         let src = self.vregs[rn as usize];
         let dst = self.vregs[rd as usize];
 
@@ -1352,7 +1448,11 @@ impl Cpu {
         if opcode == 0b10100 {
             let shift = imm - esize;
             let wide = 2 * esize;
-            let wide_mask: u128 = if wide >= 128 { u128::MAX } else { (1u128 << wide) - 1 };
+            let wide_mask: u128 = if wide >= 128 {
+                u128::MAX
+            } else {
+                (1u128 << wide) - 1
+            };
             let lanes = 64 / esize;
             let base = if q { lanes } else { 0 };
             let mut out: u128 = 0;
@@ -1378,18 +1478,30 @@ impl Cpu {
                 // SSHR / USHR, SSRA / USRA, SRSHR / URSHR, SRSRA / URSRA.
                 0b00000 | 0b00010 | 0b00100 | 0b00110 => {
                     let rounding = opcode & 0b00100 != 0;
-                    let round = if rounding && shift > 0 { 1u64 << (shift - 1) } else { 0 };
+                    let round = if rounding && shift > 0 {
+                        1u64 << (shift - 1)
+                    } else {
+                        0
+                    };
                     let shifted = if u {
                         raw.wrapping_add(round) >> shift.min(63)
                     } else {
                         let signed = sext_u64(raw, esize) as i64;
                         (signed.wrapping_add(round as i64) >> shift.min(63)) as u64
                     };
-                    if opcode & 0b00010 != 0 { old.wrapping_add(shifted) } else { shifted }
+                    if opcode & 0b00010 != 0 {
+                        old.wrapping_add(shifted)
+                    } else {
+                        shifted
+                    }
                 }
                 // SRI: shift right and insert, keeping the high bits of Vd.
                 0b01000 => {
-                    let keep = if shift >= esize { mask as u64 } else { !(mask as u64 >> shift) };
+                    let keep = if shift >= esize {
+                        mask as u64
+                    } else {
+                        !(mask as u64 >> shift)
+                    };
                     (old & keep) | ((raw >> shift.min(63)) & !keep)
                 }
                 // SHL, or SLI when the insert variant is selected.
@@ -1503,7 +1615,11 @@ impl Cpu {
                     let shifted = v << (64 - esize);
                     if signed {
                         // CLS counts the sign bits after the first one.
-                        let inverted = if shifted >> 63 == 1 { !shifted } else { shifted };
+                        let inverted = if shifted >> 63 == 1 {
+                            !shifted
+                        } else {
+                            shifted
+                        };
                         u64::from((inverted << 1).leading_zeros().min(esize - 1))
                     } else {
                         u64::from(shifted.leading_zeros().min(esize))
@@ -1530,7 +1646,9 @@ impl Cpu {
                 match size {
                     0b00 => self.vregs[rd as usize] = !self.vregs[rn as usize] & full,
                     0b01 => {
-                        self.simd_lane_unary_n(rd, rn, lanes(8), 8, |v| u64::from((v as u8).reverse_bits()));
+                        self.simd_lane_unary_n(rd, rn, lanes(8), 8, |v| {
+                            u64::from((v as u8).reverse_bits())
+                        });
                     }
                     _ => return Ok(false),
                 }
@@ -1581,7 +1699,9 @@ impl Cpu {
                 return Ok(true);
             }
             (1, 0b01011) => {
-                self.simd_lane_unary_n(rd, rn, lanes(esize), esize, |v| (v as i64).wrapping_neg() as u64);
+                self.simd_lane_unary_n(rd, rn, lanes(esize), esize, |v| {
+                    (v as i64).wrapping_neg() as u64
+                });
                 return Ok(true);
             }
             (0, 0b01000) | (0, 0b01001) | (0, 0b01010) | (1, 0b01000) | (1, 0b01001) => {
@@ -1595,7 +1715,11 @@ impl Cpu {
                         (1, 0b01000) => signed >= 0, // CMGE #0
                         _ => signed <= 0,            // CMLE #0
                     };
-                    if holds { u64::MAX } else { 0 }
+                    if holds {
+                        u64::MAX
+                    } else {
+                        0
+                    }
                 });
                 return Ok(true);
             }
@@ -1629,7 +1753,11 @@ impl Cpu {
                 let lanes = 64 / esize;
                 let src_mask = (1u128 << esize) - 1;
                 let src = self.vregs[rn as usize];
-                let base = if q { u128::from(lanes) * u128::from(esize) } else { 0 };
+                let base = if q {
+                    u128::from(lanes) * u128::from(esize)
+                } else {
+                    0
+                };
                 let mut out: u128 = 0;
                 for i in 0..lanes {
                     let shift = esize * i + base as u32;
@@ -1705,7 +1833,11 @@ impl Cpu {
         // Comparisons against zero produce a lane mask rather than a float.
         if matches!(key, 0x2c | 0x2d | 0x2e | 0x6c | 0x6d) {
             self.simd_lane_unary_n(rd, rn, lanes(esize), esize, move |v| {
-                let a = if double { f64::from_bits(v) } else { f64::from(f32::from_bits(v as u32)) };
+                let a = if double {
+                    f64::from_bits(v)
+                } else {
+                    f64::from(f32::from_bits(v as u32))
+                };
                 let holds = match key {
                     0x2c => a > 0.0,
                     0x2d => a == 0.0,
@@ -1713,12 +1845,19 @@ impl Cpu {
                     0x6c => a >= 0.0,
                     _ => a <= 0.0,
                 };
-                if holds { u64::MAX } else { 0 }
+                if holds {
+                    u64::MAX
+                } else {
+                    0
+                }
             });
             return Ok(true);
         }
         // Float -> integer converts, with the rounding mode in the opcode.
-        if matches!(key, 0x1a | 0x1b | 0x1c | 0x3a | 0x3b | 0x5a | 0x5b | 0x5c | 0x7a | 0x7b) {
+        if matches!(
+            key,
+            0x1a | 0x1b | 0x1c | 0x3a | 0x3b | 0x5a | 0x5b | 0x5c | 0x7a | 0x7b
+        ) {
             let signed = u == 0;
             let rounding = match key & 0x1F {
                 0b11010 if size >> 1 == 0 => Rounding::TiesEven, // FCVTNS/FCVTNU
@@ -1728,7 +1867,11 @@ impl Cpu {
                 _ => Rounding::TiesAway,                         // FCVTAS/FCVTAU
             };
             self.simd_lane_unary_n(rd, rn, lanes(esize), esize, move |v| {
-                let a = if double { f64::from_bits(v) } else { f64::from(f32::from_bits(v as u32)) };
+                let a = if double {
+                    f64::from_bits(v)
+                } else {
+                    f64::from(f32::from_bits(v as u32))
+                };
                 round_to_int_sized(a, rounding, signed, esize)
             });
             return Ok(true);
@@ -1743,7 +1886,11 @@ impl Cpu {
                         let f = if signed { (v as i64) as f64 } else { v as f64 };
                         f.to_bits()
                     } else {
-                        let f = if signed { (v as i32) as f32 } else { (v as u32) as f32 };
+                        let f = if signed {
+                            (v as i32) as f32
+                        } else {
+                            (v as u32) as f32
+                        };
                         u64::from(f.to_bits())
                     }
                 });
@@ -1754,7 +1901,11 @@ impl Cpu {
                 let negate = u == 1;
                 self.simd_lane_unary_n(rd, rn, lanes(esize), esize, move |v| {
                     let sign = 1u64 << (esize - 1);
-                    if negate { v ^ sign } else { v & !sign }
+                    if negate {
+                        v ^ sign
+                    } else {
+                        v & !sign
+                    }
                 });
                 Ok(true)
             }
@@ -1845,18 +1996,18 @@ impl Cpu {
         // Arithmetic and the min/max family, over the raw lane bits.
         let arith = |x: f64, y: f64| -> f64 {
             match key {
-                0x1a => x + y,               // FADD
-                0x3a => x - y,               // FSUB
-                0x5b => x * y,               // FMUL
-                0x1b => fmulx(x, y),         // FMULX
-                0x5f => x / y,               // FDIV
-                0x7a => (x - y).abs(),       // FABD
-                0x1e => fp_max(x, y),        // FMAX
-                0x3e => fp_min(x, y),        // FMIN
-                0x18 => fp_maxnum(x, y),     // FMAXNM
-                0x38 => fp_minnum(x, y),     // FMINNM
-                0x1f => 2.0 - x * y,         // FRECPS
-                _ => (3.0 - x * y) / 2.0,    // FRSQRTS
+                0x1a => x + y,            // FADD
+                0x3a => x - y,            // FSUB
+                0x5b => x * y,            // FMUL
+                0x1b => fmulx(x, y),      // FMULX
+                0x5f => x / y,            // FDIV
+                0x7a => (x - y).abs(),    // FABD
+                0x1e => fp_max(x, y),     // FMAX
+                0x3e => fp_min(x, y),     // FMIN
+                0x18 => fp_maxnum(x, y),  // FMAXNM
+                0x38 => fp_minnum(x, y),  // FMINNM
+                0x1f => 2.0 - x * y,      // FRECPS
+                _ => (3.0 - x * y) / 2.0, // FRSQRTS
             }
         };
         if matches!(
@@ -1891,7 +2042,8 @@ impl Cpu {
                         let n = f32::from_bits(x as u32);
                         let n = if subtract { -n } else { n };
                         u64::from(
-                            n.mul_add(f32::from_bits(y as u32), f32::from_bits(d as u32)).to_bits(),
+                            n.mul_add(f32::from_bits(y as u32), f32::from_bits(d as u32))
+                                .to_bits(),
                         )
                     }
                 });
@@ -1903,18 +2055,25 @@ impl Cpu {
                     let (mut fx, mut fy) = if double {
                         (f64::from_bits(x), f64::from_bits(y))
                     } else {
-                        (f64::from(f32::from_bits(x as u32)), f64::from(f32::from_bits(y as u32)))
+                        (
+                            f64::from(f32::from_bits(x as u32)),
+                            f64::from(f32::from_bits(y as u32)),
+                        )
                     };
                     if key == 0x5d || key == 0x7d {
                         fx = fx.abs();
                         fy = fy.abs();
                     }
                     let holds = match key {
-                        0x1c => fx == fy,          // FCMEQ
-                        0x5c | 0x5d => fx >= fy,   // FCMGE / FACGE
-                        _ => fx > fy,              // FCMGT / FACGT
+                        0x1c => fx == fy,        // FCMEQ
+                        0x5c | 0x5d => fx >= fy, // FCMGE / FACGE
+                        _ => fx > fy,            // FCMGT / FACGT
                     };
-                    if holds { u64::MAX } else { 0 }
+                    if holds {
+                        u64::MAX
+                    } else {
+                        0
+                    }
                 });
                 Ok(true)
             }
@@ -1924,7 +2083,10 @@ impl Cpu {
                     let (fx, fy) = if double {
                         (f64::from_bits(x), f64::from_bits(y))
                     } else {
-                        (f64::from(f32::from_bits(x as u32)), f64::from(f32::from_bits(y as u32)))
+                        (
+                            f64::from(f32::from_bits(x as u32)),
+                            f64::from(f32::from_bits(y as u32)),
+                        )
                     };
                     let r = match key {
                         0x5a => fx + fy,           // FADDP
@@ -1933,7 +2095,11 @@ impl Cpu {
                         0x58 => fp_maxnum(fx, fy), // FMAXNMP
                         _ => fp_minnum(fx, fy),    // FMINNMP
                     };
-                    if double { r.to_bits() } else { u64::from((r as f32).to_bits()) }
+                    if double {
+                        r.to_bits()
+                    } else {
+                        u64::from((r as f32).to_bits())
+                    }
                 });
                 Ok(true)
             }

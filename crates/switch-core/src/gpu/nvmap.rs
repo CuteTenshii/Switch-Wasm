@@ -84,7 +84,8 @@ impl NvMap {
         self.next_handle += 1;
         let id = self.next_id;
         self.next_id += 1;
-        self.handles.insert(handle, NvMapHandle::new(handle, id, size));
+        self.handles
+            .insert(handle, NvMapHandle::new(handle, id, size));
         self.ids.insert(id, handle);
         handle
     }
@@ -104,7 +105,11 @@ impl NvMap {
             .handles
             .get_mut(&handle)
             .ok_or_else(|| Error::Gpu(format!("nvmap: alloc of unknown handle {}", handle)))?;
-        h.heap_mask = if heap_mask == 0 { HEAP_CARVEOUT_GENERIC } else { heap_mask };
+        h.heap_mask = if heap_mask == 0 {
+            HEAP_CARVEOUT_GENERIC
+        } else {
+            heap_mask
+        };
         h.flags = flags;
         h.align = align.max(1);
         h.kind = kind;

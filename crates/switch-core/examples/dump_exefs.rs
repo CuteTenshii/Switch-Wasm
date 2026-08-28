@@ -4,7 +4,6 @@
 //! `dump_exefs <nsp> <prod.keys> [title.keys] <out_dir>`.
 mod common;
 
-
 use std::env;
 use std::fs;
 
@@ -79,7 +78,9 @@ fn main() {
     let mut base = switch_core::nso::NSO_BASE;
     let mut syms: Vec<(u32, u32, String, String)> = Vec::new();
     for &name in ORDER {
-        let Some(ef) = exefs_pfs0.find(name) else { continue };
+        let Some(ef) = exefs_pfs0.find(name) else {
+            continue;
+        };
         let nso = &exefs[ef.offset as usize..(ef.offset + ef.size) as usize];
         let m = switch_core::nso::load_nso(&mut mem, nso, base).unwrap();
         let image_end = m.data.mem_addr + m.data.file_size + m.bss_size;
@@ -110,7 +111,9 @@ fn main() {
                 let tag = read_u64(d, off);
                 let val = read_u64(d, off + 8);
                 off += 16;
-                if tag == 0 { break; }
+                if tag == 0 {
+                    break;
+                }
                 match tag {
                     0x06 => symtab = val,
                     0x05 => strtab = val,
@@ -122,13 +125,19 @@ fn main() {
                 let nchain = read_u32(d, hash as usize + 4) as usize;
                 for i in 0..nchain {
                     let so = symtab as usize + i * 24;
-                    if so + 24 > d.len() { break; }
+                    if so + 24 > d.len() {
+                        break;
+                    }
                     let n = read_u32(d, so) as usize;
-                    if n == 0 { continue; }
+                    if n == 0 {
+                        continue;
+                    }
                     let sname = read_cstr(d, strtab as usize + n);
                     let value = read_u64(d, so + 8) as u32;
                     let size = read_u64(d, so + 16) as u32;
-                    if value == 0 { continue; }
+                    if value == 0 {
+                        continue;
+                    }
                     syms.push((base + value, size, sname, name.to_string()));
                 }
                 println!("  {} symbols ({} chain entries)", syms.len(), nchain);

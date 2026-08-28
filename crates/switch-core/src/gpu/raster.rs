@@ -19,11 +19,11 @@ use crate::gpu::engine::threed::{
     ShaderStage, VertexArray, VertexAttrib, ViewportTransform,
 };
 use crate::gpu::exec::ExecCtx;
+use crate::gpu::shader::compiled::Compiled;
 use crate::gpu::shader::interp::{
     resolve_shuffles, ConstantSource, Env, Halt, Invocation, MemoryConstants, MemoryGlobal,
     MemoryTextures, NoTextures,
 };
-use crate::gpu::shader::compiled::Compiled;
 use crate::gpu::shader::{decode_program_from_memory, Op, Program};
 use crate::gpu::surface::{f16_to_f32, ColorFormat, SampleGrid, MAX_SAMPLES};
 use crate::{Error, Result};
@@ -77,13 +77,21 @@ pub fn assemble(primitive: Primitive, count: u32) -> Vec<[u32; 3]> {
         Primitive::Points | Primitive::Lines | Primitive::LineLoop | Primitive::LineStrip => {
             Vec::new()
         }
-        Primitive::Triangles => (0..count / 3).map(|t| [t * 3, t * 3 + 1, t * 3 + 2]).collect(),
+        Primitive::Triangles => (0..count / 3)
+            .map(|t| [t * 3, t * 3 + 1, t * 3 + 2])
+            .collect(),
         Primitive::TriangleStrip => {
             if count < 3 {
                 return Vec::new();
             }
             (0..count - 2)
-                .map(|i| if i % 2 == 0 { [i, i + 1, i + 2] } else { [i + 1, i, i + 2] })
+                .map(|i| {
+                    if i % 2 == 0 {
+                        [i, i + 1, i + 2]
+                    } else {
+                        [i + 1, i, i + 2]
+                    }
+                })
                 .collect()
         }
         Primitive::TriangleFan | Primitive::Polygon => {
@@ -246,7 +254,11 @@ impl TriangleSetup {
             v2,
             clockwise,
             area: signed_area.abs(),
-            top_left: [is_top_left(v0, v1), is_top_left(v1, v2), is_top_left(v2, v0)],
+            top_left: [
+                is_top_left(v0, v1),
+                is_top_left(v1, v2),
+                is_top_left(v2, v0),
+            ],
         })
     }
 
@@ -370,9 +382,7 @@ pub fn fetch_attribute(
         ))
     })?;
 
-    let addr = array.start
-        + vertex_index as u64 * array.stride as u64
-        + attrib.offset as u64;
+    let addr = array.start + vertex_index as u64 * array.stride as u64 + attrib.offset as u64;
 
     let mut out = [0.0f32, 0.0, 0.0, 1.0];
     match (attrib.ty, bits) {
@@ -521,8 +531,10 @@ fn shade_vertex(
     y_negate: bool,
 ) -> Result<ShadedVertex> {
     let mut inv = Invocation::new();
-    inv.attr_in.set(VERTEX_ID_OFFSET, f32::from_bits(vertex_index));
-    inv.attr_in.set(INSTANCE_ID_OFFSET, f32::from_bits(instance_id));
+    inv.attr_in
+        .set(VERTEX_ID_OFFSET, f32::from_bits(vertex_index));
+    inv.attr_in
+        .set(INSTANCE_ID_OFFSET, f32::from_bits(instance_id));
     for (i, attrib) in attribs.iter().enumerate() {
         // size 0 isn't a valid DkVtxAttribSize — it's what an unconfigured
         // `VertexAttribState` slot reads back as, so it means "not used"
@@ -537,7 +549,9 @@ fn shade_vertex(
         // A non-zero divisor makes the array instanced: every `divisor`
         // instances advance it by one element, and the vertex ordinal does
         // not move it at all.
-        let element = instance_id.checked_div(array.divisor).unwrap_or(vertex_index);
+        let element = instance_id
+            .checked_div(array.divisor)
+            .unwrap_or(vertex_index);
         let v = fetch_attribute(*attrib, array, element, ctx)?;
         let base = VARYING_BASE + i as u16 * VARYING_STRIDE;
         for (c, &component) in v.iter().enumerate() {
@@ -582,7 +596,11 @@ fn to_screen(clip: [f32; 4], vt: ViewportTransform) -> (ScreenVertex, f32, f32) 
         x: clip[0] * inv_w * vt.scale[0] + vt.translate[0],
         y: clip[1] * inv_w * vt.scale[1] + vt.translate[1],
     };
-    (screen, inv_w, clip[2] * inv_w * vt.scale[2] + vt.translate[2])
+    (
+        screen,
+        inv_w,
+        clip[2] * inv_w * vt.scale[2] + vt.translate[2],
+    )
 }
 
 /// `DEPTH_TEST_FUNC` carries **either** numbering, and hardware takes both.
@@ -627,20 +645,20 @@ fn blend_factor(code: u32, src: [f32; 4], dst: [f32; 4], constant: [f32; 4]) -> 
         // through, deko3d and nvn write this one — the Home Menu blends every
         // one of its draws `SrcAlpha`/`OneMinusSrcAlpha`, which fell through
         // to `One`/`One` here and turned its whole UI into `src + dst`.
-        0x01 => [0.0; 4],                    // Zero
-        0x02 => [1.0; 4],                    // One
-        0x03 => src,                         // SrcColor
-        0x04 => src.map(|c| 1.0 - c),        // OneMinusSrcColor
-        0x05 => [src[3]; 4],                 // SrcAlpha
-        0x06 => [1.0 - src[3]; 4],           // OneMinusSrcAlpha
-        0x07 => [dst[3]; 4],                 // DstAlpha
-        0x08 => [1.0 - dst[3]; 4],           // OneMinusDstAlpha
-        0x09 => dst,                         // DstColor
-        0x0a => dst.map(|c| 1.0 - c),        // OneMinusDstColor
-        0x61 => constant,                    // ConstantColor
-        0x62 => constant.map(|c| 1.0 - c),   // OneMinusConstantColor
-        0x63 => [constant[3]; 4],            // ConstantAlpha
-        0x64 => [1.0 - constant[3]; 4],      // OneMinusConstantAlpha
+        0x01 => [0.0; 4],                  // Zero
+        0x02 => [1.0; 4],                  // One
+        0x03 => src,                       // SrcColor
+        0x04 => src.map(|c| 1.0 - c),      // OneMinusSrcColor
+        0x05 => [src[3]; 4],               // SrcAlpha
+        0x06 => [1.0 - src[3]; 4],         // OneMinusSrcAlpha
+        0x07 => [dst[3]; 4],               // DstAlpha
+        0x08 => [1.0 - dst[3]; 4],         // OneMinusDstAlpha
+        0x09 => dst,                       // DstColor
+        0x0a => dst.map(|c| 1.0 - c),      // OneMinusDstColor
+        0x61 => constant,                  // ConstantColor
+        0x62 => constant.map(|c| 1.0 - c), // OneMinusConstantColor
+        0x63 => [constant[3]; 4],          // ConstantAlpha
+        0x64 => [1.0 - constant[3]; 4],    // OneMinusConstantAlpha
 
         // The GL numbering.
         0x4000 => [0.0; 4],                  // Zero
@@ -714,7 +732,11 @@ fn blend(target: BlendTarget, constant: [f32; 4], src: [f32; 4], dst: [f32; 4]) 
     let dst_a = blend_factor(target.func_alpha_dst, src, dst, constant)[3];
     let mut out = [0.0f32; 4];
     for i in 0..3 {
-        out[i] = blend_equation(target.equation_rgb, src[i] * src_rgb[i], dst[i] * dst_rgb[i]);
+        out[i] = blend_equation(
+            target.equation_rgb,
+            src[i] * src_rgb[i],
+            dst[i] * dst_rgb[i],
+        );
     }
     out[3] = blend_equation(target.equation_alpha, src[3] * src_a, dst[3] * dst_a);
     out
@@ -759,7 +781,12 @@ fn fragment_color(inv: &Invocation, program: &Compiled) -> Option<[f32; 4]> {
         return None;
     }
     let Some(header) = program.header().filter(|h| h.writes_any_color()) else {
-        return Some([inv.reg_f32(0), inv.reg_f32(1), inv.reg_f32(2), inv.reg_f32(3)]);
+        return Some([
+            inv.reg_f32(0),
+            inv.reg_f32(1),
+            inv.reg_f32(2),
+            inv.reg_f32(3),
+        ]);
     };
     Some(std::array::from_fn(|component| {
         match header.fragment_output_reg(0, component as u32) {
@@ -845,7 +872,9 @@ fn shade_quad(
         }
         resolve_shuffles(lanes);
     }
-    Ok(std::array::from_fn(|lane| fragment_color(&lanes[lane], program)))
+    Ok(std::array::from_fn(|lane| {
+        fragment_color(&lanes[lane], program)
+    }))
 }
 
 /// The per-pixel half of a draw: which samples of a pixel a triangle covers
@@ -1077,7 +1106,10 @@ struct ClipVertex {
 
 impl ClipVertex {
     fn lerp(a: &ClipVertex, b: &ClipVertex, t: f32) -> ClipVertex {
-        let mut out = ClipVertex { clip: [0.0; 4], varyings: [[0.0; 4]; NUM_VARYINGS] };
+        let mut out = ClipVertex {
+            clip: [0.0; 4],
+            varyings: [[0.0; 4]; NUM_VARYINGS],
+        };
         for c in 0..4 {
             out.clip[c] = a.clip[c] + (b.clip[c] - a.clip[c]) * t;
         }
@@ -1153,8 +1185,12 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         engine.bound_constbuf(ShaderStage::Fragment, bank as u32)
     })?;
 
-    let attribs: Vec<VertexAttrib> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_attrib(i)).collect();
-    let arrays: Vec<VertexArray> = (0..MAX_VERTEX_ATTRIBS).map(|i| engine.vertex_array(i)).collect();
+    let attribs: Vec<VertexAttrib> = (0..MAX_VERTEX_ATTRIBS)
+        .map(|i| engine.vertex_attrib(i))
+        .collect();
+    let arrays: Vec<VertexArray> = (0..MAX_VERTEX_ATTRIBS)
+        .map(|i| engine.vertex_array(i))
+        .collect();
     let viewport = engine.viewport_transform();
     let grid = engine.sample_grid()?;
     let sample_mask = engine.sample_mask();
@@ -1174,12 +1210,24 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         (Some(rt), _) => (rt.width, rt.height),
         (None, Some(dt)) => (dt.width, dt.height),
         (None, None) => {
-            return Err(Error::Gpu("raster: draw with neither a colour nor a depth target".into()))
+            return Err(Error::Gpu(
+                "raster: draw with neither a colour nor a depth target".into(),
+            ))
         }
     };
     let (rt_width, rt_height) = grid.pixels(target_width, target_height);
-    let clip = engine.apply_scissor(ScissorRect { x0: 0, y0: 0, x1: rt_width, y1: rt_height });
-    let bounds = Bounds { x0: clip.x0, y0: clip.y0, x1: clip.x1, y1: clip.y1 };
+    let clip = engine.apply_scissor(ScissorRect {
+        x0: 0,
+        y0: 0,
+        x1: rt_width,
+        y1: rt_height,
+    });
+    let bounds = Bounds {
+        x0: clip.x0,
+        y0: clip.y0,
+        x1: clip.x1,
+        y1: clip.y1,
+    };
     let depth_state = engine.depth_state();
     let blend_target = engine.blend_target(0);
     let blend_constant = engine.blend_constant();
@@ -1191,7 +1239,11 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let writes_any_channel = color_mask.iter().any(|&channel| channel);
     let cull = engine.cull_state();
 
-    let index_base = if call.indexed { engine.index_array_start() } else { 0 };
+    let index_base = if call.indexed {
+        engine.index_array_start()
+    } else {
+        0
+    };
     let instance_id = engine.instance_id();
     let primitive = Primitive::from_raw(call.primitive)?;
     // A point or line topology assembles into nothing, and "nothing" is
@@ -1202,7 +1254,9 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         primitive,
         Primitive::Points | Primitive::Lines | Primitive::LineLoop | Primitive::LineStrip
     ) {
-        return Err(Error::Gpu(format!("raster: {primitive:?} is not rasterized")));
+        return Err(Error::Gpu(format!(
+            "raster: {primitive:?} is not rasterized"
+        )));
     }
     let triangles = assemble(primitive, call.count);
     let mut tally = DrawTally::new(&fs_program);
@@ -1299,8 +1353,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     (ShaderStage::Fragment, &fs_program),
                 ] {
                     if let Ok(translated) = crate::gpu::shader::wgsl::translate(program) {
-                        immediates
-                            .extend(translated.textures.iter().map(|&(imm, _)| (stage, imm)));
+                        immediates.extend(translated.textures.iter().map(|&(imm, _)| (stage, imm)));
                     }
                 }
                 crate::gpu::upload::Uploads::of(
@@ -1310,8 +1363,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     crate::gpu::upload::Banks::Bound,
                     &immediates,
                 )
-            })
-        {
+            }) {
             Ok(uploads) => eprintln!(
                 "[up] {} bytes: {} vertex ({}), {} index, {} constant ({} banks), \
                  {} texture ({})",
@@ -1319,9 +1371,17 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 uploads.vertex.iter().map(|v| v.bytes.len()).sum::<usize>(),
                 uploads.vertex.len(),
                 uploads.index.as_ref().map_or(0, |i| i.bytes.len()),
-                uploads.constants.iter().map(|c| c.bytes.len()).sum::<usize>(),
+                uploads
+                    .constants
+                    .iter()
+                    .map(|c| c.bytes.len())
+                    .sum::<usize>(),
                 uploads.constants.len(),
-                uploads.textures.iter().map(|t| t.bytes.len()).sum::<usize>(),
+                uploads
+                    .textures
+                    .iter()
+                    .map(|t| t.bytes.len())
+                    .sum::<usize>(),
                 uploads.textures.len(),
             ),
 
@@ -1333,8 +1393,12 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             Ok(targets) => eprintln!(
                 "[rt] {} bytes back: colour {:?}, depth {:?}",
                 targets.len(),
-                targets.color.map(|t| (t.format, t.width, t.height, t.len())),
-                targets.depth.map(|t| (t.format, t.width, t.height, t.len())),
+                targets
+                    .color
+                    .map(|t| (t.format, t.width, t.height, t.len())),
+                targets
+                    .depth
+                    .map(|t| (t.format, t.width, t.height, t.len())),
             ),
             Err(e) => eprintln!("[rt] cannot resolve: {e:?}"),
         }
@@ -1344,9 +1408,10 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // and what Maxwell's reconvergence stack does not have, so this is the
     // measurement that says how hard translating a given shader would be.
     if crate::env_flag!("TRACE_CFG") {
-        for (stage, addr, program) in
-            [("vs", vs_binding.addr, &vs_program), ("fs", fs_binding.addr, &fs_program)]
-        {
+        for (stage, addr, program) in [
+            ("vs", vs_binding.addr, &vs_program),
+            ("fs", fs_binding.addr, &fs_program),
+        ] {
             eprintln!(
                 "[cfg] {stage}@{addr:#x} {}",
                 crate::gpu::shader::cfg::Cfg::new(program).describe()
@@ -1436,15 +1501,33 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         }
 
         let unclipped = [
-            ClipVertex { clip: shaded[0].clip, varyings: shaded[0].varyings },
-            ClipVertex { clip: shaded[1].clip, varyings: shaded[1].varyings },
-            ClipVertex { clip: shaded[2].clip, varyings: shaded[2].varyings },
+            ClipVertex {
+                clip: shaded[0].clip,
+                varyings: shaded[0].varyings,
+            },
+            ClipVertex {
+                clip: shaded[1].clip,
+                varyings: shaded[1].varyings,
+            },
+            ClipVertex {
+                clip: shaded[2].clip,
+                varyings: shaded[2].varyings,
+            },
         ];
         for piece in clip_near(unclipped) {
             let shaded: [ShadedVertex; 3] = [
-                ShadedVertex { clip: piece[0].clip, varyings: piece[0].varyings },
-                ShadedVertex { clip: piece[1].clip, varyings: piece[1].varyings },
-                ShadedVertex { clip: piece[2].clip, varyings: piece[2].varyings },
+                ShadedVertex {
+                    clip: piece[0].clip,
+                    varyings: piece[0].varyings,
+                },
+                ShadedVertex {
+                    clip: piece[1].clip,
+                    varyings: piece[1].varyings,
+                },
+                ShadedVertex {
+                    clip: piece[2].clip,
+                    varyings: piece[2].varyings,
+                },
             ];
             let projected: Vec<(ScreenVertex, f32, f32)> =
                 shaded.iter().map(|v| to_screen(v.clip, viewport)).collect();
@@ -1528,8 +1611,13 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         if px < min_x || px >= max_x || py < min_y || py >= max_y {
                             continue;
                         }
-                        let mask =
-                            fragments.coverage(&tri, window_z, (px, py), &mut sample_z[lane], ctx)?;
+                        let mask = fragments.coverage(
+                            &tri,
+                            window_z,
+                            (px, py),
+                            &mut sample_z[lane],
+                            ctx,
+                        )?;
                         covered[lane] = mask;
                         if mask == 0 {
                             tally.uncovered += 1;
@@ -1713,7 +1801,12 @@ mod tests {
             ScreenVertex { x: 0.0, y: 0.0 },
             ScreenVertex { x: 4.0, y: 0.0 },
             ScreenVertex { x: 0.0, y: 4.0 },
-            Bounds { x0: 0, y0: 0, x1: 8, y1: 8 },
+            Bounds {
+                x0: 0,
+                y0: 0,
+                x1: 8,
+                y1: 8,
+            },
         );
         let mut covered = covered;
         covered.sort();
@@ -1730,16 +1823,26 @@ mod tests {
         // diagonal in the *same* direction. The diagonal runs at exactly 45
         // degrees, which puts pixel centres right on it — the case that left
         // a one-pixel gap through every one of JKSV's save tiles.
-        let (a, b) = (ScreenVertex { x: 0.0, y: 0.0 }, ScreenVertex { x: 8.0, y: 0.0 });
-        let (c, d) = (ScreenVertex { x: 0.0, y: 8.0 }, ScreenVertex { x: 8.0, y: 8.0 });
-        let bounds = Bounds { x0: 0, y0: 0, x1: 8, y1: 8 };
+        let (a, b) = (
+            ScreenVertex { x: 0.0, y: 0.0 },
+            ScreenVertex { x: 8.0, y: 0.0 },
+        );
+        let (c, d) = (
+            ScreenVertex { x: 0.0, y: 8.0 },
+            ScreenVertex { x: 8.0, y: 8.0 },
+        );
+        let bounds = Bounds {
+            x0: 0,
+            y0: 0,
+            x1: 8,
+            y1: 8,
+        };
 
         let mut covered = rasterize_triangle(a, b, c, bounds);
         covered.extend(rasterize_triangle(b, c, d, bounds));
         covered.sort();
 
-        let expected: Vec<(u32, u32)> =
-            (0..8).flat_map(|x| (0..8).map(move |y| (x, y))).collect();
+        let expected: Vec<(u32, u32)> = (0..8).flat_map(|x| (0..8).map(move |y| (x, y))).collect();
         let mut sorted = expected.clone();
         sorted.sort();
         assert_eq!(covered, sorted, "every pixel of the quad exactly once");
@@ -1751,7 +1854,12 @@ mod tests {
             ScreenVertex { x: 0.0, y: 0.0 },
             ScreenVertex { x: 10.0, y: 0.0 },
             ScreenVertex { x: 0.0, y: 10.0 },
-            Bounds { x0: 2, y0: 2, x1: 4, y1: 4 },
+            Bounds {
+                x0: 2,
+                y0: 2,
+                x1: 4,
+                y1: 4,
+            },
         );
         let mut covered = covered;
         covered.sort();
@@ -1764,7 +1872,12 @@ mod tests {
             ScreenVertex { x: 1.0, y: 1.0 },
             ScreenVertex { x: 2.0, y: 2.0 },
             ScreenVertex { x: 3.0, y: 3.0 },
-            Bounds { x0: 0, y0: 0, x1: 8, y1: 8 },
+            Bounds {
+                x0: 0,
+                y0: 0,
+                x1: 8,
+                y1: 8,
+            },
         );
         assert!(covered.is_empty());
     }
@@ -1791,10 +1904,29 @@ mod tests {
         }
         let mut stats = Default::default();
         let mut host1x = Host1x::new();
-        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
 
-        let attrib = VertexAttrib { buffer_id: 0, is_fixed: false, offset: 0, size: 0x01, ty: ATTRIB_TYPE_FLOAT, is_bgra: false };
-        let array = VertexArray { enabled: true, stride, start: base, limit: base + 0x1000, divisor: 0 };
+        let attrib = VertexAttrib {
+            buffer_id: 0,
+            is_fixed: false,
+            offset: 0,
+            size: 0x01,
+            ty: ATTRIB_TYPE_FLOAT,
+            is_bgra: false,
+        };
+        let array = VertexArray {
+            enabled: true,
+            stride,
+            start: base,
+            limit: base + 0x1000,
+            divisor: 0,
+        };
 
         let v = fetch_attribute(attrib, array, 1, &ctx).unwrap();
         assert_eq!(v, [1.0, 2.0, 3.0, 4.0]);
@@ -1808,10 +1940,29 @@ mod tests {
         vmm.write_u32(&mut mem, base, packed).unwrap();
         let mut stats = Default::default();
         let mut host1x = Host1x::new();
-        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
 
-        let attrib = VertexAttrib { buffer_id: 0, is_fixed: false, offset: 0, size: 0x0a, ty: ATTRIB_TYPE_UNORM, is_bgra: true };
-        let array = VertexArray { enabled: true, stride: 4, start: base, limit: base + 0x1000, divisor: 0 };
+        let attrib = VertexAttrib {
+            buffer_id: 0,
+            is_fixed: false,
+            offset: 0,
+            size: 0x0a,
+            ty: ATTRIB_TYPE_UNORM,
+            is_bgra: true,
+        };
+        let array = VertexArray {
+            enabled: true,
+            stride: 4,
+            start: base,
+            limit: base + 0x1000,
+            divisor: 0,
+        };
 
         let v = fetch_attribute(attrib, array, 0, &ctx).unwrap();
         // Decoded as BGRA then swapped to RGBA: R=0xff, G=0x80, B=0x40, A=0x00.
@@ -1831,24 +1982,53 @@ mod tests {
         vmm.write_u32(&mut mem, base, packed).unwrap();
         let mut stats = Default::default();
         let mut host1x = Host1x::new();
-        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
-        let array = VertexArray { enabled: true, stride: 4, start: base, limit: base + 0x1000, divisor: 0 };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let array = VertexArray {
+            enabled: true,
+            stride: 4,
+            start: base,
+            limit: base + 0x1000,
+            divisor: 0,
+        };
         let fetch = |ty| {
-            let attrib = VertexAttrib { buffer_id: 0, is_fixed: false, offset: 0, size: 0x0a, ty, is_bgra: false };
+            let attrib = VertexAttrib {
+                buffer_id: 0,
+                is_fixed: false,
+                offset: 0,
+                size: 0x0a,
+                ty,
+                is_bgra: false,
+            };
             fetch_attribute(attrib, array, 0, &ctx).unwrap()
         };
 
         let sint = fetch(ATTRIB_TYPE_SINT);
         let as_int = |v: f32| v.to_bits() as i32;
         assert_eq!(
-            [as_int(sint[0]), as_int(sint[1]), as_int(sint[2]), as_int(sint[3])],
+            [
+                as_int(sint[0]),
+                as_int(sint[1]),
+                as_int(sint[2]),
+                as_int(sint[3])
+            ],
             [127, -128, 1, -1],
             "sint8 sign-extends, and keeps its bits rather than its value"
         );
 
         let uint = fetch(ATTRIB_TYPE_UINT);
         assert_eq!(
-            [uint[0].to_bits(), uint[1].to_bits(), uint[2].to_bits(), uint[3].to_bits()],
+            [
+                uint[0].to_bits(),
+                uint[1].to_bits(),
+                uint[2].to_bits(),
+                uint[3].to_bits()
+            ],
             [0x7F, 0x80, 0x01, 0xFF],
             "uint8 is zero-extended"
         );
@@ -1875,13 +2055,33 @@ mod tests {
         vmm.write_u64(&mut mem, base, packed).unwrap();
         // The signed pattern, eight bytes on: 0x8000 is -32768, the one value
         // both ends of the range map onto -1, and 0x7FFF is +1 exactly.
-        vmm.write_u64(&mut mem, base + 8, 0x0001_7FFF_8000_8001).unwrap();
+        vmm.write_u64(&mut mem, base + 8, 0x0001_7FFF_8000_8001)
+            .unwrap();
         let mut stats = Default::default();
         let mut host1x = Host1x::new();
-        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
-        let array = VertexArray { enabled: true, stride: 16, start: base, limit: base + 0x1000, divisor: 0 };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let array = VertexArray {
+            enabled: true,
+            stride: 16,
+            start: base,
+            limit: base + 0x1000,
+            divisor: 0,
+        };
         let fetch = |size, ty, offset| {
-            let attrib = VertexAttrib { buffer_id: 0, is_fixed: false, offset, size, ty, is_bgra: false };
+            let attrib = VertexAttrib {
+                buffer_id: 0,
+                is_fixed: false,
+                offset,
+                size,
+                ty,
+                is_bgra: false,
+            };
             fetch_attribute(attrib, array, 0, &ctx).unwrap()
         };
 
@@ -1895,14 +2095,24 @@ mod tests {
         let sint = fetch(0x03, ATTRIB_TYPE_SINT, 0);
         let as_int = |v: f32| v.to_bits() as i32;
         assert_eq!(
-            [as_int(sint[0]), as_int(sint[1]), as_int(sint[2]), as_int(sint[3])],
+            [
+                as_int(sint[0]),
+                as_int(sint[1]),
+                as_int(sint[2]),
+                as_int(sint[3])
+            ],
             [0x3C00, -0x4000, 0x3800, 0x7BFF],
             "sint16 sign-extends, and keeps its bits rather than its value"
         );
 
         let uint = fetch(0x03, ATTRIB_TYPE_UINT, 0);
         assert_eq!(
-            [uint[0].to_bits(), uint[1].to_bits(), uint[2].to_bits(), uint[3].to_bits()],
+            [
+                uint[0].to_bits(),
+                uint[1].to_bits(),
+                uint[2].to_bits(),
+                uint[3].to_bits()
+            ],
             [0x3C00, 0xC000, 0x3800, 0x7BFF],
             "uint16 is zero-extended"
         );
@@ -1922,9 +2132,28 @@ mod tests {
         let (mut mem, vmm, base) = harness();
         let mut stats = Default::default();
         let mut host1x = Host1x::new();
-        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
-        let attrib = VertexAttrib { buffer_id: 0, is_fixed: false, offset: 0, size: 0x01, ty: ATTRIB_TYPE_FLOAT, is_bgra: false };
-        let array = VertexArray { enabled: false, stride: 16, start: base, limit: base, divisor: 0 };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let attrib = VertexAttrib {
+            buffer_id: 0,
+            is_fixed: false,
+            offset: 0,
+            size: 0x01,
+            ty: ATTRIB_TYPE_FLOAT,
+            is_bgra: false,
+        };
+        let array = VertexArray {
+            enabled: false,
+            stride: 16,
+            start: base,
+            limit: base,
+            divisor: 0,
+        };
         assert!(fetch_attribute(attrib, array, 0, &ctx).is_err());
     }
 
@@ -1937,12 +2166,34 @@ mod tests {
         let (mut mem, vmm, base) = harness();
         let mut stats = Default::default();
         let mut host1x = Host1x::new();
-        let ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
-        let attrib = VertexAttrib { buffer_id: 0, is_fixed: true, offset: 0, size: 0x12, ty: ATTRIB_TYPE_FLOAT, is_bgra: false };
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let attrib = VertexAttrib {
+            buffer_id: 0,
+            is_fixed: true,
+            offset: 0,
+            size: 0x12,
+            ty: ATTRIB_TYPE_FLOAT,
+            is_bgra: false,
+        };
         // Deliberately a disabled array: a fixed attribute is not fetched
         // from one at all, so the buffer's state must not matter.
-        let array = VertexArray { enabled: false, stride: 0, start: base, limit: base, divisor: 0 };
-        assert_eq!(fetch_attribute(attrib, array, 0, &ctx).unwrap(), [0.0, 0.0, 0.0, 1.0]);
+        let array = VertexArray {
+            enabled: false,
+            stride: 0,
+            start: base,
+            limit: base,
+            divisor: 0,
+        };
+        assert_eq!(
+            fetch_attribute(attrib, array, 0, &ctx).unwrap(),
+            [0.0, 0.0, 0.0, 1.0]
+        );
     }
 
     // -- Full-pipeline integration: vertex fetch -> vertex shading ->
@@ -2048,7 +2299,9 @@ mod tests {
         let mut mem = Memory::new();
         mem.map_zero(0x7000_0000, 0x2000).unwrap();
         let mut vmm = AddressSpace::new();
-        let base = vmm.map(0x7000_0000, 0x2000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+        let base = vmm
+            .map(0x7000_0000, 0x2000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
 
         let rt_addr = base;
         let vs_addr = base + 0x200;
@@ -2058,10 +2311,17 @@ mod tests {
         {
             let mut host1x = Host1x::new();
             let mut stats = Default::default();
-            let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
-            for (words, addr) in
-                [(passthrough_vertex_shader(), vs_addr), (fragment_shader, fs_addr)]
-            {
+            let mut ctx = ExecCtx {
+                mem: &mut mem,
+                vmm: &vmm,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
+            for (words, addr) in [
+                (passthrough_vertex_shader(), vs_addr),
+                (fragment_shader, fs_addr),
+            ] {
                 for (i, chunk) in words.chunks_exact(4).enumerate() {
                     let word = u32::from_le_bytes(chunk.try_into().unwrap());
                     ctx.write_u32(addr + i as u64 * 4, word).unwrap();
@@ -2095,7 +2355,9 @@ mod tests {
         // VertexAttribState[0] = aPosition: buffer 0, offset 0, 4x32 float.
         engine.regs.set(0x458, 0x01 << 21 | 7 << 27);
         // VertexAttribState[1] = aColor: buffer 0, offset 16, 4x32 float.
-        engine.regs.set(0x458 + 1, (16 << 7) | (0x01 << 21) | (7 << 27));
+        engine
+            .regs
+            .set(0x458 + 1, (16 << 7) | (0x01 << 21) | (7 << 27));
         // VertexArray[0]: stride 32, enabled.
         engine.regs.set(0x700, 32 | (1 << 12));
         engine.regs.set(0x701, (vbuf_addr >> 32) as u32);
@@ -2103,17 +2365,32 @@ mod tests {
         engine.regs.set(0x7C0, (vbuf_addr >> 32) as u32);
         engine.regs.set(0x7C1, vbuf_addr as u32 + 3 * 32);
 
-        engine.last_draw = DrawCall { primitive: 4, first: 0, count: 3, indexed: false, index_format: 0 };
+        engine.last_draw = DrawCall {
+            primitive: 4,
+            first: 0,
+            count: 3,
+            indexed: false,
+            index_format: 0,
+        };
         (mem, vmm, engine)
     }
 
-    fn write_vertex(mem: &mut Memory, vmm: &AddressSpace, base: u64, index: u32, pos: [f32; 4], color: [f32; 4]) {
+    fn write_vertex(
+        mem: &mut Memory,
+        vmm: &AddressSpace,
+        base: u64,
+        index: u32,
+        pos: [f32; 4],
+        color: [f32; 4],
+    ) {
         let addr = base + index as u64 * 32;
         for (i, v) in pos.iter().enumerate() {
-            vmm.write_u32(mem, addr + i as u64 * 4, v.to_bits()).unwrap();
+            vmm.write_u32(mem, addr + i as u64 * 4, v.to_bits())
+                .unwrap();
         }
         for (i, v) in color.iter().enumerate() {
-            vmm.write_u32(mem, addr + 16 + i as u64 * 4, v.to_bits()).unwrap();
+            vmm.write_u32(mem, addr + 16 + i as u64 * 4, v.to_bits())
+                .unwrap();
         }
     }
 
@@ -2131,7 +2408,13 @@ mod tests {
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: true };
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: true,
+        };
         draw(&engine, &mut ctx).unwrap();
 
         let rt = engine.render_target(0).unwrap().unwrap();
@@ -2139,8 +2422,16 @@ mod tests {
         // (2,2) and (0,0) are inside the covered half; (12,6) is in the
         // untouched half and must still read as the mapping's initial zero.
         assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
-        assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(2 * 4, 2, 16 * 4) as u64).unwrap() as u128, expected);
-        assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(12 * 4, 6, 16 * 4) as u64).unwrap(), 0);
+        assert_eq!(
+            ctx.read_u32(rt.addr + rt.layout.offset(2 * 4, 2, 16 * 4) as u64)
+                .unwrap() as u128,
+            expected
+        );
+        assert_eq!(
+            ctx.read_u32(rt.addr + rt.layout.offset(12 * 4, 6, 16 * 4) as u64)
+                .unwrap(),
+            0
+        );
     }
 
     /// A shader that reads its neighbour's register gets the neighbour, not
@@ -2158,18 +2449,47 @@ mod tests {
         // Red ramps from 0 at the left edge of the 16-pixel target to 1 at
         // the right, so it is exactly `(x + 0.5) / 16` at each pixel centre
         // and the difference between neighbours is 1/16 everywhere.
-        write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
-        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
-        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+        write_vertex(
+            &mut mem,
+            &vmm,
+            vbuf_addr,
+            0,
+            [-1.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+        );
+        write_vertex(
+            &mut mem,
+            &vmm,
+            vbuf_addr,
+            1,
+            [1.0, 1.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0, 1.0],
+        );
+        write_vertex(
+            &mut mem,
+            &vmm,
+            vbuf_addr,
+            2,
+            [-1.0, -1.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0],
+        );
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         draw(&engine, &mut ctx).unwrap();
 
         let rt = engine.render_target(0).unwrap().unwrap();
         let pixel = |ctx: &mut ExecCtx, x: u32, y: u32| {
-            let raw = ctx.read_pixel(rt.addr + rt.texel_offset(x, y) as u64, 4).unwrap();
+            let raw = ctx
+                .read_pixel(rt.addr + rt.texel_offset(x, y) as u64, 4)
+                .unwrap();
             rt.format.decode(raw).unwrap()
         };
         let close = |got: f32, want: f32| (got - want).abs() < 1.0 / 255.0;
@@ -2178,12 +2498,18 @@ mod tests {
         // along the ramp in each direction.
         let left = pixel(&mut ctx, 0, 0);
         assert!(close(left[0], 1.0 / 16.0), "dFdx at (0,0): {left:?}");
-        assert!(close(left[1], 1.5 / 16.0), "the neighbour's own value: {left:?}");
+        assert!(
+            close(left[1], 1.5 / 16.0),
+            "the neighbour's own value: {left:?}"
+        );
         // Lane 1 differences the other way, and a negative colour clamps at
         // zero on the way into an unorm target.
         let right = pixel(&mut ctx, 1, 0);
         assert!(close(right[0], 0.0), "dFdx at (1,0): {right:?}");
-        assert!(close(right[1], 0.5 / 16.0), "the neighbour's own value: {right:?}");
+        assert!(
+            close(right[1], 0.5 / 16.0),
+            "the neighbour's own value: {right:?}"
+        );
     }
 
     /// The colour write mask keeps the channels it turns off, and a mask with
@@ -2209,20 +2535,30 @@ mod tests {
             let (mut mem, vmm, mut engine) = pipeline_harness();
             engine.regs.set(0x680, mask);
             let vbuf_addr = engine.vertex_array(0).start;
-            for (i, pos) in [[-1.0f32, 1.0, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0], [-1.0, -1.0, 0.0, 1.0]]
-                .into_iter()
-                .enumerate()
+            for (i, pos) in [
+                [-1.0f32, 1.0, 0.0, 1.0],
+                [1.0, 1.0, 0.0, 1.0],
+                [-1.0, -1.0, 0.0, 1.0],
+            ]
+            .into_iter()
+            .enumerate()
             {
                 write_vertex(&mut mem, &vmm, vbuf_addr, i as u32, pos, full);
             }
 
             let mut host1x = Host1x::new();
             let mut stats = Default::default();
-            let mut ctx =
-                ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+            let mut ctx = ExecCtx {
+                mem: &mut mem,
+                vmm: &vmm,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
             let rt = engine.render_target(0).unwrap().unwrap();
             let held = rt.format.encode(before).unwrap();
-            ctx.write_pixel(rt.addr, rt.format.bytes_per_pixel, held).unwrap();
+            ctx.write_pixel(rt.addr, rt.format.bytes_per_pixel, held)
+                .unwrap();
 
             draw(&engine, &mut ctx).unwrap();
 
@@ -2266,13 +2602,19 @@ mod tests {
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let mut ctx =
-            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         draw(&engine, &mut ctx).unwrap();
 
         let rt = engine.render_target(0).unwrap().unwrap();
         let texel = |ctx: &ExecCtx, x: u32, y: u32| {
-            ctx.read_u32(rt.addr + rt.texel_offset(x, y) as u64).unwrap()
+            ctx.read_u32(rt.addr + rt.texel_offset(x, y) as u64)
+                .unwrap()
         };
         // Pixel (0, 0) is wholly inside: all four of its texels are written.
         for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
@@ -2286,7 +2628,11 @@ mod tests {
         }
         // Pixel (7, 3) is wholly outside.
         for (x, y) in [(14, 6), (15, 6), (14, 7), (15, 7)] {
-            assert_eq!(texel(&ctx, x, y), 0, "texel ({x}, {y}) of an uncovered pixel");
+            assert_eq!(
+                texel(&ctx, x, y),
+                0,
+                "texel ({x}, {y}) of an uncovered pixel"
+            );
         }
     }
 
@@ -2314,13 +2660,20 @@ mod tests {
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let mut ctx =
-            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         draw(&engine, &mut ctx).unwrap();
 
         let rt = engine.render_target(0).unwrap().unwrap();
-        let texel =
-            |ctx: &ExecCtx, x: u32, y: u32| ctx.read_u32(rt.addr + rt.texel_offset(x, y) as u64).unwrap();
+        let texel = |ctx: &ExecCtx, x: u32, y: u32| {
+            ctx.read_u32(rt.addr + rt.texel_offset(x, y) as u64)
+                .unwrap()
+        };
         assert_ne!(texel(&ctx, 0, 0), 0, "sample 0 is in the mask");
         for (x, y) in [(1, 0), (0, 1), (1, 1)] {
             assert_eq!(texel(&ctx, x, y), 0, "texel ({x}, {y}) is masked off");
@@ -2339,15 +2692,22 @@ mod tests {
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let mut ctx =
-            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         draw(&engine, &mut ctx).unwrap();
 
         // Half of four samples is two, so the pixel is half covered even
         // though the triangle covers all of it.
         let rt = engine.render_target(0).unwrap().unwrap();
-        let texel =
-            |ctx: &ExecCtx, x: u32, y: u32| ctx.read_u32(rt.addr + rt.texel_offset(x, y) as u64).unwrap();
+        let texel = |ctx: &ExecCtx, x: u32, y: u32| {
+            ctx.read_u32(rt.addr + rt.texel_offset(x, y) as u64)
+                .unwrap()
+        };
         assert_ne!(texel(&ctx, 0, 0), 0);
         assert_ne!(texel(&ctx, 1, 0), 0);
         assert_eq!(texel(&ctx, 0, 1), 0);
@@ -2395,12 +2755,25 @@ mod tests {
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let mut ctx =
-            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         draw(&engine, &mut ctx).unwrap();
 
-        assert_ne!(ctx.read_u32(slot1).unwrap(), 0, "the draw belongs in slot 1");
-        assert_eq!(ctx.read_u32(slot0).unwrap(), 0, "slot 0 is not the mapped target");
+        assert_ne!(
+            ctx.read_u32(slot1).unwrap(),
+            0,
+            "the draw belongs in slot 1"
+        );
+        assert_eq!(
+            ctx.read_u32(slot0).unwrap(),
+            0,
+            "slot 0 is not the mapped target"
+        );
     }
 
     #[test]
@@ -2420,30 +2793,50 @@ mod tests {
         {
             let mut host1x = Host1x::new();
             let mut stats = Default::default();
-            let mut ctx =
-                ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+            let mut ctx = ExecCtx {
+                mem: &mut mem,
+                vmm: &vmm,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
             ctx.write_u32(ibuf_addr, 2 | (1 << 16)).unwrap();
             ctx.write_u32(ibuf_addr + 4, 0).unwrap();
         }
         engine.regs.set(0x5F2, (ibuf_addr >> 32) as u32);
         engine.regs.set(0x5F3, ibuf_addr as u32);
-        engine.last_draw =
-            DrawCall { primitive: 4, first: 0, count: 3, indexed: true, index_format: 1 };
+        engine.last_draw = DrawCall {
+            primitive: 4,
+            first: 0,
+            count: 3,
+            indexed: true,
+            index_format: 1,
+        };
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let mut ctx =
-            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: true };
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: true,
+        };
         draw(&engine, &mut ctx).unwrap();
 
         let rt = engine.render_target(0).unwrap().unwrap();
         let expected = rt.format.encode(color).unwrap();
         assert_eq!(ctx.read_u32(rt.addr).unwrap() as u128, expected);
         assert_eq!(
-            ctx.read_u32(rt.addr + rt.layout.offset(2 * 4, 2, 16 * 4) as u64).unwrap() as u128,
+            ctx.read_u32(rt.addr + rt.layout.offset(2 * 4, 2, 16 * 4) as u64)
+                .unwrap() as u128,
             expected
         );
-        assert_eq!(ctx.read_u32(rt.addr + rt.layout.offset(12 * 4, 6, 16 * 4) as u64).unwrap(), 0);
+        assert_eq!(
+            ctx.read_u32(rt.addr + rt.layout.offset(12 * 4, 6, 16 * 4) as u64)
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -2463,11 +2856,20 @@ mod tests {
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let mut ctx =
-            ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: true };
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: true,
+        };
         draw(&engine, &mut ctx).unwrap();
         let rt = engine.render_target(0).unwrap().unwrap();
-        assert_eq!(ctx.read_u32(rt.addr).unwrap(), 0, "a back face must not be drawn");
+        assert_eq!(
+            ctx.read_u32(rt.addr).unwrap(),
+            0,
+            "a back face must not be drawn"
+        );
 
         // Culling the front face instead draws it.
         engine.regs.set(0x648, 0x404);
@@ -2481,15 +2883,27 @@ mod tests {
         // projected position to the far side of the screen and smear the
         // triangle across the whole target; clipping replaces it with real
         // vertices on the plane first.
-        let far = ClipVertex { clip: [-1.0, 1.0, 0.0, 1.0], varyings: [[0.0; 4]; NUM_VARYINGS] };
-        let also_far = ClipVertex { clip: [1.0, 1.0, 0.0, 1.0], varyings: [[0.0; 4]; NUM_VARYINGS] };
-        let behind = ClipVertex { clip: [0.0, -1.0, 0.0, -1.0], varyings: [[0.0; 4]; NUM_VARYINGS] };
+        let far = ClipVertex {
+            clip: [-1.0, 1.0, 0.0, 1.0],
+            varyings: [[0.0; 4]; NUM_VARYINGS],
+        };
+        let also_far = ClipVertex {
+            clip: [1.0, 1.0, 0.0, 1.0],
+            varyings: [[0.0; 4]; NUM_VARYINGS],
+        };
+        let behind = ClipVertex {
+            clip: [0.0, -1.0, 0.0, -1.0],
+            varyings: [[0.0; 4]; NUM_VARYINGS],
+        };
 
         let pieces = clip_near([far, also_far, behind]);
         assert_eq!(pieces.len(), 2, "a triangle cut by one plane fans into two");
         for piece in &pieces {
             for v in piece {
-                assert!(v.clip[3] > 0.0, "no vertex may survive at or behind the eye");
+                assert!(
+                    v.clip[3] > 0.0,
+                    "no vertex may survive at or behind the eye"
+                );
             }
         }
 
@@ -2500,9 +2914,15 @@ mod tests {
 
     #[test]
     fn the_other_triangle_topologies_assemble() {
-        assert_eq!(assemble(Primitive::TriangleFan, 5), vec![[0, 1, 2], [0, 2, 3], [0, 3, 4]]);
+        assert_eq!(
+            assemble(Primitive::TriangleFan, 5),
+            vec![[0, 1, 2], [0, 2, 3], [0, 3, 4]]
+        );
         assert_eq!(assemble(Primitive::Quads, 4), vec![[0, 1, 2], [0, 2, 3]]);
-        assert_eq!(assemble(Primitive::QuadStrip, 4), vec![[0, 1, 2], [2, 1, 3]]);
+        assert_eq!(
+            assemble(Primitive::QuadStrip, 4),
+            vec![[0, 1, 2], [2, 1, 3]]
+        );
         // Point and line topologies need their own rasterization; turning
         // them into triangles would draw something that isn't there.
         assert!(assemble(Primitive::Lines, 6).is_empty());
@@ -2522,7 +2942,13 @@ mod tests {
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: true };
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: true,
+        };
         draw(&engine, &mut ctx).unwrap();
 
         let rt = engine.render_target(0).unwrap().unwrap();
@@ -2586,9 +3012,9 @@ mod tests {
         // leaves the background alone rather than blacking it out.
         let target = BlendTarget {
             enabled: true,
-            equation_rgb: 0x8006,   // FuncAdd
-            func_rgb_src: 0x4302,   // SrcAlpha
-            func_rgb_dst: 0x4303,   // OneMinusSrcAlpha
+            equation_rgb: 0x8006, // FuncAdd
+            func_rgb_src: 0x4302, // SrcAlpha
+            func_rgb_dst: 0x4303, // OneMinusSrcAlpha
             equation_alpha: 0x8006,
             func_alpha_src: 0x4302,
             func_alpha_dst: 0x4303,
@@ -2631,14 +3057,49 @@ mod tests {
 
         let mut program = Program::default();
         for (at, op) in [
-            (8u32, Op::Ld { dst: 0, offset: INSTANCE_ID_OFFSET, idx: RZ, size: MemSize::B32 }),
-            (16, Op::Ld { dst: 1, offset: VERTEX_ID_OFFSET, idx: RZ, size: MemSize::B32 }),
-            (24, Op::St { offset: CLIP_POS_OFFSET, idx: RZ, src: 0, size: MemSize::B32 }),
-            (32, Op::St { offset: CLIP_POS_OFFSET + 4, idx: RZ, src: 1, size: MemSize::B32 }),
+            (
+                8u32,
+                Op::Ld {
+                    dst: 0,
+                    offset: INSTANCE_ID_OFFSET,
+                    idx: RZ,
+                    size: MemSize::B32,
+                },
+            ),
+            (
+                16,
+                Op::Ld {
+                    dst: 1,
+                    offset: VERTEX_ID_OFFSET,
+                    idx: RZ,
+                    size: MemSize::B32,
+                },
+            ),
+            (
+                24,
+                Op::St {
+                    offset: CLIP_POS_OFFSET,
+                    idx: RZ,
+                    src: 0,
+                    size: MemSize::B32,
+                },
+            ),
+            (
+                32,
+                Op::St {
+                    offset: CLIP_POS_OFFSET + 4,
+                    idx: RZ,
+                    src: 1,
+                    size: MemSize::B32,
+                },
+            ),
             (40, Op::Exit),
         ] {
             program.offsets.push(at);
-            program.insns.push(Instruction { pred: Pred::ALWAYS, op });
+            program.insns.push(Instruction {
+                pred: Pred::ALWAYS,
+                op,
+            });
         }
 
         let (mut mem, vmm, _) = harness();
@@ -2664,7 +3125,8 @@ mod tests {
         let (mut mem, vmm, base) = harness();
         // Four consecutive floats, one per element of a divisor-2 array.
         for (i, v) in [10.0f32, 20.0, 30.0, 40.0].iter().enumerate() {
-            vmm.write_u32(&mut mem, base + i as u64 * 4, v.to_bits()).unwrap();
+            vmm.write_u32(&mut mem, base + i as u64 * 4, v.to_bits())
+                .unwrap();
         }
         let mut stats = Default::default();
         let mut host1x = Host1x::new();
@@ -2683,8 +3145,13 @@ mod tests {
             ty: ATTRIB_TYPE_FLOAT,
             is_bgra: false,
         };
-        let array =
-            VertexArray { enabled: true, stride: 4, start: base, limit: base + 0x1000, divisor: 2 };
+        let array = VertexArray {
+            enabled: true,
+            stride: 4,
+            start: base,
+            limit: base + 0x1000,
+            divisor: 2,
+        };
 
         // Instances 0 and 1 share element 0; instances 2 and 3 share element 1.
         for (instance, expected) in [(0u32, 10.0f32), (1, 10.0), (2, 20.0), (3, 20.0)] {
@@ -2721,7 +3188,10 @@ mod tests {
         let src = [1.0, 0.0, 0.0, 0.5];
         let dst = [0.0, 0.0, 1.0, 1.0];
         assert_eq!(blend(d3d, [0.0; 4], src, dst), [0.5, 0.0, 0.5, 0.5]);
-        assert_eq!(blend(d3d, [0.0; 4], src, dst), blend(gl, [0.0; 4], src, dst));
+        assert_eq!(
+            blend(d3d, [0.0; 4], src, dst),
+            blend(gl, [0.0; 4], src, dst)
+        );
     }
 
     #[test]
@@ -2753,12 +3223,21 @@ mod tests {
             );
         }
         // SrcAlphaSaturate is min(srcA, 1 - dstA) on colour and 1 on alpha.
-        assert_eq!(blend_factor(0x0b, src, dst, constant), [0.75, 0.75, 0.75, 1.0]);
+        assert_eq!(
+            blend_factor(0x0b, src, dst, constant),
+            [0.75, 0.75, 0.75, 1.0]
+        );
     }
 
     #[test]
     fn blend_equation_reads_the_d3d_numbering_too() {
-        for (d3d, gl) in [(1u32, 0x8006u32), (2, 0x800a), (3, 0x800b), (4, 0x8007), (5, 0x8008)] {
+        for (d3d, gl) in [
+            (1u32, 0x8006u32),
+            (2, 0x800a),
+            (3, 0x800b),
+            (4, 0x8007),
+            (5, 0x8008),
+        ] {
             assert_eq!(
                 blend_equation(d3d, 0.75, 0.25),
                 blend_equation(gl, 0.75, 0.25),
@@ -2792,23 +3271,42 @@ mod tests {
         {
             let mut host1x = Host1x::new();
             let mut stats = Default::default();
-            let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+            let mut ctx = ExecCtx {
+                mem: &mut mem,
+                vmm: &vmm,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
             engine.regs.set(0x364, 1.0f32.to_bits()); // CLEAR_DEPTH = far
             engine.write(0x674, 0b1, true, &mut ctx).unwrap();
         }
 
         let color = [0.2f32, 0.8, 0.2, 1.0];
-        for (i, pos) in [[-1.0f32, 1.0, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0], [-1.0, -1.0, 0.0, 1.0]]
-            .into_iter()
-            .enumerate()
+        for (i, pos) in [
+            [-1.0f32, 1.0, 0.0, 1.0],
+            [1.0, 1.0, 0.0, 1.0],
+            [-1.0, -1.0, 0.0, 1.0],
+        ]
+        .into_iter()
+        .enumerate()
         {
             write_vertex(&mut mem, &vmm, vbuf_addr, i as u32, pos, color);
         }
 
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
-        assert!(engine.render_target(0).unwrap().is_none(), "no colour target is bound");
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        assert!(
+            engine.render_target(0).unwrap().is_none(),
+            "no colour target is bound"
+        );
         draw(&engine, &mut ctx).unwrap();
 
         // NDC z = 0 is window z = 0.5 through this viewport, and it passes
@@ -2840,7 +3338,13 @@ mod tests {
             // nearest possible value and reject every draw.
             let mut host1x = Host1x::new();
             let mut stats = Default::default();
-            let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+            let mut ctx = ExecCtx {
+                mem: &mut mem,
+                vmm: &vmm,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
             engine.regs.set(0x364, 1.0f32.to_bits()); // CLEAR_DEPTH
             engine.write(0x674, 0b1, true, &mut ctx).unwrap(); // CLEAR_BUFFERS: clear_depth
         }
@@ -2855,7 +3359,13 @@ mod tests {
         {
             let mut host1x = Host1x::new();
             let mut stats = Default::default();
-            let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+            let mut ctx = ExecCtx {
+                mem: &mut mem,
+                vmm: &vmm,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
             draw(&engine, &mut ctx).unwrap();
         }
         // Near triangle second, at NDC z = -0.5 (closer — smaller depth).
@@ -2864,7 +3374,13 @@ mod tests {
         write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, -0.5, 1.0], near);
         let mut host1x = Host1x::new();
         let mut stats = Default::default();
-        let mut ctx = ExecCtx { mem: &mut mem, vmm: &vmm, host1x: &mut host1x, stats: &mut stats, trace: false };
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
         draw(&engine, &mut ctx).unwrap();
 
         let rt = engine.render_target(0).unwrap().unwrap();

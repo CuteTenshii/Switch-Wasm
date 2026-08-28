@@ -109,7 +109,10 @@ mod tests {
         const BUFFERS: u32 = 0x3000;
         const TYPES: u32 = 7;
         let font = b"not really a font, but bytes are bytes!!".to_vec();
-        assert!(font.len().is_multiple_of(4), "so no padding is in play here");
+        assert!(
+            font.len().is_multiple_of(4),
+            "so no padding is in play here"
+        );
 
         // GetSize and GetSharedMemoryAddressOffset, per font type. Each font
         // sits behind the eight-byte header a console puts in front of it, so
@@ -125,7 +128,11 @@ mod tests {
             cpu.set_shared_font(font.clone());
             cpu.pl_request(TLS, Some(3)).unwrap();
             let expected = (font.len() as u32 + 8) * i + 8;
-            assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), expected, "offset for type {i}");
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x20).unwrap(),
+                expected,
+                "offset for type {i}"
+            );
         }
 
         // GetSharedFontInOrderOfPriority: one request, three out map-aliases.
@@ -189,7 +196,10 @@ mod tests {
         // without it cannot be decoded at all — and a plain TrueType file
         // handed here by mistake must be refused rather than xored into noise.
         assert!(decode_bfttf(&[0x00, 0x01, 0x00, 0x00, 0, 0, 0, 0]).is_none());
-        assert!(decode_bfttf(&[0x36, 0xf8, 0x1a]).is_none(), "shorter than a header");
+        assert!(
+            decode_bfttf(&[0x36, 0xf8, 0x1a]).is_none(),
+            "shorter than a header"
+        );
     }
 
     #[test]
@@ -213,7 +223,11 @@ mod tests {
         cpu.mem.write_u32(TLS + data_area + 8, 5).unwrap();
         cpu.pl_request(TLS, Some(5)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), 2);
-        assert_eq!(cpu.mem.read_u32(BUFFERS + 8).unwrap(), 0, "nothing past the second");
+        assert_eq!(
+            cpu.mem.read_u32(BUFFERS + 8).unwrap(),
+            0,
+            "nothing past the second"
+        );
     }
 
     #[test]
@@ -222,7 +236,11 @@ mod tests {
         // `_plRequestLoadWait` or read a font that isn't there.
         let mut cpu = request(false, 5, &[]);
         cpu.pl_request(TLS, Some(1)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "reported as loaded");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            1,
+            "reported as loaded"
+        );
         cpu.pl_request(TLS, Some(5)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), 0, "no fonts");
     }

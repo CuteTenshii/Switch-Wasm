@@ -47,7 +47,12 @@ impl Cpu {
     /// one — the same distinction `vi_request` makes for `vi:m` — so the control
     /// path has to be checked first or a domain conversion would be read as
     /// `GetStandardUserSystemClock`.
-    pub(super) fn time_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+    pub(super) fn time_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+        handle: u64,
+    ) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
@@ -109,7 +114,11 @@ impl Cpu {
     /// straight from [`Cpu::set_unix_time`] — there is no persisted offset or
     /// network sync here, so `SetCurrentTime`/`SetSystemClockContext` are
     /// accepted but don't change what a later read sees.
-    pub(super) fn time_system_clock_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn time_system_clock_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         const GET_CURRENT_TIME: u32 = 0;
         const SET_CURRENT_TIME: u32 = 1;
         const GET_SYSTEM_CLOCK_CONTEXT: u32 = 2;
@@ -136,7 +145,11 @@ impl Cpu {
     }
 
     /// `ISteadyClock`: a monotonic clock unrelated to wall time.
-    pub(super) fn time_steady_clock_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+    pub(super) fn time_steady_clock_request(
+        &mut self,
+        tls: u32,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
         const GET_CURRENT_TIME_POINT: u32 = 0;
         const GET_RTC_VALUE: u32 = 100;
         const IS_RTC_RESET_DETECTED: u32 = 101;
@@ -275,7 +288,14 @@ impl Cpu {
     }
 
     /// Inverse of [`Cpu::to_calendar_time`], assuming UTC.
-    pub(super) fn from_calendar_time(year: u16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> i64 {
+    pub(super) fn from_calendar_time(
+        year: u16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+    ) -> i64 {
         let days = days_from_civil(year as i64, month.max(1) as u32, day.max(1) as u32);
         days * 86400 + hour as i64 * 3600 + minute as i64 * 60 + second as i64
     }
@@ -300,7 +320,11 @@ mod tests {
             (2000, 2, 29),  // is a leap year (divisible by 400)
         ] {
             let days = days_from_civil(y, m, d);
-            assert_eq!(civil_from_days(days), (y, m, d), "{y}-{m}-{d} (days={days})");
+            assert_eq!(
+                civil_from_days(days),
+                (y, m, d),
+                "{y}-{m}-{d} (days={days})"
+            );
         }
     }
 
@@ -325,7 +349,10 @@ mod tests {
         assert_eq!(billion[5], 46);
         assert_eq!(billion[6], 40);
 
-        assert_eq!(Cpu::from_calendar_time(2001, 9, 9, 1, 46, 40), 1_000_000_000);
+        assert_eq!(
+            Cpu::from_calendar_time(2001, 9, 9, 1, 46, 40),
+            1_000_000_000
+        );
     }
 
     #[test]

@@ -95,8 +95,18 @@ impl<'a> RomFs<'a> {
                 header_size, HEADER_SIZE
             )));
         }
-        let dir_table = table(image, crate::nsp::read_u64(image, 0x18), crate::nsp::read_u64(image, 0x20), "RomFS directory metadata table")?;
-        let file_table = table(image, crate::nsp::read_u64(image, 0x38), crate::nsp::read_u64(image, 0x40), "RomFS file metadata table")?;
+        let dir_table = table(
+            image,
+            crate::nsp::read_u64(image, 0x18),
+            crate::nsp::read_u64(image, 0x20),
+            "RomFS directory metadata table",
+        )?;
+        let file_table = table(
+            image,
+            crate::nsp::read_u64(image, 0x38),
+            crate::nsp::read_u64(image, 0x40),
+            "RomFS file metadata table",
+        )?;
         let data_offset = crate::nsp::read_u64(image, 0x48);
 
         // Chains are just offsets into the tables, so a corrupt image can
@@ -105,9 +115,8 @@ impl<'a> RomFs<'a> {
         // fixed part long, so dividing each table by that is an upper bound on
         // what it can contain. A directory is read twice — once when its
         // parent lists it, once when it is walked itself — so it gets two.
-        let mut budget = 2 * (dir_table.len() / DIR_ENTRY_SIZE)
-            + file_table.len() / FILE_ENTRY_SIZE
-            + 2;
+        let mut budget =
+            2 * (dir_table.len() / DIR_ENTRY_SIZE) + file_table.len() / FILE_ENTRY_SIZE + 2;
         let spend = |budget: &mut usize| -> Result<(), Error> {
             *budget = budget.checked_sub(1).ok_or_else(|| {
                 Error::RomFs("entry chain doesn't terminate — corrupt image".into())
@@ -144,7 +153,11 @@ impl<'a> RomFs<'a> {
             }
         }
 
-        Ok(RomFs { image, data_offset, files })
+        Ok(RomFs {
+            image,
+            data_offset,
+            files,
+        })
     }
 
     /// Every file in the image, in no particular order.
@@ -156,7 +169,9 @@ impl<'a> RomFs<'a> {
     /// RomFS itself is case-sensitive, but the names this reader looks for are
     /// SDK-generated and have been spelled inconsistently by repack tools.
     pub fn find(&self, path: &str) -> Option<&RomFsFile> {
-        self.files.iter().find(|f| f.path.eq_ignore_ascii_case(path))
+        self.files
+            .iter()
+            .find(|f| f.path.eq_ignore_ascii_case(path))
     }
 
     /// The payload bytes of `file`, or `None` if its extent falls outside the
@@ -176,9 +191,7 @@ impl<'a> RomFs<'a> {
 /// Slice one of the header's declared tables out of the image.
 fn table<'a>(image: &'a [u8], offset: u64, size: u64, what: &str) -> Result<&'a [u8], Error> {
     let start = offset as usize;
-    let end = start
-        .checked_add(size as usize)
-        .ok_or(Error::Overflow)?;
+    let end = start.checked_add(size as usize).ok_or(Error::Overflow)?;
     image.get(start..end).ok_or_else(|| Error::Truncated {
         what: what.to_owned(),
         expected: end,
@@ -188,7 +201,12 @@ fn table<'a>(image: &'a [u8], offset: u64, size: u64, what: &str) -> Result<&'a 
 
 /// The bytes of one metadata entry: its fixed part plus its name, which the
 /// entry's own `name length` field sizes.
-fn entry<'a>(table: &'a [u8], offset: u32, fixed_size: usize, what: &str) -> Result<&'a [u8], Error> {
+fn entry<'a>(
+    table: &'a [u8],
+    offset: u32,
+    fixed_size: usize,
+    what: &str,
+) -> Result<&'a [u8], Error> {
     let start = offset as usize;
     let fixed_end = start.checked_add(fixed_size).ok_or(Error::Overflow)?;
     if fixed_end > table.len() {
@@ -314,11 +332,20 @@ mod tests {
 
     #[test]
     fn reads_root_files() {
-        let image = build(&[("control.nacp", b"NACP"), ("icon_AmericanEnglish.dat", b"JPEG")], None);
+        let image = build(
+            &[
+                ("control.nacp", b"NACP"),
+                ("icon_AmericanEnglish.dat", b"JPEG"),
+            ],
+            None,
+        );
         let romfs = RomFs::parse(&image).unwrap();
         assert_eq!(romfs.files().len(), 2);
         assert_eq!(romfs.read_path("/control.nacp").unwrap(), b"NACP");
-        assert_eq!(romfs.read_path("/icon_AmericanEnglish.dat").unwrap(), b"JPEG");
+        assert_eq!(
+            romfs.read_path("/icon_AmericanEnglish.dat").unwrap(),
+            b"JPEG"
+        );
     }
 
     #[test]
@@ -348,7 +375,11 @@ mod tests {
 
         let mut dir_table: Vec<u8> = Vec::new();
         for level in 0..=depth {
-            let first_child = if level < depth { level_offset(level + 1) } else { INVALID_OFFSET };
+            let first_child = if level < depth {
+                level_offset(level + 1)
+            } else {
+                INVALID_OFFSET
+            };
             let first_file = if level == depth { 0 } else { INVALID_OFFSET };
             dir_table.extend_from_slice(&0u32.to_le_bytes()); // parent
             dir_table.extend_from_slice(&INVALID_OFFSET.to_le_bytes()); // sibling
@@ -415,7 +446,10 @@ mod tests {
     #[test]
     fn rejects_a_truncated_image() {
         let image = build(&[("a.bin", b"A")], None);
-        assert!(matches!(RomFs::parse(&image[..0x20]), Err(Error::Truncated { .. })));
+        assert!(matches!(
+            RomFs::parse(&image[..0x20]),
+            Err(Error::Truncated { .. })
+        ));
     }
 
     #[test]

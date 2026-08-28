@@ -113,8 +113,8 @@ pub fn setup_env_block(mem: &mut Memory) -> u32 {
     let _ = mem.write_u32(a + 28, 0);
     let _ = mem.write_u64(a + 32, 0xFFFF_FFFF);
     let _ = mem.write_u64(a + 40, 0x4154_4D4F_5350_4852); // "ATMOSPHR"
-    // Argv (Key 5): Value[1] points at the command line, which libnx splits
-    // into argv. argv[0] is how `romfsMountSelf` finds the running NRO.
+                                                          // Argv (Key 5): Value[1] points at the command line, which libnx splits
+                                                          // into argv. argv[0] is how `romfsMountSelf` finds the running NRO.
     const ARGV_STRING_OFFSET: u32 = 0x100;
     let _ = mem.write_u32(a + 48, ENTRY_ARGV);
     let _ = mem.write_u32(a + 52, 0);
@@ -201,7 +201,10 @@ impl NroHeader {
             if off as usize + size as usize > nro_size as usize {
                 return Err(Error::Nro(format!(
                     "{} segment [{:#x}, {:#x}) out of bounds (nro_size {:#x})",
-                    name, off, off + size, nro_size
+                    name,
+                    off,
+                    off + size,
+                    nro_size
                 )));
             }
         }
@@ -298,8 +301,8 @@ pub fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
             break;
         }
         match tag {
-            0x06 => symtab = val, // DT_SYMTAB
-            0x05 => strtab = val, // DT_STRTAB
+            0x06 => symtab = val,   // DT_SYMTAB
+            0x05 => strtab = val,   // DT_STRTAB
             0x04 => hash_off = val, // DT_HASH
             _ => {}
         }
@@ -358,7 +361,12 @@ pub fn symbol_value(data: &[u8], name: &str) -> Option<u64> {
 /// in the dynamic table; the main executable may define a strong copy that
 /// `_sbrk_r` actually reads. We therefore decode `_sbrk_r` to find the live
 /// mode pointer and patch that.
-fn patch_libtransistor_runconf(mem: &mut Memory, data: &[u8], base: u32, text_end: u32) -> Result<()> {
+fn patch_libtransistor_runconf(
+    mem: &mut Memory,
+    data: &[u8],
+    base: u32,
+    text_end: u32,
+) -> Result<()> {
     if let Some(off) = symbol_value(data, "_trn_runconf_heap_mode") {
         let addr = base.wrapping_add(off as u32);
         let _ = mem.write_u32(addr, 1);
@@ -653,9 +661,9 @@ fn apply_nro_relocations(mem: &mut Memory, data: &[u8], image_end: u32) -> Resul
             break;
         }
         match tag {
-            0x24 => relr_off = val as u32,   // DT_RELR
-            0x23 => relr_count = val,        // DT_RELRCOUNT
-            0x25 => relr_size = val as u32,  // DT_RELRSZ
+            0x24 => relr_off = val as u32,  // DT_RELR
+            0x23 => relr_count = val,       // DT_RELRCOUNT
+            0x25 => relr_size = val as u32, // DT_RELRSZ
             _ => {}
         }
     }
@@ -800,13 +808,11 @@ mod tests {
         assert_eq!(loaded.entry, NRO_BASE);
         assert_eq!(mem.read_u32(NRO_BASE).unwrap(), 0x01);
         assert_eq!(mem.read_u32(NRO_BASE + 4).unwrap(), 0x02);
-        assert_eq!(
-            mem.read_u32(loaded.data.mem_addr).unwrap(),
-            0xEFBE_ADDE
-        );
+        assert_eq!(mem.read_u32(loaded.data.mem_addr).unwrap(), 0xEFBE_ADDE);
         // bss zero-filled
         assert_eq!(
-            mem.read_u8(loaded.data.mem_addr + loaded.data.file_size).unwrap(),
+            mem.read_u8(loaded.data.mem_addr + loaded.data.file_size)
+                .unwrap(),
             0
         );
         assert!(loaded.is_64bit);
@@ -840,17 +846,26 @@ mod tests {
         let mut relr = Vec::new();
         relr.extend_from_slice(&0x1000u64.to_le_bytes());
         relr.extend_from_slice(&0b101u64.to_le_bytes()); // bitmap: bit0=1, bit2 → +8
-        relr.extend_from_slice(&0u64.to_le_bytes());     // address 0 → backwards → stop
+        relr.extend_from_slice(&0u64.to_le_bytes()); // address 0 → backwards → stop
         apply_relr(&mut mem, NRO_BASE, NRO_BASE + 0x2000, &relr).unwrap();
-        assert_eq!(mem.read_u64(NRO_BASE + 0x1000).unwrap(), 0x1234 + NRO_BASE as u64);
-        assert_eq!(mem.read_u64(NRO_BASE + 0x1008).unwrap(), 0x5678 + NRO_BASE as u64);
+        assert_eq!(
+            mem.read_u64(NRO_BASE + 0x1000).unwrap(),
+            0x1234 + NRO_BASE as u64
+        );
+        assert_eq!(
+            mem.read_u64(NRO_BASE + 0x1008).unwrap(),
+            0x5678 + NRO_BASE as u64
+        );
     }
 
     #[test]
     fn rejects_bad_magic() {
         let mut nro = build_nro(&[0u8; 4], &[]);
         nro[0] = b'X';
-        assert!(matches!(NroHeader::parse(&nro), Err(Error::BadMagic { .. })));
+        assert!(matches!(
+            NroHeader::parse(&nro),
+            Err(Error::BadMagic { .. })
+        ));
     }
 
     #[test]
@@ -865,9 +880,6 @@ mod tests {
     fn rejects_segment_out_of_bounds() {
         let mut nro = build_nro(&[0u8; 4], &[]);
         nro[0x14..0x18].copy_from_slice(&0xFFFFu32.to_le_bytes());
-        assert!(matches!(
-            NroHeader::parse(&nro),
-            Err(Error::Nro(_))
-        ));
+        assert!(matches!(NroHeader::parse(&nro), Err(Error::Nro(_))));
     }
 }

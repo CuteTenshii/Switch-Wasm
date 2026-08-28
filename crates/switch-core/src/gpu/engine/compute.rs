@@ -43,7 +43,11 @@ pub struct EngineCompute {
 
 impl EngineCompute {
     pub fn new() -> EngineCompute {
-        EngineCompute { regs: Registers::new(), last_dispatch: None, dispatches: 0 }
+        EngineCompute {
+            regs: Registers::new(),
+            last_dispatch: None,
+            dispatches: 0,
+        }
     }
 
     /// Base a QMD's `program_offset` is measured from.
@@ -120,7 +124,12 @@ mod tests {
         let mut engine = EngineCompute::new();
         engine.write(SEND_PCAS_A, 0x0012_3456, &mut ctx).unwrap();
         engine.write(SEND_SIGNALING_PCAS_B, 0, &mut ctx).unwrap();
-        assert_eq!(engine.last_dispatch, Some(Dispatch { qmd_addr: 0x1234_5600 }));
+        assert_eq!(
+            engine.last_dispatch,
+            Some(Dispatch {
+                qmd_addr: 0x1234_5600
+            })
+        );
         assert_eq!(engine.dispatches, 1);
         // The QMD is at an address nothing has mapped, so the launch is
         // refused — and counted, rather than taking the pushbuffer with it.

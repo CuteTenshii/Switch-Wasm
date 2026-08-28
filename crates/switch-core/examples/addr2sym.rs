@@ -19,7 +19,9 @@ fn find_mod0(data: &[u8]) -> Option<usize> {
 fn read_cstr(data: &[u8], off: usize) -> String {
     let mut s = Vec::new();
     for i in off..data.len() {
-        if data[i] == 0 { break; }
+        if data[i] == 0 {
+            break;
+        }
         s.push(data[i]);
     }
     String::from_utf8_lossy(&s).into_owned()
@@ -38,7 +40,9 @@ fn main() {
         let tag = read_u64(&data, off);
         let val = read_u64(&data, off + 8);
         off += 16;
-        if tag == 0 { break; }
+        if tag == 0 {
+            break;
+        }
         match tag {
             0x06 => symtab = val,
             0x05 => strtab = val,
@@ -46,25 +50,42 @@ fn main() {
         }
     }
     println!("symtab={:#x} strtab={:#x}", symtab, strtab);
-    if symtab == 0 || strtab == 0 { return; }
+    if symtab == 0 || strtab == 0 {
+        return;
+    }
     const BASE: u32 = 0x0800_0000;
     let symtab = (symtab as u32) as usize;
     let strtab = (strtab as u32).wrapping_sub(BASE) as usize;
     let mut best: Option<(u32, u32, String)> = None;
     for i in 0.. {
         let sym_off = symtab + i * 24;
-        if sym_off + 24 > data.len() { break; }
+        if sym_off + 24 > data.len() {
+            break;
+        }
         let name_off = read_u32(&data, sym_off) as usize;
-        if name_off == 0 { continue; }
+        if name_off == 0 {
+            continue;
+        }
         let name = read_cstr(&data, strtab + name_off);
         let value = read_u32(&data, sym_off + 8);
         let size = read_u32(&data, sym_off + 16);
         if i < 8 {
-            println!("sym {} name={:?} off={:#x} value={:#x} size={:#x}", i, name, name_off, value, size);
+            println!(
+                "sym {} name={:?} off={:#x} value={:#x} size={:#x}",
+                i, name, name_off, value, size
+            );
         }
-        if value == 0 { continue; }
+        if value == 0 {
+            continue;
+        }
         if target >= value && target < value + size {
-            println!("{:#x} is in {}+{:#x} (size {:#x})", target, name, target - value, size);
+            println!(
+                "{:#x} is in {}+{:#x} (size {:#x})",
+                target,
+                name,
+                target - value,
+                size
+            );
             return;
         }
         if value < target {

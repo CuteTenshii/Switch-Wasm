@@ -53,7 +53,9 @@ impl Cpu {
         }
         let object_id = self.ipc_domain_object_id(tls);
         let iface = if self.ipc_is_domain_request(tls) {
-            self.domain_interface(handle, object_id).unwrap_or("ns:am2").to_string()
+            self.domain_interface(handle, object_id)
+                .unwrap_or("ns:am2")
+                .to_string()
         } else {
             match self.service_name(handle) {
                 Some(name) => name.to_string(),
@@ -88,28 +90,31 @@ impl Cpu {
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
-            "ns:am2" | "ns:ec" | "ns:rid" | "ns:rt" | "ns:web" | "ns:ro"
-            | "ns:vm" | "ns:dev" => match cmd_id {
-                // The ids are `libnx`'s (`nsGet*Interface` in `ns.c`), which
-                // are Nintendo's own. Everything from 7989 up used to be
-                // numbered one too low here, so a caller got the *next*
-                // interface along: `nsInitialize` asks for 7996 and was handed
-                // an `ns:account-proxy` to call `ListApplicationRecord` (cmd 0)
-                // on, which is not a command that interface has. Note the gap
-                // at 7990 — it is genuinely not assigned.
-                Some(7988) => self.ns_reply_with_interface(tls, handle, "ns:dynamic-rights"),
-                Some(7989) => self.ns_reply_with_interface(tls, handle, "ns:read-only-control"),
-                Some(7991) => self.ns_reply_with_interface(tls, handle, "ns:read-only-record"),
-                Some(7992) => self.ns_reply_with_interface(tls, handle, "ns:ecommerce"),
-                Some(7993) => self.ns_reply_with_interface(tls, handle, "ns:app-version"),
-                Some(7994) => self.ns_reply_with_interface(tls, handle, "ns:factory-reset"),
-                Some(7995) => self.ns_reply_with_interface(tls, handle, "ns:account-proxy"),
-                Some(7996) => self.ns_reply_with_interface(tls, handle, "ns:app-manager"),
-                Some(7997) => self.ns_reply_with_interface(tls, handle, "ns:download-task"),
-                Some(7998) => self.ns_reply_with_interface(tls, handle, "ns:content-management"),
-                Some(7999) => self.ns_reply_with_interface(tls, handle, "ns:document"),
-                _ => self.unimplemented_command(tls, &iface, cmd_id),
-            },
+            "ns:am2" | "ns:ec" | "ns:rid" | "ns:rt" | "ns:web" | "ns:ro" | "ns:vm" | "ns:dev" => {
+                match cmd_id {
+                    // The ids are `libnx`'s (`nsGet*Interface` in `ns.c`), which
+                    // are Nintendo's own. Everything from 7989 up used to be
+                    // numbered one too low here, so a caller got the *next*
+                    // interface along: `nsInitialize` asks for 7996 and was handed
+                    // an `ns:account-proxy` to call `ListApplicationRecord` (cmd 0)
+                    // on, which is not a command that interface has. Note the gap
+                    // at 7990 — it is genuinely not assigned.
+                    Some(7988) => self.ns_reply_with_interface(tls, handle, "ns:dynamic-rights"),
+                    Some(7989) => self.ns_reply_with_interface(tls, handle, "ns:read-only-control"),
+                    Some(7991) => self.ns_reply_with_interface(tls, handle, "ns:read-only-record"),
+                    Some(7992) => self.ns_reply_with_interface(tls, handle, "ns:ecommerce"),
+                    Some(7993) => self.ns_reply_with_interface(tls, handle, "ns:app-version"),
+                    Some(7994) => self.ns_reply_with_interface(tls, handle, "ns:factory-reset"),
+                    Some(7995) => self.ns_reply_with_interface(tls, handle, "ns:account-proxy"),
+                    Some(7996) => self.ns_reply_with_interface(tls, handle, "ns:app-manager"),
+                    Some(7997) => self.ns_reply_with_interface(tls, handle, "ns:download-task"),
+                    Some(7998) => {
+                        self.ns_reply_with_interface(tls, handle, "ns:content-management")
+                    }
+                    Some(7999) => self.ns_reply_with_interface(tls, handle, "ns:document"),
+                    _ => self.unimplemented_command(tls, &iface, cmd_id),
+                }
+            }
             // `ns:am` is the pre-3.0.0 service, where the application manager
             // is reached directly rather than through a getter.
             "ns:am" | "ns:app-manager" => self.ns_application_manager_request(tls, &iface, cmd_id),
@@ -128,9 +133,7 @@ impl Cpu {
                 Some(47) => {
                     self.write_ipc_response(tls, 0, &[], &SD_TOTAL_SPACE.to_le_bytes(), &[])
                 }
-                Some(48) => {
-                    self.write_ipc_response(tls, 0, &[], &SD_FREE_SPACE.to_le_bytes(), &[])
-                }
+                Some(48) => self.write_ipc_response(tls, 0, &[], &SD_FREE_SPACE.to_le_bytes(), &[]),
                 // CountApplicationContentMeta(u64 application_id) -> u32:
                 // nothing is installed, so nothing has content meta.
                 Some(600) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
@@ -300,16 +303,12 @@ impl Cpu {
         match cmd_id {
             // GetAlbumFileCount(AlbumStorage) -> u64, and GetAlbumFileCountEx0,
             // which takes the same storage plus a flags byte. No files.
-            Some(0) | Some(100) => {
-                self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[])
-            }
+            Some(0) | Some(100) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             // GetAlbumFileList / …Ex0 -> u64 entries written, with the
             // `AlbumEntry` array itself going into a map-alias out buffer.
             // None are written, and the count says so — so the buffer is left
             // exactly as the caller left it and nothing walks it.
-            Some(1) | Some(101) => {
-                self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[])
-            }
+            Some(1) | Some(101) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             // DeleteAlbumFile(AlbumFileId). There is no file any list here
             // could have named, so nothing can reach this with a real id.
             Some(3) => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -525,7 +524,11 @@ mod tests {
         let mut cpu = request(false, 43, &[]);
         cpu.register_service_handle(9, "ns:content-management");
         cpu.ns_request(TLS, 9, Some(43)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "the card reads as missing");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "the card reads as missing"
+        );
 
         // And the two space queries have to be answerable in either order:
         // free must be no larger than total, or the arithmetic between them
@@ -596,7 +599,11 @@ mod tests {
         cpu.ns_request(TLS, 9, Some(7991)).unwrap();
         let records = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
 
-        write_request(&mut cpu, 0, &crate::cpu::ipc::DEFAULT_PROGRAM_ID.to_le_bytes());
+        write_request(
+            &mut cpu,
+            0,
+            &crate::cpu::ipc::DEFAULT_PROGRAM_ID.to_le_bytes(),
+        );
         cpu.ns_request(TLS, records, Some(0)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "has record");
@@ -664,7 +671,10 @@ mod tests {
             cpu.set_program_id(PROGRAM_ID);
             for id in content {
                 let src = crate::source::MemSource(vec![0u8; 0x20]);
-                assert_eq!(cpu.add_add_on_content(id, Box::new(src)), Some((id - PROGRAM_ID - 0x1000) as u32));
+                assert_eq!(
+                    cpu.add_add_on_content(id, Box::new(src)),
+                    Some((id - PROGRAM_ID - 0x1000) as u32)
+                );
             }
         };
 
@@ -731,7 +741,10 @@ mod tests {
         let mut cpu = request(false, 8, &[]);
         aoc(&mut cpu, 8);
         let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
-        assert_ne!(event, 0, "GetAddOnContentListChangedEvent handed back no handle");
+        assert_ne!(
+            event, 0,
+            "GetAddOnContentListChangedEvent handed back no handle"
+        );
         assert_eq!(cpu.event_name(event), Some("aoc:list-changed"));
         assert_eq!(cpu.event_signaled(event), Some(false));
 

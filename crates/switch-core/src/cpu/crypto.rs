@@ -281,7 +281,11 @@ mod tests {
                     let t0 = (n >> 32) | (m << 96);
                     let mut out: u128 = 0;
                     for e in 0..4u32 {
-                        let src = if e < 2 { elem32(m, e + 2) } else { elem32(out, e - 2) };
+                        let src = if e < 2 {
+                            elem32(m, e + 2)
+                        } else {
+                            elem32(out, e - 2)
+                        };
                         let v = sigma1_lower(src)
                             .wrapping_add(elem32(su0, e))
                             .wrapping_add(elem32(t0, e));

@@ -223,7 +223,10 @@ pub(super) enum PairKind {
 impl PairKind {
     /// Whether the pair writes its two registers.
     fn loads(self) -> bool {
-        matches!(self, PairKind::Load32 | PairKind::Load32Sext | PairKind::Load64)
+        matches!(
+            self,
+            PairKind::Load32 | PairKind::Load32Sext | PairKind::Load64
+        )
     }
 
     /// The distance between the two registers' addresses.
@@ -250,7 +253,11 @@ pub(super) enum Op {
     /// same top-byte test `execute` makes to decide which of the two decoders
     /// gets first look, and `form` is which of the scalar forms it is — both
     /// decided once here rather than on every execution.
-    Fp { insn: u32, scalar: bool, form: FpForm },
+    Fp {
+        insn: u32,
+        scalar: bool,
+        form: FpForm,
+    },
     /// A system instruction [`decode_system`] could not place. Straight to
     /// [`super::Cpu::system`], which is where its error comes from.
     System { insn: u32 },
@@ -279,14 +286,37 @@ pub(super) enum Op {
     /// to match, so which direction the operation runs in does not survive to
     /// run time. `rn_sp`/`rd_sp` are the two places register 31 means the
     /// stack pointer rather than the zero register, also decided here.
-    AddSubImm { rd: u8, rn: u8, rhs: u64, carry: u8, set_flags: bool, sf: bool },
+    AddSubImm {
+        rd: u8,
+        rn: u8,
+        rhs: u64,
+        carry: u8,
+        set_flags: bool,
+        sf: bool,
+    },
     /// The shifted-register form, where both `Rd` and `Rn` are always the zero
     /// register. `carry` is 1 for the subtractions, and doubles as the mask
     /// that inverts the operand.
-    AddSubShifted { rd: u8, rn: u8, rm: u8, st: u8, sa: u8, carry: u8, set_flags: bool, sf: bool },
+    AddSubShifted {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        st: u8,
+        sa: u8,
+        carry: u8,
+        set_flags: bool,
+        sf: bool,
+    },
     /// The same with no shift at all — `add x0, x1, x2` — which is most of
     /// them, and skips [`shift_reg`] entirely.
-    AddSubReg { rd: u8, rn: u8, rm: u8, carry: u8, set_flags: bool, sf: bool },
+    AddSubReg {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        carry: u8,
+        set_flags: bool,
+        sf: bool,
+    },
     AddSubExtended {
         rd: u8,
         rn: u8,
@@ -299,31 +329,122 @@ pub(super) enum Op {
     },
 
     /// `AND`/`ORR`/`EOR`/`ANDS` with the bitmask immediate already decoded.
-    LogicalImm { rd: u8, rn: u8, imm: u64, opc: u8, sf: bool },
-    LogicalShifted { rd: u8, rn: u8, rm: u8, st: u8, sa: u8, opc: u8, invert: bool, sf: bool },
+    LogicalImm {
+        rd: u8,
+        rn: u8,
+        imm: u64,
+        opc: u8,
+        sf: bool,
+    },
+    LogicalShifted {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        st: u8,
+        sa: u8,
+        opc: u8,
+        invert: bool,
+        sf: bool,
+    },
     /// The unshifted form, which covers every `mov xd, xm` and `mvn xd, xm`.
-    LogicalReg { rd: u8, rn: u8, rm: u8, opc: u8, invert: bool, sf: bool },
+    LogicalReg {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        opc: u8,
+        invert: bool,
+        sf: bool,
+    },
 
     /// `SBFM`/`BFM`/`UBFM` and the aliases built on them.
-    Bitfield { rd: u8, rn: u8, opc: u8, immr: u8, imms: u8, sf: bool },
-    Extr { rd: u8, rn: u8, rm: u8, imm: u8, sf: bool },
+    Bitfield {
+        rd: u8,
+        rn: u8,
+        opc: u8,
+        immr: u8,
+        imms: u8,
+        sf: bool,
+    },
+    Extr {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        imm: u8,
+        sf: bool,
+    },
 
     /// `CSEL`/`CSINC`/`CSINV`/`CSNEG`.
-    CondSel { rd: u8, rn: u8, rm: u8, cond: u8, else_inv: bool, else_inc: bool, sf: bool },
+    CondSel {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        cond: u8,
+        else_inv: bool,
+        else_inc: bool,
+        sf: bool,
+    },
     /// `CCMP`/`CCMN`, register and immediate forms.
-    CondCmp { rn: u8, rm: u8, imm: u8, cond: u8, nzcv: u8, sub: bool, is_imm: bool, sf: bool },
+    CondCmp {
+        rn: u8,
+        rm: u8,
+        imm: u8,
+        cond: u8,
+        nzcv: u8,
+        sub: bool,
+        is_imm: bool,
+        sf: bool,
+    },
 
     /// `MADD`/`MSUB`.
-    Madd { rd: u8, rn: u8, rm: u8, ra: u8, sub: bool, sf: bool },
+    Madd {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        ra: u8,
+        sub: bool,
+        sf: bool,
+    },
     /// `SMADDL`/`SMSUBL`/`UMADDL`/`UMSUBL`: the 32x32 widening multiplies.
-    MaddLong { rd: u8, rn: u8, rm: u8, ra: u8, sub: bool, signed: bool },
+    MaddLong {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        ra: u8,
+        sub: bool,
+        signed: bool,
+    },
     /// `SMULH`/`UMULH`.
-    Mulh { rd: u8, rn: u8, rm: u8, signed: bool },
+    Mulh {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        signed: bool,
+    },
 
-    LoadStoreImm { rt: u8, rn: u8, acc: Acc, wb: Wb, offset: i64 },
-    LoadStoreReg { rt: u8, rn: u8, rm: u8, ext: Ext, shift: u8, acc: Acc },
+    LoadStoreImm {
+        rt: u8,
+        rn: u8,
+        acc: Acc,
+        wb: Wb,
+        offset: i64,
+    },
+    LoadStoreReg {
+        rt: u8,
+        rn: u8,
+        rm: u8,
+        ext: Ext,
+        shift: u8,
+        acc: Acc,
+    },
     /// `LDP`/`STP`/`LDPSW`.
-    Pair { rt: u8, rt2: u8, rn: u8, offset: i64, kind: PairKind, wb: Wb },
+    Pair {
+        rt: u8,
+        rt2: u8,
+        rn: u8,
+        offset: i64,
+        kind: PairKind,
+        wb: Wb,
+    },
     /// `LDR <t>, label`, with the literal's address already resolved.
     LoadLiteral { rt: u8, addr: u32, acc: Acc },
 }
@@ -366,18 +487,42 @@ pub(super) enum Exit {
     /// `B.cond`.
     Cond { cond: u8, target: u32 },
     /// `CBZ`/`CBNZ`.
-    Cbz { rt: u8, sf: bool, nz: bool, target: u32 },
+    Cbz {
+        rt: u8,
+        sf: bool,
+        nz: bool,
+        target: u32,
+    },
     /// `TBZ`/`TBNZ`.
-    Tbz { rt: u8, bit: u8, nz: bool, target: u32 },
+    Tbz {
+        rt: u8,
+        bit: u8,
+        nz: bool,
+        target: u32,
+    },
     /// A `CMP`/`CMN` against a constant, fused with the `B.cond` that reads
     /// its flags — the commonest pair in compiled code, and one that only
     /// became fusable when blocks started running through conditional
     /// branches. `rhs` and `carry` arrive as they do for any other
     /// subtraction; the destination was the zero register, so nothing but
     /// NZCV is written.
-    CmpImm { rn: u8, rhs: u64, carry: u8, sf: bool, cond: u8, target: u32 },
+    CmpImm {
+        rn: u8,
+        rhs: u64,
+        carry: u8,
+        sf: bool,
+        cond: u8,
+        target: u32,
+    },
     /// The same against a register.
-    CmpReg { rn: u8, rm: u8, carry: u8, sf: bool, cond: u8, target: u32 },
+    CmpReg {
+        rn: u8,
+        rm: u8,
+        carry: u8,
+        sf: bool,
+        cond: u8,
+        target: u32,
+    },
 }
 
 impl Exit {
@@ -559,14 +704,26 @@ fn translate(mem: &Memory, start: u32) -> Block {
             Ok(insn) => insn,
             Err(_) => {
                 fuse_compares(&mut ops, &mut exits);
-                return Block { start, ops, words, exits, term: Some(Term::Fetch) };
+                return Block {
+                    start,
+                    ops,
+                    words,
+                    exits,
+                    term: Some(Term::Fetch),
+                };
             }
         };
         match decode(insn, pc) {
             Decoded::Term(term) => {
                 words.push(insn);
                 fuse_compares(&mut ops, &mut exits);
-                return Block { start, ops, words, exits, term: Some(term) };
+                return Block {
+                    start,
+                    ops,
+                    words,
+                    exits,
+                    term: Some(term),
+                };
             }
             // A conditional branch does not end the block: its not-taken path
             // is the next instruction, so translation carries on there and the
@@ -585,7 +742,13 @@ fn translate(mem: &Memory, start: u32) -> Block {
         }
     }
     fuse_compares(&mut ops, &mut exits);
-    Block { start, ops, words, exits, term: None }
+    Block {
+        start,
+        ops,
+        words,
+        exits,
+        term: None,
+    }
 }
 
 /// Fold every `CMP`/`CMN` that feeds the conditional branch immediately after
@@ -598,18 +761,44 @@ fn translate(mem: &Memory, start: u32) -> Block {
 /// rewrite cannot lose a result.
 fn fuse_compares(ops: &mut [Op], exits: &mut [(u32, Exit)]) {
     for (at, exit) in exits.iter_mut() {
-        let Exit::Cond { cond, target } = *exit else { continue };
+        let Exit::Cond { cond, target } = *exit else {
+            continue;
+        };
         if *at == 0 {
             continue;
         }
         let prev = (*at - 1) as usize;
         let fused = match ops[prev] {
-            Op::AddSubImm { rd, rn, rhs, carry, set_flags: true, sf } if rd == ZR_DISCARD as u8 => {
-                Exit::CmpImm { rn, rhs, carry, sf, cond, target }
-            }
-            Op::AddSubReg { rd, rn, rm, carry, set_flags: true, sf } if rd == ZR_DISCARD as u8 => {
-                Exit::CmpReg { rn, rm, carry, sf, cond, target }
-            }
+            Op::AddSubImm {
+                rd,
+                rn,
+                rhs,
+                carry,
+                set_flags: true,
+                sf,
+            } if rd == ZR_DISCARD as u8 => Exit::CmpImm {
+                rn,
+                rhs,
+                carry,
+                sf,
+                cond,
+                target,
+            },
+            Op::AddSubReg {
+                rd,
+                rn,
+                rm,
+                carry,
+                set_flags: true,
+                sf,
+            } if rd == ZR_DISCARD as u8 => Exit::CmpReg {
+                rn,
+                rm,
+                carry,
+                sf,
+                cond,
+                target,
+            },
             _ => continue,
         };
         // The compare's slot becomes filler and the exit moves onto it, so the
@@ -691,7 +880,10 @@ fn decode_branch_or_system(insn: u32, pc: u32) -> Decoded {
         // SVC, and the other exception-generating forms the interpreter faults on.
         0xD4 => {
             if ((insn >> 21) & 0b111) == 0 && (insn & 0x1F) == 0b00001 {
-                Decoded::Term(Term::Svc { imm: ((insn >> 5) & 0xFFFF) as u16, next })
+                Decoded::Term(Term::Svc {
+                    imm: ((insn >> 5) & 0xFFFF) as u16,
+                    next,
+                })
             } else {
                 Decoded::Term(Term::Interpret { insn, next })
             }
@@ -752,15 +944,18 @@ fn decode_system(insn: u32) -> Op {
     let rt = (insn & 0x1F) as u8;
 
     if l == 1 {
-        return Op::Mrs { rd: zr_write(insn), reg: decode_sysreg(insn) };
+        return Op::Mrs {
+            rd: zr_write(insn),
+            reg: decode_sysreg(insn),
+        };
     }
     if op0 == 0 {
         // MSR (immediate). Only the PSTATE write has an effect; DAIF, SPSel
         // and the rest retire with none.
         return match (op1, crn, crm, op2) {
-            (0b010 | 0b011, 0b0100, 0b0010, 0b000) => {
-                Op::MsrNzcvImm { imm: ((insn >> 8) & 0xF) as u8 }
-            }
+            (0b010 | 0b011, 0b0100, 0b0010, 0b000) => Op::MsrNzcvImm {
+                imm: ((insn >> 8) & 0xF) as u8,
+            },
             _ => Op::Nop,
         };
     }
@@ -773,7 +968,10 @@ fn decode_system(insn: u32) -> Op {
         return Op::Nop;
     }
     if op0 == 2 || op0 == 3 {
-        return Op::Msr { rt, reg: decode_sysreg(insn) };
+        return Op::Msr {
+            rt,
+            reg: decode_sysreg(insn),
+        };
     }
     Op::System { insn }
 }
@@ -784,21 +982,33 @@ fn decode_system(insn: u32) -> Op {
 #[inline]
 fn zr_write(n: u32) -> u8 {
     let n = (n & 0x1F) as u8;
-    if n == 31 { ZR_DISCARD as u8 } else { n }
+    if n == 31 {
+        ZR_DISCARD as u8
+    } else {
+        n
+    }
 }
 
 /// The slot a five-bit field names when 31 means `SP`, read or written.
 #[inline]
 fn sp_form(n: u32) -> u8 {
     let n = (n & 0x1F) as u8;
-    if n == 31 { SP_SLOT as u8 } else { n }
+    if n == 31 {
+        SP_SLOT as u8
+    } else {
+        n
+    }
 }
 
 /// The slot a load or store's `Rt` field names, which depends on whether the
 /// access reads it or writes it.
 #[inline]
 fn rt_slot(rt: u32, acc: Acc) -> u8 {
-    if acc.writes_rt() { zr_write(rt) } else { (rt & 0x1F) as u8 }
+    if acc.writes_rt() {
+        zr_write(rt)
+    } else {
+        (rt & 0x1F) as u8
+    }
 }
 
 /// The operand an addition needs to compute a subtraction. `carry` is 1
@@ -841,13 +1051,21 @@ fn decode_data_proc_imm(insn: u32, pc: u32) -> Op {
             }
             let op = (insn >> 29) & 0b11;
             let imm12 = u64::from((insn >> 10) & 0xFFF);
-            let imm = if ((insn >> 22) & 1) == 1 { imm12 << 12 } else { imm12 };
+            let imm = if ((insn >> 22) & 1) == 1 {
+                imm12 << 12
+            } else {
+                imm12
+            };
             let set_flags = (op & 1) == 1;
             let sub = (op >> 1) == 1;
             Op::AddSubImm {
                 // Both operands are the SP form here, and the destination is
                 // only SP when the instruction does not set flags.
-                rd: if set_flags { zr_write(insn) } else { sp_form(insn) },
+                rd: if set_flags {
+                    zr_write(insn)
+                } else {
+                    sp_form(insn)
+                },
                 rn: sp_form(insn >> 5),
                 // Subtraction is addition of the inverted operand with a carry
                 // in, and both are known now.
@@ -862,14 +1080,28 @@ fn decode_data_proc_imm(insn: u32, pc: u32) -> Op {
                 // MOVN / MOVZ / MOVK
                 let rd = zr_write(insn);
                 let imm16 = u64::from((insn >> 5) & 0xFFFF);
-                let hw = if sf { (insn >> 21) & 0b11 } else { (insn >> 21) & 1 };
+                let hw = if sf {
+                    (insn >> 21) & 0b11
+                } else {
+                    (insn >> 21) & 1
+                };
                 let shift = hw * 16;
                 match (insn >> 29) & 0b11 {
-                    0b00 => Op::MovConst { rd, val: !(imm16 << shift) & Cpu::mask(sf) },
-                    0b10 => Op::MovConst { rd, val: (imm16 << shift) & Cpu::mask(sf) },
+                    0b00 => Op::MovConst {
+                        rd,
+                        val: !(imm16 << shift) & Cpu::mask(sf),
+                    },
+                    0b10 => Op::MovConst {
+                        rd,
+                        val: (imm16 << shift) & Cpu::mask(sf),
+                    },
                     // A 32-bit MOVK never selects a field above bit 31, so
                     // the operation-size mask cannot narrow it.
-                    0b11 => Op::MovK { rd, shift: shift as u8, val: imm16 as u16 },
+                    0b11 => Op::MovK {
+                        rd,
+                        shift: shift as u8,
+                        val: imm16 as u16,
+                    },
                     _ => Op::Interpret { insn },
                 }
             } else {
@@ -882,7 +1114,11 @@ fn decode_data_proc_imm(insn: u32, pc: u32) -> Op {
                         Op::LogicalImm {
                             // `ANDS` is the only one of the four whose Rd is
                             // the zero register rather than SP.
-                            rd: if opc == 0b11 { zr_write(insn) } else { sp_form(insn) },
+                            rd: if opc == 0b11 {
+                                zr_write(insn)
+                            } else {
+                                sp_form(insn)
+                            },
                             rn: ((insn >> 5) & 0x1F) as u8,
                             imm,
                             opc,
@@ -926,15 +1162,19 @@ fn decode_data_proc_imm(insn: u32, pc: u32) -> Op {
                     }
                     (insn >> 10) & 0x3F
                 } else {
-                    if ((insn >> 22) & 1) == 1
-                        || ((insn >> 21) & 1) == 1
-                        || ((insn >> 15) & 1) == 1
+                    if ((insn >> 22) & 1) == 1 || ((insn >> 21) & 1) == 1 || ((insn >> 15) & 1) == 1
                     {
                         return Op::Interpret { insn };
                     }
                     (insn >> 10) & 0x1F
                 };
-                Op::Extr { rd, rn, rm: ((insn >> 16) & 0x1F) as u8, imm: imm as u8, sf }
+                Op::Extr {
+                    rd,
+                    rn,
+                    rm: ((insn >> 16) & 0x1F) as u8,
+                    imm: imm as u8,
+                    sf,
+                }
             }
         }
         _ => Op::Interpret { insn },
@@ -957,9 +1197,25 @@ fn decode_data_proc_reg(insn: u32) -> Op {
             let invert = ((insn >> 21) & 1) == 1;
             if sa == 0 {
                 // `mov xd, xm` and `mvn xd, xm` are both this.
-                Op::LogicalReg { rd, rn, rm, opc, invert, sf }
+                Op::LogicalReg {
+                    rd,
+                    rn,
+                    rm,
+                    opc,
+                    invert,
+                    sf,
+                }
             } else {
-                Op::LogicalShifted { rd, rn, rm, st, sa, opc, invert, sf }
+                Op::LogicalShifted {
+                    rd,
+                    rn,
+                    rm,
+                    st,
+                    sa,
+                    opc,
+                    invert,
+                    sf,
+                }
             }
         }
         // ADD/SUB, shifted or extended register.
@@ -986,9 +1242,25 @@ fn decode_data_proc_reg(insn: u32) -> Op {
                 if sa == 0 {
                     // Every shift kind is the identity at zero, and this is
                     // the common form.
-                    Op::AddSubReg { rd, rn, rm, carry, set_flags, sf }
+                    Op::AddSubReg {
+                        rd,
+                        rn,
+                        rm,
+                        carry,
+                        set_flags,
+                        sf,
+                    }
                 } else {
-                    Op::AddSubShifted { rd, rn, rm, st, sa, carry, set_flags, sf }
+                    Op::AddSubShifted {
+                        rd,
+                        rn,
+                        rm,
+                        st,
+                        sa,
+                        carry,
+                        set_flags,
+                        sf,
+                    }
                 }
             }
         }
@@ -1025,11 +1297,42 @@ fn decode_data_proc_reg(insn: u32) -> Op {
             // Ra is read, Rd written; `rd` above already resolved.
 
             match (insn >> 21) & 0xFF {
-                0b11011000 => Op::Madd { rd, rn, rm, ra, sub, sf },
-                0b11011001 => Op::MaddLong { rd, rn, rm, ra, sub, signed: true },
-                0b11011101 => Op::MaddLong { rd, rn, rm, ra, sub, signed: false },
-                0b11011010 => Op::Mulh { rd, rn, rm, signed: true },
-                0b11011110 => Op::Mulh { rd, rn, rm, signed: false },
+                0b11011000 => Op::Madd {
+                    rd,
+                    rn,
+                    rm,
+                    ra,
+                    sub,
+                    sf,
+                },
+                0b11011001 => Op::MaddLong {
+                    rd,
+                    rn,
+                    rm,
+                    ra,
+                    sub,
+                    signed: true,
+                },
+                0b11011101 => Op::MaddLong {
+                    rd,
+                    rn,
+                    rm,
+                    ra,
+                    sub,
+                    signed: false,
+                },
+                0b11011010 => Op::Mulh {
+                    rd,
+                    rn,
+                    rm,
+                    signed: true,
+                },
+                0b11011110 => Op::Mulh {
+                    rd,
+                    rn,
+                    rm,
+                    signed: false,
+                },
                 _ => Op::Interpret { insn },
             }
         }
@@ -1091,7 +1394,14 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
         };
         // `S` scales by log2 of the access size, not by the byte count.
         let shift = if ((insn >> 12) & 1) == 1 { sz } else { 0 };
-        return Op::LoadStoreReg { rt, rn, rm: ((insn >> 16) & 0x1F) as u8, ext, shift, acc };
+        return Op::LoadStoreReg {
+            rt,
+            rn,
+            rm: ((insn >> 16) & 0x1F) as u8,
+            ext,
+            shift,
+            acc,
+        };
     }
 
     // Immediate offset forms.
@@ -1116,7 +1426,13 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
                 // Unscaled (`LDUR`/`STUR`) and the unprivileged forms.
                 _ => Wb::None,
             };
-            return Op::LoadStoreImm { rt, rn, acc, wb, offset };
+            return Op::LoadStoreImm {
+                rt,
+                rn,
+                acc,
+                wb,
+                offset,
+            };
         }
     }
 
@@ -1145,7 +1461,13 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
         };
         // The pair forms have their own Rt/Rt2 slots: `kind`, not `acc`,
         // says whether they are read or written.
-        let pair_slot = |n: u32| if kind.loads() { zr_write(n) } else { (n & 0x1F) as u8 };
+        let pair_slot = |n: u32| {
+            if kind.loads() {
+                zr_write(n)
+            } else {
+                (n & 0x1F) as u8
+            }
+        };
         return Op::Pair {
             rt: pair_slot(insn),
             rt2: pair_slot(insn >> 10),
@@ -1221,7 +1543,10 @@ impl Cpu {
             self.slice_used += ran;
             steps += ran;
         }
-        Ok(RunReport { steps, halted: self.halted })
+        Ok(RunReport {
+            steps,
+            halted: self.halted,
+        })
     }
 
     /// The block entered at `pc`, translating it if this is the first visit.
@@ -1342,10 +1667,12 @@ impl Cpu {
     #[inline(always)]
     fn apply_compare(&mut self, exit: Exit) {
         let (a, b, carry, sf) = match exit {
-            Exit::CmpImm { rn, rhs, carry, sf, .. } => {
-                (self.reg_at(rn) & Cpu::mask(sf), rhs, carry, sf)
-            }
-            Exit::CmpReg { rn, rm, carry, sf, .. } => (
+            Exit::CmpImm {
+                rn, rhs, carry, sf, ..
+            } => (self.reg_at(rn) & Cpu::mask(sf), rhs, carry, sf),
+            Exit::CmpReg {
+                rn, rm, carry, sf, ..
+            } => (
                 self.reg_at(rn) & Cpu::mask(sf),
                 invert_if(self.reg_at(rm) & Cpu::mask(sf), carry),
                 carry,
@@ -1366,13 +1693,27 @@ impl Cpu {
     fn take_exit(&mut self, exit: Exit) -> bool {
         let (taken, target) = match exit {
             Exit::Cond { cond, target } => (self.condition_holds(cond), target),
-            Exit::CmpImm { rn, rhs, carry, sf, cond, target } => {
+            Exit::CmpImm {
+                rn,
+                rhs,
+                carry,
+                sf,
+                cond,
+                target,
+            } => {
                 let a = self.reg_at(rn) & Cpu::mask(sf);
                 let (result, c, v) = Cpu::add_carry_overflow(a, rhs, u64::from(carry), sf);
                 self.set_nzcv_from_alu(result, sf, c, v);
                 (self.condition_holds(cond), target)
             }
-            Exit::CmpReg { rn, rm, carry, sf, cond, target } => {
+            Exit::CmpReg {
+                rn,
+                rm,
+                carry,
+                sf,
+                cond,
+                target,
+            } => {
                 let a = self.reg_at(rn) & Cpu::mask(sf);
                 let b = invert_if(self.reg_at(rm) & Cpu::mask(sf), carry);
                 let (result, c, v) = Cpu::add_carry_overflow(a, b, u64::from(carry), sf);
@@ -1384,7 +1725,12 @@ impl Cpu {
                 let is_zero = if sf { val == 0 } else { (val as u32) == 0 };
                 (is_zero == !nz, target)
             }
-            Exit::Tbz { rt, bit, nz, target } => {
+            Exit::Tbz {
+                rt,
+                bit,
+                nz,
+                target,
+            } => {
                 let set = (self.read_zr(rt) >> bit) & 1 == 1;
                 (set == nz, target)
             }
@@ -1464,24 +1810,67 @@ impl Cpu {
                 self.set_reg_at(rd, cur | (u64::from(val) << shift));
             }
 
-            Op::AddSubImm { rd, rn, rhs, carry, set_flags, sf } => {
+            Op::AddSubImm {
+                rd,
+                rn,
+                rhs,
+                carry,
+                set_flags,
+                sf,
+            } => {
                 self.add_sub_pre(rd, rn, rhs, carry, set_flags, sf);
             }
-            Op::AddSubReg { rd, rn, rm, carry, set_flags, sf } => {
+            Op::AddSubReg {
+                rd,
+                rn,
+                rm,
+                carry,
+                set_flags,
+                sf,
+            } => {
                 let v = self.reg_at(rm) & Cpu::mask(sf);
                 self.add_sub_pre(rd, rn, invert_if(v, carry), carry, set_flags, sf);
             }
-            Op::AddSubShifted { rd, rn, rm, st, sa, carry, set_flags, sf } => {
-                let v = shift_reg(self.reg_at(rm) & Cpu::mask(sf), u32::from(st), u32::from(sa), sf);
+            Op::AddSubShifted {
+                rd,
+                rn,
+                rm,
+                st,
+                sa,
+                carry,
+                set_flags,
+                sf,
+            } => {
+                let v = shift_reg(
+                    self.reg_at(rm) & Cpu::mask(sf),
+                    u32::from(st),
+                    u32::from(sa),
+                    sf,
+                );
                 self.add_sub_pre(rd, rn, invert_if(v, carry), carry, set_flags, sf);
             }
-            Op::AddSubExtended { rd, rn, rm, option, shift, carry, set_flags, sf } => {
+            Op::AddSubExtended {
+                rd,
+                rn,
+                rm,
+                option,
+                shift,
+                carry,
+                set_flags,
+                sf,
+            } => {
                 let v = extend_reg(self.reg_at(rm), option, sf) & Cpu::mask(sf);
                 let v = v.wrapping_shl(u32::from(shift)) & Cpu::mask(sf);
                 self.add_sub_pre(rd, rn, invert_if(v, carry), carry, set_flags, sf);
             }
 
-            Op::LogicalImm { rd, rn, imm, opc, sf } => {
+            Op::LogicalImm {
+                rd,
+                rn,
+                imm,
+                opc,
+                sf,
+            } => {
                 // Rd == 31 is SP for AND/ORR/EOR and the zero register only
                 // for ANDS — one of the few places the two differ, and one
                 // the translator has already settled into `rd`.
@@ -1489,9 +1878,23 @@ impl Cpu {
                 let r = self.logical(a, imm, opc, sf);
                 self.set_reg_at(rd, r);
             }
-            Op::LogicalShifted { rd, rn, rm, st, sa, opc, invert, sf } => {
+            Op::LogicalShifted {
+                rd,
+                rn,
+                rm,
+                st,
+                sa,
+                opc,
+                invert,
+                sf,
+            } => {
                 let a = self.reg_at(rn) & Cpu::mask(sf);
-                let b = shift_reg(self.reg_at(rm) & Cpu::mask(sf), u32::from(st), u32::from(sa), sf);
+                let b = shift_reg(
+                    self.reg_at(rm) & Cpu::mask(sf),
+                    u32::from(st),
+                    u32::from(sa),
+                    sf,
+                );
                 // `BIC`/`ORN`/`EON` invert the *shifted* operand, not the
                 // register: `ir.Not(ShiftReg(...))` in dynarmic, and the same
                 // order in the ARM ARM's pseudocode.
@@ -1499,7 +1902,14 @@ impl Cpu {
                 let r = self.logical(a, b, opc, sf);
                 self.set_reg_at(rd, r);
             }
-            Op::LogicalReg { rd, rn, rm, opc, invert, sf } => {
+            Op::LogicalReg {
+                rd,
+                rn,
+                rm,
+                opc,
+                invert,
+                sf,
+            } => {
                 let a = self.reg_at(rn) & Cpu::mask(sf);
                 let b = self.reg_at(rm) & Cpu::mask(sf);
                 let b = if invert { !b & Cpu::mask(sf) } else { b };
@@ -1507,13 +1917,33 @@ impl Cpu {
                 self.set_reg_at(rd, r);
             }
 
-            Op::Bitfield { rd, rn, opc, immr, imms, sf } => {
+            Op::Bitfield {
+                rd,
+                rn,
+                opc,
+                immr,
+                imms,
+                sf,
+            } => {
                 let val = self.reg_at(rn) & Cpu::mask(sf);
                 let cur = self.reg_at(rd) & Cpu::mask(sf);
-                let r = bitfield_apply(u32::from(opc), val, cur, u32::from(immr), u32::from(imms), sf);
+                let r = bitfield_apply(
+                    u32::from(opc),
+                    val,
+                    cur,
+                    u32::from(immr),
+                    u32::from(imms),
+                    sf,
+                );
                 self.set_reg_at(rd, r);
             }
-            Op::Extr { rd, rn, rm, imm, sf } => {
+            Op::Extr {
+                rd,
+                rn,
+                rm,
+                imm,
+                sf,
+            } => {
                 let size = if sf { 64u32 } else { 32 };
                 let a = self.reg_at(rn) & Cpu::mask(sf);
                 let b = self.reg_at(rm) & Cpu::mask(sf);
@@ -1527,7 +1957,15 @@ impl Cpu {
                 self.set_reg_at(rd, r);
             }
 
-            Op::CondSel { rd, rn, rm, cond, else_inv, else_inc, sf } => {
+            Op::CondSel {
+                rd,
+                rn,
+                rm,
+                cond,
+                else_inv,
+                else_inc,
+                sf,
+            } => {
                 let a = self.reg_at(rn) & Cpu::mask(sf);
                 let b = self.reg_at(rm) & Cpu::mask(sf);
                 let take_a = self.condition_holds(cond);
@@ -1541,24 +1979,55 @@ impl Cpu {
                 let r = if take_a { a } else { else_val };
                 self.set_reg_at(rd, r & Cpu::mask(sf));
             }
-            Op::CondCmp { rn, rm, imm, cond, nzcv, sub, is_imm, sf } => {
+            Op::CondCmp {
+                rn,
+                rm,
+                imm,
+                cond,
+                nzcv,
+                sub,
+                is_imm,
+                sf,
+            } => {
                 if self.condition_holds(cond) {
                     let a = self.read_zr(rn) & Cpu::mask(sf);
-                    let b = if is_imm { u64::from(imm) } else { self.read_zr(rm) };
+                    let b = if is_imm {
+                        u64::from(imm)
+                    } else {
+                        self.read_zr(rm)
+                    };
                     self.set_nzcv_from_compare(a, b, sub, u64::from(sub), sf);
                 } else {
                     self.nzcv = u32::from(nzcv) << 28;
                 }
             }
 
-            Op::Madd { rd, rn, rm, ra, sub, sf } => {
+            Op::Madd {
+                rd,
+                rn,
+                rm,
+                ra,
+                sub,
+                sf,
+            } => {
                 let mask = Cpu::mask(sf);
                 let product = (self.reg_at(rn) & mask).wrapping_mul(self.reg_at(rm) & mask);
                 let c = self.reg_at(ra) & mask;
-                let r = if sub { c.wrapping_sub(product) } else { c.wrapping_add(product) };
+                let r = if sub {
+                    c.wrapping_sub(product)
+                } else {
+                    c.wrapping_add(product)
+                };
                 self.set_reg_at(rd, r & mask);
             }
-            Op::MaddLong { rd, rn, rm, ra, sub, signed } => {
+            Op::MaddLong {
+                rd,
+                rn,
+                rm,
+                ra,
+                sub,
+                signed,
+            } => {
                 let a = self.reg_at(rn);
                 let b = self.reg_at(rm);
                 // The multiplicands are the low 32 bits of Rn/Rm, not the
@@ -1571,7 +2040,11 @@ impl Cpu {
                     u64::from(a as u32).wrapping_mul(u64::from(b as u32))
                 };
                 let c = self.reg_at(ra);
-                let r = if sub { c.wrapping_sub(product) } else { c.wrapping_add(product) };
+                let r = if sub {
+                    c.wrapping_sub(product)
+                } else {
+                    c.wrapping_add(product)
+                };
                 self.set_reg_at(rd, r);
             }
             Op::Mulh { rd, rn, rm, signed } => {
@@ -1585,7 +2058,13 @@ impl Cpu {
                 self.set_reg_at(rd, r);
             }
 
-            Op::LoadStoreImm { rt, rn, acc, wb, offset } => {
+            Op::LoadStoreImm {
+                rt,
+                rn,
+                acc,
+                wb,
+                offset,
+            } => {
                 let base = self.reg_at(rn);
                 let (addr, wb_val) = Self::indexed(base, offset, wb);
                 self.access(addr as u32, rt, acc)?;
@@ -1593,7 +2072,14 @@ impl Cpu {
                     self.set_reg_at(rn, v);
                 }
             }
-            Op::LoadStoreReg { rt, rn, rm, ext, shift, acc } => {
+            Op::LoadStoreReg {
+                rt,
+                rn,
+                rm,
+                ext,
+                shift,
+                acc,
+            } => {
                 let index = match ext {
                     Ext::Uxtw => u64::from(self.reg_at(rm) as u32),
                     Ext::Sxtw => sext_u64(self.reg_at(rm), 32),
@@ -1603,7 +2089,14 @@ impl Cpu {
                 let addr = (self.reg_at(rn) as i64).wrapping_add(offset) as u32;
                 self.access(addr, rt, acc)?;
             }
-            Op::Pair { rt, rt2, rn, offset, kind, wb } => {
+            Op::Pair {
+                rt,
+                rt2,
+                rn,
+                offset,
+                kind,
+                wb,
+            } => {
                 let base = self.reg_at(rn);
                 let (addr, wb_val) = Self::indexed(base, offset, wb);
                 let addr = addr as u32;
@@ -1693,15 +2186,7 @@ impl Cpu {
     /// The `ADD`/`SUB` core, with the direction already folded into `rhs` and
     /// `carry` and register 31's two meanings already resolved.
     #[inline(always)]
-    fn add_sub_pre(
-        &mut self,
-        rd: u8,
-        rn: u8,
-        rhs: u64,
-        carry: u8,
-        set_flags: bool,
-        sf: bool,
-    ) {
+    fn add_sub_pre(&mut self, rd: u8, rn: u8, rhs: u64, carry: u8, set_flags: bool, sf: bool) {
         let a = self.reg_at(rn) & Cpu::mask(sf);
         let (result, c, v) = Cpu::add_carry_overflow(a, rhs, u64::from(carry), sf);
         if set_flags {
@@ -1769,7 +2254,11 @@ impl Cpu {
                 // model routes it through the exit trampoline instead of
                 // fetching from NULL.
                 let target = self.read_zr(rn) as u32;
-                self.pc = if target == 0 { SELF_RETURN_TRAMPOLINE } else { target };
+                self.pc = if target == 0 {
+                    SELF_RETURN_TRAMPOLINE
+                } else {
+                    target
+                };
             }
             Term::Svc { imm, next } => {
                 // Retire the SVC before dispatching it: a syscall that
@@ -1787,4 +2276,3 @@ impl Cpu {
         Ok(())
     }
 }
-

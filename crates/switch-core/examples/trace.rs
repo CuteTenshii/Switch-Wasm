@@ -11,7 +11,9 @@ const SAMPLE_EVERY: u64 = 64;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let Some(path) = args.next() else { common::usage("trace <path.nro> [pc...]") };
+    let Some(path) = args.next() else {
+        common::usage("trace <path.nro> [pc...]")
+    };
     let watch: HashSet<u32> = args.map(|a| common::hex(&a)).collect();
 
     let data = common::read(&path);

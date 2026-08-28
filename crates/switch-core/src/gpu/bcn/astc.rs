@@ -59,7 +59,11 @@ fn replicate(value: u32, src_bits: i32, dst_bits: i32) -> u32 {
     let mut out = 0u32;
     let mut shift = dst_bits - src_bits;
     while shift > -src_bits {
-        out |= if shift >= 0 { value << shift } else { value >> -shift };
+        out |= if shift >= 0 {
+            value << shift
+        } else {
+            value >> -shift
+        };
         shift -= src_bits;
     }
     out
@@ -80,7 +84,13 @@ struct Stream {
 
 impl Stream {
     fn new(data: u128, start: i32, length: i32, forward: bool) -> Stream {
-        Stream { data, start, length, forward, position: 0 }
+        Stream {
+            data,
+            start,
+            length,
+            forward,
+            position: 0,
+        }
     }
 
     fn next(&mut self, count: i32) -> u32 {
@@ -95,7 +105,10 @@ impl Stream {
         if self.forward {
             bits(self.data, self.start + low, self.start + high)
         } else {
-            reverse_bits(bits(self.data, self.start - high, self.start - low), from_source)
+            reverse_bits(
+                bits(self.data, self.start - high, self.start - low),
+                from_source,
+            )
         }
     }
 }
@@ -146,19 +159,28 @@ fn max_range_ise(available: i32, values: i32) -> Ise {
         let plain_range = if plain > 0 { (1 << plain) - 1 } else { -1 };
         let widest = trit_range.max(quint_range).max(plain_range);
         if widest == trit_range {
-            let params = Ise { mode: IseMode::Trit, bits: trit };
+            let params = Ise {
+                mode: IseMode::Trit,
+                bits: trit,
+            };
             if ise_required_bits(params, values) <= available {
                 return params;
             }
             trit -= 1;
         } else if widest == quint_range {
-            let params = Ise { mode: IseMode::Quint, bits: quint };
+            let params = Ise {
+                mode: IseMode::Quint,
+                bits: quint,
+            };
             if ise_required_bits(params, values) <= available {
                 return params;
             }
             quint -= 1;
         } else {
-            let params = Ise { mode: IseMode::Plain, bits: plain };
+            let params = Ise {
+                mode: IseMode::Plain,
+                bits: plain,
+            };
             if ise_required_bits(params, values) <= available {
                 return params;
             }
@@ -228,7 +250,11 @@ fn decode_ise(out: &mut [IseValue], count: usize, stream: &mut Stream, params: I
         IseMode::Plain => {
             for slot in out.iter_mut().take(count) {
                 let value = stream.next(params.bits);
-                *slot = IseValue { low: value, trit_or_quint: 0, value };
+                *slot = IseValue {
+                    low: value,
+                    trit_or_quint: 0,
+                    value,
+                };
             }
         }
     }
@@ -250,7 +276,10 @@ fn block_mode(data: u32) -> Option<BlockMode> {
             dual_plane: false,
             grid_width: 0,
             grid_height: 0,
-            weight_ise: Ise { mode: IseMode::Plain, bits: 0 },
+            weight_ise: Ise {
+                mode: IseMode::Plain,
+                bits: 0,
+            },
         });
     }
     let data = data as u128;
@@ -305,21 +334,63 @@ fn block_mode(data: u32) -> Option<BlockMode> {
     let high = !zero_dh && bit(data, 9) != 0;
     let dual_plane = !zero_dh && bit(data, 10) != 0;
     let weight_ise = match (high, range) {
-        (true, 2) => Ise { mode: IseMode::Quint, bits: 1 },
-        (true, 3) => Ise { mode: IseMode::Trit, bits: 2 },
-        (true, 4) => Ise { mode: IseMode::Plain, bits: 4 },
-        (true, 5) => Ise { mode: IseMode::Quint, bits: 2 },
-        (true, 6) => Ise { mode: IseMode::Trit, bits: 3 },
-        (true, 7) => Ise { mode: IseMode::Plain, bits: 5 },
-        (false, 2) => Ise { mode: IseMode::Plain, bits: 1 },
-        (false, 3) => Ise { mode: IseMode::Trit, bits: 0 },
-        (false, 4) => Ise { mode: IseMode::Plain, bits: 2 },
-        (false, 5) => Ise { mode: IseMode::Quint, bits: 0 },
-        (false, 6) => Ise { mode: IseMode::Trit, bits: 1 },
-        (false, 7) => Ise { mode: IseMode::Plain, bits: 3 },
+        (true, 2) => Ise {
+            mode: IseMode::Quint,
+            bits: 1,
+        },
+        (true, 3) => Ise {
+            mode: IseMode::Trit,
+            bits: 2,
+        },
+        (true, 4) => Ise {
+            mode: IseMode::Plain,
+            bits: 4,
+        },
+        (true, 5) => Ise {
+            mode: IseMode::Quint,
+            bits: 2,
+        },
+        (true, 6) => Ise {
+            mode: IseMode::Trit,
+            bits: 3,
+        },
+        (true, 7) => Ise {
+            mode: IseMode::Plain,
+            bits: 5,
+        },
+        (false, 2) => Ise {
+            mode: IseMode::Plain,
+            bits: 1,
+        },
+        (false, 3) => Ise {
+            mode: IseMode::Trit,
+            bits: 0,
+        },
+        (false, 4) => Ise {
+            mode: IseMode::Plain,
+            bits: 2,
+        },
+        (false, 5) => Ise {
+            mode: IseMode::Quint,
+            bits: 0,
+        },
+        (false, 6) => Ise {
+            mode: IseMode::Trit,
+            bits: 1,
+        },
+        (false, 7) => Ise {
+            mode: IseMode::Plain,
+            bits: 3,
+        },
         _ => return None,
     };
-    Some(BlockMode { void_extent: false, dual_plane, grid_width, grid_height, weight_ise })
+    Some(BlockMode {
+        void_extent: false,
+        dual_plane,
+        grid_width,
+        grid_height,
+        weight_ise,
+    })
 }
 
 /// How many values a colour endpoint mode spends.
@@ -344,8 +415,14 @@ fn unquantize_endpoints(out: &mut [u32], values: &[IseValue], count: usize, para
     let c = CA[case as usize];
     for i in 0..count {
         let m = values[i].low;
-        let (a, b, cc, d, e, f) =
-            (m & 1, (m >> 1) & 1, (m >> 2) & 1, (m >> 3) & 1, (m >> 4) & 1, (m >> 5) & 1);
+        let (a, b, cc, d, e, f) = (
+            m & 1,
+            (m >> 1) & 1,
+            (m >> 2) & 1,
+            (m >> 3) & 1,
+            (m >> 4) & 1,
+            (m >> 5) & 1,
+        );
         let big_a = if a == 0 { 0 } else { (1 << 9) - 1 };
         let big_b = match case {
             0 | 1 => 0,
@@ -404,10 +481,18 @@ fn decode_endpoint_pair(mode: u32, v: &[u32]) -> ([u32; 4], [u32; 4]) {
             let (mut v2, mut v3) = (v[2] as i32, v[3] as i32);
             bit_transfer_signed(&mut v1, &mut v0);
             bit_transfer_signed(&mut v3, &mut v2);
-            (clamped([v0, v0, v0, v2]), clamped([v0 + v1, v0 + v1, v0 + v1, v2 + v3]))
+            (
+                clamped([v0, v0, v0, v2]),
+                clamped([v0 + v1, v0 + v1, v0 + v1, v2 + v3]),
+            )
         }
         6 => (
-            [(v[0] * v[3]) >> 8, (v[1] * v[3]) >> 8, (v[2] * v[3]) >> 8, 0xFF],
+            [
+                (v[0] * v[3]) >> 8,
+                (v[1] * v[3]) >> 8,
+                (v[2] * v[3]) >> 8,
+                0xFF,
+            ],
             [v[0], v[1], v[2], 0xFF],
         ),
         8 => {
@@ -428,7 +513,10 @@ fn decode_endpoint_pair(mode: u32, v: &[u32]) -> ([u32; 4], [u32; 4]) {
             bit_transfer_signed(&mut v3, &mut v2);
             bit_transfer_signed(&mut v5, &mut v4);
             if v1 + v3 + v5 >= 0 {
-                (clamped([v0, v2, v4, 0xFF]), clamped([v0 + v1, v2 + v3, v4 + v5, 0xFF]))
+                (
+                    clamped([v0, v2, v4, 0xFF]),
+                    clamped([v0 + v1, v2 + v3, v4 + v5, 0xFF]),
+                )
             } else {
                 (
                     clamped(blue_contract(v0 + v1, v2 + v3, v4 + v5, 0xFF)),
@@ -437,7 +525,12 @@ fn decode_endpoint_pair(mode: u32, v: &[u32]) -> ([u32; 4], [u32; 4]) {
             }
         }
         10 => (
-            [(v[0] * v[3]) >> 8, (v[1] * v[3]) >> 8, (v[2] * v[3]) >> 8, v[4]],
+            [
+                (v[0] * v[3]) >> 8,
+                (v[1] * v[3]) >> 8,
+                (v[2] * v[3]) >> 8,
+                v[4],
+            ],
             [v[0], v[1], v[2], v[5]],
         ),
         12 => {
@@ -445,8 +538,18 @@ fn decode_endpoint_pair(mode: u32, v: &[u32]) -> ([u32; 4], [u32; 4]) {
                 ([v[0], v[2], v[4], v[6]], [v[1], v[3], v[5], v[7]])
             } else {
                 (
-                    clamped(blue_contract(v[1] as i32, v[3] as i32, v[5] as i32, v[7] as i32)),
-                    clamped(blue_contract(v[0] as i32, v[2] as i32, v[4] as i32, v[6] as i32)),
+                    clamped(blue_contract(
+                        v[1] as i32,
+                        v[3] as i32,
+                        v[5] as i32,
+                        v[7] as i32,
+                    )),
+                    clamped(blue_contract(
+                        v[0] as i32,
+                        v[2] as i32,
+                        v[4] as i32,
+                        v[6] as i32,
+                    )),
                 )
             }
         }
@@ -460,7 +563,10 @@ fn decode_endpoint_pair(mode: u32, v: &[u32]) -> ([u32; 4], [u32; 4]) {
             bit_transfer_signed(&mut v5, &mut v4);
             bit_transfer_signed(&mut v7, &mut v6);
             if v1 + v3 + v5 >= 0 {
-                (clamped([v0, v2, v4, v6]), clamped([v0 + v1, v2 + v3, v4 + v5, v6 + v7]))
+                (
+                    clamped([v0, v2, v4, v6]),
+                    clamped([v0 + v1, v2 + v3, v4 + v5, v6 + v7]),
+                )
             } else {
                 (
                     clamped(blue_contract(v0 + v1, v2 + v3, v4 + v5, v6 + v7)),
@@ -538,7 +644,12 @@ fn interpolate_weights(
             let w01 = fx - w11;
             let w00 = 16 - fx - fy + w11;
             let i00 = jy * mode.grid_width + jx;
-            let indices = [i00, i00 + 1, i00 + mode.grid_width, i00 + mode.grid_width + 1];
+            let indices = [
+                i00,
+                i00 + 1,
+                i00 + mode.grid_width,
+                i00 + mode.grid_width + 1,
+            ];
             for plane in 0..planes {
                 // Out-of-grid corners always carry a zero weight, and masking
                 // keeps the read inside the array as the hardware does.
@@ -546,10 +657,12 @@ fn interpolate_weights(
                     .iter()
                     .map(|&i| weights[((i * planes + plane) & 0x3F) as usize])
                     .collect();
-                out[(y * bw + x) as usize][plane as usize] =
-                    (p[0] * w00 as u32 + p[1] * w01 as u32 + p[2] * w10 as u32 + p[3] * w11 as u32
-                        + 8)
-                        >> 4;
+                out[(y * bw + x) as usize][plane as usize] = (p[0] * w00 as u32
+                    + p[1] * w01 as u32
+                    + p[2] * w10 as u32
+                    + p[3] * w11 as u32
+                    + 8)
+                    >> 4;
             }
         }
     }
@@ -575,7 +688,11 @@ fn hash52(value: u32) -> u32 {
 /// coefficients, and the partition is whichever of up to four linear functions
 /// of the texel's position comes out largest.
 fn texel_partition(seed: u32, x: u32, y: u32, partitions: i32, small_block: bool) -> usize {
-    let (x, y) = if small_block { (x << 1, y << 1) } else { (x, y) };
+    let (x, y) = if small_block {
+        (x << 1, y << 1)
+    } else {
+        (x, y)
+    };
     let seed = seed + 1024 * (partitions as u32 - 1);
     let rnum = hash52(seed);
     let mut s = [0u32; 12];
@@ -591,7 +708,11 @@ fn texel_partition(seed: u32, x: u32, y: u32, partitions: i32, small_block: bool
     }
     let sh_a = if seed & 2 != 0 { 4 } else { 5 };
     let sh_b = if partitions == 3 { 6 } else { 5 };
-    let (sh1, sh2) = if seed & 1 != 0 { (sh_a, sh_b) } else { (sh_b, sh_a) };
+    let (sh1, sh2) = if seed & 1 != 0 {
+        (sh_a, sh_b)
+    } else {
+        (sh_b, sh_a)
+    };
     let sh3 = if seed & 0x10 != 0 { sh1 } else { sh2 };
     for (i, slot) in s.iter_mut().enumerate().take(8) {
         *slot >>= if i % 2 == 0 { sh1 } else { sh2 };
@@ -599,15 +720,29 @@ fn texel_partition(seed: u32, x: u32, y: u32, partitions: i32, small_block: bool
     for slot in s.iter_mut().skip(8) {
         *slot >>= sh3;
     }
-    let a = 0x3F & (s[0].wrapping_mul(x).wrapping_add(s[1].wrapping_mul(y)).wrapping_add(rnum >> 14));
-    let b = 0x3F & (s[2].wrapping_mul(x).wrapping_add(s[3].wrapping_mul(y)).wrapping_add(rnum >> 10));
+    let a = 0x3F
+        & (s[0]
+            .wrapping_mul(x)
+            .wrapping_add(s[1].wrapping_mul(y))
+            .wrapping_add(rnum >> 14));
+    let b = 0x3F
+        & (s[2]
+            .wrapping_mul(x)
+            .wrapping_add(s[3].wrapping_mul(y))
+            .wrapping_add(rnum >> 10));
     let c = if partitions >= 3 {
-        0x3F & (s[4].wrapping_mul(x).wrapping_add(s[5].wrapping_mul(y)).wrapping_add(rnum >> 6))
+        0x3F & (s[4]
+            .wrapping_mul(x)
+            .wrapping_add(s[5].wrapping_mul(y))
+            .wrapping_add(rnum >> 6))
     } else {
         0
     };
     let d = if partitions >= 4 {
-        0x3F & (s[6].wrapping_mul(x).wrapping_add(s[7].wrapping_mul(y)).wrapping_add(rnum >> 2))
+        0x3F & (s[6]
+            .wrapping_mul(x)
+            .wrapping_add(s[7].wrapping_mul(y))
+            .wrapping_add(rnum >> 2))
     } else {
         0
     };
@@ -630,7 +765,12 @@ fn fill(out: &mut [[f32; 4]], texels: usize, colour: [f32; 4]) {
 
 /// Decode one ASTC block of the given footprint into `out`, which must hold at
 /// least `block_width * block_height` texels.
-pub fn decode_astc(block: &[u8], block_width: u32, block_height: u32, out: &mut [[f32; 4]]) -> Result<()> {
+pub fn decode_astc(
+    block: &[u8],
+    block_width: u32,
+    block_height: u32,
+    out: &mut [[f32; 4]],
+) -> Result<()> {
     let texels = (block_width * block_height) as usize;
     if block.len() < 16 || out.len() < texels {
         return Err(Error::Gpu("astc: block or destination too small".into()));
@@ -665,7 +805,11 @@ pub fn decode_astc(block: &[u8], block_width: u32, block_height: u32, out: &mut 
                 raw as f32 / 65536.0
             }
         };
-        fill(out, texels, [channel(64), channel(80), channel(96), channel(112)]);
+        fill(
+            out,
+            texels,
+            [channel(64), channel(80), channel(96), channel(112)],
+        );
         return Ok(());
     }
 
@@ -716,25 +860,42 @@ pub fn decode_astc(block: &[u8], block_width: u32, block_height: u32, out: &mut 
             modes[..partitions as usize].fill(shared);
         } else {
             for (part, slot) in modes.iter_mut().enumerate().take(partitions as usize) {
-                let class = selector - if bit(data, 25 + part as i32) != 0 { 0 } else { 1 };
+                let class = selector
+                    - if bit(data, 25 + part as i32) != 0 {
+                        0
+                    } else {
+                        1
+                    };
                 let low0 = partitions + 2 * part as i32;
                 let low1 = low0 + 1;
                 let at = |index: i32| {
-                    bit(data, if index < 4 { 25 + index } else { extra_cem_start + index - 4 })
+                    bit(
+                        data,
+                        if index < 4 {
+                            25 + index
+                        } else {
+                            extra_cem_start + index - 4
+                        },
+                    )
                 };
                 *slot = (class << 2) | (at(low1) << 1) | at(low0);
             }
         }
     }
 
-    let value_count: i32 =
-        modes[..partitions as usize].iter().map(|&m| endpoint_values(m)).sum();
+    let value_count: i32 = modes[..partitions as usize]
+        .iter()
+        .map(|&m| endpoint_values(m))
+        .sum();
     if value_count > 18 || endpoint_bits < div_round_up(13 * value_count, 5) {
         fill(out, texels, ERROR_COLOUR);
         return Ok(());
     }
     // The LDR profile has no way to express an HDR endpoint.
-    if modes[..partitions as usize].iter().any(|&m| is_hdr_endpoint_mode(m)) {
+    if modes[..partitions as usize]
+        .iter()
+        .any(|&m| is_hdr_endpoint_mode(m))
+    {
         fill(out, texels, ERROR_COLOUR);
         return Ok(());
     }
@@ -758,14 +919,27 @@ pub fn decode_astc(block: &[u8], block_width: u32, block_height: u32, out: &mut 
     // Weights are read from the top of the block downwards.
     let mut weight_raw = [IseValue::default(); 64];
     let mut stream = Stream::new(data, 127, weight_bits, false);
-    decode_ise(&mut weight_raw, num_weights as usize, &mut stream, mode.weight_ise);
+    decode_ise(
+        &mut weight_raw,
+        num_weights as usize,
+        &mut stream,
+        mode.weight_ise,
+    );
     let mut weights = [0u32; 64];
-    unquantize_weights(&mut weights, &weight_raw, num_weights as usize, mode.weight_ise);
+    unquantize_weights(
+        &mut weights,
+        &weight_raw,
+        num_weights as usize,
+        mode.weight_ise,
+    );
     let mut texel_weights = [[0u32; 2]; MAX_TEXELS];
     interpolate_weights(&mut texel_weights, &weights, bw, bh, &mode);
 
-    let component_selector =
-        if mode.dual_plane { bits(data, extra_cem_start - 2, extra_cem_start - 1) as i32 } else { -1 };
+    let component_selector = if mode.dual_plane {
+        bits(data, extra_cem_start - 2, extra_cem_start - 1) as i32
+    } else {
+        -1
+    };
     let seed = bits(data, 13, 22);
     let small_block = bw * bh < 31;
 
@@ -781,8 +955,7 @@ pub fn decode_astc(block: &[u8], block_width: u32, block_height: u32, out: &mut 
             for channel in 0..4 {
                 let c0 = (e0[channel] << 8) | e0[channel];
                 let c1 = (e1[channel] << 8) | e1[channel];
-                let w = texel_weights[index]
-                    [usize::from(component_selector == channel as i32)];
+                let w = texel_weights[index][usize::from(component_selector == channel as i32)];
                 let c = (c0 * (64 - w) + c1 * w + 32) / 64;
                 out[index][channel] = if c == 65535 { 1.0 } else { c as f32 / 65536.0 };
             }
@@ -800,8 +973,7 @@ mod tests {
     /// anywhere"), and the colour sits in the top four sixteen-bit fields.
     fn void_extent(r: u16, g: u16, b: u16, a: u16) -> [u8; 16] {
         let low: u64 = 0x1FC | (0x1FFF << 12) | (0x1FFF << 25) | (0x1FFF << 38) | (0x1FFF << 51);
-        let high: u64 =
-            r as u64 | ((g as u64) << 16) | ((b as u64) << 32) | ((a as u64) << 48);
+        let high: u64 = r as u64 | ((g as u64) << 16) | ((b as u64) << 32) | ((a as u64) << 48);
         let mut block = [0u8; 16];
         block[..8].copy_from_slice(&low.to_le_bytes());
         block[8..].copy_from_slice(&high.to_le_bytes());
