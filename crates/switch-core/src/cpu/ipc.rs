@@ -1511,19 +1511,41 @@ pub(super) mod testing {
         size: u32,
         send: bool,
     ) {
-        for offset in (0..0x100u32).step_by(4) {
+        let one = [(buffer, size)];
+        let (send, recv) = if send { (&one[..], &[][..]) } else { (&[][..], &one[..]) };
+        write_buffer_request(cpu, command_id, payload, send, recv);
+    }
+
+    /// Marshal a request carrying map-alias buffers on **both** sides into an
+    /// existing session's TLS — the shape `bsd`'s `Select` arrives in, which
+    /// sends three descriptor sets and receives three back.
+    ///
+    /// The general case the two helpers around it are each one corner of: the
+    /// send descriptors come first and the receive ones follow, which is the
+    /// order [`Cpu::ipc_recv_buffer`] indexes them in.
+    pub(crate) fn write_buffer_request(
+        cpu: &mut Cpu,
+        command_id: u32,
+        payload: &[u8],
+        send: &[(u32, u32)],
+        recv: &[(u32, u32)],
+    ) {
+        for offset in (0..0x200u32).step_by(4) {
             cpu.mem.write_u32(TLS + offset, 0).unwrap();
         }
-        let counts = if send { 1 << 20 } else { 1 << 24 };
+        let counts = ((send.len() as u32) << 20) | ((recv.len() as u32) << 24);
         cpu.mem.write_u32(TLS, 4 | counts).unwrap();
-        cpu.mem.write_u32(TLS + 4, 12).unwrap();
-        // The descriptor: size, the low half of the address, then the packed
-        // word holding the rest of it.
-        cpu.mem.write_u32(TLS + 8, size).unwrap();
-        cpu.mem.write_u32(TLS + 12, buffer).unwrap();
-        cpu.mem.write_u32(TLS + 16, 0).unwrap();
-        // The data area, aligned up from the 20 bytes of header + descriptor.
-        let at = TLS + 0x20;
+        cpu.mem.write_u32(TLS + 4, 16).unwrap();
+        // Each descriptor is size, the low half of the address, then the
+        // packed word holding the rest of it.
+        for (index, &(address, size)) in send.iter().chain(recv).enumerate() {
+            let at = TLS + 8 + 12 * index as u32;
+            cpu.mem.write_u32(at, size).unwrap();
+            cpu.mem.write_u32(at + 4, address).unwrap();
+            cpu.mem.write_u32(at + 8, 0).unwrap();
+        }
+        let descriptors = 8 + 12 * (send.len() + recv.len()) as u32;
+        let at = TLS + descriptors.div_ceil(16) * 16;
         cpu.mem.write_u32(at, SFCI).unwrap();
         cpu.mem.write_u32(at + 8, command_id).unwrap();
         for (index, &byte) in payload.iter().enumerate() {
@@ -1557,23 +1579,7 @@ pub(super) mod testing {
         payload: &[u8],
         buffers: &[(u32, u32)],
     ) {
-        for offset in (0..0x200u32).step_by(4) {
-            cpu.mem.write_u32(TLS + offset, 0).unwrap();
-        }
-        cpu.mem.write_u32(TLS, 4 | ((buffers.len() as u32) << 20)).unwrap();
-        cpu.mem.write_u32(TLS + 4, 16).unwrap();
-        for (index, &(address, size)) in buffers.iter().enumerate() {
-            let at = TLS + 8 + 12 * index as u32;
-            cpu.mem.write_u32(at, size).unwrap();
-            cpu.mem.write_u32(at + 4, address).unwrap();
-            cpu.mem.write_u32(at + 8, 0).unwrap();
-        }
-        let at = TLS + (8 + 12 * buffers.len() as u32).div_ceil(16) * 16;
-        cpu.mem.write_u32(at, SFCI).unwrap();
-        cpu.mem.write_u32(at + 8, command_id).unwrap();
-        for (index, &byte) in payload.iter().enumerate() {
-            cpu.mem.write_u8(at + 0x10 + index as u32, byte).unwrap();
-        }
+        write_buffer_request(cpu, command_id, payload, buffers, &[]);
     }
 
     #[test]

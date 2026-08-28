@@ -1407,6 +1407,10 @@ pub struct Cpu {
     /// Monotonic descriptor allocator. Starts at 3, past the standard streams
     /// a guest's C library already holds.
     next_bsd_fd: i32,
+    /// Monotonic port allocator for a `bind` that asked for port 0. Starts at
+    /// the bottom of IANA's ephemeral range, which is where FreeBSD's own
+    /// allocator starts.
+    next_bsd_port: u16,
     /// The `ApmPerformanceConfiguration` set for each performance mode
     /// (Normal, then Boost). Read back by `GetPerformanceConfiguration`, so
     /// they are stored rather than acknowledged and forgotten.
@@ -1631,6 +1635,7 @@ impl Cpu {
             bsd_sockets: HashMap::new(),
             bsd_socket_options: HashMap::new(),
             next_bsd_fd: 3,
+            next_bsd_port: net::BSD_FIRST_EPHEMERAL_PORT,
             battery_percent: 100,
             battery_charging: true,
             fs: crate::vfs::Vfs::new(),
