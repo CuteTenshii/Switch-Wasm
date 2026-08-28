@@ -2,7 +2,7 @@
 //! executed instructions and dump it when the guest halts — the fastest way
 //! to see how an `nnSdk` abort was reached without tracing 117M steps.
 //!
-//! Usage: retail_trace <nsp> <prod.keys> <title.keys> [tail_len]
+//! Usage: retail_trace <nsp> <prod.keys> [title.keys] [tail_len]
 //!   RING_FROM=<hex pc>  start recording only once this pc is first hit.
 //!   MARK=<pc>[=name][,...]  print a line each time one of these pcs runs.
 //!   MARK_DUMP=<reg>,<byte offset>,<words>  also dump memory at each mark.
@@ -11,15 +11,12 @@ mod common;
 use std::env;
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "retail_trace <nsp> <prod.keys> <title.keys> [tail_len]";
+const USAGE: &str = "retail_trace <nsp> <prod.keys> [title.keys] [tail_len]";
 
 fn main() {
-    let title = common::Title::open_nsp(
-        common::arg(1, USAGE),
-        common::arg(2, USAGE),
-        Some(common::arg(3, USAGE)),
-    );
-    let tail: usize = common::opt_num(4).unwrap_or(4000) as usize;
+    let args = common::container_args(USAGE);
+    let title = args.open();
+    let tail: usize = args.rest_num(0).unwrap_or(4000) as usize;
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();

@@ -1,6 +1,6 @@
 //! `screenshot_nca` with the GPU backend installed, so the two can be
 //! compared frame for frame:
-//! `screenshot_gpu <path.nsp|path.nca> <prod.keys> <title.keys> <out.ppm> [frame]`.
+//! `screenshot_gpu <path.nsp|path.nca> <prod.keys> [title.keys] <out.ppm> [frame]`.
 //!
 //! Either kind of container, decided by its header: the backend this exists to
 //! measure is only worth measuring against a title that draws, and those ship
@@ -20,16 +20,13 @@ mod common;
 use common::{Flow, Pace};
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "screenshot_gpu <path.nsp|path.nca> <prod.keys> <title.keys> <out.ppm> [frame]";
+const USAGE: &str = "screenshot_gpu <path.nsp|path.nca> <prod.keys> [title.keys] <out.ppm> [frame]";
 
 fn main() {
-    let title = common::Title::open(
-        common::arg(1, USAGE),
-        common::arg(2, USAGE),
-        Some(common::arg(3, USAGE)),
-    );
-    let out = common::arg(4, USAGE);
-    let want = common::opt_num(5).unwrap_or(1);
+    let args = common::container_args(USAGE);
+    let title = args.open();
+    let out = args.need(0).to_string();
+    let want = args.rest_num(1).unwrap_or(1);
 
     let mut gpu = match switch_gpu::Gpu::open() {
         Ok(gpu) => Some(gpu),

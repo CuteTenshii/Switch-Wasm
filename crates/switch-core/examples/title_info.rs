@@ -5,94 +5,21 @@
 //! Usage: cargo run -p switch-core --example title_info -- <path.nsp|path.nca> <prod.keys> [title.keys] [icon_out.jpg]
 mod common;
 
-use std::cell::RefCell;
-use std::env;
-use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
-use switch_core::control::Control;
-use switch_core::nsp::Pfs0;
-use switch_core::source::ByteSource;
-use switch_core::Error;
+use switch_core::source::{ByteSource, FileSource};
 
-/// A container read straight off disk, so a multi-gigabyte `.nsp` costs a few
-/// seeks rather than its own size in memory — the native counterpart of the
-/// browser's `host_read`.
-#[derive(Debug)]
-struct FileSource {
-    file: RefCell<File>,
-    len: u64,
-}
-
-impl FileSource {
-    fn open(path: &str) -> std::io::Result<FileSource> {
-        let file = File::open(path)?;
-        let len = file.metadata()?.len();
-        Ok(FileSource {
-            file: RefCell::new(file),
-            len,
-        })
-    }
-}
-
-impl ByteSource for FileSource {
-    fn len(&self) -> u64 {
-        self.len
-    }
-
-    fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
-        if offset >= self.len {
-            return Ok(0);
-        }
-        let mut file = self.file.borrow_mut();
-        file.seek(SeekFrom::Start(offset))
-            .map_err(|e| Error::Io(e.to_string()))?;
-        let want = ((out.len() as u64).min(self.len - offset)) as usize;
-        file.read_exact(&mut out[..want])
-            .map_err(|e| Error::Io(e.to_string()))?;
-        Ok(want)
-    }
-}
+const USAGE: &str = "title_info <path.nsp|path.nca> <prod.keys> [title.keys] [icon_out.jpg]";
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        eprintln!("usage: title_info <path.nsp|path.nca> <prod.keys> [title.keys] [icon_out.jpg]");
-        std::process::exit(1);
+    let args = common::container_args(USAGE);
+    let mut keys = args.keys();
+    if let Ok(src) = FileSource::open(&args.container) {
+        println!("{}: {} bytes", args.container, src.len());
     }
-    let container_path = &args[1];
-    let prod_path = &args[2];
-    let title_path = args.get(3).filter(|s| s.ends_with(".keys"));
-    let icon_path = args.iter().skip(3).find(|s| !s.ends_with(".keys"));
 
-    let mut keys = common::keys(prod_path, title_path);
-
-    let src = FileSource::open(container_path).expect("open container");
-    println!("{}: {} bytes", container_path, src.len());
-
-    // A standalone `.nca` is its own container; anything else is a PFS0 whose
-    // Control NCA has to be found first, and whose bundled ticket may be the
-    // only place that NCA's title key exists.
-    let control = if container_path.to_ascii_lowercase().ends_with(".nca") {
-        Control::from_source(&src, &keys)
-    } else {
-        let pfs0 = Pfs0::read_from(&src).expect("parse container");
-        println!("{} file(s) in the container", pfs0.files.len());
-        let (index, nca) = switch_core::control::find_control_nca(&pfs0.files, &src, &keys)
-            .expect("no Control NCA in this container (is prod.keys right?)");
-        println!("Control NCA: {}", pfs0.files[index].name);
-        if let Err(e) =
-            switch_core::ticket::load_bundled_title_key(&mut keys, &nca, &pfs0.files, &src)
-        {
-            println!("ticket resolution failed: {}", e);
-        }
-        pfs0.file_source(&src, index)
-            .and_then(|window| Control::from_source(window, &keys))
-    };
-
-    let control = match control {
+    let control = match common::open_control(&args.container, &mut keys) {
         Ok(control) => control,
         Err(e) => {
-            println!("control data unavailable: {}", e);
+            println!("control data unavailable: {e}");
             std::process::exit(1);
         }
     };
@@ -151,12 +78,12 @@ fn main() {
         control.icon_mime()
     );
 
-    if let Some(path) = icon_path {
+    if let Some(path) = args.rest(0) {
         if control.icon.is_empty() {
             println!("no icon to write");
         } else {
             std::fs::write(path, &control.icon).expect("write icon");
-            println!("wrote {}", path);
+            println!("wrote {path}");
         }
     }
 }

@@ -105,6 +105,75 @@ pub fn keys(prod: impl AsRef<Path>, title: Option<impl AsRef<Path>>) -> KeySet {
     set
 }
 
+/// The `<container> <prod.keys> [title.keys]` triple every tool that reads a
+/// retail container takes, resolved once.
+///
+/// The optional third argument had been spelled four ways — "not all digits",
+/// "does not start with a digit", "ends with `.keys`", and taken blind — and
+/// five more tools made it *mandatory* by passing `Some(arg(3, USAGE))`, so a
+/// container whose keys are all in `prod.keys` could not be opened without
+/// naming a `title.keys` that does not exist. One rule now: argument 3 is the
+/// title keys when it is named like a keys file. Everything after the triple
+/// is the tool's own, and is reached through [`Args::rest`].
+pub struct Args {
+    pub container: String,
+    pub prod: String,
+    pub title: Option<String>,
+    rest: Vec<String>,
+    line: String,
+}
+
+/// Resolve the container triple, or print `line` and exit.
+pub fn container_args(line: &str) -> Args {
+    let mut positional = env::args().skip(1);
+    let (Some(container), Some(prod)) = (positional.next(), positional.next()) else {
+        usage(line)
+    };
+    let mut rest: Vec<String> = positional.collect();
+    let title = rest
+        .first()
+        .is_some_and(|arg| arg.to_ascii_lowercase().ends_with(".keys"))
+        .then(|| rest.remove(0));
+    Args {
+        container,
+        prod,
+        title,
+        rest,
+        line: line.to_string(),
+    }
+}
+
+impl Args {
+    /// Open the container, whichever kind it turns out to be.
+    pub fn open(&self) -> Title {
+        Title::open(&self.container, &self.prod, self.title.as_ref())
+    }
+
+    /// The keys alone, for a tool that reads the container itself rather than
+    /// booting what is in it.
+    pub fn keys(&self) -> KeySet {
+        keys(&self.prod, self.title.as_ref())
+    }
+
+    /// Argument `n` after the triple, counting from 0.
+    pub fn rest(&self, n: usize) -> Option<&str> {
+        self.rest.get(n).map(String::as_str)
+    }
+
+    /// Argument `n` after the triple, or the usage line if it is not there.
+    pub fn need(&self, n: usize) -> &str {
+        match self.rest.get(n) {
+            Some(arg) => arg,
+            None => usage(&self.line),
+        }
+    }
+
+    /// Argument `n` after the triple, if it is there and parses as a `u64`.
+    pub fn rest_num(&self, n: usize) -> Option<u64> {
+        self.rest.get(n)?.parse().ok()
+    }
+}
+
 /// A `u64` from the environment, or `default`.
 pub fn env_u64(name: &str, default: u64) -> u64 {
     env::var(name)
@@ -410,6 +479,247 @@ pub fn report(cpu: &Cpu, run: &Run) {
     );
 }
 
+/// Where one `DUMP=` entry starts. A fault's interesting address is usually
+/// one the faulting code was holding rather than one known before the run —
+/// the object a null came out of is whatever `x23` happened to be — so a base
+/// may name a register as well as an absolute address.
+enum DumpBase {
+    Absolute(u32),
+    Register(u8),
+    StackPointer,
+    ProgramCounter,
+}
+
+/// One region to hex-dump once the run has stopped.
+struct DumpSpec {
+    label: String,
+    base: DumpBase,
+    offset: i64,
+    len: u32,
+}
+
+fn parse_dump_specs(spec: &str) -> Vec<DumpSpec> {
+    /// Enough to see a small object and its first few pointers. A region
+    /// worth more than this is one the caller knows the size of.
+    const DEFAULT_LEN: u32 = 0x40;
+    let parse = |text: &str| u64::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok();
+    spec.split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| {
+            let (addr, len) = match entry.split_once(':') {
+                Some((addr, len)) => (addr, parse(len)? as u32),
+                None => (entry, DEFAULT_LEN),
+            };
+            // The sign has to be found from the right: `x23+0x10` splits on
+            // the `+`, but a bare `0x...` address must not be split on a `-`
+            // that is part of nothing at all.
+            let (base, offset) = match addr.rfind(['+', '-']).filter(|&i| i > 0) {
+                Some(i) => {
+                    let value = parse(&addr[i + 1..])? as i64;
+                    let signed = if addr.as_bytes()[i] == b'-' {
+                        -value
+                    } else {
+                        value
+                    };
+                    (&addr[..i], signed)
+                }
+                None => (addr, 0),
+            };
+            let base = match base.trim() {
+                "sp" => DumpBase::StackPointer,
+                "pc" => DumpBase::ProgramCounter,
+                name if name.starts_with('x') => DumpBase::Register(name[1..].parse().ok()?),
+                absolute => DumpBase::Absolute(parse(absolute)? as u32),
+            };
+            Some(DumpSpec {
+                label: entry.to_string(),
+                base,
+                offset,
+                len,
+            })
+        })
+        .collect()
+}
+
+/// How many times a watchpoint or a pc watch reports before going quiet. What
+/// is wanted is which code reached a region *first*, and a region being
+/// touched at all is usually a loop.
+const MAX_HITS: u32 = 24;
+
+/// `x0`..`x7`, which are a call's arguments — what a trapped write or a
+/// watched pc was reached *with*, as opposed to where it was reached from.
+fn arguments(cpu: &Cpu) -> String {
+    (0..8)
+        .map(|r| format!(" x{r}={:#x}", cpu.read_x(r)))
+        .collect()
+}
+
+fn backtrace(cpu: &Cpu, depth: usize) -> String {
+    cpu.backtrace(depth)
+        .iter()
+        .map(|pc| format!("{pc:#010x}"))
+        .collect::<Vec<_>>()
+        .join(" <- ")
+}
+
+/// The debugging knobs a runner needs, read from the environment once.
+///
+/// `boot_nsp`, `screenshot_nsp` and `screenshot_nca` each grew their own parse
+/// of the same `<addr>:<hex size>` spelling, and then drifted apart in name:
+/// the pc watch was `WATCH` in one and `WATCH_PC` in another, memory dumping
+/// was `DUMP` in one and `DUMP_MEM` in another, and no tool had all of them. A
+/// knob worth having in one runner is worth having in every runner.
+///
+/// - `TRAP_WRITE=<addr>:<hex size>` — the pc and call stack of the first
+///   writes into a region, which is how a buffer nobody admits to owning gets
+///   an owner.
+/// - `TRAP_READ=<addr>:<hex size>` — every distinct pc that reads a region,
+///   counted.
+/// - `TRAP_ZERO=1` — keep writes of zero as well. Off by default, since a
+///   field being cleared is usually the noise; on when clearing is the hunt.
+/// - `WATCH_PC=<addr>[,...]` — the argument registers and the call stack the
+///   first few times execution reaches an address. Who calls a thin IPC stub
+///   is not a static question here: they are reached through vtables, so
+///   nothing in the image points at them.
+/// - `DUMP=<base>[+<hex>][:<hex length>][,...]` — hex-dump guest memory
+///   wherever the run stopped, where `<base>` is `x0`..`x30`, `sp`, `pc` or an
+///   address: `DUMP=x23+0x1830:0x40,0x10c2e870`.
+pub struct Debug {
+    write_trap: Option<(u32, u32)>,
+    read_trap: Option<(u32, u32)>,
+    trap_zero: bool,
+    watch_pc: Vec<u32>,
+    dumps: Vec<DumpSpec>,
+    traps: u32,
+    watch_hits: u32,
+    /// Pcs that read the `TRAP_READ` region, and how often each did.
+    readers: std::collections::BTreeMap<u32, u64>,
+    /// The read watchpoint reports on the step *after* the one that tripped
+    /// it, so the pc that did the reading has to be carried across a tick.
+    reader_pc: u32,
+}
+
+impl Debug {
+    pub fn from_env() -> Debug {
+        Debug {
+            write_trap: env_span("TRAP_WRITE"),
+            read_trap: env_span("TRAP_READ"),
+            trap_zero: env::var("TRAP_ZERO").is_ok(),
+            watch_pc: env_hex_list("WATCH_PC"),
+            dumps: env::var("DUMP")
+                .map(|spec| parse_dump_specs(&spec))
+                .unwrap_or_default(),
+            traps: 0,
+            watch_hits: 0,
+            readers: std::collections::BTreeMap::new(),
+            reader_pc: 0,
+        }
+    }
+
+    /// Whether anything armed here reads the machine between two
+    /// instructions, and so needs [`Pace::Instructions`]. With none of them
+    /// set the run goes through the block translator instead, which is the
+    /// engine the frontend uses.
+    pub fn stepwise(&self) -> bool {
+        self.write_trap.is_some() || self.read_trap.is_some() || !self.watch_pc.is_empty()
+    }
+
+    /// Install the watchpoints. After the title has booted, since booting
+    /// lays out the address space they are set in.
+    pub fn arm(&self, cpu: &mut Cpu) {
+        if let Some((lo, hi)) = self.write_trap {
+            cpu.mem.watch_writes(lo, hi - lo);
+        }
+        if let Some((lo, hi)) = self.read_trap {
+            cpu.mem.watch_reads(lo, hi - lo);
+        }
+    }
+
+    /// Report whatever tripped since the last instruction. Call from a
+    /// [`drive`] tick running at [`Pace::Instructions`].
+    pub fn tick(&mut self, cpu: &mut Cpu, done: u64) {
+        if self.read_trap.is_some() && cpu.mem.take_read_hit().is_some() {
+            *self.readers.entry(self.reader_pc).or_default() += 1;
+        }
+        self.reader_pc = cpu.get_pc();
+        if let Some(at) = cpu.mem.take_watch_hit() {
+            let value = cpu.mem.read_u32(at & !3).unwrap_or(0);
+            if self.traps < MAX_HITS && (value != 0 || self.trap_zero) {
+                println!(
+                    "[trap] wrote {at:#010x} = {value:#010x} at step {done} pc={:#010x}{} bt={}",
+                    cpu.get_pc(),
+                    arguments(cpu),
+                    backtrace(cpu, 12),
+                );
+                self.traps += 1;
+            }
+        }
+        if self.watch_hits < MAX_HITS && self.watch_pc.contains(&cpu.get_pc()) {
+            println!(
+                "[watch-pc] {:#010x} at step {done}{} bt={}",
+                cpu.get_pc(),
+                arguments(cpu),
+                backtrace(cpu, 12),
+            );
+            self.watch_hits += 1;
+        }
+    }
+
+    /// Everything worth knowing about where a run stopped: the registers, the
+    /// call stack, and whatever `DUMP=` asked for.
+    ///
+    /// Printed for a fault, a halt and an exhausted step budget alike. A run
+    /// that stops any of those three ways stops somewhere, and the address a
+    /// fault was holding is no easier to guess than the one a hang was.
+    pub fn stop_state(&self, cpu: &Cpu) {
+        if self.dumps.is_empty() {
+            return;
+        }
+        print!("{}", cpu.reg_dump());
+        println!("backtrace: {}", backtrace(cpu, 24));
+        for spec in &self.dumps {
+            let base = match spec.base {
+                DumpBase::Absolute(addr) => u64::from(addr),
+                DumpBase::Register(reg) => cpu.read_x(reg),
+                DumpBase::StackPointer => cpu.sp(),
+                DumpBase::ProgramCounter => u64::from(cpu.get_pc()),
+            };
+            let at = (base as i64).wrapping_add(spec.offset) as u32;
+            println!("[dump] {} = {at:#010x} ({:#x} bytes)", spec.label, spec.len);
+            // Words rather than bytes because what is being read here is
+            // almost always a structure: a null in a field is the thing being
+            // looked for, and a run of pointers is what says a table was
+            // populated. The ASCII column is there because the other half of
+            // what turns up in guest memory is names.
+            for line in (0..spec.len).step_by(16) {
+                let addr = at.wrapping_add(line);
+                let mut words = String::new();
+                let mut ascii = String::new();
+                for word in 0..4u32 {
+                    let value = cpu.mem.read_u32(addr.wrapping_add(word * 4)).unwrap_or(0);
+                    words.push_str(&format!(" {value:08x}"));
+                    for byte in value.to_le_bytes() {
+                        ascii.push(if (0x20..0x7f).contains(&byte) {
+                            byte as char
+                        } else {
+                            '.'
+                        });
+                    }
+                }
+                println!("  {addr:#010x}:{words}  {ascii}");
+            }
+        }
+    }
+
+    /// What the run collected, once it has stopped.
+    pub fn report(&self) {
+        for (pc, count) in &self.readers {
+            println!("[reader] {pc:#010x} {count}");
+        }
+    }
+}
+
 /// The order the modules of an ExeFS load in.
 ///
 /// One list, because three examples carried their own and two of them
@@ -419,6 +729,74 @@ const MODULE_ORDER: &[&str] = &[
     "rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4", "subsdk5", "subsdk6",
     "subsdk7", "subsdk8", "subsdk9", "sdk",
 ];
+
+/// What a container turned out to be, decided by looking at it.
+///
+/// `PFS0` sits at offset 0 and the NCA magic at 0x200. An NCA straight off the
+/// CDN keeps its header encrypted, so its magic is invisible until `prod.keys`
+/// decrypts it — those fall back to the extension, which is what the frontend
+/// does with them too (`web/main/filetype.ts`).
+enum Kind {
+    Pfs0,
+    Nca,
+}
+
+fn container_kind(path: &Path) -> Kind {
+    let mut head = [0u8; 0x204];
+    // The whole window or nothing: a short read would leave the magic
+    // positions as zeros and quietly look like "not an NCA".
+    let read = open_source(path).read_exact_at(0, &mut head).is_ok();
+    if read && &head[..4] == b"PFS0" {
+        return Kind::Pfs0;
+    }
+    let is_nca = read && matches!(&head[0x200..0x204], b"NCA3" | b"NCA2" | b"NCA0");
+    let by_name = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("nca"));
+    if is_nca || by_name {
+        Kind::Nca
+    } else {
+        Kind::Pfs0
+    }
+}
+
+/// A container's control data — the NACP and the icon that name a title, and
+/// the save-data sizes it declares.
+///
+/// A free function rather than a method on [`Title`] because a Control NCA is
+/// a container in its own right: `title_info` is handed one directly, and it
+/// has no ExeFS for a `Title` to be built around. Any bundled ticket's title
+/// key goes into `keys`, since the Control NCA is encrypted under the same
+/// title key as the program beside it.
+pub fn open_control(
+    container: impl AsRef<Path>,
+    keys: &mut KeySet,
+) -> Result<switch_core::control::Control, switch_core::Error> {
+    let path = container.as_ref();
+    let src = open_source(path);
+    match container_kind(path) {
+        Kind::Nca => switch_core::control::Control::from_source(&src, keys),
+        Kind::Pfs0 => {
+            let pfs0 = switch_core::nsp::Pfs0::read_from(&src)?;
+            let Some((index, nca)) =
+                switch_core::control::find_control_nca(&pfs0.files, &src, keys)
+            else {
+                return Err(switch_core::Error::Nca(format!(
+                    "no Control NCA in {}",
+                    path.display()
+                )));
+            };
+            if let Err(e) =
+                switch_core::ticket::load_bundled_title_key(keys, &nca, &pfs0.files, &src)
+            {
+                eprintln!("no title key for the Control NCA: {e}");
+            }
+            let window = pfs0.file_source(&src, index)?;
+            switch_core::control::Control::from_source(window, keys)
+        }
+    }
+}
 
 /// A title's Program NCA, opened without reading the container in.
 ///
@@ -451,8 +829,6 @@ pub struct Title {
 }
 
 impl Title {
-    /// Open the Program NCA inside an NSP, resolving its title key from a
-    /// bundled ticket if the container has one.
     /// Open whichever kind of container this is, by looking at it.
     ///
     /// A tool that only takes one kind is a tool that cannot be pointed at the
@@ -460,39 +836,20 @@ impl Title {
     /// backend it exists to measure could not be run against a retail game at
     /// all. The web frontend already decides this by header rather than by
     /// name (`web/main/filetype.ts`); this is the same rule.
-    ///
-    /// `PFS0` sits at offset 0 and the NCA magic at 0x200. An NCA straight off
-    /// the CDN keeps its header encrypted, so its magic is invisible until
-    /// `prod.keys` decrypts it — those fall back to the extension, which is
-    /// what the frontend does with them too.
     pub fn open(
         container: impl AsRef<Path>,
         prod: impl AsRef<Path>,
         title: Option<impl AsRef<Path>>,
     ) -> Title {
         let path = container.as_ref().to_path_buf();
-        let mut head = [0u8; 0x204];
-        // The whole window or nothing: a short read would leave the magic
-        // positions as zeros and quietly look like "not an NCA".
-        let read = {
-            let src = open_source(&path);
-            switch_core::source::ByteSource::read_exact_at(&src, 0, &mut head).is_ok()
-        };
-        let is_pfs0 = read && &head[..4] == b"PFS0";
-        let is_nca = read && matches!(&head[0x200..0x204], b"NCA3" | b"NCA2" | b"NCA0");
-        let by_name = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("nca"));
-        if is_pfs0 {
-            Title::open_nsp(path, prod, title)
-        } else if is_nca || by_name {
-            Title::open_nca(path, prod, title)
-        } else {
-            Title::open_nsp(path, prod, title)
+        match container_kind(&path) {
+            Kind::Nca => Title::open_nca(path, prod, title),
+            Kind::Pfs0 => Title::open_nsp(path, prod, title),
         }
     }
 
+    /// Open the Program NCA inside an NSP, resolving its title key from a
+    /// bundled ticket if the container has one.
     pub fn open_nsp(
         container: impl AsRef<Path>,
         prod: impl AsRef<Path>,
@@ -612,11 +969,12 @@ impl Title {
     }
 
     /// Boot the title: its address space, its program id, and its modules.
+    /// Returns where each module landed.
     ///
     /// The system resource size comes from the title's own manifest and has
     /// to be set before the modules load, since `nn::init` reads the
     /// resulting figures as soon as it runs.
-    pub fn boot(&self, cpu: &mut Cpu) {
+    pub fn boot(&self, cpu: &mut Cpu) -> Vec<switch_core::nso::LoadedNso> {
         // `DOCKED=1` boots as a docked console — a 1080p display, which is
         // what the frontend's dock toggle sets and so what a browser session
         // is usually looking at. The default here is handheld, and a title
@@ -633,17 +991,31 @@ impl Title {
         ));
         cpu.set_program_id(self.nca.program_id);
         let modules = self.modules();
-        if let Err(e) = cpu.boot_retail_program(&modules) {
-            die(&format!("booting {} modules: {e:?}", modules.len()))
-        }
+        let loaded = cpu
+            .boot_retail_program(&modules)
+            .unwrap_or_else(|e| die(&format!("booting {} modules: {e:?}", modules.len())));
         // After the program id, which is what add-on content is numbered
         // against, and after the modules, which is where the browser has to
         // do it — booting clears the diagnostics it reads them through.
         mount_add_on_content(cpu, &self.keys);
+        loaded
+    }
+
+    /// The container the *game* is in, which is the base one when an update
+    /// is stacked over it. An update NSP carries no Control NCA of its own.
+    pub fn container(&self) -> &Path {
+        match &self.base {
+            Some((path, _, _)) => path,
+            None => &self.path,
+        }
+    }
+
+    /// This title's control data, or the reason it could not be read.
+    pub fn control(&self) -> Result<switch_core::control::Control, switch_core::Error> {
+        open_control(self.container(), &mut self.keys.clone())
     }
 }
 
-/// A handle on the container, or exit saying which one could not be opened.
 /// An update container, which `UPDATE=<path.nsp>` names.
 ///
 /// An update NSP holds no game. Its Program NCA carries the patched modules

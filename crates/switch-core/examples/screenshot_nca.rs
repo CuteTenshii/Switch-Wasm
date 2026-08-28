@@ -1,7 +1,7 @@
 //! Boot a bare Program NCA — a system applet such as the Home Menu, which
 //! ships inside firmware rather than in an NSP — and write the Nth presented
 //! frame to a PPM:
-//! `screenshot_nca <path.nca> <prod.keys> <title.keys> <out.ppm> [frame]`.
+//! `screenshot_nca <path.nca> <prod.keys> [title.keys] <out.ppm> [frame]`.
 //!
 //! The counterpart to `screenshot_nsp`. An applet is the case that matters for
 //! the system UI and the one an NSP-only runner cannot reach, because there is
@@ -17,16 +17,13 @@ use std::collections::HashMap;
 use std::env;
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "screenshot_nca <path.nca> <prod.keys> <title.keys> <out.ppm> [frame]";
+const USAGE: &str = "screenshot_nca <path.nca> <prod.keys> [title.keys] <out.ppm> [frame]";
 
 fn main() {
-    let title = common::Title::open_nca(
-        common::arg(1, USAGE),
-        common::arg(2, USAGE),
-        Some(common::arg(3, USAGE)),
-    );
-    let out = common::arg(4, USAGE);
-    let want = common::opt_num(5).unwrap_or(1);
+    let args = common::container_args(USAGE);
+    let title = args.open();
+    let out = args.need(0).to_string();
+    let want = args.rest_num(1).unwrap_or(1);
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
@@ -35,40 +32,10 @@ fn main() {
     common::register_firmware(&mut cpu, &title.keys);
     title.boot(&mut cpu);
 
-    let trap: Option<(u32, u32)> = env::var("TRAP_WRITE").ok().and_then(|v| {
-        let (s, n) = v.split_once(':')?;
-        let s = u32::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()?;
-        let n = u32::from_str_radix(n.trim().trim_start_matches("0x"), 16).ok()?;
-        Some((s, s + n))
-    });
-    if let Some((lo, hi)) = trap {
-        cpu.mem.watch_writes(lo, hi - lo);
-    }
-    // `TRAP_READ=<addr>:<size>` collects every distinct guest PC that reads a
-    // region.
-    let read_trap: Option<(u32, u32)> = env::var("TRAP_READ").ok().and_then(|v| {
-        let (a, n) = v.split_once(':')?;
-        let a = u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok()?;
-        let n = u32::from_str_radix(n.trim().trim_start_matches("0x"), 16).ok()?;
-        Some((a, a + n))
-    });
-    if let Some((lo, hi)) = read_trap {
-        cpu.mem.watch_reads(lo, hi - lo);
-    }
-    let mut readers: std::collections::BTreeMap<u32, u64> = std::collections::BTreeMap::new();
-    // `WATCH_PC=<addr>[,...]` reports the guest backtrace the first few times
-    // execution reaches an address. Finding who calls a thin IPC stub is not a
-    // static question here -- they are reached through vtables, so nothing in
-    // the image points at them.
-    let watch_pc: Vec<u32> = env::var("WATCH_PC")
-        .ok()
-        .map(|v| {
-            v.split(',')
-                .filter_map(|a| u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut watch_hits = 0u32;
+    // `TRAP_WRITE`, `TRAP_READ`, `WATCH_PC` and `DUMP`, which every runner
+    // here shares.
+    let mut debug = common::Debug::from_env();
+    debug.arm(&mut cpu);
     // `COVER=<lo>:<hi>` records which instructions in a range ever execute.
     // Chasing a call chain statically stops the moment a function has no
     // reference anywhere in the image; this answers "which of these ran" for a
@@ -115,18 +82,12 @@ fn main() {
     // backtrace at a time.
     let stacks = env::var("STACKS").is_ok();
     let mut frames: HashMap<u32, (u64, usize)> = HashMap::new();
-    // A write of zero is a write. `TRAP_ZERO=1` keeps them, for the case where
-    // what you are hunting is something *clearing* a field.
-    let trap_zero = env::var("TRAP_ZERO").is_ok();
-    let mut traps = 0u32;
     let budget = common::env_u64("STEPS", 40_000_000_000);
     // Every hook below reads the machine between two instructions, which is
     // what `Pace::Instructions` is for — and about half the speed. With none
     // of them armed the run goes through the block translator instead, which
     // is the engine the frontend uses.
-    let pace = if trap.is_some()
-        || read_trap.is_some()
-        || !watch_pc.is_empty()
+    let pace = if debug.stepwise()
         || poke.is_some()
         || start_threads.is_some()
         || wake_every > 0
@@ -138,9 +99,6 @@ fn main() {
     } else {
         Pace::Blocks
     };
-    // The read watchpoint reports on the step *after* the one that tripped it,
-    // so the PC that did the reading has to be carried across a tick.
-    let mut reader_pc = 0u32;
     let run = common::drive(&mut cpu, pace, budget, |cpu, done| {
         if cpu.nv.gpu.frames >= want {
             return Flow::Stop;
@@ -149,21 +107,7 @@ fn main() {
         if t < share.len() {
             share[t] += 1;
         }
-        if read_trap.is_some() && cpu.mem.take_read_hit().is_some() {
-            *readers.entry(reader_pc).or_insert(0) += 1;
-        }
-        reader_pc = cpu.get_pc();
-        if let Some(at) = cpu.mem.take_watch_hit() {
-            let v = cpu.mem.read_u32(at & !3).unwrap_or(0);
-            if traps < 24 && (v != 0 || trap_zero) {
-                println!(
-                    "[trap] wrote {at:#x} = {v:#010x} at step {done} pc={:#x} bt={:x?}",
-                    cpu.get_pc(),
-                    cpu.backtrace(6)
-                );
-                traps += 1;
-            }
-        }
+        debug.tick(cpu, done);
         if done % 4096 == 0 {
             let t = cpu.current_thread_index();
             if t < share.len() {
@@ -177,20 +121,6 @@ fn main() {
                     slot.1 = slot.1.min(depth);
                 }
             }
-        }
-        if watch_hits < 24 && !watch_pc.is_empty() && watch_pc.contains(&cpu.get_pc()) {
-            println!(
-                "[watch-pc] {:#x} at step {done} x0={:#x} x1={:#x} x8={:#x} x9={:#x} x19={:#x} x22={:#x} bt={:x?}",
-                cpu.get_pc(),
-                cpu.reg(0),
-                cpu.reg(1),
-                cpu.reg(8),
-                cpu.reg(9),
-                cpu.reg(19),
-                cpu.reg(22),
-                cpu.backtrace(6)
-            );
-            watch_hits += 1;
         }
         if let Some((addr, value)) = poke {
             match poke_at {
@@ -284,9 +214,7 @@ fn main() {
         }
         println!("[find] {magic}: {hits} hit(s)");
     }
-    for (pc, n) in &readers {
-        println!("[reader] {pc:#x} {n}");
-    }
+    debug.report();
     println!(
         "[mem] {} MiB mapped",
         cpu.mem.mapped_bytes() / (1024 * 1024)
@@ -317,6 +245,7 @@ fn main() {
     }
     print!("{}", cpu.thread_dump());
     common::report(&cpu, &run);
+    debug.stop_state(&cpu);
     let fb = &cpu.nv.gpu.framebuffer;
     if fb.is_empty() {
         println!("no frame");

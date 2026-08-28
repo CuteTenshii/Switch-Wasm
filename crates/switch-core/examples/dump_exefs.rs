@@ -1,10 +1,9 @@
-//! Decrypt a retail NSP's Program ExeFS and dump every module as a flat
+//! Decrypt a retail container's Program ExeFS and dump every module as a flat
 //! image plus a symbol map, at the exact addresses `boot_retail_program`
 //! lays them out at. That makes a backtrace from a real run nameable:
-//! `dump_exefs <nsp> <prod.keys> [title.keys] <out_dir>`.
+//! `dump_exefs <path.nsp|path.nca> <prod.keys> [title.keys] <out_dir>`.
 mod common;
 
-use std::env;
 use std::fs;
 
 fn read_u32(d: &[u8], at: usize) -> u32 {
@@ -18,71 +17,25 @@ fn read_cstr(d: &[u8], off: usize) -> String {
     String::from_utf8_lossy(&d[off..end]).into_owned()
 }
 
+const USAGE: &str = "dump_exefs <path.nsp|path.nca> <prod.keys> [title.keys] <out_dir>";
+
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    let nsp_path = &args[1];
-    let prod_path = &args[2];
-    let title_path = &args[3];
-    let out_dir = &args[4];
-    fs::create_dir_all(out_dir).unwrap();
+    let args = common::container_args(USAGE);
+    let out_dir = args.need(0).to_string();
+    let title = args.open();
+    fs::create_dir_all(&out_dir).expect("create the output directory");
 
-    let nsp_data = fs::read(nsp_path).unwrap();
-    // A retail title arrives as an NSP with the Program NCA inside it; a
-    // system applet ships as the bare NCA, with no PFS0 around it at all.
-    let pfs0 = switch_core::nsp::Pfs0::parse(&nsp_data).ok();
-    let mut keys = common::keys(prod_path, Some(title_path));
-
-    let span = match &pfs0 {
-        Some(pfs0) => {
-            let mut program = None;
-            for f in &pfs0.files {
-                if !f.name.to_ascii_lowercase().ends_with(".nca") {
-                    continue;
-                }
-                let raw = &nsp_data[f.offset as usize..(f.offset + f.size) as usize];
-                if let Ok(nca) = switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)) {
-                    if nca.content_type == switch_core::nca::ContentType::Program {
-                        program = Some(f);
-                    }
-                }
-            }
-            let f = program.expect("no Program NCA in the PFS0");
-            (f.offset as usize, (f.offset + f.size) as usize)
-        }
-        None => (0, nsp_data.len()),
-    };
-    let raw = &nsp_data[span.0..span.1];
-    let nca = switch_core::nca::Nca::parse_with_keys(raw, Some(&keys)).unwrap();
-    let files = pfs0.as_ref().map(|p| p.files.clone()).unwrap_or_default();
-    switch_core::ticket::load_bundled_title_key(
-        &mut keys,
-        &nca,
-        &files,
-        &switch_core::source::SliceSource(&nsp_data),
-    )
-    .unwrap();
-    let idx = nca.exefs_section_index().unwrap();
-    let exefs = nca.decrypt_pfs0_section(raw, &keys, idx).unwrap();
-    let exefs_pfs0 = switch_core::nsp::Pfs0::parse(&exefs).unwrap();
-
-    for ef in &exefs_pfs0.files {
-        let b = &exefs[ef.offset as usize..(ef.offset + ef.size) as usize];
-        fs::write(format!("{out_dir}/raw_{}", ef.name), b).unwrap();
+    for file in &title.exefs_pfs0.files {
+        let start = file.offset as usize;
+        let raw = &title.exefs[start..start + file.size as usize];
+        fs::write(format!("{out_dir}/raw_{}", file.name), raw).expect("write the raw module");
     }
 
-    const ORDER: &[&str] = &[
-        "rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4", "subsdk5",
-        "subsdk6", "subsdk7", "subsdk8", "subsdk9", "sdk",
-    ];
     let mut mem = switch_core::mem::Memory::new();
     let mut base = switch_core::nso::NSO_BASE;
     let mut syms: Vec<(u32, u32, String, String)> = Vec::new();
-    for &name in ORDER {
-        let Some(ef) = exefs_pfs0.find(name) else {
-            continue;
-        };
-        let nso = &exefs[ef.offset as usize..(ef.offset + ef.size) as usize];
-        let m = switch_core::nso::load_nso(&mut mem, nso, base).unwrap();
+    for (name, nso) in title.modules() {
+        let m = switch_core::nso::load_nso(&mut mem, nso, base).expect("load the module");
         let image_end = m.data.mem_addr + m.data.file_size + m.bss_size;
         // Flat image, base..image_end, straight out of the mapped memory.
         let mut flat = Vec::with_capacity((image_end - base) as usize);
@@ -90,7 +43,7 @@ fn main() {
             flat.push(mem.read_u8(a).unwrap_or(0));
         }
         let path = format!("{out_dir}/{name}.bin");
-        fs::write(&path, &flat).unwrap();
+        fs::write(&path, &flat).expect("write the flat image");
         println!(
             "{name}: base={:#010x} entry={:#010x} text={:#x}+{:#x} ro={:#x}+{:#x} data={:#x}+{:#x} bss={:#x} end={:#010x} -> {path}",
             m.base, m.entry,
@@ -150,6 +103,6 @@ fn main() {
     for (a, s, n, m) in &syms {
         out.push_str(&format!("{a:#010x} {s:#x} {m} {n}\n"));
     }
-    fs::write(format!("{out_dir}/symbols.txt"), out).unwrap();
+    fs::write(format!("{out_dir}/symbols.txt"), out).expect("write the symbol map");
     println!("wrote {} symbols", syms.len());
 }

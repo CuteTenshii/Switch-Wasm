@@ -1,5 +1,5 @@
 //! Ad-hoc diagnostic for debugging real-world NCA decryption against a real
-//! `prod.keys`/`title.keys` — prints the fields `Nca::parse_with_keys`
+//! `prod.keys`/`title.keys` — prints the fields `Nca::parse_source`
 //! derives (key index, generation, FS header layout) without needing the
 //! actual section key to be present, so a "missing key" case still reports
 //! everything else for sanity-checking.
@@ -7,36 +7,31 @@
 //! Usage: cargo run -p switch-core --example diag_nca -- <path.nca> <prod.keys> [title.keys]
 mod common;
 
-use std::env;
-use std::fs;
+use switch_core::source::{ByteSource, FileSource};
+
+const USAGE: &str = "diag_nca <path.nca> <prod.keys> [title.keys]";
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        eprintln!("usage: diag_nca <path.nca> <prod.keys> [title.keys]");
-        std::process::exit(1);
-    }
-    let nca_path = &args[1];
-    let prod_path = &args[2];
-    let title_path = args.get(3);
-
-    let raw = fs::read(nca_path).expect("read nca");
+    let args = common::container_args(USAGE);
+    // Off disk rather than into memory: the NCA being diagnosed is often the
+    // Program one, which is the whole game.
+    let src = FileSource::open(&args.container).expect("open nca");
     println!(
         "file size: {} bytes ({:.1} KiB)",
-        raw.len(),
-        raw.len() as f64 / 1024.0
+        src.len(),
+        src.len() as f64 / 1024.0
     );
 
-    let keys = common::keys(prod_path, title_path);
+    let keys = args.keys();
     println!(
         "header_key loaded: {}",
         keys.effective_header_key().is_some()
     );
 
-    let nca = match switch_core::nca::Nca::parse_with_keys(&raw, Some(&keys)) {
+    let nca = match switch_core::nca::Nca::parse_source(&src, Some(&keys)) {
         Ok(n) => n,
         Err(e) => {
-            println!("parse_with_keys FAILED: {}", e);
+            println!("parse_source FAILED: {e}");
             return;
         }
     };
@@ -99,9 +94,9 @@ fn main() {
     }
 
     if let Some(idx) = nca.exefs_section_index() {
-        match nca.decrypt_pfs0_section(&raw, &keys, idx) {
+        match nca.read_pfs0_section(&src, &keys, idx) {
             Ok(pfs0) => {
-                println!("decrypt_pfs0_section OK: {} bytes", pfs0.len());
+                println!("read_pfs0_section OK: {} bytes", pfs0.len());
                 match switch_core::nsp::Pfs0::parse(&pfs0) {
                     Ok(p) => {
                         for f in &p.files {
@@ -111,7 +106,7 @@ fn main() {
                     Err(e) => println!("  Pfs0::parse failed: {}", e),
                 }
             }
-            Err(e) => println!("decrypt_pfs0_section FAILED: {}", e),
+            Err(e) => println!("read_pfs0_section FAILED: {e}"),
         }
     }
 }

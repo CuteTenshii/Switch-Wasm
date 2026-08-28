@@ -1,5 +1,5 @@
 //! Boot a retail NSP and write the Nth presented frame to a PPM:
-//! `screenshot_nsp <path.nsp> <prod.keys> <title.keys> <out.ppm> [frame]`.
+//! `screenshot_nsp <path.nsp> <prod.keys> [title.keys] <out.ppm> [frame]`.
 //!
 //! The counterpart to `screenshot` for a title rather than an NRO, and the
 //! difference from `boot_nsp SHOT=` is that this stops *at* the frame rather
@@ -16,16 +16,13 @@ use common::{Flow, Pace};
 use std::env;
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "screenshot_nsp <path.nsp> <prod.keys> <title.keys> <out.ppm> [frame]";
+const USAGE: &str = "screenshot_nsp <path.nsp> <prod.keys> [title.keys] <out.ppm> [frame]";
 
 fn main() {
-    let title = common::Title::open_nsp(
-        common::arg(1, USAGE),
-        common::arg(2, USAGE),
-        Some(common::arg(3, USAGE)),
-    );
-    let out = common::arg(4, USAGE);
-    let want = common::opt_num(5).unwrap_or(1);
+    let args = common::container_args(USAGE);
+    let title = args.open();
+    let out = args.need(0).to_string();
+    let want = args.rest_num(1).unwrap_or(1);
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
@@ -39,24 +36,14 @@ fn main() {
     // the wrong memory or at memory nothing has filled yet, and this is what
     // tells the two apart.
     let watch = common::env_hex("WATCH_MEM");
-    let trap: Option<(u32, u32)> = env::var("TRAP_WRITE").ok().and_then(|v| {
-        let (a, n) = v.split_once(':')?;
-        let a = u32::from_str_radix(a.trim().trim_start_matches("0x"), 16).ok()?;
-        let n = u32::from_str_radix(n.trim().trim_start_matches("0x"), 16).ok()?;
-        Some((a, a + n))
-    });
     // `POKE_TRI=<cpu addr>` fills a 3-vertex, 60-byte-stride array with a
     // full-screen triangle. A buffer the guest binds but never writes leaves
     // two possibilities open -- the upload is missing, or the draw would draw
     // nothing anyway -- and putting real geometry there separates them.
-    let poke: Option<u32> = env::var("POKE_TRI")
-        .ok()
-        .and_then(|v| u32::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok());
-    if let Some((lo, hi)) = trap {
-        cpu.mem.watch_writes(lo, hi - lo);
-    }
+    let poke: Option<u32> = common::env_hex("POKE_TRI");
+    let mut debug = common::Debug::from_env();
+    debug.arm(&mut cpu);
     let mut share = [0u64; 32];
-    let mut traps = 0u32;
     let mut seen_nonzero = false;
     // Stepwise throughout: every hook below reads the machine between two
     // instructions. `screenshot_nca` shows the other shape, where the
@@ -69,21 +56,7 @@ fn main() {
             if cpu.nv.gpu.frames >= want {
                 return Flow::Stop;
             }
-            // `TRAP_WRITE=<addr>:<size>` reports the guest PC of each of the first
-            // writes into a region -- which code owns a buffer, rather than just
-            // whether it was touched.
-            if let Some(at) = cpu.mem.take_watch_hit() {
-                if traps < 24 {
-                    let v = cpu.mem.read_u32(at & !3).unwrap_or(0);
-                    let src = cpu.reg(1) as u32;
-                    let peek: Vec<u32> = (0..4)
-                        .map(|k| cpu.mem.read_u32(src.wrapping_add(k * 4)).unwrap_or(0))
-                        .collect();
-                    println!("[trap] wrote {at:#x} = {v:#010x} at step {done} pc={:#x} x0={:#x} x1={src:#x} x2={:#x} src[..4]={peek:08x?} bt={:x?}",
-                    cpu.get_pc(), cpu.reg(0), cpu.reg(2), cpu.backtrace(4));
-                    traps += 1;
-                }
-            }
+            debug.tick(cpu, done);
             if let Some(w) = watch {
                 if !seen_nonzero
                     && done % 4096 == 0
@@ -130,10 +103,8 @@ fn main() {
         println!("[watch-mem] never non-zero");
     }
     common::report(&cpu, &run);
-    // `DUMP_MEM=<addr>[,<addr>]` reads three 60-byte rows there as floats,
-    // which is the quickest way to tell a vertex buffer from whatever else
-    // happened to be nearby: real positions are ordinary numbers, and a
-    // structure reinterpreted as float is a wall of denormals.
+    debug.report();
+    debug.stop_state(&cpu);
     // `SCAN_MEM=<addr>:<size>` lists the non-zero spans in a region, which is
     // how you find the buffer you meant among the ones you did not.
     if let Ok(v) = env::var("SCAN_MEM") {
@@ -161,7 +132,12 @@ fn main() {
             println!("    {a:#x} .. +{l:#x}");
         }
     }
-    if let Ok(v) = env::var("DUMP_MEM") {
+    // `DUMP_VERTS=<addr>[,<addr>]` reads three 60-byte rows there as floats,
+    // which is the quickest way to tell a vertex buffer from whatever else
+    // happened to be nearby: real positions are ordinary numbers, and a
+    // structure reinterpreted as float is a wall of denormals. `DUMP=` is the
+    // generic hex view; this is the one that reads geometry as geometry.
+    if let Ok(v) = env::var("DUMP_VERTS") {
         for spec in v.split(',') {
             let at = u32::from_str_radix(spec.trim().trim_start_matches("0x"), 16).unwrap_or(0);
             let f: Vec<f32> = (0..45u32)

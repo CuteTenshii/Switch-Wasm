@@ -1,6 +1,6 @@
 //! Where a title that presents frames but draws nothing spends its time once
 //! it has stopped getting anywhere:
-//! `steady_state <nsp> <prod.keys> <title.keys> [frame] [steps]`.
+//! `steady_state <nsp> <prod.keys> [title.keys] [frame] [steps]`.
 //!
 //! `boot_nsp`'s `PROFILE=` samples a whole run, and for a title that spends a
 //! billion instructions booting and then stalls, that is a profile of the part
@@ -23,7 +23,7 @@ use common::{Flow, Pace};
 use std::collections::BTreeMap;
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "steady_state <nsp> <prod.keys> <title.keys> [frame] [steps]";
+const USAGE: &str = "steady_state <nsp> <prod.keys> [title.keys] [frame] [steps]";
 
 /// How many instructions to sample once the frame is reached. Enough to cover
 /// a few seconds of a stalled title's own loop.
@@ -52,13 +52,10 @@ fn report(title: &str, counts: &BTreeMap<(u64, u32), u64>, total: u64, rows: usi
 }
 
 fn main() {
-    let title = common::Title::open_nsp(
-        common::arg(1, USAGE),
-        common::arg(2, USAGE),
-        Some(common::arg(3, USAGE)),
-    );
-    let want_frame = common::opt_num(4).unwrap_or(60);
-    let steps = common::opt_num(5).unwrap_or(DEFAULT_STEPS);
+    let args = common::container_args(USAGE);
+    let title = args.open();
+    let want_frame = args.rest_num(0).unwrap_or(60);
+    let steps = args.rest_num(1).unwrap_or(DEFAULT_STEPS);
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();

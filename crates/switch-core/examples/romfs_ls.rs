@@ -1,5 +1,5 @@
 //! What a title's RomFS holds, and which file a byte offset falls in:
-//! `romfs_ls <path.nsp> <prod.keys> <title.keys> [offset,...]`.
+//! `romfs_ls <path.nsp|path.nca> <prod.keys> [title.keys] [offset,...]`.
 //!
 //! `TRACE_IPC`'s `[storage] read offset=…` lines name a byte range and nothing
 //! else, so a trace of a title loading its assets says how much it read and
@@ -18,7 +18,7 @@ mod common;
 
 use switch_core::source::ByteSource;
 
-const USAGE: &str = "romfs_ls <path.nsp> <prod.keys> <title.keys> [offset,...]";
+const USAGE: &str = "romfs_ls <path.nsp|path.nca> <prod.keys> [title.keys] [offset,...]";
 
 /// The RomFS header's declared size. The format carries no magic number, so
 /// this doubles as the check that the section decrypted to a RomFS at all.
@@ -106,18 +106,9 @@ fn name(entry: &[u8], fixed_size: usize) -> String {
 }
 
 fn main() {
-    let container = common::arg(1, USAGE);
-    let prod = common::arg(2, USAGE);
-    // Argument 3 is `title.keys` unless it is the offset list — a container
-    // whose keys are all in `prod.keys` should not have to name a file that
-    // does not exist just to reach the fourth argument.
-    let third = common::opt_arg(3);
-    let is_offsets =
-        |s: &String| s.starts_with("0x") || s.starts_with(|c: char| c.is_ascii_digit());
-    let title = third.clone().filter(|s| !is_offsets(s));
-    let wanted: Vec<u64> = third
-        .filter(is_offsets)
-        .or_else(|| common::opt_arg(4))
+    let args = common::container_args(USAGE);
+    let wanted: Vec<u64> = args
+        .rest(0)
         .map(|list| {
             list.split(',')
                 .filter_map(|v| u64::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok())
@@ -125,7 +116,7 @@ fn main() {
         })
         .unwrap_or_default();
 
-    let title = common::Title::open_nsp(&container, &prod, title.as_ref());
+    let title = args.open();
     let romfs = match title.romfs_source() {
         Some(Ok(romfs)) => romfs,
         Some(Err(e)) => common::usage(&format!("this title's RomFS could not be opened: {e}")),

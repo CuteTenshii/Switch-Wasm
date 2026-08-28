@@ -14,6 +14,17 @@ The `.nro`/`.nsp` files are gitignored.
   `UPDATE=<update.nsp>` runs the title patched and `DLC=<a.nsp>,<b.nsp>` mounts
   its add-on content, which is the page's pairing of the containers with no
   page in the way.
+- **The shared debugging knobs**, on `boot_nsp`, `screenshot_nsp` and
+  `screenshot_nca` alike: `TRAP_WRITE=<addr>:<hex size>` and `TRAP_READ=…` name
+  the code that writes to or reads a region, `WATCH_PC=<addr>[,...]` the code
+  that reaches one, and `DUMP=<base>[+<hex>][:<hex len>][,...]` hex-dumps guest
+  memory wherever the run stopped — `<base>` being a register, `sp`, `pc` or an
+  address, as in `DUMP=x23+0x1830:0x40`. Each used to live in one tool and be
+  spelled differently in the next.
+- Every tool that reads a container takes `<container> <prod.keys>
+  [title.keys]`, in that order: the container may be an NSP or a bare NCA
+  (decided by its header, not its name), and `title.keys` may be left out when
+  `prod.keys` already opens the title.
 - `--example dump_exefs …` — flat module images at their real load addresses
   plus a sorted `symbols.txt`. **This is what makes a retail backtrace
   readable.** `--example disasm_flat` disassembles them there.
