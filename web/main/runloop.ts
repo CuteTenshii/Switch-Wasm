@@ -11,6 +11,7 @@ import { call, readLastError } from './rpc';
 import { saveFlush } from './saves';
 import { sdFlush } from './sdcard';
 import { panelOpen, setPanel, setState } from './shell';
+import { holdWakeLock, releaseWakeLock } from './wakelock';
 
 // Run in worker slices so the page can paint and input can reach the emulator
 // between them. There is no overall step budget - hbmenu never halts - so the
@@ -56,6 +57,9 @@ export async function run(): Promise<void> {
   aborted = false;
   setRunButton(true);
   setState('running');
+  // A guest that runs for minutes without a keypress is a page the browser
+  // would otherwise let the screen sleep on.
+  holdWakeLock();
   const slice = traceEnabled() ? TRACE_SLICE : RUN_SLICE;
   let steps = 0;
   let tick = 0;
@@ -118,6 +122,7 @@ export async function run(): Promise<void> {
   } finally {
     running = false;
     setRunButton(false);
+    releaseWakeLock();
   }
   await finishRun(steps);
 }
