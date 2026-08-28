@@ -88,6 +88,9 @@ pub struct Gpu {
     pub stats: GpuStats,
     /// The most recently presented frame, ready for the host to display.
     pub framebuffer: Framebuffer,
+    /// The swizzled bytes of the surface being scanned out, kept so that
+    /// reading one does not allocate a surface's worth of zeros per frame.
+    scan_out: Vec<u8>,
     /// Frames presented since boot.
     pub frames: u64,
     /// Emit a per-method trace to stderr.
@@ -111,6 +114,7 @@ impl Gpu {
             channels: HashMap::new(),
             stats: GpuStats::default(),
             framebuffer: Framebuffer::default(),
+            scan_out: Vec::new(),
             frames: 0,
             trace: false,
             next_as_id: 1,
@@ -255,6 +259,22 @@ impl Gpu {
         let srgb = format.is_srgb();
         let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
 
+        // The whole buffer in one walk of the page table rather than 921,600.
+        //
+        // `read_le` finds the page, bounds-checks it and assembles a word for
+        // every pixel, and scan-out does that for every pixel of every frame
+        // whichever renderer drew it — so it was the cost of a frame in a
+        // title that draws nothing at all. `read_into` copies whole pages,
+        // and what is left is arithmetic over a slice.
+        // Kept between frames rather than allocated per frame: it is the
+        // size of the surface, and `read_into` writes over all of it, so a
+        // fresh zeroed one is 3.7 MB of zeroing thrown away sixty times a
+        // second.
+        let swizzled = layout.layer_stride(width_bytes, buffer.height) as usize;
+        let mut raw_bytes = std::mem::take(&mut self.scan_out);
+        raw_bytes.resize(swizzled, 0);
+        let held = mem.read_into(base, &mut raw_bytes[..swizzled]).is_ok();
+
         let mut pixels = Vec::with_capacity((buffer.width * buffer.height) as usize);
         for y in 0..buffer.height {
             // Swizzled once per contiguous run rather than once per pixel:
@@ -266,7 +286,20 @@ impl Gpu {
                 let addr = base.wrapping_add(offset);
                 let count = (run / bpp).clamp(1, buffer.width - x);
                 for i in 0..count {
-                    let raw = mem.read_le(addr.wrapping_add(i * bpp), bpp)?;
+                    let at = (offset + i * bpp) as usize;
+                    // Four bytes as one word, not four shifts into a `u128`:
+                    // every display format but the 16-bit ones is four bytes,
+                    // and a byte loop here costs more than the page lookup it
+                    // was meant to save.
+                    let raw = match (held, at + bpp as usize <= swizzled) {
+                        (true, true) if bpp == 4 => u128::from(u32::from_le_bytes(
+                            raw_bytes[at..at + 4].try_into().expect("four bytes"),
+                        )),
+                        (true, true) if bpp == 2 => u128::from(u16::from_le_bytes(
+                            raw_bytes[at..at + 2].try_into().expect("two bytes"),
+                        )),
+                        _ => mem.read_le(addr.wrapping_add(i * bpp), bpp)?,
+                    };
                     // The common surface is already the word the canvas
                     // wants; only a format whose decode is real work goes
                     // through linear light and straight back again.
@@ -290,6 +323,7 @@ impl Gpu {
                 x += count;
             }
         }
+        self.scan_out = raw_bytes;
         self.framebuffer = Framebuffer { width: buffer.width, height: buffer.height, pixels };
         self.frames += 1;
         Ok(())
