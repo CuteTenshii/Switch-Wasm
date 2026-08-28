@@ -1136,14 +1136,11 @@ impl Cpu {
     /// order), `q` selects 128-bit vs 64-bit registers.
     pub(super) fn simd_elem<F: Fn(u64, u64) -> u64>(&mut self, rd: u8, rn: u8, rm: u8, q: bool, esize: u32, f: F) {
         let lanes = if q { 128 / esize } else { 64 / esize };
-        let mask = (1u128 << esize) - 1;
         let a = self.vregs[rn as usize];
         let b = self.vregs[rm as usize];
         let mut out: u128 = 0;
         for i in 0..lanes {
-            let av = ((a >> (esize * i)) & mask) as u64;
-            let bv = ((b >> (esize * i)) & mask) as u64;
-            out |= (f(av, bv) as u128 & mask) << (esize * i);
+            out = set_lane(out, esize, i, f(lane(a, esize, i), lane(b, esize, i)));
         }
         self.vregs[rd as usize] = out;
     }
@@ -1158,14 +1155,11 @@ impl Cpu {
         esize: u32,
         f: F,
     ) {
-        let mask = elem_mask(esize);
         let a = self.vregs[rn as usize];
         let b = self.vregs[rm as usize];
         let mut out: u128 = 0;
         for i in 0..lanes {
-            let av = ((a >> (esize * i)) & mask) as u64;
-            let bv = ((b >> (esize * i)) & mask) as u64;
-            out |= (u128::from(f(av, bv)) & mask) << (esize * i);
+            out = set_lane(out, esize, i, f(lane(a, esize, i), lane(b, esize, i)));
         }
         self.vregs[rd as usize] = out;
     }
@@ -1968,13 +1962,12 @@ impl Cpu {
     ) {
         let src_esize = 2 * dest_esize;
         let src_elements = 128 / src_esize;
-        let src_mask = (1u128 << src_esize) - 1;
         let dest_mask = (1u128 << dest_esize) - 1;
         let src = self.vregs[rn as usize];
         let round_add = if rounding { 1i64 << (shift - 1) } else { 0 };
         let mut narrowed = [0u64; 16];
         for i in 0..src_elements {
-            let raw = ((src >> (src_esize * i)) & src_mask) as u64;
+            let raw = lane(src, src_esize, i);
             let shifted = if signed_src {
                 let v = (raw as i64) << (64 - src_esize) >> (64 - src_esize);
                 v.wrapping_add(round_add) >> shift
@@ -1994,7 +1987,7 @@ impl Cpu {
         }
         let mut out: u128 = 0;
         for i in 0..src_elements {
-            out |= (narrowed[i as usize] as u128) << (dest_esize * i);
+            out = set_lane(out, dest_esize, i, narrowed[i as usize]);
         }
         if q {
             self.vregs[rd as usize] = (self.vregs[rd as usize] & ((1u128 << 64) - 1)) | (out << 64);

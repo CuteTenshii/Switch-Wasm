@@ -164,7 +164,7 @@ impl Cpu {
         self.run_fp(Cpu::fp_form(insn), insn)
     }
 
-    fn fp_mov_imm(&mut self, insn: u32) -> Result<bool> {
+    pub(super) fn fp_mov_imm(&mut self, insn: u32) -> Result<bool> {
         let imm8 = ((insn >> 13) & 0xFF) as u8;
         let ftype = (insn >> 22) & 0b11;
         let rd = (insn & 0x1F) as u8;
@@ -190,7 +190,7 @@ impl Cpu {
         };
     }
 
-    fn fp_one_source(&mut self, insn: u32) -> Result<bool> {
+    pub(super) fn fp_one_source(&mut self, insn: u32) -> Result<bool> {
         let op = (insn >> 15) & 0x3F;
         let rn = ((insn >> 5) & 0x1F) as u8;
         let rd = (insn & 0x1F) as u8;
@@ -290,7 +290,7 @@ impl Cpu {
         return Ok(true);
     }
 
-    fn fp_mov_reg(&mut self, insn: u32) -> Result<bool> {
+    pub(super) fn fp_mov_reg(&mut self, insn: u32) -> Result<bool> {
         let sel = (insn >> 16) & 0x3F;
         let double = ((insn >> 22) & 1) == 1;
         let rd = (insn & 0x1F) as u8;
@@ -318,7 +318,7 @@ impl Cpu {
         return Ok(true);
     }
 
-    fn fp_int_conv(&mut self, insn: u32) -> Result<bool> {
+    pub(super) fn fp_int_conv(&mut self, insn: u32) -> Result<bool> {
         let sf = (insn >> 31) & 1;
         let ftype = (insn >> 22) & 0b11; // 00 = single, 01 = double
         if ftype > 0b01 {
@@ -382,7 +382,7 @@ impl Cpu {
         };
     }
 
-    fn fp_fixed_conv(&mut self, insn: u32) -> Result<bool> {
+    pub(super) fn fp_fixed_conv(&mut self, insn: u32) -> Result<bool> {
         let sf = (insn >> 31) & 1;
         let ftype = (insn >> 22) & 0b11;
         if ftype > 0b01 {
@@ -395,7 +395,7 @@ impl Cpu {
         let opcode = (insn >> 16) & 0b111;
         let fbits = 64 - ((insn >> 10) & 0x3F);
         let wide = sf != 0;
-        let scale = 2f64.powi(fbits as i32);
+        let scale = Self::pow2(fbits);
         return match (rmode, opcode) {
             // SCVTF / UCVTF: fixed-point → float.
             (0b00, 0b010) | (0b00, 0b011) => {
@@ -435,7 +435,7 @@ impl Cpu {
         };
     }
 
-    fn fp_int_cmp_zero(&mut self, insn: u32) -> Result<bool> {
+    pub(super) fn fp_int_cmp_zero(&mut self, insn: u32) -> Result<bool> {
         let u = (insn >> 29) & 1;
         let op = (insn >> 10) & 0x3F;
         let rn = ((insn >> 5) & 0x1F) as u8;
@@ -452,7 +452,7 @@ impl Cpu {
         return Ok(true);
     }
 
-    fn fp_three_source(&mut self, insn: u32) -> Result<bool> {
+    pub(super) fn fp_three_source(&mut self, insn: u32) -> Result<bool> {
         let double = match (insn >> 22) & 0b11 {
             0b00 => false,
             0b01 => true,
@@ -495,7 +495,7 @@ impl Cpu {
         return Ok(true);
     }
 
-    fn fp_data_proc(&mut self, insn: u32) -> Result<bool> {
+    pub(super) fn fp_data_proc(&mut self, insn: u32) -> Result<bool> {
     let double = ((insn >> 22) & 1) == 1;
     let rn = ((insn >> 5) & 0x1F) as u8;
     let rd = (insn & 0x1F) as u8;
@@ -592,6 +592,18 @@ impl Cpu {
     Ok(true)
     }
 
+    /// `2^n` as an `f64`, built rather than computed.
+    ///
+    /// `f64::powi` is a libcall in wasm (`__powidf2`, 1.4% of a translated
+    /// frame), and every `fcvtzs` went through two of them for its saturation
+    /// bounds. A power of two is exact: the exponent field is `1023 + n` and
+    /// the mantissa is zero.
+    #[inline(always)]
+    fn pow2(n: u32) -> f64 {
+        debug_assert!(n <= 1023);
+        f64::from_bits(u64::from(1023 + n) << 52)
+    }
+
     /// The Invalid and Inexact flags a float-to-integer convert raises: a NaN
     /// or a result the destination cannot hold is Invalid (and saturates), and
     /// anything that lost a fraction is Inexact.
@@ -602,9 +614,10 @@ impl Cpu {
         }
         let rounded = round_to_integral(v, r);
         let (min, upper) = if signed {
-            (-(2f64.powi(bits as i32 - 1)), 2f64.powi(bits as i32 - 1))
+            let edge = Self::pow2(bits - 1);
+            (-edge, edge)
         } else {
-            (0.0, 2f64.powi(bits as i32))
+            (0.0, Self::pow2(bits))
         };
         if !rounded.is_finite() || rounded < min || rounded >= upper {
             self.fpsr |= FPSR_IOC;

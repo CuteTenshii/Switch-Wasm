@@ -236,19 +236,31 @@ First visit to an address translates forward into `Op`s — operands extracted,
 immediates decoded, and every field the interpreter re-reads per execution
 (load width and direction, register-offset extension, add-vs-subtract, which
 system register, which floating-point form) resolved to the one thing the
-instruction does. Translation runs *through* `b.cond`/`cbz`/`tbz`, which become
-`Exit`s checked on the way past, so only an always-taken branch ends a block:
-hbmenu averages 13 instructions per block entry, not 7. Worth **2.5x**
-(hbmenu 30 -> 80 M/s). It generates no code: every op calls the same helper the
-interpreter would, so the two engines are the same computation and anything
-untranslated falls back. `SWITCH_NO_JIT=1` for host tools, the debug panel's
-*Translation* section in the browser.
+instruction does. Register 31 is resolved too — the file has 34 slots so that
+its three meanings (`XZR` read, `XZR` write, `SP`) are an index, not a branch.
+Translation runs *through* `b.cond`/`cbz`/`tbz`, which become `Exit`s checked
+on the way past, so only an always-taken branch ends a block: hbmenu averages
+13 instructions per block entry, not 7. A `cmp` feeding the branch right after
+it is then folded into that `Exit` (`fuse_compares`), which is only possible
+because the two now share a block. Worth **~2.9x** (hbmenu 30 -> 88 M/s). It
+generates no code: every op calls the same helper the interpreter would, so the
+two engines are the same computation and anything untranslated falls back.
+`SWITCH_NO_JIT=1` for host tools, the debug panel's *Translation* section in
+the browser.
 
-Two traps this cost real time to learn. `Memory::fill_le` stamps a 512-byte
+**A block must always retire at least one instruction.** `run_jit` advances by
+what `exec_block` reports, so a block that returns `Ok(0)` spins forever. A
+fused pair at index 0 under a one-instruction budget did exactly that; the
+budget now runs the compare's half alone and stops on the branch, which is a
+valid entry point. `jit_test` catches this, but it hangs rather than failing.
+
+Three traps this cost real time to learn. `Memory::fill_le` stamps a 512-byte
 pattern before copying, so it is *slower* than a plain loop for a small run —
-`DC ZVA`'s 64 bytes went through eight `write_u64`s instead. And a segment loop
+`DC ZVA`'s 64 bytes went through eight `write_u64`s instead. A segment loop
 that recomputes `pc` from the index rather than carrying it costs more than the
-block-entry it saves.
+block entry it saves. And dispatching the floating-point handlers through a
+`fn` pointer instead of `run_fp`'s `match` was a **regression** — it stops LLVM
+inlining them. Tried, measured, reverted.
 
 Emitting wasm per block is blocked by the memory model, not the browser: a
 generated module can only address its own linear memory, and guest memory is a
@@ -901,10 +913,23 @@ What the numbers taught us:
 - The interpreter's floor is ~9ns/instruction natively and ~20ns in wasm.
   Block translation is what got past it; more guard reordering would not have.
 - **What is left after translation is real work, not bookkeeping.** hbmenu's
-  translated profile is 72% `exec_block`, 14% `try_fp` (the floating-point
-  arithmetic itself) and 5% block dispatch. Anything further needs ops for the
-  scalar FP forms — `scvtf`, `fcvt`, `fadd`/`fsub`/`fmul`, `fcmpe` are the four
-  that matter — or real wasm codegen, not more dispatch work.
+  translated profile is 68% `exec_block`, ~10% floating point and SIMD, and 7%
+  block dispatch. Anything further needs ops for the scalar FP forms —
+  `scvtf`, `fcvt`, `fadd`/`fsub`/`fmul`, `fcmpe` are the four that matter — or
+  real codegen, not more dispatch work.
+- **The two builds disagree by more than the 2-3x wasm tax.** Resolving
+  register 31, dropping `f64::powi` and keeping vector lane shifts 64-bit were
+  together worth ~1.15x natively and **~1.44x in wasm**, because each removes a
+  branch or a libcall only wasm pays for. Rank by `wasm_bench`, not by
+  `jit_bench`; `perf` on the host is for finding *where*, not *how much*.
+- **An identity map for guest memory genuinely does not fit**, so that part of
+  `cpu/jit.rs`'s note stands: addresses reach `GUEST_SPACE_END` (0xF5000000)
+  and wasm32 linear memory caps at 4 GiB. But codegen does not need one — only
+  ≤2.5 GiB is ever backed (`MAX_MAPPED_BYTES`). Making `Memory::pages` slabs
+  inside one arena with a flat `u32` offset table would let generated code
+  translate an address inline (`table[addr >> 12] + (addr & 0xFFF)`) instead of
+  importing a host call per access, and would drop the `Option` check and the
+  `Box` chase for the interpreter today.
 - **A fragment shader runs once per covered pixel**, and a full-screen pass is
   921,600 of them — so a small `Vec`, a `HashMap` for a sparse thing, or a
   rescan to answer a question costs whole seconds a frame. Fixing three of

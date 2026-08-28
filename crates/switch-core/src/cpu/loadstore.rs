@@ -486,18 +486,15 @@ impl Cpu {
     }
 
     /// Read lane `index` of Vn, `esize` bits wide, in little-endian lane order.
-    #[inline]
+    #[inline(always)]
     pub(super) fn read_vreg_elem(&self, reg: u8, index: u32, esize: u32) -> u64 {
-        ((self.vregs[reg as usize] >> (index * esize)) & elem_mask(esize)) as u64
+        lane(self.vregs[reg as usize], esize, index)
     }
 
     /// Write lane `index` of Vn, leaving every other lane alone.
-    #[inline]
+    #[inline(always)]
     pub(super) fn write_vreg_elem(&mut self, reg: u8, index: u32, esize: u32, val: u64) {
-        let shift = index * esize;
-        let mask = elem_mask(esize) << shift;
-        self.vregs[reg as usize] =
-            (self.vregs[reg as usize] & !mask) | ((u128::from(val) << shift) & mask);
+        self.vregs[reg as usize] = set_lane(self.vregs[reg as usize], esize, index, val);
     }
 
     #[allow(clippy::too_many_lines)]

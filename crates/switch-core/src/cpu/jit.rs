@@ -91,7 +91,7 @@
 
 use super::bits::*;
 use super::fp::FpForm;
-use super::{Cpu, Result, RunReport, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
+use super::{Cpu, Result, RunReport, SELF_RETURN_TRAMPOLINE, SP_SLOT, TIME_SLICE, ZR_DISCARD};
 use crate::mem::{Memory, PAGE_SIZE};
 use crate::IdMap;
 use std::rc::Rc;
@@ -146,6 +146,15 @@ pub(super) enum Acc {
 }
 
 impl Acc {
+    /// Whether the access writes `Rt`. Decides which of register 31's two
+    /// meanings the `Rt` field names, and so which slot the translator bakes.
+    fn writes_rt(self) -> bool {
+        !matches!(
+            self,
+            Acc::Store8 | Acc::Store16 | Acc::Store32 | Acc::Store64 | Acc::Prefetch
+        )
+    }
+
     /// The access a `size`:`opc` pair selects, reading them exactly as
     /// [`super::Cpu::ld_st_opc`] does.
     fn of(sz: u8, opc: u8) -> Acc {
@@ -212,6 +221,11 @@ pub(super) enum PairKind {
 }
 
 impl PairKind {
+    /// Whether the pair writes its two registers.
+    fn loads(self) -> bool {
+        matches!(self, PairKind::Load32 | PairKind::Load32Sext | PairKind::Load64)
+    }
+
     /// The distance between the two registers' addresses.
     #[inline(always)]
     fn stride(self) -> u32 {
@@ -265,16 +279,7 @@ pub(super) enum Op {
     /// to match, so which direction the operation runs in does not survive to
     /// run time. `rn_sp`/`rd_sp` are the two places register 31 means the
     /// stack pointer rather than the zero register, also decided here.
-    AddSubImm {
-        rd: u8,
-        rn: u8,
-        rhs: u64,
-        carry: u8,
-        set_flags: bool,
-        rn_sp: bool,
-        rd_sp: bool,
-        sf: bool,
-    },
+    AddSubImm { rd: u8, rn: u8, rhs: u64, carry: u8, set_flags: bool, sf: bool },
     /// The shifted-register form, where both `Rd` and `Rn` are always the zero
     /// register. `carry` is 1 for the subtractions, and doubles as the mask
     /// that inverts the operand.
@@ -290,7 +295,6 @@ pub(super) enum Op {
         shift: u8,
         carry: u8,
         set_flags: bool,
-        rd_sp: bool,
         sf: bool,
     },
 
@@ -365,6 +369,27 @@ pub(super) enum Exit {
     Cbz { rt: u8, sf: bool, nz: bool, target: u32 },
     /// `TBZ`/`TBNZ`.
     Tbz { rt: u8, bit: u8, nz: bool, target: u32 },
+    /// A `CMP`/`CMN` against a constant, fused with the `B.cond` that reads
+    /// its flags — the commonest pair in compiled code, and one that only
+    /// became fusable when blocks started running through conditional
+    /// branches. `rhs` and `carry` arrive as they do for any other
+    /// subtraction; the destination was the zero register, so nothing but
+    /// NZCV is written.
+    CmpImm { rn: u8, rhs: u64, carry: u8, sf: bool, cond: u8, target: u32 },
+    /// The same against a register.
+    CmpReg { rn: u8, rm: u8, carry: u8, sf: bool, cond: u8, target: u32 },
+}
+
+impl Exit {
+    /// How many instructions the exit covers — two once a compare has been
+    /// folded into it.
+    #[inline(always)]
+    fn span(self) -> usize {
+        match self {
+            Exit::CmpImm { .. } | Exit::CmpReg { .. } => 2,
+            _ => 1,
+        }
+    }
 }
 
 /// A run of instructions with a single entry point, translated once.
@@ -533,12 +558,14 @@ fn translate(mem: &Memory, start: u32) -> Block {
         let insn = match mem.fetch(pc) {
             Ok(insn) => insn,
             Err(_) => {
+                fuse_compares(&mut ops, &mut exits);
                 return Block { start, ops, words, exits, term: Some(Term::Fetch) };
             }
         };
         match decode(insn, pc) {
             Decoded::Term(term) => {
                 words.push(insn);
+                fuse_compares(&mut ops, &mut exits);
                 return Block { start, ops, words, exits, term: Some(term) };
             }
             // A conditional branch does not end the block: its not-taken path
@@ -557,7 +584,40 @@ fn translate(mem: &Memory, start: u32) -> Block {
             }
         }
     }
+    fuse_compares(&mut ops, &mut exits);
     Block { start, ops, words, exits, term: None }
+}
+
+/// Fold every `CMP`/`CMN` that feeds the conditional branch immediately after
+/// it into that branch.
+///
+/// The pair is the shape of every bounds check and loop condition compiled
+/// code emits, and until blocks ran through conditional branches the two were
+/// never in the same block to fold. Only a compare whose destination is the
+/// zero register qualifies, so the fused op writes nothing but NZCV and the
+/// rewrite cannot lose a result.
+fn fuse_compares(ops: &mut [Op], exits: &mut [(u32, Exit)]) {
+    for (at, exit) in exits.iter_mut() {
+        let Exit::Cond { cond, target } = *exit else { continue };
+        if *at == 0 {
+            continue;
+        }
+        let prev = (*at - 1) as usize;
+        let fused = match ops[prev] {
+            Op::AddSubImm { rd, rn, rhs, carry, set_flags: true, sf } if rd == ZR_DISCARD as u8 => {
+                Exit::CmpImm { rn, rhs, carry, sf, cond, target }
+            }
+            Op::AddSubReg { rd, rn, rm, carry, set_flags: true, sf } if rd == ZR_DISCARD as u8 => {
+                Exit::CmpReg { rn, rm, carry, sf, cond, target }
+            }
+            _ => continue,
+        };
+        // The compare's slot becomes filler and the exit moves onto it, so the
+        // pair is one dispatch covering two instructions.
+        ops[prev] = Op::Nop;
+        *at -= 1;
+        *exit = fused;
+    }
 }
 
 /// Classify one instruction the way [`super::Cpu::execute`] does — by bits
@@ -692,7 +752,7 @@ fn decode_system(insn: u32) -> Op {
     let rt = (insn & 0x1F) as u8;
 
     if l == 1 {
-        return Op::Mrs { rd: rt, reg: decode_sysreg(insn) };
+        return Op::Mrs { rd: zr_write(insn), reg: decode_sysreg(insn) };
     }
     if op0 == 0 {
         // MSR (immediate). Only the PSTATE write has an effect; DAIF, SPSel
@@ -718,6 +778,29 @@ fn decode_system(insn: u32) -> Op {
     Op::System { insn }
 }
 
+/// The register-file slot a five-bit field names when 31 means `XZR` and the
+/// field is *written*. Reads need no mapping — slot 31 holds zero and nothing
+/// writes it — so only the destinations are resolved here.
+#[inline]
+fn zr_write(n: u32) -> u8 {
+    let n = (n & 0x1F) as u8;
+    if n == 31 { ZR_DISCARD as u8 } else { n }
+}
+
+/// The slot a five-bit field names when 31 means `SP`, read or written.
+#[inline]
+fn sp_form(n: u32) -> u8 {
+    let n = (n & 0x1F) as u8;
+    if n == 31 { SP_SLOT as u8 } else { n }
+}
+
+/// The slot a load or store's `Rt` field names, which depends on whether the
+/// access reads it or writes it.
+#[inline]
+fn rt_slot(rt: u32, acc: Acc) -> u8 {
+    if acc.writes_rt() { zr_write(rt) } else { (rt & 0x1F) as u8 }
+}
+
 /// The operand an addition needs to compute a subtraction. `carry` is 1
 /// exactly when the instruction subtracts, so it doubles as the mask that
 /// inverts the operand — no branch, and nothing left to decide at run time.
@@ -739,7 +822,7 @@ fn decode_data_proc_imm(insn: u32, pc: u32) -> Op {
         // ADR / ADRP: the result depends only on where the instruction is, so
         // the translator computes it and the block just moves a constant.
         0b10000 => {
-            let rd = (insn & 0x1F) as u8;
+            let rd = zr_write(insn);
             let immhi = u64::from((insn >> 5) & 0x7_FFFF);
             let immlo = u64::from((insn >> 29) & 0b11);
             let imm = sext_u64((immhi << 2) | immlo, 21);
@@ -762,22 +845,22 @@ fn decode_data_proc_imm(insn: u32, pc: u32) -> Op {
             let set_flags = (op & 1) == 1;
             let sub = (op >> 1) == 1;
             Op::AddSubImm {
-                rd: (insn & 0x1F) as u8,
-                rn: ((insn >> 5) & 0x1F) as u8,
+                // Both operands are the SP form here, and the destination is
+                // only SP when the instruction does not set flags.
+                rd: if set_flags { zr_write(insn) } else { sp_form(insn) },
+                rn: sp_form(insn >> 5),
                 // Subtraction is addition of the inverted operand with a carry
                 // in, and both are known now.
                 rhs: if sub { !imm } else { imm },
                 carry: u8::from(sub),
                 set_flags,
-                rn_sp: true,
-                rd_sp: !set_flags,
                 sf,
             }
         }
         0b10010 => {
             if ((insn >> 23) & 1) == 1 {
                 // MOVN / MOVZ / MOVK
-                let rd = (insn & 0x1F) as u8;
+                let rd = zr_write(insn);
                 let imm16 = u64::from((insn >> 5) & 0xFFFF);
                 let hw = if sf { (insn >> 21) & 0b11 } else { (insn >> 21) & 1 };
                 let shift = hw * 16;
@@ -794,19 +877,24 @@ fn decode_data_proc_imm(insn: u32, pc: u32) -> Op {
                 let immr = (insn >> 16) & 0x3F;
                 let imms = (insn >> 10) & 0x3F;
                 match decode_bit_mask(sf, (insn >> 22) & 1, immr, imms) {
-                    Some(imm) => Op::LogicalImm {
-                        rd: (insn & 0x1F) as u8,
-                        rn: ((insn >> 5) & 0x1F) as u8,
-                        imm,
-                        opc: ((insn >> 29) & 0b11) as u8,
-                        sf,
-                    },
+                    Some(imm) => {
+                        let opc = ((insn >> 29) & 0b11) as u8;
+                        Op::LogicalImm {
+                            // `ANDS` is the only one of the four whose Rd is
+                            // the zero register rather than SP.
+                            rd: if opc == 0b11 { zr_write(insn) } else { sp_form(insn) },
+                            rn: ((insn >> 5) & 0x1F) as u8,
+                            imm,
+                            opc,
+                            sf,
+                        }
+                    }
                     None => Op::Interpret { insn },
                 }
             }
         }
         0b10011 => {
-            let rd = (insn & 0x1F) as u8;
+            let rd = zr_write(insn);
             let rn = ((insn >> 5) & 0x1F) as u8;
             if ((insn >> 23) & 1) == 0 {
                 // Bitfield move. The unallocated encodings go to the
@@ -855,7 +943,9 @@ fn decode_data_proc_imm(insn: u32, pc: u32) -> Op {
 
 fn decode_data_proc_reg(insn: u32) -> Op {
     let sf = (insn >> 31) & 1 == 1;
-    let rd = (insn & 0x1F) as u8;
+    // Every form in this group reads Rn and Rm as the zero register, and all
+    // but the extended ADD/SUB write Rd as one too.
+    let rd = zr_write(insn);
     let rn = ((insn >> 5) & 0x1F) as u8;
     let rm = ((insn >> 16) & 0x1F) as u8;
     match (insn >> 24) & 0x1F {
@@ -880,14 +970,14 @@ fn decode_data_proc_reg(insn: u32) -> Op {
             let carry = u8::from(sub);
             if ((insn >> 21) & 0b111) == 0b001 {
                 Op::AddSubExtended {
-                    rd,
-                    rn,
+                    // The extended form is the other place register 31 is SP.
+                    rd: if set_flags { rd } else { sp_form(insn) },
+                    rn: sp_form(insn >> 5),
                     rm,
                     option: ((insn >> 13) & 0b111) as u8,
                     shift: ((insn >> 10) & 0b111) as u8,
                     carry,
                     set_flags,
-                    rd_sp: !set_flags,
                     sf,
                 }
             } else {
@@ -932,6 +1022,8 @@ fn decode_data_proc_reg(insn: u32) -> Op {
         0b11011 => {
             let ra = ((insn >> 10) & 0x1F) as u8;
             let sub = ((insn >> 15) & 1) == 1;
+            // Ra is read, Rd written; `rd` above already resolved.
+
             match (insn >> 21) & 0xFF {
                 0b11011000 => Op::Madd { rd, rn, rm, ra, sub, sf },
                 0b11011001 => Op::MaddLong { rd, rn, rm, ra, sub, signed: true },
@@ -960,7 +1052,7 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
             _ => Acc::Prefetch,
         };
         return Op::LoadLiteral {
-            rt: (insn & 0x1F) as u8,
+            rt: rt_slot(insn, acc),
             addr: (pc as i64).wrapping_add(imm as i64) as u32,
             acc,
         };
@@ -981,8 +1073,11 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
 
     let sz = ((insn >> 30) & 0b11) as u8;
     let opc = ((insn >> 22) & 0b11) as u8;
-    let rt = (insn & 0x1F) as u8;
-    let rn = ((insn >> 5) & 0x1F) as u8;
+    let acc = Acc::of(sz, opc);
+    // Rt is read by a store and written by a load, and Rn is always the SP
+    // form — the base of an addressing mode is never the zero register.
+    let rt = rt_slot(insn, acc);
+    let rn = sp_form(insn >> 5);
 
     // Register offset.
     if ((insn >> 27) & 0b111) == 0b111 && ((insn >> 24) & 0b11) == 0b00 && ((insn >> 21) & 1) == 1 {
@@ -996,14 +1091,7 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
         };
         // `S` scales by log2 of the access size, not by the byte count.
         let shift = if ((insn >> 12) & 1) == 1 { sz } else { 0 };
-        return Op::LoadStoreReg {
-            rt,
-            rn,
-            rm: ((insn >> 16) & 0x1F) as u8,
-            ext,
-            shift,
-            acc: Acc::of(sz, opc),
-        };
+        return Op::LoadStoreReg { rt, rn, rm: ((insn >> 16) & 0x1F) as u8, ext, shift, acc };
     }
 
     // Immediate offset forms.
@@ -1015,7 +1103,7 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
             return Op::LoadStoreImm {
                 rt,
                 rn,
-                acc: Acc::of(sz, opc),
+                acc,
                 wb: Wb::None,
                 offset: i64::from((insn >> 10) & 0xFFF) * scale,
             };
@@ -1028,7 +1116,7 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
                 // Unscaled (`LDUR`/`STUR`) and the unprivileged forms.
                 _ => Wb::None,
             };
-            return Op::LoadStoreImm { rt, rn, acc: Acc::of(sz, opc), wb, offset };
+            return Op::LoadStoreImm { rt, rn, acc, wb, offset };
         }
     }
 
@@ -1055,9 +1143,12 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
             (false, true, _) => PairKind::Store64,
             (false, false, _) => PairKind::Store32,
         };
+        // The pair forms have their own Rt/Rt2 slots: `kind`, not `acc`,
+        // says whether they are read or written.
+        let pair_slot = |n: u32| if kind.loads() { zr_write(n) } else { (n & 0x1F) as u8 };
         return Op::Pair {
-            rt,
-            rt2: ((insn >> 10) & 0x1F) as u8,
+            rt: pair_slot(insn),
+            rt2: pair_slot(insn >> 10),
             rn,
             offset: (sext_u64((insn >> 15) & 0x7F, 7) as i64).wrapping_mul(scale),
             kind,
@@ -1104,6 +1195,11 @@ impl Cpu {
     /// different from stopping between two interpreted instructions.
     pub(super) fn run_jit(&mut self, max_steps: u64) -> Result<RunReport> {
         let mut steps = 0u64;
+        // The block last executed, kept across iterations. A loop that branches
+        // back to its own head — which is most of what a hot loop is — then
+        // costs neither the cache lookup nor the reference count, because the
+        // handle is moved out and back rather than cloned.
+        let mut held: Option<Rc<Block>> = None;
         while steps < max_steps && !self.halted {
             // The scheduler's preemption point. The interpreter takes it
             // between any two instructions; here it is between blocks, which
@@ -1113,8 +1209,15 @@ impl Cpu {
                 self.yield_thread();
             }
             self.sweep_timed_waits();
-            let block = self.jit_block_at(self.pc);
+            let block = match held.take() {
+                Some(block) if block.start == self.pc && !self.mem.has_dirty_code() => {
+                    self.jit.executed += 1;
+                    block
+                }
+                _ => self.jit_block_at(self.pc),
+            };
             let ran = self.exec_block(&block, max_steps - steps)?;
+            held = Some(block);
             self.slice_used += ran;
             steps += ran;
         }
@@ -1181,8 +1284,22 @@ impl Cpu {
                 break;
             }
             let (_, exit) = block.exits[next_exit];
-            i += 1;
-            pc = pc.wrapping_add(4);
+            let span = exit.span();
+            if i + span > body {
+                // The budget splits a fused pair. Run the compare's half of it
+                // and stop on the branch, which is a valid entry point with the
+                // flags already set. Doing nothing here instead would return no
+                // progress at all when the pair starts the block, and
+                // [`Cpu::run_jit`] would spin on it forever.
+                if i < body {
+                    self.apply_compare(exit);
+                    i += 1;
+                    pc = pc.wrapping_add(4);
+                }
+                break;
+            }
+            i += span;
+            pc = pc.wrapping_add(4 * span as u32);
             if self.take_exit(exit) {
                 // Taken: the branch is the last instruction of this visit, and
                 // `take_exit` has already put the target in `pc`.
@@ -1220,6 +1337,27 @@ impl Cpu {
         Ok(ran)
     }
 
+    /// The flag-setting half of a fused compare-and-branch, for the one case
+    /// that cannot run both: a step budget that ends between them.
+    #[inline(always)]
+    fn apply_compare(&mut self, exit: Exit) {
+        let (a, b, carry, sf) = match exit {
+            Exit::CmpImm { rn, rhs, carry, sf, .. } => {
+                (self.reg_at(rn) & Cpu::mask(sf), rhs, carry, sf)
+            }
+            Exit::CmpReg { rn, rm, carry, sf, .. } => (
+                self.reg_at(rn) & Cpu::mask(sf),
+                invert_if(self.reg_at(rm) & Cpu::mask(sf), carry),
+                carry,
+                sf,
+            ),
+            // Nothing else spans two instructions.
+            _ => return,
+        };
+        let (result, c, v) = Cpu::add_carry_overflow(a, b, u64::from(carry), sf);
+        self.set_nzcv_from_alu(result, sf, c, v);
+    }
+
     /// Evaluate a conditional branch inside a block. Returns whether it was
     /// taken — in which case `pc` is where control went and the block is over,
     /// and otherwise the block carries on at the following instruction with
@@ -1228,6 +1366,19 @@ impl Cpu {
     fn take_exit(&mut self, exit: Exit) -> bool {
         let (taken, target) = match exit {
             Exit::Cond { cond, target } => (self.condition_holds(cond), target),
+            Exit::CmpImm { rn, rhs, carry, sf, cond, target } => {
+                let a = self.reg_at(rn) & Cpu::mask(sf);
+                let (result, c, v) = Cpu::add_carry_overflow(a, rhs, u64::from(carry), sf);
+                self.set_nzcv_from_alu(result, sf, c, v);
+                (self.condition_holds(cond), target)
+            }
+            Exit::CmpReg { rn, rm, carry, sf, cond, target } => {
+                let a = self.reg_at(rn) & Cpu::mask(sf);
+                let b = invert_if(self.reg_at(rm) & Cpu::mask(sf), carry);
+                let (result, c, v) = Cpu::add_carry_overflow(a, b, u64::from(carry), sf);
+                self.set_nzcv_from_alu(result, sf, c, v);
+                (self.condition_holds(cond), target)
+            }
             Exit::Cbz { rt, sf, nz, target } => {
                 let val = self.read_zr(rt);
                 let is_zero = if sf { val == 0 } else { (val as u32) == 0 };
@@ -1284,88 +1435,88 @@ impl Cpu {
                     SysReg::Fpsr => u64::from(self.fpsr),
                     SysReg::Fixed(v) => u64::from(v),
                 };
-                self.write_zr(rd, val);
+                self.set_reg_at(rd, val);
             }
             Op::Msr { rt, reg } => match reg {
-                SysReg::Nzcv => self.nzcv = self.read_zr(rt) as u32,
+                SysReg::Nzcv => self.nzcv = self.reg_at(rt) as u32,
                 // Only the bits the architecture defines stick, so a guest
                 // that reads back what it wrote sees the same value.
-                SysReg::Fpcr => self.fpcr = self.read_zr(rt) as u32 & FPCR_MASK,
-                SysReg::Fpsr => self.fpsr = self.read_zr(rt) as u32 & FPSR_MASK,
-                SysReg::Tpidr => self.tpidr_rw = self.read_zr(rt),
+                SysReg::Fpcr => self.fpcr = self.reg_at(rt) as u32 & FPCR_MASK,
+                SysReg::Fpsr => self.fpsr = self.reg_at(rt) as u32 & FPSR_MASK,
+                SysReg::Tpidr => self.tpidr_rw = self.reg_at(rt),
                 SysReg::TpidrRo | SysReg::Fixed(_) => {}
             },
             Op::MsrNzcvImm { imm } => self.nzcv = u32::from(imm),
             Op::DcZva { rt } => {
-                let addr = self.read_zr(rt) as u32 & !0x3F;
+                let addr = self.reg_at(rt) as u32 & !0x3F;
                 for i in 0..8u32 {
                     self.mem.write_u64(addr.wrapping_add(i * 8), 0)?;
                 }
             }
 
-            Op::MovConst { rd, val } => self.write_zr(rd, val),
+            Op::MovConst { rd, val } => self.set_reg_at(rd, val),
             Op::MovK { rd, shift, val } => {
+                // Read and write through the same slot: a `MOVK` to `XZR`
+                // reads the discard slot and writes it back, which is as
+                // unobservable as discarding the write was.
                 let mask = 0xFFFFu64 << shift;
-                let cur = self.read_zr(rd) & !mask;
-                self.write_zr(rd, cur | (u64::from(val) << shift));
+                let cur = self.reg_at(rd) & !mask;
+                self.set_reg_at(rd, cur | (u64::from(val) << shift));
             }
 
-            Op::AddSubImm { rd, rn, rhs, carry, set_flags, rn_sp, rd_sp, sf } => {
-                self.add_sub_pre(rd, rn, rhs, carry, set_flags, rn_sp, rd_sp, sf);
+            Op::AddSubImm { rd, rn, rhs, carry, set_flags, sf } => {
+                self.add_sub_pre(rd, rn, rhs, carry, set_flags, sf);
             }
             Op::AddSubReg { rd, rn, rm, carry, set_flags, sf } => {
-                let v = self.read_zr(rm) & Cpu::mask(sf);
-                self.add_sub_pre(rd, rn, invert_if(v, carry), carry, set_flags, false, false, sf);
+                let v = self.reg_at(rm) & Cpu::mask(sf);
+                self.add_sub_pre(rd, rn, invert_if(v, carry), carry, set_flags, sf);
             }
             Op::AddSubShifted { rd, rn, rm, st, sa, carry, set_flags, sf } => {
-                let v = shift_reg(self.read_zr(rm) & Cpu::mask(sf), u32::from(st), u32::from(sa), sf);
-                self.add_sub_pre(rd, rn, invert_if(v, carry), carry, set_flags, false, false, sf);
+                let v = shift_reg(self.reg_at(rm) & Cpu::mask(sf), u32::from(st), u32::from(sa), sf);
+                self.add_sub_pre(rd, rn, invert_if(v, carry), carry, set_flags, sf);
             }
-            Op::AddSubExtended { rd, rn, rm, option, shift, carry, set_flags, rd_sp, sf } => {
-                let v = extend_reg(self.read_zr(rm), option, sf) & Cpu::mask(sf);
+            Op::AddSubExtended { rd, rn, rm, option, shift, carry, set_flags, sf } => {
+                let v = extend_reg(self.reg_at(rm), option, sf) & Cpu::mask(sf);
                 let v = v.wrapping_shl(u32::from(shift)) & Cpu::mask(sf);
-                self.add_sub_pre(rd, rn, invert_if(v, carry), carry, set_flags, true, rd_sp, sf);
+                self.add_sub_pre(rd, rn, invert_if(v, carry), carry, set_flags, sf);
             }
 
             Op::LogicalImm { rd, rn, imm, opc, sf } => {
-                let a = self.read_zr(rn) & Cpu::mask(sf);
-                let r = self.logical(a, imm, opc, sf);
                 // Rd == 31 is SP for AND/ORR/EOR and the zero register only
-                // for ANDS — one of the few places the two differ.
-                if opc == 0b11 {
-                    self.write_zr(rd, r);
-                } else {
-                    self.write_x(rd, r);
-                }
+                // for ANDS — one of the few places the two differ, and one
+                // the translator has already settled into `rd`.
+                let a = self.reg_at(rn) & Cpu::mask(sf);
+                let r = self.logical(a, imm, opc, sf);
+                self.set_reg_at(rd, r);
             }
             Op::LogicalShifted { rd, rn, rm, st, sa, opc, invert, sf } => {
-                let a = self.read_zr(rn) & Cpu::mask(sf);
-                let b = shift_reg(self.read_zr(rm) & Cpu::mask(sf), u32::from(st), u32::from(sa), sf);
+                let a = self.reg_at(rn) & Cpu::mask(sf);
+                let b = shift_reg(self.reg_at(rm) & Cpu::mask(sf), u32::from(st), u32::from(sa), sf);
                 // `BIC`/`ORN`/`EON` invert the *shifted* operand, not the
                 // register: `ir.Not(ShiftReg(...))` in dynarmic, and the same
                 // order in the ARM ARM's pseudocode.
                 let b = if invert { !b & Cpu::mask(sf) } else { b };
                 let r = self.logical(a, b, opc, sf);
-                self.write_zr(rd, r);
+                self.set_reg_at(rd, r);
             }
             Op::LogicalReg { rd, rn, rm, opc, invert, sf } => {
-                let a = self.read_zr(rn) & Cpu::mask(sf);
-                let b = self.read_zr(rm) & Cpu::mask(sf);
+                let a = self.reg_at(rn) & Cpu::mask(sf);
+                let b = self.reg_at(rm) & Cpu::mask(sf);
                 let b = if invert { !b & Cpu::mask(sf) } else { b };
                 let r = self.logical(a, b, opc, sf);
-                self.write_zr(rd, r);
+                self.set_reg_at(rd, r);
             }
 
             Op::Bitfield { rd, rn, opc, immr, imms, sf } => {
-                let val = self.read_zr(rn) & Cpu::mask(sf);
-                let cur = self.read_zr(rd) & Cpu::mask(sf);
+                let val = self.reg_at(rn) & Cpu::mask(sf);
+                let cur = self.reg_at(rd) & Cpu::mask(sf);
                 let r = bitfield_apply(u32::from(opc), val, cur, u32::from(immr), u32::from(imms), sf);
-                self.write_zr(rd, r);
+                self.set_reg_at(rd, r);
             }
             Op::Extr { rd, rn, rm, imm, sf } => {
                 let size = if sf { 64u32 } else { 32 };
-                let a = self.read_zr(rn) & Cpu::mask(sf);
-                let b = self.read_zr(rm) & Cpu::mask(sf);
+                let a = self.reg_at(rn) & Cpu::mask(sf);
+                let b = self.reg_at(rm) & Cpu::mask(sf);
                 let imm = u32::from(imm);
                 // Rn is the high half of the Rn:Rm pair the field is taken from.
                 let r = if imm == 0 {
@@ -1373,12 +1524,12 @@ impl Cpu {
                 } else {
                     ((b >> imm) | a.wrapping_shl(size.wrapping_sub(imm))) & Cpu::mask(sf)
                 };
-                self.write_zr(rd, r);
+                self.set_reg_at(rd, r);
             }
 
             Op::CondSel { rd, rn, rm, cond, else_inv, else_inc, sf } => {
-                let a = self.read_zr(rn) & Cpu::mask(sf);
-                let b = self.read_zr(rm) & Cpu::mask(sf);
+                let a = self.reg_at(rn) & Cpu::mask(sf);
+                let b = self.reg_at(rm) & Cpu::mask(sf);
                 let take_a = self.condition_holds(cond);
                 let mut else_val = b;
                 if else_inv {
@@ -1388,7 +1539,7 @@ impl Cpu {
                     else_val = else_val.wrapping_add(1);
                 }
                 let r = if take_a { a } else { else_val };
-                self.write_zr(rd, r & Cpu::mask(sf));
+                self.set_reg_at(rd, r & Cpu::mask(sf));
             }
             Op::CondCmp { rn, rm, imm, cond, nzcv, sub, is_imm, sf } => {
                 if self.condition_holds(cond) {
@@ -1402,14 +1553,14 @@ impl Cpu {
 
             Op::Madd { rd, rn, rm, ra, sub, sf } => {
                 let mask = Cpu::mask(sf);
-                let product = (self.read_zr(rn) & mask).wrapping_mul(self.read_zr(rm) & mask);
-                let c = self.read_zr(ra) & mask;
+                let product = (self.reg_at(rn) & mask).wrapping_mul(self.reg_at(rm) & mask);
+                let c = self.reg_at(ra) & mask;
                 let r = if sub { c.wrapping_sub(product) } else { c.wrapping_add(product) };
-                self.write_zr(rd, r & mask);
+                self.set_reg_at(rd, r & mask);
             }
             Op::MaddLong { rd, rn, rm, ra, sub, signed } => {
-                let a = self.read_zr(rn);
-                let b = self.read_zr(rm);
+                let a = self.reg_at(rn);
+                let b = self.reg_at(rm);
                 // The multiplicands are the low 32 bits of Rn/Rm, not the
                 // whole register.
                 // A 32x32 product fits in 64 bits, so this does not need the
@@ -1419,41 +1570,41 @@ impl Cpu {
                 } else {
                     u64::from(a as u32).wrapping_mul(u64::from(b as u32))
                 };
-                let c = self.read_zr(ra);
+                let c = self.reg_at(ra);
                 let r = if sub { c.wrapping_sub(product) } else { c.wrapping_add(product) };
-                self.write_zr(rd, r);
+                self.set_reg_at(rd, r);
             }
             Op::Mulh { rd, rn, rm, signed } => {
-                let a = self.read_zr(rn);
-                let b = self.read_zr(rm);
+                let a = self.reg_at(rn);
+                let b = self.reg_at(rm);
                 let r = if signed {
                     (((a as i64 as i128) * (b as i64 as i128)) >> 64) as u64
                 } else {
                     ((u128::from(a) * u128::from(b)) >> 64) as u64
                 };
-                self.write_zr(rd, r);
+                self.set_reg_at(rd, r);
             }
 
             Op::LoadStoreImm { rt, rn, acc, wb, offset } => {
-                let base = self.read_x(rn);
+                let base = self.reg_at(rn);
                 let (addr, wb_val) = Self::indexed(base, offset, wb);
                 self.access(addr as u32, rt, acc)?;
                 if let Some(v) = wb_val {
-                    self.write_x(rn, v);
+                    self.set_reg_at(rn, v);
                 }
             }
             Op::LoadStoreReg { rt, rn, rm, ext, shift, acc } => {
                 let index = match ext {
-                    Ext::Uxtw => u64::from(self.read_zr(rm) as u32),
-                    Ext::Sxtw => sext_u64(self.read_zr(rm), 32),
-                    Ext::None => self.read_zr(rm),
+                    Ext::Uxtw => u64::from(self.reg_at(rm) as u32),
+                    Ext::Sxtw => sext_u64(self.reg_at(rm), 32),
+                    Ext::None => self.reg_at(rm),
                 };
                 let offset = index.wrapping_shl(u32::from(shift)) as i64;
-                let addr = (self.read_x(rn) as i64).wrapping_add(offset) as u32;
+                let addr = (self.reg_at(rn) as i64).wrapping_add(offset) as u32;
                 self.access(addr, rt, acc)?;
             }
             Op::Pair { rt, rt2, rn, offset, kind, wb } => {
-                let base = self.read_x(rn);
+                let base = self.reg_at(rn);
                 let (addr, wb_val) = Self::indexed(base, offset, wb);
                 let addr = addr as u32;
                 let second = addr.wrapping_add(kind.stride());
@@ -1463,32 +1614,32 @@ impl Cpu {
                     PairKind::Load64 => {
                         let v0 = self.mem.read_u64(addr)?;
                         let v1 = self.mem.read_u64(second)?;
-                        self.write_zr(rt, v0);
-                        self.write_zr(rt2, v1);
+                        self.set_reg_at(rt, v0);
+                        self.set_reg_at(rt2, v1);
                     }
                     PairKind::Load32 => {
                         let v0 = u64::from(self.mem.read_u32(addr)?);
                         let v1 = u64::from(self.mem.read_u32(second)?);
-                        self.write_zr(rt, v0);
-                        self.write_zr(rt2, v1);
+                        self.set_reg_at(rt, v0);
+                        self.set_reg_at(rt2, v1);
                     }
                     PairKind::Load32Sext => {
                         let v0 = u64::from(self.mem.read_u32(addr)?);
                         let v1 = u64::from(self.mem.read_u32(second)?);
-                        self.write_zr(rt, sext_u64(v0, 32));
-                        self.write_zr(rt2, sext_u64(v1, 32));
+                        self.set_reg_at(rt, sext_u64(v0, 32));
+                        self.set_reg_at(rt2, sext_u64(v1, 32));
                     }
                     PairKind::Store64 => {
-                        self.mem.write_u64(addr, self.read_zr(rt))?;
-                        self.mem.write_u64(second, self.read_zr(rt2))?;
+                        self.mem.write_u64(addr, self.reg_at(rt))?;
+                        self.mem.write_u64(second, self.reg_at(rt2))?;
                     }
                     PairKind::Store32 => {
-                        self.mem.write_u32(addr, self.read_zr(rt) as u32)?;
-                        self.mem.write_u32(second, self.read_zr(rt2) as u32)?;
+                        self.mem.write_u32(addr, self.reg_at(rt) as u32)?;
+                        self.mem.write_u32(second, self.reg_at(rt2) as u32)?;
                     }
                 }
                 if let Some(v) = wb_val {
-                    self.write_x(rn, v);
+                    self.set_reg_at(rn, v);
                 }
             }
             Op::LoadLiteral { rt, addr, acc } => self.access(addr, rt, acc)?,
@@ -1503,36 +1654,36 @@ impl Cpu {
         match acc {
             Acc::Load8 => {
                 let v = u64::from(self.mem.read_u8(addr)?);
-                self.write_zr(rt, v);
+                self.set_reg_at(rt, v);
             }
             Acc::Load16 => {
                 let v = u64::from(self.mem.read_u16(addr)?);
-                self.write_zr(rt, v);
+                self.set_reg_at(rt, v);
             }
             Acc::Load32 => {
                 let v = u64::from(self.mem.read_u32(addr)?);
-                self.write_zr(rt, v);
+                self.set_reg_at(rt, v);
             }
             Acc::Load64 => {
                 let v = self.mem.read_u64(addr)?;
-                self.write_zr(rt, v);
+                self.set_reg_at(rt, v);
             }
             Acc::LoadS8 => {
                 let v = u64::from(self.mem.read_u8(addr)?);
-                self.write_zr(rt, sext_u64(v, 8));
+                self.set_reg_at(rt, sext_u64(v, 8));
             }
             Acc::LoadS16 => {
                 let v = u64::from(self.mem.read_u16(addr)?);
-                self.write_zr(rt, sext_u64(v, 16));
+                self.set_reg_at(rt, sext_u64(v, 16));
             }
             Acc::LoadS32 => {
                 let v = u64::from(self.mem.read_u32(addr)?);
-                self.write_zr(rt, sext_u64(v, 32));
+                self.set_reg_at(rt, sext_u64(v, 32));
             }
-            Acc::Store8 => self.mem.write_u8(addr, self.read_zr(rt) as u8)?,
-            Acc::Store16 => self.mem.write_u16(addr, self.read_zr(rt) as u16)?,
-            Acc::Store32 => self.mem.write_u32(addr, self.read_zr(rt) as u32)?,
-            Acc::Store64 => self.mem.write_u64(addr, self.read_zr(rt))?,
+            Acc::Store8 => self.mem.write_u8(addr, self.reg_at(rt) as u8)?,
+            Acc::Store16 => self.mem.write_u16(addr, self.reg_at(rt) as u16)?,
+            Acc::Store32 => self.mem.write_u32(addr, self.reg_at(rt) as u32)?,
+            Acc::Store64 => self.mem.write_u64(addr, self.reg_at(rt))?,
             // PRFM: a hint. The addressing mode's writeback still happens.
             Acc::Prefetch => {}
         }
@@ -1542,7 +1693,6 @@ impl Cpu {
     /// The `ADD`/`SUB` core, with the direction already folded into `rhs` and
     /// `carry` and register 31's two meanings already resolved.
     #[inline(always)]
-    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
     fn add_sub_pre(
         &mut self,
         rd: u8,
@@ -1550,20 +1700,14 @@ impl Cpu {
         rhs: u64,
         carry: u8,
         set_flags: bool,
-        rn_sp: bool,
-        rd_sp: bool,
         sf: bool,
     ) {
-        let a = if rn_sp { self.read_x(rn) } else { self.read_zr(rn) } & Cpu::mask(sf);
+        let a = self.reg_at(rn) & Cpu::mask(sf);
         let (result, c, v) = Cpu::add_carry_overflow(a, rhs, u64::from(carry), sf);
         if set_flags {
             self.set_nzcv_from_alu(result, sf, c, v);
         }
-        if rd_sp {
-            self.write_x(rd, result);
-        } else {
-            self.write_zr(rd, result);
-        }
+        self.set_reg_at(rd, result);
     }
 
     /// The address a load/store touches and the value (if any) to write back

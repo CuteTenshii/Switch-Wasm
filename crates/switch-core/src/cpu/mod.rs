@@ -965,8 +965,8 @@ pub struct ThreadContext {
     /// blocked on a mutex is still blocked on it when it resumes; it is only
     /// taken out of the scheduler's rotation meanwhile.
     paused: bool,
-    regs: [u64; 31],
-    sp: u64,
+    /// The saved register file, stack pointer included — see [`REG_SLOTS`].
+    regs: [u64; REG_SLOTS],
     pc: u32,
     nzcv: u32,
     vregs: [u128; 32],
@@ -979,10 +979,8 @@ pub struct ThreadContext {
 #[derive(Debug)]
 pub struct Cpu {
     pub mem: Memory,
-    /// X0..=X30 (X31 is the stack pointer).
-    regs: [u64; 31],
-    /// The stack pointer register (X31).
-    sp: u64,
+    /// X0..=X30 and the three slots register 31 can mean; see [`REG_SLOTS`].
+    regs: [u64; REG_SLOTS],
     pc: u32,
     /// NZCV, packed as ARM PSTATE does: N=31, Z=30, C=29, V=28.
     nzcv: u32,
@@ -1480,6 +1478,27 @@ pub struct Cpu {
 /// How many recently-executed instructions the fault trace shows.
 pub const RECENT_LEN: usize = 64;
 
+/// How many slots [`Cpu::regs`] holds: X0..=X30, then three more.
+///
+/// A64 spells three different registers `31`, and which one it means is a
+/// property of the instruction, not of the value: the zero register reads as
+/// zero, discards its writes, and *is* the stack pointer in the immediate and
+/// extended-register forms. Both engines used to test for it on every operand
+/// access — 12% of a translated frame. Instead the zero slot is simply never
+/// written, writes to it go to a bit-bucket, and the stack pointer lives in
+/// the file too, so choosing between the three is an index the translator
+/// bakes in ([`super::jit`]) rather than a branch at run time.
+const REG_SLOTS: usize = 34;
+/// Reads of `XZR`. Nothing ever writes it, so it is permanently zero.
+const ZR_SLOT: usize = 31;
+/// [`Cpu::read_zr`] and the translator's read operands index the file with the
+/// encoding's own five-bit field, so the zero slot has to *be* 31.
+const _: () = assert!(ZR_SLOT == 31);
+/// Writes to `XZR`, which the architecture discards.
+const ZR_DISCARD: usize = 32;
+/// The stack pointer, `SP`.
+const SP_SLOT: usize = 33;
+
 /// Instructions between display refreshes: the panel's 60 Hz against the
 /// 1.02 GHz CPU one emulated instruction stands for.
 ///
@@ -1519,8 +1538,7 @@ impl Cpu {
     pub fn new() -> Cpu {
         let mut cpu = Cpu {
             mem: Memory::new(),
-            regs: [0; 31],
-            sp: 0,
+            regs: [0; REG_SLOTS],
             pc: 0,
             nzcv: 0,
             vregs: [0; 32],
@@ -1685,7 +1703,7 @@ impl Cpu {
         self.mem.soft_map_zero(0, GUEST_SPACE_END);
         // 1 MiB full-descending stack; SP starts at the top.
         let _ = self.mem.map_zero((STACK_TOP - STACK_SIZE) as u32, STACK_SIZE as usize);
-        self.sp = STACK_TOP;
+        self.regs[SP_SLOT] = STACK_TOP;
         // libnx reads TPIDR_EL0 expecting the loader (HBL/kernel) to have set
         // the thread-local-storage base. Point it at a writable region clear of
         // both the heap (`svcSetHeapSize` hands out 0x30000000) and the stack
@@ -1736,8 +1754,7 @@ impl Cpu {
                 handle: MAIN_THREAD_HANDLE,
                 state: ThreadState::Runnable,
                 paused: false,
-                regs: [0; 31],
-                sp: 0,
+                regs: [0; REG_SLOTS],
                 pc: 0,
                 nzcv: 0,
                 vregs: [0; 32],
@@ -1769,15 +1786,15 @@ impl Cpu {
         let _ = self.mem.write_u32(tls + 0x1F0, reent);
         let _ = self.mem.write_u32(tls + 0x1F8, tls);
 
-        let mut regs = [0u64; 31];
+        let mut regs = [0u64; REG_SLOTS];
         regs[0] = arg;
         regs[30] = THREAD_EXIT_TRAMPOLINE as u64;
+        regs[SP_SLOT] = stack_top;
         self.threads.push(ThreadContext {
             handle,
             state: ThreadState::Created,
             paused: false,
             regs,
-            sp: stack_top,
             pc: entry,
             nzcv: 0,
             vregs: [0; 32],
@@ -1824,15 +1841,13 @@ impl Cpu {
         let Some(index) = self.threads.iter().position(|t| t.handle == handle) else {
             return false;
         };
-        let (regs, sp, pc, nzcv, vregs, fpcr, fpsr, tpidr) = if index == self.current_thread {
-            (
-                self.regs, self.sp, self.pc, self.nzcv, self.vregs, self.fpcr, self.fpsr,
-                self.tpidr,
-            )
+        let (regs, pc, nzcv, vregs, fpcr, fpsr, tpidr) = if index == self.current_thread {
+            (self.regs, self.pc, self.nzcv, self.vregs, self.fpcr, self.fpsr, self.tpidr)
         } else {
             let t = &self.threads[index];
-            (t.regs, t.sp, t.pc, t.nzcv, t.vregs, t.fpcr, t.fpsr, t.tpidr)
+            (t.regs, t.pc, t.nzcv, t.vregs, t.fpcr, t.fpsr, t.tpidr)
         };
+        let sp = regs[SP_SLOT];
         let put64 = |cpu: &mut Self, off: u32, v: u64| {
             let _ = cpu.mem.write_u64(out.wrapping_add(off), v);
         };
@@ -2413,7 +2428,6 @@ impl Cpu {
     fn save_context(&mut self, index: usize) {
         let thread = &mut self.threads[index];
         thread.regs = self.regs;
-        thread.sp = self.sp;
         thread.pc = self.pc;
         thread.nzcv = self.nzcv;
         thread.vregs = self.vregs;
@@ -2431,7 +2445,6 @@ impl Cpu {
         self.exclusive = None;
         let thread = self.threads[index].clone();
         self.regs = thread.regs;
-        self.sp = thread.sp;
         self.pc = thread.pc;
         self.nzcv = thread.nzcv;
         self.vregs = thread.vregs;
@@ -2848,7 +2861,7 @@ impl Cpu {
 
     #[inline]
     pub fn sp(&self) -> u64 {
-        self.sp
+        self.regs[SP_SLOT]
     }
 
     pub fn set_pc(&mut self, pc: u32) {
@@ -3036,14 +3049,26 @@ impl Cpu {
         v
     }
 
-    /// Read X0..=X30 (X31 reads as zero / is the stack pointer).
+    /// Read a register in the forms where 31 is the stack pointer.
     #[inline(always)]
     pub fn read_x(&self, idx: u8) -> u64 {
-        match idx {
-            0..=30 => self.regs[idx as usize],
-            31 => self.sp,
-            _ => 0,
-        }
+        self.regs[Self::x_slot(idx)]
+    }
+
+    /// The slot a register number names when 31 means `SP`.
+    #[inline(always)]
+    fn x_slot(idx: u8) -> usize {
+        let idx = (idx & 0x1F) as usize;
+        // 31 -> SP_SLOT, everything else itself. A compare and an add, which
+        // the branch this replaced could not beat.
+        idx + (SP_SLOT - 31) * usize::from(idx == 31)
+    }
+
+    /// The slot a register number names when 31 means `XZR` and is written.
+    #[inline(always)]
+    fn zr_write_slot(idx: u8) -> usize {
+        let idx = (idx & 0x1F) as usize;
+        idx + (ZR_DISCARD - 31) * usize::from(idx == 31)
     }
 
     pub fn read_reg(&self, idx: u8) -> u64 {
@@ -3065,27 +3090,39 @@ impl Cpu {
         self.vregs[idx as usize] = val;
     }
 
-    /// Read X0..=X30 where X31 is ZR (always zero).
+    /// Read a register in the forms where 31 is `XZR`. No test for 31:
+    /// [`ZR_SLOT`] holds zero and nothing ever writes it.
     #[inline(always)]
     fn read_zr(&self, idx: u8) -> u64 {
-        if idx == 31 { 0 } else { self.regs[idx as usize] }
+        self.regs[(idx & 0x1F) as usize]
+    }
+
+    /// Write a register in the forms where 31 is `XZR`, whose writes the
+    /// architecture discards — so they go to [`ZR_DISCARD`] rather than being
+    /// tested for.
+    #[inline(always)]
+    fn write_zr(&mut self, idx: u8, val: u64) {
+        self.regs[Self::zr_write_slot(idx)] = val;
+    }
+
+    /// Write a register in the forms where 31 is `SP`.
+    #[inline(always)]
+    fn write_x(&mut self, idx: u8, val: u64) {
+        self.regs[Self::x_slot(idx)] = val;
+    }
+
+    /// Read the register file by slot, for a caller that already knows which
+    /// of register 31's meanings it wants — see [`REG_SLOTS`]. The block
+    /// translator resolves that when it builds the op, so nothing about it is
+    /// left to run time.
+    #[inline(always)]
+    pub(super) fn reg_at(&self, slot: u8) -> u64 {
+        self.regs[slot as usize]
     }
 
     #[inline(always)]
-    fn write_zr(&mut self, idx: u8, val: u64) {
-        if idx != 31 {
-            self.regs[idx as usize] = val;
-        }
-    }
-
-    /// Write X0..=X30 where X31 is SP.
-    #[inline]
-    fn write_x(&mut self, idx: u8, val: u64) {
-        match idx {
-            0..=30 => self.regs[idx as usize] = val,
-            31 => self.sp = val,
-            _ => {}
-        }
+    pub(super) fn set_reg_at(&mut self, slot: u8, val: u64) {
+        self.regs[slot as usize] = val;
     }
 
     pub fn set_reg(&mut self, idx: u8, val: u64) {
@@ -3098,7 +3135,7 @@ impl Cpu {
 
     pub fn set_pc_and_sp(&mut self, pc: u32, sp: u64) {
         self.pc = pc;
-        self.sp = sp;
+        self.regs[SP_SLOT] = sp;
     }
 
     /// Write the host gamepad state so the guest can see it. The button
@@ -3950,7 +3987,7 @@ impl Cpu {
         let _ = writeln!(
             s,
             "pc={:#010x}  sp={:#018x}  nzcv=N:{n} Z:{z} C:{c} V:{v}",
-            self.pc, self.sp
+            self.pc, self.regs[SP_SLOT]
         );
         for i in 0..31 {
             let _ = write!(s, "x{:<2}={:#018x}  ", i, self.regs[i]);

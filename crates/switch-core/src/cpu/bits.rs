@@ -8,6 +8,37 @@ pub(crate) fn elem_mask(bits: u32) -> u128 {
     (1u128 << bits) - 1
 }
 
+/// The `esize`-bit lane at `index` of a 128-bit vector register.
+///
+/// wasm has no 128-bit integer, so `v >> (esize * index)` with a distance only
+/// known at run time becomes a call to `__lshrti3` that V8 cannot inline —
+/// visible as 1% of a browser frame. Every A64 lane width divides 64 and every
+/// lane is aligned to its own width, so no lane straddles the halfway point
+/// and splitting the register into two halves keeps every shift 64-bit. The
+/// `>> 64` here is a constant, which is free: it just names the high half.
+#[inline(always)]
+pub(crate) fn lane(v: u128, esize: u32, index: u32) -> u64 {
+    let off = esize * index;
+    let (half, shift) = if off >= 64 { ((v >> 64) as u64, off - 64) } else { (v as u64, off) };
+    let mask = if esize >= 64 { u64::MAX } else { (1u64 << esize) - 1 };
+    (half >> shift) & mask
+}
+
+/// Replace the `esize`-bit lane at `index`, the counterpart to [`lane`].
+#[inline(always)]
+pub(crate) fn set_lane(v: u128, esize: u32, index: u32, val: u64) -> u128 {
+    let off = esize * index;
+    let mask = if esize >= 64 { u64::MAX } else { (1u64 << esize) - 1 };
+    let (mut lo, mut hi) = (v as u64, (v >> 64) as u64);
+    if off >= 64 {
+        let s = off - 64;
+        hi = (hi & !(mask << s)) | ((val & mask) << s);
+    } else {
+        lo = (lo & !(mask << off)) | ((val & mask) << off);
+    }
+    u128::from(lo) | (u128::from(hi) << 64)
+}
+
 /// The FPCR bits this core observes: RMode (23:22), plus the FZ/DN/AH
 /// controls it stores so a guest reads back what it wrote.
 pub(crate) const FPCR_MASK: u32 = 0x07FF_9F00;
