@@ -1,4 +1,4 @@
-//! `screenshot_nca` with the GPU backend installed, so the two can be
+//! `screenshot_title` with the GPU backend installed, so the two can be
 //! compared frame for frame:
 //! `screenshot_gpu <path.nsp|path.nca> <prod.keys> [title.keys] <out.ppm> [frame]`.
 //!
@@ -6,7 +6,7 @@
 //! measure is only worth measuring against a title that draws, and those ship
 //! in an NSP.
 //!
-//! The point is the comparison. Run `screenshot_nca` and this over the same
+//! The point is the comparison. Run `screenshot_title` and this over the same
 //! frame and `cmp` the two PPMs — a byte-identical pair is the only evidence
 //! that a GPU backend renders what the reference does, and the software
 //! rasterizer exists to be that reference.
@@ -31,7 +31,7 @@ fn main() {
     let mut gpu = match switch_gpu::Gpu::open() {
         Ok(gpu) => Some(gpu),
         Err(why) => {
-            eprintln!("no GPU backend ({why}): this is `screenshot_nca` with extra steps");
+            eprintln!("no GPU backend ({why}): this is `screenshot_title` with extra steps");
             None
         }
     };

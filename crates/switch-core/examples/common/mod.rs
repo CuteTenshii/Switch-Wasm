@@ -3,7 +3,7 @@
 //!
 //! Each example used to carry its own copy of all of this, and the copies
 //! drifted. That is not only untidy — it is how `screenshot` and
-//! `screenshot_nca` both ended up driving the CPU one instruction at a time
+//! `screenshot_title` both ended up driving the CPU one instruction at a time
 //! through [`switch_core::cpu::Cpu::step`], which is the *interpreter*: only
 //! `Cpu::run` reaches the block translator, and it is 1.8x faster on real
 //! code. Every measurement either tool produced was of the wrong engine, and
@@ -565,11 +565,12 @@ fn backtrace(cpu: &Cpu, depth: usize) -> String {
 
 /// The debugging knobs a runner needs, read from the environment once.
 ///
-/// `boot_nsp`, `screenshot_nsp` and `screenshot_nca` each grew their own parse
-/// of the same `<addr>:<hex size>` spelling, and then drifted apart in name:
-/// the pc watch was `WATCH` in one and `WATCH_PC` in another, memory dumping
-/// was `DUMP` in one and `DUMP_MEM` in another, and no tool had all of them. A
-/// knob worth having in one runner is worth having in every runner.
+/// `boot_nsp` and the two runners since merged into `screenshot_title` each
+/// grew their own parse of the same `<addr>:<hex size>` spelling, and then
+/// drifted apart in name: the pc watch was `WATCH` in one and `WATCH_PC` in
+/// another, memory dumping was `DUMP` in one and `DUMP_MEM` in another, and no
+/// tool had all of them. A knob worth having in one runner is worth having in
+/// every runner.
 ///
 /// - `TRAP_WRITE=<addr>:<hex size>` — the pc and call stack of the first
 ///   writes into a region, which is how a buffer nobody admits to owning gets

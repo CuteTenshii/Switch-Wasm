@@ -14,8 +14,8 @@ The `.nro`/`.nsp` files are gitignored.
   `UPDATE=<update.nsp>` runs the title patched and `DLC=<a.nsp>,<b.nsp>` mounts
   its add-on content, which is the page's pairing of the containers with no
   page in the way.
-- **The shared debugging knobs**, on `boot_nsp`, `screenshot_nsp` and
-  `screenshot_nca` alike: `TRAP_WRITE=<addr>:<hex size>` and `TRAP_READ=…` name
+- **The shared debugging knobs**, on `boot_nsp` and `screenshot_title`
+  alike: `TRAP_WRITE=<addr>:<hex size>` and `TRAP_READ=…` name
   the code that writes to or reads a region, `WATCH_PC=<addr>[,...]` the code
   that reaches one, and `DUMP=<base>[+<hex>][:<hex len>][,...]` hex-dumps guest
   memory wherever the run stopped — `<base>` being a register, `sp`, `pc` or an
@@ -34,7 +34,12 @@ The `.nro`/`.nsp` files are gitignored.
   being called in order without recording the steps between.
 - `--example jit_difftest <nro>` — both engines, with every state difference.
   `SWITCH_NO_JIT=1` disables translation for host tools.
-- **Checking the WebGPU backend**: run `screenshot_nca` and `switch-gpu`'s
+- `--example screenshot_title <container> <prod.keys> [title.keys] out.ppm [n]`
+  — the Nth *presented* frame of a retail title, either container kind. Stops
+  at the frame rather than at a step budget, which `boot_nsp SHOT=` cannot: a
+  title needs billions of steps to reach its first, and picking a budget that
+  lands after it is guesswork. Was `screenshot_nsp` and `screenshot_nca`.
+- **Checking the WebGPU backend**: run `screenshot_title` and `switch-gpu`'s
   `screenshot_gpu` over the same frame and `cmp` the PPMs. `GPU_ONLY=<i>` puts
   only the i-th draw on the device, so a difference is exactly one draw's.
 - Tracing is environment-gated and **host-only** (`TRACE_IPC`, `TRACE_SVC`,

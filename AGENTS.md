@@ -618,7 +618,7 @@ take the expanded route regardless.
 it down. Not a bug in either — a test wanting byte-identity picks values off
 the eight-bit half-way points.
 
-**The reference is how you check the backend.** Run `screenshot_nca` and
+**The reference is how you check the backend.** Run `screenshot_title` and
 `screenshot_gpu` over the same frame and `cmp` the PPMs; a byte-identical pair
 is the only evidence the backend renders what the rasterizer does.
 `GPU_ONLY=<i>` runs only the i-th draw on the device, so a difference is
