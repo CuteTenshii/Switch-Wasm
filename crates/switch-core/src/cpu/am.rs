@@ -618,7 +618,10 @@ impl Cpu {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // SetCpuBoostMode: no clock governor to move.
-                Some(66) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                Some(66) => {
+                    self.warn_stub(&iface, cmd_id, "accepted; there is no clock to move");
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
                 // SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled:
                 // a title that is about to hand the console to another
                 // program (`nn::oe::ExecuteProgram`) asks AM to send it an
@@ -631,7 +634,10 @@ impl Cpu {
                 // never be sent. Tomodachi Life asks for it during startup,
                 // and refusing it aborted `nnSdk` before the title reached a
                 // service.
-                Some(900) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                Some(900) => {
+                    self.warn_stub(&iface, cmd_id, "the exit-request latch is not recorded");
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             "am:application-functions" => match cmd_id {
@@ -663,7 +669,10 @@ impl Cpu {
                     }
                 }
                 // EnsureSaveData -> the save data size it ensured.
-                Some(20) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
+                Some(20) => {
+                    self.warn_stub(&iface, cmd_id, "0 bytes ensured; no save was created");
+                    self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[])
+                }
                 // ExtendSaveData(u8 SaveDataType, u128 userId, s64 size,
                 // s64 journal) -> an s64 the caller discards. Same argument
                 // shape as GetSaveDataSize below with the two sizes appended,
@@ -792,7 +801,10 @@ impl Cpu {
                 // Zero is a legitimate value and nothing here derives anything
                 // from it, but it must be the right *size* — a caller copies
                 // 16 bytes out of the reply either way.
-                Some(50) => self.write_ipc_response(tls, 0, &[], &[0u8; 16], &[]),
+                Some(50) => {
+                    self.warn_stub(&iface, cmd_id, "an all-zero device id");
+                    self.write_ipc_response(tls, 0, &[], &[0u8; 16], &[])
+                }
                 // GetGpuErrorDetectedSystemEvent: the event `nn::oe::
                 // SetupGpuErrorHandler` registers with the SDK's system
                 // worker, so that a GPU fault wakes a handler instead of
@@ -802,6 +814,7 @@ impl Cpu {
                 // Nothing here ever faults the GPU, so the event is handed out
                 // and never signalled.
                 Some(130) => {
+                    self.warn_stub(&iface, cmd_id, "an event nothing here ever signals");
                     let h = self.alloc_event("am:gpu-error", true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
@@ -809,6 +822,7 @@ impl Cpu {
                 // SetGamePlayRecordingState / SetDelayTimeToAbortOnGpuError:
                 // nothing to record, nothing to fault, nothing to report back.
                 Some(22) | Some(66) | Some(67) | Some(131) => {
+                    self.warn_stub(&iface, cmd_id, "accepted and not recorded");
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // Command 210, added in 20.0.0 and still unnamed on
@@ -826,6 +840,7 @@ impl Cpu {
                 // command id with an svcBreak — so refusing it ended the boot
                 // there.
                 Some(210) => {
+                    self.warn_stub(&iface, cmd_id, "an event nothing here ever signals");
                     let h = match self.application_functions_210_event {
                         Some(h) => h,
                         None => {
@@ -886,6 +901,7 @@ impl Cpu {
                 // holding 0 — the same shape of bug that had `nnSdk`'s system
                 // worker waiting on handle 0.
                 Some(9) | Some(91) => {
+                    self.warn_stub(&iface, cmd_id, "an event nothing here ever signals");
                     let h = self.alloc_event("am:self-controller", true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
@@ -1661,6 +1677,35 @@ mod tests {
         marshal(&mut cpu, false, 210, &[]);
         cpu.applet_request(TLS, 9, Some(210)).unwrap();
         assert_eq!(u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap()), event);
+    }
+
+    #[test]
+    fn a_stubbed_answer_names_itself_once_and_still_succeeds() {
+        // SetTerminateResult is accepted and thrown away: the reply is a bare
+        // success, which is the right *shape* and an answer with nothing
+        // behind it. Neither existing warning covers that -- the command is
+        // neither missing nor refused -- so the guest believes it and the
+        // consequence surfaces somewhere else entirely. The marker is what
+        // makes the belief visible; it must not change the reply.
+        let mut cpu = request(false, 22, &4u32.to_le_bytes());
+        cpu.register_service_handle(9, "am:application-functions");
+        cpu.applet_request(TLS, 9, Some(22)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
+        let trace = String::from_utf8_lossy(&cpu.trace).into_owned();
+        assert!(
+            trace.contains("[ipc] stub: am:application-functions cmd=Some(22)"),
+            "the stub went unreported: {trace:?}"
+        );
+
+        // Once per (interface, command): a title that polls one every frame
+        // would otherwise bury every other line in the trace the browser
+        // drains.
+        marshal(&mut cpu, false, 22, &4u32.to_le_bytes());
+        cpu.applet_request(TLS, 9, Some(22)).unwrap();
+        let repeated = String::from_utf8_lossy(&cpu.trace)
+            .matches("[ipc] stub:")
+            .count();
+        assert_eq!(repeated, 1, "the stub was reported on every call");
     }
 
     #[test]

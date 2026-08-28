@@ -375,6 +375,17 @@ listed by id, never caught by `_`. `Cpu::warn_no_implementation` logs `[ipc] no
 implementation` once per pair, and that list *is* the inventory of what a guest
 asks for and does not get.
 
+**`Cpu::warn_stub` is the other half of that inventory**: what a guest asks for
+and is *answered* without anything behind the answer — an invented value, a
+latch nobody records, an event nothing will ever signal. Neither warning above
+catches those, and the guest cannot either: the call succeeds and the
+consequence lands tens of millions of instructions away. `[ipc] stub:`, once
+per pair, is what makes the belief visible when a fault has to be blamed on
+something. It is not for a *modelled* answer — one user account, no DLC, no
+parental controls are true statements about this console, and marking those
+would bury the real ones. Annotation is per-site and incremental; `[nv]
+unimplemented` is the same idea for an ioctl the model has no handler for.
+
 ### Events
 
 `Cpu::alloc_event` records one in `Cpu::events`, and it must reach the guest

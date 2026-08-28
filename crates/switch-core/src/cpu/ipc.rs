@@ -941,6 +941,11 @@ impl Cpu {
         name: &str,
         cmd_id: Option<u32>,
     ) -> Result<()> {
+        self.warn_stub(
+            name,
+            cmd_id,
+            "a fabricated out-object and an event nothing signals",
+        );
         let key = (handle, cmd_id.unwrap_or(u32::MAX));
         let (object_id, sub, event) = match self.fabricated_objects.get(&key) {
             Some(&triple) => triple,
@@ -981,6 +986,35 @@ impl Cpu {
             self.diagnostic(&format!(
                 "[ipc] no implementation: {service} cmd={cmd_id:?}"
             ));
+        }
+    }
+
+    /// Note that a command *was* answered, but with nothing behind the answer:
+    /// an invented value, a latch that is not recorded anywhere, or an event
+    /// handed out that nothing here will ever signal.
+    ///
+    /// The two existing warnings only cover the gaps a guest can see —
+    /// [`Cpu::warn_no_implementation`] for a service with nothing behind it and
+    /// [`Cpu::unimplemented_command`] for a refused command id. A stub is the
+    /// case neither of them catches and the guest cannot detect either: the
+    /// call succeeds, the caller believes the answer, and whatever it does
+    /// with it surfaces tens of millions of instructions later, in code that
+    /// has nothing to do with the service that lied. When that happens, the
+    /// question is always "what did this title believe that was not true", and
+    /// the answer used to be a grep through twenty service modules.
+    ///
+    /// `what` is what the guest was told, not what is missing — it is read
+    /// next to a fault, where the useful question is whether *this* answer
+    /// could have caused it.
+    ///
+    /// Once per `(interface, command)`, because `appletMainLoop` polls `am`
+    /// every frame, and through [`Cpu::diagnostic`] so a browser run reports
+    /// it too. **A stub is not the same as an emulated answer**: one user
+    /// account, no DLC and an unplugged network cable are all true statements
+    /// about this console, and marking those would bury the real ones.
+    pub(super) fn warn_stub(&mut self, iface: &str, cmd_id: Option<u32>, what: &str) {
+        if self.stubbed_ipc.insert((iface.to_string(), cmd_id)) {
+            self.diagnostic(&format!("[ipc] stub: {iface} cmd={cmd_id:?} ({what})"));
         }
     }
 

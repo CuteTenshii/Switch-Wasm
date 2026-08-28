@@ -36,7 +36,10 @@ impl Cpu {
                     self.record_handle(clone, "nvdrv");
                     self.write_ipc_response(tls, 0, &[clone], &[], &[])
                 }
-                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                _ => {
+                    self.warn_stub("nvdrv:control", cmd_id, "accepted with no reply data");
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
             };
         }
         let data = self.ipc_request_data(tls);
@@ -193,7 +196,10 @@ impl Cpu {
                 self.write_ipc_reply(tls, 0, &[handle], &[], &error.to_le_bytes(), &[])
             }
             // SetClientPID / everything else: acknowledge with no out data.
-            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            _ => {
+                self.warn_stub("nvdrv", cmd_id, "accepted with no reply data");
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
         }
     }
 }

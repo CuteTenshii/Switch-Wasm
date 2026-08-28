@@ -1161,6 +1161,12 @@ pub struct Cpu {
     /// implementation behind it, so the warning naming it prints once instead
     /// of once per call (`appletMainLoop` polls `am` every frame).
     unimplemented_ipc: HashSet<(String, Option<u32>)>,
+    /// Every `(interface, command)` pair already reported as *answered with
+    /// nothing behind it* — see [`Cpu::warn_stub`]. Separate from
+    /// `unimplemented_ipc` because the two are different claims about the same
+    /// pair, and a guest that gets a stubbed answer may later be refused a
+    /// neighbouring command on the same interface.
+    stubbed_ipc: HashSet<(String, Option<u32>)>,
     /// What [`Cpu::reply_with_fabricated_object`] hands back for a command
     /// nothing implements, keyed by `(session handle, command id)`: the domain
     /// object id, the plain sub-session handle, and the event — one for each
@@ -1594,6 +1600,7 @@ impl Cpu {
             operation_mode: OperationMode::default(),
             applet_event: None,
             unimplemented_ipc: HashSet::new(),
+            stubbed_ipc: HashSet::new(),
             fabricated_objects: HashMap::new(),
             ro_modules: BTreeMap::new(),
             ro_registrations: BTreeMap::new(),
