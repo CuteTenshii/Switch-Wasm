@@ -49,6 +49,7 @@ pub(in crate::cpu) enum Op {
         rd: u8,
         shift: u8,
         val: u16,
+        sf: bool,
     },
 
     /// `ADD`/`SUB`/`ADDS`/`SUBS` against a constant.

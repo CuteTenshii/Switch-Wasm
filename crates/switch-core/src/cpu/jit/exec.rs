@@ -315,7 +315,7 @@ impl Cpu {
             Op::Sys { op } => self.exec_sys(op)?,
 
             Op::MovConst { rd, val } => self.set_reg_at(rd, val),
-            Op::MovK { rd, shift, val } => self.movk(rd, shift, val),
+            Op::MovK { rd, shift, val, sf } => self.movk(rd, shift, val, sf),
 
             Op::AddSubImm {
                 rd,

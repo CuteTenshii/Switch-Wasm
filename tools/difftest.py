@@ -202,6 +202,14 @@ SCALAR_INSTRUCTIONS = [
     "clz w8, w10",
     "cls w9, w10",
     "clz x0, x10",
+    # MOVK, whose 32-bit form merges into a register it must also narrow.
+    # x14 is all-ones, so a `movk w` that forgets to zero bits 63:32 leaves
+    # them set and the X form of the result reads wrong.
+    "mov x0, x14",
+    "movk w0, #0x1234",
+    "movk w0, #0x5678, lsl #16",
+    "mov x1, x14",
+    "movk x1, #0x9abc, lsl #32",
     # logicals with shifted operands
     "and w1, w10, w11, lsr #3",
     "orn w2, w10, w11, asr #4",

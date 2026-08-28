@@ -367,12 +367,11 @@ fn decode_data_proc_imm(insn: u32, pc: u32) -> Op {
                         rd,
                         val: (imm16 << shift) & Cpu::mask(sf),
                     },
-                    // A 32-bit MOVK never selects a field above bit 31, so
-                    // the operation-size mask cannot narrow it.
                     0b11 => Op::MovK {
                         rd,
                         shift: shift as u8,
                         val: imm16 as u16,
+                        sf,
                     },
                     _ => Op::Interpret { insn },
                 }

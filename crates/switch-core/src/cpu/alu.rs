@@ -60,7 +60,7 @@ impl Cpu {
                             self.write_zr(rd, (imm16 << shift) & Self::mask(sf));
                         }
                         0b11 => {
-                            self.movk(Self::zr_write_slot(rd), shift as u8, imm16 as u16);
+                            self.movk(Self::zr_write_slot(rd), shift as u8, imm16 as u16, sf);
                         }
                         _ => {
                             return Err(Error::Cpu(format!(
@@ -432,13 +432,17 @@ impl Cpu {
     // unobservable: the result is discarded too.
 
     /// `MOVK`: replace the 16-bit field at `shift`, leaving the rest alone.
-    /// A 32-bit form never selects a field above bit 31, so the operation-size
-    /// mask cannot narrow it and is not applied.
+    ///
+    /// The field itself never reaches above bit 31 in a 32-bit form, but the
+    /// register it merges into does — and a write to a W register zeroes bits
+    /// 63:32. Without the narrowing, `movk w0, #0x1234` over an all-ones
+    /// register left `ffffffffffff1234` where hardware gives `00000000ffff1234`
+    /// (`tools/difftest.py --scalar`).
     #[inline(always)]
-    pub(super) fn movk(&mut self, rd: u8, shift: u8, val: u16) {
+    pub(super) fn movk(&mut self, rd: u8, shift: u8, val: u16, sf: bool) {
         let mask = 0xFFFFu64 << shift;
         let cur = self.reg_at(rd) & !mask;
-        self.set_reg_at(rd, cur | (u64::from(val) << shift));
+        self.set_reg_at(rd, (cur | (u64::from(val) << shift)) & Self::mask(sf));
     }
 
     /// `AND`/`ORR`/`EOR`/`ANDS`. The immediate, shifted-register and plain

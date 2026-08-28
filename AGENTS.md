@@ -23,6 +23,9 @@ standing state.
 - `python3 tools/difftest.py [--scalar]` — differential-test the decode
   against real ARM under `qemu-aarch64`. **Add an instruction there before
   hand-deriving expected values.** Needs `clang` + `lld` + `qemu-aarch64`.
+  **Two separate harnesses**: bare, it runs the SIMD table only; `--scalar`
+  runs the integer one. A change to the integer ALU that reports "matches
+  qemu" from the bare run has not been tested at all.
 - `cargo run --release -p switch-core --example jit_difftest -- <nro>` — both
   engines side by side, with every state difference between them.
 
