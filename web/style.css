@@ -208,7 +208,9 @@ body {
      the window is. */
   object-fit: contain;
   background: #000;
-  image-rendering: pixelated;
+  /* The frame is a 720p photograph, not pixel art: nearest-neighbour at the
+     fractional scale a window gives it stair-steps every thin feature. */
+  image-rendering: auto;
   /* The canvas is the console's touchscreen: a drag across it is a finger, not
      a page scroll or a pinch-zoom, and a double-tap is two taps. Without this
      the browser swallows the gesture before pointermove ever fires. */
