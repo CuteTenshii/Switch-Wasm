@@ -72,6 +72,7 @@ fn main() {
         block_height_log2: BLOCK_HEIGHT_LOG2,
         color_format: COLOR_FORMAT,
         transform: 0,
+        crop: switch_core::gpu::Crop::ALL,
     };
 
     // One outside the timing, so a cold page table is not counted as scan-out.

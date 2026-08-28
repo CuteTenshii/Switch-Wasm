@@ -174,6 +174,8 @@ pub enum Format {
     Bgra8UnormSrgb,
     Rgb10a2Unorm,
     R32Float,
+    R16Float,
+    R16Unorm,
     Rgba16Float,
     Rgba32Float,
     Depth16Unorm,
@@ -656,6 +658,8 @@ pub(crate) fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
         0xC0 | 0xC3 => Format::Rgba32Float,
         0xEA => Format::Rg8Unorm,
         0xF3 => Format::R8Unorm,
+        0xF2 => Format::R16Float,
+        0xEE => Format::R16Unorm,
         raw => return Err(Unsupported::Format { raw }),
     })
 }
@@ -955,6 +959,7 @@ mod tests {
             Format::Rgba8Unorm | Format::Bgra8Unorm | Format::Rgb10a2Unorm | Format::R32Float => {
                 (4, false)
             }
+            Format::R16Float | Format::R16Unorm => (2, false),
             Format::Rgba8UnormSrgb | Format::Bgra8UnormSrgb => (4, true),
             Format::Rgba16Float => (8, false),
             Format::Rgba32Float => (16, false),

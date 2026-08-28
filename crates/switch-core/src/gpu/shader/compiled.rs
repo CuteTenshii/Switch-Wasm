@@ -749,6 +749,9 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             round,
             ftz,
             sat,
+            src_bits,
+            dst_bits,
+            hi,
         } => Op::F2f {
             dst,
             src: f(src),
@@ -756,6 +759,9 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             round,
             ftz,
             sat,
+            src_bits,
+            dst_bits,
+            hi,
         },
 
         // Everything else carries no constant-bank operand — `ldc`'s bank is

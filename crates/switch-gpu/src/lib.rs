@@ -46,6 +46,15 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
     let wanted = wgpu::Features::TEXTURE_COMPRESSION_BC
         | wgpu::Features::TEXTURE_COMPRESSION_ASTC
         | wgpu::Features::TEXTURE_COMPRESSION_ETC2
+        // `R16Unorm` and its wider siblings, which a title samples as an
+        // ordinary texture and WebGPU does not offer. Asked for the same way
+        // the compressed formats are: taken where an adapter has it, and the
+        // draw falls to the rasterizer where it does not.
+        | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+        // WGSL's quad operations, which are what a warp shuffle is: a `shfl`
+        // reads another lane of the 2x2 quad, and `quadSwapX`/`Y`/`Diagonal`
+        // are exactly that. Without them the draw is the rasterizer's.
+        | wgpu::Features::SUBGROUP
         // Without this a device offers the sample counts the WebGPU spec
         // guarantees — one and four — whatever the adapter underneath it can
         // do. Maxwell's multisample modes are two, four, eight and sixteen,
@@ -55,8 +64,22 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
         // `Gpu::samples_supported`, which asks whichever source is telling
         // the truth on this device.
         | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+    // A constant bank is bound as a storage buffer, and WebGPU guarantees
+    // only eight of those per stage. Maxwell has eighteen banks and a shader
+    // is free to read nine, which `create_pipeline_layout` then rejects
+    // outright — so the draw is lost to a limit rather than to anything it
+    // asked the device to do. Raised to whatever the adapter really has,
+    // which is the mechanism the specification provides for exactly this;
+    // asking for more than that would fail device creation instead.
+    let required_limits = wgpu::Limits {
+        max_storage_buffers_per_shader_stage: wgpu::Limits::default()
+            .max_storage_buffers_per_shader_stage
+            .max(adapter.limits().max_storage_buffers_per_shader_stage),
+        ..wgpu::Limits::default()
+    };
     wgpu::DeviceDescriptor {
         required_features: adapter.features() & wanted,
+        required_limits,
         ..Default::default()
     }
 }
@@ -74,6 +97,43 @@ use switch_core::gpu::shader::wgsl::{self, Coverage, Layout, Stage, Translation}
 use switch_core::gpu::surface::{SampleGrid, MAX_SAMPLES};
 use switch_core::gpu::upload::{Banks, DepthKind, Target, Targets, Uploads};
 use switch_core::{Error, Result};
+
+/// The memory a `ldg` reads, resolved from the descriptor its address was
+/// built out of.
+struct GlobalUpload {
+    stage: ShaderStage,
+    slot: u32,
+    bytes: Vec<u8>,
+}
+
+/// How much of a mapping one `ldg` buffer may take. A shader indexes from a
+/// descriptor and nothing in the program says how far it reaches, so the
+/// upload runs to the end of the mapping the descriptor points into — and
+/// stops here, well inside `maxStorageBufferBindingSize`, rather than moving
+/// a mapping's worth of memory for a draw that reads a few words of it.
+const MAX_GLOBAL: u64 = 8 << 20;
+
+/// Keep the leftmost `window` texels of each row of a linear image whose rows
+/// are `stride` texels wide.
+fn crop_rows(rows: Vec<u8>, stride: usize, window: usize, unit: usize) -> Vec<u8> {
+    if window >= stride {
+        return rows;
+    }
+    let mut out = Vec::with_capacity(rows.len() / stride * window);
+    for row in rows.chunks_exact(stride * unit) {
+        out.extend_from_slice(&row[..window * unit]);
+    }
+    out
+}
+
+/// How wide the red channel of a shadow map's texel is, and how it is read.
+#[derive(Clone, Copy)]
+enum Red {
+    Unorm8,
+    Unorm16,
+    Float16,
+    Float32,
+}
 
 /// `copyTextureToBuffer` wants each row of the destination aligned.
 const COPY_ALIGNMENT: u32 = 256;
@@ -1133,7 +1193,12 @@ impl Gpu {
                 | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
+        // `read_depth` walks the surface, whose rows are `row_bytes` wide
+        // whatever the pass covers — so a cropped target takes the left of
+        // each one. `Target::rows` is already the pass's height.
         let values = target.read_depth(ctx)?;
+        let surface_texels = (target.row_bytes / target.unit.max(1)) as usize;
+        let values = crop_rows(values, surface_texels, target.width as usize, kind.unit() as usize);
         // The staging image is always `r32float`, whatever the depth format
         // is: one WGSL text, one pipeline per depth format, and a `u16` that
         // has to be widened on the way in either way.
@@ -1359,7 +1424,27 @@ impl Gpu {
         // frame, and in a browser a dropped buffer waits on a collector.
         pending.staging.destroy();
         match target.depth_kind() {
-            Some(_) => target.write_depth(ctx, &rows),
+            Some(kind) => {
+                // A cropped depth target holds the left of each row; the rest
+                // is what the surface already had, and reading it back is
+                // how it survives being written whole.
+                let surface_texels = (target.row_bytes / target.unit.max(1)) as usize;
+                let window = target.width as usize;
+                if window < surface_texels {
+                    let unit = kind.unit() as usize;
+                    let mut full = target.read_depth(ctx)?;
+                    for y in 0..target.rows as usize {
+                        let from = y * window * unit;
+                        let to = y * surface_texels * unit;
+                        let len = window * unit;
+                        if to + len <= full.len() && from + len <= rows.len() {
+                            full[to..to + len].copy_from_slice(&rows[from..from + len]);
+                        }
+                    }
+                    return target.write_depth(ctx, &full);
+                }
+                target.write_depth(ctx, &rows)
+            }
             None => target.write(ctx, &rows),
         }
     }
@@ -1840,16 +1925,19 @@ impl Gpu {
             .filter(|t| t.stage == stage)
             .enumerate()
         {
-            let dim = declared
+            use switch_core::gpu::shader::isa::TexDim;
+            let declared_texture = declared
                 .textures
                 .iter()
                 .find(|b| b.immediate == upload.immediate)
-                .map(|b| b.dim)
                 .ok_or("a texture the module never declared")?;
+            let compare = declared_texture.compare;
+            let dim = declared_texture.dim;
             let view_dimension = match dim {
-                switch_core::gpu::shader::isa::TexDim::T2dArray => {
-                    wgpu::TextureViewDimension::D2Array
-                }
+                TexDim::T2dArray => wgpu::TextureViewDimension::D2Array,
+                TexDim::T3d => wgpu::TextureViewDimension::D3,
+                // Six faces of a 2D texture, viewed as one cube.
+                TexDim::TCube => wgpu::TextureViewDimension::Cube,
                 _ => wgpu::TextureViewDimension::D2,
             };
             let binding = TEXTURE_BINDING + 2 * index as u32;
@@ -1857,7 +1945,11 @@ impl Gpu {
                 binding,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Texture {
-                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    sample_type: if compare {
+                        wgpu::TextureSampleType::Depth
+                    } else {
+                        wgpu::TextureSampleType::Float { filterable: true }
+                    },
                     view_dimension,
                     multisampled: false,
                 },
@@ -1866,15 +1958,41 @@ impl Gpu {
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: binding + 1,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                ty: wgpu::BindingType::Sampler(if compare {
+                    wgpu::SamplerBindingType::Comparison
+                } else {
+                    wgpu::SamplerBindingType::Filtering
+                }),
                 count: None,
             });
-            resources.push(Resource::Texture(
-                binding,
-                self.texture(upload)?,
-                view_dimension,
+            let texture = if compare {
+                self.shadow_texture(upload)?
+            } else {
+                self.texture(upload, view_dimension)?
+            };
+            resources.push(Resource::Texture(binding, texture, view_dimension));
+            resources.push(Resource::Sampler(
+                binding + 1,
+                self.sampler(upload, compare),
             ));
-            resources.push(Resource::Sampler(binding + 1, self.sampler(upload)));
+        }
+
+        for global in p.globals.iter().filter(|g| g.stage == stage) {
+            let binding = wgsl::GLOBAL_BINDING + global.slot;
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            });
+            resources.push(Resource::Buffer(
+                binding,
+                self.buffer("global", &global.bytes, wgpu::BufferUsages::STORAGE),
+            ));
         }
 
         let layout = match self.group_layouts.get(&entries) {
@@ -1933,6 +2051,7 @@ impl Gpu {
     fn texture(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
+        view: wgpu::TextureViewDimension,
     ) -> std::result::Result<wgpu::Texture, String> {
         let format =
             device_texture_format(&self.device, upload.format).map_err(|e| format!("{e:?}"))?;
@@ -1941,12 +2060,19 @@ impl Gpu {
             height: upload.height.max(1),
             depth_or_array_layers: upload.layers.max(1),
         };
+        // A 3D image's slices are the same bytes an array's are, but the
+        // texture has to be created as one: a `texture_3d` binding filters
+        // between them, and a `D2Array` does not.
+        let dimension = match view {
+            wgpu::TextureViewDimension::D3 => wgpu::TextureDimension::D3,
+            _ => wgpu::TextureDimension::D2,
+        };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("texture"),
             size,
             mip_level_count: 1,
             sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
+            dimension,
             format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
@@ -1970,7 +2096,170 @@ impl Gpu {
         Ok(texture)
     }
 
-    fn sampler(&self, upload: &switch_core::gpu::upload::TextureUpload) -> wgpu::Sampler {
+    /// The buffers a stage's `ldg`s read, one per descriptor the translation
+    /// tracked back to a constant bank.
+    ///
+    /// The address is not something the shader computed: it is a descriptor
+    /// the driver wrote into a bank, so it can be read out of the bank this
+    /// draw already uploads and the memory it names bound beside it. Eden
+    /// does the same in `global_memory_to_storage_buffer`.
+    fn global_uploads(
+        &self,
+        layout: &Layout,
+        stage: ShaderStage,
+        uploads: &Uploads,
+        ctx: &ExecCtx,
+    ) -> std::result::Result<Vec<GlobalUpload>, String> {
+        let mut out = Vec::new();
+        for (slot, &(bank, offset)) in layout.globals.iter().enumerate() {
+            let held = uploads
+                .constants
+                .iter()
+                .find(|c| c.stage == stage && c.bank == u32::from(bank))
+                .ok_or("a `ldg` descriptor in a bank the draw never bound")?;
+            let word = |at: usize| -> Option<u32> {
+                held.bytes
+                    .get(at..at + 4)
+                    .map(|b| u32::from_le_bytes(b.try_into().expect("four bytes")))
+            };
+            let at = usize::from(offset);
+            let (Some(lo), Some(hi)) = (word(at), word(at + 4)) else {
+                return Err(format!(
+                    "a `ldg` descriptor at c{bank}[{offset:#x}], past the bank's end"
+                ));
+            };
+            let address = (u64::from(hi) << 32) | u64::from(lo);
+            let mapping = ctx
+                .vmm
+                .mapping_at(address)
+                .ok_or_else(|| format!("a `ldg` descriptor naming {address:#x}, which is unmapped"))?;
+            let len = (mapping.gpu_va + mapping.size - address).min(MAX_GLOBAL) as usize;
+            let mut bytes = vec![0u8; len];
+            ctx.vmm
+                .read_into(ctx.mem, address, &mut bytes)
+                .map_err(|e| format!("{e:?}"))?;
+            out.push(GlobalUpload {
+                stage,
+                slot: slot as u32,
+                bytes,
+            });
+        }
+        Ok(out)
+    }
+
+    /// A sampled depth image, which cannot be uploaded and so is *drawn*.
+    ///
+    /// WebGPU allows a copy into a `depth32float` only from another texture
+    /// of the same format (§26.1.2.2), so the guest's shadow map goes into an
+    /// `r32float` staging image and [`Gpu::load_depth`] — the same pass that
+    /// puts a depth *target* on the device — writes it through `frag_depth`.
+    /// That is the workaround the specification itself names.
+    fn shadow_texture(
+        &mut self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+    ) -> std::result::Result<wgpu::Texture, String> {
+        let size = wgpu::Extent3d {
+            width: upload.width.max(1),
+            height: upload.height.max(1),
+            depth_or_array_layers: upload.layers.max(1),
+        };
+        let format = wgpu::TextureFormat::Depth32Float;
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow map"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        // Whatever the guest stored it as, the staging image is the one
+        // `load_depth` reads: `r32float`, one value a texel.
+        let depths = self.shadow_depths(upload)?;
+        let staging = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow upload"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &staging,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &depths,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size.width * 4),
+                rows_per_image: Some(size.height),
+            },
+            size,
+        );
+        self.load_depth(&texture, &staging, format)
+            .map_err(|e| format!("{e:?}"))?;
+        staging.destroy();
+        self.scratch.push(Scratch::Texture(texture.clone()));
+        Ok(texture)
+    }
+
+    /// One `f32` a texel out of a sampled depth image: its red channel,
+    /// which is the one a comparison reads.
+    ///
+    /// A shadow map is not always stored in a depth format — a title is free
+    /// to render its depth into an ordinary colour surface and compare that,
+    /// and A Short Hike does — so this reads whichever format the descriptor
+    /// named. Red rather than the first byte, because `sample_compare_with`
+    /// compares `texel[0]` of the *decoded* texel and the two have to agree.
+    fn shadow_depths(
+        &self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+    ) -> std::result::Result<Vec<u8>, String> {
+        use switch_core::gpu::pipeline::Format;
+        // (bytes per texel, where red starts in one, how wide red is).
+        let (unit, at, red) = match upload.format {
+            Format::R32Float => return Ok(upload.bytes.clone()),
+            Format::R16Unorm => (2, 0, Red::Unorm16),
+            Format::R16Float => (2, 0, Red::Float16),
+            Format::R8Unorm => (1, 0, Red::Unorm8),
+            Format::Rg8Unorm => (2, 0, Red::Unorm8),
+            Format::Rgba8Unorm => (4, 0, Red::Unorm8),
+            Format::Bgra8Unorm => (4, 2, Red::Unorm8),
+            Format::Rgba16Float => (8, 0, Red::Float16),
+            Format::Rgba32Float => (8 * 2, 0, Red::Float32),
+            other => return Err(format!("a shadow map stored as {other:?}")),
+        };
+        let mut out = Vec::with_capacity(upload.bytes.len() / unit * 4);
+        for texel in upload.bytes.chunks_exact(unit) {
+            let b = &texel[at..];
+            let value = match red {
+                Red::Unorm8 => f32::from(b[0]) / 255.0,
+                Red::Unorm16 => f32::from(u16::from_le_bytes([b[0], b[1]])) / 65535.0,
+                Red::Float16 => {
+                    switch_core::gpu::surface::f16_to_f32(u16::from_le_bytes([b[0], b[1]]))
+                }
+                Red::Float32 => f32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+            };
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        Ok(out)
+    }
+
+    /// The sampler a texture is read through. `compare` is the *binding's*
+    /// question, not the descriptor's: a `texs.dc` asks for a comparison
+    /// whatever the TSC left in `depth_compare_enable`, and the rasterizer
+    /// answers such a sample with `Always` — see `sample_compare_with`.
+    fn sampler(
+        &self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        compare: bool,
+    ) -> wgpu::Sampler {
         use switch_core::gpu::texture::Wrap;
         let wrap = |w: Wrap| match w {
             Wrap::Repeat => wgpu::AddressMode::Repeat,
@@ -1994,8 +2283,22 @@ impl Gpu {
                 wgpu::FilterMode::Nearest
             }
         };
+        use switch_core::gpu::texture::Compare;
+        let compare = compare
+            .then(|| upload.sampler.compare.unwrap_or(Compare::Always))
+            .map(|c| match c {
+                Compare::Never => wgpu::CompareFunction::Never,
+                Compare::Less => wgpu::CompareFunction::Less,
+                Compare::Equal => wgpu::CompareFunction::Equal,
+                Compare::LessEqual => wgpu::CompareFunction::LessEqual,
+                Compare::Greater => wgpu::CompareFunction::Greater,
+                Compare::NotEqual => wgpu::CompareFunction::NotEqual,
+                Compare::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
+                Compare::Always => wgpu::CompareFunction::Always,
+            });
         self.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("sampler"),
+            compare,
             address_mode_u: wrap(upload.sampler.wrap_u),
             address_mode_v: wrap(upload.sampler.wrap_v),
             address_mode_w: wgpu::AddressMode::ClampToEdge,
@@ -2812,6 +3115,8 @@ fn texture_format(format: Format) -> Result<wgpu::TextureFormat> {
         Format::Bgra8UnormSrgb => T::Bgra8UnormSrgb,
         Format::Rgb10a2Unorm => T::Rgb10a2Unorm,
         Format::R32Float => T::R32Float,
+        Format::R16Float => T::R16Float,
+        Format::R16Unorm => T::R16Unorm,
         Format::Rgba16Float => T::Rgba16Float,
         Format::Rgba32Float => T::Rgba32Float,
         Format::Depth16Unorm => T::Depth16Unorm,
@@ -2875,6 +3180,8 @@ struct Prepared {
     vs_layout: Layout,
     fs_layout: Layout,
     uploads: Uploads,
+    /// The memory each stage's `ldg`s read, by descriptor.
+    globals: Vec<GlobalUpload>,
     /// Vertices for a sequential draw, indices for an indexed one — or, for
     /// a topology that had to be assembled, the length of
     /// [`Prepared::assembled`].
@@ -2912,15 +3219,31 @@ impl Gpu {
             .depth
             .is_some_and(|d| d.write_enabled || d.compare != state::Compare::Always);
         let depth = targets.depth.filter(|_| uses_depth);
-        if let (Some(color), Some(depth)) = (color, depth) {
-            // WebGPU wants every attachment of a pass to be the same size,
-            // and the rasterizer does not — it addresses each surface with
-            // its own extent and simply misses where they disagree.
-            if (color.width, color.height) != (depth.width, depth.height) {
-                return Err(format!(
-                    "a {}x{} colour target beside a {}x{} depth one",
-                    color.width, color.height, depth.width, depth.height
-                ));
+        // WebGPU wants every attachment of a pass to be the same size, and
+        // the rasterizer does not — it addresses each surface with its own
+        // extent and simply misses where they disagree. A depth surface
+        // larger than the colour one is the case that arises, and the pass
+        // only ever touches the part of it the colour target covers, so it
+        // is attached cropped to that: the rest is read and written by
+        // nobody, which is what missing it means.
+        let mut depth = depth;
+        if let (Some(color), Some(full)) = (color, depth) {
+            if (color.width, color.height) != (full.width, full.height) {
+                if full.width < color.width || full.height < color.height {
+                    return Err(format!(
+                        "a {}x{} colour target beside a smaller {}x{} depth one",
+                        color.width, color.height, full.width, full.height
+                    ));
+                }
+                // The stride stays the surface's, because that is what its
+                // block-linear addressing is in terms of; only how much of
+                // it the pass covers changes.
+                depth = Some(Target {
+                    width: color.width,
+                    height: color.height,
+                    rows: color.height,
+                    ..full
+                });
             }
         }
         if color.is_none() && depth.is_none() {
@@ -3004,12 +3327,12 @@ impl Gpu {
         immediates.extend(
             vs.textures
                 .iter()
-                .map(|&(imm, _)| (ShaderStage::VertexB, imm)),
+                .map(|&(imm, _, _)| (ShaderStage::VertexB, imm)),
         );
         immediates.extend(
             fs.textures
                 .iter()
-                .map(|&(imm, _)| (ShaderStage::Fragment, imm)),
+                .map(|&(imm, _, _)| (ShaderStage::Fragment, imm)),
         );
         let mut banks: Vec<(ShaderStage, u32)> = Vec::new();
         banks.extend(
@@ -3083,6 +3406,9 @@ impl Gpu {
             None => None,
         };
 
+        let mut globals = self.global_uploads(&vs_layout, ShaderStage::VertexB, &uploads, ctx)?;
+        globals.extend(self.global_uploads(&fs_layout, ShaderStage::Fragment, &uploads, ctx)?);
+
         if switch_core::env_flag!("TRACE_GPU_TEX") {
             for t in &uploads.textures {
                 eprintln!(
@@ -3101,6 +3427,7 @@ impl Gpu {
             vs_layout,
             fs_layout,
             uploads,
+            globals,
             count: match &assembled {
                 Some((indices, _)) => indices.len() as u32,
                 None => engine.last_draw.count,
@@ -3124,7 +3451,13 @@ impl Gpu {
                 engine.bound_constbuf(stage, u32::from(bank))
             })
             .map_err(|e| format!("{e:?}"))?;
-        wgsl::translate(&Compiled::new(&program)).map_err(|e| e.to_string())
+        let caps = wgsl::Caps {
+            subgroups: self.device.features().contains(wgpu::Features::SUBGROUP),
+            // On the web the browser compiles the text and wants the
+            // directive; natively naga does, and rejects it.
+            subgroup_enable: cfg!(target_arch = "wasm32"),
+        };
+        wgsl::translate_for(&Compiled::new(&program), caps).map_err(|e| e.to_string())
     }
 }
 

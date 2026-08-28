@@ -838,6 +838,7 @@ mod tests {
                 dst: 0,
                 dst2: 2,
                 coords: [0, 1, RZ],
+                dref: None,
                 handle: 0x1a4,
                 dim: TexDim::T2d,
                 mask: [true, true, true, true],

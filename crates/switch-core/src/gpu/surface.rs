@@ -85,6 +85,38 @@ pub fn block_linear_offset(x_bytes: u32, y: u32, width_bytes: u32, block_height_
         + block_linear_column(x_bytes, block_height_gobs)
 }
 
+/// Byte offset of `(x_bytes, y, z)` in a block-linear *volume*, whose blocks
+/// are `block_depth_gobs` GOBs deep as well as `block_height_gobs` tall.
+///
+/// A 3D image is not a stack of 2D ones: consecutive slices interleave inside
+/// a block, so slice `z` is not `z` layer-strides along. Every term the depth
+/// touches is a multiple of a GOB, which is why one GOB of depth at `z = 0`
+/// reduces this to [`block_linear_offset`] exactly — the test below holds the
+/// two together. Eden's `SwizzleImpl` is the same arithmetic as shifts.
+pub fn block_linear_volume_offset(
+    x_bytes: u32,
+    y: u32,
+    z: u32,
+    width_bytes: u32,
+    height: u32,
+    block_height_gobs: u32,
+    block_depth_gobs: u32,
+) -> u32 {
+    let bh = block_height_gobs.max(1);
+    let bd = block_depth_gobs.max(1);
+    let width_gobs = width_bytes.div_ceil(GOB_WIDTH).max(1);
+    let block_bytes = width_gobs * GOB_SIZE * bh * bd;
+    let rows_per_block = GOB_HEIGHT * bh;
+    let blocks_down = height.div_ceil(rows_per_block).max(1);
+    let slice_bytes = blocks_down * block_bytes;
+
+    let offset_z = (z / bd) * slice_bytes + (z % bd) * GOB_SIZE * bh;
+    let block_y = y / GOB_HEIGHT;
+    let offset_y = (block_y / bh) * block_bytes + (block_y % bh) * GOB_SIZE;
+    let offset_x = (x_bytes / GOB_WIDTH) * block_bytes / width_gobs;
+    offset_z + offset_y + offset_x + gob_offset(x_bytes, y)
+}
+
 /// How a surface's rows are arranged in memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
@@ -536,6 +568,8 @@ impl ColorFormat {
             }
             // R32Float
             0xE5 => Ok(rgba[0].to_bits() as u128),
+            0xF2 => Ok(f32_to_f16(rgba[0]) as u128),
+            0xEE => Ok((rgba[0].clamp(0.0, 1.0) * 65535.0 + 0.5) as u128),
             // RGBA32Float
             0xC0 | 0xC3 => {
                 let mut v = 0u128;
@@ -659,6 +693,8 @@ impl ColorFormat {
                 })
             }
             0xE5 => Ok([f32::from_bits(raw as u32), 0.0, 0.0, 1.0]),
+            0xF2 => Ok([f16_to_f32(raw as u16), 0.0, 0.0, 1.0]),
+            0xEE => Ok([f32::from(raw as u16) / 65535.0, 0.0, 0.0, 1.0]),
             0xC0 | 0xC3 => {
                 let mut out = [0.0f32; 4];
                 for (i, o) in out.iter_mut().enumerate() {
@@ -755,7 +791,7 @@ fn round_to_nearest_even(value: u32, shift: u32) -> u32 {
     }
 }
 
-pub(crate) fn f16_to_f32(v: u16) -> f32 {
+pub fn f16_to_f32(v: u16) -> f32 {
     let sign = ((v as u32) & 0x8000) << 16;
     let exp = ((v as u32) >> 10) & 0x1F;
     let mantissa = (v as u32) & 0x3FF;
@@ -881,6 +917,43 @@ mod tests {
             *byte = (words[i / 4] >> (8 * (i % 4))) as u8;
         }
         out
+    }
+
+    /// One GOB of depth at slice zero is a 2D surface, and the volume
+    /// addressing has to agree with the 2D addressing there or one of the two
+    /// is wrong.
+    #[test]
+    fn a_volume_one_gob_deep_addresses_like_a_surface() {
+        for &bh in &[1u32, 2, 4, 8, 16] {
+            for y in 0..40u32 {
+                for x in (0..320u32).step_by(4) {
+                    assert_eq!(
+                        block_linear_volume_offset(x, y, 0, 256, 64, bh, 1),
+                        block_linear_offset(x, y, 256, bh),
+                        "bh {bh} at ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Consecutive slices of a deep block sit one GOB-column apart inside it,
+    /// and the block after that is a whole slice along.
+    #[test]
+    fn a_deep_block_interleaves_its_slices() {
+        // One GOB wide, one GOB tall per block, four deep.
+        let at = |z| block_linear_volume_offset(0, 0, z, 64, 8, 1, 4);
+        assert_eq!(at(0), 0);
+        assert_eq!(at(1), 512);
+        assert_eq!(at(3), 3 * 512);
+        // The fifth slice starts the next block of depth, which is a whole
+        // slice of blocks along.
+        assert_eq!(at(4), 4 * 512);
+        // Two GOBs tall: a slice is two GOBs, so the second slice is past
+        // both of the first's.
+        let tall = |z| block_linear_volume_offset(0, 0, z, 64, 16, 2, 2);
+        assert_eq!(tall(0), 0);
+        assert_eq!(tall(1), 2 * 512);
     }
 
     #[test]

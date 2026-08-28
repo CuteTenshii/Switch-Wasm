@@ -12,7 +12,7 @@
 //! of a gralloc handle.
 
 use crate::display::parcel::{ParcelReader, ParcelWriter};
-use crate::gpu::DisplayBuffer;
+use crate::gpu::{Crop, DisplayBuffer};
 
 /// Transaction codes (`IGraphicBufferProducer.cpp`).
 pub const REQUEST_BUFFER: u32 = 1;
@@ -51,10 +51,18 @@ const PLANE_PITCH: usize = 0x14;
 const PLANE_OFFSET: usize = 0x1C;
 const PLANE_BLOCK_HEIGHT_LOG2: usize = 0x24;
 
-/// Byte offset of `transform` inside the flattened `QueueBufferInput`
+/// Byte offsets inside the flattened `QueueBufferInput`
 /// (`{ s64 timestamp, s32 isAutoTimestamp, Rect crop, s32 scalingMode,
-/// u32 transform, ... }`) — how the queued image is stored versus how it is
-/// to be shown. Discarding it drew every Minecraft frame upside down.
+/// u32 transform, u32 stickyTransform, ... }`).
+///
+/// `crop` is the window of the surface that is the frame, and `transform` is
+/// how the image is stored versus how it is to be shown. Discarding the pair
+/// drew every Minecraft frame upside down and gave A Short Hike a 1080p
+/// screen with its 720p frame in the corner.
+///
+/// `scalingMode` is not read: it says how the crop maps onto the layer, and
+/// the frame goes to a canvas that scales it to the window either way.
+const INPUT_CROP_OFFSET: usize = 12;
 const INPUT_TRANSFORM_OFFSET: usize = 32;
 
 /// `NATIVE_WINDOW_*` selectors for `QUERY`.
@@ -221,11 +229,16 @@ impl BufferQueue {
             }
             QUEUE_BUFFER => {
                 let slot = r.read_i32();
-                let transform = r
-                    .read_flattened()
-                    .and_then(|input| input.get(INPUT_TRANSFORM_OFFSET..INPUT_TRANSFORM_OFFSET + 4))
-                    .map_or(0, |bytes| read_u32(bytes, 0));
-                action = match self.queue(slot, transform) {
+                let input = r.read_flattened().unwrap_or_default();
+                let word = |at: usize| read_u32(input, at) as i32;
+                let transform = word(INPUT_TRANSFORM_OFFSET) as u32;
+                let crop = Crop {
+                    left: word(INPUT_CROP_OFFSET),
+                    top: word(INPUT_CROP_OFFSET + 4),
+                    right: word(INPUT_CROP_OFFSET + 8),
+                    bottom: word(INPUT_CROP_OFFSET + 12),
+                };
+                action = match self.queue(slot, transform, crop) {
                     Some(buffer) => Action::Present(buffer),
                     None => Action::None,
                 };
@@ -306,11 +319,12 @@ impl BufferQueue {
 
     /// Mark a dequeued slot as presented. Because scan-out happens
     /// immediately, the slot goes straight back to free.
-    fn queue(&mut self, slot: i32, transform: u32) -> Option<DisplayBuffer> {
+    fn queue(&mut self, slot: i32, transform: u32, crop: Crop) -> Option<DisplayBuffer> {
         let index = usize::try_from(slot).ok()?;
         let entry = self.slots.get_mut(index)?;
         let mut buffer = entry.buffer?;
         buffer.transform = transform;
+        buffer.crop = crop;
         entry.state = SlotState::Free;
         self.queued += 1;
         Some(buffer)
@@ -358,8 +372,9 @@ impl BufferQueue {
             layout: plane(PLANE_LAYOUT),
             block_height_log2: plane(PLANE_BLOCK_HEIGHT_LOG2),
             color_format,
-            // The producer names it per queued frame, not per slot.
+            // The producer names both per queued frame, not per slot.
             transform: 0,
+            crop: Crop::ALL,
         };
         if buffer.width != 0 && buffer.height != 0 {
             self.width = buffer.width;

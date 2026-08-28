@@ -80,6 +80,59 @@ pub struct DisplayBuffer {
     /// right way up. Minecraft queues every frame `FLIP_V`; A Short Hike and
     /// the Home Menu queue `0`.
     pub transform: u32,
+    /// Which part of the surface is the image.
+    pub crop: Crop,
+}
+
+/// The `Rect` a producer queues beside its buffer: the window of the surface
+/// that is actually the frame.
+///
+/// A title whose render resolution is not its swapchain's says so here. A
+/// Short Hike allocates 1920x1080 buffers, renders 1280x720 into the corner
+/// of one and queues `(0, 0, 1280, 720)`; scanning out the whole surface put
+/// its frame in the corner of a screen that was 55% pixels it never wrote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Crop {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl Crop {
+    /// The whole surface, which is what an empty rectangle asks for.
+    pub const ALL: Crop = Crop {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+
+    /// Android calls a rectangle with no area empty, and a producer with
+    /// nothing to crop queues one.
+    pub fn is_empty(&self) -> bool {
+        self.right <= self.left || self.bottom <= self.top
+    }
+
+    /// This crop against a `width` x `height` surface, as
+    /// `(x, y, width, height)`. Clamped rather than trusted: the rectangle
+    /// crosses from the guest, and one reaching past the surface would read
+    /// the row below.
+    pub fn window(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        if self.is_empty() {
+            return (0, 0, width, height);
+        }
+        let x = (self.left.max(0) as u32).min(width);
+        let y = (self.top.max(0) as u32).min(height);
+        let right = (self.right.max(0) as u32).min(width);
+        let bottom = (self.bottom.max(0) as u32).min(height);
+        // A rectangle entirely off the surface leaves nothing to show, and a
+        // zero-sized frame is not one — so it falls back to the whole thing.
+        if right <= x || bottom <= y {
+            return (0, 0, width, height);
+        }
+        (x, y, right - x, bottom - y)
+    }
 }
 
 /// `NATIVE_WINDOW_TRANSFORM_FLIP_H`: mirror the image left to right.
@@ -259,8 +312,14 @@ impl Gpu {
         let base = handle.cpu_addr.wrapping_add(buffer.offset);
         if self.trace {
             eprintln!(
-                "[gpu] present nvmap={} offset={:#x} -> cpu {:#x} {}x{}",
-                buffer.nvmap_id, buffer.offset, base, buffer.width, buffer.height
+                "[gpu] present nvmap={} offset={:#x} -> cpu {:#x} {}x{} crop={:?} transform={:#x}",
+                buffer.nvmap_id,
+                buffer.offset,
+                base,
+                buffer.width,
+                buffer.height,
+                buffer.crop,
+                buffer.transform
             );
         }
         let format = display_color_format(buffer.color_format)?;
@@ -316,19 +375,25 @@ impl Gpu {
             )));
         }
 
-        let mut pixels = Vec::with_capacity((buffer.width * buffer.height) as usize);
-        for y in 0..buffer.height {
+        // Only the window the producer queued. The rest of the surface is
+        // whatever the title happened to leave there, which on a 1080p buffer
+        // holding a 720p frame is more than half of it.
+        let (crop_x, crop_y, out_width, out_height) =
+            buffer.crop.window(buffer.width, buffer.height);
+
+        let mut pixels = Vec::with_capacity((out_width * out_height) as usize);
+        for row in 0..out_height {
             // The row of the *surface* this row of the image comes from.
-            let y = if flip_v { buffer.height - 1 - y } else { y };
+            let y = crop_y + if flip_v { out_height - 1 - row } else { row };
             let row_start = pixels.len();
             // Swizzled once per contiguous run rather than once per pixel:
             // `Layout::run_at` says how far the addresses stay linear, which
             // at 32 bits a pixel is four of them.
             let mut x = 0;
-            while x < buffer.width {
-                let (offset, run) = layout.run_at(x * bpp, y, width_bytes);
+            while x < out_width {
+                let (offset, run) = layout.run_at((crop_x + x) * bpp, y, width_bytes);
                 let addr = base.wrapping_add(offset);
-                let count = (run / bpp).clamp(1, buffer.width - x);
+                let count = (run / bpp).clamp(1, out_width - x);
                 for i in 0..count {
                     let at = (offset + i * bpp) as usize;
                     // Four bytes as one word, not four shifts into a `u128`:
@@ -372,8 +437,8 @@ impl Gpu {
         }
         self.scan_out = raw_bytes;
         self.framebuffer = Framebuffer {
-            width: buffer.width,
-            height: buffer.height,
+            width: out_width,
+            height: out_height,
             pixels,
         };
         self.frames += 1;
@@ -484,6 +549,7 @@ mod tests {
                 block_height_log2: 0,
                 color_format: 0x0100_5321_20,
                 transform: 0,
+                crop: Crop::ALL,
             },
         )
         .unwrap();
@@ -523,6 +589,7 @@ mod tests {
             block_height_log2: 0,
             color_format: 0x0100_5321_20,
             transform,
+            crop: Crop::ALL,
         };
 
         gpu.present(&mem, &buffer(0)).unwrap();
@@ -546,6 +613,81 @@ mod tests {
         assert!(gpu.present(&mem, &buffer(TRANSFORM_ROT_90)).is_err());
     }
 
+    /// A producer whose render resolution is smaller than its swapchain
+    /// queues the window it actually drew. A Short Hike renders 1280x720 into
+    /// the corner of a 1920x1080 buffer, and scanning out the whole surface
+    /// showed the frame in the corner of a mostly-black screen.
+    #[test]
+    fn a_queued_crop_is_the_frame() {
+        let mut gpu = Gpu::new();
+        let mut mem = Memory::new();
+        mem.map_zero(0x4000_0000, 0x1000).unwrap();
+        let handle = gpu.nvmap.create(0x1000);
+        gpu.nvmap
+            .alloc(handle, 0, 0, 0x1000, 0, 0x4000_0000)
+            .unwrap();
+        let id = gpu.nvmap.get(handle).unwrap().id;
+        let at = |x: u32, y: u32| 0x4000_0000 + surface::gob_offset(x * 4, y);
+        // The corners of the window (4, 2)..(12, 6), and one pixel outside it.
+        mem.write_u32(at(4, 2), 0xFF00_0000).unwrap();
+        mem.write_u32(at(11, 5), 0x0000_00FF).unwrap();
+        mem.write_u32(at(0, 0), 0x00FF_0000).unwrap();
+        let buffer = |crop, transform| DisplayBuffer {
+            nvmap_id: id,
+            offset: 0,
+            width: 16,
+            height: 8,
+            pitch: 64,
+            layout: NV_LAYOUT_BLOCK_LINEAR,
+            block_height_log2: 0,
+            color_format: 0x0100_5321_20,
+            transform,
+            crop,
+        };
+        let window = Crop {
+            left: 4,
+            top: 2,
+            right: 12,
+            bottom: 6,
+        };
+
+        gpu.present(&mem, &buffer(window, 0)).unwrap();
+        assert_eq!((gpu.framebuffer.width, gpu.framebuffer.height), (8, 4));
+        assert_eq!(gpu.framebuffer.pixels[0], 0xFF00_0000);
+        assert_eq!(gpu.framebuffer.pixels[3 * 8 + 7], 0x0000_00FF);
+        assert!(
+            !gpu.framebuffer.pixels.contains(&0x00FF_0000),
+            "a pixel outside the crop is not in the frame"
+        );
+
+        // The flip is about the window, not the surface.
+        gpu.present(&mem, &buffer(window, TRANSFORM_FLIP_V))
+            .unwrap();
+        assert_eq!(gpu.framebuffer.pixels[3 * 8], 0xFF00_0000);
+        assert_eq!(gpu.framebuffer.pixels[7], 0x0000_00FF);
+
+        // An empty rectangle is how a producer says "all of it", and one off
+        // the surface is not a frame of no pixels.
+        for crop in [
+            Crop::ALL,
+            Crop {
+                left: 9,
+                top: 0,
+                right: 4,
+                bottom: 8,
+            },
+            Crop {
+                left: 40,
+                top: 0,
+                right: 60,
+                bottom: 8,
+            },
+        ] {
+            gpu.present(&mem, &buffer(crop, 0)).unwrap();
+            assert_eq!((gpu.framebuffer.width, gpu.framebuffer.height), (16, 8));
+        }
+    }
+
     #[test]
     fn present_of_an_unknown_buffer_is_reported() {
         let mut gpu = Gpu::new();
@@ -562,6 +704,7 @@ mod tests {
                 block_height_log2: 0,
                 color_format: 0x0100_5321_20,
                 transform: 0,
+                crop: Crop::ALL,
             },
         );
         assert!(err.is_err());

@@ -688,6 +688,38 @@ fn read_texture(
     }
     let mut bytes = Vec::with_capacity(total as usize);
     for layer in 0..layers {
+        // A volume's slices interleave inside a block, so there is no base a
+        // slice starts at — `Texture::texel` addresses each one instead, and
+        // that is also the only path that reads the depth of a block.
+        if image.block_depth_gobs > 1 {
+            let unit = match copy {
+                Copy::Raw { unit } => unit,
+                Copy::Decode { .. } => {
+                    return Err(Error::Gpu(
+                        "upload: a compressed 3D image is not decoded".into(),
+                    ))
+                }
+            };
+            for y in 0..rows {
+                for x in 0..row_bytes / unit {
+                    let at = crate::gpu::surface::block_linear_volume_offset(
+                        x * unit,
+                        y,
+                        layer,
+                        row_bytes,
+                        rows,
+                        match image.layout {
+                            Layout::BlockLinear { block_height_gobs } => block_height_gobs,
+                            Layout::Pitch { .. } => 1,
+                        },
+                        image.block_depth_gobs,
+                    );
+                    let word = ctx.read_pixel(image.addr + u64::from(at), unit)?;
+                    bytes.extend_from_slice(&word.to_le_bytes()[..unit as usize]);
+                }
+            }
+            continue;
+        }
         let base = image.addr + u64::from(layer) * u64::from(image.layer_stride);
         match copy {
             Copy::Raw { unit } => {
@@ -1157,6 +1189,7 @@ mod tests {
             ],
             layer_stride: 0,
             layers: 1,
+            block_depth_gobs: 1,
         }
     }
 
@@ -1300,6 +1333,7 @@ mod tests {
             ],
             layer_stride: 0,
             layers: 1,
+            block_depth_gobs: 1,
         };
         let mut out = Vec::new();
         deswizzle(&h.ctx(), base, layout, 16 * 4, 16, 4, &mut out).unwrap();

@@ -338,6 +338,20 @@ pub enum FRound {
     Trunc,
 }
 
+/// What an `xmad` adds its product to: `c` whole, one of `c`'s halves
+/// zero-extended, or `b` shifted up beside `c` (`SelectMode` in Eden's
+/// `integer_short_multiply_add`).
+///
+/// A 32-bit multiply lowers to a chain of these, and the mode is how each
+/// step says which part of the running total it is adding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XmadC {
+    Full,
+    Lo,
+    Hi,
+    Bcc,
+}
+
 /// `texs`'s sample dimensionality (envydis's `d000_1`/`d200_1` tables).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TexDim {
@@ -724,6 +738,7 @@ pub enum Op {
         bh: bool,
         bsigned: bool,
         c: Operand,
+        cmode: XmadC,
         psl: bool,
         mrg: bool,
     },
@@ -813,14 +828,24 @@ pub enum Op {
         round: FRound,
         ftz: bool,
     },
-    /// Float -> float: on f32 this is only ever a round/saturate.
+    /// Float -> float: a width conversion between f16 and f32, an explicit
+    /// rounding of the value, or both.
     F2f {
         dst: u8,
         src: Operand,
         sm: FMod,
-        round: FRound,
+        /// The rounding the instruction names, or `None` where it names none
+        /// and the value is only moved.
+        round: Option<FRound>,
         sat: bool,
         ftz: bool,
+        /// Source and destination widths, 16 or 32. A 16-bit source is one
+        /// half of the operand; a 16-bit result lands in the low half of
+        /// `dst` with the rest cleared.
+        src_bits: u8,
+        dst_bits: u8,
+        /// Which half a 16-bit source is read from. Meaningless at 32 bits.
+        hi: bool,
     },
     /// Integer -> integer: a width conversion, optionally saturating.
     I2i {
@@ -933,6 +958,10 @@ pub enum Op {
         dst: u8,
         dst2: u8,
         coords: [u8; 3],
+        /// A shadow sample's reference register: the fetched depth is
+        /// compared against it and the result, not the depth, is what the
+        /// instruction returns.
+        dref: Option<u8>,
         handle: u16,
         dim: TexDim,
         mask: [bool; 4],
@@ -1143,6 +1172,16 @@ fn int_type(bits: u64) -> Option<(u8, bool)> {
         4 => Some((1, true)),
         5 => Some((2, true)),
         6 => Some((4, true)),
+        _ => None,
+    }
+}
+
+/// The `FloatFormat` a conversion names, in bits: 1 is f16 and 2 is f32.
+/// f64 (3) is not modelled, and 0 is not a format.
+fn float_width(bits: u64) -> Option<u8> {
+    match bits {
+        1 => Some(16),
+        2 => Some(32),
         _ => None,
     }
 }
@@ -1849,15 +1888,47 @@ fn decode_alu(insn: u64) -> Op {
                 ftz: field(insn, 44, 1) != 0,
             }
         }
-        // f2f — both types must be f32; rounding at 39..41 plus bit 42.
+        // f2f — f16 and f32 in either direction, and the rounding a
+        // same-width conversion names.
         0xa8 => {
-            let Some(src) = rhs_float else { return un };
-            if field(insn, 8, 2) != 2 || field(insn, 10, 2) != 2 {
-                return un;
-            }
-            if field(insn, 42, 1) == 0 && field(insn, 39, 2) != 0 {
-                return un; // "pass" without an explicit rounding mode
-            }
+            let (Some(dst_bits), Some(src_bits)) = (
+                float_width(field(insn, 8, 2)),
+                float_width(field(insn, 10, 2)),
+            ) else {
+                return un; // f64, which nothing here models
+            };
+            let hi = field(insn, 41, 1) != 0;
+            let src = if src_bits == 16 {
+                // A half source is read out of the packed pair it sits in,
+                // and an immediate carries one half both lanes see — which is
+                // how Eden's `F2F_imm` builds `imm | (imm << 16)`.
+                match rhs_int {
+                    Some(Operand::Imm(v)) => Operand::Imm((v & 0xffff) | (v << 16)),
+                    Some(other) => other,
+                    None => return un,
+                }
+            } else {
+                let Some(src) = rhs_float else { return un };
+                src
+            };
+            let round = if src_bits == dst_bits {
+                // `RoundingOp` is bits 39, 40 and 42: bit 41 sits between
+                // them and is the half selector, which is why the field is
+                // not contiguous. 0 (none) and 3 (pass) both only move.
+                match field(insn, 39, 2) | (field(insn, 42, 1) << 3) {
+                    0 | 3 => None,
+                    8..=11 => Some(fround(field(insn, 39, 2))),
+                    _ => return un,
+                }
+            } else {
+                // Bits 39..41 are the *cast's* rounding mode here, and both
+                // renderers round a conversion to nearest-even and nothing
+                // else — so any other mode is refused rather than ignored.
+                if field(insn, 39, 2) != 0 {
+                    return un;
+                }
+                None
+            };
             Op::F2f {
                 dst: reg(insn, 0, 8),
                 src,
@@ -1865,9 +1936,12 @@ fn decode_alu(insn: u64) -> Op {
                     neg: field(insn, 45, 1) != 0,
                     abs: field(insn, 49, 1) != 0,
                 },
-                round: fround(field(insn, 39, 2)),
+                round,
                 sat: field(insn, 50, 1) != 0,
                 ftz: field(insn, 44, 1) != 0,
+                src_bits,
+                dst_bits,
+                hi,
             }
         }
         // i2i — src type in tab5ce0_1, dst type in tab5ce0_0.
@@ -2174,68 +2248,86 @@ fn decode_alu_wide(insn: u64) -> Op {
         );
     }
 
-    // xmad — 16x16 multiply-accumulate. Only the plain modes are decoded:
-    // the `.x` extended-carry and the psl/mrg merge forms change what the
-    // accumulate does, so they stay unimplemented rather than approximated.
+    // xmad — 16x16 multiply-accumulate, in each of its four operand forms.
+    // Which operand is which moves between them, and so do `psl`, `mrg` and
+    // the width of the select mode: the layouts are Eden's `XMAD_reg`,
+    // `_rc`, `_cr` and `_imm`.
     if insn & 0xffc0_0000_0000_0000 == 0x5b00_0000_0000_0000 {
         return decode_xmad(
             insn,
-            Operand::Reg(reg(insn, 20, 8)),
-            Operand::Reg(reg(insn, 39, 8)),
-            field(insn, 35, 1) != 0,
-            field(insn, 50, 3),
-            field(insn, 38, 1) != 0,
-            field(insn, 36, 1) != 0,
-            field(insn, 37, 1) != 0,
+            XmadForm {
+                b: Operand::Reg(reg(insn, 20, 8)),
+                c: Operand::Reg(reg(insn, 39, 8)),
+                bh: field(insn, 35, 1) != 0,
+                mode: field(insn, 50, 3),
+                x: field(insn, 38, 1) != 0,
+                psl: field(insn, 36, 1) != 0,
+                mrg: field(insn, 37, 1) != 0,
+            },
         );
     }
+    // The `rc` form multiplies by the register and adds the bank; `cr` is the
+    // other way round. Reading them the same way makes one of the two
+    // multiply by its addend.
     if insn & 0xff80_0000_0000_0000 == 0x5100_0000_0000_0000 {
         return decode_xmad(
             insn,
-            const_operand(insn),
-            Operand::Reg(reg(insn, 39, 8)),
-            field(insn, 52, 1) != 0,
-            field(insn, 50, 2),
-            field(insn, 54, 1) != 0,
-            false,
-            false,
+            XmadForm {
+                b: Operand::Reg(reg(insn, 39, 8)),
+                c: const_operand(insn),
+                bh: field(insn, 52, 1) != 0,
+                mode: field(insn, 50, 2),
+                x: field(insn, 54, 1) != 0,
+                psl: false,
+                mrg: false,
+            },
         );
     }
-    // xmad, immediate form: the register form with a **15-bit** immediate at
-    // 20..35 in place of the b register, and every modifier left exactly
-    // where the register form keeps it.
-    //
-    // The width is what makes this form readable. A 32-bit multiply by a
-    // constant lowers to a pair — `xmad d, a, K, RZ` then
-    // `xmad.psl d, a.h1, K, c` — and both halves multiply by the *same* K.
-    // Reading the immediate as the usual 20 bits makes the second one
-    // multiply by `K | 0x10000` instead, because bit 36 is `psl` and not part
-    // of the immediate at all. Fifteen bits is the width at which the pair
-    // agrees, and it leaves `bh` at 35 where the register form has it.
-    //
-    // Without this arm 59 of "A Short Hike"'s 297 draws were dropped by the
-    // rasterizer and its frames came out black.
-    if insn & 0xffc0_0000_0000_0000 == 0x3600_0000_0000_0000 {
+    if insn & 0xfe00_0000_0000_0000 == 0x4e00_0000_0000_0000 {
         return decode_xmad(
             insn,
-            Operand::Imm(field(insn, 20, 15) as u32),
-            Operand::Reg(reg(insn, 39, 8)),
-            field(insn, 35, 1) != 0,
-            field(insn, 50, 3),
-            field(insn, 38, 1) != 0,
-            field(insn, 36, 1) != 0,
-            field(insn, 37, 1) != 0,
+            XmadForm {
+                b: const_operand(insn),
+                c: Operand::Reg(reg(insn, 39, 8)),
+                bh: field(insn, 52, 1) != 0,
+                mode: field(insn, 50, 2),
+                x: field(insn, 54, 1) != 0,
+                psl: field(insn, 55, 1) != 0,
+                mrg: field(insn, 56, 1) != 0,
+            },
+        );
+    }
+    // The immediate form carries a **16-bit** `b` at 20..36 and multiplies by
+    // its low half always — there is no half selector to spend a bit on, so
+    // bit 35 belongs to the immediate and not to `bh`. A 32-bit multiply by a
+    // constant lowers to a pair of these that both multiply by the same `K`,
+    // and reading the field 20 bits wide gave the second one `K | 0x10000`.
+    if insn & 0xfec0_0000_0000_0000 == 0x3600_0000_0000_0000 {
+        return decode_xmad(
+            insn,
+            XmadForm {
+                b: Operand::Imm(field(insn, 20, 16) as u32),
+                c: Operand::Reg(reg(insn, 39, 8)),
+                bh: false,
+                mode: field(insn, 50, 3),
+                x: field(insn, 38, 1) != 0,
+                psl: field(insn, 36, 1) != 0,
+                mrg: field(insn, 37, 1) != 0,
+            },
         );
     }
 
-    // fset — the register-writing form of fsetp.
+    // fset — the register-writing form of fsetp. The three operand forms
+    // share every other field, exactly as Eden's one `FSET` body serves its
+    // `_reg`, `_cbuf` and `_imm` entries.
     if insn & 0xff00_0000_0000_0000 == 0x5800_0000_0000_0000
         || insn & 0xfe00_0000_0000_0000 == 0x4800_0000_0000_0000
+        || insn & 0xfe00_0000_0000_0000 == 0x3000_0000_0000_0000
     {
-        let b = if insn >> 56 == 0x58 {
-            Operand::Reg(reg(insn, 20, 8))
-        } else {
-            const_operand(insn)
+        let b = match insn >> 57 {
+            0x2c => Operand::Reg(reg(insn, 20, 8)),
+            0x24 => const_operand(insn),
+            _ => Operand::Imm(imm20f(insn)),
         };
         let Some(bop) = bool_op(field(insn, 45, 2)) else {
             return un;
@@ -2261,20 +2353,29 @@ fn decode_alu_wide(insn: u64) -> Op {
 
     // ipa — a[]-relative, non-indexed.
     if insn & 0xff00_0040_0000_ff00 == 0xe000_0000_0000_ff00 {
+        // The interpolation mode (bits 54..56): 0 pass, 1 multiply,
+        // 2 constant, 3 sc. Only `multiply` changes the value — it scales the
+        // varying by the register, which is how a shader spends its
+        // `mufu rcp` on the perspective divide. The other three fetch the
+        // attribute and stop, so they decode to the same op with no
+        // multiplier, exactly as Eden's `IPA` translates them.
+        //
+        // Whether a varying is interpolated or flat is not this field's to
+        // say: the program header's pixel imap is, for every mode alike.
         let mode = field(insn, 54, 2);
         // The sample mode (`SampleMode` in Eden's decode): 0 default, 1
         // centroid, 2 offset. Offset samples wherever a register points,
-        // which is a per-invocation position neither renderer has; the
-        // sc/constant interpolation modes are not interpolation at all.
+        // which is a per-invocation position neither renderer has.
         let sample = field(insn, 52, 2);
-        if sample > 1 || mode > 1 {
+        if sample > 1 {
             return un;
         }
+        let multiply = mode == 1;
         return Op::Ipa {
             dst: reg(insn, 0, 8),
             offset: field(insn, 28, 10) as u16,
-            mul: opt_reg(reg(insn, 20, 8)),
-            perspective: mode == 1,
+            mul: opt_reg(reg(insn, 20, 8)).filter(|_| multiply),
+            perspective: multiply,
             sat: field(insn, 51, 1) != 0,
             centroid: sample == 1,
         };
@@ -2288,7 +2389,7 @@ fn decode_alu_wide(insn: u64) -> Op {
         let dst = reg(insn, 0, 8);
         let dst2 = reg(insn, 28, 8);
         let (a, b) = (reg(insn, 8, 8), reg(insn, 20, 8));
-        if let (Some((dim, coords)), Some(mask)) = (
+        if let (Some((dim, coords, dref)), Some(mask)) = (
             texs_encoding(field(insn, 53, 4), a, b),
             decode_tex_mask(field(insn, 50, 3), dst, dst2),
         ) {
@@ -2296,6 +2397,7 @@ fn decode_alu_wide(insn: u64) -> Op {
                 dst,
                 dst2,
                 coords,
+                dref,
                 handle: field(insn, 36, 13) as u16,
                 dim,
                 mask,
@@ -2735,9 +2837,9 @@ fn decode_ffma(insn: u64, b: Operand, c: Operand) -> Op {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn decode_xmad(
-    insn: u64,
+/// What one `xmad` form supplies. Everything else — the destination, `a`,
+/// its half and the two signedness bits — sits in the same place in all four.
+struct XmadForm {
     b: Operand,
     c: Operand,
     bh: bool,
@@ -2745,22 +2847,36 @@ fn decode_xmad(
     x: bool,
     psl: bool,
     mrg: bool,
-) -> Op {
-    if x || mode != 0 {
-        return Op::Unimplemented { raw: insn };
+}
+
+fn decode_xmad(insn: u64, form: XmadForm) -> Op {
+    let un = Op::Unimplemented { raw: insn };
+    if form.x {
+        return un; // the extended-carry form
     }
+    let cmode = match form.mode {
+        0 => XmadC::Full,
+        1 => XmadC::Lo,
+        2 => XmadC::Hi,
+        4 => XmadC::Bcc,
+        // `csfu` folds a sign into an unsigned product. Eden does not
+        // implement it either, and a guess here is a wrong answer that looks
+        // like a right one.
+        _ => return un,
+    };
     let sign = field(insn, 48, 2);
     Op::Xmad {
         dst: reg(insn, 0, 8),
         a: reg(insn, 8, 8),
         ah: field(insn, 53, 1) != 0,
         asigned: sign == 1 || sign == 3,
-        b,
-        bh,
+        b: form.b,
+        bh: form.bh,
         bsigned: sign == 2 || sign == 3,
-        c,
-        psl,
-        mrg,
+        c: form.c,
+        cmode,
+        psl: form.psl,
+        mrg: form.mrg,
     }
 }
 
@@ -2771,28 +2887,35 @@ fn decode_xmad(
 /// sample takes `(a, b)`, while one that also carries an explicit LOD takes
 /// `(a, a + 1)` and leaves `b` for the level.
 ///
-/// The encodings left out are the ones this rasteriser has no model for:
-/// depth-compare (4, 5, 6, 9) and 2D arrays (7, 8). They decode to
-/// [`Op::Unimplemented`] and their draw is skipped with a reason, which is
-/// better than sampling the wrong thing silently.
-fn texs_encoding(bits: u64, a: u8, b: u8) -> Option<(TexDim, [u8; 3])> {
+/// The depth-compare encodings (4, 5, 6, 9) also name the register holding
+/// the reference the fetched depth is compared against, which is the third
+/// item of the answer.
+fn texs_encoding(bits: u64, a: u8, b: u8) -> Option<(TexDim, [u8; 3], Option<u8>)> {
     let next = a.wrapping_add(1);
-    match bits {
+    let after_b = b.wrapping_add(1);
+    Some(match bits {
         // 1D.LZ
-        0 => Some((TexDim::T1d, [a, RZ, RZ])),
+        0 => (TexDim::T1d, [a, RZ, RZ], None),
         // 2D, 2D.LZ
-        1 | 2 => Some((TexDim::T2d, [a, b, RZ])),
+        1 | 2 => (TexDim::T2d, [a, b, RZ], None),
         // 2D.LL — `b` is the level, not a coordinate.
-        3 => Some((TexDim::T2d, [a, next, RZ])),
+        3 => (TexDim::T2d, [a, next, RZ], None),
+        // 2D.DC, 2D.LZ.DC — the reference is `b`.
+        4 | 6 => (TexDim::T2d, [a, next, RZ], Some(b)),
+        // 2D.LL.DC — `b` is the level, so the reference is the register
+        // after it.
+        5 => (TexDim::T2d, [a, next, RZ], Some(after_b)),
         // ARRAY_2D, ARRAY_2D.LZ — the layer comes from `a`, and the
         // coordinates from `a + 1` and `b`.
-        7 | 8 => Some((TexDim::T2dArray, [next, b, a])),
+        7 | 8 => (TexDim::T2dArray, [next, b, a], None),
+        // ARRAY_2D.LZ.DC
+        9 => (TexDim::T2dArray, [next, b, a], Some(after_b)),
         // 3D, 3D.LZ
-        10 | 11 => Some((TexDim::T3d, [a, next, b])),
+        10 | 11 => (TexDim::T3d, [a, next, b], None),
         // CUBE, CUBE.LL
-        12 | 13 => Some((TexDim::TCube, [a, next, b])),
-        _ => None,
-    }
+        12 | 13 => (TexDim::TCube, [a, next, b], None),
+        _ => return None,
+    })
 }
 
 /// Which colour channels a `texs` writes.
@@ -3249,6 +3372,181 @@ mod tests {
         assert!(matches!(op(0xe033ff87cff7ff06), Op::Unimplemented { .. }));
     }
 
+    /// Bits 54..56 are the interpolation mode. Only `multiply` reads the
+    /// register at 20; `constant` and `sc` fetch the attribute and stop.
+    /// A Short Hike's fragment shaders carry 23 distinct `ipa` constants,
+    /// and refusing them cost the backend 226 of the title's 899 draws.
+    #[test]
+    fn decodes_the_ipa_interpolation_modes() {
+        let ipa = |raw| match op(raw) {
+            Op::Ipa {
+                mul, perspective, ..
+            } => (mul, perspective),
+            other => panic!("not an ipa: {other:?}"),
+        };
+        // pass, multiply, constant, sc — the same instruction each time, with
+        // $r3 in the multiplier field.
+        assert_eq!(ipa(0xe003ff8800_37ff00), (None, false));
+        assert_eq!(ipa(0xe043ff8800_37ff00), (Some(3), true));
+        assert_eq!(ipa(0xe083ff8800_37ff00), (None, false));
+        assert_eq!(ipa(0xe0c3ff8800_37ff00), (None, false));
+        // One of A Short Hike's own, whose multiplier field is already RZ.
+        assert_eq!(
+            op(0xe083ff890ff7ff00),
+            Op::Ipa {
+                dst: 0,
+                offset: 0x90,
+                mul: None,
+                perspective: false,
+                sat: false,
+                centroid: false,
+            }
+        );
+    }
+
+    /// `f2f` between the two float widths. Unity's mediump arithmetic
+    /// converts constantly, and A Short Hike carries ten distinct
+    /// half-to-half roundings — every one of them a `floor`, half the time
+    /// off the high half of the register.
+    #[test]
+    fn decodes_f2f_between_half_and_single() {
+        // Two of the title's own: `f2f.f16.f16.floor` off H0 and off H1.
+        assert_eq!(
+            op(0x5ca8048000370503),
+            Op::F2f {
+                dst: 3,
+                src: Operand::Reg(3),
+                sm: FMod::NONE,
+                round: Some(FRound::Floor),
+                sat: false,
+                ftz: false,
+                src_bits: 16,
+                dst_bits: 16,
+                hi: false,
+            }
+        );
+        assert!(matches!(
+            op(0x5ca8068000370500),
+            Op::F2f {
+                round: Some(FRound::Floor),
+                src_bits: 16,
+                dst_bits: 16,
+                hi: true,
+                ..
+            }
+        ));
+        // The widths come from bits 8..10 (destination) and 10..12 (source),
+        // and a conversion names no rounding of its own.
+        let widths = |dst: u64, src: u64| {
+            let raw = 0x5ca8_0000_0000_0000 | (dst << 8) | (src << 10);
+            match op(raw) {
+                Op::F2f {
+                    src_bits,
+                    dst_bits,
+                    round,
+                    ..
+                } => (src_bits, dst_bits, round),
+                other => panic!("not an f2f: {other:?}"),
+            }
+        };
+        assert_eq!(widths(2, 1), (16, 32, None));
+        assert_eq!(widths(1, 2), (32, 16, None));
+        assert_eq!(widths(2, 2), (32, 32, None));
+        // f64 is not modelled, and neither is a cast that rounds any way but
+        // to nearest.
+        assert!(matches!(
+            op(0x5ca8_0000_0000_0300),
+            Op::Unimplemented { .. }
+        ));
+        assert!(matches!(
+            op(0x5ca8_0080_0000_0200),
+            Op::Unimplemented { .. }
+        ));
+    }
+
+    /// `fset` against a 20-bit float immediate. The three operand forms share
+    /// every other field, so the arm only has to choose where `b` comes from.
+    /// A Short Hike compares four varyings against 0.5 this way.
+    #[test]
+    fn decodes_fset_against_an_immediate() {
+        assert_eq!(
+            op(0x309303bf00070301),
+            Op::Fset {
+                dst: 1,
+                a: 3,
+                am: FMod::NONE,
+                b: Operand::Imm(0.5f32.to_bits()),
+                bm: FMod::NONE,
+                cmp: FCmp::Le,
+                bop: BoolOp::And,
+                src: Pred {
+                    reg: 7,
+                    negate: false
+                },
+                bf: true,
+            }
+        );
+        // The same instruction in its register and constant-bank forms.
+        assert!(matches!(
+            op(0x5800_0000_0000_0000),
+            Op::Fset {
+                b: Operand::Reg(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            op(0x4800_0000_0000_0000),
+            Op::Fset {
+                b: Operand::Const { .. },
+                ..
+            }
+        ));
+    }
+
+    /// The depth-compare encodings, which name a reference register beside
+    /// their coordinates. Where that register sits depends on whether the
+    /// form also spends one on a level: `2d.ll.dc` and `array_2d.lz.dc` take
+    /// the one after `b`, the other two take `b` itself.
+    #[test]
+    fn decodes_the_texs_depth_compare_forms() {
+        let texs = |enc: u64| {
+            let raw = 0xd000_0000_0000_0000u64
+                | (1 << 59)
+                | (enc << 53)
+                | (0x20 << 36)
+                | (8 << 8)
+                | (20 << 20)
+                | 2;
+            match op(raw) {
+                Op::Texs {
+                    coords, dref, dim, ..
+                } => (dim, coords, dref),
+                other => panic!("expected texs, got {other:?}"),
+            }
+        };
+        // The plain 2D sample it is otherwise identical to.
+        assert_eq!(texs(1), (TexDim::T2d, [8, 20, RZ], None));
+        // 2d.dc, 2d.lz.dc — the reference is `b`.
+        assert_eq!(texs(4), (TexDim::T2d, [8, 9, RZ], Some(20)));
+        assert_eq!(texs(6), (TexDim::T2d, [8, 9, RZ], Some(20)));
+        // 2d.ll.dc — `b` is the level, so the reference follows it.
+        assert_eq!(texs(5), (TexDim::T2d, [8, 9, RZ], Some(21)));
+        // array_2d.lz.dc — the layer still comes from `a`.
+        assert_eq!(texs(9), (TexDim::T2dArray, [9, 20, 8], Some(21)));
+
+        // A Short Hike's own three, all `2d.lz.dc`.
+        for raw in [
+            0xd0c200aff0670404u64,
+            0xd8c200aff1270001,
+            0xd8c200aff1270004,
+        ] {
+            assert!(
+                matches!(op(raw), Op::Texs { dref: Some(_), .. }),
+                "{raw:#018x} is a shadow sample"
+            );
+        }
+    }
+
     #[test]
     fn decodes_exit() {
         assert_eq!(op(0xe3000000_0007000f), Op::Exit);
@@ -3414,6 +3712,7 @@ mod tests {
                 dst: 0,
                 dst2: 2,
                 coords: [0, 1, RZ],
+                dref: None,
                 handle: 0x1a4,
                 dim: TexDim::T2d,
                 mask: [true, true, true, true],
@@ -3557,6 +3856,57 @@ mod tests {
             }
             other => panic!("expected xmad.psl, got {other:?}"),
         }
+    }
+
+    /// The select mode says what the product is added to, and the four
+    /// operand forms disagree about which operand is which. A Short Hike
+    /// carries one `clo` and one `cbcc`.
+    #[test]
+    fn decodes_the_xmad_select_modes_and_operand_forms() {
+        let cmode = |raw| match op(raw) {
+            Op::Xmad { cmode, .. } => Some(cmode),
+            Op::Unimplemented { .. } => None,
+            other => panic!("expected xmad, got {other:?}"),
+        };
+        for (mode, want) in [
+            (0, Some(XmadC::Full)),
+            (1, Some(XmadC::Lo)),
+            (2, Some(XmadC::Hi)),
+            // `csfu`, which Eden does not implement either.
+            (3, None),
+            (4, Some(XmadC::Bcc)),
+        ] {
+            assert_eq!(cmode(asm(0x5b00, &[(50, 3, mode)])), want, "mode {mode}");
+        }
+        // A Short Hike's own: `xmad.clo` with a 16-bit immediate, and
+        // `xmad.cbcc` in the register form.
+        assert!(matches!(
+            op(0x36247f9000180303),
+            Op::Xmad {
+                cmode: XmadC::Lo,
+                ..
+            }
+        ));
+        assert!(matches!(
+            op(0x5b30041800970704),
+            Op::Xmad {
+                cmode: XmadC::Bcc,
+                ..
+            }
+        ));
+
+        // `rc` multiplies by the register and adds the bank; `cr` is the
+        // other way round.
+        let operands = |raw| match op(raw) {
+            Op::Xmad { b, c, .. } => (b, c),
+            other => panic!("expected xmad, got {other:?}"),
+        };
+        let (b, c) = operands(asm(0x5100, &[(39, 8, 5)]));
+        assert_eq!(b, Operand::Reg(5));
+        assert!(matches!(c, Operand::Const { .. }));
+        let (b, c) = operands(asm(0x4e00, &[(39, 8, 5)]));
+        assert!(matches!(b, Operand::Const { .. }));
+        assert_eq!(c, Operand::Reg(5));
     }
 
     fn asm(opcode: u16, fields: &[(u32, u32, u64)]) -> u64 {

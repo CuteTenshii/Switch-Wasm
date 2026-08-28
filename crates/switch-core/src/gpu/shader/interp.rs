@@ -28,7 +28,8 @@ use std::collections::HashMap;
 
 use super::isa::{
     self, AtomOp, AtomSpace, AtomType, BarMode, BoolOp, FCmp, FMod, FRound, HMerge, HPrecision,
-    HSwizzle, ICmp, LogicOp, LopTest, MemSize, MufuOp, Op, Operand, Pred, ShflMode, TexDim, RZ,
+    HSwizzle, ICmp, LogicOp, LopTest, MemSize, MufuOp, Op, Operand, Pred, ShflMode, TexDim, XmadC,
+    RZ,
 };
 use crate::gpu::surface::{f16_to_f32, f32_to_f16};
 
@@ -162,6 +163,38 @@ pub trait TextureSource {
     /// Sample `handle` at `(u, v)` of array layer `layer` — 0 for everything
     /// that is not a 2D array.
     fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> ShaderResult<[f32; 4]>;
+
+    /// Sample a 3D image, whose third coordinate is normalized rather than a
+    /// layer index. Defaulted, like the two below, so that a source with
+    /// none of them stays a one-method implementation.
+    fn sample_3d(&self, handle: u32, _u: f32, _v: f32, _w: f32) -> ShaderResult<[f32; 4]> {
+        Err(fault(format!(
+            "shader: 3D sample of handle {handle:#x} with no 3D source bound"
+        )))
+    }
+
+    /// Sample a cubemap, whose three coordinates are a direction.
+    fn sample_cube(&self, handle: u32, _s: f32, _t: f32, _r: f32) -> ShaderResult<[f32; 4]> {
+        Err(fault(format!(
+            "shader: cube sample of handle {handle:#x} with no cube source bound"
+        )))
+    }
+
+    /// A shadow sample: how `reference` compares against the depth there,
+    /// as `[c, c, c, 1.0]`. Defaulted to an error so that a source with no
+    /// depth textures behind it stays a one-method implementation.
+    fn sample_compare(
+        &self,
+        handle: u32,
+        _u: f32,
+        _v: f32,
+        _layer: u32,
+        _reference: f32,
+    ) -> ShaderResult<[f32; 4]> {
+        Err(fault(format!(
+            "shader: shadow sample of handle {handle:#x} with no depth source bound"
+        )))
+    }
 }
 
 /// No texture backend at all — every `texs` is an error. Correct for vertex
@@ -195,28 +228,76 @@ pub struct MemoryTextures<'a, 'b> {
     pub blocks: &'a std::cell::RefCell<crate::gpu::texture::BlockCache>,
 }
 
+impl MemoryTextures<'_, '_> {
+    /// The TIC/TSC pair `handle` resolves to, parsed once per draw.
+    fn descriptors_for(&self, handle: u32) -> ShaderResult<crate::gpu::texture::Descriptors> {
+        if let Some(d) = self.descriptors.borrow().get(&handle).copied() {
+            return Ok(d);
+        }
+        let d = crate::gpu::texture::read_descriptors(
+            self.ctx,
+            self.tex_header_pool,
+            self.tex_sampler_pool,
+            handle,
+        )?;
+        self.descriptors.borrow_mut().insert(handle, d);
+        Ok(d)
+    }
+}
+
 impl TextureSource for MemoryTextures<'_, '_> {
     fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> ShaderResult<[f32; 4]> {
-        let cached = self.descriptors.borrow().get(&handle).copied();
-        let descriptors = match cached {
-            Some(d) => d,
-            None => {
-                let d = crate::gpu::texture::read_descriptors(
-                    self.ctx,
-                    self.tex_header_pool,
-                    self.tex_sampler_pool,
-                    handle,
-                )?;
-                self.descriptors.borrow_mut().insert(handle, d);
-                d
-            }
-        };
+        let descriptors = self.descriptors_for(handle)?;
         Ok(crate::gpu::texture::sample_with(
             self.ctx,
             &descriptors,
             u as f64,
             v as f64,
             layer,
+            self.blocks,
+        )?)
+    }
+
+    fn sample_3d(&self, handle: u32, u: f32, v: f32, w: f32) -> ShaderResult<[f32; 4]> {
+        let descriptors = self.descriptors_for(handle)?;
+        Ok(crate::gpu::texture::sample_3d_with(
+            self.ctx,
+            &descriptors,
+            u as f64,
+            v as f64,
+            w as f64,
+            self.blocks,
+        )?)
+    }
+
+    fn sample_cube(&self, handle: u32, s: f32, t: f32, r: f32) -> ShaderResult<[f32; 4]> {
+        let descriptors = self.descriptors_for(handle)?;
+        Ok(crate::gpu::texture::sample_cube_with(
+            self.ctx,
+            &descriptors,
+            s as f64,
+            t as f64,
+            r as f64,
+            self.blocks,
+        )?)
+    }
+
+    fn sample_compare(
+        &self,
+        handle: u32,
+        u: f32,
+        v: f32,
+        layer: u32,
+        reference: f32,
+    ) -> ShaderResult<[f32; 4]> {
+        let descriptors = self.descriptors_for(handle)?;
+        Ok(crate::gpu::texture::sample_compare_with(
+            self.ctx,
+            &descriptors,
+            u as f64,
+            v as f64,
+            layer,
+            reference,
             self.blocks,
         )?)
     }
@@ -1231,21 +1312,29 @@ impl Invocation {
                 bh,
                 bsigned,
                 c,
+                cmode,
                 psl,
                 mrg,
             } => {
+                let raw_b = self.operand(b, env)?;
                 let av = half(self.reg(a), ah, asigned);
-                let bv = half(self.operand(b, env)?, bh, bsigned);
+                let bv = half(raw_b, bh, bsigned);
                 let mut product = (av.wrapping_mul(bv)) as u32;
                 if psl {
                     product <<= 16;
                 }
-                let cv = self.operand(c, env)?;
+                let raw_c = self.operand(c, env)?;
+                let cv = match cmode {
+                    XmadC::Full => raw_c,
+                    XmadC::Lo => raw_c & 0xffff,
+                    XmadC::Hi => raw_c >> 16,
+                    XmadC::Bcc => (raw_b << 16).wrapping_add(raw_c),
+                };
                 let mut v = product.wrapping_add(cv);
                 if mrg {
-                    // `.mrg` keeps the product's low half in the result's
-                    // high half instead of adding it there.
-                    v = (v & 0xffff) | (product << 16);
+                    // `.mrg` replaces the result's high half with `b`'s low
+                    // one rather than adding anything there.
+                    v = (v & 0xffff) | (raw_b << 16);
                 }
                 self.set_reg(dst, v);
             }
@@ -1508,9 +1597,29 @@ impl Invocation {
                 round,
                 sat,
                 ftz,
+                src_bits,
+                dst_bits,
+                hi,
             } => {
-                let x = sm.apply(flush(self.operand_f32(src, env)?, ftz));
-                self.set_reg_f32(dst, saturate(apply_round(x, round), sat));
+                let x = if src_bits == 16 {
+                    let raw = self.operand(src, env)?;
+                    f16_to_f32((raw >> if hi { 16 } else { 0 }) as u16)
+                } else {
+                    self.operand_f32(src, env)?
+                };
+                let x = sm.apply(flush(x, ftz));
+                let x = match round {
+                    Some(round) => apply_round(x, round),
+                    None => x,
+                };
+                let x = saturate(x, sat);
+                if dst_bits == 16 {
+                    // The half lands in the low half and the rest is cleared,
+                    // which is `PackFloat2x16` against a zero.
+                    self.set_reg(dst, u32::from(f32_to_f16(x)));
+                } else {
+                    self.set_reg_f32(dst, x);
+                }
             }
             Op::I2i {
                 dst,
@@ -1839,6 +1948,7 @@ impl Invocation {
     ) -> ShaderResult<()> {
         let Op::Texs {
             coords,
+            dref,
             handle,
             dim,
             ..
@@ -1860,7 +1970,23 @@ impl Invocation {
             TexDim::T2dArray => self.reg(coords[2]) & 0xffff,
             _ => 0,
         };
-        let color = env.textures.sample(handle, u, v, layer)?;
+        let color = match (dref, dim) {
+            (Some(reg), _) => {
+                env.textures
+                    .sample_compare(handle, u, v, layer, self.reg_f32(reg))?
+            }
+            // A 3D image's third coordinate is normalized like the other two,
+            // where an array's is the layer number.
+            (None, TexDim::T3d) => env
+                .textures
+                .sample_3d(handle, u, v, self.reg_f32(coords[2]))?,
+            // A cubemap's three are a direction, and the face comes out of it.
+            (None, TexDim::TCube) => {
+                env.textures
+                    .sample_cube(handle, u, v, self.reg_f32(coords[2]))?
+            }
+            (None, _) => env.textures.sample(handle, u, v, layer)?,
+        };
 
         // Where each channel lands was worked out at decode time.
         for &(reg, store, due) in program.texs_writes(pc) {
@@ -3485,6 +3611,7 @@ mod tests {
                 dst: 2,
                 dst2: 4,
                 coords: [0, 3, RZ], // u=r0, v=r3
+                dref: None,
                 handle: 0x20,
                 dim: TexDim::T2d,
                 mask: [true, true, true, true],
@@ -3862,6 +3989,7 @@ mod tests {
             dst: 1,
             dst2: 0,
             coords: [4, 5, RZ],
+            dref: None,
             handle: 0,
             dim: TexDim::T2d,
             mask: [true, true, true, true],
@@ -3923,6 +4051,7 @@ mod tests {
                         dst: 2,
                         dst2: 4,
                         coords: [4, 5, RZ],
+                        dref: None,
                         handle: 0,
                         dim: TexDim::T2d,
                         mask: [true, true, true, false],

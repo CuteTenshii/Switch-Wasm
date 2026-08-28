@@ -361,9 +361,28 @@ impl Cpu {
             // PresentSharedFrameBuffer(fence, Rect crop, u32 transform,
             // s32 swap interval, u64 layer_id, s64 slot). The slot is the last
             // field, and it is the frame.
+            //
+            // `android::Fence` is a count and four `{ id, value }` pairs — 36
+            // bytes, not 40 — so the crop starts at 0x24 and the transform is
+            // at 0x34. Reading the transform one field along lands on the swap
+            // interval, which the Home Menu queues as 1 and which decodes as
+            // `FLIP_H` on a frame that is plainly not mirrored.
             8255 => {
                 let data = self.ipc_request_data(tls);
+                let word = |at: u32| self.mem.read_u32(data.wrapping_add(at)).unwrap_or(0);
                 let slot = self.mem.read_u64(data.wrapping_add(0x48)).unwrap_or(0) as u32;
+                let crop = crate::gpu::Crop {
+                    left: word(0x24) as i32,
+                    top: word(0x28) as i32,
+                    right: word(0x2C) as i32,
+                    bottom: word(0x30) as i32,
+                };
+                let transform = word(0x34);
+                if self.trace_nv {
+                    eprintln!(
+                        "[vi] present shared slot={slot} crop={crop:?} transform={transform:#x}"
+                    );
+                }
                 let (_, id) = self.shared_buffer_object();
                 let buffer = crate::gpu::DisplayBuffer {
                     nvmap_id: id,
@@ -374,13 +393,8 @@ impl Cpu {
                     layout: crate::gpu::NV_LAYOUT_BLOCK_LINEAR,
                     block_height_log2: 4,
                     color_format: 0x01_0053_2120, // A8B8G8R8
-                    // Not read. The signature names a transform between the
-                    // crop and the swap interval, but where it sits in this
-                    // request is unverified: at the offset the field widths
-                    // imply (0x38) the Home Menu reads back `FLIP_H`, and it
-                    // is plainly not mirrored. An applet that wanted one
-                    // would be a reason to work the layout out; none does.
-                    transform: 0,
+                    transform,
+                    crop,
                 };
                 // A GPU backend holds its render targets on the device; the
                 // display reads them out of guest memory.

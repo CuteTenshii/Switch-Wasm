@@ -74,8 +74,57 @@ fn decode_wrap(bits: u32) -> Wrap {
 pub struct Sampler {
     pub wrap_u: Wrap,
     pub wrap_v: Wrap,
+    /// `address_p`, the third axis — a 3D image's depth.
+    pub wrap_w: Wrap,
     pub mag_linear: bool,
     pub min_linear: bool,
+    /// `depth_compare_enable` and `depth_compare_op`: a shadow sampler
+    /// answers with how the fetched depth compares against a reference the
+    /// instruction carries, not with the depth.
+    pub compare: Option<Compare>,
+}
+
+/// The comparison a shadow sampler makes, in the order `depth_compare_op`
+/// numbers them (which is GL's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compare {
+    Never,
+    Less,
+    Equal,
+    LessEqual,
+    Greater,
+    NotEqual,
+    GreaterEqual,
+    Always,
+}
+
+impl Compare {
+    /// Whether `reference` passes against the depth that was fetched.
+    pub fn passes(self, reference: f32, depth: f32) -> bool {
+        match self {
+            Compare::Never => false,
+            Compare::Less => reference < depth,
+            Compare::Equal => reference == depth,
+            Compare::LessEqual => reference <= depth,
+            Compare::Greater => reference > depth,
+            Compare::NotEqual => reference != depth,
+            Compare::GreaterEqual => reference >= depth,
+            Compare::Always => true,
+        }
+    }
+}
+
+fn decode_compare(bits: u32) -> Compare {
+    match bits & 0x7 {
+        0 => Compare::Never,
+        1 => Compare::Less,
+        2 => Compare::Equal,
+        3 => Compare::LessEqual,
+        4 => Compare::Greater,
+        5 => Compare::NotEqual,
+        6 => Compare::GreaterEqual,
+        _ => Compare::Always,
+    }
 }
 
 /// Parse one 32-byte TSC entry (`g80_texture.xml`'s `TSC` domain).
@@ -85,8 +134,12 @@ pub fn read_sampler(ctx: &ExecCtx, addr: u64) -> Result<Sampler> {
     Ok(Sampler {
         wrap_u: decode_wrap(w0),
         wrap_v: decode_wrap(w0 >> 3),
+        wrap_w: decode_wrap(w0 >> 6),
         mag_linear: (w1 & 0x3) == 2,
         min_linear: ((w1 >> 4) & 0x3) == 2,
+        // `depth_compare_enable` at bit 9, and the function it enables in the
+        // three bits above it.
+        compare: ((w0 >> 9) & 1 != 0).then(|| decode_compare(w0 >> 10)),
     })
 }
 
@@ -157,6 +210,11 @@ pub struct Texture {
     /// but copying the image out does, since nothing else says where it
     /// ends.
     pub layers: u32,
+    /// GOBs of depth per block, for a 3D image. Anything but 1 makes the
+    /// image a *volume*: consecutive slices interleave inside a block rather
+    /// than sitting a layer-stride apart, so `layer` addresses through
+    /// [`crate::gpu::surface::block_linear_volume_offset`] instead.
+    pub block_depth_gobs: u32,
 }
 
 impl Texture {
@@ -174,6 +232,14 @@ impl Texture {
         // The layer is not part of the swizzle: an array's slices sit back to
         // back, each one a whole surface.
         let layer_base = self.addr + u64::from(layer) * u64::from(self.layer_stride);
+        // A volume's slices interleave, so the slice is part of the address
+        // rather than a stride onto the front of it.
+        let volume = match self.layout {
+            Layout::BlockLinear { block_height_gobs } if self.block_depth_gobs > 1 => {
+                Some((block_height_gobs, self.block_depth_gobs))
+            }
+            _ => None,
+        };
         let mut texel = match self.kind {
             TexelKind::Plain(format) => {
                 let bpp = format.bytes_per_pixel;
@@ -181,7 +247,21 @@ impl Texture {
                     Layout::Pitch { pitch } => pitch,
                     Layout::BlockLinear { .. } => self.width * bpp,
                 };
-                let va = layer_base + self.layout.offset(x * bpp, y, width_bytes) as u64;
+                let va = match volume {
+                    Some((bh, bd)) => {
+                        self.addr
+                            + u64::from(crate::gpu::surface::block_linear_volume_offset(
+                                x * bpp,
+                                y,
+                                layer,
+                                width_bytes,
+                                self.height,
+                                bh,
+                                bd,
+                            ))
+                    }
+                    None => layer_base + self.layout.offset(x * bpp, y, width_bytes) as u64,
+                };
                 format.decode(ctx.read_pixel(va, bpp)?)?
             }
             TexelKind::Block(codec) => {
@@ -376,6 +456,8 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x01, FLOAT) => 0xC0, // R32_G32_B32_A32   -> RGBA32Float
         (0x03, FLOAT) => 0xCA, // R16_G16_B16_A16   -> RGBA16Float
         (0x0F, FLOAT) => 0xE5, // R32               -> R32Float
+        (0x1B, FLOAT) => 0xF2, // R16               -> R16Float
+        (0x1B, UNORM) => 0xEE, // R16               -> R16Unorm
         (other, UNORM) => {
             return Err(Error::Gpu(format!(
                 "texture: unsupported TIC COMPONENTS_SIZES {other:#x}"
@@ -419,6 +501,8 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
             let block_height_gobs = 1u32 << ((dw3 >> 3) & 0x7);
             ((dw1 >> 9) << 9, Layout::BlockLinear { block_height_gobs })
         }
+        // The block *depth* sits beside the height, and a 3D image with more
+        // than one GOB of it interleaves its slices — see the check below.
         1 | 2 => {
             // PITCH[_COLORKEY]: 27 address MSBs, 32B-aligned; pitch is a
             // separate 16-bit field, also in 32B units.
@@ -435,28 +519,45 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     let addr_hi = (dw2 & 0xffff) as u64;
     let tex_addr = (addr_hi << 32) | addr_low as u64;
 
-    // `TextureType_2D` and `_2DNoMipmap` differ only in whether the image has
-    // levels below the one sampled here; anything else has an extent this
-    // decoder would silently misread as a 2D image's.
-    // 1 and 7 are `TextureType_2D` and `_2DNoMipmap`, 3 is `_2DArray`. The
-    // array's slices are laid out back to back and differ from a plain 2D
-    // image only by the stride between them, so the same decode serves both.
+    // `TextureType` (Eden's `video_core/textures/texture.h`): 1 is `_2D` and
+    // 7 `_2DNoMipmap`, which differ only in whether there are levels below
+    // this one; 2 is `_3D`; 3, 5 and 8 are the cubemap, the 2D array and the
+    // cubemap array, whose slices sit back to back and so decode as one 2D
+    // image apiece, a layer stride apart. The 1D types are refused rather
+    // than misread as a 2D image one texel high.
     let texture_type = (dw4 >> 23) & 0xF;
-    if !matches!(texture_type, 1 | 3 | 7) {
+    const THREE_D: u32 = 2;
+    if !matches!(texture_type, 1 | THREE_D | 3 | 5 | 7 | 8) {
         return Err(Error::Gpu(format!(
-            "texture: TIC TextureType {texture_type} is not a 2D image or array"
+            "texture: TIC TextureType {texture_type} is not a 2D, 3D, array or cube image"
         )));
     }
+    // How many GOBs deep one block of a 3D image is. Anything but one makes
+    // it a volume, whose slices interleave — see `Texture::block_depth_gobs`.
+    let block_depth_gobs = if texture_type == THREE_D && header_version >= 3 {
+        1u32 << ((dw3 >> 6) & 0x7)
+    } else {
+        1
+    };
     let srgb = (dw4 >> 22) & 1 != 0;
     let width = (dw4 & 0xffff) + 1;
     let height = (dw5 & 0xffff) + 1;
-    // `DEPTH_MINUS_ONE`, which only an array has: a plain 2D image leaves
-    // whatever is in the field, and reading it would give it layers it has
-    // no memory for.
-    let layers = if texture_type == 3 {
-        ((dw5 >> 16) & 0x3fff) + 1
-    } else {
-        1
+    // `DEPTH_MINUS_ONE`, which only an image with a third dimension has: a
+    // plain 2D one leaves whatever is in the field, and reading it would give
+    // it slices it has no memory for.
+    //
+    // A cubemap is the exception in the other direction: its six faces are
+    // implied by the type and the field holds 1, which Eden's `image_info`
+    // asserts and then sets six layers anyway. Reading it would leave five
+    // faces of a cube behind.
+    const CUBE: u32 = 3;
+    const CUBE_ARRAY: u32 = 8;
+    let depth = ((dw5 >> 16) & 0x3fff) + 1;
+    let layers = match texture_type {
+        CUBE => 6,
+        CUBE_ARRAY => depth * 6,
+        THREE_D | 5 => depth,
+        _ => 1,
     };
     // The TIC carries no layer stride: it is the size of one swizzled slice,
     // worked out from the extent and the layout the same way the offset of a
@@ -487,6 +588,7 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
         swizzle,
         layer_stride,
         layers,
+        block_depth_gobs,
     };
     if let Some(dir) = dump_textures() {
         dump_texture(&texture, ctx, dir)?;
@@ -597,6 +699,26 @@ pub fn sample(
     )
 }
 
+/// A normalized coordinate wrapped into `size` texels.
+fn wrap_coord(mode: Wrap, t: f64, size: u32) -> f64 {
+    let t = match mode {
+        Wrap::Repeat => t - t.floor(),
+        // Mirrored repeat folds every other period back on itself, which is
+        // the whole difference from plain repeat: treating it as repeat puts
+        // a seam where the reflection should be.
+        Wrap::Mirror => {
+            let period = t.rem_euclid(2.0);
+            if period > 1.0 {
+                2.0 - period
+            } else {
+                period
+            }
+        }
+        Wrap::ClampToEdge | Wrap::ClampToBorder => t.clamp(0.0, 1.0),
+    };
+    t * size as f64
+}
+
 /// Sample already-resolved descriptors at normalized coordinates `(u, v)` of
 /// array layer `layer`, which is 0 for everything that is not an array.
 pub fn sample_with(
@@ -610,26 +732,8 @@ pub fn sample_with(
     let (texture, sampler) = (&d.texture, d.sampler);
     let image = texture;
 
-    let wrap = |mode: Wrap, t: f64, size: u32| -> f64 {
-        let t = match mode {
-            Wrap::Repeat => t - t.floor(),
-            // Mirrored repeat folds every other period back on itself, which
-            // is the whole difference from plain repeat: treating it as
-            // repeat puts a seam where the reflection should be.
-            Wrap::Mirror => {
-                let period = t.rem_euclid(2.0);
-                if period > 1.0 {
-                    2.0 - period
-                } else {
-                    period
-                }
-            }
-            Wrap::ClampToEdge | Wrap::ClampToBorder => t.clamp(0.0, 1.0),
-        };
-        t * size as f64
-    };
-    let px = wrap(sampler.wrap_u, u, image.width);
-    let py = wrap(sampler.wrap_v, v, image.height);
+    let px = wrap_coord(sampler.wrap_u, u, image.width);
+    let py = wrap_coord(sampler.wrap_v, v, image.height);
 
     // Filtering happens before the swizzle, which is free to do: selecting a
     // component commutes with interpolating each one.
@@ -639,6 +743,132 @@ pub fn sample_with(
         image.sample_point(px, py, layer, ctx, blocks)?
     };
     Ok(apply_swizzle(texture.swizzle, texel))
+}
+
+/// Sample a 3D image, whose third coordinate is normalized like the other
+/// two rather than a layer index.
+///
+/// A linear sampler filters *between* slices as well as within one — that is
+/// what makes a colour-grading lookup smooth rather than banded — so this
+/// blends the two nearest by the same rule [`crate::gpu::surface::bilinear`]
+/// uses for the other axes, and `textureSampleLevel` on a `texture_3d` does
+/// the same thing on the device.
+pub fn sample_3d_with(
+    ctx: &ExecCtx,
+    d: &Descriptors,
+    u: f64,
+    v: f64,
+    w: f64,
+    blocks: &RefCell<BlockCache>,
+) -> Result<[f32; 4]> {
+    let depth = d.texture.layers.max(1);
+    let last = depth - 1;
+    let t = wrap_coord(d.sampler.wrap_w, w, depth);
+    if !d.sampler.mag_linear {
+        return sample_with(ctx, d, u, v, (t.max(0.0) as u32).min(last), blocks);
+    }
+    let t = (t - 0.5).max(0.0);
+    let z0 = (t as u32).min(last);
+    let z1 = (z0 + 1).min(last);
+    let f = (t - z0 as f64) as f32;
+    let near = sample_with(ctx, d, u, v, z0, blocks)?;
+    if z1 == z0 || f == 0.0 {
+        return Ok(near);
+    }
+    let far = sample_with(ctx, d, u, v, z1, blocks)?;
+    let mut out = [0.0f32; 4];
+    for i in 0..4 {
+        out[i] = near[i] + (far[i] - near[i]) * f;
+    }
+    Ok(out)
+}
+
+/// Sample a cubemap, whose three coordinates are a *direction* rather than a
+/// position: the face is whichever axis the direction points most strongly
+/// along, and the two coordinates within it are the other two divided by it.
+///
+/// The face order and the sign of each axis are OpenGL's, which is what
+/// Maxwell stores its six faces in and what a `texture_cube` binding expects
+/// — so the device and this pick the same face for the same direction.
+///
+/// The two renderers can still differ on a texel at a face's edge: a device
+/// filters across the seam and this clamps inside the face. Nothing seen so
+/// far samples one.
+pub fn sample_cube_with(
+    ctx: &ExecCtx,
+    d: &Descriptors,
+    s: f64,
+    t: f64,
+    r: f64,
+    blocks: &RefCell<BlockCache>,
+) -> Result<[f32; 4]> {
+    let (face, sc, tc, ma) = if s.abs() >= t.abs() && s.abs() >= r.abs() {
+        if s >= 0.0 {
+            (0, -r, -t, s)
+        } else {
+            (1, r, -t, -s)
+        }
+    } else if t.abs() >= r.abs() {
+        if t >= 0.0 {
+            (2, s, r, t)
+        } else {
+            (3, s, -r, -t)
+        }
+    } else if r >= 0.0 {
+        (4, s, -t, r)
+    } else {
+        (5, -s, -t, -r)
+    };
+    // A direction of no length has no face; hardware leaves it undefined and
+    // the centre of face 0 is a defined answer rather than a division by zero.
+    if ma == 0.0 {
+        return sample_with(ctx, d, 0.5, 0.5, 0, blocks);
+    }
+    let u = (sc / ma + 1.0) * 0.5;
+    let v = (tc / ma + 1.0) * 0.5;
+    let face = face.min(d.texture.layers.saturating_sub(1));
+    sample_with(ctx, d, u, v, face, blocks)
+}
+
+/// A shadow sample: the same fetch, with each texel replaced by whether
+/// `reference` passes against it before the filter runs.
+///
+/// Comparing per tap and filtering the results is what hardware does — it is
+/// percentage-closer filtering, and it is why a shadow edge is soft rather
+/// than a step. Comparing the *filtered* depth instead would give a hard edge
+/// wherever a linear sampler straddles one.
+///
+/// The answer is `[c, c, c, 1.0]`: a shadow sample has one value, and every
+/// channel a `texs` asks for gets it except alpha, which is one. That is
+/// Eden's `Extract` in `texture_fetch_swizzled`, and it lets the ordinary
+/// destination machinery store the result unchanged. The image's swizzle is
+/// not applied, for the same reason.
+pub fn sample_compare_with(
+    ctx: &ExecCtx,
+    d: &Descriptors,
+    u: f64,
+    v: f64,
+    layer: u32,
+    reference: f32,
+    blocks: &RefCell<BlockCache>,
+) -> Result<[f32; 4]> {
+    let (image, sampler) = (&d.texture, d.sampler);
+    // A sampler with no comparison enabled still answers a `texs.dc`: the
+    // instruction is what asks for one, and `always` is what a TSC that
+    // never enabled it leaves behind.
+    let compare = sampler.compare.unwrap_or(Compare::Always);
+    let px = wrap_coord(sampler.wrap_u, u, image.width);
+    let py = wrap_coord(sampler.wrap_v, v, image.height);
+    let tap = |x: u32, y: u32| -> Result<[f32; 4]> {
+        let depth = image.texel(x, y, layer, ctx, blocks)?[0];
+        let passed = f32::from(u8::from(compare.passes(reference, depth)));
+        Ok([passed, passed, passed, 1.0])
+    };
+    if sampler.mag_linear {
+        crate::gpu::surface::bilinear(px, py, tap)
+    } else {
+        tap(px.max(0.0) as u32, py.max(0.0) as u32)
+    }
 }
 
 #[cfg(test)]
@@ -1222,5 +1452,84 @@ mod tests {
         assert_eq!(green, [0.0, 1.0, 0.0, 1.0]);
         let blue = sample(&ctx, tic_addr, tsc_addr, handle, 0.25, 0.75, 0).unwrap();
         assert_eq!(blue, [0.0, 0.0, 1.0, 1.0]);
+    }
+
+    /// A shadow sample compares each texel it fetches and filters the
+    /// *results*, which is what makes a shadow edge soft. Comparing the
+    /// filtered depth instead would give a step wherever the four taps
+    /// disagree.
+    #[test]
+    fn a_shadow_sample_compares_before_it_filters() {
+        let (mut mem, vmm, base) = harness();
+        let tic_addr = base;
+        let tsc_addr = base + 0x100;
+        let tex_addr = base + 0x400;
+
+        // A 2x2 R32F image: the left column is near, the right column far.
+        vmm.write_u32(&mut mem, tic_addr, 0x0F | (7 << 7) | IDENTITY_SWIZZLE)
+            .unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+            .unwrap();
+        vmm.write_u32(
+            &mut mem,
+            tic_addr + 8,
+            ((tex_addr >> 32) as u32) | (2 << 21),
+        )
+        .unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 16, 1 | TYPE_2D).unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 20, 1).unwrap();
+        for (offset, depth) in [(0, 0.0f32), (4, 1.0), (32, 0.0), (36, 1.0)] {
+            vmm.write_u32(&mut mem, tex_addr + offset, depth.to_bits())
+                .unwrap();
+        }
+
+        // Clamp on both axes, `depth_compare_enable` with `less`, and the
+        // filter chosen per case below.
+        let compare_less = 1u32 << 9 | (1 << 10);
+        let write_tsc = |mem: &mut Memory, linear: bool| {
+            vmm.write_u32(mem, tsc_addr, 2 | (2 << 3) | compare_less)
+                .unwrap();
+            let filter = if linear { 2 | (2 << 4) } else { 1 | (1 << 4) };
+            vmm.write_u32(mem, tsc_addr + 4, filter).unwrap();
+        };
+
+        let sample_at = |mem: &mut Memory, u: f64, reference: f32| {
+            let mut host1x = Host1x::new();
+            let mut stats = Default::default();
+            let ctx = ExecCtx {
+                mem,
+                vmm: &vmm,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
+            let d = read_descriptors(&ctx, tic_addr, tsc_addr, 0).unwrap();
+            sample_compare_with(
+                &ctx,
+                &d,
+                u,
+                0.5,
+                0,
+                reference,
+                &RefCell::new(BlockCache::default()),
+            )
+            .unwrap()
+        };
+
+        // Nearest: 0.5 is nearer than the far column and not than the near one.
+        write_tsc(&mut mem, false);
+        assert_eq!(sample_at(&mut mem, 0.75, 0.5), [1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(sample_at(&mut mem, 0.25, 0.5), [0.0, 0.0, 0.0, 1.0]);
+
+        // Linear, halfway between the two columns: one tap passes and one does
+        // not, so the answer is between them. Alpha stays one.
+        write_tsc(&mut mem, true);
+        let half = sample_at(&mut mem, 0.5, 0.5);
+        assert_eq!(half[3], 1.0);
+        assert!(
+            half[0] > 0.0 && half[0] < 1.0,
+            "a filtered comparison, not a filtered depth: {half:?}"
+        );
     }
 }

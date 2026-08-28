@@ -71,7 +71,7 @@
 use super::compiled::{Compiled, NO_TARGET};
 use super::isa::{
     BoolOp, FCmp, FMod, FRound, HMerge, HPrecision, HSwizzle, ICmp, LogicOp, LopTest, MufuOp, Op,
-    Operand, Pred, TexDim, TexsStore, RZ,
+    Operand, Pred, ShflMode, TexDim, TexsStore, XmadC, RZ,
 };
 use crate::gpu::pipeline::AttributeBase;
 use crate::gpu::texture::SwizzleSource;
@@ -101,6 +101,25 @@ pub enum Unsupported {
     /// rasterizer samples every dimension as though it were 2D, which is
     /// what a `texture_2d` binding would then be lying about.
     TextureDimension { dim: TexDim },
+    /// A warp shuffle on a device without WGSL's quad operations. They are
+    /// `quadSwapX`/`Y`/`Diagonal` behind `enable subgroups`, which is what a
+    /// `shfl` inside a 2x2 quad *is* — and a quad is the whole warp the
+    /// rasterizer models, so the two agree exactly where a device has them.
+    /// Reconstructing a neighbour from `dpdxFine` instead would not: the
+    /// derivative is a float subtraction, and adding it back does not
+    /// recover the other lane's bits.
+    Subgroups { at: usize },
+    /// A shadow sample. WGSL compares depth only through
+    /// `textureSampleCompare` on a `texture_depth_*` bound beside a
+    /// `sampler_comparison`, and a guest shadow map cannot become one:
+    /// WebGPU allows a copy into a `depth32float` texture *only from another
+    /// texture of the same format* (§26.1.2.2), so an uploaded buffer cannot
+    /// reach it. Getting there means a render pass per shadow map writing
+    /// `frag_depth`, which is the workaround the specification itself names.
+    ///
+    /// Until then the rasterizer takes these draws, and it does implement the
+    /// comparison — see `texture::sample_compare_with`.
+    DepthCompare { at: usize },
 }
 
 impl fmt::Display for Unsupported {
@@ -108,6 +127,18 @@ impl fmt::Display for Unsupported {
         match self {
             Unsupported::Op { at, op } => {
                 write!(f, "instruction {at}: no WGSL form for {op:?}")
+            }
+            Unsupported::Subgroups { at } => {
+                write!(
+                    f,
+                    "instruction {at}: a warp shuffle needs the device's quad operations"
+                )
+            }
+            Unsupported::DepthCompare { at } => {
+                write!(
+                    f,
+                    "instruction {at}: a shadow sample needs a depth texture and a comparison sampler"
+                )
             }
             Unsupported::UndecodedTarget { at } => {
                 write!(
@@ -141,8 +172,12 @@ pub const HOST_INTERFACE: &str = "\
 fn attrIn(offset: u32) -> f32 { return 0.0; }
 fn attrOut(offset: u32, value: f32) { }
 fn cbRead(bank: u32, offset: u32) -> u32 { return 0u; }
-fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {
+fn gRead(slot: u32, offset: u32) -> u32 { return 0u; }
+fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+fn texSampleCompare(imm: u32, dim: u32, u: f32, v: f32, layer: u32, dref: f32) -> vec4<f32> {
+  return vec4<f32>(0.0, 0.0, 0.0, 1.0);
 }
 ";
 
@@ -191,14 +226,54 @@ pub struct Translation {
     pub const_banks: Vec<u8>,
     /// The textures it samples, in the order it first mentions them: the
     /// `texs` immediate and the dimensionality sampled with.
-    pub textures: Vec<(u16, TexDim)>,
+    /// Each `texs` immediate, what it samples as, and whether it is
+    /// sampled as a shadow map — a depth image compared against a reference
+    /// rather than read.
+    pub textures: Vec<(u16, TexDim, bool)>,
+    /// Whether the program reads another lane of its quad.
+    pub uses_quad: bool,
+    /// Whether that needs `enable subgroups;` in front of the module.
+    pub subgroup_enable: bool,
+    /// The `(bank, offset)` of each 64-bit descriptor a `ldg` reads memory
+    /// through, in the order the module binds them.
+    pub globals: Vec<(u8, u16)>,
 }
 
 /// Translate `program` into a WGSL function `run`, which returns whether the
 /// invocation discarded itself with `kil`.
 pub fn translate(program: &Compiled) -> Result<Translation, Unsupported> {
+    translate_for(program, Caps::NONE)
+}
+
+/// What a device can do that WGSL does not guarantee, and so that the
+/// translation has to be told rather than assume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Caps {
+    /// WGSL's quad operations, which are what a warp shuffle is. Without
+    /// them a shuffle has no form here at all — see
+    /// [`Unsupported::Subgroups`].
+    pub subgroups: bool,
+    /// Whether to write `enable subgroups;` in front of the module.
+    ///
+    /// The standard requires the directive, and a browser compiling the text
+    /// enforces that. Naga recognises the built-ins on their own and rejects
+    /// the directive as not yet implemented, so a native device wants the
+    /// module without it. Whoever compiles the text decides.
+    pub subgroup_enable: bool,
+}
+
+impl Caps {
+    /// Only what every WebGPU device has.
+    pub const NONE: Caps = Caps {
+        subgroups: false,
+        subgroup_enable: false,
+    };
+}
+
+/// [`translate`], told what the device it is being built for can do.
+pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsupported> {
     let leaders = leaders(program)?;
-    let mut emitter = Emitter::new(program);
+    let mut emitter = Emitter::new(program, caps);
     emitter.emit_blocks(&leaders)?;
     Ok(Translation {
         source: emitter.finish(&leaders),
@@ -208,6 +283,9 @@ pub fn translate(program: &Compiled) -> Result<Translation, Unsupported> {
         centroid_loads: emitter.centroid_loads.iter().copied().collect(),
         const_banks: emitter.banks.iter().copied().collect(),
         textures: emitter.textures.clone(),
+        uses_quad: emitter.uses_quad,
+        subgroup_enable: caps.subgroup_enable,
+        globals: emitter.globals.clone(),
     })
 }
 
@@ -492,20 +570,26 @@ struct Emitter<'a> {
     helpers: BTreeSet<&'static str>,
     uses_carry: bool,
     uses_stack: bool,
+    /// Whether the program reads another lane of its quad.
+    uses_quad: bool,
+    /// Whether the device has WGSL's quad operations to read it with.
+    subgroups: bool,
     /// The interface the emitted text reaches through, recorded as it is
     /// emitted so that a binding it calls cannot be left out of the module.
     loads: BTreeSet<usize>,
     stores: BTreeSet<usize>,
     centroid_loads: BTreeSet<usize>,
     banks: BTreeSet<u8>,
-    textures: Vec<(u16, TexDim)>,
+    textures: Vec<(u16, TexDim, bool)>,
+    /// The constant-bank descriptors a `ldg` reads memory through.
+    globals: Vec<(u8, u16)>,
     /// Names `let` bindings apart. WGSL scopes them to their block, but one
     /// counter across the whole function is simpler than reasoning about it.
     temps: usize,
 }
 
 impl<'a> Emitter<'a> {
-    fn new(program: &'a Compiled) -> Emitter<'a> {
+    fn new(program: &'a Compiled, caps: Caps) -> Emitter<'a> {
         Emitter {
             program,
             body: String::new(),
@@ -515,13 +599,79 @@ impl<'a> Emitter<'a> {
             helpers: BTreeSet::new(),
             uses_carry: false,
             uses_stack: false,
+            uses_quad: false,
+            subgroups: caps.subgroups,
             loads: BTreeSet::new(),
             stores: BTreeSet::new(),
             centroid_loads: BTreeSet::new(),
             banks: BTreeSet::new(),
             textures: Vec::new(),
+            globals: Vec::new(),
             temps: 0,
         }
+    }
+
+    /// Where a `ldg`'s address comes from, if this program builds it the way
+    /// every compiler does: a 64-bit base in a constant bank, plus a
+    /// per-invocation byte offset in a register.
+    ///
+    /// ```text
+    /// iadd.cout r10, r7, c0[0x110]      // low half, carrying out
+    /// iadd.cin  r11, RZ, c0[0x114]      // high half, carrying in
+    /// ldg       r10, [r10]
+    /// ```
+    ///
+    /// The base is a *descriptor*, not an address the shader computed, so the
+    /// backend can read it out of the same bank it uploads and bind the
+    /// memory it points at. Eden calls the same pass
+    /// `global_memory_to_storage_buffer`.
+    fn global_base(&self, at: usize, addr: u8) -> Option<(u8, u16, u8)> {
+        let (mut lo, mut hi) = (None, None);
+        for i in (0..at).rev() {
+            match self.program.op(i) {
+                // The low half: the index register plus the descriptor.
+                Op::Iadd {
+                    dst,
+                    a,
+                    b: Operand::Const { bank, offset },
+                    aneg: false,
+                    bneg: false,
+                    cout: true,
+                    ..
+                } if dst == addr && lo.is_none() => lo = Some((bank, offset, a)),
+                // The high half, which adds nothing but the carry.
+                Op::Iadd {
+                    dst,
+                    a: RZ,
+                    b: Operand::Const { bank, offset },
+                    aneg: false,
+                    bneg: false,
+                    cin: true,
+                    ..
+                } if dst == addr.wrapping_add(1) && hi.is_none() => hi = Some((bank, offset)),
+                // Anything else writing either half means the pattern does
+                // not hold, and a guess at the address is a read of whatever
+                // guest memory happens to be there.
+                other => {
+                    let writes = super::interp::writes(&other);
+                    if writes.contains(&addr) && lo.is_none() {
+                        return None;
+                    }
+                    if writes.contains(&addr.wrapping_add(1)) && hi.is_none() {
+                        return None;
+                    }
+                }
+            }
+            if lo.is_some() && hi.is_some() {
+                break;
+            }
+        }
+        let ((bank, offset, index), (hi_bank, hi_offset)) = (lo?, hi?);
+        // The two halves must be the two words of one descriptor.
+        if hi_bank != bank || hi_offset != offset.wrapping_add(4) {
+            return None;
+        }
+        Some((bank, offset, index))
     }
 
     fn line(&mut self, text: &str) {
@@ -1315,25 +1465,33 @@ impl Emitter<'_> {
                 bh,
                 bsigned,
                 c,
+                cmode,
                 psl,
                 mrg,
             } => {
                 let x = self.r(a);
                 let x = self.half(&x, ah, asigned);
-                let y = self.operand(b);
-                let y = self.half(&y, bh, bsigned);
+                let raw_b = self.operand(b);
+                let raw_b = self.bind(&raw_b);
+                let y = self.half(&raw_b, bh, bsigned);
                 let product = self.bind(&format!("({x}) * ({y})"));
                 let product = if psl {
                     self.bind(&format!("{product} << 16u"))
                 } else {
                     product
                 };
-                let z = self.operand(c);
+                let raw_c = self.operand(c);
+                let z = match cmode {
+                    XmadC::Full => raw_c,
+                    XmadC::Lo => format!("(({raw_c}) & 0xffffu)"),
+                    XmadC::Hi => format!("(({raw_c}) >> 16u)"),
+                    XmadC::Bcc => format!("(({raw_b} << 16u) + ({raw_c}))"),
+                };
                 let sum = self.bind(&format!("{product} + ({z})"));
-                // `.mrg` keeps the product's low half in the result's high
-                // half instead of adding it there.
+                // `.mrg` replaces the result's high half with `b`'s low one
+                // rather than adding anything there.
                 let value = if mrg {
-                    format!("({sum} & 0xffffu) | ({product} << 16u)")
+                    format!("({sum} & 0xffffu) | ({raw_b} << 16u)")
                 } else {
                     sum
                 };
@@ -1588,13 +1746,32 @@ impl Emitter<'_> {
                 round,
                 sat,
                 ftz,
+                src_bits,
+                dst_bits,
+                hi,
             } => {
-                let x = self.operand_f(src);
+                let x = if src_bits == 16 {
+                    let raw = self.operand(src);
+                    let lane = if hi { "y" } else { "x" };
+                    format!("unpack2x16float({raw}).{lane}")
+                } else {
+                    self.operand_f(src)
+                };
                 let x = self.flush(ftz, x);
                 let x = self.fmod(sm, x);
-                let x = self.round(round, x);
+                let x = match round {
+                    Some(round) => self.round(round, x),
+                    None => x,
+                };
                 let value = self.saturate(sat, x);
-                self.set_f(dst, &value);
+                if dst_bits == 16 {
+                    // `pack2x16float` rounds to nearest-even exactly as
+                    // `f32_to_f16` does, so the two backends agree.
+                    let packed = format!("pack2x16float(vec2<f32>({value}, 0.0))");
+                    self.set_r(dst, &packed);
+                } else {
+                    self.set_f(dst, &value);
+                }
             }
             Op::I2i {
                 dst,
@@ -1682,12 +1859,21 @@ impl Emitter<'_> {
             // ---- texture ----
             Op::Texs {
                 coords,
+                dref,
                 handle,
                 dim,
                 ..
             } => {
-                if !self.textures.iter().any(|&(imm, _)| imm == handle) {
-                    self.textures.push((handle, dim));
+                let compare = dref.is_some();
+                match self.textures.iter().find(|&&(imm, _, _)| imm == handle) {
+                    // One binding cannot be both a colour image and a depth
+                    // one — they are different WGSL types — so a program that
+                    // reads the same immediate each way is the rasterizer's.
+                    Some(&(_, _, was)) if was != compare => {
+                        return Err(Unsupported::DepthCompare { at })
+                    }
+                    Some(_) => {}
+                    None => self.textures.push((handle, dim, compare)),
                 }
                 let u = self.f(coords[0]);
                 let v = self.f(coords[1]);
@@ -1700,8 +1886,31 @@ impl Emitter<'_> {
                     }
                     _ => "0u".to_string(),
                 };
+                // A 3D image's third coordinate is normalized like the other
+                // two, where an array's is the layer number — so they travel
+                // in separate arguments rather than one that means both.
+                let w = match dim {
+                    // A cubemap's three coordinates are a direction, and a
+                    // 3D image's third is normalized like the other two.
+                    TexDim::T3d | TexDim::TCube => self.f(coords[2]),
+                    _ => "0.0".to_string(),
+                };
                 let code = tex_dim_code(dim);
-                let color = self.bind(&format!("texSample({handle}u, {code}u, {u}, {v}, {layer})"));
+                let color = match dref {
+                    // A shadow sample answers with one value, and every
+                    // channel a `texs` asks for gets it except alpha — which
+                    // is what `sample_compare_with` returns too, so the
+                    // destinations below are stored the same way either way.
+                    Some(reg) => {
+                        let reference = self.f(reg);
+                        self.bind(&format!(
+                            "texSampleCompare({handle}u, {code}u, {u}, {v}, {layer}, {reference})"
+                        ))
+                    }
+                    None => self.bind(&format!(
+                        "texSample({handle}u, {code}u, {u}, {v}, {layer}, {w})"
+                    )),
+                };
                 // The interpreter lands these results *late*, at the first
                 // instruction that reads the destination, because that is
                 // where hardware's scoreboard would have waited. Writing them
@@ -1739,21 +1948,132 @@ impl Emitter<'_> {
                 }
             }
 
+            // `shfl` reads the value of another lane of the 2x2 quad, which
+            // is the whole warp the rasterizer models — so `quadSwapX`/`Y`/
+            // `Diagonal` are that instruction exactly, and the lane it names
+            // picks between them. `interp::shuffle_source` is the arithmetic
+            // mirrored here.
+            Op::Shfl {
+                dst,
+                pred,
+                src,
+                index,
+                mask,
+                mode,
+            } => {
+                if !self.subgroups {
+                    return Err(Unsupported::Subgroups { at });
+                }
+                self.uses_quad = true;
+                let value = self.r(src);
+                let here = self.bind(&value);
+                let x = self.bind(&format!("quadSwapX({here})"));
+                let y = self.bind(&format!("quadSwapY({here})"));
+                let d = self.bind(&format!("quadSwapDiagonal({here})"));
+                let lane = self.bind("i32(quadLane())");
+                let index = self.operand(index);
+                let index = self.bind(&format!("i32({index})"));
+                let mask = self.operand(mask);
+                let mask = self.bind(&format!("i32({mask})"));
+                let clamp = self.bind(&format!("({mask} & 31)"));
+                let segment = self.bind(&format!("(({mask} >> 8) & 31)"));
+                let floor = self.bind(&format!("({lane} & {segment})"));
+                let ceiling = self.bind(&format!("({floor} | ({clamp} & ~{segment}))"));
+                let from = match mode {
+                    ShflMode::Idx => format!("(({index} & ~{segment}) | {floor})"),
+                    ShflMode::Up => format!("({lane} - {index})"),
+                    ShflMode::Down => format!("({lane} + {index})"),
+                    ShflMode::Bfly => format!("({lane} ^ {index})"),
+                };
+                let from = self.bind(&from);
+                // `up` is the one mode whose bound holds from below.
+                let within = match mode {
+                    ShflMode::Up => format!("({from} >= {ceiling})"),
+                    _ => format!("({from} <= {ceiling})"),
+                };
+                let ok = self.bind(&format!("({within} && {from} >= 0)"));
+                let sel = self.bind(&format!("u32(({from} ^ {lane}) & 3)"));
+                let peer = format!(
+                    "select(select(select({here}, {x}, {sel} == 1u), {y}, {sel} == 2u), {d}, {sel} == 3u)"
+                );
+                // A lane outside the quad has no value to read, and the
+                // rasterizer leaves this one's own there.
+                let reachable = format!("({ok} && {from} < 4)");
+                self.set_r(dst, &format!("select({here}, {peer}, {reachable})"));
+                self.set_p(pred, &ok);
+            }
+
+            // `fswzadd` is not a cross-lane read at all: each lane of the
+            // quad combines its *own* two operands with the pair of signs its
+            // two bits of the swizzle name. Only which lane this is comes
+            // from outside, which is why it wants the quad too.
+            Op::Fswzadd {
+                dst,
+                a,
+                b,
+                swizzle,
+                ftz,
+            } => {
+                if !self.subgroups {
+                    return Err(Unsupported::Subgroups { at });
+                }
+                self.uses_quad = true;
+                let x = self.r(a);
+                let x = self.flush(ftz, format!("bitcast<f32>({x})"));
+                let x = self.bind(&x);
+                let y = self.r(b);
+                let y = self.flush(ftz, format!("bitcast<f32>({y})"));
+                let y = self.bind(&y);
+                let code = self.bind(&format!(
+                    "((({swizzle}u) >> ((quadLane() & 3u) * 2u)) & 3u)"
+                ));
+                // `FSWZ_SIGNS` in `super::interp`, arm for arm.
+                let ka = self.bind(&format!(
+                    "select(select(-1.0, 1.0, {code} == 1u), 0.0, {code} == 3u)"
+                ));
+                let kb = self.bind(&format!("select(-1.0, 1.0, {code} == 2u)"));
+                self.set_f(dst, &format!("{ka} * {x} + {kb} * {y}"));
+            }
+
             Op::Nop | Op::Inert => {}
 
             // Global, local and shared memory need storage buffers, which is
             // a question about resource binding rather than translation. A
             // barrier has no meaning in the graphics stages this translates.
             //
-            // `shfl`/`fswzadd` read a value that belongs to another lane of
-            // the quad. WGSL has no subgroup operations at all, and the
-            // derivative built-ins are not the same thing: a shader is free
-            // to shuffle whatever it likes, and only some of those shuffles
-            // are a `dpdx`. The rasterizer runs those draws instead.
-            Op::Shfl { .. }
-            | Op::Fswzadd { .. }
-            | Op::Ldg { .. }
-            | Op::Stg { .. }
+            // A global load whose address is a descriptor in a constant bank
+            // plus an index: the backend binds the memory that descriptor
+            // points at, and the read becomes an indexed one of that buffer.
+            // Any other address is guest memory this cannot reach — see
+            // `Unsupported::Op`.
+            Op::Ldg {
+                dst,
+                addr,
+                offset,
+                size,
+            } => {
+                let Some((bank, at, index)) = self.global_base(at, addr) else {
+                    return Err(Unsupported::Op { at, op });
+                };
+                let slot = match self.globals.iter().position(|g| *g == (bank, at)) {
+                    Some(slot) => slot,
+                    None => {
+                        self.globals.push((bank, at));
+                        self.globals.len() - 1
+                    }
+                };
+                let index = self.r(index);
+                let base = self.bind(&format!("({index} + {offset}u)"));
+                for word in 0..size.regs() {
+                    let byte = u32::from(word) * 4;
+                    self.set_r(
+                        dst.wrapping_add(word),
+                        &format!("gRead({slot}u, {base} + {byte}u)"),
+                    );
+                }
+            }
+
+            Op::Stg { .. }
             | Op::Ldl { .. }
             | Op::Stl { .. }
             | Op::Lds { .. }
@@ -2050,6 +2370,8 @@ pub struct Layout {
     pub const_banks: Vec<u8>,
     /// The textures the module binds.
     pub textures: Vec<TextureBinding>,
+    /// The `(bank, offset)` of each `ldg` descriptor, in binding order.
+    pub globals: Vec<(u8, u16)>,
     /// How many colour targets a fragment shader writes. Each takes four
     /// consecutive registers from `r0`, so target `n` is `r[4n..4n+4]`.
     ///
@@ -2157,6 +2479,14 @@ pub struct TextureBinding {
     /// single-channel image swizzled to `[R, R, R, One]`, and reading it as
     /// the identity gets every one of them wrong.
     pub swizzle: [SwizzleSource; 4],
+    /// Whether this is a shadow map: bound as a `texture_depth_*` beside a
+    /// `sampler_comparison` and read with `textureSampleCompareLevel`.
+    ///
+    /// A depth image cannot be uploaded — WebGPU allows a copy into a
+    /// `depth32float` only from another texture of the same format
+    /// (§26.1.2.2) — so a backend gets one there by *drawing* into it, which
+    /// is the workaround the specification itself names.
+    pub compare: bool,
 }
 
 /// The swizzle that rearranges nothing.
@@ -2186,6 +2516,9 @@ const VERTEX_ID: usize = 0x2fc;
 /// with its sampler beside it. Fixed rather than packed so that a backend can
 /// work out a binding number without re-deriving the layout.
 const TEXTURE_BINDING: u32 = 32;
+
+/// Where a module's `ldg` buffers start binding, past the textures.
+pub const GLOBAL_BINDING: u32 = 96;
 
 impl Layout {
     /// Read a program's interface off what translating it touched.
@@ -2217,12 +2550,14 @@ impl Layout {
             textures: translated
                 .textures
                 .iter()
-                .map(|&(immediate, dim)| TextureBinding {
+                .map(|&(immediate, dim, compare)| TextureBinding {
                     immediate,
                     dim,
+                    compare,
                     swizzle: IDENTITY_SWIZZLE,
                 })
                 .collect(),
+            globals: translated.globals.clone(),
             targets: 1,
             group: 0,
             // Neither is anything the program says; both come from the
@@ -2306,6 +2641,15 @@ pub fn module(
     layout: &Layout,
 ) -> Result<String, Unsupported> {
     let mut out = String::new();
+    // The enable has to come before everything, and the lane index with it:
+    // `quadSwap*` say which value, and this says which lane is asking.
+    if translated.uses_quad {
+        if translated.subgroup_enable {
+            out.push_str("enable subgroups;\n\n");
+        }
+        out.push_str("var<private> quad_lane: u32;\n");
+        out.push_str("fn quadLane() -> u32 { return quad_lane; }\n\n");
+    }
     for bank in &layout.const_banks {
         out.push_str(&format!(
             "@group({}) @binding({bank}) var<storage, read> cb{bank}: array<u32>;\n",
@@ -2317,16 +2661,43 @@ pub fn module(
         out.push_str(&format!(
             "@group({}) @binding({binding}) var tex{index}: {};\n",
             layout.group,
-            texture_type(texture.dim)?
+            texture_type(texture.dim, texture.compare)?
         ));
         out.push_str(&format!(
-            "@group({}) @binding({}) var smp{index}: sampler;\n",
+            "@group({}) @binding({}) var smp{index}: {};\n",
             layout.group,
-            binding + 1
+            binding + 1,
+            if texture.compare {
+                "sampler_comparison"
+            } else {
+                "sampler"
+            }
         ));
     }
-    if !layout.const_banks.is_empty() || !layout.textures.is_empty() {
+    for slot in 0..layout.globals.len() {
+        out.push_str(&format!(
+            "@group({}) @binding({}) var<storage, read> g{slot}: array<u32>;\n",
+            layout.group,
+            GLOBAL_BINDING + slot as u32
+        ));
+    }
+    if !layout.const_banks.is_empty()
+        || !layout.textures.is_empty()
+        || !layout.globals.is_empty()
+    {
         out.push('\n');
+    }
+    if !layout.globals.is_empty() {
+        out.push_str("fn gRead(slot: u32, offset: u32) -> u32 {\n  switch (slot) {\n");
+        for slot in 0..layout.globals.len() {
+            out.push_str(&format!(
+                "    case {slot}u: {{ return g{slot}[offset >> 2u]; }}\n"
+            ));
+        }
+        // Out of range reads as zero, which is what an unwritten word does
+        // and what the rasterizer's `MemoryGlobal` reports for an address
+        // the mapping does not cover.
+        out.push_str("    default: { return 0u; }\n  }\n}\n\n");
     }
 
     // `a[]` is a ten-bit byte address holding one f32 per word. The two
@@ -2363,13 +2734,17 @@ pub fn module(
     // It stays in the signature because it is part of `HOST_INTERFACE`, and
     // a backend that binds textures some other way may want it.
     out.push_str(
-        "fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {\n\
+        "fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32> {\n\
          \x20 switch (imm) {\n",
     );
     for (index, texture) in layout.textures.iter().enumerate() {
+        if texture.compare {
+            continue;
+        }
         let coords = match texture.dim {
             TexDim::T2d => "vec2<f32>(u, v), 0.0",
             TexDim::T2dArray => "vec2<f32>(u, v), layer, 0.0",
+            TexDim::T3d | TexDim::TCube => "vec3<f32>(u, v, w), 0.0",
             other => return Err(Unsupported::TextureDimension { dim: other }),
         };
         let imm = texture.immediate;
@@ -2399,6 +2774,34 @@ pub fn module(
     }
     out.push_str("    default: { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }\n  }\n}\n\n");
 
+    // The shadow half. `textureSampleCompareLevel` compares each texel it
+    // fetches and filters the results, which is what
+    // `texture::sample_compare_with` does texel by texel — so the two
+    // renderers answer a soft shadow edge the same way. Alpha is one and the
+    // other three channels are the comparison, exactly as Eden's `Extract`
+    // hands a shadow sample back.
+    out.push_str(
+        "fn texSampleCompare(imm: u32, dim: u32, u: f32, v: f32, layer: u32, dref: f32)\
+         \x20-> vec4<f32> {\n\
+         \x20 switch (imm) {\n",
+    );
+    for (index, texture) in layout.textures.iter().enumerate() {
+        if !texture.compare {
+            continue;
+        }
+        let coords = match texture.dim {
+            TexDim::T2d => "vec2<f32>(u, v)",
+            TexDim::T2dArray => "vec2<f32>(u, v), layer",
+            other => return Err(Unsupported::TextureDimension { dim: other }),
+        };
+        let imm = texture.immediate;
+        out.push_str(&format!(
+            "    case {imm}u: {{\n      let c = textureSampleCompareLevel(tex{index}, \
+             smp{index}, {coords}, dref);\n      return vec4<f32>(c, c, c, 1.0);\n    }}\n"
+        ));
+    }
+    out.push_str("    default: { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }\n  }\n}\n\n");
+
     out.push_str(&translated.source);
     out.push('\n');
     out.push_str(&match stage {
@@ -2409,11 +2812,15 @@ pub fn module(
 }
 
 /// The WGSL type a `texs` of this dimensionality samples.
-fn texture_type(dim: TexDim) -> Result<&'static str, Unsupported> {
-    match dim {
-        TexDim::T2d => Ok("texture_2d<f32>"),
-        TexDim::T2dArray => Ok("texture_2d_array<f32>"),
-        other => Err(Unsupported::TextureDimension { dim: other }),
+fn texture_type(dim: TexDim, compare: bool) -> Result<&'static str, Unsupported> {
+    match (dim, compare) {
+        (TexDim::T2d, false) => Ok("texture_2d<f32>"),
+        (TexDim::T2dArray, false) => Ok("texture_2d_array<f32>"),
+        (TexDim::T3d, false) => Ok("texture_3d<f32>"),
+        (TexDim::TCube, false) => Ok("texture_cube<f32>"),
+        (TexDim::T2d, true) => Ok("texture_depth_2d"),
+        (TexDim::T2dArray, true) => Ok("texture_depth_2d_array"),
+        (dim, _) => Err(Unsupported::TextureDimension { dim }),
     }
 }
 
@@ -2575,6 +2982,13 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
                 coverage.sample_mask
             ));
         }
+    }
+    // Which lane of the 2x2 quad this is, numbered as `raster::quad_pixel`
+    // numbers them: the row parity above the column parity.
+    if translated.uses_quad {
+        out.push_str(
+            "  quad_lane = (u32(input.position.y) & 1u) * 2u + (u32(input.position.x) & 1u);\n",
+        );
     }
     // WGSL's fragment `position.w` is `1/w` interpolated linearly, which is
     // exactly what `a[0x7c]` holds.
@@ -2922,6 +3336,7 @@ mod tests {
                 dst: 1,
                 dst2: 3,
                 coords: [4, 5, RZ],
+                dref: None,
                 handle: 0x1a4,
                 dim: TexDim::T2d,
                 mask: [true, true, true, true],
@@ -3073,11 +3488,62 @@ mod tests {
         assert_eq!(translate(&p).unwrap_err(), Unsupported::Op { at: 0, op });
     }
 
+    /// A `ldg` whose address is a descriptor in a constant bank plus an
+    /// index, which is how every compiler builds one — A Short Hike's own
+    /// fragment shader does exactly this, twelve times over.
     #[test]
-    fn a_warp_shuffle_is_reported_rather_than_translated_as_a_derivative() {
-        // WGSL has no subgroup operations, and `dpdx` is not the same thing:
-        // it is one of the things a shuffle can be used for. The rasterizer
-        // runs those draws, in the 2x2 quads a shuffle needs.
+    fn a_global_load_through_a_descriptor_binds_the_memory_it_names() {
+        let base = |dst, a, offset, cin, cout| Op::Iadd {
+            dst,
+            a,
+            aneg: false,
+            b: Operand::Const { bank: 0, offset },
+            bneg: false,
+            cin,
+            cout,
+        };
+        let p = program(&[
+            // r10 = r7 + c0[0x110], carrying out; r11 = RZ + c0[0x114] with it.
+            (base(10, 7, 0x110, false, true), ALWAYS),
+            (base(11, RZ, 0x114, true, false), ALWAYS),
+            (
+                Op::Ldg {
+                    dst: 10,
+                    addr: 10,
+                    offset: 0,
+                    size: MemSize::B32,
+                },
+                ALWAYS,
+            ),
+            (Op::Exit, ALWAYS),
+        ]);
+        let translated = translate(&p).unwrap();
+        assert_eq!(translated.globals, vec![(0, 0x110)]);
+        assert!(translated.source.contains("gRead(0u,"), "{}", translated.source);
+        let layout = Layout::of(&translated, Stage::Fragment);
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(source.contains("var<storage, read> g0: array<u32>"), "{source}");
+        assert!(source.contains("case 0u: { return g0[offset >> 2u]; }"), "{source}");
+
+        // An address the shader computed some other way is memory this
+        // cannot reach, and is reported rather than read from somewhere.
+        let op = Op::Ldg {
+            dst: 1,
+            addr: 2,
+            offset: 0,
+            size: MemSize::B32,
+        };
+        let loose = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
+        assert_eq!(translate(&loose).unwrap_err(), Unsupported::Op { at: 0, op });
+    }
+
+    #[test]
+    fn a_warp_shuffle_is_a_quad_operation_where_the_device_has_them() {
+        // A `shfl` reads another lane of the 2x2 quad, which is exactly what
+        // `quadSwapX`/`Y`/`Diagonal` do — and a quad is the whole warp the
+        // rasterizer models. `dpdxFine` is *not* the same thing: it is a
+        // float subtraction, and adding it back does not recover the other
+        // lane's bits.
         let op = Op::Shfl {
             dst: 1,
             pred: 0,
@@ -3087,7 +3553,33 @@ mod tests {
             mode: ShflMode::Bfly,
         };
         let p = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
-        assert_eq!(translate(&p).unwrap_err(), Unsupported::Op { at: 0, op });
+        // Without the device's quad operations there is no form for it.
+        assert_eq!(translate(&p).unwrap_err(), Unsupported::Subgroups { at: 0 });
+
+        let translated = translate_for(
+            &p,
+            Caps {
+                subgroups: true,
+                subgroup_enable: true,
+            },
+        )
+        .unwrap();
+        assert!(translated.uses_quad);
+        for wanted in ["quadSwapX(", "quadSwapY(", "quadSwapDiagonal("] {
+            assert!(
+                translated.source.contains(wanted),
+                "{wanted} missing from {}",
+                translated.source
+            );
+        }
+        // The enable and the lane the arithmetic asks about are the module's.
+        let layout = Layout::of(&translated, Stage::Fragment);
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(source.starts_with("enable subgroups;"), "{source}");
+        assert!(
+            source.contains("quad_lane = (u32(input.position.y)"),
+            "{source}"
+        );
     }
 
     #[test]
@@ -3361,6 +3853,7 @@ mod tests {
                     dst: 4,
                     dst2: 6,
                     coords: [7, 8, RZ],
+                    dref: None,
                     handle: 0x1a4,
                     dim: TexDim::T2d,
                     mask: [true, true, true, true],
@@ -3378,6 +3871,7 @@ mod tests {
             vec![TextureBinding {
                 immediate: 0x1a4,
                 dim: TexDim::T2d,
+                compare: false,
                 swizzle: IDENTITY_SWIZZLE
             }]
         );
@@ -3402,6 +3896,7 @@ mod tests {
                     dst: 0,
                     dst2: 2,
                     coords: [4, 5, RZ],
+                    dref: None,
                     handle: 8,
                     dim: TexDim::T2d,
                     mask: [true, true, true, true],
@@ -3772,8 +4267,12 @@ mod tests {
                     dst: 0,
                     dst2: 2,
                     coords: [4, 5, 6],
+                    dref: None,
                     handle: 1,
-                    dim: TexDim::T3d,
+                    // 2D, 2D-array, 3D and cube all bind. A 1D image does
+                    // not: `texture_1d` takes no sampler in WebGPU, and the
+                    // TIC decoder refuses the type before a draw gets here.
+                    dim: TexDim::T1d,
                     mask: [true, true, true, true],
                     f16: false,
                 },
@@ -3785,7 +4284,7 @@ mod tests {
         let layout = Layout::of(&translated, Stage::Fragment);
         assert_eq!(
             module(&translated, Stage::Fragment, &layout).unwrap_err(),
-            Unsupported::TextureDimension { dim: TexDim::T3d }
+            Unsupported::TextureDimension { dim: TexDim::T1d }
         );
     }
 

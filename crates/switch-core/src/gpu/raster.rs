@@ -1353,7 +1353,8 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     (ShaderStage::Fragment, &fs_program),
                 ] {
                     if let Ok(translated) = crate::gpu::shader::wgsl::translate(program) {
-                        immediates.extend(translated.textures.iter().map(|&(imm, _)| (stage, imm)));
+                        immediates
+                            .extend(translated.textures.iter().map(|&(imm, _, _)| (stage, imm)));
                     }
                 }
                 crate::gpu::upload::Uploads::of(
