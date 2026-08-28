@@ -1053,6 +1053,22 @@ fn field(insn: u64, pos: u32, len: u32) -> u64 {
     (insn >> pos) & ((1u64 << len) - 1)
 }
 
+/// Whether a control-flow instruction's condition-code test (bits 0..5) can
+/// ever be true. It is a second condition beside the predicate, and both have
+/// to hold for the branch to be taken.
+///
+/// Only the two codes that are *decidable without condition-code flags* are
+/// answered here: `F` is never true, and `FCSM_TR` — which a compiler emits
+/// to mean "not this one" — is the same, matching Eden's
+/// `IREmitter::GetFlowTest`, which stubs it to false. Every other code is
+/// treated as satisfiable, which is what this interpreter did for all of them
+/// before it modelled the field at all.
+fn flow_test_can_hold(insn: u64) -> bool {
+    const NEVER: u64 = 0;
+    const FCSM_TR: u64 = 28;
+    !matches!(field(insn, 0, 5), NEVER | FCSM_TR)
+}
+
 fn sfield(insn: u64, pos: u32, len: u32) -> i64 {
     let v = field(insn, pos, len);
     let sign = 1u64 << (len - 1);
@@ -1422,8 +1438,17 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             // ---- control flow (0xfff0 masks) ----
             0xe35 => Op::Cont,
             0xe34 => Op::Brk,
-            0xe33 => Op::Kil,
-            0xe30 => Op::Exit,
+            0xe33 if flow_test_can_hold(insn) => Op::Kil,
+            0xe33 => Op::Nop,
+            0xe30 if flow_test_can_hold(insn) => Op::Exit,
+            // An `exit` the flow test can never satisfy is not the end of the
+            // program, and Persona 5 Royal's vertex shaders put one in the
+            // middle of every one of theirs. Stopping the walk there dropped
+            // every instruction after it — the `ast` to `o[0x70]` among them
+            // — so every vertex came out at the default clip position, every
+            // triangle collapsed to the viewport centre, and 39,000 draws a
+            // run produced a black frame.
+            0xe30 => Op::Nop,
             0xe2b if field(insn, 5, 1) == 0 => Op::Pcnt {
                 target: branch_target(insn, pc),
             },
@@ -1433,9 +1458,12 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             0xe29 if field(insn, 5, 1) == 0 => Op::Ssy {
                 target: branch_target(insn, pc),
             },
-            0xe24 if field(insn, 5, 1) == 0 => Op::Bra {
+            0xe24 if field(insn, 5, 1) == 0 && flow_test_can_hold(insn) => Op::Bra {
                 target: branch_target(insn, pc),
             },
+            // A branch the flow test can never satisfy, like the `exit` below:
+            // taking it would send the walk somewhere the shader never goes.
+            0xe24 if field(insn, 5, 1) == 0 => Op::Nop,
             0xe25 if field(insn, 5, 1) == 0 => {
                 // The *sum* of the base and the table entry is the target, so
                 // this is where alignment must not happen: a base that is a
@@ -3553,6 +3581,26 @@ mod tests {
     }
 
     #[test]
+    fn an_exit_its_flow_test_can_never_satisfy_is_not_an_exit() {
+        // `exit` carries a condition-code test beside its predicate, and both
+        // have to hold. Persona 5 Royal's vertex shaders open with the middle
+        // word here — `EXIT.FCSM_TR`, which never fires — and every one of
+        // them writes `gl_Position` *after* it. Reading it as the end of the
+        // program left every vertex at the default clip position.
+        assert_eq!(op(0xe3000000_0007001c), Op::Nop); // FCSM_TR
+        assert_eq!(op(0xe3000000_00070000), Op::Nop); // F
+        assert_eq!(op(0xe3000000_0007000f), Op::Exit); // T
+
+        // `kil` carries the same field.
+        assert_eq!(op(0xe3300000_00070000), Op::Nop);
+        assert_eq!(op(0xe3300000_0007000f), Op::Kil);
+        // And so does `bra`, where taking a never-taken one would send the
+        // walk somewhere the shader never goes.
+        assert_eq!(op(0xe2400fffff870000), Op::Nop);
+        assert!(matches!(op(0xe2400fffff87000f), Op::Bra { .. }));
+    }
+
+    #[test]
     fn decodes_ld_st_b128_attribute_space() {
         // mvp.vert: "ld b128 $r0 a[0x80] 0x0"
         assert_eq!(
@@ -3909,6 +3957,11 @@ mod tests {
         assert_eq!(c, Operand::Reg(5));
     }
 
+    /// The condition-code test `T`, which a control-flow instruction needs in
+    /// bits 0..5 to be taken at all. Only `bra`/`exit`/`kil` read the field;
+    /// for everything else those bits are the destination register.
+    const FLOW_TEST_T: u64 = 0xF;
+
     fn asm(opcode: u16, fields: &[(u32, u32, u64)]) -> u64 {
         let mut w = (opcode as u64) << 48;
         w |= 0x7 << 16; // PT, not negated
@@ -3996,7 +4049,7 @@ mod tests {
     fn decodes_a_relative_branch_to_an_absolute_offset() {
         // `bra` is pc-relative with an addend of 8, so from the instruction
         // at 0x18 an offset of -0x10 lands at 0x10.
-        let raw = asm(0xe240, &[(20, 24, (-0x10i64) as u64)]);
+        let raw = asm(0xe240, &[(20, 24, (-0x10i64) as u64), (0, 5, FLOW_TEST_T)]);
         assert_eq!(decode_at(raw, 0x18).op, Op::Bra { target: 0x10 });
     }
 
@@ -4044,7 +4097,7 @@ mod tests {
         }
         // `bra` in the same group *is* predicated, and keeps its guard.
         // `asm` writes PT into those bits, so clear them before setting p3.
-        let bra = (asm(0xe240, &[(20, 24, 0x20)]) & !(0x7 << 16)) | (3 << 16);
+        let bra = (asm(0xe240, &[(20, 24, 0x20), (0, 5, FLOW_TEST_T)]) & !(0x7 << 16)) | (3 << 16);
         assert_eq!(
             decode_at(bra, 0).pred,
             Pred {

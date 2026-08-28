@@ -545,6 +545,14 @@ headers, ioctls from libnx's `nvidia/ioctl`.
 - `raster` — the software rasterizer, and **the reference every other path must
   agree with**. `qmd` + `compute` are its counterpart for a dispatch.
 
+**`exit` carries a condition-code test beside its predicate**, and both have
+to hold. `EXIT.F` and `EXIT.FCSM_TR` never fire, so they are decoded as `nop`
+and the walk carries on past them — Persona 5 Royal's vertex shaders open with
+one and write `gl_Position` *after* it, and treating any `exit` as the end of
+the program left every vertex at the default clip position, every triangle
+collapsed to the viewport centre, and 39,000 draws a run drawing a black frame.
+`bra`'s and `kil`'s field is the same one.
+
 **A compute dispatch runs on the CPU, one thread at a time.** Almost none of a
 launch is in the class's register file — the grid, block, constant buffers and
 shared-memory size come out of a 256-byte QMD in memory (`clb1c0qmd.h`'s

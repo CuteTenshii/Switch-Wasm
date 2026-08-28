@@ -329,6 +329,9 @@ mod tests {
     /// here: none of them is predicated.
     const PT: u64 = 7 << 16;
 
+    /// A control-flow instruction's condition-code test field holding `T`.
+    const FLOW_TEST_T: u64 = 0xF;
+
     /// Assemble one instruction, and check it against the decoder — which is
     /// what makes these encodings trustworthy rather than a second guess at
     /// the same tables.
@@ -470,8 +473,10 @@ mod tests {
         )
     }
 
+    /// `exit` with the condition-code test a compiler emits: `T`. The field
+    /// left at zero is `F`, which is an `exit` that never fires.
     fn exit() -> u64 {
-        encode(0xe300_0000_0000_0000 | PT, Op::Exit)
+        encode(0xe300_0000_0000_0000 | PT | FLOW_TEST_T, Op::Exit)
     }
 
     /// Lay instructions out the way a real binary does: one `sched` control

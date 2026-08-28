@@ -255,7 +255,10 @@ pub fn decode_program_from_memory(
                 program.offsets.len()
             );
             for (i, &off) in program.offsets.iter().enumerate() {
-                eprintln!("  {off:#06x}: {:?}", program.insns[i]);
+                // The raw word beside the decode: a wrong decode and a
+                // missing one look the same from the `Op` alone.
+                let raw = ctx.read_u64(addr + u64::from(off)).unwrap_or(0);
+                eprintln!("  {off:#06x}: {raw:016x} {:?}", program.insns[i]);
             }
         }
     })?;
