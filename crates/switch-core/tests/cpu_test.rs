@@ -7343,9 +7343,7 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     // region that is follows from the layout rather than from the title:
     // without virtual address memory it is `svcSetHeapSize` and the heap
     // region, every time, and the alias region is address space no title on
-    // this layout ever asks for. So it is sized for the one thing that does
-    // read it — `libnx`'s virtmem, which reserves out of it — and the rest is
-    // charged to the heap.
+    // this layout ever asks for, so the rest is charged to the heap.
     assert!(GUEST_TOTAL_MEMORY_SIZE <= GUEST_HEAP_REGION_SIZE);
 
     // And the emulator has to be able to *back* what it advertises. A title
@@ -7358,8 +7356,14 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
         u64::from(GUEST_TOTAL_MEMORY_SIZE) <= switch_core::mem::MAX_MAPPED_BYTES,
         "advertising {GUEST_TOTAL_MEMORY_SIZE:#x} of memory that cannot be backed"
     );
+    // The alias region has to be a region a guest can read, and not a byte
+    // more: `libnx` reads it at startup and never maps into it — hbmenu,
+    // JKSV, Checkpoint, the appstore and NX-Shell issue `svcGetInfo` 2/3 and
+    // zero `svcMapPhysicalMemory` — and `nnSdk` without virtual address
+    // memory does not issue that syscall either. Persona 5 Royal's pools want
+    // every byte of what the floor used to hold back.
     assert!(
-        GUEST_ALIAS_REGION_SIZE >= 0x1000_0000,
+        GUEST_ALIAS_REGION_SIZE >= 0x0100_0000,
         "the alias region is still a region"
     );
 

@@ -123,7 +123,7 @@ pub const THREAD_TLS_STRIDE: u32 = 0x1000;
 /// [`OperationMode::shared_buffer_size`] and the rest of that family for how
 /// one is measured, and [`SHARED_BUFFER_GEOMETRY`] for which geometry it is
 /// measured at.
-pub const SHARED_BUFFER_ADDR: u32 = 0xF000_0000;
+pub const SHARED_BUFFER_ADDR: u32 = 0xFA00_0000;
 pub const SHARED_BUFFER_SLOTS: u32 = 7;
 /// The geometry the pool is laid out at — the shared *layer's* size, which is
 /// not the display's and does not follow the dock.
@@ -372,8 +372,10 @@ pub const GUEST_STACK_REGION_SIZE: u32 = SELF_RETURN_TRAMPOLINE - GUEST_STACK_RE
 /// every region below has to be carved out of it. The top is left unmapped on
 /// purpose: a guest that walks off the end of a region should fault rather
 /// than find more zeros, and hbmenu reads the failure at the very top of the
-/// 64-bit range to work out how wide the address space is.
-pub const GUEST_SPACE_END: u32 = 0xF500_0000;
+/// 64-bit range to work out how wide the address space is. How much of the
+/// top is left is a free choice — 16 MiB faults the same way 176 MiB did, and
+/// the rest is heap [`GUEST_HEAP_REGION_SIZE`] needs.
+pub const GUEST_SPACE_END: u32 = 0xFF00_0000;
 
 /// The heap region `svcSetHeapSize` grows, and the alias region
 /// `svcMapPhysicalMemory` backs — the two ways a process gets its memory.
@@ -407,11 +409,19 @@ pub const GUEST_SPACE_END: u32 = 0xF500_0000;
 /// through `svcGetInfo` had `nnSdk` asking to map memory at an address the
 /// emulator cannot represent at all — which `svcMapPhysicalMemory` would
 /// silently truncate to 0.
+///
+/// **The alias region is 32 MiB because the heap wants everything else.**
+/// Persona 5 Royal builds three memory pools whose sizes — 1.73 GiB,
+/// 704 MiB and 650 MiB — are constants in its own `.data`, 2.98 GiB in
+/// total. It asked for the third out of a 2.5 GiB heap, was handed a null,
+/// and asserted `condition(bresult)` in `RsdxDevice11CoreCommonUtil.cpp`
+/// 100.9M steps in. Nothing under a 3 GiB heap runs that title, so the
+/// unused-under-this-layout region keeps only enough to be a region.
 pub const GUEST_HEAP_REGION_ADDR: u32 = 0x3000_0000;
-pub const GUEST_HEAP_REGION_SIZE: u32 = 0xA000_0000;
+pub const GUEST_HEAP_REGION_SIZE: u32 = 0xC800_0000;
 pub const GUEST_ALIAS_REGION_ADDR: u32 =
     GUEST_HEAP_REGION_ADDR.wrapping_add(GUEST_HEAP_REGION_SIZE);
-pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x2000_0000;
+pub const GUEST_ALIAS_REGION_SIZE: u32 = 0x0200_0000;
 
 /// Where `ldr:ro` maps the modules a title loads at run time.
 ///
@@ -438,10 +448,10 @@ pub const RO_MODULE_REGION_SIZE: u32 = GUEST_HEAP_REGION_ADDR.wrapping_sub(RO_MO
 /// Dance 2019 sized its heap from this figure and then asked that heap for a
 /// 699 MiB graphics pool, a number baked into its own code rather than derived
 /// from what the console said. The allocation could not succeed, and the title
-/// used the null it got back. 2.5 GiB is what is left of the address space
+/// used the null it got back. 3.125 GiB is what is left of the address space
 /// once the image, the stacks, the shared buffer and an alias region are out
-/// of it; it is short of a console and five times the 480 MiB that stopped a
-/// real title from reaching its first frame.
+/// of it — within 80 MiB of what a console gives an application, and enough
+/// for Persona 5 Royal's 2.98 GiB of pools.
 pub const GUEST_TOTAL_MEMORY_SIZE: u32 = GUEST_HEAP_REGION_SIZE;
 
 /// The arena `nn::os::detail::VammManagerImplByHorizon` claims at the base of

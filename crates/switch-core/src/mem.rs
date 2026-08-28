@@ -42,7 +42,7 @@ const BLOCK_COUNT: usize = PAGE_COUNT / BLOCK_PAGES;
 /// only decides when a run fails, never what an idle title reserves. The
 /// console being emulated has 4 GiB, of which an application gets about 3.2,
 /// so this is still short of hardware rather than generous.
-pub const MAX_MAPPED_BYTES: u64 = 0xA000_0000; // 2.5 GiB, `GUEST_TOTAL_MEMORY_SIZE`
+pub const MAX_MAPPED_BYTES: u64 = 0xC800_0000; // 3.125 GiB, `GUEST_TOTAL_MEMORY_SIZE`
 const MAX_MAPPED_PAGES: usize = (MAX_MAPPED_BYTES / PAGE_SIZE as u64) as usize;
 
 /// Horizon's `MemoryState`, as `svcQueryMemory` reports it in the first word

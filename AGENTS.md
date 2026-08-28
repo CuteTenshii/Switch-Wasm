@@ -134,7 +134,7 @@ IVFC levels).
 Guest memory is `u32`-indexed, so the whole space is the low 4 GiB.
 `Cpu::bootstrap` soft-maps 0..`GUEST_SPACE_END`: unwritten pages read as zeros
 and allocate on first write, which is why a region can be reported far larger
-than the `MAX_MAPPED_BYTES` (512 MiB) cap for free.
+than the `MAX_MAPPED_BYTES` (3.125 GiB) cap for free.
 
 ```text
 0x0010_0000  ENV_BLOCK_ADDR (nro.rs)  homebrew ABI environment block
@@ -145,10 +145,10 @@ than the `MAX_MAPPED_BYTES` (512 MiB) cap for free.
 0x2800_0000  STACK_BASE               main stack 1 MiB, SP at STACK_TOP
 0x2900_0000  RO_MODULE_REGION_ADDR    ldr:ro maps run-time NROs, 112 MiB
 0x3000_0000  heap / alias             per MemoryLayout, below
-0xF000_0000  SHARED_BUFFER_ADDR       system shared buffer, ~59 MiB reserved
-0xF400_0000  FB_BASE (lib.rs)         demo framebuffer, 640x360 RGBA
-0xF410_0000  INPUT_ADDR               memory-mapped input block
-0xF500_0000  GUEST_SPACE_END          above this a read faults
+0xFA00_0000  SHARED_BUFFER_ADDR       system shared buffer, ~59 MiB reserved
+0xFE00_0000  FB_BASE (lib.rs)         demo framebuffer, 640x360 RGBA
+0xFE10_0000  INPUT_ADDR               memory-mapped input block
+0xFF00_0000  GUEST_SPACE_END          above this a read faults
 ```
 
 **Every region `svcGetInfo` reports must be representable here.** Horizon's
@@ -157,9 +157,9 @@ real bases (alias 0x10_0000_0000) truncate to 0 when `nnSdk` asks
 
 ```text
 MemoryLayout::PLAIN                 MemoryLayout::VIRTUAL_ADDRESS
-0x3000_0000  heap,  2.5 GiB         0x3000_0000  heap,  128 MiB
-0xD000_0000  alias, 512 MiB         0x3800_0000  alias, 2.875 GiB
-total memory 2.5 GiB                total memory 896 MiB
+0x3000_0000  heap,  3.125 GiB       0x3000_0000  heap,  128 MiB
+0xF800_0000  alias, 32 MiB          0x3800_0000  alias, 3.03 GiB
+total memory 3.125 GiB              total memory 896 MiB
 system resource 0                   system resource 16 MiB
 ```
 
@@ -182,8 +182,11 @@ system resource 0                   system resource 16 MiB
   fails quietly: allocators here return null, nothing checks it, and the crash
   lands tens of millions of instructions away.
 - **The reported total is what a title believes about the console.** Titles
-  size pools from it against numbers baked into their own code, so 2.5 GiB is a
-  floor rather than a fidelity target.
+  size pools from it against numbers baked into their own code, and those
+  numbers are not negotiable: Persona 5 Royal's three pools are 2.98 GiB of
+  `.data` constants, so anything under a 3 GiB heap aborts it in
+  `RsdxDevice11CoreCommonUtil.cpp`. The alias region keeps only enough to be a
+  region, because nothing on this layout ever maps into it.
 - **InfoType 21/22** size the application heap — their difference goes straight
   to `nn::mem::StandardAllocator::Initialize`, which asserts under 16 KiB.
 - **InfoType 11 (RandomEntropy) must not be zero** — real `sdk` startup
@@ -787,7 +790,7 @@ byte-identical across any such change.
 
 An identity map for guest memory does not fit — addresses reach
 `GUEST_SPACE_END` (0xF5000000) and wasm32 caps at 4 GiB — but codegen does not
-need one: only ≤2.5 GiB is ever backed (`MAX_MAPPED_BYTES`), so slabs in one
+need one: only ≤3.125 GiB is ever backed (`MAX_MAPPED_BYTES`), so slabs in one
 arena with a flat `u32` offset table would let generated code translate inline.
 
 PROGRESS.md carries the measurements behind all of this.
