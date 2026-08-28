@@ -775,6 +775,8 @@ impl Copy {
                         image.height.div_ceil(block_h),
                     )
                 }
+                // `image_copy` refuses these before a `Copy` exists.
+                TexelKind::Depth(_) => unreachable!("a depth texel has no WebGPU format"),
             },
             // A decoded image is texels again, whatever it was stored as.
             Copy::Decode { .. } => {
@@ -799,6 +801,16 @@ fn image_copy(image: &Texture) -> Result<Copy> {
             Copy::Raw {
                 unit: plain.bytes_per_pixel,
             }
+        }
+        // A depth surface handed over as a texture would have to be a
+        // `depth32float`, and WebGPU fills one only from another texture of
+        // the same format — the same rule that keeps a shadow map off the
+        // device (see `wgsl`'s `Unsupported::DepthCompare`). So a draw that
+        // samples one is the rasterizer's.
+        TexelKind::Depth(depth) => {
+            return Err(Error::Gpu(format!(
+                "upload: {depth:?} is a depth surface, which cannot be uploaded as a texture"
+            )))
         }
         // WebGPU has ASTC only behind the `texture-compression-astc` feature,
         // which a desktop browser does not offer — and the Home Menu's real

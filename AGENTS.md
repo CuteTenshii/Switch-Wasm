@@ -539,7 +539,10 @@ headers, ioctls from libnx's `nvidia/ioctl`.
 - `macro_engine` — methods ≥ 0xE00 are macro slots, and deko3d compiles its
   draws into macros, so nothing draws without it.
 - `surface` — block-linear (GOB) swizzling. `texture` + `bcn/` cover BC1–BC7
-  and ASTC.
+  and ASTC, the packed 32-bit formats (`A2B10G10R10`, `B10G11R11`) a title
+  samples its own HDR targets back through, and `ZF32_X24S8` — a depth buffer
+  read as a texture, which is its own `TexelKind` because its texel is not a
+  colour in any layout `ColorFormat` names.
 - `shader/` — `isa` (SASS decode), `cfg`, `interp` (software shading), `wgsl`
   (translation for the backend).
 - `raster` — the software rasterizer, and **the reference every other path must

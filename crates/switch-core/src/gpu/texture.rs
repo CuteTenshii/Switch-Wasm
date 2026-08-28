@@ -184,6 +184,38 @@ fn decode_swizzle_source(bits: u32) -> Result<SwizzleSource> {
 pub enum TexelKind {
     Plain(ColorFormat),
     Block(Codec),
+    /// A depth surface sampled as a texture, which a title does to light or
+    /// fog by distance. Its texel is not a colour in any layout
+    /// [`ColorFormat`] names — `ZF32_X24S8` is a float and a stencil byte
+    /// three bytes apart — so it is its own kind rather than a colour format
+    /// whose green channel would be a lie.
+    Depth(DepthTexel),
+}
+
+/// A depth texel's layout. Sampling one answers with the depth alone; the
+/// stencil byte and its padding belong to no channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepthTexel {
+    /// `ZF32_X24S8`: a 32-bit float, then 24 bits of nothing and a stencil
+    /// byte. The depth target of the same name — `SET_ZT_FORMAT` 0x19, see
+    /// `threed::depth_format_layout` — is where the surface comes from.
+    F32X24S8,
+}
+
+impl DepthTexel {
+    pub fn bytes_per_texel(self) -> u32 {
+        match self {
+            DepthTexel::F32X24S8 => 8,
+        }
+    }
+
+    /// The depth, in the red channel. What the other three hold is the TIC's
+    /// swizzle to decide, the same as for a one-channel colour format.
+    fn decode(self, raw: u128) -> [f32; 4] {
+        match self {
+            DepthTexel::F32X24S8 => [f32::from_bits(raw as u32), 0.0, 0.0, 1.0],
+        }
+    }
 }
 
 /// A parsed TIC: where the texels are and how to read them, plus the
@@ -240,29 +272,37 @@ impl Texture {
             }
             _ => None,
         };
+        // A plain texel and a depth one are addressed identically — one unit
+        // per texel, whatever the unit holds.
+        let unit_address = |bpp: u32| {
+            let width_bytes = match self.layout {
+                Layout::Pitch { pitch } => pitch,
+                Layout::BlockLinear { .. } => self.width * bpp,
+            };
+            match volume {
+                Some((bh, bd)) => {
+                    self.addr
+                        + u64::from(crate::gpu::surface::block_linear_volume_offset(
+                            x * bpp,
+                            y,
+                            layer,
+                            width_bytes,
+                            self.height,
+                            bh,
+                            bd,
+                        ))
+                }
+                None => layer_base + self.layout.offset(x * bpp, y, width_bytes) as u64,
+            }
+        };
         let mut texel = match self.kind {
             TexelKind::Plain(format) => {
                 let bpp = format.bytes_per_pixel;
-                let width_bytes = match self.layout {
-                    Layout::Pitch { pitch } => pitch,
-                    Layout::BlockLinear { .. } => self.width * bpp,
-                };
-                let va = match volume {
-                    Some((bh, bd)) => {
-                        self.addr
-                            + u64::from(crate::gpu::surface::block_linear_volume_offset(
-                                x * bpp,
-                                y,
-                                layer,
-                                width_bytes,
-                                self.height,
-                                bh,
-                                bd,
-                            ))
-                    }
-                    None => layer_base + self.layout.offset(x * bpp, y, width_bytes) as u64,
-                };
-                format.decode(ctx.read_pixel(va, bpp)?)?
+                format.decode(ctx.read_pixel(unit_address(bpp), bpp)?)?
+            }
+            TexelKind::Depth(depth) => {
+                let bytes = depth.bytes_per_texel();
+                depth.decode(ctx.read_pixel(unit_address(bytes), bytes)?)
             }
             TexelKind::Block(codec) => {
                 // The swizzle addresses a compressed surface in blocks: one
@@ -444,13 +484,19 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
     if let Some(codec) = codec {
         return Ok(TexelKind::Block(codec));
     }
+    // A depth surface read back as a texture, which is not a colour at all.
+    if (components_sizes, data_type) == (0x30, FLOAT) {
+        return Ok(TexelKind::Depth(DepthTexel::F32X24S8)); // ZF32_X24S8
+    }
     // An HDR title renders into a float surface and samples it back to
     // tonemap: "A Short Hike" composites its frame out of an
     // R16_G16_B16_A16 FLOAT target, and refusing that one sample left the
-    // whole frame transparent. The float sizes here are the ones
-    // [`ColorFormat`] already decodes; the rest stay an honest error.
+    // whole frame transparent, and Persona 5 Royal out of a `B10G11R11` one.
+    // The sizes here are the ones [`ColorFormat`] decodes; the rest stay an
+    // honest error.
     let raw = match (components_sizes, data_type) {
         (0x08, UNORM) => 0xD5, // A8B8G8R8          -> RGBA8Unorm
+        (0x09, UNORM) => 0xD1, // A2B10G10R10       -> RGB10A2Unorm
         (0x18, UNORM) => 0xEA, // G8R8              -> RG8Unorm
         (0x1D, UNORM) => 0xF3, // R8                -> R8Unorm
         (0x01, FLOAT) => 0xC0, // R32_G32_B32_A32   -> RGBA32Float
@@ -458,6 +504,7 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x0F, FLOAT) => 0xE5, // R32               -> R32Float
         (0x1B, FLOAT) => 0xF2, // R16               -> R16Float
         (0x1B, UNORM) => 0xEE, // R16               -> R16Unorm
+        (0x21, FLOAT) => 0xE0, // B10G11R11         -> B10G11R11Float
         (other, UNORM) => {
             return Err(Error::Gpu(format!(
                 "texture: unsupported TIC COMPONENTS_SIZES {other:#x}"
@@ -564,13 +611,14 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     // texel inside one is.
     let width_bytes = match kind {
         TexelKind::Plain(format) => width * format.bytes_per_pixel,
+        TexelKind::Depth(depth) => width * depth.bytes_per_texel(),
         TexelKind::Block(codec) => {
             let (block_w, _) = codec.block_size();
             width.div_ceil(block_w) * codec.bytes_per_block()
         }
     };
     let layer_height = match kind {
-        TexelKind::Plain(_) => height,
+        TexelKind::Plain(_) | TexelKind::Depth(_) => height,
         TexelKind::Block(codec) => {
             let (_, block_h) = codec.block_size();
             height.div_ceil(block_h)
@@ -1277,6 +1325,18 @@ mod tests {
         assert_eq!(
             texel_kind_for(0x17, 2).unwrap(),
             TexelKind::Block(Codec::Bc7)
+        );
+
+        // The two packed 32-bit formats Persona 5 Royal samples its own
+        // render targets back through: `A2B10G10R10` for the UI composite and
+        // `B10G11R11` for the HDR scene it tonemaps.
+        assert_eq!(
+            texel_kind_for(0x09, 2).unwrap(),
+            TexelKind::Plain(ColorFormat::from_raw(0xD1).unwrap())
+        );
+        assert_eq!(
+            texel_kind_for(0x21, 7).unwrap(),
+            TexelKind::Plain(ColorFormat::from_raw(0xE0).unwrap())
         );
 
         // Every ASTC footprint Maxwell can name, and the fourteen of them are

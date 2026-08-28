@@ -566,6 +566,10 @@ impl ColorFormat {
                 let a = (rgba[3].clamp(0.0, 1.0) * 3.0 + 0.5) as u32;
                 Ok((c0 | (scale(rgba[1]) << 10) | (c2 << 20) | (a << 30)) as u128)
             }
+            // B10G11R11Float
+            0xE0 => Ok((pack_small_float(rgba[0], 6)
+                | (pack_small_float(rgba[1], 6) << 11)
+                | (pack_small_float(rgba[2], 5) << 22)) as u128),
             // R32Float
             0xE5 => Ok(rgba[0].to_bits() as u128),
             0xF2 => Ok(f32_to_f16(rgba[0]) as u128),
@@ -692,6 +696,15 @@ impl ColorFormat {
                     [c2, c1, c0, a]
                 })
             }
+            0xE0 => {
+                let v = raw as u32;
+                Ok([
+                    unpack_small_float(v & 0x7FF, 6),
+                    unpack_small_float((v >> 11) & 0x7FF, 6),
+                    unpack_small_float((v >> 22) & 0x3FF, 5),
+                    1.0,
+                ])
+            }
             0xE5 => Ok([f32::from_bits(raw as u32), 0.0, 0.0, 1.0]),
             0xF2 => Ok([f16_to_f32(raw as u16), 0.0, 0.0, 1.0]),
             0xEE => Ok([f32::from(raw as u16) / 65535.0, 0.0, 0.0, 1.0]),
@@ -738,6 +751,29 @@ pub fn srgb_to_linear(v: f32) -> f32 {
     } else {
         ((v + 0.055) / 1.055).powf(2.4)
     }
+}
+
+/// One channel of `B10G11R11_FLOAT`, as an unsigned float with `mantissa_bits`
+/// of mantissa.
+///
+/// The 11- and 10-bit channels of that format use f16's 5-bit exponent and its
+/// bias, so each is a half with the sign dropped and the mantissa narrowed:
+/// carrying the rounding through the whole 15-bit field is what lets it round
+/// up into the exponent instead of wrapping the mantissa. The format has no
+/// sign bit, so a negative has no encoding at all and becomes zero.
+fn pack_small_float(v: f32, mantissa_bits: u32) -> u32 {
+    if !(v > 0.0) {
+        return 0;
+    }
+    let shift = 10 - mantissa_bits;
+    let half = u32::from(f32_to_f16(v)) & 0x7FFF;
+    let max = (1 << (5 + mantissa_bits)) - 1;
+    (((half + (1 << (shift - 1))) >> shift) as u32).min(max)
+}
+
+/// The inverse: widen the mantissa back out to a half and decode that.
+fn unpack_small_float(bits: u32, mantissa_bits: u32) -> f32 {
+    f16_to_f32((bits << (10 - mantissa_bits)) as u16)
 }
 
 /// Convert to a half, rounding to nearest with ties to even — the mode both
@@ -1258,6 +1294,29 @@ mod tests {
         // The largest subnormal and the smallest normal are adjacent.
         assert_eq!(f16_to_f32(0x0400), 2.0f32.powi(-14));
         assert!(f16_to_f32(0x03FF) < f16_to_f32(0x0400));
+    }
+
+    /// `B10G11R11_FLOAT` is the HDR target Persona 5 Royal tonemaps from, and
+    /// its channels are halves with the sign bit and some mantissa gone.
+    #[test]
+    fn b10g11r11_round_trips_what_its_mantissa_can_hold() {
+        let format = ColorFormat::from_raw(0xE0).unwrap();
+        assert_eq!(format.bytes_per_pixel, 4);
+        // Values exactly representable in six and five mantissa bits.
+        let colour = [1.0, 0.5, 0.25, 1.0];
+        let stored = format.encode(colour).unwrap();
+        assert_eq!(format.decode_stored(stored).unwrap(), colour);
+        // The channels sit at 0, 11 and 22, red lowest, and alpha is not
+        // stored at all.
+        assert_eq!(stored & 0x7FF, 0x3C0); // 1.0: exponent 15, mantissa 0
+        assert_eq!(format.decode_stored(0).unwrap(), [0.0, 0.0, 0.0, 1.0]);
+        // The format is unsigned: a negative has no encoding.
+        assert_eq!(format.encode([-1.0, 0.0, 0.0, 1.0]).unwrap(), 0);
+        // Rounding carries into the exponent rather than wrapping the
+        // mantissa: the largest 11-bit value is finite, the next is infinity.
+        let big = format.encode([65024.0, 0.0, 0.0, 1.0]).unwrap();
+        assert_eq!(big & 0x7FF, 0x7BF);
+        assert!(format.decode_stored(big).unwrap()[0].is_finite());
     }
 
     #[test]
