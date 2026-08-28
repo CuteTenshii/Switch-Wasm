@@ -42,6 +42,10 @@ let gpu: 'no' | 'trying' | 'done' | 'never' = 'no';
 // backend to and the right response is to try the next slice.
 const NO_CHANNEL_YET = 'the title has not opened a channel yet';
 
+/* The core's answer when the device is installed, and the whole of it when the
+   core had no name to put after it. */
+const RENDERING_ON = 'rendering on';
+
 /* Whether the GPU backend may be installed at all.
 
    On again: the readback that kept it off no longer waits. `Renderer::flush`
@@ -93,6 +97,41 @@ const GPU_DEVICE_MSAA = false;
    this title's and another's could be a whole background. */
 const GPU_INTERLEAVE = false;
 
+/* What the browser calls the adapter, for the frequent case where the core
+   arrives with no name for it.
+
+   wgpu names an adapter from `GPUAdapterInfo.description`, and Chrome and
+   Firefox both leave that empty on macOS rather than say which machine this
+   is; `vendor` and `architecture` are the fields they do fill. Reading them
+   costs a second `requestAdapter`, so it is asked only for an adapter that
+   came back unnamed, and only once -- the caller is the success path. */
+type AdapterInfo = {
+  vendor?: string;
+  architecture?: string;
+  device?: string;
+  description?: string;
+};
+
+type WebGpu = { requestAdapter(): Promise<{ info?: AdapterInfo } | null> };
+
+const UNNAMED_ADAPTER = 'an unnamed adapter';
+
+async function adapterName(): Promise<string> {
+  try {
+    const webgpu = (navigator as unknown as { gpu?: WebGpu }).gpu;
+    if (!webgpu) return UNNAMED_ADAPTER;
+    const info = (await webgpu.requestAdapter())?.info;
+    if (!info) return UNNAMED_ADAPTER;
+    const named = info.description || info.device;
+    if (named) return named;
+    return [info.vendor, info.architecture].filter(Boolean).join(' ') || UNNAMED_ADAPTER;
+  } catch {
+    // The device is already open and drawing; failing to label it is not a
+    // reason to say anything about the backend that is running.
+    return UNNAMED_ADAPTER;
+  }
+}
+
 function tryGpu(): void {
   if (!GPU_BACKEND_READY) {
     if (gpu === 'no') {
@@ -106,10 +145,13 @@ function tryGpu(): void {
   const open = (state.exports as unknown as {
     switch_gpu_open(handle: number, deviceMsaa: boolean, interleave: boolean): Promise<string>;
   }).switch_gpu_open;
-  open(state.handle, GPU_DEVICE_MSAA, GPU_INTERLEAVE).then((what) => {
-    if (what.startsWith('rendering on')) {
+  open(state.handle, GPU_DEVICE_MSAA, GPU_INTERLEAVE).then(async (what) => {
+    if (what.startsWith(RENDERING_ON)) {
       gpu = 'done';
-      console.info('[gpu] ' + what);
+      // What follows the prefix, not an exact match on it: a core built before
+      // this left a trailing space where the name would have gone.
+      const named = what.slice(RENDERING_ON.length).trim();
+      console.info('[gpu] ' + RENDERING_ON + ' ' + (named || await adapterName()));
     } else if (what === NO_CHANNEL_YET) {
       gpu = 'no';
     } else {

@@ -13,6 +13,10 @@
 
 use wasm_bindgen::prelude::wasm_bindgen;
 
+/// The prefix the worker matches on, and the whole message on its own when the
+/// browser declines to name the adapter -- see `name` in [`switch_gpu_open`].
+const RENDERING_ON: &str = "rendering on";
+
 /// Open a device and install the backend on session `handle`'s 3D channel.
 ///
 /// Answers a message rather than a bool: a machine without WebGPU is a normal
@@ -55,6 +59,8 @@ pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -
             Ok(pair) => pair,
             Err(e) => return format!("no device: {e}"),
         };
+    // wgpu takes this from `GPUAdapterInfo.description`, which Chrome and
+    // Firefox leave empty on macOS; the worker names those from `vendor`.
     let name = adapter.get_info().name;
     // The instance and the adapter are handed over rather than dropped here:
     // see `switch_gpu::Gpu::_instance` for what a browser does to a device
@@ -63,7 +69,8 @@ pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -
     gpu.set_device_msaa(device_msaa);
     gpu.set_interleave(interleave);
     match crate::install_gpu(handle, gpu) {
-        Ok(()) => format!("rendering on {name}"),
+        Ok(()) if name.is_empty() => RENDERING_ON.to_string(),
+        Ok(()) => format!("{RENDERING_ON} {name}"),
         Err((gpu, why)) => {
             // The check above makes this unreachable in practice — a slice
             // only ever adds channels — but `install_gpu` owns the answer,
