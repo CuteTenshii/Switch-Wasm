@@ -19,13 +19,14 @@ use wasm_bindgen::prelude::wasm_bindgen;
 /// thing, and the answer to it is the software rasterizer, which is what ran
 /// before this existed.
 ///
-/// `ignore_depth` is the browser's spelling of the backend's
-/// `GPU_IGNORE_DEPTH`, which a wasm build has no environment to read: it lets
-/// a depth-tested draw render here with no depth test rather than fall back.
-/// See `switch_gpu::Gpu::ignore_depth` for what that costs and when it is
-/// right.
+/// `device_msaa` is the browser's spelling of the backend's
+/// `GPU_DEVICE_MSAA`, which a wasm build has no environment to read: it lets
+/// the device do the multisampling where WebGPU offers the sample count,
+/// which is four and only four. That shades once per pixel instead of once
+/// per sample, and anti-aliases every edge differently from the rasterizer —
+/// see `switch_gpu::Gpu::route` for the trade.
 #[wasm_bindgen]
-pub async fn switch_gpu_open(handle: u32, ignore_depth: bool) -> String {
+pub async fn switch_gpu_open(handle: u32, device_msaa: bool) -> String {
     // Before anything is opened, not after. `requestDevice` builds a device in
     // the GPU process whether or not there is a channel to install it on, and
     // one built too early used to be dropped — which on wgpu's web backend
@@ -54,7 +55,7 @@ pub async fn switch_gpu_open(handle: u32, ignore_depth: bool) -> String {
     // see `switch_gpu::Gpu::_instance` for what a browser does to a device
     // whose instance has no external reference left.
     let mut gpu = switch_gpu::Gpu::with_device(instance, adapter, device, queue);
-    gpu.set_ignore_depth(ignore_depth);
+    gpu.set_device_msaa(device_msaa);
     match crate::install_gpu(handle, gpu) {
         Ok(()) => format!("rendering on {name}"),
         Err((gpu, why)) => {

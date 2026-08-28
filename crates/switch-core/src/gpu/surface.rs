@@ -274,8 +274,29 @@ impl SampleGrid {
 
     /// Texel coordinates of `sample` of the pixel at `(x, y)`.
     pub fn texel(&self, x: u32, y: u32, sample: u32) -> (u32, u32) {
-        let (offset_x, offset_y) = self.slots[sample as usize];
+        let (offset_x, offset_y) = self.slot(sample);
         (x * self.samples_x + offset_x, y * self.samples_y + offset_y)
+    }
+
+    /// Which texel of a pixel's own tile holds `sample`, as an offset within
+    /// it.
+    pub fn slot(&self, sample: u32) -> (u32, u32) {
+        self.slots[sample as usize]
+    }
+
+    /// The inverse of [`SampleGrid::slot`]: which sample each texel of a
+    /// pixel's tile holds, indexed by `dy * samples_x + dx`.
+    ///
+    /// A fragment shader rendering an expanded surface knows where it is and
+    /// has to work out which sample that makes it, which is this way round.
+    /// Only the first `count()` entries mean anything.
+    pub fn sample_of_slot(&self) -> [u32; MAX_SAMPLES] {
+        let mut out = [0u32; MAX_SAMPLES];
+        for sample in 0..self.count() {
+            let (dx, dy) = self.slot(sample);
+            out[(dy * self.samples_x + dx) as usize] = sample;
+        }
+        out
     }
 
     /// The pixel extent of a surface `width` by `height` *texels* — what the

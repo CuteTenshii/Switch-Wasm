@@ -56,21 +56,21 @@ const NO_CHANNEL_YET = 'the title has not opened a channel yet';
    browser is where its no-op `Device::poll` lives. */
 const GPU_BACKEND_READY = true;
 
-/* Whether a depth-tested draw may render on the backend, which holds no depth
-   buffer, rather than falling back to the software rasterizer.
+/* Whether the device does the multisampling, instead of the backend rendering
+   the expanded multisample surface a texel at a time.
 
-   It is an approximation and it is off. A draw whose depth test decides which
-   fragment survives comes out wrong here, and the rasterizer -- which owns the
-   guest's depth surface -- would then disagree with the frame.
+   It is off. Maxwell's samples sit at the centres of the texels they are
+   stored in and WebGPU's sit on a rotated grid the spec fixes, so the device's
+   own multisampling anti-aliases every edge correctly and *differently* from
+   the software rasterizer -- which is the reference the frame is checked
+   against. What it buys is shading once per pixel rather than once per sample.
 
-   It is a named constant because the cost of *not* doing it is title-sized.
-   Every one of Just Dance 2019's 55,465 draws in a six-billion-instruction run
-   is depth-tested, so with this off the backend renders none of them; with it
-   on the frames it produced were byte-identical to the rasterizer's at both
-   points they were compared. Whether that holds for a given title is a
-   question only that comparison answers, which is why this is a switch and
-   not a default. */
-const GPU_IGNORE_DEPTH = false;
+   It is a named constant because turning it on is a judgement about a title:
+   at 4x that is four times less fragment work, and whether the difference
+   shows is a question only a comparison against the reference answers. WebGPU
+   guarantees four samples and no more, so 2x1, 4x2 and 4x4 render the expanded
+   way here whatever this says. */
+const GPU_DEVICE_MSAA = false;
 
 function tryGpu(): void {
   if (!GPU_BACKEND_READY) {
@@ -83,9 +83,9 @@ function tryGpu(): void {
   if (gpu !== 'no' || state.handle < 0) return;
   gpu = 'trying';
   const open = (state.exports as unknown as {
-    switch_gpu_open(handle: number, ignoreDepth: boolean): Promise<string>;
+    switch_gpu_open(handle: number, deviceMsaa: boolean): Promise<string>;
   }).switch_gpu_open;
-  open(state.handle, GPU_IGNORE_DEPTH).then((what) => {
+  open(state.handle, GPU_DEVICE_MSAA).then((what) => {
     if (what.startsWith('rendering on')) {
       gpu = 'done';
       console.info('[gpu] ' + what);

@@ -24,6 +24,7 @@ pub mod renderer;
 pub mod shader;
 pub mod surface;
 pub mod syncpt;
+pub mod testing;
 pub mod texture;
 pub mod upload;
 pub mod vmm;

@@ -1704,6 +1704,13 @@ pub struct Layout {
     pub textures: Vec<TextureBinding>,
     /// How many colour targets a fragment shader writes. Each takes four
     /// consecutive registers from `r0`, so target `n` is `r[4n..4n+4]`.
+    ///
+    /// Zero is a depth-only pass, which is a real thing a title does rather
+    /// than a gap — Just Dance 2017 renders every pass that way. The entry
+    /// point then returns nothing at all, because a fragment shader that
+    /// names `@location(0)` with no colour attachment behind it is a pipeline
+    /// that will not build. It still runs: `kil` and alpha-to-coverage are
+    /// both reasons a depth-only fragment is shaded.
     pub targets: u32,
     /// Which bind group this module's bindings live in.
     ///
@@ -1740,6 +1747,46 @@ pub struct Layout {
     /// half of the frustum clipped away entirely. Read it off the viewport
     /// transform's z scale, which is 0.5 for a guest using GL's range.
     pub depth_minus_one_to_one: bool,
+    /// Attribute slots whose fetch swaps the first and third components.
+    ///
+    /// WebGPU has no BGRA vertex format, so the swap happens in the entry
+    /// point — which is where `raster::fetch_attribute` does it too. Nothing
+    /// the program says: the draw's registers say it, and the backend fills
+    /// it in the way it does [`Layout::flip_y`].
+    pub bgra_attributes: Vec<usize>,
+    /// What a fragment has to work out for itself when a backend is
+    /// rendering a multisampled surface one texel at a time, rather than
+    /// through a device's own multisampling.
+    pub coverage: Option<Coverage>,
+}
+
+/// Per-sample coverage, for a backend rendering an expanded multisample
+/// surface at texel resolution.
+///
+/// A Maxwell multisample surface stores its samples spatially — a pixel owns
+/// a `samples_x` by `samples_y` tile of texels — so a backend can render it
+/// by treating every texel as its own fragment. What that arrangement does
+/// *not* get for free is the two things a device's multisample state would
+/// have done: the sample mask, and alpha-to-coverage. Both are a question
+/// about which sample this fragment is, and the answer is in its position.
+///
+/// Nothing here is anything the program says. It is the draw's
+/// [`crate::gpu::surface::SampleGrid`] and its multisample registers, filled
+/// in by the backend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Coverage {
+    pub samples_x: u32,
+    pub samples_y: u32,
+    /// Which sample each texel of a pixel's tile holds, indexed by
+    /// `dy * samples_x + dx`. The inverse of
+    /// [`crate::gpu::surface::SampleGrid::texel`], which is what a fragment
+    /// needs: it knows where it is, and has to work out which sample that
+    /// makes it.
+    pub sample_of_slot: Vec<u32>,
+    /// Which samples the draw may write, as a bit per sample.
+    pub sample_mask: u32,
+    /// Whether the fragment's alpha narrows that mask further.
+    pub alpha_to_coverage: bool,
 }
 
 /// One texture a module samples.
@@ -1824,6 +1871,8 @@ impl Layout {
             // draw's viewport transform.
             flip_y: false,
             depth_minus_one_to_one: false,
+            bgra_attributes: Vec::new(),
+            coverage: None,
         }
     }
 
@@ -2033,7 +2082,14 @@ fn vertex_entry(layout: &Layout) -> String {
         // An integer attribute is carried as its bits, the way `shade_vertex`
         // carries one and the way `fetch_attribute` writes one into `a[]`.
         let integer = layout.attribute_base(*slot) != AttributeBase::Float;
-        for (component, axis) in ["x", "y", "z", "w"].iter().enumerate() {
+        // A BGRA attribute is read the same way and stored with its first and
+        // third components swapped, which is `fetch_attribute`'s `swap(0, 2)`.
+        let axes = if layout.bgra_attributes.contains(slot) {
+            ["z", "y", "x", "w"]
+        } else {
+            ["x", "y", "z", "w"]
+        };
+        for (component, axis) in axes.iter().enumerate() {
             let read = format!("input.attr{slot}.{axis}");
             let read = if integer { format!("bitcast<f32>({read})") } else { read };
             out.push_str(&format!("  attr_in[{}u] = {read};\n", generic_word(*slot, component)));
@@ -2095,7 +2151,7 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         ));
     }
     out.push_str("}\n\n");
-    let targets = layout.targets.max(1);
+    let targets = layout.targets;
     if targets > 1 {
         out.push_str("struct FragmentOutput {\n");
         for target in 0..targets {
@@ -2103,8 +2159,24 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         }
         out.push_str("}\n\n");
     }
-    let returns = if targets > 1 { "FragmentOutput" } else { "@location(0) vec4<f32>" };
-    out.push_str(&format!("@fragment\nfn fs_main(input: FragmentInput) -> {returns} {{\n"));
+    let returns = match targets {
+        0 => String::new(),
+        1 => " -> @location(0) vec4<f32>".to_string(),
+        _ => " -> FragmentOutput".to_string(),
+    };
+    out.push_str(&format!("@fragment\nfn fs_main(input: FragmentInput){returns} {{\n"));
+    // Coverage first, because the sample mask is coverage: a sample the mask
+    // excludes is one the fragment never had, and `Fragments::coverage`
+    // applies it before anything is shaded.
+    if let Some(coverage) = &layout.coverage {
+        out.push_str(&sample_index(coverage));
+        if coverage.sample_mask != u32::MAX {
+            out.push_str(&format!(
+                "  if (({}u >> sample) & 1u) == 0u {{ discard; }}\n",
+                coverage.sample_mask
+            ));
+        }
+    }
     // WGSL's fragment `position.w` is `1/w` interpolated linearly, which is
     // exactly what `a[0x7c]` holds.
     out.push_str(&format!("  attr_in[{}u] = input.position.w;\n", POSITION / 4 + 3));
@@ -2117,17 +2189,67 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
         }
     }
     out.push_str("  if (run()) { discard; }\n");
+    // Alpha-to-coverage narrows the mask *after* shading, since it is the
+    // shaded alpha it turns into coverage — `Fragments::write`'s ordering.
+    let alpha_to_coverage = layout.coverage.as_ref().filter(|c| c.alpha_to_coverage);
     if targets > 1 {
         out.push_str("  var out: FragmentOutput;\n");
         for target in 0..targets {
             out.push_str(&format!("  out.target{target} = {};\n", colour(target)));
         }
+        if let Some(coverage) = alpha_to_coverage {
+            out.push_str(&alpha_coverage(coverage, "out.target0.w"));
+        }
         out.push_str("  return out;\n");
-    } else {
+    } else if let Some(coverage) = alpha_to_coverage {
+        // Shaded even with nowhere to put it: a depth-only pass still turns
+        // its alpha into coverage, which is what `Fragments::write` does.
+        out.push_str(&format!("  let target0 = {};\n", colour(0)));
+        out.push_str(&alpha_coverage(coverage, "target0.w"));
+        if targets == 1 {
+            out.push_str("  return target0;\n");
+        }
+    } else if targets == 1 {
         out.push_str(&format!("  return {};\n", colour(0)));
     }
     out.push_str("}\n");
     out
+}
+
+/// Work out which sample of its pixel this fragment is.
+///
+/// A texel's place inside its pixel's tile is its position modulo the grid,
+/// and which sample lives in that place is the table hardware fixes per mode
+/// — so this is a lookup, not an arithmetic identity. The table is a local
+/// `var` rather than a `const` because it is indexed by a value only known at
+/// run time, and that is the form every WGSL implementation accepts.
+fn sample_index(coverage: &Coverage) -> String {
+    let slots: Vec<String> = coverage.sample_of_slot.iter().map(|s| format!("{s}u")).collect();
+    let count = slots.len();
+    format!(
+        "  var sample_of_slot = array<u32, {count}>({});\n\
+         \x20 let tile = vec2<u32>(u32(input.position.x) % {}u, u32(input.position.y) % {}u);\n\
+         \x20 let sample = sample_of_slot[tile.y * {}u + tile.x];\n",
+        slots.join(", "),
+        coverage.samples_x,
+        coverage.samples_y,
+        coverage.samples_x,
+    )
+}
+
+/// The samples an alpha of `alpha` keeps, as `raster::alpha_coverage` keeps
+/// them: a prefix of `round(alpha * count)` of them, so every pixel of equal
+/// alpha keeps the same fraction.
+fn alpha_coverage(coverage: &Coverage, alpha: &str) -> String {
+    let count = coverage.samples_x * coverage.samples_y;
+    // `floor(x + 0.5)` rather than `round(x)`: WGSL's `round` breaks a tie
+    // towards the even whole number and Rust's breaks it away from zero, so
+    // an alpha of an eighth over four samples keeps one sample there and none
+    // here. This is the arithmetic `alpha_coverage` actually performs.
+    format!(
+        "  if (sample >= u32(floor(clamp({alpha}, 0.0, 1.0) * {}.0 + 0.5))) {{ discard; }}\n",
+        count
+    )
 }
 
 #[cfg(test)]
@@ -2631,6 +2753,130 @@ mod tests {
         let source = module(&vs, Stage::Vertex, &plain).unwrap();
         assert!(source.contains("@location(3) attr3: vec4<f32>"), "{source}");
         assert!(!source.contains("bitcast<f32>(input."), "{source}");
+    }
+
+    #[test]
+    fn a_depth_only_pass_writes_no_colour_and_still_shades() {
+        // A fragment shader naming `@location(0)` with no colour attachment
+        // behind it is a pipeline that will not build, and a pass that
+        // skipped the shader entirely would lose `kil` — which is a reason a
+        // fragment is not there, and so a reason depth is not written.
+        let p = program(&[
+            (Op::Mov { dst: 0, src: Operand::Imm(0x3f80_0000) }, ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]);
+        let translated = translate(&p).unwrap();
+        let mut layout = Layout::of(&translated, Stage::Fragment);
+        layout.targets = 0;
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(source.contains("fn fs_main(input: FragmentInput) {"), "{source}");
+        assert!(!source.contains("@location(0) vec4<f32>"), "{source}");
+        assert!(source.contains("if (run()) { discard; }"), "{source}");
+        let entry = source.split("@fragment").nth(1).expect("a fragment entry point");
+        assert!(!entry.contains("return"), "{source}");
+        assert!(braces_balance(&source), "{source}");
+
+        // Alpha-to-coverage still shades it, because the alpha is what the
+        // coverage is made of.
+        layout.coverage = Some(quad_coverage(u32::MAX, true));
+        let shaded = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(shaded.contains("let target0 = vec4<f32>("), "{shaded}");
+        assert!(shaded.contains("if (sample >= u32(floor(clamp(target0.w"), "{shaded}");
+        assert!(!shaded.contains("return target0;"), "{shaded}");
+        assert!(braces_balance(&shaded), "{shaded}");
+    }
+
+    #[test]
+    fn a_bgra_attribute_is_swapped_where_it_is_read() {
+        // WebGPU has no BGRA vertex format, and `fetch_attribute` ends with
+        // `out.swap(0, 2)` — so the swap has to happen here or the two
+        // renderers disagree about which channel a packed colour's blue is.
+        let (vs, _) = pair(2);
+        let vs = translate(&vs).unwrap();
+        let mut layout = Layout::of(&vs, Stage::Vertex);
+        layout.bgra_attributes = vec![2];
+        let source = module(&vs, Stage::Vertex, &layout).unwrap();
+        assert!(source.contains("attr_in[40u] = input.attr2.z;"), "{source}");
+        assert!(source.contains("attr_in[42u] = input.attr2.x;"), "{source}");
+        // y and w are not part of the swap.
+        assert!(source.contains("attr_in[41u] = input.attr2.y;"), "{source}");
+        assert!(source.contains("attr_in[43u] = input.attr2.w;"), "{source}");
+
+        let plain = module(&vs, Stage::Vertex, &Layout::of(&vs, Stage::Vertex)).unwrap();
+        assert!(plain.contains("attr_in[40u] = input.attr2.x;"), "{plain}");
+    }
+
+    /// A 2x2 grid in raster order, which is what an unprogrammed sample
+    /// location table gives.
+    fn quad_coverage(sample_mask: u32, alpha_to_coverage: bool) -> Coverage {
+        Coverage {
+            samples_x: 2,
+            samples_y: 2,
+            sample_of_slot: vec![0, 1, 2, 3],
+            sample_mask,
+            alpha_to_coverage,
+        }
+    }
+
+    #[test]
+    fn a_sample_mask_discards_the_texels_it_excludes() {
+        // Rendering an expanded multisample surface a texel at a time gets
+        // per-sample coverage for nothing and the sample mask for nothing at
+        // all — a device's multisample state is what would have applied it,
+        // and there is no multisample state here. So the fragment works out
+        // which sample it is and discards itself.
+        let p = program(&[(Op::Exit, ALWAYS)]);
+        let translated = translate(&p).unwrap();
+        let mut layout = Layout::of(&translated, Stage::Fragment);
+        layout.coverage = Some(quad_coverage(0b0001, false));
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(source.contains("var sample_of_slot = array<u32, 4>(0u, 1u, 2u, 3u);"), "{source}");
+        assert!(source.contains("u32(input.position.x) % 2u"), "{source}");
+        assert!(source.contains("if ((1u >> sample) & 1u) == 0u { discard; }"), "{source}");
+        assert!(braces_balance(&source), "{source}");
+
+        // An all-ones mask excludes nothing, and is what an unprogrammed
+        // register reads as — so it must not cost a branch.
+        layout.coverage = Some(quad_coverage(u32::MAX, false));
+        let open = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(!open.contains("& 1u) == 0u"), "{open}");
+    }
+
+    #[test]
+    fn alpha_to_coverage_keeps_the_same_prefix_the_rasterizer_keeps() {
+        // `raster::alpha_coverage` keeps `round(alpha * count)` samples as a
+        // prefix rather than as a dither, so half an alpha is samples 0 and 1
+        // of four. The comparison here is that rule, sample by sample.
+        let p = program(&[(Op::Exit, ALWAYS)]);
+        let translated = translate(&p).unwrap();
+        let mut layout = Layout::of(&translated, Stage::Fragment);
+        layout.coverage = Some(quad_coverage(u32::MAX, true));
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(source.contains("let target0 = vec4<f32>("), "{source}");
+        assert!(
+            source.contains("if (sample >= u32(floor(clamp(target0.w, 0.0, 1.0) * 4.0 + 0.5)))"),
+            "{source}"
+        );
+        assert!(source.contains("return target0;"), "{source}");
+        assert!(braces_balance(&source), "{source}");
+
+        // And nothing of it is emitted for a draw that does not ask.
+        layout.coverage = Some(quad_coverage(u32::MAX, false));
+        let plain = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(!plain.contains("floor(clamp("), "{plain}");
+        assert!(!plain.contains("let target0"), "{plain}");
+    }
+
+    #[test]
+    fn a_single_sample_draw_carries_no_coverage_at_all() {
+        // The whole of it is conditional on a grid with more than one sample
+        // in it, which is what every draw into an ordinary surface has.
+        let p = program(&[(Op::Exit, ALWAYS)]);
+        let translated = translate(&p).unwrap();
+        let layout = Layout::of(&translated, Stage::Fragment);
+        assert!(layout.coverage.is_none());
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(!source.contains("sample_of_slot"), "{source}");
     }
 
     #[test]

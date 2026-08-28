@@ -10,7 +10,9 @@ use crate::gpu::exec::ExecCtx;
 use crate::gpu::surface::Layout;
 use crate::{Error, Result};
 
-const LAUNCH_DMA: u32 = 0x0C0;
+/// The method write that launches a copy, so a caller can hand a GPU
+/// backend's surfaces back before it reads guest memory.
+pub const LAUNCH_DMA: u32 = 0x0C0;
 const OFFSET_IN: u32 = 0x100;
 const OFFSET_OUT: u32 = 0x102;
 const PITCH_IN: u32 = 0x104;

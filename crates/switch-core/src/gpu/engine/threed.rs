@@ -987,6 +987,13 @@ impl Engine3D {
         self.instance_id
     }
 
+    /// Put the engine on a given instance, for a test that needs a draw to be
+    /// one other than the first. A guest gets here by issuing `VertexBegin`
+    /// with `InstanceNext`.
+    pub fn set_instance_id(&mut self, instance_id: u32) {
+        self.instance_id = instance_id;
+    }
+
     pub fn index_array_start(&self) -> u64 {
         self.regs.iova(INDEX_ARRAY_START)
     }
@@ -1076,10 +1083,22 @@ impl Engine3D {
             *byte = (word >> (8 * (i % 4))) as u8;
         }
         let grid = SampleGrid::new(self.regs.get(MULTISAMPLE_MODE), &locations)?;
-        if self.regs.get(MULTISAMPLE_ENABLE) == 0 {
+        if !self.multisample_enabled() {
             return Ok(grid.per_pixel_coverage());
         }
         Ok(grid)
+    }
+
+    /// Whether coverage is tested per sample rather than once per pixel.
+    ///
+    /// `AntiAliasEnable` on its own, without the surface's layout folded in —
+    /// which [`Engine3D::sample_grid`] cannot tell a caller, because a grid
+    /// with its samples moved to the pixel centre and a grid that only ever
+    /// had one look the same from outside. A backend needs them apart: a
+    /// device's own multisampling has no way to say "every sample at the
+    /// centre", so a draw that asks for it is rendered a different way.
+    pub fn multisample_enabled(&self) -> bool {
+        self.regs.get(MULTISAMPLE_ENABLE) != 0
     }
 
     /// Which samples a draw is allowed to write, as a bit per sample.
@@ -1195,6 +1214,40 @@ impl Engine3D {
     /// leaves the clear covering only the top-left `1/samples_x` by
     /// `1/samples_y` of it.
     fn clear_rect(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
+        let rect = self.clear_rectangle(width, height);
+        (rect.x0, rect.y0, rect.x1, rect.y1)
+    }
+
+    /// [`Engine3D::clear_rect`] as the rectangle type a backend already
+    /// speaks — the same reading, so the two cannot come to differ about
+    /// what a clear covers.
+    pub fn clear_rectangle(&self, width: u32, height: u32) -> ScissorRect {
+        let (x0, y0, x1, y1) = self.clear_rect_bounds(width, height);
+        ScissorRect { x0, y0, x1, y1 }
+    }
+
+    /// The colour a `ClearBuffers` writes, in the linear floats the register
+    /// file holds it as.
+    pub fn clear_color_value(&self) -> [f32; 4] {
+        [
+            self.regs.float(CLEAR_COLOR),
+            self.regs.float(CLEAR_COLOR + 1),
+            self.regs.float(CLEAR_COLOR + 2),
+            self.regs.float(CLEAR_COLOR + 3),
+        ]
+    }
+
+    /// The depth a `ClearBuffers` writes, in `0.0..=1.0`.
+    pub fn clear_depth_value(&self) -> f32 {
+        self.regs.float(CLEAR_DEPTH).clamp(0.0, 1.0)
+    }
+
+    /// The stencil byte a `ClearBuffers` writes.
+    pub fn clear_stencil_value(&self) -> u32 {
+        self.regs.get(CLEAR_STENCIL) & 0xFF
+    }
+
+    fn clear_rect_bounds(&self, width: u32, height: u32) -> (u32, u32, u32, u32) {
         let mut x0 = self.regs.field(SCREEN_SCISSOR_HORIZONTAL, 0, 15);
         let mut y0 = self.regs.field(SCREEN_SCISSOR_VERTICAL, 0, 15);
         let mut x1 = x0 + self.regs.field(SCREEN_SCISSOR_HORIZONTAL, 16, 31);

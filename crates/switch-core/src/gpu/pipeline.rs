@@ -31,18 +31,23 @@
 //! pixel and the wrong thing for a description that can say "I don't know".
 
 use crate::gpu::engine::threed::{
-    BlendTarget, DepthLayout, DepthState, Engine3D, ScissorRect, VertexArray, ViewportTransform,
+    BlendTarget, DepthLayout, DepthState, Engine3D, VertexArray, ViewportTransform,
 };
+// A pipeline's scissor is one of these, so a backend reading `Pipeline` needs
+// the name as well.
+pub use crate::gpu::engine::threed::ScissorRect;
 use crate::gpu::raster::Primitive;
-use crate::gpu::surface::ColorFormat;
+use crate::gpu::surface::{ColorFormat, SampleGrid};
 use std::fmt;
 
 /// A piece of state that has no WebGPU spelling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unsupported {
-    /// A primitive topology WebGPU does not have. Fans, quads, loops and
-    /// polygons all need the index buffer expanded first, which is work for
-    /// a backend rather than a description.
+    /// A primitive topology nothing turns into triangles. Fans, quads and
+    /// polygons are not here: [`Pipeline::expand`] names them, and a backend
+    /// rewrites the index buffer through [`crate::gpu::raster::assemble`] the
+    /// way the rasterizer does. Lines and points are, because neither
+    /// renderer assembles those into anything.
     Topology(Primitive),
     /// A blend factor with no equivalent, or a code neither numbering
     /// recognises.
@@ -56,10 +61,6 @@ pub enum Unsupported {
     /// A vertex attribute's component count and type, as
     /// `DkVtxAttribSize`/`DkVtxAttribType`.
     VertexFormat { size: u32, ty: u32 },
-    /// An attribute declared BGRA, which swaps two components after
-    /// fetching. WebGPU has no BGRA vertex format; a backend could swizzle
-    /// it in the entry point instead.
-    BgraAttribute { location: u32 },
     /// A vertex array stepped once every `divisor` instances. WebGPU steps
     /// per instance or per vertex and has nothing in between.
     InstanceDivisor { divisor: u32 },
@@ -77,9 +78,6 @@ impl fmt::Display for Unsupported {
             Unsupported::Format { raw } => write!(f, "no surface format for {raw:#x}"),
             Unsupported::VertexFormat { size, ty } => {
                 write!(f, "no vertex format for size {size:#x} type {ty}")
-            }
-            Unsupported::BgraAttribute { location } => {
-                write!(f, "attribute {location} is BGRA, which has no vertex format")
             }
             Unsupported::InstanceDivisor { divisor } => {
                 write!(f, "a vertex array stepped once every {divisor} instances")
@@ -273,6 +271,10 @@ pub struct VertexAttribute {
     /// Which `@location` the shader reads it as. Maxwell's attribute slot
     /// number, which is also the generic `a[]` slot it lands in.
     pub location: u32,
+    /// Whether the fetch swaps the first and third components. WebGPU has no
+    /// BGRA vertex format, so a backend does it in the entry point — which is
+    /// where `raster::fetch_attribute` does it too.
+    pub is_bgra: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -316,6 +318,11 @@ pub struct Viewport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Pipeline {
     pub topology: Topology,
+    /// The topology the draw actually asked for, when it is one that becomes
+    /// a triangle list by rewriting the index buffer rather than by naming a
+    /// WebGPU topology. `None` when [`Pipeline::topology`] is the whole
+    /// answer.
+    pub expand: Option<Primitive>,
     pub front_face: FrontFace,
     pub cull: Cull,
     /// Colour target 0, or `None` for a depth-only pass — which is a real
@@ -328,6 +335,17 @@ pub struct Pipeline {
     /// — a shader reading an input this draw supplies nothing for is
     /// well-defined — and a backend feeds them from a constant of its own.
     pub fixed_attributes: Vec<u32>,
+    /// How the bound surfaces lay their samples out, and where inside a
+    /// pixel coverage is tested. [`Pipeline::samples`] is its count, kept
+    /// separate because it is what a multisample state is built from.
+    pub grid: SampleGrid,
+    /// Whether coverage is tested once per pixel rather than per sample —
+    /// `AntiAliasEnable` off over a surface that still has more than one
+    /// texel per pixel. [`Pipeline::grid`] has already moved every sample to
+    /// the pixel centre for it; this is what says so out loud, because a
+    /// device's own multisampling cannot be told to do that and a backend
+    /// has to render such a draw another way.
+    pub per_pixel_coverage: bool,
     pub samples: u32,
     pub sample_mask: u32,
     pub alpha_to_coverage: bool,
@@ -382,8 +400,10 @@ impl Pipeline {
 
         let (vertex_buffers, fixed_attributes) = vertex_buffers(engine)?;
 
+        let (topology, expand) = topology(primitive)?;
         Ok(Pipeline {
-            topology: topology(primitive)?,
+            topology,
+            expand,
             // In window space, after the transform: mirroring y reverses
             // which way a triangle winds, so a front face resolved from the
             // register alone would be back-to-front on a flipped viewport.
@@ -405,7 +425,9 @@ impl Pipeline {
             depth,
             vertex_buffers,
             fixed_attributes,
-            samples: grid.samples_x * grid.samples_y,
+            grid,
+            per_pixel_coverage: !grid.is_single() && !engine.multisample_enabled(),
+            samples: grid.count(),
             sample_mask: engine.sample_mask(),
             alpha_to_coverage: engine.alpha_to_coverage(),
             viewport,
@@ -455,16 +477,25 @@ impl Viewport {
     }
 }
 
-fn topology(primitive: Primitive) -> Result<Topology, Unsupported> {
+/// The WebGPU topology to draw with, and the primitive whose indices have to
+/// be rewritten first.
+///
+/// A fan, a quad strip and a polygon all become a triangle list through
+/// `raster::assemble` — the same call the rasterizer assembles them with, so
+/// the two cannot disagree about which triangles a quad is. Line loops and
+/// bare points and lines are not on that list: `assemble` produces nothing
+/// for them, and neither renderer draws them.
+fn topology(primitive: Primitive) -> Result<(Topology, Option<Primitive>), Unsupported> {
     match primitive {
-        Primitive::Points => Ok(Topology::PointList),
-        Primitive::Lines => Ok(Topology::LineList),
-        Primitive::LineStrip => Ok(Topology::LineStrip),
-        Primitive::Triangles => Ok(Topology::TriangleList),
-        Primitive::TriangleStrip => Ok(Topology::TriangleStrip),
-        // A fan, a quad, a loop and a polygon all become triangles by
-        // rewriting the index buffer, which `raster::assemble` does on the
-        // CPU and a pipeline cannot describe.
+        Primitive::Points => Ok((Topology::PointList, None)),
+        Primitive::Lines => Ok((Topology::LineList, None)),
+        Primitive::LineStrip => Ok((Topology::LineStrip, None)),
+        Primitive::Triangles => Ok((Topology::TriangleList, None)),
+        Primitive::TriangleStrip => Ok((Topology::TriangleStrip, None)),
+        Primitive::TriangleFan
+        | Primitive::Quads
+        | Primitive::QuadStrip
+        | Primitive::Polygon => Ok((Topology::TriangleList, Some(primitive))),
         other => Err(Unsupported::Topology(other)),
     }
 }
@@ -638,13 +669,11 @@ fn vertex_buffers(engine: &Engine3D) -> Result<(Vec<VertexBuffer>, Vec<u32>), Un
                 attrib.buffer_id
             )));
         }
-        if attrib.is_bgra {
-            return Err(Unsupported::BgraAttribute { location });
-        }
         let attribute = VertexAttribute {
             format: vertex_format(attrib.size, attrib.ty)?,
             offset: attrib.offset,
             location,
+            is_bgra: attrib.is_bgra,
         };
         match buffers.iter_mut().find(|b| b.index == attrib.buffer_id) {
             Some(buffer) => buffer.attributes.push(attribute),
@@ -755,20 +784,22 @@ mod tests {
     }
 
     #[test]
-    fn topologies_webgpu_lacks_are_reported() {
-        // A fan, a quad, a loop and a polygon all become triangles by
-        // rewriting the index buffer, which is work for a backend.
-        for primitive in [
-            Primitive::TriangleFan,
-            Primitive::Quads,
-            Primitive::QuadStrip,
-            Primitive::Polygon,
-            Primitive::LineLoop,
-        ] {
-            assert_eq!(topology(primitive), Err(Unsupported::Topology(primitive)));
+    fn topologies_webgpu_lacks_are_assembled_into_triangles_instead() {
+        // Every one of these is a triangle list once `raster::assemble` has
+        // rewritten the indices, and saying so is what keeps the draw on the
+        // device. A line loop is not: nothing assembles it.
+        for primitive in
+            [Primitive::TriangleFan, Primitive::Quads, Primitive::QuadStrip, Primitive::Polygon]
+        {
+            assert_eq!(topology(primitive), Ok((Topology::TriangleList, Some(primitive))));
+            assert!(
+                !crate::gpu::raster::assemble(primitive, 6).is_empty(),
+                "{primitive:?} names an expansion the rasterizer does not perform"
+            );
         }
-        assert_eq!(topology(Primitive::Triangles), Ok(Topology::TriangleList));
-        assert_eq!(topology(Primitive::TriangleStrip), Ok(Topology::TriangleStrip));
+        assert_eq!(topology(Primitive::LineLoop), Err(Unsupported::Topology(Primitive::LineLoop)));
+        assert_eq!(topology(Primitive::Triangles), Ok((Topology::TriangleList, None)));
+        assert_eq!(topology(Primitive::TriangleStrip), Ok((Topology::TriangleStrip, None)));
     }
 
     #[test]

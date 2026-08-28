@@ -39,7 +39,7 @@
 //! tries, because the failure mode of not having one is a machine in swap.
 
 use crate::gpu::bcn::Codec;
-use crate::gpu::engine::threed::{Engine3D, ShaderStage};
+use crate::gpu::engine::threed::{DepthLayout, Engine3D, ShaderStage};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::pipeline::{Format, Pipeline, StepMode};
 use crate::gpu::surface::{ColorFormat, Layout};
@@ -101,6 +101,27 @@ pub struct IndexUpload {
     /// vertex uploads.
     pub lowest: u32,
     pub highest: u32,
+}
+
+impl IndexUpload {
+    /// The indices themselves, widened.
+    ///
+    /// A backend that has to *rewrite* the list — which assembling a fan or a
+    /// quad into triangles is — needs the values rather than the bytes, and
+    /// the widening is the same one `read_indices` already does for an
+    /// eight-bit list.
+    pub fn indices(&self) -> Vec<u32> {
+        match self.format {
+            IndexFormat::Uint16 => {
+                self.bytes.chunks_exact(2).map(|b| u32::from(u16::from_le_bytes([b[0], b[1]]))).collect()
+            }
+            IndexFormat::Uint32 => self
+                .bytes
+                .chunks_exact(4)
+                .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -295,6 +316,11 @@ pub struct Target {
     pub rows: u32,
     /// Bytes per texel, which is what the layout addresses.
     pub unit: u32,
+    /// How a depth surface packs its depth and its stencil, for the target
+    /// that is one. A device holds depth in a format of its own — no shading
+    /// API exposes Maxwell's packings — so a backend needs this to convert,
+    /// and to put the stencil byte back untouched.
+    pub depth: Option<DepthLayout>,
 }
 
 impl Target {
@@ -349,6 +375,175 @@ impl Target {
         }
         Ok(())
     }
+
+    /// How a device would hold this surface, for the target that is a depth
+    /// one.
+    pub fn depth_kind(&self) -> Option<DepthKind> {
+        self.depth.map(DepthKind::of)
+    }
+
+    /// Read a depth surface out as the linear rows a device texture wants:
+    /// one [`DepthKind::unit`] per texel, the stencil byte dropped.
+    pub fn read_depth(&self, ctx: &ExecCtx) -> Result<Vec<u8>> {
+        let (layout, kind) = self.depth_parts()?;
+        let rows = self.read(ctx)?;
+        let unit = self.unit as usize;
+        let mut out = Vec::with_capacity(rows.len() / unit * kind.unit() as usize);
+        for texel in rows.chunks_exact(unit) {
+            let mut pixel = 0u128;
+            for (i, &byte) in texel.iter().enumerate() {
+                pixel |= u128::from(byte) << (8 * i);
+            }
+            out.extend_from_slice(&kind.encode(layout.decode_depth(pixel))[..kind.unit() as usize]);
+        }
+        Ok(out)
+    }
+
+    /// Put a device's depth rows back into guest memory, in the guest's own
+    /// packing.
+    ///
+    /// A packed pixel's stencil byte is read back and kept: a depth pass
+    /// writes depth, and the byte beside it belongs to whoever wrote it last
+    /// — which is what `raster`'s `Fragments::write` does per fragment.
+    pub fn write_depth(&self, ctx: &mut ExecCtx, values: &[u8]) -> Result<()> {
+        let (layout, kind) = self.depth_parts()?;
+        let unit = kind.unit() as usize;
+        let per_row = self.row_bytes / self.unit.max(1);
+        let want = per_row as usize * self.rows as usize * unit;
+        if values.len() < want {
+            return Err(Error::Gpu(format!(
+                "upload: writing back {} bytes of a {want}-byte depth target",
+                values.len()
+            )));
+        }
+        for y in 0..self.rows {
+            for x in 0..per_row {
+                let at = self.addr + u64::from(self.layout.offset(x * self.unit, y, self.row_bytes));
+                let from = (y * per_row + x) as usize * unit;
+                let depth = kind.decode(&values[from..from + unit]);
+                // Reading the pixel back is only worth its cost where
+                // something else lives in it.
+                let value = if layout.packs_stencil() {
+                    layout.with_depth(ctx.read_pixel(at, self.unit)?, depth)
+                } else {
+                    layout.encode_depth(depth)
+                };
+                ctx.write_pixel(at, self.unit, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The colour surface bound at `slot`, or `None` for a slot with no
+    /// surface in it.
+    ///
+    /// Split out of [`Targets::of`] because a clear names its own target and
+    /// a draw does not: `ClearBuffers` carries the index, and reading it
+    /// through a second walk of the register file is a second place for the
+    /// two to disagree about what a surface is.
+    pub fn color(engine: &Engine3D, slot: u32) -> Result<Option<Target>> {
+        let Some(rt) = engine.render_target(slot)? else { return Ok(None) };
+        let unit = rt.format.bytes_per_pixel;
+        // A disabled target reads back as format 0, which is no pixel at all
+        // rather than a pixel of no bytes.
+        if unit == 0 {
+            return Ok(None);
+        }
+        Ok(Some(Target {
+            format: crate::gpu::pipeline::color_format(rt.format)
+                .map_err(|e| Error::Gpu(format!("upload: colour target: {e}")))?,
+            addr: rt.addr,
+            width: rt.width,
+            height: rt.height,
+            layout: rt.layout,
+            row_bytes: rt.width * unit,
+            rows: rt.height,
+            unit,
+            depth: None,
+        }))
+    }
+
+    /// The depth surface the engine has bound, or `None`.
+    pub fn depth_surface(engine: &Engine3D) -> Result<Option<Target>> {
+        let Some(dt) = engine.depth_target()? else { return Ok(None) };
+        Ok(Some(Target {
+            format: crate::gpu::pipeline::depth_format(dt.format)
+                .map_err(|e| Error::Gpu(format!("upload: depth target: {e}")))?,
+            addr: dt.addr,
+            width: dt.width,
+            height: dt.height,
+            layout: dt.layout,
+            row_bytes: dt.width * dt.format.bytes,
+            rows: dt.height,
+            unit: dt.format.bytes,
+            depth: Some(dt.format),
+        }))
+    }
+
+    fn depth_parts(&self) -> Result<(DepthLayout, DepthKind)> {
+        let layout = self
+            .depth
+            .ok_or_else(|| Error::Gpu("upload: a colour target has no depth packing".into()))?;
+        Ok((layout, DepthKind::of(layout)))
+    }
+}
+
+/// How a device holds a guest depth surface.
+///
+/// A shading API has no Maxwell packing in it, so a depth surface is
+/// converted rather than copied, and there are only two formats worth
+/// converting *to*: WebGPU lets a copy read `depth32float` but never write
+/// it, lets a copy do both to `depth16unorm`, and lets a copy touch
+/// `depth24plus` in neither direction. So `Z16` stays what it is and
+/// everything else becomes a float — including the 24-bit packings, which
+/// survive the round trip bit-for-bit because 24 bits is exactly what an
+/// `f32` mantissa holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepthKind {
+    Unorm16,
+    Float32,
+}
+
+impl DepthKind {
+    /// Bytes one texel takes on the device.
+    pub fn unit(self) -> u32 {
+        match self {
+            DepthKind::Unorm16 => 2,
+            DepthKind::Float32 => 4,
+        }
+    }
+
+    /// The kind a guest packing converts to.
+    pub fn of(layout: DepthLayout) -> DepthKind {
+        match (layout.bytes, layout.depth_bits, layout.stencil_shift) {
+            (2, 16, None) => DepthKind::Unorm16,
+            _ => DepthKind::Float32,
+        }
+    }
+
+    /// `depth`, in `0.0..=1.0`, as the bytes a device texel holds.
+    fn encode(self, depth: f32) -> [u8; 4] {
+        match self {
+            DepthKind::Unorm16 => {
+                let stored = (f64::from(depth.clamp(0.0, 1.0)) * 65535.0 + 0.5) as u16;
+                let [a, b] = stored.to_le_bytes();
+                [a, b, 0, 0]
+            }
+            DepthKind::Float32 => depth.to_le_bytes(),
+        }
+    }
+
+    /// Inverse of [`DepthKind::encode`], from `unit` bytes of a device texel.
+    fn decode(self, bytes: &[u8]) -> f32 {
+        match self {
+            DepthKind::Unorm16 => {
+                f32::from(u16::from_le_bytes([bytes[0], bytes[1]])) / 65535.0
+            }
+            DepthKind::Float32 => {
+                f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+            }
+        }
+    }
 }
 
 /// Where a draw's surfaces are.
@@ -363,38 +558,10 @@ pub struct Targets {
 impl Targets {
     /// Resolve the surfaces the engine has bound.
     pub fn of(engine: &Engine3D) -> Result<Targets> {
-        let color = engine.render_target(engine.render_target_slot(0))?.and_then(|rt| {
-            let unit = rt.format.bytes_per_pixel;
-            // A disabled target reads back as format 0, which is no pixel at
-            // all rather than a pixel of no bytes.
-            (unit != 0).then(|| {
-                Ok::<Target, Error>(Target {
-                    format: crate::gpu::pipeline::color_format(rt.format)
-                        .map_err(|e| Error::Gpu(format!("upload: colour target: {e}")))?,
-                    addr: rt.addr,
-                    width: rt.width,
-                    height: rt.height,
-                    layout: rt.layout,
-                    row_bytes: rt.width * unit,
-                    rows: rt.height,
-                    unit,
-                })
-            })
-        });
-        let depth = engine.depth_target()?.map(|dt| {
-            Ok::<Target, Error>(Target {
-                format: crate::gpu::pipeline::depth_format(dt.format)
-                    .map_err(|e| Error::Gpu(format!("upload: depth target: {e}")))?,
-                addr: dt.addr,
-                width: dt.width,
-                height: dt.height,
-                layout: dt.layout,
-                row_bytes: dt.width * dt.format.bytes,
-                rows: dt.height,
-                unit: dt.format.bytes,
-            })
-        });
-        Ok(Targets { color: color.transpose()?, depth: depth.transpose()? })
+        Ok(Targets {
+            color: Target::color(engine, engine.render_target_slot(0))?,
+            depth: Target::depth_surface(engine)?,
+        })
     }
 
     /// How many bytes both surfaces are, which is what a round trip through a
@@ -1001,6 +1168,7 @@ mod tests {
             row_bytes: 16 * 4,
             rows: 16,
             unit: 4,
+            depth: None,
         };
         target.write(&mut h.ctx(), &original).unwrap();
         assert_eq!(target.read(&h.ctx()).unwrap(), original);
@@ -1010,6 +1178,108 @@ mod tests {
         let base = h.base;
         deswizzle(&h.ctx(), base, Layout::Pitch { pitch: 64 }, 64, 16, 4, &mut linear).unwrap();
         assert_ne!(linear, original, "a block-linear surface is not rows");
+    }
+
+    /// A `Z24S8` target, four by four, pitch-linear.
+    fn packed_depth_target(addr: u64) -> Target {
+        let format = DepthLayout { bytes: 4, depth_bits: 24, depth_shift: 8, stencil_shift: Some(0) };
+        Target {
+            format: Format::Depth24PlusStencil8,
+            addr,
+            width: 4,
+            height: 4,
+            layout: Layout::Pitch { pitch: 16 },
+            row_bytes: 16,
+            rows: 4,
+            unit: 4,
+            depth: Some(format),
+        }
+    }
+
+    #[test]
+    fn a_packed_depth_surface_round_trips_through_a_device_format() {
+        // 24 bits of depth is exactly what an f32 mantissa holds, so the
+        // conversion a device forces is lossless — which is the whole reason
+        // `depth32float` is what a 24-bit packing is held in. A round trip
+        // that lost a bit would fail every `Equal` depth test in the frame
+        // after it.
+        let mut h = Harness::new(0x1000);
+        let target = packed_depth_target(h.base);
+        let mut original = Vec::new();
+        for i in 0..16u32 {
+            let depth = i * 0x11_1111;
+            original.extend_from_slice(&((depth << 8) | u32::from(i as u8) + 1).to_le_bytes());
+        }
+        target.write(&mut h.ctx(), &original).unwrap();
+        let device = target.read_depth(&h.ctx()).unwrap();
+        assert_eq!(device.len(), 16 * 4);
+        target.write_depth(&mut h.ctx(), &device).unwrap();
+        assert_eq!(target.read(&h.ctx()).unwrap(), original);
+    }
+
+    #[test]
+    fn writing_depth_back_leaves_the_stencil_byte_alone() {
+        // A depth pass writes depth. The byte beside it belongs to whoever
+        // wrote it last, and flattening it to zero is how a stencil buffer
+        // gets cleared by a pass that never mentioned it.
+        let mut h = Harness::new(0x1000);
+        let target = packed_depth_target(h.base);
+        let original: Vec<u8> = (0..16).flat_map(|i: u32| (0x00AB_CD00 | (i + 1)).to_le_bytes()).collect();
+        target.write(&mut h.ctx(), &original).unwrap();
+        target.write_depth(&mut h.ctx(), &[0u8; 16 * 4]).unwrap();
+        let after = target.read(&h.ctx()).unwrap();
+        for (i, pixel) in after.chunks_exact(4).enumerate() {
+            let value = u32::from_le_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
+            assert_eq!(value >> 8, 0, "texel {i} kept a depth it was told to clear");
+            assert_eq!(value & 0xFF, i as u32 + 1, "texel {i} lost its stencil");
+        }
+    }
+
+    #[test]
+    fn a_sixteen_bit_depth_surface_stays_sixteen_bit_on_a_device() {
+        // `depth16unorm` is the one depth format a copy may write *into*, so
+        // Z16 is the one packing that reaches a device without a pass to put
+        // it there.
+        let format = DepthLayout { bytes: 2, depth_bits: 16, depth_shift: 0, stencil_shift: None };
+        assert_eq!(DepthKind::of(format), DepthKind::Unorm16);
+        assert_eq!(DepthKind::Unorm16.unit(), 2);
+        let mut h = Harness::new(0x1000);
+        let target = Target {
+            format: Format::Depth16Unorm,
+            addr: h.base,
+            width: 4,
+            height: 2,
+            layout: Layout::Pitch { pitch: 8 },
+            row_bytes: 8,
+            rows: 2,
+            unit: 2,
+            depth: Some(format),
+        };
+        let original: Vec<u8> =
+            (0..8u16).flat_map(|i| (i * 0x1234).to_le_bytes()).collect();
+        target.write(&mut h.ctx(), &original).unwrap();
+        let device = target.read_depth(&h.ctx()).unwrap();
+        assert_eq!(device, original, "a Z16 texel is already what the device holds");
+        target.write_depth(&mut h.ctx(), &device).unwrap();
+        assert_eq!(target.read(&h.ctx()).unwrap(), original);
+    }
+
+    #[test]
+    fn asking_a_colour_target_for_its_depth_packing_is_reported() {
+        let mut h = Harness::new(0x1000);
+        let target = Target {
+            format: Format::Rgba8Unorm,
+            addr: h.base,
+            width: 4,
+            height: 4,
+            layout: Layout::Pitch { pitch: 16 },
+            row_bytes: 16,
+            rows: 4,
+            unit: 4,
+            depth: None,
+        };
+        assert!(target.depth_kind().is_none());
+        assert!(target.read_depth(&h.ctx()).is_err());
     }
 
     #[test]
@@ -1024,6 +1294,7 @@ mod tests {
             row_bytes: 16,
             rows: 4,
             unit: 4,
+            depth: None,
         };
         assert_eq!(target.len(), 64);
         assert!(target.write(&mut h.ctx(), &[0; 32]).is_err());

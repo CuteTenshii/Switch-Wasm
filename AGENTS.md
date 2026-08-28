@@ -11,7 +11,7 @@ standing state.
 ## Commands
 
 - `make all` — `test` then `assets`.
-- `make test` — `cargo test` over all three crates. 758 tests.
+- `make test` — `cargo test` over all three crates. 878 tests.
 - `make wasm` — release wasm build `--features gpu`, then `wasm-bindgen
   --target web`. Needs `rustup target add wasm32-unknown-unknown` and a
   `wasm-bindgen-cli` matching the `Cargo.lock` version.
@@ -300,6 +300,12 @@ guest journals, by category), `TRACE_MAP`, `TRACE_REGS`, and the
 GPU set — `TRACE_GPU`, `TRACE_NV`, `TRACE_DRAW`, `TRACE_PIPELINE`,
 `TRACE_SHADER`, `TRACE_CFG`, `TRACE_WGSL`, `TRACE_UPLOAD`. `Cpu::backtrace`
 walks the guest X29 frame chain.
+
+The `wgpu` backend's own flags are not traces but switches: `GPU_ONLY=<i>` or
+`<a>..<b>` renders only those draws of each frame on the device,
+`GPU_DEVICE_MSAA=1` lets the device do the multisampling, `GPU_TIMES=1` says
+where a draw's time went, and `GPU_DUMP_WGSL=<dir>` writes each draw's two
+modules out.
 
 ## IPC (`cpu/ipc.rs`, `cpu/svc.rs`)
 
@@ -651,8 +657,8 @@ Scan-out: `display::BufferQueue` (`QUEUE_BUFFER`) resolves the
 `NvGraphicBuffer` to an nvmap id and `Gpu::present` de-swizzles into
 `Gpu::framebuffer`.
 
-**The `wgpu` backend never blocks.** Reading a render target back means
-awaiting a promise, and a blocking wait in a browser is not slow but
+**The `wgpu` backend never blocks in a browser.** Reading a render target
+back means awaiting a promise, and a blocking wait there is not slow but
 *deadlocked*. So a surface stays on the device across every draw targeting it
 and returns to guest memory only at `Renderer::flush`, which the engine calls
 before `present` — eighty-eight round trips a frame become one. Opening the
@@ -661,14 +667,77 @@ device is likewise deferred: `worker/index.ts` calls `switch_gpu_open`
 **Any draw the backend cannot express falls back to `Software`** — a backend
 that guessed would produce a frame nobody could check.
 
+The flush polls with `PollType::Wait`, which is a real wait natively and *has
+no effect at all* on WebGPU — callbacks there are invoked from the event loop.
+So the browser still gets `Flush::Pending` and the present still waits for a
+later slice. It matters because a flush also runs before a draw hands itself to
+the rasterizer, and the rasterizer reads guest memory: a flush that answered
+"not yet" there left the draw reading what was in memory before the device drew
+and the readback landing on top of what it wrote. **That is still true in a
+browser, and the fix is to yield** — the backend says it needs the event loop,
+the channel suspends the pushbuffer at that method, and the next slice resumes
+with the readback landed. Not implemented.
+
+**A copy out of a held surface flushes first.** The 2D blitter and the copy
+engine read guest memory, so `channel.rs` hands the surfaces back before
+`Engine2D::LAUNCHES_BLIT` and `copy::LAUNCH_DMA` — the same guard compute
+already had. Just Dance 2019 resolves its multisampled colour target with a 2D
+blit once a frame, and without this it resolves whatever was there before.
+
+**Depth, clears and multisampling all run on the device.** A depth surface is
+held like a colour one, converted to `depth16unorm` or `depth32float` — the two
+formats a copy can read — with the stencil byte read back out of guest memory
+and put where it was, because neither renderer tests stencil. Nothing copies
+*into* `depth32float`, so a surface gets there by being drawn: a fullscreen
+triangle writing `@builtin(frag_depth)`. Clears are a pass's load operation
+where they cover the whole surface, and a scissored fullscreen draw where they
+do not — and a whole clear skips the upload entirely, since nothing reads a
+surface it is about to overwrite.
+
+**Multisampling has two routes, and the default is the exact one.** Maxwell
+stores samples *spatially* — a pixel owns a `samples_x` by `samples_y` tile of
+texels — so the surface guest memory holds is the expanded image, and the
+default route renders exactly that, one fragment per texel. Its coverage is
+tested at texel centres, which is where Maxwell's samples are, so it reproduces
+the rasterizer's frame texel for texel; the sample mask and alpha-to-coverage
+are then the fragment shader's job (`wgsl::Coverage`), because there is no
+multisample state to carry them. `GPU_DEVICE_MSAA=1` lets the device do the
+multisampling instead where it offers the sample count — shading once per pixel
+rather than once per sample, which at `4x4` is sixteen times less fragment work
+— through a *companion* texture gathered on the way in and scattered on the way
+out. It is off because WebGPU fixes its sample positions at a rotated grid that
+is not Maxwell's and cannot be programmed, so every anti-aliased edge comes out
+correct and different. Core WebGPU guarantees four samples and no more, so in a
+browser `2x1`, `4x2` and `4x4` take the expanded route whatever the flag says.
+
+**Two renderers disagree by a 255th where a channel lands on a half.**
+`ColorFormat::encode` rounds `127.5` up and a device's unorm conversion rounds
+it down, so a channel of exactly `0.5` differs by one. It is not a bug in
+either and there is nothing to fix — a test that wants byte-identity picks
+values that are not on the eight-bit half-way points.
+
 **The reference is how you check the backend.** Run `switch-core`'s
 `screenshot_nca` and `switch-gpu`'s `screenshot_gpu` over the same frame and
 `cmp` the PPMs — a byte-identical pair is the only evidence the backend renders
 what the rasterizer does. `GPU_ONLY=<i>` runs only the i-th draw of each frame
 on the device and leaves the rest to the reference, so a difference is exactly
 one draw's. That is what caught a doubled y flip: two flat greys trading places
-is geometry, not colour. The Home Menu's 88 draws all run on the device with no
-fallback, 99.88% pixel-identical, 811 → 513 ms a frame.
+is geometry, not colour.
+
+`switch-gpu`'s own tests are the other half of it, and the faster half:
+`gpu::testing::Harness` builds a drawable `Engine3D` — a 16x8 target, two real
+shaders, three vertices — that both renderers are driven over, so a route can
+be checked against the reference without booting a title. Every multisample
+mode, the sample mask, alpha-to-coverage, per-pixel coverage, depth-tested and
+depth-only draws, fans, instanced arrays, BGRA and unbound attributes, and
+clears are each one of those comparisons. It exists because a title exercises
+what a title happens to do: A Short Hike reaches frame 30 without a single
+multisampled draw.
+
+Measured: A Short Hike at frame 30 is **byte-identical**, 133 draws on the
+device (the 220 that fall back are all shader opcodes `wgsl` does not
+translate). The Home Menu at frame 60 is 99.81% pixel-identical over 480 device
+draws, the rest being `mufu rcp` precision and the half-way rounding above.
 
 **hbmenu is not a shader-core test.** Its menu renders correctly, but
 `nx_graphics.c` draws with the CPU into a linear memblock and its command list

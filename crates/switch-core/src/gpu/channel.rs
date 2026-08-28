@@ -290,8 +290,23 @@ impl Channel {
             // The standalone class and the 3D class's own methods are one
             // unit sharing one register file, so they share one instance.
             CLASS_INLINE => self.three_d.inline.write(method, arg, ctx),
-            CLASS_2D => self.two_d.write(method, arg, ctx),
-            CLASS_COPY => self.copy.write(method, arg, ctx),
+            // Both of these read guest memory, and the wgpu backend keeps a
+            // render target on the device until it is flushed — so a copy out
+            // of one reads whatever was in memory before it was drawn into.
+            // It is not a hypothetical: Just Dance 2019 resolves its
+            // multisampled colour target with a 2D blit, once a frame.
+            CLASS_2D => {
+                if method == crate::gpu::engine::twod::Engine2D::LAUNCHES_BLIT {
+                    self.three_d.flush_renderer(ctx)?;
+                }
+                self.two_d.write(method, arg, ctx)
+            }
+            CLASS_COPY => {
+                if method == crate::gpu::engine::copy::LAUNCH_DMA {
+                    self.three_d.flush_renderer(ctx)?;
+                }
+                self.copy.write(method, arg, ctx)
+            }
             CLASS_COMPUTE => {
                 // A dispatch reads and writes guest memory, and the wgpu
                 // backend keeps a render target on the device until it is

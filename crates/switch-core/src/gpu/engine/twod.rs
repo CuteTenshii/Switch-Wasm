@@ -54,9 +54,13 @@ impl Engine2D {
         Engine2D { regs: Registers::new() }
     }
 
+    /// Which method write launches a blit, so a caller can hand a GPU
+    /// backend's surfaces back before the copy reads guest memory.
+    pub const LAUNCHES_BLIT: u32 = SRC_Y0_INT;
+
     pub fn write(&mut self, method: u32, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
         self.regs.set(method, arg);
-        if method == SRC_Y0_INT {
+        if method == Engine2D::LAUNCHES_BLIT {
             self.blit(ctx)?;
         }
         Ok(())
