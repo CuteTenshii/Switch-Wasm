@@ -1021,10 +1021,12 @@ pub struct Cpu {
     /// no figure — it is the loading screen's only sign that a title working
     /// towards its first frame is working at all.
     pub steps: u64,
-    /// Ring buffer of the most recent `RECENT_LEN` `(pc, insn)` pairs, dumped
-    /// on fault so the path into a crash is visible without full tracing.
+    /// Ring buffer of the most recent `RECENT_LEN` runs of straight-line
+    /// execution, each `(first pc, instruction count)`, dumped on fault so the
+    /// path into a crash is visible without full tracing. See
+    /// [`Cpu::record_run`] for why it holds runs and not instructions.
     recent: [(u32, u32); RECENT_LEN],
-    /// Total instructions recorded into [`Cpu::recent`].
+    /// Total runs recorded into [`Cpu::recent`].
     recent_len: usize,
     /// Base of the kernel-fixed Thread Local Region (TPIDRRO_EL0): where the
     /// IPC message buffer lives and where `create_thread` points each
@@ -2359,6 +2361,34 @@ impl Cpu {
         self.steps += 1;
     }
 
+    /// Note a run of `count` consecutive instructions starting at `start` in
+    /// the fault trail.
+    ///
+    /// The trail used to hold one `(pc, insn)` pair per instruction, written
+    /// from the inner loop of both engines: a load of the instruction word, a
+    /// ring store and a counter bump on every step, for something nothing
+    /// reads until the machine faults. A translated block is seven
+    /// instructions on average, so recording it as one run is seven times less
+    /// of all three, and [`Cpu::record_fault`] expands the runs when it
+    /// actually needs them.
+    #[inline(always)]
+    pub(super) fn record_run(&mut self, start: u32, count: u32) {
+        self.recent[self.recent_len % RECENT_LEN] = (start, count);
+        self.recent_len = self.recent_len.wrapping_add(1);
+    }
+
+    /// Account for a run of `count` retired instructions at `start`: the
+    /// clock, the step counter and the trail, all at once.
+    #[inline(always)]
+    pub(super) fn retire_run(&mut self, start: u32, count: u64) {
+        if count == 0 {
+            return;
+        }
+        self.cycles += count;
+        self.steps += count;
+        self.record_run(start, count as u32);
+    }
+
     /// Round-robin to the next runnable thread. Returns false if there is none
     /// (in which case the running thread keeps going).
     fn switch_to_next_runnable(&mut self) -> bool {
@@ -3624,18 +3654,27 @@ impl Cpu {
     /// Operands are masked to the operation size first: callers pass `b` as
     /// the already-inverted subtrahend for SUB, whose 64-bit `!` would
     /// otherwise pollute the 32-bit carry/overflow computation.
-    #[inline]
+    #[inline(always)]
     fn add_carry_overflow(a: u64, b: u64, carry_in: u64, sf: bool) -> (u64, u32, u32) {
-        let size = if sf { 64 } else { 32 };
         let mask = Self::mask(sf);
         let a = a & mask;
         let b = b & mask;
-        let base = 1u128 << size;
-        let sum = (a as u128) + (b as u128) + (carry_in as u128);
-        let result = (sum & (base - 1)) as u64;
-        let carry = ((sum >> size) & 1) as u32;
-        let sign = 1u64 << (size - 1);
-        let overflow = (((a & b & !result) | (!a & !b & result)) & sign != 0) as u32;
+        // No u128. A 32-bit add cannot carry out of a u64, and a 64-bit one is
+        // two `overflowing_add`s whose carries are mutually exclusive — the
+        // second can only fire when the first did not. wasm has no 128-bit
+        // integers, so the old form lowered to a call on the hottest path
+        // there is: ADD/SUB/CMP are 15% of a frame.
+        let (result, carry) = if sf {
+            let (s, c1) = a.overflowing_add(b);
+            let (s, c2) = s.overflowing_add(carry_in);
+            (s, u32::from(c1 | c2))
+        } else {
+            let s = a + b + carry_in;
+            (s & mask, ((s >> 32) & 1) as u32)
+        };
+        // Both operands the same sign and the result a different one.
+        let sign = 1u64 << (if sf { 63 } else { 31 });
+        let overflow = u32::from((!(a ^ b) & (a ^ result) & sign) != 0);
         (result, carry, overflow)
     }
 
@@ -3724,8 +3763,7 @@ impl Cpu {
             }
         };
         let next_pc = pc.wrapping_add(4);
-        self.recent[self.recent_len % RECENT_LEN] = (pc, insn);
-        self.recent_len = self.recent_len.saturating_add(1);
+        self.record_run(pc, 1);
         let result = self.execute(insn, next_pc);
         if self.trace_enabled {
             self.trace_line(&format!("{:08x}: {:08x}  {}\n", pc, insn, crate::disasm::disassemble(insn)));
@@ -3751,13 +3789,25 @@ impl Cpu {
         ));
         self.trace_regs(pc);
         // Show the run-up to the fault so the crash path is readable without
-        // full tracing enabled.
-        let n = self.recent_len.min(RECENT_LEN);
-        if n > 0 {
-            let start = self.recent_len.wrapping_sub(n) % RECENT_LEN;
-            self.trace_line(&format!("--- last {} instructions ---\n", n));
-            for i in 0..n {
-                let (ipc, iinsn) = self.recent[(start + i) % RECENT_LEN];
+        // full tracing enabled. The trail holds runs rather than instructions
+        // (see [`Cpu::record_run`]), so expand them here and re-read the words
+        // — this is the one place that pays for keeping the inner loops free
+        // of it.
+        let runs = self.recent_len.min(RECENT_LEN);
+        if runs > 0 {
+            let first = self.recent_len.wrapping_sub(runs) % RECENT_LEN;
+            let mut trail: Vec<(u32, u32)> = Vec::new();
+            for i in 0..runs {
+                let (start, count) = self.recent[(first + i) % RECENT_LEN];
+                for step in 0..count {
+                    let at = start.wrapping_add(4 * step);
+                    let word = self.mem.fetch(at).unwrap_or(0);
+                    trail.push((at, word));
+                }
+            }
+            let shown = trail.len().min(RECENT_LEN);
+            self.trace_line(&format!("--- last {} instructions ---\n", shown));
+            for &(ipc, iinsn) in &trail[trail.len() - shown..] {
                 self.trace_line(&format!(
                     "{:08x}: {:08x}  {}\n",
                     ipc,

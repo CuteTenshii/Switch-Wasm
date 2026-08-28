@@ -9,10 +9,21 @@
 //! This module does it once. The first time control reaches an address, the
 //! translator walks forward from it decoding instructions into [`Op`]s — the
 //! operation with its operands already extracted, its immediates already
-//! decoded, its PC-relative addresses already resolved — until it reaches
-//! something that changes the PC. That run of ops plus its terminator is a
-//! [`Block`], cached by entry address, and every later visit executes it with
-//! no decoding at all.
+//! decoded, its PC-relative addresses already resolved, and every field the
+//! interpreter re-reads per execution (a load's width and direction, a
+//! register offset's extension, whether an add is really a subtract, which
+//! system register an `MRS` names, which floating-point form an encoding is)
+//! already resolved to the one thing the instruction does. That run of ops
+//! plus its terminator is a [`Block`], cached by entry address, and every
+//! later visit executes it with no decoding at all.
+//!
+//! A block does not end at the first branch. The three conditional branches —
+//! `B.cond`, `CBZ`/`CBNZ`, `TBZ`/`TBNZ` — have the following instruction as
+//! their not-taken path, so translation carries on through them and each
+//! becomes an [`Exit`] the body is checked against on the way past. Only an
+//! instruction that *always* leaves ends a block. `b.cond` alone is 12% of an
+//! hbmenu frame, so this is the difference between blocks that average seven
+//! instructions and blocks that average thirteen.
 //!
 //! What this removes is decode, not dispatch — three quarters of where the
 //! interpreter's time went (see [`super::Cpu::execute`]'s note on the group
@@ -47,12 +58,20 @@
 //!
 //! Every op executes the same helper the interpreter's decoder would have
 //! called with the same arguments, so translated and interpreted execution are
-//! the same computation. Anything the translator does not have an op for —
-//! SIMD, floating point, the exclusive accessors, the encodings the
+//! the same computation. Anything the translator does not have an op for — the
+//! exclusive accessors, the divides and variable shifts, the encodings the
 //! interpreter rejects as unallocated — becomes [`Op::Interpret`], which hands
 //! the raw instruction word straight back to [`super::Cpu::execute`]. That
 //! makes the translator's coverage a performance question rather than a
 //! correctness one: a form it does not know is slower, never wrong.
+//!
+//! SIMD and floating point are half-way between. They have no ops of their
+//! own, but which decoder owns an encoding — and, for the scalar forms, which
+//! of [`super::fp::FpForm`]'s eight groups it belongs to — is settled at
+//! translation time, so [`Op::Fp`] enters the right handler directly instead
+//! of walking a guard chain. The classification lives in
+//! [`super::Cpu::fp_form`] and the interpreter asks the same function, so the
+//! two cannot drift.
 //!
 //! An op may only be a mid-block [`Op::Interpret`] if it cannot move the PC
 //! anywhere but to the following instruction. Every A64 instruction that can
@@ -71,16 +90,17 @@
 //! exact.
 
 use super::bits::*;
-use super::{Cpu, Result, RunReport, RECENT_LEN, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
+use super::fp::FpForm;
+use super::{Cpu, Result, RunReport, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
 use crate::mem::{Memory, PAGE_SIZE};
 use crate::IdMap;
 use std::rc::Rc;
 
 /// Longest run of instructions one block may cover. Longer blocks amortize the
-/// per-block bookkeeping over more work, but they also make invalidation and
-/// the step budget coarser, and past a basic block's typical length there is
-/// nothing left to gain — straight-line runs of more than this between two
-/// branches are rare in compiled code.
+/// per-block bookkeeping over more work, but they also make the step budget
+/// coarser. Not the binding limit in practice: raising it to 160 moved
+/// hbmenu's block entries by 0.2%, because what actually ends a block is an
+/// unconditional branch or the end of the page.
 const MAX_BLOCK_OPS: usize = 64;
 
 /// How many blocks the cache holds before it is dropped wholesale. A retail
@@ -100,6 +120,108 @@ pub(super) enum Wb {
     Post,
 }
 
+/// What a load or store actually does, decided when the block is translated.
+///
+/// [`super::Cpu::ld_st_opc`] derives this from the `size` and `opc` fields
+/// every time it runs: the `PRFM` test, the load/store test, the sign-extend
+/// test, and then a second match inside `load_by_size` to pick the width, and
+/// a third to pick the sign-extension width. All of it is constant per
+/// instruction, so all of it belongs here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Acc {
+    Store8,
+    Store16,
+    Store32,
+    Store64,
+    Load8,
+    Load16,
+    Load32,
+    Load64,
+    LoadS8,
+    LoadS16,
+    LoadS32,
+    /// `PRFM`, a hint with no architectural effect. Still an op, because the
+    /// addressing mode's writeback happens whether or not the access does.
+    Prefetch,
+}
+
+impl Acc {
+    /// The access a `size`:`opc` pair selects, reading them exactly as
+    /// [`super::Cpu::ld_st_opc`] does.
+    fn of(sz: u8, opc: u8) -> Acc {
+        if sz == 0b11 && opc >= 0b10 {
+            return Acc::Prefetch;
+        }
+        match (opc, sz) {
+            (0b00, 0b00) => Acc::Store8,
+            (0b00, 0b01) => Acc::Store16,
+            (0b00, 0b10) => Acc::Store32,
+            (0b00, _) => Acc::Store64,
+            (0b01, 0b00) => Acc::Load8,
+            (0b01, 0b01) => Acc::Load16,
+            (0b01, 0b10) => Acc::Load32,
+            (0b01, _) => Acc::Load64,
+            (_, 0b00) => Acc::LoadS8,
+            (_, 0b01) => Acc::LoadS16,
+            (_, _) => Acc::LoadS32,
+        }
+    }
+}
+
+/// How a register-offset load/store extends its index register. The four
+/// encodings A64 defines collapse to three behaviours; the other four are
+/// undefined and never reach a block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Ext {
+    /// `UXTW`: the low 32 bits, zero-extended.
+    Uxtw,
+    /// `SXTW`: the low 32 bits, sign-extended.
+    Sxtw,
+    /// `LSL`, `UXTX` and `SXTX`, all of which take the register as it stands.
+    None,
+}
+
+/// The system register a translated `MRS`/`MSR` names, resolved from the
+/// `op0:op1:CRn:CRm:op2` fields once instead of on every execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SysReg {
+    Nzcv,
+    /// `TPIDR_EL0`, which guest code may write.
+    Tpidr,
+    /// `TPIDRRO_EL0`, the kernel-fixed TLS base. Read-only at EL0, so an
+    /// `MSR` to it is ignored rather than refused.
+    TpidrRo,
+    Fpcr,
+    Fpsr,
+    /// A register that always reads the same value: the two Cortex-A57
+    /// constants [`super::Cpu::system`] reports, and zero for everything it
+    /// does not model. Writes to these are dropped. Both constants fit in 32
+    /// bits, which keeps [`Op`] to one 64-bit word.
+    Fixed(u32),
+}
+
+/// What a load/store pair moves, and which way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PairKind {
+    Load32,
+    /// `LDPSW`: two words, each sign-extended to 64 bits.
+    Load32Sext,
+    Load64,
+    Store32,
+    Store64,
+}
+
+impl PairKind {
+    /// The distance between the two registers' addresses.
+    #[inline(always)]
+    fn stride(self) -> u32 {
+        match self {
+            PairKind::Load64 | PairKind::Store64 => 8,
+            _ => 4,
+        }
+    }
+}
+
 /// One translated instruction: what it does, with its operands already pulled
 /// out of the encoding.
 #[derive(Debug, Clone, Copy)]
@@ -109,21 +231,74 @@ pub(super) enum Op {
     Nop,
     /// Not translated: run the original instruction through the interpreter.
     Interpret { insn: u32 },
+    /// SIMD and floating point, handed to the decoder that owns it instead of
+    /// back through [`super::Cpu::execute`]'s group match. `scalar` is the
+    /// same top-byte test `execute` makes to decide which of the two decoders
+    /// gets first look, and `form` is which of the scalar forms it is — both
+    /// decided once here rather than on every execution.
+    Fp { insn: u32, scalar: bool, form: FpForm },
+    /// A system instruction [`decode_system`] could not place. Straight to
+    /// [`super::Cpu::system`], which is where its error comes from.
+    System { insn: u32 },
+    /// `MRS Xt, <sysreg>`.
+    Mrs { rd: u8, reg: SysReg },
+    /// `MSR <sysreg>, Xt`.
+    Msr { rt: u8, reg: SysReg },
+    /// The one `MSR` immediate form that has an effect.
+    MsrNzcvImm { imm: u8 },
+    /// `DC ZVA Xt`: zero the 64-byte block Xt points into.
+    DcZva { rt: u8 },
 
     /// A value the translator already computed: `MOVZ`/`MOVN`, and the
     /// PC-relative `ADR`/`ADRP` whose result depends only on where the
     /// instruction is.
     MovConst { rd: u8, val: u64 },
-    /// `MOVK`: replace the 16-bit field `mask` selects with `val`.
-    MovK { rd: u8, mask: u64, val: u64 },
+    /// `MOVK`: replace the 16-bit field at `shift` with `val`. Held as a
+    /// shift and a halfword rather than a mask and a placed value so the
+    /// variant needs one 64-bit word instead of two — which is what decides
+    /// [`Op`]'s size, and so a block body's whole cache footprint.
+    MovK { rd: u8, shift: u8, val: u16 },
 
-    AddSubImm { rd: u8, rn: u8, imm: u64, set_flags: bool, sub: bool, sf: bool },
-    AddSubShifted { rd: u8, rn: u8, rm: u8, st: u8, sa: u8, set_flags: bool, sub: bool, sf: bool },
-    AddSubExtended { rd: u8, rn: u8, rm: u8, option: u8, shift: u8, set_flags: bool, sub: bool, sf: bool },
+    /// `ADD`/`SUB`/`ADDS`/`SUBS` against a constant.
+    ///
+    /// `rhs` arrives already inverted for the subtractions, with `carry` set
+    /// to match, so which direction the operation runs in does not survive to
+    /// run time. `rn_sp`/`rd_sp` are the two places register 31 means the
+    /// stack pointer rather than the zero register, also decided here.
+    AddSubImm {
+        rd: u8,
+        rn: u8,
+        rhs: u64,
+        carry: u8,
+        set_flags: bool,
+        rn_sp: bool,
+        rd_sp: bool,
+        sf: bool,
+    },
+    /// The shifted-register form, where both `Rd` and `Rn` are always the zero
+    /// register. `carry` is 1 for the subtractions, and doubles as the mask
+    /// that inverts the operand.
+    AddSubShifted { rd: u8, rn: u8, rm: u8, st: u8, sa: u8, carry: u8, set_flags: bool, sf: bool },
+    /// The same with no shift at all — `add x0, x1, x2` — which is most of
+    /// them, and skips [`shift_reg`] entirely.
+    AddSubReg { rd: u8, rn: u8, rm: u8, carry: u8, set_flags: bool, sf: bool },
+    AddSubExtended {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        option: u8,
+        shift: u8,
+        carry: u8,
+        set_flags: bool,
+        rd_sp: bool,
+        sf: bool,
+    },
 
     /// `AND`/`ORR`/`EOR`/`ANDS` with the bitmask immediate already decoded.
     LogicalImm { rd: u8, rn: u8, imm: u64, opc: u8, sf: bool },
     LogicalShifted { rd: u8, rn: u8, rm: u8, st: u8, sa: u8, opc: u8, invert: bool, sf: bool },
+    /// The unshifted form, which covers every `mov xd, xm` and `mvn xd, xm`.
+    LogicalReg { rd: u8, rn: u8, rm: u8, opc: u8, invert: bool, sf: bool },
 
     /// `SBFM`/`BFM`/`UBFM` and the aliases built on them.
     Bitfield { rd: u8, rn: u8, opc: u8, immr: u8, imms: u8, sf: bool },
@@ -141,29 +316,25 @@ pub(super) enum Op {
     /// `SMULH`/`UMULH`.
     Mulh { rd: u8, rn: u8, rm: u8, signed: bool },
 
-    LoadStoreImm { rt: u8, rn: u8, sz: u8, opc: u8, wb: Wb, offset: i64 },
-    LoadStoreReg { rt: u8, rn: u8, rm: u8, opt: u8, s: u8, sz: u8, opc: u8 },
-    /// `LDP`/`STP`/`LDPSW`. `wide` is the 64-bit form, `sext` the `LDPSW` one.
-    Pair { rt: u8, rt2: u8, rn: u8, offset: i64, wide: bool, load: bool, sext: bool, wb: Wb },
+    LoadStoreImm { rt: u8, rn: u8, acc: Acc, wb: Wb, offset: i64 },
+    LoadStoreReg { rt: u8, rn: u8, rm: u8, ext: Ext, shift: u8, acc: Acc },
+    /// `LDP`/`STP`/`LDPSW`.
+    Pair { rt: u8, rt2: u8, rn: u8, offset: i64, kind: PairKind, wb: Wb },
     /// `LDR <t>, label`, with the literal's address already resolved.
-    LoadLiteral { rt: u8, addr: u32, opc: u8 },
+    LoadLiteral { rt: u8, addr: u32, acc: Acc },
 }
 
-/// The instruction a block ends on: the one that decides where control goes
-/// next. A block with no terminator ran into the block-length or page limit
-/// and simply falls through to [`Block::end`].
+/// The instruction a block ends on: one that always moves the PC somewhere
+/// other than the following instruction. The conditional branches, whose
+/// not-taken path *is* the following instruction, are [`Exit`]s instead and do
+/// not end a block. A block with no terminator ran into the block-length or
+/// page limit and simply falls through.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Term {
     /// `B #imm`.
     B { target: u32 },
     /// `BL #imm`.
     Bl { target: u32, ret_pc: u32 },
-    /// `B.cond #imm`.
-    BCond { cond: u8, target: u32, next: u32 },
-    /// `CBZ`/`CBNZ`.
-    Cbz { rt: u8, sf: bool, nz: bool, target: u32, next: u32 },
-    /// `TBZ`/`TBNZ`.
-    Tbz { rt: u8, bit: u8, nz: bool, target: u32, next: u32 },
     /// `BR Xn`.
     Br { rn: u8 },
     /// `BLR Xn`.
@@ -181,16 +352,38 @@ pub(super) enum Term {
     Fetch,
 }
 
+/// A conditional branch *inside* a block: control leaves at this instruction
+/// if the condition holds, and otherwise carries straight on to the next one.
+///
+/// These are the only three A64 branches whose not-taken path is the following
+/// instruction, which is what lets a block continue past them at all.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Exit {
+    /// `B.cond`.
+    Cond { cond: u8, target: u32 },
+    /// `CBZ`/`CBNZ`.
+    Cbz { rt: u8, sf: bool, nz: bool, target: u32 },
+    /// `TBZ`/`TBNZ`.
+    Tbz { rt: u8, bit: u8, nz: bool, target: u32 },
+}
+
 /// A run of instructions with a single entry point, translated once.
 #[derive(Debug)]
 pub(super) struct Block {
     /// Guest address of the first instruction.
     start: u32,
-    /// The straight-line body, `ops[i]` at `start + 4 * i`.
+    /// One entry per instruction the block covers before its terminator, so
+    /// `ops[i]` is the instruction at `start + 4 * i`. The slots that hold a
+    /// conditional branch carry [`Op::Nop`] as filler — the branch itself is
+    /// in `exits`, and keeping the indexing exact is worth one dead slot per
+    /// exit.
     ops: Vec<Op>,
     /// The original instruction words, body then terminator, kept so a fault
     /// inside a block leaves the same run-up trail an interpreted one does.
     words: Vec<u32>,
+    /// The conditional branches the block runs through, as
+    /// `(index into ops, branch)`, in ascending order.
+    exits: Vec<(u32, Exit)>,
     term: Option<Term>,
 }
 
@@ -316,10 +509,11 @@ impl Jit {
     }
 }
 
-/// One decoded instruction: either part of a block's body, or the terminator
-/// that ends it.
+/// One decoded instruction: part of a block's body, a conditional branch the
+/// block can run through, or the terminator that ends it.
 enum Decoded {
     Op(Op),
+    Exit(Exit),
     Term(Term),
 }
 
@@ -333,18 +527,29 @@ fn translate(mem: &Memory, start: u32) -> Block {
     let limit = MAX_BLOCK_OPS.min(page_room.max(1));
     let mut ops = Vec::with_capacity(limit);
     let mut words = Vec::with_capacity(limit);
+    let mut exits = Vec::new();
     for i in 0..limit {
         let pc = start.wrapping_add(4 * i as u32);
         let insn = match mem.fetch(pc) {
             Ok(insn) => insn,
             Err(_) => {
-                return Block { start, ops, words, term: Some(Term::Fetch) };
+                return Block { start, ops, words, exits, term: Some(Term::Fetch) };
             }
         };
         match decode(insn, pc) {
             Decoded::Term(term) => {
                 words.push(insn);
-                return Block { start, ops, words, term: Some(term) };
+                return Block { start, ops, words, exits, term: Some(term) };
+            }
+            // A conditional branch does not end the block: its not-taken path
+            // is the next instruction, so translation carries on there and the
+            // branch becomes an early exit. This is the whole reason blocks
+            // are longer than the six or seven instructions a basic block runs
+            // to — `b.cond` alone is 12% of hbmenu's frame.
+            Decoded::Exit(exit) => {
+                exits.push((i as u32, exit));
+                ops.push(Op::Nop);
+                words.push(insn);
             }
             Decoded::Op(op) => {
                 ops.push(op);
@@ -352,7 +557,7 @@ fn translate(mem: &Memory, start: u32) -> Block {
             }
         }
     }
-    Block { start, ops, words, term: None }
+    Block { start, ops, words, exits, term: None }
 }
 
 /// Classify one instruction the way [`super::Cpu::execute`] does — by bits
@@ -362,8 +567,14 @@ fn decode(insn: u32, pc: u32) -> Decoded {
         0x8 | 0x9 => Decoded::Op(decode_data_proc_imm(insn, pc)),
         0x5 | 0xD => Decoded::Op(decode_data_proc_reg(insn)),
         0x4 | 0x6 | 0xC | 0xE => Decoded::Op(decode_load_store(insn, pc)),
-        // Advanced SIMD and scalar floating point: no ops of their own yet.
-        0x7 | 0xF => Decoded::Op(Op::Interpret { insn }),
+        // Advanced SIMD and scalar floating point. No ops of their own, but
+        // which of the two decoders owns the encoding is decided here rather
+        // than on every execution.
+        0x7 | 0xF => Decoded::Op(Op::Fp {
+            insn,
+            scalar: matches!((insn >> 24) & 0xFF, 0x1E | 0x1F | 0x9E | 0x9F),
+            form: Cpu::fp_form(insn),
+        }),
         0xA | 0xB => decode_branch_or_system(insn, pc),
         // Reserved and SVE. The interpreter rejects them; let it say so.
         _ => Decoded::Op(Op::Interpret { insn }),
@@ -377,30 +588,27 @@ fn decode_branch_or_system(insn: u32, pc: u32) -> Decoded {
     let next = pc.wrapping_add(4);
     match (insn >> 24) & 0xFF {
         // B.cond
-        0x54 => Decoded::Term(Term::BCond {
+        0x54 => Decoded::Exit(Exit::Cond {
             cond: (insn & 0xF) as u8,
             target: branch_target(pc, sext_u64((insn >> 5) & 0x7_FFFF, 19) << 2),
-            next,
         }),
         // B #imm
         0x14..=0x17 => Decoded::Term(Term::B {
             target: branch_target(pc, sext_u64(insn & 0x3FF_FFFF, 26) << 2),
         }),
         // TBZ / TBNZ
-        0x36 | 0x37 | 0xB6 | 0xB7 => Decoded::Term(Term::Tbz {
+        0x36 | 0x37 | 0xB6 | 0xB7 => Decoded::Exit(Exit::Tbz {
             rt: (insn & 0x1F) as u8,
             bit: ((((insn >> 31) & 1) << 5) | ((insn >> 19) & 0x1F)) as u8,
             nz: ((insn >> 24) & 1) == 1,
             target: branch_target(pc, sext_u64((insn >> 5) & 0x3FFF, 14) << 2),
-            next,
         }),
         // CBZ / CBNZ
-        0x34 | 0x35 | 0xB4 | 0xB5 => Decoded::Term(Term::Cbz {
+        0x34 | 0x35 | 0xB4 | 0xB5 => Decoded::Exit(Exit::Cbz {
             rt: (insn & 0x1F) as u8,
             sf: ((insn >> 31) & 1) == 1,
             nz: ((insn >> 24) & 1) == 1,
             target: branch_target(pc, sext_u64((insn >> 5) & 0x7_FFFF, 19) << 2),
-            next,
         }),
         // BL #imm
         0x94..=0x97 => Decoded::Term(Term::Bl {
@@ -433,12 +641,89 @@ fn decode_branch_or_system(insn: u32, pc: u32) -> Decoded {
         0xD5 => {
             if (insn >> 16) & 0xFFFF == 0xD503 {
                 Decoded::Op(Op::Nop)
+            } else if ((insn >> 22) & 0x3FF) == 0b1101010100 {
+                // The same guard `try_branch_or_system` applies before handing
+                // an encoding to `system`. Anything else falls through to the
+                // whole-space chain, so it stays an `Interpret`.
+                Decoded::Op(decode_system(insn))
             } else {
                 Decoded::Op(Op::Interpret { insn })
             }
         }
         _ => Decoded::Term(Term::Interpret { insn, next }),
     }
+}
+
+/// The system register `op0:op1:CRn:CRm:op2` names, read exactly as
+/// [`super::Cpu::system`] reads it.
+fn decode_sysreg(insn: u32) -> SysReg {
+    let op0 = (insn >> 19) & 0b11;
+    let op1 = (insn >> 16) & 0b111;
+    let crn = (insn >> 12) & 0xF;
+    let crm = (insn >> 8) & 0xF;
+    let op2 = (insn >> 5) & 0b111;
+    match (op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2 {
+        0b11_011_0100_0010_000 => SysReg::Nzcv,
+        0b11_011_1101_0000_010 => SysReg::Tpidr,
+        0b11_011_1101_0000_011 => SysReg::TpidrRo,
+        0b11_011_0100_0100_000 => SysReg::Fpcr,
+        0b11_011_0100_0100_001 => SysReg::Fpsr,
+        // DCZID_EL0: BS=4, a 64-byte `DC ZVA` block.
+        0b11_011_0000_0000_111 => SysReg::Fixed(4),
+        // CTR_EL0: the Cortex-A57 value.
+        0b11_011_0000_0000_001 => SysReg::Fixed(0x8444_C004),
+        _ => SysReg::Fixed(0),
+    }
+}
+
+/// The `MRS`/`MSR`/cache-maintenance group, resolved to the single thing the
+/// instruction does.
+///
+/// [`super::Cpu::system`] re-derives six fields and walks a chain of guards to
+/// reach the same answer every time it runs one, and `MRS TPIDRRO_EL0` — how
+/// every `nnSdk` thread finds its own TLS — is near the end of that chain.
+fn decode_system(insn: u32) -> Op {
+    let l = (insn >> 21) & 1;
+    let op0 = (insn >> 19) & 0b11;
+    let op1 = (insn >> 16) & 0b111;
+    let crn = (insn >> 12) & 0xF;
+    let crm = (insn >> 8) & 0xF;
+    let op2 = (insn >> 5) & 0b111;
+    let rt = (insn & 0x1F) as u8;
+
+    if l == 1 {
+        return Op::Mrs { rd: rt, reg: decode_sysreg(insn) };
+    }
+    if op0 == 0 {
+        // MSR (immediate). Only the PSTATE write has an effect; DAIF, SPSel
+        // and the rest retire with none.
+        return match (op1, crn, crm, op2) {
+            (0b010 | 0b011, 0b0100, 0b0010, 0b000) => {
+                Op::MsrNzcvImm { imm: ((insn >> 8) & 0xF) as u8 }
+            }
+            _ => Op::Nop,
+        };
+    }
+    if op0 == 1 && crn == 7 {
+        if op1 == 3 && crm == 4 && op2 == 1 {
+            return Op::DcZva { rt };
+        }
+        // The other cache maintenance operations: this memory is always
+        // coherent, so there is nothing for them to do.
+        return Op::Nop;
+    }
+    if op0 == 2 || op0 == 3 {
+        return Op::Msr { rt, reg: decode_sysreg(insn) };
+    }
+    Op::System { insn }
+}
+
+/// The operand an addition needs to compute a subtraction. `carry` is 1
+/// exactly when the instruction subtracts, so it doubles as the mask that
+/// inverts the operand — no branch, and nothing left to decide at run time.
+#[inline(always)]
+fn invert_if(v: u64, carry: u8) -> u64 {
+    v ^ 0u64.wrapping_sub(u64::from(carry))
 }
 
 /// The target of a PC-relative branch. `imm` is already the sign-extended
@@ -473,12 +758,19 @@ fn decode_data_proc_imm(insn: u32, pc: u32) -> Op {
             }
             let op = (insn >> 29) & 0b11;
             let imm12 = u64::from((insn >> 10) & 0xFFF);
+            let imm = if ((insn >> 22) & 1) == 1 { imm12 << 12 } else { imm12 };
+            let set_flags = (op & 1) == 1;
+            let sub = (op >> 1) == 1;
             Op::AddSubImm {
                 rd: (insn & 0x1F) as u8,
                 rn: ((insn >> 5) & 0x1F) as u8,
-                imm: if ((insn >> 22) & 1) == 1 { imm12 << 12 } else { imm12 },
-                set_flags: (op & 1) == 1,
-                sub: (op >> 1) == 1,
+                // Subtraction is addition of the inverted operand with a carry
+                // in, and both are known now.
+                rhs: if sub { !imm } else { imm },
+                carry: u8::from(sub),
+                set_flags,
+                rn_sp: true,
+                rd_sp: !set_flags,
                 sf,
             }
         }
@@ -492,10 +784,9 @@ fn decode_data_proc_imm(insn: u32, pc: u32) -> Op {
                 match (insn >> 29) & 0b11 {
                     0b00 => Op::MovConst { rd, val: !(imm16 << shift) & Cpu::mask(sf) },
                     0b10 => Op::MovConst { rd, val: (imm16 << shift) & Cpu::mask(sf) },
-                    0b11 => {
-                        let mask = (0xFFFFu64 << shift) & Cpu::mask(sf);
-                        Op::MovK { rd, mask, val: (imm16 << shift) & mask }
-                    }
+                    // A 32-bit MOVK never selects a field above bit 31, so
+                    // the operation-size mask cannot narrow it.
+                    0b11 => Op::MovK { rd, shift: shift as u8, val: imm16 as u16 },
                     _ => Op::Interpret { insn },
                 }
             } else {
@@ -569,21 +860,24 @@ fn decode_data_proc_reg(insn: u32) -> Op {
     let rm = ((insn >> 16) & 0x1F) as u8;
     match (insn >> 24) & 0x1F {
         // Logical shifted register.
-        0b01010 => Op::LogicalShifted {
-            rd,
-            rn,
-            rm,
-            st: ((insn >> 22) & 0b11) as u8,
-            sa: ((insn >> 10) & 0x3F) as u8,
-            opc: ((insn >> 29) & 0b11) as u8,
-            invert: ((insn >> 21) & 1) == 1,
-            sf,
-        },
+        0b01010 => {
+            let st = ((insn >> 22) & 0b11) as u8;
+            let sa = ((insn >> 10) & 0x3F) as u8;
+            let opc = ((insn >> 29) & 0b11) as u8;
+            let invert = ((insn >> 21) & 1) == 1;
+            if sa == 0 {
+                // `mov xd, xm` and `mvn xd, xm` are both this.
+                Op::LogicalReg { rd, rn, rm, opc, invert, sf }
+            } else {
+                Op::LogicalShifted { rd, rn, rm, st, sa, opc, invert, sf }
+            }
+        }
         // ADD/SUB, shifted or extended register.
         0b01011 => {
             let op = (insn >> 29) & 0b11;
             let set_flags = (op & 1) == 1;
             let sub = (op >> 1) == 1;
+            let carry = u8::from(sub);
             if ((insn >> 21) & 0b111) == 0b001 {
                 Op::AddSubExtended {
                     rd,
@@ -591,20 +885,20 @@ fn decode_data_proc_reg(insn: u32) -> Op {
                     rm,
                     option: ((insn >> 13) & 0b111) as u8,
                     shift: ((insn >> 10) & 0b111) as u8,
+                    carry,
                     set_flags,
-                    sub,
+                    rd_sp: !set_flags,
                     sf,
                 }
             } else {
-                Op::AddSubShifted {
-                    rd,
-                    rn,
-                    rm,
-                    st: ((insn >> 22) & 0b11) as u8,
-                    sa: ((insn >> 10) & 0x3F) as u8,
-                    set_flags,
-                    sub,
-                    sf,
+                let st = ((insn >> 22) & 0b11) as u8;
+                let sa = ((insn >> 10) & 0x3F) as u8;
+                if sa == 0 {
+                    // Every shift kind is the identity at zero, and this is
+                    // the common form.
+                    Op::AddSubReg { rd, rn, rm, carry, set_flags, sf }
+                } else {
+                    Op::AddSubShifted { rd, rn, rm, st, sa, carry, set_flags, sf }
                 }
             }
         }
@@ -657,10 +951,18 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
     // LDR <t>, label — the address is fixed by where the instruction is.
     if ((insn >> 27) & 0b111) == 0b011 && ((insn >> 26) & 1) == 0 && ((insn >> 24) & 0b11) == 0b00 {
         let imm = sext_u64((insn >> 5) & 0x7_FFFF, 19) << 2;
+        // The literal forms encode the width in `opc` alone; `Acc::of` reads
+        // it as a size:opc pair, so pass the size the width implies.
+        let acc = match (insn >> 30) & 0b11 {
+            0b00 => Acc::Load32,
+            0b01 => Acc::Load64,
+            0b10 => Acc::LoadS32,
+            _ => Acc::Prefetch,
+        };
         return Op::LoadLiteral {
             rt: (insn & 0x1F) as u8,
             addr: (pc as i64).wrapping_add(imm as i64) as u32,
-            opc: ((insn >> 30) & 0b11) as u8,
+            acc,
         };
     }
 
@@ -684,20 +986,23 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
 
     // Register offset.
     if ((insn >> 27) & 0b111) == 0b111 && ((insn >> 24) & 0b11) == 0b00 && ((insn >> 21) & 1) == 1 {
-        let opt = ((insn >> 13) & 0b111) as u8;
         // Only four of the eight extend encodings are defined here; the rest
         // are undefined, and the interpreter faults on them.
-        if !matches!(opt, 0b010 | 0b011 | 0b110 | 0b111) {
-            return Op::Interpret { insn };
-        }
+        let ext = match (insn >> 13) & 0b111 {
+            0b010 => Ext::Uxtw,
+            0b110 => Ext::Sxtw,
+            0b011 | 0b111 => Ext::None,
+            _ => return Op::Interpret { insn },
+        };
+        // `S` scales by log2 of the access size, not by the byte count.
+        let shift = if ((insn >> 12) & 1) == 1 { sz } else { 0 };
         return Op::LoadStoreReg {
             rt,
             rn,
             rm: ((insn >> 16) & 0x1F) as u8,
-            opt,
-            s: ((insn >> 12) & 1) as u8,
-            sz,
-            opc,
+            ext,
+            shift,
+            acc: Acc::of(sz, opc),
         };
     }
 
@@ -710,8 +1015,7 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
             return Op::LoadStoreImm {
                 rt,
                 rn,
-                sz,
-                opc,
+                acc: Acc::of(sz, opc),
                 wb: Wb::None,
                 offset: i64::from((insn >> 10) & 0xFFF) * scale,
             };
@@ -724,7 +1028,7 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
                 // Unscaled (`LDUR`/`STUR`) and the unprivileged forms.
                 _ => Wb::None,
             };
-            return Op::LoadStoreImm { rt, rn, sz, opc, wb, offset };
+            return Op::LoadStoreImm { rt, rn, acc: Acc::of(sz, opc), wb, offset };
         }
     }
 
@@ -744,14 +1048,19 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
             0b11 => Wb::Pre,
             _ => Wb::None,
         };
+        let kind = match (load, wide, pair_opc == 0b01) {
+            (true, _, true) => PairKind::Load32Sext,
+            (true, true, _) => PairKind::Load64,
+            (true, false, _) => PairKind::Load32,
+            (false, true, _) => PairKind::Store64,
+            (false, false, _) => PairKind::Store32,
+        };
         return Op::Pair {
             rt,
             rt2: ((insn >> 10) & 0x1F) as u8,
             rn,
             offset: (sext_u64((insn >> 15) & 0x7F, 7) as i64).wrapping_mul(scale),
-            wide,
-            load,
-            sext: pair_opc == 0b01,
+            kind,
             wb,
         };
     }
@@ -840,29 +1149,65 @@ impl Cpu {
     /// address and the same register state an interpreted one would.
     fn exec_block(&mut self, block: &Block, budget: u64) -> Result<u64> {
         let body = (block.ops.len() as u64).min(budget) as usize;
+        let mut i = 0usize;
         let mut pc = block.start;
-        for i in 0..body {
-            let insn = block.words[i];
-            self.recent[self.recent_len % RECENT_LEN] = (pc, insn);
-            self.recent_len = self.recent_len.saturating_add(1);
-            self.retire();
-            self.pc = pc;
-            if let Err(e) = self.exec_op(block.ops[i], pc) {
-                self.record_fault(&e, pc, insn);
-                return Err(e);
+        let mut next_exit = 0usize;
+        loop {
+            // Run straight through to the next conditional branch, or to the
+            // end of what the budget allows. Taking the segment as a slice
+            // keeps this the same bounds-check-free walk it was when a block
+            // had no interior exits at all.
+            let stop = match block.exits.get(next_exit) {
+                Some(&(at, _)) if (at as usize) < body => at as usize,
+                _ => body,
+            };
+            for (k, &op) in block.ops[i..stop].iter().enumerate() {
+                if let Err(e) = self.exec_op(op, pc) {
+                    // The clock, the step counter, the trail and `pc` are all
+                    // settled here rather than maintained per instruction:
+                    // nothing inside a block reads any of them, and a fault is
+                    // the only thing that ever does. The faulting instruction
+                    // counts, exactly as it does in the interpreter.
+                    let at = i + k;
+                    self.retire_run(block.start, at as u64 + 1);
+                    self.pc = pc;
+                    self.record_fault(&e, pc, block.words[at]);
+                    return Err(e);
+                }
+                pc = pc.wrapping_add(4);
             }
+            i = stop;
+            if stop == body {
+                break;
+            }
+            let (_, exit) = block.exits[next_exit];
+            i += 1;
             pc = pc.wrapping_add(4);
+            if self.take_exit(exit) {
+                // Taken: the branch is the last instruction of this visit, and
+                // `take_exit` has already put the target in `pc`.
+                self.retire_run(block.start, i as u64);
+                return Ok(i as u64);
+            }
+            next_exit += 1;
         }
-        let mut ran = body as u64;
+        self.retire_run(block.start, i as u64);
+        let mut ran = i as u64;
         match block.term {
-            Some(term) if body == block.ops.len() && ran < budget => {
-                let insn = block.words[body];
-                self.recent[self.recent_len % RECENT_LEN] = (pc, insn);
-                self.recent_len = self.recent_len.saturating_add(1);
-                self.retire();
+            Some(term) if i == block.ops.len() && ran < budget => {
                 self.pc = pc;
-                if let Err(e) = self.exec_term(term, pc) {
-                    self.record_fault(&e, pc, insn);
+                self.record_run(pc, 1);
+                let result = self.exec_term(term, pc);
+                // After the terminator, not before, and whether or not it
+                // faulted — which is what `step_inner` does. An `SVC` is the
+                // one instruction that reads the clock while it runs, so
+                // retiring it early made the JIT hand every syscall a tick the
+                // interpreter had not spent yet: sdl-hello ended 1 cycle apart
+                // between the two engines, because a sleep deadline is
+                // computed from the value the syscall saw.
+                self.retire();
+                if let Err(e) = result {
+                    self.record_fault(&e, pc, block.words[i]);
                     return Err(e);
                 }
                 ran += 1;
@@ -875,31 +1220,111 @@ impl Cpu {
         Ok(ran)
     }
 
+    /// Evaluate a conditional branch inside a block. Returns whether it was
+    /// taken — in which case `pc` is where control went and the block is over,
+    /// and otherwise the block carries on at the following instruction with
+    /// `pc` still to be settled by the caller.
+    #[inline(always)]
+    fn take_exit(&mut self, exit: Exit) -> bool {
+        let (taken, target) = match exit {
+            Exit::Cond { cond, target } => (self.condition_holds(cond), target),
+            Exit::Cbz { rt, sf, nz, target } => {
+                let val = self.read_zr(rt);
+                let is_zero = if sf { val == 0 } else { (val as u32) == 0 };
+                (is_zero == !nz, target)
+            }
+            Exit::Tbz { rt, bit, nz, target } => {
+                let set = (self.read_zr(rt) >> bit) & 1 == 1;
+                (set == nz, target)
+            }
+        };
+        if taken {
+            self.pc = target;
+        }
+        taken
+    }
+
     /// Execute one body op. Every arm does what the interpreter's decoder
     /// would have done once it finished decoding.
     #[inline(always)]
     fn exec_op(&mut self, op: Op, pc: u32) -> Result<()> {
         match op {
             Op::Nop => {}
-            Op::Interpret { insn } => self.execute(insn, pc.wrapping_add(4))?,
+            // The three arms that re-enter the interpreter are the only ones
+            // that need `pc` in the register file: `execute` resolves
+            // PC-relative forms from it, and every fault message names it.
+            Op::Interpret { insn } => {
+                self.pc = pc;
+                self.execute(insn, pc.wrapping_add(4))?;
+            }
+            Op::Fp { insn, scalar, form } => {
+                self.pc = pc;
+                let next = pc.wrapping_add(4);
+                let claimed = if scalar {
+                    self.run_fp(form, insn)? || self.try_simd(insn)?
+                } else {
+                    self.try_simd(insn)? || self.run_fp(form, insn)?
+                };
+                if claimed {
+                    self.pc = next;
+                } else {
+                    self.execute_chain(insn, next)?;
+                }
+            }
+            Op::System { insn } => {
+                self.pc = pc;
+                self.system(insn, pc.wrapping_add(4))?;
+            }
+            Op::Mrs { rd, reg } => {
+                let val = match reg {
+                    SysReg::Nzcv => u64::from(self.nzcv),
+                    SysReg::Tpidr => self.tpidr_rw,
+                    SysReg::TpidrRo => self.tpidr,
+                    SysReg::Fpcr => u64::from(self.fpcr),
+                    SysReg::Fpsr => u64::from(self.fpsr),
+                    SysReg::Fixed(v) => u64::from(v),
+                };
+                self.write_zr(rd, val);
+            }
+            Op::Msr { rt, reg } => match reg {
+                SysReg::Nzcv => self.nzcv = self.read_zr(rt) as u32,
+                // Only the bits the architecture defines stick, so a guest
+                // that reads back what it wrote sees the same value.
+                SysReg::Fpcr => self.fpcr = self.read_zr(rt) as u32 & FPCR_MASK,
+                SysReg::Fpsr => self.fpsr = self.read_zr(rt) as u32 & FPSR_MASK,
+                SysReg::Tpidr => self.tpidr_rw = self.read_zr(rt),
+                SysReg::TpidrRo | SysReg::Fixed(_) => {}
+            },
+            Op::MsrNzcvImm { imm } => self.nzcv = u32::from(imm),
+            Op::DcZva { rt } => {
+                let addr = self.read_zr(rt) as u32 & !0x3F;
+                for i in 0..8u32 {
+                    self.mem.write_u64(addr.wrapping_add(i * 8), 0)?;
+                }
+            }
 
             Op::MovConst { rd, val } => self.write_zr(rd, val),
-            Op::MovK { rd, mask, val } => {
+            Op::MovK { rd, shift, val } => {
+                let mask = 0xFFFFu64 << shift;
                 let cur = self.read_zr(rd) & !mask;
-                self.write_zr(rd, cur | val);
+                self.write_zr(rd, cur | (u64::from(val) << shift));
             }
 
-            Op::AddSubImm { rd, rn, imm, set_flags, sub, sf } => {
-                self.add_sub(rd, rn, imm, set_flags, sub, sf, true);
+            Op::AddSubImm { rd, rn, rhs, carry, set_flags, rn_sp, rd_sp, sf } => {
+                self.add_sub_pre(rd, rn, rhs, carry, set_flags, rn_sp, rd_sp, sf);
             }
-            Op::AddSubShifted { rd, rn, rm, st, sa, set_flags, sub, sf } => {
+            Op::AddSubReg { rd, rn, rm, carry, set_flags, sf } => {
+                let v = self.read_zr(rm) & Cpu::mask(sf);
+                self.add_sub_pre(rd, rn, invert_if(v, carry), carry, set_flags, false, false, sf);
+            }
+            Op::AddSubShifted { rd, rn, rm, st, sa, carry, set_flags, sf } => {
                 let v = shift_reg(self.read_zr(rm) & Cpu::mask(sf), u32::from(st), u32::from(sa), sf);
-                self.add_sub(rd, rn, v, set_flags, sub, sf, false);
+                self.add_sub_pre(rd, rn, invert_if(v, carry), carry, set_flags, false, false, sf);
             }
-            Op::AddSubExtended { rd, rn, rm, option, shift, set_flags, sub, sf } => {
+            Op::AddSubExtended { rd, rn, rm, option, shift, carry, set_flags, rd_sp, sf } => {
                 let v = extend_reg(self.read_zr(rm), option, sf) & Cpu::mask(sf);
                 let v = v.wrapping_shl(u32::from(shift)) & Cpu::mask(sf);
-                self.add_sub(rd, rn, v, set_flags, sub, sf, true);
+                self.add_sub_pre(rd, rn, invert_if(v, carry), carry, set_flags, true, rd_sp, sf);
             }
 
             Op::LogicalImm { rd, rn, imm, opc, sf } => {
@@ -915,11 +1340,18 @@ impl Cpu {
             }
             Op::LogicalShifted { rd, rn, rm, st, sa, opc, invert, sf } => {
                 let a = self.read_zr(rn) & Cpu::mask(sf);
-                let mut b = self.read_zr(rm) & Cpu::mask(sf);
-                if invert {
-                    b = !b & Cpu::mask(sf);
-                }
-                let b = shift_reg(b, u32::from(st), u32::from(sa), sf);
+                let b = shift_reg(self.read_zr(rm) & Cpu::mask(sf), u32::from(st), u32::from(sa), sf);
+                // `BIC`/`ORN`/`EON` invert the *shifted* operand, not the
+                // register: `ir.Not(ShiftReg(...))` in dynarmic, and the same
+                // order in the ARM ARM's pseudocode.
+                let b = if invert { !b & Cpu::mask(sf) } else { b };
+                let r = self.logical(a, b, opc, sf);
+                self.write_zr(rd, r);
+            }
+            Op::LogicalReg { rd, rn, rm, opc, invert, sf } => {
+                let a = self.read_zr(rn) & Cpu::mask(sf);
+                let b = self.read_zr(rm) & Cpu::mask(sf);
+                let b = if invert { !b & Cpu::mask(sf) } else { b };
                 let r = self.logical(a, b, opc, sf);
                 self.write_zr(rd, r);
             }
@@ -980,10 +1412,12 @@ impl Cpu {
                 let b = self.read_zr(rm);
                 // The multiplicands are the low 32 bits of Rn/Rm, not the
                 // whole register.
+                // A 32x32 product fits in 64 bits, so this does not need the
+                // 128-bit arithmetic wasm has to synthesize.
                 let product = if signed {
-                    ((i128::from(a as u32 as i32)) * (i128::from(b as u32 as i32))) as u64
+                    i64::from(a as u32 as i32).wrapping_mul(i64::from(b as u32 as i32)) as u64
                 } else {
-                    (u128::from(a as u32) * u128::from(b as u32)) as u64
+                    u64::from(a as u32).wrapping_mul(u64::from(b as u32))
                 };
                 let c = self.read_zr(ra);
                 let r = if sub { c.wrapping_sub(product) } else { c.wrapping_add(product) };
@@ -1000,58 +1434,136 @@ impl Cpu {
                 self.write_zr(rd, r);
             }
 
-            Op::LoadStoreImm { rt, rn, sz, opc, wb, offset } => {
+            Op::LoadStoreImm { rt, rn, acc, wb, offset } => {
                 let base = self.read_x(rn);
                 let (addr, wb_val) = Self::indexed(base, offset, wb);
-                self.ld_st_opc(addr as u32, rt, u32::from(sz), u32::from(opc))?;
+                self.access(addr as u32, rt, acc)?;
                 if let Some(v) = wb_val {
                     self.write_x(rn, v);
                 }
             }
-            Op::LoadStoreReg { rt, rn, rm, opt, s, sz, opc } => {
-                let offset = self.offset_from_reg(rm, opt, u32::from(s), sz)?;
+            Op::LoadStoreReg { rt, rn, rm, ext, shift, acc } => {
+                let index = match ext {
+                    Ext::Uxtw => u64::from(self.read_zr(rm) as u32),
+                    Ext::Sxtw => sext_u64(self.read_zr(rm), 32),
+                    Ext::None => self.read_zr(rm),
+                };
+                let offset = index.wrapping_shl(u32::from(shift)) as i64;
                 let addr = (self.read_x(rn) as i64).wrapping_add(offset) as u32;
-                self.ld_st_opc(addr, rt, u32::from(sz), u32::from(opc))?;
+                self.access(addr, rt, acc)?;
             }
-            Op::Pair { rt, rt2, rn, offset, wide, load, sext, wb } => {
+            Op::Pair { rt, rt2, rn, offset, kind, wb } => {
                 let base = self.read_x(rn);
                 let (addr, wb_val) = Self::indexed(base, offset, wb);
                 let addr = addr as u32;
-                let stride = if wide { 8u32 } else { 4 };
-                if load {
-                    let v0 = self.load_pair_half(addr, wide, sext)?;
-                    let v1 = self.load_pair_half(addr.wrapping_add(stride), wide, sext)?;
-                    self.write_zr(rt, v0);
-                    self.write_zr(rt2, v1);
-                } else if wide {
-                    self.mem.write_u64(addr, self.read_zr(rt))?;
-                    self.mem.write_u64(addr.wrapping_add(8), self.read_zr(rt2))?;
-                } else {
-                    self.mem.write_u32(addr, self.read_zr(rt) as u32)?;
-                    self.mem.write_u32(addr.wrapping_add(4), self.read_zr(rt2) as u32)?;
+                let second = addr.wrapping_add(kind.stride());
+                match kind {
+                    // Both halves are read before either register is written,
+                    // so `ldp x0, x1, [x0]` sees the memory it was pointed at.
+                    PairKind::Load64 => {
+                        let v0 = self.mem.read_u64(addr)?;
+                        let v1 = self.mem.read_u64(second)?;
+                        self.write_zr(rt, v0);
+                        self.write_zr(rt2, v1);
+                    }
+                    PairKind::Load32 => {
+                        let v0 = u64::from(self.mem.read_u32(addr)?);
+                        let v1 = u64::from(self.mem.read_u32(second)?);
+                        self.write_zr(rt, v0);
+                        self.write_zr(rt2, v1);
+                    }
+                    PairKind::Load32Sext => {
+                        let v0 = u64::from(self.mem.read_u32(addr)?);
+                        let v1 = u64::from(self.mem.read_u32(second)?);
+                        self.write_zr(rt, sext_u64(v0, 32));
+                        self.write_zr(rt2, sext_u64(v1, 32));
+                    }
+                    PairKind::Store64 => {
+                        self.mem.write_u64(addr, self.read_zr(rt))?;
+                        self.mem.write_u64(second, self.read_zr(rt2))?;
+                    }
+                    PairKind::Store32 => {
+                        self.mem.write_u32(addr, self.read_zr(rt) as u32)?;
+                        self.mem.write_u32(second, self.read_zr(rt2) as u32)?;
+                    }
                 }
                 if let Some(v) = wb_val {
                     self.write_x(rn, v);
                 }
             }
-            Op::LoadLiteral { rt, addr, opc } => match opc {
-                0b00 => {
-                    let val = u64::from(self.mem.read_u32(addr)?);
-                    self.write_zr(rt, val);
-                }
-                0b01 => {
-                    let val = self.mem.read_u64(addr)?;
-                    self.write_zr(rt, val);
-                }
-                0b10 => {
-                    let val = u64::from(self.mem.read_u32(addr)?);
-                    self.write_zr(rt, sext_u64(val, 32));
-                }
-                // PRFM: a prefetch hint, so nothing to do.
-                _ => {}
-            },
+            Op::LoadLiteral { rt, addr, acc } => self.access(addr, rt, acc)?,
         }
         Ok(())
+    }
+
+    /// Perform one load or store whose width, direction and sign-extension
+    /// were all settled when the block was translated.
+    #[inline(always)]
+    fn access(&mut self, addr: u32, rt: u8, acc: Acc) -> Result<()> {
+        match acc {
+            Acc::Load8 => {
+                let v = u64::from(self.mem.read_u8(addr)?);
+                self.write_zr(rt, v);
+            }
+            Acc::Load16 => {
+                let v = u64::from(self.mem.read_u16(addr)?);
+                self.write_zr(rt, v);
+            }
+            Acc::Load32 => {
+                let v = u64::from(self.mem.read_u32(addr)?);
+                self.write_zr(rt, v);
+            }
+            Acc::Load64 => {
+                let v = self.mem.read_u64(addr)?;
+                self.write_zr(rt, v);
+            }
+            Acc::LoadS8 => {
+                let v = u64::from(self.mem.read_u8(addr)?);
+                self.write_zr(rt, sext_u64(v, 8));
+            }
+            Acc::LoadS16 => {
+                let v = u64::from(self.mem.read_u16(addr)?);
+                self.write_zr(rt, sext_u64(v, 16));
+            }
+            Acc::LoadS32 => {
+                let v = u64::from(self.mem.read_u32(addr)?);
+                self.write_zr(rt, sext_u64(v, 32));
+            }
+            Acc::Store8 => self.mem.write_u8(addr, self.read_zr(rt) as u8)?,
+            Acc::Store16 => self.mem.write_u16(addr, self.read_zr(rt) as u16)?,
+            Acc::Store32 => self.mem.write_u32(addr, self.read_zr(rt) as u32)?,
+            Acc::Store64 => self.mem.write_u64(addr, self.read_zr(rt))?,
+            // PRFM: a hint. The addressing mode's writeback still happens.
+            Acc::Prefetch => {}
+        }
+        Ok(())
+    }
+
+    /// The `ADD`/`SUB` core, with the direction already folded into `rhs` and
+    /// `carry` and register 31's two meanings already resolved.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+    fn add_sub_pre(
+        &mut self,
+        rd: u8,
+        rn: u8,
+        rhs: u64,
+        carry: u8,
+        set_flags: bool,
+        rn_sp: bool,
+        rd_sp: bool,
+        sf: bool,
+    ) {
+        let a = if rn_sp { self.read_x(rn) } else { self.read_zr(rn) } & Cpu::mask(sf);
+        let (result, c, v) = Cpu::add_carry_overflow(a, rhs, u64::from(carry), sf);
+        if set_flags {
+            self.set_nzcv_from_alu(result, sf, c, v);
+        }
+        if rd_sp {
+            self.write_x(rd, result);
+        } else {
+            self.write_zr(rd, result);
+        }
     }
 
     /// The address a load/store touches and the value (if any) to write back
@@ -1066,16 +1578,6 @@ impl Cpu {
             }
             Wb::Post => (base, Some(base.wrapping_add(offset as u64))),
         }
-    }
-
-    /// One register's worth of an `LDP`/`LDPSW`.
-    #[inline(always)]
-    fn load_pair_half(&self, addr: u32, wide: bool, sext: bool) -> Result<u64> {
-        if wide {
-            return self.mem.read_u64(addr);
-        }
-        let w = u64::from(self.mem.read_u32(addr)?);
-        Ok(if sext { sext_u64(w, 32) } else { w })
     }
 
     /// The `AND`/`ORR`/`EOR`/`ANDS` core, shared by the immediate and
@@ -1109,18 +1611,6 @@ impl Cpu {
                 self.write_zr(30, u64::from(ret_pc));
                 self.pc = target;
             }
-            Term::BCond { cond, target, next } => {
-                self.pc = if self.condition_holds(cond) { target } else { next };
-            }
-            Term::Cbz { rt, sf, nz, target, next } => {
-                let val = self.read_zr(rt);
-                let is_zero = if sf { val == 0 } else { (val as u32) == 0 };
-                self.pc = if is_zero == !nz { target } else { next };
-            }
-            Term::Tbz { rt, bit, nz, target, next } => {
-                let set = (self.read_zr(rt) >> bit) & 1 == 1;
-                self.pc = if set == nz { target } else { next };
-            }
             Term::Br { rn } => self.pc = self.read_zr(rn) as u32,
             Term::Blr { rn, ret_pc } => {
                 // Read the target before linking: `blr x30` is a
@@ -1153,3 +1643,4 @@ impl Cpu {
         Ok(())
     }
 }
+

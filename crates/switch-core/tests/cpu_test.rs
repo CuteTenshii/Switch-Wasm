@@ -7839,3 +7839,65 @@ fn the_exception_flags_are_sticky_until_written() {
     assert_eq!(cpu.read_x(6) & 0b10, 0b10, "a later clean divide cleared DZC");
     assert_eq!(cpu.read_x(8), 0, "writing FPSR did not clear the flags");
 }
+
+/// Run one program through both engines and assert they agree with the value
+/// the architecture calls for. The translator and the interpreter share these
+/// helpers, so a decode bug in one is a decode bug in both — which is exactly
+/// how the two below survived.
+fn both_engines(setup: &[(u8, u64)], code: &[u32]) -> (Cpu, Cpu) {
+    let mut out = Vec::new();
+    for jit in [true, false] {
+        let mut cpu = cpu_at(0x1000);
+        cpu.set_jit_enabled(jit);
+        for &(reg, val) in setup {
+            cpu.set_reg(reg, val);
+        }
+        out.push(run_program(cpu, 0x1000, code));
+    }
+    let mut it = out.into_iter();
+    (it.next().unwrap(), it.next().unwrap())
+}
+
+/// `ExtendReg` truncates to the operation width; it does not clamp to it.
+///
+/// The old code reduced the extended value with `min`, so every negative
+/// 32-bit extend came out as `0xFFFF_FFFF`: `add w0, w2, w1, sxtb` of `0x80`
+/// gave -1 where dynarmic's `SignExtendToWord` gives -128.
+#[test]
+fn a_signed_32_bit_extend_keeps_its_low_bits() {
+    let code = &[
+        0x0b21_8040, // add w0, w2, w1, sxtb
+        0x0b21_a047, // add w7, w2, w1, sxth
+        0x0b21_c049, // add w9, w2, w1, sxtw
+    ];
+    // Negative in all three widths, with a different value in each so a
+    // clamp cannot pass by accident.
+    let (jit, interp) = both_engines(&[(1, 0xFFFF_FFFF_8000_8080), (2, 0)], code);
+    for cpu in [&jit, &interp] {
+        assert_eq!(cpu.read_x(0), 0xFFFF_FF80, "sxtb clamped instead of truncating");
+        assert_eq!(cpu.read_x(7), 0xFFFF_8080, "sxth clamped instead of truncating");
+        assert_eq!(cpu.read_x(9), 0x8000_8080, "sxtw clamped instead of truncating");
+    }
+}
+
+/// `BIC`/`ORN`/`EON` invert the *shifted* operand.
+///
+/// The ARM ARM's pseudocode shifts first and inverts second, and so does
+/// dynarmic (`ir.Not(ShiftReg(...))`). Both engines here used to invert the
+/// register and then shift, which agrees only when the shift amount is zero —
+/// so every `mvn`/`mov` alias was right and every shifted form was wrong.
+#[test]
+fn bic_and_friends_invert_after_shifting() {
+    let code = &[
+        0x8a22_1020, // bic x0, x1, x2, lsl #4
+        0x2a25_2083, // orn w3, w4, w5, lsl #8
+        0xca6a_1128, // eon x8, x9, x10, lsr #4
+    ];
+    let setup = &[(1, 0xFF), (2, 0x0F), (4, 0), (5, 0xFF), (9, 0), (10, 0xFF)];
+    let (jit, interp) = both_engines(setup, code);
+    for cpu in [&jit, &interp] {
+        assert_eq!(cpu.read_x(0), 0x0F, "bic inverted before shifting");
+        assert_eq!(cpu.read_x(3), 0xFFFF_00FF, "orn inverted before shifting");
+        assert_eq!(cpu.read_x(8), 0xFFFF_FFFF_FFFF_FFF0, "eon inverted before shifting");
+    }
+}

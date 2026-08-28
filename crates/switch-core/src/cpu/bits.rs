@@ -332,7 +332,7 @@ pub(crate) fn shift_var(v: u64, amt: u64, kind: u32, sf: bool) -> u64 {
 /// Extend a register value for the ADD/SUB extended-register form.
 #[inline(always)]
 pub(crate) fn extend_reg(v: u64, option: u8, sf: bool) -> u64 {
-    match option {
+    let extended = match option {
         0b000 => v as u8 as u64,        // UXTB
         0b001 => v as u16 as u64,       // UXTH
         0b010 => v as u32 as u64,       // UXTW
@@ -342,8 +342,11 @@ pub(crate) fn extend_reg(v: u64, option: u8, sf: bool) -> u64 {
         0b110 => sext_u64(v, 32),       // SXTW
         0b111 => v,                     // SXTX
         _ => v,
-    }
-    .min(if sf { u64::MAX } else { u32::MAX as u64 })
+    };
+    // Truncate to the operation width, don't clamp to it. `min` turned every
+    // negative 32-bit extend into `0xFFFF_FFFF`, so `add w0, w1, w2, sxtb` of
+    // `0x80` produced -1 where dynarmic's `SignExtendToWord` gives -128.
+    extended & if sf { u64::MAX } else { u32::MAX as u64 }
 }
 
 /// Decode the rotated-element bitmask of the logical-immediate encoding.

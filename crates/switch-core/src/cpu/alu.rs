@@ -209,11 +209,12 @@ impl Cpu {
                 let rn = ((insn >> 5) & 0x1F) as u8;
                 let rd = (insn & 0x1F) as u8;
                 let a = self.read_zr(rn) & Self::mask(sf);
-                let mut b = self.read_zr(rm) & Self::mask(sf);
-                if invert {
-                    b = !b & Self::mask(sf);
-                }
-                let b = shift_reg(b, st, sa, sf);
+                let b = shift_reg(self.read_zr(rm) & Self::mask(sf), st, sa, sf);
+                // `BIC`/`ORN`/`EON` invert the shifted operand, not the
+                // register: `ir.Not(ShiftReg(...))` in dynarmic, and the same
+                // order in the ARM ARM. Inverting first only agreed with that
+                // when the shift amount was zero.
+                let b = if invert { !b & Self::mask(sf) } else { b };
                 let r = match opc {
                     0b00 => a & b,
                     0b01 => a | b,
@@ -457,8 +458,9 @@ impl Cpu {
                     // SMADDL / SMSUBL: the multiplicands are the low 32 bits
                     // of Rn/Rm, sign-extended — not the whole register.
                     0b11011001 => {
-                        let product =
-                            ((i128::from(a as u32 as i32)) * (i128::from(b as u32 as i32))) as u64;
+                        let product = i64::from(a as u32 as i32)
+                            .wrapping_mul(i64::from(b as u32 as i32))
+                            as u64;
                         let c = self.read_zr(ra);
                         let r = if o0 {
                             c.wrapping_sub(product)
@@ -469,7 +471,7 @@ impl Cpu {
                     }
                     // UMADDL / UMSUBL: the low 32 bits of Rn/Rm, zero-extended.
                     0b11011101 => {
-                        let product = (u128::from(a as u32) * u128::from(b as u32)) as u64;
+                        let product = u64::from(a as u32).wrapping_mul(u64::from(b as u32));
                         let c = self.read_zr(ra);
                         let r = if o0 {
                             c.wrapping_sub(product)

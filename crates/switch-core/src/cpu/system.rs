@@ -72,10 +72,14 @@ impl Cpu {
 
         if l == 0 && op0 == 1 && op1 == 3 && crn == 7 && crm == 4 && op2 == 1 {
             // DC ZVA Xt: zero the 64-byte block at Xt (A57 dczid BS=4).
-            // musl/newlib memset uses this to clear aligned blocks.
+            // musl/newlib memset uses this to clear aligned blocks, so it is
+            // hot — eight doubleword stores rather than sixty-four byte ones,
+            // which is eight page lookups instead of sixty-four. (Not
+            // `fill_le`: it stamps a 512-byte pattern before copying, which a
+            // block this small never amortizes.)
             let addr = self.read_zr(rt) as u32 & !0x3F;
-            for i in 0..0x40u32 {
-                self.mem.write_u8(addr.wrapping_add(i), 0)?;
+            for i in 0..8u32 {
+                self.mem.write_u64(addr.wrapping_add(i * 8), 0)?;
             }
             self.pc = next_pc;
             return Ok(());
