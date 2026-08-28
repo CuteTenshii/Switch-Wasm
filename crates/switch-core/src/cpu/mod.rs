@@ -3093,23 +3093,27 @@ impl Cpu {
     /// Read a register in the forms where 31 is the stack pointer.
     #[inline(always)]
     pub fn read_x(&self, idx: u8) -> u64 {
-        self.regs[Self::x_slot(idx)]
+        self.regs[Self::x_slot(idx) as usize]
     }
 
     /// The slot a register number names when 31 means `SP`.
+    ///
+    /// The interpreter asks per execution and the block translator asks once
+    /// per instruction, but the mapping is the same one — so it is written
+    /// once here and both engines resolve register 31 through it.
     #[inline(always)]
-    fn x_slot(idx: u8) -> usize {
-        let idx = (idx & 0x1F) as usize;
+    pub(super) fn x_slot(idx: u8) -> u8 {
+        let idx = idx & 0x1F;
         // 31 -> SP_SLOT, everything else itself. A compare and an add, which
         // the branch this replaced could not beat.
-        idx + (SP_SLOT - 31) * usize::from(idx == 31)
+        idx + (SP_SLOT as u8 - 31) * u8::from(idx == 31)
     }
 
     /// The slot a register number names when 31 means `XZR` and is written.
     #[inline(always)]
-    fn zr_write_slot(idx: u8) -> usize {
-        let idx = (idx & 0x1F) as usize;
-        idx + (ZR_DISCARD - 31) * usize::from(idx == 31)
+    pub(super) fn zr_write_slot(idx: u8) -> u8 {
+        let idx = idx & 0x1F;
+        idx + (ZR_DISCARD as u8 - 31) * u8::from(idx == 31)
     }
 
     pub fn read_reg(&self, idx: u8) -> u64 {
@@ -3143,13 +3147,13 @@ impl Cpu {
     /// tested for.
     #[inline(always)]
     fn write_zr(&mut self, idx: u8, val: u64) {
-        self.regs[Self::zr_write_slot(idx)] = val;
+        self.regs[Self::zr_write_slot(idx) as usize] = val;
     }
 
     /// Write a register in the forms where 31 is `SP`.
     #[inline(always)]
     fn write_x(&mut self, idx: u8, val: u64) {
-        self.regs[Self::x_slot(idx)] = val;
+        self.regs[Self::x_slot(idx) as usize] = val;
     }
 
     /// Read the register file by slot, for a caller that already knows which
@@ -3817,27 +3821,48 @@ impl Cpu {
         sf: bool,
         sp_form: bool,
     ) {
-        let a = if sp_form {
-            self.read_x(rn)
-        } else {
-            self.read_zr(rn)
-        } & Self::mask(sf);
-        let (result, carry, overflow) = if sub {
-            Self::add_carry_overflow(a, !rhs, 1, sf)
-        } else {
-            Self::add_carry_overflow(a, rhs, 0, sf)
-        };
-        if set_flags {
-            self.set_nzcv_from_alu(result, sf, carry, overflow);
-        }
         // Rd=31 is SP only for the plain ADD/SUB immediate and extended forms.
         // For the flag-setting forms and the shifted-register form it is XZR,
         // so the result is discarded.
-        if set_flags || !sp_form {
-            self.write_zr(rd, result);
+        let rd = if set_flags || !sp_form {
+            Self::zr_write_slot(rd)
         } else {
-            self.write_x(rd, result);
+            Self::x_slot(rd)
+        };
+        let rn = if sp_form { Self::x_slot(rn) } else { rn & 0x1F };
+        // Subtraction is addition of the inverted operand with a carry in.
+        self.add_sub_pre(
+            rd,
+            rn,
+            if sub { !rhs } else { rhs },
+            u8::from(sub),
+            set_flags,
+            sf,
+        );
+    }
+
+    /// The `ADD`/`SUB` core, with the direction already folded into `rhs` and
+    /// `carry`, and register 31's two meanings already resolved to slots.
+    ///
+    /// The block translator settles both when it builds the op and enters
+    /// here directly; [`Cpu::add_sub`] settles them per execution and lands
+    /// here too, so the addition itself is written once.
+    #[inline(always)]
+    pub(super) fn add_sub_pre(
+        &mut self,
+        rd: u8,
+        rn: u8,
+        rhs: u64,
+        carry: u8,
+        set_flags: bool,
+        sf: bool,
+    ) {
+        let a = self.reg_at(rn) & Self::mask(sf);
+        let (result, c, v) = Self::add_carry_overflow(a, rhs, u64::from(carry), sf);
+        if set_flags {
+            self.set_nzcv_from_alu(result, sf, c, v);
         }
+        self.set_reg_at(rd, result);
     }
 
     // ---- main execution ----

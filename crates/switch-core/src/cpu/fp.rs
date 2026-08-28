@@ -61,7 +61,7 @@ impl Cpu {
     /// them, and the 3-source group before the `00011110` space.
     ///
     /// Separating classification from execution is what lets the block
-    /// translator settle the form once ([`super::jit::Op::Fp`]) instead of
+    /// translator settle the form once ([`super::jit::ir::Op::Fp`]) instead of
     /// walking eight guards on every execution — `scvtf`, `fcvt`, `fadd` and
     /// `fcmpe` sit in four different ones, and together they are most of the
     /// floating point hbmenu runs.

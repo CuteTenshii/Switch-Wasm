@@ -60,10 +60,7 @@ impl Cpu {
                             self.write_zr(rd, (imm16 << shift) & Self::mask(sf));
                         }
                         0b11 => {
-                            // MOVK
-                            let mask = (0xFFFFu64 << shift) & Self::mask(sf);
-                            let cur = self.read_zr(rd) & !mask;
-                            self.write_zr(rd, cur | ((imm16 << shift) & mask));
+                            self.movk(Self::zr_write_slot(rd), shift as u8, imm16 as u16);
                         }
                         _ => {
                             return Err(Error::Cpu(format!(
@@ -84,22 +81,6 @@ impl Cpu {
                     let mask = decode_bit_mask(sf, n, immr, imms).ok_or_else(|| {
                         Error::Cpu(format!("unallocated logical immediate at {:#x}", self.pc))
                     })?;
-                    let a = self.read_zr(rn) & Self::mask(sf);
-                    let r = match opc {
-                        0b00 => a & mask, // AND
-                        0b01 => a | mask, // ORR
-                        0b10 => a ^ mask, // EOR
-                        _ => {
-                            let r = a & mask;
-                            let nbit = (r >> (if sf { 63 } else { 31 })) & 1;
-                            let z = (r == 0) as u64;
-                            let c = (self.nzcv >> 29) & 1;
-                            let v = (self.nzcv >> 28) & 1;
-                            self.nzcv =
-                                ((nbit as u32) << 31) | ((z as u32) << 30) | (c << 29) | (v << 28);
-                            r
-                        }
-                    };
                     // `Rd == 31` is **SP** for AND/ORR/EOR, and the zero
                     // register only for ANDS -- the immediate forms are among
                     // the handful where the two differ, unlike the
@@ -115,11 +96,12 @@ impl Cpu {
                     // allocated, and every local the function then writes
                     // lands 0x260 bytes too high -- straight over the
                     // register save area it just filled in.
-                    if opc == 0b11 {
-                        self.write_zr(rd, r);
+                    let rd = if opc == 0b11 {
+                        Self::zr_write_slot(rd)
                     } else {
-                        self.write_x(rd, r);
-                    }
+                        Self::x_slot(rd)
+                    };
+                    self.logical(rd, rn, mask, opc as u8, sf);
                     Ok(true)
                 }
             }
@@ -146,10 +128,14 @@ impl Cpu {
                         }
                         (((insn >> 16) & 0x1F), ((insn >> 10) & 0x1F))
                     };
-                    let val = self.read_zr(rn) & Self::mask(sf);
-                    let cur = self.read_zr(rd) & Self::mask(sf);
-                    let r = bitfield_apply(opc, val, cur, immr, imms, sf);
-                    self.write_zr(rd, r);
+                    self.bitfield(
+                        Self::zr_write_slot(rd),
+                        rn,
+                        opc as u8,
+                        immr as u8,
+                        imms as u8,
+                        sf,
+                    );
                     Ok(true)
                 } else {
                     // EXTR
@@ -175,19 +161,7 @@ impl Cpu {
                     if !ok {
                         return Err(Error::Cpu(format!("unallocated EXTR at {:#x}", self.pc)));
                     }
-                    let size = if sf { 64 } else { 32 };
-                    let a = self.read_zr(rn) & Self::mask(sf);
-                    let b = self.read_zr(rm) & Self::mask(sf);
-                    // EXTR takes the low `size` bits of `Rn:Rm >> imm`, so Rn
-                    // is the *high* half. Having them the other way round made
-                    // every `extr` extract from the wrong operand.
-                    let r = if imm == 0 {
-                        b
-                    } else {
-                        ((b >> imm) | (a.wrapping_shl((size as u32).wrapping_sub(imm))))
-                            & Self::mask(sf)
-                    };
-                    self.write_zr(rd, r);
+                    self.extr(Self::zr_write_slot(rd), rn, rm, imm as u8, sf);
                     Ok(true)
                 }
             }
@@ -211,29 +185,13 @@ impl Cpu {
                 let sa = (insn >> 10) & 0x3F;
                 let rn = ((insn >> 5) & 0x1F) as u8;
                 let rd = (insn & 0x1F) as u8;
-                let a = self.read_zr(rn) & Self::mask(sf);
                 let b = shift_reg(self.read_zr(rm) & Self::mask(sf), st, sa, sf);
                 // `BIC`/`ORN`/`EON` invert the shifted operand, not the
                 // register: `ir.Not(ShiftReg(...))` in dynarmic, and the same
                 // order in the ARM ARM. Inverting first only agreed with that
                 // when the shift amount was zero.
                 let b = if invert { !b & Self::mask(sf) } else { b };
-                let r = match opc {
-                    0b00 => a & b,
-                    0b01 => a | b,
-                    0b10 => a ^ b,
-                    _ => {
-                        let r = a & b;
-                        let nbit = (r >> (if sf { 63 } else { 31 })) & 1;
-                        let z = (r == 0) as u64;
-                        let c = (self.nzcv >> 29) & 1;
-                        let v = (self.nzcv >> 28) & 1;
-                        self.nzcv =
-                            ((nbit as u32) << 31) | ((z as u32) << 30) | (c << 29) | (v << 28);
-                        r
-                    }
-                };
-                self.write_zr(rd, r);
+                self.logical(Self::zr_write_slot(rd), rn, b, opc as u8, sf);
                 Ok(true)
             }
             0b01011 => {
@@ -360,27 +318,21 @@ impl Cpu {
                         Ok(true)
                     } else {
                         // CCMP / CCMN
-                        let op = (insn >> 30) & 1;
-                        let imm_flag = (insn >> 11) & 1;
-                        let cond = ((insn >> 12) & 0xF) as u8;
-                        let nzcv = insn & 0xF;
-                        let rn = ((insn >> 5) & 0x1F) as u8;
-                        if !self.condition_holds(cond) {
-                            self.nzcv = nzcv << 28;
-                        } else {
-                            let a = self.read_zr(rn) & Self::mask(sf);
-                            // Bit 30: 1 = CCMP (subtract), 0 = CCMN (add). The
-                            // 5-bit immediate is unsigned for both forms
-                            // (QEMU-verified). The subtract needs the
-                            // +carry_in the borrow implies, so carry_in is 1
-                            // for CCMP and 0 for CCMN.
-                            let b = if imm_flag == 1 {
-                                ((insn >> 16) & 0x1F) as u64
-                            } else {
-                                self.read_zr(((insn >> 16) & 0x1F) as u8)
-                            };
-                            self.set_nzcv_from_compare(a, b, op == 1, op as u64, sf);
-                        }
+                        // Bit 30 selects CCMP (subtract) over CCMN (add),
+                        // and bit 11 the immediate form. Rm and the immediate
+                        // are the same field, read either as a register or as
+                        // the value itself.
+                        let field = ((insn >> 16) & 0x1F) as u8;
+                        self.cond_cmp(
+                            ((insn >> 5) & 0x1F) as u8,
+                            field,
+                            field,
+                            ((insn >> 12) & 0xF) as u8,
+                            (insn & 0xF) as u8,
+                            ((insn >> 30) & 1) == 1,
+                            ((insn >> 11) & 1) == 1,
+                            sf,
+                        );
                         Ok(true)
                     }
                 } else {
@@ -394,18 +346,15 @@ impl Cpu {
                         let rn = ((insn >> 5) & 0x1F) as u8;
                         let rd = (insn & 0x1F) as u8;
                         let rm = ((insn >> 16) & 0x1F) as u8;
-                        let a = self.read_zr(rn) & Self::mask(sf);
-                        let b = self.read_zr(rm) & Self::mask(sf);
-                        let take_a = self.condition_holds(cond);
-                        let mut else_val = b;
-                        if else_inv {
-                            else_val = !else_val;
-                        }
-                        if else_inc {
-                            else_val = else_val.wrapping_add(1);
-                        }
-                        let r = if take_a { a } else { else_val };
-                        self.write_zr(rd, r & Self::mask(sf));
+                        self.cond_sel(
+                            Self::zr_write_slot(rd),
+                            rn,
+                            rm,
+                            cond,
+                            else_inv,
+                            else_inc,
+                            sf,
+                        );
                     } else {
                         // ADC / ADCS / SBC / SBCS
                         let op = (insn >> 29) & 0b11;
@@ -441,59 +390,19 @@ impl Cpu {
                 let rm = ((insn >> 16) & 0x1F) as u8;
                 let ra = ((insn >> 10) & 0x1F) as u8;
                 let o0 = ((insn >> 15) & 1) == 1;
-                let a = self.read_zr(rn);
-                let b = self.read_zr(rm);
+                let rd = Self::zr_write_slot(rd);
                 match (insn >> 21) & 0xFF {
                     // MADD / MSUB (bits[28:21] == 11011000), 32- and 64-bit.
-                    0b11011000 => {
-                        let sf = (insn >> 31) & 1;
-                        let mask = Self::mask(sf != 0);
-                        let a = a & mask;
-                        let b = b & mask;
-                        let c = self.read_zr(ra) & mask;
-                        let product = a.wrapping_mul(b);
-                        let r = if o0 {
-                            c.wrapping_sub(product)
-                        } else {
-                            c.wrapping_add(product)
-                        };
-                        self.write_zr(rd, r & mask);
-                    }
+                    0b11011000 => self.madd(rd, rn, rm, ra, o0, sf),
                     // SMADDL / SMSUBL: the multiplicands are the low 32 bits
                     // of Rn/Rm, sign-extended — not the whole register.
-                    0b11011001 => {
-                        let product = i64::from(a as u32 as i32)
-                            .wrapping_mul(i64::from(b as u32 as i32))
-                            as u64;
-                        let c = self.read_zr(ra);
-                        let r = if o0 {
-                            c.wrapping_sub(product)
-                        } else {
-                            c.wrapping_add(product)
-                        };
-                        self.write_zr(rd, r);
-                    }
+                    0b11011001 => self.madd_long(rd, rn, rm, ra, o0, true),
                     // UMADDL / UMSUBL: the low 32 bits of Rn/Rm, zero-extended.
-                    0b11011101 => {
-                        let product = u64::from(a as u32).wrapping_mul(u64::from(b as u32));
-                        let c = self.read_zr(ra);
-                        let r = if o0 {
-                            c.wrapping_sub(product)
-                        } else {
-                            c.wrapping_add(product)
-                        };
-                        self.write_zr(rd, r);
-                    }
+                    0b11011101 => self.madd_long(rd, rn, rm, ra, o0, false),
                     // SMULH: top 64 bits of the signed 128-bit product.
-                    0b11011010 => {
-                        let product = ((a as i64 as i128) * (b as i64 as i128)) >> 64;
-                        self.write_zr(rd, product as u64);
-                    }
+                    0b11011010 => self.mulh(rd, rn, rm, true),
                     // UMULH: top 64 bits of the unsigned 128-bit product.
-                    0b11011110 => {
-                        let product = (a as u128 * b as u128) >> 64;
-                        self.write_zr(rd, product as u64);
-                    }
+                    0b11011110 => self.mulh(rd, rn, rm, false),
                     _ => {
                         return Err(Error::Cpu(format!(
                             "unimplemented multiply-long at {:#x}",
@@ -505,5 +414,191 @@ impl Cpu {
             }
             _ => Ok(false),
         }
+    }
+
+    // ---- one implementation per instruction ----
+
+    // The bodies below are the instructions themselves, with their operands
+    // already resolved to register-file slots (see `Cpu::x_slot` and
+    // `Cpu::zr_write_slot`). The interpreter resolves them from the encoding
+    // on every execution and the block translator resolves them once when it
+    // builds an `Op`, but from here down there is one implementation — so the
+    // two engines cannot compute an instruction differently, which is the
+    // drift `examples/jit_difftest.rs` exists to find.
+    //
+    // A destination is always the *write* slot, so an instruction that reads
+    // its destination back (`MOVK`, `BFM`) reads through that same slot. For
+    // register 31 that is the discard slot rather than the zero one, which is
+    // unobservable: the result is discarded too.
+
+    /// `MOVK`: replace the 16-bit field at `shift`, leaving the rest alone.
+    /// A 32-bit form never selects a field above bit 31, so the operation-size
+    /// mask cannot narrow it and is not applied.
+    #[inline(always)]
+    pub(super) fn movk(&mut self, rd: u8, shift: u8, val: u16) {
+        let mask = 0xFFFFu64 << shift;
+        let cur = self.reg_at(rd) & !mask;
+        self.set_reg_at(rd, cur | (u64::from(val) << shift));
+    }
+
+    /// `AND`/`ORR`/`EOR`/`ANDS`. The immediate, shifted-register and plain
+    /// register forms differ only in how `b` is formed, so they share this.
+    /// `ANDS` is the one that writes flags, and it leaves C and V alone.
+    #[inline(always)]
+    pub(super) fn logical(&mut self, rd: u8, rn: u8, b: u64, opc: u8, sf: bool) {
+        let a = self.reg_at(rn) & Self::mask(sf);
+        let r = match opc {
+            0b00 => a & b,
+            0b01 => a | b,
+            0b10 => a ^ b,
+            _ => {
+                let r = a & b;
+                let n = (r >> (if sf { 63 } else { 31 })) & 1;
+                let z = u64::from(r == 0);
+                let c = (self.nzcv >> 29) & 1;
+                let v = (self.nzcv >> 28) & 1;
+                self.nzcv = ((n as u32) << 31) | ((z as u32) << 30) | (c << 29) | (v << 28);
+                r
+            }
+        };
+        self.set_reg_at(rd, r);
+    }
+
+    /// `SBFM`/`BFM`/`UBFM` and the aliases built on them.
+    #[inline(always)]
+    pub(super) fn bitfield(&mut self, rd: u8, rn: u8, opc: u8, immr: u8, imms: u8, sf: bool) {
+        let val = self.reg_at(rn) & Self::mask(sf);
+        let cur = self.reg_at(rd) & Self::mask(sf);
+        let r = bitfield_apply(
+            u32::from(opc),
+            val,
+            cur,
+            u32::from(immr),
+            u32::from(imms),
+            sf,
+        );
+        self.set_reg_at(rd, r);
+    }
+
+    /// `EXTR`: the low `size` bits of `Rn:Rm >> imm`, so Rn is the *high*
+    /// half. Having them the other way round extracts from the wrong operand.
+    #[inline(always)]
+    pub(super) fn extr(&mut self, rd: u8, rn: u8, rm: u8, imm: u8, sf: bool) {
+        let size = if sf { 64u32 } else { 32 };
+        let a = self.reg_at(rn) & Self::mask(sf);
+        let b = self.reg_at(rm) & Self::mask(sf);
+        let imm = u32::from(imm);
+        let r = if imm == 0 {
+            b
+        } else {
+            ((b >> imm) | a.wrapping_shl(size.wrapping_sub(imm))) & Self::mask(sf)
+        };
+        self.set_reg_at(rd, r);
+    }
+
+    /// `CSEL`/`CSINC`/`CSINV`/`CSNEG`. The invert and the increment are part
+    /// of the *else* value, not applied to the selected one.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn cond_sel(
+        &mut self,
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        cond: u8,
+        else_inv: bool,
+        else_inc: bool,
+        sf: bool,
+    ) {
+        let a = self.reg_at(rn) & Self::mask(sf);
+        let b = self.reg_at(rm) & Self::mask(sf);
+        let take_a = self.condition_holds(cond);
+        let mut else_val = b;
+        if else_inv {
+            else_val = !else_val;
+        }
+        if else_inc {
+            else_val = else_val.wrapping_add(1);
+        }
+        let r = if take_a { a } else { else_val };
+        self.set_reg_at(rd, r & Self::mask(sf));
+    }
+
+    /// `CCMP`/`CCMN`, register and immediate forms. `sub` is CCMP, whose
+    /// borrow implies the carry-in; the 5-bit immediate is unsigned for both
+    /// forms (QEMU-verified). When the condition fails the instruction just
+    /// installs the flags it carries.
+    #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn cond_cmp(
+        &mut self,
+        rn: u8,
+        rm: u8,
+        imm: u8,
+        cond: u8,
+        nzcv: u8,
+        sub: bool,
+        is_imm: bool,
+        sf: bool,
+    ) {
+        if self.condition_holds(cond) {
+            let a = self.reg_at(rn) & Self::mask(sf);
+            let b = if is_imm {
+                u64::from(imm)
+            } else {
+                self.reg_at(rm)
+            };
+            self.set_nzcv_from_compare(a, b, sub, u64::from(sub), sf);
+        } else {
+            self.nzcv = u32::from(nzcv) << 28;
+        }
+    }
+
+    /// `MADD`/`MSUB`.
+    #[inline(always)]
+    pub(super) fn madd(&mut self, rd: u8, rn: u8, rm: u8, ra: u8, sub: bool, sf: bool) {
+        let mask = Self::mask(sf);
+        let product = (self.reg_at(rn) & mask).wrapping_mul(self.reg_at(rm) & mask);
+        let c = self.reg_at(ra) & mask;
+        let r = if sub {
+            c.wrapping_sub(product)
+        } else {
+            c.wrapping_add(product)
+        };
+        self.set_reg_at(rd, r & mask);
+    }
+
+    /// `SMADDL`/`SMSUBL`/`UMADDL`/`UMSUBL`: the multiplicands are the low 32
+    /// bits of Rn/Rm, not the whole register. A 32x32 product fits in 64 bits,
+    /// so this does not need the 128-bit arithmetic wasm has to synthesize.
+    #[inline(always)]
+    pub(super) fn madd_long(&mut self, rd: u8, rn: u8, rm: u8, ra: u8, sub: bool, signed: bool) {
+        let a = self.reg_at(rn);
+        let b = self.reg_at(rm);
+        let product = if signed {
+            i64::from(a as u32 as i32).wrapping_mul(i64::from(b as u32 as i32)) as u64
+        } else {
+            u64::from(a as u32).wrapping_mul(u64::from(b as u32))
+        };
+        let c = self.reg_at(ra);
+        let r = if sub {
+            c.wrapping_sub(product)
+        } else {
+            c.wrapping_add(product)
+        };
+        self.set_reg_at(rd, r);
+    }
+
+    /// `SMULH`/`UMULH`: the top 64 bits of the 128-bit product.
+    #[inline(always)]
+    pub(super) fn mulh(&mut self, rd: u8, rn: u8, rm: u8, signed: bool) {
+        let a = self.reg_at(rn);
+        let b = self.reg_at(rm);
+        let r = if signed {
+            (((a as i64 as i128) * (b as i64 as i128)) >> 64) as u64
+        } else {
+            ((u128::from(a) * u128::from(b)) >> 64) as u64
+        };
+        self.set_reg_at(rd, r);
     }
 }

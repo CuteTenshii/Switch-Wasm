@@ -223,7 +223,10 @@ engines go through `Cpu::retire` so they cannot drift. The page's *Steps*
 readout is `switch_get_steps`: a figure that leaps while the guest is stopped
 is useless as a loading screen's sign of life.
 
-## Block translation (`cpu/jit.rs`)
+## Block translation (`cpu/jit/`)
+
+`ir` is what a block is made of, `cache` is which blocks exist and when a
+guest store takes one away, `decode` builds them and `exec` runs them.
 
 First visit to an address translates forward into `Op`s — operands extracted,
 immediates decoded, and every field the interpreter re-reads per execution
@@ -238,6 +241,17 @@ generates no code — every op calls the same helper the interpreter would, so
 the two engines are the same computation and anything untranslated falls back.
 `SWITCH_NO_JIT=1` for host tools, the debug panel's *Translation* section in
 the browser.
+
+**That shared helper is literal, not aspirational.** An instruction's body is
+written once, keyed on register-file *slots*, and lives with its semantics
+rather than with either engine: the ALU, bitfield, multiply and conditional
+forms in `alu.rs`, `Acc`/`Ext`/`PairKind`/`Wb` with `access`/`indexed`/`pair`
+in `loadstore.rs`, and `SysReg`/`SysOp` in `system.rs`. The interpreter
+resolves slots from the encoding per execution, the translator resolves them
+once into an `Op`, and both then call the same function. They used to be two
+transcriptions of each other — which is what `jit_difftest` was watching for,
+and what a `movk w0` that forgot to zero bits 63:32 hid in *both* engines at
+once until `tools/difftest.py --scalar` was pointed at it.
 
 **A block must always retire at least one instruction.** `run_jit` advances by
 what `exec_block` reports, so a block returning `Ok(0)` spins forever. A fused

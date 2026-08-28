@@ -1,9 +1,169 @@
 //! Loads and stores: the integer, pair, exclusive and SIMD&FP addressing
 //! modes, including the structure load/store forms.
+//!
+//! The types below are what a load or store *does*, separated from the
+//! encoding that asked for it. The interpreter derives one per execution and
+//! the block translator bakes one into an [`super::jit::ir::Op`], and both then
+//! run the same [`Cpu::access`], [`Cpu::indexed`] and [`Cpu::pair`].
 
 use super::bits::*;
 use super::Cpu;
 use crate::{Error, Result};
+
+/// What a load/store does to its base register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Wb {
+    /// No writeback: the access is at `base + offset`.
+    None,
+    /// Pre-index: the access is at `base + offset`, which is also written back.
+    Pre,
+    /// Post-index: the access is at `base`, and `base + offset` is written back.
+    Post,
+}
+
+/// What a load or store actually does: its width, its direction and its
+/// sign-extension, as the `size` and `opc` fields together select them.
+///
+/// Deriving this is the `PRFM` test, the load/store test, the sign-extend
+/// test, a match to pick the width and a second to pick the sign-extension
+/// width. All of it is constant per instruction, which is why the translator
+/// resolves it once — and why there is one classifier rather than two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Acc {
+    Store8,
+    Store16,
+    Store32,
+    Store64,
+    Load8,
+    Load16,
+    Load32,
+    Load64,
+    LoadS8,
+    LoadS16,
+    LoadS32,
+    /// `PRFM`, a hint with no architectural effect. Still an access, because
+    /// the addressing mode's writeback happens whether or not it does.
+    Prefetch,
+}
+
+impl Acc {
+    /// Whether the access writes `Rt`. Decides which of register 31's two
+    /// meanings the `Rt` field names, and so which slot it resolves to.
+    pub(super) fn writes_rt(self) -> bool {
+        !matches!(
+            self,
+            Acc::Store8 | Acc::Store16 | Acc::Store32 | Acc::Store64 | Acc::Prefetch
+        )
+    }
+
+    /// The access a `size`:`opc` pair selects.
+    ///
+    /// `opc` selects the access: 00 = STR, 01 = LDR, 10/11 = sign-extending
+    /// loads (LDRSB/LDRSH/LDRSW). The load bit is NOT `opc & 1` — treating
+    /// opc=10 as a store silently corrupted the target (observed as a bogus
+    /// `ldrsw` index in NX-Shell's tokenizer). size=11 with opc=10/11 is
+    /// `PRFM`, which must not run as a sign-extending load or it clobbers a
+    /// register: libtransistor's memcpy starts with `prfm pldl1keep, [x1]`,
+    /// and running that as `ldrsw x0, [x1]` made memcpy write to the source
+    /// magic value as an address.
+    pub(super) fn of(sz: u8, opc: u8) -> Acc {
+        if sz == 0b11 && opc >= 0b10 {
+            return Acc::Prefetch;
+        }
+        match (opc, sz) {
+            (0b00, 0b00) => Acc::Store8,
+            (0b00, 0b01) => Acc::Store16,
+            (0b00, 0b10) => Acc::Store32,
+            (0b00, _) => Acc::Store64,
+            (0b01, 0b00) => Acc::Load8,
+            (0b01, 0b01) => Acc::Load16,
+            (0b01, 0b10) => Acc::Load32,
+            (0b01, _) => Acc::Load64,
+            (_, 0b00) => Acc::LoadS8,
+            (_, 0b01) => Acc::LoadS16,
+            (_, _) => Acc::LoadS32,
+        }
+    }
+}
+
+/// How a register-offset load/store extends its index register. The four
+/// encodings A64 defines collapse to three behaviours; the other four are
+/// undefined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Ext {
+    /// `UXTW`: the low 32 bits, zero-extended.
+    Uxtw,
+    /// `SXTW`: the low 32 bits, sign-extended.
+    Sxtw,
+    /// `LSL`, `UXTX` and `SXTX`, all of which take the register as it stands.
+    None,
+}
+
+impl Ext {
+    /// The extension an `option` field selects, or `None` where the encoding
+    /// is undefined. The signed pair is 110/111 — not 111/110 as in some
+    /// tables — and a byte or halfword extend here is UNDEFINED, so it faults
+    /// rather than guessing.
+    pub(super) fn of(option: u8) -> Option<Ext> {
+        match option {
+            0b010 => Some(Ext::Uxtw),
+            0b110 => Some(Ext::Sxtw),
+            0b011 | 0b111 => Some(Ext::None),
+            _ => None,
+        }
+    }
+}
+
+/// What a load/store pair moves, and which way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PairKind {
+    Load32,
+    /// `LDPSW`: two words, each sign-extended to 64 bits.
+    Load32Sext,
+    Load64,
+    Store32,
+    Store64,
+}
+
+impl PairKind {
+    /// Whether the pair writes its two registers.
+    pub(super) fn loads(self) -> bool {
+        matches!(
+            self,
+            PairKind::Load32 | PairKind::Load32Sext | PairKind::Load64
+        )
+    }
+
+    /// The distance between the two registers' addresses.
+    #[inline(always)]
+    pub(super) fn stride(self) -> u32 {
+        match self {
+            PairKind::Load64 | PairKind::Store64 => 8,
+            _ => 4,
+        }
+    }
+}
+
+/// The slot a load or store's `Rt` field names, which depends on whether the
+/// access reads it or writes it.
+#[inline]
+pub(super) fn rt_slot(rt: u32, acc: Acc) -> u8 {
+    if acc.writes_rt() {
+        Cpu::zr_write_slot(rt as u8)
+    } else {
+        (rt & 0x1F) as u8
+    }
+}
+
+/// The slot a pair's `Rt`/`Rt2` field names, on the same rule.
+#[inline]
+pub(super) fn pair_slot(rt: u32, kind: PairKind) -> u8 {
+    if kind.loads() {
+        Cpu::zr_write_slot(rt as u8)
+    } else {
+        (rt & 0x1F) as u8
+    }
+}
 
 impl Cpu {
     /// SIMD (V=1) memory ops: the Q-register (128-bit) subset libnx's
@@ -651,28 +811,136 @@ impl Cpu {
         Ok(false)
     }
 
+    /// One load or store named by its raw `size`:`opc` fields — the form the
+    /// interpreter has after decoding. [`Acc::of`] settles what that means and
+    /// [`Cpu::access`] performs it, which is the same pair the translator uses.
     #[inline(always)]
     pub(super) fn ld_st_opc(&mut self, addr: u32, rt: u8, sz: u32, opc: u32) -> Result<()> {
-        // opc selects the access: 00 = STR, 01 = LDR, 10/11 = sign-extending
-        // loads (LDRSB/LDRSH/LDRSW). The load bit is NOT opc&1 — treating
-        // opc=10 as a store silently corrupted the target (observed as a
-        // bogus `ldrsw` index in NX-Shell's tokenizer).
-        //
-        // size=11 with opc=10/11 is PRFM (prefetch hint) — it must NOT be
-        // executed as a sign-extending load, or the load clobbers a register
-        // (libtransistor's memcpy starts with `prfm pldl1keep, [x1]`, and
-        // treating it as `ldrsw x0, [x1]` made memcpy write to the source
-        // magic value as an address, zero-filling the real destination).
-        if sz == 0b11 && opc >= 0b10 {
-            return Ok(());
+        let acc = Acc::of(sz as u8, opc as u8);
+        self.access(addr, rt_slot(u32::from(rt), acc), acc)
+    }
+
+    /// Perform one load or store whose width, direction and sign-extension are
+    /// already settled, against a `Rt` already resolved to a slot.
+    #[inline(always)]
+    pub(super) fn access(&mut self, addr: u32, rt: u8, acc: Acc) -> Result<()> {
+        match acc {
+            Acc::Load8 => {
+                let v = u64::from(self.mem.read_u8(addr)?);
+                self.set_reg_at(rt, v);
+            }
+            Acc::Load16 => {
+                let v = u64::from(self.mem.read_u16(addr)?);
+                self.set_reg_at(rt, v);
+            }
+            Acc::Load32 => {
+                let v = u64::from(self.mem.read_u32(addr)?);
+                self.set_reg_at(rt, v);
+            }
+            Acc::Load64 => {
+                let v = self.mem.read_u64(addr)?;
+                self.set_reg_at(rt, v);
+            }
+            Acc::LoadS8 => {
+                let v = u64::from(self.mem.read_u8(addr)?);
+                self.set_reg_at(rt, sext_u64(v, 8));
+            }
+            Acc::LoadS16 => {
+                let v = u64::from(self.mem.read_u16(addr)?);
+                self.set_reg_at(rt, sext_u64(v, 16));
+            }
+            Acc::LoadS32 => {
+                let v = u64::from(self.mem.read_u32(addr)?);
+                self.set_reg_at(rt, sext_u64(v, 32));
+            }
+            Acc::Store8 => self.mem.write_u8(addr, self.reg_at(rt) as u8)?,
+            Acc::Store16 => self.mem.write_u16(addr, self.reg_at(rt) as u16)?,
+            Acc::Store32 => self.mem.write_u32(addr, self.reg_at(rt) as u32)?,
+            Acc::Store64 => self.mem.write_u64(addr, self.reg_at(rt))?,
+            // PRFM: a hint. The addressing mode's writeback still happens.
+            Acc::Prefetch => {}
         }
-        let load = opc != 0b00;
-        let sign = (opc >> 1) == 1;
-        if load {
-            let val = self.load_by_size(addr, sz, sign)?;
-            self.write_zr(rt, val);
-        } else {
-            self.store_by_size(addr, sz, self.read_zr(rt))?;
+        Ok(())
+    }
+
+    /// The address a load/store touches and the value (if any) to write back
+    /// into its base register.
+    #[inline(always)]
+    pub(super) fn indexed(base: u64, offset: i64, wb: Wb) -> (u64, Option<u64>) {
+        match wb {
+            Wb::None => (base.wrapping_add(offset as u64), None),
+            Wb::Pre => {
+                let addr = base.wrapping_add(offset as u64);
+                (addr, Some(addr))
+            }
+            Wb::Post => (base, Some(base.wrapping_add(offset as u64))),
+        }
+    }
+
+    /// The byte offset a register-offset addressing mode adds, with the
+    /// extension and the scale already settled.
+    ///
+    /// `S` scales by log2 of the access size, not by the byte count — the byte
+    /// count over-shifted table indices (`ldrsw x8,[x9,x8,lsl#2]` read entry
+    /// 4x too far, loading 0 and jumping into the table itself).
+    #[inline(always)]
+    pub(super) fn reg_offset(&self, rm: u8, ext: Ext, shift: u8) -> i64 {
+        let index = match ext {
+            Ext::Uxtw => u64::from(self.reg_at(rm) as u32),
+            Ext::Sxtw => sext_u64(self.reg_at(rm), 32),
+            Ext::None => self.reg_at(rm),
+        };
+        index.wrapping_shl(u32::from(shift)) as i64
+    }
+
+    /// `LDP`/`STP`/`LDPSW`, against slots already resolved and an addressing
+    /// mode already classified.
+    #[inline(always)]
+    pub(super) fn pair(
+        &mut self,
+        rt: u8,
+        rt2: u8,
+        rn: u8,
+        offset: i64,
+        kind: PairKind,
+        wb: Wb,
+    ) -> Result<()> {
+        let base = self.reg_at(rn);
+        let (addr, wb_val) = Self::indexed(base, offset, wb);
+        let addr = addr as u32;
+        let second = addr.wrapping_add(kind.stride());
+        match kind {
+            // Both halves are read before either register is written, so
+            // `ldp x0, x1, [x0]` sees the memory it was pointed at.
+            PairKind::Load64 => {
+                let v0 = self.mem.read_u64(addr)?;
+                let v1 = self.mem.read_u64(second)?;
+                self.set_reg_at(rt, v0);
+                self.set_reg_at(rt2, v1);
+            }
+            PairKind::Load32 => {
+                let v0 = u64::from(self.mem.read_u32(addr)?);
+                let v1 = u64::from(self.mem.read_u32(second)?);
+                self.set_reg_at(rt, v0);
+                self.set_reg_at(rt2, v1);
+            }
+            PairKind::Load32Sext => {
+                let v0 = u64::from(self.mem.read_u32(addr)?);
+                let v1 = u64::from(self.mem.read_u32(second)?);
+                self.set_reg_at(rt, sext_u64(v0, 32));
+                self.set_reg_at(rt2, sext_u64(v1, 32));
+            }
+            PairKind::Store64 => {
+                self.mem.write_u64(addr, self.reg_at(rt))?;
+                self.mem.write_u64(second, self.reg_at(rt2))?;
+            }
+            PairKind::Store32 => {
+                self.mem.write_u32(addr, self.reg_at(rt) as u32)?;
+                self.mem.write_u32(second, self.reg_at(rt2) as u32)?;
+            }
+        }
+        if let Some(v) = wb_val {
+            self.set_reg_at(rn, v);
         }
         Ok(())
     }
@@ -709,24 +977,11 @@ impl Cpu {
     }
 
     pub(super) fn offset_from_reg(&self, rm: u8, opt: u8, s: u32, sz: u8) -> Result<i64> {
-        // Register-offset loads/stores shift Rm by `LSL #scale` where scale is
-        // log2(size) (2 for word, 3 for doubleword), NOT the byte count — the
-        // byte count over-shifted table indices (e.g. `ldrsw x8,[x9,x8,lsl#2]`
-        // read entry 4x too far, loading 0 and jumping into the table itself).
-        let shift = if s == 1 { sz as u32 } else { 0 };
-        let v = self.read_zr(rm);
-        // Only four of the eight extend encodings are defined for a
-        // register-offset load/store, and the signed pair is 110/111 — not
-        // 111/110 as in some tables. A byte/halfword extend here is an
-        // UNDEFINED encoding, so it faults rather than guessing.
-        let ext = match opt {
-            0b010 => (v as u32) as u64, // UXTW
-            0b011 => v,                 // LSL / UXTX
-            0b110 => sext_u64(v, 32),   // SXTW
-            0b111 => v,                 // SXTX
-            _ => return Err(Error::Cpu(format!("bad register offset option {}", opt))),
+        let Some(ext) = Ext::of(opt) else {
+            return Err(Error::Cpu(format!("bad register offset option {}", opt)));
         };
-        Ok((ext.wrapping_shl(shift)) as i64)
+        let shift = if s == 1 { sz } else { 0 };
+        Ok(self.reg_offset(rm & 0x1F, ext, shift))
     }
 
     pub(super) fn try_pair(&mut self, insn: u32) -> Result<bool> {
@@ -745,63 +1000,29 @@ impl Cpu {
                 self.pc
             )));
         }
-        let sz = if opc == 0b10 { 0b11 } else { 0b10 };
-        let scale = if sz == 0b11 { 8u64 } else { 4 };
-        let mode = (insn >> 23) & 0b11;
-        let imm = sext_u64((insn >> 15) & 0x7F, 7) as i64;
-        let rn = ((insn >> 5) & 0x1F) as u8;
-        let rt = (insn & 0x1F) as u8;
-        let rt2 = ((insn >> 10) & 0x1F) as u8;
-        let scaled = (imm as u64).wrapping_mul(scale);
-
-        let base = self.read_x(rn);
-        let (addr, writeback, wb_val) = match mode {
-            0b00 => (base.wrapping_add(scaled), false, 0), // signed offset
-            0b01 => (base, true, base.wrapping_add(scaled)), // post-index
-            0b10 => (base.wrapping_add(scaled), false, 0), // offset
-            _ => (base.wrapping_add(scaled), true, base.wrapping_add(scaled)), // pre-index
+        let wide = opc == 0b10;
+        let kind = match (l == 1, wide, opc == 0b01) {
+            (true, _, true) => PairKind::Load32Sext,
+            (true, true, _) => PairKind::Load64,
+            (true, false, _) => PairKind::Load32,
+            (false, true, _) => PairKind::Store64,
+            (false, false, _) => PairKind::Store32,
         };
-        let addr = addr as u32;
-
-        if l == 1 {
-            // LDP: load rt, rt2
-            let v0 = if sz == 0b11 {
-                self.mem.read_u64(addr)?
-            } else {
-                let w = self.mem.read_u32(addr)?;
-                if opc == 0b01 {
-                    sext_u64(w as u64, 32)
-                } else {
-                    w as u64
-                }
-            };
-            let v1 = if sz == 0b11 {
-                self.mem.read_u64(addr.wrapping_add(scale as u32))?
-            } else {
-                let w = self.mem.read_u32(addr.wrapping_add(scale as u32))?;
-                if opc == 0b01 {
-                    sext_u64(w as u64, 32)
-                } else {
-                    w as u64
-                }
-            };
-            self.write_zr(rt, v0);
-            self.write_zr(rt2, v1);
-        } else {
-            // STP: store rt, rt2
-            if sz == 0b11 {
-                self.mem.write_u64(addr, self.read_zr(rt))?;
-                self.mem
-                    .write_u64(addr.wrapping_add(8), self.read_zr(rt2))?;
-            } else {
-                self.mem.write_u32(addr, self.read_zr(rt) as u32)?;
-                self.mem
-                    .write_u32(addr.wrapping_add(4), self.read_zr(rt2) as u32)?;
-            }
-        }
-        if writeback {
-            self.write_x(rn, wb_val);
-        }
+        let wb = match (insn >> 23) & 0b11 {
+            0b01 => Wb::Post,
+            0b11 => Wb::Pre,
+            _ => Wb::None,
+        };
+        let scale: i64 = if wide { 8 } else { 4 };
+        let offset = (sext_u64((insn >> 15) & 0x7F, 7) as i64).wrapping_mul(scale);
+        self.pair(
+            pair_slot(insn, kind),
+            pair_slot(insn >> 10, kind),
+            Cpu::x_slot((insn >> 5) as u8),
+            offset,
+            kind,
+            wb,
+        )?;
         Ok(true)
     }
 
