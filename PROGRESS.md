@@ -29,7 +29,7 @@ graphics stack, opens its audio device, and runs on into its own loop. **Every
 service it asks for has a real implementation** — a full boot logs no `no
 implementation` and no `unimplemented` lines.
 
-`make test`: **888 tests, all passing.**
+`make test`: **889 tests, all passing.**
 
 ## Homebrew
 
@@ -306,6 +306,11 @@ mirrored, so the layout is unverified and nothing is applied.
 still 173-220 ms, and the software rasterizer is not in it: 21.9 billion
 instructions buys 20 frames. Minecraft is CPU-bound here, not GPU-bound.
 
+**And the rasterizer still renders it black** — 110 draws, `draws_skipped: 0`,
+0 of 921,600 pixels lit, at frame 3 and frame 20 alike, where the device draws
+the same frame correctly. The rasterizer is the reference every other path is
+checked against, so this is a hole in the check rather than a cosmetic gap.
+
 ## Performance
 
 **Two things nobody was looking at cost more than everything they were.** A
@@ -525,13 +530,14 @@ deadlock is not chased; the update is the configuration that runs.
 ## Services
 
 Every service the retail title asks for is implemented; `usb:hs` and `ncm` are
-the two still absent. The design rule throughout is **answer as the console you
-actually are**: one user account (uid nonzero, because zero means "nobody is
-signed in"), an idle temperature, a link that is up with nothing behind it,
-empty play history, a factory-fresh console — not a stub, and not a failure,
-because a failure puts callers on the path built for hardware that broke.
+the two still absent. `docs/services.md` is the inventory; this is what
+building it taught.
 
-Two things that follow from it:
+The design rule throughout is **answer as the console you actually are**: one
+user account (uid nonzero, because zero means "nobody is signed in"), an idle
+temperature, a link that is up with nothing behind it, empty play history, a
+factory-fresh console — not a stub, and not a failure, because a failure puts
+callers on the path built for hardware that broke.
 
 - **The angles have to agree.** `am`'s operation mode, `apm`'s performance mode
   and `clkrst`'s rates all describe one console; `GetOperationMode` answered
@@ -539,25 +545,20 @@ Two things that follow from it:
   a 720p handheld framebuffer.
 - **`Set`/`Get` pairs are read back**, and a pair that disagrees is the failure
   mode this file keeps rediscovering.
-
-Where a stub would have to invent something unverifiable, it fails instead:
-`ssl`'s `CreateConnection` (no socket layer beneath it), `sfdnsres` (definite
-`EAI_NONAME`, not a try-again that invites a spin), `acc`'s `LoadIdTokenCache`
-(zero bytes, so authentication fails where the missing piece actually is).
+- Where a stub would have to invent something unverifiable, it fails instead:
+  `ssl`'s `CreateConnection`, `sfdnsres` (a definite `EAI_NONAME`, not a
+  try-again that invites a spin), `acc`'s `LoadIdTokenCache` (zero bytes, so
+  authentication fails where the missing piece actually is).
 
 **`hwopus` is the exception to all of that**: there is nothing to answer *as*,
 because the caller wants audio back. So `src/opus/` is a full Opus decoder —
-range coder, CELT, SILK, hybrid, concealment and multi-stream, no
-dependencies — and `cpu/hwopus.rs` is the thin service in front of it. The
-work buffer the caller allocates as transfer memory is sized and never read;
-the decode happens on this side. Just Dance 2023 was the title that reported
-`hwopus` missing.
-
-Conformance is checked rather than assumed. `--example opus_testvectors` runs
-the RFC 8251 vectors and requires the range coder's final state to match on
-every packet of all twelve, decoded both to stereo and to mono; the samples
-score 96-100% on `opus_compare`, which is what libopus's own float build
-scores against the same references. Throughput is ~350x real time.
+range coder, CELT, SILK, hybrid, concealment and multi-stream, no dependencies
+— and `cpu/hwopus.rs` is the thin service in front of it. Just Dance 2023 was
+the title that reported `hwopus` missing. Conformance is checked rather than
+assumed: `--example opus_testvectors` runs the RFC 8251 vectors and requires
+the range coder's final state to match on every packet of all twelve, decoded
+both to stereo and to mono; the samples score 96-100% on `opus_compare`, which
+is what libopus's own float build scores. Throughput is ~350x real time.
 
 ## Frontend
 
@@ -581,64 +582,42 @@ scores against the same references. Throughput is ~350x real time.
 
 ## Repro
 
-The `.nro`/`.nsp` files are gitignored; `test-nros/` holds the local homebrew.
-
-- `--example screenshot <nro> out.ppm 3` — writes the third presented frame,
-  feeding in `web/font.ttf` as the shared font unless told otherwise.
-- `--example boot_nx <nro>` — shortest path to "does it halt cleanly".
-- `--example boot_nsp <nsp> <prod.keys> [title.keys] [steps]` — the browser's
-  Launch button, without a browser. `SHOT=<f.ppm>` writes a frame; prefer it
-  over reading `frames presented: 0` off a budget too short to reach one.
-  `UPDATE=<update.nsp>` runs the title patched and `DLC=<a.nsp>,<b.nsp>` mounts
-  its add-on content, which is the page's pairing of the containers with no
-  page in the way.
-- `--example dump_exefs …` — flat module images at their real load addresses
-  plus a sorted `symbols.txt`. **This is what makes a retail backtrace
-  readable.** `--example disasm_flat` disassembles them there.
-- `--example retail_trace …` — a ring buffer of the last N instructions, dumped
-  on halt or fault. `RING_MIN` past `rtld` (`0x08004000`), whose lazy-binding
-  resolver would otherwise fill the whole ring. `MARK`/`MARK_DUMP` watch an API
-  being called in order without recording the steps between.
-- `--example jit_bench <nro>` — both engines, with every state difference.
-  `SWITCH_NO_JIT=1` disables translation for host tools.
-- **Checking the WebGPU backend**: run `screenshot_nca` and `switch-gpu`'s
-  `screenshot_gpu` over the same frame and `cmp` the PPMs. `GPU_ONLY=<i>` puts
-  only the i-th draw on the device, so a difference is exactly one draw's.
-- Tracing is environment-gated and **host-only** (`TRACE_IPC`, `TRACE_SVC`,
-  `TRACE_WAIT`, `TRACE_NV`, `TRACE_GPU`, and a dozen more): wasm has no WASI,
-  so `std::env::var` always fails there. Browser diagnostics go through
-  `Cpu::diagnostic`.
-- `--example opus_testvectors <dir>` — the Opus decoder against the RFC 8251
-  vectors (`opus_testvectors-rfc8251.tar.gz` from opus-codec.org). It fails on
-  the first packet whose range coder state disagrees with the encoder's, and
-  writes `<name>.rs.dec` beside each vector for `opus_compare` to score.
-  `--example opus_difftest <dir>` does the same against a reference decode you
-  generate yourself, which is how the output rates below 48 kHz and the
-  multi-stream layouts get covered.
-- Browser: `make wasm` once, then `bun run dev`. Tests: `make test`.
+`docs/repro.md` — the examples (`screenshot`, `boot_nsp`, `dump_exefs`,
+`retail_trace`, `jit_bench`, `opus_testvectors`), the environment switches they
+take (`SHOT=`, `UPDATE=`, `DLC=`, `RING_MIN`, `MARK`), and how to check the
+WebGPU backend against the rasterizer.
 
 ## Next
 
-1. **Why does a retail title issue no draws?** Two titles, same shape: layer,
-   buffer queue, a stream of `nvdrv` ioctls, and zero draw calls over billions
-   of instructions. Whatever they wait on is above the GPU — find which thread
-   is spinning (`pc=0xa70b7ec` for A Short Hike, `0xd4c36f0` for Tomodachi Life)
-   and on what. The Home Menu *does* draw, so this is these titles' own gap,
-   not the retail path's.
-2. **NX-Shell regressed** to 433,783 steps with no output. Cheapest bisect
+1. **The rasterizer renders Minecraft black, and it is the reference.** With
+   the 16-bit attributes and `ipa.centroid` in, the device draws the title
+   correctly — but `screenshot_nsp` over the same frame reports 110 draws,
+   `draws_skipped: 0` and **0 of 921,600 pixels lit**, at frame 3 and at frame
+   20 alike. Every other path is checked by agreeing with the rasterizer, so a
+   title only the backend can draw is a hole in the check itself. Bisect with
+   `GPU_ONLY`.
+2. **A retail title that draws but never a scene.** A Short Hike composites a
+   full frame and settles at two draws a frame forever; Tomodachi Life issues
+   no draw calls at all (`pc=0xd4c36f0`). Whatever they wait on is above the
+   GPU. The Home Menu and Minecraft both draw, so this is these titles' own
+   gap, not the retail path's.
+3. **NX-Shell regressed** to 433,783 steps with no output. Cheapest bisect
    here — the `.nro` is in the tree.
-3. **Check Checkpoint's text.** `SHFL`/`FSWZADD` and the quad that runs them
+4. **Check Checkpoint's text.** `SHFL`/`FSWZADD` and the quad that runs them
    are implemented and tested, but the title itself has never been run against
    them — its `.nro` is not in the tree.
-4. **`usb:hs` and `ncm`**, the last two services. Homebrew also still opens a
+5. **`usb:hs` and `ncm`**, the last two services. Homebrew also still opens a
    service under an **empty name** (Checkpoint does), and `sm` hands out a
    working handle instead of failing the way real `sm` would.
-5. **Known interpreter bug, open**: with a font carrying hinting programs
+6. **Known interpreter bug, open**: with a font carrying hinting programs
    (`fpgm`/`prep`/`cvt`), glyphs get correct heights and advances but each
    bitmap is 1-3px wide, as if untouched points never get interpolated. The
    same subset with `--no-hinting` renders perfectly. Invisible in normal use —
    the shipped font has no hinting — but a real correctness gap.
+7. **Minecraft is CPU-bound**, not GPU-bound: 21.9 billion instructions buys 20
+   frames, and a steady frame is 173-220 ms with every draw on the device.
 
 Lower priority: hbmenu's entry label renders as a blank box; NAND-vs-SD storage
 is one hardcoded 32 GiB for both free and total; Checkpoint never presents a
-frame.
+frame. The applet path's queue transform offset is unverified (see the GPU
+section).
