@@ -2,7 +2,7 @@
 
 import { pumpAudio } from './audio';
 import { drainDiagnostics, drainTrace, traceEnabled } from './debug';
-import { presentIfNewFrame, renderFb } from './display';
+import { countEmulation, presentIfNewFrame, renderFb } from './display';
 import { $ } from './dom';
 import { formatBytes } from './format';
 import { bootDetail, endLoad } from './loading';
@@ -65,7 +65,9 @@ export async function run(): Promise<void> {
   let tick = 0;
   try {
     for (;;) {
+      const sliceAt = performance.now();
       steps = await call('run', slice);
+      countEmulation(performance.now() - sliceAt);
       // Reset does not wait for the slice already in flight - it is about to
       // be thrown away - so by the time one returns the session may be gone.
       // Every call below reads it, so the loop leaves rather than asking.

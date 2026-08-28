@@ -62,13 +62,26 @@ export async function renderFb(): Promise<void> {
 // Frames per second, measured from the guest's own present count.
 let fpsFrames = 0;
 let fpsSince = performance.now();
+// Wall clock the run loop has spent inside the worker since the last readout.
+// A slice carries whatever presents happened during it, so charging the run
+// time to the frames it produced is the only division that means anything -
+// the same reasoning as `FRAME_TIMES` in examples/common/mod.rs.
+let emulatedMs = 0;
+
+/** Wall clock one run slice cost, for the ms/frame readout. */
+export function countEmulation(ms: number): void {
+  emulatedMs += ms;
+}
+
 function countFrames(delta: number): void {
   fpsFrames += delta;
   const now = performance.now();
   const elapsed = now - fpsSince;
   if (elapsed >= 500) {
     $('fps').textContent = (fpsFrames * 1000 / elapsed).toFixed(1) + ' fps';
+    $('frame-ms').textContent = (emulatedMs / fpsFrames).toFixed(1) + ' ms';
     fpsFrames = 0;
+    emulatedMs = 0;
     fpsSince = now;
   }
 }
@@ -90,5 +103,10 @@ export function resetDisplay(): void {
   fbW = 0;
   fbH = 0;
   fbBytes = 0;
+  fpsFrames = 0;
+  emulatedMs = 0;
+  fpsSince = performance.now();
   $('res').textContent = '—';
+  $('fps').textContent = '- fps';
+  $('frame-ms').textContent = '- ms';
 }
