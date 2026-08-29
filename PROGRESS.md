@@ -21,7 +21,7 @@ whenever it was last recorded.
 | `Checkpoint.nro` | layout and chrome; text was solid blocks for want of `SHFL`, unchecked since | yes | carried |
 | "A Short Hike" (NSP) | composites a full 1280x720 frame; steady state is 2 draws a frame and never a scene | partial | measured |
 | "Minecraft" (NSP) | the world, on the device: 110 draws a frame, none falling back | yes | measured |
-| "Tomodachi Life" (NSP) | 1.2B steps, no fault, no abort, **no draw calls** | no | carried |
+| "Tomodachi Life" (NSP) | reaches its idle frame loop; **no draw calls** ([below](#an-nnhid-state-is-read-under-a-seqlock-and-bit-0-is-the-lock)) | no | measured |
 
 A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` →
 `sdk` through real `nnSdk` init, gets its heap, events and input, brings up its
@@ -578,6 +578,18 @@ callers on the path built for hardware that broke.
   try-again that invites a spin), `acc`'s `LoadIdTokenCache` (zero bytes, so
   authentication fails where the missing piece actually is).
 
+### An `nn::hid` state is read under a seqlock, and bit 0 is the lock
+
+A storage entry's sampling number is the state's own **doubled** — Eden's
+`hid_core/resources/ring_lifo.h` writes `sampling_number << 1` — so its low bit
+is free to mean "being written", and `nn::hid`'s reader spins on the entry
+until that bit clears. Publishing the number undoubled made the very first
+sample odd, and Tomodachi Life's main thread sat in that retry loop from its
+first pad read on: 20 billion instructions with the GPU counters, the backed
+heap and all 41 thread states byte-identical to where they stood at 2 billion.
+`libnx` never looks at the bit, so no homebrew could show it. Past it the title
+sets up its vibration devices and reaches its idle frame loop.
+
 **`hwopus` is the exception to all of that**: there is nothing to answer *as*,
 because the caller wants audio back. So `src/opus/` is a full Opus decoder —
 range coder, CELT, SILK, hybrid, concealment and multi-stream, no dependencies
@@ -626,9 +638,11 @@ the WebGPU backend against the rasterizer.
    `GPU_ONLY`.
 2. **A retail title that draws but never a scene.** A Short Hike composites a
    full frame and settles at two draws a frame forever; Tomodachi Life issues
-   no draw calls at all (`pc=0xd4c36f0`). Whatever they wait on is above the
-   GPU. The Home Menu and Minecraft both draw, so this is these titles' own
-   gap, not the retail path's.
+   no draw calls at all. Past the `hid` seqlock above it reaches a steady idle
+   loop — every worker parked, the main thread woken by `vi:vsync` and
+   `audren:frame`, no service call refused — and still renders nothing.
+   Whatever they wait on is above the GPU. The Home Menu and Minecraft both
+   draw, so this is these titles' own gap, not the retail path's.
 3. **NX-Shell regressed** to 433,783 steps with no output. Cheapest bisect
    here — the `.nro` is in the tree.
 4. **Check Checkpoint's text.** `SHFL`/`FSWZADD` and the quad that runs them

@@ -734,7 +734,9 @@ mod hid_shmem {
     pub const LIFO_CAPACITY: u64 = 17;
 
     /// `HidNpadCommonStateAtomicStorage`: a sampling number the reader uses to
-    /// detect a torn read, then the `HidNpadCommonState` itself.
+    /// detect a torn read, then the `HidNpadCommonState` itself. The storage's
+    /// number is the state's *doubled*: bit 0 is the seqlock's "being written"
+    /// flag, and a reader spins on the entry until it clears.
     pub const STORAGE_SAMPLING_NUMBER: u32 = 0x00;
     pub const STATE_SAMPLING_NUMBER: u32 = 0x08;
     pub const STATE_BUTTONS: u32 = 0x10;
@@ -3428,7 +3430,7 @@ impl Cpu {
         let entry = lifo.wrapping_add(h::LIFO_STORAGE);
         let _ = self
             .mem
-            .write_u64(entry + h::STORAGE_SAMPLING_NUMBER, sample);
+            .write_u64(entry + h::STORAGE_SAMPLING_NUMBER, sample << 1);
         let _ = self.mem.write_u64(entry + h::STATE_SAMPLING_NUMBER, sample);
         let _ = self.mem.write_u64(entry + h::STATE_BUTTONS, buttons);
         let _ = self.mem.write_u32(entry + h::STATE_STICK_L, lx as u32);
@@ -3472,7 +3474,7 @@ impl Cpu {
         let storage = lifo.wrapping_add(h::LIFO_STORAGE);
         let _ = self
             .mem
-            .write_u64(storage + h::STORAGE_SAMPLING_NUMBER, sample);
+            .write_u64(storage + h::STORAGE_SAMPLING_NUMBER, sample << 1);
         let state = storage.wrapping_add(h::TOUCH_STATE);
         let _ = self.mem.write_u64(state + h::TOUCH_SAMPLING_NUMBER, sample);
 
