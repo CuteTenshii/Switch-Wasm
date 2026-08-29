@@ -157,20 +157,35 @@ pub struct Memory {
     /// the hit is recorded through a `Cell`.
     read_watch: (u32, u32),
     read_hit: std::cell::Cell<Option<u32>>,
-    /// Pages the JIT has translated code out of, one bit each. A store that
-    /// lands on one of them invalidates whatever was compiled from it, so the
-    /// translator's view of guest code can never go stale behind its back.
+    /// Pages something has cached the contents of, one bit each. A store that
+    /// lands on one of them is reported, so no cache of guest memory can go
+    /// stale behind its back: the JIT's translations, and the GPU backend's
+    /// deswizzled textures.
+    ///
+    /// One bitmap and not one per consumer, because the test is
+    /// `#[inline(always)]` in every guest write path — the hottest code here —
+    /// and a second bounds-checked load and bit test on it would be paid by
+    /// every store the emulator ever runs. The price is that a write reports
+    /// the page to *both* drains, so each sees pages it has nothing cached
+    /// for. Both treat that the same way they treat a real one: the JIT finds
+    /// no blocks to throw away, the backend finds no texture to evict, and a
+    /// spurious invalidation is only ever wasted work rather than a wrong
+    /// answer. Textures and code do not share pages in practice anyway.
     ///
     /// One bit per 4 KiB page is 128 KiB for the whole address space, but a
     /// program's stores cluster, so the handful of cache lines under them is
-    /// all a run ever touches. It is allocated on the first
-    /// [`Memory::mark_code_page`], so a run with the JIT off does not carry
-    /// it and every store's test misses on the length check alone.
-    code_pages: Vec<u64>,
-    /// Code pages written since the JIT last drained this. A page is recorded
-    /// once — marking it clears its bit — and stays out of the bitmap until
-    /// something is translated from it again.
+    /// all a run ever touches. It is allocated on the first mark, so a run
+    /// with the JIT off and no GPU backend does not carry it and every
+    /// store's test misses on the length check alone.
+    watched_pages: Vec<u64>,
+    /// Watched pages written since the JIT last drained this. A page is
+    /// recorded once — marking it clears its bit — and stays out of the
+    /// bitmap until something is cached from it again.
     code_dirty: Vec<u32>,
+    /// The same list, for the GPU backend. Separate because the two drain
+    /// independently: whichever asks first must not take the notification the
+    /// other has not seen yet.
+    gpu_dirty: Vec<u32>,
 }
 
 impl Default for Memory {
@@ -196,19 +211,20 @@ impl Memory {
             watch_hit: None,
             read_watch: (1, 0),
             read_hit: std::cell::Cell::new(None),
-            code_pages: Vec::new(),
+            watched_pages: Vec::new(),
             code_dirty: Vec::new(),
+            gpu_dirty: Vec::new(),
         }
     }
 
     /// Record that the page holding `addr` has had code translated out of it,
     /// so a later store there is reported by [`Memory::dirty_code_pages`].
     pub fn mark_code_page(&mut self, addr: u32) {
-        if self.code_pages.is_empty() {
-            self.code_pages = vec![0u64; PAGE_COUNT / 64];
+        if self.watched_pages.is_empty() {
+            self.watched_pages = vec![0u64; PAGE_COUNT / 64];
         }
         let idx = Self::page_index(addr);
-        self.code_pages[idx >> 6] |= 1u64 << (idx & 63);
+        self.watched_pages[idx >> 6] |= 1u64 << (idx & 63);
     }
 
     /// Note a guest store, invalidating the page's translations if it holds
@@ -220,7 +236,7 @@ impl Memory {
     fn note_code_write(&mut self, addr: u32) {
         let idx = Self::page_index(addr);
         let bit = 1u64 << (idx & 63);
-        if let Some(&word) = self.code_pages.get(idx >> 6) {
+        if let Some(&word) = self.watched_pages.get(idx >> 6) {
             if word & bit != 0 {
                 self.mark_code_dirty(idx, bit);
             }
@@ -232,8 +248,9 @@ impl Memory {
     #[cold]
     #[inline(never)]
     fn mark_code_dirty(&mut self, idx: usize, bit: u64) {
-        self.code_pages[idx >> 6] &= !bit;
+        self.watched_pages[idx >> 6] &= !bit;
         self.code_dirty.push(idx as u32);
+        self.gpu_dirty.push(idx as u32);
     }
 
     /// Mark every code page overlapping `[addr, addr + size)` dirty. Used by
@@ -241,7 +258,7 @@ impl Memory {
     /// [`Memory::unmap`]), which move whole segments at a time and do not go
     /// through the per-store write paths.
     fn dirty_code_range(&mut self, addr: u32, size: usize) {
-        if self.code_pages.is_empty() || size == 0 {
+        if self.watched_pages.is_empty() || size == 0 {
             return;
         }
         let first = (addr as u64) >> PAGE_BITS;
@@ -249,9 +266,10 @@ impl Memory {
         for idx in first..=last.min(PAGE_COUNT as u64 - 1) {
             let idx = idx as usize;
             let bit = 1u64 << (idx & 63);
-            if self.code_pages[idx >> 6] & bit != 0 {
-                self.code_pages[idx >> 6] &= !bit;
+            if self.watched_pages[idx >> 6] & bit != 0 {
+                self.watched_pages[idx >> 6] &= !bit;
                 self.code_dirty.push(idx as u32);
+                self.gpu_dirty.push(idx as u32);
             }
         }
     }
@@ -269,6 +287,29 @@ impl Memory {
     /// nothing has written to code.
     pub fn dirty_code_pages(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.code_dirty)
+    }
+
+    /// Watch `addr`'s page on the GPU backend's behalf, so a later store there
+    /// is reported by [`Memory::dirty_gpu_pages`]. The same bitmap the JIT
+    /// marks: a store reports the page to both drains.
+    pub fn mark_gpu_page(&mut self, addr: u32) {
+        if self.watched_pages.is_empty() {
+            self.watched_pages = vec![0u64; PAGE_COUNT / 64];
+        }
+        let idx = Self::page_index(addr);
+        self.watched_pages[idx >> 6] |= 1u64 << (idx & 63);
+    }
+
+    /// Whether any watched page has been written since the GPU backend last
+    /// drained this.
+    #[inline(always)]
+    pub fn has_dirty_gpu(&self) -> bool {
+        !self.gpu_dirty.is_empty()
+    }
+
+    /// Take the pages whose cached contents are stale, clearing the list.
+    pub fn dirty_gpu_pages(&mut self) -> Vec<u32> {
+        std::mem::take(&mut self.gpu_dirty)
     }
 
     /// Mark `[start, end)` as softly mapped: reads return zeros (served from
@@ -1409,5 +1450,31 @@ mod tests {
         let data = (0..=127u8).collect::<Vec<_>>();
         m.map(0x0001_0000, &data).unwrap();
         assert_eq!(m.dump(0x0001_0000, 128).unwrap(), data);
+    }
+
+    /// The JIT and the GPU backend share one bitmap and drain separately, so
+    /// the store that tells one of them has to still be there for the other.
+    /// Draining in either order used to be the obvious way to lose a texture
+    /// invalidation to a block invalidation that happened to run first.
+    #[test]
+    fn a_write_reaches_both_drains_whichever_asks_first() {
+        let mut mem = Memory::new();
+        mem.map_zero(0x1000, 0x2000).unwrap();
+        mem.mark_gpu_page(0x1000);
+        mem.write_u32(0x1000, 1).unwrap();
+        assert!(mem.has_dirty_gpu());
+        assert!(mem.has_dirty_code());
+        // One drain does not empty the other.
+        assert_eq!(mem.dirty_gpu_pages().len(), 1);
+        assert!(!mem.has_dirty_gpu());
+        assert_eq!(mem.dirty_code_pages().len(), 1);
+
+        // A page is reported once: the store clears its bit, and it stays out
+        // until something caches from it again.
+        mem.write_u32(0x1000, 2).unwrap();
+        assert!(!mem.has_dirty_gpu());
+        mem.mark_gpu_page(0x1000);
+        mem.write_u32(0x1000, 3).unwrap();
+        assert_eq!(mem.dirty_gpu_pages().len(), 1);
     }
 }
