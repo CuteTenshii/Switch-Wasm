@@ -24,7 +24,7 @@ use crate::gpu::shader::interp::{
     resolve_shuffles, ConstantSource, Env, Halt, Invocation, MemoryConstants, MemoryGlobal,
     MemoryTextures, NoTextures,
 };
-use crate::gpu::shader::{decode_program_from_memory, Op, Program};
+use crate::gpu::shader::{decode_program_from_memory, wgsl, Op, Program};
 use crate::gpu::surface::{f16_to_f32, ColorFormat, SampleGrid, MAX_SAMPLES};
 use crate::{Error, Result};
 
@@ -1184,6 +1184,9 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let fs_program = decode_program_from_memory(&*ctx, fs_binding.addr, &|bank: u8| {
         engine.bound_constbuf(ShaderStage::Fragment, bank as u32)
     })?;
+    // Only when a diagnostic asked; see `examples/shader_coverage.rs`.
+    crate::gpu::shader::uses::note(wgsl::Stage::Vertex, vs_binding.addr, &vs_program);
+    crate::gpu::shader::uses::note(wgsl::Stage::Fragment, fs_binding.addr, &fs_program);
 
     let attribs: Vec<VertexAttrib> = (0..MAX_VERTEX_ATTRIBS)
         .map(|i| engine.vertex_attrib(i))

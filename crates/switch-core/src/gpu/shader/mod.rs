@@ -24,6 +24,49 @@ pub use isa::{Instruction, Op};
 use crate::{Error, Result};
 use std::collections::{BTreeMap, HashSet};
 
+/// Which programs a run actually bound, for a diagnostic that wants to put
+/// every one a real frame used through [`wgsl::translate`].
+///
+/// Off unless a tool turns it on, so a frame nobody is measuring pays one
+/// thread-local read per *draw* — not per fragment. A global rather than a
+/// field on [`crate::gpu::exec::ExecCtx`] because it is a tool's seam and not
+/// part of a frame: threading a `&mut Vec` down to the one place that knows
+/// both the stage and the decoded program would change every construction of
+/// that struct, fixtures included, to carry something no frame reads.
+pub mod uses {
+    use super::wgsl::Stage;
+    use super::Program;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static BOUND: RefCell<Option<Vec<(Stage, u64, Program)>>> = const { RefCell::new(None) };
+    }
+
+    /// Start recording, discarding anything already held.
+    pub fn record() {
+        BOUND.with(|bound| *bound.borrow_mut() = Some(Vec::new()));
+    }
+
+    /// Note the program bound as `stage` for the draw about to run. The
+    /// decoded form is kept rather than its address, because reading it back
+    /// afterwards would need the GPU address space the draw was using and
+    /// that is gone by the time anything asks.
+    pub fn note(stage: Stage, addr: u64, program: &Program) {
+        BOUND.with(|bound| {
+            if let Some(list) = bound.borrow_mut().as_mut() {
+                list.push((stage, addr, program.clone()));
+            }
+        });
+    }
+
+    /// Everything noted since [`record`], in draw order, and stop recording.
+    pub fn take() -> Vec<(Stage, u64, Program)> {
+        BOUND
+            .with(|bound| bound.borrow_mut().take())
+            .unwrap_or_default()
+    }
+}
+
 /// Hard cap on decoded instructions per program, so a binary that is missing
 /// its `exit` — a corrupt upload, or a control-flow form this decoder cannot
 /// follow — can't walk off into unmapped memory.
