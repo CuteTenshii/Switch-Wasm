@@ -1511,41 +1511,55 @@ impl Gpu {
             .get_mapped_range()
             .map_err(|e| Error::Gpu(format!("mapping the readback: {e}")))?;
         let target = &pending.target;
-        let mut rows = Vec::with_capacity((pending.row_bytes * target.rows) as usize);
-        for y in 0..target.rows {
-            let at = (y * pending.padded) as usize;
-            rows.extend_from_slice(&mapped[at..at + pending.row_bytes as usize]);
-        }
+        // A colour surface goes back straight out of the mapping, padding and
+        // all: `write_strided` skips whatever each row's alignment left over,
+        // which is a whole-surface copy — 3.7 MB a frame at 720p — that only
+        // ever existed to hand the walk a packed buffer.
+        //
+        // Depth still repacks. Its write-back reads the surface and patches a
+        // window into it, so it wants the rows contiguous, and it is the
+        // rarer path.
+        let outcome = match target.depth_kind() {
+            None => target.write_strided(ctx, &mapped, pending.padded),
+            Some(kind) => {
+                let mut rows = Vec::with_capacity((pending.row_bytes * target.rows) as usize);
+                for y in 0..target.rows {
+                    let at = (y * pending.padded) as usize;
+                    rows.extend_from_slice(&mapped[at..at + pending.row_bytes as usize]);
+                }
+                Self::land_depth(target, kind, &rows, ctx)
+            }
+        };
         drop(mapped);
         pending.staging.unmap();
         // Destroyed rather than merely dropped, for the reason
         // [`Gpu::scratch`] gives: a readback is a whole surface, several a
         // frame, and in a browser a dropped buffer waits on a collector.
         pending.staging.destroy();
-        match target.depth_kind() {
-            Some(kind) => {
-                // A cropped depth target holds the left of each row; the rest
-                // is what the surface already had, and reading it back is
-                // how it survives being written whole.
-                let surface_texels = (target.row_bytes / target.unit.max(1)) as usize;
-                let window = target.width as usize;
-                if window < surface_texels {
-                    let unit = kind.unit() as usize;
-                    let mut full = target.read_depth(ctx)?;
-                    for y in 0..target.rows as usize {
-                        let from = y * window * unit;
-                        let to = y * surface_texels * unit;
-                        let len = window * unit;
-                        if to + len <= full.len() && from + len <= rows.len() {
-                            full[to..to + len].copy_from_slice(&rows[from..from + len]);
-                        }
-                    }
-                    return target.write_depth(ctx, &full);
-                }
-                target.write_depth(ctx, &rows)
-            }
-            None => target.write(ctx, &rows),
+        outcome
+    }
+
+    /// Put a depth readback back, repacked.
+    fn land_depth(target: &Target, kind: DepthKind, rows: &[u8], ctx: &mut ExecCtx) -> Result<()> {
+        // A cropped depth target holds the left of each row; the rest is what
+        // the surface already had, and reading it back is how it survives
+        // being written whole.
+        let surface_texels = (target.row_bytes / target.unit.max(1)) as usize;
+        let window = target.width as usize;
+        if window >= surface_texels {
+            return target.write_depth(ctx, rows);
         }
+        let unit = kind.unit() as usize;
+        let mut full = target.read_depth(ctx)?;
+        for y in 0..target.rows as usize {
+            let from = y * window * unit;
+            let to = y * surface_texels * unit;
+            let len = window * unit;
+            if to + len <= full.len() && from + len <= rows.len() {
+                full[to..to + len].copy_from_slice(&rows[from..from + len]);
+            }
+        }
+        target.write_depth(ctx, &full)
     }
 }
 
@@ -3518,7 +3532,7 @@ impl Gpu {
         );
         // Out of `self` and back, because the closure below holds it while
         // `timed!` wants `self` for the clock.
-        let mut cache = std::mem::take(&mut self.texture_cache);
+        let cache = std::mem::take(&mut self.texture_cache);
         let mut hits = 0u64;
         let uploads = timed!(self, upload, {
             Uploads::of_cached(

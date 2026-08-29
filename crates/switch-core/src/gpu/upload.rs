@@ -426,7 +426,18 @@ impl Target {
     /// backwards, and the thing a backend does before the guest looks at
     /// what it drew.
     pub fn write(&self, ctx: &mut ExecCtx, rows: &[u8]) -> Result<()> {
-        let want = self.len() as usize;
+        self.write_strided(ctx, rows, self.row_bytes)
+    }
+
+    /// [`Target::write`], from rows that are `stride` bytes apart rather than
+    /// packed.
+    ///
+    /// A device readback pads its rows out to an alignment, and repacking
+    /// them first is a copy of the whole surface — 3.7 MB a frame at 720p,
+    /// for a walk that is about to read every byte anyway and can as easily
+    /// read them where they are.
+    pub fn write_strided(&self, ctx: &mut ExecCtx, rows: &[u8], stride: u32) -> Result<()> {
+        let want = (stride * self.rows) as usize;
         if rows.len() < want {
             return Err(Error::Gpu(format!(
                 "upload: writing back {} bytes of a {want}-byte target",
@@ -454,7 +465,7 @@ impl Target {
                         break;
                     }
                     let at = at as usize;
-                    let from = ((y * self.row_bytes) + x) as usize;
+                    let from = ((y * stride) + x) as usize;
                     raw[at..at + take].copy_from_slice(&rows[from..from + take]);
                     x += take as u32;
                 }
@@ -465,7 +476,7 @@ impl Target {
             for x in 0..per_row {
                 let offset = self.layout.offset(x * self.unit, y, self.row_bytes);
                 let at = self.addr + u64::from(offset);
-                let from = ((y * self.row_bytes) + x * self.unit) as usize;
+                let from = ((y * stride) + x * self.unit) as usize;
                 let mut value = 0u128;
                 for (i, &byte) in rows[from..from + self.unit as usize].iter().enumerate() {
                     value |= u128::from(byte) << (8 * i);
