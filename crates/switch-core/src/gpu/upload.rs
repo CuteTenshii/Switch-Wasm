@@ -145,6 +145,35 @@ pub struct ConstantUpload {
 /// The blocks of a compressed texture are *not* decoded. WebGPU has the BC
 /// formats natively, and decoding them here would turn 4 bits a texel into
 /// 32 for no reason and then ask the device to sample the result.
+/// What decides a texture upload's bytes: where they are and how they are
+/// read.
+///
+/// Two draws with the same key read the same bytes out of the same memory, so
+/// one of them can be given the other's — which is the whole point, because a
+/// title samples a handful of images over and over and 96.5% of everything
+/// [`Uploads::of`] lifts is texture bytes.
+///
+/// Every field comes off the TIC, so a descriptor the guest rewrites produces
+/// a *different key* rather than a stale hit; only a write to the texels
+/// themselves needs reporting, which is what [`crate::mem::Memory`]'s watched
+/// pages are for. Not the swizzle or the sampler: both are applied when the
+/// texture is sampled rather than when it is copied, so they change the draw
+/// and not the bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextureKey {
+    pub addr: u64,
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub layer_stride: u32,
+    pub row_bytes: u32,
+    pub rows: u32,
+    pub block_depth_gobs: u32,
+    pub layout: Layout,
+    pub format: Format,
+    pub srgb: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextureUpload {
     /// The stage whose constant buffer named this texture. The same
@@ -164,7 +193,15 @@ pub struct TextureUpload {
     /// Rows per layer: the height in texels, or in blocks when compressed.
     pub rows: u32,
     /// The layers back to back, each `row_bytes * rows` long.
-    pub bytes: Vec<u8>,
+    ///
+    /// Shared rather than owned so that a cache hand-back costs a refcount
+    /// instead of copying 1.76 MiB, which is what an average draw reads.
+    pub bytes: std::sync::Arc<[u8]>,
+    /// What these bytes were read from — see [`TextureKey`].
+    pub key: TextureKey,
+    /// How far past `key.addr` the read reached, so a caller holding these
+    /// bytes knows which pages to watch.
+    pub source_len: u64,
     /// How the shader expects the channels rearranged. WebGPU has no
     /// per-texture component swizzle, so a backend applies this itself —
     /// in the sampling hook, where it costs a shuffle rather than a copy.
@@ -211,6 +248,25 @@ impl Uploads {
         ctx: &ExecCtx,
         banks: Banks<'_>,
         immediates: &[(ShaderStage, u16)],
+    ) -> Result<Uploads> {
+        Uploads::of_cached(engine, pipeline, ctx, banks, immediates, &mut |_| None)
+    }
+
+    /// [`Uploads::of`], letting the caller answer for a texture it has
+    /// already read.
+    ///
+    /// `cached` is asked once per distinct texture a draw samples, with the
+    /// key that decides its bytes; answering `Some` skips the deswizzle
+    /// entirely. The caller is the one that can know the answer is still
+    /// good, because it is the one that can watch the pages the bytes came
+    /// from — see `TextureUpload::source_len` and `Memory::mark_gpu_page`.
+    pub fn of_cached(
+        engine: &Engine3D,
+        pipeline: &Pipeline,
+        ctx: &ExecCtx,
+        banks: Banks<'_>,
+        immediates: &[(ShaderStage, u16)],
+        cached: &mut dyn FnMut(&TextureKey) -> Option<std::sync::Arc<[u8]>>,
     ) -> Result<Uploads> {
         let call = engine.last_draw;
         let index = if call.indexed {
@@ -294,7 +350,7 @@ impl Uploads {
             {
                 continue;
             }
-            textures.push(read_texture(engine, ctx, stage, immediate)?);
+            textures.push(read_texture(engine, ctx, stage, immediate, cached)?);
         }
 
         Ok(Uploads {
@@ -649,11 +705,15 @@ impl Targets {
 /// `TexCbIndex` names — a register the driver programs, to 15 under nouveau
 /// and 0 under deko3d — and *that* holds the bindless handle, which in turn
 /// indexes the TIC and TSC pools. Three levels, none of them optional.
+/// One GOB: the block-linear unit a surface's rows are padded up to.
+const GOB_BYTES: u64 = 512;
+
 fn read_texture(
     engine: &Engine3D,
     ctx: &ExecCtx,
     stage: ShaderStage,
     immediate: u16,
+    cached: &mut dyn FnMut(&TextureKey) -> Option<std::sync::Arc<[u8]>>,
 ) -> Result<TextureUpload> {
     let bank = u32::from(engine.tex_cb_index());
     let (addr, size) = engine.bound_constbuf(stage, bank).ok_or_else(|| {
@@ -686,6 +746,54 @@ fn read_texture(
             image.width, image.height
         )));
     }
+    let key = TextureKey {
+        addr: image.addr,
+        width: image.width,
+        height: image.height,
+        layers,
+        layer_stride: image.layer_stride,
+        row_bytes,
+        rows,
+        block_depth_gobs: image.block_depth_gobs,
+        layout: image.layout,
+        format,
+        srgb: image.srgb,
+    };
+    // How far the read reaches, so a caller holding the bytes knows which
+    // pages a guest write to them would land on. Block-linear pads a surface
+    // up, so the dense size is a floor rather than the answer: the offset of
+    // the last row's last byte is what the walk actually reaches, plus a GOB
+    // of slack, plus the stride to the last layer. Whichever is larger, since
+    // a volume interleaves its slices and addresses through neither.
+    let dense = u64::from(row_bytes) * u64::from(rows) * u64::from(layers);
+    let last = u64::from(image.layout.offset(
+        row_bytes.saturating_sub(1),
+        rows.saturating_sub(1),
+        row_bytes,
+    ));
+    let strided =
+        last + GOB_BYTES + u64::from(image.layer_stride) * u64::from(layers.saturating_sub(1));
+    let source_len = dense.max(strided);
+
+    if let Some(bytes) = cached(&key) {
+        return Ok(TextureUpload {
+            stage,
+            immediate,
+            handle,
+            format,
+            width: image.width,
+            height: image.height,
+            layers,
+            row_bytes,
+            rows,
+            bytes,
+            key,
+            source_len,
+            swizzle: image.swizzle,
+            sampler: descriptors.sampler,
+        });
+    }
+
     let mut bytes = Vec::with_capacity(total as usize);
     for layer in 0..layers {
         // A volume's slices interleave inside a block, so there is no base a
@@ -738,7 +846,9 @@ fn read_texture(
         layers,
         row_bytes,
         rows,
-        bytes,
+        bytes: std::sync::Arc::from(bytes),
+        key,
+        source_len,
         swizzle: image.swizzle,
         sampler: descriptors.sampler,
     })

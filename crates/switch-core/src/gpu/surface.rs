@@ -118,7 +118,7 @@ pub fn block_linear_volume_offset(
 }
 
 /// How a surface's rows are arranged in memory.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Layout {
     /// Plain rows of `pitch` bytes.
     Pitch { pitch: u32 },

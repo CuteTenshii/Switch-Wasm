@@ -95,7 +95,7 @@ use switch_core::gpu::renderer::{Flush, Renderer, Software};
 use switch_core::gpu::shader::compiled::Compiled;
 use switch_core::gpu::shader::wgsl::{self, Coverage, Layout, Stage, Translation};
 use switch_core::gpu::surface::{SampleGrid, MAX_SAMPLES};
-use switch_core::gpu::upload::{Banks, DepthKind, Target, Targets, Uploads};
+use switch_core::gpu::upload::{Banks, DepthKind, Target, Targets, TextureKey, Uploads};
 use switch_core::{Error, Result};
 
 /// The memory a `ldg` reads, resolved from the descriptor its address was
@@ -815,6 +815,25 @@ pub struct Gpu {
     times: Option<Times>,
     /// What every draw's `Uploads::of` read, by category.
     uploaded: UploadBytes,
+    /// Texture bytes already deswizzled, by what decides them.
+    ///
+    /// A title samples a handful of images over and over — 96.5% of
+    /// everything `Uploads::of` lifts is texture bytes, 1.76 MiB a draw, and
+    /// nearly all of it the same images read again. An entry lives until the
+    /// guest writes to the memory behind it, which `Memory`'s watched pages
+    /// report.
+    texture_cache: std::collections::HashMap<TextureKey, std::sync::Arc<[u8]>>,
+    /// Which cached textures a guest page holds bytes for, so a write to it
+    /// evicts them without walking the cache. A key left here after its entry
+    /// has gone evicts nothing, which is why nothing prunes these.
+    page_owners: std::collections::HashMap<u32, Vec<TextureKey>>,
+    cached_bytes: u64,
+    pub texture_hits: u64,
+    pub texture_misses: u64,
+    /// Textures `prepare` read and has not watched yet. `prepare` is handed a
+    /// shared `ExecCtx` and watching a page needs a mutable one, so the two
+    /// halves happen either side of it.
+    to_remember: Vec<(TextureKey, std::sync::Arc<[u8]>, u64)>,
     /// `GPU_ONLY=<i>` renders only the i-th draw of each frame here and
     /// leaves the rest to the rasterizer; `GPU_ONLY=<a>..<b>` renders the
     /// half-open range of them.
@@ -827,6 +846,14 @@ pub struct Gpu {
     only: Option<std::ops::Range<u32>>,
 }
 
+/// How much deswizzled texture to keep. A frame's working set is a handful of
+/// images at 1.76 MiB each, so this is generous on purpose: the point is to
+/// bound a run that walks endlessly over fresh textures, not to ration a
+/// normal one.
+const TEXTURE_CACHE_BYTES: u64 = 256 << 20;
+/// Guest pages are 4 KiB, the granularity `Memory` watches writes at.
+const PAGE_BITS: u32 = 12;
+
 /// What `Uploads::of` lifted out of guest memory over a whole run.
 #[derive(Debug, Default, Clone, Copy)]
 struct UploadBytes {
@@ -837,13 +864,18 @@ struct UploadBytes {
 }
 
 impl UploadBytes {
-    /// What one draw lifted, by what it was.
+    /// What one draw lifted out of guest memory, by what it was.
     ///
     /// Bytes rather than milliseconds: a byte read out of guest memory is the
-    /// same byte under V8, and it is what a cache would be avoiding. The
-    /// `upload` timer says the reading costs 4.66 ms a draw and says nothing
-    /// about which of the four is worth remembering.
-    fn add(&mut self, uploads: &Uploads) {
+    /// same byte under V8, and counting them is what showed textures to be
+    /// 96.5% of this, and so the only one of the four worth caching.
+    ///
+    /// Textures are counted by [`UploadBytes::add_texture`] instead, and only
+    /// when one was really read. A draw served from the cache never touched
+    /// guest memory for it, and counting it here would report reads that did
+    /// not happen — which is exactly what this said before the cache existed
+    /// to make the two differ.
+    fn add_but_textures(&mut self, uploads: &Uploads) {
         self.vertex += uploads
             .vertex
             .iter()
@@ -855,11 +887,10 @@ impl UploadBytes {
             .iter()
             .map(|c| c.bytes.len() as u64)
             .sum::<u64>();
-        self.textures += uploads
-            .textures
-            .iter()
-            .map(|t| t.bytes.len() as u64)
-            .sum::<u64>();
+    }
+
+    fn add_texture(&mut self, bytes: usize) {
+        self.textures += bytes as u64;
     }
 }
 
@@ -900,11 +931,13 @@ impl Drop for Gpu {
         let u = self.uploaded;
         eprintln!(
             "[gpu] read {:.1} MiB of textures, {:.1} MiB of vertices, {:.1} MiB of constants, \
-             {:.1} MiB of indices",
+             {:.1} MiB of indices; {} texture reads served from cache, {} not",
             mib(u.textures),
             mib(u.vertex),
             mib(u.constants),
             mib(u.index),
+            self.texture_hits,
+            self.texture_misses,
         );
         if let Some(t) = self.times {
             let ms = |v: u128| v as f64 / 1000.0;
@@ -1011,6 +1044,12 @@ impl Gpu {
             times: (cfg!(target_arch = "wasm32") || switch_core::env_flag!("GPU_TIMES"))
                 .then(Times::default),
             uploaded: UploadBytes::default(),
+            texture_cache: std::collections::HashMap::new(),
+            page_owners: std::collections::HashMap::new(),
+            cached_bytes: 0,
+            texture_hits: 0,
+            texture_misses: 0,
+            to_remember: Vec::new(),
             only: std::env::var("GPU_ONLY")
                 .ok()
                 .as_deref()
@@ -2283,7 +2322,7 @@ impl Gpu {
         use switch_core::gpu::pipeline::Format;
         // (bytes per texel, where red starts in one, how wide red is).
         let (unit, at, red) = match upload.format {
-            Format::R32Float => return Ok(upload.bytes.clone()),
+            Format::R32Float => return Ok(upload.bytes.to_vec()),
             Format::R16Unorm => (2, 0, Red::Unorm16),
             Format::R16Float => (2, 0, Red::Float16),
             Format::R8Unorm => (1, 0, Red::Unorm8),
@@ -3129,6 +3168,79 @@ impl Gpu {
     /// Give back everything the draw that has just finished made — whether it
     /// was submitted or handed to the rasterizer, nothing will read any of it
     /// again.
+    /// Drop every cached texture the guest has written over.
+    ///
+    /// The pages come from the same bitmap the JIT drains, so this sees pages
+    /// nothing here cached from as well; those find no owner and cost a miss
+    /// in a hash map.
+    fn evict_written(&mut self, ctx: &mut ExecCtx) {
+        if !ctx.mem.has_dirty_gpu() {
+            return;
+        }
+        for page in ctx.mem.dirty_gpu_pages() {
+            let Some(keys) = self.page_owners.remove(&page) else {
+                continue;
+            };
+            for key in keys {
+                if let Some(bytes) = self.texture_cache.remove(&key) {
+                    self.cached_bytes -= bytes.len() as u64;
+                }
+            }
+        }
+    }
+
+    /// Keep what this draw read, and watch the memory it came from.
+    ///
+    /// A texture whose source is not wholly mapped is not kept: the pages
+    /// that would report a write to it cannot be named, so trusting the bytes
+    /// later would be trusting memory nothing is watching.
+    fn remember_textures(&mut self, ctx: &mut ExecCtx) {
+        for (key, bytes, source_len) in std::mem::take(&mut self.to_remember) {
+            if self.texture_cache.contains_key(&key) {
+                continue;
+            }
+            self.texture_misses += 1;
+            let end = key.addr.saturating_add(source_len);
+            let mut pages: Vec<u32> = Vec::new();
+            let mut at = key.addr;
+            let mut mapped = true;
+            while at < end {
+                let Some((cpu, run)) = ctx.vmm.translate(at) else {
+                    mapped = false;
+                    break;
+                };
+                let take = run.min(end - at);
+                if take == 0 {
+                    mapped = false;
+                    break;
+                }
+                let first = u64::from(cpu) >> PAGE_BITS;
+                let last = (u64::from(cpu) + take - 1) >> PAGE_BITS;
+                pages.extend((first..=last).map(|p| p as u32));
+                at += take;
+            }
+            if !mapped {
+                continue;
+            }
+            // Whole-cache rather than least-recently-used: the working set is
+            // a handful of images, so a run that reaches this is one whose
+            // textures have changed wholesale, and picking victims out of a
+            // set that is all about to be replaced buys nothing.
+            let len = bytes.len() as u64;
+            if self.cached_bytes + len > TEXTURE_CACHE_BYTES {
+                self.texture_cache.clear();
+                self.page_owners.clear();
+                self.cached_bytes = 0;
+            }
+            for &page in &pages {
+                ctx.mem.mark_gpu_page(page << PAGE_BITS);
+                self.page_owners.entry(page).or_default().push(key);
+            }
+            self.texture_cache.insert(key, bytes);
+            self.cached_bytes += len;
+        }
+    }
+
     fn release_scratch(&mut self) {
         for made in self.scratch.drain(..) {
             match made {
@@ -3404,11 +3516,35 @@ impl Gpu {
                 .iter()
                 .map(|&b| (ShaderStage::Fragment, u32::from(b))),
         );
+        // Out of `self` and back, because the closure below holds it while
+        // `timed!` wants `self` for the clock.
+        let mut cache = std::mem::take(&mut self.texture_cache);
+        let mut hits = 0u64;
         let uploads = timed!(self, upload, {
-            Uploads::of(engine, &state, ctx, Banks::Read(&banks), &immediates)
-        })
-        .map_err(|e| format!("{e:?}"))?;
-        self.uploaded.add(&uploads);
+            Uploads::of_cached(
+                engine,
+                &state,
+                ctx,
+                Banks::Read(&banks),
+                &immediates,
+                &mut |key| {
+                    let hit = cache.get(key).cloned();
+                    hits += u64::from(hit.is_some());
+                    hit
+                },
+            )
+        });
+        self.texture_cache = cache;
+        self.texture_hits += hits;
+        let uploads = uploads.map_err(|e| format!("{e:?}"))?;
+        self.uploaded.add_but_textures(&uploads);
+        for upload in &uploads.textures {
+            if !self.texture_cache.contains_key(&upload.key) {
+                self.uploaded.add_texture(upload.bytes.len());
+                self.to_remember
+                    .push((upload.key, upload.bytes.clone(), upload.source_len));
+            }
+        }
 
         // The swizzle is in the descriptor, which is guest memory the draw
         // points at, so the translation cannot know it and the layout has to
@@ -3548,6 +3684,9 @@ impl Renderer for Gpu {
             self.flush(ctx)?;
             return self.software.draw(engine, ctx);
         }
+        // Anything the guest wrote since the last draw is no longer what was
+        // read from it, whoever wrote it and whatever they meant by it.
+        self.evict_written(ctx);
         let mut route = None;
         let attempt = match self.prepare(engine, &*ctx) {
             Ok(prepared) => {
@@ -3556,6 +3695,10 @@ impl Renderer for Gpu {
             }
             Err(why) => Err(why),
         };
+        // What `prepare` read, now that there is a mutable `ExecCtx` to watch
+        // its pages through. After the draw rather than before: a draw that
+        // failed read the same bytes, and they are as reusable either way.
+        self.remember_textures(ctx);
         // Whether it was submitted or abandoned, nothing reads this draw's
         // buffers and textures again — see [`Gpu::scratch`].
         self.release_scratch();
@@ -3716,6 +3859,7 @@ impl Renderer for Gpu {
             "{{\"backend\":\"device\",\"drawn\":{},\"fallbacks\":{},\"pipelines\":{},\
              \"modules\":{},\"held\":{},\"evicted\":{},\"pending\":{},\
              \"read\":{{\"textures\":{},\"vertex\":{},\"constants\":{},\"index\":{}}},\
+             \"textureHits\":{},\"textureMisses\":{},\
              \"softwareFrame\":{},\"gaveUp\":{},\"reasons\":[{}]{}}}",
             self.drawn,
             self.fallbacks,
@@ -3728,6 +3872,8 @@ impl Renderer for Gpu {
             self.uploaded.vertex,
             self.uploaded.constants,
             self.uploaded.index,
+            self.texture_hits,
+            self.texture_misses,
             self.software_frame,
             self.gave_up,
             reasons.join(","),

@@ -88,6 +88,10 @@ $('btn-gpustats').addEventListener('click', async () => {
         `${mib(r.constants)} MiB constants, ${mib(r.index)} MiB indices`,
       'dim',
     );
+    const hits = g.textureHits ?? 0;
+    const misses = g.textureMisses ?? 0;
+    const rate = hits + misses ? ((hits * 100) / (hits + misses)).toFixed(1) : '0';
+    log(`  texture cache: ${hits} hits, ${misses} misses (${rate}%)`, 'dim');
   }
   const t = g.times;
   if (t) {
