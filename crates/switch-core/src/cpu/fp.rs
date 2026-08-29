@@ -689,3 +689,281 @@ impl Cpu {
         self.nzcv = (n << 31) | (z << 30) | (c << 29) | (v << 28);
     }
 }
+
+/// One unpacked float: `value = 1.mantissa × 2^exponent`, with the mantissa's
+/// binary point at [`NORMALIZED_POINT`] so both widths share one routine.
+struct Unpacked {
+    sign: bool,
+    exponent: i32,
+    mantissa: u64,
+}
+
+/// Where the binary point sits in an unpacked mantissa. High enough that a
+/// double's 52 bits fit under it with room to normalise a subnormal.
+const NORMALIZED_POINT: u32 = 62;
+
+/// `(mantissa width, exponent bias)` for a 32- or 64-bit float.
+fn format(esize: u32) -> (u32, i32) {
+    if esize == 64 {
+        (52, 1023)
+    } else {
+        (23, 127)
+    }
+}
+
+fn unpack(bits: u64, esize: u32) -> Unpacked {
+    let (width, bias) = format(esize);
+    let sign = (bits >> (esize - 1)) & 1 == 1;
+    let field = ((bits >> width) & ((1 << (esize - 1 - width)) - 1)) as i32;
+    let frac = bits & ((1u64 << width) - 1);
+    if field == 0 {
+        // Subnormal: shift the leading one up to the point, paying an
+        // exponent for each place, which is what makes the estimate of a
+        // subnormal the estimate of the normal number it equals.
+        let mut mantissa = frac << (NORMALIZED_POINT - width);
+        let mut exponent = 1 - bias;
+        while mantissa != 0 && mantissa & (1 << NORMALIZED_POINT) == 0 {
+            mantissa <<= 1;
+            exponent -= 1;
+        }
+        Unpacked {
+            sign,
+            exponent,
+            mantissa,
+        }
+    } else {
+        Unpacked {
+            sign,
+            exponent: field - bias,
+            mantissa: (1 << NORMALIZED_POINT) | (frac << (NORMALIZED_POINT - width)),
+        }
+    }
+}
+
+fn is_nan(bits: u64, esize: u32) -> bool {
+    let (width, _) = format(esize);
+    let field = (bits >> width) & ((1 << (esize - 1 - width)) - 1);
+    field == ((1 << (esize - 1 - width)) - 1) && bits & ((1u64 << width) - 1) != 0
+}
+
+fn is_infinite(bits: u64, esize: u32) -> bool {
+    let (width, _) = format(esize);
+    let field = (bits >> width) & ((1 << (esize - 1 - width)) - 1);
+    field == ((1 << (esize - 1 - width)) - 1) && bits & ((1u64 << width) - 1) == 0
+}
+
+fn quiet_nan(bits: u64, esize: u32) -> u64 {
+    let (width, _) = format(esize);
+    bits | (1 << (width - 1))
+}
+
+fn default_nan(esize: u32) -> u64 {
+    if esize == 64 {
+        0x7FF8_0000_0000_0000
+    } else {
+        0x7FC0_0000
+    }
+}
+
+fn infinity(sign: bool, esize: u32) -> u64 {
+    let (width, bias) = format(esize);
+    let field = ((2 * bias) + 1) as u64;
+    ((sign as u64) << (esize - 1)) | (field << width)
+}
+
+fn zero(sign: bool, esize: u32) -> u64 {
+    (sign as u64) << (esize - 1)
+}
+
+/// ARM's `RecipEstimate`: a u0.9 input in [0.5, 1) to a u0.8 output with an
+/// implied leading one.
+fn recip_estimate(scaled: u64) -> u8 {
+    let a = (scaled - 256) + 256;
+    let a = a * 2 + 1;
+    let b = (1u64 << 19) / a;
+    ((b + 1) / 2) as u8
+}
+
+/// ARM's `RecipSqrtEstimate`: a u0.9 input in [0.25, 1) to the same u0.8 form.
+///
+/// Defined by search rather than by a formula — the largest `b` whose square
+/// still fits under the input's reciprocal — which is why it is a table on
+/// hardware and is cached here.
+fn recip_sqrt_estimate(scaled: u64) -> u8 {
+    static TABLE: std::sync::OnceLock<[u8; 512]> = std::sync::OnceLock::new();
+    let table = TABLE.get_or_init(|| {
+        let mut table = [0u8; 512];
+        for (index, slot) in table.iter_mut().enumerate().skip(128) {
+            // To u.10 with 8 significant bits, forced odd.
+            let a = if index < 256 {
+                (index as u64) * 2 + 1
+            } else {
+                ((index as u64) | 1) * 2
+            };
+            let mut b = 512u64;
+            while a * (b + 1) * (b + 1) < (1 << 28) {
+                b += 1;
+            }
+            *slot = ((b + 1) / 2) as u8;
+        }
+        table
+    });
+    table[scaled as usize]
+}
+
+/// `FRECPE`: the architectural **estimate**, not a division.
+///
+/// It was a division here, on the grounds that the Newton-Raphson step a
+/// caller follows it with converges either way. That is true of the maths and
+/// false of the machine: hardware's estimate is 8 bits and a division is 24,
+/// so every result downstream differs in its low bits — and a title that
+/// compares one against a threshold, or hashes it, or just rounds it, takes a
+/// different branch than it does on a console. `1/1.5` is `0x3f2aaaab` exactly
+/// and `0x3f2a8000` on hardware.
+pub(super) fn recip_estimate_bits(bits: u64, esize: u32) -> u64 {
+    let (width, bias) = format(esize);
+    if is_nan(bits, esize) {
+        return quiet_nan(bits, esize);
+    }
+    let value = unpack(bits, esize);
+    if is_infinite(bits, esize) {
+        return zero(value.sign, esize);
+    }
+    if value.mantissa == 0 {
+        return infinity(value.sign, esize);
+    }
+    let exponent_min = 1 - bias;
+    if value.exponent < exponent_min - 2 {
+        // Too small to have a reciprocal in range; round-to-nearest takes it
+        // to infinity rather than to the largest normal.
+        return infinity(value.sign, esize);
+    }
+    let scaled = value.mantissa >> (NORMALIZED_POINT - 8);
+    let mut estimate = u64::from(recip_estimate(scaled)) << (width - 8);
+    let mut result_exponent = -(value.exponent + 1);
+    if result_exponent < exponent_min {
+        // The reciprocal is subnormal: put the implicit one back and shift it
+        // down into the fraction, which is what a subnormal encoding is.
+        let implicit = 1u64 << width;
+        if result_exponent == exponent_min - 1 {
+            estimate = (estimate | implicit) >> 1;
+        } else {
+            estimate = (estimate | implicit) >> 2;
+            result_exponent += 1;
+        }
+    }
+    let field = (result_exponent + bias) as u64;
+    ((value.sign as u64) << (esize - 1)) | (field << width) | (estimate & ((1u64 << width) - 1))
+}
+
+/// `FRSQRTE`: the same estimate for the reciprocal square root.
+///
+/// A negative input is not a sign-preserving NaN but the **default** NaN,
+/// which is the other half of what this used to get wrong.
+pub(super) fn rsqrt_estimate_bits(bits: u64, esize: u32) -> u64 {
+    let (width, bias) = format(esize);
+    if is_nan(bits, esize) {
+        return quiet_nan(bits, esize);
+    }
+    let value = unpack(bits, esize);
+    if value.mantissa == 0 {
+        return infinity(value.sign, esize);
+    }
+    if value.sign {
+        return default_nan(esize);
+    }
+    if is_infinite(bits, esize) {
+        return zero(false, esize);
+    }
+    let result_exponent = -(value.exponent + 1) >> 1;
+    // An odd exponent leaves a factor of two behind, and the table takes it as
+    // an extra bit of input rather than as a scale on the answer.
+    let odd = value.exponent.rem_euclid(2) == 0;
+    let scaled = value.mantissa >> (NORMALIZED_POINT - if odd { 7 } else { 8 });
+    let estimate = u64::from(recip_sqrt_estimate(scaled)) << (width - 8);
+    let field = (result_exponent + bias) as u64;
+    (field << width) | (estimate & ((1u64 << width) - 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{recip_estimate_bits, rsqrt_estimate_bits};
+
+    /// The values `qemu-aarch64` produces for `frecpe v3.4s, v10.4s` over
+    /// (1.5, -2.25, 3.0, 0.5) — the four that `tools/difftest.py` runs.
+    ///
+    /// Pinned here as well because the difference is subtle enough to be
+    /// "fixed" back: an exact reciprocal passes every plausibility check a
+    /// reader applies to `1/1.5`, and differs from the hardware in the eight
+    /// low bits of every result.
+    #[test]
+    fn the_reciprocal_estimate_is_eight_bits_wide_like_the_hardware() {
+        for (input, expected) in [
+            (1.5f32, 0x3F2A_8000u32),
+            (-2.25, 0xBEE3_0000),
+            (3.0, 0x3EAA_8000),
+            (0.5, 0x3FFF_8000),
+        ] {
+            let got = recip_estimate_bits(u64::from(input.to_bits()), 32) as u32;
+            assert_eq!(got, expected, "frecpe {input}: {got:#010x}");
+            // The exact reciprocal is a different number, which is the whole
+            // point: nothing below the estimate's eight bits survives.
+            assert_ne!(f32::from_bits(got), 1.0 / input);
+        }
+        // The double form reads the same table, so its mantissa is the f32
+        // one shifted into a wider field rather than a more accurate answer.
+        assert_eq!(
+            recip_estimate_bits(1.5f64.to_bits(), 64),
+            0x3FE5_5000_0000_0000
+        );
+    }
+
+    #[test]
+    fn the_reciprocal_square_root_of_a_negative_is_the_default_nan() {
+        for (input, expected) in [
+            (1.5f32, 0x3F51_0000u32),
+            (-2.25, 0x7FC0_0000),
+            (3.0, 0x3F13_8000),
+            (0.5, 0x3FB4_8000),
+        ] {
+            let got = rsqrt_estimate_bits(u64::from(input.to_bits()), 32) as u32;
+            assert_eq!(got, expected, "frsqrte {input}: {got:#010x}");
+        }
+        // Not a sign-preserving NaN: the sign bit is what a negative input
+        // used to leave set here, and no hardware NaN comes back that way.
+        assert_eq!(rsqrt_estimate_bits((-1.0f64).to_bits(), 64) >> 63, 0);
+    }
+
+    #[test]
+    fn the_estimates_answer_the_edges_the_way_a_divide_cannot() {
+        // Zero divides, infinity vanishes, and both keep the sign they came
+        // with — except a negative square root, which has no sign to keep.
+        assert_eq!(
+            recip_estimate_bits(0.0f32.to_bits().into(), 32),
+            0x7F80_0000
+        );
+        assert_eq!(
+            recip_estimate_bits((-0.0f32).to_bits().into(), 32),
+            0xFF80_0000
+        );
+        assert_eq!(
+            recip_estimate_bits(f32::INFINITY.to_bits().into(), 32),
+            0x0000_0000
+        );
+        assert_eq!(
+            recip_estimate_bits(f32::NEG_INFINITY.to_bits().into(), 32),
+            0x8000_0000
+        );
+        assert_eq!(
+            rsqrt_estimate_bits(f32::INFINITY.to_bits().into(), 32),
+            0x0000_0000
+        );
+        assert_eq!(
+            rsqrt_estimate_bits(0.0f32.to_bits().into(), 32),
+            0x7F80_0000
+        );
+        // A signalling NaN comes back quiet, and keeps its payload.
+        let snan = 0x7F80_0001u32;
+        assert_eq!(recip_estimate_bits(snan.into(), 32) as u32, 0x7FC0_0001);
+    }
+}

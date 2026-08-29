@@ -2068,6 +2068,16 @@ fn hid_sys_is_its_own_interface_and_answers_before_any_command() {
     ipc_request(&mut cpu, HIDSYS, 4, Some(server), 503);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
 
+    // GetMaskedSupportedNpadStyleSet(u64 aruid) -> NpadStyleSet. This is what
+    // the system permits, not what the caller asked for -- so it has to name
+    // controllers even though nothing has called SetSupportedNpadStyleSet,
+    // and handheld above all, since that is the mode this console reports.
+    ipc_request_with_payload(&mut cpu, HIDSYS, server, 310, &[0u8; 8]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+    let styles = cpu.mem.read_u32(tls + 0x30).unwrap();
+    assert_ne!(styles & (1 << 1), 0, "handheld is not supported");
+    assert_ne!(styles & (1 << 0), 0, "a full-key pad is not supported");
+
     // SetNpadSystemExtStateEnabled(bool, u64 aruid), the same: this console
     // publishes the SystemExt style already, so there is no permission left
     // for it to grant.
@@ -8968,5 +8978,45 @@ fn bic_and_friends_invert_after_shifting() {
             0xFFFF_FFFF_FFFF_FFF0,
             "eon inverted before shifting"
         );
+    }
+}
+
+/// A sign-extending load into a **W** register zeroes the top half.
+///
+/// `opc` picks the destination width — 10 is the X form, 11 the W form — and
+/// this decoder read only the width of the *access*, so both forms sign-
+/// extended all the way to 64 bits. `ldrsh w6` of `0xff00` left
+/// `0xffffffffffffff00` where hardware leaves `0x00000000ffffff00`, which is
+/// invisible until something reads the X form of a register it filled: the
+/// same class of bug as the `movk w` that forgot to narrow, and found the same
+/// way, by `tools/difftest.py --scalar` against qemu.
+#[test]
+fn a_signed_load_into_a_w_register_narrows_like_every_other_w_write() {
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.write_u16(0x2000, 0xFF00).unwrap();
+    cpu.mem.write_u8(0x2002, 0x80).unwrap();
+    cpu.set_reg(0, 0x2000);
+    let code = &[
+        0x79c0_0001, // ldrsh w1, [x0]
+        0x7980_0002, // ldrsh x2, [x0]
+        0x39c0_0803, // ldrsb w3, [x0, #2]
+        0x3980_0804, // ldrsb x4, [x0, #2]
+    ];
+    drop(cpu);
+    // Both engines: the translator resolves the same classifier once per
+    // instruction, so neither can disagree about which form this was.
+    for jit in [true, false] {
+        let mut cpu = cpu_at(0x1000);
+        cpu.set_jit_enabled(jit);
+        cpu.mem.map_zero(0x2000, 0x100).unwrap();
+        cpu.mem.write_u16(0x2000, 0xFF00).unwrap();
+        cpu.mem.write_u8(0x2002, 0x80).unwrap();
+        cpu.set_reg(0, 0x2000);
+        let cpu = run_program(cpu, 0x1000, code);
+        assert_eq!(cpu.read_x(1), 0x0000_0000_FFFF_FF00, "ldrsh w (jit={jit})");
+        assert_eq!(cpu.read_x(2), 0xFFFF_FFFF_FFFF_FF00, "ldrsh x (jit={jit})");
+        assert_eq!(cpu.read_x(3), 0x0000_0000_FFFF_FF80, "ldrsb w (jit={jit})");
+        assert_eq!(cpu.read_x(4), 0xFFFF_FFFF_FFFF_FF80, "ldrsb x (jit={jit})");
     }
 }

@@ -1909,9 +1909,11 @@ impl Cpu {
                 });
                 Ok(true)
             }
-            // FSQRT, the FRINTx family and the reciprocal estimates. FRECPE /
-            // FRSQRTE are modelled exactly rather than as the architectural
-            // 8-bit estimate; Newton-Raphson refinement converges either way.
+            // FSQRT, the FRINTx family and the reciprocal estimates. FRECPE
+            // and FRSQRTE are the architecture's 8-bit estimates, in
+            // `fp::recip_estimate_bits` / `fp::rsqrt_estimate_bits`: they used
+            // to be a division and a reciprocal square root here, which is a
+            // different number in every low bit.
             0x7f | 0x18 | 0x19 | 0x38 | 0x39 | 0x58 | 0x59 | 0x79 | 0x3d | 0x7d => {
                 let mode = fpcr_rounding(self.fpcr);
                 self.simd_lane_unary_n(rd, rn, lanes(esize), esize, move |v| {
@@ -1925,8 +1927,13 @@ impl Cpu {
                             0x39 => a.trunc(),           // FRINTZ
                             0x58 => a.round(),           // FRINTA
                             0x59 | 0x79 => round_to_integral(a, mode), // FRINTX / FRINTI
-                            0x3d => 1.0 / a,             // FRECPE
-                            _ => 1.0 / a.sqrt(),         // FRSQRTE
+                            0x3d => {
+                                return super::fp::recip_estimate_bits(v, 64);
+                            }
+                            0x7d => {
+                                return super::fp::rsqrt_estimate_bits(v, 64);
+                            }
+                            _ => unreachable!("unhandled two-register misc key"),
                         };
                         r.to_bits()
                     } else {
@@ -1939,8 +1946,13 @@ impl Cpu {
                             0x39 => a.trunc(),
                             0x58 => a.round(),
                             0x59 | 0x79 => round_to_integral(f64::from(a), mode) as f32,
-                            0x3d => 1.0 / a,
-                            _ => 1.0 / a.sqrt(),
+                            0x3d => {
+                                return super::fp::recip_estimate_bits(v & 0xFFFF_FFFF, 32);
+                            }
+                            0x7d => {
+                                return super::fp::rsqrt_estimate_bits(v & 0xFFFF_FFFF, 32);
+                            }
+                            _ => unreachable!("unhandled two-register misc key"),
                         };
                         u64::from(r.to_bits())
                     }

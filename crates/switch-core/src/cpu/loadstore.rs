@@ -38,9 +38,18 @@ pub(super) enum Acc {
     Load16,
     Load32,
     Load64,
+    /// The sign-extending loads with a **64-bit** destination (`opc == 10`).
     LoadS8,
     LoadS16,
     LoadS32,
+    /// The same loads with a **32-bit** destination (`opc == 11`): the value
+    /// is sign-extended to 32 bits and the top half of the register is then
+    /// zeroed, like every other write to a W register. Sign-extending all the
+    /// way to 64 instead is invisible until something reads the X form --
+    /// `ldrsh w6, [x29, #18]` of `0xff00` left `0xffffffffffffff00` here
+    /// where hardware leaves `0x00000000ffffff00`.
+    LoadS8To32,
+    LoadS16To32,
     /// `PRFM`, a hint with no architectural effect. Still an access, because
     /// the addressing mode's writeback happens whether or not it does.
     Prefetch,
@@ -79,8 +88,10 @@ impl Acc {
             (0b01, 0b01) => Acc::Load16,
             (0b01, 0b10) => Acc::Load32,
             (0b01, _) => Acc::Load64,
-            (_, 0b00) => Acc::LoadS8,
-            (_, 0b01) => Acc::LoadS16,
+            (0b10, 0b00) => Acc::LoadS8,
+            (0b10, 0b01) => Acc::LoadS16,
+            (0b11, 0b00) => Acc::LoadS8To32,
+            (0b11, 0b01) => Acc::LoadS16To32,
             (_, _) => Acc::LoadS32,
         }
     }
@@ -848,6 +859,14 @@ impl Cpu {
             Acc::LoadS16 => {
                 let v = u64::from(self.mem.read_u16(addr)?);
                 self.set_reg_at(rt, sext_u64(v, 16));
+            }
+            Acc::LoadS8To32 => {
+                let v = u64::from(self.mem.read_u8(addr)?);
+                self.set_reg_at(rt, u64::from(sext_u64(v, 8) as u32));
+            }
+            Acc::LoadS16To32 => {
+                let v = u64::from(self.mem.read_u16(addr)?);
+                self.set_reg_at(rt, u64::from(sext_u64(v, 16) as u32));
             }
             Acc::LoadS32 => {
                 let v = u64::from(self.mem.read_u32(addr)?);
