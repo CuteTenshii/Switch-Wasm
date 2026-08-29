@@ -10,7 +10,7 @@ import { log } from './log';
 import { call, readLastError } from './rpc';
 import { saveFlush } from './saves';
 import { sdFlush } from './sdcard';
-import { panelOpen, setPanel, setState } from './shell';
+import { loaded, panelOpen, setPanel, setState } from './shell';
 import { holdWakeLock, releaseWakeLock } from './wakelock';
 
 // Run in worker slices so the page can paint and input can reach the emulator
@@ -50,8 +50,18 @@ function setRunButton(isRunning: boolean): void {
   $('run-label').textContent = isRunning ? 'Pause' : 'Run';
 }
 
+// Both transport actions are reachable from the keyboard as well as from the
+// two buttons `setState` disables, so the refusal lives here rather than on
+// the buttons alone.
+function nothingLoaded(): boolean {
+  if (loaded()) return false;
+  log('Nothing is loaded - open a .nro, .elf, .nsp, .xci or .nca to boot one.', 'dim');
+  return true;
+}
+
 export async function run(): Promise<void> {
   if (running) { pauseRequested = true; return; }
+  if (nothingLoaded()) return;
   running = true;
   pauseRequested = false;
   aborted = false;
@@ -142,6 +152,7 @@ $('btn-run').addEventListener('click', run);
 
 $('btn-step').addEventListener('click', async () => {
   if (running) { pauseRequested = true; return; }
+  if (nothingLoaded()) return;
   const r = await call('run', 1);
   await finishRun(r, true);
   if (traceEnabled() && r >= 0) {
@@ -153,9 +164,20 @@ $('btn-step').addEventListener('click', async () => {
 // Space toggles run/pause and backtick toggles the panel - but not while the
 // user is typing into one of the panel's inputs.
 window.addEventListener('keydown', (e) => {
-  if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName || '')) return;
-  if (e.code === 'Space') { e.preventDefault(); run(); }
-  else if (e.code === 'Backquote') { e.preventDefault(); setPanel(!panelOpen()); }
+  const focused = document.activeElement;
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test(focused?.tagName || '')) return;
+  if (e.code === 'Space') {
+    // Space is also how a keyboard presses whatever has the focus - a button,
+    // a section's <summary>, a NAND Launch row - so the transport only gets it
+    // when nothing else holds it. Taking it unconditionally meant tabbing to
+    // Reset and pressing Space ran the console instead of resetting it.
+    if (focused && focused !== document.body && focused !== document.documentElement) return;
+    e.preventDefault();
+    run();
+  } else if (e.code === 'Backquote') {
+    e.preventDefault();
+    setPanel(!panelOpen());
+  }
 });
 
 export async function drainOutput(): Promise<void> {

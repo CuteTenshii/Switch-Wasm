@@ -13,14 +13,35 @@ if (!ctx) throw new Error('this browser has no 2d canvas context');
 export const screenCtx = ctx;
 
 const stateEl = $('state');
+const runEl = $<HTMLButtonElement>('btn-run');
+const stepEl = $<HTMLButtonElement>('btn-step');
 
 /** What the chip in the top bar says, and what `[data-state]` styles. */
 export type EmuState = 'idle' | 'loading' | 'loaded' | 'running' | 'paused' | 'halted' | 'fault';
 
+let state: EmuState = 'idle';
+
+/** Whether there is a program in the session for the transport to act on.
+ *
+ * `idle` is a console with nothing loaded and `loading` one still being
+ * handed a title. In both the guest's pc is 0 and guest memory there reads
+ * zeroes, so Run and Step would execute those zeroes and report the fault as
+ * if a title had crashed. */
+export function loaded(): boolean {
+  return state !== 'idle' && state !== 'loading';
+}
+
 export function setState(text: EmuState): void {
+  state = text;
   stateEl.textContent = text;
   stateEl.dataset.state = text;
+  runEl.disabled = !loaded();
+  stepEl.disabled = !loaded();
 }
+
+// index.html draws the transport live, and the machine it acts on is empty
+// until something is loaded into it.
+setState('idle');
 
 export function showOverlay(show: boolean): void {
   overlayEl.classList.toggle('hidden', !show);
