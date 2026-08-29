@@ -439,12 +439,24 @@ impl Target {
         // nothing, because a block-linear surface is padded out to whole
         // blocks and those bytes are not this surface's to zero.
         if let Some((cpu, mut raw)) = self.mapped(ctx)? {
-            let unit = self.unit as usize;
+            // A run at a time, not a texel: `run_at` answers where a byte
+            // lands *and* how far from there is contiguous, which inside a GOB
+            // is 16 bytes — four pixels at 32 bits — and a whole row for a
+            // pitch surface. This is the walk `Gpu::present` already makes,
+            // and it is the one that runs every frame: a readback lands here.
+            let width = per_row * self.unit;
             for y in 0..self.rows {
-                for x in 0..per_row {
-                    let at = self.layout.offset(x * self.unit, y, self.row_bytes) as usize;
-                    let from = ((y * self.row_bytes) + x * self.unit) as usize;
-                    raw[at..at + unit].copy_from_slice(&rows[from..from + unit]);
+                let mut x = 0;
+                while x < width {
+                    let (at, run) = self.layout.run_at(x, y, self.row_bytes);
+                    let take = run.min(width - x) as usize;
+                    if take == 0 {
+                        break;
+                    }
+                    let at = at as usize;
+                    let from = ((y * self.row_bytes) + x) as usize;
+                    raw[at..at + take].copy_from_slice(&rows[from..from + take]);
+                    x += take as u32;
                 }
             }
             return ctx.write_span(cpu, &raw);
@@ -1065,11 +1077,20 @@ fn deswizzle(
     if let Some(cpu) = ctx.span(base, swizzled) {
         let mut raw = vec![0u8; swizzled as usize];
         ctx.read_span(cpu, &mut raw)?;
-        let unit = unit as usize;
+        // The same run-at-a-time walk `Target::write` makes, in the other
+        // direction — `out` is built in order, so a run appends.
+        let width = per_row * unit;
         for y in 0..rows {
-            for x in 0..per_row {
-                let at = layout.offset(x * unit as u32, y, row_bytes) as usize;
-                out.extend_from_slice(&raw[at..at + unit]);
+            let mut x = 0;
+            while x < width {
+                let (at, run) = layout.run_at(x, y, row_bytes);
+                let take = run.min(width - x) as usize;
+                if take == 0 {
+                    break;
+                }
+                let at = at as usize;
+                out.extend_from_slice(&raw[at..at + take]);
+                x += take as u32;
             }
         }
         return Ok(());
