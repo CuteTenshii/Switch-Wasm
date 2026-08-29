@@ -300,6 +300,11 @@ impl Cpu {
                         None => self.write_ipc_response(tls, MII_INVALID_ARGUMENT, &[], &[], &[]),
                     }
                 }
+                // IsBrokenDatabaseWithClearFlag -> bool, and clears the
+                // flag it reports. This database is synthesized rather than
+                // read off a filesystem, so it has never been corrupted and
+                // there is no flag behind the answer to clear.
+                Some(20) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
                 // SetInterfaceVersion(u32): which revision of the Mii
                 // structures the caller speaks. Nothing here reads them, and
                 // an empty database is the same shape in every revision.
@@ -388,6 +393,18 @@ mod tests {
         let first = super::default_mii_char_info(0).unwrap();
         assert_eq!(first[0x32], super::MII_HAIR_COLORS[0], "hair_color");
         assert_eq!(first[0x35], super::MII_EYE_COLORS[0], "eye_color");
+    }
+
+    #[test]
+    fn mii_reports_a_database_that_is_intact_and_empty() {
+        // IsBrokenDatabaseWithClearFlag. Answered with nothing, the editor
+        // read its own stack for the flag; a nonzero read there is a database
+        // it will offer to wipe before it will show a face.
+        let mut cpu = request(true, 20, &[]);
+        cpu.record_domain_object(9, 7, "mii:database");
+        cpu.mii_request(TLS, 9, Some(20)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u8(TLS + 0x30).unwrap(), 0, "not broken");
     }
 
     #[test]

@@ -282,6 +282,41 @@ impl Cpu {
                     .copy_from_slice(&(COMPLETION | USER_ADDITION | TIMESTAMP).to_le_bytes());
                 self.write_ipc_response(tls, 0, &[], &settings, &[])
             }
+            // GetEulaVersions -> s32 count, with the agreements themselves
+            // in a map-alias out buffer: `EulaVersion { u32 version;
+            // SystemRegionCode region; EulaVersionClockType clock_type;
+            // pad[4]; SystemClockContext accepted_at; }`.
+            //
+            // A console that has accepted none has not finished first-time
+            // setup, and the Home Menu hands over to `starter` for that --
+            // the same handover `GetInitialLaunchSettings` above is written
+            // to avoid. This one has accepted the agreement for the region
+            // it is set to. When it was accepted is not tracked, so the
+            // clock context stays zero; callers gate on version and region.
+            Some(21) => {
+                const EULA_VERSION: u32 = 0x1_0000;
+                const STEADY_CLOCK: u32 = 1;
+                const ENTRY_SIZE: usize = 0x30;
+
+                let mut eula = [0u8; ENTRY_SIZE];
+                eula[..4].copy_from_slice(&EULA_VERSION.to_le_bytes());
+                // SetRegion_USA, the region `set`'s GetRegionCode reports.
+                eula[4..8].copy_from_slice(&1u32.to_le_bytes());
+                eula[8..12].copy_from_slice(&STEADY_CLOCK.to_le_bytes());
+
+                let (addr, size) = self.ipc_output_buffer(tls, 0).unwrap_or((0, 0));
+                let count = if addr == 0 {
+                    0
+                } else {
+                    (size as usize / ENTRY_SIZE).min(1)
+                };
+                if count == 1 {
+                    for (index, &byte) in eula.iter().enumerate() {
+                        self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
+                    }
+                }
+                self.write_ipc_response(tls, 0, &[], &(count as i32).to_le_bytes(), &[])
+            }
             // GetPlatformRegion -> s32 `nn::settings::PlatformRegion`, which
             // is Global (1) or Terra (2) — the Chinese console — and has no
             // zero. So the generic empty-success reply below left the caller
@@ -877,6 +912,29 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         let region = cpu.mem.read_u32(TLS + 0x20).unwrap();
         assert_eq!(region, 1, "this console is the Global one");
+    }
+
+    #[test]
+    fn set_sys_reports_an_accepted_eula() {
+        // A console that has accepted no agreement has not finished
+        // first-time setup, and the Home Menu hands over to `starter` for
+        // that -- which nothing here can launch.
+        const BUFFER: u32 = 0x4000;
+        const ENTRY: u32 = 0x30;
+
+        let mut cpu = request_with_recv_buffer(21, &[], BUFFER, 4 * ENTRY);
+        cpu.mem.map_zero(BUFFER, 0x200).unwrap();
+        cpu.set_sys_request(TLS, Some(21)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "one agreement");
+        assert_ne!(cpu.mem.read_u32(BUFFER).unwrap(), 0, "a version was set");
+        assert_eq!(cpu.mem.read_u32(BUFFER + 4).unwrap(), 1, "SetRegion_USA");
+
+        // A buffer with no room for an entry gets a count of zero, not one
+        // naming an entry the caller has nowhere to read.
+        write_map_buffer_request(&mut cpu, 21, &[], BUFFER, ENTRY - 1, false);
+        cpu.set_sys_request(TLS, Some(21)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "nothing fits");
     }
 
     #[test]

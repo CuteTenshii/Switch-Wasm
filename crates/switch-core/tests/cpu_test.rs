@@ -2086,6 +2086,25 @@ fn hid_sys_is_its_own_interface_and_answers_before_any_command() {
     ipc_request_with_payload(&mut cpu, HIDSYS, server, 322, &args);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
 
+    // IsJoyConRailEnabled / IsJoyConAttachedOnAllRail -> bool. Handheld play
+    // is the state where both pads are seated on the rails, and this console
+    // reports handheld mode and publishes a handheld npad, so both are true.
+    for cmd in [523u32, 525] {
+        ipc_request(&mut cpu, HIDSYS, 4, Some(server), cmd);
+        assert_eq!(
+            cpu.mem.read_u32(tls + 0x28).unwrap(),
+            0,
+            "cmd {cmd} refused"
+        );
+        assert_eq!(cpu.mem.read_u8(tls + 0x30).unwrap(), 1, "cmd {cmd}");
+    }
+
+    // SetFirmwareHotfixUpdateSkipEnabled(bool): whether to skip the hotfix a
+    // controller firmware update would apply. The pad here has no firmware to
+    // flash, so there is nothing to skip -- but a refusal is a fatal.
+    ipc_request_with_payload(&mut cpu, HIDSYS, server, 1120, &[1u8, 0, 0, 0]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+
     // GetUniquePadIds -> an s64 count. A unique pad is a *detachable*
     // controller and the one here is the built-in handheld pad, so there are
     // none and the pointer buffer is left alone.

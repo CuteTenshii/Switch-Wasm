@@ -579,12 +579,17 @@ impl Cpu {
                 // Global; 2 is the Chinese console, which has a different set
                 // of services and stores behind it.
                 Some(300) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
-                // GetHomeButtonReaderLockAccessor /
-                // GetReaderLockAccessorEx(u32 button_type) -> ILockAccessor:
-                // the read side of the HOME and capture button locks, the
-                // counterpart to `IHomeMenuFunctions` 30/31. The Home Menu
-                // takes one per button before it will run a transition.
-                Some(30) | Some(31) => {
+                // GetHomeButtonReaderLockAccessor,
+                // GetReaderLockAccessorEx(u32 button_type) and
+                // GetWriterLockAccessorEx [7.0.0+] -> ILockAccessor: the HOME
+                // and capture button locks, the counterpart to
+                // `IHomeMenuFunctions` 30/31. The Home Menu takes one per
+                // button before it will run a transition.
+                //
+                // Reader and writer hand back the same object because nothing
+                // here contends for either -- see `am:lock-accessor` below,
+                // where TryLock always succeeds.
+                Some(30) | Some(31) | Some(32) => {
                     self.reply_with_interface(tls, handle, "am:lock-accessor")?;
                     Ok(())
                 }
@@ -969,18 +974,49 @@ impl Cpu {
                 // SetScreenShotAppletIdentityInfo /
                 // SetOutOfFocusSuspendingEnabled /
                 // SetScreenShotImageOrientation / SetHandlesRequestToDisplay /
-                // SetIdleTimeDetectionExtension / SetAutoSleepDisabled /
+                // OverrideAutoSleepTimeAndDimmingTime /
+                // SetInputDetectionSourceSet / ReportUserIsActive /
+                // SetInputDetectionPolicy /
                 // SetAlbumImageTakenNotificationEnabled /
                 // SetApplicationAlbumUserData / SetRecordVolumeMuted.
                 //
                 // Every one of these is a setter or a notifier whose whole
-                // reply is a Result. There is no suspend, screenshot, album or
-                // exit-lock behaviour behind them to change, so accepting the
-                // setting really is the complete implementation — unlike the
-                // commands below it, a bare success here is the truth.
-                Some(0..=4) | Some(10..=16) | Some(19) | Some(51) | Some(62) | Some(68)
-                | Some(100) | Some(110) | Some(130) => {
+                // reply is a Result. There is no suspend, screenshot, album,
+                // idle-detection or exit-lock behaviour behind them to change,
+                // so accepting the setting really is the complete
+                // implementation — unlike the commands below it, a bare
+                // success here is the truth.
+                Some(0..=4) | Some(10..=16) | Some(19) | Some(51) | Some(60) | Some(64)
+                | Some(65) | Some(72) | Some(100) | Some(110) | Some(130) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // SetIdleTimeDetectionExtension(u32) /
+                // GetIdleTimeDetectionExtension -> u32, and
+                // SetAutoSleepDisabled(bool) / IsAutoSleepDisabled -> bool.
+                //
+                // Nothing here sleeps or dims the panel, so neither setting
+                // has an effect to implement -- but each has a getter beside
+                // it, and a setting that does not read back is a different
+                // bug from one that was never implemented. Both were on the
+                // accept-everything list above with no getter at all, so the
+                // read was a refusal `nnSdk` aborts on.
+                Some(62) => {
+                    let data = self.ipc_request_data(tls);
+                    self.idle_time_detection_extension = self.mem.read_u32(data).unwrap_or(0);
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                Some(63) => {
+                    let extension = self.idle_time_detection_extension;
+                    self.write_ipc_response(tls, 0, &[], &extension.to_le_bytes(), &[])
+                }
+                Some(68) => {
+                    let data = self.ipc_request_data(tls);
+                    self.auto_sleep_disabled = self.mem.read_u8(data).unwrap_or(0) != 0;
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                Some(69) => {
+                    let disabled = u8::from(self.auto_sleep_disabled);
+                    self.write_ipc_response(tls, 0, &[], &[disabled], &[])
                 }
                 // SetHandlesRequestToDisplay(bool): the applet is taking
                 // responsibility for when it appears. AM answers by queueing
@@ -1745,6 +1781,86 @@ mod tests {
         // — which decides whether the applet is told `FocusStateChanged` or
         // `ChangeIntoForeground` — stays where it was.
         assert!(!cpu.applet_is_application);
+    }
+
+    #[test]
+    fn the_idle_detection_setters_are_accepted_rather_than_refused() {
+        // ISelfController 60, 64, 65 and 72 -- the group an applet walks to
+        // configure when the console counts it as idle. Every one is a setter
+        // whose whole reply is a Result, and nothing here sleeps or dims, so
+        // accepting is the complete implementation. What is not survivable is
+        // the refusal: `nnSdk` aborts on an unknown command id.
+        for (cmd, payload) in [
+            (60u32, &[0u8; 0x10][..]),
+            (64, &[0u8; 4][..]),
+            (65, &[][..]),
+            (72, &[0u8; 4][..]),
+        ] {
+            let mut cpu = request(false, cmd, payload);
+            cpu.register_service_handle(9, "am:self-controller");
+            cpu.applet_request(TLS, 9, Some(cmd)).unwrap();
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                0,
+                "cmd {cmd} refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_auto_sleep_settings_read_back_what_was_set() {
+        // ISelfController 62/63 and 68/69 are Set/Get pairs. Both setters were
+        // on the accept-everything list with no getter beside them, so a title
+        // that set one and read it back got a refusal `nnSdk` aborts on.
+        // Nothing here sleeps or dims a panel; what these owe the caller is
+        // the value it just wrote.
+        const EXTENSION: u32 = 3;
+        let mut cpu = request(false, 62, &EXTENSION.to_le_bytes());
+        cpu.register_service_handle(9, "am:self-controller");
+        cpu.applet_request(TLS, 9, Some(62)).unwrap();
+
+        marshal(&mut cpu, false, 63, &[]);
+        cpu.applet_request(TLS, 9, Some(63)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "refused");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), EXTENSION);
+
+        marshal(&mut cpu, false, 68, &[1u8]);
+        cpu.applet_request(TLS, 9, Some(68)).unwrap();
+        marshal(&mut cpu, false, 69, &[]);
+        cpu.applet_request(TLS, 9, Some(69)).unwrap();
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 1, "auto sleep off");
+
+        // And the other way, so neither getter is a constant that happens to
+        // match what the test set.
+        marshal(&mut cpu, false, 68, &[0u8]);
+        cpu.applet_request(TLS, 9, Some(68)).unwrap();
+        marshal(&mut cpu, false, 69, &[]);
+        cpu.applet_request(TLS, 9, Some(69)).unwrap();
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "auto sleep on");
+    }
+
+    #[test]
+    fn every_button_lock_accessor_hands_back_a_lock() {
+        // ICommonStateGetter 30, 31 and 32 -- the HOME-button locks the menu
+        // takes before it runs a transition. `nnSdk` reads each as a move
+        // handle, so a refusal is a fatal and a bare success is a null
+        // `SharedPointer` that faults on its first virtual call. 32 is the
+        // writer side, added in 7.0.0; nothing here contends for either side,
+        // so all three hand back the same stateless accessor.
+        const HOME_BUTTON: u32 = 0;
+        for cmd in [30u32, 31, 32] {
+            let mut cpu = request(false, cmd, &HOME_BUTTON.to_le_bytes());
+            cpu.register_service_handle(9, "am:common-state-getter");
+            cpu.applet_request(TLS, 9, Some(cmd)).unwrap();
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                0,
+                "cmd {cmd} refused"
+            );
+            let lock = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+            assert_ne!(lock, 0, "cmd {cmd} moved no accessor back");
+            assert_eq!(cpu.service_name(lock), Some("am:lock-accessor"));
+        }
     }
 
     #[test]

@@ -11,6 +11,12 @@ use crate::Result;
 
 pub(super) const ACCOUNT_UID: [u8; 16] = *b"switch-wasm user";
 
+/// The `Uuid` `IProfile::GetImageId` reports for the icon below.
+///
+/// Callers cache the icon and re-read it only when this changes. The icon is
+/// synthesized from a constant, so it never does.
+const PROFILE_IMAGE_ID: [u8; 16] = *b"switch-wasm icon";
+
 /// `nn::account::ProfileBase`: uid, last-edit timestamp, then the nickname.
 const PROFILE_BASE_LEN: usize = 0x38;
 
@@ -504,14 +510,17 @@ impl Cpu {
                 let base = self.acc_profile_base();
                 self.write_ipc_response(tls, 0, &[], &base, &[])
             }
-            // GetImageSize -> u32, which has to be the exact length command 11
-            // then writes: a caller sizes its buffer from this.
-            Some(10) => {
+            // GetImageSize / GetLargeImageSize [18.0.0+] -> u32, which has
+            // to be the exact length 11 and 21 then write: a caller sizes its
+            // buffer from this. There is one icon and no larger variant of
+            // it, so both report the size of that one.
+            Some(10) | Some(20) => {
                 let size = profile_image().len() as u32;
                 self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
             }
-            // LoadImage(out buffer) -> u32 bytes written.
-            Some(11) => {
+            // LoadImage / LoadLargeImage [18.0.0+] (out buffer) -> u32 bytes
+            // written.
+            Some(11) | Some(21) => {
                 let image = profile_image();
                 let mut written = 0u32;
                 if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
@@ -525,12 +534,19 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &written.to_le_bytes(), &[])
             }
-            // IProfileEditor::Store(ProfileBase, userdata) / StoreWithImage:
-            // the nickname is the one part of this profile that is real state,
-            // so a store writes it back and a later GetBase reads out what was
-            // stored. Accepting an edit and then reporting the old name is the
-            // failure mode a `Set`/`Get` pair always has.
-            Some(100) | Some(101) if iface == "acc:profile-editor" => {
+            // GetImageId [18.0.0+] -> a Uuid naming the icon, which callers
+            // hold onto to decide whether the copy they cached is still the
+            // current one. Zero is that field's "no icon" sentinel, and the
+            // generic reply left it reading whatever the caller's own stack
+            // held -- a fresh id every call, so a cache that never hits.
+            Some(30) => self.write_ipc_response(tls, 0, &[], &PROFILE_IMAGE_ID, &[]),
+            // IProfileEditor::Store(ProfileBase, userdata), StoreWithImage
+            // and StoreWithLargeImage [18.0.0+]: the nickname is the one part
+            // of this profile that is real state, so a store writes it back
+            // and a later GetBase reads out what was stored. Accepting an
+            // edit and then reporting the old name is the failure mode a
+            // `Set`/`Get` pair always has.
+            Some(100) | Some(101) | Some(110) if iface == "acc:profile-editor" => {
                 let at = self.ipc_request_data(tls);
                 let nickname = self.read_string(at.wrapping_add(0x18), NICKNAME_LEN as u32);
                 self.set_user_nickname(&nickname);
@@ -863,6 +879,44 @@ mod tests {
         cpu.acc_request(TLS, 9, Some(11)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), advertised);
         assert_eq!(cpu.read_bytes(BUFFER, advertised), super::profile_image());
+
+        // GetLargeImageSize and LoadLargeImage [18.0.0+] answer for the same
+        // icon: there is no larger variant of it to report a second size for.
+        let mut cpu = request(false, 20, &[]);
+        cpu.register_service_handle(9, "acc:profile");
+        cpu.acc_request(TLS, 9, Some(20)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), advertised);
+
+        let mut cpu = request_with_recv_buffer(21, &[], BUFFER, advertised);
+        cpu.mem
+            .map_zero(BUFFER, advertised as usize + 0x100)
+            .unwrap();
+        cpu.register_service_handle(9, "acc:profile");
+        cpu.acc_request(TLS, 9, Some(21)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), advertised);
+        assert_eq!(cpu.read_bytes(BUFFER, advertised), super::profile_image());
+    }
+
+    #[test]
+    fn acc_names_the_icon_with_an_id_that_is_not_the_uid() {
+        // GetImageId [18.0.0+] is what a caller caches its copy of the icon
+        // against, so it has to be the same every call -- and nonzero, which
+        // is that field's "no icon" sentinel.
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let mut cpu = request(false, 30, &[]);
+            cpu.register_service_handle(9, "acc:profile");
+            cpu.acc_request(TLS, 9, Some(30)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "refused");
+            ids.push(cpu.read_bytes(TLS + 0x20, 0x10));
+        }
+        assert_eq!(ids[0], ids[1], "a cache key that changes never hits");
+        assert_ne!(ids[0], vec![0u8; 0x10], "zero means there is no icon");
+        assert_ne!(
+            ids[0],
+            super::ACCOUNT_UID.to_vec(),
+            "the icon, not the user"
+        );
     }
 
     /// Decode the profile icon: walk its markers, rebuild the Huffman tables

@@ -382,12 +382,26 @@ impl Cpu {
                 // publishes that style to a caller whose supported set names
                 // it, so the permission has nothing left to gate.
                 Some(322) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-                // InitializeFirmwareUpdate (1000) and its USB form,
-                // InitializeUsbFirmwareUpdateWithoutMemory (1135): both open a
-                // controller firmware update. The pad here is the console's
-                // own and has no firmware to flash, so there is nothing to
-                // refuse and nothing to do.
-                Some(1000) | Some(1135) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // InitializeFirmwareUpdate (1000), its USB form
+                // InitializeUsbFirmwareUpdateWithoutMemory (1135), and
+                // SetFirmwareHotfixUpdateSkipEnabled (1120), which says
+                // whether to skip the hotfix that update would apply. The pad
+                // here is the console's own and has no firmware to flash, so
+                // there is nothing to refuse, nothing to skip and nothing to
+                // do.
+                Some(1000) | Some(1120) | Some(1135) => {
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // IsJoyConRailEnabled (523) and IsJoyConAttachedOnAllRail
+                // (525) -> bool: whether the console's rails are live, and
+                // whether both Joy-Cons are actually seated in them.
+                //
+                // Both are true. Handheld play is exactly the state where the
+                // pads are on the rails, and this console reports handheld
+                // operation mode and publishes a handheld npad -- answering
+                // otherwise would describe a console that cannot be played
+                // the only way this one can.
+                Some(523) | Some(525) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
                 // IsUsbFullKeyControllerEnabled -> bool. There is no USB
                 // controller here, wired or otherwise.
                 Some(850) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),

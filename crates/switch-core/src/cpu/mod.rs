@@ -1172,6 +1172,14 @@ pub struct Cpu {
     /// — is told `ChangeIntoForeground`. Sending an applet the application's
     /// message is sending it one it does not act on.
     applet_is_application: bool,
+    /// What `ISelfController`'s two auto-sleep settings were last set to.
+    ///
+    /// Nothing here sleeps or dims, so neither reaches a panel. They are kept
+    /// because each has a getter beside it: a title that sets one and reads it
+    /// back has to see what it set, and that is a different failure from a
+    /// setting that was never implemented.
+    idle_time_detection_extension: u32,
+    auto_sleep_disabled: bool,
     /// Every `(interface, command)` pair already reported as having no
     /// implementation behind it, so the warning naming it prints once instead
     /// of once per call (`appletMainLoop` polls `am` every frame).
@@ -1642,6 +1650,8 @@ impl Cpu {
             shared_buffer_slot: 0,
             applet_focus_announced: false,
             applet_is_application: true,
+            idle_time_detection_extension: 0,
+            auto_sleep_disabled: false,
             operation_mode: OperationMode::default(),
             applet_event: None,
             unimplemented_ipc: HashSet::new(),
