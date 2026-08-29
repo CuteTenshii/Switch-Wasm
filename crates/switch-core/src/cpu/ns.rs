@@ -147,6 +147,17 @@ impl Cpu {
                 Some(707) | Some(708) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
+            // `IDynamicRightsInterface`: whether a title may run under the
+            // rights the accounts on the console hold — the licence-sharing
+            // checks a 20.0.0 Home Menu makes before it launches anything.
+            "ns:dynamic-rights" => match cmd_id {
+                // HasAccountRestrictedRightsInRunningApplications -> bool.
+                // Nothing here holds a licence for anything, so no account
+                // is restricted by one; refusing instead aborted the caller
+                // on `cmif`'s unknown-command-id.
+                Some(26) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                _ => self.unimplemented_command(tls, &iface, cmd_id),
+            },
             // `IReadOnlyApplicationRecordInterface`: the record half of the
             // manager, for callers that only want to know what is installed.
             "ns:read-only-record" => match cmd_id {
@@ -574,6 +585,20 @@ mod tests {
             assert_ne!(session, 0, "{command}");
             assert_eq!(cpu.service_name(session), Some(expected), "{command}");
         }
+    }
+
+    #[test]
+    fn ns_reports_no_account_restricted_by_dynamic_rights() {
+        // `IDynamicRightsInterface` is the licence-sharing check a 20.0.0
+        // Home Menu makes before it launches anything. Nothing here holds a
+        // licence for any title, so no account is restricted by one --
+        // refusing the command is what the caller turns into a fatal on
+        // cmif's unknown-command-id.
+        let mut cpu = request(false, 26, &[]);
+        cpu.register_service_handle(9, "ns:dynamic-rights");
+        cpu.ns_request(TLS, 9, Some(26)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "restricted");
     }
 
     #[test]

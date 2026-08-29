@@ -427,6 +427,16 @@ impl Cpu {
                 // Nothing is restricted here, and an age of -1 is how that is
                 // said: any rating passes it.
                 Some(1035) => self.write_ipc_response(tls, 0, &[], &[0xffu8, 0, 0], &[]),
+                // GenerateInquiryCode -> char[0x20], the "%02d%08llu" of 11
+                // and eight digits a guardian reads out to have a forgotten
+                // PIN reset. No PIN is set here, so the digits are a fixed
+                // placeholder; the width and the format are not.
+                Some(1204) => {
+                    const INQUIRY_CODE: &[u8] = b"1100000000";
+                    let mut code = [0u8; 0x20];
+                    code[..INQUIRY_CODE.len()].copy_from_slice(INQUIRY_CODE);
+                    self.write_ipc_response(tls, 0, &[], &code, &[])
+                }
                 // The event getters: GetPinCodeChangedEvent (1207),
                 // GetSynchronizationEvent (1432),
                 // GetPlayTimerEventToRequestSuspension (1457) and

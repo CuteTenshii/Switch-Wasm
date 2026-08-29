@@ -2068,6 +2068,14 @@ fn hid_sys_is_its_own_interface_and_answers_before_any_command() {
     ipc_request(&mut cpu, HIDSYS, 4, Some(server), 503);
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
 
+    // SetNpadSystemExtStateEnabled(bool, u64 aruid), the same: this console
+    // publishes the SystemExt style already, so there is no permission left
+    // for it to grant.
+    let mut args = [0u8; 0x10];
+    args[0] = 1;
+    ipc_request_with_payload(&mut cpu, HIDSYS, server, 322, &args);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0);
+
     // GetUniquePadIds -> an s64 count. A unique pad is a *detachable*
     // controller and the one here is the built-in handheld pad, so there are
     // none and the pointer buffer is left alone.
@@ -2349,6 +2357,19 @@ fn pctl_reports_parental_controls_off() {
         assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "cmd {cmd}");
         assert_eq!(cpu.mem.read_u8(tls + 0x30).unwrap(), 1, "cmd {cmd} allowed");
     }
+
+    // GenerateInquiryCode answers with the ten digits a guardian would read
+    // out, NUL-padded to 0x20. Refusing it is what a caller turns into a
+    // fatal 2010-0221 rather than carrying on without a code.
+    ipc_request(&mut cpu, PCTL, 4, Some(service), 1204);
+    assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0, "cmd 1204 refused");
+    let code: Vec<u8> = (0..0x20)
+        .map(|i| cpu.mem.read_u8(tls + 0x30 + i).unwrap())
+        .collect();
+    assert!(
+        code[..10].iter().all(u8::is_ascii_digit) && code[10..].iter().all(|&b| b == 0),
+        "inquiry code is not ten digits in a 0x20 block: {code:?}"
+    );
 
     // Anything else still reports honestly rather than fabricating a success.
     const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
@@ -5254,6 +5275,78 @@ fn the_applet_capture_buffer_names_a_slot_nothing_renders_into() {
             "slot {slot} is not a spare one"
         );
     }
+}
+
+#[test]
+fn the_capture_image_getters_clear_the_buffer_they_fill() {
+    // The same black screen the three `Acquire`s hand out as a slot, asked
+    // for as pixels instead: a 1280x720 RGBA8888 image in a map-alias out
+    // buffer. Nothing was captured, and leaving the buffer alone while
+    // reporting one was written hands the applet whatever it had in there to
+    // draw. Refusing the command instead aborted `nnSdk` outright.
+    const APPLET: u64 = 0xA1000;
+    const REGION: u32 = 0x20_0000;
+    const ROOM: u32 = 0x4000;
+    const START: u32 = REGION + 0x40; // unaligned, and spanning three pages
+    const SIZE: u32 = 0x2800;
+    const PATTERN: u32 = 0xDEAD_BEEF;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(APPLET, "am:display-controller");
+    cpu.mem.map_zero(REGION, ROOM as usize).unwrap();
+    let tls = cpu.tls_base();
+
+    for cmd in [5u32, 6, 7] {
+        for at in (REGION..REGION + ROOM).step_by(4) {
+            cpu.mem.write_u32(at, PATTERN).unwrap();
+        }
+        ipc_request_plain_with_buffer(&mut cpu, APPLET, cmd, START, SIZE, true, &[]);
+        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "capture {cmd}");
+        assert_eq!(
+            cpu.mem.read_u8(tls + 0x20).unwrap(),
+            1,
+            "capture {cmd} wrote nothing"
+        );
+        assert_eq!(
+            cpu.mem.dump(START, SIZE as usize).unwrap(),
+            vec![0u8; SIZE as usize],
+            "capture {cmd} left the buffer as it was"
+        );
+        // And only the buffer: the clear walks a page at a time, so an
+        // overrun would land on the page after the one it ends in.
+        assert_eq!(
+            cpu.mem.read_u32(START - 4).unwrap(),
+            PATTERN,
+            "capture {cmd} wrote before the buffer"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(START + SIZE).unwrap(),
+            PATTERN,
+            "capture {cmd} wrote past the buffer"
+        );
+    }
+}
+
+#[test]
+fn a_library_applet_is_told_which_keyboard_layout_to_open_with() {
+    // GetDesirableKeyboardLayout is the layout the applet's caller asked it
+    // to open with, and hardware errors when no caller set one. There is no
+    // caller here, so it answers with the layout that goes with the language
+    // `set` reports -- en-US, so EnglishUs.
+    const APPLET: u64 = 0xA2000;
+    const ENGLISH_US: u32 = 1;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(APPLET, "am:library-applet-self-accessor");
+    let tls = cpu.tls_base();
+
+    ipc_request_plain(&mut cpu, APPLET, 19, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "refused");
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), ENGLISH_US);
 }
 
 #[test]

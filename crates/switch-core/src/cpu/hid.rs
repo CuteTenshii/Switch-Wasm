@@ -367,6 +367,12 @@ impl Cpu {
                 | Some(305) | Some(308) | Some(503) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // SetNpadSystemExtStateEnabled(bool, u64 aruid): whether the
+                // caller may be handed pads in the SystemExt style. There is
+                // one process here, and `NPAD_PRESENTATIONS` already
+                // publishes that style to a caller whose supported set names
+                // it, so the permission has nothing left to gate.
+                Some(322) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // InitializeFirmwareUpdate (1000) and its USB form,
                 // InitializeUsbFirmwareUpdateWithoutMemory (1135): both open a
                 // controller firmware update. The pad here is the console's

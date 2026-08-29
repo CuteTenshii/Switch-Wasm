@@ -153,29 +153,54 @@ pub(crate) fn applet_interface_version(program_id: u64) -> u32 {
         // 18.0.1 keyboard understands. Claiming version 1 describes a 1.0.0
         // caller, whose launch struct is a different shape and half the size.
         APPLET_SWKBD => 0x8_000D,
+        // The controller applet picks the shape of its second storage by this
+        // number, and 0x8 is what an 11.0.0-and-later one speaks: the 0x430
+        // `ControllerSupportArg` with room for eight players, rather than the
+        // 0x21C one with room for four.
+        APPLET_CONTROLLER => 8,
+        // myPage numbers its own the same way the keyboard does: 0x10000 is
+        // 9.0.0 and later, whose argument is 0x10A8 bytes against the 0xB0 a
+        // version 1 caller sends.
+        APPLET_MY_PAGE => 0x1_0000,
         _ => 1,
     }
 }
 
 /// `AppletId_LibraryAppletSwkbd`.
 const APPLET_SWKBD: u32 = 0x11;
+/// `AppletId_LibraryAppletController`.
+const APPLET_CONTROLLER: u32 = 0x0C;
+/// `AppletId_LibraryAppletMyPage`.
+const APPLET_MY_PAGE: u32 = 0x1A;
 
-/// The applet-specific launch struct a library applet pops after the common
-/// arguments — the one only its caller could fill in.
+/// The launch storages a library applet's caller pushes after the common
+/// arguments — the ones only its caller could fill in.
 ///
-/// Every applet defines its own, and gets no further than reading it: a
-/// keyboard with no configuration has no size to draw itself at. Zeroes are
-/// the ordinary entry point for the applets whose struct starts with a mode
-/// selector, so they stay the default; `swkbd` is the exception, because its
-/// configuration is what says how long the text may be and what the confirm
-/// button reads.
-pub(crate) fn applet_launch_argument(program_id: u64) -> Vec<u8> {
+/// An applet pops these in order and gets no further than the first one that
+/// is not there: `PopInData` answers `2128-0003` and `nnSdk` aborts on it.
+/// That is one storage for most applets, and **two** for the keyboard and the
+/// controller applet, which both take a private struct and then the argument
+/// it describes.
+///
+/// Zeroes are the ordinary entry point for the applets whose struct starts
+/// with a mode selector, so they stay the default. The two named here are the
+/// ones whose contents say something: the keyboard's configuration is what
+/// says how long the text may be and what the confirm button reads, and the
+/// controller applet's says which controllers this console can offer.
+pub(crate) fn applet_launch_storages(program_id: u64) -> Vec<Vec<u8>> {
     /// Enough of any other applet's struct for it to read the prefix it knows.
     const GENERIC_SIZE: usize = 0x100;
-    if applet_id_for(program_id) != APPLET_SWKBD {
-        return vec![0u8; GENERIC_SIZE];
+    match applet_id_for(program_id) {
+        APPLET_SWKBD => vec![swkbd_config(), vec![0u8; SWKBD_WORK_BUFFER_SIZE]],
+        APPLET_CONTROLLER => vec![controller_support_arg_private(), controller_support_arg()],
+        APPLET_MY_PAGE => vec![my_page_arg()],
+        _ => vec![vec![0u8; GENERIC_SIZE]],
     }
-    // `SwkbdConfigCommon` followed by `SwkbdConfigNew`, the 6.0.0+ shape.
+}
+
+/// `nn::swkbd::KeyboardConfig`: `SwkbdConfigCommon` followed by
+/// `SwkbdConfigNew`, the 6.0.0+ shape [`applet_interface_version`] claims.
+fn swkbd_config() -> Vec<u8> {
     const CONFIG_SIZE: usize = 0x4C8;
     const OK_TEXT: usize = 0x004;
     const MAX_TEXT_LENGTH: usize = 0x3AC;
@@ -190,6 +215,70 @@ pub(crate) fn applet_launch_argument(program_id: u64) -> Vec<u8> {
     config[MAX_TEXT_LENGTH..MAX_TEXT_LENGTH + 4].copy_from_slice(&32u32.to_le_bytes());
     config[MIN_TEXT_LENGTH..MIN_TEXT_LENGTH + 4].copy_from_slice(&0u32.to_le_bytes());
     config
+}
+
+/// The keyboard's third storage: the buffer its initial string and its user
+/// dictionary would live in, at the offsets the configuration names. That
+/// configuration names neither, so the applet reads nothing out of it — but
+/// the storage still has to be there, and 0x1000 is the size a caller passes.
+const SWKBD_WORK_BUFFER_SIZE: usize = 0x1000;
+
+/// The friend-list applet's argument: which of its pages to open on, and the
+/// user it is the page *of*. The fields past the uid belong to the types that
+/// name another account — a friend request, an invitation — and are cleared
+/// for the rest, which is every type this can be launched with here.
+fn my_page_arg() -> Vec<u8> {
+    /// The 9.0.0+ width, the one [`applet_interface_version`] claims.
+    const ARG_SIZE: usize = 0x10A8;
+    const USER_ID: usize = 0x8;
+    let mut arg = vec![0u8; ARG_SIZE];
+    // Type ShowFriendList, which is where the applet opens with no caller to
+    // have asked for one of its other pages.
+    arg[..4].copy_from_slice(&0u32.to_le_bytes());
+    arg[USER_ID..USER_ID + 16].copy_from_slice(&super::acc::ACCOUNT_UID);
+    arg
+}
+
+/// `nn::hid::system::ControllerSupportArgPrivate`: which of the controller
+/// applet's screens to show, and the controller state its caller had when it
+/// asked for one.
+fn controller_support_arg_private() -> Vec<u8> {
+    const SIZE: u32 = 0x14;
+    let mut arg = Vec::with_capacity(SIZE as usize);
+    arg.extend_from_slice(&SIZE.to_le_bytes());
+    arg.extend_from_slice(&(CONTROLLER_SUPPORT_ARG_SIZE as u32).to_le_bytes());
+    // Flag0 and Flag1, which sdknso leaves clear outside its *ForSystem
+    // entry points, then ControllerSupportMode::ShowControllerSupport and
+    // ControllerSupportCaller::Application.
+    arg.extend_from_slice(&[0, 0, 0, 0]);
+    // What `GetSupportedNpadStyleSet` answered the caller. Every style this
+    // console's one pad can be published in, so the applet offers exactly the
+    // controllers `hid` will then present — see `NPAD_PRESENTATIONS`.
+    let styles = super::NPAD_PRESENTATIONS
+        .iter()
+        .fold(super::NPAD_HANDHELD.style, |set, pad| set | pad.style);
+    arg.extend_from_slice(&styles.to_le_bytes());
+    // `GetNpadJoyHoldType`, which is `hid`'s own default here: Vertical.
+    arg.extend_from_slice(&0u32.to_le_bytes());
+    arg
+}
+
+/// `nn::hid::ControllerSupportArg`, the 0x430-byte version 0x7-and-later
+/// shape: eight identification colours and eight explain-text entries.
+const CONTROLLER_SUPPORT_ARG_SIZE: usize = 0x430;
+
+fn controller_support_arg() -> Vec<u8> {
+    let mut arg = vec![0u8; CONTROLLER_SUPPORT_ARG_SIZE];
+    // sdknso's own default for the struct, which it writes as a word: no
+    // minimum player count, four of them at most, and take-over-connection
+    // and left-justify on. The byte after it permits a dual Joy-Con.
+    arg[..4].copy_from_slice(&0x0101_0400u32.to_le_bytes());
+    arg[4] = 1;
+    // enableSingleMode, which the default leaves clear. This console is in
+    // handheld mode with one pad, and handheld is not an allowed answer to
+    // the applet unless this says a single player will do.
+    arg[5] = 1;
+    arg
 }
 
 /// The `AppletId` a system applet reports for itself, from its title id.
@@ -208,8 +297,16 @@ fn applet_id_for(program_id: u64) -> u32 {
         // auth, cabinet, controller, dataErase, error, netConnect,
         // playerSelect, swkbd, miiEdit, web, shop.
         low @ 0x1001..=0x100B => 0x0A + (low as u32 - 0x1001),
-        // photoViewer, set, offlineWeb, loginShare, wifiWebAuth, .., myPage.
-        low @ 0x100D..=0x1013 => 0x15 + (low as u32 - 0x100D),
+        // photoViewer, set, offlineWeb, loginShare, wifiWebAuth.
+        low @ 0x100D..=0x1011 => 0x15 + (low as u32 - 0x100D),
+        // `starter` breaks the run: it is a SystemApplication rather than a
+        // library applet, and it has a title id in the middle of the range
+        // rather than past it. Counting through it put myPage one id too far
+        // along — on `gift`, whose id is not a library applet's here at all,
+        // so nothing seeded myPage's launch storages and its first
+        // `PopInData` was refused.
+        0x1012 => 0x04, // starter -> SystemApplication
+        0x1013 => 0x1A, // myPage
         _ => 0x01,
     }
 }
@@ -993,6 +1090,31 @@ impl Cpu {
                 // Update{LastForeground,CallerApplet}CaptureImage: the same,
                 // and they answer with a bare Result.
                 Some(1) | Some(4) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // Get{LastForeground,LastApplication,CallerApplet}
+                // CaptureImageEx -> bool written, with the image itself going
+                // into a map-alias out buffer of 0x384000 bytes: 1280x720
+                // RGBA8888. The black capture the three `Acquire`s above hand
+                // out as a slot, handed over as pixels instead — so it is
+                // cleared here rather than left as whatever the caller's
+                // buffer held, which is what it would then have drawn.
+                Some(5) | Some(6) | Some(7) => {
+                    if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
+                        let page = crate::mem::PAGE_SIZE as u32;
+                        let end = addr.saturating_add(size);
+                        let mut at = addr;
+                        while at < end {
+                            // `fill_le` looks the page up once for a run that
+                            // stays inside one, and writes a byte at a time
+                            // for a run that does not.
+                            let run = (page - at % page).min(end - at);
+                            if self.mem.fill_le(at, 1, 0, run).is_err() {
+                                break;
+                            }
+                            at += run;
+                        }
+                    }
+                    self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[])
+                }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             "am:window-controller" => match cmd_id {
@@ -1200,6 +1322,15 @@ impl Cpu {
                     info[8..].copy_from_slice(&QLAUNCH_TITLE_ID.to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &info, &[])
                 }
+                // GetDesirableKeyboardLayout -> nn::settings::KeyboardLayout,
+                // the layout the applet's caller asked it to open with.
+                // Hardware errors when no caller set one; there is no caller
+                // here, so this answers with the layout that goes with the
+                // language the console is set to — `set`'s SetLanguage_ENUS.
+                Some(19) => {
+                    const ENGLISH_US: u32 = 1;
+                    self.write_ipc_response(tls, 0, &[], &ENGLISH_US.to_le_bytes(), &[])
+                }
                 // A setter the applet calls during init, carrying 16 bytes
                 // of arguments and expecting nothing back but a Result.
                 // Whatever it is configuring has no equivalent here.
@@ -1224,6 +1355,19 @@ impl Cpu {
                         /// `am` description 3: the applet asked for a storage
                         /// that was never pushed.
                         const NO_DATA: u32 = 128 | (3 << 9);
+                        // Named once, because `nnSdk` aborts on this and the
+                        // fatal it raises carries the code and nothing about
+                        // where it came from — 2128-0003 is also what an
+                        // empty `ReceiveMessage` answers, which is routine.
+                        if self
+                            .unimplemented_ipc
+                            .insert(("am:pop-in-data".to_string(), None))
+                        {
+                            self.diagnostic(
+                                "[am] PopInData: the applet has popped every storage seeded for \
+                                 it and asked for another",
+                            );
+                        }
                         self.write_ipc_response(tls, NO_DATA, &[], &[], &[])
                     }
                 },
@@ -1877,6 +2021,144 @@ mod tests {
             Some("am:library-applet-accessor")
         );
         (cpu, accessor)
+    }
+
+    #[test]
+    fn the_keyboard_and_the_controller_applet_pop_three_storages() {
+        // Both pop the common arguments, then a private struct, then the
+        // argument that struct describes -- and stop dead on the pop that is
+        // not there, because `PopInData` answers 2128-0003 and `nnSdk`
+        // aborts on it rather than carry on. Seeding only the first two is
+        // what took both of them down.
+        const SWKBD: u64 = 0x0100_0000_0000_1008;
+        const CONTROLLER: u64 = 0x0100_0000_0000_1003;
+        /// `am` description 3, what a pop past the last storage answers.
+        const NO_DATA: u32 = 128 | (3 << 9);
+
+        for program_id in [SWKBD, CONTROLLER] {
+            let mut cpu = request(false, 0, &[]);
+            cpu.set_program_id(program_id);
+            cpu.seed_applet_launch_arguments();
+            cpu.register_service_handle(9, "am:library-applet-self-accessor");
+
+            let mut sizes = Vec::new();
+            for pop in 0..3 {
+                write_request(&mut cpu, 0, &[]);
+                cpu.applet_request(TLS, 9, Some(0)).unwrap();
+                assert_eq!(
+                    cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                    0,
+                    "{program_id:#x} pop {pop} was refused"
+                );
+                let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+                assert_eq!(cpu.service_name(storage), Some("am:storage"));
+                // The applet reads the size before the bytes, and a struct
+                // of the wrong width is one it will not read at all.
+                write_request(&mut cpu, 0, &[]);
+                cpu.applet_request(TLS, storage, Some(0)).unwrap();
+                let accessor = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+                write_request(&mut cpu, 0, &[]);
+                cpu.applet_request(TLS, accessor, Some(0)).unwrap();
+                sizes.push(cpu.mem.read_u64(TLS + 0x20).unwrap());
+            }
+
+            // LibAppletCommonArguments, then the pair the applet's own
+            // interface version describes.
+            let expected: [u64; 3] = match program_id {
+                SWKBD => [0x20, 0x4C8, 0x1000],
+                _ => [0x20, 0x14, 0x430],
+            };
+            assert_eq!(sizes, expected, "{program_id:#x} storage sizes");
+
+            write_request(&mut cpu, 0, &[]);
+            cpu.applet_request(TLS, 9, Some(0)).unwrap();
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                NO_DATA,
+                "{program_id:#x} was handed a fourth storage"
+            );
+        }
+    }
+
+    #[test]
+    fn every_applet_title_id_maps_to_the_id_switchbrew_gives_it() {
+        // `starter` sits in the middle of the library applets' title ids and
+        // is not one of them, so the run cannot be counted straight through:
+        // doing that put myPage on `gift`'s id, which is not a library applet
+        // here -- so nothing seeded its launch storages and its first
+        // `PopInData` was refused with 2128-0003.
+        for (program_id, applet_id) in [
+            (0x0100_0000_0000_1000u64, 0x03u32), // qlaunch
+            (0x0100_0000_0000_1003, 0x0C),       // controller
+            (0x0100_0000_0000_1008, 0x11),       // swkbd
+            (0x0100_0000_0000_100C, 0x02),       // overlayDisp
+            (0x0100_0000_0000_100D, 0x15),       // photoViewer
+            (0x0100_0000_0000_1011, 0x19),       // wifiWebAuth
+            (0x0100_0000_0000_1012, 0x04),       // starter, a SystemApplication
+            (0x0100_0000_0000_1013, 0x1A),       // myPage
+        ] {
+            assert_eq!(
+                super::applet_id_for(program_id),
+                applet_id,
+                "{program_id:#x}"
+            );
+        }
+        // And the two that are not library applets are not treated as ones:
+        // a library applet is handed launch storages and no preselected user,
+        // and `starter` is handed the opposite.
+        assert!(super::is_library_applet(0x0100_0000_0000_1013));
+        assert!(!super::is_library_applet(0x0100_0000_0000_1012));
+
+        // myPage's argument is the 9.0.0+ width its interface version claims,
+        // and it names the one user this console has -- a zero uid is "no
+        // user", which is not a page the applet can show.
+        assert_eq!(
+            super::applet_interface_version(0x0100_0000_0000_1013),
+            0x1_0000
+        );
+        let arg = &super::applet_launch_storages(0x0100_0000_0000_1013)[0];
+        assert_eq!(arg.len(), 0x10A8);
+        assert_eq!(arg[8..24], crate::cpu::acc::ACCOUNT_UID);
+    }
+
+    #[test]
+    fn the_controller_applet_is_told_what_it_may_offer() {
+        // `ControllerSupportArgPrivate` names its own size and the size of
+        // the argument behind it, and the applet picks the struct it reads by
+        // them -- so both have to match what is actually pushed, and the
+        // interface version the common arguments claim has to be the one
+        // whose argument shape that is.
+        const CONTROLLER: u64 = 0x0100_0000_0000_1003;
+        let storages = super::applet_launch_storages(CONTROLLER);
+        let private = &storages[0];
+        assert_eq!(
+            u32::from_le_bytes(private[..4].try_into().unwrap()),
+            private.len() as u32
+        );
+        assert_eq!(
+            u32::from_le_bytes(private[4..8].try_into().unwrap()) as usize,
+            storages[1].len()
+        );
+        assert_eq!(super::applet_interface_version(CONTROLLER), 8);
+
+        // The styles it may offer are the ones `hid` can actually publish:
+        // an applet that offers a controller the console then never presents
+        // is one the user cannot get past. Handheld is the one that matters
+        // here, since that is the mode this console reports.
+        let styles = u32::from_le_bytes(private[0x0C..0x10].try_into().unwrap());
+        assert_ne!(
+            styles & crate::cpu::hid_shmem::STYLE_HANDHELD,
+            0,
+            "handheld is not on offer"
+        );
+        for pad in crate::cpu::NPAD_PRESENTATIONS {
+            assert_ne!(
+                styles & pad.style,
+                0,
+                "style {:#x} is not on offer",
+                pad.style
+            );
+        }
     }
 
     #[test]

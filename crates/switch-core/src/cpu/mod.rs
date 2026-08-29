@@ -2739,7 +2739,10 @@ impl Cpu {
     /// own arguments aborts before it draws anything.
     ///
     /// Whatever the applet pops *after* that is its own launch struct, which
-    /// only a real caller could fill in; nothing is queued for it.
+    /// only a real caller could fill in — see
+    /// [`crate::cpu::am::applet_launch_storages`] for the ones synthesized
+    /// here. The keyboard and the controller applet pop **two**, and stopping
+    /// after the first left both of them aborting on `2128-0003`.
     fn seed_applet_launch_arguments(&mut self) {
         self.am_in_data.clear();
         if !crate::cpu::am::is_library_applet(self.program_id) {
@@ -2764,12 +2767,12 @@ impl Cpu {
         // elapsed time against it.
         args.extend_from_slice(&0u64.to_le_bytes());
         self.am_in_data.push_back(args);
-        // Then the applet's own launch struct — see
-        // [`crate::cpu::am::applet_launch_argument`]. Refusing the pop
-        // instead is what a real applet treats as a launch it cannot honour,
-        // and it aborts.
-        let argument = crate::cpu::am::applet_launch_argument(self.program_id);
-        self.am_in_data.push_back(argument);
+        // Then the applet's own launch structs. Refusing one of these pops is
+        // what a real applet treats as a launch it cannot honour, and it
+        // aborts rather than carry on without it.
+        for storage in crate::cpu::am::applet_launch_storages(self.program_id) {
+            self.am_in_data.push_back(storage);
+        }
     }
 
     /// Set the decrypted RomFS bytes `OpenDataStorageByCurrentProcess`
