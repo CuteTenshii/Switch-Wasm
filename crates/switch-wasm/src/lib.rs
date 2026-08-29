@@ -1480,10 +1480,6 @@ fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[
 /// keys are loaded), extract its ExeFS `main` executable and boot it. Returns
 /// entry address or -1 — check `switch_last_error` either way, since the
 /// entry can legitimately be 0 for some NSO layouts.
-///
-/// This gets a real title as far as its own crt0; there is no Horizon service
-/// surface for a full retail SDK program yet, so expect it to run until the
-/// first missing service rather than to a menu.
 #[no_mangle]
 pub extern "C" fn switch_load_nca(handle: u32) -> i64 {
     let s = session(handle);
@@ -1536,10 +1532,6 @@ pub extern "C" fn switch_program_nca_index(handle: u32) -> i32 {
 /// loaded), extract its ExeFS `main` executable and boot it. Returns entry
 /// address or -1 — check `switch_last_error` either way, since the entry can
 /// legitimately be 0 for some NSO layouts.
-///
-/// This gets a real title as far as its own crt0; there is no Horizon service
-/// surface for a full retail SDK program yet, so expect it to run until the
-/// first missing service rather than to a menu.
 #[no_mangle]
 pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
     let s = session(handle);

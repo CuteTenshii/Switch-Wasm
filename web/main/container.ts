@@ -679,10 +679,7 @@ async function parseAndRenderNca(
 }
 
 // Decrypts NSP file `index` as a Program NCA and boots its ExeFS `main`
-// executable. This gets a real title only as far as its own crt0 - there is
-// no Horizon service surface for a full retail SDK program yet (that's a much
-// larger undertaking than the homebrew this emulator otherwise runs), so
-// expect it to run until the first missing service rather than reach a menu.
+// executable.
 function launchNca(f: NspFile, index: number): Promise<void> {
   // Said by the page rather than left to the core's own diagnostics: booting
   // clears the trace buffer those go to, and which version is about to run is
@@ -750,7 +747,6 @@ export async function doLaunchNca(
   }
   log('Launched ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
   noteBooted();
-  log('Decrypted and booted the title\'s own executable; there is no Horizon service support for retail games yet, so expect it to run until the first missing service rather than reach a menu.', 'dim');
   setState('loaded');
   loadPhase('starting the process');
   showScreen();
