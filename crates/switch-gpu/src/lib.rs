@@ -827,9 +827,19 @@ pub struct Gpu {
     /// evicts them without walking the cache. A key left here after its entry
     /// has gone evicts nothing, which is why nothing prunes these.
     page_owners: std::collections::HashMap<u32, Vec<TextureKey>>,
+    /// The device's copy of a cached texture, by the same key and paired with
+    /// the view it was created for — a 3D image and an array of the same
+    /// bytes are different textures.
+    ///
+    /// Only ever holds a key `texture_cache` also holds. That is what ties it
+    /// to a watched page: a texture kept here whose bytes were not cached
+    /// would never be told the guest had overwritten it.
+    gpu_textures:
+        std::collections::HashMap<TextureKey, Vec<(wgpu::TextureViewDimension, wgpu::Texture)>>,
     cached_bytes: u64,
     pub texture_hits: u64,
     pub texture_misses: u64,
+    gpu_texture_bytes: u64,
     /// Textures `prepare` read and has not watched yet. `prepare` is handed a
     /// shared `ExecCtx` and watching a page needs a mutable one, so the two
     /// halves happen either side of it.
@@ -1046,9 +1056,11 @@ impl Gpu {
             uploaded: UploadBytes::default(),
             texture_cache: std::collections::HashMap::new(),
             page_owners: std::collections::HashMap::new(),
+            gpu_textures: std::collections::HashMap::new(),
             cached_bytes: 0,
             texture_hits: 0,
             texture_misses: 0,
+            gpu_texture_bytes: 0,
             to_remember: Vec::new(),
             only: std::env::var("GPU_ONLY")
                 .ok()
@@ -2166,6 +2178,11 @@ impl Gpu {
         upload: &switch_core::gpu::upload::TextureUpload,
         view: wgpu::TextureViewDimension,
     ) -> std::result::Result<wgpu::Texture, String> {
+        if let Some(made) = self.gpu_textures.get(&upload.key) {
+            if let Some((_, texture)) = made.iter().find(|(v, _)| *v == view) {
+                return Ok(texture.clone());
+            }
+        }
         let format =
             device_texture_format(&self.device, upload.format).map_err(|e| format!("{e:?}"))?;
         let size = wgpu::Extent3d {
@@ -2205,7 +2222,18 @@ impl Gpu {
             },
             size,
         );
-        self.scratch.push(Scratch::Texture(texture.clone()));
+        // Kept only alongside its bytes, which is what a guest write evicts;
+        // a texture whose source could not be watched goes back to being one
+        // draw's scratch, as everything was before this.
+        if self.texture_cache.contains_key(&upload.key) {
+            self.gpu_texture_bytes += upload.bytes.len() as u64;
+            self.gpu_textures
+                .entry(upload.key)
+                .or_default()
+                .push((view, texture.clone()));
+        } else {
+            self.scratch.push(Scratch::Texture(texture.clone()));
+        }
         Ok(texture)
     }
 
@@ -3198,7 +3226,20 @@ impl Gpu {
             for key in keys {
                 if let Some(bytes) = self.texture_cache.remove(&key) {
                     self.cached_bytes -= bytes.len() as u64;
+                    self.drop_gpu_texture(&key, bytes.len() as u64);
                 }
+            }
+        }
+    }
+
+    /// Give a cached texture's device copy back, destroyed rather than merely
+    /// dropped: in a browser a dropped texture waits on a collector, and this
+    /// is a whole image.
+    fn drop_gpu_texture(&mut self, key: &TextureKey, bytes: u64) {
+        if let Some(made) = self.gpu_textures.remove(key) {
+            for (_, texture) in made {
+                texture.destroy();
+                self.gpu_texture_bytes = self.gpu_texture_bytes.saturating_sub(bytes);
             }
         }
     }
@@ -3242,6 +3283,12 @@ impl Gpu {
             // set that is all about to be replaced buys nothing.
             let len = bytes.len() as u64;
             if self.cached_bytes + len > TEXTURE_CACHE_BYTES {
+                for (_, made) in self.gpu_textures.drain() {
+                    for (_, texture) in made {
+                        texture.destroy();
+                    }
+                }
+                self.gpu_texture_bytes = 0;
                 self.texture_cache.clear();
                 self.page_owners.clear();
                 self.cached_bytes = 0;
