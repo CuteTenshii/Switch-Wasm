@@ -804,9 +804,14 @@ pub struct Gpu {
     /// Which draw of the current frame this is, counting from the clear that
     /// starts it. Only `GPU_ONLY` reads it.
     in_frame: u32,
-    /// `GPU_TIMES=1` accumulates where a draw's time goes, and prints it
-    /// when this is dropped. Native only: it reads a clock, and a browser's
-    /// answer to that is another question entirely.
+    /// Where a draw's time goes, printed when this is dropped and readable
+    /// at any point through [`Renderer::report_json`].
+    ///
+    /// Always on under wasm and `GPU_TIMES=1` natively. `env_flag!` reads
+    /// `std::env::var`, which is empty in a browser, so an env-gated clock
+    /// is one the target can never switch on — and the browser has no other
+    /// way to find out where a frame went. It costs one `performance.now()`
+    /// per phase per draw, which is microseconds across a whole run.
     times: Option<Times>,
     /// `GPU_ONLY=<i>` renders only the i-th draw of each frame here and
     /// leaves the rest to the rasterizer; `GPU_ONLY=<a>..<b>` renders the
@@ -875,7 +880,7 @@ macro_rules! timed {
         if $self.times.is_none() {
             $body
         } else {
-            let at = std::time::Instant::now();
+            let at = web_time::Instant::now();
             let out = $body;
             if let Some(t) = $self.times.as_mut() {
                 t.$field += at.elapsed().as_micros();
@@ -955,7 +960,8 @@ impl Gpu {
             multisampled: 0,
             per_pixel: 0,
             in_frame: 0,
-            times: switch_core::env_flag!("GPU_TIMES").then(Times::default),
+            times: (cfg!(target_arch = "wasm32") || switch_core::env_flag!("GPU_TIMES"))
+                .then(Times::default),
             only: std::env::var("GPU_ONLY")
                 .ok()
                 .as_deref()
@@ -1198,7 +1204,12 @@ impl Gpu {
         // each one. `Target::rows` is already the pass's height.
         let values = target.read_depth(ctx)?;
         let surface_texels = (target.row_bytes / target.unit.max(1)) as usize;
-        let values = crop_rows(values, surface_texels, target.width as usize, kind.unit() as usize);
+        let values = crop_rows(
+            values,
+            surface_texels,
+            target.width as usize,
+            kind.unit() as usize,
+        );
         // The staging image is always `r32float`, whatever the depth format
         // is: one WGSL text, one pipeline per depth format, and a `u16` that
         // has to be widened on the way in either way.
@@ -2129,10 +2140,9 @@ impl Gpu {
                 ));
             };
             let address = (u64::from(hi) << 32) | u64::from(lo);
-            let mapping = ctx
-                .vmm
-                .mapping_at(address)
-                .ok_or_else(|| format!("a `ldg` descriptor naming {address:#x}, which is unmapped"))?;
+            let mapping = ctx.vmm.mapping_at(address).ok_or_else(|| {
+                format!("a `ldg` descriptor naming {address:#x}, which is unmapped")
+            })?;
             let len = (mapping.gpu_va + mapping.size - address).min(MAX_GLOBAL) as usize;
             let mut bytes = vec![0u8; len];
             ctx.vmm
@@ -3606,13 +3616,73 @@ impl Renderer for Gpu {
     }
 
     fn flush(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {
-        let at = self.times.map(|_| std::time::Instant::now());
+        let at = self.times.map(|_| web_time::Instant::now());
         let result = self.flush_inner(ctx);
         if let (Some(at), Some(t)) = (at, self.times.as_mut()) {
             t.flush += at.elapsed().as_micros();
         }
         result
     }
+
+    fn report_json(&self) -> String {
+        // The same numbers `Drop` prints, except that a browser never sees
+        // those: the module outlives the page's interest in it, and stderr
+        // goes nowhere. `software_frame` is the one that matters most — once
+        // it latches, every frame after it is the rasterizer's however well
+        // the device is working.
+        let ms = |v: u128| v as f64 / 1000.0;
+        // Nested rather than flattened: the phase that builds modules and the
+        // count of modules built are both called "modules", and one JSON
+        // object cannot hold that name twice — `JSON.parse` keeps whichever
+        // came last and drops the other without saying so.
+        let times = match self.times {
+            Some(t) => format!(
+                ",\"times\":{{\"translate\":{:.1},\"upload\":{:.1},\"modules\":{:.1},\
+                 \"pipeline\":{:.1},\"encode\":{:.1},\"flush\":{:.1}}}",
+                ms(t.translate),
+                ms(t.upload),
+                ms(t.modules),
+                ms(t.pipeline),
+                ms(t.encode),
+                ms(t.flush),
+            ),
+            None => String::new(),
+        };
+        let reasons: Vec<String> = self.reasons.iter().map(|why| json_string(why)).collect();
+        format!(
+            "{{\"backend\":\"device\",\"drawn\":{},\"fallbacks\":{},\"pipelines\":{},\
+             \"modules\":{},\"softwareFrame\":{},\"gaveUp\":{},\"reasons\":[{}]{}}}",
+            self.drawn,
+            self.fallbacks,
+            self.pipelines.len(),
+            self.modules.len(),
+            self.software_frame,
+            self.gave_up,
+            reasons.join(","),
+            times,
+        )
+    }
+}
+
+/// One JSON string literal. A fallback reason is an error message and is free
+/// to contain a quote or a backslash; the page parses this with `JSON.parse`,
+/// which is entitled to reject the whole object over one of them.
+fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 impl Gpu {
@@ -4312,5 +4382,24 @@ mod tests {
             Ok(gpu) => println!("[gpu] opened, max texture {}", gpu.describe()),
             Err(why) => println!("[gpu] {why}"),
         }
+    }
+
+    /// A fallback reason is an error message and can hold anything. The page
+    /// parses the whole report with `JSON.parse`, which rejects the entire
+    /// object over one unescaped quote — so the counters would vanish because
+    /// of a string beside them.
+    #[test]
+    fn a_reason_with_json_punctuation_in_it_stays_one_string() {
+        assert_eq!(super::json_string("plain"), "\"plain\"");
+        assert_eq!(
+            super::json_string(r#"no WGSL form for Ldg { at: 3 } "x" \ y"#),
+            r#""no WGSL form for Ldg { at: 3 } \"x\" \\ y""#
+        );
+        assert_eq!(
+            super::json_string("two\nlines\ttabbed"),
+            r#""two\nlines\ttabbed""#
+        );
+        // A control character has no literal form at all.
+        assert_eq!(super::json_string("\u{1}"), r#""\u0001""#);
     }
 }

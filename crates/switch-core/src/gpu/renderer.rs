@@ -98,6 +98,18 @@ pub trait Renderer: std::fmt::Debug {
         let _ = ctx;
         Ok(Flush::Done)
     }
+
+    /// What this backend has been doing, as a JSON object.
+    ///
+    /// A backend that can decline a draw is the only thing that knows why it
+    /// declined, and in a browser that answer reaches nobody: `eprintln!`
+    /// goes nowhere and an env var cannot be set. So it is asked for instead,
+    /// and the page shows it beside the translator's own counters.
+    ///
+    /// [`Software`] never declines anything and has nothing to report.
+    fn report_json(&self) -> String {
+        "{}".to_string()
+    }
 }
 
 /// Whether a [`Renderer::flush`] finished, or wants asking again.

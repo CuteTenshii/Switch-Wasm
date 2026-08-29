@@ -27,6 +27,34 @@ export interface RamUsage {
  *  entered, so `executed / translated` is how much each translation paid for
  *  itself; `invalidated` counts blocks dropped because the guest wrote over
  *  the code they came from. */
+/** What the installed GPU backend has been doing. `backend` is absent while
+ *  the software rasterizer has the frame — it never declines a draw, so it has
+ *  nothing to report. The timings are milliseconds over the whole run and are
+ *  present whenever a device is. */
+export interface GpuReport {
+  backend?: 'device';
+  drawn?: number;
+  fallbacks?: number;
+  pipelines?: number;
+  modules?: number;
+  /** Once this latches, every frame after it is the rasterizer's however well
+   *  the device is working. */
+  softwareFrame?: boolean;
+  gaveUp?: boolean;
+  /** Every distinct reason a draw fell back, in the order first seen. */
+  reasons?: string[];
+  /** Milliseconds over the whole run, by phase. Nested because `modules` is
+   *  both a count above and a phase here. */
+  times?: {
+    translate: number;
+    upload: number;
+    modules: number;
+    pipeline: number;
+    encode: number;
+    flush: number;
+  };
+}
+
 export interface JitStats {
   enabled: boolean;
   blocks: number;
@@ -163,6 +191,7 @@ export interface Commands {
   get_reg(i: number): string;
   ram(): RamUsage;
   jit_stats(): JitStats;
+  gpu_report(): GpuReport;
   last_error(): string;
 
   fb_width(): number;

@@ -992,6 +992,12 @@ impl Engine3D {
         self.renderer = renderer;
     }
 
+    /// What the installed backend has been doing — see
+    /// [`Renderer::report_json`].
+    pub fn renderer_report(&self) -> String {
+        self.renderer.report_json()
+    }
+
     /// Tell the backend that something outside it is about to read a render
     /// target — see [`Renderer::flush`].
     pub fn flush_renderer(&mut self, ctx: &mut ExecCtx) -> Result<crate::gpu::renderer::Flush> {

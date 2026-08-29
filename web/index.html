@@ -183,6 +183,21 @@
 
     <details class="section" open>
       <summary class="section-head">
+        <span class="section-title">Rendering</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny">Which renderer is drawing, and why. A draw the device cannot take runs
+          on the software rasterizer instead - and once enough of them have, the rasterizer keeps
+          every frame after, however well the device is working. This says whether that has
+          happened, what the fallbacks were, and where the device's own time went.</p>
+        <div class="panel-tools">
+          <button id="btn-gpustats" class="btn small">Renderer stats</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" open>
+      <summary class="section-head">
         <span class="section-title">Registers</span>
       </summary>
       <div class="section-body">

@@ -1629,6 +1629,27 @@ pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) 
     write_into(buf, maxlen, json.as_bytes())
 }
 
+/// What the installed GPU backend has been doing, as JSON.
+///
+/// `{}` while the software rasterizer has the frame — it never declines a
+/// draw and has nothing to report. A device backend answers its draw and
+/// fallback counts, every distinct reason a draw fell back, whether the
+/// software-frame latch has tripped, and where its time went.
+///
+/// Asked for rather than printed because a browser is where these matter and
+/// the browser is exactly where they could not be had: `eprintln!` goes
+/// nowhere, and the env vars that gate them natively are always empty on
+/// wasm32.
+#[no_mangle]
+pub extern "C" fn switch_gpu_report_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session(handle);
+    let json = match s.cpu.nv.gpu.channels.values().next() {
+        Some(channel) => channel.three_d.renderer_report(),
+        None => "{}".to_string(),
+    };
+    write_into(buf, maxlen, json.as_bytes())
+}
+
 /// Enable/disable the per-instruction disassembly trace.
 #[no_mangle]
 pub extern "C" fn switch_set_trace(handle: u32, enabled: u32) {

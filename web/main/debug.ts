@@ -57,6 +57,39 @@ $('btn-jitstats').addEventListener('click', async () => {
   );
 });
 
+$('btn-gpustats').addEventListener('click', async () => {
+  const g = await call('gpu_report');
+  openPanel('console');
+  if (!g.backend) {
+    log('rendering: the software rasterizer has the frame - no device is installed.', 'dim');
+    return;
+  }
+  const drawn = g.drawn ?? 0;
+  const fallbacks = g.fallbacks ?? 0;
+  // Share of draws the device actually took. A frame can look fine and still
+  // be almost entirely the rasterizer's.
+  const share = drawn + fallbacks ? ((drawn * 100) / (drawn + fallbacks)).toFixed(1) : '0';
+  log(
+    `rendering: ${drawn} draws on the device, ${fallbacks} fell back (${share}% device), ` +
+      `${g.pipelines ?? 0} pipelines, ${g.modules ?? 0} modules`,
+    'dim',
+  );
+  if (g.gaveUp) log('rendering: the device was lost - the rasterizer has every frame.', 'err');
+  else if (g.softwareFrame) {
+    log('rendering: the software-frame latch has tripped - every frame from here is the rasterizer\'s.', 'err');
+  }
+  for (const why of g.reasons ?? []) log('  fell back: ' + why, 'dim');
+  const t = g.times;
+  if (t) {
+    log(
+      `  device time: translate ${t.translate}ms, upload ${t.upload}ms, ` +
+        `modules ${t.modules}ms, pipeline ${t.pipeline}ms, encode ${t.encode}ms, ` +
+        `flush ${t.flush}ms`,
+      'dim',
+    );
+  }
+});
+
 $('btn-dumptrace').addEventListener('click', async () => {
   const t = await drainTrace();
   openPanel('console');
