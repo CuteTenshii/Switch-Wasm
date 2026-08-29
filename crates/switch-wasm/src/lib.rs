@@ -1643,9 +1643,19 @@ pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) 
 #[no_mangle]
 pub extern "C" fn switch_gpu_report_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
+    // The frame count comes from here rather than the backend, which has no
+    // idea what a frame is — it sees clears and draws. Without it every
+    // reading has to be normalised by draws, and a flush costs what a frame
+    // costs however many draws went into it: a frame that only clears the
+    // screen reads the whole target back exactly like one that draws it.
+    let frames = s.cpu.nv.gpu.frames;
     let json = match s.cpu.nv.gpu.channels.values().next() {
         Some(channel) => channel.three_d.renderer_report(),
         None => "{}".to_string(),
+    };
+    let json = match json.strip_suffix('}') {
+        Some(body) if body.len() > 1 => format!("{body},\"frames\":{frames}}}"),
+        _ => format!("{{\"frames\":{frames}}}"),
     };
     write_into(buf, maxlen, json.as_bytes())
 }

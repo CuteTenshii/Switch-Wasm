@@ -33,6 +33,9 @@ export interface RamUsage {
  *  present whenever a device is. */
 export interface GpuReport {
   backend?: 'device';
+  /** Frames presented. Flush is a per-frame cost — one readback of the scanout
+   *  surface — so this is what its timing has to be divided by, not draws. */
+  frames?: number;
   drawn?: number;
   fallbacks?: number;
   pipelines?: number;

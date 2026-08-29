@@ -96,7 +96,7 @@ $('btn-gpustats').addEventListener('click', async () => {
   const t = g.times;
   if (t) {
     log(
-      `  device time: translate ${t.translate}ms, upload ${t.upload}ms, ` +
+      `  device time (${g.frames ?? 0} frames): translate ${t.translate}ms, upload ${t.upload}ms, ` +
         `modules ${t.modules}ms, pipeline ${t.pipeline}ms, encode ${t.encode}ms, ` +
         `flush ${t.flush}ms`,
       'dim',
