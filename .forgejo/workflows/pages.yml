@@ -19,6 +19,13 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: wasm32-unknown-unknown
+          # wasm-bindgen is fetched below on every run, so caching ~/.cargo/bin
+          # would only risk restoring a stale copy of it.
+          cache-bin: "false"
+
       # Keep this version in step with the wasm-bindgen crate in Cargo.lock.
       - name: Install wasm-bindgen
         run: |
