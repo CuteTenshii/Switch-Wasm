@@ -1397,6 +1397,11 @@ pub struct Cpu {
     erpt_journal_id: Option<[u8; erpt::ERPT_UUID_SIZE]>,
     /// Monotonic sampling number for the hid shared-memory LIFO entries.
     sample_counter: u64,
+    /// The host's last pad and contacts, and when they were last published.
+    /// [`Cpu::hid_tick`] republishes them on `hid`'s own clock.
+    last_gamepad: (u64, i32, i32, i32, i32),
+    last_touches: Vec<TouchPoint>,
+    last_hid_cycles: u64,
     /// The touchscreen LIFO's own sampling number. Separate from the npad one
     /// because a reader compares it against the last value *it* saw from this
     /// LIFO, and pad and touch are published on independent schedules.
@@ -1602,6 +1607,16 @@ const SP_SLOT: usize = 33;
 /// this.
 pub const VSYNC_PERIOD_CYCLES: u64 = 1_020_000_000 / 60;
 
+/// Instructions between `hid` samples: the sysmodule's 200 Hz against the same
+/// core.
+///
+/// `hid` writes a fresh entry into every LIFO on a timer whether or not
+/// anything moved, so the sampling number a title polls keeps advancing with
+/// the pad untouched. Publishing only when the host sends input froze it, and
+/// Tomodachi Life — which waits for a sample newer than the one it last read —
+/// waited for one that never came.
+pub const HID_SAMPLE_PERIOD_CYCLES: u64 = 1_020_000_000 / 200;
+
 /// How many instructions a thread runs before the scheduler takes the CPU
 /// away from it.
 ///
@@ -1735,6 +1750,9 @@ impl Cpu {
             erpt_readers: IdMap::default(),
             erpt_journal_id: None,
             sample_counter: 0,
+            last_gamepad: (0, 0, 0, 0, 0),
+            last_touches: Vec::new(),
+            last_hid_cycles: 0,
             shared_font: Vec::new(),
             pl_shmem_image: Vec::new(),
             shared_font_regions: Vec::new(),
@@ -3343,6 +3361,7 @@ impl Cpu {
         stick_rx: i32,
         stick_ry: i32,
     ) {
+        self.last_gamepad = (buttons, stick_lx, stick_ly, stick_rx, stick_ry);
         let buttons = buttons | Self::stick_pseudo_buttons(stick_lx, stick_ly, stick_rx, stick_ry);
 
         // Simple host→guest register: a u64 mask, then two analog sticks.
@@ -3356,6 +3375,25 @@ impl Cpu {
             return;
         }
         self.write_hid_gamepad_state(buttons, stick_lx, stick_ly, stick_rx, stick_ry);
+    }
+
+    /// Publish a fresh `hid` sample if the sysmodule's timer has come round.
+    ///
+    /// The host is not the clock `hid` runs on: it writes an entry every 5 ms
+    /// with whatever the pad is holding, and a reader that wants a sample
+    /// newer than its last one only gets it because of that. See
+    /// [`HID_SAMPLE_PERIOD_CYCLES`].
+    pub(super) fn hid_tick(&mut self) {
+        if self.hid_shmem_addr == 0
+            || self.cycles.wrapping_sub(self.last_hid_cycles) < HID_SAMPLE_PERIOD_CYCLES
+        {
+            return;
+        }
+        self.last_hid_cycles = self.cycles;
+        let (buttons, lx, ly, rx, ry) = self.last_gamepad;
+        self.set_gamepad_state(buttons, lx, ly, rx, ry);
+        let touches = std::mem::take(&mut self.last_touches);
+        self.set_touch_state(&touches);
     }
 
     /// The `HidNpadButton_StickL*`/`StickR*` bits hid sets from stick
@@ -3519,6 +3557,7 @@ impl Cpu {
     /// makes a touch that began before the guest mapped hid's shared memory
     /// show up as soon as it has.
     pub fn set_touch_state(&mut self, touches: &[TouchPoint]) {
+        self.last_touches = touches.to_vec();
         if self.hid_shmem_addr == 0 {
             return;
         }

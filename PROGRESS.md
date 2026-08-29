@@ -21,7 +21,7 @@ whenever it was last recorded.
 | `Checkpoint.nro` | layout and chrome; text was solid blocks for want of `SHFL`, unchecked since | yes | carried |
 | "A Short Hike" (NSP) | composites a full 1280x720 frame; steady state is 2 draws a frame and never a scene | partial | measured |
 | "Minecraft" (NSP) | the world, on the device: 110 draws a frame, none falling back | yes | measured |
-| "Tomodachi Life" (NSP) | reaches its idle frame loop; **no draw calls** ([below](#an-nnhid-state-is-read-under-a-seqlock-and-bit-0-is-the-lock)) | no | measured |
+| "Tomodachi Life" (NSP) | 2.52B steps to an `nnSdk` abort, `sf` 11-141 ([below](#hid-samples-on-a-clock-not-on-input)) | no | measured |
 
 A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` →
 `sdk` through real `nnSdk` init, gets its heap, events and input, brings up its
@@ -590,6 +590,31 @@ heap and all 41 thread states byte-identical to where they stood at 2 billion.
 `libnx` never looks at the bit, so no homebrew could show it. Past it the title
 sets up its vibration devices and reaches its idle frame loop.
 
+### `hid` samples on a clock, not on input
+
+The sysmodule writes a fresh entry into every LIFO every 5 ms whether or not
+anything moved, so the sampling number a title polls keeps advancing with the
+pad untouched. Publishing only when the host sent input froze it, and a title
+that waits for a sample newer than its last one waited forever. It is
+`Cpu::hid_tick`, on the same wait the display refresh already ticks from, and
+it republishes the host's last pad and contacts rather than inventing any.
+
+That was also why the CLI could not reproduce what the browser saw: the browser
+publishes on input events, so a hand on the keyboard kept the LIFO moving.
+Headless, Tomodachi Life sat in an idle frame loop forever; with the tick it
+runs on to the abort above at 2,524,316,651 steps, the same one and the same
+backtrace. hbmenu, JKSV, Checkpoint and A Short Hike present byte-identical
+frame 3s either way.
+
+**What the abort is** is open. The title reads all of
+`/Parameter/ClockSystem/` — the six `TimeRangeParam`s and the four
+`SeasonParam`s, ending with `Winter` at RomFS 0x49a9e3f0 — and then one
+`nnSdk` call fails: `blr x8` at `0x0d6df6d8`, reached exactly once, on the
+`.bss` singleton at `0xde9e290` through vtable slot `+0xa0`. No service request
+is refused anywhere in the run, `romfs_selftest` says the reads are consistent,
+and answering `QueryPointerBufferSize` with Eden's 0x8000 instead of 0 leaves
+the run bit-identical, so it is none of those three.
+
 **`hwopus` is the exception to all of that**: there is nothing to answer *as*,
 because the caller wants audio back. So `src/opus/` is a full Opus decoder —
 range coder, CELT, SILK, hybrid, concealment and multi-stream, no dependencies
@@ -638,9 +663,8 @@ the WebGPU backend against the rasterizer.
    `GPU_ONLY`.
 2. **A retail title that draws but never a scene.** A Short Hike composites a
    full frame and settles at two draws a frame forever; Tomodachi Life issues
-   no draw calls at all. Past the `hid` seqlock above it reaches a steady idle
-   loop — every worker parked, the main thread woken by `vi:vsync` and
-   `audren:frame`, no service call refused — and still renders nothing.
+   no draw calls at all: it now runs to an `nnSdk` abort instead, `sf` 11-141
+   after reading its clock parameters, which is the thing to chase next.
    Whatever they wait on is above the GPU. The Home Menu and Minecraft both
    draw, so this is these titles' own gap, not the retail path's.
 3. **NX-Shell regressed** to 433,783 steps with no output. Cheapest bisect
