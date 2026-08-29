@@ -1,6 +1,5 @@
 //! The Horizon supervisor calls (`SVC`) libnx homebrew issues at runtime.
 
-use super::power::CLOCK_RATES_HZ;
 use super::{
     ArbiterWait, Cpu, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE,
     HID_SHMEM_SIZE, PL_SHMEM_SIZE,
@@ -614,6 +613,11 @@ impl Cpu {
                         self.signal_event(vsync);
                     }
                 }
+                // `hid` runs on a clock of its own, and for the same reason
+                // the display does: a title polling for an entry newer than
+                // the one it last read gets nothing out of a LIFO that only
+                // moves when the host moves.
+                self.hid_tick();
                 // The audio devices get the same treatment as the display: a
                 // buffer whose samples have finished playing fires its event
                 // here, and `next_buffer` is when the soonest one this wait
@@ -781,9 +785,7 @@ impl Cpu {
                 // instructions read back as five seconds of wall time, and
                 // anything that measures its own progress against the tick
                 // was being told it had missed every deadline it had.
-                const TICK_HZ: u128 = 19_200_000;
-                let ticks = u128::from(self.cycles) * TICK_HZ / u128::from(CLOCK_RATES_HZ[0]);
-                self.svc_out64(0, 0, 1, ticks as u64);
+                self.svc_out64(0, 0, 1, self.system_tick());
                 Ok(())
             }
             0x1F => {

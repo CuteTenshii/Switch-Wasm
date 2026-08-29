@@ -598,6 +598,37 @@ fn tpidr_el0_roundtrips_and_tpidrro_el0_does_not() {
 }
 
 #[test]
+fn the_generic_timer_counts_and_reports_its_own_rate() {
+    // `nn::os::GetSystemTick` is `mrs x0, cntpct_el0; ret`, so this register
+    // is the clock a retail title measures its frames against: reading it as
+    // a fixed zero leaves every delta time zero and stops animation dead.
+    const NOPS: usize = 2000;
+    let mut cpu = Cpu::new();
+    cpu.bootstrap();
+    let mut code = vec![0xD53B_E021u32]; // mrs x1, cntpct_el0
+    code.extend(std::iter::repeat_n(0xD503_201Fu32, NOPS)); // nop
+    code.push(0xD53B_E022); // mrs x2, cntpct_el0
+    code.push(0xD53B_E043); // mrs x3, cntvct_el0
+    code.push(0xD53B_E004); // mrs x4, cntfrq_el0
+    let mut bytes = Vec::new();
+    for insn in &code {
+        bytes.extend_from_slice(&insn.to_le_bytes());
+    }
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    cpu.set_pc(0x1000);
+    cpu.run(code.len() as u64).unwrap();
+    assert!(
+        cpu.read_x(2) > cpu.read_x(1),
+        "CNTPCT_EL0 must advance as the guest runs, not read a fixed value"
+    );
+    assert!(
+        cpu.read_x(3) >= cpu.read_x(2) && cpu.read_x(3) - cpu.read_x(2) <= 1,
+        "CNTVCT_EL0 reads the same counter as CNTPCT_EL0"
+    );
+    assert_eq!(cpu.read_x(4), 19_200_000, "CNTFRQ_EL0 is the 19.2 MHz rate");
+}
+
+#[test]
 fn sub_shifted_register() {
     // SUB X2, X0, X1 must subtract, not add, and must not clobber flags.
     let mut cpu = Cpu::new();

@@ -10,8 +10,14 @@
 //! the end of that table, which is what made the difference worth having.
 
 use super::bits::{FPCR_MASK, FPSR_MASK};
+use super::power::CLOCK_RATES_HZ;
 use super::Cpu;
 use crate::{Error, Result};
+
+/// The generic timer's rate. `nn::os::GetSystemTickFrequency` returns it
+/// from a constant of its own, so the counter has to be on this scale
+/// whatever the CPU is clocked at.
+pub(super) const TICK_HZ: u32 = 19_200_000;
 
 /// The system register an `MRS`/`MSR` names, resolved from its
 /// `op0:op1:CRn:CRm:op2` fields.
@@ -25,6 +31,11 @@ pub(super) enum SysReg {
     TpidrRo,
     Fpcr,
     Fpsr,
+    /// `CNTPCT_EL0`, and `CNTVCT_EL0` for the same count — EL0 has no virtual
+    /// offset here. **This is the clock, not `svcGetSystemTick`**:
+    /// `nn::os::GetSystemTick` is `mrs x0, cntpct_el0; ret`, so a retail
+    /// title's frame timing never reaches a syscall at all.
+    SystemTick,
     /// A register that always reads the same value: the two Cortex-A57
     /// constants this emulator reports, and zero for everything it does not
     /// model. Writes to these are dropped. Both constants fit in 32 bits,
@@ -57,6 +68,9 @@ impl SysReg {
             // so reporting 0 made NX-Shell's flush walk its buffers 4 bytes
             // at a time.
             0b11_011_0000_0000_001 => SysReg::Fixed(0x8444_C004),
+            // CNTFRQ_EL0 (3:3:14:0:0), CNTPCT_EL0 (…:1) and CNTVCT_EL0 (…:2).
+            0b11_011_1110_0000_000 => SysReg::Fixed(TICK_HZ),
+            0b11_011_1110_0000_001 | 0b11_011_1110_0000_010 => SysReg::SystemTick,
             _ => SysReg::Fixed(0),
         }
     }
@@ -155,6 +169,13 @@ impl Cpu {
         Ok(())
     }
 
+    /// The 19.2 MHz generic-timer count, which both `CNTPCT_EL0` and
+    /// `svcGetSystemTick` report. One emulated instruction stands for one
+    /// cycle of the CPU `apm` reports, so a tick is worth about 53 of them.
+    pub(super) fn system_tick(&self) -> u64 {
+        (u128::from(self.cycles) * u128::from(TICK_HZ) / u128::from(CLOCK_RATES_HZ[0])) as u64
+    }
+
     /// Carry out an already-classified system instruction. `Unhandled` is the
     /// caller's to report, and does nothing here.
     #[inline(always)]
@@ -168,6 +189,7 @@ impl Cpu {
                     SysReg::TpidrRo => self.tpidr,
                     SysReg::Fpcr => u64::from(self.fpcr),
                     SysReg::Fpsr => u64::from(self.fpsr),
+                    SysReg::SystemTick => self.system_tick(),
                     SysReg::Fixed(v) => u64::from(v),
                 };
                 self.set_reg_at(rd, val);
@@ -181,7 +203,7 @@ impl Cpu {
                 SysReg::Tpidr => self.tpidr_rw = self.reg_at(rt),
                 // TPIDRRO_EL0 is read-only at EL0, so a guest write to it is
                 // ignored rather than refused.
-                SysReg::TpidrRo | SysReg::Fixed(_) => {}
+                SysReg::TpidrRo | SysReg::SystemTick | SysReg::Fixed(_) => {}
             },
             SysOp::MsrNzcvImm { imm } => self.nzcv = u32::from(imm),
             SysOp::ClearExclusive => self.exclusive = None,
