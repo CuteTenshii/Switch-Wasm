@@ -78,14 +78,26 @@ pub(super) enum SysOp {
     MsrNzcvImm { imm: u8 },
     /// `DC ZVA Xt`: zero the 64-byte block Xt points into.
     DcZva { rt: u8 },
+    /// `CLREX`: clear the local exclusive monitor.
+    ///
+    /// It sits in the barrier group and is not a barrier: a `STXR` after one
+    /// must fail. It was retiring as a hint, so a guest that abandoned a
+    /// read-modify-write kept its reservation, and the store it had given up
+    /// on could still land.
+    ClearExclusive,
     /// An encoding this does not place. The caller reports it.
     Unhandled,
 }
 
 impl SysOp {
     pub(super) fn of(insn: u32) -> SysOp {
-        // HINT (incl. NOP) and the barriers.
+        // HINT (incl. NOP) and the barriers. CLREX shares the group and is
+        // the one member of it with an architectural effect: CRn == 0011 with
+        // op2 == 010, where DMB/DSB/ISB take op2 100/101/110.
         if (insn >> 16) & 0xFFFF == 0xD503 {
+            if (insn >> 12) & 0xF == 0b0011 && (insn >> 5) & 0b111 == 0b010 {
+                return SysOp::ClearExclusive;
+            }
             return SysOp::Nop;
         }
         let l = (insn >> 21) & 1;
@@ -172,6 +184,7 @@ impl Cpu {
                 SysReg::TpidrRo | SysReg::Fixed(_) => {}
             },
             SysOp::MsrNzcvImm { imm } => self.nzcv = u32::from(imm),
+            SysOp::ClearExclusive => self.exclusive = None,
             SysOp::DcZva { rt } => {
                 // Eight doubleword stores rather than sixty-four byte ones,
                 // which is eight page lookups instead of sixty-four. (Not

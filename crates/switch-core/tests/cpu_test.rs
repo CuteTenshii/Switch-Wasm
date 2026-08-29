@@ -9052,3 +9052,58 @@ fn a_signed_load_into_a_w_register_narrows_like_every_other_w_write() {
         assert_eq!(cpu.read_x(4), 0xFFFF_FFFF_FFFF_FF80, "ldrsb x (jit={jit})");
     }
 }
+
+/// `CLREX` clears the local monitor, and a `STXR` after one fails.
+///
+/// It sits in the barrier group, so it was retiring as a hint like `DMB` and
+/// `ISB` beside it — and a guest that abandons a read-modify-write (the
+/// give-up branch of every compare-and-swap) kept its reservation, so the
+/// store it had decided not to make could still land later.
+#[test]
+fn clrex_clears_the_reservation_a_store_exclusive_needs() {
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.set_reg(0, 0x2000);
+    cpu.set_reg(2, 0xAAAA);
+    let code = &[
+        0xc85f7c01, // ldxr x1, [x0]
+        0xd5033f5f, // clrex
+        0xc8037c02, // stxr w3, x2, [x0]
+        0xf9400004, // ldr x4, [x0]
+    ];
+    let cpu = run_program(cpu, 0x1000, code);
+    assert_eq!(cpu.read_x(3), 1, "the store-exclusive reported success");
+    assert_eq!(cpu.read_x(4), 0, "it stored anyway");
+}
+
+/// A 32-bit `LDXP`/`STXP` pair is two words, not two doublewords.
+///
+/// Both halves were read and written as 64-bit whatever the size field said,
+/// so a `stxp w0, w1, w2, [x3]` wrote sixteen bytes where it should write
+/// eight — over eight bytes belonging to something else — and reported that it
+/// had succeeded.
+#[test]
+fn a_32_bit_exclusive_pair_moves_words() {
+    let mut cpu = cpu_at(0x1000);
+    cpu.mem.map_zero(0x2000, 0x100).unwrap();
+    cpu.mem.write_u64(0x2008, 0xDEAD_BEEF_DEAD_BEEF).unwrap();
+    cpu.set_reg(0, 0x2000);
+    cpu.set_reg(1, 0x1111_1111_1111_1111);
+    cpu.set_reg(2, 0x2222_2222_2222_2222);
+    let code = &[
+        0x887f0c03, // ldxp w3, w3, [x0]  (both halves, discarded)
+        0x88240801, // stxp w4, w1, w2, [x0]
+        0xf9400405, // ldr x5, [x0, #8]
+        0xb9400006, // ldr w6, [x0]
+        0xb9400407, // ldr w7, [x0, #4]
+    ];
+    let cpu = run_program(cpu, 0x1000, code);
+    assert_eq!(cpu.read_x(4), 0, "the pair store failed");
+    assert_eq!(cpu.read_x(6), 0x1111_1111, "first word");
+    assert_eq!(cpu.read_x(7), 0x2222_2222, "second word");
+    assert_eq!(
+        cpu.read_x(5),
+        0xDEAD_BEEF_DEAD_BEEF,
+        "a word pair wrote over its neighbour"
+    );
+}

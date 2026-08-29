@@ -710,21 +710,41 @@ impl Cpu {
                     self.write_zr(rt, val);
                 }
                 0b001000001 => {
-                    // STXP: 64-bit pair store, on the same monitor.
+                    // STXP: a pair store on the same monitor. `sz` picks the
+                    // element: 10 is two **words** four bytes apart, 11 two
+                    // doublewords eight apart. Both were doublewords here, so
+                    // a 32-bit pair wrote sixteen bytes over eight bytes of
+                    // its neighbour and reported success.
                     if self.exclusive.take() == Some(base as u32) {
                         let v0 = self.read_zr(rt);
                         let v1 = self.read_zr(rt2);
-                        self.mem.write_u64(base as u32, v0)?;
-                        self.mem.write_u64(base.wrapping_add(8) as u32, v1)?;
+                        if sz == 0b10 {
+                            self.mem.write_u32(base as u32, v0 as u32)?;
+                            self.mem.write_u32(base.wrapping_add(4) as u32, v1 as u32)?;
+                        } else {
+                            self.mem.write_u64(base as u32, v0)?;
+                            self.mem.write_u64(base.wrapping_add(8) as u32, v1)?;
+                        }
                         self.write_zr(((insn >> 16) & 0x1F) as u8, 0);
                     } else {
                         self.write_zr(((insn >> 16) & 0x1F) as u8, 1);
                     }
                 }
                 0b001000011 => {
-                    // LDXP: 64-bit pair load
-                    let v0 = self.mem.read_u64(base as u32)?;
-                    let v1 = self.mem.read_u64(base.wrapping_add(8) as u32)?;
+                    // LDXP: the same pair, loaded. The 32-bit form writes W
+                    // registers, so each half is zero-extended rather than
+                    // read as a doubleword.
+                    let (v0, v1) = if sz == 0b10 {
+                        (
+                            u64::from(self.mem.read_u32(base as u32)?),
+                            u64::from(self.mem.read_u32(base.wrapping_add(4) as u32)?),
+                        )
+                    } else {
+                        (
+                            self.mem.read_u64(base as u32)?,
+                            self.mem.read_u64(base.wrapping_add(8) as u32)?,
+                        )
+                    };
                     self.exclusive = Some(base as u32);
                     self.write_zr(rt, v0);
                     self.write_zr(rt2, v1);

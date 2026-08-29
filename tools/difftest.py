@@ -422,6 +422,54 @@ SCALAR_INSTRUCTIONS = [
     "movn x25, #1",
     "ldr x8, [x29, w25, sxtw #3]",
     "ldrsb w9, [x29, w25, sxtw]",
+    # The exclusives, which every lock word a title's threads share is built
+    # out of, and which neither harness tested. The status register is the
+    # whole point: a store that reports success where hardware reports failure
+    # is a lost update, and a lock that loses one is a lock nobody holds.
+    "add x23, x29, #16",
+    "ldxr x0, [x29]",
+    "stxr w1, x11, [x29]",
+    "ldr x2, [x29]",
+    # The monitor is spent by the store above, so this one must fail and must
+    # leave memory alone.
+    "stxr w3, x12, [x29]",
+    "ldr x4, [x29]",
+    "ldxr x5, [x29]",
+    "clrex",
+    "stxr w6, x13, [x29]",
+    "ldr x7, [x29]",
+    # A reservation taken at one address is not a reservation at another.
+    "ldxr x8, [x29]",
+    "stxr w9, x14, [x23]",
+    "ldr x0, [x23]",
+    # every width, and the acquire/release forms the SDK's mutexes use
+    "ldxrb w1, [x29]",
+    "stxrb w2, w11, [x29]",
+    "ldrb w3, [x29]",
+    "ldxrh w4, [x29]",
+    "stxrh w5, w11, [x29]",
+    "ldrh w6, [x29]",
+    "ldaxr x7, [x29]",
+    "stlxr w8, x12, [x29]",
+    "ldr x9, [x29]",
+    "ldaxrb w0, [x29]",
+    "stlxrb w1, w13, [x29]",
+    "ldaxrh w2, [x29]",
+    "stlxrh w3, w13, [x29]",
+    "ldar x4, [x29]",
+    "stlr x14, [x29]",
+    "ldr x5, [x29]",
+    # the pairs, both widths -- a 32-bit pair is two words four bytes apart,
+    # not two doublewords eight apart
+    "ldxp x6, x7, [x29]",
+    "stxp w8, x11, x12, [x29]",
+    "ldp x9, x0, [x29]",
+    "ldxp w1, w2, [x29]",
+    "stxp w3, w13, w14, [x29]",
+    "ldp w4, w5, [x29]",
+    "ldaxp x6, x7, [x29]",
+    "stlxp w8, x15, x16, [x29]",
+    "ldp x9, x0, [x29]",
 ]
 
 # The values loaded into x10..x25 before the scalar tests run.

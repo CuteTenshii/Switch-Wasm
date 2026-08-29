@@ -245,9 +245,12 @@ fn decode_branch_or_system(insn: u32, pc: u32) -> Decoded {
         // MSR/MRS, barriers and hints. `system` retires all of them to the
         // next instruction, so they stay inside the block.
         0xD5 => {
-            if (insn >> 16) & 0xFFFF == 0xD503 {
-                Decoded::Op(Op::Nop)
-            } else if ((insn >> 22) & 0x3FF) == 0b1101010100 {
+            // The hint and barrier group used to shortcut to `Op::Nop` here
+            // without asking the classifier, which is right for all of it but
+            // `CLREX` — that one clears the local monitor, and skipping the
+            // classifier made it a hint in this engine while the interpreter
+            // honoured it. `decode_system` answers `Op::Nop` for the rest.
+            if ((insn >> 22) & 0x3FF) == 0b1101010100 {
                 // The same guard `try_branch_or_system` applies before handing
                 // an encoding to `system`. Anything else falls through to the
                 // whole-space chain, so it stays an `Interpret`.
