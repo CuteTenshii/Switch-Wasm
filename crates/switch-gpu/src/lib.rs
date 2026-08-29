@@ -3624,6 +3624,14 @@ impl Renderer for Gpu {
         result
     }
 
+    fn lost(&self) -> bool {
+        // `gave_up` and not `software_frame`: the latch is a decision about
+        // this device, which is working, and replacing it would throw away a
+        // warm cache to reach the same conclusion. A lost device is the one
+        // condition a fresh one actually fixes.
+        self.gave_up
+    }
+
     fn report_json(&self) -> String {
         // The same numbers `Drop` prints, except that a browser never sees
         // those: the module outlives the page's interest in it, and stderr

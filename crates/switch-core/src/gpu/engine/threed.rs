@@ -998,6 +998,12 @@ impl Engine3D {
         self.renderer.report_json()
     }
 
+    /// Whether the installed backend wants replacing — see
+    /// [`Renderer::lost`].
+    pub fn renderer_lost(&self) -> bool {
+        self.renderer.lost()
+    }
+
     /// Tell the backend that something outside it is about to read a render
     /// target — see [`Renderer::flush`].
     pub fn flush_renderer(&mut self, ctx: &mut ExecCtx) -> Result<crate::gpu::renderer::Flush> {

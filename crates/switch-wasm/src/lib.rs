@@ -1650,6 +1650,19 @@ pub extern "C" fn switch_gpu_report_json(handle: u32, buf: *mut u8, maxlen: u32)
     write_into(buf, maxlen, json.as_bytes())
 }
 
+/// Whether the installed GPU backend has lost its device and wants replacing.
+///
+/// Cheap by design — the worker asks after every slice, and a JSON report
+/// parsed that often would cost more than the answer is worth.
+#[no_mangle]
+pub extern "C" fn switch_gpu_lost(handle: u32) -> u32 {
+    let s = session(handle);
+    match s.cpu.nv.gpu.channels.values().next() {
+        Some(channel) => u32::from(channel.three_d.renderer_lost()),
+        None => 0,
+    }
+}
+
 /// Enable/disable the per-instruction disassembly trace.
 #[no_mangle]
 pub extern "C" fn switch_set_trace(handle: u32, enabled: u32) {

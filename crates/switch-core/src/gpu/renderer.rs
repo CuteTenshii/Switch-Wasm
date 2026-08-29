@@ -110,6 +110,20 @@ pub trait Renderer: std::fmt::Debug {
     fn report_json(&self) -> String {
         "{}".to_string()
     }
+
+    /// Whether this backend has stopped being able to render and wants
+    /// replacing.
+    ///
+    /// A device is not a thing a browser promises to keep: a driver reset, a
+    /// GPU process restart or memory pressure takes it away, and the backend
+    /// hands every frame to the rasterizer from then on. That is the right
+    /// answer for the frame it happens in and the wrong one for the rest of
+    /// the session — 30x wrong, measured — because a lost device can simply
+    /// be asked for again. Cheap enough to ask once a slice, which is what
+    /// makes a fresh one possible without a reload.
+    fn lost(&self) -> bool {
+        false
+    }
 }
 
 /// Whether a [`Renderer::flush`] finished, or wants asking again.

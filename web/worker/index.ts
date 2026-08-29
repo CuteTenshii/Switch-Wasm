@@ -136,6 +136,33 @@ async function adapterName(): Promise<string> {
   }
 }
 
+/* How many times a lost device is replaced before the rasterizer keeps the
+   session.
+
+   A device is not something a browser promises to keep -- a driver reset, a
+   GPU process restart or memory pressure takes it, and the backend then hands
+   every frame to the rasterizer, which measured 30x slower. Reloading the tab
+   was the only cure, which is not a thing to ask of somebody mid-title.
+
+   Bounded rather than endless because a device that dies on sight would
+   otherwise be re-requested once a slice forever, and each attempt costs an
+   instance and a `requestAdapter`. Three is enough for a transient loss and
+   short enough that a permanently broken adapter settles quickly. */
+const GPU_REOPENS = 3;
+let gpuReopens = 0;
+
+/* Whether the backend has lost its device. One integer across the boundary,
+   because this is asked after every slice -- the JSON report says the same
+   thing and costs a parse. */
+function gpuLost(): boolean {
+  if (state.handle < 0) return false;
+  const lost = (state.exports as unknown as {
+    switch_gpu_lost?(handle: number): number;
+  }).switch_gpu_lost;
+  // A core built before this export exists is not a core with a lost device.
+  return !!lost && lost(state.handle) !== 0;
+}
+
 function tryGpu(): void {
   if (!GPU_BACKEND_READY) {
     if (gpu === 'no') {
@@ -143,6 +170,22 @@ function tryGpu(): void {
       console.info('[gpu] software rasterizer: turned off at GPU_BACKEND_READY');
     }
     return;
+  }
+  // Installing a fresh backend replaces the dead one, which drops it and the
+  // instance behind it. Its caches go with it: a new device shares nothing
+  // with the old, so the first frames after this pay for their pipelines
+  // again.
+  if (gpu === 'done' && gpuLost()) {
+    if (gpuReopens >= GPU_REOPENS) {
+      gpu = 'never';
+      console.info(
+        `[gpu] software rasterizer: the device was lost ${gpuReopens} times; not asking again`,
+      );
+      return;
+    }
+    gpuReopens++;
+    gpu = 'no';
+    console.info(`[gpu] the device was lost - opening another (attempt ${gpuReopens})`);
   }
   if (gpu !== 'no' || state.handle < 0) return;
   gpu = 'trying';
