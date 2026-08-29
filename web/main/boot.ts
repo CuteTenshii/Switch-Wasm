@@ -16,6 +16,7 @@ import { call, readLastError } from './rpc';
 import { run, updatePc } from './runloop';
 import { noteBooted, recycleSession } from './session';
 import { dropveilEl, setState, showScreen, stageEl } from './shell';
+import { setRunning } from './title';
 
 export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<boolean> {
   clearConsole();
@@ -43,6 +44,7 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
     return false;
   }
   log('Loaded ' + file.name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
+  setRunning({ name: file.name, icon: null, version: '' });
   noteBooted();
   setState('loaded');
   // Uncover the emulated screen now, but keep the loading screen over it:
@@ -70,6 +72,7 @@ async function bootFile(file: File): Promise<void> {
   // mapped underneath the new one — see `recycleSession`.
   try {
     beginLoad(file.name, 'replacing the running session');
+    setRunning(null);
     await recycleSession();
   } catch (err) {
     setState('fault');

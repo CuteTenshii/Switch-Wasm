@@ -69,6 +69,48 @@ body {
 }
 .brand .name { font-weight: 600; letter-spacing: .2px; font-size: 14px; }
 
+/* What is running, between the brand and the controls that act on it. The one
+   part of the bar whose width is the title's to decide, so it is also the only
+   one allowed to shrink. */
+.running {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+}
+.running-icon {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  background: var(--chrome-hi);
+  object-fit: cover;
+}
+/* Name over version, the way a console's own home menu stacks them. Both lines
+   fit the 48px bar only at a line height tighter than the page's. */
+.running-meta {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  line-height: 1.25;
+}
+.running-name {
+  font-size: 13px;
+  color: var(--text);
+  max-width: 26ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.running-version {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .transport { display: flex; gap: 6px; }
 
 .topbar-status { display: flex; align-items: center; gap: 10px; }
@@ -881,6 +923,13 @@ body.resizing { cursor: col-resize; user-select: none; }
     to   { opacity: 1; transform: none; }
   }
   .transport .btn span:not(.glyph) { display: none; }
+  /* Only where the icon is left to say which title it is: homebrew launched
+     from a file has no icon, and a bare rule with nothing beside it names
+     nothing at all. */
+  .running.has-icon .running-meta { display: none; }
+  .running { padding-left: 8px; }
+  .running-icon { width: 26px; height: 26px; border-radius: 6px; }
+  .running-name { max-width: 14ch; }
   .topbar { gap: 8px; }
   .statusbar .item:nth-child(n+3) { display: none; }
 }

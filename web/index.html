@@ -40,6 +40,16 @@
       <span class="name">switch-wasm</span>
     </div>
 
+    <!-- What the session is running. Empty until something is loaded, and
+         emptied again by anything that throws the session away. -->
+    <div class="running" id="running" hidden>
+      <img class="running-icon" id="running-icon" alt="" hidden>
+      <span class="running-meta">
+        <span class="running-name" id="running-name"></span>
+        <span class="running-version" id="running-version" hidden></span>
+      </span>
+    </div>
+
     <div class="transport" role="group" aria-label="Emulation controls">
       <button id="btn-run" class="btn primary" title="Run / Pause (Space)">
         <span class="glyph" id="run-glyph">&#9654;</span><span id="run-label">Run</span>

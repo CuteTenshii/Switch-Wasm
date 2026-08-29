@@ -19,6 +19,7 @@ import { sdRequestPersistence, sdRestore } from './sdcard';
 import { screenCtx, screenEl, setState, showOverlay } from './shell';
 import { reopenContainer } from './container';
 import { recycleSession, stageFont } from './session';
+import { setRunning } from './title';
 import { beginLoad, endLoad, failLoad, loadPhase } from './loading';
 
 // Registered for their side effects: each of these owns a part of the page and
@@ -87,6 +88,7 @@ $('btn-reset').addEventListener('click', async () => {
   resetAudio();
   clearConsole();
   resetDisplay();
+  setRunning(null);
   setState('idle');
   showOverlay(true);
   screenCtx.clearRect(0, 0, screenEl.width, screenEl.height);

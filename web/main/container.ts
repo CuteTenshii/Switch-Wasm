@@ -13,6 +13,7 @@ import { call, readLastError } from './rpc';
 import { run, updatePc } from './runloop';
 import { noteBooted, recycleSession } from './session';
 import { openPanel, setNote, setState, showScreen } from './shell';
+import { setRunning } from './title';
 
 /** What a launch puts on the loading screen. A title picked out of a container
  *  has its own name and icon; one launched from the NAND is a bare NCA with
@@ -20,6 +21,12 @@ import { openPanel, setNote, setState, showScreen } from './shell';
 export interface LaunchIdentity {
   name: string;
   iconUrl: string | null;
+  /** The icon behind that URL. The top bar outlives the URL - opening another
+   *  container revokes it - so it makes one of its own from these bytes. */
+  icon: Blob | null;
+  /** What the NACP calls this version - "1.0.1", not "v65536". Empty where the
+   *  title left it unset, which plenty do. */
+  version: string;
 }
 
 const nspDrop = $('nsp-drop');
@@ -461,11 +468,14 @@ let heldTitle: LaunchIdentity | null = null;
 
 function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity | null {
   if (heldTitle?.iconUrl) URL.revokeObjectURL(heldTitle.iconUrl);
+  const blob = info && icon && icon.length
+    ? new Blob([icon], { type: info.icon_mime })
+    : null;
   heldTitle = info ? {
     name: info.name,
-    iconUrl: icon && icon.length
-      ? URL.createObjectURL(new Blob([icon], { type: info.icon_mime }))
-      : null,
+    iconUrl: blob ? URL.createObjectURL(blob) : null,
+    icon: blob,
+    version: info.version || '',
   } : null;
   return heldTitle;
 }
@@ -685,15 +695,20 @@ function launchNca(f: NspFile, index: number): Promise<void> {
   // clears the trace buffer those go to, and which version is about to run is
   // the one thing a launch should not be silent about.
   const notes = [];
+  let identity = heldTitle;
   if (heldUpdate && heldUpdate.titleId === openTitleId) {
     notes.push('Update ' + describeUpdate(heldUpdate)
       + ' applied: its modules, over the base game\'s data.');
+    // What runs is the update's build, so that is the version to report - the
+    // base game's own is what the container said, and it is about to be
+    // patched out from under it.
+    if (identity && heldUpdate.version) identity = { ...identity, version: heldUpdate.version };
   }
   const packs = heldDlc
     .filter((held) => held.titleId === openTitleId)
     .reduce((n, held) => n + held.indices.length, 0);
   if (packs) notes.push(describeDlc(packs) + ' mounted.');
-  return doLaunchNca(f.name, () => call('load_nca_from_nsp', index), heldTitle,
+  return doLaunchNca(f.name, () => call('load_nca_from_nsp', index), identity,
     notes.join(' '));
 }
 
@@ -713,6 +728,9 @@ export async function doLaunchNca(
   // After the clear, or the launch would wipe the line that says what it is.
   if (note) log(note, 'ok');
   setState('loading');
+  // The session below is about to be thrown away, so the bar stops naming what
+  // was in it now rather than when the replacement succeeds.
+  setRunning(null);
   // A title the container named puts that name and its own icon on the screen;
   // a bare NCA off the NAND has only the file name to show.
   beginLoad(identity?.name || name, 'decrypting the program and reading its ExeFS',
@@ -746,6 +764,11 @@ export async function doLaunchNca(
     return;
   }
   log('Launched ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
+  setRunning({
+    name: identity?.name || name,
+    icon: identity?.icon ?? null,
+    version: identity?.version || '',
+  });
   noteBooted();
   setState('loaded');
   loadPhase('starting the process');
