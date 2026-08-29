@@ -3657,13 +3657,22 @@ impl Renderer for Gpu {
             None => String::new(),
         };
         let reasons: Vec<String> = self.reasons.iter().map(|why| json_string(why)).collect();
+        // `held` is what a flush costs: `flush_inner` writes back every
+        // surface in it, every time, so this growing is the flush time
+        // growing. Nothing caps it — a title that renders to fresh addresses
+        // accumulates them — and the count is the only way to see that from
+        // outside.
         format!(
             "{{\"backend\":\"device\",\"drawn\":{},\"fallbacks\":{},\"pipelines\":{},\
-             \"modules\":{},\"softwareFrame\":{},\"gaveUp\":{},\"reasons\":[{}]{}}}",
+             \"modules\":{},\"held\":{},\"evicted\":{},\"pending\":{},\
+             \"softwareFrame\":{},\"gaveUp\":{},\"reasons\":[{}]{}}}",
             self.drawn,
             self.fallbacks,
             self.pipelines.len(),
             self.modules.len(),
+            self.held.len(),
+            self.evicted.len(),
+            self.pending.len(),
             self.software_frame,
             self.gave_up,
             reasons.join(","),
@@ -3703,6 +3712,20 @@ impl Gpu {
                 Some(why) => Err(Error::Gpu(why)),
                 None => Ok(Flush::Done),
             };
+        }
+        // Nothing on the device, nothing owed, nothing in flight: guest
+        // memory cannot disagree with a backend holding no surfaces, so there
+        // is nothing to wait for and nothing to land.
+        //
+        // Worth checking because a flush is not once a frame. It also runs
+        // before every fallback draw, and `flush_one` empties `held` as it
+        // writes back — so every flush after a frame's first one reaches this
+        // with all three empty, and used to poll the device to find that out.
+        // On the web that poll cannot even do anything (callbacks come from
+        // the event loop) and still costs a crossing: a browser trace with
+        // *no draws at all* charged 1,755 ms to flush.
+        if self.held.is_empty() && self.evicted.is_empty() && self.pending.is_empty() {
+            return Ok(Flush::Done);
         }
         // Only once per frame: asking again while the first ask is in flight
         // would copy the same surface twice and read the second copy.

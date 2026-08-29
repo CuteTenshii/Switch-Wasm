@@ -71,7 +71,8 @@ $('btn-gpustats').addEventListener('click', async () => {
   const share = drawn + fallbacks ? ((drawn * 100) / (drawn + fallbacks)).toFixed(1) : '0';
   log(
     `rendering: ${drawn} draws on the device, ${fallbacks} fell back (${share}% device), ` +
-      `${g.pipelines ?? 0} pipelines, ${g.modules ?? 0} modules`,
+      `${g.pipelines ?? 0} pipelines, ${g.modules ?? 0} modules, ` +
+      `${g.held ?? 0} surfaces held (${g.evicted ?? 0} evicted, ${g.pending ?? 0} pending)`,
     'dim',
   );
   if (g.gaveUp) log('rendering: the device was lost - the rasterizer has every frame.', 'err');

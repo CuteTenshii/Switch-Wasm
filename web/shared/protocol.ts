@@ -37,6 +37,11 @@ export interface GpuReport {
   fallbacks?: number;
   pipelines?: number;
   modules?: number;
+  /** Surfaces the backend is holding on the device. Every flush writes back
+   *  all of them, so this growing is the flush time growing. */
+  held?: number;
+  evicted?: number;
+  pending?: number;
   /** Once this latches, every frame after it is the rasterizer's however well
    *  the device is working. */
   softwareFrame?: boolean;
