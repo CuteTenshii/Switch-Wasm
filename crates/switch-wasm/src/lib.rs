@@ -1414,6 +1414,14 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     ));
     cpu.set_system_resource_size(system_resource);
 
+    // And which instruction set it runs, from bit 0 of the same manifest's
+    // flags. Also before the boot: the entry ABI puts the return trampoline in
+    // a different register in each state.
+    if !switch_core::npdm::Npdm::is_64_bit_of(&pfs0, &exefs) {
+        cpu.diagnostic("[npdm] AArch32 title — running the A32 interpreter");
+        cpu.set_mode(switch_core::cpu::ExecMode::A32);
+    }
+
     match cpu.boot_retail_program(&modules) {
         Ok(loaded) => {
             // After the modules, not before: booting clears the diagnostic

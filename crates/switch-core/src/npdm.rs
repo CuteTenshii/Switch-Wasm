@@ -16,7 +16,8 @@
 //! 0x00  magic "META" (u32)
 //! 0x04  signature key generation (u32)
 //! 0x08  reserved
-//! 0x0C  flags (u8)
+//! 0x0C  flags (u8) — bit 0 is `Is64BitInstruction`, bits 1:3 the
+//!       address-space type
 //! 0x0E  main thread priority (u8)
 //! 0x0F  main thread core number (u8)
 //! 0x14  system resource size (u32) — [7.0.0+], 0 on older titles
@@ -33,6 +34,12 @@ pub const NPDM_HEADER_SIZE: usize = 0x30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Npdm {
+    /// Whether the process runs in AArch64. Mario Kart 8 Deluxe
+    /// (`0100152000022000`) is the counter-example: it declares zero here, and
+    /// its `rtld` opens with the 32-bit module prologue `b #+8` — a valid
+    /// `ANDS x0, x0, x0` to the A64 decoder, which then executes the `MOD0`
+    /// offset word after it as if it were an instruction.
+    pub is_64_bit: bool,
     /// The kernel's per-process bookkeeping reservation, carved out of the
     /// application pool. Non-zero means this title expects virtual address
     /// memory; `nnSdk` decides that by asking `svcGetInfo` for the same
@@ -69,10 +76,32 @@ impl Npdm {
             .position(|&b| b == 0)
             .unwrap_or(name_bytes.len());
         Ok(Npdm {
+            is_64_bit: data[0x0C] & 1 != 0,
             system_resource_size: crate::nsp::read_u32(data, 0x14),
             main_thread_stack_size: crate::nsp::read_u32(data, 0x1C),
             name: String::from_utf8_lossy(&name_bytes[..end]).into_owned(),
         })
+    }
+
+    /// Whether an ExeFS's `main.npdm` declares an AArch64 process.
+    ///
+    /// A container with no manifest, or one that cannot be read, is treated as
+    /// 64-bit: that is what every title but a handful is, and it keeps a
+    /// homebrew NRO — which has no NPDM at all — on the path it has always
+    /// taken.
+    pub fn is_64_bit_of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> bool {
+        Npdm::of(exefs, data).map(|n| n.is_64_bit).unwrap_or(true)
+    }
+
+    /// Parse an ExeFS's `main.npdm`, if it has one that parses.
+    pub fn of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> Option<Npdm> {
+        let file = exefs.find("main.npdm")?;
+        let start = file.offset as usize;
+        let end = start.checked_add(file.size as usize)?;
+        if end > data.len() {
+            return None;
+        }
+        Npdm::parse(&data[start..end]).ok()
     }
 
     /// The `system_resource_size` of an ExeFS's `main.npdm`, or 0 when the
@@ -82,17 +111,7 @@ impl Npdm {
     /// a manifest gets on hardware, and it selects the plain heap, which is
     /// the layout that works without knowing anything about the title.
     pub fn system_resource_size_of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> u32 {
-        let Some(file) = exefs.find("main.npdm") else {
-            return 0;
-        };
-        let start = file.offset as usize;
-        let Some(end) = start.checked_add(file.size as usize) else {
-            return 0;
-        };
-        if end > data.len() {
-            return 0;
-        }
-        Npdm::parse(&data[start..end])
+        Npdm::of(exefs, data)
             .map(|n| n.system_resource_size)
             .unwrap_or(0)
     }
@@ -115,6 +134,7 @@ mod tests {
     #[test]
     fn parses_a_manifest() {
         let parsed = Npdm::parse(&npdm(0x0100_0000)).unwrap();
+        assert!(parsed.is_64_bit);
         assert_eq!(parsed.system_resource_size, 0x0100_0000);
         assert_eq!(parsed.main_thread_stack_size, 0x0010_0000);
         assert_eq!(parsed.name, "Application");
@@ -127,6 +147,16 @@ mod tests {
     #[test]
     fn zero_is_a_real_answer() {
         assert_eq!(Npdm::parse(&npdm(0)).unwrap().system_resource_size, 0);
+    }
+
+    /// Mario Kart 8 Deluxe's own flags byte. Bit 0 clear is the whole of what
+    /// says a title is AArch32, and reading it as anything else feeds 32-bit
+    /// code to the A64 decoder.
+    #[test]
+    fn a_thirty_two_bit_title_says_so_in_bit_zero() {
+        let mut data = npdm(0);
+        data[0x0C] = 0x04;
+        assert!(!Npdm::parse(&data).unwrap().is_64_bit);
     }
 
     #[test]

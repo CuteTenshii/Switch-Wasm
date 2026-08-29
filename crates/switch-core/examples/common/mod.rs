@@ -1169,6 +1169,13 @@ impl Title {
             &self.exefs,
         ));
         cpu.set_program_id(self.nca.program_id);
+        // Which instruction set the title runs, from bit 0 of the same
+        // manifest's flags. Before the boot, which lays the entry ABI out
+        // differently in each state.
+        if !switch_core::npdm::Npdm::is_64_bit_of(&self.exefs_pfs0, &self.exefs) {
+            eprintln!("[npdm] AArch32 title — running the A32 interpreter");
+            cpu.set_mode(switch_core::cpu::ExecMode::A32);
+        }
         let modules = self.modules();
         let loaded = cpu
             .boot_retail_program(&modules)

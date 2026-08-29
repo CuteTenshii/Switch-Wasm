@@ -20,6 +20,7 @@ use crate::{Error, Result};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 // The processor.
+mod a32;
 mod alu;
 mod bits;
 mod crypto;
@@ -54,6 +55,7 @@ mod settings;
 mod time;
 mod vi;
 
+pub use a32::ExecMode;
 pub use fs::SaveDataQuota;
 pub use jit::{translates, JitStats};
 
@@ -999,6 +1001,9 @@ pub struct ThreadContext {
     regs: [u64; REG_FILE],
     pc: u32,
     nzcv: u32,
+    mode: ExecMode,
+    cpsr_q: bool,
+    cpsr_ge: u8,
     vregs: [u128; 32],
     fpcr: u32,
     fpsr: u32,
@@ -1012,8 +1017,16 @@ pub struct Cpu {
     /// X0..=X30 and the three slots register 31 can mean; see [`REG_SLOTS`].
     regs: [u64; REG_FILE],
     pc: u32,
-    /// NZCV, packed as ARM PSTATE does: N=31, Z=30, C=29, V=28.
+    /// NZCV, packed as ARM PSTATE does: N=31, Z=30, C=29, V=28. Shared with
+    /// AArch32, whose CPSR puts the same four flags in the same places.
     nzcv: u32,
+    /// Which instruction set this thread runs. See [`a32`].
+    mode: ExecMode,
+    /// CPSR's sticky saturation flag, which only AArch32 has. Set by the
+    /// saturating arithmetic and never cleared except by a write to APSR.
+    cpsr_q: bool,
+    /// CPSR's four GE bits, written by the parallel adds and read by `SEL`.
+    cpsr_ge: u8,
     /// SIMD vector registers Q0..=Q31 (128-bit). Only the handful of
     /// instructions libnx's `memset`/`memcpy` rely on are implemented;
     /// full NEON is out of scope for Phase 1.
@@ -1611,6 +1624,9 @@ impl Default for Cpu {
 impl Cpu {
     pub fn new() -> Cpu {
         let mut cpu = Cpu {
+            mode: ExecMode::A64,
+            cpsr_q: false,
+            cpsr_ge: 0,
             mem: Memory::new(),
             regs: [0; REG_FILE],
             pc: 0,
@@ -1841,6 +1857,9 @@ impl Cpu {
                 regs: [0; REG_FILE],
                 pc: 0,
                 nzcv: 0,
+                mode: self.mode,
+                cpsr_q: false,
+                cpsr_ge: 0,
                 vregs: [0; 32],
                 fpcr: self.fpcr,
                 fpsr: 0,
@@ -1872,8 +1891,15 @@ impl Cpu {
 
         let mut regs = [0u64; REG_FILE];
         regs[0] = arg;
-        regs[30] = THREAD_EXIT_TRAMPOLINE as u64;
-        regs[SP_SLOT] = stack_top;
+        // A thread inherits its creator's execution state, and the link
+        // register and stack pointer are different slots in each.
+        if self.mode == ExecMode::A32 {
+            regs[14] = THREAD_EXIT_TRAMPOLINE as u64;
+            regs[13] = stack_top;
+        } else {
+            regs[30] = THREAD_EXIT_TRAMPOLINE as u64;
+            regs[SP_SLOT] = stack_top;
+        }
         self.threads.push(ThreadContext {
             handle,
             state: ThreadState::Created,
@@ -1881,6 +1907,9 @@ impl Cpu {
             regs,
             pc: entry,
             nzcv: 0,
+            mode: self.mode,
+            cpsr_q: false,
+            cpsr_ge: 0,
             vregs: [0; 32],
             fpcr: 0,
             fpsr: 0,
@@ -2527,6 +2556,9 @@ impl Cpu {
         thread.regs = self.regs;
         thread.pc = self.pc;
         thread.nzcv = self.nzcv;
+        thread.mode = self.mode;
+        thread.cpsr_q = self.cpsr_q;
+        thread.cpsr_ge = self.cpsr_ge;
         thread.vregs = self.vregs;
         thread.fpcr = self.fpcr;
         thread.fpsr = self.fpsr;
@@ -2544,6 +2576,9 @@ impl Cpu {
         self.regs = thread.regs;
         self.pc = thread.pc;
         self.nzcv = thread.nzcv;
+        self.mode = thread.mode;
+        self.cpsr_q = thread.cpsr_q;
+        self.cpsr_ge = thread.cpsr_ge;
         self.vregs = thread.vregs;
         self.fpcr = thread.fpcr;
         self.fpsr = thread.fpsr;
@@ -2707,7 +2742,16 @@ impl Cpu {
         // `nn::os::SdkMutexType::Lock` fires its recursive-lock assertion and
         // `nn::oe::Initialize` aborts before the SDK ever reaches a service.
         self.set_reg(1, MAIN_THREAD_HANDLE);
-        self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
+        if self.mode == ExecMode::A32 {
+            // The loop above cleared x0..x30, and in this state that includes
+            // both the stack pointer and the link register. A64 keeps SP in a
+            // slot of its own, so it is only 32-bit code that has to put the
+            // stack back afterwards.
+            self.regs[13] = self.regs[SP_SLOT];
+            self.regs[14] = SELF_RETURN_TRAMPOLINE as u64;
+        } else {
+            self.set_reg(30, SELF_RETURN_TRAMPOLINE as u64);
+        }
 
         // Real inter-module gaps are whatever the kernel's ASLR/layout
         // picked; page-aligned and back-to-back is a reasonable stand-in —
@@ -2967,9 +3011,14 @@ impl Cpu {
         self.pc
     }
 
+    /// The stack pointer, from whichever slot the running state keeps it in:
+    /// A64's dedicated [`SP_SLOT`], or `r13` in AArch32.
     #[inline]
     pub fn sp(&self) -> u64 {
-        self.regs[SP_SLOT]
+        match self.mode {
+            ExecMode::A64 => self.regs[SP_SLOT],
+            ExecMode::A32 => self.regs[13],
+        }
     }
 
     pub fn set_pc(&mut self, pc: u32) {
@@ -3257,7 +3306,10 @@ impl Cpu {
 
     pub fn set_pc_and_sp(&mut self, pc: u32, sp: u64) {
         self.pc = pc;
-        self.regs[SP_SLOT] = sp;
+        match self.mode {
+            ExecMode::A64 => self.regs[SP_SLOT] = sp,
+            ExecMode::A32 => self.regs[13] = sp,
+        }
     }
 
     /// Write the host gamepad state so the guest can see it. The button
@@ -3977,13 +4029,16 @@ impl Cpu {
         };
         let next_pc = pc.wrapping_add(4);
         self.record_run(pc, 1);
-        let result = self.execute(insn, next_pc);
+        let result = match self.mode {
+            ExecMode::A64 => self.execute(insn, next_pc),
+            ExecMode::A32 => self.execute_a32(insn),
+        };
         if self.trace_enabled {
             self.trace_line(&format!(
                 "{:08x}: {:08x}  {}\n",
                 pc,
                 insn,
-                crate::disasm::disassemble(insn)
+                self.disassemble_for_mode(insn)
             ));
         }
         if let Err(e) = &result {
@@ -4002,7 +4057,7 @@ impl Cpu {
             if insn == 0 {
                 String::new()
             } else {
-                crate::disasm::disassemble(insn)
+                self.disassemble_for_mode(insn)
             }
         ));
         self.trace_regs(pc);
@@ -4030,7 +4085,7 @@ impl Cpu {
                     "{:08x}: {:08x}  {}\n",
                     ipc,
                     iinsn,
-                    crate::disasm::disassemble(iinsn)
+                    self.disassemble_for_mode(iinsn)
                 ));
             }
         }
@@ -4133,12 +4188,22 @@ impl Cpu {
     /// frame base. Stops as soon as the chain leaves mapped memory or fails to
     /// move forward, so a corrupt stack cannot loop.
     pub fn backtrace(&self, depth: usize) -> Vec<u32> {
+        // Both states chain {saved frame pointer, return address}, but from
+        // different registers and in different widths: x29/x30 over 16-byte
+        // frames in A64, r11/r14 over 8-byte ones in AArch32.
+        let (mut fp, lr, width) = match self.mode {
+            ExecMode::A64 => (self.regs[29] as u32, self.regs[30] as u32, 8),
+            ExecMode::A32 => (self.regs[11] as u32, self.regs[14] as u32, 4),
+        };
         let mut out = Vec::with_capacity(depth + 1);
-        out.push(self.regs[30] as u32);
-        let mut fp = self.regs[29] as u32;
+        out.push(lr);
         for _ in 0..depth {
-            let (next_fp, lr) = match (self.mem.read_u64(fp), self.mem.read_u64(fp + 8)) {
-                (Ok(next_fp), Ok(lr)) => (next_fp as u32, lr as u32),
+            let read = |at: u32| match self.mode {
+                ExecMode::A64 => self.mem.read_u64(at).map(|v| v as u32),
+                ExecMode::A32 => self.mem.read_u32(at),
+            };
+            let (next_fp, lr) = match (read(fp), read(fp + width)) {
+                (Ok(next_fp), Ok(lr)) => (next_fp, lr),
                 _ => break,
             };
             if lr == 0 || next_fp <= fp {
@@ -4157,6 +4222,11 @@ impl Cpu {
         self.regs[i]
     }
 
+    /// A register snapshot in whichever state the core is running.
+    ///
+    /// The names are not cosmetic: an AArch32 dump printed as `x0..x30` says
+    /// nothing about which slot is the stack pointer and which is the link
+    /// register, and shows sixteen registers the state does not have.
     pub fn reg_dump(&self) -> String {
         use std::fmt::Write;
         let mut s = String::with_capacity(1024);
@@ -4164,15 +4234,40 @@ impl Cpu {
         let z = (self.nzcv >> 30) & 1;
         let c = (self.nzcv >> 29) & 1;
         let v = (self.nzcv >> 28) & 1;
-        let _ = writeln!(
-            s,
-            "pc={:#010x}  sp={:#018x}  nzcv=N:{n} Z:{z} C:{c} V:{v}",
-            self.pc, self.regs[SP_SLOT]
-        );
-        for i in 0..31 {
-            let _ = write!(s, "x{:<2}={:#018x}  ", i, self.regs[i]);
-            if i % 4 == 3 {
-                let _ = writeln!(s);
+        match self.mode {
+            ExecMode::A64 => {
+                let _ = writeln!(
+                    s,
+                    "pc={:#010x}  sp={:#018x}  nzcv=N:{n} Z:{z} C:{c} V:{v}",
+                    self.pc, self.regs[SP_SLOT]
+                );
+                for i in 0..31 {
+                    let _ = write!(s, "x{:<2}={:#018x}  ", i, self.regs[i]);
+                    if i % 4 == 3 {
+                        let _ = writeln!(s);
+                    }
+                }
+            }
+            ExecMode::A32 => {
+                let _ = writeln!(
+                    s,
+                    "pc={:#010x}  nzcv=N:{n} Z:{z} C:{c} V:{v} Q:{} ge={:#03b}",
+                    self.pc,
+                    u8::from(self.cpsr_q),
+                    self.cpsr_ge
+                );
+                for i in 0..15 {
+                    let name = match i {
+                        13 => "sp".to_string(),
+                        14 => "lr".to_string(),
+                        _ => format!("r{i}"),
+                    };
+                    let _ = write!(s, "{name:<3}={:#010x}  ", self.regs[i] as u32);
+                    if i % 4 == 3 {
+                        let _ = writeln!(s);
+                    }
+                }
+                let _ = write!(s, "pc ={:#010x}  ", self.pc);
             }
         }
         let _ = writeln!(s);
@@ -4187,7 +4282,7 @@ impl Cpu {
     /// interpreter produces, so it takes that path instead.
     pub fn run(&mut self, max_steps: u64) -> Result<RunReport> {
         self.complete_pending_present();
-        if self.jit_enabled && !self.trace_enabled {
+        if self.jit_enabled && !self.trace_enabled && self.mode == ExecMode::A64 {
             return self.run_jit(max_steps);
         }
         let mut steps = 0u64;
