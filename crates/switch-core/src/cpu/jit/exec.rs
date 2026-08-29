@@ -70,12 +70,34 @@ impl Cpu {
                 self.yield_thread();
             }
             self.sweep_timed_waits();
+            let pc = self.pc;
+            // A store that landed on translated code makes every cached handle
+            // suspect, so all three fast paths below are off until
+            // `jit_block_at` has drained the dirty list.
+            let stale = self.mem.has_dirty_code();
             let block = match held.take() {
-                Some(block) if block.start == self.pc && !self.mem.has_dirty_code() => {
+                Some(block) if block.start == pc && !stale => {
                     self.jit.executed += 1;
                     block
                 }
-                _ => self.jit_block_at(self.pc),
+                // Where this block went last time. A block boundary falls every
+                // 6.1 instructions on a retail frame, and the overwhelming
+                // majority of them lead somewhere they have led before, so this
+                // is the difference between a hash lookup per six instructions
+                // and a pointer that is already in hand.
+                Some(previous) => match previous.successor(pc).filter(|_| !stale) {
+                    Some(next) => {
+                        self.jit.executed += 1;
+                        self.jit.linked += 1;
+                        next
+                    }
+                    None => {
+                        let next = self.jit_block_at(pc);
+                        previous.link_to(pc, &next);
+                        next
+                    }
+                },
+                None => self.jit_block_at(pc),
             };
             let ran = self.exec_block(&block, max_steps - steps)?;
             held = Some(block);
@@ -128,14 +150,20 @@ impl Cpu {
                 Some(&(at, _)) if (at as usize) < body => at as usize,
                 _ => body,
             };
-            for (k, &op) in block.ops[i..stop].iter().enumerate() {
+            for &op in &block.ops[i..stop] {
                 if let Err(e) = self.exec_op(op, pc) {
                     // The clock, the step counter, the trail and `pc` are all
                     // settled here rather than maintained per instruction:
                     // nothing inside a block reads any of them, and a fault is
                     // the only thing that ever does. The faulting instruction
                     // counts, exactly as it does in the interpreter.
-                    let at = i + k;
+                    //
+                    // Which instruction that is comes from `pc` rather than
+                    // from a counter the loop carries: `pc` is already being
+                    // maintained, so counting alongside it was a second way of
+                    // saying the same thing, paid for on every instruction to
+                    // be read on almost none.
+                    let at = (pc.wrapping_sub(block.start) / 4) as usize;
                     self.retire_run(block.start, at as u64 + 1);
                     self.pc = pc;
                     self.record_fault(&e, pc, block.words[at]);

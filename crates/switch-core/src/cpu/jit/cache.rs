@@ -30,6 +30,7 @@ pub(in crate::cpu) struct Jit {
     pub(super) by_page: IdMap<u32, Vec<u32>>,
     pub(super) translated: u64,
     pub(super) executed: u64,
+    pub(super) linked: u64,
     pub(super) invalidated: u64,
     pub(super) interpreted: u64,
 }
@@ -43,6 +44,13 @@ pub struct JitStats {
     pub translated: u64,
     /// Blocks entered.
     pub executed: u64,
+    /// Of those, the ones reached through the previous block's own link rather
+    /// than through a lookup.
+    ///
+    /// Against `executed` this is the link cache's hit rate — the one number
+    /// that says whether chaining is doing anything, and the same number on
+    /// any target.
+    pub linked: u64,
     /// Blocks dropped because the memory they came from was written.
     pub invalidated: u64,
     /// Instructions that reached the interpreter's dispatcher anyway, because
@@ -62,6 +70,7 @@ impl Default for Jit {
             by_page: IdMap::default(),
             translated: 0,
             executed: 0,
+            linked: 0,
             invalidated: 0,
             interpreted: 0,
         }
@@ -137,6 +146,7 @@ impl Jit {
             blocks: self.blocks.len(),
             translated: self.translated,
             executed: self.executed,
+            linked: self.linked,
             invalidated: self.invalidated,
             interpreted: self.interpreted,
         }

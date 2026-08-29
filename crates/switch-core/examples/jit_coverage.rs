@@ -1,5 +1,6 @@
 //! Which instructions a program actually runs that the block translator has
-//! no op for: `jit_coverage <nro> [font.ttf]`.
+//! no op for:
+//! `jit_coverage <target> [prod.keys] [title.keys] [font.ttf]`.
 //!
 //! The translator resolves an instruction's group, form, fields and immediates
 //! once, at translation time, and every later execution of that block does
@@ -24,7 +25,14 @@
 //! same property the `interpreted` counter does, over one steady frame rather
 //! than over whatever window that run was given, so the two shares only match
 //! when the windows do.
+//!
+//! The target is a homebrew `.nro` or a retail container — an `.nsp`, an
+//! `.xci` or a bare Program `.nca`, which needs its keys after it. An NRO is
+//! not the workload a retail title is, so a ranking taken from one does not
+//! transfer.
 mod common;
+
+const USAGE: &str = "jit_coverage <target> [prod.keys] [title.keys] [font.ttf]";
 
 use common::{Flow, Pace};
 use std::collections::HashMap;
@@ -35,14 +43,11 @@ use switch_core::disasm::disassemble;
 const ROWS: usize = 20;
 
 fn main() {
-    let nro = common::read(common::arg(1, "jit_coverage <path.nro> [font.ttf]"));
+    let args = common::program_args(USAGE);
+    let program = args.open_program();
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    match common::opt_arg(2) {
-        Some(font) => cpu.set_shared_font(common::read(&font)),
-        None => common::load_fallback_font(&mut cpu),
-    }
-    cpu.boot_homebrew(&nro).expect("boot");
+    program.boot(&mut cpu);
 
     // Two frames of startup, so what follows is a steady-state frame. Nothing
     // is sampled here, so it runs through the block translator.

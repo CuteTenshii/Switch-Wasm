@@ -1,5 +1,5 @@
 //! What one frame costs, counted rather than timed:
-//! `frame_work <nro> [frames] [font.ttf]`.
+//! `frame_work <target> [prod.keys] [title.keys] [frames] [font.ttf]`.
 //!
 //! A frame's cost is how much work it asks for multiplied by what that work
 //! costs on the machine running it. Only the first half is a fact about this
@@ -20,7 +20,14 @@
 //! Startup is skipped: the first frames of a program are its loader, its
 //! allocator and its first upload, and averaging those into a steady frame
 //! describes neither.
+//!
+//! The target is a homebrew `.nro` or a retail container — an `.nsp`, an
+//! `.xci` or a bare Program `.nca`, which needs its keys after it. An NRO is
+//! not the workload a retail title is, so a ranking taken from one does not
+//! transfer.
 mod common;
+
+const USAGE: &str = "frame_work <target> [prod.keys] [title.keys] [frames] [font.ttf]";
 
 use switch_core::cpu::Cpu;
 use switch_core::gpu::exec::GpuStats;
@@ -34,6 +41,7 @@ const FRAME_BUDGET: u64 = 2_000_000_000;
 struct Snapshot {
     steps: u64,
     entered: u64,
+    linked: u64,
     translated: u64,
     invalidated: u64,
     interpreted: u64,
@@ -48,6 +56,7 @@ impl Snapshot {
         Snapshot {
             steps,
             entered: jit.executed,
+            linked: jit.linked,
             translated: jit.translated,
             invalidated: jit.invalidated,
             interpreted: jit.interpreted,
@@ -61,6 +70,7 @@ impl Snapshot {
 struct Delta {
     steps: u64,
     entered: u64,
+    linked: u64,
     translated: u64,
     invalidated: u64,
     interpreted: u64,
@@ -82,6 +92,7 @@ impl Delta {
         Delta {
             steps: after.steps - before.steps,
             entered: after.entered - before.entered,
+            linked: after.linked - before.linked,
             translated: after.translated - before.translated,
             invalidated: after.invalidated - before.invalidated,
             interpreted: after.interpreted - before.interpreted,
@@ -104,6 +115,7 @@ impl Delta {
     fn add(&mut self, other: &Delta) {
         self.steps += other.steps;
         self.entered += other.entered;
+        self.linked += other.linked;
         self.translated += other.translated;
         self.invalidated += other.invalidated;
         self.interpreted += other.interpreted;
@@ -124,6 +136,7 @@ impl Delta {
         Delta {
             steps: 0,
             entered: 0,
+            linked: 0,
             translated: 0,
             invalidated: 0,
             interpreted: 0,
@@ -155,16 +168,13 @@ fn frame(cpu: &mut Cpu, total_steps: &mut u64) -> Option<Delta> {
 }
 
 fn main() {
-    let nro = common::read(common::arg(1, "frame_work <path.nro> [frames] [font.ttf]"));
-    let frames = common::opt_num(2).unwrap_or(30).max(1);
+    let args = common::program_args(USAGE);
+    let program = args.open_program();
+    let frames = args.rest_num(0).unwrap_or(30).max(1);
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
-    match common::opt_arg(3) {
-        Some(font) => cpu.set_shared_font(common::read(&font)),
-        None => common::load_fallback_font(&mut cpu),
-    }
-    cpu.boot_homebrew(&nro).expect("boot");
+    program.boot(&mut cpu);
 
     let boot = common::run_to(&mut cpu, FRAME_BUDGET, |cpu| {
         cpu.nv.gpu.frames >= WARMUP_FRAMES
@@ -229,6 +239,11 @@ fn main() {
         total.steps as f64 / total.entered.max(1) as f64,
         mean(total.translated),
         mean(total.invalidated),
+    );
+    println!(
+        "  cpu:    {:.0} of those entries ({:.1}%) came from the previous block's link",
+        mean(total.linked),
+        share(total.linked, total.entered),
     );
     // The share the translator did not translate. It is the same share in the
     // browser, and it is the largest CPU-side number here that a change can

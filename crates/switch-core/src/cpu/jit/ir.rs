@@ -312,6 +312,22 @@ impl Exit {
 /// A run of instructions with a single entry point, translated once.
 #[derive(Debug)]
 pub(super) struct Block {
+    /// Where control went the last time this block was left, and the block it
+    /// found there — an inline cache of one entry, filled on the way past.
+    ///
+    /// A retail frame enters a block every 6.1 instructions, so what a block
+    /// boundary costs is charged against six instructions rather than against
+    /// a whole loop body. Most of those boundaries go somewhere they have been
+    /// before: a loop alternating between two blocks, a `RET` to the site that
+    /// called it, a `BLR` through a call site that is monomorphic in practice.
+    ///
+    /// Held [`Weak`] so it cannot keep a block alive. That is not only about
+    /// the A-to-B-to-A cycle leaking: a block dropped because a guest store
+    /// landed on its page is *gone* from the cache, and a link that still
+    /// upgraded would be running code the guest has overwritten. Failing to
+    /// upgrade is exactly the right answer, and it needs no invalidation pass
+    /// of its own.
+    pub(super) link: std::cell::RefCell<Option<(u32, std::rc::Weak<Block>)>>,
     /// Guest address of the first instruction.
     pub(super) start: u32,
     /// One entry per instruction the block covers before its terminator, so
@@ -327,6 +343,43 @@ pub(super) struct Block {
     /// `(index into ops, branch)`, in ascending order.
     pub(super) exits: Vec<(u32, Exit)>,
     pub(super) term: Option<Term>,
+}
+
+impl Block {
+    /// A block with nothing linked to it yet, from the parts [`super::decode`]
+    /// builds.
+    pub(super) fn new(
+        start: u32,
+        ops: Vec<Op>,
+        words: Vec<u32>,
+        exits: Vec<(u32, Exit)>,
+        term: Option<Term>,
+    ) -> Block {
+        Block {
+            link: std::cell::RefCell::new(None),
+            start,
+            ops,
+            words,
+            exits,
+            term,
+        }
+    }
+
+    /// The block at `pc`, if that is where this one went last time and it is
+    /// still translated.
+    #[inline(always)]
+    pub(super) fn successor(&self, pc: u32) -> Option<std::rc::Rc<Block>> {
+        match &*self.link.borrow() {
+            Some((at, block)) if *at == pc => block.upgrade(),
+            _ => None,
+        }
+    }
+
+    /// Remember that control went to `block` at `pc`.
+    #[inline(always)]
+    pub(super) fn link_to(&self, pc: u32, block: &std::rc::Rc<Block>) {
+        *self.link.borrow_mut() = Some((pc, std::rc::Rc::downgrade(block)));
+    }
 }
 
 #[cfg(test)]

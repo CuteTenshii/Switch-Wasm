@@ -16,6 +16,9 @@ pub const ADDRESS_SPACE_SIZE: u64 = 0x1_0000_0000; // 4 GiB
 /// Number of 4 KiB pages in the 4 GiB space. Computed in u64 first so it
 /// survives the wasm32 (32-bit usize) truncation of the 4 GiB constant.
 const PAGE_COUNT: usize = (ADDRESS_SPACE_SIZE >> PAGE_BITS) as usize;
+/// [`Memory::page_index`] masks with `PAGE_COUNT - 1`, which only covers the
+/// whole space if that is a power of two.
+const _: () = assert!(PAGE_COUNT.is_power_of_two());
 /// Pages per entry in the block summary [`Memory`] keeps beside the page
 /// table. 512 pages is 2 MiB: small enough that the summary is a few
 /// kilobytes, large enough that walking a multi-gigabyte untouched region
@@ -96,7 +99,13 @@ struct ModuleImage {
 #[derive(Debug)]
 pub struct Memory {
     /// One slot per page. `None` means the page is not mapped.
-    pages: Vec<Option<Box<[u8; PAGE_SIZE]>>>,
+    /// One slot per 4 KiB of the guest space, `None` until something writes
+    /// there. A boxed array rather than a `Vec` for one reason: the length is
+    /// then a compile-time constant, so indexing it with a page number the
+    /// compiler can see is in range carries no bounds check. Every guest load
+    /// and store goes through here, and loads and stores are 31% of a retail
+    /// frame's instructions.
+    pages: Box<[Option<Box<[u8; PAGE_SIZE]>>; PAGE_COUNT]>,
     /// Soft region as `(start, end)` (end-exclusive); `start > end` disables
     /// it. Unmapped pages in `[start, end)` read as zero from [`Memory::zero`]
     /// and allocate a private page on first write.
@@ -197,7 +206,10 @@ impl Default for Memory {
 impl Memory {
     pub fn new() -> Memory {
         Memory {
-            pages: vec![None; PAGE_COUNT],
+            pages: vec![None; PAGE_COUNT]
+                .into_boxed_slice()
+                .try_into()
+                .expect("the page table is PAGE_COUNT long by construction"),
             block_mapped: vec![0u16; BLOCK_COUNT],
             soft: (1, 0),
             readonly: Vec::new(),
@@ -480,9 +492,15 @@ impl Memory {
         }
     }
 
+    /// The page a guest address falls in.
+    ///
+    /// Masked rather than merely shifted: the shift alone already cannot
+    /// exceed `PAGE_COUNT - 1` for a `u32` address, but saying so explicitly
+    /// is what lets the indexing below compile without a bounds check even
+    /// where the address arrived through several layers of inlining.
     #[inline]
     fn page_index(addr: u32) -> usize {
-        (addr as usize) >> PAGE_BITS
+        ((addr as usize) >> PAGE_BITS) & (PAGE_COUNT - 1)
     }
 
     #[inline]
@@ -1476,5 +1494,24 @@ mod tests {
         mem.mark_gpu_page(0x1000);
         mem.write_u32(0x1000, 3).unwrap();
         assert_eq!(mem.dirty_gpu_pages().len(), 1);
+    }
+
+    /// The mask in [`Memory::page_index`] must be unable to hide a bad address
+    /// rather than merely unlikely to see one.
+    ///
+    /// A mask that silently folds an out-of-range index back into the table
+    /// would turn what used to be a crash into a read of the wrong page —
+    /// a real hazard, and the reason to state this once as a test instead of
+    /// as a comment. It cannot happen here: the argument is a `u32` and the
+    /// space is 4 GiB, so the shift alone already lands inside the table and
+    /// the mask only says so to the compiler.
+    #[test]
+    fn the_page_index_mask_cannot_hide_an_address() {
+        assert_eq!(Memory::page_index(u32::MAX), PAGE_COUNT - 1);
+        assert_eq!(Memory::page_index(0), 0);
+        // Every address maps to the page the plain shift names, mask or not.
+        for addr in [1u32, 0xFFF, 0x1000, 0x8000_0000, 0xFFFF_F000, 0xFFFF_FFFF] {
+            assert_eq!(Memory::page_index(addr), (addr as usize) >> PAGE_BITS);
+        }
     }
 }

@@ -994,7 +994,7 @@ pub struct ThreadContext {
     /// taken out of the scheduler's rotation meanwhile.
     paused: bool,
     /// The saved register file, stack pointer included — see [`REG_SLOTS`].
-    regs: [u64; REG_SLOTS],
+    regs: [u64; REG_FILE],
     pc: u32,
     nzcv: u32,
     vregs: [u128; 32],
@@ -1008,7 +1008,7 @@ pub struct ThreadContext {
 pub struct Cpu {
     pub mem: Memory,
     /// X0..=X30 and the three slots register 31 can mean; see [`REG_SLOTS`].
-    regs: [u64; REG_SLOTS],
+    regs: [u64; REG_FILE],
     pc: u32,
     /// NZCV, packed as ARM PSTATE does: N=31, Z=30, C=29, V=28.
     nzcv: u32,
@@ -1512,7 +1512,7 @@ pub struct Cpu {
 /// How many recently-executed instructions the fault trace shows.
 pub const RECENT_LEN: usize = 64;
 
-/// How many slots [`Cpu::regs`] holds: X0..=X30, then three more.
+/// How many slots of [`Cpu::regs`] mean anything: X0..=X30, then three more.
 ///
 /// A64 spells three different registers `31`, and which one it means is a
 /// property of the instruction, not of the value: the zero register reads as
@@ -1523,6 +1523,36 @@ pub const RECENT_LEN: usize = 64;
 /// the file too, so choosing between the three is an index the translator
 /// bakes in ([`super::jit`]) rather than a branch at run time.
 const REG_SLOTS: usize = 34;
+
+/// How many slots the array actually holds — [`REG_SLOTS`] rounded up to a
+/// power of two.
+///
+/// The slot arrives as a `u8`, so a 34-entry array cannot be indexed without a
+/// bounds check: the compiler has to allow for the 222 values that would be
+/// out of range. Rounding the array up and masking the index makes the check
+/// provably unnecessary and it disappears. That is worth doing for one reason
+/// only, which is that a register access is the single most frequent thing
+/// either engine does — 14% of a retail frame sat on these two lines, more
+/// than the whole interpreter fallback and the whole GPU put together.
+///
+/// The cost is 240 bytes per saved register file, and there are as many of
+/// those as the guest has threads.
+const REG_FILE: usize = 64;
+const _: () = assert!(REG_FILE.is_power_of_two() && REG_FILE >= REG_SLOTS);
+
+/// A slot masked into the array, so indexing carries no bounds check.
+///
+/// Every caller has already resolved a real slot; the mask is what tells the
+/// compiler so. `debug_assert` keeps a slot that is somehow out of range from
+/// silently aliasing a real register in a test build.
+#[inline(always)]
+fn reg_slot(slot: u8) -> usize {
+    debug_assert!(
+        (slot as usize) < REG_SLOTS,
+        "register slot {slot} is not one"
+    );
+    (slot as usize) & (REG_FILE - 1)
+}
 /// Reads of `XZR`. Nothing ever writes it, so it is permanently zero.
 const ZR_SLOT: usize = 31;
 /// [`Cpu::read_zr`] and the translator's read operands index the file with the
@@ -1572,7 +1602,7 @@ impl Cpu {
     pub fn new() -> Cpu {
         let mut cpu = Cpu {
             mem: Memory::new(),
-            regs: [0; REG_SLOTS],
+            regs: [0; REG_FILE],
             pc: 0,
             nzcv: 0,
             vregs: [0; 32],
@@ -1796,7 +1826,7 @@ impl Cpu {
                 handle: MAIN_THREAD_HANDLE,
                 state: ThreadState::Runnable,
                 paused: false,
-                regs: [0; REG_SLOTS],
+                regs: [0; REG_FILE],
                 pc: 0,
                 nzcv: 0,
                 vregs: [0; 32],
@@ -1828,7 +1858,7 @@ impl Cpu {
         let _ = self.mem.write_u32(tls + 0x1F0, reent);
         let _ = self.mem.write_u32(tls + 0x1F8, tls);
 
-        let mut regs = [0u64; REG_SLOTS];
+        let mut regs = [0u64; REG_FILE];
         regs[0] = arg;
         regs[30] = THREAD_EXIT_TRAMPOLINE as u64;
         regs[SP_SLOT] = stack_top;
@@ -3128,7 +3158,7 @@ impl Cpu {
     /// Read a register in the forms where 31 is the stack pointer.
     #[inline(always)]
     pub fn read_x(&self, idx: u8) -> u64 {
-        self.regs[Self::x_slot(idx) as usize]
+        self.regs[reg_slot(Self::x_slot(idx))]
     }
 
     /// The slot a register number names when 31 means `SP`.
@@ -3182,13 +3212,13 @@ impl Cpu {
     /// tested for.
     #[inline(always)]
     fn write_zr(&mut self, idx: u8, val: u64) {
-        self.regs[Self::zr_write_slot(idx) as usize] = val;
+        self.regs[reg_slot(Self::zr_write_slot(idx))] = val;
     }
 
     /// Write a register in the forms where 31 is `SP`.
     #[inline(always)]
     fn write_x(&mut self, idx: u8, val: u64) {
-        self.regs[Self::x_slot(idx) as usize] = val;
+        self.regs[reg_slot(Self::x_slot(idx))] = val;
     }
 
     /// Read the register file by slot, for a caller that already knows which
@@ -3197,12 +3227,12 @@ impl Cpu {
     /// left to run time.
     #[inline(always)]
     pub(super) fn reg_at(&self, slot: u8) -> u64 {
-        self.regs[slot as usize]
+        self.regs[reg_slot(slot)]
     }
 
     #[inline(always)]
     pub(super) fn set_reg_at(&mut self, slot: u8, val: u64) {
-        self.regs[slot as usize] = val;
+        self.regs[reg_slot(slot)] = val;
     }
 
     pub fn set_reg(&mut self, idx: u8, val: u64) {

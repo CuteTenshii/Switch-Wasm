@@ -58,26 +58,14 @@ pub(super) fn translate(mem: &Memory, start: u32) -> Block {
             Ok(insn) => insn,
             Err(_) => {
                 fuse_compares(&mut ops, &mut exits);
-                return Block {
-                    start,
-                    ops,
-                    words,
-                    exits,
-                    term: Some(Term::Fetch),
-                };
+                return Block::new(start, ops, words, exits, Some(Term::Fetch));
             }
         };
         match decode(insn, pc) {
             Decoded::Term(term) => {
                 words.push(insn);
                 fuse_compares(&mut ops, &mut exits);
-                return Block {
-                    start,
-                    ops,
-                    words,
-                    exits,
-                    term: Some(term),
-                };
+                return Block::new(start, ops, words, exits, Some(term));
             }
             // A conditional branch does not end the block: its not-taken path
             // is the next instruction, so translation carries on there and the
@@ -96,13 +84,7 @@ pub(super) fn translate(mem: &Memory, start: u32) -> Block {
         }
     }
     fuse_compares(&mut ops, &mut exits);
-    Block {
-        start,
-        ops,
-        words,
-        exits,
-        term: None,
-    }
+    Block::new(start, ops, words, exits, None)
 }
 
 /// Fold every `CMP`/`CMN` that feeds the conditional branch immediately after

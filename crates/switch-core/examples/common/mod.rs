@@ -123,6 +123,7 @@ pub struct Args {
     pub container: String,
     pub prod: String,
     pub title: Option<String>,
+    font: Option<String>,
     rest: Vec<String>,
     line: String,
 }
@@ -142,8 +143,125 @@ pub fn container_args(line: &str) -> Args {
         container,
         prod,
         title,
+        font: None,
         rest,
         line: line.to_string(),
+    }
+}
+
+/// Resolve the arguments of a tool that *runs* a program, where the program is
+/// either a homebrew `.nro` or a retail container with its keys.
+///
+/// One argument list serves both: the target comes first, a retail one is
+/// followed by its keys, and the tool's own arguments follow either. A `.ttf`
+/// anywhere in the tail is the shared font, by the same rule
+/// [`container_args`] reads a `.keys` — which is what lets an analysis tool
+/// keep the `<nro> [font.ttf]` spelling it already had.
+///
+/// The measurement tools took an NRO only, and an NRO is not the workload:
+/// hbmenu spends 56% of a frame in its own software gradient fill and draws
+/// nothing. Anything ranked from one is ranked from the wrong program.
+pub fn program_args(line: &str) -> Args {
+    let mut positional = env::args().skip(1);
+    let Some(container) = positional.next() else {
+        usage(line)
+    };
+    let mut rest: Vec<String> = positional.collect();
+    let take_named = |rest: &mut Vec<String>, suffix: &str| {
+        let at = rest
+            .iter()
+            .position(|arg| arg.to_ascii_lowercase().ends_with(suffix))?;
+        Some(rest.remove(at))
+    };
+    let font = take_named(&mut rest, ".ttf");
+    // Keys belong to a container and mean nothing to an NRO, so only a retail
+    // target consumes them — and only then is a missing `prod.keys` fatal.
+    let (prod, title) = match target_kind(Path::new(&container)) {
+        Kind::Nro => (String::new(), None),
+        _ => {
+            let Some(prod) = (!rest.is_empty()).then(|| rest.remove(0)) else {
+                usage(line)
+            };
+            (prod, take_named(&mut rest, ".keys"))
+        }
+    };
+    Args {
+        container,
+        prod,
+        title,
+        font,
+        rest,
+        line: line.to_string(),
+    }
+}
+
+/// A program to run, whichever kind of thing it arrived in.
+pub struct Program {
+    form: Form,
+    /// The font named on the command line, if one was. Serves `pl:u` for
+    /// either kind of program — a retail title reads the same interface.
+    font: Option<Vec<u8>>,
+}
+
+/// Which of the two things a [`Program`] turned out to be.
+enum Form {
+    /// A homebrew `.nro`.
+    Homebrew(Vec<u8>),
+    /// A retail title: an `.nsp`, an `.xci`, or a bare Program `.nca`.
+    Retail(Box<Title>),
+}
+
+/// What booting a program produced, for a tool that reports it.
+pub struct Booted {
+    pub modules: Vec<switch_core::nso::LoadedNso>,
+    /// System data archives registered out of `SWITCH_FIRMWARE`.
+    pub archives: usize,
+}
+
+impl Program {
+    /// Boot into a `cpu` that has already been bootstrapped.
+    ///
+    /// The four steps a retail title needs — RomFS, font, firmware, modules —
+    /// are one sequence in one place because they had drifted: `retail_trace`
+    /// was missing [`register_firmware`], so a title run under it took a fatal
+    /// on a system data archive that every other tool had.
+    pub fn boot(&self, cpu: &mut Cpu) -> Booted {
+        if let Form::Retail(title) = &self.form {
+            title.mount_romfs(cpu);
+        }
+        match &self.font {
+            Some(bytes) => cpu.set_shared_font(bytes.clone()),
+            None => load_fallback_font(cpu),
+        }
+        match &self.form {
+            Form::Homebrew(image) => {
+                cpu.boot_homebrew(image)
+                    .unwrap_or_else(|e| die(&format!("booting the NRO: {e:?}")));
+                Booted {
+                    modules: Vec::new(),
+                    archives: 0,
+                }
+            }
+            Form::Retail(title) => {
+                // After the font, because registering the firmware fonts
+                // overrides the fallback one, and before the modules, because
+                // `nn::init` reads what it finds as soon as it runs.
+                let archives = register_firmware(cpu, &title.keys);
+                Booted {
+                    modules: title.boot(cpu),
+                    archives,
+                }
+            }
+        }
+    }
+
+    /// The retail title behind this program, for a tool that needs the
+    /// container as well as the program in it. `None` for homebrew.
+    pub fn title(&self) -> Option<&Title> {
+        match &self.form {
+            Form::Retail(title) => Some(title),
+            Form::Homebrew(_) => None,
+        }
     }
 }
 
@@ -151,6 +269,18 @@ impl Args {
     /// Open the container, whichever kind it turns out to be.
     pub fn open(&self) -> Title {
         Title::open(&self.container, &self.prod, self.title.as_ref())
+    }
+
+    /// Open the program this names, homebrew or retail.
+    pub fn open_program(&self) -> Program {
+        let form = match target_kind(Path::new(&self.container)) {
+            Kind::Nro => Form::Homebrew(read(&self.container)),
+            _ => Form::Retail(Box::new(self.open())),
+        };
+        Program {
+            form,
+            font: self.font.as_ref().map(read),
+        }
     }
 
     /// The keys alone, for a tool that reads the container itself rather than
@@ -746,9 +876,10 @@ const MODULE_ORDER: &[&str] = &[
 enum Kind {
     Container,
     Nca,
+    Nro,
 }
 
-fn container_kind(path: &Path) -> Kind {
+fn target_kind(path: &Path) -> Kind {
     let mut head = [0u8; 0x204];
     // The whole window or nothing: a short read would leave the magic
     // positions as zeros and quietly look like "not an NCA".
@@ -756,13 +887,26 @@ fn container_kind(path: &Path) -> Kind {
     if read && (&head[..4] == b"PFS0" || &head[0x100..0x104] == b"HEAD") {
         return Kind::Container;
     }
+    // An NRO's magic sits at 0x10, but a homebrew image may carry a crt0 stub
+    // in front of it, so `nro.rs` searches rather than indexes. Same rule
+    // here, over the window already read.
+    if read
+        && head[..0x100]
+            .windows(4)
+            .any(|w| w == switch_core::nro::NRO0_MAGIC.to_le_bytes())
+    {
+        return Kind::Nro;
+    }
     let is_nca = read && matches!(&head[0x200..0x204], b"NCA3" | b"NCA2" | b"NCA0");
-    let by_name = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("nca"));
-    if is_nca || by_name {
+    let named = |ext: &str| {
+        path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+    };
+    if is_nca || named("nca") {
         Kind::Nca
+    } else if named("nro") {
+        Kind::Nro
     } else {
         Kind::Container
     }
@@ -782,8 +926,13 @@ pub fn open_control(
 ) -> Result<switch_core::control::Control, switch_core::Error> {
     let path = container.as_ref();
     let src = open_source(path);
-    match container_kind(path) {
+    match target_kind(path) {
         Kind::Nca => switch_core::control::Control::from_source(&src, keys),
+        // A homebrew NRO carries its own NACP, but not as a Control NCA.
+        Kind::Nro => Err(switch_core::Error::BadMagic {
+            what: "control data (this is a homebrew NRO)".to_string(),
+            found: 0,
+        }),
         Kind::Container => {
             let pfs0 = switch_core::xci::read_container(&src)?;
             let Some((index, nca)) =
@@ -849,9 +998,13 @@ impl Title {
         title: Option<impl AsRef<Path>>,
     ) -> Title {
         let path = container.as_ref().to_path_buf();
-        match container_kind(&path) {
+        match target_kind(&path) {
             Kind::Nca => Title::open_nca(path, prod, title),
             Kind::Container => Title::open_container(path, prod, title),
+            Kind::Nro => die(&format!(
+                "{} is a homebrew NRO, not a retail container",
+                path.display()
+            )),
         }
     }
 
