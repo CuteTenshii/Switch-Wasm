@@ -1004,6 +1004,7 @@ pub struct ThreadContext {
     mode: ExecMode,
     cpsr_q: bool,
     cpsr_ge: u8,
+    fpscr_nzcv: u32,
     vregs: [u128; 32],
     fpcr: u32,
     fpsr: u32,
@@ -1027,6 +1028,10 @@ pub struct Cpu {
     cpsr_q: bool,
     /// CPSR's four GE bits, written by the parallel adds and read by `SEL`.
     cpsr_ge: u8,
+    /// FPSCR's own N/Z/C/V. AArch32's `VCMP` writes these rather than the
+    /// condition flags — a separate `VMRS APSR_nzcv` is what moves them
+    /// across — so they cannot share [`Cpu::nzcv`] the way A64's `FCMP` does.
+    pub(super) fpscr_nzcv: u32,
     /// SIMD vector registers Q0..=Q31 (128-bit). Only the handful of
     /// instructions libnx's `memset`/`memcpy` rely on are implemented;
     /// full NEON is out of scope for Phase 1.
@@ -1627,6 +1632,7 @@ impl Cpu {
             mode: ExecMode::A64,
             cpsr_q: false,
             cpsr_ge: 0,
+            fpscr_nzcv: 0,
             mem: Memory::new(),
             regs: [0; REG_FILE],
             pc: 0,
@@ -1860,6 +1866,7 @@ impl Cpu {
                 mode: self.mode,
                 cpsr_q: false,
                 cpsr_ge: 0,
+                fpscr_nzcv: 0,
                 vregs: [0; 32],
                 fpcr: self.fpcr,
                 fpsr: 0,
@@ -1910,6 +1917,7 @@ impl Cpu {
             mode: self.mode,
             cpsr_q: false,
             cpsr_ge: 0,
+            fpscr_nzcv: 0,
             vregs: [0; 32],
             fpcr: 0,
             fpsr: 0,
@@ -2559,6 +2567,7 @@ impl Cpu {
         thread.mode = self.mode;
         thread.cpsr_q = self.cpsr_q;
         thread.cpsr_ge = self.cpsr_ge;
+        thread.fpscr_nzcv = self.fpscr_nzcv;
         thread.vregs = self.vregs;
         thread.fpcr = self.fpcr;
         thread.fpsr = self.fpsr;
@@ -2579,6 +2588,7 @@ impl Cpu {
         self.mode = thread.mode;
         self.cpsr_q = thread.cpsr_q;
         self.cpsr_ge = thread.cpsr_ge;
+        self.fpscr_nzcv = thread.fpscr_nzcv;
         self.vregs = thread.vregs;
         self.fpcr = thread.fpcr;
         self.fpsr = thread.fpsr;

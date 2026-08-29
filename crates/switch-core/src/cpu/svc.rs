@@ -299,6 +299,8 @@ impl Cpu {
                 let entry = self.read_zr(1) as u32;
                 let arg = self.read_zr(2);
                 let stack_top = self.read_zr(3);
+                // Neither priority nor core is acted on. When one is, note
+                // that AArch32 passes them in r0 and r4 rather than X4 and X5.
                 let handle = self.create_thread(entry, arg, stack_top);
                 if crate::env_flag!("TRACE_WAIT") {
                     eprintln!("[thread] create handle={handle:#x} entry={entry:#x}");
@@ -375,7 +377,7 @@ impl Cpu {
                 // process has nothing else to do: `reschedule` idles `cycles`
                 // forward to the earliest sleeper rather than stepping its way
                 // there.
-                let nanoseconds = self.read_zr(0) as i64;
+                let nanoseconds = self.svc_arg64(0, 0, 1) as i64;
                 self.write_zr(0, RESULT_OK);
                 match self.wait_deadline(nanoseconds) {
                     Some(deadline) => self.sleep_until(deadline),
@@ -414,7 +416,7 @@ impl Cpu {
                 // A negative timeout waits forever; a positive one is a
                 // deadline in nanoseconds, and `wait_process_wide_key` turns
                 // it into one against the cycle counter.
-                let timeout = self.read_zr(3) as i64;
+                let timeout = self.svc_arg64(3, 3, 4) as i64;
                 if crate::env_flag!("TRACE_WAIT") {
                     eprintln!(
                         "[wait] condvar key={key:#x} mutex={mutex:#x} timeout={timeout} thread={:#x} bt={:x?}",
@@ -444,7 +446,7 @@ impl Cpu {
                 let addr = self.read_zr(0) as u32;
                 let arb_type = self.read_zr(1) as u32;
                 let value = self.read_zr(2) as u32 as i32;
-                let timeout = self.read_zr(3) as i64;
+                let timeout = self.svc_arg64(3, 3, 4) as i64;
                 if crate::env_flag!("TRACE_WAIT") {
                     eprintln!(
                         "[wait] arbiter addr={addr:#x} type={arb_type} value={value} \
@@ -510,9 +512,12 @@ impl Cpu {
                 self.signal_process_wide_key(key, count);
                 Ok(())
             }
-            0x0C | 0x0D | 0x0E | 0x0F | 0x16 | 0x17 | 0x28 => {
+            0x0C | 0x0D | 0x0E | 0x0F | 0x16 | 0x17 | 0x28 | 0x5F => {
                 // get/set thread priority + core mask / CloseHandle /
-                // CancelSynchronization / ReturnFromException
+                // CancelSynchronization / ReturnFromException /
+                // FlushProcessDataCache — the last of which is real work on a
+                // console and nothing here, where the guest's stores are
+                // already visible to the GPU as soon as they are made.
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }
@@ -575,7 +580,7 @@ impl Cpu {
                 const RESULT_TIMED_OUT: u64 = 0xEA01;
                 let handles_ptr = self.read_zr(1) as u32;
                 let count = (self.read_zr(2) as u32).min(0x40);
-                let timeout = self.read_zr(3) as i64;
+                let timeout = self.svc_arg64(3, 0, 3) as i64;
                 let handles: Vec<u64> = (0..count)
                     .map(|i| {
                         u64::from(
@@ -778,7 +783,7 @@ impl Cpu {
                 // was being told it had missed every deadline it had.
                 const TICK_HZ: u128 = 19_200_000;
                 let ticks = u128::from(self.cycles) * TICK_HZ / u128::from(CLOCK_RATES_HZ[0]);
-                self.write_zr(0, ticks as u64);
+                self.svc_out64(0, 0, 1, ticks as u64);
                 Ok(())
             }
             0x1F => {
@@ -1422,14 +1427,14 @@ impl Cpu {
                 // with X1 left stale, sending real code down an error path
                 // that ultimately aborted.
                 self.write_zr(0, RESULT_OK);
-                self.write_zr(1, 1);
+                self.svc_out64(1, 1, 2, 1);
                 Ok(())
             }
             0x25 => {
                 // GetThreadId(out_thread_id, handle): same shape and same
                 // fix as GetProcessId above.
                 self.write_zr(0, RESULT_OK);
-                self.write_zr(1, 1);
+                self.svc_out64(1, 1, 2, 1);
                 Ok(())
             }
             0x26 => {
@@ -1542,7 +1547,7 @@ impl Cpu {
                     // meaningful seed — it only needs to satisfy that "not
                     // obviously broken" check, not actually secure anything.
                     11 => {
-                        let sub = self.read_zr(3).wrapping_add(1);
+                        let sub = self.svc_arg64(3, 0, 3).wrapping_add(1);
                         let mut z = sub.wrapping_mul(0x9E37_79B9_7F4A_7C15);
                         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
                         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
@@ -1603,7 +1608,7 @@ impl Cpu {
                 if crate::env_flag!("TRACE_SVC") {
                     eprintln!("[svc]   -> GetInfo({info_type}) = {value:#x}");
                 }
-                self.write_zr(1, value);
+                self.svc_out64(1, 1, 2, value);
                 self.write_zr(0, RESULT_OK);
                 Ok(())
             }

@@ -110,6 +110,79 @@ impl Cpu {
                 }
                 self.set_r32(rd, clamped as u32);
             }
+            // The dual signed multiplies: two halfword products added or
+            // subtracted, optionally accumulated. `X` swaps the second
+            // operand's halves.
+            (0x10, 0b000 | 0b001 | 0b010 | 0b011) => {
+                let d = rn;
+                let a = self.r32(rm) as i32;
+                let b = self.r32(((insn >> 8) & 0xF) as u8);
+                let b = if (insn >> 5) & 1 != 0 {
+                    b.rotate_right(16) as i32
+                } else {
+                    b as i32
+                };
+                let lo = i32::from(a as i16).wrapping_mul(i32::from(b as i16));
+                let hi = i32::from((a >> 16) as i16).wrapping_mul(i32::from((b >> 16) as i16));
+                let dual = if op2 & 0b010 != 0 {
+                    lo.wrapping_sub(hi)
+                } else {
+                    lo.wrapping_add(hi)
+                };
+                // Ra == 15 is the non-accumulating form.
+                let result = if rd == 15 {
+                    dual
+                } else {
+                    let (sum, overflow) = dual.overflowing_add(self.r32(rd) as i32);
+                    if overflow {
+                        self.cpsr_q = true;
+                    }
+                    sum
+                };
+                self.set_r32(d, result as u32);
+            }
+            // SMMUL, SMMLA and SMMLS: the top 32 bits of a 64-bit product,
+            // optionally rounded and accumulated.
+            (0x15, 0b000 | 0b001 | 0b110 | 0b111) => {
+                let d = rn;
+                let a = i64::from(self.r32(rm) as i32);
+                let b = i64::from(self.r32(((insn >> 8) & 0xF) as u8) as i32);
+                let acc = if rd == 15 {
+                    0
+                } else {
+                    i64::from(self.r32(rd) as i32) << 32
+                };
+                let product = a.wrapping_mul(b);
+                let sum = if op2 & 0b100 != 0 {
+                    acc.wrapping_sub(product)
+                } else {
+                    acc.wrapping_add(product)
+                };
+                // The R bit rounds by adding half before the truncation.
+                let rounded = if (insn >> 5) & 1 != 0 {
+                    sum.wrapping_add(0x8000_0000)
+                } else {
+                    sum
+                };
+                self.set_r32(d, (rounded >> 32) as u32);
+            }
+            // SDIV and UDIV, which the media space files under the signed
+            // multiplies. The destination is bits 19:16 here, not 15:12 —
+            // that field holds the 0b1111 that says there is no accumulator.
+            (0x11 | 0x13, 0b000) => {
+                let n = self.r32(rm);
+                let m = self.r32(((insn >> 8) & 0xF) as u8);
+                // Horizon leaves integer division-by-zero untrapped, so it
+                // gives zero rather than faulting.
+                let result = if m == 0 {
+                    0
+                } else if op1 == 0x11 {
+                    (n as i32).wrapping_div(m as i32) as u32
+                } else {
+                    n / m
+                };
+                self.set_r32(rn, result);
+            }
             _ => {
                 return Err(Error::Cpu(format!(
                     "unimplemented A32 media instruction {:#010x} at pc={:#010x}",

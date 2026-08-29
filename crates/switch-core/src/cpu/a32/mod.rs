@@ -35,6 +35,7 @@ mod dataproc;
 mod disasm;
 mod loadstore;
 mod media;
+mod neon;
 mod shift;
 mod vfp;
 
@@ -223,6 +224,48 @@ impl Cpu {
         match self.mode {
             ExecMode::A64 => crate::disasm::disassemble(insn),
             ExecMode::A32 => disassemble_a32(insn),
+        }
+    }
+}
+
+/// The AArch32 syscall ABI.
+///
+/// Horizon numbers its syscalls the same in both execution states and passes
+/// the arguments in the same low registers, so most of `svc.rs` needs no help:
+/// `X0`..`X7` and `r0`..`r7` are the same slots of the same register file, and
+/// a 32-bit argument zero-extends into a 64-bit one by itself.
+///
+/// What does not carry over is the arguments that *are* 64 bits. AArch32 has
+/// no register wide enough, so the kernel splits each across a pair — and the
+/// pairs are not always adjacent, nor are the remaining arguments always in
+/// the same positions. `svcWaitSynchronization`'s timeout is `r0:r3` while its
+/// handle list stays in `r1`; `svcCreateThread` takes its priority in `r0`
+/// where A64 takes it in `X4`. The mappings below are Eden's
+/// `SvcWrap_*64From32` wrappers in `core/hle/kernel/svc.cpp`, which are
+/// generated from the kernel's own definitions.
+///
+/// These are accessors rather than a shuffle of the register file around the
+/// dispatch, because a blocking syscall rewinds onto its own `svc` and is
+/// reissued: anything that rewrote the argument registers on the way out would
+/// corrupt the arguments the next attempt reads.
+impl Cpu {
+    /// A 64-bit syscall argument: one register in A64, the pair `lo:hi` in
+    /// AArch32, low half first.
+    pub(super) fn svc_arg64(&self, a64: u8, lo: u8, hi: u8) -> u64 {
+        match self.mode {
+            ExecMode::A64 => self.reg_at(a64),
+            ExecMode::A32 => u64::from(self.r32(lo)) | (u64::from(self.r32(hi)) << 32),
+        }
+    }
+
+    /// A 64-bit syscall result, scattered across a register pair in AArch32.
+    pub(super) fn svc_out64(&mut self, a64: u8, lo: u8, hi: u8, val: u64) {
+        match self.mode {
+            ExecMode::A64 => self.set_reg(a64, val),
+            ExecMode::A32 => {
+                self.set_r32(lo, val as u32);
+                self.set_r32(hi, (val >> 32) as u32);
+            }
         }
     }
 }
