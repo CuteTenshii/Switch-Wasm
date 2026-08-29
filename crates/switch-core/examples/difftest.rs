@@ -28,7 +28,12 @@ fn main() {
     cpu.mem.map(CODE, &code).unwrap();
     cpu.mem.map_zero(inputs_addr, inputs.len() + 4096).unwrap();
     cpu.mem.map(inputs_addr, &inputs).unwrap();
-    cpu.mem.map_zero(OUTPUT, 512 * 129).unwrap();
+    // One dump per instruction under test, sized from the program rather than
+    // fixed: the buffer used to hold 128 of them, and a longer list did not
+    // fail -- it silently stopped comparing at 128 and reported everything
+    // past that as "the emulator ran short".
+    let capacity = (code.len() / 4 + 1) * 512;
+    cpu.mem.map_zero(OUTPUT, capacity).unwrap();
     cpu.set_reg(0, inputs_addr as u64);
     cpu.set_reg(1, OUTPUT as u64);
     cpu.set_pc(CODE);
@@ -57,7 +62,9 @@ fn main() {
             cpu.get_pc()
         );
     }
-    let written = (high_water as u32).saturating_sub(OUTPUT).min(512 * 128);
+    let written = (high_water as u32)
+        .saturating_sub(OUTPUT)
+        .min(capacity as u32);
     let dump = cpu.mem.dump(OUTPUT, written as usize).unwrap();
     std::fs::write(&out, &dump).unwrap();
     println!(

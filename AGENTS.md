@@ -26,6 +26,15 @@ standing state.
   **Two separate harnesses**: bare, it runs the SIMD table only; `--scalar`
   runs the integer one. A change to the integer ALU that reports "matches
   qemu" from the bare run has not been tested at all.
+  **What belongs in the lists is what titles execute**, which is a measurable
+  thing rather than a guess: walk a run's executed pcs, disassemble the
+  distinct encodings, and disassemble the ones this repo's own disassembler
+  cannot name with `llvm-mc --disassemble --triple=aarch64`. Doing that for
+  Echoes of Wisdom found 8,035 encodings it ran and neither harness tested —
+  almost all floating point — and adding them caught `FRECPE`/`FRSQRTE`
+  computing exact reciprocals instead of the architecture's 8-bit estimate.
+  The scalar harness covers loads and stores through the scratch `x29` points
+  at; that is where `ldrsh w` was found sign-extending into all 64 bits.
 - `cargo run --release -p switch-core --example jit_difftest -- <nro>` — both
   engines side by side, with every state difference between them.
 
