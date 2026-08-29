@@ -813,6 +813,8 @@ pub struct Gpu {
     /// way to find out where a frame went. It costs one `performance.now()`
     /// per phase per draw, which is microseconds across a whole run.
     times: Option<Times>,
+    /// What every draw's `Uploads::of` read, by category.
+    uploaded: UploadBytes,
     /// `GPU_ONLY=<i>` renders only the i-th draw of each frame here and
     /// leaves the rest to the rasterizer; `GPU_ONLY=<a>..<b>` renders the
     /// half-open range of them.
@@ -823,6 +825,42 @@ pub struct Gpu {
     /// what a bisection needs: a frame is a hundred draws, and halving turns
     /// that into seven runs instead of a hundred.
     only: Option<std::ops::Range<u32>>,
+}
+
+/// What `Uploads::of` lifted out of guest memory over a whole run.
+#[derive(Debug, Default, Clone, Copy)]
+struct UploadBytes {
+    vertex: u64,
+    index: u64,
+    constants: u64,
+    textures: u64,
+}
+
+impl UploadBytes {
+    /// What one draw lifted, by what it was.
+    ///
+    /// Bytes rather than milliseconds: a byte read out of guest memory is the
+    /// same byte under V8, and it is what a cache would be avoiding. The
+    /// `upload` timer says the reading costs 4.66 ms a draw and says nothing
+    /// about which of the four is worth remembering.
+    fn add(&mut self, uploads: &Uploads) {
+        self.vertex += uploads
+            .vertex
+            .iter()
+            .map(|v| v.bytes.len() as u64)
+            .sum::<u64>();
+        self.index += uploads.index.as_ref().map_or(0, |i| i.bytes.len() as u64);
+        self.constants += uploads
+            .constants
+            .iter()
+            .map(|c| c.bytes.len() as u64)
+            .sum::<u64>();
+        self.textures += uploads
+            .textures
+            .iter()
+            .map(|t| t.bytes.len() as u64)
+            .sum::<u64>();
+    }
 }
 
 /// Where a draw's time goes, in microseconds, over a whole run.
@@ -858,6 +896,16 @@ impl Drop for Gpu {
                 self.direct, self.multisampled, self.expanded, self.per_pixel
             );
         }
+        let mib = |v: u64| v as f64 / (1024.0 * 1024.0);
+        let u = self.uploaded;
+        eprintln!(
+            "[gpu] read {:.1} MiB of textures, {:.1} MiB of vertices, {:.1} MiB of constants, \
+             {:.1} MiB of indices",
+            mib(u.textures),
+            mib(u.vertex),
+            mib(u.constants),
+            mib(u.index),
+        );
         if let Some(t) = self.times {
             let ms = |v: u128| v as f64 / 1000.0;
             eprintln!(
@@ -962,6 +1010,7 @@ impl Gpu {
             in_frame: 0,
             times: (cfg!(target_arch = "wasm32") || switch_core::env_flag!("GPU_TIMES"))
                 .then(Times::default),
+            uploaded: UploadBytes::default(),
             only: std::env::var("GPU_ONLY")
                 .ok()
                 .as_deref()
@@ -3359,6 +3408,7 @@ impl Gpu {
             Uploads::of(engine, &state, ctx, Banks::Read(&banks), &immediates)
         })
         .map_err(|e| format!("{e:?}"))?;
+        self.uploaded.add(&uploads);
 
         // The swizzle is in the descriptor, which is guest memory the draw
         // points at, so the translation cannot know it and the layout has to
@@ -3665,6 +3715,7 @@ impl Renderer for Gpu {
         format!(
             "{{\"backend\":\"device\",\"drawn\":{},\"fallbacks\":{},\"pipelines\":{},\
              \"modules\":{},\"held\":{},\"evicted\":{},\"pending\":{},\
+             \"read\":{{\"textures\":{},\"vertex\":{},\"constants\":{},\"index\":{}}},\
              \"softwareFrame\":{},\"gaveUp\":{},\"reasons\":[{}]{}}}",
             self.drawn,
             self.fallbacks,
@@ -3673,6 +3724,10 @@ impl Renderer for Gpu {
             self.held.len(),
             self.evicted.len(),
             self.pending.len(),
+            self.uploaded.textures,
+            self.uploaded.vertex,
+            self.uploaded.constants,
+            self.uploaded.index,
             self.software_frame,
             self.gave_up,
             reasons.join(","),

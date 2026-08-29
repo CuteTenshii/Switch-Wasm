@@ -42,6 +42,9 @@ export interface GpuReport {
   held?: number;
   evicted?: number;
   pending?: number;
+  /** Bytes lifted out of guest memory by `Uploads::of`, by category. Textures
+   *  dominate: 96.5% of them, deswizzled from block-linear on every draw. */
+  read?: { textures: number; vertex: number; constants: number; index: number };
   /** Once this latches, every frame after it is the rasterizer's however well
    *  the device is working. */
   softwareFrame?: boolean;

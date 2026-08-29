@@ -80,6 +80,15 @@ $('btn-gpustats').addEventListener('click', async () => {
     log('rendering: the software-frame latch has tripped - every frame from here is the rasterizer\'s.', 'err');
   }
   for (const why of g.reasons ?? []) log('  fell back: ' + why, 'dim');
+  const r = g.read;
+  if (r) {
+    const mib = (v: number) => (v / (1024 * 1024)).toFixed(1);
+    log(
+      `  read from guest memory: ${mib(r.textures)} MiB textures, ${mib(r.vertex)} MiB vertices, ` +
+        `${mib(r.constants)} MiB constants, ${mib(r.index)} MiB indices`,
+      'dim',
+    );
+  }
   const t = g.times;
   if (t) {
     log(
