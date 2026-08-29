@@ -5340,6 +5340,38 @@ fn the_capture_image_getters_clear_the_buffer_they_fill() {
 }
 
 #[test]
+fn the_caller_applet_stack_is_the_one_applet_above_this_one() {
+    // GetCallerAppletIdentityInfoStack walks up the chain of applets that
+    // launched this one. Nothing here launched it, so the chain above it is
+    // the menu and nothing else -- the same identity 12 and 14 answer with.
+    // The count has to fit the buffer the caller sized: one that overruns it
+    // is worse than a short one.
+    const APPLET: u64 = 0xA3000;
+    const STACK: u32 = 0x30_0000;
+    const ENTRY: u32 = 0x10;
+    const QLAUNCH_TITLE_ID: u64 = 0x0100_0000_0000_1000;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(APPLET, "am:library-applet-self-accessor");
+    cpu.mem.map_zero(STACK, 0x1000).unwrap();
+    let tls = cpu.tls_base();
+
+    ipc_request_plain_with_buffer(&mut cpu, APPLET, 17, STACK, 4 * ENTRY, true, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "refused");
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "entries written");
+    assert_eq!(cpu.mem.read_u32(STACK).unwrap(), 3, "SystemAppletMenu");
+    assert_eq!(cpu.mem.read_u64(STACK + 8).unwrap(), QLAUNCH_TITLE_ID);
+
+    // A buffer with no room for an entry gets a count of zero, not one that
+    // names an entry the caller has nowhere to read.
+    ipc_request_plain_with_buffer(&mut cpu, APPLET, 17, STACK, ENTRY - 1, true, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0, "refused");
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0, "entries written");
+}
+
+#[test]
 fn a_library_applet_is_told_which_keyboard_layout_to_open_with() {
     // GetDesirableKeyboardLayout is the layout the applet's caller asked it
     // to open with, and hardware errors when no caller set one. There is no

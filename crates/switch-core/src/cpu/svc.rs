@@ -1128,6 +1128,11 @@ impl Cpu {
                         }
                         // pdm, the play-history database.
                         "pdm:qry" | "pdm:ntfy" | "pdm:info" => self.pdm_request(tls, cmd_id)?,
+                        // prepo, the play reports. `:a`, `:m` and `:s` are
+                        // the same interface at higher privilege.
+                        "prepo:u" | "prepo:a" | "prepo:a2" | "prepo:m" | "prepo:s" => {
+                            self.prepo_request(tls, cmd_id)?
+                        }
                         // pm, the process manager, whose four services are
                         // four different interfaces.
                         "pm:shell" | "pm:dmnt" | "pm:info" | "pm:bm" => {

@@ -239,6 +239,19 @@ fn my_page_arg() -> Vec<u8> {
     arg
 }
 
+/// `AppletIdentityInfo { AppletId, pad, u64 title_id }` for the home menu,
+/// which is the answer to every question a library applet asks about who
+/// launched it: one is only ever launched by whatever is in the foreground,
+/// and the only thing that launches one from a standing start is the menu.
+fn home_menu_identity() -> [u8; 16] {
+    const QLAUNCH_TITLE_ID: u64 = 0x0100_0000_0000_1000;
+    const SYSTEM_APPLET_MENU: u32 = 3;
+    let mut info = [0u8; 16];
+    info[..4].copy_from_slice(&SYSTEM_APPLET_MENU.to_le_bytes());
+    info[8..].copy_from_slice(&QLAUNCH_TITLE_ID.to_le_bytes());
+    info
+}
+
 /// `nn::hid::system::ControllerSupportArgPrivate`: which of the controller
 /// applet's screens to show, and the controller state its caller had when it
 /// asked for one.
@@ -254,10 +267,7 @@ fn controller_support_arg_private() -> Vec<u8> {
     // What `GetSupportedNpadStyleSet` answered the caller. Every style this
     // console's one pad can be published in, so the applet offers exactly the
     // controllers `hid` will then present — see `NPAD_PRESENTATIONS`.
-    let styles = super::NPAD_PRESENTATIONS
-        .iter()
-        .fold(super::NPAD_HANDHELD.style, |set, pad| set | pad.style);
-    arg.extend_from_slice(&styles.to_le_bytes());
+    arg.extend_from_slice(&super::supported_npad_style_set().to_le_bytes());
     // `GetNpadJoyHoldType`, which is `hid`'s own default here: Vertical.
     arg.extend_from_slice(&0u32.to_le_bytes());
     arg
@@ -1316,11 +1326,31 @@ impl Cpu {
                 // launches one from a standing start is the menu — which is
                 // also the applet that would be behind it on the stack.
                 Some(12) | Some(14) => {
-                    const QLAUNCH_TITLE_ID: u64 = 0x0100_0000_0000_1000;
-                    let mut info = [0u8; 16];
-                    info[..4].copy_from_slice(&3u32.to_le_bytes()); // SystemAppletMenu
-                    info[8..].copy_from_slice(&QLAUNCH_TITLE_ID.to_le_bytes());
+                    let info = home_menu_identity();
                     self.write_ipc_response(tls, 0, &[], &info, &[])
+                }
+                // GetCallerAppletIdentityInfoStack -> s32 count, with the
+                // entries themselves in a map-alias out buffer: this applet's
+                // caller, then *its* caller, and so on up. The chain above
+                // this one is the menu and nothing else, so the stack is the
+                // single entry 12 and 14 already answer with — and a count
+                // that overruns the buffer the caller sized is worse than a
+                // short one, so it is what fits.
+                Some(17) => {
+                    let info = home_menu_identity();
+                    let (addr, size) = self.ipc_output_buffer(tls, 0).unwrap_or((0, 0));
+                    let room = if addr == 0 {
+                        0
+                    } else {
+                        size as usize / info.len()
+                    };
+                    let count = room.min(1);
+                    if count == 1 {
+                        for (index, &byte) in info.iter().enumerate() {
+                            self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
+                        }
+                    }
+                    self.write_ipc_response(tls, 0, &[], &(count as i32).to_le_bytes(), &[])
                 }
                 // GetDesirableKeyboardLayout -> nn::settings::KeyboardLayout,
                 // the layout the applet's caller asked it to open with.
@@ -1330,6 +1360,33 @@ impl Cpu {
                 Some(19) => {
                     const ENGLISH_US: u32 = 1;
                     self.write_ipc_response(tls, 0, &[], &ENGLISH_US.to_le_bytes(), &[])
+                }
+                // PushOutData / PushInteractiveOutData(IStorage): the applet
+                // handing back what it produced — the keyboard's text, an
+                // applet's exit code. Accepted and dropped, the way
+                // `am:library-applet-accessor` accepts what a caller pushes
+                // to an applet that never runs: nothing here launched this
+                // one, so there is nobody to pop the result.
+                Some(1) | Some(3) => {
+                    if self
+                        .unimplemented_ipc
+                        .insert(("am:applet-output".to_string(), cmd_id))
+                    {
+                        self.diagnostic(
+                            "[am] the applet pushed its result; nothing here launched it, so \
+                             there is nobody to pop it",
+                        );
+                    }
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // ExitProcessAndReturn: the applet is finished. `am`
+                // terminates the process here and the call does not return,
+                // so halting is the whole implementation — and it is how a
+                // run of a library applet ends normally rather than on a
+                // fault or a refused command.
+                Some(10) => {
+                    self.halted = true;
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // A setter the applet calls during init, carrying 16 bytes
                 // of arguments and expecting nothing back but a Result.
@@ -2119,6 +2176,29 @@ mod tests {
         let arg = &super::applet_launch_storages(0x0100_0000_0000_1013)[0];
         assert_eq!(arg.len(), 0x10A8);
         assert_eq!(arg[8..24], crate::cpu::acc::ACCOUNT_UID);
+    }
+
+    #[test]
+    fn an_applet_that_pushes_its_result_and_exits_stops_the_process() {
+        // The end of every library applet's run: it pushes what it produced
+        // and then calls ExitProcessAndReturn, which on hardware does not
+        // return -- `am` terminates the process. Refusing either is a fatal
+        // one command short of a clean finish.
+        let mut cpu = request(false, 1, &[]);
+        cpu.register_service_handle(9, "am:library-applet-self-accessor");
+
+        cpu.applet_request(TLS, 9, Some(1)).unwrap(); // PushOutData
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "PushOutData");
+        assert!(!cpu.halted, "the applet has not asked to exit yet");
+
+        write_request(&mut cpu, 10, &[]);
+        cpu.applet_request(TLS, 9, Some(10)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "ExitProcessAndReturn"
+        );
+        assert!(cpu.halted, "the applet asked to exit and kept running");
     }
 
     #[test]

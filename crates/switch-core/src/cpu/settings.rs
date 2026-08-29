@@ -215,7 +215,14 @@ impl Cpu {
                 } as u32;
                 self.write_ipc_response(tls, 0, &[], &total.to_le_bytes(), &[])
             }
-            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            _ => {
+                self.warn_stub(
+                    "set",
+                    cmd_id,
+                    "an empty success, so the caller reads its own buffer as the answer",
+                );
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
         }
     }
 
@@ -275,6 +282,15 @@ impl Cpu {
                     .copy_from_slice(&(COMPLETION | USER_ADDITION | TIMESTAMP).to_le_bytes());
                 self.write_ipc_response(tls, 0, &[], &settings, &[])
             }
+            // GetPlatformRegion -> s32 `nn::settings::PlatformRegion`, which
+            // is Global (1) or Terra (2) — the Chinese console — and has no
+            // zero. So the generic empty-success reply below left the caller
+            // reading a value that is not a member of the enum, and
+            // `nn::settings` aborts on that: the error applet took an
+            // svcBreak with no message here, one command into its own start.
+            // This console is the Global one, which is what `set`'s
+            // SetRegion_USA already says.
+            Some(183) => self.write_ipc_response(tls, 0, &[], &1i32.to_le_bytes(), &[]),
             // GetSerialNumber -> SetSysSerialNumber { char number[0x18] }.
             // Real hardware's is burned in at manufacturing and unique per
             // console; this is a fixed placeholder, not a real serial.
@@ -284,7 +300,14 @@ impl Cpu {
                 number[..SERIAL.len()].copy_from_slice(SERIAL);
                 self.write_ipc_response(tls, 0, &[], &number, &[])
             }
-            _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            _ => {
+                self.warn_stub(
+                    "set:sys",
+                    cmd_id,
+                    "an empty success, so the caller reads its own buffer as the answer",
+                );
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
         }
     }
 
@@ -841,6 +864,20 @@ impl Cpu {
 #[cfg(test)]
 mod tests {
     use crate::cpu::ipc::testing::*;
+
+    #[test]
+    fn set_sys_reports_a_platform_region_that_is_in_the_enum() {
+        // `nn::settings::PlatformRegion` is Global (1) or Terra (2) -- the
+        // Chinese console -- and has no zero. The generic empty-success reply
+        // left the caller reading a value that is in neither, and
+        // `nn::settings` aborts on that with no message: it is where the
+        // error applet took an svcBreak, one command into its own start.
+        let mut cpu = request(false, 183, &[]);
+        cpu.set_sys_request(TLS, Some(183)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        let region = cpu.mem.read_u32(TLS + 0x20).unwrap();
+        assert_eq!(region, 1, "this console is the Global one");
+    }
 
     #[test]
     fn set_sys_get_serial_number_returns_a_nul_padded_placeholder() {

@@ -367,6 +367,15 @@ impl Cpu {
                 | Some(305) | Some(308) | Some(503) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // GetMaskedSupportedNpadStyleSet(u64 aruid) -> NpadStyleSet:
+                // what the *system* permits the caller, rather than what the
+                // caller asked for at 101. Every style this console's pad can
+                // be published in, which is the same set the controller
+                // applet is handed in its launch struct.
+                Some(310) => {
+                    let styles = super::supported_npad_style_set();
+                    self.write_ipc_response(tls, 0, &[], &styles.to_le_bytes(), &[])
+                }
                 // SetNpadSystemExtStateEnabled(bool, u64 aruid): whether the
                 // caller may be handed pads in the SystemExt style. There is
                 // one process here, and `NPAD_PRESENTATIONS` already

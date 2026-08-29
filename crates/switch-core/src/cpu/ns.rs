@@ -457,6 +457,43 @@ impl Cpu {
         }
     }
 
+    /// `prepo:u` and its privileged aliases (`IPrepoService`): the play
+    /// reports a title sends Nintendo — what was played, for how long, and
+    /// whatever telemetry the title cares to attach.
+    ///
+    /// **Nothing here transmits anything.** There is no network behind this
+    /// and no report storage on the NAND, so a report is accepted and goes
+    /// nowhere, and the queue is always empty. That is the same console
+    /// [`Cpu::pdm_request`] describes from the other side.
+    ///
+    /// It had no implementation at all, so every command reached the generic
+    /// fabricated-object reply — which answered a *void* transmission request
+    /// with an object id, a sub-session and an event, and would have answered
+    /// the transmission status with the object id read as a status code.
+    pub(super) fn prepo_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            // The reports travel in map-alias buffers rather than pointer
+            // ones, so there is no pointer buffer to size.
+            return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
+        }
+        match cmd_id {
+            // SaveReport / SaveReportWithUser, in each of the four revisions
+            // they have had, and the SaveSystemReport pair. The report itself
+            // arrives in a buffer and there is nowhere for it to go.
+            Some(10100..=10107) | Some(20100..=20103) => {
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // RequestImmediateTransmission: send what is queued, now. Nothing
+            // is queued and nothing transmits, so the request is honoured by
+            // having nothing to do.
+            Some(10200) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // GetTransmissionStatus -> s32. Zero is the idle status, which is
+            // the only one a console that never transmits is ever in.
+            Some(10300) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+            _ => self.unimplemented_command(tls, "prepo:u", cmd_id),
+        }
+    }
+
     /// `pdm:qry` (`IQueryService`): the play-history database — what has been
     /// played, for how long, and when.
     ///
@@ -585,6 +622,26 @@ mod tests {
             assert_ne!(session, 0, "{command}");
             assert_eq!(cpu.service_name(session), Some(expected), "{command}");
         }
+    }
+
+    #[test]
+    fn prepo_accepts_a_report_that_goes_nowhere() {
+        // Nothing here transmits, so the queue is always idle -- but the
+        // commands still have to be answered in their own shapes. With no
+        // implementation at all, a *void* transmission request was answered
+        // with a fabricated object id, a sub-session and an event.
+        for cmd in [10100u32, 10107, 10200, 20102] {
+            let mut cpu = request(false, cmd, &[]);
+            cpu.register_service_handle(9, "prepo:u");
+            cpu.prepo_request(TLS, Some(cmd)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "prepo {cmd}");
+        }
+        // GetTransmissionStatus -> s32, and idle is zero.
+        let mut cpu = request(false, 10300, &[]);
+        cpu.register_service_handle(9, "prepo:u");
+        cpu.prepo_request(TLS, Some(10300)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "status");
     }
 
     #[test]

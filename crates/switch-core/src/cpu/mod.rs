@@ -923,6 +923,21 @@ const NPAD_HANDHELD: NpadPresentation = NpadPresentation {
     joy_assignment: hid_shmem::JOY_ASSIGNMENT_DUAL,
 };
 
+/// Every style this console's pad can be published in: the ones
+/// [`NPAD_PRESENTATIONS`] can present, plus the handheld slot published beside
+/// player 1 whatever a title asked for.
+///
+/// This is the console's own capability, not a title's choice — what a title
+/// *asked* for is `npad_style_set` — and it has to be the same answer wherever
+/// it is given. The controller applet is handed it in its launch struct and
+/// then asks `hid:sys` for it again, and an applet offering a controller that
+/// never appears afterwards is one the user cannot get past.
+fn supported_npad_style_set() -> u32 {
+    NPAD_PRESENTATIONS
+        .iter()
+        .fold(NPAD_HANDHELD.style, |set, pad| set | pad.style)
+}
+
 /// Which presentation player 1 gets, given the styles the title said it takes.
 ///
 /// A `style_set` of zero is a title that has not called
