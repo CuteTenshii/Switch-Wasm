@@ -55,7 +55,10 @@ async function init(): Promise<void> {
       await stageKeys();
     }
     updateKeysState();
-    // And then the NAND, which needs those keys to parse a header.
+    // And then the NAND, which needs those keys to parse a header. Only its
+    // index is waited for here; the archives it holds register behind the
+    // page, so a firmware dump does not stand between a cold load and the
+    // first file the user drops on the stage.
     loadPhase('reading the NAND');
     await initNand();
   } catch (err) {

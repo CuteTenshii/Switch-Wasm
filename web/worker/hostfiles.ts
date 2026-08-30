@@ -8,13 +8,18 @@
    That import has to answer *synchronously* - the emulator asks for RomFS
    ranges from inside `switch_run`, with nowhere to await a promise - and
    `FileReaderSync` exists only in a worker, which is the second reason the
-   emulator lives in one. */
+   emulator lives in one.
+
+   A `Blob` is as good as a `File` here, and that is what the NAND hands over:
+   content the page stored in IndexedDB comes back as a handle the browser
+   owns the bytes of, so a firmware dump is registered for the cost of its
+   headers rather than pulled through the wasm heap. */
 
 import { api } from './wasm';
 
 // File 0 is the container being run; the rest are system data archives the
 // page has added, which a title mounts by data id.
-let hostFiles: (File | null)[] = [];
+let hostFiles: (Blob | null)[] = [];
 let hostReader: FileReaderSync | null = null;
 
 // Reads land in bursts of a few hundred bytes as the guest walks its RomFS
@@ -38,7 +43,7 @@ function reader(): FileReaderSync {
 // Opening a container replaces slot 0 and leaves the rest alone: the wasm
 // side holds sources that address archives by index, so the table can only
 // ever grow. Only slot 0's cached chunks go with it.
-export function openHostFile(file: File): bigint {
+export function openHostFile(file: Blob): bigint {
   reader();
   if (hostFiles.length === 0) hostFiles = [null];
   hostFiles[0] = file;
@@ -48,17 +53,26 @@ export function openHostFile(file: File): bigint {
 
 // Add a file the wasm side can read, and return its index. Slot 0 stays
 // reserved for the container even if nothing has been opened yet.
-export function addHostFile(file: File): number {
+export function addHostFile(file: Blob): number {
   reader();
   if (hostFiles.length === 0) hostFiles = [null];
   return hostFiles.push(file) - 1;
 }
 
-function readBlob(file: File, start: number, end: number): Uint8Array {
+// Every source addressing this table dies with the session that holds it, so
+// the table only has to grow within one session. Clearing it when a session is
+// freed is what keeps a NAND full of archives from costing another hundred
+// handles - and another hundred chunk caches - on every reset.
+export function resetHostFiles(): void {
+  hostFiles = [];
+  hostChunks.clear();
+}
+
+function readBlob(file: Blob, start: number, end: number): Uint8Array {
   return new Uint8Array(reader().readAsArrayBuffer(file.slice(start, end)));
 }
 
-function hostChunk(file: File, fileIndex: number, index: number): Uint8Array {
+function hostChunk(file: Blob, fileIndex: number, index: number): Uint8Array {
   let cache = hostChunks.get(fileIndex);
   if (!cache) hostChunks.set(fileIndex, (cache = new Map()));
   const hit = cache.get(index);

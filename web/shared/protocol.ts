@@ -178,7 +178,7 @@ export interface Commands {
 
   open_nsp(file: File): number;
   open_nca(file: File): number;
-  add_archive(file: File): number;
+  add_archive(file: Blob): number;
   add_update(file: File): string;
   update_version(): string;
   add_dlc(file: File): number;
@@ -187,7 +187,6 @@ export interface Commands {
   clear_update(): number;
   nand_identify(file: File): NandIdentity | null;
   nand_launch(bytes: Bytes): number;
-  nand_add_archive(bytes: Bytes): string;
   load_nca_from_nsp(index: number): number;
   load_nca(): number;
   program_nca_index(): number;

@@ -6,7 +6,7 @@
    call - the emulator's heap is the browser's memory too. */
 
 import type { CommandHandlers, FsChange, GpuReport, JitStats } from '../shared/protocol';
-import { addHostFile, openHostFile } from './hostfiles';
+import { addHostFile, openHostFile, resetHostFiles } from './hostfiles';
 import { releaseLatchIfSeen, resetInput, setGamepad, setTouch } from './latch';
 import {
   api,
@@ -75,6 +75,9 @@ export const CMD: CommandHandlers = {
     api().switch_free_session(handle());
     state.handle = -1;
     resetInput();
+    // Every host file the freed session was reading through went with it, and
+    // the page re-registers what the next one needs.
+    resetHostFiles();
     return 0;
   },
 
@@ -129,7 +132,9 @@ export const CMD: CommandHandlers = {
     return api().switch_open_nca(handle(), openHostFile(file));
   },
   // Register a firmware NCA as a system data archive. Costs nothing but the
-  // File reference and its header until a title mounts it.
+  // reference and its header until a title mounts it - which is as true of a
+  // Blob out of the page's NAND as of a File the user just picked, so this is
+  // the one way in for both.
   add_archive(file) {
     const index = addHostFile(file);
     return api().switch_add_archive(handle(), index, BigInt(file.size));
@@ -189,17 +194,6 @@ export const CMD: CommandHandlers = {
   // emulator keeps its own copy, so the staging buffer goes back immediately.
   nand_launch(bytes) {
     return withBytes(bytes, (ptr, len) => Number(api().switch_nand_launch(handle(), ptr, len)));
-  },
-  // The same as `add_archive`, from bytes rather than a File reference -
-  // which is what makes it keepable. A browser will not hand the page a file
-  // it was not asked for, so an archive registered from a File is gone on
-  // reload; bytes can be stored and handed back. Returns the archive's title
-  // id as hex, or '' if the bytes are not one.
-  nand_add_archive(bytes) {
-    return withBytes(bytes, (ptr, len) => {
-      const id = api().switch_nand_add_archive(handle(), ptr, len);
-      return id ? id.toString(16).padStart(16, '0') : '';
-    });
   },
   // Decrypts NSP file `index` as a Program NCA (with whatever keys are
   // loaded) and boots its ExeFS `main` executable, reading both out of the

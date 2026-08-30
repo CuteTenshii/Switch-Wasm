@@ -405,6 +405,11 @@ pub extern "C" fn switch_open_nca(handle: u32, size: u64) -> i32 {
 /// a console's NAND, so the frontend hands them over one file at a time and
 /// nothing is read until a title actually asks for one.
 ///
+/// A host file is not necessarily a file the user picked. The frontend's NAND
+/// keeps its content in the browser's own storage and hands it back as a
+/// handle the host reads ranges out of, which is what lets a whole firmware
+/// dump be re-registered every session for the cost of its headers.
+///
 /// Returns 0 if it was registered, -1 if the file is not a data archive this
 /// build can read.
 #[no_mangle]
@@ -654,58 +659,6 @@ pub extern "C" fn switch_clear_dlc(handle: u32) {
 #[no_mangle]
 pub extern "C" fn switch_clear_update(handle: u32) {
     session(handle).update = None;
-}
-
-/// Register a system data archive from bytes the host is holding, rather than
-/// from a file it can ask for again later.
-///
-/// The difference is the whole point of a NAND. A browser will not hand a page
-/// a file it was not asked for, so an archive registered through
-/// [`switch_add_archive`] — which keeps only a reference to a `File` — is gone
-/// the moment the page reloads, and a firmware dump has to be re-picked every
-/// session. Bytes can be kept. This is what a console's NAND is here: content
-/// the host stores on the emulator's behalf and hands back unprompted.
-///
-/// Returns the archive's title id, which is what a title asks for it by, or 0
-/// if the bytes are not a data archive this build can read.
-#[no_mangle]
-pub extern "C" fn switch_nand_add_archive(handle: u32, ptr: *const u8, len: u32) -> u64 {
-    let s = session(handle);
-    let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) }.to_vec();
-    let nca = match Nca::parse_with_keys(&bytes, Some(&s.keys)) {
-        Ok(nca) => nca,
-        Err(e) => {
-            s.last_error = e.to_string();
-            return 0;
-        }
-    };
-    use switch_core::nca::ContentType;
-    if !matches!(
-        nca.content_type,
-        ContentType::Data | ContentType::PublicData
-    ) {
-        s.last_error = format!(
-            "not a data archive (content type {})",
-            nca.content_type.name()
-        );
-        return 0;
-    }
-    let Some(index) = nca.romfs_section_index() else {
-        s.last_error = "data archive has no RomFS section".into();
-        return 0;
-    };
-    let title_id = nca.title_id;
-    match nca.romfs_source(switch_core::source::MemSource(bytes), &s.keys, index) {
-        Ok(romfs) => {
-            s.cpu.add_data_archive(title_id, Box::new(romfs));
-            s.last_error.clear();
-            title_id
-        }
-        Err(e) => {
-            s.last_error = e.to_string();
-            0
-        }
-    }
 }
 
 /// What a firmware NCA is, without reading the whole thing.
