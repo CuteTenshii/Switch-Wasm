@@ -3246,27 +3246,38 @@ impl Gpu {
 
     /// Keep what this draw read, and watch the memory it came from.
     ///
-    /// A texture whose source is not wholly mapped is not kept: the pages
-    /// that would report a write to it cannot be named, so trusting the bytes
-    /// later would be trusting memory nothing is watching.
+    /// The pages a texture's source covers are what a later write to it is
+    /// noticed through, so a texture with none of them is not kept: its bytes
+    /// could change with nothing to say so.
     fn remember_textures(&mut self, ctx: &mut ExecCtx) {
         for (key, bytes, source_len) in std::mem::take(&mut self.to_remember) {
             if self.texture_cache.contains_key(&key) {
                 continue;
             }
             self.texture_misses += 1;
+            // `source_len` is an upper bound on where a read could reach —
+            // `dense.max(strided)` in `upload.rs` — and not the size of the
+            // allocation, which a title routinely maps less of: Asphalt 9's
+            // textures claim 16 MiB against a 6 MiB mapping.
+            //
+            // So the walk stops where the mapping does and keeps what it
+            // found. Bytes that are not mapped cannot be written through this
+            // address space, and the decode did not read them either — it
+            // would have faulted rather than produced the image being cached,
+            // and a faulted upload is a draw on the rasterizer, which
+            // `fallbacks` would have counted. Requiring the whole bound
+            // instead cost this title every texture it had: 240 of 242
+            // decodes in a 40-frame run reproduced an image the cache had
+            // already decoded and would not take.
             let end = key.addr.saturating_add(source_len);
             let mut pages: Vec<u32> = Vec::new();
             let mut at = key.addr;
-            let mut mapped = true;
             while at < end {
                 let Some((cpu, run)) = ctx.vmm.translate(at) else {
-                    mapped = false;
                     break;
                 };
                 let take = run.min(end - at);
                 if take == 0 {
-                    mapped = false;
                     break;
                 }
                 let first = u64::from(cpu) >> PAGE_BITS;
@@ -3274,7 +3285,7 @@ impl Gpu {
                 pages.extend((first..=last).map(|p| p as u32));
                 at += take;
             }
-            if !mapped {
+            if pages.is_empty() {
                 continue;
             }
             // Whole-cache rather than least-recently-used: the working set is
