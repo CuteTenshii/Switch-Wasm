@@ -1267,7 +1267,7 @@ mod tests {
 mod decrypt_tests {
     use super::*;
     use crate::crypto::{aes128_encrypt_block, aes128_xts_decrypt};
-    use crate::keys::KeySet;
+    use crate::keys::{KeySet, KEY_GENERATION_COUNT};
 
     fn encrypt_xts(key: &[u8; 32], data: &[u8], sector: u64, sector_size: usize) -> Vec<u8> {
         // XTS encrypt is decrypt of the "ciphertext" — not needed; instead we
@@ -1277,22 +1277,20 @@ mod decrypt_tests {
         key1.copy_from_slice(&key[..16]);
         key2.copy_from_slice(&key[16..]);
         let mut out = Vec::with_capacity(data.len());
-        let mut s = sector;
-        for chunk in data.chunks(sector_size) {
+        for (s, chunk) in (sector..).zip(data.chunks(sector_size)) {
             let mut tweak = [0u8; 16];
             let mut sv = s;
             for i in (0..16).rev() {
                 tweak[i] = (sv & 0xff) as u8;
                 sv >>= 8;
             }
-            s += 1;
             let mut tweak = aes128_encrypt_block(&key2, &tweak);
             for blk in chunk.chunks(16) {
                 let mut p = [0u8; 16];
                 p[..blk.len()].copy_from_slice(blk);
                 let mut x = [0u8; 16];
-                for i in 0..16 {
-                    x[i] = p[i] ^ tweak[i];
+                for (i, b) in x.iter_mut().enumerate() {
+                    *b = p[i] ^ tweak[i];
                 }
                 let c = aes128_encrypt_block(&key1, &x);
                 for i in 0..16 {
@@ -1326,13 +1324,15 @@ mod decrypt_tests {
         hdr[0x21C] = 0; // crypto type
 
         let mut key = [0u8; 32];
-        for i in 0..32 {
-            key[i] = i as u8;
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = i as u8;
         }
         let encrypted = encrypt_xts(&key, &hdr, 0, 0x200);
 
-        let mut keys = KeySet::default();
-        keys.header_key = Some(key);
+        let keys = KeySet {
+            header_key: Some(key),
+            ..Default::default()
+        };
         let nca = Nca::parse_with_keys(&encrypted, Some(&keys)).expect("decrypt+parse");
         assert_eq!(nca.title_id, 0x010075600ae96800);
         assert_eq!(nca.content_type, ContentType::Program);
@@ -1347,8 +1347,8 @@ mod decrypt_tests {
     #[test]
     fn xts_roundtrip_consistency() {
         let mut key = [0u8; 32];
-        for i in 0..32 {
-            key[i] = i as u8;
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = i as u8;
         }
         let mut data = [0u8; 0x400];
         for (i, b) in data.iter_mut().enumerate() {
@@ -1397,22 +1397,22 @@ mod decrypt_tests {
 
         let header_key = {
             let mut k = [0u8; 32];
-            for i in 0..32 {
-                k[i] = i as u8;
+            for (i, b) in k.iter_mut().enumerate() {
+                *b = i as u8;
             }
             k
         };
         let kek = {
             let mut k = [0u8; 16];
-            for i in 0..16 {
-                k[i] = 0xA0 + i as u8;
+            for (i, b) in k.iter_mut().enumerate() {
+                *b = 0xA0 + i as u8;
             }
             k
         };
         let section_key = {
             let mut k = [0u8; 16];
-            for i in 0..16 {
-                k[i] = 0xB0 + i as u8;
+            for (i, b) in k.iter_mut().enumerate() {
+                *b = 0xB0 + i as u8;
             }
             k
         };
@@ -1450,7 +1450,7 @@ mod decrypt_tests {
 
         let at = h + 0x40;
         let start_units = (SECTION_OFFSET / 0x200) as u32;
-        let size_units = ((plain_section.len() + 0x1ff) / 0x200) as u32;
+        let size_units = plain_section.len().div_ceil(0x200) as u32;
         let end_units = start_units + size_units;
         header[at..at + 4].copy_from_slice(&start_units.to_le_bytes());
         header[at + 4..at + 8].copy_from_slice(&end_units.to_le_bytes());
@@ -1499,9 +1499,15 @@ mod decrypt_tests {
         raw[SECTION_OFFSET..SECTION_OFFSET + encrypted_section.len()]
             .copy_from_slice(&encrypted_section);
 
-        let mut keys = KeySet::default();
-        keys.header_key = Some(header_key);
-        keys.key_area_key_system[0] = Some(kek);
+        let keys = KeySet {
+            header_key: Some(header_key),
+            key_area_key_system: {
+                let mut slots = [None; KEY_GENERATION_COUNT];
+                slots[0] = Some(kek);
+                slots
+            },
+            ..Default::default()
+        };
         (raw, keys, pfs0)
     }
 
@@ -1799,9 +1805,15 @@ mod decrypt_tests {
             "the declared extent must not be in the file"
         );
 
-        let mut keys = KeySet::default();
-        keys.header_key = Some(header_key);
-        keys.key_area_key_system[0] = Some(kek);
+        let keys = KeySet {
+            header_key: Some(header_key),
+            key_area_key_system: {
+                let mut slots = [None; KEY_GENERATION_COUNT];
+                slots[0] = Some(kek);
+                slots
+            },
+            ..Default::default()
+        };
         (raw, keys, plain)
     }
 
@@ -1883,22 +1895,22 @@ mod decrypt_tests {
 
         let header_key = {
             let mut k = [0u8; 32];
-            for i in 0..32 {
-                k[i] = (0x40 + i) as u8;
+            for (i, b) in k.iter_mut().enumerate() {
+                *b = (0x40 + i) as u8;
             }
             k
         };
         let kek = {
             let mut k = [0u8; 16];
-            for i in 0..16 {
-                k[i] = 0xC0 + i as u8;
+            for (i, b) in k.iter_mut().enumerate() {
+                *b = 0xC0 + i as u8;
             }
             k
         };
         let section_key = {
             let mut k = [0u8; 16];
-            for i in 0..16 {
-                k[i] = 0xD0 + i as u8;
+            for (i, b) in k.iter_mut().enumerate() {
+                *b = 0xD0 + i as u8;
             }
             k
         };
@@ -1928,7 +1940,7 @@ mod decrypt_tests {
 
         let at = h + 0x40;
         let start_units = (SECTION_OFFSET / 0x200) as u32;
-        let size_units = ((plain_section.len() + 0x1ff) / 0x200) as u32;
+        let size_units = plain_section.len().div_ceil(0x200) as u32;
         header[at..at + 4].copy_from_slice(&start_units.to_le_bytes());
         header[at + 4..at + 8].copy_from_slice(&(start_units + size_units).to_le_bytes());
 
@@ -1969,9 +1981,15 @@ mod decrypt_tests {
         raw[SECTION_OFFSET..SECTION_OFFSET + encrypted_section.len()]
             .copy_from_slice(&encrypted_section);
 
-        let mut keys = KeySet::default();
-        keys.header_key = Some(header_key);
-        keys.key_area_key_system[0] = Some(kek);
+        let keys = KeySet {
+            header_key: Some(header_key),
+            key_area_key_system: {
+                let mut slots = [None; KEY_GENERATION_COUNT];
+                slots[0] = Some(kek);
+                slots
+            },
+            ..Default::default()
+        };
         (raw, keys, plain_section, LEVEL5_OFFSET)
     }
 

@@ -6,7 +6,7 @@
 
 mod a32;
 
-use a32::{cpu, r, BASE, HALT, SCRATCH};
+use a32::{r, run, SCRATCH};
 
 use switch_core::cpu::Cpu;
 
@@ -18,17 +18,6 @@ fn load(rd: u32, value: u32) -> [u32; 2] {
         0xE300_0000 | ((lo & 0xF000) << 4) | (rd << 12) | (lo & 0xFFF),
         0xE340_0000 | ((hi & 0xF000) << 4) | (rd << 12) | (hi & 0xFFF),
     ]
-}
-
-fn run(code: &[u32]) -> Cpu {
-    let mut cpu = cpu();
-    let mut bytes = Vec::new();
-    for insn in code.iter().chain(std::iter::once(&HALT)) {
-        bytes.extend_from_slice(&insn.to_le_bytes());
-    }
-    cpu.mem.map(BASE, &bytes).unwrap();
-    cpu.run(code.len() as u64 + 1).unwrap();
-    cpu
 }
 
 /// Assemble `movw/movt` for each value, move it into `s0`/`s1`, then run `ops`.

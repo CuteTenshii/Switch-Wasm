@@ -852,6 +852,7 @@ pub fn srgb_to_linear(v: f32) -> f32 {
 /// up into the exponent instead of wrapping the mantissa. The format has no
 /// sign bit, so a negative has no encoding at all and becomes zero.
 fn pack_small_float(v: f32, mantissa_bits: u32) -> u32 {
+    #[allow(clippy::neg_cmp_op_on_partial_ord)] // NaN belongs on this side
     if !(v > 0.0) {
         return 0;
     }

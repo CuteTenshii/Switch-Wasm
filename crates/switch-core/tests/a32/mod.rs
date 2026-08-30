@@ -44,7 +44,9 @@ pub fn run_failing(code: &[u32]) -> String {
     format!("{}", cpu.run(code.len() as u64 + 1).unwrap_err())
 }
 
-fn load(cpu: &mut Cpu, code: &[u32]) {
+/// Assemble `code` at [`BASE`] with a halt appended, without running it —
+/// for a test that has to set registers up before the program sees them.
+pub fn load(cpu: &mut Cpu, code: &[u32]) {
     let mut bytes = Vec::with_capacity(code.len() * 4 + 4);
     for insn in code.iter().chain(std::iter::once(&HALT)) {
         bytes.extend_from_slice(&insn.to_le_bytes());

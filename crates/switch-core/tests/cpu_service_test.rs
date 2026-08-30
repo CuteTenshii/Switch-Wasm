@@ -4,6 +4,7 @@
 mod cpu;
 
 use cpu::*;
+use switch_core::cpu::POINTER_BUFFER_SIZE;
 
 #[test]
 fn ssl_keeps_context_state_and_refuses_connections() {

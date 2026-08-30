@@ -7,7 +7,7 @@
 //! needs, which is what `dead_code` is doing here.
 #![allow(dead_code)]
 
-pub use switch_core::cpu::{Cpu, POINTER_BUFFER_SIZE};
+pub use switch_core::cpu::Cpu;
 
 pub fn cpu_at(pc: u32) -> Cpu {
     let mut cpu = Cpu::new();

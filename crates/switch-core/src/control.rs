@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn an_nro_with_nothing_appended_has_no_control() {
         assert_eq!(Control::from_nro(&nro_with_assets(b"", b"")), None);
-        assert_eq!(Control::from_nro(&vec![0u8; 0x50]), None);
+        assert_eq!(Control::from_nro(&[0u8; 0x50]), None);
     }
 
     #[test]
