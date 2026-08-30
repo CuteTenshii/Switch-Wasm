@@ -155,6 +155,18 @@ pub struct Gpu {
     pub host1x: Host1x,
     pub address_spaces: HashMap<u32, AddressSpace>,
     pub channels: HashMap<u32, Channel>,
+    /// The one GPU backend this session has, lent to whichever channel is
+    /// executing — see [`Gpu::submit`].
+    ///
+    /// It lives here and not on a [`Channel`] because a channel is not the
+    /// unit a device belongs to: every `open("/dev/nvhost-gpu")` makes
+    /// another one (Asphalt 9 opens four), `nvClose` destroys one, and which
+    /// of them a title draws through is the title's business. Installing on
+    /// one of them left the device somewhere nothing drew.
+    renderer: Box<dyn renderer::Renderer>,
+    /// The channel the backend was last lent to, so a flush runs through the
+    /// address space its held surfaces were produced under.
+    last_channel: Option<u32>,
     pub stats: GpuStats,
     /// The most recently presented frame, ready for the host to display.
     pub framebuffer: Framebuffer,
@@ -182,6 +194,8 @@ impl Gpu {
             host1x: Host1x::new(),
             address_spaces: HashMap::new(),
             channels: HashMap::new(),
+            renderer: Box::new(renderer::Software),
+            last_channel: None,
             stats: GpuStats::default(),
             framebuffer: Framebuffer::default(),
             scan_out: Vec::new(),
@@ -259,8 +273,52 @@ impl Gpu {
             stats: &mut self.stats,
             trace: self.trace,
         };
-        chan.submit(entries, fence, &mut ctx)?;
+        // The backend is lent for the length of the submission and taken
+        // back whether or not it faulted: leaving it on a channel would hand
+        // the next submission on another channel the software rasterizer.
+        chan.three_d.swap_renderer(&mut self.renderer);
+        let submitted = chan.submit(entries, fence, &mut ctx);
+        chan.three_d.swap_renderer(&mut self.renderer);
+        self.last_channel = Some(channel_id);
+        submitted?;
         Ok(fence)
+    }
+
+    /// Install the backend every channel draws through.
+    ///
+    /// The one place a GPU backend gets installed. It replaces whatever was
+    /// there, which is [`renderer::Software`] until something calls this.
+    pub fn set_renderer(&mut self, renderer: Box<dyn renderer::Renderer>) {
+        self.renderer = renderer;
+    }
+
+    /// What the installed backend has been doing — see
+    /// [`renderer::Renderer::report_json`].
+    pub fn renderer_report(&self) -> String {
+        self.renderer.report_json()
+    }
+
+    /// Whether the installed backend wants replacing — see
+    /// [`renderer::Renderer::lost`].
+    pub fn renderer_lost(&self) -> bool {
+        self.renderer.lost()
+    }
+
+    /// The channel a flush should run through: the one that last submitted,
+    /// or any channel still holding an address space when that one has been
+    /// closed under us.
+    fn flush_channel(&self) -> Option<u32> {
+        let usable = |id: u32| {
+            self.channels.get(&id).is_some_and(|channel| {
+                channel
+                    .as_id
+                    .is_some_and(|as_id| self.address_spaces.contains_key(&as_id))
+            })
+        };
+        if self.last_channel.is_some_and(usable) {
+            return self.last_channel;
+        }
+        self.channels.keys().copied().find(|&id| usable(id))
     }
 
     /// Hand back anything a GPU backend is holding, so that whatever reads a
@@ -269,27 +327,37 @@ impl Gpu {
     /// Called before [`Gpu::present`], which is the reader that always
     /// matters. A backend with nothing to hand back — the software
     /// rasterizer, which writes guest memory as it goes — does nothing here.
+    ///
+    /// Plural in name only: a session has one backend. The name is kept
+    /// because it is what `vi` and [`crate::cpu::Cpu`] call.
     pub fn flush_renderers(&mut self, mem: &mut Memory) -> Result<renderer::Flush> {
-        let mut state = renderer::Flush::Done;
-        for channel in self.channels.values_mut() {
-            let Some(as_id) = channel.as_id else { continue };
-            let Some(vmm) = self.address_spaces.get(&as_id) else {
-                continue;
-            };
-            let mut ctx = ExecCtx {
-                mem,
-                vmm,
-                host1x: &mut self.host1x,
-                stats: &mut self.stats,
-                trace: self.trace,
-            };
-            // Every channel is asked, so every readback is started, and one
-            // that is not ready does not stop the others from making progress.
-            if channel.three_d.flush_renderer(&mut ctx)? == renderer::Flush::Pending {
-                state = renderer::Flush::Pending;
-            }
-        }
-        Ok(state)
+        // One backend, so one flush — asking once per channel would ask the
+        // same object to write the same surfaces back N times.
+        let Some(channel_id) = self.flush_channel() else {
+            return Ok(renderer::Flush::Done);
+        };
+        let channel = self
+            .channels
+            .get_mut(&channel_id)
+            .expect("flush_channel returns a channel that exists");
+        let as_id = channel
+            .as_id
+            .expect("flush_channel checks the address space");
+        let vmm = self
+            .address_spaces
+            .get(&as_id)
+            .expect("flush_channel checks the address space");
+        channel.three_d.swap_renderer(&mut self.renderer);
+        let mut ctx = ExecCtx {
+            mem,
+            vmm,
+            host1x: &mut self.host1x,
+            stats: &mut self.stats,
+            trace: self.trace,
+        };
+        let flushed = channel.three_d.flush_renderer(&mut ctx);
+        channel.three_d.swap_renderer(&mut self.renderer);
+        flushed
     }
 
     /// Read a surface the display was handed and convert it to the RGBA8888
@@ -490,6 +558,140 @@ mod tests {
         let syncpt_a = gpu.channel_mut(a).unwrap().syncpt;
         let syncpt_b = gpu.channel_mut(b).unwrap().syncpt;
         assert_ne!(syncpt_a, syncpt_b);
+    }
+
+    /// A backend that answers to a name and counts its flushes, so a test can
+    /// tell it from [`renderer::Software`] and see it being reached.
+    #[derive(Debug)]
+    struct Stub {
+        flushes: std::rc::Rc<std::cell::Cell<u32>>,
+    }
+
+    impl renderer::Renderer for Stub {
+        fn draw(
+            &mut self,
+            _engine: &crate::gpu::engine::threed::Engine3D,
+            _ctx: &mut ExecCtx,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_color(
+            &mut self,
+            _engine: &crate::gpu::engine::threed::Engine3D,
+            _ctx: &mut ExecCtx,
+            _target: u32,
+            _layer: u32,
+            _channels: [bool; 4],
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn clear_depth_stencil(
+            &mut self,
+            _engine: &crate::gpu::engine::threed::Engine3D,
+            _ctx: &mut ExecCtx,
+            _depth: bool,
+            _stencil: bool,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        fn flush(&mut self, _ctx: &mut ExecCtx) -> Result<renderer::Flush> {
+            self.flushes.set(self.flushes.get() + 1);
+            Ok(renderer::Flush::Done)
+        }
+
+        fn report_json(&self) -> String {
+            "{\"backend\":\"stub\"}".to_string()
+        }
+    }
+
+    /// A channel is not what a backend belongs to. Every
+    /// `open("/dev/nvhost-gpu")` makes another one — Asphalt 9 opens four —
+    /// and `nvClose` destroys one; installing on `channels.values().next()`
+    /// put the device on an arbitrary channel and lost it on a close.
+    #[test]
+    fn the_backend_outlives_more_channels_and_a_close() {
+        let mut gpu = Gpu::new();
+        let first = gpu.create_channel().unwrap();
+        gpu.set_renderer(Box::new(Stub {
+            flushes: std::rc::Rc::new(std::cell::Cell::new(0)),
+        }));
+        for _ in 0..3 {
+            gpu.create_channel().unwrap();
+        }
+        assert_eq!(
+            gpu.renderer_report(),
+            "{\"backend\":\"stub\"}",
+            "three more channels do not displace the backend"
+        );
+        gpu.channels.remove(&first);
+        assert_eq!(
+            gpu.renderer_report(),
+            "{\"backend\":\"stub\"}",
+            "closing the channel it was installed on does not take it away"
+        );
+    }
+
+    /// One pushbuffer command word — the encoding [`channel::Command`] decodes.
+    fn header(mode: u32, arg: u32, subchannel: u32, method: u32) -> u32 {
+        (method & 0x1FFF) | ((subchannel & 7) << 13) | ((arg & 0x1FFF) << 16) | (mode << 29)
+    }
+
+    /// The backend is lent to whichever channel is executing, so a title that
+    /// draws through its *second* channel still reaches it — and it is back on
+    /// the `Gpu` afterwards for the next channel to borrow.
+    ///
+    /// Driven through a real submission rather than through
+    /// [`Gpu::flush_renderers`], which does its own lending and so would pass
+    /// with the backend stranded on a channel nothing runs.
+    #[test]
+    fn a_later_channel_reaches_the_backend() {
+        let mut gpu = Gpu::new();
+        let mut mem = Memory::new();
+        mem.map_zero(0x3000_0000, 0x1000).unwrap();
+        let as_id = gpu.create_address_space();
+        let gpu_va = gpu
+            .address_space_mut(as_id)
+            .unwrap()
+            .map(0x3000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
+
+        // Bind the copy engine and launch a transfer. `Channel::method` hands
+        // the 3D engine's surfaces back before one, because a copy reads a
+        // render target straight out of guest memory — so this is a
+        // submission that has to reach the backend to be correct.
+        let words = [
+            header(3, 1, 0, 0),
+            crate::gpu::engine::CLASS_COPY,
+            header(3, 1, 0, crate::gpu::engine::copy::LAUNCH_DMA),
+            0,
+        ];
+        for (index, &word) in words.iter().enumerate() {
+            mem.write_u32(0x3000_0000 + index as u32 * 4, word).unwrap();
+        }
+
+        let flushes = std::rc::Rc::new(std::cell::Cell::new(0));
+        gpu.set_renderer(Box::new(Stub {
+            flushes: flushes.clone(),
+        }));
+        let _first = gpu.create_channel().unwrap();
+        let second = gpu.create_channel().unwrap();
+        gpu.channel_mut(second).unwrap().as_id = Some(as_id);
+
+        let entry = gpu_va | ((words.len() as u64) << 42);
+        gpu.submit(second, &mut mem, &[entry], 1).unwrap();
+        assert_eq!(
+            flushes.get(),
+            1,
+            "the submission on the second channel reached the backend"
+        );
+        assert_eq!(
+            gpu.renderer_report(),
+            "{\"backend\":\"stub\"}",
+            "the backend came back off the channel it was lent to"
+        );
     }
 
     #[test]

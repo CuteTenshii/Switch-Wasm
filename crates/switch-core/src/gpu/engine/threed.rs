@@ -986,10 +986,20 @@ impl Engine3D {
     /// Where the bound index buffer starts.
     /// Replace the backend this engine draws and clears through.
     ///
-    /// The one place a GPU backend gets installed — see
-    /// [`crate::gpu::renderer`].
+    /// [`crate::gpu::Gpu`] owns the one backend a session has; this is how it
+    /// is put somewhere, and the tests below are the other caller.
     pub fn set_renderer(&mut self, renderer: Box<dyn Renderer>) {
         self.renderer = renderer;
+    }
+
+    /// Exchange this engine's backend with the caller's.
+    ///
+    /// A session has one backend and a title may have several channels, so
+    /// [`crate::gpu::Gpu::submit`] lends it to whichever channel is executing
+    /// and takes it back after. Swapping rather than setting is what makes
+    /// that reversible without a second allocation.
+    pub fn swap_renderer(&mut self, other: &mut Box<dyn Renderer>) {
+        std::mem::swap(&mut self.renderer, other);
     }
 
     /// What the installed backend has been doing — see

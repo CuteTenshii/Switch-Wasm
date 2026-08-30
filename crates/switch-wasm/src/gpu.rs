@@ -75,15 +75,10 @@ pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -
     let mut gpu = switch_gpu::Gpu::with_device(instance, adapter, device, queue);
     gpu.set_device_msaa(device_msaa);
     gpu.set_interleave(interleave);
-    match crate::install_gpu(handle, gpu) {
-        Ok(()) if name.is_empty() => RENDERING_ON.to_string(),
-        Ok(()) => format!("{RENDERING_ON} {name}"),
-        Err((gpu, why)) => {
-            // The check above makes this unreachable in practice — a slice
-            // only ever adds channels — but `install_gpu` owns the answer,
-            // and a device nobody installed has to be given back.
-            gpu.destroy();
-            why
-        }
+    crate::install_gpu(handle, gpu);
+    if name.is_empty() {
+        RENDERING_ON.to_string()
+    } else {
+        format!("{RENDERING_ON} {name}")
     }
 }

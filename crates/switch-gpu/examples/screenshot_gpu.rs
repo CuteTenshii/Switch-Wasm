@@ -51,23 +51,18 @@ fn main() {
     common::register_firmware(&mut cpu, &title.keys);
     title.boot(&mut cpu);
 
-    // The channel a guest draws through does not exist until the guest opens
-    // it, so the backend cannot be installed before boot. This installs it
-    // into the first channel that appears, which is the one every title this
-    // runs has drawn through.
+    // The backend goes on the session, not on a channel, so it can be
+    // installed before the guest has opened one — and it is reached whichever
+    // channel the title turns out to draw through.
+    if let Some(gpu) = gpu.take() {
+        println!("[gpu] installed");
+        cpu.nv.gpu.set_renderer(Box::new(gpu));
+    }
     let run = common::drive(
         &mut cpu,
         Pace::Blocks,
         common::env_u64("STEPS", u64::MAX),
         |cpu, _| {
-            if gpu.is_some() {
-                if let Some(channel) = cpu.nv.gpu.channels.values_mut().next() {
-                    if let Some(gpu) = gpu.take() {
-                        println!("[gpu] installed on channel {}", channel.id);
-                        channel.three_d.set_renderer(Box::new(gpu));
-                    }
-                }
-            }
             if cpu.nv.gpu.frames >= dock_at {
                 cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
             }
@@ -79,6 +74,9 @@ fn main() {
         },
     );
     common::report(&cpu, &run);
+    // What the browser's Rendering panel shows, for a run that has no browser:
+    // how many draws the device took, how many fell back and why.
+    println!("rendering: {}", cpu.nv.gpu.renderer_report());
     if cpu.nv.gpu.framebuffer.is_empty() {
         println!("no frame");
         return;
