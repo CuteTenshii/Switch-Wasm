@@ -286,12 +286,6 @@ impl Cpu {
             .then(|| self.ipc_map_descriptor(tls, header.send_buffers + index))
     }
 
-    /// Address of the `index`-th map-alias receive buffer, for the callers
-    /// that write into one and never ask how big it is.
-    pub(super) fn ipc_recv_buffer_addr(&self, tls: u32, index: u32) -> Option<u32> {
-        self.ipc_recv_buffer(tls, index).map(|(address, _)| address)
-    }
-
     /// The send-static ("pointer") buffers of a hipc request, as
     /// `(address, size)`.
     ///
@@ -359,6 +353,15 @@ impl Cpu {
     }
 
     /// Every buffer a request carries, as `(input, output)` lists — the list
+    /// Address of the `index`-th output buffer, for the callers that write
+    /// into one and never ask how big it is. Every command reached this way
+    /// has an `...Auto` variant, and reading only the map-alias descriptor
+    /// there finds the null one and writes the reply to address 0.
+    pub(super) fn ipc_output_buffer_addr(&self, tls: u32, index: u32) -> Option<u32> {
+        self.ipc_output_buffer(tls, index)
+            .map(|(address, _)| address)
+    }
+
     /// form of [`Cpu::ipc_input_buffer`] and [`Cpu::ipc_output_buffer`], for
     /// the services that want all of them rather than one by index.
     pub(super) fn ipc_buffers(&self, tls: u32) -> (Buffers, Buffers) {

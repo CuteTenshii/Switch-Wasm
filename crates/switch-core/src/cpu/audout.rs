@@ -164,7 +164,7 @@ impl Cpu {
         match cmd_id {
             // ListAudioOuts / ListAudioOutsAuto: one device.
             Some(0) | Some(2) => {
-                if let Some(buf) = self.ipc_recv_buffer_addr(tls, 0) {
+                if let Some(buf) = self.ipc_output_buffer_addr(tls, 0) {
                     for i in 0..NAME_LEN {
                         let b = DEVICE.get(i as usize).copied().unwrap_or(0);
                         let _ = self.mem.write_u8(buf.wrapping_add(i), b);
@@ -194,7 +194,7 @@ impl Cpu {
                     asked_channels
                 });
 
-                if let Some(buf) = self.ipc_recv_buffer_addr(tls, 0) {
+                if let Some(buf) = self.ipc_output_buffer_addr(tls, 0) {
                     for i in 0..NAME_LEN {
                         let b = DEVICE.get(i as usize).copied().unwrap_or(0);
                         let _ = self.mem.write_u8(buf.wrapping_add(i), b);
@@ -492,11 +492,9 @@ impl Cpu {
     /// and wrote its de-interleaved samples over its own `.text`.
     fn audio_out_release(&mut self, tls: u32, handle: u64) -> Result<()> {
         let now = self.cycles;
-        let room = self
-            .ipc_recv_buffer(tls, 0)
-            .map(|(_, size)| size / 8)
-            .unwrap_or(0);
-        let addr = self.ipc_recv_buffer_addr(tls, 0);
+        let out = self.ipc_output_buffer(tls, 0);
+        let room = out.map(|(_, size)| size / 8).unwrap_or(0);
+        let addr = out.map(|(address, _)| address);
         let mut tags = Vec::new();
         if let Some(device) = self.audio_outs.get_mut(&handle) {
             while (tags.len() as u32) < room {

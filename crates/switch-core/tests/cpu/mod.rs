@@ -601,6 +601,39 @@ pub fn ipc_request_plain_with_buffer(
     run_ipc_request(cpu, handle);
 }
 
+/// A request whose out buffer is marshalled the way `nnSdk`'s `...Auto`
+/// commands marshal one: a real receive-static ("pointer") descriptor beside
+/// the null map-alias descriptor the caller fills in for the form it did not
+/// use. A server that reads only the map-alias one finds address 0.
+pub fn ipc_request_auto_recv(
+    cpu: &mut Cpu,
+    handle: u64,
+    cmd: u32,
+    buf: u32,
+    len: u32,
+    payload: &[u8],
+) {
+    assert!(payload.len() <= 8, "the data words leave room for two");
+    let tls = cpu.tls_base();
+    for i in (0..0x100u32).step_by(4) {
+        cpu.mem.write_u32(tls + i, 0).unwrap();
+    }
+    // One receive buffer, declared both ways: bits 27:24 count the map-alias
+    // descriptors and bits 13:10 encode a single receive-static as 2.
+    cpu.mem.write_u32(tls, 4 | (1 << 24)).unwrap();
+    cpu.mem.write_u32(tls + 4, 9 | (2 << 10)).unwrap();
+    // tls+8 is the map-alias descriptor, and it stays zeroed.
+    cpu.mem.write_u32(tls + 0x20, 0x4943_4653).unwrap(); // "SFCI"
+    cpu.mem.write_u32(tls + 0x28, cmd).unwrap();
+    for (i, &b) in payload.iter().enumerate() {
+        cpu.mem.write_u8(tls + 0x30 + i as u32, b).unwrap();
+    }
+    // The receive-static sits past the data words, as { address, size:16 }.
+    cpu.mem.write_u32(tls + 0x38, buf).unwrap();
+    cpu.mem.write_u32(tls + 0x3c, len << 16).unwrap();
+    run_ipc_request(cpu, handle);
+}
+
 /// The section strides of a `RequestUpdateAudioRenderer` **input**, from
 /// libnx's `audren.h`. They are not the reply's: an input entry and the output
 /// entry describing the same object are different sizes.

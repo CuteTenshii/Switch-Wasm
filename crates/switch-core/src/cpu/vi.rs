@@ -446,7 +446,7 @@ impl Cpu {
     /// room for it. Nothing `vi` lists here has a second entry, so one element
     /// is the whole list.
     fn vi_fill_out_buffer(&mut self, tls: u32, entry: &[u8]) {
-        let Some((addr, size)) = self.ipc_recv_buffer(tls, 0) else {
+        let Some((addr, size)) = self.ipc_output_buffer(tls, 0) else {
             return;
         };
         for (i, &b) in entry.iter().take(size as usize).enumerate() {
@@ -582,7 +582,7 @@ impl Cpu {
             raw.extend_from_slice(&(parcel_size as u64).to_le_bytes());
         }
 
-        if let Some(buf) = self.ipc_recv_buffer_addr(tls, 0) {
+        if let Some(buf) = self.ipc_output_buffer_addr(tls, 0) {
             for (i, &b) in parcel.iter().enumerate() {
                 let _ = self.mem.write_u8(buf.wrapping_add(i as u32), b);
             }

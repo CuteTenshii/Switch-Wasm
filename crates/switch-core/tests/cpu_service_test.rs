@@ -1202,6 +1202,79 @@ fn audout_release_zeroes_the_entry_after_the_last_tag() {
 }
 
 #[test]
+fn audout_release_answers_the_auto_commands_pointer_buffer() {
+    // `nnSdk` reaches this through `GetReleasedAudioOutBufferAuto`, which
+    // offers the out buffer as a receive-static and leaves the map-alias
+    // descriptor null. Reading only the map-alias one wrote the reply to
+    // address 0, so the caller kept the uninitialised stack slot it points at:
+    // "A Short Hike"'s mixer took a `bl`'s return address for an
+    // `AudioOutBuffer` and stored its samples over its own `.text`.
+    const AUDOUT: u64 = 0xA000;
+    const DESC: u32 = 0x8000;
+    const PCM: u32 = 0x8100;
+    const TAGS: u32 = 0x8200;
+    const TAG: u64 = 0xFEED_0004;
+    const GARBAGE: u64 = 0x0AA2_8F50;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(AUDOUT, "audout:u");
+    let tls = cpu.tls_base();
+
+    let mut args = Vec::new();
+    args.extend_from_slice(&48_000u32.to_le_bytes());
+    args.extend_from_slice(&2u32.to_le_bytes());
+    args.extend_from_slice(&0u64.to_le_bytes());
+    ipc_request_plain(&mut cpu, AUDOUT, 1, &args);
+    let device = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
+    ipc_request_plain(&mut cpu, device, 1, &[]); // StartAudioOut
+
+    for i in 0..8u32 {
+        cpu.mem.write_u16(PCM + i * 2, 0x4000).unwrap();
+    }
+    cpu.mem.write_u64(DESC, 0).unwrap();
+    cpu.mem.write_u64(DESC + 8, u64::from(PCM)).unwrap();
+    cpu.mem.write_u64(DESC + 16, 16).unwrap();
+    cpu.mem.write_u64(DESC + 24, 16).unwrap();
+    cpu.mem.write_u64(DESC + 32, 0).unwrap();
+    ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &TAG.to_le_bytes());
+
+    // Nothing has played yet, so the terminator has to reach the guest's own
+    // slot rather than address 0.
+    cpu.mem.write_u64(TAGS, GARBAGE).unwrap();
+    ipc_request_auto_recv(&mut cpu, device, 8, TAGS, 16, &[]);
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x20).unwrap(),
+        0,
+        "a tag came back early"
+    );
+    assert_eq!(
+        cpu.mem.read_u64(TAGS).unwrap(),
+        0,
+        "the pointer buffer was never written"
+    );
+
+    // And once the device is done with it, so does the tag.
+    const SPIN: u32 = 0x9000;
+    cpu.mem.map(SPIN, &0x1400_0000u32.to_le_bytes()).unwrap(); // b .
+    cpu.set_pc(SPIN);
+    cpu.run(90_000).unwrap();
+    cpu.set_pc(0x1000);
+
+    cpu.mem.write_u64(TAGS, GARBAGE).unwrap();
+    cpu.mem.write_u64(TAGS + 8, GARBAGE).unwrap();
+    ipc_request_auto_recv(&mut cpu, device, 8, TAGS, 16, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "no tag released");
+    assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), TAG);
+    assert_eq!(
+        cpu.mem.read_u64(TAGS + 8).unwrap(),
+        0,
+        "no terminator after the last tag"
+    );
+}
+
+#[test]
 fn audren_update_reply_has_a_section_for_every_count_the_renderer_was_opened_with() {
     // `RequestUpdateAudioRenderer` runs every frame, and both `audrvUpdate`
     // and `nnSdk` walk its reply section by section against sizes they

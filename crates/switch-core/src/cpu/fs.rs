@@ -500,10 +500,10 @@ impl Cpu {
         }
     }
 
-    /// Fill a command's map-alias out buffer with `bytes`, clamped to both the
-    /// buffer the caller mapped and the width it asked for.
+    /// Fill a command's out buffer with `bytes`, clamped to both the buffer
+    /// the caller offered and the width it asked for.
     fn write_out_buffer(&mut self, tls: u32, bytes: &[u8], requested: u64) -> Result<()> {
-        let Some((addr, len)) = self.ipc_recv_buffer(tls, 0) else {
+        let Some((addr, len)) = self.ipc_output_buffer(tls, 0) else {
             return Ok(());
         };
         let take = requested.min(bytes.len() as u64).min(u64::from(len)) as usize;
@@ -584,7 +584,7 @@ impl Cpu {
                 }
                 let start = offset;
                 let end = start + requested;
-                if let Some(addr) = self.ipc_recv_buffer_addr(tls, 0) {
+                if let Some(addr) = self.ipc_output_buffer_addr(tls, 0) {
                     // The RomFS is not a buffer to slice: it is decrypted out
                     // of the container a range at a time (a retail one is
                     // gigabytes), so the copy goes through a fixed staging
@@ -614,7 +614,7 @@ impl Cpu {
                     // What actually landed in the guest's buffer. A read that
                     // reports a size and delivers zeroes is indistinguishable
                     // from a successful one until you look.
-                    let head: Vec<u8> = match self.ipc_recv_buffer_addr(tls, 0) {
+                    let head: Vec<u8> = match self.ipc_output_buffer_addr(tls, 0) {
                         Some(addr) => (0..16)
                             .map(|i| self.mem.read_u8(addr.wrapping_add(i)).unwrap_or(0))
                             .collect(),
@@ -747,7 +747,7 @@ impl Cpu {
         match cmd_id {
             Some(0) => {
                 let entries = self.fs_dirs.remove(&key).unwrap_or_default();
-                if let Some(buf) = self.ipc_recv_buffer_addr(tls, 0) {
+                if let Some(buf) = self.ipc_output_buffer_addr(tls, 0) {
                     for (i, entry) in entries.iter().enumerate() {
                         let base = buf.wrapping_add(i as u32 * ENTRY_SIZE);
                         let name = entry.name.as_bytes();
@@ -807,10 +807,10 @@ impl Cpu {
                         offset,
                         requested,
                         read,
-                        self.ipc_recv_buffer_addr(tls, 0)
+                        self.ipc_output_buffer_addr(tls, 0)
                     );
                 }
-                if let Some(addr) = self.ipc_recv_buffer_addr(tls, 0) {
+                if let Some(addr) = self.ipc_output_buffer_addr(tls, 0) {
                     for (i, &byte) in buf[..read].iter().enumerate() {
                         self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
                     }
