@@ -178,6 +178,12 @@ pub enum Format {
     R16Unorm,
     Rgba16Float,
     Rgba32Float,
+    /// `B10G11R11_FLOAT`: three unsigned floats in one 32-bit word, and the
+    /// HDR target a title tonemaps from. Renderable only where the device has
+    /// `rg11b10ufloat-renderable`, which is why `Rgba16Float` cannot stand in
+    /// for it — that is eight bytes a pixel against this one's four, and the
+    /// surface is written back into guest memory at the guest's width.
+    Rg11b10Ufloat,
     Depth16Unorm,
     Depth24Plus,
     Depth24PlusStencil8,
@@ -660,6 +666,7 @@ pub(crate) fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
         0xF3 => Format::R8Unorm,
         0xF2 => Format::R16Float,
         0xEE => Format::R16Unorm,
+        0xE0 => Format::Rg11b10Ufloat,
         raw => return Err(Unsupported::Format { raw }),
     })
 }
@@ -960,6 +967,7 @@ mod tests {
                 (4, false)
             }
             Format::R16Float | Format::R16Unorm => (2, false),
+            Format::Rg11b10Ufloat => (4, false),
             Format::Rgba8UnormSrgb | Format::Bgra8UnormSrgb => (4, true),
             Format::Rgba16Float => (8, false),
             Format::Rgba32Float => (16, false),

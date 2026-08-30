@@ -63,7 +63,12 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
         // It does not exist on the web, where four is all there is; see
         // `Gpu::samples_supported`, which asks whichever source is telling
         // the truth on this device.
-        | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        | wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
+        // `rg11b10ufloat` is sampleable everywhere and *renderable* only with
+        // this. It is the HDR colour target Tomodachi Life draws its whole
+        // frame into, and without it that draw falls back -- which used to
+        // hand the rasterizer every frame for the rest of the session.
+        | wgpu::Features::RG11B10UFLOAT_RENDERABLE;
     // A constant bank is bound as a storage buffer, and WebGPU guarantees
     // only eight of those per stage. Maxwell has eighteen banks and a shader
     // is free to read nine, which `create_pipeline_layout` then rejects
@@ -1267,7 +1272,7 @@ impl Gpu {
         if let Some(kind) = target.depth_kind() {
             return self.upload_depth_target(target, kind, ctx);
         }
-        let format = device_texture_format(&self.device, target.format)?;
+        let format = render_target_format(&self.device, target.format)?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("render target"),
             size: wgpu::Extent3d {
@@ -1623,7 +1628,7 @@ impl Gpu {
     fn render(&mut self, p: &Prepared, ctx: &mut ExecCtx) -> std::result::Result<(), String> {
         let target_format = match p.color {
             Some(color) => Some(
-                device_texture_format(&self.device, color.format).map_err(|e| format!("{e:?}"))?,
+                render_target_format(&self.device, color.format).map_err(|e| format!("{e:?}"))?,
             ),
             None => None,
         };
@@ -2585,7 +2590,7 @@ impl Gpu {
         let formats = [
             match color {
                 Some(color) => Some(
-                    device_texture_format(&self.device, color.format)
+                    render_target_format(&self.device, color.format)
                         .map_err(|e| format!("{e:?}"))?,
                 ),
                 None => None,
@@ -2969,7 +2974,7 @@ impl Gpu {
         let key = ClearKey {
             color: match color {
                 Some((target, _, _)) => Some(
-                    device_texture_format(&self.device, target.format)
+                    render_target_format(&self.device, target.format)
                         .map_err(|e| format!("{e:?}"))?,
                 ),
                 None => None,
@@ -3174,7 +3179,7 @@ impl Gpu {
                     | wgpu::TextureUsages::TEXTURE_BINDING,
             ),
             None => (
-                device_texture_format(&self.device, target.format)?,
+                render_target_format(&self.device, target.format)?,
                 wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::COPY_SRC
                     | wgpu::TextureUsages::COPY_DST
@@ -3394,12 +3399,35 @@ fn device_texture_format(device: &wgpu::Device, format: Format) -> Result<wgpu::
     Ok(wanted)
 }
 
+/// [`device_texture_format`], for a format that has to be a **colour
+/// attachment** rather than only a sampled texture.
+///
+/// `required_features` does not cover this. `rg11b10ufloat` needs no feature
+/// to be sampled and reports none, but rendering into it is gated behind
+/// `RG11B10UFLOAT_RENDERABLE` — expressed in wgpu as the allowed *usages* the
+/// format has given a device's features, not as a required feature. Asking
+/// the usage question directly covers every format that is sampled more
+/// widely than it is drawn into, rather than this one by name.
+fn render_target_format(device: &wgpu::Device, format: Format) -> Result<wgpu::TextureFormat> {
+    let wanted = device_texture_format(device, format)?;
+    let usages = wanted
+        .guaranteed_format_features(device.features())
+        .allowed_usages;
+    if !usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT) {
+        return Err(Error::Gpu(format!(
+            "this device cannot render into {wanted:?}"
+        )));
+    }
+    Ok(wanted)
+}
+
 /// The wgpu name for a format `switch_core::gpu::pipeline` resolved.
 fn texture_format(format: Format) -> Result<wgpu::TextureFormat> {
     use wgpu::TextureFormat as T;
     Ok(match format {
         Format::R8Unorm => T::R8Unorm,
         Format::Rg8Unorm => T::Rg8Unorm,
+        Format::Rg11b10Ufloat => T::Rg11b10Ufloat,
         Format::Rgba8Unorm => T::Rgba8Unorm,
         Format::Rgba8UnormSrgb => T::Rgba8UnormSrgb,
         Format::Bgra8Unorm => T::Bgra8Unorm,
