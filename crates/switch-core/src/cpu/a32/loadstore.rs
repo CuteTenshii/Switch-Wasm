@@ -149,10 +149,10 @@ impl Cpu {
         // Where the lowest-numbered register goes, for each of the four
         // addressing modes.
         let start = match (pre, add) {
-            (false, true) => base,                          // IA
-            (true, true) => base.wrapping_add(4),           // IB
-            (false, false) => base.wrapping_sub(bytes),     // DA
-            (true, false) => base.wrapping_sub(bytes),      // DB
+            (false, true) => base,                      // IA
+            (true, true) => base.wrapping_add(4),       // IB
+            (false, false) => base.wrapping_sub(bytes), // DA
+            (true, false) => base.wrapping_sub(bytes),  // DB
         };
         let end = if add {
             base.wrapping_add(bytes)

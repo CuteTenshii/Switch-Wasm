@@ -22,7 +22,6 @@
 //! copies into the condition flags — a comparison does *not* set the condition
 //! flags directly, the way A64's `FCMP` does.
 
-
 use crate::cpu::Cpu;
 use crate::{Error, Result};
 
@@ -120,7 +119,8 @@ impl Cpu {
                 } else {
                     let val = self.vfp_d(dd);
                     self.mem.write_u32(addr, val as u32)?;
-                    self.mem.write_u32(addr.wrapping_add(4), (val >> 32) as u32)?;
+                    self.mem
+                        .write_u32(addr.wrapping_add(4), (val >> 32) as u32)?;
                 }
             } else {
                 let sd = (vd << 1) | d_bit;
@@ -154,7 +154,8 @@ impl Cpu {
                 } else {
                     let val = self.vfp_d(dd);
                     self.mem.write_u32(addr, val as u32)?;
-                    self.mem.write_u32(addr.wrapping_add(4), (val >> 32) as u32)?;
+                    self.mem
+                        .write_u32(addr.wrapping_add(4), (val >> 32) as u32)?;
                 }
                 addr = addr.wrapping_add(8);
             } else {
@@ -245,7 +246,13 @@ impl Cpu {
             }
             (0, 0b10) => {
                 // VMUL, and VNMUL which negates the product.
-                self.vfp_write(double, rd, |a, b| a * b, self.vfp_pair(double, rn, rm), negate)
+                self.vfp_write(
+                    double,
+                    rd,
+                    |a, b| a * b,
+                    self.vfp_pair(double, rn, rm),
+                    negate,
+                )
             }
             (0, 0b11) => {
                 // VADD and VSUB.
@@ -545,7 +552,6 @@ impl Cpu {
     }
 }
 
-
 impl Cpu {
     /// The ARMv8 additions to AArch32's floating point, which live in the
     /// unconditional encoding space because they carry their own condition or
@@ -607,10 +613,10 @@ impl Cpu {
                     f64::from(self.vfp_f32(rm))
                 };
                 let rounded = match rounding {
-                    0b00 => v.round(),      // A: ties away from zero
+                    0b00 => v.round(), // A: ties away from zero
                     0b01 => round_ties_even(v),
-                    0b10 => v.ceil(),       // P
-                    _ => v.floor(),         // M
+                    0b10 => v.ceil(), // P
+                    _ => v.floor(),   // M
                 };
                 if (insn >> 18) & 1 != 0 {
                     // VCVT: the result is an integer in an S register.
@@ -651,7 +657,11 @@ fn round_ties_even(v: f64) -> f64 {
 /// operation is not implemented: "cop p11" says nothing about what stopped a
 /// run.
 pub(super) fn vfp_mnemonic(insn: u32, cond: &str) -> String {
-    let width = if (insn >> 8) & 0xF == 10 { "f32" } else { "f64" };
+    let width = if (insn >> 8) & 0xF == 10 {
+        "f32"
+    } else {
+        "f64"
+    };
     if (insn >> 25) & 0x7 == 0b110 {
         let load = (insn >> 20) & 1 != 0;
         let base = (insn >> 16) & 0xF;
@@ -675,7 +685,10 @@ pub(super) fn vfp_mnemonic(insn: u32, cond: &str) -> String {
     }
     if insn & 0x10 != 0 {
         if (insn >> 21) & 0b111 == 0b111 {
-            return format!("vm{}s{cond} fpscr", if (insn >> 20) & 1 != 0 { "r" } else { "" });
+            return format!(
+                "vm{}s{cond} fpscr",
+                if (insn >> 20) & 1 != 0 { "r" } else { "" }
+            );
         }
         return format!("vmov{cond} (core)");
     }

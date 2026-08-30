@@ -61,7 +61,8 @@ impl Cpu {
         } else {
             let rm = self.r32((insn & 0xF) as u8);
             if (insn >> 4) & 1 == 0 {
-                let (ty, amount) = decode_imm_shift(((insn >> 5) & 0b11) as u8, ((insn >> 7) & 0x1F) as u8);
+                let (ty, amount) =
+                    decode_imm_shift(((insn >> 5) & 0b11) as u8, ((insn >> 7) & 0x1F) as u8);
                 shift_c(rm, ty, amount, carry_in)
             } else {
                 // Shift by register: only the bottom byte counts, and a zero
@@ -180,7 +181,14 @@ impl Cpu {
                 // either half setting Q is enough.
                 let (doubled, doubled_sat) = {
                     let (wrapped, sat) = b.overflowing_add(b);
-                    (if sat { Self::sat_edge(wrapped) } else { wrapped }, sat)
+                    (
+                        if sat {
+                            Self::sat_edge(wrapped)
+                        } else {
+                            wrapped
+                        },
+                        sat,
+                    )
                 };
                 let (value, saturated) = match op {
                     0b00 => a.overflowing_add(b),

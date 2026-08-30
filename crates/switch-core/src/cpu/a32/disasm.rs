@@ -89,7 +89,11 @@ pub fn disassemble_a32(insn: u32) -> String {
             let kind = if (insn >> 24) & 1 != 0 { "bl" } else { "b" };
             // Relative to the instruction, which is what the trace's own
             // addresses let a reader add up.
-            format!("{kind}{cond} pc{}{:#x}", if imm < 0 { "-" } else { "+" }, imm.unsigned_abs() + 8)
+            format!(
+                "{kind}{cond} pc{}{:#x}",
+                if imm < 0 { "-" } else { "+" },
+                imm.unsigned_abs() + 8
+            )
         }
         0b100 => {
             let dir = match ((insn >> 24) & 1, (insn >> 23) & 1) {
@@ -100,8 +104,15 @@ pub fn disassemble_a32(insn: u32) -> String {
             };
             let kind = if (insn >> 20) & 1 != 0 { "ldm" } else { "stm" };
             let bang = if (insn >> 21) & 1 != 0 { "!" } else { "" };
-            let base = if rn == 13 { "sp".into() } else { format!("r{rn}") };
-            format!("{kind}{dir}{cond} {base}{bang}, {}", register_list(insn & 0xFFFF))
+            let base = if rn == 13 {
+                "sp".into()
+            } else {
+                format!("r{rn}")
+            };
+            format!(
+                "{kind}{dir}{cond} {base}{bang}, {}",
+                register_list(insn & 0xFFFF)
+            )
         }
         0b010 | 0b011 => {
             if (insn >> 25) & 1 != 0 && insn & 0x10 != 0 {
@@ -117,7 +128,11 @@ pub fn disassemble_a32(insn: u32) -> String {
             } else {
                 String::new()
             };
-            let base = if rn == 13 { "sp".into() } else { format!("r{rn}") };
+            let base = if rn == 13 {
+                "sp".into()
+            } else {
+                format!("r{rn}")
+            };
             if (insn >> 24) & 1 != 0 {
                 let bang = if (insn >> 21) & 1 != 0 { "!" } else { "" };
                 format!("{kind}{byte}{cond} r{rd}, [{base}{offset}]{bang}")
@@ -162,8 +177,15 @@ pub fn disassemble_a32(insn: u32) -> String {
             }
             // MOVW/MOVT, which the ordinary opcode table has no room for.
             if (insn & 0x0FB0_0000) == 0x0300_0000 {
-                let wide = if (insn >> 22) & 1 != 0 { "movt" } else { "movw" };
-                return format!("{wide}{cond} r{rd}, #{:#x}", ((insn >> 4) & 0xF000) | (insn & 0xFFF));
+                let wide = if (insn >> 22) & 1 != 0 {
+                    "movt"
+                } else {
+                    "movw"
+                };
+                return format!(
+                    "{wide}{cond} r{rd}, #{:#x}",
+                    ((insn >> 4) & 0xF000) | (insn & 0xFFF)
+                );
             }
             let op = (insn >> 21) & 0xF;
             let name = OPS[op as usize];

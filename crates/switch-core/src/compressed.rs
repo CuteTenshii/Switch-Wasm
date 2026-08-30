@@ -83,7 +83,10 @@ impl<S: ByteSource> CompressedStorage<S> {
                 table.magic
             )));
         }
-        let end = table.offset.checked_add(table.size).ok_or(Error::Overflow)?;
+        let end = table
+            .offset
+            .checked_add(table.size)
+            .ok_or(Error::Overflow)?;
         if end > inner.len() {
             return Err(Error::OutOfRange {
                 what: "compression table".into(),
@@ -145,7 +148,9 @@ impl<S: ByteSource> CompressedStorage<S> {
             return Ok(Rc::clone(block));
         }
         let entry = self.entries[index];
-        let compressed = self.inner.read_vec(entry.phys, u64::from(entry.phys_size))?;
+        let compressed = self
+            .inner
+            .read_vec(entry.phys, u64::from(entry.phys_size))?;
         let plain = crate::lz4::decompress_block(&compressed, virtual_size).map_err(|e| {
             Error::Nca(format!(
                 "compressed block at {:#x} ({:#x} bytes): {e}",

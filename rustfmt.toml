@@ -1,0 +1,8 @@
+# Stock rustfmt: the tree was already written to these defaults.
+#
+# `edition` and `style_edition` are here so a bare `rustfmt` — an editor's
+# format-on-save, say — parses and formats the same way `cargo fmt` does, and
+# so a newer toolchain's style edition cannot silently reflow the whole tree.
+edition = "2021"
+style_edition = "2021"
+newline_style = "Unix"

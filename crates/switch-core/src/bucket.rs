@@ -130,7 +130,10 @@ pub(crate) fn read<E: Entry, S: ByteSource>(
         for i in 0..count {
             let at = node + (NODE_HEADER_SIZE + i * E::SIZE) as usize;
             let entry = E::parse(&raw[at..at + E::SIZE as usize]);
-            if out.last().is_some_and(|last: &E| last.virt() >= entry.virt()) {
+            if out
+                .last()
+                .is_some_and(|last: &E| last.virt() >= entry.virt())
+            {
                 return Err(Error::Nca(format!(
                     "{what} entries are not in ascending order"
                 )));
@@ -247,7 +250,10 @@ mod tests {
     #[test]
     fn rejects_a_table_that_does_not_describe_itself() {
         let ordered = testing::write_table::<Fake>(&[entry(0), entry(0x100)], 0x400);
-        assert!(read::<Fake, _>(&SliceSource(&ordered), 0, "test").is_err(), "no entries");
+        assert!(
+            read::<Fake, _>(&SliceSource(&ordered), 0, "test").is_err(),
+            "no entries"
+        );
         // A count the table cannot hold, and one it does not match.
         assert!(read::<Fake, _>(&SliceSource(&ordered[..0x100]), 2, "test").is_err());
         assert!(read::<Fake, _>(&SliceSource(&ordered), 3, "test").is_err());
@@ -256,7 +262,10 @@ mod tests {
         assert!(read::<Fake, _>(&SliceSource(&unordered), 3, "test").is_err());
 
         let offset = testing::write_table::<Fake>(&[entry(0x40), entry(0x100)], 0x400);
-        assert!(read::<Fake, _>(&SliceSource(&offset), 2, "test").is_err(), "must start at 0");
+        assert!(
+            read::<Fake, _>(&SliceSource(&offset), 2, "test").is_err(),
+            "must start at 0"
+        );
 
         let zero_end = testing::write_table::<Fake>(&[entry(0)], 0);
         assert!(read::<Fake, _>(&SliceSource(&zero_end), 1, "test").is_err());

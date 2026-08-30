@@ -2686,10 +2686,7 @@ pub fn module(
             GLOBAL_BINDING + slot as u32
         ));
     }
-    if !layout.const_banks.is_empty()
-        || !layout.textures.is_empty()
-        || !layout.globals.is_empty()
-    {
+    if !layout.const_banks.is_empty() || !layout.textures.is_empty() || !layout.globals.is_empty() {
         out.push('\n');
     }
     if !layout.globals.is_empty() {
@@ -3524,11 +3521,21 @@ mod tests {
         ]);
         let translated = translate(&p).unwrap();
         assert_eq!(translated.globals, vec![(0, 0x110)]);
-        assert!(translated.source.contains("gRead(0u,"), "{}", translated.source);
+        assert!(
+            translated.source.contains("gRead(0u,"),
+            "{}",
+            translated.source
+        );
         let layout = Layout::of(&translated, Stage::Fragment);
         let source = module(&translated, Stage::Fragment, &layout).unwrap();
-        assert!(source.contains("var<storage, read> g0: array<u32>"), "{source}");
-        assert!(source.contains("case 0u: { return g0[offset >> 2u]; }"), "{source}");
+        assert!(
+            source.contains("var<storage, read> g0: array<u32>"),
+            "{source}"
+        );
+        assert!(
+            source.contains("case 0u: { return g0[offset >> 2u]; }"),
+            "{source}"
+        );
 
         // An address the shader computed some other way is memory this
         // cannot reach, and is reported rather than read from somewhere.
@@ -3539,7 +3546,10 @@ mod tests {
             size: MemSize::B32,
         };
         let loose = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
-        assert_eq!(translate(&loose).unwrap_err(), Unsupported::Op { at: 0, op });
+        assert_eq!(
+            translate(&loose).unwrap_err(),
+            Unsupported::Op { at: 0, op }
+        );
     }
 
     #[test]

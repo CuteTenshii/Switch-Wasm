@@ -22,6 +22,10 @@ and their environment switches), `services.md` (the per-service inventory),
   does not update the site.
 - `bun run dev` (:8000) / `bun run preview` — both need `make wasm` once.
 - `bun run typecheck` — the only thing that type-checks; Vite never does.
+- `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings`
+  — what `.forgejo/workflows/check.yml` runs on every push and pull request.
+  `git config core.hooksPath .githooks` adds a pre-commit rustfmt check over
+  the staged files; `--no-verify` skips it.
 - `python3 tools/difftest.py [--scalar]` — diffs the decode against real ARM
   under `qemu-aarch64`. **Add an instruction here before hand-deriving an
   expected value.** **Two separate harnesses**: bare runs SIMD only, `--scalar`
@@ -600,9 +604,11 @@ with a flat `u32` offset table would let generated code translate inline.
 ## Gotchas
 
 - `cargo clippy` **fails** in `switch-wasm` — 28 `not_unsafe_ptr_arg_deref` on
-  the deliberate raw-pointer `extern "C"` signatures. Not gating.
-- **The crate is `cargo fmt`-formatted** at rustfmt's defaults (no
-  `rustfmt.toml`); `--check` is clean. Run it rather than hand-aligning.
+  the deliberate raw-pointer `extern "C"` signatures. CI gates on `-D
+  warnings`, so a deliberate one needs an `allow` naming why.
+- **The crate is `cargo fmt`-formatted** at rustfmt's defaults; `rustfmt.toml`
+  only pins the edition and style edition so a bare `rustfmt` — an editor's
+  format-on-save — agrees with `cargo fmt`. Run it rather than hand-aligning.
 - `json_escape` **walks characters, not bytes** — a `\uXXXX` escape names a code
   point. Above-ASCII goes out as itself; the page decodes as UTF-8.
 - CPU test encodings in `tests/cpu_test.rs` are hand-assembled and cross-checked

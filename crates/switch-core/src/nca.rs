@@ -1738,7 +1738,10 @@ mod decrypt_tests {
         // Encrypting the whole section and then dropping the hole is the same
         // thing the packer does: the hole's ciphertext is already all zeroes.
         let cipher = aes128_ctr_xor(&section_key, &counter(SECTION_OFFSET), &plain);
-        assert!(cipher[HOLE].iter().all(|&b| b == 0), "a hole stores nothing");
+        assert!(
+            cipher[HOLE].iter().all(|&b| b == 0),
+            "a hole stores nothing"
+        );
 
         let mut body = Vec::new();
         body.extend_from_slice(&cipher[..HOLE.start]);
@@ -1827,9 +1830,9 @@ mod decrypt_tests {
         // every boundary, unaligned so the head-block path runs too.
         for &(offset, len) in &[
             (0u64, 1usize),
-            (0xff, 2),    // the last kept byte and the first of the hole
+            (0xff, 2),     // the last kept byte and the first of the hole
             (0x101, 0x7f), // unaligned inside the hole
-            (0x1ff, 3),   // out of the hole and into the kept range past it
+            (0x1ff, 3),    // out of the hole and into the kept range past it
             (0x37, 0x200),
         ] {
             let mut out = vec![0u8; len];
@@ -1860,8 +1863,8 @@ mod decrypt_tests {
     fn build_romfs_nca() -> (Vec<u8>, KeySet, Vec<u8>, u64) {
         let mut image = vec![0u8; 0x1C0];
         image[..8].copy_from_slice(&0x50u64.to_le_bytes()); // RomFS header_size
-        // Every byte past the header is a function of its own offset, so a
-        // partial read can be checked for having landed where it claims.
+                                                            // Every byte past the header is a function of its own offset, so a
+                                                            // partial read can be checked for having landed where it claims.
         for (i, byte) in image.iter_mut().enumerate().skip(8) {
             *byte = (i as u8).wrapping_add(0x40) ^ 0x5A;
         }

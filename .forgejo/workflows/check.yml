@@ -1,0 +1,31 @@
+name: Checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Separate from the pages cache: that one is keyed on the wasm target and
+      # holds no clippy metadata, so sharing it would rebuild the world twice.
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: lint
+
+      - name: rustfmt
+        run: cargo fmt --all --check
+
+      # Host targets only. `switch-wasm --features gpu` is what the site ships,
+      # but it needs wasm32 and the pages workflow already builds it.
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

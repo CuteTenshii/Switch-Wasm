@@ -71,10 +71,7 @@ pub(super) fn shift_c(value: u32, ty: u8, amount: u32, carry_in: bool) -> (u32, 
             }
         }
         // RRX: one place right through the carry.
-        _ => (
-            (u32::from(carry_in) << 31) | (value >> 1),
-            value & 1 != 0,
-        ),
+        _ => ((u32::from(carry_in) << 31) | (value >> 1), value & 1 != 0),
     }
 }
 

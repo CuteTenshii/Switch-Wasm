@@ -311,7 +311,13 @@ pub fn fadd_d(rd: u32, rn: u32, rm: u32) -> u32 {
 /// A domain request carrying raw arguments after the CmifInHeader. The reply
 /// overwrites the request in TLS, so the payload has to go in before the
 /// request runs rather than by re-running it.
-pub fn ipc_request_with_payload(cpu: &mut Cpu, handle: u64, object_id: u32, cmd: u32, payload: &[u8]) {
+pub fn ipc_request_with_payload(
+    cpu: &mut Cpu,
+    handle: u64,
+    object_id: u32,
+    cmd: u32,
+    payload: &[u8],
+) {
     build_ipc_request(cpu, 4, Some(object_id), cmd);
     // No buffer descriptors, so the data area starts at 0x10: the domain
     // header, then the CmifInHeader at 0x20, then the arguments at 0x30.

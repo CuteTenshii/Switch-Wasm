@@ -210,7 +210,11 @@ impl Cpu {
             // Integer maximum and minimum.
             (0x6, false) => self.neon_lane_op(a, b, esize, count, |x, y| {
                 if unsigned {
-                    if op_max(insn) { x.max(y) } else { x.min(y) }
+                    if op_max(insn) {
+                        x.max(y)
+                    } else {
+                        x.min(y)
+                    }
                 } else if op_max(insn) {
                     sext(x, esize).max(sext(y, esize)) as u64
                 } else {
@@ -262,10 +266,13 @@ impl Cpu {
                     let acc = lanes_of(d, 32, count);
                     let mut out = [0u64; 16];
                     for i in 0..count as usize {
-                        let product =
-                            f32::from_bits(x[i] as u32) * f32::from_bits(y[i] as u32);
+                        let product = f32::from_bits(x[i] as u32) * f32::from_bits(y[i] as u32);
                         let base = f32::from_bits(acc[i] as u32);
-                        let sum = if negate { base - product } else { base + product };
+                        let sum = if negate {
+                            base - product
+                        } else {
+                            base + product
+                        };
                         out[i] = u64::from(sum.to_bits());
                     }
                     from_lanes(&out, 32, count)
@@ -295,7 +302,12 @@ impl Cpu {
                 if unsigned {
                     return self.neon_pairwise_minmax_f32(quad, vd, a, b, count, minimum);
                 }
-                self.neon_f32(a, b, count, |x, y| if minimum { x.min(y) } else { x.max(y) })
+                self.neon_f32(
+                    a,
+                    b,
+                    count,
+                    |x, y| if minimum { x.min(y) } else { x.max(y) },
+                )
             }
             (0xF, true) => {
                 // VRECPS and VRSQRTS, the two iteration steps.
@@ -352,7 +364,14 @@ impl Cpu {
 
     /// `VPADD.F32`, which adds adjacent lanes within each source rather than
     /// across the two.
-    fn neon_pairwise_f32(&mut self, quad: bool, vd: u8, a: u128, b: u128, count: u32) -> Result<()> {
+    fn neon_pairwise_f32(
+        &mut self,
+        quad: bool,
+        vd: u8,
+        a: u128,
+        b: u128,
+        count: u32,
+    ) -> Result<()> {
         let x = lanes_of(a, 32, count);
         let y = lanes_of(b, 32, count);
         let mut out = [0u64; 16];
@@ -435,7 +454,11 @@ impl Cpu {
         } else {
             (a >> shift) | (b << (width - shift))
         };
-        let value = if quad { value } else { value & u128::from(u64::MAX) };
+        let value = if quad {
+            value
+        } else {
+            value & u128::from(u64::MAX)
+        };
         self.neon_set(quad, vd, value);
         Ok(())
     }
@@ -572,7 +595,10 @@ impl Cpu {
         // each element size.
         let (vm, index) = if size == 0b01 {
             // A 16-bit scalar lives in D0..D7 and needs two index bits.
-            ((insn & 0x7) as u8, (((insn >> 5) & 1) << 1) | ((insn >> 3) & 1))
+            (
+                (insn & 0x7) as u8,
+                (((insn >> 5) & 1) << 1) | ((insn >> 3) & 1),
+            )
         } else {
             ((insn & 0xF) as u8, (insn >> 5) & 1)
         };
@@ -702,7 +728,8 @@ impl Cpu {
                 } else {
                     let val = self.vfp_d(d);
                     self.mem.write_u32(addr, val as u32)?;
-                    self.mem.write_u32(addr.wrapping_add(4), (val >> 32) as u32)?;
+                    self.mem
+                        .write_u32(addr.wrapping_add(4), (val >> 32) as u32)?;
                 }
                 addr = addr.wrapping_add(8);
             }

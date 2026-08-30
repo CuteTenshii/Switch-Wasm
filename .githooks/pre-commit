@@ -1,0 +1,33 @@
+#!/bin/sh
+# Enable with: git config core.hooksPath .githooks
+#
+# Formatting only. A workspace `cargo clippy` costs minutes on a cold cache,
+# which is more than a commit should wait for; CI runs that one.
+set -eu
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
+[ -n "$staged" ] || exit 0
+
+if ! command -v rustfmt >/dev/null 2>&1; then
+	echo "pre-commit: rustfmt not found — rustup component add rustfmt" >&2
+	exit 1
+fi
+
+# What is checked is the working tree, not the staged blobs: reporting a diff
+# against content that is staged but not on disk is more confusing than the
+# partial-staging case it would catch.
+IFS='
+'
+set --
+for file in $staged; do
+	[ -f "$file" ] && set -- "$@" "$file"
+done
+unset IFS
+[ "$#" -gt 0 ] || exit 0
+
+if ! rustfmt --check --files-with-diff "$@"; then
+	echo >&2
+	echo "pre-commit: the files above are not rustfmt-clean (or failed to parse)." >&2
+	echo "Run \`cargo fmt --all\`, or commit with --no-verify." >&2
+	exit 1
+fi
