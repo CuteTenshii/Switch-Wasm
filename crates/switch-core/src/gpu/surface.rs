@@ -459,10 +459,78 @@ impl ColorFormat {
         })
     }
 
+    /// Where each channel of a stored pixel lives, and how its bits are read.
+    ///
+    /// Everything else about a colour format — both codecs, the byte
+    /// permutation scan-out takes, the clamp the blend unit applies — is read
+    /// off this one table, so none of them can drift from another. The codes
+    /// are Maxwell's `RenderTargetFormat` (Eden `src/video_core/gpu.h`).
+    fn packing(&self) -> Option<Packing> {
+        use Numeric::{Float, Sint, Snorm, Uint, Unorm};
+        Some(match self.raw {
+            0xC0 | 0xC3 => Packing::chain(4, 32, Float),
+            0xC1 | 0xC4 => Packing::chain(4, 32, Sint),
+            0xC2 | 0xC5 => Packing::chain(4, 32, Uint),
+            0xC6 => Packing::chain(4, 16, Unorm),
+            0xC7 => Packing::chain(4, 16, Snorm),
+            0xC8 => Packing::chain(4, 16, Sint),
+            0xC9 => Packing::chain(4, 16, Uint),
+            0xCA | 0xCE => Packing::chain(4, 16, Float),
+            0xCB => Packing::chain(2, 32, Float),
+            0xCC => Packing::chain(2, 32, Sint),
+            0xCD => Packing::chain(2, 32, Uint),
+            // A8R8G8B8 and its X, Z and O variants: blue lowest.
+            0xCF | 0xD0 | 0xE6 | 0xE7 | 0xFD | 0xFE => {
+                Packing::packed([ch(16, 8), ch(8, 8), ch(0, 8), ch(24, 8)], Unorm)
+            }
+            0xD1 => Packing::packed([ch(0, 10), ch(10, 10), ch(20, 10), ch(30, 2)], Unorm),
+            0xD2 => Packing::packed([ch(0, 10), ch(10, 10), ch(20, 10), ch(30, 2)], Uint),
+            // A2R10G10B10, which is the same word with red and blue exchanged.
+            0xDF => Packing::packed([ch(20, 10), ch(10, 10), ch(0, 10), ch(30, 2)], Unorm),
+            0xD5 | 0xD6 | 0xF9 | 0xFA => Packing::chain(4, 8, Unorm),
+            0xD7 => Packing::chain(4, 8, Snorm),
+            0xD8 => Packing::chain(4, 8, Sint),
+            0xD9 => Packing::chain(4, 8, Uint),
+            0xDA => Packing::chain(2, 16, Unorm),
+            0xDB => Packing::chain(2, 16, Snorm),
+            0xDC => Packing::chain(2, 16, Sint),
+            0xDD => Packing::chain(2, 16, Uint),
+            0xDE => Packing::chain(2, 16, Float),
+            0xE0 => Packing::packed([ch(0, 11), ch(11, 11), ch(22, 10), NO_CHANNEL], Float),
+            0xE3 => Packing::chain(1, 32, Sint),
+            0xE4 => Packing::chain(1, 32, Uint),
+            0xE5 => Packing::chain(1, 32, Float),
+            0xE8 => Packing::packed([ch(11, 5), ch(5, 6), ch(0, 5), NO_CHANNEL], Unorm),
+            0xE9 | 0xF8 => Packing::packed([ch(10, 5), ch(5, 5), ch(0, 5), ch(15, 1)], Unorm),
+            0xEA => Packing::chain(2, 8, Unorm),
+            0xEB => Packing::chain(2, 8, Snorm),
+            0xEC => Packing::chain(2, 8, Sint),
+            0xED => Packing::chain(2, 8, Uint),
+            0xEE => Packing::chain(1, 16, Unorm),
+            0xEF => Packing::chain(1, 16, Snorm),
+            0xF0 => Packing::chain(1, 16, Sint),
+            0xF1 => Packing::chain(1, 16, Uint),
+            0xF2 => Packing::chain(1, 16, Float),
+            0xF3 => Packing::chain(1, 8, Unorm),
+            0xF4 => Packing::chain(1, 8, Snorm),
+            0xF5 => Packing::chain(1, 8, Sint),
+            0xF6 => Packing::chain(1, 8, Uint),
+            0xF7 => Packing::packed([NO_CHANNEL, NO_CHANNEL, NO_CHANNEL, ch(0, 8)], Unorm),
+            _ => return None,
+        })
+    }
+
+    /// The byte permutation an 8-bit UNORM format is, where it is one — those
+    /// are the formats a copy and scan-out shuffle rather than decode. The
+    /// SNORM and integer codes share the byte positions but not the scale.
     fn order8(&self) -> Option<Order8> {
-        match self.raw {
-            0xD5..=0xD9 | 0xF9 | 0xFA => Some(Order8::Rgba),
-            0xCF | 0xD0 | 0xE6 | 0xE7 | 0xFD | 0xFE => Some(Order8::Bgra),
+        let packing = self.packing()?;
+        if packing.numeric != Numeric::Unorm {
+            return None;
+        }
+        match packing.channels.map(|c| (c.shift, c.bits)) {
+            [(0, 8), (8, 8), (16, 8), (24, 8)] => Some(Order8::Rgba),
+            [(16, 8), (8, 8), (0, 8), (24, 8)] => Some(Order8::Bgra),
             _ => None,
         }
     }
@@ -472,20 +540,38 @@ impl ColorFormat {
         matches!(self.raw, 0xD0 | 0xD6 | 0xE7 | 0xFA)
     }
 
-    /// Whether the format's channels are floating point rather than a
-    /// fixed-point value normalised into `[0, 1]`.
+    /// The range the blend unit clamps an incoming colour into, or `None`
+    /// where the target takes it as it is.
     ///
-    /// The distinction is the blend unit's: a fixed-point target clamps the
-    /// incoming colour before blending it, a float target takes it as it is.
-    /// These are the float formats [`ColorFormat::encode_stored`] knows how to
-    /// write; every other one it can write stores a normalised value.
-    pub fn is_float(&self) -> bool {
-        matches!(self.raw, 0xC0 | 0xC3 | 0xCA | 0xCE | 0xE5)
+    /// GL clamps for a fixed-point colour buffer and not for a float one, and
+    /// a bloom chain's `B10G11R11_FLOAT` target is the one that shows it.
+    pub fn source_clamp(&self) -> Option<(f32, f32)> {
+        match self.packing() {
+            Some(packing) => match packing.numeric {
+                Numeric::Unorm => Some((0.0, 1.0)),
+                Numeric::Snorm => Some((-1.0, 1.0)),
+                // An integer target's range is applied when the value is
+                // stored, and a float one has no range to apply.
+                Numeric::Uint | Numeric::Sint | Numeric::Float => None,
+            },
+            None => Some((0.0, 1.0)),
+        }
     }
 
-    /// Whether the alpha channel exists (an "X" format ignores it).
+    /// Whether the alpha channel exists and carries a colour. An "X", "Z" or
+    /// "O" format has the bits but not the channel, and a format with no room
+    /// for alpha at all reads as opaque.
     pub fn has_alpha(&self) -> bool {
-        !matches!(self.raw, 0xE6 | 0xE7 | 0xF9 | 0xFA | 0xFD | 0xFE | 0xF8)
+        if matches!(
+            self.raw,
+            0xC3 | 0xC4 | 0xC5 | 0xCE | 0xE6 | 0xE7 | 0xF8 | 0xF9 | 0xFA | 0xFD | 0xFE
+        ) {
+            return false;
+        }
+        match self.packing() {
+            Some(packing) => packing.channels[3].bits > 0,
+            None => true,
+        }
     }
 
     /// Pack a normalized RGBA colour into this format's raw pixel bytes.
@@ -522,84 +608,39 @@ impl ColorFormat {
     }
 
     fn encode_stored(&self, rgba: [f32; 4]) -> Result<u128> {
-        let unorm8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+        let packing = self.packing().ok_or_else(|| {
+            Error::Gpu(format!(
+                "surface: encoding colour format {:#x} is not implemented",
+                self.raw
+            ))
+        })?;
+        // The general path below computes the same word, but the rasterizer
+        // stores one of these per covered pixel.
         if let Some(order) = self.order8() {
-            let (r, g, b, a) = (
-                unorm8(rgba[0]),
-                unorm8(rgba[1]),
-                unorm8(rgba[2]),
-                if self.has_alpha() {
-                    unorm8(rgba[3])
-                } else {
-                    0xFF
-                },
-            );
+            let unorm8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
+            let (r, g, b) = (unorm8(rgba[0]), unorm8(rgba[1]), unorm8(rgba[2]));
+            let a = if self.has_alpha() {
+                unorm8(rgba[3])
+            } else {
+                0xFF
+            };
             return Ok(match order {
                 Order8::Rgba => (r | (g << 8) | (b << 16) | (a << 24)) as u128,
                 Order8::Bgra => (b | (g << 8) | (r << 16) | (a << 24)) as u128,
             });
         }
-        match self.raw {
-            // B5G6R5
-            0xE8 => {
-                let r = (rgba[0].clamp(0.0, 1.0) * 31.0 + 0.5) as u32;
-                let g = (rgba[1].clamp(0.0, 1.0) * 63.0 + 0.5) as u32;
-                let b = (rgba[2].clamp(0.0, 1.0) * 31.0 + 0.5) as u32;
-                Ok((b | (g << 5) | (r << 11)) as u128)
-            }
-            // BGR5A1 / BGR5X1
-            0xE9 | 0xF8 => {
-                let r = (rgba[0].clamp(0.0, 1.0) * 31.0 + 0.5) as u32;
-                let g = (rgba[1].clamp(0.0, 1.0) * 31.0 + 0.5) as u32;
-                let b = (rgba[2].clamp(0.0, 1.0) * 31.0 + 0.5) as u32;
-                let a = (rgba[3] >= 0.5) as u32;
-                Ok((b | (g << 5) | (r << 10) | (a << 15)) as u128)
-            }
-            // RGB10A2 / BGR10A2
-            0xD1 | 0xDF => {
-                let scale = |v: f32| (v.clamp(0.0, 1.0) * 1023.0 + 0.5) as u32;
-                let (c0, c2) = if self.raw == 0xD1 {
-                    (scale(rgba[0]), scale(rgba[2]))
-                } else {
-                    (scale(rgba[2]), scale(rgba[0]))
-                };
-                let a = (rgba[3].clamp(0.0, 1.0) * 3.0 + 0.5) as u32;
-                Ok((c0 | (scale(rgba[1]) << 10) | (c2 << 20) | (a << 30)) as u128)
-            }
-            // B10G11R11Float
-            0xE0 => Ok((pack_small_float(rgba[0], 6)
-                | (pack_small_float(rgba[1], 6) << 11)
-                | (pack_small_float(rgba[2], 5) << 22)) as u128),
-            // R32Float
-            0xE5 => Ok(rgba[0].to_bits() as u128),
-            0xF2 => Ok(f32_to_f16(rgba[0]) as u128),
-            0xEE => Ok((rgba[0].clamp(0.0, 1.0) * 65535.0 + 0.5) as u128),
-            // RGBA32Float
-            0xC0 | 0xC3 => {
-                let mut v = 0u128;
-                for (i, c) in rgba.iter().enumerate() {
-                    v |= (c.to_bits() as u128) << (32 * i);
-                }
-                Ok(v)
-            }
-            // RGBA16Float
-            0xCA | 0xCE => {
-                let mut v = 0u128;
-                for (i, c) in rgba.iter().enumerate() {
-                    v |= (f32_to_f16(*c) as u128) << (16 * i);
-                }
-                Ok(v)
-            }
-            // RG8Unorm
-            0xEA => Ok((unorm8(rgba[0]) | (unorm8(rgba[1]) << 8)) as u128),
-            // R8Unorm / A8Unorm
-            0xF3 => Ok(unorm8(rgba[0]) as u128),
-            0xF7 => Ok(unorm8(rgba[3]) as u128),
-            other => Err(Error::Gpu(format!(
-                "surface: encoding colour format {:#x} is not implemented",
-                other
-            ))),
+        let mut stored = 0u128;
+        for (i, channel) in packing.channels.iter().enumerate() {
+            // An unused alpha slot stores a one rather than being left clear,
+            // so that a reader which ignores the "X" still sees it as opaque.
+            let value = if i == 3 && !self.has_alpha() {
+                1.0
+            } else {
+                rgba[i]
+            };
+            stored |= encode_channel(*channel, packing.numeric, value);
         }
+        Ok(stored)
     }
 
     /// The host's `0xAABBGGRR` word for a stored pixel, where the format's
@@ -651,8 +692,15 @@ impl ColorFormat {
 
     /// Unpack raw pixel bytes into a normalized RGBA colour.
     fn decode_stored(&self, raw: u128) -> Result<[f32; 4]> {
-        let unorm8 = |v: u32| UNORM8[(v & 0xFF) as usize];
+        let packing = self.packing().ok_or_else(|| {
+            Error::Gpu(format!(
+                "surface: decoding colour format {:#x} is not implemented",
+                self.raw
+            ))
+        })?;
+        // The mirror of `encode_stored`'s shuffle, for the same reason.
         if let Some(order) = self.order8() {
+            let unorm8 = |v: u32| UNORM8[(v & 0xFF) as usize];
             let v = raw as u32;
             let (c0, c1, c2, c3) = (v, v >> 8, v >> 16, v >> 24);
             let a = if self.has_alpha() { unorm8(c3) } else { 1.0 };
@@ -661,75 +709,117 @@ impl ColorFormat {
                 Order8::Bgra => [unorm8(c2), unorm8(c1), unorm8(c0), a],
             });
         }
-        match self.raw {
-            0xE8 => {
-                let v = raw as u32;
-                Ok([
-                    ((v >> 11) & 0x1F) as f32 / 31.0,
-                    ((v >> 5) & 0x3F) as f32 / 63.0,
-                    (v & 0x1F) as f32 / 31.0,
-                    1.0,
-                ])
-            }
-            0xE9 | 0xF8 => {
-                let v = raw as u32;
-                Ok([
-                    ((v >> 10) & 0x1F) as f32 / 31.0,
-                    ((v >> 5) & 0x1F) as f32 / 31.0,
-                    (v & 0x1F) as f32 / 31.0,
-                    if self.raw == 0xE9 && (v >> 15) & 1 == 0 {
-                        0.0
-                    } else {
-                        1.0
-                    },
-                ])
-            }
-            0xD1 | 0xDF => {
-                let v = raw as u32;
-                let c0 = (v & 0x3FF) as f32 / 1023.0;
-                let c1 = ((v >> 10) & 0x3FF) as f32 / 1023.0;
-                let c2 = ((v >> 20) & 0x3FF) as f32 / 1023.0;
-                let a = ((v >> 30) & 3) as f32 / 3.0;
-                Ok(if self.raw == 0xD1 {
-                    [c0, c1, c2, a]
-                } else {
-                    [c2, c1, c0, a]
-                })
-            }
-            0xE0 => {
-                let v = raw as u32;
-                Ok([
-                    unpack_small_float(v & 0x7FF, 6),
-                    unpack_small_float((v >> 11) & 0x7FF, 6),
-                    unpack_small_float((v >> 22) & 0x3FF, 5),
-                    1.0,
-                ])
-            }
-            0xE5 => Ok([f32::from_bits(raw as u32), 0.0, 0.0, 1.0]),
-            0xF2 => Ok([f16_to_f32(raw as u16), 0.0, 0.0, 1.0]),
-            0xEE => Ok([f32::from(raw as u16) / 65535.0, 0.0, 0.0, 1.0]),
-            0xC0 | 0xC3 => {
-                let mut out = [0.0f32; 4];
-                for (i, o) in out.iter_mut().enumerate() {
-                    *o = f32::from_bits((raw >> (32 * i)) as u32);
-                }
-                Ok(out)
-            }
-            0xCA | 0xCE => {
-                let mut out = [0.0f32; 4];
-                for (i, o) in out.iter_mut().enumerate() {
-                    *o = f16_to_f32((raw >> (16 * i)) as u16);
-                }
-                Ok(out)
-            }
-            0xEA => Ok([unorm8(raw as u32), unorm8((raw >> 8) as u32), 0.0, 1.0]),
-            0xF3 => Ok([unorm8(raw as u32), 0.0, 0.0, 1.0]),
-            0xF7 => Ok([0.0, 0.0, 0.0, unorm8(raw as u32)]),
-            other => Err(Error::Gpu(format!(
-                "surface: decoding colour format {:#x} is not implemented",
-                other
-            ))),
+        let mut rgba = [0.0f32; 4];
+        for (i, out) in rgba.iter_mut().enumerate() {
+            *out = decode_channel(packing.channels[i], packing.numeric, raw);
         }
+        if !self.has_alpha() {
+            rgba[3] = 1.0;
+        }
+        Ok(rgba)
+    }
+}
+
+/// One channel's place in a stored pixel. A width of zero means the format
+/// has no room for the channel at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Channel {
+    shift: u32,
+    bits: u32,
+}
+
+const NO_CHANNEL: Channel = Channel { shift: 0, bits: 0 };
+
+const fn ch(shift: u32, bits: u32) -> Channel {
+    Channel { shift, bits }
+}
+
+/// How a channel's bits are read as a number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Numeric {
+    Unorm,
+    Snorm,
+    Uint,
+    Sint,
+    /// 32 bits is an `f32` and 16 an `f16`; 11 and 10 are `B10G11R11_FLOAT`'s
+    /// sign-less halves, which keep the 5-bit exponent and narrow the
+    /// mantissa. So a width is always five of exponent and the rest mantissa.
+    Float,
+}
+
+/// A colour format's stored shape: R, G, B and A in order, and how to read
+/// the bits of each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Packing {
+    channels: [Channel; 4],
+    numeric: Numeric,
+}
+
+impl Packing {
+    const fn packed(channels: [Channel; 4], numeric: Numeric) -> Packing {
+        Packing { channels, numeric }
+    }
+
+    /// `count` channels of `bits` each, red lowest — the shape of every
+    /// format Maxwell names `R…G…B…A…`.
+    const fn chain(count: u32, bits: u32, numeric: Numeric) -> Packing {
+        let mut channels = [NO_CHANNEL; 4];
+        let mut i = 0;
+        while i < count as usize {
+            channels[i] = ch(i as u32 * bits, bits);
+            i += 1;
+        }
+        Packing { channels, numeric }
+    }
+}
+
+fn encode_channel(channel: Channel, numeric: Numeric, value: f32) -> u128 {
+    if channel.bits == 0 {
+        return 0;
+    }
+    let mask = (1u128 << channel.bits) - 1;
+    // A NaN casts to zero rather than wrapping, which is the floor the blend
+    // unit's clamp already applies to a fixed-point target.
+    let stored = match numeric {
+        Numeric::Unorm => (value.clamp(0.0, 1.0) * mask as f32 + 0.5) as u128,
+        Numeric::Snorm => {
+            let scaled = (value.clamp(-1.0, 1.0) * (mask >> 1) as f32).round() as i128;
+            scaled as u128 & mask
+        }
+        Numeric::Uint => (f64::from(value)).clamp(0.0, mask as f64) as u128,
+        Numeric::Sint => {
+            let max = (mask >> 1) as f64;
+            (f64::from(value)).clamp(-max - 1.0, max) as i128 as u128 & mask
+        }
+        Numeric::Float => match channel.bits {
+            32 => u128::from(value.to_bits()),
+            16 => u128::from(f32_to_f16(value)),
+            bits => u128::from(pack_small_float(value, bits - 5)),
+        },
+    };
+    (stored & mask) << channel.shift
+}
+
+fn decode_channel(channel: Channel, numeric: Numeric, raw: u128) -> f32 {
+    if channel.bits == 0 {
+        return 0.0;
+    }
+    let mask = (1u128 << channel.bits) - 1;
+    let bits = (raw >> channel.shift) & mask;
+    // Two's complement in `channel.bits`, widened to the whole of an i128.
+    let signed = || ((bits << (128 - channel.bits)) as i128) >> (128 - channel.bits);
+    match numeric {
+        Numeric::Unorm => bits as f32 / mask as f32,
+        // The most negative value is one step past -1.0 and clamps to it, as
+        // every API that defines SNORM says it does.
+        Numeric::Snorm => (signed() as f32 / (mask >> 1) as f32).max(-1.0),
+        Numeric::Uint => bits as f32,
+        Numeric::Sint => signed() as f32,
+        Numeric::Float => match channel.bits {
+            32 => f32::from_bits(bits as u32),
+            16 => f16_to_f32(bits as u16),
+            b => unpack_small_float(bits as u32, b - 5),
+        },
     }
 }
 
@@ -1317,6 +1407,144 @@ mod tests {
         let big = format.encode([65024.0, 0.0, 0.0, 1.0]).unwrap();
         assert_eq!(big & 0x7FF, 0x7BF);
         assert!(format.decode_stored(big).unwrap()[0].is_finite());
+    }
+
+    #[test]
+    fn a_described_format_is_as_wide_as_from_raw_says() {
+        for raw in 0u32..=0xFF {
+            let Ok(format) = ColorFormat::from_raw(raw) else {
+                continue;
+            };
+            let Some(packing) = format.packing() else {
+                continue;
+            };
+            let bits = packing
+                .channels
+                .iter()
+                .map(|c| c.shift + c.bits)
+                .max()
+                .unwrap();
+            assert_eq!(bits.div_ceil(8), format.bytes_per_pixel, "{raw:#x}");
+        }
+    }
+
+    /// Both codecs shuffle bytes for the formats that are a permutation
+    /// rather than walk the channel table. Two readings of one format drift,
+    /// so this is the coupling between them.
+    #[test]
+    fn the_byte_shuffle_and_the_channel_table_are_the_same_answer() {
+        for raw in 0u32..=0xFF {
+            let Ok(format) = ColorFormat::from_raw(raw) else {
+                continue;
+            };
+            if format.order8().is_none() {
+                continue;
+            }
+            let packing = format.packing().unwrap();
+            for word in [0u32, 0xFFFF_FFFF, 0x1234_5678, 0x80FF_007F] {
+                let stored = u128::from(word);
+                let mut walked = [0.0f32; 4];
+                for (i, out) in walked.iter_mut().enumerate() {
+                    *out = decode_channel(packing.channels[i], packing.numeric, stored);
+                }
+                if !format.has_alpha() {
+                    walked[3] = 1.0;
+                }
+                let shuffled = format.decode_stored(stored).unwrap();
+                assert_eq!(shuffled, walked, "{raw:#x} decoding {word:#010x}");
+
+                let mut packed = 0u128;
+                for (i, channel) in packing.channels.iter().enumerate() {
+                    let value = if i == 3 && !format.has_alpha() {
+                        1.0
+                    } else {
+                        shuffled[i]
+                    };
+                    packed |= encode_channel(*channel, packing.numeric, value);
+                }
+                assert_eq!(
+                    format.encode_stored(shuffled).unwrap(),
+                    packed,
+                    "{raw:#x} encoding {word:#010x}"
+                );
+            }
+        }
+    }
+
+    /// `A8B8G8R8_SNORM` sits at the same bytes as the UNORM code above it and
+    /// was read as one, which halved every value and lost the sign.
+    #[test]
+    fn a_snorm_target_stores_the_signed_range() {
+        let format = ColorFormat::from_raw(0xD7).unwrap();
+        assert_eq!(format.bytes_per_pixel, 4);
+        let stored = format.encode([1.0, -1.0, 0.0, 0.5]).unwrap();
+        assert_eq!(stored & 0xFF, 127);
+        assert_eq!((stored >> 8) & 0xFF, 0x81); // -127
+        assert_eq!((stored >> 16) & 0xFF, 0);
+        assert_eq!((stored >> 24) & 0xFF, 64);
+        let back = format.decode(stored).unwrap();
+        assert_eq!(&back[..3], &[1.0, -1.0, 0.0]);
+        assert_eq!(back[3], 64.0 / 127.0);
+        // The one value past -1.0 clamps to it rather than reading as -1.008.
+        assert_eq!(format.decode(0x80).unwrap()[0], -1.0);
+        // Out of range in, saturated out.
+        assert_eq!(format.encode([-2.0, 0.0, 0.0, 0.0]).unwrap() & 0xFF, 0x81);
+    }
+
+    /// An integer target holds the value, not a fraction of its range: read as
+    /// a UNORM the same bytes come back divided by 255.
+    #[test]
+    fn an_integer_target_stores_the_value_it_is_given() {
+        let format = ColorFormat::from_raw(0xD9).unwrap(); // A8B8G8R8_UINT
+        let stored = format.encode([255.0, 300.0, -5.0, 1.0]).unwrap();
+        assert_eq!(stored, 255 | (255 << 8) | (1 << 24));
+        assert_eq!(format.decode(stored).unwrap(), [255.0, 255.0, 0.0, 1.0]);
+
+        let signed = ColorFormat::from_raw(0xD8).unwrap(); // A8B8G8R8_SINT
+        let stored = signed.encode([-128.0, 127.0, -200.0, 0.0]).unwrap();
+        assert_eq!(stored & 0xFF, 0x80);
+        assert_eq!((stored >> 16) & 0xFF, 0x80); // clamped, not wrapped
+        assert_eq!(signed.decode(stored).unwrap(), [-128.0, 127.0, -128.0, 0.0]);
+    }
+
+    /// Reading `B10G11R11_FLOAT` as fixed-point clamped Persona 5 Royal's
+    /// bloom chain at 1.0, which is the whole of what it accumulates.
+    #[test]
+    fn the_blend_source_clamp_is_the_targets_own_range() {
+        let clamp = |raw| ColorFormat::from_raw(raw).unwrap().source_clamp();
+        assert_eq!(clamp(0xD5), Some((0.0, 1.0))); // A8B8G8R8_UNORM
+        assert_eq!(clamp(0xD7), Some((-1.0, 1.0))); // A8B8G8R8_SNORM
+        assert_eq!(clamp(0xE0), None); // B10G11R11_FLOAT
+        assert_eq!(clamp(0xF2), None); // R16_FLOAT
+        assert_eq!(clamp(0xCA), None); // R16G16B16A16_FLOAT
+        assert_eq!(clamp(0xD9), None); // A8B8G8R8_UINT
+    }
+
+    /// Every format Eden's `RenderTargetFormat` names, so that a title binding
+    /// one gets a shaded draw rather than a fallback to nothing.
+    #[test]
+    fn every_named_render_target_format_can_be_written_and_read() {
+        const NAMED: [u32; 54] = [
+            0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7, 0xC8, 0xC9, 0xCA, 0xCB, 0xCC, 0xCD,
+            0xCE, 0xCF, 0xD0, 0xD1, 0xD2, 0xD5, 0xD6, 0xD7, 0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD,
+            0xDE, 0xDF, 0xE0, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7, 0xE8, 0xE9, 0xEA, 0xEB, 0xEC, 0xED,
+            0xEE, 0xEF, 0xF0, 0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF8, 0xF9, 0xFA,
+        ];
+        for raw in NAMED {
+            let format = ColorFormat::from_raw(raw).unwrap();
+            let stored = format
+                .encode([0.25, 0.5, 0.75, 1.0])
+                .unwrap_or_else(|e| panic!("{raw:#x}: {e:?}"));
+            let width = format.bytes_per_pixel * 8;
+            assert!(
+                width == 128 || stored >> width == 0,
+                "{raw:#x} stored outside its {} bytes",
+                format.bytes_per_pixel
+            );
+            format
+                .decode(stored)
+                .unwrap_or_else(|e| panic!("{raw:#x}: {e:?}"));
+        }
     }
 
     #[test]

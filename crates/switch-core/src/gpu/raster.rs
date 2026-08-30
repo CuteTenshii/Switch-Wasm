@@ -708,7 +708,8 @@ fn blend_equation(op: u32, src: f32, dst: f32) -> f32 {
 /// colour buffer, and it is what the ROP does. A float target takes the
 /// colour as it is.
 ///
-/// The range is the smaller half of it. What this really settles is **NaN**,
+/// The range is the target's own — `[0, 1]` for UNORM and `[-1, 1]` for
+/// SNORM. What this really settles is **NaN**,
 /// which clamps to zero here and is otherwise indestructible: every blend
 /// factor is a multiply, and `NaN * 0` is `NaN`, so a NaN source survives even
 /// a source alpha of zero and lands in the framebuffer as an opaque black
@@ -717,12 +718,12 @@ fn blend_equation(op: u32, src: f32, dst: f32) -> f32 {
 /// fully transparent texel makes that `rcp(0)`, an infinity, and then
 /// `0 * inf`. Every icon it drew came out inside a black box.
 fn source_color(color: [f32; 4], format: ColorFormat) -> [f32; 4] {
-    if format.is_float() {
+    let Some((low, high)) = format.source_clamp() else {
         return color;
-    }
-    // `f32::max` returns the operand that is not NaN, so this floors a NaN at
-    // zero where `clamp` would carry it straight through.
-    color.map(|c| c.max(0.0).min(1.0))
+    };
+    // A NaN is floored at zero rather than at the bottom of the range, which
+    // for a SNORM target would be an opaque -1.0 rather than nothing.
+    color.map(|c| if c.is_nan() { 0.0 } else { c.clamp(low, high) })
 }
 
 fn blend(target: BlendTarget, constant: [f32; 4], src: [f32; 4], dst: [f32; 4]) -> [f32; 4] {
