@@ -218,9 +218,9 @@ impl Cpu {
     }
 
     /// `set:sys` — system settings not covered by the plain `set` service
-    /// above (language codes). Only `GetSerialNumber` is implemented; every
-    /// other command falls through to a generic empty-success reply, same as
-    /// `set_request`'s default arm.
+    /// above (language codes). The commands below answer with real values;
+    /// every other one falls through to a generic empty-success reply, same
+    /// as `set_request`'s default arm.
     pub(super) fn set_sys_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
@@ -320,6 +320,51 @@ impl Cpu {
                 let mut number = [0u8; 0x18];
                 number[..SERIAL.len()].copy_from_slice(SERIAL);
                 self.write_ipc_response(tls, 0, &[], &number, &[])
+            }
+            // GetProductModel -> u32 `nn::settings::system::ProductModel`,
+            // which starts at 1 (Nx). Zero is not a model, so the generic
+            // empty-success reply sat outside the enum the same way
+            // GetPlatformRegion's did.
+            Some(79) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]),
+            // GetKeyboardLayout -> u32 `nn::settings::system::KeyboardLayout`.
+            // Zero is `Japanese`, which is a real layout but not this
+            // console's: `set`'s GetRegionCode and GetLanguageCode both say
+            // en-US, and the software keyboard reads this to lay out its keys.
+            Some(136) => self.write_ipc_response(tls, 0, &[], &1u32.to_le_bytes(), &[]),
+            // GetTvSettings -> nn::settings::system::TvSettings, 0x20 bytes —
+            // wider than the four padding words a reply zeroes. The tail,
+            // `tv_gama` and `contrast_ratio`, came back as whatever the
+            // caller's own request had left in TLS: two floats, so a NaN gamma
+            // is a reachable answer rather than merely a wrong one.
+            Some(39) => {
+                const ALLOWS_CEC: u32 = 1 << 2;
+                const PREVENTS_SCREEN_BURN_IN: u32 = 1 << 3;
+                const HDMI_CONTENT_TYPE_GAME: u32 = 4;
+                let mut settings = [0u8; 0x20];
+                settings[0x00..0x04]
+                    .copy_from_slice(&(ALLOWS_CEC | PREVENTS_SCREEN_BURN_IN).to_le_bytes());
+                settings[0x08..0x0c].copy_from_slice(&HDMI_CONTENT_TYPE_GAME.to_le_bytes());
+                // tv_resolution Auto, rgb_range Auto, cmu_mode None and
+                // tv_underscan 0 are the zero the array already holds.
+                settings[0x18..0x1c].copy_from_slice(&1.0f32.to_le_bytes());
+                settings[0x1c..0x20].copy_from_slice(&0.5f32.to_le_bytes());
+                self.write_ipc_response(tls, 0, &[], &settings, &[])
+            }
+            // GetNotificationSettings -> nn::settings::system::
+            // NotificationSettings { NotificationFlag flags; NotificationVolume
+            // volume; NotificationTime start_time, stop_time; }, 0x18 bytes.
+            // Also wider than the padding, so `stop_time` was stale — a quiet
+            // period that ends at an arbitrary hour.
+            Some(29) => {
+                const ENABLES_NEWS: u32 = 1 << 8;
+                const INCOMING_LAMP: u32 = 1 << 9;
+                const VOLUME_HIGH: u32 = 2;
+                let mut settings = [0u8; 0x18];
+                settings[0x00..0x04].copy_from_slice(&(ENABLES_NEWS | INCOMING_LAMP).to_le_bytes());
+                settings[0x04..0x08].copy_from_slice(&VOLUME_HIGH.to_le_bytes());
+                settings[0x08..0x0c].copy_from_slice(&9u32.to_le_bytes());
+                settings[0x10..0x14].copy_from_slice(&21u32.to_le_bytes());
+                self.write_ipc_response(tls, 0, &[], &settings, &[])
             }
             _ => {
                 self.warn_stub(
@@ -929,6 +974,92 @@ mod tests {
         }
         assert!(got.starts_with(b"XAW00000000000"));
         assert_eq!(got[b"XAW00000000000".len()], 0, "NUL-padded, not garbage");
+    }
+
+    #[test]
+    fn set_sys_fills_the_settings_blocks_that_outrun_the_reply_padding() {
+        // A reply zeroes four padding words, which covers an out parameter up
+        // to 16 bytes. `TvSettings` is 0x20 and `NotificationSettings` 0x18,
+        // so past that a caller read the tail of its own request back --
+        // `tv_gama` and `contrast_ratio` are floats, so a NaN gamma was
+        // reachable and not merely a wrong number. The scribble is where
+        // those tails land.
+        const STALE: u8 = 0xa5;
+
+        let mut cpu = request(false, 39, &[]);
+        for offset in 0x30..0x40 {
+            cpu.mem.write_u8(TLS + offset, STALE).unwrap();
+        }
+        cpu.set_sys_request(TLS, Some(39)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0xc, "TvFlag");
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x24).unwrap(),
+            0,
+            "TvResolution_Auto"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x28).unwrap(),
+            4,
+            "HdmiContentType_Game"
+        );
+        assert_eq!(
+            f32::from_bits(cpu.mem.read_u32(TLS + 0x38).unwrap()),
+            1.0,
+            "tv_gama, past the padding"
+        );
+        assert_eq!(
+            f32::from_bits(cpu.mem.read_u32(TLS + 0x3c).unwrap()),
+            0.5,
+            "contrast_ratio, past the padding"
+        );
+
+        let mut cpu = request(false, 29, &[]);
+        for offset in 0x30..0x40 {
+            cpu.mem.write_u8(TLS + offset, STALE).unwrap();
+        }
+        cpu.set_sys_request(TLS, Some(29)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            0x300,
+            "NotificationFlag"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x24).unwrap(),
+            2,
+            "NotificationVolume_High"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x28).unwrap(),
+            9,
+            "quiet hours start"
+        );
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x30).unwrap(),
+            21,
+            "and they stop, past the padding"
+        );
+        assert_eq!(cpu.mem.read_u32(TLS + 0x34).unwrap(), 0, "on the hour");
+    }
+
+    #[test]
+    fn set_sys_answers_the_enums_whose_zero_is_wrong() {
+        // `ProductModel` starts at 1, so zero is outside it -- the same shape
+        // as GetPlatformRegion above. `KeyboardLayout`'s zero is `Japanese`,
+        // a real layout but not the one a console reporting en-US everywhere
+        // else should hand the software keyboard.
+        let mut cpu = request(false, 79, &[]);
+        cpu.set_sys_request(TLS, Some(79)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "ProductModel_Nx");
+
+        let mut cpu = request(false, 136, &[]);
+        cpu.set_sys_request(TLS, Some(136)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            1,
+            "KeyboardLayout_EnglishUs"
+        );
     }
 
     #[test]
