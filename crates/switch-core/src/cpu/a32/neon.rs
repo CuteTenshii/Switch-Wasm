@@ -17,9 +17,26 @@ use crate::{Error, Result};
 /// One lane's worth of a vector, as raw bits.
 type Lane = u64;
 
+/// How many single-precision lanes a vector holds. NEON has no
+/// double-precision vectors, so this is the only float lane count there is —
+/// and in the three-registers-of-the-same-length group it cannot come from
+/// `size`, where bit 21 selects subtract and bit 20 is `sz`.
+#[inline]
+fn f32_lanes(quad: bool) -> u32 {
+    if quad {
+        4
+    } else {
+        2
+    }
+}
+
 /// Split `value` into `lanes` lanes of `esize` bits.
 #[inline]
 fn lanes_of(value: u128, esize: u32, lanes: u32) -> [Lane; 16] {
+    debug_assert!(
+        esize * lanes <= 128,
+        "{lanes} lanes of {esize} bits overflow a vector"
+    );
     let mut out = [0u64; 16];
     let mask = if esize == 64 {
         u64::MAX
@@ -41,8 +58,8 @@ fn from_lanes(lanes_in: &[Lane; 16], esize: u32, lanes: u32) -> u128 {
         (1u128 << esize) - 1
     };
     let mut out = 0u128;
-    for i in 0..lanes as usize {
-        out |= (u128::from(lanes_in[i]) & mask) << (esize * i as u32);
+    for (i, &lane) in lanes_in.iter().enumerate().take(lanes as usize) {
+        out |= (u128::from(lane) & mask) << (esize * i as u32);
     }
     out
 }
@@ -245,22 +262,23 @@ impl Cpu {
                 // Bit 21 selects subtract, and U selects the pairwise forms.
                 if unsigned {
                     if size & 0b10 != 0 {
-                        self.neon_f32(a, b, count, |x, y| (x - y).abs())
+                        self.neon_f32(a, b, quad, |x, y| (x - y).abs())
                     } else {
-                        return self.neon_pairwise_f32(quad, vd, a, b, count);
+                        return self.neon_pairwise_f32(quad, vd, a, b);
                     }
                 } else if size & 0b10 != 0 {
-                    self.neon_f32(a, b, count, |x, y| x - y)
+                    self.neon_f32(a, b, quad, |x, y| x - y)
                 } else {
-                    self.neon_f32(a, b, count, |x, y| x + y)
+                    self.neon_f32(a, b, quad, |x, y| x + y)
                 }
             }
             (0xD, true) => {
                 if unsigned {
-                    self.neon_f32(a, b, count, |x, y| x * y)
+                    self.neon_f32(a, b, quad, |x, y| x * y)
                 } else {
                     let d = self.neon_get(quad, vd);
                     let negate = size & 0b10 != 0;
+                    let count = f32_lanes(quad);
                     let x = lanes_of(a, 32, count);
                     let y = lanes_of(b, 32, count);
                     let acc = lanes_of(d, 32, count);
@@ -279,7 +297,7 @@ impl Cpu {
                 }
             }
             // Floating-point comparisons, which produce a lane mask.
-            (0xE, false) => self.neon_f32_bits(a, b, count, |x, y| {
+            (0xE, false) => self.neon_f32_bits(a, b, quad, |x, y| {
                 let hit = if unsigned {
                     if size & 0b10 != 0 {
                         x > y
@@ -300,19 +318,14 @@ impl Cpu {
             (0xF, false) => {
                 let minimum = size & 0b10 != 0;
                 if unsigned {
-                    return self.neon_pairwise_minmax_f32(quad, vd, a, b, count, minimum);
+                    return self.neon_pairwise_minmax_f32(quad, vd, a, b, minimum);
                 }
-                self.neon_f32(
-                    a,
-                    b,
-                    count,
-                    |x, y| if minimum { x.min(y) } else { x.max(y) },
-                )
+                self.neon_f32(a, b, quad, |x, y| if minimum { x.min(y) } else { x.max(y) })
             }
             (0xF, true) => {
                 // VRECPS and VRSQRTS, the two iteration steps.
                 let sqrt = size & 0b10 != 0;
-                self.neon_f32(a, b, count, move |x, y| {
+                self.neon_f32(a, b, quad, move |x, y| {
                     if sqrt {
                         (3.0 - x * y) / 2.0
                     } else {
@@ -347,8 +360,8 @@ impl Cpu {
 
     /// The same over single-precision lanes.
     #[inline]
-    fn neon_f32(&self, a: u128, b: u128, count: u32, f: impl Fn(f32, f32) -> f32) -> u128 {
-        self.neon_lane_op(a, b, 32, count, |x, y| {
+    fn neon_f32(&self, a: u128, b: u128, quad: bool, f: impl Fn(f32, f32) -> f32) -> u128 {
+        self.neon_lane_op(a, b, 32, f32_lanes(quad), |x, y| {
             u64::from(f(f32::from_bits(x as u32), f32::from_bits(y as u32)).to_bits())
         })
     }
@@ -356,22 +369,16 @@ impl Cpu {
     /// The same, for the comparisons, whose result is a mask rather than a
     /// float.
     #[inline]
-    fn neon_f32_bits(&self, a: u128, b: u128, count: u32, f: impl Fn(f32, f32) -> u32) -> u128 {
-        self.neon_lane_op(a, b, 32, count, |x, y| {
+    fn neon_f32_bits(&self, a: u128, b: u128, quad: bool, f: impl Fn(f32, f32) -> u32) -> u128 {
+        self.neon_lane_op(a, b, 32, f32_lanes(quad), |x, y| {
             u64::from(f(f32::from_bits(x as u32), f32::from_bits(y as u32)))
         })
     }
 
     /// `VPADD.F32`, which adds adjacent lanes within each source rather than
     /// across the two.
-    fn neon_pairwise_f32(
-        &mut self,
-        quad: bool,
-        vd: u8,
-        a: u128,
-        b: u128,
-        count: u32,
-    ) -> Result<()> {
+    fn neon_pairwise_f32(&mut self, quad: bool, vd: u8, a: u128, b: u128) -> Result<()> {
+        let count = f32_lanes(quad);
         let x = lanes_of(a, 32, count);
         let y = lanes_of(b, 32, count);
         let mut out = [0u64; 16];
@@ -392,9 +399,9 @@ impl Cpu {
         vd: u8,
         a: u128,
         b: u128,
-        count: u32,
         minimum: bool,
     ) -> Result<()> {
+        let count = f32_lanes(quad);
         let x = lanes_of(a, 32, count);
         let y = lanes_of(b, 32, count);
         let mut out = [0u64; 16];
@@ -508,7 +515,7 @@ impl Cpu {
             0b0110 | 0b0111 | 0b1110 | 0b1111 => {
                 let negate = opc & 1 != 0;
                 if opc & 0b1000 != 0 {
-                    self.neon_f32(m, m, count, move |x, _| if negate { -x } else { x.abs() })
+                    self.neon_f32(m, m, quad, move |x, _| if negate { -x } else { x.abs() })
                 } else {
                     self.neon_lane_op(m, m, esize, count, move |x, _| {
                         let v = sext(x, esize);
