@@ -173,10 +173,23 @@ pub enum Format {
     Bgra8Unorm,
     Bgra8UnormSrgb,
     Rgb10a2Unorm,
-    R32Float,
-    R16Float,
+    // SNORM, which WebGPU samples but does not render into. Naming them puts
+    // a title's SNORM *textures* on the device; the backend's own attachment
+    // check turns the render-target case back into a fallback.
+    R8Snorm,
+    Rg8Snorm,
+    Rgba8Snorm,
+    R16Snorm,
+    Rg16Snorm,
+    Rgba16Snorm,
     R16Unorm,
+    Rg16Unorm,
+    Rgba16Unorm,
+    R16Float,
+    Rg16Float,
     Rgba16Float,
+    R32Float,
+    Rg32Float,
     Rgba32Float,
     /// `B10G11R11_FLOAT`: three unsigned floats in one 32-bit word, and the
     /// HDR target a title tonemaps from. Renderable only where the device has
@@ -651,21 +664,44 @@ fn depth(layout: DepthLayout, state: DepthState) -> Result<Depth, Unsupported> {
 ///
 /// Follows [`crate::gpu::surface`]'s reading of those codes rather than a
 /// second one — the tests below check the two still agree about how wide a
-/// pixel is and whether it is sRGB, which is what would drift.
+/// pixel is, whether it is sRGB and what kind of number it holds, which is
+/// what would drift.
+///
+/// This is the texture path's format too ([`crate::gpu::upload`]'s
+/// `image_copy`), so a code with no name costs a title the texture as well as
+/// the target. Two families have none on purpose: the integer formats, whose
+/// WebGPU pipeline would need the integer fragment output and integer sampled
+/// texture the shader translator does not yet emit, and the packings WebGPU
+/// has no spelling for.
 pub(crate) fn color_format(format: ColorFormat) -> Result<Format, Unsupported> {
     Ok(match format.raw {
-        0xD5 | 0xD7 | 0xD8 | 0xD9 | 0xF9 => Format::Rgba8Unorm,
+        // Eight bits a channel. `0xD8` and `0xD9` are the SINT and UINT codes
+        // at these same bytes.
+        0xD5 | 0xF9 => Format::Rgba8Unorm,
         0xD6 | 0xFA => Format::Rgba8UnormSrgb,
+        0xD7 => Format::Rgba8Snorm,
         0xCF | 0xE6 | 0xFD | 0xFE => Format::Bgra8Unorm,
         0xD0 | 0xE7 => Format::Bgra8UnormSrgb,
-        0xD1 => Format::Rgb10a2Unorm,
-        0xE5 => Format::R32Float,
-        0xCA | 0xCE => Format::Rgba16Float,
-        0xC0 | 0xC3 => Format::Rgba32Float,
         0xEA => Format::Rg8Unorm,
+        0xEB => Format::Rg8Snorm,
         0xF3 => Format::R8Unorm,
-        0xF2 => Format::R16Float,
+        0xF4 => Format::R8Snorm,
+        // Sixteen. The normalized ones need `texture-format-16bit-norm`,
+        // which is native-only; see `switch_gpu::device_descriptor`.
+        0xC6 => Format::Rgba16Unorm,
+        0xC7 => Format::Rgba16Snorm,
+        0xCA | 0xCE => Format::Rgba16Float,
+        0xDA => Format::Rg16Unorm,
+        0xDB => Format::Rg16Snorm,
+        0xDE => Format::Rg16Float,
         0xEE => Format::R16Unorm,
+        0xEF => Format::R16Snorm,
+        0xF2 => Format::R16Float,
+        // Thirty-two, and the two packed formats WebGPU spells.
+        0xC0 | 0xC3 => Format::Rgba32Float,
+        0xCB => Format::Rg32Float,
+        0xE5 => Format::R32Float,
+        0xD1 => Format::Rgb10a2Unorm,
         0xE0 => Format::Rg11b10Ufloat,
         raw => return Err(Unsupported::Format { raw }),
     })
@@ -961,17 +997,45 @@ mod tests {
     /// How wide a pixel of each colour format is, and whether it is sRGB.
     fn shape(format: Format) -> (u32, bool) {
         match format {
-            Format::R8Unorm => (1, false),
-            Format::Rg8Unorm => (2, false),
-            Format::Rgba8Unorm | Format::Bgra8Unorm | Format::Rgb10a2Unorm | Format::R32Float => {
-                (4, false)
-            }
-            Format::R16Float | Format::R16Unorm => (2, false),
-            Format::Rg11b10Ufloat => (4, false),
+            Format::R8Unorm | Format::R8Snorm => (1, false),
+            Format::Rg8Unorm | Format::Rg8Snorm => (2, false),
+            Format::R16Unorm | Format::R16Snorm | Format::R16Float => (2, false),
+            Format::Rgba8Unorm
+            | Format::Rgba8Snorm
+            | Format::Bgra8Unorm
+            | Format::Rgb10a2Unorm
+            | Format::Rg16Unorm
+            | Format::Rg16Snorm
+            | Format::Rg16Float
+            | Format::R32Float
+            | Format::Rg11b10Ufloat => (4, false),
             Format::Rgba8UnormSrgb | Format::Bgra8UnormSrgb => (4, true),
-            Format::Rgba16Float => (8, false),
+            Format::Rgba16Unorm | Format::Rgba16Snorm | Format::Rgba16Float | Format::Rg32Float => {
+                (8, false)
+            }
             Format::Rgba32Float => (16, false),
             other => panic!("{other:?} is not a colour target format"),
+        }
+    }
+
+    /// The range the blend unit clamps into for each colour format, which is
+    /// `None` for a float one.
+    fn clamp(format: Format) -> Option<(f32, f32)> {
+        match format {
+            Format::R16Float
+            | Format::Rg16Float
+            | Format::Rgba16Float
+            | Format::R32Float
+            | Format::Rg32Float
+            | Format::Rgba32Float
+            | Format::Rg11b10Ufloat => None,
+            Format::R8Snorm
+            | Format::Rg8Snorm
+            | Format::Rgba8Snorm
+            | Format::R16Snorm
+            | Format::Rg16Snorm
+            | Format::Rgba16Snorm => Some((-1.0, 1.0)),
+            _ => Some((0.0, 1.0)),
         }
     }
 
@@ -991,7 +1055,43 @@ mod tests {
             let (bytes, srgb) = shape(named);
             assert_eq!(bytes, format.bytes_per_pixel, "{raw:#x} is {named:?}");
             assert_eq!(srgb, format.is_srgb(), "{raw:#x} is {named:?}");
+            // And what kind of number the channels hold. Width and transfer
+            // function alone did not tell `A8B8G8R8_SINT` apart from the
+            // UNORM code above it, and it was named `Rgba8Unorm` for years.
+            assert_eq!(clamp(named), format.source_clamp(), "{raw:#x} is {named:?}");
         }
+    }
+
+    /// The codes `gpu::surface` can store but the device gets no name for.
+    /// It is a decision rather than a gap — the integer formats wait on a
+    /// shader path that is not float-typed, and the rest have no WebGPU
+    /// spelling — so it is written down where a change to it is visible.
+    #[test]
+    fn the_codes_with_no_webgpu_name_are_the_ones_that_cannot_have_one() {
+        const UNNAMED: [u32; 26] = [
+            // SINT and UINT, at every width Maxwell offers them.
+            0xC1, 0xC2, 0xC4, 0xC5, 0xC8, 0xC9, 0xCC, 0xCD, 0xD2, 0xD8, 0xD9, 0xDC, 0xDD, 0xE3,
+            0xE4, 0xEC, 0xED, 0xF0, 0xF1, 0xF5, 0xF6,
+            // `A2R10G10B10`, `R5G6B5`, `A1R5G5B5`, `X1R5G5B5` and `A8`:
+            // WebGPU orders or packs none of these.
+            0xDF, 0xE8, 0xE9, 0xF7, 0xF8,
+        ];
+        let mut unnamed = Vec::new();
+        for raw in 0u32..=0xFF {
+            let Ok(format) = ColorFormat::from_raw(raw) else {
+                continue;
+            };
+            // A code `surface` cannot store is not a device question.
+            if format.encode([0.0; 4]).is_err() {
+                continue;
+            }
+            if color_format(format).is_err() {
+                unnamed.push(raw);
+            }
+        }
+        let mut expected = UNNAMED;
+        expected.sort_unstable();
+        assert_eq!(unnamed, expected);
     }
 
     #[test]
