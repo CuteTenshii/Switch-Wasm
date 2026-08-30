@@ -148,10 +148,7 @@ impl Cpu {
     /// format alongside them, so nothing is resampled twice.
     pub(super) fn audout_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
-            return match cmd_id {
-                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
-                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            };
+            return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
         // Both clients that reach this — `nnSdk` and libnx's `audoutInitialize`
         // — keep `audout` as a plain session and take the `IAudioOut` back as a
@@ -255,10 +252,7 @@ impl Cpu {
         handle: u64,
     ) -> Result<()> {
         if self.ipc_is_control_request(tls) {
-            return match cmd_id {
-                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
-                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            };
+            return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
         match cmd_id {
             // GetAudioOutState.

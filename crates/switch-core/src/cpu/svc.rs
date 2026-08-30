@@ -874,6 +874,17 @@ impl Cpu {
                         return Ok(());
                     }
                 }
+                // QueryPointerBufferSize (control command 3): how large an
+                // input the session will accept through its pointer buffer.
+                // Every service that answered this itself answered 0, and
+                // `nnSdk` measures an explicit `HipcPointer` argument against
+                // it — a 208-byte one against 0 is the `sf` 11-141 abort.
+                if self.ipc_is_control_request(tls) && cmd_id == Some(3) {
+                    let size = super::ipc::POINTER_BUFFER_SIZE.to_le_bytes();
+                    self.write_ipc_response(tls, 0, &[], &size, &[])?;
+                    self.write_zr(0, RESULT_OK);
+                    return Ok(());
+                }
                 // Closing a domain object is a request *shape*, not a
                 // command: `CmifDomainRequestType_Close` sits where
                 // SendMessage's type byte would, and there is no command id

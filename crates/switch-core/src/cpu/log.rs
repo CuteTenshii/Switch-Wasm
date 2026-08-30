@@ -48,16 +48,12 @@ impl Cpu {
     /// on the tail packet.
     pub(super) fn lm_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, "lm:service");
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, "lm:control", cmd_id),
             };

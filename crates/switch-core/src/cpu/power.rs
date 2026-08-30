@@ -51,16 +51,12 @@ impl Cpu {
     /// way `time_request` does, so the control path is checked first.
     pub(super) fn psm_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, "psm");
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
                 }
                 _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
             };
@@ -148,7 +144,7 @@ impl Cpu {
     /// where the two numbering schemes are reconciled.
     pub(super) fn pcv_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
-            return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
+            return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
         let data = self.ipc_request_data(tls);
         let iface = self.service_name(handle).unwrap_or("pcv").to_string();
@@ -276,16 +272,12 @@ impl Cpu {
     /// range draws it off the end.
     pub(super) fn ts_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, "ts");
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, "ts:control", cmd_id),
             };
@@ -396,7 +388,6 @@ impl Cpu {
     /// runs from `__appInit`, so JKSV asks for it before it draws anything.
     pub(super) fn apm_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
@@ -404,9 +395,6 @@ impl Cpu {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, &name);
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, "apm:control", cmd_id),
             };
@@ -509,7 +497,6 @@ impl Cpu {
     pub(super) fn psc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
-                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
                 Some(0) => {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, "psc:service");
@@ -590,7 +577,6 @@ impl Cpu {
                     self.record_domain_object(handle, obj, "gpio");
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
                 }
-                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
                 _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
             };
         }

@@ -69,7 +69,7 @@ impl Cpu {
             // what a console answers for the language the fonts are indexed
             // by anyway.
             Some(5) | Some(6) => {
-                let (_, recv) = self.ipc_map_buffers(tls);
+                let (_, recv) = self.ipc_buffers(tls);
                 let regions = self.shared_font_regions().to_vec();
                 // A caller sizes all three buffers alike, but it is the
                 // smallest that says how many entries actually fit.

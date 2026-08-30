@@ -242,7 +242,6 @@ impl Cpu {
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 // QueryPointerBufferSize.
-                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
                 // ConvertCurrentObjectToDomain -> the id the session itself
                 // takes in its new domain. `nnSdk` converts this one before
                 // asking for the database, so answering without an object id
@@ -326,10 +325,7 @@ impl Cpu {
     /// applet turned out to be.
     pub(super) fn miiimg_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
-            return match cmd_id {
-                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
-                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            };
+            return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
         match cmd_id {
             // Initialize / Reload.

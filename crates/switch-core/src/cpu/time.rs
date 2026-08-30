@@ -54,16 +54,12 @@ impl Cpu {
         handle: u64,
     ) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, "time");
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
                 }
                 _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
             };
@@ -216,7 +212,7 @@ impl Cpu {
             }
             // LoadLocationNameList(u32 index) -> (u32 count, buffer<LocationName[]>)
             Some(LOAD_LOCATION_NAME_LIST) => {
-                if let Some(&(addr, size)) = self.ipc_map_buffers(tls).1.first() {
+                if let Some(&(addr, size)) = self.ipc_buffers(tls).1.first() {
                     if size >= LOCATION_NAME.len() as u32 {
                         for (i, &b) in LOCATION_NAME.iter().enumerate() {
                             self.mem.write_u8(addr.wrapping_add(i as u32), b)?;
@@ -251,7 +247,7 @@ impl Cpu {
                     self.mem.read_u8(data.wrapping_add(5)).unwrap_or(0),
                     self.mem.read_u8(data.wrapping_add(6)).unwrap_or(0),
                 );
-                if let Some(&(addr, size)) = self.ipc_map_buffers(tls).1.first() {
+                if let Some(&(addr, size)) = self.ipc_buffers(tls).1.first() {
                     if size >= 8 {
                         self.mem.write_u64(addr, posix as u64)?;
                     }

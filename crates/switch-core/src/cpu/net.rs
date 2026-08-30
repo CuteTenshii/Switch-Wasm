@@ -204,16 +204,12 @@ impl Cpu {
     /// in the title's NPDM service list.
     pub(super) fn ssl_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, "ssl:service");
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, "ssl:control", cmd_id),
             };
@@ -390,20 +386,12 @@ impl Cpu {
     /// is closed again.
     pub(super) fn bsd_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, "bsd:u");
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                // Every buffer `bsd` takes is marshalled as a map-alias range
-                // (libnx's AutoSelect falls back to one when the server claims
-                // no pointer-buffer room), which is what `ipc_input_buffer` and
-                // `ipc_output_buffer` then find.
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, "bsd:control", cmd_id),
             };
@@ -1167,7 +1155,6 @@ impl Cpu {
         handle: u64,
     ) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
@@ -1177,9 +1164,6 @@ impl Cpu {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, &name);
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
                 }
                 _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
             };

@@ -298,7 +298,6 @@ impl Cpu {
     /// opened under rather than on the command alone.
     pub(super) fn acc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
@@ -309,14 +308,6 @@ impl Cpu {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, &name);
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                // `IProfile::Get` returns its `AccountUserData` through a
-                // receive-static ("pointer") buffer, and a client told the
-                // server has no room for one sends no descriptor at all — then
-                // reads the icon id and background colour back out of its own
-                // uninitialized stack. Same reasoning as `hid`'s.
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, "acc:control", cmd_id),
             };

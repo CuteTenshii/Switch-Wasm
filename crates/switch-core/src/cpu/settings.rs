@@ -9,10 +9,6 @@
 use super::Cpu;
 use crate::Result;
 
-/// The same, for `set`. Only `GetAvailableLanguageCodes` and `GetKeyCodeMap`
-/// marshal through it, and a page holds either with room to spare.
-const SET_POINTER_BUFFER_SIZE: u16 = 0x1000;
-
 /// The system version `set:sys` reports, as major/minor/micro.
 ///
 /// libnx seeds `hosversionGet` from this and branches on it everywhere, so the
@@ -112,7 +108,6 @@ const ALARM_PARAMETER_MAX: u32 = 0x400;
 impl Cpu {
     pub(super) fn set_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         // The control interface every session carries, which has to be
         // answered before the service's own table is consulted — and `set`
         // is the case that shows why. It has a command **3** of its own,
@@ -129,10 +124,6 @@ impl Cpu {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, "set");
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    let size = SET_POINTER_BUFFER_SIZE.to_le_bytes();
-                    self.write_ipc_response(tls, 0, &[], &size, &[])
                 }
                 _ => self.unimplemented_command(tls, "set:control", cmd_id),
             };
@@ -232,12 +223,7 @@ impl Cpu {
     /// `set_request`'s default arm.
     pub(super) fn set_sys_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
-            // `GetFirmwareVersion` returns its struct through a receive-static
-            // ("pointer") buffer, so this has to claim room for one.
-            return match cmd_id {
-                Some(3) => self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[]),
-                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            };
+            return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
         match cmd_id {
             // GetFirmwareVersion / GetFirmwareVersion2 -> a
@@ -397,16 +383,12 @@ impl Cpu {
         cmd_id: Option<u32>,
     ) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, "pctl:factory");
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, "pctl:control", cmd_id),
             };
@@ -1016,13 +998,18 @@ mod tests {
         // is `GetAvailableLanguageCodeCount`. Answering the first with the
         // second told `nnSdk` a session would take 18 bytes, which is smaller
         // than anything `nn::settings` sends, so it stopped before sending.
+        // Answered before dispatch, so the request goes in through the
+        // syscall rather than to `set_request`: that interception is what the
+        // collision now depends on.
         let mut cpu = control_request(3);
+        cpu.tpidr = u64::from(TLS);
         cpu.register_service_handle(9, "set");
-        cpu.set_request(TLS, 9, Some(3)).unwrap();
+        cpu.write_zr(0, 9);
+        cpu.horizon_syscall(0x20).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(
             cpu.mem.read_u16(TLS + 0x20).unwrap(),
-            super::SET_POINTER_BUFFER_SIZE
+            super::super::ipc::POINTER_BUFFER_SIZE
         );
         assert_ne!(
             cpu.mem.read_u16(TLS + 0x20).unwrap(),

@@ -57,6 +57,7 @@ mod vi;
 
 pub use a32::ExecMode;
 pub use fs::SaveDataQuota;
+pub use ipc::POINTER_BUFFER_SIZE;
 pub use jit::{translates, JitStats};
 
 use acc::{DEFAULT_NICKNAME, NICKNAME_LEN};

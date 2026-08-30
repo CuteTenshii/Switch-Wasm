@@ -33,7 +33,6 @@ impl Cpu {
     /// same interfaces here.
     pub(super) fn ns_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
@@ -41,12 +40,6 @@ impl Cpu {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, &name);
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                // `libnx` records this on the session the moment `sm` hands it
-                // over, before any `ns` command is sent — it is what the
-                // fabricated-object-id reply was corrupting for `ns:am2`.
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, "ns:control", cmd_id),
             };
@@ -191,16 +184,12 @@ impl Cpu {
     /// content archives that do not exist.
     pub(super) fn aoc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, "aoc:u");
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, "aoc:control", cmd_id),
             };
@@ -555,11 +544,18 @@ mod tests {
         // the only thing a caller that never lists a title asks at all. The
         // generic fallback answered it with a fabricated object id, so the
         // size came back as whatever that id happened to be.
+        // Answered before dispatch, so the request goes in through the
+        // syscall rather than to `ns_request`.
         let mut cpu = control_request(3);
+        cpu.tpidr = u64::from(TLS);
         cpu.register_service_handle(9, "ns:am2");
-        cpu.ns_request(TLS, 9, Some(3)).unwrap();
+        cpu.write_zr(0, 9);
+        cpu.horizon_syscall(0x20).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-        assert_eq!(cpu.mem.read_u16(TLS + 0x20).unwrap(), 0x1000);
+        assert_eq!(
+            cpu.mem.read_u16(TLS + 0x20).unwrap(),
+            super::super::ipc::POINTER_BUFFER_SIZE
+        );
     }
 
     #[test]

@@ -22,13 +22,9 @@ impl Cpu {
         cmd_id: Option<u32>,
         _handle: u64,
     ) -> Result<()> {
-        // Control requests (message type 5) are session management, not the
-        // nv interface. QueryPointerBufferSize must report 0 so libnx's
-        // `SfBufferAttr_HipcAutoSelect` buffers are marshalled as map-alias
-        // ranges rather than through a server pointer buffer we do not have.
+        // Control requests are session management, not the nv interface.
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
-                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
                 // CloneCurrentObject(Ex): libnx clones the nvdrv session and
                 // sends SubmitGpfifo/KickoffPb down the clone, so the new
                 // handle has to route back to the same driver.
@@ -44,7 +40,7 @@ impl Cpu {
             };
         }
         let data = self.ipc_request_data(tls);
-        let (send, recv) = self.ipc_map_buffers(tls);
+        let (send, recv) = self.ipc_buffers(tls);
         if self.trace_nv {
             eprintln!(
                 "[nv] cmd={:?} send={:x?} recv={:x?} from {:#x?}",

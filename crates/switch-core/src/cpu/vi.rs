@@ -43,10 +43,6 @@ impl Cpu {
                     let raw = obj.to_le_bytes();
                     self.write_ipc_response(tls, 0, &[], &raw, &[])
                 }
-                // QueryPointerBufferSize: report 0 so libnx marshals every
-                // `SfBufferAttr_HipcAutoSelect` buffer as a map-alias range —
-                // the only buffer form this IPC layer implements.
-                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
                 _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
             };
         }
@@ -79,7 +75,7 @@ impl Cpu {
                 // TransactParcelAuto (3).
                 //
                 // 0 and 3 are the same transaction; they differ only in how
-                // the parcel is marshalled, and `ipc_map_buffers` reads either
+                // the parcel is marshalled, and `ipc_buffers` reads either
                 // form. 3 arrived in 3.0.0, so a caller built against an SDK
                 // older than that sends 0 and only 0 — Just Dance 2017 does,
                 // and answering it with an empty success queued every frame it
@@ -492,7 +488,7 @@ impl Cpu {
     pub(super) fn vi_transact_parcel(&mut self, tls: u32) -> Result<()> {
         let data = self.ipc_request_data(tls);
         let code = self.mem.read_u32(data.wrapping_add(4)).unwrap_or(0);
-        let (send, recv) = self.ipc_map_buffers(tls);
+        let (send, recv) = self.ipc_buffers(tls);
         let request = match send.first() {
             Some(&(addr, size)) => self.read_bytes(addr, size),
             None => Vec::new(),

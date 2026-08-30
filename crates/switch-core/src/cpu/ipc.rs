@@ -28,6 +28,30 @@ pub(super) const DEFAULT_PROGRAM_ID: u64 = 0x0100_0000_0000_1000;
 /// manufacturing and unique; nothing here derives anything from it.
 const SPL_DEVICE_ID: u64 = 0x0000_5357_4153_4D00;
 
+/// What every session answers `QueryPointerBufferSize` with, and so the
+/// largest input a caller will marshal through a pointer buffer rather than a
+/// map-alias one.
+///
+/// It was 0, which is the honest size for a server holding no pointer buffer
+/// — but `nnSdk` measures an explicit `SfBufferAttr_HipcPointer` argument
+/// against it and refuses to send one that does not fit, which is the `sf`
+/// 11-141 `PointerBufferTooSmall` Tomodachi Life aborted on. Both forms land
+/// in the same address space here, so the number only decides which
+/// descriptor a caller fills in; a real `fsp-srv` reports this same 0x8000.
+pub const POINTER_BUFFER_SIZE: u16 = 0x8000;
+
+/// Choose between the two descriptors an **AutoSelect** buffer occupies.
+///
+/// `cmifRequestInAutoBuffer` fills in a static *and* a map-alias descriptor
+/// every time, nulling whichever form it did not choose, so a service that
+/// reads only one of them reads a zero-length buffer for half of its callers.
+fn ipc_pick_buffer(map: Option<(u32, u32)>, pointer: Option<(u32, u32)>) -> Option<(u32, u32)> {
+    match (map, pointer) {
+        (Some((_, 0)), Some(pointer)) => Some(pointer),
+        (map, pointer) => map.or(pointer),
+    }
+}
+
 /// The counts packed into a hipc message header, decoded once.
 ///
 /// Seven separate walks over the TLS buffer need some subset of these, and
@@ -265,19 +289,6 @@ impl Cpu {
         self.ipc_recv_buffer(tls, index).map(|(address, _)| address)
     }
 
-    /// Every map-alias buffer descriptor in a hipc request, as
-    /// `(send, receive)` lists of `(address, size)`.
-    pub(super) fn ipc_map_buffers(&self, tls: u32) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
-        let header = self.ipc_header(tls);
-        let send = (0..header.send_buffers)
-            .map(|slot| self.ipc_map_descriptor(tls, slot))
-            .collect();
-        let recv = (0..header.recv_buffers)
-            .map(|slot| self.ipc_map_descriptor(tls, header.send_buffers + slot))
-            .collect();
-        (send, recv)
-    }
-
     /// The send-static ("pointer") buffers of a hipc request, as
     /// `(address, size)`.
     ///
@@ -323,11 +334,12 @@ impl Cpu {
     /// The `index`-th **input** buffer, whichever form the caller marshalled
     /// it in: `libnx`'s AutoSelect picks a send-static ("pointer") buffer when
     /// the server advertises room for one and a map-alias send buffer
-    /// otherwise, so a service that answers `QueryPointerBufferSize` with a
-    /// real size has to read both.
+    /// otherwise, and fills in a null descriptor for the other.
     pub(super) fn ipc_input_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
-        self.ipc_send_buffer(tls, index)
-            .or_else(|| self.ipc_static_buffers(tls).get(index as usize).copied())
+        ipc_pick_buffer(
+            self.ipc_send_buffer(tls, index),
+            self.ipc_static_buffers(tls).get(index as usize).copied(),
+        )
     }
 
     /// The `index`-th **output** buffer, whichever form the caller marshalled
@@ -335,11 +347,26 @@ impl Cpu {
     /// buffer if the request carries one, else a receive-static pointer
     /// buffer.
     pub(super) fn ipc_output_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
-        self.ipc_recv_buffer(tls, index).or_else(|| {
+        ipc_pick_buffer(
+            self.ipc_recv_buffer(tls, index),
             self.ipc_recv_static_buffers(tls)
                 .get(index as usize)
-                .copied()
-        })
+                .copied(),
+        )
+    }
+
+    /// Every buffer a request carries, as `(input, output)` lists — the list
+    /// form of [`Cpu::ipc_input_buffer`] and [`Cpu::ipc_output_buffer`], for
+    /// the services that want all of them rather than one by index.
+    pub(super) fn ipc_buffers(&self, tls: u32) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
+        let header = self.ipc_header(tls);
+        let send = (0..header.send_buffers.max(header.send_statics))
+            .filter_map(|index| self.ipc_input_buffer(tls, index))
+            .collect();
+        let recv = (0..header.recv_buffers.max(header.recv_statics))
+            .filter_map(|index| self.ipc_output_buffer(tls, index))
+            .collect();
+        (send, recv)
     }
 
     /// The NUL-terminated path a filesystem request sent in its first
@@ -804,11 +831,13 @@ impl Cpu {
     ///
     /// `ConvertToDomain` files the session's own interface under a fresh
     /// object id — the name given here is what later requests on that object
-    /// dispatch on — and `QueryPointerBufferSize` answers 0, which is what
-    /// keeps a caller off the pointer-buffer path this IPC layer does not
-    /// read. Every service below opens with this, because a control message
-    /// is not a command on the interface at all and answering it as one is
-    /// how `appletOE`'s first message was once read as command 3.
+    /// dispatch on. Every service below opens with this, because a control
+    /// message is not a command on the interface at all and answering it as
+    /// one is how `appletOE`'s first message was once read as command 3.
+    ///
+    /// `QueryPointerBufferSize` is answered before dispatch, in `svc.rs`, so
+    /// that the ~40 services handling their own control messages inline get
+    /// the same answer this does.
     pub(super) fn ipc_answer_control(
         &mut self,
         tls: u32,
@@ -826,7 +855,7 @@ impl Cpu {
                 self.record_domain_object(handle, obj, name);
                 self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])?;
             }
-            _ => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])?,
+            _ => self.write_ipc_response(tls, 0, &[], &POINTER_BUFFER_SIZE.to_le_bytes(), &[])?,
         }
         Ok(true)
     }
@@ -1469,6 +1498,38 @@ pub(super) mod testing {
     }
 
     #[test]
+    fn an_auto_select_buffer_is_found_in_whichever_form_it_arrived() {
+        // `cmifRequestInAutoBuffer` fills in a static *and* a map-alias
+        // descriptor every time and nulls the one it did not choose, so a
+        // service reading only its own preferred form reads a zero-length
+        // buffer for half of its callers. That half only appeared once
+        // `QueryPointerBufferSize` started answering with a real size:
+        // `nvdrv`'s ioctl argument went through the pointer descriptors, the
+        // map-alias walk found the null beside it, and the driver was handed
+        // no arguments at all.
+        const BUFFER: u32 = 0x3000;
+        const SIZE: u32 = 0x40;
+        for through_pointer in [true, false] {
+            let cpu = auto_select_request(1, &[], BUFFER, SIZE, through_pointer);
+            assert_eq!(
+                cpu.ipc_input_buffer(TLS, 0),
+                Some((BUFFER, SIZE)),
+                "input, through_pointer={through_pointer}"
+            );
+            assert_eq!(
+                cpu.ipc_output_buffer(TLS, 0),
+                Some((BUFFER, SIZE)),
+                "output, through_pointer={through_pointer}"
+            );
+            assert_eq!(
+                cpu.ipc_buffers(TLS),
+                (vec![(BUFFER, SIZE)], vec![(BUFFER, SIZE)]),
+                "both, through_pointer={through_pointer}"
+            );
+        }
+    }
+
+    #[test]
     fn a_static_buffer_is_found_past_the_handles_a_special_header_carries() {
         // `ipc_descriptor_start` skips a special header's copy and move
         // handles; `ipc_static_buffers` kept an older copy of that walk which
@@ -1663,6 +1724,61 @@ pub(super) mod testing {
         let at = TLS + 8 + 4 * data_words;
         cpu.mem.write_u32(at, buffer).unwrap();
         cpu.mem.write_u32(at + 4, size << 16).unwrap();
+        cpu
+    }
+
+    /// A CMIF request whose one buffer is marshalled the way
+    /// `cmifRequestInAutoBuffer`/`cmifRequestOutAutoBuffer` marshal an
+    /// **AutoSelect** buffer: through the pointer descriptors, with the
+    /// map-alias ones filled in and left null.
+    ///
+    /// Which of the two pairs is real is `through_pointer`; the other pair is
+    /// the buffer, and the pointer descriptors are the null ones.
+    pub(crate) fn auto_select_request(
+        command_id: u32,
+        payload: &[u8],
+        buffer: u32,
+        size: u32,
+        through_pointer: bool,
+    ) -> Cpu {
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        for offset in (0..0x200u32).step_by(4) {
+            cpu.mem.write_u32(TLS + offset, 0).unwrap();
+        }
+        let (pointer, alias) = if through_pointer {
+            ((buffer, size), (0, 0))
+        } else {
+            ((0, 0), (buffer, size))
+        };
+        // One send-static, one send buffer and one receive buffer: the counts
+        // an in-out AutoSelect buffer takes, whichever form it ends up in.
+        cpu.mem
+            .write_u32(TLS, 4 | (1 << 16) | (1 << 20) | (1 << 24))
+            .unwrap();
+        cpu.mem.write_u32(TLS + 8, pointer.1 << 16).unwrap();
+        cpu.mem.write_u32(TLS + 12, pointer.0).unwrap();
+        for (index, &(address, len)) in [alias, alias].iter().enumerate() {
+            let at = TLS + 16 + 12 * index as u32;
+            cpu.mem.write_u32(at, len).unwrap();
+            cpu.mem.write_u32(at + 4, address).unwrap();
+            cpu.mem.write_u32(at + 8, 0).unwrap();
+        }
+        // Two words of padding aligning the CmifInHeader, the header, then the
+        // payload — the receive list sits past all of it.
+        let data_words = 2 + 4 + payload.len().div_ceil(4) as u32;
+        cpu.mem.write_u32(TLS + 4, data_words | (3 << 10)).unwrap();
+        let data_area = TLS + 40;
+        cpu.mem.write_u32(data_area + 8, SFCI).unwrap();
+        cpu.mem.write_u32(data_area + 16, command_id).unwrap();
+        for (index, &byte) in payload.iter().enumerate() {
+            cpu.mem
+                .write_u8(data_area + 24 + index as u32, byte)
+                .unwrap();
+        }
+        let recv_list = data_area + 4 * data_words;
+        cpu.mem.write_u32(recv_list, pointer.0).unwrap();
+        cpu.mem.write_u32(recv_list + 4, pointer.1 << 16).unwrap();
         cpu
     }
 

@@ -2,7 +2,7 @@
 //! executed instructions and dump it when the guest halts — the fastest way
 //! to see how an `nnSdk` abort was reached without tracing 117M steps.
 //!
-//! Usage: retail_trace <container> <prod.keys> [title.keys] [tail_len]
+//! Usage: retail_trace <container> <prod.keys> [title.keys] [tail_len] [max_steps]
 //!   RING_FROM=<hex pc>  start recording only once this pc is first hit.
 //!   MARK=<pc>[=name][,...]  print a line each time one of these pcs runs.
 //!   MARK_DUMP=<reg>,<byte offset>,<words>  also dump memory at each mark.
@@ -11,12 +11,15 @@ mod common;
 use std::env;
 use switch_core::cpu::Cpu;
 
-const USAGE: &str = "retail_trace <container> <prod.keys> [title.keys] [tail_len]";
+const USAGE: &str = "retail_trace <container> <prod.keys> [title.keys] [tail_len] [max_steps]";
 
 fn main() {
     let args = common::container_args(USAGE);
     let title = args.open();
     let tail: usize = args.rest_num(0).unwrap_or(4000) as usize;
+    // A retail title takes billions of steps to reach the fault worth
+    // recording, so how long to run is an argument rather than a constant.
+    let budget = args.rest_num(1).unwrap_or(400_000_000);
 
     let mut cpu = Cpu::new();
     cpu.bootstrap();
@@ -74,7 +77,7 @@ fn main() {
         ))
     });
     let mut done = 0u64;
-    while !cpu.halted && done < 400_000_000 {
+    while !cpu.halted && done < budget {
         let pc = cpu.get_pc();
         if let Some(name) = marks.get(&pc) {
             println!(

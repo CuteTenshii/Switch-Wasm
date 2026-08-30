@@ -45,7 +45,6 @@ impl Cpu {
 
     pub(super) fn hid_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
@@ -53,15 +52,6 @@ impl Cpu {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, &name);
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                // QueryPointerBufferSize: how much the server will accept in
-                // a send-static ("pointer") buffer. This has to be non-zero
-                // here: `nn::hid::SetSupportedNpadIdType` marshals its npad id
-                // array as a pointer buffer, and `nnSdk`'s client checks the
-                // negotiated size before it sends, failing outright when the
-                // server claims it cannot take any.
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0x1000u16.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, "hid:control", cmd_id),
             };

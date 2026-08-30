@@ -398,10 +398,7 @@ impl Cpu {
         cmd_id: Option<u32>,
     ) -> Result<()> {
         if self.ipc_is_control_request(tls) {
-            return match cmd_id {
-                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
-                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            };
+            return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
         let data = self.ipc_request_data(tls);
         // `AudioRendererParameter`: sample_rate, sample_count, mix_buffer_count,
@@ -555,10 +552,7 @@ impl Cpu {
         handle: u64,
     ) -> Result<()> {
         if self.ipc_is_control_request(tls) {
-            return match cmd_id {
-                Some(3) => self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]),
-                _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            };
+            return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
         match cmd_id {
             // GetSampleRate / GetSampleCount / GetMixBufferCount: what the
@@ -1140,7 +1134,7 @@ impl Cpu {
             reply[at..at + 8].copy_from_slice(&renderer.elapsed_frames.to_le_bytes());
         }
 
-        let (_, recv) = self.ipc_map_buffers(tls);
+        let (_, recv) = self.ipc_buffers(tls);
         if let Some(&(addr, size)) = recv.first() {
             let n = (size as usize).min(reply.len());
             for (i, &byte) in reply[..n].iter().enumerate() {

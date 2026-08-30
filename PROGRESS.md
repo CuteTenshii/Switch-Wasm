@@ -21,7 +21,7 @@ whenever it was last recorded.
 | `Checkpoint.nro` | layout and chrome; text was solid blocks for want of `SHFL`, unchecked since | yes | carried |
 | "A Short Hike" (NSP) | composites a full 1280x720 frame; steady state is 2 draws a frame and never a scene | partial | measured |
 | "Minecraft" (NSP) | the world, on the device: 110 draws a frame, none falling back | yes | measured |
-| "Tomodachi Life" (NSP) | 2.52B steps to an `nnSdk` abort, `sf` 11-141 ([below](#hid-samples-on-a-clock-not-on-input)) | no | measured |
+| "Tomodachi Life" (NSP) | presents frame 1 at 3.98B steps: 78 submissions, 7 draws, a black frame | partial | measured |
 
 A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` →
 `sdk` through real `nnSdk` init, gets its heap, events and input, brings up its
@@ -606,14 +606,39 @@ runs on to the abort above at 2,524,316,651 steps, the same one and the same
 backtrace. hbmenu, JKSV, Checkpoint and A Short Hike present byte-identical
 frame 3s either way.
 
-**What the abort is** is open. The title reads all of
-`/Parameter/ClockSystem/` — the six `TimeRangeParam`s and the four
-`SeasonParam`s, ending with `Winter` at RomFS 0x49a9e3f0 — and then one
-`nnSdk` call fails: `blr x8` at `0x0d6df6d8`, reached exactly once, on the
-`.bss` singleton at `0xde9e290` through vtable slot `+0xa0`. No service request
-is refused anywhere in the run, `romfs_selftest` says the reads are consistent,
-and answering `QueryPointerBufferSize` with Eden's 0x8000 instead of 0 leaves
-the run bit-identical, so it is none of those three.
+The abort past it was `QueryPointerBufferSize`, and is fixed — see below.
+
+### A pointer buffer a caller is told it cannot use
+
+Every session answered `QueryPointerBufferSize` with 0, on the reasoning that a
+server with no pointer buffer keeps `libnx` on map-alias ranges. It does — but
+an explicit `SfBufferAttr_HipcPointer` argument is not AutoSelect and has no
+map-alias form to fall back to, and `nnSdk` measures one against the negotiated
+size before it sends. Tomodachi Life reads all of `/Parameter/ClockSystem/` —
+the six `TimeRangeParam`s and the four `SeasonParam`s, ending with `Winter` —
+and then sizes a 208-byte pointer argument against 0 at `0x0d33a51c` (`subs x4,
+x4, x22; b.cc`) and returns `PointerBufferTooSmall` without sending anything.
+That is the `sf` 11-141 the title aborted on, at 2,524,316,651 steps.
+
+The answer is 0x8000 now, a real `fsp-srv`'s, given once in `svc.rs` before
+dispatch — 28 services answered it themselves, in three different sizes, and
+the two that had already found they needed a non-zero one (`hid`, for
+`SetSupportedNpadIdType`, and `set`, for `GetFirmwareVersion`) had each fixed
+it locally.
+
+**A non-zero size is what makes the second half of the bug reachable.**
+`cmifRequestInAutoBuffer` fills in a static *and* a map-alias descriptor every
+time and nulls whichever form it did not choose, so a service that reads only
+its own preferred form reads a zero-length buffer for half of its callers.
+`nvdrv`'s ioctl argument is AutoSelect: with a real size it went through the
+pointer descriptors, `ipc_map_buffers` found the null beside it, and the driver
+was handed no arguments — `nvn` closed the channel and gave up on graphics, and
+boot died in `nn::account` at 33M steps. `ipc_pick_buffer` is the rule, in one
+place; `ipc_map_buffers` is gone and `ipc_buffers` replaces it.
+
+Tomodachi Life presents its first frame at 3,976,024,064 steps: 78 GPU
+submissions, 3 clears, 7 draws. The frame is black, which is the next question
+and a different one.
 
 **`hwopus` is the exception to all of that**: there is nothing to answer *as*,
 because the caller wants audio back. So `src/opus/` is a full Opus decoder —
@@ -661,12 +686,14 @@ the WebGPU backend against the rasterizer.
    20 alike. Every other path is checked by agreeing with the rasterizer, so a
    title only the backend can draw is a hole in the check itself. Bisect with
    `GPU_ONLY`.
-2. **A retail title that draws but never a scene.** A Short Hike composites a
-   full frame and settles at two draws a frame forever; Tomodachi Life issues
-   no draw calls at all: it now runs to an `nnSdk` abort instead, `sf` 11-141
-   after reading its clock parameters, which is the thing to chase next.
-   Whatever they wait on is above the GPU. The Home Menu and Minecraft both
-   draw, so this is these titles' own gap, not the retail path's.
+2. **A retail title that draws but never a scene.** Tomodachi Life presents at
+   3.98B steps with 7 draws and every pixel black; A Short Hike no longer
+   reaches a frame at all — at HEAD it spins after one submission and 3,536
+   methods, and past the pointer-buffer fix it runs further and takes a
+   `write to read-only address 0x0aa28f50` at `pc=0xa70b814`, step
+   404,553,728. Whatever they wait on is above the GPU. The Home Menu and
+   Minecraft both draw, so this is these titles' own gap, not the retail
+   path's.
 3. **NX-Shell regressed** to 433,783 steps with no output. Cheapest bisect
    here — the `.nro` is in the tree.
 4. **Check Checkpoint's text.** `SHFL`/`FSWZADD` and the quad that runs them

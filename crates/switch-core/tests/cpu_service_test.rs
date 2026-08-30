@@ -152,7 +152,7 @@ fn hid_sys_is_its_own_interface_and_answers_before_any_command() {
 
     ipc_request(&mut cpu, HIDSYS, 5, None, 3); // QueryPointerBufferSize
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
-    assert_eq!(cpu.mem.read_u16(tls + 0x20).unwrap(), 0x1000);
+    assert_eq!(cpu.mem.read_u16(tls + 0x20).unwrap(), POINTER_BUFFER_SIZE);
 
     ipc_request(&mut cpu, HIDSYS, 5, None, 0); // ConvertToDomain
     let server = cpu.mem.read_u32(tls + 0x20).unwrap();
@@ -2171,7 +2171,7 @@ fn a_service_with_no_stub_still_answers_its_control_commands() {
         );
         assert_eq!(
             cpu.mem.read_u16(tls + 0x20).unwrap(),
-            0,
+            POINTER_BUFFER_SIZE,
             "type {msg_type}: not a size"
         );
         // And no handle came with it: a size is not an object.
@@ -2302,9 +2302,8 @@ fn vi_reads_a_control_request_in_either_encoding() {
     // parcel transaction for it, answering a size query with a failed binder
     // reply.
     //
-    // The size has to be 0 either way, so that a caller marshals every
-    // `SfBufferAttr_HipcAutoSelect` buffer as a map-alias range -- the only
-    // buffer form this IPC layer implements.
+    // The size is the same either way: it is the session's, not the
+    // interface's, and it is answered before the request reaches `vi` at all.
     const VI: u64 = 0xB400;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -2322,9 +2321,8 @@ fn vi_reads_a_control_request_in_either_encoding() {
         );
         assert_eq!(
             cpu.mem.read_u16(tls + 0x20).unwrap(),
-            0,
-            "type {msg_type}: a non-zero pointer buffer size asks for a buffer form \
-             nothing here marshals"
+            POINTER_BUFFER_SIZE,
+            "type {msg_type}: not a size"
         );
     }
 

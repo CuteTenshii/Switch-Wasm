@@ -63,21 +63,12 @@ impl Cpu {
         cmd_id: Option<u32>,
     ) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
-        const QUERY_POINTER_BUFFER_SIZE: u32 = 3;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
                 Some(CONVERT_TO_DOMAIN) => {
                     let obj = self.alloc_domain_object();
                     self.record_domain_object(handle, obj, "ldr:ro");
                     self.write_ipc_response(tls, 0, &[], &obj.to_le_bytes(), &[])
-                }
-                // Nothing on this interface carries a buffer, so the size a
-                // caller marshals against does not matter — but 0 is the
-                // answer every other service here gives, and it is the one
-                // that keeps a caller off the pointer-buffer path this IPC
-                // layer does not read.
-                Some(QUERY_POINTER_BUFFER_SIZE) => {
-                    self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[])
                 }
                 _ => self.unimplemented_command(tls, "ldr:ro-control", cmd_id),
             };
