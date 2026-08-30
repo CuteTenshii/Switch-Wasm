@@ -143,6 +143,9 @@ pub struct NvDrv {
     next_fd: u32,
     /// Transfer-memory size the guest handed us in `Initialize`.
     pub transfer_mem_size: u32,
+    /// The applet the session belongs to, from `SetAruid`. There is one
+    /// applet here, so it is recorded and never consulted.
+    pub applet_resource_user_id: u64,
     pub initialized: bool,
     /// The two zero-bandwidth-clear tables `/dev/nvhost-ctrl-gpu` keeps,
     /// addressed by `NVGPU_ZBC_TYPE_COLOR` and `..._DEPTH`.
@@ -163,6 +166,7 @@ impl NvDrv {
             files: HashMap::new(),
             next_fd: 1,
             transfer_mem_size: 0,
+            applet_resource_user_id: 0,
             initialized: false,
             zbc_color: ZbcTable::default(),
             zbc_depth: ZbcTable::default(),

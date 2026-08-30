@@ -11,7 +11,8 @@ impl Cpu {
     /// The `INvDrvServices` interface: the guest's door to the GPU.
     ///
     /// Command ids follow libnx's `services/nv.c`: 0 Open, 1 Ioctl, 2 Close,
-    /// 3 Initialize, 4 QueryEvent, 8 SetClientPID, 11 Ioctl2, 12 Ioctl3.
+    /// 3 Initialize, 4 QueryEvent, 8 SetAruid (libnx calls it SetClientPID),
+    /// 11 Ioctl2, 12 Ioctl3.
     /// Every one of them answers with a `u32` NvError (Open also returns the
     /// fd), and the ioctl argument struct travels as a map-alias buffer in
     /// each direction.
@@ -195,11 +196,45 @@ impl Cpu {
                 }
                 self.write_ipc_reply(tls, 0, &[handle], &[], &error.to_le_bytes(), &[])
             }
-            // SetClientPID / everything else: acknowledge with no out data.
+            // SetAruid(u64 AppletResourceUserId) -> u32 error: which
+            // applet's nvmap handles and address spaces an fd belongs to.
+            // There is one applet here, so the id is recorded and nothing
+            // reads it -- but the out word is not optional, and answering
+            // with an empty reply is the short-reply bug fixed at Initialize.
+            Some(8) => {
+                self.nv.applet_resource_user_id = self.mem.read_u64(data).unwrap_or(0);
+                self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
+            }
+            // Everything else: acknowledge with no out data.
             _ => {
                 self.warn_stub("nvdrv", cmd_id, "accepted with no reply data");
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::cpu::ipc::testing::*;
+    use crate::cpu::Cpu;
+
+    #[test]
+    fn set_aruid_answers_with_the_error_word_its_callers_read() {
+        // `SetAruid` (libnx's `nvSetClientPID`) returns a `u32` NvError like
+        // every other nv command. It used to fall through the catch-all and
+        // reply with an empty raw section, which read as success only because
+        // the reply's padding is zeroed -- a caller that checks the declared
+        // size instead, as libtransistor does, sees a short reply.
+        let aruid = 0x0123_4567_89ab_cdefu64;
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        marshal(&mut cpu, false, 8, &aruid.to_le_bytes());
+        cpu.nvdrv_request(TLS, Some(8), 9).unwrap();
+
+        // 4 words of SFCO header, one of out data, four of padding.
+        assert_eq!(cpu.mem.read_u32(TLS + 4).unwrap(), 9);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "NvError_Success");
+        assert_eq!(cpu.nv.applet_resource_user_id, aruid);
     }
 }

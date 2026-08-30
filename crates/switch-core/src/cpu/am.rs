@@ -1036,16 +1036,23 @@ impl Cpu {
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
-                // GetLibraryAppletLaunchableEvent /
-                // GetAccumulatedSuspendedTickChangedEvent: copy handles the
-                // caller stores and later waits on. `libnx`'s `appletInitialize`
-                // asks for the second one on 6.0.0+ and keeps whatever handle
-                // came back, so answering with success and *no* handle left it
-                // holding 0 — the same shape of bug that had `nnSdk`'s system
-                // worker waiting on handle 0.
-                Some(9) | Some(91) => {
+                // GetLibraryAppletLaunchableEvent: real AM signals it as it
+                // hands it over, and nothing here contends for the right to
+                // launch one. Left dark — which it was, sharing the arm below
+                // — an applet that waits for permission never gets it.
+                Some(9) => {
+                    let h = self.kept_event("am:library-applet-launchable", handle);
+                    self.signal_event(h);
+                    self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
+                }
+                // GetAccumulatedSuspendedTickChangedEvent: fires when the
+                // count at 90 moves, and nothing here ever suspends. The
+                // handle still has to be real — `libnx`'s `appletInitialize`
+                // asks on 6.0.0+ and keeps whatever came back, so a reply with
+                // no handle left it holding 0.
+                Some(91) => {
                     self.warn_stub(&iface, cmd_id, "an event nothing here ever signals");
-                    let h = self.alloc_event("am:self-controller", true);
+                    let h = self.kept_event("am:accumulated-suspended-tick-changed", handle);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
                 // GetAccumulatedSuspendedTickValue: nothing has ever been
@@ -1895,13 +1902,33 @@ mod tests {
         );
         assert_eq!(cpu.event_name(event), Some("am:gpu-error"));
 
-        // ISelfController::GetAccumulatedSuspendedTickChangedEvent.
+        // ISelfController::GetAccumulatedSuspendedTickChangedEvent, which
+        // never fires because nothing here suspends.
         let mut cpu = request(false, 91, &[]);
         cpu.register_service_handle(9, "am:self-controller");
         cpu.applet_request(TLS, 9, Some(91)).unwrap();
         let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
         assert_ne!(event, 0);
-        assert_eq!(cpu.event_name(event), Some("am:self-controller"));
+        assert_eq!(
+            cpu.event_name(event),
+            Some("am:accumulated-suspended-tick-changed")
+        );
+        assert_eq!(cpu.event_signaled(event), Some(false));
+
+        // ISelfController::GetLibraryAppletLaunchableEvent shared that arm and
+        // so went out dark. Real AM signals it as it hands it over, and the
+        // same object comes back on every ask -- an event allocated afresh per
+        // call is one nothing can ever signal.
+        let mut cpu = request(false, 9, &[]);
+        cpu.register_service_handle(9, "am:self-controller");
+        cpu.applet_request(TLS, 9, Some(9)).unwrap();
+        let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(event, 0);
+        assert_eq!(cpu.event_name(event), Some("am:library-applet-launchable"));
+        assert_eq!(cpu.event_signaled(event), Some(true));
+
+        cpu.applet_request(TLS, 9, Some(9)).unwrap();
+        assert_eq!(u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap()), event);
     }
 
     #[test]
