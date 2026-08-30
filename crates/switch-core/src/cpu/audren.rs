@@ -516,11 +516,20 @@ impl Cpu {
                 }
                 self.write_ipc_response(tls, 0, &[], &written.to_le_bytes(), &[])
             }
-            // SetAudioDeviceOutputVolume: there is one volume and the host
-            // owns it.
-            Some(1) | Some(7) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // GetAudioDeviceOutputVolume -> f32, full scale.
-            Some(2) | Some(8) => self.write_ipc_response(tls, 0, &[], &1.0f32.to_le_bytes(), &[]),
+            // SetAudioDeviceOutputVolume(f32, name in a buffer). The host
+            // owns the volume that is actually played, but the setting is
+            // still the caller's to read back — see `AudioControl`.
+            Some(1) | Some(7) => {
+                let volume = f32::from_bits(self.mem.read_u32(self.ipc_request_data(tls))?);
+                self.audio_control.set_device_volume(volume);
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // GetAudioDeviceOutputVolume -> f32: whatever was last set, full
+            // scale until something sets otherwise.
+            Some(2) | Some(8) => {
+                let volume = self.audio_control.device_volume();
+                self.write_ipc_response(tls, 0, &[], &volume.to_le_bytes(), &[])
+            }
             // GetActiveAudioDeviceName / ...Auto / GetActiveAudioOutputDeviceName.
             Some(3) | Some(10) | Some(13) => {
                 if let Some((addr, len)) = self.ipc_output_buffer(tls, 0) {

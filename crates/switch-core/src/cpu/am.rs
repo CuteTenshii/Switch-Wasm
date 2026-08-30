@@ -163,6 +163,11 @@ pub(crate) fn applet_interface_version(program_id: u64) -> u32 {
         // 9.0.0 and later, whose argument is 0x10A8 bytes against the 0xB0 a
         // version 1 caller sends.
         APPLET_MY_PAGE => 0x1_0000,
+        // The browser numbers its own by firmware too. Funimation launches
+        // both the offline and the general web applet with 0x80000 —
+        // `WebAppletVersion::Version524288`, 8.0.0 and later — which is the
+        // only version an 18.0.1 browser reads its argument under.
+        APPLET_WEB => 0x8_0000,
         _ => 1,
     }
 }
@@ -173,6 +178,8 @@ const APPLET_SWKBD: u32 = 0x11;
 const APPLET_CONTROLLER: u32 = 0x0C;
 /// `AppletId_LibraryAppletMyPage`.
 const APPLET_MY_PAGE: u32 = 0x1A;
+/// `AppletId_LibraryAppletWeb`.
+const APPLET_WEB: u32 = 0x13;
 
 /// The launch storages a library applet's caller pushes after the common
 /// arguments — the ones only its caller could fill in.
@@ -195,6 +202,7 @@ pub(crate) fn applet_launch_storages(program_id: u64) -> Vec<Vec<u8>> {
         APPLET_SWKBD => vec![swkbd_config(), vec![0u8; SWKBD_WORK_BUFFER_SIZE]],
         APPLET_CONTROLLER => vec![controller_support_arg_private(), controller_support_arg()],
         APPLET_MY_PAGE => vec![my_page_arg()],
+        APPLET_WEB => vec![web_arg()],
         _ => vec![vec![0u8; GENERIC_SIZE]],
     }
 }
@@ -237,6 +245,45 @@ fn my_page_arg() -> Vec<u8> {
     // have asked for one of its other pages.
     arg[..4].copy_from_slice(&0u32.to_le_bytes());
     arg[USER_ID..USER_ID + 16].copy_from_slice(&super::acc::ACCOUNT_UID);
+    arg
+}
+
+/// The browser's argument: a `WebArgHeader` naming which of the five browser
+/// applets this is, then a packed list of `{u16 type, u16 size, u32 pad}`
+/// entries and their data.
+///
+/// The shape is Funimation's, read off its own launches rather than guessed:
+/// it pushes 12 entries for the general web applet and 13 for the offline one,
+/// and pads every URL and path to [`WEB_URL_SIZE`] whatever the string's
+/// length. The entries past the URL are display and input settings the applet
+/// has defaults for; the two that decide anything are the shim kind and the
+/// page to open.
+fn web_arg() -> Vec<u8> {
+    /// `ShimKind_Web`: the general browser, which is what `AppletId` 0x13 is.
+    const SHIM_WEB: u32 = 5;
+    /// `WebArgInputTLVType_InitialURL`.
+    const TLV_INITIAL_URL: u16 = 1;
+    /// The width a caller pads every URL to. Funimation spends all 0xC00 bytes
+    /// of it on a 51-character address.
+    const WEB_URL_SIZE: usize = 0xC00;
+    /// `WebCommonTLVStorage`, the fixed storage the list travels in.
+    const WEB_ARG_SIZE: usize = 0x2000;
+    const HEADER_SIZE: usize = 8;
+    const TLV_SIZE: usize = 8;
+    /// Where the applet is pointed with no caller to name a page. Nothing here
+    /// serves it and there is no network stack to reach anything else, so this
+    /// is a page that fails to load by construction rather than a real address
+    /// this emulator would quietly fetch.
+    const DEFAULT_URL: &str = "http://localhost/";
+
+    let mut arg = vec![0u8; WEB_ARG_SIZE];
+    arg[0..2].copy_from_slice(&1u16.to_le_bytes());
+    arg[4..8].copy_from_slice(&SHIM_WEB.to_le_bytes());
+    arg[8..10].copy_from_slice(&TLV_INITIAL_URL.to_le_bytes());
+    arg[10..12].copy_from_slice(&(WEB_URL_SIZE as u16).to_le_bytes());
+    let url = DEFAULT_URL.as_bytes();
+    let at = HEADER_SIZE + TLV_SIZE;
+    arg[at..at + url.len()].copy_from_slice(url);
     arg
 }
 
@@ -1368,6 +1415,20 @@ impl Cpu {
                 Some(12) | Some(14) => {
                     let info = home_menu_identity();
                     self.write_ipc_response(tls, 0, &[], &info, &[])
+                }
+                // CanUseApplicationCore -> bool: whether this applet may run
+                // on the core an application would hold. Real `am` answers
+                // from the applet's own NPDM core mask; nothing here schedules
+                // by core, and false is what Eden reports for every applet.
+                Some(13) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // GetMainAppletApplicationDesiredLanguage -> an
+                // `nn::settings::LanguageCode`, the language the *caller's*
+                // title runs in rather than the console's. Both are the same
+                // `en-US` `IApplicationFunctions::GetDesiredLanguage` reports.
+                Some(60) => {
+                    let mut code = [0u8; 8];
+                    code[..5].copy_from_slice(b"en-US");
+                    self.write_ipc_response(tls, 0, &[], &code, &[])
                 }
                 // GetCallerAppletIdentityInfoStack -> s32 count, with the
                 // entries themselves in a map-alias out buffer: this applet's

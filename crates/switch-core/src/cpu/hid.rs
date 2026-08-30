@@ -366,6 +366,12 @@ impl Cpu {
                     let styles = super::supported_npad_style_set();
                     self.write_ipc_response(tls, 0, &[], &styles.to_le_bytes(), &[])
                 }
+                // GetNpadCaptureButtonAssignment(u64 aruid) -> u64 count,
+                // with the buttons themselves in an out buffer: which button
+                // each pad has been assigned as its capture button. None of
+                // them has one, so the count is zero and the buffer is left
+                // alone — which is what Eden's `hid` does for an empty list.
+                Some(313) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
                 // SetNpadSystemExtStateEnabled(bool, u64 aruid): whether the
                 // caller may be handed pads in the SystemExt style. There is
                 // one process here, and `NPAD_PRESENTATIONS` already

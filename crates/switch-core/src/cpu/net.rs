@@ -24,6 +24,73 @@ use std::collections::VecDeque;
 use super::Cpu;
 use crate::Result;
 
+/// One trusted root from the firmware's certificate store.
+#[derive(Debug)]
+pub(super) struct SslCertificate {
+    /// `CaCertificateId`, the number a caller names this root by. Signed
+    /// because -1 is `All`, which is how a caller asks for every one of them.
+    id: i32,
+    /// `TrustedCertStatus`: whether the root is trusted, revoked or disabled.
+    /// Passed through as the store recorded it — a caller acts on it.
+    status: u32,
+    /// The certificate itself, DER-encoded.
+    der: Vec<u8>,
+}
+
+/// The system data archive the certificate store lives in, and the file inside
+/// it. It is firmware rather than anything `ssl` carries, so the store is only
+/// there when a firmware directory was registered.
+const CERT_STORE_DATA_ID: u64 = 0x0100_0000_0000_0800;
+const CERT_STORE_PATH: &str = "/ssl_TrustedCerts.bdf";
+
+/// `CaCertificateId_All`, which a caller sends alone to ask for every root
+/// rather than naming them one at a time.
+const CERT_ID_ALL: i32 = -1;
+
+/// `BuiltInCertificateInfo`, the fixed-width record `GetCertificates` writes
+/// one of per certificate — plus a terminator — ahead of the DER bytes.
+const CERT_INFO_SIZE: u32 = 0x18;
+
+/// Parse `ssl_TrustedCerts.bdf`: an `sslT` header giving a count, that many
+/// 0x10-byte entries, and the DER bodies the entries point into. Offsets are
+/// measured from the end of the header.
+fn parse_cert_store(data: &[u8]) -> Vec<SslCertificate> {
+    const MAGIC: u32 = u32::from_le_bytes(*b"sslT");
+    const HEADER_SIZE: usize = 8;
+    const ENTRY_SIZE: usize = 0x10;
+    let read_u32 = |at: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(data.get(at..at + 4)?.try_into().ok()?))
+    };
+    if read_u32(0) != Some(MAGIC) {
+        return Vec::new();
+    }
+    let Some(count) = read_u32(4) else {
+        return Vec::new();
+    };
+    let mut certs = Vec::new();
+    for index in 0..count as usize {
+        let at = HEADER_SIZE + index * ENTRY_SIZE;
+        let (Some(id), Some(status), Some(size), Some(offset)) = (
+            read_u32(at),
+            read_u32(at + 4),
+            read_u32(at + 8),
+            read_u32(at + 12),
+        ) else {
+            break;
+        };
+        let from = HEADER_SIZE + offset as usize;
+        let Some(der) = data.get(from..from.saturating_add(size as usize)) else {
+            continue;
+        };
+        certs.push(SslCertificate {
+            id: id as i32,
+            status,
+            der: der.to_vec(),
+        });
+    }
+    certs
+}
+
 /// One open `bsd:u` socket.
 ///
 /// A socket here can be created, configured, bound and listened on, and can
@@ -247,6 +314,27 @@ impl Cpu {
                     self.ssl_interface_version = self.mem.read_u32(data)?;
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // GetCertificateBufSize(ids in a buffer) -> u32 size: how
+                // much room `GetCertificates` will need, which a caller asks
+                // for first so it can allocate it.
+                Some(3) => {
+                    let ids = self.ssl_requested_ids(tls);
+                    let (size, _) = self.ssl_certificate_extent(&ids);
+                    self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
+                }
+                // GetCertificates(ids) -> u32 count, with the certificates in
+                // an out buffer: a `BuiltInCertificateInfo` per root and a
+                // terminator, then the DER bodies they point at.
+                //
+                // An *empty* store is not a neutral answer here. The browser
+                // asks on startup, and answering zero aborted it 10.7M steps
+                // in — the same place a refused command did. Given a store it
+                // runs on to 588M steps.
+                Some(2) => {
+                    let ids = self.ssl_requested_ids(tls);
+                    let count = self.ssl_write_certificates(tls, &ids)?;
+                    self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
+                }
                 // FlushSessionCache: nothing has been cached to flush.
                 Some(6) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
@@ -270,10 +358,142 @@ impl Cpu {
                 }
                 // GetConnectionCount: none, and none can be made — see below.
                 Some(3) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+                // ImportServerPki / ImportClientPki(format, certificates in a
+                // buffer) -> a u64 id naming what was imported. The chain is
+                // only ever verified against a peer, and there are no peers,
+                // so the certificates are accepted and the id is all a caller
+                // gets back — which is what it needs to remove them again at
+                // 6 and 7. The browser imports its own before it will draw.
+                Some(4) | Some(5) => {
+                    let id = self.ssl_next_pki_id;
+                    self.ssl_next_pki_id = id.wrapping_add(1);
+                    self.write_ipc_response(tls, 0, &[], &id.to_le_bytes(), &[])
+                }
+                // RemoveServerPki / RemoveClientPki(id): nothing was kept, so
+                // there is nothing to drop.
+                Some(6) | Some(7) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             _ => self.unimplemented_command(tls, &iface, cmd_id),
         }
+    }
+
+    /// The certificates a request named, as `CaCertificateId`s read out of its
+    /// input buffer. A single `All` — or no buffer at all — means every root.
+    fn ssl_requested_ids(&mut self, tls: u32) -> Vec<i32> {
+        let Some((addr, len)) = self.ipc_input_buffer(tls, 0) else {
+            return vec![CERT_ID_ALL];
+        };
+        let mut ids = Vec::new();
+        for index in 0..len / 4 {
+            match self.mem.read_u32(addr.wrapping_add(index * 4)) {
+                Ok(id) => ids.push(id as i32),
+                Err(_) => break,
+            }
+        }
+        if ids.is_empty() {
+            ids.push(CERT_ID_ALL);
+        }
+        ids
+    }
+
+    /// Load the firmware's certificate store on the first ask and keep it.
+    fn ssl_certificate_store(&mut self) -> &[SslCertificate] {
+        if self.ssl_certificates.is_none() {
+            let mut certs = Vec::new();
+            if let Some(src) = self.data_archives.get(&CERT_STORE_DATA_ID) {
+                let mut image = vec![0u8; src.len() as usize];
+                if src.read_at(0, &mut image).is_ok() {
+                    if let Some(file) = crate::romfs::RomFs::parse(&image)
+                        .ok()
+                        .and_then(|romfs| romfs.read_path(CERT_STORE_PATH))
+                    {
+                        certs = parse_cert_store(file);
+                    }
+                }
+            }
+            if certs.is_empty() {
+                self.diagnostic(
+                    crate::trace::Level::Warn,
+                    "[ssl] no certificate store — a browser aborts without one; register a \
+                     firmware directory",
+                );
+            }
+            self.ssl_certificates = Some(certs);
+        }
+        self.ssl_certificates.as_deref().unwrap_or(&[])
+    }
+
+    /// Whether a certificate is one this request asked for.
+    fn ssl_wanted(ids: &[i32], cert: &SslCertificate) -> bool {
+        ids == [CERT_ID_ALL] || ids.contains(&cert.id)
+    }
+
+    /// The size `GetCertificates` needs for `ids`, and how many it will write.
+    /// Every DER body is padded to a 4-byte boundary so that each record after
+    /// it starts aligned, and the terminator is counted whether or not any
+    /// certificate matched.
+    fn ssl_certificate_extent(&mut self, ids: &[i32]) -> (u32, u32) {
+        let mut size = CERT_INFO_SIZE;
+        let mut count = 0u32;
+        let store = self.ssl_certificate_store();
+        for cert in store {
+            if !Self::ssl_wanted(ids, cert) {
+                continue;
+            }
+            size += CERT_INFO_SIZE + (cert.der.len() as u32).next_multiple_of(4);
+            count += 1;
+        }
+        (size, count)
+    }
+
+    /// Write the records and the DER bodies into the request's out buffer, and
+    /// answer with how many certificates went in. A buffer too small for what
+    /// [`Cpu::ssl_certificate_extent`] reported is left alone: a caller that
+    /// ignored the size it asked for would otherwise be handed a record whose
+    /// offset points past the end of its own allocation.
+    fn ssl_write_certificates(&mut self, tls: u32, ids: &[i32]) -> Result<u32> {
+        let (size, count) = self.ssl_certificate_extent(ids);
+        let Some((addr, len)) = self.ipc_output_buffer(tls, 0) else {
+            return Ok(0);
+        };
+        if len < size {
+            return Ok(0);
+        }
+        // The bodies start past every record, the terminator included.
+        let mut der_at = (count + 1) * CERT_INFO_SIZE;
+        let mut info_at = 0u32;
+        let store = std::mem::take(&mut self.ssl_certificates).unwrap_or_default();
+        for cert in &store {
+            if !Self::ssl_wanted(ids, cert) {
+                continue;
+            }
+            let mut info = [0u8; CERT_INFO_SIZE as usize];
+            info[0..4].copy_from_slice(&cert.id.to_le_bytes());
+            info[4..8].copy_from_slice(&cert.status.to_le_bytes());
+            info[8..16].copy_from_slice(&(cert.der.len() as u64).to_le_bytes());
+            info[16..24].copy_from_slice(&u64::from(der_at).to_le_bytes());
+            for (index, &byte) in info.iter().enumerate() {
+                self.mem
+                    .write_u8(addr.wrapping_add(info_at + index as u32), byte)?;
+            }
+            for (index, &byte) in cert.der.iter().enumerate() {
+                self.mem
+                    .write_u8(addr.wrapping_add(der_at + index as u32), byte)?;
+            }
+            info_at += CERT_INFO_SIZE;
+            der_at += (cert.der.len() as u32).next_multiple_of(4);
+        }
+        self.ssl_certificates = Some(store);
+        // The terminator: `CaCertificateId_All` with an empty body, which is
+        // how a reader knows it has reached the end of the records.
+        let mut end = [0u8; CERT_INFO_SIZE as usize];
+        end[0..4].copy_from_slice(&CERT_ID_ALL.to_le_bytes());
+        for (index, &byte) in end.iter().enumerate() {
+            self.mem
+                .write_u8(addr.wrapping_add(info_at + index as u32), byte)?;
+        }
+        Ok(count)
     }
 
     /// `sfdnsres` (`IResolver`): the DNS resolver, and the other half of the

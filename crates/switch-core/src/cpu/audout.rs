@@ -109,6 +109,12 @@ pub(super) struct AudioControl {
     /// itself when something else is playing.
     headphone_output_level_mode: u32,
     speaker_auto_mute: bool,
+    /// `IAudioDevice`'s own output volume, which is a different setting from
+    /// `master_volume` above and belongs to whoever last set it. Kept because
+    /// a caller reads it straight back: the web applet sets a volume, gets the
+    /// answer to `GetAudioDeviceOutputVolumeAuto`, and aborts if it is not the
+    /// one it just asked for.
+    device_volume: f32,
 }
 
 impl Default for AudioControl {
@@ -122,6 +128,23 @@ impl Default for AudioControl {
             force_mute_policy: 0,
             headphone_output_level_mode: 0,
             speaker_auto_mute: false,
+            device_volume: 1.0,
+        }
+    }
+}
+
+impl AudioControl {
+    /// `IAudioDevice`'s output volume, as last set.
+    pub(super) fn device_volume(&self) -> f32 {
+        self.device_volume
+    }
+
+    /// Record what a caller set it to. A volume that is not a real number is
+    /// dropped rather than stored: it would come back out of the getter and
+    /// fail the same comparison a wrong value would.
+    pub(super) fn set_device_volume(&mut self, volume: f32) {
+        if volume.is_finite() {
+            self.device_volume = volume;
         }
     }
 }

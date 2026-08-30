@@ -514,6 +514,26 @@ pub const VAMM_TOTAL_MEMORY_SIZE: u32 = 0x3800_0000;
 /// the 16 MiB an application's NPDM declares.
 pub const VAMM_SYSTEM_RESOURCE_SIZE: u32 = 0x0100_0000;
 
+/// The regions for a firmware **library applet**, which takes both routes at
+/// once and so fits neither layout above.
+///
+/// `LibAppletWeb` claims a Vamm arena and *then* asks `svcSetHeapSize` for
+/// 0x1480_0000 — 328 MiB, a constant of its own rather than anything
+/// `svcGetInfo` reports it. [`VAMM_HEAP_REGION_SIZE`] is 128 MiB because a
+/// Vamm *title* grows through the alias region and leaves the heap unused, so
+/// the applet's ask was refused forty times over and it took a fatal 566k
+/// steps in, before it had asked `am` for anything.
+///
+/// An applet never makes the 880 MiB alias reservation that region was shrunk
+/// for, so it can be given a real heap without charging Just Dance 2023 for
+/// it: 512 MiB here still leaves 2.66 GiB of alias region against the
+/// 1022 MiB [`VAMM_ARENA_SIZE`] an applet's own SDK claims.
+pub const APPLET_HEAP_REGION_SIZE: u32 = 0x2000_0000;
+pub const APPLET_ALIAS_REGION_ADDR: u32 =
+    GUEST_HEAP_REGION_ADDR.wrapping_add(APPLET_HEAP_REGION_SIZE);
+pub const APPLET_ALIAS_REGION_SIZE: u32 =
+    SHARED_BUFFER_ADDR.wrapping_sub(APPLET_ALIAS_REGION_ADDR);
+
 /// The address space a process is given, which is not the same for every
 /// process.
 ///
@@ -581,6 +601,18 @@ impl MemoryLayout {
         system_resource: VAMM_SYSTEM_RESOURCE_SIZE,
     };
 
+    /// The layout for a firmware library applet: a heap it can actually grow,
+    /// paid for out of an alias region it reserves nothing in. See
+    /// [`APPLET_HEAP_REGION_SIZE`] for why an applet needs its own.
+    pub const APPLET: MemoryLayout = MemoryLayout {
+        heap_addr: GUEST_HEAP_REGION_ADDR,
+        heap_size: APPLET_HEAP_REGION_SIZE,
+        alias_addr: APPLET_ALIAS_REGION_ADDR,
+        alias_size: APPLET_ALIAS_REGION_SIZE,
+        total_memory: APPLET_HEAP_REGION_SIZE,
+        system_resource: VAMM_SYSTEM_RESOURCE_SIZE,
+    };
+
     /// The layout a title's declared `system_resource_size` selects. Zero —
     /// which is also what a container with no readable manifest yields —
     /// means the plain heap.
@@ -590,6 +622,17 @@ impl MemoryLayout {
         } else {
             MemoryLayout::VIRTUAL_ADDRESS
         }
+    }
+
+    /// The layout for a process, which is [`Self::for_system_resource`] unless
+    /// the program is one of the firmware's library applets — those declare a
+    /// system resource but spend their memory the way a plain title does, and
+    /// [`Self::APPLET`] is the only layout that serves both.
+    pub fn for_program(program_id: u64, size: u32) -> MemoryLayout {
+        if size != 0 && crate::cpu::am::is_library_applet(program_id) {
+            return MemoryLayout::APPLET;
+        }
+        MemoryLayout::for_system_resource(size)
     }
 }
 
@@ -1182,9 +1225,13 @@ pub struct Cpu {
     /// grows with whatever a title writes into it.
     save_data_quota: fs::SaveDataQuota,
     /// The address space this process was given, chosen from its NPDM's
-    /// declared system resource size. Defaults to [`MemoryLayout::PLAIN`],
-    /// which is what homebrew and a container with no readable manifest get.
+    /// declared system resource size and its program id. Defaults to
+    /// [`MemoryLayout::PLAIN`], which is what homebrew and a container with no
+    /// readable manifest get.
     memory_layout: MemoryLayout,
+    /// The `system_resource_size` the NPDM declared, kept because the layout
+    /// depends on the program id as well and the two arrive in either order.
+    system_resource_size: u32,
     /// The system shared buffer's nvmap `(handle, id)` once an applet has
     /// asked for it, and the slot the next acquire hands out.
     shared_buffer: Option<(u32, u32)>,
@@ -1364,6 +1411,14 @@ pub struct Cpu {
     ssl_interface_version: u32,
     ssl_contexts: u32,
     ssl_options: HashMap<(u64, u32), u32>,
+    /// The built-in CA certificates, parsed from the firmware's certificate
+    /// store the first time something asks and kept. `None` until then; an
+    /// empty list means the store was looked for and is not there.
+    ssl_certificates: Option<Vec<net::SslCertificate>>,
+    /// The next `ServerPkiId`/`ClientPkiId` an import hands back. Ids are
+    /// distinct so that a caller holding two can remove the right one; they
+    /// start at 1 because 0 is the id a caller reads as "nothing imported".
+    ssl_next_pki_id: u64,
     /// Events a service handed out, keyed by what the event is for and which
     /// object handed it out. A caller that asks for the same event twice has
     /// to be given the same handle back, or it waits on a copy nothing would
@@ -1690,6 +1745,7 @@ impl Cpu {
             display_resolution_event: None,
             save_data_quota: fs::SaveDataQuota::default(),
             memory_layout: MemoryLayout::PLAIN,
+            system_resource_size: 0,
             shared_buffer: None,
             shared_buffer_slot: 0,
             applet_focus_announced: false,
@@ -1735,6 +1791,8 @@ impl Cpu {
             ssl_interface_version: 0,
             ssl_contexts: 0,
             ssl_options: HashMap::new(),
+            ssl_certificates: None,
+            ssl_next_pki_id: 1,
             service_events: HashMap::new(),
             backlight: settings::Backlight::default(),
             audio_control: audout::AudioControl::default(),
@@ -3875,7 +3933,17 @@ impl Cpu {
     /// [`Cpu::boot_retail_program`]; the guest reads the resulting figures
     /// out of `svcGetInfo` as soon as `nn::init` runs.
     pub fn set_system_resource_size(&mut self, size: u32) {
-        self.memory_layout = MemoryLayout::for_system_resource(size);
+        self.system_resource_size = size;
+        self.refresh_memory_layout();
+    }
+
+    /// Re-choose the layout from whichever of the program id and the declared
+    /// system resource size have been set. Both setters call it: `common` sets
+    /// the size first and the browser sets the id first, and a layout that
+    /// depended on the order would be right in one caller and wrong in the
+    /// other.
+    fn refresh_memory_layout(&mut self) {
+        self.memory_layout = MemoryLayout::for_program(self.program_id, self.system_resource_size);
     }
 
     /// The address space this process was given.
@@ -3885,6 +3953,7 @@ impl Cpu {
 
     pub fn set_program_id(&mut self, program_id: u64) {
         self.program_id = program_id;
+        self.refresh_memory_layout();
     }
 
     /// The program id `pm` reports, as set by [`Cpu::set_program_id`].

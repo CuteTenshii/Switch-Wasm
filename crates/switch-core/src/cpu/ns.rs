@@ -83,6 +83,11 @@ impl Cpu {
                 }
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
+            // `IVulnerabilityManagerInterface::NeedsUpdateVulnerability` ->
+            // bool: whether the firmware this console runs is one the system
+            // must be updated away from. It is not, and the web applet aborts
+            // on 2010-0221 rather than carry on without an answer.
+            "ns:vm" if cmd_id == Some(1200) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
             "ns:am2" | "ns:ec" | "ns:rid" | "ns:rt" | "ns:web" | "ns:ro" | "ns:vm" | "ns:dev" => {
                 match cmd_id {
                     // The ids are `libnx`'s (`nsGet*Interface` in `ns.c`), which
