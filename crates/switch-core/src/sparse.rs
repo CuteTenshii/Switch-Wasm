@@ -97,8 +97,8 @@ impl SparseTable {
                 STORAGE_DATA => {}
                 other => {
                     return Err(Error::Nca(format!(
-                        "sparse entry {i} names storage {other}, which is neither the body nor a hole"
-                    )))
+                    "sparse entry {i} names storage {other}, which is neither the body nor a hole"
+                )))
                 }
             }
             if entry.phys > self.body_len {
@@ -245,7 +245,10 @@ mod tests {
         let stored = crate::source::SliceSource(&body[..table.offset as usize]);
 
         let mut all = vec![0xAAu8; whole.len()];
-        assert_eq!(sparse.read_raw(&stored, len, 0, &mut all).unwrap(), whole.len());
+        assert_eq!(
+            sparse.read_raw(&stored, len, 0, &mut all).unwrap(),
+            whole.len()
+        );
         assert_eq!(all, whole);
 
         // Ranges inside each kind of range and across every boundary.
@@ -282,7 +285,10 @@ mod tests {
         let len = whole.len() as u64;
 
         let mut out = vec![0u8; 0x40];
-        assert_eq!(sparse.read_raw(&stored, len, len - 0x10, &mut out).unwrap(), 0x10);
+        assert_eq!(
+            sparse.read_raw(&stored, len, len - 0x10, &mut out).unwrap(),
+            0x10
+        );
         assert_eq!(sparse.read_raw(&stored, len, len, &mut out).unwrap(), 0);
     }
 

@@ -46,7 +46,11 @@ fn a_store_of_its_own_base_transfers_the_value_it_started_with() {
         0xE8A0_0003, // stmia r0!, {r0, r1}
     ]);
     assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), SCRATCH);
-    assert_eq!(r(&cpu, 0), SCRATCH + 8, "and the base still walks past both");
+    assert_eq!(
+        r(&cpu, 0),
+        SCRATCH + 8,
+        "and the base still walks past both"
+    );
 }
 
 /// `push {..., lr}` / `pop {..., pc}` is how every A32 function returns, so a
@@ -97,7 +101,11 @@ fn the_halfword_and_doubleword_forms() {
     assert_eq!(r(&cpu, 0), 0xFFFF, "a halfword load zero-extends");
     assert_eq!(r(&cpu, 2), 0xFFFF_FFFF, "a signed byte load sign-extends");
     assert_eq!(r(&cpu, 3), 0xFFFF_FFFF, "and so does a signed halfword");
-    assert_eq!((r(&cpu, 6), r(&cpu, 7)), (4, 5), "a doubleword moves a pair");
+    assert_eq!(
+        (r(&cpu, 6), r(&cpu, 7)),
+        (4, 5),
+        "a doubleword moves a pair"
+    );
 }
 
 #[test]

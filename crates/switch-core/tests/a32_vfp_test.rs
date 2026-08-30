@@ -130,7 +130,11 @@ fn the_one_operand_arithmetic() {
 fn abs_and_neg_move_the_sign_bit_of_a_nan() {
     let nan = 0xFFC0_0000u32; // a negative quiet NaN
     let cpu = with_singles(f32::from_bits(nan), 0.0, &[0xEEF0_1AC0, 0xEE11_3A90]);
-    assert_eq!(r(&cpu, 3), 0x7FC0_0000, "vabs cleared the sign and kept the payload");
+    assert_eq!(
+        r(&cpu, 3),
+        0x7FC0_0000,
+        "vabs cleared the sign and kept the payload"
+    );
 }
 
 #[test]
@@ -165,7 +169,11 @@ fn a_comparison_reaches_the_condition_flags_only_through_vmrs() {
     code.push(0xEEF1_FA10); // vmrs APSR_nzcv, fpscr
     code.push(0x43A0_3003); // movmi r3, #3   -- now taken: 1.0 < 2.0 sets N
     let cpu = run(&code);
-    assert_eq!(r(&cpu, 2), 1, "vcmp alone does not move the condition flags");
+    assert_eq!(
+        r(&cpu, 2),
+        1,
+        "vcmp alone does not move the condition flags"
+    );
     assert_eq!(r(&cpu, 3), 3, "vmrs does");
 }
 

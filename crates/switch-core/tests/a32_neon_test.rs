@@ -25,10 +25,9 @@ fn run(code: &[u32]) -> Cpu {
 
 /// A quad register holding four `f32` lanes.
 fn quad(values: [f32; 4]) -> u128 {
-    values
-        .iter()
-        .enumerate()
-        .fold(0u128, |acc, (i, v)| acc | (u128::from(v.to_bits()) << (32 * i)))
+    values.iter().enumerate().fold(0u128, |acc, (i, v)| {
+        acc | (u128::from(v.to_bits()) << (32 * i))
+    })
 }
 
 fn lanes(cpu: &Cpu, q: u8) -> [f32; 4] {
@@ -193,7 +192,11 @@ fn the_multiply_by_element_broadcasts_one_lane() {
     }
     cpu.mem.map(BASE, &bytes).unwrap();
     cpu.run(2).unwrap();
-    assert_eq!(lanes(&cpu, 2), [100.0, 200.0, 300.0, 400.0], "vmul by d2[1]");
+    assert_eq!(
+        lanes(&cpu, 2),
+        [100.0, 200.0, 300.0, 400.0],
+        "vmul by d2[1]"
+    );
 }
 
 /// `VEXT` slides a window across the pair, and shares its `1011` opcode field

@@ -100,7 +100,11 @@ fn a_register_shift_of_zero_changes_nothing() {
         0xE1B0_4310, // movs r4, r0, lsl r3   (amount 0x00 after masking)
     ]);
     assert_eq!(r(&cpu, 2), 0xFF);
-    assert_eq!(r(&cpu, 4), 0xFF, "only the bottom byte of the amount counts");
+    assert_eq!(
+        r(&cpu, 4),
+        0xFF,
+        "only the bottom byte of the amount counts"
+    );
 }
 
 #[test]
