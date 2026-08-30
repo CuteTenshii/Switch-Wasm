@@ -15,6 +15,7 @@
 //! against QEMU's `target/arm/tcg/a64.decode`.
 
 use crate::mem::Memory;
+use crate::trace::Level;
 use crate::IdMap;
 use crate::{Error, Result};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -1050,8 +1051,12 @@ pub struct Cpu {
     pub trace: Vec<u8>,
     /// When true, each executed instruction is appended to `trace`.
     pub trace_enabled: bool,
-    /// Safety cap on the trace buffer to avoid unbounded growth.
+    /// Safety cap on the trace buffer. Past it the oldest text goes, not the
+    /// newest — see [`Cpu::trim_trace`].
     trace_cap: usize,
+    /// Text was dropped to stay under `trace_cap` and the host has not been
+    /// told yet. See [`Cpu::note_dropped_trace`].
+    trace_dropped: bool,
     pub halted: bool,
     /// The clock, in cycles of the 1.02 GHz CPU `svcGetSystemTick` is scaled
     /// from. One retired instruction is one cycle — but it is **not** an
@@ -1496,8 +1501,6 @@ pub struct Cpu {
     /// The app's window buffer queue: where rendered frames are handed to the
     /// display.
     pub display: crate::display::BufferQueue,
-    /// Log every nvdrv IPC request to stderr (`TRACE_NV`).
-    pub trace_nv: bool,
     /// Guest threads. Index 0 is the main thread; entries are appended by
     /// `svcCreateThread`. The running thread's registers are the `Cpu` fields,
     /// so its slot here is only up to date while another thread runs.
@@ -1660,6 +1663,7 @@ impl Cpu {
             trace: Vec::new(),
             trace_enabled: false,
             trace_cap: 512 * 1024,
+            trace_dropped: false,
             halted: false,
             cycles: 0,
             steps: 0,
@@ -1779,7 +1783,6 @@ impl Cpu {
             fs: crate::vfs::Vfs::new(),
             nv: crate::gpu::nvdrv::NvDrv::new(),
             display: crate::display::BufferQueue::new(),
-            trace_nv: crate::env_flag!("TRACE_NV"),
             threads: Vec::new(),
             current_thread: 0,
             exclusive: None,
@@ -1792,7 +1795,6 @@ impl Cpu {
             last_present_cycles: 0,
             pending_present: None,
         };
-        cpu.nv.gpu.trace = crate::env_flag!("TRACE_GPU");
         // The framebuffer and input registers are fixed hardware-mapped
         // regions: pre-map them so reads never fault and programs (or the
         // host) can touch them before writing.
@@ -2437,14 +2439,20 @@ impl Cpu {
             Ok(crate::gpu::renderer::Flush::Done) => {
                 self.pending_present = None;
                 if let Err(e) = self.nv.gpu.present(&self.mem, &buffer) {
-                    self.diagnostic(&format!("[vi] the deferred present failed: {e}"));
+                    self.diagnostic(
+                        Level::Error,
+                        &format!("[vi] the deferred present failed: {e}"),
+                    );
                 }
             }
             Err(e) => {
                 // Dropping the frame is the only other answer: holding it
                 // would stop the display for good over one bad readback.
                 self.pending_present = None;
-                self.diagnostic(&format!("[vi] the deferred readback failed: {e}"));
+                self.diagnostic(
+                    Level::Error,
+                    &format!("[vi] the deferred readback failed: {e}"),
+                );
             }
         }
     }
@@ -2793,7 +2801,10 @@ impl Cpu {
         // only meaningful against the binary it came from, and a report
         // carrying the ranges but not the id has more than once been read
         // against the wrong title's dump.
-        self.diagnostic(&format!("[loader] program {:#018x}", self.program_id));
+        self.diagnostic(
+            Level::Info,
+            &format!("[loader] program {:#018x}", self.program_id),
+        );
         for (name, data) in modules {
             let module = crate::nso::load_nso(&mut self.mem, data, base).map_err(|e| {
                 Error::Cpu(format!("loading module {:?} at {:#x}: {}", name, base, e))
@@ -2809,7 +2820,7 @@ impl Cpu {
             // it relocates against is one it worked out, and a fault
             // afterwards is unreadable without knowing what it was supposed
             // to have found.
-            self.diagnostic(&format!(
+            self.diagnostic(Level::Info, &format!(
                 "[loader] {} at {:#010x}: text {:#010x}..{:#010x}, rodata {:#010x}..{:#010x}, data {:#010x}..{:#010x}, bss {:#010x}..{:#010x}",
                 name,
                 module.base,
@@ -3068,8 +3079,8 @@ impl Cpu {
                 auto_clear,
             },
         );
-        if crate::env_flag!("TRACE_WAIT") {
-            eprintln!("[event] {name} = {handle:#x} auto_clear={auto_clear}");
+        if crate::trace::enabled(crate::trace::Trace::Wait) {
+            crate::traceln!("[event] {name} = {handle:#x} auto_clear={auto_clear}");
         }
         handle
     }
@@ -3744,12 +3755,13 @@ impl Cpu {
                 }
             }
         }
-        if crate::env_flag!("TRACE_FONT") {
-            eprintln!("[pl] {} bytes of shared font", self.pl_shmem_image.len());
+        if crate::trace::enabled(crate::trace::Trace::Font) {
+            crate::traceln!("[pl] {} bytes of shared font", self.pl_shmem_image.len());
             for (i, region) in self.shared_font_regions.iter().enumerate() {
-                eprintln!(
+                crate::traceln!(
                     "[pl]  type {i}: offset={:#x} size={:#x}",
-                    region.offset, region.size
+                    region.offset,
+                    region.size
                 );
             }
         }
@@ -4099,17 +4111,31 @@ impl Cpu {
     }
 
     fn record_fault(&mut self, e: &Error, pc: u32, insn: u32) {
-        self.trace_line(&format!(
-            "\n=== FAULT ===\n{}\n  at pc={:#010x} insn={:#010x}  {}\n",
-            e,
-            pc,
-            insn,
-            if insn == 0 {
-                String::new()
-            } else {
-                self.disassemble_for_mode(insn)
-            }
-        ));
+        // Whatever the parts of the emulator with no `Cpu` in reach have said
+        // belongs *before* the fault, not after it: a rasterizer complaining
+        // about the draw that led here is the context, not the aftermath.
+        self.absorb_traces();
+        // The separating blank line goes in unmarked and on its own: a marker
+        // grades the line it heads, so one written in front of a leading
+        // newline would have graded the tail of whatever came before.
+        self.trace_line("\n");
+        // Marking the block makes the register dump and instruction trail
+        // below inherit the fault's level rather than arriving as ordinary
+        // trace text — they carry no marker of their own.
+        self.trace_marked(
+            Level::Error,
+            &format!(
+                "=== FAULT ===\n{}\n  at pc={:#010x} insn={:#010x}  {}",
+                e,
+                pc,
+                insn,
+                if insn == 0 {
+                    String::new()
+                } else {
+                    self.disassemble_for_mode(insn)
+                }
+            ),
+        );
         self.trace_regs(pc);
         // Show the run-up to the fault so the crash path is readable without
         // full tracing enabled. The trail holds runs rather than instructions
@@ -4172,6 +4198,27 @@ impl Cpu {
         woken
     }
 
+    /// Every `(interface, command)` this run has reported as having no
+    /// implementation behind it, sorted.
+    ///
+    /// Each of these was announced once, at the moment it happened, and then
+    /// scrolled past. Collected they are the best single answer to "why does
+    /// this title not get further", which is why a crash report carries the
+    /// list rather than asking whoever files it to have kept the log.
+    pub fn unimplemented_ipc(&self) -> Vec<(String, Option<u32>)> {
+        let mut all: Vec<(String, Option<u32>)> = self.unimplemented_ipc.iter().cloned().collect();
+        all.sort();
+        all
+    }
+
+    /// Every `(interface, command)` answered with nothing behind the answer.
+    /// See [`Cpu::warn_stub`] for why this is a different list.
+    pub fn stubbed_ipc(&self) -> Vec<(String, Option<u32>)> {
+        let mut all: Vec<(String, Option<u32>)> = self.stubbed_ipc.iter().cloned().collect();
+        all.sort();
+        all
+    }
+
     /// Make every thread the guest created but never started runnable, and
     /// report how many that was. A debugging lever only: it answers "is this
     /// process idle because a thread it made never ran" without having to find
@@ -4189,6 +4236,21 @@ impl Cpu {
 
     pub fn thread_dump(&self) -> String {
         let mut out = String::new();
+        // A program that never created a thread has no slots at all —
+        // [`Cpu::ensure_main_thread`] makes the first one on demand — and this
+        // used to answer such a run with nothing whatsoever. That is the run
+        // most likely to be asking: a single-threaded title that has stopped
+        // and one that is working look identical from outside, and "no
+        // threads" reads as a broken dump rather than as an answer.
+        if self.threads.is_empty() {
+            out.push_str(&format!(
+                "  [0]* handle={MAIN_THREAD_HANDLE:#x} state=Runnable paused=false pc={:#x}\n  \
+                 (the main thread, which has no slot of its own until the guest creates a \
+                 second)\n",
+                self.pc
+            ));
+            return out;
+        }
         for (index, thread) in self.threads.iter().enumerate() {
             let running = index == self.current_thread;
             out.push_str(&format!(
@@ -4206,24 +4268,104 @@ impl Cpu {
     /// Record a diagnostic the user needs to see wherever the emulator is
     /// running. On the host that is stderr; in the browser there is no stderr
     /// at all — `wasm32-unknown-unknown` has no WASI, so an `eprintln!` there
-    /// goes nowhere and `std::env::var` always fails, which is why the
-    /// `TRACE_*`-gated traces are CLI-only. The trace buffer is the channel
-    /// the page actually drains (`switch_drain_trace`), so anything that must
-    /// reach a browser user goes through here as well, and is recorded whether
-    /// or not per-instruction tracing is on — the same as fault context.
-    pub fn diagnostic(&mut self, line: &str) {
+    /// goes nowhere. The trace buffer is the channel the page actually drains
+    /// (`switch_drain_trace`), so anything that must reach a browser user goes
+    /// through here as well, and is recorded whether or not per-instruction
+    /// tracing is on — the same as fault context.
+    ///
+    /// `level` is not decoration. A title's `fatal` abort, a stubbed-out
+    /// command and a loader milestone all used to arrive as the same grey
+    /// text, so the one that explains the failure had to be found by reading;
+    /// the level travels with the line and the page colours by it.
+    pub fn diagnostic(&mut self, level: Level, line: &str) {
+        // Not `traceln!`: that also feeds the pending sink, and this line is
+        // already on its way into the trace buffer the sink drains into.
+        #[cfg(not(target_arch = "wasm32"))]
         eprintln!("{line}");
-        self.trace_line(&format!("{line}\n"));
+        self.absorb_traces();
+        self.trace_marked(level, line);
     }
 
-    fn trace_line(&mut self, line: &str) {
-        if self.trace.len() >= self.trace_cap {
-            if !self.trace.ends_with(b"\n[TRACE TRUNCATED]\n") {
-                self.trace.extend_from_slice(b"\n[TRACE TRUNCATED]\n");
-            }
+    /// Fold in whatever the parts of the emulator that have no `Cpu` in reach
+    /// — the rasterizer, the shader translator, the texture decoder — have
+    /// traced since the last time anything looked.
+    ///
+    /// Ordering between the two is only as good as how often this is called,
+    /// which is why it runs before every diagnostic and every fault as well as
+    /// at the drain.
+    pub fn absorb_traces(&mut self) {
+        let pending = crate::trace::take_pending();
+        if pending.is_empty() {
             return;
         }
+        self.note_dropped_trace();
+        self.trace.extend_from_slice(&pending);
+        self.trim_trace();
+    }
+
+    /// Append a line that carries no level of its own, and so reads as a
+    /// continuation of the one before it — a register dump under a fault, an
+    /// instruction under a trace.
+    fn trace_line(&mut self, line: &str) {
+        self.note_dropped_trace();
         self.trace.extend_from_slice(line.as_bytes());
+        self.trim_trace();
+    }
+
+    /// Append a line at `level`, which every line after it inherits until
+    /// another marked one arrives.
+    fn trace_marked(&mut self, level: Level, line: &str) {
+        self.note_dropped_trace();
+        self.trace.push(level.marker());
+        self.trace.extend_from_slice(line.as_bytes());
+        if !line.ends_with('\n') {
+            self.trace.push(b'\n');
+        }
+        self.trim_trace();
+    }
+
+    /// Say that text was lost, once per loss, at the point it was lost.
+    ///
+    /// A counter reported at the end would have been simpler and would have
+    /// said the wrong thing: what matters about a gap is where in the stream
+    /// it is, and a note written at the drain claims the loss happened last.
+    fn note_dropped_trace(&mut self) {
+        if !self.trace_dropped {
+            return;
+        }
+        self.trace_dropped = false;
+        self.trace.push(Level::Warn.marker());
+        self.trace
+            .extend_from_slice(b"[trace] the buffer filled; older lines above were dropped\n");
+    }
+
+    /// Bring the trace back under its cap by dropping the oldest text.
+    ///
+    /// It used to drop the newest — once the buffer was full nothing more was
+    /// appended at all — which threw away precisely the part worth keeping: a
+    /// fault writes its `=== FAULT ===` block, its register dump and its
+    /// instruction trail *after* everything that led up to them, so a run with
+    /// tracing on lost its entire crash report and kept half a megabyte of
+    /// ordinary disassembly.
+    ///
+    /// A quarter of the buffer goes at a time, so a full buffer costs one move
+    /// per 128 KiB rather than one per line, and the cut lands on a line
+    /// boundary so the host is never handed half a line or a level marker with
+    /// nothing behind it.
+    fn trim_trace(&mut self) {
+        if self.trace.len() <= self.trace_cap {
+            return;
+        }
+        let least = self.trace.len() - self.trace_cap;
+        let want = (least + self.trace_cap / 4).min(self.trace.len());
+        let cut = match self.trace[want..].iter().position(|&b| b == b'\n') {
+            Some(at) => want + at + 1,
+            // No line ending anywhere past the cut: one line is longer than
+            // the whole buffer, and keeping its tail is keeping nothing.
+            None => self.trace.len(),
+        };
+        self.trace.drain(..cut);
+        self.trace_dropped = true;
     }
 
     fn trace_regs(&mut self, pc: u32) {

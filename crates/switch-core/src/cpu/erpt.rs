@@ -7,6 +7,7 @@
 //! report and cannot then find it concludes the journal is broken.
 
 use super::Cpu;
+use crate::trace::Level;
 use crate::Result;
 
 /// One category's worth of context `erpt` is holding, as the caller submitted
@@ -446,9 +447,9 @@ impl Cpu {
                 fields: data.clone(),
             });
         }
-        if crate::env_flag!("TRACE_ERPT") {
+        if crate::trace::enabled(crate::trace::Trace::Erpt) {
             for &category in &categories {
-                eprintln!("[erpt] context {}", Self::erpt_category_name(category));
+                crate::traceln!("[erpt] context {}", Self::erpt_category_name(category));
             }
         }
         categories
@@ -497,8 +498,8 @@ impl Cpu {
                 entry,
                 fields: data.clone(),
             });
-            if crate::env_flag!("TRACE_ERPT") {
-                eprintln!("[erpt] context {}", Self::erpt_category_name(category));
+            if crate::trace::enabled(crate::trace::Trace::Erpt) {
+                crate::traceln!("[erpt] context {}", Self::erpt_category_name(category));
             }
         }
     }
@@ -551,13 +552,16 @@ impl Cpu {
                 .collect::<Vec<_>>()
                 .join(", "),
         };
-        self.diagnostic(&format!(
-            "[erpt] {} report {} filed: {about} ({} categories journalled, {} bytes)",
-            Self::erpt_report_type_name(report_type),
-            Self::erpt_id_text(&id),
-            self.erpt_contexts.len(),
-            body.len()
-        ));
+        self.diagnostic(
+            Level::Warn,
+            &format!(
+                "[erpt] {} report {} filed: {about} ({} categories journalled, {} bytes)",
+                Self::erpt_report_type_name(report_type),
+                Self::erpt_id_text(&id),
+                self.erpt_contexts.len(),
+                body.len()
+            ),
+        );
         if self.erpt_reports.len() >= ERPT_REPORT_COUNT_MAX {
             self.erpt_reports.remove(0);
         }

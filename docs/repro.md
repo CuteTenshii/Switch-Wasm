@@ -44,10 +44,12 @@ The `.nro`/`.nsp` files are gitignored.
 - **Checking the WebGPU backend**: run `screenshot_title` and `switch-gpu`'s
   `screenshot_gpu` over the same frame and `cmp` the PPMs. `GPU_ONLY=<i>` puts
   only the i-th draw on the device, so a difference is exactly one draw's.
-- Tracing is environment-gated and **host-only** (`TRACE_IPC`, `TRACE_SVC`,
-  `TRACE_WAIT`, `TRACE_NV`, `TRACE_GPU`, and a dozen more): wasm has no WASI,
-  so `std::env::var` always fails there. Browser diagnostics go through
-  `Cpu::diagnostic`.
+- Tracing is one mask with nineteen channels (`TRACE_IPC`, `TRACE_SVC`,
+  `TRACE_WAIT`, `TRACE_NV`, `TRACE_GPU`, ...). The environment seeds it, so a
+  CLI run sets them exactly as it always did; in the browser the same nineteen
+  are checkboxes under **Diagnostic channels** in the debug panel, because
+  `std::env::var` always fails on wasm. `switch_core::trace::ALL` is the list
+  both read from.
 - `--example opus_testvectors <dir>` — the Opus decoder against the RFC 8251
   vectors (`opus_testvectors-rfc8251.tar.gz` from opus-codec.org). It fails on
   the first packet whose range coder state disagrees with the encoder's, and

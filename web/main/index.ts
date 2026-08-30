@@ -10,7 +10,7 @@ import { watchBattery } from './battery';
 import { initFbSize, resetDisplay } from './display';
 import { $ } from './dom';
 import { hasKeys, stageKeys, updateKeysState } from './keys';
-import { clearConsole, log } from './log';
+import { clearConsole, log, offerPreviousLog } from './log';
 import { initNand } from './nand';
 import { call, initWorker, setSession, whenReady } from './rpc';
 import { updatePc } from './runloop';
@@ -21,11 +21,11 @@ import { reopenContainer } from './container';
 import { recycleSession, stageFont } from './session';
 import { setRunning } from './title';
 import { beginLoad, endLoad, failLoad, loadPhase } from './loading';
+import { initTraceChannels } from './debug';
 
 // Registered for their side effects: each of these owns a part of the page and
 // binds its own controls when it is loaded.
 import './boot';
-import './debug';
 import './dock';
 import './input';
 
@@ -47,8 +47,17 @@ async function init(): Promise<void> {
     loadPhase('restoring save data');
     await saveRestore();
     await initFbSize();
-    $('wasm-ver').textContent = 'core ready';
-    log('core ready', 'dim');
+    // The build, named on the status bar and in the log. A report that does
+    // not say which code produced it can only be read by guessing at its age,
+    // and this is the line somebody copies without being asked to.
+    const version = await call('version');
+    $('wasm-ver').textContent = 'core ' + version;
+    log('core ready - build ' + version, 'dim');
+    // The debug panel's channel switches come from the core, so they can only
+    // be built once there is a core to ask.
+    await initTraceChannels();
+    // And whether the run before this one ended without saying so.
+    await offerPreviousLog();
     // Restore persisted keys into the session.
     if (hasKeys()) {
       loadPhase('staging keys');

@@ -84,6 +84,64 @@ export interface GpuReport {
   };
 }
 
+/** One diagnostic channel the emulator can be asked for, as the core names
+ *  it. The name is the environment variable a CLI run would set, so the page
+ *  offers exactly what a shell does rather than keeping a second list. */
+export interface TraceChannel {
+  name: string;
+  bit: number;
+  on: boolean;
+}
+
+/** One service command a title asked for and did not get. `cmd` is null when
+ *  the request carried no command id to name. */
+export interface IpcGap {
+  iface: string;
+  cmd: number | null;
+}
+
+/** What a title asked for and did not get, in two lists because they are
+ *  different claims: `unimplemented` was refused outright, `stubbed` was
+ *  answered with nothing behind the answer. */
+export interface IpcGaps {
+  unimplemented: IpcGap[];
+  stubbed: IpcGap[];
+}
+
+/** Everything worth putting in a bug report about one run.
+ *
+ *  `panicked` is what decides how the rest reads: a clean fault stopped the
+ *  guest, a panic stopped the emulator, and the second is a bug in the
+ *  emulator whatever the guest was doing. `session` is null when the report
+ *  was asked for after the session had gone -- which is a report worth having
+ *  anyway, since it still names the build. */
+export interface CrashReport {
+  version: string;
+  panicked: boolean;
+  traceMask: number;
+  lastError?: string;
+  title?: { id: string; name?: string; version?: string };
+  cpu?: {
+    pc: number;
+    mode: string;
+    steps: number;
+    cycles: number;
+    halted: boolean;
+    thread: number;
+    guestRam: number;
+    docked: boolean;
+  };
+  jit?: JitStats & { interpreted?: number };
+  gpu?: GpuReport;
+  backtrace?: number[];
+  registers?: string;
+  threads?: string;
+  unimplemented?: IpcGap[];
+  stubbed?: IpcGap[];
+  trace?: string;
+  session?: null;
+}
+
 export interface JitStats {
   enabled: boolean;
   blocks: number;
@@ -213,6 +271,15 @@ export interface Commands {
   drain_output(): Bytes;
   drain_trace(): Bytes;
   dump_regs(): string;
+  thread_dump(): string;
+  backtrace(depth: number): number[];
+  wake_blocked(): number;
+  start_created_threads(): number;
+  ipc_gaps(): IpcGaps;
+  crash_report(): CrashReport;
+  trace_channels(): TraceChannel[];
+  set_trace_mask(mask: number): void;
+  version(): string;
   get_pc(): number;
   get_cycles(): number;
   get_steps(): number;

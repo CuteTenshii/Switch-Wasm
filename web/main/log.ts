@@ -2,40 +2,75 @@
    DevTools so it can be filtered by severity there too. */
 
 import { $, el } from './dom';
+import { LOG_KEY, LOG_STORE, idbApply, idbGet, logIdb } from './db';
 import { openPanel } from './shell';
 
-export type LogClass = 'err' | 'ok' | 'dim';
+export type LogClass = 'err' | 'warn' | 'ok' | 'dim';
 
 const consoleEl = $('console');
 const autoscrollCb = $<HTMLInputElement>('autoscroll-cb');
 const TAG = '[switch-wasm]';
 
+/** How many entries the console keeps on the page.
+ *
+ *  It kept all of them, and every entry is its own element: with the
+ *  instruction trace on, a run puts tens of thousands into the document and
+ *  the page slows to a crawl laying them out -- while `Copy all` walks every
+ *  one of them. The text is kept in `backlog` either way, so what is dropped
+ *  here is dropped from the *view*, not from what gets copied or saved. */
+const SHOWN_MAX = 2000;
+
+/** How many entries the log keeps at all.
+ *
+ *  Larger than the view by a lot, because this is what a bug report is cut
+ *  from, and smaller than unbounded because a session left running overnight
+ *  should not end as a tab the browser kills. */
+const KEPT_MAX = 50_000;
+
+/** Every entry, in order, whether or not it is still on the page. */
+const backlog: string[] = [];
+
 export function log(msg: string, cls?: LogClass): void {
   // Real browser console (DevTools): route by severity for filterability.
   if (cls === 'err') console.error(TAG, msg);
+  else if (cls === 'warn') console.warn(TAG, msg);
   else if (cls === 'ok') console.info(TAG, msg);
   else if (cls === 'dim') console.debug(TAG, msg);
   else console.log(TAG, msg);
+
+  backlog.push(msg);
+  if (backlog.length > KEPT_MAX) backlog.splice(0, backlog.length - KEPT_MAX);
+  mirrorDirty = true;
+
   // On-page console mirror.
   consoleEl.appendChild(el('div', cls, msg));
+  while (consoleEl.childElementCount > SHOWN_MAX) consoleEl.firstElementChild!.remove();
   if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
   // Anything that went wrong is worth surfacing even with the panel closed.
   if (cls === 'err') openPanel('console');
 }
 
+/** Log a block of text one entry per line, at one level.
+ *
+ *  What arrives from the emulator is a stream, not a line: a fault is its
+ *  message, a register dump and an instruction trail, and pushing all of that
+ *  into a single element makes it one unbreakable row the console scrolls
+ *  sideways for. */
+export function logBlock(text: string, cls?: LogClass): void {
+  for (const line of text.replace(/\n$/, '').split('\n')) log(line, cls);
+}
+
 export function clearConsole(): void {
   consoleEl.textContent = '';
+  backlog.length = 0;
 }
 
 $('btn-clear-console').addEventListener('click', clearConsole);
 
-/** The whole on-page log as text, one line per entry.
- *
- *  Not `consoleEl.textContent`: every entry is its own `<div>`, and that
- *  property concatenates their text with nothing in between, so a register
- *  dump and the trace after it would arrive as one unbroken line. */
-function consoleText(): string {
-  return Array.from(consoleEl.children).map((node) => node.textContent).join('\n');
+/** The whole log as text, one line per entry -- including the entries the
+ *  view has since dropped. */
+export function consoleText(): string {
+  return backlog.join('\n');
 }
 
 const copyBtn = $('btn-copy-console');
@@ -72,20 +107,193 @@ function copyViaSelection(text: string): boolean {
   return ok;
 }
 
+/** Put `text` on the clipboard, however this context allows. */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // No clipboard API, or the permission was refused.
+    return copyViaSelection(text);
+  }
+}
+
 async function copyConsole(): Promise<void> {
   const text = consoleText();
   if (!text) {
     flashCopyLabel('Log is empty');
     return;
   }
-  try {
-    await navigator.clipboard.writeText(text);
-    flashCopyLabel('Copied');
-    return;
-  } catch {
-    // Fall through: no clipboard API, or the permission was refused.
-  }
-  flashCopyLabel(copyViaSelection(text) ? 'Copied' : 'Copy failed');
+  flashCopyLabel(await copyText(text) ? 'Copied' : 'Copy failed');
 }
 
 copyBtn.addEventListener('click', copyConsole);
+
+/** Offer `text` as a file to save.
+ *
+ *  The clipboard is not enough on its own: a log worth reporting is tens of
+ *  thousands of lines, a crash takes the tab that holds it, and a phone has
+ *  nowhere to paste it. */
+export function download(name: string, text: string, type = 'text/plain'): void {
+  const url = URL.createObjectURL(new Blob([text], { type: `${type};charset=utf-8` }));
+  const link = el('a');
+  link.href = url;
+  link.download = name;
+  link.click();
+  // Not before the click: revoking the URL is revoking the download.
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/** A filename stamp that sorts, and that names the moment rather than the
+ *  locale: two reports from one session must not collide. */
+export function stamp(): string {
+  return new Date().toISOString().replace(/[:.]/g, '-').replace('Z', '');
+}
+
+/* Surviving the tab.
+
+   Everything else that can go wrong here leaves the page alive: a wasm trap
+   unwinds into the run loop, which then reads the panic message and dumps the
+   context, and the log is still there to be saved. What is not survivable is
+   the browser killing the tab -- which an emulator that maps gigabytes of
+   guest memory is a candidate for -- and after that a reload has nothing at
+   all to say about what was happening.
+
+   So the log is mirrored, on a timer rather than per line: with the
+   instruction trace on this would otherwise be a database write per
+   instruction. What is kept is the tail, because a cap that can be reached is
+   better than a store that grows until the browser evicts the whole origin --
+   which would take the SD card and the NAND with it. */
+const MIRROR_EVERY_MS = 5000;
+const MIRRORED_MAX = 4000;
+
+let mirrorDirty = false;
+
+setInterval(() => {
+  if (!mirrorDirty) return;
+  mirrorDirty = false;
+  void mirrorLog();
+}, MIRROR_EVERY_MS);
+
+async function mirrorLog(): Promise<void> {
+  try {
+    const tail = backlog.slice(-MIRRORED_MAX).join('\n');
+    await idbApply(await logIdb(), LOG_STORE, [[LOG_KEY, tail]]);
+  } catch {
+    // Private browsing, a refused quota, an evicted origin. The log is still
+    // on the page; only the copy that would outlive it is lost, and saying so
+    // in the log would be a line per attempt.
+  }
+}
+
+/** The log from the session before this one, if the browser kept it.
+ *
+ *  Read once at startup and then cleared, so that "previous" always means the
+ *  run before this one rather than the oldest run that ever crashed. */
+export async function takePreviousLog(): Promise<string> {
+  try {
+    const db = await logIdb();
+    const previous = await idbGet<string>(db, LOG_STORE, LOG_KEY);
+    if (!previous) return '';
+    await idbApply(db, LOG_STORE, [[LOG_KEY, null]]);
+    return previous;
+  } catch {
+    return '';
+  }
+}
+
+/* Whether the session before this one closed itself.
+
+   The mirrored log is worth offering only when it is the account of a run that
+   did not get to finish -- otherwise every ordinary reload nags about the last
+   one. `pagehide` is the signal, and this is `localStorage` rather than the
+   database the log itself lives in because a `pagehide` handler is not given
+   time to await anything: a synchronous write is the only kind that reliably
+   lands there. A tab the browser kills never runs the handler, which is
+   exactly the case being detected. */
+const RUNNING_KEY = 'switch-wasm-running';
+
+function endedCleanly(): boolean {
+  try {
+    return localStorage.getItem(RUNNING_KEY) === null;
+  } catch {
+    // No storage at all: treat every run as clean rather than warning about
+    // sessions this page cannot know anything about.
+    return true;
+  }
+}
+
+function markRunning(running: boolean): void {
+  try {
+    if (running) localStorage.setItem(RUNNING_KEY, '1');
+    else localStorage.removeItem(RUNNING_KEY);
+  } catch {
+    // See `endedCleanly`.
+  }
+}
+
+window.addEventListener('pagehide', () => markRunning(false));
+
+/* The mark is per origin, not per tab, so a second tab opened beside a first
+   sees it set and would report the *live* tab as a session that died. Asking
+   is what tells the two apart: a tab that is still there answers, and a tab
+   the browser killed cannot. */
+const TAB_CHANNEL = 'switch-wasm-tabs';
+const TAB_ANSWER_MS = 250;
+
+/* Who is asking. A `BroadcastChannel` withholds a message only from the object
+   that sent it, *not* from the rest of the page -- so the answering channel
+   below is delivered this page's own ping and used to answer it, which made
+   every session look as though it had a live sibling and suppressed the offer
+   entirely. The id is what the two halves tell each other apart by. */
+const TAB_ID = Math.random().toString(36).slice(2);
+
+interface TabMessage {
+  ask?: string;
+  answer?: string;
+}
+
+function anotherTabIsLive(): Promise<boolean> {
+  if (typeof BroadcastChannel === 'undefined') return Promise.resolve(false);
+  return new Promise((resolve) => {
+    const channel = new BroadcastChannel(TAB_CHANNEL);
+    const done = (live: boolean) => { channel.close(); resolve(live); };
+    channel.onmessage = (e) => {
+      if ((e.data as TabMessage)?.answer === TAB_ID) done(true);
+    };
+    channel.postMessage({ ask: TAB_ID } satisfies TabMessage);
+    setTimeout(() => done(false), TAB_ANSWER_MS);
+  });
+}
+
+if (typeof BroadcastChannel !== 'undefined') {
+  const channel = new BroadcastChannel(TAB_CHANNEL);
+  channel.onmessage = (e) => {
+    const ask = (e.data as TabMessage)?.ask;
+    if (ask && ask !== TAB_ID) channel.postMessage({ answer: ask } satisfies TabMessage);
+  };
+}
+
+/** Offer the previous session's log, if there is one worth offering. */
+export async function offerPreviousLog(): Promise<void> {
+  const clean = endedCleanly() || await anotherTabIsLive();
+  markRunning(true);
+  const previous = await takePreviousLog();
+  if (clean || !previous) return;
+  const button = $('btn-save-previous');
+  button.hidden = false;
+  button.addEventListener('click', () => {
+    download(`switch-wasm-log-previous-${stamp()}.txt`, previous);
+  });
+  log('The previous session ended without closing its log - "Save previous" in the console bar '
+    + 'has what it had said by then.', 'warn');
+}
+
+$('btn-save-console').addEventListener('click', () => {
+  const text = consoleText();
+  if (!text) {
+    flashCopyLabel('Log is empty');
+    return;
+  }
+  download(`switch-wasm-log-${stamp()}.txt`, text);
+});

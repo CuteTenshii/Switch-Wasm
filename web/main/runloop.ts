@@ -1,12 +1,12 @@
 /* The run loop, and the status bar it keeps up to date. */
 
 import { pumpAudio } from './audio';
-import { drainDiagnostics, drainTrace, traceEnabled } from './debug';
+import { drainDiagnostics, drainTrace, logTrace, traceEnabled } from './debug';
 import { countEmulation, presentIfNewFrame, renderFb } from './display';
 import { $ } from './dom';
 import { formatBytes } from './format';
 import { bootDetail, endLoad } from './loading';
-import { log } from './log';
+import { log, logBlock, type LogClass } from './log';
 import { call, readLastError } from './rpc';
 import { saveFlush } from './saves';
 import { sdFlush } from './sdcard';
@@ -116,10 +116,10 @@ export async function run(): Promise<void> {
       setState('fault');
       // `RuntimeError: unreachable` is what a Rust panic looks like from here:
       // the release profile aborts on panic, and an abort on wasm is a trap
-      // with nothing in it. The hook `switch_new` installs caught the real
-      // message on the way down, and `switch_last_error` hands it back without
-      // needing a live session -- so ask, rather than report the trap and lose
-      // the one line that says what happened.
+      // with nothing in it. The panic hook caught the real message on the way
+      // down, and `switch_last_error` hands it back without needing a live
+      // session -- so ask, rather than report the trap and lose the one line
+      // that says what happened.
       let why = (err as Error).message;
       try {
         const captured = await readLastError();
@@ -129,6 +129,11 @@ export async function run(): Promise<void> {
         // saying on its own.
       }
       log('The run loop stopped: ' + why, 'err');
+      // A trap does not destroy linear memory -- reading the message back is
+      // already proof of that -- so the context is still there to be had, and
+      // this is the last moment anyone can have it. A panic reported as one
+      // line is a panic that has to be reproduced before it can be looked at.
+      await reportPanicContext();
     }
     return;
   } finally {
@@ -137,6 +142,31 @@ export async function run(): Promise<void> {
     releaseWakeLock();
   }
   await finishRun(steps);
+}
+
+/** After a trap: everything about where the emulator was when it stopped.
+ *
+ *  Each of these can fail on its own -- the module is, by definition, in a
+ *  state nobody designed -- so each is asked for separately and a refusal
+ *  costs only that one piece. */
+async function reportPanicContext(): Promise<void> {
+  const parts: [string, () => Promise<string>][] = [
+    ['registers', () => call('dump_regs')],
+    ['threads', () => call('thread_dump')],
+    ['trace', () => drainTrace()],
+  ];
+  for (const [what, ask] of parts) {
+    try {
+      const text = await ask();
+      if (!text) continue;
+      if (what === 'trace') logTrace(text);
+      else logBlock(text, 'dim');
+    } catch {
+      log(`The module could not be asked for its ${what}.`, 'dim');
+    }
+  }
+  log('Take a crash report from the debug panel before resetting - a reset is what loses this.',
+    'warn');
 }
 
 /** Stop the loop because the session itself is going away (Reset). Pausing
@@ -180,10 +210,25 @@ window.addEventListener('keydown', (e) => {
   }
 });
 
+/* What the guest itself printed, at the severity the guest gave it.
+
+   `cpu/log.rs` decodes the severity out of every `lm` packet and writes it
+   into the line as `[lm/ERROR]`. Logging the whole drain as one unclassified
+   block threw that away again: a title reporting an error looked exactly like
+   the same title printing a frame counter. */
+const GUEST_LEVELS: Record<string, LogClass> = {
+  FATAL: 'err',
+  ERROR: 'err',
+  WARN: 'warn',
+  INFO: 'dim',
+  TRACE: 'dim',
+};
+
 export async function drainOutput(): Promise<void> {
   const bytes = await call('drain_output');
-  if (bytes && bytes.length) {
-    log(new TextDecoder().decode(bytes));
+  if (!bytes || !bytes.length) return;
+  for (const line of new TextDecoder().decode(bytes).replace(/\n$/, '').split('\n')) {
+    log(line, GUEST_LEVELS[/^\[lm\/([A-Z]+)/.exec(line)?.[1] ?? '']);
   }
 }
 
@@ -198,9 +243,10 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
     // Not necessarily the CPU's: the error names its own kind, and a
     // renderer that refused a frame used to be reported as `CPU fault: GPU:`.
     log('Fault: ' + err, 'err');
-    // The fault trace already carries the register snapshot from the CPU.
-    const t = await drainTrace();
-    if (t) log(t.replace(/\n$/, ''), 'err');
+    // The fault trace already carries the register snapshot from the CPU, and
+    // carries its own levels: the block is an error, the lines that led up to
+    // it are not.
+    logTrace(await drainTrace());
   } else if (await call('halted')) {
     setState('halted');
     log('Halted (ExitProcess)', 'ok');

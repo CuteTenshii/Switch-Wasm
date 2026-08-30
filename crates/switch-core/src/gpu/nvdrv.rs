@@ -213,7 +213,7 @@ impl NvDrv {
         self.next_fd += 1;
         self.files.insert(fd, file);
         if self.gpu.trace {
-            eprintln!(
+            crate::traceln!(
                 "[nv] open {} -> fd {}{}",
                 path,
                 fd,
@@ -271,7 +271,7 @@ impl NvDrv {
             None => return Ok(NV_BAD_PARAMETER),
         };
         if self.gpu.trace {
-            eprintln!(
+            crate::traceln!(
                 "[nv] ioctl fd={} {:?} type={:#04x} nr={:#04x} size={} ({} bytes in)",
                 fd,
                 file,
@@ -303,10 +303,12 @@ impl NvDrv {
         // drains, where this `eprintln!` goes nowhere at all.
         match &outcome {
             Ok(code) if !matches!(*code, NV_OK | NV_NOT_IMPLEMENTED | NV_NOT_SUPPORTED) => {
-                eprintln!("[nv] FAILED {file:?} type={ioc_type:#04x} nr={nr:#04x} -> {code:#x}")
+                crate::traceln!(
+                    "[nv] FAILED {file:?} type={ioc_type:#04x} nr={nr:#04x} -> {code:#x}"
+                )
             }
             Err(error) => {
-                eprintln!("[nv] ERROR {file:?} type={ioc_type:#04x} nr={nr:#04x}: {error}")
+                crate::traceln!("[nv] ERROR {file:?} type={ioc_type:#04x} nr={nr:#04x}: {error}")
             }
             _ => {}
         }
@@ -368,7 +370,7 @@ impl NvDrv {
                         .nvmap
                         .get(handle)
                         .map(|h| (h.cpu_addr, h.allocated));
-                    eprintln!(
+                    crate::traceln!(
                         "[nv] nvmap alloc handle={handle} addr={:#x} (was {was:x?})",
                         addr as u32
                     );
@@ -513,7 +515,7 @@ impl NvDrv {
             // of a Just Dance 2017 frame.
             0x1B => {
                 if self.gpu.trace {
-                    eprintln!(
+                    crate::traceln!(
                         "[nv] GetConfig {}!{} -> refused (production mode)",
                         ascii_field(data, 0, 0x41),
                         ascii_field(data, 0x41, 0x41)
@@ -798,7 +800,7 @@ impl NvDrv {
                     requested,
                 )?;
                 if self.gpu.trace {
-                    eprintln!(
+                    crate::traceln!(
                         "[nv] map handle={nvmap_handle} cpu={:#x}+{buffer_offset:#x} size={size:#x} -> gpu_va={offset:#x} (obj cpu={:#x} size={:#x})",
                         cpu_addr, handle.cpu_addr, handle.size
                     );
@@ -885,7 +887,7 @@ impl NvDrv {
                         gpu_va,
                     )?;
                     if trace {
-                        eprintln!(
+                        crate::traceln!(
                             "[nv] remap handle={nvmap_handle} cpu={cpu_addr:#x} \
                              size={size:#x} kind={kind:#x} -> gpu_va={gpu_va:#x}"
                         );
@@ -977,7 +979,7 @@ impl NvDrv {
             // GetErrorInfo / GetErrorNotification: no errors to report.
             (TYPE_CHANNEL, 0x16) | (TYPE_CHANNEL, 0x17) => {
                 if self.gpu.trace {
-                    eprintln!("[nv] channel {nr:#04x} in={:02x?}", data);
+                    crate::traceln!("[nv] channel {nr:#04x} in={:02x?}", data);
                 }
                 for byte in data.iter_mut() {
                     *byte = 0;

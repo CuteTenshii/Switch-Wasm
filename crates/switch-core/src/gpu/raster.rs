@@ -1343,25 +1343,25 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // `TRACE_PIPELINE=1`: the fixed-function state this draw runs under, as
     // a GPU backend would have to describe it — or what stopped it being
     // describable, which is the more useful half.
-    if crate::env_flag!("TRACE_PIPELINE") {
+    if crate::trace::enabled(crate::trace::Trace::Pipeline) {
         // What the viewport was resolved *from* as well as what it resolved
         // to: `Viewport::flip_y` is the sign of a scale the window origin may
         // already have flipped, and the two are not the same claim.
-        eprintln!(
+        crate::traceln!(
             "[pipe] {:?} {:?} clip_height={}",
             engine.viewport_transform(),
             engine.window_origin(),
             engine.surface_clip_height()
         );
         match crate::gpu::pipeline::Pipeline::of(engine) {
-            Ok(pipeline) => eprintln!("[pipe] {pipeline:?}"),
-            Err(e) => eprintln!("[pipe] undescribable: {e}"),
+            Ok(pipeline) => crate::traceln!("[pipe] {pipeline:?}"),
+            Err(e) => crate::traceln!("[pipe] undescribable: {e}"),
         }
     }
     // `TRACE_UPLOAD=1`: how many bytes of guest memory this draw would have
     // to be handed to a device, which is the number that decides whether
     // uploading per draw is affordable at all.
-    if crate::env_flag!("TRACE_UPLOAD") {
+    if crate::trace::enabled(crate::trace::Trace::Upload) {
         match crate::gpu::pipeline::Pipeline::of(engine)
             .map_err(|e| Error::Gpu(format!("pipeline: {e}")))
             .and_then(|p| {
@@ -1386,7 +1386,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     &immediates,
                 )
             }) {
-            Ok(uploads) => eprintln!(
+            Ok(uploads) => crate::traceln!(
                 "[up] {} bytes: {} vertex ({}), {} index, {} constant ({} banks), \
                  {} texture ({})",
                 uploads.len(),
@@ -1407,12 +1407,12 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 uploads.textures.len(),
             ),
 
-            Err(e) => eprintln!("[up] cannot resolve: {e:?}"),
+            Err(e) => crate::traceln!("[up] cannot resolve: {e:?}"),
         }
         // The other direction: what a backend holding its surfaces on the
         // device has to hand back before the guest looks at them.
         match crate::gpu::upload::Targets::of(engine) {
-            Ok(targets) => eprintln!(
+            Ok(targets) => crate::traceln!(
                 "[rt] {} bytes back: colour {:?}, depth {:?}",
                 targets.len(),
                 targets
@@ -1422,19 +1422,19 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     .depth
                     .map(|t| (t.format, t.width, t.height, t.len())),
             ),
-            Err(e) => eprintln!("[rt] cannot resolve: {e:?}"),
+            Err(e) => crate::traceln!("[rt] cannot resolve: {e:?}"),
         }
     }
     // `TRACE_CFG=1`: what each shader's control flow looks like to a
     // translator. Structured control flow is what any shading language wants
     // and what Maxwell's reconvergence stack does not have, so this is the
     // measurement that says how hard translating a given shader would be.
-    if crate::env_flag!("TRACE_CFG") {
+    if crate::trace::enabled(crate::trace::Trace::Cfg) {
         for (stage, addr, program) in [
             ("vs", vs_binding.addr, &vs_program),
             ("fs", fs_binding.addr, &fs_program),
         ] {
-            eprintln!(
+            crate::traceln!(
                 "[cfg] {stage}@{addr:#x} {}",
                 crate::gpu::shader::cfg::Cfg::new(program).describe()
             );
@@ -1449,8 +1449,16 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // Asked as a flag first: this one wants the *value*, and reading it per
     // draw would put the environment scan back in the path everything else
     // here was just taken out of.
-    if crate::env_flag!("TRACE_WGSL") {
-        let where_to = std::env::var("TRACE_WGSL").unwrap_or_default();
+    if crate::trace::enabled(crate::trace::Trace::Wgsl) {
+        // A directory to write the modules into, or nothing for the summary.
+        // Nothing is what a browser always has -- the channel is ticked on a
+        // page, and there is no environment to name a directory in -- and
+        // taking the write branch there meant one failed `std::fs::write` per
+        // shader per draw, reported as a diagnostic each time.
+        let where_to = match std::env::var("TRACE_WGSL").unwrap_or_default() {
+            dir if dir.is_empty() || dir == "1" => None,
+            dir => Some(dir),
+        };
         use crate::gpu::shader::wgsl::{self, Layout, Stage};
         for (name, stage, addr, program) in [
             ("vs", Stage::Vertex, vs_binding.addr, &vs_program),
@@ -1459,7 +1467,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             let translated = match wgsl::translate(program) {
                 Ok(translated) => translated,
                 Err(e) => {
-                    eprintln!("[wgsl] {name}@{addr:#x} untranslated: {e}");
+                    crate::traceln!("[wgsl] {name}@{addr:#x} untranslated: {e}");
                     continue;
                 }
             };
@@ -1471,7 +1479,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 layout.depth_minus_one_to_one = pipeline.viewport.depth_minus_one_to_one();
             }
             match wgsl::module(&translated, stage, &layout) {
-                Ok(_) if where_to == "1" => eprintln!(
+                Ok(_) if where_to.is_none() => crate::traceln!(
                     "[wgsl] {name}@{addr:#x} {} regs, {} attribs, {} varyings, \
                      {} banks, {} textures",
                     translated.registers.len(),
@@ -1481,13 +1489,16 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     layout.textures.len()
                 ),
                 Ok(module) => {
-                    let path = format!("{where_to}/{name}_{addr:x}.wgsl");
+                    let dir = where_to.as_deref().unwrap_or_default();
+                    let path = format!("{dir}/{name}_{addr:x}.wgsl");
                     match std::fs::write(&path, module) {
-                        Ok(()) => eprintln!("[wgsl] {name}@{addr:#x} -> {path}"),
-                        Err(e) => eprintln!("[wgsl] {name}@{addr:#x} cannot write {path}: {e}"),
+                        Ok(()) => crate::traceln!("[wgsl] {name}@{addr:#x} -> {path}"),
+                        Err(e) => {
+                            crate::traceln!("[wgsl] {name}@{addr:#x} cannot write {path}: {e}")
+                        }
                     }
                 }
-                Err(e) => eprintln!("[wgsl] {name}@{addr:#x} no module: {e}"),
+                Err(e) => crate::traceln!("[wgsl] {name}@{addr:#x} no module: {e}"),
             }
         }
     }
@@ -1709,7 +1720,7 @@ struct DrawTally {
 impl DrawTally {
     fn new(fs_program: &Program) -> DrawTally {
         DrawTally {
-            enabled: crate::env_flag!("TRACE_DRAW"),
+            enabled: crate::trace::enabled(crate::trace::Trace::Draw),
             fs_len: fs_program.insns.len(),
             triangles: 0,
             culled: 0,
@@ -1768,7 +1779,7 @@ impl DrawTally {
             "off".to_string()
         };
         let bounds = (bounds.x0, bounds.y0, bounds.x1, bounds.y1);
-        eprintln!(
+        crate::traceln!(
             "[draw] {primitive:?} count={} indexed={} fs_ops={} bounds={bounds:?} \
              blend={blend} tris={} culled={} degen={} covered={} uncovered={} kil={} \
              a2c={} wrote={} shaded={:?} out={:?} screen={:?}",

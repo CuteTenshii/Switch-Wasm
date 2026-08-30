@@ -642,7 +642,7 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
         dump_texture(&texture, ctx, dir)?;
     }
     if trace_textures() {
-        eprintln!(
+        crate::traceln!(
             "[tex] {addr:#x} dw={dw0:#010x},{dw1:#010x},{dw2:#010x},{dw3:#010x},{dw4:#010x},\
              {dw5:#010x} sizes={:#04x} type={:#x} -> {texture:x?}",
             dw0 & 0x7f,
@@ -676,7 +676,7 @@ fn dump_texture(texture: &Texture, ctx: &ExecCtx, dir: &str) -> Result<()> {
     }
     let path = format!("{dir}/tex_{:x}_{w}x{h}.ppm", texture.addr);
     std::fs::write(&path, ppm).map_err(|e| Error::Io(format!("{path}: {e}")))?;
-    eprintln!("[tex] wrote {path}");
+    crate::traceln!("[tex] wrote {path}");
     Ok(())
 }
 
@@ -686,7 +686,7 @@ fn dump_texture(texture: &Texture, ctx: &ExecCtx, dir: &str) -> Result<()> {
 /// traces and a few dozen textures, and the descriptor is what says why a
 /// correctly-shaped image came out the wrong colour.
 fn trace_textures() -> bool {
-    crate::env_flag!("TRACE_TEX")
+    crate::trace::enabled(crate::trace::Trace::Tex)
 }
 
 /// Rearrange a decoded texel into what the shader reads.

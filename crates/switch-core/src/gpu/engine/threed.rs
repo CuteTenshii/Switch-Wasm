@@ -485,7 +485,7 @@ impl Engine3D {
             _ => {
                 ctx.stats.inert_methods += 1;
                 if ctx.trace {
-                    eprintln!("[gpu] inert method={method:#x} arg={arg:#010x}");
+                    crate::traceln!("[gpu] inert method={method:#x} arg={arg:#010x}");
                 }
             }
         }
@@ -523,9 +523,10 @@ impl Engine3D {
                 }
                 fn write_method(&mut self, write: MacroWrite) -> Result<()> {
                     if self.ctx.trace {
-                        eprintln!(
+                        crate::traceln!(
                             "[gpu] mme method={:#05x} arg={:#010x}",
-                            write.method, write.arg
+                            write.method,
+                            write.arg
                         );
                     }
                     self.engine.write(write.method, write.arg, true, self.ctx)
@@ -663,7 +664,7 @@ impl Engine3D {
     /// when a frame's draws all land on top of each other, this says what the
     /// guest varied — and by omission, what the rasterizer is failing to read.
     fn trace_reg_diff(&mut self) {
-        if !crate::env_flag!("TRACE_REGS") {
+        if !crate::trace::enabled(crate::trace::Trace::Regs) {
             return;
         }
         let now: Vec<u32> = (0..REGISTER_COUNT as u32)
@@ -676,7 +677,7 @@ impl Engine3D {
                 .filter(|(i, v)| prev[*i] != **v)
                 .map(|(i, v)| format!("{i:#x}={v:#010x}"))
                 .collect();
-            eprintln!(
+            crate::traceln!(
                 "[regs] begin={:#010x} {}",
                 self.regs.get(VERTEX_BEGIN_GL),
                 diff.join(" ")
@@ -703,7 +704,7 @@ impl Engine3D {
             // same reason — a fully culled draw leaves no trace at all.
             let rt = self.render_target(self.render_target_slot(0));
             let cull = self.cull_state();
-            eprintln!(
+            crate::traceln!(
                 "[gpu] draw {} prim={:#x} count={} cull={} -> rt0 {}",
                 ctx.stats.draws,
                 self.last_draw.primitive,
@@ -741,9 +742,11 @@ impl Engine3D {
                 // that fails and one that reads an empty buffer look the same
                 // on screen, and this is what tells them apart.
                 let va = self.vertex_array(0);
-                eprintln!(
+                crate::traceln!(
                     "[gpu] raster: {e} [vtx0 start={:#x} stride={} count={}]",
-                    va.start, va.stride, self.last_draw.count
+                    va.start,
+                    va.stride,
+                    self.last_draw.count
                 );
             }
         }
@@ -759,16 +762,23 @@ impl Engine3D {
             if a.size == 0 && !a.is_fixed {
                 continue;
             }
-            eprintln!(
+            crate::traceln!(
                 "[gpu] attrib{i} buf={} fixed={} off={:#x} size={:#x} ty={}",
-                a.buffer_id, a.is_fixed, a.offset, a.size, a.ty
+                a.buffer_id,
+                a.is_fixed,
+                a.offset,
+                a.size,
+                a.ty
             );
         }
         for i in 0..8 {
             let v = self.vertex_array(i);
-            eprintln!(
+            crate::traceln!(
                 "[gpu] stream{i} en={} stride={} start={:#x} limit={:#x}",
-                v.enabled, v.stride, v.start, v.limit
+                v.enabled,
+                v.stride,
+                v.start,
+                v.limit
             );
         }
     }
@@ -1397,11 +1407,13 @@ impl Engine3D {
                     self.regs.float(CLEAR_COLOR + 3),
                 ];
                 match self.render_target(target) {
-                    Ok(Some(rt)) => eprintln!(
+                    Ok(Some(rt)) => crate::traceln!(
                         "[gpu] clear target={target} addr={:#x} {}x{} texels colour={colour:?}",
-                        rt.addr, rt.width, rt.height
+                        rt.addr,
+                        rt.width,
+                        rt.height
                     ),
-                    other => eprintln!("[gpu] clear target={target} -> {other:x?}"),
+                    other => crate::traceln!("[gpu] clear target={target} -> {other:x?}"),
                 }
             }
             self.with_renderer(ctx, |renderer, engine, ctx| {
@@ -1442,10 +1454,14 @@ impl Engine3D {
         let (width, height) = grid.pixels(rt.width, rt.height);
         let (x0, y0, x1, y1) = self.clear_rect(width, height);
         if ctx.trace {
-            eprintln!(
+            crate::traceln!(
                 "[gpu] clear color rt{} {:#x} {width}x{height}px {}x{} samples fmt={:#x} \
                  rect=({x0},{y0})..({x1},{y1}) rgba={color:?}",
-                slot, rt.addr, grid.samples_x, grid.samples_y, rt.format.raw
+                slot,
+                rt.addr,
+                grid.samples_x,
+                grid.samples_y,
+                rt.format.raw
             );
         }
         // Every sample of a pixel is a texel of that pixel's own tile, and
@@ -1536,7 +1552,7 @@ impl Engine3D {
         let (x0, y0, x1, y1) = self.clear_rect(width, height);
         let width_bytes = texels_x * bytes;
         if ctx.trace {
-            eprintln!(
+            crate::traceln!(
                 "[gpu] clear depth {addr:#x} {width}x{height}px {}x{} samples fmt={raw_format:#x} \
                  rect=({x0},{y0})..({x1},{y1}) depth={clear_depth}/{depth} stencil={clear_stencil}/{stencil}",
                 grid.samples_x, grid.samples_y

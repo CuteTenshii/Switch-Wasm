@@ -529,6 +529,12 @@ body.resizing { cursor: col-resize; user-select: none; }
 
 .panel-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
+.checks {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 2px 10px;
+}
+
 /* ---------- collapsible section ---------- */
 
 .section {
@@ -742,6 +748,12 @@ body.resizing { cursor: col-resize; user-select: none; }
   background: rgba(255, 111, 111, .07);
 }
 .console .err::before { content: "\2715"; color: var(--red); }
+
+/* A warning is a thing that was answered wrongly or not at all, and it is
+   what a later fault usually turns out to have been caused by. Amber and no
+   tint: findable while scrolling past, without competing with the fault. */
+.console .warn { color: var(--amber); border-left-color: #5c4718; }
+.console .warn::before { content: "\26a0"; color: var(--amber); }
 
 .console .ok { color: var(--green); }
 .console .ok::before { content: "\2713"; color: var(--green); }

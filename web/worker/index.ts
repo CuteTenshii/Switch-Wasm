@@ -25,8 +25,16 @@ function reply(message: WorkerMessage, transfer?: Transferable[]): void {
 // comes next. Everything else works on the session this worker is holding.
 // `last_error` belongs here because the case it exists for is the one where
 // the session is gone or the module has trapped: `switch_last_error` returns a
-// captured panic without consulting a handle at all.
-const SESSIONLESS = new Set(['new', 'set_battery', 'last_error']);
+// captured panic without consulting a handle at all. `crash_report` is here
+// for the same reason, and answers what it can with `session: null`.
+//
+// The build identity and the diagnostic channels are the module's, not a
+// session's: the page reads the version before it has opened anything, and a
+// channel ticked between two titles stays ticked.
+const SESSIONLESS = new Set([
+  'new', 'set_battery', 'last_error',
+  'crash_report', 'version', 'trace_channels', 'set_trace_mask',
+]);
 
 /* Installing the GPU backend, once the guest has a channel to install it on.
 
@@ -256,6 +264,10 @@ ctx.onmessage = (e: MessageEvent<CallRequest>) => {
     // `switch_*` exports are on the object it returns exactly as they were
     // when the worker instantiated the module itself.
     state.exports = await init({ module_or_path: wasmUrl }) as unknown as WasmExports;
+    // Before anything else can panic. The hook used to be installed by
+    // `switch_new`, so a failure on the way to the first session trapped as a
+    // bare `unreachable` with nothing to say what had happened.
+    state.exports.switch_init();
     reply({ type: 'ready' });
   } catch (err) {
     reply({ type: 'ready', error: String(err) });

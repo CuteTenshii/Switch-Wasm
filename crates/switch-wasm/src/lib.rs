@@ -47,6 +47,7 @@ use switch_core::elf::load_elf;
 use switch_core::nca::Nca;
 use switch_core::nsp::Pfs0;
 use switch_core::source::{ByteSource, Window};
+use switch_core::trace::Level;
 
 /// Framebuffer base address, width, height and stride (RGBA, little-endian).
 pub use switch_core::{FB_BASE, FB_HEIGHT, FB_STRIDE, FB_WIDTH};
@@ -87,7 +88,35 @@ static SESSIONS: SyncCell<Vec<Option<Session>>> = SyncCell::new(Vec::new());
 
 /// Last Rust panic message captured by the panic hook (fixed buffer, so the
 /// hook itself never allocates and can't recurse).
-static PANIC_MSG: SyncCell<[u8; 512]> = SyncCell::new([0u8; 512]);
+///
+/// 512 bytes was too small to hold what a panic actually says: the payload,
+/// the file and line, and — for the assertions worth reporting — the values
+/// that failed the comparison.
+static PANIC_MSG: SyncCell<[u8; 2048]> = SyncCell::new([0u8; 2048]);
+
+/// Whether the hook has fired since the host last looked.
+///
+/// Separate from the message because the message is *taken* by
+/// [`switch_last_error`], and the crash report the page then asks for must
+/// still know that what it is reporting is a panic and not a clean fault.
+static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The largest `n <= limit` at which `s` may be cut without splitting a
+/// character.
+///
+/// `str::floor_char_boundary` is still unstable, and this crate builds on
+/// stable. A UTF-8 continuation byte is `10xxxxxx`, so walking back off them
+/// lands on the start of the character they belong to.
+fn floor_char_boundary(s: &str, limit: usize) -> usize {
+    if s.len() <= limit {
+        return s.len();
+    }
+    let mut n = limit;
+    while n > 0 && !s.is_char_boundary(n) {
+        n -= 1;
+    }
+    n
+}
 
 /// Next session-handle counter (independent of slot reuse so stale handles
 /// never alias a recycled slot).
@@ -102,6 +131,18 @@ fn session(handle: u32) -> &'static mut Session {
         .and_then(|s| s.as_mut())
         .unwrap_or_else(|| panic!("invalid session handle {handle} (slots len {len})"));
     unsafe { std::mem::transmute::<&mut Session, &'static mut Session>(slot) }
+}
+
+/// The session `handle` names, or `None` if it names none.
+///
+/// [`session`] panics instead, which is right for every command that cannot
+/// do anything useful without one. A crash report can: see
+/// [`switch_crash_report_json`].
+fn session_opt(handle: u32) -> Option<&'static mut Session> {
+    // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
+    let slots = unsafe { &mut *SESSIONS.get() };
+    let slot = slots.get_mut(handle as usize)?.as_mut()?;
+    Some(unsafe { std::mem::transmute::<&mut Session, &'static mut Session>(slot) })
 }
 
 fn new_handle(session: Session) -> u32 {
@@ -253,6 +294,9 @@ impl ByteSource for HostSource {
 /// nothing to say what had asked for what. Callers must check.
 #[no_mangle]
 pub extern "C" fn switch_alloc(len: u32) -> *mut u8 {
+    // The earliest call any host makes, and so the last chance to have a hook
+    // in place before something can panic without one.
+    install_panic_hook();
     match Layout::from_size_align(len as usize, 1) {
         Ok(layout) => unsafe { alloc(layout) },
         Err(_) => std::ptr::null_mut(),
@@ -272,20 +316,47 @@ pub extern "C" fn switch_free(ptr: *mut u8, len: u32) {
     unsafe { dealloc(ptr, layout) }
 }
 
+/// Prepare the module: install the panic hook, once.
+///
+/// Worth an export of its own because the hook used to be installed by
+/// [`switch_new`], and anything that panicked before the first session —
+/// module init, a refused allocation, a `last_error` asked for with no
+/// session — trapped with nothing captured at all. A host should call this
+/// immediately after instantiating; [`switch_new`] and [`switch_alloc`] call
+/// it too, so a host that forgets is still covered from its first allocation.
+#[no_mangle]
+pub extern "C" fn switch_init() {
+    install_panic_hook();
+}
+
+/// Surface Rust panics to the frontend — they otherwise trap silently as
+/// `unreachable` in wasm, because the release profile aborts on panic and an
+/// abort on wasm is a trap with nothing in it. The hook writes to a static
+/// buffer read back through [`switch_last_error`].
+fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            let msg = format!("PANIC: {info}");
+            // SAFETY: single-threaded wasm; the hook runs once per panic.
+            let guard = unsafe { &mut *PANIC_MSG.get() };
+            // Truncation is by character, not by byte: cutting a message in
+            // the middle of a multi-byte character leaves the page's UTF-8
+            // `TextDecoder` a replacement character to end on, and a panic
+            // message is exactly where a path or a title name — the parts
+            // most likely to be non-ASCII — get formatted in.
+            let n = floor_char_boundary(&msg, guard.len() - 1);
+            guard[..n].copy_from_slice(&msg.as_bytes()[..n]);
+            guard[n] = 0;
+            PANICKED.store(true, Ordering::Relaxed);
+        }));
+    });
+}
+
 /// Create a fresh machine, return its handle.
 #[no_mangle]
 pub extern "C" fn switch_new() -> u32 {
-    // Surface Rust panics to the frontend (they otherwise trap silently as
-    // "unreachable" in wasm). The hook appends to a static buffer read back
-    // through `switch_last_error`.
-    std::panic::set_hook(Box::new(|info| {
-        let msg = format!("PANIC: {info}");
-        // SAFETY: single-threaded wasm; the hook runs once per panic.
-        let guard = unsafe { &mut *PANIC_MSG.get() };
-        let n = msg.len().min(guard.len() - 1);
-        guard[..n].copy_from_slice(&msg.as_bytes()[..n]);
-        guard[n] = 0;
-    }));
+    install_panic_hook();
     // The framebuffer and input pages are pre-mapped by Cpu::new, and the
     // stack + low-memory shim are provided by bootstrap so libnx-style
     // homebrew gets the runtime environment the real loader sets up.
@@ -1283,26 +1354,35 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
         }
     };
     if update.is_some() {
-        cpu.diagnostic(&format!(
-            "[update] booting the update's modules for {:016x}, over this container's RomFS",
-            nca.program_id
-        ));
+        cpu.diagnostic(
+            Level::Info,
+            &format!(
+                "[update] booting the update's modules for {:016x}, over this container's RomFS",
+                nca.program_id
+            ),
+        );
     }
     // Say whether the bytes about to be executed were checked, not just that
     // they decrypted: the master hash only vouches for the section's hash
     // table, and a fault inside a title's own crt0 is worth chasing in the
     // title only once the image it ran on is known to be intact.
     match program.pfs0_hash_coverage(exefs_index) {
-        Some((block, blocks)) => cpu.diagnostic(&format!(
-            "[exefs] {:#x} bytes, {} blocks of {:#x} verified against the section hash table",
-            exefs.len(),
-            blocks,
-            block
-        )),
-        None => cpu.diagnostic(&format!(
-            "[exefs] {:#x} bytes — hash table geometry unrecognised, contents NOT verified",
-            exefs.len()
-        )),
+        Some((block, blocks)) => cpu.diagnostic(
+            Level::Info,
+            &format!(
+                "[exefs] {:#x} bytes, {} blocks of {:#x} verified against the section hash table",
+                exefs.len(),
+                blocks,
+                block
+            ),
+        ),
+        None => cpu.diagnostic(
+            Level::Warn,
+            &format!(
+                "[exefs] {:#x} bytes — hash table geometry unrecognised, contents NOT verified",
+                exefs.len()
+            ),
+        ),
     }
 
     let pfs0 = match Pfs0::parse(&exefs) {
@@ -1320,19 +1400,22 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     // Everything the ExeFS holds, next to what was actually loaded from it. A
     // title whose `sdk` or `subsdk0` were silently left behind aborts in its
     // own init looking exactly like a title that hit a missing service.
-    cpu.diagnostic(&format!(
-        "[exefs] entries: {} — loading: {}",
-        pfs0.files
-            .iter()
-            .map(|f| f.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-        modules
-            .iter()
-            .map(|(name, _)| *name)
-            .collect::<Vec<_>>()
-            .join(", ")
-    ));
+    cpu.diagnostic(
+        Level::Info,
+        &format!(
+            "[exefs] entries: {} — loading: {}",
+            pfs0.files
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            modules
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    );
     if !modules.iter().any(|(name, _)| *name == "main") {
         *last_error = "no 'main' executable in this NCA's ExeFS".into();
         return -1;
@@ -1353,14 +1436,17 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
             });
             match patched {
                 Ok(romfs) => cpu.set_romfs_source(Box::new(romfs)),
-                Err(e) => cpu.diagnostic(&format!("the update's RomFS is unreadable: {}", e)),
+                Err(e) => cpu.diagnostic(
+                    Level::Error,
+                    &format!("the update's RomFS is unreadable: {}", e),
+                ),
             }
         }
         None => {
             if let Some(romfs_index) = nca.romfs_section_index() {
                 match nca.romfs_source(nca_src, keys, romfs_index) {
                     Ok(romfs) => cpu.set_romfs_source(Box::new(romfs)),
-                    Err(e) => cpu.diagnostic(&format!("romfs unavailable: {}", e)),
+                    Err(e) => cpu.diagnostic(Level::Error, &format!("romfs unavailable: {}", e)),
                 }
             }
         }
@@ -1372,21 +1458,27 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     // the layout that pays for it. Must precede `boot_retail_program` —
     // `nn::init` reads the resulting figures as soon as it runs.
     let system_resource = switch_core::npdm::Npdm::system_resource_size_of(&pfs0, &exefs);
-    cpu.diagnostic(&format!(
-        "[npdm] system resource {system_resource:#x} — {}",
-        if system_resource == 0 {
-            "plain heap"
-        } else {
-            "virtual address memory"
-        }
-    ));
+    cpu.diagnostic(
+        Level::Info,
+        &format!(
+            "[npdm] system resource {system_resource:#x} — {}",
+            if system_resource == 0 {
+                "plain heap"
+            } else {
+                "virtual address memory"
+            }
+        ),
+    );
     cpu.set_system_resource_size(system_resource);
 
     // And which instruction set it runs, from bit 0 of the same manifest's
     // flags. Also before the boot: the entry ABI puts the return trampoline in
     // a different register in each state.
     if !switch_core::npdm::Npdm::is_64_bit_of(&pfs0, &exefs) {
-        cpu.diagnostic("[npdm] AArch32 title — running the A32 interpreter");
+        cpu.diagnostic(
+            Level::Info,
+            "[npdm] AArch32 title — running the A32 interpreter",
+        );
         cpu.set_mode(switch_core::cpu::ExecMode::A32);
     }
 
@@ -1426,20 +1518,26 @@ fn mount_add_on_content(cpu: &mut Cpu, keys: &switch_core::keys::KeySet, dlc: &[
             Ok(romfs) => {
                 let size = romfs.len();
                 match cpu.add_add_on_content(entry.content_id, Box::new(romfs)) {
-                    Some(index) => cpu.diagnostic(&format!(
-                        "[aoc] {:016x} mounted as add-on content {index}, {size:#x} bytes",
-                        entry.content_id
-                    )),
-                    None => cpu.diagnostic(&format!(
-                        "[aoc] {:016x} is not this title's add-on content — not mounted",
-                        entry.content_id
-                    )),
+                    Some(index) => cpu.diagnostic(
+                        Level::Info,
+                        &format!(
+                            "[aoc] {:016x} mounted as add-on content {index}, {size:#x} bytes",
+                            entry.content_id
+                        ),
+                    ),
+                    None => cpu.diagnostic(
+                        Level::Warn,
+                        &format!(
+                            "[aoc] {:016x} is not this title's add-on content — not mounted",
+                            entry.content_id
+                        ),
+                    ),
                 }
             }
-            Err(e) => cpu.diagnostic(&format!(
-                "[aoc] {:016x} could not be read: {e}",
-                entry.content_id
-            )),
+            Err(e) => cpu.diagnostic(
+                Level::Error,
+                &format!("[aoc] {:016x} could not be read: {e}", entry.content_id),
+            ),
         }
     }
 }
@@ -1653,6 +1751,10 @@ pub extern "C" fn switch_set_trace(handle: u32, enabled: u32) {
 #[no_mangle]
 pub extern "C" fn switch_drain_trace(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
+    // The rasterizer, the shader translator and the texture decoder have no
+    // `Cpu` to write to and trace into a sink instead. This is where it joins
+    // the stream the page reads.
+    s.cpu.absorb_traces();
     let n = s.cpu.trace.len().min(maxlen as usize);
     if n > 0 && !buf.is_null() {
         unsafe {
@@ -1669,6 +1771,268 @@ pub extern "C" fn switch_dump_regs(handle: u32, buf: *mut u8, maxlen: u32) -> u3
     let s = session(handle);
     let dump = s.cpu.reg_dump();
     write_into(buf, maxlen, dump.as_bytes())
+}
+
+/// One line per guest thread: which is running, what each is blocked on, and
+/// where it stopped.
+///
+/// The counterpart to [`switch_backtrace_json`] for a stall that is about
+/// *scheduling* rather than about one call stack. A thread spinning without
+/// ever reaching a blocking syscall looks exactly like a busy program until
+/// you can see that every other thread is Runnable and none has moved — and
+/// until now that could only be seen from the command line, on the one
+/// failure a browser user hits most.
+#[no_mangle]
+pub extern "C" fn switch_thread_dump(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session(handle);
+    write_into(buf, maxlen, s.cpu.thread_dump().as_bytes())
+}
+
+/// The guest's call stack, innermost first, as a JSON array of addresses.
+#[no_mangle]
+pub extern "C" fn switch_backtrace_json(handle: u32, depth: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session(handle);
+    write_into(
+        buf,
+        maxlen,
+        backtrace_json(&s.cpu, depth as usize).as_bytes(),
+    )
+}
+
+fn backtrace_json(cpu: &Cpu, depth: usize) -> String {
+    let frames: Vec<String> = cpu
+        .backtrace(depth)
+        .iter()
+        .map(|pc| format!("{pc}"))
+        .collect();
+    format!("[{}]", frames.join(","))
+}
+
+/// Make every blocked thread runnable and report how many that was.
+///
+/// A debugging lever, not a fix: guests re-check their predicates in a loop,
+/// so a spurious wake degrades to a spin rather than a hang, and this answers
+/// "is this process idle because a worker it parked was never woken".
+#[no_mangle]
+pub extern "C" fn switch_wake_blocked(handle: u32) -> u32 {
+    session(handle).cpu.wake_all_blocked() as u32
+}
+
+/// Make every thread the guest created but never started runnable, and report
+/// how many that was. The other half of [`switch_wake_blocked`]: it answers
+/// "is this process idle because a thread it made never ran".
+#[no_mangle]
+pub extern "C" fn switch_start_created_threads(handle: u32) -> u32 {
+    session(handle).cpu.start_created_threads() as u32
+}
+
+/// Which diagnostic channels exist and which are on, as JSON.
+///
+/// The names are the emulator's own, so a page offering these offers exactly
+/// what a shell could set — there is no second list to drift out of step.
+#[no_mangle]
+pub extern "C" fn switch_trace_channels_json(buf: *mut u8, maxlen: u32) -> u32 {
+    let mask = switch_core::trace::mask();
+    let mut out = Vec::with_capacity(1024);
+    out.push(b'[');
+    for (i, channel) in switch_core::trace::ALL.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(b"{\"name\":\"");
+        json_escape(channel.name(), &mut out);
+        out.extend_from_slice(
+            format!(
+                "\",\"bit\":{},\"on\":{}}}",
+                channel.bit(),
+                mask & channel.bit() != 0
+            )
+            .as_bytes(),
+        );
+    }
+    out.push(b']');
+    write_into(buf, maxlen, &out)
+}
+
+/// The channels currently on, as a bit mask over [`switch_trace_channels_json`].
+#[no_mangle]
+pub extern "C" fn switch_trace_mask() -> u32 {
+    switch_core::trace::mask()
+}
+
+/// Turn exactly the channels in `mask` on and every other one off.
+#[no_mangle]
+pub extern "C" fn switch_set_trace_mask(mask: u32) {
+    switch_core::trace::set_mask(mask);
+}
+
+/// What this build is, so a report can be read against the code that produced
+/// it.
+#[no_mangle]
+pub extern "C" fn switch_version(buf: *mut u8, maxlen: u32) -> u32 {
+    write_into(buf, maxlen, build_version().as_bytes())
+}
+
+/// `<crate version>+<commit>`, or just the crate version where the build had
+/// no git to ask.
+fn build_version() -> String {
+    let commit = env!("SWITCH_BUILD_COMMIT");
+    if commit.is_empty() {
+        env!("CARGO_PKG_VERSION").to_string()
+    } else {
+        format!("{}+{commit}", env!("CARGO_PKG_VERSION"))
+    }
+}
+
+/// Every service command this run asked for and did not get, as JSON.
+///
+/// Two lists, because they are different claims: `unimplemented` was refused,
+/// `stubbed` was answered with nothing behind the answer.
+#[no_mangle]
+pub extern "C" fn switch_unimplemented_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let s = session(handle);
+    let mut out = Vec::with_capacity(4096);
+    out.extend_from_slice(b"{\"unimplemented\":");
+    ipc_list_json(&s.cpu.unimplemented_ipc(), &mut out);
+    out.extend_from_slice(b",\"stubbed\":");
+    ipc_list_json(&s.cpu.stubbed_ipc(), &mut out);
+    out.push(b'}');
+    write_into(buf, maxlen, &out)
+}
+
+fn ipc_list_json(pairs: &[(String, Option<u32>)], out: &mut Vec<u8>) {
+    out.push(b'[');
+    for (i, (iface, cmd)) in pairs.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(b"{\"iface\":\"");
+        json_escape(iface, out);
+        match cmd {
+            Some(id) => out.extend_from_slice(format!("\",\"cmd\":{id}}}").as_bytes()),
+            None => out.extend_from_slice(b"\",\"cmd\":null}"),
+        }
+    }
+    out.push(b']');
+}
+
+/// Everything worth putting in a bug report about this run, as JSON.
+///
+/// A report used to mean whatever the person filing it had thought to keep:
+/// the page had a log they might have cleared and a "Copy all" button, and
+/// every other piece — which title, which backend, where the pc was, what the
+/// guest had asked for and not been given — had to be asked for by hand,
+/// through a different button each, *before* the state that made them worth
+/// reading was gone. Every one of those pieces already existed. This is the
+/// bundling.
+///
+/// `panicked` is the field that decides how the rest reads: a clean fault
+/// stopped the guest, a panic stopped the emulator, and the second is a bug
+/// here whatever the guest was doing.
+#[no_mangle]
+pub extern "C" fn switch_crash_report_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let mut out = Vec::with_capacity(16 * 1024);
+    out.extend_from_slice(b"{\"version\":\"");
+    json_escape(&build_version(), &mut out);
+    out.extend_from_slice(
+        format!(
+            "\",\"panicked\":{}",
+            PANICKED.load(std::sync::atomic::Ordering::Relaxed)
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(b",\"traceMask\":");
+    out.extend_from_slice(switch_core::trace::mask().to_string().as_bytes());
+
+    // Deliberately not `session`, which panics on a handle whose session has
+    // gone: a report is most wanted exactly when something has gone wrong,
+    // and one that cannot be produced without a live session is missing on
+    // the runs that need it.
+    let Some(s) = session_opt(handle) else {
+        out.extend_from_slice(b",\"session\":null}");
+        return write_into(buf, maxlen, &out);
+    };
+
+    out.extend_from_slice(b",\"lastError\":\"");
+    json_escape(&s.last_error, &mut out);
+    out.extend_from_slice(b"\",\"title\":");
+    match &s.control {
+        Some(control) => {
+            out.extend_from_slice(b"{\"id\":\"");
+            out.extend_from_slice(format!("{:016x}", control.title_id).as_bytes());
+            out.extend_from_slice(b"\",\"name\":\"");
+            json_escape(&control.name, &mut out);
+            out.extend_from_slice(b"\",\"version\":\"");
+            json_escape(&control.nacp.display_version, &mut out);
+            out.extend_from_slice(b"\"}");
+        }
+        // A homebrew NRO has no Control NCA, so the program id the loader
+        // settled on is all there is to name the run by.
+        None => {
+            out.extend_from_slice(format!("{{\"id\":\"{:016x}\"}}", s.cpu.program_id()).as_bytes());
+        }
+    }
+
+    let stats = s.cpu.jit_stats();
+    out.extend_from_slice(
+        format!(
+            ",\"cpu\":{{\"pc\":{},\"mode\":\"{:?}\",\"steps\":{},\"cycles\":{},\"halted\":{},\
+             \"thread\":{},\"guestRam\":{},\"docked\":{}}}",
+            s.cpu.get_pc(),
+            s.cpu.mode(),
+            s.cpu.steps,
+            s.cpu.cycles,
+            s.cpu.halted,
+            s.cpu.current_thread_index(),
+            s.cpu.mem.mapped_bytes(),
+            s.cpu.operation_mode() != switch_core::cpu::OperationMode::Handheld,
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(
+        format!(
+            ",\"jit\":{{\"enabled\":{},\"blocks\":{},\"translated\":{},\"executed\":{},\
+             \"invalidated\":{},\"interpreted\":{}}}",
+            s.cpu.jit_enabled(),
+            stats.blocks,
+            stats.translated,
+            stats.executed,
+            stats.invalidated,
+            stats.interpreted
+        )
+        .as_bytes(),
+    );
+
+    out.extend_from_slice(b",\"gpu\":");
+    let report = s.cpu.nv.gpu.renderer_report();
+    let frames = s.cpu.nv.gpu.frames;
+    match report.strip_suffix('}') {
+        Some(body) if body.len() > 1 => {
+            out.extend_from_slice(format!("{body},\"frames\":{frames}}}").as_bytes())
+        }
+        _ => out.extend_from_slice(format!("{{\"frames\":{frames}}}").as_bytes()),
+    }
+
+    out.extend_from_slice(b",\"backtrace\":");
+    out.extend_from_slice(backtrace_json(&s.cpu, 16).as_bytes());
+    out.extend_from_slice(b",\"registers\":\"");
+    json_escape(&s.cpu.reg_dump(), &mut out);
+    out.extend_from_slice(b"\",\"threads\":\"");
+    json_escape(&s.cpu.thread_dump(), &mut out);
+
+    out.extend_from_slice(b"\",\"unimplemented\":");
+    ipc_list_json(&s.cpu.unimplemented_ipc(), &mut out);
+    out.extend_from_slice(b",\"stubbed\":");
+    ipc_list_json(&s.cpu.stubbed_ipc(), &mut out);
+
+    // Last, and taken rather than copied: the trace is the largest field by
+    // far, so a report that has to be truncated loses the trail before it
+    // loses anything that would have said which run it came from.
+    s.cpu.absorb_traces();
+    out.extend_from_slice(b",\"trace\":\"");
+    json_escape(&String::from_utf8_lossy(&s.cpu.trace), &mut out);
+    out.extend_from_slice(b"\"}");
+    write_into(buf, maxlen, &out)
 }
 
 /// What the guest last asked the rumble motors to do, packed as
@@ -2292,6 +2656,167 @@ mod tests {
         let handle = switch_new();
         let _ = std::panic::take_hook();
         (guard, handle)
+    }
+
+    /// Read a JSON answer out of one of the report exports.
+    fn json_from(fill: impl Fn(*mut u8, u32) -> u32) -> String {
+        let cap = 1024 * 1024;
+        let mut buf = vec![0u8; cap];
+        let n = fill(buf.as_mut_ptr(), cap as u32);
+        String::from_utf8(buf[..n as usize].to_vec()).unwrap()
+    }
+
+    /// The value of a `"key":` field, as raw JSON text — enough to check a
+    /// report's shape without a parser the crate deliberately does not have.
+    fn field<'a>(json: &'a str, key: &str) -> &'a str {
+        let at = json
+            .find(&format!("\"{key}\":"))
+            .unwrap_or_else(|| panic!("no {key} in {json:.400}"));
+        let rest = &json[at + key.len() + 3..];
+        let mut depth = 0i32;
+        let mut in_string = false;
+        let mut escaped = false;
+        for (i, c) in rest.char_indices() {
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                    if depth == 0 {
+                        return &rest[..i + 1];
+                    }
+                }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '{' | '[' => depth += 1,
+                '}' | ']' if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &rest[..i + 1];
+                    }
+                }
+                ',' | '}' | ']' if depth == 0 => return &rest[..i],
+                _ => {}
+            }
+        }
+        rest
+    }
+
+    #[test]
+    fn a_panic_message_is_cut_between_characters_not_through_one() {
+        // The page decodes this buffer as UTF-8. Cutting mid-character left it
+        // a replacement character to end on — and a panic message is exactly
+        // where a path or a title name gets formatted in.
+        let msg = "PANIC: ⚠⚠⚠⚠";
+        for limit in 0..msg.len() {
+            let n = floor_char_boundary(msg, limit);
+            assert!(n <= limit);
+            assert!(
+                std::str::from_utf8(&msg.as_bytes()[..n]).is_ok(),
+                "cut at {limit} split a character"
+            );
+        }
+        assert_eq!(floor_char_boundary(msg, msg.len() + 10), msg.len());
+    }
+
+    #[test]
+    fn every_channel_the_core_has_is_offered_by_name_and_can_be_set() {
+        let _host = HOST.lock().unwrap_or_else(|e| e.into_inner());
+        let before = switch_trace_mask();
+
+        let listed = json_from(|buf, cap| switch_trace_channels_json(buf, cap));
+        for channel in switch_core::trace::ALL {
+            assert!(
+                listed.contains(&format!("\"name\":\"{}\"", channel.name())),
+                "{} is not offered to the page",
+                channel.name()
+            );
+        }
+
+        // The page sends back a mask, and the mask it sends is the one that
+        // takes effect — including every bit at once, which must not read back
+        // as "the environment has not been consulted yet".
+        switch_set_trace_mask(u32::MAX);
+        let all_on = json_from(|buf, cap| switch_trace_channels_json(buf, cap));
+        assert!(!all_on.contains("\"on\":false"), "{all_on}");
+        switch_set_trace_mask(0);
+        let all_off = json_from(|buf, cap| switch_trace_channels_json(buf, cap));
+        assert!(!all_off.contains("\"on\":true"), "{all_off}");
+
+        switch_set_trace_mask(before);
+    }
+
+    #[test]
+    fn a_crash_report_names_the_build_even_with_no_session_behind_it() {
+        // The report is wanted exactly when something has gone wrong, and one
+        // that needs a live session is missing on the runs that need it.
+        let _host = HOST.lock().unwrap_or_else(|e| e.into_inner());
+        let json = json_from(|buf, cap| switch_crash_report_json(u32::MAX, buf, cap));
+        assert_eq!(field(&json, "session"), "null");
+        assert!(field(&json, "version").len() > 2, "{json}");
+        assert!(json.starts_with('{') && json.ends_with('}'), "{json}");
+    }
+
+    #[test]
+    fn a_crash_report_carries_the_run_it_is_about() {
+        let (_host, handle) = new_session();
+        let cpu = &mut session(handle).cpu;
+        cpu.diagnostic(Level::Error, "[test] the thing that went wrong");
+        session(handle).last_error = "a fault worth reporting".to_string();
+
+        let json = json_from(|buf, cap| switch_crash_report_json(handle, buf, cap));
+        assert_eq!(field(&json, "lastError"), "\"a fault worth reporting\"");
+        // Every section an issue is read from, present and structured.
+        for key in [
+            "version",
+            "panicked",
+            "title",
+            "cpu",
+            "jit",
+            "gpu",
+            "backtrace",
+            "registers",
+            "threads",
+            "unimplemented",
+            "stubbed",
+            "trace",
+        ] {
+            assert!(
+                !field(&json, key).is_empty(),
+                "{key} is empty in {json:.400}"
+            );
+        }
+        assert!(
+            field(&json, "trace").contains("the thing that went wrong"),
+            "the trace has to carry what was said: {json:.400}"
+        );
+        assert!(field(&json, "backtrace").starts_with('['));
+        assert!(field(&json, "registers").contains("pc="));
+    }
+
+    #[test]
+    fn the_threads_a_guest_parked_can_be_released_from_the_browser() {
+        // These levers existed and were reachable only from the command line,
+        // on the failure a browser user hits most: a title that has stopped
+        // and a title that is working look the same from outside.
+        let (_host, handle) = new_session();
+        assert!(!json_from(|buf, cap| { switch_thread_dump(handle, buf, cap) }).is_empty());
+        // Nothing is blocked on a fresh machine, so both answer zero rather
+        // than failing — which is itself the answer to "is it parked?".
+        assert_eq!(switch_wake_blocked(handle), 0);
+        assert_eq!(switch_start_created_threads(handle), 0);
+    }
+
+    #[test]
+    fn what_a_title_asked_for_and_did_not_get_is_a_list_not_a_scrollback() {
+        let (_host, handle) = new_session();
+        let json = json_from(|buf, cap| switch_unimplemented_json(handle, buf, cap));
+        assert_eq!(field(&json, "unimplemented"), "[]");
+        assert_eq!(field(&json, "stubbed"), "[]");
     }
 
     fn take_changes(handle: u32) -> String {

@@ -5,7 +5,9 @@
    those into replies. Staging buffers are allocated and released around every
    call - the emulator's heap is the browser's memory too. */
 
-import type { CommandHandlers, FsChange, GpuReport, JitStats } from '../shared/protocol';
+import type {
+  CommandHandlers, CrashReport, FsChange, GpuReport, IpcGaps, JitStats, TraceChannel,
+} from '../shared/protocol';
 import { addHostFile, openHostFile, resetHostFiles } from './hostfiles';
 import { releaseLatchIfSeen, resetInput, setGamepad, setTouch } from './latch';
 import {
@@ -281,6 +283,52 @@ export const CMD: CommandHandlers = {
   },
   dump_regs() {
     return readString(2048, (buf, cap) => api().switch_dump_regs(handle(), buf, cap));
+  },
+  thread_dump() {
+    return readString(8192, (buf, cap) => api().switch_thread_dump(handle(), buf, cap));
+  },
+  backtrace(depth) {
+    return readJson<number[]>(
+      1024,
+      (buf, cap) => api().switch_backtrace_json(handle(), depth, buf, cap),
+      [],
+    );
+  },
+  wake_blocked() {
+    return api().switch_wake_blocked(handle());
+  },
+  start_created_threads() {
+    return api().switch_start_created_threads(handle());
+  },
+  ipc_gaps() {
+    if (handle() < 0) return { unimplemented: [], stubbed: [] };
+    return readJson<IpcGaps>(
+      64 * 1024,
+      (buf, cap) => api().switch_unimplemented_json(handle(), buf, cap),
+      { unimplemented: [], stubbed: [] },
+    );
+  },
+  // Big, because the trace is in it and the trace is the point: a report
+  // truncated to a tidy size is one that leaves out the run-up to the fault.
+  crash_report() {
+    return readJson<CrashReport>(
+      1024 * 1024,
+      (buf, cap) => api().switch_crash_report_json(handle(), buf, cap),
+      { version: 'unknown', panicked: false, traceMask: 0 },
+    );
+  },
+  trace_channels() {
+    return readJson<TraceChannel[]>(
+      4096,
+      (buf, cap) => api().switch_trace_channels_json(buf, cap),
+      [],
+    );
+  },
+  set_trace_mask(mask) {
+    api().switch_set_trace_mask(mask);
+  },
+  version() {
+    return readString(128, (buf, cap) => api().switch_version(buf, cap));
   },
   get_pc() {
     return api().switch_get_pc(handle());

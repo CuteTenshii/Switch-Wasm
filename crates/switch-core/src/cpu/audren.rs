@@ -950,7 +950,7 @@ impl Cpu {
             if kind != SINK_TYPE_DEVICE {
                 if kind == SINK_TYPE_CIRCULAR && !renderer.warned_unplayable_sink {
                     renderer.warned_unplayable_sink = true;
-                    eprintln!(
+                    crate::traceln!(
                         "[audio] audren: a circular-buffer sink is not written; \
                          only the device sink reaches the host"
                     );
@@ -1008,13 +1008,13 @@ impl Cpu {
             renderer.elapsed_frames = renderer.elapsed_frames.wrapping_add(1);
         }
 
-        if crate::env_flag!("TRACE_AUDIO") {
+        if crate::trace::enabled(crate::trace::Trace::Audio) {
             let playing = renderer
                 .voices
                 .iter()
                 .filter(|voice| voice.in_use && voice.playing && voice.remaining > 0)
                 .count();
-            eprintln!(
+            crate::traceln!(
                 "[audio] audren frames={due} voices={playing}/{} rate={} channels={channels}",
                 renderer.voices.len(),
                 renderer.sample_rate

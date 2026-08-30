@@ -208,7 +208,7 @@ impl Channel {
             return Ok(());
         }
         if ctx.trace {
-            eprintln!("[gpu] pushbuffer {:#x} ({} words)", address, words);
+            crate::traceln!("[gpu] pushbuffer {:#x} ({} words)", address, words);
         }
         let mut pushbuffer = vec![0u8; words as usize * 4];
         ctx.vmm.read_into(ctx.mem, address, &mut pushbuffer)?;
@@ -300,9 +300,12 @@ impl Channel {
         }
         let class = self.subchannel_class[slot];
         if ctx.trace {
-            eprintln!(
+            crate::traceln!(
                 "[gpu] subch{} class={:#x} method={:#05x} arg={:#010x}",
-                subchannel, class, method, arg
+                subchannel,
+                class,
+                method,
+                arg
             );
         }
         match class {
@@ -370,7 +373,7 @@ impl Channel {
                 };
                 self.subchannel_class[slot] = class;
                 if ctx.trace {
-                    eprintln!("[gpu] subchannel {} bound to class {:#x}", slot, class);
+                    crate::traceln!("[gpu] subchannel {} bound to class {:#x}", slot, class);
                 }
                 Ok(())
             }

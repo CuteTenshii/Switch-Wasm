@@ -175,7 +175,9 @@ pub struct Gpu {
     scan_out: Vec<u8>,
     /// Frames presented since boot.
     pub frames: u64,
-    /// Emit a per-method trace to stderr.
+    /// Force the per-method trace on for this GPU, whatever the `TRACE_GPU`
+    /// channel says. What an example sets when tracing one run is the point
+    /// of the run; the channel is what a page ticks mid-session.
     pub trace: bool,
     next_as_id: u32,
     next_channel_id: u32,
@@ -271,7 +273,7 @@ impl Gpu {
             vmm,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
-            trace: self.trace,
+            trace: self.trace || crate::trace::enabled(crate::trace::Trace::Gpu),
         };
         // The backend is lent for the length of the submission and taken
         // back whether or not it faulted: leaving it on a channel would hand
@@ -353,7 +355,7 @@ impl Gpu {
             vmm,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
-            trace: self.trace,
+            trace: self.trace || crate::trace::enabled(crate::trace::Trace::Gpu),
         };
         let flushed = channel.three_d.flush_renderer(&mut ctx);
         channel.three_d.swap_renderer(&mut self.renderer);
@@ -379,7 +381,7 @@ impl Gpu {
         }
         let base = handle.cpu_addr.wrapping_add(buffer.offset);
         if self.trace {
-            eprintln!(
+            crate::traceln!(
                 "[gpu] present nvmap={} offset={:#x} -> cpu {:#x} {}x{} crop={:?} transform={:#x}",
                 buffer.nvmap_id,
                 buffer.offset,

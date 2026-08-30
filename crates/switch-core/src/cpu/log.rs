@@ -7,6 +7,7 @@
 //! about to die of rather than swallowing it.
 
 use super::Cpu;
+use crate::trace::Level;
 use crate::Result;
 
 impl Cpu {
@@ -26,9 +27,12 @@ impl Cpu {
         let module = result & 0x1FF;
         let description = (result >> 9) & 0x1FFF;
         let trace = self.backtrace(10);
-        self.diagnostic(&format!(
-            "[fatal] {result:#010x} = {module}-{description:04} (cmd {cmd_id:?}) bt={trace:x?}"
-        ));
+        self.diagnostic(
+            Level::Error,
+            &format!(
+                "[fatal] {result:#010x} = {module}-{description:04} (cmd {cmd_id:?}) bt={trace:x?}"
+            ),
+        );
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 

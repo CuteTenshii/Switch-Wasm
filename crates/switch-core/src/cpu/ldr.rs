@@ -5,6 +5,7 @@
 //! and hands back where it landed.
 
 use super::Cpu;
+use crate::trace::Level;
 use crate::Result;
 
 /// The module number every result `ro` reports carries. A caller that acts on
@@ -167,9 +168,10 @@ impl Cpu {
         let header = match crate::nro::NroHeader::parse(&image) {
             Ok(header) => header,
             Err(e) => {
-                self.diagnostic(&format!(
-                    "[ro] refusing the module at {nro_address:#010x}: {e}"
-                ));
+                self.diagnostic(
+                    Level::Warn,
+                    &format!("[ro] refusing the module at {nro_address:#010x}: {e}"),
+                );
                 return self.write_ipc_response(tls, INVALID_NRO, &[], &[], &[]);
             }
         };
@@ -178,20 +180,26 @@ impl Cpu {
         // land outside the mapping — on somebody else's module, once the
         // region has more than one.
         if bss_size < u64::from(header.bss_size) {
-            self.diagnostic(&format!(
-                "[ro] refusing the module at {nro_address:#010x}: it needs {:#x} bytes of bss \
+            self.diagnostic(
+                Level::Warn,
+                &format!(
+                    "[ro] refusing the module at {nro_address:#010x}: it needs {:#x} bytes of bss \
                  and the caller supplied {bss_size:#x}",
-                header.bss_size
-            ));
+                    header.bss_size
+                ),
+            );
             return self.write_ipc_response(tls, INVALID_SIZE, &[], &[], &[]);
         }
 
         let size = (nro_size + bss_size) as u32;
         let Some(base) = self.ro_free_region(size) else {
-            self.diagnostic(&format!(
-                "[ro] no room for a {size:#x}-byte module: {} already mapped",
-                self.ro_modules.len()
-            ));
+            self.diagnostic(
+                Level::Warn,
+                &format!(
+                    "[ro] no room for a {size:#x}-byte module: {} already mapped",
+                    self.ro_modules.len()
+                ),
+            );
             return self.write_ipc_response(tls, OUT_OF_ADDRESS_SPACE, &[], &[], &[]);
         };
 
@@ -231,21 +239,24 @@ impl Cpu {
                 text,
             },
         );
-        self.diagnostic(&format!(
-            "[ro] mapped the module at {nro_address:#010x} to {base:#010x}: text \
+        self.diagnostic(
+            Level::Info,
+            &format!(
+                "[ro] mapped the module at {nro_address:#010x} to {base:#010x}: text \
              {:#010x}..{:#010x}, rodata {:#010x}..{:#010x}, data {:#010x}..{:#010x}, bss \
              {:#010x}..{:#010x}",
-            text.0,
-            text.1,
-            base.wrapping_add(header.ro_offset),
-            base.wrapping_add(header.ro_offset)
-                .wrapping_add(header.ro_size),
-            base.wrapping_add(header.data_offset),
-            base.wrapping_add(header.data_offset)
-                .wrapping_add(header.data_size),
-            base.wrapping_add(nro_size as u32),
-            base.wrapping_add(size),
-        ));
+                text.0,
+                text.1,
+                base.wrapping_add(header.ro_offset),
+                base.wrapping_add(header.ro_offset)
+                    .wrapping_add(header.ro_size),
+                base.wrapping_add(header.data_offset),
+                base.wrapping_add(header.data_offset)
+                    .wrapping_add(header.data_size),
+                base.wrapping_add(nro_size as u32),
+                base.wrapping_add(size),
+            ),
+        );
         self.write_ipc_response(tls, 0, &[], &u64::from(base).to_le_bytes(), &[])
     }
 
@@ -276,10 +287,13 @@ impl Cpu {
         self.mem
             .unmark_module(module.base, module.base.wrapping_add(module.size));
         self.mem.unmap(module.base, module.size as usize);
-        self.diagnostic(&format!(
-            "[ro] unmapped the module at {:#010x} ({:#x} bytes)",
-            module.base, module.size
-        ));
+        self.diagnostic(
+            Level::Info,
+            &format!(
+                "[ro] unmapped the module at {:#010x} ({:#x} bytes)",
+                module.base, module.size
+            ),
+        );
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
 
@@ -312,7 +326,7 @@ impl Cpu {
             return self.write_ipc_response(tls, INVALID_SIZE, &[], &[], &[]);
         }
         if self.mem.read_u32(nrr_address as u32).unwrap_or(0) != NRR0_MAGIC {
-            self.diagnostic(&format!("[ro] no NRR at {nrr_address:#010x}"));
+            self.diagnostic(Level::Warn, &format!("[ro] no NRR at {nrr_address:#010x}"));
             return self.write_ipc_response(tls, INVALID_NRR, &[], &[], &[]);
         }
         self.ro_registrations

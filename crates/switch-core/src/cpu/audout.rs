@@ -400,8 +400,8 @@ impl Cpu {
             let buffer_size = self.mem.read_u64(desc.wrapping_add(16)).unwrap_or(0) as u32;
             let data_size = self.mem.read_u64(desc.wrapping_add(24)).unwrap_or(0) as u32;
             let data_offset = self.mem.read_u64(desc.wrapping_add(32)).unwrap_or(0) as u32;
-            if crate::env_flag!("TRACE_AUDIO") {
-                eprintln!(
+            if crate::trace::enabled(crate::trace::Trace::Audio) {
+                crate::traceln!(
                     "[audio] append buffer={buffer:#x} cap={buffer_size:#x} \
                      size={data_size:#x} offset={data_offset:#x}"
                 );
@@ -433,7 +433,7 @@ impl Cpu {
                 .unimplemented_ipc
                 .insert(("audout:unplayable".to_string(), None))
             {
-                eprintln!(
+                crate::traceln!(
                     "[audio] refusing an unplayable buffer: {data_offset:#x}+{data_size:#x} \
                      is outside a {buffer_size:#x}-byte buffer at {buffer:#x}"
                 );
@@ -507,8 +507,8 @@ impl Cpu {
                 }
             }
         }
-        if crate::env_flag!("TRACE_AUDIO") {
-            eprintln!("[audio] release room={room} addr={addr:x?} tags={tags:#x?}");
+        if crate::trace::enabled(crate::trace::Trace::Audio) {
+            crate::traceln!("[audio] release room={room} addr={addr:x?} tags={tags:#x?}");
         }
         if let Some(addr) = addr {
             for (i, &tag) in tags.iter().enumerate() {

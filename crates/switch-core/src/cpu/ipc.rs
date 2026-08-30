@@ -14,6 +14,7 @@
 //! [`Cpu::reply_with_fabricated_object`].
 
 use super::Cpu;
+use crate::trace::Level;
 use crate::Result;
 
 /// The process id `svcGetProcessId` reports, and so the one `pm` has to
@@ -483,10 +484,10 @@ impl Cpu {
         // itself, but a command that is *answered* with a failure does not,
         // and that is the shape an initialisation step that quietly gives up
         // takes: the caller reads the Result, stops, and asks for nothing more.
-        if result != 0 && crate::env_flag!("TRACE_IPC") {
+        if result != 0 && crate::trace::enabled(crate::trace::Trace::Ipc) {
             let module = result & 0x1FF;
             let description = (result >> 9) & 0x1FFF;
-            eprintln!(
+            crate::traceln!(
                 "[ipc] error {result:#x} (module {module}, description {description}) from {:?} cmd={:?}",
                 self.service_name(self.read_zr(0)),
                 self.ipc_command_id(tls)
@@ -927,10 +928,13 @@ impl Cpu {
             let recv = (hdr1 >> 24) & 0xf;
             let recv_static = matches!((hdr2 >> 10) & 0xf, 2..) as u32;
             let words = hdr2 & 0x3ff;
-            self.diagnostic(&format!(
-                "[ipc] unimplemented: {iface} cmd={cmd_id:?} (pc={pc:#x}, {words} data words, \
+            self.diagnostic(
+                Level::Warn,
+                &format!(
+                    "[ipc] unimplemented: {iface} cmd={cmd_id:?} (pc={pc:#x}, {words} data words, \
                  buffers: {statics} static/{send} send/{recv} recv/{recv_static} recv-static)"
-            ));
+                ),
+            );
         }
         self.write_ipc_response(tls, UNKNOWN_COMMAND_ID, &[], &[], &[])
     }
@@ -1018,9 +1022,10 @@ impl Cpu {
     /// the list of services a guest is asking for and not getting.
     pub(super) fn warn_no_implementation(&mut self, service: &str, cmd_id: Option<u32>) {
         if self.unimplemented_ipc.insert((service.to_string(), cmd_id)) {
-            self.diagnostic(&format!(
-                "[ipc] no implementation: {service} cmd={cmd_id:?}"
-            ));
+            self.diagnostic(
+                Level::Warn,
+                &format!("[ipc] no implementation: {service} cmd={cmd_id:?}"),
+            );
         }
     }
 
@@ -1049,7 +1054,10 @@ impl Cpu {
     /// about this console, and marking those would bury the real ones.
     pub(super) fn warn_stub(&mut self, iface: &str, cmd_id: Option<u32>, what: &str) {
         if self.stubbed_ipc.insert((iface.to_string(), cmd_id)) {
-            self.diagnostic(&format!("[ipc] stub: {iface} cmd={cmd_id:?} ({what})"));
+            self.diagnostic(
+                Level::Warn,
+                &format!("[ipc] stub: {iface} cmd={cmd_id:?} ({what})"),
+            );
         }
     }
 

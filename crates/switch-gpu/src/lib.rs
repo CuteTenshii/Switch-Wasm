@@ -3247,11 +3247,16 @@ impl Gpu {
         let mut globals = self.global_uploads(&vs_layout, ShaderStage::VertexB, &uploads, ctx)?;
         globals.extend(self.global_uploads(&fs_layout, ShaderStage::Fragment, &uploads, ctx)?);
 
-        if switch_core::env_flag!("TRACE_GPU_TEX") {
+        if switch_core::trace::enabled(switch_core::trace::Trace::GpuTex) {
             for t in &uploads.textures {
-                eprintln!(
+                switch_core::traceln!(
                     "[gpu-tex] imm={} {:?} {}x{} swizzle={:?} sampler={:?}",
-                    t.immediate, t.format, t.width, t.height, t.swizzle, t.sampler
+                    t.immediate,
+                    t.format,
+                    t.width,
+                    t.height,
+                    t.swizzle,
+                    t.sampler
                 );
             }
         }

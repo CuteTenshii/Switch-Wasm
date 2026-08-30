@@ -14,8 +14,8 @@
 //! program expects, which is a much larger undertaking than homebrew ever
 //! needed and is tracked separately in `PROGRESS.md`.
 
-/// Whether an environment switch such as `TRACE_SVC` is set, read once and
-/// remembered.
+/// Whether an environment switch such as `SWITCH_NO_JIT` is set, read once
+/// and remembered.
 ///
 /// `std::env::var` is a linear scan of the whole environment on every call,
 /// and these switches sit in per-syscall, per-IPC and per-draw paths —
@@ -26,6 +26,11 @@
 ///
 /// One `OnceLock` per call site rather than a map: the name is a literal, so
 /// the lookup is a load and a branch with nothing to hash.
+///
+/// This is for switches that choose how the emulator *behaves* and are read
+/// where a CLI run sets them. The `TRACE_*` diagnostics are not among them
+/// any more: an environment is something a browser does not have, so they
+/// live in [`trace`]'s runtime mask, which the environment seeds.
 #[macro_export]
 macro_rules! env_flag {
     ($name:literal) => {{
@@ -132,6 +137,7 @@ pub mod romfs;
 pub mod source;
 pub mod sparse;
 pub mod ticket;
+pub mod trace;
 pub mod vfs;
 pub mod xci;
 

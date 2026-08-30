@@ -5,6 +5,7 @@
 //! only the session that carries them.
 
 use super::Cpu;
+use crate::trace::Level;
 use crate::Result;
 
 impl Cpu {
@@ -41,8 +42,8 @@ impl Cpu {
         }
         let data = self.ipc_request_data(tls);
         let (send, recv) = self.ipc_buffers(tls);
-        if self.trace_nv {
-            eprintln!(
+        if crate::trace::enabled(crate::trace::Trace::Nv) {
+            crate::traceln!(
                 "[nv] cmd={:?} send={:x?} recv={:x?} from {:#x?}",
                 cmd_id,
                 send,
@@ -91,8 +92,8 @@ impl Cpu {
                     &inline_in,
                     &mut inline_out,
                 )?;
-                if error != 0 && crate::env_flag!("TRACE_NV") {
-                    eprintln!("[nv] ioctl fd={fd} request={request:#x} -> error {error}");
+                if error != 0 && crate::trace::enabled(crate::trace::Trace::Nv) {
+                    crate::traceln!("[nv] ioctl fd={fd} request={request:#x} -> error {error}");
                 }
                 // An ioctl the model has no handler for is a gap in the same
                 // sense an unimplemented service command is, and it was
@@ -107,10 +108,13 @@ impl Cpu {
                     if self.unimplemented_ipc.insert((node.clone(), Some(nr))) {
                         let ioc_type = (request >> 8) & 0xFF;
                         let pc = self.pc;
-                        self.diagnostic(&format!(
-                            "[nv] unimplemented: {node} ioctl type={ioc_type:#04x} \
+                        self.diagnostic(
+                            Level::Warn,
+                            &format!(
+                                "[nv] unimplemented: {node} ioctl type={ioc_type:#04x} \
                              nr={nr:#04x} ({size} bytes, pc={pc:#x})"
-                        ));
+                            ),
+                        );
                     }
                 }
                 if let Some(&(addr, len)) = recv.first() {
@@ -163,8 +167,8 @@ impl Cpu {
                     Some(crate::gpu::nvdrv::NvFile::NvMap) => "nvdrv:nvmap",
                     _ => "nvdrv:unknown-node",
                 };
-                if self.trace_nv {
-                    eprintln!("[nv] QueryEvent fd={fd} event={event_id} -> {node}");
+                if crate::trace::enabled(crate::trace::Trace::Nv) {
+                    crate::traceln!("[nv] QueryEvent fd={fd} event={event_id} -> {node}");
                 }
                 // A syncpoint event stands for work that has already
                 // finished. This emulator runs each submission to completion

@@ -321,8 +321,8 @@ impl Cpu {
                     layout[at + 16..at + 20].copy_from_slice(&(shared_width as i32).to_le_bytes());
                     layout[at + 20..at + 24].copy_from_slice(&(shared_height as i32).to_le_bytes());
                 }
-                if self.trace_nv {
-                    eprintln!(
+                if crate::trace::enabled(crate::trace::Trace::Nv) {
+                    crate::traceln!(
                         "[vi] shared pool layout -> recv buffer {:x?}, static {:x?}",
                         self.ipc_recv_buffer(tls, 0),
                         self.ipc_recv_static_buffers(tls)
@@ -374,8 +374,8 @@ impl Cpu {
                     bottom: word(0x30) as i32,
                 };
                 let transform = word(0x34);
-                if self.trace_nv {
-                    eprintln!(
+                if crate::trace::enabled(crate::trace::Trace::Nv) {
+                    crate::traceln!(
                         "[vi] present shared slot={slot} crop={crop:?} transform={transform:#x}"
                     );
                 }
@@ -397,8 +397,8 @@ impl Cpu {
                 if self.nv.gpu.flush_renderers(&mut self.mem)? == crate::gpu::renderer::Flush::Done
                 {
                     self.nv.gpu.present(&self.mem, &buffer)?;
-                    if self.trace_nv {
-                        eprintln!(
+                    if crate::trace::enabled(crate::trace::Trace::Nv) {
+                        crate::traceln!(
                             "[vi] presented shared frame {} from slot {slot}",
                             self.nv.gpu.frames
                         );
@@ -461,8 +461,8 @@ impl Cpu {
     /// `TRACE_IPC`, because when the command did have an out parameter this
     /// line is the only place the silence becomes visible.
     fn vi_unhandled(&mut self, tls: u32, iface: &str, cmd_id: Option<u32>) -> Result<()> {
-        if crate::env_flag!("TRACE_IPC") {
-            eprintln!("[ipc] no implementation: {iface} cmd={cmd_id:?}");
+        if crate::trace::enabled(crate::trace::Trace::Ipc) {
+            crate::traceln!("[ipc] no implementation: {iface} cmd={cmd_id:?}");
         }
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
@@ -495,10 +495,10 @@ impl Cpu {
         };
 
         let (reply, action) = self.display.transact(code, &request);
-        if self.trace_nv {
+        if crate::trace::enabled(crate::trace::Trace::Nv) {
             // The binder transaction code, not the IPC command: this is the
             // level a stuck buffer-queue loop shows up at.
-            eprintln!(
+            crate::traceln!(
                 "[vi] transact code={code} in={} out={} bytes",
                 request.len(),
                 reply.len()
@@ -512,10 +512,12 @@ impl Cpu {
             // up when it can. The software rasterizer is always `Done`.
             if self.nv.gpu.flush_renderers(&mut self.mem)? == crate::gpu::renderer::Flush::Done {
                 self.nv.gpu.present(&self.mem, &buffer)?;
-                if self.trace_nv {
-                    eprintln!(
+                if crate::trace::enabled(crate::trace::Trace::Nv) {
+                    crate::traceln!(
                         "[vi] presented frame {} ({}x{})",
-                        self.nv.gpu.frames, buffer.width, buffer.height
+                        self.nv.gpu.frames,
+                        buffer.width,
+                        buffer.height
                     );
                 }
             } else {

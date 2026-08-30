@@ -153,6 +153,8 @@
       <label class="check"><input type="checkbox" id="autoscroll-cb" checked><span>Autoscroll</span></label>
       <span class="spacer"></span>
       <button id="btn-copy-console" class="btn small ghost" title="Copy the whole log to the clipboard">Copy all</button>
+      <button id="btn-save-console" class="btn small ghost" title="Save the whole log as a file - including the lines the view has scrolled past">Save</button>
+      <button id="btn-save-previous" class="btn small ghost" title="Save what the previous session had said before it ended" hidden>Save previous</button>
       <button id="btn-clear-console" class="btn small ghost">Clear</button>
     </div>
     <pre class="console" id="console" aria-live="polite"></pre>
@@ -171,6 +173,68 @@
         <div class="panel-tools">
           <button id="btn-dumptrace" class="btn small">Dump trace</button>
           <button id="btn-dumpregs" class="btn small">Dump regs</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="section">
+      <summary class="section-head">
+        <span class="section-title">Diagnostic channels</span>
+        <span class="section-note" id="channels-badge">off</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny">What the emulator says about itself while it runs, one switch per
+          subsystem. These are the same channels a command-line run sets through the environment -
+          hover a name for the variable that sets it. They are verbose by design: turn on the one
+          that covers what is going wrong, not all of them.</p>
+        <div class="checks" id="trace-channels"></div>
+      </div>
+    </details>
+
+    <details class="section">
+      <summary class="section-head">
+        <span class="section-title">Threads</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny">A title that has stopped and a title that is working look the same
+          from outside. This says which thread is running, what each of the others is waiting on,
+          and where it stopped - and lets you release them, which answers whether the stall is a
+          thread nobody woke or a thread nobody started.</p>
+        <div class="panel-tools">
+          <button id="btn-threads" class="btn small">Thread dump</button>
+          <button id="btn-wake" class="btn small">Wake blocked</button>
+          <button id="btn-start-threads" class="btn small">Start created</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="section">
+      <summary class="section-head">
+        <span class="section-title">Missing services</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny">Everything this title has asked the console for and not been given,
+          collected. Refused commands and commands answered with nothing behind the answer are
+          listed apart, because they fail differently: the first stops the caller there, the second
+          lets it carry on and fail somewhere else.</p>
+        <div class="panel-tools">
+          <button id="btn-gaps" class="btn small">What's missing</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="section">
+      <summary class="section-head">
+        <span class="section-title">Crash report</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny">Everything an issue needs about this run in one file: the build, the
+          title, the renderer and what it refused, the registers, the threads, the services that
+          were missing, and the run-up to the fault. Take it while the run is still where it
+          stopped - a reset is what loses it.</p>
+        <div class="panel-tools">
+          <button id="btn-crash-report" class="btn small">Save report</button>
+          <button id="btn-copy-report" class="btn small ghost">Copy report</button>
         </div>
       </div>
     </details>

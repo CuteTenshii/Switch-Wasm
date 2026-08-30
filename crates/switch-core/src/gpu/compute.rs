@@ -48,9 +48,12 @@ pub fn dispatch(engine: &EngineCompute, ctx: &mut ExecCtx) -> Result<()> {
     }
     let qmd = Qmd::parse(&words)?;
     if ctx.trace {
-        eprintln!(
+        crate::traceln!(
             "[gpu] compute grid {:?} block {:?} shared={:#x} program={:#x}",
-            qmd.cta_raster, qmd.cta_threads, qmd.shared_memory_size, qmd.program_offset
+            qmd.cta_raster,
+            qmd.cta_threads,
+            qmd.shared_memory_size,
+            qmd.program_offset
         );
     }
 

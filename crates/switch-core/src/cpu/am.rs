@@ -10,6 +10,7 @@
 
 use super::acc::ACCOUNT_UID;
 use super::Cpu;
+use crate::trace::Level;
 use crate::Result;
 
 /// The uid of the console's one user account.
@@ -1412,6 +1413,7 @@ impl Cpu {
                         .insert(("am:applet-output".to_string(), cmd_id))
                     {
                         self.diagnostic(
+                            Level::Warn,
                             "[am] the applet pushed its result; nothing here launched it, so \
                              there is nobody to pop it",
                         );
@@ -1460,6 +1462,7 @@ impl Cpu {
                             .insert(("am:pop-in-data".to_string(), None))
                         {
                             self.diagnostic(
+                                Level::Warn,
                                 "[am] PopInData: the applet has popped every storage seeded for \
                                  it and asked for another",
                             );
@@ -1490,11 +1493,14 @@ impl Cpu {
                     let at = self.ipc_request_data(tls);
                     let id = self.mem.read_u32(at)?;
                     let mode = self.mem.read_u32(at.wrapping_add(4))?;
-                    self.diagnostic(&format!(
-                        "[am] CreateLibraryApplet: {} (mode {mode}) — nothing here runs it, \
+                    self.diagnostic(
+                        Level::Warn,
+                        &format!(
+                            "[am] CreateLibraryApplet: {} (mode {mode}) — nothing here runs it, \
                          so it will report itself cancelled",
-                        applet_name(id)
-                    ));
+                            applet_name(id)
+                        ),
+                    );
                     let key =
                         self.reply_with_interface(tls, handle, "am:library-applet-accessor")?;
                     self.am_applets.insert(key, LibraryApplet::new(id, mode));

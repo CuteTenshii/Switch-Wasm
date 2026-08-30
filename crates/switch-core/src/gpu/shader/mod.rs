@@ -292,8 +292,8 @@ pub fn decode_program_from_memory(
         // `TRACE_SHADER=1` prints every program decoded, in control-flow-walk
         // order. A shader that fails to run says only which instruction it
         // stopped on; this is how you see what came before it.
-        if crate::env_flag!("TRACE_SHADER") {
-            eprintln!(
+        if crate::trace::enabled(crate::trace::Trace::Shader) {
+            crate::traceln!(
                 "[shader] program at {addr:#x}, {} instructions",
                 program.offsets.len()
             );
@@ -301,13 +301,13 @@ pub fn decode_program_from_memory(
                 // The raw word beside the decode: a wrong decode and a
                 // missing one look the same from the `Op` alone.
                 let raw = ctx.read_u64(addr + u64::from(off)).unwrap_or(0);
-                eprintln!("  {off:#06x}: {raw:016x} {:?}", program.insns[i]);
+                crate::traceln!("  {off:#06x}: {raw:016x} {:?}", program.insns[i]);
             }
         }
     })?;
     program.header = header;
-    if crate::env_flag!("TRACE_SPH") {
-        eprintln!("[sph] program at {addr:#x} {header:?}");
+    if crate::trace::enabled(crate::trace::Trace::Sph) {
+        crate::traceln!("[sph] program at {addr:#x} {header:?}");
     }
     Ok(program)
 }

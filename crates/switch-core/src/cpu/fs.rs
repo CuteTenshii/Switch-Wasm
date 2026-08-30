@@ -6,6 +6,7 @@
 //! here copies through a staging buffer out of a [`crate::source::ByteSource`].
 
 use super::Cpu;
+use crate::trace::Level;
 use crate::Result;
 
 /// The size of the emulated SD card, and how much of it is free. `ns` reports
@@ -183,17 +184,20 @@ impl Cpu {
                 let data = self.ipc_request_data(tls);
                 let data_id = self.mem.read_u64(data.wrapping_add(8))?;
                 if !self.data_archives.contains_key(&data_id) {
-                    self.diagnostic(&format!(
-                        "[fs] no system data archive registered for data id {data_id:016x}"
-                    ));
+                    self.diagnostic(
+                        Level::Warn,
+                        &format!(
+                            "[fs] no system data archive registered for data id {data_id:016x}"
+                        ),
+                    );
                     const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
                     return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
                 }
                 let key = self.reply_with_interface(tls, handle, "fsp-srv-storage")?;
                 self.fs_storage_archive.insert(key, data_id);
-                if crate::env_flag!("TRACE_IPC") {
+                if crate::trace::enabled(crate::trace::Trace::Ipc) {
                     let size = self.storage_source(Some(data_id)).map_or(0, |s| s.len());
-                    eprintln!("[fs] data archive {data_id:016x} -> {size:#x} bytes");
+                    crate::traceln!("[fs] data archive {data_id:016x} -> {size:#x} bytes");
                 }
                 Ok(())
             }
@@ -567,9 +571,11 @@ impl Cpu {
                 // `nn::fs::OpenDirectory("rom:/Data")` found nothing.
                 let offset = self.mem.read_u64(data)?;
                 let requested = self.mem.read_u64(data.wrapping_add(8))?;
-                let trace_storage = crate::env_flag!("TRACE_IPC");
+                let trace_storage = crate::trace::enabled(crate::trace::Trace::Ipc);
                 if trace_storage {
-                    eprintln!("[storage] read offset={offset:#x} size={requested:#x} of {size:#x}");
+                    crate::traceln!(
+                        "[storage] read offset={offset:#x} size={requested:#x} of {size:#x}"
+                    );
                 }
                 // A storage read is all or nothing: real `fs` checks the range
                 // against the storage's size and refuses one that runs past
@@ -620,7 +626,7 @@ impl Cpu {
                             .collect(),
                         None => Vec::new(),
                     };
-                    eprintln!("[storage]   -> {head:02x?}");
+                    crate::traceln!("[storage]   -> {head:02x?}");
                 }
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
@@ -655,10 +661,12 @@ impl Cpu {
         // are the same interface and the same paths; only the object they were
         // opened through tells them apart.
         let mount = self.mount_of(self.ipc_object_key(tls, handle));
-        if crate::env_flag!("TRACE_IPC") {
-            eprintln!(
+        if crate::trace::enabled(crate::trace::Trace::Ipc) {
+            crate::traceln!(
                 "[fs] pc={:#x} cmd={:?} path={:?} mount={mount:x?}",
-                self.pc, cmd_id, path
+                self.pc,
+                cmd_id,
+                path
             );
         }
         match cmd_id {
@@ -800,8 +808,8 @@ impl Cpu {
                     .vfs_for(mount)
                     .read(&path, offset, &mut buf)
                     .unwrap_or(0);
-                if crate::env_flag!("TRACE_IPC") {
-                    eprintln!(
+                if crate::trace::enabled(crate::trace::Trace::Ipc) {
+                    crate::traceln!(
                         "[fs-file] read path={:?} offset={:#x} size={:#x} -> {:#x} buf={:?}",
                         path,
                         offset,
@@ -828,8 +836,8 @@ impl Cpu {
                     Some((addr, len)) => self.read_bytes(addr, (len as u64).min(requested) as u32),
                     None => Vec::new(),
                 };
-                if crate::env_flag!("TRACE_IPC") {
-                    eprintln!(
+                if crate::trace::enabled(crate::trace::Trace::Ipc) {
+                    crate::traceln!(
                         "[fs-file] write path={:?} offset={:#x} size={:#x} -> {:#x}",
                         path,
                         offset,

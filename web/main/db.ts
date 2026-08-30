@@ -7,6 +7,12 @@ import type { Bytes } from '../shared/protocol';
 export const SD_DB_NAME = 'switch-wasm-sd';
 export const SD_STORE = 'entries';
 
+/** The page's own log, kept so that a tab the browser kills does not take the
+ *  account of what it was doing with it. One key, one string. */
+export const LOG_DB_NAME = 'switch-wasm-log';
+export const LOG_STORE = 'log';
+export const LOG_KEY = 'previous';
+
 export const NAND_DB_NAME = 'switch-wasm-nand';
 export const NAND_CONTENT = 'content';
 export const NAND_TITLES = 'titles';
@@ -36,6 +42,20 @@ export function sdIdb(): Promise<IDBDatabase> {
       if (!req.result.objectStoreNames.contains(SD_STORE)) req.result.createObjectStore(SD_STORE);
     };
     req.onsuccess = () => { sdDb = req.result; resolve(sdDb); };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+let logDb: IDBDatabase | null = null;
+
+export function logIdb(): Promise<IDBDatabase> {
+  if (logDb) return Promise.resolve(logDb);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(LOG_DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains(LOG_STORE)) req.result.createObjectStore(LOG_STORE);
+    };
+    req.onsuccess = () => { logDb = req.result; resolve(logDb); };
     req.onerror = () => reject(req.error);
   });
 }

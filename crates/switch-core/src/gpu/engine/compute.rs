@@ -77,7 +77,7 @@ impl EngineCompute {
             self.dispatches += 1;
             ctx.stats.dispatches += 1;
             if ctx.trace {
-                eprintln!("[gpu] compute dispatch qmd={:#x}", qmd_addr);
+                crate::traceln!("[gpu] compute dispatch qmd={:#x}", qmd_addr);
             }
             self.dispatch_or_log(ctx);
         }
@@ -93,7 +93,7 @@ impl EngineCompute {
         if let Err(e) = crate::gpu::compute::dispatch(self, ctx) {
             ctx.stats.dispatches_skipped += 1;
             if ctx.trace {
-                eprintln!("[gpu] compute: {e}");
+                crate::traceln!("[gpu] compute: {e}");
             }
         }
     }

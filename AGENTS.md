@@ -69,6 +69,12 @@ content-hashed, so assets are named through the bundler (`import fontUrl from
   read, 1 MiB × 32 LRU chunk cache), `latch.ts`, `commands.ts`, `index.ts`.
 - `web/main/` — `rpc.ts` plus one module per part of the page; `index.ts` is the
   composition root and owns Reset.
+- `log.ts` keeps the log in an array, not in the DOM: the view is capped at
+  2000 entries (an instruction trace put tens of thousands of elements on the
+  page), Copy/Save read the array, and the tail is mirrored to IndexedDB every
+  5 s. A `localStorage` mark cleared on `pagehide` — plus a `BroadcastChannel`
+  ping, because the mark is per origin and a second tab is not a dead one —
+  is what decides whether the mirrored log is offered back.
 - `web/shared/protocol.ts` — the `Commands` interface both sides are checked
   against, so a drifted signature is a build error.
 - `runloop.ts`: `RUN_SLICE` 1,000,000, `TRACE_SLICE` 5000, `HOUSEKEEPING_EVERY` 8.
@@ -244,18 +250,38 @@ syscalls. Between instructions is safe (all state is in `ThreadContext`), and
 ## Diagnostics
 
 `wasm32-unknown-unknown` has no WASI: `eprintln!` goes nowhere and
-`std::env::var` always fails, so every `TRACE_*` is host-CLI-only. Anything that
-must reach a browser user goes through `Cpu::diagnostic`, which writes stderr
-*and* the trace buffer the page drains every slice. `Cpu::backtrace` walks the
-guest X29 frame chain; `dump_exefs` writes a sorted `symbols.txt` that turns an
-address into `sdk!nn::diag::detail::Abort+0x18`.
+`std::env::var` always fails. **`trace.rs` is what the `TRACE_*` switches are**
+— a process-global mask the environment *seeds* and `switch_set_trace_mask`
+sets, so the page's Diagnostic channels section offers the same nineteen a
+shell does. Add a channel to `trace::ALL` and it appears there with no
+frontend change. `trace!(Trace::X, ..)` gates; `traceln!` writes to stderr
+(natively) and to the sink `Cpu::absorb_traces` folds into the trace buffer —
+which is how the rasterizer, the shader translator and the texture decoder,
+none of which have a `Cpu`, reach a browser at all.
 
-`TRACE_SVC`, `TRACE_IPC`, `TRACE_WAIT`, `TRACE_FONT`, `TRACE_AUDIO`,
-`TRACE_ERPT`, `TRACE_MAP`, `TRACE_REGS`, `TRACE_GPU`, `TRACE_NV`, `TRACE_DRAW`,
-`TRACE_PIPELINE`, `TRACE_SHADER`, `TRACE_CFG`, `TRACE_WGSL`, `TRACE_UPLOAD`. The
-backend's own flags are switches, not traces: `GPU_ONLY=<i>` or `<a>..<b>`,
-`GPU_DEVICE_MSAA`, `GPU_INTERLEAVE`, `GPU_DEFER_READBACKS`, `GPU_TIMES`,
-`GPU_DUMP_WGSL=<dir>`.
+Anything that must reach a user goes through `Cpu::diagnostic(Level, ..)`.
+**The level is part of the line**: a leading `0x01`–`0x04` byte the page maps
+to a colour, and an unmarked line inherits the one before it, so a fault's
+register dump and instruction trail stay with the fault. The trace buffer is a
+**ring** — past 512 KiB the *oldest* goes, and `[trace] the buffer filled` is
+written where the loss happened. It used to stop appending instead, which threw
+away every fault that came after a full buffer.
+
+`Cpu::backtrace` walks the guest X29 frame chain; `dump_exefs` writes a sorted
+`symbols.txt` that turns an address into `sdk!nn::diag::detail::Abort+0x18`.
+`Cpu::thread_dump`, `wake_all_blocked` and `start_created_threads` are the
+hang levers, and they are exported — a hang is the failure a browser user hits
+most.
+
+`switch_crash_report_json` is the bundle an issue needs: build (`build.rs`
+bakes the commit), title, cpu, jit, gpu, registers, threads, backtrace, the
+`unimplemented`/`stubbed` lists and the trace. It works on a **dead handle**,
+because that is when it is wanted.
+
+The backend's own flags stay environment switches, not traces: `GPU_ONLY=<i>`
+or `<a>..<b>`, `GPU_DEVICE_MSAA`, `GPU_INTERLEAVE`, `GPU_DEFER_READBACKS`,
+`GPU_TIMES`, `GPU_DUMP_WGSL=<dir>`, plus `SWITCH_NO_JIT` and
+`NO_VSYNC_THROTTLE`.
 
 ## IPC (`cpu/ipc.rs`, `cpu/svc.rs`)
 
