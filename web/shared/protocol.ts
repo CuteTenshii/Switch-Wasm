@@ -58,6 +58,12 @@ export interface GpuReport {
   gaveUp?: boolean;
   /** Every distinct reason a draw fell back, in the order first seen. */
   reasons?: string[];
+  /** What the device itself rejected, which is not the same as a fallback:
+   *  the backend only learns of a rejection when it next asks, so a frame can
+   *  count as 100% device and still be wrong. `deviceErrorCount` includes the
+   *  repeats; `deviceErrors` holds each distinct message once. */
+  deviceErrorCount?: number;
+  deviceErrors?: string[];
   /** Milliseconds over the whole run, by phase. Nested because `modules` is
    *  both a count above and a phase here. */
   times?: {

@@ -610,6 +610,44 @@ struct Companion {
     grid: SampleGrid,
 }
 
+/// How many distinct device errors are worth keeping. A rejected draw repeats
+/// its rejection every frame, so the list stops growing almost immediately and
+/// the count carries the rest.
+const MAX_DEVICE_ERRORS: usize = 16;
+
+/// Everything the device has rejected since it was opened.
+///
+/// Keeping only the first — which is what this was — reported nothing at all
+/// once the pipelines were built: the only production reader runs before a
+/// pipeline is created, and a title that builds its four in the first frames
+/// never creates another. Every rejection after that sat unread.
+#[derive(Debug, Default)]
+struct DeviceErrors {
+    /// The oldest rejection nothing has asked about yet, taken by
+    /// [`Gpu::device_error`]. Oldest rather than newest because the first
+    /// rejection is the one with a cause; the rest are usually its echo.
+    fresh: Option<String>,
+    /// Each distinct message once, in the order first seen — the same shape
+    /// as `reasons`, and for the same reason.
+    distinct: Vec<String>,
+    /// Every rejection, including the repeats and anything past
+    /// [`MAX_DEVICE_ERRORS`].
+    count: u64,
+}
+
+impl DeviceErrors {
+    fn record(&mut self, message: String) {
+        self.count += 1;
+        if !self.distinct.contains(&message) {
+            eprintln!("[gpu] the device rejected something: {message}");
+            if self.distinct.len() < MAX_DEVICE_ERRORS {
+                self.distinct.push(message.clone());
+            }
+        }
+        self.fresh.get_or_insert(message);
+    }
+}
+
 /// A device, and the rasterizer to fall back to.
 #[derive(Debug)]
 pub struct Gpu {
@@ -708,9 +746,9 @@ pub struct Gpu {
     /// [`Gpu::route`]. It is a speed-for-fidelity trade and the frame it
     /// gives up is the one the rasterizer can be compared against.
     device_msaa: bool,
-    /// Set by the device when it rejects something. Read on the next draw,
-    /// because asking sooner means waiting.
-    failed: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// What the device has rejected. Written by the uncaptured-error
+    /// callback, read on the next draw, because asking sooner means waiting.
+    failed: std::sync::Arc<std::sync::Mutex<DeviceErrors>>,
     /// Set when the device is lost, with the browser's reason.
     ///
     /// The one failure nothing else here can see: a lost device raises no
@@ -999,12 +1037,12 @@ impl Gpu {
         queue: wgpu::Queue,
     ) -> Gpu {
         // Where a rejection lands, since nothing in a draw ever stops to ask.
-        let failed: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let failed: std::sync::Arc<std::sync::Mutex<DeviceErrors>> =
+            std::sync::Arc::new(std::sync::Mutex::new(DeviceErrors::default()));
         let sink = failed.clone();
         device.on_uncaptured_error(std::sync::Arc::new(move |e: wgpu::Error| {
             if let Ok(mut slot) = sink.lock() {
-                slot.get_or_insert_with(|| e.to_string());
+                slot.record(e.to_string());
             }
         }));
         // Asked for by name, because a lost device is silent everywhere else.
@@ -2478,7 +2516,17 @@ impl Gpu {
 
     /// Whatever the device rejected since this was last asked.
     fn device_error(&self) -> Option<String> {
-        self.failed.lock().ok().and_then(|mut e| e.take())
+        self.failed.lock().ok().and_then(|mut e| e.fresh.take())
+    }
+
+    /// Every distinct rejection the device has raised, and how many it has
+    /// raised in total — for the report, which is the only channel a browser
+    /// has. Taking nothing: a rejection stays reportable for the whole run.
+    fn device_errors(&self) -> (u64, Vec<String>) {
+        match self.failed.lock() {
+            Ok(e) => (e.count, e.distinct.clone()),
+            Err(_) => (0, Vec::new()),
+        }
     }
 
     /// A buffer holding `bytes`, for the draw in progress — see
@@ -3922,6 +3970,12 @@ impl Renderer for Gpu {
             None => String::new(),
         };
         let reasons: Vec<String> = self.reasons.iter().map(|why| json_string(why)).collect();
+        // A rejection is not a fallback: the backend does not learn about one
+        // until it next asks, so a frame can be counted as wholly the
+        // device's and still be wrong. These two are the only evidence of
+        // that, and a browser sees no stderr.
+        let (error_count, errors) = self.device_errors();
+        let errors: Vec<String> = errors.iter().map(|e| json_string(e)).collect();
         // `held` is what a flush costs: `flush_inner` writes back every
         // surface in it, every time, so this growing is the flush time
         // growing. Nothing caps it — a title that renders to fresh addresses
@@ -3932,7 +3986,8 @@ impl Renderer for Gpu {
              \"modules\":{},\"held\":{},\"evicted\":{},\"pending\":{},\
              \"read\":{{\"textures\":{},\"vertex\":{},\"constants\":{},\"index\":{}}},\
              \"textureHits\":{},\"textureMisses\":{},\
-             \"softwareFrame\":{},\"gaveUp\":{},\"reasons\":[{}]{}}}",
+             \"softwareFrame\":{},\"gaveUp\":{},\"reasons\":[{}],\
+             \"deviceErrorCount\":{},\"deviceErrors\":[{}]{}}}",
             self.drawn,
             self.fallbacks,
             self.pipelines.len(),
@@ -3949,6 +4004,8 @@ impl Renderer for Gpu {
             self.software_frame,
             self.gave_up,
             reasons.join(","),
+            error_count,
+            errors.join(","),
             times,
         )
     }
@@ -4120,7 +4177,7 @@ mod tests {
                     source: wgpu::ShaderSource::Wgsl(src.into()),
                 });
             let _ = gpu.device.poll(wgpu::PollType::Poll);
-            gpu.failed.lock().ok().and_then(|mut e| e.take())
+            gpu.failed.lock().ok().and_then(|mut e| e.fresh.take())
         };
         assert!(
             module("with", "  return false;").is_none(),
@@ -4130,6 +4187,52 @@ mod tests {
             module("without", "").is_some(),
             "naga now accepts a function whose loop cannot fall through: drop the \
              trailing `return false;` from `shader::wgsl`, and Tint stops warning"
+        );
+    }
+
+    /// A rejection the backend never asks about still reaches the report.
+    ///
+    /// The failure this guards is what made a magenta frame in the browser
+    /// read as `0 fell back`: the only production reader of `device_error`
+    /// runs before a pipeline is built, and a title that builds its pipelines
+    /// in the first frames never builds another. Everything the device
+    /// rejected from then on was captured and never looked at, and the report
+    /// had nowhere to put it.
+    #[test]
+    fn a_rejection_nothing_asked_about_is_still_counted_and_reported() {
+        let Ok(gpu) = super::Gpu::open() else { return };
+        assert_eq!(gpu.device_errors(), (0, Vec::new()), "nothing rejected yet");
+
+        // Rejected for a reason that cannot become valid: `bool` is not a
+        // fragment return type WebGPU accepts at a location.
+        let _m = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("rejected"),
+                source: wgpu::ShaderSource::Wgsl(
+                    "@fragment fn fs_main() -> @location(0) bool { return true; }".into(),
+                ),
+            });
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+
+        let (count, distinct) = gpu.device_errors();
+        assert!(count >= 1, "the device rejected the module and said nothing");
+        assert_eq!(distinct.len(), 1, "one rejection, one distinct message");
+        // Not taken: `device_error` is what drains, and the report has to keep
+        // saying so for the rest of the run.
+        assert_eq!(gpu.device_errors(), (count, distinct.clone()));
+
+        // `report_json` is the renderer's, and the page reads it through that
+        // trait rather than through this type.
+        use switch_core::gpu::renderer::Renderer;
+        let json = gpu.report_json();
+        assert!(
+            json.contains(&format!("\"deviceErrorCount\":{count}")),
+            "the count is missing from the report: {json}"
+        );
+        assert!(
+            json.contains("\"deviceErrors\":[\""),
+            "the message is missing from the report: {json}"
         );
     }
 

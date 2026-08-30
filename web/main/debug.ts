@@ -66,11 +66,13 @@ $('btn-gpustats').addEventListener('click', async () => {
   }
   const drawn = g.drawn ?? 0;
   const fallbacks = g.fallbacks ?? 0;
+  const errors = g.deviceErrorCount ?? 0;
   // Share of draws the device actually took. A frame can look fine and still
   // be almost entirely the rasterizer's.
   const share = drawn + fallbacks ? ((drawn * 100) / (drawn + fallbacks)).toFixed(1) : '0';
   log(
     `rendering: ${drawn} draws on the device, ${fallbacks} fell back (${share}% device), ` +
+      `${errors} rejected, ` +
       `${g.pipelines ?? 0} pipelines, ${g.modules ?? 0} modules, ` +
       `${g.held ?? 0} surfaces held (${g.evicted ?? 0} evicted, ${g.pending ?? 0} pending)`,
     'dim',
@@ -80,6 +82,18 @@ $('btn-gpustats').addEventListener('click', async () => {
     log('rendering: the software-frame latch has tripped - every frame from here is the rasterizer\'s.', 'err');
   }
   for (const why of g.reasons ?? []) log('  fell back: ' + why, 'dim');
+  // Loud, and above the counters: a rejected draw is still counted as drawn,
+  // so this is the only line that contradicts a clean-looking 100% device.
+  if (errors) {
+    const distinct = g.deviceErrors ?? [];
+    const rest = errors - distinct.length;
+    log(
+      `rendering: the device rejected ${errors} thing(s) - the draws above were counted anyway.` +
+        (rest > 0 ? ` ${distinct.length} distinct, ${rest} repeat(s).` : ''),
+      'err',
+    );
+    for (const e of distinct) log('  device rejected: ' + e, 'err');
+  }
   const r = g.read;
   if (r) {
     const mib = (v: number) => (v / (1024 * 1024)).toFixed(1);
