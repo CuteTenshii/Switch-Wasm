@@ -366,6 +366,48 @@ impl Cpu {
                 settings[0x10..0x14].copy_from_slice(&21u32.to_le_bytes());
                 self.write_ipc_response(tls, 0, &[], &settings, &[])
             }
+            // The `Get*` settings the Home Menu reads on its way up. These
+            // fell through to the stub below, where the reply padding made
+            // them read as zero — right by accident for most, and wrong for
+            // `GetSleepSettings`, whose zero is a plan index rather than a
+            // duration. Naming them makes the console's answer deliberate.
+            //
+            // GetLockScreenFlag (7), GetAutoUpdateEnableFlag (95),
+            // GetBatteryPercentageFlag (99) and GetFieldTestingFlag (201) are
+            // each a bool.
+            Some(7) | Some(95) | Some(99) | Some(201) => {
+                self.write_ipc_response(tls, 0, &[], &[0u8], &[])
+            }
+            // GetQuestFlag -> nn::settings::system::QuestFlag, a `u8`. Zero is
+            // Retail; a kiosk unit runs a different Home Menu entirely.
+            Some(47) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+            // GetAccountSettings -> AccountSettings { u32 flags },
+            // GetColorSetId -> ColorSet (0 is BasicWhite, the light theme this
+            // menu is drawn in), GetPrimaryAlbumStorage -> PrimaryAlbumStorage
+            // (0 is Nand; there is no album on the SD card here),
+            // GetErrorReportSharePermission -> ErrorReportSharePermission (0
+            // is NotConfirmed, which is the truth — nothing has asked),
+            // GetAppletLaunchFlags -> u32, and
+            // GetChineseTraditionalInputMethod -> its enum. All one `u32`.
+            Some(17) | Some(23) | Some(63) | Some(124) | Some(126) | Some(170) => {
+                self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
+            }
+            // GetAccountNotificationSettings -> s32 count, with the entries
+            // themselves in an output buffer. No account has an override, so
+            // the count is zero and the buffer is left alone.
+            Some(31) => self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[]),
+            // GetSleepSettings -> nn::settings::system::SleepSettings
+            // { SleepFlag flags; HandheldSleepPlan handheld; ConsoleSleepPlan
+            // console; }, 0xc bytes. Both plans are `Never` (5): nothing here
+            // puts the console to sleep, and a plan that expires is a menu
+            // waiting to dim a screen this emulator does not own.
+            Some(71) => {
+                const NEVER: u32 = 5;
+                let mut sleep = [0u8; 0xc];
+                sleep[0x04..0x08].copy_from_slice(&NEVER.to_le_bytes());
+                sleep[0x08..0x0c].copy_from_slice(&NEVER.to_le_bytes());
+                self.write_ipc_response(tls, 0, &[], &sleep, &[])
+            }
             _ => {
                 self.warn_stub(
                     "set:sys",
@@ -1060,6 +1102,50 @@ mod tests {
             1,
             "KeyboardLayout_EnglishUs"
         );
+    }
+
+    #[test]
+    fn set_sys_sleeps_never_rather_than_at_an_arbitrary_hour() {
+        // The one setting here whose zero is actively wrong. `SleepSettings`
+        // is { SleepFlag; HandheldSleepPlan; ConsoleSleepPlan }, and the plans
+        // are *indices* rather than durations — so the zeroes the empty-success
+        // stub left behind said "sleep after one minute", not "do not sleep".
+        // Nothing here dims a screen this emulator does not own.
+        const NEVER: u32 = 5;
+        let mut cpu = request(false, 71, &[]);
+        cpu.set_sys_request(TLS, Some(71)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "flags");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), NEVER, "handheld");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), NEVER, "console");
+    }
+
+    #[test]
+    fn set_sys_names_the_settings_it_used_to_leave_to_the_reply_padding() {
+        // These are answered rather than stubbed now. The values match the
+        // zeroes the padding already supplied, so this is not a fix for
+        // anything the guest saw — it is the difference between a console that
+        // says it is retail and one that merely never said otherwise.
+        for (cmd, want) in [
+            (17u32, 0u32), // GetAccountSettings
+            (23, 0),       // GetColorSetId, BasicWhite
+            (31, 0),       // GetAccountNotificationSettings, no overrides
+            (63, 0),       // GetPrimaryAlbumStorage, Nand
+            (124, 0),      // GetErrorReportSharePermission, NotConfirmed
+            (126, 0),      // GetAppletLaunchFlags
+            (170, 0),      // GetChineseTraditionalInputMethod
+        ] {
+            let mut cpu = request(false, cmd, &[]);
+            cpu.set_sys_request(TLS, Some(cmd)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "cmd {cmd} result");
+            assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), want, "cmd {cmd}");
+        }
+        // QuestFlag is a `u8`: Retail, not Kiosk.
+        for cmd in [7u32, 47, 95, 99, 201] {
+            let mut cpu = request(false, cmd, &[]);
+            cpu.set_sys_request(TLS, Some(cmd)).unwrap();
+            assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "cmd {cmd}");
+        }
     }
 
     #[test]

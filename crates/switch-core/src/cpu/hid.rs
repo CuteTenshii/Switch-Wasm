@@ -348,13 +348,31 @@ impl Cpu {
                     self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                 }
                 // Activate{Home,Sleep,Capture}Button, and
-                // ApplyNpadSystemCommonPolicy / EnableAppletToGetInput.
-                // Every one is a setter over state this emulator does not
-                // have — there is one pad, it is always connected, and the
-                // caller is always the foreground applet — so accepting the
-                // request is the whole implementation.
-                Some(111) | Some(131) | Some(151) | Some(301) | Some(303) | Some(304)
-                | Some(305) | Some(308) | Some(503) => {
+                // EnableAppletToGetInput. Every one is a setter over state
+                // this emulator does not have — there is one pad, it is
+                // always connected, and the caller is always the foreground
+                // applet — so accepting the request is the whole
+                // implementation.
+                Some(111) | Some(131) | Some(151) | Some(301) | Some(304) | Some(305)
+                | Some(503) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+                // ApplyNpadSystemCommonPolicy and its `Full` form (308), which
+                // differs only in a status bit nothing here reads.
+                //
+                // **This is how a system applet asks for controllers**: it
+                // never sends `SetSupportedNpadStyleSet`, so accepting this
+                // and discarding it left `npad_style_set` at zero for a whole
+                // run. Eden's `SetNpadSystemCommonPolicy` grants every style
+                // there is; the honest equivalent is every style this console
+                // can publish. The hold type it also assigns is already this
+                // field's value, so there is nothing to write for it.
+                Some(303) | Some(308) => {
+                    let styles = super::supported_npad_style_set();
+                    if styles != self.npad_style_set {
+                        self.npad_style_set = styles;
+                        if let Some(event) = self.npad_style_update_event {
+                            self.signal_event(event);
+                        }
+                    }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // GetMaskedSupportedNpadStyleSet(u64 aruid) -> NpadStyleSet:
@@ -374,9 +392,8 @@ impl Cpu {
                 Some(313) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
                 // SetNpadSystemExtStateEnabled(bool, u64 aruid): whether the
                 // caller may be handed pads in the SystemExt style. There is
-                // one process here, and `NPAD_PRESENTATIONS` already
-                // publishes that style to a caller whose supported set names
-                // it, so the permission has nothing left to gate.
+                // one process here, and every slot carries that style
+                // already, so the permission has nothing left to gate.
                 Some(322) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // InitializeFirmwareUpdate (1000), its USB form
                 // InitializeUsbFirmwareUpdateWithoutMemory (1135), and
@@ -385,9 +402,13 @@ impl Cpu {
                 // here is the console's own and has no firmware to flash, so
                 // there is nothing to refuse, nothing to skip and nothing to
                 // do.
-                Some(1000) | Some(1120) | Some(1135) => {
+                // FinalizeUsbFirmwareUpdate (1131) closes the same session.
+                Some(1000) | Some(1120) | Some(1131) | Some(1135) => {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // CheckUsbFirmwareUpdateRequired -> bool. The pad here is the
+                // console's own and has no firmware to flash, so none is.
+                Some(1132) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
                 // IsJoyConRailEnabled (523) and IsJoyConAttachedOnAllRail
                 // (525) -> bool: whether the console's rails are live, and
                 // whether both Joy-Cons are actually seated in them.
@@ -541,6 +562,82 @@ mod tests {
         assert_eq!(
             cpu.mem.read_u32(handheld + h::STYLE_SET).unwrap(),
             h::STYLE_HANDHELD
+        );
+    }
+
+    #[test]
+    fn every_slot_carries_the_system_ext_lifo_the_home_menu_reads() {
+        // A read watchpoint on all three candidate LIFOs through a boot of
+        // 18.0.1's qlaunch finds twelve reads of SystemExt and none at all of
+        // FullKey or handheld. It is a second copy every pad carries, not an
+        // alternative presentation, so it goes out whatever style was asked
+        // for.
+        use crate::cpu::hid_shmem as h;
+        const SHMEM: u32 = 0x3000_0000;
+
+        let mut cpu = request(false, 100, &h::STYLE_JOY_DUAL.to_le_bytes());
+        cpu.mem.map_zero(SHMEM, 0x40000).unwrap();
+        cpu.hid_shmem_addr = SHMEM;
+        cpu.register_service_handle(9, "hid");
+        cpu.hid_request(TLS, 9, Some(100)).unwrap();
+        cpu.set_gamepad_state(0x3, 1000, -2000, 3000, -4000);
+
+        for (name, slot) in [
+            ("player 1", SHMEM + h::NPAD),
+            (
+                "handheld",
+                SHMEM + h::NPAD + h::HANDHELD_SLOT * h::ENTRY_SIZE,
+            ),
+        ] {
+            let entry = slot + h::SYSTEM_EXT_LIFO + h::LIFO_STORAGE;
+            assert_eq!(
+                cpu.mem.read_u64(entry + h::STATE_BUTTONS).unwrap(),
+                0x3,
+                "{name} publishes buttons in the SystemExt LIFO"
+            );
+            assert_eq!(
+                cpu.mem.read_u32(entry + h::STATE_STICK_L).unwrap() as i32,
+                1000,
+                "{name} publishes sticks there too"
+            );
+            assert_eq!(
+                cpu.mem
+                    .read_u64(slot + h::SYSTEM_EXT_LIFO + h::LIFO_COUNT)
+                    .unwrap(),
+                1,
+                "{name}'s SystemExt LIFO header says it holds an entry"
+            );
+        }
+
+        // And the style tag still names the physical controller only, the way
+        // Eden leaves it: the reader above does not consult it.
+        assert_eq!(
+            cpu.mem.read_u32(SHMEM + h::NPAD + h::STYLE_SET).unwrap(),
+            h::STYLE_JOY_DUAL
+        );
+    }
+
+    #[test]
+    fn apply_npad_system_common_policy_is_how_an_applet_asks_for_controllers() {
+        // A system applet configures input with this rather than with
+        // `SetSupportedNpadStyleSet`, which 18.0.1's qlaunch never sends.
+        let mut cpu = request(false, 303, &[]);
+        cpu.register_service_handle(9, "hid:sys");
+        cpu.hid_request(TLS, 9, Some(303)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+        assert_eq!(
+            cpu.npad_style_set,
+            crate::cpu::supported_npad_style_set(),
+            "the policy grants every style this console can publish"
+        );
+
+        // Which is also the answer 310 gives, and an applet handed a style by
+        // one and refused it by the other is one the user cannot get past.
+        marshal(&mut cpu, false, 310, &[]);
+        cpu.hid_request(TLS, 9, Some(310)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            crate::cpu::supported_npad_style_set()
         );
     }
 

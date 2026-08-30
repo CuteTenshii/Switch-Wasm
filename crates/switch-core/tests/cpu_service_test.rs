@@ -703,8 +703,36 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
     assert_eq!(cpu.mem.read_u32(touch(1) + 0x10).unwrap(), 100, "x");
     assert_eq!(cpu.mem.read_u32(touch(1) + 0x14).unwrap(), 700, "y");
 
-    // Lifting one of the two clears the slot it vacated, so a reader that scans
-    // the array rather than trusting the count finds no ghost contact.
+    // Both contacts are new, so both carry `start_touch`. A UI taps on that
+    // transition rather than on a finger being in the list, which is why
+    // publishing zero here left the Home Menu registering every tap and acting
+    // on none of them.
+    assert_eq!(cpu.mem.read_u32(touch(0) + 0x08).unwrap(), 1, "start 0");
+    assert_eq!(cpu.mem.read_u32(touch(1) + 0x08).unwrap(), 1, "start 3");
+
+    // Lifting one of the two publishes it **once more**, still counted, with
+    // `end_touch` — the finger has to be seen going up, not merely stop being
+    // there. The one still down is held, so its attributes go back to zero.
+    cpu.set_touch_state(&[TouchPoint {
+        finger_id: 0,
+        x: 5,
+        y: 6,
+    }]);
+    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 2, "contact count");
+    assert_eq!(cpu.mem.read_u32(touch(0) + 0x08).unwrap(), 0, "held");
+    assert_eq!(
+        cpu.mem.read_u32(touch(1) + 0x0C).unwrap(),
+        3,
+        "the lifted id"
+    );
+    assert_eq!(cpu.mem.read_u32(touch(1) + 0x08).unwrap(), 2, "end");
+    assert!(
+        cpu.mem.read_u64(storage).unwrap() > sample,
+        "sample must advance"
+    );
+
+    // And only then is it gone, with the slot it vacated cleared so a reader
+    // that scans the array rather than trusting the count finds no ghost.
     cpu.set_touch_state(&[TouchPoint {
         finger_id: 0,
         x: 5,
@@ -713,13 +741,12 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
     assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 1, "contact count");
     assert_eq!(cpu.mem.read_u32(touch(1) + 0x10).unwrap(), 0, "vacated x");
     assert_eq!(cpu.mem.read_u32(touch(1) + 0x14).unwrap(), 0, "vacated y");
-    assert!(
-        cpu.mem.read_u64(storage).unwrap() > sample,
-        "sample must advance"
-    );
 
-    // A full lift is a published state carrying no contacts, not silence: a
-    // title polling the LIFO has to see the finger go up.
+    // A full lift is a published state carrying the finger's end, not silence:
+    // a title polling the LIFO has to see it go up.
+    cpu.set_touch_state(&[]);
+    assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 1, "the end sample");
+    assert_eq!(cpu.mem.read_u32(touch(0) + 0x08).unwrap(), 2, "end");
     cpu.set_touch_state(&[]);
     assert_eq!(cpu.mem.read_u32(state + 0x08).unwrap(), 0, "contact count");
 

@@ -578,6 +578,32 @@ impl Cpu {
             // LoadIdTokenCache(out buffer) -> u32 size. There is no token to
             // cache, and an empty one is what an unlinked account has.
             Some(3) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // GetNetworkServiceLicenseCacheEx (15.0.0+) -> u32 license, s64
+            // expiry. The `s64` is eight-aligned, so the reply is sixteen
+            // bytes rather than twelve. No account here holds a licence, and
+            // both zeroes say so.
+            Some(143) => self.write_ipc_response(tls, 0, &[], &[0u8; 0x10], &[]),
+            // GetNintendoAccountUserResourceCache -> u64 account id, with a
+            // 0x68-byte `NasUserBaseForApplication` in the first output buffer
+            // and an optional second the caller sizes itself.
+            //
+            // The buffers matter more than the reply. Left unwritten they are
+            // whatever the caller's stack held, and this account is not linked
+            // to a Nintendo Account at all — so the cache is zeroed, which is
+            // what "no cached resource" looks like.
+            Some(130) => {
+                for index in 0..2 {
+                    if let Some((addr, size)) = self.ipc_output_buffer(tls, index) {
+                        if addr != 0 {
+                            for offset in 0..size {
+                                self.mem.write_u8(addr.wrapping_add(offset), 0)?;
+                            }
+                        }
+                    }
+                }
+                let id = NETWORK_SERVICE_ACCOUNT_ID.to_le_bytes();
+                self.write_ipc_response(tls, 0, &[], &id, &[])
+            }
             _ => self.unimplemented_command(tls, "acc:manager", cmd_id),
         }
     }

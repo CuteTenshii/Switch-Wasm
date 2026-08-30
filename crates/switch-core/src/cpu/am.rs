@@ -623,6 +623,9 @@ impl Cpu {
                 // Global; 2 is the Chinese console, which has a different set
                 // of services and stores behind it.
                 Some(300) => self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[]),
+                // GetOperationModeSystemInfo -> u32. Zero is what a console
+                // with nothing unusual about its operation mode reports.
+                Some(200) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
                 // GetHomeButtonReaderLockAccessor,
                 // GetReaderLockAccessorEx(u32 button_type) and
                 // GetWriterLockAccessorEx [7.0.0+] -> ILockAccessor: the HOME

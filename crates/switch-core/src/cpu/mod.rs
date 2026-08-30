@@ -531,8 +531,7 @@ pub const VAMM_SYSTEM_RESOURCE_SIZE: u32 = 0x0100_0000;
 pub const APPLET_HEAP_REGION_SIZE: u32 = 0x2000_0000;
 pub const APPLET_ALIAS_REGION_ADDR: u32 =
     GUEST_HEAP_REGION_ADDR.wrapping_add(APPLET_HEAP_REGION_SIZE);
-pub const APPLET_ALIAS_REGION_SIZE: u32 =
-    SHARED_BUFFER_ADDR.wrapping_sub(APPLET_ALIAS_REGION_ADDR);
+pub const APPLET_ALIAS_REGION_SIZE: u32 = SHARED_BUFFER_ADDR.wrapping_sub(APPLET_ALIAS_REGION_ADDR);
 
 /// The address space a process is given, which is not the same for every
 /// process.
@@ -866,6 +865,10 @@ mod hid_shmem {
     pub const TOUCH_SIZE: u32 = 0x28;
     pub const TOUCH_DELTA_TIME: u32 = 0x00;
     pub const TOUCH_ATTRIBUTES: u32 = 0x08;
+    /// `nn::hid::TouchAttribute`: the frame a contact went down, and the frame
+    /// it came up. A UI taps on these rather than on a finger being present.
+    pub const TOUCH_ATTR_START: u32 = 1 << 0;
+    pub const TOUCH_ATTR_END: u32 = 1 << 1;
     pub const TOUCH_FINGER_ID: u32 = 0x0C;
     pub const TOUCH_X: u32 = 0x10;
     pub const TOUCH_Y: u32 = 0x14;
@@ -904,9 +907,13 @@ struct NpadPresentation {
 /// out-of-range npad id it sits beside.
 ///
 /// The order is how much of a dual-stick pad survives the presentation. The
-/// first three carry every button and both sticks; a single Joy-Con is last
+/// first two carry every button and both sticks; a single Joy-Con is last
 /// because half the pad has nowhere to go in it.
-const NPAD_PRESENTATIONS: [NpadPresentation; 5] = [
+///
+/// `SystemExt` is deliberately not here. It is not a style a pad is published
+/// *instead of* another — see [`Cpu::write_npad_slot`], which publishes it
+/// alongside whichever of these the title asked for.
+const NPAD_PRESENTATIONS: [NpadPresentation; 4] = [
     NpadPresentation {
         style: hid_shmem::STYLE_FULL_KEY,
         device_type: hid_shmem::DEVICE_FULL_KEY,
@@ -924,15 +931,6 @@ const NPAD_PRESENTATIONS: [NpadPresentation; 5] = [
             | hid_shmem::ATTR_LEFT_WIRED
             | hid_shmem::ATTR_RIGHT_CONNECTED
             | hid_shmem::ATTR_RIGHT_WIRED,
-        joy_assignment: hid_shmem::JOY_ASSIGNMENT_DUAL,
-    },
-    // The Home Menu's own style. It is not a controller a shop sells, but it
-    // has the full face this pad does, so nothing is lost presenting as one.
-    NpadPresentation {
-        style: hid_shmem::STYLE_SYSTEM_EXT,
-        device_type: hid_shmem::DEVICE_FULL_KEY,
-        lifo: hid_shmem::SYSTEM_EXT_LIFO,
-        attributes: hid_shmem::ATTR_CONNECTED | hid_shmem::ATTR_WIRED,
         joy_assignment: hid_shmem::JOY_ASSIGNMENT_DUAL,
     },
     NpadPresentation {
@@ -974,7 +972,8 @@ const NPAD_HANDHELD: NpadPresentation = NpadPresentation {
 
 /// Every style this console's pad can be published in: the ones
 /// [`NPAD_PRESENTATIONS`] can present, plus the handheld slot published beside
-/// player 1 whatever a title asked for.
+/// player 1 whatever a title asked for, plus `SystemExt`, which every slot
+/// carries in addition to its own style.
 ///
 /// This is the console's own capability, not a title's choice — what a title
 /// *asked* for is `npad_style_set` — and it has to be the same answer wherever
@@ -982,9 +981,10 @@ const NPAD_HANDHELD: NpadPresentation = NpadPresentation {
 /// then asks `hid:sys` for it again, and an applet offering a controller that
 /// never appears afterwards is one the user cannot get past.
 fn supported_npad_style_set() -> u32 {
-    NPAD_PRESENTATIONS
-        .iter()
-        .fold(NPAD_HANDHELD.style, |set, pad| set | pad.style)
+    NPAD_PRESENTATIONS.iter().fold(
+        NPAD_HANDHELD.style | hid_shmem::STYLE_SYSTEM_EXT,
+        |set, pad| set | pad.style,
+    )
 }
 
 /// Which presentation player 1 gets, given the styles the title said it takes.
@@ -1470,6 +1470,10 @@ pub struct Cpu {
     /// How many touch slots the last publish filled, so the ones a shrinking
     /// contact count leaves behind can be cleared instead of lingering.
     touch_published: usize,
+    /// The contacts down at the last publish, so the next one can tell a new
+    /// finger from a held one and a lifted finger from a finger that was never
+    /// there. See [`Cpu::set_touch_state`].
+    touch_down: Vec<TouchPoint>,
     /// The font `pl:u` serves as every shared font type, as a TrueType/OpenType
     /// file. Homebrew reads it out of pl's shared memory and hands it to
     /// FreeType, so an empty vector means no text renders at all.
@@ -1782,6 +1786,7 @@ impl Cpu {
             romfs: None,
             touch_sample_counter: 0,
             touch_published: 0,
+            touch_down: Vec::new(),
             hid_shmem_addr: 0,
             hid_shmem_handle: None,
             npad_style_set: 0,
@@ -3559,7 +3564,6 @@ impl Cpu {
         sticks: (i32, i32, i32, i32),
     ) {
         use hid_shmem as h;
-        let (lx, ly, rx, ry) = sticks;
         let base = self
             .hid_shmem_addr
             .wrapping_add(h::NPAD)
@@ -3590,7 +3594,45 @@ impl Cpu {
                 .write_u32(base + h::BATTERY_LEVEL + info * 4, h::BATTERY_FULL);
         }
 
-        let lifo = base.wrapping_add(presentation.lifo);
+        self.write_npad_lifo(
+            base.wrapping_add(presentation.lifo),
+            sample,
+            buttons,
+            sticks,
+            presentation.attributes,
+        );
+        // SystemExt is not one of the styles above but a second copy every pad
+        // carries, the way Eden's `npad.cpp` writes it after its per-style
+        // switch. **The Home Menu reads this LIFO and no other**, and never
+        // calls `SetSupportedNpadStyleSet` to ask for the style — so
+        // publishing only what a title asked for left it with no buttons at
+        // all. `style_tag` still names the physical style, which is why
+        // nothing above ORs the bit in.
+        self.write_npad_lifo(
+            base.wrapping_add(h::SYSTEM_EXT_LIFO),
+            sample,
+            buttons,
+            sticks,
+            presentation.attributes,
+        );
+    }
+
+    /// Publish one state into one `HidNpadCommonLifo` at `lifo`.
+    ///
+    /// A reader takes `count` entries ending at `tail`, so one entry at index
+    /// 0 is all `hidGetNpadStates*` needs. The storage's sampling number is
+    /// the state's doubled because bit 0 is the seqlock's "being written"
+    /// flag, and a reader spins on the entry until it clears.
+    fn write_npad_lifo(
+        &mut self,
+        lifo: u32,
+        sample: u64,
+        buttons: u64,
+        sticks: (i32, i32, i32, i32),
+        attributes: u32,
+    ) {
+        use hid_shmem as h;
+        let (lx, ly, rx, ry) = sticks;
         let _ = self
             .mem
             .write_u64(lifo + h::LIFO_BUFFER_COUNT, h::LIFO_CAPACITY);
@@ -3607,9 +3649,7 @@ impl Cpu {
         let _ = self.mem.write_u32(entry + h::STATE_STICK_L + 4, ly as u32);
         let _ = self.mem.write_u32(entry + h::STATE_STICK_R, rx as u32);
         let _ = self.mem.write_u32(entry + h::STATE_STICK_R + 4, ry as u32);
-        let _ = self
-            .mem
-            .write_u32(entry + h::STATE_ATTRIBUTES, presentation.attributes);
+        let _ = self.mem.write_u32(entry + h::STATE_ATTRIBUTES, attributes);
     }
 
     /// Publish the host's touchscreen contacts where `hidGetTouchScreenStates`
@@ -3621,11 +3661,24 @@ impl Cpu {
     /// LIFO that stops advancing is not "no touches" to a reader waiting for
     /// the next one.
     ///
-    /// An empty slice is how a lift is reported: the state is still published,
-    /// with a contact count of zero. Nothing is remembered between calls, so a
-    /// caller has to keep sending while a finger is down - which is also what
-    /// makes a touch that began before the guest mapped hid's shared memory
-    /// show up as soon as it has.
+    /// An empty slice is how a lift is reported. The caller has to keep
+    /// sending while a finger is down - which is also what makes a touch that
+    /// began before the guest mapped hid's shared memory show up as soon as it
+    /// has.
+    ///
+    /// **A contact that is merely present is not a tap.** `HidTouchState`
+    /// carries an `attributes` word whose bit 0 is `start_touch` and bit 1
+    /// `end_touch`, and a UI decides it has been pressed on those transitions
+    /// rather than on a finger simply being in the list. This published zero
+    /// for both and reported a lift by dropping the contact, so the Home Menu
+    /// saw a finger that never began and never ended: every tap registered and
+    /// none of them did anything.
+    ///
+    /// So the fingers down at the last sample are remembered here. A new id is
+    /// published with `start_touch`; an id that has gone is published **once
+    /// more**, still counted, with `end_touch`, and only then forgotten — which
+    /// is what Eden's `touch_screen_driver.cpp` does over its own
+    /// `TouchFinger::pressed`.
     pub fn set_touch_state(&mut self, touches: &[TouchPoint]) {
         self.last_touches = touches.to_vec();
         if self.hid_shmem_addr == 0 {
@@ -3649,19 +3702,44 @@ impl Cpu {
         let state = storage.wrapping_add(h::TOUCH_STATE);
         let _ = self.mem.write_u64(state + h::TOUCH_SAMPLING_NUMBER, sample);
 
-        let count = match self.operation_mode {
-            OperationMode::Handheld => touches.len().min(TOUCH_MAX),
-            OperationMode::Docked => 0,
+        // Docked, the screen is in the dock and nothing can be touching it, so
+        // every contact is treated as gone — which still reports the lift of
+        // one that was down when the console was docked.
+        let down: &[TouchPoint] = match self.operation_mode {
+            OperationMode::Handheld => touches,
+            OperationMode::Docked => &[],
         };
+        // The contacts to publish: the ones down now, then the ones that were
+        // down at the last sample and are not any more.
+        let mut published: Vec<(TouchPoint, u32)> = Vec::with_capacity(TOUCH_MAX);
+        for touch in down.iter().take(TOUCH_MAX) {
+            let held = self
+                .touch_down
+                .iter()
+                .any(|prev| prev.finger_id == touch.finger_id);
+            let attributes = if held { 0 } else { h::TOUCH_ATTR_START };
+            published.push((*touch, attributes));
+        }
+        for prev in &self.touch_down {
+            if published.len() == TOUCH_MAX {
+                break;
+            }
+            if !down.iter().any(|touch| touch.finger_id == prev.finger_id) {
+                published.push((*prev, h::TOUCH_ATTR_END));
+            }
+        }
+        self.touch_down = down.iter().take(TOUCH_MAX).copied().collect();
+
+        let count = published.len();
         let _ = self.mem.write_u32(state + h::TOUCH_COUNT, count as u32);
         let slot = |i: usize| state + h::TOUCH_TOUCHES + i as u32 * h::TOUCH_SIZE;
-        for (i, touch) in touches[..count].iter().enumerate() {
+        for (i, (touch, attributes)) in published.iter().enumerate() {
             let e = slot(i);
             // delta_time is how long this contact has been down. Nothing here
             // measures it, and a title that wants a duration times its own
             // frames; reporting a made-up figure would be worse than zero.
             let _ = self.mem.write_u64(e + h::TOUCH_DELTA_TIME, 0);
-            let _ = self.mem.write_u32(e + h::TOUCH_ATTRIBUTES, 0);
+            let _ = self.mem.write_u32(e + h::TOUCH_ATTRIBUTES, *attributes);
             let _ = self.mem.write_u32(e + h::TOUCH_FINGER_ID, touch.finger_id);
             let _ = self
                 .mem
