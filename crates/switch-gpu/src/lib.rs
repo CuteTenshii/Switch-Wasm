@@ -91,17 +91,30 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
 
 /// The `wgpu` this was built against, so a caller that has to name a device
 /// type does not have to guess at a matching version.
+mod builtin;
+mod convert;
+mod readback;
+mod stats;
+
 pub use wgpu;
 
 use switch_core::gpu::engine::threed::{Engine3D, ShaderStage};
 use switch_core::gpu::exec::ExecCtx;
-use switch_core::gpu::pipeline::{self as state, AttributeBase, Format, Pipeline};
+use switch_core::gpu::pipeline::{self as state, AttributeBase, Pipeline};
 use switch_core::gpu::renderer::{Flush, Renderer, Software};
 use switch_core::gpu::shader::compiled::Compiled;
 use switch_core::gpu::shader::wgsl::{self, Coverage, Layout, Stage, Translation};
-use switch_core::gpu::surface::{SampleGrid, MAX_SAMPLES};
+use switch_core::gpu::surface::SampleGrid;
 use switch_core::gpu::upload::{Banks, DepthKind, Target, Targets, TextureKey, Uploads};
 use switch_core::{Error, Result};
+
+use builtin::{grid_bytes, resample_wgsl, ResampleKey, CLEAR_RECT_WGSL, LOAD_DEPTH_WGSL};
+use convert::{
+    blend, compare, depth_texture_format, device_attachment_format, device_texture_format,
+    topology, vertex_format, write_mask,
+};
+use readback::{Companion, Held, Pending, Scratch, MAP_FAILED, MAP_READY, MAP_WAITING};
+use stats::{json_string, DeviceErrors, Times, UploadBytes};
 
 /// The memory a `ldg` reads, resolved from the descriptor its address was
 /// built out of.
@@ -165,182 +178,6 @@ const ATTRIBUTE_DEFAULTS: [u8; 32] = {
 const ABSENT_ATTRIBUTE: u64 = 0;
 const DEFAULT_ATTRIBUTE: u64 = 16;
 
-/// The pass that puts a guest depth surface onto the device.
-///
-/// `depth32float` is a format a copy may read out of and never write into,
-/// so the only way in is to draw it: a fullscreen triangle whose fragment
-/// reads the texel that was uploaded to an ordinary `r32float` texture and
-/// reports it as its own depth. `depth16unorm` needs none of this — it is
-/// the one depth format a copy may write — but it goes the same way, because
-/// two paths that must agree about a surface's contents are one more place
-/// for them to disagree than there needs to be.
-const LOAD_DEPTH_WGSL: &str = "\
-@group(0) @binding(0) var src: texture_2d<f32>;
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
-  // One triangle covering the whole of clip space, out of three vertices and
-  // no vertex buffer at all.
-  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
-  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
-  return vec4<f32>(x, y, 0.0, 1.0);
-}
-
-@fragment
-fn fs_main(@builtin(position) position: vec4<f32>) -> @builtin(frag_depth) f32 {
-  return textureLoad(src, vec2<u32>(position.xy), 0).x;
-}
-";
-
-/// The pass that clears part of a surface.
-///
-/// A clear that covers the whole of one is a render pass's load operation and
-/// needs none of this. A clear that covers a rectangle of it, or only some of
-/// its channels, is not something a load operation can say — so it is a
-/// fullscreen triangle under a scissor, with the write mask baked into the
-/// pipeline and the value in a uniform.
-const CLEAR_RECT_WGSL: &str = "\
-struct Clear {
-  color: vec4<f32>,
-  depth: f32,
-}
-@group(0) @binding(0) var<uniform> clear: Clear;
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {
-  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
-  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
-  return vec4<f32>(x, y, 0.0, 1.0);
-}
-
-@fragment
-fn fs_color() -> @location(0) vec4<f32> {
-  return clear.color;
-}
-
-@fragment
-fn fs_depth() -> @builtin(frag_depth) f32 {
-  return clear.depth;
-}
-";
-
-/// The WGSL that moves a multisampled surface between the two shapes it has.
-///
-/// A Maxwell multisample surface stores its samples *spatially*: a pixel owns
-/// a `samples_x` by `samples_y` tile of texels, and that expanded image is
-/// what guest memory holds and what a readback has to produce. A device's own
-/// multisampling stores them opaquely, in a texture a copy may not touch at
-/// all. So the two shapes both exist, and this is the pass between them —
-/// `gather` on the way in, `scatter` on the way out.
-///
-/// `sampled` is how the source is declared and `load` is how one texel comes
-/// out of it, which is the only thing that differs between the four
-/// directions. The grid is a storage buffer rather than a uniform because its
-/// tables are indexed by a value only known at run time and a uniform array
-/// pads every element to sixteen bytes.
-fn resample_wgsl(sampled: &str, load: &str, depth: bool) -> String {
-    let output = if depth {
-        "@builtin(frag_depth) f32"
-    } else {
-        "@location(0) vec4<f32>"
-    };
-    format!(
-        "\
-struct Grid {{
-  size: vec2<u32>,
-  // Which texel of a pixel's tile holds each sample, as x and y.
-  slot_x: array<u32, 16>,
-  slot_y: array<u32, 16>,
-  // The inverse: which sample each texel of the tile holds.
-  sample_of_slot: array<u32, 16>,
-}}
-@group(0) @binding(0) var<storage, read> grid: Grid;
-@group(0) @binding(1) var src: {sampled};
-
-@vertex
-fn vs_main(@builtin(vertex_index) vertex: u32) -> @builtin(position) vec4<f32> {{
-  let x = f32(i32(vertex) / 2) * 4.0 - 1.0;
-  let y = f32(i32(vertex) & 1) * 4.0 - 1.0;
-  return vec4<f32>(x, y, 0.0, 1.0);
-}}
-
-// Into the companion: this fragment is one pixel, and `sample` says which of
-// its samples. The texel it comes from is that sample's slot in the tile.
-@fragment
-fn fs_gather(
-  @builtin(position) position: vec4<f32>,
-  @builtin(sample_index) sample: u32,
-) -> {output} {{
-  let pixel = vec2<u32>(position.xy);
-  let slot = vec2<u32>(grid.slot_x[sample], grid.slot_y[sample]);
-  let texel = pixel * grid.size + slot;
-  return {load};
-}}
-
-// The same fragment for a companion that has one sample per pixel: every
-// texel of the tile holds the same value, so sample 0's slot is the one to
-// read and `sample_index` means nothing.
-@fragment
-fn fs_gather_flat(@builtin(position) position: vec4<f32>) -> {output} {{
-  let pixel = vec2<u32>(position.xy);
-  let slot = vec2<u32>(grid.slot_x[0], grid.slot_y[0]);
-  let texel = pixel * grid.size + slot;
-  let sample = 0u;
-  // Named whether or not this direction's load reads it, so that one text
-  // serves all four: a phony assignment is what WGSL has for saying so.
-  _ = sample;
-  return {load};
-}}
-
-// Out of the companion: this fragment is one texel of the expanded surface,
-// and which sample it holds is its place in its pixel's tile.
-@fragment
-fn fs_scatter(@builtin(position) position: vec4<f32>) -> {output} {{
-  let texel = vec2<u32>(position.xy);
-  let pixel = texel / grid.size;
-  let slot = texel % grid.size;
-  let sample = grid.sample_of_slot[slot.y * grid.size.x + slot.x];
-  _ = sample;
-  return {load};
-}}
-"
-    )
-}
-
-/// What a resampling pipeline is built from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct ResampleKey {
-    /// Which fragment entry point of [`resample_wgsl`] runs.
-    entry: &'static str,
-    /// The destination's format, which is also the source's — a companion is
-    /// the same format as the surface it stands in for.
-    dst: wgpu::TextureFormat,
-    /// The destination's sample count.
-    samples: u32,
-    /// Whether the source is a device multisample texture.
-    ms_source: bool,
-    depth: bool,
-}
-
-/// The grid, as the storage buffer [`resample_wgsl`] reads.
-fn grid_bytes(grid: SampleGrid) -> Vec<u8> {
-    let mut out = Vec::with_capacity(8 + 3 * 16 * 4);
-    out.extend_from_slice(&grid.samples_x.to_le_bytes());
-    out.extend_from_slice(&grid.samples_y.to_le_bytes());
-    for sample in 0..MAX_SAMPLES as u32 {
-        let (x, _) = grid.slot(sample.min(grid.count() - 1));
-        out.extend_from_slice(&x.to_le_bytes());
-    }
-    for sample in 0..MAX_SAMPLES as u32 {
-        let (_, y) = grid.slot(sample.min(grid.count() - 1));
-        out.extend_from_slice(&y.to_le_bytes());
-    }
-    for sample in grid.sample_of_slot() {
-        out.extend_from_slice(&sample.to_le_bytes());
-    }
-    out
-}
-
 /// Which shape a surface's companion has, and so which pass moves values
 /// between it and the expanded surface guest memory holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -372,33 +209,6 @@ enum Resource {
     Sampler(u32, wgpu::Sampler),
 }
 
-fn topology(topology: state::Topology) -> wgpu::PrimitiveTopology {
-    match topology {
-        state::Topology::PointList => wgpu::PrimitiveTopology::PointList,
-        state::Topology::LineList => wgpu::PrimitiveTopology::LineList,
-        state::Topology::LineStrip => wgpu::PrimitiveTopology::LineStrip,
-        state::Topology::TriangleList => wgpu::PrimitiveTopology::TriangleList,
-        state::Topology::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
-    }
-}
-
-/// The guest's per-channel colour write enables, as WebGPU spells them.
-fn write_mask(mask: [bool; 4]) -> wgpu::ColorWrites {
-    let channels = [
-        wgpu::ColorWrites::RED,
-        wgpu::ColorWrites::GREEN,
-        wgpu::ColorWrites::BLUE,
-        wgpu::ColorWrites::ALPHA,
-    ];
-    let mut writes = wgpu::ColorWrites::empty();
-    for (enabled, channel) in mask.into_iter().zip(channels) {
-        if enabled {
-            writes |= channel;
-        }
-    }
-    writes
-}
-
 /// Write a draw's two WGSL modules under `dir`, named by their hash, so the
 /// exact source a title makes can be compiled somewhere other than here.
 fn dump_wgsl(dir: &str, vs: &str, fs: &str) {
@@ -421,119 +231,6 @@ fn draw_range(spec: &str) -> Option<std::ops::Range<u32>> {
         }
     }
 }
-
-fn vertex_format(format: state::VertexFormat) -> wgpu::VertexFormat {
-    match format {
-        state::VertexFormat::Float32 => wgpu::VertexFormat::Float32,
-        state::VertexFormat::Float32x2 => wgpu::VertexFormat::Float32x2,
-        state::VertexFormat::Float32x3 => wgpu::VertexFormat::Float32x3,
-        state::VertexFormat::Float32x4 => wgpu::VertexFormat::Float32x4,
-        state::VertexFormat::Float16x2 => wgpu::VertexFormat::Float16x2,
-        state::VertexFormat::Float16x4 => wgpu::VertexFormat::Float16x4,
-        state::VertexFormat::Unorm16x2 => wgpu::VertexFormat::Unorm16x2,
-        state::VertexFormat::Unorm16x4 => wgpu::VertexFormat::Unorm16x4,
-        state::VertexFormat::Snorm16x2 => wgpu::VertexFormat::Snorm16x2,
-        state::VertexFormat::Snorm16x4 => wgpu::VertexFormat::Snorm16x4,
-        state::VertexFormat::Sint16x2 => wgpu::VertexFormat::Sint16x2,
-        state::VertexFormat::Sint16x4 => wgpu::VertexFormat::Sint16x4,
-        state::VertexFormat::Uint16x2 => wgpu::VertexFormat::Uint16x2,
-        state::VertexFormat::Uint16x4 => wgpu::VertexFormat::Uint16x4,
-        state::VertexFormat::Unorm8x4 => wgpu::VertexFormat::Unorm8x4,
-        state::VertexFormat::Snorm8x4 => wgpu::VertexFormat::Snorm8x4,
-        state::VertexFormat::Sint8x4 => wgpu::VertexFormat::Sint8x4,
-        state::VertexFormat::Uint8x4 => wgpu::VertexFormat::Uint8x4,
-    }
-}
-
-fn blend_factor(factor: state::BlendFactor) -> wgpu::BlendFactor {
-    match factor {
-        state::BlendFactor::Zero => wgpu::BlendFactor::Zero,
-        state::BlendFactor::One => wgpu::BlendFactor::One,
-        state::BlendFactor::Src => wgpu::BlendFactor::Src,
-        state::BlendFactor::OneMinusSrc => wgpu::BlendFactor::OneMinusSrc,
-        state::BlendFactor::SrcAlpha => wgpu::BlendFactor::SrcAlpha,
-        state::BlendFactor::OneMinusSrcAlpha => wgpu::BlendFactor::OneMinusSrcAlpha,
-        state::BlendFactor::Dst => wgpu::BlendFactor::Dst,
-        state::BlendFactor::OneMinusDst => wgpu::BlendFactor::OneMinusDst,
-        state::BlendFactor::DstAlpha => wgpu::BlendFactor::DstAlpha,
-        state::BlendFactor::OneMinusDstAlpha => wgpu::BlendFactor::OneMinusDstAlpha,
-        state::BlendFactor::SrcAlphaSaturated => wgpu::BlendFactor::SrcAlphaSaturated,
-        state::BlendFactor::Constant => wgpu::BlendFactor::Constant,
-        state::BlendFactor::OneMinusConstant => wgpu::BlendFactor::OneMinusConstant,
-    }
-}
-
-fn blend_operation(operation: state::BlendOperation) -> wgpu::BlendOperation {
-    match operation {
-        state::BlendOperation::Add => wgpu::BlendOperation::Add,
-        state::BlendOperation::Subtract => wgpu::BlendOperation::Subtract,
-        state::BlendOperation::ReverseSubtract => wgpu::BlendOperation::ReverseSubtract,
-        state::BlendOperation::Min => wgpu::BlendOperation::Min,
-        state::BlendOperation::Max => wgpu::BlendOperation::Max,
-    }
-}
-
-fn compare(compare: state::Compare) -> wgpu::CompareFunction {
-    match compare {
-        state::Compare::Never => wgpu::CompareFunction::Never,
-        state::Compare::Less => wgpu::CompareFunction::Less,
-        state::Compare::Equal => wgpu::CompareFunction::Equal,
-        state::Compare::LessEqual => wgpu::CompareFunction::LessEqual,
-        state::Compare::Greater => wgpu::CompareFunction::Greater,
-        state::Compare::NotEqual => wgpu::CompareFunction::NotEqual,
-        state::Compare::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
-        state::Compare::Always => wgpu::CompareFunction::Always,
-    }
-}
-
-/// The depth format a device holds a guest surface in. See
-/// [`switch_core::gpu::upload::DepthKind`] for why there are only two.
-fn depth_texture_format(kind: DepthKind) -> wgpu::TextureFormat {
-    match kind {
-        DepthKind::Unorm16 => wgpu::TextureFormat::Depth16Unorm,
-        DepthKind::Float32 => wgpu::TextureFormat::Depth32Float,
-    }
-}
-
-fn blend(blend: state::Blend) -> wgpu::BlendState {
-    let component = |c: state::BlendComponent| wgpu::BlendComponent {
-        src_factor: blend_factor(c.src_factor),
-        dst_factor: blend_factor(c.dst_factor),
-        operation: blend_operation(c.operation),
-    };
-    wgpu::BlendState {
-        color: component(blend.color),
-        alpha: component(blend.alpha),
-    }
-}
-
-/// A readback that has been asked for and not yet copied out.
-///
-/// Kept as a type because asking and collecting are the two halves a browser
-/// has to put an `await` between — see [`Gpu::write_back`], which today does
-/// both with a wait in the middle.
-#[derive(Debug)]
-struct Pending {
-    staging: wgpu::Buffer,
-    target: Target,
-    /// Bytes in one row of what the device holds. The surface's own for a
-    /// colour target; for a depth one it is the device format's, which is
-    /// not the guest's — a `Z24S8` texel is four bytes in memory and four
-    /// bytes of `f32` on the device, and a `ZF32_X24S8` texel is eight and
-    /// four.
-    row_bytes: u32,
-    /// That stride rounded up to the 256 bytes `copyTextureToBuffer` wants.
-    padded: u32,
-    /// What the map callback reported: [`MAP_WAITING`] until it runs, then
-    /// [`MAP_READY`] or [`MAP_FAILED`]. Read rather than waited on, because
-    /// on the web the callback runs from the event loop and nothing inside a
-    /// slice can make that happen.
-    state: std::sync::Arc<std::sync::atomic::AtomicU8>,
-}
-
-const MAP_WAITING: u8 = 0;
-const MAP_READY: u8 = 1;
-const MAP_FAILED: u8 = 2;
 
 /// Everything a render pipeline is built from, as a value that can be
 /// compared and hashed.
@@ -563,10 +260,17 @@ struct PipelineKey {
     topology: state::Topology,
     front_face: state::FrontFace,
     cull: state::Cull,
-    /// `(stride, instanced, [(format, offset, location)])` for each bound
-    /// vertex buffer, in the order they are bound.
-    buffers: Vec<(u32, bool, Vec<(wgpu::VertexFormat, u64, u32)>)>,
+    /// Each bound vertex buffer, in the order they are bound.
+    buffers: Vec<VertexBufferKey>,
 }
+
+/// One attribute a vertex buffer carries: its format, its offset into the
+/// buffer's element, and the shader location it feeds.
+type AttributeKey = (wgpu::VertexFormat, u64, u32);
+
+/// One bound vertex buffer: its stride, whether it steps per instance rather
+/// than per vertex, and the attributes read out of it.
+type VertexBufferKey = (u32, bool, Vec<AttributeKey>);
 
 /// A vertex buffer a draw binds, and how it is stepped through.
 struct Bound {
@@ -577,80 +281,6 @@ struct Bound {
     /// vertex.
     stride: u64,
     step: wgpu::VertexStepMode,
-}
-
-/// One resource a single draw made, held only until that draw is submitted.
-#[derive(Debug)]
-enum Scratch {
-    Buffer(wgpu::Buffer),
-    Texture(wgpu::Texture),
-}
-
-/// A render target held on the device, and where in guest memory it came
-/// from.
-#[derive(Debug)]
-struct Held {
-    texture: wgpu::Texture,
-    target: Target,
-    /// Whether anything has been drawn into it since it was uploaded. A
-    /// surface nothing touched need not be written back.
-    dirty: bool,
-    /// What draws render into, when the expanded surface's own texels are
-    /// not what a draw's coverage is measured in — see [`Shape`]. Gathered
-    /// from the surface when it is made and scattered back into it before
-    /// the surface is read, so that guest memory only ever sees the expanded
-    /// form.
-    companion: Option<Companion>,
-}
-
-/// A surface's stand-in, and the grid it stands in for.
-///
-/// The grid is kept rather than read again at the end: what puts a companion
-/// back is a flush, and by then the register file has moved on to whatever
-/// the next frame is doing.
-#[derive(Debug)]
-struct Companion {
-    shape: Shape,
-    texture: wgpu::Texture,
-    grid: SampleGrid,
-}
-
-/// How many distinct device errors are worth keeping. A rejected draw repeats
-/// its rejection every frame, so the list stops growing almost immediately and
-/// the count carries the rest.
-const MAX_DEVICE_ERRORS: usize = 16;
-
-/// Everything the device has rejected since it was opened.
-///
-/// Keeping only the first — which is what this was — reported nothing at all
-/// once the pipelines were built: the only production reader runs before a
-/// pipeline is created, and a title that builds its four in the first frames
-/// never creates another. Every rejection after that sat unread.
-#[derive(Debug, Default)]
-struct DeviceErrors {
-    /// The oldest rejection nothing has asked about yet, taken by
-    /// [`Gpu::device_error`]. Oldest rather than newest because the first
-    /// rejection is the one with a cause; the rest are usually its echo.
-    fresh: Option<String>,
-    /// Each distinct message once, in the order first seen — the same shape
-    /// as `reasons`, and for the same reason.
-    distinct: Vec<String>,
-    /// Every rejection, including the repeats and anything past
-    /// [`MAX_DEVICE_ERRORS`].
-    count: u64,
-}
-
-impl DeviceErrors {
-    fn record(&mut self, message: String) {
-        self.count += 1;
-        if !self.distinct.contains(&message) {
-            eprintln!("[gpu] the device rejected something: {message}");
-            if self.distinct.len() < MAX_DEVICE_ERRORS {
-                self.distinct.push(message.clone());
-            }
-        }
-        self.fresh.get_or_insert(message);
-    }
 }
 
 /// A device, and the rasterizer to fall back to.
@@ -906,80 +536,6 @@ pub struct Gpu {
 const TEXTURE_CACHE_BYTES: u64 = 256 << 20;
 /// Guest pages are 4 KiB, the granularity `Memory` watches writes at.
 const PAGE_BITS: u32 = 12;
-
-/// What `Uploads::of` lifted out of guest memory over a whole run.
-#[derive(Debug, Default, Clone, Copy)]
-struct UploadBytes {
-    vertex: u64,
-    index: u64,
-    constants: u64,
-    textures: u64,
-}
-
-impl UploadBytes {
-    /// What one draw lifted out of guest memory, by what it was.
-    ///
-    /// Bytes rather than milliseconds: a byte read out of guest memory is the
-    /// same byte under V8, and counting them is what showed textures to be
-    /// 96.5% of this, and so the only one of the four worth caching.
-    ///
-    /// Textures are counted by [`UploadBytes::add_texture`] instead, and only
-    /// when one was really read. A draw served from the cache never touched
-    /// guest memory for it, and counting it here would report reads that did
-    /// not happen — which is exactly what this said before the cache existed
-    /// to make the two differ.
-    fn add_but_textures(&mut self, uploads: &Uploads) {
-        self.vertex += uploads
-            .vertex
-            .iter()
-            .map(|v| v.bytes.len() as u64)
-            .sum::<u64>();
-        self.index += uploads.index.as_ref().map_or(0, |i| i.bytes.len() as u64);
-        self.constants += uploads
-            .constants
-            .iter()
-            .map(|c| c.bytes.len() as u64)
-            .sum::<u64>();
-    }
-
-    fn add_texture(&mut self, bytes: usize) {
-        self.textures += bytes as u64;
-    }
-}
-
-/// Where a draw's time goes, in microseconds, over a whole run.
-#[derive(Debug, Default, Clone, Copy)]
-struct Times {
-    /// Decoding both shaders out of guest memory and translating them.
-    translate: u128,
-    /// Reading the vertices, indices, constants and textures.
-    upload: u128,
-    /// Generating the WGSL and handing it to the device.
-    modules: u128,
-    /// Building the pipeline and its bind groups.
-    pipeline: u128,
-    /// Encoding and submitting the pass.
-    encode: u128,
-    /// Handing surfaces back to guest memory.
-    flush: u128,
-    /// The three phases `flush` is made of, which answer different questions
-    /// and have different fixes. They sum to roughly `flush`; the remainder is
-    /// the early-outs, which is worth seeing as a gap rather than hiding in
-    /// one of them.
-    ///
-    /// Encoding the copies out of every held surface and submitting them.
-    /// Device work asked for, and the cost of asking.
-    flush_ask: u128,
-    /// Waiting for the maps. Natively this blocks and is the copy actually
-    /// happening; in a browser `poll` cannot do anything at all, so this being
-    /// ~0 there is correct rather than suspicious — the wait moved to the
-    /// slice boundary, where `Flush::Pending` puts it.
-    flush_wait: u128,
-    /// Reading the mapping and writing it through the page table into guest
-    /// memory. A whole surface a frame, and the phase a device-to-canvas
-    /// present would delete outright.
-    flush_land: u128,
-}
 
 impl Drop for Gpu {
     fn drop(&mut self) {
@@ -3398,100 +2954,6 @@ impl Gpu {
     }
 }
 
-/// The wgpu name for a format `switch_core::gpu::pipeline` resolved, checked
-/// against what this device was actually given.
-///
-/// WebGPU gates the compressed families behind optional features, and creating
-/// a texture in one the device does not have is not an error you can catch --
-/// `createTexture` throws, and wgpu's web backend unwraps it. That is a panic
-/// in the middle of a draw, which on wasm is a bare `unreachable` that takes
-/// the whole core down: Just Dance 2019 reached its first BC1 texture and the
-/// run loop stopped.
-///
-/// Refusing it here instead makes it what every other thing this backend
-/// cannot express already is -- one draw on the software rasterizer.
-fn device_texture_format(device: &wgpu::Device, format: Format) -> Result<wgpu::TextureFormat> {
-    let wanted = texture_format(format)?;
-    let needs = wanted.required_features();
-    if !device.features().contains(needs) {
-        return Err(Error::Gpu(format!(
-            "the device was not given {needs:?}, which {wanted:?} needs"
-        )));
-    }
-    Ok(wanted)
-}
-
-/// [`device_texture_format`], for a format that has to be a **colour
-/// attachment** rather than only a sampled texture.
-///
-/// `required_features` does not cover this. `rg11b10ufloat` needs no feature
-/// to be sampled and reports none, but rendering into it is gated behind
-/// `RG11B10UFLOAT_RENDERABLE` — expressed in wgpu as the allowed *usages* the
-/// format has given a device's features, not as a required feature. Asking
-/// the usage question directly covers every format that is sampled more
-/// widely than it is drawn into, rather than this one by name.
-fn device_attachment_format(device: &wgpu::Device, format: Format) -> Result<wgpu::TextureFormat> {
-    let wanted = device_texture_format(device, format)?;
-    let usages = wanted
-        .guaranteed_format_features(device.features())
-        .allowed_usages;
-    if !usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT) {
-        return Err(Error::Gpu(format!(
-            "this device cannot render into {wanted:?}"
-        )));
-    }
-    Ok(wanted)
-}
-
-/// The wgpu name for a format `switch_core::gpu::pipeline` resolved.
-fn texture_format(format: Format) -> Result<wgpu::TextureFormat> {
-    use wgpu::TextureFormat as T;
-    Ok(match format {
-        Format::R8Unorm => T::R8Unorm,
-        Format::R8Snorm => T::R8Snorm,
-        Format::Rg8Unorm => T::Rg8Unorm,
-        Format::Rg8Snorm => T::Rg8Snorm,
-        Format::Rg11b10Ufloat => T::Rg11b10Ufloat,
-        Format::Rgba8Unorm => T::Rgba8Unorm,
-        Format::Rgba8Snorm => T::Rgba8Snorm,
-        Format::Rgba8UnormSrgb => T::Rgba8UnormSrgb,
-        Format::Bgra8Unorm => T::Bgra8Unorm,
-        Format::Bgra8UnormSrgb => T::Bgra8UnormSrgb,
-        Format::Rgb10a2Unorm => T::Rgb10a2Unorm,
-        Format::R32Float => T::R32Float,
-        Format::Rg32Float => T::Rg32Float,
-        Format::R16Float => T::R16Float,
-        Format::Rg16Float => T::Rg16Float,
-        Format::R16Unorm => T::R16Unorm,
-        Format::R16Snorm => T::R16Snorm,
-        Format::Rg16Unorm => T::Rg16Unorm,
-        Format::Rg16Snorm => T::Rg16Snorm,
-        Format::Rgba16Unorm => T::Rgba16Unorm,
-        Format::Rgba16Snorm => T::Rgba16Snorm,
-        Format::Rgba16Float => T::Rgba16Float,
-        Format::Rgba32Float => T::Rgba32Float,
-        Format::Depth16Unorm => T::Depth16Unorm,
-        Format::Depth24Plus => T::Depth24Plus,
-        Format::Depth24PlusStencil8 => T::Depth24PlusStencil8,
-        Format::Depth32Float => T::Depth32Float,
-        Format::Depth32FloatStencil8 => T::Depth32FloatStencil8,
-        Format::Bc1RgbaUnorm => T::Bc1RgbaUnorm,
-        Format::Bc1RgbaUnormSrgb => T::Bc1RgbaUnormSrgb,
-        Format::Bc2RgbaUnorm => T::Bc2RgbaUnorm,
-        Format::Bc2RgbaUnormSrgb => T::Bc2RgbaUnormSrgb,
-        Format::Bc3RgbaUnorm => T::Bc3RgbaUnorm,
-        Format::Bc3RgbaUnormSrgb => T::Bc3RgbaUnormSrgb,
-        Format::Bc4RUnorm => T::Bc4RUnorm,
-        Format::Bc4RSnorm => T::Bc4RSnorm,
-        Format::Bc5RgUnorm => T::Bc5RgUnorm,
-        Format::Bc5RgSnorm => T::Bc5RgSnorm,
-        Format::Bc6hRgbUfloat => T::Bc6hRgbUfloat,
-        Format::Bc6hRgbFloat => T::Bc6hRgbFloat,
-        Format::Bc7RgbaUnorm => T::Bc7RgbaUnorm,
-        Format::Bc7RgbaUnormSrgb => T::Bc7RgbaUnormSrgb,
-    })
-}
-
 /// How a draw reaches the surfaces it renders into.
 ///
 /// Only a multisampled surface has more than one answer. Its samples live in
@@ -4073,27 +3535,6 @@ impl Renderer for Gpu {
             times,
         )
     }
-}
-
-/// One JSON string literal. A fallback reason is an error message and is free
-/// to contain a quote or a backslash; the page parses this with `JSON.parse`,
-/// which is entitled to reject the whole object over one of them.
-fn json_string(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    out.push('"');
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 impl Gpu {
