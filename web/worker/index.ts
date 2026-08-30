@@ -45,6 +45,18 @@ const SESSIONLESS = new Set([
    slices, between them, which is exactly where a worker is free to await. */
 let gpu: 'no' | 'trying' | 'done' | 'never' = 'no';
 
+/* Which session the backend was installed on.
+
+   `gpu` is the module's and a session is not: a backend belongs to the `Gpu`
+   inside the session it was opened on, and freeing that session drops it. The
+   flag stayed `done` regardless, so `tryGpu` returned early for ever after and
+   the next session ran on the software rasterizer whatever the machine could
+   do -- silently, at around a thirtieth of the speed, with the renderer stats
+   and the crash report both reporting no device at all. And this is not only
+   Reset: every boot recycles the session too, so it was every title after the
+   first. */
+let gpuSession = -1;
+
 // The one answer worth asking again about. A title opens its channel a moment
 // after it starts running, so until it has, there is nothing to attach a
 // backend to and the right response is to try the next slice.
@@ -195,6 +207,10 @@ function tryGpu(): void {
     gpu = 'no';
     console.info(`[gpu] the device was lost - opening another (attempt ${gpuReopens})`);
   }
+  // A session the backend was not opened on has no backend, whatever the flag
+  // says. `never` is left alone deliberately: it means this browser has no
+  // device to give, which a new session does not change.
+  if (gpu === 'done' && state.handle !== gpuSession) gpu = 'no';
   if (gpu !== 'no' || state.handle < 0) return;
   gpu = 'trying';
   const open = (state.exports as unknown as {
@@ -203,6 +219,7 @@ function tryGpu(): void {
   open(state.handle, GPU_DEVICE_MSAA, GPU_INTERLEAVE).then(async (what) => {
     if (what.startsWith(RENDERING_ON)) {
       gpu = 'done';
+      gpuSession = state.handle;
       // What follows the prefix, not an exact match on it: a core built before
       // this left a trailing space where the name would have gone.
       const named = what.slice(RENDERING_ON.length).trim();

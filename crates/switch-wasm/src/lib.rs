@@ -353,10 +353,29 @@ fn install_panic_hook() {
     });
 }
 
+/// Drop what the previous session left behind the module.
+///
+/// A session owns a whole console and freeing one takes its state with it —
+/// but the panic flag, the captured panic message and the pending trace sink
+/// are the *module's*, and nothing was clearing them. A crash report taken
+/// after a Reset therefore described a machine that no longer existed: it
+/// still said the run had panicked, `switch_last_error` still answered with
+/// the dead session's panic, and the trace still opened with lines from
+/// before the reset.
+fn forget_the_last_session() {
+    PANICKED.store(false, std::sync::atomic::Ordering::Relaxed);
+    // SAFETY: single-threaded wasm; see the `SESSIONS` comment.
+    unsafe { &mut *PANIC_MSG.get() }.fill(0);
+    // Traced by the session that is going; folded into the next one's buffer
+    // it would read as something the new console had said.
+    let _ = switch_core::trace::take_pending();
+}
+
 /// Create a fresh machine, return its handle.
 #[no_mangle]
 pub extern "C" fn switch_new() -> u32 {
     install_panic_hook();
+    forget_the_last_session();
     // The framebuffer and input pages are pre-mapped by Cpu::new, and the
     // stack + low-memory shim are provided by bootstrap so libnx-style
     // homebrew gets the runtime environment the real loader sets up.
@@ -2817,6 +2836,51 @@ mod tests {
         let json = json_from(|buf, cap| switch_unimplemented_json(handle, buf, cap));
         assert_eq!(field(&json, "unimplemented"), "[]");
         assert_eq!(field(&json, "stubbed"), "[]");
+    }
+
+    /// Reset means a new console, and a crash report about it must not carry
+    /// the last one's.
+    ///
+    /// The panic flag, the captured panic message and the pending trace sink
+    /// are all the *module's*, not a session's — nothing frees them when a
+    /// session goes — so a report taken after a reset described a machine that
+    /// no longer existed: it still said `panicked`, `switch_last_error` still
+    /// answered with the dead session's panic, and the trace still opened with
+    /// lines from before the reset.
+    #[test]
+    fn a_new_session_inherits_nothing_from_the_one_before_it() {
+        let (_host, first) = new_session();
+
+        // Everything a session that panicked leaves behind the module.
+        PANICKED.store(true, Ordering::Relaxed);
+        // SAFETY: single-threaded under the `HOST` lock; see `SESSIONS`.
+        let planted = b"PANIC: the old session died here";
+        let guard = unsafe { &mut *PANIC_MSG.get() };
+        guard[..planted.len()].copy_from_slice(planted);
+        guard[planted.len()] = 0;
+        switch_core::trace::emit("[test] the old session traced this");
+
+        switch_free_session(first);
+        let second = switch_new();
+
+        let json = json_from(|buf, cap| switch_crash_report_json(second, buf, cap));
+        assert_eq!(
+            field(&json, "panicked"),
+            "false",
+            "a reset console has not panicked"
+        );
+        assert!(
+            !field(&json, "trace").contains("the old session traced this"),
+            "the new session opened with the old one's trace: {json:.400}"
+        );
+
+        let mut buf = [0u8; 256];
+        let n = switch_last_error(second, buf.as_mut_ptr(), buf.len() as u32);
+        assert_eq!(
+            &buf[..n as usize],
+            b"",
+            "the dead session's panic is not this session's last error"
+        );
     }
 
     fn take_changes(handle: u32) -> String {
