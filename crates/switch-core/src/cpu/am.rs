@@ -1480,8 +1480,13 @@ impl Cpu {
             // refusing the creation outright.
             "am:library-applet-creator" => match cmd_id {
                 // CreateLibraryApplet(u32 AppletId, u32 LibraryAppletMode)
-                // -> ILibraryAppletAccessor.
-                Some(0) => {
+                // -> ILibraryAppletAccessor, and CreateLibraryAppletEx,
+                // which is the same call with the caller's thread id
+                // appended — real `am` attributes the launch to that thread,
+                // and nothing here runs the applet to attribute. Refusing it
+                // is what stopped the caller: `nnSdk` turns an unknown
+                // command id into 2010-0221 and aborts on it.
+                Some(0) | Some(3) => {
                     let at = self.ipc_request_data(tls);
                     let id = self.mem.read_u32(at)?;
                     let mode = self.mem.read_u32(at.wrapping_add(4))?;
@@ -2470,5 +2475,32 @@ mod tests {
             1 | (104 << 9),
             "out of memory"
         );
+    }
+
+    #[test]
+    fn the_ex_form_of_a_creation_is_the_same_creation() {
+        // CreateLibraryAppletEx appends the caller's thread id and is
+        // otherwise CreateLibraryApplet. Refusing it over that one argument
+        // was a 2010-0221, which `nnSdk` turns into an svcBreak.
+        const CALLER_THREAD: u64 = 0x2a;
+        const FOREGROUND: u32 = 1;
+
+        let mut payload = [0u8; 16];
+        payload[..4].copy_from_slice(&APPLET_WEB.to_le_bytes());
+        payload[4..8].copy_from_slice(&FOREGROUND.to_le_bytes());
+        payload[8..].copy_from_slice(&CALLER_THREAD.to_le_bytes());
+        let mut cpu = request(false, 3, &payload);
+        cpu.register_service_handle(9, "am:library-applet-creator");
+        cpu.applet_request(TLS, 9, Some(3)).unwrap();
+
+        let accessor = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(accessor, 0, "CreateLibraryAppletEx moved no object back");
+        assert_eq!(
+            cpu.service_name(accessor),
+            Some("am:library-applet-accessor")
+        );
+        let applet = &cpu.am_applets[&Cpu::object_key(accessor, 0)];
+        assert_eq!(applet.id, APPLET_WEB);
+        assert_eq!(applet.mode, FOREGROUND);
     }
 }
