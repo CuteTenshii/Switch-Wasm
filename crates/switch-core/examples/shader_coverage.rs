@@ -21,7 +21,11 @@
 //!
 //! Reported twice, because a warp shuffle is a question about the device
 //! rather than about the translator: once for a device with no optional
-//! features, and once for one with WGSL's quad operations.
+//! features, which is what a browser is, and once for one with WGSL's quad
+//! operations. The two now differ only outside a fragment shader — a
+//! fragment shader without them reads its neighbour through
+//! `wgsl::QUAD_SWAP` — so a gap between the passes is a vertex program
+//! shuffling, and nothing else.
 //!
 //! `SWITCH_FIRMWARE=<dir>` as everywhere else. A system applet is the subject
 //! to prefer here: qlaunch reaches a frame in 35 million instructions and is
@@ -65,7 +69,7 @@ fn blocker(why: Unsupported) -> String {
                 .unwrap_or("?");
             format!("op {name}")
         }
-        Unsupported::Subgroups { .. } => "warp shuffle (quad operations)".into(),
+        Unsupported::Quad { .. } => "quad operation outside a fragment shader".into(),
         Unsupported::DepthCompare { .. } => "shadow sample (depth texture + comparison)".into(),
         Unsupported::TextureDimension { dim } => format!("texture dimension {dim:?}"),
         Unsupported::UndecodedTarget { .. } => "branch to an undecoded target".into(),
@@ -229,7 +233,7 @@ fn main() {
         return;
     }
     println!();
-    report("no optional device features", &used, Caps::NONE);
+    report("no optional device features (a browser)", &used, Caps::NONE);
     println!();
     report(
         "with quad operations (subgroups)",

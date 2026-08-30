@@ -48,9 +48,18 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
         | wgpu::Features::TEXTURE_COMPRESSION_ETC2
         // `R16Unorm` and its wider siblings, which a title samples as an
         // ordinary texture and WebGPU does not offer. Asked for the same way
-        // the compressed formats are: taken where an adapter has it, and the
-        // draw falls to the rasterizer where it does not.
+        // the compressed formats are: taken where an adapter has it, and
+        // widened to a 32-bit float where it does not — see
+        // `convert::sampled_texture_format`, and `FLOAT32_FILTERABLE` below,
+        // which is what that route needs and this one does not.
         | wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+        // A widened `R16Unorm` is an `r32float`, and a 32-bit float format
+        // is filterable only with this. Without it a texture the guest
+        // sampled bilinearly would be bound beside a filtering sampler the
+        // device rejects, so it gates the widening rather than decorating
+        // it. Unlike the feature above this one *is* WebGPU's, and a browser
+        // offers it.
+        | wgpu::Features::FLOAT32_FILTERABLE
         // WGSL's quad operations, which are what a warp shuffle is: a `shfl`
         // reads another lane of the 2x2 quad, and `quadSwapX`/`Y`/`Diagonal`
         // are exactly that. Without them the draw is the rasterizer's.
@@ -110,8 +119,8 @@ use switch_core::{Error, Result};
 
 use builtin::{grid_bytes, resample_wgsl, ResampleKey, CLEAR_RECT_WGSL, LOAD_DEPTH_WGSL};
 use convert::{
-    blend, compare, depth_texture_format, device_attachment_format, device_texture_format,
-    topology, vertex_format, write_mask,
+    blend, compare, depth_texture_format, device_attachment_format, sampled_texture_format,
+    topology, vertex_format, widen, write_mask, Widen,
 };
 use readback::{Companion, Held, Pending, Scratch, MAP_FAILED, MAP_READY, MAP_WAITING};
 use stats::{json_string, DeviceErrors, Times, UploadBytes};
@@ -373,6 +382,17 @@ pub struct Gpu {
     /// The pipelines that move a multisampled surface between its expanded
     /// form and a device companion. See [`resample_wgsl`].
     resample_pipelines: std::collections::HashMap<ResampleKey, wgpu::RenderPipeline>,
+    /// `GPU_WEB_LIMITS=1`: hide the features a browser device cannot have,
+    /// so that a native run takes the routes a browser has no choice about.
+    ///
+    /// Two of wgpu's features are native-only and no browser will ever
+    /// report them: `SUBGROUP`, which its web backend can neither request
+    /// nor map, and `TEXTURE_FORMAT_16BIT_NORM`, which WebGPU has no
+    /// spelling for. Both used to be a fallback and a latched software
+    /// frame; both now have a route of their own — `shader::wgsl::QUAD_SWAP`
+    /// and [`convert::Widen`] — which only this flag lets a native device
+    /// exercise.
+    web_limits: bool,
     /// `GPU_DEVICE_MSAA=1`: let the device do the multisampling where it
     /// offers the sample count, instead of rendering the expanded surface a
     /// texel at a time.
@@ -441,11 +461,14 @@ pub struct Gpu {
     /// the next one would have fallen back — so alternating is the one
     /// behaviour this must not have.
     ///
-    /// **What buys the acceleration back is `shader::wgsl`.** Every fallback
-    /// this latches on today is an opcode with no WGSL form, not anything
-    /// WebGPU withholds: the Home Menu's are one `ldg b128`, and A Short
-    /// Hike's are a handful of `Unimplemented`. A title the translator covers
-    /// completely never reaches this.
+    /// **What buys the acceleration back is `shader::wgsl`, mostly.** The
+    /// Home Menu's fallback is one `ldg b128` — an opcode with no WGSL form,
+    /// which is the shape of most of them. A Short Hike's two were not: a
+    /// warp shuffle and an `R16Unorm` texture, both of them things wgpu
+    /// offers only natively, and one draw of either latched all 52 frames of
+    /// a run onto the rasterizer. Both now have a route — `wgsl::QUAD_SWAP`
+    /// and [`convert::Widen`] — so what reaches here is again what the
+    /// translator does not cover.
     software_frame: bool,
     /// Whether anything fell back during the frame in progress.
     fell_back_this_frame: bool,
@@ -659,6 +682,7 @@ impl Gpu {
             software_frame: false,
             fell_back_this_frame: false,
             gave_up: false,
+            web_limits: switch_core::env_flag!("GPU_WEB_LIMITS"),
             device_msaa: switch_core::env_flag!("GPU_DEVICE_MSAA"),
             report: None,
             software: Software,
@@ -760,6 +784,23 @@ impl Gpu {
         self.interleave = interleave;
     }
 
+    /// Hide the features a browser device cannot have — the
+    /// `GPU_WEB_LIMITS` flag. See [`Gpu::web_limits`].
+    pub fn set_web_limits(&mut self, web_limits: bool) {
+        self.web_limits = web_limits;
+    }
+
+    /// What this device is allowed to be asked for, which is not always what
+    /// it has: see [`Gpu::web_limits`].
+    fn features(&self) -> wgpu::Features {
+        let features = self.device.features();
+        if self.web_limits {
+            features - wgpu::Features::SUBGROUP - wgpu::Features::TEXTURE_FORMAT_16BIT_NORM
+        } else {
+            features
+        }
+    }
+
     /// Let the device do the multisampling where it offers the sample count
     /// — the `GPU_DEVICE_MSAA` flag, for the build that has no environment to
     /// read it from. See [`Gpu::route`] for what it trades.
@@ -849,7 +890,7 @@ impl Gpu {
         if let Some(kind) = target.depth_kind() {
             return self.upload_depth_target(target, kind, ctx);
         }
-        let format = device_attachment_format(&self.device, target.format)?;
+        let format = device_attachment_format(self.features(), target.format)?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("render target"),
             size: wgpu::Extent3d {
@@ -1205,7 +1246,7 @@ impl Gpu {
     fn render(&mut self, p: &Prepared, ctx: &mut ExecCtx) -> std::result::Result<(), String> {
         let target_format = match p.color {
             Some(color) => Some(
-                device_attachment_format(&self.device, color.format)
+                device_attachment_format(self.features(), color.format)
                     .map_err(|e| format!("{e:?}"))?,
             ),
             None => None,
@@ -1804,8 +1845,16 @@ impl Gpu {
                 return Ok(texture.clone());
             }
         }
-        let format =
-            device_texture_format(&self.device, upload.format).map_err(|e| format!("{e:?}"))?;
+        let (format, widening) =
+            sampled_texture_format(self.features(), upload.format).map_err(|e| format!("{e:?}"))?;
+        // A format the device holds itself is uploaded as it stands; one it
+        // does not is widened first, which doubles every channel and so the
+        // row that carries them. See [`convert::Widen`].
+        let widened = (widening != Widen::None).then(|| widen(&upload.bytes, widening));
+        let (bytes, row_bytes) = match &widened {
+            Some(bytes) => (bytes.as_slice(), upload.row_bytes * 2),
+            None => (&*upload.bytes, upload.row_bytes),
+        };
         let size = wgpu::Extent3d {
             width: upload.width.max(1),
             height: upload.height.max(1),
@@ -1835,10 +1884,10 @@ impl Gpu {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &upload.bytes,
+            bytes,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(upload.row_bytes),
+                bytes_per_row: Some(row_bytes),
                 rows_per_image: Some(upload.rows),
             },
             size,
@@ -1847,7 +1896,7 @@ impl Gpu {
         // a texture whose source could not be watched goes back to being one
         // draw's scratch, as everything was before this.
         if self.texture_cache.contains_key(&upload.key) {
-            self.gpu_texture_bytes += upload.bytes.len() as u64;
+            self.gpu_texture_bytes += bytes.len() as u64;
             self.gpu_textures
                 .entry(upload.key)
                 .or_default()
@@ -2168,7 +2217,7 @@ impl Gpu {
         let formats = [
             match color {
                 Some(color) => Some(
-                    device_attachment_format(&self.device, color.format)
+                    device_attachment_format(self.features(), color.format)
                         .map_err(|e| format!("{e:?}"))?,
                 ),
                 None => None,
@@ -2552,7 +2601,7 @@ impl Gpu {
         let key = ClearKey {
             color: match color {
                 Some((target, _, _)) => Some(
-                    device_attachment_format(&self.device, target.format)
+                    device_attachment_format(self.features(), target.format)
                         .map_err(|e| format!("{e:?}"))?,
                 ),
                 None => None,
@@ -2757,7 +2806,7 @@ impl Gpu {
                     | wgpu::TextureUsages::TEXTURE_BINDING,
             ),
             None => (
-                device_attachment_format(&self.device, target.format)?,
+                device_attachment_format(self.features(), target.format)?,
                 wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::COPY_SRC
                     | wgpu::TextureUsages::COPY_DST
@@ -3295,7 +3344,7 @@ impl Gpu {
             })
             .map_err(|e| format!("{e:?}"))?;
         let caps = wgsl::Caps {
-            subgroups: self.device.features().contains(wgpu::Features::SUBGROUP),
+            subgroups: self.features().contains(wgpu::Features::SUBGROUP),
             // On the web the browser compiles the text and wants the
             // directive; natively naga does, and rejects it.
             subgroup_enable: cfg!(target_arch = "wasm32"),
@@ -3388,8 +3437,8 @@ impl Renderer for Gpu {
             self.software_frame = true;
             eprintln!(
                 "[gpu] a draw fell back where a readback lands later than the call that \
-                 asked for it; the rasterizer has every frame from here. The fallbacks \
-                 are opcodes `shader::wgsl` does not translate: {:?}",
+                 asked for it; the rasterizer has every frame from here. What it fell \
+                 back on: {:?}",
                 self.reasons
             );
         }
@@ -3706,6 +3755,59 @@ mod tests {
         );
     }
 
+    /// The quad swap a browser gets is WGSL a validator accepts.
+    ///
+    /// wgpu's web backend can neither request WebGPU's `subgroups` nor report
+    /// it, so `Caps::NONE` is what every browser device translates under and
+    /// `shader::wgsl::QUAD_SWAP` is what it emits — derivatives, in the
+    /// middle of the dispatch loop, under a `diagnostic` directive that says
+    /// so. naga validates the same text Tint will, and the uniformity rule is
+    /// exactly the one a validator is entitled to refuse over.
+    #[test]
+    fn the_quad_swap_a_browser_gets_is_wgsl_naga_accepts() {
+        use super::{wgpu, wgsl, Compiled, Layout, Stage};
+        use switch_core::gpu::shader::isa::{Instruction, Operand, Pred, ShflMode};
+        use switch_core::gpu::shader::{Op, Program};
+
+        let Ok(gpu) = super::Gpu::open() else {
+            return;
+        };
+        let mut program = Program::default();
+        for (index, op) in [
+            Op::Shfl {
+                dst: 1,
+                pred: 0,
+                src: 2,
+                index: Operand::Imm(1),
+                mask: Operand::Imm(0x1c),
+                mode: ShflMode::Bfly,
+            },
+            Op::Exit,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            program.insns.push(Instruction {
+                pred: Pred::ALWAYS,
+                op,
+            });
+            program.offsets.push(index as u32 * 8);
+        }
+        let translated = wgsl::translate_for(&Compiled::new(&program), wgsl::Caps::NONE)
+            .expect("a shuffle translates without the device's quad operations");
+        let layout = Layout::of(&translated, Stage::Fragment);
+        let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
+        let _ = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("quad swap"),
+                source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+            });
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
+        assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+    }
+
     /// A rejection the backend never asks about still reaches the report.
     ///
     /// The failure this guards is what made a magenta frame in the browser
@@ -3822,11 +3924,26 @@ mod tests {
     /// One draw, set up by `set_up`, rendered by the rasterizer and by the
     /// device — colour and depth both.
     fn agrees(set_up: impl Fn(&mut Harness)) {
+        agrees_shading(Harness::new, |_| {}, set_up);
+    }
+
+    /// [`agrees`], for a draw whose fragment shader is not the harness's own
+    /// and a device told what to pretend it cannot do.
+    ///
+    /// `new` builds the harness rather than the caller setting the shader on
+    /// one, because the program is written at construction; `tune` gets the
+    /// device before either picture is drawn.
+    fn agrees_shading(
+        new: impl Fn() -> Harness,
+        tune: impl Fn(&mut super::Gpu),
+        set_up: impl Fn(&mut Harness),
+    ) {
         let Ok(mut gpu) = super::Gpu::open() else {
             return;
         };
+        tune(&mut gpu);
         let build = |gpu: Option<&mut super::Gpu>| {
-            let mut h = Harness::new();
+            let mut h = new();
             set_up(&mut h);
             match gpu {
                 Some(gpu) => {
@@ -3857,6 +3974,39 @@ mod tests {
     /// The depth surface is checked as well as the colour one, because it is
     /// guest memory the rasterizer owns: a frame that comes out right with a
     /// depth buffer left untouched is a frame the *next* draw gets wrong.
+    /// A shader that reads its neighbour's register reads the same neighbour
+    /// on the device as on the rasterizer.
+    ///
+    /// `testing::derivative_fragment_shader` is Checkpoint's antialiased
+    /// text: a `shfl.bfly` against the pixel beside it, then a subtract. On a
+    /// browser device the three quad operations are the ones
+    /// `shader::wgsl::QUAD_SWAP` defines out of derivatives, and this is the
+    /// claim that makes it worth defining — that the word it recovers is the
+    /// neighbour's exactly, so the surface comes out identical rather than
+    /// close.
+    ///
+    /// Run both ways, because a native adapter has the device's own quad
+    /// operations and would otherwise only ever test those.
+    #[test]
+    fn a_shuffling_fragment_shader_reads_the_same_neighbour_the_rasterizer_reads() {
+        for web_limits in [false, true] {
+            agrees_shading(
+                || Harness::with_fragment_shader(testing::derivative_fragment_shader()),
+                move |gpu| gpu.set_web_limits(web_limits),
+                |h| {
+                    h.depth_target(0x0207);
+                    // Red ramps from 0 to 1 across the 16-texel target, so
+                    // the difference between neighbours is a sixteenth
+                    // everywhere and a lane that read itself would leave a
+                    // zero.
+                    h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+                    h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+                    h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+                },
+            );
+        }
+    }
+
     #[test]
     fn a_depth_tested_draw_writes_the_same_depth_the_rasterizer_writes() {
         // Less, less-equal, greater and always, in the numbering deko3d

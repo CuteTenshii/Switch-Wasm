@@ -101,14 +101,14 @@ pub enum Unsupported {
     /// rasterizer samples every dimension as though it were 2D, which is
     /// what a `texture_2d` binding would then be lying about.
     TextureDimension { dim: TexDim },
-    /// A warp shuffle on a device without WGSL's quad operations. They are
-    /// `quadSwapX`/`Y`/`Diagonal` behind `enable subgroups`, which is what a
-    /// `shfl` inside a 2x2 quad *is* — and a quad is the whole warp the
-    /// rasterizer models, so the two agree exactly where a device has them.
-    /// Reconstructing a neighbour from `dpdxFine` instead would not: the
-    /// derivative is a float subtraction, and adding it back does not
-    /// recover the other lane's bits.
-    Subgroups { at: usize },
+    /// An instruction that needs the 2x2 quad, in a stage that has none.
+    ///
+    /// Only a fragment shader has one here: its entry point reads the lane
+    /// out of `position`, and there is nothing to read it out of anywhere
+    /// else. A `shfl` also needs a way to reach the lane it names, which is
+    /// `quadSwapX`/`Y`/`Diagonal` where the device has them and [`QUAD_SWAP`]
+    /// where it does not — and derivatives are a fragment shader's too.
+    Quad { at: usize },
     /// A shadow sample. WGSL compares depth only through
     /// `textureSampleCompare` on a `texture_depth_*` bound beside a
     /// `sampler_comparison`, and a guest shadow map cannot become one:
@@ -128,10 +128,10 @@ impl fmt::Display for Unsupported {
             Unsupported::Op { at, op } => {
                 write!(f, "instruction {at}: no WGSL form for {op:?}")
             }
-            Unsupported::Subgroups { at } => {
+            Unsupported::Quad { at } => {
                 write!(
                     f,
-                    "instruction {at}: a warp shuffle needs the device's quad operations"
+                    "instruction {at}: a quad operation outside a fragment shader"
                 )
             }
             Unsupported::DepthCompare { at } => {
@@ -230,8 +230,18 @@ pub struct Translation {
     /// sampled as a shadow map — a depth image compared against a reference
     /// rather than read.
     pub textures: Vec<(u16, TexDim, bool)>,
-    /// Whether the program reads another lane of its quad.
-    pub uses_quad: bool,
+    /// The first instruction that asks which lane of the 2x2 quad it is, if
+    /// any.
+    pub quad: Option<usize>,
+    /// The first instruction that reads *another* lane, if any. `fswzadd`
+    /// asks which lane this is without reading one, so it sets [`quad`] and
+    /// leaves this `None`.
+    ///
+    /// [`quad`]: Translation::quad
+    pub quad_swap: Option<usize>,
+    /// Whether that read is the device's own quad operations rather than
+    /// [`QUAD_SWAP`].
+    pub subgroups: bool,
     /// Whether that needs `enable subgroups;` in front of the module.
     pub subgroup_enable: bool,
     /// The `(bank, offset)` of each 64-bit descriptor a `ldg` reads memory
@@ -250,8 +260,9 @@ pub fn translate(program: &Compiled) -> Result<Translation, Unsupported> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Caps {
     /// WGSL's quad operations, which are what a warp shuffle is. Without
-    /// them a shuffle has no form here at all — see
-    /// [`Unsupported::Subgroups`].
+    /// them a fragment shader reads its neighbour through [`QUAD_SWAP`]
+    /// instead, and nothing else can read one at all — see
+    /// [`Unsupported::Quad`].
     pub subgroups: bool,
     /// Whether to write `enable subgroups;` in front of the module.
     ///
@@ -273,7 +284,7 @@ impl Caps {
 /// [`translate`], told what the device it is being built for can do.
 pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsupported> {
     let leaders = leaders(program)?;
-    let mut emitter = Emitter::new(program, caps);
+    let mut emitter = Emitter::new(program);
     emitter.emit_blocks(&leaders)?;
     Ok(Translation {
         source: emitter.finish(&leaders),
@@ -283,7 +294,9 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
         centroid_loads: emitter.centroid_loads.iter().copied().collect(),
         const_banks: emitter.banks.iter().copied().collect(),
         textures: emitter.textures.clone(),
-        uses_quad: emitter.uses_quad,
+        quad: emitter.quad,
+        quad_swap: emitter.quad_swap,
+        subgroups: caps.subgroups,
         subgroup_enable: caps.subgroup_enable,
         globals: emitter.globals.clone(),
     })
@@ -570,10 +583,10 @@ struct Emitter<'a> {
     helpers: BTreeSet<&'static str>,
     uses_carry: bool,
     uses_stack: bool,
-    /// Whether the program reads another lane of its quad.
-    uses_quad: bool,
-    /// Whether the device has WGSL's quad operations to read it with.
-    subgroups: bool,
+    /// The first instruction that asks which lane of its quad it is.
+    quad: Option<usize>,
+    /// The first instruction that reads another lane, if any.
+    quad_swap: Option<usize>,
     /// The interface the emitted text reaches through, recorded as it is
     /// emitted so that a binding it calls cannot be left out of the module.
     loads: BTreeSet<usize>,
@@ -589,7 +602,7 @@ struct Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
-    fn new(program: &'a Compiled, caps: Caps) -> Emitter<'a> {
+    fn new(program: &'a Compiled) -> Emitter<'a> {
         Emitter {
             program,
             body: String::new(),
@@ -599,8 +612,8 @@ impl<'a> Emitter<'a> {
             helpers: BTreeSet::new(),
             uses_carry: false,
             uses_stack: false,
-            uses_quad: false,
-            subgroups: caps.subgroups,
+            quad: None,
+            quad_swap: None,
             loads: BTreeSet::new(),
             stores: BTreeSet::new(),
             centroid_loads: BTreeSet::new(),
@@ -1952,7 +1965,8 @@ impl Emitter<'_> {
             // is the whole warp the rasterizer models — so `quadSwapX`/`Y`/
             // `Diagonal` are that instruction exactly, and the lane it names
             // picks between them. `interp::shuffle_source` is the arithmetic
-            // mirrored here.
+            // mirrored here. Where the device has no quad operations, the
+            // module defines the three out of derivatives; see [`QUAD_SWAP`].
             Op::Shfl {
                 dst,
                 pred,
@@ -1961,10 +1975,8 @@ impl Emitter<'_> {
                 mask,
                 mode,
             } => {
-                if !self.subgroups {
-                    return Err(Unsupported::Subgroups { at });
-                }
-                self.uses_quad = true;
+                self.quad.get_or_insert(at);
+                self.quad_swap.get_or_insert(at);
                 let value = self.r(src);
                 let here = self.bind(&value);
                 let x = self.bind(&format!("quadSwapX({here})"));
@@ -2006,7 +2018,8 @@ impl Emitter<'_> {
             // `fswzadd` is not a cross-lane read at all: each lane of the
             // quad combines its *own* two operands with the pair of signs its
             // two bits of the swizzle name. Only which lane this is comes
-            // from outside, which is why it wants the quad too.
+            // from outside — which the module answers from `position`, so
+            // this needs nothing of the device.
             Op::Fswzadd {
                 dst,
                 a,
@@ -2014,10 +2027,7 @@ impl Emitter<'_> {
                 swizzle,
                 ftz,
             } => {
-                if !self.subgroups {
-                    return Err(Unsupported::Subgroups { at });
-                }
-                self.uses_quad = true;
+                self.quad.get_or_insert(at);
                 let x = self.r(a);
                 let x = self.flush(ftz, format!("bitcast<f32>({x})"));
                 let x = self.bind(&x);
@@ -2640,20 +2650,93 @@ fn generic_slot(offset: u16) -> Option<usize> {
 /// `raster::shade_fragment` puts in `attr_in`. `a[0x7c]` is then WGSL's own
 /// `position.w`, which in a fragment shader is already `1/w` interpolated the
 /// same way.
+/// `quadSwapX`/`Y`/`Diagonal` for a fragment shader on a device that has no
+/// quad operations of its own, which in a browser is every device: wgpu's web
+/// backend can neither request WebGPU's `subgroups` nor report it.
+///
+/// A fine derivative *is* the difference between the two lanes of a pair, so
+/// the neighbour is this lane's value plus or minus it depending on which of
+/// the two this is. Adding an `f32` difference back to an `f32` does not in
+/// general land on the other lane's bits — but it does when both are
+/// integers small enough that an `f32` holds them without rounding, and a
+/// 32-bit register split into halves is two such integers. The difference of
+/// two values in `0..=65535` is exact, and so is adding it back, so this
+/// recovers the neighbour's word exactly rather than approximately.
+///
+/// The clamp is for the derivative the language promises rather than the one
+/// the hardware computes: `dpdxFine` is specified as an approximation, and a
+/// half that came back a fraction off would otherwise truncate to the wrong
+/// integer or convert out of range.
+const QUAD_SWAP: &str = "\
+fn quadSwapHalves(low: f32, high: f32, d_low: f32, d_high: f32, sign: f32) -> u32 {
+  let other_low = clamp(round(low + sign * d_low), 0.0, 65535.0);
+  let other_high = clamp(round(high + sign * d_high), 0.0, 65535.0);
+  return (u32(other_high) << 16u) | u32(other_low);
+}
+
+fn quadSwapX(v: u32) -> u32 {
+  // `quad_lane`'s low bit is the column parity: the left lane of the pair
+  // adds the difference, the right one subtracts it.
+  let low = f32(v & 0xffffu);
+  let high = f32(v >> 16u);
+  let sign = select(1.0, -1.0, (quad_lane & 1u) == 1u);
+  return quadSwapHalves(low, high, dpdxFine(low), dpdxFine(high), sign);
+}
+
+fn quadSwapY(v: u32) -> u32 {
+  // And its second bit is the row parity, which `dpdyFine` runs down just as
+  // `position.y` does.
+  let low = f32(v & 0xffffu);
+  let high = f32(v >> 16u);
+  let sign = select(1.0, -1.0, (quad_lane & 2u) == 2u);
+  return quadSwapHalves(low, high, dpdyFine(low), dpdyFine(high), sign);
+}
+
+fn quadSwapDiagonal(v: u32) -> u32 {
+  // The lane across the quad is the one across the row from the one across
+  // the column, and the first swap's answer is an exact word to take the
+  // second derivative of.
+  return quadSwapY(quadSwapX(v));
+}";
+
 pub fn module(
     translated: &Translation,
     stage: Stage,
     layout: &Layout,
 ) -> Result<String, Unsupported> {
     let mut out = String::new();
-    // The enable has to come before everything, and the lane index with it:
-    // `quadSwap*` say which value, and this says which lane is asking.
-    if translated.uses_quad {
-        if translated.subgroup_enable {
-            out.push_str("enable subgroups;\n\n");
+    // Only the fragment entry point knows which lane it is, so a quad
+    // anywhere else is a program to hand back rather than one to run with the
+    // lane left at zero.
+    if let Some(at) = translated.quad {
+        if stage != Stage::Fragment {
+            return Err(Unsupported::Quad { at });
         }
+    }
+    // Directives come before every declaration, and the lane index after
+    // them: `quadSwap*` say which value, and this says which lane is asking.
+    if translated.quad_swap.is_some() {
+        if translated.subgroups {
+            if translated.subgroup_enable {
+                out.push_str("enable subgroups;\n\n");
+            }
+        } else {
+            // The emulation's derivatives sit wherever the shuffle did,
+            // which is inside the dispatch loop's arm for its block. The
+            // device's own quad operations are read from there too and the
+            // language says nothing about them; turning the diagnostic off
+            // is what makes the two agree rather than one of them refuse to
+            // compile.
+            out.push_str("diagnostic(off, derivative_uniformity);\n\n");
+        }
+    }
+    if translated.quad.is_some() {
         out.push_str("var<private> quad_lane: u32;\n");
         out.push_str("fn quadLane() -> u32 { return quad_lane; }\n\n");
+    }
+    if translated.quad_swap.is_some() && !translated.subgroups {
+        out.push_str(QUAD_SWAP);
+        out.push_str("\n\n");
     }
     for bank in &layout.const_banks {
         out.push_str(&format!(
@@ -2987,7 +3070,7 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
     }
     // Which lane of the 2x2 quad this is, numbered as `raster::quad_pixel`
     // numbers them: the row parity above the column parity.
-    if translated.uses_quad {
+    if translated.quad.is_some() {
         out.push_str(
             "  quad_lane = (u32(input.position.y) & 1u) * 2u + (u32(input.position.x) & 1u);\n",
         );
@@ -3556,9 +3639,7 @@ mod tests {
     fn a_warp_shuffle_is_a_quad_operation_where_the_device_has_them() {
         // A `shfl` reads another lane of the 2x2 quad, which is exactly what
         // `quadSwapX`/`Y`/`Diagonal` do — and a quad is the whole warp the
-        // rasterizer models. `dpdxFine` is *not* the same thing: it is a
-        // float subtraction, and adding it back does not recover the other
-        // lane's bits.
+        // rasterizer models.
         let op = Op::Shfl {
             dst: 1,
             pred: 0,
@@ -3568,9 +3649,6 @@ mod tests {
             mode: ShflMode::Bfly,
         };
         let p = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
-        // Without the device's quad operations there is no form for it.
-        assert_eq!(translate(&p).unwrap_err(), Unsupported::Subgroups { at: 0 });
-
         let translated = translate_for(
             &p,
             Caps {
@@ -3579,7 +3657,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(translated.uses_quad);
+        assert_eq!(translated.quad, Some(0));
+        assert_eq!(translated.quad_swap, Some(0));
         for wanted in ["quadSwapX(", "quadSwapY(", "quadSwapDiagonal("] {
             assert!(
                 translated.source.contains(wanted),
@@ -3587,13 +3666,91 @@ mod tests {
                 translated.source
             );
         }
-        // The enable and the lane the arithmetic asks about are the module's.
+        // The enable and the lane the arithmetic asks about are the module's,
+        // and the device's operations are taken as they are rather than
+        // defined.
         let layout = Layout::of(&translated, Stage::Fragment);
         let source = module(&translated, Stage::Fragment, &layout).unwrap();
         assert!(source.starts_with("enable subgroups;"), "{source}");
+        assert!(!source.contains("dpdxFine"), "{source}");
         assert!(
             source.contains("quad_lane = (u32(input.position.y)"),
             "{source}"
+        );
+    }
+
+    #[test]
+    fn a_warp_shuffle_without_quad_operations_is_a_fine_derivative() {
+        // Every browser device is this one: wgpu's web backend can neither
+        // request WebGPU's `subgroups` nor report it, so a `shfl` that fell
+        // back here latched the whole session onto the rasterizer. The
+        // module defines the three operations out of derivatives instead —
+        // see `QUAD_SWAP` for why that recovers the neighbour's bits exactly.
+        let op = Op::Shfl {
+            dst: 1,
+            pred: 0,
+            src: 2,
+            index: Operand::Imm(1),
+            mask: Operand::Imm(0x1c),
+            mode: ShflMode::Bfly,
+        };
+        let p = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
+        let translated = translate(&p).unwrap();
+        assert_eq!(translated.quad_swap, Some(0));
+
+        let layout = Layout::of(&translated, Stage::Fragment);
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        // The diagnostic is a directive and so comes before every
+        // declaration; nothing asks the device for a feature it does not
+        // have.
+        assert!(
+            source.starts_with("diagnostic(off, derivative_uniformity);"),
+            "{source}"
+        );
+        assert!(!source.contains("enable subgroups"), "{source}");
+        for wanted in ["fn quadSwapX(", "dpdxFine(", "dpdyFine("] {
+            assert!(source.contains(wanted), "{wanted} missing from {source}");
+        }
+
+        // Only a fragment shader has derivatives, so only a fragment shader
+        // has this route.
+        let layout = Layout::of(&translated, Stage::Vertex);
+        assert_eq!(
+            module(&translated, Stage::Vertex, &layout).unwrap_err(),
+            Unsupported::Quad { at: 0 }
+        );
+    }
+
+    #[test]
+    fn fswzadd_asks_which_lane_it_is_and_nothing_of_the_device() {
+        // It reads no other lane at all — each lane combines its *own* two
+        // operands with the signs its two bits of the swizzle name — so
+        // rejecting it without the device's quad operations turned a draw
+        // that needed nothing into a fallback.
+        let op = Op::Fswzadd {
+            dst: 1,
+            a: 2,
+            b: 3,
+            swizzle: 0x99,
+            ftz: false,
+        };
+        let p = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
+        let translated = translate(&p).unwrap();
+        assert_eq!(translated.quad, Some(0));
+        assert_eq!(translated.quad_swap, None);
+
+        let layout = Layout::of(&translated, Stage::Fragment);
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        assert!(source.contains("fn quadLane()"), "{source}");
+        assert!(!source.contains("fn quadSwapX("), "{source}");
+
+        // A vertex shader still cannot have it: nothing there knows which
+        // lane it is, and a lane index left at zero would give every vertex
+        // the signs of the first lane rather than its own.
+        let layout = Layout::of(&translated, Stage::Vertex);
+        assert_eq!(
+            module(&translated, Stage::Vertex, &layout).unwrap_err(),
+            Unsupported::Quad { at: 0 }
         );
     }
 

@@ -134,17 +134,100 @@ pub(crate) fn blend(blend: state::Blend) -> wgpu::BlendState {
 /// Refusing it here instead makes it what every other thing this backend
 /// cannot express already is -- one draw on the software rasterizer.
 pub(crate) fn device_texture_format(
-    device: &wgpu::Device,
+    features: wgpu::Features,
     format: Format,
 ) -> Result<wgpu::TextureFormat> {
     let wanted = texture_format(format)?;
     let needs = wanted.required_features();
-    if !device.features().contains(needs) {
+    if !features.contains(needs) {
         return Err(Error::Gpu(format!(
             "the device was not given {needs:?}, which {wanted:?} needs"
         )));
     }
     Ok(wanted)
+}
+
+/// How a sampled texture's texels have to be rewritten to reach the device
+/// format [`sampled_texture_format`] chose for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Widen {
+    /// The device holds the guest's format itself; the bytes go as they are.
+    None,
+    /// Each `u16` becomes the `f32` sampling it would have produced.
+    Unorm16,
+    /// Each `i16` becomes the `f32` sampling it would have produced.
+    Snorm16,
+}
+
+/// The device format for a texture that is only *sampled*, and what its
+/// texels have to become on the way.
+///
+/// The normalized 16-bit formats are wgpu's `TEXTURE_FORMAT_16BIT_NORM`,
+/// which is native-only: WebGPU has no spelling for them, so no browser will
+/// ever offer one and A Short Hike's `R16` texture fell back on every device
+/// this actually ships to — and one fallback latches the whole session onto
+/// the rasterizer, so a format nothing here can hold cost every frame.
+///
+/// A 32-bit float sibling holds them exactly rather than approximately: an
+/// `f32` has 24 bits of significand, so `v / 65535` is the same number the
+/// hardware would have handed the shader, to the bit. What it costs is
+/// twice the bytes on the device and `float32-filterable`, without which a
+/// sampler could not filter the result — and where the device has neither
+/// route this is the fallback it always was.
+///
+/// Only for sampled textures. A *render target* of the same format is
+/// [`device_attachment_format`]'s, and stays an honest refusal: a float
+/// target neither clamps nor blends the way a normalized one does, and the
+/// readback that puts it back in guest memory copies device texels straight
+/// into a guest surface that is still 16 bits wide.
+pub(crate) fn sampled_texture_format(
+    features: wgpu::Features,
+    format: Format,
+) -> Result<(wgpu::TextureFormat, Widen)> {
+    match device_texture_format(features, format) {
+        Ok(wanted) => Ok((wanted, Widen::None)),
+        Err(refused) => {
+            let widened = match format {
+                Format::R16Unorm => Some((wgpu::TextureFormat::R32Float, Widen::Unorm16)),
+                Format::R16Snorm => Some((wgpu::TextureFormat::R32Float, Widen::Snorm16)),
+                Format::Rg16Unorm => Some((wgpu::TextureFormat::Rg32Float, Widen::Unorm16)),
+                Format::Rg16Snorm => Some((wgpu::TextureFormat::Rg32Float, Widen::Snorm16)),
+                Format::Rgba16Unorm => Some((wgpu::TextureFormat::Rgba32Float, Widen::Unorm16)),
+                Format::Rgba16Snorm => Some((wgpu::TextureFormat::Rgba32Float, Widen::Snorm16)),
+                _ => None,
+            };
+            match widened {
+                Some(pair) if features.contains(wgpu::Features::FLOAT32_FILTERABLE) => Ok(pair),
+                _ => Err(refused),
+            }
+        }
+    }
+}
+
+/// The texels of a linear image whose 16-bit channels have to reach the
+/// device as `f32`, which is [`Widen`]'s whole job.
+///
+/// Every two bytes become four, wherever they sit in the row: a row's
+/// padding is as much a part of the layout as its texels, so widening the
+/// row rather than the texels keeps a stride the caller can still describe
+/// as twice what it was.
+pub(crate) fn widen(bytes: &[u8], widen: Widen) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for pair in bytes.chunks_exact(2) {
+        let raw = u16::from_le_bytes([pair[0], pair[1]]);
+        let value = match widen {
+            // Unreachable: `Widen::None` is what "do not call this" is
+            // spelled as, and every caller checks. Zero rather than a panic
+            // in the middle of a draw.
+            Widen::None => 0.0,
+            Widen::Unorm16 => f32::from(raw) / 65535.0,
+            // The most negative `i16` is one step past -1 and clamps to it,
+            // which is what sampling a snorm does.
+            Widen::Snorm16 => (f32::from(raw as i16) / 32767.0).max(-1.0),
+        };
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
 }
 
 /// [`device_texture_format`], for a format that has to be a **colour
@@ -157,13 +240,11 @@ pub(crate) fn device_texture_format(
 /// the usage question directly covers every format that is sampled more
 /// widely than it is drawn into, rather than this one by name.
 pub(crate) fn device_attachment_format(
-    device: &wgpu::Device,
+    features: wgpu::Features,
     format: Format,
 ) -> Result<wgpu::TextureFormat> {
-    let wanted = device_texture_format(device, format)?;
-    let usages = wanted
-        .guaranteed_format_features(device.features())
-        .allowed_usages;
+    let wanted = device_texture_format(features, format)?;
+    let usages = wanted.guaranteed_format_features(features).allowed_usages;
     if !usages.contains(wgpu::TextureUsages::RENDER_ATTACHMENT) {
         return Err(Error::Gpu(format!(
             "this device cannot render into {wanted:?}"
@@ -219,4 +300,84 @@ pub(crate) fn texture_format(format: Format) -> Result<wgpu::TextureFormat> {
         Format::Bc7RgbaUnorm => T::Bc7RgbaUnorm,
         Format::Bc7RgbaUnormSrgb => T::Bc7RgbaUnormSrgb,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sampled_texture_format, widen, Widen};
+    use switch_core::gpu::pipeline::Format;
+    use switch_core::gpu::surface::ColorFormat;
+
+    /// Every browser device is the middle case: WebGPU has no spelling for
+    /// the normalized 16-bit formats, so wgpu's is native-only and an
+    /// adapter on the web never reports it.
+    #[test]
+    fn a_sixteen_bit_norm_texture_is_widened_only_where_it_has_to_be() {
+        let native = wgpu::Features::TEXTURE_FORMAT_16BIT_NORM;
+        assert_eq!(
+            sampled_texture_format(native, Format::R16Unorm).unwrap(),
+            (wgpu::TextureFormat::R16Unorm, Widen::None),
+            "a device that holds the format itself should be given it"
+        );
+
+        let web = wgpu::Features::FLOAT32_FILTERABLE;
+        for (format, wanted, how) in [
+            (
+                Format::R16Unorm,
+                wgpu::TextureFormat::R32Float,
+                Widen::Unorm16,
+            ),
+            (
+                Format::Rg16Snorm,
+                wgpu::TextureFormat::Rg32Float,
+                Widen::Snorm16,
+            ),
+            (
+                Format::Rgba16Unorm,
+                wgpu::TextureFormat::Rgba32Float,
+                Widen::Unorm16,
+            ),
+        ] {
+            assert_eq!(
+                sampled_texture_format(web, format).unwrap(),
+                (wanted, how),
+                "{format:?} should widen where the device cannot hold it"
+            );
+        }
+
+        // Without a filterable float there is no route, and the refusal is
+        // the one this always answered.
+        assert!(sampled_texture_format(wgpu::Features::empty(), Format::R16Unorm).is_err());
+        // And nothing else is widened: a compressed family the adapter
+        // lacks is still a draw for the rasterizer.
+        assert!(sampled_texture_format(web, Format::Bc1RgbaUnorm).is_err());
+    }
+
+    /// The claim the widening rests on: an `f32` holds `v / 65535` exactly,
+    /// so the number the shader samples is the one the rasterizer decodes
+    /// rather than one near it.
+    #[test]
+    fn a_widened_channel_is_the_number_the_rasterizer_decodes() {
+        // `0xEE` is R16Unorm and `0xEF` R16Snorm, as `pipeline`'s table
+        // reads them.
+        for (raw_format, how) in [(0xEE, Widen::Unorm16), (0xEF, Widen::Snorm16)] {
+            let reference = ColorFormat::from_raw(raw_format).expect("a 16-bit red format");
+            for stored in [
+                0u16, 1, 0x0100, 0x1234, 0x7fff, 0x8000, 0x8001, 0xfffe, 0xffff,
+            ] {
+                let widened = widen(&stored.to_le_bytes(), how);
+                let got = f32::from_le_bytes(widened.try_into().expect("one f32"));
+                let want = reference.decode(u128::from(stored)).expect("a decode")[0];
+                assert_eq!(got, want, "{how:?} of {stored:#06x}");
+            }
+        }
+    }
+
+    /// A row is widened whole, padding included, so the stride the caller
+    /// describes stays twice the one it had.
+    #[test]
+    fn widening_doubles_every_byte_of_a_row() {
+        let row = [0u8; 12];
+        assert_eq!(widen(&row, Widen::Unorm16).len(), 24);
+    }
 }
