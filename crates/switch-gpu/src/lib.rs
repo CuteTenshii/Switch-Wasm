@@ -2820,7 +2820,7 @@ impl Gpu {
             });
         {
             let colour: Vec<Option<wgpu::RenderPassColorAttachment>> = (!key.depth)
-                .then(|| {
+                .then_some({
                     Some(wgpu::RenderPassColorAttachment {
                         view: &view,
                         depth_slice: None,
@@ -2838,7 +2838,7 @@ impl Gpu {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("resample"),
                 color_attachments: &colour,
-                depth_stencil_attachment: key.depth.then(|| {
+                depth_stencil_attachment: key.depth.then_some({
                     wgpu::RenderPassDepthStencilAttachment {
                         view: &view,
                         depth_ops: Some(wgpu::Operations {
@@ -2888,7 +2888,7 @@ impl Gpu {
             self.module("resample", &source)
         };
         let targets: Vec<Option<wgpu::ColorTargetState>> = (!key.depth)
-            .then(|| {
+            .then_some({
                 Some(wgpu::ColorTargetState {
                     format: key.dst,
                     blend: None,

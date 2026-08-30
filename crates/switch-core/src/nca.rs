@@ -1048,7 +1048,7 @@ fn read_sparse_table<S: ByteSource>(
     fs: &FsHeader,
     key: Option<[u8; 16]>,
 ) -> Result<crate::sparse::SparseTable, Error> {
-    if fs.sparse.offset % 16 != 0 {
+    if !fs.sparse.offset.is_multiple_of(16) {
         return Err(Error::Nca(format!(
             "sparse table starts at {:#x}, which is not a counter block boundary",
             fs.sparse.offset

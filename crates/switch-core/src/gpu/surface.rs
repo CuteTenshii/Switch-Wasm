@@ -858,7 +858,7 @@ fn pack_small_float(v: f32, mantissa_bits: u32) -> u32 {
     let shift = 10 - mantissa_bits;
     let half = u32::from(f32_to_f16(v)) & 0x7FFF;
     let max = (1 << (5 + mantissa_bits)) - 1;
-    (((half + (1 << (shift - 1))) >> shift) as u32).min(max)
+    ((half + (1 << (shift - 1))) >> shift).min(max)
 }
 
 /// The inverse: widen the mantissa back out to a half and decode that.

@@ -489,7 +489,7 @@ impl Cpu {
         let value = match opc {
             // VREV64, VREV32, VREV16: reverse the elements inside a container
             // whose width the opcode names.
-            0b0000 | 0b0001 | 0b0010 => {
+            0b0000..=0b0010 => {
                 let container = 64 >> opc;
                 let per = container / esize;
                 let x = lanes_of(m, esize, count);
