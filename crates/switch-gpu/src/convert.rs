@@ -6,7 +6,7 @@
 //! less one it can draw into, so those answer `Result`.
 
 use switch_core::gpu::pipeline::{self as state, Format};
-use switch_core::gpu::upload::DepthKind;
+use switch_core::gpu::upload::{DepthKind, IndexFormat};
 use switch_core::{Error, Result};
 
 pub(crate) fn topology(topology: state::Topology) -> wgpu::PrimitiveTopology {
@@ -16,6 +16,13 @@ pub(crate) fn topology(topology: state::Topology) -> wgpu::PrimitiveTopology {
         state::Topology::LineStrip => wgpu::PrimitiveTopology::LineStrip,
         state::Topology::TriangleList => wgpu::PrimitiveTopology::TriangleList,
         state::Topology::TriangleStrip => wgpu::PrimitiveTopology::TriangleStrip,
+    }
+}
+
+pub(crate) fn index_format(format: IndexFormat) -> wgpu::IndexFormat {
+    match format {
+        IndexFormat::Uint16 => wgpu::IndexFormat::Uint16,
+        IndexFormat::Uint32 => wgpu::IndexFormat::Uint32,
     }
 }
 

@@ -119,8 +119,8 @@ use switch_core::{Error, Result};
 
 use builtin::{grid_bytes, resample_wgsl, ResampleKey, CLEAR_RECT_WGSL, LOAD_DEPTH_WGSL};
 use convert::{
-    blend, compare, depth_texture_format, device_attachment_format, sampled_texture_format,
-    topology, vertex_format, widen, write_mask, Widen,
+    blend, compare, depth_texture_format, device_attachment_format, index_format,
+    sampled_texture_format, topology, vertex_format, widen, write_mask, Widen,
 };
 use readback::{Companion, Held, Pending, Scratch, MAP_FAILED, MAP_READY, MAP_WAITING};
 use stats::{json_string, DeviceErrors, Times, UploadBytes};
@@ -267,6 +267,9 @@ struct PipelineKey {
     blend: Option<state::Blend>,
     write_mask: [bool; 4],
     topology: state::Topology,
+    /// The index format a strip's primitive restart is spelled in, which a
+    /// pipeline bakes in and a draw of a different width cannot reuse.
+    strip_index_format: Option<wgpu::IndexFormat>,
     front_face: state::FrontFace,
     cull: state::Cull,
     /// Each bound vertex buffer, in the order they are bound.
@@ -1421,6 +1424,21 @@ impl Gpu {
         // not part of the key: they follow from the two modules, and WebGPU
         // matches a bind group to a pipeline structurally rather than by
         // identity, so the ones built for this draw fit a cached pipeline.
+        // The index buffer this draw will bind, if it binds one. An assembled
+        // topology is a list of ordinals and so is always `u32`.
+        let draw_index_format = match &p.assembled {
+            Some(_) => Some(wgpu::IndexFormat::Uint32),
+            None => p.uploads.index.as_ref().map(|i| index_format(i.format)),
+        };
+        // WebGPU refuses `drawIndexed` on a strip pipeline that does not name
+        // the format its primitive restart index is spelled in, and throws out
+        // the whole command buffer with it — so one such draw costs the frame,
+        // not the draw. It refuses the format on a pipeline that is not a
+        // strip just as firmly, hence both halves of this.
+        let strip_index_format = match p.state.topology {
+            state::Topology::LineStrip | state::Topology::TriangleStrip => draw_index_format,
+            _ => None,
+        };
         let key = PipelineKey {
             vs: vs_key,
             fs: fs_key,
@@ -1434,6 +1452,7 @@ impl Gpu {
             blend: p.state.target.and_then(|t| t.blend),
             write_mask: p.state.target.map_or([true; 4], |t| t.write_mask),
             topology: p.state.topology,
+            strip_index_format,
             front_face: p.state.front_face,
             cull: p.state.cull,
             buffers: bound
@@ -1488,7 +1507,7 @@ impl Gpu {
             },
             primitive: wgpu::PrimitiveState {
                 topology: topology(p.state.topology),
-                strip_index_format: None,
+                strip_index_format,
                 front_face: match p.state.front_face {
                     state::FrontFace::Ccw => wgpu::FrontFace::Ccw,
                     state::FrontFace::Cw => wgpu::FrontFace::Cw,
@@ -1580,10 +1599,7 @@ impl Gpu {
             None => p.uploads.index.as_ref().map(|index| {
                 (
                     self.buffer("index", &index.bytes, wgpu::BufferUsages::INDEX),
-                    match index.format {
-                        switch_core::gpu::upload::IndexFormat::Uint16 => wgpu::IndexFormat::Uint16,
-                        switch_core::gpu::upload::IndexFormat::Uint32 => wgpu::IndexFormat::Uint32,
-                    },
+                    index_format(index.format),
                     -(index.lowest as i32),
                 )
             }),
