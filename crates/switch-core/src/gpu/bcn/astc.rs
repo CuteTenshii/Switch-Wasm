@@ -653,14 +653,11 @@ fn interpolate_weights(
             for plane in 0..planes {
                 // Out-of-grid corners always carry a zero weight, and masking
                 // keeps the read inside the array as the hardware does.
-                let p: Vec<u32> = indices
-                    .iter()
-                    .map(|&i| weights[((i * planes + plane) & 0x3F) as usize])
-                    .collect();
-                out[(y * bw + x) as usize][plane as usize] = (p[0] * w00 as u32
-                    + p[1] * w01 as u32
-                    + p[2] * w10 as u32
-                    + p[3] * w11 as u32
+                let at = |i: i32| weights[((i * planes + plane) & 0x3F) as usize];
+                out[(y * bw + x) as usize][plane as usize] = (at(indices[0]) * w00 as u32
+                    + at(indices[1]) * w01 as u32
+                    + at(indices[2]) * w10 as u32
+                    + at(indices[3]) * w11 as u32
                     + 8)
                     >> 4;
             }

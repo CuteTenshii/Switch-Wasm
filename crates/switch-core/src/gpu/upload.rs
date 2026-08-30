@@ -1028,14 +1028,17 @@ fn decode_blocks(
     };
     // One row of blocks at a time: a decoded block covers `block_h` output
     // rows, so the whole strip is decoded before any of it is written.
-    let mut strip: Vec<[f32; 4]> = Vec::new();
+    //
+    // Both buffers are made once and written over. `MAX_TEXELS` is a 12x12
+    // footprint, so a fresh `block` per block zeroed 2304 bytes to fill the
+    // 256 a 4x4 needs, and the strip is written in full every row before
+    // anything reads it — the clearing was 24% of an ASTC title's upload.
+    let mut strip: Vec<[f32; 4]> = vec![[0.0; 4]; (blocks_wide * block_w * block_h) as usize];
+    let mut block = [[0.0f32; 4]; crate::gpu::bcn::MAX_TEXELS];
     for block_y in 0..image.height.div_ceil(block_h) {
-        strip.clear();
-        strip.resize((blocks_wide * block_w * block_h) as usize, [0.0; 4]);
         for block_x in 0..blocks_wide {
             let at = base + u64::from(image.layout.offset(block_x * bytes, block_y, width_bytes));
             let raw = ctx.read_pixel(at, bytes)?.to_le_bytes();
-            let mut block = [[0.0f32; 4]; crate::gpu::bcn::MAX_TEXELS];
             crate::gpu::bcn::decode_into(codec, &raw[..bytes as usize], &mut block)?;
             for y in 0..block_h {
                 for x in 0..block_w {
