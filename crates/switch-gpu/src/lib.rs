@@ -292,6 +292,19 @@ struct Bound {
     step: wgpu::VertexStepMode,
 }
 
+/// How many translations to keep. qlaunch reaches 24 and Just Dance 2017 a
+/// similar handful, so this is a ceiling on a pathological title rather than a
+/// working-set limit — nothing real should ever reach it.
+const SHADER_CACHE_ENTRIES: usize = 1024;
+
+/// A translated shader and what it was translated from, so a later draw can
+/// tell whether the answer still holds. See [`Gpu::shader_cache`].
+#[derive(Debug)]
+struct CachedShader {
+    translation: Translation,
+    reads: switch_core::gpu::shader::DecodeReads,
+}
+
 /// A device, and the rasterizer to fall back to.
 #[derive(Debug)]
 pub struct Gpu {
@@ -519,6 +532,21 @@ pub struct Gpu {
     /// guest writes to the memory behind it, which `Memory`'s watched pages
     /// report.
     texture_cache: std::collections::HashMap<TextureKey, std::sync::Arc<[u8]>>,
+    /// A translated shader, by the address and stage it was translated from.
+    ///
+    /// Translating is `decode_program_from_memory` plus `wgsl::translate_for`,
+    /// and it ran **once per draw** for a result that only ever takes a handful
+    /// of values: a qlaunch run translated 278,631 times to reach 24 distinct
+    /// programs, and spent 158 of its 551 seconds of device time doing it.
+    shader_cache: std::collections::HashMap<(u64, ShaderStage), CachedShader>,
+    /// Which cached translations a guest page holds program words for, so a
+    /// write to it drops them — the same arrangement as [`Gpu::page_owners`],
+    /// and for the same reason.
+    shader_pages: std::collections::HashMap<u32, Vec<(u64, ShaderStage)>>,
+    /// Pages a translation was decoded from and nothing has watched yet, for
+    /// the same reason [`Gpu::to_remember`] exists: the draw path is handed a
+    /// shared `ExecCtx` and arming a page needs a mutable one.
+    shader_to_watch: Vec<(u32, (u64, ShaderStage))>,
     /// Which cached textures a guest page holds bytes for, so a write to it
     /// evicts them without walking the cache. A key left here after its entry
     /// has gone evicts nothing, which is why nothing prunes these.
@@ -535,6 +563,11 @@ pub struct Gpu {
     cached_bytes: u64,
     pub texture_hits: u64,
     pub texture_misses: u64,
+    /// Draws served a translation out of [`Gpu::shader_cache`], and draws that
+    /// had to do the work. A run with more than a handful of misses is one
+    /// whose programs really are changing.
+    pub shader_hits: u64,
+    pub shader_misses: u64,
     gpu_texture_bytes: u64,
     /// Textures `prepare` read and has not watched yet. `prepare` is handed a
     /// shared `ExecCtx` and watching a page needs a mutable one, so the two
@@ -587,6 +620,10 @@ impl Drop for Gpu {
             mib(u.index),
             self.texture_hits,
             self.texture_misses,
+        );
+        eprintln!(
+            "[gpu] {} shader translations served from cache, {} not",
+            self.shader_hits, self.shader_misses,
         );
         if let Some(t) = self.times {
             let ms = |v: u128| v as f64 / 1000.0;
@@ -699,10 +736,15 @@ impl Gpu {
                 .then(Times::default),
             uploaded: UploadBytes::default(),
             texture_cache: std::collections::HashMap::new(),
+            shader_cache: std::collections::HashMap::new(),
+            shader_pages: std::collections::HashMap::new(),
+            shader_to_watch: Vec::new(),
             page_owners: std::collections::HashMap::new(),
             gpu_textures: std::collections::HashMap::new(),
             cached_bytes: 0,
             texture_hits: 0,
+            shader_hits: 0,
+            shader_misses: 0,
             texture_misses: 0,
             gpu_texture_bytes: 0,
             to_remember: Vec::new(),
@@ -2899,7 +2941,9 @@ impl Gpu {
         if !ctx.mem.has_dirty_gpu() {
             return;
         }
-        for page in ctx.mem.dirty_gpu_pages() {
+        let dirty = ctx.mem.dirty_gpu_pages();
+        self.evict_shaders(&dirty);
+        for page in dirty {
             let Some(keys) = self.page_owners.remove(&page) else {
                 continue;
             };
@@ -2930,6 +2974,10 @@ impl Gpu {
     /// noticed through, so a texture with none of them is not kept: its bytes
     /// could change with nothing to say so.
     fn remember_textures(&mut self, ctx: &mut ExecCtx) {
+        for (page, key) in std::mem::take(&mut self.shader_to_watch) {
+            ctx.mem.mark_gpu_page(page << PAGE_BITS);
+            self.shader_pages.entry(page).or_default().push(key);
+        }
         for (key, bytes, source_len) in std::mem::take(&mut self.to_remember) {
             if self.texture_cache.contains_key(&key) {
                 continue;
@@ -3115,12 +3163,16 @@ impl Gpu {
 
         // Unfolded, so a module depends only on the shader binary and not on
         // what happened to be in a constant buffer when it was translated.
-        let (vs, fs) = timed!(self, translate, {
-            (
-                self.translate(engine, ctx, ShaderStage::VertexB),
-                self.translate(engine, ctx, ShaderStage::Fragment),
-            )
-        });
+        let vs = timed!(
+            self,
+            translate,
+            self.translate(engine, ctx, ShaderStage::VertexB)
+        );
+        let fs = timed!(
+            self,
+            translate,
+            self.translate(engine, ctx, ShaderStage::Fragment)
+        );
         let (vs, fs) = (vs?, fs?);
 
         let mut vs_layout = Layout::of(&vs, Stage::Vertex);
@@ -3330,7 +3382,7 @@ impl Gpu {
     }
 
     fn translate(
-        &self,
+        &mut self,
         engine: &Engine3D,
         ctx: &ExecCtx,
         stage: ShaderStage,
@@ -3338,18 +3390,70 @@ impl Gpu {
         let binding = engine
             .program(stage)
             .ok_or_else(|| format!("no {stage:?} program"))?;
-        let program =
-            switch_core::gpu::shader::decode_program_from_memory(ctx, binding.addr, &|bank: u8| {
-                engine.bound_constbuf(stage, u32::from(bank))
-            })
-            .map_err(|e| format!("{e:?}"))?;
+        let key = (binding.addr, stage);
+        // A hit still has to be checked. The decode resolves a `brx`'s jump
+        // table out of a constant buffer, so a program is only the same
+        // program while those words are — and unlike the program's own pages,
+        // constant buffers are rewritten every frame, so watching their pages
+        // would evict this on every draw instead of validating it.
+        if let Some(cached) = self.shader_cache.get(&key) {
+            if cached.reads.constants_unchanged(ctx) {
+                self.shader_hits += 1;
+                return Ok(cached.translation.clone());
+            }
+        }
+        self.shader_misses += 1;
+        let (program, reads) = switch_core::gpu::shader::decode_program_from_memory_recording(
+            ctx,
+            binding.addr,
+            &|bank: u8| engine.bound_constbuf(stage, u32::from(bank)),
+        )
+        .map_err(|e| format!("{e:?}"))?;
         let caps = wgsl::Caps {
             subgroups: self.features().contains(wgpu::Features::SUBGROUP),
             // On the web the browser compiles the text and wants the
             // directive; natively naga does, and rejects it.
             subgroup_enable: cfg!(target_arch = "wasm32"),
         };
-        wgsl::translate_for(&Compiled::new(&program), caps).map_err(|e| e.to_string())
+        let translation =
+            wgsl::translate_for(&Compiled::new(&program), caps).map_err(|e| e.to_string())?;
+        // The decode read through the GPU address space, so its pages are
+        // virtual. Watching one means the CPU page behind it, the same walk
+        // the texture cache makes — and a page with nothing behind it cannot
+        // be written through this address space, so there is nothing to watch.
+        for &page in &reads.pages {
+            if let Some((cpu, _)) = ctx.vmm.translate(page << PAGE_BITS) {
+                self.shader_to_watch
+                    .push(((u64::from(cpu) >> PAGE_BITS) as u32, key));
+            }
+        }
+        // Whole-cache rather than least-recently-used, as the texture cache
+        // does above: a run that reaches this is one whose shaders have
+        // changed wholesale, and a title only ever has a few dozen.
+        if self.shader_cache.len() >= SHADER_CACHE_ENTRIES {
+            self.shader_cache.clear();
+            self.shader_pages.clear();
+        }
+        self.shader_cache.insert(
+            key,
+            CachedShader {
+                translation: translation.clone(),
+                reads,
+            },
+        );
+        Ok(translation)
+    }
+
+    /// Drop every translation a written page held program words for.
+    fn evict_shaders(&mut self, pages: &[u32]) {
+        for page in pages {
+            let Some(keys) = self.shader_pages.remove(page) else {
+                continue;
+            };
+            for key in keys {
+                self.shader_cache.remove(&key);
+            }
+        }
     }
 }
 
@@ -3566,6 +3670,7 @@ impl Renderer for Gpu {
              \"modules\":{},\"held\":{},\"evicted\":{},\"pending\":{},\
              \"read\":{{\"textures\":{},\"vertex\":{},\"constants\":{},\"index\":{}}},\
              \"textureHits\":{},\"textureMisses\":{},\
+             \"shaderHits\":{},\"shaderMisses\":{},\
              \"softwareFrame\":{},\"gaveUp\":{},\"reasons\":[{}],\
              \"deviceErrorCount\":{},\"deviceErrors\":[{}]{}}}",
             self.drawn,
@@ -3581,6 +3686,8 @@ impl Renderer for Gpu {
             self.uploaded.index,
             self.texture_hits,
             self.texture_misses,
+            self.shader_hits,
+            self.shader_misses,
             self.software_frame,
             self.gave_up,
             reasons.join(","),

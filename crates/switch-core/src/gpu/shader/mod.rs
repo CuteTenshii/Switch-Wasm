@@ -248,13 +248,67 @@ pub fn decode_program_from_memory(
     addr: u64,
     bindings: &dyn Fn(u8) -> Option<(u64, u32)>,
 ) -> Result<Program> {
+    decode_program_from_memory_recording(ctx, addr, bindings).map(|(program, _)| program)
+}
+
+/// What a decode read out of guest memory, so a caller holding the program it
+/// produced can tell when that program has stopped being the truth.
+///
+/// A backend that translates a shader on every draw is doing the same work a
+/// few hundred thousand times for a handful of answers, and the only thing
+/// stopping it caching them is not knowing when the guest has changed one.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct DecodeReads {
+    /// The pages the program's own words came from, ascending and without
+    /// repeats, **in the GPU address space the decode read through** — a
+    /// caller that wants to watch them has to put them through
+    /// `ExecCtx::vmm` first, as the texture cache does.
+    pub pages: Vec<u64>,
+    /// The constant-buffer words the walk consumed, each with the value it
+    /// held. Only a `brx`'s jump table reads these, so the list is usually
+    /// empty and never long — which is what makes re-reading them to check a
+    /// cached translation cheaper than redoing the translation.
+    pub consts: Vec<(u64, u32)>,
+}
+
+impl DecodeReads {
+    /// Whether guest memory still holds what this decode was built from.
+    ///
+    /// Only the constant words are re-read: the program's own pages are
+    /// watched instead, since re-reading a whole program to check it would
+    /// cost most of what the cache saves.
+    pub fn constants_unchanged(&self, ctx: &crate::gpu::exec::ExecCtx) -> bool {
+        self.consts
+            .iter()
+            .all(|&(at, value)| ctx.read_u32(at).is_ok_and(|now| now == value))
+    }
+}
+
+/// [`decode_program_from_memory`], reporting what it read out of guest memory
+/// so the result can be cached against it. See [`DecodeReads`].
+pub fn decode_program_from_memory_recording(
+    ctx: &crate::gpu::exec::ExecCtx,
+    addr: u64,
+    bindings: &dyn Fn(u8) -> Option<(u64, u32)>,
+) -> Result<(Program, DecodeReads)> {
+    let mut pages: Vec<u64> = Vec::new();
+    let mut consts: Vec<(u64, u32)> = Vec::new();
+    let note = |pages: &mut Vec<u64>, at: u64| {
+        let page = at >> crate::mem::PAGE_BITS;
+        if !pages.contains(&page) {
+            pages.push(page);
+        }
+    };
     let first_real_word = ctx.read_u64(addr + 8)?;
+    note(&mut pages, addr + 8);
     let header_at =
         matches!(isa::decode(first_real_word).op, Op::Unimplemented { .. }).then_some(addr);
     let header = match header_at {
         Some(at) => {
             let target = ctx.read_u32(at + OMAP_TARGET_WORD * 4)?;
             let flags = ctx.read_u32(at + (OMAP_TARGET_WORD + 1) * 4)?;
+            note(&mut pages, at + OMAP_TARGET_WORD * 4);
+            note(&mut pages, at + (OMAP_TARGET_WORD + 1) * 4);
             Some(ProgramHeader {
                 omap_target: target,
                 omap_sample_mask: flags & 1 != 0,
@@ -275,6 +329,7 @@ pub fn decode_program_from_memory(
                     "shader: program read at {offset:#x} is past the {limit:#x}-byte cap"
                 )));
             }
+            note(&mut pages, addr + u64::from(offset));
             ctx.read_u64(addr + u64::from(offset))
         },
         &mut |bank: u8, offset: u32| {
@@ -285,7 +340,10 @@ pub fn decode_program_from_memory(
                     "shader: read of c{bank}[{offset:#x}] is past its {size:#x}-byte end"
                 )));
             }
-            ctx.read_u32(base + u64::from(offset))
+            let at = base + u64::from(offset);
+            let value = ctx.read_u32(at)?;
+            consts.push((at, value));
+            Ok(value)
         },
     )
     .inspect(|program| {
@@ -309,7 +367,8 @@ pub fn decode_program_from_memory(
     if crate::trace::enabled(crate::trace::Trace::Sph) {
         crate::traceln!("[sph] program at {addr:#x} {header:?}");
     }
-    Ok(program)
+    pages.sort_unstable();
+    Ok((program, DecodeReads { pages, consts }))
 }
 
 /// Whether `offset` names a real instruction rather than a `sched` control
@@ -584,6 +643,55 @@ mod tests {
     use crate::gpu::testing::{block, solid_fragment_shader, word};
     use crate::Error;
     use isa::{FMod, FmulScale, MemSize, MufuOp, Operand, TexDim, RZ};
+
+    /// Decode `solid_fragment_shader` out of a real `ExecCtx`, reporting what
+    /// the walk read — the seam a backend caches a translation against.
+    fn decode_recording() -> (u64, DecodeReads) {
+        use crate::gpu::exec::{ExecCtx, GpuStats};
+        use crate::gpu::syncpt::Host1x;
+        use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
+        use crate::mem::Memory;
+        let mut mem = Memory::new();
+        mem.map_zero(0x7000_0000, 0x4000).unwrap();
+        let mut vmm = AddressSpace::new();
+        let at = vmm
+            .map(0x7000_0000, 0x4000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
+        let mut host1x = Host1x::new();
+        let mut stats = GpuStats::default();
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        for (i, chunk) in solid_fragment_shader().chunks_exact(4).enumerate() {
+            let word = u32::from_le_bytes(chunk.try_into().unwrap());
+            ctx.write_u32(at + i as u64 * 4, word).unwrap();
+        }
+        let (program, reads) = decode_program_from_memory_recording(&ctx, at, &|_| None).unwrap();
+        assert!(!program.insns.is_empty(), "decoded something");
+        (at, reads)
+    }
+
+    #[test]
+    fn a_decode_reports_the_pages_it_read_so_a_cache_can_watch_them() {
+        // A backend that translates a shader on every draw does the same work
+        // hundreds of thousands of times for a handful of answers. What stops
+        // it caching them is not knowing when the guest has changed one, and
+        // the pages the walk read are that answer. They are *GPU virtual*
+        // pages: a caller watching them has to translate first.
+        let (at, reads) = decode_recording();
+        assert_eq!(
+            reads.pages,
+            vec![at >> crate::mem::PAGE_BITS],
+            "the one page this program lives on"
+        );
+        // No `brx`, so no jump table was resolved and there is nothing to
+        // re-check before reusing the translation.
+        assert!(reads.consts.is_empty(), "no constant words consumed");
+    }
 
     /// Just the opcodes, for comparing a decode against an expected list.
     fn ops(program: &Program) -> Vec<Op> {

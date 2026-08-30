@@ -176,7 +176,7 @@ const CONSTBUF_BANKS: usize = 32;
 
 /// Which pipeline stage a `SetProgram`/`Bind` entry configures. Numbering
 /// matches `SetProgram[i].Config.StageId`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShaderStage {
     VertexA,
     VertexB,
