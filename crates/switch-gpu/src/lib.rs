@@ -962,6 +962,23 @@ struct Times {
     encode: u128,
     /// Handing surfaces back to guest memory.
     flush: u128,
+    /// The three phases `flush` is made of, which answer different questions
+    /// and have different fixes. They sum to roughly `flush`; the remainder is
+    /// the early-outs, which is worth seeing as a gap rather than hiding in
+    /// one of them.
+    ///
+    /// Encoding the copies out of every held surface and submitting them.
+    /// Device work asked for, and the cost of asking.
+    flush_ask: u128,
+    /// Waiting for the maps. Natively this blocks and is the copy actually
+    /// happening; in a browser `poll` cannot do anything at all, so this being
+    /// ~0 there is correct rather than suspicious — the wait moved to the
+    /// slice boundary, where `Flush::Pending` puts it.
+    flush_wait: u128,
+    /// Reading the mapping and writing it through the page table into guest
+    /// memory. A whole surface a frame, and the phase a device-to-canvas
+    /// present would delete outright.
+    flush_land: u128,
 }
 
 impl Drop for Gpu {
@@ -996,13 +1013,17 @@ impl Drop for Gpu {
             let ms = |v: u128| v as f64 / 1000.0;
             eprintln!(
                 "[gpu] translate {:.0}ms  upload {:.0}ms  modules {:.0}ms  \
-                 pipeline {:.0}ms  encode {:.0}ms  flush {:.0}ms",
+                 pipeline {:.0}ms  encode {:.0}ms  flush {:.0}ms \
+                 (ask {:.0}ms, wait {:.0}ms, land {:.0}ms)",
                 ms(t.translate),
                 ms(t.upload),
                 ms(t.modules),
                 ms(t.pipeline),
                 ms(t.encode),
                 ms(t.flush),
+                ms(t.flush_ask),
+                ms(t.flush_wait),
+                ms(t.flush_land),
             );
         }
     }
@@ -3997,13 +4018,17 @@ impl Renderer for Gpu {
         let times = match self.times {
             Some(t) => format!(
                 ",\"times\":{{\"translate\":{:.1},\"upload\":{:.1},\"modules\":{:.1},\
-                 \"pipeline\":{:.1},\"encode\":{:.1},\"flush\":{:.1}}}",
+                 \"pipeline\":{:.1},\"encode\":{:.1},\"flush\":{:.1},\
+                 \"flushAsk\":{:.1},\"flushWait\":{:.1},\"flushLand\":{:.1}}}",
                 ms(t.translate),
                 ms(t.upload),
                 ms(t.modules),
                 ms(t.pipeline),
                 ms(t.encode),
                 ms(t.flush),
+                ms(t.flush_ask),
+                ms(t.flush_wait),
+                ms(t.flush_land),
             ),
             None => String::new(),
         };
@@ -4098,13 +4123,15 @@ impl Gpu {
         // Only once per frame: asking again while the first ask is in flight
         // would copy the same surface twice and read the second copy.
         if self.pending.is_empty() {
-            for held in std::mem::take(&mut self.evicted) {
-                self.ask_for(held);
-            }
-            let addresses: Vec<u64> = self.held.keys().copied().collect();
-            for addr in addresses {
-                self.flush_one(addr);
-            }
+            timed!(self, flush_ask, {
+                for held in std::mem::take(&mut self.evicted) {
+                    self.ask_for(held);
+                }
+                let addresses: Vec<u64> = self.held.keys().copied().collect();
+                for addr in addresses {
+                    self.flush_one(addr);
+                }
+            });
         }
         // Let the device run its callbacks.
         //
@@ -4136,14 +4163,16 @@ impl Gpu {
         // the way a browser does — the map completes on some later call
         // rather than this one. It is how the browser-only half of this is
         // measured at all.
-        let _ = if self.defer_readbacks {
-            self.device.poll(wgpu::PollType::Poll)
-        } else {
-            self.device.poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: Some(std::time::Duration::from_secs(5)),
-            })
-        };
+        let _ = timed!(self, flush_wait, {
+            if self.defer_readbacks {
+                self.device.poll(wgpu::PollType::Poll)
+            } else {
+                self.device.poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: Some(std::time::Duration::from_secs(5)),
+                })
+            }
+        });
         use std::sync::atomic::Ordering;
         if self
             .pending
@@ -4156,18 +4185,20 @@ impl Gpu {
             self.deferred_readbacks = true;
             return Ok(Flush::Pending);
         }
-        for pending in std::mem::take(&mut self.pending) {
-            if pending.state.load(Ordering::Acquire) == MAP_FAILED {
-                // With the reason, if the device left one: on its own this
-                // message names the symptom and nothing else, and the cause is
-                // in the browser rather than in the frame.
-                return Err(Error::Gpu(match self.device_error() {
-                    Some(e) => format!("the readback was not mapped: {e}"),
-                    None => "the readback was not mapped".into(),
-                }));
+        timed!(self, flush_land, {
+            for pending in std::mem::take(&mut self.pending) {
+                if pending.state.load(Ordering::Acquire) == MAP_FAILED {
+                    // With the reason, if the device left one: on its own this
+                    // message names the symptom and nothing else, and the cause
+                    // is in the browser rather than in the frame.
+                    return Err(Error::Gpu(match self.device_error() {
+                        Some(e) => format!("the readback was not mapped: {e}"),
+                        None => "the readback was not mapped".into(),
+                    }));
+                }
+                self.land(&pending, ctx)?;
             }
-            self.land(&pending, ctx)?;
-        }
+        });
         Ok(Flush::Done)
     }
 }
@@ -4254,7 +4285,10 @@ mod tests {
         let _ = gpu.device.poll(wgpu::PollType::Poll);
 
         let (count, distinct) = gpu.device_errors();
-        assert!(count >= 1, "the device rejected the module and said nothing");
+        assert!(
+            count >= 1,
+            "the device rejected the module and said nothing"
+        );
         assert_eq!(distinct.len(), 1, "one rejection, one distinct message");
         // Not taken: `device_error` is what drains, and the report has to keep
         // saying so for the rest of the run.

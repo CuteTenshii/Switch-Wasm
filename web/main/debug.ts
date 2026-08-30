@@ -115,6 +115,20 @@ $('btn-gpustats').addEventListener('click', async () => {
         `flush ${t.flush}ms`,
       'dim',
     );
+    // Split out, because `flush` being most of the frame says nothing about
+    // what to do next and these three each name a different fix. Per frame as
+    // well as total: the totals grow with the run and only the per-frame cost
+    // can be compared against the frame budget.
+    if (t.flushLand !== undefined) {
+      const frames = Math.max(g.frames ?? 0, 1);
+      const per = (v: number) => (v / frames).toFixed(1);
+      log(
+        `    flush: ask ${t.flushAsk}ms (${per(t.flushAsk ?? 0)}/frame), ` +
+          `wait ${t.flushWait}ms (${per(t.flushWait ?? 0)}/frame), ` +
+          `land ${t.flushLand}ms (${per(t.flushLand)}/frame)`,
+        'dim',
+      );
+    }
   }
 });
 

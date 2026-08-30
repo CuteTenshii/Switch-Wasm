@@ -73,6 +73,14 @@ export interface GpuReport {
     pipeline: number;
     encode: number;
     flush: number;
+    /** The three phases `flush` is made of. `flushAsk` encodes the copies off
+     *  every held surface, `flushWait` waits for the maps — ~0 in a browser,
+     *  where `poll` cannot do anything and the wait moves to the slice
+     *  boundary — and `flushLand` writes the mappings through the page table
+     *  into guest memory. They sum to roughly `flush`. */
+    flushAsk?: number;
+    flushWait?: number;
+    flushLand?: number;
   };
 }
 
