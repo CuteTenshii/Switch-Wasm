@@ -556,19 +556,28 @@ pub fn run_to(cpu: &mut Cpu, budget: u64, mut until: impl FnMut(&Cpu) -> bool) -
 }
 
 /// Write a framebuffer out as a binary PPM, and report how many of its pixels
-/// are not black.
+/// are not black and how many are opaque.
 ///
-/// That count is the cheapest regression test this project has: a frame that
-/// renders correctly lights a stable number of pixels, and a change that
+/// The lit count is the cheapest regression test this project has: a frame
+/// that renders correctly lights a stable number of pixels, and a change that
 /// breaks rendering moves it immediately.
+///
+/// PPM has no alpha, so the opaque count is reported rather than written. A
+/// canvas composites what scan-out hands it, and a frame that is transparent
+/// where it should be opaque looks black in a PPM and looks like the page
+/// behind it in a browser — the count is the only place the two differ.
 pub fn write_ppm(path: impl AsRef<Path>, fb: &Framebuffer) -> usize {
     let path = path.as_ref();
     let mut ppm = format!("P6\n{} {}\n255\n", fb.width, fb.height).into_bytes();
     let mut lit = 0usize;
+    let mut opaque = 0usize;
     for px in &fb.pixels {
         let (r, g, b) = (*px as u8, (*px >> 8) as u8, (*px >> 16) as u8);
         if r != 0 || g != 0 || b != 0 {
             lit += 1;
+        }
+        if (*px >> 24) as u8 == 0xFF {
+            opaque += 1;
         }
         ppm.extend_from_slice(&[r, g, b]);
     }
@@ -577,10 +586,11 @@ pub fn write_ppm(path: impl AsRef<Path>, fb: &Framebuffer) -> usize {
         std::process::exit(1);
     }
     println!(
-        "wrote {}: {}x{}, {lit}/{} non-black",
+        "wrote {}: {}x{}, {lit}/{} non-black, {opaque}/{} opaque",
         path.display(),
         fb.width,
         fb.height,
+        fb.pixels.len(),
         fb.pixels.len()
     );
     lit
