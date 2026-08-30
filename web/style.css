@@ -737,6 +737,22 @@ body.resizing { cursor: col-resize; user-select: none; }
   color: #3f4860;
   font-weight: 600;
 }
+/* How many times in a row an entry has been said, shown only once it is more
+   than once. `attr()` for the same reason the marker above is CSS: the count
+   is not part of what was said, so `Copy all` and the saved log carry it as a
+   trailing `(xN)` rather than finding it in the middle of the text. */
+.console div[data-repeat]::after {
+  content: "\d7" attr(data-repeat);
+  margin-left: 8px;
+  padding: 0 5px;
+  border-radius: 7px;
+  background: #232a3a;
+  color: #8b93a7;
+  font-size: 10px;
+  font-weight: 600;
+  vertical-align: 1px;
+}
+
 /* Reading a long log means following one entry across the panel's width. */
 .console div:hover { background: rgba(255, 255, 255, .035); }
 

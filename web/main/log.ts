@@ -27,23 +27,58 @@ const SHOWN_MAX = 2000;
  *  should not end as a tab the browser kills. */
 const KEPT_MAX = 50_000;
 
+/** One entry: what was said, how loudly, and how many times in a row.
+ *
+ *  A guest polling a service that is not there says the same thing on every
+ *  frame, and a thousand identical rows hide everything else that happened.
+ *  Consecutive repeats collapse into one row carrying a count, which is what a
+ *  browser's own console does with the same problem. */
+interface Entry {
+  text: string;
+  cls?: LogClass;
+  count: number;
+}
+
 /** Every entry, in order, whether or not it is still on the page. */
-const backlog: string[] = [];
+const backlog: Entry[] = [];
+
+/** The row the newest entry is on, so a repeat of it can be counted in place
+ *  rather than appended. */
+let lastRow: HTMLElement | null = null;
 
 export function log(msg: string, cls?: LogClass): void {
   // Real browser console (DevTools): route by severity for filterability.
+  // A repeat goes through here too -- DevTools keeps a count of its own, and
+  // dropping repeats would leave its copy of the log disagreeing with this one
+  // about what happened.
   if (cls === 'err') console.error(TAG, msg);
   else if (cls === 'warn') console.warn(TAG, msg);
   else if (cls === 'ok') console.info(TAG, msg);
   else if (cls === 'dim') console.debug(TAG, msg);
   else console.log(TAG, msg);
 
-  backlog.push(msg);
-  if (backlog.length > KEPT_MAX) backlog.splice(0, backlog.length - KEPT_MAX);
   mirrorDirty = true;
 
+  // `isConnected` rather than a null check: a row the view has evicted is
+  // still referenced here, and counting into a detached element would swallow
+  // the repeat instead of showing it.
+  const last = backlog[backlog.length - 1];
+  if (last && last.text === msg && last.cls === cls && lastRow?.isConnected) {
+    last.count += 1;
+    lastRow.dataset.repeat = String(last.count);
+    if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
+    // Deliberately not `openPanel`: the first of these opened it already, and
+    // re-opening on every repeat takes the panel back from someone who has
+    // moved off it to look at something else.
+    return;
+  }
+
+  backlog.push({ text: msg, cls, count: 1 });
+  if (backlog.length > KEPT_MAX) backlog.splice(0, backlog.length - KEPT_MAX);
+
   // On-page console mirror.
-  consoleEl.appendChild(el('div', cls, msg));
+  lastRow = el('div', cls, msg);
+  consoleEl.appendChild(lastRow);
   while (consoleEl.childElementCount > SHOWN_MAX) consoleEl.firstElementChild!.remove();
   if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
   // Anything that went wrong is worth surfacing even with the panel closed.
@@ -63,6 +98,7 @@ export function logBlock(text: string, cls?: LogClass): void {
 export function clearConsole(): void {
   consoleEl.textContent = '';
   backlog.length = 0;
+  lastRow = null;
 }
 
 $('btn-clear-console').addEventListener('click', clearConsole);
@@ -70,7 +106,14 @@ $('btn-clear-console').addEventListener('click', clearConsole);
 /** The whole log as text, one line per entry -- including the entries the
  *  view has since dropped. */
 export function consoleText(): string {
-  return backlog.join('\n');
+  return backlog.map(asLine).join('\n');
+}
+
+/** One entry as a line, carrying its count. A log that collapsed a thousand
+ *  identical lines has to say so: without this a copy of it reads as though
+ *  the thing happened once. */
+function asLine(entry: Entry): string {
+  return entry.count > 1 ? `${entry.text}  (x${entry.count})` : entry.text;
 }
 
 const copyBtn = $('btn-copy-console');
@@ -177,7 +220,7 @@ setInterval(() => {
 
 async function mirrorLog(): Promise<void> {
   try {
-    const tail = backlog.slice(-MIRRORED_MAX).join('\n');
+    const tail = backlog.slice(-MIRRORED_MAX).map(asLine).join('\n');
     await idbApply(await logIdb(), LOG_STORE, [[LOG_KEY, tail]]);
   } catch {
     // Private browsing, a refused quota, an evicted origin. The log is still
