@@ -20,6 +20,21 @@
 //! 0x30  build id [0x20]
 //! 0x50  (version 2 only) "NRO2" header
 //! ```
+//!
+//! `elf2nro` appends an asset section after the image, at the file offset the
+//! header's total size points at. It is where homebrew keeps the icon and
+//! name a home menu shows for it, and the RomFS `romfsMountSelf` mounts:
+//!
+//! ```text
+//! 0x00  magic "ASET"
+//! 0x04  version (0)
+//! 0x08  icon:  u64 offset, u64 size
+//! 0x18  nacp:  u64 offset, u64 size
+//! 0x28  romfs: u64 offset, u64 size
+//! ```
+//!
+//! Those offsets are relative to the asset header, and each part is optional:
+//! a build made without `--icon` leaves that pair zeroed.
 
 use crate::mem::Memory;
 use crate::nsp::read_u32;
@@ -27,6 +42,7 @@ use crate::{Error, Result};
 
 pub const NRO0_MAGIC: u32 = 0x304f524e; // "NRO0"
 pub const NRO2_MAGIC: u32 = 0x32524f4e; // "NRO2"
+pub const ASET_MAGIC: u32 = 0x54455341; // "ASET"
 /// Base address where the NRO image is mapped.
 ///
 /// Real homebrew (devkitA64/libnx) is linked against `0x08000000`, the load
@@ -35,6 +51,10 @@ pub const NRO2_MAGIC: u32 = 0x32524f4e; // "NRO2"
 /// pointers dangle.
 pub const NRO_BASE: u32 = 0x0800_0000;
 const HEADER_MIN: usize = 0x50;
+/// The asset header: magic, version, and an (offset, size) pair per part.
+const ASSET_HEADER_SIZE: usize = 0x38;
+/// The only asset header version `elf2nro` has ever written.
+const ASSET_VERSION: u32 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NroHeader {
@@ -66,6 +86,24 @@ pub struct LoadedNro {
     /// Address of the synthesized homebrew environment block to pass as the
     /// crt0's `x0` (0 for NROs whose crt0 doesn't parse one).
     pub env_addr: u32,
+}
+
+/// The three blobs an NRO carries after its image. Each is empty when the
+/// build was made without it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Assets<'a> {
+    /// The icon a home menu shows, a 256x256 JPEG in every build seen so far.
+    pub icon: &'a [u8],
+    /// A `control.nacp`, the same fixed-layout blob a Control NCA holds.
+    pub nacp: &'a [u8],
+    /// The RomFS image `romfsMountSelf` mounts. Already reachable through the
+    /// NRO on the emulated SD card, so nothing reads this yet.
+    pub romfs: &'a [u8],
+}
+
+/// The asset section appended to an NRO, or `None` when the build has none.
+pub fn assets(data: &[u8]) -> Option<Assets<'_>> {
+    NroHeader::parse(data).ok()?.assets(data)
 }
 
 /// Where [`setup_env_block`] maps the environment block. Kept out of the
@@ -232,6 +270,33 @@ impl NroHeader {
             }
         }
         true
+    }
+
+    /// The asset section, which starts where the image ends. `nro_size` is
+    /// measured from the file start, not from the magic, so a build with a
+    /// boot stub in front of its header still lands on it.
+    ///
+    /// A part whose (offset, size) runs past the file is dropped rather than
+    /// taken as far as the file goes: half an icon is not an icon.
+    pub fn assets<'a>(&self, data: &'a [u8]) -> Option<Assets<'a>> {
+        let base = self.nro_size as usize;
+        if data.len() < base + ASSET_HEADER_SIZE
+            || read_u32(data, base) != ASET_MAGIC
+            || read_u32(data, base + 4) > ASSET_VERSION
+        {
+            return None;
+        }
+        let part = |index: usize| -> &'a [u8] {
+            let entry = base + 8 + index * 16;
+            let start = base.wrapping_add(read_u64(data, entry) as usize);
+            let end = start.wrapping_add(read_u64(data, entry + 8) as usize);
+            data.get(start..end).unwrap_or_default()
+        };
+        Some(Assets {
+            icon: part(0),
+            nacp: part(1),
+            romfs: part(2),
+        })
     }
 
     pub fn build_id(&self, data: &[u8]) -> [u8; 0x20] {
@@ -796,6 +861,67 @@ mod tests {
 
     fn align4(n: usize) -> usize {
         (n + 3) & !3
+    }
+
+    /// Append an asset section the way `elf2nro` does: the header first, then
+    /// the parts it points at, back to back after it.
+    fn append_assets(nro: &mut Vec<u8>, icon: &[u8], nacp: &[u8], romfs: &[u8]) {
+        let base = nro.len();
+        nro.extend_from_slice(&ASET_MAGIC.to_le_bytes());
+        nro.extend_from_slice(&ASSET_VERSION.to_le_bytes());
+        let mut offset = ASSET_HEADER_SIZE as u64;
+        for part in [icon, nacp, romfs] {
+            nro.extend_from_slice(&offset.to_le_bytes());
+            nro.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            offset += part.len() as u64;
+        }
+        assert_eq!(nro.len() - base, ASSET_HEADER_SIZE);
+        for part in [icon, nacp, romfs] {
+            nro.extend_from_slice(part);
+        }
+    }
+
+    #[test]
+    fn reads_the_appended_asset_section() {
+        let mut nro = build_nro(&[0u8; 4], &[]);
+        append_assets(&mut nro, b"\xFF\xD8\xFFicon", b"nacp", b"romfs");
+        let assets = assets(&nro).unwrap();
+        assert_eq!(assets.icon, b"\xFF\xD8\xFFicon");
+        assert_eq!(assets.nacp, b"nacp");
+        assert_eq!(assets.romfs, b"romfs");
+    }
+
+    #[test]
+    fn an_nro_built_without_assets_has_none() {
+        assert_eq!(assets(&build_nro(&[0u8; 4], &[])), None);
+    }
+
+    #[test]
+    fn an_asset_part_the_build_omitted_is_empty() {
+        // `elf2nro --icon` with no `--nacp` is a normal way to build, and the
+        // icon still has to come out of it.
+        let mut nro = build_nro(&[0u8; 4], &[]);
+        append_assets(&mut nro, b"icon", b"", b"");
+        let assets = assets(&nro).unwrap();
+        assert_eq!(assets.icon, b"icon");
+        assert!(assets.nacp.is_empty());
+        assert!(assets.romfs.is_empty());
+    }
+
+    #[test]
+    fn an_asset_part_running_past_the_file_is_dropped() {
+        let mut nro = build_nro(&[0u8; 4], &[]);
+        let base = nro.len();
+        append_assets(&mut nro, b"icon", b"nacp", b"");
+        // Claim a RomFS the file does not hold: the parts that are there stay
+        // readable, rather than the whole section being thrown away.
+        let romfs = base + 0x28;
+        nro[romfs..romfs + 8].copy_from_slice(&(ASSET_HEADER_SIZE as u64).to_le_bytes());
+        nro[romfs + 8..romfs + 16].copy_from_slice(&u64::MAX.to_le_bytes());
+        let assets = assets(&nro).unwrap();
+        assert_eq!(assets.icon, b"icon");
+        assert_eq!(assets.nacp, b"nacp");
+        assert!(assets.romfs.is_empty());
     }
 
     #[test]

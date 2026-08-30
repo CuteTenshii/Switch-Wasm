@@ -40,17 +40,20 @@ export function beginLoad(title: string, phase: string, iconUrl?: string | null)
   awaitingFrame = false;
   rootEl.classList.remove('hidden', 'is-error');
   setBar(null);
-  titleEl.textContent = title;
   phaseEl.textContent = phase;
   detailEl.textContent = '';
   dismissEl.hidden = true;
-  if (iconUrl) {
-    iconEl.src = iconUrl;
-    iconEl.hidden = false;
-  } else {
-    iconEl.hidden = true;
-    iconEl.removeAttribute('src');
-  }
+  loadIdentity(title, iconUrl ?? null);
+}
+
+/** Say what is loading, for a load that only learns it once the file has been
+ *  read: homebrew carries its own name and icon inside the NRO, and the screen
+ *  stands over the whole of its boot. */
+export function loadIdentity(title: string, iconUrl: string | null): void {
+  titleEl.textContent = title;
+  iconEl.hidden = !iconUrl;
+  if (iconUrl) iconEl.src = iconUrl;
+  else iconEl.removeAttribute('src');
 }
 
 /** Move to the next step of the current load. */

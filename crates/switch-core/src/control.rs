@@ -5,6 +5,10 @@
 //! holds `control.nacp` — a fixed-layout 0x4000-byte metadata blob — and one
 //! `icon_<language>.dat` JPEG per language the title was localized for.
 //!
+//! Homebrew has the same data in a different place: an NRO carries one icon
+//! and the same `control.nacp` in the asset section appended after its image
+//! (see [`crate::nro`]), which [`Control::from_nro`] reads.
+//!
 //! The NACP begins with 16 title entries, one per language slot (see
 //! [`LANGUAGES`]), each 0x300 bytes: a 0x200-byte name followed by a
 //! 0x100-byte publisher, both NUL-padded UTF-8. A title is not localized into
@@ -369,6 +373,38 @@ impl Nacp {
         })
     }
 
+    /// What a program that ships no NACP at all declares — homebrew built
+    /// without one. Every figure is 0, which is what the fields a title never
+    /// sets already read as.
+    pub fn empty() -> Nacp {
+        Nacp {
+            titles: Vec::new(),
+            display_version: String::new(),
+            isbn: String::new(),
+            is_demo: false,
+            startup_user_account: StartupUserAccount::None,
+            screenshot: CaptureSupport::Screenshot(0),
+            video_capture: CaptureSupport::Video(0),
+            ratings: Vec::new(),
+            add_on_content_base_id: 0,
+            save_data_owner_id: 0,
+            user_account_save_data_size: 0,
+            user_account_save_data_journal_size: 0,
+            device_save_data_size: 0,
+            device_save_data_journal_size: 0,
+            bcat_delivery_cache_storage_size: 0,
+            user_account_save_data_size_max: 0,
+            user_account_save_data_journal_size_max: 0,
+            device_save_data_size_max: 0,
+            device_save_data_journal_size_max: 0,
+            cache_storage_size: 0,
+            cache_storage_journal_size: 0,
+            cache_storage_data_and_journal_size_max: 0,
+            cache_storage_index_max: 0,
+            application_error_code_category: String::new(),
+        }
+    }
+
     /// The entry to show: American English when the title has it, otherwise
     /// whichever language slot comes first.
     pub fn preferred(&self) -> Option<&Title> {
@@ -464,6 +500,32 @@ impl Control {
     /// Read the control data out of a Control NCA already in memory.
     pub fn from_nca(raw: &[u8], keys: &KeySet) -> Result<Control, Error> {
         Control::from_source(SliceSource(raw), keys)
+    }
+
+    /// Read the control data a homebrew NRO carries in the asset section
+    /// appended after its image — the same `control.nacp` a Control NCA
+    /// holds, and a single icon rather than one per language.
+    ///
+    /// `None` when the NRO has no asset section, or one with neither an icon
+    /// nor a NACP in it. Homebrew has no title id, so [`Control::title_id`]
+    /// is 0 and no language slot is named unless the NACP names one.
+    pub fn from_nro(data: &[u8]) -> Option<Control> {
+        let assets = crate::nro::assets(data)?;
+        if assets.icon.is_empty() && assets.nacp.is_empty() {
+            return None;
+        }
+        // A NACP that doesn't parse still leaves a usable icon, and homebrew
+        // ships without one often enough for that to matter.
+        let nacp = Nacp::parse(assets.nacp).unwrap_or_else(|_| Nacp::empty());
+        let title = nacp.preferred();
+        Some(Control {
+            title_id: 0,
+            language: title.map_or("", |t| t.language),
+            name: title.map_or(String::new(), |t| t.name.clone()),
+            publisher: title.map_or(String::new(), |t| t.publisher.clone()),
+            icon: assets.icon.to_vec(),
+            nacp,
+        })
     }
 
     /// The icon's media type, sniffed from its magic. Empty when there is no
@@ -795,6 +857,59 @@ mod tests {
         assert_eq!(quota.device_journal_size_max, 0x50_0000);
         assert_eq!(quota.cache_storage_size_max, 0x400_0000);
         assert_eq!(quota.cache_storage_index_max, 3);
+    }
+
+    /// A minimal NRO — a bare header, no segments — with an asset section
+    /// appended the way `elf2nro` appends one.
+    fn nro_with_assets(icon: &[u8], nacp: &[u8]) -> Vec<u8> {
+        const HEADER_SIZE: u32 = 0x50;
+        let mut out = vec![0u8; HEADER_SIZE as usize];
+        out[0..4].copy_from_slice(&crate::nro::NRO0_MAGIC.to_le_bytes());
+        out[4..8].copy_from_slice(&1u32.to_le_bytes());
+        out[8..12].copy_from_slice(&HEADER_SIZE.to_le_bytes());
+        out.extend_from_slice(&crate::nro::ASET_MAGIC.to_le_bytes());
+        out.extend_from_slice(&0u32.to_le_bytes());
+        let mut offset = 0x38u64;
+        for part in [icon, nacp, &[][..]] {
+            out.extend_from_slice(&offset.to_le_bytes());
+            out.extend_from_slice(&(part.len() as u64).to_le_bytes());
+            offset += part.len() as u64;
+        }
+        out.extend_from_slice(icon);
+        out.extend_from_slice(nacp);
+        out
+    }
+
+    #[test]
+    fn reads_a_homebrew_nros_own_name_and_icon() {
+        let nacp = NacpBuilder::new()
+            .title(0, "NX-Shell", "DefenderOfHyrule")
+            .text(DISPLAY_VERSION_OFFSET, "4.0.2")
+            .unrated()
+            .build();
+        let control = Control::from_nro(&nro_with_assets(b"\xFF\xD8\xFF\xE0jpeg", &nacp)).unwrap();
+        assert_eq!(control.name, "NX-Shell");
+        assert_eq!(control.publisher, "DefenderOfHyrule");
+        assert_eq!(control.language, "AmericanEnglish");
+        assert_eq!(control.nacp.display_version, "4.0.2");
+        assert_eq!(control.icon, b"\xFF\xD8\xFF\xE0jpeg");
+        assert_eq!(control.icon_mime(), "image/jpeg");
+        // Homebrew is not a title: it has no id to report.
+        assert_eq!(control.title_id, 0);
+    }
+
+    #[test]
+    fn an_nro_with_an_icon_and_no_nacp_keeps_the_icon() {
+        let control = Control::from_nro(&nro_with_assets(b"\x89PNGicon", b"")).unwrap();
+        assert_eq!(control.icon_mime(), "image/png");
+        assert!(control.name.is_empty());
+        assert!(control.nacp.titles.is_empty());
+    }
+
+    #[test]
+    fn an_nro_with_nothing_appended_has_no_control() {
+        assert_eq!(Control::from_nro(&nro_with_assets(b"", b"")), None);
+        assert_eq!(Control::from_nro(&vec![0u8; 0x50]), None);
     }
 
     #[test]

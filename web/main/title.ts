@@ -57,3 +57,10 @@ export function setRunning(title: RunningTitle | null): void {
   else iconEl.removeAttribute('src');
   document.title = title ? title.name + ' - ' + SHORT_TITLE : PAGE_TITLE;
 }
+
+/** The running title's icon, for a screen that wants to show the same one.
+ *  The URL belongs to this module, which revokes it when the next title
+ *  replaces it - so read it again rather than keeping it. */
+export function runningIconUrl(): string | null {
+  return iconUrl;
+}

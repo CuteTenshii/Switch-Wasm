@@ -6,17 +6,19 @@
    `container.ts`'s job. Which of those a file is comes from its header, not
    its name - see `filetype.ts`. */
 
+import type { ControlInfo } from '../shared/protocol';
 import { bootContainer } from './container';
 import { $, pickedFile } from './dom';
 import { classify } from './filetype';
 import { fmtSize } from './format';
-import { awaitFirstFrame, beginLoad, failLoad, loadPhase } from './loading';
+import { awaitFirstFrame, beginLoad, failLoad, loadIdentity, loadPhase } from './loading';
 import { clearConsole, log } from './log';
 import { call, readLastError } from './rpc';
 import { run, updatePc } from './runloop';
 import { noteBooted, recycleSession } from './session';
 import { dropveilEl, setState, showScreen, stageEl } from './shell';
-import { setRunning } from './title';
+import { runningIconUrl, setRunning } from './title';
+import type { RunningTitle } from './title';
 
 export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<boolean> {
   clearConsole();
@@ -44,7 +46,11 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
     return false;
   }
   log('Loaded ' + file.name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
-  setRunning({ name: file.name, icon: null, version: '' });
+  const title = await homebrewTitle(file.name);
+  setRunning(title);
+  // The loading screen was opened on the file name, before there was anything
+  // else to call this; it stays up until the first frame, so it gets the rest.
+  loadIdentity(title.name, runningIconUrl());
   noteBooted();
   setState('loaded');
   // Uncover the emulated screen now, but keep the loading screen over it:
@@ -56,6 +62,29 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
   awaitFirstFrame();
   await updatePc();
   return true;
+}
+
+/* What an NRO says it is, out of the asset section appended after its image:
+   the icon and name a home menu would show for it, which beat the file name
+   the page has been calling it until now. An ELF has none of that, and
+   neither does homebrew built without an icon - both keep the file name. */
+async function homebrewTitle(filename: string): Promise<RunningTitle> {
+  let info: ControlInfo;
+  try {
+    info = JSON.parse(await call('control_json'));
+  } catch (err) {
+    log('No homebrew details: ' + (err as Error).message, 'dim');
+    return { name: filename, icon: null, version: '' };
+  }
+  const icon = info.icon_size > 0 ? await call('control_icon', info.icon_size) : null;
+  if (info.name) {
+    log('Homebrew: ' + info.name + (info.publisher ? ' - ' + info.publisher : ''), 'ok');
+  }
+  return {
+    name: info.name || filename,
+    icon: icon && icon.length ? new Blob([icon], { type: info.icon_mime }) : null,
+    version: info.version || '',
+  };
 }
 
 async function bootFile(file: File): Promise<void> {

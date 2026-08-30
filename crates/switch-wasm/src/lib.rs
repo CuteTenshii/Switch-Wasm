@@ -1164,8 +1164,15 @@ pub extern "C" fn switch_load_keys(
 pub extern "C" fn switch_load_nro(handle: u32, ptr: *const u8, len: u32) -> i64 {
     let s = session(handle);
     let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    s.control = None;
     match s.cpu.boot_homebrew(data) {
         Ok(loaded) => {
+            // The NRO's own icon and name, for `switch_control_json` and
+            // `switch_control_icon` to answer with. Cached for display only,
+            // not through `cache_control`: HBL runs homebrew inside another
+            // title's process, so its NACP never governs the save data — and
+            // the figures in one are `nacptool`'s boilerplate anyway.
+            s.control = switch_core::control::Control::from_nro(data);
             s.cpu.out.clear();
             s.cpu.trace.clear();
             s.cpu.halted = false;
@@ -1520,6 +1527,9 @@ pub extern "C" fn switch_load_nca_from_nsp(handle: u32, index: u32) -> i64 {
 pub extern "C" fn switch_load_elf(handle: u32, ptr: *const u8, len: u32) -> i64 {
     let s = session(handle);
     let data = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    // An ELF carries no control data, and what is left of the last title's
+    // would be reported as this one's.
+    s.control = None;
     match load_elf(&mut s.cpu.mem, data) {
         Ok(elf) => {
             s.cpu.set_pc(elf.entry as u32);
