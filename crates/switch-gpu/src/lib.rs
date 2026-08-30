@@ -1293,7 +1293,7 @@ impl Gpu {
         if let Some(kind) = target.depth_kind() {
             return self.upload_depth_target(target, kind, ctx);
         }
-        let format = render_target_format(&self.device, target.format)?;
+        let format = device_attachment_format(&self.device, target.format)?;
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("render target"),
             size: wgpu::Extent3d {
@@ -1649,7 +1649,8 @@ impl Gpu {
     fn render(&mut self, p: &Prepared, ctx: &mut ExecCtx) -> std::result::Result<(), String> {
         let target_format = match p.color {
             Some(color) => Some(
-                render_target_format(&self.device, color.format).map_err(|e| format!("{e:?}"))?,
+                device_attachment_format(&self.device, color.format)
+                    .map_err(|e| format!("{e:?}"))?,
             ),
             None => None,
         };
@@ -2611,7 +2612,7 @@ impl Gpu {
         let formats = [
             match color {
                 Some(color) => Some(
-                    render_target_format(&self.device, color.format)
+                    device_attachment_format(&self.device, color.format)
                         .map_err(|e| format!("{e:?}"))?,
                 ),
                 None => None,
@@ -2995,7 +2996,7 @@ impl Gpu {
         let key = ClearKey {
             color: match color {
                 Some((target, _, _)) => Some(
-                    render_target_format(&self.device, target.format)
+                    device_attachment_format(&self.device, target.format)
                         .map_err(|e| format!("{e:?}"))?,
                 ),
                 None => None,
@@ -3200,7 +3201,7 @@ impl Gpu {
                     | wgpu::TextureUsages::TEXTURE_BINDING,
             ),
             None => (
-                render_target_format(&self.device, target.format)?,
+                device_attachment_format(&self.device, target.format)?,
                 wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::COPY_SRC
                     | wgpu::TextureUsages::COPY_DST
@@ -3429,7 +3430,7 @@ fn device_texture_format(device: &wgpu::Device, format: Format) -> Result<wgpu::
 /// format has given a device's features, not as a required feature. Asking
 /// the usage question directly covers every format that is sampled more
 /// widely than it is drawn into, rather than this one by name.
-fn render_target_format(device: &wgpu::Device, format: Format) -> Result<wgpu::TextureFormat> {
+fn device_attachment_format(device: &wgpu::Device, format: Format) -> Result<wgpu::TextureFormat> {
     let wanted = device_texture_format(device, format)?;
     let usages = wanted
         .guaranteed_format_features(device.features())
