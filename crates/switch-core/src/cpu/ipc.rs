@@ -353,7 +353,6 @@ impl Cpu {
         )
     }
 
-    /// Every buffer a request carries, as `(input, output)` lists — the list
     /// Address of the `index`-th output buffer, for the callers that write
     /// into one and never ask how big it is. Every command reached this way
     /// has an `...Auto` variant, and reading only the map-alias descriptor
@@ -363,6 +362,7 @@ impl Cpu {
             .map(|(address, _)| address)
     }
 
+    /// Every buffer a request carries, as `(input, output)` lists — the list
     /// form of [`Cpu::ipc_input_buffer`] and [`Cpu::ipc_output_buffer`], for
     /// the services that want all of them rather than one by index.
     pub(super) fn ipc_buffers(&self, tls: u32) -> (Buffers, Buffers) {
