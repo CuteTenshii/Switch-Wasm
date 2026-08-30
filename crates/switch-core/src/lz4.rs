@@ -62,11 +62,9 @@ pub fn decompress_block(input: &[u8], decompressed_size: usize) -> Result<Vec<u8
         }
         match_len += 4; // minmatch
 
-        let mut src = out.len() - offset;
-        for _ in 0..match_len {
+        for src in (out.len() - offset..).take(match_len) {
             let b = out[src];
             out.push(b);
-            src += 1;
         }
     }
 
@@ -132,7 +130,7 @@ mod tests {
         input.push(5); // extra for match length (< 0xff, stops immediately)
         let out = decompress_block(&input, 25).unwrap();
         let mut expected = vec![b'a'];
-        expected.extend(std::iter::repeat(b'a').take(24));
+        expected.extend(std::iter::repeat_n(b'a', 24));
         assert_eq!(out, expected);
     }
 

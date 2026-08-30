@@ -1344,7 +1344,7 @@ impl Invocation {
                 let raw_b = self.operand(b, env)?;
                 let av = half(self.reg(a), ah, asigned);
                 let bv = half(raw_b, bh, bsigned);
-                let mut product = (av.wrapping_mul(bv)) as u32;
+                let mut product = av.wrapping_mul(bv);
                 if psl {
                     product <<= 16;
                 }
@@ -1533,8 +1533,8 @@ impl Invocation {
             }
             Op::Bfe { dst, a, b, signed } => {
                 let desc = self.operand(b, env)?;
-                let start = (desc & 0xff) as u32;
-                let width = ((desc >> 8) & 0xff) as u32;
+                let start = desc & 0xff;
+                let width = (desc >> 8) & 0xff;
                 self.set_reg(dst, bitfield_extract(self.reg(a), start, width, signed));
             }
             Op::Popc { dst, b, inv } => {
@@ -2838,6 +2838,7 @@ mod tests {
     use crate::gpu::shader::compiled::Compiled;
     use crate::gpu::shader::decode_program;
     use crate::gpu::shader::isa::{FMod, FmulScale, Instruction, TexDim};
+    use crate::gpu::testing::{block, solid_fragment_shader};
 
     fn no_consts() -> HashMap<(u8, u16), f32> {
         HashMap::new()
@@ -3775,37 +3776,7 @@ mod tests {
         let w = 2.0f32;
         let color = [0.25f32, 0.5, 0.75, 1.0];
 
-        fn word(low: u32, high: u32) -> [u8; 8] {
-            (((high as u64) << 32) | low as u64).to_le_bytes()
-        }
-        fn block(sched: (u32, u32), a: (u32, u32), b: (u32, u32), c: (u32, u32)) -> Vec<u8> {
-            let mut out = Vec::with_capacity(32);
-            out.extend_from_slice(&word(sched.0, sched.1));
-            out.extend_from_slice(&word(a.0, a.1));
-            out.extend_from_slice(&word(b.0, b.1));
-            out.extend_from_slice(&word(c.0, c.1));
-            out
-        }
-        let mut bytes = block(
-            (0xe1a0070f, 0x00240401),
-            (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
-            (0x00470003, 0x50800000), // mufu rcp $r3 $r0
-            (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
-        );
-        bytes.extend(block(
-            (0xb0400341, 0x055c8400),
-            (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
-            (0x8037ff02, 0xe043ff88), // ipa $r2 a[0x88] $r3 0x0 0x1
-            (0xc037ff03, 0xe043ff88), // ipa $r3 a[0x8c] $r3 0x0 0x1
-        ));
-        bytes.extend(block(
-            (0xffe1ffef, 0x001f8000),
-            (0x0007000f, 0xe3000000), // exit
-            (0xff87000f, 0xe2400fff),
-            (0x00070f00, 0x50b00000),
-        ));
-
-        let program = Compiled::new(&decode_program(&bytes).unwrap());
+        let program = Compiled::new(&decode_program(&solid_fragment_shader()).unwrap());
 
         let mut inv = Invocation::new();
         inv.attr_in.set(0x7c, 1.0 / w);
@@ -3831,17 +3802,6 @@ mod tests {
         // through the real decoder with a hand-picked matrix standing in for
         // a real bound constant buffer (real GPU-memory wiring is
         // `MemoryConstants`, exercised separately below).
-        fn word(low: u32, high: u32) -> [u8; 8] {
-            (((high as u64) << 32) | low as u64).to_le_bytes()
-        }
-        fn block(sched: (u32, u32), a: (u32, u32), b: (u32, u32), c: (u32, u32)) -> Vec<u8> {
-            let mut out = Vec::with_capacity(32);
-            out.extend_from_slice(&word(sched.0, sched.1));
-            out.extend_from_slice(&word(a.0, a.1));
-            out.extend_from_slice(&word(b.0, b.1));
-            out.extend_from_slice(&word(c.0, c.1));
-            out
-        }
         let mut bytes = block(
             (0xfc20070f, 0x081f8441),
             (0x0807ff00, 0xefd9ff80), // ld b128 $r0 a[0x80] 0x0
@@ -3895,9 +3855,9 @@ mod tests {
             [0.0, 0.0, 0.0, 1.0],
         ];
         let mut consts: HashMap<(u8, u16), f32> = HashMap::new();
-        for col in 0..4 {
-            for row in 0..4 {
-                consts.insert((2, (col * 16 + row * 4) as u16), m[row][col]);
+        for (row, values) in m.iter().enumerate() {
+            for (col, value) in values.iter().enumerate() {
+                consts.insert((2, (col * 16 + row * 4) as u16), *value);
             }
         }
 
@@ -3996,17 +3956,6 @@ mod tests {
         // exactly the sampled texture colour, letting a wrong register
         // mapping surface immediately as a wrong result instead of a
         // plausible-looking wash of white.
-        fn word(low: u32, high: u32) -> [u8; 8] {
-            (((high as u64) << 32) | low as u64).to_le_bytes()
-        }
-        fn block(sched: (u32, u32), a: (u32, u32), b: (u32, u32), c: (u32, u32)) -> Vec<u8> {
-            let mut out = Vec::with_capacity(32);
-            out.extend_from_slice(&word(sched.0, sched.1));
-            out.extend_from_slice(&word(a.0, a.1));
-            out.extend_from_slice(&word(b.0, b.1));
-            out.extend_from_slice(&word(c.0, c.1));
-            out
-        }
         let mut bytes = block(
             (0xe1a0070f, 0x003c0401),
             (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1

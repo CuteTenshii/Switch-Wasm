@@ -803,7 +803,7 @@ impl Cpu {
                 self.write_zr(1, handle);
                 Ok(())
             }
-            0x20 | 0x21 | 0x22 | 0x23 => {
+            0x20..=0x23 => {
                 // SendSyncRequest[Light|WithUserBuffer] / async variant.
                 // If we recognize the target handle as a named service, dispatch
                 // to a small stub implementation. Otherwise fall back to the
@@ -904,7 +904,6 @@ impl Cpu {
                     return Ok(());
                 }
                 if let Some(name) = svc_name {
-                    let name = name;
                     match name.as_str() {
                         "sm:" | "sm" => self.sm_request(tls, cmd_id, handle)?,
                         "fsp-srv" | "fsp-srv:" => {
@@ -1490,7 +1489,7 @@ impl Cpu {
                 }
                 msg.push('\n');
                 for addr in self.backtrace(16) {
-                    let _ = write!(msg, "  {addr:#010x}\n");
+                    let _ = writeln!(msg, "  {addr:#010x}");
                 }
                 self.out.extend_from_slice(msg.as_bytes());
                 self.halted = true;

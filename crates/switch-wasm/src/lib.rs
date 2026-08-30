@@ -14,6 +14,14 @@
 //! * A memory-mapped framebuffer (like the Switch GPU's) is rendered by the
 //!   host: homebrew writes pixels to [`FB_BASE`], JS snapshots it each frame.
 
+// Every exported function here is `extern "C"` and takes pointers the caller
+// owns: JS allocates in wasm linear memory, passes the offset and the length,
+// and outlives the call. Marking them `unsafe fn` would say something true of
+// a Rust caller and nothing about this one — there is no Rust caller — while
+// changing the ABI's shape for no reader's benefit. The invariant is the
+// module's, and it is stated here.
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use std::alloc::{alloc, dealloc, Layout};
 use std::sync::atomic::{AtomicU32, Ordering};
 

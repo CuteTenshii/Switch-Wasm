@@ -667,6 +667,10 @@ impl Cpu {
 #[cfg(test)]
 mod tests {
     use crate::cpu::ipc::testing::*;
+
+    /// One JPEG Huffman table: its class-and-id byte, and the
+    /// `(symbol, code, length)` triples it defines.
+    type HuffmanTable = (u8, Vec<(u8, u16, u8)>);
     use crate::cpu::Cpu;
 
     /// Drive one acc command on a session opened under `service`.
@@ -927,7 +931,7 @@ mod tests {
 
         // Walk the marker segments, keeping what the scan needs.
         let mut quant = [0u8; 64];
-        let mut tables: Vec<(u8, Vec<(u8, u16, u8)>)> = Vec::new();
+        let mut tables: Vec<HuffmanTable> = Vec::new();
         let (mut width, mut height) = (0u32, 0u32);
         let mut components = 0usize;
         let mut scan_start = 0usize;
@@ -1046,7 +1050,7 @@ mod tests {
         let blocks = width.div_ceil(8) * height.div_ceil(8);
         let mut predictor = [0i32; 3];
         for mcu in 0..blocks {
-            for component in 0..3usize {
+            for (component, pred) in predictor.iter_mut().enumerate() {
                 let category = reader.symbol(dc_table);
                 let mut diff = 0i32;
                 if category > 0 {
@@ -1062,7 +1066,7 @@ mod tests {
                         value - (1 << category) + 1
                     };
                 }
-                predictor[component] += diff;
+                *pred += diff;
                 assert_eq!(
                     reader.symbol(ac_table),
                     super::JPEG_EOB,
@@ -1071,7 +1075,7 @@ mod tests {
 
                 // Dequantize and undo the level shift: the inverse DCT of a
                 // lone DC coefficient is that coefficient over 8, everywhere.
-                let value = predictor[component] * i32::from(quant[0]) / 8 + 128;
+                let value = *pred * i32::from(quant[0]) / 8 + 128;
                 let (red, green, blue) = super::PROFILE_IMAGE_COLOR;
                 let (red, green, blue) = (f32::from(red), f32::from(green), f32::from(blue));
                 let expected = match component {

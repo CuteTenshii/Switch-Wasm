@@ -1174,6 +1174,10 @@ fn a_timed_out_condvar_wait_comes_back_holding_its_mutex() {
 }
 
 #[test]
+// Every assertion here relates one constant to another, which is the point:
+// the reason each bound exists is in the comment beside it, and a reader
+// looking for the memory map finds the whole of it in one place.
+#[allow(clippy::assertions_on_constants)]
 fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     // Every region below is carved out of one 4 GiB space, and the guest is
     // told where each one is and how big. Two that overlap are two subsystems
@@ -1203,8 +1207,8 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
         ("the child threads' TLS", THREAD_TLS_BASE),
     ] {
         assert!(
-            addr < GUEST_STACK_REGION_ADDR
-                || addr >= GUEST_STACK_REGION_ADDR + GUEST_STACK_REGION_SIZE,
+            !(GUEST_STACK_REGION_ADDR..GUEST_STACK_REGION_ADDR + GUEST_STACK_REGION_SIZE)
+                .contains(&addr),
             "{what} ({addr:#x}) is inside the stack region the guest is told is free"
         );
     }

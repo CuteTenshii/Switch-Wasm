@@ -645,11 +645,7 @@ pub(crate) fn ctz(v: u64, size: u32) -> u64 {
 /// Absolute difference of two `bits`-wide lanes (SABD/UABD).
 pub(crate) fn simd_abs_diff(a: u64, b: u64, bits: u32, unsigned: bool) -> u64 {
     if unsigned {
-        if a >= b {
-            a - b
-        } else {
-            b - a
-        }
+        a.abs_diff(b)
     } else {
         let sa = sext_u64(a, bits) as i64;
         let sb = sext_u64(b, bits) as i64;

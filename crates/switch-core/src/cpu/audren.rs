@@ -1197,6 +1197,7 @@ fn render_frame(mem: &Memory, renderer: &mut AudioRenderer, out: &mut Vec<i16>) 
                 if to >= buffers.len() || to == from {
                     continue;
                 }
+                #[allow(clippy::needless_range_loop)] // two rows, one slice
                 for sample in 0..frames {
                     buffers[to][sample] += buffers[from][sample] * gain;
                 }
@@ -1523,7 +1524,11 @@ fn decode_adpcm(mem: &Memory, voice: &mut Voice, wavebuf: WaveBuf, index: u32) -
     let byte = mem
         .read_u8(frame_at.wrapping_add(1 + within / 2))
         .unwrap_or(0);
-    let raw = if within % 2 == 0 { byte >> 4 } else { byte };
+    let raw = if within.is_multiple_of(2) {
+        byte >> 4
+    } else {
+        byte
+    };
     let nibble = adpcm_nibble(raw);
 
     let history0 = i64::from(voice.adpcm.history0);

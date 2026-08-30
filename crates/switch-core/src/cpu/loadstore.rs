@@ -425,8 +425,7 @@ impl Cpu {
                 }
                 for r in 0..rpt {
                     for lane in 0..lanes {
-                        let mut reg = u32::from(rt) + r;
-                        for _ in 0..selem {
+                        for reg in (u32::from(rt) + r..).take(selem as usize) {
                             let addr = base.wrapping_add(offs) as u32;
                             if load {
                                 let elem = self.load_by_size(addr, size, false)?;
@@ -436,7 +435,6 @@ impl Cpu {
                                 self.store_by_size(addr, size, elem)?;
                             }
                             offs += ebytes;
-                            reg += 1;
                         }
                     }
                 }

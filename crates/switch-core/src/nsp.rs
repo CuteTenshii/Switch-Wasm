@@ -446,7 +446,7 @@ mod tests {
         ]);
         let pfs0 = Pfs0::parse(&data).unwrap();
         assert_eq!(pfs0.find("update.nca").unwrap().name, "update.nca");
-        assert_eq!(pfs0.find("nope").is_none(), true);
+        assert!(pfs0.find("nope").is_none());
         assert_eq!(pfs0.find_with_suffix(".NCA").unwrap().name, "main.nca");
     }
 

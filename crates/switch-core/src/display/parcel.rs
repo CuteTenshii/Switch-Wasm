@@ -93,7 +93,7 @@ impl ParcelWriter {
     /// Append raw bytes, padded to a 4-byte boundary.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
         self.payload.extend_from_slice(bytes);
-        while self.payload.len() % 4 != 0 {
+        while !self.payload.len().is_multiple_of(4) {
             self.payload.push(0);
         }
     }

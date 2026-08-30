@@ -44,6 +44,8 @@ pub(super) enum SysReg {
 }
 
 impl SysReg {
+    // The literals below are grouped as op0_op1_CRn_CRm_op2, the encoding the
+    // comments name in `3:3:13:0:2` form.
     fn of(insn: u32) -> SysReg {
         let op0 = (insn >> 19) & 0b11;
         let op1 = (insn >> 16) & 0b111;

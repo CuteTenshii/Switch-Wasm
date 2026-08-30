@@ -6,3 +6,6 @@ description = "Browser-oriented Nintendo Switch emulation core: container parser
 license = "MIT"
 
 [dependencies]
+
+[lints]
+workspace = true

@@ -237,12 +237,15 @@ fn name(entry: &[u8], fixed_size: usize, what: &str) -> Result<String, Error> {
 mod tests {
     use super::*;
 
+    /// A file to put in a built image: its name and its contents.
+    type NamedFile<'a> = (&'a str, &'a [u8]);
+
     /// Build a RomFS image with a root directory holding `root_files`, and one
     /// subdirectory `sub` holding `sub_files`.
-    fn build(root_files: &[(&str, &[u8])], sub: Option<(&str, &[(&str, &[u8])])>) -> Vec<u8> {
+    fn build(root_files: &[NamedFile], sub: Option<(&str, &[NamedFile])>) -> Vec<u8> {
         fn push_padded(table: &mut Vec<u8>, name: &str) {
             table.extend_from_slice(name.as_bytes());
-            while table.len() % 4 != 0 {
+            while !table.len().is_multiple_of(4) {
                 table.push(0);
             }
         }
@@ -389,7 +392,7 @@ mod tests {
             let name = if level == 0 { "" } else { "d" };
             dir_table.extend_from_slice(&(name.len() as u32).to_le_bytes());
             dir_table.extend_from_slice(name.as_bytes());
-            while dir_table.len() % 4 != 0 {
+            while !dir_table.len().is_multiple_of(4) {
                 dir_table.push(0);
             }
         }
@@ -403,7 +406,7 @@ mod tests {
         file_table.extend_from_slice(&INVALID_OFFSET.to_le_bytes()); // hash chain
         file_table.extend_from_slice(&5u32.to_le_bytes()); // name length
         file_table.extend_from_slice(b"f.bin");
-        while file_table.len() % 4 != 0 {
+        while !file_table.len().is_multiple_of(4) {
             file_table.push(0);
         }
 

@@ -849,7 +849,7 @@ impl NvDrv {
             // A zero handle means "leave this range unmapped".
             0x14 => {
                 const OP_SIZE: usize = 0x14;
-                if data.len() < OP_SIZE || data.len() % OP_SIZE != 0 {
+                if data.len() < OP_SIZE || !data.len().is_multiple_of(OP_SIZE) {
                     return Ok(NV_BAD_PARAMETER);
                 }
                 let trace = self.gpu.trace;

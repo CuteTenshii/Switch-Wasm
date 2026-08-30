@@ -885,8 +885,8 @@ fn the_applet_capture_buffer_names_a_slot_nothing_renders_into() {
         // out, so the black it claims to be stays black.
         let slot = cpu.mem.read_u32(tls + 0x24).unwrap();
         assert!(
-            slot >= switch_core::cpu::SHARED_BUFFER_USABLE_SLOTS
-                && slot < switch_core::cpu::SHARED_BUFFER_SLOTS,
+            (switch_core::cpu::SHARED_BUFFER_USABLE_SLOTS..switch_core::cpu::SHARED_BUFFER_SLOTS)
+                .contains(&slot),
             "slot {slot} is not a spare one"
         );
     }

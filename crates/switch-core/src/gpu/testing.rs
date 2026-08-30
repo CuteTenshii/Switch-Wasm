@@ -20,13 +20,13 @@ use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
 use crate::mem::Memory;
 
 /// Two instruction words, as the eight bytes a shader binary holds.
-fn word(low: u32, high: u32) -> [u8; 8] {
+pub fn word(low: u32, high: u32) -> [u8; 8] {
     (((high as u64) << 32) | low as u64).to_le_bytes()
 }
 
 /// One 32-byte scheduling block: the sched word and the three instructions it
 /// schedules.
-fn block(sched: (u32, u32), a: (u32, u32), b: (u32, u32), c: (u32, u32)) -> Vec<u8> {
+pub fn block(sched: (u32, u32), a: (u32, u32), b: (u32, u32), c: (u32, u32)) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);
     out.extend_from_slice(&word(sched.0, sched.1));
     out.extend_from_slice(&word(a.0, a.1));
@@ -76,8 +76,32 @@ pub fn solid_fragment_shader() -> Vec<u8> {
     bytes.extend(block(
         (0xffe1ffef, 0x001f8000),
         (0x0007000f, 0xe3000000), // exit
-        (0, 0),
-        (0, 0),
+        (0xff87000f, 0xe2400fff), // bra 0x50 (padding, never reached)
+        (0x00070f00, 0x50b00000), // nop (padding, never reached)
+    ));
+    bytes
+}
+
+/// `oColor.r = vColor.r - vColor.r of the pixel beside me`, which is a
+/// horizontal derivative: the `ipa` chain of [`solid_fragment_shader`] up to
+/// the first component, then a `shfl.bfly` reading the lane whose number
+/// differs in the low bit and a subtract.
+///
+/// The result lands in `r0`, the neighbour's own value stays in `r1`, and
+/// `r3` is still the `w` the interpolation needed — so the colour written is
+/// `(dFdx, neighbour, 0, 1)`.
+pub fn derivative_fragment_shader() -> Vec<u8> {
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0xf0170001, 0xef100070), // shfl.bfly $p0 $r1 $r0 0x1 0x1c
+        (0x00170000, 0x5c590000), // fadd $r0 -$r0 $r1
+        (0x0007000f, 0xe3000000), // exit
     ));
     bytes
 }
@@ -92,6 +116,30 @@ pub const MULTISAMPLE_SAMPLE_MASK: u32 = 0x3EF;
 pub const DEPTH_TEST_ENABLE: u32 = 0x4B3;
 pub const DEPTH_WRITE_ENABLE: u32 = 0x4BA;
 pub const DEPTH_TEST_FUNC: u32 = 0x4C3;
+
+/// Write one vertex of the array [`Harness`] lays out: a `vec4` position at
+/// offset 0 and a `vec4` colour at offset 16, stride 32.
+///
+/// Free-standing as well as a method because a caller that already holds the
+/// memory and the address space apart cannot also borrow a whole harness.
+pub fn write_vertex(
+    mem: &mut Memory,
+    vmm: &AddressSpace,
+    base: u64,
+    index: u32,
+    pos: [f32; 4],
+    color: [f32; 4],
+) {
+    let addr = base + index as u64 * 32;
+    for (i, v) in pos.iter().enumerate() {
+        vmm.write_u32(mem, addr + i as u64 * 4, v.to_bits())
+            .unwrap();
+    }
+    for (i, v) in color.iter().enumerate() {
+        vmm.write_u32(mem, addr + 16 + i as u64 * 4, v.to_bits())
+            .unwrap();
+    }
+}
 
 /// A memory, an address space and an engine set up to issue one draw.
 pub struct Harness {
@@ -273,17 +321,8 @@ impl Harness {
     }
 
     pub fn write_vertex(&mut self, index: u32, pos: [f32; 4], color: [f32; 4]) {
-        let addr = self.vertices() + index as u64 * 32;
-        for (i, v) in pos.iter().enumerate() {
-            self.vmm
-                .write_u32(&mut self.mem, addr + i as u64 * 4, v.to_bits())
-                .unwrap();
-        }
-        for (i, v) in color.iter().enumerate() {
-            self.vmm
-                .write_u32(&mut self.mem, addr + 16 + i as u64 * 4, v.to_bits())
-                .unwrap();
-        }
+        let base = self.vertices();
+        write_vertex(&mut self.mem, &self.vmm, base, index, pos, color);
     }
 
     /// The three vertices of a triangle covering the upper-left half of the

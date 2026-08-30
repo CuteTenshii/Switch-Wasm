@@ -1589,7 +1589,7 @@ mod tests {
         let mut original = Vec::new();
         for i in 0..16u32 {
             let depth = i * 0x11_1111;
-            original.extend_from_slice(&((depth << 8) | u32::from(i as u8) + 1).to_le_bytes());
+            original.extend_from_slice(&((depth << 8) | (u32::from(i as u8) + 1)).to_le_bytes());
         }
         target.write(&mut h.ctx(), &original).unwrap();
         let device = target.read_depth(&h.ctx()).unwrap();

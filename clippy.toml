@@ -1,0 +1,6 @@
+# A decoder's arguments are the encoding's fields: `simd_shrn` takes rd, rn,
+# q, the destination element size, the shift and four flag bits because that
+# is what the instruction word holds. Bundling them into a struct moves the
+# list rather than shortening it, so the threshold is set where those
+# functions sit instead of exempting them one by one.
+too-many-arguments-threshold = 10

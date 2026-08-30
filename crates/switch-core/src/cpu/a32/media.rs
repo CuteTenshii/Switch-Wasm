@@ -113,7 +113,7 @@ impl Cpu {
             // The dual signed multiplies: two halfword products added or
             // subtracted, optionally accumulated. `X` swaps the second
             // operand's halves.
-            (0x10, 0b000 | 0b001 | 0b010 | 0b011) => {
+            (0x10, 0b000..=0b011) => {
                 let d = rn;
                 let a = self.r32(rm) as i32;
                 let b = self.r32(((insn >> 8) & 0xF) as u8);

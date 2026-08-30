@@ -7,3 +7,15 @@ opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
+
+[workspace.lints.clippy]
+# This codebase spells out hardware encodings field by field — an instruction
+# word, a Maxwell method, an NCA header — and a field that happens to be zero
+# is written out with the rest so the literal can be read against the
+# reference. `(0x360) | (0 << 13) | (0x55 << 16) | (4 << 29)` is one method
+# with four fields, not an expression with a redundant term, and grouping a
+# system-register literal as `op0_op1_CRn_CRm_op2` is the only grouping that
+# can be checked by eye. Both lints ask for the field structure to be thrown
+# away.
+identity_op = "allow"
+unusual_byte_groupings = "allow"

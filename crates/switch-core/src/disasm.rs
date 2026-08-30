@@ -671,9 +671,9 @@ fn disasm_dp_imm(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
             if ((insn >> 23) & 1) == 0 {
                 let opc = (insn >> 29) & 0b11;
                 let (immr, imms) = if sf == 1 {
-                    (((insn >> 16) & 0x3F) as u32, ((insn >> 10) & 0x3F) as u32)
+                    ((insn >> 16) & 0x3F, (insn >> 10) & 0x3F)
                 } else {
-                    (((insn >> 16) & 0x1F) as u32, ((insn >> 10) & 0x1F) as u32)
+                    ((insn >> 16) & 0x1F, (insn >> 10) & 0x1F)
                 };
                 let (lsb, msb) = (immr as i64, imms as i64);
                 let datasize = if sf == 1 { 64 } else { 32 };

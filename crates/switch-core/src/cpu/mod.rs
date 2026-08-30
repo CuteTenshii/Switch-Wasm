@@ -4301,7 +4301,7 @@ impl Cpu {
             ExecMode::A32 => {
                 let _ = writeln!(
                     s,
-                    "pc={:#010x}  nzcv=N:{n} Z:{z} C:{c} V:{v} Q:{} ge={:#03b}",
+                    "pc={:#010x}  nzcv=N:{n} Z:{z} C:{c} V:{v} Q:{} ge={:#06b}",
                     self.pc,
                     u8::from(self.cpsr_q),
                     self.cpsr_ge
@@ -4393,6 +4393,7 @@ impl Cpu {
             // walking the whole of the other's guard chain.
             0x7 | 0xF => {
                 let scalar_fp = matches!((insn >> 24) & 0xFF, 0x1E | 0x1F | 0x9E | 0x9F);
+                #[allow(clippy::if_same_then_else)] // the order is the point
                 let claimed = if scalar_fp {
                     self.try_fp(insn)? || self.try_simd(insn)?
                 } else {
@@ -4404,6 +4405,7 @@ impl Cpu {
                 }
             }
             // Branches, exception generation and system instructions.
+            #[allow(clippy::collapsible_match)] // no fallible call in a guard
             0xA | 0xB => {
                 if self.try_branch_or_system(insn, next_pc)? {
                     return Ok(());

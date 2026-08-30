@@ -199,7 +199,7 @@ impl AddressSpace {
         let page_size = if page_size == 0 {
             SMALL_PAGE_SIZE
         } else {
-            page_size as u64
+            page_size
         };
         let gpu_va = if flags & FLAG_FIXED_OFFSET != 0 {
             requested

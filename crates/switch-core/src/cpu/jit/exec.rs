@@ -325,6 +325,7 @@ impl Cpu {
             Op::Fp { insn, scalar, form } => {
                 self.pc = pc;
                 let next = pc.wrapping_add(4);
+                #[allow(clippy::if_same_then_else)] // the order is the point
                 let claimed = if scalar {
                     self.run_fp(form, insn)? || self.try_simd(insn)?
                 } else {

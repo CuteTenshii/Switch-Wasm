@@ -34,7 +34,7 @@ impl Cpu {
             && ((insn >> 10) & 1) == 1
         {
             let op = (insn >> 11) & 0x1F;
-            if matches!(op, 0b10000 | 0b10001 | 0b10010 | 0b10011) {
+            if matches!(op, 0b10000..=0b10011) {
                 let q = (insn >> 30) & 1 == 1;
                 let u = (insn >> 29) & 1;
                 let rd = (insn & 0x1F) as u8;
@@ -55,7 +55,7 @@ impl Cpu {
                 };
                 let dest_esize = dest_esize.unwrap_or(0);
                 let shift_field = (insn >> 16) & 0x7F;
-                let shift = (2 * dest_esize).saturating_sub(shift_field as u32);
+                let shift = (2 * dest_esize).saturating_sub(shift_field);
                 if shift > 0 && shift <= dest_esize {
                     let rounding = op & 1 == 1; // RSHRN/SQRSHRN/UQRSHRN round
                     let (signed_src, to_unsigned) = match (u, op) {
@@ -96,11 +96,11 @@ impl Cpu {
         let vector_shift = ((insn >> 31) & 1) == 0 && ((insn >> 23) & 0x3F) == 0b011110;
         if (vector_shift || scalar_shift) && ((insn >> 10) & 1) == 1 && ((insn >> 19) & 0xF) != 0 {
             let opcode = (insn >> 11) & 0x1F;
-            if !matches!(opcode, 0b10000 | 0b10001 | 0b10010 | 0b10011) {
+            if !matches!(opcode, 0b10000..=0b10011) {
                 let q = vector_shift && (insn >> 30) & 1 == 1;
                 let u = (insn >> 29) & 1 == 1;
                 let immh = (insn >> 19) & 0xF;
-                let imm = ((insn >> 16) & 0x7F) as u32;
+                let imm = (insn >> 16) & 0x7F;
                 let rd = (insn & 0x1F) as u8;
                 let rn = ((insn >> 5) & 0x1F) as u8;
                 let esize = match immh {
@@ -1121,7 +1121,7 @@ impl Cpu {
                 }
                 let esize = 8u32 << lsb;
                 let index = imm5 >> (lsb + 1);
-                let shift = (index as u32) * esize;
+                let shift = index * esize;
                 let mask = (1u128 << esize) - 1;
                 let v = self.vregs[rd as usize];
                 let val = (self.read_zr(rn) as u128) & mask;
@@ -1137,7 +1137,7 @@ impl Cpu {
                 let val = (self.read_zr(rn) as u128) & ((1u128 << esize) - 1);
                 let mut v: u128 = 0;
                 for i in 0..elements {
-                    v |= (val as u128) << (i as u32 * esize);
+                    v |= val << (i * esize);
                 }
                 self.vregs[rd as usize] = v;
                 Ok(true)
@@ -1165,7 +1165,7 @@ impl Cpu {
                 let lsb = imm5.trailing_zeros();
                 let esize = 8u32 << lsb;
                 let index = imm5 >> (lsb + 1);
-                let shift = (index as u32) * esize;
+                let shift = index * esize;
                 let val = (self.vregs[rn as usize] >> shift) & ((1u128 << esize) - 1);
                 self.write_zr(rd, val as u64);
                 Ok(true)
@@ -1176,7 +1176,7 @@ impl Cpu {
                 let lsb = imm5.trailing_zeros();
                 let esize = 8u32 << lsb;
                 let index = imm5 >> (lsb + 1);
-                let shift = (index as u32) * esize;
+                let shift = index * esize;
                 let val = (self.vregs[rn as usize] >> shift) & ((1u128 << esize) - 1);
                 let val = sext_u64(val as u64, esize);
                 self.write_zr(rd, val);

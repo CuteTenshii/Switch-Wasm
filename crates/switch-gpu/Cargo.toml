@@ -10,3 +10,6 @@ pollster = "1.0.1"
 switch-core = { path = "../switch-core" }
 web-time = "1.1"
 wgpu = "30.0.1"
+
+[lints]
+workspace = true

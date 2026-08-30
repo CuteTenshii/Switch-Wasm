@@ -654,7 +654,7 @@ impl Memory {
 
         let mut start = page;
         while start > 0 {
-            if skippable && start % BLOCK == 0 && start >= BLOCK && empty(start - BLOCK) {
+            if skippable && start.is_multiple_of(BLOCK) && start >= BLOCK && empty(start - BLOCK) {
                 start -= BLOCK;
                 continue;
             }
@@ -665,7 +665,7 @@ impl Memory {
         }
         let mut end = page + PAGE;
         while end < limit {
-            if skippable && end % BLOCK == 0 && limit - end >= BLOCK && empty(end) {
+            if skippable && end.is_multiple_of(BLOCK) && limit - end >= BLOCK && empty(end) {
                 end += BLOCK;
                 continue;
             }
@@ -1286,14 +1286,9 @@ mod tests {
         m.soft_map_zero(0, 0x8000_0000);
         let mut addr = 0u32;
         let mut touched = 0u64;
-        loop {
-            match m.write_u8(addr, 1) {
-                Ok(()) => {
-                    touched += 1;
-                    addr = addr.wrapping_add(PAGE_SIZE as u32);
-                }
-                Err(_) => break,
-            }
+        while m.write_u8(addr, 1).is_ok() {
+            touched += 1;
+            addr = addr.wrapping_add(PAGE_SIZE as u32);
         }
         assert_eq!(touched, CAP / PAGE_SIZE as u64);
         assert_eq!(m.mapped_bytes(), CAP);

@@ -359,8 +359,8 @@ mod tests {
         // reproduces a direct key when the sources are consistent.
         let mut ks = KeySet::default();
         let mut direct = [0u8; 32];
-        for i in 0..32 {
-            direct[i] = i as u8;
+        for (i, b) in direct.iter_mut().enumerate() {
+            *b = i as u8;
         }
         ks.header_key = Some(direct);
         assert_eq!(ks.effective_header_key(), Some(direct));

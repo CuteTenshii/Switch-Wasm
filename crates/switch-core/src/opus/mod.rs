@@ -15,12 +15,40 @@
 //!
 //! What is here is a decoder only. Nothing on this console encodes Opus.
 
-pub(crate) mod celt;
-mod mdct;
+// RFC 6716's decoder, transcribed rather than rewritten: the tables are
+// normative, the integer arithmetic has to round the way the encoder's did,
+// and a loop that carries its index into the arithmetic reads as the
+// reference does only while it stays a loop. Clippy's suggestions here range
+// from noise to actively wrong — shortening a table constant or swapping in
+// `FRAC_1_SQRT_2` desynchronises the range decoder — so they are off for the
+// ported modules and on everywhere else.
+macro_rules! ported {
+    ($($item:item)*) => {
+        $(
+            #[allow(
+                clippy::approx_constant,
+                clippy::assign_op_pattern,
+                clippy::excessive_precision,
+                clippy::explicit_counter_loop,
+                clippy::int_plus_one,
+                clippy::manual_is_multiple_of,
+                clippy::needless_range_loop,
+                clippy::too_many_arguments
+            )]
+            $item
+        )*
+    };
+}
+
+ported! {
+    pub(crate) mod celt;
+    mod mdct;
+    mod silk;
+    mod tables_celt;
+    mod tables_silk;
+}
+
 mod range;
-mod silk;
-mod tables_celt;
-mod tables_silk;
 
 use celt::CeltDecoder;
 use range::RangeDecoder;
@@ -251,7 +279,7 @@ fn parse_frames(data: &[u8], self_delimited: bool) -> Result<(Vec<(usize, usize)
                     last_size -= bytes + size;
                 }
             } else if !self_delimited {
-                if len % count != 0 {
+                if !len.is_multiple_of(count) {
                     return Err(Error::InvalidPacket);
                 }
                 last_size = len / count;
@@ -406,7 +434,7 @@ impl Decoder {
             _ => {
                 // A loss is concealed in whole 2.5 ms steps, because that is
                 // the shortest thing either codec can synthesise.
-                if frame_size % (self.fs as usize / 400) != 0 {
+                if !frame_size.is_multiple_of(self.fs as usize / 400) {
                     return Err(Error::BadArgument);
                 }
                 let mut done = 0usize;

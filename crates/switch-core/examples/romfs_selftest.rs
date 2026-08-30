@@ -81,7 +81,7 @@ impl<S: ByteSource> ByteSource for Flaky<S> {
 
     fn read_at(&self, offset: u64, out: &mut [u8]) -> Result<usize, switch_core::Error> {
         let got = self.0.read_at(offset, out)?;
-        if got > 0 && offset % BLOCK_HINT == 0 && out.len() < 0x1000 {
+        if got > 0 && offset.is_multiple_of(BLOCK_HINT) && out.len() < 0x1000 {
             out[0] ^= 0x01;
         }
         Ok(got)

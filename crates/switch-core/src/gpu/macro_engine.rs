@@ -410,7 +410,7 @@ impl MacroState<'_> {
                 })
             }
             1 => Ok(a.wrapping_add(imm(word) as u32)),
-            2 | 3 | 4 => {
+            2..=4 => {
                 let src_bit = (word >> 17) & 0x1F;
                 let size = (word >> 22) & 0x1F;
                 let dst_bit = (word >> 27) & 0x1F;
@@ -462,7 +462,7 @@ pub fn disasm(word: u32) -> String {
         }
         5 => format!("read r{dst} = [r{a} + {}]{exit}", imm(word)),
         1 => format!("addi r{dst} = r{a} + {} (assign {assign}){exit}", imm(word)),
-        2 | 3 | 4 => {
+        2..=4 => {
             let src_bit = (word >> 17) & 0x1F;
             let size = (word >> 22) & 0x1F;
             let dst_bit = (word >> 27) & 0x1F;

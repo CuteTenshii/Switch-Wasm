@@ -80,7 +80,7 @@ fn main() {
         "frame {want_frame} at step {}; sampling the next {steps} instructions",
         boot.steps
     );
-    let before = cpu.nv.gpu.stats.clone();
+    let before = cpu.nv.gpu.stats;
 
     let mut pages: BTreeMap<(u64, u32), u64> = BTreeMap::new();
     let mut callers: BTreeMap<(u64, u32), u64> = BTreeMap::new();
@@ -97,7 +97,7 @@ fn main() {
             let thread = cpu.current_thread_handle();
             *pages.entry((thread, cpu.get_pc() & !0xFFF)).or_default() += 1;
             *callers.entry((thread, cpu.read_x(30) as u32)).or_default() += 1;
-            if sampled % STACK_EVERY == 0 {
+            if sampled.is_multiple_of(STACK_EVERY) {
                 *stacks.entry((thread, cpu.backtrace(10))).or_default() += 1;
             }
             sampled += 1;

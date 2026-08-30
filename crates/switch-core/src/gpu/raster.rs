@@ -1795,6 +1795,9 @@ mod tests {
     use super::*;
     use crate::gpu::engine::threed::DrawCall;
     use crate::gpu::syncpt::Host1x;
+    use crate::gpu::testing::{
+        derivative_fragment_shader, solid_fragment_shader, write_vertex, Harness,
+    };
     use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
     use crate::mem::Memory;
 
@@ -2219,201 +2222,19 @@ mod tests {
     }
 
     // -- Full-pipeline integration: vertex fetch -> vertex shading ->
-    // rasterization -> fragment shading -> real pixel write. Register
-    // numbers below are the same raw values `threed.rs`'s own
-    // `setup_pitch_target` test helper uses, since its constants are
-    // private to that module.
+    // rasterization -> fragment shading -> real pixel write, over the same
+    // engine `switch-gpu` is checked against.
 
-    fn word(low: u32, high: u32) -> [u8; 8] {
-        (((high as u64) << 32) | low as u64).to_le_bytes()
-    }
-    fn block(sched: (u32, u32), a: (u32, u32), b: (u32, u32), c: (u32, u32)) -> Vec<u8> {
-        let mut out = Vec::with_capacity(32);
-        out.extend_from_slice(&word(sched.0, sched.1));
-        out.extend_from_slice(&word(a.0, a.1));
-        out.extend_from_slice(&word(b.0, b.1));
-        out.extend_from_slice(&word(c.0, c.1));
-        out
-    }
-
-    /// `gl_Position = aPosition; vColor = aColor;` — composed directly from
-    /// the same real, oracle-verified `ld`/`st` b128 attribute-space words
-    /// `mvp.vert`'s fixture uses (see `isa`'s module docs), so no new
-    /// bit-level guessing is needed for this passthrough.
-    fn passthrough_vertex_shader() -> Vec<u8> {
-        // Sched words are placeholders reused from mvp.vert's real capture —
-        // never all-zero, since `decode_program_from_memory` treats an
-        // all-zero first word as "this binary has a Mesa header" (see
-        // `MESA_SHADER_HEADER_BYTES`'s doc comment).
-        let mut bytes = block(
-            (0xfc20070f, 0x081f8441),
-            (0x0807ff00, 0xefd9ff80), // ld b128 $r0 a[0x80] 0x0  (aPosition)
-            (0x0707ff00, 0xeff1ff80), // st b128 a[0x70] $r0 0x0  (gl_Position)
-            (0x0907ff00, 0xefd9ff80), // ld b128 $r0 a[0x90] 0x0  (aColor)
-        );
-        bytes.extend(block(
-            (0xfc2207e1, 0x001f8c40),
-            (0x0807ff00, 0xeff1ff80), // st b128 a[0x80] $r0 0x0  (vColor)
-            (0x0007000f, 0xe3000000), // exit
-            (0, 0),
-        ));
-        bytes
-    }
-
-    /// `oColor = vColor;` — the same real capture `isa`'s module docs and
-    /// `shader::interp`'s tests use.
-    fn solid_fragment_shader() -> Vec<u8> {
-        let mut bytes = block(
-            (0xe1a0070f, 0x00240401),
-            (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
-            (0x00470003, 0x50800000), // mufu rcp $r3 $r0
-            (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
-        );
-        bytes.extend(block(
-            (0xb0400341, 0x055c8400),
-            (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
-            (0x8037ff02, 0xe043ff88), // ipa $r2 a[0x88] $r3 0x0 0x1
-            (0xc037ff03, 0xe043ff88), // ipa $r3 a[0x8c] $r3 0x0 0x1
-        ));
-        bytes.extend(block(
-            (0xffe1ffef, 0x001f8000),
-            (0x0007000f, 0xe3000000), // exit
-            (0, 0),
-            (0, 0),
-        ));
-        bytes
-    }
-
-    /// `oColor.r = vColor.r - vColor.r of the pixel beside me`, which is a
-    /// horizontal derivative: the `ipa` chain of [`solid_fragment_shader`] up
-    /// to the first component, then a `shfl.bfly` reading the lane whose
-    /// number differs in the low bit and a subtract.
-    ///
-    /// The result lands in `r0`, the neighbour's own value stays in `r1`, and
-    /// `r3` is still the `w` the interpolation needed — so the colour written
-    /// is `(dFdx, neighbour, 0, 1)`.
-    fn derivative_fragment_shader() -> Vec<u8> {
-        let mut bytes = block(
-            (0xe1a0070f, 0x00240401),
-            (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
-            (0x00470003, 0x50800000), // mufu rcp $r3 $r0
-            (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
-        );
-        bytes.extend(block(
-            (0xb0400341, 0x055c8400),
-            (0xf0170001, 0xef100070), // shfl.bfly $p0 $r1 $r0 0x1 0x1c
-            (0x00170000, 0x5c590000), // fadd $r0 -$r0 $r1
-            (0x0007000f, 0xe3000000), // exit
-        ));
-        bytes
-    }
-
-    /// Lay out a render target, both programs, and a 3-vertex buffer
-    /// (position vec4 @ offset 0, colour vec4 @ offset 16, stride 32) in one
-    /// mapped region, and program `engine`'s registers to match. Returns
-    /// `(mem, vmm, engine)`; the caller still needs to write vertex data and
-    /// call [`draw`].
+    /// [`Harness`] taken apart into the three pieces these tests borrow
+    /// separately: they hold an [`ExecCtx`] across a whole run of reads,
+    /// which a method on the harness cannot hand out.
     fn pipeline_harness() -> (Memory, AddressSpace, Engine3D) {
         pipeline_harness_with(solid_fragment_shader())
     }
 
     fn pipeline_harness_with(fragment_shader: Vec<u8>) -> (Memory, AddressSpace, Engine3D) {
-        let mut mem = Memory::new();
-        mem.map_zero(0x7000_0000, 0x2000).unwrap();
-        let mut vmm = AddressSpace::new();
-        let base = vmm
-            .map(0x7000_0000, 0x2000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
-            .unwrap();
-
-        let rt_addr = base;
-        let vs_addr = base + 0x200;
-        let fs_addr = base + 0x300;
-        let vbuf_addr = base + 0x400;
-
-        {
-            let mut host1x = Host1x::new();
-            let mut stats = Default::default();
-            let mut ctx = ExecCtx {
-                mem: &mut mem,
-                vmm: &vmm,
-                host1x: &mut host1x,
-                stats: &mut stats,
-                trace: false,
-            };
-            for (words, addr) in [
-                (passthrough_vertex_shader(), vs_addr),
-                (fragment_shader, fs_addr),
-            ] {
-                for (i, chunk) in words.chunks_exact(4).enumerate() {
-                    let word = u32::from_le_bytes(chunk.try_into().unwrap());
-                    ctx.write_u32(addr + i as u64 * 4, word).unwrap();
-                }
-            }
-        }
-
-        let mut engine = Engine3D::new();
-        // Render target: 16x8 pitch-linear RGBA8, matching setup_pitch_target.
-        engine.regs.set(0x200, (rt_addr >> 32) as u32);
-        engine.regs.set(0x201, rt_addr as u32);
-        engine.regs.set(0x202, 16 * 4);
-        engine.regs.set(0x203, 8);
-        engine.regs.set(0x204, 0xD5); // RGBA8Unorm
-        engine.regs.set(0x205, 1 << 12); // IsLinear
-        engine.regs.set(0x206, 1);
-        // Viewport 0: x=0,y=0,w=16,h=8.
-        engine.regs.set(0x300, 16 << 16);
-        engine.regs.set(0x301, 8 << 16);
-        // SetProgramRegion.
-        engine.regs.set(0x582, (base >> 32) as u32);
-        engine.regs.set(0x583, base as u32);
-        // SetProgram[VertexB] (StageId 1): enabled, offset 0x200.
-        engine.regs.set(0x800 + 0x10, 1 | (1 << 4));
-        engine.regs.set(0x800 + 0x11, 0x200);
-        engine.regs.set(0x800 + 0x13, 8);
-        // SetProgram[Fragment] (StageId 5): enabled, offset 0x300.
-        engine.regs.set(0x800 + 5 * 0x10, 1 | (5 << 4));
-        engine.regs.set(0x800 + 5 * 0x10 + 1, 0x300);
-        engine.regs.set(0x800 + 5 * 0x10 + 3, 8);
-        // VertexAttribState[0] = aPosition: buffer 0, offset 0, 4x32 float.
-        engine.regs.set(0x458, 0x01 << 21 | 7 << 27);
-        // VertexAttribState[1] = aColor: buffer 0, offset 16, 4x32 float.
-        engine
-            .regs
-            .set(0x458 + 1, (16 << 7) | (0x01 << 21) | (7 << 27));
-        // VertexArray[0]: stride 32, enabled.
-        engine.regs.set(0x700, 32 | (1 << 12));
-        engine.regs.set(0x701, (vbuf_addr >> 32) as u32);
-        engine.regs.set(0x702, vbuf_addr as u32);
-        engine.regs.set(0x7C0, (vbuf_addr >> 32) as u32);
-        engine.regs.set(0x7C1, vbuf_addr as u32 + 3 * 32);
-
-        engine.last_draw = DrawCall {
-            primitive: 4,
-            first: 0,
-            count: 3,
-            indexed: false,
-            index_format: 0,
-        };
-        (mem, vmm, engine)
-    }
-
-    fn write_vertex(
-        mem: &mut Memory,
-        vmm: &AddressSpace,
-        base: u64,
-        index: u32,
-        pos: [f32; 4],
-        color: [f32; 4],
-    ) {
-        let addr = base + index as u64 * 32;
-        for (i, v) in pos.iter().enumerate() {
-            vmm.write_u32(mem, addr + i as u64 * 4, v.to_bits())
-                .unwrap();
-        }
-        for (i, v) in color.iter().enumerate() {
-            vmm.write_u32(mem, addr + 16 + i as u64 * 4, v.to_bits())
-                .unwrap();
-        }
+        let h = Harness::with_fragment_shader(fragment_shader);
+        (h.mem, h.vmm, h.engine)
     }
 
     #[test]

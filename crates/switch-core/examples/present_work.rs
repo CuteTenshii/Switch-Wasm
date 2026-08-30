@@ -121,7 +121,7 @@ fn case(name: &str, width: u32, height: u32, pitch_linear: bool, crop: Crop) {
     for y in 0..height {
         for x in 0..width {
             let texel =
-                (x * 4 & 0xFF) | ((y * 4 & 0xFF) << 8) | (((x ^ y) & 0xFF) << 16) | 0xFF00_0000;
+                ((x * 4) & 0xFF) | (((y * 4) & 0xFF) << 8) | (((x ^ y) & 0xFF) << 16) | 0xFF00_0000;
             let at = BASE.wrapping_add(layout.offset(x * BPP, y, width_bytes));
             mem.write_u32(at, texel).expect("fill the surface");
         }

@@ -43,7 +43,7 @@ use super::Cpu;
 use crate::{Error, Result};
 
 pub use disasm::disassemble_a32;
-pub(self) use vfp::vfp_mnemonic;
+use vfp::vfp_mnemonic;
 
 /// Which instruction set the current thread is executing.
 ///

@@ -106,7 +106,7 @@ fn main() {
                 range_mismatch = Some((frame, final_range, expected_range));
             }
 
-            for i in 0..got * channels {
+            for &sample in &pcm[..got * channels] {
                 let expected = f32::from_le_bytes([
                     reference[ref_at],
                     reference[ref_at + 1],
@@ -114,7 +114,7 @@ fn main() {
                     reference[ref_at + 3],
                 ]);
                 ref_at += 4;
-                let diff = pcm[i] - expected;
+                let diff = sample - expected;
                 if diff.abs() > max_error {
                     max_error = diff.abs();
                     max_error_frame = frame;

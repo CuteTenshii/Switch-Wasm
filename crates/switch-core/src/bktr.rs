@@ -284,7 +284,7 @@ fn read_table<S: ByteSource>(
             max: MAX_TABLE,
         });
     }
-    if table.size < BUCKET_SIZE * 2 || table.size % BUCKET_SIZE != 0 {
+    if table.size < BUCKET_SIZE * 2 || !table.size.is_multiple_of(BUCKET_SIZE) {
         return Err(Error::Nca(format!(
             "{what} table: {:#x} bytes is not a header page plus whole bucket pages",
             table.size

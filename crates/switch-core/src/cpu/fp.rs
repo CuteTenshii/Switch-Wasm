@@ -174,7 +174,7 @@ impl Cpu {
         let ftype = (insn >> 22) & 0b11;
         let rd = (insn & 0x1F) as u8;
         let sign = if (imm8 >> 7) & 1 == 1 { 0x8000u32 } else { 0 };
-        return match ftype {
+        match ftype {
             0b00 => {
                 let imm = (sign
                     | if (imm8 >> 6) & 1 == 1 { 0x3E00 } else { 0x4000 }
@@ -192,7 +192,7 @@ impl Cpu {
                 Ok(true)
             }
             _ => Ok(false), // half precision: out of scope
-        };
+        }
     }
 
     pub(super) fn fp_one_source(&mut self, insn: u32) -> Result<bool> {
@@ -292,7 +292,7 @@ impl Cpu {
             };
             self.fp_set_f32(rd, r);
         }
-        return Ok(true);
+        Ok(true)
     }
 
     pub(super) fn fp_mov_reg(&mut self, insn: u32) -> Result<bool> {
@@ -320,7 +320,7 @@ impl Cpu {
             }
             _ => return Ok(false),
         }
-        return Ok(true);
+        Ok(true)
     }
 
     pub(super) fn fp_int_conv(&mut self, insn: u32) -> Result<bool> {
@@ -335,7 +335,7 @@ impl Cpu {
         let rd = (insn & 0x1F) as u8;
         let rn = ((insn >> 5) & 0x1F) as u8;
         let wide = sf != 0;
-        return match (rmode, opcode) {
+        match (rmode, opcode) {
             // SCVTF / UCVTF: integer → float. `sf` gives the source width,
             // `type` the destination's, and they are independent.
             (0b00, 0b010) | (0b00, 0b011) => {
@@ -384,7 +384,7 @@ impl Cpu {
                 Ok(true)
             }
             _ => Ok(false),
-        };
+        }
     }
 
     pub(super) fn fp_fixed_conv(&mut self, insn: u32) -> Result<bool> {
@@ -401,7 +401,7 @@ impl Cpu {
         let fbits = 64 - ((insn >> 10) & 0x3F);
         let wide = sf != 0;
         let scale = Self::pow2(fbits);
-        return match (rmode, opcode) {
+        match (rmode, opcode) {
             // SCVTF / UCVTF: fixed-point → float.
             (0b00, 0b010) | (0b00, 0b011) => {
                 let signed = opcode == 0b010;
@@ -437,7 +437,7 @@ impl Cpu {
                 Ok(true)
             }
             _ => Ok(false),
-        };
+        }
     }
 
     pub(super) fn fp_int_cmp_zero(&mut self, insn: u32) -> Result<bool> {
@@ -454,7 +454,7 @@ impl Cpu {
             _ => return Ok(false),
         };
         self.fp_set_f64(rd, f64::from_bits(if cond { u64::MAX } else { 0 }));
-        return Ok(true);
+        Ok(true)
     }
 
     pub(super) fn fp_three_source(&mut self, insn: u32) -> Result<bool> {
@@ -497,7 +497,7 @@ impl Cpu {
             }
             self.fp_set_f32(rd, fnn.mul_add(fm, fa));
         }
-        return Ok(true);
+        Ok(true)
     }
 
     pub(super) fn fp_data_proc(&mut self, insn: u32) -> Result<bool> {
@@ -517,7 +517,7 @@ impl Cpu {
                 if self.condition_holds(cond) {
                     self.fp_cmp(rn, rm, double);
                 } else {
-                    self.nzcv = ((insn & 0xF) as u32) << 28;
+                    self.nzcv = (insn & 0xF) << 28;
                 }
                 return Ok(true);
             }
@@ -781,7 +781,7 @@ fn recip_estimate(scaled: u64) -> u8 {
     let a = (scaled - 256) + 256;
     let a = a * 2 + 1;
     let b = (1u64 << 19) / a;
-    ((b + 1) / 2) as u8
+    b.div_ceil(2) as u8
 }
 
 /// ARM's `RecipSqrtEstimate`: a u0.9 input in [0.25, 1) to the same u0.8 form.
@@ -804,7 +804,7 @@ fn recip_sqrt_estimate(scaled: u64) -> u8 {
             while a * (b + 1) * (b + 1) < (1 << 28) {
                 b += 1;
             }
-            *slot = ((b + 1) / 2) as u8;
+            *slot = b.div_ceil(2) as u8;
         }
         table
     });

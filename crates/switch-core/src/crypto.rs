@@ -362,15 +362,13 @@ fn xts_mul_x(tweak: &mut [u8; 16]) {
 /// sector number in the high 8 bytes of the 128-bit tweak.
 pub fn aes128_xts_decrypt(key: &[u8; 32], data: &[u8], sector: u64, sector_size: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
-    let mut s = sector;
-    for chunk in data.chunks(sector_size) {
+    for (s, chunk) in (sector..).zip(data.chunks(sector_size)) {
         let mut tweak = [0u8; 16];
         let mut sv = s;
         for i in (0..16).rev() {
             tweak[i] = (sv & 0xff) as u8;
             sv >>= 8;
         }
-        s += 1;
         aes128_xts_decrypt_sector(key, chunk, &tweak, &mut out);
     }
     out
@@ -570,8 +568,8 @@ mod tests {
         // sectors with hactool's tweak (sector number in the high 8 bytes).
         // Round-trips against a two-sector decrypt.
         let mut key = [0u8; 32];
-        for i in 0..32 {
-            key[i] = i as u8;
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = i as u8;
         }
         let mut data = [0u8; 0x400];
         for (i, b) in data.iter_mut().enumerate() {
@@ -591,8 +589,8 @@ mod tests {
         // bytes (...fffe -> ...ffff -> ...0000), which is the part most likely
         // to have a bug.
         let mut key = [0u8; 16];
-        for i in 0..16 {
-            key[i] = i as u8;
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = i as u8;
         }
         let mut ctr = [0xffu8; 16];
         ctr[15] = 0xfe;

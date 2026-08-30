@@ -18,11 +18,11 @@ fn find_mod0(data: &[u8]) -> Option<usize> {
 
 fn read_cstr(data: &[u8], off: usize) -> String {
     let mut s = Vec::new();
-    for i in off..data.len() {
-        if data[i] == 0 {
+    for &b in &data[off..] {
+        if b == 0 {
             break;
         }
-        s.push(data[i]);
+        s.push(b);
     }
     String::from_utf8_lossy(&s).into_owned()
 }
@@ -88,10 +88,8 @@ fn main() {
             );
             return;
         }
-        if value < target {
-            if best.as_ref().map_or(true, |(bv, _, _)| value > *bv) {
-                best = Some((value, size, name));
-            }
+        if value < target && best.as_ref().is_none_or(|(bv, _, _)| value > *bv) {
+            best = Some((value, size, name));
         }
     }
     if let Some((v, _, name)) = best {

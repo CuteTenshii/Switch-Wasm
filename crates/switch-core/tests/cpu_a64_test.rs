@@ -377,7 +377,8 @@ fn bitfield_extract_and_insert() {
     let ubfm =
         1u32 << 31 | 0b10 << 29 | 0b100110 << 23 | 1 << 22 | (4 << 16) | (11 << 10) | (2 << 5) | 1;
     let mut bytes = Vec::new();
-    for insn in [ubfm] {
+    {
+        let insn = ubfm;
         bytes.extend_from_slice(&insn.to_le_bytes());
     }
     cpu.mem.map(0x1000, &bytes).unwrap();
@@ -389,7 +390,8 @@ fn bitfield_extract_and_insert() {
     let sbfm =
         1u32 << 31 | 0b00 << 29 | 0b100110 << 23 | 1 << 22 | (0 << 16) | (7 << 10) | (2 << 5) | 3;
     let mut bytes = Vec::new();
-    for insn in [sbfm] {
+    {
+        let insn = sbfm;
         bytes.extend_from_slice(&insn.to_le_bytes());
     }
     cpu.mem.map(0x1000, &bytes).unwrap();

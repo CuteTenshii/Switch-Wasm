@@ -24,6 +24,9 @@ const PROCESS_ID: u64 = 1;
 /// Album applet's, which is what hbmenu-launched homebrew runs as on real
 /// hardware — not an invention, and not a title id belonging to somebody.
 pub(super) const DEFAULT_PROGRAM_ID: u64 = 0x0100_0000_0000_1000;
+
+/// A request's buffers, as `(address, length)` pairs in descriptor order.
+pub(super) type Buffers = Vec<(u32, u32)>;
 /// The `DeviceId` `spl:` reports. A real console's is fused in at
 /// manufacturing and unique; nothing here derives anything from it.
 const SPL_DEVICE_ID: u64 = 0x0000_5357_4153_4D00;
@@ -358,7 +361,7 @@ impl Cpu {
     /// Every buffer a request carries, as `(input, output)` lists — the list
     /// form of [`Cpu::ipc_input_buffer`] and [`Cpu::ipc_output_buffer`], for
     /// the services that want all of them rather than one by index.
-    pub(super) fn ipc_buffers(&self, tls: u32) -> (Vec<(u32, u32)>, Vec<(u32, u32)>) {
+    pub(super) fn ipc_buffers(&self, tls: u32) -> (Buffers, Buffers) {
         let header = self.ipc_header(tls);
         let send = (0..header.send_buffers.max(header.send_statics))
             .filter_map(|index| self.ipc_input_buffer(tls, index))
@@ -499,8 +502,8 @@ impl Cpu {
         let has_handles = !copy_handles.is_empty() || !move_handles.is_empty();
         // { send_pid:1, num_copy:4, num_move:4 }
         let handle_desc = ((copy_handles.len() as u32) << 1) | ((move_handles.len() as u32) << 5);
-        let raw_data_words = ((raw_data.len() as u32) + 3) / 4;
-        let object_words = ((domain_objects.len() as u32) * 4 + 3) / 4;
+        let raw_data_words = (raw_data.len() as u32).div_ceil(4);
+        let object_words = ((domain_objects.len() as u32) * 4).div_ceil(4);
         // SFCO header (4 words) + raw data + domain header/objects when needed,
         // padded so pre+post = 4 words.
         let mut raw_section_words = 4 + raw_data_words + 4;

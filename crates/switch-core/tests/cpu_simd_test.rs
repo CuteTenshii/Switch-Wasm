@@ -195,8 +195,8 @@ fn simd_ins_element_moves_one_lane_and_leaves_the_rest() {
     // v31 holds 'n' (as `ldr b31, [x0]` would leave it); one source register
     // per remaining character, each with the byte in lane 0.
     cpu.set_vreg(31, 0x6E);
-    for (i, ch) in [b's', b':', b'a', b'm', b'2'].into_iter().enumerate() {
-        cpu.set_vreg(29 - i as u8, u128::from(ch));
+    for (i, ch) in b"s:am2".iter().enumerate() {
+        cpu.set_vreg(29 - i as u8, u128::from(*ch));
     }
     let code = [
         ins_elem_b(31, 1, 29, 0),
@@ -399,9 +399,7 @@ fn simd_scalar_byte_load_and_stur_q() {
     assert_eq!(
         cpu.mem
             .read_into(0x3008, &mut [0u8; 16])
-            .and_then(|_| Ok(u128::from_le_bytes(
-                cpu.mem.dump(0x3008, 16).unwrap().try_into().unwrap()
-            )))
+            .map(|_| u128::from_le_bytes(cpu.mem.dump(0x3008, 16).unwrap().try_into().unwrap()))
             .unwrap(),
         0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00
     );
@@ -1614,7 +1612,7 @@ fn narrowing_to_half_saturates_rounds_and_flushes_at_the_edges() {
 fn widening_from_half_handles_subnormals_and_infinities() {
     let cases: [(u16, f32); 5] = [
         (0x0001, 5.960_464_5e-8), // the smallest subnormal, 2^-24
-        (0x03FF, 6.097_555_2e-5), // the largest subnormal
+        (0x03FF, 6.097_555e-5),   // the largest subnormal
         (0x0400, 6.103_515_6e-5), // the smallest normal, 2^-14
         (0x7C00, f32::INFINITY),
         (0xFC00, f32::NEG_INFINITY),

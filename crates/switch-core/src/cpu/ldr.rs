@@ -344,6 +344,6 @@ impl Cpu {
     /// argument `ro` takes has to be — it is mapping memory, and half a page
     /// of a module is not something to map.
     fn ro_is_page_aligned(value: u64) -> bool {
-        value % crate::mem::PAGE_SIZE as u64 == 0
+        value.is_multiple_of(crate::mem::PAGE_SIZE as u64)
     }
 }
