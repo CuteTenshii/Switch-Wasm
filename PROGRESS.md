@@ -1,755 +1,299 @@
 # switch-wasm — boot status
 
 Goal: get real homebrew and real retail titles to **run**, and put what they
-render on the canvas. This is the log of what broke and what it taught.
-AGENTS.md is the standing state.
+render on the canvas. This is the log of what broke and what it taught; AGENTS.md
+is the standing state and carries every rule that came out of it.
 
 ## Where it stands
 
 `.nro`/`.nsp` files are gitignored, so only `test-nros/` re-runs from a clean
-checkout. "measured" = run against this tree; the rest is carried forward from
-whenever it was last recorded.
+checkout. "measured" = run against this tree; the rest is carried forward.
 
 | Title | Result | Frame | |
 |---|---|---|---|
 | `hbmenu.nro` | full UI, responds to a controller | yes | measured |
 | `sdl-hello.nro` | exits cleanly at 11.1M steps, 2061 non-black pixels | yes | measured |
-| `NX-Shell.nro` | halts at 433,783 steps, no output — **regressed**, see below | no | measured |
-| Home Menu (`qlaunch`) | draws; 88 draws a frame on the WebGPU backend | yes | AGENTS.md |
+| `NX-Shell.nro` | halts at 433,783 steps, no output — **regressed** | no | measured |
+| Home Menu (`qlaunch`) | draws; 88 draws a frame on the WebGPU backend | yes | carried |
 | `sysinfo` / `NX-Fetch` / `nxdumptool` | render | yes | carried |
 | `JKSV.nro` | full UI: text, icons, save tiles | yes | carried |
-| `Checkpoint.nro` | layout and chrome; text was solid blocks for want of `SHFL`, unchecked since | yes | carried |
-| "A Short Hike" (NSP) | composites a full 1280x720 frame; steady state is 2 draws a frame and never a scene | partial | measured |
-| "Minecraft" (NSP) | the world, on the device: 110 draws a frame, none falling back | yes | measured |
-| "Tomodachi Life" (NSP) | its loading screen, every pixel of it, at 3.98B steps | yes | measured |
+| `Checkpoint.nro` | layout and chrome; text unchecked since `SHFL` landed | yes | carried |
+| "A Short Hike" (NSP) | composites 1280x720; steady state 2 draws, never a scene | partial | measured |
+| "Minecraft" (NSP) | the world, on the device: 110 draws a frame, no fallbacks | yes | measured |
+| "Tomodachi Life" (NSP) | its loading screen, every pixel, at 3.98B steps | yes | measured |
 
 A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` →
 `sdk` through real `nnSdk` init, gets its heap, events and input, brings up its
 graphics stack, opens its audio device, and runs on into its own loop. **Every
 service it asks for has a real implementation** — a full boot logs no `no
-implementation` and no `unimplemented` lines.
+implementation` and no `unimplemented` lines. `make test`: **908 tests passing**.
 
-`make test`: **908 tests, all passing.**
+## Method, which is the part that generalises
 
-## Homebrew
+- **Silence is not evidence.** `/dev/nvhost-ctrl-gpu` `0x13` (`VsmsMapping`) was
+  the only line a whole retail run logged, which made it look causal. Answering
+  it with any scalar, refusing it, and implementing it properly all give
+  byte-identical GPU statistics and the same spinning pc. The emulator only logs
+  the gaps it knows it has.
+- **A step counter that keeps climbing is not a title that keeps running.** Just
+  Dance 2023 reached seven billion steps with the main thread retiring a
+  *constant* 760M at every budget — everything after was two threads re-asking
+  `svcWaitSynchronization` on each slice. Profiling at four budgets is what
+  showed it; the fix (parking waits) took the Home Menu's tenth frame from 170.6M
+  steps to 39.2M, byte-identical.
+- **A frozen title is often a configuration difference, not a bug.** Host
+  examples boot handheld and the browser is usually docked, so a title told 720p
+  with a 1080p swapchain composites into a corner that reads exactly like a
+  rendering fault. `DOCKED=1` in `Title::boot` settles it.
+- **Prove a new decode guard reaches a real encoding**, and reach for
+  `tools/difftest.py` before hand-deriving an expected value. About thirty decode
+  bugs came out of the three homebrew titles and nearly all were one shape: a
+  guard that tested a field including a fixed bit, so a whole encoding group was
+  dead code. The rest were sign-extension widths.
+- **The file is the oracle, the spec is not.** AES-CTR with the wrong key still
+  "decrypts" into plausible garbage, so decryption is verified by matching a
+  Program NCA's ExeFS against Nintendo's own stored SHA-256.
+- **Ask where a draw's fragments died before blaming the pipeline.** `TRACE_DRAW`
+  tallies culled/degenerate/uncovered/killed/written per draw, and `culled=2` of
+  `tris=2` on exactly the blits is what found the winding bug below. The `[gpu]
+  draw` line names the render target's cpu address beside the cull state, which
+  is what tells a title compositing offscreen from a title whose composite was
+  dropped — both are a black frame otherwise.
+- **Getting the backtrace is what makes a fault findable.** `dump_exefs` lays the
+  modules out at their real load addresses and writes a sorted `symbols.txt` from
+  `sdk`'s 36,622 `DT_HASH` symbols; `0x0ce6c0c8` says nothing,
+  `sdk!nn::diag::detail::Abort+0x18` says everything.
+- **Nothing in the tree looked slow.** A `perf` profile of a Home Menu boot came
+  back 37% `getenv` and 18.7% SipHash — together more than the shader
+  interpreter, the rasterizer and the ARM interpreter combined. 73.6 s → 27.7 s,
+  every frame byte-identical.
 
-**hbmenu** draws its whole UI and responds to a controller (+ exits, which is
-how input was verified end to end). Needed guest threads with real mutex/condvar
-handoff, the `blr x30` fix, and a shared font — `pl:u` reported the font set
-loaded but empty, and homebrew has no font of its own. Its icon's JPEG decode
-is pixel-exact against a reference. It never touches the shader core: its
-command list is one `dkCmdBufCopyBufferToImage` plus a fence.
+## Retail boot: what each fault was
 
-**NX-Shell** halts at 433,783 steps with no console output and no frame, with
-or without a font. This file used to record a clean `ExitProcess` at 15,692,155
-steps *with* output — 36x further. **That is an unchased regression**, and the
-`.nro` is in `test-nros/`, which makes it the cheapest thing here to bisect.
+- **`rtld` has no MOD0 header.** `NSO_ENTRY_OFFSET` (`.text`+0x30) is only right
+  for modules that have one; `rtld`'s `.text`+0 is real code that establishes its
+  own load address. Jumping past it left the base at 0 and a `bss_end - base`
+  zero-fill overwrote the loop running it. Cost 25M instructions to find.
+- **`rtld` finds its own modules** with `svcQueryMemory`, looking for
+  `CodeStatic` + `R-X`. A blanket RWX permission and single-range read-only
+  tracking both broke that.
+- **The `sdk` abort was a recursive-lock assertion on an untouched mutex**, and
+  three real bugs fell out of naming the backtrace: the main thread handle was
+  never delivered (it is X1), `svcGetInfo` CoreMask/PriorityMask fell into a
+  `_ => 0` default, and `svcWaitSynchronization` answered X1 = 1 where X1 is the
+  signalling handle's *index*.
+- **Success with an unfilled out parameter, repeatedly.** `GetFirmwareVersion`
+  never wrote its struct, so NX-Fetch displayed "Horizon OS 115.119.105" — the
+  ASCII of `swi`, left in the buffer by an earlier `acc` call, and load-bearing
+  because libnx seeds `hosversionGet()` from it. `CloneCurrentObject` returned no
+  session handle. `IStorage::Read` used `IFile::Read`'s field layout.
+- **A stub that answers every unknown command with success is worse than one that
+  fails.** `SetupGpuErrorHandler` asked for an event, got "success" and no
+  handle, and filed handle 0.
+- **One field width cost a whole title.** `OpenAudioOut`'s channel count is 16
+  bits on the wire and the two bytes above are uninitialised padding; echoing the
+  whole word back reported 0xcafe0002 channels, so Unity tore audio down without
+  `CloseAudioOut` and the retry hit a registry that still held the device open.
+- **The address-space split, not the allocator.** Tomodachi Life started a thread
+  on a null 800M instructions in because `svcGetInfo` reported 1.5 GiB total and
+  the title spent it on pools it sizes *from that same figure*, while the other
+  1.5 GiB was an alias region it never touches. Each layout now spends the space
+  on the region its own titles grow into.
+- **A pointer buffer a caller is told it cannot use.** Every session answered
+  `QueryPointerBufferSize` with 0, and `nnSdk` measures an explicit
+  `SfBufferAttr_HipcPointer` argument against it before sending —
+  `PointerBufferTooSmall`, nothing sent. That was Tomodachi Life's `sf` 11-141
+  abort at 2,524,316,651 steps. Answering 0x8000 then exposed the second half:
+  `cmifRequestInAutoBuffer` fills in both descriptor forms and nulls the one it
+  did not choose, so nvdrv's AutoSelect ioctl argument came through as a null
+  map-alias buffer and `nvn` gave up on graphics at 33M steps. `ipc_pick_buffer`
+  is the rule; `ipc_map_buffers` is gone.
+- **An `nn::hid` state is read under a seqlock and bit 0 is the lock.** A storage
+  entry's sampling number is the state's own **doubled**. Publishing it undoubled
+  made the first sample odd and Tomodachi Life's main thread sat in that retry
+  loop for 20 billion instructions with every counter byte-identical. `libnx`
+  never looks at the bit, so no homebrew could have shown it.
+- **`hid` samples on a clock, not on input.** Publishing only on host input froze
+  the sampling number, and a title waiting for a newer sample waited forever.
+  That was also why the CLI could not reproduce what the browser saw: a hand on
+  the keyboard kept the LIFO moving.
+- **A `Poll` that returns instantly is not one that reports nothing ready.**
+  NXpotify's Zeroconf listener is `if (poll(&pfd, 1, 200) <= 0) continue;` — with
+  no blocking syscall it starved every other thread.
 
-**sdl-hello** (libtransistor, which validates replies libnx ignores) boots
-through libnx + SDL init and exits cleanly, presenting a partial frame. Its
-`vi`/binder requests use libtransistor's own non-CMIF marshalling, which the
-command-id scan only partly reads.
+## Containers
 
-**About thirty decode bugs came out of these three.** Nearly all were one
-shape: *a guard that tested a field including a fixed bit, so a whole encoding
-group was dead code.* The rest were sign-extension widths. Two lessons, and
-they are the only part worth carrying:
-
-- **Prove a new guard reaches a real encoding** before believing it.
-- **Reach for `tools/difftest.py` before hand-deriving an expected value.** It
-  diffs the decode against real ARM under `qemu-aarch64`; it found six integer
-  bugs in one pass after a JPEG came out grey and magenta.
-
-## Block translation (`cpu/jit.rs`)
-
-First visit to an address translates forward into ops — operands extracted,
-immediates decoded — until something moves the PC; that block is cached and
-every later visit runs it with no decoding. It removes **decode, not dispatch**,
-and generates no code, so anything untranslated falls back to the interpreter
-and the two are the same computation (`jit_difftest` diffs the two machines
-and they agree).
-
-Worth ~1.9-2.3x — **measured on the host, and that ratio does not transfer**.
-It came from two engines timed through rustc's x86-64 backend; the browser
-recompiles the same wasm with its own register allocator and a bounds check on
-every guest load, and the two builds do not disagree by a constant. What does
-transfer is the work: hbmenu enters each of its 10,645 blocks 535 times, which
-is why it pays, and a run too short to re-enter its blocks shows no benefit at
-all. `--example jit_coverage` names what is still untranslated and
-`tools/wasm_bench.mjs` is where a speedup is confirmed.
-
-Staleness is the memory's job, not the translator's: `Memory` keeps a dirty bit
-per page and the JIT drops blocks from dirtied pages. A block never spans a
-page, so invalidation is exact.
-
-A real wasm JIT is blocked by the **memory model, not the browser**: a generated
-module can only address its own linear memory, and guest memory is a page table.
-Flattening it behind a base-plus-bounds check comes first.
+- **A cartridge image is the same container one layer down.** An XCI's root is an
+  HFS0 whose entries are the cartridge's partitions, each an HFS0 holding NCAs;
+  HFS0 is PFS0 with a 0x40-byte entry. So the reader is `Pfs0`'s given an offset
+  and an entry stride, and `Xci::content` flattens the partitions into the one
+  file table every reader above already takes. Two rules the flattening keeps:
+  `update` is left out (it is a firmware bundle with Program content among it,
+  and every search that follows is "the first/last NCA of type X"), and `secure`
+  goes last, because the Program scan keeps the last match. Verified by repacking
+  "A Short Hike" into an XCI and booting it to the same frame 3.
+- **Four decryption bugs, each flipping the hash from mismatch to match**: the
+  section table is `u32 start; u32 end` in 0x200-byte media units, not a `u64`
+  pair; the AES-CTR counter runs across the section's **absolute** position; a
+  ticket's `common_key_id` needs the same +1 generation adjustment the key area
+  gets; an IVFC section's byte 0 is the hash table, and the real data is at the
+  last level's `logical_offset` (hactool reads a fixed index 5 regardless of
+  `num_levels`, which reads 7 on a real file whose level array holds 6).
+- **An update NSP holds no game.** Its Program NCA carries a complete ExeFS —
+  patched modules, not a delta — and a RomFS section encrypted `AesCtrEx`: the
+  BKTR form, holding only the changed ranges plus the two tables indexing them
+  against the base. `bktr.rs` composes the pair, streaming both containers. The
+  subsection counter replaces the section counter's **generation** word, not its
+  secure value — the wrong way round is quiet, because the tables still decrypt
+  and every byte of *data* is noise. An update's Program NCA carries the **base**
+  title id, so pairing is by program id and what identifies a container as an
+  update is that its RomFS is a patch.
+- **DLC is not an update, and is much less than one**: one Data NCA with an
+  ordinary RomFS whose title id is the base's plus an index, mounted through
+  `OpenDataStorageByDataId` — the same path a system data archive takes, so the
+  reading half was already built. What was missing was `aoc:u` saying the content
+  exists, since a title never asks for content the list does not have.
 
 ## GPU
 
-The nvdrv/nvmap/GMMU/channel/copy-engine path is real, as is the 3D shader
-core — a Maxwell SASS interpreter feeding a software rasterizer, with compute
+The nvdrv/nvmap/GMMU/channel/copy-engine path is real, as is the 3D shader core
+— a Maxwell SASS interpreter feeding a software rasterizer, with compute
 dispatches on the same interpreter one thread at a time. `switch-gpu` is a
-separate `wgpu`/WebGPU backend that translates SASS to WGSL; the rasterizer is
-the reference it must agree with, and anything it cannot express falls back.
+separate `wgpu` backend translating SASS to WGSL; the rasterizer is the reference
+it must agree with.
 
-**One transport bug stopped all of device init.** An ioctl whose argument
-carries a `{ buf_size, buf_addr }` pair returns its payload *through* that pair,
-and the IPC layer wrote back only the first receive buffer. `libnx` reads the
-payload inline and worked; `nnSdk` uses `nvIoctl3` and read a **zeroed** GPU
-characteristics struct. A GPU with no architecture is one a driver rejects — it
-closed the device and returned null, which `NvRmGpuDeviceGetInfo` dereferenced.
+**One transport bug stopped all of device init.** An ioctl whose argument carries
+a `{ buf_size, buf_addr }` pair returns its payload *through* that pair, and the
+IPC layer wrote back only the first receive buffer. `libnx` reads the payload
+inline and worked; `nnSdk` uses `nvIoctl3` and read a zeroed GPU characteristics
+struct, so the driver closed the device and returned null.
 
-**What is left unimplemented, counted rather than guessed.** Tracing every
-ioctl five guests issue and grouping by `(type, nr)` is a much shorter list than
-the ioctl tables suggest: every command `libnx` sends is implemented, and so is
-every command the two retail titles send. `ZbcSetTable`/`ZbcQueryTable` had to
-hold what they are given rather than answering a bare success — a driver told
-"nothing is registered, ever" re-registers forever. Same for `EventSignal`/
-`EventWaitAsync`: a driver parking on a slot nothing would set.
+**An ioctl that holds nothing is worse than one that fails.**
+`ZbcSetTable`/`ZbcQueryTable` had to keep what they are given rather than answer
+a bare success — a driver told "nothing is registered, ever" re-registers
+forever. Same for `EventSignal`/`EventWaitAsync`, where the driver parks on a
+slot nothing would set.
 
-**`VsmsMapping` is the cautionary tale.** `/dev/nvhost-ctrl-gpu` `0x13` is in
-no libnx header and no other emulator implements it; it was identified from its
-caller's disassembly rather than a table. It was also the only line a whole
-retail run logged, **which made it look causal, and it is not** — answering it
-with any scalar, refusing it, and implementing it properly all give
-byte-identical GPU statistics and the same spinning pc. *The emulator only logs
-the gaps it knows it has; a title that never issues a draw logs nothing at all.
-Silence is not evidence.*
-
-**Four `texs` bugs, and the reason the screenshot regression exists.** Each
-masked the next, so the symptom never looked like four things:
+**Four `texs` bugs, each masking the next**, which is why the symptom never
+looked like four things:
 
 - A `texs` has **two destination registers, not one run of four** — invisible
-  whenever `dst2 == dst + 2`, which is exactly what the fixture it was first
-  checked against did. JKSV's glyph shader clobbered the `1/w` every later
-  `ipa` multiplies by, so every glyph came out alpha-zero: text present and
-  completely invisible.
+  whenever `dst2 == dst + 2`, exactly what the first fixture did. JKSV's glyph
+  shader clobbered the `1/w` every later `ipa` multiplies by, so every glyph came
+  out alpha-zero: text present and completely invisible.
 - **The handle immediate is a dword index into the driver constant bank, not a
-  byte offset.** Reading it as bytes landed in the fixed header ahead of the
-  table, which begins `0, 1, 2, 3…` — that looks *exactly* like a plausible
-  handle table, so every draw resolved to a plausible handle, and every draw
-  resolved to the same one. A page of text sampled one glyph over and over.
-- **`TexCbIndex` is a register, not a constant** — Mesa writes 15, deko3d
-  writes 0. Hard-coding 15 sent every deko3d texture fetch at a bank deko3d
-  never binds.
-- **Whether the viewport flips y is a register, not a constant.** Hard-coding
-  the flip turned every offscreen target upside down.
-
-Also: a *fixed* vertex attribute (no vertex buffer behind it) was an error,
-which dropped the whole draw rather than reading the `vec4` default — two JKSV
-draws thrown away over an attribute their shader never reads. And `SetDstWidth`
-counts **elements, not bytes**, which shredded block-linear images into strips.
-Reading from a *disabled* buffer is still an error, because that means a
-register was read wrong and there is no correct value to invent.
+  byte offset.** Reading it as bytes landed in the header ahead of the table,
+  which begins `0, 1, 2, 3…` — a plausible handle table, so every draw resolved
+  to a plausible handle, and every draw resolved to the same one.
+- **`TexCbIndex` is a register, not a constant** — Mesa writes 15, deko3d 0.
+- **Whether the viewport flips y is a register, not a constant.**
 
 **A Unity title is written in `half`, and none of it decoded.** "A Short Hike"
-renders its scene into an RGBA16Float target and composites the frame out of it
-with two full-screen quads. Both quads were dropped — one on sampling a float
-texture, which `texel_kind_for` accepted in UNORM only, and one on the fp16
-ALU — along with 145 other draws. So nothing ever wrote the swapchain buffer
-and it presented the zeros it was allocated with: not a black frame, an
-**empty** one, which on a canvas is transparent rather than dark.
+renders into an RGBA16Float target and composites with two full-screen quads;
+both were dropped, one on sampling a float texture and one on the fp16 ALU, so
+nothing wrote the swapchain and it presented the zeros it was allocated with —
+transparent, not black. Two things worth carrying: **110 of the 145 dropped draws
+were `hadd2.f32`**, a plain float add issued on the half unit, so most of what a
+`half` shader costs is not half arithmetic; and **`f32_to_f16` had to stop
+truncating** — as the rounding step of every fp16 instruction, round-to-zero
+biases a whole shader. It now rounds to nearest, ties to even, reaching the
+subnormals, which is the mode WGSL's `pack2x16float` uses.
 
-The whole half-precision group (`hadd2`/`hmul2`/`hfma2`/`hset2`/`hsetp2`,
-opcodes and field positions from Eden's `maxwell.inc`) is decoded now. Two
-things about it are worth carrying:
+**Unity culls on the CPU**, so a title whose scene or camera is wrong emits *no
+draw calls at all* rather than draws that cover nothing. A Short Hike's steady
+state is two draws a frame forever, frames 30 and 300 byte-identical to frame 1,
+47% of instructions in the Boehm GC's mark loop — IL2CPP working normally, simply
+producing no renderers. Zero scene draws is the title's own state; chasing it
+through the GPU is chasing the wrong end.
 
-- **110 of the 145 were `hadd2.f32`** — swizzles and merge all `F32`, which is
-  a plain float add issued on the half unit. Most of what a `half` shader costs
-  you is not half arithmetic.
-- **`f32_to_f16` had to stop truncating.** Rounding towards zero cost at most
-  an ulp of a render target; as the rounding step of every fp16 instruction it
-  biases a whole shader. It rounds to nearest, ties to even, and reaches the
-  subnormals — the mode WGSL's `pack2x16float` uses, so both backends agree.
+**Minecraft: three gaps, each hiding the next.** Every draw read a `4x16`
+half-float attribute neither backend could fetch (110 draws, 110 skipped, 0
+pixels lit, and in a browser the first fallback latches `software_frame`, which
+is where the frame time went). Then every fragment shader opened with
+`ipa.centroid`, and `Op::Unimplemented` is fatal to the interpreter as well as
+untranslatable. Then the frame came out upside down — not the viewport, but
+`QUEUE_BUFFER` throwing away a `QueueBufferInput` that said `FLIP_V`.
 
-With those closed every one of the 295 draws rasterizes and the frame is no
-longer empty. 293 of them still cover no pixels — 161 triangles culled and 60
-degenerate with all three vertices on one screen point — and **that is not a
-bug**: they are one-time Unity shader warm-up, which renders every variant
-once with degenerate geometry on purpose. They happen at frame 1 and never
-again.
+**`SHFL` took a quad to run**, and three things came out of it: a shuffle is only
+half of a derivative (`FSWZADD` subtracts in whichever direction the lane's
+position calls for, so decoding the shuffle alone leaves every such shader
+failing on the *next* instruction); both operands are a register or an immediate
+and the immediate sits in a *different field* from the register, so reading the
+wrong field gives a plausible lane number rather than an error; and helper lanes
+are the point, not an artefact, which is why the quad walk is gated on the
+program containing a `shfl` or `fswzadd`.
 
-**The steady state is two draws a frame, forever.** Frames 30 and 300 are
-byte-identical to frame 1 (519,438 lit pixels), and each costs three clears, a
-blit, two full-screen quads and 1.8M instructions. So the title is not still
-loading — it has settled. `TRACE_IPC` says it asks the system for nothing but
-its two nvdrv ioctls and two `vi` parcels per frame: no filesystem, no `am`,
-nothing pending. Its own code is running — 47% of steady-state instructions
-are the Boehm GC's mark loop, which is IL2CPP working normally — and simply
-produces no renderers.
+**Which winding is front is decided in NDC.** Facing was read off screen-space
+signed area, on the reasoning that the viewport's y scale decides winding "as it
+does on hardware". It does not — `SetWindowOrigin` bit 4 is the only thing that
+reverses it, and deko3d drives that and `viewportFlipY()` as two separate flags.
+So culling was inverted for every title whose driver flips y, which is every
+title built against nnSdk: Tomodachi Life's single full-screen composite quad was
+thrown away and the frame was black. The rasterizer's own culling fixture had
+encoded the inversion too — its "clockwise in NDC" triangle has a shoelace of
+**+4**. hbmenu, JKSV, sysinfo, NX-Fetch and the Home Menu are byte-identical
+either way: content that does not cull, or does not flip y, never reached it.
 
-That is the shape to remember: **Unity culls on the CPU**, so a title whose
-scene or camera is wrong emits *no draw calls at all* rather than draws that
-cover nothing. Zero scene draws is a symptom of the title's own state, not of
-the rasterizer, and chasing it through the GPU is chasing the wrong end. The
-vertex buffer those warm-up draws read is written by the title's own `memcpy`
-from a source that is already zero — real, and a red herring for the same
-reason.
-
-**`AntiAliasEnable` does not size a surface; `MsaaMode` does.** What the frame
-*did* say was that its content sat in exactly the left 640x720 of a 1280x720
-image — half the width, and the same quarter-of-the-frame shape Just Dance
-2019 had before the sample grid existed at all. The title binds a 2560x720
-target and sets `MsaaMode` 5 (`2x1_D3D`) the four times it binds it: that is
-1280x720 *pixels* at two samples each. `sample_grid` answered "one sample per
-pixel" whenever the enable bit was clear, so the surface read as 2560 pixels
-wide, its 1280-pixel clear rect covered the left half, and the title's own
-2:1 resolve blit shrank that to a quarter.
-
-The gate was a guess — that a guest might leave a stale mode behind — and it
-cannot work, because the surface registers count texels either way. Eden sizes
-a render target from `anti_alias_samples_mode` alone and never reads
-`anti_alias_enable` at all. What the bit really means is GL's `GL_MULTISAMPLE`:
-coverage is evaluated once at the pixel centre instead of per sample, which is
-`SampleGrid::per_pixel_coverage` and moves no texels. The frame goes from
-519,438 lit pixels to **921,600** — exactly 1280x720, the whole resolved
-image — with hbmenu and the Home Menu byte-identical.
-
-**Then run it in the mode the frontend actually uses.** Every example booted
-handheld, because that is `OperationMode::default()` and none of them set
-anything else — while the browser's dock toggle is usually on. A title told
-720p whose swapchain is 1080p composites its frame into a corner of that
-buffer, and the corner reads exactly like a rendering bug. It is not one:
-`DOCKED=1` — in `Title::boot`, so every retail and applet example has it —
-fills all **2,073,600** pixels of a 1080p frame, byte-identical to what the
-browser was showing. Two frames that disagree are worth checking for a
-configuration difference before they are worth debugging.
-
-**The colour write mask was unimplemented**, which the same trace turned up:
-`SetCtWrite` (0x680, one register per target, a nibble per channel) plus
-`ColorMaskCommon` (0x3E4). "A Short Hike" writes it 420 times a frame and
-turns **alpha off for 99 of its draws** and every channel off for one. Writing
-all four regardless overwrites exactly what a title meant to keep — and alpha
-is what a frame's opacity is read out of, which is the same failure the fp16
-gap produced by a different route. An unwritten mask has to read as *all*
-channels: zero is the register file's initial value and would blank every
-guest that leaves it alone.
-
-**`SHFL` is decoded now, and it took a quad to run.** A scalar interpreter
-cannot answer it — the value belongs to another invocation — so the four pixels
-of a 2x2 quad run in lock-step: each lane runs to its next shuffle, the warp
-exchanges, and all of them go on. That is the barrier machinery a compute
-dispatch already had (`Halt::Shuffle` beside `Halt::Barrier`), which is why the
-same resolver serves a fragment quad and a kernel's warp of 32. Three things
-came out of it:
-
-- **A shuffle is only half of a derivative.** `SHFL.BFLY` fetches the
-  neighbour's value and `FSWZADD` subtracts it in whichever direction the
-  lane's own position in the quad calls for — two lanes add and two subtract,
-  one instruction, no branch. Decoding the shuffle alone would leave every one
-  of those shaders failing on the instruction *after* the one just
-  implemented.
-- **Both of its operands are a register or an immediate, and the immediate
-  sits in a different field from the register** (lane index: five bits at 20
-  or a register at 20; clamp/segment: thirteen bits at 34 or a register at
-  39), with a flag apiece. Reading the wrong field gives a *plausible* lane
-  number rather than an error — the same shape as the `texs` handle bug.
-- **Helper lanes are the point, not an artefact.** A quad shades the pixels
-  its triangle misses and throws the colour away, because they are what the
-  covered lanes difference against. That is real work no other draw does, so
-  the quad walk is gated on the program containing a `SHFL` or `FSWZADD`;
-  everything else keeps the pixel-at-a-time loop. The Home Menu's frame is
-  byte-identical across the change.
-
-Checkpoint's `.nro` is not in the tree, so the text it draws with these has
-not been looked at since.
+Smaller ones: **`AntiAliasEnable` does not size a surface; `MsaaMode` does** (a
+2560x720 `2x1_D3D` target read as 2560 pixels wide, and the title's own resolve
+shrank the frame to a quarter). **The colour write mask was unimplemented** —
+A Short Hike writes `SetCtWrite` (0x680, a nibble per
+channel) and `ColorMaskCommon` (0x3E4) 420 times a frame and turns alpha off for
+99 draws, and an unwritten mask must read as *all* channels, since zero is the
+register file's initial value. **`VOTE.VTG` writes neither register nor
+predicate**, but a refused instruction fails the whole draw — all 52 of them. A
+*fixed* vertex attribute with no buffer behind it must read the `vec4` default
+rather than dropping the draw; a *disabled* one is still an error, because that
+means a register was read wrong. **`SetDstWidth` counts elements, not bytes.**
 
 **Where a frame's time goes** (ablation on 30 JKSV frames): fragment shader
 interpretation 36%, rasterize/depth/blend/pixel I/O 30%, ARM interpreter 25%,
-texture sampling 9%.
-
-**A fragment shader runs once per covered pixel, and a full-screen pass is
-921,600 of them.** NXpotify was 2.6 s/frame because a texture result rescanned
-the program to find where to land — and the scan built a `Vec` per instruction,
-about a hundred heap allocations per pixel. Where a result lands is a property
-of the *decoded program*, not the invocation. That plus two allocations
-(`HashMap` attributes → flat array, one `Invocation` per draw instead of per
-pixel) took it to 0.67 s/frame, every frame byte-identical. Reusing the
-`pending` vector was measured at no effect and dropped rather than kept on the
-theory that it should have helped.
-
-### Minecraft: three gaps, and each one hid the next
-
-The title ran at ~5 fps in a browser and presented black frames. Three separate
-faults, found in that order:
-
-**Every draw read a `4x16` half-float attribute, and nothing could fetch one.**
-`vertex_format` had no WebGPU spelling for `DkVtxAttribSize_4x16`, so the
-backend refused all 110 draws of a frame; `attrib_shape` had no entry either,
-so the rasterizer they fell back to refused them again. 110 draws, 110
-`draws_skipped`, **0 of 921,600 pixels lit** — and in a browser the first
-fallback latches `Gpu::software_frame`, which is where the frame time went. All
-four 16-bit shapes are decoded now; `4x16` and `2x16` also build a pipeline,
-`3x16` and `1x16` are the rasterizer's for want of a WebGPU format, exactly as
-the odd 8-bit shapes are.
-
-**Then every fragment shader opened with `ipa.centroid`.** Sample mode 1 was
-refused with offset sampling, and `Op::Unimplemented` is fatal to the shader
-interpreter as well as untranslatable to WGSL — so the draws still went
-nowhere. Centroid is exact for both renderers here: each shades one invocation
-per sample, at that sample's own centre, and only runs where the sample is
-covered. It is still declared `@interpolate(linear, centroid)`, which the
-vertex stage has to be *told* because only the fragment program's `ipa` says
-it, and stages that spell an `@interpolate` differently do not link.
-
-**Then the frame came out upside down.** Not the viewport: Minecraft programs
-`scale_y = +360` where the Home Menu programs `-360`, and the backend's negate
-is right for both — mirroring the transform instead culled every triangle,
-which is the proof it was right. The title renders y-down and queues the
-buffer `NATIVE_WINDOW_TRANSFORM_FLIP_V`, and `QUEUE_BUFFER` threw the whole
-`QueueBufferInput` away. `Gpu::present` reads the row the transform names. A
-Short Hike queues `0` and is unaffected; the Home Menu is byte-identical.
-
-The applet path (`PresentSharedFrameBuffer`) still passes `0`. Its signature
-names a transform between the crop and the swap interval, but at the offset the
-field widths imply the Home Menu reads back `FLIP_H` and is plainly not
-mirrored, so the layout is unverified and nothing is applied.
-
-**What is left is the CPU.** With every draw on the device, a steady frame is
-still 173-220 ms, and the software rasterizer is not in it: 21.9 billion
-instructions buys 20 frames. Minecraft is CPU-bound here, not GPU-bound.
-
-**And the rasterizer still renders it black** — 110 draws, `draws_skipped: 0`,
-0 of 921,600 pixels lit, at frame 3 and frame 20 alike, where the device draws
-the same frame correctly. The rasterizer is the reference every other path is
-checked against, so this is a hole in the check rather than a cosmetic gap.
-
-## Performance
-
-**Two things nobody was looking at cost more than everything they were.** A
-`perf` profile of a Home Menu boot came back **37% `getenv`** and **18.7%
-SipHash** — together more than the shader interpreter, the rasterizer and the
-ARM interpreter combined. Neither is emulation:
-
-- `std::env::var("TRACE_...")` is a linear scan of the environment, and forty
-  of those sat in per-syscall, per-IPC and per-draw paths. `env_flag!` reads
-  each switch once into a `OnceLock`. Nothing can change the environment under
-  a running emulator.
-- `HashMap`'s default hasher is built to survive keys an attacker chose. Every
-  key here is a handle or a guest address this emulator minted itself, and
-  `horizon_syscall` looks several up per syscall. `IdMap` is the same map with
-  a multiply for a hash.
-
-Together **73.6 s -> 27.7 s** on the same boot, min-of-3, every frame
-byte-identical. The lesson is the measurement, not the fixes: nothing in the
-tree *looked* slow, and a profile found half the run in code that does no
-work.
-
-One trap worth keeping. The obvious integer hash is one multiply, and it moves
-entropy **upward** only — while `HashMap` picks its bucket with the **low**
-bits. Straight fxhash put all 4096 page-aligned addresses in one bucket. The
-fix is a shift and an xor in `finish`, and the test asks for the birthday
-limit on dense, page-aligned and sector-aligned keys rather than for
-perfection.
-
-## Retail NCA/NSP
-
-**A cartridge image is the same container one layer down.** An XCI's root is
-an HFS0 whose entries are the cartridge's partitions — `update`, `normal`,
-`secure`, `logo` — and each of those is an HFS0 holding NCAs; HFS0 is PFS0
-with a 0x40-byte entry that adds a hash. So the reader is `Pfs0`'s, given an
-offset to start at and an entry stride (`Pfs0::read_partition_at`), and
-`Xci::content` flattens the partitions into the one file table every reader
-above already takes. Nothing else changed: the Program NCA scan, the Control
-NCA, the bundled ticket, the browser's file list and `switch_open_nsp` were
-already written against a file table and a source.
-
-Two rules the flattening has to keep. The `update` partition is left out — it
-is a firmware bundle, dozens of system NCAs with Program content among them,
-and every search that follows is "the first/last NCA of type X" — and `secure`
-goes last, because the Program scan keeps the *last* match (the rule that
-picks an update's program over the base game's). The absolute-offset fallback
-that reads repacked `.nsp`s is off for a nested partition: inside an image an
-offset that "fits" measured from byte 0 is a coincidence, not a producer's
-intent.
-
-Verified end to end by repacking "A Short Hike" into an XCI and booting it:
-same NACP and icon, same frame 3.
-
-
-**Decryption is verified against a real commercial title**, not a synthetic
-test: a Program NCA's ExeFS decrypts and its SHA-256 matches Nintendo's own
-stored master hash. That hash check is the whole method — AES-CTR with the
-wrong key still "decrypts" into plausible-looking garbage, so **the file is the
-oracle and the spec is not**. Every bug below flipped it from mismatch to match:
-
-- The section table is `u32 start; u32 end` in 0x200-byte media units, not a
-  `u64 offset; u64 size` byte pair.
-- The AES-CTR counter runs across the section's **absolute** position in the
-  file, not from 0 at each section.
-- A ticket's `common_key_id` needs the same "stored value is one more than the
-  real generation" adjustment the key-area generation gets.
-- An IVFC section's byte 0 is the **hash table**, not RomFS's header — the real
-  data is at the last level's `logical_offset`. hactool reads a fixed index 5
-  regardless of the `num_levels` field, which reads 7 on a real file whose level
-  array holds 6.
-
-**`rtld` has no MOD0 header, and that cost 25 million instructions to find.**
-`NSO_ENTRY_OFFSET` (`.text`+0x30) is only right for modules that have one.
-`rtld`'s `.text`+0 is real code — it must establish its own load address before
-it can find anything, including its own `MOD0`. Jumping past that bootstrap
-left its base at 0, so a `bss_end - base` computation produced a ~4 GB
-zero-fill that walked the address space until it overwrote the very loop
-running it. The symptom was `unimplemented instruction 0x00000000` at an
-address that had held valid code moments earlier.
-
-**`rtld` finds its own modules** — it does not wait to be told. It calls
-`svcQueryMemory` across the address space looking for `type == CodeStatic` and
-`perm == R-X`. Two things broke that: a blanket RWX permission on every mapped
-page, and read-only tracking that held a *single* range, so each new module
-silently unprotected the previous one's `.text`.
-
-**The `sdk` abort was a recursive-lock assertion on an untouched mutex.**
-`SdkMutexType::Lock` compares the mutex's lock word against the current thread's
-handle at `ThreadType+0x1b0`; both read 0, so an unlocked mutex looked
-self-owned. Three real bugs fell out of naming the backtrace:
-
-- **The main thread handle was never delivered.** Horizon's process entry ABI
-  puts it in **X1** — `rtld`'s first two instructions are literally `cmp x0, #0`
-  / `mov w19, w1` — and the loader zeroed all 31 registers.
-- **`svcGetInfo` CoreMask/PriorityMask fell into a `_ => 0` default**, so an
-  inlined highest-set-bit scan over an empty core mask asserted. The right
-  values are in the title's own `main.npdm`.
-- **`svcWaitSynchronization` answered X1 = 1** — X1 is the *index* of the
-  handle that signaled, not a count, so 1 is out of range for a single-handle
-  wait. The SDK read one past the end of its holder list and `blr`'d a null.
-
-*Getting the backtrace is what made all three findable.* `dump_exefs` lays the
-modules out at their real load addresses and writes a sorted `symbols.txt` from
-`sdk`'s 36,622 `DT_HASH` symbols; `0x0ce6c0c8` says nothing,
-`sdk!nn::diag::detail::Abort+0x18` says everything.
-
-**A stub that answers every unknown command with success is worse than one that
-fails.** The `am` stub did, so `SetupGpuErrorHandler` asked for an event, got
-"success" and no handle, and filed handle **0**. Reporting `UnknownCommandId`
-and logging once per pair immediately surfaced two more: `nnSdk` sends every
-message in the "with context" encoding (types 6/7 where libnx sends 4/5), and
-its `am` sub-interfaces arrive as separate session handles rather than a domain.
-
-**The same bug class, over and over: success with an unfilled out parameter.**
-`GetFirmwareVersion` never wrote its struct, so NX-Fetch read its own
-uninitialized buffer and displayed "Horizon OS 115.119.105" — the ASCII of
-`swi`, from `switch-wasm user`, left there by an earlier `acc` call. That
-number is load-bearing: libnx seeds `hosversionGet()` from it and every version
-gate downstream branches on it. Likewise `CloneCurrentObject` returned no
-session handle, so `nnSdk` mounted its RomFS while talking to handle 0; and
-`IStorage::Read` used `IFile::Read`'s field layout, so every RomFS read came
-back as "0 bytes at offset 0x50".
-
-**Events must be copy handles, not move handles.** A move handle transfers
-ownership; an event is one the server keeps. In the wrong slot it reads back as
-0, and the whole boot waited on handle 0.
-
-**`nn::mem::StandardAllocator::Initialize` asserts on an empty span**, and
-`svcGetInfo` InfoType 21/22 fell into the `_ => 0` default, so the heap was
-sized 0. Also: a retail title never calls `svcSetHeapSize` — built for a 39-bit
-address space, it picks an address and calls `svcMapPhysicalMemory`.
-
-**One field width cost a whole title.** `OpenAudioOut`'s channel count is **16
-bits on the wire**, and the two bytes above it are padding the caller never
-initialises. Echoing the whole word back told `nnSdk` the device had 0xcafe0002
-channels — negative, so Unity's `channelCount > 0` check failed, it tore audio
-down *without* calling `CloseAudioOut`, and the retry hit `nnSdk`'s registry,
-which still held the device open, and aborted.
-
-**Tomodachi Life started a thread on a null 800M instructions in**, reported as
-a CPU fault at an address that is not code. Its thread constructor stores an
-allocation **without checking it**; its allocator had run dry. The real cause
-was the address-space split: `svcGetInfo` reported 1.5 GiB total, the title
-asked for exactly that, and spent it on pools it sizes *from that same figure*.
-The other 1.5 GiB was an alias region this title never touches. `nnSdk` picks
-its heap route at init from the NPDM's system resource size, so each layout now
-spends the space on the region its own titles grow into.
-
-**An update NSP holds no game.** Its Program NCA carries a complete ExeFS —
-patched modules, not a delta — and a RomFS section encrypted `AesCtrEx`: the
-BKTR form, holding only the ranges the update changed plus the two tables that
-index them against the base title's. Booting one alone loads and runs and then
-aborts, 114 M instructions in, after `OpenDataStorageByCurrentProcess` answers
-`0x202` three times — which is what Just Dance 2017's `svcBreak` was, not a CPU
-or a GPU bug. `bktr.rs` composes the pair, streaming both containers. Two
-things the format does not say out loud:
-
-- The subsection counter replaces the section counter's **generation** word,
-  not its secure value. The wrong way round is quiet: the tables are written
-  under the section's own counter and still decrypt, so everything validates
-  and every byte of *data* is noise.
-- An update's Program NCA carries the **base** title id — the `...800` update
-  id is only on the container's Meta NCA. So pairing is by program id, and
-  what identifies a container as an update at all is that its RomFS is a patch.
-
-**DLC is not an update, and is much less than one.** A DLC container has no
-Program NCA and no patch: it is one Data NCA with an ordinary RomFS, whose
-title id is the base title's plus an index — `0100bee017fc1001` is Just Dance
-2023's add-on content #1 — and a title mounts it by that id through
-`OpenDataStorageByDataId`, the same path a system data archive takes. So the
-reading half was already built. What was missing was `aoc:u` saying the content
-exists: it answered `CountAddOnContent` with 0 by design, and a title never
-asks for content the list does not have. It now reports what the host
-registered, and `ListAddOnContent` writes the real indices into the caller's
-buffer — both halves out of one registration, since an index listed but not
-mountable is worse than one never listed. The base id comes from the NACP when
-it declares one and is derived (base program id, low 13 bits masked, plus
-0x1000) when it does not, which is what Eden's `IAddOnContentManager` does.
-
-**A `Poll` that returns instantly is not the same as one that reports nothing
-ready.** NXpotify's Zeroconf listener is `if (poll(&pfd, 1, 200) <= 0)
-continue;`. On hardware that sleeps 200 ms; here it turned into a loop with no
-blocking syscall, and threads only hand over at those — so it starved every
-other thread and no frame was ever presented. A non-zero timeout now yields.
-
-**A step counter that keeps climbing is not a title that keeps running.** Just
-Dance 2023 reached seven billion steps with no frame. Profiling it at four
-budgets showed the main thread retiring a *constant* 760M instructions at 1B,
-1.5B, 3B and 6B — it had stopped at 765M and everything after was two threads
-inside `svcWaitSynchronization`, one on `am:gpu-error` and one on `vi:vsync`,
-each rewinding onto the `svc` and yielding on every scheduler slice. 70% of the
-machine, going nowhere, and the *Steps* readout counting all of it. Three
-things came out of it:
-
-- **A blocking wait parks now.** Only `signal_event` can change the answer, so
-  re-asking between signals learns nothing. `ThreadState::WaitEvent` holds the
-  thread with its PC on the `svc` until a signal or the display tick. The Home
-  Menu reaches its tenth frame in **39.2M steps instead of 170.6M**, the frame
-  byte-identical; Just Dance's main thread went from 25% of the machine to 82%.
-  The catch found on the way: waking on every `signal_event` call rather than
-  on an event's *transition* put the spin straight back, because `audio_tick`
-  re-signals a device whose buffer has come due on every wait in the process.
-- **The top 16 MiB of the stack region was not the guest's to have.**
-  `svcGetInfo` 14/15 advertised 0x1800_0000 + 128 MiB, and the return
-  trampolines (0x1F00_0000) and every thread's TLS block (0x1FE0_0000 up) sat
-  inside it. `nn::os::CreateThread` picks an address in there itself: the title
-  was already mapping stacks at 0x1fdc8000, one page short of the main thread's
-  TLS, and a stack that landed on it would overwrite the thread pointer every
-  `SdkMutex` reads. The trampolines and TLS moved to 0x2000_0000, above the
-  region, so the advertised range is free and none of the 128 MiB is lost.
-
-  **Shrinking the region instead is the wrong fix, and it looked like the right
-  one.** Ending it at the trampoline removes the same overlap and costs 16 MiB;
-  Just Dance then got *past* an abort in `nn::os::detail::ThreadManager::
-  CreateAliasStackUnsafe` it had always taken, which read as a cure. It was
-  luck: the region size is the modulus nnSdk's random placement uses, so a
-  different size is a different address sequence. With the region back at 128
-  MiB the title maps the same 38 stacks at the same 38 addresses as before and
-  aborts on the 39th, exactly as it did — and "A Short Hike", which the 16 MiB
-  cost had started aborting in the same function, runs to budget again.
-
-  So **`CreateAliasStackUnsafe` is still an open bug**, and the overlap was
-  never what caused it. `svcMapMemory` here refuses nothing, so those 38 maps
-  all succeeded and the 39th never reached a syscall: whatever asserts is
-  inside `nn::os::detail::AslrSpaceAllocator`'s own bookkeeping, which is built
-  from `svcGetInfo` 12/13 and has the heap and alias regions outside the ASLR
-  region it is told about.
-- **One undecoded opcode cost every draw.** `VOTE.VTG` (0x50e0/0xfff8) sits two
-  instructions before `exit` in the loading screen's vertex shader, and a
-  refused instruction fails the whole draw — all 52 of them, every frame the
-  clear colour. It writes neither register nor predicate: Eden stubs it too
-  (`translate/impl/vote.cpp`). The draws are no longer refused; the frame is
-  still the clear colour, which is a separate question.
-
-Booted **without its update** the same title deadlocks for real at 765M steps —
-main polling a semaphore on a 1 ms timed wait, two workers parked on one
-condvar, the 16-thread job pool idle — and no IPC of any kind follows. Patched
-with 1.0.1 it presents 76 frames and dies elsewhere. The base container's
-deadlock is not chased; the update is the configuration that runs.
-
-## Services
-
-Every service the retail title asks for is implemented; `usb:hs` and `ncm` are
-the two still absent. `docs/services.md` is the inventory; this is what
-building it taught.
-
-The design rule throughout is **answer as the console you actually are**: one
-user account (uid nonzero, because zero means "nobody is signed in"), an idle
-temperature, a link that is up with nothing behind it, empty play history, a
-factory-fresh console — not a stub, and not a failure, because a failure puts
-callers on the path built for hardware that broke.
-
-- **The angles have to agree.** `am`'s operation mode, `apm`'s performance mode
-  and `clkrst`'s rates all describe one console; `GetOperationMode` answered
-  Console under a comment saying Handheld, so NX-Fetch printed "Docked" beside
-  a 720p handheld framebuffer.
-- **`Set`/`Get` pairs are read back**, and a pair that disagrees is the failure
-  mode this file keeps rediscovering.
-- Where a stub would have to invent something unverifiable, it fails instead:
-  `ssl`'s `CreateConnection`, `sfdnsres` (a definite `EAI_NONAME`, not a
-  try-again that invites a spin), `acc`'s `LoadIdTokenCache` (zero bytes, so
-  authentication fails where the missing piece actually is).
-
-### An `nn::hid` state is read under a seqlock, and bit 0 is the lock
-
-A storage entry's sampling number is the state's own **doubled** — Eden's
-`hid_core/resources/ring_lifo.h` writes `sampling_number << 1` — so its low bit
-is free to mean "being written", and `nn::hid`'s reader spins on the entry
-until that bit clears. Publishing the number undoubled made the very first
-sample odd, and Tomodachi Life's main thread sat in that retry loop from its
-first pad read on: 20 billion instructions with the GPU counters, the backed
-heap and all 41 thread states byte-identical to where they stood at 2 billion.
-`libnx` never looks at the bit, so no homebrew could show it. Past it the title
-sets up its vibration devices and reaches its idle frame loop.
-
-### `hid` samples on a clock, not on input
-
-The sysmodule writes a fresh entry into every LIFO every 5 ms whether or not
-anything moved, so the sampling number a title polls keeps advancing with the
-pad untouched. Publishing only when the host sent input froze it, and a title
-that waits for a sample newer than its last one waited forever. It is
-`Cpu::hid_tick`, on the same wait the display refresh already ticks from, and
-it republishes the host's last pad and contacts rather than inventing any.
-
-That was also why the CLI could not reproduce what the browser saw: the browser
-publishes on input events, so a hand on the keyboard kept the LIFO moving.
-Headless, Tomodachi Life sat in an idle frame loop forever; with the tick it
-runs on to the abort above at 2,524,316,651 steps, the same one and the same
-backtrace. hbmenu, JKSV, Checkpoint and A Short Hike present byte-identical
-frame 3s either way.
-
-The abort past it was `QueryPointerBufferSize`, and is fixed — see below.
-
-### A pointer buffer a caller is told it cannot use
-
-Every session answered `QueryPointerBufferSize` with 0, on the reasoning that a
-server with no pointer buffer keeps `libnx` on map-alias ranges. It does — but
-an explicit `SfBufferAttr_HipcPointer` argument is not AutoSelect and has no
-map-alias form to fall back to, and `nnSdk` measures one against the negotiated
-size before it sends. Tomodachi Life reads all of `/Parameter/ClockSystem/` —
-the six `TimeRangeParam`s and the four `SeasonParam`s, ending with `Winter` —
-and then sizes a 208-byte pointer argument against 0 at `0x0d33a51c` (`subs x4,
-x4, x22; b.cc`) and returns `PointerBufferTooSmall` without sending anything.
-That is the `sf` 11-141 the title aborted on, at 2,524,316,651 steps.
-
-The answer is 0x8000 now, a real `fsp-srv`'s, given once in `svc.rs` before
-dispatch — 28 services answered it themselves, in three different sizes, and
-the two that had already found they needed a non-zero one (`hid`, for
-`SetSupportedNpadIdType`, and `set`, for `GetFirmwareVersion`) had each fixed
-it locally.
-
-**A non-zero size is what makes the second half of the bug reachable.**
-`cmifRequestInAutoBuffer` fills in a static *and* a map-alias descriptor every
-time and nulls whichever form it did not choose, so a service that reads only
-its own preferred form reads a zero-length buffer for half of its callers.
-`nvdrv`'s ioctl argument is AutoSelect: with a real size it went through the
-pointer descriptors, `ipc_map_buffers` found the null beside it, and the driver
-was handed no arguments — `nvn` closed the channel and gave up on graphics, and
-boot died in `nn::account` at 33M steps. `ipc_pick_buffer` is the rule, in one
-place; `ipc_map_buffers` is gone and `ipc_buffers` replaces it.
-
-Tomodachi Life presents its first frame at 3,976,024,064 steps: 78 GPU
-submissions, 3 clears, 7 draws.
-
-### Which winding is front is decided in NDC, not on screen
-
-That frame came out black, and the reason was one line of the rasterizer.
-Facing was read off the signed area of the triangle **in screen space**, on the
-stated reasoning that the viewport transform's y scale decides which winding is
-front "exactly as it does on hardware". It does not. `SetWindowOrigin` bit 4 is
-documented as "framebuffer orientation for the purposes of calculating polygon
-winding", and it is the only thing that reverses it; deko3d drives that bit
-from `windingFlip()` and the viewport's y sign from `viewportFlipY()`, two
-separate device flags, and never compensates one for the other.
-
-A driver rendering into a y-down framebuffer programs a negative viewport y
-scale, which mirrors every triangle on the way to screen space. Reading the
-sign straight off therefore inverted culling for every title whose driver flips
-y — which is every title built against nnSdk. Tomodachi Life composites its
-frame with a single full-screen quad under front=CCW/cull=BACK: the quad was
-thrown away, the buffer the display scans out was never written, and the frame
-was black. Two more of its seven draws went the same way.
-
-`viewport_mirrors` is that correction, applied once per draw. The rasterizer's
-own culling test had encoded the inversion too — its "clockwise in NDC" fixture
-has a shoelace of **+4**, which is counter-clockwise — so it passed against the
-bug and now uses a triangle that is actually wound the way it claims.
-
-hbmenu, JKSV, sysinfo and NX-Fetch render **byte-identical** frames either way,
-and the Home Menu's 67 draws are unchanged: content that does not cull, or that
-does not flip y, never reached this. Tomodachi Life's loading screen — the
-polka-dot ground and the plate icon — is 921,600 of 921,600 pixels lit.
-
-**How the frame was found**, since it is the method that generalises: `[draw]`
-(`TRACE_DRAW=1`) tallies where a draw's fragments died — culled, degenerate,
-uncovered, killed, written — and said `culled=2` of `tris=2` on exactly the
-three draws whose fragment shader was eight instructions long, the blits. The
-`[gpu] draw` line now names the render target's **cpu** address and the cull
-state beside it, which is what distinguishes a title compositing into an
-offscreen surface from a title whose composite was dropped: both are a black
-frame otherwise.
-
-**`hwopus` is the exception to all of that**: there is nothing to answer *as*,
-because the caller wants audio back. So `src/opus/` is a full Opus decoder —
-range coder, CELT, SILK, hybrid, concealment and multi-stream, no dependencies
-— and `cpu/hwopus.rs` is the thin service in front of it. Just Dance 2023 was
-the title that reported `hwopus` missing. Conformance is checked rather than
-assumed: `--example opus_testvectors` runs the RFC 8251 vectors and requires
-the range coder's final state to match on every packet of all twelve, decoded
-both to stereo and to mono; the samples score 96-100% on `opus_compare`, which
-is what libopus's own float build scores. Throughput is ~350x real time.
-
-## Frontend
-
-- **PFS0 offsets are counted from the end of the string table.** Detecting that
-  by looking for an entry pointing inside the header only works when some file
-  sits at offset 0; a repack that pads to an alignment boundary has no such
-  entry. The base is chosen from the extents instead.
-- **An update is paired, not opened, and so is DLC.** Dropping either on the
-  container panel registers it against the open title — either order, since
-  neither file is read until Launch — and the launch boots the update's
-  modules over the base game's RomFS and mounts the add-on content beside it. A `File` reference dies on reload, so the page remembers which update
-  a title was last launched with and asks for that file again rather than
-  quietly running the base version. Each host file gets its own chunk cache:
-  a patched read crosses between the two containers constantly, and one
-  shared LRU has them evicting each other at every crossing.
-- **Wasm buffers detach on growth**, so a cached view goes stale; staging
-  buffers also have to be freed or repeated loads overflow linear memory.
-- The frontend is TypeScript on Vite (`web/main/`, `web/worker/`), and
-  `make wasm` always builds `--features gpu`, so the worker imports
-  wasm-bindgen glue rather than instantiating a bare module.
-
-## Repro
-
-`docs/repro.md` — the examples (`screenshot`, `boot_nsp`, `dump_exefs`,
-`retail_trace`, `jit_difftest`, `opus_testvectors`), the environment switches
-they take (`SHOT=`, `UPDATE=`, `DLC=`, `RING_MIN`, `MARK`), and how to check
-the WebGPU backend against the rasterizer.
+texture sampling 9%. A full-screen pass is 921,600 fragment invocations, so
+NXpotify's 2.6 s/frame was a texture result rescanning the decoded program and
+building a `Vec` per instruction — about a hundred heap allocations per pixel.
+Where a result lands is a property of the *program*, not the invocation; that
+plus two allocation fixes took it to 0.67 s/frame, byte-identical.
 
 ## Next
 
-1. **The rasterizer renders Minecraft black, and it is the reference.** With
-   the 16-bit attributes and `ipa.centroid` in, the device draws the title
-   correctly — but `screenshot_nsp` over the same frame reports 110 draws,
-   `draws_skipped: 0` and **0 of 921,600 pixels lit**, at frame 3 and at frame
-   20 alike. Every other path is checked by agreeing with the rasterizer, so a
-   title only the backend can draw is a hole in the check itself. Bisect with
-   `GPU_ONLY`. The winding fix above did **not** clear it: frame 3 is still
-   black at 2.36B steps, though that frame is 6 draws and not the 110-draw one,
-   so frame 20 is the measurement that would actually settle it.
+1. **The rasterizer renders Minecraft black, and it is the reference.** The
+   device draws the title correctly, but `screenshot_nsp` over the same frame
+   reports 110 draws, `draws_skipped: 0` and 0 of 921,600 pixels lit, at frame 3
+   and frame 20 alike. Every other path is checked by agreeing with the
+   rasterizer, so this is a hole in the check itself. Bisect with `GPU_ONLY`. The
+   winding fix did not clear it, though frame 3 is 6 draws and not the 110-draw
+   one, so frame 20 is the measurement that would settle it.
 2. **A retail title that draws but never a scene.** Tomodachi Life presents at
-   3.98B steps with 7 draws and every pixel black; A Short Hike no longer
-   reaches a frame at all — at HEAD it spins after one submission and 3,536
-   methods, and past the pointer-buffer fix it runs further and takes a
-   `write to read-only address 0x0aa28f50` at `pc=0xa70b814`, step
-   404,553,728. Whatever they wait on is above the GPU. The Home Menu and
-   Minecraft both draw, so this is these titles' own gap, not the retail
-   path's.
-3. **NX-Shell regressed** to 433,783 steps with no output. Cheapest bisect
-   here — the `.nro` is in the tree.
-4. **Check Checkpoint's text.** `SHFL`/`FSWZADD` and the quad that runs them
-   are implemented and tested, but the title itself has never been run against
-   them — its `.nro` is not in the tree.
-5. **`usb:hs` and `ncm`**, the last two services. Homebrew also still opens a
-   service under an **empty name** (Checkpoint does), and `sm` hands out a
-   working handle instead of failing the way real `sm` would.
-6. **Known interpreter bug, open**: with a font carrying hinting programs
-   (`fpgm`/`prep`/`cvt`), glyphs get correct heights and advances but each
-   bitmap is 1-3px wide, as if untouched points never get interpolated. The
-   same subset with `--no-hinting` renders perfectly. Invisible in normal use —
-   the shipped font has no hinting — but a real correctness gap.
-7. **Minecraft is CPU-bound**, not GPU-bound: 21.9 billion instructions buys 20
+   3.98B steps with 7 draws; A Short Hike no longer reaches a frame at all — at
+   HEAD it spins after one submission and 3,536 methods, and past the
+   pointer-buffer fix it takes a `write to read-only address 0x0aa28f50` at
+   `pc=0xa70b814`, step 404,553,728. Whatever they wait on is above the GPU.
+3. **`CreateAliasStackUnsafe` is an open abort.** Just Dance 2023 maps 38 thread
+   stacks and aborts on the 39th, which never reaches a syscall — so it is inside
+   `nn::os::detail::AslrSpaceAllocator`'s own bookkeeping, built from `svcGetInfo`
+   12/13 with the heap and alias regions outside the ASLR region it is told
+   about. Shrinking the stack region *looks* like a cure and is luck: the region
+   size is the modulus nnSdk's random placement uses, so a different size is a
+   different address sequence. Booted without its update the title deadlocks for
+   real at 765M steps; patched with 1.0.1 it presents 76 frames and dies
+   elsewhere.
+4. **NX-Shell regressed** to 433,783 steps with no output, from a recorded clean
+   `ExitProcess` at 15,692,155 steps *with* output. The cheapest bisect here —
+   the `.nro` is in `test-nros/`.
+5. **Check Checkpoint's text.** `SHFL`/`FSWZADD` and the quad are implemented and
+   tested but the title has never been run against them; its `.nro` is not in the
+   tree.
+6. **`usb:hs` and `ncm`**, the last two services. Homebrew also still opens a
+   service under an **empty name** (Checkpoint does), and `sm` hands out a working
+   handle instead of failing the way real `sm` would.
+7. **Known interpreter bug**: with a font carrying hinting programs
+   (`fpgm`/`prep`/`cvt`), glyphs get correct heights and advances but each bitmap
+   is 1-3px wide, as if untouched points never get interpolated. The same subset
+   with `--no-hinting` renders perfectly. Invisible in normal use — the shipped
+   font has no hinting — but a real correctness gap.
+8. **Minecraft is CPU-bound**, not GPU-bound: 21.9 billion instructions buys 20
    frames, and a steady frame is 173-220 ms with every draw on the device.
 
 Lower priority: hbmenu's entry label renders as a blank box; NAND-vs-SD storage
 is one hardcoded 32 GiB for both free and total; Checkpoint never presents a
-frame. The applet path's queue transform offset is unverified (see the GPU
-section).
+frame; the applet path's queue transform offset is unverified.
