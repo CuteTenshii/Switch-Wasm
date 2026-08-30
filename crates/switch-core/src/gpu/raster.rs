@@ -1057,14 +1057,29 @@ fn with_fragment_env<T>(
     f(&mut env)
 }
 
+/// Whether the viewport transform mirrors what it maps.
+///
+/// A driver rendering into a y-down framebuffer programs a negative y scale,
+/// which reverses the winding of every triangle between NDC and screen space.
+/// Hardware does *not* take that as a change of facing: `SetWindowOrigin`'s
+/// FlipY bit is the only thing that reverses winding, which is why deko3d sets
+/// it from `windingFlip()` and the scale's sign from `viewportFlipY()` — two
+/// separate device flags. So the mirror has to be undone before a screen-space
+/// area is asked which way it winds.
+fn viewport_mirrors(vt: ViewportTransform) -> bool {
+    vt.scale[0] * vt.scale[1] < 0.0
+}
+
 /// Whether `cull` throws this triangle away.
 ///
-/// Face determination happens in *window* space, after the viewport
-/// transform — so which winding is front depends on the sign of that
-/// transform's y scale, exactly as it does on hardware, and is not decided
-/// here. A zero-area triangle covers no pixels either way; reporting it
-/// culled saves the rasterizer the walk.
-fn culls(cull: CullState, v: [ScreenVertex; 3]) -> bool {
+/// `mirrored` is [`viewport_mirrors`] for the transform that produced `v`:
+/// facing is a property of the winding in NDC, and the screen-space area
+/// measured here carries the viewport's mirror on top of it. Reading the sign
+/// straight off inverted culling for every title whose driver flips y — which
+/// is every title built against nnSdk, and is why Tomodachi Life's composite
+/// pass was thrown away and its frame came out black. A zero-area triangle
+/// covers no pixels either way; reporting it culled saves the walk.
+fn culls(cull: CullState, mirrored: bool, v: [ScreenVertex; 3]) -> bool {
     if !cull.enabled {
         return false;
     }
@@ -1072,7 +1087,8 @@ fn culls(cull: CullState, v: [ScreenVertex; 3]) -> bool {
     if area == 0.0 {
         return true;
     }
-    let front = (area > 0.0) == cull.front_ccw;
+    let ccw_in_ndc = (area > 0.0) != mirrored;
+    let front = ccw_in_ndc == cull.front_ccw;
     if front {
         cull.cull_front
     } else {
@@ -1241,6 +1257,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let writes_all_channels = color_mask == [true; 4];
     let writes_any_channel = color_mask.iter().any(|&channel| channel);
     let cull = engine.cull_state();
+    let mirrored = viewport_mirrors(viewport);
 
     let index_base = if call.indexed {
         engine.index_array_start()
@@ -1541,7 +1558,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
 
             tally.triangles += 1;
             tally.geometry(screen);
-            if culls(cull, screen) {
+            if culls(cull, mirrored, screen) {
                 tally.culled += 1;
                 continue;
             }
@@ -2848,10 +2865,13 @@ mod tests {
         let (mut mem, vmm, mut engine) = pipeline_harness();
         let vbuf_addr = engine.vertex_array(0).start;
         let color = [0.2f32, 0.4, 0.6, 1.0];
-        // Clockwise in NDC, i.e. the back face when front is CCW.
+        // Clockwise in NDC — shoelace -4 — i.e. the back face when front is
+        // CCW. The harness's viewport flips y, so this also pins down which
+        // space the winding is read in: mirrored into screen space it looks
+        // counter-clockwise, and culling it anyway is the whole point.
         write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
-        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [-1.0, -1.0, 0.0, 1.0], color);
-        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
+        write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
 
         // OGL_SET_CULL enable, front = CCW, cull = BACK.
         engine.regs.set(0x646, 1);
@@ -2879,6 +2899,60 @@ mod tests {
         engine.regs.set(0x648, 0x404);
         draw(&engine, &mut ctx).unwrap();
         assert_ne!(ctx.read_u32(rt.addr).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_y_flipping_viewport_does_not_change_which_winding_is_front() {
+        // The winding a face is judged by is the one in NDC. A driver
+        // rendering into a y-down framebuffer programs a negative viewport y
+        // scale, which mirrors every triangle on the way to screen space --
+        // and hardware does not read that as a change of facing:
+        // `SetWindowOrigin`'s FlipY bit is the only thing that reverses
+        // winding, which is why deko3d drives it from `windingFlip()` and the
+        // scale's sign from `viewportFlipY()`, two separate device flags.
+        //
+        // Measuring the screen-space area and taking its sign straight off
+        // inverted culling for every title whose driver flips y. Tomodachi
+        // Life composites its frame with one full-screen quad under
+        // front=CCW/cull=BACK; thrown away, the buffer the display scans out
+        // is never written and the frame is black.
+        let cull = CullState {
+            enabled: true,
+            front_ccw: true,
+            cull_front: false,
+            cull_back: true,
+        };
+        // Counter-clockwise in NDC: (-1,1), (-1,-1), (1,1), shoelace +4.
+        // Through a viewport that flips y it reaches screen space as the
+        // corners of Tomodachi Life's composite quad.
+        let front = [
+            ScreenVertex { x: 0.0, y: 0.0 },
+            ScreenVertex { x: 0.0, y: 720.0 },
+            ScreenVertex { x: 1280.0, y: 0.0 },
+        ];
+        assert!(!culls(cull, true, front), "a front face survives");
+        // The same triangle wound the other way is the back face.
+        let back = [front[0], front[2], front[1]];
+        assert!(culls(cull, true, back));
+
+        // Without the mirror the two swap over, which is what says the flag
+        // is doing the work rather than the vertex order.
+        assert!(culls(cull, false, front));
+        assert!(!culls(cull, false, back));
+    }
+
+    #[test]
+    fn a_viewport_mirrors_when_exactly_one_axis_is_negated() {
+        let vt = |x: f32, y: f32| ViewportTransform {
+            scale: [x, y, 0.5],
+            translate: [0.0, 0.0, 0.5],
+        };
+        // What every nnSdk title programs: x positive, y negated.
+        assert!(viewport_mirrors(vt(640.0, -360.0)));
+        assert!(viewport_mirrors(vt(-640.0, 360.0)));
+        // Both axes negated is a rotation, and neither is no transform at all.
+        assert!(!viewport_mirrors(vt(-640.0, -360.0)));
+        assert!(!viewport_mirrors(vt(640.0, 360.0)));
     }
 
     #[test]

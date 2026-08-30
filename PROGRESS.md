@@ -21,7 +21,7 @@ whenever it was last recorded.
 | `Checkpoint.nro` | layout and chrome; text was solid blocks for want of `SHFL`, unchecked since | yes | carried |
 | "A Short Hike" (NSP) | composites a full 1280x720 frame; steady state is 2 draws a frame and never a scene | partial | measured |
 | "Minecraft" (NSP) | the world, on the device: 110 draws a frame, none falling back | yes | measured |
-| "Tomodachi Life" (NSP) | presents frame 1 at 3.98B steps: 78 submissions, 7 draws, a black frame | partial | measured |
+| "Tomodachi Life" (NSP) | its loading screen, every pixel of it, at 3.98B steps | yes | measured |
 
 A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` →
 `sdk` through real `nnSdk` init, gets its heap, events and input, brings up its
@@ -637,8 +637,45 @@ boot died in `nn::account` at 33M steps. `ipc_pick_buffer` is the rule, in one
 place; `ipc_map_buffers` is gone and `ipc_buffers` replaces it.
 
 Tomodachi Life presents its first frame at 3,976,024,064 steps: 78 GPU
-submissions, 3 clears, 7 draws. The frame is black, which is the next question
-and a different one.
+submissions, 3 clears, 7 draws.
+
+### Which winding is front is decided in NDC, not on screen
+
+That frame came out black, and the reason was one line of the rasterizer.
+Facing was read off the signed area of the triangle **in screen space**, on the
+stated reasoning that the viewport transform's y scale decides which winding is
+front "exactly as it does on hardware". It does not. `SetWindowOrigin` bit 4 is
+documented as "framebuffer orientation for the purposes of calculating polygon
+winding", and it is the only thing that reverses it; deko3d drives that bit
+from `windingFlip()` and the viewport's y sign from `viewportFlipY()`, two
+separate device flags, and never compensates one for the other.
+
+A driver rendering into a y-down framebuffer programs a negative viewport y
+scale, which mirrors every triangle on the way to screen space. Reading the
+sign straight off therefore inverted culling for every title whose driver flips
+y — which is every title built against nnSdk. Tomodachi Life composites its
+frame with a single full-screen quad under front=CCW/cull=BACK: the quad was
+thrown away, the buffer the display scans out was never written, and the frame
+was black. Two more of its seven draws went the same way.
+
+`viewport_mirrors` is that correction, applied once per draw. The rasterizer's
+own culling test had encoded the inversion too — its "clockwise in NDC" fixture
+has a shoelace of **+4**, which is counter-clockwise — so it passed against the
+bug and now uses a triangle that is actually wound the way it claims.
+
+hbmenu, JKSV, sysinfo and NX-Fetch render **byte-identical** frames either way,
+and the Home Menu's 67 draws are unchanged: content that does not cull, or that
+does not flip y, never reached this. Tomodachi Life's loading screen — the
+polka-dot ground and the plate icon — is 921,600 of 921,600 pixels lit.
+
+**How the frame was found**, since it is the method that generalises: `[draw]`
+(`TRACE_DRAW=1`) tallies where a draw's fragments died — culled, degenerate,
+uncovered, killed, written — and said `culled=2` of `tris=2` on exactly the
+three draws whose fragment shader was eight instructions long, the blits. The
+`[gpu] draw` line now names the render target's **cpu** address and the cull
+state beside it, which is what distinguishes a title compositing into an
+offscreen surface from a title whose composite was dropped: both are a black
+frame otherwise.
 
 **`hwopus` is the exception to all of that**: there is nothing to answer *as*,
 because the caller wants audio back. So `src/opus/` is a full Opus decoder —
@@ -685,7 +722,9 @@ the WebGPU backend against the rasterizer.
    `draws_skipped: 0` and **0 of 921,600 pixels lit**, at frame 3 and at frame
    20 alike. Every other path is checked by agreeing with the rasterizer, so a
    title only the backend can draw is a hole in the check itself. Bisect with
-   `GPU_ONLY`.
+   `GPU_ONLY`. The winding fix above did **not** clear it: frame 3 is still
+   black at 2.36B steps, though that frame is 6 draws and not the 110-draw one,
+   so frame 20 is the measurement that would actually settle it.
 2. **A retail title that draws but never a scene.** Tomodachi Life presents at
    3.98B steps with 7 draws and every pixel black; A Short Hike no longer
    reaches a frame at all — at HEAD it spins after one submission and 3,536

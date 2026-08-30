@@ -694,14 +694,41 @@ impl Engine3D {
             // clears and the resolve. A draw that works and a draw that is
             // painted over afterwards look the same on screen, and only the
             // order tells them apart.
+            //
+            // The surface's *cpu* address is what says whether a draw landed
+            // in the buffer the display then scans out: `Gpu::present` names
+            // one, this names the other, and a title that composites into an
+            // offscreen surface and a title whose composite was dropped are
+            // otherwise the same black frame. The cull state is here for the
+            // same reason — a fully culled draw leaves no trace at all.
             let rt = self.render_target(self.render_target_slot(0));
+            let cull = self.cull_state();
             eprintln!(
-                "[gpu] draw {} prim={:#x} count={} -> rt0 {}",
+                "[gpu] draw {} prim={:#x} count={} cull={} -> rt0 {}",
                 ctx.stats.draws,
                 self.last_draw.primitive,
                 self.last_draw.count,
+                if cull.enabled {
+                    format!(
+                        "{}{}{}",
+                        if cull.front_ccw { "ccw" } else { "cw" },
+                        if cull.cull_front { "-front" } else { "" },
+                        if cull.cull_back { "-back" } else { "" },
+                    )
+                } else {
+                    "off".to_owned()
+                },
                 match rt {
-                    Ok(Some(rt)) => format!("{:#x} {}x{}", rt.addr, rt.width, rt.height),
+                    Ok(Some(rt)) => format!(
+                        "{:#x} {}x{} cpu {}",
+                        rt.addr,
+                        rt.width,
+                        rt.height,
+                        match ctx.span(rt.addr, 4) {
+                            Some(cpu) => format!("{cpu:#x}"),
+                            None => "unmapped".to_owned(),
+                        }
+                    ),
                     other => format!("{other:x?}"),
                 }
             );
