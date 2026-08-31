@@ -807,6 +807,16 @@ impl Cpu {
                 } as u32;
                 self.write_ipc_response(tls, 0, &[], &total.to_le_bytes(), &[])
             }
+            // GetDeviceNickName -> the console's name, 0x80 bytes into a
+            // buffer. The same field `set:sys`'s Get/SetDeviceNickName serves,
+            // so the name the settings applet last wrote is the one a title
+            // reads here. Answered with an empty success, the caller read
+            // whatever its own buffer already held as the console's name.
+            Some(11) => {
+                let name = self.system_settings().device_nick_name;
+                self.write_output_buffer(tls, 0, &name);
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
             _ => {
                 self.warn_stub(
                     "set",
@@ -2533,6 +2543,38 @@ mod tests {
             105 | (11 << 9),
             "ResultSettingsItemNotFound, not a fabricated zero"
         );
+    }
+
+    #[test]
+    fn set_reports_the_nickname_set_sys_was_given() {
+        // `set`'s GetDeviceNickName and `set:sys`'s Get/SetDeviceNickName are
+        // one name. Answered with an empty success, the caller read whatever
+        // its own buffer already held as the console's name.
+        const SET_NICK_NAME: u32 = 78;
+        const GET_NICK_NAME: u32 = 11;
+        const IN: u32 = 0x4000;
+        const OUT: u32 = 0x5000;
+        const NAME: &[u8] = b"the console in the tab";
+
+        let mut cpu = request(false, SET_NICK_NAME, &[]);
+        cpu.mem.map_zero(IN, 0x200).unwrap();
+        cpu.mem.map_zero(OUT, 0x200).unwrap();
+        for (index, &byte) in NAME.iter().enumerate() {
+            cpu.mem.write_u8(IN + index as u32, byte).unwrap();
+        }
+        // Scribble the buffer the name comes back in, so an untouched reply
+        // is a failure rather than an accidental pass.
+        for offset in 0..0x80 {
+            cpu.mem.write_u8(OUT + offset, 0xa5).unwrap();
+        }
+        cpu.register_service_handle(9, "set");
+        write_map_buffer_request(&mut cpu, SET_NICK_NAME, &[], IN, 0x80, true);
+        cpu.set_sys_request(TLS, Some(SET_NICK_NAME)).unwrap();
+
+        write_map_buffer_request(&mut cpu, GET_NICK_NAME, &[], OUT, 0x80, false);
+        cpu.set_request(TLS, 9, Some(GET_NICK_NAME)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.read_string(OUT, 0x80), "the console in the tab");
     }
 
     #[test]

@@ -1224,6 +1224,11 @@ impl Cpu {
                         // IBtmSystemCore every one of its commands goes
                         // through.
                         "btm:sys" | "btm:core" => self.btm_request(tls, handle, cmd_id)?,
+                        // ngc, the profanity filter, and npns, the
+                        // push-notification client: a word list this console
+                        // does not have, and a server it cannot reach.
+                        "ngc:u" | "ngct:u" | "ngct:s" => self.ngc_request(tls, handle, cmd_id)?,
+                        "npns:s" | "npns:u" => self.npns_request(tls, handle, cmd_id)?,
                         // ldn:m and lp2p:m, the read-only views of local
                         // wireless either side of 9.1.0, and the monitor each
                         // creates. `ldn:u`/`ldn:s` and `lp2p:app`/`lp2p:sys`

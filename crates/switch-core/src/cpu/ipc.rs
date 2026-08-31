@@ -1394,6 +1394,153 @@ impl Cpu {
             },
         }
     }
+
+    /// `ngc:u` and `ngct:u` — "nn::ngc", the profanity filter.
+    ///
+    /// A console checks user-entered text against a word list shipped as
+    /// system data: a Mii's name, a user profile, anything the software
+    /// keyboard produced. There is no list here, so nothing is profane —
+    /// which is a real answer rather than a placeholder, and the same one
+    /// Eden gives.
+    ///
+    /// What made this worth implementing is the *shape*. `GetContentVersion`
+    /// hands back a `u32`, and the generic fallback's fabricated object id
+    /// landed in that word: a caller asking which version of the word list
+    /// this console has was reading a session-local object id as the answer.
+    /// The two `Mask` commands are worse — they filter text *in place* into
+    /// an output buffer, and a reply that does not write it leaves the caller
+    /// reading its own uninitialized buffer as the filtered text.
+    pub(super) fn ngc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
+        /// The version of the word list this console has. There is no list,
+        /// but zero is not a version a caller would accept as one.
+        const CONTENT_VERSION: u32 = 1;
+        /// `nn::ngc::ProfanityFilterOption` sits after the `u32` flags, so
+        /// the text is in the buffer rather than the raw data either way.
+        const NOTHING_PROFANE: u32 = 0;
+
+        let root = match self.service_name(handle) {
+            Some("ngct:u") | Some("ngct:s") => "ngct:u",
+            _ => "ngc:u",
+        };
+        if self.ipc_answer_control(tls, handle, root, cmd_id)? {
+            return Ok(());
+        }
+        if root == "ngct:u" {
+            return match cmd_id {
+                // Match(text) -> bool: does the text contain anything on the
+                // list. Nothing is on the list.
+                Some(0) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
+                // Filter(text) -> the text with anything on the list masked
+                // out. Unchanged, and it has to be *written*: the output
+                // buffer is the caller's own memory.
+                Some(1) => {
+                    let text = self.input_text(tls);
+                    self.write_output_buffer(tls, 0, &text);
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                _ => self.unimplemented_command(tls, root, cmd_id),
+            };
+        }
+        match cmd_id {
+            // GetContentVersion -> u32.
+            Some(0) => self.write_ipc_response(tls, 0, &[], &CONTENT_VERSION.to_le_bytes(), &[]),
+            // Check / Check2(flags, ProfanityFilterOption, text) -> u32, the
+            // flags saying what was found. Nothing was.
+            Some(1) | Some(4) => {
+                self.write_ipc_response(tls, 0, &[], &NOTHING_PROFANE.to_le_bytes(), &[])
+            }
+            // Mask / Mask2(flags, ProfanityFilterOption, text) -> u32 and the
+            // masked text in an output buffer. Nothing is masked, so the text
+            // comes back as it went in — written rather than left alone.
+            Some(2) | Some(5) => {
+                let text = self.input_text(tls);
+                self.write_output_buffer(tls, 0, &text);
+                self.write_ipc_response(tls, 0, &[], &NOTHING_PROFANE.to_le_bytes(), &[])
+            }
+            // Reload: re-read the word list from system data. There is none.
+            Some(3) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            _ => self.unimplemented_command(tls, root, cmd_id),
+        }
+    }
+
+    /// The text a request carries in its first input buffer, as bytes.
+    fn input_text(&self, tls: u32) -> Vec<u8> {
+        match self.ipc_input_buffer(tls, 0) {
+            Some((addr, size)) if addr != 0 => self.read_bytes(addr, size),
+            _ => Vec::new(),
+        }
+    }
+
+    /// `npns:s` / `npns:u` — "nn::npns", the push-notification client.
+    ///
+    /// A console holds an XMPP session open to Nintendo's notification server
+    /// and is pushed news, friend presence and download completions over it.
+    /// There is no server to hold a session with here, so the answer to every
+    /// question is the one a console with no connection gives: registrations
+    /// are accepted, the state is *not connected*, nothing has been notified,
+    /// and the receive event never fires.
+    ///
+    /// The receive event is the reason this is worth naming rather than
+    /// leaving to the fallback. It is one event per session on hardware, and
+    /// [`Cpu::kept_event`] is what makes the second `GetReceiveEvent` on a
+    /// session hand back the same one — a caller given a fresh handle each
+    /// time waits on a copy that nothing would signal even if something did.
+    pub(super) fn npns_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        /// `nn::npns::State`. Zero is the state a client that has not
+        /// connected is in, which is this one for the life of the process.
+        const STATE_NOT_CONNECTED: u32 = 0;
+
+        let root = match self.service_name(handle) {
+            Some("npns:u") => "npns:u",
+            _ => "npns:s",
+        };
+        if self.ipc_answer_control(tls, handle, root, cmd_id)? {
+            return Ok(());
+        }
+        match cmd_id {
+            // ListenAll / ListenTo(program id) / ListenToByName(name buffer) /
+            // ListenToMyApplicationId: which notifications this client wants.
+            // Accepted — the list costs nothing to keep and nothing will ever
+            // arrive to match it against.
+            Some(1) | Some(2) | Some(8) | Some(26) => {
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // GetReceiveEvent / GetStateChangeEvent: the two events a client
+            // waits on. Neither ever fires — there is no connection to change
+            // state and nothing to receive over it — so a caller waiting on
+            // one is waiting for something that genuinely never happens.
+            Some(5) | Some(7) => {
+                let purpose = if cmd_id == Some(5) {
+                    "npns:receive"
+                } else {
+                    "npns:state-change"
+                };
+                let event = self.kept_event(purpose, handle);
+                self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
+            }
+            // GetState -> u32.
+            Some(103) => {
+                self.write_ipc_response(tls, 0, &[], &STATE_NOT_CONNECTED.to_le_bytes(), &[])
+            }
+            // GetLastNotifiedTime -> s64. Nothing has ever been notified, and
+            // zero is the time that says so.
+            Some(106) => self.write_ipc_response(tls, 0, &[], &0i64.to_le_bytes(), &[]),
+            // Suspend / Resume: there is no session to suspend.
+            Some(101) | Some(102) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // Receive / ReceiveRaw are deliberately **not** answered. They pop
+            // the next notification, and a fabricated success is a client told
+            // a notification arrived that it will then try to read. What a
+            // real client gets when the queue is empty is an error this
+            // console has no documented value for, so it is refused rather
+            // than guessed at — which is also what Eden does.
+            _ => self.unimplemented_command(tls, root, cmd_id),
+        }
+    }
 }
 
 /// Request builders shared by every service module's tests, and the
@@ -1895,5 +2042,116 @@ pub(super) mod testing {
         cpu.set_program_id(0x0100_4890_117B_2000);
         cpu.pm_request(TLS, 9, Some(0)).unwrap();
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0x0100_4890_117B_2000);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::testing::*;
+
+    #[test]
+    fn ngc_answers_a_version_rather_than_a_fabricated_object_id() {
+        // `GetContentVersion` hands back a u32, and the generic fallback's
+        // object id landed in exactly that word: a caller asking which word
+        // list this console has was reading a session-local object id.
+        let mut cpu = request(false, 0, &[]);
+        cpu.register_service_handle(9, "ngc:u");
+        cpu.ngc_request(TLS, 9, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 1, "content version");
+
+        // Check -> the flags saying what was found. Nothing was.
+        write_request(&mut cpu, 1, &[]);
+        cpu.ngc_request(TLS, 9, Some(1)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "nothing profane");
+    }
+
+    #[test]
+    fn ngc_writes_the_masked_text_back_rather_than_leaving_the_buffer() {
+        // Mask filters text *in place* into an output buffer. A reply that
+        // does not write it leaves the caller reading its own uninitialized
+        // buffer as the filtered text -- and nothing is masked here, so what
+        // has to come back is what went in.
+        const IN: u32 = 0x4000;
+        const OUT: u32 = 0x5000;
+        const TEXT: &[u8] = b"a perfectly ordinary console name";
+
+        let mut cpu = request(false, 2, &[]);
+        cpu.mem.map_zero(IN, 0x200).unwrap();
+        cpu.mem.map_zero(OUT, 0x200).unwrap();
+        for (index, &byte) in TEXT.iter().enumerate() {
+            cpu.mem.write_u8(IN + index as u32, byte).unwrap();
+        }
+        cpu.register_service_handle(9, "ngc:u");
+        write_buffer_request(&mut cpu, 2, &[], &[(IN, TEXT.len() as u32)], &[(OUT, 0x80)]);
+        cpu.ngc_request(TLS, 9, Some(2)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "nothing masked");
+        assert_eq!(cpu.read_bytes(OUT, TEXT.len() as u32), TEXT);
+    }
+
+    #[test]
+    fn ngct_matches_nothing_and_filters_nothing() {
+        // The other half of the same service under its own name: Match is a
+        // bool rather than a u32, and Filter writes its buffer like Mask.
+        const IN: u32 = 0x4000;
+        const OUT: u32 = 0x5000;
+        const TEXT: &[u8] = b"still ordinary";
+
+        let mut cpu = request(false, 0, &[]);
+        cpu.mem.map_zero(IN, 0x200).unwrap();
+        cpu.mem.map_zero(OUT, 0x200).unwrap();
+        for (index, &byte) in TEXT.iter().enumerate() {
+            cpu.mem.write_u8(IN + index as u32, byte).unwrap();
+        }
+        cpu.register_service_handle(9, "ngct:u");
+        cpu.ngc_request(TLS, 9, Some(0)).unwrap();
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "nothing matched");
+
+        write_buffer_request(&mut cpu, 1, &[], &[(IN, TEXT.len() as u32)], &[(OUT, 0x80)]);
+        cpu.ngc_request(TLS, 9, Some(1)).unwrap();
+        assert_eq!(cpu.read_bytes(OUT, TEXT.len() as u32), TEXT);
+    }
+
+    #[test]
+    fn npns_hands_back_the_same_receive_event_every_time() {
+        // One event per session. A caller given a fresh handle on the second
+        // ask waits on a copy that nothing would signal even if a
+        // notification could arrive -- which it cannot, there being no server
+        // to push one.
+        let mut cpu = request(false, 5, &[]);
+        cpu.register_service_handle(9, "npns:s");
+        cpu.npns_request(TLS, 9, Some(5)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        let first = cpu.mem.read_u32(TLS + 0x0c).unwrap();
+        assert_ne!(first, 0, "no event came back");
+
+        write_request(&mut cpu, 5, &[]);
+        cpu.npns_request(TLS, 9, Some(5)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x0c).unwrap(), first, "same event");
+
+        // And the state beside it: not connected, never notified.
+        write_request(&mut cpu, 103, &[]);
+        cpu.npns_request(TLS, 9, Some(103)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "not connected");
+        write_request(&mut cpu, 106, &[]);
+        cpu.npns_request(TLS, 9, Some(106)).unwrap();
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "never notified");
+    }
+
+    #[test]
+    fn npns_refuses_to_invent_a_notification() {
+        // Receive pops the next notification. A fabricated success is a
+        // client told one arrived that it will then try to read; what a real
+        // client gets from an empty queue is an error with no documented
+        // value here, so the command is refused rather than guessed at.
+        let mut cpu = request(false, 3, &[]);
+        cpu.register_service_handle(9, "npns:s");
+        cpu.npns_request(TLS, 9, Some(3)).unwrap();
+        assert_ne!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "answered rather than refused"
+        );
     }
 }
