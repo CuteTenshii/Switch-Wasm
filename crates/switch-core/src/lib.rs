@@ -143,8 +143,15 @@ pub mod xci;
 
 pub use error::{Error, Result};
 
-/// Memory-mapped framebuffer (modelled on the Switch GPU's): fixed-size,
-/// little-endian RGBA. Homebrew writes pixels here and the host renders it.
+/// A fixed-size, little-endian RGBA framebuffer at a fixed address: whatever
+/// is written here is what the host presents when nothing has drawn a frame
+/// through the GPU.
+///
+/// **No console has this.** A title reaches the screen through `vi` and
+/// nvnflinger, which is the path everything real takes; this is a hole
+/// punched in guest memory so that a program with no graphics stack at all
+/// can still put pixels on the canvas. `switch_fb_snapshot` prefers the GPU's
+/// framebuffer and only falls back to reading this one.
 ///
 /// It and [`INPUT_ADDR`] sit above every region a Horizon process is given —
 /// see `cpu::GUEST_SPACE_END`. They used to live at 0x3F00_0000, immediately
@@ -154,8 +161,11 @@ pub const FB_BASE: u32 = 0xFE00_0000;
 pub const FB_WIDTH: u32 = 640;
 pub const FB_HEIGHT: u32 = 360;
 pub const FB_STRIDE: u32 = FB_WIDTH * 4;
-/// Memory-mapped input register: the host writes an ASCII key here and
-/// homebrew acknowledges (writes 0) when consumed.
+/// Memory-mapped input register, the counterpart to [`FB_BASE`] and no more a
+/// console facility than it is: `Cpu::set_gamepad_state` publishes the pad
+/// here as a button bitmask followed by the four stick axes, for a program
+/// that polls memory rather than opening `hid`. Every real title reads the
+/// same pad out of `hid`'s shared memory instead.
 pub const INPUT_ADDR: u32 = 0xFE10_0000;
 
 #[cfg(test)]

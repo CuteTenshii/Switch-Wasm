@@ -64,8 +64,17 @@ and tests.
   **`ISession` is a different interface from its server** — its
   `GetTemperature` is command 4, the same id as the server's `OpenSession`. The
   device code's **high byte** picks the sensor (`0x41…` SoC, `0x43…` PCB).
-- **`set:sys`**'s `GetFirmwareVersion`/`2` are **not cosmetic**: libnx seeds
-  `hosversionGet()` from them and everything version-gated branches on that.
+- **`set:sys`** is a **store**, not a table of answers: the `Get`/`Set` pairs
+  read and write one block, and it is kept in system save data
+  `8000000000000050` — so it persists, through the same host flush that
+  persists a title's save. A setting that has two homes has none: `nfc:sys`
+  and `btm:sys` read the radio flags from here, `set`'s language and region
+  are these fields, and `am`'s desired language and keyboard layout are too.
+  `GetSettingsItemValue` is the firmware's separate key/value table; an item
+  that is not in it is **refused** (`ResultSettingsItemNotFound`), because a
+  caller reads the size back and then that many bytes.
+  `GetFirmwareVersion`/`2` are **not cosmetic**: libnx seeds `hosversionGet()`
+  from them and everything version-gated branches on that.
 - **`csrng`** fills from `Cpu::next_random_u64` (splitmix64) — not a CSPRNG,
   but the generic reply left the buffer untouched, which is non-random *and*
   undetectably so.

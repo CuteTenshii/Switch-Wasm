@@ -1,15 +1,11 @@
 //! AArch64 (A64) interpreter core.
 //!
-//! Implements a from-scratch decode + execute loop for the A64 instruction
-//! set covering the integer core that compiled Switch homebrew actually uses:
-//! integer ALU, shifts, bitfield ops, multiplies/divides, conditional selects
-//! and compares, loads/stores (immediate, register-offset, literal, paired,
-//! exclusive), PC-relative addressing, and the branch/subroutine family.
-//!
-//! System instructions (MRS/MSR/barriers/hints) are handled minimally, and
-//! `SVC` drives a small, explicit syscall ABI used by the bundled demo
-//! payload. Floating point, SIMD and the Horizon OS are out of scope for
-//! Phase 1 and raise [`Error::Cpu`] if encountered.
+//! A from-scratch decode + execute loop: the integer core here and in
+//! `alu`/`bits`/`loadstore`, floating point in `fp`, the SIMD register file in
+//! `simd`, the AES and SHA instructions in `crypto`, and the system registers
+//! in `system`. `SVC` enters Horizon's syscall ABI in `svc`, which is where
+//! the services the rest of this directory implements are reached from. A32 is
+//! interpreted in `a32`, and hot blocks are compiled by `jit`.
 //!
 //! Encoding references are taken from the ARMv8 architecture and cross-checked
 //! against QEMU's `target/arm/tcg/a64.decode`.

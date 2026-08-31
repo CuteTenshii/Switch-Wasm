@@ -129,8 +129,8 @@ than the `MAX_MAPPED_BYTES` (3.125 GiB) cap for free.
 0x2900_0000  RO_MODULE_REGION_ADDR    ldr:ro maps run-time NROs, 112 MiB
 0x3000_0000  heap / alias             per MemoryLayout, below
 0xFA00_0000  SHARED_BUFFER_ADDR       system shared buffer, ~59 MiB reserved
-0xFE00_0000  FB_BASE (lib.rs)         demo framebuffer, 640x360 RGBA
-0xFE10_0000  INPUT_ADDR               memory-mapped input block
+0xFE00_0000  FB_BASE (lib.rs)         direct framebuffer, 640x360 RGBA
+0xFE10_0000  INPUT_ADDR               memory-mapped pad register
 0xFF00_0000  GUEST_SPACE_END          above this a read faults
 
 MemoryLayout::PLAIN                 MemoryLayout::VIRTUAL_ADDRESS
@@ -140,6 +140,10 @@ total memory 3.125 GiB              total memory 896 MiB
 system resource 0                   system resource 16 MiB
 ```
 
+- **`FB_BASE` and `INPUT_ADDR` are not console facilities.** A title reaches
+  the screen through `vi`/nvnflinger and the pad through `hid`'s shared
+  memory; these two are holes in guest memory for a program that has neither.
+  `switch_fb_snapshot` reads the GPU's framebuffer and only falls back here.
 - **Every region `svcGetInfo` reports must be representable here** — Horizon's
   real bases (alias 0x10_0000_0000) truncate to 0.
 - **InfoType 16 picks the layout**, from the title's own NPDM
