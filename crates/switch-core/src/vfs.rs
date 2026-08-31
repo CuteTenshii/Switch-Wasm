@@ -169,6 +169,23 @@ impl Vfs {
         true
     }
 
+    /// [`Vfs::write_file`], recorded as a change so a host that persists this
+    /// storage writes the new contents out.
+    ///
+    /// This is the path for a *service* that keeps its state in a save —
+    /// `set:sys` and its system settings — rather than the host staging a
+    /// file the guest is about to read. The distinction is which side the
+    /// write has to travel: [`Vfs::write_file`] is a value coming back from
+    /// the store and must not be queued straight back into it.
+    pub fn guest_write_file(&mut self, path: &str, data: Vec<u8>) {
+        let path = Self::normalize(path);
+        if let Some(parent) = Self::parent_of(&path) {
+            self.guest_create_dir(&parent);
+        }
+        self.nodes.insert(path.clone(), Node::File(data));
+        self.changed.insert(path);
+    }
+
     /// [`Vfs::create_dir`], recording every directory it had to make so a host
     /// can persist an empty one the guest created.
     pub fn guest_create_dir(&mut self, path: &str) {

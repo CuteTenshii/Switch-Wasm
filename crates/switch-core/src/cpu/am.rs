@@ -930,12 +930,14 @@ impl Cpu {
                     out.extend_from_slice(&0u64.to_le_bytes());
                     self.write_ipc_response(tls, 0, &[], &out, &[])
                 }
-                // GetDesiredLanguage -> an `nn::settings::LanguageCode`, which
-                // is the null-padded BCP-47 tag as eight raw bytes.
+                // GetDesiredLanguage -> an `nn::settings::LanguageCode`, the
+                // null-padded BCP-47 tag as eight raw bytes. A title picks
+                // which of its own language assets to load from this, so it
+                // is the language the console is set to rather than a
+                // constant beside it — `set:sys`'s SetLanguageCode moves it.
                 Some(21) => {
-                    let mut code = [0u8; 8];
-                    code[..5].copy_from_slice(b"en-US");
-                    self.write_ipc_response(tls, 0, &[], &code, &[])
+                    let code = self.system_settings().language_code;
+                    self.write_ipc_response(tls, 0, &[], &code.to_le_bytes(), &[])
                 }
                 // GetDisplayVersion -> a 16-byte version string.
                 Some(23) => {
@@ -1441,12 +1443,11 @@ impl Cpu {
                 Some(13) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
                 // GetMainAppletApplicationDesiredLanguage -> an
                 // `nn::settings::LanguageCode`, the language the *caller's*
-                // title runs in rather than the console's. Both are the same
-                // `en-US` `IApplicationFunctions::GetDesiredLanguage` reports.
+                // title runs in rather than the console's. Both are the one
+                // `IApplicationFunctions::GetDesiredLanguage` reports.
                 Some(60) => {
-                    let mut code = [0u8; 8];
-                    code[..5].copy_from_slice(b"en-US");
-                    self.write_ipc_response(tls, 0, &[], &code, &[])
+                    let code = self.system_settings().language_code;
+                    self.write_ipc_response(tls, 0, &[], &code.to_le_bytes(), &[])
                 }
                 // GetCallerAppletIdentityInfoStack -> s32 count, with the
                 // entries themselves in a map-alias out buffer: this applet's
@@ -1474,11 +1475,12 @@ impl Cpu {
                 // GetDesirableKeyboardLayout -> nn::settings::KeyboardLayout,
                 // the layout the applet's caller asked it to open with.
                 // Hardware errors when no caller set one; there is no caller
-                // here, so this answers with the layout that goes with the
-                // language the console is set to — `set`'s SetLanguage_ENUS.
+                // here, so this answers with the console's own layout —
+                // `set:sys`'s GetKeyboardLayout, which the settings applet
+                // is what moves.
                 Some(19) => {
-                    const ENGLISH_US: u32 = 1;
-                    self.write_ipc_response(tls, 0, &[], &ENGLISH_US.to_le_bytes(), &[])
+                    let layout = self.system_settings().keyboard_layout;
+                    self.write_ipc_response(tls, 0, &[], &layout.to_le_bytes(), &[])
                 }
                 // PushOutData / PushInteractiveOutData(IStorage): the applet
                 // handing back what it produced — the keyboard's text, an

@@ -187,11 +187,12 @@ impl Cpu {
         (self.cycles / 1_000_000) as i64
     }
 
-    /// `ITimeZoneService`: there is no bundled TZif database, so the device's
-    /// timezone is fixed at UTC — the same "one hard-coded answer, no locale
-    /// data" shortcut `set_request` takes for the system language.
+    /// `ITimeZoneService`: there is no bundled TZif database, so every
+    /// conversion resolves against UTC, and the one zone this console can be
+    /// in is the one `set:sys` stores as its location name. The two services
+    /// read the same field so that they cannot name different places.
     pub(super) fn time_timezone_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
-        const LOCATION_NAME: &[u8] = b"UTC";
+        const LOCATION_NAME: &[u8] = super::settings::DEVICE_TIME_ZONE;
         const GET_DEVICE_LOCATION_NAME: u32 = 0;
         const GET_TOTAL_LOCATION_NAME_COUNT: u32 = 2;
         const LOAD_LOCATION_NAME_LIST: u32 = 3;
@@ -201,10 +202,11 @@ impl Cpu {
         const TO_POSIX_TIME: u32 = 201;
         const TO_POSIX_TIME_WITH_MY_RULE: u32 = 202;
         match cmd_id {
-            // -> LocationName (0x24 bytes, NUL-padded).
+            // -> LocationName (0x24 bytes, NUL-padded), out of the system
+            // settings so that a zone set through `set:sys` is the zone this
+            // reports. What it converts against is still UTC either way.
             Some(GET_DEVICE_LOCATION_NAME) => {
-                let mut raw = [0u8; 0x24];
-                raw[..LOCATION_NAME.len()].copy_from_slice(LOCATION_NAME);
+                let raw = self.system_settings().device_time_zone_location_name;
                 self.write_ipc_response(tls, 0, &[], &raw, &[])
             }
             Some(GET_TOTAL_LOCATION_NAME_COUNT) => {

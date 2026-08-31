@@ -1432,17 +1432,24 @@ pub struct Cpu {
     /// `lbl`'s backlight settings: brightness, dimming, VR mode. Settings
     /// rather than facts about a panel, so they are stored and read back.
     backlight: settings::Backlight,
+    /// The system settings `set:sys` serves, once something has asked for
+    /// them. `None` until then because they are read out of save data
+    /// ([`settings::SYSTEM_SETTINGS_SAVE`]) that the host restores after the
+    /// session is built — see [`Cpu::system_settings`].
+    system_settings: Option<settings::SystemSettings>,
+    /// The `category!name` of every settings item that was asked for and is
+    /// not in the firmware's table, so each is reported once. What a title
+    /// asked for is the only way to find out what to add.
+    missing_settings_items: HashSet<String>,
     /// `audctl`'s system-wide audio settings, for the same reason.
     audio_control: audout::AudioControl,
-    /// `nfc:sys`: whether the interface has been initialized, and whether NFC
-    /// is switched on in system settings. There is no reader attached either
-    /// way — see [`Cpu::nfc_request`].
+    /// `nfc:sys`: whether the interface has been initialized. Whether NFC is
+    /// switched *on* is a system setting rather than a fact about this
+    /// service, so it lives with the rest of them; there is no reader
+    /// attached either way — see [`Cpu::nfc_request`].
     nfc_initialized: bool,
-    nfc_enabled: bool,
-    /// `btm:sys`: whether the Bluetooth radio is on, and whether a controller
-    /// pairing is running. Both are read back by the Home Menu's
-    /// controller screens; nothing ever pairs.
-    bt_radio_enabled: bool,
+    /// `btm:sys`: whether a controller pairing is running. The radio's own
+    /// switch is a system setting, for the same reason; nothing ever pairs.
     bt_gamepad_pairing: bool,
     /// The alarms `notif` is holding, and the id the next one is given. An
     /// alarm id is the server's to assign and the caller's to address it by,
@@ -1806,12 +1813,10 @@ impl Cpu {
             ssl_next_pki_id: 1,
             service_events: HashMap::new(),
             backlight: settings::Backlight::default(),
+            system_settings: None,
+            missing_settings_items: HashSet::new(),
             audio_control: audout::AudioControl::default(),
             nfc_initialized: false,
-            nfc_enabled: false,
-            // A console boots with its Bluetooth radio on: that is how it
-            // finds the Joy-Cons it is already paired to.
-            bt_radio_enabled: true,
             bt_gamepad_pairing: false,
             notif_alarms: Vec::new(),
             // Zero is a valid AlarmSettingId, but handing it out first makes

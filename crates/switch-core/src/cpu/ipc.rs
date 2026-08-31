@@ -240,6 +240,13 @@ impl Cpu {
         self.mem.read_u32(data.wrapping_add(offset)).unwrap_or(0)
     }
 
+    /// The `u64` argument at `offset` bytes into a request's payload — a
+    /// language code, a title id, a clock offset.
+    pub(super) fn ipc_arg_u64(&self, tls: u32, offset: u32) -> u64 {
+        let data = self.ipc_request_data(tls);
+        self.mem.read_u64(data.wrapping_add(offset)).unwrap_or(0)
+    }
+
     /// The float argument at `offset` bytes into a request's payload. Every
     /// `lbl` setter takes one, and a float read as an integer is a brightness
     /// of 1065353216.
@@ -1261,13 +1268,17 @@ impl Cpu {
                 Some(2) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // GetPairedGamepadCount -> u8.
                 Some(3) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
-                // EnableRadio / DisableRadio / IsRadioEnabled.
+                // EnableRadio / DisableRadio / IsRadioEnabled. The radio's
+                // switch is a system setting, so this is the same field
+                // `set:sys`'s Get/SetBluetoothEnableFlag reads and writes —
+                // one switch, whichever service is asked about it.
                 Some(4) | Some(5) => {
-                    self.bt_radio_enabled = cmd_id == Some(4);
+                    let on = cmd_id == Some(4);
+                    self.store_system_settings(|settings| settings.bluetooth_enable = on);
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 Some(6) => {
-                    let enabled = u8::from(self.bt_radio_enabled);
+                    let enabled = u8::from(self.system_settings().bluetooth_enable);
                     self.write_ipc_response(tls, 0, &[], &[enabled], &[])
                 }
                 // AcquireRadioEvent / AcquireGamepadPairingEvent -> a bool
@@ -1344,14 +1355,17 @@ impl Cpu {
                     };
                     self.write_ipc_response(tls, 0, &[], &state.to_le_bytes(), &[])
                 }
-                // IsNfcEnabledOld / IsNfcEnabled -> bool.
+                // IsNfcEnabledOld / IsNfcEnabled -> bool, out of the same
+                // system setting `set:sys`'s Get/SetNfcEnableFlag serves:
+                // turning NFC off in the settings applet is what this reads.
                 Some(3) | Some(403) => {
-                    let enabled = u8::from(self.nfc_enabled);
+                    let enabled = u8::from(self.system_settings().nfc_enable);
                     self.write_ipc_response(tls, 0, &[], &[enabled], &[])
                 }
                 // SetNfcEnabledOld / SetNfcEnabled(bool).
                 Some(100) | Some(500) => {
-                    self.nfc_enabled = self.ipc_arg_u8(tls, 0) != 0;
+                    let on = self.ipc_arg_u8(tls, 0) != 0;
+                    self.store_system_settings(|settings| settings.nfc_enable = on);
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // ListDevices: the device handles go into an output buffer,
