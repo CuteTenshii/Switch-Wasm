@@ -109,6 +109,52 @@ const LIBRARY_APPLET_EVENT_NAMES: [&str; 3] = [
     "am:library-applet-interactive-out-data",
 ];
 
+/// The two queues a library applet pops storages from: what its caller pushed
+/// before starting it, and what that caller has answered it with since.
+#[derive(Clone, Copy)]
+enum AppletQueue {
+    InData,
+    InteractiveInData,
+}
+
+impl AppletQueue {
+    const ALL: [Self; 2] = [Self::InData, Self::InteractiveInData];
+
+    fn slot(self) -> usize {
+        match self {
+            Self::InData => 0,
+            Self::InteractiveInData => 1,
+        }
+    }
+
+    /// The event this queue's `GetPop...Event` hands out, which is also what
+    /// names the queue in a diagnostic.
+    fn event_name(self) -> &'static str {
+        match self {
+            Self::InData => "am:applet-in-data",
+            Self::InteractiveInData => "am:applet-interactive-in-data",
+        }
+    }
+
+    /// What the log says the first time the applet pops this queue empty.
+    fn empty_message(self) -> &'static str {
+        match self {
+            Self::InData => {
+                "[am] PopInData: the applet has popped every storage seeded for it and asked \
+                 for another"
+            }
+            Self::InteractiveInData => {
+                "[am] PopInteractiveInData: the applet is waiting on an answer from the caller \
+                 that launched it, and nothing here launched it"
+            }
+        }
+    }
+}
+
+/// How many of an applet's interactive messages are kept for the host. An
+/// inline keyboard pushes one per keystroke, so the oldest go.
+const MAX_INTERACTIVE_MESSAGES: usize = 8;
+
 /// The firmware applet an `AppletId` names — the inverse of
 /// [`applet_id_for`], for saying out loud what a caller asked to launch.
 fn applet_name(applet_id: u32) -> &'static str {
@@ -432,6 +478,74 @@ impl Cpu {
         let event = self.alloc_event(LIBRARY_APPLET_EVENT_NAMES[slot], false);
         self.am_applets.entry(key).or_default().events[slot] = Some(event);
         event
+    }
+
+    /// Hand the front of one of a library applet's pop queues over as an `am`
+    /// `IStorage`, or refuse with 2128-0003 when the queue is empty.
+    ///
+    /// `PopInData` and `PopInteractiveInData` differ only in which queue they
+    /// drain and what an empty one means, so they share this.
+    fn pop_applet_storage(&mut self, tls: u32, handle: u64, queue: AppletQueue) -> Result<()> {
+        let data = match queue {
+            AppletQueue::InData => self.am_in_data.pop_front(),
+            AppletQueue::InteractiveInData => self.am_interactive_in.pop_front(),
+        };
+        self.refresh_applet_pop_events();
+        match data {
+            Some(data) => {
+                let key = self.reply_with_interface(tls, handle, "am:storage")?;
+                self.am_storages.insert(key, data);
+                Ok(())
+            }
+            None => {
+                /// `am` description 3: the applet asked for a storage that was
+                /// never pushed.
+                const NO_DATA: u32 = 128 | (3 << 9);
+                // Named once, because `nnSdk` aborts on this and the fatal it
+                // raises carries the code and nothing about where it came from
+                // — 2128-0003 is also what an empty `ReceiveMessage` answers,
+                // which is routine.
+                if self
+                    .unimplemented_ipc
+                    .insert((queue.event_name().to_string(), None))
+                {
+                    self.diagnostic(Level::Warn, queue.empty_message());
+                }
+                self.write_ipc_response(tls, NO_DATA, &[], &[], &[])
+            }
+        }
+    }
+
+    /// The event a pop queue hands out, allocated on the first ask. Not
+    /// auto-clearing: what it reports is whether the queue has anything in it,
+    /// which is a state rather than an edge.
+    fn applet_queue_event(&mut self, queue: AppletQueue) -> u64 {
+        if let Some(event) = self.am_pop_events[queue.slot()] {
+            return event;
+        }
+        let event = self.alloc_event(queue.event_name(), false);
+        self.am_pop_events[queue.slot()] = Some(event);
+        event
+    }
+
+    /// Signal each pop event whose queue has something to pop, and darken the
+    /// rest. An applet waiting on a dark one waits, which is the honest answer
+    /// when only the host can fill that queue.
+    pub(super) fn refresh_applet_pop_events(&mut self) {
+        for queue in AppletQueue::ALL {
+            let Some(event) = self.am_pop_events[queue.slot()] else {
+                continue;
+            };
+            let waiting = match queue {
+                AppletQueue::InData => !self.am_in_data.is_empty(),
+                AppletQueue::InteractiveInData => !self.am_interactive_in.is_empty(),
+            };
+            if waiting {
+                self.signal_event(event);
+            } else {
+                self.clear_event(event);
+            }
+        }
     }
 
     /// Fire one of an applet's events, if the caller has taken it. Allocating
@@ -1591,24 +1705,51 @@ impl Cpu {
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
                 // PushInteractiveOutData(IStorage): the applet's half of a
-                // conversation with its caller, which the caller answers
-                // through `PushInteractiveInData`. There is no caller to
-                // answer, so this is accepted and dropped — and reported once,
-                // because an applet that gets no reply either carries on
-                // without one or waits forever, and which of the two it did is
-                // the next thing to look at.
+                // conversation with its caller — the keyboard offering its
+                // text to be checked, an inline keyboard reporting a keypress.
+                // The message is kept for the host that started the applet,
+                // which is the only thing here that can answer it through
+                // [`Cpu::push_applet_interactive_in_data`].
                 Some(3) => {
+                    let data = self
+                        .ipc_input_object_key(tls, handle, 0)
+                        .and_then(|key| self.am_storages.get(&key))
+                        .cloned()
+                        .unwrap_or_default();
                     if self
                         .unimplemented_ipc
                         .insert(("am:applet-interactive-output".to_string(), cmd_id))
                     {
                         self.diagnostic(
                             Level::Warn,
-                            "[am] the applet pushed interactive data; nothing here launched it, \
-                             so there is nobody to answer it",
+                            &format!(
+                                "[am] the applet is talking to its caller ({} bytes); nothing \
+                                 here launched it, so only the host can answer",
+                                data.len()
+                            ),
                         );
                     }
+                    self.am_interactive_out.push(data);
+                    if self.am_interactive_out.len() > MAX_INTERACTIVE_MESSAGES {
+                        self.am_interactive_out.remove(0);
+                    }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // GetPopInDataEvent / GetPopInteractiveInDataEvent -> event.
+                // What an applet waits on rather than polling the pop that
+                // refuses; a **copy** handle, like every other event a service
+                // hands out. Refusing these left an applet that waits before
+                // it pops with an unknown command id, which `nnSdk` treats as
+                // fatal.
+                Some(5) | Some(6) => {
+                    let queue = if cmd_id == Some(5) {
+                        AppletQueue::InData
+                    } else {
+                        AppletQueue::InteractiveInData
+                    };
+                    let event = self.applet_queue_event(queue);
+                    self.refresh_applet_pop_events();
+                    self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                 }
                 // ExitProcessAndReturn: the applet is finished. `am`
                 // terminates the process here and the call does not return,
@@ -1633,33 +1774,12 @@ impl Cpu {
                 // agreed on and the theme to draw in. What the applet pops
                 // after that is its own launch struct, which only its caller
                 // could know; there is no second storage to hand over.
-                Some(0) => match self.am_in_data.pop_front() {
-                    Some(data) => {
-                        let key = self.reply_with_interface(tls, handle, "am:storage")?;
-                        self.am_storages.insert(key, data);
-                        Ok(())
-                    }
-                    None => {
-                        /// `am` description 3: the applet asked for a storage
-                        /// that was never pushed.
-                        const NO_DATA: u32 = 128 | (3 << 9);
-                        // Named once, because `nnSdk` aborts on this and the
-                        // fatal it raises carries the code and nothing about
-                        // where it came from — 2128-0003 is also what an
-                        // empty `ReceiveMessage` answers, which is routine.
-                        if self
-                            .unimplemented_ipc
-                            .insert(("am:pop-in-data".to_string(), None))
-                        {
-                            self.diagnostic(
-                                Level::Warn,
-                                "[am] PopInData: the applet has popped every storage seeded for \
-                                 it and asked for another",
-                            );
-                        }
-                        self.write_ipc_response(tls, NO_DATA, &[], &[], &[])
-                    }
-                },
+                Some(0) => self.pop_applet_storage(tls, handle, AppletQueue::InData),
+                // PopInteractiveInData -> IStorage: the caller's answer to
+                // what the applet last pushed. Only the host can have left one
+                // here, so an applet that pops without one having been queued
+                // is refused the way an empty `PopInData` is.
+                Some(2) => self.pop_applet_storage(tls, handle, AppletQueue::InteractiveInData),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // ILibraryAppletCreator: how one applet launches another —
@@ -1987,6 +2107,20 @@ mod tests {
         assert!(!cpu.applet_is_application);
     }
 
+    /// Marshal a `PushOutData`-shaped request: a command taking one object,
+    /// which a plain session carries as a move handle behind a special header.
+    fn push_storage(cpu: &mut Cpu, command_id: u32, storage: u64) {
+        for i in (0..0x200u32).step_by(4) {
+            cpu.mem.write_u32(TLS + i, 0).unwrap();
+        }
+        cpu.mem.write_u32(TLS, 4).unwrap();
+        cpu.mem.write_u32(TLS + 4, 8 | (1 << 31)).unwrap();
+        cpu.mem.write_u32(TLS + 8, 1 << 5).unwrap();
+        cpu.mem.write_u32(TLS + 12, storage as u32).unwrap();
+        cpu.mem.write_u32(TLS + 0x10, SFCI).unwrap();
+        cpu.mem.write_u32(TLS + 0x18, command_id).unwrap();
+    }
+
     #[test]
     fn the_applet_result_is_kept_rather_than_dropped() {
         // The controller applet, run directly, ends by pushing a
@@ -2000,22 +2134,16 @@ mod tests {
         let mut result = vec![0u8; 0xC];
         result[0] = 1;
 
-        // A plain session moves the storage's own session handle: a special
-        // header declaring one move handle, and the handle behind it.
+        // A plain session moves the storage's own session handle.
         const STORAGE: u64 = 0x21;
         let mut cpu = Cpu::new();
         cpu.mem.map_zero(TLS, 0x200).unwrap();
         cpu.set_program_id(CONTROLLER);
-        cpu.mem.write_u32(TLS, 4).unwrap();
-        cpu.mem.write_u32(TLS + 4, 8 | (1 << 31)).unwrap();
-        cpu.mem.write_u32(TLS + 8, 1 << 5).unwrap();
-        cpu.mem.write_u32(TLS + 12, STORAGE as u32).unwrap();
-        cpu.mem.write_u32(TLS + 0x10, SFCI).unwrap();
-        cpu.mem.write_u32(TLS + 0x18, PUSH_OUT_DATA).unwrap();
         cpu.register_service_handle(9, "am:library-applet-self-accessor");
         cpu.register_service_handle(STORAGE, "am:storage");
         cpu.am_storages
             .insert(Cpu::object_key(STORAGE, 0), result.clone());
+        push_storage(&mut cpu, PUSH_OUT_DATA, STORAGE);
         cpu.applet_request(TLS, 9, Some(PUSH_OUT_DATA)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "push refused");
         assert_eq!(cpu.library_applet_results(), [result.clone()]);
@@ -2049,6 +2177,100 @@ mod tests {
             super::applet_result_summary(CONTROLLER, &result),
             "cancelled, 1 player(s), npad 0"
         );
+    }
+
+    #[test]
+    fn the_applet_can_be_answered_by_the_host_that_started_it() {
+        // The interactive channel: the applet pushes a message and waits on
+        // `GetPopInteractiveInDataEvent` for its caller's answer. Nothing here
+        // launched it, so the host is the caller — and until it answers, the
+        // event has to stay dark rather than hand back a pop that refuses.
+        const SWKBD: u64 = 0x0100_0000_0000_1008;
+        const PUSH_INTERACTIVE_OUT_DATA: u32 = 3;
+        const POP_INTERACTIVE_IN_DATA: u32 = 2;
+        const GET_POP_INTERACTIVE_IN_DATA_EVENT: u32 = 6;
+        /// `am` description 3: nothing queued to pop.
+        const NO_DATA: u32 = 128 | (3 << 9);
+        const STORAGE: u64 = 0x21;
+
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.set_program_id(SWKBD);
+        cpu.register_service_handle(9, "am:library-applet-self-accessor");
+        cpu.register_service_handle(STORAGE, "am:storage");
+        // What the keyboard offers for checking: `u64 size` then the text.
+        let mut message = 4u64.to_le_bytes().to_vec();
+        message.extend_from_slice(&[0x68, 0, 0x69, 0]);
+        cpu.am_storages
+            .insert(Cpu::object_key(STORAGE, 0), message.clone());
+        push_storage(&mut cpu, PUSH_INTERACTIVE_OUT_DATA, STORAGE);
+        cpu.applet_request(TLS, 9, Some(PUSH_INTERACTIVE_OUT_DATA))
+            .unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "push refused");
+        assert_eq!(cpu.library_applet_interactive_messages(), [message]);
+
+        // The event the applet then waits on exists and is dark: there is no
+        // answer yet, and a signalled event would send it to a pop that
+        // refuses, which `nnSdk` turns into a fatal.
+        marshal(&mut cpu, false, GET_POP_INTERACTIVE_IN_DATA_EVENT, &[]);
+        cpu.applet_request(TLS, 9, Some(GET_POP_INTERACTIVE_IN_DATA_EVENT))
+            .unwrap();
+        let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_ne!(event, 0, "no event handed back");
+        assert_eq!(cpu.event_name(event), Some("am:applet-interactive-in-data"));
+        assert_eq!(cpu.event_signaled(event), Some(false), "answered already");
+
+        marshal(&mut cpu, false, POP_INTERACTIVE_IN_DATA, &[]);
+        cpu.applet_request(TLS, 9, Some(POP_INTERACTIVE_IN_DATA))
+            .unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), NO_DATA, "pop");
+
+        // The host answers as the caller would -- `SwkbdTextCheckResult`
+        // Success and an empty message -- and that is what the applet pops.
+        let answer = vec![0u8; 0x8];
+        cpu.push_applet_interactive_in_data(answer.clone());
+        assert_eq!(cpu.event_signaled(event), Some(true), "answer unannounced");
+
+        marshal(&mut cpu, false, POP_INTERACTIVE_IN_DATA, &[]);
+        cpu.applet_request(TLS, 9, Some(POP_INTERACTIVE_IN_DATA))
+            .unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "pop refused");
+        let storage = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_eq!(cpu.service_name(storage), Some("am:storage"));
+        assert_eq!(cpu.am_storages[&Cpu::object_key(storage, 0)], answer);
+
+        // And the event goes dark again with the queue, so the next wait is a
+        // wait rather than a spin on a pop that has nothing left.
+        assert_eq!(cpu.event_signaled(event), Some(false), "still signalled");
+    }
+
+    #[test]
+    fn the_in_data_event_is_signalled_while_there_is_something_to_pop() {
+        // GetPopInDataEvent, which an applet waits on before its first
+        // `PopInData`. Refusing it is an unknown command id, and `nnSdk`
+        // aborts on one -- but a *signalled* event with an empty queue behind
+        // it is no better, so it tracks what the launch seeding left.
+        const SWKBD: u64 = 0x0100_0000_0000_1008;
+        const GET_POP_IN_DATA_EVENT: u32 = 5;
+        const POP_IN_DATA: u32 = 0;
+
+        let mut cpu = request(false, GET_POP_IN_DATA_EVENT, &[]);
+        cpu.set_program_id(SWKBD);
+        cpu.seed_applet_launch_arguments();
+        cpu.register_service_handle(9, "am:library-applet-self-accessor");
+        cpu.applet_request(TLS, 9, Some(GET_POP_IN_DATA_EVENT))
+            .unwrap();
+        let event = u64::from(cpu.mem.read_u32(TLS + 0x0c).unwrap());
+        assert_eq!(cpu.event_name(event), Some("am:applet-in-data"));
+        assert_eq!(cpu.event_signaled(event), Some(true), "storages waiting");
+
+        // The keyboard's three storages, and then the event is dark.
+        for _ in 0..3 {
+            marshal(&mut cpu, false, POP_IN_DATA, &[]);
+            cpu.applet_request(TLS, 9, Some(POP_IN_DATA)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "pop refused");
+        }
+        assert_eq!(cpu.event_signaled(event), Some(false), "queue not empty");
     }
 
     #[test]

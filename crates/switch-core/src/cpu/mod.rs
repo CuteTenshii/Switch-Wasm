@@ -1368,6 +1368,18 @@ pub struct Cpu {
     /// launched the applet; running one directly there is no caller to pop
     /// them, so they are kept for the host that started it.
     am_out_data: Vec<Vec<u8>>,
+    /// Storages queued for `ILibraryAppletSelfAccessor::PopInteractiveInData`
+    /// — the caller's side of a conversation the applet started. Only
+    /// [`Cpu::push_applet_interactive_in_data`] fills this: there is no caller
+    /// process here to answer on its own.
+    am_interactive_in: VecDeque<Vec<u8>>,
+    /// The applet's side of that conversation, most recent last, capped so an
+    /// inline keyboard pushing one per keystroke cannot grow it without end.
+    am_interactive_out: Vec<Vec<u8>>,
+    /// The events `GetPopInDataEvent` and `GetPopInteractiveInDataEvent` hand
+    /// out, by [`am::AppletQueue`] slot. Each is signalled while its queue has
+    /// something to pop.
+    am_pop_events: [Option<u64>; 2],
     /// `am`'s launch-parameter table, by `LaunchParameterKind`: what the
     /// launcher left for the program it started, for `PopLaunchParameter` to
     /// hand over. Filled by [`Cpu::seed_launch_parameters`], and emptied by
@@ -1805,6 +1817,9 @@ impl Cpu {
             fs_detection_events: BTreeMap::new(),
             am_in_data: VecDeque::new(),
             am_out_data: Vec::new(),
+            am_interactive_in: VecDeque::new(),
+            am_interactive_out: Vec::new(),
+            am_pop_events: [None; 2],
             am_launch_parameters: IdMap::default(),
             am_storages: IdMap::default(),
             am_storage_of: IdMap::default(),
@@ -2974,6 +2989,8 @@ impl Cpu {
     fn seed_applet_launch_arguments(&mut self) {
         self.am_in_data.clear();
         self.am_out_data.clear();
+        self.am_interactive_in.clear();
+        self.am_interactive_out.clear();
         if !crate::cpu::am::is_library_applet(self.program_id) {
             return;
         }
@@ -4073,6 +4090,26 @@ impl Cpu {
     /// not finished.
     pub fn library_applet_results(&self) -> &[Vec<u8>] {
         &self.am_out_data
+    }
+
+    /// What a library applet has said to its caller mid-run through
+    /// `PushInteractiveOutData`, oldest first — the keyboard offering its text
+    /// to be checked, an inline keyboard reporting a keypress. The last of
+    /// these is the one waiting on an answer.
+    pub fn library_applet_interactive_messages(&self) -> &[Vec<u8>] {
+        &self.am_interactive_out
+    }
+
+    /// Answer the applet as its caller would, through
+    /// `ILibraryAppletSelfAccessor::PopInteractiveInData`.
+    ///
+    /// An applet that has pushed an interactive message waits on the event
+    /// beside that pop, so queuing an answer fires it. Nothing here invents
+    /// one: the host that started the applet is its caller, and this is how it
+    /// speaks.
+    pub fn push_applet_interactive_in_data(&mut self, data: Vec<u8>) {
+        self.am_interactive_in.push_back(data);
+        self.refresh_applet_pop_events();
     }
 
     /// A pseudo-random 64-bit value, for `csrng`.
