@@ -151,9 +151,11 @@ impl BsdSocket {
     }
 
     /// Whether a `select` or `poll` would call it writable. Nothing here has a
-    /// send buffer that can fill, so a live connection always is.
+    /// send buffer that can fill, so a live connection always is — and so is a
+    /// datagram socket, which needs no connection to send on and would
+    /// otherwise never be reported ready for the `sendto` it can make.
     fn writable(&self) -> bool {
-        self.peer.is_some() && !self.peer_closed
+        self.kind == BSD_SOCK_DGRAM || (self.peer.is_some() && !self.peer_closed)
     }
 }
 
@@ -1249,13 +1251,17 @@ impl Cpu {
     fn bsd_receive_bytes(&mut self, tls: u32, fd: i32) -> Result<(i32, i32)> {
         match self.bsd_sockets.get(&fd) {
             None => return Ok((-1, BSD_EBADF)),
-            Some(socket) if socket.peer.is_none() && !socket.peer_closed => {
-                let unconnected = if socket.kind == BSD_SOCK_DGRAM {
-                    BSD_ENETUNREACH
-                } else {
-                    BSD_ENOTCONN
-                };
-                return Ok((-1, unconnected));
+            // A stream socket has no connection to read from. A datagram
+            // socket needs none: it reads whatever arrived, and on this
+            // console nothing ever does — which is the empty queue below,
+            // not an error. Answering `ENETUNREACH` here said the link was
+            // gone to a caller that had just been told it was up.
+            Some(socket)
+                if socket.kind != BSD_SOCK_DGRAM
+                    && socket.peer.is_none()
+                    && !socket.peer_closed =>
+            {
+                return Ok((-1, BSD_ENOTCONN));
             }
             Some(_) => {}
         }
@@ -1282,9 +1288,10 @@ impl Cpu {
         Ok((take as i32, 0))
     }
 
-    /// The answer for an operation that needs the other end of a connection
-    /// this socket does not have: a datagram socket has nowhere to send *to*,
-    /// a stream socket has no connection to send *on*.
+    /// The answer for a *send* that has no destination: a datagram socket that
+    /// named none has nowhere to send *to*, a stream socket has no connection
+    /// to send *on*. Receiving does not come here — nothing arriving is an
+    /// empty queue, not a broken link.
     fn bsd_unconnected(&mut self, tls: u32, fd: i32) -> Result<()> {
         match self.bsd_sockets.get(&fd) {
             None => self.bsd_reply(tls, -1, BSD_EBADF),
@@ -1803,12 +1810,34 @@ mod tests {
         broadcast[4..8].copy_from_slice(&[255, 255, 255, 255]);
         assert_eq!(send_to(&mut cpu, fd, &broadcast), (4, 0), "broadcast");
 
-        // Sent is not delivered. Nothing on this console is at the other end
-        // of either address, and a datagram this process sent must not turn
-        // up in its own queue however the read that looks for it fails.
+        // Sent is not delivered: nothing on this console is at the other end
+        // of either address, so a datagram this process sent does not turn up
+        // in its own queue. Nothing having arrived *yet* is what a bound
+        // socket on an idle link reports — `EAGAIN` and a reschedule, the
+        // same answer a live connection with an empty queue gives. It is not
+        // `ENETUNREACH`: the caller was just told the link was up.
+        cpu.pending_yield = false;
         let (result, bytes) = recv_on(&mut cpu, fd, 4);
-        assert!(result.0 < 0, "nothing to read");
+        assert_eq!(result, (-1, super::BSD_EAGAIN), "nothing yet");
         assert!(bytes.is_empty());
+        assert!(cpu.pending_yield, "a read that waits has to reschedule");
+
+        // And `poll` calls it writable, or a caller that waits for the socket
+        // to be ready before sending never gets to send at all.
+        const POLL_IN: u32 = SCRATCH + 0xc0;
+        const POLL_OUT: u32 = SCRATCH + 0xd0;
+        const POLLOUT: u16 = 0x0004;
+        let mut pollfd = [0u8; 8];
+        pollfd[..4].copy_from_slice(&fd.to_le_bytes());
+        pollfd[4..6].copy_from_slice(&POLLOUT.to_le_bytes());
+        place(&mut cpu, POLL_IN, &pollfd);
+        place(&mut cpu, POLL_OUT, &[0u8; 8]);
+        let mut poll = [0u8; 8];
+        poll[..4].copy_from_slice(&1u32.to_le_bytes());
+        write_buffer_request(&mut cpu, 6, &poll, &[(POLL_IN, 8)], &[(POLL_OUT, 8)]);
+        cpu.bsd_request(TLS, 9, Some(6)).unwrap();
+        assert_eq!(bsd_result(&cpu), (1, 0), "ready to send");
+        assert_eq!(cpu.mem.read_u16(POLL_OUT + 6).unwrap(), POLLOUT);
 
         // A stream socket is unchanged — a destination is not a connection.
         let (mut cpu, stream) = bsd_socket(1);

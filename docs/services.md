@@ -32,11 +32,16 @@ and tests.
   FreeBSD's** (`EAGAIN` is 35) and `fcntl`'s flags are stored verbatim. A
   `poll` *with* a timeout asks for a reschedule (`Cpu::pending_yield`) before
   returning zero, or a poll loop owns the CPU forever.
-  **A `SendTo` that names an `AF_INET` destination is sent, not refused** —
-  a link that is up hands the datagram over and reports the byte count
-  without waiting for anyone, and "nothing answers" is a thing that happens
-  to the *reply*. Refusing it describes an interface that is down, which is a
-  different console: RakNet's `BindShared` sends a test datagram to the
+  **A datagram socket needs no peer**, and none of the three things it does
+  may claim otherwise — the errno that says the link is gone contradicts the
+  `nifm` that just said it was up. A `SendTo` naming an `AF_INET` destination
+  **is sent**: a link that is up hands the datagram over and reports the byte
+  count without waiting for anyone, and "nothing answers" is a thing that
+  happens to the *reply*. A read reports `EAGAIN` and reschedules — nothing
+  has arrived *yet* — rather than `ENETUNREACH`. And `select`/`poll` call it
+  **writable**, or a caller that waits for readiness before sending never
+  sends. Refusing any of them describes an interface that is *down*, which is
+  a different console: RakNet's `BindShared` sends a test datagram to the
   address it just bound and reads a failed send as `BR_FAILED_SEND_TEST`, so
   `ENETUNREACH` there failed every `RakPeerInterface::Startup` — and
   Minecraft answers that by destroying its peer, nulling its pointer to it

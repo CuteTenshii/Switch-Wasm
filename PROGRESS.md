@@ -241,10 +241,18 @@ run presents **504 frames and 9,720 draws** across 1,515 submissions, and gets
 as far as `nsd:u` cmd 21 and raising its own error applet — which is what a
 console with no route off the LAN should make it do. So the retry around the
 failed `Startup` was eating the run, and "Minecraft is CPU-bound: 21.9 billion
-instructions buys 20 frames" below was measured through it. Two things are left
-under the same inconsistency, neither reached yet: a `recvfrom` on an
-unconnected datagram socket still answers `ENETUNREACH` where hardware would
-say "nothing yet", and `select` never calls such a socket writable.
+instructions buys 20 frames" below was measured through it.
+
+**The same contradiction had two more halves**, neither of which any title had
+reached yet, both now closed. A `recvfrom` on an unconnected datagram socket
+answered `ENETUNREACH` — a broken link — where a bound socket on an idle one
+reports that nothing has arrived *yet*: `EAGAIN` and a reschedule, the answer a
+live connection with an empty queue already gave. And `select`/`poll` never
+called a datagram socket writable, because writability was "has a peer", so a
+caller that waits for the socket to be ready before sending would never send at
+all. A datagram socket needs no peer to send; it is always writable. Only a
+stream socket with no connection still answers `ENOTCONN` to a read, which is
+what hardware does.
 
 **The fault the emulator reported was not the fault the guest took.** A call
 through a null vtable read `[0]`, `[0x1f8]` and then branched to 0, and every
