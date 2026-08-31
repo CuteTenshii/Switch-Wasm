@@ -1242,6 +1242,21 @@ impl Cpu {
             // IAppletCommonFunctions: knobs an applet sets on itself that
             // are not specific to being an application or a library applet.
             "am:applet-common-functions" => match cmd_id {
+                // SetHomeButtonDoubleClickEnabled(bool) /
+                // GetHomeButtonDoubleClickEnabled -> bool. Nothing here acts
+                // on a double press, but the getter has to read back what the
+                // setter was given -- and refusing it at all is a 2010-0221,
+                // which `nnSdk` turns into an svcBreak.
+                Some(50) => {
+                    let data = self.ipc_request_data(tls);
+                    self.home_button_double_click_enabled =
+                        self.mem.read_u8(data).unwrap_or(0) != 0;
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                Some(51) => {
+                    let enabled = u8::from(self.home_button_double_click_enabled);
+                    self.write_ipc_response(tls, 0, &[], &[enabled], &[])
+                }
                 // SetCpuBoostRequestPriority: where this applet sits in the
                 // queue when several ask the system to boost the CPU. There
                 // is one process here and no governor to ask.
@@ -1915,6 +1930,31 @@ mod tests {
         marshal(&mut cpu, false, 69, &[]);
         cpu.applet_request(TLS, 9, Some(69)).unwrap();
         assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "auto sleep on");
+    }
+
+    #[test]
+    fn the_home_button_double_click_setting_reads_back_what_was_set() {
+        // IAppletCommonFunctions 50/51, the same shape as the ISelfController
+        // pairs above: the setter had nothing behind it and the getter was a
+        // refusal, which `nnSdk` turns into an svcBreak. No HOME button here
+        // doubles anything, so the value it wrote is all the pair owes it.
+        let mut cpu = request(false, 50, &[1u8]);
+        cpu.register_service_handle(9, "am:applet-common-functions");
+        cpu.applet_request(TLS, 9, Some(50)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "set refused");
+
+        marshal(&mut cpu, false, 51, &[]);
+        cpu.applet_request(TLS, 9, Some(51)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "get refused");
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 1, "double click on");
+
+        // And the other way, so the getter is not a constant that happens to
+        // match what the test set.
+        marshal(&mut cpu, false, 50, &[0u8]);
+        cpu.applet_request(TLS, 9, Some(50)).unwrap();
+        marshal(&mut cpu, false, 51, &[]);
+        cpu.applet_request(TLS, 9, Some(51)).unwrap();
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "double click off");
     }
 
     #[test]

@@ -1253,6 +1253,11 @@ pub struct Cpu {
     /// setting that was never implemented.
     idle_time_detection_extension: u32,
     auto_sleep_disabled: bool,
+    /// What `IAppletCommonFunctions`'s HOME-button double-click setting was
+    /// last set to. There is no HOME button here to press twice; it is kept
+    /// for the reason the two above are, so the getter beside the setter
+    /// reads back what was written.
+    home_button_double_click_enabled: bool,
     /// Every `(interface, command)` pair already reported as having no
     /// implementation behind it, so the warning naming it prints once instead
     /// of once per call (`appletMainLoop` polls `am` every frame).
@@ -1756,6 +1761,7 @@ impl Cpu {
             applet_is_application: true,
             idle_time_detection_extension: 0,
             auto_sleep_disabled: false,
+            home_button_double_click_enabled: false,
             operation_mode: OperationMode::default(),
             applet_event: None,
             unimplemented_ipc: HashSet::new(),
