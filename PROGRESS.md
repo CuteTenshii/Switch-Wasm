@@ -214,6 +214,46 @@ is where the frame time went). Then every fragment shader opened with
 untranslatable. Then the frame came out upside down — not the viewport, but
 `QUEUE_BUFFER` throwing away a `QueueBufferInput` that said `FLIP_V`.
 
+**Minecraft's fourth gap was one refused datagram**, and it fired 29.6 billion
+instructions in — long after the title is drawing. The run jumps to address 0,
+in the browser and on the CLI alike, at exactly step 29,593,165,824. The vtable
+the faulting method belongs to names the class (`19RakNetServerLocator`, out of
+its typeinfo): it is building the LAN discovery ping list, and calls
+`GetNumberOfAddresses` through a `RakPeerInterface*` that is null. It is null
+because the setup function *nulls it deliberately* — `if (Startup(...) != 0) {
+Shutdown(); destroy(peer); m_peer = nullptr; }` — and the caller dereferences it
+without checking. Startup failed because RakNet's `BindShared` sends a test
+datagram to the address it just bound and reads a failed send as
+`BR_FAILED_SEND_TEST`. The last seven service calls before the fault are the
+whole story: Socket, SetSockOpt x4, Bind, GetSockName, SendTo (4-byte payload,
+16-byte `sockaddr_in`), Close.
+
+**A link that is up and a datagram that cannot leave are not the same console**,
+and `bsd` was claiming both — `nifm` reports 192.168.1.100 while `sendto`
+answered `ENETUNREACH`, which is what an interface that is *down* reports. An
+addressed `SendTo` now reports the byte count and drops the bytes; unaddressed
+datagrams and unconnected stream sockets fail as they did.
+
+**The crash was the smaller half of it.** The title was not merely dying at
+29.6B steps, it was *stuck* long before: 6 frames and 12 draws, unchanged from
+4 billion steps to 29 billion. With the send answered, the same 40-billion-step
+run presents **504 frames and 9,720 draws** across 1,515 submissions, and gets
+as far as `nsd:u` cmd 21 and raising its own error applet — which is what a
+console with no route off the LAN should make it do. So the retry around the
+failed `Startup` was eating the run, and "Minecraft is CPU-bound: 21.9 billion
+instructions buys 20 frames" below was measured through it. Two things are left
+under the same inconsistency, neither reached yet: a `recvfrom` on an
+unconnected datagram socket still answers `ENETUNREACH` where hardware would
+say "nothing yet", and `select` never calls such a socket writable.
+
+**The fault the emulator reported was not the fault the guest took.** A call
+through a null vtable read `[0]`, `[0x1f8]` and then branched to 0, and every
+one of those succeeded: `Cpu::bootstrap` soft-maps the whole space, so unwritten
+pages read as zeros — the instruction fetch at 0 included. What is reported is
+`unimplemented instruction 0x00000000 at pc=0x0`, and only the last-64
+instruction trail says it was a null dispatch. A fetch from a page nothing has
+ever written is always a wild jump; a fault at the branch would name it.
+
 **`SHFL` took a quad to run**, and three things came out of it: a shuffle is only
 half of a derivative (`FSWZADD` subtracts in whichever direction the lane's
 position calls for, so decoding the shuffle alone leaves every such shader

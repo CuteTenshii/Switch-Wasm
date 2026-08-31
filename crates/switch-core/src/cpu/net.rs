@@ -2,8 +2,9 @@
 //!
 //! There is no network behind any of this. `sfdnsres` resolves nothing; `nifm`
 //! reports a console that is connected to a LAN with no route off it; `ssl`
-//! builds contexts that never handshake; a `bsd` socket aimed at any address
-//! but this console's own is refused.
+//! builds contexts that never handshake; a `bsd` *connection* to any address
+//! but this console's own is refused, while a datagram aimed anywhere leaves
+//! and is never answered.
 //!
 //! That is deliberate: an *empty* network is a state a real console reaches
 //! and every caller has a path for. A failure is the path built for hardware
@@ -189,9 +190,10 @@ const BSD_ENOTCONN: i32 = 57;
 
 const BSD_ECONNREFUSED: i32 = 61;
 
-/// `SOCK_DGRAM`. A datagram socket has nowhere to send *to* (`ENETUNREACH`)
-/// where a stream socket has no connection to send *on* (`ENOTCONN`), and only
-/// a stream socket can be one end of the loopback pair below.
+/// `SOCK_DGRAM`. A datagram socket that named no destination has nowhere to
+/// send *to* (`ENETUNREACH`) where a stream socket has no connection to send
+/// *on* (`ENOTCONN`), and only a stream socket can be one end of the loopback
+/// pair below.
 const BSD_SOCK_DGRAM: u32 = 2;
 
 /// `AF_INET`, in the `sin_family` byte of Horizon's `sockaddr`.
@@ -716,11 +718,16 @@ impl Cpu {
             //
             // `SendTo`'s destination is ignored on a connected socket, which
             // is what the connected end of a loopback pair is; on an
-            // unconnected one there is nowhere to send to and it fails like
-            // the rest.
-            Some(10) | Some(11) | Some(24) => {
+            // unconnected datagram socket it is the whole of the operation,
+            // and [`Cpu::bsd_send`] answers it out of the link `nifm`
+            // reports rather than refusing it.
+            Some(10) | Some(24) => {
                 let fd = word(self, 0) as i32;
-                self.bsd_send(tls, fd)
+                self.bsd_send(tls, fd, None)
+            }
+            Some(11) => {
+                let fd = word(self, 0) as i32;
+                self.bsd_send(tls, fd, Some(1))
             }
             // Accept(fd) -> the connection at the head of the listener's
             // queue, its address in the output buffer and the length of that
@@ -1163,7 +1170,11 @@ impl Cpu {
     /// `Send`/`SendTo`/`Write`: into the peer's queue, all of it, at once.
     /// Nothing here has a send buffer that can fill, so a short write is not a
     /// state this can reach.
-    fn bsd_send(&mut self, tls: u32, fd: i32) -> Result<()> {
+    ///
+    /// `destination` names the buffer holding `SendTo`'s `sockaddr`; only
+    /// `SendTo` has one, and on a socket with no peer it is the whole of the
+    /// operation — see [`Cpu::bsd_send_datagram`].
+    fn bsd_send(&mut self, tls: u32, fd: i32, destination: Option<u32>) -> Result<()> {
         let peer = match self.bsd_sockets.get(&fd) {
             None => return self.bsd_reply(tls, -1, BSD_EBADF),
             // The peer is gone; on hardware this raises `SIGPIPE` as well, and
@@ -1171,7 +1182,7 @@ impl Cpu {
             Some(socket) if socket.peer_closed => return self.bsd_reply(tls, -1, BSD_EPIPE),
             Some(socket) => match socket.peer {
                 Some(peer) => peer,
-                None => return self.bsd_unconnected(tls, fd),
+                None => return self.bsd_send_datagram(tls, fd, destination),
             },
         };
         let bytes = match self.ipc_input_buffer(tls, 0) {
@@ -1182,6 +1193,31 @@ impl Cpu {
         if let Some(peer) = self.bsd_sockets.get_mut(&peer) {
             peer.rx.extend(bytes);
         }
+        self.bsd_reply(tls, sent, 0)
+    }
+
+    /// `SendTo` from a datagram socket with no peer: the link takes it, and
+    /// the bytes are dropped. On a link that is up — which is the one `nifm`
+    /// reports — `sendto` hands the datagram over and returns the byte count
+    /// without waiting for anyone; `ENETUNREACH` describes an interface that
+    /// is *down*, and RakNet's `BindShared` reads a failed test send as
+    /// `BR_FAILED_SEND_TEST`, which failed every `RakPeerInterface::Startup`.
+    /// A stream socket, and a datagram that named no destination, still fail.
+    fn bsd_send_datagram(&mut self, tls: u32, fd: i32, destination: Option<u32>) -> Result<()> {
+        let datagram = self
+            .bsd_sockets
+            .get(&fd)
+            .is_some_and(|socket| socket.kind == BSD_SOCK_DGRAM);
+        let addressed = destination
+            .and_then(|index| self.ipc_input_buffer(tls, index))
+            .map(|(addr, size)| self.read_bytes(addr, size.min(0x80)))
+            .is_some_and(|address| sockaddr_in(&address).is_some());
+        if !datagram || !addressed {
+            return self.bsd_unconnected(tls, fd);
+        }
+        let sent = self
+            .ipc_input_buffer(tls, 0)
+            .map_or(0, |(_, size)| size as i32);
         self.bsd_reply(tls, sent, 0)
     }
 
@@ -1700,7 +1736,9 @@ mod tests {
         cpu.bsd_request(TLS, 9, Some(10)).unwrap();
         assert_eq!(bsd_result(&cpu), (-1, super::BSD_ENOTCONN));
 
-        // ...and a datagram socket has nowhere to send to.
+        // ...and a datagram socket that named no destination has nowhere to
+        // send to. One that named a destination is
+        // `bsd_sends_an_addressed_datagram_the_link_would_carry`.
         let (mut cpu, fd) = bsd_socket(super::BSD_SOCK_DGRAM);
         write_request(&mut cpu, 11, &fd.to_le_bytes());
         cpu.bsd_request(TLS, 9, Some(11)).unwrap();
@@ -1719,6 +1757,66 @@ mod tests {
         write_request(&mut cpu, 12, &fd.to_le_bytes());
         cpu.bsd_request(TLS, 9, Some(12)).unwrap();
         assert_eq!(bsd_result(&cpu), (-1, super::BSD_EAGAIN));
+    }
+
+    #[test]
+    fn bsd_sends_an_addressed_datagram_the_link_would_carry() {
+        // RakNet's `BindShared` binds a UDP socket, sends a test datagram to
+        // the address it just bound, and reports `BR_FAILED_SEND_TEST` when
+        // that send fails. That fails `RakPeerInterface::Startup`, and
+        // Minecraft answers a failed startup by destroying its peer, nulling
+        // its own pointer to it and calling through it anyway — 29.6 billion
+        // instructions into a boot, as a jump to address zero.
+        let (mut cpu, fd) = bsd_socket(super::BSD_SOCK_DGRAM);
+        cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
+        const PAYLOAD: u32 = SCRATCH + 0x40;
+        const PORT: u16 = 19132;
+
+        place(&mut cpu, SCRATCH, &loopback_sockaddr(PORT));
+        write_map_buffer_request(&mut cpu, 13, &fd.to_le_bytes(), SCRATCH, 16, true);
+        cpu.bsd_request(TLS, 9, Some(13)).unwrap();
+        assert_eq!(bsd_result(&cpu), (0, 0), "bind");
+
+        let send_to = |cpu: &mut Cpu, fd: i32, address: &[u8; 16]| {
+            place(cpu, PAYLOAD, &[1u8, 2, 3, 4]);
+            place(cpu, SCRATCH, address);
+            write_buffer_request(
+                cpu,
+                11,
+                &fd.to_le_bytes(),
+                &[(PAYLOAD, 4), (SCRATCH, 16)],
+                &[],
+            );
+            cpu.bsd_request(TLS, 9, Some(11)).unwrap();
+            bsd_result(cpu)
+        };
+
+        assert_eq!(
+            send_to(&mut cpu, fd, &loopback_sockaddr(PORT)),
+            (4, 0),
+            "the address it just bound"
+        );
+
+        // And the LAN broadcast a discovery ping actually goes to, which is
+        // an address this console could not be hosting either end of.
+        let mut broadcast = loopback_sockaddr(PORT);
+        broadcast[4..8].copy_from_slice(&[255, 255, 255, 255]);
+        assert_eq!(send_to(&mut cpu, fd, &broadcast), (4, 0), "broadcast");
+
+        // Sent is not delivered. Nothing on this console is at the other end
+        // of either address, and a datagram this process sent must not turn
+        // up in its own queue however the read that looks for it fails.
+        let (result, bytes) = recv_on(&mut cpu, fd, 4);
+        assert!(result.0 < 0, "nothing to read");
+        assert!(bytes.is_empty());
+
+        // A stream socket is unchanged — a destination is not a connection.
+        let (mut cpu, stream) = bsd_socket(1);
+        cpu.mem.map_zero(SCRATCH, 0x200).unwrap();
+        assert_eq!(
+            send_to(&mut cpu, stream, &loopback_sockaddr(PORT)),
+            (-1, super::BSD_ENOTCONN)
+        );
     }
 
     #[test]

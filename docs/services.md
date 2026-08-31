@@ -32,6 +32,16 @@ and tests.
   FreeBSD's** (`EAGAIN` is 35) and `fcntl`'s flags are stored verbatim. A
   `poll` *with* a timeout asks for a reschedule (`Cpu::pending_yield`) before
   returning zero, or a poll loop owns the CPU forever.
+  **A `SendTo` that names an `AF_INET` destination is sent, not refused** —
+  a link that is up hands the datagram over and reports the byte count
+  without waiting for anyone, and "nothing answers" is a thing that happens
+  to the *reply*. Refusing it describes an interface that is down, which is a
+  different console: RakNet's `BindShared` sends a test datagram to the
+  address it just bound and reads a failed send as `BR_FAILED_SEND_TEST`, so
+  `ENETUNREACH` there failed every `RakPeerInterface::Startup` — and
+  Minecraft answers that by destroying its peer, nulling its pointer to it
+  and calling through it anyway. A datagram with *no* destination, and a
+  stream socket with no connection, fail as before.
 - **`sfdnsres`** — `EAI_NONAME` / `HOST_NOT_FOUND`, the *definitive* failure
   rather than try-again, in the **first** word of `SfdnsresRequestResults`.
 - **`pctl`** reports the console unrestricted. Watch the direction:
