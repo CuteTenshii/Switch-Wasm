@@ -979,10 +979,50 @@ impl Cpu {
                     let h = self.alloc_event("am:gpu-error", true);
                     self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
                 }
-                // SetTerminateResult / InitializeGamePlayRecording /
-                // SetGamePlayRecordingState / SetDelayTimeToAbortOnGpuError:
-                // nothing to record, nothing to fault, nothing to report back.
-                Some(22) | Some(66) | Some(67) | Some(131) => {
+                // SetTerminateResult(Result): why the title is about to
+                // stop. AM keeps it because the title will not be there to
+                // ask once it has: it outlives the process and is read back
+                // through GetLastApplicationExitReason below, and on hardware
+                // it is the code an error screen quotes.
+                //
+                // It is also the only statement a failing title makes about
+                // its own failure, so a non-zero one is said out loud rather
+                // than only stored. A title that gave up and a title that
+                // finished both stop, and nothing else in the log separates
+                // them.
+                Some(22) => {
+                    let result = self.mem.read_u32(self.ipc_request_data(tls))?;
+                    self.am_terminate_result = result;
+                    if result != 0 {
+                        let (module, description) = (result & 0x1ff, result >> 9);
+                        self.diagnostic(
+                            Level::Warn,
+                            &format!(
+                                "[am] the title set a terminate result of {result:#x} \
+                                 ({module}-{description:04})"
+                            ),
+                        );
+                    }
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // GetLastApplicationExitReason -> u32: what the application
+                // that stopped last stopped for. There has only ever been one
+                // program here and it is the one asking, so the answer is
+                // whatever it last told SetTerminateResult — zero until it
+                // tells us otherwise, which is what a console reports for an
+                // application that exited normally.
+                //
+                // switchbrew names the command and its one out word and not
+                // the encoding of that word; the shape is what a caller acts
+                // on, and refusing it is an svcBreak.
+                Some(200) => {
+                    let reason = self.am_terminate_result;
+                    self.write_ipc_response(tls, 0, &[], &reason.to_le_bytes(), &[])
+                }
+                // InitializeGamePlayRecording / SetGamePlayRecordingState /
+                // SetDelayTimeToAbortOnGpuError: nothing to record, nothing
+                // to fault, nothing to report back.
+                Some(66) | Some(67) | Some(131) => {
                     self.warn_stub(&iface, cmd_id, "accepted and not recorded");
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
@@ -2045,6 +2085,27 @@ mod tests {
     }
 
     #[test]
+    fn am_gives_back_the_terminate_result_the_title_set() {
+        // `SetTerminateResult` is everything a title says about why it is
+        // about to stop, and `GetLastApplicationExitReason` is where the
+        // system reads it back. Accepting the first without recording it left
+        // the second nothing to report — and refusing the second is an
+        // svcBreak, which is how `nnSdk` answers a command id nothing
+        // implements.
+        const TERMINATE_RESULT: u32 = 202 | (30 << 9);
+        let mut cpu = request(false, 22, &TERMINATE_RESULT.to_le_bytes());
+        cpu.register_service_handle(9, "am:application-functions");
+        cpu.applet_request(TLS, 9, Some(22)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.am_terminate_result, TERMINATE_RESULT);
+
+        marshal(&mut cpu, false, 200, &[]);
+        cpu.applet_request(TLS, 9, Some(200)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), TERMINATE_RESULT);
+    }
+
+    #[test]
     fn the_preselected_user_is_handed_over_once_and_then_it_is_gone() {
         // The HOME menu picks the user before it starts a title and leaves the
         // choice as a `PreselectedUser` launch parameter.
@@ -2138,27 +2199,27 @@ mod tests {
 
     #[test]
     fn a_stubbed_answer_names_itself_once_and_still_succeeds() {
-        // SetTerminateResult is accepted and thrown away: the reply is a bare
-        // success, which is the right *shape* and an answer with nothing
-        // behind it. Neither existing warning covers that -- the command is
-        // neither missing nor refused -- so the guest believes it and the
-        // consequence surfaces somewhere else entirely. The marker is what
-        // makes the belief visible; it must not change the reply.
-        let mut cpu = request(false, 22, &4u32.to_le_bytes());
+        // InitializeGamePlayRecording is accepted and thrown away: the reply
+        // is a bare success, which is the right *shape* and an answer with
+        // nothing behind it. Neither existing warning covers that -- the
+        // command is neither missing nor refused -- so the guest believes it
+        // and the consequence surfaces somewhere else entirely. The marker is
+        // what makes the belief visible; it must not change the reply.
+        let mut cpu = request(false, 66, &[]);
         cpu.register_service_handle(9, "am:application-functions");
-        cpu.applet_request(TLS, 9, Some(22)).unwrap();
+        cpu.applet_request(TLS, 9, Some(66)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "Result");
         let trace = String::from_utf8_lossy(&cpu.trace).into_owned();
         assert!(
-            trace.contains("[ipc] stub: am:application-functions cmd=Some(22)"),
+            trace.contains("[ipc] stub: am:application-functions cmd=Some(66)"),
             "the stub went unreported: {trace:?}"
         );
 
         // Once per (interface, command): a title that polls one every frame
         // would otherwise bury every other line in the trace the browser
         // drains.
-        marshal(&mut cpu, false, 22, &4u32.to_le_bytes());
-        cpu.applet_request(TLS, 9, Some(22)).unwrap();
+        marshal(&mut cpu, false, 66, &[]);
+        cpu.applet_request(TLS, 9, Some(66)).unwrap();
         let repeated = String::from_utf8_lossy(&cpu.trace)
             .matches("[ipc] stub:")
             .count();

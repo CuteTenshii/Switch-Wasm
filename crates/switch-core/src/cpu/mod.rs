@@ -1254,6 +1254,14 @@ pub struct Cpu {
     /// for the reason the two above are, so the getter beside the setter
     /// reads back what was written.
     home_button_double_click_enabled: bool,
+    /// The `Result` the title last handed `IApplicationFunctions`'
+    /// `SetTerminateResult`, which is the only thing it says about why it is
+    /// about to stop. `GetLastApplicationExitReason` reads it back.
+    am_terminate_result: u32,
+    /// How many Miis `mii`'s `BuildRandom` has built. It picks which face to
+    /// answer with and stamps the create id that tells one from the next, so
+    /// it counts rather than being drawn — see `mii_create_id`.
+    mii_random_sequence: u32,
     /// Every `(interface, command)` pair already reported as having no
     /// implementation behind it, so the warning naming it prints once instead
     /// of once per call (`appletMainLoop` polls `am` every frame).
@@ -1764,6 +1772,8 @@ impl Cpu {
             applet_is_application: true,
             idle_time_detection_extension: 0,
             auto_sleep_disabled: false,
+            am_terminate_result: 0,
+            mii_random_sequence: 0,
             home_button_double_click_enabled: false,
             operation_mode: OperationMode::default(),
             applet_event: None,

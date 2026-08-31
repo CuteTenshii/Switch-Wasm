@@ -15,6 +15,12 @@ const MII_CHAR_INFO_LEN: usize = 0x58;
 /// the first thing in a `CharInfo`.
 const MII_CREATE_ID_LEN: usize = 0x10;
 
+/// The tags [`mii_create_id`] stamps the six Miis `nn::mii` carries with, and
+/// the ones `BuildRandom` invents. They differ so that a Mii a title made can
+/// never be handed the identity of a built-in one.
+const MII_DEFAULT_CREATE_ID_TAG: &[u8; MII_CREATE_ID_LEN] = b"switch-wasm mii\0";
+const MII_RANDOM_CREATE_ID_TAG: &[u8; MII_CREATE_ID_LEN] = b"switch-wasm rnd\0";
+
 /// Where the nickname sits, past that id.
 const MII_CHAR_INFO_NICKNAME: usize = 0x10;
 
@@ -32,6 +38,10 @@ const MII_DEFAULT_NICKNAME: &str = "no name";
 /// mii's "that argument is out of range" (module 126, description 1), which is
 /// what `BuildDefault` answers an index past the Miis it has.
 const MII_INVALID_ARGUMENT: u32 = 126 | (1 << 9);
+
+/// `nn::mii::Gender::All`: `BuildRandom`'s default, and the value past the two
+/// real genders that narrows nothing.
+const MII_GENDER_ALL: u8 = 2;
 
 /// A Mii's colours are numbered in the palette the 3DS and Wii U used, which
 /// is the palette the default Miis are written in, and are widened on the way
@@ -147,7 +157,7 @@ const DEFAULT_MIIS: [DefaultMii; 6] = [
 fn default_mii_char_info(index: u32) -> Option<[u8; MII_CHAR_INFO_LEN]> {
     let mii = DEFAULT_MIIS.get(index as usize)?;
     let mut info = [0u8; MII_CHAR_INFO_LEN];
-    info[..MII_CREATE_ID_LEN].copy_from_slice(&default_mii_create_id(index));
+    info[..MII_CREATE_ID_LEN].copy_from_slice(&mii_create_id(MII_DEFAULT_CREATE_ID_TAG, index));
     let name = MII_DEFAULT_NICKNAME.encode_utf16().take(MII_NICKNAME_LEN);
     for (position, unit) in name.enumerate() {
         let at = MII_CHAR_INFO_NICKNAME + position * 2;
@@ -208,22 +218,43 @@ fn default_mii_char_info(index: u32) -> Option<[u8; MII_CHAR_INFO_LEN]> {
     Some(info)
 }
 
-/// The create id a default Mii is stamped with.
+/// The create id a Mii is stamped with, built from a tag and a count.
 ///
 /// A real one is an RFC 4122 version 4 UUID drawn at random when the Mii is
 /// built, and it is the Mii's identity: a database keyed on it treats two Miis
 /// sharing one as the same Mii. There is no database here to collide in, so
-/// these are derived from the index rather than drawn — the same Mii gets the
-/// same id every run, which is what makes one boot's trace comparable with the
-/// next's.
-fn default_mii_create_id(index: u32) -> [u8; MII_CREATE_ID_LEN] {
-    let mut id = *b"switch-wasm mii\0";
-    id[15] = index as u8;
+/// these are counted rather than drawn — the same Mii gets the same id every
+/// run, which is what makes one boot's trace comparable with the next's.
+///
+/// The count occupies the tag's last byte, so a tag has 256 ids in it. That
+/// outlasts the hundred Miis a console's database holds, which is the only
+/// population these ever have to stay distinct across.
+fn mii_create_id(tag: &[u8; MII_CREATE_ID_LEN], sequence: u32) -> [u8; MII_CREATE_ID_LEN] {
+    let mut id = *tag;
+    id[MII_CREATE_ID_LEN - 1] = sequence as u8;
     // The version (4, "random") and variant (RFC 4122) fields, which sit in
     // the middle of the id rather than at either end of it.
     id[6] = (id[6] & 0x0F) | 0x40;
     id[8] = (id[8] & 0x3F) | 0x80;
     id
+}
+
+/// Which built-in Mii `BuildRandom` answers with, given the gender asked for
+/// and how many random Miis have already been built.
+///
+/// Successive calls walk the matching Miis rather than repeating one, because
+/// an editor fills a row of faces by calling this once per face — answering
+/// them all with the same Mii offers a choice of one.
+///
+/// `None` means no built-in Mii has the requested gender, which cannot happen
+/// with the six below and is `MII_INVALID_ARGUMENT` if the table ever changes.
+fn random_mii_index(gender: u8, sequence: u32) -> Option<u32> {
+    let matching: Vec<u32> = (0..DEFAULT_MIIS.len() as u32)
+        .filter(|&index| gender >= MII_GENDER_ALL || DEFAULT_MIIS[index as usize].gender == gender)
+        .collect();
+    matching
+        .get((sequence as usize).checked_rem(matching.len())?)
+        .copied()
 }
 
 impl Cpu {
@@ -286,6 +317,40 @@ impl Cpu {
                 // their first Mii.
                 Some(4) | Some(8) | Some(9) => {
                     self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
+                }
+                // BuildRandom(Age, Gender, Race) -> CharInfo: a Mii nobody
+                // made, which is what an editor offers whoever has not made
+                // one yet. The three arguments are one byte each and narrow
+                // what may come back; only Gender narrows anything here,
+                // because gender is the only one of the three the six
+                // built-in Miis differ in. Filtering on an age or a race they
+                // all share would be choosing between faces on a property
+                // that is not in them.
+                //
+                // Random by hardware's definition, counted by this one: the
+                // Mii is picked in sequence and stamped with a create id of
+                // its own, which is what a database that keeps it tells it
+                // apart from every other Mii by. Reusing the built-in id
+                // would file each new Mii on top of the one it was built
+                // from.
+                Some(6) => {
+                    let data = self.ipc_request_data(tls);
+                    let gender = self
+                        .mem
+                        .read_u8(data.wrapping_add(1))
+                        .unwrap_or(MII_GENDER_ALL);
+                    let sequence = self.mii_random_sequence;
+                    match random_mii_index(gender, sequence).and_then(default_mii_char_info) {
+                        Some(mut info) => {
+                            self.mii_random_sequence = sequence.wrapping_add(1);
+                            info[..MII_CREATE_ID_LEN].copy_from_slice(&mii_create_id(
+                                MII_RANDOM_CREATE_ID_TAG,
+                                sequence,
+                            ));
+                            self.write_ipc_response(tls, 0, &[], &info, &[])
+                        }
+                        None => self.write_ipc_response(tls, MII_INVALID_ARGUMENT, &[], &[], &[]),
+                    }
                 }
                 // BuildDefault(u32 index) -> CharInfo: one of the six Miis
                 // `nn::mii` carries in its own image. This is the one read
@@ -389,6 +454,61 @@ mod tests {
         let first = super::default_mii_char_info(0).unwrap();
         assert_eq!(first[0x32], super::MII_HAIR_COLORS[0], "hair_color");
         assert_eq!(first[0x35], super::MII_EYE_COLORS[0], "eye_color");
+    }
+
+    #[test]
+    fn mii_build_random_walks_the_faces_and_gives_each_its_own_identity() {
+        // BuildRandom takes Age, Gender and Race as a byte each. Gender is
+        // the only one of the three the six built-in Miis differ in, so it is
+        // the only one that narrows what comes back — Female here, which is
+        // the last three of them.
+        let mut cpu = super::Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.record_domain_object(9, 7, "mii:database");
+
+        let mut faces = Vec::new();
+        let mut create_ids = Vec::new();
+        for _ in 0..4 {
+            marshal(&mut cpu, true, 6, &[3, 1, 3]);
+            cpu.mii_request(TLS, 9, Some(6)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "result");
+            let mut info = [0u8; super::MII_CHAR_INFO_LEN];
+            for (offset, byte) in info.iter_mut().enumerate() {
+                *byte = cpu.mem.read_u8(TLS + 0x30 + offset as u32).unwrap();
+            }
+            assert_eq!(info[0x28], 1, "a female Mii was asked for");
+            create_ids.push(info[..super::MII_CREATE_ID_LEN].to_vec());
+            faces.push(info[super::MII_CHAR_INFO_FEATURES..].to_vec());
+        }
+
+        // Three Miis match, and four calls walk them and come back round. An
+        // editor fills its row of faces by calling this once per face, so a
+        // pick that does not move offers a choice of one.
+        assert_ne!(faces[0], faces[1]);
+        assert_ne!(faces[1], faces[2]);
+        assert_ne!(faces[0], faces[2]);
+        assert_eq!(faces[0], faces[3], "the fourth comes back round");
+
+        // Each is still its own Mii, the two built from one face included:
+        // a database keyed on create ids files two Miis sharing one on top of
+        // each other.
+        for (position, id) in create_ids.iter().enumerate() {
+            assert!(
+                !create_ids[..position].contains(id),
+                "two Miis, one identity"
+            );
+        }
+
+        // And none of them may take a built-in Mii's identity, which is what
+        // the separate tag keeps apart.
+        let built_in: Vec<Vec<u8>> = (0..super::DEFAULT_MIIS.len() as u32)
+            .map(|index| {
+                super::default_mii_char_info(index).unwrap()[..super::MII_CREATE_ID_LEN].to_vec()
+            })
+            .collect();
+        for id in &create_ids {
+            assert!(!built_in.contains(id), "a new Mii took a built-in one's id");
+        }
     }
 
     #[test]

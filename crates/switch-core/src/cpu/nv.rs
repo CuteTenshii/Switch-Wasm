@@ -201,10 +201,29 @@ impl Cpu {
             // There is one applet here, so the id is recorded and nothing
             // reads it -- but the out word is not optional, and answering
             // with an empty reply is the short-reply bug fixed at Initialize.
-            Some(8) => {
+            // SetAruidForTest takes and answers the same thing.
+            Some(7) | Some(8) => {
                 self.nv.applet_resource_user_id = self.mem.read_u64(data).unwrap_or(0);
                 self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
             }
+            // GetStatus -> u32 error. Its name suggests more and it returns
+            // only that word, which is the same short-reply trap SetAruid
+            // above was in: the catch-all answered it with an empty raw
+            // section, and a caller reading the word got whatever the reply's
+            // padding held.
+            Some(6) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
+            // DumpGraphicsMemoryInfo: no input, no output. On hardware it
+            // writes the driver's memory map to the system log, so a console
+            // with no such log does the whole of what it does by returning.
+            Some(9) => self.write_ipc_response(tls, 0, &[], &[], &[]),
+            // SetGraphicsFirmwareMemoryMarginEnabled(u32 enabled) [8.0.0+]:
+            // whether the driver holds a slice of video memory back for the
+            // graphics firmware. There is no firmware here to hold it back
+            // for and no budget to take it from, so the margin is neither
+            // kept nor refused -- and unlike its neighbours this one really
+            // does answer with a Result and nothing else, which is why it can
+            // be spelled out here without changing what it replies.
+            Some(13) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // Everything else: acknowledge with no out data.
             _ => {
                 self.warn_stub("nvdrv", cmd_id, "accepted with no reply data");
@@ -236,5 +255,23 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 4).unwrap(), 9);
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "NvError_Success");
         assert_eq!(cpu.nv.applet_resource_user_id, aruid);
+    }
+
+    #[test]
+    fn get_status_answers_with_the_error_word_as_well() {
+        // The same short reply, from the same catch-all: `GetStatus`'s whole
+        // output is one NvError word, and answering it with an empty raw
+        // section leaves a caller reading the reply's padding for it.
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        marshal(&mut cpu, false, 6, &[]);
+        cpu.nvdrv_request(TLS, Some(6), 9).unwrap();
+
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 4).unwrap(),
+            9,
+            "one word of out data"
+        );
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "NvError_Success");
     }
 }
