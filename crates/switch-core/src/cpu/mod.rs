@@ -1362,6 +1362,12 @@ pub struct Cpu {
     /// Storages queued for `ILibraryAppletSelfAccessor::PopInData` — what the
     /// applet's caller would have pushed before starting it.
     am_in_data: VecDeque<Vec<u8>>,
+    /// What a library applet pushed back through
+    /// `ILibraryAppletSelfAccessor::PushOutData` — its result, in the order it
+    /// produced it. A console's `am` hands each one to the caller that
+    /// launched the applet; running one directly there is no caller to pop
+    /// them, so they are kept for the host that started it.
+    am_out_data: Vec<Vec<u8>>,
     /// `am`'s launch-parameter table, by `LaunchParameterKind`: what the
     /// launcher left for the program it started, for `PopLaunchParameter` to
     /// hand over. Filled by [`Cpu::seed_launch_parameters`], and emptied by
@@ -1798,6 +1804,7 @@ impl Cpu {
             fs_speed_emulation_mode: 0,
             fs_detection_events: BTreeMap::new(),
             am_in_data: VecDeque::new(),
+            am_out_data: Vec::new(),
             am_launch_parameters: IdMap::default(),
             am_storages: IdMap::default(),
             am_storage_of: IdMap::default(),
@@ -2966,6 +2973,7 @@ impl Cpu {
     /// after the first left both of them aborting on `2128-0003`.
     fn seed_applet_launch_arguments(&mut self) {
         self.am_in_data.clear();
+        self.am_out_data.clear();
         if !crate::cpu::am::is_library_applet(self.program_id) {
             return;
         }
@@ -4054,6 +4062,17 @@ impl Cpu {
     /// The program id `pm` reports, as set by [`Cpu::set_program_id`].
     pub fn program_id(&self) -> u64 {
         self.program_id
+    }
+
+    /// The results a library applet pushed back before it exited, oldest
+    /// first — the keyboard's text, the controller applet's player count. The
+    /// caller that launched the applet is what pops these on a console; here
+    /// the host that started it is the caller, and this is where they arrive.
+    ///
+    /// Empty for anything that is not a library applet, and for one that has
+    /// not finished.
+    pub fn library_applet_results(&self) -> &[Vec<u8>] {
+        &self.am_out_data
     }
 
     /// A pseudo-random 64-bit value, for `csrng`.

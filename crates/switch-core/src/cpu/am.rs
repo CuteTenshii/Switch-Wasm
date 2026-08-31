@@ -287,6 +287,49 @@ fn web_arg() -> Vec<u8> {
     arg
 }
 
+/// What a library applet's result storage says, in a line for the log.
+///
+/// Only the two applets whose result shape is known are read; anything else is
+/// reported by size, because a field read out of the wrong struct reads as
+/// fact.
+fn applet_result_summary(program_id: u64, data: &[u8]) -> String {
+    let word = |at: usize| -> u32 {
+        data.get(at..at + 4)
+            .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()))
+            .unwrap_or(0)
+    };
+    match applet_id_for(program_id) {
+        // `ControllerSupportResultInfo { s8 player_count, pad[3],
+        // u32 selected_id, u32 result }`: 0 is a selection the user
+        // confirmed, 2 is the user backing out of the applet.
+        APPLET_CONTROLLER if data.len() >= 0xC => {
+            let outcome = match word(8) {
+                0 => "confirmed".to_owned(),
+                2 => "cancelled".to_owned(),
+                other => format!("result {other:#x}"),
+            };
+            format!("{outcome}, {} player(s), npad {}", data[0] as i8, word(4))
+        }
+        // `u32 SwkbdResult` — 0 for text the user submitted, 1 for a keyboard
+        // they closed — then the text, UTF-16 unless the configuration asked
+        // for UTF-8, which [`swkbd_config`] does not.
+        APPLET_SWKBD if data.len() >= 4 => {
+            let text: Vec<u16> = data[4..]
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                .take_while(|&unit| unit != 0)
+                .collect();
+            let outcome = if word(0) == 0 {
+                "submitted"
+            } else {
+                "cancelled"
+            };
+            format!("{outcome} {:?}", String::from_utf16_lossy(&text))
+        }
+        _ => format!("{} bytes, starting {:#010x}", data.len(), word(0)),
+    }
+}
+
 /// `AppletIdentityInfo { AppletId, pad, u64 title_id }` for the home menu,
 /// which is the answer to every question a library applet asks about who
 /// launched it: one is only ever launched by whatever is in the foreground,
@@ -1522,21 +1565,47 @@ impl Cpu {
                     let layout = self.system_settings().keyboard_layout;
                     self.write_ipc_response(tls, 0, &[], &layout.to_le_bytes(), &[])
                 }
-                // PushOutData / PushInteractiveOutData(IStorage): the applet
-                // handing back what it produced — the keyboard's text, an
-                // applet's exit code. Accepted and dropped, the way
-                // `am:library-applet-accessor` accepts what a caller pushes
-                // to an applet that never runs: nothing here launched this
-                // one, so there is nobody to pop the result.
-                Some(1) | Some(3) => {
+                // PushOutData(IStorage): the applet handing back what it
+                // produced — the keyboard's text, the controller applet's
+                // player count. On a console the caller that launched it pops
+                // this; running one directly, the host that started it is the
+                // caller, so the bytes are kept for
+                // [`Cpu::library_applet_results`] and read out into the log.
+                Some(1) => {
+                    let data = self
+                        .ipc_input_object_key(tls, handle, 0)
+                        .and_then(|key| self.am_storages.get(&key))
+                        .cloned();
+                    let summary = match &data {
+                        Some(data) => applet_result_summary(self.program_id(), data),
+                        None => "a storage this session never handed out".to_owned(),
+                    };
+                    self.diagnostic(
+                        Level::Info,
+                        &format!(
+                            "[am] the {} applet finished: {summary}",
+                            applet_name(applet_id_for(self.program_id()))
+                        ),
+                    );
+                    self.am_out_data.push(data.unwrap_or_default());
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
+                // PushInteractiveOutData(IStorage): the applet's half of a
+                // conversation with its caller, which the caller answers
+                // through `PushInteractiveInData`. There is no caller to
+                // answer, so this is accepted and dropped — and reported once,
+                // because an applet that gets no reply either carries on
+                // without one or waits forever, and which of the two it did is
+                // the next thing to look at.
+                Some(3) => {
                     if self
                         .unimplemented_ipc
-                        .insert(("am:applet-output".to_string(), cmd_id))
+                        .insert(("am:applet-interactive-output".to_string(), cmd_id))
                     {
                         self.diagnostic(
                             Level::Warn,
-                            "[am] the applet pushed its result; nothing here launched it, so \
-                             there is nobody to pop it",
+                            "[am] the applet pushed interactive data; nothing here launched it, \
+                             so there is nobody to answer it",
                         );
                     }
                     self.write_ipc_response(tls, 0, &[], &[], &[])
@@ -1916,6 +1985,70 @@ mod tests {
         // — which decides whether the applet is told `FocusStateChanged` or
         // `ChangeIntoForeground` — stays where it was.
         assert!(!cpu.applet_is_application);
+    }
+
+    #[test]
+    fn the_applet_result_is_kept_rather_than_dropped() {
+        // The controller applet, run directly, ends by pushing a
+        // `ControllerSupportResultInfo` through `PushOutData` and exiting.
+        // Accepting the push and dropping the storage left the two endings it
+        // can have — a selection the user confirmed, and one they backed out
+        // of — looking exactly alike from outside.
+        const CONTROLLER: u64 = 0x0100_0000_0000_1003;
+        const PUSH_OUT_DATA: u32 = 1;
+        // { s8 player_count = 1, pad[3], u32 selected_id = 0, u32 result = 0 }.
+        let mut result = vec![0u8; 0xC];
+        result[0] = 1;
+
+        // A plain session moves the storage's own session handle: a special
+        // header declaring one move handle, and the handle behind it.
+        const STORAGE: u64 = 0x21;
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.set_program_id(CONTROLLER);
+        cpu.mem.write_u32(TLS, 4).unwrap();
+        cpu.mem.write_u32(TLS + 4, 8 | (1 << 31)).unwrap();
+        cpu.mem.write_u32(TLS + 8, 1 << 5).unwrap();
+        cpu.mem.write_u32(TLS + 12, STORAGE as u32).unwrap();
+        cpu.mem.write_u32(TLS + 0x10, SFCI).unwrap();
+        cpu.mem.write_u32(TLS + 0x18, PUSH_OUT_DATA).unwrap();
+        cpu.register_service_handle(9, "am:library-applet-self-accessor");
+        cpu.register_service_handle(STORAGE, "am:storage");
+        cpu.am_storages
+            .insert(Cpu::object_key(STORAGE, 0), result.clone());
+        cpu.applet_request(TLS, 9, Some(PUSH_OUT_DATA)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "push refused");
+        assert_eq!(cpu.library_applet_results(), [result.clone()]);
+
+        // `nnSdk` converts the session to a domain, and then the storage is an
+        // object id in a table past the payload rather than a handle.
+        const STORAGE_OBJECT: u32 = 5;
+        let mut cpu = request(true, PUSH_OUT_DATA, &[]);
+        cpu.set_program_id(CONTROLLER);
+        cpu.record_domain_object(9, 7, "am:library-applet-self-accessor");
+        cpu.record_domain_object(9, STORAGE_OBJECT, "am:storage");
+        cpu.am_storages
+            .insert(Cpu::object_key(9, STORAGE_OBJECT), result.clone());
+        // num_in_objects, then a `data_size` of just the `CmifInHeader` — this
+        // request has no payload — which is what the id table sits past.
+        cpu.mem.write_u8(TLS + 0x11, 1).unwrap();
+        cpu.mem.write_u16(TLS + 0x12, 0x10).unwrap();
+        cpu.mem.write_u32(TLS + 0x30, STORAGE_OBJECT).unwrap();
+        cpu.applet_request(TLS, 9, Some(PUSH_OUT_DATA)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x28).unwrap(), 0, "push refused");
+        assert_eq!(cpu.library_applet_results(), [result.clone()]);
+
+        // And what the log says about those bytes is the part a run is read
+        // from: the outcome, not just that something was pushed.
+        assert_eq!(
+            super::applet_result_summary(CONTROLLER, &result),
+            "confirmed, 1 player(s), npad 0"
+        );
+        result[8] = 2;
+        assert_eq!(
+            super::applet_result_summary(CONTROLLER, &result),
+            "cancelled, 1 player(s), npad 0"
+        );
     }
 
     #[test]

@@ -740,6 +740,53 @@ impl Cpu {
         }
     }
 
+    /// The key of the `index`-th object a request **sends** — a sub-interface
+    /// the caller hands the server, rather than one it asks for — as
+    /// [`Cpu::reply_with_interface`] filed it when it handed the object out.
+    ///
+    /// The two session forms carry it differently. A domain request lists
+    /// object ids in a table past its payload, counted by
+    /// `CmifDomainInHeader::num_in_objects` and placed by `cmifMakeRequest`
+    /// after the `CmifInHeader` and the `data_size` bytes it counts; a plain
+    /// session moves the object's own session handle instead, behind whatever
+    /// pid and copy handles the special header declares.
+    ///
+    /// `am`'s `PushOutData` is what needs this: an applet handing back the
+    /// storage it wrote its result into, which is only its bytes if the object
+    /// it names can be resolved to them.
+    pub(super) fn ipc_input_object_key(&self, tls: u32, handle: u64, index: u32) -> Option<u64> {
+        if self.ipc_is_domain_request(tls) {
+            let start = self.ipc_reply_start(tls);
+            let count = self.mem.read_u8(tls.wrapping_add(start + 1)).ok()?;
+            if index >= u32::from(count) {
+                return None;
+            }
+            let data_size = u32::from(self.mem.read_u16(tls.wrapping_add(start + 2)).ok()?);
+            let at = start + 0x10 + data_size + 4 * index;
+            let object_id = self.mem.read_u32(tls.wrapping_add(at)).ok()?;
+            Some(Self::object_key(handle, object_id))
+        } else {
+            if self.mem.read_u32(tls.wrapping_add(4)).ok()? >> 31 == 0 {
+                return None;
+            }
+            let special = self.mem.read_u32(tls.wrapping_add(8)).ok()?;
+            let copies = (special >> 1) & 0xf;
+            let moves = (special >> 5) & 0xf;
+            if index >= moves {
+                return None;
+            }
+            let mut at = 12;
+            if special & 1 != 0 {
+                at += 8; // pid
+            }
+            let session = self
+                .mem
+                .read_u32(tls.wrapping_add(at + 4 * (copies + index)))
+                .ok()?;
+            Some(Self::object_key(u64::from(session), 0))
+        }
+    }
+
     /// Whether the request is a *control* message — the session-management
     /// commands (ConvertToDomain, Clone, QueryPointerBufferSize) rather than a
     /// command on the interface behind the session.
