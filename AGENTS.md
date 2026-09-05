@@ -222,6 +222,18 @@ tools, the debug panel's *Translation* section in the browser.
 - **A block must always retire at least one instruction** — `run_jit` advances by
   what `exec_block` reports, so `Ok(0)` spins forever. `jit_test` catches this by
   hanging, not by failing.
+- **Both engines dispatch through a reference.** `exec_op`, `take_exit` and
+  `exec_term` take `&Op`/`&Exit`/`&Term` and match on `*op`. Taken by value the
+  compiler loads all sixteen bytes, splits them into every field any arm could
+  want and hoists the lot above the jump table: fifteen instructions on the way
+  to every arm to serve the one that needed them. Turning that one `&` back into
+  a copy costs 7.3% of hbmenu's host instructions, and it reads like a style
+  choice, which is why it is written down here.
+- **A condition code is a table lookup, not a `match`.** `CONDITION_MASKS` is
+  the ARM ARM's own table as sixteen 16-bit masks, evaluated by a `const fn`
+  from the same rules, so `condition_holds` is a shift and a mask. Written as a
+  `match` it compiles to a fourteen-way jump table on a value that changes every
+  time a loop turns over, and mispredicts.
 - Emitting wasm per block is blocked by the memory model, not the browser: a
   generated module can only address its own linear memory, and guest memory is a
   page table with soft regions, read-only ranges and watchpoints.

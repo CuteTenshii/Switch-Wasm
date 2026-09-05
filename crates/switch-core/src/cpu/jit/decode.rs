@@ -1,7 +1,7 @@
 //! Translation: walking forward from an address, turning each instruction
 //! into the one thing it does, and deciding where the block ends.
 
-use super::ir::{Block, Exit, Op, Term};
+use super::ir::{Block, Branch, Exit, Op, Term};
 use crate::cpu::bits::*;
 use crate::cpu::loadstore::{pair_slot, rt_slot, Acc, Ext, PairKind, Wb};
 use crate::cpu::system::SysOp;
@@ -73,7 +73,7 @@ pub(super) fn translate(mem: &Memory, start: u32) -> Block {
             // are longer than the six or seven instructions a basic block runs
             // to: `b.cond` alone is 12% of hbmenu's frame.
             Decoded::Exit(exit) => {
-                exits.push((i as u32, exit));
+                exits.push(Branch::new(i as u32, exit));
                 ops.push(Op::Nop);
                 words.push(insn);
             }
@@ -95,15 +95,15 @@ pub(super) fn translate(mem: &Memory, start: u32) -> Block {
 /// never in the same block to fold. Only a compare whose destination is the
 /// zero register qualifies, so the fused op writes nothing but NZCV and the
 /// rewrite cannot lose a result.
-fn fuse_compares(ops: &mut [Op], exits: &mut [(u32, Exit)]) {
-    for (at, exit) in exits.iter_mut() {
-        let Exit::Cond { cond, target } = *exit else {
+fn fuse_compares(ops: &mut [Op], exits: &mut [Branch]) {
+    for branch in exits.iter_mut() {
+        let Exit::Cond { cond, target } = branch.exit else {
             continue;
         };
-        if *at == 0 {
+        if branch.at == 0 {
             continue;
         }
-        let prev = (*at - 1) as usize;
+        let prev = (branch.at - 1) as usize;
         let fused = match ops[prev] {
             Op::AddSubImm {
                 rd,
@@ -140,8 +140,7 @@ fn fuse_compares(ops: &mut [Op], exits: &mut [(u32, Exit)]) {
         // The compare's slot becomes filler and the exit moves onto it, so the
         // pair is one dispatch covering two instructions.
         ops[prev] = Op::Nop;
-        *at -= 1;
-        *exit = fused;
+        *branch = Branch::new(branch.at - 1, fused);
     }
 }
 

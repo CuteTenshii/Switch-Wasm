@@ -300,11 +300,38 @@ pub(super) enum Exit {
 impl Exit {
     /// How many instructions the exit covers: two once a compare has been
     /// folded into it.
-    #[inline(always)]
-    pub(super) fn span(self) -> usize {
+    fn span(&self) -> u8 {
         match self {
             Exit::CmpImm { .. } | Exit::CmpReg { .. } => 2,
             _ => 1,
+        }
+    }
+}
+
+/// Where a conditional branch sits in a block, and how much of it the branch
+/// speaks for.
+///
+/// The span is [`Exit::span`] resolved once, when the block is built. Asking
+/// the branch itself meant loading its discriminant and testing it before the
+/// exit could even be evaluated, on the same pass that then dispatches on that
+/// discriminant again; the padding in this record was already there to hold
+/// it.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Branch {
+    /// Index into [`Block::ops`]: the instruction the branch is checked at.
+    pub(super) at: u32,
+    /// Instructions the branch covers, two once a compare has been fused into
+    /// it.
+    pub(super) span: u8,
+    pub(super) exit: Exit,
+}
+
+impl Branch {
+    pub(super) fn new(at: u32, exit: Exit) -> Branch {
+        Branch {
+            at,
+            span: exit.span(),
+            exit,
         }
     }
 }
@@ -339,9 +366,9 @@ pub(super) struct Block {
     /// The original instruction words, body then terminator, kept so a fault
     /// inside a block leaves the same run-up trail an interpreted one does.
     pub(super) words: Vec<u32>,
-    /// The conditional branches the block runs through, as
-    /// `(index into ops, branch)`, in ascending order.
-    pub(super) exits: Vec<(u32, Exit)>,
+    /// The conditional branches the block runs through, in ascending order of
+    /// where they sit.
+    pub(super) exits: Vec<Branch>,
     pub(super) term: Option<Term>,
 }
 
@@ -352,7 +379,7 @@ impl Block {
         start: u32,
         ops: Vec<Op>,
         words: Vec<u32>,
-        exits: Vec<(u32, Exit)>,
+        exits: Vec<Branch>,
         term: Option<Term>,
     ) -> Block {
         Block {
@@ -384,7 +411,7 @@ impl Block {
 
 #[cfg(test)]
 mod tests {
-    use super::{Op, SysOp};
+    use super::{Branch, Exit, Op, SysOp};
 
     /// A block body is an array of [`Op`], so its size is that body's whole
     /// cache footprint, which is why [`Op::MovK`] holds a shift and a
@@ -397,5 +424,16 @@ mod tests {
         // Folding the four system-instruction variants into one `Op::Sys`
         // only stays free while `SysOp` fits inside that budget.
         assert!(std::mem::size_of::<SysOp>() <= 16);
+    }
+
+    /// [`Branch::span`] is free only while it fits in the padding an
+    /// `(index, Exit)` pair already carried. Grow [`Exit`] past this and the
+    /// span is worth re-deriving instead.
+    #[test]
+    fn a_branch_costs_no_more_than_the_pair_it_replaced() {
+        assert_eq!(
+            std::mem::size_of::<Branch>(),
+            std::mem::size_of::<(u32, Exit)>()
+        );
     }
 }

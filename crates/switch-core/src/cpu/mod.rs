@@ -1654,34 +1654,36 @@ pub const RECENT_LEN: usize = 64;
 /// bakes in ([`super::jit`]) rather than a branch at run time.
 const REG_SLOTS: usize = 34;
 
-/// How many slots the array actually holds, [`REG_SLOTS`] rounded up to a
-/// power of two.
+/// How many slots the array actually holds: every value a `u8` slot can take.
 ///
-/// The slot arrives as a `u8`, so a 34-entry array cannot be indexed without a
-/// bounds check: the compiler has to allow for the 222 values that would be
-/// out of range. Rounding the array up and masking the index makes the check
-/// provably unnecessary and it disappears. That is worth doing for one reason
-/// only, which is that a register access is the single most frequent thing
-/// either engine does: 14% of a retail frame sat on these two lines, more
-/// than the whole interpreter fallback and the whole GPU put together.
+/// A register access is the single most frequent thing either engine does, so
+/// what it costs is decided here. A 34-entry array cannot be indexed by a `u8`
+/// without a bounds check, because the compiler has to allow for the 222
+/// values that would be out of range; 14% of a retail frame sat on those two
+/// lines, more than the whole interpreter fallback and the whole GPU put
+/// together. Rounding up to 64 and masking removed the check, and giving the
+/// array the whole range removes the mask as well: the index is the byte the
+/// op already carries, with nothing done to it. An out-of-range slot then also
+/// lands on an unused entry rather than aliasing a real register, which is
+/// what a mask would have done with it.
 ///
-/// The cost is 240 bytes per saved register file, and there are as many of
+/// The cost is 1,776 bytes per saved register file, and there are as many of
 /// those as the guest has threads.
-const REG_FILE: usize = 64;
-const _: () = assert!(REG_FILE.is_power_of_two() && REG_FILE >= REG_SLOTS);
+const REG_FILE: usize = 256;
+const _: () = assert!(REG_FILE == u8::MAX as usize + 1 && REG_FILE >= REG_SLOTS);
 
-/// A slot masked into the array, so indexing carries no bounds check.
+/// A slot as an index into the register file.
 ///
-/// Every caller has already resolved a real slot; the mask is what tells the
-/// compiler so. `debug_assert` keeps a slot that is somehow out of range from
-/// silently aliasing a real register in a test build.
+/// Every caller has already resolved a real slot; `debug_assert` catches one
+/// that is not in a test build, where it would otherwise read a permanent
+/// zero instead of the register it meant.
 #[inline(always)]
 fn reg_slot(slot: u8) -> usize {
     debug_assert!(
         (slot as usize) < REG_SLOTS,
         "register slot {slot} is not one"
     );
-    (slot as usize) & (REG_FILE - 1)
+    slot as usize
 }
 /// Reads of `XZR`. Nothing ever writes it, so it is permanently zero.
 const ZR_SLOT: usize = 31;
@@ -1692,6 +1694,57 @@ const _: () = assert!(ZR_SLOT == 31);
 const ZR_DISCARD: usize = 32;
 /// The stack pointer, `SP`.
 const SP_SLOT: usize = 33;
+
+/// Which flag settings satisfy each condition code: one 16-bit mask per code,
+/// bit `nzcv` set when the code holds for that nibble (N at bit 3 down to V at
+/// bit 0, the order [`Cpu::nzcv`] already stores them in).
+///
+/// The ARM ARM writes conditions as a table, and transcribing it as a `match`
+/// compiles to a fourteen-way jump table on a value that changes every time a
+/// loop turns over, so the indirect branch mispredicts. Evaluating the same
+/// table as a shift and a mask is branchless, and `B.cond` is 12% of an hbmenu
+/// frame.
+const CONDITION_MASKS: [u16; 16] = condition_masks();
+
+/// [`CONDITION_MASKS`], evaluated at compile time from the conditions
+/// themselves so the rules are still written once and still read like the
+/// architecture's table.
+const fn condition_masks() -> [u16; 16] {
+    let mut table = [0u16; 16];
+    let mut cond = 0usize;
+    while cond < 16 {
+        let mut nzcv = 0usize;
+        while nzcv < 16 {
+            let n = (nzcv >> 3) & 1;
+            let z = (nzcv >> 2) & 1;
+            let c = (nzcv >> 1) & 1;
+            let v = nzcv & 1;
+            let holds = match cond {
+                0x0 => z == 1,           // EQ
+                0x1 => z == 0,           // NE
+                0x2 => c == 1,           // CS
+                0x3 => c == 0,           // CC
+                0x4 => n == 1,           // MI
+                0x5 => n == 0,           // PL
+                0x6 => v == 1,           // VS
+                0x7 => v == 0,           // VC
+                0x8 => c == 1 && z == 0, // HI
+                0x9 => c == 0 || z == 1, // LS
+                0xA => n == v,           // GE
+                0xB => n != v,           // LT
+                0xC => z == 0 && n == v, // GT
+                0xD => z == 1 || n != v, // LE
+                _ => true,               // AL / NV
+            };
+            if holds {
+                table[cond] |= 1 << nzcv;
+            }
+            nzcv += 1;
+        }
+        cond += 1;
+    }
+    table
+}
 
 /// Instructions between display refreshes: the panel's 60 Hz against the
 /// 1.02 GHz CPU one emulated instruction stands for.
@@ -4139,27 +4192,7 @@ impl Cpu {
 
     #[inline(always)]
     fn condition_holds(&self, cond: u8) -> bool {
-        let n = (self.nzcv >> 31) & 1;
-        let z = (self.nzcv >> 30) & 1;
-        let c = (self.nzcv >> 29) & 1;
-        let v = (self.nzcv >> 28) & 1;
-        match cond & 0xF {
-            0x0 => z == 1,           // EQ
-            0x1 => z == 0,           // NE
-            0x2 => c == 1,           // CS
-            0x3 => c == 0,           // CC
-            0x4 => n == 1,           // MI
-            0x5 => n == 0,           // PL
-            0x6 => v == 1,           // VS
-            0x7 => v == 0,           // VC
-            0x8 => c == 1 && z == 0, // HI
-            0x9 => c == 0 || z == 1, // LS
-            0xA => n == v,           // GE
-            0xB => n != v,           // LT
-            0xC => z == 0 && n == v, // GT
-            0xD => z == 1 || n != v, // LE
-            _ => true,               // AL / NV
-        }
+        (CONDITION_MASKS[(cond & 0xF) as usize] >> (self.nzcv >> 28)) & 1 == 1
     }
 
     #[inline(always)]
@@ -4180,19 +4213,23 @@ impl Cpu {
         let mask = Self::mask(sf);
         let a = a & mask;
         let b = b & mask;
-        // No u128. A 32-bit add cannot carry out of a u64, and a 64-bit one is
-        // two `overflowing_add`s whose carries are mutually exclusive, the
-        // second can only fire when the first did not. wasm has no 128-bit
-        // integers, so the old form lowered to a call on the hottest path
-        // there is: ADD/SUB/CMP are 15% of a frame.
-        let (result, carry) = if sf {
-            let (s, c1) = a.overflowing_add(b);
-            let (s, c2) = s.overflowing_add(carry_in);
-            (s, u32::from(c1 | c2))
+        // No u128, and no branch on the width either. Two `overflowing_add`s
+        // whose carries are mutually exclusive (the second can only fire when
+        // the first did not) are the 64-bit carry chain, and masked operands
+        // make the same sum right for 32 bits with the carry-out one bit
+        // further down, so which of the two the operation means is a select on
+        // a value already in hand. wasm has no 128-bit integers, so the u128
+        // form this replaced lowered to a call on the hottest path there is,
+        // and `sf` varies from one instruction to the next, so branching on it
+        // mispredicted: ADD/SUB/CMP are 15% of a frame.
+        let (sum, c1) = a.overflowing_add(b);
+        let (sum, c2) = sum.overflowing_add(carry_in);
+        let carry = if sf {
+            u32::from(c1 | c2)
         } else {
-            let s = a + b + carry_in;
-            (s & mask, ((s >> 32) & 1) as u32)
+            ((sum >> 32) & 1) as u32
         };
+        let result = sum & mask;
         // Both operands the same sign and the result a different one.
         let sign = 1u64 << (if sf { 63 } else { 31 });
         let overflow = u32::from((!(a ^ b) & (a ^ result) & sign) != 0);
