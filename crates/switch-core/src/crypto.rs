@@ -1,5 +1,5 @@
 //! Minimal AES-128 primitives (ECB + XTS) and the GF(2^128) multiply used by
-//! XTS — enough to decrypt an NCA header, which is AES-128-XTS over two
+//! XTS: enough to decrypt an NCA header, which is AES-128-XTS over two
 //! 0x200-byte sectors with the global `header_key` from `prod.keys`.
 //!
 //! FIPS-197 Rijndael with a 128-bit key, hand-rolled (the workspace forbids
@@ -81,7 +81,7 @@ fn add_round_key(state: &mut [u8; 16], round_key: &[u8]) {
     }
 }
 
-/// SubBytes, ShiftRows and MixColumns, one pass over the state each — the
+/// SubBytes, ShiftRows and MixColumns, one pass over the state each, the
 /// textbook shape. It is both the reference [`RoundKeys::encrypt_block`]'s
 /// table-driven round is checked against and what the guest's own AES
 /// instructions run, since those expose the steps individually.
@@ -143,7 +143,7 @@ const fn xtime(a: u8) -> u8 {
     (a << 1) ^ (if a & 0x80 != 0 { 0x1b } else { 0 })
 }
 
-/// SubBytes, ShiftRows and MixColumns folded into one table lookup per byte —
+/// SubBytes, ShiftRows and MixColumns folded into one table lookup per byte,
 /// the standard way AES is implemented, and four times the rate of doing the
 /// three as separate passes over the state.
 ///
@@ -228,7 +228,7 @@ fn column_word(state: &[u8; 16], c: usize) -> u32 {
     column_word_at(state, c * 4)
 }
 
-/// The same packing, out of a longer buffer at a byte offset — the round keys
+/// The same packing, out of a longer buffer at a byte offset, the round keys
 /// are one flat 176-byte array.
 #[inline]
 fn column_word_at(bytes: &[u8], at: usize) -> u32 {
@@ -239,8 +239,8 @@ fn column_word_at(bytes: &[u8], at: usize) -> u32 {
 ///
 /// Held apart from the block operations because every bulk mode uses one
 /// schedule for every block it touches, and deriving it is comparable work to
-/// encrypting with it. Expanding per block made the firmware fonts — 17.7 MB
-/// of AES-CTR across five NCA sections — expand it 1.1 million times, which
+/// encrypting with it. Expanding per block made the firmware fonts, 17.7 MB
+/// of AES-CTR across five NCA sections, expand it 1.1 million times, which
 /// was 28% of a Home Menu boot.
 #[derive(Clone)]
 pub struct RoundKeys([u8; 176]);
@@ -287,7 +287,6 @@ impl RoundKeys {
         out
     }
 
-    /// Decrypt one 16-byte block.
     pub fn decrypt_block(&self, block: &[u8; 16]) -> [u8; 16] {
         let w = &self.0;
         let mut state = *block;
@@ -305,7 +304,7 @@ impl RoundKeys {
     }
 }
 
-/// Encrypt one 16-byte block. Expands the key schedule for this block alone —
+/// Encrypt one 16-byte block. Expands the key schedule for this block alone,
 /// use [`RoundKeys`] directly for more than one.
 pub fn aes128_encrypt_block(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
     RoundKeys::new(key).encrypt_block(block)
@@ -404,7 +403,7 @@ pub fn aes128_xts_decrypt_sector(
 /// AES-128-CTR keystream XOR (encryption and decryption are the same
 /// operation). `counter` is the initial 128-bit big-endian counter block; it
 /// increments by one, as a big-endian integer, every 16 bytes of `data`. This
-/// is the primitive NCA section bodies are encrypted with — the counter's
+/// is the primitive NCA section bodies are encrypted with, the counter's
 /// initial value is derived from the section's FS header (see `nca.rs`).
 pub fn aes128_ctr_xor(key: &[u8; 16], counter: &[u8; 16], data: &[u8]) -> Vec<u8> {
     let mut out = data.to_vec();
@@ -414,7 +413,7 @@ pub fn aes128_ctr_xor(key: &[u8; 16], counter: &[u8; 16], data: &[u8]) -> Vec<u8
 
 /// The same keystream, applied to a buffer already in place.
 ///
-/// `data` must start on a cipher-block boundary relative to `counter` — the
+/// `data` must start on a cipher-block boundary relative to `counter`, the
 /// keystream block a byte gets is decided by its index here, so a caller
 /// decrypting a range out of the middle of a stream aligns the range down to
 /// a multiple of 16 and advances `counter` to match (see
@@ -452,7 +451,7 @@ const SHA256_K: [u32; 64] = [
 ];
 
 /// SHA-256 (FIPS 180-4). Used to verify a decrypted NCA section's hash-table
-/// region against the FS header's stored master hash — the only way to tell
+/// region against the FS header's stored master hash, the only way to tell
 /// whether an NCA decrypted correctly, since a wrong key produces plausible
 /// garbage rather than an obvious error.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
@@ -650,7 +649,7 @@ mod table_driven {
     /// AES-128 encryption written the textbook way: one pass over the state
     /// per step. [`RoundKeys::encrypt_block`] folds three of those steps into
     /// a table lookup, which is four times the rate and much easier to get
-    /// subtly wrong — so it is checked against this.
+    /// subtly wrong, so it is checked against this.
     fn reference(key: &[u8; 16], block: &[u8; 16]) -> [u8; 16] {
         let w = expand_key(key);
         let mut state = *block;

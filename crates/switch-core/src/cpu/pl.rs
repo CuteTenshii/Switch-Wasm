@@ -2,8 +2,8 @@
 //!
 //! The console keeps its system fonts in shared memory rather than handing
 //! them over as files, so this maps an image of them and reports where each
-//! one landed inside it. Homebrew that draws text — hbmenu, anything using
-//! `plGetSharedFont` — feeds those bytes straight to FreeType, so without a
+//! one landed inside it. Homebrew that draws text, hbmenu, anything using
+//! `plGetSharedFont`, feeds those bytes straight to FreeType, so without a
 //! font nothing but pre-rendered bitmaps ever appears on screen.
 //!
 //! The image itself is built in [`super::Cpu::build_shared_fonts`]; this is
@@ -17,12 +17,12 @@ impl Cpu {
     ///
     /// `SetLanguage` is an index into this list, and `setMakeLanguage` maps a
     /// language code back to it by searching the array
-    /// `GetAvailableLanguageCodes` returns — so the order matters and both
+    /// `GetAvailableLanguageCodes` returns, so the order matters and both
     /// commands have to agree.
     /// `pl:u` (`IPlatformServiceManager`): the shared system fonts.
     ///
     /// A guest asks for the fonts by type, gets back an offset and a size, and
-    /// reads the font data straight out of pl's shared memory — hbmenu hands
+    /// reads the font data straight out of pl's shared memory: hbmenu hands
     /// that pointer to `FT_New_Memory_Face`, and `nn::font` walks it itself.
     /// [`Cpu::build_shared_fonts`] is what puts them there.
     ///
@@ -193,7 +193,7 @@ mod tests {
     fn only_a_real_bfttf_decodes() {
         use crate::cpu::decode_bfttf;
         // The magic is what the key is derived from on a console, so a file
-        // without it cannot be decoded at all — and a plain TrueType file
+        // without it cannot be decoded at all, and a plain TrueType file
         // handed here by mistake must be refused rather than xored into noise.
         assert!(decode_bfttf(&[0x00, 0x01, 0x00, 0x00, 0, 0, 0, 0]).is_none());
         assert!(

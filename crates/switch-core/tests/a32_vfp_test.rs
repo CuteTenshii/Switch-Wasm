@@ -1,7 +1,7 @@
 //! VFP: the AArch32 floating-point coprocessor.
 //!
-//! The register file is A64's seen differently — `D(2n)` is the bottom half of
-//! `V(n)` and `D(2n+1)` the top — so several of these check the aliasing
+//! The register file is A64's seen differently: `D(2n)` is the bottom half of
+//! `V(n)` and `D(2n+1)` the top, so several of these check the aliasing
 //! directly rather than only the arithmetic.
 
 mod a32;
@@ -143,7 +143,7 @@ fn the_immediate_moves_expand_the_vfp_encoding() {
 }
 
 /// A comparison writes FPSCR, not the condition flags. `VMRS APSR_nzcv` is
-/// what moves it across — without which every `vcmp` would be invisible to the
+/// what moves it across: without which every `vcmp` would be invisible to the
 /// branch that follows it.
 #[test]
 fn a_comparison_reaches_the_condition_flags_only_through_vmrs() {
@@ -193,7 +193,7 @@ fn the_precision_conversions_number_their_destination_by_the_other_rule() {
 }
 
 /// The integer conversions always use an `S` register for the integer, even
-/// when the float half is a double — so that operand is numbered `Vm:M` and
+/// when the float half is a double, so that operand is numbered `Vm:M` and
 /// not `M:Vm`.
 #[test]
 fn the_integer_conversions_keep_the_integer_in_a_single() {

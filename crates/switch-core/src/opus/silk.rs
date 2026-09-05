@@ -3,7 +3,7 @@
 //!
 //! SILK models the signal the way a vocal tract makes it. A short-term LPC
 //! filter stands for the resonances of the mouth, a long-term predictor
-//! stands for the pitch, and what is left — the excitation — is what actually
+//! stands for the pitch, and what is left (the excitation) is what actually
 //! gets coded, as pulses. Synthesis runs that backwards: pulses, through the
 //! pitch predictor, through the LPC filter, scaled by a per-subframe gain.
 //!
@@ -58,7 +58,7 @@ const MAX_PITCH_LAG_MS: i32 = 18;
 const LOG2_INV_LPC_GAIN_HIGH_THRES: i32 = 3;
 const LOG2_INV_LPC_GAIN_LOW_THRES: i32 = 8;
 const PITCH_DRIFT_FAC_Q16: i32 = 655;
-/// `0.99` in Q16 — the bandwidth expansion concealment applies to the last
+/// `0.99` in Q16, the bandwidth expansion concealment applies to the last
 /// good filter, so a repeated frame loses resonance rather than ringing.
 const BWE_COEF_Q16: i32 = 64881;
 const PE_MAX_LAG_MS: i32 = 18;
@@ -280,8 +280,8 @@ fn sum_sqr_shift(x: &[i16]) -> (i32, u32) {
     (nrg, shft)
 }
 
-/// One of the two NLSF codebooks — narrow/medium band at order 10, wideband
-/// at order 16 — gathered so the decoder can hold a reference to whichever
+/// One of the two NLSF codebooks, narrow/medium band at order 10, wideband
+/// at order 16: gathered so the decoder can hold a reference to whichever
 /// the current bandwidth selects.
 struct NlsfCodebook {
     n_vectors: usize,
@@ -377,7 +377,7 @@ impl Default for Indices {
 /// What one frame's side information becomes: the filters and gains the
 /// synthesis actually runs.
 struct FrameControl {
-    /// Two LPC filters — the first half of the frame may interpolate towards
+    /// Two LPC filters: the first half of the frame may interpolate towards
     /// the second, which is what `nlsf_interp_coef_q2` selects.
     pred_coef_q12: [[i16; MAX_LPC_ORDER]; 2],
     ltp_coef_q14: [i16; LTP_ORDER * MAX_NB_SUBFR],
@@ -794,7 +794,7 @@ fn gains_dequant(
     for k in 0..nb_subfr {
         if k == 0 && !conditional {
             // A gain may not fall more than 16 steps, about 21.8 dB, in one
-            // jump — that would be a click, not a fade.
+            // jump: that would be a click, not a fade.
             *prev_ind = i8::max(ind[k], prev_ind.saturating_sub(16));
         } else {
             let ind_tmp = i32::from(ind[k]) + MIN_DELTA_GAIN_QUANT;
@@ -1317,7 +1317,7 @@ impl ChannelState {
 
         // The excitation. Each pulse is pulled towards zero by the dead zone
         // the quantiser left, pushed away by the frame's offset, and given a
-        // pseudo-random sign — the sign is not coded, only its seed.
+        // pseudo-random sign: the sign is not coded, only its seed.
         let mut rand_seed = self.indices.seed;
         for i in 0..self.frame_length {
             rand_seed = silk_rand(rand_seed);
@@ -1402,7 +1402,7 @@ impl ChannelState {
 
                     if k == 0 {
                         // Scale the pitch history down so this frame depends
-                        // less on the last one — which is what makes a lost
+                        // less on the last one, which is what makes a lost
                         // packet recoverable rather than permanent.
                         inv_gain_q31 = smulwb(inv_gain_q31, ctrl.ltp_scale_q14) << 2;
                     }
@@ -1971,7 +1971,7 @@ impl Resampler {
     }
 
     /// 2x upsample, then interpolate between the doubled samples with a
-    /// 12-phase fractional FIR — the general upsampling path.
+    /// 12-phase fractional FIR, the general upsampling path.
     fn iir_fir(&mut self, out: &mut [i16], input: &[i16]) {
         let mut buf = vec![0i16; 2 * self.batch_size + 8];
         buf[..8].copy_from_slice(&self.s_fir_i16);
@@ -2017,7 +2017,7 @@ impl Resampler {
     }
 
     /// Anti-alias with a second-order AR filter, then decimate with a
-    /// polyphase FIR — the general downsampling path.
+    /// polyphase FIR, the general downsampling path.
     fn down_fir(&mut self, out: &mut [i16], input: &[i16]) {
         let mut buf = vec![0i32; self.batch_size + self.fir_order];
         buf[..self.fir_order].copy_from_slice(&self.s_fir_i32[..self.fir_order]);
@@ -2206,7 +2206,7 @@ pub(super) struct Control {
     pub payload_size_ms: usize,
 }
 
-/// SILK could not decode the frame — a duration or rate it does not have.
+/// SILK could not decode the frame: a duration or rate it does not have.
 #[derive(Debug)]
 pub(super) struct SilkError;
 

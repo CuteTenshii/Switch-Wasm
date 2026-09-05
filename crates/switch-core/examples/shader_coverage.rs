@@ -2,8 +2,8 @@
 //! `shader_coverage <container> <prod.keys> [title.keys] [frame]`.
 //!
 //! The fragment shader interpreter is about half of a frame in any title the
-//! software rasterizer draws — 49.9% of a Just Dance 2017 frame under `perf`,
-//! against 8.0% for the whole emulated CPU — and every one of those 921,600
+//! software rasterizer draws, 49.9% of a Just Dance 2017 frame under `perf`,
+//! against 8.0% for the whole emulated CPU, and every one of those 921,600
 //! invocations re-runs a program the decoder already turned into a `Compiled`
 //! once. Running it on the device instead means `gpu/shader/wgsl.rs` being
 //! able to translate it, and the useful question is not how many opcodes that
@@ -16,15 +16,15 @@
 //! program and stops at the first thing it cannot emit, so what comes back
 //! here is the *first* blocker in each program: fixing the top row can reveal
 //! another behind it, and the loop is to fix and re-run. What the headline
-//! counts do not depend on is that ordering — a program either translates
+//! counts do not depend on is that ordering, a program either translates
 //! whole or it does not.
 //!
 //! Reported twice, because a warp shuffle is a question about the device
 //! rather than about the translator: once for a device with no optional
 //! features, which is what a browser is, and once for one with WGSL's quad
-//! operations. The two now differ only outside a fragment shader — a
+//! operations. The two now differ only outside a fragment shader, a
 //! fragment shader without them reads its neighbour through
-//! `wgsl::QUAD_SWAP` — so a gap between the passes is a vertex program
+//! `wgsl::QUAD_SWAP`, so a gap between the passes is a vertex program
 //! shuffling, and nothing else.
 //!
 //! `SWITCH_FIRMWARE=<dir>` as everywhere else. A system applet is the subject
@@ -188,7 +188,7 @@ fn main() {
     }
 
     // One frame, recorded. Every draw notes the programs it was about to run,
-    // decoded — reading them back afterwards would need the GPU address space
+    // decoded: reading them back afterwards would need the GPU address space
     // the draw was using, and that has moved on by the time this returns.
     uses::record();
     let target = cpu.nv.gpu.frames + 1;

@@ -97,7 +97,7 @@ impl Cpu {
                 }
                 // An ioctl the model has no handler for is a gap in the same
                 // sense an unimplemented service command is, and it was
-                // reaching stderr only — which does not exist in the browser,
+                // reaching stderr only, which does not exist in the browser,
                 // where the whole GPU stack runs. Reported once per (node,
                 // command), because a driver that is refused usually asks
                 // again every frame.

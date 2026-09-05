@@ -40,7 +40,7 @@ pub struct KeySet {
     /// stores them: each one is still wrapped, AES-128-ECB, under the
     /// `titlekek_XX` for its title's key generation. Lockpick_RCM copies a
     /// ticket's key block into that file verbatim, so an entry here is the
-    /// ciphertext, not a usable NCA section key — [`KeySet::title_key`]
+    /// ciphertext, not a usable NCA section key, [`KeySet::title_key`]
     /// unwraps it.
     ///
     /// A ticket bundled in a container lands here too, in the same wrapped
@@ -56,13 +56,13 @@ pub struct KeySet {
     pub aes_key_generation_source: Option<[u8; 16]>,
     /// `key_area_key_application_XX` / `_ocean_XX` / `_system_XX`, indexed by
     /// key generation. Like `header_key`, these are stored directly rather
-    /// than derived — that's what prod.keys dumps (Lockpick_RCM) provide, and
+    /// than derived, that's what prod.keys dumps (Lockpick_RCM) provide, and
     /// deriving them would need Nintendo's secret seed constants, which this
     /// project does not embed.
     pub key_area_key_application: [Option<[u8; 16]>; KEY_GENERATION_COUNT],
     pub key_area_key_ocean: [Option<[u8; 16]>; KEY_GENERATION_COUNT],
     pub key_area_key_system: [Option<[u8; 16]>; KEY_GENERATION_COUNT],
-    /// `titlekek_XX`, indexed by key generation — decrypts a "Common"-crypto
+    /// `titlekek_XX`, indexed by key generation, decrypts a "Common"-crypto
     /// ticket's title-key block (see `ticket.rs`). Stored directly, like the
     /// key-area keys above.
     pub titlekek: [Option<[u8; 16]>; KEY_GENERATION_COUNT],
@@ -76,7 +76,7 @@ impl KeySet {
     }
 
     /// Whether this keyset carries a title key for `rights_id` at all,
-    /// wrapped or not — which is a different question from whether the
+    /// wrapped or not, which is a different question from whether the
     /// `titlekek` that unwraps it is present.
     pub fn has_title_key(&self, rights_id: &[u8; 16]) -> bool {
         self.wrapped_title_key(rights_id).is_some()
@@ -272,7 +272,7 @@ fn key_area_table_and_generation<'a>(
 
 /// Build a [`KeySet`] title-key list from parsed `title.keys` entries. Keys
 /// are either `titlekey_<rights_id> = hex` or `rights_id = hex` (16-byte),
-/// and each value is still `titlekek`-wrapped — the file stores a ticket's
+/// and each value is still `titlekek`-wrapped, the file stores a ticket's
 /// key block as-is. Assign the result to [`KeySet::title_keys`], which is
 /// where that wrapping is accounted for.
 pub fn keyset_from_title(entries: &[(String, Vec<u8>)]) -> Vec<([u8; 16], [u8; 16])> {

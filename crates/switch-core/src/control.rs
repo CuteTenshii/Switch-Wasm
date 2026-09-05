@@ -2,7 +2,7 @@
 //! shows for it, and the rest of what its NACP declares.
 //!
 //! Every application ships a Control NCA alongside its Program NCA. Its RomFS
-//! holds `control.nacp` — a fixed-layout 0x4000-byte metadata blob — and one
+//! holds `control.nacp` (a fixed-layout 0x4000-byte metadata blob) and one
 //! `icon_<language>.dat` JPEG per language the title was localized for.
 //!
 //! Homebrew has the same data in a different place: an NRO carries one icon
@@ -12,7 +12,7 @@
 //! The NACP begins with 16 title entries, one per language slot (see
 //! [`LANGUAGES`]), each 0x300 bytes: a 0x200-byte name followed by a
 //! 0x100-byte publisher, both NUL-padded UTF-8. A title is not localized into
-//! every slot, so the entries for languages it doesn't support are blank —
+//! every slot, so the entries for languages it doesn't support are blank,
 //! [`Nacp::preferred`] picks the first slot that isn't.
 //!
 //! Fixed fields follow at 0x3000. The ones read here:
@@ -124,7 +124,7 @@ const BCAT_STORAGE_SIZE_OFFSET: usize = 0x30A0;
 const ERROR_CODE_CATEGORY_OFFSET: usize = 0x30A8;
 const ERROR_CODE_CATEGORY_SIZE: usize = 8;
 /// A real `control.nacp` is 0x4000 bytes, but nothing past the last field
-/// *required* here is needed — so that, not the full size, is what's checked.
+/// *required* here is needed, so that, not the full size, is what's checked.
 ///
 /// The ceiling fields below sit past this, and are read only if the NACP
 /// actually extends that far. Raising the minimum to cover them would make a
@@ -255,7 +255,7 @@ pub struct Nacp {
     pub bcat_delivery_cache_storage_size: i64,
     /// How far each save may be extended past the size it was created at.
     /// A title that never grows its save leaves these 0, and so does a NACP
-    /// too short to hold them — they are past [`NACP_MIN_SIZE`].
+    /// too short to hold them: they are past [`NACP_MIN_SIZE`].
     pub user_account_save_data_size_max: i64,
     pub user_account_save_data_journal_size_max: i64,
     pub device_save_data_size_max: i64,
@@ -373,7 +373,7 @@ impl Nacp {
         })
     }
 
-    /// What a program that ships no NACP at all declares — homebrew built
+    /// What a program that ships no NACP at all declares, homebrew built
     /// without one. Every figure is 0, which is what the fields a title never
     /// sets already read as.
     pub fn empty() -> Nacp {
@@ -425,7 +425,7 @@ pub struct Control {
     pub language: &'static str,
     pub name: String,
     pub publisher: String,
-    /// The icon as stored — a JPEG on every retail title seen so far, but
+    /// The icon as stored, a JPEG on every retail title seen so far, but
     /// served with a sniffed type rather than an assumed one. Empty when the
     /// Control NCA carries no icon at all.
     pub icon: Vec<u8>,
@@ -438,7 +438,7 @@ impl Control {
     ///
     /// `nca` is a source over the whole NCA; `keys` needs the header key and
     /// whatever unlocks the section (a key area key, or the title key for a
-    /// title-key crypto NCA — resolve that from the container's ticket
+    /// title-key crypto NCA, resolve that from the container's ticket
     /// first).
     pub fn from_source<S: ByteSource>(nca: S, keys: &KeySet) -> Result<Control, Error> {
         let header = Nca::parse_source(&nca, Some(keys))?;
@@ -453,8 +453,8 @@ impl Control {
             .ok_or_else(|| Error::Nca("Control NCA has no RomFS section".into()))?;
         let romfs_source = header.romfs_source(nca, keys, index)?;
 
-        // Unlike a Program NCA's RomFS — the game's data, and the reason
-        // `romfs_source` streams at all — a Control NCA's is a handful of
+        // Unlike a Program NCA's RomFS, the game's data, and the reason
+        // `romfs_source` streams at all: a Control NCA's is a handful of
         // icons and a 0x4000-byte NACP, so it is read whole and walked in
         // memory. The bound is what keeps that true: an NCA claiming a
         // game-sized RomFS here is an error, not an allocation.
@@ -503,7 +503,7 @@ impl Control {
     }
 
     /// Read the control data a homebrew NRO carries in the asset section
-    /// appended after its image — the same `control.nacp` a Control NCA
+    /// appended after its image, the same `control.nacp` a Control NCA
     /// holds, and a single icon rather than one per language.
     ///
     /// `None` when the NRO has no asset section, or one with neither an icon
@@ -603,7 +603,7 @@ fn read_i64(data: &[u8], at: usize) -> i64 {
 
 /// The same, for a field past [`NACP_MIN_SIZE`]: 0 when the NACP does not
 /// reach it. A NACP that stops short has not declared the field, and a title
-/// that declares no ceiling is one that never grows the save — which is what
+/// that declares no ceiling is one that never grows the save, which is what
 /// 0 means to every caller of these anyway.
 fn read_i64_if_present(data: &[u8], at: usize) -> i64 {
     match data.len() >= at + 8 {
@@ -662,7 +662,7 @@ mod tests {
 
         /// A NACP the full 0x4000 bytes a real one is. [`NacpBuilder::new`]
         /// stops at [`NACP_MIN_SIZE`], which is short of the ceiling and cache
-        /// storage fields — the point being that a NACP may legitimately stop
+        /// storage fields: the point being that a NACP may legitimately stop
         /// there, so the two cases are built differently on purpose.
         fn full() -> NacpBuilder {
             NacpBuilder {
@@ -859,7 +859,7 @@ mod tests {
         assert_eq!(quota.cache_storage_index_max, 3);
     }
 
-    /// A minimal NRO — a bare header, no segments — with an asset section
+    /// A minimal NRO (a bare header, no segments) with an asset section
     /// appended the way `elf2nro` appends one.
     fn nro_with_assets(icon: &[u8], nacp: &[u8]) -> Vec<u8> {
         const HEADER_SIZE: u32 = 0x50;
@@ -916,7 +916,7 @@ mod tests {
     fn a_nacp_that_stops_before_the_ceilings_still_parses() {
         // The ceiling and cache-storage fields sit past `NACP_MIN_SIZE`.
         // Requiring them would make a NACP that parses today stop parsing, and
-        // a title's name and icon do not depend on what its save may grow to —
+        // a title's name and icon do not depend on what its save may grow to,
         // so a short one reports 0 for them and everything else as before.
         let short = NacpBuilder::new()
             .title(0, "Game", "Studio")

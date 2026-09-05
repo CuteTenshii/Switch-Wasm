@@ -2,7 +2,7 @@
 //!
 //! A channel binds a class to each of its eight subchannels with a write to
 //! method 0 (`SetObject`); every later method write on that subchannel lands
-//! in that class's register file. A class's registers *are* its interface —
+//! in that class's register file. A class's registers *are* its interface,
 //! writing a register both stores a value and, for a handful of "trigger"
 //! registers, starts work.
 

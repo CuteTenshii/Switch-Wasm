@@ -3,7 +3,7 @@
 //! Every process on a real console files context records here as it runs, and
 //! the crash reporter turns them into reports. Both halves are real: a
 //! submitted context is journalled, a report is filed from the journal, and
-//! `erpt:r` reads back exactly what was filed — because a caller that files a
+//! `erpt:r` reads back exactly what was filed, because a caller that files a
 //! report and cannot then find it concludes the journal is broken.
 
 use super::Cpu;
@@ -17,7 +17,7 @@ use crate::Result;
 /// `ThermalInfo` every few seconds is *replacing* the record that is there,
 /// not appending to a log. `fields` is the array data the entry's fields index
 /// into, which is stored alongside because a field naming a string is useless
-/// without it. Neither is interpreted — `erpt` collects context, it does not
+/// without it. Neither is interpreted: `erpt` collects context, it does not
 /// read it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ErrorContext {
@@ -29,7 +29,7 @@ pub(super) struct ErrorContext {
 /// One error report filed through `erpt:c`.
 ///
 /// The body is the journal as it stood the moment the report was created,
-/// which is what a real `erpt` writes out — as msgpack, where this keeps the
+/// which is what a real `erpt` writes out: as msgpack, where this keeps the
 /// raw `ContextEntry` records, since nothing on either side of it here parses
 /// one.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,8 +56,8 @@ pub(super) struct ErrorReportAttachment {
 /// What one `IReport` or `IAttachment` object has open, and how far through it
 /// the caller has read.
 ///
-/// `Read` takes no offset — a caller drains a report by calling it until it
-/// answers zero — so the cursor belongs to the object, not to the request.
+/// `Read` takes no offset, a caller drains a report by calling it until it
+/// answers zero, so the cursor belongs to the object, not to the request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ErrorReportReader {
     id: [u8; ERPT_ID_SIZE],
@@ -99,7 +99,7 @@ const ERPT_ATTACHMENT_NAME_MAX: usize = 0x20;
 
 /// The caps a real `erpt` enforces on what a caller may hand over:
 /// `AttachmentSizeMax`, `ArrayBufferSizeMax`, and the size `GetReportSizeMax`
-/// reports. `ERPT_CONTEXT_ENTRIES_MAX` is this implementation's own — context
+/// reports. `ERPT_CONTEXT_ENTRIES_MAX` is this implementation's own, context
 /// is submitted a category at a time, and the cap only stops a nonsense buffer
 /// size asking for an unbounded read.
 const ERPT_ATTACHMENT_SIZE_MAX: u32 = 512 * 1024;
@@ -286,17 +286,17 @@ const ERPT_CATEGORIES: [&str; 157] = [
 ];
 
 impl Cpu {
-    /// `erpt:c` — "nn::erpt::sf::IContext", the error-report collector.
+    /// `erpt:c`, "nn::erpt::sf::IContext", the error-report collector.
     ///
     /// A console keeps a running journal of *context*: one record per category
-    /// — `ErrorInfo`, `ApplicationInfo`, `ThermalInfo`, `GpuCrashInfo` — that
+    /// (`ErrorInfo`, `ApplicationInfo`, `ThermalInfo`, `GpuCrashInfo`) that
     /// whichever module owns it keeps current by resubmitting. When something
     /// goes wrong, whoever noticed calls one of the `CreateReport` commands and
     /// the journal as it stands at that instant is written out as a report, for
     /// the error-report transfer to upload later.
     ///
     /// That makes this the second account a guest ever gives of why it is
-    /// unhappy — [`Cpu::fatal_request`] is the first — and a far more detailed
+    /// unhappy ([`Cpu::fatal_request`] is the first) and a far more detailed
     /// one, which is why a report being filed is a diagnostic. The generic
     /// fallback answered `SubmitContext` with a fabricated object id and threw
     /// every one of those records away.
@@ -520,7 +520,7 @@ impl Cpu {
     /// Write the journal out as a report, and say so.
     ///
     /// `categories` are the ones the caller submitted along with the report,
-    /// which is what the report is *about* — the rest of the journal is the
+    /// which is what the report is *about*: the rest of the journal is the
     /// state the console happened to be in. The oldest report goes when the
     /// journal is full, the way a console's does.
     fn erpt_create_report(
@@ -595,7 +595,7 @@ impl Cpu {
 
     /// A fresh `ReportId` or `AttachmentId`: a version-4 UUID in the first
     /// sixteen bytes of twenty. The last four stay zero because that is what
-    /// they are on a console — the id is a `util::Uuid` in a twenty-byte
+    /// they are on a console: the id is a `util::Uuid` in a twenty-byte
     /// field, and every comparison `erpt` makes is over the sixteen.
     fn erpt_new_id(&mut self) -> [u8; ERPT_ID_SIZE] {
         let mut id = [0u8; ERPT_ID_SIZE];
@@ -659,7 +659,7 @@ impl Cpu {
         }
     }
 
-    /// `erpt:r` — "nn::erpt::sf::ISession", and the three interfaces it opens
+    /// `erpt:r`, "nn::erpt::sf::ISession", and the three interfaces it opens
     /// onto the journal `erpt:c` fills.
     ///
     /// All three of its commands are object getters, so the generic fallback's
@@ -847,7 +847,7 @@ impl Cpu {
         }
     }
 
-    /// `IManager` — the journal as a whole: what is in it, what it costs, and
+    /// `IManager`, the journal as a whole: what is in it, what it costs, and
     /// an event for a report arriving in it.
     fn erpt_manager_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         match cmd_id {
@@ -886,7 +886,7 @@ impl Cpu {
                 self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
             }
             // CleanupReports: everything the journal holds goes, attachments
-            // with it — an attachment outliving its report is what the real
+            // with it: an attachment outliving its report is what the real
             // cleanup exists to prevent.
             Some(2) => {
                 self.erpt_reports.clear();

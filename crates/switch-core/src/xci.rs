@@ -18,8 +18,8 @@
 //! 0x140   0x20   SHA-256 of the root partition header
 //! ```
 //!
-//! The root is an HFS0 whose entries are the cartridge's partitions —
-//! `update`, `normal`, `secure`, and `logo` on later carts — and each of
+//! The root is an HFS0 whose entries are the cartridge's partitions,
+//! `update`, `normal`, `secure`, and `logo` on later carts, and each of
 //! those is an HFS0 in turn, holding the NCAs. Nothing between the image and
 //! the NCAs is encrypted in a dump, so reading a cartridge is
 //! [`Pfs0::read_partition_at`] twice and then the ordinary NCA reader: what
@@ -30,13 +30,13 @@ use crate::nsp::{PartitionKind, Pfs0, Pfs0File};
 use crate::source::ByteSource;
 use crate::Error;
 
-/// "HEAD", little-endian, at [`MAGIC_OFFSET`] — the signature that opens the
+/// "HEAD", little-endian, at [`MAGIC_OFFSET`]: the signature that opens the
 /// image comes first.
 pub const XCI_MAGIC: u32 = 0x4441_4548;
 pub const MAGIC_OFFSET: u64 = 0x100;
 /// The header the magic sits in, signature included.
 pub const HEADER_SIZE: u64 = 0x200;
-/// A gamecard address is a page count, and a page is 0x200 bytes — the same
+/// A gamecard address is a page count, and a page is 0x200 bytes, the same
 /// media unit an NCA measures its sections in.
 pub const MEDIA_UNIT: u64 = 0x200;
 
@@ -116,8 +116,8 @@ impl Xci {
     /// The title's content, as the one flat file table the rest of the stack
     /// reads a container through.
     ///
-    /// The `update` partition is left out. It is a firmware bundle — dozens
-    /// of system NCAs, several of them Program content — and every search
+    /// The `update` partition is left out. It is a firmware bundle, dozens
+    /// of system NCAs, several of them Program content, and every search
     /// that follows ("the Program NCA", "the Control NCA") is a scan of this
     /// table by content type, so a cartridge's system update would answer
     /// them before the game does.
@@ -148,8 +148,8 @@ impl Xci {
 /// straight through, or a cartridge image's partitions flattened into the
 /// same table.
 ///
-/// Every reader above this — the Program NCA scan, the Control NCA, the
-/// bundled ticket, the browser's file list — works from a [`Pfs0`] and a
+/// Every reader above this, the Program NCA scan, the Control NCA, the
+/// bundled ticket, the browser's file list: works from a [`Pfs0`] and a
 /// source, so this one function is the whole of what an XCI needed from them.
 pub fn read_container<S: ByteSource>(src: &S) -> Result<Pfs0, Error> {
     // The PFS0 magic is at offset 0 and settles the question; a cartridge's
@@ -199,7 +199,7 @@ fn read_u64(data: &[u8], at: usize) -> u64 {
     ])
 }
 
-/// Fixtures that write the on-disk form this module reads — see
+/// Fixtures that write the on-disk form this module reads: see
 /// [`crate::nsp::testing`] for why they are not `#[cfg(test)]`.
 pub mod testing {
     use super::*;
@@ -279,7 +279,7 @@ mod tests {
     }
 
     /// A cartridge's `update` partition is a firmware bundle, and the scans
-    /// that follow — the Program NCA, the Control NCA — would find its system
+    /// that follow (the Program NCA, the Control NCA) would find its system
     /// titles before the game's own content.
     #[test]
     fn the_content_table_leaves_the_system_update_out() {
@@ -299,7 +299,7 @@ mod tests {
     }
 
     /// `secure` last, because the Program NCA scan keeps the last match it
-    /// finds — a rule that exists for an update stacked over a base.
+    /// finds, a rule that exists for an update stacked over a base.
     #[test]
     fn the_titles_own_partition_comes_last() {
         let secure = partition_fs(PartitionKind::Hfs0, &[("program.nca", PROGRAM)]);
@@ -310,7 +310,7 @@ mod tests {
     }
 
     /// A dump is trimmed to the data the cartridge wrote, and the header says
-    /// where that ends — so a short image is not evidence of a short read.
+    /// where that ends, so a short image is not evidence of a short read.
     #[test]
     fn a_trimmed_dump_reports_the_data_it_holds() {
         let image = retail_shaped();
@@ -346,7 +346,7 @@ mod tests {
             Err(Error::BadMagic { what, .. }) if what == "PFS0"
         ));
         // Too short to hold a header at all, and the magic is where it would
-        // be — the failure a truncated download gives.
+        // be: the failure a truncated download gives.
         let mut cut = retail_shaped();
         cut.truncate(0x180);
         assert!(matches!(

@@ -44,7 +44,7 @@ fn get_system_tick_comes_back_in_a_register_pair() {
     assert_eq!(u64::from(r(&cpu, 0)), ticks);
 }
 
-/// `svcGetThreadId`'s id is 64 bits, so it occupies `r1:r2` — not `r1` alone.
+/// `svcGetThreadId`'s id is 64 bits, so it occupies `r1:r2`, not `r1` alone.
 /// A wrapper that stores both halves through its out pointer would otherwise
 /// write a stale `r2` into the top of the caller's `u64`.
 #[test]
@@ -64,8 +64,8 @@ fn a_process_id_fills_both_halves_of_its_pair() {
     assert_eq!(r(&cpu, 2), 0);
 }
 
-/// `svcGetInfo` takes its sub-value in the *non-adjacent* pair `r0:r3` — the
-/// info type stays in r1 and the handle in r2 — and answers in `r1:r2`.
+/// `svcGetInfo` takes its sub-value in the *non-adjacent* pair `r0:r3`, the
+/// info type stays in r1 and the handle in r2, and answers in `r1:r2`.
 #[test]
 fn get_info_takes_a_split_subvalue_and_answers_in_a_pair() {
     // InfoType 1 is the priority mask, whose value has bits above 32: a

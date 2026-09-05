@@ -3,7 +3,7 @@
 //! A retail `.nsp` does not fit in memory on the target this emulator was
 //! built for. wasm32 linear memory tops out at 4 GiB, Rust's allocator on
 //! that target rejects any single request above `isize::MAX` (2 GiB), and a
-//! modern title's container is bigger than both — so nothing that reads a
+//! modern title's container is bigger than both, so nothing that reads a
 //! container may assume it can hold one.
 //!
 //! Everything that reads container bytes therefore goes through
@@ -16,7 +16,7 @@
 
 use crate::Error;
 
-/// The largest buffer this target can allocate at once — `isize::MAX`, which
+/// The largest buffer this target can allocate at once, `isize::MAX`, which
 /// is what `Layout` (and therefore every allocation) is limited to. On wasm32
 /// that is 2 GiB, so it is a real ceiling and not a theoretical one: a
 /// request past it used to reach `Layout::from_size_align(..).unwrap()` and
@@ -150,7 +150,7 @@ impl ByteSource for MemSource {
     }
 }
 
-/// A source over a file on disk, for hosts that have one — the native
+/// A source over a file on disk, for hosts that have one, the native
 /// counterpart of the browser's `host_read`.
 ///
 /// Reads the range asked for and nothing else, so a multi-gigabyte container

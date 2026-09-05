@@ -18,7 +18,7 @@ const MAX_BLOCK_OPS: usize = 64;
 /// Whether the block translator has a real op for `insn`, or hands it back to
 /// the interpreter to decode again on every execution.
 ///
-/// Exact, and the same answer on every target — which is why it is worth
+/// Exact, and the same answer on every target, which is why it is worth
 /// asking. The alternative is to time two engines against each other and call
 /// a class translated when they come out within noise of one another, and
 /// noise on a desktop is not evidence about the browser.
@@ -44,7 +44,7 @@ enum Decoded {
 /// Translate the block starting at `start`.
 ///
 /// Stops at the first instruction that can move the PC, at [`MAX_BLOCK_OPS`],
-/// or at the end of the page — never past it, so one page's invalidation
+/// or at the end of the page, never past it, so one page's invalidation
 /// covers a block completely.
 pub(super) fn translate(mem: &Memory, start: u32) -> Block {
     let page_room = (PAGE_SIZE - (start as usize & (PAGE_SIZE - 1))) / 4;
@@ -71,7 +71,7 @@ pub(super) fn translate(mem: &Memory, start: u32) -> Block {
             // is the next instruction, so translation carries on there and the
             // branch becomes an early exit. This is the whole reason blocks
             // are longer than the six or seven instructions a basic block runs
-            // to — `b.cond` alone is 12% of hbmenu's frame.
+            // to: `b.cond` alone is 12% of hbmenu's frame.
             Decoded::Exit(exit) => {
                 exits.push((i as u32, exit));
                 ops.push(Op::Nop);
@@ -145,8 +145,8 @@ fn fuse_compares(ops: &mut [Op], exits: &mut [(u32, Exit)]) {
     }
 }
 
-/// Classify one instruction the way [`crate::cpu::Cpu::execute`] does — by bits
-/// 28:25, the architecture's own first decode table — and translate it.
+/// Classify one instruction the way [`crate::cpu::Cpu::execute`] does, by bits
+/// 28:25, the architecture's own first decode table, and translate it.
 fn decode(insn: u32, pc: u32) -> Decoded {
     match (insn >> 25) & 0xF {
         0x8 | 0x9 => Decoded::Op(decode_data_proc_imm(insn, pc)),
@@ -229,7 +229,7 @@ fn decode_branch_or_system(insn: u32, pc: u32) -> Decoded {
         0xD5 => {
             // The hint and barrier group used to shortcut to `Op::Nop` here
             // without asking the classifier, which is right for all of it but
-            // `CLREX` — that one clears the local monitor, and skipping the
+            // `CLREX`, that one clears the local monitor, and skipping the
             // classifier made it a hint in this engine while the interpreter
             // honoured it. `decode_system` answers `Op::Nop` for the rest.
             if ((insn >> 22) & 0x3FF) == 0b1101010100 {
@@ -247,8 +247,8 @@ fn decode_branch_or_system(insn: u32, pc: u32) -> Decoded {
 
 /// The `MRS`/`MSR`/cache-maintenance group, as the one op it is.
 ///
-/// [`SysOp::of`] is the classification the interpreter also runs — it walks
-/// six fields and a table to reach the same answer — and this keeps its
+/// [`SysOp::of`] is the classification the interpreter also runs, it walks
+/// six fields and a table to reach the same answer, and this keeps its
 /// result in the block instead of re-deriving it on every execution.
 fn decode_system(insn: u32) -> Op {
     match SysOp::of(insn) {
@@ -259,8 +259,8 @@ fn decode_system(insn: u32) -> Op {
 }
 
 /// The register-file slot a five-bit field names when 31 means `XZR` and the
-/// field is *written*. Reads need no mapping — slot 31 holds zero and nothing
-/// writes it — so only the destinations are resolved here.
+/// field is *written*. Reads need no mapping: slot 31 holds zero and nothing
+/// writes it, so only the destinations are resolved here.
 ///
 /// The mapping itself is [`Cpu::zr_write_slot`], which is what the interpreter
 /// resolves through per execution. This takes the instruction word the field
@@ -599,7 +599,7 @@ fn decode_data_proc_reg(insn: u32) -> Op {
 /// The load/store group, in the order [`crate::cpu::Cpu::execute`] tries it: the
 /// literal forms first, then everything [`crate::cpu::Cpu::try_load_store`] claims.
 fn decode_load_store(insn: u32, pc: u32) -> Op {
-    // LDR <t>, label — the address is fixed by where the instruction is.
+    // LDR <t>, label: the address is fixed by where the instruction is.
     if ((insn >> 27) & 0b111) == 0b011 && ((insn >> 26) & 1) == 0 && ((insn >> 24) & 0b11) == 0b00 {
         let imm = sext_u64((insn >> 5) & 0x7_FFFF, 19) << 2;
         // The literal forms encode the width in `opc` alone; `Acc::of` reads
@@ -634,7 +634,7 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
     let opc = ((insn >> 22) & 0b11) as u8;
     let acc = Acc::of(sz, opc);
     // Rt is read by a store and written by a load, and Rn is always the SP
-    // form — the base of an addressing mode is never the zero register.
+    // form: the base of an addressing mode is never the zero register.
     let rt = rt_slot(insn, acc);
     let rn = sp_form(insn >> 5);
 

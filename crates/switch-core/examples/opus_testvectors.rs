@@ -9,12 +9,12 @@
 //! ended that packet with, and the packet itself. The matching `.dec` is the
 //! reference decode at 48 kHz stereo.
 //!
-//! Each vector is decoded twice, once to stereo and once to mono — the
+//! Each vector is decoded twice, once to stereo and once to mono, the
 //! second exercises the downmix a stereo stream takes on its way to a mono
 //! output, which nothing else does.
 //!
 //! Two results come out of this. The **final range** must match on every
-//! packet — that is the format's own proof that a decoder read the same
+//! packet: that is the format's own proof that a decoder read the same
 //! symbols the encoder wrote, and RFC 6716 makes it normative. The decoded
 //! samples are written to `<out dir>/testvectorNN.rs.dec` and
 //! `…NNm.rs.dec`, which is what `opus_compare` scores; a floating-point

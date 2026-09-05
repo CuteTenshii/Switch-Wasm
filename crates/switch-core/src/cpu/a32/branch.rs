@@ -1,5 +1,5 @@
 //! A32 control flow and the coprocessor space: the immediate branches, the
-//! `cond == 0xF` encodings that are unconditional by construction, and CP15 —
+//! `cond == 0xF` encodings that are unconditional by construction, and CP15,
 //! which at EL0 is only the thread-pointer pair.
 
 use crate::cpu::Cpu;
@@ -86,7 +86,7 @@ impl Cpu {
         let crm = insn & 0xF;
         let opc2 = (insn >> 5) & 0x7;
         let rt = ((insn >> 12) & 0xF) as u8;
-        // CP15 c7 is cache maintenance and the pre-ARMv7 barriers — `MCR
+        // CP15 c7 is cache maintenance and the pre-ARMv7 barriers, `MCR
         // p15, 0, rX, c7, c10, 5` is how a v6-era build spells `DMB`. There is
         // one core here and no cache to maintain, so every one of them
         // retires.

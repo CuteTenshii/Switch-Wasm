@@ -1,7 +1,7 @@
 //! Execution context handed to the engines while a channel's pushbuffer runs.
 //!
-//! Bundles everything an engine can touch — guest memory through the channel's
-//! GPU address space, the host1x syncpoints, and the frame statistics — so the
+//! Bundles everything an engine can touch, guest memory through the channel's
+//! GPU address space, the host1x syncpoints, and the frame statistics, so the
 //! engines never need a reference back to the whole GPU.
 
 use crate::gpu::syncpt::Host1x;
@@ -29,7 +29,7 @@ pub struct GpuStats {
     pub inert_methods: u64,
     /// Compute dispatches launched.
     pub dispatches: u64,
-    /// Dispatches that did not run — an unparseable QMD, or a kernel using an
+    /// Dispatches that did not run, an unparseable QMD, or a kernel using an
     /// instruction the interpreter does not decode. Counted for the same
     /// reason `draws_skipped` is: a kernel that never ran leaves memory
     /// holding whatever was there, and nothing on screen says so.
@@ -76,7 +76,7 @@ impl ExecCtx<'_> {
     /// meant millions of address-space lookups per frame.
     pub fn read_pixel(&self, gpu_va: u64, len: u32) -> Result<u128> {
         // One access per machine word rather than per byte, which is
-        // `Memory::read_le` — the same walk `Gpu::present` needs, so it lives
+        // `Memory::read_le`, the same walk `Gpu::present` needs, so it lives
         // there rather than here.
         self.mem.read_le(self.pixel_addr(gpu_va, len)?, len)
     }
@@ -93,7 +93,7 @@ impl ExecCtx<'_> {
     /// The address translation is what a clear spends itself on. A 720p target
     /// at 2x2 samples is 3.7 million texels, a title that clears three
     /// attachments does that three times a frame, and Just Dance 2019 pays it
-    /// on frames that carry no draw at all — so a per-texel translation was
+    /// on frames that carry no draw at all, so a per-texel translation was
     /// the most expensive thing in a frame with nothing in it.
     ///
     /// A run that would leave its own mapping is not a run: that falls back to
@@ -189,7 +189,7 @@ impl ExecCtx<'_> {
     /// Read a contiguous run of a surface in **one** address translation.
     ///
     /// A run that would leave its own mapping is not a run, and falls back to
-    /// a byte at a time — the same bargain [`ExecCtx::fill_pixels`] makes.
+    /// a byte at a time: the same bargain [`ExecCtx::fill_pixels`] makes.
     pub fn read_run(&self, gpu_va: u64, out: &mut [u8]) -> Result<()> {
         if let Some(cpu) = self.span(gpu_va, out.len() as u64) {
             return self.read_span(cpu, out);

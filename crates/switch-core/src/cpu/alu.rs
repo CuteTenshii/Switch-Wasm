@@ -169,8 +169,6 @@ impl Cpu {
         }
     }
 
-    // ---------- data processing: register ----------
-
     #[allow(clippy::too_many_lines)]
     pub(super) fn try_data_proc_reg(&mut self, insn: u32, _next_pc: &mut u32) -> Result<bool> {
         let grp = (insn >> 24) & 0x1F;
@@ -238,7 +236,7 @@ impl Cpu {
                                 }
                                 0b000011 => {
                                     // SDIV. The operands have to be sign-extended
-                                    // from *their own* width — using the masked
+                                    // from *their own* width, using the masked
                                     // 32-bit values as positive i64 turned
                                     // `sdiv w9, w10, w11` into an unsigned
                                     // divide. INT_MIN / -1 wraps rather than
@@ -395,7 +393,7 @@ impl Cpu {
                     // MADD / MSUB (bits[28:21] == 11011000), 32- and 64-bit.
                     0b11011000 => self.madd(rd, rn, rm, ra, o0, sf),
                     // SMADDL / SMSUBL: the multiplicands are the low 32 bits
-                    // of Rn/Rm, sign-extended — not the whole register.
+                    // of Rn/Rm, sign-extended, not the whole register.
                     0b11011001 => self.madd_long(rd, rn, rm, ra, o0, true),
                     // UMADDL / UMSUBL: the low 32 bits of Rn/Rm, zero-extended.
                     0b11011101 => self.madd_long(rd, rn, rm, ra, o0, false),
@@ -422,7 +420,7 @@ impl Cpu {
     // already resolved to register-file slots (see `Cpu::x_slot` and
     // `Cpu::zr_write_slot`). The interpreter resolves them from the encoding
     // on every execution and the block translator resolves them once when it
-    // builds an `Op`, but from here down there is one implementation — so the
+    // builds an `Op`, but from here down there is one implementation, so the
     // two engines cannot compute an instruction differently, which is the
     // drift `examples/jit_difftest.rs` exists to find.
     //
@@ -434,7 +432,7 @@ impl Cpu {
     /// `MOVK`: replace the 16-bit field at `shift`, leaving the rest alone.
     ///
     /// The field itself never reaches above bit 31 in a 32-bit form, but the
-    /// register it merges into does — and a write to a W register zeroes bits
+    /// register it merges into does, and a write to a W register zeroes bits
     /// 63:32. Without the narrowing, `movk w0, #0x1234` over an all-ones
     /// register left `ffffffffffff1234` where hardware gives `00000000ffff1234`
     /// (`tools/difftest.py --scalar`).

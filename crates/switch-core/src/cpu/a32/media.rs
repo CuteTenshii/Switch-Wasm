@@ -1,7 +1,7 @@
 //! The ARMv6 media instructions: the extends, the reverses, the bitfield
 //! moves and the saturations a compiler emits from ordinary C.
 //!
-//! They share their `op1` with each other in ways that matter — `SSAT` is
+//! They share their `op1` with each other in ways that matter: `SSAT` is
 //! `0110 101x` and `SXTB16`/`SXTH` are `0110 1000`/`0110 1011`, so bit 5 of
 //! `op2` is what tells a saturation from an extend, not the opcode field.
 
@@ -167,7 +167,7 @@ impl Cpu {
                 self.set_r32(d, (rounded >> 32) as u32);
             }
             // SDIV and UDIV, which the media space files under the signed
-            // multiplies. The destination is bits 19:16 here, not 15:12 —
+            // multiplies. The destination is bits 19:16 here, not 15:12,
             // that field holds the 0b1111 that says there is no accumulator.
             (0x11 | 0x13, 0b000) => {
                 let n = self.r32(rm);

@@ -13,7 +13,7 @@ use crate::Result;
 /// The rate each clock module runs at, in Hz: CPU, GPU, memory, then every
 /// module this does not model, which runs at nothing. These are an original
 /// console's **handheld** rates, matching the operation mode `am` reports and
-/// the Normal performance mode `apm` does — a docked console runs its GPU at
+/// the Normal performance mode `apm` does: a docked console runs its GPU at
 /// 768 MHz instead, and claiming that while presenting a 720p handheld
 /// framebuffer would be two answers to the same question.
 pub(super) const CLOCK_RATES_HZ: [u32; 4] = [1_020_000_000, 384_000_000, 1_600_000_000, 0];
@@ -27,7 +27,7 @@ pub(super) const CLOCK_RATES_HZ: [u32; 4] = [1_020_000_000, 384_000_000, 1_600_0
 const TS_TEMPERATURE_C: [i32; 2] = [40, 35];
 
 /// The range `ts` says its sensors report over. Both readings above sit inside
-/// it — a caller that scales a gauge by this range would otherwise draw the
+/// it, a caller that scales a gauge by this range would otherwise draw the
 /// needle off the end.
 const TS_TEMPERATURE_RANGE_C: (i32, i32) = (0, 100);
 
@@ -39,8 +39,8 @@ const APM_PERFORMANCE_MODE_NORMAL: u32 = 0;
 /// The `ApmPerformanceConfiguration` each performance mode starts at, indexed
 /// by mode.
 ///
-/// Nothing here derives a clock from these — no CPU, GPU or memory frequency
-/// in this emulator is settable — but they cannot be zero, which is
+/// Nothing here derives a clock from these, no CPU, GPU or memory frequency
+/// in this emulator is settable, but they cannot be zero, which is
 /// `ApmPerformanceConfiguration_Invalid`, and whatever a title sets has to
 /// read back unchanged.
 pub(super) const APM_DEFAULT_CONFIGURATION: [u32; 2] = [0x0001_0000, 0x0002_0000];
@@ -89,7 +89,7 @@ impl Cpu {
             }
             // EnableBatteryCharging/DisableBatteryCharging: accepted, but
             // charging state here mirrors the host battery, not a guest
-            // setting — there is nothing to actually stop charging.
+            // setting: there is nothing to actually stop charging.
             Some(ENABLE_BATTERY_CHARGING) | Some(DISABLE_BATTERY_CHARGING) => {
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
@@ -104,8 +104,8 @@ impl Cpu {
 
     /// `IPsmSession`: the live charger/battery-state-change notifications a
     /// caller can subscribe to. There is no push channel from the host
-    /// battery here — [`Cpu::set_battery`] is polled, the way
-    /// `GetBatteryChargePercentage` already is — so the bound event is
+    /// battery here: [`Cpu::set_battery`] is polled, the way
+    /// `GetBatteryChargePercentage` already is, so the bound event is
     /// handed out but never signalled; a caller has to keep polling rather
     /// than wait on it.
     pub(super) fn psm_session_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
@@ -132,8 +132,8 @@ impl Cpu {
     /// `clkrst` (`IClkrstManager`) and `pcv`, the same clock-and-voltage
     /// manager either side of 8.0.0: what rate each hardware module runs at.
     ///
-    /// Nothing here is clocked — the CPU is an interpreter and the GPU a
-    /// software rasterizer — so these report the rates an idle console in
+    /// Nothing here is clocked: the CPU is an interpreter and the GPU a
+    /// software rasterizer, so these report the rates an idle console in
     /// handheld mode runs at, which is the mode `am` and `apm` already agree
     /// this console is in. A rate a guest *sets* is stored and read back:
     /// that pair has to agree even when neither value drives anything, since
@@ -206,12 +206,12 @@ impl Cpu {
     /// than a rename: a `clkrst` device code is `0x40000000 + module + 1`,
     /// where `module` is the `PcvModule` value `pcv` takes directly. NX-Fetch
     /// asks `clkrst` for `0x40000001`, `0x40000002` and `0x40000039` and
-    /// labels the answers CPU, GPU and Memory — so those are `PcvModule`s 0
+    /// labels the answers CPU, GPU and Memory, so those are `PcvModule`s 0
     /// (CpuBus), 1 (GPU) and 0x38 (EMC), and reading the code's low bits as
     /// the module directly is off by one.
     ///
-    /// A module this does not model reports its own entry, which is 0 Hz —
-    /// "not running" — rather than another module's rate.
+    /// A module this does not model reports its own entry, which is 0 Hz,
+    /// "not running", rather than another module's rate.
     fn clkrst_module(&self, code: u32) -> u32 {
         const PCV_MODULE_CPU_BUS: u32 = 0;
         const PCV_MODULE_GPU: u32 = 1;
@@ -234,9 +234,9 @@ impl Cpu {
     ///
     /// Only the GPU's default moves with the dock. The CPU and memory clocks
     /// are the same either way on an original console, and the CPU's is
-    /// load-bearing beyond this — it is the rate one emulated instruction
+    /// load-bearing beyond this: it is the rate one emulated instruction
     /// stands for, and what `GetSystemTick` and every timed wait are derived
-    /// from — so it is not a figure the dock gets to change.
+    /// from, so it is not a figure the dock gets to change.
     fn clock_rate(&self, module: u32) -> u32 {
         const GPU: u32 = 1;
         match self.clock_rates.get(&module) {
@@ -258,16 +258,16 @@ impl Cpu {
 
     /// `ts` (`IMeasurementServer`): the console's thermometers.
     ///
-    /// Real hardware has two — one on the SoC die (`TsLocation_Internal`) and
-    /// one on the PCB beside it (`TsLocation_External`) — and system-info
+    /// Real hardware has two, one on the SoC die (`TsLocation_Internal`) and
+    /// one on the PCB beside it (`TsLocation_External`), and system-info
     /// homebrew puts their readings on screen. There is no silicon here to be
     /// warm, so both report a **fixed idle temperature**, which is the true
     /// state of a console that is not dissipating anything rather than a
     /// number standing in for one that could not be read.
     ///
     /// The two commands that report the same measurement in different units
-    /// have to agree — `GetTemperatureMilliC` is `GetTemperature` times a
-    /// thousand — and the reading has to sit inside the range
+    /// have to agree: `GetTemperatureMilliC` is `GetTemperature` times a
+    /// thousand, and the reading has to sit inside the range
     /// `GetTemperatureRange` reports, or a caller that scales a gauge by that
     /// range draws it off the end.
     pub(super) fn ts_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
@@ -283,8 +283,8 @@ impl Cpu {
             };
         }
         let object_id = self.ipc_domain_object_id(tls);
-        // A session reached over either route — its own handle, or an object
-        // id on a domain — is a different interface from the server.
+        // A session reached over either route, its own handle, or an object
+        // id on a domain: is a different interface from the server.
         let iface = if self.ipc_is_domain_request(tls) {
             self.domain_interface(handle, object_id)
                 .unwrap_or("ts")
@@ -326,8 +326,8 @@ impl Cpu {
             // rather than in a side table, and the two names route straight
             // back here.
             //
-            // The device code's **high byte** is what separates them —
-            // `0x41……` is the SoC and `0x43……` the PCB — not its low byte,
+            // The device code's **high byte** is what separates them,
+            // `0x41……` is the SoC and `0x43……` the PCB, not its low byte,
             // which varies between the codes a guest may use for the same
             // sensor: NX-Fetch asks for `0x41000002` and labels what comes
             // back "CPU", so reading the low byte made it print the PCB's
@@ -374,13 +374,13 @@ impl Cpu {
     }
 
     /// `apm` (`IManager`) and `apm:sys` (`ISystemManager`): performance
-    /// management — which clock profile the console runs at.
+    /// management, which clock profile the console runs at.
     ///
     /// There is nothing to clock here. The CPU is an interpreter, the GPU is a
     /// software rasterizer, and neither runs faster because a title asked for
     /// the docked profile. What `apm` still has to do is be *consistent*: it
     /// reports the same performance mode `am`'s `ICommonStateGetter` does
-    /// (Normal — this console is handheld), and a configuration it was told to
+    /// (Normal, this console is handheld), and a configuration it was told to
     /// set is the configuration it reports back. A title that sets a profile
     /// and reads back a different one concludes the request failed.
     ///
@@ -458,7 +458,7 @@ impl Cpu {
             // decides the mode on real hardware.
             "apm:sys" => match cmd_id {
                 // RequestPerformanceMode(ApmPerformanceMode): accepted, and
-                // changes nothing — the same answer as a console that is
+                // changes nothing: the same answer as a console that is
                 // already in the mode it was asked for.
                 Some(0) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // ClearLastThrottlingState / LoadAndApplySettings /
@@ -491,8 +491,8 @@ impl Cpu {
     ///
     /// A process registers a module here and is told when the console is
     /// about to sleep, wake or shut down, so it can save what it is doing.
-    /// This console does none of those things — there is no sleep, no
-    /// shutdown and no battery to run down — so the module registers
+    /// This console does none of those things: there is no sleep, no
+    /// shutdown and no battery to run down, so the module registers
     /// successfully and its event never fires.
     pub(super) fn psc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
@@ -554,8 +554,8 @@ impl Cpu {
     /// `gpio` (`IManager`), and the `IPadSession` it hands out for one pad.
     ///
     /// A GPIO pad is a single wire into the SoC, addressed by a device code.
-    /// Nothing is wired to this console — no volume rocker, no SD card detect
-    /// switch, no dock — so no pad is ever driven and no interrupt ever fires.
+    /// Nothing is wired to this console, no volume rocker, no SD card detect
+    /// switch, no dock, so no pad is ever driven and no interrupt ever fires.
     ///
     /// An undriven pad reads **High**, and that polarity is load-bearing
     /// rather than cosmetic: the buttons are active-low, and boot2 enters
@@ -568,7 +568,7 @@ impl Cpu {
         cmd_id: Option<u32>,
     ) -> Result<()> {
         /// `GpioValue::High`, the level a pad with nothing pulling it down
-        /// sits at — which is what an unpressed active-low button looks like.
+        /// sits at, which is what an unpressed active-low button looks like.
         const HIGH: u32 = 1;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -633,7 +633,7 @@ impl Cpu {
                 // The debug settings for that same never-taken wake path, plus
                 // SetRetryValues. Firmware moved a `GetWakeEventActiveFlagSet2`
                 // through this range, so these answer with a zeroed word as
-                // well as a success — a setter's caller ignores it, and a
+                // well as a success, a setter's caller ignores it, and a
                 // getter's reads the flag set as empty, which is the same
                 // answer command 4 gives.
                 Some(5) | Some(6) | Some(9) | Some(10) | Some(11) => {
@@ -698,8 +698,8 @@ mod tests {
 
     #[test]
     fn ts_sessions_report_their_own_sensor_as_a_float() {
-        // `ISession::GetTemperature` is command 4 — the same id the *server*
-        // uses for OpenSession — and reports a float. Sharing one dispatch
+        // `ISession::GetTemperature` is command 4, the same id the *server*
+        // uses for OpenSession, and reports a float. Sharing one dispatch
         // between them answered a temperature request with a session object,
         // which is what NX-Fetch drew as "8 C".
         for (iface, expected) in [
@@ -747,7 +747,7 @@ mod tests {
     fn clkrst_reports_handheld_rates_for_the_modules_nx_fetch_asks_about() {
         // The device codes NX-Fetch sends, and the labels it puts on them.
         // A code is 0x40000000 + module + 1, so reading the low bits as the
-        // module is off by one — which had the GPU's rate under "CPU".
+        // module is off by one, which had the GPU's rate under "CPU".
         for (code, expected) in [
             (0x4000_0001u32, super::CLOCK_RATES_HZ[0]), // CpuBus
             (0x4000_0002, super::CLOCK_RATES_HZ[1]),    // GPU

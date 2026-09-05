@@ -4,13 +4,13 @@
 //! value per band, differentially coded across time and frequency; shape is a
 //! unit-norm vector per band, coded as a point on a hypersphere by the
 //! algebraic PVQ. Nothing in the shape carries level, so a band always comes
-//! back with exactly the energy that was signalled for it — which is why the
+//! back with exactly the energy that was signalled for it, which is why the
 //! codec degrades by going grainy rather than by dropping bands.
 //!
 //! The bit allocation is the part that makes it work and the part that makes
 //! it unforgiving. Encoder and decoder both compute, from the frame size, the
 //! coded bandwidth and the bits consumed so far, exactly how many bits each
-//! band gets — no side information. Everything downstream of a disagreement
+//! band gets, no side information. Everything downstream of a disagreement
 //! is noise, so every count here is integer arithmetic that has to match the
 //! encoder's bit for bit, right down to the direction each division rounds.
 //!
@@ -255,7 +255,7 @@ fn bitexact_log2tan(isin: i32, icos: i32) -> i32 {
         - frac_mul16(icos, frac_mul16(icos, -2597) + 7932)
 }
 
-/// Multiply two Q15 values, rounding, exactly as the reference does — both
+/// Multiply two Q15 values, rounding, exactly as the reference does, both
 /// operands are truncated to 16 bits first, and the allocation depends on it.
 fn frac_mul16(a: i32, b: i32) -> i32 {
     (16384 + (a as i16 as i32) * (b as i16 as i32)) >> 15
@@ -308,7 +308,7 @@ fn laplace_decode(dec: &mut RangeDecoder, fs0: u32, decay: i32) -> i32 {
 /// Coarse energy: one value per band per channel, predicted from the band
 /// below and from the same band in the previous frame.
 ///
-/// The inter-frame predictor is why a lost frame is audible beyond itself —
+/// The inter-frame predictor is why a lost frame is audible beyond itself,
 /// and why `intra` exists, to break the chain at a cost in bits.
 fn unquant_coarse_energy(
     start: usize,
@@ -628,7 +628,7 @@ fn compute_theta(
 
     if qn != 1 {
         // A uniform pdf for a time split, a step for stereo, a triangular one
-        // for the rest — the shapes the angle actually takes.
+        // for the rest: the shapes the angle actually takes.
         if stereo && n > 2 {
             let p0 = 3u32;
             let x0 = (qn / 2) as u32;
@@ -710,7 +710,7 @@ fn compute_theta(
     }
 }
 
-/// Integer square root, matching the reference's exactly — the triangular
+/// Integer square root, matching the reference's exactly, the triangular
 /// angle pdf inverts through it, so a value one off decodes a different
 /// angle.
 fn isqrt32(mut val: u32) -> u32 {
@@ -1882,7 +1882,7 @@ fn denormalise_bands(
 }
 
 /// `2^x`. The energy is coded in base-2 log units, so this is the only place
-/// the decoder needs an exponential — and it needs one that cannot overflow
+/// the decoder needs an exponential, and it needs one that cannot overflow
 /// on a corrupt band.
 fn exp2_approx(x: f32) -> f32 {
     if x <= -128.0 {
@@ -2519,7 +2519,7 @@ impl CeltDecoder {
     /// Two strategies: repeat the last pitch period through the LPC synthesis
     /// filter, which holds a voiced sound together, or fill the bands with
     /// noise at the energy the signal was decaying towards. The second is
-    /// what a long loss ends in either way — a pitch repeated for half a
+    /// what a long loss ends in either way, a pitch repeated for half a
     /// second is a tone, not concealment.
     fn decode_lost(&mut self, n: usize, lm: usize) {
         let cc = self.channels;

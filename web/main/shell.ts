@@ -96,7 +96,7 @@ export function setNote(id: string, text: string, on?: boolean): void {
   node.classList.toggle('on', Boolean(on));
 }
 
-// ---------- panel width ----------
+// panel width
 //
 // A fixed 380px is right for the status readouts and far too narrow for a
 // register dump or a container's file names, so the seam between the stage and

@@ -34,7 +34,7 @@ fn bl_links_and_bx_returns() {
     assert_eq!(r(&cpu, 2), 2);
 }
 
-/// `bx lr` sits in the miscellaneous group, which bit 7 selects — not bit 4.
+/// `bx lr` sits in the miscellaneous group, which bit 7 selects, not bit 4.
 /// Reading bit 4 sends every return to the halfword multiplier, which falls
 /// through into whatever follows it.
 #[test]
@@ -141,7 +141,7 @@ fn a_fault_names_a32_mnemonics() {
     cpu.trace_enabled = true;
     let code: [u32; 2] = [
         0xE3A0_0001, // mov r0, #1
-        0xE7F0_00F0, // udf — an encoding nothing here claims
+        0xE7F0_00F0, // udf, an encoding nothing here claims
     ];
     let mut bytes = Vec::new();
     for insn in code {

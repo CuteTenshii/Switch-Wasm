@@ -1,4 +1,4 @@
-/* ---------- rumble ----------
+/* rumble
 
    Switch rumble drives two linear resonant actuators independently, and the
    Gamepad API's "dual-rumble" effect is the same shape: the guest's low band

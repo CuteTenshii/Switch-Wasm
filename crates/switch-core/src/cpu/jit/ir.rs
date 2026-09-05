@@ -23,14 +23,14 @@ pub(in crate::cpu) enum Op {
     /// SIMD and floating point, handed to the decoder that owns it instead of
     /// back through [`crate::cpu::Cpu::execute`]'s group match. `scalar` is the
     /// same top-byte test `execute` makes to decide which of the two decoders
-    /// gets first look, and `form` is which of the scalar forms it is — both
+    /// gets first look, and `form` is which of the scalar forms it is, both
     /// decided once here rather than on every execution.
     Fp {
         insn: u32,
         scalar: bool,
         form: FpForm,
     },
-    /// A system instruction [`SysOp::of`] could not place — its
+    /// A system instruction [`SysOp::of`] could not place, its
     /// [`SysOp::Unhandled`]. Straight to [`crate::cpu::Cpu::system`], which is
     /// where its error comes from.
     System { insn: u32 },
@@ -43,7 +43,7 @@ pub(in crate::cpu) enum Op {
     MovConst { rd: u8, val: u64 },
     /// `MOVK`: replace the 16-bit field at `shift` with `val`. Held as a
     /// shift and a halfword rather than a mask and a placed value so the
-    /// variant needs one 64-bit word instead of two — which is what decides
+    /// variant needs one 64-bit word instead of two, which is what decides
     /// [`Op`]'s size, and so a block body's whole cache footprint.
     MovK {
         rd: u8,
@@ -79,7 +79,7 @@ pub(in crate::cpu) enum Op {
         set_flags: bool,
         sf: bool,
     },
-    /// The same with no shift at all — `add x0, x1, x2` — which is most of
+    /// The same with no shift at all (`add x0, x1, x2`) which is most of
     /// them, and skips [`crate::cpu::bits::shift_reg`] entirely.
     AddSubReg {
         rd: u8,
@@ -273,7 +273,7 @@ pub(super) enum Exit {
         target: u32,
     },
     /// A `CMP`/`CMN` against a constant, fused with the `B.cond` that reads
-    /// its flags — the commonest pair in compiled code, and one that only
+    /// its flags, the commonest pair in compiled code, and one that only
     /// became fusable when blocks started running through conditional
     /// branches. `rhs` and `carry` arrive as they do for any other
     /// subtraction; the destination was the zero register, so nothing but
@@ -298,7 +298,7 @@ pub(super) enum Exit {
 }
 
 impl Exit {
-    /// How many instructions the exit covers — two once a compare has been
+    /// How many instructions the exit covers: two once a compare has been
     /// folded into it.
     #[inline(always)]
     pub(super) fn span(self) -> usize {
@@ -313,7 +313,7 @@ impl Exit {
 #[derive(Debug)]
 pub(super) struct Block {
     /// Where control went the last time this block was left, and the block it
-    /// found there — an inline cache of one entry, filled on the way past.
+    /// found there, an inline cache of one entry, filled on the way past.
     ///
     /// A retail frame enters a block every 6.1 instructions, so what a block
     /// boundary costs is charged against six instructions rather than against
@@ -332,7 +332,7 @@ pub(super) struct Block {
     pub(super) start: u32,
     /// One entry per instruction the block covers before its terminator, so
     /// `ops[i]` is the instruction at `start + 4 * i`. The slots that hold a
-    /// conditional branch carry [`Op::Nop`] as filler — the branch itself is
+    /// conditional branch carry [`Op::Nop`] as filler, the branch itself is
     /// in `exits`, and keeping the indexing exact is worth one dead slot per
     /// exit.
     pub(super) ops: Vec<Op>,
@@ -387,7 +387,7 @@ mod tests {
     use super::{Op, SysOp};
 
     /// A block body is an array of [`Op`], so its size is that body's whole
-    /// cache footprint — which is why [`Op::MovK`] holds a shift and a
+    /// cache footprint, which is why [`Op::MovK`] holds a shift and a
     /// halfword rather than a mask and a placed value, and why
     /// [`super::SysReg::Fixed`] is a `u32`. One 64-bit payload plus its
     /// discriminant is the budget those choices were made against.

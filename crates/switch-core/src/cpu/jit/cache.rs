@@ -47,7 +47,7 @@ pub struct JitStats {
     /// Of those, the ones reached through the previous block's own link rather
     /// than through a lookup.
     ///
-    /// Against `executed` this is the link cache's hit rate — the one number
+    /// Against `executed` this is the link cache's hit rate, the one number
     /// that says whether chaining is doing anything, and the same number on
     /// any target.
     pub linked: u64,
@@ -57,7 +57,7 @@ pub struct JitStats {
     /// the translator had no op for them.
     ///
     /// Against `Cpu::run`'s step count this is the share of a run the
-    /// translator did not actually translate — the one number here that says
+    /// translator did not actually translate: the one number here that says
     /// where the next block of speed is, and the same number on any target.
     pub interpreted: u64,
 }

@@ -18,7 +18,7 @@ pub(super) const SD_FREE_SPACE: u64 = 16 << 30;
 
 /// `nn::fs::SdCardSpeedMode::Sdr104` and `nn::fs::MmcSpeedMode::Hs400`: the
 /// fastest mode each bus negotiates. Nothing here is on a bus, but 0 in either
-/// enum is `Identification` — a device that never finished initialising, which
+/// enum is `Identification`, a device that never finished initialising, which
 /// is a fault rather than a missing measurement.
 const SD_CARD_SPEED_MODE: i64 = 6;
 
@@ -32,7 +32,7 @@ const MMC_USER_AREA_SIZE: i64 = SD_TOTAL_SPACE as i64;
 const MMC_BOOT_PARTITION_SIZE: i64 = 4 << 20;
 
 /// The two `IEventNotifier`s `fsp-srv` hands out, named apart because the
-/// event behind each one is a different slot's — and one handler serves both.
+/// event behind each one is a different slot's, and one handler serves both.
 const SD_CARD_DETECTION: &str = "fsp-srv-sd-detection";
 
 const GAME_CARD_DETECTION: &str = "fsp-srv-gamecard-detection";
@@ -40,8 +40,8 @@ const GAME_CARD_DETECTION: &str = "fsp-srv-gamecard-detection";
 /// What the save-data commands report before anything has read the running
 /// title's NACP: 64 MiB of save data and 16 MiB of journal.
 ///
-/// The real figures are per-title and only the Control NCA knows them —
-/// Tomodachi Life declares 54 MiB and 10 MiB — so this is a fallback, and it
+/// The real figures are per-title and only the Control NCA knows them,
+/// Tomodachi Life declares 54 MiB and 10 MiB, so this is a fallback, and it
 /// is deliberately generous. Reporting *more* than a title needs costs
 /// nothing, since nothing here enforces a quota; reporting less is the answer
 /// that hurts, because a title that reads a quota its save does not fit into
@@ -60,8 +60,8 @@ pub(crate) const DEFAULT_CACHE_STORAGE_INDEX_MAX: i32 = 1;
 /// Every figure here is reported by one `IApplicationFunctions` command and
 /// changes nothing else: the emulated NAND has no quota and grows with
 /// whatever a title writes. They matter because a title reads them *before*
-/// it writes — to decide whether its save fits, whether it may grow one, and
-/// how many cache storages it may create — and acts on the answer.
+/// it writes, to decide whether its save fits, whether it may grow one, and
+/// how many cache storages it may create, and acts on the answer.
 ///
 /// A zero that came from a real NACP is passed through rather than corrected.
 /// A title that declares no ceiling is one that never extends its save, and 0
@@ -153,14 +153,14 @@ impl Cpu {
                 Ok(())
             }
             // 200 = OpenDataStorageByCurrentProcess: hands back the calling
-            // title's own RomFS as a raw `IStorage` (offset/size reads only —
+            // title's own RomFS as a raw `IStorage` (offset/size reads only,
             // no paths). libnx's `romfsMount`/`nn::fs::MountRom` parse the
             // RomFS header and directory/file tables entirely in guest code
             // against this; the emulator only has to serve byte ranges.
             Some(200) => {
                 if self.romfs.is_none() {
                     // No NCA was decrypted this session (homebrew, or a
-                    // title with no RomFS section) — report "not found"
+                    // title with no RomFS section): report "not found"
                     // rather than handing out a storage backed by nothing.
                     const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
                     return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
@@ -169,7 +169,7 @@ impl Cpu {
                 Ok(())
             }
             // 202 = OpenDataStorageByDataId(u8 storage_id, u64 data_id):
-            // content that is *not* the calling title's own — an applet's
+            // content that is *not* the calling title's own, an applet's
             // shared assets, the system's Mii and amiibo resources. On a real
             // console each is a separate Data NCA on the NAND, mounted by
             // data id; here the host registers whichever it was given
@@ -177,7 +177,7 @@ impl Cpu {
             //
             // A data id nobody registered is reported missing. Handing back an
             // empty storage instead would be answered as a zero-byte archive,
-            // which is what the caller then blames — `cabinet` reported
+            // which is what the caller then blames, `cabinet` reported
             // `2002-3005` against its own resource load rather than against
             // the archive not being there.
             Some(202) => {
@@ -203,13 +203,13 @@ impl Cpu {
             }
             // 203 = OpenPatchDataStorageByCurrentProcess: the RomFS of the
             // title's *update*, which is a second NCA this emulator does not
-            // have — it boots the base Program NCA and nothing beside it.
+            // have, it boots the base Program NCA and nothing beside it.
             // Saying so is the whole implementation, but it has to be said in
             // the one shape the caller recognises. `nn::fs::QueryMountRomCacheSize`
             // opens the base storage (200) and then this one, and treats only
             // fs's 2002-1001 and 2002-1002 (`TargetNotFound`) as "there is no
-            // patch, use the base alone"; every other Result — a success most
-            // of all — it acts on.
+            // patch, use the base alone"; every other Result, a success most
+            // of all, it acts on.
             //
             // Which is how the catch-all below stopped Just Dance 2017 dead.
             // A bare success carries no out-object, so `nnSdk`'s
@@ -229,7 +229,7 @@ impl Cpu {
             // request names.
             //
             // Every one of these used to report "not found", which is a thing
-            // callers act on rather than shrug at — a title that cannot open
+            // callers act on rather than shrug at: a title that cannot open
             // its save has nowhere to put anything, and the system applets
             // open theirs before they will do very much at all.
             Some(22) | Some(23) | Some(51) | Some(52) | Some(53) => {
@@ -248,14 +248,14 @@ impl Cpu {
             // 62 = ...OnlyCacheStorage, 68 = ...WithFilter: the enumerator a
             // save manager walks to find what is on the console. All four hand
             // out the same `ISaveDataInfoReader`; the filter 68 takes (a save
-            // type, a user id, a title id — which of them apply is a mask) only
+            // type, a user id, a title id, which of them apply is a mask) only
             // narrows what it would report, and nothing is reported either way.
             //
             // 68 is the 6.0.0+ form, and it is the one a current JKSV opens.
             // It used to fall through to the catch-all below, which answers
             // with success and *no* out-object: `libnx` then read its reader
             // session handle out of a reply that had no handle in it and sent
-            // `ReadSaveDataInfo` to handle 0 — the "<untracked session> cmd=0"
+            // `ReadSaveDataInfo` to handle 0, the "<untracked session> cmd=0"
             // that the generic object-id reply answered with an object id the
             // caller read back as an entry count of several billion.
             Some(60) | Some(61) | Some(62) | Some(68) => {
@@ -263,7 +263,7 @@ impl Cpu {
                 Ok(())
             }
             // 400 = OpenDeviceOperator: the interface that answers for the
-            // storage *devices* rather than the filesystems on them — whether
+            // storage *devices* rather than the filesystems on them, whether
             // a card is in either slot, how big it is, and what the controller
             // has logged. It hands back an object, which is what the catch-all
             // below could not do: a caller reads one as a move handle, parses
@@ -277,7 +277,7 @@ impl Cpu {
             // the other half of what the device operator above answers, for a
             // caller that would rather be told when a slot changes than ask.
             // Both hand back an `IEventNotifier`, and both used to be a bare
-            // success — the same null out-object as 400, one command apart.
+            // success, the same null out-object as 400, one command apart.
             Some(500) | Some(501) => {
                 let name = match cmd_id {
                     Some(500) => SD_CARD_DETECTION,
@@ -288,7 +288,7 @@ impl Cpu {
             }
             // 1003 = DisableAutoSaveDataCreation. `ns` sends this once at
             // boot so that `fs` stops conjuring a save the moment a title
-            // opens one, leaving the creation to `ns`'s own explicit call —
+            // opens one, leaving the creation to `ns`'s own explicit call,
             // which is how a title that has never been launched is told its
             // save does not exist yet rather than handed an empty one.
             //
@@ -296,7 +296,7 @@ impl Cpu {
             // open ([`Cpu::save_data_mut`]) and there is no installer to have
             // created them beforehand, so a console that obeyed this flag
             // would have no save for any title including the Home Menu's own
-            // — the exact failure the flag exists to produce, against a NAND
+            //, the exact failure the flag exists to produce, against a NAND
             // that was never populated. It is answered rather than left to
             // the catch-all so that this is written down somewhere.
             Some(1003) => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -309,7 +309,7 @@ impl Cpu {
             // Neither command hands back an object, so the catch-all below was
             // survivable here: 1005's out word sits inside the section the
             // reply zeroes, so it read as "off" rather than as stale TLS. What
-            // the catch-all could not do is *agree* with 1004 — the mode a
+            // the catch-all could not do is *agree* with 1004, the mode a
             // title had just set came back as zero, so a caller that reads its
             // own setting back to decide whether to keep building log strings
             // was told its request had been ignored, by a reply that claimed
@@ -326,14 +326,14 @@ impl Cpu {
             // 1015 = FlushAccessLogOnSdCard, 1016 = OutputApplicationInfoAccessLog:
             // the writing end of that same log. Every one of them takes text or
             // a tag and answers with nothing but a `Result`, so accepting the
-            // write and dropping it is the whole implementation — there is no
+            // write and dropping it is the whole implementation: there is no
             // access log on this console for them to reach, and a caller only
             // sends them once 1005 has reported a mode that is not "off".
             Some(1006) | Some(1014) | Some(1015) | Some(1016) => {
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
-            // Still a fabricated success — homebrew that only checks the
-            // Result depends on it — but no longer a silent one. Every
+            // Still a fabricated success, homebrew that only checks the
+            // Result depends on it, but no longer a silent one. Every
             // command that reaches here is one whose out-object, out-handle
             // or out-value the caller is about to read as zero, and the line
             // this prints is the only warning it will get before that zero
@@ -348,13 +348,13 @@ impl Cpu {
     /// `ISaveDataInfoReader`: cmd 0 = `ReadSaveDataInfo`, which fills an
     /// output buffer with `FsSaveDataInfo` entries and reports how many it
     /// wrote. A caller reads until it reports **zero**, which is the whole
-    /// termination condition — there is no separate "end" signal.
+    /// termination condition: there is no separate "end" signal.
     ///
     /// This console has no save data, so the first read is already the last
     /// one. Saying so is the entire implementation, and saying it *wrongly* is
     /// unusually expensive: the reader used to be a fabricated object id, and
     /// a fabricated success made every read look like it had returned more
-    /// entries, so Checkpoint enumerated saves forever — 1434 rounds of
+    /// entries, so Checkpoint enumerated saves forever, 1434 rounds of
     /// mounting and scanning a save named after an all-zero title id, with no
     /// end in sight.
     pub(super) fn fs_save_data_info_reader_request(
@@ -368,8 +368,8 @@ impl Cpu {
         }
     }
 
-    /// `IDeviceOperator`: what a console's two storage devices — the SD card
-    /// and the internal eMMC — report about themselves, and whether a game
+    /// `IDeviceOperator`: what a console's two storage devices, the SD card
+    /// and the internal eMMC, report about themselves, and whether a game
     /// card is in the slot.
     ///
     /// Most of it is diagnostic, collected into a crash report rather than
@@ -394,7 +394,7 @@ impl Cpu {
             Some(101) => self.write_ipc_response(tls, 0, &[], &MMC_SPEED_MODE.to_le_bytes(), &[]),
             // 2 = GetSdCardCid, 100 = GetMmcCid: a card identification
             // register into an out buffer, sized by an input s64. No physical
-            // card stands behind either, so both are zero — still worth
+            // card stands behind either, so both are zero, still worth
             // writing, because a caller reads the full width back whether the
             // server filled it or not.
             Some(2) | Some(100) => {
@@ -457,7 +457,7 @@ impl Cpu {
             }
             // The rest of the game-card commands, and the erase and
             // direct-write ones beside them. A caller reaches those only once
-            // 200 has said a card is there, which it never does — so they are
+            // 200 has said a card is there, which it never does, so they are
             // refused rather than answered with a fabricated card.
             _ => self.unimplemented_command(tls, "fsp-srv-device-operator", cmd_id),
         }
@@ -467,8 +467,8 @@ impl Cpu {
     /// card arrives in a slot or leaves one.
     ///
     /// It goes out **dark** and stays dark. A waiter here is waiting for a
-    /// *change* — the SD card is already mounted at boot and never leaves, and
-    /// there is no game card slot to change at all — so this is an event that
+    /// *change*: the SD card is already mounted at boot and never leaves, and
+    /// there is no game card slot to change at all, so this is an event that
     /// genuinely never fires, rather than one that should have. The same
     /// reasoning `ns` applies to its own media events.
     ///
@@ -543,7 +543,7 @@ impl Cpu {
 
     /// `IStorage`, backed by the current process's decrypted RomFS
     /// ([`Cpu::set_romfs`]). Cmd 0 = Read(u64 offset, u64 size), cmd 4 =
-    /// GetSize — the same shape as `IFile`, but offset-addressed rather than
+    /// GetSize, the same shape as `IFile`, but offset-addressed rather than
     /// path-addressed since there's exactly one of these per process.
     pub(super) fn fs_storage_request(
         &mut self,
@@ -566,7 +566,7 @@ impl Cpu {
                 // **not** `IFile::Read`'s: a file read leads with a `u32
                 // option` and pads to 8, putting its offset at +8 and its size
                 // at +0x10. This used to read those two fields, so every
-                // storage read came back as "0 bytes at offset 0x50" — the
+                // storage read came back as "0 bytes at offset 0x50", the
                 // guest mounted its RomFS, parsed an empty header, and
                 // `nn::fs::OpenDirectory("rom:/Data")` found nothing.
                 let offset = self.mem.read_u64(data)?;
@@ -580,7 +580,7 @@ impl Cpu {
                 // A storage read is all or nothing: real `fs` checks the range
                 // against the storage's size and refuses one that runs past
                 // it. Clamping instead reports success over a buffer the
-                // guest's own bytes are still in, and it acts on them — which
+                // guest's own bytes are still in, and it acts on them, which
                 // is how a RomFS layout this emulator did not implement
                 // surfaced as `MountRom` calling the image corrupt, a hundred
                 // million instructions from the section that caused it.
@@ -675,7 +675,7 @@ impl Cpu {
             // Creating a file that already exists is an **error**, not a
             // truncation: `fsdev` opens a file for writing by calling this,
             // expecting "already exists", and then opening it. Answering with
-            // a fresh empty file instead emptied the file on every reopen —
+            // a fresh empty file instead emptied the file on every reopen,
             // which is what made a config written one moment read back as
             // zero bytes the next.
             Some(0) => {
@@ -732,7 +732,7 @@ impl Cpu {
             }
             // GetFileTimeStampRaw -> FsTimeStampRaw { created, modified,
             // accessed, is_valid }. Nothing here records a file's times, and
-            // `is_valid` is the field that says so — the point of answering
+            // `is_valid` is the field that says so: the point of answering
             // rather than falling through to the bare success below, which
             // left the caller reading three timestamps off its own stack.
             Some(14) => {
@@ -827,7 +827,7 @@ impl Cpu {
             }
             // Write(u32 option, s64 offset, u64 size) with the bytes in a
             // send buffer. `option`'s bit 0 is Flush, which costs nothing
-            // here — the write has already reached the only copy there is.
+            // here: the write has already reached the only copy there is.
             Some(1) => {
                 let data = self.ipc_request_data(tls);
                 let offset = self.mem.read_u64(data.wrapping_add(8))?;
@@ -852,7 +852,7 @@ impl Cpu {
             }
             // Flush: there is no write-behind cache to flush.
             Some(2) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // SetSize(s64 size) — how `fsdev` truncates a file it opened with
+            // SetSize(s64 size), how `fsdev` truncates a file it opened with
             // `O_TRUNC`, so it has to actually shorten it.
             Some(3) => {
                 let size = self.mem.read_u64(self.ipc_request_data(tls))?;
@@ -936,14 +936,14 @@ mod tests {
         cpu.fs_file_request(TLS, Some(1), key).unwrap();
         assert_eq!(cpu.fs.size("/switch/cfg.json"), Some(9));
 
-        // SetSize truncates — how `fsdev` honours `O_TRUNC`.
+        // SetSize truncates, how `fsdev` honours `O_TRUNC`.
         write_request(&mut cpu, 3, &3u64.to_le_bytes());
         cpu.fs_file_request(TLS, Some(3), key).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.fs.file("/switch/cfg.json"), Some(&br#"{"v"#[..]));
 
         // A handle whose file is gone reports it rather than reporting
-        // success — the distinction the catch-all could not make.
+        // success: the distinction the catch-all could not make.
         cpu.fs.remove("/switch/cfg.json");
         write_request(&mut cpu, 3, &0u64.to_le_bytes());
         cpu.fs_file_request(TLS, Some(3), key).unwrap();
@@ -966,7 +966,7 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "created");
         assert_eq!(cpu.fs.file("/switch/cfg.json"), Some(&[0u8; 4][..]));
 
-        // Creating it again fails and leaves the contents alone — `fsdev`
+        // Creating it again fails and leaves the contents alone, `fsdev`
         // opens an existing file this way, and truncating here is what made a
         // config read back empty right after it was written.
         cpu.fs.write("/switch/cfg.json", 0, b"{}!!").unwrap();
@@ -1022,7 +1022,7 @@ mod tests {
         let reader = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
         assert_eq!(cpu.service_name(reader), Some("fsp-srv-save-info-reader"));
 
-        // Zero entries is the whole termination condition — a reader stops
+        // Zero entries is the whole termination condition, a reader stops
         // when a read reports nothing, and there is no other end signal. A
         // fabricated success is an endless scan: Checkpoint ran 1434 rounds of
         // it before this existed.
@@ -1126,7 +1126,7 @@ mod tests {
     #[test]
     fn the_device_operator_reports_the_card_this_console_has_and_the_one_it_has_not() {
         // OpenDeviceOperator hands back an object, and the catch-all answered
-        // it with a bare success — `nnSdk` reads an out-object on a plain
+        // it with a bare success: `nnSdk` reads an out-object on a plain
         // session as a move handle, parses the missing one as 0, and still
         // reports success, so the first call lands on a null proxy.
         let mut cpu = request(false, 400, &[]);
@@ -1164,7 +1164,7 @@ mod tests {
     #[test]
     fn a_device_operator_register_is_written_over_whatever_the_buffer_held() {
         // GetSdCardCid reports nothing but a Result, so a caller reads the
-        // whole 0x10 back whether the server filled it or not — a success that
+        // whole 0x10 back whether the server filled it or not, a success that
         // writes nothing hands it its own stack as a card serial.
         const BUFFER: u32 = 0x4000;
         let mut cpu = request_with_recv_buffer(2, &0x10u64.to_le_bytes(), BUFFER, 0x10);
@@ -1247,7 +1247,7 @@ mod tests {
         assert_eq!(cpu.event_signaled(game_card_event), Some(false));
 
         // Asking twice hands back the event already being waited on rather
-        // than a second one — a poller would otherwise leak a handle per call.
+        // than a second one: a poller would otherwise leak a handle per call.
         write_request(&mut cpu, 0, &[]);
         cpu.fs_detection_notifier_request(TLS, sd, Some(0)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64, sd_event);
@@ -1261,7 +1261,7 @@ mod tests {
         const OUT_OF_RANGE: u32 = 2 | (3005 << 9);
         let romfs: Vec<u8> = (0..=0xFFu8).collect();
 
-        // `IStorage::Read(s64 offset, u64 size)` — no leading option word.
+        // `IStorage::Read(s64 offset, u64 size)`, no leading option word.
         let read = |offset: u64, size: u64| {
             let mut payload = [0u8; 0x10];
             payload[..8].copy_from_slice(&offset.to_le_bytes());
@@ -1283,7 +1283,7 @@ mod tests {
         assert_eq!(cpu.read_bytes(BUFFER, 0x100), romfs);
 
         // One byte past it is not. The buffer keeps whatever the caller left
-        // there — the point of refusing is that it never reads it as data.
+        // there: the point of refusing is that it never reads it as data.
         for offset in 0..0x100 {
             cpu.mem.write_u8(BUFFER + offset, 0xAA).unwrap();
         }

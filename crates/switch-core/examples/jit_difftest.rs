@@ -1,8 +1,8 @@
 //! The block translator against the interpreter, on real homebrew:
 //! `jit_difftest <nro> [instructions] [font.ttf]`.
 //!
-//! Boots the same program twice — once with [`Cpu::set_jit_enabled`] off, once
-//! with it on — runs the same number of instructions through both, and reports
+//! Boots the same program twice, once with [`Cpu::set_jit_enabled`] off, once
+//! with it on: runs the same number of instructions through both, and reports
 //! every way the two machines ended up disagreeing.
 //!
 //! This is a correctness tool, not a benchmark, and it used to be both. The
@@ -17,7 +17,7 @@
 //! What survives here is the part that was never about speed. The translator
 //! resolves at translation time what the interpreter re-derives per execution,
 //! so the two have to agree on every register, the flags, memory, the console
-//! and the framebuffer — and if they ever do not, the translated run is wrong
+//! and the framebuffer, and if they ever do not, the translated run is wrong
 //! however fast it was. The interpreter is the reference.
 //!
 //! The work counters below say the same thing the timing tried to, without a
@@ -41,8 +41,8 @@ fn boot(nro: &[u8], font: &Option<Vec<u8>>, jit: bool) -> Cpu {
 
 /// Run up to `want` instructions, in slices, and report how many retired.
 ///
-/// Sliced because that is how the frontend drives a session — a frame's worth
-/// per call — and re-entering blocks across those calls is part of what is
+/// Sliced because that is how the frontend drives a session, a frame's worth
+/// per call, and re-entering blocks across those calls is part of what is
 /// being checked.
 fn drive(cpu: &mut Cpu, want: u64) -> u64 {
     const SLICE: u64 = 1_000_000;
@@ -154,7 +154,7 @@ fn main() {
     );
     // The share of the run the translator did not translate. Every one of
     // these re-derived the instruction's group, form and fields on the way
-    // past, which is the work the translator exists to do once — so this is
+    // past, which is the work the translator exists to do once, so this is
     // where the next block of speed is, and it reads the same under any
     // compiler on any target.
     println!(

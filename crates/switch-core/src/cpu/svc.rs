@@ -57,8 +57,8 @@ impl Cpu {
         // The counterpart of `TRACE_IPC` for everything that is not a service
         // request. `svcSendSyncRequest` (0x21) is excluded because `TRACE_IPC`
         // already decodes it, and the two hot ones a running guest issues
-        // thousands of times a frame — `svcWaitSynchronization` (0x18) and
-        // `svcSleepThread` (0x0b) — would bury everything else.
+        // thousands of times a frame, `svcWaitSynchronization` (0x18) and
+        // `svcSleepThread` (0x0b): would bury everything else.
         if !matches!(imm, 0x21 | 0x18 | 0x0b) && crate::trace::enabled(crate::trace::Trace::Svc) {
             crate::traceln!(
                 "[svc] pc={:#x} #{:#04x} x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
@@ -79,8 +79,8 @@ impl Cpu {
                 // than granted quietly. This used to say yes to any size at
                 // all, and since `nn::init` asks for the whole of what
                 // `svcGetInfo` calls total memory, the heap it was handed ran
-                // 240 MiB past the end of its own region — over the
-                // framebuffer and into the alias region — with nothing to say
+                // 240 MiB past the end of its own region, over the
+                // framebuffer and into the alias region: with nothing to say
                 // so. Nothing had claimed those addresses yet, which is the
                 // only reason it worked.
                 /// `KERNELRESULT(OutOfMemory)`, which is what a console
@@ -126,8 +126,8 @@ impl Cpu {
                 // MapPhysicalMemory(address, size): grow the process's heap by
                 // backing `[address, address + size)` with physical pages. An
                 // application built for the 39-bit address space grows its heap
-                // this way rather than through `svcSetHeapSize` — it picks the
-                // address itself out of its ASLR region — which is why a retail
+                // this way rather than through `svcSetHeapSize`: it picks the
+                // address itself out of its ASLR region, which is why a retail
                 // title never issues syscall 0x01 at all.
                 //
                 // The pages are left to materialise on first write. `bootstrap`
@@ -151,7 +151,7 @@ impl Cpu {
             }
             0x2D => {
                 // UnmapPhysicalMemory(address, size): the counterpart, and the
-                // one direction that has to do real work — the pages go back so
+                // one direction that has to do real work: the pages go back so
                 // the RAM cap sees them freed.
                 let addr = self.read_zr(0) as u32;
                 let size = self.read_zr(1) as usize;
@@ -179,7 +179,7 @@ impl Cpu {
                     // And an empty touch sample, for the same reason the pad
                     // is published: `hid` keeps every LIFO in a valid state
                     // whether or not anything is producing input, and a header
-                    // left at zero is not "no touches" — it is a ring with no
+                    // left at zero is not "no touches": it is a ring with no
                     // capacity. `nn::hid`'s reader takes a count out of it and
                     // the Home Menu walked a sixteen-entry array several
                     // hundred million entries long, soft-mapping a page every
@@ -232,9 +232,9 @@ impl Cpu {
                 // the candidate's first words as a module header: word 1 is
                 // the offset to its `MOD0` signature. Reporting a blanket
                 // RWX made every writable page look executable, and the
-                // first such region — `rtld`'s own `.rodata`, whose leading
+                // first such region, `rtld`'s own `.rodata`, whose leading
                 // note happens to hold 0x1c where a module header keeps that
-                // offset, and which really does have `MOD0` 0x1c bytes in —
+                // offset, and which really does have `MOD0` 0x1c bytes in,
                 // passed the check. `rtld` then relocated itself a second
                 // time against a base 0x3000 past its real one and walked
                 // off the end of the address space.
@@ -243,7 +243,7 @@ impl Cpu {
                 // a module's static and mutable halves are two states, and
                 // `nn::ro` reads the boundary between them as the module's
                 // shape (`Memory::mark_module`). Mapped memory that belongs
-                // to no module — heap, stacks, TLS — still answers
+                // to no module (heap, stacks, TLS) still answers
                 // `CodeStatic`, which is a lie Horizon would spell `Normal`,
                 // `Stack` or `ThreadLocal`; nothing has been seen to read it
                 // yet, and every walk that does read a type filters on the
@@ -251,7 +251,7 @@ impl Cpu {
                 let out = self.read_zr(0) as u32;
                 let addr = self.read_zr(2) as u32;
                 // `Memory` finds the run, because it is the only thing that
-                // can do it without walking every page — see
+                // can do it without walking every page: see
                 // [`crate::mem::Memory::state_run`].
                 let run = self.mem.state_run(addr, GUEST_SPACE_END);
                 let (base, end, mapped, text) = (run.start, run.end, run.mapped, run.readonly);
@@ -355,8 +355,8 @@ impl Cpu {
             0x0B => {
                 // SleepThread(nanoseconds = X0): park the caller until that
                 // long has passed. Horizon spends the negative values on yield
-                // modes instead — 0 yields, -1 yields with load balancing, -2
-                // yields to any thread — and none of them is a duration, so
+                // modes instead, 0 yields, -1 yields with load balancing, -2
+                // yields to any thread, and none of them is a duration, so
                 // they hand the CPU on and come straight back.
                 //
                 // The duration used to be dropped and *every* sleep answered
@@ -432,7 +432,7 @@ impl Cpu {
                 // timeout = X3): the address arbiter's wait side. `nn::os`
                 // builds its semaphores, barriers and newer condition
                 // variables on it, so a retail title reaches it long before it
-                // draws — Tomodachi Life stopped here on its way to the first
+                // draws, Tomodachi Life stopped here on its way to the first
                 // frame.
                 //
                 // The arbitration type says which predicate has to hold for
@@ -458,7 +458,7 @@ impl Cpu {
                 // blocked thread resumes *after* this syscall and reads
                 // whatever was left there. A timed-out wait therefore also
                 // reports success, and `nn::os` answers that by re-checking
-                // its predicate — the same bargain the condition variables
+                // its predicate, the same bargain the condition variables
                 // above make.
                 let outcome = self.arbitrate_address(addr, arb_type, value, timeout);
                 self.write_zr(
@@ -514,7 +514,7 @@ impl Cpu {
             0x0C | 0x0D | 0x0E | 0x0F | 0x16 | 0x17 | 0x28 | 0x5F => {
                 // get/set thread priority + core mask / CloseHandle /
                 // CancelSynchronization / ReturnFromException /
-                // FlushProcessDataCache — the last of which is real work on a
+                // FlushProcessDataCache: the last of which is real work on a
                 // console and nothing here, where the guest's stores are
                 // already visible to the GPU as soon as they are made.
                 self.write_zr(0, RESULT_OK);
@@ -567,13 +567,13 @@ impl Cpu {
                 // WaitSynchronization(out_index, handles, num_handles, timeout):
                 // report the wait as immediately satisfied. X1 is the *index*
                 // of the handle that signaled, which the libnx wrapper stores
-                // to the caller's out pointer — callers index their own waiter
+                // to the caller's out pointer, callers index their own waiter
                 // array by it, so garbage here sends them to the wrong object.
                 // With every object pretended signaled, the first one is the
                 // one that signaled: 0. It used to answer 1 unconditionally,
                 // which is out of range for the single-handle waits `nnSdk`'s
                 // system worker does (`nn::os::detail::MultiWaitImpl::WaitAny`)
-                // — it then read a `MultiWaitHolderType` past the end of its
+                //: it then read a `MultiWaitHolderType` past the end of its
                 // list and called its null handler pointer.
                 // KERNELRESULT(TimedOut), as libnx spells it.
                 const RESULT_TIMED_OUT: u64 = 0xEA01;
@@ -651,7 +651,7 @@ impl Cpu {
                 // presents. `nn::os::detail::MultiWaitImplByHorizon::
                 // WaitSynchronizationN` accepts exactly Success, Timeout and
                 // Cancelled and asserts on anything else, and answers a
-                // timeout by looping — so this degrades to the spin the old
+                // timeout by looping, so this degrades to the spin the old
                 // always-signalled behaviour already had, without lying about
                 // what fired.
                 //
@@ -665,7 +665,7 @@ impl Cpu {
                 // `nn::os::detail::MultiWaitImpl::WaitAny` answers a timeout
                 // by returning a **null holder** that
                 // `nn::os::RegisterSystemWorkerHandler` then calls without
-                // checking — so telling that thread "timed out" jumps to 0,
+                // checking, so telling that thread "timed out" jumps to 0,
                 // while letting it sleep is both correct and what a real
                 // console does.
                 //
@@ -692,7 +692,7 @@ impl Cpu {
                 // go back a word.
                 //
                 // "A Short Hike" faults at `pc=0` one instruction after this
-                // wait. It always did — the thread that makes it simply never
+                // wait. It always did: the thread that makes it simply never
                 // got scheduled until threads started being preempted.
                 if handles.is_empty() && self.has_other_runnable() {
                     self.pc = self.pc.wrapping_sub(4);
@@ -754,7 +754,7 @@ impl Cpu {
                 // display tick wakes this thread.
                 //
                 // Answering it as *satisfied* is the alternative, and it does
-                // not merely lie about timing — `svcWaitSynchronization`
+                // not merely lie about timing, `svcWaitSynchronization`
                 // reports **which** handle fired, and the caller runs that
                 // object's handler. Naming index 0 unconditionally sent the
                 // Home Menu to `IHomeMenuFunctions::PopFromGeneralChannel`
@@ -765,7 +765,7 @@ impl Cpu {
                 // Re-asking on every scheduler slice is the other alternative,
                 // and it is what this used to do. Only [`Cpu::signal_event`]
                 // can change the answer and it wakes the park, so the extra
-                // laps learn nothing — and a wait nothing will ever satisfy
+                // laps learn nothing, and a wait nothing will ever satisfy
                 // (`am:gpu-error` is one every `nnSdk` title makes) then costs
                 // the whole machine rather than nothing at all.
                 self.pc = self.pc.wrapping_sub(4);
@@ -779,7 +779,7 @@ impl Cpu {
                 // The scale is not arbitrary, which is what it used to be
                 // (`cycles * 1000`). One emulated instruction stands for one
                 // cycle of the 1.02 GHz CPU `apm` reports, so a tick is worth
-                // 1_020_000_000 / 19_200_000 of them — about 53. Counting
+                // 1_020_000_000 / 19_200_000 of them, about 53. Counting
                 // 1000 ticks per instruction instead ran the guest's clock
                 // **53,000x fast**: a frame of a hundred thousand
                 // instructions read back as five seconds of wall time, and
@@ -827,7 +827,7 @@ impl Cpu {
                         cmd_id
                     );
                     // The raw message, for when the fields above do not add
-                    // up — the bytes are the only ground truth left.
+                    // up: the bytes are the only ground truth left.
                     let words: Vec<String> = (0..8)
                         .map(|i| format!("{:08x}", self.mem.read_u32(tls + i * 4).unwrap_or(0)))
                         .collect();
@@ -836,7 +836,7 @@ impl Cpu {
                 // A Close request (message type 2) carries no command id at
                 // all: it tears the session down. Dispatching it on whatever
                 // command id is still sitting in the TLS buffer runs a real
-                // command instead — closing an `fsp-srv` session was landing on
+                // command instead: closing an `fsp-srv` session was landing on
                 // `CreateFile` and adding an empty file to the SD card.
                 if self.ipc_message_type(tls) == 2 {
                     self.forget_handle(handle);
@@ -853,7 +853,7 @@ impl Cpu {
                 // success and no handle at all. `nnSdk` clones `fsp-srv`
                 // before it mounts anything, so it was left talking to handle
                 // 0 and `nn::fs::MountRom("rom", ...)` failed without ever
-                // issuing a filesystem command — which surfaced much later as
+                // issuing a filesystem command, which surfaced much later as
                 // `nn::fs::OpenDirectory("rom:/Data")` reporting that no such
                 // mount name was registered.
                 if self.ipc_is_control_request(tls) && matches!(cmd_id, Some(2) | Some(4)) {
@@ -878,7 +878,7 @@ impl Cpu {
                 // input the session will accept through its pointer buffer.
                 // Every service that answered this itself answered 0, and
                 // `nnSdk` measures an explicit `HipcPointer` argument against
-                // it — a 208-byte one against 0 is the `sf` 11-141 abort.
+                // it: a 208-byte one against 0 is the `sf` 11-141 abort.
                 if self.ipc_is_control_request(tls) && cmd_id == Some(3) {
                     let size = super::ipc::POINTER_BUFFER_SIZE.to_le_bytes();
                     self.write_ipc_response(tls, 0, &[], &size, &[])?;
@@ -889,7 +889,7 @@ impl Cpu {
                 // command: `CmifDomainRequestType_Close` sits where
                 // SendMessage's type byte would, and there is no command id
                 // behind it at all. Dispatching one to a service reads
-                // whatever follows as command 0 — so the Home Menu's
+                // whatever follows as command 0, so the Home Menu's
                 // `IStorage` close ran as a **Read**, with the reply's own
                 // "SFCO" magic for an offset, and the object stayed open.
                 //
@@ -962,7 +962,7 @@ impl Cpu {
                             self.fs_detection_notifier_request(tls, handle, cmd_id)?
                         }
                         "vi:m" | "vi:m:" => self.vi_request(tls, handle, cmd_id)?,
-                        // fatal:u — the guest reporting that it is giving up.
+                        // fatal:u, the guest reporting that it is giving up.
                         // The Result it carries is the only statement of *why*
                         // an applet stopped that the applet ever makes.
                         "fatal:u" | "fatal:p" => self.fatal_request(tls, cmd_id)?,
@@ -1016,7 +1016,7 @@ impl Cpu {
                         // The same `am` sub-interfaces reached over their own
                         // session handle, which is how a caller that never
                         // converts the root session to a domain (`nnSdk`) uses
-                        // them — the fsp-srv-fs / time:system-clock split
+                        // them, the fsp-srv-fs / time:system-clock split
                         // above, again.
                         "appletOE"
                         | "appletAE"
@@ -1047,7 +1047,7 @@ impl Cpu {
                         // nifm at all three privilege levels: `nifm:u` for an
                         // application, `nifm:s` for a system title, `nifm:a`
                         // for the administrator. The same interface behind
-                        // each — and only the first was routed here, so a
+                        // each, and only the first was routed here, so a
                         // system title's network calls all went to the generic
                         // fallback.
                         "nifm:u" | "nifm:s" | "nifm:a" => {
@@ -1128,7 +1128,7 @@ impl Cpu {
                         // aoc, the add-on content a title was sold. It is
                         // its own sysmodule interface rather than one of ns's,
                         // and having no dedicated stub meant `CountAddOnContent`
-                        // came back as a fabricated object id — a *count* a
+                        // came back as a fabricated object id, a *count* a
                         // title then went looking for content archives for.
                         "aoc:u" => self.aoc_request(tls, handle, cmd_id)?,
                         // ldr:ro, the dynamic module loader a title reaches
@@ -1218,7 +1218,7 @@ impl Cpu {
                         // volume buttons and the sound page of settings.
                         "audctl" => self.audctl_request(tls, handle, cmd_id)?,
                         // nfc:sys and the ISystem it hands out. There is no
-                        // reader attached to this console — see `nfc_request`.
+                        // reader attached to this console. See `nfc_request`.
                         "nfc:sys" | "nfc:system" => self.nfc_request(tls, handle, cmd_id)?,
                         // btm:sys, the Bluetooth manager, and the
                         // IBtmSystemCore every one of its commands goes
@@ -1305,7 +1305,7 @@ impl Cpu {
                             // Known service, no dedicated stub: answer with a
                             // sub-session and an object id, so a caller that
                             // expects an out-object gets one it can call
-                            // rather than a null it cannot — see
+                            // rather than a null it cannot: see
                             // `reply_with_fabricated_object`.
                             //
                             // This used to special-case any service whose name
@@ -1316,7 +1316,7 @@ impl Cpu {
                             // ids. `appletOE`/`appletAE` have had a real
                             // dispatch of their own for a while now, so the
                             // guess only ever applied to some other applet
-                            // service that would have been answered wrong —
+                            // service that would have been answered wrong,
                             // the same way `pl:u`'s GetLoadState once got the
                             // applet message back and left NX-Shell polling it
                             // 190k times.
@@ -1425,7 +1425,7 @@ impl Cpu {
                     self.yield_thread();
                 }
                 // And the same for a service that asked to be parked until a
-                // deadline rather than merely descheduled — `vi`'s present,
+                // deadline rather than merely descheduled, `vi`'s present,
                 // which paces a title to the refresh rate. After X0 for the
                 // reason above: `sleep_until` reschedules, and a write past it
                 // lands on whichever thread runs next.
@@ -1436,7 +1436,7 @@ impl Cpu {
             }
             0x24 => {
                 // GetProcessId(out_process_id, process_handle): Result in
-                // X0, id in X1 — the caller's wrapper stores X1 through the
+                // X0, id in X1, the caller's wrapper stores X1 through the
                 // out pointer. Confirmed wrong by tracing a real title's
                 // `sdk` init through Binary Ninja: it treats any non-zero X0
                 // as failure, and this used to hand back X0=1 (looking like
@@ -1457,8 +1457,8 @@ impl Cpu {
             0x26 => {
                 // Break(reason, arg, size): fatal debugger trap. Nintendo's
                 // own abort path (nn::diag::detail::AbortImpl) reaches this
-                // with real diagnostic info attached — a reason code and an
-                // arg/size pair the caller chose to hand the debugger — and
+                // with real diagnostic info attached, a reason code and an
+                // arg/size pair the caller chose to hand the debugger, and
                 // a plain "[svcBreak]" marker was throwing all of it away.
                 // Decode the reason, dereference the arg pointer when its
                 // size is a plain integer width, and include a
@@ -1501,7 +1501,7 @@ impl Cpu {
                 Ok(())
             }
             0x27 => {
-                // OutputDebugString(ptr, size) — log to the console.
+                // OutputDebugString(ptr, size), log to the console.
                 let ptr = self.read_zr(0) as u32;
                 let len = (self.read_zr(1) as i64).clamp(0, 4096) as u32;
                 if ptr != 0 && len > 0 {
@@ -1526,8 +1526,8 @@ impl Cpu {
                     // CoreMask / PriorityMask describe what the process is
                     // allowed to schedule on, and they come from the NPDM's
                     // `ThreadInfo` kernel capability. "A Short Hike"'s
-                    // `main.npdm` carries the ordinary application values —
-                    // cores 0..2 and priorities 28..59 — which is what every
+                    // `main.npdm` carries the ordinary application values,
+                    // cores 0..2 and priorities 28..59, which is what every
                     // retail application gets. Reporting 0 (the old `_ => 0`
                     // default) makes `nn::os::GetThreadAvailableCoreMask`
                     // hand `nn::os::RegisterSystemWorkerHandler` an empty
@@ -1537,7 +1537,7 @@ impl Cpu {
                     // Alias/Heap region. Real Horizon puts these far above
                     // the 32-bit range (alias at 0x10_0000_0000, heap at
                     // 0x2_0000_0000) and this used to report those figures
-                    // literally — but the emulator addresses guest memory
+                    // literally, but the emulator addresses guest memory
                     // with a `u32`, so `nnSdk` took the alias address at its
                     // word and asked `svcMapPhysicalMemory` to back
                     // 0x10_0000_0000, which is not a representable address
@@ -1555,13 +1555,13 @@ impl Cpu {
                     // canaries/ASLR cookies. Real `sdk` startup (confirmed by
                     // tracing "A Short Hike"'s actual `rtld`+`sdk` boot)
                     // fetches two of these words and aborts
-                    // (`svcBreak`/Panic) if what comes back looks unusable —
+                    // (`svcBreak`/Panic) if what comes back looks unusable,
                     // an all-zero entropy pool reads as "broken RNG", not
                     // "no RNG", to security-conscious SDK init. There's no
                     // real entropy source to draw on here, so this returns
                     // *some* non-zero, per-subvalue-varying bits (SplitMix64
                     // keyed by the subvalue) rather than a cryptographically
-                    // meaningful seed — it only needs to satisfy that "not
+                    // meaningful seed: it only needs to satisfy that "not
                     // obviously broken" check, not actually secure anything.
                     11 => {
                         let sub = self.svc_arg64(3, 0, 3).wrapping_add(1);
@@ -1591,7 +1591,7 @@ impl Cpu {
                     // allocator behind it. Just Dance 2023 does, from its own
                     // `nninitStartup`.
                     //
-                    // Reporting the real figure is not free — see
+                    // Reporting the real figure is not free: see
                     // [`GUEST_ALIAS_REGION_SIZE`] and [`VAMM_ARENA_SIZE`] for
                     // the address space the manager takes and the reported
                     // total memory that pays for it.
@@ -1599,13 +1599,13 @@ impl Cpu {
                     17 => 0,                    // SystemResourceSizeUsed
                     // Total/UsedNonSystemMemorySize: the same figures as
                     // 6/7 with the system resource taken out, and what
-                    // `nnSdk` actually sizes the application heap from —
+                    // `nnSdk` actually sizes the application heap from,
                     // `nn::init`'s startup asks for
                     // `TotalNonSystem - UsedNonSystem` and hands the result
                     // straight to `nn::mem::StandardAllocator::Initialize`.
                     // Falling into the `_ => 0` default made that
                     // subtraction 0, and the allocator asserts on any span
-                    // below its 16 KiB minimum — which is where the retail
+                    // below its 16 KiB minimum, which is where the retail
                     // boot stopped once `nn::oe::Initialize` was working.
                     21 => total_memory_size - system_resource_size,
                     22 => 0,

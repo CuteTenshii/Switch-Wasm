@@ -3,7 +3,7 @@
 //! A sparse section stores only the ranges that hold anything. A
 //! [`crate::bucket`] tree says which range came from where: storage 0 is the
 //! bytes that were kept, storage 1 is a hole. What the section is *declared*
-//! to be — the size in the NCA's section table — is the size after the holes
+//! to be (the size in the NCA's section table) is the size after the holes
 //! are put back.
 //!
 //! `SparseInfo` (FS header 0x148) carries the table, then two fields nothing
@@ -44,7 +44,7 @@ struct Entry {
 
 impl bucket::Entry for Entry {
     const NODE_SIZE: u64 = 0x4000;
-    /// `s64 virt, s64 phys, s32 storage index` — 0x14, not padded to 0x18.
+    /// `s64 virt, s64 phys, s32 storage index`, 0x14, not padded to 0x18.
     const SIZE: u64 = 0x14;
 
     fn parse(raw: &[u8]) -> Entry {
@@ -73,7 +73,7 @@ impl SparseTable {
     ///
     /// `body` is the NCA at [`FsHeader::sparse_physical_offset`], `table` the
     /// `SparseInfo` bucket header, and `meta` the already-decrypted table
-    /// bytes — the caller decrypts them because they use a counter of their
+    /// bytes: the caller decrypts them because they use a counter of their
     /// own ([`crate::nca::FsHeader::sparse_counter`]) that nothing else in
     /// the section does.
     pub fn parse(meta: &[u8], table: BktrTable, body_len: u64) -> Result<SparseTable, Error> {
@@ -114,7 +114,7 @@ impl SparseTable {
     }
 
     /// Read `out` bytes of the reassembled section at `offset`, still
-    /// encrypted — the caller decrypts, because the counter is numbered from
+    /// encrypted: the caller decrypts, because the counter is numbered from
     /// this offset and not from where the bytes were stored.
     ///
     /// `len` is the section's declared size, which is what the last entry
@@ -275,7 +275,7 @@ mod tests {
         }
     }
 
-    /// The section is longer than what was stored — that is the whole point —
+    /// The section is longer than what was stored: that is the whole point,
     /// so a read is bounded by the declared size, not by the body.
     #[test]
     fn the_section_is_longer_than_the_body_that_stores_it() {

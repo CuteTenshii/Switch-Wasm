@@ -63,7 +63,7 @@ impl EngineCompute {
         self.regs.iova(SET_TEX_SAMPLER_POOL)
     }
 
-    /// Which constant bank a `texs`'s immediate indexes for its handle —
+    /// Which constant bank a `texs`'s immediate indexes for its handle,
     /// `SetBindlessTexture`, the compute class's `TexCbIndex`.
     pub fn tex_cb_index(&self) -> u8 {
         self.regs.field(SET_BINDLESS_TEXTURE, 0, 4) as u8
@@ -132,7 +132,7 @@ mod tests {
         );
         assert_eq!(engine.dispatches, 1);
         // The QMD is at an address nothing has mapped, so the launch is
-        // refused — and counted, rather than taking the pushbuffer with it.
+        // refused, and counted, rather than taking the pushbuffer with it.
         assert_eq!(stats.dispatches_skipped, 1);
     }
 

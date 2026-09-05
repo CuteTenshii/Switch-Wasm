@@ -2,14 +2,14 @@
 //!
 //! Two things make this the most intricate of the family. Its endpoints are
 //! half-floats reached through a quantise/delta/unquantise chain rather than
-//! stored directly, and its header fields are *scattered* — a single endpoint
+//! stored directly, and its header fields are *scattered*, a single endpoint
 //! channel is assembled from up to six runs of bits that are nowhere near each
 //! other in the block, in an order that differs per mode.
 //!
 //! [`MODES`] is that scatter, one entry per run: which endpoint field the run
 //! belongs to, which bit of it the run starts at, how long it is, and whether
 //! it arrives most-significant-bit first. Writing it as data rather than as
-//! fourteen hand-written bit-twiddling routines is what makes it checkable —
+//! fourteen hand-written bit-twiddling routines is what makes it checkable,
 //! every mode has to account for exactly 128 bits, and the test below adds
 //! them up.
 //!

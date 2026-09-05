@@ -11,7 +11,7 @@ use crate::trace::Level;
 use crate::Result;
 
 impl Cpu {
-    /// `fatal:u` — a process reporting that it cannot continue.
+    /// `fatal:u`, a process reporting that it cannot continue.
     ///
     /// Every one of its commands carries the `Result` that caused it, and that
     /// value is the only account a guest ever gives of why it stopped.
@@ -39,7 +39,7 @@ impl Cpu {
     /// `lm`: the log manager, which is where a title's own diagnostic output
     /// goes. `nnSdk`'s `NN_LOG` and everything built on it ends up here rather
     /// than at `svcOutputDebugString`, so without this a retail title's
-    /// logging is simply thrown away — which is exactly the information that
+    /// logging is simply thrown away, which is exactly the information that
     /// makes the next failure legible.
     ///
     /// `ILogService::OpenLogger` hands back an `ILogger`, whose `Log` command

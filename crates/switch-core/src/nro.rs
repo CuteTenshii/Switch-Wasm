@@ -159,7 +159,7 @@ pub fn setup_env_block(mem: &mut Memory) -> u32 {
     let _ = mem.write_u64(a + 56, 0);
     let _ = mem.write_u64(a + 64, (a + ARGV_STRING_OFFSET) as u64);
     // NextLoadPath (Key 2): { path buffer, argv buffer }. A homebrew menu is
-    // expected to write what it wants launched next into these and exit — and
+    // expected to write what it wants launched next into these and exit, and
     // hbmenu's `launchInit()` fails outright when the loader doesn't offer them.
     let _ = mem.write_u32(a + 72, ENTRY_NEXT_LOAD_PATH);
     let _ = mem.write_u32(a + 76, 0);
@@ -167,7 +167,6 @@ pub fn setup_env_block(mem: &mut Memory) -> u32 {
     let _ = mem.write_u64(a + 88, u64::from(NEXT_LOAD_ARGV_ADDR));
     let _ = mem.map_zero(NEXT_LOAD_PATH_ADDR, NEXT_LOAD_BUFFER_SIZE);
     let _ = mem.map_zero(NEXT_LOAD_ARGV_ADDR, NEXT_LOAD_BUFFER_SIZE);
-    // EndOfList
     let _ = mem.write_u32(a + 96, ENTRY_END_OF_LIST);
     let _ = mem.write_u32(a + 100, 0);
     let _ = mem.write_u64(a + 104, 0);
@@ -661,7 +660,7 @@ pub fn init_array_entries(data: &[u8]) -> Vec<u32> {
 /// load base added, turning stored file offsets into runtime addresses.
 ///
 /// The chain is strictly monotonic (addresses only increase), so processing
-/// stops as soon as an entry would move backwards or past `end_addr` — this
+/// stops as soon as an entry would move backwards or past `end_addr`, this
 /// also guards against trailing garbage after the real RELR data.
 fn apply_relr(mem: &mut Memory, base: u32, end_addr: u32, relr: &[u8]) -> Result<()> {
     let mut addr: u32 = 0;
@@ -784,7 +783,7 @@ pub fn load_nro(mem: &mut Memory, data: &[u8]) -> Result<LoadedNro> {
     // code needs no runtime patches to its own instructions), so it can be
     // locked down now: a wild guest write through a stray/null pointer
     // faults immediately instead of silently corrupting the running image.
-    // `.rodata` is left writable — a self-relocating crt0 may still need to
+    // `.rodata` is left writable: a self-relocating crt0 may still need to
     // patch RELR entries living in `.data.rel.ro` there.
     mem.mark_readonly(text_addr, ro_addr);
     // The image is two memory states to the guest, not one: `.text`/`.rodata`
@@ -956,7 +955,7 @@ mod tests {
         // this was locked down) now faults instead of silently succeeding.
         assert!(mem.write_u32(loaded.text.mem_addr, 0xDEAD_BEEF).is_err());
         assert_eq!(mem.read_u32(loaded.text.mem_addr).unwrap(), 0x01);
-        // .data stays writable — globals still work.
+        // .data stays writable: globals still work.
         mem.write_u32(loaded.data.mem_addr, 0x1234).unwrap();
         assert_eq!(mem.read_u32(loaded.data.mem_addr).unwrap(), 0x1234);
     }

@@ -28,13 +28,13 @@ export interface RamUsage {
  *  itself; `invalidated` counts blocks dropped because the guest wrote over
  *  the code they came from. */
 /** What the installed GPU backend has been doing. `backend` is absent while
- *  the software rasterizer has the frame — it never declines a draw, so it has
+ *  the software rasterizer has the frame: it never declines a draw, so it has
  *  nothing to report. The timings are milliseconds over the whole run and are
  *  present whenever a device is. */
 export interface GpuReport {
   backend?: 'device';
-  /** Frames presented. Flush is a per-frame cost — one readback of the scanout
-   *  surface — so this is what its timing has to be divided by, not draws. */
+  /** Frames presented. Flush is a per-frame cost, one readback of the scanout
+   *  surface, so this is what its timing has to be divided by, not draws. */
   frames?: number;
   drawn?: number;
   fallbacks?: number;
@@ -74,9 +74,9 @@ export interface GpuReport {
     encode: number;
     flush: number;
     /** The three phases `flush` is made of. `flushAsk` encodes the copies off
-     *  every held surface, `flushWait` waits for the maps — ~0 in a browser,
+     *  every held surface, `flushWait` waits for the maps, ~0 in a browser,
      *  where `poll` cannot do anything and the wait moves to the slice
-     *  boundary — and `flushLand` writes the mappings through the page table
+     *  boundary, and `flushLand` writes the mappings through the page table
      *  into guest memory. They sum to roughly `flush`. */
     flushAsk?: number;
     flushWait?: number;

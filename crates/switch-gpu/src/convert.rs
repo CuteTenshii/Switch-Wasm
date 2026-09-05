@@ -172,14 +172,14 @@ pub(crate) enum Widen {
 /// The normalized 16-bit formats are wgpu's `TEXTURE_FORMAT_16BIT_NORM`,
 /// which is native-only: WebGPU has no spelling for them, so no browser will
 /// ever offer one and A Short Hike's `R16` texture fell back on every device
-/// this actually ships to — and one fallback latches the whole session onto
+/// this actually ships to, and one fallback latches the whole session onto
 /// the rasterizer, so a format nothing here can hold cost every frame.
 ///
 /// A 32-bit float sibling holds them exactly rather than approximately: an
 /// `f32` has 24 bits of significand, so `v / 65535` is the same number the
 /// hardware would have handed the shader, to the bit. What it costs is
 /// twice the bytes on the device and `float32-filterable`, without which a
-/// sampler could not filter the result — and where the device has neither
+/// sampler could not filter the result, and where the device has neither
 /// route this is the fallback it always was.
 ///
 /// Only for sampled textures. A *render target* of the same format is
@@ -242,7 +242,7 @@ pub(crate) fn widen(bytes: &[u8], widen: Widen) -> Vec<u8> {
 ///
 /// `required_features` does not cover this. `rg11b10ufloat` needs no feature
 /// to be sampled and reports none, but rendering into it is gated behind
-/// `RG11B10UFLOAT_RENDERABLE` — expressed in wgpu as the allowed *usages* the
+/// `RG11B10UFLOAT_RENDERABLE`, expressed in wgpu as the allowed *usages* the
 /// format has given a device's features, not as a required feature. Asking
 /// the usage question directly covers every format that is sampled more
 /// widely than it is drawn into, rather than this one by name.

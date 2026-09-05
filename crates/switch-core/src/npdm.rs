@@ -1,4 +1,4 @@
-//! NPDM (`main.npdm`) — the process manifest an ExeFS carries beside its
+//! NPDM (`main.npdm`): the process manifest an ExeFS carries beside its
 //! executables.
 //!
 //! Horizon reads this before it creates the process, and one field in it
@@ -16,11 +16,11 @@
 //! 0x00  magic "META" (u32)
 //! 0x04  signature key generation (u32)
 //! 0x08  reserved
-//! 0x0C  flags (u8) — bit 0 is `Is64BitInstruction`, bits 1:3 the
+//! 0x0C  flags (u8): bit 0 is `Is64BitInstruction`, bits 1:3 the
 //!       address-space type
 //! 0x0E  main thread priority (u8)
 //! 0x0F  main thread core number (u8)
-//! 0x14  system resource size (u32) — [7.0.0+], 0 on older titles
+//! 0x14  system resource size (u32), [7.0.0+], 0 on older titles
 //! 0x18  version (u32)
 //! 0x1C  main thread stack size (u32)
 //! 0x20  name (0x10 bytes, NUL-padded)
@@ -36,7 +36,7 @@ pub const NPDM_HEADER_SIZE: usize = 0x30;
 pub struct Npdm {
     /// Whether the process runs in AArch64. Mario Kart 8 Deluxe
     /// (`0100152000022000`) is the counter-example: it declares zero here, and
-    /// its `rtld` opens with the 32-bit module prologue `b #+8` — a valid
+    /// its `rtld` opens with the 32-bit module prologue `b #+8`, a valid
     /// `ANDS x0, x0, x0` to the A64 decoder, which then executes the `MOD0`
     /// offset word after it as if it were an instruction.
     pub is_64_bit: bool,
@@ -48,7 +48,7 @@ pub struct Npdm {
     pub system_resource_size: u32,
     /// The stack the main thread is created with.
     pub main_thread_stack_size: u32,
-    /// The manifest's name field, for diagnostics — "Application" on a retail
+    /// The manifest's name field, for diagnostics, "Application" on a retail
     /// game.
     pub name: String,
 }
@@ -87,7 +87,7 @@ impl Npdm {
     ///
     /// A container with no manifest, or one that cannot be read, is treated as
     /// 64-bit: that is what every title but a handful is, and it keeps a
-    /// homebrew NRO — which has no NPDM at all — on the path it has always
+    /// homebrew NRO (which has no NPDM at all) on the path it has always
     /// taken.
     pub fn is_64_bit_of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> bool {
         Npdm::of(exefs, data).map(|n| n.is_64_bit).unwrap_or(true)
@@ -142,7 +142,7 @@ mod tests {
 
     /// Just Dance 2019 declares zero here and Just Dance 2023 declares 16 MiB,
     /// and that difference is the whole of what decides which address space
-    /// each one gets — so a zero has to survive parsing as a real answer
+    /// each one gets, so a zero has to survive parsing as a real answer
     /// rather than being confused with a missing one.
     #[test]
     fn zero_is_a_real_answer() {

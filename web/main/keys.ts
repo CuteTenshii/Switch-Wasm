@@ -1,4 +1,4 @@
-/* ---------- keys ----------
+/* keys
 
    Keys are persisted in localStorage so they survive page reloads (they're
    just text; they never leave the browser). */

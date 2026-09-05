@@ -2,7 +2,7 @@
 //! `present_work [width] [height]`.
 //!
 //! [`switch_core::gpu::Gpu::present`] is the one piece of per-frame work that
-//! runs whichever renderer produced the surface — the software rasterizer and
+//! runs whichever renderer produced the surface, the software rasterizer and
 //! the wgpu backend both hand it a block-linear image in guest memory, and it
 //! walks that image into the `Vec<u32>` the canvas wants. So it is the floor
 //! under the frame rate, and enabling a GPU cannot move it. Just Dance 2019 is
@@ -13,8 +13,8 @@
 //! Neither is a fact about this project: the browser runs the same loop
 //! through its own compiler, over a bounds-checked 32-bit linear memory, and
 //! the ratio between the two is not a constant you can divide out. What *is*
-//! the same on both is how much work the loop is asked to do — bytes lifted
-//! out of guest memory, deswizzle lookups, pixels converted — and every
+//! the same on both is how much work the loop is asked to do, bytes lifted
+//! out of guest memory, deswizzle lookups, pixels converted, and every
 //! optimisation worth making moves one of those numbers. A change that leaves
 //! all three alone did not make scan-out cheaper; it made this host faster at
 //! it.
@@ -22,8 +22,8 @@
 //! The counts are derived here rather than measured inside `present`, because
 //! the only place to count a pixel is the per-pixel loop and a counter there
 //! is a cost paid 921,600 times a frame to learn something arithmetic already
-//! knows. They mirror the loop in `Gpu::present` — a `run_at` per contiguous
-//! run, `count` pixels from each — so a change to that loop's shape belongs
+//! knows. They mirror the loop in `Gpu::present`, a `run_at` per contiguous
+//! run, `count` pixels from each, so a change to that loop's shape belongs
 //! here too.
 //!
 //! Every case also presents for real and prints a checksum. The pixels are a
@@ -39,7 +39,7 @@ use switch_core::mem::Memory;
 /// the demo framebuffer is.
 const BASE: u32 = 0xF400_0000;
 /// `NvColorFormat` for A8B8G8R8, which is what a title's swapchain uses and
-/// what `present` decodes to `RGBA8Unorm` (surface format `0xD5` — the one the
+/// what `present` decodes to `RGBA8Unorm` (surface format `0xD5`, the one the
 /// `[gpu]` traces show Just Dance presenting).
 const COLOR_FORMAT: u64 = 0x01_0053_2120;
 /// Bytes per pixel of that format, which is what `present` walks the surface in.
@@ -54,7 +54,7 @@ struct Work {
     surface_bytes: u32,
     /// Bytes of that surface no output pixel ever reads.
     unsampled_bytes: u32,
-    /// Calls to [`Layout::run_at`] — one per contiguous run of pixels.
+    /// Calls to [`Layout::run_at`], one per contiguous run of pixels.
     lookups: u64,
     /// Pixels written to the framebuffer.
     pixels: u64,

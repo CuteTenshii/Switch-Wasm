@@ -1,7 +1,7 @@
 //! BC7 (`BPTC_UNORM`): 16 bytes of LDR RGBA in one of eight modes.
 //!
-//! Every mode packs the same fields in the same order — partition, rotation,
-//! index selection, endpoints, P-bits, then indices — and differs only in how
+//! Every mode packs the same fields in the same order, partition, rotation,
+//! index selection, endpoints, P-bits, then indices, and differs only in how
 //! many bits each gets and which are present at all. [`MODES`] is that table,
 //! so the decoder below is one path rather than eight.
 
@@ -289,7 +289,7 @@ pub fn decode_bc7(block: &[u8]) -> Block {
 mod tests {
     use super::*;
 
-    /// Every BC7 mode spends the block's 128 bits exactly — that is what makes
+    /// Every BC7 mode spends the block's 128 bits exactly: that is what makes
     /// the format self-delimiting. Adding up the table is therefore a check on
     /// all eight rows at once, and it catches a mistyped field width that no
     /// individual decode would localise.

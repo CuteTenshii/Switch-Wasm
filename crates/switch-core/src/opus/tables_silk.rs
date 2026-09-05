@@ -1,6 +1,6 @@
 //! SILK's constant tables, as RFC 6716 fixes them.
 //!
-//! As with the CELT tables these are normative — the probability models the
+//! As with the CELT tables these are normative, the probability models the
 //! range coder reads against, the vector codebooks it indexes, and the fixed
 //! filters the synthesis runs. Transcribed rather than derived.
 
@@ -425,7 +425,7 @@ pub(super) const RESAMPLER_DELAY_MATRIX_DEC: [[i8; 5]; 3] =
     [[4, 0, 2, 0, 0], [0, 9, 4, 7, 4], [0, 3, 12, 7, 7]];
 
 /// How hard concealment attenuates the harmonic part, then the noise part
-/// for a voiced frame and for an unvoiced one — first lost frame, then every
+/// for a voiced frame and for an unvoiced one, first lost frame, then every
 /// one after.
 pub(super) const PLC_HARM_ATT_Q15: [i32; 2] = [32440, 31130];
 

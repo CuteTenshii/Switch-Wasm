@@ -2,7 +2,7 @@
 //!
 //! The tables are a few hundred kilobytes at the end of an image that runs to
 //! gigabytes, so reading *those* out of the streamed section names every file
-//! without decrypting the rest — which is what lets a tool list a 7 GiB RomFS
+//! without decrypting the rest, which is what lets a tool list a 7 GiB RomFS
 //! in under a second.
 //!
 //! Two tools want it and neither should own it: `romfs_ls` turns a

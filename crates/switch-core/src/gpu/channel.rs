@@ -28,7 +28,7 @@ pub const SUBCHANNEL_COUNT: usize = 8;
 
 /// Subchannel the channel's own `MAXWELL_CHANNEL_GPFIFO_A` class answers on.
 /// nvhost binds it when the channel is created, so userspace never issues a
-/// `SetObject` for it — deko3d writes its syncpoint increments and cache-flush
+/// `SetObject` for it: deko3d writes its syncpoint increments and cache-flush
 /// operations straight to subchannel 6, and without the pre-binding those
 /// methods land on an unbound subchannel and the fence never signals.
 pub const SUBCHANNEL_GPFIFO: usize = 6;
@@ -314,7 +314,7 @@ impl Channel {
             // unit sharing one register file, so they share one instance.
             CLASS_INLINE => self.three_d.inline.write(method, arg, ctx),
             // Both of these read guest memory, and the wgpu backend keeps a
-            // render target on the device until it is flushed — so a copy out
+            // render target on the device until it is flushed, so a copy out
             // of one reads whatever was in memory before it was drawn into.
             // It is not a hypothetical: Just Dance 2019 resolves its
             // multisampled colour target with a 2D blit, once a frame.
@@ -333,7 +333,7 @@ impl Channel {
             CLASS_COMPUTE => {
                 // A dispatch reads and writes guest memory, and the wgpu
                 // backend keeps a render target on the device until it is
-                // flushed — so a kernel reading one would read stale bytes.
+                // flushed, so a kernel reading one would read stale bytes.
                 if method == crate::gpu::engine::compute::SEND_SIGNALING_PCAS_B {
                     self.three_d.flush_renderer(ctx)?;
                 }

@@ -127,7 +127,7 @@ fn bit_select_takes_its_mask_from_the_destination() {
 }
 
 /// The float multiply-accumulate by element is the single most common NEON
-/// encoding in the title — 2,898 of them.
+/// encoding in the title, 2,898 of them.
 #[test]
 fn the_multiply_by_element_broadcasts_one_lane() {
     let mut cpu = new_cpu();
@@ -157,7 +157,7 @@ fn the_multiply_by_element_broadcasts_one_lane() {
 }
 
 /// `VEXT` slides a window across the pair, and shares its `1011` opcode field
-/// with the two-register group — bit 24 is all that tells them apart.
+/// with the two-register group: bit 24 is all that tells them apart.
 #[test]
 fn ext_slides_a_window_across_the_register_pair() {
     let mut cpu = new_cpu();
@@ -216,7 +216,7 @@ fn the_two_register_miscellaneous_operations() {
 }
 
 /// `VLD1`/`VST1` moving two `D` registers is the commonest NEON memory
-/// instruction in the title — 14,168 across its modules, mostly this shape.
+/// instruction in the title, 14,168 across its modules, mostly this shape.
 #[test]
 fn the_vector_loads_and_stores_move_two_registers_and_advance_the_base() {
     let mut cpu = new_cpu();

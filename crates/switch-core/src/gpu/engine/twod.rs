@@ -1,4 +1,4 @@
-//! FERMI_TWOD_A (class 0x902D) — the 2D blitter.
+//! FERMI_TWOD_A (class 0x902D), the 2D blitter.
 //!
 //! `PixelsFromMemory` scales a source rectangle into a destination rectangle
 //! using 32.32 fixed-point stepping, with point or bilinear sampling. deko3d
@@ -133,7 +133,7 @@ impl Engine2D {
         // A filter whose taps land exactly on texel centres is not a filter.
         // `bilinear` weights its four taps by the fractional part of
         // `(u, v) - 0.5`, so a step and an origin that leave that zero for
-        // every pixel give weights of 1, 0, 0, 0 — `c00` plus three terms
+        // every pixel give weights of 1, 0, 0, 0, `c00` plus three terms
         // multiplied by zero. Just Dance 2019 resolves its 2x2 MSAA target
         // with `du_dx=2, dv_dy=2, src0=(0.5,0.5)`, which is exactly that, and
         // paid four fetches and twelve lerps per pixel to copy one texel.
@@ -184,7 +184,7 @@ impl Engine2D {
             if let (Some(src_base), Some(dst_base)) = (mapped(&src, ctx), mapped(&dst, ctx)) {
                 let (src_width, dst_width) = (src.width_bytes(), dst.width_bytes());
                 // A column's half of the swizzle depends on `x` alone, and the
-                // same 1280 columns are walked for every one of 720 rows — so
+                // same 1280 columns are walked for every one of 720 rows, so
                 // they are worked out once here instead of 921,600 times, and
                 // the source step's fixed-point arithmetic goes with them.
                 let columns: Vec<(u32, u32)> = (0..dst_w)
@@ -248,7 +248,7 @@ fn fixed(int_part: u32, frac: u32) -> f64 {
 /// Where a surface begins in guest memory, if the whole of it is one mapping.
 ///
 /// `None` means some of it is not, and the caller has to go on asking per
-/// texel — a translation that covered less than the surface would hand out an
+/// texel, a translation that covered less than the surface would hand out an
 /// address past the end of the mapping for the rest of it.
 fn mapped(surface: &Surface, ctx: &ExecCtx) -> Option<u32> {
     match ctx.vmm.translate(surface.addr) {

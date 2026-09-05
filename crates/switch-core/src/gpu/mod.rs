@@ -58,7 +58,7 @@ impl Framebuffer {
 /// plane in the binder parcel the compositor receives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DisplayBuffer {
-    /// nvmap object id (not a handle — the parcel crosses processes).
+    /// nvmap object id (not a handle, the parcel crosses processes).
     pub nvmap_id: u32,
     /// Byte offset of the plane inside the nvmap object.
     pub offset: u32,
@@ -73,7 +73,7 @@ pub struct DisplayBuffer {
     /// the channel order.
     pub color_format: u64,
     /// The `NATIVE_WINDOW_TRANSFORM_*` bits the producer queued the buffer
-    /// with — how the image is stored versus how it is to be shown.
+    /// with: how the image is stored versus how it is to be shown.
     ///
     /// A title that finds it cheaper to render y-down says so here rather
     /// than by mirroring its viewport, and the display is what puts it the
@@ -127,7 +127,7 @@ impl Crop {
         let right = (self.right.max(0) as u32).min(width);
         let bottom = (self.bottom.max(0) as u32).min(height);
         // A rectangle entirely off the surface leaves nothing to show, and a
-        // zero-sized frame is not one — so it falls back to the whole thing.
+        // zero-sized frame is not one, so it falls back to the whole thing.
         if right <= x || bottom <= y {
             return (0, 0, width, height);
         }
@@ -156,7 +156,7 @@ pub struct Gpu {
     pub address_spaces: HashMap<u32, AddressSpace>,
     pub channels: HashMap<u32, Channel>,
     /// The one GPU backend this session has, lent to whichever channel is
-    /// executing — see [`Gpu::submit`].
+    /// executing. See [`Gpu::submit`].
     ///
     /// It lives here and not on a [`Channel`] because a channel is not the
     /// unit a device belongs to: every `open("/dev/nvhost-gpu")` makes
@@ -294,13 +294,13 @@ impl Gpu {
         self.renderer = renderer;
     }
 
-    /// What the installed backend has been doing — see
+    /// What the installed backend has been doing: see
     /// [`renderer::Renderer::report_json`].
     pub fn renderer_report(&self) -> String {
         self.renderer.report_json()
     }
 
-    /// Whether the installed backend wants replacing — see
+    /// Whether the installed backend wants replacing: see
     /// [`renderer::Renderer::lost`].
     pub fn renderer_lost(&self) -> bool {
         self.renderer.lost()
@@ -327,13 +327,13 @@ impl Gpu {
     /// render target next reads what was drawn into it.
     ///
     /// Called before [`Gpu::present`], which is the reader that always
-    /// matters. A backend with nothing to hand back — the software
-    /// rasterizer, which writes guest memory as it goes — does nothing here.
+    /// matters. A backend with nothing to hand back, the software
+    /// rasterizer, which writes guest memory as it goes: does nothing here.
     ///
     /// Plural in name only: a session has one backend. The name is kept
     /// because it is what `vi` and [`crate::cpu::Cpu`] call.
     pub fn flush_renderers(&mut self, mem: &mut Memory) -> Result<renderer::Flush> {
-        // One backend, so one flush — asking once per channel would ask the
+        // One backend, so one flush: asking once per channel would ask the
         // same object to write the same surfaces back N times.
         let Some(channel_id) = self.flush_channel() else {
             return Ok(renderer::Flush::Done);
@@ -422,7 +422,7 @@ impl Gpu {
         //
         // `read_le` finds the page, bounds-checks it and assembles a word for
         // every pixel, and scan-out does that for every pixel of every frame
-        // whichever renderer drew it — so it was the cost of a frame in a
+        // whichever renderer drew it, so it was the cost of a frame in a
         // title that draws nothing at all. `read_into` copies whole pages,
         // and what is left is arithmetic over a slice.
         // Kept between frames rather than allocated per frame: it is the
@@ -520,7 +520,7 @@ impl Gpu {
 /// so the same decoder serves both the engines and scan-out.
 ///
 /// `NvColorFormat` names its channels most-significant first and ends with the
-/// bits-per-pixel byte, so `A8B8G8R8` stores red in the lowest byte — the same
+/// bits-per-pixel byte, so `A8B8G8R8` stores red in the lowest byte, the same
 /// order Maxwell calls `RGBA8`.
 fn display_color_format(nv_format: u64) -> Result<ColorFormat> {
     let raw = match nv_format {
@@ -610,7 +610,7 @@ mod tests {
     }
 
     /// A channel is not what a backend belongs to. Every
-    /// `open("/dev/nvhost-gpu")` makes another one — Asphalt 9 opens four —
+    /// `open("/dev/nvhost-gpu")` makes another one: Asphalt 9 opens four,
     /// and `nvClose` destroys one; installing on `channels.values().next()`
     /// put the device on an arbitrary channel and lost it on a close.
     #[test]
@@ -636,13 +636,13 @@ mod tests {
         );
     }
 
-    /// One pushbuffer command word — the encoding [`channel::Command`] decodes.
+    /// One pushbuffer command word, the encoding [`channel::Command`] decodes.
     fn header(mode: u32, arg: u32, subchannel: u32, method: u32) -> u32 {
         (method & 0x1FFF) | ((subchannel & 7) << 13) | ((arg & 0x1FFF) << 16) | (mode << 29)
     }
 
     /// The backend is lent to whichever channel is executing, so a title that
-    /// draws through its *second* channel still reaches it — and it is back on
+    /// draws through its *second* channel still reaches it, and it is back on
     /// the `Gpu` afterwards for the next channel to borrow.
     ///
     /// Driven through a real submission rather than through
@@ -662,7 +662,7 @@ mod tests {
 
         // Bind the copy engine and launch a transfer. `Channel::method` hands
         // the 3D engine's surfaces back before one, because a copy reads a
-        // render target straight out of guest memory — so this is a
+        // render target straight out of guest memory, so this is a
         // submission that has to reach the backend to be correct.
         let words = [
             header(3, 1, 0, 0),

@@ -8,13 +8,13 @@ use super::Cpu;
 use crate::{Error, Result};
 
 impl Cpu {
-    /// Minimal SIMD data-processing for the vector registers — just enough for
+    /// Minimal SIMD data-processing for the vector registers, just enough for
     /// the libnx `memset`/`memcpy` hot path (Phase 1 keeps NEON out of scope).
     ///
     /// Handled forms (fixed bits `[30:23] == 10_011100`, `[22:20] == 000`):
-    /// * `DUP <Vd>.<T>, <Rn>`  — replicate the low element of a GPR across the
+    /// * `DUP <Vd>.<T>, <Rn>`: replicate the low element of a GPR across the
     ///   vector (`bits[15:10] == 000011`).
-    /// * `MOV <Xd>, <Vn>.D[<m>]` (UMOV) — copy a 64-bit lane to a GPR
+    /// * `MOV <Xd>, <Vn>.D[<m>]` (UMOV), copy a 64-bit lane to a GPR
     ///   (`bits[15:10] == 001111`, 64-bit lane form `imm5 == 01000 | m`).
     pub(super) fn try_simd(&mut self, insn: u32) -> Result<bool> {
         // ---- AES and SHA ----
@@ -90,7 +90,7 @@ impl Cpu {
         // Vector: `0 Q U 011110 immh immb opcode 1 Rn Rd` (the same group as
         // MOVI and the narrowing shifts; `immh` is zero only for MOVI, and the
         // narrowing opcodes are handled above). Scalar: `01 U 111110 …`, which
-        // differs only in bit28 and always works on one 64-bit lane —
+        // differs only in bit28 and always works on one 64-bit lane,
         // `ushr d30, d31, #32` = 0x7f6007fe.
         let scalar_shift = ((insn >> 30) & 0b11) == 0b01 && ((insn >> 23) & 0x3F) == 0b111110;
         let vector_shift = ((insn >> 31) & 1) == 0 && ((insn >> 23) & 0x3F) == 0b011110;
@@ -597,7 +597,7 @@ impl Cpu {
 
         // ---- two-register misc (Advanced SIMD) ----
         // `0 Q U 01110 size 10000 opcode(5) 10 Rn Rd`: the one-operand vector
-        // ops — REV/CLS/CLZ/CNT/NOT/RBIT/ABS/NEG, the compares against zero,
+        // ops, REV/CLS/CLZ/CNT/NOT/RBIT/ABS/NEG, the compares against zero,
         // the narrowing and lengthening moves, and the whole FP rounding and
         // integer<->float convert set. `scvtf v28.4s, v31.4s` = 0x4e21dbfc.
         if ((insn >> 31) & 1) == 0
@@ -607,7 +607,7 @@ impl Cpu {
         {
             return self.simd_two_reg_misc(insn, false);
         }
-        // Scalar FP three-same: `01 U 11110 sz 1 Rm opcode(5) 1 Rn Rd` — one
+        // Scalar FP three-same: `01 U 11110 sz 1 Rm opcode(5) 1 Rn Rd`, one
         // lane of the vector group above. `fabd d31, d0, d31` = 0x7effd41f.
         if ((insn >> 30) & 0b11) == 0b01
             && ((insn >> 24) & 0x1F) == 0b11110
@@ -663,7 +663,7 @@ impl Cpu {
         // Copy group (DUP/INS/UMOV/SMOV, 0{q}{op} 0111 0000): q (bit30) and
         // **op (bit29)** are both free, and bit20 is part of imm5 (so it may
         // be set for 64-bit lanes). What separates the group from three-same
-        // is bit21 == 0, not bit29 — matching on bits[29:21] here excluded
+        // is bit21 == 0, not bit29, matching on bits[29:21] here excluded
         // every `op == 1` encoding, i.e. the whole of INS (element), which
         // then fell through to the three-same decoder and was executed as an
         // unrelated arithmetic op. See [`Cpu::try_simd_copy`].
@@ -686,7 +686,7 @@ impl Cpu {
                 _ => 64,
             };
             // AdvSIMD across lanes: `0 Q U 01110 size 11000 opcode 10 Rn Rd`
-            // — a horizontal reduce across a vector into a single scalar
+            //, a horizontal reduce across a vector into a single scalar
             // lane. Shares bits[28:24] with three-same, but bits[21:17] are
             // the fixed group selector 11000 rather than a free Rm, and
             // bit10 = 0 where three-same always has bit10 = 1.
@@ -1033,12 +1033,12 @@ impl Cpu {
 
         // TBL / TBX: `0 Q 001110 00 0 Rm 0 len op 00 Rn Rd`. Rebuild a vector
         // by picking bytes out of a table held in `len+1` consecutive vector
-        // registers, one index per byte of `Vm` — how a compiler spells an
+        // registers, one index per byte of `Vm`, how a compiler spells an
         // arbitrary byte shuffle when no fixed permute (ZIP/UZP/TRN/EXT)
         // matches. It shares bits[28:21] with the copy group below, so it has
         // to be split off first: the copy encodings all set bit10, where
         // table lookup has bit15 = 0 and bits[11:10] = 00. Table lookup has no
-        // `op` bit of its own — bits[29:24] are fixed at 001110 — so it is
+        // `op` bit of its own (bits[29:24] are fixed at 001110) so it is
         // only ever the `op == 0` half.
         // `tbl v31.16b, {v29.16b}, v28.16b` = 0x4e1c03bf.
         if op == 0 && ((insn >> 15) & 1) == 0 && ((insn >> 10) & 0b11) == 0 {
@@ -1077,7 +1077,7 @@ impl Cpu {
         let imm5 = (insn >> 16) & 0x1F;
 
         if op == 1 {
-            // INS <Vd>.<Ts>[<index1>], <Vn>.<Ts>[<index2>] — move one lane to
+            // INS <Vd>.<Ts>[<index1>], <Vn>.<Ts>[<index2>]: move one lane to
             // another lane, the only `op == 1` encoding in the copy group.
             // `imm5` gives the element size and the *destination* index the
             // same way UMOV/SMOV/INS-general do; `imm4` gives the *source*
@@ -1088,7 +1088,7 @@ impl Cpu {
             // 8-byte `SmServiceName` with one `ldr b<n>, [str, #i]` per
             // character and then a chain of `ins v31.b[i], v<n>.b[0]`.
             // Without this, every such name reached `sm::GetService` as
-            // eight zero bytes — Checkpoint asked for `ns:am2`, got a session
+            // eight zero bytes: Checkpoint asked for `ns:am2`, got a session
             // bound to "", and panicked once it used it.
             if q == 0 || imm5 == 0 || ((insn >> 15) & 1) != 0 || ((insn >> 10) & 1) == 0 {
                 return Ok(false);
@@ -1104,7 +1104,7 @@ impl Cpu {
             let val = (self.vregs[rn as usize] >> (src_index * esize)) & mask;
             let shift = dst_index * esize;
             let v = self.vregs[rd as usize];
-            // INS leaves every other lane of Vd alone — including the top
+            // INS leaves every other lane of Vd alone, including the top
             // half, which is why there is no `Q == 0` zeroing here.
             self.vregs[rd as usize] = (v & !(mask << shift)) | (val << shift);
             return Ok(true);
@@ -1112,7 +1112,7 @@ impl Cpu {
 
         match (insn >> 10) & 0b111111 {
             0b000111 => {
-                // INS <Vd>.<T>[<index>], <Rn> — insert a GPR lane. Same
+                // INS <Vd>.<T>[<index>], <Rn>, insert a GPR lane. Same
                 // imm5 → (esize, index) scheme as UMOV/SMOV: esize = 8<<ctz,
                 // index = imm5 >> (ctz+1).
                 let lsb = imm5.trailing_zeros();
@@ -1171,7 +1171,7 @@ impl Cpu {
                 Ok(true)
             }
             0b001011 => {
-                // SMOV <Xd/Wd>, <Vn>.B/H/S[<index>] — extract a lane,
+                // SMOV <Xd/Wd>, <Vn>.B/H/S[<index>], extract a lane,
                 // sign-extended (8/16-bit → Wd, 32-bit → Xd).
                 let lsb = imm5.trailing_zeros();
                 let esize = 8u32 << lsb;
@@ -1186,7 +1186,7 @@ impl Cpu {
         }
     }
 
-    // ---------------- scalar floating point ----------------
+    // scalar floating point
     //
     // The scalar FP subset hbmenu's UI/drawing code needs: FMOV, the common
     // arithmetic (FADD/FSUB/FMUL/FDIV/FNMUL/FMAX/FMIN/FMAXNM/FMINNM), the
@@ -1348,7 +1348,7 @@ impl Cpu {
 
     /// AdvSIMD across lanes (integer forms): `0 Q U 01110 size 11000
     /// opcode(5) 10 Rn Rd`. A horizontal reduce over every lane of Vn into
-    /// a single scalar written to Vd, zeroing the rest of the register —
+    /// a single scalar written to Vd, zeroing the rest of the register,
     /// SADDLV/UADDLV, SMAXV/UMAXV, SMINV/UMINV and ADDV.
     fn simd_across_lanes(&mut self, insn: u32) -> Result<bool> {
         let q = (insn >> 30) & 1 == 1;
@@ -1404,7 +1404,7 @@ impl Cpu {
                 best as u128
             }
             0b11011 => {
-                // ADDV: sum of all lanes wrapped to the element size — unlike
+                // ADDV: sum of all lanes wrapped to the element size, unlike
                 // SADDLV/UADDLV there is no widening, and U is always 0 (a
                 // same-width wraparound sum doesn't care about signedness).
                 let mut sum: u128 = 0;
@@ -1550,9 +1550,9 @@ impl Cpu {
 
     /// AdvSIMD two-register misc: `0 Q U 01110 size 10000 opcode(5) 10 Rn Rd`.
     ///
-    /// The FP forms are identified by `(U, size<1>, opcode)` together — e.g.
+    /// The FP forms are identified by `(U, size<1>, opcode)` together, e.g.
     /// opcode 11101 is SCVTF with `U=0, size<1>=0` but FRECPE with
-    /// `U=0, size<1>=1` — and their element size is `size<0>` (0 = single,
+    /// `U=0, size<1>=1`, and their element size is `size<0>` (0 = single,
     /// 1 = double). The integer forms use `size` as the element size instead.
     fn simd_two_reg_misc(&mut self, insn: u32, scalar: bool) -> Result<bool> {
         let q = (insn >> 30) & 1 == 1;

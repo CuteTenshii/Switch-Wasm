@@ -68,7 +68,7 @@ impl Cpu {
                 // Shift by register: only the bottom byte counts, and a zero
                 // shift leaves both the value and the carry alone. `Rm` reads
                 // as pc+12 here, since this is the one form with a fifth
-                // register operand — but r15 is unpredictable as any operand
+                // register operand, but r15 is unpredictable as any operand
                 // of it, so the ordinary pc+8 is what the read above gave.
                 let amount = self.r32(((insn >> 8) & 0xF) as u8) & 0xFF;
                 if amount == 0 {
@@ -140,7 +140,7 @@ impl Cpu {
                     self.set_r32(rd, apsr);
                 } else {
                     // MSR: a write to APSR, which at EL0 can only reach the
-                    // flags and GE — the mask says which.
+                    // flags and GE: the mask says which.
                     let mask = (insn >> 16) & 0xF;
                     let val = self.r32(rm);
                     if mask & 0b1000 != 0 {

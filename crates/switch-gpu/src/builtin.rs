@@ -13,8 +13,8 @@ use switch_core::gpu::surface::{SampleGrid, MAX_SAMPLES};
 /// `depth32float` is a format a copy may read out of and never write into,
 /// so the only way in is to draw it: a fullscreen triangle whose fragment
 /// reads the texel that was uploaded to an ordinary `r32float` texture and
-/// reports it as its own depth. `depth16unorm` needs none of this — it is
-/// the one depth format a copy may write — but it goes the same way, because
+/// reports it as its own depth. `depth16unorm` needs none of this: it is
+/// the one depth format a copy may write, but it goes the same way, because
 /// two paths that must agree about a surface's contents are one more place
 /// for them to disagree than there needs to be.
 pub(crate) const LOAD_DEPTH_WGSL: &str = "\
@@ -39,7 +39,7 @@ fn fs_main(@builtin(position) position: vec4<f32>) -> @builtin(frag_depth) f32 {
 ///
 /// A clear that covers the whole of one is a render pass's load operation and
 /// needs none of this. A clear that covers a rectangle of it, or only some of
-/// its channels, is not something a load operation can say — so it is a
+/// its channels, is not something a load operation can say, so it is a
 /// fullscreen triangle under a scissor, with the write mask baked into the
 /// pipeline and the value in a uniform.
 pub(crate) const CLEAR_RECT_WGSL: &str = "\
@@ -73,7 +73,7 @@ fn fs_depth() -> @builtin(frag_depth) f32 {
 /// a `samples_x` by `samples_y` tile of texels, and that expanded image is
 /// what guest memory holds and what a readback has to produce. A device's own
 /// multisampling stores them opaquely, in a texture a copy may not touch at
-/// all. So the two shapes both exist, and this is the pass between them —
+/// all. So the two shapes both exist, and this is the pass between them,
 /// `gather` on the way in, `scatter` on the way out.
 ///
 /// `sampled` is how the source is declared and `load` is how one texel comes
@@ -155,7 +155,7 @@ fn fs_scatter(@builtin(position) position: vec4<f32>) -> {output} {{
 pub(crate) struct ResampleKey {
     /// Which fragment entry point of [`resample_wgsl`] runs.
     pub(crate) entry: &'static str,
-    /// The destination's format, which is also the source's — a companion is
+    /// The destination's format, which is also the source's: a companion is
     /// the same format as the surface it stands in for.
     pub(crate) dst: wgpu::TextureFormat,
     /// The destination's sample count.

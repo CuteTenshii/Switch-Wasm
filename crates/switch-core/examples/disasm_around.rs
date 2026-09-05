@@ -1,4 +1,4 @@
-//! Disassemble the instructions either side of an address in a loaded NRO —
+//! Disassemble the instructions either side of an address in a loaded NRO,
 //! what a fault report needs to be read against: `disasm_around <path.nro> <pc>`.
 mod common;
 

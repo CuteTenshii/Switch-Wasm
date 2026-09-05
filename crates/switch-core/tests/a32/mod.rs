@@ -28,8 +28,8 @@ pub fn cpu() -> Cpu {
 }
 
 /// Assemble `code` at [`BASE`] and run it, stopping at the halt appended to
-/// the end. A program that ends in its own `svc #0` — one placing a literal
-/// pool after it — simply reaches that first.
+/// the end. A program that ends in its own `svc #0`, one placing a literal
+/// pool after it: simply reaches that first.
 pub fn run(code: &[u32]) -> Cpu {
     let mut cpu = cpu();
     load(&mut cpu, code);
@@ -44,7 +44,7 @@ pub fn run_failing(code: &[u32]) -> String {
     format!("{}", cpu.run(code.len() as u64 + 1).unwrap_err())
 }
 
-/// Assemble `code` at [`BASE`] with a halt appended, without running it —
+/// Assemble `code` at [`BASE`] with a halt appended, without running it,
 /// for a test that has to set registers up before the program sees them.
 pub fn load(cpu: &mut Cpu, code: &[u32]) {
     let mut bytes = Vec::with_capacity(code.len() * 4 + 4);

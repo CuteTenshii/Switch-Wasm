@@ -9,7 +9,7 @@ use crate::Result;
 /// Proleptic-Gregorian day count (days since 1970-01-01) to (year, month,
 /// day). Howard Hinnant's `civil_from_days`
 /// (<http://howardhinnant.github.io/date_algorithms.html>), the standard
-/// integer algorithm for this — no `chrono` dependency needed for the one
+/// integer algorithm for this, no `chrono` dependency needed for the one
 /// calendar conversion `ITimeZoneService` requires.
 pub(super) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719468;
@@ -44,7 +44,7 @@ impl Cpu {
     /// Its own commands (`GetStandardUserSystemClock` and friends) share
     /// command ids with `ConvertToDomain`/`QueryPointerBufferSize`, which
     /// arrive as a Control request (message type 5) rather than a normal
-    /// one — the same distinction `vi_request` makes for `vi:m` — so the control
+    /// one (the same distinction `vi_request` makes for `vi:m`) so the control
     /// path has to be checked first or a domain conversion would be read as
     /// `GetStandardUserSystemClock`.
     pub(super) fn time_request(
@@ -107,7 +107,7 @@ impl Cpu {
     }
 
     /// `ISystemClock`: wall-clock time, as POSIX seconds. The value comes
-    /// straight from [`Cpu::set_unix_time`] — there is no persisted offset or
+    /// straight from [`Cpu::set_unix_time`]: there is no persisted offset or
     /// network sync here, so `SetCurrentTime`/`SetSystemClockContext` are
     /// accepted but don't change what a later read sees.
     pub(super) fn time_system_clock_request(
@@ -180,8 +180,8 @@ impl Cpu {
     }
 
     /// Seconds since this `Cpu` started, for the steady clock. Instructions
-    /// retired stands in for elapsed wall time — the same arbitrary scale
-    /// `svcGetSystemTick`'s `cycles * 1000` already uses — since only
+    /// retired stands in for elapsed wall time, the same arbitrary scale
+    /// `svcGetSystemTick`'s `cycles * 1000` already uses, since only
     /// monotonicity matters here, not the rate.
     fn steady_clock_seconds(&self) -> i64 {
         (self.cycles / 1_000_000) as i64
@@ -264,7 +264,7 @@ impl Cpu {
     /// UTC: `CalendarTime { u16 year; u8 month, day, hour, minute, second,
     /// pad; }` (8 bytes) followed by `CalendarAdditionalInfo { u32
     /// day_of_week, day_of_year; u8 name[8]; u32 utc_offset_seconds; u8 dst,
-    /// pad[3]; }` (0x18 bytes) — 0x20 bytes total.
+    /// pad[3]; }` (0x18 bytes), 0x20 bytes total.
     pub(super) fn to_calendar_time(posix: i64) -> [u8; 0x20] {
         let days = posix.div_euclid(86400);
         let secs_of_day = posix.rem_euclid(86400);

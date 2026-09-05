@@ -1,6 +1,6 @@
 //! The AArch32 (A32) execution state.
 //!
-//! Horizon runs some retail titles in AArch32 — Mario Kart 8 Deluxe
+//! Horizon runs some retail titles in AArch32, Mario Kart 8 Deluxe
 //! (`0100152000022000`) is one, and its `main.npdm` says so in bit 0 of the
 //! flags byte at 0x0C. Such a title's `rtld` opens with the 32-bit module
 //! prologue, `ea000000` (`b #+8`) followed by the offset to `MOD0`; run
@@ -9,15 +9,15 @@
 //!
 //! # One CPU, two states
 //!
-//! Everything above the instruction set — the syscalls, IPC, the services,
-//! the GPU — is the same Horizon in either state, so there is one [`Cpu`] and
+//! Everything above the instruction set, the syscalls, IPC, the services,
+//! the GPU: is the same Horizon in either state, so there is one [`Cpu`] and
 //! one register file, with [`ExecMode`] saying how to read it. `r0`..`r14`
 //! alias the low halves of `X0`..`X14`; `r13` is SP and `r14` is LR, which is
 //! why neither of A64's separate [`super::SP_SLOT`] nor `X30` is used in this
 //! state. `r15` is not stored at all: reading it yields `pc + 8`, the value
 //! ARM's pipeline made architectural, and writing it branches.
 //!
-//! N/Z/C/V share [`Cpu::nzcv`] with A64 — the bit positions and the condition
+//! N/Z/C/V share [`Cpu::nzcv`] with A64, the bit positions and the condition
 //! encoding are identical, so [`Cpu::condition_holds`] serves both. Q and GE
 //! are AArch32's alone and live in [`Cpu::cpsr_q`] and [`Cpu::cpsr_ge`].
 //!
@@ -25,8 +25,8 @@
 //!
 //! T32 is not implemented, and measurement says it is not needed: across the
 //! 4.8M instruction words of Mario Kart 8 Deluxe's eight modules there is
-//! exactly one `BLX` immediate — the only encoding that statically switches
-//! to Thumb — which at that rate is a literal pool word, not a call. An
+//! exactly one `BLX` immediate, the only encoding that statically switches
+//! to Thumb, which at that rate is a literal pool word, not a call. An
 //! interworking branch to an odd address is therefore a diagnosable error
 //! rather than a silent wrong-mode execution; see [`Cpu::a32_write_pc`].
 
@@ -68,7 +68,7 @@ impl Cpu {
         }
     }
 
-    /// Write `r0`..`r14`. Writes to `r15` are branches and do not come here —
+    /// Write `r0`..`r14`. Writes to `r15` are branches and do not come here,
     /// see [`Cpu::a32_write_pc`].
     #[inline(always)]
     pub(super) fn set_r32(&mut self, r: u8, val: u32) {
@@ -89,7 +89,7 @@ impl Cpu {
         self.nzcv = (self.nzcv & 0x3000_0000) | n | z;
     }
 
-    /// Set N and Z from a result and C from the shifter, leaving V alone —
+    /// Set N and Z from a result and C from the shifter, leaving V alone,
     /// what the logical operations do.
     #[inline(always)]
     pub(super) fn set_nzc32(&mut self, result: u32, carry: bool) {
@@ -119,8 +119,8 @@ impl Cpu {
     /// Branch, honouring the interworking rule that bit 0 selects Thumb.
     ///
     /// Nothing implements T32, so rather than execute ARM words at a Thumb
-    /// address — which produces a fault somewhere else entirely, with nothing
-    /// to say the state was wrong — a switch is reported where it happens.
+    /// address, which produces a fault somewhere else entirely, with nothing
+    /// to say the state was wrong: a switch is reported where it happens.
     #[inline]
     pub(super) fn a32_write_pc(&mut self, target: u32) -> Result<()> {
         if target & 1 != 0 {
@@ -236,7 +236,7 @@ impl Cpu {
 /// a 32-bit argument zero-extends into a 64-bit one by itself.
 ///
 /// What does not carry over is the arguments that *are* 64 bits. AArch32 has
-/// no register wide enough, so the kernel splits each across a pair — and the
+/// no register wide enough, so the kernel splits each across a pair, and the
 /// pairs are not always adjacent, nor are the remaining arguments always in
 /// the same positions. `svcWaitSynchronization`'s timeout is `r0:r3` while its
 /// handle list stays in `r1`; `svcCreateThread` takes its priority in `r0`

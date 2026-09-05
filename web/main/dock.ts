@@ -1,4 +1,4 @@
-/* ---------- handheld / docked ----------
+/* handheld / docked
 
    Horizon's `AppletOperationMode`, and the one switch behind everything that
    depends on it: the resolution `vi` reports, the performance mode `am` and
@@ -6,8 +6,8 @@
    exists at all.
 
    Changeable while a title runs, because that is what a dock is. The number
-   on its own would change nothing — a title reads the operation mode once and
-   lays out for that answer — so the emulator queues the two AM messages a real
+   on its own would change nothing: a title reads the operation mode once and
+   lays out for that answer, so the emulator queues the two AM messages a real
    dock sends, and those are what send the title back to ask. */
 
 import { $ } from './dom';

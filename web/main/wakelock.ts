@@ -1,4 +1,4 @@
-/* ---------- screen wake lock ----------
+/* screen wake lock
 
    A running emulator is a page the browser reads as idle: minutes go by with
    nothing typed into it, so the screen dims and the machine sleeps in the

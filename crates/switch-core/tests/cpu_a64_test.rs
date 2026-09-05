@@ -539,7 +539,7 @@ fn reverse_and_count_ops() {
 
 #[test]
 fn add_immediate_preserves_flags() {
-    // CMP x1, x1 (sets Z), then ADD X2, X1, #'0' — flags must stay set.
+    // CMP x1, x1 (sets Z), then ADD X2, X1, #'0': flags must stay set.
     let mut cpu = Cpu::new();
     cpu.set_reg(1, 5);
     let code = [
@@ -677,7 +677,7 @@ fn adds_shifted_register() {
 
 #[test]
 fn cmp_does_not_clobber_sp() {
-    // CMP X0, #0x10 == SUBS XZR, X0, #0x10 — must not write the stack pointer.
+    // CMP X0, #0x10 == SUBS XZR, X0, #0x10: must not write the stack pointer.
     let mut cpu = Cpu::new();
     cpu.set_reg(0, 0x10);
     cpu.set_pc_and_sp(0x1000, 0x30441ef9);
@@ -808,7 +808,7 @@ fn disassembler_produces_readable_output() {
     assert_eq!(disassemble(0xD2824681), "movz x1, #0x1234");
     // ADR X0, #0x54
     assert_eq!(disassemble(0x100002A0), "adr x0, #0x54");
-    // ADRP X0, #0x1000 (non-zero immlo — previously misdecoded)
+    // ADRP X0, #0x1000 (non-zero immlo, previously misdecoded)
     assert_eq!(disassemble(0xB0000000), "adrp x0, #0x1");
     // ADRP X0, #0x235 from the crashing binary's trace
     assert_eq!(disassemble(0xB00011A0), "adrp x0, #0x235");
@@ -835,7 +835,7 @@ fn disassembler_produces_readable_output() {
 #[test]
 fn movk32_shift_is_bit21() {
     // movz w1, #0x4653 ; movk w1, #0x4f43, lsl #16 → 0x4f434653.
-    // The 32-bit hw/shift bit is bit 21 (not bit 22) — a regression from the
+    // The 32-bit hw/shift bit is bit 21 (not bit 22), a regression from the
     // hbmenu MOD0-magic check that miscomputed w1 as 0x4f43.
     let cpu = exec(&[movz(1, 0x4653, 0, false), movk(1, 0x4f43, 1, false)], 2);
     assert_eq!(cpu.read_x(1), 0x4f43_4653);
@@ -865,7 +865,7 @@ fn add_carry_overflow_masks_to_operand_size() {
 
 #[test]
 fn register_offset_load_32bit() {
-    // ldr w2, [x19, x0] — the 0xb8606a62 form hbmenu hit; previously only the
+    // ldr w2, [x19, x0], the 0xb8606a62 form hbmenu hit; previously only the
     // 64-bit register-offset encodings (bits[31:27]==11111) were decoded.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(19, 0x2000);
@@ -910,7 +910,7 @@ fn multiply_long_ops() {
 
 #[test]
 fn ldrsw_sign_extends_and_loads() {
-    // LDRSW must LOAD a 32-bit value and sign-extend it — not be decoded as a
+    // LDRSW must LOAD a 32-bit value and sign-extend it, not be decoded as a
     // store (opc=10 was misread as store, corrupting the target). Store
     // 0xFFFF8001 at [x0] then `ldrsw w1, [x0, #0]` must yield 0xFFFFFFFF_FFFF8001.
     let mut cpu = cpu_at(0x1000);
@@ -974,7 +974,7 @@ fn bfxil_extracts_field_into_low_bits() {
 #[test]
 fn logical_immediate_mask_80808080() {
     // 0x3201c3f4 = `mov w20, #0x80808080`. The old decoder rejected it because
-    // imms=48 with N=0 has bits above the element size — those are ignored, not
+    // imms=48 with N=0 has bits above the element size: those are ignored, not
     // "unallocated" (QEMU logic_imm_decode_wmask). This was the first bug that
     // stopped sdl-hello.nro from booting.
     let code = [0x3201c3f4, nop()];
@@ -1161,7 +1161,7 @@ fn ctr_el0_reports_64_byte_cache_lines() {
 #[test]
 fn blr_reads_its_target_before_linking() {
     // `blr x30` is a return-and-relink: BLR reads the target register first,
-    // then writes x30. Linking first made it branch to itself+4 — hbmenu's NEON
+    // then writes x30. Linking first made it branch to itself+4, hbmenu's NEON
     // JPEG decoder ends its IDCT that way, so its icon never finished decoding.
     let mut cpu = cpu_at(0x1000);
     cpu.mem.map_zero(0x2000, 0x100).unwrap();
@@ -1260,7 +1260,7 @@ fn thirty_two_bit_writes_clear_the_upper_half() {
 #[test]
 fn asr_by_register_sign_extends_from_the_operand_width() {
     // `asr w2, w2, w3` on a negative word must give all-ones. The operand was
-    // masked to 32 bits and then shifted as a positive i64, yielding 1 — which
+    // masked to 32 bits and then shifted as a positive i64, yielding 1, which
     // is how libjpeg-turbo's HUFF_EXTEND lost the sign of every DC difference
     // and hbmenu's icon decoded with the wrong luma and chroma.
     let mut cpu = cpu_at(0x1000);
@@ -1372,7 +1372,7 @@ fn a_signed_32_bit_extend_keeps_its_low_bits() {
 ///
 /// The ARM ARM's pseudocode shifts first and inverts second, and so does
 /// dynarmic (`ir.Not(ShiftReg(...))`). Both engines here used to invert the
-/// register and then shift, which agrees only when the shift amount is zero —
+/// register and then shift, which agrees only when the shift amount is zero,
 /// so every `mvn`/`mov` alias was right and every shifted form was wrong.
 #[test]
 fn bic_and_friends_invert_after_shifting() {
@@ -1396,7 +1396,7 @@ fn bic_and_friends_invert_after_shifting() {
 
 /// A sign-extending load into a **W** register zeroes the top half.
 ///
-/// `opc` picks the destination width — 10 is the X form, 11 the W form — and
+/// `opc` picks the destination width (10 is the X form, 11 the W form) and
 /// this decoder read only the width of the *access*, so both forms sign-
 /// extended all the way to 64 bits. `ldrsh w6` of `0xff00` left
 /// `0xffffffffffffff00` where hardware leaves `0x00000000ffffff00`, which is
@@ -1437,7 +1437,7 @@ fn a_signed_load_into_a_w_register_narrows_like_every_other_w_write() {
 /// `CLREX` clears the local monitor, and a `STXR` after one fails.
 ///
 /// It sits in the barrier group, so it was retiring as a hint like `DMB` and
-/// `ISB` beside it — and a guest that abandons a read-modify-write (the
+/// `ISB` beside it, and a guest that abandons a read-modify-write (the
 /// give-up branch of every compare-and-swap) kept its reservation, so the
 /// store it had decided not to make could still land later.
 #[test]
@@ -1461,7 +1461,7 @@ fn clrex_clears_the_reservation_a_store_exclusive_needs() {
 ///
 /// Both halves were read and written as 64-bit whatever the size field said,
 /// so a `stxp w0, w1, w2, [x3]` wrote sixteen bytes where it should write
-/// eight — over eight bytes belonging to something else — and reported that it
+/// eight (over eight bytes belonging to something else) and reported that it
 /// had succeeded.
 #[test]
 fn a_32_bit_exclusive_pair_moves_words() {

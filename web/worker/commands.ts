@@ -401,7 +401,7 @@ export const CMD: CommandHandlers = {
     });
   },
 
-  // ---------- the emulated SD card ----------
+  // the emulated SD card
   //
   // `Vfs` lives in the session, so on its own nothing the guest writes
   // survives a reload. The main thread mirrors it into IndexedDB using these:
@@ -455,7 +455,7 @@ export const CMD: CommandHandlers = {
     );
   },
 
-  // ---------- save data ----------
+  // save data
   //
   // The same calls as the SD card above with a save id in front, because a
   // console keeps saves on its NAND rather than its card and one title's save

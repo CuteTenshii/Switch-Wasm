@@ -27,7 +27,7 @@ pub(super) enum Wb {
 /// Deriving this is the `PRFM` test, the load/store test, the sign-extend
 /// test, a match to pick the width and a second to pick the sign-extension
 /// width. All of it is constant per instruction, which is why the translator
-/// resolves it once — and why there is one classifier rather than two.
+/// resolves it once, and why there is one classifier rather than two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Acc {
     Store8,
@@ -68,7 +68,7 @@ impl Acc {
     /// The access a `size`:`opc` pair selects.
     ///
     /// `opc` selects the access: 00 = STR, 01 = LDR, 10/11 = sign-extending
-    /// loads (LDRSB/LDRSH/LDRSW). The load bit is NOT `opc & 1` — treating
+    /// loads (LDRSB/LDRSH/LDRSW). The load bit is NOT `opc & 1`, treating
     /// opc=10 as a store silently corrupted the target (observed as a bogus
     /// `ldrsw` index in NX-Shell's tokenizer). size=11 with opc=10/11 is
     /// `PRFM`, which must not run as a sign-extending load or it clobbers a
@@ -112,8 +112,8 @@ pub(super) enum Ext {
 
 impl Ext {
     /// The extension an `option` field selects, or `None` where the encoding
-    /// is undefined. The signed pair is 110/111 — not 111/110 as in some
-    /// tables — and a byte or halfword extend here is UNDEFINED, so it faults
+    /// is undefined. The signed pair is 110/111, not 111/110 as in some
+    /// tables, and a byte or halfword extend here is UNDEFINED, so it faults
     /// rather than guessing.
     pub(super) fn of(option: u8) -> Option<Ext> {
         match option {
@@ -184,7 +184,7 @@ impl Cpu {
     pub(super) fn try_simd_load_store(&mut self, insn: u32) -> Result<bool> {
         let grp = (insn >> 27) & 0b111;
         // Scalar SIMD LDR/STR (V=1): bits[29:27] = 111, bit26 = 1. The size/opc
-        // pairs select the width — opc 00/01 are STR/LDR of B/H/S/D (size
+        // pairs select the width: opc 00/01 are STR/LDR of B/H/S/D (size
         // 00/01/10/11, byte offset scaled 1/2/4/8), opc 10/11 are STR/LDR Q
         // (128-bit, size must be 00, offset scaled 16). mode=01 is the
         // unsigned-offset form (imm12), mode=00 the unscaled STUR/LDUR (imm9).
@@ -210,7 +210,7 @@ impl Cpu {
             let mode = (insn >> 24) & 0b11;
             let (addr, writeback) = match mode {
                 // Unsigned offset (immediate). imm12 occupies bits[21:10], so
-                // bit 21 must NOT be treated as a register-offset flag here —
+                // bit 21 must NOT be treated as a register-offset flag here,
                 // `ldr b29, [x0, #0xc80]` was being misread as a register load
                 // using a garbage Rm.
                 0b01 => {
@@ -766,7 +766,7 @@ impl Cpu {
             return self.try_simd_load_store(insn);
         }
 
-        // Register-offset form: bit21 == 1 (any size — the previous
+        // Register-offset form: bit21 == 1 (any size, the previous
         // bits[31:27]==11111 test only matched the 64-bit forms, so 8/16/32-bit
         // register-offset loads/stores fell through as "unimplemented").
         if ((insn >> 27) & 0b111) == 0b111
@@ -840,7 +840,7 @@ impl Cpu {
         Ok(false)
     }
 
-    /// One load or store named by its raw `size`:`opc` fields — the form the
+    /// One load or store named by its raw `size`:`opc` fields, the form the
     /// interpreter has after decoding. [`Acc::of`] settles what that means and
     /// [`Cpu::access`] performs it, which is the same pair the translator uses.
     #[inline(always)]
@@ -917,7 +917,7 @@ impl Cpu {
     /// The byte offset a register-offset addressing mode adds, with the
     /// extension and the scale already settled.
     ///
-    /// `S` scales by log2 of the access size, not by the byte count — the byte
+    /// `S` scales by log2 of the access size, not by the byte count, the byte
     /// count over-shifted table indices (`ldrsw x8,[x9,x8,lsl#2]` read entry
     /// 4x too far, loading 0 and jumping into the table itself).
     #[inline(always)]
@@ -1062,6 +1062,4 @@ impl Cpu {
         )?;
         Ok(true)
     }
-
-    // ---------- data processing: immediate ----------
 }

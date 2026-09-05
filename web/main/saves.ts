@@ -1,4 +1,4 @@
-/* ---------- save data ----------
+/* save data
 
    Same shape as the SD card's persistence, one store further in: entries are
    keyed by "<save id>/<path>", so everything a title saved can be found again

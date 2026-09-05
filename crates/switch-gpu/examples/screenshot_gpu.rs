@@ -7,7 +7,7 @@
 //! in an NSP.
 //!
 //! The point is the comparison. Run `screenshot_title` and this over the same
-//! frame and `cmp` the two PPMs — a byte-identical pair is the only evidence
+//! frame and `cmp` the two PPMs: a byte-identical pair is the only evidence
 //! that a GPU backend renders what the reference does, and the software
 //! rasterizer exists to be that reference.
 //!
@@ -39,7 +39,7 @@ fn main() {
     let mut cpu = Cpu::new();
     cpu.bootstrap();
     // `DOCKED=1` docks before boot; `DOCK_AT=<frame>` docks once that frame
-    // has been presented, which is what a real dock does — a running title is
+    // has been presented, which is what a real dock does: a running title is
     // told by the AM messages `set_operation_mode` queues, and one that was
     // never running had nothing to tell.
     if std::env::var("DOCKED").is_ok() {
@@ -52,7 +52,7 @@ fn main() {
     title.boot(&mut cpu);
 
     // The backend goes on the session, not on a channel, so it can be
-    // installed before the guest has opened one — and it is reached whichever
+    // installed before the guest has opened one, and it is reached whichever
     // channel the title turns out to draw through.
     if let Some(gpu) = gpu.take() {
         println!("[gpu] installed");

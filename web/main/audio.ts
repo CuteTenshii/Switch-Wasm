@@ -1,4 +1,4 @@
-/* ---------- audio ----------
+/* audio
 
    `audout` hands the guest's PCM over interleaved, at whatever rate and
    channel count it opened the device with. Each pump takes everything that has

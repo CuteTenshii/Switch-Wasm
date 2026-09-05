@@ -24,7 +24,7 @@ fn bootstrap_provides_stack_and_low_memory() {
         0x1234_5678
     );
 
-    // Reads from untouched low memory return zero instead of faulting — the
+    // Reads from untouched low memory return zero instead of faulting, the
     // exact `ldr x0, [x0]` at 0x244498 a real libnx binary hit.
     assert_eq!(cpu.mem.read_u32(0x244498).unwrap(), 0);
     // Writes allocate a private page on first touch.
@@ -149,7 +149,7 @@ fn horizon_query_memory_and_get_info() {
     assert!(cpu.read_x(1) <= u64::from(u32::MAX));
 
     // InfoType 21/22 = Total/UsedNonSystemMemorySize, which is what `nnSdk`
-    // sizes the application heap from — it hands the difference straight to
+    // sizes the application heap from: it hands the difference straight to
     // `nn::mem::StandardAllocator::Initialize`, which asserts on a span under
     // 16 KiB. Answering 0 (the old `_ => 0` default) made that difference 0.
     let total = u64::from(switch_core::cpu::GUEST_TOTAL_MEMORY_SIZE);
@@ -164,7 +164,7 @@ fn horizon_query_memory_and_get_info() {
     }
 
     // InfoType 16 = SystemResourceSizeTotal, and this query is the whole of
-    // what switches `nnSdk` onto its virtual address memory manager —
+    // what switches `nnSdk` onto its virtual address memory manager,
     // `IsVirtualAddressMemoryEnabled` is it succeeding and returning non-zero,
     // nothing else. A process whose NPDM declared nothing must read 0 here, or
     // it is put on a manager it never asked for and charged the address space
@@ -187,7 +187,7 @@ fn horizon_query_memory_and_get_info() {
     assert_eq!(cpu.read_x(1), total);
 
     // A title whose NPDM declares a system resource is told a different
-    // address space entirely — the alias region has to carry the SDK's arena
+    // address space entirely: the alias region has to carry the SDK's arena
     // as well as the heap, so it grows and the total shrinks to pay for it.
     // Just Dance 2023 declares 16 MiB and Just Dance 2019 declares 0, and
     // handing either one the other's figures breaks it: the first aborts in
@@ -233,7 +233,7 @@ fn horizon_query_memory_and_get_info() {
 fn horizon_map_physical_memory() {
     use switch_core::cpu::GUEST_ALIAS_REGION_ADDR;
     // MapPhysicalMemory(address, size) is how an application built for the
-    // 39-bit address space grows its heap — it picks the address itself out of
+    // 39-bit address space grows its heap: it picks the address itself out of
     // the alias region rather than calling svcSetHeapSize, which is why a
     // retail title never issues syscall 0x01 at all.
     let mut cpu = cpu_at(0x1000);
@@ -304,7 +304,7 @@ fn map_memory_backs_the_destination_and_unmap_frees_it() {
 #[test]
 fn query_memory_writes_40_byte_memoryinfo() {
     // svc 0x06 (QueryMemory) writes a 40-byte MemoryInfo
-    // {base(u64), size(u64), type/attr/perm/device/ipc/padding(u32 each)} —
+    // {base(u64), size(u64), type/attr/perm/device/ipc/padding(u32 each)},
     // NOT 8 x u64. The old stub wrote 64 bytes, overflowing the struct by 24
     // bytes; when the app's info pointer sat near the top of its stack this
     // clobbered main's saved LR and made NX-Shell's main "return" to 0.
@@ -354,7 +354,7 @@ fn query_memory_gives_the_execute_bit_only_to_module_text() {
     // keeping every CodeStatic region that is executable, then reading the
     // candidate's word at +4 as the offset to its `MOD0` signature. While
     // every mapped page reported RWX, the first writable region also looked
-    // executable — and `rtld`'s own `.rodata` opens with a note whose second
+    // executable, and `rtld`'s own `.rodata` opens with a note whose second
     // word is 0x1c, exactly where `MOD0` sits from there. `rtld` accepted it
     // as a module, relocated itself a second time against a base 0x3000 past
     // its real one, and ran off the end of the address space.
@@ -393,7 +393,7 @@ fn query_memory_gives_the_execute_bit_only_to_module_text() {
 fn guest_threads_run_and_hand_over_at_blocking_syscalls() {
     // A guest program that creates a thread, starts it, and waits for it to set
     // a flag. Thread creation used to hand out a fake handle and never run
-    // anything, so the wait spun forever — which is where hbmenu stopped.
+    // anything, so the wait spun forever, which is where hbmenu stopped.
     let mut cpu = Cpu::new();
     cpu.bootstrap();
     cpu.mem.map_zero(0x4000, 0x2000).unwrap(); // the child's stack
@@ -455,13 +455,13 @@ fn the_address_arbiter_compares_before_it_waits() {
     // semaphores, barriers and newer condition variables out of. Neither one
     // waits or wakes unconditionally: each first compares the word in guest
     // memory against the value the caller passed, and reports InvalidState
-    // when it does not match — which the caller reads as "already happened".
+    // when it does not match, which the caller reads as "already happened".
     const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
     const RESULT_TIMED_OUT: u64 = 0xEA01;
 
     // DecrementAndWaitIfLessThan with a zero timeout. The predicate holds
-    // (0 < 1) so the decrement happens — that is how a semaphore's waiter
-    // claims its place in the queue — but a zero timeout asked whether it
+    // (0 < 1) so the decrement happens: that is how a semaphore's waiter
+    // claims its place in the queue, but a zero timeout asked whether it
     // *would* block, not to block.
     let mut cpu = cpu_at(0x1000);
     cpu.mem.map(0x1000, &svc(0x34).to_le_bytes()).unwrap();
@@ -519,11 +519,11 @@ fn the_address_arbiter_compares_before_it_waits() {
 fn blocking_on_the_arbiter_leaves_the_next_thread_its_registers() {
     // A thread that blocks in `svcWaitForAddress` hands the CPU over inside
     // the syscall, so the syscall's *own* result has to be in X0 before that
-    // happens — after it, X0 belongs to whoever took over.
+    // happens: after it, X0 belongs to whoever took over.
     //
     // Writing it afterwards zeroed the incoming thread's X0. For Tomodachi
     // Life that thread was one `nn::os` had just started, and X0 was the
-    // `ThreadType` its entry stub installs at TLS+0x1F8 — so the thread ran
+    // `ThreadType` its entry stub installs at TLS+0x1F8, so the thread ran
     // with a null current-thread pointer, read its own handle as 0, and every
     // unlocked mutex it took (lock word 0) compared equal to one it already
     // held. `pthread_mutex_lock` aborts on that.
@@ -538,7 +538,7 @@ fn blocking_on_the_arbiter_leaves_the_next_thread_its_registers() {
         0x5280_0021,    // mov w1, #1
         0xb900_0121,    // str w1, [x9]     (the word the child will signal)
         0xd284_0001,    // mov x1, #0x2000  (entry)
-        0xd282_4682,    // mov x2, #0x1234  (arg — what must survive)
+        0xd282_4682,    // mov x2, #0x1234  (arg, what must survive)
         0xd28a_0003,    // mov x3, #0x5000  (stack top)
         0x5280_0764,    // mov w4, #0x3b    (priority)
         0x1280_0005,    // mov w5, #-1      (core)
@@ -837,7 +837,7 @@ fn a_timed_wait_expires_while_the_other_threads_hand_the_cpu_round() {
 fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
     // NXpotify's Zeroconf listener is `if (poll(&pfd, 1, 200) <= 0) continue;`
     // around an idle socket. Nothing here will ever be ready, so the answer is
-    // always zero — but a poll that was given a timeout is a *wait*, and
+    // always zero, but a poll that was given a timeout is a *wait*, and
     // returning it instantly left that thread looping with no blocking syscall
     // in it. Threads only hand over at those, so the loop owned the CPU
     // forever and the main thread never drew another frame.
@@ -847,8 +847,8 @@ fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
     cpu.mem.map_zero(0x4000, 0x2000).unwrap(); // the child's stack
     cpu.mem.map_zero(0x6000, 0x1000).unwrap(); // the flag main sets
 
-    // main: start the poller, sleep once to hand it the CPU, and then — only
-    // if it hands the CPU back — set the flag and exit.
+    // main: start the poller, sleep once to hand it the CPU, and then, only
+    // if it hands the CPU back: set the flag and exit.
     let main = [
         0xd284_0001u32, // mov x1, #0x2000  (entry)
         0xd280_0002,    // mov x2, #0       (arg)
@@ -1108,7 +1108,7 @@ fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
 #[test]
 fn a_timed_out_condvar_wait_comes_back_holding_its_mutex() {
     // `svcWaitProcessWideKeyAtomic` releases the mutex on the way in and the
-    // kernel re-acquires it on the way out — for a timeout exactly as for a
+    // kernel re-acquires it on the way out, for a timeout exactly as for a
     // signal. Waking the waiter without doing that leaves it running outside a
     // lock it believes it holds, and `nn::os::UnlockMutex` checks: it compares
     // the word against its own thread tag and aborts on the mismatch. The Mii
@@ -1119,7 +1119,7 @@ fn a_timed_out_condvar_wait_comes_back_holding_its_mutex() {
     cpu.mem.map_zero(0x4000, 0x2000).unwrap();
     cpu.mem.map_zero(0x6000, 0x1000).unwrap();
 
-    // main: start the child, then spin long enough for the wait to expire —
+    // main: start the child, then spin long enough for the wait to expire,
     // timed waits are checked on the scheduler's slice boundary, so time only
     // passes while some other thread is running.
     let main = [
@@ -1139,8 +1139,8 @@ fn a_timed_out_condvar_wait_comes_back_holding_its_mutex() {
         0xd400_00e1,    // svc #7
     ];
     // child: wait on a condition variable nobody ever signals, with a short
-    // timeout. What the mutex word held before does not matter — the wait
-    // releases it on the way in — so the only question the test asks is what
+    // timeout. What the mutex word held before does not matter, the wait
+    // releases it on the way in, so the only question the test asks is what
     // it holds on the way out.
     let child = [
         0xd28c_2009u32, // mov x9, #0x6100   (the mutex)
@@ -1223,8 +1223,8 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     assert!(GUEST_ALIAS_REGION_ADDR + GUEST_ALIAS_REGION_SIZE <= SHARED_BUFFER_ADDR);
     // The shared buffer is reserved for the *docked* geometry however the
     // console starts. The pool laid out in it is the shared layer's own and
-    // does not follow the dock — the Home Menu stays 720p docked because
-    // qlaunch lays out at 720p, not because of where the buffer ends — so
+    // does not follow the dock: the Home Menu stays 720p docked because
+    // qlaunch lays out at 720p, not because of where the buffer ends, so
     // this is headroom for an applet that does honour the layout it is given,
     // and what it has to cover is whichever geometry is the larger.
     assert_eq!(
@@ -1260,9 +1260,9 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
         "advertising {GUEST_TOTAL_MEMORY_SIZE:#x} of memory that cannot be backed"
     );
     // The alias region has to be a region a guest can read, and not a byte
-    // more: `libnx` reads it at startup and never maps into it — hbmenu,
+    // more: `libnx` reads it at startup and never maps into it, hbmenu,
     // JKSV, Checkpoint, the appstore and NX-Shell issue `svcGetInfo` 2/3 and
-    // zero `svcMapPhysicalMemory` — and `nnSdk` without virtual address
+    // zero `svcMapPhysicalMemory`, and `nnSdk` without virtual address
     // memory does not issue that syscall either. Persona 5 Royal's pools want
     // every byte of what the floor used to hold back.
     assert!(
@@ -1273,7 +1273,7 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     // What actually binds the alias region is virtual address memory, not the
     // heap. `VammManager` claims `VAMM_ARENA_SIZE` at the region base before
     // the title reserves a byte of its own, and the heap `nn::init` asks for
-    // — total minus the system resource — has to fit above it, as do the
+    // (total minus the system resource) has to fit above it, as do the
     // reservations the title then makes for itself. Sizing the alias region
     // to the heap alone is what made `nn::os::AllocateAddressRegion` fail
     // with os result 3-12, and it fails as an abort inside the title rather
@@ -1284,7 +1284,7 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
         assert!(STACK_TOP <= u64::from(layout.heap_addr));
         assert!(layout.system_resource < layout.total_memory);
     }
-    // The total has to fit the region the title actually grows into — and
+    // The total has to fit the region the title actually grows into, and
     // *which* region that is, is the whole difference between the two
     // layouts. A plain title grows the heap region with `svcSetHeapSize`; one
     // on virtual address memory reserves out of the alias region and never
@@ -1321,7 +1321,7 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     // 274 MiB of it is measurably not enough. That is what this layout used
     // to leave, and the title's own block allocator spent all of it in
     // ~20 MiB segments, ran its last one up to 0xEFF0_0000, and was refused
-    // the next 4.2 MiB. Nothing checked the null — the dlmalloc behind it
+    // the next 4.2 MiB. Nothing checked the null, the dlmalloc behind it
     // built a 4 MiB arena at address **0** and ran on it until a `Reallocate`
     // dereferenced a pointer no arena claimed. Nothing here can prove any
     // figure is *enough*; the floor is here so the region is not whittled

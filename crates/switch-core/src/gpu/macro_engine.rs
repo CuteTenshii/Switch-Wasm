@@ -1,4 +1,4 @@
-//! The Macro Method Expander (MME) — the small processor in front of the
+//! The Macro Method Expander (MME), the small processor in front of the
 //! Maxwell 3D class.
 //!
 //! Methods `0xE00` and up are not registers: they are 128 macro slots. The
@@ -158,7 +158,7 @@ impl MacroEngine {
     }
 
     /// Run the pending macro against `host`, which supplies the class register
-    /// file for `read` and receives each emitted method write as it happens —
+    /// file for `read` and receives each emitted method write as it happens,
     /// so a later `read` sees the effect of earlier writes (e.g.
     /// `WriteHardwareReg`'s firmware-call completion poll).
     pub fn run<H: MacroHost + ?Sized>(&mut self, host: &mut H) -> Result<()> {

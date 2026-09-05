@@ -3,7 +3,7 @@
 //!
 //! CELT does not run an IMDCT directly. It pre-rotates the spectrum by
 //! `exp(-i·2π(k+1/8)/N)`, runs a *forward* complex FFT of `N/4` points over
-//! the result, post-rotates, and then mirrors the two ends into each other —
+//! the result, post-rotates, and then mirrors the two ends into each other,
 //! which is where the time-domain alias cancellation that makes overlapping
 //! blocks reconstruct exactly comes from. Doing it that way costs one
 //! quarter-length complex transform instead of a real transform of length
@@ -46,7 +46,7 @@ impl Fft {
 
     /// One decimation-in-time level: split `n` into `p` interleaved
     /// sub-transforms of `m = n/p` points, then combine them with a `p`-point
-    /// DFT. `stride` walks the input, `fstride` is `self.n / n` — how far one
+    /// DFT. `stride` walks the input, `fstride` is `self.n / n`, how far one
     /// step of this level's twiddle moves in the full table.
     fn recurse(
         &self,
@@ -65,7 +65,7 @@ impl Fft {
         let m = n / p;
         if m == 1 {
             // The leaves are single points, so gathering them here saves a
-            // call per point — which at these sizes is most of the calls.
+            // call per point, which at these sizes is most of the calls.
             for q in 0..p {
                 out[q] = input[offset + q * stride];
             }
@@ -84,7 +84,7 @@ impl Fft {
         // `W_n^(q·j)` gathers the sub-transforms; `W_p^(q·t)` is the p-point
         // DFT across them. Both come out of the same table: the second is the
         // first with a step of `n/p`. The gather index is always inside the
-        // table — `q·j·fstride < p·m·fstride = self.n` — so it needs no wrap.
+        // table (`q·j·fstride < p·m·fstride = self.n`) so it needs no wrap.
         match p {
             2 => self.butterfly2(out, m, fstride),
             4 => self.butterfly4(out, m, fstride),
@@ -203,7 +203,7 @@ impl Mdct {
         }
     }
 
-    /// Transform `input` — `n>>shift` halved, taken every `stride` values —
+    /// Transform `input`, `n>>shift` halved, taken every `stride` values,
     /// into `out`, windowing the first `overlap` samples against what is
     /// already there.
     ///

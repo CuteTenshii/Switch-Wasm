@@ -2,14 +2,14 @@
 //! settings beside it.
 //!
 //! This is the device path: the guest hands over finished PCM and it plays.
-//! The renderer — what nearly every retail title actually uses — is
+//! The renderer (what nearly every retail title actually uses) is
 //! [`super::audren`].
 //!
 //! **The device plays in time.** A buffer is released once the CPU has run for
 //! as long as its samples take at the device's rate, queued behind whatever is
 //! still playing. Releasing on arrival hands the guest an infinitely fast
 //! sound card, and a title's audio clock is what its video is scheduled
-//! against — one title pushed 205x real time and its video player dropped
+//! against, one title pushed 205x real time and its video player dropped
 //! every frame of the boot video.
 
 use super::power::CLOCK_RATES_HZ;
@@ -21,8 +21,8 @@ use std::collections::VecDeque;
 /// bookkeeping its client polls.
 ///
 /// A real device releases a buffer once its samples have been clocked out to
-/// the DAC. There is no DAC here — the samples are copied into
-/// [`Cpu::audio_pcm`] for the host to play — but *when* a buffer comes back is
+/// the DAC. There is no DAC here: the samples are copied into
+/// [`Cpu::audio_pcm`] for the host to play, but *when* a buffer comes back is
 /// the whole of the guest's audio clock, so the device keeps a clock of its
 /// own: a buffer is released once the emulated CPU has run for as long as its
 /// samples take to play.
@@ -30,7 +30,7 @@ use std::collections::VecDeque;
 /// Releasing on arrival instead, which this used to do, hands the guest a
 /// device infinitely faster than the panel beside it. Just Dance 2019 fed
 /// 19,693,344 samples per second of emulated time through a 48 kHz stereo
-/// device — **205× real time** — and its video player, which schedules frames
+/// device (**205× real time**) and its video player, which schedules frames
 /// against the audio clock, concluded every frame of the boot video was too
 /// late to show and dropped all of them. The title presented a white clear
 /// sixty times a second and never issued a single draw.
@@ -43,14 +43,14 @@ pub(crate) struct AudioOut {
     pub started: bool,
     /// The volume the guest set, 0.0..=1.0. Applied when samples are taken.
     pub volume: f32,
-    /// Signalled every time a buffer is released — what
+    /// Signalled every time a buffer is released, what
     /// `audoutWaitPlayFinish` blocks on.
     pub event: u64,
     /// Buffers the guest has appended and not yet collected, each with the
     /// cycle count at which the device will have finished playing it.
     /// `GetReleasedAudioOutBuffer` hands back the ones whose time has come.
     pub queued: VecDeque<(u64, u64)>,
-    /// The cycle the device finishes everything queued so far — where the next
+    /// The cycle the device finishes everything queued so far, where the next
     /// buffer starts playing. A device that has fallen silent starts again
     /// from the present rather than from whenever it last stopped, so a gap in
     /// the guest's submissions is a gap in the audio, not a debt the device
@@ -70,7 +70,7 @@ const AUDIO_OUT_STARTED: u32 = 0;
 
 const AUDIO_OUT_STOPPED: u32 = 1;
 
-/// How many `nn::settings::system::AudioOutputModeTarget` values there are —
+/// How many `nn::settings::system::AudioOutputModeTarget` values there are,
 /// None, Hdmi, Speaker, Headphone, Type3, Type4. Every `audctl` setting is
 /// per-target, and a target outside this range is one no console has.
 pub(super) const AUDIO_TARGETS: usize = 6;
@@ -80,7 +80,7 @@ pub(super) const AUDIO_TARGETS: usize = 6;
 /// and the active one.
 pub(super) const AUDIO_TARGET_SPEAKER: u32 = 2;
 
-/// `nn::settings::system::AudioOutputMode::ch_2` — stereo, which is what
+/// `nn::settings::system::AudioOutputMode::ch_2`, stereo, which is what
 /// `audout` opens and therefore the only layout this console can be in.
 pub(super) const AUDIO_OUTPUT_MODE_STEREO: u32 = 1;
 
@@ -102,7 +102,7 @@ pub(super) struct AudioControl {
     /// the per-target one.
     default_target: u32,
     master_volume: f32,
-    /// `ForceMutePolicy::Disable` — whether the speaker is cut when
+    /// `ForceMutePolicy::Disable`, whether the speaker is cut when
     /// headphones are unplugged. There is no jack to unplug.
     force_mute_policy: u32,
     /// `HeadphoneOutputLevelMode::Normal`, and whether the speaker mutes
@@ -158,8 +158,8 @@ impl Cpu {
     /// Answering `GetWorkBufferSize` with an empty reply (the old generic
     /// stub) left `workBufSize` as whatever garbage was already in that
     /// stack slot; `tmemCreate`ing a transfer memory block of that size
-    /// reliably failed, and `audrenInitialize` — and so `SDL_OpenAudioDevice`,
-    /// and so `JKSV::initialize_sdl`, and so `JKSV::JKSV()` itself — gave up
+    /// reliably failed, and `audrenInitialize`, and so `SDL_OpenAudioDevice`,
+    /// and so `JKSV::initialize_sdl`, and so `JKSV::JKSV()` itself, gave up
     /// before a single frame ever rendered.
     /// `IAudioOutManager` (`audout:u`): the plain PCM-out device, which is
     /// what `nn::audio::OpenDefaultAudioOut` and libnx's `audoutInitialize`
@@ -173,8 +173,8 @@ impl Cpu {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &[], &[]);
         }
-        // Both clients that reach this — `nnSdk` and libnx's `audoutInitialize`
-        // — keep `audout` as a plain session and take the `IAudioOut` back as a
+        // Both clients that reach this, `nnSdk` and libnx's `audoutInitialize`
+        //: keep `audout` as a plain session and take the `IAudioOut` back as a
         // move handle. A domain request would need the reply to carry an object
         // id instead, so say so rather than hand back a handle it cannot use.
         if self.ipc_is_domain_request(tls) {
@@ -267,7 +267,7 @@ impl Cpu {
     /// waits on the event from `RegisterBufferEvent`, then collects the tags of
     /// the buffers the device has finished with. Here a buffer is finished the
     /// moment its samples have been copied out for the host, so every append
-    /// releases immediately — a device that never falls behind.
+    /// releases immediately, a device that never falls behind.
     pub(super) fn audio_out_request(
         &mut self,
         tls: u32,
@@ -342,7 +342,7 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &frames.to_le_bytes(), &[])
             }
             // FlushAudioOutBuffers: nothing is ever in flight, so nothing is
-            // ever flushed — the bool says so.
+            // ever flushed: the bool says so.
             Some(11) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
             // SetAudioOutVolume / GetAudioOutVolume.
             Some(12) => {
@@ -377,7 +377,7 @@ impl Cpu {
     /// ization`: nothing here runs in the background, so "the device finished a
     /// buffer" has to be noticed by somebody, and the guest asking to wait is
     /// the moment that matters. The deadline it returns is what makes that wait
-    /// safe to honour — a waiter can be put to sleep knowing exactly when the
+    /// safe to honour: a waiter can be put to sleep knowing exactly when the
     /// device will wake it, which is the one property `Cpu::events` otherwise
     /// cannot offer.
     pub(super) fn audio_tick(&mut self, handles: &[u64]) -> Option<u64> {
@@ -397,8 +397,8 @@ impl Cpu {
         for event in fire {
             self.signal_event(event);
         }
-        // The renderer runs on a clock of its own — a frame every 5 ms rather
-        // than a buffer every however long the guest made it — but a wait does
+        // The renderer runs on a clock of its own, a frame every 5 ms rather
+        // than a buffer every however long the guest made it, but a wait does
         // not care which of the two will wake it, only which comes first.
         let frame = self.audren_tick(handles);
         match (next, frame) {
@@ -436,7 +436,7 @@ impl Cpu {
             // Checking it is not defensive tidiness. The Mii editor submits a
             // descriptor whose `buffer` is 6 and whose `data_offset` is a
             // pointer, and `buffer + data_offset` then lands *inside the
-            // AudioOutBuffer struct itself* — so what reached the speakers was
+            // AudioOutBuffer struct itself*, so what reached the speakers was
             // the bytes of that struct's own pointers, read as PCM, several
             // thousand times a second. That is the buzzing. Hardware's audio
             // DSP has no way to produce sound from such a descriptor either.
@@ -508,7 +508,7 @@ impl Cpu {
     ///
     /// The entry after the last tag is zeroed, because `nn::audio`'s wrapper
     /// around this command **returns the first entry without looking at the
-    /// count** — it never initialises the stack slot it points the receive
+    /// count**: it never initialises the stack slot it points the receive
     /// buffer at, so an empty release leaves the caller reading whatever the
     /// previous call left on the stack. The Album applet's audio thread did
     /// exactly that: it took a `bl`'s return address for an `AudioOutBuffer`
@@ -546,7 +546,7 @@ impl Cpu {
         self.write_ipc_response(tls, 0, &[], &(tags.len() as u32).to_le_bytes(), &[])
     }
 
-    /// `audctl` — "nn::audioctrl::detail::IAudioController", the system-wide
+    /// `audctl`, "nn::audioctrl::detail::IAudioController", the system-wide
     /// audio settings behind the volume buttons and the sound page of system
     /// settings.
     ///
@@ -555,7 +555,7 @@ impl Cpu {
     /// next caller reads, and a console that forgets between the two has a
     /// slider that snaps back. The facts this console does contribute are
     /// that the only output target is the speaker and the only layout is
-    /// stereo — `audout` opens a two-channel device, and "one console, one
+    /// stereo: `audout` opens a two-channel device, and "one console, one
     /// answer" means `audctl` cannot claim 5.1.
     pub(super) fn audctl_request(
         &mut self,
@@ -649,7 +649,7 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &mode.to_le_bytes(), &[])
             }
             // NotifyHeadphoneVolumeWarningDisplayedEvent, and
-            // UpdateHeadphoneSettings(bool) — `ns` passes parental control's
+            // UpdateHeadphoneSettings(bool), `ns` passes parental control's
             // restriction flag through the second one. Neither has an answer
             // beyond its Result.
             Some(22) | Some(26) => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -687,7 +687,7 @@ impl Cpu {
             // 19.0.0+, and unnamed: switchbrew lists the id and nothing else.
             // Eden's `audio/audio_controller.cpp` reads it as handing back a
             // second reference to the same `IAudioController`, which is what
-            // this does — every setting above lives on the console rather than
+            // this does: every setting above lives on the console rather than
             // on the object, so the two sessions cannot drift apart.
             Some(5000) => {
                 self.reply_with_interface(tls, handle, "audctl")?;

@@ -1,4 +1,4 @@
-/* ---------- controller input ----------
+/* controller input
 
    Keyboard, gamepad and touch, sampled together and pushed to the emulator as
    one state. */
@@ -63,7 +63,7 @@ function keyboardMask(): number {
   return m;
 }
 
-/* ---------- touchscreen ----------
+/* touchscreen
 
    hid reports touches in the console's own 1280x720 digitizer space whatever
    resolution the guest is presenting at (TOUCH_SCREEN_WIDTH/HEIGHT in

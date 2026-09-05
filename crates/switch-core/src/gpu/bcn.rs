@@ -1,4 +1,4 @@
-//! Block-compressed texture codecs — the BC (a.k.a. DXT/RGTC/BPTC) family.
+//! Block-compressed texture codecs, the BC (a.k.a. DXT/RGTC/BPTC) family.
 //!
 //! Every one of these stores a 4x4 block of texels in a fixed 8 or 16 bytes,
 //! so a texel is not addressable on its own: reading one means decoding the
@@ -8,7 +8,7 @@
 //! frame.
 //!
 //! Channel conventions follow what the hardware hands the sampler, and the
-//! TIC's own swizzle then decides where those channels land — BC4 produces
+//! TIC's own swizzle then decides where those channels land, BC4 produces
 //! its one channel in red, BC5 its two in red and green, and the TIC says
 //! whether the rest read as zero or one (see [`crate::gpu::texture`]).
 
@@ -18,7 +18,7 @@ use crate::{Error, Result};
 pub type Block = [[f32; 4]; 16];
 
 /// Expand a 5- or 6-bit channel to 8 bits the way the decoders do it, by
-/// replicating the high bits into the low ones — so an all-ones input reaches
+/// replicating the high bits into the low ones, so an all-ones input reaches
 /// exactly 255 rather than falling short of white.
 fn expand(value: u32, bits: u32) -> u8 {
     let shifted = value << (8 - bits);
@@ -89,7 +89,7 @@ fn colour_block(block: &[u8], punchthrough: bool, out: &mut Block) {
     }
 }
 
-/// The eight-entry palette of an interpolated-scalar block — BC3's alpha half
+/// The eight-entry palette of an interpolated-scalar block, BC3's alpha half
 /// and the whole of BC4 and BC5.
 ///
 /// The endpoint ordering picks between eight evenly spaced values and six plus

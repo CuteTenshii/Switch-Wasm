@@ -1,7 +1,7 @@
 //! `ldr:ro`: run-time module loading.
 //!
 //! A title that links against an NRO maps it here rather than at startup, so
-//! this is a real loader — it relocates into [`super::RO_MODULE_REGION_ADDR`]
+//! this is a real loader, it relocates into [`super::RO_MODULE_REGION_ADDR`]
 //! and hands back where it landed.
 
 use super::Cpu;
@@ -17,7 +17,7 @@ const RO_RESULT_MODULE: u32 = 22;
 /// [`Cpu::ldr_ro_request`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct RoModule {
-    /// Where the caller's own copy of the NRO file lives — the address it
+    /// Where the caller's own copy of the NRO file lives, the address it
     /// passed to `LoadModule`, kept so an unload naming the source rather than
     /// the mapping still finds the module.
     source: u32,
@@ -30,15 +30,15 @@ pub(super) struct RoModule {
 }
 
 impl Cpu {
-    /// `ldr:ro` — `nn::ro::detail::IRoInterface`, the half of dynamic module
+    /// `ldr:ro`, `nn::ro::detail::IRoInterface`, the half of dynamic module
     /// loading that cannot happen inside the process.
     ///
     /// A title that loads code at run time (`nn::ro::LoadModule`, and libnx's
     /// `ldrRoLoadNro` under `roDlopen`) holds the NRO file in its own memory
     /// and asks this service to **map** it: a copy of the image at an address
     /// the service picks, `.text` executable and unwritable, with the caller's
-    /// zero-filled BSS directly behind it. Everything after that —
-    /// relocations, symbol resolution, the module list — is the caller's own
+    /// zero-filled BSS directly behind it. Everything after that,
+    /// relocations, symbol resolution, the module list: is the caller's own
     /// work, done against the address returned here. So `LoadModule` is the
     /// one command that has to do something real, and what it does is the
     /// mapping.
@@ -47,7 +47,7 @@ impl Cpu {
     /// hashes of the NROs a title is permitted to load, and
     /// `RegisterModuleInfo` is the caller presenting one; `ro` checks the
     /// signature chain against a key a console has and this emulator does not.
-    /// A registration is therefore accepted rather than verified — but it is
+    /// A registration is therefore accepted rather than verified, but it is
     /// *recorded*, so unregistering one is not a blind success and a caller
     /// that never registered anything is visible in the state rather than
     /// indistinguishable from one that did.
@@ -108,7 +108,7 @@ impl Cpu {
             // RegisterProcessHandle(pid, process handle) [3.0.0+]: the caller
             // telling `ro` which process the modules it is about to load
             // belong to. There is one process here and every module maps into
-            // it, so the handle names something already known — but the call
+            // it, so the handle names something already known, but the call
             // is `nn::ro::Initialize`'s first, and refusing it stops a title
             // before it loads anything.
             Some(4) => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -120,8 +120,8 @@ impl Cpu {
     /// back the address it now lives at.
     ///
     /// The mapping is a **copy**, not the alias a real kernel makes. Page
-    /// storage here is not shareable — [`crate::mem::Memory::copy_range`] has
-    /// the same constraint for `svcMapMemory` — so writes through the caller's
+    /// storage here is not shareable: [`crate::mem::Memory::copy_range`] has
+    /// the same constraint for `svcMapMemory`, so writes through the caller's
     /// original buffer do not reach the loaded module. That is a difference a
     /// guest could observe, and nothing does: the source buffer is a file
     /// image the caller read and stops touching, and every write that matters
@@ -177,7 +177,7 @@ impl Cpu {
         };
         // The BSS is mapped behind the image and nowhere else, so a caller
         // that sized it short would have the module's zero-initialized data
-        // land outside the mapping — on somebody else's module, once the
+        // land outside the mapping, on somebody else's module, once the
         // region has more than one.
         if bss_size < u64::from(header.bss_size) {
             self.diagnostic(
@@ -214,7 +214,7 @@ impl Cpu {
                 .wrapping_add(header.text_size),
         );
         // `.text` is never a relocation target, and a real kernel maps an
-        // NRO's code segment read-execute — so a write into it is a bug worth
+        // NRO's code segment read-execute, so a write into it is a bug worth
         // faulting on rather than one to absorb. Undone by `UnloadModule`, or
         // the protection would outlive the mapping and fault whatever is
         // mapped over it next.
@@ -264,8 +264,8 @@ impl Cpu {
     /// [`Cpu::ldr_ro_load_module`], freeing both the pages and the address
     /// space for the next load.
     ///
-    /// The address is the one `LoadModule` returned — that is what `nn::ro`
-    /// keeps — but the source buffer is accepted too. The two are a `u64`
+    /// The address is the one `LoadModule` returned: that is what `nn::ro`
+    /// keeps, but the source buffer is accepted too. The two are a `u64`
     /// named `nro_address` in both directions of this interface, they are easy
     /// to confuse from the outside, and unmapping the wrong module is a far
     /// worse answer than accepting either.
@@ -302,7 +302,7 @@ impl Cpu {
     ///
     /// Only the magic is checked. The rest of an NRR is a signature chain over
     /// a table of NRO hashes, verified on a console against a key that is not
-    /// here — and a hash check without the signature behind it authorizes
+    /// here, and a hash check without the signature behind it authorizes
     /// nothing, it only decides which NROs to refuse for a reason the caller
     /// cannot distinguish from a real one. So this records the registration
     /// and accepts it, which is also what a console with the check patched out
@@ -355,7 +355,7 @@ impl Cpu {
     }
 
     /// Whether an address or size is a whole number of pages, which every
-    /// argument `ro` takes has to be — it is mapping memory, and half a page
+    /// argument `ro` takes has to be: it is mapping memory, and half a page
     /// of a module is not something to map.
     fn ro_is_page_aligned(value: u64) -> bool {
         value.is_multiple_of(crate::mem::PAGE_SIZE as u64)

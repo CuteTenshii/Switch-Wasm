@@ -5,13 +5,13 @@
 //! that is bilinearly resampled up to the footprint; the number of partitions,
 //! which endpoint pairs each partition gets, and the numeric range every one of
 //! those values is stored in all come out of the block's own header. There is
-//! no fixed field layout to tabulate — the layout is computed from the header
+//! no fixed field layout to tabulate: the layout is computed from the header
 //! and then the two halves of the block are read towards each other, endpoints
 //! forwards from the low end and weights backwards from bit 127.
 //!
 //! The one genuinely unusual mechanism is Integer Sequence Encoding, which
-//! packs values whose range is not a power of two — five values into eight bits
-//! plus a trit each, or three into seven bits plus a quint — so that a
+//! packs values whose range is not a power of two, five values into eight bits
+//! plus a trit each, or three into seven bits plus a quint, so that a
 //! range of, say, 0..11 costs a little over three and a half bits rather than
 //! four. [`TRITS_FROM_T`] and [`QUINTS_FROM_Q`] are its unpacking tables.
 //!

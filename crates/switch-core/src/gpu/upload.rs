@@ -2,8 +2,8 @@
 //!
 //! [`crate::gpu::shader::wgsl`] says how to shade a draw and
 //! [`crate::gpu::pipeline`] says what state it runs under. Neither says what
-//! it draws. That is in guest memory — vertices at a GPU virtual address,
-//! indices at another, constants in whatever the driver bound — and a device
+//! it draws. That is in guest memory, vertices at a GPU virtual address,
+//! indices at another, constants in whatever the driver bound, and a device
 //! cannot read guest memory. Somebody has to translate the addresses, bound
 //! the ranges and hand over bytes, and this is that.
 //!
@@ -11,7 +11,7 @@
 //! a time, through the GPU MMU, exactly when a vertex shader asks for it, and
 //! a buffer that a draw does not touch costs nothing. A GPU backend has to
 //! decide up front what to upload, which turns "read this word" into "how
-//! much of this buffer is this draw actually going to look at" — a question
+//! much of this buffer is this draw actually going to look at", a question
 //! the register file does not answer directly.
 //!
 //! # Bounding what a draw touches
@@ -20,14 +20,14 @@
 //! often the end of a heap rather than the end of the mesh. What bounds an
 //! upload is the draw: `first` and `count` for a sequential draw, and for an
 //! indexed one the lowest and highest index in the index buffer, which has to
-//! be read to be known. Doing that here is not wasted work — the indices have
+//! be read to be known. Doing that here is not wasted work: the indices have
 //! to be uploaded anyway.
 //!
 //! # And what it writes
 //!
 //! A render target lives in guest memory too. `present` deswizzles
 //! block-linear pixels straight out of it, the 2D blitter copies out of it,
-//! and a shader can sample it — so a backend that keeps its surfaces on the
+//! and a shader can sample it, so a backend that keeps its surfaces on the
 //! device owns the question of when to write them back. [`Targets`] says
 //! where they are and [`Target::write`] is the walk that puts them back,
 //! which is [`Target::read`] run backwards.
@@ -106,8 +106,8 @@ pub struct IndexUpload {
 impl IndexUpload {
     /// The indices themselves, widened.
     ///
-    /// A backend that has to *rewrite* the list — which assembling a fan or a
-    /// quad into triangles is — needs the values rather than the bytes, and
+    /// A backend that has to *rewrite* the list, which assembling a fan or a
+    /// quad into triangles is: needs the values rather than the bytes, and
     /// the widening is the same one `read_indices` already does for an
     /// eight-bit list.
     pub fn indices(&self) -> Vec<u32> {
@@ -139,7 +139,7 @@ pub struct ConstantUpload {
 /// 512-byte GOBs so that a 2D neighbourhood is contiguous, which is what
 /// makes a texture cache work and what makes the bytes unreadable to anything
 /// that expects rows. `WriteTexture` wants rows. So this walks the swizzle
-/// once and writes them out, in the same units the surface addresses — texels
+/// once and writes them out, in the same units the surface addresses, texels
 /// for a plain format, whole blocks for a compressed one.
 ///
 /// The blocks of a compressed texture are *not* decoded. WebGPU has the BC
@@ -149,7 +149,7 @@ pub struct ConstantUpload {
 /// read.
 ///
 /// Two draws with the same key read the same bytes out of the same memory, so
-/// one of them can be given the other's — which is the whole point, because a
+/// one of them can be given the other's, which is the whole point, because a
 /// title samples a handful of images over and over and 96.5% of everything
 /// [`Uploads::of`] lifts is texture bytes.
 ///
@@ -187,7 +187,7 @@ pub struct TextureUpload {
     pub width: u32,
     pub height: u32,
     pub layers: u32,
-    /// Bytes per row of the linear image — a row of *blocks* for a
+    /// Bytes per row of the linear image, a row of *blocks* for a
     /// compressed format, which is not `width * bytes_per_texel`.
     pub row_bytes: u32,
     /// Rows per layer: the height in texels, or in blocks when compressed.
@@ -197,13 +197,13 @@ pub struct TextureUpload {
     /// Shared rather than owned so that a cache hand-back costs a refcount
     /// instead of copying 1.76 MiB, which is what an average draw reads.
     pub bytes: std::sync::Arc<[u8]>,
-    /// What these bytes were read from — see [`TextureKey`].
+    /// What these bytes were read from. See [`TextureKey`].
     pub key: TextureKey,
     /// How far past `key.addr` the read reached, so a caller holding these
     /// bytes knows which pages to watch.
     pub source_len: u64,
     /// How the shader expects the channels rearranged. WebGPU has no
-    /// per-texture component swizzle, so a backend applies this itself —
+    /// per-texture component swizzle, so a backend applies this itself,
     /// in the sampling hook, where it costs a shuffle rather than a copy.
     pub swizzle: [SwizzleSource; 4],
     pub sampler: Sampler,
@@ -237,7 +237,7 @@ impl Uploads {
     /// description cannot disagree about which arrays a draw binds or how
     /// they step.
     /// `immediates` are the `texs` immediates the draw's shaders sample
-    /// with, each paired with the stage it came from — a
+    /// with, each paired with the stage it came from, a
     /// [`crate::gpu::shader::wgsl::Translation`]'s `textures`. They are not
     /// in the register file: only the shader knows which texture units it
     /// reaches, and the two stages index *different* constant buffers with
@@ -259,7 +259,7 @@ impl Uploads {
     /// key that decides its bytes; answering `Some` skips the deswizzle
     /// entirely. The caller is the one that can know the answer is still
     /// good, because it is the one that can watch the pages the bytes came
-    /// from — see `TextureUpload::source_len` and `Memory::mark_gpu_page`.
+    /// from. See `TextureUpload::source_len` and `Memory::mark_gpu_page`.
     pub fn of_cached(
         engine: &Engine3D,
         pipeline: &Pipeline,
@@ -300,7 +300,7 @@ impl Uploads {
             let length = u64::from(count) * u64::from(buffer.stride);
             let start = array.start + u64::from(first) * u64::from(buffer.stride);
             // The array's own limit is the real end of the mapping, and it is
-            // the address of the *last valid byte* rather than one past it —
+            // the address of the *last valid byte* rather than one past it,
             // a 32-byte array at `0x204730000` has a limit of `0x20473001f`.
             // A draw that runs past it is reading something else's memory,
             // and saying so is better than uploading it.
@@ -372,7 +372,7 @@ pub struct Target {
     pub format: Format,
     pub addr: u64,
     /// Extent in *texels*, which on a multisampled surface is not its extent
-    /// in pixels — one pixel is a grid of texels there.
+    /// in pixels: one pixel is a grid of texels there.
     pub width: u32,
     pub height: u32,
     pub layout: Layout,
@@ -382,8 +382,8 @@ pub struct Target {
     /// Bytes per texel, which is what the layout addresses.
     pub unit: u32,
     /// How a depth surface packs its depth and its stencil, for the target
-    /// that is one. A device holds depth in a format of its own — no shading
-    /// API exposes Maxwell's packings — so a backend needs this to convert,
+    /// that is one. A device holds depth in a format of its own, no shading
+    /// API exposes Maxwell's packings, so a backend needs this to convert,
     /// and to put the stencil byte back untouched.
     pub depth: Option<DepthLayout>,
 }
@@ -398,7 +398,7 @@ impl Target {
         self.len() == 0
     }
 
-    /// Read the surface out as linear rows — what a backend needs before a
+    /// Read the surface out as linear rows: what a backend needs before a
     /// draw that blends, or tests depth, against what is already there.
     pub fn read(&self, ctx: &ExecCtx) -> Result<Vec<u8>> {
         if self.len() > MAX_UPLOAD {
@@ -422,7 +422,7 @@ impl Target {
         Ok(out)
     }
 
-    /// Put linear rows back, swizzled — the walk of [`Target::read`] run
+    /// Put linear rows back, swizzled: the walk of [`Target::read`] run
     /// backwards, and the thing a backend does before the guest looks at
     /// what it drew.
     pub fn write(&self, ctx: &mut ExecCtx, rows: &[u8]) -> Result<()> {
@@ -433,7 +433,7 @@ impl Target {
     /// packed.
     ///
     /// A device readback pads its rows out to an alignment, and repacking
-    /// them first is a copy of the whole surface — 3.7 MB a frame at 720p,
+    /// them first is a copy of the whole surface, 3.7 MB a frame at 720p,
     /// for a walk that is about to read every byte anyway and can as easily
     /// read them where they are.
     pub fn write_strided(&self, ctx: &mut ExecCtx, rows: &[u8], stride: u32) -> Result<()> {
@@ -452,7 +452,7 @@ impl Target {
         if let Some((cpu, mut raw)) = self.mapped(ctx)? {
             // A run at a time, not a texel: `run_at` answers where a byte
             // lands *and* how far from there is contiguous, which inside a GOB
-            // is 16 bytes — four pixels at 32 bits — and a whole row for a
+            // is 16 bytes (four pixels at 32 bits) and a whole row for a
             // pitch surface. This is the walk `Gpu::present` already makes,
             // and it is the one that runs every frame: a readback lands here.
             let width = per_row * self.unit;
@@ -527,7 +527,7 @@ impl Target {
     ///
     /// A packed pixel's stencil byte is read back and kept: a depth pass
     /// writes depth, and the byte beside it belongs to whoever wrote it last
-    /// — which is what `raster`'s `Fragments::write` does per fragment.
+    ///, which is what `raster`'s `Fragments::write` does per fragment.
     pub fn write_depth(&self, ctx: &mut ExecCtx, values: &[u8]) -> Result<()> {
         let (layout, kind) = self.depth_parts()?;
         let unit = kind.unit() as usize;
@@ -646,7 +646,7 @@ impl Target {
 /// converting *to*: WebGPU lets a copy read `depth32float` but never write
 /// it, lets a copy do both to `depth16unorm`, and lets a copy touch
 /// `depth24plus` in neither direction. So `Z16` stays what it is and
-/// everything else becomes a float — including the 24-bit packings, which
+/// everything else becomes a float, including the 24-bit packings, which
 /// survive the round trip bit-for-bit because 24 bits is exactly what an
 /// `f32` mantissa holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -696,7 +696,7 @@ impl DepthKind {
 /// Where a draw's surfaces are.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Targets {
-    /// Colour target 0, or `None` for a depth-only pass — which is a real
+    /// Colour target 0, or `None` for a depth-only pass, which is a real
     /// thing a title does: Just Dance 2017 renders every pass that way.
     pub color: Option<Target>,
     pub depth: Option<Target>,
@@ -725,8 +725,8 @@ impl Targets {
 /// Resolve a `texs` immediate to a texture and copy it out.
 ///
 /// The immediate is not a handle. It indexes, in dwords, the constant bank
-/// `TexCbIndex` names — a register the driver programs, to 15 under nouveau
-/// and 0 under deko3d — and *that* holds the bindless handle, which in turn
+/// `TexCbIndex` names, a register the driver programs, to 15 under nouveau
+/// and 0 under deko3d, and *that* holds the bindless handle, which in turn
 /// indexes the TIC and TSC pools. Three levels, none of them optional.
 /// One GOB: the block-linear unit a surface's rows are padded up to.
 const GOB_BYTES: u64 = 512;
@@ -820,7 +820,7 @@ fn read_texture(
     let mut bytes = Vec::with_capacity(total as usize);
     for layer in 0..layers {
         // A volume's slices interleave inside a block, so there is no base a
-        // slice starts at — `Texture::texel` addresses each one instead, and
+        // slice starts at, `Texture::texel` addresses each one instead, and
         // that is also the only path that reads the depth of a block.
         if image.block_depth_gobs > 1 {
             let unit = match copy {
@@ -881,7 +881,7 @@ fn read_texture(
 #[derive(Debug, Clone, Copy)]
 enum Copy {
     /// Deswizzled and handed over in the surface's own units, which is what
-    /// happens whenever WebGPU has a format for them — including every BC
+    /// happens whenever WebGPU has a format for them, including every BC
     /// codec, which stays compressed.
     Raw { unit: u32 },
     /// Decoded to `Rgba8Unorm` first, because WebGPU has no format for the
@@ -937,7 +937,7 @@ fn image_copy(image: &Texture) -> Result<Copy> {
         }
         // A depth surface handed over as a texture would have to be a
         // `depth32float`, and WebGPU fills one only from another texture of
-        // the same format — the same rule that keeps a shadow map off the
+        // the same format: the same rule that keeps a shadow map off the
         // device (see `wgsl`'s `Unsupported::DepthCompare`). So a draw that
         // samples one is the rasterizer's.
         TexelKind::Depth(depth) => {
@@ -946,7 +946,7 @@ fn image_copy(image: &Texture) -> Result<Copy> {
             )))
         }
         // WebGPU has ASTC only behind the `texture-compression-astc` feature,
-        // which a desktop browser does not offer — and the Home Menu's real
+        // which a desktop browser does not offer, and the Home Menu's real
         // textures are ASTC 4x4, so refusing them would mean refusing the
         // draws that matter.
         TexelKind::Block(codec @ Codec::Astc { .. }) => Copy::Decode { codec },
@@ -956,7 +956,7 @@ fn image_copy(image: &Texture) -> Result<Copy> {
             // whole number of blocks, and Maxwell will: the Home Menu binds
             // 1x1 BC4 and BC5 images as the default texture for its
             // untextured quads. Rounding the extent up would change what a
-            // normalized coordinate samples — one texel becomes sixteen —
+            // normalized coordinate samples: one texel becomes sixteen,
             // so the partial ones are decoded instead, which
             // `decode_blocks` already clips to the real extent.
             if image.width.is_multiple_of(block_w) && image.height.is_multiple_of(block_h) {
@@ -1009,7 +1009,7 @@ fn block_format(codec: Codec, srgb: bool) -> Format {
 /// Decode a compressed surface to `Rgba8Unorm`, block by block.
 ///
 /// The values a codec yields are what the texture *stores*, so an sRGB image
-/// stays sRGB-encoded here and the format says so — the device applies the
+/// stays sRGB-encoded here and the format says so, the device applies the
 /// transfer function, exactly as `Texture::texel` applies it for the
 /// rasterizer.
 fn decode_blocks(
@@ -1032,7 +1032,7 @@ fn decode_blocks(
     // Both buffers are made once and written over. `MAX_TEXELS` is a 12x12
     // footprint, so a fresh `block` per block zeroed 2304 bytes to fill the
     // 256 a 4x4 needs, and the strip is written in full every row before
-    // anything reads it — the clearing was 24% of an ASTC title's upload.
+    // anything reads it: the clearing was 24% of an ASTC title's upload.
     let mut strip: Vec<[f32; 4]> = vec![[0.0; 4]; (blocks_wide * block_w * block_h) as usize];
     let mut block = [[0.0f32; 4]; crate::gpu::bcn::MAX_TEXELS];
     for block_y in 0..image.height.div_ceil(block_h) {
@@ -1086,13 +1086,13 @@ fn deswizzle(
     let per_row = row_bytes / unit;
     // One translation for the whole surface where one mapping holds it, which
     // a render target's does. The walk is then arithmetic over a slice
-    // instead of 3.7 million address translations — see [`ExecCtx::span`].
+    // instead of 3.7 million address translations. See [`ExecCtx::span`].
     let swizzled = u64::from(layout.layer_stride(row_bytes, rows));
     if let Some(cpu) = ctx.span(base, swizzled) {
         let mut raw = vec![0u8; swizzled as usize];
         ctx.read_span(cpu, &mut raw)?;
         // The same run-at-a-time walk `Target::write` makes, in the other
-        // direction — `out` is built in order, so a run appends.
+        // direction: `out` is built in order, so a run appends.
         let width = per_row * unit;
         for y in 0..rows {
             let mut x = 0;
@@ -1287,7 +1287,7 @@ mod tests {
 
     #[test]
     fn the_first_index_is_an_offset_into_the_index_buffer() {
-        // For an indexed draw `first` counts indices, not vertices — the
+        // For an indexed draw `first` counts indices, not vertices, the
         // vertex it lands on is whatever the index there says.
         let mut h = Harness::new(0x1000);
         h.write(0, &[0, 0, 0, 42, 0, 0]);
@@ -1381,7 +1381,7 @@ mod tests {
     #[test]
     fn an_astc_texture_is_decoded_because_no_desktop_browser_can_sample_one() {
         // WebGPU has ASTC behind `texture-compression-astc`, which desktop
-        // browsers do not offer — and the Home Menu's real textures are ASTC
+        // browsers do not offer, and the Home Menu's real textures are ASTC
         // 4x4, so refusing them would be refusing the draws that matter.
         let astc = image(
             TexelKind::Block(Codec::Astc {
@@ -1580,7 +1580,7 @@ mod tests {
     #[test]
     fn a_packed_depth_surface_round_trips_through_a_device_format() {
         // 24 bits of depth is exactly what an f32 mantissa holds, so the
-        // conversion a device forces is lossless — which is the whole reason
+        // conversion a device forces is lossless, which is the whole reason
         // `depth32float` is what a 24-bit packing is held in. A round trip
         // that lost a bit would fail every `Equal` depth test in the frame
         // after it.

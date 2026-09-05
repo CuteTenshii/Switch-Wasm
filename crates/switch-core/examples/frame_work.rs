@@ -21,7 +21,7 @@
 //! allocator and its first upload, and averaging those into a steady frame
 //! describes neither.
 //!
-//! The target is a homebrew `.nro` or a retail container — an `.nsp`, an
+//! The target is a homebrew `.nro` or a retail container, an `.nsp`, an
 //! `.xci` or a bare Program `.nca`, which needs its keys after it. An NRO is
 //! not the workload a retail title is, so a ranking taken from one does not
 //! transfer.
@@ -270,7 +270,7 @@ fn main() {
         mean(total.dispatches_skipped),
     );
     // Scan-out runs whatever the frame drew, so a title issuing no draws at
-    // all still pays this one in full — see `examples/present_work.rs`.
+    // all still pays this one in full. See `examples/present_work.rs`.
     println!("  scan-out: {:.0} pixels", mean(total.pixels));
 
     let used = cpu.mem.mapped_bytes();

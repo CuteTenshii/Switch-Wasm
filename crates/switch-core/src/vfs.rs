@@ -2,7 +2,7 @@
 //!
 //! A path-addressed in-memory filesystem behind the `fsp-srv` service, so the
 //! guest's `opendir`/`readdir`/`open`/`read` see a real, consistent tree
-//! instead of a fixed reply. Hosts populate it — the browser frontend adds the
+//! instead of a fixed reply. Hosts populate it: the browser frontend adds the
 //! files the user drops in, and tests build small trees inline.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -36,7 +36,7 @@ pub struct Vfs {
     /// back on every tick: the emulated SD card lives in memory, and the only
     /// thing a store outside the session needs to hear about is what changed.
     /// Host-side edits ([`Vfs::write_file`]) deliberately do **not** land here
-    /// — that is the host loading the card *from* its store, and marking those
+    ///: that is the host loading the card *from* its store, and marking those
     /// would write every file straight back where it came from.
     changed: BTreeSet<String>,
 }
@@ -82,7 +82,7 @@ impl Vfs {
     ///
     /// Resolving those components is not cosmetic. A guest builds paths by
     /// joining, so `.` and `..` arrive in them constantly, and treating them
-    /// as ordinary names creates directories called `.` — `hb-appstore` left
+    /// as ordinary names creates directories called `.`: `hb-appstore` left
     /// a tree of `/switch/.`, `/switch/./.get`, `/switch/./.get/packages`
     /// behind it, none of which it could find again by any other spelling.
     pub fn normalize(path: &str) -> String {
@@ -98,7 +98,7 @@ impl Vfs {
                 // anything. Note this is an exact match: `.get` is a perfectly
                 // ordinary name that happens to start with a dot.
                 "" | "." => {}
-                // `..` goes up, and stops at the root rather than above it —
+                // `..` goes up, and stops at the root rather than above it,
                 // a guest does not get out of its own filesystem by asking.
                 ".." => {
                     parts.pop();
@@ -149,8 +149,8 @@ impl Vfs {
     /// Create an empty file of `size` bytes, failing if anything is already
     /// at `path`.
     ///
-    /// Unlike [`Vfs::write_file`] — which is the *host* putting a file on the
-    /// card and may replace what is there — this is the guest's `CreateFile`,
+    /// Unlike [`Vfs::write_file`], which is the *host* putting a file on the
+    /// card and may replace what is there: this is the guest's `CreateFile`,
     /// and it must not truncate: `fsdev` opens an existing file by calling
     /// `CreateFile`, expecting "already exists", and then opening it. Losing
     /// that distinction silently emptied a file every time the guest reopened
@@ -172,8 +172,8 @@ impl Vfs {
     /// [`Vfs::write_file`], recorded as a change so a host that persists this
     /// storage writes the new contents out.
     ///
-    /// This is the path for a *service* that keeps its state in a save —
-    /// `set:sys` and its system settings — rather than the host staging a
+    /// This is the path for a *service* that keeps its state in a save,
+    /// `set:sys` and its system settings, rather than the host staging a
     /// file the guest is about to read. The distinction is which side the
     /// write has to travel: [`Vfs::write_file`] is a value coming back from
     /// the store and must not be queued straight back into it.

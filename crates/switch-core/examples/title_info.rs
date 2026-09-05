@@ -1,5 +1,5 @@
-//! Print a title's control data — icon, name, publisher and the rest of its
-//! NACP — from an `.nsp`, an `.xci` or a standalone Control `.nca`. The CLI equivalent of
+//! Print a title's control data: icon, name, publisher and the rest of its
+//! NACP, from an `.nsp`, an `.xci` or a standalone Control `.nca`. The CLI equivalent of
 //! the browser's title card, useful for checking a container without one.
 //!
 //! Usage: cargo run -p switch-core --example title_info -- <container> <prod.keys> [title.keys] [icon_out.jpg]

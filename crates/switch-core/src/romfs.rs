@@ -5,7 +5,7 @@
 //! 0x50-byte header of `u64` offset/size pairs:
 //!
 //! ```text
-//! 0x00  header size (always 0x50 — RomFS has no magic, this is the check)
+//! 0x00  header size (always 0x50, RomFS has no magic, this is the check)
 //! 0x08  directory hash table offset
 //! 0x10  directory hash table size
 //! 0x18  directory metadata table offset
@@ -113,8 +113,8 @@ impl<'a> RomFs<'a> {
         // point an entry back at itself. The walk is bounded by the number of
         // entries the tables could possibly hold: every entry is at least its
         // fixed part long, so dividing each table by that is an upper bound on
-        // what it can contain. A directory is read twice — once when its
-        // parent lists it, once when it is walked itself — so it gets two.
+        // what it can contain. A directory is read twice, once when its
+        // parent lists it, once when it is walked itself, so it gets two.
         let mut budget =
             2 * (dir_table.len() / DIR_ENTRY_SIZE) + file_table.len() / FILE_ENTRY_SIZE + 2;
         let spend = |budget: &mut usize| -> Result<(), Error> {
@@ -165,7 +165,7 @@ impl<'a> RomFs<'a> {
         &self.files
     }
 
-    /// Look up a file by absolute path (`/control.nacp`), case-insensitively —
+    /// Look up a file by absolute path (`/control.nacp`), case-insensitively,
     /// RomFS itself is case-sensitive, but the names this reader looks for are
     /// SDK-generated and have been spelled inconsistently by repack tools.
     pub fn find(&self, path: &str) -> Option<&RomFsFile> {

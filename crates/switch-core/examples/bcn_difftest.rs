@@ -9,8 +9,8 @@
 //!
 //! The fixture is produced by a throwaway C harness around `bcdec.h`
 //! (<https://github.com/iOrange/bcdec>, public domain), which writes one
-//! record per block — sixteen input bytes then the reference's decoded
-//! texels — for each codec in turn:
+//! record per block, sixteen input bytes then the reference's decoded
+//! texels, for each codec in turn:
 //!
 //! ```c
 //! #define BCDEC_IMPLEMENTATION

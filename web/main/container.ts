@@ -1,4 +1,4 @@
-/* ---------- NSP / NCA containers ----------
+/* NSP / NCA containers
 
    Inspecting what a container holds, showing the title it describes, and
    launching the program inside it. */
@@ -62,7 +62,7 @@ async function handleContainerFile(file: File): Promise<void> {
   }
   // An update NSP is not a container to open: it holds no game. Asking the
   // session what it is costs its header and its ticket, and answers with the
-  // title it patches — so this is also how the page knows which game to pair
+  // title it patches, so this is also how the page knows which game to pair
   // it with.
   const patches = await call('add_update', file).catch(() => '');
   if (patches) {
@@ -79,11 +79,11 @@ async function handleContainerFile(file: File): Promise<void> {
   await handleNspFile(file);
 }
 
-/* ---------- updates ----------
+/* updates
 
    An update holds only what it changed. Its Program NCA carries the patched
    modules in full, and its RomFS is a set of ranges indexed against the base
-   game's — readable over that container and nowhere else. So an update is not
+   game's, readable over that container and nowhere else. So an update is not
    opened, it is *paired*: dropped before the game or after, it waits until
    the title it belongs to is open and is then applied at Launch.
 
@@ -276,7 +276,7 @@ function pairedNotes(): string[] {
   return lines;
 }
 
-/* ---------- booting a container from the stage ----------
+/* booting a container from the stage
 
    The panel's flow is "look inside this, and maybe launch something out of
    it"; the stage's is "play this". Both open the container the same way and
@@ -480,7 +480,7 @@ function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity
   return heldTitle;
 }
 
-/* ---------- title details ----------
+/* title details
 
    What a console's home menu shows for a title - its icon, name and publisher
    - plus the rest of what its NACP declares, read from the Control NCA that
@@ -735,7 +735,7 @@ export async function doLaunchNca(
   // a bare NCA off the NAND has only the file name to show.
   beginLoad(identity?.name || name, 'decrypting the program and reading its ExeFS',
     identity?.iconUrl);
-  // A launch replaces whatever is running, so it gets a console of its own —
+  // A launch replaces whatever is running, so it gets a console of its own,
   // and unlike a boot from the stage it needs the container back, since that
   // is what it is about to read the title out of. A no-op when the boot that
   // reached here rebuilt the session already.

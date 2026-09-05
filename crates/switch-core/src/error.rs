@@ -31,7 +31,7 @@ pub enum Error {
         end: u64,
         available: u64,
     },
-    /// A buffer this target cannot allocate was asked for — on wasm32 no
+    /// A buffer this target cannot allocate was asked for, on wasm32 no
     /// single allocation may exceed `isize::MAX` (2 GiB), which is smaller
     /// than a retail container. Reported instead of letting the request reach
     /// the allocator, whose failure path traps the module.

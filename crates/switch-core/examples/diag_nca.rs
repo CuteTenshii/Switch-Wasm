@@ -1,5 +1,5 @@
 //! Ad-hoc diagnostic for debugging real-world NCA decryption against a real
-//! `prod.keys`/`title.keys` — prints the fields `Nca::parse_source`
+//! `prod.keys`/`title.keys`, prints the fields `Nca::parse_source`
 //! derives (key index, generation, FS header layout) without needing the
 //! actual section key to be present, so a "missing key" case still reports
 //! everything else for sanity-checking.

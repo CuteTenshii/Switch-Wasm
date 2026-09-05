@@ -16,7 +16,7 @@
 //! which on both a homebrew and a retail title is under 1.5%; this measures
 //! the ones it has an op for and still charges for.
 //!
-//! The target is a homebrew `.nro` or a retail container — an `.nsp`, an
+//! The target is a homebrew `.nro` or a retail container, an `.nsp`, an
 //! `.xci` or a bare Program `.nca`, which needs its keys after it. An NRO is
 //! not the workload a retail title is, so a ranking taken from one does not
 //! transfer.

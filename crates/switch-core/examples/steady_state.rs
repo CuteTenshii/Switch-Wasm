@@ -8,8 +8,8 @@
 //! out to be four calls that all finished before its first frame. The stall
 //! itself was a rounding error in the same numbers.
 //!
-//! So this skips the boot — running it through the block translator, which is
-//! the only fast way to get there — and starts sampling at the Nth presented
+//! So this skips the boot: running it through the block translator, which is
+//! the only fast way to get there, and starts sampling at the Nth presented
 //! frame. Everything it reports happened after the title stopped making
 //! progress, which is the only part that says why.
 //!
@@ -65,7 +65,7 @@ fn main() {
     title.boot(&mut cpu);
 
     // Nothing is sampled here, so the boot runs through the block translator
-    // rather than the interpreter — the difference is 1.8x on real code, and
+    // rather than the interpreter: the difference is 1.8x on real code, and
     // a title's boot is measured in billions of instructions.
     let boot = common::run_to(&mut cpu, BOOT_BUDGET, |cpu| cpu.nv.gpu.frames >= want_frame);
     if cpu.nv.gpu.frames < want_frame {
@@ -86,7 +86,7 @@ fn main() {
     let mut callers: BTreeMap<(u64, u32), u64> = BTreeMap::new();
     // Whole call stacks, sampled far more rarely than the pc: walking frame
     // pointers costs more than reading a register, and what a stack answers is
-    // "which loop is this" rather than "how hot is it" — a question a few
+    // "which loop is this" rather than "how hot is it", a question a few
     // thousand samples settle as well as a few million.
     let mut stacks: BTreeMap<(u64, Vec<u32>), u64> = BTreeMap::new();
     let mut sampled = 0u64;
@@ -153,7 +153,7 @@ fn main() {
     );
     // What the window cost is not reported here. It would be a wall clock on
     // this host, and the frontend's frame rate is made in a browser, out of
-    // the same work run through a different compiler — `tools/wasm_bench.mjs`
+    // the same work run through a different compiler, `tools/wasm_bench.mjs`
     // times that one. What a stall costs in *work* is above, and
     // `examples/frame_work.rs` reports it per frame.
     print!("{}", cpu.thread_dump());

@@ -1,13 +1,13 @@
 //! The A32 barrel shifter and the data-processing immediate.
 //!
 //! Both produce a carry as well as a value, and that carry *is* the `C` flag
-//! for the logical operations — which is the whole reason A64's
+//! for the logical operations, which is the whole reason A64's
 //! [`crate::cpu::bits::shift_reg`] cannot be reused here: it computes the
 //! value only.
 
 /// A shift type after the encoding's zero-amount special cases are resolved.
-/// `RRX` is not one of the encoded types — it is `ROR` with an immediate
-/// amount of zero — so it gets a value of its own here rather than being a
+/// `RRX` is not one of the encoded types: it is `ROR` with an immediate
+/// amount of zero, so it gets a value of its own here rather than being a
 /// case inside [`shift_c`].
 const SHIFT_RRX: u8 = 4;
 
@@ -28,7 +28,7 @@ pub(super) fn decode_imm_shift(ty: u8, imm5: u8) -> (u8, u32) {
 /// The barrel shifter, returning the carry it produces as well as the value.
 ///
 /// Every data-processing operand goes through this, and the carry it hands
-/// back *is* the `C` flag for the logical operations — which is the whole
+/// back *is* the `C` flag for the logical operations, which is the whole
 /// reason A64's [`crate::cpu::bits::shift_reg`] cannot be reused: it computes
 /// the value only.
 #[inline]

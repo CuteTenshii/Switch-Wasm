@@ -38,8 +38,8 @@ pub const HFS0_ENTRY_SIZE: usize = 0x40;
 /// The two spellings of one partition table: `PFS0` in an `.nsp` and in an
 /// NCA's ExeFS, `HFS0` in the root and partitions of an XCI.
 ///
-/// Nothing but the magic and the entry stride separates them — the header and
-/// the first four fields of an entry are laid out identically — so they are
+/// Nothing but the magic and the entry stride separates them, the header and
+/// the first four fields of an entry are laid out identically, so they are
 /// read by one parser rather than two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartitionKind {
@@ -72,7 +72,7 @@ impl PartitionKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pfs0File {
-    /// Byte offset of the file payload from the start of the image — the
+    /// Byte offset of the file payload from the start of the image, the
     /// entry's own offset already resolved against the payload area, so it
     /// can be read without knowing how long the header was.
     pub offset: u64,
@@ -145,13 +145,13 @@ impl Pfs0 {
         let string_table_size = read_u32(&head, 0x08) as u64;
 
         // Header + entries + string table must fit within the image. Every
-        // term comes from a `u32`, so the `u64` arithmetic cannot overflow —
+        // term comes from a `u32`, so the `u64` arithmetic cannot overflow,
         // which is the point of doing it in `u64` on a 32-bit target, where
         // `file_count * FILE_ENTRY_SIZE` alone can exceed `usize`.
         let strings_start = HEADER_SIZE as u64 + file_count * entry_size as u64;
         let header_len = strings_start + string_table_size;
-        // The payload area starts where the header — entry table and string
-        // table — ends, and that is what an entry's offset is counted from.
+        // The payload area starts where the header, entry table and string
+        // table: ends, and that is what an entry's offset is counted from.
         let payload_base = at.checked_add(header_len).ok_or(Error::Overflow)?;
         if payload_base > src.len() {
             return Err(Error::Truncated {
@@ -174,7 +174,7 @@ impl Pfs0 {
             let offset = read_u64(&header, entry);
             let size = read_u64(&header, entry + 8);
             let name_off = read_u32(&header, entry + 16) as usize;
-            // The name has to be NUL-terminated inside the string table —
+            // The name has to be NUL-terminated inside the string table,
             // `header` ends where the table does, so a name offset pointing
             // past it fails here instead of running into the payload.
             let name = read_cstr(&header, strings_start.saturating_add(name_off))
@@ -193,8 +193,8 @@ impl Pfs0 {
         //
         // This is decided from the extents rather than from "does any entry
         // point inside the header", which is what it used to ask. A repack
-        // that pads its payload area — aligning the first file to 0x8000,
-        // say — has no entry at offset 0 to give the relative reading away,
+        // that pads its payload area, aligning the first file to 0x8000,
+        // say: has no entry at offset 0 to give the relative reading away,
         // so every offset was left short by the header length and every NCA
         // in it was read from the wrong place. A 7 GiB Just Dance 2022 `.nsp`
         // whose first entry starts at 0x7e30 (0x8000 once rebased) is one.
@@ -202,7 +202,7 @@ impl Pfs0 {
         // Only for a table that starts the image. A partition nested inside
         // one is written by the cartridge master, not by a repacker, and
         // "absolute" there would mean an offset into the image rather than
-        // into the partition — a reading no producer intends and one that
+        // into the partition, a reading no producer intends and one that
         // happens to fit often enough to be dangerous.
         let relative_fits = extents_fit(&files, payload_base, src.len());
         // An absolute offset cannot point into the header its own entry
@@ -314,7 +314,7 @@ pub(crate) fn read_cstr(data: &[u8], at: usize) -> Option<&str> {
 ///
 /// Not `#[cfg(test)]`: `switch-wasm` is a separate crate and cannot reach a
 /// test module in this one, and the container path it exports is worth
-/// testing against a real image — the same reason [`crate::gpu::testing`]
+/// testing against a real image, the same reason [`crate::gpu::testing`]
 /// exists.
 pub mod testing {
     use super::*;
@@ -359,7 +359,7 @@ mod tests {
     use super::*;
 
     /// Entry offsets here are written from the start of the image, not from
-    /// the payload area — so every test built on this one is also what keeps
+    /// the payload area, so every test built on this one is also what keeps
     /// the absolute-offset fallback honest.
     fn build_pfs0(files: &[(&str, &[u8])]) -> Vec<u8> {
         // Layout: header (0x10) + entries + string table, then payloads.
@@ -479,7 +479,7 @@ mod tests {
         // area padded so the first file lands on an alignment boundary. No
         // entry sits at offset 0, which is what the old "does any entry point
         // inside the header" test needed to notice the offsets were relative
-        // at all — so every file in one was read a header-length short.
+        // at all, so every file in one was read a header-length short.
         const PAYLOAD_AT: usize = 0x80;
         let mut image = Vec::new();
         image.extend_from_slice(&PFS0_MAGIC.to_le_bytes());
@@ -502,7 +502,7 @@ mod tests {
     }
 
     /// An XCI keeps its partitions at offsets of their own, so the table has
-    /// to be readable somewhere other than the front of the image — and what
+    /// to be readable somewhere other than the front of the image, and what
     /// comes out has to be addressed against the image, not against the
     /// partition, or every layer above would need to know it was nested.
     #[test]
@@ -532,7 +532,7 @@ mod tests {
 
     /// The absolute-offset fallback is for a repacked `.nsp` and stops there.
     /// Inside an image, an offset that "fits" measured from byte 0 is a
-    /// coincidence — the entry belongs to a partition, and reading it that way
+    /// coincidence, the entry belongs to a partition, and reading it that way
     /// would hand back a range from somewhere else entirely.
     #[test]
     fn a_nested_partition_is_never_reread_as_absolute_offsets() {
@@ -540,7 +540,7 @@ mod tests {
         let mut partition = testing::partition_fs(PartitionKind::Hfs0, &[("a.nca", b"first")]);
         let payload_base = AT + (0x10 + HFS0_ENTRY_SIZE + 6) as u64;
         // Past this partition's header, and inside the image measured from
-        // byte 0 — but past the end of it once counted from the payload area,
+        // byte 0, but past the end of it once counted from the payload area,
         // which is the only reading a cartridge ever means.
         partition[0x10..0x18].copy_from_slice(&0x1100u64.to_le_bytes());
         partition[0x18..0x20].copy_from_slice(&0x100u64.to_le_bytes());
@@ -573,7 +573,7 @@ mod tests {
         }
     }
 
-    /// The container, and where its payload area starts — which is what the
+    /// The container, and where its payload area starts, which is what the
     /// entry offset in it is counted from.
     fn huge_container(entry_offset: u64, entry_size: u64, len: u64) -> (HugeSource, u64) {
         let mut header = Vec::new();

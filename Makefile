@@ -23,7 +23,7 @@ test:
 #
 # Always with it. `wgpu` reaches WebGPU through `wasm-bindgen`, so the
 # artefact is a wasm-bindgen module with generated glue beside it rather than
-# a bare one the worker hands to `WebAssembly.instantiateStreaming` — and
+# a bare one the worker hands to `WebAssembly.instantiateStreaming`, and
 # carrying two shapes of core, two loaders and two answers to every question
 # about the build costs more than the megabyte it would save. A machine
 # without WebGPU still runs: the backend reports that it could not open a

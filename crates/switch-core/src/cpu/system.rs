@@ -6,7 +6,7 @@
 //! back, which is what the interpreter needs; the block translator runs the
 //! classification once and keeps the answer in its op, so a hot `MRS` walks
 //! the table when it is translated rather than every time it executes.
-//! `MRS TPIDRRO_EL0` — how every `nnSdk` thread finds its own TLS — sits near
+//! `MRS TPIDRRO_EL0` (how every `nnSdk` thread finds its own TLS) sits near
 //! the end of that table, which is what made the difference worth having.
 
 use super::bits::{FPCR_MASK, FPSR_MASK};
@@ -31,7 +31,7 @@ pub(super) enum SysReg {
     TpidrRo,
     Fpcr,
     Fpsr,
-    /// `CNTPCT_EL0`, and `CNTVCT_EL0` for the same count — EL0 has no virtual
+    /// `CNTPCT_EL0`, and `CNTVCT_EL0` for the same count: EL0 has no virtual
     /// offset here. **This is the clock, not `svcGetSystemTick`**:
     /// `nn::os::GetSystemTick` is `mrs x0, cntpct_el0; ret`, so a retail
     /// title's frame timing never reaches a syscall at all.
@@ -58,14 +58,14 @@ impl SysReg {
             0b11_011_1101_0000_010 => SysReg::Tpidr,
             0b11_011_1101_0000_011 => SysReg::TpidrRo,
             // FPCR (3:3:4:4:0) and FPSR (3:3:4:4:1). The op1 field is 3 at
-            // EL0, not 0 — reading it as 3:0:... meant a guest's `mrs x0,
+            // EL0, not 0: reading it as 3:0:... meant a guest's `mrs x0,
             // fpcr` fell through to the catch-all zero.
             0b11_011_0100_0100_000 => SysReg::Fpcr,
             0b11_011_0100_0100_001 => SysReg::Fpsr,
             // DCZID_EL0: BS=4, a 64-byte `DC ZVA` block. musl/newlib memset
             // strides the cache-zero loop with `4 << BS`; BS=0 runs away.
             0b11_011_0000_0000_111 => SysReg::Fixed(4),
-            // CTR_EL0: the Cortex-A57 value — 64-byte I- and D-cache lines,
+            // CTR_EL0: the Cortex-A57 value, 64-byte I- and D-cache lines,
             // 64-byte ERG/CWG. Cache-flush loops stride by `4 << DminLine`,
             // so reporting 0 made NX-Shell's flush walk its buffers 4 bytes
             // at a time.
@@ -82,8 +82,8 @@ impl SysReg {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum SysOp {
     /// A hint, barrier, cache maintenance operation or PSTATE-immediate write
-    /// that retires with no effect. There are no caches to maintain here —
-    /// memory is always coherent — and libnx flushes the data cache around
+    /// that retires with no effect. There are no caches to maintain here,
+    /// memory is always coherent, and libnx flushes the data cache around
     /// every buffer it hands to the GPU.
     Nop,
     /// `MRS Xt, <sysreg>`. `rd` is a resolved register-file slot.

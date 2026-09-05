@@ -7,7 +7,7 @@
 //!
 //! The command processor here runs a submission to completion inside the
 //! submitting ioctl, so by the time the guest waits, the counter has already
-//! passed the threshold — but the counters are still real, because the guest
+//! passed the threshold, but the counters are still real, because the guest
 //! reads them directly (deko3d polls fences out of a mapped syncpoint page)
 //! and compares with wrapping arithmetic.
 
@@ -122,7 +122,7 @@ impl Host1x {
         Ok(self.slot(id)?.max)
     }
 
-    /// Reserve `count` future increments and return the resulting threshold —
+    /// Reserve `count` future increments and return the resulting threshold,
     /// what a submission's fence reports back to the guest.
     pub fn incr_max(&mut self, id: u32, count: u32) -> Result<u32> {
         let p = self.slot_mut(id)?;

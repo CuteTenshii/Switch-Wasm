@@ -4,8 +4,8 @@
 //! it is a run of LZ4 blocks plus a [`crate::bucket`] tree saying which block
 //! covers which range of the decompressed image. `nn::fssystem` stacks this
 //! layer directly on top of the hash one, so the offsets here are relative to
-//! the image — the RomFS past its IVFC levels, or the ExeFS past its hash
-//! table — and not to the section.
+//! the image, the RomFS past its IVFC levels, or the ExeFS past its hash
+//! table, and not to the section.
 //!
 //! An entry is `u64 virtual offset, u64 physical offset, u8 kind, u32
 //! physical size`, and covers everything up to the next entry's virtual
@@ -63,7 +63,7 @@ pub struct CompressedStorage<S> {
     /// The image as stored: compressed data first, then the table.
     inner: S,
     entries: Vec<Entry>,
-    /// Where the data ends and the table begins — nothing may read past it.
+    /// Where the data ends and the table begins: nothing may read past it.
     data_end: u64,
     /// Size of the decompressed image.
     len: u64,
@@ -74,7 +74,7 @@ impl<S: ByteSource> CompressedStorage<S> {
     /// Read the table out of `inner` and index it.
     ///
     /// `table` is the FS header's `CompressionInfo`, whose offsets are
-    /// relative to `inner` — which must therefore be the image the hash layer
+    /// relative to `inner`, which must therefore be the image the hash layer
     /// exposes, not the whole section.
     pub fn new(inner: S, table: BktrTable) -> Result<CompressedStorage<S>, Error> {
         if table.magic != BKTR_MAGIC {

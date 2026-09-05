@@ -4,8 +4,8 @@
 //! read through [`crate::env_flag`], and every one of them wrote to stderr.
 //! Neither exists in a browser: `wasm32-unknown-unknown` has no WASI, so
 //! `std::env::var` always fails and `eprintln!` goes nowhere. That left the
-//! twenty-odd `TRACE_*` switches — the most detailed account this emulator can
-//! give of itself — reachable only from the command line, on a project whose
+//! twenty-odd `TRACE_*` switches: the most detailed account this emulator can
+//! give of itself, reachable only from the command line, on a project whose
 //! target is the browser.
 //!
 //! So the switches live in a mask that can be set at run time, and what they
@@ -216,8 +216,8 @@ pub fn enabled(what: Trace) -> bool {
     mask() & what.bit() != 0
 }
 
-/// Text traced by code that has no [`crate::cpu::Cpu`] in reach — the
-/// rasterizer, the shader translator, the texture decoder — waiting to be
+/// Text traced by code that has no [`crate::cpu::Cpu`] in reach, the
+/// rasterizer, the shader translator, the texture decoder: waiting to be
 /// folded into the trace buffer the host drains.
 ///
 /// The alternative was threading a sink through every free function in
@@ -225,15 +225,15 @@ pub fn enabled(what: Trace) -> bool {
 /// called from a hot loop.
 static PENDING: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
-/// `PENDING`'s length, so the common case — nothing traced, because nothing is
-/// on — costs a relaxed load rather than a lock.
+/// `PENDING`'s length, so the common case: nothing traced, because nothing is
+/// on: costs a relaxed load rather than a lock.
 static PENDING_LEN: AtomicUsize = AtomicUsize::new(0);
 
 /// How much untaken trace text the sink holds before it starts dropping.
 ///
 /// It has to have a cap: a native run never takes from it at all, since stderr
 /// is where its traces go. Dropping is from the front, for the same reason
-/// the trace buffer drops from the front — what happened most recently is what
+/// the trace buffer drops from the front: what happened most recently is what
 /// is being asked about.
 const PENDING_CAP: usize = 256 * 1024;
 
@@ -242,7 +242,7 @@ const PENDING_CAP: usize = 256 * 1024;
 /// Callers gate on [`enabled`] first: this does no checking of its own, so
 /// that a channel that is off costs one load and a branch at the call site.
 pub fn emit(line: &str) {
-    // Natively this is the channel — a CLI run traces to stderr exactly as it
+    // Natively this is the channel: a CLI run traces to stderr exactly as it
     // did when these were environment switches.
     #[cfg(not(target_arch = "wasm32"))]
     eprintln!("{line}");
@@ -274,8 +274,8 @@ pub fn take_pending() -> Vec<u8> {
 /// Write one already-decided-on line to both channels.
 ///
 /// Spelled like `eprintln!` because it replaces one at roughly a hundred
-/// sites that were already gated by a switch of their own — `ctx.trace`, a
-/// tally's `enabled`, an inverted early return — and rewriting each of those
+/// sites that were already gated by a switch of their own, `ctx.trace`, a
+/// tally's `enabled`, an inverted early return, and rewriting each of those
 /// guards into a [`trace!`] would have changed what they mean.
 #[macro_export]
 macro_rules! traceln {

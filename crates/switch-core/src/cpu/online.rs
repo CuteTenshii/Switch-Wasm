@@ -14,20 +14,20 @@ use super::Cpu;
 use crate::Result;
 
 impl Cpu {
-    /// `ldn:m` — "nn::ldn::detail::IMonitorServiceCreator", and the
+    /// `ldn:m`, "nn::ldn::detail::IMonitorServiceCreator", and the
     /// `IMonitorService` it hands out: the read-only view of local wireless
     /// that the Home Menu polls to decide whether to draw the local-play
     /// icon.
     ///
-    /// There is no local wireless here — no radio, and nothing in the browser
-    /// that could carry an ad-hoc network — so the monitor reports the state
+    /// There is no local wireless here, no radio, and nothing in the browser
+    /// that could carry an ad-hoc network, so the monitor reports the state
     /// a console with the radio idle reports: `None`, no network, no address.
     /// That is a state the caller already handles, which is why it is the
     /// right answer rather than a failure.
     ///
     /// `Initialize` is the command that made this visible: official software
     /// **aborts** if it fails, and it is sent immediately after the object is
-    /// created — so the fabricated object id the fallback returned was one
+    /// created, so the fabricated object id the fallback returned was one
     /// command away from taking the caller down.
     pub(super) fn ldn_monitor_request(
         &mut self,
@@ -35,7 +35,7 @@ impl Cpu {
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
-        /// `nn::ldn::State::None` — the radio is up and doing nothing.
+        /// `nn::ldn::State::None`, the radio is up and doing nothing.
         const LDN_STATE_NONE: u32 = 0;
         /// `nn::ldn::SecurityParameter` and `nn::ldn::NetworkConfig`, both
         /// 0x20 bytes and both returned in the reply rather than a buffer.
@@ -86,13 +86,13 @@ impl Cpu {
         }
     }
 
-    /// `lp2p:m` — "nn::lp2p::monitor::detail::ISfMonitorServiceCreator", and
+    /// `lp2p:m`, "nn::lp2p::monitor::detail::ISfMonitorServiceCreator", and
     /// the `ISfMonitorService` it hands out.
     ///
     /// `lp2p` is the Wi-Fi-direct transport under local play that replaced
     /// `ldn`'s for newer titles; the monitor is the same read-only view, and
-    /// gets the same answer for the same reason. The role is zero — this
-    /// console is neither a group owner nor a member of one — so the group
+    /// gets the same answer for the same reason. The role is zero, this
+    /// console is neither a group owner nor a member of one, so the group
     /// info is empty and the link level is nothing.
     pub(super) fn lp2p_monitor_request(
         &mut self,
@@ -132,21 +132,21 @@ impl Cpu {
         }
     }
 
-    /// `ovln:snd` / `ovln:rcv` — "nn::ovln::ISenderService" and
+    /// `ovln:snd` / `ovln:rcv`, "nn::ovln::ISenderService" and
     /// "nn::ovln::IReceiverService", the one-way message queue the overlay
     /// applet listens on.
     ///
     /// This is how a system module tells the overlay to draw something: a
     /// controller disconnecting, a screenshot being taken, a notification
-    /// arriving. Each side opens an object first — `OpenSender` with the
-    /// source name it is sending as, `OpenReceiver` for the overlay — and
+    /// arriving. Each side opens an object first, `OpenSender` with the
+    /// source name it is sending as, `OpenReceiver` for the overlay, and
     /// every message after that goes through *that* object, which is why the
     /// fabricated object id the fallback handed back was the end of the line
     /// rather than the start of one.
     ///
     /// The queue itself is not modelled: nothing here draws an overlay, so a
     /// message sent into it has nowhere to arrive. Sends are accepted and
-    /// dropped, and the receiver's queue is permanently empty — which is
+    /// dropped, and the receiver's queue is permanently empty, which is
     /// exactly what a receiver sees on a console where nothing has happened.
     pub(super) fn ovln_request(
         &mut self,
@@ -204,7 +204,7 @@ impl Cpu {
         }
     }
 
-    /// `olsc:s` — the save-data cloud backup service, as a system title
+    /// `olsc:s`, the save-data cloud backup service, as a system title
     /// reaches it.
     ///
     /// Five interfaces deep, and the Home Menu walks all of it on the way to
@@ -215,11 +215,11 @@ impl Cpu {
     /// `INativeHandleHolder`s that hold the events a transfer starting and
     /// finishing would signal, then `GetNativeHandle` on each to get the
     /// events themselves. Every step of that chain hands back an object, and
-    /// the fallback's fabricated object id is not one — so the menu was
+    /// the fallback's fabricated object id is not one, so the menu was
     /// waiting on handle 0 four objects before it ever got to a save.
     ///
     /// Nothing is backed up. There is no account linked to a Nintendo
-    /// Account, no network under it, and no transfer queue — so the task
+    /// Account, no network under it, and no transfer queue, so the task
     /// list is empty, the error list is empty, and the events never fire.
     pub(super) fn olsc_request(
         &mut self,
@@ -248,7 +248,7 @@ impl Cpu {
                 }
                 // GetTransferTaskEndEventNativeHandleHolder /
                 // GetTransferTaskStartEventNativeHandleHolder. Two holders,
-                // two different events — the caller waits on both and acts on
+                // two different events, the caller waits on both and acts on
                 // whichever fires, so they must not be the same object.
                 Some(5) => {
                     self.reply_with_interface(tls, handle, "olsc:transfer-end-holder")?;
@@ -376,7 +376,7 @@ impl Cpu {
         }
     }
 
-    /// `friend:u` and its higher-privilege aliases —
+    /// `friend:u` and its higher-privilege aliases,
     /// "nn::friends::detail::ipc::IServiceCreator", and the three interfaces
     /// it hands out.
     ///
@@ -384,7 +384,7 @@ impl Cpu {
     /// account on this console ([`ACCOUNT_UID`]) is not linked to a Nintendo
     /// Account and there is no network behind it: no friends, no friend
     /// requests, no blocked users, no presence to publish. That is a real
-    /// state of a real console — one that has never been online — and it is
+    /// state of a real console (one that has never been online) and it is
     /// the state every other service here already describes.
     ///
     /// `CreateFriendService` is command 0 and the start of all of it, so the
@@ -419,7 +419,7 @@ impl Cpu {
                 // blocked users, profiles, friend requests, friend candidates,
                 // play history, received invitations. Each writes its entries
                 // into a buffer and reports how many it wrote, and a caller
-                // reads *that* number rather than the buffer's size — so zero
+                // reads *that* number rather than the buffer's size, so zero
                 // is the whole answer and the buffer is left alone.
                 Some(10100) | Some(10101) | Some(10400) | Some(10500) | Some(10501)
                 | Some(20105) | Some(20108) | Some(20201) | Some(20202) | Some(20300)
@@ -467,7 +467,7 @@ impl Cpu {
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // IDaemonSuspendSessionService has no commands at all: holding
-            // the object open is its entire purpose — it keeps the friend
+            // the object open is its entire purpose: it keeps the friend
             // daemon from running while the caller has it.
             "friend:daemon-suspend-session" => self.unimplemented_command(tls, &iface, cmd_id),
             // IServiceCreator.
@@ -492,15 +492,15 @@ impl Cpu {
         }
     }
 
-    /// `news:p` and its four siblings —
+    /// `news:p` and its four siblings,
     /// "nn::news::detail::ipc::IServiceCreator", and the objects it hands
     /// out. This is the News channel: the articles that arrive over BCAT and
     /// surface as the Home Menu's News row.
     ///
     /// The five service names are the same interface at five permission
     /// levels (`news:a` may do everything, `news:p` may only post, and so
-    /// on). Permissions are not modelled — there is no second process here to
-    /// keep out — so all five dispatch to the same commands.
+    /// on). Permissions are not modelled: there is no second process here to
+    /// keep out, so all five dispatch to the same commands.
     ///
     /// Nothing has arrived and nothing can: there is no CDN behind this and
     /// no news savedata to have cached one. The database is empty rather than
@@ -526,8 +526,8 @@ impl Cpu {
         match iface.as_str() {
             // INewlyArrivedEventHolder / IOverwriteEventHolder: one command
             // each, `Get`, and it returns the event. They are separate
-            // objects holding separate events — one fires when an article
-            // arrives, the other when an article already held is replaced —
+            // objects holding separate events: one fires when an article
+            // arrives, the other when an article already held is replaced,
             // and a caller waits on both.
             "news:arrival-event" | "news:overwrite-event" => match cmd_id {
                 Some(0) => {
@@ -550,20 +550,20 @@ impl Cpu {
                 }
                 // UpdateIntegerValue / UpdateIntegerValueWithAddition /
                 // UpdateStringValue: each names a row of the empty table
-                // above — marking an article read, counting a view.
+                // above: marking an article read, counting a view.
                 Some(3) | Some(4) | Some(5) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // INewsDataService reads an article's msgpack out of the news
             // savedata by name. There is no savedata and no article, so
-            // `Open` has nothing to open — and a fabricated success there
+            // `Open` has nothing to open, and a fabricated success there
             // would hand the caller an empty file to parse as an article.
             // Refusing puts the failure on the command that genuinely cannot
             // be answered.
             "news:data" => self.unimplemented_command(tls, &iface, cmd_id),
             "news:service" => match cmd_id {
                 // PostLocalNews(msgpack buffer): a title posting an article
-                // of its own. Accepted and dropped — there is no database to
+                // of its own. Accepted and dropped: there is no database to
                 // put it in, and the arrival event nothing is waiting on is
                 // what would announce it.
                 Some(10100) => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -635,12 +635,12 @@ impl Cpu {
         }
     }
 
-    /// `bcat:u` and its three siblings — "nn::bcat::ipc::IServiceCreator",
+    /// `bcat:u` and its three siblings, "nn::bcat::ipc::IServiceCreator",
     /// and the delivery-cache objects it hands out.
     ///
     /// BCAT is the background download that brings a title its event data and
     /// the system its news. There is no network here, so every sync has
-    /// nothing to fetch and every cache is empty — which is the state a title
+    /// nothing to fetch and every cache is empty, which is the state a title
     /// handles as "no new content", not as an error.
     ///
     /// The delivery cache is a filesystem in miniature (a storage, then a
@@ -727,7 +727,7 @@ impl Cpu {
             // IDeliveryTaskSuspensionService each hand out one event.
             // `IDeliveryCacheProgressService::GetImpl` also reports the
             // finished state of the sync, which is a struct a caller reads
-            // rather than an event it waits on — and one this has no honest
+            // rather than an event it waits on, and one this has no honest
             // shape for, so it is refused rather than invented.
             "bcat:progress" | "bcat:notifier" | "bcat:suspension" => match cmd_id {
                 Some(0) => {

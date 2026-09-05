@@ -2,7 +2,7 @@
 //! driving the machine, and writing a frame out.
 //!
 //! Each example used to carry its own copy of all of this, and the copies
-//! drifted. That is not only untidy — it is how `screenshot` and
+//! drifted. That is not only untidy: it is how `screenshot` and
 //! `screenshot_title` both ended up driving the CPU one instruction at a time
 //! through [`switch_core::cpu::Cpu::step`], which is the *interpreter*: only
 //! `Cpu::run` reaches the block translator, and it is 1.8x faster on real
@@ -112,8 +112,8 @@ pub fn keys(prod: impl AsRef<Path>, title: Option<impl AsRef<Path>>) -> KeySet {
 /// The `<container> <prod.keys> [title.keys]` triple every tool that reads a
 /// retail container takes, resolved once.
 ///
-/// The optional third argument had been spelled four ways — "not all digits",
-/// "does not start with a digit", "ends with `.keys`", and taken blind — and
+/// The optional third argument had been spelled four ways, "not all digits",
+/// "does not start with a digit", "ends with `.keys`", and taken blind, and
 /// five more tools made it *mandatory* by passing `Some(arg(3, USAGE))`, so a
 /// container whose keys are all in `prod.keys` could not be opened without
 /// naming a `title.keys` that does not exist. One rule now: argument 3 is the
@@ -155,7 +155,7 @@ pub fn container_args(line: &str) -> Args {
 /// One argument list serves both: the target comes first, a retail one is
 /// followed by its keys, and the tool's own arguments follow either. A `.ttf`
 /// anywhere in the tail is the shared font, by the same rule
-/// [`container_args`] reads a `.keys` — which is what lets an analysis tool
+/// [`container_args`] reads a `.keys`, which is what lets an analysis tool
 /// keep the `<nro> [font.ttf]` spelling it already had.
 ///
 /// The measurement tools took an NRO only, and an NRO is not the workload:
@@ -175,7 +175,7 @@ pub fn program_args(line: &str) -> Args {
     };
     let font = take_named(&mut rest, ".ttf");
     // Keys belong to a container and mean nothing to an NRO, so only a retail
-    // target consumes them — and only then is a missing `prod.keys` fatal.
+    // target consumes them, and only then is a missing `prod.keys` fatal.
     let (prod, title) = match target_kind(Path::new(&container)) {
         Kind::Nro => (String::new(), None),
         _ => {
@@ -199,7 +199,7 @@ pub fn program_args(line: &str) -> Args {
 pub struct Program {
     form: Form,
     /// The font named on the command line, if one was. Serves `pl:u` for
-    /// either kind of program — a retail title reads the same interface.
+    /// either kind of program: a retail title reads the same interface.
     font: Option<Vec<u8>>,
 }
 
@@ -221,7 +221,7 @@ pub struct Booted {
 impl Program {
     /// Boot into a `cpu` that has already been bootstrapped.
     ///
-    /// The four steps a retail title needs — RomFS, font, firmware, modules —
+    /// The four steps a retail title needs, RomFS, font, firmware, modules,
     /// are one sequence in one place because they had drifted: `retail_trace`
     /// was missing [`register_firmware`], so a title run under it took a fatal
     /// on a system data archive that every other tool had.
@@ -355,7 +355,7 @@ pub fn load_fallback_font(cpu: &mut Cpu) {
     }
 }
 
-/// Register every system data archive in `SWITCH_FIRMWARE` — the shared
+/// Register every system data archive in `SWITCH_FIRMWARE`, the shared
 /// fonts among them, which is what makes an applet render real text.
 ///
 /// Does nothing when the variable is unset, so an example that calls this
@@ -401,14 +401,14 @@ pub fn register_firmware(cpu: &mut Cpu, keys: &KeySet) -> usize {
 /// How [`drive`] advances the machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pace {
-    /// In slices, through `Cpu::run` — which is the only thing that reaches
+    /// In slices, through `Cpu::run`, which is the only thing that reaches
     /// the block translator, and so the only honest way to measure or to wait
     /// out a long boot. Use this unless the answer requires looking at the
     /// machine *between* two instructions.
     Blocks,
     /// One instruction at a time, through `Cpu::step`. Necessary for
     /// watchpoints, coverage, PC watches and anything else that samples state
-    /// per instruction — and about half the speed.
+    /// per instruction, and about half the speed.
     Instructions,
 }
 
@@ -437,8 +437,8 @@ pub struct Run {
 /// is set.
 ///
 /// Timing two whole processes and subtracting them does not measure a frame
-/// here. A retail title spends most of a run booting — Just Dance 2019 presents
-/// its first frame at step 900,710,775 — and that boot swings by seconds
+/// here. A retail title spends most of a run booting, Just Dance 2019 presents
+/// its first frame at step 900,710,775, and that boot swings by seconds
 /// between runs when anything else on the machine is busy, which is larger than
 /// the frames being measured. Min-of-N does not rescue it either: the minimum
 /// of the boot and the minimum of the boot-plus-frames come from different runs,
@@ -504,7 +504,7 @@ impl FrameTimes {
 /// before each slice under [`Pace::Blocks`], with the instructions retired so
 /// far. Returning [`Flow::Stop`] ends the run.
 ///
-/// `FRAME_TIMES=1` reports what each presented frame cost — see [`FrameTimes`]
+/// `FRAME_TIMES=1` reports what each presented frame cost. See [`FrameTimes`]
 /// for why that has to be measured from in here rather than around the process.
 pub fn drive(
     cpu: &mut Cpu,
@@ -565,7 +565,7 @@ pub fn run_to(cpu: &mut Cpu, budget: u64, mut until: impl FnMut(&Cpu) -> bool) -
 /// PPM has no alpha, so the opaque count is reported rather than written. A
 /// canvas composites what scan-out hands it, and a frame that is transparent
 /// where it should be opaque looks black in a PPM and looks like the page
-/// behind it in a browser — the count is the only place the two differ.
+/// behind it in a browser: the count is the only place the two differ.
 pub fn write_ppm(path: impl AsRef<Path>, fb: &Framebuffer) -> usize {
     let path = path.as_ref();
     let mut ppm = format!("P6\n{} {}\n255\n", fb.width, fb.height).into_bytes();
@@ -610,7 +610,7 @@ pub fn report(cpu: &Cpu, run: &Run) {
         run.steps, cpu.nv.gpu.frames, cpu.nv.gpu.stats
     );
     // How near the run came to the RAM cap. Reaching it fails an allocation
-    // the title may not check, which is a symptom that never names memory —
+    // the title may not check, which is a symptom that never names memory,
     // so the number belongs in every run's report rather than in whichever
     // tool someone thought to add it to.
     let used = cpu.mem.mapped_bytes();
@@ -624,8 +624,8 @@ pub fn report(cpu: &Cpu, run: &Run) {
 }
 
 /// Where one `DUMP=` entry starts. A fault's interesting address is usually
-/// one the faulting code was holding rather than one known before the run —
-/// the object a null came out of is whatever `x23` happened to be — so a base
+/// one the faulting code was holding rather than one known before the run,
+/// the object a null came out of is whatever `x23` happened to be, so a base
 /// may name a register as well as an absolute address.
 enum DumpBase {
     Absolute(u32),
@@ -691,7 +691,7 @@ fn parse_dump_specs(spec: &str) -> Vec<DumpSpec> {
 /// touched at all is usually a loop.
 const MAX_HITS: u32 = 24;
 
-/// `x0`..`x7`, which are a call's arguments — what a trapped write or a
+/// `x0`..`x7`, which are a call's arguments: what a trapped write or a
 /// watched pc was reached *with*, as opposed to where it was reached from.
 fn arguments(cpu: &Cpu) -> String {
     (0..8)
@@ -716,18 +716,18 @@ fn backtrace(cpu: &Cpu, depth: usize) -> String {
 /// tool had all of them. A knob worth having in one runner is worth having in
 /// every runner.
 ///
-/// - `TRAP_WRITE=<addr>:<hex size>` — the pc and call stack of the first
+/// - `TRAP_WRITE=<addr>:<hex size>`: the pc and call stack of the first
 ///   writes into a region, which is how a buffer nobody admits to owning gets
 ///   an owner.
-/// - `TRAP_READ=<addr>:<hex size>` — every distinct pc that reads a region,
+/// - `TRAP_READ=<addr>:<hex size>`: every distinct pc that reads a region,
 ///   counted.
-/// - `TRAP_ZERO=1` — keep writes of zero as well. Off by default, since a
+/// - `TRAP_ZERO=1`: keep writes of zero as well. Off by default, since a
 ///   field being cleared is usually the noise; on when clearing is the hunt.
-/// - `WATCH_PC=<addr>[,...]` — the argument registers and the call stack the
+/// - `WATCH_PC=<addr>[,...]`: the argument registers and the call stack the
 ///   first few times execution reaches an address. Who calls a thin IPC stub
 ///   is not a static question here: they are reached through vtables, so
 ///   nothing in the image points at them.
-/// - `DUMP=<base>[+<hex>][:<hex length>][,...]` — hex-dump guest memory
+/// - `DUMP=<base>[+<hex>][:<hex length>][,...]`: hex-dump guest memory
 ///   wherever the run stopped, where `<base>` is `x0`..`x30`, `sp`, `pc` or an
 ///   address: `DUMP=x23+0x1830:0x40,0x10c2e870`.
 pub struct Debug {
@@ -868,7 +868,7 @@ impl Debug {
 /// The order the modules of an ExeFS load in.
 ///
 /// One list, because three examples carried their own and two of them
-/// stopped at `subsdk4` — a title with a `subsdk5` booted differently
+/// stopped at `subsdk4`, a title with a `subsdk5` booted differently
 /// depending on which tool you ran it with.
 const MODULE_ORDER: &[&str] = &[
     "rtld", "main", "subsdk0", "subsdk1", "subsdk2", "subsdk3", "subsdk4", "subsdk5", "subsdk6",
@@ -881,7 +881,7 @@ const MODULE_ORDER: &[&str] = &[
 /// 0x200; the first two are containers holding files and are read the same
 /// way from here on ([`switch_core::xci::read_container`]). An NCA straight
 /// off the CDN keeps its header encrypted, so its magic is invisible until
-/// `prod.keys` decrypts it — those fall back to the extension, which is what
+/// `prod.keys` decrypts it: those fall back to the extension, which is what
 /// the frontend does with them too (`web/main/filetype.ts`).
 enum Kind {
     Container,
@@ -922,7 +922,7 @@ fn target_kind(path: &Path) -> Kind {
     }
 }
 
-/// A container's control data — the NACP and the icon that name a title, and
+/// A container's control data: the NACP and the icon that name a title, and
 /// the save-data sizes it declares.
 ///
 /// A free function rather than a method on [`Title`] because a Control NCA is
@@ -968,7 +968,7 @@ pub fn open_control(
 ///
 /// A retail container is the whole game. Just Dance 2017's NSP is 13.4 GB,
 /// and reading it into a `Vec` and then decrypting its RomFS beside it wants
-/// 21 GB on a machine that also has to hold the guest — which is not slow, it
+/// 21 GB on a machine that also has to hold the guest, which is not slow, it
 /// is a machine that stops responding. `boot_nsp` learned that and streams;
 /// every other example kept its own copy of the loading code and kept
 /// slurping.
@@ -1018,8 +1018,8 @@ impl Title {
         }
     }
 
-    /// Open the Program NCA inside a container — an `.nsp`, or a cartridge
-    /// image whose partitions present the same file table — resolving its
+    /// Open the Program NCA inside a container, an `.nsp`, or a cartridge
+    /// image whose partitions present the same file table, resolving its
     /// title key from a bundled ticket if there is one.
     pub fn open_container(
         container: impl AsRef<Path>,
@@ -1041,7 +1041,7 @@ impl Title {
         }
     }
 
-    /// Open a bare Program NCA — a system applet, which ships inside firmware
+    /// Open a bare Program NCA, a system applet, which ships inside firmware
     /// rather than in an NSP and so has no PFS0 around it.
     pub fn open_nca(
         container: impl AsRef<Path>,
@@ -1112,8 +1112,8 @@ impl Title {
     /// reads the image itself rather than running the title.
     ///
     /// `None` when the NCA has no RomFS section at all, which is a different
-    /// thing from one that would not open. Boxed because a patched RomFS —
-    /// two containers read as one — is a different type from a plain one, and
+    /// thing from one that would not open. Boxed because a patched RomFS,
+    /// two containers read as one: is a different type from a plain one, and
     /// every caller wants the same thing from either.
     pub fn romfs_source(&self) -> Option<Result<Box<dyn ByteSource>, switch_core::Error>> {
         let window = program_window(&self.path, self.program.0, self.program.1);
@@ -1164,7 +1164,7 @@ impl Title {
     /// to be set before the modules load, since `nn::init` reads the
     /// resulting figures as soon as it runs.
     pub fn boot(&self, cpu: &mut Cpu) -> Vec<switch_core::nso::LoadedNso> {
-        // `DOCKED=1` boots as a docked console — a 1080p display, which is
+        // `DOCKED=1` boots as a docked console: a 1080p display, which is
         // what the frontend's dock toggle sets and so what a browser session
         // is usually looking at. The default here is handheld, and a title
         // told 720p while its swapchain is 1080p composites its frame into a
@@ -1192,7 +1192,7 @@ impl Title {
             .unwrap_or_else(|e| die(&format!("booting {} modules: {e:?}", modules.len())));
         // After the program id, which is what add-on content is numbered
         // against, and after the modules, which is where the browser has to
-        // do it — booting clears the diagnostics it reads them through.
+        // do it: booting clears the diagnostics it reads them through.
         mount_add_on_content(cpu, &self.keys);
         loaded
     }
@@ -1215,7 +1215,7 @@ impl Title {
 /// An update container, which `UPDATE=<path.nsp>` names.
 ///
 /// An update NSP holds no game. Its Program NCA carries the patched modules
-/// in full — so an update runs by booting *its* ExeFS — and a RomFS section
+/// in full (so an update runs by booting *its* ExeFS) and a RomFS section
 /// holding only the ranges the update changed, which reads over the base
 /// container's RomFS and nowhere else. The browser pairs the two files the
 /// user picked; this is the same pairing for a run without one.
@@ -1253,7 +1253,7 @@ impl Update {
 ///
 /// A DLC container is nothing like an update: no program, no patch, no base to
 /// read over. Each is one Data NCA with an ordinary RomFS whose title id is
-/// the title's add-on base plus an index, and a title mounts it by that id —
+/// the title's add-on base plus an index, and a title mounts it by that id,
 /// so all this does is decrypt each one and hand it over. Content belonging to
 /// another title is reported and skipped, since an index the title cannot
 /// number is one nothing will ever ask for.

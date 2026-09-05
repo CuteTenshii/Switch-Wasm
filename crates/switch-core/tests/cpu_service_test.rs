@@ -355,7 +355,7 @@ fn storage_read_uses_the_istorage_field_layout() {
     // A read that runs off the end is refused, not clamped: `fs` checks the
     // range against the storage and reports 2002-3005 rather than filling
     // what exists. It used to be clamped, which reports success over a buffer
-    // the caller's own bytes are still in — and a caller that trusts the
+    // the caller's own bytes are still in, and a caller that trusts the
     // Result reads those as data.
     const OUT_OF_RANGE: u32 = 2 | (3005 << 9);
     cpu.mem.write_u8(OUT, 0xAA).unwrap();
@@ -503,7 +503,7 @@ fn pctl_reports_parental_controls_off() {
 #[test]
 fn applet_common_state_getter_reports_focus_once() {
     // ICommonStateGetter::ReceiveMessage (cmd 1) must hand out the startup
-    // FocusStateChanged (15) exactly once and then report "no message" — NOT
+    // FocusStateChanged (15) exactly once and then report "no message", NOT
     // the AM_BUSY error (0x19280) that wedges hbmenu in its "wait for applet"
     // sleep loop, and not a fresh focus change on every poll, which made JKSV
     // treat every frame as a new focus transition.
@@ -553,7 +553,7 @@ fn applet_unimplemented_command_is_an_error_not_a_fake_success() {
 
 #[test]
 fn applet_control_command_with_context_is_not_a_normal_command() {
-    // nnSdk sends every message in the "with context" encoding —
+    // nnSdk sends every message in the "with context" encoding,
     // ControlWithContext (7) rather than Control (5). Reading only type 5 as a
     // control message turned `appletOE`'s opening QueryPointerBufferSize into
     // IApplicationProxyService command 3, which does not exist, and the applet
@@ -711,7 +711,7 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
     assert_eq!(cpu.mem.read_u32(touch(1) + 0x08).unwrap(), 1, "start 3");
 
     // Lifting one of the two publishes it **once more**, still counted, with
-    // `end_touch` — the finger has to be seen going up, not merely stop being
+    // `end_touch`: the finger has to be seen going up, not merely stop being
     // there. The one still down is held, so its attributes go back to zero.
     cpu.set_touch_state(&[TouchPoint {
         finger_id: 0,
@@ -813,7 +813,7 @@ fn caps_a_reports_a_mounted_empty_album() {
     // The Album applet asks three things before it will draw anything: an
     // unnamed command 18, whether the album is mounted, and whether captures
     // are being auto-saved to the SD card. Nothing implemented `caps:a` at
-    // all, so each came back as a fabricated object id — as a *bool*, a large
+    // all, so each came back as a fabricated object id, as a *bool*, a large
     // number read one byte at a time.
     //
     // There is no NAND album and no SD card here, so what these describe is a
@@ -864,7 +864,7 @@ fn caps_a_reports_a_mounted_empty_album() {
     );
 
     // And the album it says is mounted is empty, by both the count and the
-    // list — a caller told "mounted" asks these next, and a count it cannot
+    // list: a caller told "mounted" asks these next, and a count it cannot
     // trust is worse than no service at all.
     for cmd in [0u32, 1, 100, 101] {
         ipc_request_plain(&mut cpu, CAPS, cmd, &0u8.to_le_bytes());
@@ -885,7 +885,7 @@ fn caps_a_reports_a_mounted_empty_album() {
 fn the_applet_capture_buffer_names_a_slot_nothing_renders_into() {
     // `AcquireCallerAppletCaptureSharedBuffer` hands back the screen of
     // whatever was on display before this applet. Booted alone, there is no
-    // such screen — but "nothing written, slot -1" is not how to say so:
+    // such screen, but "nothing written, slot -1" is not how to say so:
     // `nnSdk` reads it as not-ready-yet and asks again, and the Album applet
     // spent every frame of a 300M-instruction run in that retry loop without
     // ever reaching a draw.
@@ -1192,7 +1192,7 @@ fn audout_release_zeroes_the_entry_after_the_last_tag() {
     cpu.mem.write_u64(DESC + 32, 0).unwrap();
     ipc_request_plain_with_buffer(&mut cpu, device, 3, DESC, 40, false, &TAG.to_le_bytes());
 
-    // Nothing has played yet, so the release is empty — and the slot the guest
+    // Nothing has played yet, so the release is empty, and the slot the guest
     // reads regardless has to say so.
     cpu.mem.write_u64(TAGS, GARBAGE).unwrap();
     cpu.mem.write_u64(TAGS + 8, GARBAGE).unwrap();
@@ -1305,7 +1305,7 @@ fn audout_release_answers_the_auto_commands_pointer_buffer() {
 fn audren_update_reply_has_a_section_for_every_count_the_renderer_was_opened_with() {
     // `RequestUpdateAudioRenderer` runs every frame, and both `audrvUpdate`
     // and `nnSdk` walk its reply section by section against sizes they
-    // computed themselves — a section left out is not ignored, it desynchronises
+    // computed themselves: a section left out is not ignored, it desynchronises
     // the walk and aborts. Tomodachi Life opens a revision-15 renderer with 17
     // effects; the reply had no effects section and no renderer info, and its
     // audio setup ended the boot on an `nn::audio` result.
@@ -1367,7 +1367,7 @@ fn audren_mixes_a_voice_through_to_the_host() {
     // The renderer is where retail audio actually lives: `nn::audio` and
     // libnx's `audrv` hand it wave buffers, a pitch and a routing matrix, and
     // expect mixed PCM out the far end. It used to answer every update with a
-    // correctly shaped, entirely zeroed reply — the right size for the caller
+    // correctly shaped, entirely zeroed reply, the right size for the caller
     // to accept and no sound whatsoever.
     const IN: u32 = 0x3_0000;
     const OUT: u32 = 0x4_0000;
@@ -1409,7 +1409,7 @@ fn audren_mixes_a_voice_through_to_the_host() {
     );
     assert_eq!(cpu.audio_format(), (48_000, 2));
     // The voice is mono into both mix buffers and the sink reads one into each
-    // output channel, so the frame is the source doubled up — and it is
+    // output channel, so the frame is the source doubled up, and it is
     // bit-exact, because a 16-bit source at unity gain has no arithmetic done
     // to it that it should not survive.
     for (i, &s) in samples.iter().enumerate() {
@@ -1474,7 +1474,7 @@ fn audren_reports_the_wave_buffers_it_finished_with() {
 
 #[test]
 fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
-    // Nintendo's 4-bit ADPCM is what retail voices are stored as — 14 samples
+    // Nintendo's 4-bit ADPCM is what retail voices are stored as, 14 samples
     // in every 8 bytes, one header byte naming a shift and one of eight
     // predictor pairs, then seven bytes of nibbles. A renderer that decodes
     // only PCM is silent on almost everything that ships.
@@ -1498,7 +1498,7 @@ fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
     }
 
     // Frame 0: pair 0, shift 0, nibbles 1..7 then -8..-2.
-    // Frame 1: pair 1, shift 0, every nibble 1 — a running +1 from the -2 the
+    // Frame 1: pair 1, shift 0, every nibble 1, a running +1 from the -2 the
     // first frame ended on.
     let data: [u8; 16] = [
         0x00, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0x10, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
@@ -1540,7 +1540,7 @@ fn audren_decodes_the_adpcm_a_retail_voice_is_encoded_in() {
 fn audren_frame_event_fires_on_the_clock() {
     // `audrenWaitFrame` blocks on this event, and every mixer built on it
     // paces itself by how often it comes back. The handle used to be a bare
-    // one — not modelled as an event at all, so `WaitSynchronization` treated
+    // one, not modelled as an event at all, so `WaitSynchronization` treated
     // it as permanently ready and the wait returned instantly. That is a
     // renderer with no clock, which is how a title ends up running its audio
     // at whatever multiple of real time the emulator manages.
@@ -1581,7 +1581,7 @@ fn audren_frame_event_fires_on_the_clock() {
 fn audren_refuses_a_wave_buffer_that_is_outside_its_allocation() {
     // `end_sample_offset` is the guest's claim about its own buffer and `size`
     // is what it allocated. Where they disagree the allocation wins, because
-    // the samples past it are somebody else's memory read as PCM — which is
+    // the samples past it are somebody else's memory read as PCM, which is
     // exactly the buzzing `audout` produced from the Mii editor's descriptor
     // until it started checking.
     //
@@ -1632,8 +1632,8 @@ fn audren_refuses_a_wave_buffer_that_is_outside_its_allocation() {
 #[test]
 fn audout_refuses_a_buffer_whose_samples_are_outside_it() {
     // `data_offset + data_size` has to fit inside `buffer_size`. The Mii
-    // editor submits one where it does not — `buffer` is 6 and `data_offset`
-    // is a pointer — and `buffer + data_offset` then lands inside the
+    // editor submits one where it does not: `buffer` is 6 and `data_offset`
+    // is a pointer, and `buffer + data_offset` then lands inside the
     // `AudioOutBuffer` struct itself, so what reached the speakers was that
     // struct's own pointers read as PCM, thousands of times a second. It
     // buzzed.
@@ -2836,7 +2836,7 @@ fn ldr_ro_initialize_is_not_a_fabricated_object() {
     // RegisterProcessHandle (cmd 4) is the first call `nn::ro::Initialize`
     // makes, and the one that reported `ldr:ro` as having no implementation at
     // all. The generic fallback answers it with an object id, a sub-session
-    // and an event — for a command that returns nothing but a Result.
+    // and an event: for a command that returns nothing but a Result.
     let (mut cpu, handle) = ldr_ro_session();
     let tls = cpu.tls_base();
 
@@ -2869,7 +2869,7 @@ fn ldr_ro_maps_a_module_where_nothing_else_lives() {
     let base = base as u32;
 
     // The three segments, in the order the file has them, and the BSS behind
-    // them — zero-filled, whatever the caller's own buffer held.
+    // them: zero-filled, whatever the caller's own buffer held.
     assert_eq!(cpu.mem.read_u32(base).unwrap(), 0x1400_0010);
     assert_eq!(cpu.mem.read_u8(base + 0x1000).unwrap(), 0xAA);
     assert_eq!(cpu.mem.read_u8(base + 0x2000).unwrap(), 0xBB);
@@ -2884,7 +2884,7 @@ fn ldr_ro_maps_a_module_where_nothing_else_lives() {
 #[test]
 fn ldr_ro_unload_frees_the_address_space_and_the_protection() {
     // A module that has been unloaded has to leave nothing behind: not the
-    // pages, and not the read-only marking on its `.text` — which would
+    // pages, and not the read-only marking on its `.text`, which would
     // outlive the mapping and fault whatever is loaded over it next.
     let (mut cpu, handle) = ldr_ro_session();
     let tls = cpu.tls_base();
@@ -2929,7 +2929,7 @@ fn ldr_ro_two_modules_do_not_overlap() {
 fn ldr_ro_refuses_what_is_not_a_module() {
     // A bad NRO is refused rather than mapped: the caller jumps into what this
     // command returns, so "success" over an image with no segment table is a
-    // branch into nothing. Same for a BSS the caller sized too small — the
+    // branch into nothing. Same for a BSS the caller sized too small, the
     // module's zero-initialized data would land past the mapping, on whatever
     // is loaded next.
     const INVALID_NRO: u32 = 22 | (4 << 9);
@@ -2955,8 +2955,8 @@ fn ldr_ro_refuses_what_is_not_a_module() {
 
 #[test]
 fn ldr_ro_module_info_is_registered_before_it_is_unregistered() {
-    // An NRR cannot be verified here — there is no key to check its signature
-    // chain against — but it can be *tracked*, so unregistering one that was
+    // An NRR cannot be verified here: there is no key to check its signature
+    // chain against, but it can be *tracked*, so unregistering one that was
     // never registered is an error rather than a success the caller believes.
     const INVALID_NRR: u32 = 22 | (6 << 9);
     const NOT_REGISTERED: u32 = 22 | (1029 << 9);
@@ -3100,8 +3100,8 @@ fn the_dock_resizes_the_display_and_takes_the_touchscreen_away() {
     assert_eq!(cpu.mem.read_u32(tls + 0x24).unwrap(), 1080, "docked height");
 
     // Touch is handheld-only: the screen is in the dock, so nothing can be on
-    // it. The sample is still published — a LIFO that stops advancing is not
-    // "no touches" to a reader waiting for the next one — but it carries none.
+    // it. The sample is still published: a LIFO that stops advancing is not
+    // "no touches" to a reader waiting for the next one, but it carries none.
     cpu.set_reg(1, SHMEM as u64);
     cpu.set_reg(2, 0x40000);
     cpu.mem.map(0x1000, &svc(0x13).to_le_bytes()).unwrap();
@@ -3144,7 +3144,7 @@ fn the_shared_buffer_does_not_move_when_the_console_is_docked() {
     // The pool layout is a promise: it goes out once, at
     // GetSharedBufferMemoryHandleId, and the applet maps it and renders into
     // it for as long as it holds it. Sizing it by the display broke that
-    // promise on the dock — every slot in the pool moved while qlaunch was
+    // promise on the dock, every slot in the pool moved while qlaunch was
     // still drawing into the old ones, and the present that followed read
     // from the wrong offset at the wrong pitch. Thirteen frames after a dock
     // the Home Menu was 0 of 2073600 pixels non-black, with the guest drawing
@@ -3182,7 +3182,7 @@ fn the_shared_buffer_does_not_move_when_the_console_is_docked() {
         "docking moved the pool the applet had mapped"
     );
 
-    // The display did move, though — the pool is the shared layer's geometry
+    // The display did move, though: the pool is the shared layer's geometry
     // and the display is the panel's, and the two are no longer the same
     // number.
     assert_eq!(cpu.operation_mode().display_size(), (1920, 1080));
@@ -3235,8 +3235,8 @@ fn the_resolution_change_event_fires_on_the_dock() {
 #[test]
 fn hwopus_reports_a_work_buffer_size_before_it_opens_anything() {
     // `nn::codec` asks for the work buffer size, allocates that much as
-    // transfer memory, and only then opens a decoder. A size of zero — which
-    // is what the generic fallback answered — is an allocation that fails, so
+    // transfer memory, and only then opens a decoder. A size of zero, which
+    // is what the generic fallback answered: is an allocation that fails, so
     // nothing ever gets as far as decoding.
     const HWOPUS: u64 = 0xC000;
     let mut cpu = cpu_at(0x1000);

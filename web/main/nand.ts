@@ -1,4 +1,4 @@
-/* ---------- the NAND ----------
+/* the NAND
 
    A console keeps its system content on internal storage and finds it again
    every boot. Here the equivalent is IndexedDB, in two stores: `content` holds

@@ -4,13 +4,13 @@
 //! sections (a nonzero `rights_id` in the NCA header selects this path
 //! instead of the header's own key area). Scene NSP releases bundle the
 //! ticket right next to the content, so the title key is available without a
-//! separate personal `title.keys` dump — as long as the ticket uses "Common"
+//! separate personal `title.keys` dump: as long as the ticket uses "Common"
 //! crypto (the overwhelming majority do), unwrapping it only needs a public
 //! `titlekek_XX` from `prod.keys`.
 //!
 //! What a ticket yields here is the key block *still wrapped*, exactly as
 //! `title.keys` stores it. Which `titlekek_XX` unwraps it is the NCA's key
-//! generation, not anything the ticket says — so unwrapping belongs to
+//! generation, not anything the ticket says, so unwrapping belongs to
 //! [`crate::nca::Nca::section_key`], which is the only place that knows it.
 //!
 //! Layout: a fixed-size signature block (size depends on the signature type)
@@ -23,7 +23,7 @@
 //! body + 0x00  issuer [0x40]
 //! body + 0x40  title key block [0x100] (Common crypto: first 16 bytes are
 //!              the AES-128-ECB-wrapped title key; Personalized crypto
-//!              RSA-wraps it instead, which needs a console's ETicket key —
+//!              RSA-wraps it instead, which needs a console's ETicket key,
 //!              out of scope here)
 //! body + 0x140 format_version (u8)
 //! body + 0x141 titlekey_type (u8): 0 = Common, 1 = Personalized
@@ -47,7 +47,7 @@ const BODY_MIN_SIZE: usize = BODY_OFFSET_RIGHTS_ID + 0x10;
 pub struct Ticket {
     pub rights_id: [u8; 16],
     /// 0 = Common (a public `titlekek` unwraps it), 1 = Personalized (needs
-    /// a console's ETicket RSA key — not supported).
+    /// a console's ETicket RSA key, not supported).
     pub titlekey_type: u8,
     /// The ticket's own idea of which `titlekek_XX` its key block belongs to.
     /// Reported for diagnostics only: a retail ticket may leave this 0 while
@@ -112,7 +112,7 @@ impl Ticket {
     }
 
     /// The still-`titlekek`-wrapped title key, for the keyset to hold
-    /// alongside `title.keys`' entries — Common crypto only.
+    /// alongside `title.keys`' entries, Common crypto only.
     pub fn title_key_block(&self) -> Result<[u8; 16], Error> {
         if self.titlekey_type != 0 {
             return Err(Error::Ticket(
@@ -321,7 +321,7 @@ mod tests {
         let kek = [0x44u8; 16];
         let title_key = [0x55u8; 16];
         let wrapped = crate::crypto::aes128_encrypt_block(&kek, &title_key);
-        // `common_key_id` 0 against content whose key generation is 8 —
+        // `common_key_id` 0 against content whose key generation is 8,
         // Asphalt 9's shape exactly.
         let (nsp_data, files) =
             nsp_with_ticket(&build_ticket(rights_id, 0, 0, wrapped), &rights_id);
@@ -334,7 +334,7 @@ mod tests {
     }
 
     /// A container with no ticket is only a failure when nothing else has
-    /// the key — and a bundled ticket replaces a `title.keys` entry rather
+    /// the key, and a bundled ticket replaces a `title.keys` entry rather
     /// than stacking behind it.
     #[test]
     fn a_missing_ticket_defers_to_the_keyset() {

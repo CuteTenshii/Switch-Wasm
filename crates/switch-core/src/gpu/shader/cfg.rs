@@ -3,7 +3,7 @@
 //! Maxwell does not have structured control flow. It has a *reconvergence
 //! stack*: `ssy` pushes an address and `sync` pops one and jumps there, and
 //! the same for `pbk`/`brk` and `pcnt`/`cont`. The interpreter can run that
-//! directly — it just keeps the stack — but a translator to any shading
+//! directly (it just keeps the stack) but a translator to any shading
 //! language cannot, because WGSL and GLSL both want `if`/`else`/`loop` and
 //! have nothing that pops a jump target off a runtime stack.
 //!
@@ -14,7 +14,7 @@
 //! one particular `ssy` pushed, then each pair is an `if` (or a loop, for
 //! `pbk`/`pcnt`) and the translation is mechanical. If a `sync` can be
 //! reached with two different stacks, it cannot be, and the arms have to be
-//! executed under per-lane masks instead — a far bigger and slower thing.
+//! executed under per-lane masks instead, a far bigger and slower thing.
 //!
 //! So this does not try to build structured output yet. It answers the
 //! question, over whatever shaders are actually put through it. See
@@ -26,16 +26,16 @@ use std::collections::HashMap;
 
 /// Which reconvergence stack an instruction uses. The hardware has one stack
 /// with three kinds of entry on it, and a `sync` pops whatever is on top
-/// regardless of what pushed it — but a program in which those interleave is
+/// regardless of what pushed it, but a program in which those interleave is
 /// one no compiler emits, and [`Cfg::pairing`] reports it rather than
 /// pretending otherwise.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reconverge {
-    /// `ssy` / `sync` — the two arms of a branch rejoining.
+    /// `ssy` / `sync`, the two arms of a branch rejoining.
     Sync,
-    /// `pbk` / `brk` — leaving a loop.
+    /// `pbk` / `brk`, leaving a loop.
     Break,
-    /// `pcnt` / `cont` — the next iteration of one.
+    /// `pcnt` / `cont`, the next iteration of one.
     Continue,
 }
 
@@ -73,7 +73,7 @@ pub enum Pairing {
     PathDependent { at: usize },
     /// A pop of a kind that nothing on the stack pushed, or a pop with the
     /// stack empty. Either the program is malformed or the walk cannot follow
-    /// it — a `brx` whose targets are unknown, most likely.
+    /// it: a `brx` whose targets are unknown, most likely.
     Unbalanced { at: usize },
     /// The walk gave up, and why. It says so rather than reporting a
     /// conclusion it did not reach.
@@ -132,7 +132,7 @@ impl<'a> Cfg<'a> {
         self.stacks.len()
     }
 
-    /// The deepest reconvergence stack the walk saw — how far an `if` inside
+    /// The deepest reconvergence stack the walk saw, how far an `if` inside
     /// an `if` inside a loop nests, which is what a structured translation
     /// would have to reproduce.
     pub fn max_depth(&self) -> usize {
@@ -140,7 +140,7 @@ impl<'a> Cfg<'a> {
     }
 
     /// One line describing what the walk found, with byte offsets rather than
-    /// instruction indices — those are the addresses a shader dump shows.
+    /// instruction indices: those are the addresses a shader dump shows.
     pub fn describe(&self) -> String {
         let at = |i: usize| format!("{:#x}", self.program.offset(i));
         let verdict = match &self.pairing {
@@ -175,8 +175,8 @@ impl<'a> Cfg<'a> {
             if at >= self.program.len() {
                 continue;
             }
-            // Reaching an instruction a second time is fine, and normal — a
-            // loop body does it — but only with the same stack. With a
+            // Reaching an instruction a second time is fine, and normal, a
+            // loop body does it, but only with the same stack. With a
             // different one, what its pops jump to depends on the path.
             if let Some(seen) = self.stacks.get(&at) {
                 if *seen != stack && self.pairing == Pairing::Static {
@@ -288,7 +288,7 @@ mod tests {
     }
 
     const ALWAYS: Pred = Pred::ALWAYS;
-    /// `@p0` — the guard a two-armed branch is built out of.
+    /// `@p0`: the guard a two-armed branch is built out of.
     const IF_P0: Pred = Pred {
         reg: 0,
         negate: false,

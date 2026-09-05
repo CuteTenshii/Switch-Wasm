@@ -2,7 +2,7 @@
 //! and sampling.
 //!
 //! Layouts are ported from envytools' `gm200_texture.xml` (Maxwell TIC) and
-//! `g80_texture.xml` (TSC, unchanged since Tesla) — real hardware register
+//! `g80_texture.xml` (TSC, unchanged since Tesla), real hardware register
 //! documentation (envytools, github.com/envytools/envytools, MIT-style
 //! license), not guesses. The bindless-texture-handle convention (`imageId
 //! | samplerId << 20`, each indexing 32-byte entries in their own pool)
@@ -24,7 +24,7 @@ use std::cell::RefCell;
 
 /// What nouveau programs `TexCbIndex` to: bank 15, the buffer it reserves
 /// for driver constants on every shader stage. Only a default for test
-/// fixtures captured from a Mesa run — a real draw reads the register, since
+/// fixtures captured from a Mesa run: a real draw reads the register, since
 /// deko3d answers 0.
 pub const NOUVEAU_TEX_CB_INDEX: u8 = 15;
 
@@ -35,7 +35,7 @@ pub const NOUVEAU_TEX_CB_INDEX: u8 = 15;
 /// pass emits `tex.r = texBindBase / 4 + unit`, so the handle for texture
 /// unit *n* sits at `(texBindBase / 4 + n) * 4`. Reading the immediate as a
 /// byte offset lands a quarter of the way into the buffer, in the fixed
-/// header nouveau keeps ahead of the handle table — which on GM107 begins
+/// header nouveau keeps ahead of the handle table, which on GM107 begins
 /// `0, 1, 2, 3, 4, 5, 6, 7`. That looked exactly like a handle table of
 /// sequential `imageId`s with `samplerId == 0`, which is why the byte
 /// reading survived: every draw resolved to a plausible handle, and every
@@ -74,7 +74,7 @@ fn decode_wrap(bits: u32) -> Wrap {
 pub struct Sampler {
     pub wrap_u: Wrap,
     pub wrap_v: Wrap,
-    /// `address_p`, the third axis — a 3D image's depth.
+    /// `address_p`, the third axis, a 3D image's depth.
     pub wrap_w: Wrap,
     pub mag_linear: bool,
     pub min_linear: bool,
@@ -143,7 +143,7 @@ pub fn read_sampler(ctx: &ExecCtx, addr: u64) -> Result<Sampler> {
     })
 }
 
-/// Where one component of a sampled texel comes from — `TIC2`'s
+/// Where one component of a sampled texel comes from, `TIC2`'s
 /// `X_SOURCE`..`W_SOURCE`. A texture's channels are not handed to the shader
 /// in memory order: the driver picks, per component, one of the stored
 /// channels or a constant, which is how one `R8` image serves GL's `RED`
@@ -178,7 +178,7 @@ fn decode_swizzle_source(bits: u32) -> Result<SwizzleSource> {
 ///
 /// The distinction is not cosmetic: a plain texel can be read on its own,
 /// while a compressed one only exists as part of a block that has to be
-/// decoded whole. That changes the addressing as well as the decode — a
+/// decoded whole. That changes the addressing as well as the decode, a
 /// compressed surface is swizzled in units of blocks, not texels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TexelKind {
@@ -186,8 +186,8 @@ pub enum TexelKind {
     Block(Codec),
     /// A depth surface sampled as a texture, which a title does to light or
     /// fog by distance. Its texel is not a colour in any layout
-    /// [`ColorFormat`] names — `ZF32_X24S8` is a float and a stencil byte
-    /// three bytes apart — so it is its own kind rather than a colour format
+    /// [`ColorFormat`] names: `ZF32_X24S8` is a float and a stencil byte
+    /// three bytes apart, so it is its own kind rather than a colour format
     /// whose green channel would be a lie.
     Depth(DepthTexel),
 }
@@ -197,8 +197,8 @@ pub enum TexelKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepthTexel {
     /// `ZF32_X24S8`: a 32-bit float, then 24 bits of nothing and a stencil
-    /// byte. The depth target of the same name — `SET_ZT_FORMAT` 0x19, see
-    /// `threed::depth_format_layout` — is where the surface comes from.
+    /// byte. The depth target of the same name: `SET_ZT_FORMAT` 0x19, see
+    /// `threed::depth_format_layout`, is where the surface comes from.
     F32X24S8,
 }
 
@@ -224,7 +224,7 @@ impl DepthTexel {
 pub struct Texture {
     pub addr: u64,
     /// Extent in texels, which for a compressed texture is not its extent in
-    /// blocks — the last block of a row or column may be partly outside it.
+    /// blocks, the last block of a row or column may be partly outside it.
     pub width: u32,
     pub height: u32,
     pub layout: Layout,
@@ -238,7 +238,7 @@ pub struct Texture {
     pub layer_stride: u32,
     /// How many array layers the image has, and 1 for a plain 2D one.
     ///
-    /// Sampling never needed this — the shader says which layer it wants —
+    /// Sampling never needed this: the shader says which layer it wants,
     /// but copying the image out does, since nothing else says where it
     /// ends.
     pub layers: u32,
@@ -272,7 +272,7 @@ impl Texture {
             }
             _ => None,
         };
-        // A plain texel and a depth one are addressed identically — one unit
+        // A plain texel and a depth one are addressed identically, one unit
         // per texel, whatever the unit holds.
         let unit_address = |bpp: u32| {
             let width_bytes = match self.layout {
@@ -393,7 +393,7 @@ const BLOCK_CACHE_WAYS: usize = 4;
 /// from.
 ///
 /// A block-compressed texel is not stored on its own: fetching one decodes the
-/// whole 4x4 block — up to 12x12 for ASTC — that it sits in, and throws the
+/// whole 4x4 block (up to 12x12 for ASTC) that it sits in, and throws the
 /// other 15 (or 143) away. Doing that per fetch was 7% of the Home Menu's
 /// frame in ASTC decoding alone, on top of what it cost inside `texel`.
 ///
@@ -424,7 +424,7 @@ impl BlockCache {
     }
 
     /// Take the next way to decode into, leaving it invalid until the caller
-    /// sets its address — so a decode that fails does not leave the way
+    /// sets its address, so a decode that fails does not leave the way
     /// claiming to hold texels it never wrote.
     fn claim(&mut self) -> usize {
         let way = self.next;
@@ -436,8 +436,8 @@ impl BlockCache {
 
 /// How a TIC's `COMPONENTS_SIZES` and `R_DATA_TYPE` pair describes its texels.
 ///
-/// The uncompressed sizes and [`ColorFormat`] name channels the same way —
-/// most significant first — so `A8B8G8R8` and `RGBA8Unorm` are the same bytes,
+/// The uncompressed sizes and [`ColorFormat`] name channels the same way,
+/// most significant first, so `A8B8G8R8` and `RGBA8Unorm` are the same bytes,
 /// and so are `G8R8`/`RG8Unorm` and `R8`/`R8Unorm`. Only the sizes whose
 /// channel order is unambiguous under that reading are listed.
 ///
@@ -549,7 +549,7 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
             ((dw1 >> 9) << 9, Layout::BlockLinear { block_height_gobs })
         }
         // The block *depth* sits beside the height, and a 3D image with more
-        // than one GOB of it interleaves its slices — see the check below.
+        // than one GOB of it interleaves its slices. See the check below.
         1 | 2 => {
             // PITCH[_COLORKEY]: 27 address MSBs, 32B-aligned; pitch is a
             // separate 16-bit field, also in 32B units.
@@ -580,7 +580,7 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
         )));
     }
     // How many GOBs deep one block of a 3D image is. Anything but one makes
-    // it a volume, whose slices interleave — see `Texture::block_depth_gobs`.
+    // it a volume, whose slices interleave. See `Texture::block_depth_gobs`.
     let block_depth_gobs = if texture_type == THREE_D && header_version >= 3 {
         1u32 << ((dw3 >> 6) & 0x7)
     } else {
@@ -796,8 +796,8 @@ pub fn sample_with(
 /// Sample a 3D image, whose third coordinate is normalized like the other
 /// two rather than a layer index.
 ///
-/// A linear sampler filters *between* slices as well as within one — that is
-/// what makes a colour-grading lookup smooth rather than banded — so this
+/// A linear sampler filters *between* slices as well as within one: that is
+/// what makes a colour-grading lookup smooth rather than banded, so this
 /// blends the two nearest by the same rule [`crate::gpu::surface::bilinear`]
 /// uses for the other axes, and `textureSampleLevel` on a `texture_3d` does
 /// the same thing on the device.
@@ -837,7 +837,7 @@ pub fn sample_3d_with(
 ///
 /// The face order and the sign of each axis are OpenGL's, which is what
 /// Maxwell stores its six faces in and what a `texture_cube` binding expects
-/// — so the device and this pick the same face for the same direction.
+///, so the device and this pick the same face for the same direction.
 ///
 /// The two renderers can still differ on a texel at a face's edge: a device
 /// filters across the seam and this clamps inside the face. Nothing seen so
@@ -881,7 +881,7 @@ pub fn sample_cube_with(
 /// A shadow sample: the same fetch, with each texel replaced by whether
 /// `reference` passes against it before the filter runs.
 ///
-/// Comparing per tap and filtering the results is what hardware does — it is
+/// Comparing per tap and filtering the results is what hardware does: it is
 /// percentage-closer filtering, and it is why a shadow edge is soft rather
 /// than a step. Comparing the *filtered* depth instead would give a hard edge
 /// wherever a linear sampler straddles one.
@@ -926,7 +926,7 @@ mod tests {
     use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
     use crate::mem::Memory;
 
-    /// `X_SOURCE=R, Y_SOURCE=G, Z_SOURCE=B, W_SOURCE=A` in TIC dword 0 — the
+    /// `X_SOURCE=R, Y_SOURCE=G, Z_SOURCE=B, W_SOURCE=A` in TIC dword 0, the
     /// identity swizzle, which a plain RGBA texture carries.
     const IDENTITY_SWIZZLE: u32 = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
     /// `TextureType_2D` in dword4, which every real TIC carries.
@@ -1036,7 +1036,7 @@ mod tests {
     /// A compressed surface is addressed in blocks. Four 4x4 blocks laid out
     /// across one 16-texel row must be found at 8-byte steps, not at the
     /// 8-bytes-per-*texel* steps a decoder that forgot the distinction would
-    /// use — which is the difference between an image and diagonal ribbons.
+    /// use, which is the difference between an image and diagonal ribbons.
     #[test]
     fn a_pitch_bc1_texture_is_addressed_in_blocks() {
         let (mut mem, vmm, base) = harness();

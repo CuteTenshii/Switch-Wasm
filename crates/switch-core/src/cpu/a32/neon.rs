@@ -4,8 +4,8 @@
 //! halves, so nothing here needs storage of its own.
 //!
 //! What is implemented is what Mario Kart 8 Deluxe's modules actually contain.
-//! Canonicalising every NEON encoding in their 4.8M words — masking out the
-//! register fields so one class collapses to one key — gives 97 distinct
+//! Canonicalising every NEON encoding in their 4.8M words, masking out the
+//! register fields so one class collapses to one key: gives 97 distinct
 //! classes, and a long tail: the float multiply-accumulate by element is 2,898
 //! of them, the immediate zero 1,140, and by the fortieth the count is in the
 //! tens. The classes below are that head. Anything else still says so by name
@@ -18,7 +18,7 @@ use crate::{Error, Result};
 type Lane = u64;
 
 /// How many single-precision lanes a vector holds. NEON has no
-/// double-precision vectors, so this is the only float lane count there is —
+/// double-precision vectors, so this is the only float lane count there is,
 /// and in the three-registers-of-the-same-length group it cannot come from
 /// `size`, where bit 21 selects subtract and bit 20 is `sz`.
 #[inline]
@@ -136,7 +136,7 @@ impl Cpu {
         }
     }
 
-    /// Advanced SIMD data processing — the `cond == 0xF`, bits 27:25 == 001
+    /// Advanced SIMD data processing, the `cond == 0xF`, bits 27:25 == 001
     /// encoding space.
     pub(super) fn a32_neon_data(&mut self, insn: u32) -> Result<()> {
         let result = if (insn >> 23) & 1 == 0 {
@@ -705,7 +705,7 @@ impl Cpu {
     /// The NEON element and structure load/store space, `1111 0100`.
     ///
     /// Mario Kart 8 Deluxe issues 14,168 of these and all but a handful are
-    /// `VLD1`/`VST1` moving one or two `D` registers — the vector equivalent
+    /// `VLD1`/`VST1` moving one or two `D` registers, the vector equivalent
     /// of a `memcpy` step. The interleaving forms (`VLD2`/`VLD3`/`VLD4`) are
     /// in this space too and are not implemented.
     pub(super) fn a32_neon_load_store(&mut self, insn: u32) -> Result<()> {

@@ -1,6 +1,6 @@
 //! KEPLER_INLINE_TO_MEMORY_B (class 0xA140).
 //!
-//! Uploads data that travels *inside* the pushbuffer straight into memory —
+//! Uploads data that travels *inside* the pushbuffer straight into memory,
 //! deko3d uses it for small buffer updates where a DMA round-trip would cost
 //! more than the words themselves. The 3D class implements the same methods,
 //! and deko3d sends them on the 3D subchannel, so the channel routes both.

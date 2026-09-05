@@ -3,7 +3,7 @@
 //! One frame carries two interleaved streams in the same bytes: symbols coded
 //! against a probability model, read forwards from the start, and *raw* bits
 //! of uniform probability, read backwards from the end. Both advance the same
-//! bit counter, which is what lets the two ends meet exactly in the middle —
+//! bit counter, which is what lets the two ends meet exactly in the middle,
 //! and what makes [`RangeDecoder::tell_frac`] a usable budget rather than an
 //! estimate. CELT spends the whole frame deciding how many bits a band may
 //! have from that counter, so it has to agree with the encoder's to the
@@ -13,7 +13,7 @@
 //! the specified behaviour, not leniency: a decoder must stay in step with an
 //! encoder that stopped writing once the remaining bits were implied.
 
-/// Bits emitted at a time — the coder's base is a byte.
+/// Bits emitted at a time: the coder's base is a byte.
 const SYM_BITS: u32 = 8;
 
 /// Width of `rng` and `val`.
@@ -226,8 +226,8 @@ impl<'a> RangeDecoder<'a> {
     }
 
     /// Drop `bytes` from the end of the frame. A packet that carries a
-    /// redundant CELT frame puts it there, and this frame's raw bits — which
-    /// are read backwards from the end — must stop short of it.
+    /// redundant CELT frame puts it there, and this frame's raw bits, which
+    /// are read backwards from the end: must stop short of it.
     pub(super) fn shrink(&mut self, bytes: usize) {
         self.buf = &self.buf[..self.buf.len().saturating_sub(bytes)];
     }
@@ -246,7 +246,7 @@ impl<'a> RangeDecoder<'a> {
     }
 
     /// The same count in eighths of a bit. The linear term plus this table is
-    /// exact at this resolution — the transition thresholds are where
+    /// exact at this resolution: the transition thresholds are where
     /// `r*r >> 15` would carry.
     pub(super) fn tell_frac(&self) -> u32 {
         const CORRECTION: [u32; 8] = [35733, 38967, 42495, 46340, 50535, 55109, 60097, 65535];

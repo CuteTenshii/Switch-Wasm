@@ -3,14 +3,14 @@
 //!
 //! Its own binary, not a section of `cpu_a64_test`. The sink that code with no
 //! `Cpu` in reach traces into is process-global, and any test that faults
-//! drains it — so a test asserting on what is in the sink has to be the only
+//! drains it, so a test asserting on what is in the sink has to be the only
 //! thing in the process that could take from it.
 
 use switch_core::cpu::Cpu;
 use switch_core::trace::{self, Level};
 
 /// The sink is process-global and *taken* rather than copied, so any test that
-/// absorbs it — which is every test that raises a diagnostic or faults — can
+/// absorbs it (which is every test that raises a diagnostic or faults) can
 /// take a line another test was about to assert on. Held for the length of
 /// each test below, which makes this file's tests serial among themselves.
 static SINK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -109,8 +109,8 @@ fn a_diagnostic_carries_its_level_and_the_lines_under_it_inherit_it() {
     );
 }
 
-/// What the parts of the emulator with no `Cpu` in reach trace — the
-/// rasterizer, the shader translator, the texture decoder — reaches the same
+/// What the parts of the emulator with no `Cpu` in reach trace, the
+/// rasterizer, the shader translator, the texture decoder: reaches the same
 /// buffer the host drains. Natively they go to stderr; in a browser there is
 /// no stderr at all, which is where they used to stop.
 #[test]

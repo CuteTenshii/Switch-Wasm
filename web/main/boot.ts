@@ -98,7 +98,7 @@ async function bootFile(file: File): Promise<void> {
   }
   // A title gets a console of its own. Booting used to load straight into
   // whatever was already running, which left the outgoing title's guest RAM
-  // mapped underneath the new one — see `recycleSession`.
+  // mapped underneath the new one. See `recycleSession`.
   try {
     beginLoad(file.name, 'replacing the running session');
     setRunning(null);

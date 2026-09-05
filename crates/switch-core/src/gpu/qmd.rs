@@ -13,7 +13,7 @@
 use crate::gpu::engine::field;
 use crate::{Error, Result};
 
-/// A QMD is 64 words — 256 bytes — however few of them a launch fills in.
+/// A QMD is 64 words (256 bytes) however few of them a launch fills in.
 pub const QMD_WORDS: usize = 64;
 
 /// How many constant buffers a QMD can bind. The bind slot *is* the index:
@@ -31,7 +31,7 @@ pub struct ConstantBuffer {
     pub size: u32,
 }
 
-/// A semaphore the launch releases when it completes — immediately, since a
+/// A semaphore the launch releases when it completes, immediately, since a
 /// dispatch retires inside its own method. It still has to be written, or a
 /// guest waiting on it rather than on a syncpoint waits forever.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +68,6 @@ pub struct Qmd {
 }
 
 impl Qmd {
-    /// Total threads in one CTA.
     pub fn threads_per_cta(&self) -> u32 {
         self.cta_threads[0] * self.cta_threads[1] * self.cta_threads[2]
     }
@@ -163,7 +162,7 @@ fn release(words: &[u32; QMD_WORDS], which: u32) -> Option<Release> {
     })
 }
 
-/// Bits `lo..=hi` of the structure — the `MW(hi:lo)` the header names a field
+/// Bits `lo..=hi` of the structure: the `MW(hi:lo)` the header names a field
 /// by. Reads a word pair, because a field may straddle the boundary (every
 /// constant buffer's size does).
 fn mw(words: &[u32; QMD_WORDS], lo: u32, hi: u32) -> u32 {
@@ -188,7 +187,7 @@ mod tests {
         words
     }
 
-    /// Write `value` into bits `lo..=hi` — the inverse of [`mw`].
+    /// Write `value` into bits `lo..=hi`, the inverse of [`mw`].
     fn set(words: &mut [u32; QMD_WORDS], lo: u32, hi: u32, value: u32) {
         for bit in 0..=(hi - lo) {
             let at = (lo + bit) as usize;
@@ -299,7 +298,7 @@ mod tests {
 
     #[test]
     fn a_structure_that_is_not_a_qmd_is_refused() {
-        // Zeroed memory reads as version 0.0 — what a wrong QMD address
+        // Zeroed memory reads as version 0.0, what a wrong QMD address
         // hands us.
         let err = Qmd::parse(&[0u32; QMD_WORDS]).unwrap_err();
         assert!(

@@ -1,4 +1,4 @@
-//! `IGraphicBufferProducer` — the buffer queue between an app and the
+//! `IGraphicBufferProducer`, the buffer queue between an app and the
 //! compositor.
 //!
 //! The app registers each of its swapchain images with
@@ -126,7 +126,7 @@ impl Default for BufferQueue {
 
 impl BufferQueue {
     pub fn new() -> BufferQueue {
-        // An undocked console, which is what one is until something docks it —
+        // An undocked console, which is what one is until something docks it,
         // and the size comes from there rather than from a pair of literals,
         // because a queue that disagrees with the display is a title drawing
         // at the wrong scale. `Cpu::set_operation_mode` moves it.
@@ -141,7 +141,7 @@ impl BufferQueue {
     }
 
     /// Set the geometry a caller is told about before it has dequeued
-    /// anything — `QUERY_WIDTH`/`QUERY_HEIGHT` and the default in a dequeue
+    /// anything, `QUERY_WIDTH`/`QUERY_HEIGHT` and the default in a dequeue
     /// reply. It is the display's size, so docking the console moves it.
     ///
     /// Only the default: `DequeueBuffer` and a queued buffer both overwrite

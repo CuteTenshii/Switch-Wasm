@@ -1,6 +1,6 @@
 //! A compact A32 disassembler, for reading a fault trace of 32-bit code.
 //!
-//! Not a full one — the shifter's syntax stops at naming the shift — but
+//! Not a full one (the shifter's syntax stops at naming the shift) but
 //! enough to follow a crash back to the call that caused it, which is what a
 //! trace is for.
 

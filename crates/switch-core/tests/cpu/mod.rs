@@ -42,7 +42,7 @@ pub fn run_program(mut cpu: Cpu, pc: u32, code: &[u32]) -> Cpu {
     cpu
 }
 
-// ---------------- instruction encodings (hand-assembled) ----------------
+// instruction encodings (hand-assembled)
 
 // ADD Xd, Xn, #imm  :  sf(1) op(0) S(0) 100010 sh imm12 Rn Rd
 pub fn add_imm(rd: u32, rn: u32, imm: u32, sf: bool) -> u32 {
@@ -181,7 +181,7 @@ pub fn msr_nzcv() -> u32 {
     0xD51B4200 | 31
 }
 
-/// `movk x9, #(THREAD_TLS_BASE >> 16), lsl #16` — the second half of building
+/// `movk x9, #(THREAD_TLS_BASE >> 16), lsl #16`, the second half of building
 /// a guest thread's own TLS address, after `mov x9, #stride` supplies the low
 /// word. Assembled from the constant rather than written out, because the two
 /// starvation tests below reach into thread 1's TLS block by address and a
@@ -190,7 +190,7 @@ pub fn movk_x9_tls_high() -> u32 {
     0xf2a0_0000 | ((switch_core::cpu::THREAD_TLS_BASE >> 16) << 5) | 9
 }
 
-// ---------------- Advanced SIMD (three-same / logical / permute) ----------------
+// Advanced SIMD (three-same / logical / permute)
 
 // dup <Vd>.16B, <Wn>
 pub fn dup16(rd: u32, rn: u32) -> u32 {
@@ -231,7 +231,7 @@ pub fn cmeq16(rd: u32, rn: u32, rm: u32) -> u32 {
 
 // UHADD <Vd>.16B, <Vn>.16B, <Vm>.16B
 pub fn uhadd16(rd: u32, rn: u32, rm: u32) -> u32 {
-    // bit21 is what separates three-same from the copy/permute/table space —
+    // bit21 is what separates three-same from the copy/permute/table space,
     // every other helper here sets it, and this one used to leave it clear.
     // The decoder ignored bit21, so the malformed encoding still reached
     // UHADD; it is really an INS (element) opcode.
@@ -289,7 +289,7 @@ pub fn across_lanes(q: u32, u: u32, size: u32, opcode: u32, rd: u32, rn: u32) ->
         | rd
 }
 
-// ---------------- scalar floating point ----------------
+// scalar floating point
 
 // fmov <Vd>.D, <Xn>
 pub fn fmov_dx(rd: u32, rn: u32) -> u32 {
@@ -306,7 +306,7 @@ pub fn fadd_d(rd: u32, rn: u32, rm: u32) -> u32 {
     (0b00011110 << 24) | (0b01 << 22) | (1 << 21) | (rm << 16) | (0b00101 << 11) | (rn << 5) | rd
 }
 
-// ---------------- Horizon IPC reply synthesis ----------------
+// Horizon IPC reply synthesis
 
 /// A domain request carrying raw arguments after the CmifInHeader. The reply
 /// overwrites the request in TLS, so the payload has to go in before the
@@ -405,7 +405,7 @@ pub fn ipc_request_with_buffer(
     for i in (0..0x100u32).step_by(4) {
         cpu.mem.write_u32(tls + i, 0).unwrap();
     }
-    // hdr1: type 4 (Request), one buffer — send buffers count in bits 23:20,
+    // hdr1: type 4 (Request), one buffer, send buffers count in bits 23:20,
     // receive buffers in 27:24. Either way it is one 12-byte descriptor, so
     // the aligned data area lands at 0x20.
     cpu.mem
@@ -802,7 +802,7 @@ pub fn audren_open(cpu: &mut Cpu, manager: u64, voices: u32, sinks: u32, mix_buf
 }
 
 /// A renderer with one voice, one final mix of two buffers and a stereo device
-/// sink — the smallest arrangement that actually plays — plus the manager and
+/// sink (the smallest arrangement that actually plays) plus the manager and
 /// renderer handles.
 pub fn audren_stereo(cpu: &mut Cpu) -> u64 {
     const AUDREN: u64 = 0xB100;
@@ -945,7 +945,7 @@ pub fn ldr_ro_request(cpu: &mut Cpu, handle: u64, cmd: u32, args: &[u64]) {
     run_ipc_request(cpu, handle);
 }
 
-// ---------------- cryptographic extension and half-precision ----------------
+// cryptographic extension and half-precision
 
 // AESE/AESD/AESMC/AESIMC: 0100 1110 00 10100 opcode(5) 10 Rn Rd
 pub fn aes(opcode: u32, rd: u32, rn: u32) -> u32 {
@@ -979,7 +979,7 @@ pub fn fcvt(ftype: u32, opc: u32, rd: u32, rn: u32) -> u32 {
         | rd
 }
 
-// ---------------- variable (register) shifts ----------------
+// variable (register) shifts
 
 // Vector three-same: 0 Q U 01110 size 1 Rm opcode(5) 1 Rn Rd
 pub fn simd_shift_reg(q: u32, u: u32, size: u32, op: u32, rd: u32, rn: u32, rm: u32) -> u32 {
@@ -1009,9 +1009,9 @@ pub fn scalar_shift_reg(u: u32, size: u32, op: u32, rd: u32, rn: u32, rm: u32) -
         | rd
 }
 
-// ---------------- FPCR and FPSR ----------------
+// FPCR and FPSR
 
-// `1101010100 L op0 op1 CRn CRm op2 Rt` — op0 is bits[20:19], so it does not
+// `1101010100 L op0 op1 CRn CRm op2 Rt`: op0 is bits[20:19], so it does not
 // fit in the 0xD53 prefix. `mrs x0, fpcr` is 0xD53B4400.
 pub fn sysreg_move(read: bool, rt: u32, op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) -> u32 {
     0b1101010100 << 22
@@ -1038,7 +1038,7 @@ pub fn fdiv_d(rd: u32, rn: u32, rm: u32) -> u32 {
 
 /// Run one program through both engines and assert they agree with the value
 /// the architecture calls for. The translator and the interpreter share these
-/// helpers, so a decode bug in one is a decode bug in both — which is exactly
+/// helpers, so a decode bug in one is a decode bug in both, which is exactly
 /// how the two below survived.
 pub fn both_engines(setup: &[(u8, u64)], code: &[u32]) -> (Cpu, Cpu) {
     let mut out = Vec::new();

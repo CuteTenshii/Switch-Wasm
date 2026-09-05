@@ -5,7 +5,7 @@
 //! address range the CPU can reach. Reads/writes to unmapped addresses fault
 //! with [`Error::Cpu`], except inside an optional "soft" region (see
 //! [`Memory::soft_map_zero`]) whose unmapped pages read as zero and allocate
-//! a real page on first write — used to present homebrew with its expected
+//! a real page on first write, used to present homebrew with its expected
 //! address space without reserving it up front.
 
 use crate::{Error, Result};
@@ -25,12 +25,12 @@ const _: () = assert!(PAGE_COUNT.is_power_of_two());
 /// costs thousands of steps instead of millions. See [`Memory::state_run`].
 const BLOCK_PAGES: usize = 512;
 const BLOCK_COUNT: usize = PAGE_COUNT / BLOCK_PAGES;
-/// The default ceiling on real, host-backed guest RAM — see
+/// The default ceiling on real, host-backed guest RAM: see
 /// [`Memory::set_max_mapped_bytes`] to choose another.
 ///
 /// It exists to bound a runaway guest write (e.g. a stray pointer walking up
 /// from a null base, one soft-mapped page at a time) to a fast, cheap failure
-/// instead of ballooning the host process — a browser tab included — for
+/// instead of ballooning the host process (a browser tab included) for
 /// seconds before anything faults.
 ///
 /// **It may not be smaller than what `svcGetInfo` advertises as
@@ -41,7 +41,7 @@ const BLOCK_COUNT: usize = PAGE_COUNT / BLOCK_PAGES;
 /// no allocation in sight. A cap under the advertised total does not limit a
 /// title, it makes the emulator lie to one.
 ///
-/// Backing is lazy — a page costs nothing until the guest touches it — so this
+/// Backing is lazy (a page costs nothing until the guest touches it) so this
 /// only decides when a run fails, never what an idle title reserves. The
 /// console being emulated has 4 GiB, of which an application gets about 3.2,
 /// so this is still short of hardware rather than generous.
@@ -54,7 +54,7 @@ const MAX_MAPPED_PAGES: usize = (MAX_MAPPED_BYTES / PAGE_SIZE as u64) as usize;
 ///
 /// A module is **two** states, not one: the kernel maps its static half
 /// (`.text` + `.rodata`) and its mutable half (`.data` + `.bss`) separately,
-/// and SDK code walks from one into the other — see [`Memory::mark_module`].
+/// and SDK code walks from one into the other. See [`Memory::mark_module`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum MemoryState {
@@ -78,7 +78,7 @@ pub struct StateRun {
     /// Whether the pages hold real storage, as opposed to being untouched
     /// soft-mapped ones an address-space walk should see as free.
     pub mapped: bool,
-    /// Whether they are write-protected — in practice a module's `.text`.
+    /// Whether they are write-protected, in practice a module's `.text`.
     pub readonly: bool,
     /// What the guest is told the run is.
     pub state: MemoryState,
@@ -115,7 +115,7 @@ pub struct Memory {
     /// a guest write through a wild pointer faults instead of silently
     /// corrupting running code, and so `svcQueryMemory` can report the
     /// real-world R-X permission code on it (retail `rtld` scans process
-    /// memory for other modules by filtering on exactly that permission —
+    /// memory for other modules by filtering on exactly that permission,
     /// see [`Memory::mark_readonly`]). A retail process loads several
     /// modules (`rtld`/`main`/`subsdk*`/`sdk`), so this is a list, not a
     /// single range.
@@ -125,13 +125,13 @@ pub struct Memory {
     ///
     /// [`Memory::is_readonly`] runs on **every** guest store and walks that
     /// list linearly, so a process with four modules loaded paid four
-    /// comparisons per store — against a clear that writes eleven million
+    /// comparisons per store: against a clear that writes eleven million
     /// texels a frame, and a heap that writes far more. Every protected range
     /// is a module's `.text` down in the image, so almost every store a
     /// running title makes is outside the envelope and answers in two
     /// comparisons without touching the list at all.
     readonly_span: (u32, u32),
-    /// Every module image currently mapped, in load order. Small — a retail
+    /// Every module image currently mapped, in load order. Small, a retail
     /// process is four modules plus whatever `ldr:ro` has open.
     modules: Vec<ModuleImage>,
     /// The envelope of every range in `modules`, as `(lowest start, highest
@@ -146,8 +146,8 @@ pub struct Memory {
     mapped_pages: usize,
     /// The ceiling `mapped_pages` may reach, from [`MAX_MAPPED_BYTES`] unless
     /// a caller lowered it. A field rather than a constant so that a host with
-    /// less to give — or a test that wants to reach the cap without allocating
-    /// gigabytes to do it — can say so.
+    /// less to give, or a test that wants to reach the cap without allocating
+    /// gigabytes to do it: can say so.
     max_mapped_pages: usize,
     /// How many pages of each 2 MiB block hold real storage. Maintained
     /// alongside `pages` so a scan can skip a block that is entirely
@@ -172,7 +172,7 @@ pub struct Memory {
     /// deswizzled textures.
     ///
     /// One bitmap and not one per consumer, because the test is
-    /// `#[inline(always)]` in every guest write path — the hottest code here —
+    /// `#[inline(always)]` in every guest write path, the hottest code here,
     /// and a second bounds-checked load and bit test on it would be paid by
     /// every store the emulator ever runs. The price is that a write reports
     /// the page to *both* drains, so each sees pages it has nothing cached
@@ -188,7 +188,7 @@ pub struct Memory {
     /// store's test misses on the length check alone.
     watched_pages: Vec<u64>,
     /// Watched pages written since the JIT last drained this. A page is
-    /// recorded once — marking it clears its bit — and stays out of the
+    /// recorded once (marking it clears its bit) and stays out of the
     /// bitmap until something is cached from it again.
     code_dirty: Vec<u32>,
     /// The same list, for the GPU backend. Separate because the two drain
@@ -336,7 +336,7 @@ impl Memory {
     /// faults instead of writing through. Adds to the existing set of
     /// read-only ranges (a retail process has one per loaded module) rather
     /// than replacing it. Loader-only writes (`map`/`map_zero`/`copy_range`)
-    /// are unaffected — call this once a segment's relocations have been
+    /// are unaffected: call this once a segment's relocations have been
     /// patched in, not before.
     pub fn mark_readonly(&mut self, start: u32, end: u32) {
         self.readonly.push((start, end));
@@ -355,8 +355,8 @@ impl Memory {
             });
     }
 
-    /// Forget every loaded module — both its protection and the memory
-    /// states it is reported under — so a fresh boot in a reused [`Memory`]
+    /// Forget every loaded module, both its protection and the memory
+    /// states it is reported under, so a fresh boot in a reused [`Memory`]
     /// doesn't inherit either from a previous title/homebrew. The two are one
     /// call because a module image that outlived its protection, or the other
     /// way round, is a state no boot can produce.
@@ -373,7 +373,7 @@ impl Memory {
     /// because a module can go away while the process keeps running:
     /// `ldr:ro`'s `UnloadModule` frees the address space a loaded NRO
     /// occupied, and leaving its `.text` protected would fault the next thing
-    /// to be mapped over it. Ranges that merely overlap are left alone —
+    /// to be mapped over it. Ranges that merely overlap are left alone,
     /// nothing here splits a protected range, and a partial unmap of somebody
     /// else's module is not something to guess at.
     pub fn unmark_readonly(&mut self, start: u32, end: u32) {
@@ -381,7 +381,7 @@ impl Memory {
         self.refresh_readonly_span();
     }
 
-    /// Whether `addr` falls in a range marked by [`Memory::mark_readonly`] —
+    /// Whether `addr` falls in a range marked by [`Memory::mark_readonly`],
     /// in practice, always a loaded module's `.text`. Used by `svcQueryMemory`
     /// to report the real R-X permission code on it instead of a blanket RWX.
     #[inline(always)]
@@ -398,13 +398,13 @@ impl Memory {
     ///
     /// A module is not one region to Horizon. Its static half (`.text` +
     /// `.rodata`) is `Code` and its mutable half (`.data` + `.bss`) is
-    /// `CodeData`, and `nn::ro::detail::GetExceptionInfo` — which every
+    /// `CodeData`, and `nn::ro::detail::GetExceptionInfo`, which every
     /// `nn::diag` log line and every abort goes through to name the module an
-    /// address belongs to — reads the boundary between them as the module's
+    /// address belongs to: reads the boundary between them as the module's
     /// shape: it walks `Code` up from the queried address, then *requires*
     /// the region immediately above that run to be `CodeData` and walks that
     /// to find the image's end. Reporting one state for the whole image left
-    /// nothing above the run to be `CodeData`, and it aborted — which is how
+    /// nothing above the run to be `CodeData`, and it aborted, which is how
     /// Asphalt 9 died on its first `puts`, 377M steps in, with an assertion
     /// whose text the release SDK had compiled out.
     pub fn mark_module(
@@ -428,7 +428,7 @@ impl Memory {
         self.refresh_module_span();
     }
 
-    /// Drop every module image that lies inside `[start, end)` — the other
+    /// Drop every module image that lies inside `[start, end)`, the other
     /// half of [`Memory::mark_module`], for `ldr:ro`'s `UnloadModule`. Same
     /// rule as [`Memory::unmark_readonly`]: an image that merely overlaps is
     /// left alone rather than split.
@@ -569,7 +569,7 @@ impl Memory {
 
     /// An access to a page with no storage behind it: zeros inside a soft-mapped
     /// region, a fault anywhere else. Kept out of line so the mapped case stays
-    /// small enough to inline into its callers — it is on the path of every
+    /// small enough to inline into its callers: it is on the path of every
     /// instruction fetch.
     #[cold]
     #[inline(never)]
@@ -597,8 +597,8 @@ impl Memory {
         self.readonly.iter().any(|&(s, e)| start < e && s < end)
     }
 
-    /// The run of pages around `addr` that share its state — backed or not,
-    /// read-only or not — clamped to `[0, limit)`. This is the region
+    /// The run of pages around `addr` that share its state, backed or not,
+    /// read-only or not: clamped to `[0, limit)`. This is the region
     /// `svcQueryMemory` reports, and the two facts it reports about it.
     ///
     /// Finding the run means finding where the state changes, which the
@@ -703,7 +703,7 @@ impl Memory {
     ///
     /// Zero-filled including where a page was already backed. This used to
     /// allocate the pages and stop, which is the same thing only while every
-    /// page is fresh — and the callers that most need the zeros are the ones
+    /// page is fresh, and the callers that most need the zeros are the ones
     /// where it is not. `.bss` shares its first page with `.data`, a recycled
     /// thread's TLS slot is a page some earlier thread already wrote, and
     /// `MapSharedMemory` promises the guest a cleared buffer. Each of those
@@ -739,7 +739,7 @@ impl Memory {
 
     /// The `N` bytes at `addr` when they all live in one page. Multi-byte
     /// accesses go through this so they cost a single page lookup instead of one
-    /// per byte — the interpreter reads four bytes for every instruction it
+    /// per byte: the interpreter reads four bytes for every instruction it
     /// fetches, so this is the hottest path in the emulator.
     #[inline(always)]
     fn read_bytes_in_page<const N: usize>(&self, addr: u32) -> Option<[u8; N]> {
@@ -823,7 +823,7 @@ impl Memory {
     ///
     /// This is the shape every pixel walk in the GPU wants. `read_u8` costs a
     /// page lookup each, so assembling a 4-byte pixel a byte at a time is four
-    /// of them, and the walks that do it run over every pixel of a surface —
+    /// of them, and the walks that do it run over every pixel of a surface,
     /// a blit, a scan-out, a blend. Both `ExecCtx::read_pixel` and
     /// `Gpu::present` used to carry their own copy of this; only one of them
     /// had been fixed.
@@ -842,7 +842,7 @@ impl Memory {
         })
     }
 
-    /// The byte-at-a-time fallback for a width no accessor covers — 3-byte
+    /// The byte-at-a-time fallback for a width no accessor covers, 3-byte
     /// formats, and nothing else in practice.
     #[cold]
     #[inline(never)]
@@ -888,7 +888,7 @@ impl Memory {
     /// and going through [`Memory::write_le`] per unit paid a page lookup and
     /// a read-only scan for each of the eleven million texels a 720p 2x2 MSAA
     /// target costs per frame. The GPU hands runs of at most a GOB's linear
-    /// stretch, which never crosses a page — anything that would falls back to
+    /// stretch, which never crosses a page: anything that would falls back to
     /// writing them one at a time.
     ///
     /// The watchpoint and the JIT's code-page bookkeeping are kept exactly as
@@ -941,7 +941,7 @@ impl Memory {
     ///
     /// A depth clear against a packed format is this. `Z24S8` clearing depth
     /// alone may not touch the stencil byte beside it, so the run cannot be
-    /// filled — but the mask and the value are the same for every unit, so it
+    /// filled, but the mask and the value are the same for every unit, so it
     /// is still one page lookup and a linear walk rather than a translation
     /// and a swizzle per texel.
     pub fn merge_le(
@@ -1135,7 +1135,7 @@ impl Memory {
         Ok(())
     }
 
-    /// Copy `buf` into guest memory at `addr` — [`Memory::read_into`] run
+    /// Copy `buf` into guest memory at `addr`: [`Memory::read_into`] run
     /// backwards, one page at a time rather than one word at a time.
     ///
     /// What a render target's write-back needs. A 720p surface at 2x2 samples
@@ -1166,8 +1166,8 @@ impl Memory {
     /// pages. Horizon's `svcMapMemory` aliases two ranges; page storage here is
     /// not shareable, so the bytes are copied instead and copied back when the
     /// alias is torn down. The guest only uses one side of such an alias at a
-    /// time — libnx maps a thread's stack into the stack region and from then on
-    /// touches only the mirror — so a copy behaves like an alias to it.
+    /// time, libnx maps a thread's stack into the stack region and from then on
+    /// touches only the mirror, so a copy behaves like an alias to it.
     /// Source pages that were never touched contribute zeros, the same
     /// zero-filled memory the guest would have seen through the alias.
     pub fn copy_range(&mut self, dst: u32, src: u32, size: usize) -> Result<()> {
@@ -1235,7 +1235,7 @@ mod tests {
     }
 
     /// `map_zero` over ground somebody has already used has to hand back
-    /// zeros, and has to stop at the range it was given — the page holding the
+    /// zeros, and has to stop at the range it was given, the page holding the
     /// first byte of `.bss` holds the last bytes of `.data` too.
     #[test]
     fn map_zero_clears_a_page_that_was_already_backed() {
@@ -1358,7 +1358,7 @@ mod tests {
         // runs `Code` up from an address it was given, then requires the very
         // next region to be `CodeData` and runs that to find the image's end.
         // Reporting one state for the whole image leaves nothing above the
-        // run to be `CodeData`, and it aborts — which is exactly what stopped
+        // run to be `CodeData`, and it aborts, which is exactly what stopped
         // Asphalt 9 on its first `puts`.
         const LIMIT: u32 = 0xF000_0000;
         let mut m = Memory::new();
@@ -1495,7 +1495,7 @@ mod tests {
     /// rather than merely unlikely to see one.
     ///
     /// A mask that silently folds an out-of-range index back into the table
-    /// would turn what used to be a crash into a read of the wrong page —
+    /// would turn what used to be a crash into a read of the wrong page,
     /// a real hazard, and the reason to state this once as a test instead of
     /// as a comment. It cannot happen here: the argument is a `u32` and the
     /// space is 4 GiB, so the shift alone already lands inside the table and

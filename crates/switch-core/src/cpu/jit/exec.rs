@@ -2,7 +2,7 @@
 //! leave through, and the terminator it ends on.
 //!
 //! Every arm here does what the interpreter's decoder would have done once it
-//! finished decoding — in most cases by calling the very same helper, so the
+//! finished decoding, in most cases by calling the very same helper, so the
 //! two engines are one computation with two front ends.
 
 use super::cache::JitStats;
@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 /// The operand an addition needs to compute a subtraction. `carry` is 1
 /// exactly when the instruction subtracts, so it doubles as the mask that
-/// inverts the operand — no branch, and nothing left to decide at run time.
+/// inverts the operand: no branch, and nothing left to decide at run time.
 #[inline(always)]
 fn invert_if(v: u64, carry: u8) -> u64 {
     v ^ 0u64.wrapping_sub(u64::from(carry))
@@ -51,13 +51,13 @@ impl Cpu {
     ///
     /// The step budget is honoured exactly. A block whose remaining
     /// instructions do not fit is entered anyway and left part-way through,
-    /// with `pc` on the instruction that would have come next — the block is
+    /// with `pc` on the instruction that would have come next: the block is
     /// a cache, not a unit of execution, so stopping inside one is no
     /// different from stopping between two interpreted instructions.
     pub(in crate::cpu) fn run_jit(&mut self, max_steps: u64) -> Result<RunReport> {
         let mut steps = 0u64;
         // The block last executed, kept across iterations. A loop that branches
-        // back to its own head — which is most of what a hot loop is — then
+        // back to its own head (which is most of what a hot loop is) then
         // costs neither the cache lookup nor the reference count, because the
         // handle is moved out and back rather than cloned.
         let mut held: Option<Rc<Block>> = None;
@@ -208,7 +208,7 @@ impl Cpu {
                 self.record_run(pc, 1);
                 let result = self.exec_term(term, pc);
                 // After the terminator, not before, and whether or not it
-                // faulted — which is what `step_inner` does. An `SVC` is the
+                // faulted, which is what `step_inner` does. An `SVC` is the
                 // one instruction that reads the clock while it runs, so
                 // retiring it early made the JIT hand every syscall a tick the
                 // interpreter had not spent yet: sdl-hello ended 1 cycle apart
@@ -253,7 +253,7 @@ impl Cpu {
     }
 
     /// Evaluate a conditional branch inside a block. Returns whether it was
-    /// taken — in which case `pc` is where control went and the block is over,
+    /// taken: in which case `pc` is where control went and the block is over,
     /// and otherwise the block carries on at the following instruction with
     /// `pc` still to be settled by the caller.
     #[inline(always)]
@@ -408,7 +408,7 @@ impl Cpu {
                 sf,
             } => {
                 // Rd == 31 is SP for AND/ORR/EOR and the zero register only
-                // for ANDS — one of the few places the two differ, and one
+                // for ANDS, one of the few places the two differ, and one
                 // the translator has already settled into `rd`.
                 self.logical(rd, rn, imm, opc, sf);
             }

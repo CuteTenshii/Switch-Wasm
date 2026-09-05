@@ -1,9 +1,9 @@
-//! `ns`: the title manager — what is installed, how much room it takes, and
+//! `ns`: the title manager, what is installed, how much room it takes, and
 //! the DLC (`aoc`), play statistics (`pdm`) and album (`caps`) interfaces
 //! alongside it.
 //!
 //! Most of `ns` is a creator that hands out sub-interfaces, and a fabricated
-//! object id is not callable — so an unimplemented getter here does not fail
+//! object id is not callable, so an unimplemented getter here does not fail
 //! one command, it ends the whole chain at its first.
 
 use super::fs::{SD_FREE_SPACE, SD_TOTAL_SPACE};
@@ -16,7 +16,7 @@ impl Cpu {
     ///
     /// Nothing is installed here. There is no NAND to install a title to, no
     /// content manager to install one with, and no application record database
-    /// to have recorded it — so `ListApplicationRecord` is an empty list, and
+    /// to have recorded it, so `ListApplicationRecord` is an empty list, and
     /// that is the truthful answer rather than a gap. A save manager asks `ns`
     /// what a title id is *called* so it can label the save it found; with no
     /// records to label, it has nothing to ask about.
@@ -24,7 +24,7 @@ impl Cpu {
     /// The generic fallback answered the getters below with a fabricated
     /// object id, so a caller that asked for `IApplicationManagerInterface`
     /// got an id that was not one and then called `ListApplicationRecord` on
-    /// it — which the fallback also answered with a fresh object id, leaving
+    /// it, which the fallback also answered with a fresh object id, leaving
     /// the caller to read its record count out of that.
     ///
     /// Before 3.0.0 `ns:am` *was* the application manager; from 3.0.0 the
@@ -62,7 +62,7 @@ impl Cpu {
             // interface is, and nothing here enforces privilege.
             // `ns:su` is not one more getter service: `ISystemUpdateInterface`
             // has its own small command set, and it is opened at boot by the
-            // Home Menu — which is the only process that has anywhere to show
+            // Home Menu, which is the only process that has anywhere to show
             // "an update is available".
             "ns:su" => match cmd_id {
                 // GetBackgroundNetworkUpdateState -> u8. Nothing downloads
@@ -96,7 +96,7 @@ impl Cpu {
                     // interface along: `nsInitialize` asks for 7996 and was handed
                     // an `ns:account-proxy` to call `ListApplicationRecord` (cmd 0)
                     // on, which is not a command that interface has. Note the gap
-                    // at 7990 — it is genuinely not assigned.
+                    // at 7990: it is genuinely not assigned.
                     Some(7988) => self.ns_reply_with_interface(tls, handle, "ns:dynamic-rights"),
                     Some(7989) => self.ns_reply_with_interface(tls, handle, "ns:read-only-control"),
                     Some(7991) => self.ns_reply_with_interface(tls, handle, "ns:read-only-record"),
@@ -146,7 +146,7 @@ impl Cpu {
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // `IDynamicRightsInterface`: whether a title may run under the
-            // rights the accounts on the console hold — the licence-sharing
+            // rights the accounts on the console hold, the licence-sharing
             // checks a 20.0.0 Home Menu makes before it launches anything.
             "ns:dynamic-rights" => match cmd_id {
                 // HasAccountRestrictedRightsInRunningApplications -> bool.
@@ -169,20 +169,20 @@ impl Cpu {
     }
 
     /// Hand out one of `ns`'s sub-interfaces. The getters all have the same
-    /// shape — no input, one out-interface — so they share this.
+    /// shape (no input, one out-interface) so they share this.
     fn ns_reply_with_interface(&mut self, tls: u32, handle: u64, name: &str) -> Result<()> {
         self.reply_with_interface(tls, handle, name)?;
         Ok(())
     }
 
-    /// `aoc:u` — "nn::aocsrv::detail::IAddOnContentManager", the add-on
+    /// `aoc:u`, "nn::aocsrv::detail::IAddOnContentManager", the add-on
     /// content a title has been given. With nothing registered every answer
     /// here is the one a retail console gives a title whose DLC nobody has
     /// bought: the list is empty. What the host adds through
     /// [`Cpu::add_add_on_content`] shows up in it.
     ///
     /// The service had no implementation at all, so every command reached the
-    /// generic fabricated-object reply — which hands a *void* command an
+    /// generic fabricated-object reply, which hands a *void* command an
     /// object id, a sub-session and an event it never asked for, and hands
     /// `CountAddOnContent` an object id the caller then reads as a **count**.
     /// A title that believes it owns two pieces of DLC goes looking for two
@@ -233,8 +233,8 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &base.to_le_bytes(), &[])
             }
             // PrepareAddOnContent(s32 index): make one entry of the list ready
-            // to mount. Everything registered here already is — the host
-            // handed over the container before the title started — so this is
+            // to mount. Everything registered here already is, the host
+            // handed over the container before the title started, so this is
             // the acknowledgement and nothing else, which is what Eden's
             // `IAddOnContentManager::PrepareAddOnContent` does too.
             Some(7) => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -265,7 +265,7 @@ impl Cpu {
             // IsAddOnContentMountedForDebug -> bool.
             Some(13) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
             // CheckAddOnContentMountStatus: a title asking whether what it
-            // mounted is still there. There is no out value — the **Result**
+            // mounted is still there. There is no out value, the **Result**
             // is the whole answer, and a failure is how a title is told its
             // DLC has been removed since it mounted it. Nothing here removes
             // content once it is registered, so this succeeds.
@@ -274,11 +274,11 @@ impl Cpu {
         }
     }
 
-    /// `caps:a` — `nn::capsrv::detail::IAlbumAccessorService`, the album of
+    /// `caps:a`, `nn::capsrv::detail::IAlbumAccessorService`, the album of
     /// screenshots and clips a console keeps on its NAND and its SD card.
     ///
     /// This console has neither, so every answer here describes an album that
-    /// is **mounted and empty** — which is what a freshly initialised console
+    /// is **mounted and empty**, which is what a freshly initialised console
     /// has, and is a state the Album applet knows how to show. Reporting it
     /// unmounted instead is a different thing entirely: it is the card-removed
     /// error, and the applet puts a message on the screen rather than a
@@ -311,7 +311,7 @@ impl Cpu {
             Some(0) | Some(100) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             // GetAlbumFileList / …Ex0 -> u64 entries written, with the
             // `AlbumEntry` array itself going into a map-alias out buffer.
-            // None are written, and the count says so — so the buffer is left
+            // None are written, and the count says so, so the buffer is left
             // exactly as the caller left it and nothing walks it.
             Some(1) | Some(101) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             // DeleteAlbumFile(AlbumFileId). There is no file any list here
@@ -332,7 +332,7 @@ impl Cpu {
             Some(401) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
             // GetAlbumAccessResultForDebug -> the result code 50012 injects to
             // make the album's access functions fail. Nothing has injected one,
-            // so the code read back is success — and switchbrew notes the
+            // so the code read back is success, and switchbrew notes the
             // command itself returns 0 either way, so the reply carries both.
             Some(50011) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
             _ => self.unimplemented_command(tls, "caps:a", cmd_id),
@@ -352,7 +352,7 @@ impl Cpu {
             // buffer of ApplicationRecord). Zero records, whatever the offset:
             // see the type comment for why that is the answer and not a stub.
             //
-            // The count has to be written even though it is zero — a caller
+            // The count has to be written even though it is zero, a caller
             // that gets a success with no out-data reads its record count off
             // its own stack, which is how "no titles installed" turns into
             // several billion of them.
@@ -362,7 +362,7 @@ impl Cpu {
             Some(1) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             // GetApplicationRecordUpdateSystemEvent -> event. The Home Menu
             // waits on this before it reads the title list, so it goes out
-            // **signalled** — hardware hands out a record set that is already
+            // **signalled**: hardware hands out a record set that is already
             // current, and a dark event here is a Home Menu that never asks
             // what is installed. One event per process: a caller that asks
             // twice has to be given the one it is already waiting on.
@@ -381,7 +381,7 @@ impl Cpu {
             // CheckSdCardMountStatus, and the total/free space of a storage
             // id. `IContentManagementInterface` answers these too and the
             // manager delegates to it on hardware, so the answers are the same
-            // ones — see the `ns:content-management` arm.
+            // ones. See the `ns:content-management` arm.
             Some(43) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             Some(47) => self.write_ipc_response(tls, 0, &[], &SD_TOTAL_SPACE.to_le_bytes(), &[]),
             Some(48) => self.write_ipc_response(tls, 0, &[], &SD_FREE_SPACE.to_le_bytes(), &[]),
@@ -398,7 +398,7 @@ impl Cpu {
             // The media events: SD card mount status, SD card removed, game
             // card attached, game card update detected, game card mount
             // failed. Nothing here can change any of that, so they are handed
-            // out dark — but the same object every time, because the Home Menu
+            // out dark, but the same object every time, because the Home Menu
             // keeps one waiter per event for as long as it runs.
             Some(cmd @ (44 | 45 | 49 | 52 | 505)) => {
                 let h = match self.ns_manager_events.get(&cmd) {
@@ -419,7 +419,7 @@ impl Cpu {
                 self.write_ipc_reply(tls, 0, &[h], &[], &[], &[])
             }
             // 20.0.0+, unnamed, and both event getters that Eden's
-            // `application_manager_interface.cpp` answers with one handler —
+            // `application_manager_interface.cpp` answers with one handler,
             // signalling the event before handing it over, so a caller that
             // waits on it does not block. Kept per command, like the media
             // events above, because a second ask must be the same object as
@@ -444,7 +444,7 @@ impl Cpu {
             // 20.0.0+, and unnamed: switchbrew lists the id and nothing else.
             // Eden's `ns/application_manager_interface.cpp` reads it as one u64
             // out and answers 0, which is the only account of its shape there
-            // is — and with nothing installed here, zero is what every other
+            // is, and with nothing installed here, zero is what every other
             // count and id above reports too.
             Some(4023) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
             _ => self.unimplemented_command(tls, iface, cmd_id),
@@ -452,7 +452,7 @@ impl Cpu {
     }
 
     /// `prepo:u` and its privileged aliases (`IPrepoService`): the play
-    /// reports a title sends Nintendo — what was played, for how long, and
+    /// reports a title sends Nintendo: what was played, for how long, and
     /// whatever telemetry the title cares to attach.
     ///
     /// **Nothing here transmits anything.** There is no network behind this
@@ -461,7 +461,7 @@ impl Cpu {
     /// [`Cpu::pdm_request`] describes from the other side.
     ///
     /// It had no implementation at all, so every command reached the generic
-    /// fabricated-object reply — which answered a *void* transmission request
+    /// fabricated-object reply, which answered a *void* transmission request
     /// with an object id, a sub-session and an event, and would have answered
     /// the transmission status with the object id read as a status code.
     pub(super) fn prepo_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
@@ -488,7 +488,7 @@ impl Cpu {
         }
     }
 
-    /// `pdm:qry` (`IQueryService`): the play-history database — what has been
+    /// `pdm:qry` (`IQueryService`): the play-history database, what has been
     /// played, for how long, and when.
     ///
     /// **Nothing has ever been played on this console.** There is no
@@ -497,16 +497,16 @@ impl Cpu {
     /// an empty result rather than a fabricated history: no play events, no
     /// account events, an empty available range, and zeroed statistics.
     ///
-    /// An empty result is a state a real console has too — a factory-fresh one
-    /// — which is what makes it a truthful answer rather than a placeholder.
+    /// An empty result is a state a real console has too, a factory-fresh one
+    ///, which is what makes it a truthful answer rather than a placeholder.
     pub(super) fn pdm_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
         if self.ipc_is_control_request(tls) {
             return self.write_ipc_response(tls, 0, &[], &0u16.to_le_bytes(), &[]);
         }
         match cmd_id {
-            // The list queries — QueryAppletEvent, QueryPlayEvent,
+            // The list queries, QueryAppletEvent, QueryPlayEvent,
             // QueryAccountEvent, QueryAccountPlayEvent,
-            // QueryRecentlyPlayedApplication — each fill an output array and
+            // QueryRecentlyPlayedApplication, each fill an output array and
             // report how many entries they wrote. None.
             Some(0) | Some(5) | Some(7) | Some(8) | Some(11) => {
                 self.write_ipc_response(tls, 0, &[], &0i32.to_le_bytes(), &[])
@@ -536,7 +536,7 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0);
 
         // And the statistics for any application are a title launched zero
-        // times — not a fabricated playtime.
+        // times, not a fabricated playtime.
         let mut cpu = request(false, 2, &[0u8; 8]);
         cpu.pdm_request(TLS, Some(2)).unwrap();
         assert_eq!(cpu.read_bytes(TLS + 0x20, 0x20), vec![0u8; 0x20]);
@@ -598,7 +598,7 @@ mod tests {
         // From 3.0.0 `ns:am2` is a getter: every interface behind it is
         // reached by asking for it by command id, and answering the wrong one
         // (or a fabricated object) hands the caller an interface whose
-        // commands mean something else entirely. That is not hypothetical —
+        // commands mean something else entirely. That is not hypothetical,
         // this table used to be shifted one id down from 7989 up, so
         // `nsInitialize`'s 7996 came back as the account proxy and JKSV's
         // `ListApplicationRecord` landed on an interface without that command.
@@ -662,7 +662,7 @@ mod tests {
     #[test]
     fn ns_reports_a_console_with_nothing_installed() {
         // There is no NAND to install a title to and no record database to
-        // have recorded one, so the list is empty — and the count has to be
+        // have recorded one, so the list is empty, and the count has to be
         // written even though it is zero, or the caller reads its record
         // count off its own stack.
         let mut cpu = request(false, 7996, &[]);
@@ -782,7 +782,7 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(BUFFER).unwrap(), 1);
         assert_eq!(cpu.mem.read_u32(BUFFER + 4).unwrap(), 4);
 
-        // An offset past the end is not an error, it is the end of the list —
+        // An offset past the end is not an error, it is the end of the list,
         // a title paging through one asks once more than there is content.
         let mut args = [0u8; 8];
         args[..4].copy_from_slice(&2u32.to_le_bytes());

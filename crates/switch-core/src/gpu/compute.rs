@@ -11,7 +11,7 @@
 //! threads run to the next `bar`, and only once every one of them has arrived
 //! does any of them continue; a `shfl` suspends the same way and is answered
 //! once its warp has caught up. Since nothing runs concurrently, an atomic needs no locking
-//! and a race cannot be observed — a kernel whose result depends on one gets a
+//! and a race cannot be observed: a kernel whose result depends on one gets a
 //! valid answer here and a different one on hardware.
 
 use crate::gpu::engine::compute::EngineCompute;
@@ -29,7 +29,7 @@ use std::cell::RefCell;
 
 /// The most threads one dispatch may run.
 ///
-/// Not a hardware limit — hardware would run a grid this size in microseconds.
+/// Not a hardware limit: hardware would run a grid this size in microseconds.
 /// It is a liveness guard for the browser, where the whole GPU stack runs on
 /// one worker thread: a grid of a million interpreted threads is a tab that
 /// stops answering, and a refused dispatch that says so is worth more than
@@ -221,7 +221,7 @@ fn release(qmd: &Qmd, ctx: &mut ExecCtx) -> Result<()> {
 /// execution context.
 ///
 /// The interpreter reads constants and textures and writes global memory from
-/// the same instruction stream, and a write needs the context mutably — so the
+/// the same instruction stream, and a write needs the context mutably, so the
 /// one mutable borrow lives here and every access goes through it. Nothing
 /// re-enters, so no two of those borrows overlap.
 struct DispatchMemory<'a, 'b> {
@@ -335,7 +335,7 @@ mod tests {
     /// A control-flow instruction's condition-code test field holding `T`.
     const FLOW_TEST_T: u64 = 0xF;
 
-    /// Assemble one instruction, and check it against the decoder — which is
+    /// Assemble one instruction, and check it against the decoder, which is
     /// what makes these encodings trustworthy rather than a second guess at
     /// the same tables.
     fn encode(word: u64, expected: Op) -> u64 {
@@ -357,7 +357,7 @@ mod tests {
         )
     }
 
-    /// `iscadd dst, a, b, shift` — `(a << shift) + b`, which is every
+    /// `iscadd dst, a, b, shift`: `(a << shift) + b`, which is every
     /// "index into an array" one of these kernels does.
     fn iscadd(dst: u8, a: u8, b: u8, shift: u8) -> u64 {
         encode(
@@ -412,7 +412,7 @@ mod tests {
         )
     }
 
-    /// `shfl.bfly p0, dst, src, index, mask` — the lane whose number differs
+    /// `shfl.bfly p0, dst, src, index, mask`, the lane whose number differs
     /// from this one's in the bits `index` names.
     fn shfl_bfly(dst: u8, src: u8, index: u32, mask: u32) -> u64 {
         encode(
@@ -706,7 +706,7 @@ mod tests {
     #[test]
     fn shared_memory_does_not_carry_from_one_cta_to_the_next() {
         // Same kernel, two CTAs, and the second must publish its own slot 3
-        // rather than inherit the first's — which it would if the block were
+        // rather than inherit the first's, which it would if the block were
         // allocated once for the grid.
         let mut h = Harness::new();
         let out = h.base + OUTPUT_AT;
@@ -805,7 +805,7 @@ mod tests {
     fn a_kernel_the_interpreter_cannot_follow_fails_the_dispatch_and_writes_nothing() {
         let mut h = Harness::new();
         let out = h.base + OUTPUT_AT;
-        // Not an instruction this decoder knows — with a `PT` guard, or the
+        // Not an instruction this decoder knows, with a `PT` guard, or the
         // predicate would skip it and the kernel would run clean.
         let unknown = 0xffff_ffff_ff00_0000 | PT;
         assert!(matches!(isa::decode(unknown).op, Op::Unimplemented { .. }));

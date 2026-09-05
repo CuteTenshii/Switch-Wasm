@@ -2,7 +2,7 @@
 //! multiplies. The Tegra X1's A57 implements all of it, so guest code is free
 //! to use it.
 //!
-//! The AES steps are the ones [`crate::crypto`] already decrypts NCAs with —
+//! The AES steps are the ones [`crate::crypto`] already decrypts NCAs with,
 //! same column-major state, so the instructions are just a different way in.
 
 use super::Cpu;

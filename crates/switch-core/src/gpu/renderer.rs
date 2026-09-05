@@ -1,7 +1,7 @@
 //! What turns a draw stream into pixels.
 //!
-//! There is one implementation today — [`Software`], the rasterizer in
-//! [`crate::gpu::raster`] — and the trait exists so that a second one can be
+//! There is one implementation today, [`Software`], the rasterizer in
+//! [`crate::gpu::raster`], and the trait exists so that a second one can be
 //! added beside it rather than in place of it. That matters for two reasons
 //! beyond tidiness.
 //!
@@ -10,13 +10,13 @@
 //! sharpening the software path changes that. The second is that a GPU
 //! backend needs something to be checked *against*, and a bit-exact software
 //! rasterizer with a frame that is byte-comparable to the previous build is
-//! exactly that — the same way `bcn_difftest` checks the block codecs against
+//! exactly that, the same way `bcn_difftest` checks the block codecs against
 //! a second implementation rather than against a rendered frame.
 //!
 //! # What a second backend has to answer
 //!
 //! Both methods are handed the [`Engine3D`] the draw was issued on, so a
-//! backend reads whatever state it needs through that engine's accessors —
+//! backend reads whatever state it needs through that engine's accessors,
 //! which are already typed, and are the list of what a pipeline has to be
 //! built from: [`Engine3D::render_target`], [`Engine3D::depth_target`],
 //! [`Engine3D::viewport_transform`], [`Engine3D::apply_scissor`],
@@ -27,7 +27,7 @@
 //! [`Engine3D::tex_header_pool`] and [`Engine3D::instance_id`].
 //!
 //! The hard part is not that list. It is that a render target lives in *guest
-//! memory* — `present` deswizzles block-linear pixels straight out of it — so
+//! memory* (`present` deswizzles block-linear pixels straight out of it) so
 //! a backend that keeps its surfaces GPU-side owns the question of when to
 //! write them back. Nothing here answers that, because nothing here needs to
 //! yet.
@@ -87,7 +87,7 @@ pub trait Renderer: std::fmt::Debug {
     ///
     /// It exists so that [`Renderer::draw`] does not have to hand anything
     /// back *itself*. A draw that read its target back would be a draw that
-    /// blocked, and in a browser a blocking readback is not slow — it is a
+    /// blocked, and in a browser a blocking readback is not slow: it is a
     /// deadlock, since the promise it waits on can only resolve once the
     /// event loop runs. Draws encode and return; this is where the waiting
     /// is allowed to be.
@@ -118,7 +118,7 @@ pub trait Renderer: std::fmt::Debug {
     /// GPU process restart or memory pressure takes it away, and the backend
     /// hands every frame to the rasterizer from then on. That is the right
     /// answer for the frame it happens in and the wrong one for the rest of
-    /// the session — 30x wrong, measured — because a lost device can simply
+    /// the session (30x wrong, measured) because a lost device can simply
     /// be asked for again. Cheap enough to ask once a slice, which is what
     /// makes a fresh one possible without a reload.
     fn lost(&self) -> bool {
@@ -129,7 +129,7 @@ pub trait Renderer: std::fmt::Debug {
 /// Whether a [`Renderer::flush`] finished, or wants asking again.
 ///
 /// A backend that keeps its surfaces on a device gets them back by mapping a
-/// buffer, and a map completes when the host's event loop runs — which it
+/// buffer, and a map completes when the host's event loop runs, which it
 /// cannot do underneath a call that is waiting for it. So a flush is allowed
 /// to say "not yet" instead of blocking, and the caller has to let the host
 /// make progress before reading the surface.
@@ -151,8 +151,8 @@ pub enum Flush {
 /// the 3D engine's own register-decoding clear paths.
 ///
 /// Stateless. Everything a draw needs is either in the engine's registers or
-/// in guest memory, and what the rasterizer caches — decoded programs, parsed
-/// texture descriptors, decoded compressed blocks — it caches for the length
+/// in guest memory, and what the rasterizer caches, decoded programs, parsed
+/// texture descriptors, decoded compressed blocks, it caches for the length
 /// of one draw and no longer.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Software;

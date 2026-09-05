@@ -1,4 +1,4 @@
-//! Boot a real game from its container — an `.nsp`, an `.xci` or a bare
+//! Boot a real game from its container, an `.nsp`, an `.xci` or a bare
 //! Program `.nca`: find the Program NCA, decrypt the ExeFS, load every module
 //! and run it. The CLI equivalent of the browser's panel "Launch" button,
 //! useful for debugging without a browser.
@@ -14,7 +14,7 @@
 //! `SHOT=<out.ppm>` writes whatever was presented last.
 //!
 //! `DUMP=`, `TRAP_WRITE=`, `TRAP_READ=` and `WATCH_PC=` are the debugging
-//! knobs every runner here shares — see [`common::Debug`] for their spelling.
+//! knobs every runner here shares. See [`common::Debug`] for their spelling.
 mod common;
 
 use common::{Flow, Pace};
@@ -77,7 +77,7 @@ fn main() {
 
     // The title's save-data quota, which `IApplicationFunctions::GetSaveDataSize`
     // reports. It is declared in the NACP, and the NACP is in the *Control*
-    // NCA rather than the Program one booted below — so it has to be read
+    // NCA rather than the Program one booted below, so it has to be read
     // separately, and a container without one leaves the CPU's default in
     // place rather than reporting a size this title never asked for.
     match title.control() {
@@ -123,8 +123,8 @@ fn main() {
     // bucket per instruction turns a profile into a list.
     let mut pages: BTreeMap<(u64, u32), u64> = BTreeMap::new();
     // The same samples keyed by the return address instead. The hot page of a
-    // run that spends itself in `memcpy` says nothing on its own — every
-    // caller in the process shares it — and for a leaf like that the link
+    // run that spends itself in `memcpy` says nothing on its own, every
+    // caller in the process shares it, and for a leaf like that the link
     // register *is* the caller.
     let mut callers: BTreeMap<(u64, u32), u64> = BTreeMap::new();
     let mut sampled = 0u64;

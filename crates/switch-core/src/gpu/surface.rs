@@ -4,7 +4,7 @@
 //! byte GOBs ("group of bytes", 64 bytes wide by 8 rows), GOBs are stacked
 //! into blocks that are `2^block_height_log2` GOBs tall, and blocks are laid
 //! out left-to-right then top-to-bottom. Reading a pixel therefore means
-//! swizzling its (x, y) into that order — the layout is what makes a naive
+//! swizzling its (x, y) into that order: the layout is what makes a naive
 //! memory dump of a Switch framebuffer look shredded.
 //!
 //! A surface can also be *pitch* (plain linear rows), which the display path
@@ -16,7 +16,7 @@ use crate::{Error, Result};
 /// Every `v / 255.0` an 8-bit channel can produce, indexed by the byte.
 ///
 /// Decoding a pixel is four of those divisions, and the blitter decodes four
-/// texels for every pixel it filters — fifteen million divisions for one
+/// texels for every pixel it filters, fifteen million divisions for one
 /// 720p filtered blit. The table holds exactly the quotients it replaces, so
 /// it is the same number, fetched instead of computed.
 const UNORM8: [f32; 256] = {
@@ -45,7 +45,7 @@ pub fn gob_offset(x: u32, y: u32) -> u32 {
 
 /// The part of a block-linear address that depends only on the row.
 ///
-/// A block-linear address is a *sum* of a term in `y` and a term in `x` —
+/// A block-linear address is a *sum* of a term in `y` and a term in `x`,
 /// every factor of it, [`gob_offset`] included, uses one or the other and
 /// never both. Splitting it that way is what lets a walk over a surface hoist
 /// the row out of its inner loop: this half carries the only two divisions in
@@ -91,7 +91,7 @@ pub fn block_linear_offset(x_bytes: u32, y: u32, width_bytes: u32, block_height_
 /// A 3D image is not a stack of 2D ones: consecutive slices interleave inside
 /// a block, so slice `z` is not `z` layer-strides along. Every term the depth
 /// touches is a multiple of a GOB, which is why one GOB of depth at `z = 0`
-/// reduces this to [`block_linear_offset`] exactly — the test below holds the
+/// reduces this to [`block_linear_offset`] exactly: the test below holds the
 /// two together. Eden's `SwizzleImpl` is the same arithmetic as shifts.
 pub fn block_linear_volume_offset(
     x_bytes: u32,
@@ -158,8 +158,8 @@ impl Layout {
     ///
     /// Walking a whole surface is what the scan-out, the deswizzler and the
     /// blitter all do, and none of them needs a full swizzle per pixel. In a
-    /// GOB only `x % 16` is linear — every other term of [`gob_offset`] is
-    /// fixed until the next 16-byte boundary — so block-linear runs 16 bytes
+    /// GOB only `x % 16` is linear: every other term of [`gob_offset`] is
+    /// fixed until the next 16-byte boundary, so block-linear runs 16 bytes
     /// at a time, and a pitch row is contiguous from `x_bytes` to its end.
     ///
     /// Worth having as one answer rather than each caller's own: at 32 bits a
@@ -183,7 +183,7 @@ impl Layout {
     /// surface, rounded up to the blocks it is made of.
     ///
     /// A 2D array is stored as its layers back to back, and the layer is not
-    /// part of the swizzle — so this is the only thing that distinguishes
+    /// part of the swizzle, so this is the only thing that distinguishes
     /// layer *n* from layer 0, and a stride of zero collapses the whole array
     /// onto its first slice.
     pub fn layer_stride(&self, width_bytes: u32, height: u32) -> u32 {
@@ -209,7 +209,7 @@ pub const MAX_SAMPLES: usize = 16;
 /// *spatially*: a pixel owns a `samples_x` by `samples_y` tile of texels, so a
 /// 4x-multisampled 1280x720 target is a 2560x1440 surface in memory. The
 /// render- and depth-target registers describe that expanded surface, while
-/// the scissor, the viewport and the clear rectangle stay in pixels — which is
+/// the scissor, the viewport and the clear rectangle stay in pixels, which is
 /// why every write into a multisampled target goes through here to turn a
 /// pixel and a sample number into a texel.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -253,7 +253,7 @@ impl SampleGrid {
         let mut positions = [[0.5f32; 2]; MAX_SAMPLES];
         for (i, position) in positions.iter_mut().enumerate().take(count) {
             *position = if programmed {
-                // `x | (y << 4)`, each in sixteenths of a pixel — deko3d's
+                // `x | (y << 4)`, each in sixteenths of a pixel, deko3d's
                 // `encodeSampleLocation`.
                 [
                     (locations[i] & 0xF) as f32 / 16.0,
@@ -277,7 +277,7 @@ impl SampleGrid {
 
     /// The same surface, with coverage evaluated once per pixel: what
     /// `AntiAliasEnable = 0` means over a multisampled one. Every sample tests
-    /// the pixel's centre, so a pixel is covered whole or not at all — which
+    /// the pixel's centre, so a pixel is covered whole or not at all, which
     /// is what GL promises with `GL_MULTISAMPLE` off.
     ///
     /// Only the positions move. `slots` still maps each sample to a texel of
@@ -298,7 +298,7 @@ impl SampleGrid {
         self.samples_x == 1 && self.samples_y == 1
     }
 
-    /// Where `sample` sits inside its pixel — the point the coverage test and
+    /// Where `sample` sits inside its pixel: the point the coverage test and
     /// the depth interpolation use.
     pub fn position(&self, sample: u32) -> [f32; 2] {
         self.positions[sample as usize]
@@ -320,14 +320,14 @@ impl SampleGrid {
     ///
     /// That is where an unprogrammed grid puts them, and it is the one
     /// arrangement a backend can reproduce by rendering the expanded surface
-    /// a texel at a time — a fragment is tested at its own centre and nowhere
+    /// a texel at a time: a fragment is tested at its own centre and nowhere
     /// else. A guest that programs `MultisampleSampleLocations` to anything
     /// else is asking for coverage this cannot express, and a backend that
     /// drew it anyway would be off by a fraction of a texel with nothing
     /// saying so.
     ///
-    /// A programmed table that happens to name the centres — `4/16` and
-    /// `12/16` over a 2x2 grid — answers `true`, because it *is* the same
+    /// A programmed table that happens to name the centres, `4/16` and
+    /// `12/16` over a 2x2 grid: answers `true`, because it *is* the same
     /// grid. Comparing the positions rather than whether anything was written
     /// is what makes that work.
     pub fn samples_at_texel_centres(&self) -> bool {
@@ -356,7 +356,7 @@ impl SampleGrid {
         out
     }
 
-    /// The pixel extent of a surface `width` by `height` *texels* — what the
+    /// The pixel extent of a surface `width` by `height` *texels*, what the
     /// target registers hold, converted to what the scissor talks about.
     pub fn pixels(&self, width: u32, height: u32) -> (u32, u32) {
         (width / self.samples_x, height / self.samples_y)
@@ -389,7 +389,7 @@ fn msaa_mode_grid(mode: u32) -> Result<(u32, u32)> {
 /// Which texel of a pixel's tile holds each sample.
 ///
 /// Hardware fixes this mapping per mode and constrains a programmable sample
-/// location to stay inside its own texel — so the texel a sample's location
+/// location to stay inside its own texel, so the texel a sample's location
 /// falls in *is* its slot. Deriving it that way reproduces the tables deko3d
 /// ships for 4x and 8x (`locationsMS4`/`locationsMS8`) without hard-coding one
 /// per mode, and it keeps a guest's custom locations stored where a resolve
@@ -461,8 +461,8 @@ impl ColorFormat {
 
     /// Where each channel of a stored pixel lives, and how its bits are read.
     ///
-    /// Everything else about a colour format — both codecs, the byte
-    /// permutation scan-out takes, the clamp the blend unit applies — is read
+    /// Everything else about a colour format, both codecs, the byte
+    /// permutation scan-out takes, the clamp the blend unit applies: is read
     /// off this one table, so none of them can drift from another. The codes
     /// are Maxwell's `RenderTargetFormat` (Eden `src/video_core/gpu.h`).
     fn packing(&self) -> Option<Packing> {
@@ -520,7 +520,7 @@ impl ColorFormat {
         })
     }
 
-    /// The byte permutation an 8-bit UNORM format is, where it is one — those
+    /// The byte permutation an 8-bit UNORM format is, where it is one, those
     /// are the formats a copy and scan-out shuffle rather than decode. The
     /// SNORM and integer codes share the byte positions but not the scale.
     fn order8(&self) -> Option<Order8> {
@@ -581,7 +581,7 @@ impl ColorFormat {
     /// An sRGB format stores sRGB-encoded channels, so this is where the
     /// transfer function is applied. Doing it here rather than at each call
     /// site is what keeps the render target, the blitter and the sampler
-    /// agreeing about what the bytes of an sRGB surface mean — they did not,
+    /// agreeing about what the bytes of an sRGB surface mean: they did not,
     /// and a surface drawn into as though it were linear then sampled as
     /// though it were sRGB came back darkened.
     pub fn encode(&self, rgba: [f32; 4]) -> Result<u128> {
@@ -648,12 +648,12 @@ impl ColorFormat {
     ///
     /// [`ColorFormat::decode`] answers in linear light, so an 8-bit UNORM
     /// channel is divided by 255 for a caller that immediately multiplies it
-    /// back — and scan-out does exactly that, 921,600 times a frame. Where the
+    /// back, and scan-out does exactly that, 921,600 times a frame. Where the
     /// round trip is the identity this is the same answer without it: an
     /// RGBA8 surface *is* what a canvas wants, byte for byte, and a BGRA8 one
     /// is two bytes swapped.
     ///
-    /// `None` where the decode is real work rather than a shuffle — an sRGB
+    /// `None` where the decode is real work rather than a shuffle, an sRGB
     /// format carries a transfer function, and everything below 8 bits a
     /// channel has to be widened.
     #[inline]
@@ -760,7 +760,7 @@ impl Packing {
         Packing { channels, numeric }
     }
 
-    /// `count` channels of `bits` each, red lowest — the shape of every
+    /// `count` channels of `bits` each, red lowest, the shape of every
     /// format Maxwell names `R…G…B…A…`.
     const fn chain(count: u32, bits: u32, numeric: Numeric) -> Packing {
         let mut channels = [NO_CHANNEL; 4];
@@ -833,7 +833,7 @@ pub fn linear_to_srgb(v: f32) -> f32 {
     }
 }
 
-/// The inverse of [`linear_to_srgb`] — what a sampler applies on the way *out*
+/// The inverse of [`linear_to_srgb`], what a sampler applies on the way *out*
 /// of an sRGB-encoded texture, so that shading happens in linear light.
 pub fn srgb_to_linear(v: f32) -> f32 {
     if v <= 0.040_45 {
@@ -867,7 +867,7 @@ fn unpack_small_float(bits: u32, mantissa_bits: u32) -> f32 {
     f16_to_f32((bits << (10 - mantissa_bits)) as u16)
 }
 
-/// Convert to a half, rounding to nearest with ties to even — the mode both
+/// Convert to a half, rounding to nearest with ties to even, the mode both
 /// Maxwell's fp16 ALU and WGSL's `pack2x16float` use.
 ///
 /// This used to truncate and flush every subnormal to zero, which cost at most
@@ -890,8 +890,8 @@ pub(crate) fn f32_to_f16(v: f32) -> u16 {
         return sign | 0x7C00;
     }
     if exp <= 0 {
-        // Below the smallest normal half the significand — implicit bit and
-        // all — shifts down into a subnormal's ten mantissa bits. Rounding up
+        // Below the smallest normal half the significand, implicit bit and
+        // all, shifts down into a subnormal's ten mantissa bits. Rounding up
         // may carry into the exponent, which lands on 2^-14 exactly.
         let shift = (1 - exp) as u32 + 13;
         if shift > 25 {
@@ -901,7 +901,7 @@ pub(crate) fn f32_to_f16(v: f32) -> u16 {
         return sign | (round_to_nearest_even(significand, shift) as u16);
     }
     // Rounded as one number rather than exponent and mantissa separately, so
-    // that a carry out of the mantissa steps the exponent — which at the top
+    // that a carry out of the mantissa steps the exponent, which at the top
     // of the range is the overflow to infinity.
     sign | (round_to_nearest_even(((exp as u32) << 23) | mantissa, 13) as u16)
 }
@@ -943,7 +943,7 @@ pub fn f16_to_f32(v: u16) -> f32 {
 
 /// A described image in GPU memory: enough to compute where `(x, y)` lives
 /// and how to decode it. Shared by the 2D engine's blits and the 3D engine's
-/// texture sampling — both are "read a described surface", nothing more.
+/// texture sampling: both are "read a described surface", nothing more.
 #[derive(Debug, Clone, Copy)]
 pub struct Surface {
     pub addr: u64,
@@ -1152,7 +1152,7 @@ mod tests {
     #[test]
     fn a_programmed_table_is_told_apart_from_the_centres_it_may_still_name() {
         // deko3d's `encodeSampleLocation` packs each axis in sixteenths, so
-        // the centres of a 2x2 grid are 4/16 and 12/16 — a table that names
+        // the centres of a 2x2 grid are 4/16 and 12/16: a table that names
         // those *is* the unprogrammed grid, and saying otherwise would hand
         // back a draw that could have been rendered exactly.
         let centres = [
@@ -1178,7 +1178,7 @@ mod tests {
     #[test]
     fn coverage_per_pixel_is_not_the_texel_centres() {
         // Every sample at the pixel centre is a different arrangement, and
-        // the one `AntiAliasEnable` off asks for — a backend renders it at
+        // the one `AntiAliasEnable` off asks for, a backend renders it at
         // pixel resolution rather than pretending it is the grid.
         let grid = SampleGrid::new(2, &[0; MAX_SAMPLES]).unwrap();
         assert!(!grid.per_pixel_coverage().samples_at_texel_centres());
@@ -1238,7 +1238,7 @@ mod tests {
 
     /// Every walk in the emulator hoists [`Layout::row_offset`] out of its
     /// inner loop and adds [`Layout::column_offset`] per texel, which is only
-    /// the same address if the two really do sum to it — for every layout, not
+    /// the same address if the two really do sum to it, for every layout, not
     /// just the one a title happened to use.
     #[test]
     fn a_row_and_a_column_sum_to_the_offset() {
@@ -1341,7 +1341,7 @@ mod tests {
         }
     }
 
-    /// Encoding rounds to nearest, ties to even, and reaches the subnormals —
+    /// Encoding rounds to nearest, ties to even, and reaches the subnormals,
     /// which a fp16 shader's arithmetic depends on and truncation did not do.
     #[test]
     fn halves_round_to_nearest_even() {

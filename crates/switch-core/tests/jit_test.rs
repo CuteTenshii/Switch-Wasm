@@ -3,7 +3,7 @@
 //! The translator's contract is that a translated run and an interpreted one
 //! are the same computation, so almost everything here is differential: run
 //! the same program both ways and compare every piece of state a guest can
-//! observe — the register file, the flags, the vector registers, the program
+//! observe, the register file, the flags, the vector registers, the program
 //! counter, the retired instruction count and the memory it wrote.
 //!
 //! The corpus is real assembler output (`llvm-mc` + `ld.lld`, linked at

@@ -3,7 +3,7 @@
 //! Opus is two codecs behind one container. SILK is a linear-prediction coder
 //! that carries speech efficiently at low rates and internally runs at 8, 12
 //! or 16 kHz; CELT is an MDCT transform coder that carries everything else at
-//! 48 kHz. A packet is coded by one of them, or — in hybrid mode — by both at
+//! 48 kHz. A packet is coded by one of them, or (in hybrid mode) by both at
 //! once, SILK below 8 kHz and CELT above it.
 //!
 //! Which of the three a packet used is in its first byte, and a stream may
@@ -19,8 +19,8 @@
 // normative, the integer arithmetic has to round the way the encoder's did,
 // and a loop that carries its index into the arithmetic reads as the
 // reference does only while it stays a loop. Clippy's suggestions here range
-// from noise to actively wrong — shortening a table constant or swapping in
-// `FRAC_1_SQRT_2` desynchronises the range decoder — so they are off for the
+// from noise to actively wrong, shortening a table constant or swapping in
+// `FRAC_1_SQRT_2` desynchronises the range decoder, so they are off for the
 // ported modules and on everywhere else.
 macro_rules! ported {
     ($($item:item)*) => {
@@ -59,7 +59,7 @@ use silk::SilkDecoder;
 /// damaged stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
-    /// The packet is malformed — a length that does not fit, a frame count of
+    /// The packet is malformed: a length that does not fit, a frame count of
     /// zero, a duration no mode can produce.
     InvalidPacket,
     /// The arguments do not describe something this decoder can do.
@@ -489,7 +489,7 @@ impl Decoder {
         Ok(got)
     }
 
-    /// Decode one frame of a packet — the unit both codecs actually work in.
+    /// Decode one frame of a packet: the unit both codecs actually work in.
     /// `at` is where in `pcm` it goes, in samples per channel.
     fn decode_frame(
         &mut self,
@@ -831,7 +831,7 @@ fn float_to_i16(x: f32) -> i16 {
 ///
 /// Each stream is either mono or a coupled stereo pair, and the mapping says
 /// which output channel takes which half of which stream. A channel mapped to
-/// 255 is silent — surround layouts use that for the ones a particular mix
+/// 255 is silent: surround layouts use that for the ones a particular mix
 /// does not fill.
 pub struct MultiStreamDecoder {
     decoders: Vec<Decoder>,
@@ -1274,7 +1274,7 @@ mod tests {
 
     /// A guest can hand this decoder anything at all, so nothing it is handed
     /// may panic. This throws random bytes and corrupted real packets at it
-    /// and only asks that it come back — with samples or with an error, but
+    /// and only asks that it come back, with samples or with an error, but
     /// without taking the emulator down.
     #[test]
     fn survives_arbitrary_input() {

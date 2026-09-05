@@ -7,8 +7,8 @@
 //!
 //! # Why the shape below, and not structured control flow
 //!
-//! Maxwell has no `if`/`else`/`loop`. It has a reconvergence stack — `ssy`
-//! pushes an address, `sync` pops one and jumps there — plus ordinary
+//! Maxwell has no `if`/`else`/`loop`. It has a reconvergence stack, `ssy`
+//! pushes an address, `sync` pops one and jumps there, plus ordinary
 //! branches and `brx`, an indexed jump into a table. [`super::cfg`] can prove
 //! that the pushes and pops of a given program pair up statically, which is
 //! what a *structured* translation would need, and every Home Menu shader
@@ -18,7 +18,7 @@
 //!
 //! So this emits the form that is correct for all of it: the program becomes
 //! a `switch` over a program counter inside a `loop`, one `case` per basic
-//! block, with the reconvergence stack as an explicit array — the same
+//! block, with the reconvergence stack as an explicit array, the same
 //! machine [`super::interp::Invocation`] runs, written in WGSL. Every branch
 //! is an assignment to `pc`. Nothing about the control flow can be
 //! mistranslated because nothing about it is *re*structured.
@@ -26,7 +26,7 @@
 //! That form is slower on a GPU than nested blocks, because the shader
 //! compiler cannot see the loop structure. Recovering that structure where
 //! [`super::cfg`] says it is safe is worth doing, and is a change to this
-//! module with the state machine as the fallback — not a change to anything
+//! module with the state machine as the fallback, not a change to anything
 //! else.
 //!
 //! # What the register file looks like
@@ -39,7 +39,7 @@
 //! be wrong rather than tidier.
 //!
 //! Only the registers a program touches are declared, which is why the
-//! emitter records them as it goes rather than scanning first — a second pass
+//! emitter records them as it goes rather than scanning first, a second pass
 //! over the opcodes is a second place to get the list wrong.
 //!
 //! # Two layers
@@ -49,7 +49,7 @@
 //! space, constant banks and textures live in guest memory that only a
 //! backend knows how to address. [`HOST_INTERFACE`] is their signatures.
 //!
-//! [`module`] wraps that in everything it needs to be a shader module — the
+//! [`module`] wraps that in everything it needs to be a shader module, the
 //! bindings, the attribute storage, real implementations of those four calls,
 //! and the `@vertex` or `@fragment` entry point that fills attribute space in
 //! and takes the result out. What it needs to know to do that is a
@@ -62,7 +62,7 @@
 //! Nothing in this crate can parse WGSL, and a translation that is merely
 //! plausible is worth very little. `TRACE_WGSL=<dir>` on a real run writes
 //! every shader a title uses to that directory as a complete module, and
-//! `naga` then says whether it is one — `--validate 31` for the front end
+//! `naga` then says whether it is one: `--validate 31` for the front end
 //! Firefox compiles WGSL with, or an output path to compile the whole way
 //! down to SPIR-V, HLSL, MSL or GLSL, which is what a pipeline actually does
 //! with it. Both are development steps; this crate still has no
@@ -107,7 +107,7 @@ pub enum Unsupported {
     /// out of `position`, and there is nothing to read it out of anywhere
     /// else. A `shfl` also needs a way to reach the lane it names, which is
     /// `quadSwapX`/`Y`/`Diagonal` where the device has them and [`QUAD_SWAP`]
-    /// where it does not — and derivatives are a fragment shader's too.
+    /// where it does not, and derivatives are a fragment shader's too.
     Quad { at: usize },
     /// A shadow sample. WGSL compares depth only through
     /// `textureSampleCompare` on a `texture_depth_*` bound beside a
@@ -118,7 +118,7 @@ pub enum Unsupported {
     /// `frag_depth`, which is the workaround the specification itself names.
     ///
     /// Until then the rasterizer takes these draws, and it does implement the
-    /// comparison — see `texture::sample_compare_with`.
+    /// comparison. See `texture::sample_compare_with`.
     DepthCompare { at: usize },
 }
 
@@ -166,7 +166,7 @@ impl fmt::Display for Unsupported {
 ///
 /// `texSample` takes the *immediate* a `texs` carries rather than a texture
 /// handle, because turning one into the other means reading the driver's
-/// reserved constant bank at an offset only the engine knows — see
+/// reserved constant bank at an offset only the engine knows: see
 /// [`crate::gpu::texture`]. `dim` is [`tex_dim_code`].
 pub const HOST_INTERFACE: &str = "\
 fn attrIn(offset: u32) -> f32 { return 0.0; }
@@ -201,19 +201,19 @@ pub fn tex_dim_code(dim: TexDim) -> u32 {
 /// A translated program.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Translation {
-    /// WGSL source text — not a module: it needs [`HOST_INTERFACE`], or a
+    /// WGSL source text, not a module: it needs [`HOST_INTERFACE`], or a
     /// backend's replacement for it, in front of it to compile.
     pub source: String,
     /// The registers the program declares, ascending.
     ///
     /// They are `var<private>`, and not because anything in the translation
     /// needs them to be: a **fragment shader's colour is its registers**.
-    /// Maxwell has no output attribute for it — the rasterizer reads `r0` to
+    /// Maxwell has no output attribute for it: the rasterizer reads `r0` to
     /// `r3` after the invocation ends, and a GPU backend has to do the same,
     /// so the register file has to outlive the call. A vertex shader's
     /// outputs go the other way, through `attrOut`.
     pub registers: Vec<u8>,
-    /// Generic `a[]` slots the program reads, ascending — a vertex shader's
+    /// Generic `a[]` slots the program reads, ascending, a vertex shader's
     /// vertex attributes, a fragment shader's varyings.
     pub loads: Vec<usize>,
     /// Generic `a[]` slots the program writes, ascending: a vertex shader's
@@ -227,7 +227,7 @@ pub struct Translation {
     /// The textures it samples, in the order it first mentions them: the
     /// `texs` immediate and the dimensionality sampled with.
     /// Each `texs` immediate, what it samples as, and whether it is
-    /// sampled as a shadow map — a depth image compared against a reference
+    /// sampled as a shadow map, a depth image compared against a reference
     /// rather than read.
     pub textures: Vec<(u16, TexDim, bool)>,
     /// The first instruction that asks which lane of the 2x2 quad it is, if
@@ -261,7 +261,7 @@ pub fn translate(program: &Compiled) -> Result<Translation, Unsupported> {
 pub struct Caps {
     /// WGSL's quad operations, which are what a warp shuffle is. Without
     /// them a fragment shader reads its neighbour through [`QUAD_SWAP`]
-    /// instead, and nothing else can read one at all — see
+    /// instead, and nothing else can read one at all: see
     /// [`Unsupported::Quad`].
     pub subgroups: bool,
     /// Whether to write `enable subgroups;` in front of the module.
@@ -306,7 +306,7 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
 /// program counter other than by one.
 ///
 /// `ssy`/`pbk`/`pcnt` are absent on purpose. They push a target and fall
-/// through, so they are ordinary statements — it is the address they push
+/// through, so they are ordinary statements: it is the address they push
 /// that starts a block, not the push.
 fn is_terminator(op: Op) -> bool {
     matches!(
@@ -768,7 +768,7 @@ impl<'a> Emitter<'a> {
 
     // ---- destinations ----
 
-    /// Write a register. `RZ` discards, so nothing is emitted — every
+    /// Write a register. `RZ` discards, so nothing is emitted, every
     /// operation whose result is not its only effect binds the value first.
     fn set_r(&mut self, dst: u8, value: &str) {
         if dst == RZ {
@@ -828,7 +828,7 @@ impl<'a> Emitter<'a> {
     // ---- half-precision ----
     //
     // A pair of halves is a `vec2<f32>` here and `pack2x16float` puts it back,
-    // rounding to nearest with ties to even exactly as `f32_to_f16` does — so
+    // rounding to nearest with ties to even exactly as `f32_to_f16` does, so
     // the two backends agree on every finite result. They can differ on one
     // that overflows the half range, which WGSL leaves indeterminate and the
     // interpreter answers with an infinity.
@@ -885,7 +885,7 @@ impl<'a> Emitter<'a> {
         format!("(({a} == vec2<f32>(0.0)) | ({b} == vec2<f32>(0.0)))")
     }
 
-    /// Each lane's comparison, combined with the source predicate — the half
+    /// Each lane's comparison, combined with the source predicate, the half
     /// of `hset2` and `hsetp2` that is the same instruction.
     #[allow(clippy::too_many_arguments)]
     fn half_compare(
@@ -1826,7 +1826,7 @@ impl Emitter<'_> {
             Op::Mov32i { dst, imm } => self.set_r(dst, &format!("{imm}u")),
             Op::S2r { dst, .. } => {
                 // Nothing here runs a warp or more than one invocation at a
-                // time, so every lane and thread identity is zero — the same
+                // time, so every lane and thread identity is zero, the same
                 // answer the interpreter gives.
                 self.set_r(dst, "0u");
             }
@@ -1880,7 +1880,7 @@ impl Emitter<'_> {
                 let compare = dref.is_some();
                 match self.textures.iter().find(|&&(imm, _, _)| imm == handle) {
                     // One binding cannot be both a colour image and a depth
-                    // one — they are different WGSL types — so a program that
+                    // one (they are different WGSL types) so a program that
                     // reads the same immediate each way is the rasterizer's.
                     Some(&(_, _, was)) if was != compare => {
                         return Err(Unsupported::DepthCompare { at })
@@ -1900,7 +1900,7 @@ impl Emitter<'_> {
                     _ => "0u".to_string(),
                 };
                 // A 3D image's third coordinate is normalized like the other
-                // two, where an array's is the layer number — so they travel
+                // two, where an array's is the layer number, so they travel
                 // in separate arguments rather than one that means both.
                 let w = match dim {
                     // A cubemap's three coordinates are a direction, and a
@@ -1911,7 +1911,7 @@ impl Emitter<'_> {
                 let code = tex_dim_code(dim);
                 let color = match dref {
                     // A shadow sample answers with one value, and every
-                    // channel a `texs` asks for gets it except alpha — which
+                    // channel a `texs` asks for gets it except alpha, which
                     // is what `sample_compare_with` returns too, so the
                     // destinations below are stored the same way either way.
                     Some(reg) => {
@@ -1931,7 +1931,7 @@ impl Emitter<'_> {
                 // matter: `first_use_after` finds the first read, so nothing
                 // between here and there reads or writes the register. Where
                 // the two differ is a destination overwritten before any read
-                // — the interpreter still lands the sample afterwards, and
+                //, the interpreter still lands the sample afterwards, and
                 // hardware does not.
                 let writes = self.program.texs_writes(at).to_vec();
                 for (reg, store, _) in writes {
@@ -1962,7 +1962,7 @@ impl Emitter<'_> {
             }
 
             // `shfl` reads the value of another lane of the 2x2 quad, which
-            // is the whole warp the rasterizer models — so `quadSwapX`/`Y`/
+            // is the whole warp the rasterizer models, so `quadSwapX`/`Y`/
             // `Diagonal` are that instruction exactly, and the lane it names
             // picks between them. `interp::shuffle_source` is the arithmetic
             // mirrored here. Where the device has no quad operations, the
@@ -2018,7 +2018,7 @@ impl Emitter<'_> {
             // `fswzadd` is not a cross-lane read at all: each lane of the
             // quad combines its *own* two operands with the pair of signs its
             // two bits of the swizzle name. Only which lane this is comes
-            // from outside — which the module answers from `position`, so
+            // from outside, which the module answers from `position`, so
             // this needs nothing of the device.
             Op::Fswzadd {
                 dst,
@@ -2054,7 +2054,7 @@ impl Emitter<'_> {
             // A global load whose address is a descriptor in a constant bank
             // plus an index: the backend binds the memory that descriptor
             // points at, and the read becomes an indexed one of that buffer.
-            // Any other address is guest memory this cannot reach — see
+            // Any other address is guest memory this cannot reach: see
             // `Unsupported::Op`.
             Op::Ldg {
                 dst,
@@ -2104,8 +2104,8 @@ impl Emitter<'_> {
             | Op::Cont
             | Op::Exit
             | Op::Kil => unreachable!("control flow is emitted by emit_instruction"),
-            // The general `tex` needs the operands `texs` has no room for —
-            // an explicit level, a texel offset — and each of those is a
+            // The general `tex` needs the operands `texs` has no room for,
+            // an explicit level, a texel offset, and each of those is a
             // separate WGSL builtin. Until they are emitted, a shader with
             // one is the rasterizer's.
             Op::Tex { .. } => return Err(Unsupported::Op { at, op }),
@@ -2325,7 +2325,7 @@ impl Emitter<'_> {
         out.push_str("    switch (pc) {\n");
         out.push_str(&self.body);
         // Reached by a fall-through past the last block, which is a program
-        // with no `exit` — the decoder rejects those, so this is the arm WGSL
+        // with no `exit`: the decoder rejects those, so this is the arm WGSL
         // requires rather than one control gets to.
         out.push_str("      default: { return false; }\n");
         out.push_str("    }\n");
@@ -2349,7 +2349,7 @@ pub enum Stage {
 
 /// Everything a complete module has to be wired to, as slot and bank numbers.
 ///
-/// All of it can be read off the program — see [`Layout::of`] — because
+/// All of it can be read off the program (see [`Layout::of`]) because
 /// Maxwell's attribute space *is* the interface: a vertex shader's inputs are
 /// the `a[]` offsets it loads from, its outputs are the ones it stores to,
 /// and a fragment shader's inputs are the ones it interpolates. What cannot
@@ -2358,7 +2358,7 @@ pub enum Stage {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Layout {
     /// Generic slots a vertex shader loads its inputs from. The slot number
-    /// is the `@location`, and the backend feeds each one four floats —
+    /// is the `@location`, and the backend feeds each one four floats,
     /// whatever the vertex format was, `raster::fetch_attribute` has already
     /// widened it to that.
     pub attributes: Vec<usize>,
@@ -2367,7 +2367,7 @@ pub struct Layout {
     ///
     /// WebGPU makes a shader input's base type part of the match, so an
     /// integer attribute has to be declared `vec4<i32>`/`vec4<u32>` and
-    /// bitcast into `a[]` — which is the bit pattern `fetch_attribute`
+    /// bitcast into `a[]`, which is the bit pattern `fetch_attribute`
     /// leaves there for one as well, so the two stages still agree. Nothing
     /// the program says: the backend fills it in from the draw, the same way
     /// it does [`Layout::flip_y`].
@@ -2377,7 +2377,7 @@ pub struct Layout {
     /// from one layout rather than two.
     pub varyings: Vec<usize>,
     /// The subset of [`Layout::varyings`] the fragment shader reads with
-    /// `ipa.centroid`, which both stages must qualify the same way — an
+    /// `ipa.centroid`, which both stages must qualify the same way, an
     /// `@interpolate` that differs between them is a pipeline that will not
     /// build. Only the fragment program says so; the vertex stage is told.
     pub centroid_varyings: Vec<usize>,
@@ -2391,7 +2391,7 @@ pub struct Layout {
     /// consecutive registers from `r0`, so target `n` is `r[4n..4n+4]`.
     ///
     /// Zero is a depth-only pass, which is a real thing a title does rather
-    /// than a gap — Just Dance 2017 renders every pass that way. The entry
+    /// than a gap, Just Dance 2017 renders every pass that way. The entry
     /// point then returns nothing at all, because a fragment shader that
     /// names `@location(0)` with no colour attachment behind it is a pipeline
     /// that will not build. It still runs: `kil` and alpha-to-coverage are
@@ -2412,7 +2412,7 @@ pub struct Layout {
     /// mirrors already: `ndc_y = +1` is row 0 whatever the viewport says,
     /// and its height cannot be negative to say otherwise.
     ///
-    /// Maxwell mirrors only when the guest wrote a negative `scale_y` —
+    /// Maxwell mirrors only when the guest wrote a negative `scale_y`,
     /// which a driver does for the window, to reconcile GL's bottom-left
     /// origin with a target whose row 0 is at the top. So the two agree
     /// exactly when the guest's transform *does* mirror, and the shader has
@@ -2420,7 +2420,7 @@ pub struct Layout {
     ///
     /// Setting this from `pipeline::Viewport::flip_y` directly flips twice.
     /// It looks almost right, because a full-screen quad is symmetric about
-    /// the centre and so is most of a UI — the Home Menu came out 94.87%
+    /// the centre and so is most of a UI: the Home Menu came out 94.87%
     /// correct that way, with one off-centre band mirrored onto the other
     /// side of the screen.
     pub flip_y: bool,
@@ -2435,7 +2435,7 @@ pub struct Layout {
     /// Attribute slots whose fetch swaps the first and third components.
     ///
     /// WebGPU has no BGRA vertex format, so the swap happens in the entry
-    /// point — which is where `raster::fetch_attribute` does it too. Nothing
+    /// point, which is where `raster::fetch_attribute` does it too. Nothing
     /// the program says: the draw's registers say it, and the backend fills
     /// it in the way it does [`Layout::flip_y`].
     pub bgra_attributes: Vec<usize>,
@@ -2448,8 +2448,8 @@ pub struct Layout {
 /// Per-sample coverage, for a backend rendering an expanded multisample
 /// surface at texel resolution.
 ///
-/// A Maxwell multisample surface stores its samples spatially — a pixel owns
-/// a `samples_x` by `samples_y` tile of texels — so a backend can render it
+/// A Maxwell multisample surface stores its samples spatially, a pixel owns
+/// a `samples_x` by `samples_y` tile of texels, so a backend can render it
 /// by treating every texel as its own fragment. What that arrangement does
 /// *not* get for free is the two things a device's multisample state would
 /// have done: the sample mask, and alpha-to-coverage. Both are a question
@@ -2483,8 +2483,8 @@ pub struct TextureBinding {
     pub dim: TexDim,
     /// How the descriptor says the channels are rearranged on the way out.
     ///
-    /// Not something the program says — it is in the TIC, which is guest
-    /// memory the draw points at — so [`Layout::of`] leaves it as the
+    /// Not something the program says: it is in the TIC, which is guest
+    /// memory the draw points at, so [`Layout::of`] leaves it as the
     /// identity and a backend fills it in from
     /// [`crate::gpu::upload::TextureUpload::swizzle`]. WebGPU has no
     /// per-texture component swizzle, so it happens in the sampling hook,
@@ -2497,9 +2497,9 @@ pub struct TextureBinding {
     /// Whether this is a shadow map: bound as a `texture_depth_*` beside a
     /// `sampler_comparison` and read with `textureSampleCompareLevel`.
     ///
-    /// A depth image cannot be uploaded — WebGPU allows a copy into a
+    /// A depth image cannot be uploaded, WebGPU allows a copy into a
     /// `depth32float` only from another texture of the same format
-    /// (§26.1.2.2) — so a backend gets one there by *drawing* into it, which
+    /// (§26.1.2.2), so a backend gets one there by *drawing* into it, which
     /// is the workaround the specification itself names.
     pub compare: bool,
 }
@@ -2523,7 +2523,7 @@ const GENERIC_SLOTS: usize = 32;
 /// reads `1/w`, which is not a collision: one is a vertex output and the
 /// other a fragment input.
 const POSITION: usize = 0x70;
-/// `InstanceId` and `VertexId`, in that order — the instance is the lower.
+/// `InstanceId` and `VertexId`, in that order: the instance is the lower.
 const INSTANCE_ID: usize = 0x2f8;
 const VERTEX_ID: usize = 0x2fc;
 
@@ -2585,7 +2585,7 @@ impl Layout {
     }
 
     /// The sampling half of a varying's `@interpolate`, as the text that
-    /// follows `linear` — `", centroid"` or nothing.
+    /// follows `linear`, `", centroid"` or nothing.
     ///
     /// WGSL's default is `center`, and in a single-sampled pass the two are
     /// the same point. It is still said, because the expanded-multisample
@@ -2641,7 +2641,7 @@ fn generic_slot(offset: u16) -> Option<usize> {
 /// Maxwell's `ipa` does not receive a perspective-correct value: it receives
 /// `value/w`, linearly interpolated in screen space, and the shader finishes
 /// the job itself by multiplying by `rcp(a[0x7c])`. Declaring the varyings
-/// `perspective` — which is WGSL's default — would have the hardware divide
+/// `perspective` (which is WGSL's default) would have the hardware divide
 /// as well, and every textured surface would be wrong in a way that looks
 /// like a texture-coordinate bug.
 ///
@@ -2657,7 +2657,7 @@ fn generic_slot(offset: u16) -> Option<usize> {
 /// A fine derivative *is* the difference between the two lanes of a pair, so
 /// the neighbour is this lane's value plus or minus it depending on which of
 /// the two this is. Adding an `f32` difference back to an `f32` does not in
-/// general land on the other lane's bits — but it does when both are
+/// general land on the other lane's bits, but it does when both are
 /// integers small enough that an `f32` holds them without rounding, and a
 /// 32-bit register split into halves is two such integers. The difference of
 /// two values in `0..=65535` is exact, and so is adding it back, so this
@@ -2787,7 +2787,7 @@ pub fn module(
 
     // `a[]` is a ten-bit byte address holding one f32 per word. The two
     // halves are separate because a vertex shader's inputs and its outputs
-    // occupy the same offsets and must not alias — `Invocation` keeps them
+    // occupy the same offsets and must not alias: `Invocation` keeps them
     // apart for the same reason.
     out.push_str(&format!(
         "var<private> attr_in: array<f32, {ATTRIBUTE_WORDS}>;\n"
@@ -2861,7 +2861,7 @@ pub fn module(
 
     // The shadow half. `textureSampleCompareLevel` compares each texel it
     // fetches and filters the results, which is what
-    // `texture::sample_compare_with` does texel by texel — so the two
+    // `texture::sample_compare_with` does texel by texel, so the two
     // renderers answer a soft shadow edge the same way. Alpha is one and the
     // other three channels are the comparison, exactly as Eden's `Extract`
     // hands a shadow sample back.
@@ -3091,7 +3091,7 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
     }
     out.push_str("  if (run()) { discard; }\n");
     // Alpha-to-coverage narrows the mask *after* shading, since it is the
-    // shaded alpha it turns into coverage — `Fragments::write`'s ordering.
+    // shaded alpha it turns into coverage: `Fragments::write`'s ordering.
     let alpha_to_coverage = layout.coverage.as_ref().filter(|c| c.alpha_to_coverage);
     if targets > 1 {
         out.push_str("  var out: FragmentOutput;\n");
@@ -3121,7 +3121,7 @@ fn fragment_entry(translated: &Translation, layout: &Layout) -> String {
 ///
 /// A texel's place inside its pixel's tile is its position modulo the grid,
 /// and which sample lives in that place is the table hardware fixes per mode
-/// — so this is a lookup, not an arithmetic identity. The table is a local
+///, so this is a lookup, not an arithmetic identity. The table is a local
 /// `var` rather than a `const` because it is indexed by a value only known at
 /// run time, and that is the form every WGSL implementation accepts.
 fn sample_index(coverage: &Coverage) -> String {
@@ -3165,7 +3165,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     const ALWAYS: Pred = Pred::ALWAYS;
-    /// `@p0` — the guard a two-armed branch is built out of.
+    /// `@p0`: the guard a two-armed branch is built out of.
     const IF_P0: Pred = Pred {
         reg: 0,
         negate: false,
@@ -3455,8 +3455,8 @@ mod tests {
 
     #[test]
     fn every_opcode_the_home_menu_uses_translates() {
-        // The control-flow opcodes in that set — bra, ssy, sync, pbk, brk,
-        // brx, exit — are covered by the tests below, which need programs
+        // The control-flow opcodes in that set, bra, ssy, sync, pbk, brk,
+        // brx, exit: are covered by the tests below, which need programs
         // shaped around them rather than a straight line.
         for op in home_menu_opcodes() {
             let p = program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]);
@@ -3574,7 +3574,7 @@ mod tests {
     }
 
     /// A `ldg` whose address is a descriptor in a constant bank plus an
-    /// index, which is how every compiler builds one — A Short Hike's own
+    /// index, which is how every compiler builds one, A Short Hike's own
     /// fragment shader does exactly this, twelve times over.
     #[test]
     fn a_global_load_through_a_descriptor_binds_the_memory_it_names() {
@@ -3638,7 +3638,7 @@ mod tests {
     #[test]
     fn a_warp_shuffle_is_a_quad_operation_where_the_device_has_them() {
         // A `shfl` reads another lane of the 2x2 quad, which is exactly what
-        // `quadSwapX`/`Y`/`Diagonal` do — and a quad is the whole warp the
+        // `quadSwapX`/`Y`/`Diagonal` do, and a quad is the whole warp the
         // rasterizer models.
         let op = Op::Shfl {
             dst: 1,
@@ -3684,7 +3684,7 @@ mod tests {
         // Every browser device is this one: wgpu's web backend can neither
         // request WebGPU's `subgroups` nor report it, so a `shfl` that fell
         // back here latched the whole session onto the rasterizer. The
-        // module defines the three operations out of derivatives instead —
+        // module defines the three operations out of derivatives instead,
         // see `QUAD_SWAP` for why that recovers the neighbour's bits exactly.
         let op = Op::Shfl {
             dst: 1,
@@ -3723,8 +3723,8 @@ mod tests {
 
     #[test]
     fn fswzadd_asks_which_lane_it_is_and_nothing_of_the_device() {
-        // It reads no other lane at all — each lane combines its *own* two
-        // operands with the signs its two bits of the swizzle name — so
+        // It reads no other lane at all, each lane combines its *own* two
+        // operands with the signs its two bits of the swizzle name, so
         // rejecting it without the device's quad operations turned a draw
         // that needed nothing into a fallback.
         let op = Op::Fswzadd {
@@ -3769,7 +3769,7 @@ mod tests {
     #[test]
     fn a_block_starts_at_every_branch_target() {
         // Instruction 2 is only reachable by the branch, so it has to be its
-        // own case — a translation that folded it into the block above would
+        // own case, a translation that folded it into the block above would
         // run it on the fall-through path as well.
         let p = program(&[
             (Op::Bra { target: at(2) }, ALWAYS),
@@ -3866,7 +3866,7 @@ mod tests {
     #[test]
     fn the_function_returns_on_every_path() {
         // The dispatch loop has no `break`, so control cannot fall out of it
-        // — but WGSL requires a function with a return type to return at the
+        //, but WGSL requires a function with a return type to return at the
         // end of its body regardless, and `naga` rejects one that does not.
         let p = program(&[(Op::Exit, ALWAYS)]);
         let wgsl = translate(&p).unwrap().source;
@@ -3939,7 +3939,7 @@ mod tests {
     }
 
     /// A vertex shader that reads attribute `slot` and writes varying `slot`,
-    /// and a fragment shader that interpolates it — the smallest pair that
+    /// and a fragment shader that interpolates it, the smallest pair that
     /// has an interface at all.
     fn pair(slot: usize) -> (Compiled, Compiled) {
         let offset = (GENERIC_BASE + slot * GENERIC_STRIDE) as u16;
@@ -4119,7 +4119,7 @@ mod tests {
 
     /// Only the fragment program's `ipa` says a varying is sampled at the
     /// centroid, and an `@interpolate` the two stages spell differently is a
-    /// pipeline that will not build — so the vertex stage is told, the way
+    /// pipeline that will not build, so the vertex stage is told, the way
     /// `Gpu::pipeline` tells it.
     #[test]
     fn a_centroid_varying_is_qualified_the_same_way_in_both_stages() {
@@ -4220,7 +4220,7 @@ mod tests {
     fn a_depth_only_pass_writes_no_colour_and_still_shades() {
         // A fragment shader naming `@location(0)` with no colour attachment
         // behind it is a pipeline that will not build, and a pass that
-        // skipped the shader entirely would lose `kil` — which is a reason a
+        // skipped the shader entirely would lose `kil`, which is a reason a
         // fragment is not there, and so a reason depth is not written.
         let p = program(&[
             (
@@ -4265,7 +4265,7 @@ mod tests {
     #[test]
     fn a_bgra_attribute_is_swapped_where_it_is_read() {
         // WebGPU has no BGRA vertex format, and `fetch_attribute` ends with
-        // `out.swap(0, 2)` — so the swap has to happen here or the two
+        // `out.swap(0, 2)`, so the swap has to happen here or the two
         // renderers disagree about which channel a packed colour's blue is.
         let (vs, _) = pair(2);
         let vs = translate(&vs).unwrap();
@@ -4298,7 +4298,7 @@ mod tests {
     fn a_sample_mask_discards_the_texels_it_excludes() {
         // Rendering an expanded multisample surface a texel at a time gets
         // per-sample coverage for nothing and the sample mask for nothing at
-        // all — a device's multisample state is what would have applied it,
+        // all: a device's multisample state is what would have applied it,
         // and there is no multisample state here. So the fragment works out
         // which sample it is and discards itself.
         let p = program(&[(Op::Exit, ALWAYS)]);
@@ -4318,7 +4318,7 @@ mod tests {
         assert!(braces_balance(&source), "{source}");
 
         // An all-ones mask excludes nothing, and is what an unprogrammed
-        // register reads as — so it must not cost a branch.
+        // register reads as, so it must not cost a branch.
         layout.coverage = Some(quad_coverage(u32::MAX, false));
         let open = module(&translated, Stage::Fragment, &layout).unwrap();
         assert!(!open.contains("& 1u) == 0u"), "{open}");
@@ -4605,7 +4605,7 @@ mod tests {
     }
 
     /// A pair of halves is a `vec2<f32>` here, and the pack that puts it back
-    /// rounds the way `f32_to_f16` does — so the two backends agree on every
+    /// rounds the way `f32_to_f16` does, so the two backends agree on every
     /// finite result rather than only on the ones that round the same way.
     #[test]
     fn a_half_op_unpacks_its_lanes_and_a_merge_keeps_the_other_one() {

@@ -4,7 +4,7 @@
 //! it a work buffer as transfer memory, the DSP decodes into it, and the PCM
 //! comes back through an output buffer. Here the decode happens in
 //! [`crate::opus`] on the emulator's own side, so the work buffer is sized
-//! and never read — [`work_buffer_size`] still has to answer, because the
+//! and never read: [`work_buffer_size`] still has to answer, because the
 //! caller allocates from it before it opens anything.
 //!
 //! The packets are not bare Opus. Each one arrives behind an eight-byte
@@ -67,7 +67,7 @@ pub(crate) struct HwOpus {
     max_frame: usize,
 }
 
-/// Either a plain decoder or a multi-stream one — the two are opened by
+/// Either a plain decoder or a multi-stream one: the two are opened by
 /// different commands and decoded by different ones, and a decoder never
 /// changes from one to the other.
 enum Decoder {
@@ -445,8 +445,8 @@ impl Cpu {
         raw.extend_from_slice(&(samples as u32).to_le_bytes());
         if with_perf {
             // How long the decode took, in microseconds. Reporting zero would
-            // be a lie a caller can act on — `nn::codec` uses it to decide
-            // how far ahead to decode — so report the time the hardware would
+            // be a lie a caller can act on: `nn::codec` uses it to decide
+            // how far ahead to decode, so report the time the hardware would
             // have taken, which is the samples' own duration over the DSP's
             // real-time factor.
             let micros = (samples as u64 * 1_000_000) / 48_000 / 8;

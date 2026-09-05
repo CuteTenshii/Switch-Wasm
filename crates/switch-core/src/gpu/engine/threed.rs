@@ -1,4 +1,4 @@
-//! MAXWELL_B (class 0xB197) — the 3D engine.
+//! MAXWELL_B (class 0xB197), the 3D engine.
 //!
 //! Register numbers come from the Maxwell class headers deko3d generates
 //! (`source/maxwell/engine_3d.def`), so they match the command streams real
@@ -56,7 +56,7 @@ const VERTEX_BEGIN_GL: u32 = 0x586;
 /// `VertexBeginGl.InstanceNext`. An instanced draw is not one method with an
 /// instance count: it is one `Begin`/`End` pair per instance, every pair after
 /// the first carrying this bit, which tells the hardware to step its instance
-/// counter rather than reset it. Without it every instance is instance zero —
+/// counter rather than reset it. Without it every instance is instance zero,
 /// and a UI that draws each of its elements as one instance of a unit quad
 /// stacks all of them on top of each other.
 const VERTEX_BEGIN_INSTANCE_NEXT: u32 = 1 << 26;
@@ -75,7 +75,7 @@ const LOAD_CONSTBUF_DATA_LAST: u32 = 0x8F3;
 // a firmware routine whose arguments live in the MmeFirmwareArgs registers
 // (0xD00..). deko3d's `WriteHardwareReg` macro uses FirmwareCall[4] to poke
 // PGRAPH registers, then polls MmeFirmwareArgs[0] until the firmware reports
-// completion — see `firmware_call` below.
+// completion. See `firmware_call` below.
 const FIRMWARE_CALL: u32 = 0x8C0;
 const FIRMWARE_CALL_LAST: u32 = 0x8DF;
 const MME_FIRMWARE_ARGS: u32 = 0xD00;
@@ -114,7 +114,7 @@ const DEPTH_TEST_FUNC: u32 = 0x4C3;
 // --- Blend ---
 const BLEND_CONSTANT: u32 = 0x4C7;
 // The shared, non-independent blend state (`gf100_3d.xml`: BLEND_EQUATION_RGB
-// 0x1340..BLEND_FUNC_DST_ALPHA 0x1358, word-indexed) — what real hardware
+// 0x1340..BLEND_FUNC_DST_ALPHA 0x1358, word-indexed), what real hardware
 // actually reads when `IndependentBlendEnable` is off, which is the common
 // case. `IndependentBlend[i]` below is a *different* register block that
 // only applies when that bit is set; reading it unconditionally left every
@@ -138,7 +138,7 @@ const COLOR_MASK: u32 = 0x680;
 const COLOR_MASK_COMMON: u32 = 0x3E4;
 /// How many colour targets Maxwell has, and so how many masks.
 const COLOR_TARGETS: u32 = 8;
-/// Every channel enabled — hardware's usable state, and what a target whose
+/// Every channel enabled, hardware's usable state, and what a target whose
 /// mask the guest never writes has to read as. Zero would mean "write
 /// nothing", which is a blank frame for every guest that leaves it alone.
 const COLOR_MASK_ALL: u32 = 0x1111;
@@ -159,7 +159,7 @@ const MULTISAMPLE_MODE: u32 = 0x574;
 // `Bind[slot].Constbuf{Valid, Index}` is a *trigger*, not plain state: on a
 // valid write, real hardware snapshots the currently-selected
 // `ConstbufSelectorAddr`/`Size` into a per-(stage, bank) table that the
-// shader ISA's `cN[offset]` operand reads through directly — it is a
+// shader ISA's `cN[offset]` operand reads through directly: it is a
 // separate mechanism from `LoadConstbufData`'s upload cursor, which just
 // writes bytes to whatever `ConstbufSelectorAddr` currently points at.
 // `Bind` has one slot per stage *except* the vertex shader's `VertexA`/
@@ -201,7 +201,7 @@ impl ShaderStage {
     }
 
     /// `Bind`'s array index for this stage. `VertexA` and `VertexB` share a
-    /// slot — Maxwell's constant-buffer bindings don't distinguish the split
+    /// slot, Maxwell's constant-buffer bindings don't distinguish the split
     /// vertex-shader halves.
     fn bind_slot(self) -> u32 {
         match self {
@@ -224,7 +224,7 @@ pub struct ProgramBinding {
 
 /// A `VertexAttribState[i]` entry: where in a vertex buffer this attribute's
 /// data lives and how to interpret it. `size`/`ty` are the raw
-/// `DkVtxAttribSize`/`DkVtxAttribType`-shaped enum values — decoding those
+/// `DkVtxAttribSize`/`DkVtxAttribType`-shaped enum values, decoding those
 /// into an actual component count/format is `gpu/raster.rs`'s job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VertexAttrib {
@@ -248,7 +248,7 @@ pub struct VertexArray {
 
 /// One `IndependentBlend[i]` entry plus its shared `ColorBlendEnable[i]` bit.
 /// Function/equation values are the raw Maxwell enum codes (GL blend
-/// func/equation order) — resolving those is `gpu/raster.rs`'s job.
+/// func/equation order): resolving those is `gpu/raster.rs`'s job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlendTarget {
     pub enabled: bool,
@@ -262,7 +262,7 @@ pub struct BlendTarget {
 
 /// The depth-test state (as opposed to `DEPTH_TARGET_*`'s depth-clear
 /// state). `func` is the raw `DepthTestFunc` enum code (`1..=8`,
-/// `Never..=Always` — one-based, unlike GL's zero-based `GL_NEVER..=GL_ALWAYS`).
+/// `Never..=Always`, one-based, unlike GL's zero-based `GL_NEVER..=GL_ALWAYS`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DepthState {
     pub test_enabled: bool,
@@ -340,7 +340,7 @@ pub struct DrawCall {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderTarget {
     pub addr: u64,
-    /// Width in pixels (block-linear) — for a pitch target this is derived
+    /// Width in pixels (block-linear): for a pitch target this is derived
     /// from the stride.
     pub width: u32,
     pub height: u32,
@@ -352,7 +352,7 @@ pub struct RenderTarget {
 
 impl RenderTarget {
     /// Byte offset of a *texel* within the target. On a multisampled target a
-    /// texel is one sample, not one pixel — [`SampleGrid::texel`] converts.
+    /// texel is one sample, not one pixel, [`SampleGrid::texel`] converts.
     pub fn texel_offset(&self, x: u32, y: u32) -> u32 {
         let bpp = self.format.bytes_per_pixel;
         let width_bytes = self.width * bpp;
@@ -360,7 +360,7 @@ impl RenderTarget {
     }
 
     /// [`Target::texel_offset`], plus how many texels from there on are
-    /// contiguous — what a walk over the whole surface wants, rather than a
+    /// contiguous: what a walk over the whole surface wants, rather than a
     /// swizzle per texel. At least one, so a caller can always make progress.
     pub fn texel_run(&self, x: u32, y: u32) -> (u32, u32) {
         let bpp = self.format.bytes_per_pixel;
@@ -374,10 +374,10 @@ impl RenderTarget {
 pub struct Engine3D {
     pub regs: Registers,
     /// What turns this engine's draws and clears into pixels. Swappable so a
-    /// GPU backend can be a second implementation rather than a rewrite —
+    /// GPU backend can be a second implementation rather than a rewrite,
     /// see [`crate::gpu::renderer`].
     renderer: Box<dyn Renderer>,
-    /// `gl_InstanceID` for the draw about to be issued — see
+    /// `gl_InstanceID` for the draw about to be issued: see
     /// [`VERTEX_BEGIN_INSTANCE_NEXT`].
     instance_id: u32,
     traced_regs: Option<Vec<u32>>,
@@ -393,14 +393,14 @@ pub struct Engine3D {
     /// Write cursor for `LoadConstbufData`, in bytes.
     constbuf_cursor: u32,
     /// `(Bind slot, hardware bank index) -> (addr, size)` snapshots taken on
-    /// each valid `Bind[slot].Constbuf` write — see the constant `BIND`'s
+    /// each valid `Bind[slot].Constbuf` write. See the constant `BIND`'s
     /// doc comment for why this needs to be its own table rather than a
     /// plain register read.
     /// Where each stage's constant banks are bound, indexed by bind slot and
     /// bank rather than hashed.
     ///
     /// This was a `HashMap<(u32, u32), _>`, which meant a SipHash of the key
-    /// for *every constant a shader reads* — one per instruction with a `c[]`
+    /// for *every constant a shader reads*, one per instruction with a `c[]`
     /// operand, once per covered pixel. Hashing was 10% of the Home Menu's
     /// whole frame time. Both indices are small and bounded by the register
     /// layout, so an array is both faster and a better description of what the
@@ -473,7 +473,7 @@ impl Engine3D {
             VERTEX_END_GL => {}
             // The inline-to-memory methods the 3D class shares with
             // KEPLER_INLINE_TO_MEMORY_B. These used to do nothing here on the
-            // reasoning that the channel drives them — which it does, but only
+            // reasoning that the channel drives them, which it does, but only
             // for methods that arrive in a pushbuffer. A **macro**'s writes go
             // straight to this engine, and uploading a small buffer from a
             // macro is precisely what the class is for: "A Short Hike" pushes
@@ -656,13 +656,13 @@ impl Engine3D {
     /// Run the real rasterizer for `last_draw`. This is deliberately
     /// non-fatal: the ISA/feature subset it supports is still growing (see
     /// `gpu/shader`'s staging), and content that hits something outside it
-    /// — real deko3d/Mesa shaders are far richer than our fixtures — must
+    /// (real deko3d/Mesa shaders are far richer than our fixtures) must
     /// keep running exactly as it did before this existed, just without
     /// real pixels for that draw. `TRACE_GPU` surfaces why.
     /// `TRACE_REGS=1`: which registers this draw changed since the previous
     /// one. Two draws that read the same state must draw the same thing, so
     /// when a frame's draws all land on top of each other, this says what the
-    /// guest varied — and by omission, what the rasterizer is failing to read.
+    /// guest varied, and by omission, what the rasterizer is failing to read.
     fn trace_reg_diff(&mut self) {
         if !crate::trace::enabled(crate::trace::Trace::Regs) {
             return;
@@ -701,7 +701,7 @@ impl Engine3D {
             // one, this names the other, and a title that composites into an
             // offscreen surface and a title whose composite was dropped are
             // otherwise the same black frame. The cull state is here for the
-            // same reason — a fully culled draw leaves no trace at all.
+            // same reason: a fully culled draw leaves no trace at all.
             let rt = self.render_target(self.render_target_slot(0));
             let cull = self.cull_state();
             crate::traceln!(
@@ -852,7 +852,7 @@ impl Engine3D {
     }
 
     /// The `(addr, size)` of the constant buffer bound to `stage`'s hardware
-    /// bank `bank` — see `BIND`'s doc comment.
+    /// bank `bank`. See `BIND`'s doc comment.
     pub fn bound_constbuf(&self, stage: ShaderStage, bank: u32) -> Option<(u64, u32)> {
         *self
             .bound_constbufs
@@ -888,7 +888,7 @@ impl Engine3D {
         }
     }
 
-    /// Whether blend targets are independent (`IndependentBlendEnable`) —
+    /// Whether blend targets are independent (`IndependentBlendEnable`),
     /// when false, every render target uses `blend_target(0)`.
     pub fn independent_blend_enabled(&self) -> bool {
         self.regs.get(INDEPENDENT_BLEND_ENABLE) != 0
@@ -932,7 +932,7 @@ impl Engine3D {
         }))
     }
 
-    /// Viewport 0's `(x, y, width, height)` in pixels — the NDC-to-screen
+    /// Viewport 0's `(x, y, width, height)` in pixels, the NDC-to-screen
     /// transform's target rectangle. Real Maxwell has up to 16 viewports;
     /// only the first is wired up, matching `clear_rect`'s existing
     /// single-viewport assumption.
@@ -951,7 +951,7 @@ impl Engine3D {
     /// **Whether y is flipped is this register's business, not a constant.**
     /// GL's window origin is bottom-left and a render target's row 0 is at
     /// the top, so Mesa hands the default framebuffer a *negative* `scale_y`
-    /// — and a user FBO, whose contents are sampled back with the same
+    ///, and a user FBO, whose contents are sampled back with the same
     /// convention they were written in, a positive one. JKSV's own capture
     /// shows both: `scale_y = -360` for the 1280x720 window, `+128` for the
     /// 256x256 target it renders a save tile into. Hard-coding the flip drew
@@ -965,7 +965,7 @@ impl Engine3D {
         }
     }
 
-    /// The height a bottom-left window origin is measured against — the
+    /// The height a bottom-left window origin is measured against, the
     /// surface clip's, which is what hardware reflects about and not the
     /// render target's own.
     pub(crate) fn surface_clip_height(&self) -> u32 {
@@ -1014,7 +1014,7 @@ impl Engine3D {
     /// Both drivers this emulator sees program it, to different values:
     /// nouveau writes 15, the bank it reserves for driver constants, and
     /// deko3d writes 0. Hard-coding nouveau's answer made every deko3d draw
-    /// that samples a texture read a bank deko3d never binds — Checkpoint
+    /// that samples a texture read a bank deko3d never binds, Checkpoint
     /// lost eighteen draws a frame to "read from unbound constant bank 15".
     pub fn tex_cb_index(&self) -> u8 {
         self.regs.field(TEX_CB_INDEX, 0, 4) as u8
@@ -1039,20 +1039,20 @@ impl Engine3D {
         std::mem::swap(&mut self.renderer, other);
     }
 
-    /// What the installed backend has been doing — see
+    /// What the installed backend has been doing: see
     /// [`Renderer::report_json`].
     pub fn renderer_report(&self) -> String {
         self.renderer.report_json()
     }
 
-    /// Whether the installed backend wants replacing — see
+    /// Whether the installed backend wants replacing: see
     /// [`Renderer::lost`].
     pub fn renderer_lost(&self) -> bool {
         self.renderer.lost()
     }
 
     /// Tell the backend that something outside it is about to read a render
-    /// target — see [`Renderer::flush`].
+    /// target. See [`Renderer::flush`].
     pub fn flush_renderer(&mut self, ctx: &mut ExecCtx) -> Result<crate::gpu::renderer::Flush> {
         self.with_renderer(ctx, |renderer, _, ctx| renderer.flush(ctx))
     }
@@ -1073,7 +1073,7 @@ impl Engine3D {
         self.regs.iova(INDEX_ARRAY_START)
     }
 
-    /// Narrow `rect` — normally a render target's full extent — by whichever
+    /// Narrow `rect` (normally a render target's full extent) by whichever
     /// of the two clip rectangles the guest has actually configured.
     ///
     /// Both are skipped when unset rather than treated as empty: a register
@@ -1138,7 +1138,7 @@ impl Engine3D {
     /// The sample grid the bound targets are laid out on.
     ///
     /// `MultisampleEnable` off means one sample per pixel whatever
-    /// `MultisampleMode` still holds — the mode register survives a pass that
+    /// `MultisampleMode` still holds, the mode register survives a pass that
     /// turns multisampling off, so reading it alone would keep expanding
     /// coordinates long after the guest stopped asking for it.
     /// How the bound surfaces lay their samples out, and where coverage is
@@ -1146,7 +1146,7 @@ impl Engine3D {
     ///
     /// **`AntiAliasEnable` does not decide how many texels a pixel owns.**
     /// `MsaaMode` does, and the render- and depth-target registers describe
-    /// the expanded surface whether or not the bit is set — Eden reads the
+    /// the expanded surface whether or not the bit is set: Eden reads the
     /// mode alone to size a render target and never reads the enable at all.
     /// Taking the bit as "one sample per pixel" made "A Short Hike"'s
     /// 2560x720 2x1 surface a 2560x720 *pixel* one, so its 1280x720 clear
@@ -1170,7 +1170,7 @@ impl Engine3D {
 
     /// Whether coverage is tested per sample rather than once per pixel.
     ///
-    /// `AntiAliasEnable` on its own, without the surface's layout folded in —
+    /// `AntiAliasEnable` on its own, without the surface's layout folded in,
     /// which [`Engine3D::sample_grid`] cannot tell a caller, because a grid
     /// with its samples moved to the pixel centre and a grid that only ever
     /// had one look the same from outside. A backend needs them apart: a
@@ -1183,7 +1183,7 @@ impl Engine3D {
     /// Which samples a draw is allowed to write, as a bit per sample.
     ///
     /// A register file nothing has written reads as zero, and taking that
-    /// literally would discard every fragment of every draw — so an all-zero
+    /// literally would discard every fragment of every draw, so an all-zero
     /// mask means "unprogrammed", the same reading `apply_scissor` gives an
     /// unset scissor. Hardware resets this register to all-ones, so no guest
     /// can tell the difference.
@@ -1203,7 +1203,7 @@ impl Engine3D {
     /// `index` onto.
     ///
     /// A guest may bind its targets in one order and address them in another,
-    /// and the two places that resolve a target — a clear and a draw — have to
+    /// and the two places that resolve a target (a clear and a draw) have to
     /// agree about it. They did not: the clear mapped and the draw did not, so
     /// content that remapped target 0 cleared one surface and drew into
     /// whichever one happened to be bound in slot 0.
@@ -1221,7 +1221,7 @@ impl Engine3D {
     ///
     /// Not a detail: "A Short Hike" turns alpha off for a third of its draws
     /// and turns every channel off for one, so a rasterizer that writes all
-    /// four regardless overwrites exactly what the title meant to keep — and
+    /// four regardless overwrites exactly what the title meant to keep, and
     /// alpha is what the display reads a frame's opacity out of.
     pub fn color_mask(&self, index: u32) -> [bool; 4] {
         let slot = if self.regs.get(COLOR_MASK_COMMON) != 0 {
@@ -1249,8 +1249,8 @@ impl Engine3D {
         // The colour and depth format enums are disjoint, so a depth format
         // here is not an unrecognised colour one: the guest has bound a depth
         // surface where a colour target goes. Just Dance 2017 does it for
-        // every depth-only pass it runs — the same Z24S8 surface as both
-        // colour target 0 and the Z target — and then clears it with the
+        // every depth-only pass it runs, the same Z24S8 surface as both
+        // colour target 0 and the Z target, and then clears it with the
         // colour channels enabled. There is no colour in a depth surface to
         // write, so report nothing bound rather than invent an encoding for
         // it; a clear then does nothing instead of failing, which matters
@@ -1306,7 +1306,7 @@ impl Engine3D {
     }
 
     /// [`Engine3D::clear_rect`] as the rectangle type a backend already
-    /// speaks — the same reading, so the two cannot come to differ about
+    /// speaks: the same reading, so the two cannot come to differ about
     /// what a clear covers.
     pub fn clear_rectangle(&self, width: u32, height: u32) -> ScissorRect {
         let (x0, y0, x1, y1) = self.clear_rect_bounds(width, height);
@@ -1372,7 +1372,7 @@ impl Engine3D {
     ///
     /// The renderer is taken out of the engine for the call and put back
     /// after, because it needs `&mut` while the backend needs `&Engine3D` to
-    /// read the draw's state from — the same swap `write_macro` does with the
+    /// read the draw's state from: the same swap `write_macro` does with the
     /// macro engine, and for the same reason.
     fn with_renderer<T>(
         &mut self,
@@ -1465,7 +1465,7 @@ impl Engine3D {
             );
         }
         // Every sample of a pixel is a texel of that pixel's own tile, and
-        // `SampleGrid` hands out `samples_x * samples_y` distinct ones — so
+        // `SampleGrid` hands out `samples_x * samples_y` distinct ones, so
         // clearing whole pixels *is* clearing the texel rectangle they cover.
         // Written that way it is runs of contiguous texels rather than a
         // swizzle and an address translation each, which for a 720p target at
@@ -1560,7 +1560,7 @@ impl Engine3D {
         }
 
         // Which bits this clear owns, and what it puts in them. Both are the
-        // same for every texel, so the whole clear is one masked value —
+        // same for every texel, so the whole clear is one masked value,
         // which is what lets it go run by run instead of texel by texel.
         let mut written = 0u128;
         let mut value = 0u128;
@@ -1582,7 +1582,7 @@ impl Engine3D {
         // The same GOB walk [`Engine3D::clear_color`] does, and for the same
         // reason: a GOB is 512 contiguous bytes holding 128 texels in some
         // permuted order, and this applies one mask and one value to all of
-        // them — an operation that does not care what the order is. Just Dance
+        // them: an operation that does not care what the order is. Just Dance
         // 2019 clears depth twice a frame and draws nothing, so this was the
         // whole cost of its frame.
         let (tx0, ty0) = (x0 * grid.samples_x, y0 * grid.samples_y);
@@ -1620,7 +1620,7 @@ impl Engine3D {
 /// How a depth format packs depth and stencil into one pixel.
 ///
 /// NVIDIA names the fields most significant first, so `Z24S8` keeps its
-/// stencil in the *low* byte and `S8Z24` in the high one — the opposite of
+/// stencil in the *low* byte and `S8Z24` in the high one, the opposite of
 /// how the names read. Mesa's nv50 format table is what settles it: it maps
 /// `PIPE_FORMAT_Z24_UNORM_S8_UINT`, whose depth is in the low 24 bits, onto
 /// NVIDIA's `S8Z24`, and `PIPE_FORMAT_S8_UINT_Z24_UNORM` onto `Z24S8`. The
@@ -1653,7 +1653,7 @@ impl DepthLayout {
     ///
     /// The rounding is done in `f64`. In `f32` it cannot be: 24 bits of depth
     /// scale to 16777215, and `16777215.0 + 0.5` is not representable as an
-    /// `f32` — it rounds up to 16777216, one bit past the field, so a depth
+    /// `f32`, it rounds up to 16777216, one bit past the field, so a depth
     /// buffer cleared to 1.0 came back cleared to 0 and every depth test
     /// against it failed.
     pub fn encode_depth(&self, depth: f32) -> u128 {
@@ -1852,7 +1852,7 @@ mod tests {
         {
             let mut ctx = h.ctx();
             // A colour clear of all four channels, a depth and stencil clear,
-            // and a draw — every way this engine makes pixels.
+            // and a draw: every way this engine makes pixels.
             engine
                 .write(CLEAR_BUFFERS, 0b11_1100, true, &mut ctx)
                 .unwrap();
@@ -1951,8 +1951,8 @@ mod tests {
     /// `MsaaMode` alone says how many texels a pixel owns; `AntiAliasEnable`
     /// says only where coverage is tested.
     ///
-    /// This used to read the other way — the enable bit gating the whole grid
-    /// — on the reasoning that a guest might leave a stale mode behind. It
+    /// This used to read the other way, the enable bit gating the whole grid
+    ///: on the reasoning that a guest might leave a stale mode behind. It
     /// cannot work: the surface registers count texels either way, so
     /// answering "one sample per pixel" turns a multisampled target into a
     /// pixel-space one that many times too wide. That is what made "A Short
@@ -2510,7 +2510,7 @@ mod tests {
         assert_eq!(engine.bound_constbuf(ShaderStage::VertexB, 2), None);
 
         // A later selector change must not retroactively affect an already
-        // bound bank — binding really does snapshot, not alias.
+        // bound bank: binding really does snapshot, not alias.
         engine
             .write(
                 CONSTBUF_SELECTOR_ADDR + 1,
@@ -2533,7 +2533,7 @@ mod tests {
 
     #[test]
     fn blend_target_uses_the_shared_registers_when_independent_blend_is_off() {
-        // `IndependentBlendEnable` defaults to off — this is the common case
+        // `IndependentBlendEnable` defaults to off: this is the common case
         // (a single font/UI shader drawing everything with one blend
         // state), and it's a *different* register block from
         // `IndependentBlend[i]`, not just index 0 of the same array.

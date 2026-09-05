@@ -2,7 +2,7 @@
 //! drawn with.
 //!
 //! There is exactly one user here ([`ACCOUNT_UID`]) and it is always signed
-//! in. The icon is synthesized rather than stored — `IProfile::LoadImage`
+//! in. The icon is synthesized rather than stored, `IProfile::LoadImage`
 //! hands out an encoded JPEG and callers feed what they get straight to a
 //! decoder, so there has to be a real one to decode.
 
@@ -100,8 +100,8 @@ fn profile_image() -> Vec<u8> {
 /// Encoding a constant image needs no DCT and no zig-zag: the transform of a
 /// block of constant level-shifted value `x` is one DC coefficient of `8x`
 /// with every AC coefficient zero. So each block is a Huffman-coded DC
-/// *difference* — nonzero only in the first block of each component, since the
-/// predictor is the previous block's DC and every block is the same — followed
+/// *difference*, nonzero only in the first block of each component, since the
+/// predictor is the previous block's DC and every block is the same, followed
 /// by end-of-block. With a quantization table of 8 throughout, `8x`
 /// quantizes to exactly `x` and dequantizes back to `8x`, so the colour
 /// survives the round trip unchanged.
@@ -218,7 +218,7 @@ fn segment(out: &mut Vec<u8>, marker: u8, payload: &[u8]) {
 }
 
 /// Canonical Huffman codes from a JPEG `BITS`/`HUFFVAL` pair, as
-/// `(symbol, code, length)` — the generation procedure from the spec's Annex
+/// `(symbol, code, length)`, the generation procedure from the spec's Annex
 /// C, and the same walk a decoder makes to rebuild them from the DHT segment.
 fn huffman_codes(bits: &[u8; 16], values: &[u8]) -> Vec<(u8, u16, u8)> {
     let mut codes = Vec::with_capacity(values.len());
@@ -263,7 +263,7 @@ impl JpegBits {
     }
 
     /// Pad the final partial byte with 1 bits, which is what the spec calls
-    /// for — a 1-filled tail cannot be confused with the start of a marker.
+    /// for: a 1-filled tail cannot be confused with the start of a marker.
     fn finish(mut self) -> Vec<u8> {
         while self.filled != 0 {
             self.push(1, 1);
@@ -278,7 +278,7 @@ impl Cpu {
     /// (`IAccountServiceForAdministrator`): the console's user accounts.
     ///
     /// There is **one** user here and it is always signed in. That is not a
-    /// placeholder for a user database — it is what this console is: no
+    /// placeholder for a user database, it is what this console is: no
     /// account applet to register a second user with, no profile UI, and
     /// nowhere to persist one to. So every "who is the current user" question
     /// has a determinate answer ([`ACCOUNT_UID`]), and every list is one entry
@@ -336,7 +336,7 @@ impl Cpu {
             // profile, so a notifier that never fires is the truthful model of
             // this console rather than a gap. (An event reported signalled
             // sends `nnSdk`'s system worker looking for a callback that was
-            // never registered — see `am:applet-message`.)
+            // never registered. See `am:applet-message`.)
             "acc:notifier" => match cmd_id {
                 Some(0) => {
                     let event = self.alloc_event("acc:notifier", false);
@@ -371,7 +371,7 @@ impl Cpu {
             // ListAllUsers / ListOpenUsers / ListOpenContextStoredUsers /
             // ListQualifiedUsers: the same one-entry list each time. The user
             // exists, is signed in, has an open context, and qualifies for
-            // whatever the title is about to do — there is no sign-out, and no
+            // whatever the title is about to do: there is no sign-out, and no
             // second account, to make those four lists differ.
             Some(2) | Some(3) | Some(60) | Some(141) => self.acc_write_user_list(tls),
             // GetLastOpenedUser -> AccountUid.
@@ -386,7 +386,7 @@ impl Cpu {
             }
             // IsUserRegistrationRequestPermitted(u64) -> bool. Registering a
             // user means running the account applet, which does not exist
-            // here — the one permission query on this console that is honestly
+            // here, the one permission query on this console that is honestly
             // "no".
             Some(50) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
             // TrySelectUserWithoutInteraction(bool network_account_required)
@@ -399,7 +399,7 @@ impl Cpu {
             Some(99) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // InitializeApplicationInfo: the title naming itself to `acc`,
             // which it does before asking `acc` anything else. Three command
-            // ids for one call — 100 is the original, 140 replaced it in
+            // ids for one call: 100 is the original, 140 replaced it in
             // 6.0.0, and 160 is what a current SDK sends. All three marshal
             // the same way and answer with a bare Result, so they share an
             // arm; nothing here varies by application.
@@ -407,7 +407,7 @@ impl Cpu {
             // 160 is the one Tomodachi Life sends, and reading its request off
             // the wire is what identified it: a domain request of type 6
             // (RequestWithContext) with the pid flag set, carrying one u64 of
-            // payload — zero, the placeholder the kernel overwrites — and no
+            // payload (zero, the placeholder the kernel overwrites) and no
             // buffers, no receive list, nothing for a reply to fill. Its
             // caller reads nothing back and aborts unless the Result is
             // success, which is what refusing the command did.
@@ -441,7 +441,7 @@ impl Cpu {
                 Ok(())
             }
             // GetBaasAccountManagerForSystemService(AccountUid) ->
-            // IManagerForSystemService — the same interface `acc:u0`'s command
+            // IManagerForSystemService, the same interface `acc:u0`'s command
             // 101 hands an application.
             Some(102) => {
                 self.reply_with_interface(tls, handle, "acc:manager")?;
@@ -455,7 +455,7 @@ impl Cpu {
             // StoreSaveDataThumbnail(AccountUid, buffer) /
             // ClearSaveDataThumbnail(AccountUid): the picture the home menu
             // shows beside a save. There is no home menu and no thumbnail
-            // store, so the thumbnail is accepted and dropped — failing a call
+            // store, so the thumbnail is accepted and dropped: failing a call
             // a title makes on every save would be the larger lie.
             Some(110) | Some(111) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // IsUserAccountSwitchLocked -> bool. Locked: with one account
@@ -476,14 +476,14 @@ impl Cpu {
         }
     }
 
-    /// `IProfile`, and `IProfileEditor` — the same interface plus the two
+    /// `IProfile`, and `IProfileEditor`, the same interface plus the two
     /// store commands, which is why they share an arm.
     fn acc_profile_request(&mut self, tls: u32, iface: &str, cmd_id: Option<u32>) -> Result<()> {
         match cmd_id {
             // Get -> ProfileBase, with the AccountUserData in an output
             // buffer. The userdata is written even though every field of it is
             // zero here: the buffer belongs to the caller, and left untouched
-            // it reads back as whatever was on that stack — an icon id and a
+            // it reads back as whatever was on that stack, an icon id and a
             // background colour chosen out of garbage.
             Some(0) => {
                 if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
@@ -560,8 +560,8 @@ impl Cpu {
             // `nifm`'s permanently-connected ethernet link makes: reporting
             // the account unavailable sends a title down its offline path
             // (or into an error dialog) rather than letting it start. What it
-            // still cannot get is a *token* — command 3 hands back an empty
-            // one — so anything that genuinely authenticates fails there,
+            // still cannot get is a *token*: command 3 hands back an empty
+            // one, so anything that genuinely authenticates fails there,
             // where the missing piece actually is.
             Some(0) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // GetAccountId -> u64 NetworkServiceAccountId. Nonzero, since zero
@@ -589,7 +589,7 @@ impl Cpu {
             //
             // The buffers matter more than the reply. Left unwritten they are
             // whatever the caller's stack held, and this account is not linked
-            // to a Nintendo Account at all — so the cache is zeroed, which is
+            // to a Nintendo Account at all, so the cache is zeroed, which is
             // what "no cached resource" looks like.
             Some(130) => {
                 for index in 0..2 {
@@ -668,7 +668,7 @@ impl Cpu {
         // The reply is a bare `Result`: these commands carry no count, and the
         // caller works out how many users there are by reading its own array
         // and stopping at the first all-zero uid. So the **whole** buffer has
-        // to be written, not just the entry that exists — a server that fills
+        // to be written, not just the entry that exists, a server that fills
         // one slot and leaves the other seven is a console with one user and
         // seven made of whatever was on the caller's stack. That is what the
         // Home Menu found: it enumerated three accounts, asked `acc:su` for a
@@ -731,7 +731,7 @@ mod tests {
     fn acc_list_all_users_zeroes_the_slots_it_has_no_user_for() {
         // These commands carry no count: the caller passes a fixed array and
         // works out how many users there are by scanning for the first all-zero
-        // uid. So every slot has to be written, not just the one that exists —
+        // uid. So every slot has to be written, not just the one that exists,
         // and the Home Menu is what proved it, enumerating three accounts out
         // of an array with one user and two of the caller's own stack in it.
         const BUFFER: u32 = 0x4000;
@@ -809,7 +809,7 @@ mod tests {
         cpu.acc_request(TLS, 9, Some(100)).unwrap();
         assert_eq!(cpu.user_nickname(), "Yuuto");
 
-        // GetBase reports what was stored, timestamp included — a store the
+        // GetBase reports what was stored, timestamp included, a store the
         // service accepts and then forgets is the failure mode every
         // Set/Get pair has.
         write_request(&mut cpu, 1, &[]);
@@ -822,8 +822,8 @@ mod tests {
     #[test]
     fn acc_initialize_application_info_answers_every_id_it_has_had() {
         // The title naming itself to `acc`, which it does before asking `acc`
-        // anything else. The command id moved with the SDK — 100, then 140 in
-        // 6.0.0, then 160 — and all three are the same call: the pid and a u64
+        // anything else. The command id moved with the SDK, 100, then 140 in
+        // 6.0.0, then 160, and all three are the same call: the pid and a u64
         // placeholder go out, a bare Result comes back. Tomodachi Life sends
         // 160, and refusing it aborted `nnSdk` before the title drew anything.
         for command in [100u32, 140, 160] {
@@ -944,7 +944,7 @@ mod tests {
     /// out of the DHT segments the file itself carries, and run the whole
     /// entropy-coded scan.
     ///
-    /// A constant image is the strongest thing to assert against — every one
+    /// A constant image is the strongest thing to assert against, every one
     /// of the 3072 blocks has to decode to the same colour, and the bit stream
     /// has to run out exactly at the EOI marker. That covers the tables, the
     /// canonical code generation, the DC prediction and the byte stuffing,

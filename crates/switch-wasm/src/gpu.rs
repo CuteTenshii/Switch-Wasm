@@ -5,7 +5,7 @@
 //! emulator may wait on one: the event loop that would resolve it is the same
 //! one blocked by waiting. So this is `async`, driven by the browser through
 //! `wasm-bindgen-futures`, and hands the finished device to
-//! [`switch_gpu::Gpu::with_device`] — which exists for exactly this.
+//! [`switch_gpu::Gpu::with_device`], which exists for exactly this.
 //!
 //! Reaching WebGPU at all means `wasm-bindgen`, because wgpu's web backend is
 //! the WebGPU JS API called through generated glue. That is the whole cost of
@@ -27,18 +27,18 @@ const RENDERING_ON: &str = "rendering on";
 /// `GPU_DEVICE_MSAA`, which a wasm build has no environment to read: it lets
 /// the device do the multisampling where WebGPU offers the sample count,
 /// which is four and only four. That shades once per pixel instead of once
-/// per sample, and anti-aliases every edge differently from the rasterizer —
+/// per sample, and anti-aliases every edge differently from the rasterizer,
 /// see `switch_gpu::Gpu::route` for the trade.
 /// `interleave` is the browser's spelling of `GPU_INTERLEAVE`: keep handing
 /// single fallback draws to the rasterizer inside a device frame, rather than
 /// giving the frame after one to the rasterizer whole. A browser's readback
 /// lands after the call that asked for it, which is what makes the difference
-/// — see `switch_gpu::Gpu::interleave` for the measured trade.
+///. See `switch_gpu::Gpu::interleave` for the measured trade.
 #[wasm_bindgen]
 pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -> String {
     // Before anything is opened, not after. `requestDevice` builds a device in
     // the GPU process whether or not there is a channel to install it on, and
-    // one built too early used to be dropped — which on wgpu's web backend
+    // one built too early used to be dropped, which on wgpu's web backend
     // frees nothing. See [`crate::gpu_channel_open`].
     if !crate::gpu_channel_open(handle) {
         return crate::NO_CHANNEL_YET.to_string();
@@ -56,7 +56,7 @@ pub async fn switch_gpu_open(handle: u32, device_msaa: bool, interleave: bool) -
     // Not `DeviceDescriptor::default()`: that asks for no optional features,
     // and WebGPU keeps the compressed texture families behind them. A title's
     // textures are block-compressed, so the first one threw inside
-    // `createTexture` and wgpu unwrapped it — a panic mid-draw, which on wasm
+    // `createTexture` and wgpu unwrapped it, a panic mid-draw, which on wasm
     // is a bare `unreachable` that stops the core. See
     // `switch_gpu::device_descriptor`.
     let (device, queue) = match adapter

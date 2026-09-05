@@ -29,7 +29,7 @@ pub const NV_INSUFFICIENT_MEMORY: u32 = 6;
 pub const NV_INVALID_STATE: u32 = 8;
 
 /// `NVGPU_ZBC_TYPE_*`: which of the two zero-bandwidth-clear tables an entry
-/// belongs to. `INVALID` is not an error — a query passes it to ask for the
+/// belongs to. `INVALID` is not an error: a query passes it to ask for the
 /// table size and nothing else.
 const ZBC_TYPE_INVALID: u32 = 0;
 const ZBC_TYPE_COLOR: u32 = 1;
@@ -77,7 +77,7 @@ pub const ZBC_TABLE_SIZE: usize = 16;
 /// and the L2 encoding) or a depth value that the hardware can encode into a
 /// surface's compression bits instead of writing out pixels.
 ///
-/// Nothing here clears that way — the rasterizer writes the pixels — so the
+/// Nothing here clears that way (the rasterizer writes the pixels) so the
 /// table changes no rendering. It is kept because it is *readable*:
 /// `ZbcQueryTable` hands back what `ZbcSetTable` put in, and a driver that
 /// asks which clear values it already registered and is told "none, ever"
@@ -178,8 +178,8 @@ impl NvDrv {
     }
 
     /// The device node `fd` was opened on, for diagnostics. An ioctl number
-    /// means nothing on its own — the same number is a different command on
-    /// every node — so anything reporting one has to say which node it was.
+    /// means nothing on its own: the same number is a different command on
+    /// every node, so anything reporting one has to say which node it was.
     pub fn device_name(&self, fd: u32) -> &str {
         match self.files.get(&fd) {
             Some(NvFile::NvMap) => "/dev/nvmap",
@@ -253,7 +253,7 @@ impl NvDrv {
     /// second buffer rather than inline. `libnx` uses `nvIoctl` and reads the
     /// payload from `data`; `nnSdk` uses `nvIoctl3` and reads it from here, so
     /// leaving this empty handed a retail title a **zeroed** GPU
-    /// characteristics struct — it closed `/dev/nvhost-ctrl-gpu` and returned
+    /// characteristics struct, it closed `/dev/nvhost-ctrl-gpu` and returned
     /// a null device, which its caller then dereferenced.
     pub fn ioctl(
         &mut self,
@@ -526,7 +526,7 @@ impl NvDrv {
             // EventWaitAsync { in syncpt_id, threshold, timeout, event_id }:
             // the same wait, arming a slot instead of blocking. Submissions
             // retire inside their own ioctl, so by the time anyone asks the
-            // fence has already passed and the slot is signalled on arrival —
+            // fence has already passed and the slot is signalled on arrival,
             // which is the one thing the bare success it used to answer did
             // not do.
             0x1E => {
@@ -678,7 +678,7 @@ impl NvDrv {
             // Tomodachi Life) and hands the driver two buffer descriptors:
             // the 8-byte argument, and an array of `num_tpc_per_gpc` **u16**
             // entries. That is upstream's `nvgpu_gpu_vsms_mapping_args`
-            // exactly — the argument is a bare buffer address, zero here
+            // exactly: the argument is a bare buffer address, zero here
             // because the Switch passes the buffer out-of-line rather than as
             // a pointer, and the entries are `nvgpu_gpu_vsms_mapping_entry`.
             // GM20B's one GPC and two TPCs are the four bytes the guest
@@ -755,7 +755,7 @@ impl NvDrv {
 
                 // The remap form maps nothing new: `offset` names a mapping
                 // that already exists and `nvmap_handle` is unused (0 here),
-                // so it has to be split off before the handle lookup below —
+                // so it has to be split off before the handle lookup below,
                 // which is what rejected it with `BadParameter`, and what
                 // aborted `deko3d`'s image setup before it drew a frame.
                 if flags & FLAG_REMAP_SUB_RANGE != 0 {
@@ -1212,7 +1212,7 @@ mod tests {
     fn the_virtual_sm_map_names_a_gpc_and_a_tpc_for_every_shader_unit() {
         // `VsmsMapping` is asked for once during `nvrm_gpu`'s device probe,
         // and the buffer the guest offers is sized from the TPC count it was
-        // given moments earlier by `GetCharacteristics` — so the two have to
+        // given moments earlier by `GetCharacteristics`, so the two have to
         // agree or the driver indexes one chip with the other's count.
         let mut drv = NvDrv::new();
         let mut mem = Memory::new();
@@ -1464,7 +1464,7 @@ mod tests {
         // holding block-linear images over the top with the kind that
         // describes their swizzle. That second call sets
         // `NVGPU_AS_MAP_BUFFER_FLAGS_MODIFY`, names the existing mapping in
-        // `offset`, and leaves the nvmap handle **0** — which the ordinary
+        // `offset`, and leaves the nvmap handle **0**, which the ordinary
         // map path rejected as `BadParameter`, aborting before the first frame.
         let mut drv = NvDrv::new();
         let mut mem = Memory::new();

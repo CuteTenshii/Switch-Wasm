@@ -1,6 +1,6 @@
 //! `hid`: the controllers, and the shared memory their state is published in.
 //!
-//! Almost nothing is answered here — the guest maps hid's shared memory once
+//! Almost nothing is answered here, the guest maps hid's shared memory once
 //! and reads it directly every frame after that, so what this service mostly
 //! does is hand that mapping over and agree about which controllers exist.
 //! The layout itself is [`super::hid_shmem`].
@@ -12,7 +12,7 @@ impl Cpu {
     /// `hid`: the input service.
     ///
     /// Input arrives on Switch in two halves, and only one of them is IPC. The
-    /// **data** — buttons, sticks, touch points — lives in a 256 KiB shared
+    /// **data** (buttons, sticks, touch points) lives in a 256 KiB shared
     /// memory region the `hid` sysmodule writes continuously and the
     /// application reads directly, with no IPC per frame; this emulator
     /// already fills it from [`Cpu::set_gamepad_state`]. What `IHidServer`
@@ -28,11 +28,11 @@ impl Cpu {
     ///
     /// None of that existed. `libnx` survived it because it maps the region by
     /// size and this emulator recognises it that way, so homebrew got working
-    /// input out of a fabricated reply — but `nnSdk` calls a method on the
+    /// input out of a fabricated reply, but `nnSdk` calls a method on the
     /// `IAppletResource` it was handed, and a fabricated object id is not one.
     /// Which `hid` interface a session handle stands for.
     ///
-    /// `hid` and `hid:dbg` are both `IHidServer` — the debug service is the
+    /// `hid` and `hid:dbg` are both `IHidServer`, the debug service is the
     /// same interface at higher privilege, and nothing here enforces
     /// privilege. `hid:sys` is a *different* interface (`IHidSystemServer`),
     /// so it keeps its own name and gets its own dispatch below.
@@ -93,13 +93,13 @@ impl Cpu {
                 // SetGestureOutputRanges(u32 width, u32 height, u64 aruid),
                 // added in 18.0.0 and named but not described on switchbrew.
                 // The shape is the request Tomodachi Life sends, which is
-                // unambiguous: `00 05 00 00 | d0 02 00 00 | 01 00 …` — 1280,
+                // unambiguous: `00 05 00 00 | d0 02 00 00 | 01 00 …`, 1280,
                 // 720, and the aruid `am`'s window controller handed out.
                 //
                 // It is the coordinate space the gesture engine reports in.
                 // A title sets it to the resolution it is drawing at so that a
                 // swipe comes back in the same units as its own geometry
-                // rather than in the panel's — which is why what arrives here
+                // rather than in the panel's, which is why what arrives here
                 // is exactly the handheld display size, the one `vi` and `am`
                 // already agree on (see [`super::OperationMode::display_size`]).
                 //
@@ -107,22 +107,22 @@ impl Cpu {
                 // point at a range and accepting is the whole implementation.
                 // Refusing was not free: `nnSdk` answers an unknown command id
                 // with an svcBreak, and this is where the title stopped once
-                // its save data was answered — 454,291,947 steps in, the first
+                // its save data was answered, 454,291,947 steps in, the first
                 // blocker outside `am` in a long while.
                 //
                 // ActivateGesture (91) joins the void setters above for the
-                // same reason. This title does not call it — it sets the range
-                // and never turns the engine on — but the two are one pair in
+                // same reason. This title does not call it: it sets the range
+                // and never turns the engine on, but the two are one pair in
                 // every SDK that uses either, and the one that is missing when
                 // the other is answered is the one that aborts.
                 Some(92) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // SetSupportedNpadStyleSet(u32 style_set, aruid) and its
                 // readback. A caller that sets a style set and reads back
-                // something else decides the pad it wants does not exist —
+                // something else decides the pad it wants does not exist,
                 // which is what the generic reply's incrementing object id
                 // looked like.
-                // It also decides which style the pad is *published* in — see
-                // `NPAD_PRESENTATIONS` — so a set that changes changes what is
+                // It also decides which style the pad is *published* in: see
+                // `NPAD_PRESENTATIONS`, so a set that changes changes what is
                 // in shared memory, which is precisely what 106's event
                 // reports.
                 Some(100) => {
@@ -145,8 +145,8 @@ impl Cpu {
                 Some(102) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                 // AcquireNpadStyleSetUpdateEventHandle(npad_id, aruid, u64):
                 // fires when a controller is connected or its style changes.
-                // Nothing here hot-plugs, but the style does change — 100
-                // above signals it — and the pad is already published by the
+                // Nothing here hot-plugs, but the style does change, 100
+                // above signals it, and the pad is already published by the
                 // time anyone asks, so it starts **signalled**: a caller
                 // waiting to be told the pad has settled is waiting for
                 // something that has already happened.
@@ -190,7 +190,7 @@ impl Cpu {
                 // frequency for a low band and a high band. Switch rumble is
                 // two linear resonant actuators driven independently, which is
                 // also what the browser's Gamepad API exposes as
-                // `dual-rumble`'s strong and weak magnitudes — so the two
+                // `dual-rumble`'s strong and weak magnitudes, so the two
                 // amplitudes are kept and [`Cpu::vibration`] hands them to the
                 // page.
                 //
@@ -234,7 +234,7 @@ impl Cpu {
                     self.write_ipc_response(tls, 0, &[], &1u8.to_le_bytes(), &[])
                 }
                 // SendVibrationValues(handles[], values[]): the arrays arrive
-                // as buffers. Only the first value is kept — this emulator
+                // as buffers. Only the first value is kept, this emulator
                 // drives one actuator pair, not one per device.
                 Some(206) => {
                     if let Some((addr, size)) = self.ipc_input_buffer(tls, 1) {
@@ -263,7 +263,7 @@ impl Cpu {
                 // -> u8 left, u8 right. `HidNpadInterfaceType` says how the
                 // controller reaches the console: Bluetooth (1), rail (2) or
                 // USB (3). A title reads it to decide what a pad is capable of
-                // — whether it can be told to sleep, how much of a rumble
+                //: whether it can be told to sleep, how much of a rumble
                 // budget it has, which glyphs to draw for it.
                 //
                 // The shared memory already said which is which: slot 0 is a
@@ -271,7 +271,7 @@ impl Cpu {
                 // Controller is one on its USB cable; the handheld slot
                 // carries left- and right-wired, which is what a pair of
                 // Joy-Con report while they sit on the rails. Nothing here is
-                // ever Bluetooth — there is no radio for one to be on the far
+                // ever Bluetooth: there is no radio for one to be on the far
                 // end of.
                 Some(403..=406) => {
                     /// `HidNpadIdType_Handheld`; players 1-8 are 0-7.
@@ -296,8 +296,8 @@ impl Cpu {
                 _ => self.unimplemented_command(tls, &iface, cmd_id),
             },
             // `IHidSystemServer`: the privileged half of hid, opened as
-            // `hid:sys`. Nothing an application needs for *input* is here —
-            // that is `IHidServer` above — but homebrew reaches for this one
+            // `hid:sys`. Nothing an application needs for *input* is here,
+            // that is `IHidServer` above, but homebrew reaches for this one
             // to take the console's own buttons over, and `libnx` opens the
             // session during `hidsysInitialize` whether or not it ever sends
             // a command.
@@ -306,12 +306,12 @@ impl Cpu {
             // itself the traffic. `libnx` records the pointer buffer size on
             // it before any command, and with `hid:sys` not routed here that
             // control request fell through to the generic reply and was
-            // answered with a fabricated object id — the same failure `ns:am2`
+            // answered with a fabricated object id, the same failure `ns:am2`
             // had. The command ids below come from `libnx`'s `hidsys.c`.
             "hid:sys" => match cmd_id {
                 // Acquire{Home,Sleep,Capture}ButtonEventHandle -> a copy
                 // handle. This console has no Home, Sleep or Capture button,
-                // so each event is handed out and never signalled — the
+                // so each event is handed out and never signalled, the
                 // caller waits on a press that cannot arrive, which is the
                 // truth rather than a fabricated one.
                 Some(101) => {
@@ -349,9 +349,9 @@ impl Cpu {
                 }
                 // Activate{Home,Sleep,Capture}Button, and
                 // EnableAppletToGetInput. Every one is a setter over state
-                // this emulator does not have — there is one pad, it is
+                // this emulator does not have: there is one pad, it is
                 // always connected, and the caller is always the foreground
-                // applet — so accepting the request is the whole
+                // applet, so accepting the request is the whole
                 // implementation.
                 Some(111) | Some(131) | Some(151) | Some(301) | Some(304) | Some(305)
                 | Some(503) => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -388,7 +388,7 @@ impl Cpu {
                 // with the buttons themselves in an out buffer: which button
                 // each pad has been assigned as its capture button. None of
                 // them has one, so the count is zero and the buffer is left
-                // alone — which is what Eden's `hid` does for an empty list.
+                // alone, which is what Eden's `hid` does for an empty list.
                 Some(313) => self.write_ipc_response(tls, 0, &[], &0u64.to_le_bytes(), &[]),
                 // SetNpadSystemExtStateEnabled(bool, u64 aruid): whether the
                 // caller may be handed pads in the SystemExt style. There is
@@ -485,7 +485,7 @@ mod tests {
     fn the_gesture_pair_is_accepted_rather_than_refused() {
         // SetGestureOutputRanges(u32 width, u32 height, u64 aruid) and
         // ActivateGesture. Both are void, and `nnSdk` answers a refusal with
-        // an svcBreak — so what is being pinned here is that neither reaches
+        // an svcBreak, so what is being pinned here is that neither reaches
         // `unimplemented_command`, which replies `cmif`'s unknown-command-id.
         const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
         // What the title actually sends: the display size both `vi` and `am`
@@ -517,7 +517,7 @@ mod tests {
         // an ordinary thing to be. This used to publish FullKey and Handheld
         // whatever the title supported, so such a title found every slot in a
         // style it had not asked for and `nnSdk` aborted in the npad layer
-        // with 2202-0710 — one description along from the out-of-range npad id
+        // with 2202-0710, one description along from the out-of-range npad id
         // it sits beside. `SetSupportedNpadStyleSet` was stored and read back
         // by its own getter and used for nothing else.
         use crate::cpu::hid_shmem as h;
@@ -643,7 +643,7 @@ mod tests {
 
     #[test]
     fn the_npad_condition_is_published_so_the_hold_type_can_be_read_at_all() {
-        // `nn::hid::GetNpadJoyHoldType` does not ask `hid` for the hold type —
+        // `nn::hid::GetNpadJoyHoldType` does not ask `hid` for the hold type,
         // it reads `nn::hid::NpadCondition` straight out of shared memory and
         // refuses the value unless `is_valid` is set. Left at its mapped
         // zeroes the region is not a default hold type, it is one that was

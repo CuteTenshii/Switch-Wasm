@@ -8,7 +8,7 @@
 //! boot hand-assembled and simple compiled homebrew.
 //!
 //! Commercial game content (NCA) can be decrypted and its main executable
-//! (NSO0) loaded when the caller supplies `prod.keys`/`title.keys` — see
+//! (NSO0) loaded when the caller supplies `prod.keys`/`title.keys`: see
 //! [`nca`] and [`nso`]. That only gets a real title as far as its own crt0;
 //! actually running one needs the Horizon service surface a retail SDK
 //! program expects, which is a much larger undertaking than homebrew ever
@@ -18,7 +18,7 @@
 /// and remembered.
 ///
 /// `std::env::var` is a linear scan of the whole environment on every call,
-/// and these switches sit in per-syscall, per-IPC and per-draw paths —
+/// and these switches sit in per-syscall, per-IPC and per-draw paths,
 /// `getenv` was **37% of a Home Menu run**, more than the shader interpreter
 /// and the rasterizer put together. Nothing changes the environment under a
 /// running emulator, so asking once is the same answer for less than a
@@ -39,7 +39,7 @@ macro_rules! env_flag {
     }};
 }
 
-/// A hasher for keys that are already well-distributed integers — kernel
+/// A hasher for keys that are already well-distributed integers, kernel
 /// handles, guest addresses, object ids.
 ///
 /// `HashMap`'s default is SipHash-1-3, built to survive keys chosen by an
@@ -48,7 +48,7 @@ macro_rules! env_flag {
 /// several up per guest syscall: SipHash was **18.7%** of a Home Menu run,
 /// more than the shader interpreter.
 ///
-/// Iteration order cannot be depended on either way — the default hasher
+/// Iteration order cannot be depended on either way, the default hasher
 /// seeds itself randomly per process, so anything that could notice the
 /// difference was already nondeterministic between two runs.
 #[derive(Default, Clone, Copy)]
@@ -68,7 +68,7 @@ impl IdHasher {
 
 impl std::hash::Hasher for IdHasher {
     /// Folding the high half down is not optional. One multiply moves entropy
-    /// *upward* only, and `HashMap` picks its bucket with the **low** bits —
+    /// *upward* only, and `HashMap` picks its bucket with the **low** bits,
     /// so without this every page-aligned guest address hashed to the same
     /// bucket: 4096 of them shared one, against 2938 buckets with it.
     #[inline]
@@ -153,7 +153,7 @@ pub use error::{Error, Result};
 /// can still put pixels on the canvas. `switch_fb_snapshot` prefers the GPU's
 /// framebuffer and only falls back to reading this one.
 ///
-/// It and [`INPUT_ADDR`] sit above every region a Horizon process is given —
+/// It and [`INPUT_ADDR`] sit above every region a Horizon process is given,
 /// see `cpu::GUEST_SPACE_END`. They used to live at 0x3F00_0000, immediately
 /// after a 240 MiB heap region; the heap now needs the address space they
 /// were standing in.
@@ -175,7 +175,7 @@ mod tests {
 
     /// The keys this hashes are handles and addresses: dense runs, and runs
     /// spaced by a page or a sector. Every one of those has to spread across
-    /// the **low** bits, because that is where `HashMap` picks its bucket —
+    /// the **low** bits, because that is where `HashMap` picks its bucket,
     /// and the low bits of a page-aligned address are all the same.
     #[test]
     fn the_id_hasher_spreads_the_keys_it_exists_for() {

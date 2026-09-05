@@ -11,7 +11,7 @@
 //! Section bodies are AES-128-CTR encrypted with a key that lives in the base
 //! header's own encrypted key area (unlocked with one of the three
 //! `key_area_key_<application|ocean|system>_XX` keys, selected by the header's
-//! key index and generation) — or, for titles distributed with a rights id,
+//! key index and generation), or, for titles distributed with a rights id,
 //! with the matching entry from `title.keys` directly.
 //!
 //! Header layout (relative to the NCA start):
@@ -25,9 +25,9 @@
 //! 0x208  content size (u64)
 //! 0x210  program id / title id (u64)
 //! 0x218  sdk version (u32)
-//! 0x21C  crypto type (u8) — 0 for title-key crypto; check rights id instead
+//! 0x21C  crypto type (u8), 0 for title-key crypto; check rights id instead
 //! 0x220  key generation (u8)
-//! 0x230  rights id (16 bytes) — nonzero means title-key crypto
+//! 0x230  rights id (16 bytes): nonzero means title-key crypto
 //! 0x240  section table header entry 0 (16 bytes)
 //! 0x250  section table header entry 1 (16 bytes)
 //! 0x260  section table header entry 2 (16 bytes)
@@ -64,7 +64,7 @@ pub const NCA_FULL_HEADER_SIZE: usize = 0xC00;
 /// `HierarchicalSha256` (PFS0/ExeFS sections use this).
 pub const HASH_TYPE_SHA256: u8 = 2;
 /// Hash type byte for `HierarchicalIntegrity` (IVFC/RomFS sections). Not
-/// verified here — RomFS mounting is future work.
+/// verified here: RomFS mounting is future work.
 pub const HASH_TYPE_IVFC: u8 = 3;
 /// Encryption type byte in an FS header: no encryption.
 pub const ENCRYPTION_NONE: u8 = 1;
@@ -75,7 +75,7 @@ pub const ENCRYPTION_AES_CTR: u8 = 3;
 /// counter's top word chosen per region from the section's own subsection
 /// table rather than fixed for the whole section. Only an update's patch
 /// RomFS is stored this way, alongside the relocation table that says which
-/// of its ranges come from the base title — see [`crate::bktr`].
+/// of its ranges come from the base title. See [`crate::bktr`].
 pub const ENCRYPTION_AES_CTR_EX: u8 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +86,7 @@ pub enum ContentType {
     Control = 2,
     Manual = 3,
     Data = 4,
-    /// Content shared between titles rather than owned by one — the system's
+    /// Content shared between titles rather than owned by one, the system's
     /// Mii and amiibo models, the bad-word lists. Mounted by data id through
     /// `OpenDataStorageByDataId` exactly as `Data` is.
     PublicData = 5,
@@ -128,23 +128,23 @@ pub struct SectionHeader {
     /// Total section size, in bytes (derived the same way).
     pub media_size: u64,
     /// Which of the 4 possible partitions the image belongs to (this is just
-    /// the entry's index — the entry itself carries no partition id).
+    /// the entry's index: the entry itself carries no partition id).
     pub partition_index: u8,
 }
 
 /// A section's FS header (0x200 bytes, decrypted from immediately after the
 /// base header). Field names/offsets below are cross-checked against
 /// hactool's `nca_fs_header_t`/`ivfc_hdr_t` (a real reference implementation,
-/// not just the public wiki write-up) — `partition_type`/`fs_type` in
+/// not just the public wiki write-up), `partition_type`/`fs_type` in
 /// particular are named the way hactool names them, which turned out to
-/// differ from this project's first guess (harmlessly — the byte
+/// differ from this project's first guess (harmlessly, the byte
 /// *positions* were already right, only the semantic labels were swapped).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FsHeader {
     pub version: u16,
     /// 0 = RomFs, 1 = Pfs0 (byte 2 of the header).
     pub partition_type: u8,
-    /// 2 = Pfs0 (`HierarchicalSha256`), 3 = RomFs (`HierarchicalIntegrity`) —
+    /// 2 = Pfs0 (`HierarchicalSha256`), 3 = RomFs (`HierarchicalIntegrity`),
     /// byte 3. This one value doubles as what earlier revisions of this code
     /// called `hash_type`: there's no separate hash-type byte, the two are
     /// the same field.
@@ -165,7 +165,7 @@ pub struct FsHeader {
     pub data_offset: u64,
     pub data_size: u64,
     /// `HierarchicalIntegrity` (IVFC) superblock: where the actual RomFS
-    /// image starts within the decrypted section — the *last* IVFC level's
+    /// image starts within the decrypted section, the *last* IVFC level's
     /// `logical_offset` (levels 0..N-2 are progressively coarser hash
     /// tables; the last level is the real data). Getting this wrong looks
     /// exactly like a decryption failure: byte 0 of an IVFC section is
@@ -173,7 +173,7 @@ pub struct FsHeader {
     /// `header_size` magic at section offset 0 fails even with perfectly
     /// correct decryption.
     pub romfs_data_offset: u64,
-    /// How long that last IVFC level is — the exact size of the RomFS image,
+    /// How long that last IVFC level is, the exact size of the RomFS image,
     /// where the section's own size is rounded up to a media unit and can
     /// overstate it by most of a sector. 0 on a section with no IVFC
     /// superblock, and treated as "unstated" rather than "empty".
@@ -221,7 +221,7 @@ pub struct BktrTable {
     pub offset: u64,
     pub size: u64,
     /// [`BKTR_MAGIC`] on a table that is really there, and nothing at all on
-    /// a section that has none — which is what the readers check before
+    /// a section that has none, which is what the readers check before
     /// believing the rest.
     pub magic: u32,
     pub entries: u32,
@@ -250,7 +250,7 @@ impl FsHeader {
             // logical_offset, u64 hash_data_size, u32 block_size, u32
             // reserved). hactool's own `nca_save_section` always reads
             // `level_headers[IVFC_MAX_LEVEL - 1]` (fixed index 5) as the real
-            // RomFS data level and ignores `num_levels` for this — on a real
+            // RomFS data level and ignores `num_levels` for this, on a real
             // file `num_levels` reads as 7 while the array only holds 6
             // entries, so deriving the index from it (as this code did at
             // first) reads out of bounds into the trailing padding.
@@ -289,7 +289,7 @@ impl FsHeader {
 
     /// The AES-CTR counter block for the very start of the section.
     /// `aes128_ctr_xor` increments it correctly from there for every
-    /// subsequent 16-byte block. The low 8 bytes are the block index — which
+    /// subsequent 16-byte block. The low 8 bytes are the block index, which
     /// is the section's *absolute* position in the NCA file divided by 16,
     /// not 0: confirmed empirically against a real title (Nintendo's own
     /// `nca_calculate_section_ctr` runs the same counter across the whole
@@ -311,7 +311,7 @@ impl FsHeader {
     /// regions vary.
     ///
     /// The tables themselves are written before any of this applies and
-    /// decrypt with [`FsHeader::initial_counter`] — which is also why a
+    /// decrypt with [`FsHeader::initial_counter`], which is also why a
     /// region whose `ctr_val` is the section's own generation reads
     /// identically either way.
     pub fn patch_counter(&self, media_offset: u64, ctr_val: u32) -> [u8; 16] {
@@ -321,7 +321,7 @@ impl FsHeader {
     }
 
     /// The counter block for a *sparse* section's table, whose generation
-    /// word is `SparseInfo`'s own rather than the section's — and shifted
+    /// word is `SparseInfo`'s own rather than the section's, and shifted
     /// into the high half, the way `NcaSparseInfo::MakeAesCtrUpperIv` does
     /// it. The section's data is not written under this: only the table is,
     /// and only because it lives at a physical offset the rest of the
@@ -345,7 +345,7 @@ pub struct Nca {
     /// The NCA's total content size, in bytes.
     pub file_size: u64,
     /// Same field as `title_id` (the header stores "program ID" once, at
-    /// 0x210) — kept as a separate field for API clarity even though the
+    /// 0x210): kept as a separate field for API clarity even though the
     /// values are always identical.
     pub program_id: u64,
     /// Nonzero when the title uses title-key crypto: the section key comes
@@ -414,7 +414,7 @@ impl Nca {
         let content_type_raw = data[h + 0x05];
         let mut sections = Vec::with_capacity(SECTION_HEADER_COUNT);
         // Each entry is `u32 start_offset; u32 end_offset; u8 reserved[8]`,
-        // both offsets counted in 0x200-byte media units — NOT a byte
+        // both offsets counted in 0x200-byte media units, NOT a byte
         // offset/size pair. (A real Program NCA's section 0 decoded as a
         // multi-terabyte offset with a 1-byte size before this was fixed.)
         const MEDIA_UNIT: u64 = 0x200;
@@ -436,7 +436,7 @@ impl Nca {
         // with the same header_key, continuing the sector count (sectors 0-1
         // are the base header, so FS header `i` is sector 2+i). They need the
         // *raw* file bytes regardless of whether the base header itself
-        // needed decrypting, and enough of the file to reach them — the
+        // needed decrypting, and enough of the file to reach them, the
         // lightweight header-only inspection path doesn't provide that, so
         // this is skipped (all `None`) rather than erroring.
         let mut fs_headers: [Option<FsHeader>; SECTION_HEADER_COUNT] = Default::default();
@@ -521,7 +521,7 @@ impl Nca {
     /// reads as "wrong keys" when the keys were fine.
     ///
     /// This NCA's generation, specifically: the ticket carries a generation
-    /// of its own and it is not reliable — Asphalt 9's says 0 where the
+    /// of its own and it is not reliable: Asphalt 9's says 0 where the
     /// content needs `titlekek_07`.
     pub fn section_key(&self, keys: &crate::keys::KeySet) -> Result<[u8; 16], Error> {
         if self.has_rights_id() {
@@ -663,7 +663,7 @@ impl Nca {
     /// Check the data region against the per-block hashes in the table the
     /// master hash just vouched for.
     ///
-    /// The master hash only says the *table* is intact — every byte the
+    /// The master hash only says the *table* is intact, every byte the
     /// emulator goes on to execute is covered by the table, not by it. Left
     /// unchecked, a single wrong byte anywhere in an ExeFS boots: what
     /// follows is a fault somewhere inside the title's own crt0, reported
@@ -726,7 +726,7 @@ impl Nca {
     /// just the PFS0 payload (after the hash table), ready for `Pfs0::parse`.
     /// Only valid for `HierarchicalSha256`-hashed sections.
     ///
-    /// An ExeFS is a title's executables — tens of megabytes at the outside —
+    /// An ExeFS is a title's executables, tens of megabytes at the outside,
     /// so unlike its RomFS this is read in full.
     pub fn read_pfs0_section<S: ByteSource>(
         &self,
@@ -791,7 +791,7 @@ impl Nca {
         hash_coverage(self.fs_headers.get(index).and_then(|o| o.as_ref())?)
     }
 
-    /// The index of this NCA's PFS0 (ExeFS) section, if any — `partition_type`
+    /// The index of this NCA's PFS0 (ExeFS) section, if any, `partition_type`
     /// is 1 for PartitionFS, 0 for RomFS.
     pub fn exefs_section_index(&self) -> Option<usize> {
         self.fs_headers
@@ -811,7 +811,7 @@ impl Nca {
     ///
     /// Nothing else distinguishes it. An update's Program NCA carries the
     /// *base* title id (the `...800` update id appears only on the container's
-    /// Meta NCA), and its ExeFS is a complete replacement set of modules — so
+    /// Meta NCA), and its ExeFS is a complete replacement set of modules, so
     /// the patch RomFS is what says the container cannot be booted on its own.
     pub fn is_update(&self) -> bool {
         self.romfs_section_index()
@@ -825,8 +825,8 @@ impl Nca {
     /// when the section has one.
     ///
     /// Nothing is decrypted up front. This is the only way a modern title's
-    /// RomFS can be served at all — it is the bulk of a container that
-    /// already does not fit in memory — and the guest reads it a range at a
+    /// RomFS can be served at all: it is the bulk of a container that
+    /// already does not fit in memory, and the guest reads it a range at a
     /// time through `IStorage` anyway.
     ///
     /// Sanity-checks the image against RomFS's own `header_size` field
@@ -873,7 +873,7 @@ impl Nca {
         let stored = Window::new(section, fs.romfs_data_offset, len, "RomFS image")?;
         let romfs = RomFsImage::open(stored, fs.compression)?;
         // RomFS's own header starts with its size, always 0x50. With the
-        // wrong key the section decrypts to noise, and this is what says so —
+        // wrong key the section decrypts to noise, and this is what says so,
         // there is no per-block hash to check an IVFC section against.
         let mut header_size = [0u8; 8];
         romfs.read_exact_at(0, &mut header_size)?;
@@ -917,8 +917,8 @@ fn hash_coverage(fs: &FsHeader) -> Option<(u32, u64)> {
 /// A decrypting view of one NCA section: [`Nca::section_source`] builds it,
 /// and reads through it come back in the clear.
 ///
-/// AES-CTR is seekable — the keystream block a byte gets is decided by its
-/// own position — so a range out of the middle of a section costs exactly
+/// AES-CTR is seekable: the keystream block a byte gets is decided by its
+/// own position, so a range out of the middle of a section costs exactly
 /// that range, which is what lets a RomFS larger than memory be read at all.
 /// Reads are aligned down to the 16-byte cipher block internally; callers see
 /// plain byte addressing.
@@ -1041,7 +1041,7 @@ impl<S: ByteSource> ByteSource for SectionSource<S> {
 /// Read and decrypt a sparse section's table out of its stored body.
 ///
 /// The table is the one part of a sparse section encrypted at the offset it
-/// is actually stored at, under a generation of its own — everything else is
+/// is actually stored at, under a generation of its own: everything else is
 /// numbered from where it lands once the holes are back.
 fn read_sparse_table<S: ByteSource>(
     body: &S,
@@ -1150,7 +1150,7 @@ mod tests {
         data[h + 0x18..h + 0x1C].copy_from_slice(&0x0001_000Au32.to_le_bytes()); // sdk version
         data[h + 0x1C] = 0x01; // crypto type
                                // section 0: a PFS0 image starting at media unit 0, 0x10 units
-                               // (0x2000 bytes) long — the entry is `u32 start; u32 end`, both in
+                               // (0x2000 bytes) long: the entry is `u32 start; u32 end`, both in
                                // 0x200-byte media units, not a byte offset/size pair.
         data[h + 0x40..h + 0x44].copy_from_slice(&0u32.to_le_bytes());
         data[h + 0x44..h + 0x48].copy_from_slice(&0x10u32.to_le_bytes());
@@ -1270,7 +1270,7 @@ mod decrypt_tests {
     use crate::keys::{KeySet, KEY_GENERATION_COUNT};
 
     fn encrypt_xts(key: &[u8; 32], data: &[u8], sector: u64, sector_size: usize) -> Vec<u8> {
-        // XTS encrypt is decrypt of the "ciphertext" — not needed; instead we
+        // XTS encrypt is decrypt of the "ciphertext", not needed; instead we
         // encrypt manually: standard XTS encrypt (E(K1, P^T) ^ T).
         let mut key1 = [0u8; 16];
         let mut key2 = [0u8; 16];
@@ -1384,13 +1384,13 @@ mod decrypt_tests {
 
     /// Build a synthetic *encrypted* Program NCA with an AES-CTR ExeFS
     /// section, its `HierarchicalSha256` hash table, and a master hash over
-    /// that table — returns the raw NCA bytes, the keyset that unlocks them,
+    /// that table: returns the raw NCA bytes, the keyset that unlocks them,
     /// and the PFS0 payload that should come back out.
     fn build_exefs_nca() -> (Vec<u8>, KeySet, Vec<u8>) {
         build_exefs_nca_with(false)
     }
 
-    /// The same, with the ExeFS optionally stored compressed — which is what
+    /// The same, with the ExeFS optionally stored compressed, which is what
     /// the hash layer then covers, since compression sits above it.
     fn build_exefs_nca_with(compressed: bool) -> (Vec<u8>, KeySet, Vec<u8>) {
         use crate::crypto::{aes128_ctr_xor, sha256};
@@ -1429,7 +1429,7 @@ mod decrypt_tests {
         header[h + 0x20] = 0; // key generation (new)
 
         // Section 0 entry: `u32 start; u32 end`, both in 0x200-byte media
-        // units (not a byte offset/size pair — that was the real-world bug
+        // units (not a byte offset/size pair: that was the real-world bug
         // this test caught).
         const SECTION_OFFSET: usize = 0x1000;
         let pfs0 = build_pfs0("main", b"fake NSO bytes for the test");
@@ -1456,7 +1456,7 @@ mod decrypt_tests {
         header[at + 4..at + 8].copy_from_slice(&end_units.to_le_bytes());
 
         // Encrypted key area: slot 2 (System) holds `section_key`, ECB
-        // "encrypted" with `kek` — `section_key()` decrypts it back.
+        // "encrypted" with `kek`, `section_key()` decrypts it back.
         let encrypted_slot2 = crate::crypto::aes128_encrypt_block(&kek, &section_key);
         header[h + 0x120..h + 0x130].copy_from_slice(&encrypted_slot2);
 
@@ -1517,8 +1517,8 @@ mod decrypt_tests {
     /// This proves the plumbing (XTS header decrypt → key-area unlock →
     /// AES-CTR section decrypt → hash verification → PFS0 extraction) is
     /// internally consistent. It cannot prove the exact FS-header field
-    /// offsets or CTR IV layout match a real retail NCA — there is no
-    /// legally includable fixture for that — so treat a real title's
+    /// offsets or CTR IV layout match a real retail NCA: there is no
+    /// legally includable fixture for that, so treat a real title's
     /// decryption as unverified until tried against real keys.
     #[test]
     fn decrypts_and_extracts_a_synthetic_exefs_section() {
@@ -1570,13 +1570,13 @@ mod decrypt_tests {
     }
 
     /// Same shape as the ExeFS test above, but for a RomFS (`HierarchicalIntegrity`/IVFC)
-    /// section: no `data_offset` sub-slice, no master-hash check — just the
+    /// section: no `data_offset` sub-slice, no master-hash check, just the
     /// section decrypting to something starting with a valid RomFS header.
     /// The path Echoes of Wisdom needs: the section holds LZ4 blocks and a
     /// bucket tree, and what the guest mounts is what they decompress to.
     ///
     /// Nothing above [`Nca::romfs_source`] knows the difference, which is the
-    /// point — the compression layer is chosen from the FS header and the
+    /// point: the compression layer is chosen from the FS header and the
     /// caller reads the image either way.
     #[test]
     fn a_compressed_romfs_section_is_served_decompressed() {
@@ -1684,7 +1684,7 @@ mod decrypt_tests {
 
     /// Build a synthetic *encrypted* NCA whose RomFS section is sparse: only
     /// part of it is in the file, and the section table describes where it
-    /// lands once the holes are back — an extent this fixture deliberately
+    /// lands once the holes are back, an extent this fixture deliberately
     /// puts past the end of the file, so anything reading that rather than
     /// the stored body fails outright instead of quietly.
     ///
@@ -1706,7 +1706,7 @@ mod decrypt_tests {
             *b = 0xF0 + i as u8;
         }
 
-        // Where the section *lands*, which is not where anything is stored —
+        // Where the section *lands*, which is not where anything is stored,
         // and past the end of the file this fixture writes.
         const SECTION_OFFSET: u64 = 0x20000;
         const BODY_OFFSET: u64 = 0x1000;
@@ -1729,7 +1729,7 @@ mod decrypt_tests {
         };
 
         // The section as it must read back. A hole is stored as nothing, so
-        // it decrypts to the keystream — see `crate::sparse`. Writing that
+        // it decrypts to the keystream. See `crate::sparse`. Writing that
         // into the expectation is what makes the round trip checkable.
         let mut plain: Vec<u8> = (0..SECTION_SIZE).map(|i| (i as u8) ^ 0x3C).collect();
         plain[LEVEL5_OFFSET as usize..LEVEL5_OFFSET as usize + 8]
@@ -1818,7 +1818,7 @@ mod decrypt_tests {
     }
 
     /// A sparse section reads as the section it describes, not as the bytes
-    /// that were kept — and the reassembly happens underneath the decryption,
+    /// that were kept, and the reassembly happens underneath the decryption,
     /// so every consumer of `section_source` gets it for free.
     #[test]
     fn a_sparse_section_is_reassembled_before_it_is_decrypted() {
@@ -1924,7 +1924,7 @@ mod decrypt_tests {
 
         const SECTION_OFFSET: usize = 0x1000;
         // The real RomFS data always lives at IVFC level index 5 (hactool
-        // reads `level_headers[IVFC_MAX_LEVEL - 1]` unconditionally) — bytes
+        // reads `level_headers[IVFC_MAX_LEVEL - 1]` unconditionally), bytes
         // before that are the (unverified here) hash-tree levels. This
         // exercises the actual bug this fixture caught against real content:
         // byte 0 of the section is NOT the RomFS header for a real,
@@ -1934,7 +1934,7 @@ mod decrypt_tests {
         let mut plain_section = vec![0xAAu8; LEVEL5_OFFSET as usize]; // levels 0..4 "hash tables"
         plain_section.extend_from_slice(&image);
         // A section is a whole number of media units, so the image ends
-        // before the section does — which is what `romfs_data_size` is for.
+        // before the section does, which is what `romfs_data_size` is for.
         let padded = plain_section.len().next_multiple_of(0x200);
         plain_section.resize(padded, 0xEE);
 
@@ -1995,7 +1995,7 @@ mod decrypt_tests {
 
     /// Same shape as the ExeFS test above, but for a RomFS
     /// (`HierarchicalIntegrity`/IVFC) section: no `data_offset` sub-slice, no
-    /// master-hash check — just the section decrypting to something starting
+    /// master-hash check, just the section decrypting to something starting
     /// with a valid RomFS header.
     #[test]
     fn decrypts_a_synthetic_romfs_section() {
@@ -2026,7 +2026,7 @@ mod decrypt_tests {
     ///
     /// The ranges deliberately do not line up with anything. AES-CTR numbers
     /// its keystream blocks by position, so a read starting mid-block has to
-    /// be aligned down to the cipher block, decrypted, and then trimmed —
+    /// be aligned down to the cipher block, decrypted, and then trimmed,
     /// get that wrong and only reads that happen to start on a multiple of 16
     /// come back correct, which most of a RomFS mount's do.
     #[test]

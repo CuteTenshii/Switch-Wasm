@@ -1,7 +1,7 @@
 //! Reading a title's RomFS through the update that replaced parts of it.
 //!
 //! An update NSP does not contain the game. Its Program NCA carries a full
-//! ExeFS — the patched executables, which replace the base title's outright —
+//! ExeFS, the patched executables, which replace the base title's outright,
 //! but its RomFS section holds only the ranges the update changed, together
 //! with two tables that say how to put the two halves back together:
 //!
@@ -30,7 +30,7 @@
 //!
 //! A relocation entry is `u64 virtual offset, u64 physical offset, u32 from
 //! the patch`; a subsection entry is `u64 offset, u32 _, u32 counter`. Both
-//! are sorted, and both tables are flattened into one list here — the bucket
+//! are sorted, and both tables are flattened into one list here, the bucket
 //! split is a paging detail of the on-disk form, not something a lookup needs.
 
 use crate::keys::KeySet;
@@ -71,7 +71,7 @@ struct Subsection {
 /// The base title's RomFS section with an update's patch section over it,
 /// addressed as the one section the two describe together.
 ///
-/// This is the whole section — IVFC hash levels and all, since that is what
+/// This is the whole section: IVFC hash levels and all, since that is what
 /// the relocation table's offsets are in terms of. [`patched_romfs_source`]
 /// windows it down to the RomFS image the guest actually mounts.
 #[derive(Debug)]
@@ -124,7 +124,7 @@ impl<P: ByteSource, B: ByteSource> ByteSource for PatchedSection<P, B> {
         }
         let want = ((out.len() as u64).min(self.len - offset)) as usize;
         let mut done = 0;
-        // One read can span any number of relocation entries — a guest asking
+        // One read can span any number of relocation entries, a guest asking
         // for a file that the update rewrote the middle of gets base bytes,
         // patch bytes and base bytes again out of a single call.
         while done < want {
@@ -382,7 +382,7 @@ mod tests {
     use crate::nca::FsHeader;
 
     /// A lookup lands on the entry that covers the offset, not the one after
-    /// it — and an offset inside the first entry finds the first entry rather
+    /// it, and an offset inside the first entry finds the first entry rather
     /// than underflowing.
     #[test]
     fn a_lookup_finds_the_entry_that_covers_an_offset() {
@@ -397,7 +397,7 @@ mod tests {
     }
 
     /// A patch section's counter differs from its section's in exactly one
-    /// word — the generation. The secure value above it identifies the
+    /// word, the generation. The secure value above it identifies the
     /// section and the block index below it is the position, so a region
     /// counter that disturbs either is a different keystream entirely.
     #[test]
@@ -500,7 +500,7 @@ mod tests {
     }
 
     /// The same, for a patch section whose composed image is stored
-    /// compressed — the update's own header is what says so.
+    /// compressed: the update's own header is what says so.
     fn fs_header_with(
         encryption: u8,
         tables: Option<(u64, u64)>,
@@ -555,7 +555,7 @@ mod tests {
         }
     }
 
-    /// A table page pair — header page then one bucket — holding `entries`.
+    /// A table page pair (header page then one bucket) holding `entries`.
     fn table_pages(total: u64, entry_size: usize, entries: &[Vec<u8>], end_key: u64) -> Vec<u8> {
         let mut bytes = vec![0u8; (BUCKET_SIZE * 2) as usize];
         bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
@@ -730,7 +730,7 @@ mod tests {
         use crate::compressed::testing::{build, Block};
 
         // The composed image has to start with a RomFS header, the same as an
-        // unpatched one — and here that byte pattern only exists once the LZ4
+        // unpatched one, and here that byte pattern only exists once the LZ4
         // block it is inside has been decompressed.
         let mut first = 0x50u64.to_le_bytes().to_vec();
         first.extend((8..0x100u32).map(|i| i as u8));

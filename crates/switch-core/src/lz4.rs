@@ -1,4 +1,4 @@
-//! LZ4 "legacy"/raw block decompression — no frame headers, just the token
+//! LZ4 "legacy"/raw block decompression, no frame headers, just the token
 //! stream. This is the format NSO0 embeds for compressed `.text`/`.rodata`/
 //! `.data` segments: the decompressed size is already known from the NSO
 //! header, so no length prefix is needed either.
@@ -17,7 +17,7 @@
 //! match against.
 
 /// Decompress an LZ4 block into a buffer of exactly `decompressed_size`
-/// bytes. Returns an error string (not [`crate::Error`] — this module has no
+/// bytes. Returns an error string (not [`crate::Error`], this module has no
 /// NSO-specific context) on truncated input, a match offset of 0, or a match
 /// that would read before the start of the output.
 pub fn decompress_block(input: &[u8], decompressed_size: usize) -> Result<Vec<u8>, String> {

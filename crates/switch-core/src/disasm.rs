@@ -633,8 +633,8 @@ fn disasm_dp_imm(insn: u32, s: &mut String) -> Result<bool, std::fmt::Error> {
                 let imm16 = (insn >> 5) & 0xFFFF;
                 let rd = insn & 0x1F;
                 // Bits[22:21] in both widths; a 32-bit form simply has no
-                // encoding above 1. Reading bit 22 — the field's *high* half
-                // — printed every shifted 32-bit `movz`/`movk` as unshifted,
+                // encoding above 1. Reading bit 22, the field's *high* half
+                //, printed every shifted 32-bit `movz`/`movk` as unshifted,
                 // so `movz w9, #7, lsl #16` read as `movz w9, #0x7`: the one
                 // thing a listing of a `Result` constant is read for.
                 let hw = (insn >> 21) & 0b11;

@@ -6,7 +6,7 @@
 //! for that reason, even where a generating formula exists.
 //!
 //! Only the 48 kHz / 960-sample mode is here, because it is the only mode
-//! Opus itself uses — every other frame size is that mode with a smaller
+//! Opus itself uses: every other frame size is that mode with a smaller
 //! `LM`.
 
 pub(super) const WINDOW120: [f32; 120] = [

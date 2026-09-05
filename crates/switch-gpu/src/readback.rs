@@ -2,7 +2,7 @@
 //!
 //! A draw renders into a device texture; guest memory is where the surface
 //! actually lives. Getting it back is three steps that cannot happen in one
-//! call on the web — copy into a staging buffer, map it, read it — and these
+//! call on the web (copy into a staging buffer, map it, read it) and these
 //! are what a backend holds between them.
 //!
 //! The map state is an atomic rather than a wait because in a browser the
@@ -17,7 +17,7 @@ use crate::Shape;
 /// A readback that has been asked for and not yet copied out.
 ///
 /// Kept as a type because asking and collecting are the two halves a browser
-/// has to put an `await` between — see [`Gpu::write_back`], which today does
+/// has to put an `await` between. See [`Gpu::write_back`], which today does
 /// both with a wait in the middle.
 #[derive(Debug)]
 pub(crate) struct Pending {
@@ -25,7 +25,7 @@ pub(crate) struct Pending {
     pub(crate) target: Target,
     /// Bytes in one row of what the device holds. The surface's own for a
     /// colour target; for a depth one it is the device format's, which is
-    /// not the guest's — a `Z24S8` texel is four bytes in memory and four
+    /// not the guest's: a `Z24S8` texel is four bytes in memory and four
     /// bytes of `f32` on the device, and a `ZF32_X24S8` texel is eight and
     /// four.
     pub(crate) row_bytes: u32,
@@ -61,7 +61,7 @@ pub(crate) struct Held {
     /// surface nothing touched need not be written back.
     pub(crate) dirty: bool,
     /// What draws render into, when the expanded surface's own texels are
-    /// not what a draw's coverage is measured in — see [`Shape`]. Gathered
+    /// not what a draw's coverage is measured in. See [`Shape`]. Gathered
     /// from the surface when it is made and scattered back into it before
     /// the surface is read, so that guest memory only ever sees the expanded
     /// form.

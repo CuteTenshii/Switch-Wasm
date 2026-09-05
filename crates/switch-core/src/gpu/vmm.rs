@@ -3,7 +3,7 @@
 //! On the Switch the guest allocates its own CPU-visible memory and hands the
 //! backing address to nvmap; `/dev/nvhost-as-gpu` then maps those nvmap
 //! handles into a GPU address space. So a GPU virtual address resolves to a
-//! CPU address in the same [`Memory`] the ARM core executes from — there is no
+//! CPU address in the same [`Memory`] the ARM core executes from: there is no
 //! separate VRAM.
 //!
 //! Mappings are whole buffers rather than individual pages: an
@@ -30,7 +30,7 @@ pub const BIG_REGION_END: u64 = 0x100_0000_0000;
 
 /// `NVGPU_AS_ALLOC_SPACE_FLAGS_FIXED_OFFSET` / `..._MAP_BUFFER_FLAGS_FIXED_OFFSET`.
 pub const FLAG_FIXED_OFFSET: u32 = 1 << 0;
-/// `NVGPU_AS_MAP_BUFFER_FLAGS_MAPPABLE_COMPBITS` — irrelevant to us but
+/// `NVGPU_AS_MAP_BUFFER_FLAGS_MAPPABLE_COMPBITS`, irrelevant to us but
 /// forwarded by the driver, so it must not be mistaken for a fixed offset.
 pub const FLAG_MAPPABLE_COMPBITS: u32 = 1 << 1;
 /// `NVGPU_AS_MAP_BUFFER_FLAGS_CACHEABLE`.
@@ -39,7 +39,7 @@ pub const FLAG_CACHEABLE: u32 = 1 << 2;
 /// nvmap handle at all, it is **re-mapping a sub-range of a mapping that
 /// already exists** with a different memory kind. The `offset` field names the
 /// existing mapping rather than requesting one, and the nvmap handle field is
-/// unused — which is why treating this as an ordinary map rejected it with
+/// unused, which is why treating this as an ordinary map rejected it with
 /// `BadParameter` for handle 0.
 pub const FLAG_REMAP_SUB_RANGE: u32 = 1 << 8;
 
@@ -93,14 +93,14 @@ pub struct AddressSpace {
     /// in a single mapping: it reads two or three constant buffers, samples a
     /// texture and reads and writes the render target, each of which is its
     /// own. A one-entry cache is evicted by every one of those in turn and
-    /// hits almost never — the `BTreeMap` search was still 5% of the Home
+    /// hits almost never: the `BTreeMap` search was still 5% of the Home
     /// Menu's frame with it in place.
     ///
     /// Split across three arrays because the scan is what runs per pixel and
     /// it only needs two of the three: a `Cell<Option<(u64, u32, u64)>>` per
     /// way made rejecting a way copy the whole thirty-two-byte option out of
     /// the cell. A `size` of zero is an empty way, so no discriminant is
-    /// needed to say so — no mapping is zero bytes long.
+    /// needed to say so: no mapping is zero bytes long.
     recent_base: [Cell<u64>; TRANSLATION_WAYS],
     recent_size: [Cell<u64>; TRANSLATION_WAYS],
     recent_cpu: [Cell<u32>; TRANSLATION_WAYS],
@@ -220,15 +220,15 @@ impl AddressSpace {
         Ok(gpu_va)
     }
 
-    /// Re-map `[gpu_va, gpu_va + size)` — a sub-range of a mapping that
-    /// already exists — with a different memory kind
+    /// Re-map `[gpu_va, gpu_va + size)`, a sub-range of a mapping that
+    /// already exists, with a different memory kind
     /// ([`FLAG_REMAP_SUB_RANGE`]). Returns whether a mapping covered it.
     ///
     /// This is how a driver gives one buffer several layouts: the whole nvmap
     /// handle is mapped once, then the ranges holding block-linear images are
     /// re-mapped over the top with the kind that describes their swizzle. The
-    /// backing memory does not move — the sub-range keeps resolving to exactly
-    /// the CPU bytes it did before — so the only thing that changes is the
+    /// backing memory does not move: the sub-range keeps resolving to exactly
+    /// the CPU bytes it did before, so the only thing that changes is the
     /// kind recorded for those pages.
     ///
     /// The covering mapping is split rather than overwritten. Overwriting it

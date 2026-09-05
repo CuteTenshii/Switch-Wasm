@@ -2,7 +2,7 @@
 //!
 //! Measured across Mario Kart 8 Deluxe's eight modules, the VFP data
 //! processing, load/store and register-transfer encodings are 5% of the
-//! binary — small next to the integer core, and load-bearing: `rtld` reaches
+//! binary, small next to the integer core, and load-bearing: `rtld` reaches
 //! its first `vpush {d0-d7}` 8192 instructions in.
 //!
 //! # The registers are A64's, seen differently
@@ -19,7 +19,7 @@
 //! and the halves line up: the rounding mode is bits 23:22 in both, so
 //! [`crate::cpu::bits::fpcr_rounding`] reads either. The one part with nowhere
 //! to go is FPSCR's own N/Z/C/V, which `VCMP` writes and `VMRS APSR_nzcv`
-//! copies into the condition flags — a comparison does *not* set the condition
+//! copies into the condition flags: a comparison does *not* set the condition
 //! flags directly, the way A64's `FCMP` does.
 
 use crate::cpu::Cpu;
@@ -443,7 +443,7 @@ impl Cpu {
                 Ok(())
             }
             // VCVT from an integer, which always arrives in an S register
-            // however wide the result is — so the operand is numbered
+            // however wide the result is, so the operand is numbered
             // `Vm:M` even when `sz` says double.
             (0b1000, _) => {
                 let sm = ((insn & 0xF) as u8) << 1 | ((insn >> 5) & 1) as u8;
@@ -557,7 +557,7 @@ impl Cpu {
     /// unconditional encoding space because they carry their own condition or
     /// rounding mode rather than the instruction's.
     ///
-    /// `VSEL` is 2,672 of the 2,915 such instructions in Mario Kart 8 Deluxe —
+    /// `VSEL` is 2,672 of the 2,915 such instructions in Mario Kart 8 Deluxe,
     /// a compiler emitting branchless `min`, `max` and ternaries.
     pub(super) fn a32_vfp_v8(&mut self, insn: u32) -> Result<()> {
         let double = (insn >> 8) & 0xF == 0xB;

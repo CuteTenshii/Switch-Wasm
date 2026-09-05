@@ -1,7 +1,7 @@
 //! `vi`: the display service, the layers on it, and the `IHOSBinderDriver`
 //! parcels that carry Android's buffer queue underneath.
 //!
-//! A frame reaches the screen through here — `vi:m`/`vi:u` open a display, a
+//! A frame reaches the screen through here: `vi:m`/`vi:u` open a display, a
 //! layer on it produces a binder, and the parcel transactions on that binder
 //! are what queue and dequeue the buffers [`crate::display`] presents.
 
@@ -19,7 +19,7 @@ const DISPLAY_NAME: &str = "Default";
 const DISPLAY_ID: u64 = 1;
 
 /// The id of the one layer, shared by `OpenLayer`, `CreateStrayLayer` and
-/// `CreateManagedLayer` — they all end up on the single buffer queue.
+/// `CreateManagedLayer`: they all end up on the single buffer queue.
 const LAYER_ID: u64 = 1;
 
 impl Cpu {
@@ -70,14 +70,14 @@ impl Cpu {
                 .cloned()
                 .unwrap_or_else(|| "vi:root".to_owned());
             match iface.as_str() {
-                // IHOSBinderDriverRelay: the binder protocol — TransactParcel
+                // IHOSBinderDriverRelay: the binder protocol, TransactParcel
                 // (0), AdjustRefcount (1), GetNativeHandle (2),
                 // TransactParcelAuto (3).
                 //
                 // 0 and 3 are the same transaction; they differ only in how
                 // the parcel is marshalled, and `ipc_buffers` reads either
                 // form. 3 arrived in 3.0.0, so a caller built against an SDK
-                // older than that sends 0 and only 0 — Just Dance 2017 does,
+                // older than that sends 0 and only 0: Just Dance 2017 does,
                 // and answering it with an empty success queued every frame it
                 // rendered into nothing.
                 "vi:ihosbd" => match cmd_id {
@@ -108,7 +108,7 @@ impl Cpu {
                     // slot and register nothing: a copy handle read from the
                     // move slot is 0, and `signal_vsync` had no event to fire
                     // even if the caller had got one. So a render loop paced
-                    // by vsync was waiting on handle 0 forever — and only kept
+                    // by vsync was waiting on handle 0 forever, and only kept
                     // running at all because a wait on an unknown handle is
                     // answered as satisfied.
                     Some(5202) => {
@@ -162,7 +162,7 @@ impl Cpu {
                 // The binder relay does the same work on a domain session as
                 // on a plain one. Answering `TransactParcel` with an empty
                 // success instead meant a caller that converted its vi session
-                // to a domain — which is what libnx does by default — queued
+                // to a domain (which is what libnx does by default) queued
                 // every frame into nothing and presented none of them.
                 Some("vi:ihosbd") => match cmd_id {
                     Some(1) => self.write_ipc_response(tls, 0, &[], &[], &[]),
@@ -183,8 +183,8 @@ impl Cpu {
     /// The `vi` commands that answer with data rather than with an object.
     ///
     /// They are the same on `IApplicationDisplayService`,
-    /// `ISystemDisplayService` and `IManagerDisplayService` — the command ids
-    /// do not overlap — and identical on a domain session and a plain one, so
+    /// `ISystemDisplayService` and `IManagerDisplayService`, the command ids
+    /// do not overlap, and identical on a domain session and a plain one, so
     /// dispatching them once ahead of the sub-interface match beats writing
     /// each of them four times.
     ///
@@ -192,7 +192,7 @@ impl Cpu {
     /// `out` parameter answered by an *empty success* is worse than a refusal.
     /// `ListDisplayModes` did exactly that, so the Home Menu read its mode
     /// count out of whatever the previous reply had left in the TLS data area
-    /// and then walked a buffer nothing had written — a billion instructions
+    /// and then walked a buffer nothing had written, a billion instructions
     /// of spinning without a single syscall, and no way to tell from the
     /// outside that a display query was where it went wrong.
     ///
@@ -292,13 +292,13 @@ impl Cpu {
     /// AM hands the system's applets one buffer between them rather than a
     /// layer each: an applet asks for a slot, renders into it and presents the
     /// slot back. This is the path the Home Menu takes, and it takes it the
-    /// moment `IsSystemBufferSharingEnabled` succeeds — refuse that and it
+    /// moment `IsSystemBufferSharingEnabled` succeeds, refuse that and it
     /// falls back to building a swapchain of its own, which it then never
     /// draws a single triangle into.
     fn vi_shared_buffer(&mut self, tls: u32, cmd_id: u32) -> Result<()> {
         use super::{SHARED_BUFFER_ADDR, SHARED_BUFFER_SLOTS, SHARED_BUFFER_USABLE_SLOTS};
         // The shared layer's geometry, which is not the display's and does
-        // not follow the dock — see [`super::SHARED_BUFFER_GEOMETRY`].
+        // not follow the dock. See [`super::SHARED_BUFFER_GEOMETRY`].
         let mode = super::SHARED_BUFFER_GEOMETRY;
         let (shared_width, shared_height) = mode.display_size();
         let slot_size = mode.shared_buffer_slot_size();
@@ -358,8 +358,8 @@ impl Cpu {
             // s32 swap interval, u64 layer_id, s64 slot). The slot is the last
             // field, and it is the frame.
             //
-            // `android::Fence` is a count and four `{ id, value }` pairs — 36
-            // bytes, not 40 — so the crop starts at 0x24 and the transform is
+            // `android::Fence` is a count and four `{ id, value }` pairs, 36
+            // bytes, not 40, so the crop starts at 0x24 and the transform is
             // at 0x34. Reading the transform one field along lands on the swap
             // interval, which the Home Menu queues as 1 and which decodes as
             // `FLIP_H` on a frame that is plainly not mirrored.
@@ -424,8 +424,8 @@ impl Cpu {
     }
 
     /// The system shared buffer's nvmap `(handle, id)`, creating it on first
-    /// use. Unlike every other nvmap object this one is not the guest's — the
-    /// system owns it and the applet is only lent slots in it — so it is
+    /// use. Unlike every other nvmap object this one is not the guest's, the
+    /// system owns it and the applet is only lent slots in it, so it is
     /// registered here rather than through `NVMAP_IOC_CREATE`.
     fn shared_buffer_object(&mut self) -> (u32, u32) {
         if let Some(pair) = self.shared_buffer {
@@ -483,7 +483,7 @@ impl Cpu {
     /// The request data is `{ s32 session_id, u32 code, u32 flags }` followed
     /// by the incoming parcel in a map-alias send buffer; the reply parcel
     /// goes into the receive buffer. When the app queues a finished frame, the
-    /// GPU scans that buffer out — this is where a rendered frame becomes
+    /// GPU scans that buffer out: this is where a rendered frame becomes
     /// something the host can display.
     pub(super) fn vi_transact_parcel(&mut self, tls: u32) -> Result<()> {
         let data = self.ipc_request_data(tls);
@@ -550,7 +550,7 @@ impl Cpu {
     /// `flat_binder_object` real `vi` sends, followed by the four-byte object
     /// offset table the parcel header points at.
     pub(super) fn vi_native_window(&mut self, tls: u32, out_size: usize) -> Result<()> {
-        /// The binder handle every layer here shares — `vi_transact_parcel`
+        /// The binder handle every layer here shares, `vi_transact_parcel`
         /// serves the one `IGraphicBufferProducer` this emulator has.
         const BINDER_ID: u64 = 1;
 
@@ -594,7 +594,7 @@ impl Cpu {
 
     /// The buffer queue's own event, which a producer waits on before it
     /// dequeues. It is created **signalled** and manual-reset: the queue here
-    /// always has a free buffer — `dequeueBuffer` never refuses — so the state
+    /// always has a free buffer (`dequeueBuffer` never refuses) so the state
     /// it reports is "a buffer is available", permanently and truthfully.
     ///
     /// One object per process rather than one per `GetNativeHandle`, because a

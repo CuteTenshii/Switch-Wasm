@@ -1,5 +1,5 @@
 //! Boot a retail NSP like `boot_nsp`, but keep a ring buffer of the last N
-//! executed instructions and dump it when the guest halts — the fastest way
+//! executed instructions and dump it when the guest halts, the fastest way
 //! to see how an `nnSdk` abort was reached without tracing 117M steps.
 //!
 //! Usage: retail_trace <container> <prod.keys> [title.keys] [tail_len] [max_steps]
@@ -25,7 +25,7 @@ fn main() {
     cpu.bootstrap();
     title.mount_romfs(&mut cpu);
     // The system fonts `pl:u` hands out. Without them a title that draws
-    // text waits for a font that never arrives — the browser stages one at
+    // text waits for a font that never arrives, the browser stages one at
     // startup, so a native run that skips it fails in a way the real
     // frontend never would.
     common::load_fallback_font(&mut cpu);
@@ -67,7 +67,7 @@ fn main() {
         })
         .unwrap_or_default();
     // With MARK, also dump memory: `MARK_DUMP=<reg>,<signed byte offset>,<words>`
-    // — the reply struct a marked function is about to read, say.
+    //: the reply struct a marked function is about to read, say.
     let mark_dump: Option<(u8, i64, u32)> = env::var("MARK_DUMP").ok().and_then(|v| {
         let mut parts = v.split(',');
         Some((
@@ -104,7 +104,7 @@ fn main() {
             recording = true;
             // Whatever this function was called with: dump any argument that
             // points at a printable C string, which is how a path or a mount
-            // name gets read out of a stuck `nn::fs` call — or the condition,
+            // name gets read out of a stuck `nn::fs` call, or the condition,
             // file, function and message of an `nn::diag` assertion, which sit
             // as far out as x5.
             for r in 0..8u8 {

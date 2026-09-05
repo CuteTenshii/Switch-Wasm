@@ -14,7 +14,7 @@ pub(crate) const MAX_DEVICE_ERRORS: usize = 16;
 
 /// Everything the device has rejected since it was opened.
 ///
-/// Keeping only the first — which is what this was — reported nothing at all
+/// Keeping only the first (which is what this was) reported nothing at all
 /// once the pipelines were built: the only production reader runs before a
 /// pipeline is created, and a title that builds its four in the first frames
 /// never creates another. Every rejection after that sat unread.
@@ -24,7 +24,7 @@ pub(crate) struct DeviceErrors {
     /// [`Gpu::device_error`]. Oldest rather than newest because the first
     /// rejection is the one with a cause; the rest are usually its echo.
     pub(crate) fresh: Option<String>,
-    /// Each distinct message once, in the order first seen — the same shape
+    /// Each distinct message once, in the order first seen, the same shape
     /// as `reasons`, and for the same reason.
     pub(crate) distinct: Vec<String>,
     /// Every rejection, including the repeats and anything past
@@ -64,7 +64,7 @@ impl UploadBytes {
     /// Textures are counted by [`UploadBytes::add_texture`] instead, and only
     /// when one was really read. A draw served from the cache never touched
     /// guest memory for it, and counting it here would report reads that did
-    /// not happen — which is exactly what this said before the cache existed
+    /// not happen, which is exactly what this said before the cache existed
     /// to make the two differ.
     pub(crate) fn add_but_textures(&mut self, uploads: &Uploads) {
         self.vertex += uploads
@@ -110,7 +110,7 @@ pub(crate) struct Times {
     pub(crate) flush_ask: u128,
     /// Waiting for the maps. Natively this blocks and is the copy actually
     /// happening; in a browser `poll` cannot do anything at all, so this being
-    /// ~0 there is correct rather than suspicious — the wait moved to the
+    /// ~0 there is correct rather than suspicious, the wait moved to the
     /// slice boundary, where `Flush::Pending` puts it.
     pub(crate) flush_wait: u128,
     /// Reading the mapping and writing it through the page table into guest

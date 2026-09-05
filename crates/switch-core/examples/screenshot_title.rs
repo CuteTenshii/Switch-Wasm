@@ -1,5 +1,5 @@
-//! Boot a retail title — an NSP, a cartridge image or a bare Program NCA,
-//! decided by the container's header — and write the Nth presented frame to a
+//! Boot a retail title, an NSP, a cartridge image or a bare Program NCA,
+//! decided by the container's header, and write the Nth presented frame to a
 //! PPM:
 //! `screenshot_title <container> <prod.keys> [title.keys] <out.ppm> [frame]`.
 //!
@@ -7,12 +7,12 @@
 //! difference from `boot_nsp SHOT=` is that this stops *at* the frame rather
 //! than at a step budget, which matters more than it sounds: a title needs
 //! **seconds** of console time before its first frame, which is billions of
-//! steps, and picking a budget that lands after it is guesswork — "A Short
+//! steps, and picking a budget that lands after it is guesswork, "A Short
 //! Hike" reaches frame 30 at step 3.3 billion.
 //!
 //! This was `screenshot_nsp` and `screenshot_nca`. They differed in which
 //! container each could open, and once that was decided by header instead,
-//! they differed only in which investigation's knobs each had accumulated —
+//! they differed only in which investigation's knobs each had accumulated,
 //! neither set having anything to do with the container kind.
 //!
 //! `SWITCH_FIRMWARE=<dir>` registers the system data archives. A system applet
@@ -22,7 +22,7 @@
 //! Beyond the knobs every runner shares (see [`common::Debug`]):
 //!
 //! - `STEPS=<n>` caps the run; it otherwise goes until the frame arrives.
-//! - `PROFILE=<interval>` samples the pc that often — hot pcs, hot 4 KiB pages
+//! - `PROFILE=<interval>` samples the pc that often, hot pcs, hot 4 KiB pages
 //!   and which thread is running. Same spelling as `boot_nsp`'s. `STACKS=1`
 //!   adds a return-address histogram at the same interval, so a frame loop's
 //!   whole call tree comes out of one run instead of one backtrace at a time.
@@ -36,7 +36,7 @@
 //!   apart. `SCAN_MEM=<addr>:<size>` lists a region's non-zero spans once the
 //!   run has stopped, which is how you find the buffer you meant among the
 //!   ones you did not, and `DUMP_VERTS=<addr>[,...]` reads three 60-byte rows
-//!   as floats — real positions are ordinary numbers, and a structure
+//!   as floats: real positions are ordinary numbers, and a structure
 //!   reinterpreted as float is a wall of denormals.
 //! - `POKE_U32=<addr>:<value>` writes a word every sampling tick, or once at
 //!   `POKE_AT=<step>`. A latched state flag is only a theory until you clear
@@ -48,7 +48,7 @@
 //!   mask without knowing the object's address: the frame loop reads it with
 //!   `ldr w8, [xN, #0x3e8]`, so the first time that instruction executes, the
 //!   word it names is the gate. Then it holds that word at zero. **Zeroing it
-//!   is not free** — on 18.0.1's qlaunch the sniffer finds the gate at step
+//!   is not free**: on 18.0.1's qlaunch the sniffer finds the gate at step
 //!   26M, and the run then reaches its frame with 0 draws instead of 8.
 //! - `FIND_MAGIC=SARC` scans guest memory for a four-byte magic. A layout
 //!   archive arrives Yaz0-compressed and is decompressed by the guest; if the
@@ -67,7 +67,7 @@ const USAGE: &str = "screenshot_title <container> <prod.keys> [title.keys] <out.
 /// enough that a hot loop still resolves.
 const DEFAULT_INTERVAL: u64 = 4096;
 
-/// A hex `<lo>:<hi>` pair — both ends given, unlike [`common::env_span`]'s
+/// A hex `<lo>:<hi>` pair, both ends given, unlike [`common::env_span`]'s
 /// address and length.
 fn env_bounds(name: &str) -> Option<(u32, u32)> {
     let raw = env::var(name).ok()?;
@@ -169,7 +169,7 @@ fn main() {
     let mut gate: Option<u32> = None;
 
     // Every hook below reads the machine between two instructions, which is
-    // what `Pace::Instructions` is for — and about half the speed. With none
+    // what `Pace::Instructions` is for, and about half the speed. With none
     // of them armed the run goes through the block translator instead, which
     // is the engine the frontend uses. `screenshot_nsp` used to be stepwise
     // unconditionally, so every run it ever timed was of the interpreter.

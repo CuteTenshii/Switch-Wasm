@@ -21,7 +21,7 @@ fn main() {
 }
 
 /// The short commit, with a `-dirty` suffix when the tree it was built from
-/// had uncommitted changes — which is the case a report most needs flagged,
+/// had uncommitted changes, which is the case a report most needs flagged,
 /// since that commit alone does not describe the build.
 fn commit() -> String {
     let Some(hash) = git(&["rev-parse", "--short", "HEAD"]) else {

@@ -63,7 +63,7 @@ export interface Recycle {
    *  needs one in the new session.
    *
    * Supplied by the caller rather than reached for here, so that rebuilding a
-   * session does not have to know what a container is — `container.ts` is
+   * session does not have to know what a container is: `container.ts` is
    * what would then import this back. Reset and a panel Launch both pass it:
    * the page goes on showing an open container, and a launch reads the title
    * out of one. A boot from the stage does not, since it is about to open a
@@ -76,8 +76,8 @@ export interface Recycle {
 
 /** Throw the running session away and build a fresh one in its place.
  *
- * Everything a session was *given* is staged again — the font, the SD card,
- * save data, keys, the system data archives — because a new session starts
+ * Everything a session was *given* is staged again, the font, the SD card,
+ * save data, keys, the system data archives, because a new session starts
  * with none of them while the page goes on reporting all of them. Throws if
  * the session could not be rebuilt; the caller owns how that is reported,
  * since Reset and a failed boot say different things about it. */

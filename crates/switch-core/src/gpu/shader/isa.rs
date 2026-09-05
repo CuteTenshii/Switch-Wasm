@@ -1,7 +1,7 @@
 //! Maxwell (GM20B) shader instruction decoding.
 //!
 //! Bit layouts are ported from `envydis`'s `gm107.c` tables (envytools,
-//! github.com/envytools/envytools) — opcode values and masks, operand bit
+//! github.com/envytools/envytools), opcode values and masks, operand bit
 //! positions, and the modifier sub-tables, transcribed row by row. The
 //! original subset was additionally verified against `uam`-compiled GLSL
 //! fixtures disassembled with `envydis -m gm107`: a solid-color fragment
@@ -23,13 +23,13 @@
 //!   always-true placeholder, so `0b0111` with bit 19 clear is "unpredicated".
 //!   Unlike the first version of this decoder, a real predicate is now
 //!   decoded and carried rather than making the whole instruction
-//!   unsupported — shaders with any control flow at all predicate constantly.
+//!   unsupported, shaders with any control flow at all predicate constantly.
 //! - Maxwell has no integer-multiply instruction in the usual sense. 32-bit
 //!   multiplies come out as chains of `xmad`, which multiplies two 16-bit
 //!   halves and accumulates.
 //!
-//! An encoding this decoder doesn't recognise — or recognises with a modifier
-//! whose behaviour isn't modelled — becomes [`Op::Unimplemented`], which
+//! An encoding this decoder doesn't recognise, or recognises with a modifier
+//! whose behaviour isn't modelled: becomes [`Op::Unimplemented`], which
 //! carries the raw bits so a real capture stays inspectable rather than
 //! silently mis-executing.
 
@@ -298,7 +298,7 @@ impl HPrecision {
     /// Whether a product one of whose operands is zero answers zero whatever
     /// the other one is.
     ///
-    /// Saturation already forces that answer, so hardware does not do both —
+    /// Saturation already forces that answer, so hardware does not do both,
     /// and stating it here is what keeps the interpreter and the WGSL backend
     /// from each deciding it separately.
     pub fn zeroes_products(self, sat: bool) -> bool {
@@ -309,11 +309,11 @@ impl HPrecision {
 /// What `lop`'s test form asks of the result before it writes its predicate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LopTest {
-    /// `.T` — the predicate is set unconditionally.
+    /// `.T`: the predicate is set unconditionally.
     True,
-    /// `.Z` — set when the result is zero.
+    /// `.Z`: set when the result is zero.
     Zero,
-    /// `.NZ` — set when any bit of the result is set.
+    /// `.NZ`: set when any bit of the result is set.
     NonZero,
 }
 
@@ -358,7 +358,7 @@ pub enum TexDim {
     T1d,
     T2d,
     /// A 2D array. The third coordinate slot holds the *layer*, as an integer
-    /// in the low half of its register rather than a float — see
+    /// in the low half of its register rather than a float: see
     /// [`texs_encoding`].
     T2dArray,
     T3d,
@@ -415,7 +415,7 @@ pub enum AtomOp {
     Exch,
     /// Compare-and-swap: `src` is the comparand and `src + 1` the new value.
     Cas,
-    /// `safeadd` — an add the hardware may drop under contention. Nothing
+    /// `safeadd`: an add the hardware may drop under contention. Nothing
     /// here is contended, so it is an add.
     SafeAdd,
 }
@@ -463,21 +463,21 @@ impl Instruction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
     // ---- attribute space ----
-    /// `ld.<size> dst, a[offset]` — attribute-space load.
+    /// `ld.<size> dst, a[offset]`, attribute-space load.
     Ld {
         dst: u8,
         offset: u16,
         idx: u8,
         size: MemSize,
     },
-    /// `st.<size> a[offset], src` — attribute-space store.
+    /// `st.<size> a[offset], src`, attribute-space store.
     St {
         offset: u16,
         idx: u8,
         src: u8,
         size: MemSize,
     },
-    /// `ipa[.pass][.centroid] dst, a[offset], mul` — fixed-function
+    /// `ipa[.pass][.centroid] dst, a[offset], mul`, fixed-function
     /// interpolation. `perspective = false` is `ipa pass`; `perspective =
     /// true` multiplies the fetched value by `mul` (`RZ` decodes to `None`).
     /// `centroid` samples the varying inside the primitive's covered area
@@ -561,7 +561,7 @@ pub enum Op {
 
     // ---- half-precision ALU ----
     // A register is a pair of halves and each of these computes both lanes at
-    // once, which is why a Unity shader — written in `half` throughout — is
+    // once, which is why a Unity shader (written in `half` throughout) is
     // most of these and few of the f32 ops above. [`HSwizzle`] says where each
     // source's two lanes come from and [`HMerge`] where the result goes.
     Hadd2 {
@@ -618,7 +618,7 @@ pub enum Op {
         ftz: bool,
     },
     /// Unlike `fsetp`, the two destination predicates are the two *lanes*, not
-    /// a result and its inverse — until `and`, which ands them together and
+    /// a result and its inverse, until `and`, which ands them together and
     /// then writes the inverse into `p1` after all.
     Hsetp2 {
         p0: u8,
@@ -639,7 +639,7 @@ pub enum Op {
     // ---- integer ALU ----
     /// `cin` is `IADD.X`, which adds the carry a previous `IADD.CC` left
     /// behind, and `cout` is that `.CC`. Together they are how a shader adds a
-    /// 64-bit number in two halves — every global-memory address a Maxwell
+    /// 64-bit number in two halves, every global-memory address a Maxwell
     /// program computes is one of these pairs.
     Iadd {
         dst: u8,
@@ -704,7 +704,7 @@ pub enum Op {
     },
     /// `bfi dst, insert, src, base`: splice `insert` into `base`. `src` packs
     /// the destination field's offset in its low byte and its width in the
-    /// next — one operand carrying two numbers, which is why a shader building
+    /// next: one operand carrying two numbers, which is why a shader building
     /// a bitfield does it in one instruction rather than a shift and two masks.
     Bfi {
         dst: u8,
@@ -727,7 +727,7 @@ pub enum Op {
         signed: bool,
         hi: bool,
     },
-    /// `xmad dst, a.h[ah], b.h[bh], c` — the 16x16+32 multiply-accumulate
+    /// `xmad dst, a.h[ah], b.h[bh], c`, the 16x16+32 multiply-accumulate
     /// Maxwell builds every wider integer multiply out of.
     Xmad {
         dst: u8,
@@ -868,7 +868,7 @@ pub enum Op {
         dst: u8,
         imm: u32,
     },
-    /// `mov dst, sN` — a special register (`tid`, `laneid`, ...).
+    /// `mov dst, sN`, a special register (`tid`, `laneid`, ...).
     S2r {
         dst: u8,
         sr: u8,
@@ -884,7 +884,7 @@ pub enum Op {
     },
 
     // ---- memory ----
-    /// `ld cN[idx + offset]` — a constant-buffer load into registers.
+    /// `ld cN[idx + offset]`, a constant-buffer load into registers.
     Ldc {
         dst: u8,
         bank: u8,
@@ -892,21 +892,21 @@ pub enum Op {
         idx: u8,
         size: MemSize,
     },
-    /// `ldg dst, [addr + offset]` — a global load.
+    /// `ldg dst, [addr + offset]`, a global load.
     Ldg {
         dst: u8,
         addr: u8,
         offset: i32,
         size: MemSize,
     },
-    /// `stg [addr + offset], src` — a global store.
+    /// `stg [addr + offset], src`, a global store.
     Stg {
         addr: u8,
         offset: i32,
         src: u8,
         size: MemSize,
     },
-    /// `ld dst, l[addr + offset]` — a local (per-thread scratch) load.
+    /// `ld dst, l[addr + offset]`, a local (per-thread scratch) load.
     Ldl {
         dst: u8,
         addr: u8,
@@ -920,7 +920,7 @@ pub enum Op {
         src: u8,
         size: MemSize,
     },
-    /// `ld dst, s[addr + offset]` — a load from the CTA's shared memory.
+    /// `ld dst, s[addr + offset]`, a load from the CTA's shared memory.
     Lds {
         dst: u8,
         addr: u8,
@@ -934,7 +934,7 @@ pub enum Op {
         src: u8,
         size: MemSize,
     },
-    /// `atom`/`atoms`/`red` — a read-modify-write of one location. `red` is
+    /// `atom`/`atoms`/`red`: a read-modify-write of one location. `red` is
     /// this with `dst` = [`RZ`]: the same operation, its old value discarded.
     Atom {
         dst: u8,
@@ -947,10 +947,10 @@ pub enum Op {
     },
 
     // ---- texture ----
-    /// `texs dst, coords.., handle, dim, mask` — texture sample with an
+    /// `texs dst, coords.., handle, dim, mask`, texture sample with an
     /// immediate handle.
     ///
-    /// `coords` is in sample order — `u`, `v`, then the third axis — and
+    /// `coords` is in sample order (`u`, `v`, then the third axis) and
     /// holds [`RZ`] in the slots `dim` does not use. `dst`/`dst2` are the
     /// two destination registers the enabled channels are split between;
     /// see [`texs_destinations`].
@@ -970,7 +970,7 @@ pub enum Op {
         f16: bool,
     },
 
-    /// `tex dst, coords.., handle, dim, mask` — the general texture sample.
+    /// `tex dst, coords.., handle, dim, mask`, the general texture sample.
     ///
     /// [`Op::Texs`] is a short encoding of the common cases; this is the full
     /// one, and carries the operands that encoding has no room for. The
@@ -998,7 +998,7 @@ pub enum Op {
     },
 
     // ---- warp ----
-    /// `shfl.<mode> p, dst, src, index, mask` — read another lane's `src`.
+    /// `shfl.<mode> p, dst, src, index, mask`: read another lane's `src`.
     ///
     /// `index` selects the lane the mode's own way, and `mask` packs two
     /// fields: a clamp in its low five bits and a segment mask at bit 8,
@@ -1013,7 +1013,7 @@ pub enum Op {
         mask: Operand,
         mode: ShflMode,
     },
-    /// `fswzadd dst, a, b, swizzle` — add `a` and `b` with a sign per lane,
+    /// `fswzadd dst, a, b, swizzle`: add `a` and `b` with a sign per lane,
     /// the two-bit code for this one selected out of `swizzle` by `laneid`.
     ///
     /// It is the other half of a derivative: `shfl` fetches the neighbour's
@@ -1028,15 +1028,15 @@ pub enum Op {
     },
 
     // ---- control ----
-    /// `bra target` — `target` is an instruction's byte offset within the
+    /// `bra target`: `target` is an instruction's byte offset within the
     /// program, already resolved from the pc-relative encoding.
     Bra {
         target: u32,
     },
-    /// `ssy target` — push a reconvergence point.
+    /// `ssy target`: push a reconvergence point.
     /// `brx Ra, imm`: an indexed branch, which is how a `switch` lowers. The
     /// register holds an entry a jump table in a constant bank supplied, and
-    /// the target is that entry plus this instruction's own pc-relative base —
+    /// the target is that entry plus this instruction's own pc-relative base,
     /// so an interpreter, unlike a recompiler, needs no table tracking at all.
     Brx {
         base: u32,
@@ -1045,22 +1045,22 @@ pub enum Op {
     Ssy {
         target: u32,
     },
-    /// `sync` — pop one and jump there.
+    /// `sync`, pop one and jump there.
     Sync,
-    /// `pbk target` — push a loop-break point.
+    /// `pbk target`: push a loop-break point.
     Pbk {
         target: u32,
     },
     Brk,
-    /// `pcnt target` — push a loop-continue point.
+    /// `pcnt target`: push a loop-continue point.
     Pcnt {
         target: u32,
     },
     Cont,
     Exit,
-    /// `kil` — discard this fragment.
+    /// `kil`, discard this fragment.
     Kil,
-    /// `bar.<mode>` — a CTA-wide barrier.
+    /// `bar.<mode>`, a CTA-wide barrier.
     Bar {
         mode: BarMode,
     },
@@ -1085,8 +1085,8 @@ fn field(insn: u64, pos: u32, len: u32) -> u64 {
 /// to hold for the branch to be taken.
 ///
 /// Only the two codes that are *decidable without condition-code flags* are
-/// answered here: `F` is never true, and `FCSM_TR` — which a compiler emits
-/// to mean "not this one" — is the same, matching Eden's
+/// answered here: `F` is never true, and `FCSM_TR`, which a compiler emits
+/// to mean "not this one": is the same, matching Eden's
 /// `IREmitter::GetFlowTest`, which stubs it to false. Every other code is
 /// treated as satisfiable, which is what this interpreter did for all of them
 /// before it modelled the field at all.
@@ -1282,7 +1282,7 @@ pub fn decode_at(insn: u64, pc: u32) -> Instruction {
     let op = decode_op(insn, pc);
     // `ssy`/`pbk`/`pcnt` have no predicate: the bits every other instruction
     // keeps its guard in belong to their branch target, and they read as zero
-    // — which is `@p0`, a predicate that is false until something sets it. So
+    //, which is `@p0`, a predicate that is false until something sets it. So
     // the push was skipped and the `sync`/`brk` that matched it found an empty
     // reconvergence stack, which is where every one of the Home Menu's 222
     // textured draws stopped.
@@ -1307,7 +1307,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
     // written in, so a narrow opcode can't shadow a wide one.
     match top(16) & 0xfff8 {
         // ---- attribute space ----
-        // ld a[] — gm107.c 0xefd8/0xfff8
+        // ld a[], gm107.c 0xefd8/0xfff8
         0xefd8 => {
             if field(insn, 32, 1) != 0 || field(insn, 31, 1) != 0 {
                 return un;
@@ -1319,7 +1319,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
                 size: attr_size(field(insn, 47, 2)),
             }
         }
-        // st a[] — 0xeff0/0xfff8
+        // st a[], 0xeff0/0xfff8
         0xeff0 => {
             if field(insn, 31, 1) != 0 {
                 return un;
@@ -1331,7 +1331,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
                 size: attr_size(field(insn, 47, 2)),
             }
         }
-        // ld c[] — 0xef90/0xfff8, bank at [36,41), signed 16-bit offset.
+        // ld c[], 0xef90/0xfff8, bank at [36,41), signed 16-bit offset.
         0xef90 => Op::Ldc {
             dst: reg(insn, 0, 8),
             bank: reg(insn, 36, 5),
@@ -1339,7 +1339,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             idx: reg(insn, 8, 8),
             size: mem_size(field(insn, 48, 3)),
         },
-        // ldg/stg — 0xeed0/0xeed8, signed 24-bit offset off REG_08.
+        // ldg/stg, 0xeed0/0xeed8, signed 24-bit offset off REG_08.
         0xeed0 => Op::Ldg {
             dst: reg(insn, 0, 8),
             addr: reg(insn, 8, 8),
@@ -1352,7 +1352,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             src: reg(insn, 0, 8),
             size: mem_size(field(insn, 48, 3)),
         },
-        // ld/st s[] — 0xef48/0xef58, the shared-memory pair of the local
+        // ld/st s[], 0xef48/0xef58, the shared-memory pair of the local
         // ones below and encoded identically.
         0xef48 => Op::Lds {
             dst: reg(insn, 0, 8),
@@ -1366,7 +1366,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             src: reg(insn, 0, 8),
             size: mem_size(field(insn, 48, 3)),
         },
-        // ld/st l[] — 0xef40/0xef50.
+        // ld/st l[], 0xef40/0xef50.
         0xef40 => Op::Ldl {
             dst: reg(insn, 0, 8),
             addr: reg(insn, 8, 8),
@@ -1379,7 +1379,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             src: reg(insn, 0, 8),
             size: mem_size(field(insn, 48, 3)),
         },
-        // mov dst, sN — 0xf0c8/0xfff8.
+        // mov dst, sN, 0xf0c8/0xfff8.
         0xf0c8 => Op::S2r {
             dst: reg(insn, 0, 8),
             sr: reg(insn, 20, 8),
@@ -1387,7 +1387,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
         // depbar/membar: scheduling and memory ordering, no-ops for a scalar
         // interpreter that runs one invocation at a time.
         0xf0f0 | 0xef98 => Op::Inert,
-        // bar — 0xf0a8/0xfff8. The mode's bits are not contiguous.
+        // bar: 0xf0a8/0xfff8. The mode's bits are not contiguous.
         0xf0a8 => match (field(insn, 39, 1) << 4)
             | (field(insn, 36, 1) << 3)
             | (field(insn, 35, 1) << 2)
@@ -1413,7 +1413,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             },
             _ => un,
         },
-        // red — 0xebf8/0xfff8. A global atomic whose old value is discarded,
+        // red: 0xebf8/0xfff8. A global atomic whose old value is discarded,
         // so it decodes to the same op with RZ as its destination.
         0xebf8 => {
             let (Some(op), Some(ty)) = (atom_op(field(insn, 23, 3)), atom_type(field(insn, 20, 3)))
@@ -1430,9 +1430,9 @@ fn decode_op(insn: u64, pc: u32) -> Op {
                 space: AtomSpace::Global,
             }
         }
-        // shfl — 0xef10/0xfff8 (Eden's `maxwell.inc`,
+        // shfl, 0xef10/0xfff8 (Eden's `maxwell.inc`,
         // "1110 1111 0001 0---"). Both operands can be a register or an
-        // immediate, and each has its own flag saying which — the lane index
+        // immediate, and each has its own flag saying which, the lane index
         // five bits at 20, the clamp/segment pair thirteen at 34.
         0xef10 => {
             let index = if field(insn, 28, 1) != 0 {
@@ -1459,7 +1459,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
                 },
             }
         }
-        // sync — 0xf0f8/0xfff8.
+        // sync, 0xf0f8/0xfff8.
         0xf0f8 => Op::Sync,
         _ => match top(12) {
             // ---- control flow (0xfff0 masks) ----
@@ -1471,8 +1471,8 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             // An `exit` the flow test can never satisfy is not the end of the
             // program, and Persona 5 Royal's vertex shaders put one in the
             // middle of every one of theirs. Stopping the walk there dropped
-            // every instruction after it — the `ast` to `o[0x70]` among them
-            // — so every vertex came out at the default clip position, every
+            // every instruction after it, the `ast` to `o[0x70]` among them
+            //, so every vertex came out at the default clip position, every
             // triangle collapsed to the viewport centre, and 39,000 draws a
             // run produced a black frame.
             0xe30 => Op::Nop,
@@ -1502,7 +1502,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
                     reg: reg(insn, 8, 8),
                 }
             }
-            // atom.cas — 0xeef0/0xfff0, whose size field is one bit because
+            // atom.cas: 0xeef0/0xfff0, whose size field is one bit because
             // the operation is fixed.
             0xeef => Op::Atom {
                 dst: reg(insn, 0, 8),
@@ -1526,7 +1526,7 @@ fn decode_op(insn: u64, pc: u32) -> Op {
 /// (0xed00/0xff00), `atoms` (0xec00/0xff00) and `atoms.cas` (0xee00/0xff80).
 fn decode_memory_atomic(insn: u64) -> Option<Op> {
     match insn >> 56 {
-        // atom — the op is a full nibble and the type three bits below it.
+        // atom: the op is a full nibble and the type three bits below it.
         0xed => Some(Op::Atom {
             dst: reg(insn, 0, 8),
             addr: reg(insn, 8, 8),
@@ -1536,7 +1536,7 @@ fn decode_memory_atomic(insn: u64) -> Option<Op> {
             ty: atom_type(field(insn, 49, 3))?,
             space: AtomSpace::Global,
         }),
-        // atoms — a 22-bit offset stored in dwords, and a two-bit type.
+        // atoms, a 22-bit offset stored in dwords, and a two-bit type.
         0xec => Some(Op::Atom {
             dst: reg(insn, 0, 8),
             addr: reg(insn, 8, 8),
@@ -1551,7 +1551,7 @@ fn decode_memory_atomic(insn: u64) -> Option<Op> {
             },
             space: AtomSpace::Shared,
         }),
-        // atoms.cast/.cas — `cast` is a lock-and-load form nothing here
+        // atoms.cast/.cas: `cast` is a lock-and-load form nothing here
         // models, so only the compare-and-swap arm decodes.
         _ if insn >> 55 == 0x1dc => {
             if field(insn, 53, 2) != 2 {
@@ -1575,7 +1575,7 @@ fn decode_memory_atomic(insn: u64) -> Option<Op> {
     }
 }
 
-/// `tabed00_0`/`tabec00_0` — the same eight operations in the same order for
+/// `tabed00_0`/`tabec00_0`, the same eight operations in the same order for
 /// `atom` and `atoms`, with two more that only `atom` reaches.
 fn atom_op(bits: u64) -> Option<AtomOp> {
     Some(match bits {
@@ -1613,7 +1613,7 @@ fn decode_alu(insn: u64) -> Op {
     // top byte selects register (0x5c..), constant (0x4c..) or immediate
     // (0x38.., masked 0xfef8 because bit 56 belongs to the immediate) and
     // the rest of the opcode is identical. Resolving the form once lets each
-    // op below be written once — but the form byte has to be checked too,
+    // op below be written once, but the form byte has to be checked too,
     // because a *different* opcode group reuses the same low byte (0x49a0 is
     // `ffma`, 0x4ca0 is `sel`), so anything outside this group goes to
     // [`decode_alu_wide`].
@@ -1635,7 +1635,7 @@ fn decode_alu(insn: u64) -> Op {
 
     match sub {
         // ---- float ----
-        // fadd — ftz 44, sat 50, a: neg 48/abs 46, b: neg 45/abs 49.
+        // fadd: ftz 44, sat 50, a: neg 48/abs 46, b: neg 45/abs 49.
         0x58 => {
             let Some(b) = rhs_float else { return un };
             Op::Fadd {
@@ -1654,7 +1654,7 @@ fn decode_alu(insn: u64) -> Op {
                 sat: field(insn, 50, 1) != 0,
             }
         }
-        // fmul — ftz/fmz at 44..46, scale at 41..44, sat 50, b: neg 48.
+        // fmul: ftz/fmz at 44..46, scale at 41..44, sat 50, b: neg 48.
         0x68 => {
             let Some(b) = rhs_float else { return un };
             let Some(scale) = FmulScale::decode(field(insn, 41, 3)) else {
@@ -1673,7 +1673,7 @@ fn decode_alu(insn: u64) -> Op {
                 scale,
             }
         }
-        // fmnmx — ftz 44, a: neg 48/abs 46, b: neg 45/abs 49, pred at 39.
+        // fmnmx: ftz 44, a: neg 48/abs 46, b: neg 45/abs 49, pred at 39.
         0x60 => {
             let Some(b) = rhs_float else { return un };
             Op::Fmnmx {
@@ -1692,7 +1692,7 @@ fn decode_alu(insn: u64) -> Op {
                 ftz: field(insn, 44, 1) != 0,
             }
         }
-        // r2p — move register bits into the predicate registers. Bit 40
+        // r2p: move register bits into the predicate registers. Bit 40
         // picks the destination file: `PR` (0) is the predicates, `CC` (1) the
         // condition-code flags, which nothing here models.
         0xf0 => {
@@ -1707,7 +1707,7 @@ fn decode_alu(insn: u64) -> Op {
             }
         }
         // ---- integer ----
-        // iadd — sat 50, x 43, a: neg 49, b: neg 48.
+        // iadd: sat 50, x 43, a: neg 49, b: neg 48.
         0x10 => {
             let Some(b) = rhs_int else { return un };
             if field(insn, 50, 1) != 0 {
@@ -1723,7 +1723,7 @@ fn decode_alu(insn: u64) -> Op {
                 cout: field(insn, 47, 1) != 0,
             }
         }
-        // iscadd — shift at 39..44.
+        // iscadd, shift at 39..44.
         0x18 => {
             let Some(b) = rhs_int else { return un };
             Op::Iscadd {
@@ -1735,7 +1735,7 @@ fn decode_alu(insn: u64) -> Op {
                 shift: field(insn, 39, 5) as u8,
             }
         }
-        // imnmx — signed 48, pred at 39.
+        // imnmx, signed 48, pred at 39.
         0x20 => {
             let Some(b) = rhs_int else { return un };
             if field(insn, 43, 2) != 0 {
@@ -1749,7 +1749,7 @@ fn decode_alu(insn: u64) -> Op {
                 signed: field(insn, 48, 1) != 0,
             }
         }
-        // shr — signed 48, wrap 39, brev 40, x 44.
+        // shr, signed 48, wrap 39, brev 40, x 44.
         0x28 => {
             let Some(b) = rhs_int else { return un };
             if field(insn, 40, 1) != 0 || field(insn, 44, 1) != 0 {
@@ -1763,7 +1763,7 @@ fn decode_alu(insn: u64) -> Op {
                 wrap: field(insn, 39, 1) != 0,
             }
         }
-        // flo — signed 48, shift 41, inv 40.
+        // flo, signed 48, shift 41, inv 40.
         0x30 => {
             let Some(b) = rhs_int else { return un };
             Op::Flo {
@@ -1774,7 +1774,7 @@ fn decode_alu(insn: u64) -> Op {
                 inv: field(insn, 40, 1) != 0,
             }
         }
-        // imul — hi 39, signedness at 41 (a) and 40 (b) in tab5c38_0/1.
+        // imul, hi 39, signedness at 41 (a) and 40 (b) in tab5c38_0/1.
         0x38 => {
             let Some(b) = rhs_int else { return un };
             Op::Imul {
@@ -1785,7 +1785,7 @@ fn decode_alu(insn: u64) -> Op {
                 hi: field(insn, 39, 1) != 0,
             }
         }
-        // lop — op at 41..43, inv 39 (a) / 40 (b), x 43.
+        // lop, op at 41..43, inv 39 (a) / 40 (b), x 43.
         0x40 => {
             let Some(b) = rhs_int else { return un };
             if field(insn, 43, 1) != 0 {
@@ -1816,7 +1816,7 @@ fn decode_alu(insn: u64) -> Op {
                 pred,
             }
         }
-        // shl — wrap 39, x 43.
+        // shl, wrap 39, x 43.
         0x48 => {
             let Some(b) = rhs_int else { return un };
             if field(insn, 43, 1) != 0 {
@@ -1829,7 +1829,7 @@ fn decode_alu(insn: u64) -> Op {
                 wrap: field(insn, 39, 1) != 0,
             }
         }
-        // bfe — signed 48, brev 40.
+        // bfe, signed 48, brev 40.
         0x00 => {
             let Some(b) = rhs_int else { return un };
             if field(insn, 40, 1) != 0 {
@@ -1842,7 +1842,7 @@ fn decode_alu(insn: u64) -> Op {
                 signed: field(insn, 48, 1) != 0,
             }
         }
-        // popc — inv 40.
+        // popc, inv 40.
         0x08 => {
             let Some(b) = rhs_int else { return un };
             Op::Popc {
@@ -1852,7 +1852,7 @@ fn decode_alu(insn: u64) -> Op {
             }
         }
         // ---- moves and selects ----
-        // mov — the 4-bit byte-enable mask at 39..43 must be "all".
+        // mov: the 4-bit byte-enable mask at 39..43 must be "all".
         0x98 => {
             let Some(src) = rhs_int else { return un };
             if field(insn, 39, 4) != 0xf {
@@ -1863,7 +1863,7 @@ fn decode_alu(insn: u64) -> Op {
                 src,
             }
         }
-        // rro — the range-reduction operator that precedes `mufu`.
+        // rro, the range-reduction operator that precedes `mufu`.
         //
         // On hardware `mufu sin`/`cos`/`ex2` take an argument already folded
         // into the range their tables cover, and `rro` is what folds it. The
@@ -1885,7 +1885,7 @@ fn decode_alu(insn: u64) -> Op {
                 src,
             }
         }
-        // sel — pred at 39.
+        // sel, pred at 39.
         0xa0 => {
             let Some(b) = rhs_int else { return un };
             Op::Sel {
@@ -1896,7 +1896,7 @@ fn decode_alu(insn: u64) -> Op {
             }
         }
         // ---- conversions ----
-        // i2f — dst type 8..10 (must be f32), src type in tab5cb8_1, byte
+        // i2f: dst type 8..10 (must be f32), src type in tab5cb8_1, byte
         // select at 41..43, src: neg 45/abs 49.
         0xb8 => {
             let Some(src) = rhs_int else { return un };
@@ -1919,7 +1919,7 @@ fn decode_alu(insn: u64) -> Op {
                 sel: field(insn, 41, 2) as u8,
             }
         }
-        // f2i — dst type in tab5cb0_2, src type 10..12 (must be f32),
+        // f2i: dst type in tab5cb0_2, src type 10..12 (must be f32),
         // rounding at 39..41.
         0xb0 => {
             let Some(src) = rhs_float else { return un };
@@ -1943,7 +1943,7 @@ fn decode_alu(insn: u64) -> Op {
                 ftz: field(insn, 44, 1) != 0,
             }
         }
-        // f2f — f16 and f32 in either direction, and the rounding a
+        // f2f, f16 and f32 in either direction, and the rounding a
         // same-width conversion names.
         0xa8 => {
             let (Some(dst_bits), Some(src_bits)) = (
@@ -1955,7 +1955,7 @@ fn decode_alu(insn: u64) -> Op {
             let hi = field(insn, 41, 1) != 0;
             let src = if src_bits == 16 {
                 // A half source is read out of the packed pair it sits in,
-                // and an immediate carries one half both lanes see — which is
+                // and an immediate carries one half both lanes see, which is
                 // how Eden's `F2F_imm` builds `imm | (imm << 16)`.
                 match rhs_int {
                     Some(Operand::Imm(v)) => Operand::Imm((v & 0xffff) | (v << 16)),
@@ -1978,7 +1978,7 @@ fn decode_alu(insn: u64) -> Op {
             } else {
                 // Bits 39..41 are the *cast's* rounding mode here, and both
                 // renderers round a conversion to nearest-even and nothing
-                // else — so any other mode is refused rather than ignored.
+                // else, so any other mode is refused rather than ignored.
                 if field(insn, 39, 2) != 0 {
                     return un;
                 }
@@ -1999,7 +1999,7 @@ fn decode_alu(insn: u64) -> Op {
                 hi,
             }
         }
-        // i2i — src type in tab5ce0_1, dst type in tab5ce0_0.
+        // i2i, src type in tab5ce0_1, dst type in tab5ce0_0.
         0xe0 => {
             let Some(src) = rhs_int else { return un };
             let sbits = field(insn, 10, 2) | (field(insn, 13, 1) << 2);
@@ -2041,7 +2041,7 @@ fn decode_alu_wide(insn: u64) -> Op {
 
     // ---- 0xfff0-masked: fsetp/isetp/iset/icmp/prmt/lop3/bfi ----
     match form >> 4 {
-        // fsetp — cmp 48..52, ftz 47, bop 45..47.
+        // fsetp, cmp 48..52, ftz 47, bop 45..47.
         0x5bb | 0x4bb | 0x36b => {
             let b = match form >> 12 {
                 0x5 => Operand::Reg(reg(insn, 20, 8)),
@@ -2069,7 +2069,7 @@ fn decode_alu_wide(insn: u64) -> Op {
                 src: src_pred(insn, 39, 42),
             };
         }
-        // isetp — cmp 49..52, signed 48, bop 45..47, x 43.
+        // isetp, cmp 49..52, signed 48, bop 45..47, x 43.
         0x5b6 | 0x4b6 | 0x366 => {
             let b = match form >> 12 {
                 0x5 => Operand::Reg(reg(insn, 20, 8)),
@@ -2093,7 +2093,7 @@ fn decode_alu_wide(insn: u64) -> Op {
                 src: src_pred(insn, 39, 42),
             };
         }
-        // iset — the register-writing form of isetp.
+        // iset, the register-writing form of isetp.
         0x5b5 | 0x4b5 | 0x365 => {
             let b = match form >> 12 {
                 0x5 => Operand::Reg(reg(insn, 20, 8)),
@@ -2114,7 +2114,7 @@ fn decode_alu_wide(insn: u64) -> Op {
                 bf: field(insn, 44, 1) != 0,
             };
         }
-        // icmp — c is the third source; the operand order differs between
+        // icmp: c is the third source; the operand order differs between
         // the register and constant forms.
         0x5b4 | 0x4b4 | 0x534 | 0x364 | 0x374 => {
             let (b, c) = match form >> 4 {
@@ -2131,7 +2131,7 @@ fn decode_alu_wide(insn: u64) -> Op {
                 signed: field(insn, 48, 1) != 0,
             };
         }
-        // bfi — `src` carries the field's offset and width packed into one
+        // bfi: `src` carries the field's offset and width packed into one
         // operand; `base` is what the insert lands in. The four forms differ
         // only in where those two come from.
         0x5bf | 0x4bf | 0x53f | 0x36f | 0x37f => {
@@ -2151,7 +2151,7 @@ fn decode_alu_wide(insn: u64) -> Op {
                 base,
             };
         }
-        // iadd3 — three-way add, negation per source.
+        // iadd3: three-way add, negation per source.
         0x5cc | 0x4cc | 0x38c => {
             let (b, c) = match form >> 12 {
                 0x5 => (
@@ -2174,7 +2174,7 @@ fn decode_alu_wide(insn: u64) -> Op {
                 cneg: field(insn, 49, 1) != 0,
             };
         }
-        // psetp — a pure predicate op.
+        // psetp, a pure predicate op.
         _ => {}
     }
 
@@ -2194,12 +2194,12 @@ fn decode_alu_wide(insn: u64) -> Op {
         };
     }
 
-    // nop — 0x50b0/0xfff8.
+    // nop, 0x50b0/0xfff8.
     if insn & 0xfff8_0000_0000_0000 == 0x50b0_0000_0000_0000 {
         return Op::Nop;
     }
 
-    // vote.vtg — 0x50e0/0xfff8, and nothing to do. The vertex-stage vote
+    // vote.vtg: 0x50e0/0xfff8, and nothing to do. The vertex-stage vote
     // writes neither a register nor a predicate: it tells the hardware's
     // tessellation and stream-out fixed function about the warp, and there is
     // no such fixed function here. Eden stubs it the same way
@@ -2208,13 +2208,13 @@ fn decode_alu_wide(insn: u64) -> Op {
     //
     // Refusing it is not free: a refused instruction fails the whole draw, and
     // this one sits two instructions before `exit` in Just Dance 2023's
-    // loading-screen vertex shader — every draw the title made, all 52 of
+    // loading-screen vertex shader: every draw the title made, all 52 of
     // them, and the frame it presented was the clear colour and nothing else.
     if insn & 0xfff8_0000_0000_0000 == 0x50e0_0000_0000_0000 {
         return Op::Nop;
     }
 
-    // fswzadd — 0x50f8/0xfff8. `ndv` at 38 is a scheduling hint about
+    // fswzadd: 0x50f8/0xfff8. `ndv` at 38 is a scheduling hint about
     // divergence and has no effect here; the condition-code write at 47 is
     // refused rather than dropped, since a shader that reads the flag would
     // read whatever was left there. Only round-to-nearest is decoded: this
@@ -2233,7 +2233,7 @@ fn decode_alu_wide(insn: u64) -> Op {
         };
     }
 
-    // mufu — subop at 20..24, sat 50, src: neg 48 / abs 46.
+    // mufu: subop at 20..24, sat 50, src: neg 48 / abs 46.
     if insn & 0xfff8_0000_0000_0000 == 0x5080_0000_0000_0000 {
         let mufu = match field(insn, 20, 4) {
             0 => MufuOp::Cos,
@@ -2257,7 +2257,7 @@ fn decode_alu_wide(insn: u64) -> Op {
         };
     }
 
-    // lop3 — the LUT byte sits in a different field in each form.
+    // lop3: the LUT byte sits in a different field in each form.
     if insn & 0xfff8_0000_0000_0000 == 0x5be0_0000_0000_0000 {
         if field(insn, 38, 1) != 0 || field(insn, 36, 2) != 0 {
             return un;
@@ -2280,7 +2280,7 @@ fn decode_alu_wide(insn: u64) -> Op {
         };
     }
 
-    // ffma — three operand orders across four opcodes.
+    // ffma, three operand orders across four opcodes.
     if insn & 0xff80_0000_0000_0000 == 0x5980_0000_0000_0000 {
         return decode_ffma(
             insn,
@@ -2303,7 +2303,7 @@ fn decode_alu_wide(insn: u64) -> Op {
         );
     }
 
-    // xmad — 16x16 multiply-accumulate, in each of its four operand forms.
+    // xmad, 16x16 multiply-accumulate, in each of its four operand forms.
     // Which operand is which moves between them, and so do `psl`, `mrg` and
     // the width of the select mode: the layouts are Eden's `XMAD_reg`,
     // `_rc`, `_cr` and `_imm`.
@@ -2353,7 +2353,7 @@ fn decode_alu_wide(insn: u64) -> Op {
         );
     }
     // The immediate form carries a **16-bit** `b` at 20..36 and multiplies by
-    // its low half always — there is no half selector to spend a bit on, so
+    // its low half always: there is no half selector to spend a bit on, so
     // bit 35 belongs to the immediate and not to `bh`. A 32-bit multiply by a
     // constant lowers to a pair of these that both multiply by the same `K`,
     // and reading the field 20 bits wide gave the second one `K | 0x10000`.
@@ -2372,7 +2372,7 @@ fn decode_alu_wide(insn: u64) -> Op {
         );
     }
 
-    // fset — the register-writing form of fsetp. The three operand forms
+    // fset, the register-writing form of fsetp. The three operand forms
     // share every other field, exactly as Eden's one `FSET` body serves its
     // `_reg`, `_cbuf` and `_imm` entries.
     if insn & 0xff00_0000_0000_0000 == 0x5800_0000_0000_0000
@@ -2406,10 +2406,10 @@ fn decode_alu_wide(insn: u64) -> Op {
         };
     }
 
-    // ipa — a[]-relative, non-indexed.
+    // ipa, a[]-relative, non-indexed.
     if insn & 0xff00_0040_0000_ff00 == 0xe000_0000_0000_ff00 {
         // The interpolation mode (bits 54..56): 0 pass, 1 multiply,
-        // 2 constant, 3 sc. Only `multiply` changes the value — it scales the
+        // 2 constant, 3 sc. Only `multiply` changes the value, it scales the
         // varying by the register, which is how a shader spends its
         // `mufu rcp` on the perspective divide. The other three fetch the
         // attribute and stop, so they decode to the same op with no
@@ -2436,7 +2436,7 @@ fn decode_alu_wide(insn: u64) -> Op {
         };
     }
 
-    // texs — the immediate-handle sample. Bit 49 is `nodep`, a scheduling
+    // texs: the immediate-handle sample. Bit 49 is `nodep`, a scheduling
     // hint with no effect on what the instruction computes, so it is ignored
     // rather than decoded: refusing it cost the Home Menu 156 of its textured
     // draws, every one of them an ordinary 2D sample.
@@ -2464,7 +2464,7 @@ fn decode_alu_wide(insn: u64) -> Op {
         return un;
     }
 
-    // tex — the general sample, whose operands are spread over the meta
+    // tex: the general sample, whose operands are spread over the meta
     // register rather than packed into `texs`'s two.
     if insn & 0xf800_0000_0000_0000 == 0xc000_0000_0000_0000 {
         return decode_tex(insn);
@@ -2567,9 +2567,9 @@ fn half_cbuf_or_imm(insn: u64, cbuf: bool) -> (Operand, HSwizzle) {
 ///
 /// Opcodes and field positions come from Eden's `maxwell.inc` and its
 /// `half_floating_point_*.cpp` translators. The forms differ in more than
-/// where the second operand comes from — a register form keeps `b`'s
+/// where the second operand comes from: a register form keeps `b`'s
 /// modifiers below bit 32 and a constant or immediate one puts them up at
-/// 52..57 — so each is written out rather than shared.
+/// 52..57, so each is written out rather than shared.
 ///
 /// Without these, "A Short Hike" lost 145 of its 295 draws, each to the first
 /// `hadd2` in its shader, and with them the two full-screen quads it
@@ -2640,7 +2640,7 @@ fn decode_half(insn: u64) -> Option<Op> {
             sat: field(insn, 52, 1) != 0,
         });
     }
-    // hadd2_32i — its own field positions, and the merge is fixed.
+    // hadd2_32i: its own field positions, and the merge is fixed.
     if top & 0xfe00 == 0x2c00 {
         return Some(Op::Hadd2 {
             dst,
@@ -2780,7 +2780,7 @@ fn decode_half(insn: u64) -> Option<Op> {
             sat: field(insn, 52, 1) != 0,
         });
     }
-    // hfma2_32i — the addend is the destination register, which is the only
+    // hfma2_32i: the addend is the destination register, which is the only
     // place the encoding has left to name it.
     if top & 0xfe00 == 0x2800 {
         return Some(Op::Hfma2 {
@@ -2898,8 +2898,8 @@ fn decode_ffma(insn: u64, b: Operand, c: Operand) -> Op {
     }
 }
 
-/// What one `xmad` form supplies. Everything else — the destination, `a`,
-/// its half and the two signedness bits — sits in the same place in all four.
+/// What one `xmad` form supplies. Everything else, the destination, `a`,
+/// its half and the two signedness bits: sits in the same place in all four.
 struct XmadForm {
     b: Operand,
     c: Operand,
@@ -2944,7 +2944,7 @@ fn decode_xmad(insn: u64, form: XmadForm) -> Op {
 /// `d000_1`/`d200_1`-shared 4-bit field.
 /// A `texs`'s encoding field: which texture shape it samples, and where its
 /// coordinates come from. The two operand registers are `REG_08` (`a`) and
-/// `REG_20` (`b`), but which axes they feed differs per encoding — a 2D
+/// `REG_20` (`b`), but which axes they feed differs per encoding, a 2D
 /// sample takes `(a, b)`, while one that also carries an explicit LOD takes
 /// `(a, a + 1)` and leaves `b` for the level.
 ///
@@ -2959,14 +2959,14 @@ fn texs_encoding(bits: u64, a: u8, b: u8) -> Option<(TexDim, [u8; 3], Option<u8>
         0 => (TexDim::T1d, [a, RZ, RZ], None),
         // 2D, 2D.LZ
         1 | 2 => (TexDim::T2d, [a, b, RZ], None),
-        // 2D.LL — `b` is the level, not a coordinate.
+        // 2D.LL: `b` is the level, not a coordinate.
         3 => (TexDim::T2d, [a, next, RZ], None),
-        // 2D.DC, 2D.LZ.DC — the reference is `b`.
+        // 2D.DC, 2D.LZ.DC: the reference is `b`.
         4 | 6 => (TexDim::T2d, [a, next, RZ], Some(b)),
-        // 2D.LL.DC — `b` is the level, so the reference is the register
+        // 2D.LL.DC: `b` is the level, so the reference is the register
         // after it.
         5 => (TexDim::T2d, [a, next, RZ], Some(after_b)),
-        // ARRAY_2D, ARRAY_2D.LZ — the layer comes from `a`, and the
+        // ARRAY_2D, ARRAY_2D.LZ: the layer comes from `a`, and the
         // coordinates from `a + 1` and `b`.
         7 | 8 => (TexDim::T2dArray, [next, b, a], None),
         // ARRAY_2D.LZ.DC
@@ -2988,7 +2988,7 @@ fn texs_encoding(bits: u64, a: u8, b: u8) -> Option<(TexDim, [u8; 3], Option<u8>
 /// (`rgb`/`rga`/`rba`/`gba`/`rgba`); with only one they are the one- and
 /// two-channel sets (`r`/`g`/`b`/`a`/`rg`/`ra`/`ga`/`ba`). Reading the
 /// four-destination row for a single-destination sample turns a one-channel
-/// fetch — which is what a glyph out of an alpha atlas is — into a
+/// fetch (which is what a glyph out of an alpha atlas is) into a
 /// three-channel one landing on registers the shader is still using.
 ///
 /// The last three selectors of the two-destination row are encodings this
@@ -3010,7 +3010,7 @@ fn decode_tex_mask(selector: u64, dst: u8, dst2: u8) -> Option<[bool; 4]> {
 }
 
 /// Decode `tex`, whose operands are read out of one register in a fixed order
-/// — level of detail, then texel offset, then shadow reference — each present
+/// (level of detail, then texel offset, then shadow reference) each present
 /// only if its own modifier bit is set. Getting that order wrong reads a
 /// coordinate as an offset, so it is written the way Eden's
 /// `texture_fetch.cpp` walks it.
@@ -3088,7 +3088,7 @@ pub enum TexsStore {
 /// rest to `dst2` and `dst2 + 1`. The pair is not one run of four.
 ///
 /// The distinction is invisible whenever `dst2 == dst + 2`, which is what
-/// the `tex.frag` fixture this decoder was first checked against does — so
+/// the `tex.frag` fixture this decoder was first checked against does, so
 /// the run-of-four reading survived until a shader with `dst = $r4,
 /// dst2 = $r2` ran under it. There channels 2 and 3 landed on `$r6`/`$r7`,
 /// and `$r6` was holding the `1/w` every later `ipa` multiplies by.
@@ -3113,7 +3113,7 @@ pub fn texs_destinations(dst: u8, dst2: u8, mask: [bool; 4], f16: bool) -> Vec<(
             })
             .collect();
     }
-    // Two channels to a register, `dst` then `dst2` — so four channels need
+    // Two channels to a register, `dst` then `dst2`, so four channels need
     // two registers rather than four, and the shader reads them back with the
     // half swizzles the `h*2` ops carry.
     enabled
@@ -3229,7 +3229,7 @@ mod tests {
     }
 
     /// `shfl` carries two operands that are each either a register or an
-    /// immediate, with a flag apiece saying which — and the immediates sit in
+    /// immediate, with a flag apiece saying which, and the immediates sit in
     /// different fields from the registers, so reading the wrong one gives a
     /// plausible lane number rather than an error.
     #[test]
@@ -3473,7 +3473,7 @@ mod tests {
     }
 
     /// Bits 52..54 are the sample mode, and Minecraft's fragment shaders
-    /// open with `ipa.centroid` — refusing it dropped every draw of the
+    /// open with `ipa.centroid`, refusing it dropped every draw of the
     /// title, first from the backend and then from the rasterizer it fell
     /// back to. `Offset` stays refused: it samples wherever a register
     /// points, which is a position neither renderer has.
@@ -3507,7 +3507,7 @@ mod tests {
             } => (mul, perspective),
             other => panic!("not an ipa: {other:?}"),
         };
-        // pass, multiply, constant, sc — the same instruction each time, with
+        // pass, multiply, constant, sc, the same instruction each time, with
         // $r3 in the multiplier field.
         assert_eq!(ipa(0xe003ff8800_37ff00), (None, false));
         assert_eq!(ipa(0xe043ff8800_37ff00), (Some(3), true));
@@ -3529,7 +3529,7 @@ mod tests {
 
     /// `f2f` between the two float widths. Unity's mediump arithmetic
     /// converts constantly, and A Short Hike carries ten distinct
-    /// half-to-half roundings — every one of them a `floor`, half the time
+    /// half-to-half roundings, every one of them a `floor`, half the time
     /// off the high half of the register.
     #[test]
     fn decodes_f2f_between_half_and_single() {
@@ -3649,12 +3649,12 @@ mod tests {
         };
         // The plain 2D sample it is otherwise identical to.
         assert_eq!(texs(1), (TexDim::T2d, [8, 20, RZ], None));
-        // 2d.dc, 2d.lz.dc — the reference is `b`.
+        // 2d.dc, 2d.lz.dc: the reference is `b`.
         assert_eq!(texs(4), (TexDim::T2d, [8, 9, RZ], Some(20)));
         assert_eq!(texs(6), (TexDim::T2d, [8, 9, RZ], Some(20)));
-        // 2d.ll.dc — `b` is the level, so the reference follows it.
+        // 2d.ll.dc: `b` is the level, so the reference follows it.
         assert_eq!(texs(5), (TexDim::T2d, [8, 9, RZ], Some(21)));
-        // array_2d.lz.dc — the layer still comes from `a`.
+        // array_2d.lz.dc: the layer still comes from `a`.
         assert_eq!(texs(9), (TexDim::T2dArray, [9, 20, 8], Some(21)));
 
         // A Short Hike's own three, all `2d.lz.dc`.
@@ -3679,7 +3679,7 @@ mod tests {
     fn an_exit_its_flow_test_can_never_satisfy_is_not_an_exit() {
         // `exit` carries a condition-code test beside its predicate, and both
         // have to hold. Persona 5 Royal's vertex shaders open with the middle
-        // word here — `EXIT.FCSM_TR`, which never fires — and every one of
+        // word here (`EXIT.FCSM_TR`, which never fires) and every one of
         // them writes `gl_Position` *after* it. Reading it as the end of the
         // program left every vertex at the default clip position.
         assert_eq!(op(0xe3000000_0007001c), Op::Nop); // FCSM_TR
@@ -3875,7 +3875,7 @@ mod tests {
             }
         );
         // `.LL` takes a level out of the meta register, so everything after
-        // it moves along one — reading the offset from the wrong register is
+        // it moves along one: reading the offset from the wrong register is
         // how a texel offset becomes a coordinate.
         let ll = 0xc07a0080a0770401 | 3 << 55;
         assert!(matches!(
@@ -3903,7 +3903,7 @@ mod tests {
     fn decodes_texs() {
         // tex.frag: envydis prints "texs $r2 $r0 $r0 $r1 0x1a4 t2d rgba", but
         // envydis's print order doesn't match this ISA's real dst/coord
-        // roles — confirmed empirically (see `interp`'s module docs) by
+        // roles: confirmed empirically (see `interp`'s module docs) by
         // running the decoded program against known texture/colour inputs
         // and checking the output against `texture.rgba * vColor.rgba`.
         // The destinations are REG_00 ($r0) and REG_28 ($r2), which take two
@@ -3981,7 +3981,7 @@ mod tests {
     #[test]
     fn a_one_destination_texs_reads_the_single_and_double_channel_masks() {
         // Selector 0 is `rgb` when both destinations are present and plain
-        // `r` when only one is — the case an alpha-atlas glyph fetch hits.
+        // `r` when only one is, the case an alpha-atlas glyph fetch hits.
         assert_eq!(decode_tex_mask(0, 0, 2), Some([true, true, true, false]));
         assert_eq!(decode_tex_mask(0, 0, RZ), Some([true, false, false, false]));
         assert_eq!(decode_tex_mask(3, 0, RZ), Some([false, false, false, true]));
@@ -4037,7 +4037,7 @@ mod tests {
             }
             other => panic!("expected xmad, got {other:?}"),
         }
-        // xmad.psl R1, R2.h1, 0x7, R0 — the same constant, one bit up.
+        // xmad.psl R1, R2.h1, 0x7, R0, the same constant, one bit up.
         let hi = asm(
             0x3600,
             &[
@@ -4146,7 +4146,7 @@ mod tests {
 
     #[test]
     fn decodes_source_modifiers_on_fadd() {
-        // fadd $r0, -|$r1|, $r2 — neg 48 / abs 46 on a, both clear on b.
+        // fadd $r0, -|$r1|, $r2: neg 48 / abs 46 on a, both clear on b.
         let raw = asm(
             0x5c58,
             &[(0, 8, 0), (8, 8, 1), (20, 8, 2), (48, 1, 1), (46, 1, 1)],
@@ -4170,7 +4170,7 @@ mod tests {
 
     #[test]
     fn decodes_isetp_and_its_predicate_destinations() {
-        // isetp.lt.and p0, pt, r1, r2, pt — cmp at 49, signed at 48,
+        // isetp.lt.and p0, pt, r1, r2, pt, cmp at 49, signed at 48,
         // destinations at [3,6) and [0,3), source predicate at [39,42).
         let raw = asm(
             0x5b60,
@@ -4210,7 +4210,7 @@ mod tests {
     #[test]
     fn decodes_the_reconvergence_ops() {
         // 0 + 8 + 0x18 is 0x20, which is a `sched` word rather than an
-        // instruction — so the target is the slot after it. See
+        // instruction, so the target is the slot after it. See
         // [`super::super::align_slot`].
         assert_eq!(
             decode_at(asm(0xe290, &[(20, 24, 0x18)]), 0).op,
@@ -4242,7 +4242,7 @@ mod tests {
     #[test]
     fn a_reconvergence_push_is_never_predicated() {
         // The bits every other instruction keeps its guard in belong to these
-        // three's branch target, and read as zero — which is `@p0`, false
+        // three's branch target, and read as zero, which is `@p0`, false
         // until something sets it. Decoded that way the push is skipped and
         // the `sync` that matched it finds an empty stack.
         for opcode in [0xe290u16, 0xe2a0, 0xe2b0] {
@@ -4299,7 +4299,7 @@ mod tests {
                 pred: None,
             }
         );
-        // mov r5, r6 — the byte-enable mask must be "all four".
+        // mov r5, r6: the byte-enable mask must be "all four".
         assert_eq!(
             op(asm(0x5c98, &[(0, 8, 5), (20, 8, 6), (39, 4, 0xf)])),
             Op::Mov {
@@ -4368,7 +4368,7 @@ mod tests {
     /// every operand form the group has except `hfma2`'s and the `32I`s.
     #[test]
     fn the_half_instructions_a_unity_shader_issues() {
-        // hadd2.f32 $r12 $r12 $r17 — the swizzles and the merge are all F32,
+        // hadd2.f32 $r12 $r12 $r17: the swizzles and the merge are all F32,
         // which is a plain float add issued on the half unit. 110 of the 145
         // skipped draws stopped on one of these.
         assert_eq!(
@@ -4402,7 +4402,7 @@ mod tests {
                 sat: false,
             }
         );
-        // hmul2.f32 $r4 $r5 c1[0xc] — the constant form keeps `b`'s
+        // hmul2.f32 $r4 $r5 c1[0xc]: the constant form keeps `b`'s
         // modifiers up at 52..57 rather than below 32.
         assert_eq!(
             op(0x7882800400370504),
@@ -4422,7 +4422,7 @@ mod tests {
                 sat: false,
             }
         );
-        // hadd2 $r0 -$r9 (1.0, 1.0) — a "one minus" through the immediate
+        // hadd2 $r0 -$r9 (1.0, 1.0), a "one minus" through the immediate
         // form, whose pair is two halves missing their low six mantissa bits.
         assert_eq!(
             op(0x7a02883c0f070900),
@@ -4442,7 +4442,7 @@ mod tests {
                 sat: false,
             }
         );
-        // hadd2 $r8.h0 -$rZ.h0_h0 c1[0x0] — the merging form, which keeps
+        // hadd2 $r8.h0 -$rZ.h0_h0 c1[0x0]: the merging form, which keeps
         // the half of $r8 it does not write.
         assert_eq!(
             op(0x7a8508040007ff08),
@@ -4462,7 +4462,7 @@ mod tests {
                 sat: false,
             }
         );
-        // hsetp2.eq.and $p0 $pT $rZ.h0_h0 c3[0x140] $pT — the two
+        // hsetp2.eq.and $p0 $pT $rZ.h0_h0 c3[0x140] $pT, the two
         // destinations are the two lanes, and the second is `PT`, which is
         // not writable.
         assert_eq!(
@@ -4489,7 +4489,7 @@ mod tests {
     }
 
     /// The forms no capture covers yet, assembled from the field positions
-    /// rather than observed — so a transcription slip in one shows up here
+    /// rather than observed, so a transcription slip in one shows up here
     /// rather than in a frame.
     #[test]
     fn every_half_operand_form_reaches_its_op() {

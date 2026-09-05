@@ -11,7 +11,7 @@ panic = "abort"
 # For driving the host examples. `release` builds one of them in 21 s of a
 # single core, because `codegen-units = 1` has nowhere to spread; thin LTO over
 # 16 units runs the same guest workload at the same speed in 8.6 s. Quote
-# timings from `release` anyway — see AGENTS.md.
+# timings from `release` anyway. See AGENTS.md.
 [profile.quick]
 inherits = "release"
 lto = "thin"
@@ -34,8 +34,8 @@ opt-level = 2
 opt-level = 2
 
 [workspace.lints.clippy]
-# This codebase spells out hardware encodings field by field — an instruction
-# word, a Maxwell method, an NCA header — and a field that happens to be zero
+# This codebase spells out hardware encodings field by field, an instruction
+# word, a Maxwell method, an NCA header, and a field that happens to be zero
 # is written out with the rest so the literal can be read against the
 # reference. `(0x360) | (0 << 13) | (0x55 << 16) | (4 << 29)` is one method
 # with four fields, not an expression with a redundant term, and grouping a

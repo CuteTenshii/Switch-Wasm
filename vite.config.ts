@@ -64,7 +64,7 @@ export default defineConfig({
       '@core': coreDir,
       // The `host_read` import, when the core is built with the `gpu`
       // feature. wasm-bindgen writes the import into its generated glue,
-      // which lives in cargo's target directory — a bare specifier is what
+      // which lives in cargo's target directory: a bare specifier is what
       // lets that glue name a file in `web/worker/` without a relative path
       // between two directories that have no reason to know about each other.
       '@host/files': fileURLToPath(

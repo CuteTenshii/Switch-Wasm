@@ -1,8 +1,8 @@
 //! Read a title's RomFS twice and check it said the same thing both times:
 //! `romfs_selftest <container> <prod.keys> [title.keys] [samples]`.
 //!
-//! A RomFS is served through a stack — `HostSource` → the NCA window →
-//! AES-CTR → the compression layer and its block cache — and every layer of
+//! A RomFS is served through a stack, `HostSource` → the NCA window →
+//! AES-CTR → the compression layer and its block cache, and every layer of
 //! it answers a *range*. Nothing verifies what comes out: the ExeFS is
 //! hash-checked against the NCA header, but full IVFC verification of a RomFS
 //! is not implemented (`nca.rs` says so), so a byte that decrypts or
@@ -10,7 +10,7 @@
 //! title behaving oddly hundreds of millions of instructions later, with
 //! nothing anywhere near the reader to say the bytes were wrong.
 //!
-//! There is no reference image to compare against — but a correct reader has
+//! There is no reference image to compare against, but a correct reader has
 //! a property that does not need one: **the bytes of a range do not depend on
 //! how the range was asked for**. Read it whole, read it in pieces, read the
 //! pieces backwards, read something far away in between, read it again: a
@@ -20,11 +20,11 @@
 //! whole test.
 //!
 //! Ranges are drawn where such a bug would show first: at each file's first
-//! and last bytes, and straddling the compression layer's block boundaries —
+//! and last bytes, and straddling the compression layer's block boundaries,
 //! `CACHED_BLOCKS` is 4, so a window a few blocks wide also makes the cache
 //! evict while the sample is still being read.
 //!
-//! `SEED=<n>` picks the sample set — a failing run names its seed, and that
+//! `SEED=<n>` picks the sample set: a failing run names its seed, and that
 //! seed reproduces it exactly. `WINDOW=<hex>` is how many bytes each sample
 //! compares (default 0x9000, a little over two 16 KiB blocks).
 //!
@@ -88,7 +88,7 @@ impl<S: ByteSource> ByteSource for Flaky<S> {
     }
 }
 
-/// One range to check, and why it was picked — a failure reports the reason,
+/// One range to check, and why it was picked, a failure reports the reason,
 /// because "the first byte of a file" and "across a block boundary" send you
 /// to different code.
 struct Sample {
@@ -255,7 +255,7 @@ fn main() {
             }
         };
         // Chunk sizes that put a boundary everywhere it can be: inside a
-        // machine word, either side of a page, and a whole page — plus the
+        // machine word, either side of a page, and a whole page, plus the
         // orders and the eviction that a stateful stack disagrees with itself
         // over.
         let far = (sample.at + image.len / 2) % image.len;

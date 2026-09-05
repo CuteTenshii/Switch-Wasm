@@ -1,4 +1,4 @@
-//! MAXWELL_DMA_COPY_A (class 0xB0B5) — the copy engine.
+//! MAXWELL_DMA_COPY_A (class 0xB0B5), the copy engine.
 //!
 //! Moves rectangles of memory between pitch and block-linear surfaces, with an
 //! optional component remap that also serves as the hardware's buffer-fill
@@ -38,7 +38,7 @@ const REMAP_NO_WRITE: u32 = 6;
 pub struct EngineCopy {
     pub regs: Registers,
     /// One source run in flight, kept between launches rather than allocated
-    /// per line — hbmenu's present copies 720 of them a frame.
+    /// per line, hbmenu's present copies 720 of them a frame.
     run: Vec<u8>,
 }
 
@@ -178,7 +178,7 @@ impl EngineCopy {
     /// A pitch row is contiguous to its end and a block-linear one in
     /// sixteens, which is what `run_at` reports.
     ///
-    /// An element is a byte here — that is what makes this the remap-off path.
+    /// An element is a byte here: that is what makes this the remap-off path.
     fn copy_runs(
         &mut self,
         ctx: &mut ExecCtx,
@@ -263,13 +263,13 @@ struct SurfaceWalk {
     /// than offsets its caller has to rebase.
     base: u64,
     /// The surface's row length in bytes. `SetDstWidth`/`SetSrcWidth` count
-    /// **elements**, so this is that width scaled by the element size — the
+    /// **elements**, so this is that width scaled by the element size, the
     /// remap makes an element as wide as a pixel, and a block-linear
     /// surface's row length in *bytes* is what decides how many GOBs a row
     /// spans and therefore where the next block row starts.
     ///
     /// Taking the register as bytes worked for every copy with the remap
-    /// off, where an element is one byte and the two readings coincide —
+    /// off, where an element is one byte and the two readings coincide,
     /// which is how deko3d drives it. JKSV's Mesa uploads a 256x256 RGBA
     /// icon with the remap on: 256 elements is 1024 bytes, and calling it
     /// 256 made the row four GOBs wide instead of sixteen, shredding the

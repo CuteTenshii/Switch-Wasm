@@ -1,6 +1,6 @@
 //! Executing decoded Maxwell instructions.
 //!
-//! [`Invocation`] is one shader invocation — one vertex or one fragment —
+//! [`Invocation`] is one shader invocation, one vertex or one fragment,
 //! run to completion on a scalar machine: 255 general-purpose 32-bit
 //! registers, seven predicate registers, a program counter, and the
 //! reconvergence stack `ssy`/`sync` and `pbk`/`brk` push onto.
@@ -13,7 +13,7 @@
 //!
 //! The register file is untyped, exactly as on hardware: a register holds 32
 //! bits and the instruction decides whether they are a float, a signed
-//! integer or a bit pattern. That matters — a shader routinely computes an
+//! integer or a bit pattern. That matters, a shader routinely computes an
 //! address with integer ops in the same registers it later loads floats
 //! into.
 //!
@@ -49,7 +49,7 @@ fn fault(message: String) -> Box<Error> {
 }
 
 /// Resolves a `cN[offset]` operand to its raw 32 bits. `bank` is whatever the
-/// ISA's `Operand::Const` carries — for real programs that's a constant-buffer
+/// ISA's `Operand::Const` carries, for real programs that's a constant-buffer
 /// *bind slot* (`Bind[]`'s index, not a raw GPU address), so a real source
 /// still needs its own way to turn that into bytes; see [`MemoryConstants`].
 /// Reads are fallible because a real one touches guest memory.
@@ -64,13 +64,13 @@ impl ConstantSource for HashMap<(u8, u16), f32> {
 }
 
 /// Reads `cN[offset]` straight out of GPU memory. `bindings` resolves a bank
-/// index to the `(address, size)` a real constant buffer was bound to —
+/// index to the `(address, size)` a real constant buffer was bound to,
 /// `Engine3D::bound_constbuf` for the real integration, anything else for
-/// tests — so this module stays decoupled from `engine::threed`.
+/// tests, so this module stays decoupled from `engine::threed`.
 pub struct MemoryConstants<'a, 'b> {
     pub ctx: &'a ExecCtx<'b>,
     pub bindings: &'a dyn Fn(u8) -> Option<(u64, u32)>,
-    /// Values already read, shared across the draw — see [`ConstCache`].
+    /// Values already read, shared across the draw. See [`ConstCache`].
     pub cache: &'a std::cell::RefCell<ConstCache>,
 }
 
@@ -80,8 +80,8 @@ const CONST_CACHE_SLOTS: usize = 512;
 
 /// The constants a draw has already read.
 ///
-/// A constant buffer cannot change while a draw is running — the GPU processes
-/// methods in order, and a draw is one method — so every pixel of a draw reads
+/// A constant buffer cannot change while a draw is running, the GPU processes
+/// methods in order, and a draw is one method, so every pixel of a draw reads
 /// the same handful of values out of the same buffers, and each read otherwise
 /// costs a bank lookup, a bounds check, a GPU address translation and a guest
 /// memory access. Shading a full-screen quad paid that 921 600 times per
@@ -141,7 +141,7 @@ impl ConstantSource for MemoryConstants<'_, '_> {
 ///
 /// A Maxwell shader addresses global memory by full 64-bit GPU virtual
 /// address, which it builds itself out of a constant-buffer pair with
-/// `iadd.cc`/`iadd.x` — so there is nothing to bind and no window to set up.
+/// `iadd.cc`/`iadd.x`, so there is nothing to bind and no window to set up.
 /// Translating the address is the whole implementation, and it is the same
 /// translation every other GPU read goes through.
 pub struct MemoryGlobal<'a, 'b> {
@@ -156,11 +156,11 @@ impl GlobalMemory for MemoryGlobal<'_, '_> {
 
 /// Resolves a `texs` sample. `handle` is the packed `imageId | samplerId <<
 /// 20` value a real one reads out of the driver's reserved constant bank
-/// (see `gpu::texture`'s module docs) — [`Invocation::execute`] does that
+/// (see `gpu::texture`'s module docs), [`Invocation::execute`] does that
 /// read itself via [`ConstantSource`] before calling this, so this trait only
 /// needs to turn a resolved handle plus UVs into a colour.
 pub trait TextureSource {
-    /// Sample `handle` at `(u, v)` of array layer `layer` — 0 for everything
+    /// Sample `handle` at `(u, v)` of array layer `layer`, 0 for everything
     /// that is not a 2D array.
     fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> ShaderResult<[f32; 4]>;
 
@@ -180,7 +180,7 @@ pub trait TextureSource {
         )))
     }
 
-    /// One texel of `handle` in normalized coordinates — `(1/width,
+    /// One texel of `handle` in normalized coordinates, `(1/width,
     /// 1/height)`.
     ///
     /// A `tex.aoffi`'s offset is in texels and this sampler takes normalized
@@ -211,7 +211,7 @@ pub trait TextureSource {
     }
 }
 
-/// No texture backend at all — every `texs` is an error. Correct for vertex
+/// No texture backend at all: every `texs` is an error. Correct for vertex
 /// shading and for tests that don't exercise `texs`.
 pub struct NoTextures;
 
@@ -234,7 +234,7 @@ pub struct MemoryTextures<'a, 'b> {
     /// that decode to the same thing for every pixel of a draw, so parsing
     /// them per sample was pure repetition: a full-screen textured quad paid
     /// for it 921 600 times. The cache lives in the caller so that this
-    /// struct can still be rebuilt per fragment — it borrows `ctx`, which
+    /// struct can still be rebuilt per fragment, it borrows `ctx`, which
     /// the pixel loop needs mutably between shading calls.
     pub descriptors: &'a std::cell::RefCell<crate::IdMap<u32, crate::gpu::texture::Descriptors>>,
     /// Decoded compressed blocks, shared by every fragment of the draw for the
@@ -330,7 +330,7 @@ impl TextureSource for MemoryTextures<'_, '_> {
 /// without one gets an error naming the address rather than a silent zero.
 ///
 /// Writes take `&self` because a compute dispatch shares one of these across
-/// every thread of the grid while the interpreter holds it — the backend owns
+/// every thread of the grid while the interpreter holds it, the backend owns
 /// whatever interior mutability that needs. They default to an error so that
 /// a read-only source (the rasterizer's) stays a one-method implementation.
 pub trait GlobalMemory {
@@ -366,7 +366,7 @@ pub type SharedMemory = std::cell::RefCell<Vec<u8>>;
 /// gave the registers meaning.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpecialRegs {
-    /// This invocation's lane within its warp — which of a fragment quad's
+    /// This invocation's lane within its warp, which of a fragment quad's
     /// four pixels it is shading, and the one thing a warp shuffle is
     /// relative to. Zero for anything run on its own, which is what every
     /// caller but the quad shader and a cooperative dispatch does.
@@ -392,7 +392,7 @@ impl SpecialRegs {
     const PACKED: [u8; 2] = [0x20, 0x28];
 
     /// The value of special register `sr`, or `None` if this doesn't model it
-    /// — which the caller answers with zero, as every one of them was
+    ///, which the caller answers with zero, as every one of them was
     /// answered before.
     pub fn read(&self, sr: u8) -> Option<u32> {
         Some(match sr {
@@ -435,7 +435,7 @@ pub struct Env<'a> {
     pub shared: Option<&'a SharedMemory>,
     pub special: SpecialRegs,
     /// Which constant bank a `texs`'s immediate indexes for its texture
-    /// handle — `TexCbIndex`, which the driver programs (see
+    /// handle: `TexCbIndex`, which the driver programs (see
     /// [`crate::gpu::engine::threed::Engine3D::tex_cb_index`]).
     pub tex_cb_index: u8,
 }
@@ -466,16 +466,16 @@ impl<'a> Env<'a> {
 
 /// Per-vertex/per-fragment machine state.
 #[derive(Debug)]
-/// The `a[]` attribute space — a shader's interpolated inputs on the way in,
-/// its outputs on the way out — addressed by the byte offset the ISA uses
+/// The `a[]` attribute space, a shader's interpolated inputs on the way in,
+/// its outputs on the way out: addressed by the byte offset the ISA uses
 /// (`a[0x7c]` is offset `0x7c`).
 ///
 /// Flat rather than a map, because a fragment shader runs *once per covered
 /// pixel*: the `HashMap<u16, f32>` this replaces cost a hash per component
 /// plus a heap allocation on each invocation's first insert, and those
 /// together were most of the time in a shaded pixel. `ld`/`st`/`ipa` address
-/// `a[]` with a ten-bit field, so the whole space is `0x000..0x400` — 256
-/// words — and an offset past that (only reachable by adding an indexing
+/// `a[]` with a ten-bit field, so the whole space is `0x000..0x400`, 256
+/// words, and an offset past that (only reachable by adding an indexing
 /// register) is outside attribute space entirely: it reads zero and a write
 /// to it is dropped.
 ///
@@ -493,7 +493,7 @@ impl Attributes {
     /// `a[]` is a ten-bit byte address, one `f32` per word.
     const WORDS: usize = 0x400 / 4;
 
-    /// The value at `offset`, or 0.0 if nothing wrote it — what a read of an
+    /// The value at `offset`, or 0.0 if nothing wrote it: what a read of an
     /// absent key gave before.
     pub fn get(&self, offset: u16) -> f32 {
         self.written(offset).unwrap_or(0.0)
@@ -517,7 +517,7 @@ impl Attributes {
         self.written[word / 64] |= 1 << (word % 64);
     }
 
-    /// Forget everything. Only the mask has to be cleared — a stale word is
+    /// Forget everything. Only the mask has to be cleared: a stale word is
     /// unreachable once it reads as unwritten.
     pub fn clear(&mut self) {
         self.written = [0; Self::WORDS / 64];
@@ -564,7 +564,7 @@ pub struct Invocation {
     /// Texture results not yet landed; see `run_texs`.
     pending: Vec<(usize, u8, u32)>,
     /// The shuffle this invocation is suspended on, waiting for the rest of
-    /// its warp to reach one too — see [`resolve_shuffles`].
+    /// its warp to reach one too. See [`resolve_shuffles`].
     shuffle: Option<Shuffle>,
 }
 
@@ -700,7 +700,7 @@ impl Invocation {
     /// Execute `program` from its entry point until it exits.
     ///
     /// A `bar` has no meaning outside a CTA, so one reached here is an error
-    /// rather than a suspension — see [`Invocation::resume`], which is what a
+    /// rather than a suspension. See [`Invocation::resume`], which is what a
     /// compute dispatch drives instead.
     pub fn execute(&mut self, program: &Compiled, env: &Env) -> Result<()> {
         self.begin();
@@ -774,7 +774,7 @@ impl Invocation {
             }
             // Guarded: a texture result is pending for a handful of steps out
             // of a program, and `Vec::retain` is a real call even over an
-            // empty vector — one per instruction, per covered pixel.
+            // empty vector, one per instruction, per covered pixel.
             if !pending.is_empty() {
                 pending.retain(|&(due, reg, val)| {
                     if due == pc {
@@ -844,7 +844,7 @@ impl Invocation {
                 // Like a barrier, and for the same reason: the pc moves
                 // past it before suspending, so the resume lands after the
                 // shuffle rather than on it. The deferred texture writes stay
-                // deferred — nothing has jumped, so where they land is still
+                // deferred: nothing has jumped, so where they land is still
                 // the place the lowering found.
                 Op::Shfl {
                     dst,
@@ -985,7 +985,7 @@ impl Invocation {
                 scale,
             } => {
                 // The pre-scale multiplies the *first* operand, before the
-                // multiply proper — a constant halving or doubling folded into
+                // multiply proper, a constant halving or doubling folded into
                 // a multiply the shader was doing anyway.
                 let x = flush(self.reg_f32(a), ftz) * scale.factor();
                 let y = bm.apply(flush(self.operand_f32(b, env)?, ftz));
@@ -1094,7 +1094,7 @@ impl Invocation {
             }
 
             // ---- half-precision ----
-            // Both lanes are computed in f32 and rounded once, at the merge —
+            // Both lanes are computed in f32 and rounded once, at the merge,
             // which is what a half instruction does: it rounds its result,
             // not its arithmetic. So [`HMerge::F32`], whose result is a float,
             // rounds nowhere, even where one of its sources was a half.
@@ -1258,7 +1258,7 @@ impl Invocation {
                 let y = ineg_if(self.operand(b, env)?, bneg);
                 // Widened, so the carry out is the bit that falls off the top.
                 // A negated operand is already two's-complement here, so a
-                // subtraction carries exactly when it does not borrow — which
+                // subtraction carries exactly when it does not borrow, which
                 // is the convention `iadd.x` expects on the high half.
                 let sum = u64::from(x) + u64::from(y) + u64::from(cin && self.carry);
                 self.set_reg(dst, sum as u32);
@@ -1962,7 +1962,7 @@ impl Invocation {
     /// before the fetch. A synchronous write at the `texs` itself breaks
     /// that (see `gpu::texture`'s module docs for how this was caught
     /// against real content), so each destination's value is queued and
-    /// applied immediately before the instruction that first reads it —
+    /// applied immediately before the instruction that first reads it,
     /// or flushed at the next branch or at `exit`, whichever comes first.
     fn run_texs(
         &mut self,
@@ -1983,7 +1983,7 @@ impl Invocation {
             unreachable!("run_texs called with {op:?}");
         };
         // The bindless handle lives in the driver's reserved constant bank,
-        // indexed by the shader's own immediate — see `gpu::texture`'s
+        // indexed by the shader's own immediate. See `gpu::texture`'s
         // module docs and `texture::handle_offset`.
         let handle = env
             .consts
@@ -2018,9 +2018,9 @@ impl Invocation {
     }
 
     /// The general `tex`. It differs from [`Self::run_texs`] in where its
-    /// operands sit — the level of detail, the texel offset and the shadow
+    /// operands sit, the level of detail, the texel offset and the shadow
     /// reference come out of one register in that order, and an array's layer
-    /// sits *before* the coordinates rather than after them — not in what it
+    /// sits *before* the coordinates rather than after them, not in what it
     /// samples.
     fn run_tex(
         &mut self,
@@ -2364,7 +2364,7 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
     }
 }
 
-/// `fswzadd`'s two multipliers per two-bit swizzle code — the constant
+/// `fswzadd`'s two multipliers per two-bit swizzle code, the constant
 /// tables Eden's GLSL backend emits as `FSWZ_A`/`FSWZ_B`
 /// (`glsl_emit_context.cpp`).
 const FSWZ_SIGNS: [(f32, f32); 4] = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (0.0, -1.0)];
@@ -2382,8 +2382,8 @@ pub const WARP_LANES: usize = 32;
 /// is an exchange between lanes of one instruction, so no lane may see
 /// another's result.
 ///
-/// A lane the clamp allows but this warp does not hold — a quad is four lanes
-/// of a hardware warp's thirty-two — reads as the requesting lane's own
+/// A lane the clamp allows but this warp does not hold: a quad is four lanes
+/// of a hardware warp's thirty-two: reads as the requesting lane's own
 /// value, which is what an inactive lane gives on hardware. The predicate
 /// still reports what the clamp said, since that is a property of the lane
 /// numbers rather than of who is running.
@@ -2479,7 +2479,7 @@ const SMALLEST_NORMAL_HALF: f32 = 6.103_515_6e-5;
 
 /// One source of a half-precision op: its two lanes, flushed and modified.
 ///
-/// The modifier comes second, exactly as it does for `fadd` — `abs` of a
+/// The modifier comes second, exactly as it does for `fadd`, `abs` of a
 /// flushed subnormal is a flushed subnormal, not a subnormal made positive.
 fn half_source(bits: u32, m: FMod, sw: HSwizzle, ftz: bool) -> [f32; 2] {
     let mut lanes = half_lanes(bits, sw);
@@ -3271,7 +3271,7 @@ mod tests {
             Op::Exit,
         ]);
 
-        // (-a - b), (a - b), (-a + b), (0 - b) — the four codes in order.
+        // (-a - b), (a - b), (-a + b), (0 - b), the four codes in order.
         for (lane, expected) in [-4.0f32, 2.0, -2.0, -1.0].into_iter().enumerate() {
             let mut env = Env::new(&consts, &NoTextures);
             env.special.lane = lane as u32;
@@ -3330,7 +3330,7 @@ mod tests {
     #[test]
     fn a_hand_written_alu_program_produces_the_expected_registers() {
         // r2 = r0 * r1; r3 = r2 * r1 + r0. Register-register forms only, so
-        // no constant source is exercised — this is purely the interpreter's
+        // no constant source is exercised: this is purely the interpreter's
         // execute loop, independent of the decoder and of any real shader.
         let program = prog(&[
             Op::Fmul {
@@ -3423,7 +3423,7 @@ mod tests {
 
     #[test]
     fn isetp_then_a_predicated_branch_takes_the_right_path() {
-        // if (r0 < r1) r2 = 10 else r2 = 20 — the shape every `if` in a real
+        // if (r0 < r1) r2 = 10 else r2 = 20, the shape every `if` in a real
         // shader compiles to, and the whole reason the decoder had to stop
         // treating a predicated instruction as unsupported.
         let program = prog_at(&[
@@ -3737,7 +3737,7 @@ mod tests {
         let mut consts = HashMap::new();
         let handle = 7u32 | (2u32 << 20); // imageId=7, samplerId=2
                                           // The immediate 0x20 is a dword index, so the handle is 0x80 bytes in
-                                          // — putting it at 0x20 instead is what made every draw in a page of
+                                          //: putting it at 0x20 instead is what made every draw in a page of
                                           // text resolve to the same texture.
         consts.insert(
             (crate::gpu::texture::NOUVEAU_TEX_CB_INDEX, 0x80),
@@ -3768,7 +3768,7 @@ mod tests {
 
     #[test]
     fn solid_color_fragment_shader_reproduces_the_perspective_corrected_color() {
-        // solid.frag: `oColor = vColor;` — a fixture from the same envydis
+        // solid.frag: `oColor = vColor;`, a fixture from the same envydis
         // capture `isa`'s module docs cite, run end to end through the real
         // decoder. The rasterizer normally supplies attr_in already divided
         // by clip-w plus 1/w itself at a[0x7c]; we inject that directly here
@@ -3797,7 +3797,7 @@ mod tests {
 
     #[test]
     fn mvp_vertex_shader_transforms_a_known_position_via_a_fake_constant_buffer() {
-        // mvp.vert: `gl_Position = uMVP * aPosition; vColor = aColor;` — the
+        // mvp.vert: `gl_Position = uMVP * aPosition; vColor = aColor;`, the
         // Stage 0 fixture cited in `isa`'s module docs, run end to end
         // through the real decoder with a hand-picked matrix standing in for
         // a real bound constant buffer (real GPU-memory wiring is
@@ -3951,7 +3951,7 @@ mod tests {
         // tex.frag in full (the same real capture `isa`'s module docs and
         // `decodes_texs`'s test cite): `oColor = texture(uTex, vTexCoord) *
         // vColor;`. This is also the test that caught `texs`'s real
-        // dst/coordinate roles (see `isa::decodes_texs`'s doc comment) —
+        // dst/coordinate roles (see `isa::decodes_texs`'s doc comment),
         // with a solid vertex colour of (1,1,1,1) the expected output is
         // exactly the sampled texture colour, letting a wrong register
         // mapping surface immediately as a wrong result instead of a
@@ -4183,7 +4183,7 @@ mod tests {
         assert_eq!(lanes(inv.reg(0)), [1.5, -2.0]);
     }
 
-    /// Every swizzle but `H1_H0` reads one lane twice — and `F32` reads the
+    /// Every swizzle but `H1_H0` reads one lane twice, and `F32` reads the
     /// register as a single float rather than as a pair at all, which is how
     /// a shader multiplies a `half2` by a `float`.
     #[test]
@@ -4203,7 +4203,7 @@ mod tests {
         assert_eq!(lanes(inv.reg(5)), [11.0, 12.0]);
     }
 
-    /// `hadd2.f32` — swizzles and merge all `F32` — is a plain float add
+    /// `hadd2.f32` (swizzles and merge all `F32`) is a plain float add
     /// issued on the half unit, and it is what most of "A Short Hike"'s
     /// skipped draws stopped on.
     #[test]
@@ -4288,7 +4288,7 @@ mod tests {
         assert_eq!(lanes(inv.reg(0)), [9.0, 14.0]);
     }
 
-    /// `.fmz` is D3D9's rule that anything times zero is zero — infinity and
+    /// `.fmz` is D3D9's rule that anything times zero is zero, infinity and
     /// NaN included, which an ordinary multiply answers with a NaN.
     #[test]
     fn fmz_makes_anything_times_zero_zero() {
@@ -4312,7 +4312,7 @@ mod tests {
     }
 
     /// `hsetp2` writes one predicate per lane, unlike `fsetp`'s result and
-    /// its inverse — until `.h_and`, which ands the lanes and then does write
+    /// its inverse, until `.h_and`, which ands the lanes and then does write
     /// the inverse.
     #[test]
     fn hsetp2_writes_one_predicate_per_lane_until_h_and() {
@@ -4419,7 +4419,7 @@ mod tests {
     }
 
     /// A half instruction's `.ftz` flushes at the *half* threshold, four
-    /// orders of magnitude above an f32's — but only for lanes that are
+    /// orders of magnitude above an f32's, but only for lanes that are
     /// halves.
     #[test]
     fn ftz_flushes_a_subnormal_half_but_not_a_small_float() {

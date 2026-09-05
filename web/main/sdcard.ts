@@ -1,4 +1,4 @@
-/* ---------- persistent SD card ----------
+/* persistent SD card
 
    The emulated SD card lives in the session's memory, so without this nothing
    the guest writes survives a reload - and a save manager that cannot keep a

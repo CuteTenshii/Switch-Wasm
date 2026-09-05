@@ -11,7 +11,7 @@ pub(crate) fn elem_mask(bits: u32) -> u128 {
 /// The `esize`-bit lane at `index` of a 128-bit vector register.
 ///
 /// wasm has no 128-bit integer, so `v >> (esize * index)` with a distance only
-/// known at run time becomes a call to `__lshrti3` that V8 cannot inline —
+/// known at run time becomes a call to `__lshrti3` that V8 cannot inline,
 /// visible as 1% of a browser frame. Every A64 lane width divides 64 and every
 /// lane is aligned to its own width, so no lane straddles the halfway point
 /// and splitting the register into two halves keeps every shift 64-bit. The
@@ -76,7 +76,7 @@ pub(crate) fn fpcr_rounding(fpcr: u32) -> Rounding {
     }
 }
 
-/// Round a float to an integral float value in the given mode — FRINTX and
+/// Round a float to an integral float value in the given mode, FRINTX and
 /// FRINTI, which take their mode from FPCR rather than from the opcode.
 pub(crate) fn round_to_integral(v: f64, r: Rounding) -> f64 {
     if !v.is_finite() {
@@ -359,7 +359,7 @@ pub(crate) fn shift_reg(v: u64, st: u32, sa: u32, sf: bool) -> u64 {
         }
         2 => {
             // ASR. The operand was masked to its own width above, so it has to
-            // be sign-extended from *that* width before shifting — shifting the
+            // be sign-extended from *that* width before shifting, shifting the
             // masked value as a positive i64 turned `asr w0, w0, w1` on a
             // negative word into a small positive number, which is how
             // libjpeg-turbo's HUFF_EXTEND lost the sign of every DC difference.
@@ -554,7 +554,7 @@ fn bitfield_value(opc: u32, val: u64, cur: u64, immr: u32, imms: u32, sf: bool) 
                 }
             }
         }
-        // BFM — merges Rn into the ORIGINAL Rd (BFI / BFXIL). The old decoder
+        // BFM, merges Rn into the ORIGINAL Rd (BFI / BFXIL). The old decoder
         // used `cur = val` (Rn) and never read the destination register, so
         // `bfi` zeroed the bits it was meant to preserve. libtransistor's
         // squashfs `swab_super` relies on this.

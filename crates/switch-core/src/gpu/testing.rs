@@ -2,14 +2,14 @@
 //!
 //! The software rasterizer is the reference every other path must agree with,
 //! and agreeing is something only a *comparison* establishes. That needs both
-//! renderers driven over the same [`Engine3D`] — which lives here rather than
+//! renderers driven over the same [`Engine3D`], which lives here rather than
 //! in `raster`'s own test module, because `switch-gpu` is a separate crate and
 //! cannot reach into one. The same reason `ipc::testing` exists.
 //!
 //! It is the smallest complete draw: a 16x8 pitch-linear RGBA8 target, two
 //! real shaders decoded from captured SASS, and a vertex array of three
-//! positions and three colours. Everything a test varies — the multisample
-//! mode, the sample mask, the depth state — it varies by writing the register
+//! positions and three colours. Everything a test varies, the multisample
+//! mode, the sample mask, the depth state, it varies by writing the register
 //! the guest would have written.
 
 use crate::gpu::engine::threed::{DrawCall, Engine3D};
@@ -35,12 +35,12 @@ pub fn block(sched: (u32, u32), a: (u32, u32), b: (u32, u32), c: (u32, u32)) -> 
     out
 }
 
-/// `gl_Position = aPosition; vColor = aColor;` — composed from the same real,
+/// `gl_Position = aPosition; vColor = aColor;`, composed from the same real,
 /// oracle-verified `ld`/`st` b128 attribute-space words `mvp.vert`'s fixture
 /// uses (see `isa`'s module docs), so no bit-level guessing is needed for a
 /// passthrough.
 pub fn passthrough_vertex_shader() -> Vec<u8> {
-    // Sched words are placeholders reused from mvp.vert's real capture —
+    // Sched words are placeholders reused from mvp.vert's real capture,
     // never all-zero, since `decode_program_from_memory` treats an all-zero
     // first word as "this binary has a Mesa header".
     let mut bytes = block(
@@ -58,7 +58,7 @@ pub fn passthrough_vertex_shader() -> Vec<u8> {
     bytes
 }
 
-/// `oColor = vColor;` — the same real capture `isa`'s module docs and
+/// `oColor = vColor;`, the same real capture `isa`'s module docs and
 /// `shader::interp`'s tests use.
 pub fn solid_fragment_shader() -> Vec<u8> {
     let mut bytes = block(
@@ -88,7 +88,7 @@ pub fn solid_fragment_shader() -> Vec<u8> {
 /// differs in the low bit and a subtract.
 ///
 /// The result lands in `r0`, the neighbour's own value stays in `r1`, and
-/// `r3` is still the `w` the interpolation needed — so the colour written is
+/// `r3` is still the `w` the interpolation needed, so the colour written is
 /// `(dFdx, neighbour, 0, 1)`.
 pub fn derivative_fragment_shader() -> Vec<u8> {
     let mut bytes = block(
@@ -158,7 +158,7 @@ pub const TARGET_WIDTH: u32 = 16;
 pub const TARGET_HEIGHT: u32 = 8;
 
 impl Harness {
-    /// The 16x8 RGBA8 target, both shaders, and a three-vertex array — with
+    /// The 16x8 RGBA8 target, both shaders, and a three-vertex array, with
     /// nothing drawn yet.
     pub fn new() -> Harness {
         Harness::with_fragment_shader(solid_fragment_shader())
@@ -366,8 +366,8 @@ impl Harness {
     /// Move the colour attribute onto vertex array 1, stepped once per
     /// instance, and put `colours[instance]` in it.
     ///
-    /// An instanced array is what the upload path reads a single element of —
-    /// the one this instance reaches — so a backend has to bind that element
+    /// An instanced array is what the upload path reads a single element of,
+    /// the one this instance reaches, so a backend has to bind that element
     /// as though every instance read it.
     pub fn instanced_colour(&mut self, instance: u32, colours: &[[f32; 4]]) {
         let addr = self.base + 0x800;

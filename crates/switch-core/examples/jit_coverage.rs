@@ -13,20 +13,20 @@
 //! This is what `examples/bench.rs` was for, and it answered the question the
 //! wrong way round. It ran sixteen copies of one encoding in a loop, timed it
 //! on the host, and called the class untranslated when the two engines came
-//! out "within noise of each other" — inferring an exact, static property of
+//! out "within noise of each other", inferring an exact, static property of
 //! the decoder from a wall-clock measurement on a machine this emulator does
 //! not run on. [`switch_core::cpu::translates`] answers it directly, and
 //! weighting by a real frame's instruction mix says which of the gaps is worth
 //! anything.
 //!
 //! Counted per instruction, so this half necessarily runs the interpreter. The
-//! mix does not depend on which engine produced it — `examples/jit_difftest.rs`
+//! mix does not depend on which engine produced it, `examples/jit_difftest.rs`
 //! is the check that the two execute the same instructions. It measures the
 //! same property the `interpreted` counter does, over one steady frame rather
 //! than over whatever window that run was given, so the two shares only match
 //! when the windows do.
 //!
-//! The target is a homebrew `.nro` or a retail container — an `.nsp`, an
+//! The target is a homebrew `.nro` or a retail container, an `.nsp`, an
 //! `.xci` or a bare Program `.nca`, which needs its keys after it. An NRO is
 //! not the workload a retail title is, so a ranking taken from one does not
 //! transfer.

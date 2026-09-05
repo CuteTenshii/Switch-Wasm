@@ -9,14 +9,14 @@
 //!
 //! ```text
 //! + 0x0000   L1 node: u32 index, u32 count, u64 end offset, then `count`
-//!            u64 offsets — one per entry set, or one per L2 node when there
+//!            u64 offsets: one per entry set, or one per L2 node when there
 //!            are more entry sets than a node has room for offsets
 //! then       one node per entry set: the same header, then `count` entries
 //! ```
 //!
 //! Only the entry sets are read. The index nodes exist to find one entry set
 //! without holding the whole table, which is exactly what holding the whole
-//! table makes unnecessary — a retail table is a couple of megabytes against
+//! table makes unnecessary: a retail table is a couple of megabytes against
 //! a container of gigabytes, and a binary search over it costs less than
 //! walking a tree per read.
 
@@ -27,7 +27,7 @@ use crate::Error;
 pub(crate) const NODE_HEADER_SIZE: u64 = 0x10;
 
 /// The most table any of this will read in. Echoes of Wisdom's compression
-/// table — the largest in any container to hand — is 2.3 MiB over 98,846
+/// table (the largest in any container to hand) is 2.3 MiB over 98,846
 /// entries; this only exists so a corrupt header cannot ask the browser for
 /// an allocation it has no way to make.
 pub(crate) const MAX_TABLE: u64 = 64 << 20;

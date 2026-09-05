@@ -8,7 +8,7 @@
 //!
 //! Coverage is per *sample* and shading is per *pixel*, which is what makes
 //! this multisampling rather than rendering the whole frame at the sample
-//! grid's resolution — see [`crate::gpu::surface::SampleGrid`] for how a
+//! grid's resolution. See [`crate::gpu::surface::SampleGrid`] for how a
 //! sample becomes a texel. The sample mask and alpha-to-coverage narrow that
 //! coverage; `MultisampleCoverageToColor` and the target-independent
 //! rasterization `SetMultisampleRasterEnable` turns on are not implemented,
@@ -127,7 +127,7 @@ pub struct ScreenVertex {
     pub y: f32,
 }
 
-/// Inclusive-exclusive pixel bounds: `[x0, x1) x [y0, y1)` — a resolved
+/// Inclusive-exclusive pixel bounds: `[x0, x1) x [y0, y1)`, a resolved
 /// viewport/scissor intersection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bounds {
@@ -141,7 +141,7 @@ pub struct Bounds {
 /// top-left fill rule: a pixel's center is covered if it's strictly inside,
 /// or lies exactly on a "top" or "left" edge. That tie-break is what keeps
 /// two triangles sharing an edge from double-covering or gapping the pixels
-/// along it. No fragment shading or depth test yet — this is coverage only.
+/// along it. No fragment shading or depth test yet: this is coverage only.
 pub fn rasterize_triangle(
     v0: ScreenVertex,
     v1: ScreenVertex,
@@ -156,7 +156,7 @@ pub fn rasterize_triangle(
 
 /// Like [`rasterize_triangle`], but also returns each covered pixel's
 /// barycentric weights (`w0, w1, w2`, summing to 1, one per vertex). These
-/// are screen-space-linear, not perspective-corrected — the shader's own
+/// are screen-space-linear, not perspective-corrected, the shader's own
 /// `ipa`/`mufu rcp` sequence does that correction (see `isa`'s module
 /// docs), so the caller feeds these straight in as the linearly-interpolated
 /// `attr/w` and `1/w` values a real Maxwell rasterizer would hand it.
@@ -185,7 +185,7 @@ pub fn rasterize_triangle_weighted(
 ///
 /// Hardware dithers the mask so that neighbouring pixels of equal alpha keep
 /// *different* samples. Keeping a fixed prefix instead gives every pixel the
-/// same fraction of its samples, which is the same average coverage — the
+/// same fraction of its samples, which is the same average coverage, the
 /// difference only shows in the spatial noise of the dither, and a resolve
 /// averages that away.
 fn alpha_coverage(alpha: f32, count: u32) -> u32 {
@@ -238,13 +238,13 @@ impl TriangleSetup {
         //
         // The top-left tie-break only assigns an on-edge point to exactly one
         // of the two triangles sharing that edge when they *walk the edge in
-        // opposite directions* — which is true of consistently-wound geometry
+        // opposite directions*, which is true of consistently-wound geometry
         // and false when a quad is emitted as one counter-clockwise and one
         // clockwise triangle, as SDL's does. There both triangles walk the
         // shared diagonal the same way, so they agree on `is_top_left` and the
         // points exactly on it belong to both or, when the answer is `false`,
         // to neither. JKSV's save tiles are 128x128 quads whose diagonal runs
-        // at exactly 45 degrees, so pixel centres land on it — and every tile
+        // at exactly 45 degrees, so pixel centres land on it, and every tile
         // came out with a one-pixel gap straight through it.
         let clockwise = signed_area < 0.0;
         let (v1, v2) = if clockwise { (v2, v1) } else { (v1, v2) };
@@ -274,7 +274,7 @@ impl TriangleSetup {
     }
 
     /// The three edge functions at `(px, py)`, in `v0-v1`, `v1-v2`, `v2-v0`
-    /// order — the same order as `top_left`.
+    /// order, the same order as `top_left`.
     fn edges(&self, px: f32, py: f32) -> [f32; 3] {
         [
             edge(self.v0, self.v1, px, py),
@@ -300,7 +300,7 @@ impl TriangleSetup {
     /// This is where a fragment shader runs. The default interpolation
     /// qualifier evaluates at the pixel centre even for a partially covered
     /// pixel whose centre falls outside the triangle, where the weights come
-    /// out extrapolated — that is the behaviour, not a rounding slip.
+    /// out extrapolated: that is the behaviour, not a rounding slip.
     pub fn weights(&self, px: f32, py: f32) -> [f32; 3] {
         self.weights_from(self.edges(px, py))
     }
@@ -349,7 +349,7 @@ const ATTRIB_DEFAULT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// Fetch one vertex's worth of a single attribute out of GPU memory,
 /// returning it padded to 4 components (`0,0,0,1` for the ones the format
-/// doesn't carry — the usual `vec4` default). `is_bgra` swaps the first and
+/// doesn't carry, the usual `vec4` default). `is_bgra` swaps the first and
 /// third component after decoding, matching a packed-colour attribute
 /// declared BGRA instead of RGBA. A "fixed" attribute has no buffer behind
 /// it and reads [`ATTRIB_DEFAULT`] outright.
@@ -445,7 +445,7 @@ pub fn fetch_attribute(
             }
         }
         // An integer attribute is not a number the shader averages, it is a
-        // value it indexes or masks with — so the slot carries its *bits*,
+        // value it indexes or masks with, so the slot carries its *bits*,
         // the same way `shade_vertex` hands over `vertex_id` and
         // `instance_id`. Converting it to a float instead would read back as
         // whatever that float's bit pattern happened to be.
@@ -476,15 +476,15 @@ pub fn fetch_attribute(
 }
 
 /// The `a[]` offset `gl_Position`/clip position lands at, and the fixed
-/// interpolated-`1/w` slot — both established in Stage 0's recon (see
+/// interpolated-`1/w` slot: both established in Stage 0's recon (see
 /// `isa`'s module docs) and already load-bearing in `shader::interp`'s
 /// tests.
 const CLIP_POS_OFFSET: u16 = 0x70;
 const INV_W_OFFSET: u16 = 0x7c;
 /// Generic varying `i`'s `a[]` slot: `VARYING_BASE + i * VARYING_STRIDE`.
-/// This is the same numeric convention on both sides of the interpolator —
+/// This is the same numeric convention on both sides of the interpolator,
 /// a vertex shader's output slot `i` is the fragment shader's input slot
-/// `i` — because they're literally the same fixed-function wires.
+/// `i`, because they're literally the same fixed-function wires.
 const VARYING_BASE: u16 = 0x80;
 const VARYING_STRIDE: u16 = 0x10;
 
@@ -536,7 +536,7 @@ fn shade_vertex(
     inv.attr_in
         .set(INSTANCE_ID_OFFSET, f32::from_bits(instance_id));
     for (i, attrib) in attribs.iter().enumerate() {
-        // size 0 isn't a valid DkVtxAttribSize — it's what an unconfigured
+        // size 0 isn't a valid DkVtxAttribSize, it's what an unconfigured
         // `VertexAttribState` slot reads back as, so it means "not used"
         // rather than "unsupported format".
         if attrib.size == 0 {
@@ -583,7 +583,7 @@ fn shade_vertex(
 }
 
 /// Clip position to window space: perspective-divide, then apply the
-/// viewport transform the guest programmed — `window = ndc * scale +
+/// viewport transform the guest programmed, `window = ndc * scale +
 /// translate` per axis. Whether that flips y is the transform's business
 /// (see [`Engine3D::viewport_transform`]), not a convention baked in here.
 ///
@@ -606,7 +606,7 @@ fn to_screen(clip: [f32; 4], vt: ViewportTransform) -> (ScreenVertex, f32, f32) 
 /// `DEPTH_TEST_FUNC` carries **either** numbering, and hardware takes both.
 ///
 /// Homebrew going through Mesa's GL driver writes the literal OpenGL enum,
-/// `GL_NEVER`(0x0200)`..=GL_ALWAYS`(0x0207) — confirmed by dumping a live
+/// `GL_NEVER`(0x0200)`..=GL_ALWAYS`(0x0207): confirmed by dumping a live
 /// JKSV capture's registers, which is why only those were decoded here. A
 /// title that came through a D3D-shaped path writes the one-based numbering
 /// instead, and Maxwell's register documents both: Eden's `ComparisonOp`
@@ -634,7 +634,7 @@ fn depth_test_passes(func: u32, new: f32, old: f32) -> bool {
 /// `BLEND_FUNC_*`'s real hardware type is `G80_BLEND_FACTOR`
 /// (`nv_3ddefs.xml`): literal OpenGL blend-factor enum values (`0x4000`+ for
 /// the plain factors, `0xc000`+ for the constant-colour ones), not deko3d's
-/// simplified `DkBlendFactor` numbering — see [`depth_test_passes`]'s doc
+/// simplified `DkBlendFactor` numbering. See [`depth_test_passes`]'s doc
 /// comment for how that was confirmed. `SrcColor`/`DstColor` are genuinely
 /// per-channel; the rest just broadcast a scalar.
 fn blend_factor(code: u32, src: [f32; 4], dst: [f32; 4], constant: [f32; 4]) -> [f32; 4] {
@@ -642,7 +642,7 @@ fn blend_factor(code: u32, src: [f32; 4], dst: [f32; 4], constant: [f32; 4]) -> 
         // The D3D numbering. Both numberings name the same set of factors and
         // the hardware takes either; which one a register holds is down to
         // whose driver wrote it. Mesa (JKSV) writes the GL enum straight
-        // through, deko3d and nvn write this one — the Home Menu blends every
+        // through, deko3d and nvn write this one, the Home Menu blends every
         // one of its draws `SrcAlpha`/`OneMinusSrcAlpha`, which fell through
         // to `One`/`One` here and turned its whole UI into `src + dst`.
         0x01 => [0.0; 4],                  // Zero
@@ -689,7 +689,7 @@ fn blend_factor(code: u32, src: [f32; 4], dst: [f32; 4], constant: [f32; 4]) -> 
 /// `BLEND_EQUATION_*`'s real hardware type is `gl_blend_equation`
 /// (`nv_3ddefs.xml`): literal `GL_FUNC_ADD`(0x8006)`..=GL_FUNC_REVERSE_
 /// SUBTRACT`(0x800b), not deko3d's simplified 1-5 `DkBlendOp` numbering.
-/// `BLEND_EQUATION_*` in the D3D numbering the same register also takes —
+/// `BLEND_EQUATION_*` in the D3D numbering the same register also takes,
 /// see [`blend_factor`].
 fn blend_equation(op: u32, src: f32, dst: f32) -> f32 {
     match op {
@@ -704,16 +704,16 @@ fn blend_equation(op: u32, src: f32, dst: f32) -> f32 {
 /// The shader's output colour as the blend unit sees it.
 ///
 /// Blending into a **fixed-point** render target clamps the incoming colour
-/// into the range that target can store first — GL says so for a fixed-point
+/// into the range that target can store first: GL says so for a fixed-point
 /// colour buffer, and it is what the ROP does. A float target takes the
 /// colour as it is.
 ///
-/// The range is the target's own — `[0, 1]` for UNORM and `[-1, 1]` for
+/// The range is the target's own, `[0, 1]` for UNORM and `[-1, 1]` for
 /// SNORM. What this really settles is **NaN**,
 /// which clamps to zero here and is otherwise indestructible: every blend
 /// factor is a multiply, and `NaN * 0` is `NaN`, so a NaN source survives even
 /// a source alpha of zero and lands in the framebuffer as an opaque black
-/// pixel. That is not a hypothetical — the Album applet's image shaders
+/// pixel. That is not a hypothetical, the Album applet's image shaders
 /// normalise a weighted sum of samples by dividing by the total alpha, and a
 /// fully transparent texel makes that `rcp(0)`, an infinity, and then
 /// `0 * inf`. Every icon it drew came out inside a black box.
@@ -746,7 +746,7 @@ fn blend(target: BlendTarget, constant: [f32; 4], src: [f32; 4], dst: [f32; 4]) 
 /// Put one fragment's interpolated inputs in place, ready to run.
 ///
 /// `inv` is threaded in rather than created here so that a draw allocates one
-/// invocation instead of one per covered pixel — a full-screen quad covers
+/// invocation instead of one per covered pixel, a full-screen quad covers
 /// 921 600 of them.
 fn seed_fragment(
     inv: &mut Invocation,
@@ -775,7 +775,7 @@ fn seed_fragment(
 /// Which register holds which component is the program header's business: a
 /// program that leaves a component to the driver still spends a register on
 /// it, and one that writes nothing to a target spends none at all. A program
-/// with no header — `uam`/deko3d builds, and this module's own fixtures —
+/// with no header, `uam`/deko3d builds, and this module's own fixtures,
 /// keeps the plain `r0..r3`.
 fn fragment_color(inv: &Invocation, program: &Compiled) -> Option<[f32; 4]> {
     if inv.discarded {
@@ -828,11 +828,11 @@ fn quad_pixel(x: u32, y: u32, lane: usize) -> (u32, u32) {
 /// four pixels have to reach it together: each lane runs to its next shuffle,
 /// and only once every lane that is still going has arrived does the exchange
 /// happen and all of them go on. Lanes whose pixel the triangle misses are
-/// shaded anyway and their colour thrown away — they exist so that the
+/// shaded anyway and their colour thrown away, they exist so that the
 /// covered lanes have a neighbour to difference against, which is the whole
 /// reason a derivative can be computed at all.
 ///
-/// Lanes that diverge — one at a shuffle, another somewhere else entirely —
+/// Lanes that diverge, one at a shuffle, another somewhere else entirely,
 /// are answered from wherever the other lane happens to be. Hardware answers
 /// them from an inactive lane, which is to say with a value the shader is not
 /// entitled to rely on either.
@@ -882,9 +882,9 @@ fn shade_quad(
 /// and passes the depth test at, and what a shaded colour does to the
 /// targets.
 ///
-/// Held apart from the loop over pixels because there are two such loops — a
+/// Held apart from the loop over pixels because there are two such loops, a
 /// shader containing a warp shuffle is walked in 2x2 quads instead of pixel
-/// by pixel — and they do exactly this to every pixel they reach.
+/// by pixel, and they do exactly this to every pixel they reach.
 struct Fragments {
     grid: SampleGrid,
     sample_mask: u32,
@@ -908,7 +908,7 @@ impl Fragments {
     /// resolution: the edges get every sample's worth of coverage, but the
     /// fragment shader still runs once for the pixel.
     /// `sample_z` is filled for the samples the returned mask names, and left
-    /// alone for the rest — so the caller may reuse one buffer across pixels
+    /// alone for the rest, so the caller may reuse one buffer across pixels
     /// without clearing it. [`Fragments::write`] reads exactly the samples the
     /// mask names, and alpha-to-coverage only narrows that mask.
     fn coverage(
@@ -980,7 +980,7 @@ impl Fragments {
                     let z = sample_z[sample as usize];
                     // A packed depth-stencil pixel holds a stencil byte this
                     // draw is not writing. Read it back and merge rather than
-                    // flattening it to zero — the extra read is only for the
+                    // flattening it to zero: the extra read is only for the
                     // formats that actually share the pixel.
                     let value = if dt.format.packs_stencil() {
                         dt.format.with_depth(ctx.read_pixel(dva, bytes)?, z)
@@ -993,7 +993,7 @@ impl Fragments {
 
             // A depth-only pass shaded the fragment for its `kil` and its
             // alpha coverage, and has nowhere to put the colour that came out
-            // of it — either because no colour target is bound or because the
+            // of it: either because no colour target is bound or because the
             // write mask closed every channel.
             if let Some(rt) = self.rt.filter(|_| self.writes_any_channel) {
                 let bpp = rt.format.bytes_per_pixel;
@@ -1028,7 +1028,7 @@ impl Fragments {
 /// Build the environment a fragment shader runs under and hand it to `f`.
 ///
 /// Every source in it borrows the execution context immutably, and the pixel
-/// loop needs that context mutably to write what comes out — so the
+/// loop needs that context mutably to write what comes out, so the
 /// environment cannot outlive one shading step, which is what the callback is
 /// for.
 fn with_fragment_env<T>(
@@ -1064,7 +1064,7 @@ fn with_fragment_env<T>(
 /// which reverses the winding of every triangle between NDC and screen space.
 /// Hardware does *not* take that as a change of facing: `SetWindowOrigin`'s
 /// FlipY bit is the only thing that reverses winding, which is why deko3d sets
-/// it from `windingFlip()` and the scale's sign from `viewportFlipY()` — two
+/// it from `windingFlip()` and the scale's sign from `viewportFlipY()`, two
 /// separate device flags. So the mirror has to be undone before a screen-space
 /// area is asked which way it winds.
 fn viewport_mirrors(vt: ViewportTransform) -> bool {
@@ -1076,7 +1076,7 @@ fn viewport_mirrors(vt: ViewportTransform) -> bool {
 /// `mirrored` is [`viewport_mirrors`] for the transform that produced `v`:
 /// facing is a property of the winding in NDC, and the screen-space area
 /// measured here carries the viewport's mirror on top of it. Reading the sign
-/// straight off inverted culling for every title whose driver flips y — which
+/// straight off inverted culling for every title whose driver flips y, which
 /// is every title built against nnSdk, and is why Tomodachi Life's composite
 /// pass was thrown away and its frame came out black. A zero-area triangle
 /// covers no pixels either way; reporting it culled saves the walk.
@@ -1144,7 +1144,7 @@ impl ClipVertex {
 ///
 /// This is not an optimisation. A vertex at or behind the eye has `w <= 0`,
 /// and the perspective divide by it sends the projected position to infinity
-/// or flips it to the wrong side of the screen — one off-screen vertex
+/// or flips it to the wrong side of the screen, one off-screen vertex
 /// smears a triangle across the whole framebuffer. Clipping first replaces
 /// the offending vertices with real ones on the plane, so the rasterizer
 /// only ever sees geometry that projects.
@@ -1185,7 +1185,7 @@ fn clip_near(tri: [ClipVertex; 3]) -> Vec<[ClipVertex; 3]> {
 pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let call = engine.last_draw;
     // Logical target 0, through whatever slot RenderTargetControl maps it onto
-    // — the same resolution a clear does.
+    //: the same resolution a clear does.
     let rt = engine.render_target(engine.render_target_slot(0))?;
 
     let vs_binding = engine
@@ -1222,7 +1222,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     //
     // A depth-only pass binds no colour target, so the extent comes from
     // whichever target the draw does have. Just Dance 2017 runs every pass
-    // that way — it binds its Z24S8 surface as colour target 0, which is a
+    // that way, it binds its Z24S8 surface as colour target 0, which is a
     // depth surface and so no colour target at all, and does its work in the
     // depth buffer. Requiring a colour target here cost it every one of its
     // 1870 draws.
@@ -1253,7 +1253,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let blend_constant = engine.blend_constant();
     // Which channels this draw is allowed into. A mask with nothing set is a
     // draw that writes depth and no colour at all, which is a real pass rather
-    // than a mistake — so it is resolved once here, not per pixel.
+    // than a mistake, so it is resolved once here, not per pixel.
     let color_mask = engine.color_mask(engine.render_target_slot(0));
     let writes_all_channels = color_mask == [true; 4];
     let writes_any_channel = color_mask.iter().any(|&channel| channel);
@@ -1341,7 +1341,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         .then(|| Box::new(std::array::from_fn(|_| Invocation::new())));
 
     // `TRACE_PIPELINE=1`: the fixed-function state this draw runs under, as
-    // a GPU backend would have to describe it — or what stopped it being
+    // a GPU backend would have to describe it, or what stopped it being
     // describable, which is the more useful half.
     if crate::trace::enabled(crate::trace::Trace::Pipeline) {
         // What the viewport was resolved *from* as well as what it resolved
@@ -1443,7 +1443,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // `TRACE_WGSL=1`: whether each shader can be translated, and what it
     // needs bound. `TRACE_WGSL=dir` writes each complete module to
     // `dir/<stage>_<addr>.wgsl` instead, which is how the emitted text gets
-    // in front of a real shader compiler — nothing in this crate can parse
+    // in front of a real shader compiler: nothing in this crate can parse
     // WGSL, so `naga --validate` on those files is the only thing that says
     // whether a translation is one.
     // Asked as a flag first: this one wants the *value*, and reading it per
@@ -1628,9 +1628,9 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
             // needs. It starts at the even pixel at or below the bounding
             // box's corner, since which pixels share a quad is a property of
             // the grid rather than of the triangle. Pixels outside the box are
-            // never sampled — they are outside the scissor as well, and a
+            // never sampled: they are outside the scissor as well, and a
             // depth test there would read a target this draw has no business
-            // touching — but they are still shaded, as the neighbours the
+            // touching, but they are still shaded, as the neighbours the
             // covered lanes difference against.
             let mut sample_z = [[0.0f32; MAX_SAMPLES]; QUAD];
             for y in ((min_y & !1)..max_y).step_by(2) {
@@ -1830,7 +1830,7 @@ mod tests {
 
     #[test]
     fn a_right_triangle_covers_exactly_its_staircase_of_pixels() {
-        // (0,0)-(4,0)-(0,4): a clean, hand-verifiable case — the covered set
+        // (0,0)-(4,0)-(0,4): a clean, hand-verifiable case, the covered set
         // is the classic staircase, with the top-left rule resolving the
         // shared hypotenuse/edges so nothing doubles up or gaps.
         let covered = rasterize_triangle(
@@ -1857,7 +1857,7 @@ mod tests {
         // The six vertices SDL emits for an 8x8 quad: v0,v1,v2 counter-
         // clockwise and v1,v2,v3 clockwise, so both triangles walk the shared
         // diagonal in the *same* direction. The diagonal runs at exactly 45
-        // degrees, which puts pixel centres right on it — the case that left
+        // degrees, which puts pixel centres right on it: the case that left
         // a one-pixel gap through every one of JKSV's save tiles.
         let (a, b) = (
             ScreenVertex { x: 0.0, y: 0.0 },
@@ -2005,7 +2005,7 @@ mod tests {
         assert_eq!(v, [1.0, 0x80 as f32 / 255.0, 0x40 as f32 / 255.0, 0.0]);
     }
 
-    /// An integer attribute carries its bits, not its magnitude — the slot is
+    /// An integer attribute carries its bits, not its magnitude: the slot is
     /// read back as an integer by the shader, the same way `shade_vertex`
     /// hands over `vertex_id`. Just Dance 2019 binds a signed-byte attribute
     /// (`size 0xa type 3`), and every draw that read one was dropped: 6,480 of
@@ -2076,7 +2076,7 @@ mod tests {
     }
 
     /// Minecraft's every draw reads `4x16` halves (`size 0x3 type 7`), and
-    /// with no shape for them all 110 of a frame's 110 draws were dropped —
+    /// with no shape for them all 110 of a frame's 110 draws were dropped,
     /// by the backend, which had no vertex format to build a pipeline from,
     /// and then by the rasterizer it fell back to.
     #[test]
@@ -2292,7 +2292,7 @@ mod tests {
     /// its own value: the four pixels of a quad run in lock-step so that the
     /// shuffle has something to read.
     ///
-    /// This is what Checkpoint's antialiased text is drawn with — a coverage
+    /// This is what Checkpoint's antialiased text is drawn with, a coverage
     /// differenced against the pixel beside it. Run one pixel at a time,
     /// every lane reads whatever it holds itself and the difference is zero,
     /// which is why the text came out as solid blocks.
@@ -2441,7 +2441,7 @@ mod tests {
     fn a_multisampled_edge_covers_some_samples_of_a_pixel_and_not_others() {
         // The same 16x8 surface, read as 8x4 pixels of 2x2 samples. The
         // triangle's hypotenuse runs from (8,0) to (0,4) in pixels, so it
-        // crosses pixel (7, 0) — the one pixel a single-sample rasterizer has
+        // crosses pixel (7, 0): the one pixel a single-sample rasterizer has
         // to call either wholly covered or wholly empty.
         let (mut mem, vmm, mut engine) = pipeline_harness();
         engine.regs.set(0x300, 8 << 16); // viewport width, in pixels
@@ -2475,7 +2475,7 @@ mod tests {
             assert_ne!(texel(&ctx, x, y), 0, "texel ({x}, {y}) of a covered pixel");
         }
         // Pixel (7, 0) straddles the edge. Only the sample at the top left of
-        // it — texel (14, 0) — falls inside the triangle.
+        // it (texel (14, 0)) falls inside the triangle.
         assert_ne!(texel(&ctx, 14, 0), 0, "the covered sample of pixel (7, 0)");
         for (x, y) in [(15, 0), (14, 1), (15, 1)] {
             assert_eq!(texel(&ctx, x, y), 0, "texel ({x}, {y}) is outside the edge");
@@ -2698,7 +2698,7 @@ mod tests {
         let (mut mem, vmm, mut engine) = pipeline_harness();
         let vbuf_addr = engine.vertex_array(0).start;
         let color = [0.2f32, 0.4, 0.6, 1.0];
-        // Clockwise in NDC — shoelace -4 — i.e. the back face when front is
+        // Clockwise in NDC (shoelace -4) i.e. the back face when front is
         // CCW. The harness's viewport flips y, so this also pins down which
         // space the winding is read in: mirrored into screen space it looks
         // counter-clockwise, and culling it anyway is the whole point.
@@ -2907,7 +2907,7 @@ mod tests {
     fn a_fixed_point_target_clamps_the_blend_source_and_a_float_one_does_not() {
         // A NaN is what this is really for. Every blend factor is a multiply
         // and `NaN * 0` is `NaN`, so a NaN source colour survives a source
-        // alpha of zero and reaches the framebuffer as opaque black — which is
+        // alpha of zero and reaches the framebuffer as opaque black, which is
         // what put a black box around every icon the Album applet drew. A
         // fixed-point target clamps it to zero before the blend unit ever sees
         // it; a float target stores what it is given.
@@ -3075,7 +3075,7 @@ mod tests {
     #[test]
     fn the_same_blend_state_composites_the_same_in_either_numbering() {
         // The Home Menu writes its blend state in the D3D numbering, which
-        // this understood as "unrecognised" and therefore `One`/`One` — every
+        // this understood as "unrecognised" and therefore `One`/`One`, every
         // one of its draws came out as `src + dst`, which put 2.0 in the
         // alpha channel and washed its dark separator lines to white.
         let gl = BlendTarget {
@@ -3244,7 +3244,7 @@ mod tests {
         engine.regs.set(0x4C3, 0x0201); // DepthTestFunc = GL_LESS
 
         {
-            // Clear depth to 1.0 (far) first, as real content always does —
+            // Clear depth to 1.0 (far) first, as real content always does,
             // an unwritten (zeroed) depth buffer would otherwise read as the
             // nearest possible value and reject every draw.
             let mut host1x = Host1x::new();
@@ -3279,7 +3279,7 @@ mod tests {
             };
             draw(&engine, &mut ctx).unwrap();
         }
-        // Near triangle second, at NDC z = -0.5 (closer — smaller depth).
+        // Near triangle second, at NDC z = -0.5 (closer, smaller depth).
         write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, -0.5, 1.0], near);
         write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, -0.5, 1.0], near);
         write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, -0.5, 1.0], near);

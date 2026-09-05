@@ -37,7 +37,7 @@ body {
   display: flex;
 }
 
-/* ---------- app shell ---------- */
+/* app shell */
 
 .app {
   flex: 1 1 auto;
@@ -49,7 +49,7 @@ body {
 
 .spacer { flex: 1 1 auto; }
 
-/* ---------- top bar ---------- */
+/* top bar */
 
 .topbar {
   display: flex;
@@ -116,7 +116,7 @@ body {
 .topbar-status { display: flex; align-items: center; gap: 10px; }
 .topbar-actions { display: flex; gap: 6px; }
 
-/* ---------- buttons ---------- */
+/* buttons */
 
 .btn {
   display: inline-flex;
@@ -213,7 +213,7 @@ body {
 }
 .select.big { padding: 9px 12px; font-size: 14px; }
 
-/* ---------- status chip + readouts ---------- */
+/* status chip + readouts */
 
 .chip {
   font-family: var(--mono);
@@ -233,7 +233,7 @@ body {
 
 .readout { font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 58px; }
 
-/* ---------- stage ---------- */
+/* stage */
 
 .stage {
   position: relative;
@@ -302,7 +302,7 @@ body {
 }
 .dropveil.on { opacity: 1; visibility: visible; }
 
-/* ---------- loading screen ----------
+/* loading screen
 
    The state chip says *that* something is loading; this says what, on the
    surface the eye is already on. It shares the idle overlay's ground so that
@@ -389,7 +389,7 @@ body {
 .loading.is-error .loading-bar span { animation: none; transform: none; background: var(--red); }
 .loading.is-error .loading-phase { color: var(--red); }
 
-/* ---------- status bar ---------- */
+/* status bar */
 
 .statusbar {
   display: flex;
@@ -407,7 +407,7 @@ body {
 .statusbar b { color: var(--text); font-family: var(--mono); font-weight: 500; }
 .statusbar .dim { color: #5d6579; }
 
-/* ---------- side panel ---------- */
+/* side panel */
 
 /* A drawer, not a second window: one head, one scrolling body, and a grip on
    the seam it shares with the stage. */
@@ -464,7 +464,7 @@ body.panel-open .panel {
    has to survive leaving the 9px grip. */
 body.resizing { cursor: col-resize; user-select: none; }
 
-/* ---------- panel head + tabs ---------- */
+/* panel head + tabs */
 
 .panel-head {
   display: flex;
@@ -504,7 +504,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .tab.is-active { color: var(--text); font-weight: 600; }
 .tab.is-active::after { background: var(--accent); }
 
-/* ---------- tab bodies ---------- */
+/* tab bodies */
 
 .tabpanel {
   display: none;
@@ -535,7 +535,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   gap: 2px 10px;
 }
 
-/* ---------- collapsible section ---------- */
+/* collapsible section */
 
 .section {
   flex: none;
@@ -601,7 +601,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   background: var(--chrome);
 }
 
-/* ---------- panel controls ---------- */
+/* panel controls */
 
 .check {
   display: inline-flex;
@@ -670,7 +670,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   overflow-wrap: anywhere;
 }
 
-/* ---------- console ----------
+/* console
 
    The log sits on its own near-black ground rather than the panel's, so its
    chrome (markers, scrollbar, empty note) is a few greys darker than --muted,
@@ -779,7 +779,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 
 @keyframes log-in { from { opacity: 0; } to { opacity: 1; } }
 
-/* ---------- dropzone ---------- */
+/* dropzone */
 
 .dropzone {
   display: flex;
@@ -800,7 +800,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .dropzone label { color: var(--accent); cursor: pointer; text-decoration: underline; }
 .dropzone code { font-family: var(--mono); color: var(--accent); }
 
-/* ---------- list rows ---------- */
+/* list rows */
 
 /* The NAND's installed programs. A system applet ships as a bare NCA with no
    container around it, so these rows are the only way to start one - which is
@@ -841,7 +841,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   text-align: center;
 }
 
-/* ---------- container contents ---------- */
+/* container contents */
 
 .nsp-list {
   list-style: none;
@@ -929,7 +929,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   background: none;
 }
 
-/* ---------- narrow screens: the panel becomes a bottom sheet ---------- */
+/* narrow screens: the panel becomes a bottom sheet */
 
 @media (max-width: 820px) {
   body { flex-direction: column; }

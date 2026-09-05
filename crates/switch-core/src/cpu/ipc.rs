@@ -1,14 +1,14 @@
 //! Horizon IPC: parsing CMIF/HIPC requests out of the TLS message buffer and
 //! synthesizing the replies.
 //!
-//! This is the marshalling layer every service is built on — the descriptor
+//! This is the marshalling layer every service is built on, the descriptor
 //! walks, the domain and control-message handling, the handle bookkeeping and
 //! [`Cpu::write_ipc_reply`]. The services themselves live one module per
 //! domain beside this one (`am`, `fs`, `vi`, `hid`, `net`, `audout`,
 //! `audren`, …); `svc.rs` dispatches to them by session name.
 //!
 //! What is still *here* is `sm:`, which hands out every other session, and the
-//! handful of services whose whole implementation is an answer or two —
+//! handful of services whose whole implementation is an answer or two,
 //! `csrng`, `spl`, `pm`, `btm`, `nfc`. Alongside them are the fallbacks every
 //! service falls back *to*: [`Cpu::unimplemented_command`] and
 //! [`Cpu::reply_with_fabricated_object`].
@@ -23,7 +23,7 @@ use crate::Result;
 const PROCESS_ID: u64 = 1;
 /// The program id a guest runs under until a loader sets one. This is the
 /// Album applet's, which is what hbmenu-launched homebrew runs as on real
-/// hardware — not an invention, and not a title id belonging to somebody.
+/// hardware, not an invention, and not a title id belonging to somebody.
 pub(super) const DEFAULT_PROGRAM_ID: u64 = 0x0100_0000_0000_1000;
 
 /// A request's buffers, as `(address, length)` pairs in descriptor order.
@@ -37,7 +37,7 @@ const SPL_DEVICE_ID: u64 = 0x0000_5357_4153_4D00;
 /// map-alias one.
 ///
 /// It was 0, which is the honest size for a server holding no pointer buffer
-/// — but `nnSdk` measures an explicit `SfBufferAttr_HipcPointer` argument
+///, but `nnSdk` measures an explicit `SfBufferAttr_HipcPointer` argument
 /// against it and refuses to send one that does not fit, which is the `sf`
 /// 11-141 `PointerBufferTooSmall` Tomodachi Life aborted on. Both forms land
 /// in the same address space here, so the number only decides which
@@ -61,7 +61,7 @@ fn ipc_pick_buffer(map: Option<(u32, u32)>, pointer: Option<(u32, u32)>) -> Opti
 /// Seven separate walks over the TLS buffer need some subset of these, and
 /// each used to re-derive them with its own shifts. That is how
 /// [`Cpu::ipc_static_buffers`] came to skip a special header's pid but not the
-/// copy and move handles behind it — four bytes short per handle, against a
+/// copy and move handles behind it, four bytes short per handle, against a
 /// [`Cpu::ipc_descriptor_start`] that had been fixed to skip both.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct HipcHeader {
@@ -90,7 +90,7 @@ impl Cpu {
     /// TIPC is the lighter serialization Nintendo moved `sm:` to in 12.0.0:
     /// the same hipc header, but the command id is carried *in the type
     /// field* as `16 + command`, and the data area holds the arguments
-    /// directly — no `SFCI` header, no 16-byte alignment, and no domains. A
+    /// directly, no `SFCI` header, no 16-byte alignment, and no domains. A
     /// type below 16 is one of the eight hipc command types and therefore
     /// CMIF; anything at or above it is TIPC.
     ///
@@ -121,8 +121,8 @@ impl Cpu {
         }
     }
 
-    /// Offset of a hipc request's descriptor area — its first send-static
-    /// descriptor — walking the header the way libnx's `hipcParseRequest`
+    /// Offset of a hipc request's descriptor area, its first send-static
+    /// descriptor, walking the header the way libnx's `hipcParseRequest`
     /// does: the 8-byte message header, then the optional special header with
     /// whatever it declares.
     ///
@@ -159,7 +159,7 @@ impl Cpu {
 
     /// Compute where a **CMIF** reply starts in the TLS IPC buffer, mirroring
     /// libnx's `cmifGetAlignedDataStart`: the data area, rounded up to 16
-    /// bytes. TIPC does no such rounding — see [`Cpu::ipc_is_tipc_request`].
+    /// bytes. TIPC does no such rounding. See [`Cpu::ipc_is_tipc_request`].
     pub(super) fn ipc_reply_start(&self, tls: u32) -> u32 {
         (self.ipc_data_area(tls) + 15) & !15
     }
@@ -169,7 +169,7 @@ impl Cpu {
     /// Where it lands depends on how many descriptors the request carries: the
     /// data area follows the message header, the optional pid, and the static
     /// and buffer descriptors. A `KICKOFF_PB` with its gpfifo-entry buffers puts
-    /// it at 0x40 — a fixed scan of the first 0x40 bytes missed it entirely, so
+    /// it at 0x40, a fixed scan of the first 0x40 bytes missed it entirely, so
     /// the submit was dispatched as "unknown command", answered with a generic
     /// success, and the GPU never saw the frame.
     pub(super) fn ipc_cmif_header_offset(&self, tls: u32) -> Option<u32> {
@@ -198,8 +198,8 @@ impl Cpu {
         if let Some(offset) = self.ipc_cmif_header_offset(tls) {
             return self.mem.read_u32(tls.wrapping_add(offset + 8)).ok();
         }
-        // Older libnx (pre-CMIF) sessions — e.g. the FsDir object NX-Shell's
-        // `fsDirRead` uses — marshal requests as {type=2, object_id, cmd_id,
+        // Older libnx (pre-CMIF) sessions, e.g. the FsDir object NX-Shell's
+        // `fsDirRead` uses, marshal requests as {type=2, object_id, cmd_id,
         // ...} with no SFCI magic. Fall back to reading the command there.
         let start = self.ipc_reply_start(tls);
         if self.mem.read_u32(tls.wrapping_add(start)).unwrap_or(0) == 2 {
@@ -208,7 +208,7 @@ impl Cpu {
         None
     }
 
-    /// Address of a CMIF request's raw payload — the bytes after the 16-byte
+    /// Address of a CMIF request's raw payload, the bytes after the 16-byte
     /// `CmifInHeader`.
     ///
     /// Its distance from the data area is not fixed: a domain request carries a
@@ -227,7 +227,7 @@ impl Cpu {
         }
     }
 
-    /// The `u8` argument at `offset` bytes into a request's payload — a bool,
+    /// The `u8` argument at `offset` bytes into a request's payload, a bool,
     /// or one of the small enums these services take.
     pub(super) fn ipc_arg_u8(&self, tls: u32, offset: u32) -> u8 {
         let data = self.ipc_request_data(tls);
@@ -240,7 +240,7 @@ impl Cpu {
         self.mem.read_u32(data.wrapping_add(offset)).unwrap_or(0)
     }
 
-    /// The `u64` argument at `offset` bytes into a request's payload — a
+    /// The `u64` argument at `offset` bytes into a request's payload, a
     /// language code, a title id, a clock offset.
     pub(super) fn ipc_arg_u64(&self, tls: u32, offset: u32) -> u64 {
         let data = self.ipc_request_data(tls);
@@ -263,7 +263,7 @@ impl Cpu {
     /// numbered across the send, receive and exchange descriptors in that
     /// order, which is the order they sit in.
     ///
-    /// Each is three words — `{size_low, address_low, packed}` — where the
+    /// Each is three words (`{size_low, address_low, packed}`) where the
     /// packed word holds the mode in bits 0..1, address bits 36..57 in bits
     /// 2..23, size bits 32..35 in bits 24..27 and address bits 32..35 in bits
     /// 28..31. **Only the low 32 bits are read.** Guest memory here is
@@ -285,7 +285,7 @@ impl Cpu {
     }
 
     /// The `index`-th map-alias **receive** buffer as `(address, size)`. The
-    /// size matters when the reply's length is whatever fits —
+    /// size matters when the reply's length is whatever fits,
     /// `GetReleasedAudioOutBuffer` hands back as many tags as the guest left
     /// room for.
     pub(super) fn ipc_recv_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
@@ -299,7 +299,7 @@ impl Cpu {
     ///
     /// Each descriptor is two words: `{ index:6, address_high:6,
     /// address_mid:4, size:16 }` then the low 32 bits of the address. Services
-    /// that take a path — all of `fsp-srv`'s — send it this way rather than as
+    /// that take a path (all of `fsp-srv`'s) send it this way rather than as
     /// a map-alias buffer.
     pub(super) fn ipc_static_buffers(&self, tls: u32) -> Vec<(u32, u32)> {
         let start = self.ipc_descriptor_start(tls);
@@ -317,11 +317,11 @@ impl Cpu {
     /// as `(address, size)`.
     ///
     /// These are the only descriptors that sit *after* the raw data rather
-    /// than before it, at the data area plus the words of payload — which
+    /// than before it, at the data area plus the words of payload, which
     /// counts the padding that aligns the CMIF header, so the walk lands past
     /// it either way.
     ///
-    /// `IProfile::Get` is why this exists — its `AccountUserData` comes back
+    /// `IProfile::Get` is why this exists, its `AccountUserData` comes back
     /// through a fixed-size pointer buffer rather than a map-alias one.
     pub(super) fn ipc_recv_static_buffers(&self, tls: u32) -> Vec<(u32, u32)> {
         let header = self.ipc_header(tls);
@@ -348,7 +348,7 @@ impl Cpu {
     }
 
     /// The `index`-th **output** buffer, whichever form the caller marshalled
-    /// it in — the mirror of [`Cpu::ipc_input_buffer`]. A map-alias receive
+    /// it in, the mirror of [`Cpu::ipc_input_buffer`]. A map-alias receive
     /// buffer if the request carries one, else a receive-static pointer
     /// buffer.
     pub(super) fn ipc_output_buffer(&self, tls: u32, index: u32) -> Option<(u32, u32)> {
@@ -369,7 +369,7 @@ impl Cpu {
             .map(|(address, _)| address)
     }
 
-    /// Every buffer a request carries, as `(input, output)` lists — the list
+    /// Every buffer a request carries, as `(input, output)` lists, the list
     /// form of [`Cpu::ipc_input_buffer`] and [`Cpu::ipc_output_buffer`], for
     /// the services that want all of them rather than one by index.
     pub(super) fn ipc_buffers(&self, tls: u32) -> (Buffers, Buffers) {
@@ -427,8 +427,8 @@ impl Cpu {
     /// that struct: the buffer is the caller's own memory, and a reply that
     /// leaves it untouched hands back whatever the caller had there before.
     /// Every struct the services below would fill describes something this
-    /// console does not have — a local network, a peer group, a save
-    /// transfer — and an all-zero one is what "none of that" looks like in
+    /// console does not have, a local network, a peer group, a save
+    /// transfer, and an all-zero one is what "none of that" looks like in
     /// each of them.
     pub(super) fn zero_output_buffer(&mut self, tls: u32, index: u32) {
         let Some((addr, size)) = self.ipc_output_buffer(tls, index) else {
@@ -475,7 +475,7 @@ impl Cpu {
     /// (a sub-session from `reply_with_interface`); a copy handle duplicates
     /// one the server keeps (every event a service hands out). They live in
     /// different fields of the handle descriptor and in that order in the
-    /// reply, so a copy handle sent in the move slot is read back as **0** —
+    /// reply, so a copy handle sent in the move slot is read back as **0**,
     /// which is exactly why `nnSdk` spent the whole boot waiting on handle 0
     /// after asking for `GetGpuErrorDetectedSystemEvent`.
     pub(super) fn write_ipc_reply(
@@ -508,7 +508,7 @@ impl Cpu {
         // rest of the word are what matter. libnx ignores the field entirely,
         // but libtransistor validates it (`type != 0 && type != 4` → its error
         // 0x7E0DD), which is what made sdl-hello's "Failed to open connection
-        // to fsp-srv" — a 0x40 here fails that check on every single reply.
+        // to fsp-srv": a 0x40 here fails that check on every single reply.
         self.mem.write_u32(tls, 0)?;
         let has_handles = !copy_handles.is_empty() || !move_handles.is_empty();
         // { send_pid:1, num_copy:4, num_move:4 }
@@ -544,14 +544,14 @@ impl Cpu {
         // A reply is written *over* the request, in the same TLS buffer, and
         // whatever it does not write stays as the request's bytes. The padding
         // the header counts is four words wide, which is room for a small out
-        // parameter — so a command answered with an empty success never handed
+        // parameter, so a command answered with an empty success never handed
         // the caller nothing. It handed the caller stale TLS, in a reply whose
         // declared size passed every length check `nnSdk` and libnx make.
         //
         // That is how `ListDisplayModes` cost the Home Menu a billion
         // instructions: it read its mode count out of the previous reply's
         // leftovers and walked a buffer nothing had written. Zeroed, an
-        // unimplemented command's out parameters read as 0 — still wrong, but
+        // unimplemented command's out parameters read as 0, still wrong, but
         // the same wrong every time and survivable, which is the difference
         // between a bug that can be found and one that cannot.
         for i in 0..raw_section_words * 4 {
@@ -571,7 +571,6 @@ impl Cpu {
         self.mem.write_u32(tls.wrapping_add(off + 8), result)?;
         self.mem.write_u32(tls.wrapping_add(off + 12), 0)?;
         off += 16;
-        // Raw data.
         for (i, &b) in raw_data.iter().enumerate() {
             self.mem.write_u8(tls.wrapping_add(off + i as u32), b)?;
         }
@@ -585,7 +584,7 @@ impl Cpu {
     }
 
     /// A **TIPC** reply: the hipc header, the handles, and then the data
-    /// words — which start with the `Result` itself rather than with an SFCO
+    /// words, which start with the `Result` itself rather than with an SFCO
     /// header, and are not aligned to 16 bytes the way a CMIF reply's are.
     fn write_tipc_reply(
         &mut self,
@@ -629,8 +628,8 @@ impl Cpu {
     /// Hand a sub-interface back to the caller the way its session expects.
     ///
     /// A domain session (libnx converts `fsp-srv` to one) takes an out-object
-    /// id in the response's domain header; a plain session — libtransistor
-    /// never converts, so sdl-hello's `fsp-srv` is one — takes a real session
+    /// id in the response's domain header; a plain session, libtransistor
+    /// never converts, so sdl-hello's `fsp-srv` is one: takes a real session
     /// handle as a move handle, and validates the count, so answering with a
     /// domain object made `fsp_srv_open_sd_card_filesystem` fail. Returns the
     /// key the new object's state is filed under.
@@ -705,8 +704,8 @@ impl Cpu {
     /// domain object was filed under, or the name its session handle was
     /// recorded with.
     ///
-    /// A service that hands out sub-interfaces is reached by two routes — an
-    /// object id inside a domain, or a session handle of its own — and both
+    /// A service that hands out sub-interfaces is reached by two routes, an
+    /// object id inside a domain, or a session handle of its own, and both
     /// arrive at the same handler, so both have to resolve to the same name.
     /// `root` is the answer for a session nothing has named, which is the
     /// service itself.
@@ -728,7 +727,7 @@ impl Cpu {
         (handle << 32) | u64::from(object_id)
     }
 
-    /// The key *this* request's object files its state under — the same one
+    /// The key *this* request's object files its state under, the same one
     /// [`Cpu::reply_with_interface`] returned when it handed the object out.
     /// A domain object is identified by its id within the session, a plain
     /// sub-session by its own handle.
@@ -740,8 +739,8 @@ impl Cpu {
         }
     }
 
-    /// The key of the `index`-th object a request **sends** — a sub-interface
-    /// the caller hands the server, rather than one it asks for — as
+    /// The key of the `index`-th object a request **sends**, a sub-interface
+    /// the caller hands the server, rather than one it asks for, as
     /// [`Cpu::reply_with_interface`] filed it when it handed the object out.
     ///
     /// The two session forms carry it differently. A domain request lists
@@ -787,7 +786,7 @@ impl Cpu {
         }
     }
 
-    /// Whether the request is a *control* message — the session-management
+    /// Whether the request is a *control* message, the session-management
     /// commands (ConvertToDomain, Clone, QueryPointerBufferSize) rather than a
     /// command on the interface behind the session.
     ///
@@ -799,8 +798,8 @@ impl Cpu {
     /// classified every retail control command as an ordinary command on the
     /// interface. `appletOE`'s very first message is
     /// `QueryPointerBufferSize`, which arrives as type 7 and was being answered
-    /// as though it were IApplicationProxyService command 3 — a command that
-    /// does not exist — which killed the applet chain before it opened.
+    /// as though it were IApplicationProxyService command 3, a command that
+    /// does not exist, which killed the applet chain before it opened.
     pub(super) fn ipc_is_control_request(&self, tls: u32) -> bool {
         matches!(self.ipc_message_type(tls), 5 | 7)
     }
@@ -825,7 +824,7 @@ impl Cpu {
     /// session and carries no `CmifInHeader` at all. [`Cpu::ipc_command_id`]
     /// falls back to scanning the whole message buffer for an `SFCI` magic, so
     /// on a close it finds the *previous* request's header still sitting there
-    /// and reports that command id — which is why `appletExit`'s teardown used
+    /// and reports that command id, which is why `appletExit`'s teardown used
     /// to look like a flurry of command 0s.
     pub(super) fn ipc_is_domain_close(&self, tls: u32) -> bool {
         if self.ipc_is_tipc_request(tls) {
@@ -846,7 +845,7 @@ impl Cpu {
     ) -> Result<()> {
         // `ssl` counts its live contexts, and this is where one stops being
         // live. The count lives here rather than in `ssl_request` because a
-        // close never reaches a service handler any more — see the dispatch in
+        // close never reaches a service handler any more. See the dispatch in
         // `horizon_syscall`.
         if self.domain_interface(handle, object_id) == Some("ssl:context") {
             self.ssl_contexts = self.ssl_contexts.saturating_sub(1);
@@ -891,7 +890,7 @@ impl Cpu {
     /// this request is one of them, and report whether it was.
     ///
     /// `ConvertToDomain` files the session's own interface under a fresh
-    /// object id — the name given here is what later requests on that object
+    /// object id: the name given here is what later requests on that object
     /// dispatch on. Every service below opens with this, because a control
     /// message is not a command on the interface at all and answering it as
     /// one is how `appletOE`'s first message was once read as command 3.
@@ -931,8 +930,8 @@ impl Cpu {
     /// keyed by what the event is for and which object handed it out.
     ///
     /// Almost nothing here ever signals one. Each describes something that
-    /// does not happen on this console — a Bluetooth radio turning on, a save
-    /// transfer finishing, a news article arriving — so a caller waiting on it
+    /// does not happen on this console, a Bluetooth radio turning on, a save
+    /// transfer finishing, a news article arriving, so a caller waiting on it
     /// is waiting for something that genuinely never comes, which is the
     /// truthful state rather than the silent one. The exception is `erpt`'s
     /// report-created event, which fires because a report really is filed.
@@ -950,7 +949,7 @@ impl Cpu {
     ///
     /// Everything `am` hands back is a live kernel object or a piece of applet
     /// state the caller then acts on, so a blanket "success, no data" reply is
-    /// not a neutral placeholder — it is a wrong answer the guest believes.
+    /// not a neutral placeholder: it is a wrong answer the guest believes.
     /// That is exactly how `nn::oe::SetupGpuErrorHandler` ended up waiting on
     /// handle **0**: the old catch-all answered
     /// `GetGpuErrorDetectedSystemEvent` with success and no copy handle at
@@ -972,8 +971,8 @@ impl Cpu {
             // The request's shape, which is most of its signature: how many
             // argument words it carries, and whether it left a buffer for the
             // reply to fill. Answering a command that wants an out-object or
-            // an out-buffer with a bare success is worse than refusing it —
-            // the caller reads a zero and fails somewhere else entirely — so
+            // an out-buffer with a bare success is worse than refusing it,
+            // the caller reads a zero and fails somewhere else entirely, so
             // this is what says which kind it is.
             let hdr1 = self.mem.read_u32(tls).unwrap_or(0);
             let hdr2 = self.mem.read_u32(tls.wrapping_add(4)).unwrap_or(0);
@@ -999,15 +998,15 @@ impl Cpu {
     /// This reply used to carry the fabricated object id in the raw data and
     /// nothing else. On a plain session that is not where an out-object
     /// lives: `nnSdk` reads one as a **move handle**, and a reply carrying no
-    /// handle is not an error to it — the handle parses as 0, the client
+    /// handle is not an error to it, the handle parses as 0, the client
     /// quietly skips constructing the proxy, and the command still returns
     /// **success**. The caller then makes its first virtual call through a
     /// null `SharedPointer`. That is how boot2 reached `pc=0` one instruction
     /// after `gpio`'s `OpenSession2` was answered "successfully", with
     /// nothing in between to say which command had lied.
     ///
-    /// So the reply now carries a real sub-session — or a real domain
-    /// out-object, when the session is a domain — *as well as* the raw object
+    /// So the reply now carries a real sub-session, or a real domain
+    /// out-object, when the session is a domain, *as well as* the raw object
     /// id, which is what a caller reading a plain out value has always read
     /// here, `ConvertToDomain` most of all.
     ///
@@ -1016,7 +1015,7 @@ impl Cpu {
     /// and an out-event are the two things a command can hand back that a
     /// caller cannot invent for itself, and nothing here knows which of them
     /// an unimplemented command was supposed to return. Filling both costs one
-    /// handle and removes the case where a caller waits forever on handle 0 —
+    /// handle and removes the case where a caller waits forever on handle 0,
     /// which is not a hypothetical: it is where the Home Menu's message thread
     /// stopped, three created-but-never-started threads behind it, and there
     /// was nothing in any trace to say which command had failed to hand it an
@@ -1070,9 +1069,9 @@ impl Cpu {
     /// Note that a service reached over IPC has no implementation behind it at
     /// all, and is about to be answered with a fabricated object id.
     ///
-    /// Unlike [`Cpu::unimplemented_command`] this does not change the reply — the
+    /// Unlike [`Cpu::unimplemented_command`] this does not change the reply, the
     /// generic success is load-bearing for homebrew that only checks the
-    /// Result — it just stops the gap being invisible. Whatever this prints is
+    /// Result: it just stops the gap being invisible. Whatever this prints is
     /// the list of services a guest is asking for and not getting.
     pub(super) fn warn_no_implementation(&mut self, service: &str, cmd_id: Option<u32>) {
         if self.unimplemented_ipc.insert((service.to_string(), cmd_id)) {
@@ -1087,7 +1086,7 @@ impl Cpu {
     /// an invented value, a latch that is not recorded anywhere, or an event
     /// handed out that nothing here will ever signal.
     ///
-    /// The two existing warnings only cover the gaps a guest can see —
+    /// The two existing warnings only cover the gaps a guest can see,
     /// [`Cpu::warn_no_implementation`] for a service with nothing behind it and
     /// [`Cpu::unimplemented_command`] for a refused command id. A stub is the
     /// case neither of them catches and the guest cannot detect either: the
@@ -1097,7 +1096,7 @@ impl Cpu {
     /// question is always "what did this title believe that was not true", and
     /// the answer used to be a grep through twenty service modules.
     ///
-    /// `what` is what the guest was told, not what is missing — it is read
+    /// `what` is what the guest was told, not what is missing: it is read
     /// next to a fault, where the useful question is whether *this* answer
     /// could have caused it.
     ///
@@ -1142,8 +1141,8 @@ impl Cpu {
     /// Real hardware answers this out of the security processor's hardware
     /// RNG. There is none here, and `wasm32-unknown-unknown` has no OS entropy
     /// to borrow either, so what a caller gets is **pseudo**-random: splitmix64
-    /// over a state seeded from the emulated clock. That distinction is real —
-    /// nothing that comes out of here should be used as a key — but it is a
+    /// over a state seeded from the emulated clock. That distinction is real,
+    /// nothing that comes out of here should be used as a key, but it is a
     /// far better answer than the generic fallback's, which left the caller's
     /// buffer untouched: a "random" number that is whatever was on the stack
     /// is both non-random *and* undetectably so.
@@ -1174,8 +1173,8 @@ impl Cpu {
 
     /// `spl:` (`IGeneralInterface`): the liaison to the security processor.
     ///
-    /// Everything it exists for — key derivation, AES with device-unique keys,
-    /// unwrapping title keys in TrustZone — is out of reach here, and the one
+    /// Everything it exists for, key derivation, AES with device-unique keys,
+    /// unwrapping title keys in TrustZone: is out of reach here, and the one
     /// command a guest actually asks this emulator for is `GetConfig`, which
     /// reports what kind of console it is running on. That much this can
     /// answer truthfully: an original (Icosa) retail unit, not in debug mode.
@@ -1208,9 +1207,9 @@ impl Cpu {
                     9 => 0,
                     // IsDebugMode: no.
                     10 => 0,
-                    // Everything else — Version, BootReason, kernel
+                    // Everything else, Version, BootReason, kernel
                     // configuration, quest state, regulator and key
-                    // generation — reads as zero, which is the "nothing
+                    // generation: reads as zero, which is the "nothing
                     // unusual" answer for each of them.
                     //
                     // That deliberately includes Atmosphère's own extensions
@@ -1218,7 +1217,7 @@ impl Cpu {
                     // service for first: NX-Fetch wants the CFW's API version
                     // (65000) and emummc type (65007). Zero there reads as "no
                     // custom firmware, booted from internal storage", and this
-                    // emulator is indeed not Atmosphère — answering with a
+                    // emulator is indeed not Atmosphère, answering with a
                     // version would be claiming a CFW whose behaviour nothing
                     // here implements.
                     _ => 0,
@@ -1233,9 +1232,9 @@ impl Cpu {
     /// `pm:dmnt` finds them, `pm:info` maps one to its program, and `pm:bm`
     /// reports how the console booted.
     ///
-    /// There is exactly one process here and nothing can create another —
+    /// There is exactly one process here and nothing can create another,
     /// `LaunchProgram` has nothing to launch and no second address space to
-    /// launch it into — so what these can answer honestly is *identity*: which
+    /// launch it into, so what these can answer honestly is *identity*: which
     /// process is the application (this one), and which program it is running.
     /// The process id agrees with `svcGetProcessId`'s, which is the same
     /// question asked through the kernel instead.
@@ -1283,11 +1282,11 @@ impl Cpu {
         }
     }
 
-    /// `btm:sys` — "nn::btm::IBtmSystem", and the `IBtmSystemCore` it hands
+    /// `btm:sys`, "nn::btm::IBtmSystem", and the `IBtmSystemCore` it hands
     /// out: the Bluetooth radio and the controller-pairing flow the Home
     /// Menu's "Change Grip/Order" screen drives.
     ///
-    /// There is no Bluetooth radio here and no controller to pair over it —
+    /// There is no Bluetooth radio here and no controller to pair over it,
     /// input arrives through `hid`'s shared memory from the host's Gamepad
     /// API, which is not a pairing at all. So the radio can be turned on and
     /// off (it is a setting, and the menu reads it back), nothing is ever
@@ -1317,7 +1316,7 @@ impl Cpu {
                 Some(3) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
                 // EnableRadio / DisableRadio / IsRadioEnabled. The radio's
                 // switch is a system setting, so this is the same field
-                // `set:sys`'s Get/SetBluetoothEnableFlag reads and writes —
+                // `set:sys`'s Get/SetBluetoothEnableFlag reads and writes,
                 // one switch, whichever service is asked about it.
                 Some(4) | Some(5) => {
                     let on = cmd_id == Some(4);
@@ -1359,13 +1358,13 @@ impl Cpu {
         }
     }
 
-    /// `nfc:sys` — "nn::nfc::detail::ISystemManager", and the `ISystem` it
+    /// `nfc:sys`, "nn::nfc::detail::ISystemManager", and the `ISystem` it
     /// hands out.
     ///
     /// The NFC reader lives in the right Joy-Con, and nothing here emulates
     /// one, so the device list is empty and every command that names a device
     /// has no device to name. That is a state a real console reaches too,
-    /// with the controller detached — it is not a broken console, it is one
+    /// with the controller detached: it is not a broken console, it is one
     /// with nothing to scan.
     ///
     /// Whether NFC is *enabled* is a different question from whether a reader
@@ -1424,8 +1423,8 @@ impl Cpu {
                     let event = self.kept_event("nfc:availability", handle);
                     self.write_ipc_reply(tls, 0, &[event], &[], &[], &[])
                 }
-                // Everything past here — GetDeviceState, StartDetection,
-                // GetTagInfo, the Mifare pass-through — names a device out of
+                // Everything past here, GetDeviceState, StartDetection,
+                // GetTagInfo, the Mifare pass-through: names a device out of
                 // the list ListDevices reports as empty, so a caller can only
                 // reach it with a handle this service never handed out.
                 // Refusing says so; answering would invent a reader.
@@ -1442,11 +1441,11 @@ impl Cpu {
         }
     }
 
-    /// `ngc:u` and `ngct:u` — "nn::ngc", the profanity filter.
+    /// `ngc:u` and `ngct:u`, "nn::ngc", the profanity filter.
     ///
     /// A console checks user-entered text against a word list shipped as
     /// system data: a Mii's name, a user profile, anything the software
-    /// keyboard produced. There is no list here, so nothing is profane —
+    /// keyboard produced. There is no list here, so nothing is profane,
     /// which is a real answer rather than a placeholder, and the same one
     /// Eden gives.
     ///
@@ -1454,7 +1453,7 @@ impl Cpu {
     /// hands back a `u32`, and the generic fallback's fabricated object id
     /// landed in that word: a caller asking which version of the word list
     /// this console has was reading a session-local object id as the answer.
-    /// The two `Mask` commands are worse — they filter text *in place* into
+    /// The two `Mask` commands are worse, they filter text *in place* into
     /// an output buffer, and a reply that does not write it leaves the caller
     /// reading its own uninitialized buffer as the filtered text.
     pub(super) fn ngc_request(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
@@ -1498,7 +1497,7 @@ impl Cpu {
             }
             // Mask / Mask2(flags, ProfanityFilterOption, text) -> u32 and the
             // masked text in an output buffer. Nothing is masked, so the text
-            // comes back as it went in — written rather than left alone.
+            // comes back as it went in: written rather than left alone.
             Some(2) | Some(5) => {
                 let text = self.input_text(tls);
                 self.write_output_buffer(tls, 0, &text);
@@ -1518,7 +1517,7 @@ impl Cpu {
         }
     }
 
-    /// `npns:s` / `npns:u` — "nn::npns", the push-notification client.
+    /// `npns:s` / `npns:u`, "nn::npns", the push-notification client.
     ///
     /// A console holds an XMPP session open to Nintendo's notification server
     /// and is pushed news, friend presence and download completions over it.
@@ -1530,7 +1529,7 @@ impl Cpu {
     /// The receive event is the reason this is worth naming rather than
     /// leaving to the fallback. It is one event per session on hardware, and
     /// [`Cpu::kept_event`] is what makes the second `GetReceiveEvent` on a
-    /// session hand back the same one — a caller given a fresh handle each
+    /// session hand back the same one, a caller given a fresh handle each
     /// time waits on a copy that nothing would signal even if something did.
     pub(super) fn npns_request(
         &mut self,
@@ -1552,14 +1551,14 @@ impl Cpu {
         match cmd_id {
             // ListenAll / ListenTo(program id) / ListenToByName(name buffer) /
             // ListenToMyApplicationId: which notifications this client wants.
-            // Accepted — the list costs nothing to keep and nothing will ever
+            // Accepted: the list costs nothing to keep and nothing will ever
             // arrive to match it against.
             Some(1) | Some(2) | Some(8) | Some(26) => {
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             // GetReceiveEvent / GetStateChangeEvent: the two events a client
-            // waits on. Neither ever fires — there is no connection to change
-            // state and nothing to receive over it — so a caller waiting on
+            // waits on. Neither ever fires: there is no connection to change
+            // state and nothing to receive over it, so a caller waiting on
             // one is waiting for something that genuinely never happens.
             Some(5) | Some(7) => {
                 let purpose = if cmd_id == Some(5) {
@@ -1584,7 +1583,7 @@ impl Cpu {
             // a notification arrived that it will then try to read. What a
             // real client gets when the queue is empty is an error this
             // console has no documented value for, so it is refused rather
-            // than guessed at — which is also what Eden does.
+            // than guessed at, which is also what Eden does.
             _ => self.unimplemented_command(tls, root, cmd_id),
         }
     }
@@ -1757,7 +1756,7 @@ pub(super) mod testing {
         // handles; `ipc_static_buffers` kept an older copy of that walk which
         // skipped only the pid, so a request carrying both a handle and a path
         // read the path out of the handle words. Nothing in the emulator's
-        // path had sent that combination — which is why it went unnoticed, not
+        // path had sent that combination, which is why it went unnoticed, not
         // why it was safe.
         const PATH: u32 = 0x3000;
 
@@ -1892,7 +1891,7 @@ pub(super) mod testing {
     }
 
     /// Marshal a request carrying map-alias buffers on **both** sides into an
-    /// existing session's TLS — the shape `bsd`'s `Select` arrives in, which
+    /// existing session's TLS, the shape `bsd`'s `Select` arrives in, which
     /// sends three descriptor sets and receives three back.
     ///
     /// The general case the two helpers around it are each one corner of: the
@@ -1939,7 +1938,7 @@ pub(super) mod testing {
     ) -> Cpu {
         let mut cpu = request(false, command_id, payload);
         // Two words of padding aligning the CmifInHeader, the header, then the
-        // payload — what the walk has to skip to reach the receive list.
+        // payload: what the walk has to skip to reach the receive list.
         let data_words = 2 + 4 + payload.len().div_ceil(4) as u32;
         // recv_static_mode = 2 + one buffer.
         cpu.mem.write_u32(TLS + 4, data_words | (3 << 10)).unwrap();
@@ -1987,7 +1986,7 @@ pub(super) mod testing {
             cpu.mem.write_u32(at + 8, 0).unwrap();
         }
         // Two words of padding aligning the CmifInHeader, the header, then the
-        // payload — the receive list sits past all of it.
+        // payload: the receive list sits past all of it.
         let data_words = 2 + 4 + payload.len().div_ceil(4) as u32;
         cpu.mem.write_u32(TLS + 4, data_words | (3 << 10)).unwrap();
         let data_area = TLS + 40;
@@ -2005,7 +2004,7 @@ pub(super) mod testing {
     }
 
     /// Marshal a request carrying `buffers` map-alias **send** buffers into an
-    /// existing session's TLS — the shape `erpt`'s context commands arrive in,
+    /// existing session's TLS, the shape `erpt`'s context commands arrive in,
     /// which carry two and three of them.
     pub(crate) fn write_send_buffer_request(
         cpu: &mut Cpu,
@@ -2018,7 +2017,7 @@ pub(super) mod testing {
 
     #[test]
     fn csrng_fills_the_buffer_with_bytes_that_differ() {
-        // Not a CSPRNG — see `Cpu::next_random_u64` — but a caller asking for
+        // Not a CSPRNG (see `Cpu::next_random_u64`) but a caller asking for
         // random bytes has to get bytes, and different ones each call. The
         // generic reply left the buffer untouched, so a "random" value was
         // whatever the caller's stack already held.
@@ -2059,7 +2058,7 @@ pub(super) mod testing {
         assert_ne!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0);
     }
 
-    /// A CMIF **control** request (message type 5) — the session-management
+    /// A CMIF **control** request (message type 5), the session-management
     /// commands `libnx` sends on a handle the moment `sm` hands it over,
     /// before any command of the service's own.
     pub(crate) fn control_request(command_id: u32) -> Cpu {

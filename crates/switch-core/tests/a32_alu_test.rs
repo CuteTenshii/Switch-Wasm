@@ -76,7 +76,7 @@ fn a_condition_that_fails_costs_only_the_advance() {
     assert_eq!(r(&cpu, 2), 0);
 }
 
-/// Reading r15 yields the instruction's own address plus 8 — the pipeline
+/// Reading r15 yields the instruction's own address plus 8, the pipeline
 /// offset the architecture made visible.
 #[test]
 fn r15_reads_as_the_instruction_address_plus_eight() {

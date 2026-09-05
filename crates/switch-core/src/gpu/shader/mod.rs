@@ -2,12 +2,12 @@
 //! instruction (that's [`isa`]).
 //!
 //! Real binaries pack instructions in 32-byte blocks: an 8-byte `sched`
-//! control word (which register bank/latency hints the scheduler needs — not
+//! control word (which register bank/latency hints the scheduler needs, not
 //! a real instruction) followed by three real 8-byte instructions.
 //!
 //! A shader binary carries no length, so the end has to be found rather than
 //! read. The first version of this stopped at the first `exit`, which is
-//! right only for straight-line programs — a shader with any control flow has
+//! right only for straight-line programs: a shader with any control flow has
 //! code *after* its first `exit` that a branch reaches. This walks the
 //! control-flow graph instead: decode from the entry point, follow every
 //! branch target, and stop each path at whatever ends it. Anything no path
@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, HashSet};
 /// every one a real frame used through [`wgsl::translate`].
 ///
 /// Off unless a tool turns it on, so a frame nobody is measuring pays one
-/// thread-local read per *draw* — not per fragment. A global rather than a
+/// thread-local read per *draw*, not per fragment. A global rather than a
 /// field on [`crate::gpu::exec::ExecCtx`] because it is a tool's seam and not
 /// part of a frame: threading a `&mut Vec` down to the one place that knows
 /// both the stage and the decoded program would change every construction of
@@ -68,8 +68,8 @@ pub mod uses {
 }
 
 /// Hard cap on decoded instructions per program, so a binary that is missing
-/// its `exit` — a corrupt upload, or a control-flow form this decoder cannot
-/// follow — can't walk off into unmapped memory.
+/// its `exit`, a corrupt upload, or a control-flow form this decoder cannot
+/// follow: can't walk off into unmapped memory.
 const MAX_INSTRUCTIONS: usize = 4096;
 
 /// The first real instruction sits in slot 1 of the first 32-byte block,
@@ -154,7 +154,7 @@ impl ProgramHeader {
     /// `None` if the program does not write it.
     ///
     /// Registers are handed out in render-target order, and a target the
-    /// program writes *nothing* to is skipped whole — but inside a target it
+    /// program writes *nothing* to is skipped whole, but inside a target it
     /// writes anything to, a disabled component still costs its register.
     /// Reading `r0..r3` as RGBA instead is what turned Asphalt 9's red car
     /// green: its program leaves a component to the driver, and every colour
@@ -209,7 +209,7 @@ impl Program {
     }
 }
 
-/// Words of shader binary to scan looking for `exit` before giving up — not
+/// Words of shader binary to scan looking for `exit` before giving up, not
 /// unbounded (see `shader::MAX_INSTRUCTIONS`'s doc comment for the same
 /// reasoning). Reading stops as soon as `exit` is found, so a short real
 /// program never touches memory past its own end.
@@ -221,18 +221,18 @@ pub const MAX_PROGRAM_WORDS: u64 = 8192;
 /// Decode a shader program straight out of GPU memory, stripping `sched`
 /// words and stopping at the first `exit` (mirrors
 /// `shader::decode_program`, which needs the whole binary as a slice
-/// up front — reading incrementally here means a short real program never
+/// up front: reading incrementally here means a short real program never
 /// touches memory past its own end).
 /// Nouveau/Mesa's shader upload convention prepends a fixed-size header
 /// (driver bookkeeping, not part of the Maxwell ISA) before the real `sched`/
-/// instruction stream — confirmed empirically against a live JKSV capture
+/// instruction stream: confirmed empirically against a live JKSV capture
 /// (its vertex and fragment programs both have a recognisable `sched` word,
 /// followed by a real `ld`, starting exactly 0x50 bytes in;
 /// `/tmp/dump_vs.bin`/`dump_fs.bin` via a temporary dump added and removed
 /// for this investigation). `uam`/deko3d-compiled binaries (hbmenu, this
 /// module's own test fixtures) have no such header. The header's own first
 /// bytes aren't reliably zero (they carry real driver metadata), so this
-/// can't be detected by peeking the first word — instead, decode
+/// can't be detected by peeking the first word, instead, decode
 /// speculatively assuming no header, and if the very first real instruction
 /// (slot 1, right after the first `sched` word) doesn't decode, that's the
 /// header showing through: retry assuming one.
@@ -260,13 +260,13 @@ pub fn decode_program_from_memory(
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DecodeReads {
     /// The pages the program's own words came from, ascending and without
-    /// repeats, **in the GPU address space the decode read through** — a
+    /// repeats, **in the GPU address space the decode read through**, a
     /// caller that wants to watch them has to put them through
     /// `ExecCtx::vmm` first, as the texture cache does.
     pub pages: Vec<u64>,
     /// The constant-buffer words the walk consumed, each with the value it
     /// held. Only a `brx`'s jump table reads these, so the list is usually
-    /// empty and never long — which is what makes re-reading them to check a
+    /// empty and never long, which is what makes re-reading them to check a
     /// cached translation cheaper than redoing the translation.
     pub consts: Vec<(u64, u32)>,
 }
@@ -379,7 +379,7 @@ fn is_instruction_slot(offset: u32) -> bool {
 
 /// A branch target rounded onto the instruction slot it means. A target is a
 /// raw byte offset and can land on the `sched` word that starts a 32-byte
-/// block, which is not an instruction — hardware takes the next slot, so an
+/// block, which is not an instruction: hardware takes the next slot, so an
 /// unaligned target is the block's first real instruction rather than an
 /// error. Every computed branch goes through this: `bra`, `ssy`, `pbk`,
 /// `pcnt` and `brx` alike.
@@ -405,7 +405,7 @@ pub fn next_slot(offset: u32) -> u32 {
 /// How many instructions back a jump-table walk will look.
 ///
 /// The walk follows a chain of definitions rather than a run of adjacent
-/// instructions, so this is not the size of the idiom — it is a bound on a
+/// instructions, so this is not the size of the idiom: it is a bound on a
 /// binary where the shape is simply not there. The Home Menu's fragment
 /// shaders put 36 instruction slots between the clamp and the branch, which
 /// is exactly why this is not the 32 it used to be.
@@ -420,7 +420,7 @@ const MAX_BRX_ARMS: usize = 256;
 /// A `switch` lowers to four things: clamp the selector to the last arm,
 /// scale it to a word index, load that entry of the table, and branch to it.
 /// The clamp is the only thing in the binary that records how many arms the
-/// `switch` had, so the walk has to reach it — and it is the one part the
+/// `switch` had, so the walk has to reach it, and it is the one part the
 /// scheduler is free to hoist far away from the rest, because it depends on
 /// nothing but the selector. In the Home Menu's fragment shaders it sits 36
 /// instruction slots ahead of the branch, with the other three packed
@@ -430,13 +430,13 @@ const MAX_BRX_ARMS: usize = 256;
 /// adjacent instructions: find what wrote the register the `brx` reads, then
 /// what wrote that instruction's input, and so on until the clamp. Each step
 /// takes the nearest preceding write, which is a use-def chain only if the
-/// preceding code is the code that runs — an assumption this makes and cannot
+/// preceding code is the code that runs: an assumption this makes and cannot
 /// check, since the control-flow graph is what is being decoded. What keeps
 /// it honest is that the chain must be exactly this idiom: anything else
 /// writing a register the chain is following gives up, and so does a write
 /// that is predicated, because then the register's value depends on which
 /// path reached it. Giving up returns `None` and leaves the caller to fall
-/// through — a guess at a table's length reads whatever follows it as code.
+/// through: a guess at a table's length reads whatever follows it as code.
 fn brx_targets(
     decoded: &BTreeMap<u32, Instruction>,
     at: u32,
@@ -574,7 +574,7 @@ pub fn decode_program_with_consts(
                 // `brx` reaches its arms only through a jump table in a
                 // constant bank. The linear walk finds an arm only when the
                 // arm before it falls through, and a `switch` whose arms all
-                // end in `brk` or `bra` has none that do — the Home Menu's
+                // end in `brk` or `bra` has none that do, the Home Menu's
                 // instanced-quad vertex shader is one, and every one of its
                 // 222 draws stopped on an arm no path had decoded.
                 Op::Brx { base, reg } => {
@@ -645,7 +645,7 @@ mod tests {
     use isa::{FMod, FmulScale, MemSize, MufuOp, Operand, TexDim, RZ};
 
     /// Decode `solid_fragment_shader` out of a real `ExecCtx`, reporting what
-    /// the walk read — the seam a backend caches a translation against.
+    /// the walk read, the seam a backend caches a translation against.
     fn decode_recording() -> (u64, DecodeReads) {
         use crate::gpu::exec::{ExecCtx, GpuStats};
         use crate::gpu::syncpt::Host1x;
@@ -969,7 +969,7 @@ mod tests {
 
     /// The Home Menu's instanced-quad vertex shader, from the `brx` that
     /// picks a corner's texture coordinate through the three arms it selects
-    /// between — transcribed word for word out of a live qlaunch run, along
+    /// between: transcribed word for word out of a live qlaunch run, along
     /// with the jump table its `c1` held.
     fn brx_switch_fixture() -> (Vec<u8>, [u32; 3]) {
         let mut bytes = vec![0u8; 0x300];
@@ -1049,7 +1049,7 @@ mod tests {
     #[test]
     fn a_brx_base_is_not_rounded_onto_an_instruction_slot() {
         // Only the *sum* of the base and a table entry is a target. This
-        // base is zero, which is a multiple of 32 — rounding it up to the
+        // base is zero, which is a multiple of 32, rounding it up to the
         // first real instruction slot would add 8 to every arm and land two
         // of the three on the `brk` after the arm instead of the arm itself.
         let (bytes, table) = brx_switch_fixture();
@@ -1060,7 +1060,7 @@ mod tests {
 
     #[test]
     fn a_brx_whose_table_cannot_be_read_still_decodes_what_falls_through() {
-        // No constant banks bound — the decode must not fail, it must just
+        // No constant banks bound: the decode must not fail, it must just
         // stop knowing where the arms are.
         let (bytes, _) = brx_switch_fixture();
         let program = decode_program(&bytes).unwrap();
@@ -1071,7 +1071,7 @@ mod tests {
         );
     }
 
-    /// `nop`, which writes nothing and falls through — filler for putting a
+    /// `nop`, which writes nothing and falls through, filler for putting a
     /// measured distance between two instructions.
     const NOP: (u32, u32) = (0x00070f00, 0x50b00000);
     /// `brk`, which ends an arm.
@@ -1155,7 +1155,7 @@ mod tests {
 
     #[test]
     fn a_predicated_write_to_the_selector_abandons_the_table() {
-        // `@p0 shl r12, r12, 2` — an instruction the walk would otherwise
+        // `@p0 shl r12, r12, 2`: an instruction the walk would otherwise
         // step straight through, except that only some lanes take it. After
         // it the selector holds two different values at once, and the clamp
         // behind it bounds only one of them, so the arm count read from it
@@ -1171,7 +1171,7 @@ mod tests {
 
     #[test]
     fn an_unrecognised_write_to_the_selector_abandons_the_table() {
-        // `iadd r12, r12, -1` is a real part of this switch's lowering — but
+        // `iadd r12, r12, -1` is a real part of this switch's lowering, but
         // *behind* the clamp, where it changes nothing. In front of it the
         // walk cannot tell whether the clamp still bounds what the branch
         // reads, so it stops rather than assuming it does.

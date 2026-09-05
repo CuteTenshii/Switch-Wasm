@@ -139,7 +139,7 @@ fn simd_table_lookup_gathers_bytes_and_zeroes_misses() {
         cpu.mem.write_u8(0x3010 + i, 0x20 + i as u8).unwrap();
     }
     // v2: the low half reverses the first eight table bytes, the high half
-    // is 0x40 — past the end of any table this test builds.
+    // is 0x40: past the end of any table this test builds.
     for i in 0..8u32 {
         cpu.mem.write_u8(0x3020 + i, 7 - i as u8).unwrap();
         cpu.mem.write_u8(0x3028 + i, 0x40).unwrap();
@@ -182,7 +182,7 @@ fn simd_ins_element_moves_one_lane_and_leaves_the_rest() {
     // `INS <Vd>.<Ts>[<i1>], <Vn>.<Ts>[<i2>]` is the `op == 1` half of the
     // AdvSIMD copy group. The group was matched on bits[29:21], which pins
     // `op` to 0, so every one of these fell through to the three-same integer
-    // decoder and executed as an unrelated arithmetic op — silently
+    // decoder and executed as an unrelated arithmetic op, silently
     // overwriting the whole destination register instead of one lane.
     //
     // The regression this comes from: libnx's `smEncodeName` builds an 8-byte
@@ -213,7 +213,7 @@ fn simd_ins_element_moves_one_lane_and_leaves_the_rest() {
     assert_eq!(cpu.read_x(1), u64::from_le_bytes(*b"ns:am2\0\0"));
 
     // A non-zero source lane, and lanes wider than a byte. INS touches only
-    // the destination lane — the top half of Vd is left alone, unlike almost
+    // the destination lane: the top half of Vd is left alone, unlike almost
     // every other AdvSIMD encoding.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(0, 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00);
@@ -498,7 +498,7 @@ fn simd_multiply_and_multiply_accumulate() {
 #[test]
 fn ld1_multiple_structures_writes_back_only_when_post_indexed() {
     // `ld1 {v1.16b, v2.16b}, [x2], #32` = 0x4cdfa041. The immediate post-index
-    // form has Rm == 31, which the old decode read as "no writeback" — newlib's
+    // form has Rm == 31, which the old decode read as "no writeback", newlib's
     // strrchr then computed its result from a base 32 bytes too low and
     // PHYSFS_init failed on a garbage argv[0] directory.
     let mut cpu = cpu_at(0x1000);
@@ -645,7 +645,7 @@ fn bsl_bit_and_bif_take_their_mask_from_the_right_register() {
 #[test]
 fn scalar_fp_one_source_and_fused_multiply_add() {
     // `fmov s0, s15` = 0x1e2041e0 is opcode 0 of the 1-source group, whose low
-    // opcode bit sits in bits[15] — matching bits[15:10] as a unit missed the
+    // opcode bit sits in bits[15], matching bits[15:10] as a unit missed the
     // whole group, so NX-Shell faulted here. FMOV is a bit-exact copy, so a
     // signalling NaN payload survives it.
     let mut cpu = cpu_at(0x1000);
@@ -753,7 +753,7 @@ fn vector_integer_float_conversions() {
 
 #[test]
 fn vector_floating_point_arithmetic() {
-    // `fdiv v28.4s, v28.4s, v30.4s` = 0x6e3eff9c — the FP three-same group
+    // `fdiv v28.4s, v28.4s, v30.4s` = 0x6e3eff9c, the FP three-same group
     // (opcodes from 0b11000 up) was being decoded as integer ops.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(28, f32x4([1.0, 3.0, 5.0, 9.0]));
@@ -968,7 +968,7 @@ fn vector_two_register_misc_integer_ops() {
 fn scalar_integer_float_conversions_and_rounding_modes() {
     // `ucvtf d0, x1` = 0x9e630020 is where NX-Shell died: rmode/opcode were
     // read as one 6-bit field including the fixed bit 21, so this decoded as
-    // FCVTMU and wrote x0 — clobbering a live pointer.
+    // FCVTMU and wrote x0: clobbering a live pointer.
     let mut cpu = cpu_at(0x1000);
     cpu.set_reg(0, 0xDEAD_BEEF);
     cpu.set_reg(1, 5);
@@ -1165,7 +1165,7 @@ fn fcsel_fccmp_and_fixed_point_conversions() {
 
 #[test]
 fn scalar_two_register_misc_converts_one_lane() {
-    // `ucvtf s13, s13` = 0x7e21d9ad — the scalar form of the two-register misc
+    // `ucvtf s13, s13` = 0x7e21d9ad, the scalar form of the two-register misc
     // group (bits[31:30] = 01, bits[28:24] = 11110). Only the vector encodings
     // were decoded, so NX-Shell faulted here.
     let mut cpu = cpu_at(0x1000);
@@ -1479,7 +1479,7 @@ fn aesd_and_aesimc_invert_the_encrypting_pair() {
     );
 }
 
-/// SHA1H is a bare rotate, and SHA1SU0's three-way XOR is the schedule step —
+/// SHA1H is a bare rotate, and SHA1SU0's three-way XOR is the schedule step,
 /// both cheap enough to state the expected value outright.
 #[test]
 fn the_sha1_instructions_decode_and_compute() {
@@ -1547,7 +1547,7 @@ fn pmull_multiplies_without_carrying() {
     assert_eq!(cpu.read_vreg(2), 1u128 << 126);
 }
 
-/// `fcvt` to and from a half is ARMv8.0 baseline — the half-precision
+/// `fcvt` to and from a half is ARMv8.0 baseline, the half-precision
 /// *arithmetic* the A57 lacks is a separate thing.
 #[test]
 fn fcvt_converts_to_and_from_half_precision() {
@@ -1682,7 +1682,7 @@ fn the_vector_half_conversions_move_four_lanes() {
 
 /// The shift amount is the low **byte** of the lane sign-extended, so a
 /// negative one shifts right. Reading the whole lane instead made that
-/// impossible below 64 bits — `sshl` could only ever shift left.
+/// impossible below 64 bits: `sshl` could only ever shift left.
 #[test]
 fn sshl_shifts_right_on_a_negative_amount_in_every_lane_width() {
     for (size, esize) in [(0u32, 8u32), (1, 16), (2, 32), (3, 64)] {

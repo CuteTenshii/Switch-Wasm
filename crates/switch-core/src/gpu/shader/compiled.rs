@@ -3,7 +3,7 @@
 //! [`Program`] is what the binary says: instructions paired with the byte
 //! offsets they were decoded from. That is the right shape for reading a
 //! shader and the wrong one for running it, because a fragment shader runs
-//! once per covered pixel — a full-screen quad runs it 921 600 times — and
+//! once per covered pixel (a full-screen quad runs it 921 600 times) and
 //! everything the interpreter re-derives on the way is re-derived that many
 //! times.
 //!
@@ -14,8 +14,8 @@
 //! and folded into an immediate, rather than going back through the constant
 //! cache on every operand evaluation.
 //!
-//! It is also the shape a shader translator wants — constants folded, control
-//! flow resolved — so the same lowering serves both.
+//! It is also the shape a shader translator wants, constants folded, control
+//! flow resolved, so the same lowering serves both.
 
 use super::interp::{texs_writes_for, ConstantSource};
 use super::isa::{Op, Operand, Pred};
@@ -146,7 +146,7 @@ impl Compiled {
         self.preds[index]
     }
 
-    /// Every operation, in order — for the passes that only look at opcodes.
+    /// Every operation, in order, for the passes that only look at opcodes.
     pub fn ops(&self) -> &[Op] {
         &self.ops
     }
@@ -162,7 +162,7 @@ impl Compiled {
         self.targets.get(index).copied().unwrap_or(NO_TARGET)
     }
 
-    /// The byte offset instruction `index` was decoded from — what an error
+    /// The byte offset instruction `index` was decoded from, what an error
     /// message names, since that is the address in the shader binary.
     pub fn offset(&self, index: usize) -> u32 {
         self.offsets.get(index).copied().unwrap_or(0)
@@ -176,19 +176,19 @@ impl Compiled {
         self.offsets.binary_search(&byte_offset).ok()
     }
 
-    /// Where the `brx` at `index` can go, as indices — the arms of the switch
+    /// Where the `brx` at `index` can go, as indices, the arms of the switch
     /// it lowers, which nothing on the instruction itself names.
     pub fn indirect_targets(&self, index: usize) -> Option<&[u32]> {
         self.indirect.get(&index).map(|t| t.as_slice())
     }
 
-    /// The generic varying slots this program's `ipa`s read, ascending — see
+    /// The generic varying slots this program's `ipa`s read, ascending: see
     /// [`super::interpolated_slots`].
     pub fn interpolated_slots(&self) -> &[usize] {
         &self.interpolated_slots
     }
 
-    /// The deferred register writes the `texs` at `index` produces — see
+    /// The deferred register writes the `texs` at `index` produces: see
     /// [`Program::texs_writes`].
     pub fn texs_writes(&self, index: usize) -> &[(u8, super::isa::TexsStore, usize)] {
         self.texs_writes
@@ -764,7 +764,7 @@ fn fold(op: Op, consts: &dyn ConstantSource) -> Op {
             hi,
         },
 
-        // Everything else carries no constant-bank operand — `ldc`'s bank is
+        // Everything else carries no constant-bank operand: `ldc`'s bank is
         // indexed by a register, so its value is not known until it runs.
         other => other,
     }
