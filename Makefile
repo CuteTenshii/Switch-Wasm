@@ -1,7 +1,12 @@
 .PHONY: all test wasm assets clean
 
 TARGET := wasm32-unknown-unknown
-WASM   := target/$(TARGET)/release/switch_wasm.wasm
+# Which cargo profile the module is built with. `release` is what ships;
+# `PROFILE=quick` halves the wait when the change under test is the emulator's
+# behaviour rather than the artefact's size (4.5 MB against 4.1 MB).
+PROFILE ?= release
+OUT    := target/$(TARGET)/$(PROFILE)
+WASM   := $(OUT)/switch_wasm.wasm
 DIST   := dist
 
 all: test assets
@@ -28,10 +33,8 @@ test:
 # `wasm-bindgen` is a build-time tool and has to match the crate version in
 # Cargo.lock: `cargo install wasm-bindgen-cli --version <that>`.
 wasm:
-	cargo build --target $(TARGET) --release -p switch-wasm --features gpu
-	wasm-bindgen --target web \
-	  --out-dir target/$(TARGET)/release \
-	  target/$(TARGET)/release/switch_wasm.wasm
+	cargo build --target $(TARGET) --profile $(PROFILE) -p switch-wasm --features gpu
+	wasm-bindgen --target web --out-dir $(OUT) $(WASM)
 
 # The whole site, from web/index.html down: Vite follows the page to the
 # stylesheet, the worker, the font and the core, and emits every one of them
@@ -41,7 +44,7 @@ wasm:
 # because the core is an *input* to the frontend build rather than something
 # copied in after it, and only make knows how to build the core.
 assets: wasm
-	bun run build
+	SWITCH_PROFILE=$(PROFILE) bun run build
 	@ls -la $(DIST) $(DIST)/assets
 
 clean:

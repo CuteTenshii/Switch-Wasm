@@ -8,6 +8,31 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
+# For driving the host examples. `release` builds one of them in 21 s of a
+# single core, because `codegen-units = 1` has nowhere to spread; thin LTO over
+# 16 units runs the same guest workload at the same speed in 8.6 s. Quote
+# timings from `release` anyway — see AGENTS.md.
+[profile.quick]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+
+# `perf -s srcline` over the emulator is what found the last three wins, and it
+# needs line tables. Only this crate carries them: `wgpu`'s 82 dependencies are
+# never what a profile is asking about, and debug info for them is most of the
+# build.
+[profile.quick.package.switch-core]
+debug = "line-tables-only"
+
+# The test suite runs guest code, and at `opt-level = 0` the emulator inside it
+# is slow enough to dominate: the suite takes 47 s unoptimised and 20 s here,
+# for no measured build-time cost.
+[profile.dev]
+opt-level = 2
+
+[profile.test]
+opt-level = 2
+
 [workspace.lints.clippy]
 # This codebase spells out hardware encodings field by field — an instruction
 # word, a Maxwell method, an NCA header — and a field that happens to be zero

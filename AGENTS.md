@@ -13,13 +13,21 @@ and their environment switches), `services.md` (the per-service inventory),
 
 ## Commands
 
-- `make all` — `test` then `assets`. `make test` — `cargo test`, 908 tests.
+- `make all` — `test` then `assets`. `make test` — `cargo test`, 1094 tests.
 - `make wasm` — release wasm `--features gpu` + `wasm-bindgen --target web`.
   Needs the `wasm32-unknown-unknown` target and a `wasm-bindgen-cli` matching
   `Cargo.lock`.
 - `make assets` — `make wasm` + `vite build` → `dist/`. The only frontend target:
   the core is an *input* to the frontend build, so building `switch-wasm` alone
   does not update the site.
+- **`PROFILE=quick` on either builds the same thing in half the time.**
+  `release` is `lto = "fat"` and `codegen-units = 1`, which puts a 100k-line
+  crate's codegen on one core: 21 s per host example and 44 s per wasm rebuild.
+  `quick` is thin LTO over 16 units — 8.6 s and 20 s, a 4.5 MB module instead
+  of 4.1 MB, and the same guest speed (min-of-3 on JD2017 to 400 M steps: 3.96 s
+  against 4.02 s). Host examples take it as `cargo build --profile quick
+  --example <name>`, landing in `target/quick/examples/`. **Ship and quote
+  timings from `release`.**
 - `bun run dev` (:8000) / `bun run preview` — both need `make wasm` once.
 - `bun run typecheck` — the only thing that type-checks; Vite never does.
 - `cargo fmt --all` and `cargo clippy --workspace --all-targets -- -D warnings`

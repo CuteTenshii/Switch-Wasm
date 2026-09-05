@@ -14,8 +14,12 @@ import { defineConfig } from 'vite';
    card, whose URL is baked into other people's caches by the meta tags, and the
    font's licence, which has to stay readable next to the font it covers. */
 
+// Which cargo profile `make wasm` put the module in. The Makefile's PROFILE
+// selects it and the alias has to follow, or a `quick` build serves the last
+// `release` one.
+const profile = process.env.SWITCH_PROFILE ?? 'release';
 const coreDir = fileURLToPath(
-  new URL('./target/wasm32-unknown-unknown/release', import.meta.url));
+  new URL(`./target/wasm32-unknown-unknown/${profile}`, import.meta.url));
 
 // Cross-origin isolation, the precondition for `SharedArrayBuffer`. The
 // deployed site asks for the same pair through `web/public/_headers`.
