@@ -43,6 +43,14 @@ and their environment switches), `services.md` (the per-service inventory),
   --triple=aarch64`.
 - `--example jit_difftest -- <nro>` — both engines side by side, every state
   difference. The interpreter is the reference.
+- **`--example emit_difftest` then `node tools/emit_difftest.mjs <dir>`** — the
+  *emitted wasm* against the interpreter. Two programs because `switch-core` has
+  no wasm engine and the host has none either: the example finds real blocks the
+  emitter can write, records the guest state either side of the interpreter
+  running them, and writes a module per case; the tool runs those under V8 and
+  diffs every register slot and NZCV. `OUT=<dir>` picks where. **`INJECT=1` on
+  the tool corrupts two expected results and must report exactly those two** —
+  run it once, or "agree" means nothing.
 
 ## Layout
 
@@ -234,9 +242,23 @@ tools, the debug panel's *Translation* section in the browser.
   from the same rules, so `condition_holds` is a shift and a mask. Written as a
   `match` it compiles to a fourteen-way jump table on a value that changes every
   time a loop turns over, and mispredicts.
-- Emitting wasm per block is blocked by the memory model, not the browser: a
-  generated module can only address its own linear memory, and guest memory is a
-  page table with soft regions, read-only ranges and watchpoints.
+- **The emitter (`wasm.rs`, `emit.rs`) is started, and straight-line only.**
+  `wasm.rs` writes the binary format and knows nothing about AArch64; `emit.rs`
+  turns `Op`s into it. A block function takes **one parameter, the address of
+  the `Cpu`**, and reaches the register file and NZCV by `offset_of!`, so the
+  module imports the host's memory and touches guest state where it already
+  lives. `emit_block` returns `None` for anything it cannot write, including
+  every block with an exit or a memory op, and that block keeps interpreting:
+  coverage is a performance question, not a correctness one. It is not wired
+  into `run_jit` yet and nothing executes emitted code in anger.
+- **Every opcode in `wasm.rs` is one something emits.** Instructions for the
+  control flow that is coming were written, went unused, tripped
+  `clippy -D warnings` and were deleted; they come back with the code that uses
+  them, so the encoder stays covered by `emit_difftest` rather than accumulating
+  untested arms.
+- Guest *memory* is still the open piece: a generated module can only address
+  its own linear memory, and guest memory is a page table with soft regions,
+  read-only ranges and watchpoints. Loads and stores need the flat arena first.
 
 ## Guest threads (`cpu/mod.rs`, `cpu/svc.rs`)
 

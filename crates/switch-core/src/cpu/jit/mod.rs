@@ -29,30 +29,33 @@
 //! interpreter's time went (see [`super::Cpu::execute`]'s note on the group
 //! dispatcher). It does not generate code.
 //!
-//! # Why not generate wasm
+//! # Generating wasm
 //!
-//! Emitting a wasm module per translation unit and handing it to
-//! `WebAssembly.Module` is a real JIT, and it is the next step for speed
-//! rather than something the browser forbids. What stops it being *this*
-//! step is the memory model, not the platform.
+//! [`emit`] writes a block out as wasm rather than interpreting it, using the
+//! encoder in [`wasm`]. It is started but not wired in: only straight-line
+//! data-processing blocks are written, and [`emit::emit_block`] returns `None`
+//! for everything else, so nothing executes emitted code yet.
 //!
-//! A generated module can only address its own linear memory directly. Guest
-//! memory cannot be that: this emulator is itself a wasm32 module, whose
-//! linear memory caps at 4 GiB, and the guest address space is 4 GiB reaching
-//! up to [`super::GUEST_SPACE_END`], so an identity map does not fit, and
-//! would give up the lazy soft-mapping that makes a multi-gigabyte heap cost
-//! nothing until it is touched. [`crate::mem::Memory`] is a page table of
-//! boxed 4 KiB pages with soft regions, read-only ranges and watchpoints over
-//! it. Generated code would have to reach all of that through imported host
-//! calls, one per guest load and store, which is most of what a block does,
-//! and exactly what the codegen was supposed to make cheap.
+//! What made this look impossible was the memory model, and two thirds of that
+//! turned out to be wrong. A generated module can only address *its own*
+//! linear memory, but it can **import** the host's, and this emulator is
+//! itself a wasm module: the guest register file and NZCV are at fixed offsets
+//! inside its `Cpu`, so an emitted block reaches them with a plain `i64.load`
+//! and nothing is copied or called. Compiling was supposed to be too dear for
+//! so small a unit, and measured it is not: 7,062 blocks compile in 1.8 ms, so
+//! the answer is to batch a module rather than to emit one per block.
 //!
-//! Two smaller things point the same way: compiling a module goes out through
-//! JS, so a basic block is far too small a unit to pay for one, and generated
-//! code would not exist in host builds, leaving the test suite and
-//! `examples/jit_difftest.rs` covering only one of the two engines. Flattening
-//! the guest address space behind a base-plus-bounds check is the change that
-//! has to come first.
+//! What is genuinely still open is guest *memory*. [`crate::mem::Memory`] is a
+//! page table of boxed 4 KiB pages with soft regions, read-only ranges and
+//! watchpoints, and emitted code cannot walk that without a host call per
+//! access, which is most of what a block does and exactly what codegen was
+//! meant to make cheap. Flattening the address space behind one bounds check
+//! has to come before loads and stores are emitted.
+//!
+//! Generated code also does not exist in host builds, which would have left it
+//! untested; `examples/emit_difftest.rs` and `tools/emit_difftest.mjs` are the
+//! answer to that, running the emitted module under V8 against the interpreter
+//! on blocks a real title executes.
 //!
 //! # Fidelity
 //!
@@ -92,15 +95,17 @@
 //! # Where things are
 //!
 //! [`ir`] is what a block is made of, [`cache`] is which blocks exist and when
-//! a guest store takes one away, [`decode`] builds them and [`exec`] runs
-//! them. What an instruction *means* is in none of them: those bodies are
+//! a guest store takes one away, [`decode`] builds them, [`exec`] runs them,
+//! and [`emit`] writes them out as wasm through [`wasm`]. What an instruction *means* is in none of them: those bodies are
 //! shared with the interpreter and live with the semantics, in
 //! [`crate::cpu::alu`], [`crate::cpu::loadstore`] and [`crate::cpu::system`].
 
 mod cache;
 mod decode;
+mod emit;
 mod exec;
 pub(in crate::cpu) mod ir;
+mod wasm;
 
 pub use cache::JitStats;
 pub use decode::translates;
