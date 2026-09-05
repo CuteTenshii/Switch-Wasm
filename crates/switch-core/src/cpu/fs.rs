@@ -117,6 +117,10 @@ impl From<&crate::control::Nacp> for SaveDataQuota {
     }
 }
 
+/// `fs`'s "path not found" (2002-0001), the answer for content this console
+/// does not have.
+const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
+
 impl Cpu {
     pub(super) fn fsp_srv_request(
         &mut self,
@@ -162,7 +166,6 @@ impl Cpu {
                     // No NCA was decrypted this session (homebrew, or a
                     // title with no RomFS section): report "not found"
                     // rather than handing out a storage backed by nothing.
-                    const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
                     return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
                 }
                 self.reply_with_interface(tls, handle, "fsp-srv-storage")?;
@@ -190,7 +193,6 @@ impl Cpu {
                             "[fs] no system data archive registered for data id {data_id:016x}"
                         ),
                     );
-                    const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
                     return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
                 }
                 let key = self.reply_with_interface(tls, handle, "fsp-srv-storage")?;
@@ -331,6 +333,25 @@ impl Cpu {
             // sends them once 1005 has reported a mode that is not "off".
             Some(1006) | Some(1014) | Some(1015) | Some(1016) => {
                 self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // The `Open*` commands hand back an `IFileSystem` or an
+            // `IStorage`. A bare success gives the caller an out-object id of
+            // **zero**, which it wraps and calls through, so the answer has to
+            // be a failure rather than a lie.
+            //
+            // Asphalt 9 is what named this: `OpenDataFileSystemByApplicationId`
+            // (9) fell to the catch-all below, and 12.9 billion instructions
+            // later `blr x8` went to pc=0 with x8 = 0. Guest memory is
+            // soft-mapped from zero ([`Cpu::bootstrap`]), so the two loads that
+            // walked the null vtable read zeros instead of faulting, which is
+            // why the fault surfaces at the call and not at the dereference
+            // that caused it.
+            //
+            // "Not found" is the true answer for content this console does not
+            // have, and it puts the caller on the path it already has for that.
+            Some(2) | Some(7) | Some(8) | Some(9) | Some(12) | Some(17) | Some(30) | Some(31) => {
+                self.warn_no_implementation("fsp-srv", cmd_id);
+                self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[])
             }
             // Still a fabricated success, homebrew that only checks the
             // Result depends on it, but no longer a silent one. Every
@@ -654,7 +675,6 @@ impl Cpu {
     pub(super) fn fs_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         /// Horizon `fs` results: module 2, descriptions 1 (path not found) and
         /// 2 (path already exists).
-        const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
         const PATH_ALREADY_EXISTS: u32 = 2 | (2 << 9);
         let path = self.ipc_request_path(tls);
         // Which storage this `IFileSystem` addresses. The SD card and a save
@@ -793,7 +813,6 @@ impl Cpu {
         cmd_id: Option<u32>,
         key: u64,
     ) -> Result<()> {
-        const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
         let path = self.fs_files.get(&key).cloned().unwrap_or_default();
         // The storage the file was opened on, inherited from its filesystem.
         let mount = self.mount_of(key);
@@ -892,6 +911,39 @@ impl Cpu {
 mod tests {
     use crate::cpu::ipc::testing::*;
     use crate::cpu::Cpu;
+
+    /// An `fsp-srv` command that hands back an object must not answer with a
+    /// bare success: the caller reads the out-object id as zero, wraps it, and
+    /// calls through the null vtable. Asphalt 9 did exactly that with
+    /// `OpenDataFileSystemByApplicationId` and ran to `pc=0`, 12.9 billion
+    /// instructions after the reply that caused it.
+    ///
+    /// Guest memory is soft-mapped from zero, so nothing faults on the way:
+    /// this is only ever caught at the reply.
+    #[test]
+    fn an_unimplemented_open_reports_a_failure_rather_than_a_null_object() {
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        for cmd in [2, 7, 8, 9, 12, 17, 30, 31] {
+            write_request(&mut cpu, cmd, &[]);
+            cpu.fsp_srv_request(TLS, Some(cmd), 1).unwrap();
+            let result = cpu.mem.read_u32(TLS + 0x18).unwrap();
+            assert_ne!(result, 0, "fsp-srv cmd {cmd} answered a bare success");
+        }
+    }
+
+    /// The commands that genuinely have nothing to hand back keep their
+    /// fabricated success: homebrew that only checks the Result depends on it,
+    /// and breaking that to fix the one above would trade one silent failure
+    /// for another.
+    #[test]
+    fn a_setter_shaped_command_still_succeeds() {
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        write_request(&mut cpu, 1003, &[]);
+        cpu.fsp_srv_request(TLS, Some(1003), 1).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
+    }
 
     #[test]
     fn a_file_written_through_ifile_reads_back() {
