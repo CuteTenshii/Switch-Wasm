@@ -144,15 +144,6 @@ impl PairKind {
             PairKind::Load32 | PairKind::Load32Sext | PairKind::Load64
         )
     }
-
-    /// The distance between the two registers' addresses.
-    #[inline(always)]
-    pub(super) fn stride(self) -> u32 {
-        match self {
-            PairKind::Load64 | PairKind::Store64 => 8,
-            _ => 4,
-        }
-    }
 }
 
 /// The slot a load or store's `Rt` field names, which depends on whether the
@@ -962,35 +953,31 @@ impl Cpu {
         let base = self.reg_at(rn);
         let (addr, wb_val) = Self::indexed(base, offset, wb);
         let addr = addr as u32;
-        let second = addr.wrapping_add(kind.stride());
         match kind {
             // Both halves are read before either register is written, so
             // `ldp x0, x1, [x0]` sees the memory it was pointed at.
             PairKind::Load64 => {
-                let v0 = self.mem.read_u64(addr)?;
-                let v1 = self.mem.read_u64(second)?;
+                let (v0, v1) = self.mem.read_u64_pair(addr)?;
                 self.set_reg_at(rt, v0);
                 self.set_reg_at(rt2, v1);
             }
             PairKind::Load32 => {
-                let v0 = u64::from(self.mem.read_u32(addr)?);
-                let v1 = u64::from(self.mem.read_u32(second)?);
-                self.set_reg_at(rt, v0);
-                self.set_reg_at(rt2, v1);
+                let (v0, v1) = self.mem.read_u32_pair(addr)?;
+                self.set_reg_at(rt, u64::from(v0));
+                self.set_reg_at(rt2, u64::from(v1));
             }
             PairKind::Load32Sext => {
-                let v0 = u64::from(self.mem.read_u32(addr)?);
-                let v1 = u64::from(self.mem.read_u32(second)?);
-                self.set_reg_at(rt, sext_u64(v0, 32));
-                self.set_reg_at(rt2, sext_u64(v1, 32));
+                let (v0, v1) = self.mem.read_u32_pair(addr)?;
+                self.set_reg_at(rt, sext_u64(u64::from(v0), 32));
+                self.set_reg_at(rt2, sext_u64(u64::from(v1), 32));
             }
             PairKind::Store64 => {
-                self.mem.write_u64(addr, self.reg_at(rt))?;
-                self.mem.write_u64(second, self.reg_at(rt2))?;
+                self.mem
+                    .write_u64_pair(addr, self.reg_at(rt), self.reg_at(rt2))?;
             }
             PairKind::Store32 => {
-                self.mem.write_u32(addr, self.reg_at(rt) as u32)?;
-                self.mem.write_u32(second, self.reg_at(rt2) as u32)?;
+                self.mem
+                    .write_u32_pair(addr, self.reg_at(rt) as u32, self.reg_at(rt2) as u32)?;
             }
         }
         if let Some(v) = wb_val {

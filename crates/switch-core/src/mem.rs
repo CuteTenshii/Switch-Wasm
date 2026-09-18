@@ -772,6 +772,114 @@ impl Memory {
         Some(())
     }
 
+    /// The two `N`-byte halves of a pair access at `addr`, when the pair lies
+    /// in one page. Leaves the read watchpoint exactly as two single reads
+    /// would: the later half is the one reported when both are watched.
+    #[inline(always)]
+    fn read_pair_in_page<const N: usize>(&self, addr: u32) -> Option<([u8; N], [u8; N])> {
+        let off = Self::in_page_offset(addr);
+        if off + 2 * N > PAGE_SIZE {
+            return None;
+        }
+        let page = self.page_ref(Self::page_index(addr)).ok()?;
+        if addr < self.read_watch.1 && addr.wrapping_add(2 * N as u32) > self.read_watch.0 {
+            self.read_hit
+                .set(Some(Self::later_half_hit(addr, N as u32, self.read_watch)));
+        }
+        Some((
+            page[off..off + N].try_into().unwrap(),
+            page[off + N..off + 2 * N].try_into().unwrap(),
+        ))
+    }
+
+    /// [`Memory::read_pair_in_page`] for writing. Both halves are checked
+    /// before either is written, and a pair that one of them cannot complete
+    /// is `None`, so the caller's half-at-a-time fallback reproduces the
+    /// partial write and the fault exactly.
+    #[inline(always)]
+    fn write_pair_in_page<const N: usize>(
+        &mut self,
+        addr: u32,
+        first: [u8; N],
+        second: [u8; N],
+    ) -> Option<()> {
+        let off = Self::in_page_offset(addr);
+        if off + 2 * N > PAGE_SIZE {
+            return None;
+        }
+        self.check_writable(addr).ok()?;
+        self.check_writable(addr.wrapping_add(N as u32)).ok()?;
+        let page = self.page_mut(Self::page_index(addr)).ok()?;
+        page[off..off + N].copy_from_slice(&first);
+        page[off + N..off + 2 * N].copy_from_slice(&second);
+        if addr < self.watch.1 && addr.wrapping_add(2 * N as u32) > self.watch.0 {
+            self.watch_hit = Some(Self::later_half_hit(addr, N as u32, self.watch));
+        }
+        self.note_code_write(addr);
+        Some(())
+    }
+
+    /// Which half of a pair a watchpoint over `range` reports, given that the
+    /// pair as a whole overlaps it: the second when it overlaps, since two
+    /// single accesses would have reported that one last.
+    #[cold]
+    #[inline(never)]
+    fn later_half_hit(addr: u32, half: u32, range: (u32, u32)) -> u32 {
+        let second = addr.wrapping_add(half);
+        if second < range.1 && second.wrapping_add(half) > range.0 {
+            second
+        } else {
+            addr
+        }
+    }
+
+    /// The two consecutive `u64`s an `LDP` of X registers reads, with one page
+    /// lookup rather than two whenever they share a page. Pairs are about a
+    /// tenth of a retail frame's instructions.
+    #[inline(always)]
+    pub fn read_u64_pair(&self, addr: u32) -> Result<(u64, u64)> {
+        match self.read_pair_in_page::<8>(addr) {
+            Some((a, b)) => Ok((u64::from_le_bytes(a), u64::from_le_bytes(b))),
+            None => Ok((self.read_u64(addr)?, self.read_u64(addr.wrapping_add(8))?)),
+        }
+    }
+
+    /// The two consecutive `u32`s an `LDP` of W registers reads.
+    #[inline(always)]
+    pub fn read_u32_pair(&self, addr: u32) -> Result<(u32, u32)> {
+        match self.read_pair_in_page::<4>(addr) {
+            Some((a, b)) => Ok((u32::from_le_bytes(a), u32::from_le_bytes(b))),
+            None => Ok((self.read_u32(addr)?, self.read_u32(addr.wrapping_add(4))?)),
+        }
+    }
+
+    /// Write two consecutive `u64`s, an `STP` of X registers: the first at
+    /// `addr`, exactly as two [`Memory::write_u64`] calls in that order would.
+    #[inline(always)]
+    pub fn write_u64_pair(&mut self, addr: u32, first: u64, second: u64) -> Result<()> {
+        if self
+            .write_pair_in_page(addr, first.to_le_bytes(), second.to_le_bytes())
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.write_u64(addr, first)?;
+        self.write_u64(addr.wrapping_add(8), second)
+    }
+
+    /// Write two consecutive `u32`s, an `STP` of W registers.
+    #[inline(always)]
+    pub fn write_u32_pair(&mut self, addr: u32, first: u32, second: u32) -> Result<()> {
+        if self
+            .write_pair_in_page(addr, first.to_le_bytes(), second.to_le_bytes())
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.write_u32(addr, first)?;
+        self.write_u32(addr.wrapping_add(4), second)
+    }
+
     #[inline(always)]
     pub fn read_u16(&self, addr: u32) -> Result<u16> {
         match self.read_bytes_in_page::<2>(addr) {
@@ -1455,6 +1563,67 @@ mod tests {
         assert_eq!(m.read_u32(0).unwrap(), 0xDEAD_BEEF);
         m.write_u64(8, 0x1234_5678_9ABC_DEF0).unwrap();
         assert_eq!(m.read_u64(8).unwrap(), 0x1234_5678_9ABC_DEF0);
+    }
+
+    /// A pair in one page takes the single-lookup path and one across a page
+    /// boundary takes the half-at-a-time one, and the two must agree.
+    #[test]
+    fn pair_accesses_match_two_single_accesses() {
+        let mut m = Memory::new();
+        m.map_zero(0x1000, 2 * PAGE_SIZE).unwrap();
+        for addr in [0x1100, 0x1FF8, 0x1FFC] {
+            m.write_u64_pair(addr, 0x1111_2222_3333_4444, 0x5555_6666_7777_8888)
+                .unwrap();
+            assert_eq!(m.read_u64(addr).unwrap(), 0x1111_2222_3333_4444);
+            assert_eq!(m.read_u64(addr + 8).unwrap(), 0x5555_6666_7777_8888);
+            assert_eq!(
+                m.read_u64_pair(addr).unwrap(),
+                (0x1111_2222_3333_4444, 0x5555_6666_7777_8888)
+            );
+
+            m.write_u32_pair(addr, 0x9999_AAAA, 0xBBBB_CCCC).unwrap();
+            assert_eq!(m.read_u32(addr).unwrap(), 0x9999_AAAA);
+            assert_eq!(m.read_u32(addr + 4).unwrap(), 0xBBBB_CCCC);
+            assert_eq!(m.read_u32_pair(addr).unwrap(), (0x9999_AAAA, 0xBBBB_CCCC));
+        }
+        // A pair reading off the end of mapped memory faults like its halves.
+        assert!(m.read_u64_pair(0x2FF8).is_err());
+        assert!(m.read_u32_pair(0x2FFC).is_err());
+    }
+
+    /// Two stores in a row leave the first one done when the second faults,
+    /// and a pair is architecturally two stores.
+    #[test]
+    fn a_pair_whose_second_half_is_read_only_still_writes_the_first() {
+        let mut m = Memory::new();
+        m.map_zero(0x1000, PAGE_SIZE).unwrap();
+        m.mark_readonly(0x1108, 0x1110);
+        assert!(m.write_u64_pair(0x1100, 7, 8).is_err());
+        assert_eq!(m.read_u64(0x1100).unwrap(), 7);
+        assert_eq!(m.read_u64(0x1108).unwrap(), 0);
+    }
+
+    /// The watchpoints name the later of two single accesses that hit, so a
+    /// pair has to name the half that would have come second.
+    #[test]
+    fn a_watched_pair_reports_the_half_two_accesses_would() {
+        let mut m = Memory::new();
+        m.map_zero(0x1000, PAGE_SIZE).unwrap();
+        for (start, size, expected) in [
+            (0x1100, 8, 0x1100),
+            (0x1108, 8, 0x1108),
+            (0x1100, 16, 0x1108),
+        ] {
+            m.watch_writes(start, size);
+            m.write_u64_pair(0x1100, 1, 2).unwrap();
+            assert_eq!(m.take_watch_hit(), Some(expected));
+            m.watch_reads(start, size);
+            m.read_u64_pair(0x1100).unwrap();
+            assert_eq!(m.take_read_hit(), Some(expected));
+        }
+        m.watch_writes(0x1110, 8);
+        m.write_u64_pair(0x1100, 1, 2).unwrap();
+        assert_eq!(m.take_watch_hit(), None);
     }
 
     #[test]
