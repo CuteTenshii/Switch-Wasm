@@ -366,11 +366,27 @@ impl Branch {
     }
 }
 
+/// The address an empty link slot holds. Unaligned, so no block starts there
+/// and an empty slot can never match.
+const NO_LINK: u32 = 1;
+
+/// How many successors a block remembers.
+///
+/// A block that runs through a conditional branch has two, the branch's target
+/// and wherever its terminator goes, and one slot evicted one for the other
+/// every time the branch changed its mind. A function's `RET` has as many as
+/// it has callers. On a Just Dance 2019 frame one slot linked 73.3% of block
+/// entries, two 79.8% and four 82.5%, each step taking 2.2% and then 1.4% off
+/// the frame in the wasm build. Eight linked 82.6%: what still misses is `RET`
+/// from functions with more callers than any small cache holds.
+const LINKS: usize = 4;
+
 /// A run of instructions with a single entry point, translated once.
 #[derive(Debug)]
 pub(super) struct Block {
-    /// Where control went the last time this block was left, and the block it
-    /// found there, an inline cache of one entry, filled on the way past.
+    /// The last [`LINKS`] places control went when this block was left, and
+    /// the blocks it found there: an inline cache filled on the way past, most
+    /// recent first.
     ///
     /// A retail frame enters a block every 6.1 instructions, so what a block
     /// boundary costs is charged against six instructions rather than against
@@ -384,7 +400,7 @@ pub(super) struct Block {
     /// upgraded would be running code the guest has overwritten. Failing to
     /// upgrade is exactly the right answer, and it needs no invalidation pass
     /// of its own.
-    pub(super) link: std::cell::RefCell<Option<(u32, std::rc::Weak<Block>)>>,
+    pub(super) link: std::cell::RefCell<[(u32, std::rc::Weak<Block>); LINKS]>,
     /// Guest address of the first instruction.
     pub(super) start: u32,
     /// One entry per instruction the block covers before its terminator, so
@@ -413,7 +429,7 @@ impl Block {
         term: Option<Term>,
     ) -> Block {
         Block {
-            link: std::cell::RefCell::new(None),
+            link: std::cell::RefCell::new(std::array::from_fn(|_| (NO_LINK, std::rc::Weak::new()))),
             start,
             ops,
             words,
@@ -422,20 +438,21 @@ impl Block {
         }
     }
 
-    /// The block at `pc`, if that is where this one went last time and it is
-    /// still translated.
+    /// The block at `pc`, if that is one of the places this one went recently
+    /// and it is still translated.
     #[inline(always)]
     pub(super) fn successor(&self, pc: u32) -> Option<std::rc::Rc<Block>> {
-        match &*self.link.borrow() {
-            Some((at, block)) if *at == pc => block.upgrade(),
-            _ => None,
-        }
+        let links = self.link.borrow();
+        links.iter().find(|l| l.0 == pc).and_then(|l| l.1.upgrade())
     }
 
-    /// Remember that control went to `block` at `pc`.
+    /// Remember that control went to `block` at `pc`, forgetting the oldest
+    /// place it remembered before.
     #[inline(always)]
     pub(super) fn link_to(&self, pc: u32, block: &std::rc::Rc<Block>) {
-        *self.link.borrow_mut() = Some((pc, std::rc::Rc::downgrade(block)));
+        let mut links = self.link.borrow_mut();
+        links.rotate_right(1);
+        links[0] = (pc, std::rc::Rc::downgrade(block));
     }
 }
 
