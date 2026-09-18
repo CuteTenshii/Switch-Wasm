@@ -1032,9 +1032,11 @@ impl Gpu {
         let floats: Vec<u8> = match kind {
             DepthKind::Float32 => values,
             DepthKind::Unorm16 => values
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .flat_map(|v| {
-                    let stored = u16::from_le_bytes([v[0], v[1]]);
+                    let stored = u16::from_le_bytes(*v);
                     (f32::from(stored) / 65535.0).to_le_bytes()
                 })
                 .collect(),

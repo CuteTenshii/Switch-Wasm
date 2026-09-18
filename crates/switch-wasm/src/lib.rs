@@ -2090,8 +2090,8 @@ pub extern "C" fn switch_audio_pull(handle: u32, buf: *mut u8, max_samples: u32)
     let mut samples = vec![0i16; max_samples as usize];
     let n = s.cpu.take_audio(&mut samples);
     let out = unsafe { std::slice::from_raw_parts_mut(buf, n * 2) };
-    for (chunk, sample) in out.chunks_exact_mut(2).zip(samples.iter()) {
-        chunk.copy_from_slice(&sample.to_le_bytes());
+    for (chunk, sample) in out.as_chunks_mut::<2>().0.iter_mut().zip(samples.iter()) {
+        *chunk = sample.to_le_bytes();
     }
     n as u32
 }
@@ -2137,8 +2137,8 @@ pub extern "C" fn switch_fb_snapshot(handle: u32, buf: *mut u8, maxlen: u32) -> 
         let fb = &s.cpu.nv.gpu.framebuffer;
         let n = (fb.pixels.len() * 4).min(maxlen as usize);
         let out = unsafe { std::slice::from_raw_parts_mut(buf, n) };
-        for (chunk, pixel) in out.chunks_exact_mut(4).zip(fb.pixels.iter()) {
-            chunk.copy_from_slice(&pixel.to_le_bytes());
+        for (chunk, pixel) in out.as_chunks_mut::<4>().0.iter_mut().zip(fb.pixels.iter()) {
+            *chunk = pixel.to_le_bytes();
         }
         return n as u32;
     }

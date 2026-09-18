@@ -220,8 +220,8 @@ pub(crate) fn sampled_texture_format(
 /// as twice what it was.
 pub(crate) fn widen(bytes: &[u8], widen: Widen) -> Vec<u8> {
     let mut out = Vec::with_capacity(bytes.len() * 2);
-    for pair in bytes.chunks_exact(2) {
-        let raw = u16::from_le_bytes([pair[0], pair[1]]);
+    for pair in bytes.as_chunks::<2>().0 {
+        let raw = u16::from_le_bytes(*pair);
         let value = match widen {
             // Unreachable: `Widen::None` is what "do not call this" is
             // spelled as, and every caller checks. Zero rather than a panic
