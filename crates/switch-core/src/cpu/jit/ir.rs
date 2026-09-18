@@ -421,13 +421,21 @@ pub(super) struct Block {
 impl Block {
     /// A block with nothing linked to it yet, from the parts [`super::decode`]
     /// builds.
+    ///
+    /// The translator sizes `ops` and `words` for the longest block a page
+    /// allows, 1.25 KiB between them, and a block is a handful of
+    /// instructions, so both are trimmed here. Kept at that size, a full cache
+    /// was ~80 MiB of mostly empty heap, in a wasm32 address space the guest
+    /// may claim 3.2 GiB of.
     pub(super) fn new(
         start: u32,
-        ops: Vec<Op>,
-        words: Vec<u32>,
+        mut ops: Vec<Op>,
+        mut words: Vec<u32>,
         exits: Vec<Branch>,
         term: Option<Term>,
     ) -> Block {
+        ops.shrink_to_fit();
+        words.shrink_to_fit();
         Block {
             link: std::cell::RefCell::new(std::array::from_fn(|_| (NO_LINK, std::rc::Weak::new()))),
             start,
