@@ -648,7 +648,7 @@ impl Cpu {
                 acc,
                 wb,
                 offset,
-            } => self.load_store_imm(rt, rn, acc, wb, offset)?,
+            } => self.load_store_fast(op, rt, rn, acc, wb, offset)?,
             Op::Load64 { rt, rn, wb, offset } => {
                 self.load_store_fast(op, rt, rn, Acc::Load64, wb, offset)?
             }
@@ -677,7 +677,9 @@ impl Cpu {
             } => {
                 let offset = self.reg_offset(rm, ext, shift);
                 let addr = (self.reg_at(rn) as i64).wrapping_add(offset) as u32;
-                self.access(addr, rt, acc)?;
+                if !self.access_fast(addr, rt, acc) {
+                    return self.exec_op_slow(op);
+                }
             }
             Op::Pair {
                 rt,
@@ -722,7 +724,11 @@ impl Cpu {
                     self.set_reg_at(rn, v);
                 }
             }
-            Op::LoadLiteral { rt, addr, acc } => self.access(addr, rt, acc)?,
+            Op::LoadLiteral { rt, addr, acc } => {
+                if !self.access_fast(addr, rt, acc) {
+                    return self.exec_op_slow(op);
+                }
+            }
             Op::LoadExclusive { rt, rn, sz } => self.load_exclusive(rt, rn, sz)?,
             Op::StoreExclusive { rs, rt, rn, sz } => self.store_exclusive(rs, rt, rn, sz)?,
         }
@@ -731,7 +737,9 @@ impl Cpu {
 
     /// [`Cpu::load_store_imm`] for an access that needs nothing but the page
     /// table, which is nearly all of them, with `op` run again in full by
-    /// [`Cpu::exec_op_slow`] when it needs more. `acc` is always a constant.
+    /// [`Cpu::exec_op_slow`] when it needs more. `acc` is a constant for
+    /// every variant that has one built in, so their accesses are each their
+    /// own code with no match left to run.
     ///
     /// The fast path makes no calls, and that is the point of it. V8 stores a
     /// value that is still needed after a call to the stack where it is
@@ -751,35 +759,52 @@ impl Cpu {
         offset: i64,
     ) -> Result<()> {
         let (addr, wb_val) = Self::indexed(self.reg_at(rn), offset, wb);
-        let addr = addr as u32;
-        let done = match acc {
-            Acc::Load64 => self
-                .mem
-                .peek::<8>(addr)
-                .map(|b| self.set_reg_at(rt, u64::from_le_bytes(b)))
-                .is_some(),
-            Acc::Load32 => self
-                .mem
-                .peek::<4>(addr)
-                .map(|b| self.set_reg_at(rt, u64::from(u32::from_le_bytes(b))))
-                .is_some(),
-            Acc::Load8 => self
-                .mem
-                .peek::<1>(addr)
-                .map(|b| self.set_reg_at(rt, u64::from(b[0])))
-                .is_some(),
-            Acc::Store64 => self.mem.poke(addr, self.reg_at(rt).to_le_bytes()),
-            Acc::Store32 => self.mem.poke(addr, (self.reg_at(rt) as u32).to_le_bytes()),
-            Acc::Store8 => self.mem.poke(addr, [self.reg_at(rt) as u8]),
-            _ => false,
-        };
-        if !done {
+        if !self.access_fast(addr as u32, rt, acc) {
             return self.exec_op_slow(op);
         }
         if let Some(v) = wb_val {
             self.set_reg_at(rn, v);
         }
         Ok(())
+    }
+
+    /// [`Cpu::access`] through [`crate::mem::Memory::peek`] and
+    /// [`crate::mem::Memory::poke`], saying whether it could. Declining leaves
+    /// memory and the registers as they were.
+    #[inline(always)]
+    fn access_fast(&mut self, addr: u32, rt: u8, acc: Acc) -> bool {
+        let mem = &self.mem;
+        let loaded = match acc {
+            Acc::Load8 => mem.peek(addr).map(|[b]: [u8; 1]| u64::from(b)),
+            Acc::Load16 => mem.peek(addr).map(|b| u64::from(u16::from_le_bytes(b))),
+            Acc::Load32 => mem.peek(addr).map(|b| u64::from(u32::from_le_bytes(b))),
+            Acc::Load64 => mem.peek(addr).map(u64::from_le_bytes),
+            Acc::LoadS8 => mem.peek(addr).map(|[b]: [u8; 1]| sext_u64(u64::from(b), 8)),
+            Acc::LoadS16 => mem
+                .peek(addr)
+                .map(|b| sext_u64(u64::from(u16::from_le_bytes(b)), 16)),
+            Acc::LoadS8To32 => mem
+                .peek(addr)
+                .map(|[b]: [u8; 1]| u64::from(sext_u64(u64::from(b), 8) as u32)),
+            Acc::LoadS16To32 => mem
+                .peek(addr)
+                .map(|b| u64::from(sext_u64(u64::from(u16::from_le_bytes(b)), 16) as u32)),
+            Acc::LoadS32 => mem
+                .peek(addr)
+                .map(|b| sext_u64(u64::from(u32::from_le_bytes(b)), 32)),
+            Acc::Store8 => return self.mem.poke(addr, [self.reg_at(rt) as u8]),
+            Acc::Store16 => return self.mem.poke(addr, (self.reg_at(rt) as u16).to_le_bytes()),
+            Acc::Store32 => return self.mem.poke(addr, (self.reg_at(rt) as u32).to_le_bytes()),
+            Acc::Store64 => return self.mem.poke(addr, self.reg_at(rt).to_le_bytes()),
+            Acc::Prefetch => return true,
+        };
+        match loaded {
+            Some(value) => {
+                self.set_reg_at(rt, value);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Run a load or store op through the full memory path: the page-table
@@ -790,6 +815,26 @@ impl Cpu {
     #[inline(never)]
     fn exec_op_slow(&mut self, op: &Op) -> Result<()> {
         match *op {
+            Op::LoadStoreImm {
+                rt,
+                rn,
+                acc,
+                wb,
+                offset,
+            } => self.load_store_imm(rt, rn, acc, wb, offset),
+            Op::LoadStoreReg {
+                rt,
+                rn,
+                rm,
+                ext,
+                shift,
+                acc,
+            } => {
+                let offset = self.reg_offset(rm, ext, shift);
+                let addr = (self.reg_at(rn) as i64).wrapping_add(offset) as u32;
+                self.access(addr, rt, acc)
+            }
+            Op::LoadLiteral { rt, addr, acc } => self.access(addr, rt, acc),
             Op::Load64 { rt, rn, wb, offset } => {
                 self.load_store_imm(rt, rn, Acc::Load64, wb, offset)
             }
@@ -900,15 +945,18 @@ impl Cpu {
     /// stub would and `pc` on the function it reaches, and reports the four
     /// instructions it retired.
     ///
-    /// When the budget cannot fit all four, or the slot cannot be read, it
-    /// does nothing but leave `pc` on the stub: the stub then runs as a block
-    /// of its own, stops where the budget says and faults where its load
-    /// does, exactly as it did before it was folded.
+    /// When the budget cannot fit all four, or reading the slot takes more
+    /// than the page table, it does nothing but leave `pc` on the stub: the
+    /// stub then runs as a block of its own, stops where the budget says and
+    /// reads the slot, watchpoint, fault and all, exactly as it did before it
+    /// was folded. Handing it that case rather than reading the slot in full
+    /// keeps this path free of calls; see [`Cpu::load_store_fast`] for why
+    /// that is worth having.
     #[inline(always)]
     fn through_plt(&mut self, got: u32, stub: u32, room: u64) -> u64 {
         const STUB: u64 = 4;
-        let target = match self.mem.read_u64(got) {
-            Ok(target) if room > STUB => target,
+        let target = match self.mem.peek::<8>(got) {
+            Some(bytes) if room > STUB => u64::from_le_bytes(bytes),
             _ => {
                 self.pc = stub;
                 return 0;
