@@ -737,6 +737,91 @@ impl Memory {
         Ok(page[Self::in_page_offset(addr)])
     }
 
+    /// The `N` bytes at `addr`, if reading them takes nothing but the page
+    /// table: one page holds all of them, it has storage, and no watchpoint
+    /// covers them. `None` means the full read has something more to do, and
+    /// says nothing about whether it would fault.
+    ///
+    /// For the block translator's loads, which try this first and otherwise
+    /// run the whole instruction again out of line. Nothing on this path calls
+    /// anything, and under V8 that matters beyond the calls themselves: a
+    /// value still needed after a call is stored to the stack where it is
+    /// computed, on the path that never makes the call as well.
+    #[inline(always)]
+    pub fn peek<const N: usize>(&self, addr: u32) -> Option<[u8; N]> {
+        let off = Self::in_page_offset(addr);
+        if off + N > PAGE_SIZE
+            || (addr < self.read_watch.1 && addr.wrapping_add(N as u32) > self.read_watch.0)
+        {
+            return None;
+        }
+        let page = self.pages[Self::page_index(addr)].as_deref()?;
+        Some(page[off..off + N].try_into().unwrap())
+    }
+
+    /// Write `val` at `addr` if that takes nothing but the page table, and say
+    /// whether it did. The store [`Memory::peek`] is the load for: it declines
+    /// a page with no storage yet, a write-protected address, one the
+    /// watchpoint covers and a page with translated code on it, all of which
+    /// the full write has more to do for, and changes nothing when it does.
+    #[inline(always)]
+    pub fn poke<const N: usize>(&mut self, addr: u32, val: [u8; N]) -> bool {
+        let off = Self::in_page_offset(addr);
+        let idx = Self::page_index(addr);
+        if off + N > PAGE_SIZE
+            || self.is_readonly(addr)
+            || (addr < self.watch.1 && addr.wrapping_add(N as u32) > self.watch.0)
+            || self.watches_code(idx)
+        {
+            return false;
+        }
+        match self.pages[idx].as_deref_mut() {
+            Some(page) => {
+                page[off..off + N].copy_from_slice(&val);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// [`Memory::poke`] for a pair: both halves in one page, and each checked
+    /// against the protected ranges, as [`Memory::write_u64_pair`] checks them.
+    #[inline(always)]
+    pub fn poke_pair<const N: usize>(
+        &mut self,
+        addr: u32,
+        first: [u8; N],
+        second: [u8; N],
+    ) -> bool {
+        let off = Self::in_page_offset(addr);
+        let idx = Self::page_index(addr);
+        if off + 2 * N > PAGE_SIZE
+            || self.is_readonly(addr)
+            || self.is_readonly(addr.wrapping_add(N as u32))
+            || (addr < self.watch.1 && addr.wrapping_add(2 * N as u32) > self.watch.0)
+            || self.watches_code(idx)
+        {
+            return false;
+        }
+        match self.pages[idx].as_deref_mut() {
+            Some(page) => {
+                page[off..off + N].copy_from_slice(&first);
+                page[off + N..off + 2 * N].copy_from_slice(&second);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Whether code has been translated out of page `idx` since a store to it
+    /// was last reported.
+    #[inline(always)]
+    fn watches_code(&self, idx: usize) -> bool {
+        self.watched_pages
+            .get(idx >> 6)
+            .is_some_and(|&word| word & (1u64 << (idx & 63)) != 0)
+    }
+
     /// The `N` bytes at `addr` when they all live in one page. Multi-byte
     /// accesses go through this so they cost a single page lookup instead of one
     /// per byte: the interpreter reads four bytes for every instruction it

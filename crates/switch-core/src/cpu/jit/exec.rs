@@ -650,22 +650,22 @@ impl Cpu {
                 offset,
             } => self.load_store_imm(rt, rn, acc, wb, offset)?,
             Op::Load64 { rt, rn, wb, offset } => {
-                self.load_store_imm(rt, rn, Acc::Load64, wb, offset)?
+                self.load_store_fast(op, rt, rn, Acc::Load64, wb, offset)?
             }
             Op::Store64 { rt, rn, wb, offset } => {
-                self.load_store_imm(rt, rn, Acc::Store64, wb, offset)?
+                self.load_store_fast(op, rt, rn, Acc::Store64, wb, offset)?
             }
             Op::Load32 { rt, rn, wb, offset } => {
-                self.load_store_imm(rt, rn, Acc::Load32, wb, offset)?
+                self.load_store_fast(op, rt, rn, Acc::Load32, wb, offset)?
             }
             Op::Store32 { rt, rn, wb, offset } => {
-                self.load_store_imm(rt, rn, Acc::Store32, wb, offset)?
+                self.load_store_fast(op, rt, rn, Acc::Store32, wb, offset)?
             }
             Op::Load8 { rt, rn, wb, offset } => {
-                self.load_store_imm(rt, rn, Acc::Load8, wb, offset)?
+                self.load_store_fast(op, rt, rn, Acc::Load8, wb, offset)?
             }
             Op::Store8 { rt, rn, wb, offset } => {
-                self.load_store_imm(rt, rn, Acc::Store8, wb, offset)?
+                self.load_store_fast(op, rt, rn, Acc::Store8, wb, offset)?
             }
             Op::LoadStoreReg {
                 rt,
@@ -693,19 +693,135 @@ impl Cpu {
                 rn,
                 offset,
                 wb,
-            } => self.pair(rt, rt2, rn, offset, PairKind::Load64, wb)?,
+            } => {
+                let (addr, wb_val) = Self::indexed(self.reg_at(rn), offset, wb);
+                let Some(bytes) = self.mem.peek::<16>(addr as u32) else {
+                    return self.exec_op_slow(op);
+                };
+                let (first, second) = bytes.split_at(8);
+                self.set_reg_at(rt, u64::from_le_bytes(first.try_into().unwrap()));
+                self.set_reg_at(rt2, u64::from_le_bytes(second.try_into().unwrap()));
+                if let Some(v) = wb_val {
+                    self.set_reg_at(rn, v);
+                }
+            }
             Op::PairStore64 {
                 rt,
                 rt2,
                 rn,
                 offset,
                 wb,
-            } => self.pair(rt, rt2, rn, offset, PairKind::Store64, wb)?,
+            } => {
+                let (addr, wb_val) = Self::indexed(self.reg_at(rn), offset, wb);
+                let first = self.reg_at(rt).to_le_bytes();
+                let second = self.reg_at(rt2).to_le_bytes();
+                if !self.mem.poke_pair(addr as u32, first, second) {
+                    return self.exec_op_slow(op);
+                }
+                if let Some(v) = wb_val {
+                    self.set_reg_at(rn, v);
+                }
+            }
             Op::LoadLiteral { rt, addr, acc } => self.access(addr, rt, acc)?,
             Op::LoadExclusive { rt, rn, sz } => self.load_exclusive(rt, rn, sz)?,
             Op::StoreExclusive { rs, rt, rn, sz } => self.store_exclusive(rs, rt, rn, sz)?,
         }
         Ok(())
+    }
+
+    /// [`Cpu::load_store_imm`] for an access that needs nothing but the page
+    /// table, which is nearly all of them, with `op` run again in full by
+    /// [`Cpu::exec_op_slow`] when it needs more. `acc` is always a constant.
+    ///
+    /// The fast path makes no calls, and that is the point of it. V8 stores a
+    /// value that is still needed after a call to the stack where it is
+    /// computed, whether or not the call is made, and every page-table miss or
+    /// fault here used to be a call made halfway through the access: a load
+    /// paid six such stores on the way past, for a slow path it almost never
+    /// took. The fallback starts the instruction over instead, which it can
+    /// because the fast path changes nothing until it has decided to finish.
+    #[inline(always)]
+    fn load_store_fast(
+        &mut self,
+        op: &Op,
+        rt: u8,
+        rn: u8,
+        acc: Acc,
+        wb: Wb,
+        offset: i64,
+    ) -> Result<()> {
+        let (addr, wb_val) = Self::indexed(self.reg_at(rn), offset, wb);
+        let addr = addr as u32;
+        let done = match acc {
+            Acc::Load64 => self
+                .mem
+                .peek::<8>(addr)
+                .map(|b| self.set_reg_at(rt, u64::from_le_bytes(b)))
+                .is_some(),
+            Acc::Load32 => self
+                .mem
+                .peek::<4>(addr)
+                .map(|b| self.set_reg_at(rt, u64::from(u32::from_le_bytes(b))))
+                .is_some(),
+            Acc::Load8 => self
+                .mem
+                .peek::<1>(addr)
+                .map(|b| self.set_reg_at(rt, u64::from(b[0])))
+                .is_some(),
+            Acc::Store64 => self.mem.poke(addr, self.reg_at(rt).to_le_bytes()),
+            Acc::Store32 => self.mem.poke(addr, (self.reg_at(rt) as u32).to_le_bytes()),
+            Acc::Store8 => self.mem.poke(addr, [self.reg_at(rt) as u8]),
+            _ => false,
+        };
+        if !done {
+            return self.exec_op_slow(op);
+        }
+        if let Some(v) = wb_val {
+            self.set_reg_at(rn, v);
+        }
+        Ok(())
+    }
+
+    /// Run a load or store op through the full memory path: the page-table
+    /// misses, watchpoints, protection and code-page reports the fast arms
+    /// leave to it, and every fault. Only ever handed an op whose fast path
+    /// declined before changing anything.
+    #[cold]
+    #[inline(never)]
+    fn exec_op_slow(&mut self, op: &Op) -> Result<()> {
+        match *op {
+            Op::Load64 { rt, rn, wb, offset } => {
+                self.load_store_imm(rt, rn, Acc::Load64, wb, offset)
+            }
+            Op::Store64 { rt, rn, wb, offset } => {
+                self.load_store_imm(rt, rn, Acc::Store64, wb, offset)
+            }
+            Op::Load32 { rt, rn, wb, offset } => {
+                self.load_store_imm(rt, rn, Acc::Load32, wb, offset)
+            }
+            Op::Store32 { rt, rn, wb, offset } => {
+                self.load_store_imm(rt, rn, Acc::Store32, wb, offset)
+            }
+            Op::Load8 { rt, rn, wb, offset } => self.load_store_imm(rt, rn, Acc::Load8, wb, offset),
+            Op::Store8 { rt, rn, wb, offset } => {
+                self.load_store_imm(rt, rn, Acc::Store8, wb, offset)
+            }
+            Op::PairLoad64 {
+                rt,
+                rt2,
+                rn,
+                offset,
+                wb,
+            } => self.pair(rt, rt2, rn, offset, PairKind::Load64, wb),
+            Op::PairStore64 {
+                rt,
+                rt2,
+                rn,
+                offset,
+                wb,
+            } => self.pair(rt, rt2, rn, offset, PairKind::Store64, wb),
+            _ => unreachable!("only the fast load and store arms fall back to the full path"),
+        }
     }
 
     /// A single-register load or store with an immediate offset. The variants
