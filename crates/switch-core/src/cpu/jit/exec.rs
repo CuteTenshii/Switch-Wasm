@@ -136,6 +136,16 @@ impl Cpu {
     /// `self.pc` tracks the instruction being executed throughout, exactly as
     /// it does in the interpreter, so a fault inside a block reports the same
     /// address and the same register state an interpreted one would.
+    ///
+    /// Inlined into [`Cpu::run_jit`], so that walking from block to block is
+    /// one loop rather than a call per block. A retail frame enters a block
+    /// every six to ten instructions, and as a call each entry paid this
+    /// function's whole prologue (a 384-byte frame under V8) and then reloaded
+    /// everything the caller already held in registers. Inlining it took a
+    /// Just Dance 2019 frame in the wasm build from 240 ms to 229 ms, while
+    /// the host's cycle count did not move: the two targets are not related
+    /// by a constant.
+    #[inline(always)]
     fn exec_block(&mut self, block: &Block, budget: u64) -> Result<u64> {
         let body = (block.ops.len() as u64).min(budget) as usize;
         let mut i = 0usize;
