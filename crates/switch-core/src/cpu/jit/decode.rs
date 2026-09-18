@@ -670,13 +670,7 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
         // store or load, and a single core has nothing to order against.
         0b001000100 | 0b001000110 => {
             let acc = Acc::of(sz, u8::from(grp_excl == 0b001000110));
-            return Op::LoadStoreImm {
-                rt: rt_slot(insn, acc),
-                rn,
-                acc,
-                wb: Wb::None,
-                offset: 0,
-            };
+            return Op::load_store_imm(rt_slot(insn, acc), rn, acc, Wb::None, 0);
         }
         0b001000001 | 0b001000011 => return Op::Interpret { insn },
         _ => {}
@@ -716,13 +710,8 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
         if mode == 0b01 {
             // Unsigned offset, scaled by the access size.
             let scale = 1i64 << sz;
-            return Op::LoadStoreImm {
-                rt,
-                rn,
-                acc,
-                wb: Wb::None,
-                offset: i64::from((insn >> 10) & 0xFFF) * scale,
-            };
+            let offset = i64::from((insn >> 10) & 0xFFF) * scale;
+            return Op::load_store_imm(rt, rn, acc, Wb::None, offset);
         }
         if mode == 0b00 && ((insn >> 21) & 1) == 0 {
             let offset = sext_u64((insn >> 12) & 0x1FF, 9) as i64;
@@ -732,13 +721,7 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
                 // Unscaled (`LDUR`/`STUR`) and the unprivileged forms.
                 _ => Wb::None,
             };
-            return Op::LoadStoreImm {
-                rt,
-                rn,
-                acc,
-                wb,
-                offset,
-            };
+            return Op::load_store_imm(rt, rn, acc, wb, offset);
         }
     }
 
@@ -767,14 +750,14 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
         };
         // The pair forms have their own Rt/Rt2 slots: `kind`, not `acc`,
         // says whether they are read or written.
-        return Op::Pair {
-            rt: pair_slot(insn, kind),
-            rt2: pair_slot(insn >> 10, kind),
+        return Op::pair(
+            pair_slot(insn, kind),
+            pair_slot(insn >> 10, kind),
             rn,
-            offset: (sext_u64((insn >> 15) & 0x7F, 7) as i64).wrapping_mul(scale),
+            (sext_u64((insn >> 15) & 0x7F, 7) as i64).wrapping_mul(scale),
             kind,
             wb,
-        };
+        );
     }
 
     Op::Interpret { insn }

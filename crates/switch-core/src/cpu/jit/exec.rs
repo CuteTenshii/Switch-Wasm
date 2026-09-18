@@ -9,6 +9,7 @@ use super::cache::JitStats;
 use super::decode::translate;
 use super::ir::{Block, Exit, Op, Term};
 use crate::cpu::bits::*;
+use crate::cpu::loadstore::{Acc, PairKind, Wb};
 use crate::cpu::{Cpu, Result, RunReport, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
 use std::rc::Rc;
 
@@ -549,13 +550,24 @@ impl Cpu {
                 acc,
                 wb,
                 offset,
-            } => {
-                let base = self.reg_at(rn);
-                let (addr, wb_val) = Self::indexed(base, offset, wb);
-                self.access(addr as u32, rt, acc)?;
-                if let Some(v) = wb_val {
-                    self.set_reg_at(rn, v);
-                }
+            } => self.load_store_imm(rt, rn, acc, wb, offset)?,
+            Op::Load64 { rt, rn, wb, offset } => {
+                self.load_store_imm(rt, rn, Acc::Load64, wb, offset)?
+            }
+            Op::Store64 { rt, rn, wb, offset } => {
+                self.load_store_imm(rt, rn, Acc::Store64, wb, offset)?
+            }
+            Op::Load32 { rt, rn, wb, offset } => {
+                self.load_store_imm(rt, rn, Acc::Load32, wb, offset)?
+            }
+            Op::Store32 { rt, rn, wb, offset } => {
+                self.load_store_imm(rt, rn, Acc::Store32, wb, offset)?
+            }
+            Op::Load8 { rt, rn, wb, offset } => {
+                self.load_store_imm(rt, rn, Acc::Load8, wb, offset)?
+            }
+            Op::Store8 { rt, rn, wb, offset } => {
+                self.load_store_imm(rt, rn, Acc::Store8, wb, offset)?
             }
             Op::LoadStoreReg {
                 rt,
@@ -577,9 +589,37 @@ impl Cpu {
                 kind,
                 wb,
             } => self.pair(rt, rt2, rn, offset, kind, wb)?,
+            Op::PairLoad64 {
+                rt,
+                rt2,
+                rn,
+                offset,
+                wb,
+            } => self.pair(rt, rt2, rn, offset, PairKind::Load64, wb)?,
+            Op::PairStore64 {
+                rt,
+                rt2,
+                rn,
+                offset,
+                wb,
+            } => self.pair(rt, rt2, rn, offset, PairKind::Store64, wb)?,
             Op::LoadLiteral { rt, addr, acc } => self.access(addr, rt, acc)?,
             Op::LoadExclusive { rt, rn, sz } => self.load_exclusive(rt, rn, sz)?,
             Op::StoreExclusive { rs, rt, rn, sz } => self.store_exclusive(rs, rt, rn, sz)?,
+        }
+        Ok(())
+    }
+
+    /// A single-register load or store with an immediate offset. The variants
+    /// that have their access built in pass it here as a constant, so each of
+    /// them compiles to its own access with no match left to run.
+    #[inline(always)]
+    fn load_store_imm(&mut self, rt: u8, rn: u8, acc: Acc, wb: Wb, offset: i64) -> Result<()> {
+        let base = self.reg_at(rn);
+        let (addr, wb_val) = Self::indexed(base, offset, wb);
+        self.access(addr as u32, rt, acc)?;
+        if let Some(v) = wb_val {
+            self.set_reg_at(rn, v);
         }
         Ok(())
     }

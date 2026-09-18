@@ -20,7 +20,9 @@ pub(in crate::cpu) enum Op {
     /// with no effect.
     Nop,
     /// Not translated: run the original instruction through the interpreter.
-    Interpret { insn: u32 },
+    Interpret {
+        insn: u32,
+    },
     /// SIMD and floating point, handed to the decoder that owns it instead of
     /// back through [`crate::cpu::Cpu::execute`]'s group match. `scalar` is the
     /// same top-byte test `execute` makes to decide which of the two decoders
@@ -34,14 +36,21 @@ pub(in crate::cpu) enum Op {
     /// A system instruction [`SysOp::of`] could not place, its
     /// [`SysOp::Unhandled`]. Straight to [`crate::cpu::Cpu::system`], which is
     /// where its error comes from.
-    System { insn: u32 },
+    System {
+        insn: u32,
+    },
     /// `MRS`, `MSR` and `DC ZVA`, already resolved to the register they name.
-    Sys { op: SysOp },
+    Sys {
+        op: SysOp,
+    },
 
     /// A value the translator already computed: `MOVZ`/`MOVN`, and the
     /// PC-relative `ADR`/`ADRP` whose result depends only on where the
     /// instruction is.
-    MovConst { rd: u8, val: u64 },
+    MovConst {
+        rd: u8,
+        val: u64,
+    },
     /// `MOVK`: replace the 16-bit field at `shift` with `val`. Held as a
     /// shift and a halfword rather than a mask and a placed value so the
     /// variant needs one 64-bit word instead of two, which is what decides
@@ -225,6 +234,51 @@ pub(in crate::cpu) enum Op {
         wb: Wb,
         offset: i64,
     },
+    /// [`Op::LoadStoreImm`] for the six accesses a retail frame makes almost
+    /// all of its single-register loads and stores with, the access folded
+    /// into the variant. Build them through [`Op::load_store_imm`].
+    ///
+    /// The general form dispatches twice, once on the op and again on `acc`,
+    /// and under V8 each of the two is an indirect jump that mispredicts on
+    /// its own. The samples of the general arm sat on the instructions just
+    /// past those jumps rather than on the memory access, so the second one
+    /// goes where the first already is.
+    Load64 {
+        rt: u8,
+        rn: u8,
+        wb: Wb,
+        offset: i64,
+    },
+    Store64 {
+        rt: u8,
+        rn: u8,
+        wb: Wb,
+        offset: i64,
+    },
+    Load32 {
+        rt: u8,
+        rn: u8,
+        wb: Wb,
+        offset: i64,
+    },
+    Store32 {
+        rt: u8,
+        rn: u8,
+        wb: Wb,
+        offset: i64,
+    },
+    Load8 {
+        rt: u8,
+        rn: u8,
+        wb: Wb,
+        offset: i64,
+    },
+    Store8 {
+        rt: u8,
+        rn: u8,
+        wb: Wb,
+        offset: i64,
+    },
     LoadStoreReg {
         rt: u8,
         rn: u8,
@@ -242,13 +296,95 @@ pub(in crate::cpu) enum Op {
         kind: PairKind,
         wb: Wb,
     },
+    /// [`Op::Pair`] for `LDP`/`STP` of X registers, which is what every
+    /// prologue and epilogue saves and restores through, with the kind folded
+    /// into the variant for the same reason as [`Op::Load64`]. Build them
+    /// through [`Op::pair`].
+    PairLoad64 {
+        rt: u8,
+        rt2: u8,
+        rn: u8,
+        offset: i64,
+        wb: Wb,
+    },
+    PairStore64 {
+        rt: u8,
+        rt2: u8,
+        rn: u8,
+        offset: i64,
+        wb: Wb,
+    },
     /// `LDR <t>, label`, with the literal's address already resolved.
-    LoadLiteral { rt: u8, addr: u32, acc: Acc },
+    LoadLiteral {
+        rt: u8,
+        addr: u32,
+        acc: Acc,
+    },
     /// `LDXR`/`LDAXR`, one register. The lock word of every `nn::os` mutex
     /// goes through this and [`Op::StoreExclusive`].
-    LoadExclusive { rt: u8, rn: u8, sz: u8 },
+    LoadExclusive {
+        rt: u8,
+        rn: u8,
+        sz: u8,
+    },
     /// `STXR`/`STLXR`, one register; `rs` takes the status.
-    StoreExclusive { rs: u8, rt: u8, rn: u8, sz: u8 },
+    StoreExclusive {
+        rs: u8,
+        rt: u8,
+        rn: u8,
+        sz: u8,
+    },
+}
+
+impl Op {
+    /// A single-register load or store with an immediate offset, as the
+    /// variant that has its access built in when there is one.
+    pub(super) fn load_store_imm(rt: u8, rn: u8, acc: Acc, wb: Wb, offset: i64) -> Op {
+        match acc {
+            Acc::Load64 => Op::Load64 { rt, rn, wb, offset },
+            Acc::Store64 => Op::Store64 { rt, rn, wb, offset },
+            Acc::Load32 => Op::Load32 { rt, rn, wb, offset },
+            Acc::Store32 => Op::Store32 { rt, rn, wb, offset },
+            Acc::Load8 => Op::Load8 { rt, rn, wb, offset },
+            Acc::Store8 => Op::Store8 { rt, rn, wb, offset },
+            _ => Op::LoadStoreImm {
+                rt,
+                rn,
+                acc,
+                wb,
+                offset,
+            },
+        }
+    }
+
+    /// A load or store pair, as the variant that has its kind built in when
+    /// there is one.
+    pub(super) fn pair(rt: u8, rt2: u8, rn: u8, offset: i64, kind: PairKind, wb: Wb) -> Op {
+        match kind {
+            PairKind::Load64 => Op::PairLoad64 {
+                rt,
+                rt2,
+                rn,
+                offset,
+                wb,
+            },
+            PairKind::Store64 => Op::PairStore64 {
+                rt,
+                rt2,
+                rn,
+                offset,
+                wb,
+            },
+            _ => Op::Pair {
+                rt,
+                rt2,
+                rn,
+                offset,
+                kind,
+                wb,
+            },
+        }
+    }
 }
 
 /// The instruction a block ends on: one that always moves the PC somewhere
