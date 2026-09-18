@@ -25,6 +25,36 @@ enum Taken {
     Follow(u32),
 }
 
+/// Where the straight-line stretch of ops being executed starts, in the block's
+/// body and in guest memory, so the address of any op in it can be worked out
+/// from where the op is.
+///
+/// Only three arms and the fault path ever need that address, and carrying it
+/// through the loop instead cost every op a reload, an add and a spill under
+/// V8, which keeps it on the stack.
+#[derive(Clone, Copy)]
+struct Here {
+    first: usize,
+    pc: u32,
+}
+
+impl Here {
+    #[inline(always)]
+    fn new(ops: &[Op], pc: u32) -> Here {
+        Here {
+            first: ops.as_ptr() as usize,
+            pc,
+        }
+    }
+
+    /// The guest address of `op`, which has to be one of the stretch's ops.
+    #[inline(always)]
+    fn pc_of(self, op: &Op) -> u32 {
+        let index = (op as *const Op as usize - self.first) / std::mem::size_of::<Op>();
+        self.pc.wrapping_add(4 * index as u32)
+    }
+}
+
 /// The operand an addition needs to compute a subtraction. `carry` is 1
 /// exactly when the instruction subtracts, so it doubles as the mask that
 /// inverts the operand: no branch, and nothing left to decide at run time.
@@ -180,27 +210,24 @@ impl Cpu {
                 Some(branch) if (branch.at as usize) < body => branch.at as usize,
                 _ => body,
             };
-            for op in &block.ops[i..stop] {
-                if let Err(e) = self.exec_op(op, pc) {
+            let segment = &block.ops[i..stop];
+            let here = Here::new(segment, pc);
+            for op in segment {
+                if let Err(e) = self.exec_op(op, here) {
                     // The clock, the step counter, the trail and `pc` are all
                     // settled here rather than maintained per instruction:
                     // nothing inside a block reads any of them, and a fault is
                     // the only thing that ever does. The faulting instruction
                     // counts, exactly as it does in the interpreter.
-                    //
-                    // Which instruction that is comes from `pc` rather than
-                    // from a counter the loop carries: `pc` is already being
-                    // maintained, so counting alongside it was a second way of
-                    // saying the same thing, paid for on every instruction to
-                    // be read on almost none.
+                    let pc = here.pc_of(op);
                     let at = run_i + (pc.wrapping_sub(run_pc) / 4) as usize;
                     self.retire_runs(run_pc, run_i, at + 1);
                     self.pc = pc;
                     self.record_fault(&e, pc, block.words[at]);
                     return Err(e);
                 }
-                pc = pc.wrapping_add(4);
             }
+            pc = pc.wrapping_add(4 * (stop - i) as u32);
             i = stop;
             if stop == body {
                 break;
@@ -402,18 +429,20 @@ impl Cpu {
     /// is why [`Cpu::take_exit`], [`Cpu::apply_compare`] and
     /// [`Cpu::exec_term`] take references too.
     #[inline(always)]
-    fn exec_op(&mut self, op: &Op, pc: u32) -> Result<()> {
+    fn exec_op(&mut self, op: &Op, here: Here) -> Result<()> {
         match *op {
             Op::Nop => {}
             // The three arms that re-enter the interpreter are the only ones
             // that need `pc` in the register file: `execute` resolves
             // PC-relative forms from it, and every fault message names it.
             Op::Interpret { insn } => {
+                let pc = here.pc_of(op);
                 self.pc = pc;
                 self.jit.interpreted += 1;
                 self.execute(insn, pc.wrapping_add(4))?;
             }
             Op::Fp { insn, scalar, form } => {
+                let pc = here.pc_of(op);
                 self.pc = pc;
                 let next = pc.wrapping_add(4);
                 #[allow(clippy::if_same_then_else)] // the order is the point
@@ -429,6 +458,7 @@ impl Cpu {
                 }
             }
             Op::System { insn } => {
+                let pc = here.pc_of(op);
                 self.pc = pc;
                 self.system(insn, pc.wrapping_add(4))?;
             }
