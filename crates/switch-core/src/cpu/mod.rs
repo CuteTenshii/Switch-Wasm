@@ -2708,18 +2708,6 @@ impl Cpu {
         self.recent_len = self.recent_len.wrapping_add(1);
     }
 
-    /// Account for a run of `count` retired instructions at `start`: the
-    /// clock, the step counter and the trail, all at once.
-    #[inline(always)]
-    pub(super) fn retire_run(&mut self, start: u32, count: u64) {
-        if count == 0 {
-            return;
-        }
-        self.cycles += count;
-        self.steps += count;
-        self.record_run(start, count as u32);
-    }
-
     /// Round-robin to the next runnable thread. Returns false if there is none
     /// (in which case the running thread keeps going).
     fn switch_to_next_runnable(&mut self) -> bool {

@@ -26,7 +26,11 @@ pub(in crate::cpu) struct Jit {
     pub(super) lookup: Vec<Option<Rc<Block>>>,
     pub(super) blocks: IdMap<u32, Rc<Block>>,
     /// Entry addresses translated out of each page, so a store to that page
-    /// drops exactly the blocks that read it.
+    /// drops exactly the blocks that read it. A block that read several pages
+    /// is listed under each. When a store drops it through one of them, the
+    /// others keep a stale entry, and a later block at the same address is
+    /// dropped by a store to one of those: a spurious retranslation, never a
+    /// stale block.
     pub(super) by_page: IdMap<u32, Vec<u32>>,
     pub(super) translated: u64,
     pub(super) executed: u64,
@@ -103,9 +107,7 @@ impl Jit {
             self.by_page.clear();
             self.drop_lookup();
         }
-        let page = block.start >> 12;
-        self.by_page.entry(page).or_default().push(block.start);
-        if let Some(page) = block.also_reads {
+        for &page in &block.pages {
             self.by_page.entry(page).or_default().push(block.start);
         }
         self.lookup[Self::slot(block.start)] = Some(block.clone());

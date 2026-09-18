@@ -430,10 +430,10 @@ fn writing_the_zero_register_never_makes_it_read_back() {
 }
 
 #[test]
-fn a_block_stops_at_the_end_of_its_page() {
-    // A block that spanned two pages could not be invalidated by one page's
-    // worth of dirt, so the translator never lets one. Straight-line code
-    // across the boundary still has to run.
+fn a_block_across_two_pages_is_dropped_by_a_store_to_the_second() {
+    // Straight-line code runs off the end of its page into the next, and the
+    // block it becomes is listed under both, so rewriting the instruction on
+    // the second page has to be noticed exactly as one on the first would.
     let mut cpu = Cpu::new();
     cpu.set_jit_enabled(true);
     cpu.mem.map_zero(0x1000, 0x2000).unwrap();
@@ -451,9 +451,87 @@ fn a_block_stops_at_the_end_of_its_page() {
     assert_eq!(cpu.read_x(0), 1);
     assert_eq!(cpu.read_x(1), 2);
     assert_eq!(cpu.read_x(2), 3);
-    assert!(
-        cpu.jit_stats().translated >= 2,
-        "the run across the page boundary was translated as one block"
+
+    cpu.mem.write_u32(0x2000, 0xd2800122).unwrap(); // movz x2, #9
+    cpu.set_pc(start);
+    cpu.run(8).unwrap();
+    assert_eq!(
+        cpu.read_x(2),
+        9,
+        "the block ran the instruction the second page no longer holds"
+    );
+    assert!(cpu.jit_stats().invalidated > 0, "nothing was invalidated");
+}
+
+/// A forward `B` past two instructions that must not run, a `BL` into a
+/// function and back, and a second `B`. The translator follows both `B`s
+/// rather than ending a block on them; the `BL` still ends one. Assembled
+/// from:
+///
+/// ```text
+///         movz  x0, #1
+///         b     one
+///         movz  x0, #99
+///         movz  x0, #98
+/// one:    bl    fn
+///         add   x0, x0, #1
+///         b     two
+///         movz  x0, #97
+/// fn:     movz  x1, #5
+///         ret
+/// two:    add   x1, x1, x0
+///         b     .
+/// ```
+#[rustfmt::skip]
+const FOLLOWED: &[u32] = &[
+    0xd2800020, 0x14000003, 0xd2800c60, 0xd2800c40,
+    0x94000004, 0x91000400, 0x14000004, 0xd2800c20,
+    0xd28000a1, 0xd65f03c0, 0x8b000021, 0x14000000,
+];
+
+#[test]
+fn followed_branches_match_the_interpreter_at_every_step_budget() {
+    // Every budget stops somewhere different relative to the branches the
+    // block follows: before one, on it, just past it into its target. Each
+    // has to leave the pc, the registers and the retired count exactly where
+    // the interpreter would.
+    for steps in 1..=16 {
+        compare(
+            FOLLOWED,
+            steps,
+            &format!("followed branches, {steps} steps"),
+        );
+    }
+    let mut cpu = loaded(FOLLOWED, true);
+    cpu.run(16).unwrap();
+    assert_eq!(cpu.read_x(0), 2, "a skipped instruction ran");
+    assert_eq!(cpu.read_x(1), 7);
+    assert_eq!(cpu.read_x(30), u64::from(CODE + 0x14), "BL did not link");
+    // Followed, the path is four blocks: the entry through `b one` to the
+    // `bl`, the function, the return site through `b two` to the spin, and
+    // the spin itself. Six means the `B`s ended blocks instead.
+    assert_eq!(
+        cpu.jit_stats().translated,
+        4,
+        "the branches were not followed"
+    );
+}
+
+#[test]
+fn a_fault_past_a_followed_branch_names_the_right_instruction() {
+    // b over one instruction, then LDR x0, [x1] with x1 still zero. The load
+    // is the second instruction of the block but not at `start + 4`, so the
+    // fault has to be placed from where the branch went, not from the index.
+    let code = [0x14000002u32, 0xd503201f, 0xf9400020];
+    let mut interpreted = loaded(&code, false);
+    let mut translated = loaded(&code, true);
+    let a = interpreted.run(4).unwrap_err();
+    let b = translated.run(4).unwrap_err();
+    assert_eq!(a.to_string(), b.to_string(), "fault messages differ");
+    assert_eq!(translated.get_pc(), CODE + 8, "the pc is not on the load");
+    assert_eq!(
+        interpreted.cycles, translated.cycles,
+        "retired counts differ"
     );
 }
 

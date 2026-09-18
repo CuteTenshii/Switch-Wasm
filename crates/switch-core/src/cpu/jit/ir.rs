@@ -468,6 +468,10 @@ pub(super) enum Exit {
         cond: u8,
         target: u32,
     },
+    /// A `B #imm` the translator followed: always taken, and the block goes
+    /// on at `target` rather than ending. The ops after it are the ones at
+    /// `target`.
+    Jump { target: u32 },
 }
 
 impl Exit {
@@ -546,11 +550,12 @@ pub(super) struct Block {
     pub(super) link: std::cell::RefCell<[(u32, std::rc::Weak<Block>); LINKS]>,
     /// Guest address of the first instruction.
     pub(super) start: u32,
-    /// One entry per instruction the block covers before its terminator, so
-    /// `ops[i]` is the instruction at `start + 4 * i`. The slots that hold a
-    /// conditional branch carry [`Op::Nop`] as filler, the branch itself is
-    /// in `exits`, and keeping the indexing exact is worth one dead slot per
-    /// exit.
+    /// One entry per instruction the block covers before its terminator, in
+    /// the order they run. Consecutive entries are consecutive instructions
+    /// except across an [`Exit::Jump`], after which they are the ones at its
+    /// target. The slots that hold a branch carry [`Op::Nop`]
+    /// as filler, the branch itself is in `exits`, and keeping one slot per
+    /// instruction is worth one dead slot per exit.
     pub(super) ops: Vec<Op>,
     /// The original instruction words, body then terminator, kept so a fault
     /// inside a block leaves the same run-up trail an interpreted one does.
@@ -559,10 +564,11 @@ pub(super) struct Block {
     /// where they sit.
     pub(super) exits: Vec<Branch>,
     pub(super) term: Option<Term>,
-    /// A second page the block's behaviour was read from, when its
-    /// terminator folds in a PLT stub that lives on another page. A store
-    /// there has to drop the block as surely as one to its own.
-    pub(super) also_reads: Option<u32>,
+    /// Every page the block's instructions were read from, as page numbers.
+    /// One for most blocks; more once it follows a `B`, runs off the end of
+    /// a page, or folds in a PLT stub that lives on another. A store to any
+    /// of them has to drop the block.
+    pub(super) pages: Vec<u32>,
 }
 
 impl Block {
@@ -580,10 +586,11 @@ impl Block {
         mut words: Vec<u32>,
         exits: Vec<Branch>,
         term: Option<Term>,
-        also_reads: Option<u32>,
+        mut pages: Vec<u32>,
     ) -> Block {
         ops.shrink_to_fit();
         words.shrink_to_fit();
+        pages.shrink_to_fit();
         Block {
             link: std::cell::RefCell::new(std::array::from_fn(|_| (NO_LINK, std::rc::Weak::new()))),
             start,
@@ -591,7 +598,7 @@ impl Block {
             words,
             exits,
             term,
-            also_reads,
+            pages,
         }
     }
 

@@ -13,6 +13,18 @@ use crate::cpu::loadstore::{Acc, PairKind, Wb};
 use crate::cpu::{Cpu, Result, RunReport, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
 use std::rc::Rc;
 
+/// Where a branch inside a block sends control.
+#[derive(Clone, Copy)]
+enum Taken {
+    /// Not taken: on to the following instruction.
+    No,
+    /// Taken, out of the block; `self.pc` holds the target.
+    Leave,
+    /// A branch the translator followed: always taken, and the block's ops go
+    /// on at the target.
+    Follow(u32),
+}
+
 /// The operand an addition needs to compute a subtraction. `carry` is 1
 /// exactly when the instruction subtracts, so it doubles as the mask that
 /// inverts the operand: no branch, and nothing left to decide at run time.
@@ -125,8 +137,7 @@ impl Cpu {
             return block;
         }
         let block = Rc::new(translate(&self.mem, pc));
-        self.mem.mark_code_page(block.start);
-        if let Some(page) = block.also_reads {
+        for &page in &block.pages {
             self.mem.mark_code_page(page << crate::mem::PAGE_BITS);
         }
         self.jit.translated += 1;
@@ -155,6 +166,11 @@ impl Cpu {
         let mut i = 0usize;
         let mut pc = block.start;
         let mut next_exit = 0usize;
+        // Where the straight-line run being executed began, by address and by
+        // index. A block that follows a `B` is several runs, and the
+        // index of the instruction at `pc` is only `pc - start` within one.
+        let mut run_pc = block.start;
+        let mut run_i = 0usize;
         loop {
             // Run straight through to the next conditional branch, or to the
             // end of what the budget allows. Taking the segment as a slice
@@ -177,8 +193,8 @@ impl Cpu {
                     // maintained, so counting alongside it was a second way of
                     // saying the same thing, paid for on every instruction to
                     // be read on almost none.
-                    let at = (pc.wrapping_sub(block.start) / 4) as usize;
-                    self.retire_run(block.start, at as u64 + 1);
+                    let at = run_i + (pc.wrapping_sub(run_pc) / 4) as usize;
+                    self.retire_runs(run_pc, run_i, at + 1);
                     self.pc = pc;
                     self.record_fault(&e, pc, block.words[at]);
                     return Err(e);
@@ -207,15 +223,36 @@ impl Cpu {
             }
             i += span;
             pc = pc.wrapping_add(4 * span as u32);
-            if self.take_exit(exit) {
-                // Taken: the branch is the last instruction of this visit, and
-                // `take_exit` has already put the target in `pc`.
-                self.retire_run(block.start, i as u64);
-                return Ok(i as u64);
+            match self.take_exit(exit) {
+                Taken::No => {}
+                Taken::Leave => {
+                    // The branch is the last instruction of this visit, and
+                    // `take_exit` has already put the target in `pc`.
+                    self.retire_runs(run_pc, run_i, i);
+                    return Ok(i as u64);
+                }
+                Taken::Follow(target) => {
+                    // Where the block would have ended before it followed the
+                    // branch, and so where a store to translated code has to
+                    // be noticed: the ops past here may be the very ones it
+                    // overwrote. Leave the way the branch would have as a
+                    // terminator, and `run_jit` drops what went stale.
+                    if self.mem.has_dirty_code() {
+                        self.pc = target;
+                        self.retire_runs(run_pc, run_i, i);
+                        return Ok(i as u64);
+                    }
+                    // The block goes on at the target. The run that ends here
+                    // goes into the trail now, while its start is still known.
+                    self.record_run(run_pc, (i - run_i) as u32);
+                    pc = target;
+                    run_pc = target;
+                    run_i = i;
+                }
             }
             next_exit += 1;
         }
-        self.retire_run(block.start, i as u64);
+        self.retire_runs(run_pc, run_i, i);
         let mut ran = i as u64;
         match block.term {
             Some(ref term) if i == block.ops.len() && ran < budget => {
@@ -253,6 +290,19 @@ impl Cpu {
         Ok(ran)
     }
 
+    /// Account for the `ran` instructions a visit to a block retired: the clock
+    /// and the step counter for all of them, and the trail for the ones in
+    /// the run that began at index `run_i`, address `run_pc`. The runs before
+    /// it went into the trail as the branches ending them were followed.
+    #[inline(always)]
+    fn retire_runs(&mut self, run_pc: u32, run_i: usize, ran: usize) {
+        self.cycles += ran as u64;
+        self.steps += ran as u64;
+        if ran > run_i {
+            self.record_run(run_pc, (ran - run_i) as u32);
+        }
+    }
+
     /// The flag-setting half of a fused compare-and-branch, for the one case
     /// that cannot run both: a step budget that ends between them.
     #[inline(always)]
@@ -276,12 +326,15 @@ impl Cpu {
         self.set_nzcv_from_alu(result, sf, c, v);
     }
 
-    /// Evaluate a conditional branch inside a block. Returns whether it was
-    /// taken: in which case `pc` is where control went and the block is over,
-    /// and otherwise the block carries on at the following instruction with
-    /// `pc` still to be settled by the caller.
+    /// Evaluate a branch inside a block, and say where control goes: on to
+    /// the following instruction, out of the block with `self.pc` on the
+    /// target, or on inside the block at a target the translator followed.
+    ///
+    /// One match for all of it. Asking first whether the branch was a
+    /// followed one and only then evaluating it was two jumps on the kind of
+    /// every exit, and cost 6% of a Just Dance 2019 frame in the wasm build.
     #[inline(always)]
-    fn take_exit(&mut self, exit: &Exit) -> bool {
+    fn take_exit(&mut self, exit: &Exit) -> Taken {
         let (taken, target) = match *exit {
             Exit::Cond { cond, target } => (self.condition_holds(cond), target),
             Exit::CmpImm {
@@ -325,11 +378,14 @@ impl Cpu {
                 let set = (self.read_zr(rt) >> bit) & 1 == 1;
                 (set == nz, target)
             }
+            Exit::Jump { target } => return Taken::Follow(target),
         };
         if taken {
             self.pc = target;
+            Taken::Leave
+        } else {
+            Taken::No
         }
-        taken
     }
 
     /// Execute one body op. Every arm does what the interpreter's decoder

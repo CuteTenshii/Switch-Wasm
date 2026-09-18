@@ -6,13 +6,13 @@ use crate::cpu::bits::*;
 use crate::cpu::loadstore::{pair_slot, rt_slot, Acc, Ext, PairKind, Wb};
 use crate::cpu::system::SysOp;
 use crate::cpu::{Cpu, ZR_DISCARD};
-use crate::mem::{Memory, PAGE_BITS, PAGE_SIZE};
+use crate::mem::{Memory, PAGE_BITS};
 
-/// Longest run of instructions one block may cover. Longer blocks amortize the
-/// per-block bookkeeping over more work, but they also make the step budget
-/// coarser. Not the binding limit in practice: raising it to 160 moved
-/// hbmenu's block entries by 0.2%, because what actually ends a block is an
-/// unconditional branch or the end of the page.
+/// Longest run of instructions one block may cover, the branches it follows
+/// included. Longer blocks amortize the per-block bookkeeping over more work,
+/// but they also make the step budget coarser. Not the binding limit in
+/// practice: raising it to 160 moved hbmenu's block entries by 0.2%, because
+/// what actually ends a block is an indirect branch or a return.
 const MAX_BLOCK_OPS: usize = 64;
 
 /// Whether the block translator has a real op for `insn`, or hands it back to
@@ -43,55 +43,113 @@ enum Decoded {
 
 /// Translate the block starting at `start`.
 ///
-/// Stops at the first instruction that can move the PC, at [`MAX_BLOCK_OPS`],
-/// or at the end of the page, never past it, so one page's invalidation
-/// covers a block completely.
+/// Stops at the first instruction that can move the PC somewhere it cannot
+/// follow, or at [`MAX_BLOCK_OPS`]. A direct `B` whose target is not already
+/// part of the block is followed rather than ending it: the target is fixed,
+/// so translation carries on there and the branch becomes an [`Exit::Jump`]
+/// that is always taken. On a Just Dance 2019 frame that took block entries
+/// from 2.13M to 2.00M and 1% off the frame in the wasm build.
+///
+/// `BL` is not followed, although its target is as fixed. Doing so copies the
+/// callee into a block at every call site, and on the same frame that cost 4%
+/// more than it saved in transitions.
+///
+/// A block may therefore read code from more than one page, and every page it
+/// read is listed in [`Block::pages`], so a store to any of them drops it.
 pub(super) fn translate(mem: &Memory, start: u32) -> Block {
-    let page_room = (PAGE_SIZE - (start as usize & (PAGE_SIZE - 1))) / 4;
-    let limit = MAX_BLOCK_OPS.min(page_room.max(1));
-    let mut ops = Vec::with_capacity(limit);
-    let mut words = Vec::with_capacity(limit);
+    let mut ops = Vec::with_capacity(MAX_BLOCK_OPS);
+    let mut words = Vec::with_capacity(MAX_BLOCK_OPS);
     let mut exits = Vec::new();
-    for i in 0..limit {
-        let pc = start.wrapping_add(4 * i as u32);
+    let mut pages = Vec::with_capacity(2);
+    // The straight-line runs translated so far, as `(first, end)` addresses,
+    // so a branch back into the block is left to end it rather than unrolled.
+    let mut runs: Vec<(u32, u32)> = Vec::with_capacity(4);
+    let mut run_start = start;
+    let mut pc = start;
+    for i in 0..MAX_BLOCK_OPS {
+        let page = pc >> PAGE_BITS;
+        if !pages.contains(&page) {
+            pages.push(page);
+        }
         let insn = match mem.fetch(pc) {
             Ok(insn) => insn,
             Err(_) => {
                 fuse_compares(&mut ops, &mut exits);
-                return Block::new(start, ops, words, exits, Some(Term::Fetch), None);
+                return Block::new(start, ops, words, exits, Some(Term::Fetch), pages);
             }
         };
-        match decode(insn, pc) {
-            Decoded::Term(term) => {
+        let decoded = match decode(insn, pc) {
+            Decoded::Term(Term::B { target }) => Decoded::Exit(Exit::Jump { target }),
+            other => other,
+        };
+        let follow = match decoded {
+            Decoded::Exit(Exit::Jump { target }) => {
+                let end = pc.wrapping_add(4);
+                let inside = |t: u32| {
+                    t >= run_start && t < end
+                        || runs.iter().any(|&(first, last)| t >= first && t < last)
+                };
+                // A jump on the last slot the block has room for would leave
+                // it with nothing after the jump, which is a block that only
+                // moves the PC. Not worth a slot of its own.
+                // Nor is a jump to a PLT stub, which the terminator runs
+                // better folded than the block would as four more ops.
+                let followable = target & 3 == 0
+                    && !inside(target)
+                    && i + 1 < MAX_BLOCK_OPS
+                    && plt_slot(mem, target).is_none();
+                followable.then_some(target)
+            }
+            _ => None,
+        };
+        match (decoded, follow) {
+            (Decoded::Exit(exit), Some(target)) => {
+                exits.push(Branch::new(i as u32, exit));
+                ops.push(Op::Nop);
+                words.push(insn);
+                runs.push((run_start, pc.wrapping_add(4)));
+                pc = target;
+                run_start = target;
+                continue;
+            }
+            // A jump that is not followed ends the block, as it always did.
+            (Decoded::Exit(Exit::Jump { target }), None) => {
                 words.push(insn);
                 fuse_compares(&mut ops, &mut exits);
-                let (term, also_reads) = fold_plt(mem, start, term);
-                return Block::new(start, ops, words, exits, Some(term), also_reads);
+                let term = fold_plt(mem, Term::B { target }, &mut pages);
+                return Block::new(start, ops, words, exits, Some(term), pages);
+            }
+            (Decoded::Term(term), _) => {
+                words.push(insn);
+                fuse_compares(&mut ops, &mut exits);
+                let term = fold_plt(mem, term, &mut pages);
+                return Block::new(start, ops, words, exits, Some(term), pages);
             }
             // A conditional branch does not end the block: its not-taken path
             // is the next instruction, so translation carries on there and the
             // branch becomes an early exit. This is the whole reason blocks
             // are longer than the six or seven instructions a basic block runs
             // to: `b.cond` alone is 12% of hbmenu's frame.
-            Decoded::Exit(exit) => {
+            (Decoded::Exit(exit), None) => {
                 exits.push(Branch::new(i as u32, exit));
                 ops.push(Op::Nop);
                 words.push(insn);
             }
-            Decoded::Op(op) => {
+            (Decoded::Op(op), _) => {
                 ops.push(op);
                 words.push(insn);
             }
         }
+        pc = pc.wrapping_add(4);
     }
     fuse_compares(&mut ops, &mut exits);
-    Block::new(start, ops, words, exits, None, None)
+    Block::new(start, ops, words, exits, None, pages)
 }
 
 /// A direct `BL` or `B` whose target is a PLT stub, turned into the terminator
-/// that runs the stub as well, together with the stub's page when that is not
-/// the block's own.
-fn fold_plt(mem: &Memory, start: u32, term: Term) -> (Term, Option<u32>) {
+/// that runs the stub as well, with the stub's page added to the ones the
+/// block reads.
+fn fold_plt(mem: &Memory, term: Term, pages: &mut Vec<u32>) -> Term {
     let (target, folded) = match term {
         Term::Bl { target, ret_pc } => match plt_slot(mem, target) {
             Some(got) => (
@@ -102,16 +160,19 @@ fn fold_plt(mem: &Memory, start: u32, term: Term) -> (Term, Option<u32>) {
                     ret_pc,
                 },
             ),
-            None => return (term, None),
+            None => return term,
         },
         Term::B { target } => match plt_slot(mem, target) {
             Some(got) => (target, Term::BPlt { got, stub: target }),
-            None => return (term, None),
+            None => return term,
         },
-        _ => return (term, None),
+        _ => return term,
     };
     let page = target >> PAGE_BITS;
-    (folded, (page != start >> PAGE_BITS).then_some(page))
+    if !pages.contains(&page) {
+        pages.push(page);
+    }
+    folded
 }
 
 /// The GOT slot a PLT stub at `at` jumps through, if `at` is one.
