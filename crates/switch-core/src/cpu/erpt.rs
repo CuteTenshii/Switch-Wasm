@@ -347,7 +347,9 @@ impl Cpu {
                     None => Vec::new(),
                 };
                 let ids: Vec<[u8; ERPT_ID_SIZE]> = ids
-                    .chunks_exact(ERPT_ID_SIZE)
+                    .as_chunks::<ERPT_ID_SIZE>()
+                    .0
+                    .iter()
                     .map(|id| {
                         let mut out = [0u8; ERPT_ID_SIZE];
                         out.copy_from_slice(id);
@@ -434,7 +436,7 @@ impl Cpu {
             None => Vec::new(),
         };
         let mut categories = Vec::new();
-        for entry in array.chunks_exact(ERPT_CONTEXT_ENTRY_SIZE) {
+        for entry in array.as_chunks::<ERPT_CONTEXT_ENTRY_SIZE>().0 {
             let category = u32::from_le_bytes(
                 entry[ERPT_CONTEXT_CATEGORY..ERPT_CONTEXT_CATEGORY + 4]
                     .try_into()

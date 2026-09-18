@@ -666,8 +666,13 @@ mod tests {
             stats: &mut stats,
             trace: false,
         };
-        for (i, chunk) in solid_fragment_shader().chunks_exact(4).enumerate() {
-            let word = u32::from_le_bytes(chunk.try_into().unwrap());
+        for (i, chunk) in solid_fragment_shader()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .enumerate()
+        {
+            let word = u32::from_le_bytes(*chunk);
             ctx.write_u32(at + i as u64 * 4, word).unwrap();
         }
         let (program, reads) = decode_program_from_memory_recording(&ctx, at, &|_| None).unwrap();

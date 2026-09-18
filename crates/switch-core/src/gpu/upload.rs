@@ -114,12 +114,16 @@ impl IndexUpload {
         match self.format {
             IndexFormat::Uint16 => self
                 .bytes
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|b| u32::from(u16::from_le_bytes([b[0], b[1]])))
                 .collect(),
             IndexFormat::Uint32 => self
                 .bytes
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
                 .collect(),
         }
@@ -1611,7 +1615,7 @@ mod tests {
         target.write(&mut h.ctx(), &original).unwrap();
         target.write_depth(&mut h.ctx(), &[0u8; 16 * 4]).unwrap();
         let after = target.read(&h.ctx()).unwrap();
-        for (i, pixel) in after.chunks_exact(4).enumerate() {
+        for (i, pixel) in after.as_chunks::<4>().0.iter().enumerate() {
             let value = u32::from_le_bytes([pixel[0], pixel[1], pixel[2], pixel[3]]);
             assert_eq!(value >> 8, 0, "texel {i} kept a depth it was told to clear");
             assert_eq!(value & 0xFF, i as u32 + 1, "texel {i} lost its stencil");

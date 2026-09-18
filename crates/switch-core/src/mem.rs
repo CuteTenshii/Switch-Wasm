@@ -1088,7 +1088,7 @@ impl Memory {
             4 => {
                 let keep = u32::from_le_bytes([keep[0], keep[1], keep[2], keep[3]]);
                 let set = u32::from_le_bytes([set[0], set[1], set[2], set[3]]);
-                for slot in run.chunks_exact_mut(4) {
+                for slot in run.as_chunks_mut::<4>().0 {
                     let old = u32::from_le_bytes([slot[0], slot[1], slot[2], slot[3]]);
                     slot.copy_from_slice(&((old & keep) | set).to_le_bytes());
                 }
@@ -1096,7 +1096,7 @@ impl Memory {
             2 => {
                 let keep = u16::from_le_bytes([keep[0], keep[1]]);
                 let set = u16::from_le_bytes([set[0], set[1]]);
-                for slot in run.chunks_exact_mut(2) {
+                for slot in run.as_chunks_mut::<2>().0 {
                     let old = u16::from_le_bytes([slot[0], slot[1]]);
                     slot.copy_from_slice(&((old & keep) | set).to_le_bytes());
                 }

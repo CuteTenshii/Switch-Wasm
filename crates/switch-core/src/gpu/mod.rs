@@ -469,9 +469,13 @@ impl Gpu {
                 if let Some(shuffle) = shuffle.filter(|_| held && run_bytes.end <= swizzled) {
                     // A shuffle is only ever an 8-bit-per-channel format, so
                     // four bytes a pixel.
-                    pixels.extend(raw_bytes[run_bytes].chunks_exact(4).map(|b| {
-                        shuffle.apply(u32::from_le_bytes(b.try_into().expect("four bytes")))
-                    }));
+                    pixels.extend(
+                        raw_bytes[run_bytes]
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|b| shuffle.apply(u32::from_le_bytes(*b))),
+                    );
                     x += count;
                     continue;
                 }

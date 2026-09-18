@@ -1,4 +1,4 @@
-name: Checks
+name: Check and deploy
 
 on:
   push:
@@ -6,26 +6,72 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: check-and-deploy-${{ forgejo.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: https://github.com/dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      # Separate from the pages cache: that one is keyed on the wasm target and
-      # holds no clippy metadata, so sharing it would rebuild the world twice.
       - uses: https://github.com/Swatinem/rust-cache@v2
         with:
-          key: lint
+          key: check
 
-      - name: rustfmt
+      - name: Check formatting
         run: cargo fmt --all --check
 
-      # Host targets only. `switch-wasm --features gpu` is what the site ships,
-      # but it needs wasm32 and the pages workflow already builds it.
-      - name: clippy
+      - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: make test
+
+  build:
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: wasm32-unknown-unknown
+          cache-bin: "false"
+
+      - name: Install matching wasm-bindgen CLI
+        shell: bash
+        run: |
+          version=$(sed -n '/^name = "wasm-bindgen"$/,/^\[\[package\]\]/ s/^version = "\(.*\)"/\1/p' Cargo.lock)
+          test -n "$version"
+          curl -sSfL "https://github.com/wasm-bindgen/wasm-bindgen/releases/download/$version/wasm-bindgen-$version-x86_64-unknown-linux-musl.tar.gz" \
+            | tar -xz -C ~/.cargo/bin --strip-components=1 --wildcards '*/wasm-bindgen'
+          wasm-bindgen --version | grep -F "wasm-bindgen $version"
+
+      - uses: https://github.com/oven-sh/setup-bun@v2
+
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type-check frontend and worker
+        run: bun run typecheck
+
+      - name: Build
+        run: make assets
+
+      - name: Deploy to Pages
+        if: forgejo.ref == 'refs/heads/master' && forgejo.event_name != 'pull_request'
+        uses: actions/git-pages@v2
+        with:
+          site: https://tenshii.moe/Switch-Wasm/
+          token: ${{ forge.token }}
+          source: dist/

@@ -522,10 +522,7 @@ impl SystemSettings {
             value.get(..N)?.try_into().ok()
         }
         fn list<const N: usize>(value: &[u8]) -> Vec<[u8; N]> {
-            value
-                .chunks_exact(N)
-                .filter_map(|entry| entry.try_into().ok())
-                .collect()
+            value.as_chunks::<N>().0.to_vec()
         }
 
         match tag {
@@ -556,7 +553,7 @@ impl SystemSettings {
             }
             39 => self.tv_settings = block(value).unwrap_or(self.tv_settings),
             43 => {
-                for (target, mode) in value.chunks_exact(4).enumerate() {
+                for (target, mode) in value.as_chunks::<4>().0.iter().enumerate() {
                     if let (Some(slot), Some(mode)) =
                         (self.audio_output_mode.get_mut(target), u32_at(mode))
                     {
@@ -1445,10 +1442,7 @@ impl Cpu {
         if addr == 0 {
             return Vec::new();
         }
-        self.read_bytes(addr, size)
-            .chunks_exact(N)
-            .filter_map(|entry| entry.try_into().ok())
-            .collect()
+        self.read_bytes(addr, size).as_chunks::<N>().0.to_vec()
     }
 
     /// `SetSysFirmwareVersion`, the 0x100-byte block `set:sys` reports the

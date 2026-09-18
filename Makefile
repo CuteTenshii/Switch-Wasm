@@ -17,7 +17,9 @@ all: test assets
 test:
 	cargo test -p switch-core
 	cargo test -p switch-wasm
-	cargo test -p switch-gpu
+	# wgpu device tests share the host adapter; parallel creation can crash the
+	# software Vulkan driver used by headless CI runners.
+	cargo test -p switch-gpu -- --test-threads=1
 
 # Compile the wasm bindings crate, with the WebGPU backend.
 #

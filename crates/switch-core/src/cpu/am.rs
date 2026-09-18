@@ -361,7 +361,9 @@ fn applet_result_summary(program_id: u64, data: &[u8]) -> String {
         // for UTF-8, which [`swkbd_config`] does not.
         APPLET_SWKBD if data.len() >= 4 => {
             let text: Vec<u16> = data[4..]
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .take_while(|&unit| unit != 0)
                 .collect();

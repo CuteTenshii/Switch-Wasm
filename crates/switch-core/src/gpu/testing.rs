@@ -191,8 +191,8 @@ impl Harness {
                 (passthrough_vertex_shader(), vs_addr),
                 (fragment_shader, fs_addr),
             ] {
-                for (i, chunk) in words.chunks_exact(4).enumerate() {
-                    let word = u32::from_le_bytes(chunk.try_into().unwrap());
+                for (i, chunk) in words.as_chunks::<4>().0.iter().enumerate() {
+                    let word = u32::from_le_bytes(*chunk);
                     ctx.write_u32(addr + i as u64 * 4, word).unwrap();
                 }
             }
