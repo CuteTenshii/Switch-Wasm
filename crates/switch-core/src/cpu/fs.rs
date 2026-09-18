@@ -351,6 +351,7 @@ impl Cpu {
             // have, and it puts the caller on the path it already has for that.
             Some(2) | Some(7) | Some(8) | Some(9) | Some(12) | Some(17) | Some(30) | Some(31) => {
                 self.warn_no_implementation("fsp-srv", cmd_id);
+                self.report_refused_open(tls, cmd_id);
                 self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[])
             }
             // Still a fabricated success, homebrew that only checks the
@@ -364,6 +365,44 @@ impl Cpu {
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
         }
+    }
+
+    /// Name the content an `Open*` this console cannot serve was asking for.
+    ///
+    /// "No implementation" on its own says which command was refused and
+    /// nothing about what it wanted, and these are the commands where that is
+    /// the whole question: they differ only in which title's content and which
+    /// section of it. Asphalt 9 falls through 9, then 7, then 8, and without
+    /// the arguments there is no way to tell whether it wants its own data, an
+    /// update, or its HTML manual.
+    ///
+    /// The layout assumed is `nn::fs`'s: a proxy type in the first word and a
+    /// program id in the second. The raw words go out beside the decoded
+    /// reading so a wrong assumption is visible rather than believed.
+    fn report_refused_open(&mut self, tls: u32, cmd_id: Option<u32>) {
+        let data = self.ipc_request_data(tls);
+        let first = self.mem.read_u64(data).unwrap_or(0);
+        let second = self.mem.read_u64(data.wrapping_add(8)).unwrap_or(0);
+        let kind = match first as u8 {
+            0 => "Code",
+            1 => "Rom",
+            2 => "Logo",
+            3 => "Control",
+            4 => "Manual",
+            5 => "Meta",
+            6 => "Data",
+            7 => "Package",
+            8 => "RegisteredUpdate",
+            _ => "?",
+        };
+        let cmd = cmd_id.unwrap_or(0);
+        self.diagnostic(
+            Level::Warn,
+            &format!(
+                "[fs] refused fsp-srv {cmd}: raw {first:#018x} {second:#018x} \
+                 (reads as type {kind}, program {second:016x})"
+            ),
+        );
     }
 
     /// `ISaveDataInfoReader`: cmd 0 = `ReadSaveDataInfo`, which fills an
