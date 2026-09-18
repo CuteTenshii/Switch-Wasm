@@ -447,7 +447,7 @@ mod tests {
 
     fn block_of(ops: Vec<Op>) -> Block {
         let words = vec![0u32; ops.len()];
-        Block::new(0x1000, ops, words, Vec::new(), None)
+        Block::new(0x1000, ops, words, Vec::new(), None, None)
     }
 
     const LAYOUT: Layout = Layout {

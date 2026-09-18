@@ -398,6 +398,13 @@ pub(super) enum Term {
     B { target: u32 },
     /// `BL #imm`.
     Bl { target: u32, ret_pc: u32 },
+    /// `BL` to a PLT stub, with the stub run as part of it: see
+    /// [`super::decode`]'s `plt_slot`. `got` is the slot the stub loads its
+    /// target from, and `stub` where the stub is, for the fallback.
+    BlPlt { got: u32, stub: u32, ret_pc: u32 },
+    /// `B` to a PLT stub, a tail call into another module, folded the same
+    /// way.
+    BPlt { got: u32, stub: u32 },
     /// `BR Xn`.
     Br { rn: u8 },
     /// `BLR Xn`.
@@ -552,6 +559,10 @@ pub(super) struct Block {
     /// where they sit.
     pub(super) exits: Vec<Branch>,
     pub(super) term: Option<Term>,
+    /// A second page the block's behaviour was read from, when its
+    /// terminator folds in a PLT stub that lives on another page. A store
+    /// there has to drop the block as surely as one to its own.
+    pub(super) also_reads: Option<u32>,
 }
 
 impl Block {
@@ -569,6 +580,7 @@ impl Block {
         mut words: Vec<u32>,
         exits: Vec<Branch>,
         term: Option<Term>,
+        also_reads: Option<u32>,
     ) -> Block {
         ops.shrink_to_fit();
         words.shrink_to_fit();
@@ -579,6 +591,7 @@ impl Block {
             words,
             exits,
             term,
+            also_reads,
         }
     }
 

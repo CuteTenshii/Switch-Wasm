@@ -6,7 +6,7 @@ use crate::cpu::bits::*;
 use crate::cpu::loadstore::{pair_slot, rt_slot, Acc, Ext, PairKind, Wb};
 use crate::cpu::system::SysOp;
 use crate::cpu::{Cpu, ZR_DISCARD};
-use crate::mem::{Memory, PAGE_SIZE};
+use crate::mem::{Memory, PAGE_BITS, PAGE_SIZE};
 
 /// Longest run of instructions one block may cover. Longer blocks amortize the
 /// per-block bookkeeping over more work, but they also make the step budget
@@ -58,14 +58,15 @@ pub(super) fn translate(mem: &Memory, start: u32) -> Block {
             Ok(insn) => insn,
             Err(_) => {
                 fuse_compares(&mut ops, &mut exits);
-                return Block::new(start, ops, words, exits, Some(Term::Fetch));
+                return Block::new(start, ops, words, exits, Some(Term::Fetch), None);
             }
         };
         match decode(insn, pc) {
             Decoded::Term(term) => {
                 words.push(insn);
                 fuse_compares(&mut ops, &mut exits);
-                return Block::new(start, ops, words, exits, Some(term));
+                let (term, also_reads) = fold_plt(mem, start, term);
+                return Block::new(start, ops, words, exits, Some(term), also_reads);
             }
             // A conditional branch does not end the block: its not-taken path
             // is the next instruction, so translation carries on there and the
@@ -84,7 +85,79 @@ pub(super) fn translate(mem: &Memory, start: u32) -> Block {
         }
     }
     fuse_compares(&mut ops, &mut exits);
-    Block::new(start, ops, words, exits, None)
+    Block::new(start, ops, words, exits, None, None)
+}
+
+/// A direct `BL` or `B` whose target is a PLT stub, turned into the terminator
+/// that runs the stub as well, together with the stub's page when that is not
+/// the block's own.
+fn fold_plt(mem: &Memory, start: u32, term: Term) -> (Term, Option<u32>) {
+    let (target, folded) = match term {
+        Term::Bl { target, ret_pc } => match plt_slot(mem, target) {
+            Some(got) => (
+                target,
+                Term::BlPlt {
+                    got,
+                    stub: target,
+                    ret_pc,
+                },
+            ),
+            None => return (term, None),
+        },
+        Term::B { target } => match plt_slot(mem, target) {
+            Some(got) => (target, Term::BPlt { got, stub: target }),
+            None => return (term, None),
+        },
+        _ => return (term, None),
+    };
+    let page = target >> PAGE_BITS;
+    (folded, (page != start >> PAGE_BITS).then_some(page))
+}
+
+/// The GOT slot a PLT stub at `at` jumps through, if `at` is one.
+///
+/// Every call from one module into another lands on one of these first:
+///
+/// ```text
+/// adrp x16, <slot page>
+/// ldr  x17, [x16, #<slot offset>]
+/// add  x16, x16, #<slot offset>
+/// br   x17
+/// ```
+///
+/// Run as they stand, they are a block of their own: the caller's block ends
+/// on its `BL`, the stub is entered, and its `BR` ends it again, so a call
+/// across modules was two block transitions and four dispatches more than a
+/// call inside one. On a Just Dance 2019 frame that was 500K of the 1.78M
+/// blocks entered, since `nn::` sits in the sdk module and the game calls it
+/// constantly. Recognised here, the stub is folded into the terminator that
+/// reaches it, which loads the slot itself when it runs.
+///
+/// Only the stub's code is taken as fixed. The slot is loaded on every call,
+/// so a module that rebinds an import is followed like it is by the stub.
+fn plt_slot(mem: &Memory, at: u32) -> Option<u32> {
+    const X16: u32 = 16;
+    const X17: u32 = 17;
+    // The four words have to be on one page, the one the block registers.
+    if at & 3 != 0 || (at & 0xFFF) > 0xFF0 {
+        return None;
+    }
+    let word = |i: u32| mem.fetch(at.wrapping_add(4 * i)).ok();
+    let (adrp, ldr, add, br) = (word(0)?, word(1)?, word(2)?, word(3)?);
+    let is_adrp = adrp & 0x9F00_0000 == 0x9000_0000 && adrp & 0x1F == X16;
+    let is_ldr = ldr & 0xFFC0_0000 == 0xF940_0000 && (ldr >> 5) & 0x1F == X16 && ldr & 0x1F == X17;
+    let is_add = add & 0xFFC0_0000 == 0x9100_0000 && (add >> 5) & 0x1F == X16 && add & 0x1F == X16;
+    if !is_adrp || !is_ldr || !is_add || br != 0xD61F_0220 {
+        return None;
+    }
+    let offset = ((ldr >> 10) & 0xFFF) * 8;
+    if (add >> 10) & 0xFFF != offset {
+        return None;
+    }
+    let immhi = u64::from((adrp >> 5) & 0x7_FFFF);
+    let immlo = u64::from((adrp >> 29) & 0b11);
+    let page = u64::from(at & !0xFFF).wrapping_add(sext_u64((immhi << 2) | immlo, 21) << 12);
+    Some((page as u32).wrapping_add(offset))
 }
 
 /// Fold every `CMP`/`CMN` that feeds the conditional branch immediately after

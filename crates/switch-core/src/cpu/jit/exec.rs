@@ -126,6 +126,9 @@ impl Cpu {
         }
         let block = Rc::new(translate(&self.mem, pc));
         self.mem.mark_code_page(block.start);
+        if let Some(page) = block.also_reads {
+            self.mem.mark_code_page(page << crate::mem::PAGE_BITS);
+        }
         self.jit.translated += 1;
         self.jit.insert(block.clone());
         block
@@ -218,7 +221,7 @@ impl Cpu {
             Some(ref term) if i == block.ops.len() && ran < budget => {
                 self.pc = pc;
                 self.record_run(pc, 1);
-                let result = self.exec_term(term, pc);
+                let result = self.exec_term(term, pc, budget - ran);
                 // After the terminator, not before, and whether or not it
                 // faulted, which is what `step_inner` does. An `SVC` is the
                 // one instruction that reads the clock while it runs, so
@@ -227,11 +230,20 @@ impl Cpu {
                 // between the two engines, because a sleep deadline is
                 // computed from the value the syscall saw.
                 self.retire();
-                if let Err(e) = result {
-                    self.record_fault(&e, pc, block.words[i]);
-                    return Err(e);
+                match result {
+                    Ok(folded) => {
+                        // The instructions of a PLT stub the terminator ran as
+                        // well, which retire exactly as if they had run on
+                        // their own.
+                        self.cycles += folded;
+                        self.steps += folded;
+                        ran += 1 + folded;
+                    }
+                    Err(e) => {
+                        self.record_fault(&e, pc, block.words[i]);
+                        return Err(e);
+                    }
                 }
-                ran += 1;
             }
             // Either the budget ran out inside the block, or it covered the
             // body of a block that has no terminator. Both leave `pc` on the
@@ -625,10 +637,17 @@ impl Cpu {
     }
 
     /// Execute the instruction a block ends on, leaving `self.pc` wherever
-    /// control goes next.
+    /// control goes next, and report how many instructions it retired beyond
+    /// its own: those of a folded PLT stub, and otherwise none. `room` is how
+    /// many the step budget has left for, the terminator included.
     #[inline(always)]
-    fn exec_term(&mut self, term: &Term, pc: u32) -> Result<()> {
+    fn exec_term(&mut self, term: &Term, pc: u32, room: u64) -> Result<u64> {
         match *term {
+            Term::BlPlt { got, stub, ret_pc } => {
+                self.write_zr(30, u64::from(ret_pc));
+                return Ok(self.through_plt(got, stub, room));
+            }
+            Term::BPlt { got, stub } => return Ok(self.through_plt(got, stub, room)),
             Term::B { target } => self.pc = target,
             Term::Bl { target, ret_pc } => {
                 self.write_zr(30, u64::from(ret_pc));
@@ -671,6 +690,32 @@ impl Cpu {
                 self.execute(insn, pc.wrapping_add(4))?;
             }
         }
-        Ok(())
+        Ok(0)
+    }
+
+    /// Run the PLT stub at `stub`, which jumps through the GOT slot `got`,
+    /// once the branch to it has been taken. Leaves `x16` and `x17` as the
+    /// stub would and `pc` on the function it reaches, and reports the four
+    /// instructions it retired.
+    ///
+    /// When the budget cannot fit all four, or the slot cannot be read, it
+    /// does nothing but leave `pc` on the stub: the stub then runs as a block
+    /// of its own, stops where the budget says and faults where its load
+    /// does, exactly as it did before it was folded.
+    #[inline(always)]
+    fn through_plt(&mut self, got: u32, stub: u32, room: u64) -> u64 {
+        const STUB: u64 = 4;
+        let target = match self.mem.read_u64(got) {
+            Ok(target) if room > STUB => target,
+            _ => {
+                self.pc = stub;
+                return 0;
+            }
+        };
+        self.write_zr(16, u64::from(got));
+        self.write_zr(17, target);
+        self.record_run(stub, STUB as u32);
+        self.pc = target as u32;
+        STUB
     }
 }

@@ -105,6 +105,9 @@ impl Jit {
         }
         let page = block.start >> 12;
         self.by_page.entry(page).or_default().push(block.start);
+        if let Some(page) = block.also_reads {
+            self.by_page.entry(page).or_default().push(block.start);
+        }
         self.lookup[Self::slot(block.start)] = Some(block.clone());
         self.blocks.insert(block.start, block);
     }

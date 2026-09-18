@@ -457,6 +457,109 @@ fn a_block_stops_at_the_end_of_its_page() {
     );
 }
 
+/// Two calls through a PLT stub, the way every call into another module is
+/// made, to a function that sets `x1`. The stub's GOT slot is at
+/// `DATA + 0x10` and is filled in by the test, as a dynamic linker would.
+/// Assembled from:
+///
+/// ```text
+///         bl    stub
+///         add   x0, x0, #1
+///         bl    stub
+///         b     .
+///         nop ; nop ; nop ; nop
+/// stub:   adrp  x16, DATA
+///         ldr   x17, [x16, #0x10]
+///         add   x16, x16, #0x10
+///         br    x17
+/// five:   movz  x1, #5
+///         ret
+/// seven:  movz  x1, #7
+///         ret
+/// ```
+#[rustfmt::skip]
+const THROUGH_PLT: &[u32] = &[
+    0x94000008, 0x91000400, 0x94000006, 0x14000000,
+    0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f,
+    0xf0000030, 0xf9400a11, 0x91004210, 0xd61f0220,
+    0xd28000a1, 0xd65f03c0, 0xd28000e1, 0xd65f03c0,
+];
+const PLT_SLOT: u32 = DATA + 0x10;
+const FIVE: u64 = CODE as u64 + 0x30;
+const SEVEN: u64 = CODE as u64 + 0x38;
+
+fn bound(code: &[u32], jit: bool, target: u64) -> Cpu {
+    let mut cpu = loaded(code, jit);
+    cpu.mem.write_u64(PLT_SLOT, target).unwrap();
+    cpu
+}
+
+#[test]
+fn a_call_through_a_plt_stub_matches_the_interpreter_at_every_step_budget() {
+    // The stub is folded into the `BL` that reaches it, so a budget can end
+    // between the two, inside the stub, or just past it. Each has to leave
+    // x16, x17, x30, the pc and the retired count where the interpreter does.
+    for steps in 1..=20 {
+        let mut interpreted = bound(THROUGH_PLT, false, FIVE);
+        let mut translated = bound(THROUGH_PLT, true, FIVE);
+        let a = interpreted.run(steps).unwrap();
+        let b = translated.run(steps).unwrap();
+        let what = format!("through a PLT stub, {steps} steps");
+        assert_eq!(a, b, "{what}: run reports differ");
+        assert_same(&snapshot(&interpreted), &snapshot(&translated), &what);
+    }
+    let mut cpu = bound(THROUGH_PLT, true, FIVE);
+    cpu.run(20).unwrap();
+    assert_eq!(cpu.read_x(1), 5);
+    assert_eq!(cpu.read_x(16), u64::from(PLT_SLOT));
+    assert_eq!(cpu.read_x(17), FIVE);
+    // The entry, the function, the return site and the spin. A fifth block
+    // would be the stub, run on its own rather than folded.
+    assert_eq!(
+        cpu.jit_stats().translated,
+        4,
+        "the stub was not folded into the call"
+    );
+}
+
+#[test]
+fn a_rebound_plt_slot_is_followed_on_the_next_call() {
+    // The stub's code is taken as fixed; its slot is not, so a slot rewritten
+    // between two calls has to send the second one to the new target.
+    let mut cpu = bound(THROUGH_PLT, true, FIVE);
+    // `bl`, the stub's four, `movz` and `ret`.
+    cpu.run(7).unwrap();
+    assert_eq!(cpu.read_x(1), 5);
+    assert_eq!(cpu.get_pc(), CODE + 4);
+    cpu.mem.write_u64(PLT_SLOT, SEVEN).unwrap();
+    cpu.run(13).unwrap();
+    assert_eq!(cpu.read_x(1), 7, "the second call went to the old target");
+}
+
+#[test]
+fn a_plt_slot_that_cannot_be_read_faults_where_the_interpreter_does() {
+    // The same stub pointed at a slot on an unmapped page: `adrp x16`, one page
+    // past `DATA`. The folded call has to fall back to running the stub, so
+    // the load faults on the stub's own `ldr`.
+    let mut code = THROUGH_PLT.to_vec();
+    code[8] = 0x90000050;
+    let mut interpreted = loaded(&code, false);
+    let mut translated = loaded(&code, true);
+    let a = interpreted.run(20).unwrap_err();
+    let b = translated.run(20).unwrap_err();
+    assert_eq!(a.to_string(), b.to_string(), "fault messages differ");
+    assert_eq!(
+        translated.get_pc(),
+        CODE + 0x24,
+        "the pc is not on the load"
+    );
+    assert_same(
+        &snapshot(&interpreted),
+        &snapshot(&translated),
+        "an unreadable PLT slot",
+    );
+}
+
 #[test]
 fn a_hot_loop_is_translated_once_and_entered_many_times() {
     // The whole point: a loop body pays for its decode on the first pass and
