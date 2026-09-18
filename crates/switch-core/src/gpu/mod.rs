@@ -416,6 +416,7 @@ impl Gpu {
         // Asked once, not once per pixel: the answer is the same for every
         // one of the 921,600 in a 720p frame.
         let srgb = format.is_srgb();
+        let shuffle = format.host_shuffle();
         let to8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
 
         // The whole buffer in one walk of the page table rather than 921,600.
@@ -464,6 +465,16 @@ impl Gpu {
                 let (offset, run) = layout.run_at((crop_x + x) * bpp, y, width_bytes);
                 let addr = base.wrapping_add(offset);
                 let count = (run / bpp).clamp(1, out_width - x);
+                let run_bytes = offset as usize..(offset + count * bpp) as usize;
+                if let Some(shuffle) = shuffle.filter(|_| held && run_bytes.end <= swizzled) {
+                    // A shuffle is only ever an 8-bit-per-channel format, so
+                    // four bytes a pixel.
+                    pixels.extend(raw_bytes[run_bytes].chunks_exact(4).map(|b| {
+                        shuffle.apply(u32::from_le_bytes(b.try_into().expect("four bytes")))
+                    }));
+                    x += count;
+                    continue;
+                }
                 for i in 0..count {
                     let at = (offset + i * bpp) as usize;
                     // Four bytes as one word, not four shifts into a `u128`:
@@ -482,8 +493,8 @@ impl Gpu {
                     // The common surface is already the word the canvas
                     // wants; only a format whose decode is real work goes
                     // through linear light and straight back again.
-                    if let Some(word) = format.host_word(raw as u32) {
-                        pixels.push(word);
+                    if let Some(shuffle) = shuffle {
+                        pixels.push(shuffle.apply(raw as u32));
                         continue;
                     }
                     let mut rgba = format.decode(raw)?;

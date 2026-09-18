@@ -437,6 +437,27 @@ enum Order8 {
     Bgra,
 }
 
+/// How a stored pixel becomes the host's `0xAABBGGRR` word, for a format
+/// where that is a byte shuffle. See [`ColorFormat::host_shuffle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostShuffle {
+    swap_red_blue: bool,
+    keep_alpha: u32,
+    force_alpha: u32,
+}
+
+impl HostShuffle {
+    #[inline(always)]
+    pub fn apply(self, raw: u32) -> u32 {
+        let rgb = if self.swap_red_blue {
+            ((raw >> 16) & 0xFF) | (raw & 0x0000_FF00) | ((raw & 0xFF) << 16)
+        } else {
+            raw & 0x00FF_FFFF
+        };
+        rgb | (raw & self.keep_alpha) | self.force_alpha
+    }
+}
+
 impl ColorFormat {
     pub fn from_raw(raw: u32) -> Result<ColorFormat> {
         let bytes_per_pixel = match raw {
@@ -656,23 +677,25 @@ impl ColorFormat {
     /// `None` where the decode is real work rather than a shuffle, an sRGB
     /// format carries a transfer function, and everything below 8 bits a
     /// channel has to be widened.
-    #[inline]
-    pub fn host_word(&self, raw: u32) -> Option<u32> {
+    ///
+    /// Asked once per surface, not once per pixel: the question walks
+    /// [`ColorFormat::packing`]'s table, and the answer is the same for all
+    /// 921,600 pixels of a frame.
+    pub fn host_shuffle(&self) -> Option<HostShuffle> {
         // sRGB is a curve, not a permutation.
         if self.is_srgb() {
             return None;
         }
         // An "X" format has no alpha to read, and the host word is opaque.
-        let alpha = if self.has_alpha() {
-            raw & 0xFF00_0000
+        let (keep_alpha, force_alpha) = if self.has_alpha() {
+            (0xFF00_0000, 0)
         } else {
-            0xFF00_0000
+            (0, 0xFF00_0000)
         };
-        Some(match self.order8()? {
-            Order8::Rgba => (raw & 0x00FF_FFFF) | alpha,
-            Order8::Bgra => {
-                ((raw >> 16) & 0xFF) | (raw & 0x0000_FF00) | ((raw & 0xFF) << 16) | alpha
-            }
+        Some(HostShuffle {
+            swap_red_blue: self.order8()? == Order8::Bgra,
+            keep_alpha,
+            force_alpha,
         })
     }
 
