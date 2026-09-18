@@ -666,6 +666,41 @@ impl Cpu {
         self.vregs[reg as usize] = set_lane(self.vregs[reg as usize], esize, index, val);
     }
 
+    /// `LDXR`/`LDAXR`: load, and arm this thread's monitor at the address.
+    /// `rt` is already resolved for writing and `rn` to the SP form.
+    #[inline(always)]
+    pub(super) fn load_exclusive(&mut self, rt: u8, rn: u8, sz: u8) -> Result<()> {
+        let addr = self.reg_at(rn) as u32;
+        let val = self.load_by_size(addr, u32::from(sz), false)?;
+        self.exclusive = Some(addr);
+        self.set_reg_at(rt, val);
+        Ok(())
+    }
+
+    /// `STXR`/`STLXR`: succeeds only against a monitor this thread's own
+    /// `LDXR` set at the same address. A failed one stores **nothing** and
+    /// writes 1 to `rs`, which every guest answers by looping back to the
+    /// `LDXR`.
+    ///
+    /// This used to succeed unconditionally, which was safe only while threads
+    /// could lose the CPU at a blocking syscall and nowhere else: no guest puts
+    /// one between the two halves of a read-modify-write, so every pair was
+    /// atomic by construction. Preemption ended that, and "A Short Hike"
+    /// started losing a doubly-linked-list update and calling through the null
+    /// it left behind.
+    #[inline(always)]
+    pub(super) fn store_exclusive(&mut self, rs: u8, rt: u8, rn: u8, sz: u8) -> Result<()> {
+        let addr = self.reg_at(rn) as u32;
+        if self.exclusive.take() == Some(addr) {
+            let val = self.reg_at(rt);
+            self.store_by_size(addr, u32::from(sz), val)?;
+            self.set_reg_at(rs, 0);
+        } else {
+            self.set_reg_at(rs, 1);
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines)]
     pub(super) fn try_load_store(&mut self, insn: u32, _next_pc: &mut u32) -> Result<bool> {
         // Exclusive accessors.
@@ -680,32 +715,14 @@ impl Cpu {
             let rt2 = ((insn >> 10) & 0x1F) as u8;
             let base = self.read_x(rn);
             match grp_excl {
-                0b001000000 => {
-                    // STXR Ws, Xt, [Xn]: succeeds only against a monitor this
-                    // thread's own LDXR set at the same address. A failed one
-                    // stores **nothing** and reports 1, which every guest
-                    // answers by looping back to the LDXR.
-                    //
-                    // This used to succeed unconditionally, which was safe
-                    // only while threads could lose the CPU at a blocking
-                    // syscall and nowhere else: no guest puts one between the
-                    // two halves of a read-modify-write, so every pair was
-                    // atomic by construction. Preemption ended that, and "A
-                    // Short Hike" started losing a doubly-linked-list update
-                    // and calling through the null it left behind.
-                    if self.exclusive.take() == Some(base as u32) {
-                        let val = self.read_zr(rt);
-                        self.store_by_size(base as u32, sz, val)?;
-                        self.write_zr(((insn >> 16) & 0x1F) as u8, 0);
-                    } else {
-                        self.write_zr(((insn >> 16) & 0x1F) as u8, 1);
-                    }
-                }
+                0b001000000 => self.store_exclusive(
+                    Self::zr_write_slot(((insn >> 16) & 0x1F) as u8),
+                    rt,
+                    Self::x_slot(rn),
+                    sz as u8,
+                )?,
                 0b001000010 => {
-                    // LDXR Xt, [Xn]
-                    let val = self.load_by_size(base as u32, sz, false)?;
-                    self.exclusive = Some(base as u32);
-                    self.write_zr(rt, val);
+                    self.load_exclusive(Self::zr_write_slot(rt), Self::x_slot(rn), sz as u8)?
                 }
                 0b001000001 => {
                     // STXP: a pair store on the same monitor. `sz` picks the

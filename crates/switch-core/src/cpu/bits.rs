@@ -507,71 +507,79 @@ pub(crate) fn decode_bit_mask(sf: bool, n: u32, immr: u32, imms: u32) -> Option<
     Some(wmask)
 }
 
-/// SBFM / BFM / UBFM semantics.
-///
-/// The result is truncated to the operand width: a write to a W register zeroes
-/// bits 63:32, and SBFM's sign extension would otherwise fill them (`asr w0,
-/// w0, #31` produced `0xFFFF_FFFF_FFFF_FFFF`, so any later 64-bit use of that
-/// register saw a huge value).
-pub(crate) fn bitfield_apply(opc: u32, val: u64, cur: u64, immr: u32, imms: u32, sf: bool) -> u64 {
-    let width = if sf { u64::MAX } else { u64::from(u32::MAX) };
-    bitfield_value(opc, val, cur, immr, imms, sf) & width
+/// `SBFM` and `UBFM`, which every one of their aliases (`LSL`, `LSR`, `ASR`,
+/// `UBFX`, `SBFX`, `UBFIZ`, `SBFIZ`, `SXTW`, `UXTB`, ...) reduces to three
+/// shifts: the field's top bit up to bit 63, back down to where the field
+/// lands with sign or zero filling in above it, and up again for the forms
+/// that place the field at a position. Decoded once from `immr`/`imms`, so
+/// what runs is branch-free and the same for every alias.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Extract {
+    left: u8,
+    right: u8,
+    up: u8,
+    signed: bool,
 }
 
-fn bitfield_value(opc: u32, val: u64, cur: u64, immr: u32, imms: u32, sf: bool) -> u64 {
-    let datasize = if sf { 64 } else { 32 };
-    let lsb = immr as u64;
-    let msb = imms as u64;
-
-    match opc {
-        // UBFM
-        0b10 => {
-            if msb >= lsb {
-                let width = (msb - lsb + 1) as u32;
-                (val >> lsb) & mask_of_width(width, sf)
-            } else {
-                // UBFIZ: field at the bottom, shifted up
-                let shift = datasize - lsb;
-                ((val & mask_of_width((msb + 1) as u32, sf)).wrapping_shl(shift as u32))
-                    & mask_of_width(64, sf)
-            }
-        }
-        // SBFM
-        0b00 => {
-            if msb >= lsb {
-                let width = (msb - lsb + 1) as u32;
-                sext_u64(val >> lsb, width)
-            } else {
-                let shift = datasize - lsb;
-                let field = val & mask_of_width((msb + 1) as u32, sf);
-                let shifted = field.wrapping_shl(shift as u32);
-                // sign extend from bit (msb) after the shift
-                let sign_bit = msb as u32;
-                if shifted & (1u64 << sign_bit) != 0 {
-                    shifted | !mask_of_width((shift + msb + 1) as u32, sf)
-                } else {
-                    shifted & mask_of_width((shift + msb + 1) as u32, sf)
-                }
-            }
-        }
-        // BFM, merges Rn into the ORIGINAL Rd (BFI / BFXIL). The old decoder
-        // used `cur = val` (Rn) and never read the destination register, so
-        // `bfi` zeroed the bits it was meant to preserve. libtransistor's
-        // squashfs `swab_super` relies on this.
-        0b01 => {
-            if msb >= lsb {
-                let width = (msb - lsb + 1) as u32;
-                let field = (val >> lsb) & mask_of_width(width, sf);
-                (cur & !mask_of_width(width, sf)) | field
-            } else {
-                let field = val & mask_of_width((msb + 1) as u32, sf);
-                let shift = (datasize - lsb) as u32;
-                let m = mask_of_width((msb + 1) as u32, sf).wrapping_shl(shift);
-                (cur & !m) | (field << shift)
-            }
-        }
-        _ => 0,
+impl Extract {
+    /// `None` for `BFM`, which keeps bits of the destination, and for the
+    /// unallocated `opc`. `immr` and `imms` must already be in range for `sf`.
+    pub(crate) fn of(opc: u32, immr: u32, imms: u32, sf: bool) -> Option<Extract> {
+        let signed = match opc {
+            0b00 => true,
+            0b10 => false,
+            _ => return None,
+        };
+        let size = if sf { 64 } else { 32 };
+        let left = 63 - imms;
+        // `imms >= immr` extracts bits imms:immr to the bottom; otherwise the
+        // low imms+1 bits are inserted at `size - immr`.
+        let (right, up) = if imms >= immr {
+            (left + immr, 0)
+        } else {
+            (left, size - immr)
+        };
+        Some(Extract {
+            left: left as u8,
+            right: right as u8,
+            up: up as u8,
+            signed,
+        })
     }
+
+    /// The result is truncated to the operand width: a write to a W register
+    /// zeroes bits 63:32, and the sign extension would otherwise fill them
+    /// (`asr w0, w0, #31` produced `0xFFFF_FFFF_FFFF_FFFF`).
+    #[inline(always)]
+    pub(crate) fn apply(self, val: u64, sf: bool) -> u64 {
+        let top = val << self.left;
+        let down = if self.signed {
+            ((top as i64) >> self.right) as u64
+        } else {
+            top >> self.right
+        };
+        (down << self.up) & if sf { u64::MAX } else { u64::from(u32::MAX) }
+    }
+}
+
+/// `BFM` (`BFI`/`BFXIL`), which merges a field of `val` into the ORIGINAL
+/// destination `cur`. The old decoder used `cur = val` (Rn) and never read
+/// the destination register, so `bfi` zeroed the bits it was meant to
+/// preserve. libtransistor's squashfs `swab_super` relies on this.
+pub(crate) fn bitfield_insert(val: u64, cur: u64, immr: u32, imms: u32, sf: bool) -> u64 {
+    let datasize = if sf { 64 } else { 32 };
+    let (lsb, msb) = (immr, imms);
+    let merged = if msb >= lsb {
+        let width = msb - lsb + 1;
+        let field = (val >> lsb) & mask_of_width(width, sf);
+        (cur & !mask_of_width(width, sf)) | field
+    } else {
+        let field = val & mask_of_width(msb + 1, sf);
+        let shift = datasize - lsb;
+        let m = mask_of_width(msb + 1, sf).wrapping_shl(shift);
+        (cur & !m) | (field << shift)
+    };
+    merged & if sf { u64::MAX } else { u64::from(u32::MAX) }
 }
 
 pub(crate) fn mask_of_width(width: u32, _sf: bool) -> u64 {

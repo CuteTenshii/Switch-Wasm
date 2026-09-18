@@ -62,8 +62,8 @@
 //! Every op executes the same helper the interpreter's decoder would have
 //! called with the same arguments, so translated and interpreted execution are
 //! the same computation. Anything the translator does not have an op for, the
-//! exclusive accessors, the divides and variable shifts, the encodings the
-//! interpreter rejects as unallocated: becomes [`ir::Op::Interpret`], which hands
+//! exclusive pairs, the bit counts, the encodings the interpreter rejects as
+//! unallocated: becomes [`ir::Op::Interpret`], which hands
 //! the raw instruction word straight back to [`super::Cpu::execute`]. That
 //! makes the translator's coverage a performance question rather than a
 //! correctness one: a form it does not know is slower, never wrong.

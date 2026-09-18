@@ -459,6 +459,12 @@ impl Cpu {
                 self.logical(rd, rn, b, opc, sf);
             }
 
+            Op::Extract {
+                rd,
+                rn,
+                extract,
+                sf,
+            } => self.extract(rd, rn, extract, sf),
             Op::Bitfield {
                 rd,
                 rn,
@@ -512,6 +518,20 @@ impl Cpu {
                 signed,
             } => self.madd_long(rd, rn, rm, ra, sub, signed),
             Op::Mulh { rd, rn, rm, signed } => self.mulh(rd, rn, rm, signed),
+            Op::ShiftVar {
+                rd,
+                rn,
+                rm,
+                kind,
+                sf,
+            } => self.shift_by_reg(rd, rn, rm, kind, sf),
+            Op::Divide {
+                rd,
+                rn,
+                rm,
+                signed,
+                sf,
+            } => self.divide(rd, rn, rm, signed, sf),
 
             Op::LoadStoreImm {
                 rt,
@@ -548,6 +568,8 @@ impl Cpu {
                 wb,
             } => self.pair(rt, rt2, rn, offset, kind, wb)?,
             Op::LoadLiteral { rt, addr, acc } => self.access(addr, rt, acc)?,
+            Op::LoadExclusive { rt, rn, sz } => self.load_exclusive(rt, rn, sz)?,
+            Op::StoreExclusive { rs, rt, rn, sz } => self.store_exclusive(rs, rt, rn, sz)?,
         }
         Ok(())
     }

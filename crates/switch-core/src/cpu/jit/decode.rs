@@ -401,13 +401,22 @@ fn decode_data_proc_imm(insn: u32, pc: u32) -> Op {
                     }
                     ((insn >> 16) & 0x1F, (insn >> 10) & 0x1F)
                 };
-                Op::Bitfield {
-                    rd,
-                    rn,
-                    opc: ((insn >> 29) & 0b11) as u8,
-                    immr: immr as u8,
-                    imms: imms as u8,
-                    sf,
+                let opc = (insn >> 29) & 0b11;
+                match Extract::of(opc, immr, imms, sf) {
+                    Some(extract) => Op::Extract {
+                        rd,
+                        rn,
+                        extract,
+                        sf,
+                    },
+                    None => Op::Bitfield {
+                        rd,
+                        rn,
+                        opc: opc as u8,
+                        immr: immr as u8,
+                        imms: imms as u8,
+                        sf,
+                    },
                 }
             } else {
                 // EXTR
@@ -541,8 +550,28 @@ fn decode_data_proc_reg(insn: u32) -> Op {
                 else_inc: ((insn >> 10) & 1) == 1,
                 sf,
             },
-            // The one- and two-source group (divides, variable shifts, CRC32,
-            // bit counts) and ADC/SBC: left to the interpreter.
+            // The two-source group, under the same test the interpreter
+            // makes. CRC32 stays with the interpreter, which rejects its
+            // malformed operand sizes.
+            (1, 1) if ((insn >> 29) & 0b11) == 0b00 => match (insn >> 10) & 0x3F {
+                opcode2 @ (0b000010 | 0b000011) => Op::Divide {
+                    rd,
+                    rn,
+                    rm,
+                    signed: opcode2 & 1 == 1,
+                    sf,
+                },
+                opcode2 @ 0b001000..=0b001011 => Op::ShiftVar {
+                    rd,
+                    rn,
+                    rm,
+                    kind: (opcode2 & 0b11) as u8,
+                    sf,
+                },
+                _ => Op::Interpret { insn },
+            },
+            // The one-source group (bit counts, byte reversal) and ADC/SBC:
+            // left to the interpreter.
             _ => Op::Interpret { insn },
         },
         // Three-source: the multiplies.
@@ -616,26 +645,51 @@ fn decode_load_store(insn: u32, pc: u32) -> Op {
         };
     }
 
-    // The exclusive accessors touch the local monitor, and the V=1 forms are
-    // SIMD: both stay with the interpreter.
+    // The exclusive and acquire/release group, classified by the same field
+    // the interpreter tests. The pairs stay with it.
     let grp_excl = (insn >> 21) & 0x1FF;
-    if (0b001000000..=0b001000011).contains(&grp_excl)
-        || grp_excl == 0b001000100
-        || grp_excl == 0b001000110
-    {
-        return Op::Interpret { insn };
+    let sz = ((insn >> 30) & 0b11) as u8;
+    let rn = sp_form(insn >> 5);
+    match grp_excl {
+        0b001000000 => {
+            return Op::StoreExclusive {
+                rs: zr_write(insn >> 16),
+                rt: (insn & 0x1F) as u8,
+                rn,
+                sz,
+            }
+        }
+        0b001000010 => {
+            return Op::LoadExclusive {
+                rt: zr_write(insn),
+                rn,
+                sz,
+            }
+        }
+        // `STLR`/`LDAR`: ordering is all that sets them apart from a plain
+        // store or load, and a single core has nothing to order against.
+        0b001000100 | 0b001000110 => {
+            let acc = Acc::of(sz, u8::from(grp_excl == 0b001000110));
+            return Op::LoadStoreImm {
+                rt: rt_slot(insn, acc),
+                rn,
+                acc,
+                wb: Wb::None,
+                offset: 0,
+            };
+        }
+        0b001000001 | 0b001000011 => return Op::Interpret { insn },
+        _ => {}
     }
     if ((insn >> 26) & 1) == 1 {
         return Op::Interpret { insn };
     }
 
-    let sz = ((insn >> 30) & 0b11) as u8;
     let opc = ((insn >> 22) & 0b11) as u8;
     let acc = Acc::of(sz, opc);
     // Rt is read by a store and written by a load, and Rn is always the SP
     // form: the base of an addressing mode is never the zero register.
     let rt = rt_slot(insn, acc);
-    let rn = sp_form(insn >> 5);
 
     // Register offset.
     if ((insn >> 27) & 0b111) == 0b111 && ((insn >> 24) & 0b11) == 0b00 && ((insn >> 21) & 1) == 1 {

@@ -8,9 +8,8 @@
 //!
 //! The corpus is real assembler output (`llvm-mc` + `ld.lld`, linked at
 //! `CODE`), chosen to reach every class of operation the translator has an op
-//! for, plus a sample of the ones it deliberately hands back: divides,
-//! variable shifts, bit counts, ADC/SBC, the system registers, and scalar
-//! floating point.
+//! for, plus a sample of the ones it deliberately hands back: bit counts,
+//! ADC/SBC, the system registers, and scalar floating point.
 
 use switch_core::cpu::Cpu;
 
@@ -204,6 +203,42 @@ fn a_translated_run_matches_when_resumed_repeatedly() {
             &format!("corpus resumed in {chunk}-step chunks"),
         );
     }
+}
+
+#[test]
+fn exclusives_and_sign_filled_bitfields_run_as_ops_and_match() {
+    // llvm-mc:
+    //   movz x2, #0x8000 ; movz x3, #0xdef0 ; movk x3, #0x9abc, lsl #16
+    //   ldaxr w8, [x2] ; add w8, w8, #5 ; stlxr w9, w8, [x2]
+    //   stlxr w10, w3, [x2]          // monitor already consumed: fails
+    //   ldxr x11, [x2] ; stxr w12, x3, [x2]
+    //   ldar w13, [x2] ; stlr x13, [x2]
+    //   ldaxrb w14, [x2] ; stlxrb w15, w3, [x2] ; ldar x16, [x2]
+    //   sbfiz w17, w3, #4, #8 ; sbfiz x18, x3, #12, #8 ; b .
+    let code = [
+        0xd2900002, 0xd29bde03, 0xf2b35783, 0x885ffc48, 0x11001508, 0x8809fc48, 0x880afc43,
+        0xc85f7c4b, 0xc80c7c43, 0x88dffc4d, 0xc89ffc4d, 0x085ffc4e, 0x080ffc43, 0xc8dffc50,
+        0x131c1c71, 0x93741c72, 0x14000000,
+    ];
+    compare(&code, code.len() as u64, "exclusives and bitfields");
+    let mut cpu = loaded(&code, true);
+    cpu.run(code.len() as u64).unwrap();
+    assert_eq!(cpu.read_x(9), 0, "a store against a live monitor succeeds");
+    assert_eq!(cpu.read_x(10), 1, "a second store has no monitor left");
+    assert_eq!(cpu.read_x(11), 5, "the failed store wrote nothing");
+    assert_eq!(cpu.read_x(12), 0);
+    assert_eq!(cpu.read_x(13), 0x9abc_def0);
+    assert_eq!(cpu.read_x(14), 0xf0);
+    assert_eq!(cpu.read_x(15), 0);
+    assert_eq!(cpu.read_x(16), 0x9abc_def0);
+    // The field is 0xF0, negative, so the sign fills everything above it.
+    assert_eq!(cpu.read_x(17), 0xffff_ff00);
+    assert_eq!(cpu.read_x(18), 0xffff_ffff_ffff_0000);
+    assert_eq!(
+        cpu.jit_stats().interpreted,
+        0,
+        "every instruction here has an op"
+    );
 }
 
 #[test]

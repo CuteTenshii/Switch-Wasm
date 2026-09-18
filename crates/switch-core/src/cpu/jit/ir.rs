@@ -7,6 +7,7 @@
 //! [`crate::cpu::loadstore`], and the system-register one in
 //! [`crate::cpu::system`].
 
+use crate::cpu::bits::Extract;
 use crate::cpu::fp::FpForm;
 use crate::cpu::loadstore::{Acc, Ext, PairKind, Wb};
 use crate::cpu::system::SysOp;
@@ -128,7 +129,15 @@ pub(in crate::cpu) enum Op {
         sf: bool,
     },
 
-    /// `SBFM`/`BFM`/`UBFM` and the aliases built on them.
+    /// `SBFM`/`UBFM` and every alias of them, already decoded to the shifts
+    /// they are. 3.9% of a retail frame, most of it `LSL`/`LSR`/`UBFX`.
+    Extract {
+        rd: u8,
+        rn: u8,
+        extract: Extract,
+        sf: bool,
+    },
+    /// `BFM`, the one form that keeps bits of Rd, and the unallocated `opc`.
     Bitfield {
         rd: u8,
         rn: u8,
@@ -192,6 +201,22 @@ pub(in crate::cpu) enum Op {
         rm: u8,
         signed: bool,
     },
+    /// `LSLV`/`LSRV`/`ASRV`/`RORV`, `kind` being the shift type.
+    ShiftVar {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        kind: u8,
+        sf: bool,
+    },
+    /// `UDIV`/`SDIV`.
+    Divide {
+        rd: u8,
+        rn: u8,
+        rm: u8,
+        signed: bool,
+        sf: bool,
+    },
 
     LoadStoreImm {
         rt: u8,
@@ -219,6 +244,11 @@ pub(in crate::cpu) enum Op {
     },
     /// `LDR <t>, label`, with the literal's address already resolved.
     LoadLiteral { rt: u8, addr: u32, acc: Acc },
+    /// `LDXR`/`LDAXR`, one register. The lock word of every `nn::os` mutex
+    /// goes through this and [`Op::StoreExclusive`].
+    LoadExclusive { rt: u8, rn: u8, sz: u8 },
+    /// `STXR`/`STLXR`, one register; `rs` takes the status.
+    StoreExclusive { rs: u8, rt: u8, rn: u8, sz: u8 },
 }
 
 /// The instruction a block ends on: one that always moves the PC somewhere

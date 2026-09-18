@@ -227,39 +227,21 @@ impl Cpu {
                         let rm = ((insn >> 16) & 0x1F) as u8;
                         if ((insn >> 29) & 0b11) == 0b00 {
                             // 2-source (bits[30:29]=00)
+                            let rd_slot = Self::zr_write_slot(rd);
+                            match opcode2 {
+                                0b000010 | 0b000011 => {
+                                    self.divide(rd_slot, rn, rm, opcode2 & 1 == 1, sf);
+                                    return Ok(true);
+                                }
+                                0b001000..=0b001011 => {
+                                    self.shift_by_reg(rd_slot, rn, rm, (opcode2 & 0b11) as u8, sf);
+                                    return Ok(true);
+                                }
+                                _ => {}
+                            }
                             let a = self.read_zr(rn) & Self::mask(sf);
                             let b = self.read_zr(rm) & Self::mask(sf);
                             let r = match opcode2 {
-                                0b000010 => {
-                                    // UDIV. Division by zero gives 0 (no trap).
-                                    a.checked_div(b).unwrap_or(0) & Self::mask(sf)
-                                }
-                                0b000011 => {
-                                    // SDIV. The operands have to be sign-extended
-                                    // from *their own* width, using the masked
-                                    // 32-bit values as positive i64 turned
-                                    // `sdiv w9, w10, w11` into an unsigned
-                                    // divide. INT_MIN / -1 wraps rather than
-                                    // trapping.
-                                    let size = if sf { 64 } else { 32 };
-                                    let x = sext_u64(a, size) as i64;
-                                    let y = sext_u64(b, size) as i64;
-                                    let q = if y == 0 { 0 } else { x.wrapping_div(y) };
-                                    (q as u64) & Self::mask(sf)
-                                }
-                                0b001000 => shift_var(a, b, 0, sf),
-                                0b001001 => shift_var(a, b, 1, sf),
-                                0b001010 => shift_var(a, b, 2, sf),
-                                0b001011 => {
-                                    // RORV
-                                    let size = if sf { 64 } else { 32 };
-                                    let amt = (b % size) as u32;
-                                    if sf {
-                                        a.rotate_right(amt)
-                                    } else {
-                                        (a as u32).rotate_right(amt) as u64
-                                    }
-                                }
                                 0b010000..=0b010111 => {
                                     // CRC32/CRC32C. The accumulator and the
                                     // result are always 32-bit; only the
@@ -466,20 +448,63 @@ impl Cpu {
         self.set_reg_at(rd, r);
     }
 
-    /// `SBFM`/`BFM`/`UBFM` and the aliases built on them.
+    /// `SBFM`/`BFM`/`UBFM` and the aliases built on them. The unallocated
+    /// `opc` writes zero.
     #[inline(always)]
     pub(super) fn bitfield(&mut self, rd: u8, rn: u8, opc: u8, immr: u8, imms: u8, sf: bool) {
-        let val = self.reg_at(rn) & Self::mask(sf);
-        let cur = self.reg_at(rd) & Self::mask(sf);
-        let r = bitfield_apply(
-            u32::from(opc),
-            val,
-            cur,
-            u32::from(immr),
-            u32::from(imms),
-            sf,
-        );
+        let (immr, imms) = (u32::from(immr), u32::from(imms));
+        if let Some(extract) = Extract::of(u32::from(opc), immr, imms, sf) {
+            self.extract(rd, rn, extract, sf);
+            return;
+        }
+        let r = if opc == 0b01 {
+            let val = self.reg_at(rn) & Self::mask(sf);
+            let cur = self.reg_at(rd) & Self::mask(sf);
+            bitfield_insert(val, cur, immr, imms, sf)
+        } else {
+            0
+        };
         self.set_reg_at(rd, r);
+    }
+
+    /// `SBFM`/`UBFM`, already decoded to its shifts.
+    #[inline(always)]
+    pub(super) fn extract(&mut self, rd: u8, rn: u8, extract: Extract, sf: bool) {
+        let r = extract.apply(self.reg_at(rn), sf);
+        self.set_reg_at(rd, r);
+    }
+
+    /// `LSLV`/`LSRV`/`ASRV`/`RORV`: `kind` is the shift-type field, 3 being
+    /// the rotate. The amount is Rm modulo the operand width.
+    #[inline(always)]
+    pub(super) fn shift_by_reg(&mut self, rd: u8, rn: u8, rm: u8, kind: u8, sf: bool) {
+        let a = self.reg_at(rn) & Self::mask(sf);
+        let b = self.reg_at(rm) & Self::mask(sf);
+        self.set_reg_at(rd, shift_var(a, b, u32::from(kind), sf));
+    }
+
+    /// `UDIV`/`SDIV`. Division by zero gives 0 rather than trapping, and
+    /// `INT_MIN / -1` wraps.
+    #[inline(always)]
+    pub(super) fn divide(&mut self, rd: u8, rn: u8, rm: u8, signed: bool, sf: bool) {
+        let a = self.reg_at(rn) & Self::mask(sf);
+        let b = self.reg_at(rm) & Self::mask(sf);
+        let q = if signed {
+            // The operands are sign-extended from *their own* width: using
+            // the masked 32-bit values as positive i64 turned `sdiv w9, w10,
+            // w11` into an unsigned divide.
+            let size = if sf { 64 } else { 32 };
+            let x = sext_u64(a, size) as i64;
+            let y = sext_u64(b, size) as i64;
+            if y == 0 {
+                0
+            } else {
+                x.wrapping_div(y) as u64
+            }
+        } else {
+            a.checked_div(b).unwrap_or(0)
+        };
+        self.set_reg_at(rd, q & Self::mask(sf));
     }
 
     /// `EXTR`: the low `size` bits of `Rn:Rm >> imm`, so Rn is the *high*
