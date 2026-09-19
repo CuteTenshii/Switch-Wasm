@@ -200,6 +200,13 @@ pub struct Memory {
     /// software renderer runs without one, and every report queued for it was
     /// kept for the rest of the run.
     gpu_watching: bool,
+    /// Pages a copy of guest memory held on the host was taken from, one bit
+    /// each, allocated on the first mark, and whether a store has landed on
+    /// one since [`Memory::take_copy_written`] last asked. A flag rather than
+    /// a list: its one reader only wants to know whether its copy still
+    /// stands, and a flag cannot grow while nobody asks.
+    copy_watch: Vec<u64>,
+    copy_written: bool,
 }
 
 impl Default for Memory {
@@ -232,6 +239,8 @@ impl Memory {
             code_dirty: Vec::new(),
             gpu_dirty: Vec::new(),
             gpu_watching: false,
+            copy_watch: Vec::new(),
+            copy_written: false,
         }
     }
 
@@ -276,6 +285,13 @@ impl Memory {
         self.code_dirty.push(idx as u32);
         if self.gpu_watching {
             self.gpu_dirty.push(idx as u32);
+        }
+        let bit = 1u64 << (idx & 63);
+        if let Some(word) = self.copy_watch.get_mut(idx >> 6) {
+            if *word & bit != 0 {
+                *word &= !bit;
+                self.copy_written = true;
+            }
         }
     }
 
@@ -336,6 +352,36 @@ impl Memory {
     /// Take the pages whose cached contents are stale, clearing the list.
     pub fn dirty_gpu_pages(&mut self) -> Vec<u32> {
         std::mem::take(&mut self.gpu_dirty)
+    }
+
+    /// Watch every page of `[addr, addr + len)` on behalf of a copy of it
+    /// held on the host, so that a later store to any of them sets the flag
+    /// [`Memory::take_copy_written`] reports. Through the same bitmap every
+    /// store already tests, so watching costs the stores nothing until one
+    /// lands on a watched page.
+    pub fn mark_copy_range(&mut self, addr: u32, len: u32) {
+        if len == 0 {
+            return;
+        }
+        if self.watched_pages.is_empty() {
+            self.watched_pages = vec![0u64; PAGE_COUNT / 64];
+        }
+        if self.copy_watch.is_empty() {
+            self.copy_watch = vec![0u64; PAGE_COUNT / 64];
+        }
+        let first = u64::from(addr) >> PAGE_BITS;
+        let last = (u64::from(addr) + u64::from(len) - 1) >> PAGE_BITS;
+        for idx in first..=last.min(PAGE_COUNT as u64 - 1) {
+            let (word, bit) = ((idx >> 6) as usize, 1u64 << (idx & 63));
+            self.watched_pages[word] |= bit;
+            self.copy_watch[word] |= bit;
+        }
+    }
+
+    /// Whether a store has landed on a page [`Memory::mark_copy_range`]
+    /// watched since this was last asked, clearing the answer.
+    pub fn take_copy_written(&mut self) -> bool {
+        std::mem::take(&mut self.copy_written)
     }
 
     /// Mark `[start, end)` as softly mapped: reads return zeros (served from

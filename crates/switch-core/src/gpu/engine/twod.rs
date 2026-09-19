@@ -57,6 +57,12 @@ pub struct Engine2D {
     /// See [`Engine2D::blit_staged`].
     source: Vec<u8>,
     target: Vec<u8>,
+    /// The texels the last staged copy read out of its source, in the order
+    /// it wrote them, and where they came from. A copy of the same texels
+    /// from a source nothing has written since reuses them rather than
+    /// reading the source again.
+    resolved: Vec<u8>,
+    resolved_from: Option<ResolvedFrom>,
 }
 
 impl Engine2D {
@@ -65,6 +71,8 @@ impl Engine2D {
             regs: Registers::new(),
             source: Vec::new(),
             target: Vec::new(),
+            resolved: Vec::new(),
+            resolved_from: None,
         }
     }
 
@@ -290,16 +298,21 @@ impl Engine2D {
     }
 
     /// A byte-exact copy between two disjoint surfaces, done in host memory:
-    /// both read whole, the texels moved between the two buffers, the target
-    /// written back. `rows` and `columns` are the two halves of every texel's
-    /// offset into its surface, source first. Reports whether it did the copy;
-    /// when it did not, nothing has been written.
+    /// the source read whole and its texels gathered into one buffer, the
+    /// target read whole, the texels put in it, and the target written back.
+    /// `rows` and `columns` are the two halves of every texel's offset into
+    /// its surface, source first. Reports whether it did the copy; when it
+    /// did not, nothing has been written.
     ///
     /// Just Dance 2019 resolves a 2560x1440 target this way every frame, and
     /// through guest memory each of the 921,600 texels it reads was a
     /// dependent load out of whichever of 3,600 separately allocated pages
     /// held it, so the copy was a chain of cache misses: 13 ms of a frame.
-    /// Staged, the misses are page-sized sequential copies instead.
+    /// Staged, the misses are page-sized sequential copies instead. And the
+    /// gathered texels are kept, with the source's pages watched, so a copy
+    /// of the same texels from a source nothing has stored to since skips
+    /// the source altogether; that target is one Just Dance 2019 stopped
+    /// drawing to when it finished loading.
     ///
     /// Only where that is exactly the per-texel copy: every offset inside its
     /// surface, no watchpoint over either and no protected byte in the
@@ -330,49 +343,148 @@ impl Engine2D {
         {
             return Ok(false);
         }
-        let mut source = std::mem::take(&mut self.source);
+        let texels = rows.len() * columns.len() * bpp as usize;
+        // The source's texels are what they were at the last copy if it read
+        // the same ones and nothing has been stored to its pages since. Just
+        // Dance 2019 resolves a target it has not drawn to since it loaded,
+        // so this is every frame of it.
+        let unwritten = !ctx.mem.take_copy_written();
+        let current = self
+            .resolved_from
+            .as_ref()
+            .is_some_and(|from| unwritten && from.is(src_base, src.size(), bpp, rows, columns));
+        if !current {
+            let mut source = std::mem::take(&mut self.source);
+            source.resize(src.size() as usize, 0);
+            let read = ctx.mem.read_into(src_base, &mut source);
+            if read.is_ok() {
+                self.resolved.resize(texels, 0);
+                match bpp {
+                    1 => gather::<1>(&source, &mut self.resolved, rows, columns),
+                    2 => gather::<2>(&source, &mut self.resolved, rows, columns),
+                    4 => gather::<4>(&source, &mut self.resolved, rows, columns),
+                    8 => gather::<8>(&source, &mut self.resolved, rows, columns),
+                    _ => gather::<16>(&source, &mut self.resolved, rows, columns),
+                }
+                ctx.mem.mark_copy_range(src_base, src.size());
+                self.resolved_from =
+                    Some(ResolvedFrom::new(src_base, src.size(), bpp, rows, columns));
+            } else {
+                self.resolved_from = None;
+            }
+            self.source = source;
+            if read.is_err() {
+                return Ok(false);
+            }
+        }
         let mut target = std::mem::take(&mut self.target);
-        source.resize(src.size() as usize, 0);
         target.resize(dst.size() as usize, 0);
-        let staged = ctx.mem.read_into(src_base, &mut source).is_ok()
-            && ctx.mem.read_into(dst_base, &mut target).is_ok();
-        let result = if staged {
+        let result = if ctx.mem.read_into(dst_base, &mut target).is_ok() {
             match bpp {
-                1 => move_texels::<1>(&source, &mut target, rows, columns),
-                2 => move_texels::<2>(&source, &mut target, rows, columns),
-                4 => move_texels::<4>(&source, &mut target, rows, columns),
-                8 => move_texels::<8>(&source, &mut target, rows, columns),
-                _ => move_texels::<16>(&source, &mut target, rows, columns),
+                1 => scatter::<1>(&self.resolved, &mut target, rows, columns),
+                2 => scatter::<2>(&self.resolved, &mut target, rows, columns),
+                4 => scatter::<4>(&self.resolved, &mut target, rows, columns),
+                8 => scatter::<8>(&self.resolved, &mut target, rows, columns),
+                _ => scatter::<16>(&self.resolved, &mut target, rows, columns),
             }
             ctx.mem.write_from(dst_base, &target).map(|()| true)
         } else {
             Ok(false)
         };
-        self.source = source;
         self.target = target;
         result
     }
 }
 
-/// Copy every texel of a staged blit from `source` to `target`, `N` bytes
-/// each, a tile at a time. A width known here makes
-/// each move one load and one store rather than a call to `memcpy`.
-fn move_texels<const N: usize>(
+/// What the texels in [`Engine2D::resolved`] were read from: the source's
+/// place and size, the texel width, and the source's half of every row and
+/// column offset. Two copies that agree on all of it read the same texels.
+#[derive(Debug)]
+struct ResolvedFrom {
+    base: u32,
+    size: u32,
+    bpp: u32,
+    rows: Vec<u32>,
+    columns: Vec<u32>,
+}
+
+impl ResolvedFrom {
+    fn new(base: u32, size: u32, bpp: u32, rows: &[(u32, u32)], columns: &[(u32, u32)]) -> Self {
+        ResolvedFrom {
+            base,
+            size,
+            bpp,
+            rows: rows.iter().map(|&(from, _)| from).collect(),
+            columns: columns.iter().map(|&(from, _)| from).collect(),
+        }
+    }
+
+    fn is(
+        &self,
+        base: u32,
+        size: u32,
+        bpp: u32,
+        rows: &[(u32, u32)],
+        columns: &[(u32, u32)],
+    ) -> bool {
+        self.base == base
+            && self.size == size
+            && self.bpp == bpp
+            && self
+                .rows
+                .iter()
+                .copied()
+                .eq(rows.iter().map(|&(from, _)| from))
+            && self
+                .columns
+                .iter()
+                .copied()
+                .eq(columns.iter().map(|&(from, _)| from))
+    }
+}
+
+/// Read every texel a staged blit copies out of `source`, `N` bytes each,
+/// into `resolved` in destination order, a row of columns at a time; a
+/// tile at a time, so the source is read a few blocks at a time too. A
+/// width known here makes each move one load and one store rather than a
+/// call to `memcpy`.
+fn gather<const N: usize>(
     source: &[u8],
+    resolved: &mut [u8],
+    rows: &[(u32, u32)],
+    columns: &[(u32, u32)],
+) {
+    let width = columns.len();
+    for (band_at, band) in rows.chunks(TILE_H).enumerate() {
+        for (strip_at, strip) in columns.chunks(TILE_W).enumerate() {
+            for (r, &(src_row, _)) in band.iter().enumerate() {
+                let row = band_at * TILE_H + r;
+                for (c, &(from, _)) in strip.iter().enumerate() {
+                    let at = (src_row + from) as usize;
+                    let texel: [u8; N] = source[at..at + N].try_into().unwrap();
+                    let slot = (row * width + strip_at * TILE_W + c) * N;
+                    resolved[slot..slot + N].copy_from_slice(&texel);
+                }
+            }
+        }
+    }
+}
+
+/// Write the texels [`gather`] collected into `target`, each where the
+/// destination's half of its row and column offsets puts it.
+fn scatter<const N: usize>(
+    resolved: &[u8],
     target: &mut [u8],
     rows: &[(u32, u32)],
     columns: &[(u32, u32)],
 ) {
-    for band in rows.chunks(TILE_H) {
-        for strip in columns.chunks(TILE_W) {
-            for &(src_row, dst_row) in band {
-                for &(from, to) in strip {
-                    let at = (src_row + from) as usize;
-                    let texel: [u8; N] = source[at..at + N].try_into().unwrap();
-                    let at = (dst_row + to) as usize;
-                    target[at..at + N].copy_from_slice(&texel);
-                }
-            }
+    let width = columns.len();
+    for (row, &(_, dst_row)) in rows.iter().enumerate() {
+        for (column, &(_, to)) in columns.iter().enumerate() {
+            let slot = (row * width + column) * N;
+            let texel: [u8; N] = resolved[slot..slot + N].try_into().unwrap();
+            let at = (dst_row + to) as usize;
+            target[at..at + N].copy_from_slice(&texel);
         }
     }
 }
@@ -538,6 +650,90 @@ mod tests {
         let (staged, walked) = (resolve(false), resolve(true));
         let differs = staged.iter().zip(&walked).position(|(a, b)| a != b);
         assert_eq!(differs, None, "first differing byte, from {SRC:#x}");
+    }
+
+    /// A copy that reuses the texels it gathered last time has to notice
+    /// that the source changed under it, whether a store or a new mapping
+    /// did it.
+    #[test]
+    fn a_repeated_blit_sees_what_was_written_to_its_source() {
+        const SRC: u32 = 0x3000_0000;
+        const DST: u32 = 0x3001_0000;
+        let mut mem = Memory::new();
+        mem.map_zero(SRC, 0x2_0000).unwrap();
+        for i in 0..64 * 64 {
+            mem.write_u32(SRC + i * 4, i).unwrap();
+        }
+        let mut vmm = AddressSpace::new();
+        let base = vmm.map(SRC, 0x2_0000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+        let mut host1x = Host1x::new();
+        let mut stats = GpuStats::default();
+        let mut engine = Engine2D::new();
+        for (format, layout, pitch, width, height, offset, w, at) in [
+            (
+                SET_SRC_FORMAT,
+                SET_SRC_MEMORY_LAYOUT,
+                SET_SRC_PITCH,
+                SET_SRC_WIDTH,
+                SET_SRC_HEIGHT,
+                SET_SRC_OFFSET,
+                64,
+                base,
+            ),
+            (
+                SET_DST_FORMAT,
+                SET_DST_MEMORY_LAYOUT,
+                SET_DST_PITCH,
+                SET_DST_WIDTH,
+                SET_DST_HEIGHT,
+                SET_DST_OFFSET,
+                32,
+                base + u64::from(DST - SRC),
+            ),
+        ] {
+            engine.regs.set(format, 0xD5);
+            engine.regs.set(layout, MEMORY_LAYOUT_PITCH);
+            engine.regs.set(pitch, w * 4);
+            engine.regs.set(width, w);
+            engine.regs.set(height, w);
+            set_iova(&mut engine, offset, at);
+        }
+        engine.regs.set(SET_OPERATION, OPERATION_SRC_COPY);
+        engine.regs.set(DST_WIDTH, 32);
+        engine.regs.set(DST_HEIGHT, 32);
+        engine.regs.set(DU_DX_INT, 2);
+        engine.regs.set(DV_DY_INT, 2);
+        let mut blit = |mem: &mut Memory| {
+            let mut ctx = ExecCtx {
+                mem,
+                vmm: &vmm,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
+            engine.write(SRC_Y0_INT, 0, &mut ctx).unwrap();
+        };
+        // Destination texel (5, 7) comes from source texel (10, 14).
+        let (from, to) = (SRC + (14 * 64 + 10) * 4, DST + (7 * 32 + 5) * 4);
+        blit(&mut mem);
+        assert_eq!(mem.read_u32(to).unwrap(), 14 * 64 + 10);
+        mem.write_u32(to, 0).unwrap();
+        blit(&mut mem);
+        assert_eq!(
+            mem.read_u32(to).unwrap(),
+            14 * 64 + 10,
+            "unchanged source, copied again"
+        );
+        mem.write_u32(from, 0xABCD).unwrap();
+        blit(&mut mem);
+        assert_eq!(mem.read_u32(to).unwrap(), 0xABCD, "a store to the source");
+        mem.map(from & !0xFFF, &[0x5A; 0x1000]).unwrap();
+        blit(&mut mem);
+        assert_eq!(
+            mem.read_u32(to).unwrap(),
+            0x5A5A_5A5A,
+            "a new mapping of the source"
+        );
     }
 
     /// A halving copy bigger than one tile in both directions, so the tiled
