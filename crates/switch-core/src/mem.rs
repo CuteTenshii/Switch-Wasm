@@ -597,6 +597,27 @@ impl Memory {
         self.readonly.iter().any(|&(s, e)| start < e && s < end)
     }
 
+    /// Whether reading `len` bytes at `addr` one access at a time would do
+    /// nothing but load them: the read watchpoint does not reach into the
+    /// range. [`Memory::read_into`] does not report to the watchpoint, so
+    /// this is where it stands in for the accesses it replaces.
+    pub fn plainly_readable(&self, addr: u32, len: u32) -> bool {
+        let (start, end) = (u64::from(addr), u64::from(addr) + u64::from(len));
+        !(start < u64::from(self.read_watch.1) && u64::from(self.read_watch.0) < end)
+    }
+
+    /// Whether writing `len` bytes at `addr` one access at a time would do
+    /// nothing but store them and report the pages to the caches that watch
+    /// them: no protected range and no write watchpoint reaches into it.
+    /// [`Memory::write_from`] tests protection only where it starts and does
+    /// not report to the watchpoint, so where this holds it is exactly the
+    /// accesses it replaces.
+    pub fn plainly_writable(&self, addr: u32, len: u32) -> bool {
+        let (start, end) = (u64::from(addr), u64::from(addr) + u64::from(len));
+        let overlaps = |(s, e): (u32, u32)| start < u64::from(e) && u64::from(s) < end;
+        !overlaps(self.watch) && !self.readonly.iter().any(|&range| overlaps(range))
+    }
+
     /// The run of pages around `addr` that share its state, backed or not,
     /// read-only or not: clamped to `[0, limit)`. This is the region
     /// `svcQueryMemory` reports, and the two facts it reports about it.

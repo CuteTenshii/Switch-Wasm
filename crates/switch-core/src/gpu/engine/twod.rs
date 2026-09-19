@@ -44,15 +44,27 @@ const MEMORY_LAYOUT_PITCH: u32 = 1;
 const OPERATION_SRC_COPY: u32 = 3;
 const FILTER_BILINEAR: u32 = 1;
 
+/// The tile a byte-exact copy walks the destination in: a GOB column of
+/// 32-bit texels at a halving step, and one 16-GOB block of rows.
+const TILE_W: usize = 8;
+const TILE_H: usize = 64;
+
 #[derive(Debug, Default)]
 pub struct Engine2D {
     pub regs: Registers,
+    /// Both surfaces of the last staged copy, kept between blits so a title
+    /// that resolves every frame does not allocate and zero 18 MB each time.
+    /// See [`Engine2D::blit_staged`].
+    source: Vec<u8>,
+    target: Vec<u8>,
 }
 
 impl Engine2D {
     pub fn new() -> Engine2D {
         Engine2D {
             regs: Registers::new(),
+            source: Vec::new(),
+            target: Vec::new(),
         }
     }
 
@@ -207,8 +219,8 @@ impl Engine2D {
                         // instead.
                         let sy = (v.max(0.0) as u32).min(src.height.saturating_sub(1));
                         (
-                            src_base.wrapping_add(src.layout.row_offset(sy, src_width)),
-                            dst_base.wrapping_add(dst.layout.row_offset(dst_y0 + y, dst_width)),
+                            src.layout.row_offset(sy, src_width),
+                            dst.layout.row_offset(dst_y0 + y, dst_width),
                         )
                     })
                     .collect();
@@ -216,18 +228,21 @@ impl Engine2D {
                 // read in the one order its layout makes slowest: eight texels
                 // of a GOB, then a jump of a whole column of GOBs to the next,
                 // a new cache line every few texels and in no pattern a
-                // prefetcher follows. The resolve Just Dance 2019 runs every
-                // frame spent half its time stalled on those loads. In tiles,
-                // each one's source is a few contiguous blocks.
+                // prefetcher follows. In tiles, each one's source is a few
+                // contiguous blocks.
                 //
                 // Only the order changes, which nothing can see unless the
                 // copy reads what it has already written, so overlapping
                 // surfaces keep going a row at a time. The hardware does not
                 // promise an order either.
-                const TILE_W: usize = 8;
-                const TILE_H: usize = 64;
                 let disjoint = u64::from(src_base) + u64::from(src.size()) <= u64::from(dst_base)
                     || u64::from(dst_base) + u64::from(dst.size()) <= u64::from(src_base);
+                if disjoint
+                    && self.blit_staged(ctx, (&src, src_base), (&dst, dst_base), &rows, &columns)?
+                {
+                    ctx.stats.copies += 1;
+                    return Ok(());
+                }
                 let (tile_w, tile_h) = if disjoint {
                     (TILE_W, TILE_H)
                 } else {
@@ -236,6 +251,10 @@ impl Engine2D {
                 for band in rows.chunks(tile_h) {
                     for strip in columns.chunks(tile_w) {
                         for &(src_row, dst_row) in band {
+                            let (src_row, dst_row) = (
+                                src_base.wrapping_add(src_row),
+                                dst_base.wrapping_add(dst_row),
+                            );
                             for &(from, to) in strip {
                                 let raw = ctx.mem.read_le(src_row.wrapping_add(from), bpp)?;
                                 ctx.mem.write_le(dst_row.wrapping_add(to), bpp, raw)?;
@@ -268,6 +287,93 @@ impl Engine2D {
         }
         ctx.stats.copies += 1;
         Ok(())
+    }
+
+    /// A byte-exact copy between two disjoint surfaces, done in host memory:
+    /// both read whole, the texels moved between the two buffers, the target
+    /// written back. `rows` and `columns` are the two halves of every texel's
+    /// offset into its surface, source first. Reports whether it did the copy;
+    /// when it did not, nothing has been written.
+    ///
+    /// Just Dance 2019 resolves a 2560x1440 target this way every frame, and
+    /// through guest memory each of the 921,600 texels it reads was a
+    /// dependent load out of whichever of 3,600 separately allocated pages
+    /// held it, so the copy was a chain of cache misses: 13 ms of a frame.
+    /// Staged, the misses are page-sized sequential copies instead.
+    ///
+    /// Only where that is exactly the per-texel copy: every offset inside its
+    /// surface, no watchpoint over either and no protected byte in the
+    /// target, so skipping the per-access checks skips nothing. Writing back
+    /// the bytes between texels, the padding of a block-linear surface,
+    /// stores what was just read from them.
+    fn blit_staged(
+        &mut self,
+        ctx: &mut ExecCtx,
+        (src, src_base): (&Surface, u32),
+        (dst, dst_base): (&Surface, u32),
+        rows: &[(u32, u32)],
+        columns: &[(u32, u32)],
+    ) -> Result<bool> {
+        let bpp = dst.format.bytes_per_pixel;
+        let furthest =
+            |pick: fn(&(u32, u32)) -> u32, rows: &[(u32, u32)], columns: &[(u32, u32)]| {
+                u64::from(rows.iter().map(pick).max().unwrap_or(0))
+                    + u64::from(columns.iter().map(pick).max().unwrap_or(0))
+                    + u64::from(bpp)
+            };
+        let inside = furthest(|&(s, _)| s, rows, columns) <= u64::from(src.size())
+            && furthest(|&(_, d)| d, rows, columns) <= u64::from(dst.size());
+        if !inside
+            || !matches!(bpp, 1 | 2 | 4 | 8 | 16)
+            || !ctx.mem.plainly_readable(src_base, src.size())
+            || !ctx.mem.plainly_writable(dst_base, dst.size())
+        {
+            return Ok(false);
+        }
+        let mut source = std::mem::take(&mut self.source);
+        let mut target = std::mem::take(&mut self.target);
+        source.resize(src.size() as usize, 0);
+        target.resize(dst.size() as usize, 0);
+        let staged = ctx.mem.read_into(src_base, &mut source).is_ok()
+            && ctx.mem.read_into(dst_base, &mut target).is_ok();
+        let result = if staged {
+            match bpp {
+                1 => move_texels::<1>(&source, &mut target, rows, columns),
+                2 => move_texels::<2>(&source, &mut target, rows, columns),
+                4 => move_texels::<4>(&source, &mut target, rows, columns),
+                8 => move_texels::<8>(&source, &mut target, rows, columns),
+                _ => move_texels::<16>(&source, &mut target, rows, columns),
+            }
+            ctx.mem.write_from(dst_base, &target).map(|()| true)
+        } else {
+            Ok(false)
+        };
+        self.source = source;
+        self.target = target;
+        result
+    }
+}
+
+/// Copy every texel of a staged blit from `source` to `target`, `N` bytes
+/// each, a tile at a time. A width known here makes
+/// each move one load and one store rather than a call to `memcpy`.
+fn move_texels<const N: usize>(
+    source: &[u8],
+    target: &mut [u8],
+    rows: &[(u32, u32)],
+    columns: &[(u32, u32)],
+) {
+    for band in rows.chunks(TILE_H) {
+        for strip in columns.chunks(TILE_W) {
+            for &(src_row, dst_row) in band {
+                for &(from, to) in strip {
+                    let at = (src_row + from) as usize;
+                    let texel: [u8; N] = source[at..at + N].try_into().unwrap();
+                    let at = (dst_row + to) as usize;
+                    target[at..at + N].copy_from_slice(&texel);
+                }
+            }
+        }
     }
 }
 
@@ -354,6 +460,84 @@ mod tests {
             );
         }
         assert_eq!(stats.copies, 1);
+    }
+
+    /// The staged copy is only allowed where it is the texel-by-texel one, so
+    /// it has to leave memory byte for byte as that one does: every texel,
+    /// and the padding a block-linear surface carries past its edges. A write
+    /// watchpoint over the target is what sends a copy the other way, so the
+    /// same resolve is run both ways and the results compared.
+    #[test]
+    fn a_staged_blit_leaves_memory_as_the_texel_walk_does() {
+        const SRC: u32 = 0x3000_0000;
+        const DST: u32 = 0x3001_0000;
+        const BLOCK_16_GOBS: u32 = 4 << 4;
+        let resolve = |watch: bool| {
+            let mut mem = Memory::new();
+            mem.map_zero(SRC, 0x2_0000).unwrap();
+            for i in 0..0x2_0000 / 4 {
+                mem.write_u32(SRC + i * 4, i.wrapping_mul(0x9E37_79B9))
+                    .unwrap();
+            }
+            if watch {
+                mem.watch_writes(DST + 0x5FF0, 4);
+            }
+            let mut vmm = AddressSpace::new();
+            let base = vmm.map(SRC, 0x2_0000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+            let mut host1x = Host1x::new();
+            let mut stats = GpuStats::default();
+            let mut engine = Engine2D::new();
+            // Neither size a whole number of GOBs, so both have padding.
+            for (format, layout, block, width, height, offset, w, h, at) in [
+                (
+                    SET_SRC_FORMAT,
+                    SET_SRC_MEMORY_LAYOUT,
+                    SET_SRC_BLOCK_SIZE,
+                    SET_SRC_WIDTH,
+                    SET_SRC_HEIGHT,
+                    SET_SRC_OFFSET,
+                    74,
+                    90,
+                    base,
+                ),
+                (
+                    SET_DST_FORMAT,
+                    SET_DST_MEMORY_LAYOUT,
+                    SET_DST_BLOCK_SIZE,
+                    SET_DST_WIDTH,
+                    SET_DST_HEIGHT,
+                    SET_DST_OFFSET,
+                    37,
+                    45,
+                    base + u64::from(DST - SRC),
+                ),
+            ] {
+                engine.regs.set(format, 0xD5);
+                engine.regs.set(layout, 0);
+                engine.regs.set(block, BLOCK_16_GOBS);
+                engine.regs.set(width, w);
+                engine.regs.set(height, h);
+                set_iova(&mut engine, offset, at);
+            }
+            engine.regs.set(SET_OPERATION, OPERATION_SRC_COPY);
+            engine.regs.set(DST_WIDTH, 37);
+            engine.regs.set(DST_HEIGHT, 45);
+            engine.regs.set(DU_DX_INT, 2);
+            engine.regs.set(DV_DY_INT, 2);
+            let mut ctx = ExecCtx {
+                mem: &mut mem,
+                vmm: &vmm,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
+            engine.write(SRC_Y0_INT, 0, &mut ctx).unwrap();
+            assert_eq!(stats.copies, 1);
+            mem.dump(SRC, 0x2_0000).unwrap()
+        };
+        let (staged, walked) = (resolve(false), resolve(true));
+        let differs = staged.iter().zip(&walked).position(|(a, b)| a != b);
+        assert_eq!(differs, None, "first differing byte, from {SRC:#x}");
     }
 
     /// A halving copy bigger than one tile in both directions, so the tiled
