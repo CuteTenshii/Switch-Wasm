@@ -195,6 +195,11 @@ pub struct Memory {
     /// independently: whichever asks first must not take the notification the
     /// other has not seen yet.
     gpu_dirty: Vec<u32>,
+    /// Whether the GPU backend has watched a page yet. Until it has, there is
+    /// nobody to drain `gpu_dirty`, and without a backend there never is: the
+    /// software renderer runs without one, and every report queued for it was
+    /// kept for the rest of the run.
+    gpu_watching: bool,
 }
 
 impl Default for Memory {
@@ -226,6 +231,7 @@ impl Memory {
             watched_pages: Vec::new(),
             code_dirty: Vec::new(),
             gpu_dirty: Vec::new(),
+            gpu_watching: false,
         }
     }
 
@@ -261,8 +267,16 @@ impl Memory {
     #[inline(never)]
     fn mark_code_dirty(&mut self, idx: usize, bit: u64) {
         self.watched_pages[idx >> 6] &= !bit;
+        self.report_written(idx);
+    }
+
+    /// Tell everything watching page `idx` that it has been written. Its bit
+    /// in `watched_pages` is already clear.
+    fn report_written(&mut self, idx: usize) {
         self.code_dirty.push(idx as u32);
-        self.gpu_dirty.push(idx as u32);
+        if self.gpu_watching {
+            self.gpu_dirty.push(idx as u32);
+        }
     }
 
     /// Mark every code page overlapping `[addr, addr + size)` dirty. Used by
@@ -280,8 +294,7 @@ impl Memory {
             let bit = 1u64 << (idx & 63);
             if self.watched_pages[idx >> 6] & bit != 0 {
                 self.watched_pages[idx >> 6] &= !bit;
-                self.code_dirty.push(idx as u32);
-                self.gpu_dirty.push(idx as u32);
+                self.report_written(idx);
             }
         }
     }
@@ -308,6 +321,7 @@ impl Memory {
         if self.watched_pages.is_empty() {
             self.watched_pages = vec![0u64; PAGE_COUNT / 64];
         }
+        self.gpu_watching = true;
         let idx = Self::page_index(addr);
         self.watched_pages[idx >> 6] |= 1u64 << (idx & 63);
     }
