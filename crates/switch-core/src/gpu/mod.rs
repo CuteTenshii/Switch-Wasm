@@ -453,9 +453,47 @@ impl Gpu {
             buffer.crop.window(buffer.width, buffer.height);
 
         let mut pixels = Vec::with_capacity((out_width * out_height) as usize);
-        for row in 0..out_height {
-            // The row of the *surface* this row of the image comes from.
-            let y = crop_y + if flip_v { out_height - 1 - row } else { row };
+        // The row of the *surface* each row of the image comes from.
+        let surface_row = |row: u32| crop_y + if flip_v { out_height - 1 - row } else { row };
+
+        // The common case in one pass: a 32-bit format that is a shuffle, and
+        // every pixel of the window in the bytes just read. A pixel's offset
+        // is its row's half of the swizzle plus its column's, the same sum
+        // `Layout::run_at` makes, so each half is worked out once, the
+        // columns for the frame and the rows as they come, rather than the
+        // whole swizzle once per 16-byte run. That swizzle was most of what
+        // scan-out cost.
+        let mut scanned = false;
+        if let Some(shuffle) = shuffle.filter(|_| held && bpp == 4) {
+            let columns: Vec<u32> = (0..out_width)
+                .map(|x| layout.column_offset((crop_x + x) * bpp))
+                .collect();
+            let rows: Vec<u32> = (0..out_height)
+                .map(|row| layout.row_offset(surface_row(row), width_bytes))
+                .collect();
+            let furthest = u64::from(rows.iter().copied().max().unwrap_or(0))
+                + u64::from(columns.iter().copied().max().unwrap_or(0))
+                + u64::from(bpp);
+            if furthest <= swizzled as u64 {
+                for &row_offset in &rows {
+                    let row_start = pixels.len();
+                    pixels.extend(columns.iter().map(|&column| {
+                        let at = (row_offset + column) as usize;
+                        shuffle.apply(u32::from_le_bytes(
+                            raw_bytes[at..at + 4].try_into().expect("four bytes"),
+                        ))
+                    }));
+                    if flip_h {
+                        pixels[row_start..].reverse();
+                    }
+                }
+                scanned = true;
+            }
+        }
+
+        let rows_left = if scanned { 0 } else { out_height };
+        for row in 0..rows_left {
+            let y = surface_row(row);
             let row_start = pixels.len();
             // Swizzled once per contiguous run rather than once per pixel:
             // `Layout::run_at` says how far the addresses stay linear, which
