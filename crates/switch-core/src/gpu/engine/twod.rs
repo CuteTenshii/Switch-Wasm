@@ -197,19 +197,50 @@ impl Engine2D {
                         )
                     })
                     .collect();
-                for y in 0..dst_h {
-                    let v = src_y0 + dv_dy * y as f64;
-                    // `Surface::texel_raw` clamps to the surface; reading the
-                    // addresses directly means doing that here instead.
-                    let sy = (v.max(0.0) as u32).min(src.height.saturating_sub(1));
-                    // Both rows are fixed for this pass, so their half of the
-                    // swizzle is computed once rather than 1280 times.
-                    let src_row = src_base.wrapping_add(src.layout.row_offset(sy, src_width));
-                    let dst_row =
-                        dst_base.wrapping_add(dst.layout.row_offset(dst_y0 + y, dst_width));
-                    for &(from, to) in &columns {
-                        let raw = ctx.mem.read_le(src_row.wrapping_add(from), bpp)?;
-                        ctx.mem.write_le(dst_row.wrapping_add(to), bpp, raw)?;
+                // The same for a row's half, once per row rather than 1280
+                // times.
+                let rows: Vec<(u32, u32)> = (0..dst_h)
+                    .map(|y| {
+                        let v = src_y0 + dv_dy * y as f64;
+                        // `Surface::texel_raw` clamps to the surface; reading
+                        // the addresses directly means doing that here
+                        // instead.
+                        let sy = (v.max(0.0) as u32).min(src.height.saturating_sub(1));
+                        (
+                            src_base.wrapping_add(src.layout.row_offset(sy, src_width)),
+                            dst_base.wrapping_add(dst.layout.row_offset(dst_y0 + y, dst_width)),
+                        )
+                    })
+                    .collect();
+                // Walked a destination row at a time, a block-linear source is
+                // read in the one order its layout makes slowest: eight texels
+                // of a GOB, then a jump of a whole column of GOBs to the next,
+                // a new cache line every few texels and in no pattern a
+                // prefetcher follows. The resolve Just Dance 2019 runs every
+                // frame spent half its time stalled on those loads. In tiles,
+                // each one's source is a few contiguous blocks.
+                //
+                // Only the order changes, which nothing can see unless the
+                // copy reads what it has already written, so overlapping
+                // surfaces keep going a row at a time. The hardware does not
+                // promise an order either.
+                const TILE_W: usize = 8;
+                const TILE_H: usize = 64;
+                let disjoint = u64::from(src_base) + u64::from(src.size()) <= u64::from(dst_base)
+                    || u64::from(dst_base) + u64::from(dst.size()) <= u64::from(src_base);
+                let (tile_w, tile_h) = if disjoint {
+                    (TILE_W, TILE_H)
+                } else {
+                    (columns.len().max(1), 1)
+                };
+                for band in rows.chunks(tile_h) {
+                    for strip in columns.chunks(tile_w) {
+                        for &(src_row, dst_row) in band {
+                            for &(from, to) in strip {
+                                let raw = ctx.mem.read_le(src_row.wrapping_add(from), bpp)?;
+                                ctx.mem.write_le(dst_row.wrapping_add(to), bpp, raw)?;
+                            }
+                        }
                     }
                 }
                 ctx.stats.copies += 1;
@@ -323,6 +354,68 @@ mod tests {
             );
         }
         assert_eq!(stats.copies, 1);
+    }
+
+    /// A halving copy bigger than one tile in both directions, so the tiled
+    /// walk has to get every band and every strip right, the ragged last ones
+    /// included.
+    #[test]
+    fn a_blit_larger_than_a_tile_lands_every_texel() {
+        const SRC_W: u32 = 2 * 21;
+        const SRC_H: u32 = 2 * 70;
+        const DST_W: u32 = SRC_W / 2;
+        const DST_H: u32 = SRC_H / 2;
+        const SRC: u32 = 0x3000_0000;
+        const DST: u32 = 0x3001_0000;
+        let mut mem = Memory::new();
+        mem.map_zero(SRC, 0x2_0000).unwrap();
+        for i in 0..SRC_W * SRC_H {
+            mem.write_u32(SRC + i * 4, i).unwrap();
+        }
+        let mut vmm = AddressSpace::new();
+        let base = vmm.map(SRC, 0x2_0000, 1, 0, SMALL_PAGE_SIZE, 0, 0).unwrap();
+        let mut host1x = Host1x::new();
+        let mut stats = GpuStats::default();
+
+        let mut engine = Engine2D::new();
+        engine.regs.set(SET_SRC_FORMAT, 0xD5);
+        engine.regs.set(SET_SRC_MEMORY_LAYOUT, MEMORY_LAYOUT_PITCH);
+        engine.regs.set(SET_SRC_PITCH, SRC_W * 4);
+        engine.regs.set(SET_SRC_WIDTH, SRC_W);
+        engine.regs.set(SET_SRC_HEIGHT, SRC_H);
+        set_iova(&mut engine, SET_SRC_OFFSET, base);
+
+        engine.regs.set(SET_DST_FORMAT, 0xD5);
+        engine.regs.set(SET_DST_MEMORY_LAYOUT, MEMORY_LAYOUT_PITCH);
+        engine.regs.set(SET_DST_PITCH, DST_W * 4);
+        engine.regs.set(SET_DST_WIDTH, DST_W);
+        engine.regs.set(SET_DST_HEIGHT, DST_H);
+        set_iova(&mut engine, SET_DST_OFFSET, base + u64::from(DST - SRC));
+
+        engine.regs.set(SET_OPERATION, OPERATION_SRC_COPY);
+        engine.regs.set(DST_WIDTH, DST_W);
+        engine.regs.set(DST_HEIGHT, DST_H);
+        engine.regs.set(DU_DX_INT, 2);
+        engine.regs.set(DV_DY_INT, 2);
+
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        engine.write(SRC_Y0_INT, 0, &mut ctx).unwrap();
+
+        for y in 0..DST_H {
+            for x in 0..DST_W {
+                assert_eq!(
+                    mem.read_u32(DST + (y * DST_W + x) * 4).unwrap(),
+                    (2 * y) * SRC_W + 2 * x,
+                    "texel ({x}, {y})"
+                );
+            }
+        }
     }
 
     #[test]
