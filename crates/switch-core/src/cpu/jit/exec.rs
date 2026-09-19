@@ -336,8 +336,13 @@ impl Cpu {
     fn apply_compare(&mut self, exit: &Exit) {
         let (a, b, carry, sf) = match *exit {
             Exit::CmpImm {
-                rn, rhs, carry, sf, ..
-            } => (self.reg_at(rn) & Cpu::mask(sf), rhs, carry, sf),
+                rn, imm, carry, sf, ..
+            } => (
+                self.reg_at(rn) & Cpu::mask(sf),
+                invert_if(u64::from(imm), carry),
+                carry,
+                sf,
+            ),
             Exit::CmpReg {
                 rn, rm, carry, sf, ..
             } => (
@@ -366,14 +371,15 @@ impl Cpu {
             Exit::Cond { cond, target } => (self.condition_holds(cond), target),
             Exit::CmpImm {
                 rn,
-                rhs,
+                imm,
                 carry,
                 sf,
                 cond,
                 target,
             } => {
                 let a = self.reg_at(rn) & Cpu::mask(sf);
-                let (result, c, v) = Cpu::add_carry_overflow(a, rhs, u64::from(carry), sf);
+                let b = invert_if(u64::from(imm), carry);
+                let (result, c, v) = Cpu::add_carry_overflow(a, b, u64::from(carry), sf);
                 self.set_nzcv_from_alu(result, sf, c, v);
                 (self.condition_holds(cond), target)
             }

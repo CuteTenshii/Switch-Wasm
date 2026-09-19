@@ -427,7 +427,13 @@ pub(super) enum Term {
 ///
 /// These are the only three A64 branches whose not-taken path is the following
 /// instruction, which is what lets a block continue past them at all.
+///
+/// With a tag byte of its own. Left to itself the compiler hid the tag in a
+/// spare value of one variant's `bool`, and every exit taken then worked out
+/// which kind it was with five instructions of arithmetic before it could
+/// even jump on it.
 #[derive(Debug, Clone, Copy)]
+#[repr(u8)]
 pub(super) enum Exit {
     /// `B.cond`.
     Cond { cond: u8, target: u32 },
@@ -448,12 +454,18 @@ pub(super) enum Exit {
     /// A `CMP`/`CMN` against a constant, fused with the `B.cond` that reads
     /// its flags, the commonest pair in compiled code, and one that only
     /// became fusable when blocks started running through conditional
-    /// branches. `rhs` and `carry` arrive as they do for any other
-    /// subtraction; the destination was the zero register, so nothing but
-    /// NZCV is written.
+    /// branches. The destination was the zero register, so nothing but NZCV
+    /// is written.
+    ///
+    /// `imm` is the constant as the instruction encodes it, twelve bits and
+    /// perhaps a shift, and `carry` is 1 for `CMP`, which inverts it on the
+    /// way in as the register form does. Held that way rather than inverted
+    /// ahead of time because the inverted form is a `u64`, and one of those
+    /// beside `target` made this variant, and so every exit, 24 bytes once
+    /// the enum has a tag of its own.
     CmpImm {
         rn: u8,
-        rhs: u64,
+        imm: u32,
         carry: u8,
         sf: bool,
         cond: u8,
@@ -637,14 +649,21 @@ mod tests {
         assert!(std::mem::size_of::<SysOp>() <= 16);
     }
 
-    /// [`Branch::span`] is free only while it fits in the padding an
-    /// `(index, Exit)` pair already carried. Grow [`Exit`] past this and the
-    /// span is worth re-deriving instead.
+    /// [`Branch::span`] was added into the padding an `(index, Exit)` pair
+    /// already carried, when that was 24 bytes. [`Exit`] has since lost its
+    /// eight-byte field and the pair is 20, but a branch is still the 24 it
+    /// was: the span costs the word the padding rounds to, and no more. Grow
+    /// either past this and the span is worth re-deriving instead.
     #[test]
     fn a_branch_costs_no_more_than_the_pair_it_replaced() {
-        assert_eq!(
-            std::mem::size_of::<Branch>(),
-            std::mem::size_of::<(u32, Exit)>()
-        );
+        assert_eq!(std::mem::size_of::<Branch>(), 24);
+    }
+
+    /// An exit's tag is a byte of its own (see [`Exit`]), which is only free
+    /// while every variant still fits beside it in two words. A `u64` operand
+    /// next to a `u32` target does not.
+    #[test]
+    fn an_exit_with_its_own_tag_still_costs_two_words() {
+        assert_eq!(std::mem::size_of::<Exit>(), 16);
     }
 }

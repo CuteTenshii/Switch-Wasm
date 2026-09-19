@@ -248,7 +248,8 @@ fn fuse_compares(ops: &mut [Op], exits: &mut [Branch]) {
                 sf,
             } if rd == ZR_DISCARD as u8 => Exit::CmpImm {
                 rn,
-                rhs,
+                // Back to the encoded constant, which fits in 24 bits.
+                imm: (rhs ^ 0u64.wrapping_sub(u64::from(carry))) as u32,
                 carry,
                 sf,
                 cond,
