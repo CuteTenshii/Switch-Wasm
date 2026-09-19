@@ -1,0 +1,6 @@
+# The browser build uses wasm SIMD. Without it LLVM has no 128-bit vectors
+# to lower to, so every fill, copy and `u128` vector-register operation in the
+# emulator is scalar. Every engine the site targets has had SIMD since 2023
+# (Safari 16.4 was the last), and Just Dance 2019 runs 2.4% faster a frame.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]
