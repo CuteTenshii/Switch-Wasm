@@ -571,10 +571,7 @@ impl Cpu {
             return Ok(());
         };
         let take = requested.min(bytes.len() as u64).min(u64::from(len)) as usize;
-        for (index, &byte) in bytes[..take].iter().enumerate() {
-            self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
-        }
-        Ok(())
+        self.mem.write_bytes(addr, &bytes[..take])
     }
 
     /// Which save an `fsp-srv` save-data request names.
@@ -668,10 +665,8 @@ impl Cpu {
                         if got == 0 {
                             break;
                         }
-                        for (i, &byte) in buf[..got].iter().enumerate() {
-                            self.mem
-                                .write_u8(addr.wrapping_add(written + i as u32), byte)?;
-                        }
+                        self.mem
+                            .write_bytes(addr.wrapping_add(written), &buf[..got])?;
                         written += got as u32;
                         pos += got as u64;
                     }
@@ -877,9 +872,7 @@ impl Cpu {
                     );
                 }
                 if let Some(addr) = self.ipc_output_buffer_addr(tls, 0) {
-                    for (i, &byte) in buf[..read].iter().enumerate() {
-                        self.mem.write_u8(addr.wrapping_add(i as u32), byte)?;
-                    }
+                    self.mem.write_bytes(addr, &buf[..read])?;
                 }
                 self.write_ipc_response(tls, 0, &[], &(read as u64).to_le_bytes(), &[])
             }

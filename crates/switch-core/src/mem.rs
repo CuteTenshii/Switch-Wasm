@@ -1328,6 +1328,45 @@ impl Memory {
         Ok(())
     }
 
+    /// Write `buf` at `addr` with exactly the effect of a [`Memory::write_u8`]
+    /// per byte, in order, but a page at a time.
+    ///
+    /// Where a service hands a guest a buffer of data. A `fsp-srv` read of a
+    /// RomFS file is tens of kilobytes, and byte by byte each byte paid a page
+    /// lookup, a protection test, a watchpoint test and a code-page test;
+    /// loading Just Dance 2019's JSON spent as long in that loop as in
+    /// decrypting the data. Unlike [`Memory::write_from`], a write-protected
+    /// byte stops the write at that byte with every one before it written,
+    /// and the watchpoint reports the last byte to land in it.
+    pub fn write_bytes(&mut self, addr: u32, buf: &[u8]) -> Result<()> {
+        let mut done = 0usize;
+        while done < buf.len() {
+            let at = addr.wrapping_add(done as u32);
+            let off = Self::in_page_offset(at);
+            let n = (PAGE_SIZE - off).min(buf.len() - done);
+            let end = u64::from(at) + n as u64;
+            let protected = self
+                .readonly
+                .iter()
+                .any(|&(s, e)| u64::from(at) < u64::from(e) && u64::from(s) < end);
+            if protected {
+                for (i, &byte) in buf[done..done + n].iter().enumerate() {
+                    self.write_u8(at.wrapping_add(i as u32), byte)?;
+                }
+            } else {
+                let page = self.page_mut(Self::page_index(at))?;
+                page[off..off + n].copy_from_slice(&buf[done..done + n]);
+                let (watch_start, watch_end) = (u64::from(self.watch.0), u64::from(self.watch.1));
+                if u64::from(at) < watch_end && end > watch_start {
+                    self.watch_hit = Some((end.min(watch_end) - 1) as u32);
+                }
+                self.note_code_write(at);
+            }
+            done += n;
+        }
+        Ok(())
+    }
+
     /// Copy `buf` into guest memory at `addr`: [`Memory::read_into`] run
     /// backwards, one page at a time rather than one word at a time.
     ///
@@ -1709,6 +1748,50 @@ mod tests {
         m.watch_writes(0x1110, 8);
         m.write_u64_pair(0x1100, 1, 2).unwrap();
         assert_eq!(m.take_watch_hit(), None);
+    }
+
+    /// `write_bytes` is a `write_u8` per byte done a page at a time, so it has
+    /// to leave memory, the fault and the watch hit exactly where a loop of
+    /// those would.
+    #[test]
+    fn a_bulk_write_stops_and_reports_where_bytewise_writes_would() {
+        let data: Vec<u8> = (1..=0x40u8).collect();
+        let bytewise = |m: &mut Memory, at: u32| -> Result<()> {
+            for (i, &b) in data.iter().enumerate() {
+                m.write_u8(at + i as u32, b)?;
+            }
+            Ok(())
+        };
+        // Across a page boundary, watching a range the write runs through.
+        let setup = || {
+            let mut m = Memory::new();
+            m.map_zero(0x1000, 2 * PAGE_SIZE).unwrap();
+            m.watch_writes(0x1FF0, 0x20);
+            m
+        };
+        let (mut bulk, mut single) = (setup(), setup());
+        bulk.write_bytes(0x1FE0, &data).unwrap();
+        bytewise(&mut single, 0x1FE0).unwrap();
+        assert_eq!(
+            bulk.dump(0x1000, 2 * PAGE_SIZE),
+            single.dump(0x1000, 2 * PAGE_SIZE)
+        );
+        assert_eq!(bulk.take_watch_hit(), single.take_watch_hit());
+        assert_eq!(bulk.take_watch_hit(), None);
+
+        // Into a protected range part-way through a page.
+        let setup = || {
+            let mut m = Memory::new();
+            m.map_zero(0x1000, PAGE_SIZE).unwrap();
+            m.mark_readonly(0x1110, 0x1200);
+            m
+        };
+        let (mut bulk, mut single) = (setup(), setup());
+        assert!(bulk.write_bytes(0x1100, &data).is_err());
+        assert!(bytewise(&mut single, 0x1100).is_err());
+        assert_eq!(bulk.dump(0x1000, PAGE_SIZE), single.dump(0x1000, PAGE_SIZE));
+        assert_eq!(bulk.read_u8(0x110F).unwrap(), 0x10);
+        assert_eq!(bulk.read_u8(0x1110).unwrap(), 0);
     }
 
     #[test]
