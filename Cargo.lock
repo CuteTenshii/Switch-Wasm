@@ -759,6 +759,7 @@ dependencies = [
 name = "switch-wasm"
 version = "0.1.0"
 dependencies = [
+ "js-sys",
  "switch-core",
  "switch-gpu",
  "wasm-bindgen",

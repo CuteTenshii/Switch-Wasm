@@ -41,6 +41,8 @@ impl<T> SyncCell<T> {
 
 #[cfg(feature = "gpu")]
 mod gpu;
+#[cfg(all(feature = "jit", target_arch = "wasm32"))]
+mod jit;
 
 use switch_core::cpu::{Cpu, TouchPoint};
 use switch_core::elf::load_elf;
@@ -327,6 +329,15 @@ pub extern "C" fn switch_free(ptr: *mut u8, len: u32) {
 #[no_mangle]
 pub extern "C" fn switch_init() {
     install_panic_hook();
+    attach_jit();
+}
+
+/// Let the core run the blocks it emits. A build without the bindings to
+/// compile one has nowhere to put emitted code, and the translator goes on
+/// interpreting what it translates.
+fn attach_jit() {
+    #[cfg(all(feature = "jit", target_arch = "wasm32"))]
+    jit::attach();
 }
 
 /// Surface Rust panics to the frontend, they otherwise trap silently as
@@ -375,6 +386,11 @@ fn forget_the_last_session() {
 #[no_mangle]
 pub extern "C" fn switch_new() -> u32 {
     install_panic_hook();
+    // Here as well as in `switch_init`, which a host driving the module
+    // directly has no reason to call: a session that ran without this would
+    // interpret everything it translated and look, from the outside, exactly
+    // like one that simply had no emitter.
+    attach_jit();
     forget_the_last_session();
     // The framebuffer and input pages are pre-mapped by Cpu::new, and the
     // stack + low-memory shim are provided by bootstrap so libnx-style
@@ -1706,13 +1722,15 @@ pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) 
     let s = session(handle);
     let stats = s.cpu.jit_stats();
     let json = format!(
-        "{{\"enabled\":{},\"blocks\":{},\"translated\":{},\"executed\":{},\"invalidated\":{},\"interpreted\":{}}}",
+        "{{\"enabled\":{},\"blocks\":{},\"translated\":{},\"executed\":{},\"invalidated\":{},\"interpreted\":{},\"emitted\":{},\"enteredEmitted\":{}}}",
         s.cpu.jit_enabled(),
         stats.blocks,
         stats.translated,
         stats.executed,
         stats.invalidated,
-        stats.interpreted
+        stats.interpreted,
+        stats.emitted,
+        stats.entered_emitted
     );
     write_into(buf, maxlen, json.as_bytes())
 }

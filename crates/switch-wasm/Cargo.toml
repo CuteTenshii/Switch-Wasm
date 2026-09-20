@@ -23,7 +23,15 @@ default = []
 # it. `make wasm` turns it on, because the site does — see the Makefile for
 # why one shape of core beats two. A machine with no WebGPU still runs: the
 # backend says it could not open a device and the rasterizer takes the frame.
-gpu = ["dep:switch-gpu", "dep:wasm-bindgen", "dep:wasm-bindgen-futures"]
+gpu = ["dep:switch-gpu", "dep:wasm-bindgen-futures", "jit"]
+
+# Run the core's emitted wasm, rather than only writing it. Compiling a
+# module needs `WebAssembly.Module`, so this is what pulls in the JS bindings;
+# without it the translator still runs, it just interprets what it translated.
+#
+# `gpu` turns it on because the shipped build has both, and because the
+# bindings are already there for `wgpu`.
+jit = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies.switch-gpu]
 path = "../switch-gpu"
@@ -35,6 +43,10 @@ optional = true
 
 [dependencies.wasm-bindgen-futures]
 version = "0.4"
+optional = true
+
+[dependencies.js-sys]
+version = "0.3"
 optional = true
 
 [lints]
