@@ -1,8 +1,9 @@
 #!/bin/sh
 # Enable with: git config core.hooksPath .githooks
 #
-# Formatting only. A workspace `cargo clippy` costs minutes on a cold cache,
-# which is more than a commit should wait for; CI runs that one.
+# rustfmt first, then the same clippy invocation CI runs, so a lint that would
+# fail the pipeline fails here instead. Warm, the clippy pass costs ~9 s and
+# a cold cache costs minutes; `git commit --no-verify` skips both.
 set -eu
 
 staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
@@ -15,7 +16,8 @@ fi
 
 # What is checked is the working tree, not the staged blobs: reporting a diff
 # against content that is staged but not on disk is more confusing than the
-# partial-staging case it would catch.
+# partial-staging case it would catch. The clippy pass below reads the working
+# tree for the same reason — cargo has no way to build from the index.
 IFS='
 '
 set --
@@ -29,5 +31,20 @@ if ! rustfmt --check --files-with-diff "$@"; then
 	echo >&2
 	echo "pre-commit: the files above are not rustfmt-clean (or failed to parse)." >&2
 	echo "Run \`cargo fmt --all\`, or commit with --no-verify." >&2
+	exit 1
+fi
+
+if ! cargo clippy --version >/dev/null 2>&1; then
+	echo "pre-commit: clippy not found — rustup component add clippy" >&2
+	exit 1
+fi
+
+# The whole workspace and every target, not just the staged crates: a change to
+# switch-core is what breaks a lint in switch-wasm, and the test and example
+# targets are where most of the warnings live.
+if ! cargo clippy --workspace --all-targets -- -D warnings; then
+	echo >&2
+	echo "pre-commit: clippy reported the warnings above, which CI treats as errors." >&2
+	echo "Fix them, or commit with --no-verify." >&2
 	exit 1
 fi
