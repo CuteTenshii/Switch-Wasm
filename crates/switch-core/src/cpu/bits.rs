@@ -547,6 +547,12 @@ impl Extract {
         })
     }
 
+    /// The three distances and the fill, for the wasm emitter, which writes
+    /// them out as shift constants instead of calling [`Extract::apply`].
+    pub(crate) fn parts(self) -> (u8, u8, u8, bool) {
+        (self.left, self.right, self.up, self.signed)
+    }
+
     /// The result is truncated to the operand width: a write to a W register
     /// zeroes bits 63:32, and the sign extension would otherwise fill them
     /// (`asr w0, w0, #31` produced `0xFFFF_FFFF_FFFF_FFFF`).

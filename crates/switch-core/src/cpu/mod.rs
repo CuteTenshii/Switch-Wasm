@@ -55,7 +55,7 @@ mod vi;
 pub use a32::ExecMode;
 pub use fs::SaveDataQuota;
 pub use ipc::POINTER_BUFFER_SIZE;
-pub use jit::{translates, JitStats};
+pub use jit::{emits, translates, JitStats, Refused};
 
 use acc::{DEFAULT_NICKNAME, NICKNAME_LEN};
 pub(crate) use bits::decode_bit_mask;

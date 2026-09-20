@@ -131,6 +131,37 @@ impl Func {
         self.op_idx(0x21, i);
     }
 
+    /// Store the value on the stack into a local and leave it there. The
+    /// rotates need their operand twice and have it once.
+    pub(super) fn local_tee(&mut self, i: u32) {
+        self.op_idx(0x22, i);
+    }
+
+    pub(super) fn drop_value(&mut self) {
+        self.op(0x1A);
+    }
+
+    /// Pick between two values already on the stack: the first if the
+    /// condition under them is non-zero.
+    ///
+    /// Both arms are evaluated, which is what makes this the right shape for a
+    /// conditional *value* and the wrong one for anything that can trap. The
+    /// divides use [`Func::if_result`] for exactly that reason.
+    pub(super) fn select(&mut self) {
+        self.op(0x1B);
+    }
+
+    /// An `if` whose two arms each leave one value of type `ty`. Closed by
+    /// [`Func::else_`] and then [`Func::end`].
+    pub(super) fn if_result(&mut self, ty: u8) {
+        self.code.push(0x04);
+        self.code.push(ty);
+    }
+
+    pub(super) fn else_(&mut self) {
+        self.op(0x05);
+    }
+
     /// A load or store's immediates are an alignment *hint* (log2 of the
     /// assumed alignment) and a static byte offset. The offset is what makes
     /// guest state cheap to reach: the address operand stays dynamic and the
@@ -170,8 +201,31 @@ impl Func {
         self.op(0x74);
     }
 
+    pub(super) fn i32_shr_u(&mut self) {
+        self.op(0x76);
+    }
+
     pub(super) fn i64_add(&mut self) {
         self.op(0x7C);
+    }
+
+    pub(super) fn i64_sub(&mut self) {
+        self.op(0x7D);
+    }
+
+    pub(super) fn i64_mul(&mut self) {
+        self.op(0x7E);
+    }
+
+    /// Traps on a zero divisor, and `i64.div_s` traps again on
+    /// `i64::MIN / -1`. A64 defines both as answers rather than faults, so
+    /// every emitted divide guards them; see [`super::emit`].
+    pub(super) fn i64_div_s(&mut self) {
+        self.op(0x7F);
+    }
+
+    pub(super) fn i64_div_u(&mut self) {
+        self.op(0x80);
     }
 
     pub(super) fn i64_and(&mut self) {
@@ -186,12 +240,32 @@ impl Func {
         self.op(0x85);
     }
 
+    /// Every wasm shift and rotate takes its distance modulo the operand
+    /// width, which is what A64's variable shifts do too, so a `ShiftVar`'s
+    /// 64-bit form needs no masking of the amount. The 32-bit form does: its
+    /// modulus is 32 and this one's is still 64.
+    pub(super) fn i64_shl(&mut self) {
+        self.op(0x86);
+    }
+
+    pub(super) fn i64_shr_s(&mut self) {
+        self.op(0x87);
+    }
+
     pub(super) fn i64_shr_u(&mut self) {
         self.op(0x88);
     }
 
+    pub(super) fn i64_rotr(&mut self) {
+        self.op(0x8A);
+    }
+
     pub(super) fn i64_eqz(&mut self) {
         self.op(0x50);
+    }
+
+    pub(super) fn i64_eq(&mut self) {
+        self.op(0x51);
     }
 
     pub(super) fn i64_ne(&mut self) {
@@ -200,6 +274,24 @@ impl Func {
 
     pub(super) fn i64_lt_u(&mut self) {
         self.op(0x54);
+    }
+
+    /// Sign-extend the low 8, 16 or 32 bits of an i64 over the rest of it.
+    ///
+    /// These are the sign-extension opcodes rather than a shift-left and an
+    /// arithmetic shift-right, which is what an engine without them needs. A64
+    /// asks for this constantly: every `ASR`, every `SDIV`, and the `SXTB`,
+    /// `SXTH` and `SXTW` of the extended-register form.
+    pub(super) fn i64_extend8_s(&mut self) {
+        self.op(0xC2);
+    }
+
+    pub(super) fn i64_extend16_s(&mut self) {
+        self.op(0xC3);
+    }
+
+    pub(super) fn i64_extend32_s(&mut self) {
+        self.op(0xC4);
     }
 
     /// Narrow an i64 to i32. Every guest address is computed in 64 bits and

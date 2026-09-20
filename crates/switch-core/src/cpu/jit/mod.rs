@@ -32,9 +32,22 @@
 //! # Generating wasm
 //!
 //! [`emit`] writes a block out as wasm rather than interpreting it, using the
-//! encoder in [`wasm`]. It is started but not wired in: only straight-line
-//! data-processing blocks are written, and [`emit::emit_block`] returns `None`
-//! for everything else, so nothing executes emitted code yet.
+//! encoder in [`wasm`]. It is not wired in: [`emit::emit_block`] gives back an
+//! [`emit::Refused`] for a block it cannot write, and nothing executes emitted
+//! code yet.
+//!
+//! What it can write is the data-processing half of the architecture, all of
+//! it bar `SMULH`/`UMULH`, which need a 128-bit product wasm has no integer
+//! for.
+//!
+//! What refuses a block is now guest memory, and almost nothing else. Of
+//! hbmenu's 9,481 sampled block entry points, 212 are emitted, 8,943 are
+//! refused for an op with no emitter, and every one of the twenty encodings
+//! that cost the most blocks is a load or a store. Only 326 are held back by
+//! control flow alone. That ordering is worth keeping in view, because it is
+//! the reverse of how the two look before the refusals are attributed: most
+//! blocks contain a branch *and* a load, and writing the branch would leave
+//! them exactly where they are.
 //!
 //! What made this look impossible was the memory model, and two thirds of that
 //! turned out to be wrong. A generated module can only address *its own*
@@ -44,6 +57,16 @@
 //! and nothing is copied or called. Compiling was supposed to be too dear for
 //! so small a unit, and measured it is not: 7,062 blocks compile in 1.8 ms, so
 //! the answer is to batch a module rather than to emit one per block.
+//!
+//! Control flow is the other half, and the smaller one: 326 blocks. A block
+//! that runs through a conditional branch needs that branch written and its
+//! not-taken path carried on from, and it has to say where control went
+//! rather than only how many instructions it retired, which is the whole of
+//! what `run` reports today. That last part is an ABI change, and it runs
+//! into a question wiring-in has to answer anyway: [`Cpu::run_jit`] honours a
+//! step budget exactly by entering a block and leaving part-way through it,
+//! and emitted code cannot be left part-way. Either a block is entered only
+//! when the whole of it fits, or the budget stops being exact.
 //!
 //! What is genuinely still open is guest *memory*. [`crate::mem::Memory`] is a
 //! page table of boxed 4 KiB pages with soft regions, read-only ranges and
@@ -56,6 +79,12 @@
 //! untested; `examples/emit_difftest.rs` and `tools/emit_difftest.mjs` are the
 //! answer to that, running the emitted module under V8 against the interpreter
 //! on blocks a real title executes.
+//!
+//! A title only covers what it runs, though, and hbmenu never divides by zero
+//! or rotates by a register. `examples/emit_selftest.rs` feeds the same
+//! comparison encodings swept out of the instruction space with
+//! [`emit::emits`], under register contents picked to sit on the edges the two
+//! engines could disagree about, and needs no target to do it.
 //!
 //! # Fidelity
 //!
@@ -109,5 +138,6 @@ mod wasm;
 
 pub use cache::JitStats;
 pub use decode::translates;
+pub use emit::{emits, Refused};
 
 pub(in crate::cpu) use cache::Jit;

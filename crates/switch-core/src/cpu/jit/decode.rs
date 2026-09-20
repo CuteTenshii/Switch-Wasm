@@ -35,7 +35,7 @@ pub fn translates(insn: u32) -> bool {
 
 /// One decoded instruction: part of a block's body, a conditional branch the
 /// block can run through, or the terminator that ends it.
-enum Decoded {
+pub(super) enum Decoded {
     Op(Op),
     Exit(Exit),
     Term(Term),
@@ -281,7 +281,7 @@ fn fuse_compares(ops: &mut [Op], exits: &mut [Branch]) {
 
 /// Classify one instruction the way [`crate::cpu::Cpu::execute`] does, by bits
 /// 28:25, the architecture's own first decode table, and translate it.
-fn decode(insn: u32, pc: u32) -> Decoded {
+pub(super) fn decode(insn: u32, pc: u32) -> Decoded {
     match (insn >> 25) & 0xF {
         0x8 | 0x9 => Decoded::Op(decode_data_proc_imm(insn, pc)),
         0x5 | 0xD => Decoded::Op(decode_data_proc_reg(insn)),

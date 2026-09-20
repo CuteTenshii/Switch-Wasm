@@ -25,15 +25,19 @@ mod common;
 const USAGE: &str = "emit_difftest <target> [prod.keys] [title.keys] [font.ttf]";
 
 use common::{Flow, Pace};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
-use switch_core::cpu::Cpu;
+use switch_core::cpu::{Cpu, Refused};
+use switch_core::disasm::disassemble;
 
 /// Where the harness puts guest state in the memory it hands a module. The
 /// register file at zero and NZCV clear of it; an emitted block only ever
 /// reaches these two, so nothing else has to be modelled.
 const REGS_AT: u32 = 0;
 const NZCV_AT: u32 = 4096;
+
+/// How many encodings to name in the refusal report.
+const ROWS: usize = 20;
 
 /// How many distinct block entry points to try.
 const CANDIDATES: usize = 4000;
@@ -68,16 +72,31 @@ fn main() {
     std::fs::create_dir_all(&out_dir).expect("cannot create the output directory");
     let mut manifest = String::new();
     let mut cases = 0usize;
-    let mut refused = 0usize;
+    let mut refused_flow = 0usize;
+    let mut refused_long = 0usize;
     let mut skipped_fault = 0usize;
+    // The encodings that took a block out of the emitted path, by how many
+    // blocks each one cost. This is the list that says what to write next.
+    let mut unwritable: HashMap<u32, u64> = HashMap::new();
 
     for &pc in seen.iter() {
         if cases >= CANDIDATES {
             break;
         }
-        let Some((module, ops)) = cpu.emit_block_at(pc, REGS_AT, NZCV_AT) else {
-            refused += 1;
-            continue;
+        let (module, ops) = match cpu.emit_block_at(pc, REGS_AT, NZCV_AT) {
+            Ok(emitted) => emitted,
+            Err(Refused::ControlFlow) => {
+                refused_flow += 1;
+                continue;
+            }
+            Err(Refused::TooLong) => {
+                refused_long += 1;
+                continue;
+            }
+            Err(Refused::Op(insn)) => {
+                *unwritable.entry(insn).or_default() += 1;
+                continue;
+            }
         };
         // A block of one op is nearly always a lone `MOV`; it would pass
         // without saying anything about the operand handling.
@@ -126,10 +145,26 @@ fn main() {
     std::fs::write(format!("{out_dir}/manifest.txt"), header + &manifest)
         .expect("cannot write the manifest");
 
+    let refused_op: u64 = unwritable.values().sum();
     println!(
-        "{cases} cases written to {out_dir}/ ({refused} blocks the emitter refused, \
-         {skipped_fault} that faulted under the interpreter)"
+        "{cases} cases written to {out_dir}/ ({skipped_fault} blocks faulted under the \
+         interpreter)"
     );
+    println!(
+        "refused: {refused_flow} for control flow, {refused_op} for an op with no emitter, \
+         {refused_long} for length"
+    );
+
+    // Ranked by blocks cost rather than by how often the encoding runs: one
+    // instruction with no emitter takes its whole block with it, so this is
+    // what writing that one op would buy.
+    let mut ranked: Vec<(u64, u32)> = unwritable.iter().map(|(&i, &n)| (n, i)).collect();
+    ranked.sort_by_key(|&(count, insn)| (std::cmp::Reverse(count), insn));
+    println!("--- encodings that cost the most blocks ---");
+    for (count, insn) in ranked.iter().take(ROWS) {
+        println!("  {insn:#010x}  {count:>6}  {}", disassemble(*insn));
+    }
+
     println!("now run: node tools/emit_difftest.mjs {out_dir}");
 }
 
