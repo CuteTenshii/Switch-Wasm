@@ -80,6 +80,7 @@ struct Delta {
     draws: u64,
     draws_skipped: u64,
     clears: u64,
+    clears_elided: u64,
     copies: u64,
     macros: u64,
     dispatches: u64,
@@ -102,6 +103,7 @@ impl Delta {
             draws: after.gpu.draws - before.gpu.draws,
             draws_skipped: after.gpu.draws_skipped - before.gpu.draws_skipped,
             clears: after.gpu.clears - before.gpu.clears,
+            clears_elided: after.gpu.clears_elided - before.gpu.clears_elided,
             copies: after.gpu.copies - before.gpu.copies,
             macros: after.gpu.macros - before.gpu.macros,
             dispatches: after.gpu.dispatches - before.gpu.dispatches,
@@ -125,6 +127,7 @@ impl Delta {
         self.draws += other.draws;
         self.draws_skipped += other.draws_skipped;
         self.clears += other.clears;
+        self.clears_elided += other.clears_elided;
         self.copies += other.copies;
         self.macros += other.macros;
         self.dispatches += other.dispatches;
@@ -146,6 +149,7 @@ impl Delta {
             draws: 0,
             draws_skipped: 0,
             clears: 0,
+            clears_elided: 0,
             copies: 0,
             macros: 0,
             dispatches: 0,
@@ -261,10 +265,11 @@ fn main() {
         mean(total.macros),
     );
     println!(
-        "  gpu:    {:.1} draws ({:.0} skipped), {:.1} clears, {:.1} copies, {:.1} dispatches ({:.0} skipped)",
+        "  gpu:    {:.1} draws ({:.0} skipped), {:.1} clears ({:.1} elided), {:.1} copies, {:.1} dispatches ({:.0} skipped)",
         mean(total.draws),
         mean(total.draws_skipped),
         mean(total.clears),
+        mean(total.clears_elided),
         mean(total.copies),
         mean(total.dispatches),
         mean(total.dispatches_skipped),

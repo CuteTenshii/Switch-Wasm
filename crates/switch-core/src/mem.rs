@@ -207,6 +207,16 @@ pub struct Memory {
     /// stands, and a flag cannot grow while nobody asks.
     copy_watch: Vec<u64>,
     copy_written: bool,
+    /// The same pair again, for a second host-side claim about guest memory
+    /// watched independently of the first. A staged blit uses `copy_watch` for
+    /// the texels it read; the depth clear uses this one for the bytes it
+    /// wrote. They cannot share a flag: each writes memory the other watches,
+    /// so one would keep reporting the other's own stores. Tested only from
+    /// [`Memory::report_written`], which a store reaches only once it has
+    /// already hit `watched_pages`, so the second channel costs the hot store
+    /// path nothing.
+    fill_watch: Vec<u64>,
+    fill_written: bool,
 }
 
 impl Default for Memory {
@@ -241,6 +251,8 @@ impl Memory {
             gpu_watching: false,
             copy_watch: Vec::new(),
             copy_written: false,
+            fill_watch: Vec::new(),
+            fill_written: false,
         }
     }
 
@@ -291,6 +303,12 @@ impl Memory {
             if *word & bit != 0 {
                 *word &= !bit;
                 self.copy_written = true;
+            }
+        }
+        if let Some(word) = self.fill_watch.get_mut(idx >> 6) {
+            if *word & bit != 0 {
+                *word &= !bit;
+                self.fill_written = true;
             }
         }
     }
@@ -382,6 +400,33 @@ impl Memory {
     /// watched since this was last asked, clearing the answer.
     pub fn take_copy_written(&mut self) -> bool {
         std::mem::take(&mut self.copy_written)
+    }
+
+    /// [`Memory::mark_copy_range`] for the second channel: the bytes a host
+    /// operation last *wrote*, so it can tell whether they are still the ones
+    /// it put there.
+    pub fn mark_fill_range(&mut self, addr: u32, len: u32) {
+        if len == 0 {
+            return;
+        }
+        if self.watched_pages.is_empty() {
+            self.watched_pages = vec![0u64; PAGE_COUNT / 64];
+        }
+        if self.fill_watch.is_empty() {
+            self.fill_watch = vec![0u64; PAGE_COUNT / 64];
+        }
+        let first = u64::from(addr) >> PAGE_BITS;
+        let last = (u64::from(addr) + u64::from(len) - 1) >> PAGE_BITS;
+        for idx in first..=last.min(PAGE_COUNT as u64 - 1) {
+            let (word, bit) = ((idx >> 6) as usize, 1u64 << (idx & 63));
+            self.watched_pages[word] |= bit;
+            self.fill_watch[word] |= bit;
+        }
+    }
+
+    /// [`Memory::take_copy_written`] for that second channel.
+    pub fn take_fill_written(&mut self) -> bool {
+        std::mem::take(&mut self.fill_written)
     }
 
     /// Mark `[start, end)` as softly mapped: reads return zeros (served from

@@ -370,6 +370,21 @@ impl RenderTarget {
     }
 }
 
+/// Everything that decides what a depth clear writes, plus the span it wrote
+/// it over. Two clears agreeing on all of it put the same bytes in the same
+/// places.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DepthFill {
+    addr: u64,
+    span: u32,
+    value: u128,
+    written: u128,
+    bytes: u32,
+    rect: (u32, u32, u32, u32),
+    tile_mode: u32,
+    width_bytes: u32,
+}
+
 #[derive(Debug)]
 pub struct Engine3D {
     pub regs: Registers,
@@ -390,6 +405,15 @@ pub struct Engine3D {
     pub inline: crate::gpu::engine::inline::EngineInline,
     /// The last draw the engine was asked to perform.
     pub last_draw: DrawCall,
+    /// What the last depth clear wrote, and over which bytes. A clear puts one
+    /// masked value on every texel of a rectangle, so a second clear with the
+    /// same parameters over memory nothing has touched since writes the bytes
+    /// that are already there. Just Dance 2019 clears depth **twice a frame**,
+    /// 3.69 MB each time, and never draws, so from the second clear of the
+    /// first frame onwards every one of them is that.
+    ///
+    /// A `RefCell` because the clear runs behind `&self`.
+    depth_fill: std::cell::RefCell<Option<DepthFill>>,
     /// Write cursor for `LoadConstbufData`, in bytes.
     constbuf_cursor: u32,
     /// `(Bind slot, hardware bank index) -> (addr, size)` snapshots taken on
@@ -430,6 +454,7 @@ impl Engine3D {
             macros: MacroEngine::new(),
             inline: crate::gpu::engine::inline::EngineInline::new(),
             last_draw: DrawCall::default(),
+            depth_fill: std::cell::RefCell::new(None),
             constbuf_cursor: 0,
             bound_constbufs: [[None; CONSTBUF_BANKS]; BIND_SLOTS],
         }
@@ -1579,12 +1604,44 @@ impl Engine3D {
             return Ok(());
         }
 
+        // Already there. A clear puts one masked value on every texel it
+        // covers, so a repeat of the last one over bytes nothing has stored to
+        // since would write what is in them: the masked-out bits are untouched
+        // too, because nothing touched them. Just Dance 2019 clears depth
+        // twice a frame and draws nothing at all, so after the first clear
+        // this is every clear it issues.
+        let stale = ctx.mem.take_fill_written();
+        let fill = DepthFill {
+            addr,
+            span: 0,
+            value,
+            written,
+            bytes,
+            rect: (x0, y0, x1, y1),
+            tile_mode,
+            width_bytes,
+        };
+        if !stale {
+            if let Some(last) = *self.depth_fill.borrow() {
+                if (DepthFill { span: 0, ..last }) == fill {
+                    ctx.stats.clears_elided += 1;
+                    return Ok(());
+                }
+            }
+        }
+        // Anything else invalidates the record: this clear is about to write
+        // the surface, and until it has finished there is nothing to claim.
+        *self.depth_fill.borrow_mut() = None;
+
         // The same GOB walk [`Engine3D::clear_color`] does, and for the same
         // reason: a GOB is 512 contiguous bytes holding 128 texels in some
         // permuted order, and this applies one mask and one value to all of
-        // them: an operation that does not care what the order is. Just Dance
-        // 2019 clears depth twice a frame and draws nothing, so this was the
-        // whole cost of its frame.
+        // them: an operation that does not care what the order is.
+        //
+        // `span` is grown to cover every byte the walk touches, so the watch
+        // armed below cannot under-cover what was written; marking more than
+        // was written would only cost a clear that need not have been redone.
+        let mut span = 0u64;
         let (tx0, ty0) = (x0 * grid.samples_x, y0 * grid.samples_y);
         let (tx1, ty1) = (x1 * grid.samples_x, y1 * grid.samples_y);
         let gob_texels = GOB_WIDTH / bytes;
@@ -1602,16 +1659,29 @@ impl Engine3D {
                 if row_whole && tx == gob_col && tx + gob_texels <= tx1 {
                     let (offset, _) = layout.run_at(tx * bytes, ty, width_bytes);
                     let va = addr + offset as u64;
+                    span = span.max(offset as u64 + u64::from(GOB_SIZE));
                     ctx.merge_pixels(va, bytes, value, written, GOB_SIZE / bytes)?;
                     tx += gob_texels;
                     continue;
                 }
                 let (offset, run) = layout.run_at(tx * bytes, ty, width_bytes);
                 let count = (run / bytes).max(1).min(tx1 - tx);
+                span = span.max(offset as u64 + u64::from(count) * u64::from(bytes));
                 ctx.merge_pixels(addr + offset as u64, bytes, value, written, count)?;
                 tx += count;
             }
             ty += if row_whole { GOB_HEIGHT } else { 1 };
+        }
+
+        // Arm the watch over exactly what was written, and record it. After
+        // the walk and not before: the walk's own stores land on these pages,
+        // and marking first would leave them reported as somebody else's.
+        if let Some(cpu) = ctx.span(addr, span) {
+            if let Ok(len) = u32::try_from(span) {
+                ctx.mem.mark_fill_range(cpu, len);
+                ctx.mem.take_fill_written();
+                *self.depth_fill.borrow_mut() = Some(DepthFill { span: len, ..fill });
+            }
         }
         Ok(())
     }

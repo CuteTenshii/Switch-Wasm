@@ -18,6 +18,10 @@ pub struct GpuStats {
     pub methods: u64,
     /// `ClearBuffers` operations executed.
     pub clears: u64,
+    /// Of those, the depth clears that wrote nothing because the bytes were
+    /// already the ones the last identical clear put there. See
+    /// `Engine3D::clear_depth_stencil`.
+    pub clears_elided: u64,
     /// Draw calls seen (`VertexBegin`/`DrawArrays`/`DrawElements`).
     pub draws: u64,
     /// Copy-engine and 2D-engine transfers executed.
