@@ -1184,24 +1184,50 @@ impl Memory {
         let end = addr.wrapping_add(span as u32);
         // The whole run shares a page, so it shares its protection too.
         self.check_writable(addr)?;
-        // Stamped once into a pattern and then memcpy'd, rather than `count`
-        // separate little copies: a GOB-sized clear run is 128 four-byte
-        // writes done the obvious way, and one 512-byte copy done this way.
-        const PATTERN: usize = 512;
         let unit = unit as usize;
         let bytes = value.to_le_bytes();
-        let mut pattern = [0u8; PATTERN];
-        let repeats = (PATTERN / unit).max(1);
-        for i in 0..repeats {
-            pattern[i * unit..(i + 1) * unit].copy_from_slice(&bytes[..unit]);
-        }
-        let stride = repeats * unit;
         let page = self.page_mut(Self::page_index(addr))?;
-        let mut done = 0;
-        while done < span {
-            let n = stride.min(span - done);
-            page[off + done..off + done + n].copy_from_slice(&pattern[..n]);
-            done += n;
+        let run = &mut page[off..off + span];
+        // A unit at a time in its own width, the shape [`Memory::merge_le`]
+        // below already writes a run in.
+        //
+        // This used to stamp the value across a 512-byte pattern and copy that
+        // over the run, to turn 128 four-byte writes into one `memcpy`. On a
+        // host that is what it does. In wasm the length of the little copy is
+        // `unit`, a value the compiler cannot see, so each one lowers to a
+        // `memory.copy` that V8 services with an out-of-line call into its
+        // runtime: a GOB-sized clear made 129 of those plus a `memory.fill` to
+        // zero a pattern it was about to overwrite in full. Just Dance 2019's
+        // colour clear reaches here 7,200 times a frame, which was 920,000
+        // four-byte calls a frame and 1.5% of one in the wrapper alone.
+        //
+        // `span` is `unit * count`, so the chunks cover the run exactly, and
+        // the guard above has already left only the five widths with an arm.
+        match unit {
+            4 => {
+                let v: [u8; 4] = bytes[..4].try_into().unwrap();
+                for slot in run.as_chunks_mut::<4>().0 {
+                    *slot = v;
+                }
+            }
+            2 => {
+                let v: [u8; 2] = bytes[..2].try_into().unwrap();
+                for slot in run.as_chunks_mut::<2>().0 {
+                    *slot = v;
+                }
+            }
+            1 => run.fill(bytes[0]),
+            8 => {
+                let v: [u8; 8] = bytes[..8].try_into().unwrap();
+                for slot in run.as_chunks_mut::<8>().0 {
+                    *slot = v;
+                }
+            }
+            _ => {
+                for slot in run.as_chunks_mut::<16>().0 {
+                    *slot = bytes;
+                }
+            }
         }
         if addr < self.watch.1 && end > self.watch.0 {
             self.watch_hit = Some(addr);
