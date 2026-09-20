@@ -168,6 +168,10 @@ fn main() {
         for v in after {
             let _ = write!(manifest, " {v:016x}");
         }
+        // No window is mapped, so nothing this block did can have reached
+        // guest memory and the delta is empty. The marker is still owed: it
+        // is what separates the two snapshots from it.
+        manifest.push_str(" !");
         manifest.push('\n');
         cases += 1;
     }
