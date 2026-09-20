@@ -26,7 +26,7 @@ A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` 
 `sdk` through real `nnSdk` init, gets its heap, events and input, brings up its
 graphics stack, opens its audio device, and runs on into its own loop. **Every
 service it asks for has a real implementation** — a full boot logs no `no
-implementation` and no `unimplemented` lines. `make test`: **908 tests passing**.
+implementation` and no `unimplemented` lines. `make test`: **1,124 tests passing**.
 
 ## Method, which is the part that generalises
 
@@ -301,6 +301,53 @@ NXpotify's 2.6 s/frame was a texture result rescanning the decoded program and
 building a `Vec` per instruction — about a hundred heap allocations per pixel.
 Where a result lands is a property of the *program*, not the invocation; that
 plus two allocation fixes took it to 0.67 s/frame, byte-identical.
+
+## JIT: emitted wasm, and what it took to reach it
+
+The translator writes a hot block out as wasm and the browser runs it. A block
+that survives sixteen entries is emitted, compiled through
+`WebAssembly.Module`, and its `run` export is put in **this module's own
+function table**; the core then calls the slot. A function pointer on wasm32
+*is* a table index, so entering a compiled block is one `call_indirect`. The
+shape that suggests itself instead — an import the core calls emitted code
+through — would put a JS frame on a boundary crossed every six guest
+instructions, which costs more than the dispatch the emitter exists to remove.
+
+**`--growable-table` is load-bearing and silent.** LLD emits the function table
+with its maximum equal to its minimum, so `table.grow` fails, every install
+answers "could not", and the translator interprets everything it translated
+while looking, from the outside, exactly like a build with no emitter at all.
+Nothing failed, nothing warned; the counters said 1,001 block entries and 0
+compiled. It is in `.cargo/config.toml` now, and `tools/jit_wasm_check.mjs`
+asserts that blocks are not only compiled but **entered**, because the register
+comparison alone passes happily on a build that compiled nothing.
+
+The wiring is checked from both ends, because neither end can check the other:
+
+- `tests/jit_emitted_test.rs` drives the state machine on the host with a Rust
+  function standing in for the compiler — an entry point is a code address in
+  whatever sense the target has one, so that is the real interface and not a
+  mock of it. It covers when a block is emitted, the clock and the step budget
+  across a block that stops early, and that a dropped or invalidated block
+  gives its slot back.
+- `tools/jit_wasm_check.mjs` runs the artefact `make wasm` produces under V8.
+  That is the only place the target-specific parts exist: the field offsets an
+  emitted block reaches guest state by are wasm32's, and a page-table entry is
+  four bytes there against eight on the host. Perturbing one offset by eight
+  makes it name the exact registers that diverged.
+
+**Guest state is reached by `offset_of!`, never by a written-down number.**
+Neither `Cpu` nor `Memory` is `repr(C)`, so the only offsets that are right are
+the ones the build chose, and the emitter runs in that build. A test walks them
+from the address of a `Cpu` the way emitted code does — register file, NZCV,
+both watchpoints, the write-protected envelope, the watched-page bitmap, and
+the page-table walk down to the byte.
+
+What the emitter cannot yet write is control flow, so only a block with no
+conditional branch in it is emitted at all. Everything else is unchanged and
+still interpreted. The infrastructure is what was missing; writing branches now
+pays immediately, and batching several blocks into one module is the next
+compile-time win (7,062 blocks compile in 1.8 ms when batched).
 
 ## Next
 

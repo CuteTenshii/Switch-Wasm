@@ -51,6 +51,10 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+- `node tools/jit_wasm_check.mjs` checks that the browser build runs the blocks
+  it emits, against the interpreter, after `make wasm`. Host tests cannot: the
+  offsets emitted code uses are wasm32's, and only the browser build has
+  anything that can compile a module.
 - `make all` runs the Rust tests and builds the browser site.
 - `make wasm` builds `switch-wasm` with the WebGPU feature and runs
   `wasm-bindgen`. The installed CLI version must match `Cargo.lock`.
