@@ -228,6 +228,12 @@ fn column_word(state: &[u8; 16], c: usize) -> u32 {
     column_word_at(state, c * 4)
 }
 
+/// All four columns of a sixteen-byte state.
+#[inline]
+fn block_words(state: &[u8; 16]) -> [u32; 4] {
+    [0, 1, 2, 3].map(|c| column_word(state, c))
+}
+
 /// The same packing, out of a longer buffer at a byte offset, the round keys
 /// are one flat 176-byte array.
 #[inline]
@@ -259,10 +265,28 @@ impl RoundKeys {
     /// is row `r` of column `c`, and ShiftRows takes row `r` of a column from
     /// column `c + r`.
     pub fn encrypt_block(&self, block: &[u8; 16]) -> [u8; 16] {
+        let words = self.encrypt_block_words(&block_words(block));
+        let mut out = [0u8; 16];
+        for (word, slot) in words.iter().zip(out.chunks_exact_mut(4)) {
+            slot.copy_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    /// The same block cipher, in and out as the four column words the rounds
+    /// already work in.
+    ///
+    /// [`RoundKeys::encrypt_block`]'s last round used to write sixteen bytes
+    /// one at a time, and its only bulk caller
+    /// ([`aes128_ctr_xor_in_place`]) then read all sixteen back one at a time
+    /// to XOR them. Neither side ever wanted the byte array: the rounds hold
+    /// the state as four words and the keystream is consumed four bytes at a
+    /// time, so the scatter and the gather cancelled out.
+    pub fn encrypt_block_words(&self, block: &[u32; 4]) -> [u32; 4] {
         let w = &self.0;
         let mut s = [0u32; 4];
         for (c, column) in s.iter_mut().enumerate() {
-            *column = column_word(block, c) ^ column_word_at(w, c * 4);
+            *column = block[c] ^ column_word_at(w, c * 4);
         }
         for round in 1..10 {
             let rk = round * 16;
@@ -277,12 +301,15 @@ impl RoundKeys {
             s = next;
         }
         // The last round has no MixColumns, so no table: SubBytes and
-        // ShiftRows straight into the output.
-        let mut out = [0u8; 16];
-        for c in 0..4 {
-            for r in 0..4 {
-                out[c * 4 + r] = SBOX[byte_of(&s, c, r)] ^ w[160 + c * 4 + r];
-            }
+        // ShiftRows straight into the output, packed the way `column_word`
+        // packs a column, row 0 in the low byte.
+        let mut out = [0u32; 4];
+        for (c, column) in out.iter_mut().enumerate() {
+            *column = u32::from(SBOX[byte_of(&s, c, 0)])
+                | u32::from(SBOX[byte_of(&s, c, 1)]) << 8
+                | u32::from(SBOX[byte_of(&s, c, 2)]) << 16
+                | u32::from(SBOX[byte_of(&s, c, 3)]) << 24;
+            *column ^= column_word_at(w, 160 + c * 4);
         }
         out
     }
@@ -420,19 +447,47 @@ pub fn aes128_ctr_xor(key: &[u8; 16], counter: &[u8; 16], data: &[u8]) -> Vec<u8
 /// [`crate::nca::SectionSource`], which reads sections that way).
 pub fn aes128_ctr_xor_in_place(key: &[u8; 16], counter: &[u8; 16], data: &mut [u8]) {
     let keys = RoundKeys::new(key);
-    let mut ctr = *counter;
-    for chunk in data.chunks_mut(16) {
-        let ks = keys.encrypt_block(&ctr);
-        for (b, k) in chunk.iter_mut().zip(ks.iter()) {
-            *b ^= k;
+    // The counter is one 128-bit big-endian integer. Held as its two halves,
+    // advancing it is an add and a carry rather than a walk back down sixteen
+    // bytes looking for the one that did not wrap, which ran per block and
+    // found the last byte 255 times in 256.
+    let mut hi = u64::from_be_bytes(counter[..8].try_into().unwrap());
+    let mut lo = u64::from_be_bytes(counter[8..].try_into().unwrap());
+    let mut blocks = data.chunks_exact_mut(16);
+    for chunk in &mut blocks {
+        let ks = keys.encrypt_block_words(&counter_words(hi, lo));
+        for (word, slot) in ks.iter().zip(chunk.chunks_exact_mut(4)) {
+            let v = u32::from_le_bytes(slot.try_into().unwrap()) ^ word;
+            slot.copy_from_slice(&v.to_le_bytes());
         }
-        for i in (0..16).rev() {
-            ctr[i] = ctr[i].wrapping_add(1);
-            if ctr[i] != 0 {
-                break;
-            }
+        let (next, carried) = lo.overflowing_add(1);
+        lo = next;
+        if carried {
+            hi = hi.wrapping_add(1);
         }
     }
+    // A final partial block takes as much of its keystream as it has bytes
+    // for; nothing follows it, so the counter need not advance again.
+    let tail = blocks.into_remainder();
+    if !tail.is_empty() {
+        let ks = keys.encrypt_block_words(&counter_words(hi, lo));
+        let mut stream = [0u8; 16];
+        for (word, slot) in ks.iter().zip(stream.chunks_exact_mut(4)) {
+            slot.copy_from_slice(&word.to_le_bytes());
+        }
+        for (b, k) in tail.iter_mut().zip(stream.iter()) {
+            *b ^= k;
+        }
+    }
+}
+
+/// The counter's two halves back as the four column words the cipher takes.
+#[inline]
+fn counter_words(hi: u64, lo: u64) -> [u32; 4] {
+    let mut bytes = [0u8; 16];
+    bytes[..8].copy_from_slice(&hi.to_be_bytes());
+    bytes[8..].copy_from_slice(&lo.to_be_bytes());
+    block_words(&bytes)
 }
 
 const SHA256_H0: [u32; 8] = [
@@ -601,6 +656,20 @@ mod tests {
         assert_eq!(aes128_ctr_xor(&key, &ctr, &pt), ct);
         // CTR is its own inverse.
         assert_eq!(aes128_ctr_xor(&key, &ctr, &ct), pt);
+
+        // A message that stops part-way through a block gets the prefix of the
+        // same keystream, which is the whole of what the last partial block
+        // means. The vector above is three whole blocks, so it is every length
+        // up to it that says the tail is handled: the bulk path runs over
+        // whole blocks and the remainder is served separately, and nothing
+        // else here would notice if the two disagreed by a byte.
+        for n in 0..=pt.len() {
+            assert_eq!(
+                aes128_ctr_xor(&key, &ctr, &pt[..n]),
+                ct[..n],
+                "keystream diverges at {n} bytes"
+            );
+        }
     }
 
     #[test]
