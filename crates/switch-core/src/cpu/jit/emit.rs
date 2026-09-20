@@ -148,6 +148,11 @@ const L_R: u32 = 4;
 const L_S: u32 = 5;
 const L_C: u32 = 6;
 
+/// Alignment hints, as the log2 the format wants. Guest state is naturally
+/// aligned because this emulator laid it out.
+const ALIGN_4: u8 = 2;
+const ALIGN_8: u8 = 3;
+
 /// A block bigger than this is not emitted. A translated block is bounded
 /// already, but the guard keeps one pathological block from dominating a
 /// module's compile time.
@@ -192,7 +197,8 @@ impl Emitter<'_> {
     /// the way before using it, which is what `SBFM`/`UBFM` do.
     fn read_reg_raw(&mut self, slot: u8) {
         self.f.local_get(STATE);
-        self.f.i64_load(self.layout.regs + 8 * u32::from(slot));
+        self.f
+            .i64_load(ALIGN_8, self.layout.regs + 8 * u32::from(slot));
     }
 
     /// Narrow the value on the stack to the operation's width.
@@ -226,7 +232,8 @@ impl Emitter<'_> {
     }
 
     fn store_reg(&mut self, slot: u8) {
-        self.f.i64_store(self.layout.regs + 8 * u32::from(slot));
+        self.f
+            .i64_store(ALIGN_8, self.layout.regs + 8 * u32::from(slot));
     }
 
     /// Write the local `L_R` into `regs[slot]`.
@@ -256,7 +263,7 @@ impl Emitter<'_> {
         self.f
             .i32_const(i32::from(CONDITION_MASKS[(cond & 0xF) as usize]));
         self.f.local_get(STATE);
-        self.f.i32_load(self.layout.nzcv);
+        self.f.i32_load(ALIGN_4, self.layout.nzcv);
         self.f.i32_const(28);
         self.f.i32_shr_u();
         self.f.i32_shr_u();
@@ -483,7 +490,7 @@ impl Emitter<'_> {
         } else {
             // `ANDS` leaves C and V exactly as they were.
             self.f.local_get(STATE);
-            self.f.i32_load(self.layout.nzcv);
+            self.f.i32_load(ALIGN_4, self.layout.nzcv);
             self.f.i32_const(0x3000_0000);
             self.f.i32_and();
             self.f.i32_or();
@@ -496,7 +503,7 @@ impl Emitter<'_> {
         self.f.local_set(L_C);
         self.f.local_get(STATE);
         self.f.local_get(L_C);
-        self.f.i32_store(self.layout.nzcv);
+        self.f.i32_store(ALIGN_4, self.layout.nzcv);
     }
 
     /// `AND`/`ORR`/`EOR`/`ANDS` with the second operand already in `L_B`.
@@ -1035,7 +1042,7 @@ impl Emitter<'_> {
                 self.f.i32_const((u32::from(nzcv) << 28) as i32);
                 self.cond_holds(cond);
                 self.f.select();
-                self.f.i32_store(self.layout.nzcv);
+                self.f.i32_store(ALIGN_4, self.layout.nzcv);
                 true
             }
 

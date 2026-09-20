@@ -167,26 +167,33 @@ impl Func {
     /// guest state cheap to reach: the address operand stays dynamic and the
     /// base of the register file or the guest arena is folded into the
     /// instruction.
+    ///
+    /// The hint is a promise, not a request: an engine may use it to pick a
+    /// wider instruction, so it has to be no larger than the address is really
+    /// aligned to. Emulator state is naturally aligned and a guest address is
+    /// aligned to nothing this knows, which is why every caller passes one
+    /// rather than taking the access width's own.
     fn mem(&mut self, opcode: u8, align: u8, offset: u32) {
+        debug_assert!(align <= 3, "an alignment hint is a log2, not a width");
         self.code.push(opcode);
         uleb(&mut self.code, u64::from(align));
         uleb(&mut self.code, u64::from(offset));
     }
 
-    pub(super) fn i32_load(&mut self, offset: u32) {
-        self.mem(0x28, 2, offset);
+    pub(super) fn i32_load(&mut self, align: u8, offset: u32) {
+        self.mem(0x28, align, offset);
     }
 
-    pub(super) fn i64_load(&mut self, offset: u32) {
-        self.mem(0x29, 3, offset);
+    pub(super) fn i64_load(&mut self, align: u8, offset: u32) {
+        self.mem(0x29, align, offset);
     }
 
-    pub(super) fn i32_store(&mut self, offset: u32) {
-        self.mem(0x36, 2, offset);
+    pub(super) fn i32_store(&mut self, align: u8, offset: u32) {
+        self.mem(0x36, align, offset);
     }
 
-    pub(super) fn i64_store(&mut self, offset: u32) {
-        self.mem(0x37, 3, offset);
+    pub(super) fn i64_store(&mut self, align: u8, offset: u32) {
+        self.mem(0x37, align, offset);
     }
 
     pub(super) fn i32_and(&mut self) {
