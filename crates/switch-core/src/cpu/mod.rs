@@ -55,7 +55,9 @@ mod vi;
 pub use a32::ExecMode;
 pub use fs::SaveDataQuota;
 pub use ipc::POINTER_BUFFER_SIZE;
-pub use jit::{defers, emits, set_jit_host, translates, Entry, JitHost, JitStats, Layout, Refused};
+pub use jit::{
+    defers, emits, set_jit_host, translates, Entry, JitHost, JitStats, Layout, Refused, LEFT,
+};
 
 use acc::{DEFAULT_NICKNAME, NICKNAME_LEN};
 pub(crate) use bits::decode_bit_mask;
@@ -1692,6 +1694,18 @@ const ZR_SLOT: usize = 31;
 const _: () = assert!(ZR_SLOT == 31);
 /// Writes to `XZR`, which the architecture discards.
 const ZR_DISCARD: usize = 32;
+
+/// That same slot, for the difftest harnesses, which compare the register
+/// file slot by slot and have to leave this one out.
+///
+/// Nothing reads it: it exists so that a write to `XZR` has somewhere to go
+/// without a test for register 31 on every operand. So what is in it is not
+/// guest state, and two engines with different rubbish in the bin are not
+/// disagreeing about anything. They do differ, and legitimately: a `CMP`
+/// folded into the branch that reads its flags ([`jit::translates`]) is
+/// emitted as the flag write it is, and drops a register write the
+/// architecture was going to discard anyway.
+pub const DISCARD_SLOT: usize = ZR_DISCARD;
 /// The stack pointer, `SP`.
 const SP_SLOT: usize = 33;
 

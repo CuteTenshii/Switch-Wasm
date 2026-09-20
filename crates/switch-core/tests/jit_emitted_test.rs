@@ -16,9 +16,9 @@
 //! the property the whole handover rests on: a block that stops early leaves
 //! guest state as if only those instructions had run.
 
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use switch_core::cpu::{set_jit_host, Cpu, Entry, JitHost, Layout};
+use switch_core::cpu::{set_jit_host, Cpu, Entry, JitHost, Layout, LEFT};
 
 const CODE: u32 = 0x1000;
 
@@ -36,6 +36,25 @@ const LOOP: &[u32] = &[
     0xD503201F, // nop
     0xD65F03C0, // ret  x30
 ];
+
+/// A loop whose back edge is a conditional branch inside the block rather
+/// than its terminator: `x0` counts down and the `CBNZ` goes back to the top
+/// while it is not zero, which it never is.
+///
+/// The branch is the block's *last* instruction, so taking it retires every
+/// one of them and the `RET` below it must still not run. That is the case a
+/// count of retired instructions cannot express on its own, and the reason an
+/// emitted block says where control went rather than only how far it got.
+#[rustfmt::skip]
+const BRANCH_LOOP: &[u32] = &[
+    0xD282001E, // movz x30, #0x1000
+    0xD1000400, // sub  x0, x0, #1
+    0xB5FFFFC0, // cbnz x0, #-8
+    0xD65F03C0, // ret  x30
+];
+
+/// Instructions in one trip round [`BRANCH_LOOP`]: the `RET` is never reached.
+const BRANCH_TRIP: u64 = 3;
 
 /// Instructions in one trip round [`LOOP`], the `RET` included.
 const TRIP: u64 = 4;
@@ -77,6 +96,35 @@ extern "C" fn fake_run(state: usize) -> u32 {
     retired
 }
 
+/// Stands in for [`BRANCH_LOOP`]'s compiled block: does all three of its ops
+/// and leaves the way the `CBNZ` does, by putting the target in the pc and
+/// reporting [`LEFT`] beside the count.
+extern "C" fn fake_branch(state: usize) -> u32 {
+    ENTERED.fetch_add(1, Ordering::SeqCst);
+    let layout = Layout::of_cpu();
+    let regs = state + layout.regs as usize;
+    // SAFETY: as `fake_run`. `pc` is a field of the same `Cpu` at the same
+    // layout's offset, and a taken branch is the one thing that writes it.
+    unsafe {
+        *((regs + 8 * 30) as *mut u64) = u64::from(CODE);
+        let x0 = (regs as *mut u64).read();
+        (regs as *mut u64).write(x0.wrapping_sub(1));
+        *((state + layout.pc as usize) as *mut u32) = CODE;
+    }
+    BRANCH_TRIP as u32 | LEFT
+}
+
+/// Which fake the next `install` hands back, because the two loops are not
+/// the same block and the host is one function for the whole binary.
+static EMIT_BRANCH: AtomicBool = AtomicBool::new(false);
+
+fn fake_for_this_block() -> Entry {
+    match EMIT_BRANCH.load(Ordering::SeqCst) {
+        true => fake_branch as *const () as Entry,
+        false => fake_run as *const () as Entry,
+    }
+}
+
 fn install(code: &[u8]) -> Entry {
     LAST_MODULE.store(code.len(), Ordering::SeqCst);
     assert_eq!(
@@ -84,13 +132,16 @@ fn install(code: &[u8]) -> Entry {
         &[0x00, 0x61, 0x73, 0x6D],
         "what reached the host is not a wasm module"
     );
-    fake_run as *const () as Entry
+    fake_for_this_block()
 }
 
 fn release(entry: Entry) {
-    assert_eq!(
-        entry, fake_run as *const () as Entry,
-        "an entry point came back wrong"
+    // Either fake, rather than whichever one is being handed out now: a block
+    // is released when it is dropped, which for the last block of a test is
+    // after the test body has finished with it.
+    assert!(
+        entry == fake_run as *const () as Entry || entry == fake_branch as *const () as Entry,
+        "an entry point came back that was never handed out"
     );
     RELEASED.fetch_add(1, Ordering::SeqCst);
 }
@@ -106,15 +157,20 @@ fn exclusive() -> MutexGuard<'static, ()> {
     RELEASED.store(0, Ordering::SeqCst);
     LAST_MODULE.store(0, Ordering::SeqCst);
     RETIRE.store(OPS, Ordering::SeqCst);
+    EMIT_BRANCH.store(false, Ordering::SeqCst);
     guard
 }
 
 fn loaded(jit: bool) -> Cpu {
+    running(jit, LOOP)
+}
+
+fn running(jit: bool, program: &[u32]) -> Cpu {
     let mut cpu = Cpu::new();
     cpu.set_jit_enabled(jit);
     cpu.mem.map_zero(CODE, 0x1000).unwrap();
-    let mut bytes = Vec::with_capacity(LOOP.len() * 4);
-    for insn in LOOP {
+    let mut bytes = Vec::with_capacity(program.len() * 4);
+    for insn in program {
         bytes.extend_from_slice(&insn.to_le_bytes());
     }
     cpu.mem.map(CODE, &bytes).unwrap();
@@ -138,8 +194,12 @@ fn snapshot(cpu: &Cpu) -> (u64, u64, u32, u64, u64) {
 /// and the budget has to survive the emitted path as exactly as it does the
 /// interpreted one.
 fn compare(steps: u64, what: &str) {
-    let mut interpreted = loaded(false);
-    let mut translated = loaded(true);
+    compare_running(LOOP, steps, what);
+}
+
+fn compare_running(program: &[u32], steps: u64, what: &str) {
+    let mut interpreted = running(false, program);
+    let mut translated = running(true, program);
     let a = interpreted.run(steps).unwrap();
     let b = translated.run(steps).unwrap();
     assert_eq!(a.steps, steps, "{what}: the interpreter missed the budget");
@@ -267,4 +327,41 @@ fn overwriting_the_code_releases_its_emitted_form() {
         "the invalidated block kept its entry point"
     );
     assert_eq!(cpu.read_x(1), 1, "the new instruction did not run");
+}
+
+/// A block whose branch is taken leaves through it: control goes where the
+/// branch said, the terminator underneath it does not run, and the clock
+/// counts the instructions that did.
+///
+/// [`BRANCH_LOOP`]'s branch is its last instruction, so this is also the case
+/// a count alone cannot express. A block reporting three of three retired and
+/// nothing else would fall into the `RET`, and the loop would leave through a
+/// terminator it never reached.
+#[test]
+fn a_block_left_through_a_taken_branch_skips_its_terminator() {
+    let _guard = exclusive();
+    EMIT_BRANCH.store(true, Ordering::SeqCst);
+    compare_running(BRANCH_LOOP, 401, "a block left at its branch");
+
+    ENTERED.store(0, Ordering::SeqCst);
+    let mut cpu = running(true, BRANCH_LOOP);
+    cpu.run(401).unwrap();
+
+    let stats = cpu.jit_stats();
+    assert_eq!(stats.emitted, 1, "the loop's block was not emitted");
+    assert!(
+        stats.entered_emitted > 50,
+        "only {} of {} entries reached emitted code",
+        stats.entered_emitted,
+        stats.executed
+    );
+    // One `sub` a trip, and the budget ends the last trip just after its
+    // one. Had the `RET` under the branch run, a trip would be four
+    // instructions rather than three and `x0` would be a quarter smaller.
+    let subs = 401 / BRANCH_TRIP + u64::from(401 % BRANCH_TRIP >= 2);
+    assert_eq!(
+        cpu.read_x(0),
+        0u64.wrapping_sub(subs),
+        "the loop did not go round as many times as the budget allows"
+    );
 }

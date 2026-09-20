@@ -41,7 +41,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use switch_core::cpu::{defers, emits, Cpu, Layout};
+use switch_core::cpu::{defers, emits, Cpu, Layout, DISCARD_SLOT};
 use switch_core::disasm::disassemble;
 
 /// Where the harness puts guest state in the memory it hands a module, the
@@ -60,6 +60,9 @@ const READONLY_LO_AT: u32 = 0x1018;
 const READONLY_HI_AT: u32 = 0x101C;
 /// Where the pointer to the watched-page bitmap is.
 const WATCHED_AT: u32 = 0x1020;
+/// Where the guest `pc` is. Nothing here emits a branch, so nothing writes
+/// it; the layout names it because a `Layout` has to name all of it.
+const PC_AT: u32 = 0x1024;
 
 /// The page table itself: one four-byte entry per 4 KiB of the guest's 4 GiB,
 /// holding where in this memory that page lives and zero where it is not
@@ -368,6 +371,7 @@ fn main() {
          readonly_hi_at {READONLY_HI_AT}\n\
          watched_at {WATCHED_AT}\n\
          pages_at {PAGES_AT}\n\
+         discard_slot {DISCARD_SLOT}\n\
          table_at {TABLE_AT}\n\
          bitmap_at {BITMAP_AT}\n\
          slots {}\n\
@@ -411,6 +415,7 @@ const LAYOUT: Layout = Layout {
     readonly_lo: READONLY_LO_AT,
     readonly_hi: READONLY_HI_AT,
     watched: WATCHED_AT,
+    pc: PC_AT,
 };
 
 /// What the byte at guest address `a` holds.

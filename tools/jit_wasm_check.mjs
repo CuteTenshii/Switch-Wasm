@@ -85,6 +85,52 @@ const PROGRAMS = [
     ],
     expect: { 0: 0x1234n, 2: 0x1234n },
   },
+  {
+    name: 'a loop whose back edge is a conditional branch',
+    data: false,
+    code: [
+      0x1000001e, // adr  x30, #0        -> x30 = BASE
+      0x91000400, // add  x0, x0, #1
+      0xf101901f, // cmp  x0, #0x64
+      0x54ffffa1, // b.ne #-0xc          -> back to BASE
+      0xd65f03c0, // ret  x30
+    ],
+    // The third program, because a block that runs through a branch is a
+    // different shape from one that does not: it reports where control went
+    // as well as how far it got, and the target it names is one this build
+    // computed rather than one the interpreter chose. The `cmp` is folded
+    // into the `b.ne`, so this covers the fused pair as well, which is the
+    // commonest thing compiled code puts in front of a branch.
+    //
+    // x0 counts up past 100 and never matches again, so the branch is taken
+    // on every trip but the hundredth: 99 trips of four instructions, one of
+    // five (the `ret` under the branch runs, and goes back to the top), then
+    // 900 more of four, which is 4001 exactly.
+    expect: { 0: 1000n },
+  },
+  {
+    name: 'a branch out of one block and into another',
+    data: false,
+    code: [
+      0x1000001e, // adr  x30, #0        -> x30 = BASE
+      0x91000400, // add  x0, x0, #1
+      0x36000060, // tbz  w0, #0, #0xc   -> BASE+20 when x0 is even
+      0x91000442, // add  x2, x2, #1     -> the not-taken path, x0 odd
+      0xd65f03c0, // ret  x30
+      0x91000463, // add  x3, x3, #1     -> the taken path, x0 even
+      0xd65f03c0, // ret  x30
+    ],
+    // The loop above branches to its own first instruction, which is where
+    // the interpreter already stood, so a block that reported leaving but
+    // wrote the target nowhere would still land in the right place. This one
+    // branches somewhere else, so the target an emitted block names is the
+    // only thing that can put control there.
+    //
+    // Either path is five instructions and comes back to the top, so 4001
+    // steps is 800 whole trips and one instruction over: x0 counted every
+    // trip, x2 and x3 the odd and even halves.
+    expect: { 0: 800n, 2: 400n, 3: 400n },
+  },
 ];
 
 /** `program` as the smallest ELF the core's loader accepts. */

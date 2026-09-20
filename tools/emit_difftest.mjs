@@ -38,7 +38,7 @@ const HEADER_KEYS = new Set([
   'regs_at', 'nzcv_at', 'read_watch_lo_at', 'read_watch_hi_at', 'watch_lo_at',
   'watch_hi_at', 'readonly_lo_at', 'readonly_hi_at', 'watched_at', 'pages_at',
   'table_at', 'bitmap_at', 'slots', 'code_at', 'read_watch', 'watch',
-  'readonly', 'watched_page', 'wasm_pages',
+  'readonly', 'watched_page', 'wasm_pages', 'pc_at', 'discard_slot',
 ]);
 const header = {};
 // `(guest address, where in this memory it lives)` per mapped page, in guest
@@ -78,6 +78,23 @@ const READONLY_LO_AT = need('readonly_lo_at');
 const READONLY_HI_AT = need('readonly_hi_at');
 const WATCHED_AT = need('watched_at');
 const PAGES_AT = need('pages_at');
+// Where the guest pc is. Only a block that runs through a conditional branch
+// writes it, so a manifest whose cases cannot contain one need not name it.
+const PC_AT = header.pc_at ? header.pc_at[0] : -1;
+// Set in what `run` answers when the block was left at a branch it took. An
+// i32 with its top bit set comes back from wasm negative, and `|` here makes
+// the expected value negative the same way.
+const LEFT = 1 << 31;
+// What the pc is set to before a case, so that a block which was supposed to
+// write it and did not is caught rather than reading whatever the last case
+// left behind.
+const NO_PC = 0xdead0000;
+// The slot a write to `XZR` goes into. Left out of the comparison: nothing
+// reads it, so what is in it is not guest state, and the two engines differ
+// there on purpose -- a `CMP` folded into the branch that reads its flags is
+// emitted as the flag write it is, without the register write the
+// architecture discards.
+const DISCARD = header.discard_slot ? header.discard_slot[0] : -1;
 const TABLE_AT = need('table_at');
 const PAGE_BYTES = 4096;
 
@@ -192,6 +209,7 @@ for (const line of manifest.slice(first)) {
   resetGuest();
   for (let i = 0; i < SLOTS; i++) view.setBigUint64(REGS + i * 8, before[i], true);
   view.setUint32(NZCV, Number(BigInt(nzcvBefore)), true);
+  if (PC_AT >= 0) view.setUint32(PC_AT, NO_PC, true);
 
   let exports;
   try {
@@ -212,9 +230,21 @@ for (const line of manifest.slice(first)) {
   // watchpoint saw: reading it takes more than the page table, so the emitted
   // block has to have handed it back, and a block that went ahead anyway would
   // be leaving the watchpoint blind.
-  const allowed = { exact: [Number(ops)], maybe: [Number(ops), 0], none: [0] }[mode];
+  // `left:<target>` is a block that ran through a conditional branch and took
+  // it: it reports the instructions it retired with `LEFT` set, and has put
+  // the target in the pc. Nothing else about the case changes -- the
+  // registers and NZCV still have to be what the interpreter left after
+  // exactly those instructions.
+  const leftTo = mode.startsWith('left:') ? Number(mode.slice(5)) : null;
+  const allowed = leftTo !== null
+    ? [Number(ops) | LEFT]
+    : { exact: [Number(ops)], maybe: [Number(ops), 0], none: [0] }[mode];
   if (!allowed) {
     console.error(`${name}: manifest asks for an unknown mode ${mode}`);
+    process.exit(1);
+  }
+  if (leftTo !== null && PC_AT < 0) {
+    console.error(`${name}: a case leaves at a branch but the manifest names no pc_at`);
     process.exit(1);
   }
   let want = after, wantNzcv = nzcvAfter;
@@ -227,10 +257,18 @@ for (const line of manifest.slice(first)) {
     handedBack++;
   }
 
+  if (leftTo !== null && want) {
+    const gotPc = view.getUint32(PC_AT, true) >>> 0;
+    if (gotPc !== (leftTo >>> 0)) {
+      bad.push(`pc: emitted ${gotPc.toString(16)}, interpreted ${(leftTo >>> 0).toString(16)}`);
+    }
+  }
+
   if (want) {
     if (inject && ran === 0) want = want.map((v, i) => (i === 0 ? v ^ 1n : v));
     if (inject && ran === 1) wantNzcv = '0x' + ((Number(BigInt(wantNzcv)) ^ 0x40000000) >>> 0).toString(16);
     for (let i = 0; i < SLOTS; i++) {
+      if (i === DISCARD) continue;
       const got = view.getBigUint64(REGS + i * 8, true);
       if (got !== want[i]) {
         bad.push(`slot ${i}: emitted ${got.toString(16).padStart(16, '0')}, interpreted ${want[i].toString(16).padStart(16, '0')}`);

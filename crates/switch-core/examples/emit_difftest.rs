@@ -27,7 +27,7 @@ const USAGE: &str = "emit_difftest <target> [prod.keys] [title.keys] [font.ttf]"
 use common::{Flow, Pace};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
-use switch_core::cpu::{defers, Cpu, Layout, Refused};
+use switch_core::cpu::{defers, Cpu, Layout, Refused, DISCARD_SLOT};
 use switch_core::disasm::disassemble;
 
 /// Where the harness puts guest state in the memory it hands a module.
@@ -41,6 +41,8 @@ const READONLY_LO_AT: u32 = 4116;
 const READONLY_HI_AT: u32 = 4120;
 const WATCHED_AT: u32 = 4124;
 const PAGES_AT: u32 = 4128;
+/// Where the guest `pc` is, which a taken branch writes on its way out.
+const PC_AT: u32 = 4132;
 
 /// Where the page table goes, and how much memory that needs: one four-byte
 /// entry per 4 KiB of the guest's 4 GiB.
@@ -58,6 +60,7 @@ const LAYOUT: Layout = Layout {
     readonly_lo: READONLY_LO_AT,
     readonly_hi: READONLY_HI_AT,
     watched: WATCHED_AT,
+    pc: PC_AT,
 };
 
 /// How many encodings to name in the refusal report.
@@ -97,6 +100,9 @@ fn main() {
     let mut manifest = String::new();
     let mut cases = 0usize;
     let mut refused_flow = 0usize;
+    // Cases whose block ran through a conditional branch and took it, which
+    // are the ones that check control flow was written.
+    let mut branched = 0usize;
     let mut refused_long = 0usize;
     let mut skipped_fault = 0usize;
     // The encodings that took a block out of the emitted path, by how many
@@ -138,13 +144,30 @@ fn main() {
             continue;
         }
 
+        // Where the interpreter stops, which is the answer the module has to
+        // agree with. It runs one instruction at a time and watches the pc:
+        // as long as control stays on the instruction after the last one, the
+        // block is running straight through, and the step where it does not
+        // is a conditional branch the block ran through and took.
+        //
+        // Asked of the interpreter rather than worked out from the block,
+        // because whether a branch is taken depends on the registers this
+        // case starts from, and those are whatever the title had.
         let before = cpu.reg_slots();
         let nzcv_before = cpu.nzcv();
         cpu.set_pc(pc);
         let mut faulted = false;
-        for _ in 0..ops {
+        let mut retired = 0usize;
+        let mut left = None;
+        for i in 0..ops {
             if cpu.step().is_err() {
                 faulted = true;
+                break;
+            }
+            retired = i + 1;
+            let next = cpu.get_pc();
+            if next != pc.wrapping_add(4 * retired as u32) {
+                left = Some(next);
                 break;
             }
         }
@@ -152,6 +175,13 @@ fn main() {
             skipped_fault += 1;
             continue;
         }
+        if left.is_some() {
+            branched += 1;
+        }
+        let mode = match left {
+            Some(target) => format!("left:{target:#010x}"),
+            None => "exact".into(),
+        };
         let after = cpu.reg_slots();
         let nzcv_after = cpu.nzcv();
 
@@ -159,7 +189,7 @@ fn main() {
         std::fs::write(format!("{out_dir}/{name}.wasm"), &module).expect("cannot write a module");
         let _ = write!(
             manifest,
-            "{name} {pc:#010x} {ops} exact {nzcv_before:#010x} {nzcv_after:#010x}"
+            "{name} {pc:#010x} {retired} {mode} {nzcv_before:#010x} {nzcv_after:#010x}"
         );
         for v in before {
             let _ = write!(manifest, " {v:016x}");
@@ -191,6 +221,8 @@ fn main() {
          readonly_hi_at {READONLY_HI_AT}\n\
          watched_at {WATCHED_AT}\n\
          pages_at {PAGES_AT}\n\
+         discard_slot {DISCARD_SLOT}\n\
+         pc_at {PC_AT}\n\
          table_at {TABLE_AT}\n\
          slots {}\n\
          wasm_pages {}\n",
@@ -202,8 +234,8 @@ fn main() {
 
     let refused_op: u64 = unwritable.values().sum();
     println!(
-        "{cases} cases written to {out_dir}/ ({skipped_fault} blocks faulted under the \
-         interpreter)"
+        "{cases} cases written to {out_dir}/, {branched} of them leaving at a branch they took \
+         ({skipped_fault} blocks faulted under the interpreter)"
     );
     println!(
         "refused: {refused_flow} for control flow, {refused_op} for an op with no emitter, \
