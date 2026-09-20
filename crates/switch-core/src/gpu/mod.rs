@@ -474,13 +474,20 @@ impl Gpu {
             let furthest = u64::from(rows.iter().copied().max().unwrap_or(0))
                 + u64::from(columns.iter().copied().max().unwrap_or(0))
                 + u64::from(bpp);
-            if furthest <= swizzled as u64 {
+            if furthest <= swizzled as u64 && swizzled >= 4 {
+                // `furthest` has just established that every offset below is
+                // in range. The clamp is how the compiler is told so: without
+                // it each of the 921,600 reads carries its own bounds check,
+                // and the live panic path behind it spills the offset to the
+                // stack on the way past.
+                let scan = &raw_bytes[..swizzled];
+                let last = scan.len() - 4;
                 for &row_offset in &rows {
                     let row_start = pixels.len();
                     pixels.extend(columns.iter().map(|&column| {
-                        let at = (row_offset + column) as usize;
+                        let at = ((row_offset + column) as usize).min(last);
                         shuffle.apply(u32::from_le_bytes(
-                            raw_bytes[at..at + 4].try_into().expect("four bytes"),
+                            scan[at..at + 4].try_into().expect("four bytes"),
                         ))
                     }));
                     if flip_h {
