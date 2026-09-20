@@ -42,6 +42,48 @@
 //! instruction word, which is what `examples/emit_difftest.rs` ranks to say
 //! which op is worth writing next.
 //!
+//! # Guest memory
+//!
+//! An access is written out as the page-table walk it is.
+//! [`crate::mem::Memory`] keeps one pointer per 4 KiB of the guest's address
+//! space and nulls the ones with no storage behind them, so an emitted access
+//! shifts the address down twelve, loads that pointer, and reads or writes at
+//! the offset into it. Four instructions and no call.
+//!
+//! What made this look impossible was the rest of `Memory`: soft regions,
+//! write-protected ranges, watchpoints, the reports a store owes anything
+//! caching guest memory. None of it is on this path, because the interpreter
+//! already splits the same way. [`crate::mem::Memory::peek`] and
+//! [`crate::mem::Memory::poke`] are the parts of an access the page table can
+//! answer on its own; they decline the rest, whereupon [`super::exec`] runs the
+//! whole instruction again out of line. An emitted access makes exactly their
+//! checks, in their order, and declines what they decline.
+//!
+//! A store has three more of those checks than a load, and one is a bitmap of
+//! the pages something has cached the contents of. That is the one thing here
+//! that guest memory had to be changed for: the bitmap was a `Vec`, and nothing
+//! promises where in one the pointer and the length sit, so there was nowhere
+//! for an emitted store to look. It is a fixed-size bitmap behind a single
+//! pointer now, which is what it always was.
+//!
+//! What is not written is the pair forms and the exclusives. A pair is two
+//! accesses in one page with its own boundary test, and the exclusives carry a
+//! reservation that is not in this model at all.
+//!
+//! # What a block reports
+//!
+//! `run` gives back the number of leading instructions it retired, and guest
+//! state is exactly what those instructions left: an access that declines does
+//! so before it has written a register, so the instruction it stopped at has
+//! not half happened. The interpreter picks up from there, which is the
+//! handover [`super::exec`] already makes when a step budget runs out inside a
+//! block, and it resumes by translating the block at the address it stopped on
+//! rather than by re-entering this one part-way.
+//!
+//! [`defers`] is which instructions can do that, and it matters outside this
+//! module because it is what the difftests need in order to know which answer
+//! from `run` is the right one.
+//!
 //! # Where wasm and A64 disagree
 //!
 //! Three places, each of which costs emitted instructions that the operation
@@ -64,7 +106,9 @@ use super::decode::{decode, translate, Decoded};
 use super::ir::{Block, Op};
 use super::wasm::{Func, Module, I32, I64};
 use crate::cpu::bits::mask_of_width;
+use crate::cpu::loadstore::{Acc, Ext, Wb};
 use crate::cpu::{Cpu, CONDITION_MASKS};
+use crate::mem::{PAGE_BITS, PAGE_SIZE};
 
 /// Whether the emitter has a way to write `insn` out as wasm, which is what
 /// [`super::translates`] asks of the translator.
@@ -90,16 +134,66 @@ pub fn emits(insn: u32) -> bool {
     let mut f = scratch_func();
     Emitter {
         f: &mut f,
-        layout: Layout { regs: 0, nzcv: 0 },
+        layout: Layout {
+            regs: 0,
+            nzcv: 0,
+            pages: 0,
+            read_watch_lo: 0,
+            read_watch_hi: 0,
+            watch_lo: 0,
+            watch_hi: 0,
+            readonly_lo: 0,
+            readonly_hi: 0,
+            watched: 0,
+        },
     }
-    .op(&op)
+    .op(&op, 0)
+}
+
+/// Whether the emitted form of `insn` can decline the instruction and hand it
+/// back to the interpreter, rather than always doing it itself.
+///
+/// Every guest access can: the page it names may have no storage, may not hold
+/// all of the access, or may be watched, and each of those is a case the
+/// emitted code leaves to the full path. Nothing else can, so a block of
+/// instructions that all answer `false` retires every one of them.
+///
+/// That distinction is what the difftests need in order to know which answer
+/// from `run` is the right one, so it is derived from the emitter rather than
+/// listed beside it: a declining op writes the count it would report into its
+/// body, so emitting the same instruction under two different counts and
+/// comparing the bodies asks the arms themselves, and cannot fall out of step
+/// with them the way a second list of ops would.
+pub fn defers(insn: u32) -> bool {
+    const REPRESENTATIVE_PC: u32 = 0x0800_0000;
+    let Decoded::Op(op) = decode(insn, REPRESENTATIVE_PC) else {
+        return false;
+    };
+    let body = |retired: usize| {
+        let mut f = scratch_func();
+        let layout = Layout {
+            regs: 0,
+            nzcv: 0,
+            pages: 0,
+            read_watch_lo: 0,
+            read_watch_hi: 0,
+            watch_lo: 0,
+            watch_hi: 0,
+            readonly_lo: 0,
+            readonly_hi: 0,
+            watched: 0,
+        };
+        Emitter { f: &mut f, layout }.op(&op, retired);
+        f.code().to_vec()
+    };
+    body(0) != body(1)
 }
 
 /// A function body with the locals every emitted block declares.
 fn scratch_func() -> Func {
     let mut f = Func::new();
-    f.locals(1, 5, I64);
-    f.locals(1, 1, I32);
+    f.locals(1, 6, I64);
+    f.locals(1, 5, I32);
     f
 }
 
@@ -111,12 +205,58 @@ fn scratch_func() -> Func {
 /// right are the ones the compiler actually chose for this build, and the
 /// emitter runs in that same build.
 #[derive(Debug, Clone, Copy)]
-pub(super) struct Layout {
+pub struct Layout {
     /// Start of the `[u64; REG_FILE]` register file.
-    pub(super) regs: u32,
+    pub regs: u32,
     /// The packed NZCV word, in its architectural bit positions.
-    pub(super) nzcv: u32,
+    pub nzcv: u32,
+    /// Where the page table's own pointer is kept, not where the table is: an
+    /// emitted block loads it and indexes it, because
+    /// [`crate::mem::Memory`] holds the table behind a `Box` and the
+    /// allocation it points at is not known when the block is written.
+    pub pages: u32,
+    /// The read watchpoint, as the two `u32`s of its `[start, end)`.
+    pub read_watch_lo: u32,
+    pub read_watch_hi: u32,
+    /// The write watchpoint, likewise.
+    pub watch_lo: u32,
+    pub watch_hi: u32,
+    /// The envelope of the write-protected ranges, likewise.
+    pub readonly_lo: u32,
+    pub readonly_hi: u32,
+    /// Where the pointer to the bitmap of pages something has cached the
+    /// contents of is kept; null until something watches one. A store landing
+    /// on a watched page owes a report that an emitted one cannot make.
+    pub watched: u32,
 }
+
+/// Bytes per page-table entry, and so the shift that turns a page number into
+/// an offset into the table.
+///
+/// One entry is one `Option<Box<[u8; PAGE_SIZE]>>`, which the language
+/// guarantees is laid out as the pointer alone with `None` written as null:
+/// that null *is* how [`crate::mem::Memory`] says a page has no storage, so an
+/// emitted access tests for it directly. Four bytes because the only target
+/// that ever runs emitted code is `wasm32`, which the second assertion is
+/// against; the first is the part that holds on the host too, where the
+/// pointer is wider but the niche is the same.
+const PAGE_ENTRY_SHIFT: i32 = 2;
+const _: () = assert!(
+    std::mem::size_of::<Option<Box<[u8; PAGE_SIZE]>>>() == std::mem::size_of::<*const u8>(),
+    "an unmapped page is emitted as a null entry, which needs Option<Box<_>> to be one pointer"
+);
+#[cfg(target_arch = "wasm32")]
+const _: () = assert!(
+    std::mem::size_of::<Option<Box<[u8; PAGE_SIZE]>>>() == 1 << PAGE_ENTRY_SHIFT,
+    "emitted code indexes the page table by this shift, so it has to be the entry's size"
+);
+
+/// Alignment hints, as the log2 the format wants. Guest state is naturally
+/// aligned because this emulator laid it out; a guest address is aligned to
+/// nothing the emitter can promise, and A64 permits unaligned accesses.
+const ALIGN_4: u8 = 2;
+const ALIGN_8: u8 = 3;
+const UNALIGNED: u8 = 0;
 
 /// Why a block was not written out.
 ///
@@ -146,12 +286,21 @@ const L_R: u32 = 4;
 /// Held by the one operation that needs its operand twice and has it once: a
 /// 32-bit rotate, which wasm has no instruction for.
 const L_S: u32 = 5;
-const L_C: u32 = 6;
-
-/// Alignment hints, as the log2 the format wants. Guest state is naturally
-/// aligned because this emulator laid it out.
-const ALIGN_4: u8 = 2;
-const ALIGN_8: u8 = 3;
+/// The value an addressing mode with writeback leaves in its base register,
+/// computed before the access and written after it.
+const L_W: u32 = 6;
+const L_C: u32 = 7;
+/// The guest address an access is at, narrowed to the 32 bits the guest
+/// address space has.
+const L_ADDR: u32 = 8;
+/// The host address of the guest page that address is on.
+const L_PAGE: u32 = 9;
+/// Which guest page that is, which both the page table and the bitmap of
+/// watched pages are indexed by.
+const L_IDX: u32 = 10;
+/// The bitmap of watched pages, held because the test against it is inside a
+/// check that there is one at all.
+const L_WP: u32 = 11;
 
 /// A block bigger than this is not emitted. A translated block is bounded
 /// already, but the guard keeps one pathological block from dominating a
@@ -593,8 +742,294 @@ impl Emitter<'_> {
         self.f.end();
     }
 
+    /// Leave the block, reporting that `retired` of its instructions are done.
+    ///
+    /// The value on the stack decides: non-zero leaves. What is left behind is
+    /// guest state as it stood before the instruction being emitted, so the
+    /// interpreter picks that instruction up whole, which is the same handover
+    /// [`super::exec`] already makes when a step budget runs out inside a
+    /// block.
+    fn deopt_if(&mut self, retired: usize) {
+        self.f.if_void();
+        self.f.i32_const(retired as i32);
+        self.f.return_();
+        self.f.end();
+    }
+
+    /// Leave the guest address of an access in `L_ADDR`, and the value its
+    /// addressing mode writes back, if it writes one, in `L_W`.
+    ///
+    /// The three modes are [`crate::cpu::Cpu::indexed`]: the access is at
+    /// `base + offset` except under post-indexing, where it is at `base` and
+    /// `base + offset` is only what the base register ends up holding.
+    fn address(&mut self, rn: u8, offset: i64, wb: Wb) {
+        if matches!(wb, Wb::None) {
+            self.read_reg_raw(rn);
+            if offset != 0 {
+                self.f.i64_const(offset);
+                self.f.i64_add();
+            }
+        } else {
+            self.read_reg_raw(rn);
+            self.f.local_tee(L_A);
+            self.f.i64_const(offset);
+            self.f.i64_add();
+            self.f.local_set(L_W);
+            match wb {
+                Wb::Post => self.f.local_get(L_A),
+                _ => self.f.local_get(L_W),
+            }
+        }
+        self.f.i32_wrap_i64();
+        self.f.local_set(L_ADDR);
+    }
+
+    /// The same for the register-offset form, which has no writeback:
+    /// [`crate::cpu::Cpu::reg_offset`]'s extension and scale, both already
+    /// resolved.
+    fn address_reg(&mut self, rn: u8, rm: u8, ext: Ext, shift: u8) {
+        self.read_reg_raw(rn);
+        self.read_reg_raw(rm);
+        match ext {
+            Ext::Uxtw => self.mask_to(false),
+            Ext::Sxtw => self.f.i64_extend32_s(),
+            Ext::None => {}
+        }
+        if shift != 0 {
+            self.f.i64_const(i64::from(shift));
+            self.f.i64_shl();
+        }
+        self.f.i64_add();
+        self.f.i32_wrap_i64();
+        self.f.local_set(L_ADDR);
+    }
+
+    /// Write `L_W` back to the base register, for the modes that have one.
+    fn write_back(&mut self, rn: u8, wb: Wb) {
+        if !matches!(wb, Wb::None) {
+            self.addr_regs();
+            self.f.local_get(L_W);
+            self.store_reg(rn);
+        }
+    }
+
+    /// Leave the page `L_ADDR` is on in `L_PAGE`, or leave the block if
+    /// reading `n` bytes there takes more than the page table.
+    ///
+    /// The three conditions are [`crate::mem::Memory::peek`]'s, in its order:
+    /// the access crosses a page boundary, the read watchpoint covers part of
+    /// it, or the page has no storage. Each is something the full path has
+    /// more to do about, and each is rare, so the emitted access is the
+    /// straight-line case and the interpreter keeps the rest.
+    fn page_for_read(&mut self, n: u32, retired: usize) {
+        self.page_number();
+        let crosses = n > 1;
+        if crosses {
+            self.crosses_page(n);
+        }
+        self.covers(n, self.layout.read_watch_lo, self.layout.read_watch_hi);
+        if crosses {
+            self.f.i32_or();
+        }
+        self.deopt_if(retired);
+        self.page_or_defer(retired);
+    }
+
+    /// The same for a store, whose conditions are
+    /// [`crate::mem::Memory::poke`]'s: the boundary again, a write-protected
+    /// address, the write watchpoint, and a page whose contents something has
+    /// cached, which a store owes a report to.
+    fn page_for_write(&mut self, n: u32, retired: usize) {
+        self.page_number();
+        let crosses = n > 1;
+        if crosses {
+            self.crosses_page(n);
+        }
+        self.within(self.layout.readonly_lo, self.layout.readonly_hi);
+        if crosses {
+            self.f.i32_or();
+        }
+        self.covers(n, self.layout.watch_lo, self.layout.watch_hi);
+        self.f.i32_or();
+        self.deopt_if(retired);
+        self.owes_a_report(retired);
+        self.page_or_defer(retired);
+    }
+
+    /// Leave the guest page `L_ADDR` is on in `L_IDX`.
+    fn page_number(&mut self) {
+        self.f.local_get(L_ADDR);
+        self.f.i32_const(PAGE_BITS as i32);
+        self.f.i32_shr_u();
+        self.f.local_set(L_IDX);
+    }
+
+    /// Leave that page's storage in `L_PAGE`, or leave the block if it has
+    /// none. An unmapped page is a null entry, so this is the entry itself.
+    fn page_or_defer(&mut self, retired: usize) {
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, self.layout.pages);
+        self.f.local_get(L_IDX);
+        self.f.i32_const(PAGE_ENTRY_SHIFT);
+        self.f.i32_shl();
+        self.f.i32_add();
+        self.f.i32_load(ALIGN_4, 0);
+        self.f.local_tee(L_PAGE);
+        self.f.i32_eqz();
+        self.deopt_if(retired);
+    }
+
+    /// Push whether `L_ADDR` is inside `[lo, hi)`, which is the envelope test
+    /// [`crate::mem::Memory::is_readonly`] makes before it walks its list.
+    ///
+    /// The list is not walked here: a store inside the envelope hands back and
+    /// the full path decides whether that address really is protected. Every
+    /// protected range is a module's `.text`, so hardly a store a title makes
+    /// is in the envelope at all.
+    fn within(&mut self, lo: u32, hi: u32) {
+        self.f.local_get(L_ADDR);
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, lo);
+        self.f.i32_ge_u();
+        self.f.local_get(L_ADDR);
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, hi);
+        self.f.i32_lt_u();
+        self.f.i32_and();
+    }
+
+    /// Leave the block if anything has cached page `L_IDX`'s contents, which
+    /// is [`crate::mem::Memory`]'s `watches_code`.
+    ///
+    /// Inside a check that the bitmap is there at all, because it is not
+    /// allocated until something watches a page and a run with no JIT and no
+    /// GPU backend never has one.
+    fn owes_a_report(&mut self, retired: usize) {
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, self.layout.watched);
+        self.f.local_tee(L_WP);
+        self.f.if_void();
+        self.f.local_get(L_WP);
+        self.f.local_get(L_IDX);
+        self.f.i32_const(6);
+        self.f.i32_shr_u();
+        self.f.i32_const(3);
+        self.f.i32_shl();
+        self.f.i32_add();
+        self.f.i64_load(ALIGN_8, 0);
+        // The shift is taken modulo 64, which is the masking the bit index
+        // would otherwise need.
+        self.f.i64_const(1);
+        self.f.local_get(L_IDX);
+        self.f.i64_extend_i32_u();
+        self.f.i64_shl();
+        self.f.i64_and();
+        self.f.i64_const(0);
+        self.f.i64_ne();
+        self.deopt_if(retired);
+        self.f.end();
+    }
+
+    /// Push whether the `n` bytes at `L_ADDR` run past the end of their page.
+    fn crosses_page(&mut self, n: u32) {
+        self.f.local_get(L_ADDR);
+        self.f.i32_const((PAGE_SIZE - 1) as i32);
+        self.f.i32_and();
+        self.f.i32_const((PAGE_SIZE as u32 - n) as i32);
+        self.f.i32_gt_u();
+    }
+
+    /// Push whether the watchpoint held at `lo`/`hi` covers any of the `n`
+    /// bytes at `L_ADDR`: `addr < end && addr + n > start`, which is the
+    /// overlap test [`crate::mem::Memory::peek`] makes, wrapping included.
+    fn covers(&mut self, n: u32, lo: u32, hi: u32) {
+        self.f.local_get(L_ADDR);
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, hi);
+        self.f.i32_lt_u();
+        self.f.local_get(L_ADDR);
+        self.f.i32_const(n as i32);
+        self.f.i32_add();
+        self.f.local_get(STATE);
+        self.f.i32_load(ALIGN_4, lo);
+        self.f.i32_gt_u();
+        self.f.i32_and();
+    }
+
+    /// Push the host address the access is at: the page, plus the offset into
+    /// it, which the boundary check above has already proved leaves room.
+    fn in_page(&mut self) {
+        self.f.local_get(L_PAGE);
+        self.f.local_get(L_ADDR);
+        self.f.i32_const((PAGE_SIZE - 1) as i32);
+        self.f.i32_and();
+        self.f.i32_add();
+    }
+
+    /// A load into `rt`, with the address already in `L_ADDR`.
+    ///
+    /// The widening is the load instruction's own: A64's zero- and
+    /// sign-extending loads are exactly wasm's `_u` and `_s` forms, so only
+    /// the two that sign-extend to 32 bits and then zero the top half need
+    /// anything after the access.
+    fn load(&mut self, rt: u8, acc: Acc, retired: usize) {
+        self.page_for_read(access_bytes(acc), retired);
+        self.addr_regs();
+        self.in_page();
+        match acc {
+            Acc::Load8 => self.f.i64_load8_u(0),
+            Acc::Load16 => self.f.i64_load16_u(UNALIGNED, 0),
+            Acc::Load32 => self.f.i64_load32_u(UNALIGNED, 0),
+            Acc::Load64 => self.f.i64_load(UNALIGNED, 0),
+            Acc::LoadS8 => self.f.i64_load8_s(0),
+            Acc::LoadS16 => self.f.i64_load16_s(UNALIGNED, 0),
+            Acc::LoadS32 => self.f.i64_load32_s(UNALIGNED, 0),
+            Acc::LoadS8To32 => {
+                self.f.i64_load8_s(0);
+                self.mask_to(false);
+            }
+            Acc::LoadS16To32 => {
+                self.f.i64_load16_s(UNALIGNED, 0);
+                self.mask_to(false);
+            }
+            _ => unreachable!("only the loads reach here; `writes_rt` is what sorts them"),
+        }
+        self.store_reg(rt);
+    }
+
+    /// A store of `rt`, with the address already in `L_ADDR`.
+    ///
+    /// The narrowing is the store instruction's own: A64 stores the low bytes
+    /// of the register whatever the width, which is what wasm's narrow stores
+    /// do, so nothing is masked first.
+    fn store(&mut self, rt: u8, acc: Acc, retired: usize) {
+        self.page_for_write(access_bytes(acc), retired);
+        self.in_page();
+        self.read_reg_raw(rt);
+        match acc {
+            Acc::Store8 => self.f.i64_store8(0),
+            Acc::Store16 => self.f.i64_store16(UNALIGNED, 0),
+            Acc::Store32 => self.f.i64_store32(UNALIGNED, 0),
+            Acc::Store64 => self.f.i64_store(UNALIGNED, 0),
+            _ => unreachable!("only the stores reach here; `writes_rt` is what sorts them"),
+        }
+    }
+
+    /// A single-register access, whatever addressed it.
+    ///
+    /// `PRFM` is an access with no memory in it, and its addressing mode still
+    /// writes back, so it is the one arm that emits no guard at all: there is
+    /// nothing for the page table to answer.
+    fn access(&mut self, rt: u8, acc: Acc, retired: usize) {
+        match acc {
+            Acc::Prefetch => {}
+            _ if acc.writes_rt() => self.load(rt, acc, retired),
+            _ => self.store(rt, acc, retired),
+        }
+    }
+
     /// One op, or `false` if there is no way to write it yet.
-    fn op(&mut self, op: &Op) -> bool {
+    fn op(&mut self, op: &Op, retired: usize) -> bool {
         match *op {
             Op::Nop => true,
 
@@ -1046,8 +1481,88 @@ impl Emitter<'_> {
                 true
             }
 
+            Op::Load64 { rt, rn, wb, offset } => {
+                self.address(rn, offset, wb);
+                self.load(rt, Acc::Load64, retired);
+                self.write_back(rn, wb);
+                true
+            }
+            Op::Load32 { rt, rn, wb, offset } => {
+                self.address(rn, offset, wb);
+                self.load(rt, Acc::Load32, retired);
+                self.write_back(rn, wb);
+                true
+            }
+            Op::Load8 { rt, rn, wb, offset } => {
+                self.address(rn, offset, wb);
+                self.load(rt, Acc::Load8, retired);
+                self.write_back(rn, wb);
+                true
+            }
+            Op::Store64 { rt, rn, wb, offset } => {
+                self.address(rn, offset, wb);
+                self.store(rt, Acc::Store64, retired);
+                self.write_back(rn, wb);
+                true
+            }
+            Op::Store32 { rt, rn, wb, offset } => {
+                self.address(rn, offset, wb);
+                self.store(rt, Acc::Store32, retired);
+                self.write_back(rn, wb);
+                true
+            }
+            Op::Store8 { rt, rn, wb, offset } => {
+                self.address(rn, offset, wb);
+                self.store(rt, Acc::Store8, retired);
+                self.write_back(rn, wb);
+                true
+            }
+            Op::LoadStoreImm {
+                rt,
+                rn,
+                acc,
+                wb,
+                offset,
+            } => {
+                self.address(rn, offset, wb);
+                self.access(rt, acc, retired);
+                self.write_back(rn, wb);
+                true
+            }
+            Op::LoadStoreReg {
+                rt,
+                rn,
+                rm,
+                ext,
+                shift,
+                acc,
+            } => {
+                self.address_reg(rn, rm, ext, shift);
+                self.access(rt, acc, retired);
+                true
+            }
+            Op::LoadLiteral { rt, addr, acc } => {
+                self.f.i32_const(addr as i32);
+                self.f.local_set(L_ADDR);
+                self.access(rt, acc, retired);
+                true
+            }
+
             _ => false,
         }
+    }
+}
+
+/// How many bytes an access touches, which is what its page and its
+/// watchpoint are tested against.
+fn access_bytes(acc: Acc) -> u32 {
+    match acc {
+        Acc::Load8 | Acc::LoadS8 | Acc::LoadS8To32 | Acc::Store8 => 1,
+        Acc::Load16 | Acc::LoadS16 | Acc::LoadS16To32 | Acc::Store16 => 2,
+        Acc::Load32 | Acc::LoadS32 | Acc::Store32 => 4,
+        Acc::Load64 | Acc::Store64 => 8,
+        // `PRFM` reads nothing, so nothing is ever asked of its address.
+        Acc::Prefetch => 0,
     }
 }
 
@@ -1060,7 +1575,7 @@ pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refus
     let mut f = scratch_func();
     let mut e = Emitter { f: &mut f, layout };
     for (i, op) in block.ops.iter().enumerate() {
-        if !e.op(op) {
+        if !e.op(op, i) {
             return Err(Refused::Op(block.words[i]));
         }
         if e.f.len() > MAX_BODY_BYTES {
@@ -1094,18 +1609,13 @@ pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refus
 impl Cpu {
     /// Translate the block at `pc` and emit it, for `examples/emit_difftest.rs`.
     ///
-    /// The offsets are where the harness has put the register file and NZCV in
-    /// the memory it hands the module, which for a test is a bare buffer
-    /// rather than a `Cpu`. Reports how many instructions the block covers, so
+    /// `layout` is where the harness has put guest state in the memory it
+    /// hands the module, which for a test is a bare buffer rather than a
+    /// `Cpu`. Reports how many instructions the block covers, so
     /// the harness can step the interpreter over exactly the same ones.
-    pub fn emit_block_at(
-        &self,
-        pc: u32,
-        regs: u32,
-        nzcv: u32,
-    ) -> Result<(Vec<u8>, usize), Refused> {
+    pub fn emit_block_at(&self, pc: u32, layout: Layout) -> Result<(Vec<u8>, usize), Refused> {
         let block = translate(&self.mem, pc);
-        let bytes = emit_block(&block, Layout { regs, nzcv })?;
+        let bytes = emit_block(&block, layout)?;
         Ok((bytes, block.ops.len()))
     }
 
@@ -1135,6 +1645,14 @@ mod tests {
     const LAYOUT: Layout = Layout {
         regs: 0,
         nzcv: 2048,
+        pages: 2052,
+        read_watch_lo: 2056,
+        read_watch_hi: 2060,
+        watch_lo: 2064,
+        watch_hi: 2068,
+        readonly_lo: 2072,
+        readonly_hi: 2076,
+        watched: 2080,
     };
 
     /// An op with no emitter has to take the whole block out of the emitted

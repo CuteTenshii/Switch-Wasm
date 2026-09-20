@@ -158,8 +158,21 @@ impl Func {
         self.code.push(ty);
     }
 
+    /// An `if` whose arm leaves nothing, so it needs no `else`. Closed by
+    /// [`Func::end`].
+    pub(super) fn if_void(&mut self) {
+        self.code.push(0x04);
+        self.code.push(0x40);
+    }
+
     pub(super) fn else_(&mut self) {
         self.op(0x05);
+    }
+
+    /// Leave the function with whatever its result type asks for already on
+    /// the stack.
+    pub(super) fn return_(&mut self) {
+        self.op(0x0F);
     }
 
     /// A load or store's immediates are an alignment *hint* (log2 of the
@@ -171,8 +184,8 @@ impl Func {
     /// The hint is a promise, not a request: an engine may use it to pick a
     /// wider instruction, so it has to be no larger than the address is really
     /// aligned to. Emulator state is naturally aligned and a guest address is
-    /// aligned to nothing this knows, which is why every caller passes one
-    /// rather than taking the access width's own.
+    /// aligned to nothing the emitter knows, which is why every caller passes
+    /// one explicitly rather than taking the access width's own.
     fn mem(&mut self, opcode: u8, align: u8, offset: u32) {
         debug_assert!(align <= 3, "an alignment hint is a log2, not a width");
         self.code.push(opcode);
@@ -188,12 +201,54 @@ impl Func {
         self.mem(0x29, align, offset);
     }
 
+    /// The narrowing loads, which widen what they read into an `i64` on the
+    /// way: `_u` with zeroes and `_s` with the sign. A64's loads are exactly
+    /// these two shapes, so a `LDRB`/`LDRSB` pair needs no shifting of its
+    /// own.
+    pub(super) fn i64_load8_s(&mut self, offset: u32) {
+        self.mem(0x30, 0, offset);
+    }
+
+    pub(super) fn i64_load8_u(&mut self, offset: u32) {
+        self.mem(0x31, 0, offset);
+    }
+
+    pub(super) fn i64_load16_s(&mut self, align: u8, offset: u32) {
+        self.mem(0x32, align, offset);
+    }
+
+    pub(super) fn i64_load16_u(&mut self, align: u8, offset: u32) {
+        self.mem(0x33, align, offset);
+    }
+
+    pub(super) fn i64_load32_s(&mut self, align: u8, offset: u32) {
+        self.mem(0x34, align, offset);
+    }
+
+    pub(super) fn i64_load32_u(&mut self, align: u8, offset: u32) {
+        self.mem(0x35, align, offset);
+    }
+
     pub(super) fn i32_store(&mut self, align: u8, offset: u32) {
         self.mem(0x36, align, offset);
     }
 
     pub(super) fn i64_store(&mut self, align: u8, offset: u32) {
         self.mem(0x37, align, offset);
+    }
+
+    /// The narrowing stores, which write the low bytes of an `i64` and drop
+    /// the rest: A64's `STRB`/`STRH`/`STR W` with nothing masked first.
+    pub(super) fn i64_store8(&mut self, offset: u32) {
+        self.mem(0x3C, 0, offset);
+    }
+
+    pub(super) fn i64_store16(&mut self, align: u8, offset: u32) {
+        self.mem(0x3D, align, offset);
+    }
+
+    pub(super) fn i64_store32(&mut self, align: u8, offset: u32) {
+        self.mem(0x3E, align, offset);
     }
 
     pub(super) fn i32_and(&mut self) {
@@ -210,6 +265,26 @@ impl Func {
 
     pub(super) fn i32_shr_u(&mut self) {
         self.op(0x76);
+    }
+
+    pub(super) fn i32_add(&mut self) {
+        self.op(0x6A);
+    }
+
+    pub(super) fn i32_eqz(&mut self) {
+        self.op(0x45);
+    }
+
+    pub(super) fn i32_lt_u(&mut self) {
+        self.op(0x49);
+    }
+
+    pub(super) fn i32_gt_u(&mut self) {
+        self.op(0x4B);
+    }
+
+    pub(super) fn i32_ge_u(&mut self) {
+        self.op(0x4F);
     }
 
     pub(super) fn i64_add(&mut self) {
@@ -308,6 +383,12 @@ impl Func {
         self.op(0xA7);
     }
 
+    /// Widen an i32 to i64 with zeroes, which is what a page number needs
+    /// before it can be a shift distance in a 64-bit word.
+    pub(super) fn i64_extend_i32_u(&mut self) {
+        self.op(0xAD);
+    }
+
     pub(super) fn end(&mut self) {
         self.op(0x0B);
     }
@@ -316,6 +397,13 @@ impl Func {
     /// block has grown past what is worth compiling.
     pub(super) fn len(&self) -> usize {
         self.code.len()
+    }
+
+    /// The instruction stream as it stands, for [`super::emit::defers`], which
+    /// asks what an op wrote rather than keeping its own list of which ops
+    /// write what.
+    pub(super) fn code(&self) -> &[u8] {
+        &self.code
     }
 
     /// The function as the code section holds it: size, locals, body.

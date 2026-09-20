@@ -27,14 +27,38 @@ const USAGE: &str = "emit_difftest <target> [prod.keys] [title.keys] [font.ttf]"
 use common::{Flow, Pace};
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
-use switch_core::cpu::{Cpu, Refused};
+use switch_core::cpu::{defers, Cpu, Layout, Refused};
 use switch_core::disasm::disassemble;
 
-/// Where the harness puts guest state in the memory it hands a module. The
-/// register file at zero and NZCV clear of it; an emitted block only ever
-/// reaches these two, so nothing else has to be modelled.
+/// Where the harness puts guest state in the memory it hands a module.
 const REGS_AT: u32 = 0;
 const NZCV_AT: u32 = 4096;
+const READ_WATCH_LO_AT: u32 = 4100;
+const READ_WATCH_HI_AT: u32 = 4104;
+const WATCH_LO_AT: u32 = 4108;
+const WATCH_HI_AT: u32 = 4112;
+const READONLY_LO_AT: u32 = 4116;
+const READONLY_HI_AT: u32 = 4120;
+const WATCHED_AT: u32 = 4124;
+const PAGES_AT: u32 = 4128;
+
+/// Where the page table goes, and how much memory that needs: one four-byte
+/// entry per 4 KiB of the guest's 4 GiB.
+const TABLE_AT: u32 = 0x0010_0000;
+const TABLE_BYTES: u32 = (1 << 20) * 4;
+
+const LAYOUT: Layout = Layout {
+    regs: REGS_AT,
+    nzcv: NZCV_AT,
+    pages: PAGES_AT,
+    read_watch_lo: READ_WATCH_LO_AT,
+    read_watch_hi: READ_WATCH_HI_AT,
+    watch_lo: WATCH_LO_AT,
+    watch_hi: WATCH_HI_AT,
+    readonly_lo: READONLY_LO_AT,
+    readonly_hi: READONLY_HI_AT,
+    watched: WATCHED_AT,
+};
 
 /// How many encodings to name in the refusal report.
 const ROWS: usize = 20;
@@ -83,7 +107,7 @@ fn main() {
         if cases >= CANDIDATES {
             break;
         }
-        let (module, ops) = match cpu.emit_block_at(pc, REGS_AT, NZCV_AT) {
+        let (module, ops) = match cpu.emit_block_at(pc, LAYOUT) {
             Ok(emitted) => emitted,
             Err(Refused::ControlFlow) => {
                 refused_flow += 1;
@@ -98,6 +122,16 @@ fn main() {
                 continue;
             }
         };
+        // How much of the block will run. A title's guest memory is hundreds
+        // of megabytes and the harness hands a module a bare buffer, so every
+        // page here is unmapped and every access hands its instruction back:
+        // the block runs as far as its first one and reports that. Which is
+        // still the whole of most blocks, and it is real code with real
+        // operands, which is what this half is for. What a *mapped* access
+        // does is `emit_selftest`'s to check, against a window it owns.
+        let ops = (0..ops)
+            .find(|i| cpu.mem.read_u32(pc + 4 * *i as u32).is_ok_and(defers))
+            .unwrap_or(ops);
         // A block of one op is nearly always a lone `MOV`; it would pass
         // without saying anything about the operand handling.
         if ops < 2 {
@@ -125,7 +159,7 @@ fn main() {
         std::fs::write(format!("{out_dir}/{name}.wasm"), &module).expect("cannot write a module");
         let _ = write!(
             manifest,
-            "{name} {pc:#010x} {ops} {nzcv_before:#010x} {nzcv_after:#010x}"
+            "{name} {pc:#010x} {ops} exact {nzcv_before:#010x} {nzcv_after:#010x}"
         );
         for v in before {
             let _ = write!(manifest, " {v:016x}");
@@ -138,9 +172,26 @@ fn main() {
         cases += 1;
     }
 
+    // No `page` lines, so every page-table entry stays zero and an emitted
+    // access finds nothing at its address. No watchpoints and no protected
+    // ranges either, which leaves all three disarmed, and no `watched_at`
+    // bitmap, which is a `Memory` nothing is caching a page of.
     let header = format!(
-        "regs_at {REGS_AT}\nnzcv_at {NZCV_AT}\nslots {}\n",
-        before_len()
+        "regs_at {REGS_AT}\n\
+         nzcv_at {NZCV_AT}\n\
+         read_watch_lo_at {READ_WATCH_LO_AT}\n\
+         read_watch_hi_at {READ_WATCH_HI_AT}\n\
+         watch_lo_at {WATCH_LO_AT}\n\
+         watch_hi_at {WATCH_HI_AT}\n\
+         readonly_lo_at {READONLY_LO_AT}\n\
+         readonly_hi_at {READONLY_HI_AT}\n\
+         watched_at {WATCHED_AT}\n\
+         pages_at {PAGES_AT}\n\
+         table_at {TABLE_AT}\n\
+         slots {}\n\
+         wasm_pages {}\n",
+        before_len(),
+        (TABLE_AT + TABLE_BYTES).div_ceil(64 * 1024),
     );
     std::fs::write(format!("{out_dir}/manifest.txt"), header + &manifest)
         .expect("cannot write the manifest");

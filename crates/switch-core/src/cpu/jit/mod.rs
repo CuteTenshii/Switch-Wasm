@@ -38,42 +38,43 @@
 //!
 //! What it can write is the data-processing half of the architecture, all of
 //! it bar `SMULH`/`UMULH`, which need a 128-bit product wasm has no integer
-//! for.
+//! for, and every single-register guest load and store.
 //!
-//! What refuses a block is now guest memory, and almost nothing else. Of
-//! hbmenu's 9,481 sampled block entry points, 212 are emitted, 8,943 are
-//! refused for an op with no emitter, and every one of the twenty encodings
-//! that cost the most blocks is a load or a store. Only 326 are held back by
-//! control flow alone. That ordering is worth keeping in view, because it is
-//! the reverse of how the two look before the refusals are attributed: most
-//! blocks contain a branch *and* a load, and writing the branch would leave
-//! them exactly where they are.
+//! What made this look impossible was the memory model, and none of it turned
+//! out to be right. A generated module can only address *its own* linear
+//! memory, but it can **import** the host's, and this emulator is itself a
+//! wasm module: the guest register file and NZCV are at fixed offsets inside
+//! its `Cpu`, so an emitted block reaches them with a plain `i64.load` and
+//! nothing is copied or called. Compiling was supposed to be too dear for so
+//! small a unit, and measured it is not: 7,062 blocks compile in 1.8 ms, so
+//! the answer is to batch a module rather than to emit one per block. And
+//! guest memory was supposed to need a host call per access, because
+//! [`crate::mem::Memory`] is a page table of boxed 4 KiB pages with soft
+//! regions, read-only ranges and watchpoints hung off it. It does not: the
+//! interpreter already separates the part of an access the page table can
+//! answer alone from the part that needs the rest, and emitted code makes the
+//! same separation and hands back the accesses on the far side of it.
 //!
-//! What made this look impossible was the memory model, and two thirds of that
-//! turned out to be wrong. A generated module can only address *its own*
-//! linear memory, but it can **import** the host's, and this emulator is
-//! itself a wasm module: the guest register file and NZCV are at fixed offsets
-//! inside its `Cpu`, so an emitted block reaches them with a plain `i64.load`
-//! and nothing is copied or called. Compiling was supposed to be too dear for
-//! so small a unit, and measured it is not: 7,062 blocks compile in 1.8 ms, so
-//! the answer is to batch a module rather than to emit one per block.
+//! What is left of memory is the pair forms and the exclusives: `LDP`/`STP`
+//! are two accesses sharing one page and one boundary test, and `LDXR`/`STXR`
+//! carry a reservation this model does not have.
 //!
-//! Control flow is the other half, and the smaller one: 326 blocks. A block
-//! that runs through a conditional branch needs that branch written and its
-//! not-taken path carried on from, and it has to say where control went
-//! rather than only how many instructions it retired, which is the whole of
-//! what `run` reports today. That last part is an ABI change, and it runs
-//! into a question wiring-in has to answer anyway: [`Cpu::run_jit`] honours a
-//! step budget exactly by entering a block and leaving part-way through it,
-//! and emitted code cannot be left part-way. Either a block is entered only
-//! when the whole of it fits, or the budget stops being exact.
+//! Control flow is the other half. A block that runs through a conditional
+//! branch needs that branch written and its not-taken path carried on from,
+//! and it has to say where control went rather than only how many
+//! instructions it retired. Measured before any access was written, that held
+//! back 326 of hbmenu's 9,481 sampled block entry points on its own, against
+//! 8,943 refused for an op with no emitter, every one of the twenty costliest
+//! encodings being a load or a store. That ordering is worth keeping in view,
+//! because it is the reverse of how the two look before the refusals are
+//! attributed: most blocks contain a branch *and* a load, and writing the
+//! branch alone would have left them exactly where they were.
 //!
-//! What is genuinely still open is guest *memory*. [`crate::mem::Memory`] is a
-//! page table of boxed 4 KiB pages with soft regions, read-only ranges and
-//! watchpoints, and emitted code cannot walk that without a host call per
-//! access, which is most of what a block does and exactly what codegen was
-//! meant to make cheap. Flattening the address space behind one bounds check
-//! has to come before loads and stores are emitted.
+//! Wiring in still has a question of its own. [`Cpu::run_jit`] honours a step
+//! budget exactly by entering a block and leaving part-way through it. Emitted
+//! code can now be left part-way, but only where it chose to stop, so either a
+//! block is entered only when the whole of it fits, or the budget stops being
+//! exact.
 //!
 //! Generated code also does not exist in host builds, which would have left it
 //! untested; `examples/emit_difftest.rs` and `tools/emit_difftest.mjs` are the
@@ -138,6 +139,6 @@ mod wasm;
 
 pub use cache::JitStats;
 pub use decode::translates;
-pub use emit::{emits, Refused};
+pub use emit::{defers, emits, Layout, Refused};
 
 pub(in crate::cpu) use cache::Jit;

@@ -25,6 +25,8 @@ const _: () = assert!(PAGE_COUNT.is_power_of_two());
 /// costs thousands of steps instead of millions. See [`Memory::state_run`].
 const BLOCK_PAGES: usize = 512;
 const BLOCK_COUNT: usize = PAGE_COUNT / BLOCK_PAGES;
+/// Words in a bitmap holding one bit per page of the whole address space.
+const WATCH_WORDS: usize = PAGE_COUNT / 64;
 /// The default ceiling on real, host-backed guest RAM: see
 /// [`Memory::set_max_mapped_bytes`] to choose another.
 ///
@@ -185,8 +187,20 @@ pub struct Memory {
     /// program's stores cluster, so the handful of cache lines under them is
     /// all a run ever touches. It is allocated on the first mark, so a run
     /// with the JIT off and no GPU backend does not carry it and every
-    /// store's test misses on the length check alone.
-    watched_pages: Vec<u64>,
+    /// store's test misses on the null check alone.
+    ///
+    /// A fixed-size bitmap behind one pointer rather than a `Vec`, which is
+    /// what it was and what it never needed: the address space it covers is a
+    /// constant, so it is allocated once, at full size, and never resized.
+    /// Writing it that way removes the length from every test and gives
+    /// emitted code somewhere to look, which a `Vec` cannot: nothing promises
+    /// where in one the pointer and the length sit, and an emitted store has
+    /// to make this exact test before it can write anything.
+    ///
+    /// `copy_watch` and `fill_watch` below are still `Vec`s. They are only
+    /// ever reached from [`Memory::report_written`], which no emitted code
+    /// runs and no store reaches without having already missed here.
+    watched_pages: Option<Box<[u64; WATCH_WORDS]>>,
     /// Watched pages written since the JIT last drained this. A page is
     /// recorded once (marking it clears its bit) and stays out of the
     /// bitmap until something is cached from it again.
@@ -245,7 +259,7 @@ impl Memory {
             watch_hit: None,
             read_watch: (1, 0),
             read_hit: std::cell::Cell::new(None),
-            watched_pages: Vec::new(),
+            watched_pages: None,
             code_dirty: Vec::new(),
             gpu_dirty: Vec::new(),
             gpu_watching: false,
@@ -259,26 +273,39 @@ impl Memory {
     /// Record that the page holding `addr` has had code translated out of it,
     /// so a later store there is reported by [`Memory::dirty_code_pages`].
     pub fn mark_code_page(&mut self, addr: u32) {
-        if self.watched_pages.is_empty() {
-            self.watched_pages = vec![0u64; PAGE_COUNT / 64];
-        }
         let idx = Self::page_index(addr);
-        self.watched_pages[idx >> 6] |= 1u64 << (idx & 63);
+        self.watch_words()[idx >> 6] |= 1u64 << (idx & 63);
+    }
+
+    /// The page bitmap, allocated if this is the first thing to watch
+    /// anything. One shape for all four kinds of watcher; see `watched_pages`.
+    ///
+    /// Built through a `Vec` rather than `Box::new([0; _])`, which puts 128 KiB
+    /// on the stack before moving it to the heap.
+    fn watch_words(&mut self) -> &mut [u64; WATCH_WORDS] {
+        self.watched_pages.get_or_insert_with(|| {
+            vec![0u64; WATCH_WORDS]
+                .into_boxed_slice()
+                .try_into()
+                .expect("the bitmap is WATCH_WORDS long by construction")
+        })
     }
 
     /// Note a guest store, invalidating the page's translations if it holds
     /// any. Inlined into every write path, so it has to answer "no" in a
-    /// couple of instructions: one bounds-checked load from the bitmap (which
-    /// is empty, and so always misses, while nothing has been translated) and
-    /// one bit test. Only the recording is out of line.
+    /// couple of instructions: one null test on the bitmap (which is not there
+    /// at all while nothing has been translated), one load from it and one bit
+    /// test. Only the recording is out of line.
     #[inline(always)]
     fn note_code_write(&mut self, addr: u32) {
         let idx = Self::page_index(addr);
         let bit = 1u64 << (idx & 63);
-        if let Some(&word) = self.watched_pages.get(idx >> 6) {
-            if word & bit != 0 {
-                self.mark_code_dirty(idx, bit);
-            }
+        let word = match &self.watched_pages {
+            Some(words) => words[idx >> 6],
+            None => return,
+        };
+        if word & bit != 0 {
+            self.mark_code_dirty(idx, bit);
         }
     }
 
@@ -287,7 +314,7 @@ impl Memory {
     #[cold]
     #[inline(never)]
     fn mark_code_dirty(&mut self, idx: usize, bit: u64) {
-        self.watched_pages[idx >> 6] &= !bit;
+        self.watch_words()[idx >> 6] &= !bit;
         self.report_written(idx);
     }
 
@@ -318,7 +345,7 @@ impl Memory {
     /// [`Memory::unmap`]), which move whole segments at a time and do not go
     /// through the per-store write paths.
     fn dirty_code_range(&mut self, addr: u32, size: usize) {
-        if self.watched_pages.is_empty() || size == 0 {
+        if self.watched_pages.is_none() || size == 0 {
             return;
         }
         let first = (addr as u64) >> PAGE_BITS;
@@ -326,10 +353,12 @@ impl Memory {
         for idx in first..=last.min(PAGE_COUNT as u64 - 1) {
             let idx = idx as usize;
             let bit = 1u64 << (idx & 63);
-            if self.watched_pages[idx >> 6] & bit != 0 {
-                self.watched_pages[idx >> 6] &= !bit;
-                self.report_written(idx);
+            let words = self.watch_words();
+            if words[idx >> 6] & bit == 0 {
+                continue;
             }
+            words[idx >> 6] &= !bit;
+            self.report_written(idx);
         }
     }
 
@@ -352,12 +381,9 @@ impl Memory {
     /// is reported by [`Memory::dirty_gpu_pages`]. The same bitmap the JIT
     /// marks: a store reports the page to both drains.
     pub fn mark_gpu_page(&mut self, addr: u32) {
-        if self.watched_pages.is_empty() {
-            self.watched_pages = vec![0u64; PAGE_COUNT / 64];
-        }
         self.gpu_watching = true;
         let idx = Self::page_index(addr);
-        self.watched_pages[idx >> 6] |= 1u64 << (idx & 63);
+        self.watch_words()[idx >> 6] |= 1u64 << (idx & 63);
     }
 
     /// Whether any watched page has been written since the GPU backend last
@@ -381,17 +407,14 @@ impl Memory {
         if len == 0 {
             return;
         }
-        if self.watched_pages.is_empty() {
-            self.watched_pages = vec![0u64; PAGE_COUNT / 64];
-        }
         if self.copy_watch.is_empty() {
-            self.copy_watch = vec![0u64; PAGE_COUNT / 64];
+            self.copy_watch = vec![0u64; WATCH_WORDS];
         }
         let first = u64::from(addr) >> PAGE_BITS;
         let last = (u64::from(addr) + u64::from(len) - 1) >> PAGE_BITS;
         for idx in first..=last.min(PAGE_COUNT as u64 - 1) {
             let (word, bit) = ((idx >> 6) as usize, 1u64 << (idx & 63));
-            self.watched_pages[word] |= bit;
+            self.watch_words()[word] |= bit;
             self.copy_watch[word] |= bit;
         }
     }
@@ -409,17 +432,14 @@ impl Memory {
         if len == 0 {
             return;
         }
-        if self.watched_pages.is_empty() {
-            self.watched_pages = vec![0u64; PAGE_COUNT / 64];
-        }
         if self.fill_watch.is_empty() {
-            self.fill_watch = vec![0u64; PAGE_COUNT / 64];
+            self.fill_watch = vec![0u64; WATCH_WORDS];
         }
         let first = u64::from(addr) >> PAGE_BITS;
         let last = (u64::from(addr) + u64::from(len) - 1) >> PAGE_BITS;
         for idx in first..=last.min(PAGE_COUNT as u64 - 1) {
             let (word, bit) = ((idx >> 6) as usize, 1u64 << (idx & 63));
-            self.watched_pages[word] |= bit;
+            self.watch_words()[word] |= bit;
             self.fill_watch[word] |= bit;
         }
     }
@@ -944,8 +964,8 @@ impl Memory {
     #[inline(always)]
     fn watches_code(&self, idx: usize) -> bool {
         self.watched_pages
-            .get(idx >> 6)
-            .is_some_and(|&word| word & (1u64 << (idx & 63)) != 0)
+            .as_ref()
+            .is_some_and(|words| words[idx >> 6] & (1u64 << (idx & 63)) != 0)
     }
 
     /// The `N` bytes at `addr` when they all live in one page. Multi-byte
