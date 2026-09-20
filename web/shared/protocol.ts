@@ -148,6 +148,11 @@ export interface JitStats {
   translated: number;
   executed: number;
   invalidated: number;
+  /** Blocks compiled to wasm and called directly. Zero when the build has
+   *  nowhere to put emitted code. */
+  emitted?: number;
+  /** Block entries that ran that compiled code instead of the op walk. */
+  enteredEmitted?: number;
 }
 
 /** What a firmware NCA is, without reading it: kind 0 is a program, 1 a data

@@ -78,6 +78,17 @@ $('btn-jitstats').addEventListener('click', async () => {
       `${s.invalidated} invalidated`,
     'dim',
   );
+  // What share of those entries ran compiled code rather than walking the
+  // block's ops, which is the number that says what the emitter is worth.
+  const emitted = s.emitted ?? 0;
+  const entered = s.enteredEmitted ?? 0;
+  const share = s.executed ? ((100 * entered) / s.executed).toFixed(1) : '0';
+  log(
+    emitted
+      ? `compiled: ${emitted} blocks, entered ${entered} times (${share}% of entries)`
+      : 'compiled: nothing - every block was interpreted',
+    'dim',
+  );
 });
 
 $('btn-gpustats').addEventListener('click', async () => {
