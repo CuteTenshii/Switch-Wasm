@@ -230,6 +230,36 @@ pub struct Layout {
     pub watched: u32,
 }
 
+impl Layout {
+    /// Where that state sits inside a real [`Cpu`], which is what a block
+    /// emitted to run under this emulator is written against.
+    ///
+    /// `examples/emit_difftest.rs` passes a layout of its own because the
+    /// memory it hands a module is a bare buffer rather than a `Cpu`. This is
+    /// the one the emulator itself uses.
+    ///
+    /// Every offset comes from `offset_of!` rather than being written down:
+    /// neither `Cpu` nor [`crate::mem::Memory`] is `#[repr(C)]`, so the only
+    /// offsets that are right are the ones this build chose, and the emitter
+    /// runs in that build.
+    pub const fn of_cpu() -> Layout {
+        let mem = std::mem::offset_of!(Cpu, mem) as u32;
+        let m = crate::mem::Offsets::OF_MEMORY;
+        Layout {
+            regs: std::mem::offset_of!(Cpu, regs) as u32,
+            nzcv: std::mem::offset_of!(Cpu, nzcv) as u32,
+            pages: mem + m.pages,
+            read_watch_lo: mem + m.read_watch_lo,
+            read_watch_hi: mem + m.read_watch_hi,
+            watch_lo: mem + m.watch_lo,
+            watch_hi: mem + m.watch_hi,
+            readonly_lo: mem + m.readonly_lo,
+            readonly_hi: mem + m.readonly_hi,
+            watched: mem + m.watched,
+        }
+    }
+}
+
 /// Bytes per page-table entry, and so the shift that turns a page number into
 /// an offset into the table.
 ///
@@ -1671,6 +1701,98 @@ mod tests {
         let words = vec![0, 0xD503201F];
         let bad = Block::new(0x1000, ops, words, Vec::new(), None, vec![1]);
         assert_eq!(emit_block(&bad, LAYOUT), Err(Refused::Op(0xD503201F)));
+    }
+
+    /// Every offset in [`Layout::of_cpu`] is baked into emitted code as a
+    /// static operand and checked by nothing at run time: name the wrong field
+    /// and a block reads or writes it perfectly happily. Neither `Cpu` nor
+    /// `Memory` is `#[repr(C)]`, so nothing but this says the offsets still
+    /// point where they are supposed to.
+    ///
+    /// So this walks guest state the way an emitted block does: from the
+    /// address of the `Cpu` by offset alone, never through a field.
+    #[test]
+    fn emitted_code_finds_guest_state_through_the_layout() {
+        /// One page-table entry, which on `wasm32` is
+        /// [`PAGE_ENTRY_SHIFT`]'s four bytes and on the host a wider pointer.
+        /// The shift itself is asserted against this at compile time for the
+        /// only target that runs emitted code; what is under test here is that
+        /// an entry is a bare pointer at all, and where the table is.
+        const ENTRY: usize = std::mem::size_of::<Option<Box<[u8; PAGE_SIZE]>>>();
+
+        const SLOT: u8 = 5;
+        const VALUE: u64 = 0x0123_4567_89AB_CDEF;
+        const ADDR: u32 = 0x0800_1234;
+        const BYTE: u8 = 0xA7;
+
+        let mut cpu = Cpu::new();
+        cpu.set_reg_at(SLOT, VALUE);
+        cpu.nzcv = 0xC000_0000;
+        cpu.mem.write_u8(ADDR, BYTE).expect("the page is writable");
+        cpu.mem.watch_reads(0x1000, 0x40);
+        cpu.mem.watch_writes(0x2000, 0x80);
+        cpu.mem.mark_readonly(0x3000, 0x4000);
+        cpu.mem.mark_code_page(ADDR);
+
+        let layout = Layout::of_cpu();
+        let base = &cpu as *const Cpu as usize;
+        // SAFETY: every read below is at an offset from a live `Cpu`, of the
+        // type the field at that offset holds. That is the claim the test
+        // exists to make, and a wrong offset is a wrong answer rather than an
+        // out-of-bounds read: the offsets are all inside the `Cpu`.
+        unsafe {
+            let u32_at = |off: u32| *((base + off as usize) as *const u32);
+
+            assert_eq!(
+                *((base + layout.regs as usize + 8 * SLOT as usize) as *const u64),
+                VALUE,
+                "the register file is not where an emitted block reads it"
+            );
+            assert_eq!(u32_at(layout.nzcv), 0xC000_0000, "NZCV moved");
+
+            assert_eq!(
+                (u32_at(layout.read_watch_lo), u32_at(layout.read_watch_hi)),
+                (0x1000, 0x1040),
+                "the read watchpoint moved"
+            );
+            assert_eq!(
+                (u32_at(layout.watch_lo), u32_at(layout.watch_hi)),
+                (0x2000, 0x2080),
+                "the write watchpoint moved"
+            );
+            assert_eq!(
+                (u32_at(layout.readonly_lo), u32_at(layout.readonly_hi)),
+                (0x3000, 0x4000),
+                "the write-protected envelope moved"
+            );
+
+            // The bitmap of pages something has cached, and the bit in it that
+            // makes an emitted store hand back. Null until the first mark,
+            // which is why one was made above.
+            let watched = *((base + layout.watched as usize) as *const *const u64);
+            assert!(!watched.is_null(), "the watched-page bitmap is not there");
+            let page = (ADDR >> PAGE_BITS) as usize;
+            assert_ne!(
+                *watched.add(page >> 6) & (1u64 << (page & 63)),
+                0,
+                "the marked page's bit is not where an emitted store looks"
+            );
+
+            // The page-table walk itself: the table's pointer, the entry for
+            // this address, and the byte at the offset into it. An unmapped
+            // page is a null entry, which is what an emitted access tests.
+            let table = *((base + layout.pages as usize) as *const *const u8);
+            let entry = *(table.add(page * ENTRY) as *const *const u8);
+            assert!(!entry.is_null(), "a written page has no storage");
+            assert_eq!(
+                *entry.add((ADDR as usize) & (PAGE_SIZE - 1)),
+                BYTE,
+                "the page-table walk does not reach the byte that was written"
+            );
+            const NOWHERE: u32 = 0xF000_0000;
+            let blank = *(table.add((NOWHERE >> PAGE_BITS) as usize * ENTRY) as *const *const u8);
+            assert!(blank.is_null(), "an unmapped page is not a null entry");
+        }
     }
 
     /// The module has to carry the magic and version a browser checks first,

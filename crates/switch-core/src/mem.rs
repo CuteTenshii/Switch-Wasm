@@ -98,6 +98,43 @@ struct ModuleImage {
     alias: bool,
 }
 
+/// Where inside a [`Memory`] each piece of state an emitted guest access
+/// reads sits, in bytes from the start of the `Memory`.
+///
+/// Emitted code makes [`Memory::peek`]'s and [`Memory::poke`]'s checks itself
+/// rather than calling them, so it has to reach the fields those checks read.
+/// This is the only way it can: `Memory`'s fields are private, and
+/// `offset_of!` needs them visible where it is written, so the offsets are
+/// taken here, beside the declarations they are about, and nowhere else.
+///
+/// Not `#[repr(C)]`, so these are whatever the compiler chose for this build.
+/// That is exactly what emitted code needs, because it is written by that same
+/// build.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Offsets {
+    pub(crate) pages: u32,
+    pub(crate) read_watch_lo: u32,
+    pub(crate) read_watch_hi: u32,
+    pub(crate) watch_lo: u32,
+    pub(crate) watch_hi: u32,
+    pub(crate) readonly_lo: u32,
+    pub(crate) readonly_hi: u32,
+    pub(crate) watched: u32,
+}
+
+impl Offsets {
+    pub(crate) const OF_MEMORY: Offsets = Offsets {
+        pages: std::mem::offset_of!(Memory, pages) as u32,
+        read_watch_lo: std::mem::offset_of!(Memory, read_watch.0) as u32,
+        read_watch_hi: std::mem::offset_of!(Memory, read_watch.1) as u32,
+        watch_lo: std::mem::offset_of!(Memory, watch.0) as u32,
+        watch_hi: std::mem::offset_of!(Memory, watch.1) as u32,
+        readonly_lo: std::mem::offset_of!(Memory, readonly_span.0) as u32,
+        readonly_hi: std::mem::offset_of!(Memory, readonly_span.1) as u32,
+        watched: std::mem::offset_of!(Memory, watched_pages) as u32,
+    };
+}
+
 #[derive(Debug)]
 pub struct Memory {
     /// One slot per page. `None` means the page is not mapped.

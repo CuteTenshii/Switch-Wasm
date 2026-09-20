@@ -49,6 +49,8 @@ pub(in crate::cpu) struct Jit {
     pub(super) linked: u64,
     pub(super) invalidated: u64,
     pub(super) interpreted: u64,
+    pub(super) emitted: u64,
+    pub(super) entered_emitted: u64,
 }
 
 /// What the translator has been doing, for host-side diagnostics.
@@ -76,6 +78,17 @@ pub struct JitStats {
     /// translator did not actually translate: the one number here that says
     /// where the next block of speed is, and the same number on any target.
     pub interpreted: u64,
+    /// Blocks written out as wasm and compiled by the host. Zero on a build
+    /// with nowhere to put them, which is every host build.
+    pub emitted: u64,
+    /// Entries that ran that compiled code rather than the op walk.
+    ///
+    /// Against `executed` this is the share of block entries that reach
+    /// emitted code at all, which is the number that says what the emitter's
+    /// coverage is worth. It counts an entry that handed straight back, so
+    /// against `emitted` and `executed` together it also says whether blocks
+    /// are being compiled and then not run.
+    pub entered_emitted: u64,
 }
 
 impl Default for Jit {
@@ -90,6 +103,8 @@ impl Default for Jit {
             linked: 0,
             invalidated: 0,
             interpreted: 0,
+            emitted: 0,
+            entered_emitted: 0,
         }
     }
 }
@@ -206,6 +221,8 @@ impl Jit {
             linked: self.linked,
             invalidated: self.invalidated,
             interpreted: self.interpreted,
+            emitted: self.emitted,
+            entered_emitted: self.entered_emitted,
         }
     }
 }

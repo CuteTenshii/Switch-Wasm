@@ -540,6 +540,29 @@ const NO_LINK: u32 = 1;
 /// from functions with more callers than any small cache holds.
 const LINKS: usize = 4;
 
+/// Whether a block has been written out as wasm, and where that went.
+///
+/// A block starts cold and is counted up as it is entered, because emitting
+/// one costs more than interpreting it a few times does: most blocks a program
+/// translates are entered once or twice and never again, and writing those out
+/// would be work spent on code that is already finished with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Code {
+    /// Entered this many times, and not emitted yet.
+    Cold(u32),
+    /// Emitted and installed: the entry point [`super::host::install`] gave
+    /// it, and how many times entering it has handed straight back without
+    /// retiring anything.
+    Ready {
+        entry: super::host::Entry,
+        misses: u16,
+    },
+    /// Never to be emitted: the emitter refused it, the host could not compile
+    /// it, or it kept handing back at its first instruction. Whichever it was,
+    /// asking again would answer the same.
+    Never,
+}
+
 /// A run of instructions with a single entry point, translated once.
 #[derive(Debug)]
 pub(super) struct Block {
@@ -560,6 +583,11 @@ pub(super) struct Block {
     /// upgrade is exactly the right answer, and it needs no invalidation pass
     /// of its own.
     pub(super) link: std::cell::RefCell<[(u32, std::rc::Weak<Block>); LINKS]>,
+    /// Whether this block has been written out as wasm. In a [`Cell`] because
+    /// a block is reached through an [`std::rc::Rc`] shared with the cache and
+    /// with whatever linked to it, so there is no `&mut` to it anywhere on the
+    /// path that would promote one.
+    pub(super) code: std::cell::Cell<Code>,
     /// Guest address of the first instruction.
     pub(super) start: u32,
     /// One entry per instruction the block covers before its terminator, in
@@ -605,6 +633,7 @@ impl Block {
         pages.shrink_to_fit();
         Block {
             link: std::cell::RefCell::new(std::array::from_fn(|_| (NO_LINK, std::rc::Weak::new()))),
+            code: std::cell::Cell::new(Code::Cold(0)),
             start,
             ops,
             words,
@@ -629,6 +658,28 @@ impl Block {
         let mut links = self.link.borrow_mut();
         links.rotate_right(1);
         links[0] = (pc, std::rc::Rc::downgrade(block));
+    }
+
+    /// Stop running this block's emitted form, giving its table slot back.
+    ///
+    /// The block itself is unaffected and goes on being interpreted. Called
+    /// when the emitted form turns out not to be worth entering, and on the
+    /// way out in [`Block::drop`].
+    pub(super) fn drop_code(&self) {
+        if let Code::Ready { entry, .. } = self.code.replace(Code::Never) {
+            super::host::release(entry);
+        }
+    }
+}
+
+/// A block's emitted form is a slot in the module's function table, and the
+/// cache drops blocks constantly: on a store that lands on translated code,
+/// and on every rotation. Without this the table would grow by one slot per
+/// block the program ever translated, which on a retail title is six figures
+/// of compiled code nothing can reach.
+impl Drop for Block {
+    fn drop(&mut self) {
+        self.drop_code();
     }
 }
 

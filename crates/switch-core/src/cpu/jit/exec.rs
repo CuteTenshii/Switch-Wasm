@@ -7,11 +7,34 @@
 
 use super::cache::JitStats;
 use super::decode::translate;
-use super::ir::{Block, Exit, Op, Term};
+use super::emit::emit_block;
+use super::host;
+use super::ir::{Block, Code, Exit, Op, Term};
 use crate::cpu::bits::*;
 use crate::cpu::loadstore::{Acc, PairKind, Wb};
-use crate::cpu::{Cpu, Result, RunReport, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
+use crate::cpu::{Cpu, Layout, Result, RunReport, SELF_RETURN_TRAMPOLINE, TIME_SLICE};
 use std::rc::Rc;
+
+/// How many times a block is entered before it is written out as wasm.
+///
+/// Emitting and compiling a block costs far more than interpreting it a few
+/// times, and most blocks a program translates are entered once or twice and
+/// then never again: a threshold is what keeps that work on the code a run
+/// actually spends its time in. A hot loop crosses it in the first
+/// microseconds it runs.
+const HOT: u32 = 16;
+
+/// How many times an emitted block may hand back at its very first
+/// instruction before it is dropped and the block goes back to the
+/// interpreter for good.
+///
+/// Handing back at instruction zero retires nothing, so the visit is pure
+/// loss: the emitted code ran, decided it could not, and the interpreter did
+/// the block anyway. One or two of those are ordinary, the first touch of a
+/// soft-mapped page allocates it and every later access finds it, but a block
+/// whose first instruction *always* needs the full path, a store to a
+/// watched page in a loop, would pay that toll forever.
+const MAX_MISSES: u16 = 8;
 
 /// Where a branch inside a block sends control.
 #[derive(Clone, Copy)]
@@ -201,83 +224,92 @@ impl Cpu {
         // index of the instruction at `pc` is only `pc - start` within one.
         let mut run_pc = block.start;
         let mut run_i = 0usize;
-        loop {
-            // Run straight through to the next conditional branch, or to the
-            // end of what the budget allows. Taking the segment as a slice
-            // keeps this the same bounds-check-free walk it was when a block
-            // had no interior exits at all.
-            let stop = match block.exits.get(next_exit) {
-                Some(branch) if (branch.at as usize) < body => branch.at as usize,
-                _ => body,
-            };
-            let segment = &block.ops[i..stop];
-            let here = Here::new(segment, pc);
-            for op in segment {
-                if let Err(e) = self.exec_op(op, here) {
-                    // The clock, the step counter, the trail and `pc` are all
-                    // settled here rather than maintained per instruction:
-                    // nothing inside a block reads any of them, and a fault is
-                    // the only thing that ever does. The faulting instruction
-                    // counts, exactly as it does in the interpreter.
-                    let pc = here.pc_of(op);
-                    let at = run_i + (pc.wrapping_sub(run_pc) / 4) as usize;
-                    self.retire_runs(run_pc, run_i, at + 1);
-                    self.pc = pc;
-                    self.record_fault(&e, pc, block.words[at]);
-                    return Err(e);
+        // The emitted form, when there is one, replaces the walk over the ops
+        // and nothing else: it leaves guest state exactly where the loop below
+        // would have, so the terminator and the accounting under both are the
+        // same code.
+        if let Some(retired) = self.enter_emitted(block, budget) {
+            i = retired;
+            pc = block.start.wrapping_add(4 * retired as u32);
+        } else {
+            loop {
+                // Run straight through to the next conditional branch, or to the
+                // end of what the budget allows. Taking the segment as a slice
+                // keeps this the same bounds-check-free walk it was when a block
+                // had no interior exits at all.
+                let stop = match block.exits.get(next_exit) {
+                    Some(branch) if (branch.at as usize) < body => branch.at as usize,
+                    _ => body,
+                };
+                let segment = &block.ops[i..stop];
+                let here = Here::new(segment, pc);
+                for op in segment {
+                    if let Err(e) = self.exec_op(op, here) {
+                        // The clock, the step counter, the trail and `pc` are all
+                        // settled here rather than maintained per instruction:
+                        // nothing inside a block reads any of them, and a fault is
+                        // the only thing that ever does. The faulting instruction
+                        // counts, exactly as it does in the interpreter.
+                        let pc = here.pc_of(op);
+                        let at = run_i + (pc.wrapping_sub(run_pc) / 4) as usize;
+                        self.retire_runs(run_pc, run_i, at + 1);
+                        self.pc = pc;
+                        self.record_fault(&e, pc, block.words[at]);
+                        return Err(e);
+                    }
                 }
-            }
-            pc = pc.wrapping_add(4 * (stop - i) as u32);
-            i = stop;
-            if stop == body {
-                break;
-            }
-            let branch = &block.exits[next_exit];
-            let exit = &branch.exit;
-            let span = branch.span as usize;
-            if i + span > body {
-                // The budget splits a fused pair. Run the compare's half of it
-                // and stop on the branch, which is a valid entry point with the
-                // flags already set. Doing nothing here instead would return no
-                // progress at all when the pair starts the block, and
-                // [`Cpu::run_jit`] would spin on it forever.
-                if i < body {
-                    self.apply_compare(exit);
-                    i += 1;
-                    pc = pc.wrapping_add(4);
+                pc = pc.wrapping_add(4 * (stop - i) as u32);
+                i = stop;
+                if stop == body {
+                    break;
                 }
-                break;
-            }
-            i += span;
-            pc = pc.wrapping_add(4 * span as u32);
-            match self.take_exit(exit) {
-                Taken::No => {}
-                Taken::Leave => {
-                    // The branch is the last instruction of this visit, and
-                    // `take_exit` has already put the target in `pc`.
-                    self.retire_runs(run_pc, run_i, i);
-                    return Ok(i as u64);
+                let branch = &block.exits[next_exit];
+                let exit = &branch.exit;
+                let span = branch.span as usize;
+                if i + span > body {
+                    // The budget splits a fused pair. Run the compare's half of it
+                    // and stop on the branch, which is a valid entry point with the
+                    // flags already set. Doing nothing here instead would return no
+                    // progress at all when the pair starts the block, and
+                    // [`Cpu::run_jit`] would spin on it forever.
+                    if i < body {
+                        self.apply_compare(exit);
+                        i += 1;
+                        pc = pc.wrapping_add(4);
+                    }
+                    break;
                 }
-                Taken::Follow(target) => {
-                    // Where the block would have ended before it followed the
-                    // branch, and so where a store to translated code has to
-                    // be noticed: the ops past here may be the very ones it
-                    // overwrote. Leave the way the branch would have as a
-                    // terminator, and `run_jit` drops what went stale.
-                    if self.mem.has_dirty_code() {
-                        self.pc = target;
+                i += span;
+                pc = pc.wrapping_add(4 * span as u32);
+                match self.take_exit(exit) {
+                    Taken::No => {}
+                    Taken::Leave => {
+                        // The branch is the last instruction of this visit, and
+                        // `take_exit` has already put the target in `pc`.
                         self.retire_runs(run_pc, run_i, i);
                         return Ok(i as u64);
                     }
-                    // The block goes on at the target. The run that ends here
-                    // goes into the trail now, while its start is still known.
-                    self.record_run(run_pc, (i - run_i) as u32);
-                    pc = target;
-                    run_pc = target;
-                    run_i = i;
+                    Taken::Follow(target) => {
+                        // Where the block would have ended before it followed the
+                        // branch, and so where a store to translated code has to
+                        // be noticed: the ops past here may be the very ones it
+                        // overwrote. Leave the way the branch would have as a
+                        // terminator, and `run_jit` drops what went stale.
+                        if self.mem.has_dirty_code() {
+                            self.pc = target;
+                            self.retire_runs(run_pc, run_i, i);
+                            return Ok(i as u64);
+                        }
+                        // The block goes on at the target. The run that ends here
+                        // goes into the trail now, while its start is still known.
+                        self.record_run(run_pc, (i - run_i) as u32);
+                        pc = target;
+                        run_pc = target;
+                        run_i = i;
+                    }
                 }
+                next_exit += 1;
             }
-            next_exit += 1;
         }
         self.retire_runs(run_pc, run_i, i);
         let mut ran = i as u64;
@@ -315,6 +347,113 @@ impl Cpu {
             _ => self.pc = pc,
         }
         Ok(ran)
+    }
+
+    /// Run `block`'s emitted form and report how many of its leading
+    /// instructions it retired, or `None` when this visit belongs to the
+    /// interpreter after all.
+    ///
+    /// Guest state on the way out is exactly what those instructions left. An
+    /// emitted access that needs more than the page table hands back *before*
+    /// writing anything, so the instruction it stopped on has not half
+    /// happened and the interpreter picks it up whole, which is the handover
+    /// [`Cpu::exec_block`] already makes when a step budget runs out inside a
+    /// block.
+    ///
+    /// Progress is what the arms below are really about. An emitted block that
+    /// retires nothing has done nothing, so this hands the visit back to the
+    /// interpreter rather than reporting zero: [`Cpu::run_jit`] would
+    /// otherwise enter the same block at the same pc forever.
+    #[inline(always)]
+    fn enter_emitted(&mut self, block: &Block, budget: u64) -> Option<usize> {
+        let Code::Ready { entry, misses } = block.code.get() else {
+            self.warm(block);
+            return None;
+        };
+        // The step budget stays exact by entering only a block that fits in
+        // what is left of it. Emitted code stops where it decides to and not
+        // where it is told to, so a block that overruns is interpreted this
+        // visit and the budget ends inside it as precisely as ever.
+        if block.ops.len() as u64 > budget {
+            return None;
+        }
+        self.jit.entered_emitted += 1;
+        let state = self as *mut Cpu;
+        // SAFETY: `entry` is what `host::install` answered for this very
+        // block and nothing has released it, because only `Block::drop_code`
+        // does and that takes `Code::Ready` away with it. `state` is a live
+        // `Cpu`: it is this one, borrowed for the call. What runs is a module
+        // this build emitted against `Layout::of_cpu`, so every offset it
+        // reaches is a field of that type.
+        let retired = unsafe { host::enter(entry, state) } as usize;
+        let whole = block.ops.len();
+        if retired >= whole {
+            // A run of misses that ended is not a run: a page allocated on
+            // first touch made the block decline once and never will again.
+            if misses != 0 {
+                block.code.set(Code::Ready { entry, misses: 0 });
+            }
+            return Some(whole);
+        }
+        if retired == 0 {
+            let misses = misses + 1;
+            if misses >= MAX_MISSES {
+                block.drop_code();
+            } else {
+                block.code.set(Code::Ready { entry, misses });
+            }
+            return None;
+        }
+        Some(retired)
+    }
+
+    /// Count a visit to a block with no emitted form, and write it out once it
+    /// has had [`HOT`] of them.
+    #[inline(always)]
+    fn warm(&mut self, block: &Block) {
+        if let Code::Cold(seen) = block.code.get() {
+            let seen = seen + 1;
+            if seen >= HOT {
+                self.install(block);
+            } else {
+                block.code.set(Code::Cold(seen));
+            }
+        }
+    }
+
+    /// Write `block` out as wasm and hand it to the host, so that later visits
+    /// run the emitted form.
+    ///
+    /// Whatever the answer, the block is left in a state that never asks
+    /// again: an emitter that refused this block will refuse it next time too,
+    /// and a host that could not compile the module is not going to compile
+    /// the same bytes later.
+    ///
+    /// That includes a build with nowhere to put emitted code at all, which is
+    /// every host build and any browser build whose embedder never named a
+    /// [`crate::cpu::JitHost`]. The embedder names one before the first guest
+    /// instruction runs, so a block reaching this that early enough to see no
+    /// host is a block that would not have been emitted anyway.
+    #[cold]
+    #[inline(never)]
+    fn install(&mut self, block: &Block) {
+        let code = match host::available() {
+            true => emit_block(block, Layout::of_cpu()),
+            false => {
+                block.code.set(Code::Never);
+                return;
+            }
+        };
+        let entry = match code {
+            Ok(code) => host::install(&code),
+            Err(_) => 0,
+        };
+        if entry == 0 {
+            block.code.set(Code::Never);
+            return;
+        }
+        self.jit.emitted += 1;
+        block.code.set(Code::Ready { entry, misses: 0 });
     }
 
     /// Account for the `ran` instructions a visit to a block retired: the clock

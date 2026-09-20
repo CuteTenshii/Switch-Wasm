@@ -32,13 +32,25 @@
 //! # Generating wasm
 //!
 //! [`emit`] writes a block out as wasm rather than interpreting it, using the
-//! encoder in [`wasm`]. It is not wired in: [`emit::emit_block`] gives back an
-//! [`emit::Refused`] for a block it cannot write, and nothing executes emitted
-//! code yet.
+//! encoder in [`wasm`]. What it can write is the data-processing half of the
+//! architecture, all of it bar `SMULH`/`UMULH`, which need a 128-bit product
+//! wasm has no integer for, and every single-register guest load and store.
 //!
-//! What it can write is the data-processing half of the architecture, all of
-//! it bar `SMULH`/`UMULH`, which need a 128-bit product wasm has no integer
-//! for, and every single-register guest load and store.
+//! A block that survives sixteen entries is written out and handed to the
+//! embedder through [`host`], which compiles it and puts its `run` export in
+//! the function table this module makes its own indirect calls through. After
+//! that, entering the block is one `call_indirect` and the op walk in [`exec`]
+//! does not run at all. The threshold is there because emitting a block costs
+//! more than interpreting it a few times, and most blocks a program ever
+//! translates are entered once.
+//!
+//! Only the browser build has an embedder that can compile a module, so only
+//! it runs emitted code. A host build translates and interprets exactly as it
+//! did before, and never installs anything.
+//!
+//! [`emit::emit_block`] gives back an [`emit::Refused`] for a block it cannot
+//! write, and that block keeps being interpreted: a form the emitter does not
+//! know is slower, never wrong.
 //!
 //! What made this look impossible was the memory model, and none of it turned
 //! out to be right. A generated module can only address *its own* linear
@@ -70,11 +82,19 @@
 //! attributed: most blocks contain a branch *and* a load, and writing the
 //! branch alone would have left them exactly where they were.
 //!
-//! Wiring in still has a question of its own. [`Cpu::run_jit`] honours a step
-//! budget exactly by entering a block and leaving part-way through it. Emitted
-//! code can now be left part-way, but only where it chose to stop, so either a
-//! block is entered only when the whole of it fits, or the budget stops being
-//! exact.
+//! [`Cpu::run_jit`] honours a step budget exactly by entering a block and
+//! leaving part-way through it, and emitted code can only be left where it
+//! chose to stop. So a block is entered only when the whole of it fits in what
+//! is left of the budget, and is interpreted when it does not: the budget
+//! stays exact, at the cost of one interpreted visit at the end of a slice.
+//!
+//! An emitted block that hands back retires what it did before it stopped, and
+//! the interpreter carries on from the instruction it stopped at, which is the
+//! handover [`exec`] already makes when a budget runs out mid-block. One that
+//! hands back *at its first instruction* has retired nothing, so the visit
+//! goes to the interpreter instead and the block counts the miss; a block that
+//! keeps doing it stops being entered at all, because [`Cpu::run_jit`] would
+//! otherwise enter it at the same pc forever.
 //!
 //! Generated code also does not exist in host builds, which would have left it
 //! untested; `examples/emit_difftest.rs` and `tools/emit_difftest.mjs` are the
@@ -126,7 +146,8 @@
 //!
 //! [`ir`] is what a block is made of, [`cache`] is which blocks exist and when
 //! a guest store takes one away, [`decode`] builds them, [`exec`] runs them,
-//! and [`emit`] writes them out as wasm through [`wasm`]. What an instruction *means* is in none of them: those bodies are
+//! [`emit`] writes them out as wasm through [`wasm`], and [`host`] is where an
+//! emitted one goes to become something that can be called. What an instruction *means* is in none of them: those bodies are
 //! shared with the interpreter and live with the semantics, in
 //! [`crate::cpu::alu`], [`crate::cpu::loadstore`] and [`crate::cpu::system`].
 
@@ -134,11 +155,13 @@ mod cache;
 mod decode;
 mod emit;
 mod exec;
+mod host;
 pub(in crate::cpu) mod ir;
 mod wasm;
 
 pub use cache::JitStats;
 pub use decode::translates;
 pub use emit::{defers, emits, Layout, Refused};
+pub use host::{set_jit_host, Entry, JitHost};
 
 pub(in crate::cpu) use cache::Jit;
