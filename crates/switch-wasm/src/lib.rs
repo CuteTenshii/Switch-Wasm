@@ -2649,7 +2649,11 @@ fn write_into(buf: *mut u8, maxlen: u32, data: &[u8]) -> u32 {
     n as u32
 }
 
-#[cfg(test)]
+// These drive the entry points through `set_host_container`, which only host
+// builds have, and serialise on a `Mutex`, which a single-threaded wasm build
+// has no reason to carry. `--all-targets` for wasm32 would otherwise compile
+// them for a target that cannot run them.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 
