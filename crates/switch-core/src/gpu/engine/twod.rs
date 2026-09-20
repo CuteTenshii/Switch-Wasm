@@ -492,7 +492,7 @@ fn scatter<const N: usize>(
         return;
     }
     for (&(_, dst_row), row_texels) in rows.iter().zip(resolved.chunks_exact(row_bytes)) {
-        for (&(_, to), texel) in columns.iter().zip(row_texels.chunks_exact(N)) {
+        for (&(_, to), texel) in columns.iter().zip(row_texels.as_chunks::<N>().0) {
             let at = ((dst_row + to) as usize).min(last);
             target[at..at + N].copy_from_slice(texel);
         }

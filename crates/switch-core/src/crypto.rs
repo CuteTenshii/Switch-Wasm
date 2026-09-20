@@ -234,6 +234,18 @@ fn block_words(state: &[u8; 16]) -> [u32; 4] {
     [0, 1, 2, 3].map(|c| column_word(state, c))
 }
 
+/// The same four columns back as the sixteen bytes they came from, which is
+/// [`block_words`] the other way round.
+#[inline]
+fn block_bytes(words: &[u32; 4]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    let (columns, _) = out.as_chunks_mut::<4>();
+    for (word, column) in words.iter().zip(columns) {
+        *column = word.to_le_bytes();
+    }
+    out
+}
+
 /// The same packing, out of a longer buffer at a byte offset, the round keys
 /// are one flat 176-byte array.
 #[inline]
@@ -265,12 +277,7 @@ impl RoundKeys {
     /// is row `r` of column `c`, and ShiftRows takes row `r` of a column from
     /// column `c + r`.
     pub fn encrypt_block(&self, block: &[u8; 16]) -> [u8; 16] {
-        let words = self.encrypt_block_words(&block_words(block));
-        let mut out = [0u8; 16];
-        for (word, slot) in words.iter().zip(out.chunks_exact_mut(4)) {
-            slot.copy_from_slice(&word.to_le_bytes());
-        }
-        out
+        block_bytes(&self.encrypt_block_words(&block_words(block)))
     }
 
     /// The same block cipher, in and out as the four column words the rounds
@@ -453,12 +460,11 @@ pub fn aes128_ctr_xor_in_place(key: &[u8; 16], counter: &[u8; 16], data: &mut [u
     // found the last byte 255 times in 256.
     let mut hi = u64::from_be_bytes(counter[..8].try_into().unwrap());
     let mut lo = u64::from_be_bytes(counter[8..].try_into().unwrap());
-    let mut blocks = data.chunks_exact_mut(16);
-    for chunk in &mut blocks {
+    let (blocks, tail) = data.as_chunks_mut::<16>();
+    for chunk in blocks {
         let ks = keys.encrypt_block_words(&counter_words(hi, lo));
-        for (word, slot) in ks.iter().zip(chunk.chunks_exact_mut(4)) {
-            let v = u32::from_le_bytes(slot.try_into().unwrap()) ^ word;
-            slot.copy_from_slice(&v.to_le_bytes());
+        for (word, column) in ks.iter().zip(chunk.as_chunks_mut::<4>().0) {
+            *column = (u32::from_le_bytes(*column) ^ word).to_le_bytes();
         }
         let (next, carried) = lo.overflowing_add(1);
         lo = next;
@@ -468,13 +474,8 @@ pub fn aes128_ctr_xor_in_place(key: &[u8; 16], counter: &[u8; 16], data: &mut [u
     }
     // A final partial block takes as much of its keystream as it has bytes
     // for; nothing follows it, so the counter need not advance again.
-    let tail = blocks.into_remainder();
     if !tail.is_empty() {
-        let ks = keys.encrypt_block_words(&counter_words(hi, lo));
-        let mut stream = [0u8; 16];
-        for (word, slot) in ks.iter().zip(stream.chunks_exact_mut(4)) {
-            slot.copy_from_slice(&word.to_le_bytes());
-        }
+        let stream = block_bytes(&keys.encrypt_block_words(&counter_words(hi, lo)));
         for (b, k) in tail.iter_mut().zip(stream.iter()) {
             *b ^= k;
         }
