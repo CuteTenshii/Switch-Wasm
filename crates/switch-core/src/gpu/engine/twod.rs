@@ -472,19 +472,29 @@ fn gather<const N: usize>(
 
 /// Write the texels [`gather`] collected into `target`, each where the
 /// destination's half of its row and column offsets puts it.
+/// [`Engine2D::blit_staged`] has already established that the furthest any
+/// row and column offset can add up to is inside `target`, and that `resolved`
+/// holds exactly one texel per row and column. Neither index here can be out
+/// of range, and saying so is what leaves the walk without a bounds check and
+/// without the panic path behind it: the destination offset was being spilled
+/// to the stack on the way past every one of 921,600 texels a frame.
 fn scatter<const N: usize>(
     resolved: &[u8],
     target: &mut [u8],
     rows: &[(u32, u32)],
     columns: &[(u32, u32)],
 ) {
-    let width = columns.len();
-    for (row, &(_, dst_row)) in rows.iter().enumerate() {
-        for (column, &(_, to)) in columns.iter().enumerate() {
-            let slot = (row * width + column) * N;
-            let texel: [u8; N] = resolved[slot..slot + N].try_into().unwrap();
-            let at = (dst_row + to) as usize;
-            target[at..at + N].copy_from_slice(&texel);
+    let row_bytes = columns.len() * N;
+    let Some(last) = target.len().checked_sub(N) else {
+        return;
+    };
+    if row_bytes == 0 {
+        return;
+    }
+    for (&(_, dst_row), row_texels) in rows.iter().zip(resolved.chunks_exact(row_bytes)) {
+        for (&(_, to), texel) in columns.iter().zip(row_texels.chunks_exact(N)) {
+            let at = ((dst_row + to) as usize).min(last);
+            target[at..at + N].copy_from_slice(texel);
         }
     }
 }
