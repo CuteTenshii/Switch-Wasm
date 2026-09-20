@@ -71,16 +71,25 @@
 //! are two accesses sharing one page and one boundary test, and `LDXR`/`STXR`
 //! carry a reservation this model does not have.
 //!
-//! Control flow is the other half. A block that runs through a conditional
-//! branch needs that branch written and its not-taken path carried on from,
-//! and it has to say where control went rather than only how many
-//! instructions it retired. Measured before any access was written, that held
-//! back 326 of hbmenu's 9,481 sampled block entry points on its own, against
-//! 8,943 refused for an op with no emitter, every one of the twenty costliest
-//! encodings being a load or a store. That ordering is worth keeping in view,
-//! because it is the reverse of how the two look before the refusals are
-//! attributed: most blocks contain a branch *and* a load, and writing the
-//! branch alone would have left them exactly where they were.
+//! Control flow was the other half, and the conditional branches are written
+//! now: a block runs through `B.cond`, `CBZ`/`CBNZ`, `TBZ`/`TBNZ` and the
+//! fused compare-and-branch, and says where control went by setting
+//! [`emit::LEFT`] in what it reports. Which was worth doing only once the
+//! accesses were: measured before any access was written, control flow held
+//! back 326 of hbmenu's 9,481 sampled block entry points on its own against
+//! 8,943 refused for an op with no emitter, because most blocks contain a
+//! branch *and* a load and writing the branch alone would have left them
+//! exactly where they were. With the accesses written the ordering reverses,
+//! and on a Just Dance 2019 frame control flow was the larger half: 136 block
+//! entry points against 115 for an op with no emitter.
+//!
+//! What is still refused is a `B` the translator *followed*, whose ops are
+//! the ones at its target, so a block holding one has a body that is not
+//! consecutive in memory while every address on the handover path is
+//! `start + 4 * retired`. That is all [`emit::Refused::ControlFlow`] means
+//! now, and on the same frame it is what all 67 of the remaining refusals
+//! are: the rest of the sample is 82 blocks wanting an op, a list `LDP` and
+//! `STP` are most of, and 59 written out.
 //!
 //! [`Cpu::run_jit`] honours a step budget exactly by entering a block and
 //! leaving part-way through it, and emitted code can only be left where it
@@ -161,7 +170,7 @@ mod wasm;
 
 pub use cache::JitStats;
 pub use decode::translates;
-pub use emit::{defers, emits, Layout, Refused};
+pub use emit::{defers, emits, Layout, Refused, LEFT};
 pub use host::{set_jit_host, Entry, JitHost};
 
 pub(in crate::cpu) use cache::Jit;

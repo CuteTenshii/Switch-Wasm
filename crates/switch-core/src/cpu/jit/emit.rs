@@ -84,6 +84,30 @@
 //! module because it is what the difftests need in order to know which answer
 //! from `run` is the right one.
 //!
+//! A count alone cannot say where control went, and a block that runs through
+//! a conditional branch has to. So the answer carries [`LEFT`] when the block
+//! was left at a taken branch, and the branch has put the target in the
+//! guest's `pc` on its way out. The bit is needed rather than implied by the
+//! count being short, because a branch sitting on the last instruction of the
+//! body retires all of it and still must not fall into the terminator.
+//!
+//! # Control flow
+//!
+//! The three conditional branches a block runs *through* are written:
+//! `B.cond`, `CBZ`/`CBNZ`, `TBZ`/`TBNZ`, and the `CMP`-and-`B.cond` pair the
+//! translator fuses, whose compare sets the flags whether or not the branch
+//! is then taken. Each is a test and an `if` that leaves; the not-taken path
+//! is the following instruction, which is the next thing emitted, so nothing
+//! here needs a label or a jump backwards.
+//!
+//! What is not written is [`super::ir::Exit::Jump`], a `B` the translator
+//! followed. Its ops are the ones at the target rather than the ones after
+//! it, so a block holding one has a body whose instructions are not
+//! consecutive in memory, and every address on the handover path is
+//! `start + 4 * retired`. Terminators are not written either: a block still
+//! ends by falling out of `run` and letting [`super::exec`] run the one it
+//! has.
+//!
 //! # Where wasm and A64 disagree
 //!
 //! Three places, each of which costs emitted instructions that the operation
@@ -103,7 +127,7 @@
 //! stay with the interpreter.
 
 use super::decode::{decode, translate, Decoded};
-use super::ir::{Block, Op};
+use super::ir::{Block, Exit, Op};
 use super::wasm::{Func, Module, I32, I64};
 use crate::cpu::bits::mask_of_width;
 use crate::cpu::loadstore::{Acc, Ext, Wb};
@@ -121,8 +145,9 @@ use crate::mem::{PAGE_BITS, PAGE_SIZE};
 /// and testing whatever it actually encoded.
 ///
 /// An instruction that ends a block or branches out of one answers `false`:
-/// those are the translator's terminators and exits, and no emitter writes
-/// them yet.
+/// those are the translator's terminators and exits, which are not ops at
+/// all. A conditional branch is still emitted, by [`emit_block`] out of the
+/// [`Exit`] the translator recorded rather than out of an [`Op`] here.
 pub fn emits(insn: u32) -> bool {
     // PC-relative forms decode against an address; which one makes no
     // difference to whether there is an arm for the result, so any aligned
@@ -137,6 +162,7 @@ pub fn emits(insn: u32) -> bool {
         layout: Layout {
             regs: 0,
             nzcv: 0,
+            pc: 0,
             pages: 0,
             read_watch_lo: 0,
             read_watch_hi: 0,
@@ -174,6 +200,7 @@ pub fn defers(insn: u32) -> bool {
         let layout = Layout {
             regs: 0,
             nzcv: 0,
+            pc: 0,
             pages: 0,
             read_watch_lo: 0,
             read_watch_hi: 0,
@@ -210,6 +237,12 @@ pub struct Layout {
     pub regs: u32,
     /// The packed NZCV word, in its architectural bit positions.
     pub nzcv: u32,
+    /// The guest program counter. Written by a taken branch on its way out of
+    /// the block, and by nothing else: everywhere else the interpreter
+    /// derives it from how much the block retired, which is why it is the one
+    /// piece of guest state emitted code writes that the instruction it is
+    /// emitting did not name.
+    pub pc: u32,
     /// Where the page table's own pointer is kept, not where the table is: an
     /// emitted block loads it and indexes it, because
     /// [`crate::mem::Memory`] holds the table behind a `Box` and the
@@ -248,6 +281,7 @@ impl Layout {
         Layout {
             regs: std::mem::offset_of!(Cpu, regs) as u32,
             nzcv: std::mem::offset_of!(Cpu, nzcv) as u32,
+            pc: std::mem::offset_of!(Cpu, pc) as u32,
             pages: mem + m.pages,
             read_watch_lo: mem + m.read_watch_lo,
             read_watch_hi: mem + m.read_watch_hi,
@@ -295,14 +329,23 @@ const UNALIGNED: u8 = 0;
 /// title's blocks is the list of what to write next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
-    /// The block runs through a conditional branch. Nothing about control
-    /// flow is written yet, so the whole block stays with the interpreter.
+    /// The block follows an unconditional `B`, so its instructions are not
+    /// consecutive in memory. The conditional branches are written; this one
+    /// is not.
     ControlFlow,
     /// An op with no emitter, as the instruction word it was decoded from.
     Op(u32),
     /// The body grew past [`MAX_BODY_BYTES`].
     TooLong,
 }
+
+/// Set in what `run` answers when the block was left at a taken branch rather
+/// than stopped at an instruction: the rest of the answer is still how many
+/// instructions retired, and the guest `pc` holds where control went.
+///
+/// A block cannot hold anything like enough instructions for this to collide
+/// with a count: a block never spans a page, so 1,024 is the ceiling.
+pub const LEFT: u32 = 1 << 31;
 
 /// The parameter every block function takes.
 const STATE: u32 = 0;
@@ -336,6 +379,13 @@ const L_WP: u32 = 11;
 /// already, but the guard keeps one pathological block from dominating a
 /// module's compile time.
 const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// A subtraction's operand inverted at emit time, the way
+/// [`Emitter::invert_if`] does it at run time, for the one operand that is a
+/// constant: the immediate a fused `CMP` compares against.
+fn invert_if_const(v: u64, carry: u8) -> u64 {
+    v ^ 0u64.wrapping_sub(u64::from(carry))
+}
 
 /// The mask an operation of this width applies to its operands and result.
 fn width_mask(sf: bool) -> i64 {
@@ -784,6 +834,125 @@ impl Emitter<'_> {
         self.f.i32_const(retired as i32);
         self.f.return_();
         self.f.end();
+    }
+
+    /// Leave the block at a taken branch, reporting `retired` instructions
+    /// done and `target` as where control went. The value on the stack
+    /// decides.
+    ///
+    /// The branch counts among the instructions retired, which is what makes
+    /// this progress however early in the block it sits: a block that left
+    /// having done nothing would be re-entered at the same address forever.
+    fn leave_if(&mut self, retired: usize, target: u32) {
+        self.f.if_void();
+        self.f.local_get(STATE);
+        self.f.i32_const(target as i32);
+        self.f.i32_store(ALIGN_4, self.layout.pc);
+        self.f.i32_const((retired as u32 | LEFT) as i32);
+        self.f.return_();
+        self.f.end();
+    }
+
+    /// The flag-setting half of a fused compare-and-branch, with the operands
+    /// already in `L_A` and `L_B`.
+    ///
+    /// [`Emitter::add_sub`] without the register write: a `CMP` or `CMN`
+    /// names the zero register as its destination, which is the whole reason
+    /// [`super::decode`] was allowed to fold it into the branch.
+    fn compare_flags(&mut self, carry: u8, sf: bool) {
+        self.add_carry(carry, true, sf);
+        self.pack_nzcv(sf, true);
+        self.store_nzcv();
+    }
+
+    /// Emit the conditional branch that sits `retired` instructions into the
+    /// block, having emitted everything before it, and say whether there was
+    /// a way to write it.
+    ///
+    /// The not-taken path needs nothing: it is the following instruction, and
+    /// that is what gets emitted next.
+    fn exit(&mut self, exit: &Exit, retired: usize) -> bool {
+        let target = match *exit {
+            Exit::Cond { cond, target } => {
+                self.cond_holds(cond);
+                target
+            }
+            // The compare runs whether or not the branch it feeds is taken:
+            // it is an instruction in its own right, and the block carries on
+            // past it with the flags it set.
+            Exit::CmpImm {
+                rn,
+                imm,
+                carry,
+                sf,
+                cond,
+                target,
+            } => {
+                self.read_reg(rn, sf);
+                self.f.local_set(L_A);
+                let rhs = invert_if_const(u64::from(imm), carry) & width_mask(sf) as u64;
+                self.f.i64_const(rhs as i64);
+                self.f.local_set(L_B);
+                self.compare_flags(carry, sf);
+                self.cond_holds(cond);
+                target
+            }
+            Exit::CmpReg {
+                rn,
+                rm,
+                carry,
+                sf,
+                cond,
+                target,
+            } => {
+                self.read_reg(rn, sf);
+                self.f.local_set(L_A);
+                self.read_reg(rm, sf);
+                self.invert_if(carry, sf);
+                self.f.local_set(L_B);
+                self.compare_flags(carry, sf);
+                self.cond_holds(cond);
+                target
+            }
+            // `CBZ`/`CBNZ` and `TBZ`/`TBNZ` read register 31 as the zero
+            // register, so the encoding's own five bits are the slot.
+            Exit::Cbz { rt, sf, nz, target } => {
+                self.read_reg(rt & 0x1F, sf);
+                self.is_zero(!nz);
+                target
+            }
+            Exit::Tbz {
+                rt,
+                bit,
+                nz,
+                target,
+            } => {
+                self.read_reg_raw(rt & 0x1F);
+                self.f.i64_const(i64::from(bit));
+                self.f.i64_shr_u();
+                self.f.i64_const(1);
+                self.f.i64_and();
+                self.is_zero(!nz);
+                target
+            }
+            // A `B` the translator followed, which is not a branch out of the
+            // block at all: it is why the ops after it are the ones at its
+            // target rather than the ones after it in memory.
+            Exit::Jump { .. } => return false,
+        };
+        self.leave_if(retired, target);
+        true
+    }
+
+    /// Replace the value on the stack with whether it is zero, or, when
+    /// `want_zero` is false, whether it is not.
+    fn is_zero(&mut self, want_zero: bool) {
+        if want_zero {
+            self.f.i64_eqz();
+        } else {
+            self.f.i64_const(0);
+            self.f.i64_ne();
+        }
     }
 
     /// Leave the guest address of an access in `L_ADDR`, and the value its
@@ -1599,31 +1768,42 @@ fn access_bytes(acc: Acc) -> u32 {
 /// Emit `block`'s body as a module exporting `run`.
 ///
 /// `run` takes the address of the guest state and returns how many
-/// instructions it retired, which for now is always the whole body: a block
-/// with an op the emitter cannot write is not emitted at all.
+/// instructions it retired, with [`LEFT`] set when it stopped because a
+/// branch in it was taken rather than because it ran out of body.
 pub(super) fn emit_block(block: &Block, layout: Layout) -> Result<Vec<u8>, Refused> {
     let mut f = scratch_func();
     let mut e = Emitter { f: &mut f, layout };
-    for (i, op) in block.ops.iter().enumerate() {
-        if !e.op(op, i) {
-            return Err(Refused::Op(block.words[i]));
+    let mut next_exit = 0usize;
+    let mut i = 0usize;
+    while i < block.ops.len() {
+        // The same walk [`super::exec`] makes: straight through the ops,
+        // except where a branch sits, whose slots carry filler and whose span
+        // it speaks for.
+        match block.exits.get(next_exit) {
+            Some(branch) if branch.at as usize == i => {
+                let retired = i + branch.span as usize;
+                if !e.exit(&branch.exit, retired) {
+                    return Err(Refused::ControlFlow);
+                }
+                i = retired;
+                next_exit += 1;
+            }
+            _ => {
+                if !e.op(&block.ops[i], i) {
+                    return Err(Refused::Op(block.words[i]));
+                }
+                i += 1;
+            }
         }
         if e.f.len() > MAX_BODY_BYTES {
             return Err(Refused::TooLong);
         }
     }
-    // Control flow is not written yet. A block with a conditional exit would
-    // need its branch and the not-taken path, and one with a terminator has to
-    // say where control went; until both exist, only straight-line blocks are
-    // emitted and everything else stays with the interpreter.
-    //
-    // Asked after the body and not before it, which wastes the body of a block
-    // that is refused anyway. Nothing calls this on a hot path, and the count
-    // of blocks refused here is then the count of blocks that *only* control
-    // flow is holding back, which is the number that says whether writing
-    // branches would pay. Asked first, it hides every block that would still
-    // need a load written before it could be emitted.
-    if !block.exits.is_empty() {
+    // Every exit sits inside the body and they are in ascending order, so the
+    // walk lands on each in turn. One left over would be a branch the emitted
+    // block does not make, and the instructions it guards would run as though
+    // it had never been there, so that block is not emitted at all.
+    if next_exit != block.exits.len() {
         return Err(Refused::ControlFlow);
     }
     f.i32_const(block.ops.len() as i32);
@@ -1675,6 +1855,7 @@ mod tests {
     const LAYOUT: Layout = Layout {
         regs: 0,
         nzcv: 2048,
+        pc: 2084,
         pages: 2052,
         read_watch_lo: 2056,
         read_watch_hi: 2060,
@@ -1816,16 +1997,126 @@ mod tests {
         assert_eq!(&bytes[4..8], &[0x01, 0x00, 0x00, 0x00]);
     }
 
-    /// A block that runs through a conditional branch says so, rather than
-    /// being counted against the ops it contains: the two refusals call for
+    /// A `B` the translator followed says so, rather than being counted
+    /// against the ops the block contains: the two refusals call for
     /// completely different work.
     #[test]
-    fn a_conditional_branch_refuses_as_control_flow() {
+    fn a_followed_branch_refuses_as_control_flow() {
+        use crate::cpu::jit::ir::{Branch, Exit};
+
+        let ops = vec![Op::Nop, Op::MovConst { rd: 0, val: 7 }];
+        let exits = vec![Branch::new(0, Exit::Jump { target: 0x2000 })];
+        let b = Block::new(0x1000, ops, vec![0, 0], exits, None, vec![1]);
+        assert_eq!(emit_block(&b, LAYOUT), Err(Refused::ControlFlow));
+    }
+
+    /// An exit the walk never reaches would leave the instructions it guards
+    /// running as though the branch were not there, which is wrong in a way
+    /// no later check could catch. It has to take the block out of the
+    /// emitted path instead.
+    #[test]
+    fn an_exit_past_the_body_refuses_rather_than_being_dropped() {
         use crate::cpu::jit::ir::{Branch, Exit};
 
         let ops = vec![Op::MovConst { rd: 0, val: 7 }];
-        let exits = vec![Branch::new(0, Exit::Cond { cond: 0, target: 8 })];
+        let exits = vec![Branch::new(4, Exit::Cond { cond: 0, target: 8 })];
         let b = Block::new(0x1000, ops, vec![0], exits, None, vec![1]);
         assert_eq!(emit_block(&b, LAYOUT), Err(Refused::ControlFlow));
+    }
+
+    /// The four conditional branches are all written, each as a test and a
+    /// leave. What they compute is `emit_difftest`'s and
+    /// `tools/jit_wasm_check.mjs`'s to check; what this holds is that no arm
+    /// quietly went missing, which would show up as a whole class of block
+    /// dropping out of the emitted path and nowhere else.
+    #[test]
+    fn every_conditional_branch_is_written() {
+        use crate::cpu::jit::ir::{Branch, Exit};
+
+        let branches = [
+            Exit::Cond {
+                cond: 0,
+                target: 0x2000,
+            },
+            Exit::Cbz {
+                rt: 3,
+                sf: true,
+                nz: false,
+                target: 0x2000,
+            },
+            Exit::Tbz {
+                rt: 3,
+                bit: 40,
+                nz: true,
+                target: 0x2000,
+            },
+            Exit::CmpImm {
+                rn: 3,
+                imm: 0x20,
+                carry: 1,
+                sf: false,
+                cond: 11,
+                target: 0x2000,
+            },
+            Exit::CmpReg {
+                rn: 3,
+                rm: 4,
+                carry: 1,
+                sf: true,
+                cond: 11,
+                target: 0x2000,
+            },
+        ];
+        for exit in branches {
+            // The branch sits between two ops, so the block covers the three
+            // places a body meets one: before it, the branch itself, and the
+            // not-taken path carrying on after it.
+            let ops = vec![Op::MovConst { rd: 0, val: 7 }, Op::Nop, Op::Nop];
+            let exits = vec![Branch::new(1, exit)];
+            let b = Block::new(0x1000, ops, vec![0; 3], exits, None, vec![1]);
+            assert!(
+                emit_block(&b, LAYOUT).is_ok(),
+                "{exit:?} was not written out"
+            );
+        }
+    }
+
+    /// A fused compare covers two instructions, so the branch after it
+    /// reports both as retired. Getting that wrong would leave the
+    /// interpreter re-running the compare, which sets flags a second time
+    /// from operands the block has since moved on from.
+    #[test]
+    fn a_fused_compare_retires_the_pair() {
+        use crate::cpu::jit::ir::{Branch, Exit};
+
+        let pair = Branch::new(
+            0,
+            Exit::CmpImm {
+                rn: 3,
+                imm: 1,
+                carry: 1,
+                sf: true,
+                cond: 0,
+                target: 0x2000,
+            },
+        );
+        assert_eq!(pair.span, 2);
+        let b = Block::new(
+            0x1000,
+            vec![Op::Nop, Op::Nop],
+            vec![0; 2],
+            vec![pair],
+            None,
+            vec![1],
+        );
+        let bytes = emit_block(&b, LAYOUT).expect("a fused compare is written");
+        // The count it leaves with, `2 | LEFT`, as the signed LEB128 the
+        // encoder writes for `i32.const`.
+        let mut want = Vec::new();
+        super::super::wasm::sleb(&mut want, i64::from((2u32 | LEFT) as i32));
+        assert!(
+            bytes.windows(want.len()).any(|w| w == want),
+            "the leave does not report the pair"
+        );
     }
 }

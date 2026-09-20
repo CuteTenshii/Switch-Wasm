@@ -7,7 +7,7 @@
 
 use super::cache::JitStats;
 use super::decode::translate;
-use super::emit::emit_block;
+use super::emit::{emit_block, LEFT};
 use super::host;
 use super::ir::{Block, Code, Exit, Op, Term};
 use crate::cpu::bits::*;
@@ -46,6 +46,18 @@ enum Taken {
     /// A branch the translator followed: always taken, and the block's ops go
     /// on at the target.
     Follow(u32),
+}
+
+/// What one visit to a block's emitted form did.
+#[derive(Clone, Copy)]
+struct Emitted {
+    /// Leading instructions of the block it retired.
+    retired: usize,
+    /// Whether it left through a branch it took, having put where control
+    /// went in `pc`, rather than stopping on an instruction for the
+    /// interpreter to pick up. The two differ in where control is and in
+    /// whether the block's terminator still runs.
+    left: bool,
 }
 
 /// Where the straight-line stretch of ops being executed starts, in the block's
@@ -228,9 +240,16 @@ impl Cpu {
         // and nothing else: it leaves guest state exactly where the loop below
         // would have, so the terminator and the accounting under both are the
         // same code.
-        if let Some(retired) = self.enter_emitted(block, budget) {
-            i = retired;
-            pc = block.start.wrapping_add(4 * retired as u32);
+        if let Some(done) = self.enter_emitted(block, budget) {
+            i = done.retired;
+            if done.left {
+                // The branch put its target in `pc` itself, and the
+                // terminator does not run: control has already gone
+                // somewhere else, which is what `Taken::Leave` does below.
+                self.retire_runs(run_pc, run_i, i);
+                return Ok(i as u64);
+            }
+            pc = block.start.wrapping_add(4 * i as u32);
         } else {
             loop {
                 // Run straight through to the next conditional branch, or to the
@@ -360,12 +379,18 @@ impl Cpu {
     /// [`Cpu::exec_block`] already makes when a step budget runs out inside a
     /// block.
     ///
+    /// A block that ran through a branch and took it reports that too, and
+    /// has put the target in `pc`: where control went is not derivable from
+    /// how much it retired, and a branch on the block's last instruction
+    /// retires all of it without reaching the terminator.
+    ///
     /// Progress is what the arms below are really about. An emitted block that
     /// retires nothing has done nothing, so this hands the visit back to the
     /// interpreter rather than reporting zero: [`Cpu::run_jit`] would
-    /// otherwise enter the same block at the same pc forever.
+    /// otherwise enter the same block at the same pc forever. A taken branch
+    /// is always progress, because the branch itself retires.
     #[inline(always)]
-    fn enter_emitted(&mut self, block: &Block, budget: u64) -> Option<usize> {
+    fn enter_emitted(&mut self, block: &Block, budget: u64) -> Option<Emitted> {
         let Code::Ready { entry, misses } = block.code.get() else {
             self.warm(block);
             return None;
@@ -385,17 +410,11 @@ impl Cpu {
         // `Cpu`: it is this one, borrowed for the call. What runs is a module
         // this build emitted against `Layout::of_cpu`, so every offset it
         // reaches is a field of that type.
-        let retired = unsafe { host::enter(entry, state) } as usize;
+        let answer = unsafe { host::enter(entry, state) };
+        let left = answer & LEFT != 0;
+        let retired = (answer & !LEFT) as usize;
         let whole = block.ops.len();
-        if retired >= whole {
-            // A run of misses that ended is not a run: a page allocated on
-            // first touch made the block decline once and never will again.
-            if misses != 0 {
-                block.code.set(Code::Ready { entry, misses: 0 });
-            }
-            return Some(whole);
-        }
-        if retired == 0 {
+        if retired == 0 && !left {
             let misses = misses + 1;
             if misses >= MAX_MISSES {
                 block.drop_code();
@@ -404,7 +423,16 @@ impl Cpu {
             }
             return None;
         }
-        Some(retired)
+        // Progress of any size ends a run of misses, and a run that ended is
+        // not a run: a page allocated on first touch made the block decline
+        // once and never will again.
+        if misses != 0 {
+            block.code.set(Code::Ready { entry, misses: 0 });
+        }
+        Some(Emitted {
+            retired: retired.min(whole),
+            left,
+        })
     }
 
     /// Count a visit to a block with no emitted form, and write it out once it
