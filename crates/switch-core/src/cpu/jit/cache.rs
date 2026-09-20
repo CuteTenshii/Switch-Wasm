@@ -5,11 +5,18 @@ use super::ir::Block;
 use crate::IdMap;
 use std::rc::Rc;
 
-/// How many blocks the cache holds before it is dropped wholesale. A retail
-/// title's hot code is a few thousand blocks; the cap is only there so a
-/// program that walks endlessly over fresh code cannot grow the cache without
-/// bound.
-const MAX_BLOCKS: usize = 64 * 1024;
+/// How many blocks a generation holds before the cache rotates. Two are live
+/// at once, so the ceiling is twice this: the cap is only there so a program
+/// that walks endlessly over fresh code cannot grow the cache without bound.
+///
+/// A retail title's *hot* code is a few thousand blocks, but the set it has
+/// ever entered is much larger and keeps growing: Just Dance 2019 reaches the
+/// cap partway through its boot. Before there were two generations that
+/// emptied the cache, and the counters said so exactly — 105,340 blocks
+/// translated for 39,804 still held, which is the cap plus everything
+/// retranslated after it. Every block came back the hard way and every link
+/// between them was cold again.
+const MAX_BLOCKS: usize = 32 * 1024;
 
 /// How many entries the direct-mapped lookup in front of the block map holds.
 /// A hash of the entry address is a large share of what entering a short
@@ -25,6 +32,11 @@ pub(in crate::cpu) struct Jit {
     /// what actually owns the cache.
     pub(super) lookup: Vec<Option<Rc<Block>>>,
     pub(super) blocks: IdMap<u32, Rc<Block>>,
+    /// The generation before `blocks`. Filling the cache then costs the half
+    /// of it nothing has asked for since the last rotation, rather than all of
+    /// it: a block still being entered is promoted back out of here by
+    /// [`Jit::get`] before the rotation that would have dropped it.
+    pub(super) older: IdMap<u32, Rc<Block>>,
     /// Entry addresses translated out of each page, so a store to that page
     /// drops exactly the blocks that read it. A block that read several pages
     /// is listed under each. When a store drops it through one of them, the
@@ -71,6 +83,7 @@ impl Default for Jit {
         Jit {
             lookup: vec![None; LOOKUP_SLOTS],
             blocks: IdMap::default(),
+            older: IdMap::default(),
             by_page: IdMap::default(),
             translated: 0,
             executed: 0,
@@ -96,22 +109,54 @@ impl Jit {
                 return Some(block.clone());
             }
         }
-        let block = self.blocks.get(&pc)?.clone();
+        let block = match self.blocks.get(&pc) {
+            Some(block) => block.clone(),
+            // Reaching a block in the older generation is what says it is
+            // still in use, so it moves up instead of waiting for the
+            // rotation that would drop it. Moving rather than copying leaves
+            // the two generations disjoint, so the ceiling still holds.
+            None => {
+                let block = self.older.remove(&pc)?;
+                self.blocks.insert(pc, block.clone());
+                block
+            }
+        };
         self.lookup[slot] = Some(block.clone());
         Some(block)
     }
 
     pub(super) fn insert(&mut self, block: Rc<Block>) {
-        if self.blocks.len() >= MAX_BLOCKS {
-            self.blocks.clear();
-            self.by_page.clear();
-            self.drop_lookup();
-        }
+        self.rotate_if_full();
         for &page in &block.pages {
             self.by_page.entry(page).or_default().push(block.start);
         }
         self.lookup[Self::slot(block.start)] = Some(block.clone());
         self.blocks.insert(block.start, block);
+    }
+
+    /// Start a new generation when the newest one is full, dropping the one
+    /// before it.
+    ///
+    /// What that drops is the blocks nothing has entered since the last
+    /// rotation, because entering one promotes it back into `blocks`. A block
+    /// still being run therefore survives any number of rotations, which is
+    /// the whole difference from emptying the cache.
+    fn rotate_if_full(&mut self) {
+        if self.blocks.len() < MAX_BLOCKS {
+            return;
+        }
+        self.older = std::mem::take(&mut self.blocks);
+        // `by_page` has to go on covering everything still held, or a store to
+        // a surviving block's page would not drop it and the guest would run
+        // instructions it has overwritten. Rebuilding it from the generation
+        // that survived is also what takes the dropped one's entries out.
+        self.by_page.clear();
+        for block in self.older.values() {
+            for &page in &block.pages {
+                self.by_page.entry(page).or_default().push(block.start);
+            }
+        }
+        self.drop_lookup();
     }
 
     /// Forget every lookup hint. Called whenever a block is dropped: a hint
@@ -127,7 +172,13 @@ impl Jit {
         for &page in pages {
             if let Some(starts) = self.by_page.remove(&page) {
                 for start in starts {
-                    if self.blocks.remove(&start).is_some() {
+                    // Both generations, and neither test may be skipped: a
+                    // block that has sunk into `older` is still reachable
+                    // through `get`, so leaving it there would hand back code
+                    // the guest has just overwritten.
+                    let newer = self.blocks.remove(&start).is_some();
+                    let older = self.older.remove(&start).is_some();
+                    if newer || older {
                         self.invalidated += 1;
                         dropped = true;
                     }
@@ -140,15 +191,16 @@ impl Jit {
     }
 
     pub(super) fn clear(&mut self) {
-        self.invalidated += self.blocks.len() as u64;
+        self.invalidated += (self.blocks.len() + self.older.len()) as u64;
         self.blocks.clear();
+        self.older.clear();
         self.by_page.clear();
         self.drop_lookup();
     }
 
     pub(super) fn stats(&self) -> JitStats {
         JitStats {
-            blocks: self.blocks.len(),
+            blocks: self.blocks.len() + self.older.len(),
             translated: self.translated,
             executed: self.executed,
             linked: self.linked,
