@@ -50,10 +50,48 @@ const MSR_NZCV_X0: u32 = 0xD51B_4200;
 /// under test rather than letting translation run on into whatever follows.
 const RET: u32 = 0xD65F_03C0;
 
-/// How many instructions of one mnemonic go into a block. They share a block
+/// How many instructions of one form go into a block. They share a block
 /// rather than getting one each because a block is what the emitter refuses or
 /// accepts, and because the manifest carries a whole register file per case.
-const PER_MNEMONIC: usize = 16;
+const PER_FORM: usize = 16;
+
+/// An instruction's *form*: its disassembly with every register number and
+/// every immediate replaced, which is what a bucket is keyed on.
+///
+/// The mnemonic alone is too coarse, and the mnemonic with bit 31 beside it,
+/// which is what this used to be, is too coarse in exactly one place. Bit 31
+/// is `sf` in the data-processing forms and splitting on it separates the two
+/// widths there; in a load or a store it is the top bit of `size`, so `ldr w`
+/// and `ldr x` answer to the same name *and* the same bit. The sweep fills a
+/// bucket from the low encoding prefixes, so it filled that one with 32-bit
+/// loads and never wrote a 64-bit one.
+///
+/// The shape separates all of them, and every other pair a width, a sign or an
+/// addressing mode decides, without this file having to know which field does
+/// it in which group.
+fn form(text: &str) -> String {
+    let b = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'0' && i + 1 < b.len() && b[i + 1] | 0x20 == b'x' {
+            i += 2;
+            while i < b.len() && b[i].is_ascii_hexdigit() {
+                i += 1;
+            }
+            out.push('_');
+        } else if b[i].is_ascii_digit() {
+            while i < b.len() && b[i].is_ascii_digit() {
+                i += 1;
+            }
+            out.push('_');
+        } else {
+            out.push(b[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
 
 /// Random fills per encoding-group prefix during the sweep. Every A64
 /// data-processing group is named by bits 31:21, so filling the remaining 21
@@ -71,7 +109,7 @@ fn main() {
     let mut faulted = 0usize;
     let mut refused = 0usize;
 
-    for (mnemonic, encodings) in &buckets {
+    for (form, encodings) in &buckets {
         let mut program = vec![MSR_NZCV_X0];
         program.extend_from_slice(encodings);
         program.push(RET);
@@ -129,14 +167,10 @@ fn main() {
                 cases += 1;
             }
         }
-        // With an example or two, because a mnemonic does not say which form
-        // was reached: `add` covers the immediate, the shifted-register and
-        // the extended-register arms, and they share no code.
-        let examples: Vec<String> = encodings.iter().take(2).map(|&i| disassemble(i)).collect();
         println!(
-            "  {mnemonic:<10} {:>3} encodings   {}",
+            "  {form:<34} {:>3} encodings   {}",
             encodings.len(),
-            examples.join("  |  ")
+            disassemble(encodings[0])
         );
     }
 
@@ -148,15 +182,14 @@ fn main() {
         .expect("cannot write the manifest");
 
     println!(
-        "{cases} cases over {} mnemonics written to {out_dir}/ \
+        "{cases} cases over {} forms written to {out_dir}/ \
          ({refused} blocks the emitter refused, {faulted} that faulted)",
         buckets.len()
     );
     println!("now run: node tools/emit_difftest.mjs {out_dir}");
 }
 
-/// The encodings the emitter can write, grouped by what the disassembler calls
-/// them.
+/// The encodings the emitter can write, grouped by [`form`].
 ///
 /// Swept rather than assembled: see this file's note on why. Bits 31:21 name
 /// the group in every data-processing form, so every prefix gets its own tries
@@ -170,18 +203,8 @@ fn survey() -> BTreeMap<String, Vec<u32>> {
             if !emits(insn) {
                 continue;
             }
-            let text = disassemble(insn);
-            let mnemonic = text.split_whitespace().next().unwrap_or("?");
-            // Split on bit 31 as well as on the mnemonic. It is `sf` in every
-            // data-processing form, and the two widths share almost no code
-            // here: the narrow one masks after every step and the wide one
-            // runs a carry chain the narrow one skips, and only the wide
-            // `SDIV` needs the guard against the division wasm traps on.
-            // Without this the sweep fills every bucket from the low prefixes,
-            // which are all `sf = 0`, and never tests the other half.
-            let width = if insn >> 31 != 0 { 'x' } else { 'w' };
-            let slot = buckets.entry(format!("{mnemonic}.{width}")).or_default();
-            if slot.len() < PER_MNEMONIC {
+            let slot = buckets.entry(form(&disassemble(insn))).or_default();
+            if slot.len() < PER_FORM {
                 slot.push(insn);
             }
         }
