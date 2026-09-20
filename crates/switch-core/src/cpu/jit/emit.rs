@@ -1016,7 +1016,13 @@ impl Emitter<'_> {
                 if is_imm {
                     self.f.i64_const(i64::from(imm));
                 } else {
-                    self.read_reg_raw(rm);
+                    // Narrowed, as [`crate::cpu::Cpu::add_carry_overflow`]
+                    // narrows both its operands. Read raw, a 32-bit `CCMN`
+                    // carried the top half of Rm into a sum whose carry is
+                    // taken from bit 32, and reported C from bits the
+                    // operation does not have. `CCMP` hid it: inverting the
+                    // operand masks it again on the way past.
+                    self.read_reg(rm, sf);
                 }
                 self.invert_if(u8::from(sub), sf);
                 self.f.local_set(L_B);
