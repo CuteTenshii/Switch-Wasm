@@ -1226,14 +1226,14 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     // depth surface and so no colour target at all, and does its work in the
     // depth buffer. Requiring a colour target here cost it every one of its
     // 1870 draws.
-    let (target_width, target_height) = match (rt, depth) {
-        (Some(rt), _) => (rt.width, rt.height),
-        (None, Some(dt)) => (dt.width, dt.height),
-        (None, None) => {
-            return Err(Error::Gpu(
-                "raster: draw with neither a colour nor a depth target".into(),
-            ))
-        }
+    let Some((target_width, target_height)) = crate::gpu::engine::threed::draw_extent(
+        rt.map(|rt| (rt.width, rt.height)),
+        depth.map(|dt| (dt.width, dt.height)),
+        engine.depth_state(),
+    ) else {
+        return Err(Error::Gpu(
+            "raster: draw with neither a colour nor a depth target".into(),
+        ));
     };
     let (rt_width, rt_height) = grid.pixels(target_width, target_height);
     let clip = engine.apply_scissor(ScissorRect {

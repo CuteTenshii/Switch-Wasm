@@ -438,14 +438,14 @@ impl Pipeline {
         // The extent the scissor is resolved against is the target's, in
         // pixels, which differ from texels on a multisampled surface.
         let grid = engine.sample_grid().map_err(|e| state("sample grid", e))?;
-        let extent = match (rt, dt) {
-            (Some(rt), _) => (rt.width, rt.height),
-            (None, Some(dt)) => (dt.width, dt.height),
-            (None, None) => {
-                return Err(Unsupported::State(
-                    "a draw with neither a colour nor a depth target".into(),
-                ))
-            }
+        let Some(extent) = crate::gpu::engine::threed::draw_extent(
+            rt.map(|rt| (rt.width, rt.height)),
+            dt.map(|dt| (dt.width, dt.height)),
+            engine.depth_state(),
+        ) else {
+            return Err(Unsupported::State(
+                "a draw with neither a colour nor a depth target".into(),
+            ));
         };
         let (width, height) = grid.pixels(extent.0, extent.1);
         let scissor = engine.apply_scissor(ScissorRect {

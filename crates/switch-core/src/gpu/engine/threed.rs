@@ -270,6 +270,39 @@ pub struct DepthState {
     pub func: u32,
 }
 
+impl DepthState {
+    /// Whether a draw under this state touches its depth surface at all: a
+    /// test that writes, or one that compares against anything but
+    /// `Always`. A disabled test neither reads nor writes, whatever the
+    /// write mask says.
+    pub fn reaches_surface(&self) -> bool {
+        const ALWAYS: [u32; 2] = [8, 0x0207];
+        self.test_enabled && (self.write_enabled || !ALWAYS.contains(&self.func))
+    }
+}
+
+/// The extent, in texels, a draw is confined to: its colour target's, or its
+/// depth surface's where it has no colour target, and never more than the
+/// depth surface's where the draw reaches it.
+///
+/// A colour target and a depth surface of different sizes is legal, and the
+/// draw touches only where both exist. Tomodachi Life draws into 1280x720,
+/// 1920x1080 and 256x256 colour targets beside one 128x128 depth surface.
+/// Addressing the depth surface past its own extent reads whatever memory
+/// follows it, and a device refuses the pass outright, so both renderers
+/// confine the draw to the intersection instead.
+pub fn draw_extent(
+    color: Option<(u32, u32)>,
+    depth: Option<(u32, u32)>,
+    state: DepthState,
+) -> Option<(u32, u32)> {
+    match (color, depth) {
+        (Some((w, h)), Some((dw, dh))) if state.reaches_surface() => Some((w.min(dw), h.min(dh))),
+        (Some(extent), _) | (None, Some(extent)) => Some(extent),
+        (None, None) => None,
+    }
+}
+
 /// A depth/stencil render target resolved from the register file, mirroring
 /// [`RenderTarget`] for the colour side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1884,6 +1917,28 @@ pub(crate) fn depth_format_layout(raw: u32) -> Result<DepthLayout> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_draw_is_confined_to_a_depth_surface_only_where_it_reaches_it() {
+        let state = |test_enabled, write_enabled, func| DepthState {
+            test_enabled,
+            write_enabled,
+            func,
+        };
+        let (color, depth) = (Some((1280, 720)), Some((128, 128)));
+        let less = state(true, false, 0x0201);
+        assert_eq!(draw_extent(color, depth, less), Some((128, 128)));
+        let always_writing = state(true, true, 8);
+        assert_eq!(draw_extent(color, depth, always_writing), Some((128, 128)));
+        // A disabled test reads and writes nothing, whatever the mask says,
+        // and neither does an `Always` that does not write.
+        for untouched in [state(false, true, 0x0201), state(true, false, 0x0207)] {
+            assert!(!untouched.reaches_surface());
+            assert_eq!(draw_extent(color, depth, untouched), Some((1280, 720)));
+        }
+        assert_eq!(draw_extent(None, depth, less), Some((128, 128)));
+        assert_eq!(draw_extent(None, None, less), None);
+    }
     use crate::gpu::exec::GpuStats;
     use crate::gpu::syncpt::Host1x;
     use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};

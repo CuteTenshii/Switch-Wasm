@@ -1576,6 +1576,53 @@ impl Gpu {
             }
             None => None,
         };
+        // The held surface's corner the pass covers, copied into a texture
+        // the size of the pass: see [`Prepared::color_scratch`].
+        let scratch = match (p.color, p.color_scratch) {
+            (Some(color), Some((width, height))) => {
+                let held = &self
+                    .held
+                    .get(&color.addr)
+                    .ok_or("the surface was not held")?
+                    .texture;
+                let size = wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                };
+                let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("colour scratch"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: held.format(),
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                let mut encoder =
+                    self.device
+                        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                            label: Some("colour scratch in"),
+                        });
+                encoder.copy_texture_to_texture(
+                    held.as_image_copy(),
+                    texture.as_image_copy(),
+                    size,
+                );
+                self.queue.submit([encoder.finish()]);
+                Some((held.clone(), texture, size))
+            }
+            _ => None,
+        };
+        let colour_view = match &scratch {
+            Some((_, texture, _)) => {
+                Some(texture.create_view(&wgpu::TextureViewDescriptor::default()))
+            }
+            None => colour_view,
+        };
         let depth_view = match p.depth {
             Some(depth) => {
                 self.hold(&depth, ctx).map_err(|e| format!("{e:?}"))?;
@@ -1700,6 +1747,10 @@ impl Gpu {
                 }
                 None => pass.draw(0..p.count, instances),
             }
+        }
+        if let Some((held, texture, size)) = &scratch {
+            encoder.copy_texture_to_texture(texture.as_image_copy(), held.as_image_copy(), *size);
+            self.scratch.push(Scratch::Texture(texture.clone()));
         }
         timed!(self, encode, self.queue.submit([encoder.finish()]));
         Ok(())
@@ -3100,6 +3151,10 @@ struct Prepared {
     render: Render,
     /// `None` for a depth-only pass.
     color: Option<Target>,
+    /// The extent of the scratch texture the pass draws colour into, when
+    /// the colour target is larger than the depth surface beside it: see
+    /// [`Gpu::prepare`].
+    color_scratch: Option<(u32, u32)>,
     /// The depth surface the draw reads or writes, or `None` for a draw that
     /// does neither, which is not the same as a draw with no depth surface
     /// bound. A test of `Always` with writes off depends on nothing, so
@@ -3139,7 +3194,7 @@ impl Gpu {
         engine: &Engine3D,
         ctx: &ExecCtx,
     ) -> std::result::Result<Prepared, String> {
-        let state = Pipeline::of(engine).map_err(|e| e.to_string())?;
+        let mut state = Pipeline::of(engine).map_err(|e| e.to_string())?;
         let targets = Targets::of(engine).map_err(|e| format!("{e:?}"))?;
         let color = targets.color;
         // A draw that neither tests nor writes depth depends on the surface
@@ -3149,37 +3204,64 @@ impl Gpu {
             .depth
             .is_some_and(|d| d.write_enabled || d.compare != state::Compare::Always);
         let depth = targets.depth.filter(|_| uses_depth);
-        // WebGPU wants every attachment of a pass to be the same size, and
-        // the rasterizer does not, it addresses each surface with its own
-        // extent and simply misses where they disagree. A depth surface
-        // larger than the colour one is the case that arises, and the pass
-        // only ever touches the part of it the colour target covers, so it
-        // is attached cropped to that: the rest is read and written by
-        // nobody, which is what missing it means.
+        // WebGPU wants every attachment of a pass to be the same size, and a
+        // draw only ever touches where both surfaces exist: see
+        // `engine::threed::draw_extent`, which confines the rasterizer the
+        // same way. Where the two differ, the pass is the size of the
+        // intersection.
+        //
+        // A depth surface larger than the colour one is attached cropped:
+        // the rest of it is read and written by nobody. Its stride stays the
+        // surface's, because that is what its block-linear addressing is in
+        // terms of.
+        //
+        // A colour target larger than the depth one cannot be cropped the
+        // same way. It is held on the device at its own extent, and a
+        // smaller `Target` at the same address reads as the guest rebinding
+        // it: the held surface would be evicted, its latest draws still on
+        // the device, and the crop uploaded from guest memory without them.
+        // So the pass draws into a scratch texture the size of the depth
+        // surface, filled from the held one and copied back into it
+        // afterwards. That only works that way round: WebGPU copies part of
+        // a colour texture but only the whole of a depth one.
         let mut depth = depth;
-        if let (Some(color), Some(full)) = (color, depth) {
-            if (color.width, color.height) != (full.width, full.height) {
-                if full.width < color.width || full.height < color.height {
-                    return Err(format!(
-                        "a {}x{} colour target beside a smaller {}x{} depth one",
-                        color.width, color.height, full.width, full.height
-                    ));
-                }
-                // The stride stays the surface's, because that is what its
-                // block-linear addressing is in terms of; only how much of
-                // it the pass covers changes.
+        let mut color_scratch = None;
+        if let (Some(full_color), Some(full_depth)) = (color, depth) {
+            let (cw, ch) = (full_color.width, full_color.height);
+            let (dw, dh) = (full_depth.width, full_depth.height);
+            if dw >= cw && dh >= ch {
                 depth = Some(Target {
-                    width: color.width,
-                    height: color.height,
-                    rows: color.height,
-                    ..full
+                    width: cw,
+                    height: ch,
+                    rows: ch,
+                    ..full_depth
                 });
+            } else if dw <= cw && dh <= ch {
+                color_scratch = Some((dw, dh));
+                // The pipeline confines its scissor to the depth surface only
+                // for a draw that reaches it, and a depth write with the test
+                // off is attached here without doing so.
+                let (pixels_x, pixels_y) = state.grid.pixels(dw, dh);
+                state.scissor.x1 = state.scissor.x1.min(pixels_x);
+                state.scissor.y1 = state.scissor.y1.min(pixels_y);
+                state.scissor.x0 = state.scissor.x0.min(state.scissor.x1);
+                state.scissor.y0 = state.scissor.y0.min(state.scissor.y1);
+            } else {
+                return Err(format!(
+                    "a {cw}x{ch} colour target beside a {dw}x{dh} depth one, each larger one way"
+                ));
             }
         }
         if color.is_none() && depth.is_none() {
             return Err("a draw into neither a colour nor a depth surface".into());
         }
         let render = self.route(&state, color, depth)?;
+        if color_scratch.is_some() && matches!(render, Render::Companion(_)) {
+            return Err(
+                "a colour target larger than its depth surface, drawn through a multisample companion"
+                    .into(),
+            );
+        }
 
         // Unfolded, so a module depends only on the shader binary and not on
         // what happened to be in a constant buffer when it was translated.
@@ -3385,6 +3467,7 @@ impl Gpu {
             state,
             render,
             color,
+            color_scratch,
             depth,
             vs,
             fs,
@@ -4189,6 +4272,31 @@ mod tests {
                 h.triangle([1.0, 0.0, 1.0, 1.0]);
             });
         }
+    }
+
+    /// A depth surface smaller than the colour target beside it confines the
+    /// draw to where both exist, on both renderers alike. Tomodachi Life
+    /// draws 1280x720, 1920x1080 and 256x256 colour targets beside one
+    /// 128x128 depth surface, and every such draw fell back.
+    #[test]
+    fn a_depth_surface_smaller_than_the_colour_target_confines_the_draw() {
+        // `Always` with writes on: every fragment passes, and the draw still
+        // reaches the depth surface, which is what confines it.
+        let set_up = |h: &mut Harness| {
+            h.depth_target_sized(0x0207, 8, 4);
+            h.triangle([1.0, 0.0, 1.0, 1.0]);
+        };
+        agrees(set_up);
+
+        // And the confinement is the rasterizer's too, not only the two
+        // agreeing: (9, 1) is inside the triangle and outside the depth
+        // surface, (1, 1) inside both.
+        let mut h = Harness::new();
+        let (inside, outside) = (h.texel(1, 1), h.texel(9, 1));
+        set_up(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        assert_ne!(h.texel(1, 1), inside, "drawn where both surfaces exist");
+        assert_eq!(h.texel(9, 1), outside, "untouched past the depth surface");
     }
 
     #[test]

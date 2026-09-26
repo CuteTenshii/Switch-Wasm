@@ -397,13 +397,19 @@ impl Harness {
     /// It goes after the colour target in the same mapping, which is why the
     /// harness maps more than it needs for one surface.
     pub fn depth_target(&mut self, func: u32) {
+        self.depth_target_sized(func, TARGET_WIDTH, TARGET_HEIGHT);
+    }
+
+    /// [`Harness::depth_target`] with an extent of its own, which a title may
+    /// make smaller than the colour target it is drawn beside.
+    pub fn depth_target_sized(&mut self, func: u32, width: u32, height: u32) {
         let addr = self.base + 0x1000;
         self.engine.regs.set(0x3F8, (addr >> 32) as u32);
         self.engine.regs.set(0x3F9, addr as u32);
         self.engine.regs.set(0x3FA, 0x14); // Z24S8
         self.engine.regs.set(0x3FB, 0); // one GOB per block
-        self.engine.regs.set(0x48A, TARGET_WIDTH);
-        self.engine.regs.set(0x48B, TARGET_HEIGHT);
+        self.engine.regs.set(0x48A, width);
+        self.engine.regs.set(0x48B, height);
         self.engine.regs.set(DEPTH_TEST_ENABLE, 1);
         self.engine.regs.set(DEPTH_WRITE_ENABLE, 1);
         self.engine.regs.set(DEPTH_TEST_FUNC, func);
