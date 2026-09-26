@@ -222,6 +222,21 @@ fn main() {
     // always stopped making progress, and where each *thread* is says more
     // about why than where the one running thread is.
     print!("{}", cpu.thread_dump());
+    // The same threads as the browser's console names them: what each one
+    // is called, what it is waiting on, and the calls it is waiting in. The
+    // dump above says which thread is blocked; this says on what.
+    let (threads, _, _) = cpu.take_thread_report();
+    for thread in threads {
+        println!(
+            "  thread {} ({}, runs {}, priority {}): {}; {}",
+            thread.index,
+            thread.name.as_deref().unwrap_or("unnamed"),
+            thread.entry,
+            thread.priority,
+            thread.state,
+            thread.at
+        );
+    }
 
     if let Ok(out) = std::env::var("SHOT") {
         if !cpu.nv.gpu.framebuffer.is_empty() {
