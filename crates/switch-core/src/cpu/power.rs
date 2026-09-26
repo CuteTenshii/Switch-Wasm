@@ -199,6 +199,68 @@ impl Cpu {
         }
     }
 
+    /// `mm:u` (`nn::mmnv::IRequest`): the multimedia clock requests the
+    /// video decoder and its relatives make before they run.
+    ///
+    /// A request names a module and asks for a floor under its clock, and
+    /// `Get` reads back where the clock is. Nothing here has a clock to move,
+    /// so a module runs at whatever was last asked of it. The newer commands
+    /// address a request by the id `Initialize` returns; the older ones, below
+    /// 4, by the module itself, which is what the id is keyed as for them.
+    ///
+    /// The request has to exist. NVIDIA's multimedia library keeps its
+    /// `mm:u` client behind a pointer that is only filled in by a successful
+    /// `Initialize`, and calls `SetAndWait` through it regardless: Just Dance
+    /// 2019 jumped to address 0 there the first time it played a movie.
+    pub(super) fn mm_request(&mut self, tls: u32, cmd_id: Option<u32>) -> Result<()> {
+        if self.ipc_is_control_request(tls) {
+            return self.write_ipc_response(tls, 0, &[], &[], &[]);
+        }
+        let data = self.ipc_request_data(tls);
+        let arg = |cpu: &Cpu, i: u32| cpu.mem.read_u32(data.wrapping_add(4 * i)).unwrap_or(0);
+        match cmd_id {
+            // InitializeOld(module, priority, clear mode).
+            Some(0) => {
+                let module = arg(self, 0);
+                self.mm_requests.insert(module, (module, 0));
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // Initialize(module, priority, clear mode) -> request id.
+            Some(4) => {
+                let module = arg(self, 0);
+                let id = (0..=u32::MAX)
+                    .find(|id| !self.mm_requests.contains_key(id))
+                    .unwrap_or(0);
+                self.mm_requests.insert(id, (module, 0));
+                self.write_ipc_response(tls, 0, &[], &id.to_le_bytes(), &[])
+            }
+            // FinalizeOld(module) / Finalize(request id).
+            Some(1) | Some(5) => {
+                self.mm_requests.remove(&arg(self, 0));
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // SetAndWaitOld(module, min, max) / SetAndWait(request id, min, max).
+            Some(2) | Some(6) => {
+                let (key, floor) = (arg(self, 0), arg(self, 1));
+                let module = self
+                    .mm_requests
+                    .get(&key)
+                    .map_or(key, |&(module, _)| module);
+                self.mm_requests.insert(key, (module, floor));
+                self.write_ipc_response(tls, 0, &[], &[], &[])
+            }
+            // GetOld(module) / Get(request id) -> the clock, in Hz.
+            Some(3) | Some(7) => {
+                let rate = self
+                    .mm_requests
+                    .get(&arg(self, 0))
+                    .map_or(0, |&(_, floor)| floor);
+                self.write_ipc_response(tls, 0, &[], &rate.to_le_bytes(), &[])
+            }
+            _ => self.unimplemented_command(tls, "mm:u", cmd_id),
+        }
+    }
+
     /// Reconcile `pcv`'s module enum and `clkrst`'s device codes into one
     /// index into [`CLOCK_RATES_HZ`].
     ///
@@ -762,6 +824,28 @@ mod tests {
             cpu.pcv_request(TLS, session, Some(8)).unwrap();
             assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), expected, "{code:#x}");
         }
+    }
+
+    #[test]
+    fn mm_gives_back_the_clock_a_request_asked_for_until_it_is_finalized() {
+        let words =
+            |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+        const MODULE: u32 = 5;
+        let mut cpu = request(false, 4, &words(&[MODULE, 0, 0]));
+        cpu.mm_request(TLS, Some(4)).unwrap();
+        let id = cpu.mem.read_u32(TLS + 0x20).unwrap();
+
+        write_request(&mut cpu, 6, &words(&[id, 600_000_000, u32::MAX]));
+        cpu.mm_request(TLS, Some(6)).unwrap();
+        write_request(&mut cpu, 7, &words(&[id]));
+        cpu.mm_request(TLS, Some(7)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 600_000_000);
+
+        write_request(&mut cpu, 5, &words(&[id]));
+        cpu.mm_request(TLS, Some(5)).unwrap();
+        write_request(&mut cpu, 7, &words(&[id]));
+        cpu.mm_request(TLS, Some(7)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "finalized");
     }
 
     #[test]

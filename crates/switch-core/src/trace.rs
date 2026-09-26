@@ -72,10 +72,13 @@ pub enum Trace {
     Copy,
     /// Frames handed to the display: which surface was scanned out, and how.
     Present,
+    /// The video engines: nvdec and VIC channels, their command streams and
+    /// the methods those write.
+    Video,
 }
 
 /// Every channel, in the order the host is offered them.
-pub const ALL: [Trace; 23] = [
+pub const ALL: [Trace; 24] = [
     Trace::Svc,
     Trace::Ipc,
     Trace::Wait,
@@ -99,6 +102,7 @@ pub const ALL: [Trace; 23] = [
     Trace::Io,
     Trace::Copy,
     Trace::Present,
+    Trace::Video,
 ];
 
 impl Trace {
@@ -136,6 +140,7 @@ impl Trace {
             Trace::Io => "TRACE_IO",
             Trace::Copy => "TRACE_COPY",
             Trace::Present => "TRACE_PRESENT",
+            Trace::Video => "TRACE_VIDEO",
         }
     }
 
@@ -185,7 +190,7 @@ impl Level {
 }
 
 /// The bit pattern a mask has before the environment has been read. All ones
-/// is safe to reserve: [`ALL`] is twenty-three channels, so the top bits are not
+/// is safe to reserve: [`ALL`] is twenty-four channels, so the top bits are not
 /// reachable by any real mask.
 const UNSEEDED: u32 = u32::MAX;
 

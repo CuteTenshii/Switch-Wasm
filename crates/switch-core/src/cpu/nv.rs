@@ -82,7 +82,11 @@ impl Cpu {
                     Some(&(addr, len)) if len > 0 => self.read_bytes(addr, len),
                     _ => Vec::new(),
                 };
-                argp.resize(size, 0);
+                // Never shorter than the declared size, and never cut down to
+                // it: a video engine's `SUBMIT` declares its 16-byte header
+                // and sends every command buffer, relocation and fence after
+                // it in the same buffer.
+                argp.resize(size.max(argp.len()), 0);
                 let mut inline_out = Vec::new();
                 let error = self.nv.ioctl(
                     &mut self.mem,

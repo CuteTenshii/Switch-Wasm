@@ -16,6 +16,7 @@ pub mod compute;
 pub mod engine;
 pub mod exec;
 pub mod macro_engine;
+pub mod multimedia;
 pub mod nvdrv;
 pub mod nvmap;
 pub mod pipeline;

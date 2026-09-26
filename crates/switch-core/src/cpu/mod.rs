@@ -1596,6 +1596,9 @@ pub struct Cpu {
     /// The clock rate each module was last *set* to, by module index. A module
     /// with no entry runs at its default in `CLOCK_RATES_HZ`.
     clock_rates: IdMap<u32, u32>,
+    /// `mm:u`'s clock requests, by request id: the module each is for and the
+    /// floor `SetAndWait` last asked for it, 0 until it has asked.
+    mm_requests: IdMap<u32, (u32, u32)>,
     /// State for the pseudo-random generator behind `csrng`, seeded lazily
     /// from the emulated clock. Zero means "not seeded yet".
     rng_state: u64,
@@ -2011,6 +2014,7 @@ impl Cpu {
             apm_configuration: power::APM_DEFAULT_CONFIGURATION,
             program_id: ipc::DEFAULT_PROGRAM_ID,
             clock_rates: IdMap::default(),
+            mm_requests: IdMap::default(),
             rng_state: 0,
             bsd_sockets: HashMap::new(),
             bsd_socket_options: HashMap::new(),

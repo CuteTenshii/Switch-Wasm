@@ -10,6 +10,7 @@
 //! Struct layouts and ioctl numbers match libnx's `nvidia/ioctl` sources,
 //! which is what real homebrew is compiled against.
 
+use crate::gpu::multimedia::{self, Engine, Video};
 use crate::gpu::syncpt::NvFence;
 use crate::gpu::vmm::{
     BIG_REGION_END, FLAG_FIXED_OFFSET, FLAG_REMAP_SUB_RANGE, SMALL_PAGE_SIZE, SMALL_REGION_BASE,
@@ -63,7 +64,13 @@ pub enum NvFile {
     Channel {
         channel_id: u32,
     },
-    /// A node we recognise but do not model (nvdec, vic, …).
+    /// `/dev/nvhost-nvdec` or `/dev/nvhost-vic`, owning one channel to that
+    /// video engine.
+    Multimedia {
+        engine: Engine,
+        channel_id: u32,
+    },
+    /// A node we recognise but do not model (nvjpg, …).
     Unsupported {
         path: String,
     },
@@ -151,6 +158,8 @@ pub struct NvDrv {
     /// addressed by `NVGPU_ZBC_TYPE_COLOR` and `..._DEPTH`.
     pub zbc_color: ZbcTable,
     pub zbc_depth: ZbcTable,
+    /// The video engines behind `/dev/nvhost-nvdec` and `/dev/nvhost-vic`.
+    pub video: Video,
 }
 
 impl Default for NvDrv {
@@ -170,6 +179,7 @@ impl NvDrv {
             initialized: false,
             zbc_color: ZbcTable::default(),
             zbc_depth: ZbcTable::default(),
+            video: Video::default(),
         }
     }
 
@@ -187,6 +197,7 @@ impl NvDrv {
             Some(NvFile::NvHostCtrlGpu) => "/dev/nvhost-ctrl-gpu",
             Some(NvFile::AddressSpace { .. }) => "/dev/nvhost-as-gpu",
             Some(NvFile::Channel { .. }) => "/dev/nvhost-gpu",
+            Some(NvFile::Multimedia { engine, .. }) => engine.node(),
             Some(NvFile::Unsupported { path }) => path,
             None => "(closed)",
         }
@@ -204,8 +215,14 @@ impl NvDrv {
             "/dev/nvhost-gpu" => NvFile::Channel {
                 channel_id: self.gpu.create_channel()?,
             },
-            other => NvFile::Unsupported {
-                path: other.to_owned(),
+            other => match Engine::from_node(other) {
+                Some(engine) => NvFile::Multimedia {
+                    engine,
+                    channel_id: self.video.open(engine, &mut self.gpu.host1x)?,
+                },
+                None => NvFile::Unsupported {
+                    path: other.to_owned(),
+                },
             },
         };
         let unsupported = matches!(file, NvFile::Unsupported { .. });
@@ -236,13 +253,18 @@ impl NvDrv {
                 }
                 NV_OK
             }
+            Some(NvFile::Multimedia { channel_id, .. }) => {
+                self.video.close(channel_id, &mut self.gpu.host1x);
+                NV_OK
+            }
             Some(_) => NV_OK,
             None => NV_BAD_PARAMETER,
         }
     }
 
     /// `nvIoctl` / `nvIoctl2` / `nvIoctl3`. `data` is the in/out argument
-    /// struct, resized by the caller to the ioctl's declared size; `inline_in`
+    /// struct, at least the ioctl's declared size and longer when the guest
+    /// sent records after it, as a video engine's `SUBMIT` does; `inline_in`
     /// carries `nvIoctl2`'s extra input buffer and `inline_out` receives
     /// `nvIoctl3`'s extra *output* buffer. Returns the `NvError` the guest
     /// sees, or a hard [`Error`] when the GPU model itself faults.
@@ -288,6 +310,9 @@ impl NvDrv {
             (NvFile::AddressSpace { as_id }, TYPE_AS_GPU) => self.as_gpu_ioctl(*as_id, nr, data),
             (NvFile::Channel { channel_id }, _) => {
                 self.channel_ioctl(mem, *channel_id, ioc_type, nr, data, inline_in)
+            }
+            (NvFile::Multimedia { channel_id, .. }, _) => {
+                self.multimedia_ioctl(mem, *channel_id, ioc_type, nr, data)
             }
             (NvFile::Unsupported { .. }, _) => Ok(NV_NOT_SUPPORTED),
             _ => Ok(NV_NOT_IMPLEMENTED),
@@ -899,6 +924,64 @@ impl NvDrv {
         }
     }
 
+    /// `/dev/nvhost-nvdec` and `/dev/nvhost-vic`: the channel ioctls of a
+    /// host1x client, which both engines share.
+    fn multimedia_ioctl(
+        &mut self,
+        mem: &Memory,
+        channel_id: u32,
+        ioc_type: u32,
+        nr: u32,
+        data: &mut [u8],
+    ) -> Result<u32> {
+        let Some((engine, syncpt)) = self.video.channel(channel_id).map(|c| (c.engine, c.syncpt))
+        else {
+            return Ok(NV_BAD_PARAMETER);
+        };
+        if crate::trace::enabled(crate::trace::Trace::Video) {
+            crate::traceln!(
+                "[video] {} ioctl type={ioc_type:#04x} nr={nr:#04x} ({} bytes)",
+                engine.node(),
+                data.len()
+            );
+        }
+        match (ioc_type, nr) {
+            // SetNvmapFd, and SetSubmitTimeout: there is one nvmap and no
+            // submission that can time out.
+            (TYPE_CHANNEL, 0x01) | (TYPE_NVHOST, 0x07) => Ok(NV_OK),
+            // Submit { cmdbufs, relocs, syncpt_incrs, fences; records... }
+            (TYPE_NVHOST, 0x01) => {
+                let ok = self.video.submit(
+                    channel_id,
+                    data,
+                    mem,
+                    &self.gpu.nvmap,
+                    &mut self.gpu.host1x,
+                )?;
+                Ok(if ok { NV_OK } else { NV_BAD_PARAMETER })
+            }
+            // GetSyncpoint { in param; out value }
+            (TYPE_NVHOST, 0x02) => {
+                write_u32(data, 4, syncpt);
+                Ok(NV_OK)
+            }
+            // GetWaitbase { in param; out value }: host1x's wait bases are
+            // gone from the hardware the Switch has, and nothing reads one.
+            (TYPE_NVHOST, 0x03) => {
+                write_u32(data, 4, 0);
+                Ok(NV_OK)
+            }
+            // MapBuffer / UnmapBuffer { num_entries; reserved; attach; entries... }
+            (TYPE_NVHOST, 0x09) => Ok(if multimedia::map_buffer(data, &self.gpu.nvmap) {
+                NV_OK
+            } else {
+                NV_BAD_PARAMETER
+            }),
+            (TYPE_NVHOST, 0x0A) => Ok(NV_OK),
+            _ => Ok(NV_NOT_IMPLEMENTED),
+        }
+    }
+
     // -- /dev/nvhost-gpu -------------------------------------------------
 
     fn channel_ioctl(
@@ -1151,7 +1234,16 @@ mod tests {
         let (chan_fd, err) = drv.open("/dev/nvhost-gpu").unwrap();
         assert_eq!(err, NV_OK);
         assert!(matches!(drv.file(chan_fd), Some(NvFile::Channel { .. })));
-        let (_, err) = drv.open("/dev/nvhost-nvdec").unwrap();
+        let (dec_fd, err) = drv.open("/dev/nvhost-nvdec").unwrap();
+        assert_eq!(err, NV_OK);
+        assert!(matches!(
+            drv.file(dec_fd),
+            Some(NvFile::Multimedia {
+                engine: Engine::Nvdec,
+                ..
+            })
+        ));
+        let (_, err) = drv.open("/dev/nvhost-nvjpg").unwrap();
         assert_eq!(err, NV_NOT_SUPPORTED);
     }
 

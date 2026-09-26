@@ -1221,6 +1221,8 @@ impl Cpu {
                         | "clkrst:session-2" | "clkrst:session-3" => {
                             self.pcv_request(tls, handle, cmd_id)?
                         }
+                        // mm:u, the multimedia clock requests.
+                        "mm:u" => self.mm_request(tls, cmd_id)?,
                         // ts, the temperature sensors, and the ISession
                         // later firmware moved the measurement onto.
                         "ts" | "ts:u" | "ts:s" | "ts:session-internal" | "ts:session-external" => {

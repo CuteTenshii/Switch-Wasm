@@ -86,6 +86,10 @@ and tests.
 - **`pcv`/`clkrst`** are the same manager either side of 8.0.0, numbered **by
   an offset**: a `clkrst` device code is `0x40000000 + module + 1`. A rate a
   guest sets reads back.
+- **`mm:u`** holds the multimedia clock requests the video decoder makes before
+  it runs. `Initialize` must hand out a request: NVIDIA's multimedia library
+  calls `SetAndWait` through a client pointer only a successful `Initialize`
+  fills in. The floor a request asks for is what `Get` reads back.
 - **`fsp-srv`**'s `DisableAutoSaveDataCreation` (1003) is accepted and
   deliberately **not** honoured — saves are created on open.
 
