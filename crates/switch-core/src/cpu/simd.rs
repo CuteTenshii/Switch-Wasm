@@ -668,6 +668,87 @@ impl Cpu {
             self.vregs[(insn & 0x1F) as usize] = u128::from(v);
             return Ok(true);
         }
+        // Scalar pairwise: `01 U 11110 size 11000 opcode 10 Rn Rd`, the two
+        // lanes of Vn reduced into one, the rest of Vd cleared. ADDP on a
+        // doubleword pair; FADDP, FMAXP, FMINP, FMAXNMP and FMINNMP on a
+        // single or double pair, U set, bit 22 the size and bit 23 choosing
+        // the minimum. Tomodachi Life's `fmaxp s0, v0.2s` = 0x7e30f800
+        // stopped the run, and nothing in the group had been decoded.
+        if ((insn >> 30) & 0b11) == 0b01
+            && ((insn >> 24) & 0x1F) == 0b11110
+            && ((insn >> 17) & 0x1F) == 0b11000
+            && ((insn >> 10) & 0b11) == 0b10
+        {
+            let unsigned = (insn >> 29) & 1 == 1;
+            let opcode = (insn >> 12) & 0x1F;
+            let a = self.vregs[((insn >> 5) & 0x1F) as usize];
+            let rd = (insn & 0x1F) as usize;
+            if !unsigned {
+                if opcode != 0b11011 || (insn >> 22) & 0b11 != 0b11 {
+                    return Ok(false); // ADDP only, and only on doublewords
+                }
+                self.vregs[rd] = u128::from((a as u64).wrapping_add((a >> 64) as u64));
+                return Ok(true);
+            }
+            let double = (insn >> 22) & 1 == 1;
+            let min = (insn >> 23) & 1 == 1;
+            let op = |x: f64, y: f64| -> Option<f64> {
+                Some(match (opcode, min) {
+                    (0b01100, false) => fp_maxnum(x, y),
+                    (0b01100, true) => fp_minnum(x, y),
+                    (0b01101, false) => x + y,
+                    (0b01111, false) => fp_max(x, y),
+                    (0b01111, true) => fp_min(x, y),
+                    _ => return None,
+                })
+            };
+            self.vregs[rd] = if double {
+                let lane = |i: u32| f64::from_bits((a >> (64 * i)) as u64);
+                let Some(r) = op(lane(0), lane(1)) else {
+                    return Ok(false);
+                };
+                u128::from(r.to_bits())
+            } else {
+                let lane = |i: u32| f32::from_bits((a >> (32 * i)) as u32);
+                // Widened and narrowed back, as the vector pairwise forms
+                // compute singles, so the two agree on every sum.
+                let Some(r) = op(f64::from(lane(0)), f64::from(lane(1))) else {
+                    return Ok(false);
+                };
+                u128::from((r as f32).to_bits())
+            };
+            return Ok(true);
+        }
+        // Scalar integer three-same, the compares and ADD/SUB: the vector
+        // group's opcodes on one doubleword, the only size these have as
+        // scalars, with the rest of the register zeroed. Tomodachi Life's
+        // `cmeq d4, d19, d4` = 0x7ee48e64 stopped the run.
+        if ((insn >> 30) & 0b11) == 0b01
+            && ((insn >> 24) & 0x1F) == 0b11110
+            && ((insn >> 21) & 1) == 1
+            && ((insn >> 10) & 1) == 1
+            && matches!((insn >> 11) & 0x1F, 0b00110 | 0b00111 | 0b10000 | 0b10001)
+        {
+            if (insn >> 22) & 0b11 != 0b11 {
+                return Ok(false); // no byte, half or word scalar form
+            }
+            let unsigned = (insn >> 29) & 1 == 1;
+            let a = self.vregs[((insn >> 5) & 0x1F) as usize] as u64;
+            let b = self.vregs[((insn >> 16) & 0x1F) as usize] as u64;
+            let all = |holds: bool| if holds { u64::MAX } else { 0 };
+            let v = match ((insn >> 11) & 0x1F, unsigned) {
+                (0b00110, false) => all((a as i64) > (b as i64)), // CMGT
+                (0b00110, true) => all(a > b),                    // CMHI
+                (0b00111, false) => all((a as i64) >= (b as i64)), // CMGE
+                (0b00111, true) => all(a >= b),                   // CMHS
+                (0b10000, false) => a.wrapping_add(b),            // ADD
+                (0b10000, true) => a.wrapping_sub(b),             // SUB
+                (0b10001, false) => all(a & b != 0),              // CMTST
+                _ => all(a == b),                                 // CMEQ
+            };
+            self.vregs[(insn & 0x1F) as usize] = u128::from(v);
+            return Ok(true);
+        }
         // The same group's scalar forms: `01 U 11110 size 10000 opcode(5) 10`.
         // One lane, and the rest of the register is zeroed.
         // `ucvtf s13, s13` = 0x7e21d9ad.
@@ -1383,6 +1464,29 @@ impl Cpu {
         let opcode = (insn >> 12) & 0x1F;
         let rn = ((insn >> 5) & 0x1F) as u8;
         let rd = (insn & 0x1F) as u8;
+        // FMAXNMV / FMINNMV (0b01100) and FMAXV / FMINV (0b01111): the
+        // single-precision forms, U set, bit 23 choosing the minimum, and
+        // four lanes the only arrangement there is. They reduce in pairs,
+        // (0 op 1) op (2 op 3), which is the architecture's order and the
+        // one a NaN's position can tell apart. Tomodachi Life's
+        // `fmaxnmv s0, v0.4s` = 0x6e30c800 stopped the run.
+        if u == 1 && matches!(opcode, 0b01100 | 0b01111) {
+            if !q || (insn >> 22) & 1 != 0 {
+                return Ok(false); // two lanes, or doubles: unallocated
+            }
+            let min = (insn >> 23) & 1 == 1;
+            let op = |x: f64, y: f64| match (opcode == 0b01100, min) {
+                (true, false) => fp_maxnum(x, y),
+                (true, true) => fp_minnum(x, y),
+                (false, false) => fp_max(x, y),
+                (false, true) => fp_min(x, y),
+            };
+            let a = self.vregs[rn as usize];
+            let lane = |i: u32| f64::from(f32::from_bits((a >> (32 * i)) as u32));
+            let reduced = op(op(lane(0), lane(1)), op(lane(2), lane(3))) as f32;
+            self.vregs[rd as usize] = u128::from(reduced.to_bits());
+            return Ok(true);
+        }
         if size == 0b11 || !matches!(opcode, 0b00011 | 0b01010 | 0b11010 | 0b11011) {
             return Ok(false);
         }

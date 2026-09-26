@@ -2062,3 +2062,119 @@ fn simd_fixed_point_converts_in_both_directions() {
     assert_eq!(cpu.read_vreg(7), 8192, "the scalar form converts one lane");
     assert_eq!(cpu.read_vreg(9), u128::from((-1.0f64).to_bits()));
 }
+
+/// The scalar integer compares and ADD/SUB, which exist only on a doubleword.
+/// Minus one against one is where the signed and unsigned forms disagree.
+/// `cmeq d4, d19, d4` is Tomodachi Life's, and the first one it reached
+/// stopped the run.
+#[test]
+fn simd_scalar_compares_and_add_sub_on_a_doubleword() {
+    const ONES: u64 = u64::MAX;
+    let code = [
+        0x7ee4_8e64u32, // cmeq d4, d19, d4
+        0x5ee2_8c20,    // cmtst d0, d1, d2
+        0x5ee5_3483,    // cmgt d3, d4, d5
+        0x7ee8_34e6,    // cmhi d6, d7, d8
+        0x5eeb_3d49,    // cmge d9, d10, d11
+        0x7eee_3dac,    // cmhs d12, d13, d14
+        0x5ef1_860f,    // add d15, d16, d17
+        0x7ef4_8672,    // sub d18, d19, d20
+        nop(),
+    ];
+    let mut cpu = cpu_at(0x1000);
+    let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    let minus_one = u128::from(ONES) | (7u128 << 64);
+    cpu.set_vreg(19, 5);
+    cpu.set_vreg(4, 5 | (9u128 << 64));
+    cpu.set_vreg(1, 0b1010);
+    cpu.set_vreg(2, 0b0101);
+    // cmgt's first operand is d4, which cmeq sets to all ones first.
+    cpu.set_vreg(5, 1);
+    for (a, b) in [(7, 8), (10, 11), (13, 14)] {
+        cpu.set_vreg(a, minus_one);
+        cpu.set_vreg(b, 1);
+    }
+    cpu.set_vreg(16, u128::from(ONES));
+    cpu.set_vreg(17, 2);
+    cpu.set_vreg(20, 6);
+    cpu.run(8).unwrap();
+
+    assert_eq!(
+        cpu.read_vreg(4),
+        u128::from(ONES),
+        "cmeq: equal, and the upper half cleared"
+    );
+    assert_eq!(cpu.read_vreg(0), 0, "cmtst: no bit in common");
+    assert_eq!(cpu.read_vreg(3), 0, "cmgt: -1 is not greater than 1");
+    assert_eq!(cpu.read_vreg(6), u128::from(ONES), "cmhi: 2^64-1 is");
+    assert_eq!(cpu.read_vreg(9), 0, "cmge: signed");
+    assert_eq!(cpu.read_vreg(12), u128::from(ONES), "cmhs: unsigned");
+    assert_eq!(cpu.read_vreg(15), 1, "add wraps");
+    assert_eq!(cpu.read_vreg(18), u128::from(ONES), "sub: 5 - 6 wraps");
+}
+
+/// The floating-point reductions across four lanes. `fmaxnmv s0, v0.4s` is
+/// Tomodachi Life's, and the first one it reached stopped the run.
+#[test]
+fn simd_fp_reductions_across_lanes() {
+    let f32s = |lanes: [f32; 4]| -> u128 {
+        lanes
+            .iter()
+            .enumerate()
+            .map(|(i, f)| u128::from(f.to_bits()) << (32 * i))
+            .sum()
+    };
+    let code = [
+        0x6e30_c800u32, // fmaxnmv s0, v0.4s
+        0x6eb0_c841,    // fminnmv s1, v2.4s
+        0x6e30_f883,    // fmaxv s3, v4.4s
+        0x6eb0_f8c5,    // fminv s5, v6.4s
+        nop(),
+    ];
+    let mut cpu = cpu_at(0x1000);
+    let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    let lanes = f32s([1.5, -7.0, 42.0, 0.25]);
+    for reg in [0, 2, 4, 6] {
+        cpu.set_vreg(reg, lanes);
+    }
+    cpu.run(4).unwrap();
+    // One lane written, the rest of each register cleared.
+    assert_eq!(cpu.read_vreg(0), u128::from(42.0f32.to_bits()));
+    assert_eq!(cpu.read_vreg(1), u128::from((-7.0f32).to_bits()));
+    assert_eq!(cpu.read_vreg(3), u128::from(42.0f32.to_bits()));
+    assert_eq!(cpu.read_vreg(5), u128::from((-7.0f32).to_bits()));
+}
+
+/// The scalar pairwise reductions: two lanes into one, on a doubleword pair
+/// or a single or double one. `fmaxp s0, v0.2s` is Tomodachi Life's, and the
+/// first one it reached stopped the run.
+#[test]
+fn simd_scalar_pairwise_reduces_two_lanes_into_one() {
+    let singles = |a: f32, b: f32| u128::from(a.to_bits()) | (u128::from(b.to_bits()) << 32);
+    let doubles = |a: f64, b: f64| u128::from(a.to_bits()) | (u128::from(b.to_bits()) << 64);
+    let code = [
+        0x7e30_f800u32, // fmaxp s0, v0.2s
+        0x7e30_d822,    // faddp s2, v1.2s
+        0x7e70_d864,    // faddp d4, v3.2d
+        0x5ef1_b8a6,    // addp d6, v5.2d
+        0x7ef0_c8e8,    // fminnmp d8, v7.2d
+        nop(),
+    ];
+    let mut cpu = cpu_at(0x1000);
+    let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    // Lanes above the pair hold something, which the result must not keep.
+    cpu.set_vreg(0, singles(-2.5, 9.0) | (u128::MAX << 64));
+    cpu.set_vreg(1, singles(1.25, 2.5));
+    cpu.set_vreg(3, doubles(0.5, 0.25));
+    cpu.set_vreg(5, u128::from(u64::MAX) | (3u128 << 64));
+    cpu.set_vreg(7, doubles(4.0, -8.0));
+    cpu.run(5).unwrap();
+    assert_eq!(cpu.read_vreg(0), u128::from(9.0f32.to_bits()));
+    assert_eq!(cpu.read_vreg(2), u128::from(3.75f32.to_bits()));
+    assert_eq!(cpu.read_vreg(4), u128::from(0.75f64.to_bits()));
+    assert_eq!(cpu.read_vreg(6), 2, "addp wraps");
+    assert_eq!(cpu.read_vreg(8), u128::from((-8.0f64).to_bits()));
+}
