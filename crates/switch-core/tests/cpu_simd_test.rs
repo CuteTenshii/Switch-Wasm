@@ -1999,3 +1999,66 @@ fn the_exception_flags_are_sticky_until_written() {
     );
     assert_eq!(cpu.read_x(8), 0, "writing FPSR did not clear the flags");
 }
+
+/// Fixed-point conversions, the shift-by-immediate encodings whose shift is a
+/// count of fraction bits. `fcvtzs v0.4s, v0.4s, #15` is Just Dance 2023
+/// turning float samples into Q15, and the first one it reached ended the run.
+#[test]
+fn simd_fixed_point_converts_in_both_directions() {
+    let f32s = |lanes: [f32; 4]| -> u128 {
+        lanes
+            .iter()
+            .enumerate()
+            .map(|(i, f)| u128::from(f.to_bits()) << (32 * i))
+            .sum()
+    };
+    let words = |lanes: [u32; 4]| -> u128 {
+        lanes
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| u128::from(w) << (32 * i))
+            .sum()
+    };
+    let f64s = |lanes: [f64; 2]| -> u128 {
+        u128::from(lanes[0].to_bits()) | (u128::from(lanes[1].to_bits()) << 64)
+    };
+    let code = [
+        0x4f31_fc00u32, // fcvtzs v0.4s, v0.4s, #15
+        0x6f78_fc41,    // fcvtzu v1.2d, v2.2d, #8
+        0x4f31_e483,    // scvtf v3.4s, v4.4s, #15
+        0x2f3f_e4c5,    // ucvtf v5.2s, v6.2s, #1
+        0x5f31_fd07,    // fcvtzs s7, s8, #15
+        0x5f7d_e549,    // scvtf d9, d10, #3
+        nop(),
+    ];
+    let mut cpu = cpu_at(0x1000);
+    let bytes: Vec<u8> = code.iter().flat_map(|w| w.to_le_bytes()).collect();
+    cpu.mem.map(0x1000, &bytes).unwrap();
+    cpu.set_vreg(0, f32s([0.5, -1.0, 1e10, f32::NAN]));
+    cpu.set_vreg(2, f64s([-3.0, 2.75]));
+    cpu.set_vreg(4, words([0x4000, 0xFFFF_8000, 1, 0]));
+    cpu.set_vreg(5, u128::MAX);
+    cpu.set_vreg(6, words([3, 0xFFFF_FFFF, 7, 7]));
+    cpu.set_vreg(8, f32s([0.25, 7.0, 7.0, 7.0]));
+    cpu.set_vreg(10, u128::from((-8i64) as u64));
+    cpu.run(6).unwrap();
+
+    assert_eq!(
+        cpu.read_vreg(0),
+        words([0x4000, 0xFFFF_8000, 0x7FFF_FFFF, 0]),
+        "toward zero, saturating, NaN to 0"
+    );
+    assert_eq!(
+        cpu.read_vreg(1),
+        704u128 << 64,
+        "unsigned: a negative saturates to 0"
+    );
+    assert_eq!(cpu.read_vreg(3), f32s([0.5, -1.0, 1.0 / 32768.0, 0.0]));
+    assert_eq!(
+        cpu.read_vreg(5),
+        u128::from(1.5f32.to_bits()) | (u128::from(2_147_483_648f32.to_bits()) << 32),
+        "a 64-bit vector clears the upper half"
+    );
+    assert_eq!(cpu.read_vreg(7), 8192, "the scalar form converts one lane");
+    assert_eq!(cpu.read_vreg(9), u128::from((-1.0f64).to_bits()));
+}

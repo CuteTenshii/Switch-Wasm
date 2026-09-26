@@ -109,6 +109,32 @@ impl Cpu {
                     0b0100..=0b0111 => 32,
                     _ => 64,
                 };
+                // SCVTF / UCVTF and FCVTZS / FCVTZU with a fixed-point
+                // operand, whose fraction bits are encoded the way the other
+                // opcodes encode a right shift.
+                if matches!(opcode, 0b11100 | 0b11111) {
+                    if vector_shift && !q && esize == 64 {
+                        return Err(Error::Cpu(format!(
+                            "unallocated SIMD fixed-point convert {insn:#010x}: one 64-bit lane in a 64-bit vector"
+                        )));
+                    }
+                    let lanes = match (scalar_shift, q) {
+                        (true, _) => 1,
+                        (false, true) => 128 / esize,
+                        (false, false) => 64 / esize,
+                    };
+                    return self
+                        .simd_fixed_convert(
+                            rd,
+                            rn,
+                            lanes,
+                            esize,
+                            2 * esize - imm,
+                            opcode == 0b11111,
+                            u,
+                        )
+                        .map(|()| true);
+                }
                 return self
                     .simd_shift_imm(rd, rn, q, u, opcode, esize, imm)
                     .map(|()| true);
@@ -1417,6 +1443,66 @@ impl Cpu {
         };
         self.vregs[rd as usize] = result;
         Ok(true)
+    }
+
+    /// SCVTF / UCVTF (`to_int` false) and FCVTZS / FCVTZU (`to_int` true) on
+    /// `lanes` lanes of `esize` bits, each a fixed-point number with `fbits`
+    /// fraction bits. `fcvtzs v0.4s, v0.4s, #15` is how Just Dance 2023 turns
+    /// float samples into Q15 before narrowing them to 16 bits.
+    ///
+    /// Each lane converts as the scalar [`Cpu::fp_fixed_conv`] does: toward
+    /// zero and saturating into an integer, NaN to 0; to nearest into a float.
+    /// Lanes past `lanes` are cleared, as for any AdvSIMD result.
+    #[allow(clippy::too_many_arguments)]
+    fn simd_fixed_convert(
+        &mut self,
+        rd: u8,
+        rn: u8,
+        lanes: u32,
+        esize: u32,
+        fbits: u32,
+        to_int: bool,
+        unsigned: bool,
+    ) -> Result<()> {
+        if esize == 16 {
+            return Err(Error::Cpu(
+                "unimplemented half-precision SIMD fixed-point convert".to_owned(),
+            ));
+        }
+        let mask = if esize == 64 {
+            u64::MAX
+        } else {
+            (1u64 << esize) - 1
+        };
+        let scale = Self::pow2(fbits);
+        let src = self.vregs[rn as usize];
+        let mut out: u128 = 0;
+        for i in 0..lanes {
+            let raw = (src >> (esize * i)) as u64 & mask;
+            let value = if to_int {
+                let f = if esize == 64 {
+                    f64::from_bits(raw)
+                } else {
+                    f64::from(f32::from_bits(raw as u32))
+                };
+                round_to_int_sized(f * scale, Rounding::TowardZero, !unsigned, esize) & mask
+            } else {
+                let int = match (unsigned, esize == 64) {
+                    (false, true) => raw as i64 as f64,
+                    (false, false) => f64::from(raw as u32 as i32),
+                    (true, true) => raw as f64,
+                    (true, false) => f64::from(raw as u32),
+                };
+                if esize == 64 {
+                    (int / scale).to_bits()
+                } else {
+                    u64::from(((int / scale) as f32).to_bits())
+                }
+            };
+            out |= u128::from(value) << (esize * i);
+        }
+        self.vregs[rd as usize] = out;
+        Ok(())
     }
 
     /// AdvSIMD shift-by-immediate.

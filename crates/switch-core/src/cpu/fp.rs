@@ -604,7 +604,7 @@ impl Cpu {
     /// bounds. A power of two is exact: the exponent field is `1023 + n` and
     /// the mantissa is zero.
     #[inline(always)]
-    fn pow2(n: u32) -> f64 {
+    pub(super) fn pow2(n: u32) -> f64 {
         debug_assert!(n <= 1023);
         f64::from_bits(u64::from(1023 + n) << 52)
     }
