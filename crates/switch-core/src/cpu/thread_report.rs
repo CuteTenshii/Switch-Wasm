@@ -305,7 +305,13 @@ impl Cpu {
                         }
                     })
                     .collect();
-                format!("waiting on {}", waits.join(", "))
+                // `nn::os` sleeps by waiting on no handles at all, and that
+                // is a thread with nothing to be woken by but its timeout.
+                if waits.is_empty() {
+                    "asleep in a wait on no handles".to_owned()
+                } else {
+                    format!("waiting on {}", waits.join(", "))
+                }
             }
         };
         if thread.paused {
