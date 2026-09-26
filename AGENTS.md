@@ -55,6 +55,12 @@ cargo clippy --workspace --all-targets -- -D warnings
   it emits, against the interpreter, after `make wasm`. Host tests cannot: the
   offsets emitted code uses are wasm32's, and only the browser build has
   anything that can compile a module.
+- `node tools/browser_boot.mjs <container> [--keys=…] [--title-keys=…]
+  [--seconds=N] [--out=log.txt]` boots a container in the built site in a real
+  browser and saves what the page and its worker said. It serves `dist` itself,
+  so run `make assets` first. The browser is Playwright's
+  (`bunx playwright install chromium`, once per machine), or the Chromium that
+  `CHROMIUM` names.
 - `make all` runs the Rust tests and builds the browser site.
 - `make wasm` builds `switch-wasm` with the WebGPU feature and runs
   `wasm-bindgen`. The installed CLI version must match `Cargo.lock`.
