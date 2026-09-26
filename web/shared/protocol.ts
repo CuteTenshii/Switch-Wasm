@@ -56,6 +56,8 @@ export interface GpuReport {
    *  the device is working. */
   softwareFrame?: boolean;
   gaveUp?: boolean;
+  /** Why the device was lost, when it was. */
+  lostBecause?: string | null;
   /** Every distinct reason a draw fell back, in the order first seen. */
   reasons?: string[];
   /** What the device itself rejected, which is not the same as a fallback:

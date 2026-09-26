@@ -10,7 +10,7 @@ import { CMD } from './commands';
 import { workerLog } from './log';
 import init from '@core/switch_wasm.js';
 import wasmUrl from '@core/switch_wasm_bg.wasm?url';
-import { state, type WasmExports } from './wasm';
+import { api, readWholeJson, state, type WasmExports } from './wasm';
 
 // The WebWorker lib types `self` as the shared WorkerGlobalScope, which has no
 // postMessage; this worker is a dedicated one, and that is where the reply
@@ -207,7 +207,14 @@ function tryGpu(): void {
     }
     gpuReopens++;
     gpu = 'no';
-    workerLog(`[gpu] the device was lost - opening another (attempt ${gpuReopens})`);
+    // Read before the next backend replaces this one and its report with it.
+    const report = readWholeJson<{ lostBecause?: string | null }>(
+      2048,
+      (buf, cap) => api().switch_gpu_report_json(state.handle, buf, cap),
+      {},
+    );
+    const why = report.lostBecause ? ` (${report.lostBecause})` : '';
+    workerLog(`[gpu] the device was lost${why} - opening another (attempt ${gpuReopens})`, 'err');
   }
   // A session the backend was not opened on has no backend, whatever the flag
   // says. `never` is left alone deliberately: it means this browser has no

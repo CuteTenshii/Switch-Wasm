@@ -111,7 +111,10 @@ $('btn-gpustats').addEventListener('click', async () => {
       `${g.held ?? 0} surfaces held (${g.evicted ?? 0} evicted, ${g.pending ?? 0} pending)`,
     'dim',
   );
-  if (g.gaveUp) log('rendering: the device was lost - the rasterizer has every frame.', 'err');
+  if (g.gaveUp) {
+    const why = g.lostBecause ? `: ${g.lostBecause}` : '';
+    log(`rendering: the device was lost - the rasterizer has every frame${why}.`, 'err');
+  }
   else if (g.softwareFrame) {
     log('rendering: the software-frame latch has tripped - every frame from here is the rasterizer\'s.', 'err');
   }

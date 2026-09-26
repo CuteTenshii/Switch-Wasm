@@ -3842,7 +3842,7 @@ impl Renderer for Gpu {
              \"read\":{{\"textures\":{},\"vertex\":{},\"constants\":{},\"index\":{}}},\
              \"textureHits\":{},\"textureMisses\":{},\
              \"shaderHits\":{},\"shaderMisses\":{},\
-             \"softwareFrame\":{},\"gaveUp\":{},\"reasons\":[{}],\
+             \"softwareFrame\":{},\"gaveUp\":{},\"lostBecause\":{},\"reasons\":[{}],\
              \"deviceErrorCount\":{},\"deviceErrors\":[{}]{}}}",
             self.drawn,
             self.fallbacks,
@@ -3861,6 +3861,9 @@ impl Renderer for Gpu {
             self.shader_misses,
             self.software_frame,
             self.gave_up,
+            self.report
+                .as_deref()
+                .map_or("null".to_string(), json_string),
             reasons.join(","),
             error_count,
             errors.join(","),
@@ -3871,14 +3874,14 @@ impl Renderer for Gpu {
 
 impl Gpu {
     fn flush_inner(&mut self, ctx: &mut ExecCtx) -> Result<Flush> {
+        // After a loss the frame is ready: guest memory is the whole truth
+        // again and there is nothing left to wait for. The reason goes out in
+        // the report, not as an error, because a flush runs inside a GPU
+        // submission as well as before a present, and an error there faulted
+        // the guest: Persona 5 Royal's device ran out of memory and the title
+        // stopped, where the rasterizer could have carried on.
         if self.give_up() {
-            // The first flush after the loss carries the reason out; every one
-            // after it says the frame is ready, because guest memory is now
-            // the whole truth and there is nothing left to wait for.
-            return match self.report.take() {
-                Some(why) => Err(Error::Gpu(why)),
-                None => Ok(Flush::Done),
-            };
+            return Ok(Flush::Done);
         }
         // Nothing on the device, nothing owed, nothing in flight: guest
         // memory cannot disagree with a backend holding no surfaces, so there
@@ -4140,6 +4143,28 @@ mod tests {
         }
         assert!(can_blend(wgpu::TextureFormat::Rgba16Float, none));
         assert!(can_blend(wgpu::TextureFormat::Rgba8Unorm, none));
+    }
+
+    /// A lost device hands the frame to the rasterizer without failing the
+    /// flush that finds out. The flush runs inside a GPU submission too, and
+    /// an error there faulted Persona 5 Royal when its device ran out of
+    /// memory. The reason goes into the report instead.
+    #[test]
+    fn a_lost_device_is_reported_rather_than_failing_the_flush() {
+        use switch_core::gpu::renderer::Renderer;
+        let Ok(mut gpu) = super::Gpu::open() else {
+            return;
+        };
+        let mut h = Harness::new();
+        h.triangle([1.0, 0.0, 1.0, 1.0]);
+        h.draw_with(&mut gpu).expect("the draw");
+        *gpu.lost.lock().unwrap() = Some("Out of memory".into());
+        // `flush_with` panics on an error, which is the point.
+        h.flush_with(&mut gpu);
+        h.flush_with(&mut gpu);
+        let json = gpu.report_json();
+        assert!(json.contains("\"gaveUp\":true"), "{json}");
+        assert!(json.contains("Out of memory"), "{json}");
     }
 
     /// A rejection the backend never asks about still reaches the report.
