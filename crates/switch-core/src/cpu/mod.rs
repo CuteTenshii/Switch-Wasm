@@ -107,6 +107,10 @@ pub const THREAD_EXIT_TRAMPOLINE: u32 = 0x2000_0100;
 /// same value as `EntryType_MainThreadHandle`).
 pub const MAIN_THREAD_HANDLE: u64 = 1;
 
+/// Horizon's `CUR_THREAD` pseudo-handle: in a thread syscall, the calling
+/// thread, whatever its real handle is.
+pub const CURRENT_THREAD_PSEUDO_HANDLE: u64 = 0xFFFF_8000;
+
 /// The main thread's TLS block, which `Cpu::bootstrap` puts in `tpidr`.
 pub const MAIN_THREAD_TLS_BASE: u32 = 0x2010_0000;
 
@@ -1055,6 +1059,11 @@ pub struct ThreadContext {
     fpsr: u32,
     tpidr: u64,
     tpidr_rw: u64,
+    /// Its priority, 0 (most urgent) to 63: see [`Cpu::pick_next`].
+    priority: u8,
+    /// Scheduling decisions it has been runnable for and not chosen, since
+    /// it last ran: see [`STARVE_DECISIONS`].
+    passed_over: u32,
     /// Where it started, and the argument it started with, for the thread
     /// report: an `nn::os` thread's argument is its `ThreadType`, which is
     /// where its name is.
@@ -1672,6 +1681,9 @@ pub struct Cpu {
     /// Every loaded module's `(start, end, name)`, so an address can be named
     /// as an offset into its module.
     module_names: Vec<(u32, u32, String)>,
+    /// The priority the main thread runs at: see
+    /// [`Cpu::set_main_thread_priority`].
+    main_thread_priority: u8,
 }
 
 /// How many recently-executed instructions the fault trace shows.
@@ -1831,6 +1843,27 @@ pub const HID_SAMPLE_PERIOD_CYCLES: u64 = 1_020_000_000 / 200;
 /// would be 1000 instructions: far more switching than the saving is worth
 /// here, where a guest instruction is hundreds of host ones.
 const TIME_SLICE: u64 = 20_000;
+
+/// The priority a thread gets when nothing says otherwise: the main thread
+/// of a title with no manifest, which is also what most retail manifests
+/// declare. Horizon priorities run from 0, the most urgent, to 63.
+pub const DEFAULT_THREAD_PRIORITY: u8 = 44;
+
+/// The least urgent priority a thread can be given.
+const LOWEST_PRIORITY: u8 = 63;
+
+/// How many scheduling decisions in a row a runnable thread may be passed
+/// over for a more urgent one before it runs regardless.
+///
+/// Horizon's rule is strict, the most urgent runnable thread runs, and on a
+/// console that is safe because a title's threads are spread over three
+/// cores: a busy high-priority thread leaves the others theirs. Here every
+/// thread shares one, and a strict rule would let a high-priority thread
+/// that spins waiting on a lower one, fine on hardware where the other runs
+/// beside it, wait for ever. So priority decides, and this bounds it: two
+/// busy threads split the CPU roughly this many to one, and a thread that
+/// yields in a loop hands over within this many yields rather than never.
+const STARVE_DECISIONS: u32 = 8;
 
 impl Default for Cpu {
     fn default() -> Self {
@@ -2003,6 +2036,7 @@ impl Cpu {
             thread_log: Vec::new(),
             thread_log_dropped: 0,
             module_names: Vec::new(),
+            main_thread_priority: DEFAULT_THREAD_PRIORITY,
         };
         // The framebuffer and input registers are fixed hardware-mapped
         // regions: pre-map them so reads never fault and programs (or the
@@ -2102,6 +2136,8 @@ impl Cpu {
                 fpsr: 0,
                 tpidr: self.tpidr,
                 tpidr_rw: self.tpidr_rw,
+                priority: self.main_thread_priority,
+                passed_over: 0,
                 entry: 0,
                 arg: 0,
                 ran: 0,
@@ -2114,7 +2150,13 @@ impl Cpu {
     /// Create a thread the way `svcCreateThread` does: its own TLS block (with
     /// the libnx `ThreadVars` the guest reads through TPIDRRO_EL0), the given
     /// stack and entry point, and the argument in x0. Returns its handle.
-    pub(super) fn create_thread(&mut self, entry: u32, arg: u64, stack_top: u64) -> u64 {
+    pub(super) fn create_thread(
+        &mut self,
+        entry: u32,
+        arg: u64,
+        stack_top: u64,
+        priority: u8,
+    ) -> u64 {
         self.ensure_main_thread();
         let handle = self.alloc_handle();
         let index = self.threads.len() as u32;
@@ -2157,13 +2199,15 @@ impl Cpu {
             fpsr: 0,
             tpidr: u64::from(tls),
             tpidr_rw: 0,
+            priority: priority.min(LOWEST_PRIORITY),
+            passed_over: 0,
             entry,
             arg,
             ran: 0,
             switches: 0,
         });
         let line = format!(
-            "{} created by {}: arg {arg:#x}, stack top {stack_top:#x}",
+            "{} created by {}: arg {arg:#x}, stack top {stack_top:#x}, priority {priority}",
             self.thread_label(handle),
             self.thread_label(self.current_thread_handle())
         );
@@ -2287,14 +2331,117 @@ impl Cpu {
         }
     }
 
-    /// Give up the CPU at a blocking syscall. Does nothing when this is the
-    /// only runnable thread, so single-threaded programs behave exactly as
-    /// before.
+    /// Give up the CPU, at a yielding syscall or at the end of a time slice,
+    /// to whichever thread [`Cpu::pick_next`] chooses. Does nothing when this
+    /// is the only runnable thread, so single-threaded programs behave exactly
+    /// as before, or when the running thread is still the one that should run:
+    /// more urgent than every other runnable thread, and none of them starved.
     pub(super) fn yield_thread(&mut self) {
         if self.threads.len() < 2 || !self.has_other_runnable() {
             return;
         }
+        let current = self.current_thread;
+        let still_runnable =
+            self.threads[current].state == ThreadState::Runnable && !self.threads[current].paused;
+        if still_runnable {
+            if let Some(next) = self.pick_next() {
+                let other = &self.threads[next];
+                if other.passed_over < STARVE_DECISIONS
+                    && self.threads[current].priority < other.priority
+                {
+                    self.pass_over_all_but(current);
+                    return;
+                }
+            }
+        }
         self.switch_to_next_runnable();
+    }
+
+    /// The thread that should run next, other than the running one: a
+    /// starved thread first (see [`STARVE_DECISIONS`]), then the most urgent
+    /// priority, and among equals the next in round-robin order, which is
+    /// Horizon's rule for threads of one priority. `None` when no other
+    /// thread can run.
+    fn pick_next(&self) -> Option<usize> {
+        let count = self.threads.len();
+        let start = self.current_thread;
+        let mut best: Option<usize> = None;
+        for step in 1..count {
+            let candidate = (start + step) % count;
+            let thread = &self.threads[candidate];
+            if thread.state != ThreadState::Runnable || thread.paused {
+                continue;
+            }
+            if thread.passed_over >= STARVE_DECISIONS {
+                return Some(candidate);
+            }
+            if best.is_none_or(|b| thread.priority < self.threads[b].priority) {
+                best = Some(candidate);
+            }
+        }
+        best
+    }
+
+    /// Count a scheduling decision against every runnable thread except
+    /// `chosen`, which runs and starts its count again.
+    fn pass_over_all_but(&mut self, chosen: usize) {
+        for (index, thread) in self.threads.iter_mut().enumerate() {
+            if index == chosen {
+                thread.passed_over = 0;
+            } else if thread.state == ThreadState::Runnable && !thread.paused {
+                thread.passed_over = thread.passed_over.saturating_add(1);
+            }
+        }
+    }
+
+    /// `svcGetThreadPriority`: the priority of the thread `handle` names,
+    /// `CURRENT_THREAD` included, or `None` for a handle that is not one.
+    pub(super) fn thread_priority(&self, handle: u64) -> Option<u8> {
+        let handle = self.resolve_thread_handle(handle);
+        match self.threads.iter().find(|t| t.handle == handle) {
+            Some(thread) => Some(thread.priority),
+            // A process that never created a thread has no slot for its main
+            // one yet, and its priority is still the manifest's.
+            None if handle == MAIN_THREAD_HANDLE => Some(self.main_thread_priority),
+            None => None,
+        }
+    }
+
+    /// `svcSetThreadPriority`: `false` for a handle that is not a thread. The
+    /// new priority takes effect at the next scheduling decision.
+    pub(super) fn set_thread_priority(&mut self, handle: u64, priority: u8) -> bool {
+        let handle = self.resolve_thread_handle(handle);
+        self.ensure_main_thread();
+        match self.threads.iter_mut().find(|t| t.handle == handle) {
+            Some(thread) => {
+                thread.priority = priority;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The handle a thread syscall means: `CURRENT_THREAD` is the running
+    /// thread's.
+    fn resolve_thread_handle(&self, handle: u64) -> u64 {
+        if handle == CURRENT_THREAD_PSEUDO_HANDLE {
+            self.current_thread_handle()
+        } else {
+            handle
+        }
+    }
+
+    /// The main thread's priority, from the title's `main.npdm`. Applies to
+    /// the main thread whether or not it already has a slot.
+    pub fn set_main_thread_priority(&mut self, priority: u8) {
+        self.main_thread_priority = priority.min(LOWEST_PRIORITY);
+        if let Some(main) = self
+            .threads
+            .iter_mut()
+            .find(|t| t.handle == MAIN_THREAD_HANDLE)
+        {
+            main.priority = self.main_thread_priority;
+        }
     }
 
     // ---- mutexes and condition variables ----
@@ -2799,27 +2946,19 @@ impl Cpu {
         self.recent_len = self.recent_len.wrapping_add(1);
     }
 
-    /// Round-robin to the next runnable thread. Returns false if there is none
-    /// (in which case the running thread keeps going).
+    /// Switch to the thread [`Cpu::pick_next`] chooses. Returns false if there
+    /// is none (in which case the running thread keeps going).
     fn switch_to_next_runnable(&mut self) -> bool {
-        let count = self.threads.len();
         let start = self.current_thread;
-        for step in 1..=count {
-            let candidate = (start + step) % count;
-            if candidate == start {
-                continue;
-            }
-            if self.threads[candidate].state == ThreadState::Runnable
-                && !self.threads[candidate].paused
-            {
-                self.account_slice(start);
-                self.threads[candidate].switches += 1;
-                self.save_context(start);
-                self.load_context(candidate);
-                return true;
-            }
-        }
-        false
+        let Some(candidate) = self.pick_next() else {
+            return false;
+        };
+        self.pass_over_all_but(candidate);
+        self.account_slice(start);
+        self.threads[candidate].switches += 1;
+        self.save_context(start);
+        self.load_context(candidate);
+        true
     }
 
     fn save_context(&mut self, index: usize) {
@@ -4650,9 +4789,10 @@ impl Cpu {
         for (index, thread) in self.threads.iter().enumerate() {
             let running = index == self.current_thread;
             out.push_str(&format!(
-                "  [{index}]{} handle={:#x} state={:?} paused={} pc={:#x}\n",
+                "  [{index}]{} handle={:#x} priority={} state={:?} paused={} pc={:#x}\n",
                 if running { "*" } else { " " },
                 thread.handle,
+                thread.priority,
                 thread.state,
                 thread.paused,
                 if running { self.pc } else { thread.pc },
@@ -5228,7 +5368,7 @@ impl Cpu {
 
 #[cfg(test)]
 mod tests {
-    use super::Cpu;
+    use super::{Cpu, CURRENT_THREAD_PSEUDO_HANDLE, DEFAULT_THREAD_PRIORITY, MAIN_THREAD_HANDLE};
 
     #[test]
     fn the_idle_moves_the_clock_and_leaves_the_step_count_alone() {
@@ -5254,5 +5394,76 @@ mod tests {
             "the clock idled to the deadline"
         );
         assert_eq!(cpu.steps, steps, "the idle executed nothing");
+    }
+
+    /// Run `rounds` scheduling decisions, each the running thread yielding,
+    /// and count how often each thread ended up holding the CPU.
+    fn shares(cpu: &mut Cpu, rounds: usize) -> Vec<usize> {
+        let mut held = vec![0; cpu.threads.len()];
+        for _ in 0..rounds {
+            cpu.yield_thread();
+            held[cpu.current_thread] += 1;
+        }
+        held
+    }
+
+    /// Horizon runs the most urgent runnable thread; here it gets most of the
+    /// CPU, and a less urgent one still gets a turn within
+    /// `STARVE_DECISIONS` rather than never.
+    #[test]
+    fn the_most_urgent_thread_runs_most_and_starves_nobody() {
+        let mut cpu = Cpu::new();
+        let urgent = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, 30);
+        let idle = cpu.create_thread(0x0800_0000, 0, 0x1100_0000, 50);
+        assert!(cpu.start_thread(urgent) && cpu.start_thread(idle));
+
+        let held = shares(&mut cpu, 900);
+        // Main is 44, the default; thread 1 is 30 and thread 2 is 50.
+        assert!(
+            held[1] > held[0] * 4,
+            "the urgent thread dominates: {held:?}"
+        );
+        assert!(
+            held[1] > held[2] * 4,
+            "the urgent thread dominates: {held:?}"
+        );
+        assert!(held[0] > 0 && held[2] > 0, "nobody is starved: {held:?}");
+    }
+
+    /// Among threads of one priority, Horizon takes turns.
+    #[test]
+    fn threads_of_one_priority_take_turns() {
+        let mut cpu = Cpu::new();
+        let a = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, DEFAULT_THREAD_PRIORITY);
+        let b = cpu.create_thread(0x0800_0000, 0, 0x1100_0000, DEFAULT_THREAD_PRIORITY);
+        assert!(cpu.start_thread(a) && cpu.start_thread(b));
+        assert_eq!(shares(&mut cpu, 300), vec![100, 100, 100]);
+    }
+
+    /// `svcSetThreadPriority` on the running thread, through the pseudo
+    /// handle, is what a title raising its own loader does, and it has to
+    /// change what the next decision picks.
+    #[test]
+    fn a_priority_set_through_the_pseudo_handle_is_the_one_scheduled_on() {
+        let mut cpu = Cpu::new();
+        let worker = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, DEFAULT_THREAD_PRIORITY);
+        assert!(cpu.start_thread(worker));
+        assert_eq!(cpu.thread_priority(CURRENT_THREAD_PSEUDO_HANDLE), Some(44));
+        assert_eq!(cpu.thread_priority(worker), Some(44));
+        assert_eq!(cpu.thread_priority(0xdead), None, "not a thread");
+
+        // The main thread makes itself urgent, and then keeps the CPU.
+        assert!(cpu.set_thread_priority(CURRENT_THREAD_PSEUDO_HANDLE, 10));
+        assert_eq!(cpu.thread_priority(MAIN_THREAD_HANDLE), Some(10));
+        cpu.yield_thread();
+        assert_eq!(
+            cpu.current_thread, 0,
+            "the more urgent main thread keeps running"
+        );
+
+        // A manifest's main-thread priority reaches a main thread that
+        // already has a slot, as well as one created later.
+        cpu.set_main_thread_priority(20);
+        assert_eq!(cpu.thread_priority(MAIN_THREAD_HANDLE), Some(20));
     }
 }

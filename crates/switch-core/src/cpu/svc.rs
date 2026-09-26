@@ -317,9 +317,20 @@ impl Cpu {
                 let entry = self.read_zr(1) as u32;
                 let arg = self.read_zr(2);
                 let stack_top = self.read_zr(3);
-                // Neither priority nor core is acted on. When one is, note
-                // that AArch32 passes them in r0 and r4 rather than X4 and X5.
-                let handle = self.create_thread(entry, arg, stack_top);
+                // The priority is scheduled on; the core is not, every thread
+                // runs on the one core there is. AArch32 passes the priority
+                // in r0 rather than the fifth argument register.
+                let priority = if self.mode == crate::cpu::ExecMode::A32 {
+                    self.read_zr(0)
+                } else {
+                    self.read_zr(4)
+                } as u32;
+                if priority > 63 {
+                    const RESULT_INVALID_PRIORITY: u64 = 1 | (112 << 9);
+                    self.write_zr(0, RESULT_INVALID_PRIORITY);
+                    return Ok(());
+                }
+                let handle = self.create_thread(entry, arg, stack_top, priority as u8);
                 if crate::trace::enabled(crate::trace::Trace::Wait) {
                     crate::traceln!("[thread] create handle={handle:#x} entry={entry:#x}");
                 }
@@ -530,8 +541,37 @@ impl Cpu {
                 self.signal_process_wide_key(key, count);
                 Ok(())
             }
-            0x0C | 0x0D | 0x0E | 0x0F | 0x16 | 0x17 | 0x28 | 0x5F => {
-                // get/set thread priority + core mask / CloseHandle /
+            0x0C => {
+                // GetThreadPriority(handle = X1) -> priority in W1.
+                match self.thread_priority(self.read_zr(1)) {
+                    Some(priority) => {
+                        self.write_zr(0, RESULT_OK);
+                        self.write_zr(1, u64::from(priority));
+                    }
+                    None => self.write_zr(0, RESULT_INVALID_HANDLE),
+                }
+                Ok(())
+            }
+            0x0D => {
+                // SetThreadPriority(handle = X0, priority = W1). The scheduler
+                // acts on it from the next decision on, which is how a title
+                // that raises its loading thread above its render loop gets
+                // the CPU where it asked for it.
+                const RESULT_INVALID_PRIORITY: u64 = 1 | (112 << 9);
+                let handle = self.read_zr(0);
+                let priority = self.read_zr(1) as u32;
+                let result = if priority > 63 {
+                    RESULT_INVALID_PRIORITY
+                } else if self.set_thread_priority(handle, priority as u8) {
+                    RESULT_OK
+                } else {
+                    RESULT_INVALID_HANDLE
+                };
+                self.write_zr(0, result);
+                Ok(())
+            }
+            0x0E | 0x0F | 0x16 | 0x17 | 0x28 | 0x5F => {
+                // get/set thread core mask / CloseHandle /
                 // CancelSynchronization / ReturnFromException /
                 // FlushProcessDataCache: the last of which is real work on a
                 // console and nothing here, where the guest's stores are

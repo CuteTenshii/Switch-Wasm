@@ -48,6 +48,8 @@ pub struct ThreadReport {
     pub at: String,
     /// What it is doing, in words.
     pub state: String,
+    /// Its priority, 0 (most urgent) to 63.
+    pub priority: u8,
     /// Whether it holds the CPU right now.
     pub running: bool,
     /// Instructions it retired since the last reading.
@@ -123,6 +125,7 @@ impl Cpu {
                 entry: "the process entry".to_owned(),
                 at: self.where_is(0),
                 state: "running".to_owned(),
+                priority: self.main_thread_priority,
                 running: true,
                 ran,
                 switches: 0,
@@ -145,6 +148,7 @@ impl Cpu {
                 entry,
                 at: self.where_is(index),
                 state: self.describe_thread(index),
+                priority: thread.priority,
                 running: index == self.current_thread,
                 ran: 0,
                 switches: 0,
@@ -359,7 +363,7 @@ mod tests {
     fn a_thread_is_reported_from_creation_to_exit() {
         let mut cpu = Cpu::new();
         cpu.record_module_name(0x0800_0000, 0x0900_0000, "main");
-        let handle = cpu.create_thread(0x0800_0100, 7, 0x1000_0000);
+        let handle = cpu.create_thread(0x0800_0100, 7, 0x1000_0000, 44);
         assert!(cpu.start_thread(handle));
 
         let (threads, log, dropped) = cpu.take_thread_report();
@@ -389,7 +393,7 @@ mod tests {
     fn a_thread_handle_is_signalled_when_its_thread_exits_and_wakes_its_joiner() {
         use crate::cpu::ThreadState;
         let mut cpu = Cpu::new();
-        let handle = cpu.create_thread(0x0800_0100, 0, 0x1000_0000);
+        let handle = cpu.create_thread(0x0800_0100, 0, 0x1000_0000, 44);
         assert_eq!(cpu.waitable_signaled(handle), Some(false), "created");
         assert!(cpu.start_thread(handle));
         assert_eq!(cpu.waitable_signaled(handle), Some(false), "running");
@@ -435,7 +439,7 @@ mod tests {
             .write_u64(TYPE + 0x1A8, u64::from(TYPE + 0x188))
             .unwrap();
 
-        let handle = cpu.create_thread(0x0800_0100, u64::from(TYPE), 0x1000_0000);
+        let handle = cpu.create_thread(0x0800_0100, u64::from(TYPE), 0x1000_0000, 44);
         let (threads, _, _) = cpu.take_thread_report();
         assert_eq!(threads[1].name.as_deref(), Some("\"LoadingThread\""));
         assert!(cpu.thread_label(handle).contains("\"LoadingThread\""));

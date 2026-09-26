@@ -1511,6 +1511,12 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     );
     cpu.set_system_resource_size(system_resource);
 
+    // The main thread's priority, which the scheduler weighs it by against
+    // the threads it creates.
+    if let Some(priority) = switch_core::npdm::Npdm::main_thread_priority_of(&pfs0, &exefs) {
+        cpu.set_main_thread_priority(priority);
+    }
+
     // And which instruction set it runs, from bit 0 of the same manifest's
     // flags. Also before the boot: the entry ABI puts the return trampoline in
     // a different register in each state.

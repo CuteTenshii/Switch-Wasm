@@ -1179,6 +1179,13 @@ impl Title {
             &self.exefs,
         ));
         cpu.set_program_id(self.nca.program_id);
+        // The main thread's priority, which the scheduler weighs it by
+        // against the threads it creates.
+        if let Some(priority) =
+            switch_core::npdm::Npdm::main_thread_priority_of(&self.exefs_pfs0, &self.exefs)
+        {
+            cpu.set_main_thread_priority(priority);
+        }
         // Which instruction set the title runs, from bit 0 of the same
         // manifest's flags. Before the boot, which lays the entry ABI out
         // differently in each state.

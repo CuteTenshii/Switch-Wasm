@@ -1063,7 +1063,7 @@ fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
         0xd284_0001u32, // mov x1, #0x2000
         0xd280_0002,    // mov x2, #0
         0xd28a_0003,    // mov x3, #0x5000
-        0x5280_0764,    // mov w4, #0x3b
+        0x5280_0584,    // mov w4, #0x2c  (main's priority: a lower one would never be yielded to)
         0x1280_0005,    // mov w5, #-1
         0xd400_0101,    // svc #8
         0xaa01_03e0,    // mov x0, x1
@@ -1126,7 +1126,7 @@ fn a_timed_out_condvar_wait_comes_back_holding_its_mutex() {
         0xd284_0001u32, // mov x1, #0x2000
         0xd280_0002,    // mov x2, #0
         0xd28a_0003,    // mov x3, #0x5000
-        0x5280_0764,    // mov w4, #0x3b
+        0x5280_0584,    // mov w4, #0x2c  (main's priority: a lower one would never be yielded to)
         0x1280_0005,    // mov w5, #-1
         0xd400_0101,    // svc #8      (CreateThread -> x1 = the child's handle)
         0xd28c_0109,    // mov x9, #0x6008
