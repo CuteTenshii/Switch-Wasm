@@ -4,7 +4,9 @@
    Once a second at most, and only for what changed: the frames and the draws,
    clears and copies behind them, and then each surface on its own line, what
    was drawn into it, cleared, copied or blitted between which two, and which
-   one each frame presented; each file the guest read or wrote, by name,
+   one each frame presented; every guest thread created, started, paused or
+   ended, and each thread's share of the instructions and what it is waiting
+   on; each file the guest read or wrote, by name,
    and how much; the guest's path operations (opens, creates, deletes, and the
    lookups that found nothing), one per line, because "the title looked for a
    file and it was not there" is the most common silent failure there is; and
@@ -35,6 +37,22 @@ interface GpuEntry {
   failed: number;
 }
 
+/** One guest thread, as of the reading. `ran` and `switches` cover the time
+ *  since the last one; `state` is what it is doing now, in words. */
+interface ThreadActivity {
+  index: number;
+  handle: number;
+  running: boolean;
+  ran: number;
+  switches: number;
+  entry: string;
+  /** Its pc and the frames above it, innermost first. */
+  at: string;
+  state: string;
+  /** Its `nn::os` name, or for a thread never named, the function it runs. */
+  name: string | null;
+}
+
 /** `switch_activity_json`. The GPU counts and `failures` run from the start
  *  of the session; `gpu`, `files` and `journal` cover the time since the last
  *  call. */
@@ -52,6 +70,9 @@ interface Activity {
   gpuDropped: number;
   files: FileActivity[];
   filesDropped: number;
+  threads: ThreadActivity[];
+  threadLog: string[];
+  threadLogDropped: number;
   journal: string[];
   dropped: number;
 }
@@ -76,12 +97,19 @@ const ZERO: Activity = {
   gpuDropped: 0,
   files: [],
   filesDropped: 0,
+  threads: [],
+  threadLog: [],
+  threadLogDropped: 0,
   journal: [],
   dropped: 0,
 };
 
 let previous: Activity = ZERO;
 let reportedAt = 0;
+
+/** Each thread's state at the last report, by index, so a thread that sat
+ *  still and did not change is not repeated every second. */
+const lastThreadState = new Map<number, string>();
 
 /** Host files registered since the last report, summed rather than listed:
  *  booting from the NAND registers a couple of hundred system archives at
@@ -100,6 +128,7 @@ export function noteRegistered(what: string, bytes: number): void {
 export function resetActivity(): void {
   previous = ZERO;
   reportedAt = 0;
+  lastThreadState.clear();
   registered.clear();
   takeHostIo();
 }
@@ -125,6 +154,7 @@ export function reportActivity(now = false): void {
     if (!current) return;
     logRegistered();
     logGpu(previous, current, reportedAt ? elapsed / 1000 : 0);
+    logThreads(current);
     logFs(previous, current);
     for (const io of takeHostIo()) logHostIo(io);
     previous = current;
@@ -202,6 +232,42 @@ function logSurface(entry: GpuEntry): void {
       break;
   }
   workerLog('[gpu] ' + line, failed ? 'warn' : undefined);
+}
+
+/** An instruction count the way a person reads one: 12.3M rather than
+ *  12345678. */
+function amount(n: number): string {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'G';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+/* The threads: every one created, started, paused or ended since the last
+   report, then each thread that ran or changed what it is doing, with its
+   share of the instructions. A thread at 99% is the one a stalled title is
+   spinning in; one that has been "waiting on" the same thing report after
+   report is the one waiting for something that never comes. */
+function logThreads(now: Activity): void {
+  for (const line of now.threadLog) workerLog('[thread] ' + line);
+  if (now.threadLogDropped > 0) {
+    workerLog(`[thread] ...and ${now.threadLogDropped} more thread events than could be listed`);
+  }
+  const total = now.threads.reduce((sum, t) => sum + t.ran, 0);
+  for (const thread of now.threads) {
+    const changed = lastThreadState.get(thread.index) !== thread.state;
+    lastThreadState.set(thread.index, thread.state);
+    if (!thread.ran && !changed) continue;
+    const share = total ? ` (${Math.round((thread.ran / total) * 100)}%)` : '';
+    const ran = thread.ran
+      ? `${amount(thread.ran)} instructions${share}, ${count(thread.switches, 'switch', 'switches')}`
+      : 'did not run';
+    const who = thread.name ? `${thread.name}, via ${thread.entry}` : thread.entry;
+    workerLog(
+      `[thread] ${thread.index}${thread.running ? '*' : ''} (${who}, handle `
+        + `${thread.handle.toString(16)}): ${ran}; ${thread.state}; ${thread.at}`,
+    );
+  }
 }
 
 function logFs(before: Activity, now: Activity): void {

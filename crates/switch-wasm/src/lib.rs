@@ -1773,8 +1773,10 @@ pub extern "C" fn switch_gpu_report_json(handle: u32, buf: *mut u8, maxlen: u32)
 ///
 /// The GPU counts and `failures` run from boot, so the worker reports the
 /// difference between two readings. `gpu` (draws, clears, copies, blits and
-/// presents by surface), `files` (reads and writes by file) and `journal`
-/// (path operations) are taken instead: each appears in exactly one answer. Both are fitted to `maxlen` rather than truncated by
+/// presents by surface), `threads` (what each ran since the last reading and
+/// what it waits on), `threadLog` (threads created, started, paused and
+/// ended), `files` (reads and writes by file) and `journal` (path
+/// operations) are taken instead: each appears in exactly one answer. Both are fitted to `maxlen` rather than truncated by
 /// [`write_into`], since an answer cut mid-string would lose everything in it
 /// when the page failed to parse it; what does not fit is counted in
 /// `gpuDropped`, `filesDropped` and `dropped` instead.
@@ -1797,8 +1799,8 @@ pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -
         cpu.fs_activity.failures,
     )
     .into_bytes();
-    // Room for the closing fields, whose width is at most three u64s' digits.
-    let budget = (maxlen as usize).saturating_sub(128);
+    // Room for the closing fields, whose width is at most four u64s' digits.
+    let budget = (maxlen as usize).saturating_sub(160);
 
     let files = cpu.fs_activity.take_files();
     let mut files_dropped = 0u64;
@@ -1854,6 +1856,54 @@ pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -
     }
     out.push(b']');
 
+    let (threads, thread_log, mut thread_log_dropped) = cpu.take_thread_report();
+    out.extend_from_slice(b",\"threads\":[");
+    for (i, thread) in threads.iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(
+            format!(
+                "{{\"index\":{},\"handle\":{},\"running\":{},\"ran\":{},\"switches\":{},\"entry\":\"",
+                thread.index, thread.handle, thread.running, thread.ran, thread.switches
+            )
+            .as_bytes(),
+        );
+        json_escape(&thread.entry, &mut out);
+        out.extend_from_slice(b"\",\"at\":\"");
+        json_escape(&thread.at, &mut out);
+        out.extend_from_slice(b"\",\"state\":\"");
+        json_escape(&thread.state, &mut out);
+        out.extend_from_slice(b"\",\"name\":");
+        match &thread.name {
+            Some(name) => {
+                out.push(b'"');
+                json_escape(name, &mut out);
+                out.push(b'"');
+            }
+            None => out.extend_from_slice(b"null"),
+        }
+        out.push(b'}');
+    }
+    out.extend_from_slice(b"],\"threadLog\":[");
+    let mut first = true;
+    for line in &thread_log {
+        let mut entry = Vec::with_capacity(line.len() + 3);
+        if !first {
+            entry.push(b',');
+        }
+        entry.push(b'"');
+        json_escape(line, &mut entry);
+        entry.push(b'"');
+        if out.len() + entry.len() > budget {
+            thread_log_dropped += 1;
+            continue;
+        }
+        out.extend_from_slice(&entry);
+        first = false;
+    }
+    out.push(b']');
+
     let (journal, mut dropped) = cpu.fs_activity.take_journal();
     out.extend_from_slice(b",\"journal\":[");
     let mut first = true;
@@ -1874,7 +1924,8 @@ pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -
     }
     out.extend_from_slice(
         format!(
-            "],\"dropped\":{dropped},\"filesDropped\":{files_dropped},\"gpuDropped\":{gpu_dropped}}}"
+            "],\"dropped\":{dropped},\"filesDropped\":{files_dropped},\"gpuDropped\":{gpu_dropped},\
+             \"threadLogDropped\":{thread_log_dropped}}}"
         )
         .as_bytes(),
     );
@@ -2914,6 +2965,8 @@ mod tests {
         assert_eq!(field(&json, "draws"), "0");
         assert_eq!(field(&json, "files"), "[]");
         assert_eq!(field(&json, "gpu"), "[]");
+        assert_eq!(field(&json, "threadLog"), "[]");
+        assert!(field(&json, "threads").contains("\"index\":0"), "{json}");
         assert_eq!(field(&json, "journal"), "[]");
 
         let activity = &mut session(handle).cpu.fs_activity;

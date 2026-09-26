@@ -49,6 +49,7 @@ mod online;
 mod pl;
 mod power;
 mod settings;
+mod thread_report;
 mod time;
 mod vi;
 
@@ -58,6 +59,7 @@ pub use ipc::POINTER_BUFFER_SIZE;
 pub use jit::{
     defers, emits, set_jit_host, translates, Entry, JitHost, JitStats, Layout, Refused, LEFT,
 };
+pub use thread_report::ThreadReport;
 
 use acc::{DEFAULT_NICKNAME, NICKNAME_LEN};
 pub(crate) use bits::decode_bit_mask;
@@ -1053,6 +1055,15 @@ pub struct ThreadContext {
     fpsr: u32,
     tpidr: u64,
     tpidr_rw: u64,
+    /// Where it started, and the argument it started with, for the thread
+    /// report: an `nn::os` thread's argument is its `ThreadType`, which is
+    /// where its name is.
+    entry: u32,
+    arg: u64,
+    /// Instructions it retired, and times it was given the CPU, since the
+    /// host last took a [`ThreadReport`].
+    ran: u64,
+    switches: u64,
 }
 
 #[derive(Debug)]
@@ -1651,6 +1662,16 @@ pub struct Cpu {
     /// A frame the display was handed whose surface has not come back from
     /// the GPU backend yet. See [`Cpu::complete_pending_present`].
     pub(crate) pending_present: Option<crate::gpu::DisplayBuffer>,
+    /// `steps` when the running thread was last given the CPU, which is what
+    /// its share of the instructions is measured from.
+    switched_in_at: u64,
+    /// Threads created, started, paused and ended since the host last asked:
+    /// see [`ThreadReport`].
+    thread_log: Vec<String>,
+    thread_log_dropped: u64,
+    /// Every loaded module's `(start, end, name)`, so an address can be named
+    /// as an offset into its module.
+    module_names: Vec<(u32, u32, String)>,
 }
 
 /// How many recently-executed instructions the fault trace shows.
@@ -1978,6 +1999,10 @@ impl Cpu {
             pending_sleep: None,
             last_present_cycles: 0,
             pending_present: None,
+            switched_in_at: 0,
+            thread_log: Vec::new(),
+            thread_log_dropped: 0,
+            module_names: Vec::new(),
         };
         // The framebuffer and input registers are fixed hardware-mapped
         // regions: pre-map them so reads never fault and programs (or the
@@ -2077,6 +2102,10 @@ impl Cpu {
                 fpsr: 0,
                 tpidr: self.tpidr,
                 tpidr_rw: self.tpidr_rw,
+                entry: 0,
+                arg: 0,
+                ran: 0,
+                switches: 0,
             });
             self.current_thread = 0;
         }
@@ -2128,7 +2157,17 @@ impl Cpu {
             fpsr: 0,
             tpidr: u64::from(tls),
             tpidr_rw: 0,
+            entry,
+            arg,
+            ran: 0,
+            switches: 0,
         });
+        let line = format!(
+            "{} created by {}: arg {arg:#x}, stack top {stack_top:#x}",
+            self.thread_label(handle),
+            self.thread_label(self.current_thread_handle())
+        );
+        self.log_thread(line);
         handle
     }
 
@@ -2137,9 +2176,16 @@ impl Cpu {
         for thread in &mut self.threads {
             if thread.handle == handle && thread.state == ThreadState::Created {
                 thread.state = ThreadState::Runnable;
+                let line = format!("{} started", self.thread_label(handle));
+                self.log_thread(line);
                 return true;
             }
         }
+        let line = format!(
+            "{} asked to start, but it is not a thread waiting to be started",
+            self.thread_label(handle)
+        );
+        self.log_thread(line);
         false
     }
 
@@ -2153,6 +2199,13 @@ impl Cpu {
             return Some(false);
         }
         thread.paused = paused;
+        let line = format!(
+            "{} {} by {}",
+            self.thread_label(handle),
+            if paused { "paused" } else { "resumed" },
+            self.thread_label(self.current_thread_handle())
+        );
+        self.log_thread(line);
         Some(true)
     }
 
@@ -2212,6 +2265,12 @@ impl Cpu {
     /// exits, matching Horizon.
     pub(super) fn exit_thread(&mut self) {
         self.ensure_main_thread();
+        let line = format!(
+            "{} exited at {}",
+            self.thread_label(self.current_thread_handle()),
+            self.locate(self.pc)
+        );
+        self.log_thread(line);
         if self.current_thread == 0 {
             self.halted = true;
             return;
@@ -2750,6 +2809,8 @@ impl Cpu {
             if self.threads[candidate].state == ThreadState::Runnable
                 && !self.threads[candidate].paused
             {
+                self.account_slice(start);
+                self.threads[candidate].switches += 1;
                 self.save_context(start);
                 self.load_context(candidate);
                 return true;
@@ -2820,7 +2881,14 @@ impl Cpu {
     /// path to "" and exits. Running the constructors fixes that.
     pub fn boot_homebrew(&mut self, data: &[u8]) -> Result<crate::nro::LoadedNro> {
         self.mem.clear_modules();
+        self.module_names.clear();
         let loaded = crate::nro::load_nro(&mut self.mem, data)?;
+        let end = loaded
+            .data
+            .mem_addr
+            .wrapping_add(loaded.data.file_size)
+            .wrapping_add(loaded.bss_size);
+        self.record_module_name(loaded.base, end, "homebrew");
         // Present the NRO on the SD card at the path the environment block
         // advertises as argv[0]: libnx's `romfsMountSelf` re-opens the running
         // NRO through the filesystem to read the RomFS appended to it, which
@@ -2937,6 +3005,7 @@ impl Cpu {
         self.halted = false;
         self.trace_enabled = false;
         self.mem.clear_modules();
+        self.module_names.clear();
         for i in 0..=30u8 {
             self.set_reg(i, 0);
         }
@@ -3005,6 +3074,7 @@ impl Cpu {
                 module.data.mem_addr.wrapping_add(module.data.file_size),
                 image_end,
             ));
+            self.record_module_name(module.base, image_end, name);
             base = image_end.wrapping_add(MODULE_ALIGN - 1) & !(MODULE_ALIGN - 1);
             loaded.push(module);
         }
@@ -4657,21 +4727,32 @@ impl Cpu {
     /// frame base. Stops as soon as the chain leaves mapped memory or fails to
     /// move forward, so a corrupt stack cannot loop.
     pub fn backtrace(&self, depth: usize) -> Vec<u32> {
+        self.walk_frames(&self.regs, self.mode, depth)
+    }
+
+    /// [`Cpu::backtrace`] over any register file: the running thread's, or a
+    /// switched-out thread's as saved when it last gave up the CPU.
+    pub(super) fn walk_frames(
+        &self,
+        regs: &[u64; REG_FILE],
+        mode: ExecMode,
+        depth: usize,
+    ) -> Vec<u32> {
         // Both states chain {saved frame pointer, return address}, but from
         // different registers and in different widths: x29/x30 over 16-byte
         // frames in A64, r11/r14 over 8-byte ones in AArch32.
-        let (mut fp, lr, width) = match self.mode {
-            ExecMode::A64 => (self.regs[29] as u32, self.regs[30] as u32, 8),
-            ExecMode::A32 => (self.regs[11] as u32, self.regs[14] as u32, 4),
+        let (mut fp, lr, width) = match mode {
+            ExecMode::A64 => (regs[29] as u32, regs[30] as u32, 8),
+            ExecMode::A32 => (regs[11] as u32, regs[14] as u32, 4),
         };
         let mut out = Vec::with_capacity(depth + 1);
         out.push(lr);
         for _ in 0..depth {
-            let read = |at: u32| match self.mode {
+            let read = |at: u32| match mode {
                 ExecMode::A64 => self.mem.read_u64(at).map(|v| v as u32),
                 ExecMode::A32 => self.mem.read_u32(at),
             };
-            let (next_fp, lr) = match (read(fp), read(fp + width)) {
+            let (next_fp, lr) = match (read(fp), read(fp.wrapping_add(width))) {
                 (Ok(next_fp), Ok(lr)) => (next_fp, lr),
                 _ => break,
             };

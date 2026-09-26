@@ -230,6 +230,11 @@ impl Cpu {
             ),
             true,
         );
+        self.record_module_name(
+            base,
+            base.wrapping_add(size),
+            &format!("ro@{nro_address:#x}"),
+        );
         self.ro_modules.insert(
             base,
             RoModule {
@@ -287,6 +292,7 @@ impl Cpu {
         self.mem
             .unmark_module(module.base, module.base.wrapping_add(module.size));
         self.mem.unmap(module.base, module.size as usize);
+        self.forget_module_name(module.base);
         self.diagnostic(
             Level::Info,
             &format!(
