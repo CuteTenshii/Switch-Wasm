@@ -1870,8 +1870,8 @@ pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -
         }
         out.extend_from_slice(
             format!(
-                "{{\"index\":{},\"handle\":{},\"running\":{},\"ran\":{},\"switches\":{},\"entry\":\"",
-                thread.index, thread.handle, thread.running, thread.ran, thread.switches
+                "{{\"index\":{},\"handle\":{},\"priority\":{},\"running\":{},\"ran\":{},\"switches\":{},\"entry\":\"",
+                thread.index, thread.handle, thread.priority, thread.running, thread.ran, thread.switches
             )
             .as_bytes(),
         );

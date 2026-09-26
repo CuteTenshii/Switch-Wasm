@@ -42,6 +42,8 @@ interface GpuEntry {
 interface ThreadActivity {
   index: number;
   handle: number;
+  /** 0 is the most urgent, 63 the least. */
+  priority: number;
   running: boolean;
   ran: number;
   switches: number;
@@ -265,7 +267,8 @@ function logThreads(now: Activity): void {
     const who = thread.name ? `${thread.name}, via ${thread.entry}` : thread.entry;
     workerLog(
       `[thread] ${thread.index}${thread.running ? '*' : ''} (${who}, handle `
-        + `${thread.handle.toString(16)}): ${ran}; ${thread.state}; ${thread.at}`,
+        + `${thread.handle.toString(16)}, priority ${thread.priority}): ${ran}; ${thread.state}; `
+        + thread.at,
     );
   }
 }
