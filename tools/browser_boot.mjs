@@ -12,9 +12,15 @@
 // page's run loop, the console the page keeps, and the browser's own errors.
 // Every few seconds it samples the page's run state and how many lines its
 // console holds, so a run that stops making progress is seen stopping rather
-// than guessed at afterwards. At the end it presses "Thread dump" and saves
-// the page's whole console with everything the page and the worker printed
-// to the browser's.
+// than guessed at afterwards. At the end it presses "GPU stats" and "Thread
+// dump" and saves the page's whole console with everything the page and the
+// worker printed to the browser's.
+//
+// WebGPU is switched on, which headless Chromium leaves off. Without it the
+// page renders everything on the software rasterizer and a run says nothing
+// about the renderer a browser really uses. Headless, the adapter is usually
+// SwiftShader's, a CPU implementation: right for whether draws reach the
+// device or fall back, wrong for how fast they are.
 //
 // `--jit-stats` also presses "Block stats" at every sample. The counters are
 // cumulative, so the difference between two samples is what the block
@@ -73,7 +79,10 @@ const say = (text) => {
   console.log(text);
 };
 
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || undefined });
+const browser = await chromium.launch({
+  executablePath: process.env.CHROMIUM || undefined,
+  args: ['--enable-unsafe-webgpu'],
+});
 try {
   const page = await browser.newPage();
   page.on('console', (m) => note(`page ${m.type()}: ${m.text()}`));
@@ -115,6 +124,7 @@ try {
 
   // Pressed from script: the button lives in the debug panel, which is not
   // open, and a click through the page's surface would wait for it to show.
+  await page.evaluate(() => document.getElementById('btn-gpustats').click());
   await page.evaluate(() => document.getElementById('btn-threads').click());
   await page.waitForTimeout(3000);
   const pageConsole = await page.evaluate(() =>
