@@ -1,6 +1,11 @@
 //! Which of a real frame's shader programs the WGSL translator cannot take:
 //! `shader_coverage <container> <prod.keys> [title.keys] [frame]`.
 //!
+//! `BEFORE=<n>` also prints, for each program an instruction blocks, the `n`
+//! instructions leading up to it: what a blocker needs from the code around
+//! it, such as where a bindless texture's handle register was loaded from,
+//! is not in the blocker's own name.
+//!
 //! The fragment shader interpreter is about half of a frame in any title the
 //! software rasterizer draws, 49.9% of a Just Dance 2017 frame under `perf`,
 //! against 8.0% for the whole emulated CPU, and every one of those 921,600
@@ -89,6 +94,24 @@ fn compiles(program: &Program, stage: Stage, caps: Caps) -> Result<(), Unsupport
     Ok(())
 }
 
+/// `BEFORE=<n>`: how many instructions before a blocker to print, if any.
+fn show_before() -> Option<usize> {
+    std::env::var("BEFORE").ok()?.parse().ok()
+}
+
+/// The instruction a refusal names, for every refusal that names one.
+fn blocked_at(why: &Unsupported) -> Option<usize> {
+    match *why {
+        Unsupported::Op { at, .. }
+        | Unsupported::UndecodedTarget { at }
+        | Unsupported::IndirectBranch { at }
+        | Unsupported::Quad { at }
+        | Unsupported::DepthCompare { at }
+        | Unsupported::UntracedHandle { at } => Some(at),
+        Unsupported::TextureDimension { .. } => None,
+    }
+}
+
 /// Translate everything `used` holds under `caps` and print what came back.
 fn report(label: &str, used: &[Used], caps: Caps) {
     let mut blocked: BTreeMap<String, (u64, u64)> = BTreeMap::new();
@@ -110,6 +133,17 @@ fn report(label: &str, used: &[Used], caps: Caps) {
                 }
             }
             Err(why) => {
+                if let (Some(at), Some(before)) = (blocked_at(&why), show_before()) {
+                    println!(
+                        "  {:?} program at {:#x} blocked at instruction {at}:",
+                        entry.stage, entry.addr
+                    );
+                    for i in at.saturating_sub(before)..=at {
+                        if let Some(insn) = entry.program.insns.get(i) {
+                            println!("    {i:>5}  {:?}  {:?}", insn.pred, insn.op);
+                        }
+                    }
+                }
                 let row = blocked.entry(blocker(why)).or_default();
                 row.0 += entry.draws;
                 row.1 += 1;
