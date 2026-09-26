@@ -743,7 +743,23 @@ impl<'a> Emitter<'a> {
 
     fn operand_f(&mut self, operand: Operand) -> String {
         let value = self.operand(operand);
+        let value = self.runtime_if_non_finite(value, |bits| f32::from_bits(bits).is_finite());
         format!("bitcast<f32>({value})")
+    }
+
+    /// `bits` bound to a `let` where it is a literal that `finite` says reads
+    /// as an infinity or a NaN, and left as it is otherwise.
+    ///
+    /// WGSL makes a constant expression that evaluates to either an error,
+    /// and a conversion of a literal is a constant expression: Chrome refused
+    /// a whole module of Tomodachi Life's over `bitcast<f32>(2139095040u)`,
+    /// which is +inf, where naga had compiled it without complaint. A `let`
+    /// is a runtime value, so converting one is not constant evaluation.
+    fn runtime_if_non_finite(&mut self, bits: String, finite: fn(u32) -> bool) -> String {
+        match bits.strip_suffix('u').and_then(|n| n.parse::<u32>().ok()) {
+            Some(value) if !finite(value) => self.bind(&bits),
+            _ => bits,
+        }
     }
 
     fn p(&mut self, pred: u8) -> String {
@@ -836,6 +852,18 @@ impl<'a> Emitter<'a> {
 
     /// One source's two lanes, flushed and modified.
     fn half_source(&mut self, bits: String, m: FMod, sw: HSwizzle, ftz: bool) -> String {
+        let bits = match sw {
+            HSwizzle::F32 => {
+                self.runtime_if_non_finite(bits, |bits| f32::from_bits(bits).is_finite())
+            }
+            // A half is an infinity or a NaN when its five exponent bits are
+            // all set.
+            _ => self.runtime_if_non_finite(bits, |bits| {
+                [bits, bits >> 16]
+                    .iter()
+                    .all(|half| (half >> 10) & 0x1f != 0x1f)
+            }),
+        };
         let lanes = match sw {
             HSwizzle::H1H0 => format!("unpack2x16float({bits})"),
             HSwizzle::H0H0 => format!("unpack2x16float({bits}).xx"),
@@ -3259,6 +3287,35 @@ mod tests {
             p.offsets.push(at(index));
         }
         Compiled::new(&p)
+    }
+
+    /// An infinity or a NaN written as a literal and converted is a constant
+    /// expression, which WGSL refuses: Chrome would not compile a module of
+    /// Tomodachi Life's over `bitcast<f32>(2139095040u)`. Those go through a
+    /// `let`; every other immediate stays the literal it was.
+    #[test]
+    fn a_non_finite_immediate_is_converted_at_run_time() {
+        let fadd = |bits: u32| Op::Fadd {
+            dst: 1,
+            a: 2,
+            am: NO_MOD,
+            b: Operand::Imm(bits),
+            bm: NO_MOD,
+            ftz: false,
+            sat: false,
+        };
+        let source = |op: Op| {
+            translate(&program(&[(op, ALWAYS), (Op::Exit, ALWAYS)]))
+                .unwrap()
+                .source
+        };
+        for bits in [0x7f80_0000u32, 0xff80_0000, 0x7fc0_0000] {
+            let wgsl = source(fadd(bits));
+            assert!(!wgsl.contains(&format!("bitcast<f32>({bits}u)")), "{wgsl}");
+            assert!(wgsl.contains(&format!(" = {bits}u;")), "{wgsl}");
+        }
+        let one = source(fadd(0x3f80_0000));
+        assert!(one.contains("bitcast<f32>(1065353216u)"), "{one}");
     }
 
     /// The braces the emitted text opens and closes must balance, or nothing
