@@ -948,11 +948,20 @@ impl Gpu {
             }
         }
         // A surface nothing drew into is already what guest memory says.
-        if !held.dirty {
-            return;
+        if held.dirty {
+            let pending = self.start_read_back(&held.target, &held.texture);
+            self.pending.push(pending);
         }
-        let pending = self.start_read_back(&held.target, &held.texture);
-        self.pending.push(pending);
+        // Destroyed rather than dropped, the same as a cached texture: in a
+        // browser a dropped texture waits on the collector, and these are the
+        // largest things the backend makes. Persona 5 Royal flushes 1920x1080
+        // colour and 2048x2048 depth surfaces every frame, and the device ran
+        // out of memory with the dead ones still waiting. The readback copy
+        // above is already submitted, and submitted work finishes first.
+        held.texture.destroy();
+        if let Some(companion) = &held.companion {
+            companion.texture.destroy();
+        }
     }
 
     /// Bring a guest surface onto the device.
