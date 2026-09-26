@@ -6,6 +6,9 @@
 //! it, such as where a bindless texture's handle register was loaded from,
 //! is not in the blocker's own name.
 //!
+//! `FRAMES=<n>` records `n` frames from `frame` on rather than one, for a
+//! program that draws once somewhere in a stretch of the run.
+//!
 //! The fragment shader interpreter is about half of a frame in any title the
 //! software rasterizer draws, 49.9% of a Just Dance 2017 frame under `perf`,
 //! against 8.0% for the whole emulated CPU, and every one of those 921,600
@@ -222,12 +225,18 @@ fn main() {
         return;
     }
 
-    // One frame, recorded. Every draw notes the programs it was about to run,
-    // decoded: reading them back afterwards would need the GPU address space
-    // the draw was using, and that has moved on by the time this returns.
+    // Every draw notes the programs it was about to run, decoded: reading
+    // them back afterwards would need the GPU address space the draw was
+    // using, and that has moved on by the time this returns.
+    let frames: u64 = std::env::var("FRAMES")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(1);
     uses::record();
-    let target = cpu.nv.gpu.frames + 1;
-    let frame = common::run_to(&mut cpu, FRAME_BUDGET, |cpu| cpu.nv.gpu.frames >= target);
+    let target = cpu.nv.gpu.frames + frames;
+    let frame = common::run_to(&mut cpu, FRAME_BUDGET * frames, |cpu| {
+        cpu.nv.gpu.frames >= target
+    });
     let bound = uses::take();
 
     // Two draws binding one address are one program. The decode folds the
@@ -255,7 +264,7 @@ fn main() {
     let draws: u64 = used.iter().map(|u| u.draws).sum();
     let fragment = used.iter().filter(|u| u.stage == Stage::Fragment).count();
     println!(
-        "frame {want_frame} at step {}, recorded over the next {} steps",
+        "frame {want_frame} at step {}, {frames} frame(s) recorded over the next {} steps",
         boot.steps, frame.steps
     );
     println!(
