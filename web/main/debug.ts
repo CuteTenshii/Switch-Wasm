@@ -116,8 +116,9 @@ $('btn-gpustats').addEventListener('click', async () => {
     log(`rendering: the device was lost - the rasterizer has every frame${why}.`, 'err');
   }
   else if (g.softwareFrame) {
-    log('rendering: the software-frame latch has tripped - every frame from here is the rasterizer\'s.', 'err');
+    log('rendering: the software-frame latch has tripped - the rasterizer has the frames until the device could draw them all.', 'err');
   }
+  if (g.unlatched) log(`rendering: the software-frame latch has let go ${g.unlatched} time(s).`, 'dim');
   for (const why of g.reasons ?? []) log('  fell back: ' + why, 'dim');
   // Loud, and above the counters: a rejected draw is still counted as drawn,
   // so this is the only line that contradicts a clean-looking 100% device.

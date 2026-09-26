@@ -17,11 +17,19 @@ a later slice (`Cpu::complete_pending_present`).
 
 **Where a readback lands late, a frame is all one renderer's.** The first flush
 answering `Pending` sets `Gpu::deferred_readbacks`, and from then on a frame in
-which anything fell back makes every frame after it the rasterizer's whole
-(`Gpu::software_frame`). **It latches on purpose** — alternating is the one
-behaviour this must not have. What buys the acceleration back is
-`shader::wgsl`: every fallback that latches it is an opcode with no WGSL form,
-not anything WebGPU withholds.
+which anything fell back makes the frames after it the rasterizer's whole
+(`Gpu::software_frame`). **It latches on purpose**, because alternating costs
+a frame with the rasterizer's draws under a readback each time, **but it lets
+go**: each draw of a rasterizer's frame goes through `Gpu::check` (pipeline
+state, surfaces, route, cached translations; no uploads), and after enough
+frames in a row in which every draw passed, the device has the frames again.
+One clean frame releases it the first time; each time it has to close again
+after a release, the wait doubles, since the check cannot see a fallback that
+an upload or the device itself causes. Tomodachi Life is why: one draw in its
+first 740 frames samples a per-pixel bindless handle, and a latch that never
+let go gave the rest of the session to the rasterizer. What buys the
+acceleration back is still `shader::wgsl`: almost every fallback that latches
+it is an opcode with no WGSL form, not anything WebGPU withholds.
 
 **A copy out of a held surface flushes first.** The 2D blitter and the copy
 engine read guest memory, so `channel.rs` hands the surfaces back before

@@ -489,18 +489,28 @@ pub struct Gpu {
     /// half the frame would lose more than 795 pixels. Off, because a frame
     /// nobody produced is the one thing this backend is built not to make.
     interleave: bool,
-    /// Whether the rasterizer has the frame, and every frame after it.
+    /// Whether the rasterizer has the frame, and the frames after it until
+    /// the device could take them back.
     ///
     /// The answer to a readback that cannot land inside a slice is not to
     /// interleave more carefully: it is not to interleave. A frame the
     /// device cannot render *all* of is one it renders none of: guest memory
     /// is then the only copy of every surface, and no readback is ever owed.
     ///
-    /// It latches, because nothing can tell it to unlatch. A draw falls back
-    /// on the shader it runs, a title runs the same shaders every frame, and
-    /// a frame rendered entirely on the rasterizer never discovers whether
-    /// the next one would have fallen back, so alternating is the one
-    /// behaviour this must not have.
+    /// It latches, because a title mostly runs the same shaders every frame,
+    /// and alternating costs a frame with the rasterizer's draws under a
+    /// readback each time. But not for good: Tomodachi Life draws one frame
+    /// in 740 with a shader nothing here can translate, and a latch that
+    /// never let go gave every frame after that to the rasterizer. So each
+    /// draw of a rasterizer's frame is put through [`Gpu::check`], and after
+    /// [`Gpu::clean_frames_needed`] frames in a row in which every draw
+    /// passed, the device has the next one.
+    ///
+    /// The check cannot see everything that falls back, an upload or the
+    /// device itself can still refuse, so a draw that passes it and then
+    /// falls back latches this again, and doubles the clean frames the next
+    /// release waits for. A title that falls back on such a draw every frame
+    /// then costs one wrong frame at each of exponentially rarer releases.
     ///
     /// **What buys the acceleration back is `shader::wgsl`, mostly.** The
     /// Home Menu's fallback is one `ldg b128`, an opcode with no WGSL form,
@@ -513,6 +523,18 @@ pub struct Gpu {
     software_frame: bool,
     /// Whether anything fell back during the frame in progress.
     fell_back_this_frame: bool,
+    /// Whether a draw of the rasterizer's frame in progress was checked, and
+    /// whether one of them would have fallen back. A frame with no draws
+    /// says nothing about whether the device could have drawn it.
+    checked_this_frame: bool,
+    would_fall_back_this_frame: bool,
+    /// Rasterizer's frames in a row in which every draw passed the check.
+    clean_frames: u32,
+    /// How many of those release the latch: one, doubled every time the
+    /// latch has to close again after a release.
+    clean_frames_needed: u32,
+    /// How many times the latch has let go.
+    unlatched: u32,
     /// Whether [`Gpu::give_up`] has already handed the frame back.
     gave_up: bool,
     /// The loss, kept for the first flush after it.
@@ -747,6 +769,11 @@ impl Gpu {
             interleave: switch_core::env_flag!("GPU_INTERLEAVE"),
             software_frame: false,
             fell_back_this_frame: false,
+            checked_this_frame: false,
+            would_fall_back_this_frame: false,
+            clean_frames: 0,
+            clean_frames_needed: 1,
+            unlatched: 0,
             gave_up: false,
             web_limits: switch_core::env_flag!("GPU_WEB_LIMITS"),
             device_msaa: switch_core::env_flag!("GPU_DEVICE_MSAA"),
@@ -845,6 +872,49 @@ impl Gpu {
         self.pending.clear();
         self.scratch.clear();
         true
+    }
+
+    /// Put a draw of the rasterizer's frame through [`Gpu::check`], to learn
+    /// whether the device could have drawn it. See [`Gpu::software_frame`].
+    ///
+    /// The eviction and the watching around it are the ones a device draw
+    /// makes, for the same reason: a translation cached from a program the
+    /// guest has since rewritten would answer for the old program.
+    fn check_for_release(&mut self, engine: &Engine3D, ctx: &mut ExecCtx) {
+        self.evict_written(ctx);
+        let verdict = self.check(engine, &*ctx);
+        self.remember_textures(ctx);
+        self.checked_this_frame = true;
+        if verdict.is_err() {
+            self.would_fall_back_this_frame = true;
+        }
+    }
+
+    /// At the clear that ends a rasterizer's frame, count it towards
+    /// releasing the latch, and release it once enough have passed.
+    fn release_if_clean(&mut self) {
+        let (checked, would_fall_back) = (self.checked_this_frame, self.would_fall_back_this_frame);
+        self.checked_this_frame = false;
+        self.would_fall_back_this_frame = false;
+        if !self.software_frame || !checked {
+            return;
+        }
+        if would_fall_back {
+            self.clean_frames = 0;
+            return;
+        }
+        self.clean_frames += 1;
+        if self.clean_frames < self.clean_frames_needed {
+            return;
+        }
+        self.software_frame = false;
+        self.clean_frames = 0;
+        self.unlatched += 1;
+        eprintln!(
+            "[gpu] every draw of the last {} frame(s) could have run on the device; \
+             it has the frames again",
+            self.clean_frames_needed
+        );
     }
 
     /// Keep interleaving single fallback draws into a device frame on a host
@@ -3203,7 +3273,6 @@ enum Render {
     Companion(Shape),
 }
 
-/// One draw, resolved into everything a device needs.
 /// Everything a sampler is made of here, and so what one is cached by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct SamplerKey {
@@ -3214,6 +3283,19 @@ struct SamplerKey {
     min: wgpu::FilterMode,
 }
 
+/// What [`Gpu::check`] settled, for [`Gpu::prepare`] to go on from. The
+/// fields mean what [`Prepared`]'s of the same names do.
+struct Checked {
+    state: Pipeline,
+    render: Render,
+    color: Option<Target>,
+    color_scratch: Option<(u32, u32)>,
+    depth: Option<Target>,
+    vs: Translation,
+    fs: Translation,
+}
+
+/// One draw, resolved into everything a device needs.
 struct Prepared {
     state: Pipeline,
     /// How this draw reaches its surfaces.
@@ -3258,11 +3340,13 @@ impl Gpu {
     /// Everything this reaches for is `switch-core`'s: the translation, the
     /// pipeline state and the uploads all already exist and are already
     /// tested against the rasterizer. What is left is arranging them.
-    fn prepare(
-        &mut self,
-        engine: &Engine3D,
-        ctx: &ExecCtx,
-    ) -> std::result::Result<Prepared, String> {
+    /// The part of [`Gpu::prepare`] that decides whether a draw can run
+    /// here at all, and nothing that costs an upload: the pipeline state,
+    /// the surfaces, how the pass reaches them, and both translations, which
+    /// are cached. A frame the rasterizer has asks each draw this, so that it
+    /// can tell when the device could take the frames back. See
+    /// [`Gpu::software_frame`].
+    fn check(&mut self, engine: &Engine3D, ctx: &ExecCtx) -> std::result::Result<Checked, String> {
         let mut state = Pipeline::of(engine).map_err(|e| e.to_string())?;
         let targets = Targets::of(engine).map_err(|e| format!("{e:?}"))?;
         let color = targets.color;
@@ -3345,6 +3429,31 @@ impl Gpu {
             self.translate(engine, ctx, ShaderStage::Fragment)
         );
         let (vs, fs) = (vs?, fs?);
+        Ok(Checked {
+            state,
+            render,
+            color,
+            color_scratch,
+            depth,
+            vs,
+            fs,
+        })
+    }
+
+    fn prepare(
+        &mut self,
+        engine: &Engine3D,
+        ctx: &ExecCtx,
+    ) -> std::result::Result<Prepared, String> {
+        let Checked {
+            state,
+            render,
+            color,
+            color_scratch,
+            depth,
+            vs,
+            fs,
+        } = self.check(engine, ctx)?;
 
         let mut vs_layout = Layout::of(&vs, Stage::Vertex);
         let mut fs_layout = Layout::of(&fs, Stage::Fragment);
@@ -3663,6 +3772,7 @@ impl Renderer for Gpu {
         // of. See [`Gpu::software_frame`]. Nothing is held, so the flush
         // here has nothing to hand back after the first draw of it.
         if self.software_frame {
+            self.check_for_release(engine, ctx);
             self.flush(ctx)?;
             return self.software.draw(engine, ctx);
         }
@@ -3721,14 +3831,18 @@ impl Renderer for Gpu {
             && !self.interleave
         {
             self.software_frame = true;
+            if self.unlatched > 0 {
+                self.clean_frames_needed = self.clean_frames_needed.saturating_mul(2);
+            }
             eprintln!(
                 "[gpu] a draw fell back where a readback lands later than the call that \
-                 asked for it; the rasterizer has every frame from here. What it fell \
-                 back on: {:?}",
-                self.reasons
+                 asked for it; the rasterizer has the frames from here until {} in a row \
+                 could have been the device's. What it fell back on: {:?}",
+                self.clean_frames_needed, self.reasons
             );
         }
         self.fell_back_this_frame = false;
+        self.release_if_clean();
         if self.give_up() || self.software_frame {
             self.flush(ctx)?;
             return self
@@ -3853,7 +3967,7 @@ impl Renderer for Gpu {
              \"read\":{{\"textures\":{},\"vertex\":{},\"constants\":{},\"index\":{}}},\
              \"textureHits\":{},\"textureMisses\":{},\
              \"shaderHits\":{},\"shaderMisses\":{},\
-             \"softwareFrame\":{},\"gaveUp\":{},\"lostBecause\":{},\"reasons\":[{}],\
+             \"softwareFrame\":{},\"unlatched\":{},\"gaveUp\":{},\"lostBecause\":{},\"reasons\":[{}],\
              \"deviceErrorCount\":{},\"deviceErrors\":[{}]{}}}",
             self.drawn,
             self.fallbacks,
@@ -3871,6 +3985,7 @@ impl Renderer for Gpu {
             self.shader_hits,
             self.shader_misses,
             self.software_frame,
+            self.unlatched,
             self.gave_up,
             self.report
                 .as_deref()
@@ -4681,11 +4796,70 @@ mod tests {
         want.draw_with(&mut Software).expect("the draw");
         assert_eq!(got, want.target());
 
-        // It latches: a frame that renders nothing on the device cannot
-        // discover that the next one would have been fine, and alternating is
-        // the one behaviour this must not have.
+        // That frame's one draw would have run on the device, and one clean
+        // frame is what the first release waits for.
         h.clear_with(&mut gpu, [true; 4]).expect("the clear");
-        assert!(gpu.software_frame, "the decision came undone");
+        assert!(
+            !gpu.software_frame,
+            "a clean frame did not release the latch"
+        );
+        assert_eq!(gpu.unlatched, 1);
+    }
+
+    /// The latch holds through a frame whose draws the device still could not
+    /// run, lets go after one in which it could, and waits twice as long each
+    /// time it has to close again.
+    #[test]
+    fn the_latch_lets_go_after_clean_frames_and_waits_longer_each_time() {
+        let Ok(mut gpu) = super::Gpu::open() else {
+            return;
+        };
+        gpu.deferred_readbacks = true;
+        let mut h = Harness::new();
+        h.triangle([1.0, 0.0, 1.0, 1.0]);
+        // A line loop has no pipeline, so the device refuses it and the check
+        // a rasterizer's frame makes refuses it too.
+        let line_loop = |h: &mut Harness, gpu: &mut super::Gpu| {
+            h.engine.last_draw.primitive = 2;
+            let _ = h.draw_with(gpu);
+            h.engine.last_draw.primitive = 4;
+        };
+        let frame = |h: &mut Harness, gpu: &mut super::Gpu| {
+            h.clear_with(gpu, [true; 4]).expect("the clear");
+        };
+
+        frame(&mut h, &mut gpu);
+        line_loop(&mut h, &mut gpu);
+        frame(&mut h, &mut gpu);
+        assert!(gpu.software_frame, "a fallback did not latch");
+
+        line_loop(&mut h, &mut gpu);
+        frame(&mut h, &mut gpu);
+        assert!(
+            gpu.software_frame,
+            "released after a frame the device could not have drawn"
+        );
+
+        // Nothing drawn is nothing learned.
+        frame(&mut h, &mut gpu);
+        assert!(gpu.software_frame, "released after a frame with no draws");
+
+        h.draw_with(&mut gpu).expect("the draw");
+        frame(&mut h, &mut gpu);
+        assert!(!gpu.software_frame, "a clean frame did not release it");
+
+        // Falling back again closes it, and the next release waits for two.
+        line_loop(&mut h, &mut gpu);
+        frame(&mut h, &mut gpu);
+        assert!(gpu.software_frame, "a second fallback did not latch");
+        assert_eq!(gpu.clean_frames_needed, 2);
+        h.draw_with(&mut gpu).expect("the draw");
+        frame(&mut h, &mut gpu);
+        assert!(gpu.software_frame, "released after one of two clean frames");
+        h.draw_with(&mut gpu).expect("the draw");
+        frame(&mut h, &mut gpu);
+        assert!(!gpu.software_frame, "two clean frames did not release it");
+        assert_eq!(gpu.unlatched, 2);
     }
 
     #[test]

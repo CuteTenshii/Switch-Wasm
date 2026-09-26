@@ -52,9 +52,11 @@ export interface GpuReport {
    *  had to be read out of guest memory again. */
   textureHits?: number;
   textureMisses?: number;
-  /** Once this latches, every frame after it is the rasterizer's however well
-   *  the device is working. */
+  /** Whether the rasterizer has the frames after a fallback. It lets go once
+   *  every draw of enough frames in a row could have run on the device. */
   softwareFrame?: boolean;
+  /** How many times the software-frame latch has let go. */
+  unlatched?: number;
   gaveUp?: boolean;
   /** Why the device was lost, when it was. */
   lostBecause?: string | null;
