@@ -178,6 +178,9 @@ impl Cpu {
             .into_iter()
             .map(|addr| self.locate(addr))
             .collect();
+        if callers.is_empty() {
+            return format!("at {}", self.locate(pc));
+        }
         format!(
             "at {}, called from {}",
             self.locate(pc),
@@ -383,6 +386,56 @@ mod tests {
             "{log:?}"
         );
         assert!(cpu.take_thread_report().1.is_empty(), "taken, not read");
+    }
+
+    /// A function free to use x29 and x30 for data, as zlib's `inflate_fast`
+    /// does, leaves text and small integers where the walk looks for frames.
+    /// Only a frame on the stack whose return address follows a call is
+    /// reported, and the walk stops at the first one that is not.
+    #[test]
+    fn a_backtrace_reports_only_frames_that_return_after_a_call() {
+        use crate::cpu::SP_SLOT;
+        const BL: u32 = 0x9400_0000;
+        const BLR_X8: u32 = 0xD63F_0100;
+        const NOP: u32 = 0xD503_201F;
+        const STACK: u32 = 0x1000_0000;
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(0x0800_0000, 0x1000).unwrap();
+        cpu.mem.write_u32(0x0800_0100, BL).unwrap();
+        cpu.mem.write_u32(0x0800_0200, BLR_X8).unwrap();
+        cpu.mem.write_u32(0x0800_0300, NOP).unwrap();
+        cpu.mem.map_zero(STACK - 0x1000, 0x2000).unwrap();
+        // Two good frames, then one whose return address follows a nop.
+        cpu.mem
+            .write_u64(STACK + 0x10, u64::from(STACK + 0x40))
+            .unwrap();
+        cpu.mem.write_u64(STACK + 0x18, 0x0800_0204).unwrap();
+        cpu.mem
+            .write_u64(STACK + 0x40, u64::from(STACK + 0x80))
+            .unwrap();
+        cpu.mem.write_u64(STACK + 0x48, 0x0800_0104).unwrap();
+        cpu.mem
+            .write_u64(STACK + 0x80, u64::from(STACK + 0xC0))
+            .unwrap();
+        cpu.mem.write_u64(STACK + 0x88, 0x0800_0304).unwrap();
+
+        cpu.regs[SP_SLOT] = u64::from(STACK);
+        cpu.regs[29] = u64::from(STACK + 0x10);
+        cpu.regs[30] = 0xaa;
+        assert_eq!(cpu.backtrace(8), [0x0800_0204, 0x0800_0104]);
+
+        cpu.regs[30] = 0x0800_0104;
+        assert_eq!(cpu.backtrace(8), [0x0800_0104, 0x0800_0204, 0x0800_0104]);
+
+        // The same good record below the stack pointer is not a frame.
+        cpu.regs[SP_SLOT] = u64::from(STACK + 0x20);
+        cpu.regs[30] = 0xaa;
+        assert_eq!(cpu.backtrace(8), [] as [u32; 0]);
+
+        cpu.regs[SP_SLOT] = u64::from(STACK);
+        cpu.regs[29] = 0x7473_6964;
+        cpu.regs[30] = 0;
+        assert_eq!(cpu.backtrace(8), [] as [u32; 0], "\"dist\" is no frame");
     }
 
     /// A thread handle is what `nn::os::WaitThread` waits on, and it has to

@@ -4915,6 +4915,13 @@ impl Cpu {
     /// [sp]; mov x29, sp`), so each frame stores `{saved fp, saved lr}` at the
     /// frame base. Stops as soon as the chain leaves mapped memory or fails to
     /// move forward, so a corrupt stack cannot loop.
+    ///
+    /// Not every function keeps that convention: zlib's `inflate_fast` in Just
+    /// Dance 2019 holds data in x29 and x30, and a walk that trusted them
+    /// reported the thread as called from `0x74736964`, which is the text
+    /// "dist". So a frame is followed only if it lies at or above the stack
+    /// pointer, and an address is reported as a return address only if the
+    /// instruction before it is a call.
     pub fn backtrace(&self, depth: usize) -> Vec<u32> {
         self.walk_frames(&self.regs, self.mode, depth)
     }
@@ -4930,13 +4937,24 @@ impl Cpu {
         // Both states chain {saved frame pointer, return address}, but from
         // different registers and in different widths: x29/x30 over 16-byte
         // frames in A64, r11/r14 over 8-byte ones in AArch32.
-        let (mut fp, lr, width) = match mode {
-            ExecMode::A64 => (regs[29] as u32, regs[30] as u32, 8),
-            ExecMode::A32 => (regs[11] as u32, regs[14] as u32, 4),
+        let (mut fp, lr, sp, width) = match mode {
+            ExecMode::A64 => (regs[29] as u32, regs[30] as u32, regs[SP_SLOT] as u32, 8),
+            ExecMode::A32 => (regs[11] as u32, regs[14] as u32, regs[13] as u32, 4),
         };
         let mut out = Vec::with_capacity(depth + 1);
-        out.push(lr);
+        if self.is_return_address(lr, mode) {
+            out.push(lr);
+        }
+        // A frame record is pushed onto the stack, so the first one is at or
+        // above the stack pointer; the `next_fp <= fp` check keeps every later
+        // one above that.
+        if fp < sp {
+            return out;
+        }
         for _ in 0..depth {
+            if !fp.is_multiple_of(width) {
+                break;
+            }
             let read = |at: u32| match mode {
                 ExecMode::A64 => self.mem.read_u64(at).map(|v| v as u32),
                 ExecMode::A32 => self.mem.read_u32(at),
@@ -4945,13 +4963,38 @@ impl Cpu {
                 (Ok(next_fp), Ok(lr)) => (next_fp, lr),
                 _ => break,
             };
-            if lr == 0 || next_fp <= fp {
+            if next_fp <= fp || !self.is_return_address(lr, mode) {
                 break;
             }
             out.push(lr);
             fp = next_fp;
         }
         out
+    }
+
+    /// Whether `addr` is somewhere a call returns to: just after a call
+    /// instruction, or one of the stubs a thread or a host call is started
+    /// with a return into.
+    fn is_return_address(&self, addr: u32, mode: ExecMode) -> bool {
+        if addr == THREAD_EXIT_TRAMPOLINE || addr == SELF_RETURN_TRAMPOLINE {
+            return true;
+        }
+        if addr < 4 || !addr.is_multiple_of(4) {
+            return false;
+        }
+        let Ok(call) = self.mem.read_u32(addr - 4) else {
+            return false;
+        };
+        match mode {
+            // BL, then BLR.
+            ExecMode::A64 => call & 0xFC00_0000 == 0x9400_0000 || call & 0xFFFF_FC1F == 0xD63F_0000,
+            // BL (cond != 1111), BLX to an immediate, then BLX to a register.
+            ExecMode::A32 => {
+                (call & 0x0F00_0000 == 0x0B00_0000 && call >> 28 != 0xF)
+                    || call & 0xFE00_0000 == 0xFA00_0000
+                    || call & 0x0FFF_FFF0 == 0x012F_FF30
+            }
+        }
     }
 
     /// Format a full register snapshot for debugging.
