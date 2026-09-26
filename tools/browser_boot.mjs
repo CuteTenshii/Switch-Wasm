@@ -1,7 +1,7 @@
 // Boot a container in the built site, in a real browser, and report what the
 // page and its worker said:
 //   node tools/browser_boot.mjs <container> [--keys=prod.keys] [--title-keys=title.keys]
-//                               [--seconds=N] [--out=log.txt]
+//                               [--seconds=N] [--out=log.txt] [--jit-stats]
 //
 // Needs `make assets` first: this serves `dist` with Vite's preview server,
 // on a port of its own, so nothing else has to be running. The browser is
@@ -16,6 +16,12 @@
 // the page's whole console with everything the page and the worker printed
 // to the browser's.
 //
+// `--jit-stats` also presses "Block stats" at every sample. The counters are
+// cumulative, so the difference between two samples is what the block
+// translator and the wasm emitter did in that window: whether the code a
+// title spends a given phase in runs compiled is a question only the browser
+// build can answer, because nothing on a host compiles an emitted block.
+//
 // Each run gets a fresh browser profile, so nothing an earlier run stored
 // (keys, the SD card, saves, the NAND) leaks into this one.
 import { existsSync, writeFileSync } from 'node:fs';
@@ -26,7 +32,7 @@ import { preview } from 'vite';
 
 const USAGE =
   'usage: node tools/browser_boot.mjs <container> [--keys=prod.keys] [--title-keys=title.keys]' +
-  ' [--seconds=N] [--out=log.txt]';
+  ' [--seconds=N] [--out=log.txt] [--jit-stats]';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -43,6 +49,7 @@ if (!existsSync(join(root, 'dist/index.html'))) {
 }
 const seconds = Number(flag('seconds') ?? 60);
 const out = flag('out');
+const jitStats = process.argv.includes('--jit-stats');
 // How often the run state is sampled.
 const SAMPLE_MS = 5000;
 
@@ -101,6 +108,9 @@ try {
     const quiet = sample.rows === lastRows ? ', console quiet since the last sample' : '';
     say(`${at}s: ${sample.state}, ${sample.rows} console lines${quiet}; last: ${sample.last.slice(0, 160)}`);
     lastRows = sample.rows;
+    if (jitStats) {
+      await page.evaluate(() => document.getElementById('btn-jitstats').click());
+    }
   }
 
   // Pressed from script: the button lives in the debug panel, which is not
