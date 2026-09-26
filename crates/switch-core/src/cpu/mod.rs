@@ -4484,34 +4484,50 @@ impl Cpu {
             ),
         );
         self.trace_regs(pc);
-        // Show the run-up to the fault so the crash path is readable without
-        // full tracing enabled. The trail holds runs rather than instructions
-        // (see [`Cpu::record_run`]), so expand them here and re-read the words
-        //: this is the one place that pays for keeping the inner loops free
-        // of it.
+        self.trace_trail();
+    }
+
+    /// Show the run-up to wherever the machine is, so the path there is
+    /// readable without full tracing enabled. The trail holds runs rather
+    /// than instructions (see [`Cpu::record_run`]), so expand them here and
+    /// re-read the words: this is the one place that pays for keeping the
+    /// inner loops free of it.
+    pub(super) fn trace_trail(&mut self) {
+        let trail = self.trail_text();
+        if !trail.is_empty() {
+            self.trace_line(&trail);
+        }
+    }
+
+    /// The trail [`Cpu::trace_trail`] writes, as text: a heading and one
+    /// disassembled instruction per line, or nothing when no instruction has
+    /// run yet.
+    pub(super) fn trail_text(&self) -> String {
         let runs = self.recent_len.min(RECENT_LEN);
-        if runs > 0 {
-            let first = self.recent_len.wrapping_sub(runs) % RECENT_LEN;
-            let mut trail: Vec<(u32, u32)> = Vec::new();
-            for i in 0..runs {
-                let (start, count) = self.recent[(first + i) % RECENT_LEN];
-                for step in 0..count {
-                    let at = start.wrapping_add(4 * step);
-                    let word = self.mem.fetch(at).unwrap_or(0);
-                    trail.push((at, word));
-                }
-            }
-            let shown = trail.len().min(RECENT_LEN);
-            self.trace_line(&format!("--- last {} instructions ---\n", shown));
-            for &(ipc, iinsn) in &trail[trail.len() - shown..] {
-                self.trace_line(&format!(
-                    "{:08x}: {:08x}  {}\n",
-                    ipc,
-                    iinsn,
-                    self.disassemble_for_mode(iinsn)
-                ));
+        if runs == 0 {
+            return String::new();
+        }
+        let first = self.recent_len.wrapping_sub(runs) % RECENT_LEN;
+        let mut trail: Vec<(u32, u32)> = Vec::new();
+        for i in 0..runs {
+            let (start, count) = self.recent[(first + i) % RECENT_LEN];
+            for step in 0..count {
+                let at = start.wrapping_add(4 * step);
+                let word = self.mem.fetch(at).unwrap_or(0);
+                trail.push((at, word));
             }
         }
+        let shown = trail.len().min(RECENT_LEN);
+        let mut text = format!("--- last {shown} instructions ---\n");
+        for &(ipc, iinsn) in &trail[trail.len() - shown..] {
+            text.push_str(&format!(
+                "{:08x}: {:08x}  {}\n",
+                ipc,
+                iinsn,
+                self.disassemble_for_mode(iinsn)
+            ));
+        }
+        text
     }
 
     /// One line per guest thread: which one is running, what each is blocked

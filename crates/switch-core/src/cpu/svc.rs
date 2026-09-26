@@ -282,7 +282,26 @@ impl Cpu {
                 Ok(())
             }
             0x07 => {
-                // ExitProcess
+                // ExitProcess. The emulator's own exit stub is the main
+                // thread's return address and nobody else's, so any other
+                // thread executing it got there by an emulator mistake, a
+                // return through a frame it never pushed, rather than by the
+                // title deciding to quit. Worth saying loudly: from outside
+                // it looks exactly like the title exiting on its own.
+                let pc = self.get_pc();
+                let at_stub = pc == crate::cpu::SELF_RETURN_TRAMPOLINE
+                    || pc.wrapping_sub(4) == crate::cpu::SELF_RETURN_TRAMPOLINE;
+                if at_stub && self.current_thread_index() != 0 {
+                    let line = format!(
+                        "{} reached the emulator's process-exit stub, which only the main thread \
+                         returns to; the process is ending because of it (x30={:#x}, sp={:#x})",
+                        self.thread_label(self.current_thread_handle()),
+                        self.read_zr(30),
+                        self.sp()
+                    );
+                    let line = format!("{line}\n{}", self.trail_text());
+                    self.diagnostic(crate::trace::Level::Error, &line);
+                }
                 self.halted = true;
                 Ok(())
             }
