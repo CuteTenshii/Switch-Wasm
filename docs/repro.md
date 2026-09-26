@@ -34,6 +34,11 @@ The `.nro`/`.nsp` files are gitignored.
   on halt or fault. `RING_MIN` past `rtld` (`0x08004000`), whose lazy-binding
   resolver would otherwise fill the whole ring. `MARK`/`MARK_DUMP` watch an API
   being called in order without recording the steps between.
+- `--example jit_bisect <container> <prod.keys> [title.keys]` — the
+  translator and the interpreter in lockstep on a retail title, narrowed to the
+  first 4096-instruction slice they disagree on. Exact until the first thread
+  switch: after that the two engines interleave threads differently, both
+  correctly, and a disagreement means only that.
 - `node tools/browser_boot.mjs <container> --keys=… --title-keys=…` — the same
   boot in a real browser, sampling the page's run state every five seconds and
   saving the page's console, the worker's output and a thread dump.
