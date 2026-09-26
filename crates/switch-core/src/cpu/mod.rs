@@ -91,17 +91,24 @@ pub struct RunReport {
 pub const STACK_SIZE: u64 = 0x0010_0000;
 pub const STACK_TOP: u64 = 0x2810_0000;
 
+/// The range `svcGetInfo` reports as the ASLR region (`AslrRegionAddress`
+/// and `AslrRegionSize`): where the image is laid out, and the region the
+/// stack region is carved from, as it is on a console.
+pub const GUEST_ASLR_REGION_ADDR: u32 = 0x0800_0000;
+pub const GUEST_ASLR_REGION_SIZE: u32 = 0x1F00_0000;
+
 /// Address of the return-address trampoline for direct-entered homebrew.
 ///
-/// This and everything below it sit **above the stack region**, in the 128 MiB
-/// between it and the main stack. They used to sit inside it, which meant the
-/// emulator's own furniture was standing in the range `svcGetInfo` 14/15 tells
-/// the guest is free for thread stacks. See [`GUEST_STACK_REGION_SIZE`].
-pub const SELF_RETURN_TRAMPOLINE: u32 = 0x2000_0000;
+/// This and everything after it up to the main stack sit **just past the
+/// ASLR region**, which the stack region runs to the end of. They used to sit
+/// inside the stack region, which meant the emulator's own furniture was
+/// standing in the range `svcGetInfo` 14/15 tells the guest is free for
+/// thread stacks. See [`GUEST_STACK_REGION_SIZE`].
+pub const SELF_RETURN_TRAMPOLINE: u32 = GUEST_ASLR_REGION_ADDR + GUEST_ASLR_REGION_SIZE;
 
 /// Where a guest thread's entry point returns to: a stub that calls
 /// `svcExitThread` (svc 0x0A), the way libnx's thread entry does.
-pub const THREAD_EXIT_TRAMPOLINE: u32 = 0x2000_0100;
+pub const THREAD_EXIT_TRAMPOLINE: u32 = SELF_RETURN_TRAMPOLINE + 0x100;
 
 /// The handle the main thread is known by (the environment block advertises the
 /// same value as `EntryType_MainThreadHandle`).
@@ -112,12 +119,12 @@ pub const MAIN_THREAD_HANDLE: u64 = 1;
 pub const CURRENT_THREAD_PSEUDO_HANDLE: u64 = 0xFFFF_8000;
 
 /// The main thread's TLS block, which `Cpu::bootstrap` puts in `tpidr`.
-pub const MAIN_THREAD_TLS_BASE: u32 = 0x2010_0000;
+pub const MAIN_THREAD_TLS_BASE: u32 = SELF_RETURN_TRAMPOLINE + 0x10_0000;
 
 /// Base of the per-thread TLS blocks handed to threads the guest creates. The
 /// main thread keeps [`MAIN_THREAD_TLS_BASE`]; children get a page each above
-/// it, clear of the heap and the stack.
-pub const THREAD_TLS_BASE: u32 = 0x2011_0000;
+/// it, up to the main stack: room for 3,824 of them.
+pub const THREAD_TLS_BASE: u32 = MAIN_THREAD_TLS_BASE + 0x1_0000;
 /// Distance between two threads' TLS blocks. Horizon's are 0x200 bytes; a page
 /// each keeps the newlib reentrancy struct that follows out of the way too.
 pub const THREAD_TLS_STRIDE: u32 = 0x1000;
@@ -362,12 +369,20 @@ const CONDVAR_HAS_WAITERS: u32 = 1;
 /// thread's TLS block used to sit in the top 16 MiB of it, Just Dance 2023
 /// was already mapping stacks at 0x1fdc8000, one page short of the main
 /// thread's TLS, and a stack that landed there would have overwritten the
-/// thread pointer every `SdkMutex` reads. They moved up rather than the region
-/// shrinking, because the size is the modulus `nnSdk`'s random placement uses:
-/// taking 16 MiB off it deals every title a different sequence of addresses,
-/// which moved one title off an abort in `nn::os::detail::ThreadManager::
-/// CreateAliasStackUnsafe` and moved another onto it. The region now ends
-/// exactly where they begin, and is the size it always was.
+/// thread pointer every `SdkMutex` reads.
+///
+/// **It is 240 MiB, and it has to be large, because the placement is
+/// random.** `nn::os::detail::AddressSpaceAllocatorBase::AllocateSpace` picks
+/// a page at random, 512 times, and takes the first whose range and guard
+/// pages `svcQueryMemory` reports free. The stacks it has already placed are
+/// scattered over the whole region, so what limits the next one is the
+/// longest gap between them, not the space left. At 128 MiB, Just Dance 2023's
+/// 39th thread asked for an 8 MiB stack with 93 MiB free, the longest free
+/// run was 8244 KiB, every attempt failed, and `MapAliasStack` aborted the
+/// title. Shrinking the region by 16 MiB once moved one title off that abort
+/// and another onto it, which is the same failure one size down. A console's
+/// region is 2 GiB; this is everything from the end of the image space to the
+/// end of the ASLR region.
 pub const GUEST_STACK_REGION_ADDR: u32 = 0x1800_0000;
 pub const GUEST_STACK_REGION_SIZE: u32 = SELF_RETURN_TRAMPOLINE - GUEST_STACK_REGION_ADDR;
 

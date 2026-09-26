@@ -379,7 +379,13 @@ mod tests {
         assert_eq!(dropped, 0);
         assert_eq!(threads.len(), 2, "{threads:?}");
         assert_eq!(threads[1].entry, "main+0x100");
-        assert_eq!(threads[1].at, "at main+0x100, called from 0x20000100");
+        assert_eq!(
+            threads[1].at,
+            format!(
+                "at main+0x100, called from {:#x}",
+                crate::cpu::THREAD_EXIT_TRAMPOLINE
+            )
+        );
         assert_eq!(threads[1].state, "ready to run");
         assert_eq!(threads[1].name, None, "an argument of 7 is no ThreadType");
         assert!(threads[0].running);

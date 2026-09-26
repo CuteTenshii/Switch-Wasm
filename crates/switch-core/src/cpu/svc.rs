@@ -1,8 +1,8 @@
 //! The Horizon supervisor calls (`SVC`) libnx homebrew issues at runtime.
 
 use super::{
-    ArbiterWait, Cpu, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE,
-    HID_SHMEM_SIZE, PL_SHMEM_SIZE,
+    ArbiterWait, Cpu, GUEST_ASLR_REGION_ADDR, GUEST_ASLR_REGION_SIZE, GUEST_SPACE_END,
+    GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE, HID_SHMEM_SIZE, PL_SHMEM_SIZE,
 };
 use crate::{Error, Result};
 use std::fmt::Write;
@@ -1671,8 +1671,8 @@ impl Cpu {
                     // boot stopped once `nn::oe::Initialize` was working.
                     21 => total_memory_size - system_resource_size,
                     22 => 0,
-                    12 => 0x0800_0000, // AslrRegionAddress
-                    13 => 0x1F00_0000, // AslrRegionSize
+                    12 => u64::from(GUEST_ASLR_REGION_ADDR),
+                    13 => u64::from(GUEST_ASLR_REGION_SIZE),
                     // Where thread stacks get mirrored. It has to be clear of
                     // the main stack (`STACK_TOP`) and big enough for several
                     // stacks plus the guard pages libnx leaves around them:

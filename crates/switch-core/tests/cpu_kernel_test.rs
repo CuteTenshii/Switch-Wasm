@@ -1188,14 +1188,32 @@ fn the_guest_regions_are_disjoint_and_big_enough_for_what_they_promise() {
     // reason it went unnoticed.
     use switch_core::cpu::{
         MemoryLayout, OperationMode, GUEST_ALIAS_REGION_ADDR, GUEST_ALIAS_REGION_SIZE,
-        GUEST_HEAP_REGION_ADDR, GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR,
-        GUEST_STACK_REGION_SIZE, GUEST_TOTAL_MEMORY_SIZE, MAIN_THREAD_TLS_BASE,
-        SELF_RETURN_TRAMPOLINE, SHARED_BUFFER_ADDR, SHARED_BUFFER_RESERVED_SIZE, STACK_TOP,
-        THREAD_EXIT_TRAMPOLINE, THREAD_TLS_BASE, VAMM_ARENA_SIZE,
+        GUEST_ASLR_REGION_ADDR, GUEST_ASLR_REGION_SIZE, GUEST_HEAP_REGION_ADDR,
+        GUEST_HEAP_REGION_SIZE, GUEST_SPACE_END, GUEST_STACK_REGION_ADDR, GUEST_STACK_REGION_SIZE,
+        GUEST_TOTAL_MEMORY_SIZE, MAIN_THREAD_TLS_BASE, SELF_RETURN_TRAMPOLINE, SHARED_BUFFER_ADDR,
+        SHARED_BUFFER_RESERVED_SIZE, STACK_SIZE, STACK_TOP, THREAD_EXIT_TRAMPOLINE,
+        THREAD_TLS_BASE, THREAD_TLS_STRIDE, VAMM_ARENA_SIZE,
     };
     use switch_core::{FB_BASE, FB_HEIGHT, FB_WIDTH, INPUT_ADDR};
 
     assert!(GUEST_STACK_REGION_ADDR + GUEST_STACK_REGION_SIZE <= GUEST_HEAP_REGION_ADDR);
+    // Inside the ASLR region, as on a console, and no smaller than the one
+    // Just Dance 2023 ran out of: its stacks are placed at random, so the
+    // longest free run shrinks much faster than the free space does.
+    assert!(GUEST_STACK_REGION_ADDR >= GUEST_ASLR_REGION_ADDR);
+    assert!(
+        GUEST_STACK_REGION_ADDR + GUEST_STACK_REGION_SIZE
+            <= GUEST_ASLR_REGION_ADDR + GUEST_ASLR_REGION_SIZE
+    );
+    assert!(GUEST_STACK_REGION_SIZE > 0x0800_0000);
+    // Every thread's TLS block sits between the stack region and the main
+    // stack, so the gap is the thread limit. Horizon allows an application
+    // far fewer threads than this.
+    const THREADS: u32 = 1024;
+    assert!(
+        u64::from(THREAD_TLS_BASE + THREADS * THREAD_TLS_STRIDE) <= STACK_TOP - STACK_SIZE,
+        "{THREADS} threads' TLS blocks run into the main stack"
+    );
     // And clear of what the emulator keeps for itself. A guest picks the
     // address it maps a thread stack at out of this region and asks nobody:
     // whatever of ours is inside it gets overwritten sooner or later, and the
