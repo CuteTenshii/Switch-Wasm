@@ -15,6 +15,7 @@
    owns the bytes of, so a firmware dump is registered for the cost of its
    headers rather than pulled through the wasm heap. */
 
+import { workerLog } from './log';
 import { api } from './wasm';
 
 // File 0 is the container being run; the rest are system data archives the
@@ -34,6 +35,41 @@ let hostReader: FileReaderSync | null = null;
 const HOST_CHUNK = 1 << 20;
 const HOST_CACHE_CHUNKS = 16;
 const hostChunks = new Map<number, Map<number, Uint8Array>>();
+
+/** What reads out of one host file have cost since the last `takeHostIo`:
+ *  how many the core asked for and how much of the file that took.
+ *  `diskBytes` against `bytes` is what the chunk cache is worth. */
+export interface HostIo {
+  /** The file's name, or its slot when it has none. */
+  file: string;
+  reads: number;
+  bytes: number;
+  chunkMisses: number;
+  diskBytes: number;
+  failures: number;
+}
+
+let io = new Map<number, HostIo>();
+
+function ioOf(fileIndex: number): HostIo {
+  let entry = io.get(fileIndex);
+  if (!entry) {
+    const file = hostFiles[fileIndex];
+    const name = file instanceof File
+      ? file.name
+      : fileIndex === 0 ? 'the container' : `host file ${fileIndex}`;
+    entry = { file: name, reads: 0, bytes: 0, chunkMisses: 0, diskBytes: 0, failures: 0 };
+    io.set(fileIndex, entry);
+  }
+  return entry;
+}
+
+/** Every file read since the last call, in the order they were first read. */
+export function takeHostIo(): HostIo[] {
+  const taken = [...io.values()];
+  io = new Map();
+  return taken;
+}
 
 function reader(): FileReaderSync {
   if (!hostReader) hostReader = new FileReaderSync();
@@ -68,11 +104,13 @@ export function resetHostFiles(): void {
   hostChunks.clear();
 }
 
-function readBlob(file: Blob, start: number, end: number): Uint8Array {
-  return new Uint8Array(reader().readAsArrayBuffer(file.slice(start, end)));
+function readBlob(stats: HostIo, file: Blob, start: number, end: number): Uint8Array {
+  const bytes = new Uint8Array(reader().readAsArrayBuffer(file.slice(start, end)));
+  stats.diskBytes += bytes.length;
+  return bytes;
 }
 
-function hostChunk(file: Blob, fileIndex: number, index: number): Uint8Array {
+function hostChunk(stats: HostIo, file: Blob, fileIndex: number, index: number): Uint8Array {
   let cache = hostChunks.get(fileIndex);
   if (!cache) hostChunks.set(fileIndex, (cache = new Map()));
   const hit = cache.get(index);
@@ -81,8 +119,9 @@ function hostChunk(file: Blob, fileIndex: number, index: number): Uint8Array {
     cache.set(index, hit);
     return hit;
   }
+  stats.chunkMisses++;
   const start = index * HOST_CHUNK;
-  const chunk = readBlob(file, start, Math.min(start + HOST_CHUNK, file.size));
+  const chunk = readBlob(stats, file, start, Math.min(start + HOST_CHUNK, file.size));
   cache.set(index, chunk);
   if (cache.size > HOST_CACHE_CHUNKS) {
     const oldest = cache.keys().next();
@@ -111,17 +150,20 @@ export function hostRead(
   // The view has to be built here, not cached: growing the heap detaches it.
   const out = new Uint8Array(api().memory.buffer, ptr, end - at);
   let written = 0;
+  const stats = ioOf(fileIndex);
+  stats.reads++;
   try {
     // A read bigger than a chunk is the ExeFS being pulled in one go. Serve
     // it straight from the file: it would evict the whole cache on its way
     // through and never be asked for again.
     if (end - at > HOST_CHUNK) {
-      out.set(readBlob(file, at, end));
+      out.set(readBlob(stats, file, at, end));
+      stats.bytes += end - at;
       return end - at;
     }
     while (at < end) {
       const index = Math.floor(at / HOST_CHUNK);
-      const chunk = hostChunk(file, fileIndex, index);
+      const chunk = hostChunk(stats, file, fileIndex, index);
       const from = at - index * HOST_CHUNK;
       const take = Math.min(chunk.length - from, end - at);
       if (take <= 0) break;
@@ -132,7 +174,9 @@ export function hostRead(
   } catch (e) {
     // The file was moved or replaced while it was open. Report the short
     // read; the wasm side turns that into an error with an offset on it.
-    console.error('[switch-wasm] host read failed:', e);
+    stats.failures++;
+    workerLog(`[io] ${stats.file}: read at ${at} failed: ${String(e)}`, 'err');
   }
+  stats.bytes += written;
   return written;
 }

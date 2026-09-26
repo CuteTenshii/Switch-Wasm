@@ -144,7 +144,10 @@ async function registerArchives(gen: number): Promise<number | null> {
     try {
       const content = await nandContent(entry.name);
       if (gen !== restoreGen) return null;
-      if (content && await call('add_archive', content) === 0) registered++;
+      // Named, so the worker's I/O lines can say which archive they read. A
+      // File made from a Blob refers to the same bytes rather than copying.
+      const named = content instanceof File ? content : content && new File([content], entry.name);
+      if (named && await call('add_archive', named) === 0) registered++;
     } catch { /* one unreadable archive should not cost the rest */ }
     restoreProgress = { done: ++done, total: archives.length };
     archiveCount = registered;

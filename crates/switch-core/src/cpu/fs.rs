@@ -218,7 +218,104 @@ fn directory_command(cmd: u32) -> Option<&'static str> {
     })
 }
 
-/// An `IStorage` the way the trace names it.
+/// How many path operations [`FsActivity`] holds before it starts counting
+/// them instead. The browser drains it once a second, so this is only reached
+/// by a title walking a directory tree, and what it drops it still counts.
+const JOURNAL_CAP: usize = 256;
+
+/// How many distinct files [`FsActivity`] tallies between two readings. What
+/// is past it is summed under [`OTHER_FILES`] rather than lost.
+const FILES_CAP: usize = 256;
+
+/// The name the tally gives the files that did not fit.
+pub const OTHER_FILES: &str = "(other files)";
+
+/// Reads and writes through one file or storage.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct FileIo {
+    pub reads: u64,
+    pub read_bytes: u64,
+    pub writes: u64,
+    pub write_bytes: u64,
+}
+
+/// What the guest's filesystem has been doing, for a host that wants to say so
+/// without turning a trace channel on.
+///
+/// Both halves are taken rather than read, so each reading covers the time
+/// since the one before. The journal is the path operations themselves,
+/// opens, creates, deletes and the lookups that found nothing. Reads and
+/// writes are tallied per file instead of journalled: a title streaming its
+/// RomFS issues thousands a second, and what is worth knowing about those is
+/// which file and how much, not each one.
+#[derive(Debug, Default, Clone)]
+pub struct FsActivity {
+    /// Requests of any kind that were answered with a failure, since boot.
+    pub failures: u64,
+    journal: Vec<String>,
+    dropped: u64,
+    files: std::collections::BTreeMap<String, FileIo>,
+}
+
+impl FsActivity {
+    /// Journal one path operation, or count it when the journal is full.
+    pub fn record(&mut self, line: String) {
+        if self.journal.len() < JOURNAL_CAP {
+            self.journal.push(line);
+        } else {
+            self.dropped += 1;
+        }
+    }
+
+    /// The path operations since the last call, and how many more there were
+    /// than the journal had room for.
+    pub fn take_journal(&mut self) -> (Vec<String>, u64) {
+        (
+            std::mem::take(&mut self.journal),
+            std::mem::take(&mut self.dropped),
+        )
+    }
+
+    /// Count one read of `bytes` from `file`.
+    pub fn read(&mut self, file: &str, bytes: u64) {
+        let io = self.file(file);
+        io.reads += 1;
+        io.read_bytes += bytes;
+    }
+
+    /// Count one write of `bytes` to `file`.
+    pub fn wrote(&mut self, file: &str, bytes: u64) {
+        let io = self.file(file);
+        io.writes += 1;
+        io.write_bytes += bytes;
+    }
+
+    /// Every file read or written since the last call, by name.
+    pub fn take_files(&mut self) -> std::collections::BTreeMap<String, FileIo> {
+        std::mem::take(&mut self.files)
+    }
+
+    fn file(&mut self, file: &str) -> &mut FileIo {
+        // Looked up by `&str` first so the common case, a file already
+        // tallied, allocates nothing.
+        let name = if self.files.contains_key(file) || self.files.len() < FILES_CAP {
+            file
+        } else {
+            OTHER_FILES
+        };
+        if !self.files.contains_key(name) {
+            self.files.insert(name.to_owned(), FileIo::default());
+        }
+        self.files.get_mut(name).expect("inserted above")
+    }
+}
+
+/// A file the way the tally names it: its storage and its path.
+fn file_text(mount: Option<u64>, path: &str) -> String {
+    format!("{}:{path}", mount_text(mount))
+}
+
+/// An `IStorage` the way the tally names it.
 fn storage_text(archive: Option<u64>) -> String {
     match archive {
         Some(id) => format!("data archive {id:016x}"),
@@ -235,27 +332,38 @@ fn mount_text(mount: Option<u64>) -> String {
 }
 
 impl Cpu {
-    /// Run one filesystem request, and under `TRACE_FS`, say what it was and
-    /// how it ended.
+    /// Run one filesystem request, count it if it failed, and say what it was
+    /// and how it ended: under `TRACE_FS`, and into [`FsActivity`]'s journal
+    /// when `journal` asks for it.
     ///
     /// The outcome is the `Result` the reply carried, read back rather than
-    /// traced by each arm, so a command added later is reported without
-    /// anyone remembering to. `subject` is only evaluated when the channel is
-    /// on: it reads paths out of guest memory.
+    /// reported by each arm, so a command added later is covered without
+    /// anyone remembering to. `subject` is only evaluated when the line is
+    /// going somewhere: it reads paths out of guest memory.
     fn fs_traced(
         &mut self,
         interface: &str,
         cmd_id: Option<u32>,
         name: fn(u32) -> Option<&'static str>,
+        journal: bool,
         subject: impl FnOnce(&Self) -> String,
         handle: impl FnOnce(&mut Self) -> Result<()>,
     ) -> Result<()> {
-        if !crate::trace::enabled(Trace::Fs) {
-            return handle(self);
-        }
-        let subject = subject(self);
+        let tracing = crate::trace::enabled(Trace::Fs);
+        let subject = if tracing || journal {
+            subject(self)
+        } else {
+            String::new()
+        };
         self.last_ipc_result = None;
         let handled = handle(self);
+        let failed = handled.is_err() || self.last_ipc_result.is_some_and(|r| r != 0);
+        if failed {
+            self.fs_activity.failures += 1;
+        }
+        if !tracing && !journal {
+            return handled;
+        }
         let command = match cmd_id {
             Some(cmd) => name(cmd).map_or_else(|| format!("cmd {cmd}"), str::to_owned),
             None => "<no command>".to_owned(),
@@ -265,7 +373,13 @@ impl Cpu {
             (Ok(()), Some(result)) => result_text(result),
             (Ok(()), None) => "no reply".to_owned(),
         };
-        crate::traceln!("[fs] {interface} {command}{subject} -> {outcome}");
+        let line = format!("{interface} {command}{subject} -> {outcome}");
+        if tracing {
+            crate::traceln!("[fs] {line}");
+        }
+        if journal {
+            self.fs_activity.record(line);
+        }
         handled
     }
 
@@ -280,10 +394,14 @@ impl Cpu {
         if self.ipc_is_control_request(tls) {
             return self.fsp_srv_dispatch(tls, cmd_id, handle);
         }
+        // The access-log commands (1004 and up) are a title writing its own
+        // log, once per access when it is on, and would bury the opens.
+        let journal = cmd_id.is_some_and(|cmd| cmd < 1000);
         self.fs_traced(
             "fsp-srv",
             cmd_id,
             fsp_srv_command,
+            journal,
             |_| String::new(),
             |cpu| cpu.fsp_srv_dispatch(tls, cmd_id, handle),
         )
@@ -780,6 +898,7 @@ impl Cpu {
             "storage",
             cmd_id,
             file_command,
+            false,
             |cpu| {
                 let key = cpu.ipc_object_key(tls, handle);
                 format!(
@@ -854,6 +973,9 @@ impl Cpu {
                         written += got as u32;
                         pos += got as u64;
                     }
+                    self.tally_storage_read(archive, start, u64::from(written));
+                } else {
+                    self.tally_storage_read(archive, start, 0);
                 }
                 if trace_storage {
                     // What actually landed in the guest's buffer. A read that
@@ -872,6 +994,36 @@ impl Cpu {
             // GetSize -> u64
             Some(4) => self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[]),
             _ => self.write_ipc_response(tls, 0, &[], &[], &[]),
+        }
+    }
+
+    /// Charge a storage read to the RomFS files it landed in, by path.
+    ///
+    /// A storage read is a raw range, and the title walks the file table
+    /// itself, so the range is all there is to go on; the index built from
+    /// the same tables is what turns it back into names. Bytes outside every
+    /// file are the header and the tables, which is the guest mounting it.
+    fn tally_storage_read(&mut self, archive: Option<u64>, offset: u64, len: u64) {
+        if !self.romfs_indexes.contains_key(&archive) {
+            let index = self
+                .storage_source(archive)
+                .and_then(|src| crate::romfs::RomFsIndex::read(src).ok());
+            self.romfs_indexes.insert(archive, index);
+        }
+        let storage = storage_text(archive);
+        let activity = &mut self.fs_activity;
+        let Some(index) = self.romfs_indexes.get(&archive).and_then(Option::as_ref) else {
+            // Not a RomFS this can read, so there are no names to give.
+            activity.read(&storage, len);
+            return;
+        };
+        let mut named = 0;
+        for (path, bytes) in index.files_in(offset, len) {
+            activity.read(&format!("{storage}:{path}"), bytes);
+            named += bytes;
+        }
+        if named < len || len == 0 {
+            activity.read(&format!("{storage} (tables)"), len - named);
         }
     }
 
@@ -895,6 +1047,7 @@ impl Cpu {
             "fs",
             cmd_id,
             file_system_command,
+            true,
             |cpu| {
                 let path = cpu.ipc_request_path(tls);
                 let mount = cpu.mount_of(cpu.ipc_object_key(tls, handle));
@@ -997,6 +1150,7 @@ impl Cpu {
             "dir",
             cmd_id,
             directory_command,
+            false,
             |cpu| {
                 let entries = cpu.fs_dirs.get(&key).map_or(0, Vec::len);
                 format!(" ({entries} entries left)")
@@ -1054,6 +1208,7 @@ impl Cpu {
             "file",
             cmd_id,
             file_command,
+            false,
             |cpu| {
                 let path = cpu.fs_files.get(&key).map_or("", String::as_str);
                 format!(" {path:?} on {}", mount_text(cpu.mount_of(key)))
@@ -1090,6 +1245,7 @@ impl Cpu {
                 if let Some(addr) = self.ipc_output_buffer_addr(tls, 0) {
                     self.mem.write_bytes(addr, &buf[..read])?;
                 }
+                self.fs_activity.read(&file_text(mount, &path), read as u64);
                 self.write_ipc_response(tls, 0, &[], &(read as u64).to_le_bytes(), &[])
             }
             // Write(u32 option, s64 offset, u64 size) with the bytes in a
@@ -1112,6 +1268,8 @@ impl Cpu {
                         bytes.len()
                     );
                 }
+                self.fs_activity
+                    .wrote(&file_text(mount, &path), bytes.len() as u64);
                 match self.vfs_for(mount).write(&path, offset, &bytes) {
                     Some(_) => self.write_ipc_response(tls, 0, &[], &[], &[]),
                     None => self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]),
@@ -1218,6 +1376,14 @@ mod tests {
         cpu.fs_file_request(TLS, Some(1), key).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.fs.file("/switch/cfg.json"), Some(&br#"{"v":5}"#[..]));
+        let files = cpu.fs_activity.take_files();
+        assert_eq!(
+            files
+                .get("sdmc:/switch/cfg.json")
+                .map(|io| (io.writes, io.write_bytes)),
+            Some((1, 7)),
+            "the write is tallied under the file it went to: {files:?}"
+        );
 
         // GetSize agrees with what was written, rather than the zero the file
         // was created with.
@@ -1553,6 +1719,28 @@ mod tests {
         assert_eq!(cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64, sd_event);
     }
 
+    /// A path operation is journalled with its outcome whether or not
+    /// `TRACE_FS` is on: the journal is what the browser console reports from.
+    #[test]
+    fn a_path_operation_is_journalled_with_its_result() {
+        let mut cpu = request_with_path(7, "sdmc:/missing.bin", &[]);
+        cpu.record_handle(9, "fsp-srv");
+        cpu.fs_request(TLS, Some(7), 9).unwrap();
+        let (journal, dropped) = cpu.fs_activity.take_journal();
+        assert_eq!(dropped, 0);
+        assert_eq!(journal.len(), 1, "{journal:?}");
+        assert!(
+            journal[0].starts_with("fs GetEntryType \"/missing.bin\" on sdmc ->"),
+            "{journal:?}"
+        );
+        assert!(journal[0].ends_with("-> 2002-0001 (0x202)"), "{journal:?}");
+        assert_eq!(cpu.fs_activity.failures, 1);
+        assert!(
+            cpu.fs_activity.take_journal().0.is_empty(),
+            "taken, not read"
+        );
+    }
+
     /// `TRACE_FS` prints a `Result` the way every list of `fs` errors is
     /// indexed, so a line can be looked up without decoding it by hand.
     #[test]
@@ -1613,5 +1801,19 @@ mod tests {
         write_request(&mut cpu, 4, &[]);
         cpu.fs_storage_request(TLS, 1, Some(4)).unwrap();
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0x100);
+
+        // The two reads that were served are tallied under the storage they
+        // came from; the refused ones never reached it.
+        let files = cpu.fs_activity.take_files();
+        assert_eq!(
+            files.get("romfs"),
+            Some(&super::FileIo {
+                reads: 2,
+                read_bytes: 0x120,
+                writes: 0,
+                write_bytes: 0
+            }),
+            "{files:?}"
+        );
     }
 }

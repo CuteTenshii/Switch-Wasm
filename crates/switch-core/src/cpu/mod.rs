@@ -53,7 +53,7 @@ mod time;
 mod vi;
 
 pub use a32::ExecMode;
-pub use fs::SaveDataQuota;
+pub use fs::{FsActivity, SaveDataQuota};
 pub use ipc::POINTER_BUFFER_SIZE;
 pub use jit::{
     defers, emits, set_jit_host, translates, Entry, JitHost, JitStats, Layout, Refused, LEFT,
@@ -1361,6 +1361,13 @@ pub struct Cpu {
     /// report how a request ended from one place, rather than from each of
     /// the dozens of arms that write a reply.
     last_ipc_result: Option<u32>,
+    /// What the guest's filesystem has been doing: see [`FsActivity`].
+    pub fs_activity: FsActivity,
+    /// Which RomFS file each byte of a storage belongs to, by the archive
+    /// the storage serves (`None` for the process's own RomFS), built on its
+    /// first read. `None` inside is a storage whose tables could not be
+    /// read, remembered so a bad one is not re-read on every request.
+    romfs_indexes: BTreeMap<Option<u64>, Option<crate::romfs::RomFsIndex>>,
     /// The event each card slot's `IEventNotifier` hands out, by the `fsp-srv`
     /// command that opened it. One per slot rather than one per caller: a
     /// guest that asks twice has to be given the event it is already waiting
@@ -1887,6 +1894,8 @@ impl Cpu {
             fs_access_log_mode: 0,
             fs_speed_emulation_mode: 0,
             last_ipc_result: None,
+            fs_activity: FsActivity::default(),
+            romfs_indexes: BTreeMap::new(),
             fs_detection_events: BTreeMap::new(),
             am_in_data: VecDeque::new(),
             am_out_data: Vec::new(),
@@ -3091,6 +3100,7 @@ impl Cpu {
     /// for the form a real title's uses.
     pub fn set_romfs(&mut self, data: Vec<u8>) {
         self.romfs = Some(Box::new(crate::source::MemSource(data)));
+        self.romfs_indexes.remove(&None);
     }
 
     /// Register a system data archive under its data id, for
@@ -3103,6 +3113,7 @@ impl Cpu {
     /// answered with an empty archive.
     pub fn add_data_archive(&mut self, data_id: u64, src: Box<dyn crate::source::ByteSource>) {
         self.data_archives.insert(data_id, src);
+        self.romfs_indexes.remove(&Some(data_id));
     }
 
     /// The id this title's add-on content is numbered upwards from.
@@ -3142,6 +3153,7 @@ impl Cpu {
             return None;
         }
         self.data_archives.insert(content_id, src);
+        self.romfs_indexes.remove(&Some(content_id));
         self.add_on_content.insert(index as u32);
         // A title running when content arrives is told to look again. One that
         // has not asked for the event yet reads the list when it does.
@@ -3208,6 +3220,7 @@ impl Cpu {
     /// container the title was launched from.
     pub fn set_romfs_source(&mut self, src: Box<dyn crate::source::ByteSource>) {
         self.romfs = Some(src);
+        self.romfs_indexes.remove(&None);
     }
 
     // ---- register access ----

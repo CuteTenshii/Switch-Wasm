@@ -46,6 +46,7 @@
 //! `0xFFFFFFFF` ends a sibling chain. The root directory is the entry at
 //! offset 0 of the directory metadata table and its own name is empty.
 
+use crate::source::ByteSource;
 use crate::Error;
 
 /// The header's declared size. RomFS carries no magic number, so this
@@ -108,55 +109,10 @@ impl<'a> RomFs<'a> {
             "RomFS file metadata table",
         )?;
         let data_offset = crate::nsp::read_u64(image, 0x48);
-
-        // Chains are just offsets into the tables, so a corrupt image can
-        // point an entry back at itself. The walk is bounded by the number of
-        // entries the tables could possibly hold: every entry is at least its
-        // fixed part long, so dividing each table by that is an upper bound on
-        // what it can contain. A directory is read twice, once when its
-        // parent lists it, once when it is walked itself, so it gets two.
-        let mut budget =
-            2 * (dir_table.len() / DIR_ENTRY_SIZE) + file_table.len() / FILE_ENTRY_SIZE + 2;
-        let spend = |budget: &mut usize| -> Result<(), Error> {
-            *budget = budget.checked_sub(1).ok_or_else(|| {
-                Error::RomFs("entry chain doesn't terminate — corrupt image".into())
-            })?;
-            Ok(())
-        };
-        let mut files = Vec::new();
-        let mut pending = vec![(0u32, String::new())];
-        while let Some((dir_offset, prefix)) = pending.pop() {
-            spend(&mut budget)?;
-            let dir = entry(dir_table, dir_offset, DIR_ENTRY_SIZE, "directory")?;
-
-            let mut file_offset = crate::nsp::read_u32(dir, 0x0C);
-            while file_offset != INVALID_OFFSET {
-                spend(&mut budget)?;
-                let file = entry(file_table, file_offset, FILE_ENTRY_SIZE, "file")?;
-                files.push(RomFsFile {
-                    path: format!("{}/{}", prefix, name(file, FILE_ENTRY_SIZE, "file")?),
-                    offset: crate::nsp::read_u64(file, 0x08),
-                    size: crate::nsp::read_u64(file, 0x10),
-                });
-                file_offset = crate::nsp::read_u32(file, 0x04);
-            }
-
-            let mut child_offset = crate::nsp::read_u32(dir, 0x08);
-            while child_offset != INVALID_OFFSET {
-                spend(&mut budget)?;
-                let child = entry(dir_table, child_offset, DIR_ENTRY_SIZE, "directory")?;
-                pending.push((
-                    child_offset,
-                    format!("{}/{}", prefix, name(child, DIR_ENTRY_SIZE, "directory")?),
-                ));
-                child_offset = crate::nsp::read_u32(child, 0x04);
-            }
-        }
-
         Ok(RomFs {
             image,
             data_offset,
-            files,
+            files: walk(dir_table, file_table)?,
         })
     }
 
@@ -186,6 +142,120 @@ impl<'a> RomFs<'a> {
     pub fn read_path(&self, path: &str) -> Option<&'a [u8]> {
         self.read(self.find(path)?)
     }
+}
+
+/// The largest metadata table [`RomFsIndex::read`] will pull in. A retail
+/// title's tables run to a few megabytes; a size past this is a corrupt
+/// header, and believing it would allocate whatever it says.
+const MAX_TABLE: u64 = 64 << 20;
+
+/// Which file each byte of a RomFS belongs to, read from its metadata tables
+/// alone.
+///
+/// A title reads its RomFS as raw ranges of an `IStorage` and walks the file
+/// table itself, so the emulator serving those ranges sees offsets and never
+/// a name. This is what puts the name back: the same tables the guest reads,
+/// read once, and turned into extents that an offset can be looked up in.
+/// Only the tables are read, never the payload, so it costs what the guest's
+/// own mount costs.
+#[derive(Debug, Clone, Default)]
+pub struct RomFsIndex {
+    /// `(start, end, path)`, with `start`/`end` absolute within the image and
+    /// sorted by `start`. RomFS payloads never overlap, so `end` is sorted too.
+    extents: Vec<(u64, u64, String)>,
+}
+
+impl RomFsIndex {
+    /// Read the header and the two metadata tables out of `src`.
+    pub fn read(src: &dyn ByteSource) -> Result<RomFsIndex, Error> {
+        let mut header = [0u8; HEADER_SIZE as usize];
+        src.read_exact_at(0, &mut header)?;
+        if crate::nsp::read_u64(&header, 0) != HEADER_SIZE {
+            return Err(Error::RomFs("not a RomFS image".into()));
+        }
+        let table = |offset_at: usize, what: &str| -> Result<Vec<u8>, Error> {
+            let offset = crate::nsp::read_u64(&header, offset_at);
+            let size = crate::nsp::read_u64(&header, offset_at + 8);
+            if size > MAX_TABLE {
+                return Err(Error::RomFs(format!("{what} claims {size:#x} bytes")));
+            }
+            src.read_vec(offset, size)
+        };
+        let dir_table = table(0x18, "RomFS directory metadata table")?;
+        let file_table = table(0x38, "RomFS file metadata table")?;
+        let data_offset = crate::nsp::read_u64(&header, 0x48);
+        let mut extents: Vec<(u64, u64, String)> = walk(&dir_table, &file_table)?
+            .into_iter()
+            .filter_map(|f| {
+                let start = data_offset.checked_add(f.offset)?;
+                Some((start, start.checked_add(f.size)?, f.path))
+            })
+            .collect();
+        extents.sort_unstable_by_key(|&(start, _, _)| start);
+        Ok(RomFsIndex { extents })
+    }
+
+    /// Every file the range `offset..offset + len` touches, with how many of
+    /// its bytes fall inside that file, in image order.
+    pub fn files_in(&self, offset: u64, len: u64) -> impl Iterator<Item = (&str, u64)> {
+        let end = offset.saturating_add(len);
+        let first = self.extents.partition_point(|&(_, e, _)| e <= offset);
+        self.extents[first..]
+            .iter()
+            .take_while(move |&&(start, _, _)| start < end)
+            .filter_map(move |(start, e, path)| {
+                let overlap = end.min(*e).saturating_sub(offset.max(*start));
+                (overlap > 0).then_some((path.as_str(), overlap))
+            })
+    }
+}
+
+/// Walk the metadata tables and collect every file they describe.
+fn walk(dir_table: &[u8], file_table: &[u8]) -> Result<Vec<RomFsFile>, Error> {
+    // Chains are just offsets into the tables, so a corrupt image can
+    // point an entry back at itself. The walk is bounded by the number of
+    // entries the tables could possibly hold: every entry is at least its
+    // fixed part long, so dividing each table by that is an upper bound on
+    // what it can contain. A directory is read twice, once when its
+    // parent lists it, once when it is walked itself, so it gets two.
+    let mut budget =
+        2 * (dir_table.len() / DIR_ENTRY_SIZE) + file_table.len() / FILE_ENTRY_SIZE + 2;
+    let spend = |budget: &mut usize| -> Result<(), Error> {
+        *budget = budget
+            .checked_sub(1)
+            .ok_or_else(|| Error::RomFs("entry chain doesn't terminate — corrupt image".into()))?;
+        Ok(())
+    };
+    let mut files = Vec::new();
+    let mut pending = vec![(0u32, String::new())];
+    while let Some((dir_offset, prefix)) = pending.pop() {
+        spend(&mut budget)?;
+        let dir = entry(dir_table, dir_offset, DIR_ENTRY_SIZE, "directory")?;
+
+        let mut file_offset = crate::nsp::read_u32(dir, 0x0C);
+        while file_offset != INVALID_OFFSET {
+            spend(&mut budget)?;
+            let file = entry(file_table, file_offset, FILE_ENTRY_SIZE, "file")?;
+            files.push(RomFsFile {
+                path: format!("{}/{}", prefix, name(file, FILE_ENTRY_SIZE, "file")?),
+                offset: crate::nsp::read_u64(file, 0x08),
+                size: crate::nsp::read_u64(file, 0x10),
+            });
+            file_offset = crate::nsp::read_u32(file, 0x04);
+        }
+
+        let mut child_offset = crate::nsp::read_u32(dir, 0x08);
+        while child_offset != INVALID_OFFSET {
+            spend(&mut budget)?;
+            let child = entry(dir_table, child_offset, DIR_ENTRY_SIZE, "directory")?;
+            pending.push((
+                child_offset,
+                format!("{}/{}", prefix, name(child, DIR_ENTRY_SIZE, "directory")?),
+            ));
+            child_offset = crate::nsp::read_u32(child, 0x04);
+        }
+    }
+    Ok(files)
 }
 
 /// Slice one of the header's declared tables out of the image.
@@ -437,6 +507,30 @@ mod tests {
         let path = format!("{}/f.bin", "/d".repeat(16));
         assert_eq!(romfs.files().len(), 1);
         assert_eq!(romfs.read_path(&path).unwrap(), b"DEEP");
+    }
+
+    /// The index has to name a file from nothing but a range: that is all a
+    /// guest's `IStorage::Read` carries.
+    #[test]
+    fn the_index_names_the_files_a_range_touches() {
+        let image = build(&[("a.bin", b"AAAA")], Some(("sub", &[("b.bin", b"BB")])));
+        let index = RomFsIndex::read(&crate::source::SliceSource(&image)).unwrap();
+        let data = crate::nsp::read_u64(&image, 0x48);
+        let hits = |offset: u64, len: u64| -> Vec<(String, u64)> {
+            index
+                .files_in(offset, len)
+                .map(|(path, n)| (path.to_owned(), n))
+                .collect()
+        };
+        assert_eq!(hits(data + 1, 2), vec![("/a.bin".to_owned(), 2)]);
+        // Across the boundary: three bytes of one file, one of the next.
+        assert_eq!(
+            hits(data + 1, 4),
+            vec![("/a.bin".to_owned(), 3), ("/sub/b.bin".to_owned(), 1)]
+        );
+        // The header and the tables are no file's.
+        assert!(hits(0, HEADER_SIZE).is_empty());
+        assert!(hits(data + 6, 16).is_empty());
     }
 
     #[test]

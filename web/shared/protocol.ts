@@ -334,7 +334,16 @@ export interface CallRequest {
   args: unknown[];
 }
 
+/** How loudly the page's log shows a line, and which `console` method mirrors
+ *  it into DevTools: `err` and `warn` as named, `ok` as `info`, `dim` as
+ *  `debug`, and none at all as `log`. */
+export type LogClass = 'err' | 'warn' | 'ok' | 'dim';
+
+/** `log` is the worker saying something unasked. It goes through the page's
+ *  log rather than the worker's own `console`, so the page's console and
+ *  DevTools carry the same lines. */
 export type WorkerMessage =
   | { type: 'ready'; error?: string }
+  | { type: 'log'; text: string; cls?: LogClass }
   | { id: number; ok: true; result: unknown }
   | { id: number; ok: false; error: string };

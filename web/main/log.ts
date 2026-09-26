@@ -2,10 +2,12 @@
    DevTools so it can be filtered by severity there too. */
 
 import { $, el } from './dom';
-import { LOG_KEY, LOG_STORE, idbApply, idbGet, logIdb } from './db';
+import type { LogClass } from '../shared/protocol';
+import { LOG_KEY, LOG_STORE, idbApply, idbGet, logIdb, type StoredEntry } from './db';
+import { fmtSize } from './format';
 import { openPanel } from './shell';
 
-export type LogClass = 'err' | 'warn' | 'ok' | 'dim';
+export type { LogClass } from '../shared/protocol';
 
 const consoleEl = $('console');
 const autoscrollCb = $<HTMLInputElement>('autoscroll-cb');
@@ -83,6 +85,27 @@ export function log(msg: string, cls?: LogClass): void {
   if (autoscrollCb.checked) consoleEl.scrollTop = consoleEl.scrollHeight;
   // Anything that went wrong is worth surfacing even with the panel closed.
   if (cls === 'err') openPanel('console');
+}
+
+/** How many paths a line about stored changes names before it summarises. */
+const STORED_NAMED_MAX = 8;
+
+/** Log what a flush just wrote to IndexedDB. `null` in the map is a
+ *  deletion. */
+export function logStored(what: string, changes: Map<string, StoredEntry | null>): void {
+  let bytes = 0;
+  const named: string[] = [];
+  for (const [path, entry] of changes) {
+    if (entry?.kind === 'file') bytes += entry.data?.length ?? 0;
+    if (named.length < STORED_NAMED_MAX) {
+      named.push(entry ? path : path + ' (deleted)');
+    }
+  }
+  const more = changes.size > named.length ? `, and ${changes.size - named.length} more` : '';
+  log(
+    `[io] ${what}: stored ${changes.size} changes (${fmtSize(bytes)}) in IndexedDB: `
+      + named.join(', ') + more,
+  );
 }
 
 /** Log a block of text one entry per line, at one level.

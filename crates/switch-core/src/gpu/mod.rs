@@ -9,6 +9,7 @@
 //! from, because on Tegra it genuinely does: the guest allocates a buffer, and
 //! nvmap plus the GMMU just make that buffer visible at a GPU address.
 
+pub mod activity;
 pub mod bcn;
 pub mod channel;
 pub mod compute;
@@ -151,6 +152,9 @@ pub const NV_LAYOUT_BLOCK_LINEAR: u32 = 3;
 
 #[derive(Debug)]
 pub struct Gpu {
+    /// Which surfaces were presented since the host last asked: see
+    /// [`Gpu::take_activity`].
+    activity: activity::GpuActivity,
     pub nvmap: NvMap,
     pub host1x: Host1x,
     pub address_spaces: HashMap<u32, AddressSpace>,
@@ -192,6 +196,7 @@ impl Default for Gpu {
 impl Gpu {
     pub fn new() -> Gpu {
         Gpu {
+            activity: activity::GpuActivity::default(),
             nvmap: NvMap::new(),
             host1x: Host1x::new(),
             address_spaces: HashMap::new(),
@@ -284,6 +289,19 @@ impl Gpu {
         self.last_channel = Some(channel_id);
         submitted?;
         Ok(fence)
+    }
+
+    /// Everything the GPU drew, cleared, copied and presented since the last
+    /// call, by surface, gathered from every channel's engines.
+    pub fn take_activity(&mut self) -> Vec<(activity::Kind, activity::Tally)> {
+        let mut all = std::mem::take(&mut self.activity);
+        for channel in self.channels.values_mut() {
+            all.absorb(&mut channel.three_d.activity);
+            all.absorb(&mut channel.three_d.inline.activity);
+            all.absorb(&mut channel.two_d.activity);
+            all.absorb(&mut channel.copy.activity);
+        }
+        all.take()
     }
 
     /// Install the backend every channel draws through.
@@ -380,6 +398,24 @@ impl Gpu {
             )));
         }
         let base = handle.cpu_addr.wrapping_add(buffer.offset);
+        self.activity.note(
+            activity::Kind::Present,
+            u64::from(base),
+            u64::from(buffer.nvmap_id),
+            1,
+            false,
+            || {
+                format!(
+                    "nvmap {} at cpu {base:#x} {}x{} fmt {:#x} layout {} pitch {}",
+                    buffer.nvmap_id,
+                    buffer.width,
+                    buffer.height,
+                    buffer.color_format,
+                    buffer.layout,
+                    buffer.pitch
+                )
+            },
+        );
         if self.trace
             || crate::trace::enabled(crate::trace::Trace::Gpu)
             || crate::trace::enabled(crate::trace::Trace::Present)

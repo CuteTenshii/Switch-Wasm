@@ -1768,6 +1768,119 @@ pub extern "C" fn switch_gpu_report_json(handle: u32, buf: *mut u8, maxlen: u32)
     write_into(buf, maxlen, json.as_bytes())
 }
 
+/// What the session has been doing, as JSON: the counts the worker logs to
+/// the page's console once a second.
+///
+/// The GPU counts and `failures` run from boot, so the worker reports the
+/// difference between two readings. `gpu` (draws, clears, copies, blits and
+/// presents by surface), `files` (reads and writes by file) and `journal`
+/// (path operations) are taken instead: each appears in exactly one answer. Both are fitted to `maxlen` rather than truncated by
+/// [`write_into`], since an answer cut mid-string would lose everything in it
+/// when the page failed to parse it; what does not fit is counted in
+/// `gpuDropped`, `filesDropped` and `dropped` instead.
+#[no_mangle]
+pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let cpu = &mut session(handle).cpu;
+    let gpu = &cpu.nv.gpu;
+    let stats = gpu.stats;
+    let mut out = format!(
+        "{{\"frames\":{},\"submissions\":{},\"draws\":{},\"drawsSkipped\":{},\
+         \"clears\":{},\"clearsElided\":{},\"copies\":{},\"dispatches\":{},\"failures\":{}",
+        gpu.frames,
+        stats.submissions,
+        stats.draws,
+        stats.draws_skipped,
+        stats.clears,
+        stats.clears_elided,
+        stats.copies,
+        stats.dispatches,
+        cpu.fs_activity.failures,
+    )
+    .into_bytes();
+    // Room for the closing fields, whose width is at most three u64s' digits.
+    let budget = (maxlen as usize).saturating_sub(128);
+
+    let files = cpu.fs_activity.take_files();
+    let mut files_dropped = 0u64;
+    out.extend_from_slice(b",\"files\":[");
+    let mut first = true;
+    for (name, io) in &files {
+        let mut entry = Vec::with_capacity(name.len() + 96);
+        if !first {
+            entry.push(b',');
+        }
+        entry.extend_from_slice(b"{\"name\":\"");
+        json_escape(name, &mut entry);
+        entry.extend_from_slice(
+            format!(
+                "\",\"reads\":{},\"readBytes\":{},\"writes\":{},\"writeBytes\":{}}}",
+                io.reads, io.read_bytes, io.writes, io.write_bytes
+            )
+            .as_bytes(),
+        );
+        if out.len() + entry.len() > budget {
+            files_dropped += 1;
+            continue;
+        }
+        out.extend_from_slice(&entry);
+        first = false;
+    }
+    out.push(b']');
+
+    let surfaces = cpu.nv.gpu.take_activity();
+    let mut gpu_dropped = 0u64;
+    out.extend_from_slice(b",\"gpu\":[");
+    let mut first = true;
+    for (kind, tally) in &surfaces {
+        let mut entry = Vec::with_capacity(tally.label.len() + 96);
+        if !first {
+            entry.push(b',');
+        }
+        entry.extend_from_slice(format!("{{\"kind\":\"{}\",\"label\":\"", kind.name()).as_bytes());
+        json_escape(&tally.label, &mut entry);
+        entry.extend_from_slice(
+            format!(
+                "\",\"count\":{},\"amount\":{},\"failed\":{}}}",
+                tally.count, tally.amount, tally.failed
+            )
+            .as_bytes(),
+        );
+        if out.len() + entry.len() > budget {
+            gpu_dropped += 1;
+            continue;
+        }
+        out.extend_from_slice(&entry);
+        first = false;
+    }
+    out.push(b']');
+
+    let (journal, mut dropped) = cpu.fs_activity.take_journal();
+    out.extend_from_slice(b",\"journal\":[");
+    let mut first = true;
+    for line in &journal {
+        let mut entry = Vec::with_capacity(line.len() + 3);
+        if !first {
+            entry.push(b',');
+        }
+        entry.push(b'"');
+        json_escape(line, &mut entry);
+        entry.push(b'"');
+        if out.len() + entry.len() > budget {
+            dropped += 1;
+            continue;
+        }
+        out.extend_from_slice(&entry);
+        first = false;
+    }
+    out.extend_from_slice(
+        format!(
+            "],\"dropped\":{dropped},\"filesDropped\":{files_dropped},\"gpuDropped\":{gpu_dropped}}}"
+        )
+        .as_bytes(),
+    );
+    write_into(buf, maxlen, &out)
+}
+
 /// Whether the installed GPU backend has lost its device and wants replacing.
 ///
 /// Cheap by design: the worker asks after every slice, and a JSON report
@@ -2792,6 +2905,47 @@ mod tests {
         assert!(!all_off.contains("\"on\":true"), "{all_off}");
 
         switch_set_trace_mask(before);
+    }
+
+    #[test]
+    fn the_activity_report_names_each_file_and_hands_it_over_once() {
+        let (_host, handle) = new_session();
+        let json = json_from(|buf, cap| switch_activity_json(handle, buf, cap));
+        assert_eq!(field(&json, "draws"), "0");
+        assert_eq!(field(&json, "files"), "[]");
+        assert_eq!(field(&json, "gpu"), "[]");
+        assert_eq!(field(&json, "journal"), "[]");
+
+        let activity = &mut session(handle).cpu.fs_activity;
+        activity.read("romfs", 0x100);
+        activity.read("romfs", 0x20);
+        activity.wrote("sdmc:/cfg.json", 7);
+        activity.record("fs OpenFile \"/b\" on sdmc -> 2002-0001 (0x202)".to_owned());
+        let json = json_from(|buf, cap| switch_activity_json(handle, buf, cap));
+        assert_eq!(
+            field(&json, "files"),
+            r#"[{"name":"romfs","reads":2,"readBytes":288,"writes":0,"writeBytes":0},{"name":"sdmc:/cfg.json","reads":0,"readBytes":0,"writes":1,"writeBytes":7}]"#
+        );
+        assert_eq!(
+            field(&json, "journal"),
+            r#"["fs OpenFile \"/b\" on sdmc -> 2002-0001 (0x202)"]"#
+        );
+        let again = json_from(|buf, cap| switch_activity_json(handle, buf, cap));
+        assert_eq!(field(&again, "files"), "[]", "taken, not read");
+        assert_eq!(field(&again, "journal"), "[]", "taken, not read");
+
+        // An answer too small for what is waiting stays parseable and counts
+        // what it could not carry, rather than cutting an entry in half.
+        let activity = &mut session(handle).cpu.fs_activity;
+        activity.read(&"x".repeat(1000), 1);
+        activity.record("y".repeat(1000));
+        let mut buf = vec![0u8; 700];
+        let n = switch_activity_json(handle, buf.as_mut_ptr(), buf.len() as u32);
+        let small = String::from_utf8(buf[..n as usize].to_vec()).unwrap();
+        assert!(small.ends_with('}'), "{small}");
+        assert_eq!(field(&small, "files"), "[]");
+        assert_eq!(field(&small, "filesDropped"), "1");
+        assert_eq!(field(&small, "dropped"), "1");
     }
 
     #[test]

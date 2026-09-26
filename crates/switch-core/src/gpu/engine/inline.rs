@@ -30,6 +30,8 @@ pub struct EngineInline {
     pub regs: Registers,
     /// Bytes written since the last `LaunchDma`.
     written: u32,
+    /// Uploads by destination: see [`crate::gpu::activity`].
+    pub activity: crate::gpu::activity::GpuActivity,
 }
 
 impl EngineInline {
@@ -37,6 +39,7 @@ impl EngineInline {
         EngineInline {
             regs: Registers::new(),
             written: 0,
+            activity: Default::default(),
         }
     }
 
@@ -45,6 +48,21 @@ impl EngineInline {
         match method {
             LAUNCH_DMA => {
                 self.written = 0;
+                let dst = self.regs.iova(OFFSET_OUT);
+                let line = self.regs.get(LINE_LENGTH_IN);
+                let lines = self.regs.get(LINE_COUNT).max(1);
+                let cpu = ctx.span(dst, 1);
+                self.activity.note(
+                    crate::gpu::activity::Kind::Upload,
+                    dst,
+                    0,
+                    u64::from(line) * u64::from(lines),
+                    false,
+                    || match cpu {
+                        Some(cpu) => format!("{dst:#x} (cpu {cpu:#x})"),
+                        None => format!("{dst:#x} (unmapped)"),
+                    },
+                );
                 if ctx.trace || crate::trace::enabled(crate::trace::Trace::Copy) {
                     crate::traceln!(
                         "[gpu] inline launch dst={:#x} line_len={} lines={} pitch={} flags={arg:#x}",

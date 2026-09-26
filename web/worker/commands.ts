@@ -8,7 +8,10 @@
 import type {
   CommandHandlers, CrashReport, FsChange, GpuReport, IpcGaps, JitStats, TraceChannel,
 } from '../shared/protocol';
+import { fmtSize } from '../shared/format';
+import { noteRegistered, resetActivity } from './activity';
 import { addHostFile, openHostFile, resetHostFiles } from './hostfiles';
+import { workerLog } from './log';
 import { releaseLatchIfSeen, resetInput, setGamepad, setTouch } from './latch';
 import {
   api,
@@ -64,6 +67,20 @@ const changesCap = (pending: number) => 2 + pending * (0x301 * 2 + 64);
 // twice its size.
 const READ_CHUNK = 1 << 20;
 
+// How a host file reads in the console: its name when the page picked it, and
+// its size either way. A Blob out of the NAND has no name to give.
+function describe(file: Blob): string {
+  const name = file instanceof File ? `"${file.name}" ` : '';
+  return name + '(' + fmtSize(file.size) + ')';
+}
+
+// Log a load the core answered with `result`, which is negative on failure
+// for every loader here.
+function logLoad(what: string, result: number | bigint): void {
+  if (Number(result) < 0) workerLog(`[io] ${what}: refused (${lastError()})`, 'warn');
+  else workerLog(`[io] ${what}`);
+}
+
 export const CMD: CommandHandlers = {
   new() {
     state.handle = api().switch_new();
@@ -77,6 +94,7 @@ export const CMD: CommandHandlers = {
     api().switch_free_session(handle());
     state.handle = -1;
     resetInput();
+    resetActivity();
     // Every host file the freed session was reading through went with it, and
     // the page re-registers what the next one needs.
     resetHostFiles();
@@ -114,24 +132,36 @@ export const CMD: CommandHandlers = {
   },
 
   load_font(bytes) {
-    return withBytes(bytes, (ptr, len) => api().switch_load_font(handle(), ptr, len));
+    const result = withBytes(bytes, (ptr, len) => api().switch_load_font(handle(), ptr, len));
+    logLoad(`loaded the shared font (${fmtSize(bytes.length)})`, result);
+    return result;
   },
   load_nro(bytes) {
-    return withBytes(bytes, (ptr, len) => Number(api().switch_load_nro(handle(), ptr, len)));
+    const result =
+      withBytes(bytes, (ptr, len) => Number(api().switch_load_nro(handle(), ptr, len)));
+    logLoad(`loaded an NRO (${fmtSize(bytes.length)})`, result);
+    return result;
   },
   load_elf(bytes) {
-    return withBytes(bytes, (ptr, len) => Number(api().switch_load_elf(handle(), ptr, len)));
+    const result =
+      withBytes(bytes, (ptr, len) => Number(api().switch_load_elf(handle(), ptr, len)));
+    logLoad(`loaded an ELF (${fmtSize(bytes.length)})`, result);
+    return result;
   },
 
   // Open a container: the File is kept here and read range by range, so this
   // costs nothing but its PFS0 header no matter how large the file is.
   open_nsp(file) {
-    return api().switch_open_nsp(handle(), openHostFile(file));
+    const result = api().switch_open_nsp(handle(), openHostFile(file));
+    logLoad(`opened ${describe(file)} as the container`, result);
+    return result;
   },
   // Same, for a standalone .nca - the container is the NCA, with no file
   // table in front of it.
   open_nca(file) {
-    return api().switch_open_nca(handle(), openHostFile(file));
+    const result = api().switch_open_nca(handle(), openHostFile(file));
+    logLoad(`opened ${describe(file)} as a standalone NCA`, result);
+    return result;
   },
   // Register a firmware NCA as a system data archive. Costs nothing but the
   // reference and its header until a title mounts it - which is as true of a
@@ -139,7 +169,12 @@ export const CMD: CommandHandlers = {
   // the one way in for both.
   add_archive(file) {
     const index = addHostFile(file);
-    return api().switch_add_archive(handle(), index, BigInt(file.size));
+    const result = api().switch_add_archive(handle(), index, BigInt(file.size));
+    if (result < 0) {
+      workerLog(`[io] system archive ${describe(file)}: refused (${lastError()})`, 'warn');
+    }
+    else noteRegistered('system archives', file.size);
+    return result;
   },
   // Register an update container for the title in the open container. Like
   // `add_archive` this keeps only the File reference, so an update costs its
@@ -149,7 +184,10 @@ export const CMD: CommandHandlers = {
   add_update(file) {
     const index = addHostFile(file);
     const id = api().switch_add_update(handle(), index, BigInt(file.size));
-    return id ? id.toString(16).padStart(16, '0') : '';
+    const title = id ? id.toString(16).padStart(16, '0') : '';
+    if (title) workerLog(`[io] opened ${describe(file)} as an update for ${title}`);
+    else workerLog(`[io] ${describe(file)} is not an update`);
+    return title;
   },
   // The update's own version string, out of its Control NCA's NACP. Empty if
   // it ships without one.
@@ -162,7 +200,14 @@ export const CMD: CommandHandlers = {
   // the container holds.
   add_dlc(file) {
     const index = addHostFile(file);
-    return api().switch_add_dlc(handle(), index, BigInt(file.size));
+    const pieces = api().switch_add_dlc(handle(), index, BigInt(file.size));
+    // Zero, not a negative, is how this one refuses.
+    if (pieces === 0) {
+      workerLog(`[io] add-on content ${describe(file)}: refused (${lastError()})`, 'warn');
+    } else {
+      workerLog(`[io] opened ${describe(file)} as add-on content, ${pieces} pieces`);
+    }
+    return pieces;
   },
   // What the session holds: content id, base title id and index, per piece.
   dlc_json() {
@@ -185,6 +230,7 @@ export const CMD: CommandHandlers = {
   // that out.
   nand_identify(file) {
     const index = addHostFile(file);
+    noteRegistered('NAND files to identify', file.size);
     return withBuffer(4, (kindPtr) => {
       const id = api().switch_nand_identify(handle(), index, BigInt(file.size), kindPtr);
       const kind = new DataView(api().memory.buffer).getUint32(kindPtr, true);
@@ -195,18 +241,25 @@ export const CMD: CommandHandlers = {
   // rather than one opened out of a container the user just picked. The
   // emulator keeps its own copy, so the staging buffer goes back immediately.
   nand_launch(bytes) {
-    return withBytes(bytes, (ptr, len) => Number(api().switch_nand_launch(handle(), ptr, len)));
+    const result =
+      withBytes(bytes, (ptr, len) => Number(api().switch_nand_launch(handle(), ptr, len)));
+    logLoad(`launched a program from the NAND (${fmtSize(bytes.length)})`, result);
+    return result;
   },
   // Decrypts NSP file `index` as a Program NCA (with whatever keys are
   // loaded) and boots its ExeFS `main` executable, reading both out of the
   // open container. Its RomFS is left where it is and decrypted on demand
   // while the title runs.
   load_nca_from_nsp(index) {
-    return Number(api().switch_load_nca_from_nsp(handle(), index));
+    const result = Number(api().switch_load_nca_from_nsp(handle(), index));
+    logLoad(`booted the program in container file ${index}`, result);
+    return result;
   },
   // Same, for a container that is itself a single standalone .nca.
   load_nca() {
-    return Number(api().switch_load_nca(handle()));
+    const result = Number(api().switch_load_nca(handle()));
+    logLoad('booted the program in the standalone NCA', result);
+    return result;
   },
   // Which file in the open container holds the title's executable. Every file
   // in an NSP is named after its own hash, so this is the only way to boot one
@@ -217,9 +270,14 @@ export const CMD: CommandHandlers = {
   load_keys(prod, title) {
     const prodBytes = prod || new Uint8Array(0);
     const titleBytes = title || new Uint8Array(0);
-    return withBytes(prodBytes, (pptr, plen) =>
+    const result = withBytes(prodBytes, (pptr, plen) =>
       withBytes(titleBytes, (tptr, tlen) =>
         api().switch_load_keys(handle(), plen ? pptr : 0, plen, tlen ? tptr : 0, tlen)));
+    logLoad(
+      `loaded keys: prod ${fmtSize(prodBytes.length)}, title ${fmtSize(titleBytes.length)}`,
+      result,
+    );
+    return result;
   },
   nsp_files_json() {
     return readString(8192, (buf, cap) => api().switch_nsp_files_json(handle(), buf, cap));

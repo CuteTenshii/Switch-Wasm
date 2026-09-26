@@ -56,6 +56,7 @@ export interface WasmExports {
   switch_jit_stats_json(handle: number, buf: number, maxlen: number): number;
   switch_gpu_report_json(handle: number, buf: number, maxlen: number): number;
   switch_gpu_lost(handle: number): number;
+  switch_activity_json(handle: number, buf: number, maxlen: number): number;
   switch_set_input(
     handle: number, buttons: bigint,
     stickLx: number, stickLy: number, stickRx: number, stickRy: number): void;

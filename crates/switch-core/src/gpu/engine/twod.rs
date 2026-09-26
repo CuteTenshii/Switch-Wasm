@@ -63,6 +63,8 @@ pub struct Engine2D {
     /// reading the source again.
     resolved: Vec<u8>,
     resolved_from: Option<ResolvedFrom>,
+    /// Blits by source and destination: see [`crate::gpu::activity`].
+    pub activity: crate::gpu::activity::GpuActivity,
 }
 
 impl Engine2D {
@@ -73,6 +75,7 @@ impl Engine2D {
             target: Vec::new(),
             resolved: Vec::new(),
             resolved_from: None,
+            activity: Default::default(),
         }
     }
 
@@ -160,6 +163,29 @@ impl Engine2D {
         let centred = |origin: f64, step: f64| (origin - 0.5).fract() == 0.0 && step.fract() == 0.0;
         let filtered = bilinear && !(centred(src_x0, du_dx) && centred(src_y0, dv_dy));
 
+        {
+            use crate::gpu::activity::surface_text;
+            let (src_cpu, dst_cpu) = (ctx.span(src.addr, 1), ctx.span(dst.addr, 1));
+            self.activity.note(
+                crate::gpu::activity::Kind::Blit,
+                src.addr,
+                dst.addr,
+                u64::from(dst_w) * u64::from(dst_h),
+                false,
+                || {
+                    format!(
+                        "{} -> {}, {dst_w}x{dst_h} at ({dst_x0},{dst_y0}), {}",
+                        surface_text(src.addr, src_cpu, src.width, src.height, src.format.raw),
+                        surface_text(dst.addr, dst_cpu, dst.width, dst.height, dst.format.raw),
+                        if filtered {
+                            "filtered"
+                        } else {
+                            "point-sampled"
+                        }
+                    )
+                },
+            );
+        }
         if ctx.trace || crate::trace::enabled(crate::trace::Trace::Copy) {
             crate::traceln!(
                 "[gpu] 2d blit src {:#x} {}x{} fmt={:#x} -> dst {:#x} ({},{}) {}x{} fmt={:#x} \

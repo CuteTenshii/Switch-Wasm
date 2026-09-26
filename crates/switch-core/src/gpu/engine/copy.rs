@@ -40,6 +40,8 @@ pub struct EngineCopy {
     /// One source run in flight, kept between launches rather than allocated
     /// per line, hbmenu's present copies 720 of them a frame.
     run: Vec<u8>,
+    /// Copies by source and destination: see [`crate::gpu::activity`].
+    pub activity: crate::gpu::activity::GpuActivity,
 }
 
 impl EngineCopy {
@@ -47,6 +49,7 @@ impl EngineCopy {
         EngineCopy {
             regs: Registers::new(),
             run: Vec::new(),
+            activity: Default::default(),
         }
     }
 
@@ -72,8 +75,30 @@ impl EngineCopy {
         } else {
             1
         };
+        let layout = |pitch: bool| if pitch { "pitch" } else { "block" };
+        let (src_cpu, dst_cpu) = (ctx.span(src_base, 1), ctx.span(dst_base, 1));
+        self.activity.note(
+            crate::gpu::activity::Kind::Copy,
+            src_base,
+            dst_base,
+            u64::from(line_length) * u64::from(line_count),
+            false,
+            || {
+                let at = |cpu: Option<u32>| match cpu {
+                    Some(cpu) => format!("cpu {cpu:#x}"),
+                    None => "unmapped".to_owned(),
+                };
+                format!(
+                    "{src_base:#x} ({}, {}) -> {dst_base:#x} ({}, {}), \
+                     {line_length:#x} x {line_count} lines, remap {remap}",
+                    at(src_cpu),
+                    layout(src_pitch_layout),
+                    at(dst_cpu),
+                    layout(dst_pitch_layout)
+                )
+            },
+        );
         if ctx.trace || crate::trace::enabled(crate::trace::Trace::Copy) {
-            let layout = |pitch: bool| if pitch { "pitch" } else { "block" };
             crate::traceln!(
                 "[gpu] dma copy {src_base:#x} ({}) -> {dst_base:#x} ({}) \
                  {line_length:#x} x {line_count} lines remap={remap} cpu src {:x?} dst {:x?}",

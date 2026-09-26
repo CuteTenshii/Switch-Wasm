@@ -430,6 +430,8 @@ pub struct Engine3D {
     /// layout, so an array is both faster and a better description of what the
     /// hardware has.
     bound_constbufs: [[Option<(u64, u32)>; CONSTBUF_BANKS]; BIND_SLOTS],
+    /// Draws and clears by target: see [`crate::gpu::activity`].
+    pub activity: crate::gpu::activity::GpuActivity,
 }
 
 impl Default for Engine3D {
@@ -457,6 +459,7 @@ impl Engine3D {
             depth_fill: std::cell::RefCell::new(None),
             constbuf_cursor: 0,
             bound_constbufs: [[None; CONSTBUF_BANKS]; BIND_SLOTS],
+            activity: Default::default(),
         }
     }
 
@@ -765,7 +768,36 @@ impl Engine3D {
                 }
             );
         }
+        let target = match self.render_target(self.render_target_slot(0)) {
+            Ok(Some(rt)) => Some((
+                rt.addr,
+                ctx.span(rt.addr, 4),
+                rt.width,
+                rt.height,
+                rt.format.raw,
+            )),
+            _ => None,
+        };
         let result = self.with_renderer(ctx, |renderer, engine, ctx| renderer.draw(engine, ctx));
+        let vertices = u64::from(self.last_draw.count);
+        match target {
+            Some((addr, cpu, width, height, format)) => self.activity.note(
+                crate::gpu::activity::Kind::Draw,
+                addr,
+                0,
+                vertices,
+                result.is_err(),
+                || crate::gpu::activity::surface_text(addr, cpu, width, height, format),
+            ),
+            None => self.activity.note(
+                crate::gpu::activity::Kind::Draw,
+                0,
+                0,
+                vertices,
+                result.is_err(),
+                || "no colour target bound".to_owned(),
+            ),
+        }
         if let Err(e) = result {
             ctx.stats.draws_skipped += 1;
             if trace_draw {
@@ -1431,6 +1463,28 @@ impl Engine3D {
 
         let trace_clear = ctx.trace || crate::trace::enabled(crate::trace::Trace::Draw);
         if channels.iter().any(|&c| c) {
+            if let Ok(Some(rt)) = self.render_target(self.render_target_slot(target)) {
+                let cpu = ctx.span(rt.addr, 4);
+                self.activity.note(
+                    crate::gpu::activity::Kind::Clear,
+                    rt.addr,
+                    0,
+                    0,
+                    false,
+                    || {
+                        format!(
+                            "colour {}",
+                            crate::gpu::activity::surface_text(
+                                rt.addr,
+                                cpu,
+                                rt.width,
+                                rt.height,
+                                rt.format.raw
+                            )
+                        )
+                    },
+                );
+            }
             if trace_clear {
                 let colour = [
                     self.regs.float(CLEAR_COLOR),
@@ -1453,6 +1507,19 @@ impl Engine3D {
             })?;
         }
         if clear_depth || clear_stencil {
+            if let Ok(Some(zt)) = self.depth_target() {
+                let cpu = ctx.span(zt.addr, 4);
+                self.activity.note(crate::gpu::activity::Kind::Clear, zt.addr, 1, 0, false, || {
+                    let at = match cpu {
+                        Some(cpu) => format!(" (cpu {cpu:#x})"),
+                        None => String::new(),
+                    };
+                    format!(
+                        "depth/stencil {:#x}{at} {}x{} (depth {clear_depth}, stencil {clear_stencil})",
+                        zt.addr, zt.width, zt.height
+                    )
+                });
+            }
             if trace_clear {
                 let depth = self.regs.float(CLEAR_DEPTH);
                 let stencil = self.regs.get(CLEAR_STENCIL) & 0xFF;
@@ -2379,6 +2446,15 @@ mod tests {
             }
         );
         assert_eq!(h.stats.draws, 1);
+
+        // Reported by what it drew into, which here is nothing: no target
+        // is bound, and that is the thing the report has to say.
+        let activity = engine.activity.take();
+        assert_eq!(activity.len(), 1, "{activity:?}");
+        let (kind, tally) = &activity[0];
+        assert_eq!(*kind, crate::gpu::activity::Kind::Draw);
+        assert_eq!(tally.label, "no colour target bound");
+        assert_eq!((tally.count, tally.amount), (1, 3));
     }
 
     #[test]

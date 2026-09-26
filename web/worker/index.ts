@@ -5,7 +5,9 @@
    boundary as transferred ArrayBuffers. */
 
 import type { CallRequest, WorkerMessage } from '../shared/protocol';
+import { reportActivity } from './activity';
 import { CMD } from './commands';
+import { workerLog } from './log';
 import init from '@core/switch_wasm.js';
 import wasmUrl from '@core/switch_wasm_bg.wasm?url';
 import { state, type WasmExports } from './wasm';
@@ -187,7 +189,7 @@ function tryGpu(): void {
   if (!GPU_BACKEND_READY) {
     if (gpu === 'no') {
       gpu = 'never';
-      console.info('[gpu] software rasterizer: turned off at GPU_BACKEND_READY');
+      workerLog('[gpu] software rasterizer: turned off at GPU_BACKEND_READY');
     }
     return;
   }
@@ -198,14 +200,14 @@ function tryGpu(): void {
   if (gpu === 'done' && gpuLost()) {
     if (gpuReopens >= GPU_REOPENS) {
       gpu = 'never';
-      console.info(
+      workerLog(
         `[gpu] software rasterizer: the device was lost ${gpuReopens} times; not asking again`,
       );
       return;
     }
     gpuReopens++;
     gpu = 'no';
-    console.info(`[gpu] the device was lost - opening another (attempt ${gpuReopens})`);
+    workerLog(`[gpu] the device was lost - opening another (attempt ${gpuReopens})`);
   }
   // A session the backend was not opened on has no backend, whatever the flag
   // says. `never` is left alone deliberately: it means this browser has no
@@ -223,7 +225,7 @@ function tryGpu(): void {
       // What follows the prefix, not an exact match on it: a core built before
       // this left a trailing space where the name would have gone.
       const named = what.slice(RENDERING_ON.length).trim();
-      console.info('[gpu] ' + RENDERING_ON + ' ' + (named || await adapterName()));
+      workerLog('[gpu] ' + RENDERING_ON + ' ' + (named || await adapterName()), 'ok');
     } else if (what === NO_CHANNEL_YET) {
       gpu = 'no';
     } else {
@@ -234,11 +236,11 @@ function tryGpu(): void {
       // whose answer was decided before the first. The software rasterizer is
       // what runs here, and it is what runs from now on.
       gpu = 'never';
-      console.info('[gpu] software rasterizer: ' + what);
+      workerLog('[gpu] software rasterizer: ' + what);
     }
   }).catch((e) => {
     gpu = 'never';
-    console.info('[gpu] software rasterizer: ' + String(e));
+    workerLog('[gpu] software rasterizer: ' + String(e));
   });
 }
 
@@ -259,6 +261,8 @@ ctx.onmessage = (e: MessageEvent<CallRequest>) => {
       return;
     }
     const result = handler(...args);
+    // A slice that came back short, or negative, is a run that stopped.
+    const stopped = cmd === 'run' && typeof result === 'number' && result < Number(args[0]);
     if (result instanceof Uint8Array) {
       reply({ id, ok: true, result }, [result.buffer as ArrayBuffer]);
     } else if (result && typeof result === 'object' && 'error' in result) {
@@ -266,7 +270,10 @@ ctx.onmessage = (e: MessageEvent<CallRequest>) => {
     } else {
       reply({ id, ok: true, result });
     }
-    if (cmd === 'run') tryGpu();
+    if (cmd === 'run') {
+      tryGpu();
+      reportActivity(stopped);
+    }
   } catch (err) {
     reply({ id, ok: false, error: String(err) });
   }

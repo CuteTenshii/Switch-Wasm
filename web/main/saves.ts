@@ -6,7 +6,7 @@
    rather than its card, which is why they live in that database. */
 
 import { idbApply, idbGetAll, NAND_SAVES, nandIdb, type StoredEntry } from './db';
-import { log } from './log';
+import { log, logStored } from './log';
 import { call, hasSession } from './rpc';
 
 // Drained but not yet stored, for the same reason the card keeps a backlog:
@@ -59,6 +59,7 @@ export async function saveFlush(): Promise<void> {
     }
     if (saveBacklog.size) {
       await idbApply(await nandIdb(), NAND_SAVES, [...saveBacklog]);
+      logStored('saves', saveBacklog);
       saveBacklog.clear();
     }
   } catch (err) {

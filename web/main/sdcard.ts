@@ -7,7 +7,7 @@
    changed, so a flush writes back only those instead of the whole card. */
 
 import { idbApply, idbGetAll, SD_STORE, sdIdb, type StoredEntry } from './db';
-import { log } from './log';
+import { log, logStored } from './log';
 import { call, hasSession } from './rpc';
 
 // Entries drained from the core but not yet stored - keyed by path, so a file
@@ -67,6 +67,7 @@ export async function sdFlush(): Promise<void> {
     }
     if (sdBacklog.size) {
       await idbApply(await sdIdb(), SD_STORE, [...sdBacklog]);
+      logStored('SD card', sdBacklog);
       sdBacklog.clear();
     }
   } catch (err) {

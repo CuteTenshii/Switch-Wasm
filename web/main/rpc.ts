@@ -66,6 +66,10 @@ export function initWorker(): void {
   worker = new Worker(new URL('../worker/index.ts', import.meta.url), { type: 'module' });
   worker.onmessage = (e: MessageEvent<WorkerMessage>) => {
     const d = e.data;
+    if ('type' in d && d.type === 'log') {
+      log(d.text, d.cls);
+      return;
+    }
     if ('type' in d) {
       ready = true;
       // A core that failed to instantiate still reports ready, or the page
