@@ -381,6 +381,37 @@ mod tests {
         assert!(cpu.take_thread_report().1.is_empty(), "taken, not read");
     }
 
+    /// A thread handle is what `nn::os::WaitThread` waits on, and it has to
+    /// stay unsignalled until the thread really ends: a join that returned
+    /// early let Just Dance 2019 tear down a thread object that was still in
+    /// use, and the process exited through the wreckage.
+    #[test]
+    fn a_thread_handle_is_signalled_when_its_thread_exits_and_wakes_its_joiner() {
+        use crate::cpu::ThreadState;
+        let mut cpu = Cpu::new();
+        let handle = cpu.create_thread(0x0800_0100, 0, 0x1000_0000);
+        assert_eq!(cpu.waitable_signaled(handle), Some(false), "created");
+        assert!(cpu.start_thread(handle));
+        assert_eq!(cpu.waitable_signaled(handle), Some(false), "running");
+
+        // The main thread parks on the handle; the worker then exits.
+        cpu.threads[0].state = ThreadState::WaitEvent { deadline: u64::MAX };
+        cpu.current_thread = 1;
+        cpu.exit_thread();
+        assert_eq!(cpu.threads[1].state, ThreadState::Finished);
+        assert_eq!(cpu.waitable_signaled(handle), Some(true), "exited");
+        assert_eq!(
+            cpu.threads[0].state,
+            ThreadState::Runnable,
+            "the joiner is woken to recheck its handle"
+        );
+        assert_eq!(
+            cpu.waitable_signaled(0xdead),
+            None,
+            "neither event nor thread"
+        );
+    }
+
     /// The name is found by what points at it, not by where it sits, and a
     /// pointer that leaves the `ThreadType` is not taken for one: that is how
     /// a neighbouring thread's name, or any other string, stays out.

@@ -642,13 +642,14 @@ impl Cpu {
                 // here, and `next_buffer` is when the soonest one this wait
                 // names will finish. See `Cpu::audio_tick`.
                 let next_buffer = self.audio_tick(&handles);
-                // The first handle that is ready. A handle this emulator does
-                // not model as an event still counts as ready, which is what
-                // keeps thread handles and every unmodelled service handle
-                // behaving as they always have.
+                // The first handle that is ready: an event that has fired, or
+                // a thread that has exited (see [`Cpu::waitable_signaled`]).
+                // A handle modelled as neither still counts as ready, which
+                // keeps every unmodelled service handle behaving as it always
+                // has.
                 let ready = handles
                     .iter()
-                    .position(|&h| self.event_signaled(h) != Some(false));
+                    .position(|&h| self.waitable_signaled(h) != Some(false));
                 if let Some(index) = ready {
                     self.consume_event(handles[index]);
                     self.write_zr(0, RESULT_OK);

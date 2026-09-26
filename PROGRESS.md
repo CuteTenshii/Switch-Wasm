@@ -63,6 +63,21 @@ implementation` and no `unimplemented` lines. `make test`: **1,124 tests passing
   modules out at their real load addresses and writes a sorted `symbols.txt` from
   `sdk`'s 36,622 `DT_HASH` symbols; `0x0ce6c0c8` says nothing,
   `sdk!nn::diag::detail::Abort+0x18` says everything.
+- **A title that quits by itself is a bug until proven otherwise, and one the
+  translator alone exposes may still not be the translator's.** Just Dance 2019
+  halted at step 1,097,299,725 with the JIT on and never with it off. The trail
+  showed a freshly created HTTP thread returning through a zeroed return
+  address, and the `ret`-to-0 special case turning that into `ExitProcess`.
+  Polling the slot every 16 instructions caught the writer: a *different*
+  thread, joining the old thread whose `ThreadType` the new one reused.
+  `svcWaitSynchronization` treated a thread handle as always ready, so the join
+  returned while the thread ran. Whether the joiner got the CPU in that window
+  depended only on where the scheduler switched, and the translator switches at
+  block boundaries rather than at every instruction. A thread handle is now
+  signalled when its thread exits. The lockstep tool that found the divergence
+  point (`jit_bisect`) cannot follow a multithreaded title past its first
+  thread switch, because the two engines legitimately interleave differently;
+  the slot poll is what reached the bug.
 - **Nothing in the tree looked slow.** A `perf` profile of a Home Menu boot came
   back 37% `getenv` and 18.7% SipHash — together more than the shader
   interpreter, the rasterizer and the ARM interpreter combined. 73.6 s → 27.7 s,

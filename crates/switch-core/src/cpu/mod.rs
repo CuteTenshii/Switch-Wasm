@@ -2276,6 +2276,9 @@ impl Cpu {
             return;
         }
         self.threads[self.current_thread].state = ThreadState::Finished;
+        // Anyone joining this thread is parked on its handle; the handle has
+        // just become signalled.
+        self.wake_event_waiters();
         if !self.switch_to_next_runnable() {
             // Nothing else can run: fall back to the main thread, which is
             // presumably waiting on this one.
@@ -3436,11 +3439,41 @@ impl Cpu {
             return;
         }
         event.signaled = true;
+        self.wake_event_waiters();
+    }
+
+    /// Wake every thread parked in `svcWaitSynchronization`, to recheck its
+    /// handles: each one's pc was left on the `svc`, so the wait is reissued.
+    fn wake_event_waiters(&mut self) {
         for thread in &mut self.threads {
             if matches!(thread.state, ThreadState::WaitEvent { .. }) {
                 thread.state = ThreadState::Runnable;
             }
         }
+    }
+
+    /// Whether `handle` names something a wait can be satisfied by that has
+    /// been: an event that has fired, or a thread that has exited. `None`
+    /// means the handle is neither.
+    ///
+    /// A thread handle is signalled when its thread ends, which is how
+    /// `nn::os::WaitThread` joins one. It used to count as ready whatever the
+    /// thread was doing, so a join returned while the thread was still
+    /// running, and the joiner went on to tear down a thread object that was
+    /// in use. Just Dance 2019 reuses one `ThreadType` for successive HTTP
+    /// threads: its joiner, told the old thread was done, cleaned up the
+    /// object while the new one ran in it, zeroed a return address on the
+    /// new thread's stack, and the thread returned through it into the exit
+    /// stub. Whether that happened depended only on where the scheduler
+    /// happened to switch, which is why it took the translator to show it.
+    pub(super) fn waitable_signaled(&self, handle: u64) -> Option<bool> {
+        if let Some(signaled) = self.event_signaled(handle) {
+            return Some(signaled);
+        }
+        self.threads
+            .iter()
+            .find(|thread| thread.handle == handle)
+            .map(|thread| thread.state == ThreadState::Finished)
     }
 
     /// Whether `handle` names an event that has fired. `None` means the handle
