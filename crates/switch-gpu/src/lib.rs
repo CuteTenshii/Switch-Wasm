@@ -42,6 +42,19 @@
 /// itself from failing on hardware that lacks a family, and
 /// [`device_texture_format`] turns whatever is still missing into a fallback
 /// rather than a crash.
+/// Whether a device with `features` can blend into a `format` target. The
+/// 32-bit float formats blend only with `float32-blendable`; every other
+/// colour format a draw is given here blends in core WebGPU.
+fn can_blend(format: wgpu::TextureFormat, features: wgpu::Features) -> bool {
+    let float32 = matches!(
+        format,
+        wgpu::TextureFormat::R32Float
+            | wgpu::TextureFormat::Rg32Float
+            | wgpu::TextureFormat::Rgba32Float
+    );
+    !float32 || features.contains(wgpu::Features::FLOAT32_BLENDABLE)
+}
+
 pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'static> {
     let wanted = wgpu::Features::TEXTURE_COMPRESSION_BC
         | wgpu::Features::TEXTURE_COMPRESSION_ASTC
@@ -77,7 +90,12 @@ pub fn device_descriptor(adapter: &wgpu::Adapter) -> wgpu::DeviceDescriptor<'sta
         // this. It is the HDR colour target Tomodachi Life draws its whole
         // frame into, and without it that draw falls back -- which used to
         // hand the rasterizer every frame for the rest of the session.
-        | wgpu::Features::RG11B10UFLOAT_RENDERABLE;
+        | wgpu::Features::RG11B10UFLOAT_RENDERABLE
+        // Blending into a 32-bit float target, which WebGPU makes optional.
+        // Tomodachi Life blends into an `rgba32float` one, and a device
+        // without this rejects the pipeline: see `Gpu::render`, which hands
+        // such a draw to the rasterizer where it is missing.
+        | wgpu::Features::FLOAT32_BLENDABLE;
     // A constant bank is bound as a storage buffer, and WebGPU guarantees
     // only eight of those per stage. Maxwell has eighteen banks and a shader
     // is free to read nine, which `create_pipeline_layout` then rejects
@@ -1298,6 +1316,17 @@ impl Gpu {
             ),
             None => None,
         };
+        // A rejected pipeline is not a fallback: the draw still counts as
+        // drawn and simply is not. So a blend the device cannot do is caught
+        // here, where it can still go to the rasterizer instead.
+        if let Some(format) = target_format {
+            let blends = p.state.target.is_some_and(|t| t.blend.is_some());
+            if blends && !can_blend(format, self.features()) {
+                return Err(format!(
+                    "blending into a {format:?} target, which this device cannot blend"
+                ));
+            }
+        }
         let depth_format = p
             .depth
             .and_then(|d| d.depth_kind())
@@ -4055,6 +4084,23 @@ mod tests {
         let _ = gpu.device.poll(wgpu::PollType::Poll);
         let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
         assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+    }
+
+    #[test]
+    fn a_float32_target_blends_only_where_the_device_offers_it() {
+        use super::{can_blend, wgpu};
+        let none = wgpu::Features::empty();
+        let offered = wgpu::Features::FLOAT32_BLENDABLE;
+        for format in [
+            wgpu::TextureFormat::R32Float,
+            wgpu::TextureFormat::Rg32Float,
+            wgpu::TextureFormat::Rgba32Float,
+        ] {
+            assert!(!can_blend(format, none), "{format:?}");
+            assert!(can_blend(format, offered), "{format:?}");
+        }
+        assert!(can_blend(wgpu::TextureFormat::Rgba16Float, none));
+        assert!(can_blend(wgpu::TextureFormat::Rgba8Unorm, none));
     }
 
     /// A rejection the backend never asks about still reaches the report.
