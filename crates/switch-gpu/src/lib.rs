@@ -397,6 +397,12 @@ pub struct Gpu {
     /// up, and like that one it is unbounded, because a program that walks
     /// endlessly over fresh shaders is not a thing a title does.
     pipelines: std::collections::HashMap<PipelineKey, wgpu::RenderPipeline>,
+    /// Every sampler made so far, by what it is. A sampler is five settings
+    /// and nothing else, and making one is a call into JavaScript that
+    /// Chrome takes its time over: Tomodachi Life's busiest submission made
+    /// one per texture per draw and spent 62% of eight seconds in
+    /// `createSampler`, the page hearing nothing from the worker meanwhile.
+    samplers: std::collections::HashMap<SamplerKey, wgpu::Sampler>,
     /// Bind group layouts, by the entries they describe.
     ///
     /// A layout is a description, not a resource, and two draws through the
@@ -728,6 +734,7 @@ impl Gpu {
             pending: Vec::new(),
             modules: std::collections::HashMap::new(),
             pipelines: std::collections::HashMap::new(),
+            samplers: std::collections::HashMap::new(),
             group_layouts: std::collections::HashMap::new(),
             depth_loaders: std::collections::HashMap::new(),
             clear_pipelines: std::collections::HashMap::new(),
@@ -2208,7 +2215,7 @@ impl Gpu {
     /// whatever the TSC left in `depth_compare_enable`, and the rasterizer
     /// answers such a sample with `Always`. See `sample_compare_with`.
     fn sampler(
-        &self,
+        &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
         compare: bool,
     ) -> wgpu::Sampler {
@@ -2248,16 +2255,29 @@ impl Gpu {
                 Compare::GreaterEqual => wgpu::CompareFunction::GreaterEqual,
                 Compare::Always => wgpu::CompareFunction::Always,
             });
-        self.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("sampler"),
+        let key = SamplerKey {
             compare,
-            address_mode_u: wrap(upload.sampler.wrap_u),
-            address_mode_v: wrap(upload.sampler.wrap_v),
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: filter(upload.sampler.mag_linear),
-            min_filter: filter(upload.sampler.min_linear),
-            ..Default::default()
-        })
+            wrap_u: wrap(upload.sampler.wrap_u),
+            wrap_v: wrap(upload.sampler.wrap_v),
+            mag: filter(upload.sampler.mag_linear),
+            min: filter(upload.sampler.min_linear),
+        };
+        let device = &self.device;
+        self.samplers
+            .entry(key)
+            .or_insert_with(|| {
+                device.create_sampler(&wgpu::SamplerDescriptor {
+                    label: Some("sampler"),
+                    compare: key.compare,
+                    address_mode_u: key.wrap_u,
+                    address_mode_v: key.wrap_v,
+                    address_mode_w: wgpu::AddressMode::ClampToEdge,
+                    mag_filter: key.mag,
+                    min_filter: key.min,
+                    ..Default::default()
+                })
+            })
+            .clone()
     }
 
     /// A shader module, without asking the device whether it liked it.
@@ -3174,6 +3194,16 @@ enum Render {
 }
 
 /// One draw, resolved into everything a device needs.
+/// Everything a sampler is made of here, and so what one is cached by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SamplerKey {
+    compare: Option<wgpu::CompareFunction>,
+    wrap_u: wgpu::AddressMode,
+    wrap_v: wgpu::AddressMode,
+    mag: wgpu::FilterMode,
+    min: wgpu::FilterMode,
+}
+
 struct Prepared {
     state: Pipeline,
     /// How this draw reaches its surfaces.
