@@ -180,6 +180,21 @@ pub trait TextureSource {
         )))
     }
 
+    /// Sample cube `cube` of a cube array, in the direction the three
+    /// coordinates give.
+    fn sample_cube_array(
+        &self,
+        handle: u32,
+        _s: f32,
+        _t: f32,
+        _r: f32,
+        _cube: u32,
+    ) -> ShaderResult<[f32; 4]> {
+        Err(fault(format!(
+            "shader: cube-array sample of handle {handle:#x} with no cube source bound"
+        )))
+    }
+
     /// One texel of `handle` in normalized coordinates, `(1/width,
     /// 1/height)`.
     ///
@@ -300,6 +315,27 @@ impl TextureSource for MemoryTextures<'_, '_> {
             s as f64,
             t as f64,
             r as f64,
+            0,
+            self.blocks,
+        )?)
+    }
+
+    fn sample_cube_array(
+        &self,
+        handle: u32,
+        s: f32,
+        t: f32,
+        r: f32,
+        cube: u32,
+    ) -> ShaderResult<[f32; 4]> {
+        let descriptors = self.descriptors_for(handle)?;
+        Ok(crate::gpu::texture::sample_cube_with(
+            self.ctx,
+            &descriptors,
+            s as f64,
+            t as f64,
+            r as f64,
+            cube,
             self.blocks,
         )?)
     }
@@ -1292,6 +1328,25 @@ impl Invocation {
                 let y = ineg_if(self.operand(b, env)?, bneg);
                 self.set_reg(dst, x.wrapping_add(y));
             }
+            Op::Vmnmx {
+                dst,
+                a,
+                b,
+                c,
+                max,
+                then_max,
+                signed,
+                then_signed,
+            } => {
+                let pick = |x: u32, y: u32, max: bool, signed: bool| match (max, signed) {
+                    (false, false) => x.min(y),
+                    (true, false) => x.max(y),
+                    (false, true) => (x as i32).min(y as i32) as u32,
+                    (true, true) => (x as i32).max(y as i32) as u32,
+                };
+                let first = pick(self.reg(a), self.reg(b), max, signed);
+                self.set_reg(dst, pick(first, self.reg(c), then_max, then_signed));
+            }
             Op::Imnmx {
                 dst,
                 a,
@@ -2075,6 +2130,10 @@ impl Invocation {
                 env.textures
                     .sample_cube(handle, u, v, self.reg_f32(coords[2]))?
             }
+            (None, TexDim::TCubeArray) => {
+                env.textures
+                    .sample_cube_array(handle, u, v, self.reg_f32(coords[2]), layer)?
+            }
             (None, _) => env.textures.sample(handle, u, v, layer)?,
         };
         self.land_texture(program, pc, color, pending);
@@ -2263,6 +2322,7 @@ fn reads(op: &Op) -> Vec<u8> {
             v.extend(operand_reg(c));
             v
         }
+        Op::Vmnmx { a, b, c, .. } => vec![a, b, c],
         Op::Icmp { a, b, c, .. } => {
             let mut v = vec![a, c];
             v.extend(operand_reg(b));
@@ -2330,6 +2390,7 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::Iadd { dst, .. }
         | Op::Iadd3 { dst, .. }
         | Op::Imnmx { dst, .. }
+        | Op::Vmnmx { dst, .. }
         | Op::Imul { dst, .. }
         | Op::Xmad { dst, .. }
         | Op::Iscadd { dst, .. }
@@ -4416,6 +4477,77 @@ mod tests {
             inv.execute(&program, &Env::new(&consts, &probe)).unwrap();
             assert_eq!(probe.0.get(), want, "offset {packed:#04x}");
         }
+    }
+
+    /// Tomodachi Life's `tex` of a cube array: the direction in the three
+    /// registers after the cube, and every channel landing from `$r0`.
+    #[test]
+    fn a_cube_array_tex_samples_the_cube_its_layer_register_names() {
+        fn word(lo: u32, hi: u32) -> [u8; 8] {
+            let mut out = [0u8; 8];
+            out[..4].copy_from_slice(&lo.to_le_bytes());
+            out[4..].copy_from_slice(&hi.to_le_bytes());
+            out
+        }
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&word(0, 0)); // sched
+        bytes.extend_from_slice(&word(0xfff70400, 0xc03a0087));
+        bytes.extend_from_slice(&word(0x0007000f, 0xe3000000)); // exit
+        bytes.extend_from_slice(&word(0, 0));
+        let program = Compiled::new(&super::super::decode_program(&bytes).unwrap());
+
+        /// Reports the direction and the cube it was asked for.
+        struct Probe(std::cell::Cell<(f32, f32, f32, u32)>);
+        impl TextureSource for Probe {
+            fn sample(&self, _h: u32, _u: f32, _v: f32, _l: u32) -> ShaderResult<[f32; 4]> {
+                Err(fault(
+                    "a cube array is not sampled as a 2D image".to_owned(),
+                ))
+            }
+            fn sample_cube_array(
+                &self,
+                _h: u32,
+                s: f32,
+                t: f32,
+                r: f32,
+                cube: u32,
+            ) -> ShaderResult<[f32; 4]> {
+                self.0.set((s, t, r, cube));
+                Ok([0.25, 0.5, 0.75, 1.0])
+            }
+        }
+
+        let mut consts: HashMap<(u8, u16), f32> = HashMap::new();
+        consts.insert(
+            (
+                crate::gpu::texture::NOUVEAU_TEX_CB_INDEX,
+                crate::gpu::texture::handle_offset(8),
+            ),
+            f32::from_bits(1),
+        );
+        let probe = Probe(std::cell::Cell::new((0.0, 0.0, 0.0, 0)));
+        let mut inv = Invocation::new();
+        // The cube is an integer in the low half; the high half is not it.
+        inv.set_reg(4, 0x0001_0003);
+        inv.set_reg_f32(5, -1.0);
+        inv.set_reg_f32(6, 0.5);
+        inv.set_reg_f32(7, 0.25);
+        inv.execute(&program, &Env::new(&consts, &probe)).unwrap();
+        assert_eq!(probe.0.get(), (-1.0, 0.5, 0.25, 3));
+        assert_eq!([0, 1, 2, 3].map(|r| inv.reg_f32(r)), [0.25, 0.5, 0.75, 1.0]);
+    }
+
+    /// `vmnmx` as Tomodachi Life uses it, a minimum of three words, and the
+    /// signed form, which orders the same bits the other way round.
+    #[test]
+    fn vmnmx_takes_the_minimum_then_compares_with_the_third_operand() {
+        let run = |word: u64, regs: [(u8, u32); 3]| run_half(&regs, &[isa::decode(word).op]).reg(7);
+        const WORD: u64 = 0x3a2c03e060c70907;
+        assert_eq!(run(WORD, [(9, 5), (12, 9), (7, 3)]), 3);
+        assert_eq!(run(WORD, [(9, 5), (12, 9), (7, 7)]), 5);
+        let signed = WORD | 1 << 48 | 1 << 49 | 1 << 54;
+        assert_eq!(run(WORD, [(9, u32::MAX), (12, 2), (7, 9)]), 2);
+        assert_eq!(run(signed, [(9, u32::MAX), (12, 2), (7, 9)]), u32::MAX);
     }
 
     /// A half instruction's `.ftz` flushes at the *half* threshold, four

@@ -363,6 +363,9 @@ pub enum TexDim {
     T2dArray,
     T3d,
     TCube,
+    /// An array of cubemaps: a direction in the three coordinates, and which
+    /// cube in the layer register, counted in cubes rather than faces.
+    TCubeArray,
 }
 
 /// `bar`'s sub-operation (`tabf0a8_0`). The reduction forms are decoded so
@@ -665,6 +668,25 @@ pub enum Op {
         b: Operand,
         pred: Pred,
         signed: bool,
+    },
+    /// `vmnmx dst, a, b, c`: the smaller or larger of `a` and `b`, then that
+    /// against `c` by a second minimum or maximum. The video form of
+    /// `imnmx`, decoded only where both operands are whole words, which is
+    /// the one form where selecting a byte or half of each has no effect.
+    Vmnmx {
+        dst: u8,
+        a: u8,
+        b: u8,
+        c: u8,
+        /// Whether the first operation is a maximum (`.MX`).
+        max: bool,
+        /// Whether the second is a maximum rather than a minimum.
+        then_max: bool,
+        /// Whether the first operation compares signed, which both operands
+        /// agree on.
+        signed: bool,
+        /// Whether the second operation compares signed.
+        then_signed: bool,
     },
     Iscadd {
         dst: u8,
@@ -2270,6 +2292,41 @@ fn decode_alu_wide(insn: u64) -> Op {
             lut: field(insn, 28, 8) as u8,
         };
     }
+    // vmnmx, 0x3a00/0xfe00. `a` and `b` each carry a byte selector and a
+    // width, `b` is a register at bit 50 and a 16-bit immediate otherwise,
+    // and the second operation is one of seven at 51 (5 min, 6 max; the rest
+    // merge or accumulate). Only two whole-word register operands of one
+    // signedness, no saturation and no condition codes are taken: that is
+    // the form Tomodachi Life's shaders use, checked field by field against
+    // `vmnmx r7, r9, r12, r7` there, and anything else is refused rather
+    // than guessed at.
+    if insn & 0xfe00_0000_0000_0000 == 0x3a00_0000_0000_0000 {
+        const WORD: u64 = 3;
+        const MIN: u64 = 5;
+        const MAX: u64 = 6;
+        let then = field(insn, 51, 3);
+        let whole_words = field(insn, 37, 2) == WORD && field(insn, 29, 2) == WORD;
+        let signed = field(insn, 48, 1) != 0;
+        if !whole_words
+            || field(insn, 50, 1) == 0
+            || signed != (field(insn, 49, 1) != 0)
+            || field(insn, 47, 1) != 0
+            || field(insn, 55, 1) != 0
+            || !matches!(then, MIN | MAX)
+        {
+            return Op::Unimplemented { raw: insn };
+        }
+        return Op::Vmnmx {
+            dst: reg(insn, 0, 8),
+            a: reg(insn, 8, 8),
+            b: reg(insn, 20, 8),
+            c: reg(insn, 39, 8),
+            max: field(insn, 56, 1) != 0,
+            then_max: then == MAX,
+            signed,
+            then_signed: field(insn, 54, 1) != 0,
+        };
+    }
     if insn & 0xfc00_0000_0000_0000 == 0x3c00_0000_0000_0000 {
         return Op::Lop3 {
             dst: reg(insn, 0, 8),
@@ -3021,14 +3078,15 @@ fn decode_tex(insn: u64) -> Op {
     if field(insn, 58, 1) != 0 {
         return un;
     }
-    // The dimensionalities `TexDim` names. 1D arrays, 3D arrays and cube
-    // arrays are the ones it does not.
+    // The dimensionalities `TexDim` names. 1D arrays and 3D arrays are the
+    // ones it does not.
     let dim = match field(insn, 28, 3) {
         0 => TexDim::T1d,
         2 => TexDim::T2d,
         3 => TexDim::T2dArray,
         4 => TexDim::T3d,
         6 => TexDim::TCube,
+        7 => TexDim::TCubeArray,
         _ => return un,
     };
     let dst = reg(insn, 0, 8);
@@ -3040,7 +3098,7 @@ fn decode_tex(insn: u64) -> Op {
     // An array's layer sits in the first coordinate register and the
     // coordinates start one along; every other dimensionality starts at it.
     let (layer, first) = match dim {
-        TexDim::T2dArray => (Some(coord), coord.wrapping_add(1)),
+        TexDim::T2dArray | TexDim::TCubeArray => (Some(coord), coord.wrapping_add(1)),
         _ => (None, coord),
     };
     let mut meta = reg(insn, 20, 8);
@@ -3897,6 +3955,77 @@ mod tests {
             op(0xc07a0080a0770401 | u64::from(RZ)),
             Op::Unimplemented { .. }
         ));
+    }
+
+    #[test]
+    fn decodes_a_cube_array_tex() {
+        // Tomodachi Life's, the two a draw fell back on before cube arrays
+        // decoded: the cube in the register before the direction, as an
+        // array's layer is, and the second at an explicit level.
+        assert_eq!(
+            op(0xc03a0087fff70400),
+            Op::Tex {
+                dst: 0,
+                coords: [5, 6, 7],
+                layer: Some(4),
+                dref: None,
+                offset: None,
+                lod: None,
+                handle: 8,
+                dim: TexDim::TCubeArray,
+                mask: [true; 4],
+            }
+        );
+        assert!(matches!(
+            op(0xc1ba0087f0970400),
+            Op::Tex {
+                layer: Some(4),
+                lod: Some(9),
+                dim: TexDim::TCubeArray,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decodes_vmnmx_only_where_every_field_is_one_it_models() {
+        // Tomodachi Life's `vmnmx r7, r9, r12, r7`: whole unsigned words,
+        // a minimum and then a minimum against the third operand.
+        const WORD: u64 = 0x3a2c03e060c70907;
+        assert_eq!(
+            op(WORD),
+            Op::Vmnmx {
+                dst: 7,
+                a: 9,
+                b: 12,
+                c: 7,
+                max: false,
+                then_max: false,
+                signed: false,
+                then_signed: false,
+            }
+        );
+        assert!(matches!(
+            op(WORD & !(7 << 51) | 6 << 51 | 1 << 56),
+            Op::Vmnmx {
+                max: true,
+                then_max: true,
+                ..
+            }
+        ));
+        for (why, word) in [
+            ("an immediate b", WORD & !(1 << 50)),
+            ("a byte of a", WORD & !(1 << 38)),
+            ("operands of different signedness", WORD | 1 << 48),
+            ("saturation", WORD | 1 << 55),
+            ("condition codes", WORD | 1 << 47),
+            ("an accumulate", WORD & !(7 << 51) | 4 << 51),
+        ] {
+            assert!(
+                matches!(op(word), Op::Unimplemented { .. }),
+                "{why} is not modelled"
+            );
+        }
     }
 
     #[test]

@@ -195,6 +195,7 @@ pub fn tex_dim_code(dim: TexDim) -> u32 {
         TexDim::T2dArray => 2,
         TexDim::T3d => 3,
         TexDim::TCube => 4,
+        TexDim::TCubeArray => 5,
     }
 }
 
@@ -1427,6 +1428,28 @@ impl Emitter<'_> {
                 let shift = u32::from(shift) & 31;
                 self.set_r(dst, &format!("(({x}) << {shift}u) + ({y})"));
             }
+            Op::Vmnmx {
+                dst,
+                a,
+                b,
+                c,
+                max,
+                then_max,
+                signed,
+                then_signed,
+            } => {
+                let pick = |x: &str, y: &str, max: bool, signed: bool| {
+                    let op = if max { "max" } else { "min" };
+                    if signed {
+                        format!("bitcast<u32>({op}(bitcast<i32>({x}), bitcast<i32>({y})))")
+                    } else {
+                        format!("{op}({x}, {y})")
+                    }
+                };
+                let (x, y, z) = (self.r(a), self.r(b), self.r(c));
+                let first = self.bind(&pick(&x, &y, max, signed));
+                self.set_r(dst, &pick(&first, &z, then_max, then_signed));
+            }
             Op::Imnmx {
                 dst,
                 a,
@@ -1870,6 +1893,7 @@ impl Emitter<'_> {
             }
 
             // ---- texture ----
+            // A `texs` array keeps its layer in the third coordinate register.
             Op::Texs {
                 coords,
                 dref,
@@ -1877,89 +1901,22 @@ impl Emitter<'_> {
                 dim,
                 ..
             } => {
-                let compare = dref.is_some();
-                match self.textures.iter().find(|&&(imm, _, _)| imm == handle) {
-                    // One binding cannot be both a colour image and a depth
-                    // one (they are different WGSL types) so a program that
-                    // reads the same immediate each way is the rasterizer's.
-                    Some(&(_, _, was)) if was != compare => {
-                        return Err(Unsupported::DepthCompare { at })
-                    }
-                    Some(_) => {}
-                    None => self.textures.push((handle, dim, compare)),
-                }
-                let u = self.f(coords[0]);
-                let v = self.f(coords[1]);
-                // An array's layer is an integer in the low half of its
-                // register, not a float like the coordinates beside it.
-                let layer = match dim {
-                    TexDim::T2dArray => {
-                        let reg = self.r(coords[2]);
-                        format!("({reg} & 0xffffu)")
-                    }
-                    _ => "0u".to_string(),
-                };
-                // A 3D image's third coordinate is normalized like the other
-                // two, where an array's is the layer number, so they travel
-                // in separate arguments rather than one that means both.
-                let w = match dim {
-                    // A cubemap's three coordinates are a direction, and a
-                    // 3D image's third is normalized like the other two.
-                    TexDim::T3d | TexDim::TCube => self.f(coords[2]),
-                    _ => "0.0".to_string(),
-                };
-                let code = tex_dim_code(dim);
-                let color = match dref {
-                    // A shadow sample answers with one value, and every
-                    // channel a `texs` asks for gets it except alpha, which
-                    // is what `sample_compare_with` returns too, so the
-                    // destinations below are stored the same way either way.
-                    Some(reg) => {
-                        let reference = self.f(reg);
-                        self.bind(&format!(
-                            "texSampleCompare({handle}u, {code}u, {u}, {v}, {layer}, {reference})"
-                        ))
-                    }
-                    None => self.bind(&format!(
-                        "texSample({handle}u, {code}u, {u}, {v}, {layer}, {w})"
-                    )),
-                };
-                // The interpreter lands these results *late*, at the first
-                // instruction that reads the destination, because that is
-                // where hardware's scoreboard would have waited. Writing them
-                // now is equivalent wherever that deferral was built to
-                // matter: `first_use_after` finds the first read, so nothing
-                // between here and there reads or writes the register. Where
-                // the two differ is a destination overwritten before any read
-                //, the interpreter still lands the sample afterwards, and
-                // hardware does not.
-                let writes = self.program.texs_writes(at).to_vec();
-                for (reg, store, _) in writes {
-                    const COMPONENT: [&str; 4] = ["x", "y", "z", "w"];
-                    match store {
-                        TexsStore::Float(channel) => {
-                            self.set_f(reg, &format!("{color}.{}", COMPONENT[channel]));
-                        }
-                        // The `.F16` form packs two channels into the register
-                        // as halves, which is what the `h*2` ops that read it
-                        // back are expecting to unpack.
-                        TexsStore::Halves(low, high) => {
-                            let half = |c: Option<usize>| match c {
-                                Some(channel) => format!("{color}.{}", COMPONENT[channel]),
-                                None => "0.0".to_string(),
-                            };
-                            self.set_r(
-                                reg,
-                                &format!(
-                                    "pack2x16float(vec2<f32>({}, {}))",
-                                    half(Some(low)),
-                                    half(high)
-                                ),
-                            );
-                        }
-                    }
-                }
+                let layer = (dim == TexDim::T2dArray).then_some(coords[2]);
+                self.sample_texture(at, handle, dim, dref, coords, layer)?;
             }
+            // The general `tex` keeps an array's layer in the register before
+            // the coordinates. `.LL` and `.LB` are sampled at the one level
+            // both renderers give a texture, the interpreter reads no level
+            // either, and a texel offset is refused below.
+            Op::Tex {
+                coords,
+                layer,
+                dref,
+                offset: None,
+                handle,
+                dim,
+                ..
+            } => self.sample_texture(at, handle, dim, dref, coords, layer)?,
 
             // `shfl` reads the value of another lane of the 2x2 quad, which
             // is the whole warp the rasterizer models, so `quadSwapX`/`Y`/
@@ -2104,10 +2061,9 @@ impl Emitter<'_> {
             | Op::Cont
             | Op::Exit
             | Op::Kil => unreachable!("control flow is emitted by emit_instruction"),
-            // The general `tex` needs the operands `texs` has no room for,
-            // an explicit level, a texel offset, and each of those is a
-            // separate WGSL builtin. Until they are emitted, a shader with
-            // one is the rasterizer's.
+            // A `tex.aoffi`'s offset is in texels, and `texSample` takes
+            // normalized coordinates and knows no texture's size, so a shader
+            // with one is the rasterizer's.
             Op::Tex { .. } => return Err(Unsupported::Op { at, op }),
         }
         Ok(())
@@ -2161,6 +2117,111 @@ impl Emitter<'_> {
             self.need("truncw");
             format!("truncw({shifted}, {bytes}u)")
         }
+    }
+}
+
+impl Emitter<'_> {
+    /// Sample `handle` and land the channels where the program recorded
+    /// they go, for `texs` and `tex` alike: the two differ in where their
+    /// operands sit, not in what they sample. `layer` is the register an
+    /// array's layer is in.
+    fn sample_texture(
+        &mut self,
+        at: usize,
+        handle: u16,
+        dim: TexDim,
+        dref: Option<u8>,
+        coords: [u8; 3],
+        layer: Option<u8>,
+    ) -> Result<(), Unsupported> {
+        let compare = dref.is_some();
+        match self.textures.iter().find(|&&(imm, _, _)| imm == handle) {
+            // One binding cannot be both a colour image and a depth
+            // one (they are different WGSL types) so a program that
+            // reads the same immediate each way is the rasterizer's.
+            Some(&(_, _, was)) if was != compare => {
+                return Err(Unsupported::DepthCompare { at });
+            }
+            Some(_) => {}
+            None => self.textures.push((handle, dim, compare)),
+        }
+        let u = self.f(coords[0]);
+        // A 1D image has one coordinate, and the register after a
+        // `tex`'s belongs to something else.
+        let v = match dim {
+            TexDim::T1d => "0.0".to_string(),
+            _ => self.f(coords[1]),
+        };
+        // An array's layer is an integer in the low half of its
+        // register, not a float like the coordinates beside it.
+        let layer = match layer {
+            Some(reg) => {
+                let reg = self.r(reg);
+                format!("({reg} & 0xffffu)")
+            }
+            None => "0u".to_string(),
+        };
+        // A 3D image's third coordinate is normalized like the other
+        // two, where an array's is the layer number, so they travel
+        // in separate arguments rather than one that means both.
+        let w = match dim {
+            // A cubemap's three coordinates are a direction, and a
+            // 3D image's third is normalized like the other two.
+            TexDim::T3d | TexDim::TCube | TexDim::TCubeArray => self.f(coords[2]),
+            _ => "0.0".to_string(),
+        };
+        let code = tex_dim_code(dim);
+        let color = match dref {
+            // A shadow sample answers with one value, and every
+            // channel a `texs` asks for gets it except alpha, which
+            // is what `sample_compare_with` returns too, so the
+            // destinations below are stored the same way either way.
+            Some(reg) => {
+                let reference = self.f(reg);
+                self.bind(&format!(
+                    "texSampleCompare({handle}u, {code}u, {u}, {v}, {layer}, {reference})"
+                ))
+            }
+            None => self.bind(&format!(
+                "texSample({handle}u, {code}u, {u}, {v}, {layer}, {w})"
+            )),
+        };
+        // The interpreter lands these results *late*, at the first
+        // instruction that reads the destination, because that is
+        // where hardware's scoreboard would have waited. Writing them
+        // now is equivalent wherever that deferral was built to
+        // matter: `first_use_after` finds the first read, so nothing
+        // between here and there reads or writes the register. Where
+        // the two differ is a destination overwritten before any read
+        //, the interpreter still lands the sample afterwards, and
+        // hardware does not.
+        let writes = self.program.texs_writes(at).to_vec();
+        for (reg, store, _) in writes {
+            const COMPONENT: [&str; 4] = ["x", "y", "z", "w"];
+            match store {
+                TexsStore::Float(channel) => {
+                    self.set_f(reg, &format!("{color}.{}", COMPONENT[channel]));
+                }
+                // The `.F16` form packs two channels into the register
+                // as halves, which is what the `h*2` ops that read it
+                // back are expecting to unpack.
+                TexsStore::Halves(low, high) => {
+                    let half = |c: Option<usize>| match c {
+                        Some(channel) => format!("{color}.{}", COMPONENT[channel]),
+                        None => "0.0".to_string(),
+                    };
+                    self.set_r(
+                        reg,
+                        &format!(
+                            "pack2x16float(vec2<f32>({}, {}))",
+                            half(Some(low)),
+                            half(high)
+                        ),
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2830,6 +2891,7 @@ pub fn module(
             TexDim::T2d => "vec2<f32>(u, v), 0.0",
             TexDim::T2dArray => "vec2<f32>(u, v), layer, 0.0",
             TexDim::T3d | TexDim::TCube => "vec3<f32>(u, v, w), 0.0",
+            TexDim::TCubeArray => "vec3<f32>(u, v, w), layer, 0.0",
             other => return Err(Unsupported::TextureDimension { dim: other }),
         };
         let imm = texture.immediate;
@@ -2903,6 +2965,7 @@ fn texture_type(dim: TexDim, compare: bool) -> Result<&'static str, Unsupported>
         (TexDim::T2dArray, false) => Ok("texture_2d_array<f32>"),
         (TexDim::T3d, false) => Ok("texture_3d<f32>"),
         (TexDim::TCube, false) => Ok("texture_cube<f32>"),
+        (TexDim::TCubeArray, false) => Ok("texture_cube_array<f32>"),
         (TexDim::T2d, true) => Ok("texture_depth_2d"),
         (TexDim::T2dArray, true) => Ok("texture_depth_2d_array"),
         (dim, _) => Err(Unsupported::TextureDimension { dim }),

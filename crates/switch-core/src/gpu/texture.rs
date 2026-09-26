@@ -842,12 +842,16 @@ pub fn sample_3d_with(
 /// The two renderers can still differ on a texel at a face's edge: a device
 /// filters across the seam and this clamps inside the face. Nothing seen so
 /// far samples one.
+///
+/// `cube` picks one cube of a cube array, whose faces are stored six layers
+/// to a cube in the same order; it is 0 for a lone cubemap.
 pub fn sample_cube_with(
     ctx: &ExecCtx,
     d: &Descriptors,
     s: f64,
     t: f64,
     r: f64,
+    cube: u32,
     blocks: &RefCell<BlockCache>,
 ) -> Result<[f32; 4]> {
     let (face, sc, tc, ma) = if s.abs() >= t.abs() && s.abs() >= r.abs() {
@@ -869,12 +873,14 @@ pub fn sample_cube_with(
     };
     // A direction of no length has no face; hardware leaves it undefined and
     // the centre of face 0 is a defined answer rather than a division by zero.
+    let last = d.texture.layers.saturating_sub(1);
+    let first_face = cube.saturating_mul(6);
     if ma == 0.0 {
-        return sample_with(ctx, d, 0.5, 0.5, 0, blocks);
+        return sample_with(ctx, d, 0.5, 0.5, first_face.min(last), blocks);
     }
     let u = (sc / ma + 1.0) * 0.5;
     let v = (tc / ma + 1.0) * 0.5;
-    let face = face.min(d.texture.layers.saturating_sub(1));
+    let face = first_face.saturating_add(face).min(last);
     sample_with(ctx, d, u, v, face, blocks)
 }
 

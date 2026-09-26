@@ -1785,6 +1785,8 @@ impl Gpu {
                 TexDim::T3d => wgpu::TextureViewDimension::D3,
                 // Six faces of a 2D texture, viewed as one cube.
                 TexDim::TCube => wgpu::TextureViewDimension::Cube,
+                // Six faces to a cube, as many cubes as the array holds.
+                TexDim::TCubeArray => wgpu::TextureViewDimension::CubeArray,
                 _ => wgpu::TextureViewDimension::D2,
             };
             let binding = TEXTURE_BINDING + 2 * index as u32;
@@ -3926,6 +3928,45 @@ mod tests {
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("quad swap"),
+                source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+            });
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
+        assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+    }
+
+    /// Tomodachi Life's two cube-array `tex` forms and its `vmnmx`, the three
+    /// instructions whose draws fell back to the rasterizer and latched every
+    /// frame after them onto it, translate into WGSL naga accepts.
+    #[test]
+    fn tomodachi_lifes_cube_array_and_video_min_are_wgsl_naga_accepts() {
+        use super::{wgpu, wgsl, Compiled, Layout, Stage};
+        use switch_core::gpu::shader::isa::{self, Instruction, Pred};
+        use switch_core::gpu::shader::{Op, Program};
+
+        let Ok(gpu) = super::Gpu::open() else {
+            return;
+        };
+        let mut program = Program::default();
+        let words = [0xc03a0087fff70400, 0xc1ba0087f0970400, 0x3a2c03e060c70907];
+        let ops = words.map(|word| isa::decode(word).op);
+        for (index, op) in ops.into_iter().chain([Op::Exit]).enumerate() {
+            assert!(!matches!(op, Op::Unimplemented { .. }), "{op:?}");
+            program.insns.push(Instruction {
+                pred: Pred::ALWAYS,
+                op,
+            });
+            program.offsets.push(index as u32 * 8);
+        }
+        let translated = wgsl::translate_for(&Compiled::new(&program), wgsl::Caps::NONE)
+            .expect("a cube-array tex and a vmnmx translate");
+        let layout = Layout::of(&translated, Stage::Fragment);
+        let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
+        assert!(source.contains("texture_cube_array<f32>"), "{source}");
+        let _ = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("cube array and vmnmx"),
                 source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
             });
         let _ = gpu.device.poll(wgpu::PollType::Poll);
