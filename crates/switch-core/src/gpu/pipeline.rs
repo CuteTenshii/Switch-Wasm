@@ -232,6 +232,20 @@ pub enum AttributeBase {
     Uint,
 }
 
+/// How a 10-10-10-2 attribute's four fields read: Maxwell's size `0x30`,
+/// with red in the low ten bits and alpha in the top two.
+///
+/// WebGPU has `unorm10-10-10-2` and none of the other three, so a backend
+/// fetches every one of them as a plain word and unpacks it in the entry
+/// point, the way `raster::fetch_attribute` unpacks the same word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Packed1010102 {
+    Snorm,
+    Unorm,
+    Sint,
+    Uint,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VertexFormat {
     Float32,
@@ -252,6 +266,8 @@ pub enum VertexFormat {
     Snorm8x4,
     Sint8x4,
     Uint8x4,
+    /// Four fields packed 10-10-10-2 into one word.
+    Packed1010102(Packed1010102),
 }
 
 impl VertexFormat {
@@ -267,7 +283,8 @@ impl VertexFormat {
             | VertexFormat::Unorm8x4
             | VertexFormat::Snorm8x4
             | VertexFormat::Sint8x4
-            | VertexFormat::Uint8x4 => 4,
+            | VertexFormat::Uint8x4
+            | VertexFormat::Packed1010102(_) => 4,
             VertexFormat::Float32x2
             | VertexFormat::Float16x4
             | VertexFormat::Unorm16x4
@@ -284,12 +301,14 @@ impl VertexFormat {
     /// `raster::fetch_attribute` leaves in the slot for one as well.
     pub fn base(self) -> AttributeBase {
         match self {
-            VertexFormat::Sint16x2 | VertexFormat::Sint16x4 | VertexFormat::Sint8x4 => {
-                AttributeBase::Sint
-            }
-            VertexFormat::Uint16x2 | VertexFormat::Uint16x4 | VertexFormat::Uint8x4 => {
-                AttributeBase::Uint
-            }
+            VertexFormat::Sint16x2
+            | VertexFormat::Sint16x4
+            | VertexFormat::Sint8x4
+            | VertexFormat::Packed1010102(Packed1010102::Sint) => AttributeBase::Sint,
+            VertexFormat::Uint16x2
+            | VertexFormat::Uint16x4
+            | VertexFormat::Uint8x4
+            | VertexFormat::Packed1010102(Packed1010102::Uint) => AttributeBase::Uint,
             _ => AttributeBase::Float,
         }
     }
@@ -769,6 +788,12 @@ fn vertex_format(size: u32, ty: u32) -> Result<VertexFormat, Unsupported> {
         (0x0a, ATTRIB_TYPE_SNORM) => VertexFormat::Snorm8x4,
         (0x0a, ATTRIB_TYPE_SINT) => VertexFormat::Sint8x4,
         (0x0a, ATTRIB_TYPE_UINT) => VertexFormat::Uint8x4,
+        // Size `0x30` is 10-10-10-2, fetched as a word and unpacked in the
+        // entry point: see [`Packed1010102`].
+        (0x30, ATTRIB_TYPE_SNORM) => VertexFormat::Packed1010102(Packed1010102::Snorm),
+        (0x30, ATTRIB_TYPE_UNORM) => VertexFormat::Packed1010102(Packed1010102::Unorm),
+        (0x30, ATTRIB_TYPE_SINT) => VertexFormat::Packed1010102(Packed1010102::Sint),
+        (0x30, ATTRIB_TYPE_UINT) => VertexFormat::Packed1010102(Packed1010102::Uint),
         (size, ty) => return Err(Unsupported::VertexFormat { size, ty }),
     })
 }
@@ -1236,13 +1261,22 @@ mod tests {
                 ty: ATTRIB_TYPE_FLOAT
             })
         );
-        // A shape neither renderer decodes: `10_10_10_2`. Claiming it would
-        // draw something the reference could not be compared against.
+        // `10_10_10_2`, which both renderers now unpack from one word.
         assert_eq!(
             vertex_format(0x30, ATTRIB_TYPE_UNORM),
+            Ok(VertexFormat::Packed1010102(Packed1010102::Unorm))
+        );
+        assert_eq!(
+            VertexFormat::Packed1010102(Packed1010102::Sint).base(),
+            AttributeBase::Sint
+        );
+        // A shape neither renderer decodes: `11_11_10`. Claiming it would
+        // draw something the reference could not be compared against.
+        assert_eq!(
+            vertex_format(0x31, ATTRIB_TYPE_FLOAT),
             Err(Unsupported::VertexFormat {
-                size: 0x30,
-                ty: ATTRIB_TYPE_UNORM
+                size: 0x31,
+                ty: ATTRIB_TYPE_FLOAT
             })
         );
     }

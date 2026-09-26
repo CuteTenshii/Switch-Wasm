@@ -415,10 +415,13 @@ impl Harness {
         self.engine.regs.set(DEPTH_TEST_FUNC, func);
     }
 
-    /// Read the depth surface as it stands, texel by texel.
+    /// Read the depth surface as it stands, texel by texel: nothing, for a
+    /// draw that has none.
     pub fn depth(&mut self) -> Vec<u32> {
         let addr = self.base + 0x1000;
-        let target = self.engine.depth_target().unwrap().unwrap();
+        let Some(target) = self.engine.depth_target().unwrap() else {
+            return Vec::new();
+        };
         let (width, height, layout) = (target.width, target.height, target.layout);
         let ctx = self.ctx();
         let mut out = Vec::with_capacity((width * height) as usize);

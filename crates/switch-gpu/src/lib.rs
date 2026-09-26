@@ -3403,6 +3403,16 @@ impl Gpu {
             .filter(|a| a.is_bgra)
             .map(|a| a.location as usize)
             .collect();
+        // And which arrive as one 10-10-10-2 word to unpack.
+        vs_layout.packed_attributes = state
+            .vertex_buffers
+            .iter()
+            .flat_map(|buffer| &buffer.attributes)
+            .filter_map(|a| match a.format {
+                state::VertexFormat::Packed1010102(packing) => Some((a.location as usize, packing)),
+                _ => None,
+            })
+            .collect();
         // One bind group per stage; see `Layout::group`.
         vs_layout.group = 0;
         fs_layout.group = 1;
@@ -4143,6 +4153,42 @@ mod tests {
         }
         assert!(can_blend(wgpu::TextureFormat::Rgba16Float, none));
         assert!(can_blend(wgpu::TextureFormat::Rgba8Unorm, none));
+    }
+
+    /// A 10-10-10-2 colour attribute reaches the same pixels on both
+    /// renderers: the device fetches the word and unpacks it in the entry
+    /// point, and the rasterizer unpacks the same word in `fetch_attribute`.
+    /// The values are whole ones and zeros, so no channel lands on a 255th.
+    #[test]
+    fn a_10_10_10_2_colour_reaches_the_same_pixels_on_both_renderers() {
+        const UNORM: u32 = 2;
+        const SNORM: u32 = 1;
+        for (ty, word) in [
+            // Magenta, opaque: red and blue at their largest, alpha 3 of 3.
+            (UNORM, 0x3ff | 0x3ff << 20 | 0b11 << 30),
+            // The same through snorm: 511 is 1, -512 clamps to -1 and then
+            // to 0 in the target, and a two-bit 1 is 1.
+            (SNORM, 0x1ff | 0x200 << 10 | 0x1ff << 20 | 0b01 << 30),
+        ] {
+            let set_up = move |h: &mut Harness| {
+                h.triangle([0.0; 4]);
+                // Attribute 1, the colour: offset 16, size 0x30.
+                h.engine
+                    .regs
+                    .set(0x458 + 1, (16 << 7) | (0x30 << 21) | (ty << 27));
+                let vertices = h.base + 0x400;
+                for vertex in 0..3u64 {
+                    h.vmm
+                        .write_u32(&mut h.mem, vertices + vertex * 32 + 16, word)
+                        .unwrap();
+                }
+            };
+            agrees(set_up);
+            let mut h = Harness::new();
+            set_up(&mut h);
+            h.draw_with(&mut Software).expect("the draw");
+            assert_eq!(h.texel(1, 1), 0xffff_00ff, "type {ty}: opaque magenta");
+        }
     }
 
     /// A lost device hands the frame to the rasterizer without failing the

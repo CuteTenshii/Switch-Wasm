@@ -73,7 +73,7 @@ use super::isa::{
     BoolOp, FCmp, FMod, FRound, HMerge, HPrecision, HSwizzle, ICmp, LogicOp, LopTest, MufuOp, Op,
     Operand, Pred, ShflMode, TexDim, TexsStore, XmadC, RZ,
 };
-use crate::gpu::pipeline::AttributeBase;
+use crate::gpu::pipeline::{AttributeBase, Packed1010102};
 use crate::gpu::texture::SwizzleSource;
 use std::collections::BTreeSet;
 use std::fmt;
@@ -2528,6 +2528,10 @@ pub struct Layout {
     /// the program says: the draw's registers say it, and the backend fills
     /// it in the way it does [`Layout::flip_y`].
     pub bgra_attributes: Vec<usize>,
+    /// Attribute slots that arrive as one 10-10-10-2 word, declared `u32`
+    /// and unpacked in the entry point: see [`Packed1010102`]. Filled in by
+    /// the backend from the draw, like [`Layout::bgra_attributes`].
+    pub packed_attributes: Vec<(usize, Packed1010102)>,
     /// What a fragment has to work out for itself when a backend is
     /// rendering a multisampled surface one texel at a time, rather than
     /// through a device's own multisampling.
@@ -2669,6 +2673,7 @@ impl Layout {
             flip_y: false,
             depth_minus_one_to_one: false,
             bgra_attributes: Vec::new(),
+            packed_attributes: Vec::new(),
             coverage: None,
         }
     }
@@ -2693,12 +2698,45 @@ impl Layout {
     /// What slot `slot` arrives as. Float unless the draw said otherwise:
     /// only the integer formats are recorded, since they are the only ones
     /// that change how the input is declared.
+    /// How slot `slot` is packed, if it arrives as one 10-10-10-2 word.
+    pub fn packing(&self, slot: usize) -> Option<Packed1010102> {
+        self.packed_attributes
+            .iter()
+            .find(|&&(at, _)| at == slot)
+            .map(|&(_, packing)| packing)
+    }
+
     pub fn attribute_base(&self, slot: usize) -> AttributeBase {
         self.integer_attributes
             .iter()
             .find(|&&(at, _)| at == slot)
             .map_or(AttributeBase::Float, |&(_, base)| base)
     }
+}
+
+/// The four `a[]` words a 10-10-10-2 attribute unpacks to, red first, as the
+/// expressions that compute them from the word `word`.
+///
+/// The same arithmetic as `raster::fetch_attribute`: a signed field is sign
+/// extended, a normalized one divided by its largest value and, signed,
+/// clamped at -1, since the most negative value and the one above it both
+/// mean -1. An integer field is carried as its bits.
+fn unpack_1010102(word: &str, packing: Packed1010102) -> [String; 4] {
+    let fields = [(0u32, 10u32), (10, 10), (20, 10), (30, 2)];
+    fields.map(|(offset, bits)| {
+        let signed = format!("extractBits(bitcast<i32>({word}), {offset}u, {bits}u)");
+        let unsigned = format!("extractBits({word}, {offset}u, {bits}u)");
+        let largest = (1u32 << bits) - 1;
+        match packing {
+            Packed1010102::Snorm => {
+                let positive = (1u32 << (bits - 1)) - 1;
+                format!("max(f32({signed}) / {positive}.0, -1.0)")
+            }
+            Packed1010102::Unorm => format!("f32({unsigned}) / {largest}.0"),
+            Packed1010102::Sint => format!("bitcast<f32>({signed})"),
+            Packed1010102::Uint => format!("bitcast<f32>({unsigned})"),
+        }
+    })
 }
 
 /// The WGSL scalar an attribute of this base type is read as.
@@ -3017,6 +3055,10 @@ fn vertex_entry(layout: &Layout) -> String {
     if !layout.attributes.is_empty() {
         out.push_str("struct VertexInput {\n");
         for slot in &layout.attributes {
+            if layout.packing(*slot).is_some() {
+                out.push_str(&format!("  @location({slot}) attr{slot}: u32,\n"));
+                continue;
+            }
             out.push_str(&format!(
                 "  @location({slot}) attr{slot}: vec4<{}>,\n",
                 attribute_scalar(layout.attribute_base(*slot))
@@ -3046,6 +3088,18 @@ fn vertex_entry(layout: &Layout) -> String {
         VERTEX_ID / 4
     ));
     for slot in &layout.attributes {
+        if let Some(packing) = layout.packing(*slot) {
+            for (component, value) in unpack_1010102(&format!("input.attr{slot}"), packing)
+                .iter()
+                .enumerate()
+            {
+                out.push_str(&format!(
+                    "  attr_in[{}u] = {value};\n",
+                    generic_word(*slot, component)
+                ));
+            }
+            continue;
+        }
         // An integer attribute is carried as its bits, the way `shade_vertex`
         // carries one and the way `fetch_attribute` writes one into `a[]`.
         let integer = layout.attribute_base(*slot) != AttributeBase::Float;

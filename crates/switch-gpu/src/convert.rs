@@ -63,6 +63,9 @@ pub(crate) fn vertex_format(format: state::VertexFormat) -> wgpu::VertexFormat {
         state::VertexFormat::Snorm8x4 => wgpu::VertexFormat::Snorm8x4,
         state::VertexFormat::Sint8x4 => wgpu::VertexFormat::Sint8x4,
         state::VertexFormat::Uint8x4 => wgpu::VertexFormat::Uint8x4,
+        // Fetched as the word it is and unpacked in the entry point: WebGPU
+        // has no signed or integer 10-10-10-2 format.
+        state::VertexFormat::Packed1010102(_) => wgpu::VertexFormat::Uint32,
     }
 }
 

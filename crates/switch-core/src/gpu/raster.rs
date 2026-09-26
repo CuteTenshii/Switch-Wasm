@@ -337,6 +337,9 @@ fn attrib_shape(size: u32) -> Option<(u32, u32)> {
 
 /// `DkVtxAttribType` (deko3d.h): `Float = 7`, `Unorm = 2`.
 /// `DkVtxAttribType`, as Eden's `VertexAttribute::Type` names them.
+/// Size `0x30`: four fields packed 10-10-10-2 into one word, red lowest.
+const ATTRIB_SIZE_10_10_10_2: u32 = 0x30;
+
 const ATTRIB_TYPE_SNORM: u32 = 1;
 const ATTRIB_TYPE_UNORM: u32 = 2;
 const ATTRIB_TYPE_SINT: u32 = 3;
@@ -353,6 +356,50 @@ const ATTRIB_DEFAULT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 /// third component after decoding, matching a packed-colour attribute
 /// declared BGRA instead of RGBA. A "fixed" attribute has no buffer behind
 /// it and reads [`ATTRIB_DEFAULT`] outright.
+/// A 10-10-10-2 attribute, one word: red in bits 0-9, green in 10-19, blue
+/// in 20-29 and alpha in the top two. `wgsl::unpack_1010102` is the same
+/// arithmetic for a device, which is given the word and nothing else.
+fn fetch_1010102(
+    attrib: VertexAttrib,
+    array: VertexArray,
+    vertex_index: u32,
+    ctx: &ExecCtx,
+) -> Result<[f32; 4]> {
+    let addr = array.start + vertex_index as u64 * array.stride as u64 + attrib.offset as u64;
+    // Past the array's limit a fetch reads zeros, as for every format.
+    let word = if array.limit != 0 && addr + 4 > array.limit + 1 {
+        0
+    } else {
+        ctx.read_u32(addr)?
+    };
+    let fields = [(0u32, 10u32), (10, 10), (20, 10), (30, 2)];
+    let mut out = [0.0f32; 4];
+    for (slot, (offset, bits)) in out.iter_mut().zip(fields) {
+        let raw = (word >> offset) & ((1 << bits) - 1);
+        let signed = sext_u32(raw, bits);
+        *slot = match attrib.ty {
+            ATTRIB_TYPE_SNORM => {
+                // The most negative value and the one above it both mean -1.
+                (signed as f32 / ((1 << (bits - 1)) - 1) as f32).max(-1.0)
+            }
+            ATTRIB_TYPE_UNORM => raw as f32 / ((1u32 << bits) - 1) as f32,
+            ATTRIB_TYPE_SINT => f32::from_bits(signed as u32),
+            ATTRIB_TYPE_UINT => f32::from_bits(raw),
+            ty => {
+                return Err(Error::Gpu(format!(
+                    "raster: unsupported 10-10-10-2 vertex attribute type {ty}"
+                )))
+            }
+        };
+    }
+    Ok(out)
+}
+
+/// `value`'s low `bits` bits, sign extended.
+fn sext_u32(value: u32, bits: u32) -> i32 {
+    ((value << (32 - bits)) as i32) >> (32 - bits)
+}
+
 pub fn fetch_attribute(
     attrib: VertexAttrib,
     array: VertexArray,
@@ -374,6 +421,9 @@ pub fn fetch_attribute(
             "raster: attribute reads from disabled vertex buffer {}",
             attrib.buffer_id
         )));
+    }
+    if attrib.size == ATTRIB_SIZE_10_10_10_2 {
+        return fetch_1010102(attrib, array, vertex_index, ctx);
     }
     let (components, bits) = attrib_shape(attrib.size).ok_or_else(|| {
         Error::Gpu(format!(
@@ -1977,6 +2027,57 @@ mod tests {
 
         let v = fetch_attribute(attrib, array, 1, &ctx).unwrap();
         assert_eq!(v, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    /// A 10-10-10-2 attribute, one word read four ways. Red is all ones,
+    /// green the largest positive ten-bit value, blue zero, and alpha `10`,
+    /// which as a signed two-bit field is -2 and so clamps to -1.
+    #[test]
+    fn fetch_attribute_unpacks_10_10_10_2() {
+        let (mut mem, vmm, base) = harness();
+        let word = 0x3ff | 0x1ff << 10 | 0b10 << 30;
+        vmm.write_u32(&mut mem, base, word).unwrap();
+        let mut stats = Default::default();
+        let mut host1x = Host1x::new();
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let array = VertexArray {
+            enabled: true,
+            stride: 4,
+            start: base,
+            limit: base + 0x1000,
+            divisor: 0,
+        };
+        let fetch = |ty| {
+            let attrib = VertexAttrib {
+                buffer_id: 0,
+                is_fixed: false,
+                offset: 0,
+                size: ATTRIB_SIZE_10_10_10_2,
+                ty,
+                is_bgra: false,
+            };
+            fetch_attribute(attrib, array, 0, &ctx).unwrap()
+        };
+        assert_eq!(fetch(ATTRIB_TYPE_SNORM), [-1.0 / 511.0, 1.0, 0.0, -1.0]);
+        assert_eq!(
+            fetch(ATTRIB_TYPE_UNORM),
+            [1.0, 511.0 / 1023.0, 0.0, 2.0 / 3.0]
+        );
+        let bits = |v: [i32; 4]| v.map(|x| f32::from_bits(x as u32));
+        assert_eq!(
+            fetch(ATTRIB_TYPE_SINT).map(f32::to_bits),
+            bits([-1, 511, 0, -2]).map(f32::to_bits)
+        );
+        assert_eq!(
+            fetch(ATTRIB_TYPE_UINT).map(f32::to_bits),
+            bits([1023, 511, 0, 2]).map(f32::to_bits)
+        );
     }
 
     /// A fetch past the array's limit reads zeros, the way hardware does and
