@@ -132,6 +132,7 @@ use switch_core::gpu::renderer::{Flush, Renderer, Software};
 use switch_core::gpu::shader::compiled::Compiled;
 use switch_core::gpu::shader::wgsl::{self, Coverage, Layout, Stage, Translation};
 use switch_core::gpu::surface::SampleGrid;
+use switch_core::gpu::texture::TextureSlot;
 use switch_core::gpu::upload::{Banks, DepthKind, Target, Targets, TextureKey, Uploads};
 use switch_core::{Error, Result};
 
@@ -1872,7 +1873,7 @@ impl Gpu {
             let declared_texture = declared
                 .textures
                 .iter()
-                .find(|b| b.immediate == upload.immediate)
+                .find(|b| b.slot == upload.slot)
                 .ok_or("a texture the module never declared")?;
             let compare = declared_texture.compare;
             let dim = declared_texture.dim;
@@ -3417,16 +3418,16 @@ impl Gpu {
         vs_layout.group = 0;
         fs_layout.group = 1;
 
-        let mut immediates: Vec<(ShaderStage, u16)> = Vec::new();
-        immediates.extend(
+        let mut slots: Vec<(ShaderStage, TextureSlot)> = Vec::new();
+        slots.extend(
             vs.textures
                 .iter()
-                .map(|&(imm, _, _)| (ShaderStage::VertexB, imm)),
+                .map(|&(slot, _, _)| (ShaderStage::VertexB, slot)),
         );
-        immediates.extend(
+        slots.extend(
             fs.textures
                 .iter()
-                .map(|&(imm, _, _)| (ShaderStage::Fragment, imm)),
+                .map(|&(slot, _, _)| (ShaderStage::Fragment, slot)),
         );
         let mut banks: Vec<(ShaderStage, u32)> = Vec::new();
         banks.extend(
@@ -3449,7 +3450,7 @@ impl Gpu {
                 &state,
                 ctx,
                 Banks::Read(&banks),
-                &immediates,
+                &slots,
                 &mut |key| {
                     let hit = cache.get(key).cloned();
                     hits += u64::from(hit.is_some());
@@ -3480,7 +3481,7 @@ impl Gpu {
                 if let Some(upload) = uploads
                     .textures
                     .iter()
-                    .find(|t| t.stage == stage && t.immediate == binding.immediate)
+                    .find(|t| t.stage == stage && t.slot == binding.slot)
                 {
                     binding.swizzle = upload.swizzle;
                 }
@@ -3531,8 +3532,8 @@ impl Gpu {
         if switch_core::trace::enabled(switch_core::trace::Trace::GpuTex) {
             for t in &uploads.textures {
                 switch_core::traceln!(
-                    "[gpu-tex] imm={} {:?} {}x{} swizzle={:?} sampler={:?}",
-                    t.immediate,
+                    "[gpu-tex] {:?} {:?} {}x{} swizzle={:?} sampler={:?}",
+                    t.slot,
                     t.format,
                     t.width,
                     t.height,
@@ -4478,6 +4479,42 @@ mod tests {
                 },
             );
         }
+    }
+
+    /// A bindless `tex.b` samples the texture its handle names on the device
+    /// too, where the handle is resolved from the constant word the shader
+    /// loaded it from rather than read out of a register.
+    #[test]
+    fn a_bindless_texture_is_the_one_the_rasterizer_samples() {
+        // The coordinates ramp across the image, so every pixel centre
+        // falls a quarter or three quarters into a texel and nearest
+        // sampling cannot land either side of an edge.
+        let set_up = |h: &mut Harness| {
+            h.bindless_texture();
+            h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        };
+        let new = || Harness::with_fragment_shader(testing::bindless_fragment_shader());
+
+        // Agreement proves nothing if both sides drew nothing, so the
+        // reference has to be the image first.
+        let mut h = new();
+        set_up(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        let size = testing::BINDLESS_TEXTURE_SIZE;
+        let texels: Vec<u32> = (0..size * size)
+            .map(|i| testing::bindless_texel(i % size, i / size))
+            .collect();
+        let drawn: std::collections::BTreeSet<u32> =
+            h.target().into_iter().filter(|&c| c != 0).collect();
+        assert!(drawn.len() >= 8, "only {drawn:x?} was drawn");
+        assert!(
+            drawn.iter().all(|c| texels.contains(c)),
+            "{drawn:x?} is not all texels"
+        );
+
+        agrees_shading(new, |_| {}, set_up);
     }
 
     #[test]

@@ -74,6 +74,7 @@ fn blocker(why: Unsupported) -> String {
         Unsupported::TextureDimension { dim } => format!("texture dimension {dim:?}"),
         Unsupported::UndecodedTarget { .. } => "branch to an undecoded target".into(),
         Unsupported::IndirectBranch { .. } => "brx with an unread jump table".into(),
+        Unsupported::UntracedHandle { .. } => "bindless handle not from a constant bank".into(),
     }
 }
 

@@ -45,6 +45,43 @@ pub fn handle_offset(immediate: u16) -> u16 {
     immediate.wrapping_mul(4)
 }
 
+/// The constant-bank word a sampling instruction reads its handle from.
+///
+/// A translated shader cannot read the handle itself, because resolving it
+/// means walking the TIC and TSC in guest memory, so it names the word and
+/// the backend binds whatever texture that word holds at draw time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureSlot {
+    /// A `tex`/`texs` immediate, a dword index into the bank `TexCbIndex`
+    /// names; see [`handle_offset`].
+    Bound(u16),
+    /// A bindless `tex.b`, whose handle register was loaded from this word
+    /// of any bank, typically one the application filled itself.
+    Bindless { bank: u8, offset: u16 },
+}
+
+impl TextureSlot {
+    /// The bank and byte offset holding this slot's handle.
+    pub fn handle_at(self, tex_cb_index: u8) -> (u8, u16) {
+        match self {
+            TextureSlot::Bound(immediate) => (tex_cb_index, handle_offset(immediate)),
+            TextureSlot::Bindless { bank, offset } => (bank, offset),
+        }
+    }
+
+    /// A number unique to this slot, which the WGSL sampling hooks switch
+    /// on. An immediate is 13 bits wide, so setting the top bit keeps every
+    /// bindless slot clear of every bound one.
+    pub fn key(self) -> u32 {
+        match self {
+            TextureSlot::Bound(immediate) => u32::from(immediate),
+            TextureSlot::Bindless { bank, offset } => {
+                1 << 31 | u32::from(bank) << 16 | u32::from(offset)
+            }
+        }
+    }
+}
+
 pub fn image_id(handle: u32) -> u32 {
     handle & 0xF_FFFF
 }

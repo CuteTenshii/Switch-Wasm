@@ -74,7 +74,7 @@ use super::isa::{
     MufuOp, Op, Operand, Pred, ShflMode, TexDim, TexsStore, XmadC, RZ,
 };
 use crate::gpu::pipeline::{AttributeBase, Packed1010102};
-use crate::gpu::texture::SwizzleSource;
+use crate::gpu::texture::{SwizzleSource, TextureSlot};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -120,6 +120,9 @@ pub enum Unsupported {
     /// Until then the rasterizer takes these draws, and it does implement the
     /// comparison. See `texture::sample_compare_with`.
     DepthCompare { at: usize },
+    /// A bindless `tex.b` whose handle register is not loaded straight from
+    /// a constant bank, so there is no word to name for the backend to bind.
+    UntracedHandle { at: usize },
 }
 
 impl fmt::Display for Unsupported {
@@ -152,6 +155,12 @@ impl fmt::Display for Unsupported {
             Unsupported::TextureDimension { dim } => {
                 write!(f, "no binding for a {dim:?} texture")
             }
+            Unsupported::UntracedHandle { at } => {
+                write!(
+                    f,
+                    "instruction {at}: a bindless handle not loaded from a constant bank"
+                )
+            }
         }
     }
 }
@@ -164,10 +173,10 @@ impl fmt::Display for Unsupported {
 /// space its entry point fills, `cbRead` a bound constant buffer, and
 /// `texSample` a bound texture.
 ///
-/// `texSample` takes the *immediate* a `texs` carries rather than a texture
-/// handle, because turning one into the other means reading the driver's
-/// reserved constant bank at an offset only the engine knows: see
-/// [`crate::gpu::texture`]. `dim` is [`tex_dim_code`].
+/// `texSample` takes a [`TextureSlot::key`] rather than a texture handle,
+/// because turning one into the other means reading a constant bank at draw
+/// time and walking descriptors in guest memory: see [`crate::gpu::texture`].
+/// `dim` is [`tex_dim_code`].
 pub const HOST_INTERFACE: &str = "\
 fn attrIn(offset: u32) -> f32 { return 0.0; }
 fn attrOut(offset: u32, value: f32) { }
@@ -225,12 +234,11 @@ pub struct Translation {
     pub centroid_loads: Vec<usize>,
     /// The constant banks it reads, ascending.
     pub const_banks: Vec<u8>,
-    /// The textures it samples, in the order it first mentions them: the
-    /// `texs` immediate and the dimensionality sampled with.
-    /// Each `texs` immediate, what it samples as, and whether it is
-    /// sampled as a shadow map, a depth image compared against a reference
-    /// rather than read.
-    pub textures: Vec<(u16, TexDim, bool)>,
+    /// The textures it samples, in the order it first mentions them: where
+    /// each one's handle is, what it samples as, and whether it is sampled
+    /// as a shadow map, a depth image compared against a reference rather
+    /// than read.
+    pub textures: Vec<(TextureSlot, TexDim, bool)>,
     /// The first instruction that asks which lane of the 2x2 quad it is, if
     /// any.
     pub quad: Option<usize>,
@@ -620,12 +628,14 @@ struct Emitter<'a> {
     stores: BTreeSet<usize>,
     centroid_loads: BTreeSet<usize>,
     banks: BTreeSet<u8>,
-    textures: Vec<(u16, TexDim, bool)>,
+    textures: Vec<(TextureSlot, TexDim, bool)>,
     /// The constant-bank descriptors a `ldg` reads memory through.
     globals: Vec<(u8, u16)>,
     /// Names `let` bindings apart. WGSL scopes them to their block, but one
     /// counter across the whole function is simpler than reasoning about it.
     temps: usize,
+    /// The first instruction of the block being emitted.
+    block: usize,
 }
 
 impl<'a> Emitter<'a> {
@@ -648,6 +658,7 @@ impl<'a> Emitter<'a> {
             textures: Vec::new(),
             globals: Vec::new(),
             temps: 0,
+            block: 0,
         }
     }
 
@@ -712,6 +723,61 @@ impl<'a> Emitter<'a> {
             return None;
         }
         Some((bank, offset, index))
+    }
+
+    /// The constant word a bindless `tex.b` at `at` reads its handle from,
+    /// if the program loads the handle register the way compilers do,
+    /// straight out of a constant bank.
+    ///
+    /// ```text
+    /// ldc   r2, c3[0x10]
+    /// tex.b r0, r4, r2, 0x2, 2D, 0xf
+    /// ```
+    ///
+    /// The nearest write earlier in the same block decides it; failing that,
+    /// a register the program writes exactly once holds that one value
+    /// wherever it is read. Anything else could be one of several handles,
+    /// and binding a guess draws a plausible wrong texture instead of
+    /// falling back to the rasterizer, which samples the register itself.
+    fn bindless_slot(&self, at: usize, reg: u8) -> Option<TextureSlot> {
+        let writes_reg = |i: usize| super::interp::writes(&self.program.op(i)).contains(&reg);
+        let writer = match (self.block..at).rev().find(|&i| writes_reg(i)) {
+            Some(writer) => writer,
+            None => {
+                let mut writers = (0..self.program.len()).filter(|&i| writes_reg(i));
+                let only = writers.next()?;
+                if writers.next().is_some() {
+                    return None;
+                }
+                only
+            }
+        };
+        if self.program.pred(writer) != Pred::ALWAYS {
+            return None;
+        }
+        match self.program.op(writer) {
+            Op::Mov {
+                src: Operand::Const { bank, offset },
+                ..
+            } => Some(TextureSlot::Bindless { bank, offset }),
+            // A wide load fills consecutive registers from consecutive
+            // words, and the address wraps the way the emitted `Ldc` does.
+            Op::Ldc {
+                dst,
+                bank,
+                offset,
+                idx: RZ,
+                size,
+            } if size.bytes() >= 4 => {
+                let word = u32::from(reg.wrapping_sub(dst)) * 4;
+                let offset = (offset as u32).wrapping_add(word) & 0xffff;
+                Some(TextureSlot::Bindless {
+                    bank,
+                    offset: offset as u16,
+                })
+            }
+            _ => None,
+        }
     }
 
     fn line(&mut self, text: &str) {
@@ -1956,7 +2022,8 @@ impl Emitter<'_> {
                 ..
             } => {
                 let layer = (dim == TexDim::T2dArray).then_some(coords[2]);
-                self.sample_texture(at, handle, dim, dref, coords, layer)?;
+                let slot = TextureSlot::Bound(handle);
+                self.sample_texture(at, slot, dim, dref, coords, layer)?;
             }
             // The general `tex` keeps an array's layer in the register before
             // the coordinates. `.LL` and `.LB` are sampled at the one level
@@ -1968,9 +2035,18 @@ impl Emitter<'_> {
                 dref,
                 offset: None,
                 handle,
+                handle_reg,
                 dim,
                 ..
-            } => self.sample_texture(at, handle, dim, dref, coords, layer)?,
+            } => {
+                let slot = match handle_reg {
+                    None => TextureSlot::Bound(handle),
+                    Some(reg) => self
+                        .bindless_slot(at, reg)
+                        .ok_or(Unsupported::UntracedHandle { at })?,
+                };
+                self.sample_texture(at, slot, dim, dref, coords, layer)?;
+            }
 
             // `shfl` reads the value of another lane of the 2x2 quad, which
             // is the whole warp the rasterizer models, so `quadSwapX`/`Y`/
@@ -2239,23 +2315,24 @@ impl Emitter<'_> {
     fn sample_texture(
         &mut self,
         at: usize,
-        handle: u16,
+        slot: TextureSlot,
         dim: TexDim,
         dref: Option<u8>,
         coords: [u8; 3],
         layer: Option<u8>,
     ) -> Result<(), Unsupported> {
         let compare = dref.is_some();
-        match self.textures.iter().find(|&&(imm, _, _)| imm == handle) {
+        match self.textures.iter().find(|&&(seen, _, _)| seen == slot) {
             // One binding cannot be both a colour image and a depth
             // one (they are different WGSL types) so a program that
-            // reads the same immediate each way is the rasterizer's.
+            // reads the same slot each way is the rasterizer's.
             Some(&(_, _, was)) if was != compare => {
                 return Err(Unsupported::DepthCompare { at });
             }
             Some(_) => {}
-            None => self.textures.push((handle, dim, compare)),
+            None => self.textures.push((slot, dim, compare)),
         }
+        let key = slot.key();
         let u = self.f(coords[0]);
         // A 1D image has one coordinate, and the register after a
         // `tex`'s belongs to something else.
@@ -2290,11 +2367,11 @@ impl Emitter<'_> {
             Some(reg) => {
                 let reference = self.f(reg);
                 self.bind(&format!(
-                    "texSampleCompare({handle}u, {code}u, {u}, {v}, {layer}, {reference})"
+                    "texSampleCompare({key}u, {code}u, {u}, {v}, {layer}, {reference})"
                 ))
             }
             None => self.bind(&format!(
-                "texSample({handle}u, {code}u, {u}, {v}, {layer}, {w})"
+                "texSample({key}u, {code}u, {u}, {v}, {layer}, {w})"
             )),
         };
         // The interpreter lands these results *late*, at the first
@@ -2341,6 +2418,7 @@ impl Emitter<'_> {
     fn emit_blocks(&mut self, leaders: &[usize]) -> Result<(), Unsupported> {
         for (n, &start) in leaders.iter().enumerate() {
             let end = leaders.get(n + 1).copied().unwrap_or(self.program.len());
+            self.block = start;
             self.indent = 3;
             self.line(&format!("case {start}u: {{"));
             self.indent = 4;
@@ -2666,8 +2744,8 @@ pub struct Coverage {
 /// One texture a module samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TextureBinding {
-    /// The `texs` immediate that names it.
-    pub immediate: u16,
+    /// Where its handle is.
+    pub slot: TextureSlot,
     /// What the instruction samples it as, which decides the binding's type.
     pub dim: TexDim,
     /// How the descriptor says the channels are rearranged on the way out.
@@ -2754,8 +2832,8 @@ impl Layout {
             textures: translated
                 .textures
                 .iter()
-                .map(|&(immediate, dim, compare)| TextureBinding {
-                    immediate,
+                .map(|&(slot, dim, compare)| TextureBinding {
+                    slot,
                     dim,
                     compare,
                     swizzle: IDENTITY_SWIZZLE,
@@ -3038,7 +3116,7 @@ pub fn module(
     out.push_str("    default: { return 0u; }\n  }\n}\n\n");
 
     // `dim` is unused: which of these a call reaches is decided by the
-    // immediate, and the dimensionality then belongs to the binding's type.
+    // slot, and the dimensionality then belongs to the binding's type.
     // It stays in the signature because it is part of `HOST_INTERFACE`, and
     // a backend that binds textures some other way may want it.
     out.push_str(
@@ -3056,10 +3134,10 @@ pub fn module(
             TexDim::TCubeArray => "vec3<f32>(u, v, w), layer, 0.0",
             other => return Err(Unsupported::TextureDimension { dim: other }),
         };
-        let imm = texture.immediate;
+        let key = texture.slot.key();
         let sample = format!("textureSampleLevel(tex{index}, smp{index}, {coords})");
         if texture.swizzle == IDENTITY_SWIZZLE {
-            out.push_str(&format!("    case {imm}u: {{ return {sample}; }}\n"));
+            out.push_str(&format!("    case {key}u: {{ return {sample}; }}\n"));
             continue;
         }
         let channels: Vec<&str> = texture
@@ -3074,7 +3152,7 @@ pub fn module(
                 SwizzleSource::One => "1.0",
             })
             .collect();
-        out.push_str(&format!("    case {imm}u: {{\n"));
+        out.push_str(&format!("    case {key}u: {{\n"));
         out.push_str(&format!("      let sampled = {sample};\n"));
         out.push_str(&format!(
             "      return vec4<f32>({});\n    }}\n",
@@ -3103,9 +3181,9 @@ pub fn module(
             TexDim::T2dArray => "vec2<f32>(u, v), layer",
             other => return Err(Unsupported::TextureDimension { dim: other }),
         };
-        let imm = texture.immediate;
+        let key = texture.slot.key();
         out.push_str(&format!(
-            "    case {imm}u: {{\n      let c = textureSampleCompareLevel(tex{index}, \
+            "    case {key}u: {{\n      let c = textureSampleCompareLevel(tex{index}, \
              smp{index}, {coords}, dref);\n      return vec4<f32>(c, c, c, 1.0);\n    }}\n"
         ));
     }
@@ -4311,7 +4389,7 @@ mod tests {
         assert_eq!(
             layout.textures,
             vec![TextureBinding {
-                immediate: 0x1a4,
+                slot: TextureSlot::Bound(0x1a4),
                 dim: TexDim::T2d,
                 compare: false,
                 swizzle: IDENTITY_SWIZZLE
@@ -4727,6 +4805,134 @@ mod tests {
         assert_eq!(
             module(&translated, Stage::Fragment, &layout).unwrap_err(),
             Unsupported::TextureDimension { dim: TexDim::T1d }
+        );
+    }
+
+    /// Tomodachi Life's `tex.b`, which samples with the handle in `r2`.
+    const TEX_B: u64 = 0xdeba0007a0270000;
+
+    #[test]
+    fn a_bindless_tex_binds_the_constant_word_its_handle_was_loaded_from() {
+        let tex = crate::gpu::shader::isa::decode(TEX_B).op;
+        let p = program(&[
+            (
+                Op::Ldc {
+                    dst: 2,
+                    bank: 3,
+                    offset: 0x10,
+                    idx: RZ,
+                    size: MemSize::B32,
+                },
+                ALWAYS,
+            ),
+            (tex, ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]);
+        let translated = translate(&p).unwrap();
+        let slot = TextureSlot::Bindless {
+            bank: 3,
+            offset: 0x10,
+        };
+        assert_eq!(translated.textures, vec![(slot, TexDim::T2d, false)]);
+        let layout = Layout::of(&translated, Stage::Fragment);
+        let source = module(&translated, Stage::Fragment, &layout).unwrap();
+        let key = slot.key();
+        assert!(
+            source.contains(&format!(
+                "case {key}u: {{ return textureSampleLevel(tex0, smp0"
+            )),
+            "{source}"
+        );
+        assert!(
+            translated.source.contains(&format!("texSample({key}u,")),
+            "{}",
+            translated.source
+        );
+    }
+
+    #[test]
+    fn a_bindless_handle_is_traced_through_a_wide_load_and_across_blocks() {
+        // The second word of an `ldc.64`, loaded in a block of its own: the
+        // program writes `r2` nowhere else, so every path reads that word.
+        let tex = crate::gpu::shader::isa::decode(TEX_B).op;
+        let p = program(&[
+            (
+                Op::Ldc {
+                    dst: 1,
+                    bank: 4,
+                    offset: 0x20,
+                    idx: RZ,
+                    size: MemSize::B64,
+                },
+                ALWAYS,
+            ),
+            (Op::Ssy { target: at(3) }, ALWAYS),
+            (Op::Sync, ALWAYS),
+            (tex, ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]);
+        let translated = translate(&p).unwrap();
+        assert_eq!(
+            translated.textures,
+            vec![(
+                TextureSlot::Bindless {
+                    bank: 4,
+                    offset: 0x24
+                },
+                TexDim::T2d,
+                false
+            )]
+        );
+    }
+
+    #[test]
+    fn a_bindless_handle_that_is_not_a_constant_is_refused() {
+        let tex = crate::gpu::shader::isa::decode(TEX_B).op;
+        let computed = |pred| {
+            program(&[
+                (
+                    Op::Mov {
+                        dst: 2,
+                        src: Operand::Const {
+                            bank: 3,
+                            offset: 0x10,
+                        },
+                    },
+                    pred,
+                ),
+                (tex, ALWAYS),
+                (Op::Exit, ALWAYS),
+            ])
+        };
+        // A guarded load leaves whatever `r2` held before on the lanes that
+        // skip it, which could be any handle.
+        let guarded = Pred {
+            reg: 0,
+            negate: false,
+        };
+        assert_eq!(
+            translate(&computed(guarded)).unwrap_err(),
+            Unsupported::UntracedHandle { at: 1 }
+        );
+        assert!(translate(&computed(ALWAYS)).is_ok());
+
+        let indexed = program(&[
+            (
+                Op::Ldc {
+                    dst: 2,
+                    bank: 3,
+                    offset: 0x10,
+                    idx: 5,
+                    size: MemSize::B32,
+                },
+                ALWAYS,
+            ),
+            (tex, ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]);
+        assert_eq!(
+            translate(&indexed).unwrap_err(),
+            Unsupported::UntracedHandle { at: 1 }
         );
     }
 

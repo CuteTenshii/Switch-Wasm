@@ -1015,6 +1015,10 @@ pub enum Op {
         /// because a sampler with one mip level can use it.
         lod: Option<u8>,
         handle: u16,
+        /// A bindless sample's (`tex.b`) handle register. The handle is the
+        /// value a bound sample reads out of the constant bank at `handle`,
+        /// held in a register instead, and `handle` is then unused.
+        handle_reg: Option<u8>,
         dim: TexDim,
         mask: [bool; 4],
     },
@@ -2521,10 +2525,14 @@ fn decode_alu_wide(insn: u64) -> Op {
         return un;
     }
 
+    // tex.b: the bindless sample, 0xdeb8/0xfff8.
+    if insn & 0xfff8_0000_0000_0000 == 0xdeb8_0000_0000_0000 {
+        return decode_tex(insn, true);
+    }
     // tex: the general sample, whose operands are spread over the meta
     // register rather than packed into `texs`'s two.
     if insn & 0xf800_0000_0000_0000 == 0xc000_0000_0000_0000 {
-        return decode_tex(insn);
+        return decode_tex(insn, false);
     }
 
     // The 32-bit-immediate forms.
@@ -3071,11 +3079,17 @@ fn decode_tex_mask(selector: u64, dst: u8, dst2: u8) -> Option<[bool; 4]> {
 /// only if its own modifier bit is set. Getting that order wrong reads a
 /// coordinate as an offset, so it is written the way Eden's
 /// `texture_fetch.cpp` walks it.
-fn decode_tex(insn: u64) -> Op {
+/// `tex`, or with `bindless` `tex.b`: the same operands, except that the
+/// bindless form takes its handle from the first meta register instead of
+/// an immediate, and keeps `.AOFFI`, the level mode and `.LC` at 36, 37 and
+/// 40 where the bound form has the immediate. yuzu's `TEX_b` decodes it the
+/// same way.
+fn decode_tex(insn: u64, bindless: bool) -> Op {
     let un = Op::Unimplemented { raw: insn };
+    let (aoffi_at, blod_at, lc_at) = if bindless { (36, 37, 40) } else { (54, 55, 58) };
     // `.LC`, a level-of-detail clamp, has nothing to clamp in a sampler with
     // one level, and saying so is better than sampling as if it were absent.
-    if field(insn, 58, 1) != 0 {
+    if field(insn, lc_at, 1) != 0 {
         return un;
     }
     // The dimensionalities `TexDim` names. 1D arrays and 3D arrays are the
@@ -3107,14 +3121,17 @@ fn decode_tex(insn: u64) -> Op {
         meta = meta.wrapping_add(1);
         r
     };
+    // The handle comes first, ahead of everything else the meta register
+    // chain carries.
+    let handle_reg = bindless.then(&mut take);
     // `blod`: 0 none, 1 `.LZ`, 2 `.LB`, 3 `.LL`, 6 `.LBA`, 7 `.LLA`. Only the
     // four that carry a register consume one; 4 and 5 are not modes at all.
-    let lod = match field(insn, 55, 3) {
+    let lod = match field(insn, blod_at, 3) {
         0 | 1 => None,
         2 | 3 | 6 | 7 => Some(take()),
         _ => return un,
     };
-    let offset = (field(insn, 54, 1) != 0).then(&mut take);
+    let offset = (field(insn, aoffi_at, 1) != 0).then(&mut take);
     let dref = (field(insn, 50, 1) != 0).then(&mut take);
     Op::Tex {
         dst,
@@ -3123,7 +3140,12 @@ fn decode_tex(insn: u64) -> Op {
         dref,
         offset,
         lod,
-        handle: field(insn, 36, 13) as u16,
+        handle: if bindless {
+            0
+        } else {
+            field(insn, 36, 13) as u16
+        },
+        handle_reg,
         dim,
         mask: [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0],
     }
@@ -3914,6 +3936,7 @@ mod tests {
                 offset: Some(7),
                 lod: None,
                 handle: 8,
+                handle_reg: None,
                 dim: TexDim::T2d,
                 mask: [true, false, false, false],
             }
@@ -3928,6 +3951,7 @@ mod tests {
                 offset: Some(11),
                 lod: None,
                 handle: 8,
+                handle_reg: None,
                 dim: TexDim::T2d,
                 mask: [true, true, true, false],
             }
@@ -3958,6 +3982,42 @@ mod tests {
     }
 
     #[test]
+    fn decodes_a_bindless_tex() {
+        // Tomodachi Life's `tex.b`: the handle in the first meta register,
+        // `r2`, and nothing else in the chain.
+        assert_eq!(
+            op(0xdeba0007a0270000),
+            Op::Tex {
+                dst: 0,
+                coords: [0, 1, 2],
+                layer: None,
+                dref: None,
+                offset: None,
+                lod: None,
+                handle: 0,
+                handle_reg: Some(2),
+                dim: TexDim::T2d,
+                mask: [true; 4],
+            }
+        );
+        // `.LL` moves along to the register after the handle, and sits at
+        // bit 37 here rather than 55.
+        assert!(matches!(
+            op(0xdeba0007a0270000 | 3 << 37),
+            Op::Tex {
+                handle_reg: Some(2),
+                lod: Some(3),
+                ..
+            }
+        ));
+        // `.LC` is at bit 40 in this form.
+        assert!(matches!(
+            op(0xdeba0007a0270000 | 1 << 40),
+            Op::Unimplemented { .. }
+        ));
+    }
+
+    #[test]
     fn decodes_a_cube_array_tex() {
         // Tomodachi Life's, the two a draw fell back on before cube arrays
         // decoded: the cube in the register before the direction, as an
@@ -3972,6 +4032,7 @@ mod tests {
                 offset: None,
                 lod: None,
                 handle: 8,
+                handle_reg: None,
                 dim: TexDim::TCubeArray,
                 mask: [true; 4],
             }

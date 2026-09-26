@@ -43,7 +43,7 @@ use crate::gpu::engine::threed::{DepthLayout, Engine3D, ShaderStage};
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::pipeline::{Format, Pipeline, StepMode, VertexBuffer};
 use crate::gpu::surface::{ColorFormat, Layout};
-use crate::gpu::texture::{self, Sampler, SwizzleSource, TexelKind, Texture};
+use crate::gpu::texture::{self, Sampler, SwizzleSource, TexelKind, Texture, TextureSlot};
 use crate::{Error, Result};
 
 /// Which constant banks to resolve.
@@ -198,11 +198,11 @@ pub struct TextureKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextureUpload {
     /// The stage whose constant buffer named this texture. The same
-    /// immediate in the other stage is a different texture.
+    /// slot in the other stage is a different texture.
     pub stage: ShaderStage,
-    /// The `texs` immediate this was resolved for.
-    pub immediate: u16,
-    /// The bindless handle that immediate named.
+    /// The slot this was resolved for.
+    pub slot: TextureSlot,
+    /// The bindless handle that slot held.
     pub handle: u32,
     pub format: Format,
     pub width: u32,
@@ -257,20 +257,20 @@ impl Uploads {
     /// `pipeline` supplies the vertex layout, so that this and the pipeline
     /// description cannot disagree about which arrays a draw binds or how
     /// they step.
-    /// `immediates` are the `texs` immediates the draw's shaders sample
-    /// with, each paired with the stage it came from, a
+    /// `slots` are where the draw's shaders read their texture handles,
+    /// each paired with the stage it came from, a
     /// [`crate::gpu::shader::wgsl::Translation`]'s `textures`. They are not
     /// in the register file: only the shader knows which texture units it
     /// reaches, and the two stages index *different* constant buffers with
-    /// the same immediate.
+    /// the same slot.
     pub fn of(
         engine: &Engine3D,
         pipeline: &Pipeline,
         ctx: &ExecCtx,
         banks: Banks<'_>,
-        immediates: &[(ShaderStage, u16)],
+        slots: &[(ShaderStage, TextureSlot)],
     ) -> Result<Uploads> {
-        Uploads::of_cached(engine, pipeline, ctx, banks, immediates, &mut |_| None)
+        Uploads::of_cached(engine, pipeline, ctx, banks, slots, &mut |_| None)
     }
 
     /// [`Uploads::of`], letting the caller answer for a texture it has
@@ -286,7 +286,7 @@ impl Uploads {
         pipeline: &Pipeline,
         ctx: &ExecCtx,
         banks: Banks<'_>,
-        immediates: &[(ShaderStage, u16)],
+        slots: &[(ShaderStage, TextureSlot)],
         cached: &mut dyn FnMut(&TextureKey) -> Option<std::sync::Arc<[u8]>>,
     ) -> Result<Uploads> {
         let call = engine.last_draw;
@@ -369,14 +369,14 @@ impl Uploads {
         }
 
         let mut textures = Vec::new();
-        for &(stage, immediate) in immediates {
+        for &(stage, slot) in slots {
             if textures
                 .iter()
-                .any(|t: &TextureUpload| t.stage == stage && t.immediate == immediate)
+                .any(|t: &TextureUpload| t.stage == stage && t.slot == slot)
             {
                 continue;
             }
-            textures.push(read_texture(engine, ctx, stage, immediate, cached)?);
+            textures.push(read_texture(engine, ctx, stage, slot, cached)?);
         }
 
         Ok(Uploads {
@@ -748,29 +748,31 @@ impl Targets {
     }
 }
 
-/// Resolve a `texs` immediate to a texture and copy it out.
-///
-/// The immediate is not a handle. It indexes, in dwords, the constant bank
-/// `TexCbIndex` names, a register the driver programs, to 15 under nouveau
-/// and 0 under deko3d, and *that* holds the bindless handle, which in turn
-/// indexes the TIC and TSC pools. Three levels, none of them optional.
 /// One GOB: the block-linear unit a surface's rows are padded up to.
 const GOB_BYTES: u64 = 512;
 
+/// Resolve a texture slot to a texture and copy it out.
+///
+/// A `texs` immediate is not a handle. It indexes, in dwords, the constant
+/// bank `TexCbIndex` names, a register the driver programs, to 15 under
+/// nouveau and 0 under deko3d, and *that* holds the bindless handle, which
+/// in turn indexes the TIC and TSC pools. Three levels, none of them
+/// optional. A bindless slot names the constant word directly.
 fn read_texture(
     engine: &Engine3D,
     ctx: &ExecCtx,
     stage: ShaderStage,
-    immediate: u16,
+    slot: TextureSlot,
     cached: &mut dyn FnMut(&TextureKey) -> Option<std::sync::Arc<[u8]>>,
 ) -> Result<TextureUpload> {
-    let bank = u32::from(engine.tex_cb_index());
+    let (bank, offset) = slot.handle_at(engine.tex_cb_index());
+    let bank = u32::from(bank);
     let (addr, size) = engine.bound_constbuf(stage, bank).ok_or_else(|| {
         Error::Gpu(format!(
             "upload: {stage:?}'s texture bank {bank} is not bound"
         ))
     })?;
-    let offset = u32::from(texture::handle_offset(immediate));
+    let offset = u32::from(offset);
     if offset + 4 > size {
         return Err(Error::Gpu(format!(
             "upload: texture handle at c{bank}[{offset:#x}] is past the bound buffer's {size:#x}"
@@ -827,7 +829,7 @@ fn read_texture(
     if let Some(bytes) = cached(&key) {
         return Ok(TextureUpload {
             stage,
-            immediate,
+            slot,
             handle,
             format,
             width: image.width,
@@ -887,7 +889,7 @@ fn read_texture(
     }
     Ok(TextureUpload {
         stage,
-        immediate,
+        slot,
         handle,
         format,
         width: image.width,

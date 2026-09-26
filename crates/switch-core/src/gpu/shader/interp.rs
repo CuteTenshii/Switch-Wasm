@@ -2091,15 +2091,21 @@ impl Invocation {
             dref,
             offset,
             handle,
+            handle_reg,
             dim,
             ..
         } = op
         else {
             unreachable!("run_tex called with {op:?}");
         };
-        let handle = env
-            .consts
-            .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
+        // A bindless sample holds in a register the value a bound one reads
+        // out of the driver's constant bank.
+        let handle = match handle_reg {
+            Some(reg) => self.reg(reg),
+            None => env
+                .consts
+                .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?,
+        };
         let mut u = self.reg_f32(coords[0]);
         // A 1D image has one coordinate, and the register after it belongs to
         // something else.
@@ -4534,6 +4540,32 @@ mod tests {
         inv.set_reg_f32(7, 0.25);
         inv.execute(&program, &Env::new(&consts, &probe)).unwrap();
         assert_eq!(probe.0.get(), (-1.0, 0.5, 0.25, 3));
+        assert_eq!([0, 1, 2, 3].map(|r| inv.reg_f32(r)), [0.25, 0.5, 0.75, 1.0]);
+    }
+
+    /// A bindless `tex.b` samples whatever handle its register holds, where a
+    /// bound `tex` reads one out of the driver's constant bank.
+    #[test]
+    fn a_bindless_tex_samples_the_handle_its_register_holds() {
+        struct Probe(std::cell::Cell<u32>);
+        impl TextureSource for Probe {
+            fn sample(&self, handle: u32, _u: f32, _v: f32, _l: u32) -> ShaderResult<[f32; 4]> {
+                self.0.set(handle);
+                Ok([0.25, 0.5, 0.75, 1.0])
+            }
+        }
+        let op = isa::decode(0xdeba0007a0270000).op;
+        let probe = Probe(std::cell::Cell::new(0));
+        let consts = no_consts();
+        let mut program: Vec<Op> = vec![op];
+        program.push(Op::Exit);
+        let mut inv = Invocation::new();
+        inv.set_reg_f32(0, 0.5);
+        inv.set_reg_f32(1, 0.5);
+        inv.set_reg(2, 0x0030_0007);
+        inv.execute(&prog(&program), &Env::new(&consts, &probe))
+            .unwrap();
+        assert_eq!(probe.0.get(), 0x0030_0007);
         assert_eq!([0, 1, 2, 3].map(|r| inv.reg_f32(r)), [0.25, 0.5, 0.75, 1.0]);
     }
 

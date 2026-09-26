@@ -106,6 +106,48 @@ pub fn derivative_fragment_shader() -> Vec<u8> {
     bytes
 }
 
+/// `oColor = texture(bindless, vColor.xy)`: the `ipa` chain of
+/// [`solid_fragment_shader`] for the first two components, the handle loaded
+/// from `c3[0x10]`, and Tomodachi Life's own `tex.b`, which samples at
+/// `(r0, r1)` with the handle in `r2` and writes all four channels from
+/// `r0`. The words are checked against `envydis`.
+pub fn bindless_fragment_shader() -> Vec<u8> {
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
+        (0x0107ff02, 0xef940030), // ld b32 $r2 c3[0x10]
+        (0xa0270000, 0xdeba0007), // tex b nodep $r0 $r0 $r2 0x0 t2d 0xf
+    ));
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        (0x0007000f, 0xe3000000), // exit
+        (0xff87000f, 0xe2400fff), // bra 0x50 (padding, never reached)
+        (0x00070f00, 0x50b00000), // nop (padding, never reached)
+    ));
+    bytes
+}
+
+/// The bank and offset [`bindless_fragment_shader`] loads its handle from.
+pub const BINDLESS_HANDLE_BANK: u32 = 3;
+pub const BINDLESS_HANDLE_OFFSET: u32 = 0x10;
+
+/// The width and height of the image [`Harness::bindless_texture`] binds.
+pub const BINDLESS_TEXTURE_SIZE: u32 = 8;
+
+/// The texel [`Harness::bindless_texture`] stores at `(x, y)`, as the
+/// little-endian word of its RGBA8 bytes: every texel distinct, so a draw
+/// that reads the wrong one or the wrong image cannot come out equal.
+pub fn bindless_texel(x: u32, y: u32) -> u32 {
+    let (r, g, b) = (x * 30 + 10, y * 30 + 10, (y * 8 + x) * 3);
+    r | g << 8 | b << 16 | 0xff << 24
+}
+
 /// The register the multisample mode lives in, and the ones a test that
 /// varies coverage reaches for. Named because a test that writes `0x574`
 /// says nothing about what it is doing.
@@ -432,6 +474,68 @@ impl Harness {
             }
         }
         out
+    }
+
+    /// Bind an 8x8 pitch-linear RGBA8 image where a bindless handle in
+    /// fragment bank [`BINDLESS_HANDLE_BANK`] names it, for
+    /// [`bindless_fragment_shader`] to sample.
+    ///
+    /// The handle is image 1 and sampler 1 rather than 0 and 0, so a backend
+    /// that reads a zero handle from the wrong place samples an empty
+    /// descriptor instead of this one. The sampler is the nearest texel with
+    /// its edges clamped.
+    pub fn bindless_texture(&mut self) {
+        let header_pool = self.base + 0x1400;
+        let sampler_pool = self.base + 0x1480;
+        let constants = self.base + 0x1500;
+        let image = self.base + 0x1800;
+        let size = BINDLESS_TEXTURE_SIZE;
+        let mut ctx = self.ctx();
+        for y in 0..size {
+            for x in 0..size {
+                ctx.write_u32(image + u64::from((y * size + x) * 4), bindless_texel(x, y))
+                    .unwrap();
+            }
+        }
+        // TIC 1: A8B8G8R8 UNORM, the identity swizzle, pitch-linear, 2D.
+        let tic = header_pool + 32;
+        let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+        ctx.write_u32(tic, 0x08 | (2 << 7) | identity).unwrap();
+        ctx.write_u32(tic + 4, image as u32).unwrap();
+        ctx.write_u32(tic + 8, (image >> 32) as u32 | (2 << 21))
+            .unwrap();
+        ctx.write_u32(tic + 12, size * 4 / 32).unwrap();
+        ctx.write_u32(tic + 16, (size - 1) | (1 << 23)).unwrap();
+        ctx.write_u32(tic + 20, size - 1).unwrap();
+        // TSC 1: ClampToEdge on all three axes, nearest filtering.
+        ctx.write_u32(sampler_pool + 32, 2 | (2 << 3) | (2 << 6))
+            .unwrap();
+        let handle = 1 | (1 << 20);
+        ctx.write_u32(constants + u64::from(BINDLESS_HANDLE_OFFSET), handle)
+            .unwrap();
+
+        // SetTexHeaderPool and SetTexSamplerPool, address high then low.
+        self.engine.regs.set(0x55D, (header_pool >> 32) as u32);
+        self.engine.regs.set(0x55E, header_pool as u32);
+        self.engine.regs.set(0x557, (sampler_pool >> 32) as u32);
+        self.engine.regs.set(0x558, sampler_pool as u32);
+        // Select the constant buffer, then bind it to the fragment stage's
+        // bind slot (4) as the bank the shader reads.
+        let mut ctx = ExecCtx {
+            mem: &mut self.mem,
+            vmm: &self.vmm,
+            host1x: &mut self.host1x,
+            stats: &mut self.stats,
+            trace: false,
+        };
+        for (method, arg) in [
+            (0x8E0, 0x100),
+            (0x8E1, (constants >> 32) as u32),
+            (0x8E2, constants as u32),
+            (0x900 + 4 * 8 + 4, 1 | (BINDLESS_HANDLE_BANK << 4)),
+        ] {
+            self.engine.write(method, arg, true, &mut ctx).unwrap();
+        }
     }
 
     /// Turn the target into a `samples_x` by `samples_y` multisampled one,

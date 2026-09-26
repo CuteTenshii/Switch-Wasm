@@ -1426,17 +1426,21 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         match crate::gpu::pipeline::Pipeline::of(engine)
             .map_err(|e| Error::Gpu(format!("pipeline: {e}")))
             .and_then(|p| {
-                // The `texs` immediates are the shaders' business, not the
+                // The texture slots are the shaders' business, not the
                 // register file's, and the two stages index *different*
-                // constant buffers with the same immediate.
-                let mut immediates: Vec<(ShaderStage, u16)> = Vec::new();
+                // constant buffers with the same slot.
+                let mut slots: Vec<(ShaderStage, crate::gpu::texture::TextureSlot)> = Vec::new();
                 for (stage, program) in [
                     (ShaderStage::VertexB, &vs_program),
                     (ShaderStage::Fragment, &fs_program),
                 ] {
                     if let Ok(translated) = crate::gpu::shader::wgsl::translate(program) {
-                        immediates
-                            .extend(translated.textures.iter().map(|&(imm, _, _)| (stage, imm)));
+                        slots.extend(
+                            translated
+                                .textures
+                                .iter()
+                                .map(|&(slot, _, _)| (stage, slot)),
+                        );
                     }
                 }
                 crate::gpu::upload::Uploads::of(
@@ -1444,7 +1448,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                     &p,
                     &*ctx,
                     crate::gpu::upload::Banks::Bound,
-                    &immediates,
+                    &slots,
                 )
             }) {
             Ok(uploads) => crate::traceln!(
