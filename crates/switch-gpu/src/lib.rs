@@ -4191,6 +4191,74 @@ mod tests {
         }
     }
 
+    /// A colour that goes through local memory comes out the same on both
+    /// renderers. The shader is the harness's solid colour with a round trip
+    /// before `exit`: `r0`/`r1`, the interpolated red and green, stored as
+    /// one 64-bit value with `st.64 l[RZ + 0x10]` (the form Tomodachi Life
+    /// falls back on) and loaded straight back. A local memory that dropped
+    /// the store or read the wrong bytes would lose the red.
+    #[test]
+    fn a_colour_through_local_memory_reaches_the_same_pixels_on_both_renderers() {
+        use switch_core::gpu::shader::isa::{self, MemSize};
+        use switch_core::gpu::shader::Op;
+        use switch_core::gpu::testing::block;
+        const ALWAYS: u64 = 7 << 16;
+        const RZ: u64 = 0xff << 8;
+        let at = 0x10u64 << 20;
+        let stl = ((0xef50u64 | 5) << 48) | at | ALWAYS | RZ;
+        let ldl = ((0xef40u64 | 5) << 48) | at | ALWAYS | RZ;
+        assert_eq!(
+            isa::decode(stl).op,
+            Op::Stl {
+                addr: 0xff,
+                offset: 0x10,
+                src: 0,
+                size: MemSize::B64
+            }
+        );
+        assert_eq!(
+            isa::decode(ldl).op,
+            Op::Ldl {
+                dst: 0,
+                addr: 0xff,
+                offset: 0x10,
+                size: MemSize::B64
+            }
+        );
+        let split = |w: u64| (w as u32, (w >> 32) as u32);
+        let shader = move || {
+            let mut bytes = block(
+                (0xe1a0070f, 0x00240401),
+                (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c]
+                (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+                (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3
+            );
+            bytes.extend(block(
+                (0xb0400341, 0x055c8400),
+                (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3
+                (0x8037ff02, 0xe043ff88), // ipa $r2 a[0x88] $r3
+                (0xc037ff03, 0xe043ff88), // ipa $r3 a[0x8c] $r3
+            ));
+            bytes.extend(block(
+                (0xffe1ffef, 0x001f8000),
+                split(stl),
+                split(ldl),
+                (0x0007000f, 0xe3000000), // exit
+            ));
+            bytes
+        };
+        let set_up = |h: &mut Harness| h.triangle([1.0, 0.0, 1.0, 1.0]);
+        agrees_shading(
+            move || Harness::with_fragment_shader(shader()),
+            |_| {},
+            set_up,
+        );
+        let mut h = Harness::with_fragment_shader(shader());
+        set_up(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        assert_eq!(h.texel(1, 1), 0xffff_00ff, "red survived the round trip");
+    }
+
     /// A lost device hands the frame to the rasterizer without failing the
     /// flush that finds out. The flush runs inside a GPU submission too, and
     /// an error there faulted Persona 5 Royal when its device ran out of

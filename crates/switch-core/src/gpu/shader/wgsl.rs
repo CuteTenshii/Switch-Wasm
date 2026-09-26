@@ -70,8 +70,8 @@
 
 use super::compiled::{Compiled, NO_TARGET};
 use super::isa::{
-    BoolOp, FCmp, FMod, FRound, HMerge, HPrecision, HSwizzle, ICmp, LogicOp, LopTest, MufuOp, Op,
-    Operand, Pred, ShflMode, TexDim, TexsStore, XmadC, RZ,
+    BoolOp, FCmp, FMod, FRound, HMerge, HPrecision, HSwizzle, ICmp, LogicOp, LopTest, MemSize,
+    MufuOp, Op, Operand, Pred, ShflMode, TexDim, TexsStore, XmadC, RZ,
 };
 use crate::gpu::pipeline::{AttributeBase, Packed1010102};
 use crate::gpu::texture::SwizzleSource;
@@ -86,9 +86,9 @@ use std::fmt;
 /// thing to do and not an error to report.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unsupported {
-    /// An opcode with no WGSL form here. `Ldg`/`Stg`/`Ldl`/`Stl` are the
-    /// deliberate ones: global and local memory need storage buffers, which
-    /// is a resource-binding question rather than a translation one.
+    /// An opcode with no WGSL form here. `Ldg`/`Stg` are the deliberate ones:
+    /// global memory needs storage buffers, which is a resource-binding
+    /// question rather than a translation one.
     Op { at: usize, op: Op },
     /// A branch whose target was never decoded, so there is no block to jump
     /// to. The interpreter raises this where the branch is taken; a
@@ -348,6 +348,32 @@ fn leaders(program: &Compiled) -> Result<Vec<usize>, Unsupported> {
 /// satisfies their dependencies on each other. Only the ones a program
 /// reaches are emitted, so a translation carries no code it does not run.
 const HELPERS: &[(&str, &str)] = &[
+    // Local memory, `l[]`: an invocation's own scratch, so a private array
+    // rather than a buffer anything else can see. Byte addressed, as
+    // `interp::read_scratch` and `write_scratch` are: a byte past the end
+    // reads zero, and a store that reaches past the end is dropped whole,
+    // which `localStore*` leave to the caller's range check.
+    (
+        "local",
+        "\
+var<private> local_mem: array<u32, 256>;
+
+fn localByte(i: u32) -> u32 {
+  if (i >= 1024u) { return 0u; }
+  return (local_mem[i >> 2u] >> ((i & 3u) * 8u)) & 0xffu;
+}
+
+fn localWord(i: u32) -> u32 {
+  if (i >= 1024u) { return 0u; }
+  return localByte(i) | (localByte(i + 1u) << 8u) | (localByte(i + 2u) << 16u)
+    | (localByte(i + 3u) << 24u);
+}
+
+fn setLocalByte(i: u32, v: u32) {
+  let shift = (i & 3u) * 8u;
+  local_mem[i >> 2u] = (local_mem[i >> 2u] & ~(0xffu << shift)) | ((v & 0xffu) << shift);
+}",
+    ),
     (
         "ftz",
         "\
@@ -2032,7 +2058,7 @@ impl Emitter<'_> {
 
             Op::Nop | Op::Inert => {}
 
-            // Global, local and shared memory need storage buffers, which is
+            // Global and shared memory need storage buffers, which is
             // a question about resource binding rather than translation. A
             // barrier has no meaning in the graphics stages this translates.
             //
@@ -2068,9 +2094,66 @@ impl Emitter<'_> {
                 }
             }
 
+            Op::Ldl {
+                dst,
+                addr,
+                offset,
+                size,
+            } => {
+                self.helpers.insert("local");
+                let base = self.local_address(addr, offset);
+                let value = |word: u32| format!("localWord({base} + {}u)", word * 4);
+                match size {
+                    MemSize::U8 => self.set_r(dst, &format!("localByte({base})")),
+                    MemSize::S8 => self.set_r(
+                        dst,
+                        &format!(
+                            "bitcast<u32>(extractBits(bitcast<i32>(localByte({base})), 0u, 8u))"
+                        ),
+                    ),
+                    MemSize::U16 | MemSize::S16 => {
+                        let half = format!("(localByte({base}) | (localByte({base} + 1u) << 8u))");
+                        let half = if size == MemSize::S16 {
+                            format!("bitcast<u32>(extractBits(bitcast<i32>({half}), 0u, 16u))")
+                        } else {
+                            half
+                        };
+                        self.set_r(dst, &half);
+                    }
+                    _ => {
+                        for word in 0..u32::from(size.regs()) {
+                            self.set_r(dst.wrapping_add(word as u8), &value(word));
+                        }
+                    }
+                }
+            }
+            Op::Stl {
+                addr,
+                offset,
+                src,
+                size,
+            } => {
+                self.helpers.insert("local");
+                let base = self.local_address(addr, offset);
+                let len = size.bytes();
+                let words: Vec<String> = (0..size.regs())
+                    .map(|i| self.r(src.wrapping_add(i)))
+                    .collect();
+                // Checked against the whole store, which the interpreter drops
+                // whole when any byte of it is past the end.
+                self.line(&format!("if ({base} + {len}u <= 1024u) {{"));
+                self.indent += 1;
+                for byte in 0..len {
+                    let word = &words[(byte / 4) as usize];
+                    let shift = (byte % 4) * 8;
+                    self.line(&format!(
+                        "setLocalByte({base} + {byte}u, {word} >> {shift}u);"
+                    ));
+                }
+                self.indent -= 1;
+                self.line("}");
+            }
             Op::Stg { .. }
-            | Op::Ldl { .. }
-            | Op::Stl { .. }
             | Op::Lds { .. }
             | Op::Sts { .. }
             | Op::Atom { .. }
@@ -2373,6 +2456,19 @@ impl Emitter<'_> {
             _ => unreachable!("emit_jump called with {op:?}"),
         }
         Ok(())
+    }
+
+    /// The byte address a local-memory access starts at, bound once.
+    ///
+    /// The interpreter adds the offset to the register in 64 bits, so a
+    /// register of 2^31 or more is always past the end rather than wrapping
+    /// back into range; `0xffffffffu` stands for that here, and every access
+    /// through it is out of range.
+    fn local_address(&mut self, addr: u8, offset: i32) -> String {
+        let reg = self.r(addr);
+        self.bind(&format!(
+            "select(0xffffffffu, bitcast<u32>(bitcast<i32>({reg}) + ({offset})), {reg} < 0x80000000u)"
+        ))
     }
 
     /// The helpers, the declarations and the dispatch loop around the blocks.
