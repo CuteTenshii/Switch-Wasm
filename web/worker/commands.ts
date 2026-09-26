@@ -21,6 +21,7 @@ import {
   lastError,
   readJson,
   readString,
+  readWholeJson,
   state,
   withBuffer,
   withBytes,
@@ -413,7 +414,7 @@ export const CMD: CommandHandlers = {
     if (handle() < 0) {
       return { enabled: false, blocks: 0, translated: 0, executed: 0, invalidated: 0 };
     }
-    return readJson<JitStats>(
+    return readWholeJson<JitStats>(
       256,
       (buf, cap) => api().switch_jit_stats_json(handle(), buf, cap),
       { enabled: false, blocks: 0, translated: 0, executed: 0, invalidated: 0 },
@@ -421,7 +422,7 @@ export const CMD: CommandHandlers = {
   },
   gpu_report() {
     if (handle() < 0) return {};
-    return readJson<GpuReport>(
+    return readWholeJson<GpuReport>(
       2048,
       (buf, cap) => api().switch_gpu_report_json(handle(), buf, cap),
       {},

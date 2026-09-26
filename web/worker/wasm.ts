@@ -213,6 +213,48 @@ export function readString(cap: number, fill: (ptr: number, cap: number) => numb
   return withBuffer(cap, (ptr) => decode(fromWasm(ptr, fill(ptr, cap))));
 }
 
+/** The most a whole answer is read into: well past any report the module
+ *  writes, and short of letting one bad answer allocate without bound. */
+const WHOLE_ANSWER_MAX = 1 << 20;
+
+/** Read an answer the module can be asked for twice, whole, however long.
+ *
+ *  The module copies what fits and says nothing about the rest, so an answer
+ *  that filled the buffer may have been cut short, and it is asked again with
+ *  twice the room. Only for answers that do not change by being read: the
+ *  activity report hands over what it reports, and a second reading would
+ *  lose it. */
+export function readWholeString(cap: number, fill: (ptr: number, cap: number) => number): string {
+  for (let size = cap; ; size *= 2) {
+    const [written, text] = withBuffer(size, (ptr): [number, string] => {
+      const n = fill(ptr, size);
+      return [n, decode(fromWasm(ptr, n))];
+    });
+    if (written < size || size >= WHOLE_ANSWER_MAX) return text;
+  }
+}
+
+/** A read answer, parsed - falling back rather than throwing when the module
+ *  wrote nothing, which is what an empty list looks like. */
+function parseOr<T>(text: string, fallback: T): T {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+/** [`readWholeString`], parsed. A report cut off mid-string does not parse,
+ *  and the GPU report falling back to empty for that reason is how a page
+ *  whose device had rejected one long shader said it had no device at all. */
+export function readWholeJson<T>(
+  cap: number,
+  fill: (ptr: number, cap: number) => number,
+  fallback: T,
+): T {
+  return parseOr(readWholeString(cap, fill), fallback);
+}
+
 /** The same, parsed - falling back rather than throwing when the module wrote
  *  nothing, which is what an empty list looks like. */
 export function readJson<T>(
@@ -220,12 +262,7 @@ export function readJson<T>(
   fill: (ptr: number, cap: number) => number,
   fallback: T,
 ): T {
-  const text = readString(cap, fill);
-  try {
-    return JSON.parse(text) as T;
-  } catch {
-    return fallback;
-  }
+  return parseOr(readString(cap, fill), fallback);
 }
 
 export function lastError(): string {
