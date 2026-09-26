@@ -87,7 +87,13 @@ try {
   const page = await browser.newPage();
   page.on('console', (m) => note(`page ${m.type()}: ${m.text()}`));
   page.on('pageerror', (e) => say(`page error: ${e.stack || e.message}`));
-  page.on('crash', () => say('the page crashed'));
+  // A crashed page answers nothing more, so the run stops sampling it and
+  // saves what the page and the worker printed before it went.
+  let crashed = false;
+  page.on('crash', () => {
+    crashed = true;
+    say('the page crashed');
+  });
   page.on('worker', (worker) => {
     note(`worker started: ${worker.url()}`);
     worker.on('console', (m) => note(`worker ${m.type()}: ${m.text()}`));
@@ -106,31 +112,49 @@ try {
 
   const started = Date.now();
   let lastRows = -1;
-  while (Date.now() - started < seconds * 1000) {
+  let lastLine = '';
+  while (!crashed && Date.now() - started < seconds * 1000) {
     await page.waitForTimeout(SAMPLE_MS);
-    const sample = await page.evaluate(() => ({
-      state: document.getElementById('state')?.textContent,
-      rows: document.getElementById('console')?.childElementCount ?? 0,
-      last: document.getElementById('console')?.lastElementChild?.textContent ?? '',
-    }));
+    if (crashed) break;
+    let sample;
+    try {
+      sample = await page.evaluate(() => ({
+        state: document.getElementById('state')?.textContent,
+        rows: document.getElementById('console')?.childElementCount ?? 0,
+        last: document.getElementById('console')?.lastElementChild?.textContent ?? '',
+      }));
+    } catch (error) {
+      // A crash can land while the page is being asked, before the event
+      // that says so has arrived.
+      if (!page.isClosed() && !/crash/i.test(String(error))) throw error;
+      crashed = true;
+      break;
+    }
     const at = Math.round((Date.now() - started) / 1000);
-    const quiet = sample.rows === lastRows ? ', console quiet since the last sample' : '';
+    // The console keeps a fixed number of rows, so once it is full the count
+    // stops moving while lines still arrive: quiet is the last one unchanged.
+    const unchanged = sample.rows === lastRows && sample.last === lastLine;
+    const quiet = unchanged ? ', console quiet since the last sample' : '';
     say(`${at}s: ${sample.state}, ${sample.rows} console lines${quiet}; last: ${sample.last.slice(0, 160)}`);
     lastRows = sample.rows;
+    lastLine = sample.last;
     if (jitStats) {
       await page.evaluate(() => document.getElementById('btn-jitstats').click());
     }
   }
 
-  // Pressed from script: the button lives in the debug panel, which is not
-  // open, and a click through the page's surface would wait for it to show.
-  await page.evaluate(() => document.getElementById('btn-gpustats').click());
-  await page.evaluate(() => document.getElementById('btn-threads').click());
-  await page.waitForTimeout(3000);
-  const pageConsole = await page.evaluate(() =>
-    [...document.getElementById('console').children]
-      .map((row) => row.textContent + (row.dataset.repeat ? `  (x${row.dataset.repeat})` : ''))
-      .join('\n'));
+  let pageConsole = '(the page crashed, and its console went with it)';
+  if (!crashed) {
+    // Pressed from script: the buttons live in the debug panel, which is not
+    // open, and a click through the page's surface would wait for it to show.
+    await page.evaluate(() => document.getElementById('btn-gpustats').click());
+    await page.evaluate(() => document.getElementById('btn-threads').click());
+    await page.waitForTimeout(3000);
+    pageConsole = await page.evaluate(() =>
+      [...document.getElementById('console').children]
+        .map((row) => row.textContent + (row.dataset.repeat ? `  (x${row.dataset.repeat})` : ''))
+        .join('\n'));
+  }
   const report = `${lines.join('\n')}\n=== the page's console ===\n${pageConsole}\n`;
   if (out) {
     writeFileSync(out, report);
