@@ -385,6 +385,17 @@ pub fn fetch_attribute(
     let addr = array.start + vertex_index as u64 * array.stride as u64 + attrib.offset as u64;
 
     let mut out = [0.0f32, 0.0, 0.0, 1.0];
+    // Past the array's limit, the last valid byte, a fetch reads zeros:
+    // what hardware does, and what `upload` pads a device's copy of the
+    // array with. Every format reads zero bits as zero, so the attribute is
+    // the defaults with its own components cleared.
+    let bytes = u64::from(components * bits / 8);
+    if array.limit != 0 && addr + bytes > array.limit + 1 {
+        for value in out.iter_mut().take(components as usize) {
+            *value = 0.0;
+        }
+        return Ok(out);
+    }
     match (attrib.ty, bits) {
         (ATTRIB_TYPE_FLOAT, 32) => {
             for c in 0..components {
@@ -1966,6 +1977,60 @@ mod tests {
 
         let v = fetch_attribute(attrib, array, 1, &ctx).unwrap();
         assert_eq!(v, [1.0, 2.0, 3.0, 4.0]);
+    }
+
+    /// A fetch past the array's limit reads zeros, the way hardware does and
+    /// the way a device's copy of the array is padded, rather than whatever
+    /// memory follows the array.
+    #[test]
+    fn fetch_attribute_past_the_limit_reads_zeros() {
+        let (mut mem, vmm, base) = harness();
+        let stride = 16u32;
+        for vertex in 0..2u64 {
+            for i in 0..4u64 {
+                let at = base + vertex * u64::from(stride) + i * 4;
+                vmm.write_u32(&mut mem, at, 7.0f32.to_bits()).unwrap();
+            }
+        }
+        let mut stats = Default::default();
+        let mut host1x = Host1x::new();
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let attrib = |size| VertexAttrib {
+            buffer_id: 0,
+            is_fixed: false,
+            offset: 0,
+            size,
+            ty: ATTRIB_TYPE_FLOAT,
+            is_bgra: false,
+        };
+        // One vertex's worth: its last valid byte is the fifteenth.
+        let array = VertexArray {
+            enabled: true,
+            stride,
+            start: base,
+            limit: base + u64::from(stride) - 1,
+            divisor: 0,
+        };
+        assert_eq!(
+            fetch_attribute(attrib(0x01), array, 0, &ctx).unwrap(),
+            [7.0; 4]
+        );
+        assert_eq!(
+            fetch_attribute(attrib(0x01), array, 1, &ctx).unwrap(),
+            [0.0; 4],
+            "memory past the limit holds sevens, and is not read"
+        );
+        // Three components: the fourth keeps its default.
+        assert_eq!(
+            fetch_attribute(attrib(0x02), array, 1, &ctx).unwrap(),
+            [0.0, 0.0, 0.0, 1.0]
+        );
     }
 
     #[test]

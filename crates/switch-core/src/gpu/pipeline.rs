@@ -255,6 +255,30 @@ pub enum VertexFormat {
 }
 
 impl VertexFormat {
+    /// How many bytes one attribute of this format is.
+    pub fn size(self) -> u32 {
+        match self {
+            VertexFormat::Float32
+            | VertexFormat::Float16x2
+            | VertexFormat::Unorm16x2
+            | VertexFormat::Snorm16x2
+            | VertexFormat::Sint16x2
+            | VertexFormat::Uint16x2
+            | VertexFormat::Unorm8x4
+            | VertexFormat::Snorm8x4
+            | VertexFormat::Sint8x4
+            | VertexFormat::Uint8x4 => 4,
+            VertexFormat::Float32x2
+            | VertexFormat::Float16x4
+            | VertexFormat::Unorm16x4
+            | VertexFormat::Snorm16x4
+            | VertexFormat::Sint16x4
+            | VertexFormat::Uint16x4 => 8,
+            VertexFormat::Float32x3 => 12,
+            VertexFormat::Float32x4 => 16,
+        }
+    }
+
     /// The normalized formats are floats by the time a shader sees them;
     /// only the integer ones carry their bits through, which is what
     /// `raster::fetch_attribute` leaves in the slot for one as well.

@@ -41,7 +41,7 @@
 use crate::gpu::bcn::Codec;
 use crate::gpu::engine::threed::{DepthLayout, Engine3D, ShaderStage};
 use crate::gpu::exec::ExecCtx;
-use crate::gpu::pipeline::{Format, Pipeline, StepMode};
+use crate::gpu::pipeline::{Format, Pipeline, StepMode, VertexBuffer};
 use crate::gpu::surface::{ColorFormat, Layout};
 use crate::gpu::texture::{self, Sampler, SwizzleSource, TexelKind, Texture};
 use crate::{Error, Result};
@@ -76,6 +76,23 @@ const CONSTBUF_BANKS: u32 = 32;
 pub enum IndexFormat {
     Uint16,
     Uint32,
+}
+
+/// How many bytes `count` elements of `buffer` reach: every element but the
+/// last is a whole stride, and the last only as long as the attributes read
+/// out of it.
+///
+/// That is how WebGPU sizes a vertex buffer too, and charging the last
+/// element a whole stride reads bytes no attribute uses, past the end of an
+/// array whose last element is only as long as its attributes.
+fn vertex_span(count: u32, buffer: &VertexBuffer) -> u64 {
+    let last = buffer
+        .attributes
+        .iter()
+        .map(|a| a.offset + a.format.size())
+        .max()
+        .unwrap_or(buffer.stride);
+    u64::from(count.saturating_sub(1)) * u64::from(buffer.stride) + u64::from(last)
 }
 
 /// One vertex array's bytes.
@@ -301,26 +318,31 @@ impl Uploads {
             if count == 0 || buffer.stride == 0 {
                 continue;
             }
-            let length = u64::from(count) * u64::from(buffer.stride);
+            let length = vertex_span(count, buffer);
             let start = array.start + u64::from(first) * u64::from(buffer.stride);
             // The array's own limit is the real end of the mapping, and it is
             // the address of the *last valid byte* rather than one past it,
             // a 32-byte array at `0x204730000` has a limit of `0x20473001f`.
-            // A draw that runs past it is reading something else's memory,
-            // and saying so is better than uploading it.
-            if array.limit != 0 && start + length > array.limit + 1 {
-                return Err(Error::Gpu(format!(
-                    "upload: vertex array {} reads {start:#x}..{:#x}, past its limit {:#x}",
-                    buffer.index,
-                    start + length,
-                    array.limit
-                )));
-            }
+            // A fetch past it reads zeros, which is what hardware does and
+            // what `raster::fetch_attribute` does, so only what lies inside
+            // is read and the rest is zero. A Tomodachi Life draw reaches 16
+            // bytes past the end of its array, and refusing it latched every
+            // frame after it onto the rasterizer.
+            let inside = match array.limit {
+                0 => length,
+                limit => (limit + 1).saturating_sub(start).min(length),
+            };
+            let mut bytes = if inside == 0 {
+                Vec::new()
+            } else {
+                read_range(ctx, start, inside, "vertex array")?
+            };
+            bytes.resize(length as usize, 0);
             vertex.push(VertexUpload {
                 array: buffer.index,
                 first,
                 stride: buffer.stride,
-                bytes: read_range(ctx, start, length, "vertex array")?,
+                bytes,
             });
         }
 
@@ -1264,6 +1286,36 @@ mod tests {
         let indices = read_indices(&h.ctx(), base, 0, 3, 0).unwrap();
         assert_eq!(indices.format, IndexFormat::Uint16);
         assert_eq!(indices.bytes, vec![3, 0, 1, 0, 2, 0]);
+    }
+
+    #[test]
+    fn the_last_vertex_reaches_only_as_far_as_its_attributes() {
+        use crate::gpu::pipeline::{VertexAttribute, VertexFormat};
+        let attribute = |offset, format| VertexAttribute {
+            format,
+            offset,
+            location: 0,
+            is_bgra: false,
+        };
+        // A 32-byte element whose attributes use its first 16: two
+        // elements reach 48 bytes, not 64.
+        let buffer = VertexBuffer {
+            index: 0,
+            stride: 32,
+            step: StepMode::Vertex,
+            attributes: vec![
+                attribute(0, VertexFormat::Float32x2),
+                attribute(8, VertexFormat::Unorm16x4),
+            ],
+        };
+        assert_eq!(vertex_span(2, &buffer), 32 + 16);
+        assert_eq!(vertex_span(1, &buffer), 16);
+        // With nothing read, the element is taken whole.
+        let bare = VertexBuffer {
+            attributes: Vec::new(),
+            ..buffer
+        };
+        assert_eq!(vertex_span(2, &bare), 64);
     }
 
     #[test]
