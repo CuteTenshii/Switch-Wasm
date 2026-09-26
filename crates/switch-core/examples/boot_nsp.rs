@@ -13,6 +13,11 @@
 //!
 //! `SHOT=<out.ppm>` writes whatever was presented last.
 //!
+//! `PRESS=<buttons>@<interval>` taps buttons every `interval` steps, such as
+//! `PRESS=A@500000000`, or `PRESS=A+DOWN@300000000` for two at once. Much of
+//! what a title does only happens once someone gets it past a title screen or
+//! a menu, which a run with no input never does.
+//!
 //! `DUMP=`, `TRAP_WRITE=`, `TRAP_READ=` and `WATCH_PC=` are the debugging
 //! knobs every runner here shares. See [`common::Debug`] for their spelling.
 mod common;
@@ -22,6 +27,58 @@ use std::collections::BTreeMap;
 use switch_core::cpu::Cpu;
 
 const USAGE: &str = "boot_nsp <container> <prod.keys> [title.keys] [max_steps]";
+
+/// How long a `PRESS=` tap holds its buttons down: three frames of the 1.02
+/// GHz CPU at 60 Hz. A title that samples its pad once a frame misses a press
+/// shorter than a frame, and one that waits for a release needs one.
+const PRESS_HOLD: u64 = 3 * 17_000_000;
+
+/// The buttons `PRESS=` names, in Horizon's `HidNpadButton` order.
+const BUTTONS: [(&str, u64); 16] = [
+    ("A", 1 << 0),
+    ("B", 1 << 1),
+    ("X", 1 << 2),
+    ("Y", 1 << 3),
+    ("LSTICK", 1 << 4),
+    ("RSTICK", 1 << 5),
+    ("L", 1 << 6),
+    ("R", 1 << 7),
+    ("ZL", 1 << 8),
+    ("ZR", 1 << 9),
+    ("PLUS", 1 << 10),
+    ("MINUS", 1 << 11),
+    ("LEFT", 1 << 12),
+    ("UP", 1 << 13),
+    ("RIGHT", 1 << 14),
+    ("DOWN", 1 << 15),
+];
+
+/// `PRESS=`'s buttons and interval, or `None` when it is unset. Exits with
+/// a message on a spelling it cannot read, rather than running without the
+/// input that was asked for.
+fn press_from_env() -> Option<(u64, u64)> {
+    let raw = std::env::var("PRESS").ok()?;
+    let fail = |why: &str| -> ! {
+        eprintln!("PRESS={raw}: {why}; expected <buttons>@<interval>, e.g. A@500000000");
+        std::process::exit(2)
+    };
+    let (names, interval) = raw.split_once('@').unwrap_or_else(|| fail("no interval"));
+    let interval: u64 = interval
+        .parse()
+        .unwrap_or_else(|_| fail("the interval is not a number"));
+    if interval <= PRESS_HOLD {
+        fail("the interval must be longer than a press");
+    }
+    let mut mask = 0;
+    for name in names.split('+') {
+        let upper = name.trim().to_ascii_uppercase();
+        match BUTTONS.iter().find(|(button, _)| *button == upper) {
+            Some((_, bit)) => mask |= bit,
+            None => fail(&format!("no button named {name:?}")),
+        }
+    }
+    Some((mask, interval))
+}
 
 /// Where `PROFILE=` found the run: by thread, by page, and by return address.
 fn report_profile(
@@ -128,6 +185,8 @@ fn main() {
     // register *is* the caller.
     let mut callers: BTreeMap<(u64, u32), u64> = BTreeMap::new();
     let mut sampled = 0u64;
+    let press = press_from_env();
+    let mut held = false;
     // Sampling and the watchpoints both read the machine between two
     // instructions. With neither armed the run goes through the block
     // translator, which is the engine the frontend uses.
@@ -138,6 +197,15 @@ fn main() {
     };
     let run = common::drive(&mut cpu, pace, max_steps, |cpu, done| {
         debug.tick(cpu, done);
+        if let Some((buttons, interval)) = press {
+            // The first tap waits a whole interval: a press during boot
+            // lands before anything is reading the pad.
+            let down = done >= interval && done % interval < PRESS_HOLD;
+            if down != held {
+                held = down;
+                cpu.set_gamepad_state(if down { buttons } else { 0 }, 0, 0, 0, 0);
+            }
+        }
         if profile > 0 && done % profile == 0 {
             let thread = cpu.current_thread_handle();
             *pages.entry((thread, cpu.get_pc() & !0xFFF)).or_default() += 1;
