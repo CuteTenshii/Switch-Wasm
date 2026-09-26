@@ -45,7 +45,7 @@ impl EngineInline {
         match method {
             LAUNCH_DMA => {
                 self.written = 0;
-                if ctx.trace {
+                if ctx.trace || crate::trace::enabled(crate::trace::Trace::Copy) {
                     crate::traceln!(
                         "[gpu] inline launch dst={:#x} line_len={} lines={} pitch={} flags={arg:#x}",
                         self.regs.iova(OFFSET_OUT), self.regs.get(LINE_LENGTH_IN),

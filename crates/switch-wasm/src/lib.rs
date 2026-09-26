@@ -277,6 +277,11 @@ impl ByteSource for HostSource {
             }
             done += got;
         }
+        switch_core::trace!(
+            switch_core::trace::Trace::Io,
+            "[io] host file {} read {want:#x} bytes at {offset:#x} -> {done:#x}",
+            self.file
+        );
         if done != want {
             return Err(switch_core::Error::Io(format!(
                 "host read of {} bytes at {:#x} returned {}",

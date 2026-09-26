@@ -36,7 +36,10 @@ pub enum Trace {
     GpuTex,
     /// Texture decode: formats, swizzles and the surfaces they produce.
     Tex,
-    /// Per-draw tallies from the software rasterizer.
+    /// Draws and clears as the 3D engine issues them, whichever backend
+    /// carries them out: the render target each lands in, the draws a backend
+    /// refused, and from the software rasterizer, where a draw's fragments
+    /// went.
     Draw,
     /// The graphics pipeline state a draw was issued with.
     Pipeline,
@@ -58,10 +61,21 @@ pub enum Trace {
     Erpt,
     /// Shared-font requests.
     Font,
+    /// The guest's filesystem traffic: what `fsp-srv` was asked to open, every
+    /// path operation and its result, and the file, directory and storage
+    /// reads and writes behind them.
+    Fs,
+    /// Range reads out of the host's files: the open container and the system
+    /// data archives beside it.
+    Io,
+    /// Copy-engine transfers, inline uploads and 2D-engine blits.
+    Copy,
+    /// Frames handed to the display: which surface was scanned out, and how.
+    Present,
 }
 
 /// Every channel, in the order the host is offered them.
-pub const ALL: [Trace; 19] = [
+pub const ALL: [Trace; 23] = [
     Trace::Svc,
     Trace::Ipc,
     Trace::Wait,
@@ -81,6 +95,10 @@ pub const ALL: [Trace; 19] = [
     Trace::Audio,
     Trace::Erpt,
     Trace::Font,
+    Trace::Fs,
+    Trace::Io,
+    Trace::Copy,
+    Trace::Present,
 ];
 
 impl Trace {
@@ -114,6 +132,10 @@ impl Trace {
             Trace::Audio => "TRACE_AUDIO",
             Trace::Erpt => "TRACE_ERPT",
             Trace::Font => "TRACE_FONT",
+            Trace::Fs => "TRACE_FS",
+            Trace::Io => "TRACE_IO",
+            Trace::Copy => "TRACE_COPY",
+            Trace::Present => "TRACE_PRESENT",
         }
     }
 
@@ -163,7 +185,7 @@ impl Level {
 }
 
 /// The bit pattern a mask has before the environment has been read. All ones
-/// is safe to reserve: [`ALL`] is nineteen channels, so the top bits are not
+/// is safe to reserve: [`ALL`] is twenty-three channels, so the top bits are not
 /// reachable by any real mask.
 const UNSEEDED: u32 = u32::MAX;
 

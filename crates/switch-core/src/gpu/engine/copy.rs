@@ -72,6 +72,17 @@ impl EngineCopy {
         } else {
             1
         };
+        if ctx.trace || crate::trace::enabled(crate::trace::Trace::Copy) {
+            let layout = |pitch: bool| if pitch { "pitch" } else { "block" };
+            crate::traceln!(
+                "[gpu] dma copy {src_base:#x} ({}) -> {dst_base:#x} ({}) \
+                 {line_length:#x} x {line_count} lines remap={remap} cpu src {:x?} dst {:x?}",
+                layout(src_pitch_layout),
+                layout(dst_pitch_layout),
+                ctx.vmm.translate(src_base).map(|(c, _)| c),
+                ctx.vmm.translate(dst_base).map(|(c, _)| c),
+            );
+        }
 
         if !multi_line && !remap {
             // Plain 1D copy: contiguous on both sides, so it is one run.

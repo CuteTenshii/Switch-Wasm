@@ -6,7 +6,7 @@
 //! here copies through a staging buffer out of a [`crate::source::ByteSource`].
 
 use super::Cpu;
-use crate::trace::Level;
+use crate::trace::{Level, Trace};
 use crate::Result;
 
 /// The size of the emulated SD card, and how much of it is free. `ns` reports
@@ -121,13 +121,175 @@ impl From<&crate::control::Nacp> for SaveDataQuota {
 /// does not have.
 const PATH_NOT_FOUND: u32 = 2 | (1 << 9);
 
+/// A `Result` the way Horizon prints one, `2002-0001`, which is also how
+/// every list of `fs` errors is indexed.
+fn result_text(result: u32) -> String {
+    if result == 0 {
+        return "ok".to_owned();
+    }
+    let module = result & 0x1FF;
+    let description = (result >> 9) & 0x1FFF;
+    format!("{:04}-{description:04} ({result:#x})", 2000 + module)
+}
+
+/// `fsp-srv`'s own commands, by the names `nn::fs` gives them.
+fn fsp_srv_command(cmd: u32) -> Option<&'static str> {
+    Some(match cmd {
+        0 => "OpenFileSystem",
+        1 => "SetCurrentProcess",
+        2 => "OpenDataFileSystemByCurrentProcess",
+        7 => "OpenFileSystemWithPatch",
+        8 => "OpenFileSystemWithId",
+        9 => "OpenDataFileSystemByApplicationId",
+        11 => "OpenBisFileSystem",
+        12 => "OpenBisStorage",
+        17 => "OpenHostFileSystem",
+        18 => "OpenSdCardFileSystem",
+        22 => "CreateSaveDataFileSystem",
+        23 => "CreateSaveDataFileSystemBySystemSaveDataId",
+        30 => "OpenGameCardStorage",
+        31 => "OpenGameCardFileSystem",
+        51 => "OpenSaveDataFileSystem",
+        52 => "OpenSaveDataFileSystemBySystemSaveDataId",
+        53 => "OpenReadOnlySaveDataFileSystem",
+        60 => "OpenSaveDataInfoReader",
+        61 => "OpenSaveDataInfoReaderBySaveDataSpaceId",
+        62 => "OpenSaveDataInfoReaderOnlyCacheStorage",
+        68 => "OpenSaveDataInfoReaderWithFilter",
+        200 => "OpenDataStorageByCurrentProcess",
+        202 => "OpenDataStorageByDataId",
+        203 => "OpenPatchDataStorageByCurrentProcess",
+        400 => "OpenDeviceOperator",
+        500 => "OpenSdCardDetectionEventNotifier",
+        501 => "OpenGameCardDetectionEventNotifier",
+        1003 => "DisableAutoSaveDataCreation",
+        1004 => "SetGlobalAccessLogMode",
+        1005 => "GetGlobalAccessLogMode",
+        1006 => "OutputAccessLogToSdCard",
+        1014 => "OutputMultiProgramTagAccessLog",
+        1015 => "FlushAccessLogOnSdCard",
+        1016 => "OutputApplicationInfoAccessLog",
+        _ => return None,
+    })
+}
+
+/// `IFileSystem`'s commands.
+fn file_system_command(cmd: u32) -> Option<&'static str> {
+    Some(match cmd {
+        0 => "CreateFile",
+        1 => "DeleteFile",
+        2 => "CreateDirectory",
+        3 => "DeleteDirectory",
+        4 => "DeleteDirectoryRecursively",
+        5 => "RenameFile",
+        6 => "RenameDirectory",
+        7 => "GetEntryType",
+        8 => "OpenFile",
+        9 => "OpenDirectory",
+        10 => "Commit",
+        11 => "GetFreeSpaceSize",
+        12 => "GetTotalSpaceSize",
+        13 => "CleanDirectoryRecursively",
+        14 => "GetFileTimeStampRaw",
+        15 => "QueryEntry",
+        _ => return None,
+    })
+}
+
+/// `IFile`'s commands, which `IStorage` shares one for one.
+fn file_command(cmd: u32) -> Option<&'static str> {
+    Some(match cmd {
+        0 => "Read",
+        1 => "Write",
+        2 => "Flush",
+        3 => "SetSize",
+        4 => "GetSize",
+        5 => "OperateRange",
+        _ => return None,
+    })
+}
+
+/// `IDirectory`'s commands.
+fn directory_command(cmd: u32) -> Option<&'static str> {
+    Some(match cmd {
+        0 => "Read",
+        1 => "GetEntryCount",
+        _ => return None,
+    })
+}
+
+/// An `IStorage` the way the trace names it.
+fn storage_text(archive: Option<u64>) -> String {
+    match archive {
+        Some(id) => format!("data archive {id:016x}"),
+        None => "romfs".to_owned(),
+    }
+}
+
+/// Which storage a mount names, the way the trace prints it.
+fn mount_text(mount: Option<u64>) -> String {
+    match mount {
+        Some(id) => format!("save {id:016x}"),
+        None => "sdmc".to_owned(),
+    }
+}
+
 impl Cpu {
+    /// Run one filesystem request, and under `TRACE_FS`, say what it was and
+    /// how it ended.
+    ///
+    /// The outcome is the `Result` the reply carried, read back rather than
+    /// traced by each arm, so a command added later is reported without
+    /// anyone remembering to. `subject` is only evaluated when the channel is
+    /// on: it reads paths out of guest memory.
+    fn fs_traced(
+        &mut self,
+        interface: &str,
+        cmd_id: Option<u32>,
+        name: fn(u32) -> Option<&'static str>,
+        subject: impl FnOnce(&Self) -> String,
+        handle: impl FnOnce(&mut Self) -> Result<()>,
+    ) -> Result<()> {
+        if !crate::trace::enabled(Trace::Fs) {
+            return handle(self);
+        }
+        let subject = subject(self);
+        self.last_ipc_result = None;
+        let handled = handle(self);
+        let command = match cmd_id {
+            Some(cmd) => name(cmd).map_or_else(|| format!("cmd {cmd}"), str::to_owned),
+            None => "<no command>".to_owned(),
+        };
+        let outcome = match (&handled, self.last_ipc_result) {
+            (Err(e), _) => format!("failed: {e}"),
+            (Ok(()), Some(result)) => result_text(result),
+            (Ok(()), None) => "no reply".to_owned(),
+        };
+        crate::traceln!("[fs] {interface} {command}{subject} -> {outcome}");
+        handled
+    }
+
     pub(super) fn fsp_srv_request(
         &mut self,
         tls: u32,
         cmd_id: Option<u32>,
         handle: u64,
     ) -> Result<()> {
+        // A control request is the session's plumbing, not a filesystem
+        // command, and its ids overlap `fsp-srv`'s own.
+        if self.ipc_is_control_request(tls) {
+            return self.fsp_srv_dispatch(tls, cmd_id, handle);
+        }
+        self.fs_traced(
+            "fsp-srv",
+            cmd_id,
+            fsp_srv_command,
+            |_| String::new(),
+            |cpu| cpu.fsp_srv_dispatch(tls, cmd_id, handle),
+        )
+    }
+
+    fn fsp_srv_dispatch(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         const CONVERT_TO_DOMAIN: u32 = 0;
         if self.ipc_is_control_request(tls) {
             return match cmd_id {
@@ -168,6 +330,11 @@ impl Cpu {
                     // rather than handing out a storage backed by nothing.
                     return self.write_ipc_response(tls, PATH_NOT_FOUND, &[], &[], &[]);
                 }
+                crate::trace!(
+                    Trace::Fs,
+                    "[fs] romfs -> {:#x} bytes",
+                    self.storage_source(None).map_or(0, |s| s.len())
+                );
                 self.reply_with_interface(tls, handle, "fsp-srv-storage")?;
                 Ok(())
             }
@@ -197,7 +364,7 @@ impl Cpu {
                 }
                 let key = self.reply_with_interface(tls, handle, "fsp-srv-storage")?;
                 self.fs_storage_archive.insert(key, data_id);
-                if crate::trace::enabled(crate::trace::Trace::Ipc) {
+                if crate::trace::enabled(Trace::Fs) {
                     let size = self.storage_source(Some(data_id)).map_or(0, |s| s.len());
                     crate::traceln!("[fs] data archive {data_id:016x} -> {size:#x} bytes");
                 }
@@ -236,6 +403,7 @@ impl Cpu {
             // open theirs before they will do very much at all.
             Some(22) | Some(23) | Some(51) | Some(52) | Some(53) => {
                 let id = self.save_data_id(tls);
+                crate::trace!(Trace::Fs, "[fs] save data {id:016x}");
                 self.save_data_mut(id);
                 // Create answers with a bare Result; Open hands back the
                 // filesystem.
@@ -608,6 +776,22 @@ impl Cpu {
         handle: u64,
         cmd_id: Option<u32>,
     ) -> Result<()> {
+        self.fs_traced(
+            "storage",
+            cmd_id,
+            file_command,
+            |cpu| {
+                let key = cpu.ipc_object_key(tls, handle);
+                format!(
+                    " {}",
+                    storage_text(cpu.fs_storage_archive.get(&key).copied())
+                )
+            },
+            |cpu| cpu.fs_storage_dispatch(tls, handle, cmd_id),
+        )
+    }
+
+    fn fs_storage_dispatch(&mut self, tls: u32, handle: u64, cmd_id: Option<u32>) -> Result<()> {
         // Which content this particular storage was opened on: the process's
         // own RomFS (command 200), or a system data archive (command 202).
         let archive = self
@@ -628,7 +812,7 @@ impl Cpu {
                 // `nn::fs::OpenDirectory("rom:/Data")` found nothing.
                 let offset = self.mem.read_u64(data)?;
                 let requested = self.mem.read_u64(data.wrapping_add(8))?;
-                let trace_storage = crate::trace::enabled(crate::trace::Trace::Ipc);
+                let trace_storage = crate::trace::enabled(Trace::Fs);
                 if trace_storage {
                     crate::traceln!(
                         "[storage] read offset={offset:#x} size={requested:#x} of {size:#x}"
@@ -707,6 +891,20 @@ impl Cpu {
     /// `FsError_PathNotFound` rather than pretending to succeed, which is what
     /// stops a menu from recursing forever into directories that do not exist.
     pub(super) fn fs_request(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
+        self.fs_traced(
+            "fs",
+            cmd_id,
+            file_system_command,
+            |cpu| {
+                let path = cpu.ipc_request_path(tls);
+                let mount = cpu.mount_of(cpu.ipc_object_key(tls, handle));
+                format!(" {path:?} on {}", mount_text(mount))
+            },
+            |cpu| cpu.fs_dispatch(tls, cmd_id, handle),
+        )
+    }
+
+    fn fs_dispatch(&mut self, tls: u32, cmd_id: Option<u32>, handle: u64) -> Result<()> {
         /// Horizon `fs` results: module 2, descriptions 1 (path not found) and
         /// 2 (path already exists).
         const PATH_ALREADY_EXISTS: u32 = 2 | (2 << 9);
@@ -715,14 +913,6 @@ impl Cpu {
         // are the same interface and the same paths; only the object they were
         // opened through tells them apart.
         let mount = self.mount_of(self.ipc_object_key(tls, handle));
-        if crate::trace::enabled(crate::trace::Trace::Ipc) {
-            crate::traceln!(
-                "[fs] pc={:#x} cmd={:?} path={:?} mount={mount:x?}",
-                self.pc,
-                cmd_id,
-                path
-            );
-        }
         match cmd_id {
             // CreateFile(u32 option, s64 size) / CreateDirectory.
             //
@@ -803,6 +993,19 @@ impl Cpu {
     /// `IDirectory`: cmd 0 = `fsDirRead` (fill the out buffer with
     /// `FsDirectoryEntry` structs), cmd 1 = `fsDirGetEntryCount`.
     pub(super) fn fs_dir_request(&mut self, tls: u32, cmd_id: Option<u32>, key: u64) -> Result<()> {
+        self.fs_traced(
+            "dir",
+            cmd_id,
+            directory_command,
+            |cpu| {
+                let entries = cpu.fs_dirs.get(&key).map_or(0, Vec::len);
+                format!(" ({entries} entries left)")
+            },
+            |cpu| cpu.fs_dir_dispatch(tls, cmd_id, key),
+        )
+    }
+
+    fn fs_dir_dispatch(&mut self, tls: u32, cmd_id: Option<u32>, key: u64) -> Result<()> {
         /// `sizeof(FsDirectoryEntry)`: a 0x301-byte name, padding, the entry
         /// type, more padding, then the 8-aligned size.
         const ENTRY_SIZE: u32 = 0x310;
@@ -847,6 +1050,19 @@ impl Cpu {
         cmd_id: Option<u32>,
         key: u64,
     ) -> Result<()> {
+        self.fs_traced(
+            "file",
+            cmd_id,
+            file_command,
+            |cpu| {
+                let path = cpu.fs_files.get(&key).map_or("", String::as_str);
+                format!(" {path:?} on {}", mount_text(cpu.mount_of(key)))
+            },
+            |cpu| cpu.fs_file_dispatch(tls, cmd_id, key),
+        )
+    }
+
+    fn fs_file_dispatch(&mut self, tls: u32, cmd_id: Option<u32>, key: u64) -> Result<()> {
         let path = self.fs_files.get(&key).cloned().unwrap_or_default();
         // The storage the file was opened on, inherited from its filesystem.
         let mount = self.mount_of(key);
@@ -861,7 +1077,7 @@ impl Cpu {
                     .vfs_for(mount)
                     .read(&path, offset, &mut buf)
                     .unwrap_or(0);
-                if crate::trace::enabled(crate::trace::Trace::Ipc) {
+                if crate::trace::enabled(Trace::Fs) {
                     crate::traceln!(
                         "[fs-file] read path={:?} offset={:#x} size={:#x} -> {:#x} buf={:?}",
                         path,
@@ -887,7 +1103,7 @@ impl Cpu {
                     Some((addr, len)) => self.read_bytes(addr, (len as u64).min(requested) as u32),
                     None => Vec::new(),
                 };
-                if crate::trace::enabled(crate::trace::Trace::Ipc) {
+                if crate::trace::enabled(Trace::Fs) {
                     crate::traceln!(
                         "[fs-file] write path={:?} offset={:#x} size={:#x} -> {:#x}",
                         path,
@@ -1335,6 +1551,18 @@ mod tests {
         write_request(&mut cpu, 0, &[]);
         cpu.fs_detection_notifier_request(TLS, sd, Some(0)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64, sd_event);
+    }
+
+    /// `TRACE_FS` prints a `Result` the way every list of `fs` errors is
+    /// indexed, so a line can be looked up without decoding it by hand.
+    #[test]
+    fn a_traced_result_reads_as_horizon_prints_it() {
+        assert_eq!(super::result_text(0), "ok");
+        assert_eq!(
+            super::result_text(super::PATH_NOT_FOUND),
+            "2002-0001 (0x202)"
+        );
+        assert_eq!(super::result_text(2 | (3005 << 9)), "2002-3005 (0x177a02)");
     }
 
     /// `IStorage::Read` is not a short read: real `fs` refuses a range that

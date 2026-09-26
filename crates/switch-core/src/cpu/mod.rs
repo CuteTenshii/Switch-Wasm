@@ -1356,6 +1356,11 @@ pub struct Cpu {
     /// match; the mode round-trips so that a caller reading its own setting
     /// back is not told it was refused.
     fs_speed_emulation_mode: u32,
+    /// The `Result` the most recent IPC reply carried, or `None` when nothing
+    /// has replied since it was last cleared. Kept so that `TRACE_FS` can
+    /// report how a request ended from one place, rather than from each of
+    /// the dozens of arms that write a reply.
+    last_ipc_result: Option<u32>,
     /// The event each card slot's `IEventNotifier` hands out, by the `fsp-srv`
     /// command that opened it. One per slot rather than one per caller: a
     /// guest that asks twice has to be given the event it is already waiting
@@ -1881,6 +1886,7 @@ impl Cpu {
             fs_storage_archive: IdMap::default(),
             fs_access_log_mode: 0,
             fs_speed_emulation_mode: 0,
+            last_ipc_result: None,
             fs_detection_events: BTreeMap::new(),
             am_in_data: VecDeque::new(),
             am_out_data: Vec::new(),

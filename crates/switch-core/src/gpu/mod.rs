@@ -380,14 +380,22 @@ impl Gpu {
             )));
         }
         let base = handle.cpu_addr.wrapping_add(buffer.offset);
-        if self.trace {
+        if self.trace
+            || crate::trace::enabled(crate::trace::Trace::Gpu)
+            || crate::trace::enabled(crate::trace::Trace::Present)
+        {
             crate::traceln!(
-                "[gpu] present nvmap={} offset={:#x} -> cpu {:#x} {}x{} crop={:?} transform={:#x}",
+                "[gpu] present frame={} nvmap={} offset={:#x} -> cpu {:#x} {}x{} fmt={:#x} \
+                 layout={} pitch={} crop={:?} transform={:#x}",
+                self.frames,
                 buffer.nvmap_id,
                 buffer.offset,
                 base,
                 buffer.width,
                 buffer.height,
+                buffer.color_format,
+                buffer.layout,
+                buffer.pitch,
                 buffer.crop,
                 buffer.transform
             );

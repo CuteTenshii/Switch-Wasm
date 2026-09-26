@@ -487,6 +487,7 @@ impl Cpu {
         raw_data: &[u8],
         domain_objects: &[u32],
     ) -> Result<()> {
+        self.last_ipc_result = Some(result);
         // Every reply that carries an error, named. A refused command prints
         // itself, but a command that is *answered* with a failure does not,
         // and that is the shape an initialisation step that quietly gives up

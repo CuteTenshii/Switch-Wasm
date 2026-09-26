@@ -183,6 +183,10 @@ impl ByteSource for FileSource {
             return Ok(0);
         }
         let want = ((out.len() as u64).min(self.len - offset)) as usize;
+        crate::trace!(
+            crate::trace::Trace::Io,
+            "[io] file read {want:#x} bytes at {offset:#x}"
+        );
         let mut file = self.file.borrow_mut();
         file.seek(SeekFrom::Start(offset))
             .map_err(|e| Error::Io(format!("seek to {offset:#x}: {e}")))?;

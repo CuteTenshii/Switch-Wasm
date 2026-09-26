@@ -160,7 +160,7 @@ impl Engine2D {
         let centred = |origin: f64, step: f64| (origin - 0.5).fract() == 0.0 && step.fract() == 0.0;
         let filtered = bilinear && !(centred(src_x0, du_dx) && centred(src_y0, dv_dy));
 
-        if ctx.trace {
+        if ctx.trace || crate::trace::enabled(crate::trace::Trace::Copy) {
             crate::traceln!(
                 "[gpu] 2d blit src {:#x} {}x{} fmt={:#x} -> dst {:#x} ({},{}) {}x{} fmt={:#x} \
                  du_dx={du_dx} dv_dy={dv_dy} src0=({src_x0},{src_y0}) bilinear={bilinear} \

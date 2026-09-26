@@ -683,7 +683,7 @@ impl Engine3D {
     /// `gpu/shader`'s staging), and content that hits something outside it
     /// (real deko3d/Mesa shaders are far richer than our fixtures) must
     /// keep running exactly as it did before this existed, just without
-    /// real pixels for that draw. `TRACE_GPU` surfaces why.
+    /// real pixels for that draw. `TRACE_DRAW` surfaces why.
     /// `TRACE_REGS=1`: which registers this draw changed since the previous
     /// one. Two draws that read the same state must draw the same thing, so
     /// when a frame's draws all land on top of each other, this says what the
@@ -715,7 +715,10 @@ impl Engine3D {
         if ctx.trace && ctx.stats.draws == 1 {
             self.dump_vertex_input();
         }
-        if ctx.trace {
+        // Here rather than in a backend, so that a draw the device carries out
+        // is logged exactly as one the rasterizer does.
+        let trace_draw = ctx.trace || crate::trace::enabled(crate::trace::Trace::Draw);
+        if trace_draw {
             // Which surface a draw lands in, and where it falls between the
             // clears and the resolve. A draw that works and a draw that is
             // painted over afterwards look the same on screen, and only the
@@ -730,10 +733,12 @@ impl Engine3D {
             let rt = self.render_target(self.render_target_slot(0));
             let cull = self.cull_state();
             crate::traceln!(
-                "[gpu] draw {} prim={:#x} count={} cull={} -> rt0 {}",
+                "[gpu] draw {} prim={:#x} first={} count={} indexed={} cull={} -> rt0 {}",
                 ctx.stats.draws,
                 self.last_draw.primitive,
+                self.last_draw.first,
                 self.last_draw.count,
+                self.last_draw.indexed,
                 if cull.enabled {
                     format!(
                         "{}{}{}",
@@ -746,10 +751,11 @@ impl Engine3D {
                 },
                 match rt {
                     Ok(Some(rt)) => format!(
-                        "{:#x} {}x{} cpu {}",
+                        "{:#x} {}x{} fmt={:#x} cpu {}",
                         rt.addr,
                         rt.width,
                         rt.height,
+                        rt.format.raw,
                         match ctx.span(rt.addr, 4) {
                             Some(cpu) => format!("{cpu:#x}"),
                             None => "unmapped".to_owned(),
@@ -762,7 +768,7 @@ impl Engine3D {
         let result = self.with_renderer(ctx, |renderer, engine, ctx| renderer.draw(engine, ctx));
         if let Err(e) = result {
             ctx.stats.draws_skipped += 1;
-            if ctx.trace {
+            if trace_draw {
                 // With the vertex array the draw was going to read: a draw
                 // that fails and one that reads an empty buffer look the same
                 // on screen, and this is what tells them apart.
@@ -1423,8 +1429,9 @@ impl Engine3D {
         let target = field(arg, 6, 9);
         let layer = field(arg, 10, 20);
 
+        let trace_clear = ctx.trace || crate::trace::enabled(crate::trace::Trace::Draw);
         if channels.iter().any(|&c| c) {
-            if ctx.trace {
+            if trace_clear {
                 let colour = [
                     self.regs.float(CLEAR_COLOR),
                     self.regs.float(CLEAR_COLOR + 1),
@@ -1446,6 +1453,22 @@ impl Engine3D {
             })?;
         }
         if clear_depth || clear_stencil {
+            if trace_clear {
+                let depth = self.regs.float(CLEAR_DEPTH);
+                let stencil = self.regs.get(CLEAR_STENCIL) & 0xFF;
+                match self.depth_target() {
+                    Ok(Some(zt)) => crate::traceln!(
+                        "[gpu] clear depth={clear_depth}/{depth} stencil={clear_stencil}/{stencil} \
+                         addr={:#x} {}x{} texels",
+                        zt.addr,
+                        zt.width,
+                        zt.height
+                    ),
+                    other => crate::traceln!(
+                        "[gpu] clear depth={clear_depth} stencil={clear_stencil} -> {other:x?}"
+                    ),
+                }
+            }
             self.with_renderer(ctx, |renderer, engine, ctx| {
                 renderer.clear_depth_stencil(engine, ctx, clear_depth, clear_stencil)
             })?;

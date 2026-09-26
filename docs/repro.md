@@ -44,12 +44,21 @@ The `.nro`/`.nsp` files are gitignored.
 - **Checking the WebGPU backend**: run `screenshot_title` and `switch-gpu`'s
   `screenshot_gpu` over the same frame and `cmp` the PPMs. `GPU_ONLY=<i>` puts
   only the i-th draw on the device, so a difference is exactly one draw's.
-- Tracing is one mask with nineteen channels (`TRACE_IPC`, `TRACE_SVC`,
-  `TRACE_WAIT`, `TRACE_NV`, `TRACE_GPU`, ...). The environment seeds it, so a
-  CLI run sets them exactly as it always did; in the browser the same nineteen
-  are checkboxes under **Diagnostic channels** in the debug panel, because
+- Tracing is one mask of channels (`TRACE_IPC`, `TRACE_SVC`, `TRACE_WAIT`,
+  `TRACE_NV`, `TRACE_GPU`, ...). The environment seeds it, so a CLI run sets
+  them exactly as it always did; in the browser the same channels are
+  checkboxes under **Diagnostic channels** in the debug panel, because
   `std::env::var` always fails on wasm. `switch_core::trace::ALL` is the list
   both read from.
+- The channels to start from when a title misbehaves without faulting are the
+  low-volume ones. `TRACE_FS` names every filesystem request, its path and the
+  `Result` it was answered with (`2002-0001` is path-not-found), so a title
+  looking for content it cannot find says so. `TRACE_IO` is the host side of
+  the same reads: each range pulled out of the container. `TRACE_DRAW` is one
+  line per draw and clear with the surface it lands in, on either backend;
+  `TRACE_COPY` the DMA copies, inline uploads and 2D blits between them; and
+  `TRACE_PRESENT` one line per frame scanned out. `TRACE_GPU` prints the
+  draw, copy and present lines too, among every method write.
 - `--example opus_testvectors <dir>` — the Opus decoder against the RFC 8251
   vectors (`opus_testvectors-rfc8251.tar.gz` from opus-codec.org). It fails on
   the first packet whose range coder state disagrees with the encoder's, and

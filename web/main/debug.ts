@@ -267,7 +267,7 @@ export async function initTraceChannels(): Promise<void> {
     box.addEventListener('change', applyChannels);
     const text = el('span');
     // Without the `TRACE_` prefix on the page and with it in the title: the
-    // prefix is the same on all nineteen and carries nothing, but it is also
+    // prefix is the same on every channel and carries nothing, but it is also
     // the exact spelling someone needs to set the same channel from a shell.
     text.textContent = channel.name.replace(/^TRACE_/, '').toLowerCase();
     label.title = channel.name;
