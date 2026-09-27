@@ -1671,6 +1671,10 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 continue;
             };
             let (min_x, max_x, min_y, max_y) = tri.bbox(bounds);
+            if min_x >= max_x || min_y >= max_y {
+                tally.outside(screen);
+                continue;
+            }
             let Some(quad) = quad.as_mut() else {
                 let mut sample_z = [0.0f32; MAX_SAMPLES];
                 for y in min_y..max_y {
@@ -1798,6 +1802,10 @@ struct DrawTally {
     triangles: u64,
     culled: u64,
     degenerate: u64,
+    /// Triangles whose box holds no pixel of the target: off it entirely,
+    /// or placed by a position that is not a finite number.
+    outside: u64,
+    nonfinite: u64,
     uncovered: u64,
     covered: u64,
     killed: u64,
@@ -1816,6 +1824,8 @@ impl DrawTally {
             triangles: 0,
             culled: 0,
             degenerate: 0,
+            outside: 0,
+            nonfinite: 0,
             uncovered: 0,
             covered: 0,
             killed: 0,
@@ -1830,6 +1840,13 @@ impl DrawTally {
     fn geometry(&mut self, screen: [ScreenVertex; 3]) {
         if self.enabled && self.first_screen.is_none() {
             self.first_screen = Some(screen);
+        }
+    }
+
+    fn outside(&mut self, screen: [ScreenVertex; 3]) {
+        self.outside += 1;
+        if screen.iter().any(|v| !v.x.is_finite() || !v.y.is_finite()) {
+            self.nonfinite += 1;
         }
     }
 
@@ -1872,14 +1889,16 @@ impl DrawTally {
         let bounds = (bounds.x0, bounds.y0, bounds.x1, bounds.y1);
         crate::traceln!(
             "[draw] {primitive:?} count={} indexed={} fs_ops={} bounds={bounds:?} \
-             blend={blend} tris={} culled={} degen={} covered={} uncovered={} kil={} \
-             a2c={} wrote={} shaded={:?} out={:?} screen={:?}",
+             blend={blend} tris={} culled={} degen={} outside={} nonfinite={} covered={} \
+             uncovered={} kil={} a2c={} wrote={} shaded={:?} out={:?} screen={:?}",
             call.count,
             call.indexed,
             self.fs_len,
             self.triangles,
             self.culled,
             self.degenerate,
+            self.outside,
+            self.nonfinite,
             self.covered,
             self.uncovered,
             self.killed,
