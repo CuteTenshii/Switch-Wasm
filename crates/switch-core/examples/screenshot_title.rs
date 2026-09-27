@@ -33,11 +33,11 @@
 //! - `WATCH_MEM=<addr>` reports the first step at which a 4 KiB window there
 //!   stops being all zeroes. A GPU reading zeroes is either looking at the
 //!   wrong memory or at memory nothing has filled yet, and this tells the two
-//!   apart. `SCAN_MEM=<addr>:<size>` lists a region's non-zero spans once the
-//!   run has stopped, which is how you find the buffer you meant among the
-//!   ones you did not, and `DUMP_VERTS=<addr>[,...]` reads three 60-byte rows
-//!   as floats: real positions are ordinary numbers, and a structure
-//!   reinterpreted as float is a wall of denormals.
+//!   apart. `SCAN_MEM=<addr>:<size>[,...]` lists each region's non-zero
+//!   spans once the run has stopped, which is how you find the buffer you
+//!   meant among the ones you did not, and `DUMP_VERTS=<addr>[,...]` reads
+//!   three 60-byte rows as floats: real positions are ordinary numbers, and a
+//!   structure reinterpreted as float is a wall of denormals.
 //! - `POKE_U32=<addr>:<value>` writes a word every sampling tick, or once at
 //!   `POKE_AT=<step>`. A latched state flag is only a theory until you clear
 //!   it and see what the guest does.
@@ -295,7 +295,9 @@ fn main() {
         }
         println!("[find] {magic}: {hits} hit(s)");
     }
-    if let Some((lo, hi)) = common::env_span("SCAN_MEM") {
+    // Several regions at once: a frame's render targets are a chain, and
+    // finding where it goes blank one region per run costs a run per link.
+    for (lo, hi) in common::env_spans("SCAN_MEM") {
         let mut spans = Vec::new();
         let mut span: Option<u32> = None;
         for at in (lo..hi).step_by(4) {

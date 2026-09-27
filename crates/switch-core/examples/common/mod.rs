@@ -324,7 +324,18 @@ pub fn env_hex(name: &str) -> Option<u32> {
 
 /// A `lo:len` pair of hexadecimal addresses, as `(lo, lo + len)`.
 pub fn env_span(name: &str) -> Option<(u32, u32)> {
-    let raw = env::var(name).ok()?;
+    parse_span(&env::var(name).ok()?)
+}
+
+/// Comma-separated `lo:len` pairs, as [`env_span`] reads one. A pair that
+/// does not parse is left out rather than ending the list.
+pub fn env_spans(name: &str) -> Vec<(u32, u32)> {
+    env::var(name)
+        .map(|raw| raw.split(',').filter_map(parse_span).collect())
+        .unwrap_or_default()
+}
+
+fn parse_span(raw: &str) -> Option<(u32, u32)> {
     let (lo, len) = raw.split_once(':')?;
     let lo = u32::from_str_radix(lo.trim().trim_start_matches("0x"), 16).ok()?;
     let len = u32::from_str_radix(len.trim().trim_start_matches("0x"), 16).ok()?;
