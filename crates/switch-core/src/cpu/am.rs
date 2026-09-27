@@ -1185,6 +1185,17 @@ impl Cpu {
                     self.warn_stub(&iface, cmd_id, "accepted and not recorded");
                     self.write_ipc_response(tls, 0, &[], &[], &[])
                 }
+                // InitializeApplicationCopyrightFrameBuffer /
+                // SetApplicationCopyrightImage /
+                // SetApplicationCopyrightVisibility: the notice the system
+                // draws over the title's screenshots and captures. Nothing
+                // here captures, so there is nothing to draw it on. Nintendo
+                // Switch Sports sets the buffer up as it boots and aborts on
+                // the unknown-command answer, 2010-0221.
+                Some(100) | Some(101) | Some(102) => {
+                    self.warn_stub(&iface, cmd_id, "accepted, and no capture draws it");
+                    self.write_ipc_response(tls, 0, &[], &[], &[])
+                }
                 // Command 210, added in 20.0.0 and still unnamed on
                 // switchbrew: no input, one out **event**. It sits between
                 // GetLastApplicationExitReason (200) and SetAudioOutputPolicy
@@ -2389,6 +2400,16 @@ mod tests {
         cpu.register_service_handle(9, "am:common-state-getter");
         cpu.applet_request(TLS, 9, Some(5)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "Handheld");
+    }
+
+    #[test]
+    fn the_copyright_notice_for_captures_is_accepted() {
+        for cmd in [100, 101, 102] {
+            let mut cpu = request(false, cmd, &[]);
+            cpu.register_service_handle(9, "am:application-functions");
+            cpu.applet_request(TLS, 9, Some(cmd)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "command {cmd}");
+        }
     }
 
     #[test]

@@ -315,8 +315,7 @@ impl Cpu {
                 // and reports how many that was. An empty database writes
                 // nothing and reports none, which is a state a real console
                 // is in until someone makes their first Mii. Nintendo Switch
-                // Sports asks with Get as its character editor opens, and
-                // the unknown-command answer it got was a panic.
+                // Sports asks with Get, which is a list read like the others.
                 Some(3) | Some(4) | Some(8) | Some(9) => {
                     self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
                 }

@@ -57,6 +57,17 @@ and tests.
   0 is the "no user" sentinel). `acc:u0` and `acc:u1`/`acc:su` share 0..=51 but
   **diverge from 100 up**, so those arms dispatch on the service name. The
   nickname is real state; `LoadImage` returns a real JPEG.
+- **`am`** is the applet manager every title opens first, and `nnSdk` answers
+  an unknown command from it with an `svcBreak`, so a refused command ends
+  the boot there. Its shapes matter more than its answers:
+  `GetGpuErrorDetectedSystemEvent` (130) must hand back a real event, or
+  `nn::oe::Initialize` aborts; an event nothing here can fire (210, the one
+  behind the exit-request flow) is handed out and never signalled.
+  `PopLaunchParameter` is a **pop**: a kind nobody left fails, and one that was
+  left is handed over once. Everything tied to capture — gameplay recording
+  (66, 67) and the copyright notice drawn over screenshots (100-102) — is
+  accepted and does nothing, since nothing here captures; Nintendo Switch
+  Sports aborts on the copyright buffer setup otherwise.
 - **`apm`** must *agree* with `am`; `GetPerformanceConfiguration` returns what
   `Set*` was last handed (defaults nonzero — 0 is `Invalid`).
 - **`ts`** reports the SoC and PCB sensors at an idle reading. `MilliC` is
@@ -89,8 +100,6 @@ and tests.
 - **`mii`** is a database with no user Miis in it and the six built-in faces
   `nn::mii` carries: `BuildDefault` and `BuildRandom` hand those out, and every
   list read (`Get` through `Get3`) reports zero records rather than refusing.
-  A refused list read is an unknown command to the caller, and Nintendo Switch
-  Sports panics on it as its character editor opens.
 - **`mm:u`** holds the multimedia clock requests the video decoder makes before
   it runs. `Initialize` must hand out a request: NVIDIA's multimedia library
   calls `SetAndWait` through a client pointer only a successful `Initialize`
