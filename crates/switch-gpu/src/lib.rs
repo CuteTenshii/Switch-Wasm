@@ -1992,7 +1992,7 @@ impl Gpu {
             }
             let held = self.held_layers(upload, compare, view_dimension)?;
             let texture = if !held.is_empty() {
-                self.texture_over_held(upload, view_dimension, &held)?
+                self.texture_over_held(upload, view_dimension, &held, compare)?
             } else if compare {
                 self.shadow_texture(upload)?
             } else {
@@ -2095,23 +2095,86 @@ impl Gpu {
         upload: &switch_core::gpu::upload::TextureUpload,
         compare: bool,
         view: wgpu::TextureViewDimension,
-    ) -> std::result::Result<Vec<(u32, wgpu::Texture)>, String> {
+    ) -> std::result::Result<Vec<(u32, HeldLayer)>, String> {
         let mut layers = Vec::new();
         for layer in 0..upload.layers.max(1) {
             let addr = upload.key.addr + u64::from(layer) * u64::from(upload.key.layer_stride);
             let Some(held) = self.held.get(&addr) else {
                 continue;
             };
-            if compare || held.target.depth.is_some() {
-                return Err("samples a depth surface held on the device".into());
+            // A `ZF32` surface is held as a `depth32float` holding the guest's
+            // own floats, which is exactly what sampling it as an `R32` reads:
+            // Nintendo Switch Sports samples its depth that way right after
+            // drawing it. A copy cannot go from a depth texture to a colour
+            // one, so it goes through a buffer. Every other depth packing is
+            // converted on the way to the device, and a shadow sample needs a
+            // depth texture of its own.
+            if let Some(depth) = held.target.depth {
+                let float =
+                    depth.bytes == 4 && depth.depth_bits == 0 && depth.stencil_shift.is_none();
+                let (format, _) = sampled_texture_format(self.features(), upload.format)
+                    .map_err(|e| format!("{e:?}"))?;
+                // A shadow map reads a `depth32float` itself, so a held one is
+                // copied depth to depth, whatever the guest packs it as.
+                if compare {
+                    if held.texture.format() != wgpu::TextureFormat::Depth32Float
+                        || (held.texture.width(), held.texture.height())
+                            != (upload.width, upload.height)
+                    {
+                        return Err(format!(
+                            "samples a depth surface held on the device as a shadow map, \
+                             held {:?} {}x{} and sampled {}x{}",
+                            held.texture.format(),
+                            held.texture.width(),
+                            held.texture.height(),
+                            upload.width,
+                            upload.height
+                        ));
+                    }
+                    layers.push((layer, HeldLayer::Shadow(held.texture.clone())));
+                    continue;
+                }
+                let refused = if !float {
+                    Some(format!(
+                        "packed {depth:?}, which is not the float it would be read as"
+                    ))
+                } else if format != wgpu::TextureFormat::R32Float
+                    || held.texture.format() != wgpu::TextureFormat::Depth32Float
+                {
+                    Some(format!(
+                        "held as {:?} and sampled as {format:?}",
+                        held.texture.format()
+                    ))
+                } else if (held.texture.width(), held.texture.height())
+                    != (upload.width, upload.height)
+                {
+                    Some(format!(
+                        "held {}x{} and sampled {}x{}",
+                        held.texture.width(),
+                        held.texture.height(),
+                        upload.width,
+                        upload.height
+                    ))
+                } else {
+                    None
+                };
+                if let Some(why) = refused {
+                    return Err(format!("samples a depth surface held on the device, {why}"));
+                }
+                layers.push((layer, HeldLayer::Depth(held.texture.clone())));
+                continue;
             }
             if held.companion.is_some() {
                 return Err("samples a multisampled surface held on the device".into());
             }
-            // A volume's slices interleave inside a block, so no one of them
-            // is a surface of its own.
-            if view == wgpu::TextureViewDimension::D3 {
-                return Err("samples a surface held on the device as a 3D texture".into());
+            // A volume's slices interleave inside a block more than one GOB
+            // deep, so no one of them is a surface of its own. One GOB deep,
+            // each slice is a 2D image a stride apart, the same as a layer.
+            if view == wgpu::TextureViewDimension::D3 && upload.key.block_depth_gobs > 1 {
+                return Err(
+                    "samples a surface held on the device as a slice of an interleaved volume"
+                        .into(),
+                );
             }
             // A texture may be the top-left corner of a larger surface, a
             // padded render target sampled at the size that was drawn: it is
@@ -2150,7 +2213,7 @@ impl Gpu {
                     held.texture.format()
                 ));
             }
-            layers.push((layer, held.texture.clone()));
+            layers.push((layer, HeldLayer::Colour(held.texture.clone())));
         }
         Ok(layers)
     }
@@ -2167,36 +2230,83 @@ impl Gpu {
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
         view: wgpu::TextureViewDimension,
-        held: &[(u32, wgpu::Texture)],
+        held: &[(u32, HeldLayer)],
+        compare: bool,
     ) -> std::result::Result<wgpu::Texture, String> {
-        let (texture, _) = self.upload_texture(upload, view)?;
+        let texture = if compare {
+            self.shadow_texture(upload)?
+        } else {
+            let (texture, _) = self.upload_texture(upload, view)?;
+            self.scratch.push(Scratch::Texture(texture.clone()));
+            texture
+        };
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("held layers"),
             });
+        let extent = wgpu::Extent3d {
+            width: upload.width,
+            height: upload.height,
+            depth_or_array_layers: 1,
+        };
         for (layer, surface) in held {
-            encoder.copy_texture_to_texture(
-                surface.as_image_copy(),
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: 0,
-                        y: 0,
-                        z: *layer,
-                    },
-                    aspect: wgpu::TextureAspect::All,
+            let into = wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: 0,
+                    y: 0,
+                    z: *layer,
                 },
-                wgpu::Extent3d {
-                    width: upload.width,
-                    height: upload.height,
-                    depth_or_array_layers: 1,
-                },
-            );
+                aspect: wgpu::TextureAspect::All,
+            };
+            match surface {
+                HeldLayer::Colour(surface) | HeldLayer::Shadow(surface) => {
+                    encoder.copy_texture_to_texture(surface.as_image_copy(), into, extent);
+                }
+                HeldLayer::Depth(surface) => {
+                    // Four bytes a texel, in rows padded to what a copy
+                    // between a texture and a buffer requires.
+                    let row = (upload.width * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
+                        * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+                    let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("held depth"),
+                        size: u64::from(row) * u64::from(upload.height),
+                        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+                        mapped_at_creation: false,
+                    });
+                    let layout = wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(row),
+                        rows_per_image: Some(upload.height),
+                    };
+                    encoder.copy_texture_to_buffer(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: surface,
+                            mip_level: 0,
+                            origin: wgpu::Origin3d::ZERO,
+                            aspect: wgpu::TextureAspect::DepthOnly,
+                        },
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: &staging,
+                            layout,
+                        },
+                        extent,
+                    );
+                    encoder.copy_buffer_to_texture(
+                        wgpu::TexelCopyBufferInfo {
+                            buffer: &staging,
+                            layout,
+                        },
+                        into,
+                        extent,
+                    );
+                    self.scratch.push(Scratch::Buffer(staging));
+                }
+            }
         }
         self.queue.submit([encoder.finish()]);
-        self.scratch.push(Scratch::Texture(texture.clone()));
         Ok(texture)
     }
 
@@ -2370,7 +2480,11 @@ impl Gpu {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // Copied into as well as drawn into: a layer the device holds the
+            // depth of is copied over the one drawn from guest memory.
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
         // Whatever the guest stored it as, the staging image is the one
@@ -3441,6 +3555,17 @@ struct SamplerKey {
     wrap_v: wgpu::AddressMode,
     mag: wgpu::FilterMode,
     min: wgpu::FilterMode,
+}
+
+/// A surface held on the device that stands in for one layer of a sampled
+/// texture, and how it gets there: see [`Gpu::held_layers`].
+enum HeldLayer {
+    /// Copied texture to texture.
+    Colour(wgpu::Texture),
+    /// A `depth32float` copied into an `r32float` through a buffer.
+    Depth(wgpu::Texture),
+    /// A `depth32float` copied whole into its layer of a shadow map.
+    Shadow(wgpu::Texture),
 }
 
 /// What [`Gpu::check`] settled, for [`Gpu::prepare`] to go on from. The
@@ -4969,6 +5094,145 @@ mod tests {
         assert!(drawn.iter().all(|c| texels.contains(c)), "{drawn:x?}");
 
         agrees_shading(new, |_| {}, set_up);
+    }
+
+    /// A `ZF32` depth surface the device holds, sampled as the one-channel
+    /// float texture it is, reads the depth the device put there.
+    ///
+    /// The depth is cleared on the device and never seen by guest memory
+    /// before the draw samples it, so a stale read draws zero where the
+    /// rasterizer draws the clear value.
+    #[test]
+    fn a_held_float_depth_surface_samples_as_the_depth_it_holds() {
+        let Ok(mut gpu) = super::Gpu::open() else {
+            return;
+        };
+        let build = |gpu: Option<&mut super::Gpu>| {
+            let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+            h.bindless_texture();
+            h.depth_target(0x0207);
+            // ZF32, and neither tested nor written by the draw, so the draw
+            // samples it without attaching it.
+            h.engine.regs.set(0x3FA, 0x0A);
+            h.engine.regs.set(testing::DEPTH_TEST_ENABLE, 0);
+            h.engine.regs.set(testing::DEPTH_WRITE_ENABLE, 0);
+            h.engine.regs.set(0x364, 0.25f32.to_bits());
+            // The fixture's image descriptor, pointed at the depth surface:
+            // `ZF32` with a float red channel, block-linear one GOB high.
+            let (tic, depth) = (h.base + 0x1400 + 32, h.base + 0x1000);
+            let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+            let mut ctx = h.ctx();
+            for (word, value) in [
+                (0, 0x2f | (7 << 7) | identity),
+                (1, depth as u32),
+                (2, (depth >> 32) as u32 | (3 << 21)),
+                (3, 0),
+                (4, (testing::TARGET_WIDTH - 1) | (1 << 23)),
+                (5, testing::TARGET_HEIGHT - 1),
+            ] {
+                ctx.write_u32(tic + word * 4, value).unwrap();
+            }
+            h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+            match gpu {
+                Some(gpu) => {
+                    h.clear_depth_with(gpu).expect("the clear");
+                    h.draw_with(gpu).expect("the draw");
+                    h.flush_with(gpu);
+                }
+                None => {
+                    h.clear_depth_with(&mut Software).expect("the clear");
+                    h.draw_with(&mut Software).expect("the draw");
+                }
+            }
+            h.target()
+        };
+        let want = build(None);
+        assert!(
+            want.contains(&0xff00_0040),
+            "the reference did not draw the cleared depth: {want:x?}"
+        );
+        let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+        let got = build(Some(&mut gpu));
+        assert_eq!(
+            gpu.fallbacks, fallbacks,
+            "the draw fell back: {:?}",
+            gpu.last_fallback
+        );
+        assert_eq!(gpu.drawn, drawn + 1, "the draw did not run on the device");
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+        assert_eq!(got, want, "the colour surface differs");
+    }
+
+    /// A depth surface the device holds, sampled as a shadow map, is compared
+    /// against the depth the device put there.
+    #[test]
+    fn a_held_depth_surface_is_the_shadow_map_the_rasterizer_compares_against() {
+        let Ok(mut gpu) = super::Gpu::open() else {
+            return;
+        };
+        let build = |gpu: Option<&mut super::Gpu>, clear: f32| {
+            let mut h = Harness::with_fragment_shader(testing::shadow_fragment_shader());
+            h.bindless_texture();
+            h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
+            h.depth_target(0x0207);
+            h.engine.regs.set(0x3FA, 0x0A); // ZF32
+            h.engine.regs.set(testing::DEPTH_TEST_ENABLE, 0);
+            h.engine.regs.set(testing::DEPTH_WRITE_ENABLE, 0);
+            h.engine.regs.set(0x364, clear.to_bits());
+            let (tic, tsc, depth) = (h.base + 0x1400 + 32, h.base + 0x1480 + 32, h.base + 0x1000);
+            let identity = (2 << 19) | (3 << 22) | (4 << 25) | (5 << 28);
+            let mut ctx = h.ctx();
+            for (word, value) in [
+                (0, 0x2f | (7 << 7) | identity),
+                (1, depth as u32),
+                (2, (depth >> 32) as u32 | (3 << 21)),
+                (3, 0),
+                (4, (testing::TARGET_WIDTH - 1) | (1 << 23)),
+                (5, testing::TARGET_HEIGHT - 1),
+            ] {
+                ctx.write_u32(tic + word * 4, value).unwrap();
+            }
+            // The fixture's sampler, comparing with Less.
+            ctx.write_u32(tsc, 2 | (2 << 3) | (2 << 6) | (1 << 9) | (1 << 10))
+                .unwrap();
+            h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+            match gpu {
+                Some(gpu) => {
+                    h.clear_depth_with(gpu).expect("the clear");
+                    h.draw_with(gpu).expect("the draw");
+                    h.flush_with(gpu);
+                }
+                None => {
+                    h.clear_depth_with(&mut Software).expect("the clear");
+                    h.draw_with(&mut Software).expect("the draw");
+                }
+            }
+            h.target()
+        };
+        // A stale read compares against the zero guest memory still holds,
+        // which has to be a different picture for this to mean anything.
+        let want = build(None, 0.75);
+        assert_ne!(
+            want,
+            build(None, 0.0),
+            "the comparison cannot tell 0.75 from 0"
+        );
+        let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+        let got = build(Some(&mut gpu), 0.75);
+        assert_eq!(
+            gpu.fallbacks, fallbacks,
+            "the draw fell back: {:?}",
+            gpu.last_fallback
+        );
+        assert_eq!(gpu.drawn, drawn + 1, "the draw did not run on the device");
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+        assert_eq!(got, want, "the colour surface differs");
     }
 
     /// A texture that is the top-left corner of a surface the device holds,
