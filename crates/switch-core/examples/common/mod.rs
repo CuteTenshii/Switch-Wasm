@@ -638,6 +638,9 @@ enum DumpBase {
 struct DumpSpec {
     label: String,
     base: DumpBase,
+    /// `*<base>`: the pointer stored at the base rather than the base, which
+    /// is how an object's vtable is reached from the register holding it.
+    deref: bool,
     offset: i64,
     len: u32,
 }
@@ -670,6 +673,10 @@ fn parse_dump_specs(spec: &str) -> Vec<DumpSpec> {
                 }
                 None => (addr, 0),
             };
+            let (deref, base) = match base.trim().strip_prefix('*') {
+                Some(pointer) => (true, pointer),
+                None => (false, base),
+            };
             let base = match base.trim() {
                 "sp" => DumpBase::StackPointer,
                 "pc" => DumpBase::ProgramCounter,
@@ -679,6 +686,7 @@ fn parse_dump_specs(spec: &str) -> Vec<DumpSpec> {
             Some(DumpSpec {
                 label: entry.to_string(),
                 base,
+                deref,
                 offset,
                 len,
             })
@@ -721,6 +729,10 @@ fn backtrace(cpu: &Cpu, depth: usize) -> String {
 ///   an owner.
 /// - `TRAP_READ=<addr>:<hex size>`: every distinct pc that reads a region,
 ///   counted.
+/// - `TRAP_LAST=<n>`: keep the *last* `n` trapped writes and print them when
+///   the run stops, instead of the first few as they happen. A heap address
+///   is reused many times over a long run, and the write that matters is the
+///   one just before the fault.
 /// - `TRAP_ZERO=1`: keep writes of zero as well. Off by default, since a
 ///   field being cleared is usually the noise; on when clearing is the hunt.
 /// - `WATCH_PC=<addr>[,...]`: the argument registers and the call stack the
@@ -729,11 +741,15 @@ fn backtrace(cpu: &Cpu, depth: usize) -> String {
 ///   nothing in the image points at them.
 /// - `DUMP=<base>[+<hex>][:<hex length>][,...]`: hex-dump guest memory
 ///   wherever the run stopped, where `<base>` is `x0`..`x30`, `sp`, `pc` or an
-///   address: `DUMP=x23+0x1830:0x40,0x10c2e870`.
+///   address: `DUMP=x23+0x1830:0x40,0x10c2e870`. A `*` in front follows the
+///   pointer stored there, so `*x25:0x60` is the vtable of the object in `x25`.
 pub struct Debug {
     write_trap: Option<(u32, u32)>,
     read_trap: Option<(u32, u32)>,
     trap_zero: bool,
+    /// `TRAP_LAST`: how many of the latest trapped writes to keep, and them.
+    trap_last: usize,
+    last_traps: std::collections::VecDeque<String>,
     watch_pc: Vec<u32>,
     dumps: Vec<DumpSpec>,
     traps: u32,
@@ -751,6 +767,8 @@ impl Debug {
             write_trap: env_span("TRAP_WRITE"),
             read_trap: env_span("TRAP_READ"),
             trap_zero: env::var("TRAP_ZERO").is_ok(),
+            trap_last: env_u64("TRAP_LAST", 0) as usize,
+            last_traps: std::collections::VecDeque::new(),
             watch_pc: env_hex_list("WATCH_PC"),
             dumps: env::var("DUMP")
                 .map(|spec| parse_dump_specs(&spec))
@@ -790,13 +808,24 @@ impl Debug {
         self.reader_pc = cpu.get_pc();
         if let Some(at) = cpu.mem.take_watch_hit() {
             let value = cpu.mem.read_u32(at & !3).unwrap_or(0);
-            if self.traps < MAX_HITS && (value != 0 || self.trap_zero) {
-                println!(
-                    "[trap] wrote {at:#010x} = {value:#010x} at step {done} pc={:#010x}{} bt={}",
+            let wanted = value != 0 || self.trap_zero;
+            let line = || {
+                format!(
+                    "[trap] wrote {at:#010x} = {value:#010x} at step {done} pc={:#010x} \
+                     thread={:#x}{} bt={}",
                     cpu.get_pc(),
+                    cpu.current_thread_handle(),
                     arguments(cpu),
                     backtrace(cpu, 12),
-                );
+                )
+            };
+            if wanted && self.trap_last > 0 {
+                if self.last_traps.len() == self.trap_last {
+                    self.last_traps.pop_front();
+                }
+                self.last_traps.push_back(line());
+            } else if wanted && self.traps < MAX_HITS {
+                println!("{}", line());
                 self.traps += 1;
             }
         }
@@ -830,6 +859,14 @@ impl Debug {
                 DumpBase::StackPointer => cpu.sp(),
                 DumpBase::ProgramCounter => u64::from(cpu.get_pc()),
             };
+            let base = if spec.deref {
+                let at = base as u32;
+                let low = cpu.mem.read_u32(at).unwrap_or(0);
+                let high = cpu.mem.read_u32(at.wrapping_add(4)).unwrap_or(0);
+                u64::from(high) << 32 | u64::from(low)
+            } else {
+                base
+            };
             let at = (base as i64).wrapping_add(spec.offset) as u32;
             println!("[dump] {} = {at:#010x} ({:#x} bytes)", spec.label, spec.len);
             // Words rather than bytes because what is being read here is
@@ -859,6 +896,9 @@ impl Debug {
 
     /// What the run collected, once it has stopped.
     pub fn report(&self) {
+        for line in &self.last_traps {
+            println!("{line}");
+        }
         for (pc, count) in &self.readers {
             println!("[reader] {pc:#010x} {count}");
         }
