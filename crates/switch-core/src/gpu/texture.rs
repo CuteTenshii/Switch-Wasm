@@ -237,12 +237,20 @@ pub enum DepthTexel {
     /// byte. The depth target of the same name: `SET_ZT_FORMAT` 0x19, see
     /// `threed::depth_format_layout`, is where the surface comes from.
     F32X24S8,
+    /// `S8D24` sampled as an unsigned integer: the stencil byte in the low
+    /// eight bits, which red reads as the integer it is, and the depth in
+    /// the 24 above, which green reads as a unorm. Eden's
+    /// `S8_UINT_D24_UNORM`, and the packing of the `Z24S8` depth target.
+    /// The Legend of Zelda: Echoes of Wisdom reads its stencil this way in a
+    /// compute shader.
+    S8D24Uint,
 }
 
 impl DepthTexel {
     pub fn bytes_per_texel(self) -> u32 {
         match self {
             DepthTexel::F32X24S8 => 8,
+            DepthTexel::S8D24Uint => 4,
         }
     }
 
@@ -251,7 +259,21 @@ impl DepthTexel {
     fn decode(self, raw: u128) -> [f32; 4] {
         match self {
             DepthTexel::F32X24S8 => [f32::from_bits(raw as u32), 0.0, 0.0, 1.0],
+            // An integer channel reaches a shader as its bits, not as a
+            // float of its value, which is what hardware hands back from an
+            // integer texture.
+            DepthTexel::S8D24Uint => [
+                f32::from_bits(raw as u32 & 0xff),
+                ((raw as u32) >> 8) as f32 / 16_777_215.0,
+                0.0,
+                1.0,
+            ],
         }
+    }
+
+    /// Whether any channel is an integer, which cannot be filtered.
+    fn is_integer(self) -> bool {
+        matches!(self, DepthTexel::S8D24Uint)
     }
 }
 
@@ -524,6 +546,10 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
     // A depth surface read back as a texture, which is not a colour at all.
     if (components_sizes, data_type) == (0x30, FLOAT) {
         return Ok(TexelKind::Depth(DepthTexel::F32X24S8)); // ZF32_X24S8
+    }
+    const UINT: u32 = 4;
+    if (components_sizes, data_type) == (0x29, UINT) {
+        return Ok(TexelKind::Depth(DepthTexel::S8D24Uint)); // S8D24
     }
     // An HDR title renders into a float surface and samples it back to
     // tonemap: "A Short Hike" composites its frame out of an
@@ -824,10 +850,15 @@ pub fn read_descriptors(
     tex_sampler_pool: u64,
     handle: u32,
 ) -> Result<Descriptors> {
-    Ok(Descriptors {
-        texture: read_image(ctx, tex_header_pool + image_id(handle) as u64 * 32)?,
-        sampler: read_sampler(ctx, tex_sampler_pool + sampler_id(handle) as u64 * 32)?,
-    })
+    let texture = read_image(ctx, tex_header_pool + image_id(handle) as u64 * 32)?;
+    let mut sampler = read_sampler(ctx, tex_sampler_pool + sampler_id(handle) as u64 * 32)?;
+    // An integer texture is read at the nearest texel whatever its sampler
+    // says: blending integers is meaningless, and blending their bits worse.
+    if matches!(texture.kind, TexelKind::Depth(depth) if depth.is_integer()) {
+        sampler.mag_linear = false;
+        sampler.min_linear = false;
+    }
+    Ok(Descriptors { texture, sampler })
 }
 
 /// Resolve a bindless `handle` against the bound TIC/TSC pools and sample at
@@ -1160,6 +1191,57 @@ mod tests {
             texel_kind_for(0x2f, FLOAT).unwrap(),
             texel_kind_for(0x0f, FLOAT).unwrap(),
         );
+    }
+
+    /// `S8D24` read as an unsigned integer hands a shader the stencil byte's
+    /// bits and the depth as a unorm, and never blends two texels, whatever
+    /// its sampler asks for.
+    #[test]
+    fn an_integer_stencil_texture_reads_the_nearest_texel_bits() {
+        let (mut mem, vmm, base) = harness();
+        let tic_addr = base;
+        let tsc_addr = base + 0x100;
+        let tex_addr = base + 0x400;
+
+        const UINT: u32 = 4;
+        vmm.write_u32(&mut mem, tic_addr, 0x29 | (UINT << 7) | IDENTITY_SWIZZLE)
+            .unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 4, ((tex_addr as u32) >> 5) << 5)
+            .unwrap();
+        vmm.write_u32(
+            &mut mem,
+            tic_addr + 8,
+            ((tex_addr >> 32) as u32) | (2 << 21),
+        )
+        .unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 12, 1).unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 16, 1 | TYPE_2D).unwrap();
+        vmm.write_u32(&mut mem, tic_addr + 20, 0).unwrap();
+        // Left: stencil 3, depth 0. Right: stencil 200, depth 1.
+        vmm.write_u32(&mut mem, tex_addr, 3).unwrap();
+        vmm.write_u32(&mut mem, tex_addr + 4, 0xffff_ff00 | 200)
+            .unwrap();
+        // Linear on both filters, clamped.
+        vmm.write_u32(&mut mem, tsc_addr, 2 | (2 << 3)).unwrap();
+        vmm.write_u32(&mut mem, tsc_addr + 4, 2 | (2 << 4)).unwrap();
+
+        let mut host1x = Host1x::new();
+        let mut stats = Default::default();
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let d = read_descriptors(&ctx, tic_addr, tsc_addr, 0).unwrap();
+        let blocks = RefCell::new(BlockCache::default());
+        let left = sample_with(&ctx, &d, 0.45, 0.5, 0, &blocks).unwrap();
+        assert_eq!(left[0].to_bits(), 3);
+        assert_eq!(left[1], 0.0);
+        let right = sample_with(&ctx, &d, 0.55, 0.5, 0, &blocks).unwrap();
+        assert_eq!(right[0].to_bits(), 200);
+        assert_eq!(right[1], 1.0);
     }
 
     /// Tomodachi Life's environment cube array, word for word: 11 cubes of
