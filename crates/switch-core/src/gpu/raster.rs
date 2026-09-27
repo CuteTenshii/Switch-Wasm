@@ -21,7 +21,7 @@ use crate::gpu::engine::threed::{
 use crate::gpu::exec::ExecCtx;
 use crate::gpu::shader::compiled::Compiled;
 use crate::gpu::shader::interp::{
-    resolve_shuffles, ConstantSource, Env, Halt, Invocation, MemoryConstants, MemoryGlobal,
+    resolve_warp, ConstantSource, Env, Halt, Invocation, MemoryConstants, MemoryGlobal,
     MemoryTextures, NoTextures,
 };
 use crate::gpu::shader::{decode_program_from_memory, wgsl, Op, Program};
@@ -919,7 +919,7 @@ fn shade_quad(
             env.special.lane = lane as u32;
             match invocation.resume(program, env)? {
                 Halt::Exited => running[lane] = false,
-                Halt::Shuffle => shuffled = true,
+                Halt::Warp => shuffled = true,
                 Halt::Barrier => {
                     return Err(Error::Gpu(
                         "raster: bar in a fragment shader, where there is no CTA to \
@@ -932,7 +932,7 @@ fn shade_quad(
         if !shuffled {
             break;
         }
-        resolve_shuffles(lanes);
+        resolve_warp(lanes);
     }
     Ok(std::array::from_fn(|lane| {
         fragment_color(&lanes[lane], program)

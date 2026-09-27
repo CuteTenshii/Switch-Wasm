@@ -28,8 +28,8 @@ use std::collections::HashMap;
 
 use super::isa::{
     self, AtomOp, AtomSpace, AtomType, BarMode, BoolOp, FCmp, FMod, FRound, HMerge, HPrecision,
-    HSwizzle, ICmp, LogicOp, LopTest, MemSize, MufuOp, Op, Operand, Pred, ShflMode, TexDim, XmadC,
-    RZ,
+    HSwizzle, ICmp, LogicOp, LopTest, MemSize, MufuOp, Op, Operand, Pred, ShflMode, TexDim,
+    VoteMode, XmadC, RZ,
 };
 use crate::gpu::surface::{f16_to_f32, f32_to_f16};
 
@@ -653,9 +653,26 @@ pub struct Invocation {
     steps: usize,
     /// Texture results not yet landed; see `run_texs`.
     pending: Vec<(usize, u8, u32)>,
-    /// The shuffle this invocation is suspended on, waiting for the rest of
-    /// its warp to reach one too. See [`resolve_shuffles`].
-    shuffle: Option<Shuffle>,
+    /// The shuffle or vote this invocation is suspended on, waiting for the
+    /// rest of its warp to reach one too. See [`resolve_warp`].
+    exchange: Option<Exchange>,
+}
+
+/// A question an invocation cannot answer from its own registers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Exchange {
+    Shuffle(Shuffle),
+    Vote(Vote),
+}
+
+/// A `vote` with its source predicate read, waiting for the rest of the
+/// warp's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Vote {
+    mode: VoteMode,
+    dst: u8,
+    pred: u8,
+    holds: bool,
 }
 
 /// A `shfl` that has been decoded and had its operands read, and is waiting
@@ -681,9 +698,9 @@ pub enum Halt {
     Exited,
     /// It reached a `bar` and is waiting for the rest of its CTA.
     Barrier,
-    /// It reached a `shfl` and is waiting for the rest of its warp, which
-    /// [`resolve_shuffles`] releases it from.
-    Shuffle,
+    /// It reached a `shfl` or a `vote` and is waiting for the rest of its
+    /// warp, which [`resolve_warp`] releases it from.
+    Warp,
 }
 
 impl Default for Invocation {
@@ -704,7 +721,7 @@ impl Default for Invocation {
             pc: 0,
             steps: 0,
             pending: Vec::new(),
-            shuffle: None,
+            exchange: None,
         }
     }
 }
@@ -729,7 +746,7 @@ impl Invocation {
         self.pc = 0;
         self.steps = 0;
         self.pending.clear();
-        self.shuffle = None;
+        self.exchange = None;
     }
 
     /// Give this invocation `bytes` of `l[]`, as a launch's QMD asks for.
@@ -804,9 +821,9 @@ impl Invocation {
                  synchronise with",
                 program.offset(self.pc.saturating_sub(1))
             ))),
-            Halt::Shuffle => Err(Error::Gpu(format!(
-                "shader: shfl at {:#x} reads a register of another lane, and this invocation \
-                 is running on its own",
+            Halt::Warp => Err(Error::Gpu(format!(
+                "shader: the warp instruction at {:#x} reads another lane, and this \
+                 invocation is running on its own",
                 program.offset(self.pc.saturating_sub(1))
             ))),
         }
@@ -817,7 +834,7 @@ impl Invocation {
         self.pc = 0;
         self.steps = 0;
         self.pending.clear();
-        self.shuffle = None;
+        self.exchange = None;
     }
 
     /// Run until the program exits or reaches a barrier, continuing from
@@ -947,16 +964,31 @@ impl Invocation {
                     mask,
                     mode,
                 } => {
-                    self.shuffle = Some(Shuffle {
+                    self.exchange = Some(Exchange::Shuffle(Shuffle {
                         mode,
                         dst,
                         pred,
                         src,
                         index: self.operand(index, env)?,
                         mask: self.operand(mask, env)?,
-                    });
+                    }));
                     self.pc = pc + 1;
-                    return Ok(Halt::Shuffle);
+                    return Ok(Halt::Warp);
+                }
+                Op::Vote {
+                    dst,
+                    pred,
+                    src,
+                    mode,
+                } => {
+                    self.exchange = Some(Exchange::Vote(Vote {
+                        mode,
+                        dst,
+                        pred,
+                        holds: self.holds(src),
+                    }));
+                    self.pc = pc + 1;
+                    return Ok(Halt::Warp);
                 }
                 Op::Nop | Op::Inert => {}
                 Op::Bra { .. } => {
@@ -1990,6 +2022,7 @@ impl Invocation {
             | Op::Cont
             | Op::Bar { .. }
             | Op::Shfl { .. }
+            | Op::Vote { .. }
             | Op::Texs { .. }
             | Op::Tex { .. }
             | Op::Txq { .. }
@@ -2626,6 +2659,7 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::F2f { dst, .. }
         | Op::I2i { dst, .. }
         | Op::Shfl { dst, .. }
+        | Op::Vote { dst, .. }
         | Op::Fswzadd { dst, .. } => vec![dst],
         Op::Texs {
             dst,
@@ -2657,42 +2691,63 @@ const FSWZ_SIGNS: [(f32, f32); 4] = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (0.
 /// this width, so the arithmetic below has to be done in it.
 pub const WARP_LANES: usize = 32;
 
-/// Complete every shuffle the lanes of one warp are suspended on.
+/// Complete every shuffle and vote the lanes of one warp are suspended on.
 ///
-/// `warp` is the warp in lane order, so an invocation's index is its lane.
-/// Every source register is read before any destination is written: a shuffle
-/// is an exchange between lanes of one instruction, so no lane may see
-/// another's result.
+/// `warp` is the warp in lane order, so an invocation's index is its lane,
+/// and it holds at most [`WARP_LANES`] of them. Every source is read before
+/// any destination is written: these are exchanges between the lanes of one
+/// instruction, so no lane may see another's result.
 ///
-/// A lane the clamp allows but this warp does not hold: a quad is four lanes
-/// of a hardware warp's thirty-two: reads as the requesting lane's own
-/// value, which is what an inactive lane gives on hardware. The predicate
-/// still reports what the clamp said, since that is a property of the lane
-/// numbers rather than of who is running.
-pub fn resolve_shuffles(warp: &mut [Invocation]) {
-    let requests: Vec<Option<Shuffle>> = warp
+/// A shuffle to a lane the clamp allows but this warp does not hold (a quad
+/// is four lanes of a hardware warp's thirty-two) reads as the requesting
+/// lane's own value, which is what an inactive lane gives on hardware. The
+/// predicate still reports what the clamp said, since that is a property of
+/// the lane numbers rather than of who is running.
+///
+/// A vote is counted over the lanes that reached it, which are the active
+/// lanes at that instruction: one that has exited, or waits elsewhere, is
+/// not in the ballot, as a lane masked off by divergence is not on hardware.
+pub fn resolve_warp(warp: &mut [Invocation]) {
+    let requests: Vec<Option<Exchange>> = warp
         .iter_mut()
-        .map(|invocation| invocation.shuffle.take())
+        .map(|invocation| invocation.exchange.take())
         .collect();
-    let sources: Vec<Option<(u8, u8, u32, bool)>> = requests
+    let (mut voters, mut ballot) = (0u32, 0u32);
+    for (lane, request) in requests.iter().enumerate() {
+        if let Some(Exchange::Vote(vote)) = request {
+            voters |= 1 << lane;
+            ballot |= u32::from(vote.holds) << lane;
+        }
+    }
+    let answers: Vec<Option<(u8, u8, u32, bool)>> = requests
         .iter()
         .enumerate()
-        .map(|(lane, request)| {
-            let &Some(shuffle) = request else { return None };
-            let (from, in_bounds) = shuffle_source(shuffle, lane as u32);
-            let value = match warp.get(from as usize).filter(|_| in_bounds) {
-                Some(peer) => peer.reg(shuffle.src),
-                None => warp[lane].reg(shuffle.src),
-            };
-            Some((shuffle.dst, shuffle.pred, value, in_bounds))
+        .map(|(lane, request)| match *request {
+            None => None,
+            Some(Exchange::Shuffle(shuffle)) => {
+                let (from, in_bounds) = shuffle_source(shuffle, lane as u32);
+                let value = match warp.get(from as usize).filter(|_| in_bounds) {
+                    Some(peer) => peer.reg(shuffle.src),
+                    None => warp[lane].reg(shuffle.src),
+                };
+                Some((shuffle.dst, shuffle.pred, value, in_bounds))
+            }
+            Some(Exchange::Vote(vote)) => {
+                let verdict = match vote.mode {
+                    VoteMode::All => ballot == voters,
+                    VoteMode::Any => ballot != 0,
+                    VoteMode::Eq => ballot == 0 || ballot == voters,
+                };
+                Some((vote.dst, vote.pred, ballot, verdict))
+            }
         })
         .collect();
-    for (invocation, source) in warp.iter_mut().zip(sources) {
-        let Some((dst, pred, value, in_bounds)) = source else {
+    for (invocation, answer) in warp.iter_mut().zip(answers) {
+        let Some((dst, pred, value, flag)) = answer else {
             continue;
         };
         invocation.set_reg(dst, value);
-        invocation.set_pred(pred, in_bounds);
+        invocation.set_pred(pred, flag);
     }
 }
 
@@ -3464,10 +3519,10 @@ mod tests {
         }
 
         for invocation in warp.iter_mut() {
-            assert_eq!(invocation.resume(&program, &env).unwrap(), Halt::Shuffle);
+            assert_eq!(invocation.resume(&program, &env).unwrap(), Halt::Warp);
             assert_eq!(invocation.reg(1), 0, "nothing has been exchanged yet");
         }
-        resolve_shuffles(&mut warp);
+        resolve_warp(&mut warp);
         for invocation in warp.iter_mut() {
             assert_eq!(invocation.resume(&program, &env).unwrap(), Halt::Exited);
         }
@@ -3505,14 +3560,80 @@ mod tests {
             invocation.begin();
         }
         for invocation in warp.iter_mut() {
-            assert_eq!(invocation.resume(&program, &env).unwrap(), Halt::Shuffle);
+            assert_eq!(invocation.resume(&program, &env).unwrap(), Halt::Warp);
         }
-        resolve_shuffles(&mut warp);
+        resolve_warp(&mut warp);
 
         assert_eq!(warp[0].reg(1), 10, "lane 0 has nothing below it to read");
         assert!(!warp[0].pred(0));
         assert_eq!(warp[1].reg(1), 10);
         assert!(warp[1].pred(0));
+    }
+
+    /// Three of four lanes hold the predicate: `all` says no, `any` yes,
+    /// `eq` no, and each lane gets the same ballot. A lane that exited
+    /// before the vote is not in it.
+    #[test]
+    fn a_vote_answers_from_the_lanes_that_reached_it() {
+        let consts = no_consts();
+        let env = Env::new(&consts, &NoTextures);
+        for (mode, verdict) in [
+            (VoteMode::All, false),
+            (VoteMode::Any, true),
+            (VoteMode::Eq, false),
+        ] {
+            let program = prog(&[
+                Op::Vote {
+                    dst: 1,
+                    pred: 2,
+                    src: Pred {
+                        reg: 0,
+                        negate: false,
+                    },
+                    mode,
+                },
+                Op::Exit,
+            ]);
+            let mut warp: [Invocation; 4] = std::array::from_fn(|_| Invocation::new());
+            for (lane, invocation) in warp.iter_mut().enumerate() {
+                invocation.set_pred(0, lane != 1);
+                invocation.begin();
+            }
+            for invocation in warp.iter_mut() {
+                assert_eq!(invocation.resume(&program, &env).unwrap(), Halt::Warp);
+            }
+            resolve_warp(&mut warp);
+            for invocation in warp.iter_mut() {
+                assert_eq!(invocation.resume(&program, &env).unwrap(), Halt::Exited);
+            }
+            assert_eq!(warp.each_ref().map(|lane| lane.reg(1)), [0b1101; 4]);
+            assert!(warp.iter().all(|lane| lane.pred(2) == verdict), "{mode:?}");
+        }
+
+        // Only lanes 0 and 2 reach this vote, and both hold p0.
+        let program = prog(&[
+            Op::Vote {
+                dst: 1,
+                pred: 2,
+                src: Pred {
+                    reg: 0,
+                    negate: false,
+                },
+                mode: VoteMode::All,
+            },
+            Op::Exit,
+        ]);
+        let mut warp: [Invocation; 4] = std::array::from_fn(|_| Invocation::new());
+        for (lane, invocation) in warp.iter_mut().enumerate() {
+            invocation.set_pred(0, true);
+            invocation.begin();
+            if lane % 2 == 0 {
+                assert_eq!(invocation.resume(&program, &env).unwrap(), Halt::Warp);
+            }
+        }
+        resolve_warp(&mut warp);
+        assert_eq!(warp[0].reg(1), 0b101);
+        assert!(warp[0].pred(2) && warp[2].pred(2));
     }
 
     #[test]

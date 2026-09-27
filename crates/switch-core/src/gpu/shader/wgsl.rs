@@ -2403,6 +2403,9 @@ impl Emitter<'_> {
             | Op::Sts { .. }
             | Op::Atom { .. }
             | Op::Bar { .. }
+            // A ballot needs the warp's other lanes, which a draw shader here
+            // can only see as its quad; the software renderer refuses it too.
+            | Op::Vote { .. }
             | Op::Unimplemented { .. } => return Err(Unsupported::Op { at, op }),
 
             // Handled by `emit_terminator`, and `ssy`/`pbk`/`pcnt` by

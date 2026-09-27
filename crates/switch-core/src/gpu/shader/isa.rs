@@ -394,6 +394,15 @@ pub enum ShflMode {
     Bfly,
 }
 
+/// What a `vote` asks of its warp's predicates: whether all hold, whether
+/// any does, or whether they all agree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoteMode {
+    All,
+    Any,
+    Eq,
+}
+
 /// Which address space an atomic addresses. `atom`/`red` are global,
 /// `atoms` is shared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1080,6 +1089,16 @@ pub enum Op {
         index: Operand,
         mask: Operand,
         mode: ShflMode,
+    },
+    /// `vote.mode dst, pred, src`: `pred` is whether `src` holds in all, any
+    /// or every-or-none of the warp's active lanes, and `dst` the ballot, a
+    /// bit per lane that holds it. Like `shfl`, a question only the warp can
+    /// answer.
+    Vote {
+        dst: u8,
+        pred: u8,
+        src: Pred,
+        mode: VoteMode,
     },
     /// `fswzadd dst, a, b, swizzle`: add `a` and `b` with a sign per lane,
     /// the two-bit code for this one selected out of `swizzle` by `laneid`.
@@ -2344,6 +2363,23 @@ fn decode_alu_wide(insn: u64) -> Op {
     // them, and the frame it presented was the clear colour and nothing else.
     if insn & 0xfff8_0000_0000_0000 == 0x50e0_0000_0000_0000 {
         return Op::Nop;
+    }
+
+    // vote: 0x50d8/0xfff8, fields as Eden's `vote.cpp` reads them. Mode 3 is
+    // not one; Eden throws on it.
+    if insn & 0xfff8_0000_0000_0000 == 0x50d8_0000_0000_0000 {
+        let mode = match field(insn, 48, 2) {
+            0 => VoteMode::All,
+            1 => VoteMode::Any,
+            2 => VoteMode::Eq,
+            _ => return Op::Unimplemented { raw: insn },
+        };
+        return Op::Vote {
+            dst: reg(insn, 0, 8),
+            pred: reg(insn, 45, 3),
+            src: src_pred(insn, 39, 42),
+            mode,
+        };
     }
 
     // fswzadd: 0x50f8/0xfff8. `ndv` at 38 is a scheduling hint about
@@ -4661,6 +4697,45 @@ mod tests {
         for low in 0..8u64 {
             assert_eq!(op(0x50e0_0000_0000_0000 | (low << 48)), Op::Nop);
         }
+    }
+
+    /// The words `envydis` reads as `vote all $r2 0x1 0x1` (Echoes of
+    /// Wisdom's), `vote any $r5 $p5 $p4` and `vote eq $r3 $p2 not $p0`.
+    #[test]
+    fn a_vote_decodes_its_mode_and_both_predicates() {
+        assert_eq!(
+            op(0x50d8_e380_0007_0002),
+            Op::Vote {
+                dst: 2,
+                pred: Pred::PT,
+                src: Pred::ALWAYS,
+                mode: VoteMode::All,
+            }
+        );
+        assert_eq!(
+            op(0x50d9_a200_0007_0005),
+            Op::Vote {
+                dst: 5,
+                pred: 5,
+                src: Pred {
+                    reg: 4,
+                    negate: false
+                },
+                mode: VoteMode::Any,
+            }
+        );
+        assert_eq!(
+            op(0x50da_4400_0007_0003),
+            Op::Vote {
+                dst: 3,
+                pred: 2,
+                src: Pred {
+                    reg: 0,
+                    negate: true
+                },
+                mode: VoteMode::Eq,
+            }
+        );
     }
 
     #[test]
