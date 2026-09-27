@@ -58,11 +58,22 @@ fn main() {
         println!("[gpu] installed");
         cpu.nv.gpu.set_renderer(Box::new(gpu));
     }
+    // `TRAP_WRITE`, `WATCH_PC`, `DUMP` and the rest, as every runner has
+    // them: the GPU backend reaches a late fault in a fraction of the time
+    // the rasterizer takes, which makes this the runner to chase one with.
+    let mut debug = common::Debug::from_env();
+    debug.arm(&mut cpu);
+    let pace = if debug.stepwise() {
+        Pace::Instructions
+    } else {
+        Pace::Blocks
+    };
     let run = common::drive(
         &mut cpu,
-        Pace::Blocks,
+        pace,
         common::env_u64("STEPS", u64::MAX),
-        |cpu, _| {
+        |cpu, done| {
+            debug.tick(cpu, done);
             if cpu.nv.gpu.frames >= dock_at {
                 cpu.set_operation_mode(switch_core::cpu::OperationMode::Docked);
             }
@@ -74,6 +85,8 @@ fn main() {
         },
     );
     common::report(&cpu, &run);
+    debug.report();
+    debug.stop_state(&cpu);
     // What the browser's Rendering panel shows, for a run that has no browser:
     // how many draws the device took, how many fell back and why.
     println!("rendering: {}", cpu.nv.gpu.renderer_report());
