@@ -20,6 +20,10 @@ import { setRunning } from './title';
  *  nothing but a file name to go on. */
 export interface LaunchIdentity {
   name: string;
+  /** Empty where the NACP names none. */
+  publisher: string;
+  /** Sixteen hex digits, as the NACP-bearing Control NCA gives it. */
+  titleId: string;
   iconUrl: string | null;
   /** The icon behind that URL. The top bar outlives the URL - opening another
    *  container revokes it - so it makes one of its own from these bytes. */
@@ -473,6 +477,8 @@ function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity
     : null;
   heldTitle = info ? {
     name: info.name,
+    publisher: info.publisher || '',
+    titleId: info.title_id,
     iconUrl: blob ? URL.createObjectURL(blob) : null,
     icon: blob,
     version: info.version || '',
@@ -718,6 +724,18 @@ function launchStandaloneNca(file: File): Promise<void> {
   return doLaunchNca(file.name, () => call('load_nca'), heldTitle);
 }
 
+/** What a launch is of, as the log's first line: the title and who made it,
+ *  its id and version where the container named them, and the file. */
+function describeLaunch(file: string, identity?: LaunchIdentity | null): string {
+  if (!identity) return 'Launching ' + file;
+  const parts = [identity.name + (identity.publisher ? ' by ' + identity.publisher : '')];
+  if (identity.titleId) parts.push(identity.titleId.toUpperCase());
+  if (identity.version) parts.push('version ' + identity.version);
+  const container = openContainer?.file.name;
+  parts.push('from ' + (container && container !== file ? container + ', ' + file : file));
+  return 'Launching ' + parts.join(', ');
+}
+
 export async function doLaunchNca(
   name: string,
   loadFn: () => Promise<number>,
@@ -725,7 +743,11 @@ export async function doLaunchNca(
   note?: string,
 ): Promise<void> {
   clearConsole();
-  // After the clear, or the launch would wipe the line that says what it is.
+  // After the clear, or the launch would wipe the lines that say what it is.
+  // A log gets passed around on its own, so it opens by naming the game,
+  // which was otherwise only said when the container was opened, and the
+  // clear took that with it.
+  log(describeLaunch(name, identity), 'ok');
   if (note) log(note, 'ok');
   setState('loading');
   // The session below is about to be thrown away, so the bar stops naming what
