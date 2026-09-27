@@ -86,6 +86,11 @@ and tests.
 - **`pcv`/`clkrst`** are the same manager either side of 8.0.0, numbered **by
   an offset**: a `clkrst` device code is `0x40000000 + module + 1`. A rate a
   guest sets reads back.
+- **`mii`** is a database with no user Miis in it and the six built-in faces
+  `nn::mii` carries: `BuildDefault` and `BuildRandom` hand those out, and every
+  list read (`Get` through `Get3`) reports zero records rather than refusing.
+  A refused list read is an unknown command to the caller, and Nintendo Switch
+  Sports panics on it as its character editor opens.
 - **`mm:u`** holds the multimedia clock requests the video decoder makes before
   it runs. `Initialize` must hand out a request: NVIDIA's multimedia library
   calls `SetAndWait` through a client pointer only a successful `Initialize`

@@ -310,12 +310,14 @@ impl Cpu {
                 Some(1) => self.write_ipc_response(tls, 0, &[], &0u8.to_le_bytes(), &[]),
                 // GetCount(SourceFlag) -> u32.
                 Some(2) => self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[]),
-                // The list reads: each fills a caller-provided buffer with
-                // as many Mii records as it holds and reports how many that
-                // was. An empty database writes nothing and reports none,
-                // which is a state a real console is in until someone makes
-                // their first Mii.
-                Some(4) | Some(8) | Some(9) => {
+                // The list reads, Get through Get3: each fills a
+                // caller-provided buffer with as many Mii records as it holds
+                // and reports how many that was. An empty database writes
+                // nothing and reports none, which is a state a real console
+                // is in until someone makes their first Mii. Nintendo Switch
+                // Sports asks with Get as its character editor opens, and
+                // the unknown-command answer it got was a panic.
+                Some(3) | Some(4) | Some(8) | Some(9) => {
                     self.write_ipc_response(tls, 0, &[], &0u32.to_le_bytes(), &[])
                 }
                 // BuildRandom(Age, Gender, Race) -> CharInfo: a Mii nobody
@@ -508,6 +510,21 @@ mod tests {
             .collect();
         for id in &create_ids {
             assert!(!built_in.contains(id), "a new Mii took a built-in one's id");
+        }
+    }
+
+    #[test]
+    fn every_list_read_reports_an_empty_database() {
+        for cmd in [3, 4, 8, 9] {
+            let mut cpu = request(true, cmd, &1u32.to_le_bytes());
+            cpu.record_domain_object(9, 7, "mii:database");
+            cpu.mii_request(TLS, 9, Some(cmd)).unwrap();
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x28).unwrap(),
+                0,
+                "Get {cmd}: result"
+            );
+            assert_eq!(cpu.mem.read_u32(TLS + 0x30).unwrap(), 0, "Get {cmd}: count");
         }
     }
 
