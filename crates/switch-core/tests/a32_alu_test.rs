@@ -165,6 +165,28 @@ fn the_extends_and_the_reverses() {
     assert_eq!(r(&cpu, 10), 0x22CC_4488, "rbit reverses the bits");
 }
 
+/// The two-lane extends: bytes 0 and 2, each widened to a halfword, and the
+/// addend forms adding lane by lane, with the low lane's carry dropped.
+#[test]
+fn the_dual_byte_extends() {
+    let cpu = run(&[
+        0xE59F_1018, // ldr     r1, [pc, #24] -> 0x80ff7f01
+        0xE59F_4018, // ldr     r4, [pc, #24] -> 0x0001ffff
+        0xE1A0_2001, // mov     r2, r1
+        0xE6CF_2072, // uxtb16  r2, r2
+        0xE68F_0471, // sxtb16  r0, r1, ror #8
+        0xE6C4_3071, // uxtab16 r3, r4, r1
+        0xE684_5071, // sxtab16 r5, r4, r1
+        HALT,
+        0x80FF_7F01,
+        0x0001_FFFF,
+    ]);
+    assert_eq!(r(&cpu, 2), 0x00FF_0001);
+    assert_eq!(r(&cpu, 0), 0xFF80_007F, "the rotation picks bytes 1 and 3");
+    assert_eq!(r(&cpu, 3), 0x0100_0000, "0xffff + 1 does not carry upward");
+    assert_eq!(r(&cpu, 5), 0x0000_0000);
+}
+
 #[test]
 fn the_bitfield_instructions() {
     let cpu = run(&[

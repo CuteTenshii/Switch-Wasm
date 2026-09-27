@@ -76,6 +76,27 @@ impl Cpu {
                 };
                 self.set_r32(rd, result);
             }
+            // (S|U)XTB16(A): bytes 0 and 2 of the rotated source, each
+            // extended to a halfword; the addend form adds lane by lane, and
+            // a carry out of the low lane does not reach the high one.
+            (0x08 | 0x0C, 0b011) => {
+                let rotate = ((insn >> 10) & 0b11) * 8;
+                let value = self.r32(rm).rotate_right(rotate);
+                let lane = |byte: u32| -> u16 {
+                    if op1 == 0x08 {
+                        byte as u8 as i8 as i16 as u16
+                    } else {
+                        byte as u8 as u16
+                    }
+                };
+                let (mut low, mut high) = (lane(value), lane(value >> 16));
+                if rn != 15 {
+                    let addend = self.r32(rn);
+                    low = low.wrapping_add(addend as u16);
+                    high = high.wrapping_add((addend >> 16) as u16);
+                }
+                self.set_r32(rd, u32::from(low) | u32::from(high) << 16);
+            }
             // REV / REV16 / RBIT / REVSH
             (0x0B | 0x0F, 0b001 | 0b101) => {
                 let value = self.r32(rm);
