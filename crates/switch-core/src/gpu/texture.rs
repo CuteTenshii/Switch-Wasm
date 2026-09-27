@@ -18,6 +18,7 @@
 
 use crate::gpu::bcn::{self, Codec};
 use crate::gpu::exec::ExecCtx;
+use crate::gpu::shader::isa::{SurfaceData, SurfaceSize};
 use crate::gpu::surface::{self, bilinear, ColorFormat, Layout};
 use crate::{Error, Result};
 use std::cell::RefCell;
@@ -309,6 +310,60 @@ pub struct Texture {
 }
 
 impl Texture {
+    /// Where texel `(x, y)` of `layer` starts, for an uncompressed image of
+    /// `bpp`-byte texels. A plain texel and a depth one are addressed
+    /// identically, one unit per texel, whatever the unit holds.
+    fn unit_address(&self, x: u32, y: u32, layer: u32, bpp: u32) -> u64 {
+        let width_bytes = match self.layout {
+            Layout::Pitch { pitch } => pitch,
+            Layout::BlockLinear { .. } => self.width * bpp,
+        };
+        match self.layout {
+            // A volume's slices interleave, so the slice is part of the
+            // address rather than a stride onto the front of it.
+            Layout::BlockLinear { block_height_gobs } if self.block_depth_gobs > 1 => {
+                self.addr
+                    + u64::from(crate::gpu::surface::block_linear_volume_offset(
+                        x * bpp,
+                        y,
+                        layer,
+                        width_bytes,
+                        self.height,
+                        block_height_gobs,
+                        self.block_depth_gobs,
+                    ))
+            }
+            // The layer is not part of the swizzle: an array's slices sit
+            // back to back, each one a whole surface.
+            _ => {
+                self.addr
+                    + u64::from(layer) * u64::from(self.layer_stride)
+                    + self.layout.offset(x * bpp, y, width_bytes) as u64
+            }
+        }
+    }
+
+    /// Where a surface access's texel is and how many bytes it spans, or
+    /// `None` outside the image, where a load reads zero and a store is
+    /// dropped. `at` is `x`, `y` and the layer or slice.
+    fn surface_texel(&self, at: [u32; 3]) -> Result<Option<(u64, u32)>> {
+        let bytes = match self.kind {
+            TexelKind::Plain(format) => format.bytes_per_pixel,
+            TexelKind::Depth(depth) => depth.bytes_per_texel(),
+            TexelKind::Block(codec) => {
+                return Err(Error::Gpu(format!(
+                    "texture: a surface access to a {codec:?}-compressed image, which has \
+                     no texel of its own to address"
+                )))
+            }
+        };
+        let [x, y, layer] = at;
+        if x >= self.width || y >= self.height || layer >= self.layers.max(1) {
+            return Ok(None);
+        }
+        Ok(Some((self.unit_address(x, y, layer, bytes), bytes)))
+    }
+
     /// Fetch and decode one texel, clamped to the texture's extent.
     pub fn texel(
         &self,
@@ -320,48 +375,15 @@ impl Texture {
     ) -> Result<[f32; 4]> {
         let x = x.min(self.width.saturating_sub(1));
         let y = y.min(self.height.saturating_sub(1));
-        // The layer is not part of the swizzle: an array's slices sit back to
-        // back, each one a whole surface.
         let layer_base = self.addr + u64::from(layer) * u64::from(self.layer_stride);
-        // A volume's slices interleave, so the slice is part of the address
-        // rather than a stride onto the front of it.
-        let volume = match self.layout {
-            Layout::BlockLinear { block_height_gobs } if self.block_depth_gobs > 1 => {
-                Some((block_height_gobs, self.block_depth_gobs))
-            }
-            _ => None,
-        };
-        // A plain texel and a depth one are addressed identically, one unit
-        // per texel, whatever the unit holds.
-        let unit_address = |bpp: u32| {
-            let width_bytes = match self.layout {
-                Layout::Pitch { pitch } => pitch,
-                Layout::BlockLinear { .. } => self.width * bpp,
-            };
-            match volume {
-                Some((bh, bd)) => {
-                    self.addr
-                        + u64::from(crate::gpu::surface::block_linear_volume_offset(
-                            x * bpp,
-                            y,
-                            layer,
-                            width_bytes,
-                            self.height,
-                            bh,
-                            bd,
-                        ))
-                }
-                None => layer_base + self.layout.offset(x * bpp, y, width_bytes) as u64,
-            }
-        };
         let mut texel = match self.kind {
             TexelKind::Plain(format) => {
                 let bpp = format.bytes_per_pixel;
-                format.decode(ctx.read_pixel(unit_address(bpp), bpp)?)?
+                format.decode(ctx.read_pixel(self.unit_address(x, y, layer, bpp), bpp)?)?
             }
             TexelKind::Depth(depth) => {
                 let bytes = depth.bytes_per_texel();
-                depth.decode(ctx.read_pixel(unit_address(bytes), bytes)?)
+                depth.decode(ctx.read_pixel(self.unit_address(x, y, layer, bytes), bytes)?)
             }
             TexelKind::Block(codec) => {
                 // The swizzle addresses a compressed surface in blocks: one
@@ -830,6 +852,86 @@ fn apply_swizzle(swizzle: [SwizzleSource; 4], texel: [f32; 4]) -> [f32; 4] {
         SwizzleSource::A => texel[3],
         SwizzleSource::One => 1.0,
     })
+}
+
+/// The registers a surface load (`suld`) reads from texel `at` of
+/// `texture`: the channels, converted, for a formatted load, and the bytes
+/// split into words, low first, for a raw one.
+pub fn surface_load(
+    ctx: &ExecCtx,
+    texture: &Texture,
+    at: [u32; 3],
+    data: SurfaceData,
+) -> Result<[u32; 4]> {
+    let Some((addr, bytes)) = texture.surface_texel(at)? else {
+        return Ok([0; 4]);
+    };
+    let raw = ctx.read_pixel(addr, bytes)?;
+    match data {
+        SurfaceData::Formatted(_) => match texture.kind {
+            TexelKind::Plain(format) => format.decode_registers(raw),
+            _ => Err(formatted_depth_access(texture)),
+        },
+        SurfaceData::Raw(size) => {
+            check_raw_size(size, bytes)?;
+            let mut words: [u32; 4] = std::array::from_fn(|i| (raw >> (32 * i)) as u32);
+            // A narrow signed load fills the register with its sign.
+            match size {
+                SurfaceSize::S8 => words[0] = words[0] as i8 as u32,
+                SurfaceSize::S16 => words[0] = words[0] as i16 as u32,
+                _ => {}
+            }
+            Ok(words)
+        }
+    }
+}
+
+/// Write the registers of a surface store (`sust`) to texel `at` of
+/// `texture`; see [`surface_load`] for what they hold.
+pub fn surface_store(
+    ctx: &mut ExecCtx,
+    texture: &Texture,
+    at: [u32; 3],
+    data: SurfaceData,
+    regs: [u32; 4],
+) -> Result<()> {
+    let Some((addr, bytes)) = texture.surface_texel(at)? else {
+        return Ok(());
+    };
+    let raw = match data {
+        SurfaceData::Formatted(_) => match texture.kind {
+            TexelKind::Plain(format) => format.encode_registers(regs)?,
+            _ => return Err(formatted_depth_access(texture)),
+        },
+        SurfaceData::Raw(size) => {
+            check_raw_size(size, bytes)?;
+            regs.iter()
+                .enumerate()
+                .fold(0u128, |raw, (i, &word)| raw | u128::from(word) << (32 * i))
+        }
+    };
+    ctx.write_pixel(addr, bytes, raw)
+}
+
+/// A raw access moves whole texels: one of another size would need the
+/// image reinterpreted in texels of that size, and nothing here keeps such
+/// a view.
+fn check_raw_size(size: SurfaceSize, texel_bytes: u32) -> Result<()> {
+    if size.bytes() == texel_bytes {
+        return Ok(());
+    }
+    Err(Error::Gpu(format!(
+        "texture: a raw {}-byte surface access to an image of {texel_bytes}-byte texels",
+        size.bytes()
+    )))
+}
+
+fn formatted_depth_access(texture: &Texture) -> Error {
+    Error::Gpu(format!(
+        "texture: a formatted surface access to a depth image ({:?}), whose texel no \
+         register form describes",
+        texture.kind
+    ))
 }
 
 /// What one bindless handle resolves to: its TIC and its TSC, both parsed.

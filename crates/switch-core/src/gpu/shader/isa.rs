@@ -394,6 +394,71 @@ pub enum ShflMode {
     Bfly,
 }
 
+/// The shape of the image a surface instruction (`suld`/`sust`) addresses,
+/// which decides how many coordinate registers it reads and what each is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceDim {
+    D1,
+    Buffer1d,
+    Array1d,
+    D2,
+    Array2d,
+    D3,
+}
+
+/// How much a raw (`.D`) surface access moves, and whether a narrow load is
+/// sign-extended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceSize {
+    U8,
+    S8,
+    U16,
+    S16,
+    B32,
+    B64,
+    B128,
+}
+
+impl SurfaceSize {
+    pub fn bytes(self) -> u32 {
+        match self {
+            SurfaceSize::U8 | SurfaceSize::S8 => 1,
+            SurfaceSize::U16 | SurfaceSize::S16 => 2,
+            SurfaceSize::B32 => 4,
+            SurfaceSize::B64 => 8,
+            SurfaceSize::B128 => 16,
+        }
+    }
+
+    /// Registers the access fills or drains, one per 32 bits and at least
+    /// one.
+    pub fn words(self) -> usize {
+        (self.bytes() as usize).div_ceil(4)
+    }
+}
+
+/// What a surface instruction moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SurfaceData {
+    /// `.P`: the channels of a texel in the image's own format, converted
+    /// to and from what a register holds: a float for a float or normalized
+    /// channel, an integer for an integer one. Only the masked channels
+    /// move, into or out of consecutive registers.
+    Formatted([bool; 4]),
+    /// `.D`: the texel's bytes, uninterpreted.
+    Raw(SurfaceSize),
+}
+
+impl SurfaceData {
+    /// The channels a load writes, in the order its registers take them.
+    pub fn channels(self) -> [bool; 4] {
+        match self {
+            SurfaceData::Formatted(mask) => mask,
+            SurfaceData::Raw(size) => std::array::from_fn(|i| i < size.words()),
+        }
+    }
+}
+
 /// What a `vote` asks of its warp's predicates: whether all hold, whether
 /// any does, or whether they all agree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1090,6 +1155,30 @@ pub enum Op {
         mask: Operand,
         mode: ShflMode,
     },
+    /// `suld dst, [coords], handle`: read a texel of an image, the image a
+    /// texture handle names, at integer coordinates. A texel outside it
+    /// reads as zero (`.IGN`, the one clamp mode decoded).
+    Suld {
+        dst: u8,
+        /// The first coordinate register; [`SurfaceDim`] says how many follow.
+        coords: u8,
+        /// A dword index into the texture bank, as `tex`'s is, when
+        /// `handle_reg` is `None`.
+        handle: u16,
+        handle_reg: Option<u8>,
+        dim: SurfaceDim,
+        data: SurfaceData,
+    },
+    /// `sust [coords], src, handle`: write a texel, from `src` onwards. A
+    /// texel outside the image is not written.
+    Sust {
+        src: u8,
+        coords: u8,
+        handle: u16,
+        handle_reg: Option<u8>,
+        dim: SurfaceDim,
+        data: SurfaceData,
+    },
     /// `vote.mode dst, pred, src`: `pred` is whether `src` holds in all, any
     /// or every-or-none of the warp's active lanes, and `dst` the ballot, a
     /// bit per lane that holds it. Like `shfl`, a question only the warp can
@@ -1161,6 +1250,80 @@ pub enum Op {
     Unimplemented {
         raw: u64,
     },
+}
+
+/// `suld`/`sust`, fields as Eden's `surface_load_store.cpp` reads them.
+///
+/// Refused, as Eden refuses them: a clamp mode other than `.IGN` (the others
+/// trap or clamp, and nothing here has done either), a raw access with the
+/// `.BA` byte-addressing bit, a formatted store that does not write all four
+/// channels, and a formatted load with no channel at all. Bit 23 is `.BA`
+/// only in the raw form: the formatted form's channel mask covers it.
+fn decode_surface(insn: u64) -> Option<Op> {
+    const IGN: u64 = 0;
+    if field(insn, 49, 2) != IGN {
+        return None;
+    }
+    let raw = field(insn, 52, 1) != 0;
+    if raw && field(insn, 23, 1) != 0 {
+        return None;
+    }
+    let dim = match field(insn, 33, 3) {
+        0 => SurfaceDim::D1,
+        1 => SurfaceDim::Buffer1d,
+        2 => SurfaceDim::Array1d,
+        3 => SurfaceDim::D2,
+        4 => SurfaceDim::Array2d,
+        5 => SurfaceDim::D3,
+        _ => return None,
+    };
+    let data = if raw {
+        SurfaceData::Raw(match field(insn, 20, 3) {
+            0 => SurfaceSize::U8,
+            1 => SurfaceSize::S8,
+            2 => SurfaceSize::U16,
+            3 => SurfaceSize::S16,
+            4 => SurfaceSize::B32,
+            5 => SurfaceSize::B64,
+            6 => SurfaceSize::B128,
+            _ => return None,
+        })
+    } else {
+        let swizzle = field(insn, 20, 4);
+        SurfaceData::Formatted(std::array::from_fn(|i| swizzle >> i & 1 != 0))
+    };
+    let store = field(insn, 53, 1) != 0;
+    match data {
+        SurfaceData::Formatted(mask) if store && mask != [true; 4] => return None,
+        SurfaceData::Formatted([false, false, false, false]) => return None,
+        _ => {}
+    }
+    let bound = field(insn, 51, 1) != 0;
+    let (handle, handle_reg) = if bound {
+        (field(insn, 36, 13) as u16, None)
+    } else {
+        (0, Some(reg(insn, 39, 8)))
+    };
+    let coords = reg(insn, 8, 8);
+    Some(if store {
+        Op::Sust {
+            src: reg(insn, 0, 8),
+            coords,
+            handle,
+            handle_reg,
+            dim,
+            data,
+        }
+    } else {
+        Op::Suld {
+            dst: reg(insn, 0, 8),
+            coords,
+            handle,
+            handle_reg,
+            dim,
+            data,
+        }
+    })
 }
 
 fn field(insn: u64, pos: u32, len: u32) -> u64 {
@@ -1549,6 +1712,10 @@ fn decode_op(insn: u64, pc: u32) -> Op {
             },
             _ => un,
         },
+        // suld 0xeb00/0xffe0 and sust 0xeb20/0xffe0.
+        0xeb00 | 0xeb08 | 0xeb10 | 0xeb18 | 0xeb20 | 0xeb28 | 0xeb30 | 0xeb38 => {
+            decode_surface(insn).unwrap_or(un)
+        }
         // red: 0xebf8/0xfff8. A global atomic whose old value is discarded,
         // so it decodes to the same op with RZ as its destination.
         0xebf8 => {
@@ -4740,6 +4907,68 @@ mod tests {
                 b: Operand::Imm(0xfff8_0005),
                 ..
             }
+        ));
+    }
+
+    /// Words `envydis` reads as `sust p t2d rgba ign g[$r0] $r24 $r39`
+    /// (Echoes of Wisdom's), `suld d t2d b32 ign $r4 g[$r8] 0x40`,
+    /// `suld p a2d ra ign $r4 g[$r8] $r39` and `suld d t1d u8 ign $r0 g[$r1]
+    /// 0x3`.
+    #[test]
+    fn surface_accesses_decode_as_envydis_reads_them() {
+        assert_eq!(
+            op(0xeb20_1386_00f7_0018),
+            Op::Sust {
+                src: 24,
+                coords: 0,
+                handle: 0,
+                handle_reg: Some(39),
+                dim: SurfaceDim::D2,
+                data: SurfaceData::Formatted([true; 4]),
+            }
+        );
+        assert_eq!(
+            op(0xeb18_0406_0047_0804),
+            Op::Suld {
+                dst: 4,
+                coords: 8,
+                handle: 0x40,
+                handle_reg: None,
+                dim: SurfaceDim::D2,
+                data: SurfaceData::Raw(SurfaceSize::B32),
+            }
+        );
+        assert_eq!(
+            op(0xeb00_1388_0097_0804),
+            Op::Suld {
+                dst: 4,
+                coords: 8,
+                handle: 0,
+                handle_reg: Some(39),
+                dim: SurfaceDim::Array2d,
+                data: SurfaceData::Formatted([true, false, false, true]),
+            }
+        );
+        assert_eq!(
+            op(0xeb18_0030_0007_0100),
+            Op::Suld {
+                dst: 0,
+                coords: 1,
+                handle: 3,
+                handle_reg: None,
+                dim: SurfaceDim::D1,
+                data: SurfaceData::Raw(SurfaceSize::U8),
+            }
+        );
+        // A formatted store of fewer than four channels, and a clamp mode
+        // that traps, are refused rather than half-done.
+        assert!(matches!(
+            op(0xeb20_1386_0077_0018),
+            Op::Unimplemented { .. }
+        ));
+        assert!(matches!(
+            op(0xeb20_1386_00f7_0018 | 2 << 49),
+            Op::Unimplemented { .. }
         ));
     }
 

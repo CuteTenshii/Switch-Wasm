@@ -28,8 +28,8 @@ use std::collections::HashMap;
 
 use super::isa::{
     self, AtomOp, AtomSpace, AtomType, BarMode, BoolOp, FCmp, FMod, FRound, HMerge, HPrecision,
-    HSwizzle, ICmp, LogicOp, LopTest, MemSize, MufuOp, Op, Operand, Pred, ShflMode, TexDim,
-    VoteMode, XmadC, RZ,
+    HSwizzle, ICmp, LogicOp, LopTest, MemSize, MufuOp, Op, Operand, Pred, ShflMode, SurfaceData,
+    SurfaceDim, TexDim, VoteMode, XmadC, RZ,
 };
 use crate::gpu::surface::{f16_to_f32, f32_to_f16};
 
@@ -245,6 +245,34 @@ pub trait TextureSource {
     ) -> ShaderResult<[f32; 4]> {
         Err(fault(format!(
             "shader: shadow sample of handle {handle:#x} with no depth source bound"
+        )))
+    }
+
+    /// The registers `suld` reads from texel `at` (`x`, `y`, and the layer
+    /// or slice) of the image `handle` names. Defaulted, like
+    /// [`TextureSource::surface_store`], because only a compute dispatch
+    /// binds images a shader can address this way.
+    fn surface_load(
+        &self,
+        handle: u32,
+        _at: [u32; 3],
+        _data: SurfaceData,
+    ) -> ShaderResult<[u32; 4]> {
+        Err(fault(format!(
+            "shader: surface load of handle {handle:#x} with no surface source bound"
+        )))
+    }
+
+    /// Write `sust`'s registers to texel `at` of the image `handle` names.
+    fn surface_store(
+        &self,
+        handle: u32,
+        _at: [u32; 3],
+        _data: SurfaceData,
+        _regs: [u32; 4],
+    ) -> ShaderResult<()> {
+        Err(fault(format!(
+            "shader: surface store to handle {handle:#x} with no surface source bound"
         )))
     }
 }
@@ -1032,6 +1060,39 @@ impl Invocation {
                 }
                 Op::Tld4 { .. } => {
                     self.run_tld4(program, pc, op, env, pending)?;
+                }
+                Op::Suld {
+                    coords,
+                    handle,
+                    handle_reg,
+                    dim,
+                    data,
+                    ..
+                } => {
+                    let handle = self.surface_handle(handle, handle_reg, env)?;
+                    let at = self.surface_coords(coords, dim);
+                    let regs = env.textures.surface_load(handle, at, data)?;
+                    self.land_texture(program, pc, regs.map(f32::from_bits), pending);
+                }
+                Op::Sust {
+                    src,
+                    coords,
+                    handle,
+                    handle_reg,
+                    dim,
+                    data,
+                } => {
+                    let handle = self.surface_handle(handle, handle_reg, env)?;
+                    let at = self.surface_coords(coords, dim);
+                    let words = surface_source_words(data);
+                    let regs = std::array::from_fn(|i| {
+                        if i < words {
+                            self.reg(src.wrapping_add(i as u8))
+                        } else {
+                            0
+                        }
+                    });
+                    env.textures.surface_store(handle, at, data, regs)?;
                 }
                 other => self.run_alu(other, env)?,
             }
@@ -2026,7 +2087,9 @@ impl Invocation {
             | Op::Texs { .. }
             | Op::Tex { .. }
             | Op::Txq { .. }
-            | Op::Tld4 { .. } => unreachable!("control flow is dispatched in execute"),
+            | Op::Tld4 { .. }
+            | Op::Suld { .. }
+            | Op::Sust { .. } => unreachable!("control flow is dispatched in execute"),
         }
         Ok(())
     }
@@ -2334,6 +2397,32 @@ impl Invocation {
         Ok(())
     }
 
+    /// A surface instruction's handle: its register's value when it is
+    /// bindless, and otherwise the word of the texture bank its immediate
+    /// names, which is where a bound `tex` reads its handle too.
+    fn surface_handle(&self, handle: u16, handle_reg: Option<u8>, env: &Env) -> ShaderResult<u32> {
+        match handle_reg {
+            Some(reg) => Ok(self.reg(reg)),
+            None => env
+                .consts
+                .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle)),
+        }
+    }
+
+    /// A surface instruction's `x`, `y` and layer or slice, from the
+    /// registers `dim` gives it. An array's layer is the low half of its
+    /// register, as Eden reads it.
+    fn surface_coords(&self, coords: u8, dim: SurfaceDim) -> [u32; 3] {
+        let at = |i: u8| self.reg(coords.wrapping_add(i));
+        match dim {
+            SurfaceDim::D1 | SurfaceDim::Buffer1d => [at(0), 0, 0],
+            SurfaceDim::Array1d => [at(0), 0, at(1) & 0xffff],
+            SurfaceDim::D2 => [at(0), at(1), 0],
+            SurfaceDim::Array2d => [at(0), at(1), at(2) & 0xffff],
+            SurfaceDim::D3 => [at(0), at(1), at(2)],
+        }
+    }
+
     /// Queue a sample's channels into the destination registers worked out at
     /// decode time, each due right before the first instruction that reads it.
     fn land_texture(
@@ -2379,13 +2468,11 @@ pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
             // channels land in consecutive registers from `dst`, one per set
             // mask bit, as whole floats.
             Op::Tex { dst, mask, .. } | Op::Txq { dst, mask, .. } | Op::Tld4 { dst, mask, .. } => {
-                mask.iter()
-                    .enumerate()
-                    .filter(|(_, &wanted)| wanted)
-                    .zip(0u8..)
-                    .map(|((channel, _), n)| (dst.wrapping_add(n), isa::TexsStore::Float(channel)))
-                    .collect()
+                consecutive_destinations(dst, mask)
             }
+            // A surface load lands the same way; a raw one's words are its
+            // first channels.
+            Op::Suld { dst, data, .. } => consecutive_destinations(dst, data.channels()),
             _ => continue,
         };
         let writes = destinations
@@ -2398,6 +2485,17 @@ pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
         out.push(super::TexsWrites { at: pc, writes });
     }
     out
+}
+
+/// One register per set `mask` bit, consecutive from `dst`, each holding
+/// its channel as a whole word.
+fn consecutive_destinations(dst: u8, mask: [bool; 4]) -> Vec<(u8, isa::TexsStore)> {
+    mask.iter()
+        .enumerate()
+        .filter(|(_, &wanted)| wanted)
+        .zip(0u8..)
+        .map(|((channel, _), n)| (dst.wrapping_add(n), isa::TexsStore::Float(channel)))
+        .collect()
 }
 
 /// Where `reg`'s pending write should land: right before the first later
@@ -2588,6 +2686,29 @@ fn reads(op: &Op) -> Vec<u8> {
             v
         }
         Op::Fswzadd { a, b, .. } => vec![a, b],
+        Op::Suld {
+            coords,
+            handle_reg,
+            dim,
+            ..
+        } => {
+            let mut v = surface_coord_regs(coords, dim);
+            v.extend(handle_reg);
+            v
+        }
+        Op::Sust {
+            src,
+            coords,
+            handle_reg,
+            dim,
+            data,
+            ..
+        } => {
+            let mut v = surface_coord_regs(coords, dim);
+            v.extend((0..surface_source_words(data) as u8).map(|i| src.wrapping_add(i)));
+            v.extend(handle_reg);
+            v
+        }
         _ => Vec::new(),
     };
     out.retain(|&r| r != RZ);
@@ -2676,6 +2797,9 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
             ..mask.iter().filter(|&&m| m).count() as u8)
             .map(|i| dst.wrapping_add(i))
             .collect(),
+        Op::Suld { dst, data, .. } => (0..data.channels().iter().filter(|&&m| m).count() as u8)
+            .map(|i| dst.wrapping_add(i))
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -2684,6 +2808,26 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
 /// tables Eden's GLSL backend emits as `FSWZ_A`/`FSWZ_B`
 /// (`glsl_emit_context.cpp`).
 const FSWZ_SIGNS: [(f32, f32); 4] = [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (0.0, -1.0)];
+
+/// The registers a surface instruction's coordinates occupy.
+fn surface_coord_regs(coords: u8, dim: SurfaceDim) -> Vec<u8> {
+    let count = match dim {
+        SurfaceDim::D1 | SurfaceDim::Buffer1d => 1,
+        SurfaceDim::Array1d | SurfaceDim::D2 => 2,
+        SurfaceDim::Array2d | SurfaceDim::D3 => 3,
+    };
+    (0..count).map(|i| coords.wrapping_add(i)).collect()
+}
+
+/// How many registers a surface store reads its value from: all four
+/// channels for a formatted store, which the decoder only accepts whole,
+/// and a register per 32 bits for a raw one.
+fn surface_source_words(data: SurfaceData) -> usize {
+    match data {
+        SurfaceData::Formatted(_) => 4,
+        SurfaceData::Raw(size) => size.words(),
+    }
+}
 
 /// How many lanes a warp shuffle is bounded by on hardware. A fragment quad
 /// is four of them and a CTA's threads are grouped into warps of this many;

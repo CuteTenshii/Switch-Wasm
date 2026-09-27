@@ -22,8 +22,9 @@ use crate::gpu::shader::interp::{
     resolve_warp, ConstCache, ConstantSource, Env, GlobalMemory, Halt, Invocation, MemoryTextures,
     ShaderResult, SharedMemory, TextureSource, WARP_LANES,
 };
+use crate::gpu::shader::isa::SurfaceData;
 use crate::gpu::shader::{decode_program_from_memory, Op};
-use crate::gpu::texture::{BlockCache, Descriptors};
+use crate::gpu::texture::{self, BlockCache, Descriptors, Texture};
 use crate::{Error, Result};
 use std::cell::RefCell;
 
@@ -78,6 +79,7 @@ pub fn dispatch(engine: &EngineCompute, ctx: &mut ExecCtx) -> Result<()> {
         tex_sampler_pool: engine.tex_sampler_pool(),
         descriptors: RefCell::new(crate::IdMap::default()),
         blocks: RefCell::new(BlockCache::default()),
+        surfaces: RefCell::new(crate::IdMap::default()),
     };
 
     let program = {
@@ -234,6 +236,10 @@ struct DispatchMemory<'a, 'b> {
     tex_sampler_pool: u64,
     descriptors: RefCell<crate::IdMap<u32, Descriptors>>,
     blocks: RefCell<BlockCache>,
+    /// The images surface instructions address, keyed by handle. Only the
+    /// TIC: an image is addressed without a sampler, and a handle's sampler
+    /// bits need not name a valid one.
+    surfaces: RefCell<crate::IdMap<u32, Texture>>,
 }
 
 impl DispatchMemory<'_, '_> {
@@ -288,6 +294,17 @@ impl GlobalMemory for DispatchMemory<'_, '_> {
 }
 
 impl DispatchMemory<'_, '_> {
+    /// The image `handle` names, parsed once per dispatch.
+    fn surface(&self, handle: u32) -> ShaderResult<Texture> {
+        if let Some(image) = self.surfaces.borrow().get(&handle).copied() {
+            return Ok(image);
+        }
+        let at = self.tex_header_pool + u64::from(texture::image_id(handle)) * 32;
+        let image = texture::read_image(&self.ctx.borrow(), at)?;
+        self.surfaces.borrow_mut().insert(handle, image);
+        Ok(image)
+    }
+
     /// The draw path's texture source over this dispatch's borrow, so a
     /// shader reads a texture alike whichever engine runs it.
     fn textures<R>(&self, read: impl FnOnce(&MemoryTextures) -> R) -> R {
@@ -354,6 +371,28 @@ impl TextureSource for DispatchMemory<'_, '_> {
         reference: f32,
     ) -> ShaderResult<[f32; 4]> {
         self.textures(|t| t.sample_compare(handle, u, v, layer, reference))
+    }
+
+    fn surface_load(&self, handle: u32, at: [u32; 3], data: SurfaceData) -> ShaderResult<[u32; 4]> {
+        let image = self.surface(handle)?;
+        Ok(texture::surface_load(&self.ctx.borrow(), &image, at, data)?)
+    }
+
+    fn surface_store(
+        &self,
+        handle: u32,
+        at: [u32; 3],
+        data: SurfaceData,
+        regs: [u32; 4],
+    ) -> ShaderResult<()> {
+        let image = self.surface(handle)?;
+        Ok(texture::surface_store(
+            &mut self.ctx.borrow_mut(),
+            &image,
+            at,
+            data,
+            regs,
+        )?)
     }
 }
 
@@ -487,6 +526,49 @@ mod tests {
                 pred: isa::Pred::PT,
                 src: isa::Pred::ALWAYS,
                 mode: isa::VoteMode::All,
+            },
+        )
+    }
+
+    /// `sust.p.2d.rgba [coords], src, handle_reg`, Echoes of Wisdom's form.
+    fn sust_p_2d(coords: u8, src: u8, handle_reg: u8) -> u64 {
+        encode(
+            0xeb20u64 << 48
+                | u64::from(handle_reg) << 39
+                | 3 << 33
+                | 0xf << 20
+                | PT
+                | u64::from(coords) << 8
+                | u64::from(src),
+            Op::Sust {
+                src,
+                coords,
+                handle: 0,
+                handle_reg: Some(handle_reg),
+                dim: isa::SurfaceDim::D2,
+                data: isa::SurfaceData::Formatted([true; 4]),
+            },
+        )
+    }
+
+    /// `suld.d.2d.b32 dst, [coords], handle_reg`.
+    fn suld_d_2d_b32(dst: u8, coords: u8, handle_reg: u8) -> u64 {
+        encode(
+            0xeb00u64 << 48
+                | 1 << 52
+                | u64::from(handle_reg) << 39
+                | 3 << 33
+                | 4 << 20
+                | PT
+                | u64::from(coords) << 8
+                | u64::from(dst),
+            Op::Suld {
+                dst,
+                coords,
+                handle: 0,
+                handle_reg: Some(handle_reg),
+                dim: isa::SurfaceDim::D2,
+                data: isa::SurfaceData::Raw(isa::SurfaceSize::B32),
             },
         )
     }
@@ -783,6 +865,75 @@ mod tests {
         let mut expected = vec![u32::MAX; 32];
         expected.extend([0xf; 4]);
         assert_eq!(h.read_output(36), expected);
+    }
+
+    /// Five threads each store `100 + tid` to texel `tid` of a 4x2 `R32F`
+    /// image, then, past a barrier, read texel `tid + 1` back raw. Thread
+    /// 4's store falls outside the image and is dropped, and the last two
+    /// reads fall outside it and read zero.
+    #[test]
+    fn a_dispatch_stores_to_an_image_and_reads_it_back() {
+        const TIC_POOL_AT: u64 = 0x3000;
+        const IMAGE_AT: u64 = 0x4000;
+        const PITCH: u32 = 64;
+        let mut h = Harness::new();
+        let image = h.base + IMAGE_AT;
+        let tic = [
+            // R32 (0x0f) of FLOAT (7) data.
+            0x0f | 7 << 7,
+            image as u32,
+            (image >> 32) as u32 | 2 << 21,
+            PITCH / 32,
+            3 | 1 << 23,
+            1,
+            0,
+            0,
+        ];
+        h.write_words(TIC_POOL_AT, &tic);
+
+        let out = h.base + OUTPUT_AT;
+        let program = [
+            s2r(0, SR_TIDX),
+            mov32i(1, 0),
+            mov32i(39, 0),
+            mov32i(5, 100),
+            iscadd(24, 0, 5, 0),
+            sust_p_2d(0, 24, 39),
+            bar_sync(),
+            mov32i(5, 1),
+            iscadd(2, 0, 5, 0),
+            mov32i(3, 0),
+            suld_d_2d_b32(8, 2, 39),
+            mov32i(10, out as u32),
+            iscadd(10, 0, 10, 2),
+            mov32i(11, (out >> 32) as u32),
+            stg(10, 0, 8),
+            exit(),
+        ];
+        let launch = Launch {
+            grid: [1, 1, 1],
+            block: [5, 1, 1],
+            ..Launch::default()
+        };
+        h.write_words(QMD_AT, &launch.words());
+        h.write_program(&program);
+        let mut engine = h.engine();
+        let pool = h.base + TIC_POOL_AT;
+        engine.regs.set(0x55D, (pool >> 32) as u32);
+        engine.regs.set(0x55E, pool as u32);
+        dispatch(&engine, &mut h.ctx()).unwrap();
+
+        assert_eq!(h.read_output(5), vec![101, 102, 103, 0, 0]);
+        let base = h.base;
+        let ctx = h.ctx();
+        let row: Vec<u32> = (0..5)
+            .map(|x| ctx.read_u32(base + IMAGE_AT + x * 4).unwrap())
+            .collect();
+        assert_eq!(
+            row,
+            vec![100, 101, 102, 103, 0],
+            "the fifth store is dropped"
+        );
     }
 
     #[test]

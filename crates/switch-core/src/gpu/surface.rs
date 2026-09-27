@@ -713,6 +713,54 @@ impl ColorFormat {
         !self.is_srgb() && self.has_alpha() && self.order8().is_some()
     }
 
+    /// A formatted surface store's registers (`sust.p`), packed into this
+    /// format.
+    ///
+    /// A float or normalized channel's register holds an `f32` and goes
+    /// through [`ColorFormat::encode`]'s conversion. An integer channel's
+    /// holds the integer itself and keeps its low bits, as a store to an
+    /// integer image does; converting it through an `f32` would round every
+    /// value above 2^24.
+    pub fn encode_registers(&self, regs: [u32; 4]) -> Result<u128> {
+        let Some(packing) = self.packing().filter(|p| p.numeric.is_integer()) else {
+            return self.encode(regs.map(f32::from_bits));
+        };
+        Ok(packing
+            .channels
+            .iter()
+            .zip(regs)
+            .filter(|(channel, _)| channel.bits != 0)
+            .fold(0u128, |stored, (channel, reg)| {
+                stored | (u128::from(reg) & ((1u128 << channel.bits) - 1)) << channel.shift
+            }))
+    }
+
+    /// A formatted surface load's registers (`suld.p`): the inverse of
+    /// [`ColorFormat::encode_registers`]. A signed integer channel is
+    /// sign-extended, and an integer format with no alpha reads alpha as the
+    /// integer one.
+    pub fn decode_registers(&self, raw: u128) -> Result<[u32; 4]> {
+        let Some(packing) = self.packing().filter(|p| p.numeric.is_integer()) else {
+            return Ok(self.decode(raw)?.map(f32::to_bits));
+        };
+        let mut regs = packing.channels.map(|channel| {
+            if channel.bits == 0 {
+                return 0;
+            }
+            let bits = (raw >> channel.shift) & ((1u128 << channel.bits) - 1);
+            match packing.numeric {
+                Numeric::Sint => {
+                    (((bits << (128 - channel.bits)) as i128) >> (128 - channel.bits)) as u32
+                }
+                _ => bits as u32,
+            }
+        });
+        if !self.has_alpha() {
+            regs[3] = 1;
+        }
+        Ok(regs)
+    }
+
     /// Unpack raw pixel bytes into a normalized RGBA colour.
     fn decode_stored(&self, raw: u128) -> Result<[f32; 4]> {
         let packing = self.packing().ok_or_else(|| {
@@ -768,6 +816,12 @@ enum Numeric {
     /// sign-less halves, which keep the 5-bit exponent and narrow the
     /// mantissa. So a width is always five of exponent and the rest mantissa.
     Float,
+}
+
+impl Numeric {
+    fn is_integer(self) -> bool {
+        matches!(self, Numeric::Uint | Numeric::Sint)
+    }
 }
 
 /// A colour format's stored shape: R, G, B and A in order, and how to read
@@ -1067,6 +1121,35 @@ mod tests {
             *byte = (words[i / 4] >> (8 * (i % 4))) as u8;
         }
         out
+    }
+
+    /// A 32-bit integer survives a formatted store and load exactly, which
+    /// it would not through an `f32`; a signed one comes back sign-extended,
+    /// and a float format carries the register's float.
+    #[test]
+    fn formatted_registers_keep_integers_exact() {
+        let r32_uint = ColorFormat::from_raw(0xE4).unwrap();
+        let raw = r32_uint.encode_registers([0xFFFF_FFFF, 7, 7, 7]).unwrap();
+        assert_eq!(raw, 0xFFFF_FFFF);
+        assert_eq!(
+            r32_uint.decode_registers(raw).unwrap(),
+            [0xFFFF_FFFF, 0, 0, 1]
+        );
+
+        let rg8_uint = ColorFormat::from_raw(0xED).unwrap();
+        // Only the low bits of each channel are kept.
+        let raw = rg8_uint.encode_registers([0x1_23, 0x45, 0, 0]).unwrap();
+        assert_eq!(raw, 0x45_23);
+
+        let r32_sint = ColorFormat::from_raw(0xE3).unwrap();
+        let minus_two = (-2i32) as u32;
+        let raw = r32_sint.encode_registers([minus_two, 0, 0, 0]).unwrap();
+        assert_eq!(r32_sint.decode_registers(raw).unwrap()[0], minus_two);
+
+        let rgba32_float = ColorFormat::from_raw(0xC0).unwrap();
+        let regs = [1.5f32, -2.0, 0.25, 1.0].map(f32::to_bits);
+        let raw = rgba32_float.encode_registers(regs).unwrap();
+        assert_eq!(rgba32_float.decode_registers(raw).unwrap(), regs);
     }
 
     /// One GOB of depth at slice zero is a 2D surface, and the volume
