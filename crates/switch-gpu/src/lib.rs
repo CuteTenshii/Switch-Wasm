@@ -1981,6 +1981,15 @@ impl Gpu {
                 }),
                 count: None,
             });
+            // A texture the program only asked the size of is bound as 2D,
+            // and a 2D view of a texture with layers is one the device
+            // refuses to make.
+            if view_dimension == wgpu::TextureViewDimension::D2 && upload.layers > 1 {
+                return Err(format!(
+                    "binds a {}-layer texture where the program declared a 2D one",
+                    upload.layers
+                ));
+            }
             let held = self.held_layers(upload, compare, view_dimension)?;
             let texture = if !held.is_empty() {
                 self.texture_over_held(upload, view_dimension, &held)?
@@ -4804,6 +4813,162 @@ mod tests {
                 },
             );
         }
+    }
+
+    /// A `tld4` gathers the same four texels on the device as on the
+    /// rasterizer, in the same order, for the channel it names after the
+    /// descriptor's swizzle.
+    ///
+    /// The coordinates ramp across the 8x8 image as in the bindless test, so
+    /// every pixel's footprint straddles texels whole, and the left and top
+    /// edges put a footprint's corner one texel outside the image, where the
+    /// sampler's clamp decides what it reads.
+    #[test]
+    fn a_gather_reads_the_texels_the_rasterizer_reads() {
+        for component in [0, 1] {
+            let set_up = |h: &mut Harness| {
+                h.bindless_texture();
+                // `TexCbIndex`: bound texture handles come out of the bank
+                // the bindless fixture writes its handle into.
+                h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
+                h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+                h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+                h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+            };
+            let new =
+                move || Harness::with_fragment_shader(testing::gather_fragment_shader(component));
+
+            // The reference has to be the image's channel, or two renderers
+            // that both gathered nothing would agree.
+            let mut h = new();
+            set_up(&mut h);
+            h.draw_with(&mut Software).expect("the draw");
+            let channel = |texel: u32| (texel >> (8 * component)) & 0xff;
+            let size = testing::BINDLESS_TEXTURE_SIZE;
+            let values: Vec<u32> = (0..size * size)
+                .map(|i| channel(testing::bindless_texel(i % size, i / size)))
+                .collect();
+            let drawn: Vec<u32> = h.target().into_iter().filter(|&c| c != 0).collect();
+            assert!(
+                !drawn.is_empty(),
+                "component {component}: nothing was drawn"
+            );
+            for pixel in &drawn {
+                for byte in pixel.to_le_bytes() {
+                    assert!(
+                        values.contains(&u32::from(byte)),
+                        "component {component}: {pixel:#010x} holds {byte:#x}, no texel's value"
+                    );
+                }
+            }
+
+            agrees_shading(new, |_| {}, set_up);
+        }
+    }
+
+    /// Nintendo Switch Sports' `txq` and `tld4`, word for word, translate to a
+    /// module the device accepts.
+    #[test]
+    fn nintendo_switch_sports_txq_and_tld4_are_wgsl_naga_accepts() {
+        use super::{wgpu, wgsl, Compiled, Layout, Stage};
+        use switch_core::gpu::shader::isa::{self, Instruction, Pred};
+        use switch_core::gpu::shader::{Op, Program};
+
+        let Ok(gpu) = super::Gpu::open() else {
+            return;
+        };
+        let mut program = Program::default();
+        let words = [0xdf48008180470800, 0xc83a0086aff70208];
+        let ops = words.map(|word| isa::decode(word).op);
+        for (index, op) in ops.into_iter().chain([Op::Exit]).enumerate() {
+            assert!(!matches!(op, Op::Unimplemented { .. }), "{op:?}");
+            program.insns.push(Instruction {
+                pred: Pred::ALWAYS,
+                op,
+            });
+            program.offsets.push(index as u32 * 8);
+        }
+        let translated = wgsl::translate_for(&Compiled::new(&program), wgsl::Caps::NONE)
+            .expect("a txq of a texture the program gathers from translates");
+        let layout = Layout::of(&translated, Stage::Fragment);
+        let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
+        assert!(source.contains("textureGather(0, tex0"), "{source}");
+        assert!(source.contains("textureNumLevels(tex0)"), "{source}");
+        let _ = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("txq and tld4"),
+                source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+            });
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
+        assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+    }
+
+    /// Nintendo Switch Sports' `i2i.cc` and `csetp.neu`, word for word,
+    /// translate to a module the device accepts.
+    #[test]
+    fn nintendo_switch_sports_csetp_is_wgsl_naga_accepts() {
+        use super::{wgpu, wgsl, Compiled, Layout, Stage};
+        use switch_core::gpu::shader::isa::{self, Instruction, Pred};
+        use switch_core::gpu::shader::{Op, Program};
+
+        let Ok(gpu) = super::Gpu::open() else {
+            return;
+        };
+        let mut program = Program::default();
+        let words = [0x5ce0800000170aff, 0x50a0038000070d07];
+        let ops = words.map(|word| isa::decode(word).op);
+        for (index, op) in ops.into_iter().chain([Op::Exit]).enumerate() {
+            assert!(!matches!(op, Op::Unimplemented { .. }), "{op:?}");
+            program.insns.push(Instruction {
+                pred: Pred::ALWAYS,
+                op,
+            });
+            program.offsets.push(index as u32 * 8);
+        }
+        let translated = wgsl::translate_for(&Compiled::new(&program), wgsl::Caps::NONE)
+            .expect("an i2i.cc and a csetp translate");
+        let layout = Layout::of(&translated, Stage::Fragment);
+        let source = wgsl::module(&translated, Stage::Fragment, &layout).expect("a module");
+        assert!(source.contains("var ccZ: bool"), "{source}");
+        let _ = gpu
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("csetp"),
+                source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+            });
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        let rejected = gpu.failed.lock().ok().and_then(|mut e| e.fresh.take());
+        assert!(rejected.is_none(), "naga rejected {source}\n{rejected:?}");
+    }
+
+    /// A `tex.aoffi` whose offset was loaded as an immediate samples the same
+    /// texel on the device as on the rasterizer.
+    #[test]
+    fn a_constant_texel_offset_samples_what_the_rasterizer_samples() {
+        let set_up = |h: &mut Harness| {
+            h.bindless_texture();
+            h.engine.regs.set(0x982, testing::BINDLESS_HANDLE_BANK);
+            h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+        };
+        let new = || Harness::with_fragment_shader(testing::offset_fragment_shader());
+
+        let mut h = new();
+        set_up(&mut h);
+        h.draw_with(&mut Software).expect("the draw");
+        let size = testing::BINDLESS_TEXTURE_SIZE;
+        let texels: Vec<u32> = (0..size * size)
+            .map(|i| testing::bindless_texel(i % size, i / size))
+            .collect();
+        let drawn: std::collections::BTreeSet<u32> =
+            h.target().into_iter().filter(|&c| c != 0).collect();
+        assert!(drawn.len() >= 8, "only {drawn:x?} was drawn");
+        assert!(drawn.iter().all(|c| texels.contains(c)), "{drawn:x?}");
+
+        agrees_shading(new, |_| {}, set_up);
     }
 
     /// A texture that is the top-left corner of a surface the device holds,

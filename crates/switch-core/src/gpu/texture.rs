@@ -542,6 +542,11 @@ fn texel_kind_for(components_sizes: u32, data_type: u32) -> Result<TexelKind> {
         (0x1B, FLOAT) => 0xF2, // R16               -> R16Float
         (0x1B, UNORM) => 0xEE, // R16               -> R16Unorm
         (0x21, FLOAT) => 0xE0, // B10G11R11         -> B10G11R11Float
+        // `ZF32`, a depth surface sampled as a colour: one float, the depth,
+        // which is an `R32` texel exactly. Nintendo Switch Sports reads its
+        // depth this way. Its stencil-carrying sibling, handled above, is
+        // the one that needs a kind of its own.
+        (0x2F, FLOAT) => 0xE5, // ZF32              -> R32Float
         (other, UNORM) => {
             return Err(Error::Gpu(format!(
                 "texture: unsupported TIC COMPONENTS_SIZES {other:#x}"
@@ -893,6 +898,60 @@ pub fn sample_with(
     Ok(apply_swizzle(texture.swizzle, texel))
 }
 
+/// Gather channel `component`, after the swizzle, of the four texels a
+/// bilinear sample at `(u, v)` would blend, in the order `(u0,v1) (u1,v1)
+/// (u1,v0) (u0,v0)`: GL's, and what WGSL's `textureGather` returns. The
+/// footprint is [`crate::gpu::surface::bilinear`]'s, so the two agree about
+/// which texels a coordinate touches.
+pub fn gather_with(
+    ctx: &ExecCtx,
+    d: &Descriptors,
+    u: f64,
+    v: f64,
+    layer: u32,
+    component: usize,
+    blocks: &RefCell<BlockCache>,
+) -> Result<[f32; 4]> {
+    let (texture, sampler) = (&d.texture, d.sampler);
+    // The footprint's corner can be a texel before the first, which the
+    // sampler's wrap then resolves the way the device's does. A blend weights
+    // that texel by zero, which is why `bilinear` can clamp it away, but a
+    // gather returns it.
+    let x0 = (wrap_coord(sampler.wrap_u, u, texture.width) - 0.5).floor() as i64;
+    let y0 = (wrap_coord(sampler.wrap_v, v, texture.height) - 0.5).floor() as i64;
+    let at = |x: i64, y: i64| -> Result<f32> {
+        let x = wrap_index(sampler.wrap_u, x, texture.width);
+        let y = wrap_index(sampler.wrap_v, y, texture.height);
+        let texel = texture.texel(x, y, layer, ctx, blocks)?;
+        Ok(apply_swizzle(texture.swizzle, texel)[component & 3])
+    };
+    Ok([
+        at(x0, y0 + 1)?,
+        at(x0 + 1, y0 + 1)?,
+        at(x0 + 1, y0)?,
+        at(x0, y0)?,
+    ])
+}
+
+/// Which texel of a row or column `size` long index `i` reads under `mode`,
+/// for an index a footprint put outside it.
+fn wrap_index(mode: Wrap, i: i64, size: u32) -> u32 {
+    let size = i64::from(size.max(1));
+    let i = match mode {
+        Wrap::Repeat => i.rem_euclid(size),
+        Wrap::Mirror => {
+            let folded = i.rem_euclid(2 * size);
+            if folded >= size {
+                2 * size - 1 - folded
+            } else {
+                folded
+            }
+        }
+        Wrap::ClampToEdge | Wrap::ClampToBorder => i.clamp(0, size - 1),
+    };
+    i as u32
+}
+
 /// Sample a 3D image, whose third coordinate is normalized like the other
 /// two rather than a layer index.
 ///
@@ -1090,6 +1149,17 @@ mod tests {
         assert_eq!(image.width, 16);
         assert_eq!(image.height, 8);
         assert_eq!(image.layout, Layout::Pitch { pitch: 64 });
+    }
+
+    /// `ZF32` sampled as a colour is an `R32` float texel, and reads the same
+    /// on both renderers as one.
+    #[test]
+    fn a_float_depth_surface_samples_as_one_float_channel() {
+        const FLOAT: u32 = 7;
+        assert_eq!(
+            texel_kind_for(0x2f, FLOAT).unwrap(),
+            texel_kind_for(0x0f, FLOAT).unwrap(),
+        );
     }
 
     /// Tomodachi Life's environment cube array, word for word: 11 cubes of

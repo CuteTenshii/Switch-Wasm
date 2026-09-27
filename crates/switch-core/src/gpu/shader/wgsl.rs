@@ -188,6 +188,15 @@ fn texSample(imm: u32, dim: u32, u: f32, v: f32, layer: u32, w: f32) -> vec4<f32
 fn texSampleCompare(imm: u32, dim: u32, u: f32, v: f32, layer: u32, dref: f32) -> vec4<f32> {
   return vec4<f32>(0.0, 0.0, 0.0, 1.0);
 }
+fn texDims(imm: u32, lod: u32) -> vec4<u32> {
+  return vec4<u32>(1u, 1u, 1u, 1u);
+}
+fn texSampleOffset(imm: u32, offset: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {
+  return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+fn texGather(imm: u32, component: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {
+  return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
 ";
 
 /// How deep the emitted reconvergence stack is.
@@ -239,6 +248,10 @@ pub struct Translation {
     /// as a shadow map, a depth image compared against a reference rather
     /// than read.
     pub textures: Vec<(TextureSlot, TexDim, bool)>,
+    /// Every distinct texel offset a `tex.aoffi` samples with, as `(x, y)`.
+    /// WGSL takes an offset only as a constant, so a call names its offset by
+    /// its index here and [`module`] expands each one.
+    pub texture_offsets: Vec<(i32, i32)>,
     /// The first instruction that asks which lane of the 2x2 quad it is, if
     /// any.
     pub quad: Option<usize>,
@@ -295,6 +308,13 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
     let leaders = leaders(program)?;
     let mut emitter = Emitter::new(program);
     emitter.emit_blocks(&leaders)?;
+    // Nintendo Switch Sports' vertex shaders query a texture's size to scale
+    // coordinates by, and never sample it.
+    for &slot in &emitter.queried {
+        if !emitter.textures.iter().any(|&(seen, _, _)| seen == slot) {
+            emitter.textures.push((slot, TexDim::T2d, false));
+        }
+    }
     Ok(Translation {
         source: emitter.finish(&leaders),
         registers: emitter.regs.iter().copied().collect(),
@@ -303,6 +323,7 @@ pub fn translate_for(program: &Compiled, caps: Caps) -> Result<Translation, Unsu
         centroid_loads: emitter.centroid_loads.iter().copied().collect(),
         const_banks: emitter.banks.iter().copied().collect(),
         textures: emitter.textures.clone(),
+        texture_offsets: emitter.texture_offsets.clone(),
         quad: emitter.quad,
         quad_swap: emitter.quad_swap,
         subgroups: caps.subgroups,
@@ -617,6 +638,9 @@ struct Emitter<'a> {
     preds: BTreeSet<u8>,
     helpers: BTreeSet<&'static str>,
     uses_carry: bool,
+    /// Whether anything sets or tests the zero, sign or overflow flags, which
+    /// are declared beside `carry` when so.
+    uses_flags: bool,
     uses_stack: bool,
     /// The first instruction that asks which lane of its quad it is.
     quad: Option<usize>,
@@ -636,6 +660,13 @@ struct Emitter<'a> {
     temps: usize,
     /// The first instruction of the block being emitted.
     block: usize,
+    /// Each texture a `txq` asked the size of. A binding's type comes from
+    /// how the texture is sampled, which a query does not say, so one only
+    /// ever queried is bound as a 2D image; a backend refuses the draw if the
+    /// texture turns out to have layers.
+    queried: Vec<TextureSlot>,
+    /// See [`Translation::texture_offsets`].
+    texture_offsets: Vec<(i32, i32)>,
 }
 
 impl<'a> Emitter<'a> {
@@ -648,6 +679,7 @@ impl<'a> Emitter<'a> {
             preds: BTreeSet::new(),
             helpers: BTreeSet::new(),
             uses_carry: false,
+            uses_flags: false,
             uses_stack: false,
             quad: None,
             quad_swap: None,
@@ -659,6 +691,8 @@ impl<'a> Emitter<'a> {
             globals: Vec::new(),
             temps: 0,
             block: 0,
+            queried: Vec::new(),
+            texture_offsets: Vec::new(),
         }
     }
 
@@ -677,6 +711,53 @@ impl<'a> Emitter<'a> {
     /// memory it points at. Eden calls the same pass
     /// `global_memory_to_storage_buffer`.
     fn global_base(&self, at: usize, addr: u8) -> Option<(u8, u16, u8)> {
+        self.indexed_global_base(at, addr)
+            .or_else(|| self.direct_global_base(at, addr))
+    }
+
+    /// The other way a program reaches a descriptor: loading it whole into
+    /// the address pair and reading through it with no index, a 64-bit
+    /// `ldc` or two `mov`s of its halves. Nintendo Switch Sports does it in
+    /// the fourth instruction of a shader.
+    ///
+    /// ```text
+    /// ldc.64 r0, c1[0x40]
+    /// ldg.64 r2, [r0]
+    /// ```
+    fn direct_global_base(&self, at: usize, addr: u8) -> Option<(u8, u16, u8)> {
+        let lo = self.sole_writer(at, addr)?;
+        let hi = self.sole_writer(at, addr.wrapping_add(1))?;
+        match (self.program.op(lo), self.program.op(hi)) {
+            (
+                Op::Ldc {
+                    dst,
+                    bank,
+                    offset,
+                    idx: RZ,
+                    size: MemSize::B64,
+                },
+                _,
+            ) if lo == hi && dst == addr => Some((bank, (offset as u32 & 0xffff) as u16, RZ)),
+            (
+                Op::Mov {
+                    src: Operand::Const { bank, offset },
+                    ..
+                },
+                Op::Mov {
+                    src:
+                        Operand::Const {
+                            bank: hi_bank,
+                            offset: hi_offset,
+                        },
+                    ..
+                },
+            ) if hi_bank == bank && hi_offset == offset.wrapping_add(4) => Some((bank, offset, RZ)),
+            _ => None,
+        }
+    }
+
+    /// The indexed form: see [`Emitter::global_base`]'s own doc example.
+    fn indexed_global_base(&self, at: usize, addr: u8) -> Option<(u8, u16, u8)> {
         let (mut lo, mut hi) = (None, None);
         for i in (0..at).rev() {
             match self.program.op(i) {
@@ -740,21 +821,7 @@ impl<'a> Emitter<'a> {
     /// and binding a guess draws a plausible wrong texture instead of
     /// falling back to the rasterizer, which samples the register itself.
     fn bindless_slot(&self, at: usize, reg: u8) -> Option<TextureSlot> {
-        let writes_reg = |i: usize| super::interp::writes(&self.program.op(i)).contains(&reg);
-        let writer = match (self.block..at).rev().find(|&i| writes_reg(i)) {
-            Some(writer) => writer,
-            None => {
-                let mut writers = (0..self.program.len()).filter(|&i| writes_reg(i));
-                let only = writers.next()?;
-                if writers.next().is_some() {
-                    return None;
-                }
-                only
-            }
-        };
-        if self.program.pred(writer) != Pred::ALWAYS {
-            return None;
-        }
+        let writer = self.sole_writer(at, reg)?;
         match self.program.op(writer) {
             Op::Mov {
                 src: Operand::Const { bank, offset },
@@ -776,6 +843,50 @@ impl<'a> Emitter<'a> {
                     offset: offset as u16,
                 })
             }
+            _ => None,
+        }
+    }
+
+    /// The one instruction whose value `reg` holds when the instruction at
+    /// `at` reads it, if that can be told without following control flow:
+    /// the nearest write earlier in the same block, or failing that the only
+    /// write in the program. Either way unguarded, since a guarded write
+    /// leaves whatever was there before on the lanes that skip it.
+    ///
+    /// The reader itself does not count: it reads its operands before its
+    /// results land, and a sample that writes its results over one of its
+    /// own operand registers is an ordinary one.
+    fn sole_writer(&self, at: usize, reg: u8) -> Option<usize> {
+        let writes_reg = |i: usize| super::interp::writes(&self.program.op(i)).contains(&reg);
+        let writer = match (self.block..at).rev().find(|&i| writes_reg(i)) {
+            Some(writer) => writer,
+            None => {
+                let mut writers = (0..self.program.len()).filter(|&i| i != at && writes_reg(i));
+                let only = writers.next()?;
+                if writers.next().is_some() {
+                    return None;
+                }
+                only
+            }
+        };
+        (self.program.pred(writer) == Pred::ALWAYS).then_some(writer)
+    }
+
+    /// The immediate `reg` holds when the instruction at `at` reads it, if
+    /// it was loaded with one. See [`Emitter::sole_writer`].
+    fn constant_in(&self, at: usize, reg: u8) -> Option<u32> {
+        match self.program.op(self.sole_writer(at, reg)?) {
+            Op::Mov32i { imm, .. } => Some(imm),
+            Op::Mov {
+                src: Operand::Imm(imm),
+                ..
+            } => Some(imm),
+            // A copy of the zero register, which is how a compiler writes a
+            // zero: Nintendo Switch Sports clears its texel offset that way.
+            Op::Mov {
+                src: Operand::Reg(RZ),
+                ..
+            } => Some(0),
             _ => None,
         }
     }
@@ -1938,6 +2049,7 @@ impl Emitter<'_> {
                 dst_signed,
                 sat,
                 sel,
+                cc,
             } => {
                 let raw = self.operand(src);
                 let value = self.narrow(&raw, sel, src_bytes, src_signed);
@@ -1958,7 +2070,18 @@ impl Emitter<'_> {
                 } else {
                     value
                 };
+                // Bound first: the flags read the value, and `dst` may be
+                // `RZ`, which is exactly how a compiler asks for only them.
+                let value = self.bind(&value);
                 self.set_r(dst, &value);
+                if cc {
+                    self.uses_carry = true;
+                    self.uses_flags = true;
+                    self.line(&format!("ccZ = ({value} == 0u);"));
+                    self.line(&format!("ccS = (bitcast<i32>({value}) < 0);"));
+                    self.line("carry = false;");
+                    self.line("ccO = false;");
+                }
             }
 
             // ---- moves ----
@@ -1990,6 +2113,26 @@ impl Emitter<'_> {
                 let value = self.bind(&value);
                 self.set_p(p0, &value);
                 self.set_p(p1, &format!("!{value}"));
+            }
+            Op::Csetp {
+                p0,
+                p1,
+                test,
+                src,
+                op: bop,
+            } => {
+                self.uses_carry = true;
+                self.uses_flags = true;
+                let flags = ["ccZ", "ccS", "carry", "ccO"].map(str::to_string);
+                let Some(passed) = super::isa::flow_test(test, flags, &TextLogic) else {
+                    return Err(Unsupported::Op { at, op });
+                };
+                let passed = self.bind(&passed);
+                let source = self.holds(src);
+                let a = self.combine(bop, &passed, &source);
+                let b = self.combine(bop, &format!("!{passed}"), &source);
+                self.set_p(p0, &a);
+                self.set_p(p1, &b);
             }
 
             // ---- memory ----
@@ -2033,7 +2176,7 @@ impl Emitter<'_> {
                 coords,
                 layer,
                 dref,
-                offset: None,
+                offset,
                 handle,
                 handle_reg,
                 dim,
@@ -2045,8 +2188,34 @@ impl Emitter<'_> {
                         .bindless_slot(at, reg)
                         .ok_or(Unsupported::UntracedHandle { at })?,
                 };
-                self.sample_texture(at, slot, dim, dref, coords, layer)?;
+                match offset {
+                    None => self.sample_texture(at, slot, dim, dref, coords, layer)?,
+                    Some(reg) => {
+                        self.sample_offset(at, slot, dim, dref, coords, layer, reg, op)?;
+                    }
+                }
             }
+            Op::Txq { lod, handle, .. } => {
+                self.query_texture(at, TextureSlot::Bound(handle), lod);
+            }
+            // WGSL takes a gather's texel offset only as a constant, which a
+            // register is not.
+            Op::Tld4 {
+                coords,
+                layer,
+                offset: None,
+                handle,
+                dim,
+                component,
+                ..
+            } => self.gather_texture(
+                at,
+                TextureSlot::Bound(handle),
+                dim,
+                coords,
+                layer,
+                component,
+            )?,
 
             // `shfl` reads the value of another lane of the 2x2 quad, which
             // is the whole warp the rasterizer models, so `quadSwapX`/`Y`/
@@ -2251,7 +2420,7 @@ impl Emitter<'_> {
             // A `tex.aoffi`'s offset is in texels, and `texSample` takes
             // normalized coordinates and knows no texture's size, so a shader
             // with one is the rasterizer's.
-            Op::Tex { .. } => return Err(Unsupported::Op { at, op }),
+            Op::Tld4 { .. } => return Err(Unsupported::Op { at, op }),
         }
         Ok(())
     }
@@ -2307,7 +2476,133 @@ impl Emitter<'_> {
     }
 }
 
+/// A vector's components, in channel order.
+const COMPONENT: [&str; 4] = ["x", "y", "z", "w"];
+
 impl Emitter<'_> {
+    /// Record that the program samples `slot` as `dim`, a shadow map or not.
+    fn bind_texture(
+        &mut self,
+        at: usize,
+        slot: TextureSlot,
+        dim: TexDim,
+        compare: bool,
+    ) -> Result<(), Unsupported> {
+        match self.textures.iter().find(|&&(seen, _, _)| seen == slot) {
+            // One binding cannot be both a colour image and a depth
+            // one (they are different WGSL types) so a program that
+            // reads the same slot each way is the rasterizer's.
+            Some(&(_, _, was)) if was != compare => Err(Unsupported::DepthCompare { at }),
+            Some(_) => Ok(()),
+            None => {
+                self.textures.push((slot, dim, compare));
+                Ok(())
+            }
+        }
+    }
+
+    /// A `tex.aoffi`: a plain sample moved by a texel offset, which WGSL
+    /// takes only as a constant. So the register has to have been loaded
+    /// with an immediate, and the offset is recorded once per distinct value
+    /// and named by its index. It packs a signed four-bit offset per axis,
+    /// `x` in the low nibble and `y` in the next, as `interp` unpacks it.
+    /// A shadow sample with one, and an image with no 2D offset to give, are
+    /// the rasterizer's.
+    #[allow(clippy::too_many_arguments)]
+    fn sample_offset(
+        &mut self,
+        at: usize,
+        slot: TextureSlot,
+        dim: TexDim,
+        dref: Option<u8>,
+        coords: [u8; 3],
+        layer: Option<u8>,
+        offset: u8,
+        op: Op,
+    ) -> Result<(), Unsupported> {
+        let refuse = Unsupported::Op { at, op };
+        if dref.is_some() || !matches!(dim, TexDim::T2d | TexDim::T2dArray) {
+            return Err(refuse);
+        }
+        let packed = self.constant_in(at, offset).ok_or(refuse)?;
+        let axis = |shift: u32| ((packed >> shift) as i32) << 28 >> 28;
+        let texel = (axis(0), axis(4));
+        let index = match self.texture_offsets.iter().position(|&seen| seen == texel) {
+            Some(index) => index,
+            None => {
+                self.texture_offsets.push(texel);
+                self.texture_offsets.len() - 1
+            }
+        };
+        self.bind_texture(at, slot, dim, false)?;
+        let u = self.f(coords[0]);
+        let v = self.f(coords[1]);
+        let layer = match layer {
+            Some(reg) => {
+                let reg = self.r(reg);
+                format!("({reg} & 0xffffu)")
+            }
+            None => "0u".to_string(),
+        };
+        let color = self.bind(&format!(
+            "texSampleOffset({}u, {index}u, {u}, {v}, {layer})",
+            slot.key()
+        ));
+        for (reg, store, _) in self.program.texs_writes(at).to_vec() {
+            if let TexsStore::Float(channel) = store {
+                self.set_f(reg, &format!("{color}.{}", COMPONENT[channel]));
+            }
+        }
+        Ok(())
+    }
+
+    /// `txq`: the size of a texture the program also samples, whole
+    /// integers straight into the registers. Carried as floats they would
+    /// be denormals, which a device is free to flush.
+    fn query_texture(&mut self, at: usize, slot: TextureSlot, lod: u8) {
+        self.queried.push(slot);
+        let lod = self.r(lod);
+        let size = self.bind(&format!("texDims({}u, {lod})", slot.key()));
+        for (reg, store, _) in self.program.texs_writes(at).to_vec() {
+            if let TexsStore::Float(channel) = store {
+                self.set_r(reg, &format!("{size}.{}", COMPONENT[channel]));
+            }
+        }
+    }
+
+    /// `tld4`: one channel of the texels a bilinear sample would blend, as
+    /// WGSL's `textureGather` returns them.
+    fn gather_texture(
+        &mut self,
+        at: usize,
+        slot: TextureSlot,
+        dim: TexDim,
+        coords: [u8; 3],
+        layer: Option<u8>,
+        component: u8,
+    ) -> Result<(), Unsupported> {
+        self.bind_texture(at, slot, dim, false)?;
+        let u = self.f(coords[0]);
+        let v = self.f(coords[1]);
+        let layer = match layer {
+            Some(reg) => {
+                let reg = self.r(reg);
+                format!("({reg} & 0xffffu)")
+            }
+            None => "0u".to_string(),
+        };
+        let texels = self.bind(&format!(
+            "texGather({}u, {component}u, {u}, {v}, {layer})",
+            slot.key()
+        ));
+        for (reg, store, _) in self.program.texs_writes(at).to_vec() {
+            if let TexsStore::Float(channel) = store {
+                self.set_f(reg, &format!("{texels}.{}", COMPONENT[channel]));
+            }
+        }
+        Ok(())
+    }
+
     /// Sample `handle` and land the channels where the program recorded
     /// they go, for `texs` and `tex` alike: the two differ in where their
     /// operands sit, not in what they sample. `layer` is the register an
@@ -2322,16 +2617,7 @@ impl Emitter<'_> {
         layer: Option<u8>,
     ) -> Result<(), Unsupported> {
         let compare = dref.is_some();
-        match self.textures.iter().find(|&&(seen, _, _)| seen == slot) {
-            // One binding cannot be both a colour image and a depth
-            // one (they are different WGSL types) so a program that
-            // reads the same slot each way is the rasterizer's.
-            Some(&(_, _, was)) if was != compare => {
-                return Err(Unsupported::DepthCompare { at });
-            }
-            Some(_) => {}
-            None => self.textures.push((slot, dim, compare)),
-        }
+        self.bind_texture(at, slot, dim, compare)?;
         let key = slot.key();
         let u = self.f(coords[0]);
         // A 1D image has one coordinate, and the register after a
@@ -2385,7 +2671,6 @@ impl Emitter<'_> {
         // hardware does not.
         let writes = self.program.texs_writes(at).to_vec();
         for (reg, store, _) in writes {
-            const COMPONENT: [&str; 4] = ["x", "y", "z", "w"];
             match store {
                 TexsStore::Float(channel) => {
                     self.set_f(reg, &format!("{color}.{}", COMPONENT[channel]));
@@ -2577,6 +2862,11 @@ impl Emitter<'_> {
         if self.uses_carry {
             out.push_str("  var carry: bool = false;\n");
         }
+        if self.uses_flags {
+            out.push_str(
+                "  var ccZ: bool = false;\n  var ccS: bool = false;\n  var ccO: bool = false;\n",
+            );
+        }
         if self.uses_stack {
             out.push_str(&format!(
                 "  var stack: array<u32, {RECONVERGENCE_DEPTH}>;\n"
@@ -2648,6 +2938,8 @@ pub struct Layout {
     pub const_banks: Vec<u8>,
     /// The textures the module binds.
     pub textures: Vec<TextureBinding>,
+    /// See [`Translation::texture_offsets`].
+    pub texture_offsets: Vec<(i32, i32)>,
     /// The `(bank, offset)` of each `ldg` descriptor, in binding order.
     pub globals: Vec<(u8, u16)>,
     /// How many colour targets a fragment shader writes. Each takes four
@@ -2839,6 +3131,7 @@ impl Layout {
                     swizzle: IDENTITY_SWIZZLE,
                 })
                 .collect(),
+            texture_offsets: translated.texture_offsets.clone(),
             globals: translated.globals.clone(),
             targets: 1,
             group: 0,
@@ -3136,27 +3429,9 @@ pub fn module(
         };
         let key = texture.slot.key();
         let sample = format!("textureSampleLevel(tex{index}, smp{index}, {coords})");
-        if texture.swizzle == IDENTITY_SWIZZLE {
-            out.push_str(&format!("    case {key}u: {{ return {sample}; }}\n"));
-            continue;
-        }
-        let channels: Vec<&str> = texture
-            .swizzle
-            .iter()
-            .map(|source| match source {
-                SwizzleSource::Zero => "0.0",
-                SwizzleSource::R => "sampled.x",
-                SwizzleSource::G => "sampled.y",
-                SwizzleSource::B => "sampled.z",
-                SwizzleSource::A => "sampled.w",
-                SwizzleSource::One => "1.0",
-            })
-            .collect();
-        out.push_str(&format!("    case {key}u: {{\n"));
-        out.push_str(&format!("      let sampled = {sample};\n"));
         out.push_str(&format!(
-            "      return vec4<f32>({});\n    }}\n",
-            channels.join(", ")
+            "    case {key}u: {{ {} }}\n",
+            return_swizzled(&sample, texture.swizzle)
         ));
     }
     out.push_str("    default: { return vec4<f32>(0.0, 0.0, 0.0, 0.0); }\n  }\n}\n\n");
@@ -3189,6 +3464,89 @@ pub fn module(
     }
     out.push_str("    default: { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }\n  }\n}\n\n");
 
+    // `tex.aoffi`, one case per binding and, inside it, one per offset the
+    // program samples with: the offset has to be a constant in each call.
+    out.push_str(
+        "fn texSampleOffset(imm: u32, offset: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {\n  \
+         switch (imm) {\n",
+    );
+    for (index, texture) in layout.textures.iter().enumerate() {
+        let coords = match (texture.dim, texture.compare) {
+            (TexDim::T2d, false) => "vec2<f32>(u, v), 0.0",
+            (TexDim::T2dArray, false) => "vec2<f32>(u, v), layer, 0.0",
+            _ => continue,
+        };
+        let key = texture.slot.key();
+        out.push_str(&format!("    case {key}u: {{\n      switch (offset) {{\n"));
+        for (n, (x, y)) in layout.texture_offsets.iter().enumerate() {
+            let sample = format!(
+                "textureSampleLevel(tex{index}, smp{index}, {coords}, vec2<i32>({x}, {y}))"
+            );
+            out.push_str(&format!(
+                "        case {n}u: {{ {} }}\n",
+                return_swizzled(&sample, texture.swizzle)
+            ));
+        }
+        out.push_str("        default: { return vec4<f32>(0.0); }\n      }\n    }\n");
+    }
+    out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
+
+    // `txq`'s size: what `interp`'s `run_txq` answers, level 0's extent
+    // halved `lod` times and never below one, the depth or layer count as it
+    // stands (six faces to a cube), and the one level every texture has.
+    out.push_str("fn texDims(imm: u32, lod: u32) -> vec4<u32> {\n  switch (imm) {\n");
+    for (index, texture) in layout.textures.iter().enumerate() {
+        let depth = match texture.dim {
+            TexDim::T2dArray => format!("textureNumLayers(tex{index})"),
+            TexDim::T3d => "s.z".to_string(),
+            TexDim::TCube => "6u".to_string(),
+            TexDim::TCubeArray => format!("textureNumLayers(tex{index}) * 6u"),
+            _ => "1u".to_string(),
+        };
+        let key = texture.slot.key();
+        out.push_str(&format!(
+            "    case {key}u: {{\n      let s = textureDimensions(tex{index});\n      \
+             return vec4<u32>(select(max(s.x >> lod, 1u), 1u, lod >= 32u), \
+             select(max(s.y >> lod, 1u), 1u, lod >= 32u), {depth}, \
+             textureNumLevels(tex{index}));\n    }}\n"
+        ));
+    }
+    out.push_str("    default: { return vec4<u32>(1u, 1u, 1u, 1u); }\n  }\n}\n\n");
+
+    // `tld4`'s gather. WGSL takes the channel only as a constant, so each
+    // channel is its own call, and the descriptor's swizzle picks which
+    // stored channel that is, the way `texture::gather_with` applies it.
+    out.push_str(
+        "fn texGather(imm: u32, component: u32, u: f32, v: f32, layer: u32) -> vec4<f32> {\n  \
+         switch (imm) {\n",
+    );
+    for (index, texture) in layout.textures.iter().enumerate() {
+        let coords = match (texture.dim, texture.compare) {
+            (TexDim::T2d, false) => "vec2<f32>(u, v)",
+            (TexDim::T2dArray, false) => "vec2<f32>(u, v), layer",
+            _ => continue,
+        };
+        let key = texture.slot.key();
+        out.push_str(&format!(
+            "    case {key}u: {{\n      switch (component) {{\n"
+        ));
+        for (channel, source) in texture.swizzle.iter().enumerate() {
+            let texels = match source {
+                SwizzleSource::R => format!("textureGather(0, tex{index}, smp{index}, {coords})"),
+                SwizzleSource::G => format!("textureGather(1, tex{index}, smp{index}, {coords})"),
+                SwizzleSource::B => format!("textureGather(2, tex{index}, smp{index}, {coords})"),
+                SwizzleSource::A => format!("textureGather(3, tex{index}, smp{index}, {coords})"),
+                SwizzleSource::Zero => "vec4<f32>(0.0)".to_string(),
+                SwizzleSource::One => "vec4<f32>(1.0)".to_string(),
+            };
+            out.push_str(&format!(
+                "        case {channel}u: {{ return {texels}; }}\n"
+            ));
+        }
+        out.push_str("        default: { return vec4<f32>(0.0); }\n      }\n    }\n");
+    }
+    out.push_str("    default: { return vec4<f32>(0.0); }\n  }\n}\n\n");
+
     out.push_str(&translated.source);
     out.push('\n');
     out.push_str(&match stage {
@@ -3196,6 +3554,51 @@ pub fn module(
         Stage::Fragment => fragment_entry(translated, layout),
     });
     Ok(out)
+}
+
+/// [`super::isa::flow_test`] as WGSL, over the names the flags are declared
+/// under.
+struct TextLogic;
+
+impl super::isa::FlowLogic<String> for TextLogic {
+    fn constant(&self, value: bool) -> String {
+        value.to_string()
+    }
+    fn not(&self, a: String) -> String {
+        format!("!({a})")
+    }
+    fn and(&self, a: String, b: String) -> String {
+        format!("({a} && {b})")
+    }
+    fn or(&self, a: String, b: String) -> String {
+        format!("({a} || {b})")
+    }
+    fn xor(&self, a: String, b: String) -> String {
+        format!("({a} != {b})")
+    }
+}
+
+/// `return` a sample rearranged by a descriptor's swizzle, the per-texture
+/// component swizzle WebGPU does not have.
+fn return_swizzled(sample: &str, swizzle: [SwizzleSource; 4]) -> String {
+    if swizzle == IDENTITY_SWIZZLE {
+        return format!("return {sample};");
+    }
+    let channels: Vec<&str> = swizzle
+        .iter()
+        .map(|source| match source {
+            SwizzleSource::Zero => "0.0",
+            SwizzleSource::R => "sampled.x",
+            SwizzleSource::G => "sampled.y",
+            SwizzleSource::B => "sampled.z",
+            SwizzleSource::A => "sampled.w",
+            SwizzleSource::One => "1.0",
+        })
+        .collect();
+    format!(
+        "let sampled = {sample}; return vec4<f32>({});",
+        channels.join(", ")
+    )
 }
 
 /// The WGSL type a `texs` of this dimensionality samples.
@@ -4934,6 +5337,80 @@ mod tests {
             translate(&indexed).unwrap_err(),
             Unsupported::UntracedHandle { at: 1 }
         );
+    }
+
+    #[test]
+    fn a_global_load_through_a_descriptor_loaded_whole_reads_that_descriptor() {
+        let ldg = Op::Ldg {
+            dst: 2,
+            addr: 0,
+            offset: 0,
+            size: MemSize::B64,
+        };
+        let through_ldc = program(&[
+            (
+                Op::Ldc {
+                    dst: 0,
+                    bank: 1,
+                    offset: 0x40,
+                    idx: RZ,
+                    size: MemSize::B64,
+                },
+                ALWAYS,
+            ),
+            (ldg, ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]);
+        assert_eq!(translate(&through_ldc).unwrap().globals, vec![(1, 0x40)]);
+
+        let mov = |dst, offset| Op::Mov {
+            dst,
+            src: Operand::Const { bank: 1, offset },
+        };
+        let through_movs = program(&[
+            (mov(0, 0x40), ALWAYS),
+            (mov(1, 0x44), ALWAYS),
+            (ldg, ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]);
+        assert_eq!(translate(&through_movs).unwrap().globals, vec![(1, 0x40)]);
+
+        // Halves that are not one descriptor's are not one.
+        let mismatched = program(&[
+            (mov(0, 0x40), ALWAYS),
+            (mov(1, 0x48), ALWAYS),
+            (ldg, ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]);
+        assert!(translate(&mismatched).is_err());
+    }
+
+    /// Nintendo Switch Sports' two: a vertex shader that asks a texture's
+    /// size and never samples it, and a texel offset cleared with a copy of
+    /// the zero register.
+    #[test]
+    fn a_size_query_alone_and_a_zeroed_offset_translate() {
+        let txq = crate::gpu::shader::isa::decode(0xdf48008180470800).op;
+        let query_only = program(&[(txq, ALWAYS), (Op::Exit, ALWAYS)]);
+        let translated = translate(&query_only).unwrap();
+        assert_eq!(
+            translated.textures,
+            vec![(TextureSlot::Bound(8), TexDim::T2d, false)]
+        );
+
+        let tex = crate::gpu::shader::isa::decode(0xc0780083a0a70808).op;
+        let zeroed = program(&[
+            (
+                Op::Mov {
+                    dst: 10,
+                    src: Operand::Reg(RZ),
+                },
+                ALWAYS,
+            ),
+            (tex, ALWAYS),
+            (Op::Exit, ALWAYS),
+        ]);
+        assert_eq!(translate(&zeroed).unwrap().texture_offsets, vec![(0, 0)]);
     }
 
     #[test]

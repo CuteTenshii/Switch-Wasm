@@ -209,6 +209,29 @@ pub trait TextureSource {
         )))
     }
 
+    /// `handle`'s width, height, depth or layer count, and mip level count,
+    /// at level 0.
+    fn dimensions(&self, handle: u32) -> ShaderResult<[u32; 4]> {
+        Err(fault(format!(
+            "shader: size query of handle {handle:#x} with no texture source bound"
+        )))
+    }
+
+    /// Channel `component` of the four texels a bilinear sample at `(u, v)`
+    /// of layer `layer` blends: see [`crate::gpu::texture::gather_with`].
+    fn gather(
+        &self,
+        handle: u32,
+        _u: f32,
+        _v: f32,
+        _layer: u32,
+        _component: usize,
+    ) -> ShaderResult<[f32; 4]> {
+        Err(fault(format!(
+            "shader: gather of handle {handle:#x} with no texture source bound"
+        )))
+    }
+
     /// A shadow sample: how `reference` compares against the depth there,
     /// as `[c, c, c, 1.0]`. Defaulted to an error so that a source with no
     /// depth textures behind it stays a one-method implementation.
@@ -293,6 +316,32 @@ impl TextureSource for MemoryTextures<'_, '_> {
             1.0 / texture.width.max(1) as f32,
             1.0 / texture.height.max(1) as f32,
         ))
+    }
+
+    // One level, because that is all either renderer gives a texture.
+    fn dimensions(&self, handle: u32) -> ShaderResult<[u32; 4]> {
+        let texture = self.descriptors_for(handle)?.texture;
+        Ok([texture.width, texture.height, texture.layers.max(1), 1])
+    }
+
+    fn gather(
+        &self,
+        handle: u32,
+        u: f32,
+        v: f32,
+        layer: u32,
+        component: usize,
+    ) -> ShaderResult<[f32; 4]> {
+        let descriptors = self.descriptors_for(handle)?;
+        Ok(crate::gpu::texture::gather_with(
+            self.ctx,
+            &descriptors,
+            u as f64,
+            v as f64,
+            layer,
+            component,
+            self.blocks,
+        )?)
     }
 
     fn sample_3d(&self, handle: u32, u: f32, v: f32, w: f32) -> ShaderResult<[f32; 4]> {
@@ -583,6 +632,11 @@ pub struct Invocation {
     /// The carry `iadd.cc` leaves behind and `iadd.x` reads. One flag, not one
     /// per thread lane: this interpreter runs a single invocation at a time.
     carry: bool,
+    /// The other three condition codes, zero, sign and overflow, which a
+    /// `.CC` instruction sets and `csetp` tests. See [`isa::flow_test`].
+    zero: bool,
+    sign: bool,
+    overflow: bool,
     /// Set by `kil`: this fragment must not be written.
     pub discarded: bool,
     /// `ssy`/`pbk`/`pcnt` push a resume address; `sync`/`brk`/`cont` pop it.
@@ -638,6 +692,9 @@ impl Default for Invocation {
             gpr: [0; 256],
             pred: [false; 7],
             carry: false,
+            zero: false,
+            sign: false,
+            overflow: false,
             attr_in: Attributes::default(),
             attr_out: Attributes::default(),
             discarded: false,
@@ -937,6 +994,12 @@ impl Invocation {
                 }
                 Op::Tex { .. } => {
                     self.run_tex(program, pc, op, env, pending)?;
+                }
+                Op::Txq { .. } => {
+                    self.run_txq(program, pc, op, env, pending)?;
+                }
+                Op::Tld4 { .. } => {
+                    self.run_tld4(program, pc, op, env, pending)?;
                 }
                 other => self.run_alu(other, env)?,
             }
@@ -1710,6 +1773,7 @@ impl Invocation {
                 dst_signed,
                 sat,
                 sel,
+                cc,
             } => {
                 let raw = self.operand(src, env)? >> (sel as u32 * 8);
                 let mut v = if src_signed {
@@ -1727,6 +1791,12 @@ impl Invocation {
                     v = (v as i32).max(0) as u32;
                 }
                 self.set_reg(dst, v);
+                if cc {
+                    self.zero = v == 0;
+                    self.sign = (v as i32) < 0;
+                    self.carry = false;
+                    self.overflow = false;
+                }
             }
 
             // ---- moves ----
@@ -1760,6 +1830,23 @@ impl Invocation {
                 let r = combine(op2, first, self.holds(c));
                 self.set_pred(p0, r);
                 self.set_pred(p1, !r);
+            }
+            Op::Csetp {
+                p0,
+                p1,
+                test,
+                src,
+                op,
+            } => {
+                let flags = [self.zero, self.sign, self.carry, self.overflow];
+                let passed = isa::flow_test(test, flags, &BoolLogic).ok_or_else(|| {
+                    fault(format!(
+                        "shader: csetp condition-code test {test} is not modelled"
+                    ))
+                })?;
+                let src = self.holds(src);
+                self.set_pred(p0, combine(op, passed, src));
+                self.set_pred(p1, combine(op, !passed, src));
             }
 
             // ---- memory ----
@@ -1904,7 +1991,9 @@ impl Invocation {
             | Op::Bar { .. }
             | Op::Shfl { .. }
             | Op::Texs { .. }
-            | Op::Tex { .. } => unreachable!("control flow is dispatched in execute"),
+            | Op::Tex { .. }
+            | Op::Txq { .. }
+            | Op::Tld4 { .. } => unreachable!("control flow is dispatched in execute"),
         }
         Ok(())
     }
@@ -2146,6 +2235,72 @@ impl Invocation {
         Ok(())
     }
 
+    /// `txq`: the size of the texture at the level the `lod` register names,
+    /// as integers carried in the channels a sample's floats would be. The
+    /// depth or layer count is level 0's: an array's layers do not shrink.
+    fn run_txq(
+        &mut self,
+        program: &Compiled,
+        pc: usize,
+        op: Op,
+        env: &Env,
+        pending: &mut Vec<(usize, u8, u32)>,
+    ) -> ShaderResult<()> {
+        let Op::Txq { lod, handle, .. } = op else {
+            unreachable!("run_txq called with {op:?}");
+        };
+        let handle = env
+            .consts
+            .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
+        let [width, height, depth, levels] = env.textures.dimensions(handle)?;
+        let level = self.reg(lod);
+        let at = |size: u32| size.checked_shr(level).unwrap_or(0).max(1);
+        let size = [at(width), at(height), depth, levels];
+        self.land_texture(program, pc, size.map(f32::from_bits), pending);
+        Ok(())
+    }
+
+    /// `tld4`: one channel of the four texels a bilinear sample would blend,
+    /// with `.AOFFI` moving the footprint as it moves a `tex`'s.
+    fn run_tld4(
+        &mut self,
+        program: &Compiled,
+        pc: usize,
+        op: Op,
+        env: &Env,
+        pending: &mut Vec<(usize, u8, u32)>,
+    ) -> ShaderResult<()> {
+        let Op::Tld4 {
+            coords,
+            layer,
+            offset,
+            handle,
+            component,
+            ..
+        } = op
+        else {
+            unreachable!("run_tld4 called with {op:?}");
+        };
+        let handle = env
+            .consts
+            .read_const(env.tex_cb_index, crate::gpu::texture::handle_offset(handle))?;
+        let mut u = self.reg_f32(coords[0]);
+        let mut v = self.reg_f32(coords[1]);
+        if let Some(reg) = offset {
+            let packed = self.reg(reg);
+            let axis = |shift: u32| ((packed >> shift) as i32) << 28 >> 28;
+            let (du, dv) = env.textures.texel_step(handle)?;
+            u += axis(0) as f32 * du;
+            v += axis(4) as f32 * dv;
+        }
+        let layer = layer.map_or(0, |reg| self.reg(reg) & 0xffff);
+        let texels = env
+            .textures
+            .gather(handle, u, v, layer, usize::from(component))?;
+        self.land_texture(program, pc, texels, pending);
+        Ok(())
+    }
+
     /// Queue a sample's channels into the destination registers worked out at
     /// decode time, each due right before the first instruction that reads it.
     fn land_texture(
@@ -2190,13 +2345,14 @@ pub(super) fn texs_writes_for(ops: &[Op]) -> Vec<super::TexsWrites> {
             // `tex` has no two-register split and no packed-halves form: its
             // channels land in consecutive registers from `dst`, one per set
             // mask bit, as whole floats.
-            Op::Tex { dst, mask, .. } => mask
-                .iter()
-                .enumerate()
-                .filter(|(_, &wanted)| wanted)
-                .zip(0u8..)
-                .map(|((channel, _), n)| (dst.wrapping_add(n), isa::TexsStore::Float(channel)))
-                .collect(),
+            Op::Tex { dst, mask, .. } | Op::Txq { dst, mask, .. } | Op::Tld4 { dst, mask, .. } => {
+                mask.iter()
+                    .enumerate()
+                    .filter(|(_, &wanted)| wanted)
+                    .zip(0u8..)
+                    .map(|((channel, _), n)| (dst.wrapping_add(n), isa::TexsStore::Float(channel)))
+                    .collect()
+            }
             _ => continue,
         };
         let writes = destinations
@@ -2357,6 +2513,39 @@ fn reads(op: &Op) -> Vec<u8> {
             v
         }
         Op::Texs { coords, .. } => coords.to_vec(),
+        // Every register the instruction reads its operands from. Leaving a
+        // sample out made an earlier sample's queued result land after the
+        // sample that read it.
+        Op::Tex {
+            coords,
+            layer,
+            dref,
+            offset,
+            lod,
+            handle_reg,
+            dim,
+            ..
+        } => {
+            let used = match dim {
+                TexDim::T1d => 1,
+                TexDim::T2d | TexDim::T2dArray => 2,
+                TexDim::T3d | TexDim::TCube | TexDim::TCubeArray => 3,
+            };
+            let mut v = coords[..used].to_vec();
+            v.extend([layer, dref, offset, lod, handle_reg].into_iter().flatten());
+            v
+        }
+        Op::Txq { lod, .. } => vec![lod],
+        Op::Tld4 {
+            coords,
+            layer,
+            offset,
+            ..
+        } => {
+            let mut v = coords[..2].to_vec();
+            v.extend([layer, offset].into_iter().flatten());
+            v
+        }
         Op::Shfl {
             src, index, mask, ..
         } => {
@@ -2370,6 +2559,27 @@ fn reads(op: &Op) -> Vec<u8> {
     };
     out.retain(|&r| r != RZ);
     out
+}
+
+/// [`isa::flow_test`] over the flags as they stand.
+struct BoolLogic;
+
+impl isa::FlowLogic<bool> for BoolLogic {
+    fn constant(&self, value: bool) -> bool {
+        value
+    }
+    fn not(&self, a: bool) -> bool {
+        !a
+    }
+    fn and(&self, a: bool, b: bool) -> bool {
+        a && b
+    }
+    fn or(&self, a: bool, b: bool) -> bool {
+        a || b
+    }
+    fn xor(&self, a: bool, b: bool) -> bool {
+        a != b
+    }
 }
 
 /// Registers `op` writes as a destination.
@@ -2426,6 +2636,11 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         } => isa::texs_destinations(dst, dst2, mask, f16)
             .into_iter()
             .map(|(reg, _)| reg)
+            .collect(),
+        // One register per set mask bit, consecutive from `dst`.
+        Op::Tex { dst, mask, .. } | Op::Txq { dst, mask, .. } | Op::Tld4 { dst, mask, .. } => (0
+            ..mask.iter().filter(|&&m| m).count() as u8)
+            .map(|i| dst.wrapping_add(i))
             .collect(),
         _ => Vec::new(),
     }
@@ -4541,6 +4756,60 @@ mod tests {
         inv.execute(&program, &Env::new(&consts, &probe)).unwrap();
         assert_eq!(probe.0.get(), (-1.0, 0.5, 0.25, 3));
         assert_eq!([0, 1, 2, 3].map(|r| inv.reg_f32(r)), [0.25, 0.5, 0.75, 1.0]);
+    }
+
+    /// The idiom Nintendo Switch Sports tests a value with: convert it into
+    /// the zero register only to set the condition codes, then `csetp.neu`
+    /// them, which Eden spells `S || !Z` and which is "not zero" for an
+    /// integer.
+    #[test]
+    fn csetp_neu_after_an_i2i_cc_asks_whether_the_value_was_zero() {
+        let program = [
+            isa::decode(0x5ce0800000170aff).op,
+            isa::decode(0x50a0038000070d07).op,
+            Op::Exit,
+        ];
+        let consts = no_consts();
+        for (value, not_zero) in [(0u32, false), (5, true), ((-3i32) as u32, true)] {
+            let mut inv = Invocation::new();
+            inv.set_reg(1, value);
+            inv.execute(&prog(&program), &Env::new(&consts, &NoTextures))
+                .unwrap();
+            assert_eq!(inv.pred(0), not_zero, "r1 = {value:#x}");
+        }
+    }
+
+    /// `txq`'s answer at a level: the width and height halved once per level
+    /// and never below one, whatever the shift, as whole integers.
+    #[test]
+    fn txq_reports_the_size_at_the_level_it_is_asked_about() {
+        struct Sized;
+        impl TextureSource for Sized {
+            fn sample(&self, handle: u32, _u: f32, _v: f32, _l: u32) -> ShaderResult<[f32; 4]> {
+                Err(fault(format!("no sample of {handle:#x} here")))
+            }
+            fn dimensions(&self, handle: u32) -> ShaderResult<[u32; 4]> {
+                assert_eq!(handle, 0x1234, "the handle slot 8 names");
+                Ok([100, 50, 3, 1])
+            }
+        }
+        // Nintendo Switch Sports' `txq $r0 $r8 dimension 0x8 0x3`: width and
+        // height of slot 8 at the level in `r8`, into `r0` and `r1`.
+        let txq = isa::decode(0xdf48008180470800).op;
+        let mut consts = no_consts();
+        consts.insert(
+            (crate::gpu::texture::NOUVEAU_TEX_CB_INDEX, 0x20),
+            f32::from_bits(0x1234),
+        );
+        for (level, want) in [(0, [100, 50]), (2, [25, 12]), (7, [1, 1]), (40, [1, 1])] {
+            let mut inv = Invocation::new();
+            inv.set_reg(8, level);
+            inv.set_reg(2, 0xdead);
+            inv.execute(&prog(&[txq, Op::Exit]), &Env::new(&consts, &Sized))
+                .unwrap();
+            assert_eq!([inv.reg(0), inv.reg(1)], want, "level {level}");
+            assert_eq!(inv.reg(2), 0xdead, "a channel the mask leaves out");
+        }
     }
 
     /// A bindless `tex.b` samples whatever handle its register holds, where a

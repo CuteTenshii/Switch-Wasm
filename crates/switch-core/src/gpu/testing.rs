@@ -133,6 +133,81 @@ pub fn bindless_fragment_shader() -> Vec<u8> {
     bytes
 }
 
+/// `oColor = textureGather(texture, vColor.xy, component)`: the `ipa` chain
+/// of [`bindless_fragment_shader`], then a bound `tld4` of the red (0) or
+/// green (1) channel from texture slot 4 into `r0`..`r3`. Slot 4 is the word
+/// at 0x10 of the texture bank, so with `TexCbIndex` set to
+/// [`BINDLESS_HANDLE_BANK`] it reads the handle [`Harness::bindless_texture`]
+/// leaves there. The words are checked against `envydis`.
+pub fn gather_fragment_shader(component: u32) -> Vec<u8> {
+    let tld4_high = 0xc83a0047 | (component & 3) << 24;
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
+        (0xaff70000, tld4_high),  // tld4 r|g nodep $r0 $r0 0x0 0x4 t2d 0xf
+        (0x0007000f, 0xe3000000), // exit
+    ));
+    bytes
+}
+
+/// `oColor = textureOffset(texture, vColor.xy, ivec2(1, -1))`: the `ipa`
+/// chain, the offset loaded as an immediate, and a bound `tex.aoffi` of
+/// slot 4, which reads the texture [`gather_fragment_shader`] does. The
+/// words are checked against `envydis`.
+pub fn offset_fragment_shader() -> Vec<u8> {
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
+        (0x0f17000a, 0x01000000), // mov32i $r10 0xf1: x +1, y -1
+        (0xa0a70000, 0xc07a0047), // tex aoffi nodep $r0 $r0 $r10 0x4 t2d 0xf
+    ));
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        (0x0007000f, 0xe3000000), // exit
+        (0xff87000f, 0xe2400fff), // bra 0x50 (padding, never reached)
+        (0x00070f00, 0x50b00000), // nop (padding, never reached)
+    ));
+    bytes
+}
+
+/// `oColor = texture(shadowMap, vec3(vColor.xy, 0.5))`: the `ipa` chain, the
+/// reference loaded as an immediate, and a bound `tex.dc` of slot 4, which
+/// reads the texture [`gather_fragment_shader`] does and compares 0.5
+/// against it. The words are checked against `envydis`.
+pub fn shadow_fragment_shader() -> Vec<u8> {
+    let mut bytes = block(
+        (0xe1a0070f, 0x00240401),
+        (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
+        (0x00470003, 0x50800000), // mufu rcp $r3 $r0
+        (0x0037ff00, 0xe043ff88), // ipa $r0 a[0x80] $r3 0x0 0x1
+    );
+    bytes.extend(block(
+        (0xb0400341, 0x055c8400),
+        (0x4037ff01, 0xe043ff88), // ipa $r1 a[0x84] $r3 0x0 0x1
+        (0x0007f002, 0x0103f000), // mov32i $r2 0x3f000000: 0.5
+        (0xa0270000, 0xc03e0047), // tex dc nodep $r0 $r0 $r2 0x4 t2d 0xf
+    ));
+    bytes.extend(block(
+        (0xffe1ffef, 0x001f8000),
+        (0x0007000f, 0xe3000000), // exit
+        (0xff87000f, 0xe2400fff), // bra 0x50 (padding, never reached)
+        (0x00070f00, 0x50b00000), // nop (padding, never reached)
+    ));
+    bytes
+}
+
 /// The bank and offset [`bindless_fragment_shader`] loads its handle from.
 pub const BINDLESS_HANDLE_BANK: u32 = 3;
 pub const BINDLESS_HANDLE_OFFSET: u32 = 0x10;
@@ -324,6 +399,20 @@ impl Harness {
             trace: false,
         };
         renderer.clear_color(engine, &mut ctx, 0, 0, channels)
+    }
+
+    /// Clear the depth surface through `renderer`, to the value in
+    /// `ClearDepth` (0x364).
+    pub fn clear_depth_with(&mut self, renderer: &mut dyn Renderer) -> crate::Result<()> {
+        let engine = &self.engine;
+        let mut ctx = ExecCtx {
+            mem: &mut self.mem,
+            vmm: &self.vmm,
+            host1x: &mut self.host1x,
+            stats: &mut self.stats,
+            trace: false,
+        };
+        renderer.clear_depth_stencil(engine, &mut ctx, true, false)
     }
 
     /// Ask `renderer` for whatever it is holding, until it has handed it all

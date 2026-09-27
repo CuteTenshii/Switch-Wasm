@@ -879,6 +879,10 @@ pub enum Op {
         dst_signed: bool,
         sat: bool,
         sel: u8,
+        /// `.CC`: the condition codes take the result's zero and sign, and
+        /// carry and overflow are cleared. A compiler converts into `RZ` with
+        /// this set to ask whether a value is zero.
+        cc: bool,
     },
 
     // ---- moves ----
@@ -903,6 +907,16 @@ pub enum Op {
         c: Pred,
         op1: BoolOp,
         op2: BoolOp,
+    },
+    /// `csetp.<test>.<op> p0, p1, cc, src`: `p0` is [`flow_test`] of the
+    /// condition codes combined with `src` by `op`, `p1` the same with the
+    /// test negated.
+    Csetp {
+        p0: u8,
+        p1: u8,
+        test: u8,
+        src: Pred,
+        op: BoolOp,
     },
 
     // ---- memory ----
@@ -1020,6 +1034,34 @@ pub enum Op {
         /// held in a register instead, and `handle` is then unused.
         handle_reg: Option<u8>,
         dim: TexDim,
+        mask: [bool; 4],
+    },
+    /// `txq dst, lod, dimension, handle, mask`: a bound texture's size at
+    /// level `lod`, as integers: width, height, depth or layers, and how many
+    /// mip levels there are, one register per set mask bit from `dst`. The
+    /// other queries `txq` has (the texture's type, sample positions, its
+    /// filter) are not decoded.
+    Txq {
+        dst: u8,
+        lod: u8,
+        handle: u16,
+        mask: [bool; 4],
+    },
+    /// `tld4.<component> dst, coords.., handle, dim, mask`: gather one channel
+    /// of each of the four texels a bilinear sample at the coordinates would
+    /// blend, in the order `(u0,v1) (u1,v1) (u1,v0) (u0,v0)`, the order GL's
+    /// and WGSL's gather use. Operands sit where [`Op::Tex`]'s do.
+    Tld4 {
+        dst: u8,
+        coords: [u8; 3],
+        layer: Option<u8>,
+        /// `.AOFFI`'s register, as in [`Op::Tex`].
+        offset: Option<u8>,
+        handle: u16,
+        dim: TexDim,
+        /// Which channel, after the descriptor's swizzle: 0 to 3 for red to
+        /// alpha.
+        component: u8,
         mask: [bool; 4],
     },
 
@@ -1221,6 +1263,55 @@ fn icmp(bits: u64) -> ICmp {
         6 => ICmp::Ge,
         _ => ICmp::Always,
     }
+}
+
+/// What a condition-code test is made of, so that the interpreter, over
+/// `bool`s, and the WGSL translator, over the text of an expression, read one
+/// table and cannot disagree about it.
+pub trait FlowLogic<T> {
+    fn constant(&self, value: bool) -> T;
+    fn not(&self, a: T) -> T;
+    fn and(&self, a: T, b: T) -> T;
+    fn or(&self, a: T, b: T) -> T;
+    fn xor(&self, a: T, b: T) -> T;
+}
+
+/// A condition-code test, the `FlowTest` a `csetp` or a predicated branch
+/// names, over the zero, sign, carry and overflow flags. The table is Eden's
+/// `GetFlowTest` (`shader_recompiler/frontend/ir/ir_emitter.cpp`), which is
+/// where the float-flavoured ones get their odd shapes: `NEU` is `S || !Z`
+/// because a NaN leaves both set. `None` for the `CSM`/`FCSM` tests, which
+/// Eden does not implement either.
+pub fn flow_test<T: Clone>(test: u8, [z, s, c, o]: [T; 4], l: &impl FlowLogic<T>) -> Option<T> {
+    Some(match test {
+        0 => l.constant(false),                    // F
+        1 => l.xor(l.and(s.clone(), l.not(z)), o), // LT
+        2 => l.and(l.not(s), z),                   // EQ
+        3 => l.xor(s, l.or(z, o)),                 // LE
+        4 => l.and(l.xor(l.not(s), o), l.not(z)),  // GT
+        5 => l.not(z),                             // NE
+        6 => l.not(l.xor(s, o)),                   // GE
+        7 => l.or(l.not(s), l.not(z)),             // NUM
+        8 => l.and(s, z),                          // NaN
+        9 => l.xor(s, o),                          // LTU
+        10 => z,                                   // EQU
+        11 => l.or(l.xor(s, o), z),                // LEU
+        12 => l.xor(l.not(s), l.or(z, o)),         // GTU
+        13 => l.or(s, l.not(z)),                   // NEU
+        14 => l.xor(l.or(l.not(s), z), o),         // GEU
+        15 => l.constant(true),                    // T
+        16 => l.not(o),                            // OFF
+        17 => l.not(c),                            // LO
+        18 => l.not(s),                            // SFF
+        19 => l.or(z, l.not(c)),                   // LS
+        20 => l.and(c, l.not(z)),                  // HI
+        21 => s,                                   // SFT
+        22 => c,                                   // HS
+        23 => o,                                   // OFT
+        30 => l.or(s, z),                          // RLE
+        31 => l.and(l.not(s), l.not(z)),           // RGT
+        _ => return None,
+    })
 }
 
 fn bool_op(bits: u64) -> Option<BoolOp> {
@@ -2047,6 +2138,7 @@ fn decode_alu(insn: u64) -> Op {
                 dst_signed,
                 sat: field(insn, 50, 1) != 0,
                 sel: field(insn, 41, 2) as u8,
+                cc: field(insn, 47, 1) != 0,
             }
         }
         _ => decode_alu_wide(insn),
@@ -2217,6 +2309,20 @@ fn decode_alu_wide(insn: u64) -> Op {
             c: src_pred(insn, 39, 42),
             op1,
             op2,
+        };
+    }
+
+    // csetp, 0x50a0/0xfff8: Eden's `CSETP`.
+    if insn & 0xfff8_0000_0000_0000 == 0x50a0_0000_0000_0000 {
+        let Some(op) = bool_op(field(insn, 45, 2)) else {
+            return un;
+        };
+        return Op::Csetp {
+            p0: reg(insn, 3, 3),
+            p1: reg(insn, 0, 3),
+            test: field(insn, 8, 5) as u8,
+            src: src_pred(insn, 39, 42),
+            op,
         };
     }
 
@@ -2528,6 +2634,14 @@ fn decode_alu_wide(insn: u64) -> Op {
     // tex.b: the bindless sample, 0xdeb8/0xfff8.
     if insn & 0xfff8_0000_0000_0000 == 0xdeb8_0000_0000_0000 {
         return decode_tex(insn, true);
+    }
+    // txq: a bound texture's size, 0xdf48/0xfff8.
+    if insn & 0xfff8_0000_0000_0000 == 0xdf48_0000_0000_0000 {
+        return decode_txq(insn);
+    }
+    // tld4: the gather, `110010` at the top and `111` at [51, 54).
+    if insn >> 58 == 0b11_0010 && field(insn, 51, 3) == 0b111 {
+        return decode_tld4(insn);
     }
     // tex: the general sample, whose operands are spread over the meta
     // register rather than packed into `texs`'s two.
@@ -3148,6 +3262,68 @@ fn decode_tex(insn: u64, bindless: bool) -> Op {
         handle_reg,
         dim,
         mask: [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0],
+    }
+}
+
+/// The four-bit channel mask a texture instruction keeps at `[31, 35)`.
+fn texture_mask(insn: u64) -> [bool; 4] {
+    let bits = field(insn, 31, 4);
+    [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0]
+}
+
+/// `txq`. Only the dimension query (1 at `[22, 25)`) is decoded; the level
+/// it is asked about is in the register at `[8, 16)`.
+fn decode_txq(insn: u64) -> Op {
+    const DIMENSION: u64 = 1;
+    let dst = reg(insn, 0, 8);
+    let mask = texture_mask(insn);
+    if dst == RZ || field(insn, 22, 3) != DIMENSION || mask == [false; 4] {
+        return Op::Unimplemented { raw: insn };
+    }
+    Op::Txq {
+        dst,
+        lod: reg(insn, 8, 8),
+        handle: field(insn, 36, 13) as u16,
+        mask,
+    }
+}
+
+/// `tld4`, bound, of a 2D image or array: the layer and the texel offset are
+/// placed as [`decode_tex`] places them. A shadow gather (`.DC`, bit 50), the
+/// per-texel offsets of `.PTP` and a cube's gather are not decoded.
+fn decode_tld4(insn: u64) -> Op {
+    let un = Op::Unimplemented { raw: insn };
+    // A cube's gather picks its face out of a direction first, which the
+    // gather here does not do.
+    let dim = match field(insn, 28, 3) {
+        2 => TexDim::T2d,
+        3 => TexDim::T2dArray,
+        _ => return un,
+    };
+    let dst = reg(insn, 0, 8);
+    let mask = texture_mask(insn);
+    if dst == RZ || mask == [false; 4] || field(insn, 50, 1) != 0 {
+        return un;
+    }
+    let coord = reg(insn, 8, 8);
+    let (layer, first) = match dim {
+        TexDim::T2dArray | TexDim::TCubeArray => (Some(coord), coord.wrapping_add(1)),
+        _ => (None, coord),
+    };
+    let offset = match field(insn, 54, 2) {
+        0 => None,
+        1 => Some(reg(insn, 20, 8)),
+        _ => return un,
+    };
+    Op::Tld4 {
+        dst,
+        coords: [first, first.wrapping_add(1), first.wrapping_add(2)],
+        layer,
+        offset,
+        handle: field(insn, 36, 13) as u16,
+        dim,
+        component: field(insn, 56, 2) as u8,
+        mask,
     }
 }
 
@@ -3979,6 +4155,64 @@ mod tests {
             op(0xc07a0080a0770401 | u64::from(RZ)),
             Op::Unimplemented { .. }
         ));
+    }
+
+    /// Nintendo Switch Sports' `i2i.cc` into the zero register and the
+    /// `csetp neu and $p0 0x1 cc 0x1` that reads it, as `envydis` spells it.
+    #[test]
+    fn decodes_an_i2i_cc_and_a_csetp() {
+        assert!(matches!(
+            decode(0x5ce0800000170aff).op,
+            Op::I2i {
+                dst: RZ,
+                cc: true,
+                ..
+            }
+        ));
+        assert_eq!(
+            decode(0x50a0038000070d07).op,
+            Op::Csetp {
+                p0: 0,
+                p1: 7,
+                test: 13,
+                src: Pred::ALWAYS,
+                op: BoolOp::And,
+            }
+        );
+    }
+
+    #[test]
+    fn decodes_a_txq_and_a_tld4() {
+        // Nintendo Switch Sports' own words, which `envydis` reads as
+        // `txq $r0 $r8 dimension 0x8 0x3` and
+        // `tld4 r nodep $r8 $r2 0x0 0x8 t2d 0xd`.
+        assert_eq!(
+            decode(0xdf48008180470800).op,
+            Op::Txq {
+                dst: 0,
+                lod: 8,
+                handle: 8,
+                mask: [true, true, false, false],
+            }
+        );
+        assert_eq!(
+            decode(0xc83a0086aff70208).op,
+            Op::Tld4 {
+                dst: 8,
+                coords: [2, 3, 4],
+                layer: None,
+                offset: None,
+                handle: 8,
+                dim: TexDim::T2d,
+                component: 0,
+                mask: [true, false, true, true],
+            }
+        );
+        // The green channel, and a shadow gather, which is not decoded.
+        let green = 0xc83a0086aff70208u64 | 1 << 56;
+        assert!(matches!(decode(green).op, Op::Tld4 { component: 1, .. }));
+        let shadow = 0xc83a0086aff70208u64 | 1 << 50;
+        assert!(matches!(decode(shadow).op, Op::Unimplemented { .. }));
     }
 
     #[test]
