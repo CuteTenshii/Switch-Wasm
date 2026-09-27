@@ -1981,7 +1981,10 @@ impl Gpu {
                 }),
                 count: None,
             });
-            let texture = if compare {
+            let held = self.held_layers(upload, compare, view_dimension)?;
+            let texture = if !held.is_empty() {
+                self.texture_over_held(upload, view_dimension, &held)?
+            } else if compare {
                 self.shadow_texture(upload)?
             } else {
                 self.texture(upload, view_dimension)?
@@ -2064,6 +2067,114 @@ impl Gpu {
         Ok((layout, bind_group))
     }
 
+    /// The layers of a texture the draw samples that are surfaces still held
+    /// on the device, each with the surface to copy it out of.
+    ///
+    /// Their guest memory holds what the surfaces were before the device drew
+    /// into them, so uploading those bytes samples a stale image. Tomodachi
+    /// Life renders its scene into an HDR surface, reduces it through a chain
+    /// of small float surfaces and tonemaps from them with no draw the device
+    /// refuses in between, and every stage read what the one before it had
+    /// been before it ran. It also renders an environment cube a face at a
+    /// time and samples all six. A rasterizer draw anywhere in between
+    /// flushed the surfaces first, which hid it.
+    ///
+    /// A held surface that cannot be copied into the layer it stands for
+    /// is refused rather than sampled stale: the fallback flushes first.
+    fn held_layers(
+        &self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        compare: bool,
+        view: wgpu::TextureViewDimension,
+    ) -> std::result::Result<Vec<(u32, wgpu::Texture)>, String> {
+        let mut layers = Vec::new();
+        for layer in 0..upload.layers.max(1) {
+            let addr = upload.key.addr + u64::from(layer) * u64::from(upload.key.layer_stride);
+            let Some(held) = self.held.get(&addr) else {
+                continue;
+            };
+            if compare || held.target.depth.is_some() {
+                return Err("samples a depth surface held on the device".into());
+            }
+            if held.companion.is_some() {
+                return Err("samples a multisampled surface held on the device".into());
+            }
+            // A volume's slices interleave inside a block, so no one of them
+            // is a surface of its own.
+            if view == wgpu::TextureViewDimension::D3 {
+                return Err("samples a surface held on the device as a 3D texture".into());
+            }
+            let size = held.texture.size();
+            if (size.width, size.height) != (upload.width, upload.height) {
+                return Err(format!(
+                    "samples a {}x{} image out of a {}x{} surface held on the device \
+                     (layer {layer} of {} at {:#x}, {:#x} apart)",
+                    upload.width,
+                    upload.height,
+                    size.width,
+                    size.height,
+                    upload.layers,
+                    upload.key.addr,
+                    upload.key.layer_stride
+                ));
+            }
+            let (format, widening) = sampled_texture_format(self.features(), upload.format)
+                .map_err(|e| format!("{e:?}"))?;
+            // A copy may change nothing but whether the format is sRGB.
+            if widening != Widen::None
+                || format.remove_srgb_suffix() != held.texture.format().remove_srgb_suffix()
+            {
+                return Err(format!(
+                    "samples a {:?} surface held on the device as {format:?}",
+                    held.texture.format()
+                ));
+            }
+            layers.push((layer, held.texture.clone()));
+        }
+        Ok(layers)
+    }
+
+    /// A texture uploaded from guest memory with the `held` layers then
+    /// copied over it out of the surfaces the device holds for them.
+    ///
+    /// Copied rather than bound, because a draw may sample the surface it
+    /// renders into, which WebGPU does not allow in one pass, and what it
+    /// reads there is the surface before the draw. The copy is its own
+    /// submission ahead of the draw's, so it sees every earlier draw. Never
+    /// cached: what it holds is the device's, not the bytes it was keyed by.
+    fn texture_over_held(
+        &mut self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        view: wgpu::TextureViewDimension,
+        held: &[(u32, wgpu::Texture)],
+    ) -> std::result::Result<wgpu::Texture, String> {
+        let (texture, _) = self.upload_texture(upload, view)?;
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("held layers"),
+            });
+        for (layer, surface) in held {
+            encoder.copy_texture_to_texture(
+                surface.as_image_copy(),
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: *layer,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                surface.size(),
+            );
+        }
+        self.queue.submit([encoder.finish()]);
+        self.scratch.push(Scratch::Texture(texture.clone()));
+        Ok(texture)
+    }
+
     fn texture(
         &mut self,
         upload: &switch_core::gpu::upload::TextureUpload,
@@ -2074,6 +2185,29 @@ impl Gpu {
                 return Ok(texture.clone());
             }
         }
+        let (texture, len) = self.upload_texture(upload, view)?;
+        // Kept only alongside its bytes, which is what a guest write evicts;
+        // a texture whose source could not be watched goes back to being one
+        // draw's scratch, as everything was before this.
+        if self.texture_cache.contains_key(&upload.key) {
+            self.gpu_texture_bytes += len as u64;
+            self.gpu_textures
+                .entry(upload.key)
+                .or_default()
+                .push((view, texture.clone()));
+        } else {
+            self.scratch.push(Scratch::Texture(texture.clone()));
+        }
+        Ok(texture)
+    }
+
+    /// A texture made from an upload's bytes, and how many bytes went into
+    /// it. Neither cached nor released: the caller decides which.
+    fn upload_texture(
+        &mut self,
+        upload: &switch_core::gpu::upload::TextureUpload,
+        view: wgpu::TextureViewDimension,
+    ) -> std::result::Result<(wgpu::Texture, usize), String> {
         let (format, widening) =
             sampled_texture_format(self.features(), upload.format).map_err(|e| format!("{e:?}"))?;
         // A format the device holds itself is uploaded as it stands; one it
@@ -2121,19 +2255,7 @@ impl Gpu {
             },
             size,
         );
-        // Kept only alongside its bytes, which is what a guest write evicts;
-        // a texture whose source could not be watched goes back to being one
-        // draw's scratch, as everything was before this.
-        if self.texture_cache.contains_key(&upload.key) {
-            self.gpu_texture_bytes += bytes.len() as u64;
-            self.gpu_textures
-                .entry(upload.key)
-                .or_default()
-                .push((view, texture.clone()));
-        } else {
-            self.scratch.push(Scratch::Texture(texture.clone()));
-        }
-        Ok(texture)
+        Ok((texture, bytes.len()))
     }
 
     /// The buffers a stage's `ldg`s read, one per descriptor the translation
@@ -2169,6 +2291,19 @@ impl Gpu {
                 ));
             };
             let address = (u64::from(hi) << 32) | u64::from(lo);
+            if switch_core::trace::enabled(switch_core::trace::Trace::GpuTex) {
+                if let Some(h) = self
+                    .held
+                    .values()
+                    .find(|h| (h.target.addr..h.target.addr + h.target.len()).contains(&address))
+                {
+                    switch_core::traceln!(
+                        "[gpu-tex] ldg buffer of {stage:?} at {address:#x} is inside the held \
+                         surface at {:#x}",
+                        h.target.addr
+                    );
+                }
+            }
             let mapping = ctx.vmm.mapping_at(address).ok_or_else(|| {
                 format!("a `ldg` descriptor naming {address:#x}, which is unmapped")
             })?;
@@ -3639,15 +3774,74 @@ impl Gpu {
         globals.extend(self.global_uploads(&fs_layout, ShaderStage::Fragment, &uploads, ctx)?);
 
         if switch_core::trace::enabled(switch_core::trace::Trace::GpuTex) {
+            // What the draw renders into, so the texture lines below read as
+            // passes: which surface each one fills and which the next samples.
+            switch_core::traceln!(
+                "[gpu-draw] colour={} depth={} state={:?} viewport={:?} scissor={:?} \
+                 topology={:?} call={:?} vertex_buffers={} cull={:?} front={:?} buffers={:?}",
+                color.map_or("none".to_string(), |c| format!(
+                    "{:#x} {:?} {}x{}",
+                    c.addr, c.format, c.width, c.height
+                )),
+                depth.map_or("none".to_string(), |d| format!("{:#x}", d.addr)),
+                state.target,
+                state.viewport,
+                state.scissor,
+                state.topology,
+                engine.last_draw,
+                state.vertex_buffers.len(),
+                state.cull,
+                state.front_face,
+                state.vertex_buffers
+            );
+            // A buffer bound over a surface still on the device reads it as
+            // stale as a texture would.
+            let held_at = |addr: u64| {
+                self.held
+                    .values()
+                    .find(|h| (h.target.addr..h.target.addr + h.target.len()).contains(&addr))
+                    .map(|h| h.target.addr)
+            };
+            for c in &uploads.constants {
+                if let Some((addr, _)) = engine.bound_constbuf(c.stage, c.bank) {
+                    if let Some(surface) = held_at(addr) {
+                        switch_core::traceln!(
+                            "[gpu-tex] constant bank {} of {:?} at {addr:#x} is inside the held \
+                             surface at {surface:#x}",
+                            c.bank,
+                            c.stage
+                        );
+                    }
+                }
+            }
             for t in &uploads.textures {
                 switch_core::traceln!(
-                    "[gpu-tex] {:?} {:?} {}x{} swizzle={:?} sampler={:?}",
+                    "[gpu-tex] {:?} {:?} {}x{} swizzle={:?} sampler={:?} addr={:#x}{}",
                     t.slot,
                     t.format,
                     t.width,
                     t.height,
                     t.swizzle,
-                    t.sampler
+                    t.sampler,
+                    t.key.addr,
+                    // Sampling a surface still on the device reads guest
+                    // memory the device has not written back yet, whether
+                    // the texture starts where the surface does or inside it.
+                    match self.held.values().find(|h| {
+                        (h.target.addr..h.target.addr + h.target.len()).contains(&t.key.addr)
+                    }) {
+                        Some(h) if h.target.addr == t.key.addr => {
+                            " (held on the device)".to_string()
+                        }
+                        Some(h) => format!(" (inside the held surface at {:#x})", h.target.addr),
+                        None if self.evicted.iter().any(|h| h.target.addr == t.key.addr) => {
+                            " (evicted, not yet written back)".to_string()
+                        }
+                        None if self.pending.iter().any(|p| p.target.addr == t.key.addr) => {
+                            " (being read back)".to_string()
+                        }
+                        None => String::new(),
+                    }
                 );
             }
         }
