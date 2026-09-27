@@ -331,6 +331,9 @@ fn attrib_shape(size: u32) -> Option<(u32, u32)> {
         0x0f => Some((2, 16)), // 2x16
         0x1b => Some((1, 16)), // 1x16
         0x0a => Some((4, 8)),  // 4x8
+        0x13 => Some((3, 8)),  // 3x8
+        0x18 => Some((2, 8)),  // 2x8
+        0x1d => Some((1, 8)),  // 1x8
         _ => None,
     }
 }
@@ -344,6 +347,9 @@ const ATTRIB_TYPE_SNORM: u32 = 1;
 const ATTRIB_TYPE_UNORM: u32 = 2;
 const ATTRIB_TYPE_SINT: u32 = 3;
 const ATTRIB_TYPE_UINT: u32 = 4;
+/// An integer converted to the float of its value, unsigned and signed.
+const ATTRIB_TYPE_USCALED: u32 = 5;
+const ATTRIB_TYPE_SSCALED: u32 = 6;
 const ATTRIB_TYPE_FLOAT: u32 = 7;
 
 /// What a "fixed" attribute reads as: the `vec4` default every graphics API
@@ -434,7 +440,13 @@ pub fn fetch_attribute(
 
     let addr = array.start + vertex_index as u64 * array.stride as u64 + attrib.offset as u64;
 
-    let mut out = [0.0f32, 0.0, 0.0, 1.0];
+    let mut out = ATTRIB_DEFAULT;
+    // An integer attribute's missing `w` is the integer one, not the float:
+    // its slot carries bits, and WebGPU (like the Vulkan Eden draws through)
+    // fills an integer input's `w` with 1 of the input's own type.
+    if matches!(attrib.ty, ATTRIB_TYPE_SINT | ATTRIB_TYPE_UINT) && components < 4 {
+        out[3] = f32::from_bits(1);
+    }
     // Past the array's limit, the last valid byte, a fetch reads zeros:
     // what hardware does, and what `upload` pads a device's copy of the
     // array with. Every format reads zero bits as zero, so the attribute is
@@ -447,10 +459,22 @@ pub fn fetch_attribute(
         return Ok(out);
     }
     match (attrib.ty, bits) {
-        (ATTRIB_TYPE_FLOAT, 32) => {
+        // An integer's bits are carried as they are, like a float's.
+        (ATTRIB_TYPE_FLOAT | ATTRIB_TYPE_SINT | ATTRIB_TYPE_UINT, 32) => {
             for c in 0..components {
                 let bits = ctx.read_u32(addr + c as u64 * 4)?;
                 out[c as usize] = f32::from_bits(bits);
+            }
+        }
+        (ATTRIB_TYPE_USCALED | ATTRIB_TYPE_SSCALED, bits) => {
+            let packed = ctx.read_pixel(addr, components * bits / 8)?;
+            for c in 0..components {
+                let raw = (packed >> (c * bits)) as u32 & (u32::MAX >> (32 - bits));
+                out[c as usize] = if attrib.ty == ATTRIB_TYPE_SSCALED {
+                    sext_u32(raw, bits) as f32
+                } else {
+                    raw as f32
+                };
             }
         }
         // The 16-bit shapes, read as one packed value the way the 8-bit ones
@@ -489,15 +513,17 @@ pub fn fetch_attribute(
                 out[c as usize] = f32::from_bits(u32::from((packed >> (c * 16)) as u16));
             }
         }
+        // The 8-bit shapes read only the attribute's own bytes: a one-byte
+        // attribute at the end of a mapping has nothing after it to read.
         (ATTRIB_TYPE_UNORM, 8) => {
-            let packed = ctx.read_u32(addr)?;
+            let packed = ctx.read_pixel(addr, components)? as u32;
             for c in 0..components {
                 let byte = (packed >> (c * 8)) & 0xff;
                 out[c as usize] = byte as f32 / 255.0;
             }
         }
         (ATTRIB_TYPE_SNORM, 8) => {
-            let packed = ctx.read_u32(addr)?;
+            let packed = ctx.read_pixel(addr, components)? as u32;
             for c in 0..components {
                 let byte = ((packed >> (c * 8)) & 0xff) as u8 as i8;
                 // -128 and -127 both mean -1: the negative side has one more
@@ -511,14 +537,14 @@ pub fn fetch_attribute(
         // `instance_id`. Converting it to a float instead would read back as
         // whatever that float's bit pattern happened to be.
         (ATTRIB_TYPE_SINT, 8) => {
-            let packed = ctx.read_u32(addr)?;
+            let packed = ctx.read_pixel(addr, components)? as u32;
             for c in 0..components {
                 let byte = ((packed >> (c * 8)) & 0xff) as u8 as i8;
                 out[c as usize] = f32::from_bits(byte as i32 as u32);
             }
         }
         (ATTRIB_TYPE_UINT, 8) => {
-            let packed = ctx.read_u32(addr)?;
+            let packed = ctx.read_pixel(addr, components)? as u32;
             for c in 0..components {
                 out[c as usize] = f32::from_bits((packed >> (c * 8)) & 0xff);
             }
@@ -2331,6 +2357,62 @@ mod tests {
         assert_eq!(snorm[1], -1.0, "-32768 clamps onto -1 rather than past it");
         assert_eq!(snorm[2], 1.0);
         assert_eq!(snorm[3], 1.0 / 32767.0);
+    }
+
+    /// Echoes of Wisdom's `1x8` and `2x8` integer attributes (sizes `0x1d`
+    /// and `0x18`, type 4), which neither renderer fetched, so over five
+    /// thousand draws a frame were dropped outright. A narrow integer
+    /// attribute's `w` is the integer one, and a scaled one is its value.
+    #[test]
+    fn fetch_attribute_unpacks_the_narrow_eight_bit_shapes() {
+        let (mut mem, vmm, base) = harness();
+        // The attribute sits in the last bytes of the mapping, so reading a
+        // whole word for it would fault.
+        let at = base + 0xffd;
+        // 0x80, 0x7f, 0xff in the three bytes from `at`.
+        vmm.write_u32(&mut mem, at - 1, 0xff7f_8000).unwrap();
+        let mut stats = Default::default();
+        let mut host1x = Host1x::new();
+        let ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let array = VertexArray {
+            enabled: true,
+            stride: 3,
+            start: at,
+            limit: 0,
+            divisor: 0,
+        };
+        let fetch = |size, ty| {
+            let attrib = VertexAttrib {
+                buffer_id: 0,
+                is_fixed: false,
+                offset: 0,
+                size,
+                ty,
+                is_bgra: false,
+            };
+            fetch_attribute(attrib, array, 0, &ctx).unwrap()
+        };
+        let bits = |v: [f32; 4]| v.map(f32::to_bits);
+
+        assert_eq!(bits(fetch(0x1d, ATTRIB_TYPE_UINT)), [0x80, 0, 0, 1]);
+        assert_eq!(bits(fetch(0x18, ATTRIB_TYPE_UINT)), [0x80, 0x7f, 0, 1]);
+        assert_eq!(
+            bits(fetch(0x13, ATTRIB_TYPE_SINT)),
+            [(-128i32) as u32, 0x7f, u32::MAX, 1]
+        );
+        assert_eq!(
+            fetch(0x18, ATTRIB_TYPE_UNORM),
+            [128.0 / 255.0, 127.0 / 255.0, 0.0, 1.0]
+        );
+        assert_eq!(fetch(0x1d, ATTRIB_TYPE_SNORM), [-1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(fetch(0x13, ATTRIB_TYPE_USCALED), [128.0, 127.0, 255.0, 1.0]);
+        assert_eq!(fetch(0x13, ATTRIB_TYPE_SSCALED), [-128.0, 127.0, -1.0, 1.0]);
     }
 
     #[test]

@@ -257,6 +257,19 @@ pub enum VertexFormat {
     Float32x2,
     Float32x3,
     Float32x4,
+    Sint32,
+    Sint32x2,
+    Sint32x3,
+    Sint32x4,
+    Uint32,
+    Uint32x2,
+    Uint32x3,
+    Uint32x4,
+    Float16,
+    Unorm16,
+    Snorm16,
+    Sint16,
+    Uint16,
     Float16x2,
     Float16x4,
     Unorm16x2,
@@ -267,6 +280,14 @@ pub enum VertexFormat {
     Sint16x4,
     Uint16x2,
     Uint16x4,
+    Unorm8,
+    Snorm8,
+    Sint8,
+    Uint8,
+    Unorm8x2,
+    Snorm8x2,
+    Sint8x2,
+    Uint8x2,
     Unorm8x4,
     Snorm8x4,
     Sint8x4,
@@ -279,7 +300,22 @@ impl VertexFormat {
     /// How many bytes one attribute of this format is.
     pub fn size(self) -> u32 {
         match self {
+            VertexFormat::Unorm8
+            | VertexFormat::Snorm8
+            | VertexFormat::Sint8
+            | VertexFormat::Uint8 => 1,
+            VertexFormat::Float16
+            | VertexFormat::Unorm16
+            | VertexFormat::Snorm16
+            | VertexFormat::Sint16
+            | VertexFormat::Uint16
+            | VertexFormat::Unorm8x2
+            | VertexFormat::Snorm8x2
+            | VertexFormat::Sint8x2
+            | VertexFormat::Uint8x2 => 2,
             VertexFormat::Float32
+            | VertexFormat::Sint32
+            | VertexFormat::Uint32
             | VertexFormat::Float16x2
             | VertexFormat::Unorm16x2
             | VertexFormat::Snorm16x2
@@ -291,13 +327,15 @@ impl VertexFormat {
             | VertexFormat::Uint8x4
             | VertexFormat::Packed1010102(_) => 4,
             VertexFormat::Float32x2
+            | VertexFormat::Sint32x2
+            | VertexFormat::Uint32x2
             | VertexFormat::Float16x4
             | VertexFormat::Unorm16x4
             | VertexFormat::Snorm16x4
             | VertexFormat::Sint16x4
             | VertexFormat::Uint16x4 => 8,
-            VertexFormat::Float32x3 => 12,
-            VertexFormat::Float32x4 => 16,
+            VertexFormat::Float32x3 | VertexFormat::Sint32x3 | VertexFormat::Uint32x3 => 12,
+            VertexFormat::Float32x4 | VertexFormat::Sint32x4 | VertexFormat::Uint32x4 => 16,
         }
     }
 
@@ -306,12 +344,26 @@ impl VertexFormat {
     /// `raster::fetch_attribute` leaves in the slot for one as well.
     pub fn base(self) -> AttributeBase {
         match self {
-            VertexFormat::Sint16x2
+            VertexFormat::Sint32
+            | VertexFormat::Sint32x2
+            | VertexFormat::Sint32x3
+            | VertexFormat::Sint32x4
+            | VertexFormat::Sint16
+            | VertexFormat::Sint16x2
             | VertexFormat::Sint16x4
+            | VertexFormat::Sint8
+            | VertexFormat::Sint8x2
             | VertexFormat::Sint8x4
             | VertexFormat::Packed1010102(Packed1010102::Sint) => AttributeBase::Sint,
-            VertexFormat::Uint16x2
+            VertexFormat::Uint32
+            | VertexFormat::Uint32x2
+            | VertexFormat::Uint32x3
+            | VertexFormat::Uint32x4
+            | VertexFormat::Uint16
+            | VertexFormat::Uint16x2
             | VertexFormat::Uint16x4
+            | VertexFormat::Uint8
+            | VertexFormat::Uint8x2
             | VertexFormat::Uint8x4
             | VertexFormat::Packed1010102(Packed1010102::Uint) => AttributeBase::Uint,
             _ => AttributeBase::Float,
@@ -774,10 +826,24 @@ fn vertex_format(size: u32, ty: u32) -> Result<VertexFormat, Unsupported> {
         (0x02, ATTRIB_TYPE_FLOAT) => VertexFormat::Float32x3,
         (0x04, ATTRIB_TYPE_FLOAT) => VertexFormat::Float32x2,
         (0x12, ATTRIB_TYPE_FLOAT) => VertexFormat::Float32,
-        // Sizes `0x03` (`4x16`) and `0x0f` (`2x16`), the two 16-bit shapes
-        // WebGPU spells. `3x16` and `1x16` are left to the rasterizer for the
-        // same reason the odd 8-bit shapes are: there is no such vertex
-        // format to build a pipeline out of.
+        (0x01, ATTRIB_TYPE_SINT) => VertexFormat::Sint32x4,
+        (0x02, ATTRIB_TYPE_SINT) => VertexFormat::Sint32x3,
+        (0x04, ATTRIB_TYPE_SINT) => VertexFormat::Sint32x2,
+        (0x12, ATTRIB_TYPE_SINT) => VertexFormat::Sint32,
+        (0x01, ATTRIB_TYPE_UINT) => VertexFormat::Uint32x4,
+        (0x02, ATTRIB_TYPE_UINT) => VertexFormat::Uint32x3,
+        (0x04, ATTRIB_TYPE_UINT) => VertexFormat::Uint32x2,
+        (0x12, ATTRIB_TYPE_UINT) => VertexFormat::Uint32,
+        // The 16- and 8-bit shapes WebGPU spells: one, two and four
+        // components. Three has no vertex format to build a pipeline out of,
+        // so `3x16` and `3x8` are left to the rasterizer. A shape with fewer
+        // than four pads the rest `(0, 0, 0, 1)` on both renderers, an
+        // integer one with the integer 1.
+        (0x1b, ATTRIB_TYPE_FLOAT) => VertexFormat::Float16,
+        (0x1b, ATTRIB_TYPE_UNORM) => VertexFormat::Unorm16,
+        (0x1b, ATTRIB_TYPE_SNORM) => VertexFormat::Snorm16,
+        (0x1b, ATTRIB_TYPE_SINT) => VertexFormat::Sint16,
+        (0x1b, ATTRIB_TYPE_UINT) => VertexFormat::Uint16,
         (0x03, ATTRIB_TYPE_FLOAT) => VertexFormat::Float16x4,
         (0x03, ATTRIB_TYPE_UNORM) => VertexFormat::Unorm16x4,
         (0x03, ATTRIB_TYPE_SNORM) => VertexFormat::Snorm16x4,
@@ -788,10 +854,14 @@ fn vertex_format(size: u32, ty: u32) -> Result<VertexFormat, Unsupported> {
         (0x0f, ATTRIB_TYPE_SNORM) => VertexFormat::Snorm16x2,
         (0x0f, ATTRIB_TYPE_SINT) => VertexFormat::Sint16x2,
         (0x0f, ATTRIB_TYPE_UINT) => VertexFormat::Uint16x2,
-        // Size `0x0a` is `4x8`, the only 8-bit shape both `fetch_attribute`
-        // decodes and WebGPU spells: it has no one- or three-component 8-bit
-        // format, and a shorter one would be padded `(0, 0, 0, 1)` as floats
-        // where the rasterizer pads an integer slot with those *bits*.
+        (0x1d, ATTRIB_TYPE_UNORM) => VertexFormat::Unorm8,
+        (0x1d, ATTRIB_TYPE_SNORM) => VertexFormat::Snorm8,
+        (0x1d, ATTRIB_TYPE_SINT) => VertexFormat::Sint8,
+        (0x1d, ATTRIB_TYPE_UINT) => VertexFormat::Uint8,
+        (0x18, ATTRIB_TYPE_UNORM) => VertexFormat::Unorm8x2,
+        (0x18, ATTRIB_TYPE_SNORM) => VertexFormat::Snorm8x2,
+        (0x18, ATTRIB_TYPE_SINT) => VertexFormat::Sint8x2,
+        (0x18, ATTRIB_TYPE_UINT) => VertexFormat::Uint8x2,
         (0x0a, ATTRIB_TYPE_UNORM) => VertexFormat::Unorm8x4,
         (0x0a, ATTRIB_TYPE_SNORM) => VertexFormat::Snorm8x4,
         (0x0a, ATTRIB_TYPE_SINT) => VertexFormat::Sint8x4,
@@ -1278,6 +1348,41 @@ mod tests {
             VertexFormat::Packed1010102(Packed1010102::Sint).base(),
             AttributeBase::Sint
         );
+        // The narrow 8-bit shapes WebGPU has, and the one it has not.
+        assert_eq!(
+            vertex_format(0x1d, ATTRIB_TYPE_UINT),
+            Ok(VertexFormat::Uint8)
+        );
+        assert_eq!(
+            vertex_format(0x18, ATTRIB_TYPE_UINT),
+            Ok(VertexFormat::Uint8x2)
+        );
+        assert_eq!(
+            vertex_format(0x18, ATTRIB_TYPE_UNORM),
+            Ok(VertexFormat::Unorm8x2)
+        );
+        assert_eq!(VertexFormat::Uint8.base(), AttributeBase::Uint);
+        assert_eq!(VertexFormat::Sint8x2.base(), AttributeBase::Sint);
+        assert_eq!(VertexFormat::Uint8.size(), 1);
+        assert_eq!(VertexFormat::Unorm8x2.size(), 2);
+        assert_eq!(
+            vertex_format(0x13, ATTRIB_TYPE_UNORM),
+            Err(Unsupported::VertexFormat {
+                size: 0x13,
+                ty: ATTRIB_TYPE_UNORM
+            })
+        );
+        // `1x16` and the 32-bit integers.
+        assert_eq!(
+            vertex_format(0x1b, ATTRIB_TYPE_FLOAT),
+            Ok(VertexFormat::Float16)
+        );
+        assert_eq!(
+            vertex_format(0x04, ATTRIB_TYPE_SINT),
+            Ok(VertexFormat::Sint32x2)
+        );
+        assert_eq!(VertexFormat::Uint32x3.base(), AttributeBase::Uint);
+        assert_eq!(VertexFormat::Uint32x3.size(), 12);
         // A shape neither renderer decodes: `11_11_10`. Claiming it would
         // draw something the reference could not be compared against.
         assert_eq!(
