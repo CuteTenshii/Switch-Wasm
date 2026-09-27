@@ -2177,9 +2177,11 @@ fn decode_alu_wide(insn: u64) -> Op {
     }
 
     // ---- 0xfff0-masked: fsetp/isetp/iset/icmp/prmt/lop3/bfi ----
+    // Each immediate form is listed twice, as `0x36…`/`0x38…` and one above:
+    // bit 56 is the immediate's sign, not part of the opcode.
     match form >> 4 {
         // fsetp, cmp 48..52, ftz 47, bop 45..47.
-        0x5bb | 0x4bb | 0x36b => {
+        0x5bb | 0x4bb | 0x36b | 0x37b => {
             let b = match form >> 12 {
                 0x5 => Operand::Reg(reg(insn, 20, 8)),
                 0x4 => const_operand(insn),
@@ -2207,7 +2209,7 @@ fn decode_alu_wide(insn: u64) -> Op {
             };
         }
         // isetp, cmp 49..52, signed 48, bop 45..47, x 43.
-        0x5b6 | 0x4b6 | 0x366 => {
+        0x5b6 | 0x4b6 | 0x366 | 0x376 => {
             let b = match form >> 12 {
                 0x5 => Operand::Reg(reg(insn, 20, 8)),
                 0x4 => const_operand(insn),
@@ -2231,7 +2233,7 @@ fn decode_alu_wide(insn: u64) -> Op {
             };
         }
         // iset, the register-writing form of isetp.
-        0x5b5 | 0x4b5 | 0x365 => {
+        0x5b5 | 0x4b5 | 0x365 | 0x375 => {
             let b = match form >> 12 {
                 0x5 => Operand::Reg(reg(insn, 20, 8)),
                 0x4 => const_operand(insn),
@@ -2289,7 +2291,7 @@ fn decode_alu_wide(insn: u64) -> Op {
             };
         }
         // iadd3: three-way add, negation per source.
-        0x5cc | 0x4cc | 0x38c => {
+        0x5cc | 0x4cc | 0x38c | 0x39c => {
             let (b, c) = match form >> 12 {
                 0x5 => (
                     Operand::Reg(reg(insn, 20, 8)),
@@ -4697,6 +4699,48 @@ mod tests {
         for low in 0..8u64 {
             assert_eq!(op(0x50e0_0000_0000_0000 | (low << 48)), Op::Nop);
         }
+    }
+
+    /// A negative immediate sets bit 56, which moves the opcode up one:
+    /// `envydis` reads these as `isetp eq u32 and $p0 0x1 $r2 -0x1 0x1`
+    /// (Echoes of Wisdom's), `fsetp le and $p0 0x1 $r4 0xbf800000 0x1`,
+    /// `iset eq u32 and $r3 $r4 -0x1 0x1` and `iadd3 $r2 $r4 -0x7fffb $r6`.
+    #[test]
+    fn a_negative_immediate_does_not_change_the_opcode() {
+        assert!(matches!(
+            op(0x3764_03ff_fff7_0207),
+            Op::Isetp {
+                a: 2,
+                b: Operand::Imm(u32::MAX),
+                cmp: ICmp::Eq,
+                signed: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            op(0x37b3_03bf_8007_0407),
+            Op::Fsetp {
+                a: 4,
+                b: Operand::Imm(0xbf80_0000),
+                ..
+            }
+        ));
+        assert!(matches!(
+            op(0x3754_03ff_fff7_0403),
+            Op::Iset {
+                dst: 3,
+                b: Operand::Imm(u32::MAX),
+                ..
+            }
+        ));
+        assert!(matches!(
+            op(0x39c0_0300_0057_0402),
+            Op::Iadd3 {
+                dst: 2,
+                b: Operand::Imm(0xfff8_0005),
+                ..
+            }
+        ));
     }
 
     /// The words `envydis` reads as `vote all $r2 0x1 0x1` (Echoes of
