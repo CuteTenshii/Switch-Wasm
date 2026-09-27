@@ -2137,6 +2137,19 @@ fn the_display_answers_what_it_is() {
         "a display id of 0 is the no-display sentinel"
     );
 
+    // SetLayerScalingMode(mode, layer): the two modes the service supports
+    // succeed, and the rest are refused the way it refuses them.
+    let scaling = |mode: u32| {
+        let mut args = [0u8; 16];
+        args[..4].copy_from_slice(&mode.to_le_bytes());
+        args[8..].copy_from_slice(&1u64.to_le_bytes());
+        args
+    };
+    for (mode, result) in [(2, 0), (4, 0), (1, 114 | (6 << 9)), (5, 114 | (1 << 9))] {
+        ipc_request_plain(&mut cpu, display, 2101, &scaling(mode));
+        assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), result, "mode {mode}");
+    }
+
     // GetDisplayResolution, on the same interface, has to agree with it.
     ipc_request_plain(&mut cpu, display, 1102, &display_id.to_le_bytes());
     assert_eq!(cpu.mem.read_u64(tls + 0x20).unwrap(), 1280);

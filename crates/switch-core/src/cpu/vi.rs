@@ -241,6 +241,22 @@ impl Cpu {
             // the parcel size. viCreateLayer parses exactly that.
             2020 => return Some(self.vi_native_window(tls, 8)),
             2030 | 2012 | 2312 => return Some(self.vi_native_window(tls, 16)),
+            // SetLayerScalingMode(u32 mode, u64 layer_id): nothing here
+            // scales, but the mode is checked as the service checks it,
+            // since only `ScaleToWindow` (2) and `PreserveAspectRatio` (4)
+            // are supported and a caller learns that from the result.
+            // Mario Kart 8 Deluxe aborts at boot when this is refused.
+            2101 => {
+                const VI_OPERATION_FAILED: u32 = 114 | (1 << 9);
+                const VI_NOT_SUPPORTED: u32 = 114 | (6 << 9);
+                let data = self.ipc_request_data(tls);
+                let result = match self.mem.read_u32(data).unwrap_or(0) {
+                    2 | 4 => 0,
+                    0..=4 => VI_NOT_SUPPORTED,
+                    _ => VI_OPERATION_FAILED,
+                };
+                return Some(self.write_ipc_response(tls, result, &[], &[], &[]));
+            }
             // ConvertScalingMode: every nn mode this composes ends up as
             // ScalingMode_PreserveAspectRatio.
             2102 => 2u64.to_le_bytes().to_vec(),
