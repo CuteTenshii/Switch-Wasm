@@ -99,6 +99,10 @@ const VERTEX_ATTRIB_STATE: u32 = 0x458;
 const VERTEX_ARRAY: u32 = 0x700;
 const VERTEX_ARRAY_STRIDE: u32 = 0x4;
 const VERTEX_ARRAY_LIMIT: u32 = 0x7C0;
+/// `VertexStreamInstances[i]` (nouveau's `VERTEX_ARRAY_PER_INSTANCE`): whether
+/// array `i` steps per instance. Its `frequency` is the divisor only when
+/// this is set.
+const VERTEX_ARRAY_PER_INSTANCE: u32 = 0x620;
 
 // --- Texture/sampler pools ---
 const TEX_CB_INDEX: u32 = 0x982;
@@ -931,7 +935,15 @@ impl Engine3D {
             stride: field(config, 0, 11),
             start: self.regs.iova(base + 1),
             limit: self.regs.iova(VERTEX_ARRAY_LIMIT + i * 2),
-            divisor: self.regs.get(base + 3),
+            // A stream's frequency outlives the draw that set it, and a
+            // per-vertex stream can carry one: Echoes of Wisdom's do, and
+            // read as instanced every vertex of a mesh fetched vertex 0, so
+            // every triangle collapsed to a point. Eden gates it the same way.
+            divisor: if self.regs.get(VERTEX_ARRAY_PER_INSTANCE + i) & 1 != 0 {
+                self.regs.get(base + 3)
+            } else {
+                0
+            },
         }
     }
 
@@ -2695,7 +2707,12 @@ mod tests {
         assert_eq!(va.stride, 0x20);
         assert_eq!(va.start, base_addr);
         assert_eq!(va.limit, base_addr + 0x1000);
-        assert_eq!(va.divisor, 5);
+        // A frequency on an array that is not per-instance divides nothing.
+        assert_eq!(va.divisor, 0);
+        engine
+            .write(VERTEX_ARRAY_PER_INSTANCE + 2, 1, true, &mut ctx)
+            .unwrap();
+        assert_eq!(engine.vertex_array(2).divisor, 5);
     }
 
     #[test]
