@@ -569,6 +569,14 @@ pub enum Op {
     },
 
     // ---- float ALU ----
+    /// `rro dst, src`: the range reduction before a `mufu` sine, cosine or
+    /// `ex2`, which here is the identity with `src`'s negate and absolute
+    /// value applied. See the decoder's note on why.
+    Rro {
+        dst: u8,
+        src: Operand,
+        sm: FMod,
+    },
     Fadd {
         dst: u8,
         a: u8,
@@ -2175,17 +2183,21 @@ fn decode_alu(insn: u64) -> Op {
         // identity, and modelling it as one is what makes the pair compute
         // the function rather than something adjacent to it.
         //
-        // The modifiers are refused rather than ignored: a negate or an
-        // absolute value dropped on the floor is a wrong answer that looks
-        // like a right one.
+        // The negate (45) and absolute value (49) apply to the argument, as
+        // Eden's `floating_point_range_reduction.cpp` applies them. Bit 50
+        // is no field Eden or `envydis` names, so a word with it is refused.
         0x90 => {
             let Some(src) = rhs_float else { return un };
-            if field(insn, 45, 1) != 0 || field(insn, 49, 1) != 0 || field(insn, 50, 1) != 0 {
+            if field(insn, 50, 1) != 0 {
                 return un;
             }
-            Op::Mov {
+            Op::Rro {
                 dst: reg(insn, 0, 8),
                 src,
+                sm: FMod {
+                    neg: field(insn, 45, 1) != 0,
+                    abs: field(insn, 49, 1) != 0,
+                },
             }
         }
         // sel, pred at 39.
@@ -4866,6 +4878,32 @@ mod tests {
         for low in 0..8u64 {
             assert_eq!(op(0x50e0_0000_0000_0000 | (low << 48)), Op::Nop);
         }
+    }
+
+    /// Words `envydis` reads as `rro sincos $r27 neg $r7` and `rro sincos
+    /// $r24 neg $r31`, from Echoes of Wisdom's vertex shaders.
+    #[test]
+    fn a_range_reduction_keeps_its_modifiers() {
+        let neg = FMod {
+            neg: true,
+            abs: false,
+        };
+        assert_eq!(
+            op(0x5c90_2000_0077_001b),
+            Op::Rro {
+                dst: 27,
+                src: Operand::Reg(7),
+                sm: neg,
+            }
+        );
+        assert_eq!(
+            op(0x5c90_2000_01f7_0018),
+            Op::Rro {
+                dst: 24,
+                src: Operand::Reg(31),
+                sm: neg,
+            }
+        );
     }
 
     /// A negative immediate sets bit 56, which moves the opcode up one:

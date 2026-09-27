@@ -1290,6 +1290,11 @@ impl Emitter<'_> {
             }
 
             // ---- float ----
+            Op::Rro { dst, src, sm } => {
+                let x = self.operand_f(src);
+                let x = self.fmod(sm, x);
+                self.set_f(dst, &x);
+            }
             Op::Fadd {
                 dst,
                 a,

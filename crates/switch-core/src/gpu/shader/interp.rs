@@ -1154,6 +1154,10 @@ impl Invocation {
             }
 
             // ---- float ----
+            Op::Rro { dst, src, sm } => {
+                let x = sm.apply(self.operand_f32(src, env)?);
+                self.set_reg_f32(dst, x);
+            }
             Op::Fadd {
                 dst,
                 a,
@@ -2543,6 +2547,7 @@ fn reads(op: &Op) -> Vec<u8> {
         Op::Ld { idx, .. } => vec![idx],
         Op::Ipa { mul: Some(m), .. } => vec![m],
         Op::Mufu { src, .. } => vec![src],
+        Op::Rro { src, .. } => operand_reg(src).into_iter().collect(),
         Op::Fadd { a, b, .. } | Op::Fmul { a, b, .. } | Op::Fmnmx { a, b, .. } => {
             let mut v = vec![a];
             v.extend(operand_reg(b));
@@ -2745,6 +2750,7 @@ pub(super) fn writes(op: &Op) -> Vec<u8> {
         | Op::Ldc { dst, size, .. } => (0..size.regs()).map(|i| dst.wrapping_add(i)).collect(),
         Op::Ipa { dst, .. }
         | Op::Mufu { dst, .. }
+        | Op::Rro { dst, .. }
         | Op::Fadd { dst, .. }
         | Op::Fmul { dst, .. }
         | Op::Ffma { dst, .. }
@@ -3712,6 +3718,55 @@ mod tests {
         assert!(!warp[0].pred(0));
         assert_eq!(warp[1].reg(1), 10);
         assert!(warp[1].pred(0));
+    }
+
+    /// `rro` passes its argument through with its modifiers applied, so
+    /// `rro` then `mufu.sin` is the sine of the negated argument, and a
+    /// negated zero keeps its sign.
+    #[test]
+    fn a_range_reduction_applies_its_negate_and_absolute_value() {
+        let consts = no_consts();
+        let env = Env::new(&consts, &NoTextures);
+        let neg = FMod {
+            neg: true,
+            abs: false,
+        };
+        let abs_then_neg = FMod {
+            neg: true,
+            abs: true,
+        };
+        let program = prog(&[
+            Op::Rro {
+                dst: 1,
+                src: Operand::Reg(0),
+                sm: neg,
+            },
+            Op::Mufu {
+                dst: 2,
+                src: 1,
+                sm: FMod::default(),
+                op: MufuOp::Sin,
+                sat: false,
+            },
+            Op::Rro {
+                dst: 3,
+                src: Operand::Reg(0),
+                sm: abs_then_neg,
+            },
+            Op::Rro {
+                dst: 4,
+                src: Operand::Reg(RZ),
+                sm: neg,
+            },
+            Op::Exit,
+        ]);
+        let mut invocation = Invocation::new();
+        invocation.set_reg_f32(0, -0.5);
+        invocation.execute(&program, &env).unwrap();
+        assert_eq!(invocation.reg_f32(1), 0.5);
+        assert_eq!(invocation.reg_f32(2), 0.5f32.sin());
+        assert_eq!(invocation.reg_f32(3), -0.5);
+        assert_eq!(invocation.reg(4), (-0.0f32).to_bits());
     }
 
     /// Three of four lanes hold the predicate: `all` says no, `any` yes,
