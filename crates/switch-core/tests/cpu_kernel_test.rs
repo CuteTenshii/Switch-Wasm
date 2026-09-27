@@ -406,7 +406,7 @@ fn guest_threads_run_and_hand_over_at_blocking_syscalls() {
         0xd282_4682,    // mov x2, #0x1234  (arg)
         0xd28a_0003,    // mov x3, #0x5000  (stack top)
         0x5280_0764,    // mov w4, #0x3b    (priority)
-        0x1280_0005,    // mov w5, #-1      (core)
+        0x1280_0025,    // mov w5, #-2      (core: the process default)
         0xd400_0101,    // svc #8           (CreateThread → handle in x1)
         0xaa01_03e0,    // mov x0, x1
         0xd400_0121,    // svc #9           (StartThread)
@@ -541,7 +541,7 @@ fn blocking_on_the_arbiter_leaves_the_next_thread_its_registers() {
         0xd282_4682,    // mov x2, #0x1234  (arg, what must survive)
         0xd28a_0003,    // mov x3, #0x5000  (stack top)
         0x5280_0764,    // mov w4, #0x3b    (priority)
-        0x1280_0005,    // mov w5, #-1      (core)
+        0x1280_0025,    // mov w5, #-2      (core: the process default)
         0xd400_0101,    // svc #8           (CreateThread → handle in x1)
         0xaa01_03e0,    // mov x0, x1
         0xd400_0121,    // svc #9           (StartThread)
@@ -612,7 +612,7 @@ fn a_wait_on_no_handles_is_not_answered() {
         0xaa1f_03e2,    // mov x2, xzr      (arg)
         0xd28a_0003,    // mov x3, #0x5000  (stack top)
         0x5280_0764,    // mov w4, #0x3b
-        0x1280_0005,    // mov w5, #-1
+        0x1280_0025,    // mov w5, #-2      (core: the process default)
         0xd400_0101,    // svc #8           (CreateThread)
         0xaa01_03e0,    // mov x0, x1
         0xd400_0121,    // svc #9           (StartThread)
@@ -733,7 +733,7 @@ fn a_thread_that_never_blocks_is_still_taken_off_the_cpu() {
         0xaa1f_03e2,    // mov x2, xzr      (arg)
         0xd28a_0003,    // mov x3, #0x5000  (stack top)
         0x5280_0764,    // mov w4, #0x3b    (priority)
-        0x1280_0005,    // mov w5, #-1      (core)
+        0x1280_0025,    // mov w5, #-2      (core: the process default)
         0xd400_0101,    // svc #8           (CreateThread -> handle in x1)
         0xaa01_03e0,    // mov x0, x1
         0xd400_0121,    // svc #9           (StartThread)
@@ -784,7 +784,7 @@ fn a_timed_wait_expires_while_the_other_threads_hand_the_cpu_round() {
         0xaa1f_03e2,    // mov x2, xzr      (arg)
         0xd28c_0003,    // mov x3, #0x6000  (stack top)
         0x5280_0764,    // mov w4, #0x3b    (priority)
-        0x1280_0005,    // mov w5, #-1      (core)
+        0x1280_0025,    // mov w5, #-2      (core: the process default)
         0xd400_0101,    // svc #8           (CreateThread -> handle in x1)
         0xaa01_03e0,    // mov x0, x1
         0xd400_0121,    // svc #9           (StartThread)
@@ -792,7 +792,7 @@ fn a_timed_wait_expires_while_the_other_threads_hand_the_cpu_round() {
         0xaa1f_03e2,    // mov x2, xzr
         0xd290_0003,    // mov x3, #0x8000  (the second child's stack top)
         0x5280_0764,    // mov w4, #0x3b
-        0x1280_0005,    // mov w5, #-1
+        0x1280_0025,    // mov w5, #-2      (core: the process default)
         0xd400_0101,    // svc #8
         0xaa01_03e0,    // mov x0, x1
         0xd400_0121,    // svc #9
@@ -854,7 +854,7 @@ fn a_thread_polling_an_idle_socket_does_not_starve_the_others() {
         0xd280_0002,    // mov x2, #0       (arg)
         0xd28a_0003,    // mov x3, #0x5000  (stack top)
         0x5280_0764,    // mov w4, #0x3b    (priority)
-        0x1280_0005,    // mov w5, #-1      (core)
+        0x1280_0025,    // mov w5, #-2      (core: the process default)
         0xd400_0101,    // svc #8           (CreateThread → handle in x1)
         0xaa01_03e0,    // mov x0, x1
         0xd400_0121,    // svc #9           (StartThread)
@@ -937,7 +937,7 @@ fn an_audio_thread_appending_buffers_does_not_starve_the_others() {
         0xd280_0002,    // mov x2, #0       (arg)
         0xd28a_0003,    // mov x3, #0x5000  (stack top)
         0x5280_0764,    // mov w4, #0x3b    (priority)
-        0x1280_0005,    // mov w5, #-1      (core)
+        0x1280_0025,    // mov w5, #-2      (core: the process default)
         0xd400_0101,    // svc #8           (CreateThread -> handle in x1)
         0xaa01_03e0,    // mov x0, x1
         0xd400_0121,    // svc #9           (StartThread)
@@ -1064,7 +1064,7 @@ fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
         0xd280_0002,    // mov x2, #0
         0xd28a_0003,    // mov x3, #0x5000
         0x5280_0584,    // mov w4, #0x2c  (main's priority: a lower one would never be yielded to)
-        0x1280_0005,    // mov w5, #-1
+        0x1280_0025,    // mov w5, #-2      (core: the process default)
         0xd400_0101,    // svc #8
         0xaa01_03e0,    // mov x0, x1
         0xd400_0121,    // svc #9
@@ -1127,7 +1127,7 @@ fn a_timed_out_condvar_wait_comes_back_holding_its_mutex() {
         0xd280_0002,    // mov x2, #0
         0xd28a_0003,    // mov x3, #0x5000
         0x5280_0584,    // mov w4, #0x2c  (main's priority: a lower one would never be yielded to)
-        0x1280_0005,    // mov w5, #-1
+        0x1280_0025,    // mov w5, #-2      (core: the process default)
         0xd400_0101,    // svc #8      (CreateThread -> x1 = the child's handle)
         0xd28c_0109,    // mov x9, #0x6008
         0xb900_0121,    // str w1, [x9]  (record it for the assertion)

@@ -48,6 +48,9 @@ pub struct Npdm {
     pub system_resource_size: u32,
     /// The priority the main thread is created at, 0 (most urgent) to 63.
     pub main_thread_priority: u8,
+    /// The core the main thread runs on, which is also the one a thread
+    /// created with the process's default core (-2) is put on.
+    pub main_thread_core: u8,
     /// The stack the main thread is created with.
     pub main_thread_stack_size: u32,
     /// The manifest's name field, for diagnostics, "Application" on a retail
@@ -81,6 +84,7 @@ impl Npdm {
             is_64_bit: data[0x0C] & 1 != 0,
             system_resource_size: crate::nsp::read_u32(data, 0x14),
             main_thread_priority: data[0x0E],
+            main_thread_core: data[0x0F],
             main_thread_stack_size: crate::nsp::read_u32(data, 0x1C),
             name: String::from_utf8_lossy(&name_bytes[..end]).into_owned(),
         })
@@ -114,6 +118,12 @@ impl Npdm {
         Npdm::of(exefs, data).map(|n| n.main_thread_priority)
     }
 
+    /// The main thread's core from an ExeFS's `main.npdm`, or `None` when
+    /// there is no manifest that parses.
+    pub fn main_thread_core_of(exefs: &crate::nsp::Pfs0, data: &[u8]) -> Option<u8> {
+        Npdm::of(exefs, data).map(|n| n.main_thread_core)
+    }
+
     /// The `system_resource_size` of an ExeFS's `main.npdm`, or 0 when the
     /// container has no manifest or one that cannot be read.
     ///
@@ -136,6 +146,7 @@ mod tests {
         data[0..4].copy_from_slice(&NPDM_MAGIC.to_le_bytes());
         data[0x0C] = 0x37;
         data[0x0E] = 0x2C;
+        data[0x0F] = 1;
         data[0x14..0x18].copy_from_slice(&system_resource_size.to_le_bytes());
         data[0x1C..0x20].copy_from_slice(&0x0010_0000u32.to_le_bytes());
         data[0x20..0x2B].copy_from_slice(b"Application");
@@ -148,6 +159,7 @@ mod tests {
         assert!(parsed.is_64_bit);
         assert_eq!(parsed.system_resource_size, 0x0100_0000);
         assert_eq!(parsed.main_thread_priority, 0x2C);
+        assert_eq!(parsed.main_thread_core, 1);
         assert_eq!(parsed.main_thread_stack_size, 0x0010_0000);
         assert_eq!(parsed.name, "Application");
     }

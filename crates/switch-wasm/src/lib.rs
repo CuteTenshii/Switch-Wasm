@@ -1516,6 +1516,10 @@ fn load_and_boot_nca<S: ByteSource + 'static>(
     if let Some(priority) = switch_core::npdm::Npdm::main_thread_priority_of(&pfs0, &exefs) {
         cpu.set_main_thread_priority(priority);
     }
+    // And its core, which the title reads back to pick per-core state.
+    if let Some(core) = switch_core::npdm::Npdm::main_thread_core_of(&pfs0, &exefs) {
+        cpu.set_main_thread_core(core);
+    }
 
     // And which instruction set it runs, from bit 0 of the same manifest's
     // flags. Also before the boot: the entry ABI puts the return trampoline in

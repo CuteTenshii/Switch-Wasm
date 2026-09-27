@@ -132,6 +132,16 @@ implementation` and no `unimplemented` lines. `make test`: **1,124 tests passing
   the sampling number, and a title waiting for a newer sample waited forever.
   That was also why the CLI could not reproduce what the browser saw: a hand on
   the keyboard kept the LIFO moving.
+- **Every thread said it was on core 0.** Tomodachi Life creates its threads on
+  core 0 and moves each with `SetThreadCoreMask(-1, one-core mask)`, which was a
+  stub, and `GetCurrentProcessorNumber` answered 0 regardless. Two render
+  workers meant for cores 1 and 2 then ran the same job into one command list,
+  and at 15.57G steps, just after the first save, a record half-written by each
+  called a vtable slot that is null in a pool's base class: pc=0. What found it,
+  in order: the object's vtable (`DUMP=*x25`), that the vptr was written once at
+  boot and never again (`TRAP_WRITE` + `TRAP_LAST`), then that two threads wrote
+  the record with identical arguments. The exclusive monitor and the loader were
+  both suspects and both innocent.
 - **A `Poll` that returns instantly is not one that reports nothing ready.**
   NXpotify's Zeroconf listener is `if (poll(&pfd, 1, 200) <= 0) continue;` — with
   no blocking syscall it starved every other thread.

@@ -7,6 +7,11 @@ use super::{
 use crate::{Error, Result};
 use std::fmt::Write;
 
+/// The cores an application may run threads on: 0, 1 and 2, what the
+/// `ThreadInfo` capability of every retail application's NPDM grants. Core
+/// 3 is the system's.
+const PROCESS_CORE_MASK: u64 = 0b0111;
+
 impl Cpu {
     /// Every SVC a guest issues, except `svc #0`.
     ///
@@ -43,6 +48,15 @@ impl Cpu {
         const RESULT_INVALID_MEMORY_RANGE: u64 = 0x8000_DC01;
         // Kernel (module 1) description 114: a handle that names nothing.
         const RESULT_INVALID_HANDLE: u64 = 1 | (114 << 9);
+        // Kernel descriptions 57 and 116: a core the process may not run
+        // on, and an ideal core outside the affinity mask given with it.
+        const RESULT_INVALID_CORE_ID: u64 = 1 | (57 << 9);
+        const RESULT_INVALID_COMBINATION: u64 = 1 | (116 << 9);
+        // The ideal-core values that are not a core: the process's default,
+        // no preference, and leave it as it is.
+        const IDEAL_CORE_USE_PROCESS_VALUE: i32 = -2;
+        const IDEAL_CORE_DONT_CARE: i32 = -1;
+        const IDEAL_CORE_NO_UPDATE: i32 = -3;
         // What `svcGetInfo` reports as the process's memory pool, and the
         // slice of it the kernel reserves for its own per-process bookkeeping
         // (see InfoType 16 below for what reporting it buys and costs).
@@ -318,21 +332,34 @@ impl Cpu {
                 let arg = self.read_zr(2);
                 let stack_top = self.read_zr(3);
                 // The priority is scheduled on; the core is not, every thread
-                // runs on the one core there is. AArch32 passes the priority
-                // in r0 rather than the fifth argument register.
-                let priority = if self.mode == crate::cpu::ExecMode::A32 {
-                    self.read_zr(0)
+                // runs on the one host thread there is, but the guest reads
+                // it back to pick per-core state. AArch32 passes the priority
+                // in r0 rather than the fifth argument register, and the core
+                // in r4 rather than the sixth.
+                let (priority, core) = if self.mode == crate::cpu::ExecMode::A32 {
+                    (self.read_zr(0), self.read_zr(4))
                 } else {
-                    self.read_zr(4)
-                } as u32;
+                    (self.read_zr(4), self.read_zr(5))
+                };
+                let priority = priority as u32;
                 if priority > 63 {
                     const RESULT_INVALID_PRIORITY: u64 = 1 | (112 << 9);
                     self.write_zr(0, RESULT_INVALID_PRIORITY);
                     return Ok(());
                 }
-                let handle = self.create_thread(entry, arg, stack_top, priority as u8);
+                let core = match core as u32 as i32 {
+                    IDEAL_CORE_USE_PROCESS_VALUE => self.main_thread_core,
+                    core @ 0..=3 if PROCESS_CORE_MASK >> core & 1 != 0 => core as u8,
+                    _ => {
+                        self.write_zr(0, RESULT_INVALID_CORE_ID);
+                        return Ok(());
+                    }
+                };
+                let handle = self.create_thread(entry, arg, stack_top, priority as u8, core);
                 if crate::trace::enabled(crate::trace::Trace::Wait) {
-                    crate::traceln!("[thread] create handle={handle:#x} entry={entry:#x}");
+                    crate::traceln!(
+                        "[thread] create handle={handle:#x} entry={entry:#x} core={core}"
+                    );
                 }
                 self.write_zr(0, RESULT_OK);
                 self.write_zr(1, handle);
@@ -570,8 +597,67 @@ impl Cpu {
                 self.write_zr(0, result);
                 Ok(())
             }
-            0x0E | 0x0F | 0x16 | 0x17 | 0x28 | 0x5F => {
-                // get/set thread core mask / CloseHandle /
+            0x0E => {
+                // GetThreadCoreMask(handle = W2) -> ideal core in W1, -1 for
+                // none, and the affinity mask in X2 (r2:r3 in AArch32).
+                let handle = self.read_zr(2);
+                match self.thread_core_mask(handle) {
+                    Some((ideal_core, affinity)) => {
+                        self.write_zr(0, RESULT_OK);
+                        self.write_zr(1, u64::from(ideal_core as u32));
+                        self.svc_out64(2, 2, 3, affinity);
+                    }
+                    None => self.write_zr(0, RESULT_INVALID_HANDLE),
+                }
+                Ok(())
+            }
+            0x0F => {
+                // SetThreadCoreMask(handle = W0, ideal core = W1, affinity =
+                // X2, r2:r3 in AArch32). The checks are the kernel's, in its
+                // order: the mask must name only cores the process has and at
+                // least one of them, and an ideal core must be in it.
+                //
+                // Tomodachi Life creates every thread on core 0 and then
+                // moves each with no ideal core and a one-core mask; its two
+                // render workers end up on cores 1 and 2.
+                let handle = self.read_zr(0);
+                let requested = self.read_zr(1) as u32 as i32;
+                let affinity = self.svc_arg64(2, 2, 3);
+                let Some((current_ideal, _)) = self.thread_core_mask(handle) else {
+                    self.write_zr(0, RESULT_INVALID_HANDLE);
+                    return Ok(());
+                };
+                let checked = match requested {
+                    IDEAL_CORE_USE_PROCESS_VALUE => Ok((
+                        i32::from(self.main_thread_core),
+                        1u64 << self.main_thread_core,
+                    )),
+                    _ if affinity & !PROCESS_CORE_MASK != 0 => Err(RESULT_INVALID_CORE_ID),
+                    _ if affinity == 0 => Err(RESULT_INVALID_COMBINATION),
+                    core @ 0..=3 if affinity & (1 << core) == 0 => Err(RESULT_INVALID_COMBINATION),
+                    core @ 0..=3 => Ok((core, affinity)),
+                    IDEAL_CORE_DONT_CARE => Ok((IDEAL_CORE_DONT_CARE, affinity)),
+                    // Keep the ideal core, which then has to be in the mask.
+                    IDEAL_CORE_NO_UPDATE
+                        if current_ideal >= 0 && affinity & (1 << current_ideal) == 0 =>
+                    {
+                        Err(RESULT_INVALID_COMBINATION)
+                    }
+                    IDEAL_CORE_NO_UPDATE => Ok((current_ideal, affinity)),
+                    _ => Err(RESULT_INVALID_CORE_ID),
+                };
+                let result = match checked {
+                    Ok((ideal, affinity)) if self.set_thread_core_mask(handle, ideal, affinity) => {
+                        RESULT_OK
+                    }
+                    Ok(_) => RESULT_INVALID_HANDLE,
+                    Err(result) => result,
+                };
+                self.write_zr(0, result);
+                Ok(())
+            }
+            0x16 | 0x17 | 0x28 | 0x5F => {
+                // CloseHandle /
                 // CancelSynchronization / ReturnFromException /
                 // FlushProcessDataCache: the last of which is real work on a
                 // console and nothing here, where the guest's stores are
@@ -607,8 +693,12 @@ impl Cpu {
                 Ok(())
             }
             0x10 => {
-                // GetCurrentProcessorNumber
-                self.write_zr(0, 0);
+                // GetCurrentProcessorNumber: the running thread's core. A
+                // title that keeps one of something per core may index it
+                // with this, so it has to differ between threads the guest
+                // put on different cores.
+                let core = self.current_core();
+                self.write_zr(0, u64::from(core));
                 Ok(())
             }
             0x11 | 0x12 => {
@@ -1594,7 +1684,7 @@ impl Cpu {
                     // default) makes `nn::os::GetThreadAvailableCoreMask`
                     // hand `nn::os::RegisterSystemWorkerHandler` an empty
                     // mask, whose "highest set bit" scan then asserts.
-                    0 => 0b0000_0111,           // CoreMask: cores 0, 1, 2
+                    0 => PROCESS_CORE_MASK,     // CoreMask: cores 0, 1, 2
                     1 => 0x0FFF_FFFF_F000_0000, // PriorityMask: 28..=59
                     // Alias/Heap region. Real Horizon puts these far above
                     // the 32-bit range (alias at 0x10_0000_0000, heap at
@@ -1708,5 +1798,123 @@ impl Cpu {
                 imm
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{Cpu, CURRENT_THREAD_PSEUDO_HANDLE};
+
+    const RESULT_INVALID_CORE_ID: u64 = 1 | (57 << 9);
+    const RESULT_INVALID_COMBINATION: u64 = 1 | (116 << 9);
+    /// The ideal-core values `-2` and `-3`, as the 32-bit register holds them.
+    const DONT_CARE: u64 = -1i32 as u32 as u64;
+    const USE_PROCESS_VALUE: u64 = -2i32 as u32 as u64;
+    const NO_UPDATE: u64 = -3i32 as u32 as u64;
+
+    /// `svcCreateThread` on `core`, answering its result and handle.
+    fn create_thread(cpu: &mut Cpu, core: u64) -> (u64, u64) {
+        cpu.write_zr(1, 0x0800_0000);
+        cpu.write_zr(2, 0);
+        cpu.write_zr(3, 0x1000_0000);
+        cpu.write_zr(4, 44);
+        cpu.write_zr(5, core);
+        cpu.horizon_syscall(0x08).unwrap();
+        (cpu.read_zr(0), cpu.read_zr(1))
+    }
+
+    fn processor_number(cpu: &mut Cpu) -> u64 {
+        cpu.horizon_syscall(0x10).unwrap();
+        cpu.read_zr(0)
+    }
+
+    fn core_mask(cpu: &mut Cpu, handle: u64) -> (u64, u64, u64) {
+        cpu.write_zr(2, handle);
+        cpu.horizon_syscall(0x0E).unwrap();
+        (cpu.read_zr(0), cpu.read_zr(1), cpu.read_zr(2))
+    }
+
+    fn set_core_mask(cpu: &mut Cpu, handle: u64, core: u64, mask: u64) -> u64 {
+        cpu.write_zr(0, handle);
+        cpu.write_zr(1, core);
+        cpu.write_zr(2, mask);
+        cpu.horizon_syscall(0x0F).unwrap();
+        cpu.read_zr(0)
+    }
+
+    /// A title that keeps one of something per core may pick it with
+    /// `GetCurrentProcessorNumber`, so each thread has to answer with the
+    /// core it was put on.
+    #[test]
+    fn each_thread_reports_the_core_it_was_created_on() {
+        let mut cpu = Cpu::new();
+        let (result, worker) = create_thread(&mut cpu, 2);
+        assert_eq!(result, 0);
+        assert!(cpu.start_thread(worker));
+        assert_eq!(processor_number(&mut cpu), 0, "the main thread");
+        while cpu.current_thread_handle() != worker {
+            cpu.yield_thread();
+        }
+        assert_eq!(processor_number(&mut cpu), 2, "the worker");
+    }
+
+    #[test]
+    fn the_process_default_core_is_the_main_threads() {
+        let mut cpu = Cpu::new();
+        cpu.set_main_thread_core(1);
+        let (result, worker) = create_thread(&mut cpu, USE_PROCESS_VALUE);
+        assert_eq!(result, 0);
+        assert_eq!(core_mask(&mut cpu, worker), (0, 1, 0b10));
+    }
+
+    /// Core 3 is the system's, and anything past it is no core at all.
+    #[test]
+    fn a_thread_cannot_be_created_on_a_core_the_process_lacks() {
+        let mut cpu = Cpu::new();
+        assert_eq!(create_thread(&mut cpu, 3).0, RESULT_INVALID_CORE_ID);
+        assert_eq!(create_thread(&mut cpu, 7).0, RESULT_INVALID_CORE_ID);
+    }
+
+    #[test]
+    fn a_core_mask_is_checked_kept_and_read_back() {
+        let mut cpu = Cpu::new();
+        let me = CURRENT_THREAD_PSEUDO_HANDLE;
+        assert_eq!(
+            set_core_mask(&mut cpu, me, 2, 0b011),
+            RESULT_INVALID_COMBINATION,
+            "an ideal core outside its own mask"
+        );
+        assert_eq!(
+            set_core_mask(&mut cpu, me, 1, 0b1000),
+            RESULT_INVALID_CORE_ID,
+            "a mask naming the system's core"
+        );
+        assert_eq!(set_core_mask(&mut cpu, me, 1, 0b011), 0);
+        assert_eq!(core_mask(&mut cpu, me), (0, 1, 0b011));
+        assert_eq!(processor_number(&mut cpu), 1);
+        // No update keeps the ideal core and takes the mask.
+        assert_eq!(set_core_mask(&mut cpu, me, NO_UPDATE, 0b110), 0);
+        assert_eq!(core_mask(&mut cpu, me), (0, 1, 0b110));
+        assert_eq!(
+            set_core_mask(&mut cpu, me, NO_UPDATE, 0b100),
+            RESULT_INVALID_COMBINATION,
+            "a kept ideal core the new mask leaves out"
+        );
+        assert_eq!(set_core_mask(&mut cpu, 0xdead, 1, 0b011), 1 | (114 << 9));
+    }
+
+    /// What Tomodachi Life does to every thread it creates: no ideal core,
+    /// and a mask of one core other than the one it is on. The thread goes
+    /// to that core, and says so; a mask that still allows the core it is on
+    /// leaves it there.
+    #[test]
+    fn a_mask_without_an_ideal_core_moves_the_thread_only_when_it_must() {
+        let mut cpu = Cpu::new();
+        let me = CURRENT_THREAD_PSEUDO_HANDLE;
+        assert_eq!(set_core_mask(&mut cpu, me, DONT_CARE, 0b100), 0);
+        assert_eq!(core_mask(&mut cpu, me), (0, DONT_CARE, 0b100));
+        assert_eq!(processor_number(&mut cpu), 2);
+        assert_eq!(set_core_mask(&mut cpu, me, DONT_CARE, 0b110), 0);
+        assert_eq!(processor_number(&mut cpu), 2, "still allowed, so not moved");
     }
 }

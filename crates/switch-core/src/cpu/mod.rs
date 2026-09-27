@@ -1076,6 +1076,14 @@ pub struct ThreadContext {
     tpidr_rw: u64,
     /// Its priority, 0 (most urgent) to 63: see [`Cpu::pick_next`].
     priority: u8,
+    /// The core it is on, its ideal core (-1 for none) and the cores it
+    /// may run on, which the guest sets and reads back. Every thread runs on
+    /// the one host thread there is, so none of this is scheduled on; `core`
+    /// is what `GetCurrentProcessorNumber` answers, and a title that keeps
+    /// per-core state picks it by that.
+    core: u8,
+    ideal_core: i32,
+    affinity: u64,
     /// Scheduling decisions it has been runnable for and not chosen, since
     /// it last ran: see [`STARVE_DECISIONS`].
     passed_over: u32,
@@ -1702,6 +1710,9 @@ pub struct Cpu {
     /// The priority the main thread runs at: see
     /// [`Cpu::set_main_thread_priority`].
     main_thread_priority: u8,
+    /// The core the main thread runs on, and the one "the process's default
+    /// core" means: see [`Cpu::set_main_thread_core`].
+    main_thread_core: u8,
 }
 
 /// How many recently-executed instructions the fault trace shows.
@@ -1869,6 +1880,8 @@ pub const DEFAULT_THREAD_PRIORITY: u8 = 44;
 
 /// The least urgent priority a thread can be given.
 const LOWEST_PRIORITY: u8 = 63;
+/// The highest core number: the console has four, 0 to 3.
+const LAST_CORE: u8 = 3;
 
 /// How many scheduling decisions in a row a runnable thread may be passed
 /// over for a more urgent one before it runs regardless.
@@ -2056,6 +2069,7 @@ impl Cpu {
             thread_log_dropped: 0,
             module_names: Vec::new(),
             main_thread_priority: DEFAULT_THREAD_PRIORITY,
+            main_thread_core: 0,
         };
         // The framebuffer and input registers are fixed hardware-mapped
         // regions: pre-map them so reads never fault and programs (or the
@@ -2156,6 +2170,9 @@ impl Cpu {
                 tpidr: self.tpidr,
                 tpidr_rw: self.tpidr_rw,
                 priority: self.main_thread_priority,
+                core: self.main_thread_core,
+                ideal_core: i32::from(self.main_thread_core),
+                affinity: 1 << self.main_thread_core,
                 passed_over: 0,
                 entry: 0,
                 arg: 0,
@@ -2175,6 +2192,7 @@ impl Cpu {
         arg: u64,
         stack_top: u64,
         priority: u8,
+        core: u8,
     ) -> u64 {
         self.ensure_main_thread();
         let handle = self.alloc_handle();
@@ -2219,6 +2237,9 @@ impl Cpu {
             tpidr: u64::from(tls),
             tpidr_rw: 0,
             priority: priority.min(LOWEST_PRIORITY),
+            core,
+            ideal_core: i32::from(core),
+            affinity: 1 << core,
             passed_over: 0,
             entry,
             arg,
@@ -2226,7 +2247,8 @@ impl Cpu {
             switches: 0,
         });
         let line = format!(
-            "{} created by {}: arg {arg:#x}, stack top {stack_top:#x}, priority {priority}",
+            "{} created by {}: arg {arg:#x}, stack top {stack_top:#x}, priority {priority}, \
+             core {core}",
             self.thread_label(handle),
             self.thread_label(self.current_thread_handle())
         );
@@ -2460,6 +2482,68 @@ impl Cpu {
             .find(|t| t.handle == MAIN_THREAD_HANDLE)
         {
             main.priority = self.main_thread_priority;
+        }
+    }
+
+    /// The main thread's core, from the title's `main.npdm`. Applies to the
+    /// main thread whether or not it already has a slot, and is the core a
+    /// thread created on the process's default core is put on.
+    pub fn set_main_thread_core(&mut self, core: u8) {
+        self.main_thread_core = core.min(LAST_CORE);
+        if let Some(main) = self
+            .threads
+            .iter_mut()
+            .find(|t| t.handle == MAIN_THREAD_HANDLE)
+        {
+            main.core = self.main_thread_core;
+            main.ideal_core = i32::from(self.main_thread_core);
+            main.affinity = 1 << self.main_thread_core;
+        }
+    }
+
+    /// The core the running thread is on.
+    pub(super) fn current_core(&self) -> u8 {
+        self.threads
+            .get(self.current_thread)
+            .map_or(self.main_thread_core, |t| t.core)
+    }
+
+    /// A thread's ideal core (-1 for none) and affinity mask, `None` for an
+    /// unknown handle.
+    pub(super) fn thread_core_mask(&mut self, handle: u64) -> Option<(i32, u64)> {
+        let handle = self.resolve_thread_handle(handle);
+        self.ensure_main_thread();
+        self.threads
+            .iter()
+            .find(|t| t.handle == handle)
+            .map(|t| (t.ideal_core, t.affinity))
+    }
+
+    /// Set a thread's ideal core (-1 for none) and affinity mask, already
+    /// checked against each other, and move it to a core the mask allows the
+    /// way the kernel does: onto its ideal core when it has one, and
+    /// otherwise onto the lowest allowed core only when the one it is on is
+    /// no longer allowed. `false` for an unknown handle.
+    pub(super) fn set_thread_core_mask(
+        &mut self,
+        handle: u64,
+        ideal_core: i32,
+        affinity: u64,
+    ) -> bool {
+        let handle = self.resolve_thread_handle(handle);
+        self.ensure_main_thread();
+        match self.threads.iter_mut().find(|t| t.handle == handle) {
+            Some(thread) => {
+                thread.ideal_core = ideal_core;
+                thread.affinity = affinity;
+                if ideal_core >= 0 {
+                    thread.core = ideal_core as u8;
+                } else if affinity & (1 << thread.core) == 0 {
+                    thread.core = affinity.trailing_zeros() as u8;
+                }
+                true
+            }
+            None => false,
         }
     }
 
@@ -5475,8 +5559,8 @@ mod tests {
     #[test]
     fn the_most_urgent_thread_runs_most_and_starves_nobody() {
         let mut cpu = Cpu::new();
-        let urgent = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, 30);
-        let idle = cpu.create_thread(0x0800_0000, 0, 0x1100_0000, 50);
+        let urgent = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, 30, 0);
+        let idle = cpu.create_thread(0x0800_0000, 0, 0x1100_0000, 50, 0);
         assert!(cpu.start_thread(urgent) && cpu.start_thread(idle));
 
         let held = shares(&mut cpu, 900);
@@ -5496,8 +5580,8 @@ mod tests {
     #[test]
     fn threads_of_one_priority_take_turns() {
         let mut cpu = Cpu::new();
-        let a = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, DEFAULT_THREAD_PRIORITY);
-        let b = cpu.create_thread(0x0800_0000, 0, 0x1100_0000, DEFAULT_THREAD_PRIORITY);
+        let a = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, DEFAULT_THREAD_PRIORITY, 0);
+        let b = cpu.create_thread(0x0800_0000, 0, 0x1100_0000, DEFAULT_THREAD_PRIORITY, 0);
         assert!(cpu.start_thread(a) && cpu.start_thread(b));
         assert_eq!(shares(&mut cpu, 300), vec![100, 100, 100]);
     }
@@ -5508,7 +5592,7 @@ mod tests {
     #[test]
     fn a_priority_set_through_the_pseudo_handle_is_the_one_scheduled_on() {
         let mut cpu = Cpu::new();
-        let worker = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, DEFAULT_THREAD_PRIORITY);
+        let worker = cpu.create_thread(0x0800_0000, 0, 0x1000_0000, DEFAULT_THREAD_PRIORITY, 0);
         assert!(cpu.start_thread(worker));
         assert_eq!(cpu.thread_priority(CURRENT_THREAD_PSEUDO_HANDLE), Some(44));
         assert_eq!(cpu.thread_priority(worker), Some(44));

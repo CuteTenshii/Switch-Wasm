@@ -372,7 +372,7 @@ mod tests {
     fn a_thread_is_reported_from_creation_to_exit() {
         let mut cpu = Cpu::new();
         cpu.record_module_name(0x0800_0000, 0x0900_0000, "main");
-        let handle = cpu.create_thread(0x0800_0100, 7, 0x1000_0000, 44);
+        let handle = cpu.create_thread(0x0800_0100, 7, 0x1000_0000, 44, 0);
         assert!(cpu.start_thread(handle));
 
         let (threads, log, dropped) = cpu.take_thread_report();
@@ -458,7 +458,7 @@ mod tests {
     fn a_thread_handle_is_signalled_when_its_thread_exits_and_wakes_its_joiner() {
         use crate::cpu::ThreadState;
         let mut cpu = Cpu::new();
-        let handle = cpu.create_thread(0x0800_0100, 0, 0x1000_0000, 44);
+        let handle = cpu.create_thread(0x0800_0100, 0, 0x1000_0000, 44, 0);
         assert_eq!(cpu.waitable_signaled(handle), Some(false), "created");
         assert!(cpu.start_thread(handle));
         assert_eq!(cpu.waitable_signaled(handle), Some(false), "running");
@@ -504,7 +504,7 @@ mod tests {
             .write_u64(TYPE + 0x1A8, u64::from(TYPE + 0x188))
             .unwrap();
 
-        let handle = cpu.create_thread(0x0800_0100, u64::from(TYPE), 0x1000_0000, 44);
+        let handle = cpu.create_thread(0x0800_0100, u64::from(TYPE), 0x1000_0000, 44, 0);
         let (threads, _, _) = cpu.take_thread_report();
         assert_eq!(threads[1].name.as_deref(), Some("\"LoadingThread\""));
         assert!(cpu.thread_label(handle).contains("\"LoadingThread\""));
