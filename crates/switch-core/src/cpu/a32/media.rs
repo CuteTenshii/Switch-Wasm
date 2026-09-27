@@ -19,6 +19,54 @@ impl Cpu {
         let op1 = (insn >> 20) & 0x1F;
         let op2 = (insn >> 5) & 0x7;
         match (op1, op2) {
+            // The parallel adds and subtracts: SADD16 through UHSUB8.
+            (0x01..=0x03 | 0x05..=0x07, 0b000..=0b100 | 0b111) => {
+                let result = self.a32_parallel(op1, op2, self.r32(rn), self.r32(rm));
+                self.set_r32(rd, result);
+            }
+            // SEL: each byte from Rn where its GE flag is set, else from Rm.
+            (0x08, 0b101) => {
+                let (n, m) = (self.r32(rn), self.r32(rm));
+                let result = (0..4).fold(0u32, |acc, byte| {
+                    let from = if self.cpsr_ge >> byte & 1 != 0 { n } else { m };
+                    acc | from & (0xFF << (byte * 8))
+                });
+                self.set_r32(rd, result);
+            }
+            // PKHBT / PKHTB: one halfword of Rn and one of the shifted Rm.
+            // The top-from-Rn form shifts arithmetically right, and a shift
+            // of 0 there means 32.
+            (0x08, 0b000 | 0b010 | 0b100 | 0b110) => {
+                let amount = (insn >> 7) & 0x1F;
+                let (n, m) = (self.r32(rn), self.r32(rm));
+                let result = if (insn >> 6) & 1 == 0 {
+                    n & 0xFFFF | (m << amount) & 0xFFFF_0000
+                } else {
+                    let shifted = ((m as i32) >> if amount == 0 { 31 } else { amount }) as u32;
+                    n & 0xFFFF_0000 | shifted & 0xFFFF
+                };
+                self.set_r32(rd, result);
+            }
+            // SSAT16 / USAT16: each signed halfword saturated on its own.
+            (0x0A | 0x0E, 0b001) => {
+                let bits = (insn >> 16) & 0xF;
+                let (lo, hi) = if op1 == 0x0A {
+                    (-(1i32 << bits), (1i32 << bits) - 1)
+                } else {
+                    (0, (1i32 << bits) - 1)
+                };
+                let value = self.r32(rm);
+                let mut result = 0u32;
+                for lane in 0..2 {
+                    let half = i32::from((value >> (16 * lane)) as u16 as i16);
+                    let clamped = half.clamp(lo, hi);
+                    if clamped != half {
+                        self.cpsr_q = true;
+                    }
+                    result |= (clamped as u32 & 0xFFFF) << (16 * lane);
+                }
+                self.set_r32(rd, result);
+            }
             // SBFX / UBFX
             (0x1A | 0x1B | 0x1E | 0x1F, 0b010 | 0b110) => {
                 let lsb = (insn >> 7) & 0x1F;
@@ -187,6 +235,46 @@ impl Cpu {
                 };
                 self.set_r32(d, (rounded >> 32) as u32);
             }
+            // SMLALD / SMLSLD: the dual products, summed or differenced, into
+            // a 64-bit accumulator in RdHi:RdLo. `X` swaps Rm's halves.
+            (0x14, 0b000..=0b011) => {
+                let (lo_reg, hi_reg) = (rd, rn);
+                let n = self.r32(rm);
+                let m = self.r32(((insn >> 8) & 0xF) as u8);
+                let m = if (insn >> 5) & 1 != 0 {
+                    m.rotate_right(16)
+                } else {
+                    m
+                };
+                let low = i64::from(n as i16) * i64::from(m as i16);
+                let high = i64::from((n >> 16) as i16) * i64::from((m >> 16) as i16);
+                let dual = if op2 & 0b010 != 0 {
+                    low - high
+                } else {
+                    low + high
+                };
+                let acc = (u64::from(self.r32(hi_reg)) << 32 | u64::from(self.r32(lo_reg))) as i64;
+                let sum = acc.wrapping_add(dual) as u64;
+                self.set_r32(lo_reg, sum as u32);
+                self.set_r32(hi_reg, (sum >> 32) as u32);
+            }
+            // USAD8 / USADA8: the sum of the four bytes' absolute differences,
+            // plus Ra unless it is 15. The destination is bits 19:16.
+            (0x18, 0b000) => {
+                let n = self.r32(rm);
+                let m = self.r32(((insn >> 8) & 0xF) as u8);
+                let sum = (0..4).fold(0u32, |acc, byte| {
+                    let a = (n >> (8 * byte)) & 0xFF;
+                    let b = (m >> (8 * byte)) & 0xFF;
+                    acc + a.abs_diff(b)
+                });
+                let result = if rd == 15 {
+                    sum
+                } else {
+                    self.r32(rd).wrapping_add(sum)
+                };
+                self.set_r32(rn, result);
+            }
             // SDIV and UDIV, which the media space files under the signed
             // multiplies. The destination is bits 19:16 here, not 15:12,
             // that field holds the 0b1111 that says there is no accumulator.
@@ -213,5 +301,67 @@ impl Cpu {
         }
         self.pc = self.pc.wrapping_add(4);
         Ok(())
+    }
+
+    /// One parallel add or subtract. `op1`'s low two bits are the kind: 1
+    /// modular, which sets GE; 2 saturating; 3 halving. Its bit 2 says
+    /// unsigned. `op2` is the operation: ADD16, ASX, SAX, SUB16, ADD8 or
+    /// SUB8. Each lane is computed at full precision first, and the flags,
+    /// the saturation and the halving are all taken from that.
+    fn a32_parallel(&mut self, op1: u32, op2: u32, n: u32, m: u32) -> u32 {
+        let signed = op1 < 0x04;
+        let kind = op1 & 0b11;
+        // (subtract, Rn lane, Rm lane) for each result lane, low first.
+        let (width, lanes): (u32, &[(bool, u32, u32)]) = match op2 {
+            0b000 => (16, &[(false, 0, 0), (false, 1, 1)]),
+            0b001 => (16, &[(true, 0, 1), (false, 1, 0)]),
+            0b010 => (16, &[(false, 0, 1), (true, 1, 0)]),
+            0b011 => (16, &[(true, 0, 0), (true, 1, 1)]),
+            0b100 => (
+                8,
+                &[(false, 0, 0), (false, 1, 1), (false, 2, 2), (false, 3, 3)],
+            ),
+            _ => (8, &[(true, 0, 0), (true, 1, 1), (true, 2, 2), (true, 3, 3)]),
+        };
+        let mask = (1u32 << width) - 1;
+        let lane_value = |word: u32, lane: u32| -> i32 {
+            let raw = (word >> (lane * width)) & mask;
+            if signed {
+                ((raw << (32 - width)) as i32) >> (32 - width)
+            } else {
+                raw as i32
+            }
+        };
+        let flags_per_lane = 4 / lanes.len() as u32;
+        let mut result = 0u32;
+        let mut ge = 0u8;
+        for (index, &(subtract, from_n, from_m)) in lanes.iter().enumerate() {
+            let (a, b) = (lane_value(n, from_n), lane_value(m, from_m));
+            let full = if subtract { a - b } else { a + b };
+            let value = match kind {
+                // GE says which lanes did not go negative, for a signed lane
+                // or an unsigned subtract, and which carried out, for an
+                // unsigned add.
+                0b01 => {
+                    let set = if signed || subtract {
+                        full >= 0
+                    } else {
+                        full > mask as i32
+                    };
+                    if set {
+                        ge |= ((1u8 << flags_per_lane) - 1) << (index as u32 * flags_per_lane);
+                    }
+                    full
+                }
+                0b10 if signed => full.clamp(-(1 << (width - 1)), (1 << (width - 1)) - 1),
+                0b10 => full.clamp(0, mask as i32),
+                _ => full >> 1,
+            };
+            result |= (value as u32 & mask) << (index as u32 * width);
+        }
+        if kind == 0b01 {
+            self.cpsr_ge = ge;
+        }
+        result
     }
 }
