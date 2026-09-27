@@ -694,6 +694,55 @@ fn parse_dump_specs(spec: &str) -> Vec<DumpSpec> {
         .collect()
 }
 
+/// Hex-dump each region `specs` names, as the machine stands.
+fn dump_regions(cpu: &Cpu, specs: &[DumpSpec]) -> String {
+    let mut out = String::new();
+    for spec in specs {
+        let base = match spec.base {
+            DumpBase::Absolute(addr) => u64::from(addr),
+            DumpBase::Register(reg) => cpu.read_x(reg),
+            DumpBase::StackPointer => cpu.sp(),
+            DumpBase::ProgramCounter => u64::from(cpu.get_pc()),
+        };
+        let base = if spec.deref {
+            let at = base as u32;
+            let low = cpu.mem.read_u32(at).unwrap_or(0);
+            let high = cpu.mem.read_u32(at.wrapping_add(4)).unwrap_or(0);
+            u64::from(high) << 32 | u64::from(low)
+        } else {
+            base
+        };
+        let at = (base as i64).wrapping_add(spec.offset) as u32;
+        out.push_str(&format!(
+            "[dump] {} = {at:#010x} ({:#x} bytes)\n",
+            spec.label, spec.len
+        ));
+        // Words rather than bytes because what is being read here is
+        // almost always a structure: a null in a field is the thing being
+        // looked for, and a run of pointers is what says a table was
+        // populated. The ASCII column is there because the other half of
+        // what turns up in guest memory is names.
+        for line in (0..spec.len).step_by(16) {
+            let addr = at.wrapping_add(line);
+            let mut words = String::new();
+            let mut ascii = String::new();
+            for word in 0..4u32 {
+                let value = cpu.mem.read_u32(addr.wrapping_add(word * 4)).unwrap_or(0);
+                words.push_str(&format!(" {value:08x}"));
+                for byte in value.to_le_bytes() {
+                    ascii.push(if (0x20..0x7f).contains(&byte) {
+                        byte as char
+                    } else {
+                        '.'
+                    });
+                }
+            }
+            out.push_str(&format!("  {addr:#010x}:{words}  {ascii}\n"));
+        }
+    }
+    out
+}
+
 /// How many times a watchpoint or a pc watch reports before going quiet. What
 /// is wanted is which code reached a region *first*, and a region being
 /// touched at all is usually a loop.
@@ -739,6 +788,11 @@ fn backtrace(cpu: &Cpu, depth: usize) -> String {
 ///   first few times execution reaches an address. Who calls a thin IPC stub
 ///   is not a static question here: they are reached through vtables, so
 ///   nothing in the image points at them.
+/// - `WATCH_LAST=<n>`: keep the *last* `n` `WATCH_PC` hits and print them
+///   when the run stops, instead of the first few as they happen: a function
+///   called all the time is interesting at its last call before a fault.
+/// - `WATCH_DUMP=<spec>`: hex-dump memory at each `WATCH_PC` hit, in
+///   `DUMP`'s spelling, for what a register points at only at that moment.
 /// - `WATCH_REGS=1`: print the whole register file at each `WATCH_PC` hit,
 ///   not just the argument registers. What a function is working on is often
 ///   in a callee-saved register by the time it matters.
@@ -755,6 +809,10 @@ pub struct Debug {
     last_traps: std::collections::VecDeque<String>,
     watch_pc: Vec<u32>,
     watch_regs: bool,
+    watch_dumps: Vec<DumpSpec>,
+    /// `WATCH_LAST`: how many of the latest watch hits to keep, and them.
+    watch_last: usize,
+    last_watches: std::collections::VecDeque<String>,
     dumps: Vec<DumpSpec>,
     traps: u32,
     watch_hits: u32,
@@ -775,6 +833,11 @@ impl Debug {
             last_traps: std::collections::VecDeque::new(),
             watch_pc: env_hex_list("WATCH_PC"),
             watch_regs: env::var("WATCH_REGS").is_ok(),
+            watch_dumps: env::var("WATCH_DUMP")
+                .map(|spec| parse_dump_specs(&spec))
+                .unwrap_or_default(),
+            watch_last: env_u64("WATCH_LAST", 0) as usize,
+            last_watches: std::collections::VecDeque::new(),
             dumps: env::var("DUMP")
                 .map(|spec| parse_dump_specs(&spec))
                 .unwrap_or_default(),
@@ -834,18 +897,27 @@ impl Debug {
                 self.traps += 1;
             }
         }
-        if self.watch_hits < MAX_HITS && self.watch_pc.contains(&cpu.get_pc()) {
-            println!(
-                "[watch-pc] {:#010x} at step {done} thread={:#x}{} bt={}",
+        if self.watch_pc.contains(&cpu.get_pc()) {
+            let mut line = format!(
+                "[watch-pc] {:#010x} at step {done} thread={:#x}{} bt={}\n",
                 cpu.get_pc(),
                 cpu.current_thread_handle(),
                 arguments(cpu),
                 backtrace(cpu, 12),
             );
             if self.watch_regs {
-                print!("{}", cpu.reg_dump());
+                line.push_str(&cpu.reg_dump());
             }
-            self.watch_hits += 1;
+            line.push_str(&dump_regions(cpu, &self.watch_dumps));
+            if self.watch_last > 0 {
+                if self.last_watches.len() == self.watch_last {
+                    self.last_watches.pop_front();
+                }
+                self.last_watches.push_back(line);
+            } else if self.watch_hits < MAX_HITS {
+                print!("{line}");
+                self.watch_hits += 1;
+            }
         }
     }
 
@@ -861,52 +933,16 @@ impl Debug {
         }
         print!("{}", cpu.reg_dump());
         println!("backtrace: {}", backtrace(cpu, 24));
-        for spec in &self.dumps {
-            let base = match spec.base {
-                DumpBase::Absolute(addr) => u64::from(addr),
-                DumpBase::Register(reg) => cpu.read_x(reg),
-                DumpBase::StackPointer => cpu.sp(),
-                DumpBase::ProgramCounter => u64::from(cpu.get_pc()),
-            };
-            let base = if spec.deref {
-                let at = base as u32;
-                let low = cpu.mem.read_u32(at).unwrap_or(0);
-                let high = cpu.mem.read_u32(at.wrapping_add(4)).unwrap_or(0);
-                u64::from(high) << 32 | u64::from(low)
-            } else {
-                base
-            };
-            let at = (base as i64).wrapping_add(spec.offset) as u32;
-            println!("[dump] {} = {at:#010x} ({:#x} bytes)", spec.label, spec.len);
-            // Words rather than bytes because what is being read here is
-            // almost always a structure: a null in a field is the thing being
-            // looked for, and a run of pointers is what says a table was
-            // populated. The ASCII column is there because the other half of
-            // what turns up in guest memory is names.
-            for line in (0..spec.len).step_by(16) {
-                let addr = at.wrapping_add(line);
-                let mut words = String::new();
-                let mut ascii = String::new();
-                for word in 0..4u32 {
-                    let value = cpu.mem.read_u32(addr.wrapping_add(word * 4)).unwrap_or(0);
-                    words.push_str(&format!(" {value:08x}"));
-                    for byte in value.to_le_bytes() {
-                        ascii.push(if (0x20..0x7f).contains(&byte) {
-                            byte as char
-                        } else {
-                            '.'
-                        });
-                    }
-                }
-                println!("  {addr:#010x}:{words}  {ascii}");
-            }
-        }
+        print!("{}", dump_regions(cpu, &self.dumps));
     }
 
     /// What the run collected, once it has stopped.
     pub fn report(&self) {
         for line in &self.last_traps {
             println!("{line}");
+        }
+        for line in &self.last_watches {
+            print!("{line}");
         }
         for (pc, count) in &self.readers {
             println!("[reader] {pc:#010x} {count}");
