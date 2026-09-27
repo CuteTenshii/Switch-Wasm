@@ -28,6 +28,7 @@ pub const NV_NOT_SUPPORTED: u32 = 2;
 pub const NV_BAD_PARAMETER: u32 = 4;
 pub const NV_INSUFFICIENT_MEMORY: u32 = 6;
 pub const NV_INVALID_STATE: u32 = 8;
+pub const NV_CONFIG_VAR_NOT_FOUND: u32 = 0x30006;
 
 /// `NVGPU_ZBC_TYPE_*`: which of the two zero-bandwidth-clear tables an entry
 /// belongs to. `INVALID` is not an error: a query passes it to ask for the
@@ -327,7 +328,12 @@ impl NvDrv {
         // that once per command through the diagnostic channel the browser
         // drains, where this `eprintln!` goes nowhere at all.
         match &outcome {
-            Ok(code) if !matches!(*code, NV_OK | NV_NOT_IMPLEMENTED | NV_NOT_SUPPORTED) => {
+            Ok(code)
+                if !matches!(
+                    *code,
+                    NV_OK | NV_NOT_IMPLEMENTED | NV_NOT_SUPPORTED | NV_CONFIG_VAR_NOT_FOUND
+                ) =>
+            {
                 crate::traceln!(
                     "[nv] FAILED {file:?} type={ioc_type:#04x} nr={nr:#04x} -> {code:#x}"
                 )
@@ -538,6 +544,10 @@ impl NvDrv {
             // the driver has, `NVWSI_FILL` included -- which makes the WSI
             // layer fill each dequeued buffer a pixel at a time, and was 45%
             // of a Just Dance 2017 frame.
+            //
+            // The refusal is Eden's `ConfigVarNotFound`, the answer for a
+            // name with nothing set, rather than "not implemented", which the
+            // diagnostic channel reports as a gap in the driver.
             0x1B => {
                 if self.gpu.trace {
                     crate::traceln!(
@@ -546,7 +556,7 @@ impl NvDrv {
                         ascii_field(data, 0x41, 0x41)
                     );
                 }
-                Ok(NV_NOT_IMPLEMENTED)
+                Ok(NV_CONFIG_VAR_NOT_FOUND)
             }
             // EventWaitAsync { in syncpt_id, threshold, timeout, event_id }:
             // the same wait, arming a slot instead of blocking. Submissions
@@ -1443,7 +1453,7 @@ mod tests {
 
         assert_eq!(
             ioctl(&mut drv, &mut mem, fd, TYPE_NVHOST, 0x1B, &mut arg),
-            NV_NOT_IMPLEMENTED
+            NV_CONFIG_VAR_NOT_FOUND
         );
         // The keys the caller asked about are left where they were.
         assert_eq!(&arg[..2], b"nv");
