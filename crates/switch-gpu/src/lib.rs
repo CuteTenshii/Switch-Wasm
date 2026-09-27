@@ -4596,6 +4596,57 @@ mod tests {
         }
     }
 
+    /// Culling throws away the same faces on the device as on the
+    /// rasterizer, whether or not the viewport mirrors y.
+    ///
+    /// Facing is decided by the winding in NDC; a mirroring viewport reverses
+    /// the winding on screen without changing which face is front. The
+    /// rasterizer learned that when Tomodachi Life's composite pass came out
+    /// black; the device's pipeline kept the screen-space rule and culled the
+    /// same pass, so the frame stayed black there.
+    #[test]
+    fn culling_keeps_the_faces_the_rasterizer_keeps() {
+        const VIEWPORT_TRANSFORM: u32 = 0x280;
+        const CULL: u32 = 0x646;
+        const FRONT_FACE: u32 = 0x647;
+        const CULL_FACE: u32 = 0x648;
+        const CW: u32 = 0x900;
+        const CCW: u32 = 0x901;
+        const BACK: u32 = 0x405;
+        let set_up = |mirrored: bool, front: u32| {
+            move |h: &mut Harness| {
+                h.triangle([0.0, 1.0, 0.0, 1.0]);
+                let (w, height) = (
+                    testing::TARGET_WIDTH as f32 / 2.0,
+                    testing::TARGET_HEIGHT as f32 / 2.0,
+                );
+                let scale_y = if mirrored { -height } else { height };
+                for (i, value) in [w, scale_y, 0.5, w, height, 0.5].into_iter().enumerate() {
+                    h.engine
+                        .regs
+                        .set(VIEWPORT_TRANSFORM + i as u32, value.to_bits());
+                }
+                h.engine.regs.set(CULL, 1);
+                h.engine.regs.set(FRONT_FACE, front);
+                h.engine.regs.set(CULL_FACE, BACK);
+            }
+        };
+        for mirrored in [true, false] {
+            // One of the two windings keeps the triangle and the other culls
+            // it, or the test would pass on a device that culled everything.
+            let drawn = [CW, CCW].map(|front| {
+                let mut h = Harness::new();
+                set_up(mirrored, front)(&mut h);
+                h.draw_with(&mut Software).expect("the draw");
+                h.target().iter().any(|&c| c != 0)
+            });
+            assert_ne!(drawn[0], drawn[1], "mirrored={mirrored}: {drawn:?}");
+            for front in [CW, CCW] {
+                agrees(set_up(mirrored, front));
+            }
+        }
+    }
+
     /// A bindless `tex.b` samples the texture its handle names on the device
     /// too, where the handle is resolved from the constant word the shader
     /// loaded it from rather than read out of a register.

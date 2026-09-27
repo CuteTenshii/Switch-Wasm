@@ -110,8 +110,13 @@ pub enum Topology {
     TriangleStrip,
 }
 
-/// Which winding is the front face, **in window space**, after the viewport
-/// transform, so a transform that mirrors y has already reversed it.
+/// Which winding is the front face in the NDC a WebGPU backend's vertex
+/// stage produces: the guest's, with y negated where the viewport does not
+/// mirror (see [`Viewport::flip_y`]).
+///
+/// Facing is decided in NDC. A viewport that mirrors y reverses the winding
+/// on screen without changing which face is front, which is what
+/// `raster::culls` does; only the negation the backend adds reverses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FrontFace {
     Ccw,
@@ -399,9 +404,9 @@ pub struct Viewport {
     /// render target whose row 0 is at the top.
     ///
     /// WebGPU has no negative viewport height, so a backend reproduces this
-    /// by negating `position.y` in the vertex entry point. It also reverses
-    /// which winding is front, which is why [`Pipeline::front_face`] is
-    /// already resolved in window space.
+    /// by negating `position.y` in the vertex entry point where the guest's
+    /// transform does *not* mirror. That negation reverses which winding is
+    /// front, which is why [`Pipeline::front_face`] is resolved against it.
     pub flip_y: bool,
 }
 
@@ -504,12 +509,15 @@ impl Pipeline {
         Ok(Pipeline {
             topology,
             expand,
-            // In window space, after the transform: mirroring y reverses
-            // which way a triangle winds, so a front face resolved from the
-            // register alone would be back-to-front on a flipped viewport.
-            front_face: match (cull.front_ccw, viewport.flip_y) {
-                (true, false) | (false, true) => FrontFace::Ccw,
-                _ => FrontFace::Cw,
+            // The guest's front face is its NDC winding, which the backend
+            // keeps where the viewport mirrors and negates y, reversing it,
+            // where it does not. Resolving it in window space instead, where
+            // the mirror reverses it, culled Tomodachi Life's composite quad
+            // on the device and left its frame black.
+            front_face: if cull.front_ccw == viewport.flip_y {
+                FrontFace::Ccw
+            } else {
+                FrontFace::Cw
             },
             cull: match (cull.enabled, cull.cull_front, cull.cull_back) {
                 (false, _, _) | (_, false, false) => Cull::None,
