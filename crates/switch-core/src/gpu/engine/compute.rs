@@ -39,6 +39,12 @@ pub struct EngineCompute {
     pub regs: Registers,
     pub last_dispatch: Option<Dispatch>,
     pub dispatches: u64,
+    /// The inline upload this class carries at the same methods the 3D
+    /// class and `KEPLER_INLINE_TO_MEMORY_B` do, 0x60 to 0x6D. It is how a
+    /// driver writes a QMD just before launching it: The Legend of Zelda:
+    /// Echoes of Wisdom uploads every one of its QMDs this way, and without
+    /// it each launch read the blank memory the QMD was meant to fill.
+    pub inline: crate::gpu::engine::inline::EngineInline,
 }
 
 impl EngineCompute {
@@ -47,6 +53,7 @@ impl EngineCompute {
             regs: Registers::new(),
             last_dispatch: None,
             dispatches: 0,
+            inline: crate::gpu::engine::inline::EngineInline::new(),
         }
     }
 
@@ -71,6 +78,9 @@ impl EngineCompute {
 
     pub fn write(&mut self, method: u32, arg: u32, ctx: &mut ExecCtx) -> Result<()> {
         self.regs.set(method, arg);
+        if crate::gpu::engine::inline::METHOD_RANGE.contains(&method) {
+            return self.inline.write(method, arg, ctx);
+        }
         if method == SEND_SIGNALING_PCAS_B {
             let qmd_addr = (self.regs.get(SEND_PCAS_A) as u64) << 8;
             self.last_dispatch = Some(Dispatch { qmd_addr });
@@ -104,8 +114,47 @@ mod tests {
     use super::*;
     use crate::gpu::exec::GpuStats;
     use crate::gpu::syncpt::Host1x;
-    use crate::gpu::vmm::AddressSpace;
+    use crate::gpu::vmm::{AddressSpace, SMALL_PAGE_SIZE};
     use crate::mem::Memory;
+
+    /// An inline upload sent on the compute class lands in memory, which is
+    /// how a driver writes the QMD it is about to launch.
+    #[test]
+    fn an_inline_upload_on_the_compute_class_reaches_memory() {
+        use crate::gpu::engine::inline::{
+            LAUNCH_DMA, LINE_COUNT, LINE_LENGTH_IN, LOAD_INLINE_DATA, OFFSET_OUT, PITCH_OUT,
+        };
+        let mut mem = Memory::new();
+        mem.map_zero(0x3000_0000, 0x1000).unwrap();
+        let mut vmm = AddressSpace::new();
+        let base = vmm
+            .map(0x3000_0000, 0x1000, 1, 0, SMALL_PAGE_SIZE, 0, 0)
+            .unwrap();
+        let mut host1x = Host1x::new();
+        let mut stats = GpuStats::default();
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let mut engine = EngineCompute::new();
+        for (method, arg) in [
+            (OFFSET_OUT, (base >> 32) as u32),
+            (OFFSET_OUT + 1, base as u32),
+            (LINE_LENGTH_IN, 8),
+            (LINE_COUNT, 1),
+            (PITCH_OUT, 8),
+            (LAUNCH_DMA, 1),
+            (LOAD_INLINE_DATA, 0x1122_3344),
+            (LOAD_INLINE_DATA, 0x5566_7788),
+        ] {
+            engine.write(method, arg, &mut ctx).unwrap();
+        }
+        assert_eq!(mem.read_u32(0x3000_0000).unwrap(), 0x1122_3344);
+        assert_eq!(mem.read_u32(0x3000_0004).unwrap(), 0x5566_7788);
+    }
 
     #[test]
     fn dispatch_unshifts_the_qmd_address() {
