@@ -51,6 +51,9 @@ cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+- `bun install` also installs the pre-commit hook in `lefthook.yml`: CI's
+  rustfmt and clippy checks when Rust changed, and the TypeScript typecheck
+  when TypeScript did.
 - `node tools/jit_wasm_check.mjs` checks that the browser build runs the blocks
   it emits, against the interpreter, after `make wasm`. Host tests cannot: the
   offsets emitted code uses are wasm32's, and only the browser build has
