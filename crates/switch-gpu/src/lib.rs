@@ -131,7 +131,7 @@ use switch_core::gpu::pipeline::{self as state, AttributeBase, Pipeline};
 use switch_core::gpu::renderer::{Flush, Renderer, Software};
 use switch_core::gpu::shader::compiled::Compiled;
 use switch_core::gpu::shader::wgsl::{self, Coverage, Layout, Stage, Translation};
-use switch_core::gpu::surface::SampleGrid;
+use switch_core::gpu::surface::{Layout as SurfaceLayout, SampleGrid, GOB_WIDTH};
 use switch_core::gpu::texture::TextureSlot;
 use switch_core::gpu::upload::{Banks, DepthKind, Target, Targets, TextureKey, Uploads};
 use switch_core::{Error, Result};
@@ -2104,18 +2104,30 @@ impl Gpu {
             if view == wgpu::TextureViewDimension::D3 {
                 return Err("samples a surface held on the device as a 3D texture".into());
             }
+            // A texture may be the top-left corner of a larger surface, a
+            // padded render target sampled at the size that was drawn: it is
+            // the same texels when both lay their rows out the same way in
+            // memory, the same tiling and the same stride, which block-linear
+            // counts in whole GOBs. Nintendo Switch Sports samples a 40x22
+            // corner of a 48x22 target that way.
             let size = held.texture.size();
-            if (size.width, size.height) != (upload.width, upload.height) {
+            let stride = |layout: SurfaceLayout, row_bytes: u32| match layout {
+                SurfaceLayout::BlockLinear { .. } => row_bytes.div_ceil(GOB_WIDTH),
+                SurfaceLayout::Pitch { pitch } => pitch,
+            };
+            let same_rows = held.target.layout == upload.key.layout
+                && stride(held.target.layout, held.target.row_bytes)
+                    == stride(upload.key.layout, upload.key.row_bytes);
+            if !same_rows || upload.width > size.width || upload.height > size.height {
                 return Err(format!(
                     "samples a {}x{} image out of a {}x{} surface held on the device \
-                     (layer {layer} of {} at {:#x}, {:#x} apart)",
+                     that lays its rows out differently (layer {layer} of {} at {:#x})",
                     upload.width,
                     upload.height,
                     size.width,
                     size.height,
                     upload.layers,
-                    upload.key.addr,
-                    upload.key.layer_stride
+                    upload.key.addr
                 ));
             }
             let (format, widening) = sampled_texture_format(self.features(), upload.format)
@@ -2167,7 +2179,11 @@ impl Gpu {
                     },
                     aspect: wgpu::TextureAspect::All,
                 },
-                surface.size(),
+                wgpu::Extent3d {
+                    width: upload.width,
+                    height: upload.height,
+                    depth_or_array_layers: 1,
+                },
             );
         }
         self.queue.submit([encoder.finish()]);
@@ -4788,6 +4804,65 @@ mod tests {
                 },
             );
         }
+    }
+
+    /// A texture that is the top-left corner of a surface the device holds,
+    /// laid out with the same rows, is copied out of that surface on the
+    /// device rather than refused or read stale out of guest memory.
+    ///
+    /// The draw samples an 8x8 corner of the 16x8 target it renders into,
+    /// with the target's own 64-byte pitch, right after a clear the device
+    /// holds and guest memory has not seen: reading memory would draw zeros
+    /// where the rasterizer draws the clear colour.
+    #[test]
+    fn a_held_surface_stands_in_for_a_smaller_texture_laid_out_the_same_way() {
+        let Ok(mut gpu) = super::Gpu::open() else {
+            return;
+        };
+        let build = |gpu: Option<&mut super::Gpu>| {
+            let mut h = Harness::with_fragment_shader(testing::bindless_fragment_shader());
+            h.bindless_texture();
+            // The fixture's image descriptor, pointed at the colour target.
+            let tic = h.base + 0x1400 + 32;
+            let target = h.base;
+            let mut ctx = h.ctx();
+            ctx.write_u32(tic + 4, target as u32).unwrap();
+            ctx.write_u32(tic + 8, (target >> 32) as u32 | (2 << 21))
+                .unwrap();
+            ctx.write_u32(tic + 12, testing::TARGET_WIDTH * 4 / 32)
+                .unwrap();
+            h.write_vertex(0, [-1.0, 1.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(1, [1.0, 1.0, 0.0, 1.0], [1.0, 0.0, 0.0, 1.0]);
+            h.write_vertex(2, [-1.0, -1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]);
+            // No half anywhere: see the clear test for why.
+            for (i, value) in [0.0f32, 0.2, 0.6, 1.0].into_iter().enumerate() {
+                h.engine.regs.set(0x360 + i as u32, value.to_bits());
+            }
+            match gpu {
+                Some(gpu) => {
+                    h.clear_with(gpu, [true; 4]).expect("the clear");
+                    h.draw_with(gpu).expect("the draw");
+                    h.flush_with(gpu);
+                }
+                None => {
+                    h.clear_with(&mut Software, [true; 4]).expect("the clear");
+                    h.draw_with(&mut Software).expect("the draw");
+                }
+            }
+            h.target()
+        };
+        let want = build(None);
+        let (fallbacks, drawn) = (gpu.fallbacks, gpu.drawn);
+        let got = build(Some(&mut gpu));
+        assert_eq!(
+            gpu.fallbacks, fallbacks,
+            "the draw fell back: {:?}",
+            gpu.last_fallback
+        );
+        assert_eq!(gpu.drawn, drawn + 1, "the draw did not run on the device");
+        let _ = gpu.device.poll(wgpu::PollType::Poll);
+        assert_eq!(gpu.device_error(), None, "the device rejected the pass");
+        assert_eq!(got, want, "the colour surface differs");
     }
 
     /// Culling throws away the same faces on the device as on the
