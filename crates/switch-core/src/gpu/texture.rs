@@ -569,6 +569,8 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     let dw3 = dw(3)?;
     let dw4 = dw(4)?;
     let dw5 = dw(5)?;
+    let dw6 = dw(6)?;
+    let dw7 = dw(7)?;
 
     let kind = texel_kind_for(dw0 & 0x7f, (dw0 >> 7) & 0x7)?;
     let swizzle = [
@@ -645,23 +647,18 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     };
     // The TIC carries no layer stride: it is the size of one swizzled slice,
     // worked out from the extent and the layout the same way the offset of a
-    // texel inside one is.
-    let width_bytes = match kind {
-        TexelKind::Plain(format) => width * format.bytes_per_pixel,
-        TexelKind::Depth(depth) => width * depth.bytes_per_texel(),
-        TexelKind::Block(codec) => {
-            let (block_w, _) = codec.block_size();
-            width.div_ceil(block_w) * codec.bytes_per_block()
+    // texel inside one is. A layered image with mip levels keeps each layer's
+    // whole chain together, so its layers are further apart than one level.
+    // `MAX_MIP_LEVEL` is the top nibble of dword 3.
+    let levels = (dw3 >> 28) + 1;
+    let layer_stride = match layout {
+        Layout::BlockLinear { block_height_gobs }
+            if levels > 1 && layers > 1 && texture_type != THREE_D =>
+        {
+            mipmapped_layer_stride(kind, width, height, block_height_gobs, levels)
         }
+        _ => layout.layer_stride(width_bytes(kind, width), layer_rows(kind, height)),
     };
-    let layer_height = match kind {
-        TexelKind::Plain(_) | TexelKind::Depth(_) => height,
-        TexelKind::Block(codec) => {
-            let (_, block_h) = codec.block_size();
-            height.div_ceil(block_h)
-        }
-    };
-    let layer_stride = layout.layer_stride(width_bytes, layer_height);
 
     let texture = Texture {
         addr: tex_addr,
@@ -681,12 +678,78 @@ pub fn read_image(ctx: &ExecCtx, addr: u64) -> Result<Texture> {
     if trace_textures() {
         crate::traceln!(
             "[tex] {addr:#x} dw={dw0:#010x},{dw1:#010x},{dw2:#010x},{dw3:#010x},{dw4:#010x},\
-             {dw5:#010x} sizes={:#04x} type={:#x} -> {texture:x?}",
+             {dw5:#010x},{dw6:#010x},{dw7:#010x} sizes={:#04x} type={:#x} -> {texture:x?}",
             dw0 & 0x7f,
             (dw0 >> 7) & 0x7,
         );
     }
     Ok(texture)
+}
+
+/// Bytes in one row of an image `width` texels wide: a row of blocks for a
+/// compressed format.
+fn width_bytes(kind: TexelKind, width: u32) -> u32 {
+    match kind {
+        TexelKind::Plain(format) => width * format.bytes_per_pixel,
+        TexelKind::Depth(depth) => width * depth.bytes_per_texel(),
+        TexelKind::Block(codec) => {
+            let (block_w, _) = codec.block_size();
+            width.div_ceil(block_w) * codec.bytes_per_block()
+        }
+    }
+}
+
+/// Rows in an image `height` texels tall: rows of blocks for a compressed
+/// format.
+fn layer_rows(kind: TexelKind, height: u32) -> u32 {
+    match kind {
+        TexelKind::Plain(_) | TexelKind::Depth(_) => height,
+        TexelKind::Block(codec) => {
+            let (_, block_h) = codec.block_size();
+            height.div_ceil(block_h)
+        }
+    }
+}
+
+/// The block height, in GOBs, a block-linear image `rows` tall is laid out
+/// with: the one it was given, halved while half of it would still hold
+/// every row. A mip level smaller than its image's blocks gets smaller blocks,
+/// and so does the alignment of a layer that is small to begin with.
+fn fitted_block_height(block_height_gobs: u32, rows: u32) -> u32 {
+    let mut gobs = block_height_gobs.max(1);
+    while gobs > 1 && rows <= (gobs / 2) * surface::GOB_HEIGHT {
+        gobs /= 2;
+    }
+    gobs
+}
+
+/// The distance between layers of a block-linear array or cube with `levels`
+/// mip levels: every level of one layer, each laid out with its own
+/// [`fitted_block_height`], and the sum aligned to a block of the first.
+///
+/// The rule is Eden's (`CalculateLayerSize` and `AlignLayerSize` in its
+/// texture cache). Tomodachi Life's 64x64 environment cubes carry seven
+/// levels, which puts the faces 0x6000 apart; reading them 0x4000 apart
+/// sampled every face after the first out of the first face's mip chain.
+fn mipmapped_layer_stride(
+    kind: TexelKind,
+    width: u32,
+    height: u32,
+    block_height_gobs: u32,
+    levels: u32,
+) -> u32 {
+    let mut total = 0u32;
+    for level in 0..levels {
+        let rows = layer_rows(kind, (height >> level).max(1));
+        let gobs = fitted_block_height(block_height_gobs, rows);
+        total += Layout::BlockLinear {
+            block_height_gobs: gobs,
+        }
+        .layer_stride(width_bytes(kind, (width >> level).max(1)), rows);
+    }
+    let block =
+        surface::GOB_SIZE * fitted_block_height(block_height_gobs, layer_rows(kind, height));
+    total.div_ceil(block) * block
 }
 
 /// Where to write every texture as a PPM (`DUMP_TEX=<dir>`), if anywhere.
@@ -1027,6 +1090,42 @@ mod tests {
         assert_eq!(image.width, 16);
         assert_eq!(image.height, 8);
         assert_eq!(image.layout, Layout::Pitch { pitch: 64 });
+    }
+
+    /// Tomodachi Life's environment cube array, word for word: 11 cubes of
+    /// 64x64 `R11G11B10F` faces with seven mip levels each. The faces sit
+    /// 0x6000 apart, which is where its render targets put them; without the
+    /// mip chain they would be one level, 0x4000, apart.
+    #[test]
+    fn a_mipmapped_cube_array_keeps_each_faces_mip_chain_in_its_layer() {
+        const TIC: [u32; 8] = [
+            0x78d7ffa1, 0x5f400000, 0x00600003, 0x60070018, 0xec00003f, 0x800a003f, 0x03000000,
+            0x00000060,
+        ];
+        let (mut mem, vmm, base) = harness();
+        let read = |mem: &mut Memory, words: [u32; 8]| {
+            for (i, word) in words.iter().enumerate() {
+                vmm.write_u32(mem, base + i as u64 * 4, *word).unwrap();
+            }
+            let mut host1x = Host1x::new();
+            let mut stats = Default::default();
+            let ctx = ExecCtx {
+                mem,
+                vmm: &vmm,
+                host1x: &mut host1x,
+                stats: &mut stats,
+                trace: false,
+            };
+            read_image(&ctx, base).unwrap()
+        };
+        let image = read(&mut mem, TIC);
+        assert_eq!((image.width, image.height, image.layers), (64, 64, 66));
+        assert_eq!(image.layer_stride, 0x6000);
+
+        // The same image with one level.
+        let mut one_level = TIC;
+        one_level[3] &= 0x0fff_ffff;
+        assert_eq!(read(&mut mem, one_level).layer_stride, 0x4000);
     }
 
     /// A BC1 block whose endpoints are equal decodes to one flat colour, which
