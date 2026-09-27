@@ -198,12 +198,24 @@ impl Cpu {
         Ok(())
     }
 
-    /// `LDREX`/`STREX` and the deprecated `SWP`, which share an encoding.
+    /// `LDREX`/`STREX` and the deprecated `SWP`, which share an encoding,
+    /// and ARMv8's load-acquire/store-release forms beside them.
     pub(super) fn a32_sync(&mut self, insn: u32) -> Result<()> {
         let rn = ((insn >> 16) & 0xF) as u8;
         let rd = ((insn >> 12) & 0xF) as u8;
         let rt = (insn & 0xF) as u8;
         let addr = self.r32(rn);
+        // Bits 9:8 say which kind of access this is: 11 exclusive, 10
+        // exclusive with acquire/release, 00 acquire/release alone. The
+        // ordering is free here, one core at a time, but the plain forms
+        // are not exclusive at all: run as `STREX` an `STLH` dropped its
+        // store whenever no monitor was open and wrote its status into the
+        // `Rd` field, which it fills with 1111. Mario Kart 8 Deluxe's SDK
+        // caches a session's pointer-buffer size with one, read it back as
+        // 0, and refused every pointer buffer on that session.
+        if (insn >> 20) & 0b1000 != 0 && (insn >> 8) & 0b11 == 0b00 {
+            return self.a32_acquire_release(insn, addr, rd, rt);
+        }
         match (insn >> 20) & 0xF {
             // SWP / SWPB: an unconditional read-modify-write, and the only
             // form here that does not use the monitor.
@@ -267,6 +279,40 @@ impl Cpu {
             _ => {
                 return Err(Error::Cpu(format!(
                     "unimplemented A32 synchronisation instruction {:#010x} at pc={:#010x}",
+                    insn, self.pc
+                )))
+            }
+        }
+        self.pc = self.pc.wrapping_add(4);
+        Ok(())
+    }
+
+    /// `LDA{,B,H}` and `STL{,B,H}`: an ordinary load or store, since there
+    /// is no other core to order it against, that neither reads nor opens
+    /// the exclusive monitor. A load's destination is the `Rd` field; a
+    /// store's value is `Rt`, and it reports no status.
+    fn a32_acquire_release(&mut self, insn: u32, addr: u32, rd: u8, rt: u8) -> Result<()> {
+        let load = (insn >> 20) & 1 != 0;
+        match ((insn >> 21) & 0b11, load) {
+            (0b00, false) => self.mem.write_u32(addr, self.r32(rt))?,
+            (0b10, false) => self.mem.write_u8(addr, self.r32(rt) as u8)?,
+            (0b11, false) => self.mem.write_u16(addr, self.r32(rt) as u16)?,
+            (0b00, true) => {
+                let value = self.mem.read_u32(addr)?;
+                self.set_r32(rd, value);
+            }
+            (0b10, true) => {
+                let value = u32::from(self.mem.read_u8(addr)?);
+                self.set_r32(rd, value);
+            }
+            (0b11, true) => {
+                let value = u32::from(self.mem.read_u16(addr)?);
+                self.set_r32(rd, value);
+            }
+            // A doubleword has only the exclusive forms.
+            _ => {
+                return Err(Error::Cpu(format!(
+                    "undefined A32 load-acquire/store-release {:#010x} at pc={:#010x}",
                     insn, self.pc
                 )))
             }

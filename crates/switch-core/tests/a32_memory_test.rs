@@ -145,6 +145,38 @@ fn an_exclusive_store_fails_without_a_matching_load() {
     assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), 0);
 }
 
+/// ARMv8's `STL`/`LDA` share the exclusive pairs' encoding and differ in
+/// bits 9:8. They are plain accesses: a store lands with no monitor open and
+/// reports nothing, a load opens no monitor, and neither touches the `Rd`
+/// field a store leaves as 1111, which is `pc`. Mario Kart 8 Deluxe caches a
+/// session's pointer-buffer size with `STLH`.
+#[test]
+fn a_store_release_is_not_an_exclusive_store() {
+    let cpu = run(&[
+        0xE3A0_1A08, // mov   r1, #0x8000
+        0xE308_3765, // movw  r3, #0x8765
+        0xE1E1_FC93, // stlh  r3, [r1]
+        0xE1F1_0C9F, // ldah  r0, [r1]
+        0xE191_4C9F, // lda   r4, [r1]
+        0xE1D1_5C9F, // ldab  r5, [r1]
+        0xE181_2F93, // strex r2, r3, [r1]
+    ]);
+    assert_eq!(cpu.mem.read_u16(SCRATCH).unwrap(), 0x8765);
+    assert_eq!(r(&cpu, 0), 0x8765);
+    assert_eq!(r(&cpu, 4), 0x8765);
+    assert_eq!(r(&cpu, 5), 0x65);
+    assert_eq!(r(&cpu, 2), 1, "a load-acquire opens no monitor");
+
+    let cpu = run(&[
+        0xE3A0_1A08, // mov  r1, #0x8000
+        0xE308_3765, // movw r3, #0x8765
+        0xE181_FC93, // stl  r3, [r1]
+        0xE3A0_3007, // mov  r3, #7
+        0xE1C1_FC93, // stlb r3, [r1]
+    ]);
+    assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), 0x8707);
+}
+
 #[test]
 fn a_byte_swap_exchanges_memory_and_a_register() {
     let cpu = run(&[
