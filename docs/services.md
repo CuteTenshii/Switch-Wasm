@@ -68,6 +68,11 @@ and tests.
   (66, 67) and the copyright notice drawn over screenshots (100-102) — is
   accepted and does nothing, since nothing here captures; Nintendo Switch
   Sports aborts on the copyright buffer setup otherwise.
+- **`vi`** is one display with one layer. `SetLayerScalingMode` scales
+  nothing but checks the mode the way the service does: `ScaleToWindow` (2)
+  and `PreserveAspectRatio` (4) succeed, the other known modes are not
+  supported, and anything above them fails. Mario Kart 8 Deluxe sets one at
+  boot.
 - **`apm`** must *agree* with `am`; `GetPerformanceConfiguration` returns what
   `Set*` was last handed (defaults nonzero — 0 is `Invalid`).
 - **`ts`** reports the SoC and PCB sensors at an idle reading. `MilliC` is
