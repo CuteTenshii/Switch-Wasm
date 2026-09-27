@@ -739,6 +739,9 @@ fn backtrace(cpu: &Cpu, depth: usize) -> String {
 ///   first few times execution reaches an address. Who calls a thin IPC stub
 ///   is not a static question here: they are reached through vtables, so
 ///   nothing in the image points at them.
+/// - `WATCH_REGS=1`: print the whole register file at each `WATCH_PC` hit,
+///   not just the argument registers. What a function is working on is often
+///   in a callee-saved register by the time it matters.
 /// - `DUMP=<base>[+<hex>][:<hex length>][,...]`: hex-dump guest memory
 ///   wherever the run stopped, where `<base>` is `x0`..`x30`, `sp`, `pc` or an
 ///   address: `DUMP=x23+0x1830:0x40,0x10c2e870`. A `*` in front follows the
@@ -751,6 +754,7 @@ pub struct Debug {
     trap_last: usize,
     last_traps: std::collections::VecDeque<String>,
     watch_pc: Vec<u32>,
+    watch_regs: bool,
     dumps: Vec<DumpSpec>,
     traps: u32,
     watch_hits: u32,
@@ -770,6 +774,7 @@ impl Debug {
             trap_last: env_u64("TRAP_LAST", 0) as usize,
             last_traps: std::collections::VecDeque::new(),
             watch_pc: env_hex_list("WATCH_PC"),
+            watch_regs: env::var("WATCH_REGS").is_ok(),
             dumps: env::var("DUMP")
                 .map(|spec| parse_dump_specs(&spec))
                 .unwrap_or_default(),
@@ -831,11 +836,15 @@ impl Debug {
         }
         if self.watch_hits < MAX_HITS && self.watch_pc.contains(&cpu.get_pc()) {
             println!(
-                "[watch-pc] {:#010x} at step {done}{} bt={}",
+                "[watch-pc] {:#010x} at step {done} thread={:#x}{} bt={}",
                 cpu.get_pc(),
+                cpu.current_thread_handle(),
                 arguments(cpu),
                 backtrace(cpu, 12),
             );
+            if self.watch_regs {
+                print!("{}", cpu.reg_dump());
+            }
             self.watch_hits += 1;
         }
     }
