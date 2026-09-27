@@ -20,10 +20,10 @@ use crate::gpu::qmd::{ConstantBuffer, Qmd, Release, CONSTANT_BUFFERS, QMD_WORDS}
 use crate::gpu::shader::compiled::Compiled;
 use crate::gpu::shader::interp::{
     resolve_shuffles, ConstCache, ConstantSource, Env, GlobalMemory, Halt, Invocation,
-    ShaderResult, SharedMemory, TextureSource, WARP_LANES,
+    MemoryTextures, ShaderResult, SharedMemory, TextureSource, WARP_LANES,
 };
 use crate::gpu::shader::{decode_program_from_memory, Op};
-use crate::gpu::texture::{self, BlockCache, Descriptors};
+use crate::gpu::texture::{BlockCache, Descriptors};
 use crate::{Error, Result};
 use std::cell::RefCell;
 
@@ -287,31 +287,73 @@ impl GlobalMemory for DispatchMemory<'_, '_> {
     }
 }
 
+impl DispatchMemory<'_, '_> {
+    /// The draw path's texture source over this dispatch's borrow, so a
+    /// shader reads a texture alike whichever engine runs it.
+    fn textures<R>(&self, read: impl FnOnce(&MemoryTextures) -> R) -> R {
+        let ctx = self.ctx.borrow();
+        read(&MemoryTextures {
+            ctx: &ctx,
+            tex_header_pool: self.tex_header_pool,
+            tex_sampler_pool: self.tex_sampler_pool,
+            descriptors: &self.descriptors,
+            blocks: &self.blocks,
+        })
+    }
+}
+
 impl TextureSource for DispatchMemory<'_, '_> {
     fn sample(&self, handle: u32, u: f32, v: f32, layer: u32) -> ShaderResult<[f32; 4]> {
-        let cached = self.descriptors.borrow().get(&handle).copied();
-        let ctx = self.ctx.borrow();
-        let descriptors = match cached {
-            Some(d) => d,
-            None => {
-                let d = texture::read_descriptors(
-                    &ctx,
-                    self.tex_header_pool,
-                    self.tex_sampler_pool,
-                    handle,
-                )?;
-                self.descriptors.borrow_mut().insert(handle, d);
-                d
-            }
-        };
-        Ok(texture::sample_with(
-            &ctx,
-            &descriptors,
-            f64::from(u),
-            f64::from(v),
-            layer,
-            &self.blocks,
-        )?)
+        self.textures(|t| t.sample(handle, u, v, layer))
+    }
+
+    fn sample_3d(&self, handle: u32, u: f32, v: f32, w: f32) -> ShaderResult<[f32; 4]> {
+        self.textures(|t| t.sample_3d(handle, u, v, w))
+    }
+
+    fn sample_cube(&self, handle: u32, s: f32, t: f32, r: f32) -> ShaderResult<[f32; 4]> {
+        self.textures(|x| x.sample_cube(handle, s, t, r))
+    }
+
+    fn sample_cube_array(
+        &self,
+        handle: u32,
+        s: f32,
+        t: f32,
+        r: f32,
+        cube: u32,
+    ) -> ShaderResult<[f32; 4]> {
+        self.textures(|x| x.sample_cube_array(handle, s, t, r, cube))
+    }
+
+    fn texel_step(&self, handle: u32) -> ShaderResult<(f32, f32)> {
+        self.textures(|t| t.texel_step(handle))
+    }
+
+    fn dimensions(&self, handle: u32) -> ShaderResult<[u32; 4]> {
+        self.textures(|t| t.dimensions(handle))
+    }
+
+    fn gather(
+        &self,
+        handle: u32,
+        u: f32,
+        v: f32,
+        layer: u32,
+        component: usize,
+    ) -> ShaderResult<[f32; 4]> {
+        self.textures(|t| t.gather(handle, u, v, layer, component))
+    }
+
+    fn sample_compare(
+        &self,
+        handle: u32,
+        u: f32,
+        v: f32,
+        layer: u32,
+        reference: f32,
+    ) -> ShaderResult<[f32; 4]> {
+        self.textures(|t| t.sample_compare(handle, u, v, layer, reference))
     }
 }
 
