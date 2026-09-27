@@ -1600,10 +1600,21 @@ impl Cpu {
                 Ok(())
             }
             0x25 => {
-                // GetThreadId(out_thread_id, handle): same shape and same
-                // fix as GetProcessId above.
-                self.write_zr(0, RESULT_OK);
-                self.svc_out64(1, 1, 2, 1);
+                // GetThreadId(out_thread_id, handle): the thread's own id, in
+                // X1 as GetProcessId's is. Answering 1 for every thread made
+                // them all the same thread to a title comparing ids: The
+                // Legend of Zelda: Echoes of Wisdom's actor factory took the
+                // main thread for another it keeps a list of, initialised
+                // Link inside a creation that holds its lock, and aborted when
+                // Link's sword asked for the same lock.
+                let handle = self.read_zr(1);
+                match self.thread_id(handle) {
+                    Some(id) => {
+                        self.write_zr(0, RESULT_OK);
+                        self.svc_out64(1, 1, 2, id);
+                    }
+                    None => self.write_zr(0, RESULT_INVALID_HANDLE),
+                }
                 Ok(())
             }
             0x26 => {
@@ -1901,6 +1912,39 @@ mod tests {
             "a kept ideal core the new mask leaves out"
         );
         assert_eq!(set_core_mask(&mut cpu, 0xdead, 1, 0b011), 1 | (114 << 9));
+    }
+
+    fn thread_id(cpu: &mut Cpu, handle: u64) -> (u64, u64) {
+        cpu.write_zr(1, handle);
+        cpu.horizon_syscall(0x25).unwrap();
+        (cpu.read_zr(0), cpu.read_zr(1))
+    }
+
+    /// Every thread has an id of its own. Answering 1 for all of them made
+    /// The Legend of Zelda: Echoes of Wisdom mistake its main thread for
+    /// another and abort on a lock it already held.
+    #[test]
+    fn each_thread_has_an_id_of_its_own() {
+        let mut cpu = Cpu::new();
+        let (_, a) = create_thread(&mut cpu, 0);
+        let (_, b) = create_thread(&mut cpu, 0);
+        let main = thread_id(&mut cpu, CURRENT_THREAD_PSEUDO_HANDLE);
+        let (a_id, b_id) = (thread_id(&mut cpu, a), thread_id(&mut cpu, b));
+        assert_eq!(main.0, 0);
+        assert_eq!((a_id.0, b_id.0), (0, 0));
+        let ids = [main.1, a_id.1, b_id.1];
+        assert!(ids.iter().all(|&id| id != 0), "{ids:?}");
+        assert!(
+            ids[0] != ids[1] && ids[1] != ids[2] && ids[0] != ids[2],
+            "{ids:?}"
+        );
+        // The pseudo handle names whichever thread is running.
+        cpu.start_thread(a);
+        while cpu.current_thread_handle() != a {
+            cpu.yield_thread();
+        }
+        assert_eq!(thread_id(&mut cpu, CURRENT_THREAD_PSEUDO_HANDLE).1, a_id.1);
+        assert_eq!(thread_id(&mut cpu, 0xdead).0, 1 | (114 << 9));
     }
 
     /// What Tomodachi Life does to every thread it creates: no ideal core,

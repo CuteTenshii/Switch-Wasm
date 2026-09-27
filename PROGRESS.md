@@ -142,6 +142,17 @@ implementation` and no `unimplemented` lines. `make test`: **1,124 tests passing
   boot and never again (`TRAP_WRITE` + `TRAP_LAST`), then that two threads wrote
   the record with identical arguments. The exclusive monitor and the loader were
   both suspects and both innocent.
+- **Every thread had id 1.** `svcGetThreadId` answered 1 whatever it was
+  asked, so to a title comparing ids every thread was the same thread. The
+  Legend of Zelda: Echoes of Wisdom's actor factory checks whether it is on one
+  of the threads it keeps a list of, and took the main thread for another: it
+  initialised Link inside a creation that holds a global `std::mutex`, Link's
+  initialisation created his sword through the same path, and the SDK aborted
+  (2162-0001) on the second lock at 1.37G steps. The trail, for the next one:
+  the abort was `pthread_mutex_lock` refusing a self-deadlock; `TRAP_WRITE`
+  showed the lock taken once and never released; `WATCH_DUMP` read the two
+  registry names (`PrologueLink`, `PlayerItemSword`); and resolving the
+  factory's PLT imports found `nn::os::GetThreadId` beside the branch.
 - **A `Poll` that returns instantly is not one that reports nothing ready.**
   NXpotify's Zeroconf listener is `if (poll(&pfd, 1, 200) <= 0) continue;` — with
   no blocking syscall it starved every other thread.

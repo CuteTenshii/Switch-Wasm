@@ -1055,6 +1055,9 @@ pub struct TouchPoint {
 #[derive(Debug, Clone)]
 pub struct ThreadContext {
     pub handle: u64,
+    /// Its kernel thread id, what `svcGetThreadId` answers: unique to the
+    /// thread and not its handle. See [`Cpu::next_thread_id`].
+    id: u64,
     pub state: ThreadState,
     /// Suspended by `svcSetThreadActivity`. Kept apart from `state` because
     /// suspension does not replace what the thread was doing, a paused thread
@@ -1713,6 +1716,10 @@ pub struct Cpu {
     /// The core the main thread runs on, and the one "the process's default
     /// core" means: see [`Cpu::set_main_thread_core`].
     main_thread_core: u8,
+    /// The id the next thread created gets. The main thread is 1, and every
+    /// thread after it the next number, so no two share one: a title that
+    /// tells threads apart by id sees them as the kernel's ids make them.
+    next_thread_id: u64,
 }
 
 /// How many recently-executed instructions the fault trace shows.
@@ -1877,6 +1884,9 @@ const TIME_SLICE: u64 = 20_000;
 /// of a title with no manifest, which is also what most retail manifests
 /// declare. Horizon priorities run from 0, the most urgent, to 63.
 pub const DEFAULT_THREAD_PRIORITY: u8 = 44;
+
+/// The main thread's kernel id; every thread created after it counts up.
+const MAIN_THREAD_ID: u64 = 1;
 
 /// The least urgent priority a thread can be given.
 const LOWEST_PRIORITY: u8 = 63;
@@ -2070,6 +2080,7 @@ impl Cpu {
             module_names: Vec::new(),
             main_thread_priority: DEFAULT_THREAD_PRIORITY,
             main_thread_core: 0,
+            next_thread_id: MAIN_THREAD_ID + 1,
         };
         // The framebuffer and input registers are fixed hardware-mapped
         // regions: pre-map them so reads never fault and programs (or the
@@ -2155,6 +2166,7 @@ impl Cpu {
         if self.threads.is_empty() {
             self.threads.push(ThreadContext {
                 handle: MAIN_THREAD_HANDLE,
+                id: MAIN_THREAD_ID,
                 state: ThreadState::Runnable,
                 paused: false,
                 regs: [0; REG_FILE],
@@ -2220,8 +2232,11 @@ impl Cpu {
             regs[30] = THREAD_EXIT_TRAMPOLINE as u64;
             regs[SP_SLOT] = stack_top;
         }
+        let id = self.next_thread_id;
+        self.next_thread_id += 1;
         self.threads.push(ThreadContext {
             handle,
+            id,
             state: ThreadState::Created,
             paused: false,
             regs,
@@ -2499,6 +2514,16 @@ impl Cpu {
             main.ideal_core = i32::from(self.main_thread_core);
             main.affinity = 1 << self.main_thread_core;
         }
+    }
+
+    /// A thread's kernel id, `None` for a handle that names no thread.
+    pub(super) fn thread_id(&mut self, handle: u64) -> Option<u64> {
+        let handle = self.resolve_thread_handle(handle);
+        self.ensure_main_thread();
+        self.threads
+            .iter()
+            .find(|t| t.handle == handle)
+            .map(|t| t.id)
     }
 
     /// The core the running thread is on.

@@ -46,10 +46,11 @@ fn get_system_tick_comes_back_in_a_register_pair() {
 
 /// `svcGetThreadId`'s id is 64 bits, so it occupies `r1:r2`, not `r1` alone.
 /// A wrapper that stores both halves through its out pointer would otherwise
-/// write a stale `r2` into the top of the caller's `u64`.
+/// write a stale `r2` into the top of the caller's `u64`. Asked about the
+/// running thread, through the pseudo handle, which is the main thread, id 1.
 #[test]
 fn a_thread_id_fills_both_halves_of_its_pair() {
-    let cpu = syscall(0x25, [0, 0, 0xDEAD_BEEF, 0, 0]);
+    let cpu = syscall(0x25, [0, 0xFFFF_8000, 0xDEAD_BEEF, 0, 0]);
     assert_eq!(r(&cpu, 0), 0, "Result");
     assert_eq!(r(&cpu, 1), 1, "the id's low half");
     assert_eq!(r(&cpu, 2), 0, "and its top half, which was not left stale");
