@@ -442,6 +442,23 @@ fn lm_writes_the_guests_own_log_to_the_console() {
 }
 
 #[test]
+fn fatal_service_keeps_the_result_after_its_trace_is_drained() {
+    const FATAL: u64 = 0x1000;
+    const RESULT: u32 = 0x0000_7201;
+
+    let mut cpu = cpu_at(0x1000);
+    cpu.bootstrap();
+    cpu.set_pc(0x1000);
+    cpu.register_service_handle(FATAL, "fatal:u");
+
+    ipc_request_with_payload(&mut cpu, FATAL, 0, 2, &RESULT.to_le_bytes());
+    cpu.trace.clear();
+
+    let fatal = cpu.guest_fatal().expect("fatal result was not retained");
+    assert!(fatal.contains("0x00007201 = 1-0057 (cmd Some(2))"));
+}
+
+#[test]
 fn pctl_reports_parental_controls_off() {
     const PCTL: u64 = 0x1000;
     let mut cpu = cpu_at(0x1000);

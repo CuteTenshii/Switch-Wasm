@@ -2274,9 +2274,9 @@ fn ipc_list_json(pairs: &[(String, Option<u32>)], out: &mut Vec<u8>) {
 /// reading was gone. Every one of those pieces already existed. This is the
 /// bundling.
 ///
-/// `panicked` is the field that decides how the rest reads: a clean fault
-/// stopped the guest, a panic stopped the emulator, and the second is a bug
-/// here whatever the guest was doing.
+/// `panicked` is the field that decides how the rest reads: a fault or
+/// `fatal:u` stopped the guest, a panic stopped the emulator, and the second
+/// is a bug here whatever the guest was doing.
 #[no_mangle]
 pub extern "C" fn switch_crash_report_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let mut out = Vec::with_capacity(16 * 1024);
@@ -2303,7 +2303,16 @@ pub extern "C" fn switch_crash_report_json(handle: u32, buf: *mut u8, maxlen: u3
 
     out.extend_from_slice(b",\"lastError\":\"");
     json_escape(&s.last_error, &mut out);
-    out.extend_from_slice(b"\",\"title\":");
+    out.extend_from_slice(b"\",\"guestFatal\":");
+    match s.cpu.guest_fatal() {
+        Some(fatal) => {
+            out.extend_from_slice(b"\"");
+            json_escape(fatal, &mut out);
+            out.extend_from_slice(b"\"");
+        }
+        None => out.extend_from_slice(b"null"),
+    }
+    out.extend_from_slice(b",\"title\":");
     match &s.control {
         Some(control) => {
             out.extend_from_slice(b"{\"id\":\"");
@@ -3036,12 +3045,7 @@ pub extern "C" fn switch_set_battery(handle: u32, percent: u32, charging: u32) {
 pub extern "C" fn switch_run(handle: u32, max_steps: u64) -> i64 {
     let s = session(handle);
     match s.cpu.run(max_steps) {
-        Ok(report) => {
-            if report.halted {
-                // push a marker the frontend can detect
-            }
-            report.steps as i64
-        }
+        Ok(report) => report.steps as i64,
         Err(e) => {
             s.last_error = e.to_string();
             -1
@@ -3053,6 +3057,13 @@ pub extern "C" fn switch_run(handle: u32, max_steps: u64) -> i64 {
 #[no_mangle]
 pub extern "C" fn switch_halted(handle: u32) -> i32 {
     session(handle).cpu.halted as i32
+}
+
+/// Copy the last `fatal:u` report for this program, if it made one.
+#[no_mangle]
+pub extern "C" fn switch_guest_fatal(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let fatal = session(handle).cpu.guest_fatal().unwrap_or("");
+    write_into(buf, maxlen, fatal.as_bytes())
 }
 
 /// Copy accumulated console output into `buf` and clear it. Returns bytes copied.

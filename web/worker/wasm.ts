@@ -68,6 +68,7 @@ export interface WasmExports {
 
   switch_run(handle: number, maxSteps: bigint): bigint;
   switch_halted(handle: number): number;
+  switch_guest_fatal(handle: number, buf: number, maxlen: number): number;
   switch_drain_output(handle: number, buf: number, maxlen: number): number;
   switch_drain_trace(handle: number, buf: number, maxlen: number): number;
   switch_dump_regs(handle: number, buf: number, maxlen: number): number;

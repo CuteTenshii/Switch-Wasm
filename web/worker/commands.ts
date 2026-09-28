@@ -352,6 +352,9 @@ export const CMD: CommandHandlers = {
   halted() {
     return api().switch_halted(handle());
   },
+  guest_fatal() {
+    return readString(2048, (buf, cap) => api().switch_guest_fatal(handle(), buf, cap));
+  },
   drain_output() {
     return drain((h, b, l) => api().switch_drain_output(h, b, l), 4096);
   },

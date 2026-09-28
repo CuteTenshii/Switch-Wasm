@@ -1281,6 +1281,10 @@ pub struct Cpu {
     /// told yet. See [`Cpu::note_dropped_trace`].
     trace_dropped: bool,
     pub halted: bool,
+    /// The last `fatal:u` report from this guest. Kept separately from the
+    /// trace because the browser drains diagnostics while the title runs and
+    /// still needs to classify the later `ExitProcess` as a crash.
+    guest_fatal: Option<String>,
     /// The clock, in cycles of the 1.02 GHz CPU `svcGetSystemTick` is scaled
     /// from. One retired instruction is one cycle, but it is **not** an
     /// instruction count, because [`Cpu::reschedule`] idles it forward to the
@@ -2087,6 +2091,7 @@ impl Cpu {
             trace_cap: 512 * 1024,
             trace_dropped: false,
             halted: false,
+            guest_fatal: None,
             cycles: 0,
             steps: 0,
             recent: [(0, 0); RECENT_LEN],
@@ -3332,6 +3337,7 @@ impl Cpu {
         self.out.clear();
         self.trace.clear();
         self.halted = false;
+        self.guest_fatal = None;
         self.trace_enabled = false;
         for i in 0..=30u8 {
             self.set_reg(i, 0);
@@ -3437,6 +3443,7 @@ impl Cpu {
         self.out.clear();
         self.trace.clear();
         self.halted = false;
+        self.guest_fatal = None;
         self.trace_enabled = false;
         self.mem.clear_modules();
         self.module_names.clear();

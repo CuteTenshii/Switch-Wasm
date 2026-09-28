@@ -27,13 +27,17 @@ impl Cpu {
         let module = result & 0x1FF;
         let description = (result >> 9) & 0x1FFF;
         let trace = self.backtrace(10);
-        self.diagnostic(
-            Level::Error,
-            &format!(
-                "[fatal] {result:#010x} = {module}-{description:04} (cmd {cmd_id:?}) bt={trace:x?}"
-            ),
+        let report = format!(
+            "[fatal] {result:#010x} = {module}-{description:04} (cmd {cmd_id:?}) bt={trace:x?}"
         );
+        self.guest_fatal = Some(report.clone());
+        self.diagnostic(Level::Error, &report);
         self.write_ipc_response(tls, 0, &[], &[], &[])
+    }
+
+    /// The fatal report for the program currently loaded, if it made one.
+    pub fn guest_fatal(&self) -> Option<&str> {
+        self.guest_fatal.as_deref()
     }
 
     /// `lm`: the log manager, which is where a title's own diagnostic output

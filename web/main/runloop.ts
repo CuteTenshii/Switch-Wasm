@@ -265,8 +265,14 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
     // it are not.
     logTrace(await drainTrace());
   } else if (await call('halted')) {
-    setState('halted');
-    log('Halted (ExitProcess)', 'ok');
+    const fatal = await call('guest_fatal');
+    if (fatal) {
+      setState('fault');
+      showGuestCrash(fatal);
+    } else {
+      setState('halted');
+      log('Halted (ExitProcess)', 'ok');
+    }
     await drainDiagnostics();
   } else if (!stepped) {
     setState('fault');

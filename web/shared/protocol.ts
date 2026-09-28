@@ -114,8 +114,8 @@ export interface IpcGaps {
 
 /** Everything worth putting in a bug report about one run.
  *
- *  `panicked` is what decides how the rest reads: a clean fault stopped the
- *  guest, a panic stopped the emulator, and the second is a bug in the
+ *  `panicked` is what decides how the rest reads: a fault or `fatal:u` stopped
+ *  the guest, a panic stopped the emulator, and the second is a bug in the
  *  emulator whatever the guest was doing. `session` is null when the report
  *  was asked for after the session had gone -- which is a report worth having
  *  anyway, since it still names the build. */
@@ -124,6 +124,7 @@ export interface CrashReport {
   panicked: boolean;
   traceMask: number;
   lastError?: string;
+  guestFatal?: string | null;
   title?: { id: string; name?: string; version?: string };
   cpu?: {
     pc: number;
@@ -290,6 +291,7 @@ export interface Commands {
 
   run(budget: number): number;
   halted(): number;
+  guest_fatal(): string;
   drain_output(): Bytes;
   drain_trace(): Bytes;
   dump_regs(): string;

@@ -18,7 +18,9 @@ and tests.
   TLV chunks (key 2 message, key 6 module) in a map-alias buffer, split across
   packets with `flags` bit 0 head / bit 1 tail. Retail builds often compile
   logging out, so an empty log is not evidence of a bug.
-- **`fatal:u`** carries the `Result` that stopped a process.
+- **`fatal:u`** carries the `Result` that stopped a process. The core retains
+  that report after its diagnostic trace is drained so the browser can treat
+  the process's later `ExitProcess` as a guest crash rather than a clean halt.
 - **`erpt`** journals *context*, one record per category (`ErrorInfo`,
   `GpuCrashInfo`, `ThermalInfo`), resubmitted rather than appended to;
   `CreateReport` writes it out whole. Nothing persists and nothing uploads.
