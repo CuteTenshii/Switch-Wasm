@@ -17,6 +17,14 @@ use std::collections::BTreeMap;
 /// new surfaces are summed under one entry rather than dropped.
 const CAP: usize = 256;
 
+/// How many distinct refusal reasons one tally holds between two readings.
+/// A reason can carry an address, so a title refused the same way at many
+/// places would otherwise grow the map without bound.
+const REFUSAL_CAP: usize = 32;
+
+/// What the refusals past [`REFUSAL_CAP`] are summed under.
+const OTHER_REASONS: &str = "(other reasons)";
+
 /// What an entry counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
@@ -32,6 +40,9 @@ pub enum Kind {
     Blit,
     /// Frames scanned out of a surface.
     Present,
+    /// Compute dispatches. Only ever a refusal: a dispatch that ran has no
+    /// surface to be counted against.
+    Dispatch,
 }
 
 impl Kind {
@@ -44,6 +55,7 @@ impl Kind {
             Kind::Upload => "upload",
             Kind::Blit => "blit",
             Kind::Present => "present",
+            Kind::Dispatch => "dispatch",
         }
     }
 }
@@ -59,9 +71,15 @@ pub struct Tally {
 }
 
 /// The entries of one engine, or of the whole GPU once gathered.
+///
+/// Refusals are kept apart from the tallies, by reason rather than by
+/// surface: a refused draw is already counted as `failed` against its
+/// target, and what that count cannot say is *why*, which is the one thing
+/// that says what to implement next.
 #[derive(Debug, Default, Clone)]
 pub struct GpuActivity {
     tallies: BTreeMap<(Kind, u64, u64), Tally>,
+    refusals: BTreeMap<(Kind, String), u64>,
 }
 
 impl GpuActivity {
@@ -94,8 +112,24 @@ impl GpuActivity {
         tally.failed += u64::from(failed);
     }
 
+    /// Count one `kind` of work the backend refused, for `reason`.
+    pub fn refuse(&mut self, kind: Kind, reason: String) {
+        self.refuse_times(kind, reason, 1);
+    }
+
+    fn refuse_times(&mut self, kind: Kind, reason: String, times: u64) {
+        let mut key = (kind, reason);
+        if !self.refusals.contains_key(&key) && self.refusals.len() >= REFUSAL_CAP {
+            key.1 = OTHER_REASONS.to_owned();
+        }
+        *self.refusals.entry(key).or_insert(0) += times;
+    }
+
     /// Move everything in `other` into this one, leaving `other` empty.
     pub fn absorb(&mut self, other: &mut GpuActivity) {
+        for ((kind, reason), times) in std::mem::take(&mut other.refusals) {
+            self.refuse_times(kind, reason, times);
+        }
         for (key, tally) in std::mem::take(&mut other.tallies) {
             let into = self.tallies.entry(key).or_insert_with(|| Tally {
                 label: tally.label.clone(),
@@ -112,6 +146,15 @@ impl GpuActivity {
         std::mem::take(&mut self.tallies)
             .into_iter()
             .map(|((kind, _, _), tally)| (kind, tally))
+            .collect()
+    }
+
+    /// Every refusal since the last call: what was refused, why, and how
+    /// many times, in kind order.
+    pub fn take_refusals(&mut self) -> Vec<(Kind, String, u64)> {
+        std::mem::take(&mut self.refusals)
+            .into_iter()
+            .map(|((kind, reason), times)| (kind, reason, times))
             .collect()
     }
 }
@@ -181,5 +224,35 @@ mod tests {
         a.absorb(&mut b);
         assert_eq!(a.take()[0].1.count, 2);
         assert!(b.take().is_empty());
+    }
+
+    #[test]
+    fn refusals_are_counted_by_reason_across_engines() {
+        let mut a = GpuActivity::default();
+        let mut b = GpuActivity::default();
+        a.refuse(Kind::Draw, "no ldg b128".to_owned());
+        b.refuse(Kind::Draw, "no ldg b128".to_owned());
+        b.refuse(Kind::Dispatch, "bad qmd".to_owned());
+        a.absorb(&mut b);
+        assert_eq!(
+            a.take_refusals(),
+            vec![
+                (Kind::Draw, "no ldg b128".to_owned(), 2),
+                (Kind::Dispatch, "bad qmd".to_owned(), 1),
+            ]
+        );
+        assert!(a.take_refusals().is_empty(), "taken, not read");
+    }
+
+    #[test]
+    fn reasons_past_the_cap_are_summed_rather_than_lost() {
+        let mut activity = GpuActivity::default();
+        for at in 0..REFUSAL_CAP + 5 {
+            activity.refuse(Kind::Draw, format!("refused at {at}"));
+        }
+        let taken = activity.take_refusals();
+        assert_eq!(taken.len(), REFUSAL_CAP + 1);
+        let other = taken.iter().find(|(_, reason, _)| reason == OTHER_REASONS);
+        assert_eq!(other.map(|(_, _, times)| *times), Some(5));
     }
 }

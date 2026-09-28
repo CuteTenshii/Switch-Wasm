@@ -837,6 +837,8 @@ impl Engine3D {
         }
         if let Err(e) = result {
             ctx.stats.draws_skipped += 1;
+            self.activity
+                .refuse(crate::gpu::activity::Kind::Draw, e.to_string());
             if trace_draw {
                 // With the vertex array the draw was going to read: a draw
                 // that fails and one that reads an empty buffer look the same

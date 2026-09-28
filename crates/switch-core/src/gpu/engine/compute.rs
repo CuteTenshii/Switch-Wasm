@@ -45,6 +45,8 @@ pub struct EngineCompute {
     /// Echoes of Wisdom uploads every one of its QMDs this way, and without
     /// it each launch read the blank memory the QMD was meant to fill.
     pub inline: crate::gpu::engine::inline::EngineInline,
+    /// Dispatches refused, by reason: see [`crate::gpu::activity`].
+    pub activity: crate::gpu::activity::GpuActivity,
 }
 
 impl EngineCompute {
@@ -54,6 +56,7 @@ impl EngineCompute {
             last_dispatch: None,
             dispatches: 0,
             inline: crate::gpu::engine::inline::EngineInline::new(),
+            activity: Default::default(),
         }
     }
 
@@ -105,6 +108,8 @@ impl EngineCompute {
             if ctx.trace {
                 crate::traceln!("[gpu] compute: {e}");
             }
+            self.activity
+                .refuse(crate::gpu::activity::Kind::Dispatch, e.to_string());
         }
     }
 }

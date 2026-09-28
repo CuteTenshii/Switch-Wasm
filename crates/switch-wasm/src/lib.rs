@@ -1902,7 +1902,8 @@ pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -
     }
     out.push(b']');
 
-    let surfaces = cpu.nv.gpu.take_activity();
+    let mut gpu_activity = cpu.nv.gpu.take_activity();
+    let surfaces = gpu_activity.take();
     let mut gpu_dropped = 0u64;
     out.extend_from_slice(b",\"gpu\":[");
     let mut first = true;

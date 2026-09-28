@@ -288,16 +288,19 @@ impl Gpu {
     }
 
     /// Everything the GPU drew, cleared, copied and presented since the last
-    /// call, by surface, gathered from every channel's engines.
-    pub fn take_activity(&mut self) -> Vec<(activity::Kind, activity::Tally)> {
+    /// call, by surface, and every draw and dispatch it refused, by reason,
+    /// gathered from every channel's engines.
+    pub fn take_activity(&mut self) -> activity::GpuActivity {
         let mut all = std::mem::take(&mut self.activity);
         for channel in self.channels.values_mut() {
             all.absorb(&mut channel.three_d.activity);
             all.absorb(&mut channel.three_d.inline.activity);
             all.absorb(&mut channel.two_d.activity);
             all.absorb(&mut channel.copy.activity);
+            all.absorb(&mut channel.compute.activity);
+            all.absorb(&mut channel.compute.inline.activity);
         }
-        all.take()
+        all
     }
 
     /// Install the backend every channel draws through.
