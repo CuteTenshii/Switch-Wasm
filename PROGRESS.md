@@ -354,7 +354,7 @@ plus two allocation fixes took it to 0.67 s/frame, byte-identical.
 ## JIT: emitted wasm, and what it took to reach it
 
 The translator writes a hot block out as wasm and the browser runs it. A block
-that survives sixteen entries is emitted, compiled through
+that survives 512 entries (`HOT`) is emitted, compiled through
 `WebAssembly.Module`, and its `run` export is put in **this module's own
 function table**; the core then calls the slot. A function pointer on wasm32
 *is* a table index, so entering a compiled block is one `call_indirect`. The
@@ -397,6 +397,32 @@ conditional branch in it is emitted at all. Everything else is unchanged and
 still interpreted. The infrastructure is what was missing; writing branches now
 pays immediately, and batching several blocks into one module is the next
 compile-time win (7,062 blocks compile in 1.8 ms when batched).
+
+**A module per block has two costs that grow with the number of modules**, and
+both made the emitter a net loss on Just Dance 2019 until they were found. At
+`HOT = 16` a run emitted 7,990 blocks:
+
+- **Every `memory.grow` walks every instance.** Each emitted module imports the
+  core's memory, and V8 re-points each one's cached size on a grow
+  (`SetInstanceMemory`). std's allocator grows 64 KiB at a time and guest RAM is
+  backed a 4 KiB page at a time, so an asset-loading burst was ~500 grows, and
+  half the main thread for 0.4 s. `switch-wasm` now allocates with `dlmalloc` at a
+  4 MiB granularity (`src/heap.rs`): host cycles over a 40-frame run -41%, host
+  instructions -25%, frame mean -7%, guest work identical.
+- **Scattered code stalls.** With growth fixed, the emitter was still 4% slower
+  per steady frame than interpreting everything, with host *instructions* level
+  and *cycles* up: thousands of modules, each in a code region of its own,
+  entered through one indirect call. Emitted code itself is fast; a
+  microbenchmark with one or two blocks shows it at parity or better. At
+  `HOT = 512` the run emits 1,185 blocks, which take 97% of the entries the 7,990
+  did, and the emitter beats the interpreter (-0.8% instructions on every pair,
+  -1.6% cycles). 4096 (461 blocks) measured the same as 512.
+
+**Per-entry overhead dwarfs what emitting saves.** A four-instruction guest loop
+costs 20-35 ns per block entry under V8 whether or not its body is emitted, so on
+JD's 2M entries a frame the block-to-block machinery in `run_jit`, not the body,
+is where an emitter has to win: blocks that chain to each other inside emitted
+code, rather than returning to the interpreter between every one.
 
 ## Next
 
