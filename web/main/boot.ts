@@ -55,9 +55,8 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
   setState('loaded');
   // Uncover the emulated screen now, but keep the loading screen over it:
   // homebrew can run for a long time (or fault) before it presents anything,
-  // and a blank stage with a live pc on it is the difference between
-  // "still booting" and "dead". `display.renderFb` takes the screen down as
-  // soon as there is a real frame under it.
+  // and a blank stage reads as dead. `display.renderFb` takes the screen down
+  // as soon as there is a real frame under it.
   showScreen();
   awaitFirstFrame();
   await updatePc();

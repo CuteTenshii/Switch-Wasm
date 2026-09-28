@@ -22,12 +22,6 @@ const phaseEl = $('loading-phase');
 const detailEl = $('loading-detail');
 const dismissEl = $('loading-dismiss');
 
-// Whether the guest has been started and the screen is now waiting on its
-// first frame. Only in that state does the run loop's pc readout belong on
-// the screen - during the fixed phases above it the detail line is saying
-// something the caller chose.
-let awaitingFrame = false;
-
 function setBar(fraction: number | null): void {
   rootEl.classList.toggle('is-determinate', fraction !== null);
   fillEl.style.width = fraction === null ? '' : (fraction * 100).toFixed(1) + '%';
@@ -37,7 +31,6 @@ function setBar(fraction: number | null): void {
  *  where the container gave us one; a load with no identity of its own leaves
  *  the slot empty rather than filling it with a placeholder. */
 export function beginLoad(title: string, phase: string, iconUrl?: string | null): void {
-  awaitingFrame = false;
   rootEl.classList.remove('hidden', 'is-error');
   setBar(null);
   phaseEl.textContent = phase;
@@ -58,7 +51,6 @@ export function loadIdentity(title: string, iconUrl: string | null): void {
 
 /** Move to the next step of the current load. */
 export function loadPhase(phase: string, detail?: string): void {
-  awaitingFrame = false;
   setBar(null);
   phaseEl.textContent = phase;
   detailEl.textContent = detail || '';
@@ -74,19 +66,10 @@ export function loadProgress(done: number, total: number): void {
  *  that never presents would otherwise hold the stage for ever. */
 export function awaitFirstFrame(): void {
   loadPhase('booting', 'waiting for the first frame');
-  awaitingFrame = true;
   dismissEl.hidden = false;
 }
 
-/** Mirror the run loop's pc while the boot is being waited on, so a title
- *  that takes minutes to present is visibly still executing. */
-export function bootDetail(pc: number): void {
-  if (!awaitingFrame) return;
-  detailEl.textContent = 'pc 0x' + pc.toString(16).padStart(8, '0');
-}
-
 export function endLoad(): void {
-  awaitingFrame = false;
   rootEl.classList.add('hidden');
   dismissEl.hidden = true;
 }
@@ -95,7 +78,6 @@ export function endLoad(): void {
  *  alternative is uncovering a black stage and leaving the reason in a panel
  *  that is closed by default. */
 export function failLoad(message: string): void {
-  awaitingFrame = false;
   rootEl.classList.remove('hidden');
   rootEl.classList.add('is-error');
   setBar(1);
