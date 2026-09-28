@@ -2,7 +2,8 @@
 
 import { pumpAudio } from './audio';
 import { drainDiagnostics, drainTrace, logTrace, traceEnabled } from './debug';
-import { countEmulation, presentIfNewFrame, renderFb } from './display';
+import { abortDisplay, countEmulation, flushDisplay, schedulePresentIfNewFrame } from './display';
+import { recordRunSlice } from './display-metrics';
 import { $ } from './dom';
 import { fmtCount } from '../shared/format';
 import { formatBytes } from './format';
@@ -28,12 +29,6 @@ import { holdWakeLock, releaseWakeLock } from './wakelock';
 // to 5M steps), only the round trips below, so this buys ~5x lower input
 // latency for ~6% of throughput.
 const RUN_SLICE = 1_000_000;
-// A visible page should hand control back at its paint boundary, not merely
-// queue another zero-delay timer. Fast JIT slices otherwise make the page
-// exchange worker messages faster than Chrome can composite their results.
-// The timeout keeps a run alive when a hidden tab stops issuing animation
-// frames; background timers may be throttled further by the browser.
-const PAINT_FALLBACK_MS = 100;
 // Slices between panel refreshes. `updatePc`/`drainOutput`/`drainDiagnostics`/
 // `sdFlush` are eight postMessage round trips of debug-panel text that nothing
 // time-critical reads, so running them once per slice would spend more of the
@@ -67,19 +62,6 @@ function nothingLoaded(): boolean {
   return true;
 }
 
-function waitForPaint(): Promise<void> {
-  return new Promise((resolve) => {
-    const frame = requestAnimationFrame(() => {
-      clearTimeout(fallback);
-      resolve();
-    });
-    const fallback = setTimeout(() => {
-      cancelAnimationFrame(frame);
-      resolve();
-    }, PAINT_FALLBACK_MS);
-  });
-}
-
 export async function run(): Promise<void> {
   if (running) {
     pauseRequested = true;
@@ -103,15 +85,16 @@ export async function run(): Promise<void> {
     for (;;) {
       const sliceAt = performance.now();
       steps = await call('run', slice);
-      countEmulation(performance.now() - sliceAt);
+      const sliceMs = performance.now() - sliceAt;
+      countEmulation(sliceMs);
+      recordRunSlice(sliceMs);
       // Reset does not wait for the slice already in flight - it is about to
       // be thrown away - so by the time one returns the session may be gone.
       // Every call below reads it, so the loop leaves rather than asking.
       if (aborted) return;
-      // One slice per paint bounds worker chatter and framebuffer snapshots.
-      // `presentIfNewFrame` reads the latest counter after this wait, so guest
-      // frames produced between browser paints are dropped rather than queued.
-      await waitForPaint();
+      // Let input and page work run without tying guest throughput to the
+      // browser's refresh rate. Display snapshots are paced separately below.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       if (aborted) return;
       // `Cpu::run` only stops short of its budget when the machine halted, so
       // a short slice means this run is over - no separate `halted` round trip.
@@ -123,14 +106,14 @@ export async function run(): Promise<void> {
           updatePc(), drainOutput(), drainDiagnostics(), sdFlush(), saveFlush(), pullProfileEdits(),
         ]);
       }
-      await presentIfNewFrame();
+      schedulePresentIfNewFrame();
       if (done) break;
       if (pauseRequested) {
         // Whatever the guest was about to present, it is not going to now: a
         // paused machine is not a loading one.
         endLoad();
         setState('paused');
-        await renderFb();
+        await flushDisplay();
         return;
       }
     }
@@ -201,6 +184,7 @@ export function abortRun(): void {
   aborted = true;
   pauseRequested = true;
   running = false;
+  abortDisplay();
   setRunButton(false);
 }
 
@@ -285,7 +269,9 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
     setState('fault');
     log('Stopped unexpectedly.', 'err');
   }
-  await Promise.all([drainOutput(), sdFlush(), saveFlush(), pullProfileEdits(), renderFb(), updatePc()]);
+  await Promise.all([
+    drainOutput(), sdFlush(), saveFlush(), pullProfileEdits(), flushDisplay(), updatePc(),
+  ]);
 }
 
 /** The instruction count and when it was read, for the rate beside it. */
