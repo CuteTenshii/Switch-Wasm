@@ -29,6 +29,11 @@ const CALLERS: usize = 4;
 /// The longest name the search accepts, `nn::os`'s own limit included.
 const NAME_MAX: u32 = 64;
 
+/// Fewer instructions than this between two reports is no work: a thread
+/// woken spuriously reissues its wait in a handful, and one doing anything
+/// real runs tens of thousands.
+const IDLE_WORK: u64 = 20_000;
+
 /// One thread, as of the reading that produced it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadReport {
@@ -56,6 +61,11 @@ pub struct ThreadReport {
     pub ran: u64,
     /// Times it was given the CPU since the last reading.
     pub switches: u64,
+    /// Guest milliseconds since a report last saw it do real work: a
+    /// thread blocked on something that never comes counts up, one that
+    /// wakes and does its job resets. 0 for a thread never started or
+    /// ended.
+    pub idle_ms: u64,
 }
 
 impl Cpu {
@@ -129,6 +139,7 @@ impl Cpu {
                 running: true,
                 ran,
                 switches: 0,
+                idle_ms: 0,
             };
             return (vec![main], log, dropped);
         }
@@ -152,11 +163,21 @@ impl Cpu {
                 running: index == self.current_thread,
                 ran: 0,
                 switches: 0,
+                idle_ms: 0,
             });
         }
+        let hz = u64::from(crate::cpu::power::CLOCK_RATES_HZ[0]).max(1);
+        let now = self.cycles;
         for (report, thread) in reports.iter_mut().zip(self.threads.iter_mut()) {
             report.ran = std::mem::take(&mut thread.ran);
             report.switches = std::mem::take(&mut thread.switches);
+            if report.ran >= IDLE_WORK {
+                thread.busy_at = now;
+            }
+            report.idle_ms = match thread.state {
+                ThreadState::Created | ThreadState::Finished => 0,
+                _ => now.saturating_sub(thread.busy_at).saturating_mul(1000) / hz,
+            };
         }
         (reports, log, dropped)
     }
@@ -366,6 +387,26 @@ mod tests {
         assert_eq!(cpu.locate(0x0700_0000), "0x7000000");
         cpu.forget_module_name(0x0800_4000);
         assert_eq!(cpu.locate(0x0800_5234), "0x8005234");
+    }
+
+    #[test]
+    fn a_blocked_thread_counts_its_idle_time_until_it_works() {
+        use crate::cpu::ThreadState;
+        let mut cpu = Cpu::new();
+        let handle = cpu.create_thread(0x0800_0100, 0, 0x1000_0000, 44, 0);
+        assert!(cpu.start_thread(handle));
+        cpu.take_thread_report();
+        cpu.threads[1].state = ThreadState::WaitEvent { deadline: u64::MAX };
+        let hz = u64::from(crate::cpu::power::CLOCK_RATES_HZ[0]);
+        cpu.cycles += hz * 3;
+        let (threads, ..) = cpu.take_thread_report();
+        assert_eq!(threads[1].idle_ms, 3000, "three seconds without work");
+
+        // A report that finds real work resets it.
+        cpu.threads[1].ran = super::IDLE_WORK;
+        cpu.cycles += hz;
+        let (threads, ..) = cpu.take_thread_report();
+        assert_eq!(threads[1].idle_ms, 0);
     }
 
     #[test]

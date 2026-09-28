@@ -1877,8 +1877,30 @@ pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -
     .into_bytes();
     // A few devices at most, so ahead of the lists the budget trims.
     out.extend_from_slice(audio_activity_json(&cpu.audio_activity()).as_bytes());
-    // Room for the closing fields, whose width is at most four u64s' digits.
-    let budget = (maxlen as usize).saturating_sub(160);
+    let (supported, presented) = cpu.npad_styles();
+    out.extend_from_slice(
+        format!(",\"input\":{{\"supported\":{supported},\"presented\":{presented}}}").as_bytes(),
+    );
+    // Room for the closing fields, whose width is at most five u64s' digits.
+    let budget = (maxlen as usize).saturating_sub(200);
+    // Entries of the problem lists below that did not fit, summed.
+    let mut problems_dropped = 0u64;
+    let mut push_list = |out: &mut Vec<u8>, name: &str, entries: Vec<Vec<u8>>| {
+        out.extend_from_slice(format!(",\"{name}\":[").as_bytes());
+        let mut first = true;
+        for entry in entries {
+            if out.len() + entry.len() + 1 > budget {
+                problems_dropped += 1;
+                continue;
+            }
+            if !first {
+                out.push(b',');
+            }
+            out.extend_from_slice(&entry);
+            first = false;
+        }
+        out.push(b']');
+    };
 
     let files = cpu.fs_activity.take_files();
     let mut files_dropped = 0u64;
@@ -1909,6 +1931,45 @@ pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -
 
     let mut gpu_activity = cpu.nv.gpu.take_activity();
     let surfaces = gpu_activity.take();
+    let refusals = gpu_activity
+        .take_refusals()
+        .into_iter()
+        .map(|(kind, reason, count)| {
+            let mut entry = format!("{{\"kind\":\"{}\",\"reason\":\"", kind.name()).into_bytes();
+            json_escape(&reason, &mut entry);
+            entry.extend_from_slice(format!("\",\"count\":{count}}}").as_bytes());
+            entry
+        })
+        .collect();
+    push_list(&mut out, "refusals", refusals);
+    let gaps = cpu
+        .take_service_gaps()
+        .into_iter()
+        .map(|gap| {
+            let mut entry = format!("{{\"kind\":\"{}\",\"name\":\"", gap.kind.name()).into_bytes();
+            json_escape(&gap.name, &mut entry);
+            let command = gap.command.map_or("null".to_owned(), |c| c.to_string());
+            entry.extend_from_slice(
+                format!("\",\"command\":{command},\"calls\":{}}}", gap.calls).as_bytes(),
+            );
+            entry
+        })
+        .collect();
+    push_list(&mut out, "gaps", gaps);
+    let nv_errors = cpu
+        .take_nv_errors()
+        .into_iter()
+        .map(|(node, request, error, calls)| {
+            let mut entry = Vec::from("{\"node\":\"");
+            json_escape(&node, &mut entry);
+            entry.extend_from_slice(
+                format!("\",\"request\":{request},\"error\":{error},\"calls\":{calls}}}")
+                    .as_bytes(),
+            );
+            entry
+        })
+        .collect();
+    push_list(&mut out, "nvErrors", nv_errors);
     let mut gpu_dropped = 0u64;
     out.extend_from_slice(b",\"gpu\":[");
     let mut first = true;
@@ -1943,8 +2004,8 @@ pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -
         }
         out.extend_from_slice(
             format!(
-                "{{\"index\":{},\"handle\":{},\"priority\":{},\"running\":{},\"ran\":{},\"switches\":{},\"entry\":\"",
-                thread.index, thread.handle, thread.priority, thread.running, thread.ran, thread.switches
+                "{{\"index\":{},\"handle\":{},\"priority\":{},\"running\":{},\"ran\":{},\"switches\":{},\"idleMs\":{},\"entry\":\"",
+                thread.index, thread.handle, thread.priority, thread.running, thread.ran, thread.switches, thread.idle_ms
             )
             .as_bytes(),
         );
@@ -2004,7 +2065,7 @@ pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -
     out.extend_from_slice(
         format!(
             "],\"dropped\":{dropped},\"filesDropped\":{files_dropped},\"gpuDropped\":{gpu_dropped},\
-             \"threadLogDropped\":{thread_log_dropped}}}"
+             \"threadLogDropped\":{thread_log_dropped},\"problemsDropped\":{problems_dropped}}}"
         )
         .as_bytes(),
     );
@@ -3204,7 +3265,13 @@ mod tests {
         assert_eq!(field(&json, "gpu"), "[]");
         assert_eq!(field(&json, "threadLog"), "[]");
         assert!(field(&json, "threads").contains("\"index\":0"), "{json}");
+        assert!(field(&json, "threads").contains("\"idleMs\":"), "{json}");
         assert_eq!(field(&json, "journal"), "[]");
+        for list in ["refusals", "gaps", "nvErrors"] {
+            assert_eq!(field(&json, list), "[]", "{list}");
+        }
+        assert_eq!(field(&json, "input"), r#"{"supported":0,"presented":1}"#);
+        assert_eq!(field(&json, "problemsDropped"), "0");
 
         let activity = &mut session(handle).cpu.fs_activity;
         activity.read("romfs", 0x100);

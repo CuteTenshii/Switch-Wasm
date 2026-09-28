@@ -96,8 +96,12 @@ impl Cpu {
                     &inline_in,
                     &mut inline_out,
                 )?;
-                if error != 0 && crate::trace::enabled(crate::trace::Trace::Nv) {
-                    crate::traceln!("[nv] ioctl fd={fd} request={request:#x} -> error {error}");
+                if error != 0 {
+                    if crate::trace::enabled(crate::trace::Trace::Nv) {
+                        crate::traceln!("[nv] ioctl fd={fd} request={request:#x} -> error {error}");
+                    }
+                    let node = self.nv.device_name(fd).to_owned();
+                    self.count_nv_error(&node, request, error);
                 }
                 // An ioctl the model has no handler for is a gap in the same
                 // sense an unimplemented service command is, and it was

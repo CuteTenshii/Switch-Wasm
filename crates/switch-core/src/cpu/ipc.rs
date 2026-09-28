@@ -2274,6 +2274,23 @@ mod tests {
     }
 
     #[test]
+    fn failed_ioctls_are_counted_by_node_request_and_error() {
+        let mut cpu = crate::cpu::Cpu::new();
+        for _ in 0..3 {
+            cpu.count_nv_error("/dev/nvhost-as-gpu", 0xC038_4106, 4);
+        }
+        cpu.count_nv_error("/dev/nvmap", 0xC008_0103, 4);
+        assert_eq!(
+            cpu.take_nv_errors(),
+            vec![
+                ("/dev/nvhost-as-gpu".to_owned(), 0xC038_4106, 4, 3),
+                ("/dev/nvmap".to_owned(), 0xC008_0103, 4, 1),
+            ]
+        );
+        assert!(cpu.take_nv_errors().is_empty(), "taken, not read");
+    }
+
+    #[test]
     fn gaps_past_the_cap_go_uncounted() {
         use crate::cpu::{Cpu, GapKind};
         let mut cpu = Cpu::new();

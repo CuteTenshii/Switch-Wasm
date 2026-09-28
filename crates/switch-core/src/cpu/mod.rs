@@ -1232,6 +1232,9 @@ pub struct ThreadContext {
     /// host last took a [`ThreadReport`].
     ran: u64,
     switches: u64,
+    /// The clock when a report last saw it do real work. See
+    /// [`ThreadReport::idle_ms`].
+    busy_at: u64,
 }
 
 #[derive(Debug)]
@@ -1459,6 +1462,9 @@ pub struct Cpu {
     /// one that asks every frame because it is waiting for a different
     /// answer. See [`Cpu::take_service_gaps`].
     gap_calls: BTreeMap<(GapKind, String, Option<u32>), u64>,
+    /// nvdrv ioctls that failed since the host last asked, by device node,
+    /// request and error. See [`Cpu::take_nv_errors`].
+    nv_errors: BTreeMap<(String, u32, u32), u64>,
     /// What [`Cpu::reply_with_fabricated_object`] hands back for a command
     /// nothing implements, keyed by `(session handle, command id)`: the domain
     /// object id, the plain sub-session handle, and the event, one for each
@@ -2121,6 +2127,7 @@ impl Cpu {
             unimplemented_ipc: HashSet::new(),
             stubbed_ipc: HashSet::new(),
             gap_calls: BTreeMap::new(),
+            nv_errors: BTreeMap::new(),
             fabricated_objects: HashMap::new(),
             ro_modules: BTreeMap::new(),
             ro_registrations: BTreeMap::new(),
@@ -2345,6 +2352,7 @@ impl Cpu {
                 arg: 0,
                 ran: 0,
                 switches: 0,
+                busy_at: self.cycles,
             });
             self.current_thread = 0;
         }
@@ -2415,6 +2423,7 @@ impl Cpu {
             arg,
             ran: 0,
             switches: 0,
+            busy_at: self.cycles,
         });
         let line = format!(
             "{} created by {}: arg {arg:#x}, stack top {stack_top:#x}, priority {priority}, \
@@ -5078,6 +5087,41 @@ impl Cpu {
         let mut all: Vec<(String, Option<u32>)> = self.stubbed_ipc.iter().cloned().collect();
         all.sort();
         all
+    }
+
+    /// Count one failed nvdrv ioctl towards the next [`Cpu::take_nv_errors`].
+    pub(super) fn count_nv_error(&mut self, node: &str, request: u32, error: u32) {
+        /// Distinct failures held between two readings; past it new ones go
+        /// uncounted.
+        const CAP: usize = 64;
+        if let Some(calls) = self
+            .nv_errors
+            .iter_mut()
+            .find(|((n, r, e), _)| n == node && *r == request && *e == error)
+            .map(|(_, calls)| calls)
+        {
+            *calls += 1;
+        } else if self.nv_errors.len() < CAP {
+            self.nv_errors.insert((node.to_owned(), request, error), 1);
+        }
+    }
+
+    /// Every nvdrv ioctl that failed since the last call: the device node,
+    /// the request, the error, and how many times.
+    pub fn take_nv_errors(&mut self) -> Vec<(String, u32, u32, u64)> {
+        std::mem::take(&mut self.nv_errors)
+            .into_iter()
+            .map(|((node, request, error), calls)| (node, request, error, calls))
+            .collect()
+    }
+
+    /// The controller styles the title said it accepts (`HidNpadStyleTag`
+    /// bits, 0 before it says), and the one style the pad is presented as.
+    pub fn npad_styles(&self) -> (u32, u32) {
+        (
+            self.npad_style_set,
+            npad_presentation_for(self.npad_style_set).style,
+        )
     }
 
     /// Make every thread the guest created but never started runnable, and
