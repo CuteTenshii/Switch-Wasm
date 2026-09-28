@@ -40,32 +40,25 @@ async function init(): Promise<void> {
     await whenReady();
     loadPhase('creating a session');
     setSession(await call('new'));
-    loadPhase('loading the system font');
-    await stageFont();
-    loadPhase('restoring the SD card');
-    await sdRequestPersistence();
-    await sdRestore();
-    loadPhase('restoring save data');
-    await saveRestore();
-    await loadProfiles();
-    await stageUsers();
-    await initFbSize();
+    loadPhase('restoring the SD card, saves, profiles and keys');
+    // Independent of each other once the session exists. The debug panel's
+    // channel switches come from the core, so they wait for it too.
+    const [version] = await Promise.all([
+      call('version'),
+      stageFont(),
+      sdRequestPersistence().then(sdRestore),
+      saveRestore(),
+      loadProfiles().then(stageUsers),
+      initFbSize(),
+      initTraceChannels(),
+      offerPreviousLog(),
+      hasKeys() ? stageKeys() : undefined,
+    ]);
     // The build, named on the status bar and in the log. A report that does
     // not say which code produced it can only be read by guessing at its age,
     // and this is the line somebody copies without being asked to.
-    const version = await call('version');
     $('wasm-ver').textContent = 'core ' + version;
     log('core ready - build ' + version, 'dim');
-    // The debug panel's channel switches come from the core, so they can only
-    // be built once there is a core to ask.
-    await initTraceChannels();
-    // And whether the run before this one ended without saying so.
-    await offerPreviousLog();
-    // Restore persisted keys into the session.
-    if (hasKeys()) {
-      loadPhase('staging keys');
-      await stageKeys();
-    }
     updateKeysState();
     // And then the NAND, which needs those keys to parse a header. Only its
     // index is waited for here; the archives it holds register behind the

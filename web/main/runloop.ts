@@ -95,12 +95,9 @@ export async function run(): Promise<void> {
       // Audio has to track the guest or the stream gaps; the panel does not.
       await pumpAudio();
       if (done || ++tick % HOUSEKEEPING_EVERY === 0) {
-        await updatePc();
-        await drainOutput();
-        await drainDiagnostics();
-        await sdFlush();
-        await saveFlush();
-        await pullProfileEdits();
+        await Promise.all([
+          updatePc(), drainOutput(), drainDiagnostics(), sdFlush(), saveFlush(), pullProfileEdits(),
+        ]);
       }
       await presentIfNewFrame();
       if (done) break;
@@ -261,12 +258,7 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
     setState('fault');
     log('Stopped unexpectedly.', 'err');
   }
-  await drainOutput();
-  await sdFlush();
-  await saveFlush();
-  await pullProfileEdits();
-  await renderFb();
-  await updatePc();
+  await Promise.all([drainOutput(), sdFlush(), saveFlush(), pullProfileEdits(), renderFb(), updatePc()]);
 }
 
 /** The instruction count and when it was read, for the rate beside it. */

@@ -97,19 +97,16 @@ export async function recycleSession({ reopen, force = false }: Recycle = {}): P
   loadPhase('freeing the session');
   await call('free_session');
   setSession(await call('new'));
-  loadPhase('loading the system font');
-  await stageFont();
-  loadPhase('restoring the SD card');
-  await sdRestore();
-  loadPhase('restoring save data');
-  await saveRestore();
-  await stageUsers();
-  if (hasKeys()) {
-    loadPhase('staging keys');
-    await stageKeys();
-  }
-  loadPhase('restoring system data archives');
-  await restoreArchives();
+  loadPhase('restoring the SD card, saves, keys and system data');
+  // Independent of each other, except the archives, which are parsed with
+  // the keys.
+  await Promise.all([
+    stageFont(),
+    sdRestore(),
+    saveRestore(),
+    stageUsers(),
+    (hasKeys() ? stageKeys() : Promise.resolve()).then(restoreArchives),
+  ]);
   if (reopen) {
     loadPhase('re-opening the container');
     await reopen();
