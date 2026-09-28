@@ -55,9 +55,17 @@ const keysDown = new Set<string>();
 // the gamepad, which can only be sampled, but a key press *is* an event and
 // waiting up to a tick to forward it is latency for nothing. The worker
 // coalesces whatever arrives before its next slice boundary.
+/** Keys belong to the page, not the game, while the user types into a field
+ *  or has a dialog open. */
+function pageHasKeyboard(): boolean {
+  const focused = document.activeElement;
+  return /^(INPUT|SELECT|TEXTAREA)$/.test(focused?.tagName || '')
+    || document.querySelector('dialog[open]') !== null;
+}
+
 window.addEventListener('keydown', (e) => {
   const key = e.key.toLowerCase();
-  if (!KEY_MAP[key]) return;
+  if (!KEY_MAP[key] || pageHasKeyboard()) return;
   e.preventDefault();
   // Auto-repeat is not a new press - but it is the only evidence a key is
   // still down after `blur` cleared the set, so go by the set, not `e.repeat`.
