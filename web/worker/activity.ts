@@ -14,7 +14,7 @@
    device and renderer the guest has open and the samples between them and
    the page, so a silent title says where its sound stopped. */
 
-import { fmtSize } from '../shared/format';
+import { fmtCount, fmtSize } from '../shared/format';
 import { takeHostIo, type HostIo } from './hostfiles';
 import { workerLog } from './log';
 import { api, readJson, state } from './wasm';
@@ -294,15 +294,6 @@ function logSurface(entry: GpuEntry): void {
   workerLog('[gpu] ' + line, failed ? 'warn' : undefined);
 }
 
-/** An instruction count the way a person reads one: 12.3M rather than
- *  12345678. */
-function amount(n: number): string {
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'G';
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
-  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
-  return String(n);
-}
-
 /* The threads: every one created, started, paused or ended since the last
    report, then each thread that ran or changed what it is doing, with its
    share of the instructions. A thread at 99% is the one a stalled title is
@@ -320,7 +311,7 @@ function logThreads(now: Activity): void {
     if (!thread.ran && !changed) continue;
     const share = total ? ` (${Math.round((thread.ran / total) * 100)}%)` : '';
     const ran = thread.ran
-      ? `${amount(thread.ran)} instructions${share}, ${count(thread.switches, 'switch', 'switches')}`
+      ? `${fmtCount(thread.ran)} instructions${share}, ${count(thread.switches, 'switch', 'switches')}`
       : 'did not run';
     const who = thread.name ? `${thread.name}, via ${thread.entry}` : thread.entry;
     workerLog(

@@ -4,6 +4,7 @@ import { pumpAudio } from './audio';
 import { drainDiagnostics, drainTrace, logTrace, traceEnabled } from './debug';
 import { countEmulation, presentIfNewFrame, renderFb } from './display';
 import { $ } from './dom';
+import { fmtCount } from '../shared/format';
 import { formatBytes } from './format';
 import { endLoad } from './loading';
 import { log, logBlock, type LogClass } from './log';
@@ -65,6 +66,8 @@ export async function run(): Promise<void> {
   running = true;
   pauseRequested = false;
   aborted = false;
+  // The first rate of a run covers this run alone, not the pause before it.
+  countedAt = 0;
   setRunButton(true);
   setState('running');
   // A guest that runs for minutes without a keypress is a page the browser
@@ -262,14 +265,29 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
   await updatePc();
 }
 
+/** The instruction count and when it was read, for the rate beside it. */
+let countedInstructions = 0;
+let countedAt = 0;
+
 export async function updatePc(): Promise<void> {
   const pc = await call('get_pc');
   // Instructions retired, not the clock. The clock idles forward to the
   // earliest sleeper whenever every thread is blocked, so reading it here
   // made a parked Home Menu jump from 24M to 313M with nothing executed.
-  const steps = await call('get_steps');
+  const instructions = await call('get_steps');
+  const at = performance.now();
   $('pc').textContent = '0x' + pc.toString(16).padStart(8, '0');
-  $('steps').textContent = steps.toLocaleString();
+  // The rate only while running: between runs the wall clock moves and the
+  // count does not, and a stopped machine has no speed. A count that went
+  // backwards is a new session, not a rate.
+  const seconds = (at - countedAt) / 1000;
+  const ran = instructions - countedInstructions;
+  const rate = running && countedAt && seconds > 0 && ran >= 0
+    ? ` (${fmtCount(ran / seconds)}/s)`
+    : '';
+  $('instructions').textContent = fmtCount(instructions) + rate;
+  countedInstructions = instructions;
+  countedAt = at;
   await updateRam();
 }
 

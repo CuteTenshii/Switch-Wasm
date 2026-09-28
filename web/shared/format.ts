@@ -7,3 +7,13 @@ export function fmtSize(n: number): string {
   if (n >= 1 << 10) return (n / (1 << 10)).toFixed(1) + ' KiB';
   return n + ' B';
 }
+
+/** A large count the way a person reads one: 12.3M rather than 12345678.
+ *  Shared because the status bar and the worker's thread lines both count
+ *  instructions. */
+export function fmtCount(n: number): string {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'G';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(Math.round(n));
+}
