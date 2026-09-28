@@ -38,6 +38,12 @@
 //!   meant among the ones you did not, and `DUMP_VERTS=<addr>[,...]` reads
 //!   three 60-byte rows as floats: real positions are ordinary numbers, and a
 //!   structure reinterpreted as float is a wall of denormals.
+//! - `DUMP_SURFACE=<addr>:<w>x<h>:<format>[:<block height>][,...]` writes a
+//!   block-linear colour surface in guest memory to `<out>.<addr>.ppm` once
+//!   the run has stopped, decoded as the next pass would read it. `<format>`
+//!   is the render-target format the draw trace prints (`fmt=0xe0`), and the
+//!   block height is in GOBs, 16 unless given. A frame's passes read each
+//!   other's targets, and this is how to see which of them went wrong.
 //! - `POKE_U32=<addr>:<value>` writes a word every sampling tick, or once at
 //!   `POKE_AT=<step>`. A latched state flag is only a theory until you clear
 //!   it and see what the guest does.
@@ -340,10 +346,62 @@ fn main() {
     debug.report();
     debug.stop_state(&cpu);
 
+    if let Ok(list) = env::var("DUMP_SURFACE") {
+        for spec in list.split(',') {
+            dump_surface(&cpu, spec, &out);
+        }
+    }
+
     let fb = &cpu.nv.gpu.framebuffer;
     if fb.is_empty() {
         println!("no frame");
         return;
     }
     common::write_ppm(&out, fb);
+}
+
+/// One `DUMP_SURFACE` entry: `<addr>:<w>x<h>:<format>[:<block height>]`.
+/// Channels outside 0..1, which a float target holds, are clamped, and the
+/// largest one is reported so a surface that is only dark can be told from
+/// one that is empty.
+fn dump_surface(cpu: &switch_core::cpu::Cpu, spec: &str, out: &str) {
+    use switch_core::gpu::surface::{block_linear_offset, ColorFormat};
+    let fields: Vec<&str> = spec.split(':').collect();
+    let parsed = (|| {
+        let addr = common::hex(fields.first()?);
+        let (w, h) = fields.get(1)?.split_once('x')?;
+        let (w, h): (u32, u32) = (w.parse().ok()?, h.parse().ok()?);
+        let format = ColorFormat::from_raw(common::hex(fields.get(2)?)).ok()?;
+        let block_height = fields.get(3).and_then(|v| v.parse().ok()).unwrap_or(16);
+        Some((addr, w, h, format, block_height))
+    })();
+    let Some((addr, w, h, format, block_height)) = parsed else {
+        println!("[surface] cannot read {spec:?}: <addr>:<w>x<h>:<format>[:<block height>]");
+        return;
+    };
+    let bpp = format.bytes_per_pixel;
+    let mut pixels = Vec::with_capacity((w * h) as usize);
+    let mut brightest = 0.0f32;
+    for y in 0..h {
+        for x in 0..w {
+            let at = addr + block_linear_offset(x * bpp, y, w * bpp, block_height);
+            let raw = (0..bpp).fold(0u128, |acc, i| {
+                acc | u128::from(cpu.mem.read_u8(at + i).unwrap_or(0)) << (8 * i)
+            });
+            let rgba = format.decode(raw).unwrap_or([0.0; 4]);
+            brightest = rgba[..3].iter().fold(brightest, |m, &c| m.max(c));
+            let byte = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u32;
+            pixels.push(byte(rgba[0]) | byte(rgba[1]) << 8 | byte(rgba[2]) << 16 | 0xFF << 24);
+        }
+    }
+    let path = format!("{out}.{addr:x}.ppm");
+    let lit = common::write_ppm(
+        &path,
+        &switch_core::gpu::Framebuffer {
+            width: w,
+            height: h,
+            pixels,
+        },
+    );
+    println!("[surface] {addr:#x} {w}x{h} -> {path}: {lit} lit, brightest channel {brightest}");
 }
