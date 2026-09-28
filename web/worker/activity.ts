@@ -10,7 +10,9 @@
    and how much; the guest's path operations (opens, creates, deletes, and the
    lookups that found nothing), one per line, because "the title looked for a
    file and it was not there" is the most common silent failure there is; and
-   each file on the host's disk those reads came out of. */
+   each file on the host's disk those reads came out of; and the audio, each
+   device and renderer the guest has open and the samples between them and
+   the page, so a silent title says where its sound stopped. */
 
 import { fmtSize } from '../shared/format';
 import { takeHostIo, type HostIo } from './hostfiles';
@@ -55,9 +57,53 @@ interface ThreadActivity {
   name: string | null;
 }
 
-/** `switch_activity_json`. The GPU counts and `failures` run from the start
- *  of the session; `gpu`, `files` and `journal` cover the time since the last
- *  call. */
+/** One open `audout` device. The counts run from when it was opened. */
+interface AudioOutput {
+  handle: number;
+  sampleRate: number;
+  channels: number;
+  started: boolean;
+  volume: number;
+  appendedBuffers: number;
+  appendedFrames: number;
+  releasedBuffers: number;
+  pendingBuffers: number;
+  /** Appended while the device was stopped: never played. */
+  discardedFrames: number;
+  /** Descriptors pointing outside their own buffer: never played. */
+  unplayableBuffers: number;
+}
+
+/** One open audio renderer. The counts run from when it was opened. */
+interface AudioRenderer {
+  handle: number;
+  sampleRate: number;
+  started: boolean;
+  updates: number;
+  renderedFrames: number;
+  voices: number;
+  voicesPlaying: number;
+  /** 0 when no sink the renderer can play has been configured. */
+  sinkChannels: number;
+}
+
+/** The guest's audio, as `Cpu::audio_activity` reports it. Sample counts are
+ *  interleaved samples from the start of the session; `backlog` is what is
+ *  queued for the page now. */
+interface Audio {
+  sampleRate: number;
+  channels: number;
+  samplesProduced: number;
+  samplesTaken: number;
+  samplesDropped: number;
+  backlog: number;
+  outputs: AudioOutput[];
+  renderers: AudioRenderer[];
+}
+
+/** `switch_activity_json`. The GPU counts, `failures` and `audio` run from
+ *  the start of the session; `gpu`, `files` and `journal` cover the time
+ *  since the last call. */
 interface Activity {
   frames: number;
   submissions: number;
@@ -77,6 +123,7 @@ interface Activity {
   threadLogDropped: number;
   journal: string[];
   dropped: number;
+  audio: Audio;
 }
 
 const REPORT_EVERY_MS = 1000;
@@ -104,6 +151,16 @@ const ZERO: Activity = {
   threadLogDropped: 0,
   journal: [],
   dropped: 0,
+  audio: {
+    sampleRate: 0,
+    channels: 0,
+    samplesProduced: 0,
+    samplesTaken: 0,
+    samplesDropped: 0,
+    backlog: 0,
+    outputs: [],
+    renderers: [],
+  },
 };
 
 let previous: Activity = ZERO;
@@ -158,6 +215,7 @@ export function reportActivity(now = false): void {
     logGpu(previous, current, reportedAt ? elapsed / 1000 : 0);
     logThreads(current);
     logFs(previous, current);
+    logAudio(previous.audio, current.audio);
     for (const io of takeHostIo()) logHostIo(io);
     previous = current;
     reportedAt = at;
@@ -290,6 +348,118 @@ function logFs(before: Activity, now: Activity): void {
   }
   const failures = now.failures - before.failures;
   if (failures > 0) workerLog(`[fs] ${failures} requests failed`);
+}
+
+/** A frame count as time, at `rate`: what a person can compare with the
+ *  second the report covers. */
+function duration(frames: number, rate: number): string {
+  if (!rate) return count(frames, 'frame');
+  const ms = (frames / rate) * 1000;
+  return ms >= 1000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms)} ms`;
+}
+
+function layout(channels: number): string {
+  return channels === 1 ? 'mono' : channels === 2 ? 'stereo' : `${channels} channels`;
+}
+
+/* The audio: each device and renderer that opened, closed, changed state or
+   did anything, and the samples between the guest and the page. Silence has
+   a place it happens: no device, a device never started or never fed,
+   samples produced and never taken, or taken faster than they come; each of
+   those reads differently here. */
+function logAudio(before: Audio, now: Audio): void {
+  const outputsBefore = new Map(before.outputs.map((o) => [o.handle, o]));
+  for (const o of now.outputs) {
+    const was = outputsBefore.get(o.handle);
+    outputsBefore.delete(o.handle);
+    const name = `audout ${o.handle.toString(16)}`;
+    if (!was) {
+      workerLog(`[audio] ${name} opened: ${o.sampleRate} Hz ${layout(o.channels)}`);
+    }
+    const buffers = o.appendedBuffers - (was?.appendedBuffers ?? 0);
+    const frames = o.appendedFrames - (was?.appendedFrames ?? 0);
+    const released = o.releasedBuffers - (was?.releasedBuffers ?? 0);
+    const discarded = o.discardedFrames - (was?.discardedFrames ?? 0);
+    const unplayable = o.unplayableBuffers - (was?.unplayableBuffers ?? 0);
+    const stateChanged = !was || was.started !== o.started || was.volume !== o.volume;
+    const line = joined([
+      buffers > 0 && `${count(buffers, 'buffer')} (${duration(frames, o.sampleRate)}) appended`,
+      released > 0 && `${released} released`,
+      o.pendingBuffers > 0 && buffers > 0 && `${o.pendingBuffers} pending`,
+    ]);
+    if (line || stateChanged) {
+      const state = `${o.started ? 'started' : 'stopped'}`
+        + (o.volume !== 1 ? `, volume ${Math.round(o.volume * 100)}%` : '');
+      workerLog(`[audio] ${name} ${state}` + (line ? `: ${line}` : ''));
+    }
+    if (discarded > 0) {
+      workerLog(
+        `[audio] ${name}: ${duration(discarded, o.sampleRate)} appended while stopped, never played`,
+        'warn',
+      );
+    }
+    if (unplayable > 0) {
+      workerLog(
+        `[audio] ${name}: ${count(unplayable, 'buffer')} described outside itself, not played`,
+        'warn',
+      );
+    }
+  }
+  for (const gone of outputsBefore.keys()) {
+    workerLog(`[audio] audout ${gone.toString(16)} closed`);
+  }
+
+  const renderersBefore = new Map(before.renderers.map((r) => [r.handle, r]));
+  for (const r of now.renderers) {
+    const was = renderersBefore.get(r.handle);
+    renderersBefore.delete(r.handle);
+    const name = `renderer ${r.handle.toString(16)}`;
+    if (!was) {
+      workerLog(`[audio] ${name} opened: ${r.sampleRate} Hz, ${count(r.voices, 'voice')}`);
+    }
+    const frames = r.renderedFrames - (was?.renderedFrames ?? 0);
+    const updates = r.updates - (was?.updates ?? 0);
+    const stateChanged = !was || was.started !== r.started || was.sinkChannels !== r.sinkChannels
+      || was.voicesPlaying !== r.voicesPlaying;
+    if (frames > 0 || updates > 0 || stateChanged) {
+      const sink = r.sinkChannels ? layout(r.sinkChannels) : 'no playable sink';
+      const line = joined([
+        frames > 0 && `${count(frames, 'frame')} rendered`,
+        updates > 0 && count(updates, 'update'),
+        `${r.voicesPlaying} of ${count(r.voices, 'voice')} playing`,
+        sink,
+      ]);
+      // Frames mixed into nothing: the guest's sound goes nowhere.
+      const silent = r.started && frames > 0 && !r.sinkChannels;
+      workerLog(
+        `[audio] ${name} ${r.started ? 'started' : 'stopped'}: ${line}`,
+        silent ? 'warn' : undefined,
+      );
+    }
+  }
+  for (const gone of renderersBefore.keys()) {
+    workerLog(`[audio] renderer ${gone.toString(16)} closed`);
+  }
+
+  const produced = now.samplesProduced - before.samplesProduced;
+  const taken = now.samplesTaken - before.samplesTaken;
+  const dropped = now.samplesDropped - before.samplesDropped;
+  if (produced > 0 || taken > 0 || dropped > 0) {
+    const perFrame = Math.max(now.channels, 1);
+    const line = joined([
+      `${duration(produced / perFrame, now.sampleRate)} produced`,
+      `${duration(taken / perFrame, now.sampleRate)} taken by the page`,
+      now.backlog > 0 && `${duration(now.backlog / perFrame, now.sampleRate)} queued`,
+    ]);
+    workerLog(`[audio] ${now.sampleRate} Hz ${layout(now.channels)}: ${line}`);
+  }
+  if (dropped > 0) {
+    const perFrame = Math.max(now.channels, 1);
+    workerLog(
+      `[audio] ${duration(dropped / perFrame, now.sampleRate)} dropped: the page fell a second behind`,
+      'warn',
+    );
+  }
 }
 
 function logHostIo(io: HostIo): void {

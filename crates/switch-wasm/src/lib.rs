@@ -1778,10 +1778,71 @@ pub extern "C" fn switch_gpu_report_json(handle: u32, buf: *mut u8, maxlen: u32)
     write_into(buf, maxlen, json.as_bytes())
 }
 
+/// The `"audio"` member of `switch_activity_json`, with its leading comma.
+/// Sample counts run from the start of the session and the device counts
+/// from when each was opened; the page reports the differences.
+fn audio_activity_json(audio: &switch_core::cpu::AudioActivity) -> String {
+    let outputs: Vec<String> = audio
+        .outputs
+        .iter()
+        .map(|o| {
+            format!(
+                "{{\"handle\":{},\"sampleRate\":{},\"channels\":{},\"started\":{},\
+                 \"volume\":{},\"appendedBuffers\":{},\"appendedFrames\":{},\
+                 \"releasedBuffers\":{},\"pendingBuffers\":{},\"discardedFrames\":{},\
+                 \"unplayableBuffers\":{}}}",
+                o.handle,
+                o.sample_rate,
+                o.channels,
+                o.started,
+                if o.volume.is_finite() { o.volume } else { 0.0 },
+                o.appended_buffers,
+                o.appended_frames,
+                o.released_buffers,
+                o.pending_buffers,
+                o.discarded_frames,
+                o.unplayable_buffers
+            )
+        })
+        .collect();
+    let renderers: Vec<String> = audio
+        .renderers
+        .iter()
+        .map(|r| {
+            format!(
+                "{{\"handle\":{},\"sampleRate\":{},\"started\":{},\"updates\":{},\
+                 \"renderedFrames\":{},\"voices\":{},\"voicesPlaying\":{},\"sinkChannels\":{}}}",
+                r.handle,
+                r.sample_rate,
+                r.started,
+                r.updates,
+                r.rendered_frames,
+                r.voices,
+                r.voices_playing,
+                r.sink_channels
+            )
+        })
+        .collect();
+    format!(
+        ",\"audio\":{{\"sampleRate\":{},\"channels\":{},\"samplesProduced\":{},\
+         \"samplesTaken\":{},\"samplesDropped\":{},\"backlog\":{},\"outputs\":[{}],\
+         \"renderers\":[{}]}}",
+        audio.sample_rate,
+        audio.channels,
+        audio.produced,
+        audio.taken,
+        audio.dropped,
+        audio.backlog,
+        outputs.join(","),
+        renderers.join(",")
+    )
+}
+
 /// What the session has been doing, as JSON: the counts the worker logs to
 /// the page's console once a second.
 ///
-/// The GPU counts and `failures` run from boot, so the worker reports the
+/// The GPU counts, `failures` and the counts in `audio` run from boot (or,
+/// for an audio device, from when it was opened), so the worker reports the
 /// difference between two readings. `gpu` (draws, clears, copies, blits and
 /// presents by surface), `threads` (what each ran since the last reading and
 /// what it waits on), `threadLog` (threads created, started, paused and
@@ -1809,6 +1870,8 @@ pub extern "C" fn switch_activity_json(handle: u32, buf: *mut u8, maxlen: u32) -
         cpu.fs_activity.failures,
     )
     .into_bytes();
+    // A few devices at most, so ahead of the lists the budget trims.
+    out.extend_from_slice(audio_activity_json(&cpu.audio_activity()).as_bytes());
     // Room for the closing fields, whose width is at most four u64s' digits.
     let budget = (maxlen as usize).saturating_sub(160);
 

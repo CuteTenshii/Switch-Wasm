@@ -59,6 +59,15 @@ pub(crate) struct AudioOut {
     /// Frames handed over since the device was opened, which is what
     /// `GetAudioOutPlayedSampleCount` reports.
     pub played_frames: u64,
+    /// What the activity report counts, since the device was opened: the
+    /// buffers appended, the frames they carried, the buffers handed back,
+    /// the frames dropped because the device was stopped when they came, and
+    /// the buffers whose descriptor pointed outside itself.
+    pub appended_buffers: u64,
+    pub appended_frames: u64,
+    pub released_buffers: u64,
+    pub discarded_frames: u64,
+    pub unplayable_buffers: u64,
 }
 
 /// `nn::audio::PcmFormat`: 16-bit signed samples, the only format `audout`
@@ -238,6 +247,11 @@ impl Cpu {
                         queued: VecDeque::new(),
                         free_at: 0,
                         played_frames: 0,
+                        appended_buffers: 0,
+                        appended_frames: 0,
+                        released_buffers: 0,
+                        discarded_frames: 0,
+                        unplayable_buffers: 0,
                     },
                 );
                 self.audio_format = (sample_rate, channel_count);
@@ -416,6 +430,7 @@ impl Cpu {
         // `AudioOutBuffer`: { next, buffer, buffer_size, data_size,
         // data_offset }, all 8 bytes, travelling as an input buffer.
         let mut samples = Vec::new();
+        let mut unplayable = false;
         if let Some((desc, _)) = self.ipc_input_buffer(tls, 0) {
             // `AudioOutBuffer`: { next, buffer, buffer_size, data_size,
             // data_offset }, all 8 bytes, travelling as an input buffer.
@@ -446,6 +461,7 @@ impl Cpu {
             // dropped.
             let playable = buffer != 0
                 && u64::from(data_offset) + u64::from(data_size) <= u64::from(buffer_size);
+            unplayable = !playable;
             if playable {
                 let start = buffer.wrapping_add(data_offset);
                 for i in 0..data_size / 2 {
@@ -469,6 +485,12 @@ impl Cpu {
         let format = (device.sample_rate, device.channel_count);
         let frames = (samples.len() / channels) as u64;
         device.played_frames += frames;
+        device.appended_buffers += 1;
+        device.appended_frames += frames;
+        device.unplayable_buffers += u64::from(unplayable);
+        if !device.started {
+            device.discarded_frames += frames;
+        }
         // Where this buffer plays: after whatever is still queued, or from now
         // if the device has caught up. `free_at` is what makes the guest's
         // audio clock advance at the same rate as its own.
@@ -529,6 +551,7 @@ impl Cpu {
                     _ => break,
                 }
             }
+            device.released_buffers += tags.len() as u64;
         }
         if crate::trace::enabled(crate::trace::Trace::Audio) {
             crate::traceln!("[audio] release room={room} addr={addr:x?} tags={tags:#x?}");

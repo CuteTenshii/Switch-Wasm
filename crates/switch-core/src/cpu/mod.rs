@@ -65,6 +65,55 @@ use acc::{DEFAULT_NICKNAME, NICKNAME_LEN};
 pub(crate) use bits::decode_bit_mask;
 use bits::*;
 
+/// What [`Cpu::audio_activity`] reports. Sample counts are interleaved
+/// samples since the session began; `backlog` is what is queued now.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AudioActivity {
+    /// The format the host is playing in, 0 before anything has played.
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub produced: u64,
+    pub taken: u64,
+    pub dropped: u64,
+    pub backlog: u64,
+    pub outputs: Vec<AudioOutActivity>,
+    pub renderers: Vec<AudioRendererActivity>,
+}
+
+/// One open `audout` device. The counts run from when it was opened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioOutActivity {
+    pub handle: u64,
+    pub sample_rate: u32,
+    pub channels: u32,
+    pub started: bool,
+    pub volume: f32,
+    pub appended_buffers: u64,
+    pub appended_frames: u64,
+    pub released_buffers: u64,
+    /// Appended and not yet handed back.
+    pub pending_buffers: u64,
+    /// Frames appended while the device was stopped, which never play.
+    pub discarded_frames: u64,
+    /// Buffers whose descriptor pointed outside itself; see `audio_out_append`.
+    pub unplayable_buffers: u64,
+}
+
+/// One open audio renderer. The counts run from when it was opened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AudioRendererActivity {
+    pub handle: u64,
+    pub sample_rate: u32,
+    pub started: bool,
+    pub updates: u64,
+    pub rendered_frames: u64,
+    pub voices: u32,
+    pub voices_playing: u32,
+    /// The playing sink's channel count, 0 when no sink the renderer can
+    /// play has been configured.
+    pub sink_channels: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunReport {
     /// Number of instructions executed this run.
@@ -1598,6 +1647,12 @@ pub struct Cpu {
     /// has not played yet. Bounded: a host that never drains it (a headless
     /// test, a paused tab) must not be able to grow it without limit.
     audio_pcm: VecDeque<i16>,
+    /// Samples through [`Cpu::queue_audio`] and [`Cpu::take_audio`] since the
+    /// session began: produced, taken by the host, and dropped because the
+    /// host fell a second behind. See [`Cpu::audio_activity`].
+    audio_produced: u64,
+    audio_taken: u64,
+    audio_dropped: u64,
     /// The rate and channel count the samples in `audio_pcm` are in, from the
     /// most recently opened device. `(0, 0)` until one is opened.
     audio_format: (u32, u32),
@@ -2045,6 +2100,9 @@ impl Cpu {
             audio_outs: IdMap::default(),
             opus_decoders: IdMap::default(),
             audio_pcm: VecDeque::new(),
+            audio_produced: 0,
+            audio_taken: 0,
+            audio_dropped: 0,
             audio_format: (0, 0),
             unix_time: 0,
             account_nickname: String::from(DEFAULT_NICKNAME),
@@ -4285,7 +4343,66 @@ impl Cpu {
         for slot in out.iter_mut().take(n) {
             *slot = self.audio_pcm.pop_front().unwrap_or(0);
         }
+        self.audio_taken += n as u64;
         n
+    }
+
+    /// Where the guest's audio has got to: every device and renderer it has
+    /// open, and the samples between them and the host.
+    ///
+    /// A title with no sound has lost it at one of four places: nothing
+    /// opened a device, a device was opened and never started or fed, the
+    /// samples were produced and the host never took them, or the host took
+    /// them and could not play them. The first three are here; the fourth is
+    /// the page's to say.
+    pub fn audio_activity(&self) -> AudioActivity {
+        let mut outputs: Vec<AudioOutActivity> = self
+            .audio_outs
+            .iter()
+            .map(|(&handle, device)| AudioOutActivity {
+                handle,
+                sample_rate: device.sample_rate,
+                channels: device.channel_count,
+                started: device.started,
+                volume: device.volume,
+                appended_buffers: device.appended_buffers,
+                appended_frames: device.appended_frames,
+                released_buffers: device.released_buffers,
+                pending_buffers: device.queued.len() as u64,
+                discarded_frames: device.discarded_frames,
+                unplayable_buffers: device.unplayable_buffers,
+            })
+            .collect();
+        outputs.sort_by_key(|device| device.handle);
+        let mut renderers: Vec<AudioRendererActivity> = self
+            .audren_renderers
+            .iter()
+            .map(|(&handle, renderer)| AudioRendererActivity {
+                handle,
+                sample_rate: renderer.sample_rate,
+                started: renderer.started,
+                updates: renderer.updates,
+                rendered_frames: renderer.elapsed_frames,
+                voices: renderer.voices.len() as u32,
+                voices_playing: renderer
+                    .voices
+                    .iter()
+                    .filter(|voice| voice.in_use && voice.playing && voice.remaining > 0)
+                    .count() as u32,
+                sink_channels: renderer.sink.as_ref().map_or(0, |sink| sink.channels),
+            })
+            .collect();
+        renderers.sort_by_key(|renderer| renderer.handle);
+        AudioActivity {
+            sample_rate: self.audio_format.0,
+            channels: self.audio_format.1,
+            produced: self.audio_produced,
+            taken: self.audio_taken,
+            dropped: self.audio_dropped,
+            backlog: self.audio_pcm.len() as u64,
+            outputs,
+            renderers,
+        }
     }
 
     /// Queue interleaved PCM for the host, dropping the oldest samples once
@@ -4294,9 +4411,12 @@ impl Cpu {
     /// the guest keeps running, and only the audio that could never have been
     /// heard is lost.
     pub(crate) fn queue_audio(&mut self, samples: impl Iterator<Item = i16>) {
+        let before = self.audio_pcm.len();
         self.audio_pcm.extend(samples);
+        self.audio_produced += (self.audio_pcm.len() - before) as u64;
         let over = self.audio_pcm.len().saturating_sub(Self::AUDIO_QUEUE_LIMIT);
         self.audio_pcm.drain(..over);
+        self.audio_dropped += over as u64;
     }
 
     /// Roughly a second of 48 kHz stereo. Past this the host is not keeping

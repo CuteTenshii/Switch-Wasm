@@ -1150,6 +1150,34 @@ fn audout_plays_the_buffers_the_guest_hands_it() {
 
     // And the host is told what to play it at.
     assert_eq!(cpu.audio_format(), (48_000, 2));
+
+    // The activity report says the same: one device, started, one buffer of
+    // four frames in and back out, and eight samples produced and taken.
+    let activity = cpu.audio_activity();
+    assert_eq!(
+        (
+            activity.sample_rate,
+            activity.channels,
+            activity.produced,
+            activity.taken
+        ),
+        (48_000, 2, 8, 8)
+    );
+    assert_eq!((activity.dropped, activity.backlog), (0, 0));
+    let [output] = activity.outputs.as_slice() else {
+        panic!("{} devices reported", activity.outputs.len());
+    };
+    assert!(output.started);
+    assert_eq!(
+        (
+            output.appended_buffers,
+            output.appended_frames,
+            output.released_buffers,
+            output.pending_buffers,
+            output.discarded_frames
+        ),
+        (1, 4, 1, 0, 0)
+    );
 }
 
 #[test]

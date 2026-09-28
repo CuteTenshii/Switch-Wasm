@@ -162,6 +162,10 @@ pub(crate) struct AudioRenderer {
     pub sink: Option<DeviceSink>,
     /// Whether a sink type this renderer cannot play has already been reported.
     pub warned_unplayable_sink: bool,
+    /// `RequestUpdateAudioRenderer` calls since the renderer was opened, for
+    /// the activity report: a renderer the guest has stopped updating plays
+    /// on from the last state it was given.
+    pub updates: u64,
 }
 
 /// A voice's routing: one gain per mix buffer of the mix it plays into.
@@ -456,6 +460,7 @@ impl Cpu {
                         mixes: Vec::new(),
                         sink: None,
                         warned_unplayable_sink: false,
+                        updates: 0,
                     },
                 );
                 self.write_ipc_response(tls, 0, &[renderer], &[], &[])
@@ -680,6 +685,9 @@ impl Cpu {
     /// sent, render whatever frames have come due since the last update, and
     /// report back what the voices did.
     fn audren_update(&mut self, tls: u32, handle: u64) -> Result<()> {
+        if let Some(renderer) = self.audren_renderers.get_mut(&handle) {
+            renderer.updates += 1;
+        }
         if let Some((addr, size)) = self.ipc_input_buffer(tls, 0) {
             self.audren_parse_update(handle, addr, size);
         }
