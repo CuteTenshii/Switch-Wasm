@@ -9,7 +9,9 @@
 //! classes, and a long tail: the float multiply-accumulate by element is 2,898
 //! of them, the immediate zero 1,140, and by the fortieth the count is in the
 //! tens. The classes below are that head. Anything else still says so by name
-//! rather than being quietly approximated.
+//! rather than being quietly approximated. The two-register miscellaneous
+//! group is the exception, complete and checked against `qemu-arm`, since
+//! its tail was what the title reached next each time.
 
 use crate::cpu::Cpu;
 use crate::{Error, Result};
@@ -483,21 +485,26 @@ impl Cpu {
         }
     }
 
+    /// The two-register miscellaneous group. Field A (bits 17:16) splits it
+    /// into four tables and B (bits 10:6, `Q` at the bottom) names the
+    /// operation within one; the same B means different things in different
+    /// tables, so neither field can be read without the other.
     fn neon_two_reg_misc(&mut self, insn: u32) -> Result<()> {
         let quad = (insn >> 6) & 1 != 0;
         let vd = (((insn >> 22) & 1) as u8) << 4 | ((insn >> 12) & 0xF) as u8;
         let vm = (((insn >> 5) & 1) as u8) << 4 | (insn & 0xF) as u8;
         let size = (insn >> 18) & 0b11;
-        let opc = (insn >> 7) & 0b1111;
+        let table = (insn >> 16) & 0b11;
+        let op = (insn >> 7) & 0b1111;
         let esize = 8 << size;
         let count = if quad { 128 } else { 64 } / esize;
         let m = self.neon_get(quad, vm);
 
-        let value = match opc {
+        let value = match (table, op) {
             // VREV64, VREV32, VREV16: reverse the elements inside a container
             // whose width the opcode names.
-            0b0000..=0b0010 => {
-                let container = 64 >> opc;
+            (0b00, 0b0000..=0b0010) => {
+                let container = 64 >> op;
                 let per = container / esize;
                 let x = lanes_of(m, esize, count);
                 let mut out = [0u64; 16];
@@ -507,21 +514,192 @@ impl Cpu {
                 }
                 from_lanes(&out, esize, count)
             }
+            // VPADDL and VPADAL: adjacent pairs added into lanes twice as
+            // wide, the second accumulating onto what the destination holds.
+            (0b00, 0b0100 | 0b0101 | 0b1100 | 0b1101) => {
+                let unsigned = op & 1 != 0;
+                let x = lanes_of(m, esize, count);
+                let wide = esize * 2;
+                let prior = lanes_of(self.neon_get(quad, vd), wide, count / 2);
+                let mut out = [0u64; 16];
+                for i in 0..count as usize / 2 {
+                    let widen = |v: u64| if unsigned { v } else { sext(v, esize) as u64 };
+                    let sum = widen(x[2 * i]).wrapping_add(widen(x[2 * i + 1]));
+                    out[i] = if op & 0b1000 != 0 {
+                        sum.wrapping_add(prior[i])
+                    } else {
+                        sum
+                    };
+                }
+                from_lanes(&out, wide, count / 2)
+            }
+            // VCLS: the sign bit's copies below it. VCLZ: leading zeros.
+            (0b00, 0b1000) => self.neon_lane_op(m, m, esize, count, |x, _| {
+                let v = sext(x, esize);
+                let flipped = if v < 0 { !v } else { v } as u64;
+                u64::from((flipped << (64 - esize)).leading_zeros().min(esize)) - 1
+            }),
+            (0b00, 0b1001) => self.neon_lane_op(m, m, esize, count, |x, _| {
+                u64::from((x << (64 - esize)).leading_zeros().min(esize))
+            }),
             // VCNT: how many bits are set in each byte.
-            0b1010 => self.neon_lane_op(m, m, esize, count, |x, _| u64::from(x.count_ones())),
+            (0b00, 0b1010) => {
+                self.neon_lane_op(m, m, esize, count, |x, _| u64::from(x.count_ones()))
+            }
             // VMVN.
-            0b1011 => !m,
-            // VNEG and VABS, integer and floating point.
-            0b0110 | 0b0111 | 0b1110 | 0b1111 => {
-                let negate = opc & 1 != 0;
-                if opc & 0b1000 != 0 {
-                    self.neon_f32(m, m, quad, move |x, _| if negate { -x } else { x.abs() })
+            (0b00, 0b1011) => !m,
+            // VQABS and VQNEG: the most negative value saturates rather than
+            // wrapping back onto itself.
+            (0b00, 0b1110 | 0b1111) => {
+                let negate = op & 1 != 0;
+                let (lo, hi) = (-(1i64 << (esize - 1)), (1i64 << (esize - 1)) - 1);
+                self.neon_lane_op(m, m, esize, count, move |x, _| {
+                    let v = sext(x, esize);
+                    (if negate { -v } else { v.abs() }).clamp(lo, hi) as u64
+                })
+            }
+            // The comparisons with zero, integer and floating point.
+            (0b01, 0b0000..=0b0100 | 0b1000..=0b1100) => {
+                let test = op & 0b111;
+                let hit = move |ordering: Option<std::cmp::Ordering>| {
+                    use std::cmp::Ordering::{Equal, Greater, Less};
+                    match (test, ordering) {
+                        (_, None) => false,
+                        (0b000, Some(o)) => o == Greater,
+                        (0b001, Some(o)) => o != Less,
+                        (0b010, Some(o)) => o == Equal,
+                        (0b011, Some(o)) => o != Greater,
+                        (_, Some(o)) => o == Less,
+                    }
+                };
+                if op & 0b1000 != 0 {
+                    self.neon_lane_op(m, m, 32, f32_lanes(quad), move |x, _| {
+                        let v = f32::from_bits(flush_input(x as u32));
+                        if hit(v.partial_cmp(&0.0)) {
+                            0xFFFF_FFFF
+                        } else {
+                            0
+                        }
+                    })
+                } else {
+                    let mask = u64::MAX >> (64 - esize);
+                    self.neon_lane_op(m, m, esize, count, move |x, _| {
+                        if hit(Some(sext(x, esize).cmp(&0))) {
+                            mask
+                        } else {
+                            0
+                        }
+                    })
+                }
+            }
+            // VABS and VNEG, integer and floating point. The float forms only
+            // touch the sign bit, NaNs and denormals included.
+            (0b01, 0b0110 | 0b0111 | 0b1110 | 0b1111) => {
+                let negate = op & 1 != 0;
+                if op & 0b1000 != 0 {
+                    self.neon_lane_op(m, m, 32, f32_lanes(quad), move |x, _| {
+                        if negate {
+                            x ^ 0x8000_0000
+                        } else {
+                            x & 0x7FFF_FFFF
+                        }
+                    })
                 } else {
                     self.neon_lane_op(m, m, esize, count, move |x, _| {
                         let v = sext(x, esize);
-                        (if negate { -v } else { v.abs() }) as u64
+                        (if negate {
+                            v.wrapping_neg()
+                        } else {
+                            v.wrapping_abs()
+                        }) as u64
                     })
                 }
+            }
+            // VSWP, VTRN, VUZP and VZIP write both registers.
+            (0b10, 0b0000..=0b0011) => {
+                let d = self.neon_get(quad, vd);
+                let (new_d, new_m) = permute(op, d, m, esize, count);
+                self.neon_set(quad, vm, new_m);
+                new_d
+            }
+            // The narrowing moves: a Q register's lanes into a D register's,
+            // half as wide. VMOVN truncates; VQMOVUN saturates signed to
+            // unsigned; VQMOVN saturates signed to signed or unsigned to
+            // unsigned.
+            (0b10, 0b0100 | 0b0101) => {
+                let (bit6, narrow) = ((insn >> 6) & 1, esize);
+                let wide = narrow * 2;
+                let x = lanes_of(self.neon_get(true, vm), wide, 64 / narrow);
+                let (smin, smax) = (-(1i64 << (narrow - 1)), (1i64 << (narrow - 1)) - 1);
+                let umax = (1u64 << narrow) - 1;
+                let mut out = [0u64; 16];
+                for i in 0..(64 / narrow) as usize {
+                    out[i] = match (op & 1, bit6) {
+                        (0, 0) => x[i],
+                        (0, _) => sext(x[i], wide).clamp(0, umax as i64) as u64,
+                        (_, 0) => sext(x[i], wide).clamp(smin, smax) as u64,
+                        _ => x[i].min(umax),
+                    };
+                }
+                self.neon_set(false, vd, from_lanes(&out, narrow, 64 / narrow));
+                return Ok(());
+            }
+            // VSHLL by the element width, the one shift the immediate form
+            // cannot encode.
+            (0b10, 0b0110) if (insn >> 6) & 1 == 0 => {
+                let x = lanes_of(self.neon_get(false, vm), esize, 64 / esize);
+                let mut out = [0u64; 16];
+                for i in 0..(64 / esize) as usize {
+                    out[i] = x[i] << esize;
+                }
+                self.neon_set(true, vd, from_lanes(&out, esize * 2, 64 / esize));
+                return Ok(());
+            }
+            // VCVT between single and half precision, four lanes at a time.
+            (0b10, 0b1100) if (insn >> 6) & 1 == 0 => {
+                let x = lanes_of(self.neon_get(true, vm), 32, 4);
+                let mut out = [0u64; 16];
+                for i in 0..4 {
+                    out[i] = u64::from(f32_to_f16_standard(x[i] as u32));
+                }
+                self.neon_set(false, vd, from_lanes(&out, 16, 4));
+                return Ok(());
+            }
+            (0b10, 0b1110) if (insn >> 6) & 1 == 0 => {
+                let x = lanes_of(self.neon_get(false, vm), 16, 4);
+                let mut out = [0u64; 16];
+                for i in 0..4 {
+                    out[i] = u64::from(f16_to_f32_standard(x[i] as u16));
+                }
+                self.neon_set(true, vd, from_lanes(&out, 32, 4));
+                return Ok(());
+            }
+            // VRECPE and VRSQRTE, floating point or unsigned fixed point.
+            (0b11, 0b1000..=0b1011) => {
+                let float = op & 0b0010 != 0;
+                let sqrt = op & 1 != 0;
+                self.neon_lane_op(m, m, 32, f32_lanes(quad), move |x, _| {
+                    u64::from(match (float, sqrt) {
+                        (true, false) => recip_estimate_f32(x as u32),
+                        (true, true) => rsqrt_estimate_f32(x as u32),
+                        (false, false) => recip_estimate_u32(x as u32),
+                        (false, true) => rsqrt_estimate_u32(x as u32),
+                    })
+                })
+            }
+            // VCVT between single precision and 32-bit integers. To an
+            // integer rounds towards zero and saturates, NaN giving zero.
+            (0b11, 0b1100..=0b1111) => {
+                let kind = op & 0b11;
+                self.neon_lane_op(m, m, 32, f32_lanes(quad), move |x, _| {
+                    let bits = x as u32;
+                    u64::from(match kind {
+                        0b00 => (bits as i32 as f32).to_bits(),
+                        0b01 => (bits as f32).to_bits(),
+                        0b10 => f32::from_bits(flush_input(bits)) as i32 as u32,
+                        _ => f32::from_bits(flush_input(bits)) as u32,
+                    })
+                })
             }
             _ => return Err(self.neon_unimplemented(insn)),
         };
@@ -811,4 +989,170 @@ impl Cpu {
         self.pc = self.pc.wrapping_add(4);
         Ok(())
     }
+}
+
+/// `VSWP`, `VTRN`, `VUZP` and `VZIP` (`op` 0 to 3) on `d` and `m`, giving the
+/// new `d` and the new `m`.
+fn permute(op: u32, d: u128, m: u128, esize: u32, count: u32) -> (u128, u128) {
+    let (x, y) = (lanes_of(d, esize, count), lanes_of(m, esize, count));
+    let n = count as usize;
+    let (mut nd, mut nm) = ([0u64; 16], [0u64; 16]);
+    match op {
+        0b00 => return (m, d),
+        // Transpose: each pair's odd lane of `d` trades with its even lane
+        // of `m`.
+        0b01 => {
+            nd[..n].copy_from_slice(&x[..n]);
+            nm[..n].copy_from_slice(&y[..n]);
+            for i in (0..n).step_by(2) {
+                nd[i + 1] = y[i];
+                nm[i] = x[i + 1];
+            }
+        }
+        // Unzip: the even lanes of `d` then `m` into `d`, the odd into `m`.
+        0b10 => {
+            let joined: Vec<u64> = x[..n].iter().chain(&y[..n]).copied().collect();
+            for i in 0..n {
+                nd[i] = joined[2 * i];
+                nm[i] = joined[2 * i + 1];
+            }
+        }
+        // Zip: the lanes of `d` and `m` interleaved, the first half into
+        // `d` and the second into `m`.
+        _ => {
+            let joined: Vec<u64> = (0..n).flat_map(|i| [x[i], y[i]]).collect();
+            nd[..n].copy_from_slice(&joined[..n]);
+            nm[..n].copy_from_slice(&joined[n..]);
+        }
+    }
+    (from_lanes(&nd, esize, count), from_lanes(&nm, esize, count))
+}
+
+/// A single-precision input as NEON reads it: the standard FPSCR flushes a
+/// denormal to a zero of the same sign.
+fn flush_input(bits: u32) -> u32 {
+    if bits & 0x7F80_0000 == 0 {
+        bits & 0x8000_0000
+    } else {
+        bits
+    }
+}
+
+/// `VCVT.F16.F32` under the standard FPSCR: a denormal input is flushed and
+/// a NaN becomes the default NaN.
+fn f32_to_f16_standard(bits: u32) -> u16 {
+    let bits = flush_input(bits);
+    if f32::from_bits(bits).is_nan() {
+        return 0x7E00;
+    }
+    crate::gpu::surface::f32_to_f16(f32::from_bits(bits))
+}
+
+/// `VCVT.F32.F16` under the standard FPSCR: exact, bar a NaN, which becomes
+/// the default NaN.
+fn f16_to_f32_standard(bits: u16) -> u32 {
+    if bits & 0x7C00 == 0x7C00 && bits & 0x03FF != 0 {
+        return 0x7FC0_0000;
+    }
+    crate::gpu::surface::f16_to_f32(bits).to_bits()
+}
+
+/// The ARM ARM's `RecipEstimate`: `a` in 256..512 standing for [0.5, 1),
+/// and the result an 8-bit-accurate reciprocal in 256..512 standing for
+/// (1, 2].
+fn recip_table(a: u32) -> u32 {
+    let a = a * 2 + 1;
+    let b = (1 << 19) / a;
+    // `(b + 1) DIV 2` in the manual: halving, rounded to nearest.
+    b.div_ceil(2)
+}
+
+/// The ARM ARM's `RecipSqrtEstimate`: `a` in 128..512 standing for
+/// [0.25, 1), the result in 256..512. Below a half the input keeps its
+/// bottom bit, in units of 1/512; above, it is taken in units of 1/256.
+/// Both are then rounded to the nearest 1/1024.
+fn rsqrt_table(a: u32) -> u32 {
+    let a = if a < 256 {
+        a * 2 + 1
+    } else {
+        ((a >> 1 << 1) + 1) * 2
+    };
+    // The largest b with b < 2^14 / sqrt(a), found by counting up.
+    let mut b = 512u32;
+    while a * (b + 1) * (b + 1) < 1 << 28 {
+        b += 1;
+    }
+    b.div_ceil(2)
+}
+
+/// `VRECPE.F32`, the ARMv7 single-precision reciprocal estimate under the
+/// standard FPSCR. The input is scaled into [0.5, 1) and its top eight
+/// fraction bits pick the estimate; the exponent is worked out apart.
+fn recip_estimate_f32(bits: u32) -> u32 {
+    let bits = flush_input(bits);
+    let sign = bits & 0x8000_0000;
+    let exp = (bits >> 23) & 0xFF;
+    if f32::from_bits(bits).is_nan() {
+        return 0x7FC0_0000;
+    }
+    if exp == 0xFF {
+        return sign;
+    }
+    if exp == 0 {
+        return sign | 0x7F80_0000;
+    }
+    // From 2^126 up the reciprocal is below the smallest normal, which the
+    // standard FPSCR flushes to zero.
+    if exp >= 253 {
+        return sign;
+    }
+    let estimate = recip_table(0x100 | (bits >> 15) & 0xFF);
+    sign | (253 - exp) << 23 | (estimate & 0xFF) << 15
+}
+
+/// `VRSQRTE.F32`, the ARMv7 single-precision reciprocal square-root estimate
+/// under the standard FPSCR.
+fn rsqrt_estimate_f32(bits: u32) -> u32 {
+    let bits = flush_input(bits);
+    let exp = (bits >> 23) & 0xFF;
+    if f32::from_bits(bits).is_nan() {
+        return 0x7FC0_0000;
+    }
+    if exp == 0 {
+        return bits & 0x8000_0000 | 0x7F80_0000;
+    }
+    if bits & 0x8000_0000 != 0 {
+        return 0x7FC0_0000;
+    }
+    if exp == 0xFF {
+        return 0;
+    }
+    // The fraction keeps one more bit when the exponent is even, so that the
+    // square root of the scale is exact.
+    let fraction = if exp & 1 == 0 {
+        (bits >> 15) & 0xFF | 0x100
+    } else {
+        (bits >> 16) & 0x7F | 0x80
+    };
+    let estimate = rsqrt_table(fraction);
+    let result_exp = (380 - exp) / 2;
+    result_exp << 23 | (estimate & 0xFF) << 15
+}
+
+/// `VRECPE.U32`: the estimate of an unsigned fraction in [0, 1), as the top
+/// nine bits say it, and all ones below a half.
+fn recip_estimate_u32(value: u32) -> u32 {
+    if value >> 31 == 0 {
+        return u32::MAX;
+    }
+    recip_table(value >> 23) << 23
+}
+
+/// `VRSQRTE.U32`: the same for the reciprocal square root, all ones below a
+/// quarter.
+fn rsqrt_estimate_u32(value: u32) -> u32 {
+    if value >> 30 == 0 {
+        return u32::MAX;
+    }
+    rsqrt_table(value >> 23) << 23
 }
