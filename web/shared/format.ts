@@ -8,12 +8,13 @@ export function fmtSize(n: number): string {
   return n + ' B';
 }
 
-/** A large count the way a person reads one: 12.3 million rather than
- *  12345678. The scale is a word, not a letter, because next to sizes a
- *  bare G or M reads as bytes. Shared because the status bar and the
+/** A large count the way a person reads one: 12.3M rather than 12345678.
+ *  Million, billion and trillion rather than the SI prefixes, because next
+ *  to sizes a G reads as bytes. Shared because the status bar and the
  *  worker's thread lines both count instructions. */
 export function fmtCount(n: number): string {
-  if (n >= 1e9) return (n / 1e9).toFixed(2) + ' billion';
-  if (n >= 1e6) return (n / 1e6).toFixed(1) + ' million';
+  if (n >= 1e12) return (n / 1e12).toFixed(2) + 'T';
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
   return Math.round(n).toLocaleString('en');
 }
