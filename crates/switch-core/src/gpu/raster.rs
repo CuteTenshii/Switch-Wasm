@@ -1145,29 +1145,25 @@ fn with_fragment_env<T>(
     f(&mut env)
 }
 
-/// Whether the viewport transform mirrors what it maps.
-///
-/// A driver rendering into a y-down framebuffer programs a negative y scale,
-/// which reverses the winding of every triangle between NDC and screen space.
-/// Hardware does *not* take that as a change of facing: `SetWindowOrigin`'s
-/// FlipY bit is the only thing that reverses winding, which is why deko3d sets
-/// it from `windingFlip()` and the scale's sign from `viewportFlipY()`, two
-/// separate device flags. So the mirror has to be undone before a screen-space
-/// area is asked which way it winds.
-fn viewport_mirrors(vt: ViewportTransform) -> bool {
-    vt.scale[0] * vt.scale[1] < 0.0
-}
-
 /// Whether `cull` throws this triangle away.
 ///
-/// `mirrored` is [`viewport_mirrors`] for the transform that produced `v`:
-/// facing is a property of the winding in NDC, and the screen-space area
-/// measured here carries the viewport's mirror on top of it. Reading the sign
-/// straight off inverted culling for every title whose driver flips y, which
-/// is every title built against nnSdk, and is why Tomodachi Life's composite
-/// pass was thrown away and its frame came out black. A zero-area triangle
-/// covers no pixels either way; reporting it culled saves the walk.
-fn culls(cull: CullState, mirrored: bool, v: [ScreenVertex; 3]) -> bool {
+/// Facing is judged by the winding the triangle has where it lands: in window
+/// space, as memory holds the target, after the viewport transform and
+/// whatever mirror it carries. That is Eden's rule (`SetFrontFaceEXT` on
+/// the guest's front face, reversed by `SetWindowOrigin`'s FlipY and by
+/// nothing else, with Vulkan judging it in framebuffer space), and y points
+/// down here, so a counter-clockwise triangle has a negative area under the
+/// formula below.
+///
+/// Judging it in NDC instead gives the same answer through a viewport that
+/// mirrors y, which is every nnSdk title's main pass, and the opposite
+/// through one that does not. Echoes of Wisdom's offscreen post-processing
+/// runs through the latter with front=CCW, FlipY and back-face culling, and
+/// every full-screen quad of it was thrown away, which left its frame black.
+///
+/// A zero-area triangle covers no pixels either way; reporting it culled
+/// saves the walk.
+fn culls(cull: CullState, v: [ScreenVertex; 3]) -> bool {
     if !cull.enabled {
         return false;
     }
@@ -1175,8 +1171,7 @@ fn culls(cull: CullState, mirrored: bool, v: [ScreenVertex; 3]) -> bool {
     if area == 0.0 {
         return true;
     }
-    let ccw_in_ndc = (area > 0.0) != mirrored;
-    let front = ccw_in_ndc == cull.front_ccw;
+    let front = (area < 0.0) == cull.front_ccw;
     if front {
         cull.cull_front
     } else {
@@ -1345,7 +1340,6 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
     let writes_all_channels = color_mask == [true; 4];
     let writes_any_channel = color_mask.iter().any(|&channel| channel);
     let cull = engine.cull_state();
-    let mirrored = viewport_mirrors(viewport);
 
     let index_base = if call.indexed {
         engine.index_array_start()
@@ -1661,7 +1655,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
 
             tally.triangles += 1;
             tally.geometry(screen);
-            if culls(cull, mirrored, screen) {
+            if culls(cull, screen) {
                 tally.culled += 1;
                 continue;
             }
@@ -2969,10 +2963,9 @@ mod tests {
         let (mut mem, vmm, mut engine) = pipeline_harness();
         let vbuf_addr = engine.vertex_array(0).start;
         let color = [0.2f32, 0.4, 0.6, 1.0];
-        // Clockwise in NDC (shoelace -4) i.e. the back face when front is
-        // CCW. The harness's viewport flips y, so this also pins down which
-        // space the winding is read in: mirrored into screen space it looks
-        // counter-clockwise, and culling it anyway is the whole point.
+        // Through the harness's viewport, which mirrors y, this lands in
+        // window space across the top and then down to the bottom-left:
+        // clockwise, so the back face when front is CCW.
         write_vertex(&mut mem, &vmm, vbuf_addr, 0, [-1.0, 1.0, 0.0, 1.0], color);
         write_vertex(&mut mem, &vmm, vbuf_addr, 1, [1.0, 1.0, 0.0, 1.0], color);
         write_vertex(&mut mem, &vmm, vbuf_addr, 2, [-1.0, -1.0, 0.0, 1.0], color);
@@ -3005,58 +2998,35 @@ mod tests {
         assert_ne!(ctx.read_u32(rt.addr).unwrap(), 0);
     }
 
+    /// A face is judged by its winding in window space, y down, whatever
+    /// the viewport did to get it there. Both full-screen quads below are
+    /// real: Tomodachi Life composites through a viewport that mirrors y,
+    /// Echoes of Wisdom post-processes through one that does not, and both
+    /// draw under back-face culling with the winding their front face names.
     #[test]
-    fn a_y_flipping_viewport_does_not_change_which_winding_is_front() {
-        // The winding a face is judged by is the one in NDC. A driver
-        // rendering into a y-down framebuffer programs a negative viewport y
-        // scale, which mirrors every triangle on the way to screen space --
-        // and hardware does not read that as a change of facing:
-        // `SetWindowOrigin`'s FlipY bit is the only thing that reverses
-        // winding, which is why deko3d drives it from `windingFlip()` and the
-        // scale's sign from `viewportFlipY()`, two separate device flags.
-        //
-        // Measuring the screen-space area and taking its sign straight off
-        // inverted culling for every title whose driver flips y. Tomodachi
-        // Life composites its frame with one full-screen quad under
-        // front=CCW/cull=BACK; thrown away, the buffer the display scans out
-        // is never written and the frame is black.
-        let cull = CullState {
+    fn a_face_is_judged_by_its_winding_in_window_space() {
+        let cull = |front_ccw| CullState {
             enabled: true,
-            front_ccw: true,
+            front_ccw,
             cull_front: false,
             cull_back: true,
         };
-        // Counter-clockwise in NDC: (-1,1), (-1,-1), (1,1), shoelace +4.
-        // Through a viewport that flips y it reaches screen space as the
-        // corners of Tomodachi Life's composite quad.
-        let front = [
+        // Counter-clockwise as the target holds it: down the left edge, then
+        // across the top.
+        let ccw = [
             ScreenVertex { x: 0.0, y: 0.0 },
             ScreenVertex { x: 0.0, y: 720.0 },
             ScreenVertex { x: 1280.0, y: 0.0 },
         ];
-        assert!(!culls(cull, true, front), "a front face survives");
-        // The same triangle wound the other way is the back face.
-        let back = [front[0], front[2], front[1]];
-        assert!(culls(cull, true, back));
-
-        // Without the mirror the two swap over, which is what says the flag
-        // is doing the work rather than the vertex order.
-        assert!(culls(cull, false, front));
-        assert!(!culls(cull, false, back));
-    }
-
-    #[test]
-    fn a_viewport_mirrors_when_exactly_one_axis_is_negated() {
-        let vt = |x: f32, y: f32| ViewportTransform {
-            scale: [x, y, 0.5],
-            translate: [0.0, 0.0, 0.5],
-        };
-        // What every nnSdk title programs: x positive, y negated.
-        assert!(viewport_mirrors(vt(640.0, -360.0)));
-        assert!(viewport_mirrors(vt(-640.0, 360.0)));
-        // Both axes negated is a rotation, and neither is no transform at all.
-        assert!(!viewport_mirrors(vt(-640.0, -360.0)));
-        assert!(!viewport_mirrors(vt(640.0, 360.0)));
+        // Clockwise: across the top, then down to the bottom-left corner.
+        let cw = [ccw[0], ccw[2], ccw[1]];
+        // Tomodachi Life: front=CCW, and its quad lands counter-clockwise.
+        assert!(!culls(cull(true), ccw), "a front face survives");
+        assert!(culls(cull(true), cw));
+        // Echoes of Wisdom: front=CCW reversed by FlipY, so clockwise is
+        // front, and its quad lands clockwise.
+        assert!(!culls(cull(false), cw), "a front face survives");
+        assert!(culls(cull(false), ccw));
     }
 
     #[test]
