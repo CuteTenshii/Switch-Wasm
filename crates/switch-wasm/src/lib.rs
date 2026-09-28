@@ -2459,6 +2459,12 @@ pub extern "C" fn switch_frame_count(handle: u32) -> u32 {
 ///
 /// This is the scanned-out frame the guest last handed to the display, or the
 /// memory-mapped demo framebuffer when nothing has been presented yet.
+///
+/// A presented frame is always opaque. Scan-out ignores the surface's alpha,
+/// but titles leave arbitrary values there (Just Dance 2019 presents alpha 0),
+/// and Chromium's GPU canvas on macOS multiplies colour by it in
+/// `putImageData`, even on an `alpha: false` context. That dims the frame on
+/// screen while the canvas's own copy still looks right.
 #[no_mangle]
 pub extern "C" fn switch_fb_snapshot(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
     let s = session(handle);
@@ -2467,7 +2473,7 @@ pub extern "C" fn switch_fb_snapshot(handle: u32, buf: *mut u8, maxlen: u32) -> 
         let n = (fb.pixels.len() * 4).min(maxlen as usize);
         let out = unsafe { std::slice::from_raw_parts_mut(buf, n) };
         for (chunk, pixel) in out.as_chunks_mut::<4>().0.iter_mut().zip(fb.pixels.iter()) {
-            *chunk = pixel.to_le_bytes();
+            *chunk = (pixel | 0xFF00_0000).to_le_bytes();
         }
         return n as u32;
     }
