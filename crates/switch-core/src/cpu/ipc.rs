@@ -679,6 +679,8 @@ impl Cpu {
         self.fs_files
             .retain(|&key, _| key & !0xFFFF_FFFF != session);
         self.fs_dirs.retain(|&key, _| key & !0xFFFF_FFFF != session);
+        self.acc_profiles
+            .retain(|&key, _| key & !0xFFFF_FFFF != session);
         self.erpt_readers
             .retain(|&key, _| key & !0xFFFF_FFFF != session);
         self.opus_decoders

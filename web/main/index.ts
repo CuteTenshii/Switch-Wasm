@@ -15,6 +15,7 @@ import { initNand } from './nand';
 import { call, initWorker, setSession, whenReady } from './rpc';
 import { updatePc } from './runloop';
 import { saveRestore } from './saves';
+import { loadProfiles, stageUsers } from './users';
 import { sdRequestPersistence, sdRestore } from './sdcard';
 import { screenCtx, screenEl, setState, showOverlay } from './shell';
 import { reopenContainer } from './container';
@@ -46,6 +47,8 @@ async function init(): Promise<void> {
     await sdRestore();
     loadPhase('restoring save data');
     await saveRestore();
+    await loadProfiles();
+    await stageUsers();
     await initFbSize();
     // The build, named on the status bar and in the log. A report that does
     // not say which code produced it can only be read by guessing at its age,

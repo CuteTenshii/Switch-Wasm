@@ -107,20 +107,35 @@ export interface WasmExports {
   switch_sd_take_changes_json(handle: number, buf: number, maxlen: number): number;
 
   switch_save_ids_json(handle: number, buf: number, maxlen: number): number;
-  switch_save_create(handle: number, saveId: bigint): number;
-  switch_save_pending_changes(handle: number, saveId: bigint): number;
+
+  switch_user_stage(
+    handle: number, uidLo: bigint, uidHi: bigint, namePtr: number, nameLen: number,
+    editedAt: bigint, picturePtr: number, pictureLen: number): void;
+  switch_users_commit(handle: number, currentLo: bigint, currentHi: bigint): number;
+  switch_take_profile_edits(handle: number): number;
+  switch_users_json(handle: number, buf: number, maxlen: number): number;
+  switch_user_picture(
+    handle: number, uidLo: bigint, uidHi: bigint, buf: number, maxlen: number): number;
+  // A save is its id and its user's uid, in two halves: see `saveKey` in
+  // `commands.ts`.
+  switch_save_create(handle: number, saveId: bigint, userLo: bigint, userHi: bigint): number;
+  switch_save_pending_changes(
+    handle: number, saveId: bigint, userLo: bigint, userHi: bigint): number;
   switch_save_take_changes_json(
-    handle: number, saveId: bigint, buf: number, maxlen: number): number;
+    handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
+    buf: number, maxlen: number): number;
   switch_save_write_file(
-    handle: number, saveId: bigint, pathPtr: number, pathLen: number,
-    dataPtr: number, dataLen: number): number;
+    handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
+    pathPtr: number, pathLen: number, dataPtr: number, dataLen: number): number;
   switch_save_create_dir(
-    handle: number, saveId: bigint, pathPtr: number, pathLen: number): number;
+    handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
+    pathPtr: number, pathLen: number): number;
   switch_save_file_size(
-    handle: number, saveId: bigint, pathPtr: number, pathLen: number): bigint;
+    handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
+    pathPtr: number, pathLen: number): bigint;
   switch_save_read_file(
-    handle: number, saveId: bigint, pathPtr: number, pathLen: number,
-    offset: bigint, buf: number, maxlen: number): bigint;
+    handle: number, saveId: bigint, userLo: bigint, userHi: bigint,
+    pathPtr: number, pathLen: number, offset: bigint, buf: number, maxlen: number): bigint;
 }
 
 /** The instance and the session it is running. One object rather than two

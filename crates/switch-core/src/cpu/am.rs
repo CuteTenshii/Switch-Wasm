@@ -8,17 +8,10 @@
 //! library applet (see [`LibraryApplet`]) but a caller that launches one
 //! still has to see it start, finish and hand back its result.
 
-use super::acc::ACCOUNT_UID;
 use super::Cpu;
 use crate::trace::Level;
 use crate::Result;
 
-/// The uid of the console's one user account.
-///
-/// Any 128-bit value does as long as it is **not zero**: zero is what
-/// `AccountUid` means by "no user", and a title handed it back from
-/// `GetLastOpenedUser` concludes nobody is signed in. Spelling it in ASCII
-/// makes it recognisable in a trace, and it is exactly the 16 bytes a uid is.
 /// `am` 2, NoDataInChannel: the general channel has nothing queued.
 const AM_NO_DATA_IN_CHANNEL: u32 = 128 | (2 << 9);
 
@@ -32,15 +25,15 @@ pub(super) const LAUNCH_PARAMETER_PRESELECTED_USER: u32 = 2;
 /// The HOME menu picks the user before it starts a title and leaves the choice
 /// here; `nn::account::Initialize` pops it and caches the uid, and
 /// `nn::account::OpenPreselectedUser` hands that cached uid back. There is no
-/// menu here, but there is exactly one user ([`ACCOUNT_UID`]) and it is the
-/// one every other `acc` answer names, so it is also the one that was
-/// "selected".
+/// menu here, but the host chose who is playing before the title started
+/// ([`Cpu::set_users`](super::Cpu::set_users)), and that user is the one
+/// every other `acc` answer names, so it is also the one that was "selected".
 ///
 /// `nn::account::detail::TryPopPreselectedUser` reads the block strictly: a
 /// storage shorter than 0x88 bytes is an assertion, and a magic or version it
 /// does not recognise means no preselected user at all, which it reports as a
 /// zero uid, and which `OpenPreselectedUser` then asserts on.
-pub(super) fn preselected_user_parameter() -> Vec<u8> {
+pub(super) fn preselected_user_parameter(user: [u8; 16]) -> Vec<u8> {
     /// What the block says it is. `nn::account` compares the first word
     /// against this and ignores anything else.
     const MAGIC: u32 = 0xC794_97CA;
@@ -54,7 +47,7 @@ pub(super) fn preselected_user_parameter() -> Vec<u8> {
     data.extend_from_slice(&MAGIC.to_le_bytes());
     data.push(VERSION);
     data.resize(UID_OFFSET, 0);
-    data.extend_from_slice(&ACCOUNT_UID);
+    data.extend_from_slice(&user);
     data.resize(LEN, 0);
     data
 }
@@ -241,13 +234,13 @@ const APPLET_WEB: u32 = 0x13;
 /// ones whose contents say something: the keyboard's configuration is what
 /// says how long the text may be and what the confirm button reads, and the
 /// controller applet's says which controllers this console can offer.
-pub(crate) fn applet_launch_storages(program_id: u64) -> Vec<Vec<u8>> {
+pub(crate) fn applet_launch_storages(program_id: u64, user: [u8; 16]) -> Vec<Vec<u8>> {
     /// Enough of any other applet's struct for it to read the prefix it knows.
     const GENERIC_SIZE: usize = 0x100;
     match applet_id_for(program_id) {
         APPLET_SWKBD => vec![swkbd_config(), vec![0u8; SWKBD_WORK_BUFFER_SIZE]],
         APPLET_CONTROLLER => vec![controller_support_arg_private(), controller_support_arg()],
-        APPLET_MY_PAGE => vec![my_page_arg()],
+        APPLET_MY_PAGE => vec![my_page_arg(user)],
         APPLET_WEB => vec![web_arg()],
         _ => vec![vec![0u8; GENERIC_SIZE]],
     }
@@ -282,7 +275,7 @@ const SWKBD_WORK_BUFFER_SIZE: usize = 0x1000;
 /// user it is the page *of*. The fields past the uid belong to the types that
 /// name another account (a friend request, an invitation) and are cleared
 /// for the rest, which is every type this can be launched with here.
-fn my_page_arg() -> Vec<u8> {
+fn my_page_arg(user: [u8; 16]) -> Vec<u8> {
     /// The 9.0.0+ width, the one [`applet_interface_version`] claims.
     const ARG_SIZE: usize = 0x10A8;
     const USER_ID: usize = 0x8;
@@ -290,7 +283,7 @@ fn my_page_arg() -> Vec<u8> {
     // Type ShowFriendList, which is where the applet opens with no caller to
     // have asked for one of its other pages.
     arg[..4].copy_from_slice(&0u32.to_le_bytes());
-    arg[USER_ID..USER_ID + 16].copy_from_slice(&super::acc::ACCOUNT_UID);
+    arg[USER_ID..USER_ID + 16].copy_from_slice(&user);
     arg
 }
 
@@ -1015,9 +1008,9 @@ impl Cpu {
                 // 0x18 bytes follow the `CmifInHeader`, a type padded to
                 // eight, then the uid.
                 //
-                // Neither input changes the answer. There is one user here and
-                // one save behind it, and the emulated NAND has no quota to
-                // divide between save data types, so what a title is told is
+                // Neither input changes the answer. Every user's save of a
+                // title is allotted the same, and the emulated NAND has no
+                // quota to divide between save data types, so what a title is told is
                 // simply what it was allotted, which is its own NACP's figure
                 // once anything has read it (see `Cpu::set_save_data_sizes`).
                 //
@@ -2516,8 +2509,8 @@ mod tests {
             0xC794_97CA
         );
         assert_eq!(data[4], 1, "layout version");
-        assert_eq!(&data[8..0x18], &super::ACCOUNT_UID[..]);
-        assert_ne!(super::ACCOUNT_UID, [0u8; 16]);
+        assert_eq!(&data[8..0x18], &crate::cpu::acc::DEFAULT_USER_UID[..]);
+        assert_ne!(crate::cpu::acc::DEFAULT_USER_UID, [0u8; 16]);
 
         // `am` hands each launch parameter over once and forgets it, which is
         // what stops a second `nn::account::Initialize` caching a user the
@@ -2608,12 +2601,12 @@ mod tests {
     fn get_save_data_size_reports_the_quota_the_title_was_actually_allotted() {
         // GetSaveDataSize(u8 SaveDataType, u128 userId) -> two s64s. The
         // payload is 0x18 bytes: the type padded out to eight, then the uid.
-        // Neither changes the answer -- there is one user and one save behind
-        // it -- so the request is marshalled the way a title sends it and the
-        // reply is checked, not the parse.
+        // Neither changes the answer -- the quota is the title's, whoever's
+        // save it is -- so the request is marshalled the way a title sends it
+        // and the reply is checked, not the parse.
         let mut payload = [0u8; 0x18];
         payload[0] = 1; // SaveDataType::Account
-        payload[8..].copy_from_slice(&super::ACCOUNT_UID);
+        payload[8..].copy_from_slice(&crate::cpu::acc::DEFAULT_USER_UID);
 
         // Tomodachi Life's own NACP figures, which is what a console reads out
         // of the Control NCA.
@@ -2643,7 +2636,7 @@ mod tests {
         const JOURNAL: i64 = 0x0100_0000;
         let mut payload = [0u8; 0x28];
         payload[0] = 1; // SaveDataType::Account
-        payload[8..0x18].copy_from_slice(&super::ACCOUNT_UID);
+        payload[8..0x18].copy_from_slice(&crate::cpu::acc::DEFAULT_USER_UID);
         payload[0x18..0x20].copy_from_slice(&SIZE.to_le_bytes());
         payload[0x20..].copy_from_slice(&JOURNAL.to_le_bytes());
 
@@ -2862,15 +2855,18 @@ mod tests {
         assert!(!super::is_library_applet(0x0100_0000_0000_1012));
 
         // myPage's argument is the 9.0.0+ width its interface version claims,
-        // and it names the one user this console has -- a zero uid is "no
-        // user", which is not a page the applet can show.
+        // and it names the user who is playing -- a zero uid is "no user",
+        // which is not a page the applet can show.
         assert_eq!(
             super::applet_interface_version(0x0100_0000_0000_1013),
             0x1_0000
         );
-        let arg = &super::applet_launch_storages(0x0100_0000_0000_1013)[0];
+        let arg = &super::applet_launch_storages(
+            0x0100_0000_0000_1013,
+            crate::cpu::acc::DEFAULT_USER_UID,
+        )[0];
         assert_eq!(arg.len(), 0x10A8);
-        assert_eq!(arg[8..24], crate::cpu::acc::ACCOUNT_UID);
+        assert_eq!(arg[8..24], crate::cpu::acc::DEFAULT_USER_UID);
     }
 
     #[test]
@@ -2904,7 +2900,7 @@ mod tests {
         // interface version the common arguments claim has to be the one
         // whose argument shape that is.
         const CONTROLLER: u64 = 0x0100_0000_0000_1003;
-        let storages = super::applet_launch_storages(CONTROLLER);
+        let storages = super::applet_launch_storages(CONTROLLER, crate::cpu::acc::DEFAULT_USER_UID);
         let private = &storages[0];
         assert_eq!(
             u32::from_le_bytes(private[..4].try_into().unwrap()),

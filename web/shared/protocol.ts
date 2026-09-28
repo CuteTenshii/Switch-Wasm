@@ -235,6 +235,17 @@ export interface ControlInfo {
 /** Every command the worker answers, with the types the *page* sees: a
  *  handler that fails by returning `{ error }` shows up here as the value it
  *  returns on success, because the message loop turns that into a rejection. */
+/** A user account as the page keeps it and the core is handed it. */
+export interface UserRecord {
+  /** The `AccountUid`, 32 hex digits in the order its bytes sit in memory. */
+  uid: string;
+  nickname: string;
+  /** When the profile was last edited, as POSIX seconds; 0 for never. */
+  editedAt: number;
+  /** A baseline JPEG, or null for the plain picture the core makes. */
+  picture: Bytes | null;
+}
+
 export interface Commands {
   'new'(): number;
   free_session(): number;
@@ -320,6 +331,14 @@ export interface Commands {
   save_write_file(id: string, path: string, bytes: Bytes): number;
   save_create_dir(id: string, path: string): number;
   save_read_file(id: string, path: string): Bytes | null;
+
+  /** Install `users` in the session, with `current` playing. 0, or the code
+   *  `switch_users_commit` refused the list with. */
+  users_set(users: UserRecord[], current: string): number;
+  /** Whether the guest has edited a profile since the last call. */
+  users_take_edits(): boolean;
+  /** The users as the session holds them, guest edits included. */
+  users_read(): UserRecord[];
 }
 
 export type CommandName = keyof Commands;

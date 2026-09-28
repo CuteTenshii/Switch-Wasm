@@ -17,6 +17,7 @@ export const NAND_DB_NAME = 'switch-wasm-nand';
 export const NAND_CONTENT = 'content';
 export const NAND_TITLES = 'titles';
 export const NAND_SAVES = 'saves';
+export const NAND_USERS = 'users';
 
 /** A file or directory as it is stored: a directory has no bytes, and a file
  *  the guest created empty has none either. */
@@ -65,12 +66,13 @@ let nandDb: IDBDatabase | null = null;
 export function nandIdb(): Promise<IDBDatabase> {
   if (nandDb) return Promise.resolve(nandDb);
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(NAND_DB_NAME, 2);
+    const req = indexedDB.open(NAND_DB_NAME, 3);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(NAND_CONTENT)) db.createObjectStore(NAND_CONTENT);
       if (!db.objectStoreNames.contains(NAND_TITLES)) db.createObjectStore(NAND_TITLES);
       if (!db.objectStoreNames.contains(NAND_SAVES)) db.createObjectStore(NAND_SAVES);
+      if (!db.objectStoreNames.contains(NAND_USERS)) db.createObjectStore(NAND_USERS);
     };
     req.onsuccess = () => { nandDb = req.result; resolve(nandDb); };
     req.onerror = () => reject(req.error);

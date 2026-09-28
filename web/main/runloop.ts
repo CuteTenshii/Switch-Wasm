@@ -11,6 +11,7 @@ import { log, logBlock, type LogClass } from './log';
 import { call, readLastError } from './rpc';
 import { saveFlush } from './saves';
 import { sdFlush } from './sdcard';
+import { pullProfileEdits } from './users';
 import { loaded, panelOpen, setPanel, setState } from './shell';
 import { holdWakeLock, releaseWakeLock } from './wakelock';
 
@@ -99,6 +100,7 @@ export async function run(): Promise<void> {
         await drainDiagnostics();
         await sdFlush();
         await saveFlush();
+        await pullProfileEdits();
       }
       await presentIfNewFrame();
       if (done) break;
@@ -199,6 +201,7 @@ $('btn-step').addEventListener('click', async () => {
 window.addEventListener('keydown', (e) => {
   const focused = document.activeElement;
   if (/^(INPUT|SELECT|TEXTAREA)$/.test(focused?.tagName || '')) return;
+  if (document.querySelector('dialog[open]')) return;
   if (e.code === 'Space') {
     // Space is also how a keyboard presses whatever has the focus - a button,
     // a section's <summary>, a NAND Launch row - so the transport only gets it
@@ -261,6 +264,7 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
   await drainOutput();
   await sdFlush();
   await saveFlush();
+  await pullProfileEdits();
   await renderFb();
   await updatePc();
 }

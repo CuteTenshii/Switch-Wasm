@@ -1,20 +1,27 @@
-//! `acc`: the console's one user account, and the profile picture it is
+//! `acc`: the console's user accounts, and the profile pictures they are
 //! drawn with.
 //!
-//! There is exactly one user here ([`ACCOUNT_UID`]) and it is always signed
-//! in. The icon is synthesized rather than stored, `IProfile::LoadImage`
-//! hands out an encoded JPEG and callers feed what they get straight to a
-//! decoder, so there has to be a real one to decode.
+//! The host sets the users ([`Cpu::set_users`]) and which of them is playing,
+//! before the title starts, the way the HOME menu has a user picked before it
+//! launches anything. Every user is always signed in. A user with no picture
+//! of their own gets a synthesized one: `IProfile::LoadImage` hands out an
+//! encoded JPEG and callers feed what they get straight to a decoder, so
+//! there has to be a real one to decode.
 
 use super::Cpu;
 use crate::Result;
 
-pub(super) const ACCOUNT_UID: [u8; 16] = *b"switch-wasm user";
+/// The uid of the user a console has until the host sets its own. Anything
+/// but zero works: zero means "no user". ASCII makes it easy to spot in a
+/// trace.
+pub const DEFAULT_USER_UID: [u8; 16] = *b"switch-wasm user";
 
-/// The `Uuid` `IProfile::GetImageId` reports for the icon below.
-///
-/// Callers cache the icon and re-read it only when this changes. The icon is
-/// synthesized from a constant, so it never does.
+/// How many users a console holds: `acc`'s own limit, and the size of the
+/// array a title lists them into.
+pub const MAX_USERS: usize = 8;
+
+/// Mixed into a picture's id so that it is never equal to the uid it
+/// belongs to.
 const PROFILE_IMAGE_ID: [u8; 16] = *b"switch-wasm icon";
 
 /// `nn::account::ProfileBase`: uid, last-edit timestamp, then the nickname.
@@ -26,9 +33,8 @@ const ACCOUNT_USER_DATA_LEN: usize = 0x80;
 
 /// acc's "that user does not exist" (module 124, description 100).
 ///
-/// Only a caller that invented a uid can reach this: the only uid this service
-/// ever hands out is [`ACCOUNT_UID`], so anything else was not obtained from
-/// here.
+/// Only a caller that invented a uid, or kept one the host has since removed,
+/// can reach this: every uid this service hands out is a user's.
 const ACCOUNT_USER_NOT_EXIST: u32 = 124 | (100 << 9);
 
 /// The `NetworkServiceAccountId` `IManagerForApplication::GetAccountId`
@@ -37,16 +43,118 @@ const ACCOUNT_USER_NOT_EXIST: u32 = 124 | (100 << 9);
 const NETWORK_SERVICE_ACCOUNT_ID: u64 = 0x0000_0001_0000_0001;
 
 /// `nn::account::Nickname`: a fixed NUL-terminated field inside `ProfileBase`.
-pub(super) const NICKNAME_LEN: usize = 0x20;
+pub const NICKNAME_LEN: usize = 0x20;
 
-/// The nickname the console's user has until a host or the guest changes it.
+/// The nickname the console's first user has until a host or the guest
+/// changes it.
 pub(super) const DEFAULT_NICKNAME: &str = "Player";
 
 /// Real profile icons are 256x256.
 const PROFILE_IMAGE_SIZE: u16 = 256;
 
-/// The icon's colour, a neutral slate. Nothing derives anything from it.
-const PROFILE_IMAGE_COLOR: (u8, u8, u8) = (0x4B, 0x50, 0x5A);
+/// The colours a user with no picture is drawn in, picked by uid so a user
+/// keeps theirs. The page picks the same way.
+const PROFILE_IMAGE_COLORS: [(u8, u8, u8); 8] = [
+    (0x4B, 0x50, 0x5A),
+    (0x2F, 0x6F, 0xB5),
+    (0xC0, 0x4A, 0x3C),
+    (0x3E, 0x8E, 0x5A),
+    (0xB0, 0x7A, 0x1E),
+    (0x7A, 0x4F, 0xA8),
+    (0x1F, 0x8A, 0x8C),
+    (0xB4, 0x4C, 0x86),
+];
+
+/// One user account: who they are to a title.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAccount {
+    /// The `AccountUid` titles know them by, and file their saves under.
+    pub uid: [u8; 16],
+    /// Their name, at most [`NICKNAME_LEN`] - 1 bytes of UTF-8.
+    pub nickname: String,
+    /// When the profile was last edited, as POSIX seconds, 0 for a profile
+    /// nobody has touched.
+    pub edited_at: i64,
+    /// Their picture as a baseline JPEG, which is what titles decode; `None`
+    /// for a synthesized one.
+    pub picture: Option<Vec<u8>>,
+}
+
+impl UserAccount {
+    /// A user, with `nickname` cut to what `nn::account::Nickname` holds.
+    pub fn new(uid: [u8; 16], nickname: &str, picture: Option<Vec<u8>>) -> UserAccount {
+        UserAccount {
+            uid,
+            nickname: fit_nickname(nickname),
+            edited_at: 0,
+            picture,
+        }
+    }
+
+    /// The picture a title is handed.
+    fn image(&self) -> Vec<u8> {
+        match &self.picture {
+            Some(picture) => picture.clone(),
+            None => profile_image(self.uid),
+        }
+    }
+
+    /// The `Uuid` `IProfile::GetImageId` reports: what a title caches its copy
+    /// of the picture against, so it has to change when the picture does and
+    /// stay put when it does not. Two FNV-1a hashes of the uid and picture,
+    /// seeded apart.
+    fn image_id(&self) -> [u8; 16] {
+        let picture = self.picture.as_deref().unwrap_or(&[]);
+        let hash = |seed: &[u8]| {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for &byte in seed.iter().chain(&self.uid).chain(picture) {
+                h ^= u64::from(byte);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            h
+        };
+        let mut id = [0u8; 16];
+        id[..8].copy_from_slice(&hash(&PROFILE_IMAGE_ID[..8]).to_le_bytes());
+        id[8..].copy_from_slice(&hash(&PROFILE_IMAGE_ID[8..]).to_le_bytes());
+        id
+    }
+}
+
+/// `nn::account::Nickname` is a fixed 0x20-byte NUL-terminated field, so
+/// anything longer is cut to the 0x1F bytes that fit, on a char boundary,
+/// since a nickname split mid-codepoint would reach the guest as mojibake
+/// rather than as a shorter name.
+fn fit_nickname(nickname: &str) -> String {
+    let mut end = nickname.len().min(NICKNAME_LEN - 1);
+    while end > 0 && !nickname.is_char_boundary(end) {
+        end -= 1;
+    }
+    nickname[..end].to_owned()
+}
+
+/// Why [`Cpu::set_users`] turned a list down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsersRefused {
+    /// No users, or more than [`MAX_USERS`].
+    Count,
+    /// A zero uid, which titles read as "nobody".
+    ZeroUid,
+    /// Two users with one uid.
+    DuplicateUid,
+    /// The user named as playing is not in the list.
+    UnknownCurrent,
+}
+
+impl std::fmt::Display for UsersRefused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            UsersRefused::Count => "a console holds one to eight users",
+            UsersRefused::ZeroUid => "a zero uid means nobody",
+            UsersRefused::DuplicateUid => "two users share a uid",
+            UsersRefused::UnknownCurrent => "the user playing is not one of them",
+        })
+    }
+}
 
 /// JPEG markers, for the profile icon [`solid_jpeg`] encodes.
 const JPEG_SOI: u8 = 0xD8;
@@ -83,16 +191,25 @@ const JPEG_AC_BITS: [u8; 16] = [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 const JPEG_AC_VALUES: [u8; 2] = [JPEG_EOB, 0xF0];
 
-/// The user's profile picture, as the JPEG `IProfile::LoadImage` is defined to
-/// return.
+/// The picture of a user who has none, as the JPEG `IProfile::LoadImage` is
+/// defined to return.
 ///
 /// `acc` hands the icon out as an encoded JPEG and callers feed what they get
 /// straight to a decoder, so answering with zero bytes leaves anything that
-/// draws the user's picture with nothing to decode. There is no icon on this
-/// console to hand over, so one is made: a plain field of colour, which is
-/// what an account with no picture set should look like.
-fn profile_image() -> Vec<u8> {
-    solid_jpeg(PROFILE_IMAGE_SIZE, PROFILE_IMAGE_COLOR)
+/// draws the user's picture with nothing to decode. So one is made: a plain
+/// field of colour, which is what an account with no picture set should look
+/// like, in a colour of the user's own so two of them can be told apart.
+fn profile_image(uid: [u8; 16]) -> Vec<u8> {
+    solid_jpeg(PROFILE_IMAGE_SIZE, picture_color(uid))
+}
+
+/// u32 rather than usize, so the pick is the same on wasm32 and on a 64-bit
+/// host.
+fn picture_color(uid: [u8; 16]) -> (u8, u8, u8) {
+    let spread = uid.iter().fold(0u32, |sum, &byte| {
+        sum.wrapping_mul(31).wrapping_add(u32::from(byte))
+    });
+    PROFILE_IMAGE_COLORS[spread as usize % PROFILE_IMAGE_COLORS.len()]
 }
 
 /// A baseline JPEG of a single solid colour, `size` x `size` pixels.
@@ -277,12 +394,11 @@ impl Cpu {
     /// (`IAccountServiceForSystemService`) and `acc:su`
     /// (`IAccountServiceForAdministrator`): the console's user accounts.
     ///
-    /// There is **one** user here and it is always signed in. That is not a
-    /// placeholder for a user database, it is what this console is: no
-    /// account applet to register a second user with, no profile UI, and
-    /// nowhere to persist one to. So every "who is the current user" question
-    /// has a determinate answer ([`ACCOUNT_UID`]), and every list is one entry
-    /// long.
+    /// The users are the host's ([`Cpu::set_users`]), and so is the choice of
+    /// who is playing: the page picks a profile before a title starts, the
+    /// way the HOME menu does. Every "who is the current user" question is
+    /// answered with that user, and there is no account applet in here to
+    /// register another one with.
     ///
     /// A title asks early and does not proceed without an answer:
     /// `nn::account::Initialize` runs before save data is mounted, and
@@ -327,7 +443,9 @@ impl Cpu {
             "acc:u0" | "acc:u1" | "acc:su" => {
                 self.acc_user_service_request(tls, handle, &iface, cmd_id)
             }
-            "acc:profile" | "acc:profile-editor" => self.acc_profile_request(tls, &iface, cmd_id),
+            "acc:profile" | "acc:profile-editor" => {
+                self.acc_profile_request(tls, handle, &iface, cmd_id)
+            }
             "acc:manager" => self.acc_manager_request(tls, handle, cmd_id),
             "acc:async-context" => self.acc_async_context_request(tls, cmd_id),
             // `INotifier::GetSystemEvent`, for the several notifiers `acc:u1`
@@ -362,28 +480,35 @@ impl Cpu {
         let application = iface == "acc:u0";
         match cmd_id {
             // GetUserCount -> s32.
-            Some(0) => self.write_ipc_response(tls, 0, &[], &1i32.to_le_bytes(), &[]),
+            Some(0) => {
+                let count = self.users.len() as i32;
+                self.write_ipc_response(tls, 0, &[], &count.to_le_bytes(), &[])
+            }
             // GetUserExistence(AccountUid) -> bool.
             Some(1) => {
-                let exists = self.acc_requested_uid(tls) == ACCOUNT_UID;
+                let exists = self.user(self.acc_requested_uid(tls)).is_some();
                 self.write_ipc_response(tls, 0, &[], &[u8::from(exists)], &[])
             }
-            // ListAllUsers / ListOpenUsers / ListOpenContextStoredUsers /
-            // ListQualifiedUsers: the same one-entry list each time. The user
-            // exists, is signed in, has an open context, and qualifies for
-            // whatever the title is about to do: there is no sign-out, and no
-            // second account, to make those four lists differ.
-            Some(2) | Some(3) | Some(60) | Some(141) => self.acc_write_user_list(tls),
-            // GetLastOpenedUser -> AccountUid.
-            Some(4) => self.write_ipc_response(tls, 0, &[], &ACCOUNT_UID, &[]),
-            // GetProfile(AccountUid) -> IProfile.
-            Some(5) => {
-                if self.acc_requested_uid(tls) != ACCOUNT_UID {
-                    return self.write_ipc_response(tls, ACCOUNT_USER_NOT_EXIST, &[], &[], &[]);
-                }
-                self.reply_with_interface(tls, handle, "acc:profile")?;
-                Ok(())
+            // ListAllUsers / ListQualifiedUsers: every user. They all exist,
+            // and every one of them qualifies for whatever the title is about
+            // to do, since nothing here restricts a user.
+            Some(2) | Some(141) => {
+                let uids: Vec<[u8; 16]> = self.users.iter().map(|user| user.uid).collect();
+                self.acc_write_user_list(tls, &uids)
             }
+            // ListOpenUsers / ListOpenContextStoredUsers: the users this
+            // application has open, which is the one playing it.
+            Some(3) | Some(60) => {
+                let uid = self.current_user().uid;
+                self.acc_write_user_list(tls, &[uid])
+            }
+            // GetLastOpenedUser -> AccountUid.
+            Some(4) => {
+                let uid = self.current_user().uid;
+                self.write_ipc_response(tls, 0, &[], &uid, &[])
+            }
+            // GetProfile(AccountUid) -> IProfile.
+            Some(5) => self.acc_open_profile(tls, handle, "acc:profile"),
             // IsUserRegistrationRequestPermitted(u64) -> bool. Registering a
             // user means running the account applet, which does not exist
             // here, the one permission query on this console that is honestly
@@ -391,11 +516,16 @@ impl Cpu {
             Some(50) => self.write_ipc_response(tls, 0, &[], &[0u8], &[]),
             // TrySelectUserWithoutInteraction(bool network_account_required)
             // -> AccountUid. This is how a title gets a user without putting
-            // up the selector applet, and with one account it is also the
-            // right answer: there is nothing to choose between.
-            Some(51) => self.write_ipc_response(tls, 0, &[], &ACCOUNT_UID, &[]),
+            // up the selector applet. A console answers zero when it has more
+            // than one user, and the title then shows the selector, which
+            // does not exist here; the user has already been chosen, so the
+            // answer is them.
+            Some(51) => {
+                let uid = self.current_user().uid;
+                self.write_ipc_response(tls, 0, &[], &uid, &[])
+            }
             // DebugActivateOpenContextRetention: retention is unconditional
-            // here, since the one user's context is never dropped.
+            // here, since a user's context is never dropped.
             Some(99) => self.write_ipc_response(tls, 0, &[], &[], &[]),
             // InitializeApplicationInfo: the title naming itself to `acc`,
             // which it does before asking `acc` anything else. Three command
@@ -458,19 +588,16 @@ impl Cpu {
             // store, so the thumbnail is accepted and dropped: failing a call
             // a title makes on every save would be the larger lie.
             Some(110) | Some(111) => self.write_ipc_response(tls, 0, &[], &[], &[]),
-            // IsUserAccountSwitchLocked -> bool. Locked: with one account
-            // there is nothing to switch to, so a title that offers the
-            // switch would be offering a dead end.
+            // IsUserAccountSwitchLocked -> bool. Locked: switching users means
+            // the selector applet, which does not exist here, so a title that
+            // offers the switch would be offering a dead end. The page is
+            // where the user is changed, before the title starts.
             Some(150) => self.write_ipc_response(tls, 0, &[], &[1u8], &[]),
             // IAccountServiceForAdministrator::GetProfileEditor(AccountUid) ->
             // IProfileEditor, the only route by which the nickname can be
             // changed from inside the guest.
             Some(205) if iface == "acc:su" => {
-                if self.acc_requested_uid(tls) != ACCOUNT_UID {
-                    return self.write_ipc_response(tls, ACCOUNT_USER_NOT_EXIST, &[], &[], &[]);
-                }
-                self.reply_with_interface(tls, handle, "acc:profile-editor")?;
-                Ok(())
+                self.acc_open_profile(tls, handle, "acc:profile-editor")
             }
             _ => self.unimplemented_command(tls, iface, cmd_id),
         }
@@ -478,7 +605,25 @@ impl Cpu {
 
     /// `IProfile`, and `IProfileEditor`, the same interface plus the two
     /// store commands, which is why they share an arm.
-    fn acc_profile_request(&mut self, tls: u32, iface: &str, cmd_id: Option<u32>) -> Result<()> {
+    fn acc_profile_request(
+        &mut self,
+        tls: u32,
+        handle: u64,
+        iface: &str,
+        cmd_id: Option<u32>,
+    ) -> Result<()> {
+        // The user the object was opened for. An object this service did not
+        // hand out has no entry, and is taken to be the one playing.
+        let key = self.ipc_object_key(tls, handle);
+        let uid = self
+            .acc_profiles
+            .get(&key)
+            .copied()
+            .unwrap_or(self.current_user().uid);
+        let Some(index) = self.users.iter().position(|user| user.uid == uid) else {
+            // Opened for a user the host has since removed.
+            return self.write_ipc_response(tls, ACCOUNT_USER_NOT_EXIST, &[], &[], &[]);
+        };
         match cmd_id {
             // Get -> ProfileBase, with the AccountUserData in an output
             // buffer. The userdata is written even though every field of it is
@@ -493,26 +638,26 @@ impl Cpu {
                         }
                     }
                 }
-                let base = self.acc_profile_base();
+                let base = profile_base(&self.users[index]);
                 self.write_ipc_response(tls, 0, &[], &base, &[])
             }
             // GetBase -> ProfileBase.
             Some(1) => {
-                let base = self.acc_profile_base();
+                let base = profile_base(&self.users[index]);
                 self.write_ipc_response(tls, 0, &[], &base, &[])
             }
             // GetImageSize / GetLargeImageSize [18.0.0+] -> u32, which has
             // to be the exact length 11 and 21 then write: a caller sizes its
-            // buffer from this. There is one icon and no larger variant of
-            // it, so both report the size of that one.
+            // buffer from this. A user has one picture and no larger variant
+            // of it, so both report the size of that one.
             Some(10) | Some(20) => {
-                let size = profile_image().len() as u32;
+                let size = self.users[index].image().len() as u32;
                 self.write_ipc_response(tls, 0, &[], &size.to_le_bytes(), &[])
             }
             // LoadImage / LoadLargeImage [18.0.0+] (out buffer) -> u32 bytes
             // written.
             Some(11) | Some(21) => {
-                let image = profile_image();
+                let image = self.users[index].image();
                 let mut written = 0u32;
                 if let Some((addr, size)) = self.ipc_output_buffer(tls, 0) {
                     if addr != 0 {
@@ -530,18 +675,34 @@ impl Cpu {
             // current one. Zero is that field's "no icon" sentinel, and the
             // generic reply left it reading whatever the caller's own stack
             // held -- a fresh id every call, so a cache that never hits.
-            Some(30) => self.write_ipc_response(tls, 0, &[], &PROFILE_IMAGE_ID, &[]),
+            Some(30) => {
+                let id = self.users[index].image_id();
+                self.write_ipc_response(tls, 0, &[], &id, &[])
+            }
             // IProfileEditor::Store(ProfileBase, userdata), StoreWithImage
-            // and StoreWithLargeImage [18.0.0+]: the nickname is the one part
-            // of this profile that is real state, so a store writes it back
-            // and a later GetBase reads out what was stored. Accepting an
-            // edit and then reporting the old name is the failure mode a
-            // `Set`/`Get` pair always has.
+            // and StoreWithLargeImage [18.0.0+]: a store writes the nickname
+            // back, and the two image forms the picture in their send buffer,
+            // so a later GetBase or LoadImage reads out what was stored.
+            // Accepting an edit and then reporting the old profile is the
+            // failure mode a `Set`/`Get` pair always has. The host is told,
+            // so an edit outlives the session.
             Some(100) | Some(101) | Some(110) if iface == "acc:profile-editor" => {
                 let at = self.ipc_request_data(tls);
                 let nickname = self.read_string(at.wrapping_add(0x18), NICKNAME_LEN as u32);
-                self.set_user_nickname(&nickname);
-                self.account_edited_at = self.unix_time;
+                let picture = match (cmd_id, self.ipc_send_buffer(tls, 0)) {
+                    (Some(101) | Some(110), Some((addr, size))) if addr != 0 && size != 0 => {
+                        Some(self.read_bytes(addr, size))
+                    }
+                    _ => None,
+                };
+                let edited_at = self.unix_time;
+                let user = &mut self.users[index];
+                user.nickname = fit_nickname(&nickname);
+                user.edited_at = edited_at;
+                if picture.is_some() {
+                    user.picture = picture;
+                }
+                self.profiles_edited = true;
                 self.write_ipc_response(tls, 0, &[], &[], &[])
             }
             _ => self.unimplemented_command(tls, iface, cmd_id),
@@ -645,26 +806,21 @@ impl Cpu {
         uid
     }
 
-    /// `nn::account::ProfileBase`: the uid, when the profile was last edited,
-    /// and the nickname as a NUL-padded 0x20-byte field.
-    fn acc_profile_base(&self) -> [u8; PROFILE_BASE_LEN] {
-        let mut base = [0u8; PROFILE_BASE_LEN];
-        base[..0x10].copy_from_slice(&ACCOUNT_UID);
-        base[0x10..0x18].copy_from_slice(&self.account_edited_at.to_le_bytes());
-        let nickname = self.account_nickname.as_bytes();
-        let len = nickname.len().min(NICKNAME_LEN - 1);
-        base[0x18..0x18 + len].copy_from_slice(&nickname[..len]);
-        base
+    /// Hand out an `IProfile` or `IProfileEditor` for the user a request
+    /// names, or refuse one nobody has.
+    fn acc_open_profile(&mut self, tls: u32, handle: u64, iface: &str) -> Result<()> {
+        let uid = self.acc_requested_uid(tls);
+        if self.user(uid).is_none() {
+            return self.write_ipc_response(tls, ACCOUNT_USER_NOT_EXIST, &[], &[], &[]);
+        }
+        let key = self.reply_with_interface(tls, handle, iface)?;
+        self.acc_profiles.insert(key, uid);
+        Ok(())
     }
 
-    /// Write the console's one uid into a list command's output buffer, and
-    /// answer with how many were written.
-    ///
-    /// The count goes in the reply whether or not the buffer had room for the
-    /// uid: the client reads a fixed-size `s32` out of the raw data, and a
-    /// reply too short for it fails in its CMIF parse rather than in the
-    /// command that was actually asked.
-    fn acc_write_user_list(&mut self, tls: u32) -> Result<()> {
+    /// Write `uids` into a list command's output buffer, as many as fit, and
+    /// zero the rest of it.
+    fn acc_write_user_list(&mut self, tls: u32, uids: &[[u8; 16]]) -> Result<()> {
         // The reply is a bare `Result`: these commands carry no count, and the
         // caller works out how many users there are by reading its own array
         // and stopping at the first all-zero uid. So the **whole** buffer has
@@ -679,15 +835,103 @@ impl Cpu {
                 for offset in 0..size {
                     self.mem.write_u8(addr.wrapping_add(offset), 0)?;
                 }
-                if size as usize >= ACCOUNT_UID.len() {
-                    for (index, &byte) in ACCOUNT_UID.iter().enumerate() {
-                        self.mem.write_u8(addr.wrapping_add(index as u32), byte)?;
-                    }
+                let fits = size as usize / 16;
+                for (slot, uid) in uids.iter().take(fits).enumerate() {
+                    self.mem
+                        .write_bytes(addr.wrapping_add(slot as u32 * 16), uid)?;
                 }
             }
         }
         self.write_ipc_response(tls, 0, &[], &[], &[])
     }
+
+    /// The user with `uid`, if the console has one.
+    fn user(&self, uid: [u8; 16]) -> Option<&UserAccount> {
+        self.users.iter().find(|user| user.uid == uid)
+    }
+
+    /// Every user on the console, in the order `acc` lists them.
+    pub fn users(&self) -> &[UserAccount] {
+        &self.users
+    }
+
+    /// The user playing: the one every "who is this" question is answered
+    /// with.
+    pub fn current_user(&self) -> &UserAccount {
+        &self.users[self.current_user]
+    }
+
+    /// Replace the console's users, and say which of them is playing.
+    ///
+    /// Before the title starts, since a title asks who is playing once and
+    /// keeps the answer. The launch parameter `am` hands a title with the
+    /// preselected user is rewritten to match, because it is seeded when the
+    /// title is loaded, which a host may do before it sets the users.
+    pub fn set_users(
+        &mut self,
+        users: Vec<UserAccount>,
+        current: [u8; 16],
+    ) -> std::result::Result<(), UsersRefused> {
+        if users.is_empty() || users.len() > MAX_USERS {
+            return Err(UsersRefused::Count);
+        }
+        if users.iter().any(|user| user.uid == [0; 16]) {
+            return Err(UsersRefused::ZeroUid);
+        }
+        for (index, user) in users.iter().enumerate() {
+            if users[..index].iter().any(|other| other.uid == user.uid) {
+                return Err(UsersRefused::DuplicateUid);
+            }
+        }
+        let Some(current) = users.iter().position(|user| user.uid == current) else {
+            return Err(UsersRefused::UnknownCurrent);
+        };
+        self.users = users
+            .into_iter()
+            .map(|user| UserAccount {
+                nickname: fit_nickname(&user.nickname),
+                ..user
+            })
+            .collect();
+        self.current_user = current;
+        let preselected = super::am::LAUNCH_PARAMETER_PRESELECTED_USER;
+        if self.am_launch_parameters.contains_key(&preselected) {
+            let uid = self.current_user().uid;
+            self.am_launch_parameters
+                .insert(preselected, super::am::preselected_user_parameter(uid));
+        }
+        Ok(())
+    }
+
+    /// Whether the guest has stored a profile through `IProfileEditor` since
+    /// the last call, so a host that keeps the users knows to read them back.
+    pub fn take_profile_edits(&mut self) -> bool {
+        std::mem::take(&mut self.profiles_edited)
+    }
+
+    /// Set the playing user's nickname.
+    pub fn set_user_nickname(&mut self, nickname: &str) {
+        let current = self.current_user;
+        self.users[current].nickname = fit_nickname(nickname);
+    }
+
+    /// The playing user's nickname, as the host set it or the guest's own
+    /// `IProfileEditor::Store` left it.
+    pub fn user_nickname(&self) -> &str {
+        &self.current_user().nickname
+    }
+}
+
+/// `nn::account::ProfileBase`: the uid, when the profile was last edited,
+/// and the nickname as a NUL-padded 0x20-byte field.
+fn profile_base(user: &UserAccount) -> [u8; PROFILE_BASE_LEN] {
+    let mut base = [0u8; PROFILE_BASE_LEN];
+    base[..0x10].copy_from_slice(&user.uid);
+    base[0x10..0x18].copy_from_slice(&user.edited_at.to_le_bytes());
+    let nickname = user.nickname.as_bytes();
+    let len = nickname.len().min(NICKNAME_LEN - 1);
+    base[0x18..0x18 + len].copy_from_slice(&nickname[..len]);
+    base
 }
 
 #[cfg(test)]
@@ -717,14 +961,17 @@ mod tests {
         let mut cpu = request(false, 4, &[]);
         acc(&mut cpu, "acc:u0", 4);
         let uid = cpu.read_bytes(TLS + 0x20, 16);
-        assert_eq!(uid, super::ACCOUNT_UID.to_vec());
+        assert_eq!(uid, super::DEFAULT_USER_UID.to_vec());
         assert_ne!(uid, vec![0u8; 16]);
 
         // TrySelectUserWithoutInteraction hands back the same one, since there
         // is nothing to choose between.
         let mut cpu = request(false, 51, &[0, 0, 0, 0]);
         acc(&mut cpu, "acc:u0", 51);
-        assert_eq!(cpu.read_bytes(TLS + 0x20, 16), super::ACCOUNT_UID.to_vec());
+        assert_eq!(
+            cpu.read_bytes(TLS + 0x20, 16),
+            super::DEFAULT_USER_UID.to_vec()
+        );
     }
 
     #[test]
@@ -742,7 +989,7 @@ mod tests {
         }
         acc(&mut cpu, "acc:u0", 2);
 
-        assert_eq!(cpu.read_bytes(BUFFER, 16), super::ACCOUNT_UID.to_vec());
+        assert_eq!(cpu.read_bytes(BUFFER, 16), super::DEFAULT_USER_UID.to_vec());
         assert_eq!(
             cpu.read_bytes(BUFFER + 16, 0x30),
             vec![0u8; 0x30],
@@ -753,7 +1000,7 @@ mod tests {
     #[test]
     fn acc_knows_only_its_own_uid() {
         // GetUserExistence for the one user, then for a uid nothing handed out.
-        let mut cpu = request(false, 1, &super::ACCOUNT_UID);
+        let mut cpu = request(false, 1, &super::DEFAULT_USER_UID);
         acc(&mut cpu, "acc:u0", 1);
         assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 1);
 
@@ -793,7 +1040,10 @@ mod tests {
         );
         // ProfileBase: the uid, then the never-edited timestamp, then the
         // nickname.
-        assert_eq!(cpu.read_bytes(TLS + 0x20, 16), super::ACCOUNT_UID.to_vec());
+        assert_eq!(
+            cpu.read_bytes(TLS + 0x20, 16),
+            super::DEFAULT_USER_UID.to_vec()
+        );
         assert_eq!(cpu.mem.read_u64(TLS + 0x30).unwrap(), 0);
         assert_eq!(cpu.read_string(TLS + 0x38, 0x20), "Player");
     }
@@ -801,7 +1051,7 @@ mod tests {
     #[test]
     fn acc_profile_editor_stores_a_nickname_that_reads_back() {
         let mut store = [0u8; super::PROFILE_BASE_LEN];
-        store[..16].copy_from_slice(&super::ACCOUNT_UID);
+        store[..16].copy_from_slice(&super::DEFAULT_USER_UID);
         store[0x18..0x18 + 5].copy_from_slice(b"Yuuto");
         let mut cpu = request(false, 100, &store);
         cpu.set_unix_time(1_700_000_000);
@@ -846,7 +1096,7 @@ mod tests {
         cpu.register_service_handle(9, "acc:u0");
         cpu.acc_request(TLS, 9, Some(141)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0);
-        assert_eq!(cpu.read_bytes(BUFFER, 16), super::ACCOUNT_UID.to_vec());
+        assert_eq!(cpu.read_bytes(BUFFER, 16), super::DEFAULT_USER_UID.to_vec());
         assert_eq!(
             cpu.read_bytes(BUFFER + 16, 0x30),
             vec![0u8; 0x30],
@@ -861,7 +1111,7 @@ mod tests {
         // the only way to tell them apart is what that session then answers:
         // the notifier has a GetSystemEvent, the manager has a GetAccountId.
         for (service, iface) in [("acc:u0", "acc:manager"), ("acc:u1", "acc:notifier")] {
-            let mut cpu = request(false, 101, &super::ACCOUNT_UID);
+            let mut cpu = request(false, 101, &super::DEFAULT_USER_UID);
             acc(&mut cpu, service, 101);
             let session = cpu.mem.read_u32(TLS + 0x0C).unwrap() as u64;
             assert_eq!(cpu.service_name(session), Some(iface), "{service} cmd 101");
@@ -899,7 +1149,10 @@ mod tests {
         cpu.register_service_handle(9, "acc:profile");
         cpu.acc_request(TLS, 9, Some(11)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), advertised);
-        assert_eq!(cpu.read_bytes(BUFFER, advertised), super::profile_image());
+        assert_eq!(
+            cpu.read_bytes(BUFFER, advertised),
+            super::profile_image(super::DEFAULT_USER_UID)
+        );
 
         // GetLargeImageSize and LoadLargeImage [18.0.0+] answer for the same
         // icon: there is no larger variant of it to report a second size for.
@@ -915,7 +1168,10 @@ mod tests {
         cpu.register_service_handle(9, "acc:profile");
         cpu.acc_request(TLS, 9, Some(21)).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), advertised);
-        assert_eq!(cpu.read_bytes(BUFFER, advertised), super::profile_image());
+        assert_eq!(
+            cpu.read_bytes(BUFFER, advertised),
+            super::profile_image(super::DEFAULT_USER_UID)
+        );
     }
 
     #[test]
@@ -935,9 +1191,179 @@ mod tests {
         assert_ne!(ids[0], vec![0u8; 0x10], "zero means there is no icon");
         assert_ne!(
             ids[0],
-            super::ACCOUNT_UID.to_vec(),
+            super::DEFAULT_USER_UID.to_vec(),
             "the icon, not the user"
         );
+    }
+
+    const ANN: [u8; 16] = *b"ann-uid-00000001";
+    const BEN: [u8; 16] = *b"ben-uid-00000002";
+
+    /// A console with two users, Ben playing.
+    fn two_users(cpu: &mut Cpu) {
+        let ann = super::UserAccount::new(ANN, "Ann", Some(vec![0xFF, 0xD8, 0x01, 0xFF, 0xD9]));
+        let ben = super::UserAccount::new(BEN, "Ben", None);
+        cpu.set_users(vec![ann, ben], BEN).unwrap();
+    }
+
+    /// Open `iface` for `uid` through `command` on `acc:su`, and answer the
+    /// handle of the object handed back.
+    fn open_profile(uid: [u8; 16], command: u32) -> (Cpu, u64) {
+        let mut cpu = request(false, command, &uid);
+        two_users(&mut cpu);
+        acc(&mut cpu, "acc:su", command);
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "opening the profile"
+        );
+        let object = u64::from(cpu.mem.read_u32(TLS + 0x0C).unwrap());
+        (cpu, object)
+    }
+
+    #[test]
+    fn acc_lists_every_user_and_answers_with_the_one_playing() {
+        let mut cpu = request(false, 0, &[]);
+        two_users(&mut cpu);
+        acc(&mut cpu, "acc:u0", 0);
+        assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 2, "GetUserCount");
+
+        // ListAllUsers: both, in order, and the rest of the array zeroed.
+        const BUFFER: u32 = 0x4000;
+        let mut cpu = request_with_recv_buffer(2, &[], BUFFER, 0x80);
+        cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+        two_users(&mut cpu);
+        acc(&mut cpu, "acc:u0", 2);
+        assert_eq!(cpu.read_bytes(BUFFER, 16), ANN.to_vec());
+        assert_eq!(cpu.read_bytes(BUFFER + 16, 16), BEN.to_vec());
+        assert_eq!(cpu.read_bytes(BUFFER + 32, 0x60), vec![0u8; 0x60]);
+
+        // ListOpenUsers: only the one playing has the application open.
+        let mut cpu = request_with_recv_buffer(3, &[], BUFFER, 0x80);
+        cpu.mem.map_zero(BUFFER, 0x100).unwrap();
+        two_users(&mut cpu);
+        acc(&mut cpu, "acc:u0", 3);
+        assert_eq!(cpu.read_bytes(BUFFER, 16), BEN.to_vec());
+        assert_eq!(cpu.read_bytes(BUFFER + 16, 16), vec![0u8; 16]);
+
+        // GetLastOpenedUser and TrySelectUserWithoutInteraction: the one
+        // playing, not the first in the list.
+        for command in [4u32, 51] {
+            let mut cpu = request(false, command, &[0; 4]);
+            two_users(&mut cpu);
+            acc(&mut cpu, "acc:u0", command);
+            assert_eq!(
+                cpu.read_bytes(TLS + 0x20, 16),
+                BEN.to_vec(),
+                "command {command}"
+            );
+        }
+
+        // GetUserExistence knows both, and nobody else.
+        for (uid, exists) in [(ANN, 1u8), (BEN, 1), ([0xAB; 16], 0)] {
+            let mut cpu = request(false, 1, &uid);
+            two_users(&mut cpu);
+            acc(&mut cpu, "acc:u0", 1);
+            assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), exists);
+        }
+    }
+
+    #[test]
+    fn a_profile_is_the_profile_of_the_user_it_was_opened_for() {
+        // GetProfile for Ann while Ben plays: Ann's name and Ann's picture.
+        let (mut cpu, profile) = open_profile(ANN, 5);
+        write_request(&mut cpu, 1, &[]);
+        cpu.acc_request(TLS, profile, Some(1)).unwrap();
+        assert_eq!(cpu.read_bytes(TLS + 0x20, 16), ANN.to_vec());
+        assert_eq!(cpu.read_string(TLS + 0x38, 0x20), "Ann");
+
+        write_request(&mut cpu, 10, &[]);
+        cpu.acc_request(TLS, profile, Some(10)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x20).unwrap(),
+            5,
+            "her own picture's size"
+        );
+
+        write_request(&mut cpu, 30, &[]);
+        cpu.acc_request(TLS, profile, Some(30)).unwrap();
+        let ann_image = cpu.read_bytes(TLS + 0x20, 16);
+
+        // Ben has no picture, so his is made, in a colour of his own.
+        let (mut cpu, profile) = open_profile(BEN, 5);
+        write_request(&mut cpu, 30, &[]);
+        cpu.acc_request(TLS, profile, Some(30)).unwrap();
+        assert_ne!(
+            cpu.read_bytes(TLS + 0x20, 16),
+            ann_image,
+            "one cache key for two pictures"
+        );
+        assert_ne!(
+            super::profile_image(BEN),
+            super::profile_image(super::DEFAULT_USER_UID),
+            "two users drawn alike"
+        );
+
+        // A uid nobody has is refused rather than handed a profile.
+        let mut cpu = request(false, 5, &[0xAB; 16]);
+        two_users(&mut cpu);
+        acc(&mut cpu, "acc:u0", 5);
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            super::ACCOUNT_USER_NOT_EXIST
+        );
+    }
+
+    #[test]
+    fn an_edit_lands_on_the_user_it_was_opened_for_and_is_reported() {
+        let (mut cpu, editor) = open_profile(ANN, 205);
+        assert!(!cpu.take_profile_edits());
+        let mut store = [0u8; super::PROFILE_BASE_LEN];
+        store[..16].copy_from_slice(&ANN);
+        store[0x18..0x18 + 4].copy_from_slice(b"Anna");
+        write_request(&mut cpu, 100, &store);
+        cpu.acc_request(TLS, editor, Some(100)).unwrap();
+        assert_eq!(cpu.users()[0].nickname, "Anna");
+        assert_eq!(
+            cpu.users()[1].nickname,
+            "Ben",
+            "the one playing is untouched"
+        );
+        assert!(cpu.take_profile_edits());
+        assert!(!cpu.take_profile_edits(), "taken, not read");
+    }
+
+    #[test]
+    fn a_user_list_that_cannot_be_a_console_is_refused() {
+        use super::{UserAccount, UsersRefused, MAX_USERS};
+        let mut cpu = Cpu::new();
+        let user = |uid: [u8; 16]| UserAccount::new(uid, "x", None);
+        assert_eq!(cpu.set_users(vec![], ANN), Err(UsersRefused::Count));
+        let crowd = (0..=MAX_USERS as u8).map(|n| user([n + 1; 16])).collect();
+        assert_eq!(cpu.set_users(crowd, [1; 16]), Err(UsersRefused::Count));
+        assert_eq!(
+            cpu.set_users(vec![user([0; 16])], [0; 16]),
+            Err(UsersRefused::ZeroUid)
+        );
+        assert_eq!(
+            cpu.set_users(vec![user(ANN), user(ANN)], ANN),
+            Err(UsersRefused::DuplicateUid)
+        );
+        assert_eq!(
+            cpu.set_users(vec![user(ANN)], BEN),
+            Err(UsersRefused::UnknownCurrent)
+        );
+        assert_eq!(
+            cpu.user_nickname(),
+            "Player",
+            "a refused list changes nothing"
+        );
+
+        // A nickname too long for the field is cut on a char boundary.
+        let long = "é".repeat(20);
+        cpu.set_users(vec![UserAccount::new(ANN, &long, None)], ANN)
+            .unwrap();
+        assert_eq!(cpu.user_nickname(), "é".repeat(15));
     }
 
     /// Decode the profile icon: walk its markers, rebuild the Huffman tables
@@ -951,7 +1377,7 @@ mod tests {
     /// none of which can be checked by eye.
     #[test]
     fn the_profile_icon_is_a_jpeg_that_decodes_to_one_colour() {
-        let jpeg = super::profile_image();
+        let jpeg = super::profile_image(super::DEFAULT_USER_UID);
         assert_eq!(&jpeg[..2], &[0xFF, 0xD8], "SOI");
         assert_eq!(&jpeg[jpeg.len() - 2..], &[0xFF, 0xD9], "EOI");
 
@@ -1102,7 +1528,7 @@ mod tests {
                 // Dequantize and undo the level shift: the inverse DCT of a
                 // lone DC coefficient is that coefficient over 8, everywhere.
                 let value = *pred * i32::from(quant[0]) / 8 + 128;
-                let (red, green, blue) = super::PROFILE_IMAGE_COLOR;
+                let (red, green, blue) = super::picture_color(super::DEFAULT_USER_UID);
                 let (red, green, blue) = (f32::from(red), f32::from(green), f32::from(blue));
                 let expected = match component {
                     0 => 0.299 * red + 0.587 * green + 0.114 * blue,

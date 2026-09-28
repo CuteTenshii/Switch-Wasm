@@ -44,7 +44,7 @@ mod gpu;
 #[cfg(all(feature = "jit", target_arch = "wasm32"))]
 mod jit;
 
-use switch_core::cpu::{Cpu, TouchPoint};
+use switch_core::cpu::{Cpu, SaveKey, TouchPoint};
 use switch_core::elf::load_elf;
 use switch_core::nca::Nca;
 use switch_core::nsp::Pfs0;
@@ -77,6 +77,10 @@ struct Session {
     /// Cached because the icon is fetched separately from the text: JS needs
     /// its size before it can hand over a buffer to copy it into.
     control: Option<switch_core::control::Control>,
+    /// Users `switch_user_stage` has been handed and `switch_users_commit` has
+    /// not yet installed: a list goes in one user at a time, and the core
+    /// takes it whole, since half a list is not a console.
+    staged_users: Vec<switch_core::cpu::UserAccount>,
     cpu: Cpu,
     last_error: String,
 }
@@ -411,6 +415,7 @@ pub extern "C" fn switch_new() -> u32 {
         dlc: Vec::new(),
         keys: switch_core::keys::KeySet::default(),
         control: None,
+        staged_users: Vec::new(),
         cpu,
         last_error: String::new(),
     })
@@ -2577,26 +2582,31 @@ fn write_changes_json(changes: &[switch_core::vfs::Change], buf: *mut u8, maxlen
 
 // save data
 //
-// The same shape as the SD card above, with a save id in front of every call.
+// The same shape as the SD card above, with a save in front of every call.
 // A console keeps saves on its NAND rather than its card, and they are the
 // only writable storage a title has that another title cannot see, so they
-// are stored separately, and a path means nothing without the id it belongs
-// to.
+// are stored separately, and a path means nothing without the save it
+// belongs to.
+//
+// A save is its id and the user it belongs to: `save_id`, then the uid as
+// `user_lo` (its first eight bytes) and `user_hi` (its last eight), each
+// little-endian, both zero for a save no user owns. See `SaveKey`.
 
-/// Every save the running session has opened, as JSON: `["0100000000001000"]`.
+/// Every save the running session has opened, as JSON:
+/// `["8000000000000050","0100000000001000@<32 hex digits of uid>"]`.
 ///
 /// A save is created on first open, so this is also the list of what there is
 /// to persist, a host drains and stores each of these in turn.
 #[no_mangle]
 pub extern "C" fn switch_save_ids_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
-    let mut ids = session(handle).cpu.save_ids();
-    ids.sort_unstable();
+    let mut keys = session(handle).cpu.save_keys();
+    keys.sort_unstable();
     let mut out = Vec::from("[");
-    for (i, id) in ids.iter().enumerate() {
+    for (i, key) in keys.iter().enumerate() {
         if i > 0 {
             out.push(b',');
         }
-        out.extend_from_slice(format!("\"{id:016x}\"").as_bytes());
+        out.extend_from_slice(format!("\"{key}\"").as_bytes());
     }
     out.push(b']');
     let n = out.len().min(maxlen as usize);
@@ -2607,8 +2617,14 @@ pub extern "C" fn switch_save_ids_json(handle: u32, buf: *mut u8, maxlen: u32) -
 
 /// How many paths the guest has changed in this save and not yet had drained.
 #[no_mangle]
-pub extern "C" fn switch_save_pending_changes(handle: u32, save_id: u64) -> u32 {
-    session(handle).cpu.save_data_mut(save_id).pending_changes() as u32
+pub extern "C" fn switch_save_pending_changes(
+    handle: u32,
+    save_id: u64,
+    user_lo: u64,
+    user_hi: u64,
+) -> u32 {
+    let key = SaveKey::from_halves(save_id, user_lo, user_hi);
+    session(handle).cpu.save_data_mut(key).pending_changes() as u32
 }
 
 /// Drain what the guest has changed in this save, in the same JSON as
@@ -2618,10 +2634,13 @@ pub extern "C" fn switch_save_pending_changes(handle: u32, save_id: u64) -> u32 
 pub extern "C" fn switch_save_take_changes_json(
     handle: u32,
     save_id: u64,
+    user_lo: u64,
+    user_hi: u64,
     buf: *mut u8,
     maxlen: u32,
 ) -> u32 {
-    let changes = session(handle).cpu.save_data_mut(save_id).take_changes();
+    let key = SaveKey::from_halves(save_id, user_lo, user_hi);
+    let changes = session(handle).cpu.save_data_mut(key).take_changes();
     write_changes_json(&changes, buf, maxlen)
 }
 
@@ -2632,6 +2651,8 @@ pub extern "C" fn switch_save_take_changes_json(
 pub extern "C" fn switch_save_write_file(
     handle: u32,
     save_id: u64,
+    user_lo: u64,
+    user_hi: u64,
     path_ptr: *const u8,
     path_len: u32,
     data_ptr: *const u8,
@@ -2641,7 +2662,7 @@ pub extern "C" fn switch_save_write_file(
     let data = unsafe { std::slice::from_raw_parts(data_ptr, data_len as usize) };
     let path = sd_path(path_ptr, path_len);
     s.cpu
-        .save_data_mut(save_id)
+        .save_data_mut(SaveKey::from_halves(save_id, user_lo, user_hi))
         .write_file(&path, data.to_vec());
     0
 }
@@ -2652,12 +2673,16 @@ pub extern "C" fn switch_save_write_file(
 pub extern "C" fn switch_save_create_dir(
     handle: u32,
     save_id: u64,
+    user_lo: u64,
+    user_hi: u64,
     path_ptr: *const u8,
     path_len: u32,
 ) -> i32 {
     let s = session(handle);
     let path = sd_path(path_ptr, path_len);
-    s.cpu.save_data_mut(save_id).create_dir(&path);
+    s.cpu
+        .save_data_mut(SaveKey::from_halves(save_id, user_lo, user_hi))
+        .create_dir(&path);
     0
 }
 
@@ -2666,12 +2691,18 @@ pub extern "C" fn switch_save_create_dir(
 pub extern "C" fn switch_save_file_size(
     handle: u32,
     save_id: u64,
+    user_lo: u64,
+    user_hi: u64,
     path_ptr: *const u8,
     path_len: u32,
 ) -> i64 {
     let s = session(handle);
     let path = sd_path(path_ptr, path_len);
-    match s.cpu.save_data_mut(save_id).size(&path) {
+    match s
+        .cpu
+        .save_data_mut(SaveKey::from_halves(save_id, user_lo, user_hi))
+        .size(&path)
+    {
         Some(size) => size as i64,
         None => -1,
     }
@@ -2683,6 +2714,8 @@ pub extern "C" fn switch_save_file_size(
 pub extern "C" fn switch_save_read_file(
     handle: u32,
     save_id: u64,
+    user_lo: u64,
+    user_hi: u64,
     path_ptr: *const u8,
     path_len: u32,
     offset: u64,
@@ -2692,7 +2725,11 @@ pub extern "C" fn switch_save_read_file(
     let s = session(handle);
     let path = sd_path(path_ptr, path_len);
     let out = unsafe { std::slice::from_raw_parts_mut(buf, maxlen as usize) };
-    match s.cpu.save_data_mut(save_id).read(&path, offset, out) {
+    match s
+        .cpu
+        .save_data_mut(SaveKey::from_halves(save_id, user_lo, user_hi))
+        .read(&path, offset, out)
+    {
         Some(n) => n as i64,
         None => -1,
     }
@@ -2701,8 +2738,9 @@ pub extern "C" fn switch_save_read_file(
 /// Give a fresh session a save it had in an earlier one, so a host can restore
 /// before the guest asks. Returns 0.
 #[no_mangle]
-pub extern "C" fn switch_save_create(handle: u32, save_id: u64) -> i32 {
-    session(handle).cpu.save_data_mut(save_id);
+pub extern "C" fn switch_save_create(handle: u32, save_id: u64, user_lo: u64, user_hi: u64) -> i32 {
+    let key = SaveKey::from_halves(save_id, user_lo, user_hi);
+    session(handle).cpu.save_data_mut(key);
     0
 }
 
@@ -2779,6 +2817,131 @@ pub extern "C" fn switch_set_operation_mode(handle: u32, docked: u32) {
         switch_core::cpu::OperationMode::Docked
     };
     session(handle).cpu.set_operation_mode(mode);
+}
+
+// The console's users. A list is staged one user at a time and then
+// committed whole, before the title starts: a title asks who is playing once
+// and keeps the answer. A uid travels as two little-endian halves, its first
+// eight bytes then its last eight, the way a save's does.
+
+/// A uid out of the two halves the host passes it as.
+fn uid_from_halves(lo: u64, hi: u64) -> [u8; 16] {
+    let mut uid = [0u8; 16];
+    uid[..8].copy_from_slice(&lo.to_le_bytes());
+    uid[8..].copy_from_slice(&hi.to_le_bytes());
+    uid
+}
+
+/// Add one user to the list the next `switch_users_commit` installs.
+/// `edited_at` is when the profile was last edited, as POSIX seconds, and a
+/// `picture_len` of 0 means the user has no picture and gets a made one.
+/// The picture is a baseline JPEG, which is what titles decode.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "C" fn switch_user_stage(
+    handle: u32,
+    uid_lo: u64,
+    uid_hi: u64,
+    name_ptr: *const u8,
+    name_len: u32,
+    edited_at: i64,
+    picture_ptr: *const u8,
+    picture_len: u32,
+) {
+    let name = sd_path(name_ptr, name_len);
+    let picture = (picture_len > 0)
+        .then(|| unsafe { std::slice::from_raw_parts(picture_ptr, picture_len as usize) }.to_vec());
+    let mut user =
+        switch_core::cpu::UserAccount::new(uid_from_halves(uid_lo, uid_hi), &name, picture);
+    user.edited_at = edited_at;
+    session(handle).staged_users.push(user);
+}
+
+/// Install the staged users, with the one whose uid is given playing.
+/// Returns 0, or when the list cannot be a console's (and nothing changes):
+/// 1 for no users or more than eight, 2 for a zero uid, 3 for two users with
+/// one uid, 4 for a playing user who is not in the list. The staged list is
+/// emptied either way.
+#[no_mangle]
+pub extern "C" fn switch_users_commit(handle: u32, current_lo: u64, current_hi: u64) -> u32 {
+    use switch_core::cpu::UsersRefused;
+    let s = session(handle);
+    let users = std::mem::take(&mut s.staged_users);
+    match s
+        .cpu
+        .set_users(users, uid_from_halves(current_lo, current_hi))
+    {
+        Ok(()) => 0,
+        Err(UsersRefused::Count) => 1,
+        Err(UsersRefused::ZeroUid) => 2,
+        Err(UsersRefused::DuplicateUid) => 3,
+        Err(UsersRefused::UnknownCurrent) => 4,
+    }
+}
+
+/// Whether the guest has edited a profile since the last call: a nonzero
+/// answer is the host's cue to read them back with `switch_users_json`.
+#[no_mangle]
+pub extern "C" fn switch_take_profile_edits(handle: u32) -> u32 {
+    u32::from(session(handle).cpu.take_profile_edits())
+}
+
+/// The users as the core holds them, guest edits included, as JSON:
+/// `[{"uid":"<32 hex digits>","nickname":"Player","editedAt":0,
+/// "pictureLen":0}]`. A picture is fetched on its own, with
+/// `switch_user_picture`, because it is too large to escape into text.
+#[no_mangle]
+pub extern "C" fn switch_users_json(handle: u32, buf: *mut u8, maxlen: u32) -> u32 {
+    let mut out = Vec::from("[");
+    for (i, user) in session(handle).cpu.users().iter().enumerate() {
+        if i > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(b"{\"uid\":\"");
+        for byte in user.uid {
+            out.extend_from_slice(format!("{byte:02x}").as_bytes());
+        }
+        out.extend_from_slice(b"\",\"nickname\":\"");
+        json_escape(&user.nickname, &mut out);
+        out.extend_from_slice(
+            format!(
+                "\",\"editedAt\":{},\"pictureLen\":{}}}",
+                user.edited_at,
+                user.picture.as_ref().map_or(0, Vec::len)
+            )
+            .as_bytes(),
+        );
+    }
+    out.push(b']');
+    let n = out.len().min(maxlen as usize);
+    let dst = unsafe { std::slice::from_raw_parts_mut(buf, n) };
+    dst.copy_from_slice(&out[..n]);
+    n as u32
+}
+
+/// Copy the picture of the user with this uid into `buf`. Returns the bytes
+/// copied, 0 when the user has no picture of their own or no such user.
+#[no_mangle]
+pub extern "C" fn switch_user_picture(
+    handle: u32,
+    uid_lo: u64,
+    uid_hi: u64,
+    buf: *mut u8,
+    maxlen: u32,
+) -> u32 {
+    let uid = uid_from_halves(uid_lo, uid_hi);
+    let users = session(handle).cpu.users();
+    let Some(picture) = users
+        .iter()
+        .find(|user| user.uid == uid)
+        .and_then(|user| user.picture.as_ref())
+    else {
+        return 0;
+    };
+    let n = picture.len().min(maxlen as usize);
+    let dst = unsafe { std::slice::from_raw_parts_mut(buf, n) };
+    dst.copy_from_slice(&picture[..n]);
+    n as u32
 }
 
 /// Set the wall-clock time `time:u`/`time:s` report, as POSIX seconds (UTC).
@@ -3209,6 +3372,10 @@ mod tests {
     #[test]
     fn save_data_round_trips_and_stays_out_of_the_sd_card() {
         const SAVE: u64 = 0x0100_0000_0000_1000;
+        // A user's uid, in the two halves the host passes it as.
+        const USER_LO: u64 = 0x0706_0504_0302_0100;
+        const USER_HI: u64 = 0x0f0e_0d0c_0b0a_0908;
+        let key = SaveKey::from_halves(SAVE, USER_LO, USER_HI);
         let (_host, handle) = new_session();
 
         // Restoring is the host's own load path, so it must not come back as a
@@ -3220,6 +3387,8 @@ mod tests {
             switch_save_write_file(
                 handle,
                 SAVE,
+                USER_LO,
+                USER_HI,
                 path.as_ptr(),
                 path.len() as u32,
                 body.as_ptr(),
@@ -3227,14 +3396,19 @@ mod tests {
             ),
             0
         );
-        assert_eq!(switch_save_pending_changes(handle, SAVE), 0);
+        assert_eq!(
+            switch_save_pending_changes(handle, SAVE, USER_LO, USER_HI),
+            0
+        );
 
-        // Opening the save is enough to have one to persist.
-        let mut ids = [0u8; 64];
+        // Opening the save is enough to have one to persist, and it is listed
+        // under its user; the same title's shared save is another save.
+        switch_save_create(handle, SAVE, 0, 0);
+        let mut ids = [0u8; 128];
         let n = switch_save_ids_json(handle, ids.as_mut_ptr(), ids.len() as u32) as usize;
         assert_eq!(
             std::str::from_utf8(&ids[..n]).unwrap(),
-            r#"["0100000000001000"]"#
+            r#"["0100000000001000","0100000000001000@000102030405060708090a0b0c0d0e0f"]"#
         );
 
         // A guest write is a change, and it lands in the save rather than on
@@ -3242,28 +3416,56 @@ mod tests {
         // something the next title to mount the card should find.
         session(handle)
             .cpu
-            .save_data_mut(SAVE)
+            .save_data_mut(key)
             .write("/settings.dat", 0, b"12345")
             .unwrap();
-        assert_eq!(switch_save_pending_changes(handle, SAVE), 1);
+        assert_eq!(
+            switch_save_pending_changes(handle, SAVE, USER_LO, USER_HI),
+            1
+        );
+        assert_eq!(switch_save_pending_changes(handle, SAVE, 0, 0), 0);
         let mut buf = [0u8; 256];
-        let n = switch_save_take_changes_json(handle, SAVE, buf.as_mut_ptr(), buf.len() as u32);
+        let n = switch_save_take_changes_json(
+            handle,
+            SAVE,
+            USER_LO,
+            USER_HI,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+        );
         assert_eq!(
             std::str::from_utf8(&buf[..n as usize]).unwrap(),
             r#"[{"path":"/settings.dat","kind":"file","size":5}]"#
         );
-        assert_eq!(switch_save_pending_changes(handle, SAVE), 0);
+        assert_eq!(
+            switch_save_pending_changes(handle, SAVE, USER_LO, USER_HI),
+            0
+        );
         assert_eq!(session(handle).cpu.fs.entry_type("/settings.dat"), None);
 
         // And reading it back is how the host gets the bytes to store.
         assert_eq!(
-            switch_save_file_size(handle, SAVE, path.as_ptr(), path.len() as u32),
+            switch_save_file_size(
+                handle,
+                SAVE,
+                USER_LO,
+                USER_HI,
+                path.as_ptr(),
+                path.len() as u32
+            ),
             5
+        );
+        assert_eq!(
+            switch_save_file_size(handle, SAVE, 0, 0, path.as_ptr(), path.len() as u32),
+            -1,
+            "another user's save, or the shared one, does not have it"
         );
         let mut out = [0u8; 16];
         let read = switch_save_read_file(
             handle,
             SAVE,
+            USER_LO,
+            USER_HI,
             path.as_ptr(),
             path.len() as u32,
             0,
@@ -3272,6 +3474,59 @@ mod tests {
         );
         assert_eq!(read, 5);
         assert_eq!(&out[..5], b"12345");
+    }
+
+    #[test]
+    fn users_are_staged_committed_and_read_back() {
+        let (_host, handle) = new_session();
+        let (ann_lo, ann_hi) = (0x0706_0504_0302_0100u64, 0x0f0e_0d0c_0b0a_0908u64);
+        let (ben_lo, ben_hi) = (0x1111u64, 0x2222u64);
+        let picture = [0xFFu8, 0xD8, 0xFF, 0xD9];
+        let stage = |lo, hi, name: &str, picture: &[u8]| {
+            switch_user_stage(
+                handle,
+                lo,
+                hi,
+                name.as_ptr(),
+                name.len() as u32,
+                1_700_000_000,
+                picture.as_ptr(),
+                picture.len() as u32,
+            )
+        };
+        stage(ann_lo, ann_hi, "Ann \"A\"", &picture);
+        stage(ben_lo, ben_hi, "Ben", &[]);
+        assert_eq!(switch_users_commit(handle, ben_lo, ben_hi), 0);
+        assert_eq!(session(handle).cpu.user_nickname(), "Ben");
+
+        let mut buf = [0u8; 512];
+        let n = switch_users_json(handle, buf.as_mut_ptr(), buf.len() as u32) as usize;
+        assert_eq!(
+            std::str::from_utf8(&buf[..n]).unwrap(),
+            concat!(
+                r#"[{"uid":"000102030405060708090a0b0c0d0e0f","nickname":"Ann \"A\"","#,
+                r#""editedAt":1700000000,"pictureLen":4},"#,
+                r#"{"uid":"11110000000000002222000000000000","nickname":"Ben","#,
+                r#""editedAt":1700000000,"pictureLen":0}]"#
+            )
+        );
+        let mut out = [0u8; 8];
+        assert_eq!(
+            switch_user_picture(handle, ann_lo, ann_hi, out.as_mut_ptr(), out.len() as u32),
+            4
+        );
+        assert_eq!(&out[..4], &picture);
+        assert_eq!(
+            switch_user_picture(handle, ben_lo, ben_hi, out.as_mut_ptr(), out.len() as u32),
+            0
+        );
+
+        // A list naming a player who is not in it is refused, and changes
+        // nothing.
+        stage(ann_lo, ann_hi, "Ann", &[]);
+        assert_eq!(switch_users_commit(handle, 9, 9), 4);
+        assert_eq!(session(handle).cpu.users().len(), 2);
+        assert_eq!(switch_take_profile_edits(handle), 0);
     }
 
     #[test]

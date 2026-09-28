@@ -380,9 +380,9 @@ impl Cpu {
     /// "nn::friends::detail::ipc::IServiceCreator", and the three interfaces
     /// it hands out.
     ///
-    /// Every list here is empty and every count is zero, because the one
-    /// account on this console ([`ACCOUNT_UID`]) is not linked to a Nintendo
-    /// Account and there is no network behind it: no friends, no friend
+    /// Every list here is empty and every count is zero, because no account
+    /// on this console is linked to a Nintendo Account and there is no
+    /// network behind it: no friends, no friend
     /// requests, no blocked users, no presence to publish. That is a real
     /// state of a real console (one that has never been online) and it is
     /// the state every other service here already describes.

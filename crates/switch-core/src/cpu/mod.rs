@@ -61,7 +61,8 @@ pub use jit::{
 };
 pub use thread_report::ThreadReport;
 
-use acc::{DEFAULT_NICKNAME, NICKNAME_LEN};
+pub use acc::{UserAccount, UsersRefused, MAX_USERS, NICKNAME_LEN};
+use acc::{DEFAULT_NICKNAME, DEFAULT_USER_UID};
 pub(crate) use bits::decode_bit_mask;
 use bits::*;
 
@@ -112,6 +113,51 @@ pub struct AudioRendererActivity {
     /// The playing sink's channel count, 0 when no sink the renderer can
     /// play has been configured.
     pub sink_channels: u32,
+}
+
+/// Which save a piece of save data is: the id it is filed under, and the user
+/// it belongs to.
+///
+/// An application's save is one per user: two people playing the same title
+/// on one console each have their own. The id alone names the title, so the
+/// user is part of the key. A save that belongs to nobody in particular, the
+/// system's own and a title's device save, carries the zero uid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SaveKey {
+    pub id: u64,
+    pub user: [u8; 16],
+}
+
+impl SaveKey {
+    /// A save that belongs to no user.
+    pub const fn shared(id: u64) -> SaveKey {
+        SaveKey { id, user: [0; 16] }
+    }
+
+    /// The save `id` of `user`, from the uid's two halves as the host passes
+    /// them: its first eight bytes, then its last eight, each little-endian.
+    pub fn from_halves(id: u64, user_lo: u64, user_hi: u64) -> SaveKey {
+        let mut user = [0u8; 16];
+        user[..8].copy_from_slice(&user_lo.to_le_bytes());
+        user[8..].copy_from_slice(&user_hi.to_le_bytes());
+        SaveKey { id, user }
+    }
+}
+
+impl std::fmt::Display for SaveKey {
+    /// `0100000000001000` for a shared save, and the uid after an `@` for a
+    /// user's, as 32 hex digits in the order its bytes sit in memory. This
+    /// is the form a host stores a save under.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:016x}", self.id)?;
+        if self.user != [0; 16] {
+            f.write_str("@")?;
+            for byte in self.user {
+                write!(f, "{byte:02x}")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// How a guest request went unanswered, for [`Cpu::take_service_gaps`].
@@ -1471,15 +1517,15 @@ pub struct Cpu {
     /// Zero means the NACP set none (or none was read), and the id is derived
     /// from the program id instead. See [`Cpu::add_on_content_base_id`].
     add_on_content_base_id: u64,
-    /// Save data, by the id it was opened under. A console keeps these on its
-    /// NAND -- one per application for its own save, one per system save id
-    /// for the system's -- and they are the only writable storage a title has
-    /// that is not the SD card.
-    saves: IdMap<u64, crate::vfs::Vfs>,
-    /// Which storage an `fsp-srv` object addresses: a save id, or absent for
-    /// the SD card. Files and directories inherit it from the filesystem they
+    /// Save data, by the save it was opened as. A console keeps these on its
+    /// NAND -- one per application and user for a title's saves, one per
+    /// system save id for the system's -- and they are the only writable
+    /// storage a title has that is not the SD card.
+    saves: HashMap<SaveKey, crate::vfs::Vfs>,
+    /// Which storage an `fsp-srv` object addresses: a save, or absent for the
+    /// SD card. Files and directories inherit it from the filesystem they
     /// were opened through, so a path means nothing without it.
-    fs_mount: IdMap<u64, u64>,
+    fs_mount: IdMap<u64, SaveKey>,
     /// Which data archive an open `IStorage` is serving. Absent means the
     /// storage is the process's own RomFS.
     fs_storage_archive: IdMap<u64, u64>,
@@ -1704,15 +1750,19 @@ pub struct Cpu {
     /// `wasm32-unknown-unknown` has no OS clock, so this stays at the Unix
     /// epoch until the host calls [`Cpu::set_unix_time`].
     unix_time: i64,
-    /// The nickname `acc` reports for the console's one user account, and
-    /// the only part of that profile a guest can change: `IProfileEditor::
-    /// Store` writes it back here and `IProfile::GetBase` reads it out again,
-    /// so the pair agrees the way a real profile edit would.
-    account_nickname: String,
-    /// When that profile was last edited, as POSIX seconds, 0 until the guest
-    /// stores one through `IProfileEditor`, which is what a profile nobody has
-    /// touched reports.
-    account_edited_at: i64,
+    /// The console's user accounts, in the order `acc` lists them, as the
+    /// host set them with [`Cpu::set_users`]. Never empty: a console with
+    /// nobody on it is one no title will start on.
+    users: Vec<UserAccount>,
+    /// Which of them is playing, as an index into `users`: the user every
+    /// "who is this" question in `acc` and `am` is answered with.
+    current_user: usize,
+    /// Which user each `IProfile` or `IProfileEditor` object was opened for,
+    /// by the object's key.
+    acc_profiles: IdMap<u64, [u8; 16]>,
+    /// Whether the guest has stored a profile through `IProfileEditor` since
+    /// the host last asked. See [`Cpu::take_profile_edits`].
+    profiles_edited: bool,
     /// The program (title) id `pm:info` reports for this process. Defaults to
     /// the Album applet's, which is what homebrew launched from hbmenu runs
     /// as on real hardware; a loader that knows the real title id sets it with
@@ -2083,7 +2133,7 @@ impl Cpu {
             data_archives: IdMap::default(),
             add_on_content: std::collections::BTreeSet::new(),
             add_on_content_base_id: 0,
-            saves: IdMap::default(),
+            saves: HashMap::new(),
             fs_mount: IdMap::default(),
             fs_storage_archive: IdMap::default(),
             fs_access_log_mode: 0,
@@ -2150,8 +2200,10 @@ impl Cpu {
             audio_dropped: 0,
             audio_format: (0, 0),
             unix_time: 0,
-            account_nickname: String::from(DEFAULT_NICKNAME),
-            account_edited_at: 0,
+            users: vec![UserAccount::new(DEFAULT_USER_UID, DEFAULT_NICKNAME, None)],
+            current_user: 0,
+            acc_profiles: IdMap::default(),
+            profiles_edited: false,
             apm_configuration: power::APM_DEFAULT_CONFIGURATION,
             program_id: ipc::DEFAULT_PROGRAM_ID,
             clock_rates: IdMap::default(),
@@ -3481,7 +3533,7 @@ impl Cpu {
         }
         self.am_launch_parameters.insert(
             crate::cpu::am::LAUNCH_PARAMETER_PRESELECTED_USER,
-            crate::cpu::am::preselected_user_parameter(),
+            crate::cpu::am::preselected_user_parameter(self.current_user().uid),
         );
     }
 
@@ -3529,7 +3581,8 @@ impl Cpu {
         // Then the applet's own launch structs. Refusing one of these pops is
         // what a real applet treats as a launch it cannot honour, and it
         // aborts rather than carry on without it.
-        for storage in crate::cpu::am::applet_launch_storages(self.program_id) {
+        let user = self.current_user().uid;
+        for storage in crate::cpu::am::applet_launch_storages(self.program_id, user) {
             self.am_in_data.push_back(storage);
         }
     }
@@ -3617,37 +3670,37 @@ impl Cpu {
         self.add_on_content.iter().copied().collect()
     }
 
-    /// The save data filed under `id`, creating it if this is the first time
-    /// anything has asked. A console formats a save on first open too.
-    pub fn save_data_mut(&mut self, id: u64) -> &mut crate::vfs::Vfs {
-        self.saves.entry(id).or_insert_with(crate::vfs::Vfs::empty)
+    /// The save `key` names, creating it if this is the first time anything
+    /// has asked. A console formats a save on first open too.
+    pub fn save_data_mut(&mut self, key: SaveKey) -> &mut crate::vfs::Vfs {
+        self.saves.entry(key).or_insert_with(crate::vfs::Vfs::empty)
     }
 
-    /// The save data filed under `id`, if it exists.
-    pub fn save_data(&self, id: u64) -> Option<&crate::vfs::Vfs> {
-        self.saves.get(&id)
+    /// The save `key` names, if it exists.
+    pub fn save_data(&self, key: SaveKey) -> Option<&crate::vfs::Vfs> {
+        self.saves.get(&key)
     }
 
-    /// Every save id that has been opened, for a host that persists them.
-    pub fn save_ids(&self) -> Vec<u64> {
+    /// Every save that has been opened, for a host that persists them.
+    pub fn save_keys(&self) -> Vec<SaveKey> {
         self.saves.keys().copied().collect()
     }
 
     /// The storage an `fsp-srv` object addresses.
-    pub(super) fn vfs_for(&mut self, mount: Option<u64>) -> &mut crate::vfs::Vfs {
+    pub(super) fn vfs_for(&mut self, mount: Option<SaveKey>) -> &mut crate::vfs::Vfs {
         match mount {
-            Some(id) => self.saves.entry(id).or_insert_with(crate::vfs::Vfs::empty),
+            Some(key) => self.saves.entry(key).or_insert_with(crate::vfs::Vfs::empty),
             None => &mut self.fs,
         }
     }
 
     /// Which storage the `fsp-srv` object under `key` addresses.
-    pub(super) fn mount_of(&self, key: u64) -> Option<u64> {
+    pub(super) fn mount_of(&self, key: u64) -> Option<SaveKey> {
         self.fs_mount.get(&key).copied()
     }
 
     /// Record that the object under `key` addresses `mount`.
-    pub(super) fn set_mount(&mut self, key: u64, mount: Option<u64>) {
+    pub(super) fn set_mount(&mut self, key: u64, mount: Option<SaveKey>) {
         match mount {
             Some(id) => {
                 self.fs_mount.insert(key, id);
@@ -4615,26 +4668,6 @@ impl Cpu {
     /// Current battery reading, as set by [`Cpu::set_battery`].
     pub fn battery(&self) -> (u8, bool) {
         (self.battery_percent, self.battery_charging)
-    }
-
-    /// Set the nickname `acc` reports for the console's one user account.
-    ///
-    /// `nn::account::Nickname` is a fixed 0x20-byte NUL-terminated field, so
-    /// anything longer is cut to the 0x1F bytes that fit, on a char
-    /// boundary, since a nickname split mid-codepoint would reach the guest
-    /// as mojibake rather than as a shorter name.
-    pub fn set_user_nickname(&mut self, nickname: &str) {
-        let mut end = nickname.len().min(NICKNAME_LEN - 1);
-        while end > 0 && !nickname.is_char_boundary(end) {
-            end -= 1;
-        }
-        self.account_nickname = nickname[..end].to_owned();
-    }
-
-    /// The nickname `acc` reports, as set by [`Cpu::set_user_nickname`] or by
-    /// the guest's own `IProfileEditor::Store`.
-    pub fn user_nickname(&self) -> &str {
-        &self.account_nickname
     }
 
     /// Set the program (title) id `pm:info` reports for the running process.

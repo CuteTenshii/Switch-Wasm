@@ -68,7 +68,8 @@ const FIRMWARE_VERSION: (u8, u8, u8) = (22, 5, 0);
 /// persist: the host already writes back every save it has been handed and
 /// restores them into the next session, so a setting written here survives a
 /// reload with no plumbing of its own.
-pub(super) const SYSTEM_SETTINGS_SAVE: u64 = 0x8000_0000_0000_0050;
+pub(super) const SYSTEM_SETTINGS_SAVE: super::SaveKey =
+    super::SaveKey::shared(0x8000_0000_0000_0050);
 
 /// The file inside that save. Eden writes `settings` in the same place;
 /// nothing on the guest side reads the name, but agreeing costs nothing.

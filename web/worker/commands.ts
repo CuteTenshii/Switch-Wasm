@@ -6,7 +6,7 @@
    call - the emulator's heap is the browser's memory too. */
 
 import type {
-  CommandHandlers, CrashReport, FsChange, GpuReport, IpcGaps, JitStats, TraceChannel,
+  CommandHandlers, CrashReport, FsChange, GpuReport, IpcGaps, JitStats, TraceChannel, UserRecord,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { noteRegistered, resetActivity } from './activity';
@@ -56,8 +56,27 @@ function pushOperationMode(): void {
   api().switch_set_operation_mode(handle(), docked ? 1 : 0);
 }
 
-// A save id travels as hex text: it is a u64, and JSON has no such number.
-const saveId = (id: string) => BigInt('0x' + id);
+/** A uid, 32 hex digits in memory order, as the two little-endian halves
+ *  the core takes it in. */
+export function uidHalves(hex: string): [bigint, bigint] {
+  const half = (from: number) => {
+    let value = 0n;
+    for (let i = 7; i >= 0; i--) {
+      value = (value << 8n) | BigInt(parseInt(hex.slice(from + i * 2, from + i * 2 + 2), 16));
+    }
+    return value;
+  };
+  return [half(0), half(16)];
+}
+
+/** A save as the core names it: the id as hex text, since it is a u64 and
+ *  JSON has no such number, then `@` and the uid of the user it belongs to,
+ *  absent for a save no user owns. */
+function saveKey(id: string): [bigint, bigint, bigint] {
+  const [save, user] = id.split('@');
+  const [lo, hi] = user ? uidHalves(user) : [0n, 0n];
+  return [BigInt('0x' + save), lo, hi];
+}
 
 // A path is capped at 0x301 bytes by the fs protocol, plus ~48 for the rest
 // of an entry; the JSON drains on the wasm side whether or not it fits, so
@@ -529,37 +548,37 @@ export const CMD: CommandHandlers = {
     );
   },
   save_pending_changes(id) {
-    return handle() < 0 ? 0 : api().switch_save_pending_changes(handle(), saveId(id));
+    return handle() < 0 ? 0 : api().switch_save_pending_changes(handle(), ...saveKey(id));
   },
   save_take_changes(id) {
     if (handle() < 0) return [];
-    const save = saveId(id);
-    const pending = api().switch_save_pending_changes(handle(), save);
+    const save = saveKey(id);
+    const pending = api().switch_save_pending_changes(handle(), ...save);
     if (!pending) return [];
     return readJson<FsChange[]>(
       changesCap(pending),
-      (buf, cap) => api().switch_save_take_changes_json(handle(), save, buf, cap),
+      (buf, cap) => api().switch_save_take_changes_json(handle(), ...save, buf, cap),
       [],
     );
   },
   save_create(id) {
-    return api().switch_save_create(handle(), saveId(id));
+    return api().switch_save_create(handle(), ...saveKey(id));
   },
   save_write_file(id, path, bytes) {
     return withPath(path, (pptr, plen) =>
       withBytes(bytes, (dptr, dlen) =>
-        api().switch_save_write_file(handle(), saveId(id), pptr, plen, dptr, dlen)));
+        api().switch_save_write_file(handle(), ...saveKey(id), pptr, plen, dptr, dlen)));
   },
   save_create_dir(id, path) {
     return withPath(path, (ptr, len) =>
-      api().switch_save_create_dir(handle(), saveId(id), ptr, len));
+      api().switch_save_create_dir(handle(), ...saveKey(id), ptr, len));
   },
   // The whole file, or null when the path is not one. Sliced, so a large save
   // does not need one allocation twice its size.
   save_read_file(id, path) {
-    const save = saveId(id);
+    const save = saveKey(id);
     return withPath(path, (pptr, plen) => {
-      const size = Number(api().switch_save_file_size(handle(), save, pptr, plen));
+      const size = Number(api().switch_save_file_size(handle(), ...save, pptr, plen));
       if (size < 0) return null;
       const out = new Uint8Array(size);
       const cap = Math.min(Math.max(size, 1), READ_CHUNK);
@@ -567,7 +586,7 @@ export const CMD: CommandHandlers = {
         let off = 0;
         while (off < size) {
           const n = Number(
-            api().switch_save_read_file(handle(), save, pptr, plen, BigInt(off), buf, cap));
+            api().switch_save_read_file(handle(), ...save, pptr, plen, BigInt(off), buf, cap));
           if (n <= 0) break;
           out.set(fromWasm(buf, n), off);
           off += n;
@@ -575,5 +594,41 @@ export const CMD: CommandHandlers = {
         return out;
       });
     });
+  },
+
+  // users
+  //
+  // Staged one at a time and committed whole, before a title starts: see
+  // `switch_users_commit`.
+
+  users_set(users, current) {
+    if (handle() < 0) return 1;
+    for (const user of users) {
+      const [lo, hi] = uidHalves(user.uid);
+      withPath(user.nickname, (nptr, nlen) =>
+        withBytes(user.picture ?? new Uint8Array(0), (pptr, plen) =>
+          api().switch_user_stage(
+            handle(), lo, hi, nptr, nlen, BigInt(user.editedAt), pptr,
+            user.picture ? plen : 0)));
+    }
+    return api().switch_users_commit(handle(), ...uidHalves(current));
+  },
+  users_take_edits() {
+    return handle() >= 0 && api().switch_take_profile_edits(handle()) !== 0;
+  },
+  users_read() {
+    if (handle() < 0) return [];
+    const users = readJson<(Omit<UserRecord, 'picture'> & { pictureLen: number })[]>(
+      8192,
+      (buf, cap) => api().switch_users_json(handle(), buf, cap),
+      [],
+    );
+    return users.map(({ pictureLen, ...user }) => ({
+      ...user,
+      picture: pictureLen
+        ? withBuffer(pictureLen, (buf) =>
+          fromWasm(buf, api().switch_user_picture(handle(), ...uidHalves(user.uid), buf, pictureLen)))
+        : null,
+    }));
   },
 };

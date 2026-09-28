@@ -53,10 +53,18 @@ and tests.
   `Confirm*`/`Check*Permission` reply with a bare `Result` where success *is*
   permitted, `IsRestriction*` is `false`, `IsFreeCommunicationAvailable`/
   `IsStereoVisionPermitted` are `true`.
-- **`acc`** — exactly one user, always signed in, uid `ACCOUNT_UID` (nonzero;
-  0 is the "no user" sentinel). `acc:u0` and `acc:u1`/`acc:su` share 0..=51 but
-  **diverge from 100 up**, so those arms dispatch on the service name. The
-  nickname is real state; `LoadImage` returns a real JPEG.
+- **`acc`** — up to eight users, all signed in, set by the host with
+  `Cpu::set_users` before a title starts, with one of them playing. "Who is
+  playing" questions (`GetLastOpenedUser`, `TrySelectUserWithoutInteraction`,
+  `ListOpenUsers`, the preselected-user launch parameter) all name that user;
+  `ListAllUsers` names everyone. `IProfile` answers for the user it was opened
+  for. A user without a picture gets a solid-colour JPEG picked by uid.
+  `IProfileEditor` stores are kept and reported to the host. `acc:u0` and
+  `acc:u1`/`acc:su` share 0..=51 but **diverge from 100 up**, so those arms
+  dispatch on the service name.
+- **`fsp-srv` saves** are keyed by save id and the `SaveDataAttribute` uid:
+  each user has their own save of a title, and system and device saves (uid
+  0) are shared.
 - **`am`** is the applet manager every title opens first, and `nnSdk` answers
   an unknown command from it with an `svcBreak`, so a refused command ends
   the boot there. Its shapes matter more than its answers:

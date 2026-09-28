@@ -24,6 +24,7 @@ import { abortRun } from './runloop';
 import { restoreArchives } from './nand';
 import { saveRestore } from './saves';
 import { sdRestore } from './sdcard';
+import { stageUsers } from './users';
 
 // `fontUrl` is the built file's hashed URL, so a replaced font is a fetch the
 // browser cannot answer from its cache. Held across sessions: the bytes are
@@ -55,6 +56,11 @@ let booted = false;
  *  knows it is replacing something. Every path that loads one calls this. */
 export function noteBooted(): void {
   booted = true;
+}
+
+/** Whether a title has been loaded into the running session. */
+export function titleBooted(): boolean {
+  return booted;
 }
 
 /** What a rebuilt session has to be given back before it can boot anything. */
@@ -97,6 +103,7 @@ export async function recycleSession({ reopen, force = false }: Recycle = {}): P
   await sdRestore();
   loadPhase('restoring save data');
   await saveRestore();
+  await stageUsers();
   if (hasKeys()) {
     loadPhase('staging keys');
     await stageKeys();

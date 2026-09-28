@@ -68,6 +68,8 @@
     </div>
 
     <div class="topbar-actions">
+      <button id="btn-profile" class="btn profile-button" aria-haspopup="dialog"
+              title="Choose the profile">Player</button>
       <button id="btn-dock" class="btn" title="Dock or undock the console (Handheld: 720p and a touchscreen; Docked: 1080p and boost clocks)"
               aria-pressed="false">Handheld</button>
       <label class="btn" for="nro-file" title="Open a .nro, .elf, .nsp, .xci or .nca">Open</label>
@@ -120,6 +122,25 @@
 
     <div class="dropveil" id="dropveil"><span>Release to boot</span></div>
   </main>
+
+  <dialog class="profiles" id="profiles" aria-labelledby="profiles-title">
+    <header class="profiles-head">
+      <h2 id="profiles-title">Profiles</h2>
+      <button type="button" class="icon-btn" id="btn-profiles-close" aria-label="Close">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7"/></svg>
+      </button>
+    </header>
+    <p class="muted tiny">Titles save separately for each profile. Click a picture to change it.</p>
+    <p class="muted tiny" id="profile-running-note" hidden>The running title keeps the profile it
+      started with. A change applies to the next title you start.</p>
+    <ul class="profile-list" id="profile-list"></ul>
+    <form class="profile-add" id="profile-add">
+      <input class="text" id="profile-add-name" maxlength="10" placeholder="Name"
+             aria-label="New profile name" required>
+      <button type="submit" class="btn small" id="profile-add-submit">Add profile</button>
+    </form>
+    <p class="muted tiny" id="profile-add-note" hidden>A console holds up to eight profiles.</p>
+  </dialog>
 
   <footer class="statusbar">
     <span class="item">PC <b id="pc">-</b></span>

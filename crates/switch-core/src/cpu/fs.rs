@@ -5,7 +5,7 @@
 //! through `IStorage` is never staged in memory (see AGENTS.md), so a read
 //! here copies through a staging buffer out of a [`crate::source::ByteSource`].
 
-use super::Cpu;
+use super::{Cpu, SaveKey};
 use crate::trace::{Level, Trace};
 use crate::Result;
 
@@ -311,7 +311,7 @@ impl FsActivity {
 }
 
 /// A file the way the tally names it: its storage and its path.
-fn file_text(mount: Option<u64>, path: &str) -> String {
+fn file_text(mount: Option<SaveKey>, path: &str) -> String {
     format!("{}:{path}", mount_text(mount))
 }
 
@@ -324,9 +324,9 @@ fn storage_text(archive: Option<u64>) -> String {
 }
 
 /// Which storage a mount names, the way the trace prints it.
-fn mount_text(mount: Option<u64>) -> String {
+fn mount_text(mount: Option<SaveKey>) -> String {
     match mount {
-        Some(id) => format!("save {id:016x}"),
+        Some(key) => format!("save {key}"),
         None => "sdmc".to_owned(),
     }
 }
@@ -520,8 +520,8 @@ impl Cpu {
             // its save has nowhere to put anything, and the system applets
             // open theirs before they will do very much at all.
             Some(22) | Some(23) | Some(51) | Some(52) | Some(53) => {
-                let id = self.save_data_id(tls);
-                crate::trace!(Trace::Fs, "[fs] save data {id:016x}");
+                let id = self.save_data_key(tls);
+                crate::trace!(Trace::Fs, "[fs] save data {id}");
                 self.save_data_mut(id);
                 // Create answers with a bare Result; Open hands back the
                 // filesystem.
@@ -867,21 +867,34 @@ impl Cpu {
     /// system's own saves are named by system save id; an application's by its
     /// title id. A request with neither is the running title asking for its
     /// own save, which is how `nn::fs::MountSaveData` spells it.
-    fn save_data_id(&mut self, tls: u32) -> u64 {
+    ///
+    /// The user id is what makes an application's save one per user: an
+    /// account save carries the uid of the user it belongs to, and a device
+    /// save, like the system's, carries zero and is shared.
+    fn save_data_key(&mut self, tls: u32) -> SaveKey {
         /// The attribute follows a `u8` space id, padded out to eight bytes.
         const ATTRIBUTE: u32 = 8;
+        const USER_ID: u32 = 0x8;
         const SYSTEM_SAVE_DATA_ID: u32 = 0x18;
         let attribute = self.ipc_request_data(tls).wrapping_add(ATTRIBUTE);
         let application_id = self.mem.read_u64(attribute).unwrap_or(0);
+        let mut user = [0u8; 16];
+        for (index, byte) in user.iter_mut().enumerate() {
+            *byte = self
+                .mem
+                .read_u8(attribute.wrapping_add(USER_ID + index as u32))
+                .unwrap_or(0);
+        }
         let system_save_id = self
             .mem
             .read_u64(attribute.wrapping_add(SYSTEM_SAVE_DATA_ID))
             .unwrap_or(0);
-        match (system_save_id, application_id) {
+        let id = match (system_save_id, application_id) {
             (0, 0) => self.program_id(),
             (0, application) => application,
             (system, _) => system,
-        }
+        };
+        SaveKey { id, user }
     }
 
     /// `IStorage`, backed by the current process's decrypted RomFS
@@ -1510,6 +1523,39 @@ mod tests {
     }
 
     #[test]
+    fn each_user_has_their_own_save_of_a_title() {
+        // OpenSaveDataFileSystem with the same title and two users' uids:
+        // two saves, and a third with no uid, the title's device save.
+        const TITLE: u64 = 0x0100_0000_0000_1000;
+        let mut cpu = request(false, 51, &[]);
+        cpu.record_handle(9, "fsp-srv");
+        for user in [*b"ann-uid-00000001", *b"ben-uid-00000002", [0; 16]] {
+            let mut attribute = [0u8; 0x48];
+            attribute[8..0x10].copy_from_slice(&TITLE.to_le_bytes());
+            attribute[0x10..0x20].copy_from_slice(&user);
+            write_request(&mut cpu, 51, &attribute);
+            cpu.fsp_srv_request(TLS, Some(51), 9).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "opening the save");
+        }
+        let mut keys = cpu.save_keys();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                crate::cpu::SaveKey::shared(TITLE),
+                crate::cpu::SaveKey {
+                    id: TITLE,
+                    user: *b"ann-uid-00000001"
+                },
+                crate::cpu::SaveKey {
+                    id: TITLE,
+                    user: *b"ben-uid-00000002"
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn a_save_is_a_different_storage_from_the_sd_card() {
         // Save data and the SD card are the same interface over the same
         // paths; only the object a request arrives on says which is meant.
@@ -1540,7 +1586,7 @@ mod tests {
             "creating a directory"
         );
         assert_eq!(
-            cpu.save_data(SAVE_ID)
+            cpu.save_data(crate::cpu::SaveKey::shared(SAVE_ID))
                 .and_then(|save| save.entry_type("/settings")),
             Some(crate::vfs::ENTRY_TYPE_DIR),
             "the directory should be in the save"
