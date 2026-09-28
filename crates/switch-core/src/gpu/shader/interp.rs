@@ -144,13 +144,46 @@ impl ConstantSource for MemoryConstants<'_, '_> {
 /// `iadd.cc`/`iadd.x`, so there is nothing to bind and no window to set up.
 /// Translating the address is the whole implementation, and it is the same
 /// translation every other GPU read goes through.
+///
+/// A draw's stages borrow the context shared, since the pixel loop needs it
+/// mutably between shading steps, so a store (or an atomic) is held in
+/// `stores`, in order, and landed by the draw once the step is done. A read
+/// sees the stores before it, as it would on hardware; see
+/// [`MemoryGlobal::land`].
 pub struct MemoryGlobal<'a, 'b> {
     pub ctx: &'a ExecCtx<'b>,
+    pub stores: &'a std::cell::RefCell<Vec<(u64, u32)>>,
+}
+
+impl MemoryGlobal<'_, '_> {
+    /// Write out the stores a shading step made, oldest first, so a later
+    /// one to the same word wins.
+    pub fn land(ctx: &mut ExecCtx, stores: &std::cell::RefCell<Vec<(u64, u32)>>) -> Result<()> {
+        for (addr, value) in stores.borrow_mut().drain(..) {
+            ctx.write_u32(addr, value)?;
+        }
+        Ok(())
+    }
 }
 
 impl GlobalMemory for MemoryGlobal<'_, '_> {
     fn read_u32(&self, addr: u64) -> ShaderResult<u32> {
-        Ok(self.ctx.read_u32(addr)?)
+        let held = self
+            .stores
+            .borrow()
+            .iter()
+            .rev()
+            .find(|&&(at, _)| at == addr)
+            .map(|&(_, value)| value);
+        match held {
+            Some(value) => Ok(value),
+            None => Ok(self.ctx.read_u32(addr)?),
+        }
+    }
+
+    fn write_u32(&self, addr: u64, value: u32) -> ShaderResult<()> {
+        self.stores.borrow_mut().push((addr, value));
+        Ok(())
     }
 }
 
@@ -445,7 +478,7 @@ impl TextureSource for MemoryTextures<'_, '_> {
 /// Writes take `&self` because a compute dispatch shares one of these across
 /// every thread of the grid while the interpreter holds it, the backend owns
 /// whatever interior mutability that needs. They default to an error so that
-/// a read-only source (the rasterizer's) stays a one-method implementation.
+/// a read-only source stays a one-method implementation.
 pub trait GlobalMemory {
     fn read_u32(&self, addr: u64) -> ShaderResult<u32>;
 

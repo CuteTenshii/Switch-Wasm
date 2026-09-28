@@ -616,6 +616,7 @@ fn shade_vertex(
     ctx: &ExecCtx,
     consts: &dyn ConstantSource,
     y_negate: bool,
+    stores: &std::cell::RefCell<Vec<(u64, u32)>>,
 ) -> Result<ShadedVertex> {
     let mut inv = Invocation::new();
     inv.attr_in
@@ -645,7 +646,7 @@ fn shade_vertex(
             inv.attr_in.set(base + c as u16 * 4, component);
         }
     }
-    let global = MemoryGlobal { ctx };
+    let global = MemoryGlobal { ctx, stores };
     let mut env = Env::new(consts, &NoTextures);
     env.memory = Some(&global);
     env.special.y_negate = y_negate;
@@ -1124,6 +1125,7 @@ fn with_fragment_env<T>(
     consts: &std::cell::RefCell<crate::gpu::shader::interp::ConstCache>,
     descriptors: &std::cell::RefCell<crate::IdMap<u32, crate::gpu::texture::Descriptors>>,
     blocks: &std::cell::RefCell<crate::gpu::texture::BlockCache>,
+    stores: &std::cell::RefCell<Vec<(u64, u32)>>,
     f: impl FnOnce(&mut Env) -> Result<T>,
 ) -> Result<T> {
     let fs_consts = MemoryConstants {
@@ -1138,7 +1140,7 @@ fn with_fragment_env<T>(
         descriptors,
         blocks,
     };
-    let fs_global = MemoryGlobal { ctx };
+    let fs_global = MemoryGlobal { ctx, stores };
     let mut env = Env::with_tex_cb_index(&fs_consts, &fs_textures, engine.tex_cb_index());
     env.memory = Some(&fs_global);
     env.special.y_negate = engine.window_origin().lower_left;
@@ -1588,6 +1590,9 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
         }
     }
 
+    // What the draw's shaders store to global memory, landed after each
+    // shading step: see `MemoryGlobal`.
+    let global_stores = std::cell::RefCell::new(Vec::new());
     for tri in triangles {
         let mut shaded: Vec<ShadedVertex> = Vec::with_capacity(3);
         for &ordinal in &tri {
@@ -1613,7 +1618,9 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                 &*ctx,
                 &vs_consts,
                 engine.window_origin().lower_left,
+                &global_stores,
             )?;
+            MemoryGlobal::land(ctx, &global_stores)?;
             cache.insert(index, v);
             shaded.push(v);
         }
@@ -1688,6 +1695,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                             &fs_const_cache,
                             &descriptors,
                             &blocks,
+                            &global_stores,
                             |env| {
                                 shade_fragment(
                                     &mut fragment,
@@ -1699,6 +1707,7 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                                 )
                             },
                         )?;
+                        MemoryGlobal::land(ctx, &global_stores)?;
                         // `kil` discards the fragment: no colour, and no depth
                         // write either, which is why the depth store waits
                         // until after shading rather than happening with the
@@ -1758,8 +1767,10 @@ pub fn draw(engine: &Engine3D, ctx: &mut ExecCtx) -> Result<()> {
                         &fs_const_cache,
                         &descriptors,
                         &blocks,
+                        &global_stores,
                         |env| shade_quad(quad, &fs_program, &shaded, inv_w, weights, env),
                     )?;
+                    MemoryGlobal::land(ctx, &global_stores)?;
                     for lane in 0..QUAD {
                         if covered[lane] == 0 {
                             continue;
@@ -3198,6 +3209,77 @@ mod tests {
         assert_eq!(out, [0.5, 0.0, 0.5, 0.5]);
     }
 
+    /// A vertex shader's stores land in guest memory, and a load after one
+    /// sees it before it has landed. Echoes of Wisdom's visibility boxes
+    /// write their results from the vertex stage, and every such draw was
+    /// refused while the stage could only read.
+    #[test]
+    fn a_vertex_shader_stores_to_global_memory() {
+        use crate::gpu::shader::isa::{Instruction, MemSize, Op, Pred, RZ};
+
+        let (mut mem, vmm, base) = harness();
+        let ops = [
+            Op::Ld {
+                dst: 0,
+                offset: VERTEX_ID_OFFSET,
+                idx: RZ,
+                size: MemSize::B32,
+            },
+            Op::Mov32i {
+                dst: 2,
+                imm: base as u32,
+            },
+            Op::Mov32i {
+                dst: 3,
+                imm: (base >> 32) as u32,
+            },
+            Op::Stg {
+                addr: 2,
+                offset: 0,
+                src: 0,
+                size: MemSize::B32,
+            },
+            Op::Ldg {
+                dst: 4,
+                addr: 2,
+                offset: 0,
+                size: MemSize::B32,
+            },
+            Op::Stg {
+                addr: 2,
+                offset: 4,
+                src: 4,
+                size: MemSize::B32,
+            },
+            Op::Exit,
+        ];
+        let mut program = Program::default();
+        for (i, op) in ops.into_iter().enumerate() {
+            program.offsets.push(8 + i as u32 * 8);
+            program.insns.push(Instruction {
+                pred: Pred::ALWAYS,
+                op,
+            });
+        }
+        let program = Compiled::new(&program);
+
+        let mut stats = Default::default();
+        let mut host1x = Host1x::new();
+        let mut ctx = ExecCtx {
+            mem: &mut mem,
+            vmm: &vmm,
+            host1x: &mut host1x,
+            stats: &mut stats,
+            trace: false,
+        };
+        let consts: std::collections::HashMap<(u8, u16), f32> = Default::default();
+        let stores = std::cell::RefCell::new(Vec::new());
+        shade_vertex(&program, &[], &[], (7, 0), &ctx, &consts, false, &stores).unwrap();
+        MemoryGlobal::land(&mut ctx, &stores).unwrap();
+        assert_eq!(ctx.read_u32(base).unwrap(), 7);
+        assert_eq!(ctx.read_u32(base + 4).unwrap(), 7, "the load saw the store");
+    }
+
     #[test]
     fn a_vertex_shader_reads_its_vertex_and_instance_ids() {
         // The Home Menu draws each UI element as one instance of a unit quad
@@ -3267,7 +3349,8 @@ mod tests {
         let consts: std::collections::HashMap<(u8, u16), f32> = Default::default();
 
         let program = Compiled::new(&program);
-        let v = shade_vertex(&program, &[], &[], (7, 42), &ctx, &consts, false).unwrap();
+        let stores = std::cell::RefCell::new(Vec::new());
+        let v = shade_vertex(&program, &[], &[], (7, 42), &ctx, &consts, false, &stores).unwrap();
         assert_eq!(v.clip[0].to_bits(), 42, "gl_InstanceID");
         assert_eq!(v.clip[1].to_bits(), 7, "gl_VertexID");
     }
