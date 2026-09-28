@@ -147,12 +147,15 @@ impl Cpu {
         let bytes = count * 4;
 
         // Where the lowest-numbered register goes, for each of the four
-        // addressing modes.
+        // addressing modes. Decrement-after ends *at* the base, so it starts
+        // one word above decrement-before: taking them as the same address
+        // loaded every LDMDA one word low, and Mario Kart 8 Deluxe read a
+        // count where it wanted an array pointer and wrote through it.
         let start = match (pre, add) {
-            (false, true) => base,                      // IA
-            (true, true) => base.wrapping_add(4),       // IB
-            (false, false) => base.wrapping_sub(bytes), // DA
-            (true, false) => base.wrapping_sub(bytes),  // DB
+            (false, true) => base,                                      // IA
+            (true, true) => base.wrapping_add(4),                       // IB
+            (false, false) => base.wrapping_sub(bytes).wrapping_add(4), // DA
+            (true, false) => base.wrapping_sub(bytes),                  // DB
         };
         let end = if add {
             base.wrapping_add(bytes)

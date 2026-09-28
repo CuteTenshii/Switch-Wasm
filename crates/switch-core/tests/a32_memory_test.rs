@@ -177,6 +177,34 @@ fn a_store_release_is_not_an_exclusive_store() {
     assert_eq!(cpu.mem.read_u32(SCRATCH).unwrap(), 0x8707);
 }
 
+/// Decrement-after ends at the base: the highest register goes to the base
+/// address itself and the one below it a word lower, the reverse of what a
+/// decrement-before does.
+#[test]
+fn a_decrement_after_transfer_ends_at_the_base() {
+    let cpu = run(&[
+        0xE3A0_4902, // mov   r4, #0x8000
+        0xE284_4008, // add   r4, r4, #8
+        0xE3A0_2022, // mov   r2, #0x22
+        0xE3A0_3033, // mov   r3, #0x33
+        0xE804_000C, // stmda r4, {r2, r3}
+        0xE834_0003, // ldmda r4!, {r0, r1}
+    ]);
+    assert_eq!(cpu.mem.read_u32(SCRATCH + 4).unwrap(), 0x22);
+    assert_eq!(cpu.mem.read_u32(SCRATCH + 8).unwrap(), 0x33);
+    assert_eq!(
+        cpu.mem.read_u32(SCRATCH).unwrap(),
+        0,
+        "nothing below the lowest"
+    );
+    assert_eq!((r(&cpu, 0), r(&cpu, 1)), (0x22, 0x33));
+    assert_eq!(
+        r(&cpu, 4),
+        SCRATCH,
+        "the writeback moves down by both words"
+    );
+}
+
 #[test]
 fn a_byte_swap_exchanges_memory_and_a_register() {
     let cpu = run(&[
