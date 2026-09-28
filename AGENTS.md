@@ -65,12 +65,15 @@ cargo clippy --workspace --all-targets -- -D warnings
   (`bunx playwright install chromium`, once per machine), or the Chromium that
   `CHROMIUM` names.
 - `make all` runs the Rust tests and builds the browser site.
-- `make wasm` builds `switch-wasm` with the WebGPU feature and runs
-  `wasm-bindgen`. The installed CLI version must match `Cargo.lock`.
-- `make assets` builds the WebAssembly input and then the Vite site in `dist`.
-- `PROFILE=quick` shortens local emulator builds. Use `release` for shipped
-  artifacts and quoted performance results.
-- `bun run dev` serves the source on port 8000 after the core has been built.
+- `make wasm` builds `switch-wasm` with the WebGPU feature in cargo's dev
+  profile and runs `wasm-bindgen`. The installed CLI version must match
+  `Cargo.lock`. `make wasm-release` is the same in the release profile, the
+  only build performance results are quoted from.
+- `make assets` builds the release WebAssembly and then the Vite site in
+  `dist`.
+- There are two cargo profiles, `dev` and `release`. Host examples that run a
+  title use `--release`.
+- `bun run dev` serves the source on port 8000 after `make wasm`.
 - `bun run preview` serves `dist`.
 - Vite does not type-check. Run `bun run typecheck` explicitly.
 

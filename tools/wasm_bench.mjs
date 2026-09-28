@@ -29,7 +29,7 @@
 // on disk and is read a range at a time through `host_read`, which is the one
 // thing wasm32 leaves no choice about.
 //
-// Needs `make wasm` to have been run: this loads that artefact rather than
+// Needs `make wasm-release` to have been run: this loads that artefact rather than
 // building its own, because a second build would need its own copy of the
 // feature flags and the wasm-bindgen step and would then be measuring a
 // module the site does not ship.

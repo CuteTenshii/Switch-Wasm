@@ -8,27 +8,17 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
-# For driving the host examples. `release` builds one of them in 21 s of a
-# single core, because `codegen-units = 1` has nowhere to spread; thin LTO over
-# 16 units runs the same guest workload at the same speed in 8.6 s. Quote
-# timings from `release` anyway. See AGENTS.md.
-[profile.quick]
-inherits = "release"
-lto = "thin"
-codegen-units = 16
-
-# `perf -s srcline` over the emulator is what found the last three wins, and it
-# needs line tables. Only this crate carries them: `wgpu`'s 82 dependencies are
-# never what a profile is asking about, and debug info for them is most of the
-# build.
-[profile.quick.package.switch-core]
-debug = "line-tables-only"
-
+# Everything that is not shipped: the browser build `make wasm` serves to
+# `bun run dev`, the tests, and the host examples.
+#
 # The test suite runs guest code, and at `opt-level = 0` the emulator inside it
 # is slow enough to dominate: the suite takes 47 s unoptimised and 20 s here,
-# for no measured build-time cost.
+# for no measured build-time cost. Line tables rather than full debug info,
+# which is most of a build's output and is never read: `perf -s srcline` over
+# the emulator, which found the last three wins, needs only the lines.
 [profile.dev]
 opt-level = 2
+debug = "line-tables-only"
 
 [profile.test]
 opt-level = 2

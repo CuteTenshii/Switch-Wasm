@@ -2,7 +2,7 @@
 // run each emitted block under V8 and check it left the guest state the
 // interpreter left.
 //
-//   cargo run --profile quick --example emit_difftest -- <target>
+//   cargo run --release --example emit_difftest -- <target>
 //   node tools/emit_difftest.mjs [outdir]
 //
 // The Rust half cannot do this itself. `switch-core` has no dependencies and

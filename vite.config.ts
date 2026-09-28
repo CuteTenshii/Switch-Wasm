@@ -14,12 +14,12 @@ import { defineConfig } from 'vite';
    card, whose URL is baked into other people's caches by the meta tags, and the
    font's licence, which has to stay readable next to the font it covers. */
 
-// Which cargo profile `make wasm` put the module in. The Makefile's PROFILE
-// selects it and the alias has to follow, or a `quick` build serves the last
-// `release` one.
-const profile = process.env.SWITCH_PROFILE ?? 'release';
-const coreDir = fileURLToPath(
-  new URL(`./target/wasm32-unknown-unknown/${profile}`, import.meta.url));
+// Where the core comes from: the dev server serves `make wasm`'s dev build,
+// and the site build ships `make wasm-release`'s. The Makefile writes each
+// into cargo's own directory for its profile.
+const coreDir = (command: 'serve' | 'build') => fileURLToPath(
+  new URL(`./target/wasm32-unknown-unknown/${command === 'serve' ? 'debug' : 'release'}`,
+    import.meta.url));
 
 // Cross-origin isolation, the precondition for `SharedArrayBuffer`. The
 // deployed site asks for the same pair through `web/public/_headers`.
@@ -28,7 +28,7 @@ const crossOriginIsolation = {
   'Cross-Origin-Embedder-Policy': 'require-corp',
 };
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   root: 'web',
   // Relative, because the site is published under a path
   // (tenshii.moe/Switch-Wasm/) rather than at a host's root. The default of '/'
@@ -61,7 +61,7 @@ export default defineConfig({
     // the worker so that the profile and target triple are named once, beside
     // the Makefile variables that build it.
     alias: {
-      '@core': coreDir,
+      '@core': coreDir(command),
       // The `host_read` import, when the core is built with the `gpu`
       // feature. wasm-bindgen writes the import into its generated glue,
       // which lives in cargo's target directory: a bare specifier is what
@@ -79,4 +79,4 @@ export default defineConfig({
     headers: crossOriginIsolation,
   },
   preview: { headers: crossOriginIsolation },
-});
+}));

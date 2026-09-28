@@ -35,7 +35,7 @@
 //! the interpreter is the reference for whatever the word turns out to mean.
 //!
 //! ```text
-//! cargo run --profile quick --example emit_selftest
+//! cargo run --release --example emit_selftest
 //! node tools/emit_difftest.mjs target/emit-selftest
 //! ```
 

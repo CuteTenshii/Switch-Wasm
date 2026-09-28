@@ -1,13 +1,13 @@
-.PHONY: all test wasm assets clean
+.PHONY: all test wasm wasm-release assets clean
 
 TARGET := wasm32-unknown-unknown
-# Which cargo profile the module is built with. `release` is what ships;
-# `PROFILE=quick` halves the wait when the change under test is the emulator's
-# behaviour rather than the artefact's size (4.5 MB against 4.1 MB).
-PROFILE ?= release
-OUT    := target/$(TARGET)/$(PROFILE)
-WASM   := $(OUT)/switch_wasm.wasm
-DIST   := dist
+# Two builds of the module. `wasm` is cargo's dev profile, incremental and
+# spread over every core, which is what `bun run dev` serves. `wasm-release`
+# is the shipped one: fat LTO into a single codegen unit, which one core
+# spends a minute on, and the only build performance is quoted from.
+DEV     := target/$(TARGET)/debug
+RELEASE := target/$(TARGET)/release
+DIST    := dist
 
 all: test assets
 
@@ -35,8 +35,12 @@ test:
 # `wasm-bindgen` is a build-time tool and has to match the crate version in
 # Cargo.lock: `cargo install wasm-bindgen-cli --version <that>`.
 wasm:
-	cargo build --target $(TARGET) --profile $(PROFILE) -p switch-wasm --features gpu
-	wasm-bindgen --target web --out-dir $(OUT) $(WASM)
+	cargo build --target $(TARGET) -p switch-wasm --features gpu
+	wasm-bindgen --target web --out-dir $(DEV) $(DEV)/switch_wasm.wasm
+
+wasm-release:
+	cargo build --target $(TARGET) --release -p switch-wasm --features gpu
+	wasm-bindgen --target web --out-dir $(RELEASE) $(RELEASE)/switch_wasm.wasm
 
 # The whole site, from web/index.html down: Vite follows the page to the
 # stylesheet, the worker, the font and the core, and emits every one of them
@@ -45,8 +49,8 @@ wasm:
 # This target exists (where `bun run dev`, `preview` and `typecheck` do not)
 # because the core is an *input* to the frontend build rather than something
 # copied in after it, and only make knows how to build the core.
-assets: wasm
-	SWITCH_PROFILE=$(PROFILE) bun run build
+assets: wasm-release
+	bun run build
 	@ls -la $(DIST) $(DIST)/assets
 
 clean:

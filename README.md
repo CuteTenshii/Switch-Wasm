@@ -19,7 +19,8 @@ bun run dev       # Vite dev server, http://localhost:8000
 bun run preview   # the built site from dist/
 ```
 
-Both need the core built once (`make wasm`), since the frontend imports it.
+`dev` needs the core built once with `make wasm`, since the frontend imports
+it; `preview` serves what `make assets` built.
 
 ## Acknowledgments
 

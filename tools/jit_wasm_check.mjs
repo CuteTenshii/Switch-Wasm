@@ -23,8 +23,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
-const profile = process.env.SWITCH_PROFILE || 'release';
-const out = join(root, 'target/wasm32-unknown-unknown', profile);
+const out = join(root, 'target/wasm32-unknown-unknown/debug');
 const wasmPath = process.argv[2] || join(out, 'switch_wasm_bg.wasm');
 
 // The glue's one bare specifier is `@host/files`, which the frontend build

@@ -17,7 +17,7 @@
 //! flag states real code produces.
 //!
 //! ```text
-//! cargo run --profile quick --example emit_difftest -- <nro> [-- <outdir>]
+//! cargo run --release --example emit_difftest -- <nro> [-- <outdir>]
 //! node tools/emit_difftest.mjs <outdir>
 //! ```
 mod common;
