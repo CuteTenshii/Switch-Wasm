@@ -141,26 +141,37 @@ impl Cpu {
 
     /// Advanced SIMD data processing, the `cond == 0xF`, bits 27:25 == 001
     /// encoding space.
+    ///
+    /// The groups are told apart by A (bits 23:19) and C (bits 7:4) together,
+    /// as the manual's table does. With bit 4 set it is a modified immediate
+    /// when bits 21:19 are clear and bit 7 is too, and otherwise a shift:
+    /// bit 7 set is a 64-bit shift whatever A says, and a shift's `imm6`
+    /// reaches every value of bits 21:19, the pattern the other groups use
+    /// included. With bit 4 clear, bits 21:20 both set are `VEXT` or the
+    /// two-register groups, and otherwise bit 6 separates the
+    /// different-length forms from the by-scalar ones.
     pub(super) fn a32_neon_data(&mut self, insn: u32) -> Result<()> {
         let result = if (insn >> 23) & 1 == 0 {
             self.neon_three_same(insn)
+        } else if (insn >> 4) & 1 != 0 {
+            if (insn >> 7) & 1 == 0 && (insn >> 19) & 0b111 == 0 {
+                self.neon_immediate(insn)
+            } else {
+                self.neon_shift_immediate(insn)
+            }
         } else if (insn >> 20) & 0b11 == 0b11 {
             // Bit 24 is what tells `VEXT` from the two-register group: both
             // put 1011 in bits 23:20, and `VEXT`'s `imm4` freely reaches the
             // values the other group uses to name an operation.
-            if (insn >> 4) & 1 != 0 {
-                Err(self.neon_unimplemented(insn))
-            } else if (insn >> 24) & 1 == 0 {
+            if (insn >> 24) & 1 == 0 {
                 self.neon_ext(insn)
             } else {
                 self.neon_two_reg(insn)
             }
-        } else if (insn >> 4) & 1 == 0 {
-            self.neon_by_scalar(insn)
-        } else if (insn >> 19) & 0b111 == 0 {
-            self.neon_immediate(insn)
+        } else if (insn >> 6) & 1 == 0 {
+            self.neon_three_different(insn)
         } else {
-            self.neon_shift_immediate(insn)
+            self.neon_by_scalar(insn)
         };
         result.map(|()| self.pc = self.pc.wrapping_add(4))
     }
@@ -227,20 +238,110 @@ impl Cpu {
                     0
                 }
             }),
-            // Integer maximum and minimum.
-            (0x6, false) => self.neon_lane_op(a, b, esize, count, |x, y| {
-                if unsigned {
-                    if op_max(insn) {
-                        x.max(y)
-                    } else {
-                        x.min(y)
-                    }
-                } else if op_max(insn) {
-                    sext(x, esize).max(sext(y, esize)) as u64
+            // Integer maximum and minimum, told apart by bit 4 (the float
+            // forms use bit 21 instead).
+            (0x6, _) => self.neon_lane_op(a, b, esize, count, |x, y| {
+                let (x, y) = (int_lane(x, esize, unsigned), int_lane(y, esize, unsigned));
+                (if op { x.min(y) } else { x.max(y) }) as u64
+            }),
+            // The halving and saturating adds and subtracts. Each lane is
+            // worked at full width, which the halving and the saturation are
+            // both taken from.
+            (0x0 | 0x2, _) => self.neon_lane_op(a, b, esize, count, |x, y| {
+                let (x, y) = (int_lane(x, esize, unsigned), int_lane(y, esize, unsigned));
+                let full = if opc == 0x0 { x + y } else { x - y };
+                if op {
+                    saturate(full, esize, unsigned) as u64
                 } else {
-                    sext(x, esize).min(sext(y, esize)) as u64
+                    (full >> 1) as u64
                 }
             }),
+            (0x1, false) => self.neon_lane_op(a, b, esize, count, |x, y| {
+                let (x, y) = (int_lane(x, esize, unsigned), int_lane(y, esize, unsigned));
+                ((x + y + 1) >> 1) as u64
+            }),
+            // VCGT and VCGE.
+            (0x3, _) => self.neon_lane_op(a, b, esize, count, |x, y| {
+                let (x, y) = (int_lane(x, esize, unsigned), int_lane(y, esize, unsigned));
+                if (op && x >= y) || (!op && x > y) {
+                    u64::MAX
+                } else {
+                    0
+                }
+            }),
+            // Shifts by a register: the signed low byte of each lane of Vn
+            // shifts the same lane of Vm, left if positive and right if
+            // negative. The operands are the other way round from every
+            // other form here. VSHL, VQSHL, VRSHL and VQRSHL.
+            (0x4 | 0x5, _) => self.neon_lane_op(b, a, esize, count, |x, y| {
+                let value = int_lane(x, esize, unsigned);
+                let shift = i32::from(y as u8 as i8);
+                let shifted = shift_by(value, shift, opc == 0x5, esize);
+                if op {
+                    saturate(shifted, esize, unsigned) as u64
+                } else {
+                    shifted as u64
+                }
+            }),
+            // VABD and VABA: the absolute difference, accumulated by VABA.
+            (0x7, _) => {
+                let d = self.neon_get(quad, vd);
+                let diff = self.neon_lane_op(a, b, esize, count, |x, y| {
+                    let (x, y) = (int_lane(x, esize, unsigned), int_lane(y, esize, unsigned));
+                    (x - y).unsigned_abs() as u64
+                });
+                if op {
+                    self.neon_lane_op(d, diff, esize, count, |x, y| x.wrapping_add(y))
+                } else {
+                    diff
+                }
+            }
+            // VPMAX, VPMIN and VPADD: adjacent pairs of the first operand fill
+            // the low half of the result, and of the second the high half.
+            (0xA, _) | (0xB, true) => {
+                let x = lanes_of(a, esize, count);
+                let y = lanes_of(b, esize, count);
+                let mut out = [0u64; 16];
+                let half = count as usize / 2;
+                for (i, slot) in out.iter_mut().enumerate().take(count as usize) {
+                    let (src, j) = if i < half {
+                        (&x, 2 * i)
+                    } else {
+                        (&y, 2 * (i - half))
+                    };
+                    let (p, q) = (
+                        int_lane(src[j], esize, unsigned),
+                        int_lane(src[j + 1], esize, unsigned),
+                    );
+                    *slot = match (opc, op) {
+                        (0xA, false) => p.max(q),
+                        (0xA, true) => p.min(q),
+                        _ => p + q,
+                    } as u64;
+                }
+                from_lanes(&out, esize, count)
+            }
+            // VQDMULH and VQRDMULH: the high half of twice the product,
+            // rounded by the second, saturated.
+            (0xB, false) => self.neon_lane_op(a, b, esize, count, |x, y| {
+                let product = 2 * sext(x, esize) as i128 * sext(y, esize) as i128;
+                let rounding = if unsigned { 1i128 << (esize - 1) } else { 0 };
+                saturate((product + rounding) >> esize, esize, false) as u64
+            }),
+            // The three-register SHA steps, on Q registers: SHA1C, SHA1P,
+            // SHA1M and SHA1SU0 by `size`, and with U set SHA256H, SHA256H2
+            // and SHA256SU1.
+            (0xC, false) => {
+                let opcode = u32::from(unsigned) << 2 | size;
+                let d = self.neon_get(true, vd);
+                let n = self.neon_get(true, vn);
+                let m = self.neon_get(true, vm);
+                let Some(result) = crate::cpu::crypto::sha_three(opcode, d, n, m) else {
+                    return Err(self.neon_unimplemented(insn));
+                };
+                self.neon_set(true, vd, result);
+                return Ok(());
+            }
             // Integer multiply, and multiply-accumulate.
             (0x9, false) => {
                 let d = self.neon_get(quad, vd);
@@ -258,6 +359,11 @@ impl Cpu {
                 }
                 from_lanes(&out, esize, count)
             }
+            // VMUL, and with U set its polynomial form: a carry-less
+            // multiply of bytes, keeping the low eight bits.
+            (0x9, true) if unsigned => self.neon_lane_op(a, b, esize, count, |x, y| {
+                crate::cpu::crypto::poly_mul(x, y, 8) as u64
+            }),
             (0x9, true) => self.neon_lane_op(a, b, esize, count, |x, y| x.wrapping_mul(y)),
             // Floating point. NEON has no double-precision vectors, so every
             // one of these is F32.
@@ -535,6 +641,18 @@ impl Cpu {
                 }
                 from_lanes(&out, wide, count / 2)
             }
+            // The AES steps, always on Q registers: bit 6, which is `Q`
+            // elsewhere in the group, picks between each pair.
+            (0b00, 0b0110 | 0b0111) => {
+                let opcode = 0b00100 | (op & 1) << 1 | (insn >> 6) & 1;
+                let d = self.neon_get(true, vd);
+                let n = self.neon_get(true, vm);
+                let Some(result) = crate::cpu::crypto::aes(opcode, d, n) else {
+                    return Err(self.neon_unimplemented(insn));
+                };
+                self.neon_set(true, vd, result);
+                return Ok(());
+            }
             // VCLS: the sign bit's copies below it. VCLZ: leading zeros.
             (0b00, 0b1000) => self.neon_lane_op(m, m, esize, count, |x, _| {
                 let v = sext(x, esize);
@@ -593,6 +711,22 @@ impl Cpu {
                         }
                     })
                 }
+            }
+            // SHA1H, a scalar rotate, and in the next table SHA1SU1 and
+            // SHA256SU0: the two-register SHA steps, on Q registers.
+            (0b01, 0b0101) | (0b10, 0b0111) if table == 0b10 || (insn >> 6) & 1 != 0 => {
+                let opcode = if table == 0b01 {
+                    0
+                } else {
+                    1 + ((insn >> 6) & 1)
+                };
+                let d = self.neon_get(true, vd);
+                let n = self.neon_get(true, vm);
+                let Some(result) = crate::cpu::crypto::sha_two(opcode, d, n) else {
+                    return Err(self.neon_unimplemented(insn));
+                };
+                self.neon_set(true, vd, result);
+                return Ok(());
             }
             // VABS and VNEG, integer and floating point. The float forms only
             // touch the sign bit, NaNs and denormals included.
@@ -834,6 +968,95 @@ impl Cpu {
     }
 
     /// The two-registers-and-a-shift group: the immediate shifts.
+    /// Three registers of different lengths: the long forms widen two `D`
+    /// registers into a `Q`, the wide forms widen the second operand to
+    /// meet a `Q`, and the narrow ones keep the high half of each lane of a
+    /// `Q` result in a `D`. `size` names the narrow element.
+    fn neon_three_different(&mut self, insn: u32) -> Result<()> {
+        let unsigned = (insn >> 24) & 1 != 0;
+        let size = (insn >> 20) & 0b11;
+        let opc = (insn >> 8) & 0xF;
+        let vd = (((insn >> 22) & 1) as u8) << 4 | ((insn >> 12) & 0xF) as u8;
+        let vn = (((insn >> 7) & 1) as u8) << 4 | ((insn >> 16) & 0xF) as u8;
+        let vm = (((insn >> 5) & 1) as u8) << 4 | (insn & 0xF) as u8;
+        let narrow = 8 << size;
+        let wide = narrow * 2;
+        let count = 64 / narrow;
+        let mut out = [0u64; 16];
+
+        // The narrowing forms: Qn op Qm, the high half of each lane kept.
+        if matches!(opc, 0x4 | 0x6) {
+            let x = lanes_of(self.neon_get(true, vn), wide, count);
+            let y = lanes_of(self.neon_get(true, vm), wide, count);
+            for (i, slot) in out.iter_mut().enumerate().take(count as usize) {
+                let full = if opc == 0x4 {
+                    x[i].wrapping_add(y[i])
+                } else {
+                    x[i].wrapping_sub(y[i])
+                };
+                let rounding = if unsigned { 1u64 << (narrow - 1) } else { 0 };
+                *slot = full.wrapping_add(rounding) >> narrow;
+            }
+            self.neon_set(false, vd, from_lanes(&out, narrow, count));
+            return Ok(());
+        }
+
+        // Everything else produces a Q register of wide lanes. The first
+        // operand is a Q register for the wide forms and a D otherwise.
+        let wide_n = matches!(opc, 0x1 | 0x3);
+        let n = if wide_n {
+            lanes_of(self.neon_get(true, vn), wide, count)
+        } else {
+            lanes_of(self.neon_get(false, vn), narrow, count)
+        };
+        let m = lanes_of(self.neon_get(false, vm), narrow, count);
+        let acc = lanes_of(self.neon_get(true, vd), wide, count);
+        // The doubling forms are signed whatever U is; U is not a flag there.
+        let signed = !unsigned || matches!(opc, 0x9 | 0xB | 0xD);
+        let widen = |v: u64, bits: u32| int_lane(v, bits, !signed);
+        for i in 0..count as usize {
+            let a = widen(n[i], if wide_n { wide } else { narrow });
+            let b = widen(m[i], narrow);
+            let accumulated = int_lane(acc[i], wide, !signed);
+            let value = match opc {
+                0x0 | 0x1 => a + b,
+                0x2 | 0x3 => a - b,
+                0x5 => accumulated + (a - b).abs(),
+                0x7 => (a - b).abs(),
+                0x8 => accumulated + a * b,
+                0xA => accumulated - a * b,
+                0xC => a * b,
+                // VQDMLAL, VQDMLSL and VQDMULL: twice the product,
+                // saturated, then (for the first two) accumulated with a
+                // second saturation.
+                0x9 | 0xB | 0xD => {
+                    let doubled = saturate(2 * a * b, wide, false);
+                    match opc {
+                        0x9 => saturate(accumulated + doubled, wide, false),
+                        0xB => saturate(accumulated - doubled, wide, false),
+                        _ => doubled,
+                    }
+                }
+                // VMULL.P8: a carry-less product of bytes into halfwords.
+                0xE if size == 0 && !unsigned => {
+                    i128::from(crate::cpu::crypto::poly_mul(n[i], m[i], 8) as u64)
+                }
+                _ => return Err(self.neon_unimplemented(insn)),
+            };
+            out[i] = value as u64;
+        }
+        self.neon_set(true, vd, from_lanes(&out, wide, count));
+        Ok(())
+    }
+
+    /// The shifts by an immediate, and the narrowing, widening and
+    /// fixed-point forms beside them.
+    ///
+    /// The element size is the highest set bit of `L:imm6`, and the amount is
+    /// what lies under it: counted up from the element size for the left
+    /// shifts and down from twice it for the right ones. The narrowing forms
+    /// name the destination's size the same way, and `B` (bit 6, which is
+    /// `Q` elsewhere) says whether they round.
     fn neon_shift_immediate(&mut self, insn: u32) -> Result<()> {
         let unsigned = (insn >> 24) & 1 != 0;
         let quad = (insn >> 6) & 1 != 0;
@@ -841,33 +1064,136 @@ impl Cpu {
         let vm = (((insn >> 5) & 1) as u8) << 4 | (insn & 0xF) as u8;
         let opc = (insn >> 8) & 0xF;
         let imm6 = (insn >> 16) & 0x3F;
-        // The element size is the highest set bit of the immediate field, and
-        // the amount is what is left under it.
-        let (esize, amount) = if imm6 & 0b100000 != 0 {
-            (64, imm6)
-        } else if imm6 & 0b010000 != 0 {
-            (32, imm6 & 0x1F)
-        } else if imm6 & 0b001000 != 0 {
-            (16, imm6 & 0xF)
+        let esize = if (insn >> 7) & 1 != 0 {
+            64
+        } else if imm6 & 0b10_0000 != 0 {
+            32
+        } else if imm6 & 0b01_0000 != 0 {
+            16
         } else {
-            (8, imm6 & 0x7)
+            8
         };
+        let field = if esize == 64 {
+            imm6
+        } else {
+            imm6 & (esize - 1)
+        };
+        let (left, right) = (field, esize - field);
         let count = if quad { 128 } else { 64 } / esize;
         let m = self.neon_get(quad, vm);
+        let d = self.neon_get(quad, vd);
+        let mask = u64::MAX >> (64 - esize);
+
         let value = match opc {
-            // VSHR and VSRA: the amount counts down from the element size.
-            0x0 | 0x1 => {
-                let shift = esize - amount;
+            // VSHR, VSRA, VRSHR and VRSRA: right shifts, rounded by bit 9
+            // and accumulated by bit 8.
+            0x0..=0x3 => {
+                let round = opc & 0b10 != 0;
+                let shifted = self.neon_lane_op(m, m, esize, count, move |x, _| {
+                    shift_by(int_lane(x, esize, unsigned), -(right as i32), round, esize) as u64
+                });
+                if opc & 1 != 0 {
+                    self.neon_lane_op(d, shifted, esize, count, |x, y| x.wrapping_add(y))
+                } else {
+                    shifted
+                }
+            }
+            // VSRI: the shifted lane over the destination's top bits, which
+            // it leaves alone.
+            0x4 if unsigned => self.neon_lane_op(d, m, esize, count, move |x, y| {
+                let kept = if right >= esize {
+                    mask
+                } else {
+                    !(mask >> right) & mask
+                };
+                let inserted = if right >= esize { 0 } else { y >> right };
+                x & kept | inserted
+            }),
+            // VSHL, and VSLI, which keeps the destination's bits below it.
+            0x5 => self.neon_lane_op(d, m, esize, count, move |x, y| {
+                let kept = if unsigned {
+                    x & ((1u64 << left) - 1)
+                } else {
+                    0
+                };
+                (y << left) & mask | kept
+            }),
+            // VQSHL, and VQSHLU, which saturates a signed lane to unsigned.
+            0x6 | 0x7 => {
+                let (signed_in, unsigned_out) = match (opc, unsigned) {
+                    (0x6, _) => (true, true),
+                    (_, u) => (!u, u),
+                };
                 self.neon_lane_op(m, m, esize, count, move |x, _| {
-                    if unsigned {
-                        x >> shift.min(63)
-                    } else {
-                        (sext(x, esize) >> shift.min(63)) as u64
-                    }
+                    let value = int_lane(x, esize, !signed_in);
+                    saturate(
+                        shift_by(value, left as i32, false, esize),
+                        esize,
+                        unsigned_out,
+                    ) as u64
                 })
             }
-            // VSHL, whose amount counts up.
-            0x5 => self.neon_lane_op(m, m, esize, count, move |x, _| x << amount.min(63)),
+            // The narrowing right shifts: VSHRN and VRSHRN truncate;
+            // VQSHRUN and VQRSHRUN saturate signed to unsigned; VQSHRN and
+            // VQRSHRN saturate within one signedness.
+            0x8 | 0x9 => {
+                let round = quad;
+                let wide = esize * 2;
+                let x = lanes_of(self.neon_get(true, vm), wide, 64 / esize);
+                let mut out = [0u64; 16];
+                for (i, slot) in out.iter_mut().enumerate().take((64 / esize) as usize) {
+                    let signed_in = !(opc == 0x9 && unsigned);
+                    let shifted = shift_by(
+                        int_lane(x[i], wide, !signed_in),
+                        -(right as i32),
+                        round,
+                        wide,
+                    );
+                    *slot = match (opc, unsigned) {
+                        (0x8, false) => shifted as u64,
+                        (0x8, true) => saturate(shifted, esize, true) as u64,
+                        (_, u) => saturate(shifted, esize, u) as u64,
+                    };
+                }
+                self.neon_set(false, vd, from_lanes(&out, esize, 64 / esize));
+                return Ok(());
+            }
+            // VSHLL and VMOVL: each lane of a D register widened, then
+            // shifted into the wider lane.
+            0xA if !quad => {
+                let x = lanes_of(self.neon_get(false, vm), esize, 64 / esize);
+                let mut out = [0u64; 16];
+                for (i, slot) in out.iter_mut().enumerate().take((64 / esize) as usize) {
+                    *slot = (int_lane(x[i], esize, unsigned) << left) as u64;
+                }
+                self.neon_set(true, vd, from_lanes(&out, esize * 2, 64 / esize));
+                return Ok(());
+            }
+            // VCVT between single precision and fixed point, `64 - imm6`
+            // fraction bits: to a float rounds to nearest, and to fixed
+            // point rounds towards zero and saturates.
+            0xE | 0xF if esize == 32 => {
+                let fraction = 64 - imm6;
+                let scale = (fraction as f64).exp2();
+                self.neon_lane_op(m, m, 32, f32_lanes(quad), move |x, _| {
+                    let bits = x as u32;
+                    u64::from(if opc == 0xE {
+                        let value = if unsigned {
+                            f64::from(bits)
+                        } else {
+                            f64::from(bits as i32)
+                        };
+                        ((value / scale) as f32).to_bits()
+                    } else {
+                        let value = f64::from(f32::from_bits(flush_input(bits))) * scale;
+                        if unsigned {
+                            value as u32
+                        } else {
+                            value as i32 as u32
+                        }
+                    })
+                })
+            }
             _ => return Err(self.neon_unimplemented(insn)),
         };
         self.neon_set(quad, vd, value);
@@ -875,10 +1201,43 @@ impl Cpu {
     }
 }
 
-/// Bit 21 selects maximum over minimum in the integer max/min encodings.
-#[inline]
-fn op_max(insn: u32) -> bool {
-    (insn >> 21) & 1 == 0
+/// One integer lane as a number, sign-extended unless `unsigned`.
+fn int_lane(lane: Lane, esize: u32, unsigned: bool) -> i128 {
+    if unsigned {
+        i128::from(lane)
+    } else {
+        i128::from(sext(lane, esize))
+    }
+}
+
+/// `value` clamped to what an `esize`-bit lane of that signedness holds.
+fn saturate(value: i128, esize: u32, unsigned: bool) -> i128 {
+    if unsigned {
+        value.clamp(0, (1i128 << esize) - 1)
+    } else {
+        value.clamp(-(1i128 << (esize - 1)), (1i128 << (esize - 1)) - 1)
+    }
+}
+
+/// `value` shifted left by `shift`, or right by its magnitude when it is
+/// negative, rounding to nearest when `round` is set.
+///
+/// A left shift of the lane's width or more leaves nothing of the value in
+/// the lane: that is zero for the plain forms, and for the saturating ones
+/// an overflow in the value's direction, so a nonzero value comes back as
+/// one lane-width past the range with its sign. A right shift past the lane
+/// leaves only the sign, which the wide arithmetic gives on its own.
+fn shift_by(value: i128, shift: i32, round: bool, esize: u32) -> i128 {
+    if shift >= 0 {
+        if shift as u32 >= esize {
+            return value.signum() << esize;
+        }
+        value << shift
+    } else {
+        let amount = (-shift).min(esize as i32 + 1) as u32;
+        let rounding = if round { 1i128 << (amount - 1) } else { 0 };
+        (value + rounding) >> amount
+    }
 }
 
 impl Cpu {

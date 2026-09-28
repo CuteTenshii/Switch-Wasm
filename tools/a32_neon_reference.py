@@ -42,6 +42,57 @@ OPS += ["vcvt.f16.f32 d20, q8", "vcvt.f32.f16 q10, d16"]
 OPS += ["vrecpe.f32 q10, q8", "vrsqrte.f32 q10, q8", "vrecpe.u32 q10, q8", "vrsqrte.u32 q10, q8"]
 OPS += ["vcvt.f32.s32 q10, q8", "vcvt.f32.u32 q10, q8", "vcvt.s32.f32 q10, q8",
         "vcvt.u32.f32 q10, q8"]
+# The integer three-register forms at every size, signed and unsigned.
+for op in ("vhadd", "vqadd", "vrhadd", "vhsub", "vqsub", "vcgt", "vcge", "vshl", "vqshl",
+           "vrshl", "vqrshl", "vmax", "vmin", "vabd", "vaba"):
+    OPS += [f"{op}.{t}{s} q10, q8, q9" for t in "su" for s in ("8", "16", "32")]
+OPS += [f"{op}.{t}64 q10, q8, q9" for op in ("vqadd", "vqsub", "vshl", "vqshl", "vrshl", "vqrshl")
+        for t in "su"]
+OPS += [f"{op}.{t}{s} d20, d16, d18" for op in ("vpmax", "vpmin") for t in "su"
+        for s in ("8", "16", "32")]
+OPS += [f"vpadd.i{s} d20, d16, d18" for s in ("8", "16", "32")]
+OPS += [f"{op}.s{s} q10, q8, q9" for op in ("vqdmulh", "vqrdmulh") for s in ("16", "32")]
+OPS += ["vmul.p8 q10, q8, q9"]
+# The shifts by an immediate: right, rounding, accumulating and inserting,
+# left and saturating left, narrowing, widening, and fixed point, at the
+# smallest and largest amount of every size.
+for t, s, amounts in (("8", 8, (1, 8)), ("16", 16, (1, 16)), ("32", 32, (1, 32)),
+                      ("64", 64, (1, 64))):
+    for n in amounts:
+        OPS += [f"{op}.{u}{t} q10, q8, #{n}" for op in ("vshr", "vsra", "vrshr", "vrsra")
+                for u in "su"]
+        OPS += [f"vsri.{t} q10, q8, #{n}"]
+    for n in (0, s - 1):
+        OPS += [f"vshl.i{t} q10, q8, #{n}", f"vsli.{t} q10, q8, #{n}",
+                f"vqshl.s{t} q10, q8, #{n}", f"vqshl.u{t} q10, q8, #{n}",
+                f"vqshlu.s{t} q10, q8, #{n}"]
+for t, s in (("16", 8), ("32", 16), ("64", 32)):
+    for n in (1, s):
+        OPS += [f"vshrn.i{t} d20, q8, #{n}", f"vrshrn.i{t} d20, q8, #{n}",
+                f"vqshrun.s{t} d20, q8, #{n}", f"vqrshrun.s{t} d20, q8, #{n}",
+                f"vqshrn.s{t} d20, q8, #{n}", f"vqshrn.u{t} d20, q8, #{n}",
+                f"vqrshrn.s{t} d20, q8, #{n}", f"vqrshrn.u{t} d20, q8, #{n}"]
+for t, s in (("8", 8), ("16", 16), ("32", 32)):
+    OPS += [f"vmovl.s{t} q10, d16", f"vmovl.u{t} q10, d16", f"vshll.s{t} q10, d16, #1",
+            f"vshll.u{t} q10, d16, #{s - 1}"]
+OPS += [f"vcvt.{a}.{b} q10, q8, #{n}" for a, b in (("f32", "s32"), ("f32", "u32"),
+        ("s32", "f32"), ("u32", "f32")) for n in (1, 16, 32)]
+# Three registers of different lengths: long, wide and narrow.
+for t in ("s8", "s16", "s32", "u8", "u16", "u32"):
+    OPS += [f"{op}.{t} q10, d16, d18" for op in ("vaddl", "vsubl", "vabal", "vabdl", "vmlal",
+                                                 "vmlsl", "vmull")]
+    OPS += [f"{op}.{t} q10, q8, d18" for op in ("vaddw", "vsubw")]
+OPS += [f"{op}.i{t} d20, q8, q9" for op in ("vaddhn", "vraddhn", "vsubhn", "vrsubhn")
+        for t in ("16", "32", "64")]
+OPS += [f"{op}.s{t} q10, d16, d18" for op in ("vqdmlal", "vqdmlsl", "vqdmull")
+        for t in ("16", "32")]
+OPS += ["vmull.p8 q10, d16, d18"]
+# The crypto extension on A32.
+OPS += ["aese.8 q10, q8", "aesd.8 q10, q8", "aesmc.8 q10, q8", "aesimc.8 q10, q8",
+        "sha1h.32 q10, q8", "sha1su1.32 q10, q8", "sha256su0.32 q10, q8",
+        "sha1c.32 q10, q8, q9", "sha1p.32 q10, q8, q9", "sha1m.32 q10, q8, q9",
+        "sha1su0.32 q10, q8, q9", "sha256h.32 q10, q8, q9", "sha256h2.32 q10, q8, q9",
+        "sha256su1.32 q10, q8, q9"]
 # The modified immediates, every cmode and op: moves, inversions, and the
 # ORR and BIC forms that read the destination.
 OPS += ["vmov.i32 q10, #0x5a", "vmov.i32 q10, #0x5a00", "vmov.i32 q10, #0x5a0000",
@@ -70,7 +121,7 @@ INPUTS = [
 
 def encode(line):
     out = subprocess.run(
-        ["llvm-mc", "-triple=armv8a-none-eabi", "-mattr=+neon,+fp16", "-show-encoding"],
+        ["llvm-mc", "-triple=armv8a-none-eabi", "-mattr=+neon,+fp16,+crypto", "-show-encoding"],
         input=line + "\n", capture_output=True, text=True, check=True,
     ).stdout
     octets = re.findall(r"0x([0-9a-f]{2})", out.split("encoding:")[1])
@@ -79,7 +130,7 @@ def encode(line):
 
 def main():
     cases = [(op, regs) for op in OPS for regs in INPUTS]
-    asm = [".syntax unified", ".arm", ".fpu neon-fp-armv8", ".global _start", "_start:",
+    asm = [".syntax unified", ".arm", ".fpu crypto-neon-fp-armv8", ".global _start", "_start:",
            "ldr r1, =out"]
     data = [".data", "in:"]
     for i, (op, (q8, q9, q10)) in enumerate(cases):
@@ -97,7 +148,7 @@ def main():
         source = Path(tmp) / "reference.s"
         binary = Path(tmp) / "reference"
         source.write_text("\n".join(asm) + "\n")
-        subprocess.run(["clang", "--target=armv8a-linux-gnueabihf", "-mfpu=neon-fp-armv8",
+        subprocess.run(["clang", "--target=armv8a-linux-gnueabihf", "-mfpu=crypto-neon-fp-armv8",
                         "-nostdlib", "-static", "-fuse-ld=lld", "-o", str(binary),
                         str(source)], check=True)
         raw = subprocess.run(["qemu-arm", str(binary)], capture_output=True,
