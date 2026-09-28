@@ -8,14 +8,13 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
-# Everything that is not shipped: the browser build `make wasm` serves to
-# `bun run dev`, the tests, and the host examples.
+# The browser dev build `make wasm` serves to `bun run dev` and the host tools
+# use this profile; neither is shipped.
 #
-# The test suite runs guest code, and at `opt-level = 0` the emulator inside it
-# is slow enough to dominate: the suite takes 47 s unoptimised and 20 s here,
-# for no measured build-time cost. Line tables rather than full debug info,
-# which is most of a build's output and is never read: `perf -s srcline` over
-# the emulator, which found the last three wins, needs only the lines.
+# Tests use the separate profile below. Optimizing the large test targets made
+# CI spend far longer compiling them than running them.
+# Line tables are enough for `perf -s srcline`, which found the last three
+# emulator wins; full debug info only adds build output.
 [profile.dev]
 opt-level = 2
 debug = "line-tables-only"
@@ -24,8 +23,8 @@ debug = "line-tables-only"
 opt-level = 0
 
 # The core tests execute guest code, so keep some optimisation there. The GPU
-# tests spend almost all their time compiling wgpu, not running tests; compiling
-# that dependency tree without optimisation is substantially cheaper.
+# tests take little time to run, so compile wgpu and its dependencies without
+# optimisation.
 [profile.test.package.switch-core]
 opt-level = 1
 
