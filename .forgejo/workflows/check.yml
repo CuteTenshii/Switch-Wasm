@@ -30,11 +30,21 @@ jobs:
       - name: Run Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        with:
+          key: check
+
       - name: Run tests
         run: make test
 
   build:
-    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -83,8 +93,25 @@ jobs:
         env:
           CI: "true"
 
-      - name: Deploy to Pages
+      - name: Save site for deployment
         if: forgejo.ref == 'refs/heads/master' && forgejo.event_name != 'pull_request'
+        uses: actions/upload-artifact@v3
+        with:
+          name: site
+          path: dist/
+
+  deploy:
+    needs: [build, test]
+    if: forgejo.ref == 'refs/heads/master' && forgejo.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore built site
+        uses: actions/download-artifact@v3
+        with:
+          name: site
+          path: dist/
+
+      - name: Deploy to Pages
         uses: actions/git-pages@v2
         with:
           site: https://tenshii.moe/Switch-Wasm/
