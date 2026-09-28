@@ -100,8 +100,13 @@ impl Cpu {
                     if crate::trace::enabled(crate::trace::Trace::Nv) {
                         crate::traceln!("[nv] ioctl fd={fd} request={request:#x} -> error {error}");
                     }
-                    let node = self.nv.device_name(fd).to_owned();
-                    self.count_nv_error(&node, request, error);
+                    // A config variable that is not set is the driver's
+                    // ordinary answer to a title probing for one, not a
+                    // failure worth reporting.
+                    if error != crate::gpu::nvdrv::NV_CONFIG_VAR_NOT_FOUND {
+                        let node = self.nv.device_name(fd).to_owned();
+                        self.count_nv_error(&node, request, error);
+                    }
                 }
                 // An ioctl the model has no handler for is a gap in the same
                 // sense an unimplemented service command is, and it was
