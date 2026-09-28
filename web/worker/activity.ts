@@ -272,7 +272,7 @@ export function reportActivity(now = false): void {
     logIdleThreads(current);
     logInput(previous.input, current.input);
     logMemory();
-    for (const io of takeHostIo()) logHostIo(io);
+    logHostFiles(takeHostIo());
     previous = current;
     reportedAt = at;
   } catch (e) {
@@ -637,6 +637,28 @@ function logMemory(): void {
     + (near ? ': close to the limit, the next large allocation may fail' : ''),
     near ? 'warn' : undefined,
   );
+}
+
+/** Up to this much read from a file in a second, with nothing failing, is a
+ *  header read: registering the system archives does that for about forty
+ *  files at once, and a line each buried the files doing real work. */
+const SMALL_IO = 4 * 1024;
+
+function logHostFiles(files: HostIo[]): void {
+  const small = files.filter((io) => io.bytes <= SMALL_IO && !io.failures);
+  for (const io of files) {
+    if (!small.includes(io)) logHostIo(io);
+  }
+  if (small.length === 1) logHostIo(small[0]);
+  if (small.length < 2) return;
+  const sum = (key: 'reads' | 'bytes' | 'diskBytes' | 'chunkMisses') =>
+    small.reduce((total, io) => total + io[key], 0);
+  const disk = sum('diskBytes');
+  workerLog(`[io] ${small.length} files with small reads: ` + joined([
+    `${count(sum('reads'), 'read')} (${fmtSize(sum('bytes'))})`,
+    disk > 0 && `${fmtSize(disk)} read from disk (${count(sum('chunkMisses'), 'chunk miss', 'chunk misses')})`,
+    disk === 0 && 'all from cache',
+  ]));
 }
 
 function logHostIo(io: HostIo): void {
