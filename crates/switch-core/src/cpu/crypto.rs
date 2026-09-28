@@ -100,6 +100,90 @@ pub(super) fn poly_mul(a: u64, b: u64, bits: u32) -> u128 {
     out
 }
 
+/// One AES step, by the A64 `opcode`: AESE (`0b00100`), AESD (`0b00101`),
+/// AESMC (`0b00110`) or AESIMC (`0b00111`). AESE and AESD fold in `d` EOR
+/// `n` first; the mix-columns steps are separate instructions, so a full
+/// round is built from a pair. A32's forms are the same operations.
+pub(super) fn aes(opcode: u32, d: u128, n: u128) -> Option<u128> {
+    let mut state = (if opcode < 0b00110 { d ^ n } else { n }).to_le_bytes();
+    match opcode {
+        0b00100 => {
+            shift_rows(&mut state);
+            sub_bytes(&mut state);
+        }
+        0b00101 => {
+            inv_shift_rows(&mut state);
+            inv_sub_bytes(&mut state);
+        }
+        0b00110 => mix_columns(&mut state),
+        0b00111 => inv_mix_columns(&mut state),
+        _ => return None,
+    }
+    Some(u128::from_le_bytes(state))
+}
+
+/// The three-register SHA operations by the A64 `opcode`: SHA1C, SHA1P,
+/// SHA1M, SHA1SU0, SHA256H, SHA256H2 and SHA256SU1, 0 to 6.
+pub(super) fn sha_three(opcode: u32, d: u128, n: u128, m: u128) -> Option<u128> {
+    Some(match opcode {
+        0b000 => sha1_rounds(d, n as u32, m, sha_choose),
+        0b001 => sha1_rounds(d, n as u32, m, sha_parity),
+        0b010 => sha1_rounds(d, n as u32, m, sha_majority),
+        // SHA1SU0: the schedule's three-way XOR, over a window that
+        // straddles two of the message vectors.
+        0b011 => {
+            let shifted = (d >> 64) | (n << 64);
+            shifted ^ d ^ m
+        }
+        0b100 => sha256_rounds(d, n, m, true),
+        0b101 => sha256_rounds(n, d, m, false),
+        // SHA256SU1
+        0b110 => {
+            let t0 = (n >> 32) | (m << 96);
+            let mut out: u128 = 0;
+            for e in 0..4u32 {
+                let src = if e < 2 {
+                    elem32(m, e + 2)
+                } else {
+                    elem32(out, e - 2)
+                };
+                let v = sigma1_lower(src)
+                    .wrapping_add(elem32(d, e))
+                    .wrapping_add(elem32(t0, e));
+                out |= u128::from(v) << (32 * e);
+            }
+            out
+        }
+        _ => return None,
+    })
+}
+
+/// The two-register SHA operations by the A64 `opcode`: SHA1H, SHA1SU1 and
+/// SHA256SU0, 0 to 2.
+pub(super) fn sha_two(opcode: u32, d: u128, n: u128) -> Option<u128> {
+    Some(match opcode {
+        // SHA1H writes a scalar, so the rest of the register clears.
+        0b00000 => u128::from((n as u32).rotate_left(30)),
+        // SHA1SU1
+        0b00001 => {
+            let t = d ^ (n >> 32);
+            let r = [0, 1, 2, 3].map(|e| elem32(t, e).rotate_left(1));
+            pack32(r[0], r[1], r[2], r[3] ^ elem32(t, 0).rotate_left(2))
+        }
+        // SHA256SU0
+        0b00010 => {
+            let t = (d >> 32) | (n << 96);
+            let mut out: u128 = 0;
+            for e in 0..4u32 {
+                let v = sigma0_lower(elem32(t, e)).wrapping_add(elem32(d, e));
+                out |= u128::from(v) << (32 * e);
+            }
+            out
+        }
+        _ => return None,
+    })
+}
+
 impl Cpu {
     /// AES and SHA. These sit in the Advanced SIMD encoding space but share
     /// bits with the copy group, so [`Cpu::try_simd`] has to offer them here
@@ -115,25 +199,11 @@ impl Cpu {
             && (insn >> 17) & 0x1F == 0b10100
             && (insn >> 10) & 0b11 == 0b10
         {
-            let opcode = (insn >> 12) & 0x1F;
             let (n, d) = (self.vregs[rn as usize], self.vregs[rd as usize]);
-            // AESE/AESD fold in Vd EOR Vn; the mix-columns step is a separate
-            // instruction so a full round is built from the pair.
-            let mut state = (if opcode < 0b00110 { d ^ n } else { n }).to_le_bytes();
-            match opcode {
-                0b00100 => {
-                    shift_rows(&mut state);
-                    sub_bytes(&mut state);
-                }
-                0b00101 => {
-                    inv_shift_rows(&mut state);
-                    inv_sub_bytes(&mut state);
-                }
-                0b00110 => mix_columns(&mut state),
-                0b00111 => inv_mix_columns(&mut state),
-                _ => return Ok(false),
-            }
-            self.vregs[rd as usize] = u128::from_le_bytes(state);
+            let Some(result) = aes((insn >> 12) & 0x1F, d, n) else {
+                return Ok(false);
+            };
+            self.vregs[rd as usize] = result;
             return Ok(true);
         }
 
@@ -143,42 +213,13 @@ impl Cpu {
             && (insn >> 15) & 1 == 0
             && (insn >> 10) & 0b11 == 0b00
         {
-            let opcode = (insn >> 12) & 0b111;
             let (d, n, m) = (
                 self.vregs[rd as usize],
                 self.vregs[rn as usize],
                 self.vregs[rm as usize],
             );
-            let result = match opcode {
-                0b000 => sha1_rounds(d, n as u32, m, sha_choose),
-                0b001 => sha1_rounds(d, n as u32, m, sha_parity),
-                0b010 => sha1_rounds(d, n as u32, m, sha_majority),
-                // SHA1SU0: the schedule's three-way XOR, over a window that
-                // straddles two of the message vectors.
-                0b011 => {
-                    let shifted = (d >> 64) | (n << 64);
-                    shifted ^ d ^ m
-                }
-                0b100 => sha256_rounds(d, n, m, true),
-                0b101 => sha256_rounds(n, d, m, false),
-                // SHA256SU1
-                0b110 => {
-                    let t0 = (n >> 32) | (m << 96);
-                    let mut out: u128 = 0;
-                    for e in 0..4u32 {
-                        let src = if e < 2 {
-                            elem32(m, e + 2)
-                        } else {
-                            elem32(out, e - 2)
-                        };
-                        let v = sigma1_lower(src)
-                            .wrapping_add(elem32(d, e))
-                            .wrapping_add(elem32(t0, e));
-                        out |= u128::from(v) << (32 * e);
-                    }
-                    out
-                }
-                _ => return Ok(false),
+            let Some(result) = sha_three((insn >> 12) & 0b111, d, n, m) else {
+                return Ok(false);
             };
             self.vregs[rd as usize] = result;
             return Ok(true);
@@ -190,28 +231,9 @@ impl Cpu {
             && (insn >> 17) & 0x1F == 0b10100
             && (insn >> 10) & 0b11 == 0b10
         {
-            let opcode = (insn >> 12) & 0x1F;
             let (d, n) = (self.vregs[rd as usize], self.vregs[rn as usize]);
-            let result = match opcode {
-                // SHA1H writes a scalar, so the rest of the register clears.
-                0b00000 => u128::from((n as u32).rotate_left(30)),
-                // SHA1SU1
-                0b00001 => {
-                    let t = d ^ (n >> 32);
-                    let r = [0, 1, 2, 3].map(|e| elem32(t, e).rotate_left(1));
-                    pack32(r[0], r[1], r[2], r[3] ^ elem32(t, 0).rotate_left(2))
-                }
-                // SHA256SU0
-                0b00010 => {
-                    let t = (d >> 32) | (n << 96);
-                    let mut out: u128 = 0;
-                    for e in 0..4u32 {
-                        let v = sigma0_lower(elem32(t, e)).wrapping_add(elem32(d, e));
-                        out |= u128::from(v) << (32 * e);
-                    }
-                    out
-                }
-                _ => return Ok(false),
+            let Some(result) = sha_two((insn >> 12) & 0x1F, d, n) else {
+                return Ok(false);
             };
             self.vregs[rd as usize] = result;
             return Ok(true);
