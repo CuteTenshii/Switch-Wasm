@@ -182,7 +182,16 @@
   </section>
 
   <section class="tabpanel" data-panel="debug">
-    <details class="section" open>
+    <div class="debug-groups" role="group" aria-label="Debug category">
+      <button class="btn small debug-group is-active" data-debug-group="cpu"
+        aria-pressed="true">CPU</button>
+      <button class="btn small debug-group" data-debug-group="graphics"
+        aria-pressed="false">Graphics</button>
+      <button class="btn small debug-group" data-debug-group="system"
+        aria-pressed="false">System</button>
+    </div>
+
+    <details class="section" data-debug-section="cpu" open>
       <summary class="section-head">
         <span class="section-title">Tracing</span>
         <span class="section-note" id="trace-badge">off</span>
@@ -198,7 +207,7 @@
       </div>
     </details>
 
-    <details class="section">
+    <details class="section" data-debug-section="system" hidden>
       <summary class="section-head">
         <span class="section-title">Diagnostic channels</span>
         <span class="section-note" id="channels-badge">off</span>
@@ -212,7 +221,7 @@
       </div>
     </details>
 
-    <details class="section">
+    <details class="section" data-debug-section="cpu">
       <summary class="section-head">
         <span class="section-title">Threads</span>
       </summary>
@@ -229,7 +238,7 @@
       </div>
     </details>
 
-    <details class="section">
+    <details class="section" data-debug-section="system" hidden>
       <summary class="section-head">
         <span class="section-title">Missing services</span>
       </summary>
@@ -244,7 +253,7 @@
       </div>
     </details>
 
-    <details class="section">
+    <details class="section" data-debug-section="system" hidden>
       <summary class="section-head">
         <span class="section-title">Crash report</span>
       </summary>
@@ -260,7 +269,7 @@
       </div>
     </details>
 
-    <details class="section" open>
+    <details class="section" data-debug-section="cpu" open>
       <summary class="section-head">
         <span class="section-title">Translation</span>
         <span class="section-note" id="jit-badge">on</span>
@@ -276,7 +285,7 @@
       </div>
     </details>
 
-    <details class="section" open>
+    <details class="section" data-debug-section="graphics" open hidden>
       <summary class="section-head">
         <span class="section-title">Rendering</span>
       </summary>
@@ -291,7 +300,49 @@
       </div>
     </details>
 
-    <details class="section" open>
+    <details class="section" id="display-debug-section" data-debug-section="graphics" open hidden>
+      <summary class="section-head">
+        <span class="section-title">Display</span>
+        <span class="section-note" id="display-debug-badge">no samples</span>
+      </summary>
+      <div class="section-body">
+        <p class="muted tiny">Browser-side timing from a completed run slice to the canvas. Use
+          Renderer stats for device work before this path. Intermediate guest frames are counted
+          even when only the newest one is copied to the canvas.</p>
+        <p class="muted tiny" id="display-debug-empty">Run a title to collect display samples.</p>
+        <div id="display-debug-data" hidden>
+          <dl class="debug-totals">
+            <div><dt>Guest frames</dt><dd id="display-guest-frames">0</dd></div>
+            <div><dt>Canvas updates</dt><dd id="display-canvas-updates">0</dd></div>
+            <div><dt>Frames skipped</dt><dd id="display-skipped-frames">0</dd></div>
+            <div><dt>Requests merged</dt><dd id="display-merged-requests">0</dd></div>
+            <div><dt>Framebuffer copied</dt><dd id="display-snapshot-bytes">0 B</dd></div>
+          </dl>
+          <table class="debug-timings">
+            <caption>Host time per operation, milliseconds</caption>
+            <thead><tr><th scope="col">Stage</th><th scope="col">Last</th>
+              <th scope="col">Mean</th><th scope="col">Worst</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Run slice</th><td id="display-slice-last">-</td>
+                <td id="display-slice-mean">-</td><td id="display-slice-max">-</td></tr>
+              <tr><th scope="row">Paint wait</th><td id="display-paint-last">-</td>
+                <td id="display-paint-mean">-</td><td id="display-paint-max">-</td></tr>
+              <tr><th scope="row">Frame counter</th><td id="display-counter-last">-</td>
+                <td id="display-counter-mean">-</td><td id="display-counter-max">-</td></tr>
+              <tr><th scope="row">Snapshot</th><td id="display-snapshot-last">-</td>
+                <td id="display-snapshot-mean">-</td><td id="display-snapshot-max">-</td></tr>
+              <tr><th scope="row">Canvas write</th><td id="display-canvas-last">-</td>
+                <td id="display-canvas-mean">-</td><td id="display-canvas-max">-</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="panel-tools">
+          <button id="btn-reset-display-debug" class="btn small ghost">Reset samples</button>
+        </div>
+      </div>
+    </details>
+
+    <details class="section" data-debug-section="cpu" open>
       <summary class="section-head">
         <span class="section-title">Registers</span>
       </summary>

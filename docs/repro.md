@@ -55,9 +55,16 @@ The `.nro`/`.nsp` files are gitignored.
 - Tracing is one mask of channels (`TRACE_IPC`, `TRACE_SVC`, `TRACE_WAIT`,
   `TRACE_NV`, `TRACE_GPU`, ...). The environment seeds it, so a CLI run sets
   them exactly as it always did; in the browser the same channels are
-  checkboxes under **Diagnostic channels** in the debug panel, because
+  checkboxes under **Debug > System > Diagnostic channels**, because
   `std::env::var` always fails on wasm. `switch_core::trace::ALL` is the list
   both read from.
+- **The browser display path** is under **Debug > Graphics > Display**. Guest
+  frames and canvas updates say whether the page is dropping intermediate
+  frames; merged requests say how often several run slices shared one browser
+  paint. The timing table separates the worker run slice, the wait for
+  `requestAnimationFrame`, the frame-counter message, the framebuffer transfer,
+  and the synchronous canvas write. Renderer work before the worker hands a
+  frame to the page remains under **Renderer stats** beside it.
 - The channels to start from when a title misbehaves without faulting are the
   low-volume ones. `TRACE_FS` names every filesystem request, its path and the
   `Result` it was answered with (`2002-0001` is path-not-found), so a title
@@ -75,4 +82,3 @@ The `.nro`/`.nsp` files are gitignored.
   generate yourself, which is how the output rates below 48 kHz and the
   multi-stream layouts get covered.
 - Browser: `make wasm` once, then `bun run dev`. Tests: `make test`.
-

@@ -2,12 +2,35 @@
    the emulator also uses for diagnostics. */
 
 import type { LogClass } from './log';
+import {
+  displayMetrics, resetDisplayMetrics, type DisplayMetrics, type DisplayTiming,
+} from './display-metrics';
 import { $, el } from './dom';
+import { formatBytes } from './format';
 import { consoleText, copyText, download, log, logBlock, stamp } from './log';
 import { call } from './rpc';
 import { openPanel, setNote } from './shell';
 
 const traceCb = $<HTMLInputElement>('trace-cb');
+
+const debugGroups = document.querySelectorAll<HTMLButtonElement>('[data-debug-group]');
+const debugSections = document.querySelectorAll<HTMLElement>('[data-debug-section]');
+
+function selectDebugGroup(name: string): void {
+  for (const button of debugGroups) {
+    const selected = button.dataset.debugGroup === name;
+    button.classList.toggle('is-active', selected);
+    button.setAttribute('aria-pressed', String(selected));
+  }
+  for (const section of debugSections) {
+    section.hidden = section.dataset.debugSection !== name;
+  }
+  if (name === 'graphics') updateDisplayDebug();
+}
+
+for (const button of debugGroups) {
+  button.addEventListener('click', () => selectDebugGroup(button.dataset.debugGroup || 'cpu'));
+}
 
 /** Tracing caps the run slice, so the loop has to ask. */
 export function traceEnabled(): boolean {
@@ -169,6 +192,56 @@ $('btn-gpustats').addEventListener('click', async () => {
   }
 });
 
+const displayDebugSection = $<HTMLDetailsElement>('display-debug-section');
+
+const DISPLAY_TIMINGS: [keyof DisplayMetrics, string][] = [
+  ['runSlice', 'slice'],
+  ['paintWait', 'paint'],
+  ['frameCounter', 'counter'],
+  ['snapshot', 'snapshot'],
+  ['canvasWrite', 'canvas'],
+];
+
+function showTiming(name: string, sample: DisplayTiming): void {
+  const value = (n: number) => sample.count ? n.toFixed(2) : '-';
+  $(`display-${name}-last`).textContent = value(sample.last);
+  $(`display-${name}-mean`).textContent = value(sample.mean);
+  $(`display-${name}-max`).textContent = value(sample.max);
+}
+
+function updateDisplayDebug(): void {
+  const metrics = displayMetrics();
+  const sampled = metrics.runSlice.count > 0 || metrics.frameCounter.count > 0;
+  $('display-debug-empty').hidden = sampled;
+  $('display-debug-data').hidden = !sampled;
+  setNote(
+    'display-debug-badge',
+    sampled ? `${metrics.canvasUpdates}/${metrics.guestFrames} shown` : 'no samples',
+    sampled,
+  );
+  if (!sampled) return;
+  $('display-guest-frames').textContent = String(metrics.guestFrames);
+  $('display-canvas-updates').textContent = String(metrics.canvasUpdates);
+  $('display-skipped-frames').textContent = String(metrics.skippedFrames);
+  $('display-merged-requests').textContent = String(metrics.mergedRequests);
+  $('display-snapshot-bytes').textContent = formatBytes(metrics.snapshotBytes);
+  for (const [key, name] of DISPLAY_TIMINGS) {
+    showTiming(name, metrics[key] as DisplayTiming);
+  }
+}
+
+displayDebugSection.addEventListener('toggle', () => {
+  if (displayDebugSection.open) updateDisplayDebug();
+});
+$('btn-reset-display-debug').addEventListener('click', () => {
+  resetDisplayMetrics();
+  updateDisplayDebug();
+});
+setInterval(() => {
+  if (displayDebugSection.open && !displayDebugSection.hidden) updateDisplayDebug();
+}, 500);
+updateDisplayDebug();
+
 $('btn-dumptrace').addEventListener('click', async () => {
   const t = await drainTrace();
   openPanel('console');
@@ -310,6 +383,7 @@ async function crashReport(): Promise<string> {
         hardwareConcurrency: navigator.hardwareConcurrency,
         webgpu: 'gpu' in navigator,
         deviceMemory: (navigator as unknown as { deviceMemory?: number }).deviceMemory ?? null,
+        display: displayMetrics(),
       },
       // The page's own log too: it holds what the page said as well as what
       // the core did -- the worker errors, the load failures, the renderer
