@@ -22,7 +22,15 @@ use std::rc::Rc;
 /// then never again: a threshold is what keeps that work on the code a run
 /// actually spends its time in. A hot loop crosses it in the first
 /// microseconds it runs.
-const HOT: u32 = 16;
+///
+/// Every emitted block is a module of its own, and V8 gives each its own code
+/// region, so the count matters beyond compile time: entering thousands of
+/// scattered modules through one indirect call costs more in stalls than
+/// their bodies save. At 16, a Just Dance 2019 run emitted 7,990 blocks and
+/// ran 4% slower per frame than interpreting them all; at 512 it emits 1,185,
+/// which still take 97% of the entries the 7,990 did, and beats the
+/// interpreter.
+pub const HOT: u32 = 512;
 
 /// How many times an emitted block may hand back at its very first
 /// instruction before it is dropped and the block goes back to the

@@ -57,7 +57,7 @@ pub use a32::ExecMode;
 pub use fs::{FsActivity, SaveDataQuota};
 pub use ipc::POINTER_BUFFER_SIZE;
 pub use jit::{
-    defers, emits, set_jit_host, translates, Entry, JitHost, JitStats, Layout, Refused, LEFT,
+    defers, emits, set_jit_host, translates, Entry, JitHost, JitStats, Layout, Refused, HOT, LEFT,
 };
 pub use thread_report::ThreadReport;
 

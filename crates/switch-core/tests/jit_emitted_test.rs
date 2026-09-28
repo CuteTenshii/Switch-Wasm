@@ -18,7 +18,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
-use switch_core::cpu::{set_jit_host, Cpu, Entry, JitHost, Layout, LEFT};
+use switch_core::cpu::{set_jit_host, Cpu, Entry, JitHost, Layout, HOT, LEFT};
 
 const CODE: u32 = 0x1000;
 
@@ -61,6 +61,11 @@ const TRIP: u64 = 4;
 /// Ops in its block, which is the trip without the terminator, and so what a
 /// fully retired entry reports.
 const OPS: u32 = 3;
+
+/// The step budget a test runs a loop for: enough trips for its block to turn
+/// [`HOT`] and then a hundred more from its emitted form, and one instruction
+/// over, so the run ends inside a block.
+const STEPS: u64 = (HOT as u64 + 100) * TRIP + 1;
 
 /// What `fake_run` reports, standing for a block that ran all of itself, part of
 /// itself, or none of it.
@@ -218,13 +223,13 @@ fn compare_running(program: &[u32], steps: u64, what: &str) {
 #[test]
 fn a_hot_block_is_emitted_and_then_run_from_its_emitted_form() {
     let _guard = exclusive();
-    compare(401, "a fully retiring block");
+    compare(STEPS, "a fully retiring block");
 
     // A second run of its own, because the comparison above already drove the
     // loop and the counters below are the binary's, not this machine's.
     ENTERED.store(0, Ordering::SeqCst);
     let mut cpu = loaded(true);
-    cpu.run(401).unwrap();
+    cpu.run(STEPS).unwrap();
     let stats = cpu.jit_stats();
     assert_eq!(
         stats.emitted, 1,
@@ -255,7 +260,7 @@ fn a_hot_block_is_emitted_and_then_run_from_its_emitted_form() {
 fn a_block_that_stops_early_hands_the_rest_back() {
     let _guard = exclusive();
     RETIRE.store(1, Ordering::SeqCst);
-    compare(401, "a block that retires one instruction");
+    compare(STEPS, "a block that retires one instruction");
     assert!(
         ENTERED.load(Ordering::SeqCst) > 0,
         "the emitted form was never entered, so nothing stopped early"
@@ -270,7 +275,7 @@ fn a_block_that_stops_early_hands_the_rest_back() {
 fn a_block_that_retires_nothing_stops_being_entered() {
     let _guard = exclusive();
     RETIRE.store(0, Ordering::SeqCst);
-    compare(401, "a block that retires nothing");
+    compare(STEPS, "a block that retires nothing");
 
     let entered = ENTERED.load(Ordering::SeqCst);
     assert!(entered > 0, "the emitted form was never entered at all");
@@ -291,7 +296,7 @@ fn a_block_that_retires_nothing_stops_being_entered() {
 fn flushing_the_cache_releases_what_was_emitted() {
     let _guard = exclusive();
     let mut cpu = loaded(true);
-    cpu.run(401).unwrap();
+    cpu.run(STEPS).unwrap();
     assert_eq!(cpu.jit_stats().emitted, 1, "nothing was emitted to release");
     assert_eq!(RELEASED.load(Ordering::SeqCst), 0, "released too early");
 
@@ -310,7 +315,7 @@ fn flushing_the_cache_releases_what_was_emitted() {
 fn overwriting_the_code_releases_its_emitted_form() {
     let _guard = exclusive();
     let mut cpu = loaded(true);
-    cpu.run(401).unwrap();
+    cpu.run(STEPS).unwrap();
     assert_eq!(
         cpu.jit_stats().emitted,
         1,
@@ -341,11 +346,11 @@ fn overwriting_the_code_releases_its_emitted_form() {
 fn a_block_left_through_a_taken_branch_skips_its_terminator() {
     let _guard = exclusive();
     EMIT_BRANCH.store(true, Ordering::SeqCst);
-    compare_running(BRANCH_LOOP, 401, "a block left at its branch");
+    compare_running(BRANCH_LOOP, STEPS, "a block left at its branch");
 
     ENTERED.store(0, Ordering::SeqCst);
     let mut cpu = running(true, BRANCH_LOOP);
-    cpu.run(401).unwrap();
+    cpu.run(STEPS).unwrap();
 
     let stats = cpu.jit_stats();
     assert_eq!(stats.emitted, 1, "the loop's block was not emitted");
@@ -358,7 +363,7 @@ fn a_block_left_through_a_taken_branch_skips_its_terminator() {
     // One `sub` a trip, and the budget ends the last trip just after its
     // one. Had the `RET` under the branch run, a trip would be four
     // instructions rather than three and `x0` would be a quarter smaller.
-    let subs = 401 / BRANCH_TRIP + u64::from(401 % BRANCH_TRIP >= 2);
+    let subs = STEPS / BRANCH_TRIP + u64::from(STEPS % BRANCH_TRIP >= 2);
     assert_eq!(
         cpu.read_x(0),
         0u64.wrapping_sub(subs),
