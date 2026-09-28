@@ -5,7 +5,7 @@ import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
 export default defineConfig(
-  globalIgnores(['dist/', 'target/']),
+  globalIgnores(['dist/', 'target/', 'test-results/', 'playwright-report/']),
   js.configs.recommended,
   stylistic.configs.customize({
     indent: 2,
@@ -23,11 +23,11 @@ export default defineConfig(
     },
   },
   {
-    files: ['web/**/*.ts'],
+    files: ['web/**/*.ts', 'tests/**/*.ts', 'playwright.config.ts'],
     extends: [tseslint.configs.recommendedTypeChecked],
     languageOptions: {
       parserOptions: {
-        project: ['./tsconfig.json', './tsconfig.worker.json'],
+        project: ['./tsconfig.json', './tsconfig.worker.json', './tsconfig.tests.json'],
         tsconfigRootDir: import.meta.dirname,
       },
     },
@@ -47,7 +47,7 @@ export default defineConfig(
   },
   {
     // Tools run under Node, and hand callbacks to the browser they drive.
-    files: ['tools/**/*.mjs', '*.mjs'],
+    files: ['tools/**/*.mjs', '*.mjs', 'tests/**/*.ts', 'playwright.config.ts'],
     languageOptions: { globals: { ...globals.node, ...globals.browser } },
   },
 );

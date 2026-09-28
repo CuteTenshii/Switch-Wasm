@@ -11,7 +11,8 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "types": []
   },
   "include": ["web/main/**/*.ts", "web/shared/**/*.ts", "web/env.d.ts"]
 }

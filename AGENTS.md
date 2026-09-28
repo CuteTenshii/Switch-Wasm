@@ -49,6 +49,7 @@ make assets
 bun run typecheck
 bun run eslint
 bun run stylelint
+bun run test:e2e
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```
@@ -60,6 +61,9 @@ cargo clippy --workspace --all-targets -- -D warnings
   it emits, against the interpreter, after `make wasm`. Host tests cannot: the
   offsets emitted code uses are wasm32's, and only the browser build has
   anything that can compile a module.
+- `bun run test:e2e` runs the Playwright page tests in `tests/e2e` against
+  the dev server, so `make wasm` first (and `bunx playwright install
+  chromium` once per machine). CI runs them against `dist`.
 - `node tools/browser_boot.mjs <container> [--keys=…] [--title-keys=…]
   [--seconds=N] [--out=log.txt]` boots a container in the built site in a real
   browser and saves what the page and its worker said. It serves `dist` itself,

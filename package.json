@@ -6,13 +6,16 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json",
-    "eslint": "eslint .",
-    "stylelint": "stylelint 'web/**/*.css'"
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.worker.json && tsc -p tsconfig.tests.json",
+    "eslint": "eslint",
+    "stylelint": "stylelint 'web/**/*.css'",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
     "@stylistic/eslint-plugin": "^5.10.0",
+    "@types/node": "^26.6.3",
     "eslint": "^10.11.0",
     "globals": "^17.12.0",
     "lefthook": "^2.1.14",

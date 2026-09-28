@@ -74,6 +74,15 @@ jobs:
       - name: Build
         run: make assets
 
+      - name: Install Chromium for the page tests
+        run: bunx playwright install --with-deps chromium
+
+      # Against `vite preview` of the `dist` just built: see playwright.config.ts.
+      - name: Page tests
+        run: bun run test:e2e
+        env:
+          CI: "true"
+
       - name: Deploy to Pages
         if: forgejo.ref == 'refs/heads/master' && forgejo.event_name != 'pull_request'
         uses: actions/git-pages@v2
