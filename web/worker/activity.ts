@@ -609,9 +609,12 @@ function styleNames(bits: number): string {
 function logInput(before: Activity['input'], now: Activity['input']): void {
   if (now.supported === before.supported && now.presented === before.presented) return;
   if (!now.supported) return;
+  // The handheld slot carries every button beside player 1, so a title that
+  // accepts it has full input whatever player 1 is presented as.
+  const handheld = now.supported & (1 << 1) ? ', and the handheld slot has every button' : '';
   workerLog(
-    `[input] the title accepts ${styleNames(now.supported)}; the pad is presented as `
-    + styleNames(now.presented),
+    `[input] the title accepts ${styleNames(now.supported)}; player 1 is presented as `
+    + styleNames(now.presented) + handheld,
   );
 }
 
