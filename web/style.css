@@ -405,6 +405,14 @@ body {
 }
 .statusbar .item { white-space: nowrap; }
 .statusbar b { color: var(--text); font-family: var(--mono); font-weight: 500; }
+/* A controller's name can run to forty characters; the tooltip has it all. */
+#input-state {
+  display: inline-block;
+  max-width: 24ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
 .statusbar .dim { color: #5d6579; }
 
 /* side panel */

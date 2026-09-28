@@ -19,8 +19,26 @@ const BTN = {
   LEFT: 1 << 12, UP: 1 << 13, RIGHT: 1 << 14, DOWN: 1 << 15,
 };
 
-function inputStatus(text: string): void {
-  $('input-state').textContent = text;
+function inputStatus(text: string, detail = ''): void {
+  const el = $('input-state');
+  el.textContent = text;
+  el.title = detail;
+}
+
+/** A controller's name, out of the id the browser reports for it. Chromium
+ *  appends "(STANDARD GAMEPAD Vendor: 045e Product: 0b13)" and Firefox
+ *  prefixes "045e-0b13-"; neither is part of the name, and the full id stays
+ *  in the tooltip for anyone who needs the vendor and product. */
+function padName(pad: Gamepad): string {
+  const name = pad.id
+    .replace(/\s*\([^)]*\)\s*$/, '')
+    .replace(/^[0-9a-f]{1,4}-[0-9a-f]{1,4}-/i, '')
+    .trim();
+  return name || 'gamepad';
+}
+
+function showPad(pad: Gamepad): void {
+  inputStatus(padName(pad), pad.id);
 }
 
 // Keyboard fallback: dpad + A/B/X/Y + start/select.
@@ -190,7 +208,7 @@ function pushInput(): void {
     const axis = (i: number) => (Math.abs(axes[i] || 0) > dz ? axes[i] : 0);
     slx = Math.round(axis(0) * 32767); sly = Math.round(-axis(1) * 32767);
     srx = Math.round(axis(2) * 32767); sry = Math.round(-axis(3) * 32767);
-    inputStatus('gamepad');
+    showPad(pad);
   } else if (mask) {
     inputStatus('keyboard');
   }
@@ -206,5 +224,5 @@ function pushInput(): void {
 }
 
 setInterval(pushInput, 16);
-window.addEventListener('gamepadconnected', () => inputStatus('gamepad connected'));
+window.addEventListener('gamepadconnected', (e) => showPad(e.gamepad));
 window.addEventListener('gamepaddisconnected', () => inputStatus('none'));
