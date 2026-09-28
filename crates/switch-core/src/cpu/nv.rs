@@ -109,6 +109,7 @@ impl Cpu {
                 if matches!(error, NV_NOT_IMPLEMENTED | NV_NOT_SUPPORTED) {
                     let node = self.nv.device_name(fd).to_owned();
                     let nr = request & 0xFF;
+                    self.count_gap(super::GapKind::Ioctl, &node, Some(nr));
                     if self.unimplemented_ipc.insert((node.clone(), Some(nr))) {
                         let ioc_type = (request >> 8) & 0xFF;
                         let pc = self.pc;

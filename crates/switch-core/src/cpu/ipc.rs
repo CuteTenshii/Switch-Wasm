@@ -13,9 +13,14 @@
 //! service falls back *to*: [`Cpu::unimplemented_command`] and
 //! [`Cpu::reply_with_fabricated_object`].
 
-use super::Cpu;
+use super::{Cpu, GapKind, ServiceGap};
 use crate::trace::Level;
 use crate::Result;
+
+/// How many distinct gaps [`Cpu::count_gap`] holds between two readings.
+/// Past it new ones go uncounted; each was still announced once as it
+/// happened.
+const GAP_CAP: usize = 64;
 
 /// The process id `svcGetProcessId` reports, and so the one `pm` has to
 /// report for the application: there is one process here, and two answers to
@@ -967,6 +972,7 @@ impl Cpu {
         /// `cmif` (module 10) description 221: what a real `sf` server answers
         /// when a session has no handler for the requested command id.
         const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
+        self.count_gap(GapKind::Refused, iface, cmd_id);
         if self.unimplemented_ipc.insert((iface.to_string(), cmd_id)) {
             let pc = self.pc;
             // The request's shape, which is most of its signature: how many
@@ -1075,6 +1081,7 @@ impl Cpu {
     /// Result: it just stops the gap being invisible. Whatever this prints is
     /// the list of services a guest is asking for and not getting.
     pub(super) fn warn_no_implementation(&mut self, service: &str, cmd_id: Option<u32>) {
+        self.count_gap(GapKind::Missing, service, cmd_id);
         if self.unimplemented_ipc.insert((service.to_string(), cmd_id)) {
             self.diagnostic(
                 Level::Warn,
@@ -1107,12 +1114,46 @@ impl Cpu {
     /// account, no DLC and an unplugged network cable are all true statements
     /// about this console, and marking those would bury the real ones.
     pub(super) fn warn_stub(&mut self, iface: &str, cmd_id: Option<u32>, what: &str) {
+        self.count_gap(GapKind::Stub, iface, cmd_id);
         if self.stubbed_ipc.insert((iface.to_string(), cmd_id)) {
             self.diagnostic(
                 Level::Warn,
                 &format!("[ipc] stub: {iface} cmd={cmd_id:?} ({what})"),
             );
         }
+    }
+
+    /// Count one call to a request nothing answers properly, towards the
+    /// next [`Cpu::take_service_gaps`].
+    pub(super) fn count_gap(&mut self, kind: GapKind, name: &str, command: Option<u32>) {
+        // Looked up before it is keyed, so the common case, a pair already
+        // counted, does not allocate a String per call.
+        if let Some(calls) = self
+            .gap_calls
+            .iter_mut()
+            .find(|((k, n, c), _)| *k == kind && n == name && *c == command)
+            .map(|(_, calls)| calls)
+        {
+            *calls += 1;
+            return;
+        }
+        if self.gap_calls.len() < GAP_CAP {
+            self.gap_calls.insert((kind, name.to_owned(), command), 1);
+        }
+    }
+
+    /// Every call to a refused, missing or stubbed request, or an ioctl
+    /// nothing handles, since the last call, in kind and name order.
+    pub fn take_service_gaps(&mut self) -> Vec<ServiceGap> {
+        std::mem::take(&mut self.gap_calls)
+            .into_iter()
+            .map(|((kind, name, command), calls)| ServiceGap {
+                kind,
+                name,
+                command,
+                calls,
+            })
+            .collect()
     }
 
     // The services that live here: `sm:`, which hands out every other
@@ -2200,5 +2241,43 @@ mod tests {
             0,
             "answered rather than refused"
         );
+    }
+
+    #[test]
+    fn every_call_to_a_gap_is_counted_and_taken_once() {
+        use crate::cpu::{Cpu, GapKind, ServiceGap};
+        let mut cpu = Cpu::new();
+        for _ in 0..3 {
+            cpu.count_gap(GapKind::Stub, "am:IApplicationFunctions", Some(40));
+        }
+        cpu.count_gap(GapKind::Ioctl, "/dev/nvhost-gpu", Some(0x1b));
+        assert_eq!(
+            cpu.take_service_gaps(),
+            vec![
+                ServiceGap {
+                    kind: GapKind::Stub,
+                    name: "am:IApplicationFunctions".to_owned(),
+                    command: Some(40),
+                    calls: 3,
+                },
+                ServiceGap {
+                    kind: GapKind::Ioctl,
+                    name: "/dev/nvhost-gpu".to_owned(),
+                    command: Some(0x1b),
+                    calls: 1,
+                },
+            ]
+        );
+        assert!(cpu.take_service_gaps().is_empty(), "taken, not read");
+    }
+
+    #[test]
+    fn gaps_past_the_cap_go_uncounted() {
+        use crate::cpu::{Cpu, GapKind};
+        let mut cpu = Cpu::new();
+        for command in 0..super::GAP_CAP as u32 + 5 {
+            cpu.count_gap(GapKind::Refused, "svc", Some(command));
+        }
+        assert_eq!(cpu.take_service_gaps().len(), super::GAP_CAP);
     }
 }

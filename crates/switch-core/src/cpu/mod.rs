@@ -114,6 +114,44 @@ pub struct AudioRendererActivity {
     pub sink_channels: u32,
 }
 
+/// How a guest request went unanswered, for [`Cpu::take_service_gaps`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum GapKind {
+    /// A command id the service does not know, refused with an error.
+    Refused,
+    /// A service with no implementation at all, answered with a fabricated
+    /// success.
+    Missing,
+    /// A command answered, but with nothing behind the answer.
+    Stub,
+    /// An `nvdrv` ioctl the driver model has no handler for.
+    Ioctl,
+}
+
+impl GapKind {
+    /// The name the host sees.
+    pub const fn name(self) -> &'static str {
+        match self {
+            GapKind::Refused => "refused",
+            GapKind::Missing => "missing",
+            GapKind::Stub => "stub",
+            GapKind::Ioctl => "ioctl",
+        }
+    }
+}
+
+/// One unanswered request, and how many times the guest made it since the
+/// last [`Cpu::take_service_gaps`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceGap {
+    pub kind: GapKind,
+    /// The interface, service or device node.
+    pub name: String,
+    /// The command id or ioctl number, when the request had one.
+    pub command: Option<u32>,
+    pub calls: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunReport {
     /// Number of instructions executed this run.
@@ -1369,6 +1407,12 @@ pub struct Cpu {
     /// pair, and a guest that gets a stubbed answer may later be refused a
     /// neighbouring command on the same interface.
     stubbed_ipc: HashSet<(String, Option<u32>)>,
+    /// Every call to one of the gaps above since the host last asked, by
+    /// kind, interface and command. The warnings print once per pair, which
+    /// hides the difference between a title that asked once and moved on and
+    /// one that asks every frame because it is waiting for a different
+    /// answer. See [`Cpu::take_service_gaps`].
+    gap_calls: BTreeMap<(GapKind, String, Option<u32>), u64>,
     /// What [`Cpu::reply_with_fabricated_object`] hands back for a command
     /// nothing implements, keyed by `(session handle, command id)`: the domain
     /// object id, the plain sub-session handle, and the event, one for each
@@ -2026,6 +2070,7 @@ impl Cpu {
             applet_event: None,
             unimplemented_ipc: HashSet::new(),
             stubbed_ipc: HashSet::new(),
+            gap_calls: BTreeMap::new(),
             fabricated_objects: HashMap::new(),
             ro_modules: BTreeMap::new(),
             ro_registrations: BTreeMap::new(),
