@@ -395,13 +395,15 @@ async function crashReport(): Promise<string> {
   );
 }
 
-$('btn-crash-report').addEventListener('click', async () => {
+export async function saveCrashReport(): Promise<void> {
   const text = await crashReport();
   download(`switch-wasm-report-${stamp()}.json`, text, 'application/json');
   openPanel('console');
   log('Crash report saved. Attach it to the issue - it names the build, the title, '
     + 'the renderer, the registers and the run-up to the fault.', 'ok');
-});
+}
+
+$('btn-crash-report').addEventListener('click', saveCrashReport);
 
 $('btn-copy-report').addEventListener('click', async () => {
   const ok = await copyText(await crashReport());

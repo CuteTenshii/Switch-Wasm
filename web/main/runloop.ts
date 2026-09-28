@@ -1,6 +1,7 @@
 /* The run loop, and the status bar it keeps up to date. */
 
 import { pumpAudio } from './audio';
+import { showEmulatorCrash, showGuestCrash } from './crash';
 import { drainDiagnostics, drainTrace, logTrace, traceEnabled } from './debug';
 import { abortDisplay, countEmulation, flushDisplay, schedulePresentIfNewFrame } from './display';
 import { recordRunSlice } from './display-metrics';
@@ -143,6 +144,7 @@ export async function run(): Promise<void> {
       // this is the last moment anyone can have it. A panic reported as one
       // line is a panic that has to be reproduced before it can be looked at.
       await reportPanicContext();
+      showEmulatorCrash(why);
     }
     return;
   } finally {
@@ -257,6 +259,7 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
     // Not necessarily the CPU's: the error names its own kind, and a
     // renderer that refused a frame used to be reported as `CPU fault: GPU:`.
     log('Fault: ' + err, 'err');
+    showGuestCrash(err || 'The guest returned a fault without a message.');
     // The fault trace already carries the register snapshot from the CPU, and
     // carries its own levels: the block is an error, the lines that led up to
     // it are not.
@@ -268,6 +271,7 @@ async function finishRun(steps: number, stepped?: boolean): Promise<void> {
   } else if (!stepped) {
     setState('fault');
     log('Stopped unexpectedly.', 'err');
+    showGuestCrash('The guest stopped unexpectedly.');
   }
   await Promise.all([
     drainOutput(), sdFlush(), saveFlush(), pullProfileEdits(), flushDisplay(), updatePc(),

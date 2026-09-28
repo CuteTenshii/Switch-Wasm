@@ -374,6 +374,7 @@ body {
 /* Drag-and-drop veil over the stage. */
 .dropveil {
   position: absolute;
+  z-index: 3;
   inset: 10px;
   border: 2px dashed var(--accent);
   border-radius: 12px;
@@ -492,6 +493,70 @@ body {
   background: var(--red);
 }
 .loading.is-error .loading-phase { color: var(--red); }
+
+/* A run-time fault owns the stage because continuing is impossible, while the
+   console and report remain reachable around it. The translucent ground keeps
+   the last guest frame as context without asking it to carry readable text. */
+.crash {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: clamp(20px, 5vw, 64px);
+  background: rgb(7 8 12 / 94%);
+}
+
+.crash-inner {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 10px 18px;
+  width: min(620px, 100%);
+  text-align: left;
+}
+
+.crash-mark {
+  grid-row: span 2;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 2px solid var(--red);
+  border-radius: 50%;
+  color: var(--red);
+  font: 700 24px/1 var(--mono);
+}
+
+.crash-copy h1 {
+  margin: 0 0 8px;
+  font-size: clamp(22px, 4vw, 30px);
+  font-weight: 650;
+  line-height: 1.15;
+}
+
+.crash-message {
+  max-height: min(24vh, 180px);
+  margin: 0;
+  overflow: auto;
+  color: #ffb0b0;
+  font: 12.5px/1.55 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.crash-help {
+  max-width: 58ch;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.crash-actions {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
 
 /* status bar */
 
@@ -1393,6 +1458,22 @@ body.resizing {
   .statusbar .item:nth-child(n+3) { display: none; }
   .profile-button-name { display: none; }
   .profile-button { padding: 3px 4px; }
+
+  .crash {
+    place-items: start center;
+    overflow-y: auto;
+  }
+  .crash-inner {
+    grid-template-columns: 36px minmax(0, 1fr);
+  }
+  .crash-mark {
+    width: 36px;
+    height: 36px;
+    font-size: 19px;
+  }
+  .crash-actions .btn {
+    min-height: 44px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

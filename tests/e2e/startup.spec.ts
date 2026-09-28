@@ -39,3 +39,30 @@ test('the display debugger starts empty and can reset its samples', async ({ pag
   );
   expect(panelOverflows).toBe(false);
 });
+
+test('the guest crash screen exposes recovery paths', async ({ page }) => {
+  await openPage(page);
+
+  const crash = page.locator('#crash');
+  await expect(crash).toBeHidden();
+  await crash.evaluate((element) => {
+    element.querySelector('#crash-message')!.textContent = 'CPU: unmapped read at 0x1234';
+    (element as HTMLElement).hidden = false;
+  });
+
+  await expect(crash.getByRole('heading')).toHaveText('Guest crashed');
+  await expect(crash.locator('#crash-message')).toHaveText('CPU: unmapped read at 0x1234');
+  await expect(crash.getByRole('button', { name: 'Save crash report' })).toBeVisible();
+
+  await crash.getByRole('button', { name: 'Open console' }).click();
+  await expect(page.locator('body')).toHaveClass(/panel-open/);
+  await expect(page.getByRole('tab', { name: 'Console' })).toHaveAttribute('aria-selected', 'true');
+
+  await page.setViewportSize({ width: 320, height: 700 });
+  const actionHeights = await crash.getByRole('button').evaluateAll(
+    (buttons) => buttons.map((button) => button.getBoundingClientRect().height),
+  );
+  expect(actionHeights.every((height) => height >= 44)).toBe(true);
+  const overflows = await crash.evaluate((element) => element.scrollWidth > element.clientWidth);
+  expect(overflows).toBe(false);
+});

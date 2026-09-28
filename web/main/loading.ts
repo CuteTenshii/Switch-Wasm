@@ -13,6 +13,7 @@
  */
 
 import { $ } from './dom';
+import { hideCrash } from './crash';
 
 const rootEl = $('loading');
 const iconEl = $<HTMLImageElement>('loading-icon');
@@ -31,6 +32,7 @@ function setBar(fraction: number | null): void {
  *  where the container gave us one; a load with no identity of its own leaves
  *  the slot empty rather than filling it with a placeholder. */
 export function beginLoad(title: string, phase: string, iconUrl?: string | null): void {
+  hideCrash();
   rootEl.classList.remove('hidden', 'is-error');
   setBar(null);
   phaseEl.textContent = phase;
