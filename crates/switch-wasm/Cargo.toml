@@ -33,6 +33,11 @@ gpu = ["dep:switch-gpu", "dep:wasm-bindgen-futures", "jit"]
 # bindings are already there for `wgpu`.
 jit = ["dep:wasm-bindgen", "dep:js-sys"]
 
+# std's own allocator on this target, used directly so that it can be told to
+# grow memory in larger steps; see `src/heap.rs`.
+[target.'cfg(target_arch = "wasm32")'.dependencies.dlmalloc]
+version = "0.2"
+
 [dependencies.switch-gpu]
 path = "../switch-gpu"
 optional = true

@@ -143,6 +143,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "dlmalloc"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad5208a115eaba24916f7456929832e310a81518c641f93fee4f89aa93aa3675"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-sys",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -759,6 +770,7 @@ dependencies = [
 name = "switch-wasm"
 version = "0.1.0"
 dependencies = [
+ "dlmalloc",
  "js-sys",
  "switch-core",
  "switch-gpu",

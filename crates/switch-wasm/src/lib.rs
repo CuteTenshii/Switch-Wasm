@@ -41,6 +41,8 @@ impl<T> SyncCell<T> {
 
 #[cfg(feature = "gpu")]
 mod gpu;
+#[cfg(target_arch = "wasm32")]
+mod heap;
 #[cfg(all(feature = "jit", target_arch = "wasm32"))]
 mod jit;
 
