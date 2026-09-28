@@ -158,7 +158,11 @@ screenEl.addEventListener('pointerdown', (e) => {
   touchPoints.set(e.pointerId, { slot, x: p.x, y: p.y });
   // Capture so a finger that slides off the canvas still reports its lift here
   // rather than leaving a contact down forever.
-  try { screenEl.setPointerCapture(e.pointerId); } catch { /* not capturable */ }
+  try {
+    screenEl.setPointerCapture(e.pointerId);
+  } catch {
+    // not capturable
+  }
   e.preventDefault();
   pushInput();
 });
@@ -169,7 +173,10 @@ screenEl.addEventListener('pointermove', (e) => {
   const p = touchAt(e);
   // A finger dragged into the letterbox holds its last on-screen position
   // instead of lifting, which is what the bezel does on the console.
-  if (p) { t.x = p.x; t.y = p.y; }
+  if (p) {
+    t.x = p.x;
+    t.y = p.y;
+  }
   e.preventDefault();
 });
 
@@ -214,21 +221,23 @@ function pushInput(): void {
     const dz = 0.15;
     const axes = pad.axes || [];
     const axis = (i: number) => (Math.abs(axes[i] || 0) > dz ? axes[i] : 0);
-    slx = Math.round(axis(0) * 32767); sly = Math.round(-axis(1) * 32767);
-    srx = Math.round(axis(2) * 32767); sry = Math.round(-axis(3) * 32767);
+    slx = Math.round(axis(0) * 32767);
+    sly = Math.round(-axis(1) * 32767);
+    srx = Math.round(axis(2) * 32767);
+    sry = Math.round(-axis(3) * 32767);
     showPad(pad);
   } else if (mask) {
     inputStatus('keyboard');
   }
-  call('set_input', mask, slx, sly, srx, sry);
+  void call('set_input', mask, slx, sly, srx, sry);
   // Only while something is down, plus the single push that reports the lift -
   // an idle screen has nothing to say 60 times a second.
   if (touchPoints.size || touchWasDown) {
-    call('set_touch', touchTriples());
+    void call('set_touch', touchTriples());
     touchWasDown = touchPoints.size > 0;
   }
   if (touchPoints.size) inputStatus('touch');
-  pullVibration(pad || undefined);
+  void pullVibration(pad || undefined);
 }
 
 setInterval(pushInput, 16);

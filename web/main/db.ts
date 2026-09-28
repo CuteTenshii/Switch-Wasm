@@ -42,8 +42,11 @@ export function sdIdb(): Promise<IDBDatabase> {
     req.onupgradeneeded = () => {
       if (!req.result.objectStoreNames.contains(SD_STORE)) req.result.createObjectStore(SD_STORE);
     };
-    req.onsuccess = () => { sdDb = req.result; resolve(sdDb); };
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      sdDb = req.result;
+      resolve(sdDb);
+    };
+    req.onerror = () => reject(req.error ?? new Error('IndexedDB request failed'));
   });
 }
 
@@ -56,8 +59,11 @@ export function logIdb(): Promise<IDBDatabase> {
     req.onupgradeneeded = () => {
       if (!req.result.objectStoreNames.contains(LOG_STORE)) req.result.createObjectStore(LOG_STORE);
     };
-    req.onsuccess = () => { logDb = req.result; resolve(logDb); };
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      logDb = req.result;
+      resolve(logDb);
+    };
+    req.onerror = () => reject(req.error ?? new Error('IndexedDB request failed'));
   });
 }
 
@@ -74,8 +80,11 @@ export function nandIdb(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(NAND_SAVES)) db.createObjectStore(NAND_SAVES);
       if (!db.objectStoreNames.contains(NAND_USERS)) db.createObjectStore(NAND_USERS);
     };
-    req.onsuccess = () => { nandDb = req.result; resolve(nandDb); };
-    req.onerror = () => reject(req.error);
+    req.onsuccess = () => {
+      nandDb = req.result;
+      resolve(nandDb);
+    };
+    req.onerror = () => reject(req.error ?? new Error('IndexedDB request failed'));
   });
 }
 
@@ -89,8 +98,8 @@ export function idbGetAll<T>(db: IDBDatabase, store: string): Promise<[string, T
     const values = s.getAll();
     tx.oncomplete = () => resolve(
       (keys.result as string[]).map((k, i) => [k, values.result[i] as T]));
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB request failed'));
   });
 }
 
@@ -99,8 +108,8 @@ export function idbGet<T>(db: IDBDatabase, store: string, key: string): Promise<
     const tx = db.transaction(store, 'readonly');
     const req = tx.objectStore(store).get(key);
     tx.oncomplete = () => resolve(req.result as T | undefined);
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB request failed'));
   });
 }
 
@@ -118,7 +127,7 @@ export function idbApply(
       else s.put(value, key);
     }
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB request failed'));
   });
 }

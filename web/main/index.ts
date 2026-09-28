@@ -105,4 +105,4 @@ $('btn-reset').addEventListener('click', async () => {
 });
 
 watchBattery();
-init();
+void init();

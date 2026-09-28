@@ -47,13 +47,15 @@ make test
 make wasm
 make assets
 bun run typecheck
+bun run eslint
+bun run stylelint
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 - `bun install` also installs the pre-commit hook in `lefthook.yml`: CI's
-  rustfmt and clippy checks when Rust changed, and the TypeScript typecheck
-  when TypeScript did.
+  rustfmt and clippy checks when Rust changed, the TypeScript typecheck and
+  ESLint when TypeScript did, and Stylelint when CSS did.
 - `node tools/jit_wasm_check.mjs` checks that the browser build runs the blocks
   it emits, against the interpreter, after `make wasm`. Host tests cannot: the
   offsets emitted code uses are wasm32's, and only the browser build has
@@ -76,6 +78,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 - `bun run dev` serves the source on port 8000 after `make wasm`.
 - `bun run preview` serves `dist`.
 - Vite does not type-check. Run `bun run typecheck` explicitly.
+- `bun run eslint` lints the TypeScript and tools (typescript-eslint with
+  type information, and `@stylistic`); `bun run stylelint` lints the CSS.
+  Both take `--fix` for most stylistic findings.
 
 Use the narrowest relevant check while iterating, then run checks proportional
 to the changed surface. Browser-facing changes need a WebAssembly build or an

@@ -104,7 +104,7 @@ export function logStored(what: string, changes: Map<string, StoredEntry | null>
   const more = changes.size > named.length ? `, and ${changes.size - named.length} more` : '';
   log(
     `[io] ${what}: stored ${changes.size} changes (${fmtSize(bytes)}) in IndexedDB: `
-      + named.join(', ') + more,
+    + named.join(', ') + more,
   );
 }
 
@@ -148,7 +148,9 @@ let copyLabelTimer = 0;
 function flashCopyLabel(text: string): void {
   clearTimeout(copyLabelTimer);
   copyBtn.textContent = text;
-  copyLabelTimer = setTimeout(() => { copyBtn.textContent = 'Copy all'; }, 1400);
+  copyLabelTimer = setTimeout(() => {
+    copyBtn.textContent = 'Copy all';
+  }, 1400);
 }
 
 /** `navigator.clipboard` needs a secure context, which a page served over
@@ -163,7 +165,7 @@ function copyViaSelection(text: string): boolean {
   area.style.cssText = 'position:fixed;top:-1000px;left:-1000px;opacity:0';
   document.body.appendChild(area);
   area.select();
-  let ok = false;
+  let ok: boolean;
   try {
     ok = document.execCommand('copy');
   } catch {
@@ -323,7 +325,10 @@ function anotherTabIsLive(): Promise<boolean> {
   if (typeof BroadcastChannel === 'undefined') return Promise.resolve(false);
   return new Promise((resolve) => {
     const channel = new BroadcastChannel(TAB_CHANNEL);
-    const done = (live: boolean) => { channel.close(); resolve(live); };
+    const done = (live: boolean) => {
+      channel.close();
+      resolve(live);
+    };
     channel.onmessage = (e) => {
       if ((e.data as TabMessage)?.answer === TAB_ID) done(true);
     };

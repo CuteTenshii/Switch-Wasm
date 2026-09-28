@@ -21,9 +21,9 @@
 
 import { alloc, api, handle } from './wasm';
 
-let heldButtons = 0n;    // what the host says is physically down right now
+let heldButtons = 0n; // what the host says is physically down right now
 let latchedButtons = 0n; // pressed, but not yet guaranteed seen by the guest
-let sticks = [0, 0, 0, 0];        // newest analog values
+let sticks = [0, 0, 0, 0]; // newest analog values
 let latchedSticks: number[] | null = null; // a deflection held like a press
 
 // Touch rides the same latch, for the same reason: a tap that goes down and up
@@ -31,11 +31,11 @@ let latchedSticks: number[] | null = null; // a deflection held like a press
 // running to see it. Contacts are flat {finger_id, x, y} triples.
 const TOUCH_MAX = 16;
 const NO_TOUCHES = new Uint32Array(0);
-let touches = NO_TOUCHES;                    // newest host contacts
+let touches = NO_TOUCHES; // newest host contacts
 let latchedTouches: Uint32Array | null = null; // a tap held until a frame passes
-let touchIds = new Set<number>();            // finger ids down at the last sample
-let touchScratch = 0;                        // wasm-side staging buffer, allocated once
-let publishedTouches = 0;                    // contacts the guest was last told about
+let touchIds = new Set<number>(); // finger ids down at the last sample
+let touchScratch = 0; // wasm-side staging buffer, allocated once
+let publishedTouches = 0; // contacts the guest was last told about
 
 // Frame the latch is waiting on, plus a slice cap so that a program which never
 // presents - or has stopped, mid-load - still releases instead of holding a

@@ -38,7 +38,7 @@ export async function sdRestore(): Promise<void> {
   try {
     entries = await idbGetAll<StoredEntry>(await sdIdb(), SD_STORE);
   } catch (err) {
-    log('SD card: could not be read (' + err + ')', 'err');
+    log('SD card: could not be read (' + String(err) + ')', 'err');
     return;
   }
   if (!entries.length) return;
@@ -71,7 +71,7 @@ export async function sdFlush(): Promise<void> {
       sdBacklog.clear();
     }
   } catch (err) {
-    log('SD card: could not be written (' + err + ') - retrying on the next flush.', 'err');
+    log('SD card: could not be written (' + String(err) + ') - retrying on the next flush.', 'err');
   } finally {
     sdFlushing = false;
   }

@@ -15,7 +15,7 @@ export function traceEnabled(): boolean {
 }
 
 traceCb.addEventListener('change', () => {
-  call('set_trace', traceCb.checked ? 1 : 0);
+  void call('set_trace', traceCb.checked ? 1 : 0);
   setNote('trace-badge', traceCb.checked ? 'on' : 'off', traceCb.checked);
   if (traceCb.checked) log('Tracing enabled - run slices are capped for readability.', 'dim');
 });
@@ -61,7 +61,7 @@ export function logTrace(text: string): void {
 const jitCb = $<HTMLInputElement>('jit-cb');
 
 jitCb.addEventListener('change', () => {
-  call('set_jit', jitCb.checked ? 1 : 0);
+  void call('set_jit', jitCb.checked ? 1 : 0);
   setNote('jit-badge', jitCb.checked ? 'on' : 'off', jitCb.checked);
   if (!jitCb.checked) log('Block translation disabled - running the plain interpreter.', 'dim');
 });
@@ -73,9 +73,9 @@ $('btn-jitstats').addEventListener('click', async () => {
   // translating was worth it: one means every block was thrown away unused.
   const reuse = s.translated ? (s.executed / s.translated).toFixed(1) : '0';
   log(
-    `translation: ${s.enabled ? 'on' : 'off'}, ${s.blocks} blocks cached, ` +
-      `${s.translated} translated, ${s.executed} entered (${reuse}x each), ` +
-      `${s.invalidated} invalidated`,
+    `translation: ${s.enabled ? 'on' : 'off'}, ${s.blocks} blocks cached, `
+    + `${s.translated} translated, ${s.executed} entered (${reuse}x each), `
+    + `${s.invalidated} invalidated`,
     'dim',
   );
   // What share of those entries ran compiled code rather than walking the
@@ -105,17 +105,16 @@ $('btn-gpustats').addEventListener('click', async () => {
   // be almost entirely the rasterizer's.
   const share = drawn + fallbacks ? ((drawn * 100) / (drawn + fallbacks)).toFixed(1) : '0';
   log(
-    `rendering: ${drawn} draws on the device, ${fallbacks} fell back (${share}% device), ` +
-      `${errors} rejected, ` +
-      `${g.pipelines ?? 0} pipelines, ${g.modules ?? 0} modules, ` +
-      `${g.held ?? 0} surfaces held (${g.evicted ?? 0} evicted, ${g.pending ?? 0} pending)`,
+    `rendering: ${drawn} draws on the device, ${fallbacks} fell back (${share}% device), `
+    + `${errors} rejected, `
+    + `${g.pipelines ?? 0} pipelines, ${g.modules ?? 0} modules, `
+    + `${g.held ?? 0} surfaces held (${g.evicted ?? 0} evicted, ${g.pending ?? 0} pending)`,
     'dim',
   );
   if (g.gaveUp) {
     const why = g.lostBecause ? `: ${g.lostBecause}` : '';
     log(`rendering: the device was lost - the rasterizer has every frame${why}.`, 'err');
-  }
-  else if (g.softwareFrame) {
+  } else if (g.softwareFrame) {
     log('rendering: the software-frame latch has tripped - the rasterizer has the frames until the device could draw them all.', 'err');
   }
   if (g.unlatched) log(`rendering: the software-frame latch has let go ${g.unlatched} time(s).`, 'dim');
@@ -126,8 +125,8 @@ $('btn-gpustats').addEventListener('click', async () => {
     const distinct = g.deviceErrors ?? [];
     const rest = errors - distinct.length;
     log(
-      `rendering: the device rejected ${errors} thing(s) - the draws above were counted anyway.` +
-        (rest > 0 ? ` ${distinct.length} distinct, ${rest} repeat(s).` : ''),
+      `rendering: the device rejected ${errors} thing(s) - the draws above were counted anyway.`
+      + (rest > 0 ? ` ${distinct.length} distinct, ${rest} repeat(s).` : ''),
       'err',
     );
     for (const e of distinct) log('  device rejected: ' + e, 'err');
@@ -136,8 +135,8 @@ $('btn-gpustats').addEventListener('click', async () => {
   if (r) {
     const mib = (v: number) => (v / (1024 * 1024)).toFixed(1);
     log(
-      `  read from guest memory: ${mib(r.textures)} MiB textures, ${mib(r.vertex)} MiB vertices, ` +
-        `${mib(r.constants)} MiB constants, ${mib(r.index)} MiB indices`,
+      `  read from guest memory: ${mib(r.textures)} MiB textures, ${mib(r.vertex)} MiB vertices, `
+      + `${mib(r.constants)} MiB constants, ${mib(r.index)} MiB indices`,
       'dim',
     );
     const hits = g.textureHits ?? 0;
@@ -148,9 +147,9 @@ $('btn-gpustats').addEventListener('click', async () => {
   const t = g.times;
   if (t) {
     log(
-      `  device time (${g.frames ?? 0} frames): translate ${t.translate}ms, upload ${t.upload}ms, ` +
-        `modules ${t.modules}ms, pipeline ${t.pipeline}ms, encode ${t.encode}ms, ` +
-        `flush ${t.flush}ms`,
+      `  device time (${g.frames ?? 0} frames): translate ${t.translate}ms, upload ${t.upload}ms, `
+      + `modules ${t.modules}ms, pipeline ${t.pipeline}ms, encode ${t.encode}ms, `
+      + `flush ${t.flush}ms`,
       'dim',
     );
     // Split out, because `flush` being most of the frame says nothing about
@@ -161,9 +160,9 @@ $('btn-gpustats').addEventListener('click', async () => {
       const frames = Math.max(g.frames ?? 0, 1);
       const per = (v: number) => (v / frames).toFixed(1);
       log(
-        `    flush: ask ${t.flushAsk}ms (${per(t.flushAsk ?? 0)}/frame), ` +
-          `wait ${t.flushWait}ms (${per(t.flushWait ?? 0)}/frame), ` +
-          `land ${t.flushLand}ms (${per(t.flushLand)}/frame)`,
+        `    flush: ask ${t.flushAsk}ms (${per(t.flushAsk ?? 0)}/frame), `
+        + `wait ${t.flushWait}ms (${per(t.flushWait ?? 0)}/frame), `
+        + `land ${t.flushLand}ms (${per(t.flushLand)}/frame)`,
         'dim',
       );
     }
@@ -203,7 +202,7 @@ $('btn-wake').addEventListener('click', async () => {
   log(
     woken
       ? `Woke ${woken} blocked thread(s). A guest re-checks its predicate, so a wake it did not `
-        + 'need degrades to a spin rather than to a wrong answer.'
+      + 'need degrades to a spin rather than to a wrong answer.'
       : 'No thread was blocked - this process is idle for some other reason.',
     'dim',
   );
@@ -288,10 +287,9 @@ function applyChannels(): void {
     mask |= Number(box.dataset.bit);
     on += 1;
   }
-  call('set_trace_mask', mask);
+  void call('set_trace_mask', mask);
   setNote('channels-badge', on ? `${on} on` : 'off', on > 0);
 }
-
 
 /* The crash report.
 

@@ -136,7 +136,7 @@ if (header.watched_page) {
 // The mapped pages, if there are any: a page-table entry each, and their
 // contents as the interpreter had them.
 const codeAt = header.code_at ? header.code_at[0] : -1;
-let pristine = null, codeWasm = -1;
+let pristine = null;
 if (pages.length) {
   pristine = new Uint8Array(readFileSync(join(dir, 'guest.bin')));
   if (pristine.length !== pages.length * PAGE_BYTES) {
@@ -145,7 +145,6 @@ if (pages.length) {
   }
   for (const [guest, wasm] of pages) {
     view.setUint32(TABLE_AT + (guest >>> 12) * 4, wasm, true);
-    if (guest === codeAt) codeWasm = wasm;
   }
 }
 

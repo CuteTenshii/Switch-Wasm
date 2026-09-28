@@ -112,7 +112,7 @@ function readBlob(stats: HostIo, file: Blob, start: number, end: number): Uint8A
 
 function hostChunk(stats: HostIo, file: Blob, fileIndex: number, index: number): Uint8Array {
   let cache = hostChunks.get(fileIndex);
-  if (!cache) hostChunks.set(fileIndex, (cache = new Map()));
+  if (!cache) hostChunks.set(fileIndex, (cache = new Map<number, Uint8Array>()));
   const hit = cache.get(index);
   if (hit) {
     cache.delete(index);

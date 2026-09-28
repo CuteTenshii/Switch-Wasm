@@ -251,7 +251,7 @@ function logGpu(before: Activity, now: Activity, seconds: number): void {
   const dispatches = now.dispatches - before.dispatches;
   const line = joined([
     frames > 0 && count(frames, 'frame')
-      + (seconds ? ` (${(frames / seconds).toFixed(1)}/s)` : ''),
+    + (seconds ? ` (${(frames / seconds).toFixed(1)}/s)` : ''),
     draws > 0 && count(draws, 'draw'),
     // Called out on its own: a skipped draw is a hole in the frame.
     skipped > 0 && count(skipped, 'draw') + ' skipped',
@@ -316,8 +316,8 @@ function logThreads(now: Activity): void {
     const who = thread.name ? `${thread.name}, via ${thread.entry}` : thread.entry;
     workerLog(
       `[thread] ${thread.index}${thread.running ? '*' : ''} (${who}, handle `
-        + `${thread.handle.toString(16)}, priority ${thread.priority}): ${ran}; ${thread.state}; `
-        + thread.at,
+      + `${thread.handle.toString(16)}, priority ${thread.priority}): ${ran}; ${thread.state}; `
+      + thread.at,
     );
   }
 }
@@ -457,7 +457,7 @@ function logHostIo(io: HostIo): void {
   const line = joined([
     `${count(io.reads, 'read')} (${fmtSize(io.bytes)})`,
     io.diskBytes > 0 && `${fmtSize(io.diskBytes)} read from disk`
-      + (io.chunkMisses ? ` (${io.chunkMisses} chunk misses)` : ''),
+    + (io.chunkMisses ? ` (${io.chunkMisses} chunk misses)` : ''),
     io.diskBytes === 0 && 'all from cache',
     io.failures > 0 && `${io.failures} failed`,
   ]);

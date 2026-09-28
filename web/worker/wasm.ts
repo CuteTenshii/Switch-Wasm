@@ -282,7 +282,9 @@ export function readJson<T>(
 
 export function lastError(): string {
   const s = readString(2048, (buf, cap) => api().switch_last_error(state.handle, buf, cap));
-  return s.replace(/\u0000.*$/, '');
+  // The buffer is NUL-padded past the message.
+  const end = s.indexOf('\0');
+  return end < 0 ? s : s.slice(0, end);
 }
 
 // Drain a ring buffer (output/trace) to completion, concatenating the chunks.
@@ -303,6 +305,9 @@ export function drain(
   for (const c of chunks) total += c.length;
   const out = new Uint8Array(total);
   let o = 0;
-  for (const c of chunks) { out.set(c, o); o += c.length; }
+  for (const c of chunks) {
+    out.set(c, o);
+    o += c.length;
+  }
   return out;
 }

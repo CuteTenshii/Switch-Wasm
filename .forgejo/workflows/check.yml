@@ -65,6 +65,12 @@ jobs:
       - name: Type-check frontend and worker
         run: bun run typecheck
 
+      - name: Lint TypeScript
+        run: bun run eslint
+
+      - name: Lint CSS
+        run: bun run stylelint
+
       - name: Build
         run: make assets
 

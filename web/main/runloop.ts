@@ -62,7 +62,10 @@ function nothingLoaded(): boolean {
 }
 
 export async function run(): Promise<void> {
-  if (running) { pauseRequested = true; return; }
+  if (running) {
+    pauseRequested = true;
+    return;
+  }
   if (nothingLoaded()) return;
   running = true;
   pauseRequested = false;
@@ -75,7 +78,7 @@ export async function run(): Promise<void> {
   // would otherwise let the screen sleep on.
   holdWakeLock();
   const slice = traceEnabled() ? TRACE_SLICE : RUN_SLICE;
-  let steps = 0;
+  let steps: number;
   let tick = 0;
   try {
     for (;;) {
@@ -183,7 +186,10 @@ export function abortRun(): void {
 $('btn-run').addEventListener('click', run);
 
 $('btn-step').addEventListener('click', async () => {
-  if (running) { pauseRequested = true; return; }
+  if (running) {
+    pauseRequested = true;
+    return;
+  }
   if (nothingLoaded()) return;
   const r = await call('run', 1);
   await finishRun(r, true);
@@ -206,7 +212,7 @@ window.addEventListener('keydown', (e) => {
     // Reset and pressing Space ran the console instead of resetting it.
     if (focused && focused !== document.body && focused !== document.documentElement) return;
     e.preventDefault();
-    run();
+    void run();
   } else if (e.code === 'Backquote') {
     e.preventDefault();
     setPanel(!panelOpen());

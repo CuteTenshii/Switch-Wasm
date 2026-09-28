@@ -14,7 +14,7 @@
   --green: #57d98b;
   --amber: #ffc861;
   --red: #ff6f6f;
-  --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", Consolas, monospace;
+  --mono: ui-monospace, "SFMono-Regular", "Cascadia Mono", consolas, monospace;
   --topbar-h: 48px;
   --statusbar-h: 26px;
   --panel-w: 380px;
@@ -61,13 +61,21 @@ body {
   user-select: none;
 }
 
-.brand { display: flex; align-items: center; gap: 8px; }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .brand .mark {
   width: 12px; height: 12px; border-radius: 3px;
   background: linear-gradient(135deg, var(--accent), #a06bff);
-  box-shadow: 0 0 12px rgba(110, 168, 255, .45);
+  box-shadow: 0 0 12px rgb(110 168 255 / 45%);
 }
-.brand .name { font-weight: 600; letter-spacing: .2px; font-size: 14px; }
+.brand .name {
+  font-weight: 600;
+  letter-spacing: .2px;
+  font-size: 14px;
+}
 
 /* What is running, between the brand and the controls that act on it. The one
    part of the bar whose width is the title's to decide, so it is also the only
@@ -111,10 +119,20 @@ body {
   color: var(--muted);
 }
 
-.transport { display: flex; gap: 6px; }
+.transport {
+  display: flex;
+  gap: 6px;
+}
 
-.topbar-status { display: flex; align-items: center; gap: 10px; }
-.topbar-actions { display: flex; gap: 6px; }
+.topbar-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.topbar-actions {
+  display: flex;
+  gap: 6px;
+}
 
 /* buttons */
 
@@ -134,9 +152,15 @@ body {
   white-space: nowrap;
   transition: background .12s, border-color .12s, opacity .12s;
 }
-.btn:hover { background: #1e2433; border-color: #33405c; }
+.btn:hover {
+  background: #1e2433;
+  border-color: #33405c;
+}
 .btn:active { transform: translateY(0.5px); }
-.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn:disabled {
+  opacity: .4;
+  cursor: not-allowed;
+}
 .btn.primary {
   background: linear-gradient(180deg, #2b5cb8, #24499a);
   border-color: #3a6fd0;
@@ -149,20 +173,38 @@ body {
   height: 15px;
   display: block;
   fill: none;
-  stroke: currentColor;
+  stroke: currentcolor;
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
-.btn.small { padding: 4px 9px; font-size: 12px; }
-.btn.big { padding: 9px 16px; font-size: 14px; }
+.btn.small {
+  padding: 4px 9px;
+  font-size: 12px;
+}
+.btn.big {
+  padding: 9px 16px;
+  font-size: 14px;
+}
 .btn .glyph { font-size: 11px; }
 
 /* A secondary action next to a primary one - present, but not competing with
    it for the eye until it is pointed at. */
-.btn.ghost { background: none; border-color: transparent; color: var(--muted); }
-.btn.ghost:hover { background: var(--chrome-hi); border-color: var(--border); color: var(--text); }
-.btn.danger:hover { background: #2a1416; border-color: #5e2626; color: var(--red); }
+.btn.ghost {
+  background: none;
+  border-color: transparent;
+  color: var(--muted);
+}
+.btn.ghost:hover {
+  background: var(--chrome-hi);
+  border-color: var(--border);
+  color: var(--text);
+}
+.btn.danger:hover {
+  background: #2a1416;
+  border-color: #5e2626;
+  color: var(--red);
+}
 
 /* Chrome that is only an icon: no frame until it is hovered, so it reads as
    part of the surface it sits on rather than as a button parked on it. */
@@ -182,7 +224,11 @@ body {
   cursor: pointer;
   transition: background .12s, color .12s, border-color .12s;
 }
-.icon-btn:hover { background: var(--chrome-hi); border-color: var(--border); color: var(--text); }
+.icon-btn:hover {
+  background: var(--chrome-hi);
+  border-color: var(--border);
+  color: var(--text);
+}
 
 /* Keyboard focus has to be visible on every control, including the ones with
    no border of their own to thicken. */
@@ -211,7 +257,10 @@ body {
   font-size: 13px;
   cursor: pointer;
 }
-.select.big { padding: 9px 12px; font-size: 14px; }
+.select.big {
+  padding: 9px 12px;
+  font-size: 14px;
+}
 
 /* status chip + readouts */
 
@@ -226,12 +275,33 @@ body {
   background: var(--chrome-hi);
   color: var(--muted);
 }
-.chip[data-state="running"] { color: var(--green); border-color: #22603f; background: #0d1f16; }
-.chip[data-state="paused"]  { color: var(--amber); border-color: #5c4718; background: #201a0c; }
-.chip[data-state="fault"]   { color: var(--red);   border-color: #5e2626; background: #200f0f; }
-.chip[data-state="halted"]  { color: var(--accent); border-color: #274168; background: #0d1622; }
+.chip[data-state="running"] {
+  color: var(--green);
+  border-color: #22603f;
+  background: #0d1f16;
+}
+.chip[data-state="paused"] {
+  color: var(--amber);
+  border-color: #5c4718;
+  background: #201a0c;
+}
+.chip[data-state="fault"] {
+  color: var(--red);
+  border-color: #5e2626;
+  background: #200f0f;
+}
+.chip[data-state="halted"] {
+  color: var(--accent);
+  border-color: #274168;
+  background: #0d1622;
+}
 
-.readout { font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 58px; }
+.readout {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  min-width: 58px;
+}
 
 /* stage */
 
@@ -258,7 +328,6 @@ body {
      the browser swallows the gesture before pointermove ever fires. */
   touch-action: none;
   user-select: none;
-  -webkit-user-select: none;
 }
 
 /* Idle overlay: the "insert cartridge" state. */
@@ -273,17 +342,34 @@ body {
     radial-gradient(120% 80% at 50% 0%, #131a2a 0%, #07080c 60%);
   transition: opacity .25s ease, visibility .25s;
 }
-.overlay.hidden { opacity: 0; visibility: hidden; }
+.overlay.hidden {
+  opacity: 0;
+  visibility: hidden;
+}
 .overlay-inner { max-width: 560px; }
-.overlay h1 { margin: 0 0 6px; font-size: 20px; font-weight: 600; }
-.overlay code { font-family: var(--mono); font-size: .92em; color: var(--accent); }
+.overlay h1 {
+  margin: 0 0 6px;
+  font-size: 20px;
+  font-weight: 600;
+}
+.overlay code {
+  font-family: var(--mono);
+  font-size: .92em;
+  color: var(--accent);
+}
 .overlay-actions {
   display: flex; flex-wrap: wrap; align-items: center; justify-content: center;
   gap: 10px; margin: 20px 0 18px;
 }
 
-.muted { color: var(--muted); margin: 0; }
-.tiny { font-size: 12px; line-height: 1.55; }
+.muted {
+  color: var(--muted);
+  margin: 0;
+}
+.tiny {
+  font-size: 12px;
+  line-height: 1.55;
+}
 
 /* Drag-and-drop veil over the stage. */
 .dropveil {
@@ -291,7 +377,7 @@ body {
   inset: 10px;
   border: 2px dashed var(--accent);
   border-radius: 12px;
-  background: rgba(14, 30, 58, .72);
+  background: rgb(14 30 58 / 72%);
   display: grid;
   place-items: center;
   font-size: 16px;
@@ -300,7 +386,10 @@ body {
   visibility: hidden;
   transition: opacity .12s;
 }
-.dropveil.on { opacity: 1; visibility: visible; }
+.dropveil.on {
+  opacity: 1;
+  visibility: visible;
+}
 
 /* loading screen
 
@@ -319,7 +408,10 @@ body {
   background: radial-gradient(120% 80% at 50% 0%, #131a2a 0%, #07080c 60%);
   transition: opacity .25s ease, visibility .25s;
 }
-.loading.hidden { opacity: 0; visibility: hidden; }
+.loading.hidden {
+  opacity: 0;
+  visibility: hidden;
+}
 
 .loading-inner {
   display: flex;
@@ -336,10 +428,14 @@ body {
   border-radius: 14px;
   background: var(--chrome-hi);
   object-fit: cover;
-  box-shadow: 0 10px 34px rgba(0, 0, 0, .6);
+  box-shadow: 0 10px 34px rgb(0 0 0 / 60%);
 }
 
-.loading-title { font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+.loading-title {
+  font-size: 17px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
 
 .loading-bar {
   position: relative;
@@ -362,6 +458,7 @@ body {
   background: linear-gradient(90deg, transparent, var(--accent), #a06bff, transparent);
   animation: loading-sweep 1.15s ease-in-out infinite;
 }
+
 @keyframes loading-sweep {
   from { transform: translateX(-110%); }
   to   { transform: translateX(300%); }
@@ -375,7 +472,10 @@ body {
   transition: width .2s ease;
 }
 
-.loading-phase { font-size: 13px; color: var(--muted); }
+.loading-phase {
+  font-size: 13px;
+  color: var(--muted);
+}
 /* Holds its line whether or not there is anything on it, so the phase above
    does not shift every time a detail appears and goes. */
 .loading-detail {
@@ -386,7 +486,11 @@ body {
   overflow-wrap: anywhere;
 }
 
-.loading.is-error .loading-bar span { animation: none; transform: none; background: var(--red); }
+.loading.is-error .loading-bar span {
+  animation: none;
+  transform: none;
+  background: var(--red);
+}
 .loading.is-error .loading-phase { color: var(--red); }
 
 /* status bar */
@@ -404,7 +508,11 @@ body {
   overflow: hidden;
 }
 .statusbar .item { white-space: nowrap; }
-.statusbar b { color: var(--text); font-family: var(--mono); font-weight: 500; }
+.statusbar b {
+  color: var(--text);
+  font-family: var(--mono);
+  font-weight: 500;
+}
 .statusbar .dim { color: #5d6579; }
 
 /* side panel */
@@ -426,9 +534,16 @@ body.panel-open .panel {
   display: flex;
   animation: panel-in .16s ease both;
 }
+
 @keyframes panel-in {
-  from { opacity: 0; transform: translateX(12px); }
-  to   { opacity: 1; transform: none; }
+  from {
+    opacity: 0;
+    transform: translateX(12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 /* The seam is draggable, so the panel is as wide as the log being read needs
@@ -457,12 +572,15 @@ body.panel-open .panel {
 .panel-grip:focus-visible::after,
 .panel-grip.dragging::after {
   background: var(--accent);
-  box-shadow: 0 0 8px rgba(110, 168, 255, .5);
+  box-shadow: 0 0 8px rgb(110 168 255 / 50%);
 }
 .panel-grip:focus-visible { outline: none; }
 /* Dragging must not select the text the pointer sweeps over, and the cursor
    has to survive leaving the 9px grip. */
-body.resizing { cursor: col-resize; user-select: none; }
+body.resizing {
+  cursor: col-resize;
+  user-select: none;
+}
 
 /* panel head + tabs */
 
@@ -476,7 +594,11 @@ body.resizing { cursor: col-resize; user-select: none; }
   user-select: none;
 }
 
-.tabstrip { display: flex; align-items: stretch; gap: 2px; }
+.tabstrip {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+}
 
 .tab {
   position: relative;
@@ -501,7 +623,10 @@ body.resizing { cursor: col-resize; user-select: none; }
   transition: background .12s;
 }
 .tab:hover { color: var(--text); }
-.tab.is-active { color: var(--text); font-weight: 600; }
+.tab.is-active {
+  color: var(--text);
+  font-weight: 600;
+}
 .tab.is-active::after { background: var(--accent); }
 
 /* tab bodies */
@@ -527,7 +652,12 @@ body.resizing { cursor: col-resize; user-select: none; }
   flex: none;
 }
 
-.panel-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.panel-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 
 .checks {
   display: grid;
@@ -614,7 +744,6 @@ body.resizing { cursor: col-resize; user-select: none; }
 .check:hover { color: var(--text); }
 .check input[type="checkbox"] {
   appearance: none;
-  -webkit-appearance: none;
   flex: none;
   width: 15px;
   height: 15px;
@@ -662,7 +791,10 @@ body.resizing { cursor: col-resize; user-select: none; }
   font: inherit;
   font-size: 12px;
 }
-.num:focus { outline: none; border-color: var(--accent); }
+.num:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 .regval {
   font-family: var(--mono);
   font-size: 12px;
@@ -692,7 +824,7 @@ body.resizing { cursor: col-resize; user-select: none; }
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   scrollbar-width: thin;
   scrollbar-color: #2a3145 transparent;
 }
@@ -754,30 +886,49 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 
 /* Reading a long log means following one entry across the panel's width. */
-.console div:hover { background: rgba(255, 255, 255, .035); }
+.console div:hover { background: rgb(255 255 255 / 3.5%); }
 
 /* A fault is the one entry that has to be findable in a screenful of trace, so
    it takes a tinted row and a rule down its edge, not just red text. */
 .console .err {
   color: var(--red);
   border-left-color: var(--red);
-  background: rgba(255, 111, 111, .07);
+  background: rgb(255 111 111 / 7%);
 }
-.console .err::before { content: "\2715"; color: var(--red); }
+.console .err::before {
+  content: "\2715";
+  color: var(--red);
+}
 
 /* A warning is a thing that was answered wrongly or not at all, and it is
    what a later fault usually turns out to have been caused by. Amber and no
    tint: findable while scrolling past, without competing with the fault. */
-.console .warn { color: var(--amber); border-left-color: #5c4718; }
-.console .warn::before { content: "\26a0"; color: var(--amber); }
+.console .warn {
+  color: var(--amber);
+  border-left-color: #5c4718;
+}
+.console .warn::before {
+  content: "\26a0";
+  color: var(--amber);
+}
 
 .console .ok { color: var(--green); }
-.console .ok::before { content: "\2713"; color: var(--green); }
+.console .ok::before {
+  content: "\2713";
+  color: var(--green);
+}
 
 .console .dim { color: var(--muted); }
-.console .dim::before { content: "\b7"; color: #3f4860; }
+.console .dim::before {
+  content: "\b7";
+  color: #3f4860;
+}
 
-@keyframes log-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes log-in {
+  from { opacity: 0;
+  } to { opacity: 1;
+  };
+}
 
 /* dropzone */
 
@@ -794,11 +945,24 @@ body.resizing { cursor: col-resize; user-select: none; }
   cursor: pointer;
   transition: border-color .12s, background .12s;
 }
-.dropzone.drag, .dropzone:hover { border-color: var(--accent); background: #10182a; }
-.dropzone-title { font-size: 13px; color: var(--text); }
+.dropzone.drag, .dropzone:hover {
+  border-color: var(--accent);
+  background: #10182a;
+}
+.dropzone-title {
+  font-size: 13px;
+  color: var(--text);
+}
 .dropzone-sub { font-size: 12px; }
-.dropzone label { color: var(--accent); cursor: pointer; text-decoration: underline; }
-.dropzone code { font-family: var(--mono); color: var(--accent); }
+.dropzone label {
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+.dropzone code {
+  font-family: var(--mono);
+  color: var(--accent);
+}
 
 /* list rows */
 
@@ -806,7 +970,11 @@ body.resizing { cursor: col-resize; user-select: none; }
    container around it, so these rows are the only way to start one - which is
    why each is a row that says what it launches, not one more small button in a
    wrap of identical small buttons. */
-.nand-titles { display: flex; flex-direction: column; gap: 4px; }
+.nand-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
 
 .row-item {
   display: flex;
@@ -823,10 +991,26 @@ body.resizing { cursor: col-resize; user-select: none; }
   cursor: pointer;
   transition: background .12s, border-color .12s;
 }
-.row-item:hover { background: #1e2433; border-color: #33405c; }
-.row-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.row-name { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
-.row-sub { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.row-item:hover {
+  background: #1e2433;
+  border-color: #33405c;
+}
+.row-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.row-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.row-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
 .row-action {
   margin-left: auto;
   flex: none;
@@ -862,10 +1046,16 @@ body.resizing { cursor: col-resize; user-select: none; }
 }
 .nsp-list li:last-child { border-bottom: none; }
 .nsp-list .name { overflow-wrap: anywhere; }
-.nsp-list .size { flex: none; color: var(--muted); }
+.nsp-list .size {
+  flex: none;
+  color: var(--muted);
+}
 /* Only an .nca can be inspected, so only those rows offer to be. */
 .nsp-list li.clickable { cursor: pointer; }
-.nsp-list li.clickable:hover { background: var(--chrome-hi); color: var(--accent); }
+.nsp-list li.clickable:hover {
+  background: var(--chrome-hi);
+  color: var(--accent);
+}
 .nsp-list li.clickable .size { color: inherit; }
 
 .nca-info {
@@ -892,7 +1082,11 @@ body.resizing { cursor: col-resize; user-select: none; }
    metadata. */
 .paired-note { border-left: 3px solid var(--accent); }
 
-#nsp-result { display: flex; flex-direction: column; gap: 10px; }
+#nsp-result {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
 #nsp-result:empty { display: none; }
 
 /* The title's own identity - icon, name, publisher - above the container's
@@ -916,10 +1110,27 @@ body.resizing { cursor: col-resize; user-select: none; }
   background: var(--chrome);
   object-fit: cover;
 }
-.title-meta { flex: 1 1 160px; min-width: 0; }
-.title-name { font-size: 15px; font-weight: 600; line-height: 1.25; overflow-wrap: anywhere; }
-.title-publisher { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
-.title-tags { margin-top: 4px; font-family: var(--mono); font-size: 11.5px; color: var(--accent); }
+.title-meta {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+.title-name {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.title-publisher {
+  color: var(--muted);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.title-tags {
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--accent);
+}
 .title-card .nca-info {
   flex-basis: 100%;
   padding: 8px 0 0;
@@ -931,7 +1142,10 @@ body.resizing { cursor: col-resize; user-select: none; }
 
 /* profiles */
 
-.profile-button { gap: 7px; padding: 3px 10px 3px 4px; }
+.profile-button {
+  gap: 7px;
+  padding: 3px 10px 3px 4px;
+}
 .profile-avatar {
   display: inline-flex;
   align-items: center;
@@ -945,7 +1159,11 @@ body.resizing { cursor: col-resize; user-select: none; }
   font-weight: 600;
   font-size: 17px;
 }
-.profile-avatar.small { width: 22px; height: 22px; font-size: 11px; }
+.profile-avatar.small {
+  width: 22px;
+  height: 22px;
+  font-size: 11px;
+}
 
 .profiles {
   width: min(460px, calc(100vw - 32px));
@@ -956,9 +1174,17 @@ body.resizing { cursor: col-resize; user-select: none; }
   border: 1px solid var(--border);
   border-radius: var(--radius);
 }
-.profiles::backdrop { background: rgba(3, 4, 8, .6); }
-.profiles-head { display: flex; align-items: center; margin-bottom: 4px; }
-.profiles-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.profiles::backdrop { background: rgb(3 4 8 / 60%); }
+.profiles-head {
+  display: flex;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.profiles-head h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
 .profiles p { margin: 4px 0; }
 
 .profile-list {
@@ -982,9 +1208,16 @@ body.resizing { cursor: col-resize; user-select: none; }
 /* The playing profile is the one a title will start as, so it is the one
    the eye should land on. */
 .profile-row.is-playing { border-color: var(--accent-dim); }
-.profile-picture { display: inline-flex; border-radius: 50%; cursor: pointer; }
+.profile-picture {
+  display: inline-flex;
+  border-radius: 50%;
+  cursor: pointer;
+}
 .profile-picture:hover .profile-avatar { filter: brightness(1.15); }
-.profile-picture:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.profile-picture:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .profile-main {
   display: flex;
   align-items: center;
@@ -992,11 +1225,31 @@ body.resizing { cursor: col-resize; user-select: none; }
   flex: 1 1 120px;
   min-width: 0;
 }
-.profile-name { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.profile-playing { font-size: 11.5px; color: var(--accent); }
-.profile-confirm { font-size: 13px; color: var(--red); }
-.profile-actions { display: flex; flex-wrap: wrap; gap: 4px; }
-.profile-rename, .profile-add { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; }
+.profile-name {
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.profile-playing {
+  font-size: 11.5px;
+  color: var(--accent);
+}
+.profile-confirm {
+  font-size: 13px;
+  color: var(--red);
+}
+.profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.profile-rename, .profile-add {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+}
 .text {
   flex: 1 1 auto;
   min-width: 0;
@@ -1008,13 +1261,20 @@ body.resizing { cursor: col-resize; user-select: none; }
   font: inherit;
   font-size: 13px;
 }
-.text:focus { outline: none; border-color: var(--accent); }
-.btn.danger-solid { background: #5e2626; border-color: #7a3030; color: #fff; }
+.text:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.btn.danger-solid {
+  background: #5e2626;
+  border-color: #7a3030;
+  color: #fff;
+}
 .btn.danger-solid:hover { background: #7a3030; }
 
 /* narrow screens: the panel becomes a bottom sheet */
 
-@media (max-width: 820px) {
+@media (width <= 820px) {
   body { flex-direction: column; }
   .panel {
     flex: 0 0 45vh;
@@ -1029,9 +1289,16 @@ body.resizing { cursor: col-resize; user-select: none; }
   body.panel-open .panel {
     animation-name: sheet-in;
   }
+
   @keyframes sheet-in {
-    from { opacity: 0; transform: translateY(12px); }
-    to   { opacity: 1; transform: none; }
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
   }
   .transport .btn span:not(.glyph) { display: none; }
   /* Only where the icon is left to say which title it is: homebrew launched
@@ -1039,7 +1306,11 @@ body.resizing { cursor: col-resize; user-select: none; }
      nothing at all. */
   .running.has-icon .running-meta { display: none; }
   .running { padding-left: 8px; }
-  .running-icon { width: 26px; height: 26px; border-radius: 6px; }
+  .running-icon {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+  }
   .running-name { max-width: 14ch; }
   .topbar { gap: 8px; }
   .statusbar .item:nth-child(n+3) { display: none; }
@@ -1051,7 +1322,11 @@ body.resizing { cursor: col-resize; user-select: none; }
   body.panel-open .panel { animation: none; }
   /* A bar that sweeps for the whole of a boot is exactly the motion this
      query is asking to be spared; it becomes a dim full-width rule instead. */
-  .loading-bar span { animation: none; width: 100%; opacity: .55; }
+  .loading-bar span {
+    animation: none;
+    width: 100%;
+    opacity: .55;
+  }
   .section-head::before { transition: none; }
   .console div { animation: none; }
 }

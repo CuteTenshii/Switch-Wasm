@@ -34,18 +34,21 @@ export interface LaunchIdentity {
 }
 
 const nspDrop = $('nsp-drop');
-nspDrop.addEventListener('dragover', (e) => { e.preventDefault(); nspDrop.classList.add('drag'); });
+nspDrop.addEventListener('dragover', (e) => {
+  e.preventDefault();
+  nspDrop.classList.add('drag');
+});
 nspDrop.addEventListener('dragleave', () => nspDrop.classList.remove('drag'));
 nspDrop.addEventListener('drop', (e) => {
   e.preventDefault();
   nspDrop.classList.remove('drag');
   const file = e.dataTransfer?.files[0];
-  if (file) handleContainerFile(file);
+  if (file) void handleContainerFile(file);
 });
 $('nsp-file').addEventListener('change', (e) => {
   const file = pickedFile(e);
   (e.target as HTMLInputElement).value = '';
-  if (file) handleContainerFile(file);
+  if (file) void handleContainerFile(file);
 });
 
 // A `.nca` is one piece of content rather than a container of them, so it is
@@ -132,7 +135,7 @@ interface RememberedUpdate { name: string; version: string }
 
 function rememberedUpdates(): Record<string, RememberedUpdate> {
   try {
-    return JSON.parse(localStorage.getItem(UPDATE_MEMORY) || '{}');
+    return JSON.parse(localStorage.getItem(UPDATE_MEMORY) || '{}') as Record<string, RememberedUpdate>;
   } catch {
     return {};
   }
@@ -150,7 +153,7 @@ function rememberUpdate(u: HeldUpdate): void {
 
 function rememberedDlc(): Record<string, string[]> {
   try {
-    return JSON.parse(localStorage.getItem(DLC_MEMORY) || '{}');
+    return JSON.parse(localStorage.getItem(DLC_MEMORY) || '{}') as Record<string, string[]>;
   } catch {
     return {};
   }
@@ -169,7 +172,7 @@ function rememberDlc(titleId: string, name: string): void {
 }
 
 async function handleDlcFile(file: File, packs: number): Promise<void> {
-  const entries: DlcEntry[] = JSON.parse(await call('dlc_json').catch(() => '[]'));
+  const entries = JSON.parse(await call('dlc_json').catch(() => '[]')) as DlcEntry[];
   // The session holds every piece ever added; this container's are the ones
   // that were not there before, which is what `add_dlc` just returned a count
   // of. Taking them from the tail keeps the page's list and the session's in
@@ -342,7 +345,7 @@ export async function bootContainer(file: File, format: 'pfs0' | 'xci' | 'nca'):
     setState('idle');
     failLoad(held.titleId === openTitleId
       ? describeDlc(packs) + ' added - launch ' + (heldTitle?.name || 'the game')
-        + ' to run with them.'
+      + ' to run with them.'
       : 'That is add-on content for ' + held.titleId + ', not a game. Open that title'
         + ' to launch it with them.');
     openPanel('files');
@@ -428,7 +431,7 @@ async function handleNspFile(file: File): Promise<void> {
     return;
   }
   status.remove();
-  nspFiles = JSON.parse(await call('nsp_files_json'));
+  nspFiles = JSON.parse(await call('nsp_files_json')) as NspFile[];
   log('Parsed ' + nspFiles.length + ' file(s). Click an .nca to inspect it.', 'ok');
 
   const ul = el('ul', 'nsp-list');
@@ -475,14 +478,16 @@ function holdTitle(info: ControlInfo | null, icon: Bytes | null): LaunchIdentity
   const blob = info && icon && icon.length
     ? new Blob([icon], { type: info.icon_mime })
     : null;
-  heldTitle = info ? {
-    name: info.name,
-    publisher: info.publisher || '',
-    titleId: info.title_id,
-    iconUrl: blob ? URL.createObjectURL(blob) : null,
-    icon: blob,
-    version: info.version || '',
-  } : null;
+  heldTitle = info
+    ? {
+        name: info.name,
+        publisher: info.publisher || '',
+        titleId: info.title_id,
+        iconUrl: blob ? URL.createObjectURL(blob) : null,
+        icon: blob,
+        version: info.version || '',
+      }
+    : null;
   return heldTitle;
 }
 
@@ -504,7 +509,7 @@ async function showTitleCard(loader: () => Promise<number>): Promise<ControlInfo
       log('No title details: ' + await readLastError(), 'dim');
       return null;
     }
-    info = JSON.parse(await call('control_json'));
+    info = JSON.parse(await call('control_json')) as ControlInfo;
   } catch (err) {
     log('No title details: ' + (err as Error).message, 'dim');
     return null;
@@ -551,7 +556,9 @@ function renderTitleCard(info: ControlInfo, iconUrl: string | null): HTMLElement
    most titles set only a handful, and a column of zeroes says nothing. */
 function titleRows(info: ControlInfo): [string, string][] {
   const rows: [string, string][] = [];
-  const push = (k: string, v: string | undefined) => { if (v) rows.push([k, v]); };
+  const push = (k: string, v: string | undefined) => {
+    if (v) rows.push([k, v]);
+  };
   push('Language', info.language);
   push('Localized', (info.languages || []).join(', '));
   push('Age rating', (info.ratings || []).map((r) => r.organisation + ' ' + r.age).join(', '));
@@ -563,7 +570,7 @@ function titleRows(info: ControlInfo): [string, string][] {
     push('DLC base id', info.add_on_content_base_id);
   }
   if (info.save_data_owner_id && info.save_data_owner_id !== info.title_id
-      && !/^0+$/.test(info.save_data_owner_id)) {
+    && !/^0+$/.test(info.save_data_owner_id)) {
     push('Save data owner', info.save_data_owner_id);
   }
   push('Error codes', info.error_code_category);
@@ -657,7 +664,7 @@ async function parseAndRenderNca(
 ): Promise<NcaInfo | null> {
   let info: NcaInfo;
   try {
-    info = JSON.parse(await call('parse_nca', header));
+    info = JSON.parse(await call('parse_nca', header)) as NcaInfo;
   } catch (err) {
     out.textContent = 'parse failed: ' + (err as Error).message;
     return null;

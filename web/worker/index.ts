@@ -179,7 +179,7 @@ let gpuReopens = 0;
 function gpuLost(): boolean {
   if (state.handle < 0) return false;
   const lost = (state.exports as unknown as {
-    switch_gpu_lost?(handle: number): number;
+    switch_gpu_lost?: (handle: number) => number;
   }).switch_gpu_lost;
   // A core built before this export exists is not a core with a lost device.
   return !!lost && lost(state.handle) !== 0;
@@ -223,7 +223,7 @@ function tryGpu(): void {
   if (gpu !== 'no' || state.handle < 0) return;
   gpu = 'trying';
   const open = (state.exports as unknown as {
-    switch_gpu_open(handle: number, deviceMsaa: boolean, interleave: boolean): Promise<string>;
+    switch_gpu_open: (handle: number, deviceMsaa: boolean, interleave: boolean) => Promise<string>;
   }).switch_gpu_open;
   open(state.handle, GPU_DEVICE_MSAA, GPU_INTERLEAVE).then(async (what) => {
     if (what.startsWith(RENDERING_ON)) {
@@ -273,7 +273,7 @@ ctx.onmessage = (e: MessageEvent<CallRequest>) => {
     if (result instanceof Uint8Array) {
       reply({ id, ok: true, result }, [result.buffer as ArrayBuffer]);
     } else if (result && typeof result === 'object' && 'error' in result) {
-      reply({ id, ok: false, error: String((result as { error: unknown }).error) });
+      reply({ id, ok: false, error: String((result).error) });
     } else {
       reply({ id, ok: true, result });
     }
@@ -286,7 +286,7 @@ ctx.onmessage = (e: MessageEvent<CallRequest>) => {
   }
 };
 
-(async () => {
+void (async () => {
   try {
     // The core is a wasm-bindgen module, because the GPU backend inside it
     // reaches WebGPU through wasm-bindgen's glue. `init` builds the import

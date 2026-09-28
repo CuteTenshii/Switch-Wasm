@@ -134,7 +134,11 @@ gripEl.addEventListener('pointerdown', (e) => {
   // grip, which it is for all but the first pixel of any real drag. The move
   // and up listeners are on the window rather than the grip so a browser that
   // refuses the capture still gets a working drag out of it.
-  try { gripEl.setPointerCapture(e.pointerId); } catch { /* enhancement only */ }
+  try {
+    gripEl.setPointerCapture(e.pointerId);
+  } catch {
+    // enhancement only
+  }
 });
 window.addEventListener('pointermove', (e) => {
   if (gripPointer < 0) return;
@@ -142,7 +146,11 @@ window.addEventListener('pointermove', (e) => {
 });
 function endPanelResize(): void {
   if (gripPointer < 0) return;
-  try { gripEl.releasePointerCapture(gripPointer); } catch { /* never captured */ }
+  try {
+    gripEl.releasePointerCapture(gripPointer);
+  } catch {
+    // never captured
+  }
   gripPointer = -1;
   gripEl.classList.remove('dragging');
   document.body.classList.remove('resizing');
@@ -162,6 +170,6 @@ gripEl.addEventListener('keydown', (e) => {
 });
 
 $('btn-fullscreen').addEventListener('click', () => {
-  if (document.fullscreenElement) document.exitFullscreen();
-  else stageEl.requestFullscreen?.();
+  if (document.fullscreenElement) void document.exitFullscreen();
+  else void stageEl.requestFullscreen?.();
 });

@@ -42,8 +42,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const USAGE =
-  'usage: node tools/wasm_bench.mjs <container> [switch_wasm.wasm]' +
-  ' [--frames=N] [--keys=prod.keys] [--title-keys=title.keys] [--firmware=dir] [--kind=nsp|nca|nro|elf]';
+  'usage: node tools/wasm_bench.mjs <container> [switch_wasm.wasm]'
+  + ' [--frames=N] [--keys=prod.keys] [--title-keys=title.keys] [--firmware=dir] [--kind=nsp|nca|nro|elf]';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -76,16 +76,16 @@ const FRAMES = Number(flag('frames')) || 8;
 // glue is written beside the original so that its own relative paths still
 // resolve.
 const shim =
-  'data:text/javascript,' +
-  encodeURIComponent(
-    'export const hostRead = (file, offset, ptr, len) =>' +
-      ' globalThis.__benchHostRead(file, offset, ptr, len);',
+  'data:text/javascript,'
+  + encodeURIComponent(
+    'export const hostRead = (file, offset, ptr, len) =>'
+    + ' globalThis.__benchHostRead(file, offset, ptr, len);',
   );
 const gluePath = join(release, 'switch_wasm.js');
 const benchGlue = join(release, 'switch_wasm.bench.mjs');
 writeFileSync(
   benchGlue,
-  readFileSync(gluePath, 'utf8').replace("'@host/files'", JSON.stringify(shim)),
+  readFileSync(gluePath, 'utf8').replace('\'@host/files\'', JSON.stringify(shim)),
 );
 const init = (await import(pathToFileURL(benchGlue).href)).default;
 const api = await init({ module_or_path: readFileSync(wasmPath) });
@@ -280,8 +280,8 @@ if (kind === 'nro' || kind === 'elf') {
 // An entry of 0 is legitimate for some NSO layouts, so -1 is the only failure.
 if (entry < 0n) die('load failed');
 console.log(
-  `${kind}: ${containerPath} (${(containerSize / (1024 * 1024)).toFixed(1)} MiB),` +
-    ` entry ${'0x' + entry.toString(16)}`,
+  `${kind}: ${containerPath} (${(containerSize / (1024 * 1024)).toFixed(1)} MiB),`
+  + ` entry ${'0x' + entry.toString(16)}`,
 );
 
 // The same slice size the frontend runs (`web/main/runloop.ts`).
@@ -313,8 +313,8 @@ const boot = reach(WARMUP_FRAMES);
 if (api.switch_frame_count(handle) < WARMUP_FRAMES) {
   const why = lastError();
   console.error(
-    `never presented ${WARMUP_FRAMES} frames: stopped at ${api.switch_frame_count(handle)}` +
-      (why ? ` (${why})` : ''),
+    `never presented ${WARMUP_FRAMES} frames: stopped at ${api.switch_frame_count(handle)}`
+    + (why ? ` (${why})` : ''),
   );
   process.exit(1);
 }
@@ -363,8 +363,8 @@ const secs = (performance.now() - started) / 1000;
 
 console.log(`${steady.length} frames after the first, under V8 (${process.version})`);
 console.log(
-  `  frame: mean ${mean.toFixed(1)} ms  min ${sorted[0].toFixed(1)} ms` +
-    `  median ${sorted[sorted.length >> 1].toFixed(1)} ms  -> ${(1000 / mean).toFixed(2)} fps`,
+  `  frame: mean ${mean.toFixed(1)} ms  min ${sorted[0].toFixed(1)} ms`
+  + `  median ${sorted[sorted.length >> 1].toFixed(1)} ms  -> ${(1000 / mean).toFixed(2)} fps`,
 );
 console.log(`  cpu:   ${(Number(steps) / secs / 1e6).toFixed(1)} M instructions/s over ${secs.toFixed(2)}s`);
 // The count `examples/frame_work.rs` reports for the same program. It should
@@ -372,7 +372,7 @@ console.log(`  cpu:   ${(Number(steps) / secs / 1e6).toFixed(1)} M instructions/
 // only in what compiled them. Where it does not, one of the two is not running
 // what you think it is.
 console.log(
-  `  work:  ${(Number(steps) / deltas.length).toFixed(0)} instructions/frame,` +
-    ` ${(Number(api.switch_guest_ram(handle)) / (1024 * 1024)).toFixed(1)} MiB guest RAM`,
+  `  work:  ${(Number(steps) / deltas.length).toFixed(0)} instructions/frame,`
+  + ` ${(Number(api.switch_guest_ram(handle)) / (1024 * 1024)).toFixed(1)} MiB guest RAM`,
 );
 console.log(`  jit:   ${text((ptr, cap) => api.switch_jit_stats_json(handle, ptr, cap))}`);

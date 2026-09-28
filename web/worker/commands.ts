@@ -192,8 +192,7 @@ export const CMD: CommandHandlers = {
     const result = api().switch_add_archive(handle(), index, BigInt(file.size));
     if (result < 0) {
       workerLog(`[io] system archive ${describe(file)}: refused (${lastError()})`, 'warn');
-    }
-    else noteRegistered('system archives', file.size);
+    } else noteRegistered('system archives', file.size);
     return result;
   },
   // Register an update container for the title in the open container. Like
@@ -627,7 +626,7 @@ export const CMD: CommandHandlers = {
       ...user,
       picture: pictureLen
         ? withBuffer(pictureLen, (buf) =>
-          fromWasm(buf, api().switch_user_picture(handle(), ...uidHalves(user.uid), buf, pictureLen)))
+            fromWasm(buf, api().switch_user_picture(handle(), ...uidHalves(user.uid), buf, pictureLen)))
         : null,
     }));
   },

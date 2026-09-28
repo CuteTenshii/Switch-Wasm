@@ -10,7 +10,9 @@ import { log } from './log';
 let worker: Worker | null = null;
 let ready = false;
 let readyResolve!: () => void;
-const readyPromise = new Promise<void>((r) => { readyResolve = r; });
+const readyPromise = new Promise<void>((r) => {
+  readyResolve = r;
+});
 
 // The session the worker is holding, mirrored here so the persistence flushes
 // can tell whether there is anything to flush. Display only otherwise.

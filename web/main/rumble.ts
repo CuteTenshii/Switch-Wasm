@@ -25,7 +25,7 @@ export async function pullVibration(pad: Gamepad | undefined): Promise<void> {
   const actuator = pad?.vibrationActuator as DualRumbleActuator | undefined;
   if (!actuator?.playEffect) return;
   const packed = await call('vibration');
-  if (packed === lastRumble) return;   // re-issuing the same effect stutters it
+  if (packed === lastRumble) return; // re-issuing the same effect stutters it
   lastRumble = packed;
   const strong = (packed & 0xffff) / 1000;
   const weak = (packed >>> 16) / 1000;

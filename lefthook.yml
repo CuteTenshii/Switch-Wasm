@@ -27,6 +27,16 @@ pre-commit:
       run: cargo clippy --workspace --all-targets -- -D warnings
       fail_text: "Clippy warnings, which CI treats as errors."
 
+    - name: eslint
+      glob: "*.{ts,mjs}"
+      run: bun run eslint
+      fail_text: "ESLint errors: run `bunx eslint . --fix` for the stylistic ones."
+
+    - name: stylelint
+      glob: "*.css"
+      run: bun run stylelint
+      fail_text: "Stylelint errors: run `bunx stylelint 'web/**/*.css' --fix`."
+
     # Vite does not type-check, so without this a type error first shows up
     # in CI.
     - name: typecheck

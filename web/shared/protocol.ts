@@ -247,6 +247,8 @@ export interface UserRecord {
 }
 
 export interface Commands {
+  // Quoted: unquoted, `new()` in an interface is a construct signature.
+  // eslint-disable-next-line @stylistic/quote-props
   'new'(): number;
   free_session(): number;
 

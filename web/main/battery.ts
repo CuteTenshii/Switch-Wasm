@@ -20,9 +20,10 @@ type NavigatorWithBattery = Navigator & { getBattery?: () => Promise<BatteryMana
 export function watchBattery(): void {
   const nav = navigator as NavigatorWithBattery;
   if (!nav.getBattery) return;
-  nav.getBattery().then((battery) => {
-    const push = () =>
-      call('set_battery', Math.round(battery.level * 100), battery.charging ? 1 : 0);
+  void nav.getBattery().then((battery) => {
+    const push = () => {
+      void call('set_battery', Math.round(battery.level * 100), battery.charging ? 1 : 0);
+    };
     push();
     battery.addEventListener('levelchange', push);
     battery.addEventListener('chargingchange', push);

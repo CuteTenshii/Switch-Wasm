@@ -70,7 +70,7 @@ export async function loadProgram(file: File, kind: 'nro' | 'elf'): Promise<bool
 async function homebrewTitle(filename: string): Promise<RunningTitle> {
   let info: ControlInfo;
   try {
-    info = JSON.parse(await call('control_json'));
+    info = JSON.parse(await call('control_json')) as ControlInfo;
   } catch (err) {
     log('No homebrew details: ' + (err as Error).message, 'dim');
     return { name: filename, icon: null, version: '' };
@@ -133,7 +133,10 @@ stageEl.addEventListener('dragenter', (e) => {
 });
 stageEl.addEventListener('dragover', (e) => e.preventDefault());
 stageEl.addEventListener('dragleave', () => {
-  if (--dragDepth <= 0) { dragDepth = 0; dropveilEl.classList.remove('on'); }
+  if (--dragDepth <= 0) {
+    dragDepth = 0;
+    dropveilEl.classList.remove('on');
+  }
 });
 stageEl.addEventListener('drop', async (e) => {
   e.preventDefault();

@@ -37,8 +37,8 @@ import { chromium } from 'playwright';
 import { preview } from 'vite';
 
 const USAGE =
-  'usage: node tools/browser_boot.mjs <container> [--keys=prod.keys] [--title-keys=title.keys]' +
-  ' [--seconds=N] [--out=log.txt] [--jit-stats]';
+  'usage: node tools/browser_boot.mjs <container> [--keys=prod.keys] [--title-keys=title.keys]'
+  + ' [--seconds=N] [--out=log.txt] [--jit-stats]';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');

@@ -25,7 +25,7 @@ function render(): void {
 button.addEventListener('click', () => {
   docked = !docked;
   render();
-  call('set_operation_mode', docked ? 1 : 0);
+  void call('set_operation_mode', docked ? 1 : 0);
   log(
     docked
       ? 'Docked - 1080p, boost clocks, no touchscreen.'

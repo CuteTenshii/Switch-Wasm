@@ -30,13 +30,13 @@ const wasmPath = process.argv[2] || join(out, 'switch_wasm_bg.wasm');
 // aliases and node cannot resolve. Nothing here reads a host file — the guest
 // program is handed over whole — so it is pointed at a shim that refuses.
 const shim =
-  'data:text/javascript,' +
-  encodeURIComponent('export const hostRead = () => 0;');
+  'data:text/javascript,'
+  + encodeURIComponent('export const hostRead = () => 0;');
 const glue = join(out, 'switch_wasm.jitcheck.mjs');
 writeFileSync(
   glue,
   readFileSync(join(out, 'switch_wasm.js'), 'utf8').replace(
-    "'@host/files'",
+    '\'@host/files\'',
     JSON.stringify(shim),
   ),
 );

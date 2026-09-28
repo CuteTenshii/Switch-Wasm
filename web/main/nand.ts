@@ -73,8 +73,8 @@ function nandInstall(name: string, content: Blob, titleId: string, kind: number)
     tx.objectStore(NAND_CONTENT).put(content, name);
     tx.objectStore(NAND_TITLES).put({ name, kind }, titleId);
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB request failed'));
   }));
 }
 
@@ -84,8 +84,8 @@ function nandErase() {
     tx.objectStore(NAND_CONTENT).clear();
     tx.objectStore(NAND_TITLES).clear();
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB request failed'));
   }));
 }
 
@@ -353,7 +353,7 @@ $('firmware-ncas').addEventListener('change', async (e) => {
   // the ones that are get registered, so the skipped count is expected.
   log('Installed ' + installed + ' title(s) of ' + files.length + ' file(s); '
     + (registered ?? archiveCount) + ' registered as system data archives.',
-    installed ? 'ok' : 'dim');
+  installed ? 'ok' : 'dim');
 });
 
 $('btn-erase-nand').addEventListener('click', async () => {

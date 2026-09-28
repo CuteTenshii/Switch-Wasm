@@ -67,8 +67,8 @@ function idbRequest<T>(run: (store: IDBObjectStore) => IDBRequest<T>, mode: IDBT
     const tx = db.transaction(NAND_USERS, mode);
     const req = run(tx.objectStore(NAND_USERS));
     tx.oncomplete = () => resolve(req.result);
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB request failed'));
   }));
 }
 
@@ -94,7 +94,7 @@ export async function loadProfiles(): Promise<void> {
       const k = store.getAllKeys();
       const v = store.getAll();
       tx.oncomplete = () => resolve([k.result, v.result]);
-      tx.onerror = () => reject(tx.error);
+      tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
     });
     profiles = [];
     keys.forEach((key, i) => {
@@ -154,7 +154,7 @@ async function deleteSavesOf(uid: string): Promise<number> {
     cursor.onsuccess = () => {
       const at = cursor.result;
       if (!at) return;
-      const key = String(at.key);
+      const key = at.key as string;
       const cut = key.indexOf('/');
       const id = cut < 0 ? key : key.slice(0, cut);
       if (id.endsWith('@' + uid)) {
@@ -164,7 +164,7 @@ async function deleteSavesOf(uid: string): Promise<number> {
       at.continue();
     };
     tx.oncomplete = () => resolve(removed);
-    tx.onerror = () => reject(tx.error);
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB request failed'));
   });
 }
 
@@ -282,7 +282,10 @@ function renderRow(profile: Profile): HTMLElement {
     yes.addEventListener('click', () => void removeProfile(profile));
     const no = el('button', 'btn small ghost', 'Keep');
     no.type = 'button';
-    no.addEventListener('click', () => { confirming = null; renderProfiles(); });
+    no.addEventListener('click', () => {
+      confirming = null;
+      renderProfiles();
+    });
     actions.append(yes, no);
     queueMicrotask(() => no.focus());
   } else if (renaming !== profile.uid) {
@@ -294,7 +297,11 @@ function renderRow(profile: Profile): HTMLElement {
     }
     const rename = el('button', 'btn small ghost', 'Rename');
     rename.type = 'button';
-    rename.addEventListener('click', () => { renaming = profile.uid; confirming = null; renderProfiles(); });
+    rename.addEventListener('click', () => {
+      renaming = profile.uid;
+      confirming = null;
+      renderProfiles();
+    });
     actions.append(rename);
     if (profile.picture) {
       const clear = el('button', 'btn small ghost', 'Remove picture');
@@ -310,7 +317,11 @@ function renderRow(profile: Profile): HTMLElement {
       del.type = 'button';
       del.disabled = locked;
       if (locked) del.title = 'Reset the console to delete the profile the running title is playing as';
-      del.addEventListener('click', () => { confirming = profile.uid; renaming = null; renderProfiles(); });
+      del.addEventListener('click', () => {
+        confirming = profile.uid;
+        renaming = null;
+        renderProfiles();
+      });
       actions.append(del);
     }
   }
@@ -329,7 +340,10 @@ function renameForm(profile: Profile): HTMLFormElement {
   save.type = 'submit';
   const cancel = el('button', 'btn small ghost', 'Cancel');
   cancel.type = 'button';
-  cancel.addEventListener('click', () => { renaming = null; renderProfiles(); });
+  cancel.addEventListener('click', () => {
+    renaming = null;
+    renderProfiles();
+  });
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     void rename(profile, input.value);
@@ -344,7 +358,10 @@ function renameForm(profile: Profile): HTMLFormElement {
     }
   });
   form.append(input, save, cancel);
-  queueMicrotask(() => { input.focus(); input.select(); });
+  queueMicrotask(() => {
+    input.focus();
+    input.select();
+  });
   return form;
 }
 
