@@ -13,6 +13,7 @@ import { $ } from './dom';
  *  executable has only the file it came from. */
 export interface RunningTitle {
   name: string;
+  publisher: string;
   icon: Blob | null;
   /** The version the NACP declares, or the update's where one was applied.
    *  Empty for homebrew and for the titles that set none. */
@@ -55,7 +56,11 @@ export function setRunning(title: RunningTitle | null): void {
   rootEl.classList.toggle('has-icon', Boolean(iconUrl));
   if (iconUrl) iconEl.src = iconUrl;
   else iconEl.removeAttribute('src');
-  document.title = title ? title.name + ' - ' + SHORT_TITLE : PAGE_TITLE;
+  document.title = title
+    ? [title.name, title.version ? 'v' + title.version : '', title.publisher, SHORT_TITLE]
+        .filter(Boolean)
+        .join(' \u00b7 ')
+    : PAGE_TITLE;
 }
 
 /** The running title's icon, for a screen that wants to show the same one.

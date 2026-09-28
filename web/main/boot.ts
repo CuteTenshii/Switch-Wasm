@@ -73,7 +73,7 @@ async function homebrewTitle(filename: string): Promise<RunningTitle> {
     info = JSON.parse(await call('control_json')) as ControlInfo;
   } catch (err) {
     log('No homebrew details: ' + (err as Error).message, 'dim');
-    return { name: filename, icon: null, version: '' };
+    return { name: filename, publisher: '', icon: null, version: '' };
   }
   const icon = info.icon_size > 0 ? await call('control_icon', info.icon_size) : null;
   if (info.name) {
@@ -81,6 +81,7 @@ async function homebrewTitle(filename: string): Promise<RunningTitle> {
   }
   return {
     name: info.name || filename,
+    publisher: info.publisher || '',
     icon: icon && icon.length ? new Blob([icon], { type: info.icon_mime }) : null,
     version: info.version || '',
   };

@@ -795,6 +795,7 @@ export async function doLaunchNca(
   log('Launched ' + name + ' - entry 0x' + entry.toString(16).padStart(8, '0'), 'ok');
   setRunning({
     name: identity?.name || name,
+    publisher: identity?.publisher || '',
     icon: identity?.icon ?? null,
     version: identity?.version || '',
   });
