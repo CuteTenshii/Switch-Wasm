@@ -28,6 +28,12 @@ import { holdWakeLock, releaseWakeLock } from './wakelock';
 // to 5M steps), only the round trips below, so this buys ~5x lower input
 // latency for ~6% of throughput.
 const RUN_SLICE = 1_000_000;
+// A visible page should hand control back at its paint boundary, not merely
+// queue another zero-delay timer. Fast JIT slices otherwise make the page
+// exchange worker messages faster than Chrome can composite their results.
+// The timeout keeps a run alive when a hidden tab stops issuing animation
+// frames; background timers may be throttled further by the browser.
+const PAINT_FALLBACK_MS = 100;
 // Slices between panel refreshes. `updatePc`/`drainOutput`/`drainDiagnostics`/
 // `sdFlush` are eight postMessage round trips of debug-panel text that nothing
 // time-critical reads, so running them once per slice would spend more of the
@@ -61,6 +67,19 @@ function nothingLoaded(): boolean {
   return true;
 }
 
+function waitForPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    const frame = requestAnimationFrame(() => {
+      clearTimeout(fallback);
+      resolve();
+    });
+    const fallback = setTimeout(() => {
+      cancelAnimationFrame(frame);
+      resolve();
+    }, PAINT_FALLBACK_MS);
+  });
+}
+
 export async function run(): Promise<void> {
   if (running) {
     pauseRequested = true;
@@ -89,8 +108,10 @@ export async function run(): Promise<void> {
       // be thrown away - so by the time one returns the session may be gone.
       // Every call below reads it, so the loop leaves rather than asking.
       if (aborted) return;
-      // Yield so the UI repaints and any queued input is processed.
-      await new Promise((r) => setTimeout(r, 0));
+      // One slice per paint bounds worker chatter and framebuffer snapshots.
+      // `presentIfNewFrame` reads the latest counter after this wait, so guest
+      // frames produced between browser paints are dropped rather than queued.
+      await waitForPaint();
       if (aborted) return;
       // `Cpu::run` only stops short of its budget when the machine halted, so
       // a short slice means this run is over - no separate `halted` round trip.
