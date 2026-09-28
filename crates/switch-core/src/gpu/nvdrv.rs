@@ -230,7 +230,7 @@ impl NvDrv {
         let fd = self.next_fd;
         self.next_fd += 1;
         self.files.insert(fd, file);
-        if self.gpu.trace {
+        if crate::trace::enabled(crate::trace::Trace::Nv) {
             crate::traceln!(
                 "[nv] open {} -> fd {}{}",
                 path,
@@ -293,7 +293,7 @@ impl NvDrv {
             Some(file) => file.clone(),
             None => return Ok(NV_BAD_PARAMETER),
         };
-        if self.gpu.trace {
+        if crate::trace::enabled(crate::trace::Trace::Nv) {
             crate::traceln!(
                 "[nv] ioctl fd={} {:?} type={:#04x} nr={:#04x} size={} ({} bytes in)",
                 fd,
@@ -390,7 +390,7 @@ impl NvDrv {
                         addr
                     )));
                 }
-                if self.gpu.trace {
+                if crate::trace::enabled(crate::trace::Trace::Nv) {
                     // With whatever the handle was bound to before. A second
                     // alloc on a handle that is already mapped would leave the
                     // GPU address space pointing at the old memory, which is
@@ -549,7 +549,7 @@ impl NvDrv {
             // name with nothing set, rather than "not implemented", which the
             // diagnostic channel reports as a gap in the driver.
             0x1B => {
-                if self.gpu.trace {
+                if crate::trace::enabled(crate::trace::Trace::Nv) {
                     crate::traceln!(
                         "[nv] GetConfig {}!{} -> refused (production mode)",
                         ascii_field(data, 0, 0x41),
@@ -801,13 +801,27 @@ impl NvDrv {
                         write_u64(data, 0x20, gpu_va);
                         Ok(NV_OK)
                     } else {
+                        if crate::trace::enabled(crate::trace::Trace::Nv) {
+                            crate::traceln!(
+                                "[nv] remap refused: {gpu_va:#x}+{mapping_size:#x} (offset \
+                                 {requested:#x} + {buffer_offset:#x}) is not inside one mapping"
+                            );
+                        }
                         Ok(NV_BAD_PARAMETER)
                     };
                 }
                 let handle = match self.gpu.nvmap.get(nvmap_handle) {
                     Some(h) if h.allocated => *h,
                     Some(_) => return Ok(NV_INVALID_STATE),
-                    None => return Ok(NV_BAD_PARAMETER),
+                    None => {
+                        if crate::trace::enabled(crate::trace::Trace::Nv) {
+                            crate::traceln!(
+                                "[nv] map refused: nvmap handle {nvmap_handle:#x} does not \
+                                 exist (flags {flags:#x}, offset {requested:#x})"
+                            );
+                        }
+                        return Ok(NV_BAD_PARAMETER);
+                    }
                 };
                 let size = if mapping_size != 0 {
                     mapping_size
@@ -834,7 +848,7 @@ impl NvDrv {
                     flags,
                     requested,
                 )?;
-                if self.gpu.trace {
+                if crate::trace::enabled(crate::trace::Trace::Nv) {
                     crate::traceln!(
                         "[nv] map handle={nvmap_handle} cpu={:#x}+{buffer_offset:#x} size={size:#x} -> gpu_va={offset:#x} (obj cpu={:#x} size={:#x})",
                         cpu_addr, handle.cpu_addr, handle.size
@@ -889,7 +903,7 @@ impl NvDrv {
                 if data.len() < OP_SIZE || !data.len().is_multiple_of(OP_SIZE) {
                     return Ok(NV_BAD_PARAMETER);
                 }
-                let trace = self.gpu.trace;
+                let trace = crate::trace::enabled(crate::trace::Trace::Nv);
                 for at in (0..data.len()).step_by(OP_SIZE) {
                     let kind = read_u16(data, at + 2);
                     let nvmap_handle = read_u32(data, at + 4);
@@ -1071,7 +1085,7 @@ impl NvDrv {
 
             // GetErrorInfo / GetErrorNotification: no errors to report.
             (TYPE_CHANNEL, 0x16) | (TYPE_CHANNEL, 0x17) => {
-                if self.gpu.trace {
+                if crate::trace::enabled(crate::trace::Trace::Nv) {
                     crate::traceln!("[nv] channel {nr:#04x} in={:02x?}", data);
                 }
                 for byte in data.iter_mut() {

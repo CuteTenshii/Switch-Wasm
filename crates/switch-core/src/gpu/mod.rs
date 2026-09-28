@@ -180,10 +180,6 @@ pub struct Gpu {
     scan_out: Vec<u8>,
     /// Frames presented since boot.
     pub frames: u64,
-    /// Force the per-method trace on for this GPU, whatever the `TRACE_GPU`
-    /// channel says. What an example sets when tracing one run is the point
-    /// of the run; the channel is what a page ticks mid-session.
-    pub trace: bool,
     next_as_id: u32,
     next_channel_id: u32,
 }
@@ -208,7 +204,6 @@ impl Gpu {
             framebuffer: Framebuffer::default(),
             scan_out: Vec::new(),
             frames: 0,
-            trace: false,
             next_as_id: 1,
             next_channel_id: 1,
         }
@@ -279,7 +274,7 @@ impl Gpu {
             vmm,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
-            trace: self.trace || crate::trace::enabled(crate::trace::Trace::Gpu),
+            trace: crate::trace::enabled(crate::trace::Trace::Gpu),
         };
         // The backend is lent for the length of the submission and taken
         // back whether or not it faulted: leaving it on a channel would hand
@@ -374,7 +369,7 @@ impl Gpu {
             vmm,
             host1x: &mut self.host1x,
             stats: &mut self.stats,
-            trace: self.trace || crate::trace::enabled(crate::trace::Trace::Gpu),
+            trace: crate::trace::enabled(crate::trace::Trace::Gpu),
         };
         let flushed = channel.three_d.flush_renderer(&mut ctx);
         channel.three_d.swap_renderer(&mut self.renderer);
@@ -417,8 +412,7 @@ impl Gpu {
                 )
             },
         );
-        if self.trace
-            || crate::trace::enabled(crate::trace::Trace::Gpu)
+        if crate::trace::enabled(crate::trace::Trace::Gpu)
             || crate::trace::enabled(crate::trace::Trace::Present)
         {
             crate::traceln!(
