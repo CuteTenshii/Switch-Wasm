@@ -95,7 +95,8 @@ fn modified_immediate(cmode: u32, op: u32, imm8: u32) -> Option<u64> {
         (0b101, _, _) => replicate16(byte << 8),
         (0b110, 0, _) => replicate32((byte << 8) | 0xFF),
         (0b110, 1, _) => replicate32((byte << 16) | 0xFFFF),
-        (0b111, 0, 0) => {
+        (0b111, 0, 0) => replicate16(byte | byte << 8),
+        (0b111, 0, 1) => {
             // Each bit of the byte becomes a whole byte of the result.
             let mut out = 0u64;
             for i in 0..8 {
@@ -105,7 +106,7 @@ fn modified_immediate(cmode: u32, op: u32, imm8: u32) -> Option<u64> {
             }
             out
         }
-        (0b111, 0, 1) => {
+        (0b111, 1, 0) => {
             // A single-precision float built the VFP way, replicated.
             let bits = ((byte & 0x80) << 24)
                 | ((!(byte >> 6) & 1) << 30)
@@ -436,13 +437,14 @@ impl Cpu {
             return Err(self.neon_unimplemented(insn));
         };
         let wide = u128::from(pattern) | (u128::from(pattern) << 64);
-        // `op` with a cmode that carries an operation means VORR or VBIC
-        // against the destination rather than a plain move.
-        let value = match (op, cmode & 0b1001) {
-            (1, 0b0000 | 0b0001) => self.neon_get(quad, vd) & !wide,
-            (0, 0b0000 | 0b0001) if cmode & 0b0001 != 0 => self.neon_get(quad, vd) | wide,
-            (1, _) => !wide,
-            _ => wide,
+        // An odd cmode below 1100 operates on the destination, VORR or VBIC
+        // by `op`. Otherwise `op` inverts the constant, VMVN, except with
+        // cmode 1110, where it chose the bit-per-byte expansion instead.
+        let value = match (op, cmode) {
+            (0, _) if cmode & 1 != 0 && cmode < 0b1100 => self.neon_get(quad, vd) | wide,
+            (_, _) if cmode & 1 != 0 && cmode < 0b1100 => self.neon_get(quad, vd) & !wide,
+            (1, 0b1110) | (0, _) => wide,
+            _ => !wide,
         };
         self.neon_set(quad, vd, value);
         Ok(())

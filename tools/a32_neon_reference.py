@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the expected-value table of `crates/switch-core/tests/a32_neon_misc_test.rs`.
+"""Print the expected-value table of `crates/switch-core/tests/a32_neon_reference_test.rs`.
 
 Each NEON instruction runs under `qemu-arm` on the same three vectors the test
 loads into q8, q9 and q10, and the table records all three afterwards: the
@@ -42,6 +42,15 @@ OPS += ["vcvt.f16.f32 d20, q8", "vcvt.f32.f16 q10, d16"]
 OPS += ["vrecpe.f32 q10, q8", "vrsqrte.f32 q10, q8", "vrecpe.u32 q10, q8", "vrsqrte.u32 q10, q8"]
 OPS += ["vcvt.f32.s32 q10, q8", "vcvt.f32.u32 q10, q8", "vcvt.s32.f32 q10, q8",
         "vcvt.u32.f32 q10, q8"]
+# The modified immediates, every cmode and op: moves, inversions, and the
+# ORR and BIC forms that read the destination.
+OPS += ["vmov.i32 q10, #0x5a", "vmov.i32 q10, #0x5a00", "vmov.i32 q10, #0x5a0000",
+        "vmov.i32 q10, #0x5a000000", "vmov.i16 q10, #0x5a", "vmov.i16 q10, #0x5a00",
+        "vmov.i32 q10, #0x5aff", "vmov.i32 q10, #0x5affff", "vmov.i8 q10, #0xa5",
+        "vmov.i64 q10, #0xff00ff0000ffff00", "vmov.f32 q10, #1.0", "vmov.f32 q10, #-0.1875",
+        "vmvn.i32 q10, #0x5a00", "vmvn.i16 q10, #0x5a", "vmvn.i32 q10, #0x5affff",
+        "vorr.i32 q10, #0x5a00", "vorr.i16 q10, #0x5a00", "vbic.i32 q10, #0x5a000000",
+        "vbic.i16 q10, #0x5a", "vmov.i8 d20, #0x3c"]
 
 # q8, q9 and q10 as four words each: sign extremes and carries for the
 # integer forms, and for the float forms a normal, a negative, the largest
