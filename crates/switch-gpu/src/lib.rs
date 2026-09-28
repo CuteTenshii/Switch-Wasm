@@ -5436,11 +5436,10 @@ mod tests {
     /// Culling throws away the same faces on the device as on the
     /// rasterizer, whether or not the viewport mirrors y.
     ///
-    /// Facing is decided by the winding in NDC; a mirroring viewport reverses
-    /// the winding on screen without changing which face is front. The
-    /// rasterizer learned that when Tomodachi Life's composite pass came out
-    /// black; the device's pipeline kept the screen-space rule and culled the
-    /// same pass, so the frame stayed black there.
+    /// Facing is decided by the winding in window space, after the viewport:
+    /// Tomodachi Life composites through a viewport that mirrors y and Echoes
+    /// of Wisdom post-processes through one that does not, and each came out
+    /// black while one renderer or the other judged it some other way.
     #[test]
     fn culling_keeps_the_faces_the_rasterizer_keeps() {
         const VIEWPORT_TRANSFORM: u32 = 0x280;

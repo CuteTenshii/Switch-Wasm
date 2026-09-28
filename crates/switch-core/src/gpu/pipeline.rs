@@ -457,8 +457,9 @@ pub struct Viewport {
     ///
     /// WebGPU has no negative viewport height, so a backend reproduces this
     /// by negating `position.y` in the vertex entry point where the guest's
-    /// transform does *not* mirror. That negation reverses which winding is
-    /// front, which is why [`Pipeline::front_face`] is resolved against it.
+    /// transform does *not* mirror. The pixels land where the guest's
+    /// transform puts them either way, so the winding the target holds, which
+    /// is what [`Pipeline::front_face`] is judged by, does not depend on it.
     pub flip_y: bool,
 }
 
@@ -561,12 +562,13 @@ impl Pipeline {
         Ok(Pipeline {
             topology,
             expand,
-            // The guest's front face is its NDC winding, which the backend
-            // keeps where the viewport mirrors and negates y, reversing it,
-            // where it does not. Resolving it in window space instead, where
-            // the mirror reverses it, culled Tomodachi Life's composite quad
-            // on the device and left its frame black.
-            front_face: if cull.front_ccw == viewport.flip_y {
+            // Facing is judged in window space, as the target holds it, the
+            // same as `raster::culls` (see there for why). The backend lands
+            // every pixel where the guest's viewport puts it, negating y or
+            // not as that takes, and WebGPU judges winding in that same
+            // framebuffer space, so the guest's front face carries over as
+            // it is, whether or not the viewport mirrors.
+            front_face: if cull.front_ccw {
                 FrontFace::Ccw
             } else {
                 FrontFace::Cw
