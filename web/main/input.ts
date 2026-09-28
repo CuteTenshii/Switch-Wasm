@@ -4,6 +4,7 @@
    one state. */
 
 import { $ } from './dom';
+import { log } from './log';
 import { call, hasSession, isReady } from './rpc';
 import { pullVibration } from './rumble';
 import { screenEl } from './shell';
@@ -241,5 +242,18 @@ function pushInput(): void {
 }
 
 setInterval(pushInput, 16);
-window.addEventListener('gamepadconnected', (e) => showPad(e.gamepad));
-window.addEventListener('gamepaddisconnected', () => inputStatus('none'));
+window.addEventListener('gamepadconnected', (e) => {
+  const pad = e.gamepad;
+  showPad(pad);
+  // Buttons are read by position in the W3C standard layout; a controller
+  // the browser has no mapping for reports its own order, and its buttons
+  // land on the wrong Switch buttons.
+  const layout = pad.mapping === 'standard'
+    ? 'standard layout'
+    : 'no standard layout, so its buttons may be mismatched';
+  log(`[input] controller connected: ${padName(pad)} (${layout})`, pad.mapping === 'standard' ? 'dim' : 'warn');
+});
+window.addEventListener('gamepaddisconnected', (e) => {
+  inputStatus('none');
+  log(`[input] controller disconnected: ${padName(e.gamepad)}`, 'dim');
+});
