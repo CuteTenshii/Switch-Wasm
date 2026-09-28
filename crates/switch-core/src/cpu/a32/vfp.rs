@@ -498,10 +498,18 @@ impl Cpu {
         self.fpscr_nzcv = (n << 31) | (z << 30) | (c << 29) | (v << 28);
     }
 
-    /// `VMOV` between one core register and one `S`, and `VMRS`/`VMSR`.
+    /// The 8-, 16- and 32-bit transfers between a core register and the
+    /// extension registers: `VMOV` to and from an `S` register and
+    /// `VMRS`/`VMSR` with coprocessor 10, and with coprocessor 11 `VMOV` to
+    /// and from one lane of a `D` register, and `VDUP`. Bit 8 is what tells
+    /// the two halves apart; the fields above it mean different things in
+    /// each.
     fn a32_vfp_transfer(&mut self, insn: u32) -> Result<()> {
         let to_arm = (insn >> 20) & 1 != 0;
         let rt = ((insn >> 12) & 0xF) as u8;
+        if (insn >> 8) & 1 != 0 {
+            return self.a32_vfp_lane_transfer(insn, to_arm, rt);
+        }
         // VMSR/VMRS name a system register in the field a VMOV uses for Vn.
         if (insn >> 21) & 0b111 == 0b111 {
             let reg = (insn >> 16) & 0xF;
@@ -534,6 +542,67 @@ impl Cpu {
         } else {
             let val = self.r32(rt);
             self.set_vfp_s(sn, val);
+        }
+        self.pc = self.pc.wrapping_add(4);
+        Ok(())
+    }
+
+    /// `VMOV` between a core register and one lane of a `D` register, and
+    /// `VDUP` from a core register to every lane of a `D` or `Q`.
+    fn a32_vfp_lane_transfer(&mut self, insn: u32, to_arm: bool, rt: u8) -> Result<()> {
+        let d = (((insn >> 7) & 1) as u8) << 4 | ((insn >> 16) & 0xF) as u8;
+        if !to_arm && (insn >> 23) & 1 != 0 {
+            // VDUP: B (bit 22) and E (bit 5) give the size, Q (bit 21) the
+            // register width. The Vd field sits where Vn does elsewhere.
+            let esize = match ((insn >> 22) & 1, (insn >> 5) & 1) {
+                (1, 0) => 8,
+                (0, 1) => 16,
+                (0, 0) => 32,
+                _ => {
+                    return Err(Error::Cpu(format!(
+                        "undefined VDUP size in {insn:#010x} at pc={:#010x}",
+                        self.pc
+                    )))
+                }
+            };
+            let value = u64::from(self.r32(rt)) & (u64::MAX >> (64 - esize));
+            let lane = (0..64 / esize).fold(0u64, |acc, i| acc | value << (i * esize));
+            let registers = 1 + ((insn >> 21) & 1);
+            for i in 0..registers as u8 {
+                self.set_vfp_d((d + i) & 0x1F, lane);
+            }
+            self.pc = self.pc.wrapping_add(4);
+            return Ok(());
+        }
+        // opc1 (bits 22:21) and opc2 (bits 6:5) give the size and the lane.
+        let opc = ((insn >> 21) & 0b11) << 2 | (insn >> 5) & 0b11;
+        let (esize, index) = if opc & 0b1000 != 0 {
+            (8, opc & 0b111)
+        } else if opc & 0b0001 != 0 {
+            (16, opc >> 1 & 0b11)
+        } else if opc & 0b0010 == 0 {
+            (32, opc >> 2 & 1)
+        } else {
+            return Err(Error::Cpu(format!(
+                "undefined VMOV scalar size in {insn:#010x} at pc={:#010x}",
+                self.pc
+            )));
+        };
+        let shift = index * esize;
+        let mask = (u64::MAX >> (64 - esize)) << shift;
+        let current = self.vfp_d(d);
+        if to_arm {
+            let raw = (current & mask) >> shift;
+            // U (bit 23) zero-extends a narrow lane; clear, it sign-extends.
+            let value = if (insn >> 23) & 1 != 0 || esize == 32 {
+                raw
+            } else {
+                ((raw << (64 - esize)) as i64 >> (64 - esize)) as u64
+            };
+            self.set_r32(rt, value as u32);
+        } else {
+            let value = (u64::from(self.r32(rt)) << shift) & mask;
+            self.set_vfp_d(d, current & !mask | value);
         }
         self.pc = self.pc.wrapping_add(4);
         Ok(())

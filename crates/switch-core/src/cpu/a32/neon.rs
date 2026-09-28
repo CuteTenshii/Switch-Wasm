@@ -1245,8 +1245,9 @@ impl Cpu {
     ///
     /// Mario Kart 8 Deluxe issues 14,168 of these and all but a handful are
     /// `VLD1`/`VST1` moving one or two `D` registers, the vector equivalent
-    /// of a `memcpy` step. The interleaving forms (`VLD2`/`VLD3`/`VLD4`) are
-    /// in this space too and are not implemented.
+    /// of a `memcpy` step. The interleaving forms (`VLD2`/`VLD3`/`VLD4`)
+    /// share the space: member `k` of structure `e` is lane `e` of
+    /// `D[d + r + k * inc]`.
     pub(super) fn a32_neon_load_store(&mut self, insn: u32) -> Result<()> {
         let single = (insn >> 23) & 1 != 0;
         let load = (insn >> 21) & 1 != 0;
@@ -1258,28 +1259,83 @@ impl Cpu {
 
         let bytes = if !single {
             // Whole registers, `type` saying how many.
-            let registers = match (insn >> 8) & 0xF {
-                0b0111 => 1,
-                0b1010 => 2,
-                0b0110 => 3,
-                0b0010 => 4,
+            // `type`: how many members a structure has, how far apart their
+            // registers are, and how many registers each member fills.
+            let (members, inc, rows) = match (insn >> 8) & 0xF {
+                0b0111 => (1, 1, 1),
+                0b1010 => (1, 1, 2),
+                0b0110 => (1, 1, 3),
+                0b0010 => (1, 1, 4),
+                0b1000 => (2, 1, 1),
+                0b1001 => (2, 2, 1),
+                0b0011 => (2, 2, 2),
+                0b0100 => (3, 1, 1),
+                0b0101 => (3, 2, 1),
+                0b0000 => (4, 1, 1),
+                0b0001 => (4, 2, 1),
                 _ => return Err(self.neon_unimplemented(insn)),
             };
-            for i in 0..registers {
-                let d = (vd + i) & 0x1F;
-                if load {
-                    let lo = self.mem.read_u32(addr)?;
-                    let hi = self.mem.read_u32(addr.wrapping_add(4))?;
-                    self.set_vfp_d(d, u64::from(lo) | (u64::from(hi) << 32));
-                } else {
-                    let val = self.vfp_d(d);
-                    self.mem.write_u32(addr, val as u32)?;
-                    self.mem
-                        .write_u32(addr.wrapping_add(4), (val >> 32) as u32)?;
+            if members > 1 {
+                let esize = 8u32 << ((insn >> 6) & 0b11);
+                let ebytes = esize / 8;
+                let lanes = 64 / esize;
+                for row in 0..rows {
+                    for e in 0..lanes {
+                        for k in 0..members {
+                            let d = (vd + row + k * inc) & 0x1F;
+                            let shift = e * esize;
+                            let mask = (u64::MAX >> (64 - esize)) << shift;
+                            let current = self.vfp_d(d);
+                            if load {
+                                let value = match ebytes {
+                                    1 => u64::from(self.mem.read_u8(addr)?),
+                                    2 => u64::from(self.mem.read_u16(addr)?),
+                                    4 => u64::from(self.mem.read_u32(addr)?),
+                                    _ => {
+                                        u64::from(self.mem.read_u32(addr)?)
+                                            | u64::from(self.mem.read_u32(addr.wrapping_add(4))?)
+                                                << 32
+                                    }
+                                };
+                                self.set_vfp_d(d, current & !mask | (value << shift) & mask);
+                            } else {
+                                let value = (current & mask) >> shift;
+                                match ebytes {
+                                    1 => self.mem.write_u8(addr, value as u8)?,
+                                    2 => self.mem.write_u16(addr, value as u16)?,
+                                    4 => self.mem.write_u32(addr, value as u32)?,
+                                    _ => {
+                                        self.mem.write_u32(addr, value as u32)?;
+                                        self.mem.write_u32(
+                                            addr.wrapping_add(4),
+                                            (value >> 32) as u32,
+                                        )?;
+                                    }
+                                }
+                            }
+                            addr = addr.wrapping_add(ebytes);
+                        }
+                    }
                 }
-                addr = addr.wrapping_add(8);
+                u32::from(members * rows) * 8
+            } else {
+                let registers = rows;
+                for i in 0..registers {
+                    let d = (vd + i) & 0x1F;
+                    if load {
+                        let lo = self.mem.read_u32(addr)?;
+                        let hi = self.mem.read_u32(addr.wrapping_add(4))?;
+                        self.set_vfp_d(d, u64::from(lo) | (u64::from(hi) << 32));
+                    } else {
+                        let val = self.vfp_d(d);
+                        self.mem.write_u32(addr, val as u32)?;
+                        self.mem
+                            .write_u32(addr.wrapping_add(4), (val >> 32) as u32)?;
+                    }
+                    addr = addr.wrapping_add(8);
+                }
+                u32::from(registers) * 8
             }
-            u32::from(registers) * 8
         } else if (insn >> 10) & 0b11 == 0b11 {
             // One element broadcast to every lane, optionally into two
             // registers.

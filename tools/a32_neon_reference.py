@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Print the expected-value table of `crates/switch-core/tests/a32_neon_reference_test.rs`.
 
-Each NEON instruction runs under `qemu-arm` on the same three vectors the test
-loads into q8, q9 and q10, and the table records all three afterwards: the
-destination, and the source a permute rewrites as well. Needs `llvm-mc`,
+Each NEON case runs under `qemu-arm` on the same three vectors the test loads
+into q8, q9 and q10, with r2 holding 0x9abcdef0, and the table records all
+four afterwards: the destination, the source a permute rewrites, and the core
+register a lane move reads or writes. Needs `llvm-mc`,
 `clang` with `lld`, and `qemu-arm` (user-mode) on the PATH.
 
     python3 tools/a32_neon_reference.py > table.rs
 
 To cover another instruction, add a line of assembly to OPS that reads q8
-(or d16) and writes q10 (or d20).
+(or d16) and writes q10 (or d20), or a list of lines for a case that needs
+more than one, such as a store read back.
 """
 
 import re
@@ -87,6 +89,20 @@ OPS += [f"{op}.i{t} d20, q8, q9" for op in ("vaddhn", "vraddhn", "vsubhn", "vrsu
 OPS += [f"{op}.s{t} q10, d16, d18" for op in ("vqdmlal", "vqdmlsl", "vqdmull")
         for t in ("16", "32")]
 OPS += ["vmull.p8 q10, d16, d18"]
+# Moves between a core register and a lane, VDUP, and the interleaved
+# structure loads and stores, each store read back into q10.
+OPS += ["vmov.8 d20[5], r2", "vmov.16 d21[3], r2", "vmov.32 d20[1], r2",
+        "vmov.s8 r2, d16[3]", "vmov.u8 r2, d17[7]", "vmov.s16 r2, d16[1]",
+        "vmov.u16 r2, d17[2]", "vmov.32 r2, d17[1]",
+        "vdup.8 q10, r2", "vdup.16 d20, r2", "vdup.32 q10, r2"]
+OPS += [f"vld2.{s} {{d20, d21}}, [r0]" for s in ("8", "16", "32")]
+OPS += [f"vld2.{s} {{d20, d22}}, [r0]" for s in ("8", "16", "32")]
+OPS += ["vld2.16 {d18, d19, d20, d21}, [r0]", "vld3.8 {d18, d19, d20}, [r0]",
+        "vld3.16 {d17, d19, d21}, [r0]", "vld4.32 {d18, d19, d20, d21}, [r0]",
+        "vld4.8 {d16, d18, d20, d22}, [r0]"]
+OPS += [[f"{st} {regs}, [r0]", "vld1.32 {d20, d21}, [r0]"]
+        for st, regs in (("vst2.8", "{d16, d17}"), ("vst2.32", "{d16, d18}"),
+                         ("vst3.16", "{d16, d17, d18}"), ("vst4.8", "{d16, d17, d18, d19}"))]
 # The crypto extension on A32.
 OPS += ["aese.8 q10, q8", "aesd.8 q10, q8", "aesmc.8 q10, q8", "aesimc.8 q10, q8",
         "sha1h.32 q10, q8", "sha1su1.32 q10, q8", "sha256su0.32 q10, q8",
@@ -129,17 +145,21 @@ def encode(line):
 
 
 def main():
-    cases = [(op, regs) for op in OPS for regs in INPUTS]
+    cases = [(op if isinstance(op, list) else [op], regs) for op in OPS for regs in INPUTS]
     asm = [".syntax unified", ".arm", ".fpu crypto-neon-fp-armv8", ".global _start", "_start:",
            "ldr r1, =out"]
     data = [".data", "in:"]
-    for i, (op, (q8, q9, q10)) in enumerate(cases):
-        data.append(".word " + ", ".join(f"{w:#x}" for w in q8 + q9 + q10))
-        asm += [f"ldr r0, =in + {48 * i}", "vld1.32 {d16, d17, d18, d19}, [r0]!",
-                "vld1.32 {d20, d21}, [r0]", op,
-                "vst1.32 {d16, d17, d18, d19}, [r1]!", "vst1.32 {d20, d21}, [r1]!",
-                "b 1f", ".ltorg", "1:"]
-    size = 48 * len(cases)
+    for i, (ops, (q8, q9, q10)) in enumerate(cases):
+        # Sixteen zero bytes after each case's vectors: a structure load or
+        # store reaches up to 32 bytes from q10's copy, and the test's
+        # scratch page is zero there too.
+        data.append(".word " + ", ".join(f"{w:#x}" for w in q8 + q9 + q10 + (0, 0, 0, 0)))
+        asm += [f"ldr r0, =in + {64 * i}", "vld1.32 {d16, d17, d18, d19}, [r0]!",
+                "vld1.32 {d20, d21}, [r0]", "movw r2, #0xdef0", "movt r2, #0x9abc"]
+        asm += ops
+        asm += ["vst1.32 {d16, d17, d18, d19}, [r1]!", "vst1.32 {d20, d21}, [r1]!",
+                "str r2, [r1], #16", "b 1f", ".ltorg", "1:"]
+    size = 64 * len(cases)
     asm += ["mov r0, #1", "ldr r1, =out", f"ldr r2, ={size}", "mov r7, #4", "svc #0",
             "mov r0, #0", "mov r7, #1", "svc #0", ".ltorg"]
     asm += data + [".bss", f"out: .space {size}"]
@@ -154,13 +174,14 @@ def main():
         raw = subprocess.run(["qemu-arm", str(binary)], capture_output=True,
                              check=True).stdout
 
-    print("const CASES: &[(u32, [u32; 12], [u32; 12])] = &[")
-    for i, (op, (q8, q9, q10)) in enumerate(cases):
-        after = struct.unpack_from("<12I", raw, 48 * i)
+    print("const CASES: &[(&[u32], [u32; 12], [u32; 13])] = &[")
+    for i, (ops, (q8, q9, q10)) in enumerate(cases):
+        after = struct.unpack_from("<13I", raw, 64 * i)
         before = ", ".join(f"0x{w:08X}" for w in q8 + q9 + q10)
         got = ", ".join(f"0x{w:08X}" for w in after)
-        print(f"    // {op}")
-        print(f"    (0x{encode(op):08X}, [{before}], [{got}]),")
+        words = ", ".join(f"0x{encode(op):08X}" for op in ops)
+        print(f"    // {'; '.join(ops)}")
+        print(f"    (&[{words}], [{before}], [{got}]),")
     print("];")
 
 
