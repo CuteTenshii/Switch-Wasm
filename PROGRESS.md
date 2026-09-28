@@ -21,6 +21,8 @@ checkout. "measured" = run against this tree; the rest is carried forward.
 | "A Short Hike" (NSP) | composites 1280x720; steady state 2 draws, never a scene | partial | measured |
 | "Minecraft" (NSP) | the world, on the device: 110 draws a frame, no fallbacks | yes | measured |
 | "Tomodachi Life" (NSP) | its loading screen, every pixel, at 3.98B steps | yes | measured |
+| "Echoes of Wisdom" (NSP) | the prologue scene at frame 150, both renderers within 3/255 | partial | measured |
+| "Mario Kart 8 Deluxe" 1.0 (NSP, A32) | boots to 4.4B steps, then a virtual call through a corrupt vtable | no | measured |
 
 A retail title decrypts, mounts its RomFS, runs `rtld` → `main` → `subsdk*` →
 `sdk` through real `nnSdk` init, gets its heap, events and input, brings up its
@@ -114,6 +116,14 @@ implementation` and no `unimplemented` lines. `make test`: **1,124 tests passing
   the title spent it on pools it sizes *from that same figure*, while the other
   1.5 GiB was an alias region it never touches. Each layout now spends the space
   on the region its own titles grow into.
+- **A store-release run as a store-exclusive.** ARMv8 added `LDA`/`STL{,B,H}`
+  to A32 beside `LDREX`/`STREX`, differing only in bits 9:8, which the decoder
+  ignored. With no monitor open, Mario Kart 8 Deluxe's `STLH` dropped its store
+  (and wrote its status into `Rd`, which it fills with 1111: `pc`), so the SDK's
+  cached pointer-buffer size read back as 0 and the first pointer buffer it sent
+  was refused: the same 11-141 as below, from an entirely different cause. The
+  A32 media group is now complete and checked against `qemu-arm`
+  (`tools/a32_media_reference.py`).
 - **A pointer buffer a caller is told it cannot use.** Every session answered
   `QueryPointerBufferSize` with 0, and `nnSdk` measures an explicit
   `SfBufferAttr_HipcPointer` argument against it before sending —
@@ -307,16 +317,19 @@ wrong field gives a plausible lane number rather than an error; and helper lanes
 are the point, not an artefact, which is why the quad walk is gated on the
 program containing a `shfl` or `fswzadd`.
 
-**Which winding is front is decided in NDC.** Facing was read off screen-space
-signed area, on the reasoning that the viewport's y scale decides winding "as it
-does on hardware". It does not — `SetWindowOrigin` bit 4 is the only thing that
-reverses it, and deko3d drives that and `viewportFlipY()` as two separate flags.
-So culling was inverted for every title whose driver flips y, which is every
-title built against nnSdk: Tomodachi Life's single full-screen composite quad was
-thrown away and the frame was black. The rasterizer's own culling fixture had
-encoded the inversion too — its "clockwise in NDC" triangle has a shoelace of
-**+4**. hbmenu, JKSV, sysinfo, NX-Fetch and the Home Menu are byte-identical
-either way: content that does not cull, or does not flip y, never reached it.
+**Which winding is front is decided in window space, after the viewport.**
+Facing was first read off screen-space area as if y pointed up, which inverted
+culling for every title whose driver flips y, every one built against nnSdk:
+Tomodachi Life's full-screen composite was thrown away and the frame was black.
+The fix read it off the NDC winding instead, and that was a second misreading
+that happened to agree: Eden decides facing in framebuffer space after the
+viewport, reversed by `SetWindowOrigin`'s FlipY and by nothing else, and the NDC
+rule only matches that through a viewport that mirrors y. Echoes of Wisdom's
+offscreen post-processing runs through one that does not, with front=CCW, FlipY
+and back-face culling, so every full-screen quad of it was culled and its frame
+stayed black on both renderers. **When a rule is confirmed by one title, check
+it against the case that title does not exercise.** Both renderers now carry the
+guest's front face over unchanged and judge the winding the target holds.
 
 Smaller ones: **`AntiAliasEnable` does not size a surface; `MsaaMode` does** (a
 2560x720 `2x1_D3D` target read as 2560 pixels wide, and the title's own resolve
