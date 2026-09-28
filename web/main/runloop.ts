@@ -270,9 +270,9 @@ export async function updatePc(): Promise<void> {
   const steps = await call('get_steps');
   $('pc').textContent = '0x' + pc.toString(16).padStart(8, '0');
   $('steps').textContent = steps.toLocaleString();
-  // The same two figures on the loading screen, where they are the only sign
-  // that a title still working towards its first frame is working at all.
-  bootDetail(pc, steps);
+  // The pc on the loading screen, where it is the only sign that a title
+  // still working towards its first frame is working at all.
+  bootDetail(pc);
   await updateRam();
 }
 

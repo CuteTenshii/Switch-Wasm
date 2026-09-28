@@ -23,8 +23,8 @@ const detailEl = $('loading-detail');
 const dismissEl = $('loading-dismiss');
 
 // Whether the guest has been started and the screen is now waiting on its
-// first frame. Only in that state does the run loop's pc/step readout belong
-// on the screen - during the fixed phases above it the detail line is saying
+// first frame. Only in that state does the run loop's pc readout belong on
+// the screen - during the fixed phases above it the detail line is saying
 // something the caller chose.
 let awaitingFrame = false;
 
@@ -78,12 +78,11 @@ export function awaitFirstFrame(): void {
   dismissEl.hidden = false;
 }
 
-/** Mirror the run loop's own readout while the boot is being waited on, so a
- *  title that takes minutes to present is visibly still executing. */
-export function bootDetail(pc: number, steps: number): void {
+/** Mirror the run loop's pc while the boot is being waited on, so a title
+ *  that takes minutes to present is visibly still executing. */
+export function bootDetail(pc: number): void {
   if (!awaitingFrame) return;
-  detailEl.textContent = 'pc 0x' + pc.toString(16).padStart(8, '0')
-    + ' · ' + steps.toLocaleString() + ' steps';
+  detailEl.textContent = 'pc 0x' + pc.toString(16).padStart(8, '0');
 }
 
 export function endLoad(): void {
