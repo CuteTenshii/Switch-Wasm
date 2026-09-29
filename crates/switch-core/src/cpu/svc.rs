@@ -73,7 +73,13 @@ impl Cpu {
         // already decodes it, and the two hot ones a running guest issues
         // thousands of times a frame, `svcWaitSynchronization` (0x18) and
         // `svcSleepThread` (0x0b): would bury everything else.
-        if !matches!(imm, 0x21 | 0x18 | 0x0b) && crate::trace::enabled(crate::trace::Trace::Svc) {
+        // QueryMemory is used for address-space walks: qlaunch and rtld can
+        // issue it once per page across gigabytes. Its inputs are useful only
+        // when debugging the syscall itself, and drown out actionable traces
+        // during ordinary boots.
+        if !matches!(imm, 0x21 | 0x18 | 0x0b | 0x06)
+            && crate::trace::enabled(crate::trace::Trace::Svc)
+        {
             crate::traceln!(
                 "[svc] pc={:#x} #{:#04x} x0={:#x} x1={:#x} x2={:#x} x3={:#x}",
                 self.pc,
