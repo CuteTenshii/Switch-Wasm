@@ -6,7 +6,7 @@
    call - the emulator's heap is the browser's memory too. */
 
 import type {
-  CommandHandlers, CrashReport, FsChange, GpuReport, IpcGaps, JitStats, TraceChannel, UserRecord,
+  CommandHandlers, CrashReport, FsChange, GpuReport, IpcGaps, JitStats, UserRecord,
 } from '../shared/protocol';
 import { fmtSize } from '../shared/format';
 import { noteRegistered, resetActivity } from './activity';
@@ -396,16 +396,6 @@ export const CMD: CommandHandlers = {
       (buf, cap) => api().switch_crash_report_json(handle(), buf, cap),
       { version: 'unknown', panicked: false, traceMask: 0 },
     );
-  },
-  trace_channels() {
-    return readJson<TraceChannel[]>(
-      4096,
-      (buf, cap) => api().switch_trace_channels_json(buf, cap),
-      [],
-    );
-  },
-  set_trace_mask(mask) {
-    api().switch_set_trace_mask(mask);
   },
   version() {
     return readString(128, (buf, cap) => api().switch_version(buf, cap));

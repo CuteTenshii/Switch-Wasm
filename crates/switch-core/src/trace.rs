@@ -208,6 +208,14 @@ fn seed() -> u32 {
             mask |= channel.bit();
         }
     }
+    // Browser runs have no environment variables to enable tracing. Start all
+    // channels so their diagnostic records are available without UI switches.
+    #[cfg(target_arch = "wasm32")]
+    {
+        mask |= ALL
+            .iter()
+            .fold(0, |enabled, channel| enabled | channel.bit());
+    }
     MASK.store(mask, Ordering::Relaxed);
     mask
 }

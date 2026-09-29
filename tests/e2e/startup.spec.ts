@@ -13,9 +13,9 @@ test('the display debugger starts empty and can reset its samples', async ({ pag
   await page.getByRole('tab', { name: 'Debug' }).click();
 
   await expect(page.getByText('Tracing', { exact: true })).toBeVisible();
-  await expect(page.getByText('Diagnostic channels', { exact: true })).toBeHidden();
+  await expect(page.getByText('Missing services', { exact: true })).toBeHidden();
   await page.getByRole('button', { name: 'System' }).click();
-  await expect(page.getByText('Diagnostic channels', { exact: true })).toBeVisible();
+  await expect(page.getByText('Missing services', { exact: true })).toBeVisible();
   await expect(page.getByText('Tracing', { exact: true })).toBeHidden();
   await page.getByRole('button', { name: 'Graphics' }).click();
 

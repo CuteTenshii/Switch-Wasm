@@ -78,9 +78,6 @@ export interface WasmExports {
   switch_start_created_threads(handle: number): number;
   switch_unimplemented_json(handle: number, buf: number, maxlen: number): number;
   switch_crash_report_json(handle: number, buf: number, maxlen: number): number;
-  switch_trace_channels_json(buf: number, maxlen: number): number;
-  switch_trace_mask(): number;
-  switch_set_trace_mask(mask: number): void;
   switch_get_pc(handle: number): number;
   switch_get_reg(handle: number, idx: number): bigint;
   switch_get_cycles(handle: number): bigint;

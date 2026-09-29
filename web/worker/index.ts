@@ -30,12 +30,11 @@ function reply(message: WorkerMessage, transfer?: Transferable[]): void {
 // captured panic without consulting a handle at all. `crash_report` is here
 // for the same reason, and answers what it can with `session: null`.
 //
-// The build identity and the diagnostic channels are the module's, not a
-// session's: the page reads the version before it has opened anything, and a
-// channel ticked between two titles stays ticked.
+// The build identity belongs to the module rather than a session, so the page
+// can read it before opening anything.
 const SESSIONLESS = new Set([
   'new', 'set_battery', 'last_error',
-  'crash_report', 'version', 'trace_channels', 'set_trace_mask',
+  'crash_report', 'version',
 ]);
 
 /* Installing the GPU backend, once the guest has a channel to install it on.

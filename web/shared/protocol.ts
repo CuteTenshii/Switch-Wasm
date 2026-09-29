@@ -88,15 +88,6 @@ export interface GpuReport {
   };
 }
 
-/** One diagnostic channel the emulator can be asked for, as the core names
- *  it. The name is the environment variable a CLI run would set, so the page
- *  offers exactly what a shell does rather than keeping a second list. */
-export interface TraceChannel {
-  name: string;
-  bit: number;
-  on: boolean;
-}
-
 /** One service command a title asked for and did not get. `cmd` is null when
  *  the request carried no command id to name. */
 export interface IpcGap {
@@ -301,8 +292,6 @@ export interface Commands {
   start_created_threads(): number;
   ipc_gaps(): IpcGaps;
   crash_report(): CrashReport;
-  trace_channels(): TraceChannel[];
-  set_trace_mask(mask: number): void;
   version(): string;
   get_pc(): number;
   get_cycles(): number;

@@ -5,7 +5,7 @@ import type { LogClass } from './log';
 import {
   displayMetrics, resetDisplayMetrics, type DisplayMetrics, type DisplayTiming,
 } from './display-metrics';
-import { $, el } from './dom';
+import { $ } from './dom';
 import { formatBytes } from './format';
 import { consoleText, copyText, download, log, logBlock, stamp } from './log';
 import { call } from './rpc';
@@ -315,54 +315,6 @@ const regIdx = $<HTMLInputElement>('reg-idx');
 $('btn-readreg').addEventListener('click', async () => {
   $('reg-val').textContent = await call('get_reg', parseInt(regIdx.value, 10));
 });
-
-/* The diagnostic channels.
-
-   These are the emulator's `TRACE_*` switches. They were environment
-   variables, which is a thing a browser does not have, so the most detailed
-   account the emulator can give of itself was reachable only from the command
-   line -- on a project whose target is the browser. The list is the core's
-   own, fetched rather than duplicated here, so a channel added to the core
-   appears here with nothing to change. */
-const channelsEl = $('trace-channels');
-
-/** Fill in the channel switches from the core's own list.
- *
- *  Called by the composition root once the worker is up, not at import time:
- *  the list comes from the module, and asking for it while the worker is
- *  still starting is a rejected promise and an empty panel. */
-export async function initTraceChannels(): Promise<void> {
-  const channels = await call('trace_channels');
-  channelsEl.textContent = '';
-  for (const channel of channels) {
-    const label = el('label', 'check');
-    const box = el('input');
-    box.type = 'checkbox';
-    box.checked = channel.on;
-    box.dataset.bit = String(channel.bit);
-    box.addEventListener('change', applyChannels);
-    const text = el('span');
-    // Without the `TRACE_` prefix on the page and with it in the title: the
-    // prefix is the same on every channel and carries nothing, but it is also
-    // the exact spelling someone needs to set the same channel from a shell.
-    text.textContent = channel.name.replace(/^TRACE_/, '').toLowerCase();
-    label.title = channel.name;
-    label.append(box, text);
-    channelsEl.appendChild(label);
-  }
-}
-
-function applyChannels(): void {
-  let mask = 0;
-  let on = 0;
-  for (const box of channelsEl.querySelectorAll<HTMLInputElement>('input[type=checkbox]')) {
-    if (!box.checked) continue;
-    mask |= Number(box.dataset.bit);
-    on += 1;
-  }
-  void call('set_trace_mask', mask);
-  setNote('channels-badge', on ? `${on} on` : 'off', on > 0);
-}
 
 /* The crash report.
 

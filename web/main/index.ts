@@ -22,7 +22,6 @@ import { reopenContainer } from './container';
 import { recycleSession, stageFont } from './session';
 import { setRunning } from './title';
 import { beginLoad, endLoad, failLoad, loadPhase } from './loading';
-import { initTraceChannels } from './debug';
 
 // Registered for their side effects: each of these owns a part of the page and
 // binds its own controls when it is loaded.
@@ -41,8 +40,7 @@ async function init(): Promise<void> {
     loadPhase('creating a session');
     setSession(await call('new'));
     loadPhase('restoring the SD card, saves, profiles and keys');
-    // Independent of each other once the session exists. The debug panel's
-    // channel switches come from the core, so they wait for it too.
+    // Independent of each other once the session exists.
     const [version] = await Promise.all([
       call('version'),
       stageFont(),
@@ -50,7 +48,6 @@ async function init(): Promise<void> {
       saveRestore(),
       loadProfiles().then(stageUsers),
       initFbSize(),
-      initTraceChannels(),
       offerPreviousLog(),
       hasKeys() ? stageKeys() : undefined,
     ]);

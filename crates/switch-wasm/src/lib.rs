@@ -2174,46 +2174,6 @@ pub extern "C" fn switch_start_created_threads(handle: u32) -> u32 {
     session(handle).cpu.start_created_threads() as u32
 }
 
-/// Which diagnostic channels exist and which are on, as JSON.
-///
-/// The names are the emulator's own, so a page offering these offers exactly
-/// what a shell could set: there is no second list to drift out of step.
-#[no_mangle]
-pub extern "C" fn switch_trace_channels_json(buf: *mut u8, maxlen: u32) -> u32 {
-    let mask = switch_core::trace::mask();
-    let mut out = Vec::with_capacity(1024);
-    out.push(b'[');
-    for (i, channel) in switch_core::trace::ALL.iter().enumerate() {
-        if i > 0 {
-            out.push(b',');
-        }
-        out.extend_from_slice(b"{\"name\":\"");
-        json_escape(channel.name(), &mut out);
-        out.extend_from_slice(
-            format!(
-                "\",\"bit\":{},\"on\":{}}}",
-                channel.bit(),
-                mask & channel.bit() != 0
-            )
-            .as_bytes(),
-        );
-    }
-    out.push(b']');
-    write_into(buf, maxlen, &out)
-}
-
-/// The channels currently on, as a bit mask over [`switch_trace_channels_json`].
-#[no_mangle]
-pub extern "C" fn switch_trace_mask() -> u32 {
-    switch_core::trace::mask()
-}
-
-/// Turn exactly the channels in `mask` on and every other one off.
-#[no_mangle]
-pub extern "C" fn switch_set_trace_mask(mask: u32) {
-    switch_core::trace::set_mask(mask);
-}
-
 /// What this build is, so a report can be read against the code that produced
 /// it.
 #[no_mangle]
@@ -3246,33 +3206,6 @@ mod tests {
             );
         }
         assert_eq!(floor_char_boundary(msg, msg.len() + 10), msg.len());
-    }
-
-    #[test]
-    fn every_channel_the_core_has_is_offered_by_name_and_can_be_set() {
-        let _host = HOST.lock().unwrap_or_else(|e| e.into_inner());
-        let before = switch_trace_mask();
-
-        let listed = json_from(|buf, cap| switch_trace_channels_json(buf, cap));
-        for channel in switch_core::trace::ALL {
-            assert!(
-                listed.contains(&format!("\"name\":\"{}\"", channel.name())),
-                "{} is not offered to the page",
-                channel.name()
-            );
-        }
-
-        // The page sends back a mask, and the mask it sends is the one that
-        // takes effect: including every bit at once, which must not read back
-        // as "the environment has not been consulted yet".
-        switch_set_trace_mask(u32::MAX);
-        let all_on = json_from(|buf, cap| switch_trace_channels_json(buf, cap));
-        assert!(!all_on.contains("\"on\":false"), "{all_on}");
-        switch_set_trace_mask(0);
-        let all_off = json_from(|buf, cap| switch_trace_channels_json(buf, cap));
-        assert!(!all_off.contains("\"on\":true"), "{all_off}");
-
-        switch_set_trace_mask(before);
     }
 
     #[test]
