@@ -230,21 +230,6 @@ pub fn mask() -> u32 {
     mask
 }
 
-/// Turn exactly the channels in `mask` on, and every other channel off.
-///
-/// This is what the browser has instead of an environment: the page offers
-/// the [`ALL`] list and hands back what was ticked.
-pub fn set_mask(new: u32) {
-    // Never store the sentinel: a host asking for every channel at once would
-    // otherwise leave the mask looking unread and get the environment's
-    // answer on the next call.
-    MASK.store(new & !UNSEEDED_GUARD, Ordering::Relaxed);
-}
-
-/// The bits no channel uses, cleared out of any mask a host hands in so that
-/// [`UNSEEDED`] stays unreachable.
-const UNSEEDED_GUARD: u32 = !((1 << ALL.len()) - 1);
-
 /// Whether `what` is on.
 #[inline]
 pub fn enabled(what: Trace) -> bool {
@@ -354,21 +339,6 @@ mod tests {
             assert_eq!(Trace::from_name(channel.name()), Some(channel));
         }
         assert_eq!(Trace::from_name("TRACE_NOTHING"), None);
-    }
-
-    #[test]
-    fn a_full_mask_does_not_read_as_unseeded() {
-        // Every bit set is exactly what a page with all the boxes ticked
-        // sends, and storing it verbatim would make the next read seed itself
-        // from the environment instead.
-        //
-        // Checked against the constants rather than by setting the mask: the
-        // mask is the whole process's, and a test that turned every channel on
-        // would trace whatever else was running beside it.
-        assert_ne!(u32::MAX & !UNSEEDED_GUARD, UNSEEDED);
-        for channel in ALL {
-            assert_eq!(channel.bit() & UNSEEDED_GUARD, 0, "{}", channel.name());
-        }
     }
 
     #[test]
