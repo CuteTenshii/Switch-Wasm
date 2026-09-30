@@ -25,9 +25,19 @@ HEADLINE = ["A Nintendo Switch", "emulator that runs", "in your browser"]
 SUBTITLE = "ARM64 interpreter · GM20B GPU · WebAssembly"
 
 # The captured frame is 16:9, and so is the screen area it is drawn into.
-# Scaling it up and clipping shows the top-left quadrant, where the guest's
-# output actually is, instead of a mostly-black full frame.
-SCREEN_ZOOM = 2.0
+# A value above 1 scales it up and clips to the top-left corner, for frames
+# whose output only fills part of the screen.
+SCREEN_ZOOM = 1.0
+SCREEN_WIDTH = 512
+SCREEN_HEIGHT = SCREEN_WIDTH * 9 // 16
+# The window's title bar sits above the screen; the other sides are a thin bezel.
+BEZEL_SIDE, BEZEL_TOP, BEZEL_BOTTOM = 16, 46, 23
+WINDOW_WIDTH = SCREEN_WIDTH + 2 * BEZEL_SIDE
+WINDOW_HEIGHT = SCREEN_HEIGHT + BEZEL_TOP + BEZEL_BOTTOM
+WINDOW_X = WIDTH - 40 - WINDOW_WIDTH
+WINDOW_Y = 315 - WINDOW_HEIGHT // 2
+SCREEN_X = WINDOW_X + BEZEL_SIDE
+SCREEN_Y = WINDOW_Y + BEZEL_TOP
 CHIPS = ["no plugins", "runs locally", "open source"]
 
 SANS = "Inter Display, Inter, Noto Sans, Liberation Sans, sans-serif"
@@ -85,7 +95,7 @@ def build_svg(screenshot_uri: str) -> str:
       <stop offset="100%" stop-color="#0d1119"/>
     </linearGradient>
     <clipPath id="screenclip">
-      <rect x="676" y="196" width="464" height="261" rx="4"/>
+      <rect x="{SCREEN_X}" y="{SCREEN_Y}" width="{SCREEN_WIDTH}" height="{SCREEN_HEIGHT}" rx="4"/>
     </clipPath>
   </defs>
 
@@ -105,14 +115,16 @@ def build_svg(screenshot_uri: str) -> str:
 
   <!-- device: the app window, with a real captured frame inside -->
   <g>
-    <rect x="660" y="150" width="496" height="330" rx="14" fill="url(#bezel)" stroke="#252c3e"/>
-    <circle cx="682" cy="171" r="4.5" fill="#3a4358"/>
-    <rect x="676" y="196" width="464" height="261" rx="4" fill="#000000"/>
-    <image xlink:href="{screenshot_uri}" x="676" y="196"
-           width="{464 * SCREEN_ZOOM:.0f}" height="{261 * SCREEN_ZOOM:.0f}"
+    <rect x="{WINDOW_X}" y="{WINDOW_Y}" width="{WINDOW_WIDTH}" height="{WINDOW_HEIGHT}" rx="14"
+          fill="url(#bezel)" stroke="#252c3e"/>
+    <circle cx="{WINDOW_X + 22}" cy="{WINDOW_Y + 21}" r="4.5" fill="#3a4358"/>
+    <rect x="{SCREEN_X}" y="{SCREEN_Y}" width="{SCREEN_WIDTH}" height="{SCREEN_HEIGHT}" rx="4" fill="#000000"/>
+    <image xlink:href="{screenshot_uri}" x="{SCREEN_X}" y="{SCREEN_Y}"
+           width="{SCREEN_WIDTH * SCREEN_ZOOM:.0f}" height="{SCREEN_HEIGHT * SCREEN_ZOOM:.0f}"
            preserveAspectRatio="xMidYMid slice" clip-path="url(#screenclip)"/>
-    <rect x="676" y="196" width="464" height="261" rx="4" fill="none" stroke="#1d2434"/>
-    <text x="700" y="176" font-family="{SANS}" font-size="12" fill="#5d6579">hbmenu.nro · 1280×720</text>
+    <rect x="{SCREEN_X}" y="{SCREEN_Y}" width="{SCREEN_WIDTH}" height="{SCREEN_HEIGHT}" rx="4"
+          fill="none" stroke="#1d2434"/>
+    <text x="{WINDOW_X + 40}" y="{WINDOW_Y + 26}" font-family="{SANS}" font-size="12" fill="#5d6579">hbmenu.nro · 1280×720</text>
   </g>
 </svg>
 """
