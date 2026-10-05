@@ -533,34 +533,15 @@ mod tests {
         // QueryPlayEvent: no entries, because nothing here records any.
         let mut cpu = request(false, 5, &[]);
         cpu.pdm_request(TLS, Some(5)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0);
 
         // And the statistics for any application are a title launched zero
         // times, not a fabricated playtime.
         let mut cpu = request(false, 2, &[0u8; 8]);
         cpu.pdm_request(TLS, Some(2)).unwrap();
-        assert_eq!(cpu.read_bytes(TLS + 0x20, 0x20), vec![0u8; 0x20]);
-    }
-
-    #[test]
-    fn ns_answers_the_pointer_buffer_size_asked_before_any_command() {
-        // `libnx` records the pointer buffer size on the session as part of
-        // opening it, so this is the *first* thing `ns:am2` is ever asked and
-        // the only thing a caller that never lists a title asks at all. The
-        // generic fallback answered it with a fabricated object id, so the
-        // size came back as whatever that id happened to be.
-        // Answered before dispatch, so the request goes in through the
-        // syscall rather than to `ns_request`.
-        let mut cpu = control_request(3);
-        cpu.tpidr = u64::from(TLS);
-        cpu.register_service_handle(9, "ns:am2");
-        cpu.write_zr(0, 9);
-        cpu.horizon_syscall(0x20).unwrap();
         assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-        assert_eq!(
-            cpu.mem.read_u16(TLS + 0x20).unwrap(),
-            super::super::ipc::POINTER_BUFFER_SIZE
-        );
+        assert_eq!(cpu.read_bytes(TLS + 0x20, 0x20), vec![0u8; 0x20]);
     }
 
     #[test]

@@ -487,7 +487,6 @@ mod tests {
         // ActivateGesture. Both are void, and `nnSdk` answers a refusal with
         // an svcBreak, so what is being pinned here is that neither reaches
         // `unimplemented_command`, which replies `cmif`'s unknown-command-id.
-        const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
         // What the title actually sends: the display size both `vi` and `am`
         // report, then the aruid `am`'s window controller hands out.
         let mut payload = Vec::new();
@@ -495,19 +494,16 @@ mod tests {
         payload.extend_from_slice(&width.to_le_bytes());
         payload.extend_from_slice(&height.to_le_bytes());
         payload.extend_from_slice(&1u64.to_le_bytes());
-        assert_eq!(
-            payload[..4],
-            [0x00, 0x05, 0x00, 0x00],
-            "1280, as the request carries it"
-        );
 
         for command in [92u32, 91] {
             let mut cpu = request(false, command, &payload);
             cpu.register_service_handle(9, "hid");
             cpu.hid_request(TLS, 9, Some(command)).unwrap();
-            let result = cpu.mem.read_u32(TLS + 0x18).unwrap();
-            assert_ne!(result, UNKNOWN_COMMAND_ID, "command {command} was refused");
-            assert_eq!(result, 0, "command {command}");
+            assert_eq!(
+                cpu.mem.read_u32(TLS + 0x18).unwrap(),
+                0,
+                "command {command}"
+            );
         }
     }
 

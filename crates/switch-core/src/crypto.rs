@@ -618,26 +618,6 @@ mod tests {
     }
 
     #[test]
-    fn nca_header_xts_uses_two_sectors() {
-        // The NCA header path decrypts 0x400 bytes as two 0x200-byte XTS
-        // sectors with hactool's tweak (sector number in the high 8 bytes).
-        // Round-trips against a two-sector decrypt.
-        let mut key = [0u8; 32];
-        for (i, b) in key.iter_mut().enumerate() {
-            *b = i as u8;
-        }
-        let mut data = [0u8; 0x400];
-        for (i, b) in data.iter_mut().enumerate() {
-            *b = i as u8;
-        }
-        // Encrypt via the OpenSSL cross-check is not available, but the
-        // sector-based path must produce a 0x400-byte output without panicking
-        // and the two sectors must decrypt deterministically.
-        let out = aes128_xts_decrypt(&key, &data, 0, 0x200);
-        assert_eq!(out.len(), 0x400);
-    }
-
-    #[test]
     fn aes128_ctr_cross_checked() {
         // Cross-checked against `openssl enc -aes-128-ctr`: a 3-block message
         // with an initial counter chosen so the increment carries across two

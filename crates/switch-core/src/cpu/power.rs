@@ -876,15 +876,22 @@ mod tests {
         // `IManager::GetPerformanceMode` and `ICommonStateGetter::
         // GetPerformanceMode` are two routes to the same fact, and a title
         // that gets two answers concludes the mode changed underneath it.
-        let mut cpu = request(false, 1, &[]);
-        cpu.register_service_handle(9, "apm");
-        cpu.apm_request(TLS, 9, Some(1)).unwrap();
-        let from_apm = cpu.mem.read_u32(TLS + 0x20).unwrap();
+        use crate::cpu::OperationMode;
+        for (mode, want) in [(OperationMode::Handheld, 0), (OperationMode::Docked, 1)] {
+            let mut cpu = request(false, 1, &[]);
+            cpu.set_operation_mode(mode);
+            cpu.register_service_handle(9, "apm");
+            cpu.apm_request(TLS, 9, Some(1)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "apm result");
+            assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), want, "apm {mode:?}");
 
-        let mut cpu = request(false, 6, &[]);
-        cpu.register_service_handle(9, "am:common-state-getter");
-        cpu.applet_request(TLS, 9, Some(6)).unwrap();
-        assert_eq!(from_apm, cpu.mem.read_u32(TLS + 0x20).unwrap());
+            let mut cpu = request(false, 6, &[]);
+            cpu.set_operation_mode(mode);
+            cpu.register_service_handle(9, "am:common-state-getter");
+            cpu.applet_request(TLS, 9, Some(6)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "am result");
+            assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), want, "am {mode:?}");
+        }
     }
 
     #[test]

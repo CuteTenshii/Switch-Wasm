@@ -2150,10 +2150,7 @@ mod tests {
 
     #[test]
     fn set_sys_names_the_settings_it_used_to_leave_to_the_reply_padding() {
-        // These are answered rather than stubbed now. The values match the
-        // zeroes the padding already supplied, so this is not a fix for
-        // anything the guest saw: it is the difference between a console that
-        // says it is retail and one that merely never said otherwise.
+        // The padding reads 0 too, so only the stub list tells these apart.
         for (cmd, want) in [
             (17u32, 0u32), // GetAccountSettings
             (23, 0),       // GetColorSetId, BasicWhite
@@ -2167,12 +2164,15 @@ mod tests {
             cpu.set_sys_request(TLS, Some(cmd)).unwrap();
             assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "cmd {cmd} result");
             assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), want, "cmd {cmd}");
+            assert!(cpu.stubbed_ipc().is_empty(), "cmd {cmd} fell to the stub");
         }
         // QuestFlag is a `u8`: Retail, not Kiosk.
         for cmd in [7u32, 47, 95, 99, 201] {
             let mut cpu = request(false, cmd, &[]);
             cpu.set_sys_request(TLS, Some(cmd)).unwrap();
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "cmd {cmd} result");
             assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 0, "cmd {cmd}");
+            assert!(cpu.stubbed_ipc().is_empty(), "cmd {cmd} fell to the stub");
         }
     }
 
@@ -2343,12 +2343,12 @@ mod tests {
     }
 
     #[test]
-    fn set_sys_device_nick_name_round_trips_through_its_buffers() {
-        // 0x80 bytes each way, and through a buffer rather than the raw data
-        // in both directions: the setter reading the raw data would store
-        // the descriptor words instead of the name.
+    fn the_device_nick_name_set_sys_was_given_reads_back_through_both_services() {
+        // 0x80 bytes each way, through a buffer rather than the raw data:
+        // the setter reading the raw data would store the descriptor words.
         const SET: u32 = 78;
-        const GET: u32 = 77;
+        const SYS_GET: u32 = 77;
+        const SET_GET: u32 = 11;
         const IN: u32 = 0x4000;
         const OUT: u32 = 0x5000;
         const NAME: &[u8] = b"the console in the tab";
@@ -2361,10 +2361,27 @@ mod tests {
         }
         write_map_buffer_request(&mut cpu, SET, &[], IN, 0x80, true);
         cpu.set_sys_request(TLS, Some(SET)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "set result");
 
-        write_map_buffer_request(&mut cpu, GET, &[], OUT, 0x80, false);
-        cpu.set_sys_request(TLS, Some(GET)).unwrap();
-        assert_eq!(cpu.read_string(OUT, 0x80), "the console in the tab");
+        cpu.register_service_handle(9, "set");
+        for (service, get) in [("set:sys", SYS_GET), ("set", SET_GET)] {
+            // An untouched buffer must not pass as the name.
+            for offset in 0..0x80 {
+                cpu.mem.write_u8(OUT + offset, 0xa5).unwrap();
+            }
+            write_map_buffer_request(&mut cpu, get, &[], OUT, 0x80, false);
+            if service == "set" {
+                cpu.set_request(TLS, 9, Some(get)).unwrap();
+            } else {
+                cpu.set_sys_request(TLS, Some(get)).unwrap();
+            }
+            assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "{service} result");
+            assert_eq!(
+                cpu.read_string(OUT, 0x80),
+                "the console in the tab",
+                "{service}"
+            );
+        }
     }
 
     #[test]
@@ -2541,38 +2558,6 @@ mod tests {
     }
 
     #[test]
-    fn set_reports_the_nickname_set_sys_was_given() {
-        // `set`'s GetDeviceNickName and `set:sys`'s Get/SetDeviceNickName are
-        // one name. Answered with an empty success, the caller read whatever
-        // its own buffer already held as the console's name.
-        const SET_NICK_NAME: u32 = 78;
-        const GET_NICK_NAME: u32 = 11;
-        const IN: u32 = 0x4000;
-        const OUT: u32 = 0x5000;
-        const NAME: &[u8] = b"the console in the tab";
-
-        let mut cpu = request(false, SET_NICK_NAME, &[]);
-        cpu.mem.map_zero(IN, 0x200).unwrap();
-        cpu.mem.map_zero(OUT, 0x200).unwrap();
-        for (index, &byte) in NAME.iter().enumerate() {
-            cpu.mem.write_u8(IN + index as u32, byte).unwrap();
-        }
-        // Scribble the buffer the name comes back in, so an untouched reply
-        // is a failure rather than an accidental pass.
-        for offset in 0..0x80 {
-            cpu.mem.write_u8(OUT + offset, 0xa5).unwrap();
-        }
-        cpu.register_service_handle(9, "set");
-        write_map_buffer_request(&mut cpu, SET_NICK_NAME, &[], IN, 0x80, true);
-        cpu.set_sys_request(TLS, Some(SET_NICK_NAME)).unwrap();
-
-        write_map_buffer_request(&mut cpu, GET_NICK_NAME, &[], OUT, 0x80, false);
-        cpu.set_request(TLS, 9, Some(GET_NICK_NAME)).unwrap();
-        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
-        assert_eq!(cpu.read_string(OUT, 0x80), "the console in the tab");
-    }
-
-    #[test]
     fn set_get_region_code_reports_usa() {
         let mut cpu = request(false, 4, &[]);
         cpu.register_service_handle(9, "set");
@@ -2624,11 +2609,6 @@ mod tests {
         assert_eq!(
             cpu.mem.read_u16(TLS + 0x20).unwrap(),
             super::super::ipc::POINTER_BUFFER_SIZE
-        );
-        assert_ne!(
-            cpu.mem.read_u16(TLS + 0x20).unwrap(),
-            18,
-            "the language-code count"
         );
     }
 }

@@ -320,8 +320,13 @@ mod tests {
         let entries = parse_keys_file(text);
         assert_eq!(entries.len(), 2);
         let ks = keyset_from_prod(&entries);
-        assert_eq!(ks.header_key.unwrap()[0], 0x00);
-        assert_eq!(ks.master_key_00.unwrap()[15], 0x10);
+        let mut header_key = [0u8; 32];
+        for (i, b) in header_key.iter_mut().enumerate() {
+            *b = (i as u8 % 16) * 0x11;
+        }
+        assert_eq!(ks.header_key, Some(header_key));
+        let master: [u8; 16] = std::array::from_fn(|i| i as u8 + 1);
+        assert_eq!(ks.master_key_00, Some(master));
     }
 
     #[test]
@@ -353,10 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn derives_header_key_from_sources() {
-        // Constructed sources: header_kek = AESECBDecrypt(header_kek_source,
-        // ...), so pick a header_key_source and check the derivation runs and
-        // reproduces a direct key when the sources are consistent.
+    fn a_direct_header_key_is_used_as_is_and_none_is_made_up_without_one() {
         let mut ks = KeySet::default();
         let mut direct = [0u8; 32];
         for (i, b) in direct.iter_mut().enumerate() {
@@ -374,9 +376,12 @@ mod tests {
         let text = "titlekey_010075600ae968000000000000000005 = 0102030405060708090a0b0c0d0e0f10\n";
         let entries = parse_keys_file(text);
         let tks = keyset_from_title(&entries);
-        assert_eq!(tks.len(), 1);
-        assert_eq!(tks[0].0[0], 0x01);
-        assert_eq!(tks[0].1[15], 0x10);
+        let rights_id = [
+            0x01, 0x00, 0x75, 0x60, 0x0a, 0xe9, 0x68, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x05,
+        ];
+        let key: [u8; 16] = std::array::from_fn(|i| i as u8 + 1);
+        assert_eq!(tks, vec![(rights_id, key)]);
     }
 
     /// A `title.keys` entry is the ticket's key block, still wrapped: using

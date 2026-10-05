@@ -334,37 +334,32 @@ impl Vfs {
 
 #[cfg(test)]
 mod tests {
-
-    #[test]
-    fn normalize_resolves_dot_components() {
-        // Guests build paths by joining, so `.` and `..` turn up in them all
-        // the time. `hb-appstore` asked for "sdmc:/switch/./.get/packages" and
-        // got a directory literally called "." with ".get" inside it, which
-        // it could not find again by any other spelling.
-        assert_eq!(Vfs::normalize("sdmc:/switch/."), "/switch");
-        assert_eq!(
-            Vfs::normalize("sdmc:/switch/./.get/packages"),
-            "/switch/.get/packages"
-        );
-        assert_eq!(Vfs::normalize("/switch//a///b/"), "/switch/a/b");
-        assert_eq!(Vfs::normalize("/switch/a/../b"), "/switch/b");
-        // A leading dot is part of a name, not a component of its own.
-        assert_eq!(Vfs::normalize("/.get"), "/.get");
-        assert_eq!(Vfs::normalize("/..."), "/...");
-        // And `..` stops at the root rather than climbing past it.
-        assert_eq!(Vfs::normalize("/../../etc"), "/etc");
-        assert_eq!(Vfs::normalize("sdmc:/"), "/");
-        assert_eq!(Vfs::normalize("/switch/../.."), "/");
-    }
     use super::*;
 
     #[test]
-    fn normalization_strips_device_and_slashes() {
-        assert_eq!(Vfs::normalize("sdmc:/switch/"), "/switch");
-        assert_eq!(Vfs::normalize("/switch/app.nro"), "/switch/app.nro");
-        assert_eq!(Vfs::normalize("sdmc:/"), "/");
-        assert_eq!(Vfs::normalize(""), "/");
-        assert_eq!(Vfs::normalize("switch"), "/switch");
+    fn normalize_strips_the_device_and_resolves_dot_components() {
+        // Guests build paths by joining, so `.` and `..` turn up in them all
+        // the time. `hb-appstore` asked for "sdmc:/switch/./.get/packages" and
+        // got a directory literally called "." with ".get" inside it.
+        for (path, want) in [
+            ("", "/"),
+            ("sdmc:/", "/"),
+            ("switch", "/switch"),
+            ("sdmc:/switch/", "/switch"),
+            ("/switch/app.nro", "/switch/app.nro"),
+            ("sdmc:/switch/.", "/switch"),
+            ("sdmc:/switch/./.get/packages", "/switch/.get/packages"),
+            ("/switch//a///b/", "/switch/a/b"),
+            ("/switch/a/../b", "/switch/b"),
+            // A leading dot is part of a name, not a component of its own.
+            ("/.get", "/.get"),
+            ("/...", "/..."),
+            // `..` stops at the root rather than climbing past it.
+            ("/../../etc", "/etc"),
+            ("/switch/../..", "/"),
+        ] {
+            assert_eq!(Vfs::normalize(path), want, "{path:?}");
+        }
     }
 
     #[test]

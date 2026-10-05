@@ -2392,6 +2392,7 @@ mod tests {
         let mut cpu = request(false, 5, &[]);
         cpu.register_service_handle(9, "am:common-state-getter");
         cpu.applet_request(TLS, 9, Some(5)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "Handheld");
     }
 
@@ -2510,7 +2511,6 @@ mod tests {
         );
         assert_eq!(data[4], 1, "layout version");
         assert_eq!(&data[8..0x18], &crate::cpu::acc::DEFAULT_USER_UID[..]);
-        assert_ne!(crate::cpu::acc::DEFAULT_USER_UID, [0u8; 16]);
 
         // `am` hands each launch parameter over once and forgets it, which is
         // what stops a second `nn::account::Initialize` caching a user the

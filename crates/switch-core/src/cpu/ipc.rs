@@ -2096,10 +2096,10 @@ pub(super) mod testing {
                 "config item {item}"
             );
         }
-        // The device id is fixed, but it must not read as "no device".
+        // The device id is fixed, and not the zero that reads as "no device".
         let mut cpu = request(false, 0, &7u32.to_le_bytes());
         cpu.spl_request(TLS, Some(0)).unwrap();
-        assert_ne!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0);
+        assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), super::SPL_DEVICE_ID);
     }
 
     /// A CMIF **control** request (message type 5), the session-management
@@ -2218,14 +2218,21 @@ mod tests {
 
         write_request(&mut cpu, 5, &[]);
         cpu.npns_request(TLS, 9, Some(5)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
         assert_eq!(cpu.mem.read_u32(TLS + 0x0c).unwrap(), first, "same event");
 
         // And the state beside it: not connected, never notified.
         write_request(&mut cpu, 103, &[]);
         cpu.npns_request(TLS, 9, Some(103)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "GetState result");
         assert_eq!(cpu.mem.read_u32(TLS + 0x20).unwrap(), 0, "not connected");
         write_request(&mut cpu, 106, &[]);
         cpu.npns_request(TLS, 9, Some(106)).unwrap();
+        assert_eq!(
+            cpu.mem.read_u32(TLS + 0x18).unwrap(),
+            0,
+            "GetLastNotifiedTime result"
+        );
         assert_eq!(cpu.mem.read_u64(TLS + 0x20).unwrap(), 0, "never notified");
     }
 
@@ -2237,12 +2244,9 @@ mod tests {
         // value here, so the command is refused rather than guessed at.
         let mut cpu = request(false, 3, &[]);
         cpu.register_service_handle(9, "npns:s");
+        const UNKNOWN_COMMAND_ID: u32 = 10 | (221 << 9);
         cpu.npns_request(TLS, 9, Some(3)).unwrap();
-        assert_ne!(
-            cpu.mem.read_u32(TLS + 0x18).unwrap(),
-            0,
-            "answered rather than refused"
-        );
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), UNKNOWN_COMMAND_ID);
     }
 
     #[test]

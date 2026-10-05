@@ -962,7 +962,6 @@ mod tests {
         acc(&mut cpu, "acc:u0", 4);
         let uid = cpu.read_bytes(TLS + 0x20, 16);
         assert_eq!(uid, super::DEFAULT_USER_UID.to_vec());
-        assert_ne!(uid, vec![0u8; 16]);
 
         // TrySelectUserWithoutInteraction hands back the same one, since there
         // is nothing to choose between.

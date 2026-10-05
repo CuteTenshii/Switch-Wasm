@@ -383,8 +383,8 @@ mod tests {
             storage.read_at(at, &mut out).unwrap();
             assert_eq!(out, plain[at as usize..at as usize + 4]);
         }
-        // One entry read repeatedly is one block held, not twenty.
-        assert!(storage.cache.borrow().len() <= CACHED_BLOCKS);
+        // Every read falls in the second entry, so one block is held.
+        assert_eq!(storage.cache.borrow().len(), 1);
     }
 
     #[test]

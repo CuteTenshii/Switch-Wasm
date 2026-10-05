@@ -108,11 +108,8 @@ mod tests {
         // can draw with rather than an empty region.
         const BUFFERS: u32 = 0x3000;
         const TYPES: u32 = 7;
+        // 40 bytes, a whole number of words, so no padding is in play.
         let font = b"not really a font, but bytes are bytes!!".to_vec();
-        assert!(
-            font.len().is_multiple_of(4),
-            "so no padding is in play here"
-        );
 
         // GetSize and GetSharedMemoryAddressOffset, per font type. Each font
         // sits behind the eight-byte header a console puts in front of it, so
@@ -234,14 +231,31 @@ mod tests {
     fn without_a_font_pl_reports_an_empty_set() {
         // A guest must get a well-formed "no fonts" answer rather than spin in
         // `_plRequestLoadWait` or read a font that isn't there.
-        let mut cpu = request(false, 5, &[]);
+        const BUFFERS: u32 = 0x3000;
+        let mut cpu = request(false, 1, &[]);
         cpu.pl_request(TLS, Some(1)).unwrap();
         assert_eq!(
             cpu.mem.read_u32(TLS + 0x20).unwrap(),
             1,
             "reported as loaded"
         );
+
+        let mut cpu = Cpu::new();
+        cpu.mem.map_zero(TLS, 0x200).unwrap();
+        cpu.mem.map_zero(BUFFERS, 0x100).unwrap();
+        cpu.mem.write_u32(TLS, 4 | (3 << 24)).unwrap();
+        cpu.mem.write_u32(TLS + 4, 8).unwrap();
+        for i in 0..3u32 {
+            let at = TLS + 8 + 12 * i;
+            cpu.mem.write_u32(at, 0x20).unwrap(); // room for eight entries
+            cpu.mem.write_u32(at + 4, BUFFERS + 0x20 * i).unwrap();
+        }
+        let data_area = cpu.ipc_reply_start(TLS);
+        cpu.mem.write_u32(TLS + data_area, SFCI).unwrap();
+        cpu.mem.write_u32(TLS + data_area + 8, 5).unwrap();
         cpu.pl_request(TLS, Some(5)).unwrap();
+        assert_eq!(cpu.mem.read_u32(TLS + 0x18).unwrap(), 0, "result");
+        assert_eq!(cpu.mem.read_u8(TLS + 0x20).unwrap(), 1, "loaded");
         assert_eq!(cpu.mem.read_u32(TLS + 0x24).unwrap(), 0, "no fonts");
     }
 }
