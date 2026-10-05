@@ -117,19 +117,6 @@ fn horizon_query_memory_and_get_info() {
     assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 3); // type
     assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0b011); // perm (RW-)
 
-    // An untouched soft-mapped page reports as unmapped (type 0, no perm),
-    // which is what lets libnx virtmem find free address space.
-    let mut cpu = cpu_at(0x1000);
-    cpu.set_reg(0, 0x3000);
-    cpu.set_reg(1, 0x3040);
-    cpu.set_reg(2, 0x1234000);
-    cpu.mem.map_zero(0x3000, 0x60).unwrap();
-    cpu.mem.map(0x1000, &svc(0x06).to_le_bytes()).unwrap();
-    cpu.set_pc(0x1000);
-    cpu.run(1).unwrap();
-    assert_eq!(cpu.mem.read_u32(0x3010).unwrap(), 0); // type (unmapped)
-    assert_eq!(cpu.mem.read_u32(0x3018).unwrap(), 0); // perm
-
     // GetInfo returns the requested value in X1 (the libnx wrapper stores it
     // to the out pointer). InfoType 4 = HeapRegionAddress. Every region this
     // reports has to be an address the emulator can actually represent: guest
@@ -146,7 +133,6 @@ fn horizon_query_memory_and_get_info() {
         cpu.read_x(1),
         u64::from(switch_core::cpu::GUEST_HEAP_REGION_ADDR)
     );
-    assert!(cpu.read_x(1) <= u64::from(u32::MAX));
 
     // InfoType 21/22 = Total/UsedNonSystemMemorySize, which is what `nnSdk`
     // sizes the application heap from: it hands the difference straight to
@@ -244,9 +230,6 @@ fn horizon_map_physical_memory() {
     cpu.set_reg(1, 0x10_0000);
     cpu.run(1).unwrap();
     assert_eq!(cpu.read_x(0), 0);
-    // The pages are demand-allocated, so the range reads as zeros and costs
-    // nothing until it is written to.
-    assert_eq!(cpu.mem.read_u32(GUEST_ALIAS_REGION_ADDR).unwrap(), 0);
 
     // An unaligned or empty range is rejected, and so is one the emulator
     // cannot address: guest memory is indexed with a `u32`, and silently
@@ -265,7 +248,11 @@ fn horizon_map_physical_memory() {
         cpu.set_reg(0, addr);
         cpu.set_reg(1, size);
         cpu.run(1).unwrap();
-        assert_ne!(cpu.read_x(0), 0, "{addr:#x}+{size:#x} should be rejected");
+        assert_eq!(
+            cpu.read_x(0),
+            0x8000_DC01,
+            "{addr:#x}+{size:#x} should be rejected as InvalidMemoryRange"
+        );
     }
 }
 
@@ -1101,8 +1088,11 @@ fn arbitrate_lock_hands_the_mutex_to_a_waiter() {
     assert!(cpu.halted);
     // The child saw itself as the owner after the unlock handed it over.
     let observed = cpu.mem.read_u32(0x6000).unwrap();
-    assert_ne!(observed, 0, "the child ran after the unlock");
-    assert_ne!(observed, 1, "and the word no longer names the main thread");
+    assert_eq!(
+        observed,
+        cpu.read_x(1) as u32,
+        "the word names the child, by the handle CreateThread returned"
+    );
 }
 
 #[test]

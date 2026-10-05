@@ -73,11 +73,12 @@ fn the_thread_pointer_comes_from_cp15_c13() {
     let mut cpu = cpu();
     cpu.bootstrap();
     cpu.set_pc_and_sp(BASE, 0x9000);
-    let code: [u32; 5] = [
+    let code: [u32; 6] = [
         0xEE1D_0F70, // mrc p15, 0, r0, c13, c0, 3   (TPIDRURO)
         0xE3A0_10FF, // mov r1, #0xff
         0xEE0D_1F50, // mcr p15, 0, r1, c13, c0, 2   (TPIDRURW)
         0xEE1D_2F50, // mrc p15, 0, r2, c13, c0, 2
+        0xEE1D_3F70, // mrc p15, 0, r3, c13, c0, 3   (TPIDRURO)
         HALT,
     ];
     let mut bytes = Vec::new();
@@ -93,7 +94,7 @@ fn the_thread_pointer_comes_from_cp15_c13() {
     );
     assert_eq!(r(&cpu, 2), 0xFF, "and the writable one is the guest's own");
     assert_eq!(
-        r(&cpu, 0),
+        r(&cpu, 3),
         switch_core::cpu::MAIN_THREAD_TLS_BASE,
         "writing the guest's own did not move the kernel's"
     );

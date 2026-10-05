@@ -43,9 +43,9 @@ fn a_core_register_moves_to_and_from_a_single() {
         load(0, 0x4048_F5C3)[0], // 3.14
         load(0, 0x4048_F5C3)[1],
         0xEE00_0A10, // vmov s0, r0
-        0xEE11_3A90, // vmov r3, s3   (s3 is untouched, so zero)
+        0xEE10_3A10, // vmov r3, s0
     ]);
-    assert_eq!(r(&cpu, 3), 0, "s3 was never written");
+    assert_eq!(r(&cpu, 3), 0x4048_F5C3, "s0 came back into r3");
     assert_eq!(cpu.read_vreg(0) as u32, 0x4048_F5C3, "s0 is V0's low word");
 }
 

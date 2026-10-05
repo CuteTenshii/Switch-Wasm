@@ -23,7 +23,7 @@ fn movz_movn_movk_build_64bit() {
 }
 
 #[test]
-fn add_immediate_sets_flags() {
+fn add_immediate_reads_register_31_as_sp() {
     let cpu = exec(&[add_imm(1, 31, 5, true), add_imm(2, 1, 0xFFF, false)], 100);
     // x1 = SP(0) + 5
     assert_eq!(cpu.read_x(1), 5);
@@ -125,77 +125,10 @@ fn branches_subroutine_and_link() {
     // func: MOV X9, #42 ; RET
     let func_pc = 0x1100i32;
     let bl_off = func_pc - 0x1000; // BL at 0x1000, target 0x1100
-    let cpu = exec(
-        &[
-            bl(bl_off),
-            svc(0),
-            nop(), // 0x1008
-            nop(), // 0x100c
-            nop(), // 0x1010
-            nop(), // 0x1014
-            nop(), // 0x1018
-            nop(), // 0x101c
-            nop(), // 0x1020
-            nop(), // 0x1024
-            nop(), // 0x1028
-            nop(), // 0x102c
-            nop(), // 0x1030
-            nop(), // 0x1034
-            nop(), // 0x1038
-            nop(), // 0x103c
-            nop(), // 0x1040
-            nop(), // 0x1044
-            nop(), // 0x1048
-            nop(), // 0x104c
-            nop(), // 0x1050
-            nop(), // 0x1054
-            nop(), // 0x1058
-            nop(), // 0x105c
-            nop(), // 0x1060
-            nop(), // 0x1064
-            nop(), // 0x1068
-            nop(), // 0x106c
-            nop(), // 0x1070
-            nop(), // 0x1074
-            nop(), // 0x1078
-            nop(), // 0x107c
-            nop(), // 0x1080
-            nop(), // 0x1084
-            nop(), // 0x1088
-            nop(), // 0x108c
-            nop(), // 0x1090
-            nop(), // 0x1094
-            nop(), // 0x1098
-            nop(), // 0x109c
-            nop(), // 0x10a0
-            nop(), // 0x10a4
-            nop(), // 0x10a8
-            nop(), // 0x10ac
-            nop(), // 0x10b0
-            nop(), // 0x10b4
-            nop(), // 0x10b8
-            nop(), // 0x10bc
-            nop(), // 0x10c0
-            nop(), // 0x10c4
-            nop(), // 0x10c8
-            nop(), // 0x10cc
-            nop(), // 0x10d0
-            nop(), // 0x10d4
-            nop(), // 0x10d8
-            nop(), // 0x10dc
-            nop(), // 0x10e0
-            nop(), // 0x10e4
-            nop(), // 0x10e8
-            nop(), // 0x10ec
-            nop(), // 0x10f0
-            nop(), // 0x10f4
-            nop(), // 0x10f8
-            nop(), // 0x10fc
-            movz(9, 42, 0, true),
-            ret(30),
-        ],
-        200,
-    );
+    let mut code = vec![bl(bl_off), svc(0)];
+    code.resize((bl_off / 4) as usize, nop());
+    code.extend([movz(9, 42, 0, true), ret(30)]);
+    let cpu = exec(&code, 200);
     assert_eq!(cpu.read_x(9), 42);
     // x30 = return address = 0x1004
     assert_eq!(cpu.read_x(30), 0x1004);
@@ -438,6 +371,8 @@ fn mrs_msr_nzcv() {
         movz(2, 3, 0, true),
         cmp_reg(1, 2, true),
         mrs_nzcv(4),
+        0xD51B_4205, // msr nzcv, x5
+        mrs_nzcv(6),
         svc(0),
     ];
     let mut bytes = Vec::new();
@@ -446,8 +381,11 @@ fn mrs_msr_nzcv() {
     }
     cpu.mem.map(0x1000, &bytes).unwrap();
     cpu.set_pc(0x1000);
+    cpu.set_reg(5, 0x9000_0000);
     cpu.run(code.len() as u64).unwrap();
-    assert_eq!(cpu.read_x(4) & (1 << 30), 1 << 30); // Z set, captured via MRS
+    assert_eq!(cpu.read_x(4), 0x6000_0000, "Z and C after an equal compare");
+    assert_eq!(cpu.nzcv(), 0x9000_0000, "MSR wrote N and V");
+    assert_eq!(cpu.read_x(6), 0x9000_0000, "and MRS reads them back");
 }
 
 #[test]
@@ -619,14 +557,14 @@ fn the_generic_timer_counts_and_reports_its_own_rate() {
     cpu.mem.map(0x1000, &bytes).unwrap();
     cpu.set_pc(0x1000);
     cpu.run(code.len() as u64).unwrap();
-    assert!(
-        cpu.read_x(2) > cpu.read_x(1),
-        "CNTPCT_EL0 must advance as the guest runs, not read a fixed value"
+    assert_eq!(cpu.read_x(1), 0, "read at cycle 0");
+    // 2001 cycles of the 1.02 GHz clock are 37.66 ticks of the 19.2 MHz one.
+    assert_eq!(
+        cpu.read_x(2),
+        37,
+        "CNTPCT_EL0 must advance as the guest runs, at the tick rate"
     );
-    assert!(
-        cpu.read_x(3) >= cpu.read_x(2) && cpu.read_x(3) - cpu.read_x(2) <= 1,
-        "CNTVCT_EL0 reads the same counter as CNTPCT_EL0"
-    );
+    assert_eq!(cpu.read_x(3), 37, "CNTVCT_EL0 reads the same counter");
     assert_eq!(cpu.read_x(4), 19_200_000, "CNTFRQ_EL0 is the 19.2 MHz rate");
 }
 
@@ -650,6 +588,7 @@ fn sub_shifted_register() {
     cpu.run(2).unwrap();
     assert_eq!(cpu.read_x(2), 0x1000 - 0x123);
     assert_eq!(cpu.read_x(3), 0x1000);
+    assert_eq!(cpu.nzcv(), 0, "SUBS would have set C");
 }
 
 #[test]
@@ -1155,7 +1094,6 @@ fn ctr_el0_reports_64_byte_cache_lines() {
     // `4 << DminLine`; reporting 0 walked NX-Shell's buffers 4 bytes at a time.
     let cpu = run_program(cpu_at(0x1000), 0x1000, &[0xd53b_0027, nop()]);
     assert_eq!(cpu.read_reg(7), 0x8444_C004);
-    assert_eq!((cpu.read_reg(7) >> 16) & 0xF, 4);
 }
 
 #[test]
@@ -1405,18 +1343,12 @@ fn bic_and_friends_invert_after_shifting() {
 /// way, by `tools/difftest.py --scalar` against qemu.
 #[test]
 fn a_signed_load_into_a_w_register_narrows_like_every_other_w_write() {
-    let mut cpu = cpu_at(0x1000);
-    cpu.mem.map_zero(0x2000, 0x100).unwrap();
-    cpu.mem.write_u16(0x2000, 0xFF00).unwrap();
-    cpu.mem.write_u8(0x2002, 0x80).unwrap();
-    cpu.set_reg(0, 0x2000);
     let code = &[
         0x79c0_0001, // ldrsh w1, [x0]
         0x7980_0002, // ldrsh x2, [x0]
         0x39c0_0803, // ldrsb w3, [x0, #2]
         0x3980_0804, // ldrsb x4, [x0, #2]
     ];
-    drop(cpu);
     // Both engines: the translator resolves the same classifier once per
     // instruction, so neither can disagree about which form this was.
     for jit in [true, false] {

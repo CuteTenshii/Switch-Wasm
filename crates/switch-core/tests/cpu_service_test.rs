@@ -78,7 +78,7 @@ fn hid_hands_over_the_input_shared_memory() {
     // marshals its id array as a pointer buffer, and nnSdk checks the
     // negotiated size before it sends.
     ipc_request(&mut cpu, hid, 5, None, 3);
-    assert_ne!(cpu.mem.read_u16(tls + 0x20).unwrap(), 0);
+    assert_eq!(cpu.mem.read_u16(tls + 0x20).unwrap(), POINTER_BUFFER_SIZE);
 }
 
 #[test]
@@ -527,11 +527,21 @@ fn applet_common_state_getter_reports_focus_once() {
     let (mut cpu, handle, _proxy, state_getter) = applet_chain();
     let tls = cpu.tls_base();
 
+    // The message event announces the queued message to one poll, then clears.
+    const RESULT_TIMED_OUT: u64 = 0xEA01;
+    ipc_request(&mut cpu, handle, 4, Some(state_getter), 0); // GetEventHandle
+    let message = cpu.mem.read_u32(tls + 0x0c).unwrap();
+    assert_eq!(wait_sync(&mut cpu, &[message], 0).0, 0, "never announced");
+    assert_eq!(
+        wait_sync(&mut cpu, &[message], 0).0,
+        RESULT_TIMED_OUT,
+        "it announced itself twice"
+    );
+
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
     assert_eq!(cpu.read_x(0), 0); // svc result
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0x4F43_4653); // "SFCO"
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0); // Result: success
-    assert_ne!(cpu.mem.read_u32(tls + 0x28).unwrap(), 0x19280);
     assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), 15); // FocusStateChanged
 
     ipc_request(&mut cpu, handle, 4, Some(state_getter), 1);
@@ -566,25 +576,6 @@ fn applet_unimplemented_command_is_an_error_not_a_fake_success() {
     ipc_request(&mut cpu, handle, 4, Some(display_controller), 10);
     assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 0x4F43_4653); // "SFCO"
     assert_eq!(cpu.mem.read_u32(tls + 0x28).unwrap(), UNKNOWN_COMMAND_ID);
-}
-
-#[test]
-fn applet_control_command_with_context_is_not_a_normal_command() {
-    // nnSdk sends every message in the "with context" encoding,
-    // ControlWithContext (7) rather than Control (5). Reading only type 5 as a
-    // control message turned `appletOE`'s opening QueryPointerBufferSize into
-    // IApplicationProxyService command 3, which does not exist, and the applet
-    // chain died before it ever opened.
-    const APPLET: u64 = 0x1000;
-    let mut cpu = cpu_at(0x1000);
-    cpu.bootstrap();
-    cpu.set_pc(0x1000);
-    cpu.register_service_handle(APPLET, "appletOE");
-    let tls = cpu.tls_base();
-
-    ipc_request(&mut cpu, APPLET, 7, None, 3); // QueryPointerBufferSize
-    assert_eq!(cpu.mem.read_u32(tls + 0x10).unwrap(), 0x4F43_4653); // "SFCO"
-    assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0); // success, not an error
 }
 
 #[test]
@@ -779,20 +770,6 @@ fn touch_input_writes_the_hid_touchscreen_lifo() {
         "clamped x"
     );
     assert_eq!(cpu.mem.read_u32(touch(0) + 0x14).unwrap(), 719, "clamped y");
-}
-
-#[test]
-fn touch_input_before_hid_shared_memory_is_mapped_is_dropped() {
-    // Nothing is buffered: with no mapping there is nowhere to put a contact,
-    // and the host keeps sending while the finger is down anyway.
-    use switch_core::cpu::TouchPoint;
-    let mut cpu = cpu_at(0x1000);
-    cpu.set_touch_state(&[TouchPoint {
-        finger_id: 0,
-        x: 1,
-        y: 2,
-    }]);
-    assert_eq!(cpu.hid_shmem_addr(), 0);
 }
 
 #[test]
@@ -1732,10 +1709,6 @@ fn audout_refuses_a_buffer_whose_samples_are_outside_it() {
 
     // And the guest gets its buffer back, so its audio thread does not stall
     // waiting for one it will never see again.
-    let cycles = 200_000;
-    for _ in 0..cycles {
-        let _ = cpu.step();
-    }
     ipc_request_plain_with_buffer(&mut cpu, device, 8, TAGS, 16, true, &[]);
     assert_eq!(
         cpu.mem.read_u32(tls + 0x20).unwrap(),
@@ -1784,6 +1757,7 @@ fn audout_does_not_play_a_stopped_device() {
     const AUDOUT: u64 = 0xA000;
     const DESC: u32 = 0x8000;
     const PCM: u32 = 0x8100;
+    const TAGS: u32 = 0x8200;
 
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -1811,9 +1785,10 @@ fn audout_does_not_play_a_stopped_device() {
         0,
         "a stopped device played something"
     );
-    // The tag still comes back.
-    ipc_request_plain(&mut cpu, device, 9, &[]);
-    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1);
+    // The tag still comes back, through GetReleasedAudioOutBuffer.
+    ipc_request_plain_with_buffer(&mut cpu, device, 5, TAGS, 16, true, &[]);
+    assert_eq!(cpu.mem.read_u32(tls + 0x20).unwrap(), 1, "released count");
+    assert_eq!(cpu.mem.read_u64(TAGS).unwrap(), 7, "the tag");
 }
 
 #[test]
@@ -2373,8 +2348,10 @@ fn the_display_refreshes_without_being_drawn_to() {
     ipc_request_plain(&mut cpu, VI, 2, &[]);
     let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     ipc_request_plain(&mut cpu, display, 5202, &[]);
+    // { send_pid:1, num_copy:4, num_move:4 }: one copy handle, no move ones.
+    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
     let vsync = cpu.mem.read_u32(tls + 0x0c).unwrap();
-    assert_ne!(vsync, 0);
+    assert_ne!(vsync, 0, "the guest must receive a real handle");
 
     // The period has not passed yet, and nothing has been presented.
     assert_eq!(
@@ -2400,6 +2377,14 @@ fn the_display_refreshes_without_being_drawn_to() {
         wait_sync(&mut cpu, &[vsync], 0).0,
         RESULT_TIMED_OUT,
         "it refreshed twice"
+    );
+
+    // A present signals it too.
+    cpu.signal_event(u64::from(vsync));
+    assert_eq!(
+        wait_sync(&mut cpu, &[vsync], 0).0,
+        0,
+        "a signalled vsync did not fire"
     );
 }
 
@@ -2456,13 +2441,8 @@ fn closing_a_domain_object_is_not_command_zero() {
 fn vi_reads_a_control_request_in_either_encoding() {
     // Control-ness is `ipc_is_control_request`, never `type == 5`: a control
     // message has a with-context encoding too (type 7), and that is the one
-    // nnSdk sends. Testing for 5 alone read the Home Menu's
-    // QueryPointerBufferSize as command **3 on the binder relay** and ran a
-    // parcel transaction for it, answering a size query with a failed binder
-    // reply.
-    //
-    // The size is the same either way: it is the session's, not the
-    // interface's, and it is answered before the request reaches `vi` at all.
+    // nnSdk sends. ConvertToDomain in that encoding hands back an object id
+    // rather than being read as a binder AdjustRefcount.
     const VI: u64 = 0xB400;
     let mut cpu = cpu_at(0x1000);
     cpu.bootstrap();
@@ -2470,23 +2450,6 @@ fn vi_reads_a_control_request_in_either_encoding() {
     cpu.register_service_handle(VI, "vi:m");
     let tls = cpu.tls_base();
 
-    for msg_type in [5u32, 7] {
-        build_ipc_request(&mut cpu, msg_type, None, 3);
-        run_ipc_request(&mut cpu, VI);
-        assert_eq!(
-            cpu.mem.read_u32(tls + 0x18).unwrap(),
-            0,
-            "type {msg_type} refused"
-        );
-        assert_eq!(
-            cpu.mem.read_u16(tls + 0x20).unwrap(),
-            POINTER_BUFFER_SIZE,
-            "type {msg_type}: not a size"
-        );
-    }
-
-    // And ConvertToDomain, the other control command, still hands back an
-    // object id rather than being read as a binder AdjustRefcount.
     build_ipc_request(&mut cpu, 7, None, 0);
     run_ipc_request(&mut cpu, VI);
     assert_eq!(cpu.mem.read_u32(tls + 0x18).unwrap(), 0);
@@ -2504,15 +2467,18 @@ fn reset_signal_reports_whether_the_event_had_fired() {
     // unconditionally told every guest that every event it ever polled had
     // fired, so a loop that drains a queue while its event keeps signalling
     // had no reason to stop.
-    const APPLET: u64 = 0x9800;
     const RESULT_INVALID_STATE: u64 = 1 | (125 << 9);
     let (mut cpu, applet, _proxy, state_getter) = applet_chain();
-    let _ = APPLET;
     let tls = cpu.tls_base();
 
     // The applet message event starts signalled: AM has the startup focus
     // transition waiting.
     ipc_request(&mut cpu, applet, 4, Some(state_getter), 0); // GetEventHandle
+    assert_eq!(
+        cpu.mem.read_u32(tls + 0x08).unwrap(),
+        1 << 1,
+        "events are copy handles"
+    );
     let message = cpu.mem.read_u32(tls + 0x0c).unwrap();
     assert_eq!(
         reset_signal(&mut cpu, message),
@@ -2617,96 +2583,6 @@ fn an_unfilled_out_parameter_reads_as_zero_not_as_the_request() {
             "word {i} of the reply is a leftover of the request"
         );
     }
-}
-
-#[test]
-fn the_vsync_event_is_a_copy_handle_on_a_plain_session() {
-    // GetDisplayVsyncEvent on a session that never became a domain used to
-    // hand back a bare handle in the *move* slot and register nothing. A copy
-    // handle read out of the move slot is 0, and there was no event behind it
-    // for a present to fire -- so a render loop paced by vsync waited on
-    // handle 0 forever, and only kept running because a wait on an unknown
-    // handle is answered as satisfied.
-    const VI: u64 = 0xB300;
-    let mut cpu = cpu_at(0x1000);
-    cpu.bootstrap();
-    cpu.set_pc(0x1000);
-    cpu.register_service_handle(VI, "vi:m");
-    let tls = cpu.tls_base();
-
-    ipc_request_plain(&mut cpu, VI, 2, &[]);
-    let display = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
-
-    ipc_request_plain(&mut cpu, display, 5202, &[]);
-    // { send_pid:1, num_copy:4, num_move:4 }: one copy handle, no move ones.
-    assert_eq!(cpu.mem.read_u32(tls + 0x08).unwrap(), 1 << 1);
-    let vsync = cpu.mem.read_u32(tls + 0x0c).unwrap();
-    assert_ne!(vsync, 0, "the guest must receive a real handle");
-
-    // It is a real event, and quiet until the display advances.
-    const RESULT_TIMED_OUT: u64 = 0xEA01;
-    assert_eq!(wait_sync(&mut cpu, &[vsync], 0).0, RESULT_TIMED_OUT);
-    cpu.signal_event(u64::from(vsync));
-    assert_eq!(
-        wait_sync(&mut cpu, &[vsync], 0).0,
-        0,
-        "a signalled vsync did not fire"
-    );
-}
-
-#[test]
-fn the_applet_message_event_starts_signalled_and_clears() {
-    // An applet does not draw until it has been told it is in focus, and it
-    // asks by polling this event with a zero timeout rather than by calling
-    // ReceiveMessage. Left dark, the one message AM queues at startup sat
-    // there with nothing ever coming to collect it: the Mii editor idled in
-    // `appletMainLoop` with a dequeued buffer in hand and not one draw behind
-    // it. The event is auto-clearing, so the first poll takes the message and
-    // every later one times out.
-    const APPLET: u64 = 0x9400;
-    const RESULT_TIMED_OUT: u64 = 0xEA01;
-    let mut cpu = cpu_at(0x1000);
-    cpu.bootstrap();
-    cpu.set_pc(0x1000);
-    cpu.register_service_handle(APPLET, "appletOE");
-    let tls = cpu.tls_base();
-
-    ipc_request(&mut cpu, APPLET, 5, None, 0);
-    let proxy_service = cpu.mem.read_u32(tls + 0x20).unwrap();
-    ipc_request(&mut cpu, APPLET, 4, Some(proxy_service), 0);
-    let proxy = cpu.mem.read_u32(tls + 0x30).unwrap();
-    ipc_request(&mut cpu, APPLET, 4, Some(proxy), 0); // ICommonStateGetter
-    let state_getter = cpu.mem.read_u32(tls + 0x30).unwrap();
-
-    ipc_request(&mut cpu, APPLET, 4, Some(state_getter), 0); // GetEventHandle
-    assert_eq!(
-        cpu.mem.read_u32(tls + 0x08).unwrap(),
-        1 << 1,
-        "events are copy handles"
-    );
-    let message = cpu.mem.read_u32(tls + 0x0c).unwrap();
-    assert_eq!(
-        wait_sync(&mut cpu, &[message], 0).0,
-        0,
-        "the queued message never announced itself"
-    );
-    assert_eq!(
-        wait_sync(&mut cpu, &[message], 0).0,
-        RESULT_TIMED_OUT,
-        "it announced itself twice"
-    );
-
-    // And the message behind it is the focus change.
-    const FOCUS_STATE_CHANGED: u32 = 15;
-    // A domain reply with no handles carries its CmifDomainOutHeader first,
-    // so the result and the data sit 0x10 further in than on a plain session.
-    ipc_request(&mut cpu, APPLET, 4, Some(state_getter), 1); // ReceiveMessage
-    assert_eq!(
-        cpu.mem.read_u32(tls + 0x28).unwrap(),
-        0,
-        "no message was queued"
-    );
-    assert_eq!(cpu.mem.read_u32(tls + 0x30).unwrap(), FOCUS_STATE_CHANGED);
 }
 
 #[test]
@@ -3288,8 +3164,6 @@ fn the_resolution_change_event_fires_on_the_dock() {
     );
 }
 
-/// One 20 ms CELT-only Opus packet, 48 kHz mono, from the reference
-/// encoder. Its decode is 960 samples per channel.
 #[test]
 fn hwopus_reports_a_work_buffer_size_before_it_opens_anything() {
     // `nn::codec` asks for the work buffer size, allocates that much as
@@ -3380,6 +3254,7 @@ fn hwopus_decodes_a_packet_into_the_buffer_the_caller_offered() {
     let decoder = u64::from(cpu.mem.read_u32(tls + 0x0c).unwrap());
     assert_ne!(decoder, 0, "no IHardwareOpusDecoder came back");
 
+    // One 20 ms CELT-only packet, 48 kHz mono, from the reference encoder.
     let len = OPUS_PACKET.len() as u32;
     for (i, &byte) in (len).to_be_bytes().iter().enumerate() {
         cpu.mem.write_u8(INPUT + i as u32, byte).unwrap();

@@ -94,6 +94,7 @@ fn r15_reads_as_the_instruction_address_plus_eight() {
 fn a_register_shift_of_zero_changes_nothing() {
     let cpu = run(&[
         0xE3A0_00FF, // mov  r0, #0xff
+        0xE150_0000, // cmp  r0, r0           -> C set
         0xE3A0_1000, // mov  r1, #0
         0xE1B0_2110, // movs r2, r0, lsl r1
         0xE3A0_3B01, // mov  r3, #0x400
@@ -105,6 +106,7 @@ fn a_register_shift_of_zero_changes_nothing() {
         0xFF,
         "only the bottom byte of the amount counts"
     );
+    assert_eq!(cpu.nzcv(), 0x2000_0000, "C survived both shifts");
 }
 
 #[test]
@@ -141,19 +143,19 @@ fn mls_subtracts_its_product() {
 #[test]
 fn the_extends_and_the_reverses() {
     let cpu = run(&[
-        0xE3A0_10FF, // mov   r1, #0xff
-        0xE6EF_0071, // uxtb  r0, r1
         0xE3E0_3000, // mvn   r3, #0        -> 0xffffffff
+        0xE6EF_7073, // uxtb  r7, r3
         0xE6BF_2073, // sxth  r2, r3
-        0xE59F_5014, // ldr   r5, [pc, #20] -> the literal below
+        0xE3A0_1001, // mov   r1, #1
+        0xE59F_5010, // ldr   r5, [pc, #16] -> the literal below
         0xE6BF_4F35, // rev   r4, r5
         0xE6BF_6FB5, // rev16 r6, r5
         0xE6FF_AF35, // rbit  r10, r5
-        0xE3A0_1001, // mov   r1, #1
         0xE6E1_0072, // uxtab r0, r1, r2
         HALT,        // stop before the literal
         0x1122_3344,
     ]);
+    assert_eq!(r(&cpu, 7), 0xFF, "uxtb keeps only the low byte");
     assert_eq!(r(&cpu, 0), 1 + 0xFF, "uxtab adds the extended byte");
     assert_eq!(r(&cpu, 2), 0xFFFF_FFFF, "sxth of -1 is -1");
     assert_eq!(r(&cpu, 4), 0x4433_2211, "rev reverses the whole word");
@@ -176,7 +178,7 @@ fn the_dual_byte_extends() {
         0xE6CF_2072, // uxtb16  r2, r2
         0xE68F_0471, // sxtb16  r0, r1, ror #8
         0xE6C4_3071, // uxtab16 r3, r4, r1
-        0xE684_5071, // sxtab16 r5, r4, r1
+        0xE684_5471, // sxtab16 r5, r4, r1, ror #8
         HALT,
         0x80FF_7F01,
         0x0001_FFFF,
@@ -184,7 +186,11 @@ fn the_dual_byte_extends() {
     assert_eq!(r(&cpu, 2), 0x00FF_0001);
     assert_eq!(r(&cpu, 0), 0xFF80_007F, "the rotation picks bytes 1 and 3");
     assert_eq!(r(&cpu, 3), 0x0100_0000, "0xffff + 1 does not carry upward");
-    assert_eq!(r(&cpu, 5), 0x0000_0000);
+    assert_eq!(
+        r(&cpu, 5),
+        0xFF81_007E,
+        "0xffff + 0x7f and 0x0001 + 0xff80, each lane on its own"
+    );
 }
 
 #[test]

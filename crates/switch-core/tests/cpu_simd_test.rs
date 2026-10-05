@@ -30,8 +30,8 @@ fn simd_dup_umov_and_q_store() {
 
 #[test]
 fn simd_three_same_add_sub_compare() {
-    // dup v0.16b, w1 (0x3d) ; dup v1.16b, w2 (0x3d) ; sub v2.4s, v0.4s, v1.4s
-    // → lanes of 0x3d3d3d3d - 0x3d3d3d3d = 0 ; mov x3, v2.d[0]
+    // dup v0.16b, w1 (0x5a) ; dup v1.16b, w2 (0x3d) ; sub v2.4s, v0.4s, v1.4s
+    // → lanes of 0x5a5a5a5a - 0x3d3d3d3d ; mov x3, v2.d[0]
     let code = [
         dup16(0, 1),
         dup16(1, 2),
@@ -40,10 +40,13 @@ fn simd_three_same_add_sub_compare() {
         nop(),
     ];
     let mut cpu = cpu_at(0x1000);
-    cpu.set_reg(1, 0x3d);
+    cpu.set_reg(1, 0x5a);
     cpu.set_reg(2, 0x3d);
+    cpu.set_reg(3, 0xA5A5);
+    cpu.set_vreg(2, u128::MAX);
     let cpu = run_program(cpu, 0x1000, &code);
-    assert_eq!(cpu.read_x(3), 0);
+    assert_eq!(cpu.read_vreg(2), 0x1d1d1d1d_1d1d1d1d_1d1d1d1d_1d1d1d1d);
+    assert_eq!(cpu.read_x(3), 0x1d1d1d1d_1d1d1d1d);
 
     // cmeq v4.16b, v0.16b, v1.16b → all-ones since equal ; mov x5, v4.d[0]
     let code = [
@@ -76,22 +79,17 @@ fn simd_three_same_add_sub_compare() {
 
 #[test]
 fn simd_pairwise_addp() {
-    // v1 = {1,1,...}, v2 = {2,2,...}; addp v3.16b, v1.16b, v2.16b →
-    // v3[0..7] = v1 pairwise (2), v3[8..15] = v2 pairwise (4).
-    let code = [
-        dup16(1, 1),
-        dup16(2, 2),
-        addp16(3, 1, 2),
-        umov_d0(4, 3),
-        nop(),
-    ];
+    // v1 = {0..15}, v2 = {0x10..0x1f}; addp v3.16b, v1.16b, v2.16b puts v1's
+    // pairwise sums in the low half and v2's in the high half.
     let mut cpu = cpu_at(0x1000);
-    cpu.set_reg(1, 1);
-    cpu.set_reg(2, 2);
-    let cpu = run_program(cpu, 0x1000, &code);
-    // lane0 = v1[0]+v1[1] = 2, lane7 = v1[14]+v1[15] = 2.
-    assert_eq!(cpu.read_x(4) & 0xFF, 2);
-    assert_eq!((cpu.read_x(4) >> 56) & 0xFF, 2);
+    cpu.set_vreg(1, u128::from_le_bytes(std::array::from_fn(|i| i as u8)));
+    cpu.set_vreg(
+        2,
+        u128::from_le_bytes(std::array::from_fn(|i| 0x10 + i as u8)),
+    );
+    cpu.set_vreg(3, u128::MAX);
+    let cpu = run_program(cpu, 0x1000, &[addp16(3, 1, 2), nop()]);
+    assert_eq!(cpu.read_vreg(3), 0x3d393531_2d292521_1d191511_0d090501);
 }
 
 #[test]
@@ -330,7 +328,7 @@ fn movi_modified_immediate_cmodes() {
     // movi v0.8b, #0x1c  → every byte 0x1c (q=0: upper half cleared)
     let cpu = run_program(cpu_at(0x1000), 0x1000, &[0x0f00e780, nop()]);
     assert_eq!(cpu.read_vreg(0), 0x1c1c1c1c_1c1c1c1c);
-    // movi v4.4h, #0x1c  → every halfword 0x001c
+    // movi v3.8h, #0x1c  → every halfword 0x001c
     let cpu = run_program(cpu_at(0x1000), 0x1000, &[0x4f008783, nop()]);
     assert_eq!(cpu.read_vreg(3), 0x001c001c_001c001c_001c001c_001c001c);
     // movi v4.4s, #0x1c  → every word 0x1c
@@ -342,8 +340,10 @@ fn movi_modified_immediate_cmodes() {
     // mvni v6.4s, #0x1c  → ~0x1c per word
     let cpu = run_program(cpu_at(0x1000), 0x1000, &[0x6f000786, nop()]);
     assert_eq!(cpu.read_vreg(6), 0xffffffe3_ffffffe3_ffffffe3_ffffffe3);
-    // movi v7.2d, #0  (the encoding sdl-hello hit) → zero
-    let cpu = run_program(cpu_at(0x1000), 0x1000, &[0x2f00e408, nop()]);
+    // movi d8, #0  (the encoding sdl-hello hit) → zero, upper half included
+    let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(8, u128::MAX);
+    let cpu = run_program(cpu, 0x1000, &[0x2f00e408, nop()]);
     assert_eq!(cpu.read_vreg(8), 0);
 }
 
@@ -396,11 +396,9 @@ fn simd_scalar_byte_load_and_stur_q() {
     cpu.set_vreg(17, 0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00);
     let code = [0x3c80_8011u32, nop()];
     let cpu = run_program(cpu, 0x1000, &code);
+    let stored = cpu.mem.dump(0x3008, 16).unwrap();
     assert_eq!(
-        cpu.mem
-            .read_into(0x3008, &mut [0u8; 16])
-            .map(|_| u128::from_le_bytes(cpu.mem.dump(0x3008, 16).unwrap().try_into().unwrap()))
-            .unwrap(),
+        u128::from_le_bytes(stored.try_into().unwrap()),
         0x1122_3344_5566_7788_99AA_BBCC_DDEE_FF00
     );
 }
@@ -420,6 +418,7 @@ fn scalar_cmge_with_zero_masks_predicate() {
 
     // cmgt d4, d5, #0 = 0x5ee088a4 (U=0, op=100010): negative operand → 0.
     let mut cpu = cpu_at(0x1000);
+    cpu.set_vreg(4, u128::MAX);
     cpu.set_vreg(5, 0x8000_0000_0000_0000);
     let cpu = run_program(cpu, 0x1000, &[0x5ee0_88a4, nop()]);
     assert_eq!(cpu.read_vreg(4), 0);
@@ -1112,17 +1111,17 @@ fn scalar_shift_by_immediate() {
 
 #[test]
 fn fcsel_fccmp_and_fixed_point_conversions() {
-    // `fcsel s30, s31, s30, gt` = 0x1e3ecffe. FCSEL and FCCMP have bit 21 set;
+    // `fcsel s29, s31, s30, gt` = 0x1e3ecffd. FCSEL and FCCMP have bit 21 set;
     // they were guarded on bit 21 being clear, so neither was reachable.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(31, (1.5f32).to_bits() as u128);
     cpu.set_vreg(30, (2.5f32).to_bits() as u128);
+    cpu.set_vreg(29, u128::MAX);
     // Set flags with `fcmp s31, s30` (1.5 < 2.5 → not GT) then select.
-    cpu.set_reg(0, 0);
-    let cpu = run_program(cpu, 0x1000, &[0x1e3e_23e0, 0x1e3e_cffe, nop()]);
+    let cpu = run_program(cpu, 0x1000, &[0x1e3e_23e0, 0x1e3e_cffd, nop()]);
     assert_eq!(
-        f32::from_bits(cpu.read_vreg(30) as u32),
-        2.5,
+        cpu.read_vreg(29),
+        u128::from((2.5f32).to_bits()),
         "GT false → Vm"
     );
 
@@ -1245,7 +1244,7 @@ fn widening_and_by_element_multiplies() {
     let cpu = run_program(cpu, 0x1000, &[0x4f60_a044, nop()]);
     assert_eq!(lanes_u32(cpu.read_vreg(4)), [15, 18, 21, 24]);
 
-    // The vector (three-different) forms: smull, smlal, saddl, addhn.
+    // The vector (three-different) form.
     let mut cpu = cpu_at(0x1000);
     cpu.set_vreg(2, u64x2([0x0004_0003_0002_0001, 0]));
     cpu.set_vreg(3, u64x2([0xFFFF_0002_0003_0004, 0]));
@@ -1479,43 +1478,43 @@ fn aesd_and_aesimc_invert_the_encrypting_pair() {
     );
 }
 
-/// SHA1H is a bare rotate, and SHA1SU0's three-way XOR is the schedule step,
-/// both cheap enough to state the expected value outright.
+/// Operands with data in every lane; expected values from an Apple M-series core.
+const SHA_A: u128 = 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210;
+const SHA_B: u128 = 0x0f1e_2d3c_4b5a_6978_8796_a5b4_c3d2_e1f0;
+const SHA_C: u128 = 0x1357_9bdf_2468_ace0_dead_beef_cafe_f00d;
+
 #[test]
 fn the_sha1_instructions_decode_and_compute() {
     let mut cpu = cpu_at(0x1000);
-    cpu.set_vreg(0, 0x1234_5678);
+    cpu.set_vreg(0, SHA_A);
+    cpu.set_vreg(1, u128::MAX);
     let cpu = run_program(cpu, 0x1000, &[sha2(0b00000, 1, 0)]);
     assert_eq!(
         cpu.read_vreg(1),
-        u128::from(0x1234_5678u32.rotate_left(30)),
+        0x1d95_0c84,
         "sha1h is a 30-bit rotate of the low word into a cleared register"
     );
 
-    let (d, n, m) = (0x1111u128, 0x2222u128 << 64, 0x3333u128);
     let mut cpu = cpu_at(0x1000);
-    cpu.set_vreg(0, d);
-    cpu.set_vreg(1, n);
-    cpu.set_vreg(2, m);
-    let cpu = run_program(cpu, 0x1000, &[sha3(0b011, 0, 1, 2)]);
-    assert_eq!(cpu.read_vreg(0), ((d >> 64) | (n << 64)) ^ d ^ m);
-}
-
-/// SHA256H and SHA256H2 keep opposite halves of the same four rounds, so a
-/// state where both are driven from the same inputs must not come back equal.
-#[test]
-fn the_sha256_round_instructions_keep_opposite_halves() {
-    let (x, y, w) = (
-        0x0000_0004_0000_0003_0000_0002_0000_0001u128,
-        0x0000_0008_0000_0007_0000_0006_0000_0005u128,
-        0x0000_000c_0000_000b_0000_000a_0000_0009u128,
-    );
-    let mut cpu = cpu_at(0x1000);
-    for (i, v) in [(0u8, x), (1, y), (2, w)] {
+    for (i, v) in [(0u8, SHA_A), (1, SHA_B), (2, SHA_C)] {
         cpu.set_vreg(i, v);
     }
-    cpu.set_vreg(3, y);
-    cpu.set_vreg(4, x);
+    let cpu = run_program(cpu, 0x1000, &[sha3(0b011, 0, 1, 2)]);
+    assert_eq!(
+        cpu.read_vreg(0),
+        0x95e2_7b0c_6e11_80ff_2152_4110_3501_0ff2,
+        "sha1su0"
+    );
+}
+
+/// SHA256H and SHA256H2 keep opposite halves of the same four rounds, and
+/// take the two halves of the state in opposite operand order.
+#[test]
+fn the_sha256_round_instructions_keep_opposite_halves() {
+    let mut cpu = cpu_at(0x1000);
+    for (i, v) in [(0u8, SHA_A), (1, SHA_B), (2, SHA_C), (3, SHA_B), (4, SHA_A)] {
+        cpu.set_vreg(i, v);
+    }
     let cpu = run_program(
         cpu,
         0x1000,
@@ -1524,10 +1523,16 @@ fn the_sha256_round_instructions_keep_opposite_halves() {
             sha3(0b101, 3, 4, 2), // SHA256H2 q3, q4, v2.4s
         ],
     );
-    let (part1, part2) = (cpu.read_vreg(0), cpu.read_vreg(3));
-    assert_ne!(part1, x, "sha256h did not advance the state");
-    assert_ne!(part2, y, "sha256h2 did not advance the state");
-    assert_ne!(part1, part2, "the two halves came back identical");
+    assert_eq!(
+        cpu.read_vreg(0),
+        0x56db_4b4f_3866_0fc4_3cc9_10bc_c623_274d,
+        "sha256h"
+    );
+    assert_eq!(
+        cpu.read_vreg(3),
+        0x7b42_d622_6854_4a49_dd48_6ff0_511a_fafd,
+        "sha256h2"
+    );
 }
 
 #[test]

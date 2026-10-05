@@ -239,10 +239,9 @@ fn a_hot_block_is_emitted_and_then_run_from_its_emitted_form() {
         LAST_MODULE.load(Ordering::SeqCst) > 8,
         "the module handed over was only a header"
     );
-    assert!(
-        stats.entered_emitted > 50,
-        "only {} of {} entries reached emitted code",
-        stats.entered_emitted,
+    assert_eq!(
+        stats.entered_emitted, 100,
+        "every entry after the first HOT reaches emitted code, of {}",
         stats.executed
     );
     assert_eq!(
@@ -354,10 +353,10 @@ fn a_block_left_through_a_taken_branch_skips_its_terminator() {
 
     let stats = cpu.jit_stats();
     assert_eq!(stats.emitted, 1, "the loop's block was not emitted");
-    assert!(
-        stats.entered_emitted > 50,
-        "only {} of {} entries reached emitted code",
+    assert_eq!(
         stats.entered_emitted,
+        STEPS / BRANCH_TRIP - HOT as u64,
+        "every whole trip after the first HOT reaches emitted code, of {}",
         stats.executed
     );
     // One `sub` a trip, and the budget ends the last trip just after its

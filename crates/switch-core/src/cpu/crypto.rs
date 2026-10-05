@@ -247,7 +247,7 @@ impl Cpu {
 mod tests {
     use super::*;
 
-    /// Drive a whole SHA-256 block through the instruction helpers exactly as
+    /// Drive a whole SHA-256 block through the instruction opcodes exactly as
     /// the ARM-optimised implementations sequence them, and check the digest.
     #[test]
     fn the_sha256_helpers_hash_abc() {
@@ -287,34 +287,8 @@ mod tests {
             let i = round % 4;
             if round >= 4 {
                 // The schedule runs one group ahead of the rounds that use it.
-                w[i] = {
-                    let su0 = {
-                        let d = w[i];
-                        let n = w[(i + 1) % 4];
-                        let t = (d >> 32) | (n << 96);
-                        let mut out: u128 = 0;
-                        for e in 0..4u32 {
-                            let v = sigma0_lower(elem32(t, e)).wrapping_add(elem32(d, e));
-                            out |= u128::from(v) << (32 * e);
-                        }
-                        out
-                    };
-                    let (n, m) = (w[(i + 2) % 4], w[(i + 3) % 4]);
-                    let t0 = (n >> 32) | (m << 96);
-                    let mut out: u128 = 0;
-                    for e in 0..4u32 {
-                        let src = if e < 2 {
-                            elem32(m, e + 2)
-                        } else {
-                            elem32(out, e - 2)
-                        };
-                        let v = sigma1_lower(src)
-                            .wrapping_add(elem32(su0, e))
-                            .wrapping_add(elem32(t0, e));
-                        out |= u128::from(v) << (32 * e);
-                    }
-                    out
-                };
+                let su0 = sha_two(0b00010, w[i], w[(i + 1) % 4]).unwrap();
+                w[i] = sha_three(0b110, su0, w[(i + 2) % 4], w[(i + 3) % 4]).unwrap();
             }
             let wk = pack32(
                 elem32(w[i], 0).wrapping_add(K[round * 4]),
@@ -323,8 +297,8 @@ mod tests {
                 elem32(w[i], 3).wrapping_add(K[round * 4 + 3]),
             );
             let saved = abcd;
-            abcd = sha256_rounds(abcd, efgh, wk, true);
-            efgh = sha256_rounds(saved, efgh, wk, false);
+            abcd = sha_three(0b100, abcd, efgh, wk).unwrap();
+            efgh = sha_three(0b101, efgh, saved, wk).unwrap();
         }
 
         let mut digest = [0u8; 32];
@@ -368,13 +342,8 @@ mod tests {
             let i = round % 4;
             if round >= 4 {
                 // SHA1SU0 then SHA1SU1 extend the schedule by four words.
-                let su0 = {
-                    let (d, n, m) = (w[i], w[(i + 1) % 4], w[(i + 2) % 4]);
-                    ((d >> 64) | (n << 64)) ^ d ^ m
-                };
-                let t = su0 ^ (w[(i + 3) % 4] >> 32);
-                let r = [0, 1, 2, 3].map(|e| elem32(t, e).rotate_left(1));
-                w[i] = pack32(r[0], r[1], r[2], r[3] ^ elem32(t, 0).rotate_left(2));
+                let su0 = sha_three(0b011, w[i], w[(i + 1) % 4], w[(i + 2) % 4]).unwrap();
+                w[i] = sha_two(0b00001, su0, w[(i + 3) % 4]).unwrap();
             }
             let k = K[round / 5];
             let wk = pack32(
@@ -383,13 +352,10 @@ mod tests {
                 elem32(w[i], 2).wrapping_add(k),
                 elem32(w[i], 3).wrapping_add(k),
             );
-            let next_e = (elem32(abcd, 0)).rotate_left(30);
-            let f = match round / 5 {
-                0 => sha_choose as fn(u32, u32, u32) -> u32,
-                2 => sha_majority,
-                _ => sha_parity,
-            };
-            abcd = sha1_rounds(abcd, e_state, wk, f);
+            let next_e = sha_two(0b00000, 0, abcd).unwrap() as u32;
+            // SHA1C, SHA1P, SHA1M, SHA1P.
+            let opcode = [0b000, 0b001, 0b010, 0b001][round / 5];
+            abcd = sha_three(opcode, abcd, u128::from(e_state), wk).unwrap();
             e_state = next_e;
         }
 

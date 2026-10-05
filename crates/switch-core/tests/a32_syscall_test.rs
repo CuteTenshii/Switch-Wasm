@@ -40,8 +40,6 @@ fn get_system_tick_comes_back_in_a_register_pair() {
     // top half of the count.
     let cpu = syscall(0x1E, [0, 0xDEAD_BEEF, 0, 0, 0]);
     assert_eq!(r(&cpu, 1), 0, "the top half was written, not left stale");
-    let ticks = u64::from(r(&cpu, 0)) | (u64::from(r(&cpu, 1)) << 32);
-    assert_eq!(u64::from(r(&cpu, 0)), ticks);
 }
 
 /// `svcGetThreadId`'s id is 64 bits, so it occupies `r1:r2`, not `r1` alone.
@@ -98,11 +96,11 @@ fn a_sleep_duration_spans_r0_and_r1() {
     // -1 is the "yield with load balancing" mode: all ones in both halves.
     let cpu = syscall(0x0B, [0xFFFF_FFFF, 0xFFFF_FFFF, 0, 0, 0]);
     assert!(!cpu.halted);
-    // A yield leaves the thread runnable rather than parking it on a deadline.
+    // A sleep of 0xFFFF_FFFF ns would idle the clock forward by seconds.
     assert!(
-        cpu.thread_dump().contains("Runnable") || cpu.thread_count() <= 1,
-        "a negative duration is a yield, not a sleep: {}",
-        cpu.thread_dump()
+        cpu.cycles < 1_000_000,
+        "a negative duration is a yield, not a sleep: cycles = {}",
+        cpu.cycles
     );
 }
 
@@ -111,11 +109,12 @@ fn a_sleep_duration_spans_r0_and_r1() {
 /// alone loses the low half.
 #[test]
 fn a_wait_timeout_spans_r0_and_r3() {
-    // A wait on no handles with a zero timeout returns TimedOut rather than
-    // parking. Both halves of the timeout are zero here.
-    let cpu = syscall(0x18, [0, 0, 0, 0, 0]);
-    assert!(!cpu.halted);
-    // The syscall retired rather than rewinding onto itself, which is what a
-    // park does.
-    assert_eq!(cpu.get_pc(), BASE + 4, "the wait was answered, not parked");
+    // A zero timeout on no handles is a poll: answered TimedOut, not parked.
+    let polled = syscall(0x18, [0, 0, 0, 0, 0]);
+    assert_eq!(polled.get_pc(), BASE + 4, "the poll was answered");
+    assert_eq!(r(&polled, 0), 0xEA01, "TimedOut");
+    // A timeout only in r0 is non-zero, so the wait rewinds onto the svc.
+    let waited = syscall(0x18, [1, 0, 0, 0, 0]);
+    assert!(!waited.halted);
+    assert_eq!(waited.get_pc(), BASE, "the wait was parked, not answered");
 }

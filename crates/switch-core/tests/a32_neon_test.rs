@@ -49,10 +49,14 @@ fn the_immediate_move_expands_its_pattern_across_the_register() {
     // A byte pattern replicates through a D register and leaves the quad's
     // other half alone.
     let mut cpu = new_cpu();
-    cpu.set_vreg(0, u128::MAX);
+    cpu.set_vreg(0, 0x0123_4567_89AB_CDEF_1357_9BDF_2468_ACE0);
     load(&mut cpu, &[0xF387_0E1Fu32]);
     cpu.run(2).unwrap();
-    assert_eq!(cpu.read_vreg(0), u128::MAX, "vmov.i8 d0, #0xff");
+    assert_eq!(
+        cpu.read_vreg(0),
+        0x0123_4567_89AB_CDEF_FFFF_FFFF_FFFF_FFFF,
+        "vmov.i8 d0, #0xff"
+    );
 }
 
 #[test]
@@ -256,4 +260,16 @@ fn vsel_reads_the_condition_flags_it_names() {
     cpu.run(code.len() as u64 + 1).unwrap();
     assert_eq!(lanes(&cpu, 0)[1], 2.0, "s1 is unchanged");
     assert_eq!(lanes(&cpu, 0)[2], 2.0, "s2 took the false operand");
+
+    // Compared against 0 instead, GT holds and the first operand is taken.
+    let mut cpu = new_cpu();
+    let code = [
+        0xE3A0_0001u32, // mov r0, #1
+        0xE350_0000,    // cmp r0, #0
+        0xFE30_1A20,    // vselgt.f32 s2, s0, s1
+    ];
+    cpu.set_vreg(0, quad([1.0, 2.0, 0.0, 0.0]));
+    load(&mut cpu, &code);
+    cpu.run(code.len() as u64 + 1).unwrap();
+    assert_eq!(lanes(&cpu, 0)[2], 1.0, "s2 took the true operand");
 }
