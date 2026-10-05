@@ -1499,16 +1499,24 @@ impl Gpu {
                 .iter()
                 .find(|v| v.array == buffer.index)
                 .ok_or("a bound vertex array with no bytes")?;
+            // An instanced array advances once per instance, and only this
+            // instance's element was uploaded, so the stride is nothing and
+            // every instance reads the one element there is.
+            let stride = match buffer.step {
+                state::StepMode::Instance => 0,
+                state::StepMode::Vertex => u64::from(buffer.stride),
+            };
+            // Metal drops a vertex whose stride runs past the end of the
+            // buffer, though WebGPU only asks for the bytes its attributes read.
+            let mut bytes = std::borrow::Cow::Borrowed(&upload.bytes[..]);
+            let whole = bytes.len().next_multiple_of(stride.max(1) as usize);
+            if whole != bytes.len() {
+                bytes.to_mut().resize(whole, 0);
+            }
             bound.push(Bound {
-                buffer: self.buffer("vertex", &upload.bytes, wgpu::BufferUsages::VERTEX),
+                buffer: self.buffer("vertex", &bytes, wgpu::BufferUsages::VERTEX),
                 attributes,
-                // An instanced array advances once per instance, and only
-                // this instance's element was uploaded, so the stride is
-                // nothing and every instance reads the one element there is.
-                stride: match buffer.step {
-                    state::StepMode::Instance => 0,
-                    state::StepMode::Vertex => u64::from(buffer.stride),
-                },
+                stride,
                 step: match buffer.step {
                     state::StepMode::Instance => wgpu::VertexStepMode::Instance,
                     state::StepMode::Vertex => wgpu::VertexStepMode::Vertex,
