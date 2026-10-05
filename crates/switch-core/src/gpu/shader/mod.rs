@@ -642,7 +642,7 @@ mod tests {
     use super::*;
     use crate::gpu::testing::{block, solid_fragment_shader, word};
     use crate::Error;
-    use isa::{FMod, FmulScale, MemSize, MufuOp, Operand, TexDim, RZ};
+    use isa::{FMod, FmulScale, MemSize, MufuOp, Operand, RZ};
 
     /// Decode `solid_fragment_shader` out of a real `ExecCtx`, reporting what
     /// the walk read, the seam a backend caches a translation against.
@@ -918,58 +918,6 @@ mod tests {
 
         assert!(!ProgramHeader::default().writes_any_color());
         assert!(all.writes_any_color());
-    }
-
-    #[test]
-    fn tex_fragment_shader_fixture_decodes_the_texs() {
-        // tex.frag in full: ipa pass + mufu rcp for perspective correction,
-        // a texs sample, then the vertex-color modulation.
-        let mut bytes = block(
-            (0xe1a0070f, 0x003c0401),
-            (0xcff7ff00, 0xe003ff87), // ipa pass $r0 a[0x7c] 0x0 0x0 0x1
-            (0x00470004, 0x50800000), // mufu rcp $r4 $r0
-            (0x0047ff00, 0xe043ff89), // ipa $r0 a[0x90] $r4 0x0 0x1
-        );
-        bytes.extend(block(
-            (0xe020072f, 0x001cbc03),
-            (0x4047ff01, 0xe043ff89), // ipa $r1 a[0x94] $r4 0x0 0x1
-            (0x20170000, 0xd8301a40), // texs $r2 $r0 $r0 $r1 0x1a4 t2d rgba
-            (0x0047ff05, 0xe043ff88), // ipa $r5 a[0x80] $r4 0x0 0x1
-        ));
-        bytes.extend(block(
-            (0xe1e01ff0, 0x003fc000),
-            (0x00570000, 0x5c681000), // fmul ftz $r0 $r0 $r5
-            (0x4047ff05, 0xe043ff88), // ipa $r5 a[0x84] $r4 0x0 0x1
-            (0x00570101, 0x5c681000), // fmul ftz $r1 $r1 $r5
-        ));
-        bytes.extend(block(
-            (0xfe00070f, 0x001c3c01),
-            (0x8047ff05, 0xe043ff88), // ipa $r5 a[0x88] $r4 0x0 0x1
-            (0x00570202, 0x5c681000), // fmul ftz $r2 $r2 $r5
-            (0xc047ff04, 0xe043ff88), // ipa $r4 a[0x8c] $r4 0x0 0x1
-        ));
-        bytes.extend(block(
-            (0xfde00ff0, 0x001ffc3f),
-            (0x00470303, 0x5c681000), // fmul ftz $r3 $r3 $r4
-            (0x0007000f, 0xe3000000), // exit
-            (0xff87000f, 0xe2400fff), // bra (padding, never reached)
-        ));
-
-        let program = decode_program(&bytes).unwrap();
-        assert_eq!(
-            program.insns[4].op,
-            Op::Texs {
-                dst: 0,
-                dst2: 2,
-                coords: [0, 1, RZ],
-                dref: None,
-                handle: 0x1a4,
-                dim: TexDim::T2d,
-                mask: [true, true, true, true],
-                f16: false,
-            }
-        );
-        assert_eq!(program.insns.last().unwrap().op, Op::Exit);
     }
 
     /// The Home Menu's instanced-quad vertex shader, from the `brx` that

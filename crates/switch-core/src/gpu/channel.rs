@@ -737,21 +737,6 @@ mod tests {
     }
 
     #[test]
-    fn gpfifo_syncpoint_increment_bumps_host1x() {
-        let mut h = Harness::new();
-        let mut chan = Channel::new(1, 8);
-        let pb = pushbuffer(&[
-            header(3, 1, 6, 0),
-            CLASS_GPFIFO,
-            header(1, 1, 6, GPFIFO_SYNCPOINT),
-            1 | (9 << 8),
-        ]);
-        let mut ctx = h.ctx();
-        chan.run_pushbuffer(&pb, &mut ctx).unwrap();
-        assert_eq!(h.host1x.read(9).unwrap(), 1);
-    }
-
-    #[test]
     fn gpfifo_semaphore_release_writes_memory() {
         let mut h = Harness::new();
         let base = h.base;

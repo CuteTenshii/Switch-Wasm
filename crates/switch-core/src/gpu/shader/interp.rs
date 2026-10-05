@@ -4158,16 +4158,18 @@ mod tests {
     #[test]
     fn ssy_and_sync_reconverge() {
         let program = prog_at(&[
-            (Op::Ssy { target: 0x28 }, Pred::ALWAYS),
+            (Op::Ssy { target: 0x30 }, Pred::ALWAYS),
             (Op::Mov32i { dst: 1, imm: 7 }, Pred::ALWAYS),
             (Op::Sync, Pred::ALWAYS),
-            (Op::Mov32i { dst: 2, imm: 9 }, Pred::ALWAYS), // at 0x28
+            (Op::Mov32i { dst: 3, imm: 5 }, Pred::ALWAYS), // skipped by the sync
+            (Op::Mov32i { dst: 2, imm: 9 }, Pred::ALWAYS), // at 0x30
             (Op::Exit, Pred::ALWAYS),
         ]);
         let mut inv = Invocation::new();
         inv.execute(&program, &Env::new(&no_consts(), &NoTextures))
             .unwrap();
         assert_eq!(inv.reg(1), 7);
+        assert_eq!(inv.reg(3), 0);
         assert_eq!(inv.reg(2), 9);
     }
 

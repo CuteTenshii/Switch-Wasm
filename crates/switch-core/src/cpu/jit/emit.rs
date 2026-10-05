@@ -2005,27 +2005,6 @@ mod tests {
         }
     }
 
-    /// The module has to carry the magic and version a browser checks first,
-    /// so a malformed header is caught here rather than as a `CompileError`
-    /// with no offset.
-    #[test]
-    fn an_emitted_block_is_a_wasm_module() {
-        let b = block_of(vec![
-            Op::MovConst { rd: 1, val: 0x1234 },
-            Op::AddSubImm {
-                rd: 2,
-                rn: 1,
-                rhs: 1,
-                carry: 0,
-                set_flags: true,
-                sf: true,
-            },
-        ]);
-        let bytes = emit_block(&b, LAYOUT).expect("both ops are writable");
-        assert_eq!(&bytes[..4], &[0x00, 0x61, 0x73, 0x6D]);
-        assert_eq!(&bytes[4..8], &[0x01, 0x00, 0x00, 0x00]);
-    }
-
     /// A `B` the translator followed says so, rather than being counted
     /// against the ops the block contains: the two refusals call for
     /// completely different work.

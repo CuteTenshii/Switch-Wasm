@@ -1979,12 +1979,12 @@ mod tests {
         assert_eq!(sample_at(&mut mem, 0.25, 0.5), [0.0, 0.0, 0.0, 1.0]);
 
         // Linear, halfway between the two columns: one tap passes and one does
-        // not, so the answer is between them. Alpha stays one.
+        // not, each weighted a half. Alpha stays one.
         write_tsc(&mut mem, true);
         let half = sample_at(&mut mem, 0.5, 0.5);
         assert_eq!(half[3], 1.0);
         assert!(
-            half[0] > 0.0 && half[0] < 1.0,
+            half[..3].iter().all(|&c| (c - 0.5).abs() < 1e-6),
             "a filtered comparison, not a filtered depth: {half:?}"
         );
     }

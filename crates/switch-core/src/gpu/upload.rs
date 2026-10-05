@@ -1749,13 +1749,6 @@ mod tests {
     }
 
     #[test]
-    fn a_drawing_with_nothing_in_it_moves_no_bytes() {
-        let uploads = Uploads::default();
-        assert!(uploads.is_empty());
-        assert_eq!(uploads.len(), 0);
-    }
-
-    #[test]
     fn the_total_is_every_buffer_a_draw_would_move() {
         let uploads = Uploads {
             vertex: vec![VertexUpload {
@@ -1778,5 +1771,6 @@ mod tests {
             textures: Vec::new(),
         };
         assert_eq!(uploads.len(), 300);
+        assert!(!uploads.is_empty());
     }
 }

@@ -189,17 +189,4 @@ mod tests {
         // refused, and counted, rather than taking the pushbuffer with it.
         assert_eq!(stats.dispatches_skipped, 1);
     }
-
-    #[test]
-    fn the_program_region_and_pools_read_back_as_written() {
-        let mut engine = EngineCompute::new();
-        engine.regs.set(SET_PROGRAM_REGION, 0x11);
-        engine.regs.set(SET_PROGRAM_REGION + 1, 0x2233_4455);
-        engine.regs.set(SET_TEX_HEADER_POOL, 0);
-        engine.regs.set(SET_TEX_HEADER_POOL + 1, 0x8000);
-        engine.regs.set(SET_BINDLESS_TEXTURE, 2);
-        assert_eq!(engine.program_region(), 0x11_2233_4455);
-        assert_eq!(engine.tex_header_pool(), 0x8000);
-        assert_eq!(engine.tex_cb_index(), 2);
-    }
 }

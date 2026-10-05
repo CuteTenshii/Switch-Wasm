@@ -2037,22 +2037,6 @@ mod tests {
         assert_eq!(mem.dirty_gpu_pages().len(), 1);
     }
 
-    /// The mask in [`Memory::page_index`] must be unable to hide a bad address
-    /// rather than merely unlikely to see one.
-    ///
-    /// A mask that silently folds an out-of-range index back into the table
-    /// would turn what used to be a crash into a read of the wrong page,
-    /// a real hazard, and the reason to state this once as a test instead of
-    /// as a comment. It cannot happen here: the argument is a `u32` and the
-    /// space is 4 GiB, so the shift alone already lands inside the table and
-    /// the mask only says so to the compiler.
-    #[test]
-    fn the_page_index_mask_cannot_hide_an_address() {
-        assert_eq!(Memory::page_index(u32::MAX), PAGE_COUNT - 1);
-        assert_eq!(Memory::page_index(0), 0);
-        // Every address maps to the page the plain shift names, mask or not.
-        for addr in [1u32, 0xFFF, 0x1000, 0x8000_0000, 0xFFFF_F000, 0xFFFF_FFFF] {
-            assert_eq!(Memory::page_index(addr), (addr as usize) >> PAGE_BITS);
-        }
-    }
+    // The mask in `Memory::page_index` is a no-op for every `u32` address.
+    const _: () = assert!((u32::MAX as usize) >> PAGE_BITS == PAGE_COUNT - 1);
 }

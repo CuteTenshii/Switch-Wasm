@@ -568,8 +568,8 @@ mod tests {
             1,
             &[
                 add_imm(2, 1, 0, 6, false), // set method from R1, send arg 2
-                add_imm(3, 0, 0, 6, false), // R0 = 0 -> method 0? no: keeps sending
-                add_imm(0, 0, 0, 1, true),
+                add_imm(3, 0, 0, 0, false), // fetch arg 3 into R3
+                add_imm(0, 3, 0, 4, true),  // send R3
                 add_imm(0, 0, 0, 1, false),
             ],
         );
@@ -579,11 +579,17 @@ mod tests {
         engine.push_argument(0xBB);
         let writes = run_collect(&mut engine, |_| 0).unwrap();
         assert_eq!(
-            writes[0],
-            MacroWrite {
-                method: 0x100,
-                arg: 0xAA
-            }
+            writes,
+            vec![
+                MacroWrite {
+                    method: 0x100,
+                    arg: 0xAA
+                },
+                MacroWrite {
+                    method: 0x101,
+                    arg: 0xBB
+                },
+            ]
         );
     }
 
@@ -594,21 +600,23 @@ mod tests {
             &mut engine,
             0,
             &[
-                // R2 = read(R1 + 0)
-                5 | (1 << 4) | (2 << 8) | (1 << 11),
-                // set method from R1, send R2
-                2 | (2 << 4) | (0 << 8) | (1 << 11),
-                4 | 0, // filler, replaced below
-                add_imm(0, 0, 0, 1, true),
+                // R2 = read(R1 + 4)
+                5 | (1 << 4) | (2 << 8) | (1 << 11) | (4 << 14),
+                add_imm(0, 1, 0, 2, false), // set method from R1
+                add_imm(0, 2, 0, 4, true),  // send R2
                 add_imm(0, 0, 0, 1, false),
             ],
         );
         engine.start(0, 0x200);
         let writes =
-            run_collect(&mut engine, |method| if method == 0x200 { 0x99 } else { 0 }).unwrap();
-        // The macro only sets the method here; what matters is that `read`
-        // resolved without faulting and the program exited.
-        assert!(writes.is_empty());
+            run_collect(&mut engine, |method| if method == 0x204 { 0x99 } else { 0 }).unwrap();
+        assert_eq!(
+            writes,
+            vec![MacroWrite {
+                method: 0x200,
+                arg: 0x99
+            }]
+        );
     }
 
     #[test]

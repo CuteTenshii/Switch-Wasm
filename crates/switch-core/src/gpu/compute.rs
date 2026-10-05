@@ -1035,7 +1035,7 @@ mod tests {
     }
 
     #[test]
-    fn a_kernel_the_interpreter_cannot_follow_fails_the_dispatch_and_writes_nothing() {
+    fn a_kernel_the_interpreter_cannot_follow_fails_the_dispatch() {
         let mut h = Harness::new();
         let out = h.base + OUTPUT_AT;
         // Not an instruction this decoder knows, with a `PT` guard, or the

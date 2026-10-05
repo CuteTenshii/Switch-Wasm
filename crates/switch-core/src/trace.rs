@@ -342,18 +342,10 @@ mod tests {
     }
 
     #[test]
-    fn levels_are_distinct_and_not_text() {
-        let markers = [
-            Level::Error.marker(),
-            Level::Warn.marker(),
-            Level::Info.marker(),
-            Level::Debug.marker(),
-        ];
-        for (i, a) in markers.iter().enumerate() {
-            assert!(*a < b' ', "a marker must not be a printable character");
-            for b in &markers[i + 1..] {
-                assert_ne!(a, b);
-            }
-        }
+    fn levels_are_the_marker_bytes_the_page_maps() {
+        assert_eq!(Level::Error.marker(), 0x01);
+        assert_eq!(Level::Warn.marker(), 0x02);
+        assert_eq!(Level::Info.marker(), 0x03);
+        assert_eq!(Level::Debug.marker(), 0x04);
     }
 }

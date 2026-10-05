@@ -1039,14 +1039,22 @@ mod tests {
     /// must not.
     #[test]
     fn the_ise_range_is_the_widest_that_fits() {
-        for values in [2i32, 6, 9, 12, 18] {
-            for available in [24i32, 40, 63, 80, 96] {
-                let params = max_range_ise(available, values);
-                assert!(
-                    ise_required_bits(params, values) <= available,
-                    "{values} values in {available} bits"
-                );
-            }
+        use IseMode::{Plain, Quint, Trit};
+        // Bits per the spec: trits ceil(8n/5) + n*b, quints ceil(7n/3) + n*b,
+        // plain n*b. The next wider range misses each budget.
+        for (values, available, mode, bits) in [
+            (2, 24, Plain, 8),
+            (6, 40, Trit, 5),   // plain 7 needs 42
+            (6, 44, Quint, 5),  // plain 8 needs 48, trit 6 needs 46
+            (9, 63, Plain, 7),  // quint 5 needs 66
+            (12, 63, Plain, 5), // quint 3 needs 64
+            (18, 96, Quint, 3), // trit 4 needs 101
+        ] {
+            let params = max_range_ise(available, values);
+            assert!(
+                params.mode == mode && params.bits == bits,
+                "{values} values in {available} bits"
+            );
         }
     }
 }

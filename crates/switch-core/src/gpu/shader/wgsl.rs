@@ -4614,8 +4614,15 @@ mod tests {
         let p = program(&[
             (
                 Op::Mov {
-                    dst: RZ,
+                    dst: 1,
                     src: Operand::Reg(RZ),
+                },
+                ALWAYS,
+            ),
+            (
+                Op::Mov {
+                    dst: RZ,
+                    src: Operand::Reg(2),
                 },
                 ALWAYS,
             ),
@@ -4623,6 +4630,11 @@ mod tests {
         ]);
         let wgsl = translate(&p).unwrap().source;
         assert!(!wgsl.contains("r255"), "RZ is not a register:\n{wgsl}");
+        assert!(wgsl.contains("r1 = 0u;"), "RZ reads as zero:\n{wgsl}");
+        assert!(
+            !wgsl.contains("= r2;"),
+            "a write to RZ is discarded:\n{wgsl}"
+        );
     }
 
     #[test]

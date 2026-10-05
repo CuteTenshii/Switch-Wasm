@@ -552,7 +552,7 @@ mod tests {
     }
 
     #[test]
-    fn slots_alternate_across_frames() {
+    fn a_queued_slot_is_dequeued_again_on_the_next_frame() {
         let mut q = BufferQueue::new();
         preallocate(&mut q, 0, 7, 0);
         preallocate(&mut q, 1, 7, 0x10_0000);
@@ -563,9 +563,8 @@ mod tests {
             seen.push(slot);
             q.transact(QUEUE_BUFFER, &request(&words(&[slot, 0, 0])));
         }
-        // With immediate scan-out the first slot is always free again, which
-        // is correct: the display is never holding a buffer.
-        assert!(seen.iter().all(|&s| s >= 0));
+        // Scan-out is immediate, so the display never holds slot 0.
+        assert_eq!(seen, [0, 0, 0, 0]);
         assert_eq!(q.queued, 4);
     }
 

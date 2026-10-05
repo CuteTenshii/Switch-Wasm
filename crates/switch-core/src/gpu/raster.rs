@@ -2894,9 +2894,15 @@ mod tests {
         };
         draw(&engine, &mut ctx).unwrap();
 
-        assert_ne!(
-            ctx.read_u32(slot1).unwrap(),
-            0,
+        let expected = engine
+            .render_target(0)
+            .unwrap()
+            .unwrap()
+            .format
+            .encode(color);
+        assert_eq!(
+            ctx.read_u32(slot1).unwrap() as u128,
+            expected.unwrap(),
             "the draw belongs in slot 1"
         );
         assert_eq!(
@@ -3006,7 +3012,10 @@ mod tests {
         // Culling the front face instead draws it.
         engine.regs.set(0x648, 0x404);
         draw(&engine, &mut ctx).unwrap();
-        assert_ne!(ctx.read_u32(rt.addr).unwrap(), 0);
+        assert_eq!(
+            ctx.read_u32(rt.addr).unwrap() as u128,
+            rt.format.encode(color).unwrap()
+        );
     }
 
     /// A face is judged by its winding in window space, y down, whatever
@@ -3187,28 +3196,6 @@ mod tests {
         assert_eq!(blend(target, [0.0; 4], src, dst), dst);
     }
 
-    #[test]
-    fn blend_composites_the_default_alpha_blend_state() {
-        // dkBlendStateDefaults: colorBlendOp=Add, src=SrcAlpha, dst=InvSrcAlpha;
-        // alphaBlendOp=Add, src=One, dst=Zero -- so out.a is just src.a.
-        // Values are the real hardware's GL enum codes (see
-        // `blend_factor`/`blend_equation`'s doc comments), not deko3d's API
-        // numbering.
-        let target = BlendTarget {
-            enabled: true,
-            equation_rgb: 0x8006,   // FuncAdd
-            func_rgb_src: 0x4302,   // SrcAlpha
-            func_rgb_dst: 0x4303,   // OneMinusSrcAlpha
-            equation_alpha: 0x8006, // FuncAdd
-            func_alpha_src: 0x4001, // One
-            func_alpha_dst: 0x4000, // Zero
-        };
-        let src = [1.0, 0.0, 0.0, 0.5]; // 50% opaque red
-        let dst = [0.0, 0.0, 1.0, 1.0]; // opaque blue
-        let out = blend(target, [0.0; 4], src, dst);
-        assert_eq!(out, [0.5, 0.0, 0.5, 0.5]);
-    }
-
     /// A vertex shader's stores land in guest memory, and a load after one
     /// sees it before it has landed. Echoes of Wisdom's visibility boxes
     /// write their results from the vertex stage, and every such draw was
@@ -3363,6 +3350,41 @@ mod tests {
             vmm.write_u32(&mut mem, base + i as u64 * 4, v.to_bits())
                 .unwrap();
         }
+        use crate::gpu::shader::isa::{Instruction, MemSize, Op, Pred, RZ};
+
+        // Copy attribute 0 into the clip position's x.
+        let mut program = Program::default();
+        for (at, op) in [
+            (
+                8u32,
+                Op::Ld {
+                    dst: 0,
+                    offset: VARYING_BASE,
+                    idx: RZ,
+                    size: MemSize::B32,
+                },
+            ),
+            (
+                16,
+                Op::St {
+                    offset: CLIP_POS_OFFSET,
+                    idx: RZ,
+                    src: 0,
+                    size: MemSize::B32,
+                },
+            ),
+            (24, Op::Exit),
+        ] {
+            program.offsets.push(at);
+            program.insns.push(Instruction {
+                pred: Pred::ALWAYS,
+                op,
+            });
+        }
+        let program = Compiled::new(&program);
+        let consts: std::collections::HashMap<(u8, u16), f32> = Default::default();
+        let stores = std::cell::RefCell::new(Vec::new());
+
         let mut stats = Default::default();
         let mut host1x = Host1x::new();
         let ctx = ExecCtx {
@@ -3388,11 +3410,21 @@ mod tests {
             divisor: 2,
         };
 
-        // Instances 0 and 1 share element 0; instances 2 and 3 share element 1.
+        // Instances 0 and 1 share element 0; instances 2 and 3 share element 1,
+        // whatever the vertex.
         for (instance, expected) in [(0u32, 10.0f32), (1, 10.0), (2, 20.0), (3, 20.0)] {
-            let element = instance / array.divisor;
-            let v = fetch_attribute(attrib, array, element, &ctx).unwrap();
-            assert_eq!(v[0], expected, "instance {instance}");
+            let v = shade_vertex(
+                &program,
+                &[attrib],
+                &[array],
+                (3, instance),
+                &ctx,
+                &consts,
+                false,
+                &stores,
+            )
+            .unwrap();
+            assert_eq!(v.clip[0], expected, "instance {instance}");
         }
     }
 

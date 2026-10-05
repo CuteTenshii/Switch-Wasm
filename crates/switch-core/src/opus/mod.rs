@@ -1262,7 +1262,15 @@ mod tests {
             decoder.decode_float(Some(&packet), &mut pcm, 960).unwrap(),
             960
         );
+        let mut mono = vec![0.0f32; 960];
+        Decoder::new(48000, 1)
+            .unwrap()
+            .decode_float(Some(stream), &mut mono, 960)
+            .unwrap();
+        assert!(mono.iter().any(|&s| s != 0.0));
         for i in 0..960 {
+            assert_eq!(pcm[i * 4], mono[i], "stream 0 at sample {i}");
+            assert_eq!(pcm[i * 4 + 1], mono[i], "stream 1 at sample {i}");
             assert_eq!(
                 pcm[i * 4 + 1],
                 pcm[i * 4 + 2],

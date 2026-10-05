@@ -1817,11 +1817,16 @@ mod tests {
     }
 
     #[test]
-    fn ioctl_number_roundtrip() {
-        let request = make_ioctl(3, 0x01, 0x04, 0x20);
-        assert_eq!(ioctl_size(request), 0x20);
-        assert_eq!(ioctl_direction(request), 3);
-        assert_eq!((request >> 8) & 0xFF, 0x01);
-        assert_eq!(request & 0xFF, 0x04);
+    fn ioctl_numbers_match_libnx() {
+        // NVMAP_IOC_CREATE, NVMAP_IOC_ALLOC, NVHOST_IOCTL_CTRL_SYNCPT_READ and
+        // NVHOST_IOCTL_CTRL_SYNCPT_INCR as libnx and switchbrew spell them.
+        assert_eq!(make_ioctl(IOWR, TYPE_NVMAP, 0x01, 8), 0xC008_0101);
+        assert_eq!(make_ioctl(IOWR, TYPE_NVMAP, 0x04, 0x20), 0xC020_0104);
+        assert_eq!(make_ioctl(IOWR, TYPE_NVHOST, 0x14, 8), 0xC008_0014);
+        assert_eq!(make_ioctl(1, TYPE_NVHOST, 0x15, 4), 0x4004_0015);
+        assert_eq!(ioctl_size(0xC020_0104), 0x20);
+        assert_eq!(ioctl_direction(0xC020_0104), 3);
+        assert_eq!(ioctl_size(0x4004_0015), 4);
+        assert_eq!(ioctl_direction(0x4004_0015), 1);
     }
 }

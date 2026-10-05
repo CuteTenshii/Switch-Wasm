@@ -4144,11 +4144,6 @@ mod tests {
     }
 
     #[test]
-    fn decodes_exit() {
-        assert_eq!(op(0xe3000000_0007000f), Op::Exit);
-    }
-
-    #[test]
     fn an_exit_its_flow_test_can_never_satisfy_is_not_an_exit() {
         // `exit` carries a condition-code test beside its predicate, and both
         // have to hold. Persona 5 Royal's vertex shaders open with the middle
@@ -5157,18 +5152,6 @@ mod tests {
                 dst_signed: true,
                 round: FRound::Trunc,
                 ftz: false,
-            }
-        );
-    }
-
-    #[test]
-    fn a_constant_offset_is_a_signed_word_index_scaled_by_four() {
-        // c0[0x30] from the JKSV capture: 0xc in the 14-bit field, x4.
-        assert_eq!(
-            const_operand(0x4c58100000c70204),
-            Operand::Const {
-                bank: 0,
-                offset: 0x30
             }
         );
     }

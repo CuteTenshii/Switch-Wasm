@@ -1639,8 +1639,14 @@ mod tests {
         ];
         for raw in NAMED {
             let format = ColorFormat::from_raw(raw).unwrap();
+            let packing = format.packing().unwrap();
+            let colour = if packing.numeric.is_integer() {
+                [3.0, 1.0, 2.0, 1.0]
+            } else {
+                [0.25, 0.5, 0.75, 1.0]
+            };
             let stored = format
-                .encode([0.25, 0.5, 0.75, 1.0])
+                .encode(colour)
                 .unwrap_or_else(|e| panic!("{raw:#x}: {e:?}"));
             let width = format.bytes_per_pixel * 8;
             assert!(
@@ -1648,9 +1654,25 @@ mod tests {
                 "{raw:#x} stored outside its {} bytes",
                 format.bytes_per_pixel
             );
-            format
+            let decoded = format
                 .decode(stored)
                 .unwrap_or_else(|e| panic!("{raw:#x}: {e:?}"));
+            for (i, channel) in packing.channels.iter().enumerate() {
+                let steps = ((1u64 << channel.bits) - 1) as f32;
+                // Two quantisation steps, enough for an sRGB curve.
+                let (want, tolerance) = match (channel.bits, packing.numeric) {
+                    _ if i == 3 && !format.has_alpha() => (1.0, 0.0),
+                    (0, _) => (0.0, 0.0),
+                    (_, Numeric::Unorm) => (colour[i], 2.0 / steps),
+                    (_, Numeric::Snorm) => (colour[i], 4.0 / steps),
+                    _ => (colour[i], 0.0),
+                };
+                assert!(
+                    (decoded[i] - want).abs() <= tolerance,
+                    "{raw:#x} channel {i}: {} for {want}",
+                    decoded[i]
+                );
+            }
         }
     }
 
