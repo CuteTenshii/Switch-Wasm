@@ -423,12 +423,12 @@ export const CMD: CommandHandlers = {
   },
   jit_stats() {
     if (handle() < 0) {
-      return { enabled: false, blocks: 0, translated: 0, executed: 0, invalidated: 0 };
+      return { enabled: false, blocks: 0, translated: 0, executed: 0, linked: 0, invalidated: 0 };
     }
     return readWholeJson<JitStats>(
       256,
       (buf, cap) => api().switch_jit_stats_json(handle(), buf, cap),
-      { enabled: false, blocks: 0, translated: 0, executed: 0, invalidated: 0 },
+      { enabled: false, blocks: 0, translated: 0, executed: 0, linked: 0, invalidated: 0 },
     );
   },
   gpu_report() {

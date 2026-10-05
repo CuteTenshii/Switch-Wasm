@@ -1744,13 +1744,19 @@ pub extern "C" fn switch_jit_stats_json(handle: u32, buf: *mut u8, maxlen: u32) 
     let s = session(handle);
     let stats = s.cpu.jit_stats();
     let json = format!(
-        "{{\"enabled\":{},\"blocks\":{},\"translated\":{},\"executed\":{},\"invalidated\":{},\"interpreted\":{},\"emitted\":{},\"enteredEmitted\":{}}}",
+        "{{\"enabled\":{},\"blocks\":{},\"translated\":{},\"executed\":{},\"linked\":{},\"invalidated\":{},\"interpreted\":{},\"interpretedGroups\":[{}],\"emitted\":{},\"enteredEmitted\":{}}}",
         s.cpu.jit_enabled(),
         stats.blocks,
         stats.translated,
         stats.executed,
+        stats.linked,
         stats.invalidated,
         stats.interpreted,
+        stats.interpreted_groups
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
         stats.emitted,
         stats.entered_emitted
     );
@@ -2309,13 +2315,20 @@ pub extern "C" fn switch_crash_report_json(handle: u32, buf: *mut u8, maxlen: u3
     out.extend_from_slice(
         format!(
             ",\"jit\":{{\"enabled\":{},\"blocks\":{},\"translated\":{},\"executed\":{},\
-             \"invalidated\":{},\"interpreted\":{}}}",
+             \"linked\":{},\"invalidated\":{},\"interpreted\":{},\"interpretedGroups\":[{}]}}",
             s.cpu.jit_enabled(),
             stats.blocks,
             stats.translated,
             stats.executed,
+            stats.linked,
             stats.invalidated,
-            stats.interpreted
+            stats.interpreted,
+            stats
+                .interpreted_groups
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
         )
         .as_bytes(),
     );

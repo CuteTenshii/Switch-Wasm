@@ -143,6 +143,7 @@ export interface JitStats {
   blocks: number;
   translated: number;
   executed: number;
+  linked: number;
   invalidated: number;
   /** Blocks compiled to wasm and called directly. Zero when the build has
    *  nowhere to put emitted code. */

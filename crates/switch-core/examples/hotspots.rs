@@ -19,7 +19,8 @@
 //! The target is a homebrew `.nro` or a retail container, an `.nsp`, an
 //! `.xci` or a bare Program `.nca`, which needs its keys after it. An NRO is
 //! not the workload a retail title is, so a ranking taken from one does not
-//! transfer.
+//! transfer. Add `--instructions` after positional arguments to list the
+//! hottest individual instructions as well.
 mod common;
 
 const USAGE: &str = "hotspots <target> [prod.keys] [title.keys] [font.ttf]";
@@ -63,6 +64,8 @@ fn main() {
     // 16 MiB an NRO image was assumed to fit in. Gating the *mix* on that
     // window as well is what would make this report a retail frame as almost
     // no instructions at all.
+    let detail = std::env::args().any(|arg| arg == "--instructions");
+    let mut by_pc: BTreeMap<u32, u64> = BTreeMap::new();
     let mut by_page: BTreeMap<u32, u64> = BTreeMap::new();
     let mut by_top = [0u64; 256];
     let mut by_group: BTreeMap<&'static str, u64> = BTreeMap::new();
@@ -74,6 +77,9 @@ fn main() {
         }
         let pc = cpu.get_pc();
         *by_page.entry(pc / BUCKET * BUCKET).or_default() += 1;
+        if detail {
+            *by_pc.entry(pc).or_default() += 1;
+        }
         if let Ok(insn) = cpu.mem.read_u32(pc) {
             by_top[((insn >> 24) & 0xFF) as usize] += 1;
             *by_group.entry(group_of(insn)).or_default() += 1;
@@ -94,6 +100,19 @@ fn main() {
     println!("--- hottest guest code (4 KiB buckets) ---");
     for (count, addr) in buckets.iter().take(10) {
         println!("{addr:#010x}  {count:>12}  {:5.2}%", pct(*count, total));
+    }
+
+    if detail {
+        let mut instructions: Vec<_> = by_pc.into_iter().collect();
+        instructions.sort_unstable_by_key(|&(pc, count)| (std::cmp::Reverse(count), pc));
+        println!("--- hottest individual instructions ---");
+        for (pc, count) in instructions.iter().take(48) {
+            let insn = cpu.mem.read_u32(*pc).unwrap();
+            println!(
+                "{pc:#010x} {count:>12} {insn:08x} {}",
+                switch_core::disasm::disassemble(insn)
+            );
+        }
     }
 
     let mut groups: Vec<(u64, &str)> = by_group.iter().map(|(&name, &n)| (n, name)).collect();

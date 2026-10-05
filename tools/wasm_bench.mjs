@@ -1,6 +1,7 @@
 // Measure the build the browser actually runs:
 //   node tools/wasm_bench.mjs <container> [switch_wasm.wasm] [options]
 //
+//     --shot=<file.ppm>  save the final frame after timing for byte comparison
 //     --frames=N          frames to time after the warmup (default 8)
 //     --keys=<file>       prod.keys; every encrypted container needs one
 //     --title-keys=<file> title.keys, for content whose key is not bundled
@@ -43,7 +44,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const USAGE =
   'usage: node tools/wasm_bench.mjs <container> [switch_wasm.wasm]'
-  + ' [--frames=N] [--keys=prod.keys] [--title-keys=title.keys] [--firmware=dir] [--kind=nsp|nca|nro|elf]';
+  + ' [--frames=N] [--shot=frame.ppm] [--keys=prod.keys] [--title-keys=title.keys] [--firmware=dir] [--kind=nsp|nca|nro|elf]';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -376,3 +377,28 @@ console.log(
   + ` ${(Number(api.switch_guest_ram(handle)) / (1024 * 1024)).toFixed(1)} MiB guest RAM`,
 );
 console.log(`  jit:   ${text((ptr, cap) => api.switch_jit_stats_json(handle, ptr, cap))}`);
+
+// Capture outside the timed window, using the same RGBA snapshot as the
+// browser worker. A faster run must still produce the same pixels.
+const shot = flag('shot');
+if (shot) {
+  const width = api.switch_fb_width(handle);
+  const height = api.switch_fb_height(handle);
+  const len = width * height * 4;
+  const ptr = api.switch_alloc(len);
+  try {
+    const copied = api.switch_fb_snapshot(handle, ptr, len);
+    if (copied !== len) throw new Error(`incomplete framebuffer: ${copied}/${len} bytes`);
+    const rgba = new Uint8Array(api.memory.buffer, ptr, len);
+    const rgb = Buffer.alloc(width * height * 3);
+    for (let i = 0, j = 0; i < len; i += 4, j += 3) {
+      rgb[j] = rgba[i];
+      rgb[j + 1] = rgba[i + 1];
+      rgb[j + 2] = rgba[i + 2];
+    }
+    writeFileSync(shot, Buffer.concat([Buffer.from(`P6\n${width} ${height}\n255\n`), rgb]));
+    console.log(`  shot:  frame ${api.switch_frame_count(handle)} -> ${shot}`);
+  } finally {
+    api.switch_free(ptr, len);
+  }
+}
