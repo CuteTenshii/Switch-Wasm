@@ -47,7 +47,7 @@ test('the display debugger starts empty and can reset its samples', async ({ pag
   expect(panelOverflows).toBe(false);
 });
 
-test('the guest crash screen exposes recovery paths', async ({ page }) => {
+test('the guest crash screen exposes recovery paths', async ({ page, pageErrors }) => {
   await openPage(page);
 
   const crash = page.locator('#crash');
@@ -62,6 +62,10 @@ test('the guest crash screen exposes recovery paths', async ({ page }) => {
     'CPU: read from unmapped address 0xfff00000',
   );
   await expect(crash.getByRole('button', { name: 'Save crash report' })).toBeVisible();
+
+  // The fault report is logged as console errors on purpose; anything else still fails.
+  expect(pageErrors).toContain('[switch-wasm] Fault: CPU: read from unmapped address 0xfff00000');
+  pageErrors.splice(0, pageErrors.length, ...pageErrors.filter((e) => !e.startsWith('[switch-wasm] ')));
 
   await crash.getByRole('button', { name: 'Open console' }).click();
   await expect(page.locator('body')).toHaveClass(/panel-open/);
